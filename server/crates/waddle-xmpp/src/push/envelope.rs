@@ -79,26 +79,81 @@ impl PushClass {
     }
 }
 
-/// Map a granular notification class (the db-form string emitted by the
-/// chat client into `<context xmlns='urn:waddle:push:context:0' class='...'/>`)
-/// to the transport-policy [`PushClass`].
-///
-/// Unknown values fall through to [`PushClass::Mention`] (small bucket,
-/// high urgency) — the safer side: small bucket can never leak more
-/// than ~256 bytes of plaintext-length, and high urgency wakes the
-/// device. Logging the unknown value is the caller's responsibility.
-pub fn push_class_for_db_value(class: &str) -> PushClass {
-    match class {
-        "dm" | "dm_mention" => PushClass::DirectMessage,
-        "personal_mention" | "channel_mention" | "active_channel_mention" => PushClass::Mention,
-        // `notify_all` is `@everyone`/`@here`-style broadcast — not a
-        // personal ping. Route to `Room` policy (lower urgency,
-        // shorter TTL) so battery-saver can coalesce and the device
-        // doesn't get woken for what is effectively a room
-        // announcement.
-        "notify_all" => PushClass::Room,
-        _ => PushClass::Mention,
+/// Granular notification class emitted by the chat client in
+/// `<context xmlns='urn:waddle:push:context:0' class='...'/>`. Typed
+/// closed enum so the dispatch boundary never carries an unknown
+/// class string into the envelope — XML-parse is the one place this
+/// is validated; downstream sees a typed value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NotificationClass {
+    /// 1:1 direct message.
+    Dm,
+    /// 1:1 direct message that explicitly @-mentions the recipient.
+    DmMention,
+    /// Personal @-mention in a MUC.
+    PersonalMention,
+    /// @-mention scoped to a channel the recipient subscribes to.
+    ChannelMention,
+    /// @-mention in a channel the recipient currently has open.
+    ActiveChannelMention,
+    /// `@everyone` / `@here` broadcast.
+    NotifyAll,
+}
+
+/// Parse error for [`NotificationClass`]. The class string comes from
+/// the typed `<context>` element on the wire — an unknown value is a
+/// publisher protocol violation, not a runtime hazard.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[error("unknown notification class: {0:?}")]
+pub struct NotificationClassParseError(pub Box<str>);
+
+impl NotificationClass {
+    pub fn from_db_value(s: &str) -> Result<Self, NotificationClassParseError> {
+        match s {
+            "dm" => Ok(Self::Dm),
+            "dm_mention" => Ok(Self::DmMention),
+            "personal_mention" => Ok(Self::PersonalMention),
+            "channel_mention" => Ok(Self::ChannelMention),
+            "active_channel_mention" => Ok(Self::ActiveChannelMention),
+            "notify_all" => Ok(Self::NotifyAll),
+            other => Err(NotificationClassParseError(other.into())),
+        }
     }
+
+    pub fn as_db_value(self) -> &'static str {
+        match self {
+            Self::Dm => "dm",
+            Self::DmMention => "dm_mention",
+            Self::PersonalMention => "personal_mention",
+            Self::ChannelMention => "channel_mention",
+            Self::ActiveChannelMention => "active_channel_mention",
+            Self::NotifyAll => "notify_all",
+        }
+    }
+
+    /// Fold the granular class onto the transport-policy
+    /// [`PushClass`] (TTL / Urgency / bucket-size). DM-family →
+    /// `DirectMessage`; per-user mentions → `Mention`; `@everyone`
+    /// broadcast → `Room` (lower urgency, shorter TTL).
+    pub fn transport_policy(self) -> PushClass {
+        match self {
+            Self::Dm | Self::DmMention => PushClass::DirectMessage,
+            Self::PersonalMention | Self::ChannelMention | Self::ActiveChannelMention => {
+                PushClass::Mention
+            }
+            Self::NotifyAll => PushClass::Room,
+        }
+    }
+}
+
+/// Compatibility shim for callers that still receive an untyped class
+/// string from somewhere they can't (yet) parse strictly. Prefer
+/// [`NotificationClass::from_db_value`] + [`NotificationClass::transport_policy`]
+/// in new code.
+pub fn push_class_for_db_value(class: &str) -> PushClass {
+    NotificationClass::from_db_value(class)
+        .map(NotificationClass::transport_policy)
+        .unwrap_or(PushClass::Mention)
 }
 
 /// `"v": 1` envelope serialized into the encrypted body.

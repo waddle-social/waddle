@@ -13,9 +13,10 @@
 
 use std::sync::Arc;
 
+use jid::BareJid;
 use minidom::Element;
 use url::Url;
-use waddle_xmpp::push::envelope::{push_class_for_db_value, push_topic_for, PushEnvelope};
+use waddle_xmpp::push::envelope::{push_topic_for, NotificationClass, PushEnvelope};
 use waddle_xmpp::push::types::{SubscriptionKeys, VapidSub, WebPushOutcome};
 use waddle_xmpp::push::vapid::{aud_for, vapid_k_header, VapidSigner};
 use waddle_xmpp::push::{encrypt, WebPushRequest, WebPushSender};
@@ -34,25 +35,41 @@ const XEP0357_SUMMARY_FORM_TYPE: &str = "urn:xmpp:push:summary";
 const NS_DATA_FORMS: &str = "jabber:x:data";
 
 /// Parsed XEP-0357 §4 notification payload as we emit it on the wire.
+/// Protocol fields are typed at the parsing boundary so downstream
+/// (encrypt + envelope + topic computation) never touches unvalidated
+/// strings — per CLAUDE.md typed-payloads hard rule.
 #[derive(Debug, Clone)]
 pub(crate) struct ParsedPushPayload {
     /// XEP-0357 §4 `message-count` summary form field. `None` if the
     /// publisher omitted it.
     pub message_count: Option<u64>,
     /// `<context conversation='...'/>` — bare JID of the DM peer or
-    /// MUC room.
-    pub conversation: String,
-    /// `<context thread='...'/>` — XEP-0201 thread id, when the
-    /// publisher set one.
+    /// MUC room. Parsed via `jid::BareJid::from_str` at this boundary
+    /// so an invalid JID surfaces here as a typed publish-error and
+    /// never reaches the envelope serializer or topic hash.
+    pub conversation: BareJid,
+    /// `<context thread='...'/>` — XEP-0201 thread id. The XEP
+    /// defines thread as free-form text (any printable string the
+    /// originating client wishes to use), so a typed newtype here
+    /// would only carry "non-empty" — the same invariant the
+    /// `filter(|t| !t.is_empty())` step preserves. Kept as
+    /// `Option<String>` with this comment documenting the choice.
     pub thread: Option<String>,
-    /// `<context class='...'/>` — db-form notification class such as
-    /// `"dm"`, `"personal_mention"`, `"channel_mention"`, etc.
-    pub class: String,
+    /// `<context class='...'/>` — typed closed-set notification
+    /// class. Parsed via `NotificationClass::from_db_value`; unknown
+    /// values are rejected at this boundary, not silently folded to
+    /// `Mention`.
+    pub class: NotificationClass,
 }
 
 /// Parse the serialized `<notification>` element. Strictly validates
 /// the outer name+namespace (the XEP-0357 §4 envelope) and then
-/// extracts the typed `<context>` and `message-count` fields.
+/// parses the typed `<context>` attributes into typed Rust values:
+///
+/// - `conversation` → `BareJid`
+/// - `class` → `NotificationClass`
+/// - `thread` → free-form XEP-0201 id (non-empty `String`)
+/// - summary form `message-count` → `u64`
 pub(crate) fn parse_publish_payload(payload_xml: &str) -> Result<ParsedPushPayload, XmppError> {
     let payload: Element = payload_xml.parse().map_err(|err: minidom::Error| {
         XmppError::internal(format!("XEP-0357 payload is not valid XML: {err}"))
@@ -70,16 +87,20 @@ pub(crate) fn parse_publish_payload(payload_xml: &str) -> Result<ParsedPushPaylo
                 "XEP-0357 payload missing <context xmlns='urn:waddle:push:context:0'/>".to_string(),
             )
         })?;
-    let conversation = context
-        .attr("conversation")
-        .ok_or_else(|| {
-            XmppError::internal("waddle <context> missing conversation attribute".to_string())
-        })?
-        .to_string();
-    let class = context
-        .attr("class")
-        .ok_or_else(|| XmppError::internal("waddle <context> missing class attribute".to_string()))?
-        .to_string();
+    let conversation_str = context.attr("conversation").ok_or_else(|| {
+        XmppError::internal("waddle <context> missing conversation attribute".to_string())
+    })?;
+    let conversation: BareJid = conversation_str.parse().map_err(|err| {
+        XmppError::internal(format!(
+            "waddle <context> conversation is not a valid bare JID ({conversation_str:?}): {err}"
+        ))
+    })?;
+    let class_str = context.attr("class").ok_or_else(|| {
+        XmppError::internal("waddle <context> missing class attribute".to_string())
+    })?;
+    let class = NotificationClass::from_db_value(class_str).map_err(|err| {
+        XmppError::internal(format!("waddle <context> class is not recognized: {err}"))
+    })?;
     let thread = context
         .attr("thread")
         .filter(|t| !t.is_empty())
@@ -209,10 +230,13 @@ pub(crate) async fn dispatch_one_web_push(
     sub: &VapidSub,
     sender: &Arc<dyn WebPushSender>,
 ) -> Result<WebPushOutcome, XmppError> {
-    let push_class = push_class_for_db_value(&parsed.class);
+    let push_class = parsed.class.transport_policy();
+    // Render the typed `BareJid` / `NotificationClass` to the wire
+    // shapes the SW envelope expects exactly once here, at the seam.
+    let conversation_str = parsed.conversation.to_string();
     let envelope = PushEnvelope::new(
-        &parsed.class,
-        &parsed.conversation,
+        parsed.class.as_db_value(),
+        &conversation_str,
         parsed.thread.as_deref(),
         item_id,
         parsed.message_count,
@@ -227,7 +251,7 @@ pub(crate) async fn dispatch_one_web_push(
         .map_err(|err| XmppError::internal(format!("web push JWT sign failed: {err}")))?;
     let public_key = signer.current_public_key();
     let key_b64u = vapid_k_header(&public_key);
-    let topic = push_topic_for(push_class, &parsed.conversation);
+    let topic = push_topic_for(push_class, &conversation_str);
     let outcome = sender
         .send(WebPushRequest {
             endpoint: &target.endpoint,
@@ -290,7 +314,7 @@ pub(crate) const ATTEMPT_STATUS_FAKE_SENT_NON_WEB: &str = "fake-sent";
 #[cfg(test)]
 mod tests {
     use super::*;
-    use waddle_xmpp::push::envelope::PushClass;
+    use waddle_xmpp::push::envelope::{push_class_for_db_value, PushClass};
 
     fn build_notification_xml(
         class: &str,
@@ -323,8 +347,8 @@ mod tests {
             Some(7),
         );
         let parsed = parse_publish_payload(&xml).expect("valid payload");
-        assert_eq!(parsed.class, "personal_mention");
-        assert_eq!(parsed.conversation, "room@conf.example.com");
+        assert_eq!(parsed.class, NotificationClass::PersonalMention);
+        assert_eq!(parsed.conversation.to_string(), "room@conf.example.com");
         assert_eq!(parsed.thread.as_deref(), Some("thread-1"));
         assert_eq!(parsed.message_count, Some(7));
     }
@@ -351,6 +375,32 @@ mod tests {
     }
 
     #[test]
+    fn parse_publish_payload_rejects_invalid_conversation_jid() {
+        // Typed-payloads invariant: an unparseable JID must be rejected
+        // at the boundary, not silently propagated as raw String into
+        // the envelope or the topic hash.
+        let xml = build_notification_xml("dm", "not a jid", None, Some(1));
+        let err = parse_publish_payload(&xml).unwrap_err();
+        assert!(
+            err.to_string().contains("not a valid bare JID"),
+            "expected typed JID parse error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_publish_payload_rejects_unknown_class() {
+        // Closed-set invariant: classes outside `NotificationClass`
+        // must be rejected at the boundary so the envelope and topic
+        // computation never receive an unrecognized value.
+        let xml = build_notification_xml("totally-bogus-class", "alice@example.com", None, None);
+        let err = parse_publish_payload(&xml).unwrap_err();
+        assert!(
+            err.to_string().contains("class is not recognized"),
+            "expected typed class parse error, got: {err}"
+        );
+    }
+
+    #[test]
     fn parse_publish_payload_ignores_non_summary_form() {
         // Form is present but FORM_TYPE doesn't match XEP-0357 §4.
         // message-count must be ignored — we don't trust counters
@@ -361,7 +411,7 @@ mod tests {
                 <field var='FORM_TYPE' type='hidden'><value>some:other:form</value></field>
                 <field var='message-count'><value>42</value></field>
               </x>
-              <context xmlns='{NS_WADDLE_PUSH_CONTEXT}' conversation='c' class='dm'/>
+              <context xmlns='{NS_WADDLE_PUSH_CONTEXT}' conversation='alice@example.com' class='dm'/>
             </notification>"#
         );
         let parsed = parse_publish_payload(&xml).expect("payload parses");
