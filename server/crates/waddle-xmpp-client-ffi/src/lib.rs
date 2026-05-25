@@ -519,9 +519,7 @@ impl WaddleClient {
         environment: WaddlePushEnvironment,
         credentials: WaddlePushDeviceCredentials,
     ) -> Option<String> {
-        let Some(handle) = self.clone_handle().await else {
-            return None;
-        };
+        let handle = self.clone_handle().await?;
         let env: waddle_xmpp_client::push::PushEnvironment = environment.into();
         let creds: waddle_xmpp_client::push::PushDeviceCredentials = credentials.into();
         match waddle_xmpp_client::push::register_push_device(
