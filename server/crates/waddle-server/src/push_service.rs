@@ -5,6 +5,7 @@
 //! [`crate::push_registrations`]. Provider endpoints and tokens live here,
 //! behind the `push.<domain>` service boundary.
 
+pub mod commands;
 pub(crate) mod dispatch;
 pub mod vapid_storage;
 

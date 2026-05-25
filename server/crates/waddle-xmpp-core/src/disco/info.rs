@@ -413,6 +413,13 @@ pub fn pubsub_service_features() -> Vec<Feature> {
 }
 
 /// Get features for an XEP-0357 Push Service component.
+///
+/// Includes the XEP-0050 `http://jabber.org/protocol/commands` feature
+/// so the chat / mobile client can discover that device registration
+/// flows through ad-hoc commands rather than via a custom-namespace
+/// IQ. The two registered command nodes (`register-device` and
+/// `disable-device`) are surfaced via disco#items on
+/// `push.<domain>?node=http://jabber.org/protocol/commands`.
 pub fn push_service_features() -> Vec<Feature> {
     vec![
         Feature::disco_info(),
@@ -422,6 +429,7 @@ pub fn push_service_features() -> Vec<Feature> {
         Feature::pubsub_access_whitelist(),
         Feature::pubsub_publish_only_affiliation(),
         Feature::push(),
+        Feature::commands(),
     ]
 }
 
