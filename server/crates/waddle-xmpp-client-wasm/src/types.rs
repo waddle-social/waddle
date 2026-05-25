@@ -469,6 +469,19 @@ pub struct PushServiceDevice {
     pub status: PushDeviceStatus,
 }
 
+/// Result of `fetch_vapid_public_key` — the Push Service's currently-
+/// active VAPID public key + kid as advertised via the XEP-0128 disco
+/// extension form `urn:waddle:push:vapid:0`. The chat hands
+/// `publicKey` directly to `pushManager.subscribe({ applicationServerKey })`
+/// after a base64url-no-pad → `Uint8Array` decode, and stores `kid` so
+/// rotation is detectable on subsequent reconnects.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WaddleVapidAdvertisement {
+    pub public_key: String,
+    pub kid: String,
+}
+
 /// Arguments to `WaddleClient::register_web_push_device`. Bundled
 /// into a struct so the JS call site passes a single typed object
 /// (and the Rust signature stays under the

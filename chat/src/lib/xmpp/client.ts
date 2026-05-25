@@ -150,6 +150,7 @@ function isRoomActivityMessage(message: LiveRoomMessage): boolean {
 
 function roomActivityEventFromMessage(message: LiveRoomMessage): RoomActivityEvent {
   const activity: RoomActivityEvent = { roomJid: message.roomJid, nick: message.nick, body: message.body };
+  if (message.stanzaId) activity.stanzaId = message.stanzaId;
   if (message.mentions) activity.mentions = message.mentions;
   if (message.broadcastMention) activity.broadcastMention = message.broadcastMention;
   return activity;
@@ -1220,6 +1221,109 @@ export class BrowserXmppClient {
     } catch (error) {
       console.warn("[xmpp] XEP-0357 disable IQ rejected:", error);
       return false;
+    }
+  }
+
+  /**
+   * Fetch the Push Service's currently-active VAPID public key + kid
+   * via the XEP-0128 disco extension form
+   * (`FORM_TYPE='urn:waddle:push:vapid:0'`).
+   *
+   * Resolves to `null` in any of these cases — callers can't distinguish
+   * them from the return value alone, but each path emits a precise
+   * `console.warn` for diagnostics:
+   *   - The server doesn't advertise the form (Web Push not configured)
+   *   - The session is not ready (mid-reconnect / mid-teardown race)
+   *   - The disco IQ times out after 10s
+   *   - The wasm `fetch_vapid_public_key` method is missing (older bundle)
+   *   - The IQ is rejected (transport error, stanza error, malformed
+   *     advertisement caught by the wasm-side wire-shape validator)
+   *   - The JS-boundary shape is unexpected (regression on the Rust side)
+   *
+   * This is a `null`-on-any-error contract by design: every failure
+   * mode collapses to the same caller-visible action (fall back to the
+   * foreground Notification API; retry on next reconnect). UI surfaces
+   * that need to distinguish "not configured" from "transient error"
+   * should consume the console warnings via a log sink, not branch on
+   * the return value.
+   */
+  async fetchVapidPublicKey(opts: { serviceJid: string }): Promise<{ publicKey: string; kid: string } | null> {
+    // Bounded timeout (10s): the wasm-side `send_iq_command` is itself
+    // an unbounded oneshot. Without this race the rotation lock can be
+    // held indefinitely on a stalled Push Service handler, blocking
+    // every subsequent enable + reconnect's setupPushSubscription.
+    const TIMEOUT_MS = 10_000;
+    let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+    let timedOut = false;
+    const timeoutSentinel = Symbol("vapid-fetch-timeout");
+    const timeoutPromise = new Promise<typeof timeoutSentinel>((resolve) => {
+      timeoutHandle = setTimeout(() => {
+        timedOut = true;
+        resolve(timeoutSentinel);
+      }, TIMEOUT_MS);
+    });
+    try {
+      // `requireConnectedXmpp` throws when the session is not ready
+      // (mid-reconnect / mid-teardown race). The JSDoc contract for
+      // this method is "returns null on any error so the caller can
+      // fall back to foreground Notifications" — so the readiness
+      // check goes INSIDE the try block. Without this, a brief
+      // reconnect race during setupPushSubscription would abort the
+      // whole rotation flow instead of degrading cleanly.
+      const xmpp = await this.requireConnectedXmpp();
+      if (!xmpp.fetch_vapid_public_key) {
+        // Bundle-drift diagnostic: the JS shipped expects a wasm
+        // method that the active bundle doesn't export. Typically
+        // means the chat upgraded its TS but the @waddle/xmpp-client-wasm
+        // package is older. Surface so operators see why Web Push
+        // silently fell back to the foreground Notification API.
+        console.warn(
+          "[xmpp] fetch_vapid_public_key is unavailable (older wasm bundle?); returning null",
+        );
+        return null;
+      }
+      const result = await Promise.race([
+        xmpp.fetch_vapid_public_key(opts.serviceJid),
+        timeoutPromise,
+      ]);
+      if (result === timeoutSentinel) {
+        console.warn(
+          `[xmpp] fetch_vapid_public_key timed out after ${TIMEOUT_MS}ms; ` +
+          "Push Service may be unreachable. Returning null so the chat falls back " +
+          "to the foreground Notification API; the next reconnect will retry.",
+        );
+        return null;
+      }
+      if (result === null || result === undefined) return null;
+      const candidate = result as { publicKey?: unknown; kid?: unknown };
+      // Validate the JS-boundary shape — the wasm method's signature
+      // is `Promise<any>` after wasm-bindgen, so a regression on the
+      // Rust side that emitted an unexpected object would otherwise
+      // silently propagate. Hard-fail on shape drift.
+      if (
+        typeof candidate.publicKey !== "string" ||
+        candidate.publicKey.length === 0 ||
+        typeof candidate.kid !== "string" ||
+        candidate.kid.length === 0
+      ) {
+        console.warn(
+          "[xmpp] fetch_vapid_public_key returned an unexpected shape:",
+          candidate,
+        );
+        return null;
+      }
+      return { publicKey: candidate.publicKey, kid: candidate.kid };
+    } catch (error) {
+      if (timedOut) {
+        // The wasm-side IQ rejected after we already gave up on it —
+        // the warning above already explained the timeout; this path
+        // just drops the late result silently.
+        return null;
+      }
+      console.warn("[xmpp] fetch_vapid_public_key IQ rejected:", error);
+      return null;
+    } finally {
+      if (timeoutHandle !== null) clearTimeout(timeoutHandle);
     }
   }
 

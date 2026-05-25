@@ -4,10 +4,16 @@
 mod ids;
 mod iq;
 mod parsing;
+mod push_vapid;
 mod types;
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 mod ext;
+
+pub use push_vapid::{
+    parse_push_vapid_from_disco_info, PushVapidAdvertisement, PushVapidDiscoParseError,
+    PUSH_VAPID_FIELD_KID, PUSH_VAPID_FIELD_PUBLIC_KEY, PUSH_VAPID_FORM_TYPE,
+};
 
 pub use iq::{
     build_disable_push_device_iq, build_disable_push_iq, build_disco_info_iq, build_disco_items_iq,

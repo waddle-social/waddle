@@ -215,6 +215,119 @@ async fn xep0357_push_service_disco_identifies_as_pubsub_push() {
 }
 
 #[tokio::test]
+async fn push_service_disco_advertises_xep0128_vapid_form() {
+    // PR-D3: the component-level disco#info response carries a XEP-0128
+    // extension form (FORM_TYPE='urn:waddle:push:vapid:0') with the
+    // active VAPID public key + kid so the chat client can subscribe
+    // without a build-time embedded key.
+    use waddle_xmpp::push::disco::{
+        parse_push_vapid_disco_form, PUSH_VAPID_FIELD_KID, PUSH_VAPID_FIELD_PUBLIC_KEY,
+        PUSH_VAPID_FORM_TYPE,
+    };
+
+    let (_server, mut client) = setup().await;
+    let query = Element::builder("query", DISCO_INFO_NS).build();
+
+    let response = send_iq(
+        &mut client,
+        iq_frame("get", "push-disco-vapid", PUSH_SERVICE_JID, query),
+        "push-disco-vapid",
+    )
+    .await;
+
+    let iq = parse_iq_element(&response, "push-disco-vapid", "result");
+    // RFC 6120 §8.1.1.1: the chat's wasm-side `verify_iq_from_matches_query`
+    // REQUIRES a present `from` that matches the queried service JID
+    // exactly (round-5 tightening — the Push Service is a separate
+    // XEP-0114 component, not the user's own server, so §8.1.2.1's
+    // absent-from permission does not apply). This assertion pins the
+    // server-side stamping so a future regression that drops `from`
+    // on the push component's responses is caught immediately, not
+    // discovered later via a hostile-C2S spoof CVE.
+    assert_eq!(
+        iq.attr("from"),
+        Some(PUSH_SERVICE_JID),
+        "Push Service disco#info result MUST carry from='{PUSH_SERVICE_JID}'"
+    );
+    let query = single_child(&iq, "query", DISCO_INFO_NS);
+
+    let form = query
+        .children()
+        .find(|child| {
+            child.is("x", waddle_xmpp::xep::NS_DATA_FORMS)
+                && xdata_field_value(child, "FORM_TYPE").as_deref() == Some(PUSH_VAPID_FORM_TYPE)
+        })
+        .unwrap_or_else(|| panic!("VAPID disco form missing from response: {response}"));
+
+    assert_eq!(form.attr("type"), Some("result"), "form is type='result'");
+
+    let public_key =
+        xdata_field_value(form, PUSH_VAPID_FIELD_PUBLIC_KEY).expect("public-key field present");
+    let kid = xdata_field_value(form, PUSH_VAPID_FIELD_KID).expect("kid field present");
+    assert!(!public_key.is_empty(), "public-key value non-empty");
+    assert!(!kid.is_empty(), "kid value non-empty");
+
+    // Round-trip: the typed parser must accept the wire form back into
+    // a VapidAdvertisement (validates 65-byte SEC1 + 0x04 prefix + valid
+    // P-256 point + UUID kid in one shot).
+    let advertisement =
+        parse_push_vapid_disco_form(form).expect("typed parser accepts the advertised form");
+    assert_eq!(advertisement.public_key_base64url(), public_key);
+    assert_eq!(advertisement.kid.to_string(), kid);
+
+    let _ = client.close().await;
+}
+
+#[tokio::test]
+async fn push_service_node_disco_omits_xep0128_vapid_form() {
+    // The VAPID form is a *component-level* advertisement; per-node disco
+    // returns the leaf-node identity and MUST NOT carry the form (the
+    // chat side never asks a leaf node for its parent's VAPID key).
+    use waddle_xmpp::push::disco::PUSH_VAPID_FORM_TYPE;
+
+    let (_server, mut client) = setup().await;
+
+    let ensure_node = Element::builder("ensure-node", NS_WADDLE_PUSH_SERVICE)
+        .attr(minidom::rxml::xml_ncname!("app-id").to_owned(), "web")
+        .build();
+    let node_response = send_iq(
+        &mut client,
+        iq_frame(
+            "set",
+            "push-vapid-leaf-ensure-node",
+            PUSH_SERVICE_JID,
+            ensure_node,
+        ),
+        "push-vapid-leaf-ensure-node",
+    )
+    .await;
+    let node = child_attr(&node_response, "node", "id").expect("node id");
+
+    let query = Element::builder("query", DISCO_INFO_NS)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node.as_str())
+        .build();
+    let response = send_iq(
+        &mut client,
+        iq_frame("get", "push-vapid-leaf-disco", PUSH_SERVICE_JID, query),
+        "push-vapid-leaf-disco",
+    )
+    .await;
+
+    let iq = parse_iq_element(&response, "push-vapid-leaf-disco", "result");
+    let query = single_child(&iq, "query", DISCO_INFO_NS);
+    let vapid_form_present = query.children().any(|child| {
+        child.is("x", waddle_xmpp::xep::NS_DATA_FORMS)
+            && xdata_field_value(child, "FORM_TYPE").as_deref() == Some(PUSH_VAPID_FORM_TYPE)
+    });
+    assert!(
+        !vapid_form_present,
+        "leaf-node disco MUST NOT carry the component-level VAPID form: {response}"
+    );
+
+    let _ = client.close().await;
+}
+
+#[tokio::test]
 async fn xep0357_push_service_rejects_client_origin_pubsub_notification_publish() {
     let (_server, mut client) = setup().await;
 

@@ -112,6 +112,43 @@ impl WaddleClient {
         })
     }
 
+    /// Fetch the Push Service's currently-active VAPID public key + kid
+    /// via the XEP-0128 disco extension form
+    /// (`FORM_TYPE='urn:waddle:push:vapid:0'`). The chat passes
+    /// `publicKey` (base64url-no-pad uncompressed SEC1 P-256, 65 bytes
+    /// with leading 0x04) to `pushManager.subscribe({ applicationServerKey })`
+    /// and tracks `kid` so silent rotations on a server-side key change
+    /// re-subscribe transparently.
+    ///
+    /// Resolves to `null` when the server is reachable but does not
+    /// advertise the form (Web Push not configured on this deployment)
+    /// so the chat caller can branch into the "foreground-only"
+    /// fallback. Rejects on transport / stanza errors and on a
+    /// malformed advertisement — the chat MUST NOT degrade silently on
+    /// a malformed key (round-trip with the browser would fail anyway,
+    /// later and less diagnosable).
+    pub fn fetch_vapid_public_key(&self, service_jid: String) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let iq = build_disco_info_iq(&service_jid, None);
+            let result = send_iq_command(inner, iq).await?;
+            verify_iq_from_matches_query(result.attr("from"), &service_jid).map_err(js_error)?;
+            let disco = parse_disco_info_result(&result, &service_jid).ok_or_else(|| {
+                js_error("Push Service disco#info response missing <query/> payload")
+            })?;
+            let advertisement = match parse_push_vapid_from_disco_info(&disco) {
+                Ok(advertisement) => advertisement,
+                Err(PushVapidDiscoParseError::NotAdvertised) => return Ok(JsValue::NULL),
+                Err(other) => return Err(js_error(other.to_string())),
+            };
+            let surfaced = WaddleVapidAdvertisement {
+                public_key: advertisement.public_key_base64url,
+                kid: advertisement.kid.to_string(),
+            };
+            to_js_value(&surfaced)
+        })
+    }
+
     /// `<disable-device node='…' device-id='…'/>` on the Push Service.
     /// Idempotent — operates on the (node, device-id) row only.
     /// Resolves to the typed `PushServiceDevice` shape so the chat
@@ -712,4 +749,113 @@ fn require_non_empty_attr(
                 "{response_kind} response missing required attribute '{attr}'"
             ))
         })
+}
+
+/// Defense-in-depth check for `fetch_vapid_public_key`: refuse to accept
+/// a disco#info advertisement whose `from` doesn't match the queried
+/// `service_jid`. Without this, a malicious user-server (or a
+/// compromised middlebox on the C2S path) could spoof a
+/// `<iq from='attacker.tld'>` result carrying its own VAPID key, and
+/// the browser would bind its push subscription to attacker-signed
+/// JWTs. The XMPP server-side dispatcher already routes responses by
+/// stanza id, but the `from` rebinding requires the explicit check at
+/// the boundary that consumes the typed disco payload.
+///
+/// RFC 6120 §8.1.2.1 permits `<iq>` results with an absent `from` ONLY
+/// when the reply originates from the user's own server (the
+/// bare-domain of the bound JID). The Waddle Push Service is a
+/// separate addressable entity at `push.<domain>` (XEP-0357 §1 +
+/// XEP-0114 component) — a `from`-stripped reply from such a component
+/// is a server-side violation we MUST NOT silently accept, because a
+/// compromised C2S could strip `from` instead of spoofing it and
+/// bypass this guard. The check here therefore REQUIRES a present
+/// `from` that matches `service_jid`.
+///
+/// JID equality follows RFC 6122 §2.4 / RFC 7622 — domainparts are
+/// case-insensitive. Push Service JIDs are always pure domain JIDs
+/// (XEP-0114 components), so we don't accept a `service_jid/resource`
+/// form: it would be permissively useless for the production input
+/// set and would needlessly widen the attack surface. Nameprep is
+/// approximated with ASCII-lowercase since every push service JID in
+/// waddle is an ASCII subdomain — pulling in `idna` purely for this
+/// equality would inflate the WASM bundle.
+///
+/// Extracted as a pure helper so the Rust test suite can pin the
+/// anti-spoof semantics without a full wasm-bindgen test harness.
+fn verify_iq_from_matches_query(from_attr: Option<&str>, service_jid: &str) -> Result<(), String> {
+    let Some(from) = from_attr else {
+        return Err(format!(
+            "Push Service disco#info response carries no `from`; RFC 6120 §8.1.2.1 requires components to stamp `from`. Refusing to trust VAPID advertisement (queried JID was {service_jid:?})"
+        ));
+    };
+    if from.eq_ignore_ascii_case(service_jid) {
+        return Ok(());
+    }
+    Err(format!(
+        "Push Service disco#info response from {from:?} does not match queried JID {service_jid:?}; refusing to trust VAPID advertisement"
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verify_iq_from_accepts_exact_match() {
+        assert!(verify_iq_from_matches_query(Some("push.example.com"), "push.example.com").is_ok());
+    }
+
+    #[test]
+    fn verify_iq_from_rejects_absent_attr() {
+        // RFC 6120 §8.1.2.1's absent-from permission only applies to
+        // replies from the bound user's own server. The Push Service is
+        // a separate XEP-0114 component, so absent-from is a server
+        // violation we MUST NOT silently accept — a compromised C2S
+        // could strip `from` instead of spoofing it.
+        let err = verify_iq_from_matches_query(None, "push.example.com").unwrap_err();
+        assert!(err.contains("push.example.com"));
+        assert!(err.contains("no `from`"));
+    }
+
+    #[test]
+    fn verify_iq_from_rejects_service_jid_with_resource() {
+        // Push Service components don't carry resources (XEP-0114).
+        // Accepting `push.example.com/anything` would be needlessly
+        // permissive and wouldn't help any real-world deployment.
+        let err =
+            verify_iq_from_matches_query(Some("push.example.com/resource"), "push.example.com")
+                .unwrap_err();
+        assert!(err.contains("push.example.com/resource"));
+    }
+
+    #[test]
+    fn verify_iq_from_accepts_case_variation_on_domain() {
+        // RFC 6122 §2.4: domainpart comparison is case-insensitive.
+        assert!(verify_iq_from_matches_query(Some("Push.Example.COM"), "push.example.com").is_ok());
+    }
+
+    #[test]
+    fn verify_iq_from_rejects_unrelated_jid() {
+        let err =
+            verify_iq_from_matches_query(Some("attacker.tld"), "push.example.com").unwrap_err();
+        assert!(err.contains("attacker.tld"));
+        assert!(err.contains("push.example.com"));
+    }
+
+    #[test]
+    fn verify_iq_from_rejects_prefix_substring_collision() {
+        // `push.example.com` MUST NOT match `push.example.com.attacker.tld`
+        // even via case-insensitive equality.
+        assert!(verify_iq_from_matches_query(
+            Some("push.example.com.attacker.tld"),
+            "push.example.com",
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn verify_iq_from_rejects_empty_from() {
+        let err = verify_iq_from_matches_query(Some(""), "push.example.com").unwrap_err();
+        assert!(err.contains("push.example.com"));
+    }
 }

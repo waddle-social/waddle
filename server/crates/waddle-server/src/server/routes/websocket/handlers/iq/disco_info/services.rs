@@ -74,6 +74,28 @@ pub(super) async fn handle_push_service_disco_info<'a>(
 
     let identities = vec![Identity::pubsub_push(Some("Push Service"))];
     let features = push_service_features();
-    let response = build_disco_info_response(req.request_iq, &identities, &features, None);
+    // XEP-0128 extension: advertise the active VAPID public key + kid so
+    // chat clients can subscribe without a build-time embedded key. The
+    // form is suppressed when no VapidSigner is installed (legacy test
+    // boot, integration runs without a configured push provider) — the
+    // chat side treats an absent form as "Web Push not available on this
+    // server" rather than silently degrading.
+    let vapid_form = state
+        .deps
+        .protocol
+        .push_service
+        .vapid_advertisement()
+        .map(|advertisement| waddle_xmpp::push::disco::push_vapid_disco_form(&advertisement));
+    let response = if let Some(form) = vapid_form.as_ref() {
+        build_disco_info_response_with_extensions(
+            req.request_iq,
+            &identities,
+            &features,
+            None,
+            std::slice::from_ref(form),
+        )
+    } else {
+        build_disco_info_response(req.request_iq, &identities, &features, None)
+    };
     Some(DiscoInfoResponse::iq(response))
 }

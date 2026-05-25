@@ -48,6 +48,40 @@ pub fn parse_disco_info_result(iq: &Element, queried_jid: &str) -> Option<DiscoI
 }
 
 fn parse_disco_data_form(form: &Element) -> Option<DiscoDataForm> {
+    // XEP-0068 §4.3 (Incorrectly Specified FORM_TYPE): "If the FORM_TYPE
+    // field is not hidden in a form with type='form' or type='result',
+    // it MUST be ignored as a context indicator." Two conditions —
+    // BOTH required:
+    //
+    //   1. The wrapping `<x/>` element MUST be `type='form'` or
+    //      `type='result'`. A `submit` form is a user-supplied payload,
+    //      not a context-bearing advertisement; a `cancel` form
+    //      carries no fields by definition; an absent `type=` is
+    //      malformed per XEP-0004 §3.1.
+    //
+    //   2. The FORM_TYPE field itself MUST carry `type='hidden'`.
+    //
+    // Downstream callers (e.g. push_vapid::parse_push_vapid_from_disco_info)
+    // pick the form they trust by `form_type` match — so leaking a
+    // FORM_TYPE from a `submit`/`cancel`/unknown form would let a
+    // malicious or misconfigured server smuggle an attacker-claimed
+    // context indicator into the typed result.
+    let form_kind = form.attr("type");
+    let form_type = if matches!(form_kind, Some("form") | Some("result")) {
+        form.children()
+            .filter(|child| child.name() == "field" && child.ns() == DATA_FORMS_NS)
+            .find(|field| {
+                field.attr("var") == Some("FORM_TYPE") && field.attr("type") == Some("hidden")
+            })
+            .and_then(|field| {
+                field
+                    .children()
+                    .find(|child| child.name() == "value" && child.ns() == DATA_FORMS_NS)
+                    .map(Element::text)
+            })
+    } else {
+        None
+    };
     let fields: Vec<DiscoDataField> = form
         .children()
         .filter(|child| child.name() == "field" && child.ns() == DATA_FORMS_NS)
@@ -64,11 +98,6 @@ fn parse_disco_data_form(form: &Element) -> Option<DiscoDataForm> {
     if fields.is_empty() {
         return None;
     }
-    let form_type = fields
-        .iter()
-        .find(|field| field.var == "FORM_TYPE")
-        .and_then(|field| field.values.first())
-        .cloned();
     Some(DiscoDataForm { form_type, fields })
 }
 

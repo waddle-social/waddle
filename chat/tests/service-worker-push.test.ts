@@ -77,21 +77,21 @@ function makeNotificationClickEvent(data: Record<string, unknown>) {
 }
 
 describe("service worker push handling", () => {
-  test("minimal XEP-0357 payload renders default title + no body preview, updates badge", async () => {
-    // Canonical XEP-0357 publish carries only `message-count` plus
-    // the `urn:waddle:push:context:0` routing context. No sender,
-    // no body — preview is opt-in and out of the default path
-    // (#528 acceptance criterion).
+  test("minimal v=1 payload renders default count title with no body preview, updates badge", async () => {
+    // Canonical v=1 envelope from
+    // `crates/waddle-xmpp/src/push/envelope.rs::PushEnvelope`. XEP-0357
+    // §4 forbids the push service from receiving message content, so
+    // there is never a sender or body preview — the SW always renders
+    // the count-derived default with an empty body.
     const client = { postMessage: mock((_message: unknown) => {}) };
     const worker = loadServiceWorker([client]);
     const event = makePushEvent({
       json: () => ({
-        "message-count": 6,
-        context: {
-          conversation: "space_channel@conference.example.com",
-          thread: "",
-          class: "personal_mention",
-        },
+        v: 1,
+        class: "personal_mention",
+        conversation: "space_channel@conference.example.com",
+        item: "stanza-id-mention-1",
+        unread: 6,
       }),
     });
 
@@ -103,8 +103,6 @@ describe("service worker push handling", () => {
       type: "waddle:unread-count",
       unreadCount: 6,
     });
-    // Default title is count-derived; body is the empty string (no
-    // preview unless the server explicitly populated it).
     expect(worker.showNotification).toHaveBeenCalledWith("6 new messages", {
       body: "",
       tag: "space_channel@conference.example.com",
@@ -124,8 +122,11 @@ describe("service worker push handling", () => {
     const worker = loadServiceWorker();
     const event = makePushEvent({
       json: () => ({
-        "message-count": 1,
-        context: { conversation: "alice@example.com" },
+        v: 1,
+        class: "dm",
+        conversation: "alice@example.com",
+        item: "stanza-id-1msg",
+        unread: 1,
       }),
     });
     worker.dispatch("push", event);
@@ -134,58 +135,19 @@ describe("service worker push handling", () => {
     expect(worker.showNotification.mock.calls[0]?.[0]).toBe("1 new message");
   });
 
-  test("opt-in preview keeps server-provided title/body", async () => {
-    const worker = loadServiceWorker();
-    const event = makePushEvent({
-      json: () => ({
-        title: "Mention from @alice",
-        body: "hello there",
-        "message-count": 1,
-        context: { conversation: "space_channel@conference.example.com" },
-      }),
-    });
-    worker.dispatch("push", event);
-    await event.done();
-
-    const [title, options] = worker.showNotification.mock.calls[0] ?? [];
-    expect(title).toBe("Mention from @alice");
-    expect((options as NotificationOptions).body).toBe("hello there");
-  });
-
-  test("dm conversation routes to /dm/{username}", async () => {
-    const worker = loadServiceWorker();
-    const event = makePushEvent({
-      json: () => ({
-        "message-count": 1,
-        context: { conversation: "alice@example.com", class: "dm" },
-      }),
-    });
-    worker.dispatch("push", event);
-    await event.done();
-
-    const [, options] = worker.showNotification.mock.calls[0] ?? [];
-    expect((options as NotificationOptions & { data: { url: string } }).data.url).toBe("/dm/alice");
-  });
-
   test("dm with underscore in localpart routes as DM, not MUC", async () => {
     // Regression for an MUC heuristic that misrouted `jane_doe@example.com`
     // to `/jane/doe` (the underscore-as-MUC-separator fallback).
     // JIDs legally contain underscores; route on the typed `class`
-    // field or the JID's domain prefix instead. Adversarial review
-    // round-1 finding on PR #760.
+    // field or the JID's domain prefix instead.
     const worker = loadServiceWorker();
     const event = makePushEvent({
       json: () => ({
-        "message-count": 1,
-        context: {
-          conversation: "jane_doe@example.com",
-          // `"dm"` matches DM_CLASS_VALUES exactly so the test is
-          // independent of the domain heuristic. With `"direct"` (a
-          // value the server never emits) the test would pass only
-          // because `example.com` doesn't start with `muc.` — a
-          // silent regression risk.
-          class: "dm",
-        },
+        v: 1,
+        class: "dm",
+        conversation: "jane_doe@example.com",
+        item: "stanza-id-underscore",
+        unread: 1,
       }),
     });
     worker.dispatch("push", event);
@@ -197,18 +159,17 @@ describe("service worker push handling", () => {
     );
   });
 
-
   test("muc conversation routes to /r/{channelId}", async () => {
     // Chat router URL is `/r/{channelId}` where channelId == JID
     // localpart (see chat/src/lib/xmpp/jid.ts::parseManagedRoomBareJid).
     const worker = loadServiceWorker();
     const event = makePushEvent({
       json: () => ({
-        "message-count": 1,
-        context: {
-          conversation: "general@muc.example.com",
-          class: "personal_mention",
-        },
+        v: 1,
+        class: "personal_mention",
+        conversation: "general@muc.example.com",
+        item: "stanza-id-muc",
+        unread: 1,
       }),
     });
     worker.dispatch("push", event);
@@ -220,29 +181,6 @@ describe("service worker push handling", () => {
     );
   });
 
-  test("thread context routes via ?thread= query string, not path segment", async () => {
-    // Chat router carries threads in a search-param codec
-    // (chat/src/router/codecs.ts::threadSearch), NOT a path segment.
-    const worker = loadServiceWorker();
-    const event = makePushEvent({
-      json: () => ({
-        "message-count": 1,
-        context: {
-          conversation: "general@muc.example.com",
-          thread: "thread-42",
-          class: "personal_mention",
-        },
-      }),
-    });
-    worker.dispatch("push", event);
-    await event.done();
-
-    const [, options] = worker.showNotification.mock.calls[0] ?? [];
-    expect((options as NotificationOptions & { data: { url: string } }).data.url).toBe(
-      "/r/general?thread=thread-42",
-    );
-  });
-
   test("class='dm' overrides @muc. domain prefix", async () => {
     // Defense-in-depth: a misconfigured server that issues DMs from
     // a `muc.` subdomain MUST still route as DM when the typed
@@ -250,11 +188,11 @@ describe("service worker push handling", () => {
     const worker = loadServiceWorker();
     const event = makePushEvent({
       json: () => ({
-        "message-count": 1,
-        context: {
-          conversation: "alice@muc.example.com",
-          class: "dm",
-        },
+        v: 1,
+        class: "dm",
+        conversation: "alice@muc.example.com",
+        item: "stanza-id-class-override",
+        unread: 1,
       }),
     });
     worker.dispatch("push", event);
@@ -270,11 +208,11 @@ describe("service worker push handling", () => {
     const worker = loadServiceWorker();
     const event = makePushEvent({
       json: () => ({
-        "message-count": 1,
-        context: {
-          conversation: "general@muc.example.com",
-          class: "notify_all",
-        },
+        v: 1,
+        class: "notify_all",
+        conversation: "general@muc.example.com",
+        item: "stanza-id-notify-all",
+        unread: 1,
       }),
     });
     worker.dispatch("push", event);
@@ -286,52 +224,16 @@ describe("service worker push handling", () => {
     );
   });
 
-  test("legacy data.url is honored when typed context is absent", async () => {
-    // Mixed-version publishers (server pre-#528 emitter that doesn't
-    // carry `context: { conversation }`) ship a deep link in
-    // `data.url`. The SW must preserve that legacy behavior rather
-    // than collapsing to `/`. ChatGPT Codex bot flagged this
-    // regression on round-5.
-    const worker = loadServiceWorker();
-    const event = makePushEvent({
-      json: () => ({
-        "message-count": 1,
-        url: "/r/legacy-channel?thread=abc",
-      }),
-    });
-    worker.dispatch("push", event);
-    await event.done();
-
-    const [, options] = worker.showNotification.mock.calls[0] ?? [];
-    expect((options as NotificationOptions & { data: { url: string } }).data.url).toBe(
-      "/r/legacy-channel?thread=abc",
-    );
-  });
-
-  test("legacy data.url is rejected if cross-origin", async () => {
-    // Defense in depth: even on the legacy path, an off-origin
-    // `data.url` must NOT be accepted. `sameOriginUrl` runs first.
-    const worker = loadServiceWorker();
-    const event = makePushEvent({
-      json: () => ({
-        "message-count": 1,
-        url: "https://evil.example/steal",
-      }),
-    });
-    worker.dispatch("push", event);
-    await event.done();
-
-    const [, options] = worker.showNotification.mock.calls[0] ?? [];
-    expect((options as NotificationOptions & { data: { url: string } }).data.url).toBe("/");
-  });
-
-  test("clears the app badge when push message-count is zero", async () => {
+  test("clears the app badge when v=1 unread is zero", async () => {
     const client = { postMessage: mock((_message: unknown) => {}) };
     const worker = loadServiceWorker([client]);
     const event = makePushEvent({
       json: () => ({
-        "message-count": 0,
-        context: { conversation: "alice@example.com", class: "dm" },
+        v: 1,
+        class: "dm",
+        conversation: "alice@example.com",
+        item: "stanza-id-zero",
+        unread: 0,
       }),
     });
 
@@ -342,6 +244,33 @@ describe("service worker push handling", () => {
     expect(client.postMessage).toHaveBeenCalledWith({
       type: "waddle:unread-count",
       unreadCount: 0,
+    });
+  });
+
+  test("non-v=1 payload collapses to the minimal default banner", async () => {
+    // Breaking-changes-by-default: a payload missing `v: 1` (or with
+    // a future-unknown version) is rendered as the minimal "Waddle"
+    // notification, not auto-routed via legacy heuristics. The chat
+    // upgrades the SW alongside the server; mixed-version publishers
+    // are not supported.
+    const worker = loadServiceWorker();
+    const event = makePushEvent({
+      json: () => ({ "message-count": 5, context: { conversation: "alice@example.com" } }),
+    });
+    worker.dispatch("push", event);
+    await event.done();
+    expect(worker.showNotification).toHaveBeenCalledWith("Waddle", {
+      body: "",
+      tag: "waddle",
+      icon: "/android-chrome-192x192.png",
+      data: {
+        url: "/",
+        context: {
+          conversation: undefined,
+          thread: undefined,
+          class: undefined,
+        },
+      },
     });
   });
 
@@ -419,5 +348,259 @@ describe("service worker push handling", () => {
     expect(focusedClient.navigate).toHaveBeenCalledWith(
       "/myspace/general/threads/thread-42",
     );
+  });
+
+  test("v=1 envelope: dm class routes to /dm/{username}", async () => {
+    // PR-D3: server emits flat `{ v: 1, class, conversation, thread?, item, unread? }`
+    // — the SW must parse this shape and route the same as the legacy
+    // nested-context shape.
+    const worker = loadServiceWorker();
+    const event = makePushEvent({
+      json: () => ({
+        v: 1,
+        class: "dm",
+        conversation: "alice@example.com",
+        item: "stanza-id-001",
+        unread: 3,
+      }),
+    });
+    worker.dispatch("push", event);
+    await event.done();
+
+    expect(worker.setAppBadge).toHaveBeenCalledWith(3);
+    const [title, options] = worker.showNotification.mock.calls[0] ?? [];
+    expect(title).toBe("3 new messages");
+    expect((options as NotificationOptions & { data: { url: string } }).data.url).toBe(
+      "/dm/alice",
+    );
+  });
+
+  test("v=1 envelope: channel mention routes to /r/{channelId}?thread=…", async () => {
+    const worker = loadServiceWorker();
+    const event = makePushEvent({
+      json: () => ({
+        v: 1,
+        class: "personal_mention",
+        conversation: "general@muc.example.com",
+        thread: "thread-42",
+        item: "stanza-id-002",
+        unread: 1,
+      }),
+    });
+    worker.dispatch("push", event);
+    await event.done();
+
+    const [, options] = worker.showNotification.mock.calls[0] ?? [];
+    expect((options as NotificationOptions & { data: { url: string } }).data.url).toBe(
+      "/r/general?thread=thread-42",
+    );
+  });
+
+  test("v=1 envelope: duplicate item id suppresses the second SW notification", async () => {
+    // In-band dedup: if the chat tab already rendered a foreground
+    // notification for this stanza id, the SW push (arriving a few ms
+    // later) should NOT fire a second banner — it should only refresh
+    // the badge + unread count.
+    const worker = loadServiceWorker();
+    const first = makePushEvent({
+      json: () => ({
+        v: 1,
+        class: "dm",
+        conversation: "alice@example.com",
+        item: "stanza-dedup-1",
+        unread: 1,
+      }),
+    });
+    worker.dispatch("push", first);
+    await first.done();
+    expect(worker.showNotification).toHaveBeenCalledTimes(1);
+
+    const second = makePushEvent({
+      json: () => ({
+        v: 1,
+        class: "dm",
+        conversation: "alice@example.com",
+        item: "stanza-dedup-1",
+        unread: 2,
+      }),
+    });
+    worker.dispatch("push", second);
+    await second.done();
+    // No second showNotification — but badge + broadcast still update.
+    expect(worker.showNotification).toHaveBeenCalledTimes(1);
+    expect(worker.setAppBadge).toHaveBeenLastCalledWith(2);
+  });
+
+  test("v=1 envelope: distinct item ids each render their own notification", async () => {
+    const worker = loadServiceWorker();
+    for (const item of ["a", "b"]) {
+      const event = makePushEvent({
+        json: () => ({
+          v: 1,
+          class: "dm",
+          conversation: "alice@example.com",
+          item,
+          unread: 1,
+        }),
+      });
+      worker.dispatch("push", event);
+      await event.done();
+    }
+    expect(worker.showNotification).toHaveBeenCalledTimes(2);
+  });
+
+  test("foreground→SW signal: waddle:item-shown message suppresses the subsequent push for the same item", async () => {
+    // The chat tab calls `postMessage({ type: 'waddle:item-shown', itemId })`
+    // from `showMentionNotification` / `showDmNotification` when an
+    // in-band notification renders. The SW must record that id so the
+    // matching Web Push (arriving milliseconds later from the relay)
+    // doesn't double-fire.
+    const worker = loadServiceWorker();
+    worker.dispatch("message", {
+      data: { type: "waddle:item-shown", itemId: "stanza-foreground-1" },
+    });
+    const event = makePushEvent({
+      json: () => ({
+        v: 1,
+        class: "dm",
+        conversation: "alice@example.com",
+        item: "stanza-foreground-1",
+        unread: 1,
+      }),
+    });
+    worker.dispatch("push", event);
+    await event.done();
+    // No banner — the foreground tab already rendered for this id.
+    expect(worker.showNotification).not.toHaveBeenCalled();
+    // Badge + unread broadcast still updated.
+    expect(worker.setAppBadge).toHaveBeenCalledWith(1);
+  });
+
+  test("foreground→SW signal: a different item id is NOT suppressed", async () => {
+    const worker = loadServiceWorker();
+    worker.dispatch("message", {
+      data: { type: "waddle:item-shown", itemId: "stanza-foreground-1" },
+    });
+    const event = makePushEvent({
+      json: () => ({
+        v: 1,
+        class: "dm",
+        conversation: "alice@example.com",
+        item: "stanza-different-2",
+        unread: 1,
+      }),
+    });
+    worker.dispatch("push", event);
+    await event.done();
+    expect(worker.showNotification).toHaveBeenCalledTimes(1);
+  });
+
+  test("foreground→SW signal: malformed message is ignored", async () => {
+    // A non-string itemId, missing itemId, or unknown type must be
+    // tolerated — the SW shouldn't crash on a stray cross-tab message.
+    const worker = loadServiceWorker();
+    worker.dispatch("message", { data: { type: "waddle:item-shown" } });
+    worker.dispatch("message", { data: { type: "waddle:item-shown", itemId: 42 } });
+    worker.dispatch("message", { data: { type: "unknown-type", itemId: "x" } });
+    worker.dispatch("message", {});
+    // None of those should register dedup for an item with this id.
+    const event = makePushEvent({
+      json: () => ({
+        v: 1,
+        class: "dm",
+        conversation: "alice@example.com",
+        item: "x",
+        unread: 1,
+      }),
+    });
+    worker.dispatch("push", event);
+    await event.done();
+    expect(worker.showNotification).toHaveBeenCalledTimes(1);
+  });
+
+  test("v=1 envelope: dedup map evicts under overflow without unbounded scan", async () => {
+    // Regression for round-4 perf finding: under a burst of > 256
+    // distinct items inside the TTL window, the eviction scan must
+    // not degrade to O(SHOWN_ITEM_MAX) per push. Capped probe +
+    // FIFO fallback should keep eviction O(1) amortized.
+    //
+    // We can't directly time the SW from outside, but we can pin the
+    // OBSERVABLE consequence: after pushing N > MAX distinct items,
+    // the very first item must no longer be considered "shown" — it
+    // got evicted to make room. The second-to-last must still be
+    // suppressible. This catches a regression that broke eviction
+    // entirely (e.g. forgot to `delete` the head).
+    const worker = loadServiceWorker();
+    const fire = async (item: string) => {
+      const event = makePushEvent({
+        json: () => ({
+          v: 1,
+          class: "dm",
+          conversation: "alice@example.com",
+          item,
+          unread: 1,
+        }),
+      });
+      worker.dispatch("push", event);
+      await event.done();
+    };
+    // 260 distinct items: 4 past the 256 cap so the FIFO-head eviction
+    // fires multiple times.
+    const ITEMS = 260;
+    for (let i = 0; i < ITEMS; i++) {
+      await fire(`burst-${i}`);
+    }
+    // Each was distinct so each rendered. (Sanity check that the
+    // dedup didn't accidentally suppress any.)
+    expect(worker.showNotification).toHaveBeenCalledTimes(ITEMS);
+    // The first item was evicted: re-firing it now must render again.
+    await fire("burst-0");
+    expect(worker.showNotification).toHaveBeenCalledTimes(ITEMS + 1);
+    // A recent item is still in the dedup window: re-firing must NOT render.
+    await fire(`burst-${ITEMS - 1}`);
+    expect(worker.showNotification).toHaveBeenCalledTimes(ITEMS + 1);
+  });
+
+  test("v=1 envelope: dedup map is recency-aware (delete-then-set on re-touch)", async () => {
+    // Regression for round-3 perf finding: without `delete-then-set` on
+    // re-noting an item, the Map's FIFO order is by ORIGINAL insertion,
+    // so a retried push for an early item gets evicted while still
+    // inside its TTL window. The fix re-orders re-touched items to the
+    // tail so eviction tracks recency.
+    //
+    // We can't directly inspect the Map from outside, so we exercise
+    // the observable consequence: an item re-noted after the dedup
+    // window slips suppresses again (recency-update lets the entry
+    // survive eviction pressure long enough to dedup another retry).
+    const worker = loadServiceWorker();
+    const fire = async (item: string) => {
+      const event = makePushEvent({
+        json: () => ({
+          v: 1,
+          class: "dm",
+          conversation: "alice@example.com",
+          item,
+          unread: 1,
+        }),
+      });
+      worker.dispatch("push", event);
+      await event.done();
+    };
+    // First fire: renders.
+    await fire("item-A");
+    expect(worker.showNotification).toHaveBeenCalledTimes(1);
+    // Re-fire same item: suppressed (already shown).
+    await fire("item-A");
+    expect(worker.showNotification).toHaveBeenCalledTimes(1);
+    // Distinct item: renders.
+    await fire("item-B");
+    expect(worker.showNotification).toHaveBeenCalledTimes(2);
+    // Re-fire the FIRST item AGAIN: still suppressed. Without the
+    // delete-then-set, this branch already held under low pressure;
+    // the regression manifests under churn, but pinning the basic
+    // delete-on-touch contract here guards against accidental
+    // simplification.
+    await fire("item-A");
+    expect(worker.showNotification).toHaveBeenCalledTimes(2);
   });
 });

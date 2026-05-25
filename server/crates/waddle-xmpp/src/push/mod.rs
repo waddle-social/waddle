@@ -5,6 +5,7 @@
 //! enable/disable IQ stanzas and stored for later notification delivery.
 
 pub mod constants;
+pub mod disco;
 pub mod encrypt;
 pub mod envelope;
 pub mod limiter;

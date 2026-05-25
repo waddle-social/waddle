@@ -2,12 +2,20 @@ import { ref, watch } from "vue";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import { getOrRegisterServiceWorker, registerServiceWorker as registerChatServiceWorker } from "@/lib/service-worker-registration";
 import { createPushFlowLock } from "./push-flow-lock";
+import { clearCachedVapidKey, loadVapidPublicKey } from "./vapid-cache";
+import { withVapidRotationLock } from "./vapid-rotation-lock";
 
 const STORAGE_KEY = "waddle.chat.notifications-enabled";
 const DEVICE_ID_STORAGE_KEY = "waddle.chat.push-device-id";
 const PUSH_NODE_STORAGE_KEY = "waddle.chat.push-node-id";
+/// Prefix for the per-(account, service) persisted VAPID kid. The
+/// full key is built by `pushKidStorageKey(accountJid, serviceJid)`.
+/// Multi-account sessions MUST NOT share one global kid — without
+/// namespacing, account B's kid would overwrite account A's,
+/// causing spurious rotation triggers when A reconnects and reads
+/// B's kid back as "different from advertised".
+const PUSH_KID_STORAGE_PREFIX = "waddle.chat.push-kid:";
 const PUSH_SERVICE_JID = (import.meta.env.PUBLIC_WADDLE_XMPP_PUSH_SERVICE_JID ?? "").trim();
-const VAPID_PUBLIC_KEY = (import.meta.env.PUBLIC_WADDLE_VAPID_PUBLIC_KEY ?? "").trim();
 const NOTIFICATION_ICON_URL = "/android-chrome-192x192.png";
 
 /// Push Service app-id for the browser/PWA chat. APNs ("ios") and
@@ -29,6 +37,11 @@ interface MentionNotificationOptions {
   body: string;
   roomJid: string;
   isBroadcast: boolean;
+  /** XEP-0359 stanza id of the originating message. When present, the
+   * foreground tab posts it to the active service worker via
+   * `waddle:item-shown` so a Web Push for the same id (arriving a few
+   * tens of ms later) is suppressed instead of double-firing. */
+  stanzaId?: string;
   onNavigate?: (roomJid: string) => void;
 }
 
@@ -36,7 +49,29 @@ interface DmNotificationOptions {
   senderUsername: string;
   peerJid: string;
   body: string;
+  /** XEP-0359 stanza id; see `MentionNotificationOptions.stanzaId`. */
+  stanzaId?: string;
   onNavigate?: (peerJid: string) => void;
+}
+
+/// Foreground→SW signal: tell the active service worker we just
+/// rendered a notification for this stanza id so it can suppress the
+/// matching Web Push when it lands. Best-effort: a missing controller
+/// (SW not active yet, or never installed) is silently ignored —
+/// without the SW running, there is no push handler to deliver a
+/// duplicate notification either.
+const SW_ITEM_SHOWN_MESSAGE_TYPE = "waddle:item-shown";
+function postItemShownToServiceWorker(itemId: string | undefined): void {
+  if (!itemId) return;
+  if (typeof navigator === "undefined" || !navigator.serviceWorker) return;
+  const controller = navigator.serviceWorker.controller;
+  if (!controller) return;
+  try {
+    controller.postMessage({ type: SW_ITEM_SHOWN_MESSAGE_TYPE, itemId });
+  } catch {
+    // postMessage can throw if the controller transitioned to
+    // redundant between the controller-check and the call.
+  }
 }
 
 export function usePushNotifications() {
@@ -44,6 +79,12 @@ export function usePushNotifications() {
     hasNotificationApi ? Notification.permission : "denied",
   );
   const notificationsEnabled = ref(loadEnabled());
+  /// Surfaced to the UI as a non-intrusive banner the first time a
+  /// silent kid rotation re-binds the browser PushSubscription to a new
+  /// VAPID key. The UI clears the flag once the banner is dismissed; we
+  /// don't persist this across reloads because the rotation has already
+  /// happened by then and re-showing would be noise.
+  const rotationBannerVisible = ref(false);
 
   // Serialize `syncPushSubscription` and `disablePushSubscription`
   // against each other. Without this, a rapid Enable→Disable toggle
@@ -99,6 +140,11 @@ export function usePushNotifications() {
       notification.close();
     };
 
+    // Foreground→SW dedup signal: post BEFORE the setTimeout-close so
+    // the SW Map records the id even if the user dismisses the banner
+    // before the SW push arrives.
+    postItemShownToServiceWorker(opts.stanzaId);
+
     setTimeout(() => notification.close(), 5000);
   }
 
@@ -116,6 +162,7 @@ export function usePushNotifications() {
       opts.onNavigate?.(opts.peerJid);
       notification.close();
     };
+    postItemShownToServiceWorker(opts.stanzaId);
     setTimeout(() => notification.close(), 5000);
   }
 
@@ -130,16 +177,142 @@ export function usePushNotifications() {
   ): Promise<PushSubscription | null> {
     const reg = await getOrRegisterServiceWorker();
     if (!reg) return null;
+    return subscribeOnRegistration(reg, vapidPublicKey);
+  }
+
+  /// Subscribe `reg.pushManager` to Web Push for the given VAPID
+  /// public key. Split out from `subscribeToPush` so callers that
+  /// already hold a `ServiceWorkerRegistration` (the rotation path)
+  /// don't pay an extra `getOrRegisterServiceWorker()` round-trip —
+  /// that round-trip can spuriously fail under an SW-update race
+  /// while we hold the rotation lock.
+  async function subscribeOnRegistration(
+    reg: ServiceWorkerRegistration,
+    vapidPublicKey: string,
+  ): Promise<PushSubscription | null> {
+    let keyBytes: Uint8Array;
     try {
-      const keyBytes = urlBase64ToUint8Array(vapidPublicKey);
-      const sub = await reg.pushManager.subscribe({
-        userVisibleOnly: true,
-        applicationServerKey: keyBytes.buffer as ArrayBuffer,
-      });
-      return sub;
-    } catch {
+      keyBytes = urlBase64ToUint8Array(vapidPublicKey);
+    } catch (error) {
+      console.warn("[notifications] urlBase64ToUint8Array failed on VAPID key:", error);
       return null;
     }
+    if (keyBytes.length !== 65 || keyBytes[0] !== 0x04) {
+      // Belt-and-braces validation: the wasm parser already rejects
+      // malformed keys, but a cache-hit path that bypassed the parser
+      // (older code, race) could still reach this point. Refuse to
+      // subscribe rather than hand the browser garbage.
+      console.warn(
+        "[notifications] VAPID public key is not a 65-byte 0x04-prefixed SEC1 point; refusing to subscribe",
+      );
+      return null;
+    }
+    // Re-pack into a fresh `Uint8Array<ArrayBuffer>` view (NOT
+    // `Uint8Array<ArrayBufferLike>`, which TypeScript widens any
+    // `Uint8Array` to and which `PushSubscriptionOptionsInit.applicationServerKey`
+    // rejects because `SharedArrayBuffer` isn't a valid backing
+    // store). The new ArrayBuffer is owned by this view exclusively —
+    // no offset, exact 65-byte length — which is also the shape
+    // Firefox and Safari validate against; passing a wider backing
+    // buffer surfaces as InvalidAccessError in those engines.
+    const exactKey = new Uint8Array(new ArrayBuffer(keyBytes.byteLength));
+    exactKey.set(keyBytes);
+    try {
+      return await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: exactKey,
+      });
+    } catch (error) {
+      console.warn("[notifications] PushManager.subscribe() failed:", error);
+      return null;
+    }
+  }
+
+  /// Ensure the browser's PushSubscription is bound to the current
+  /// server-advertised VAPID public key. Detects rotation (kid change),
+  /// unsubscribes the stale subscription, and re-subscribes under the
+  /// new key. Cross-tab serialized via the rotation lock so a single tab
+  /// drives the re-subscribe sequence per rotation event.
+  ///
+  /// Returns the active subscription (post-rotation if any), or `null`
+  /// when the server doesn't advertise a VAPID form (Web Push not
+  /// configured on this deployment).
+  async function ensureBrowserSubscriptionWithCurrentKey(
+    xmppClient: BrowserXmppClient,
+    userJid: string,
+    serviceJid: string,
+    reg: ServiceWorkerRegistration,
+  ): Promise<{ subscription: PushSubscription; rotated: boolean } | null> {
+    const accountJid = barePart(userJid);
+    return withVapidRotationLock(accountJid, async () => {
+      // Force-refresh while holding the rotation lock so a cache-hit
+      // path doesn't mask a real server-side VAPID rotation that
+      // landed inside the cache TTL window. The 1h cache TTL is a
+      // backstop for stale tabs; rotation detection MUST run against
+      // a fresh disco fetch every time the lock is taken (i.e. on
+      // every enable / reconnect).
+      const advertisement = await loadVapidPublicKey({
+        client: xmppClient,
+        accountJid,
+        serverJid: serviceJid,
+        forceRefresh: true,
+      });
+      if (!advertisement) {
+        console.warn(
+          "[notifications] Push Service does not advertise a VAPID public key; " +
+          "Web Push subscription skipped. Foreground Notification API still works.",
+        );
+        return null;
+      }
+      const existing = await reg.pushManager.getSubscription();
+      const persistedKid = loadPersistedKid(accountJid, serviceJid);
+      // Three rotation triggers:
+      //   1. persistedKid present and differs from the advertised kid
+      //      — server rotated under us.
+      //   2. persistedKid missing while `existing` survives — localStorage
+      //      was cleared (private mode, "Clear site data", new browser
+      //      profile that inherited the SW registration). We can't trust
+      //      the surviving subscription is bound to the current key, so
+      //      verify via `existing.options.applicationServerKey` directly.
+      //   3. The existing subscription's applicationServerKey doesn't
+      //      match the advertised bytes — server-side rotation we missed.
+      const existingKeyMatches =
+        existing === null || subscriptionApplicationKeyMatches(existing, advertisement.publicKey);
+      const kidChanged = persistedKid !== null && persistedKid !== advertisement.kid;
+      if (existing && !kidChanged && existingKeyMatches) {
+        persistKid(accountJid, serviceJid, advertisement.kid);
+        return { subscription: existing, rotated: false };
+      }
+      // Either no subscription yet, server kid changed under us, or the
+      // surviving subscription is bound to a stale key. Unsubscribe (if
+      // any) and re-subscribe under the new key.
+      if (existing) {
+        try {
+          await existing.unsubscribe();
+        } catch (error) {
+          console.warn(
+            "[notifications] PushManager.unsubscribe() failed during VAPID rotation; " +
+            "continuing to re-subscribe under the new key:",
+            error,
+          );
+        }
+      }
+      // Re-use the registration the caller already holds instead of
+      // re-fetching via `getOrRegisterServiceWorker()`. The double
+      // lookup could turn a recoverable state (we have `reg` in hand)
+      // into a `null` if the second async lookup raced an SW update.
+      const fresh = await subscribeOnRegistration(reg, advertisement.publicKey);
+      if (!fresh) {
+        // Subscribe failed — drop the persisted kid + cache entry so the
+        // next attempt re-fetches from the server. The chat can also fall
+        // back to the foreground Notification API in this state.
+        clearPersistedKid(accountJid, serviceJid);
+        clearCachedVapidKey(accountJid, serviceJid);
+        return null;
+      }
+      persistKid(accountJid, serviceJid, advertisement.kid);
+      return { subscription: fresh, rotated: kidChanged };
+    });
   }
 
   /**
@@ -171,32 +344,34 @@ export function usePushNotifications() {
       return false;
     }
 
-    // Get or create a browser-side PushSubscription. Without a VAPID
-    // public key configured at build time the browser will refuse to
-    // subscribe — log and bail so the caller can fall back to the
-    // foreground Notification API.
-    if (!VAPID_PUBLIC_KEY) {
-      console.warn(
-        "[notifications] PUBLIC_WADDLE_VAPID_PUBLIC_KEY is not set; Web Push subscription skipped. " +
-        "Foreground Notification API still works while the chat tab is open.",
-      );
-      return false;
-    }
+    // Resolve the browser-side PushSubscription against the server's
+    // currently-advertised VAPID public key. PR-D3 swapped the build-
+    // time `PUBLIC_WADDLE_VAPID_PUBLIC_KEY` env for a runtime fetch via
+    // the Push Service's XEP-0128 disco extension form so the chat can
+    // ship without provider-specific build secrets and so server-side
+    // VAPID rotations are picked up automatically.
     const reg = await getOrRegisterServiceWorker();
     if (!reg) {
       console.warn("[notifications] Service worker registration failed; push disabled");
       return false;
     }
-    let subscription = await reg.pushManager.getSubscription();
-    if (!subscription) {
-      subscription = await subscribeToPush(VAPID_PUBLIC_KEY);
-    }
-    if (!subscription) {
-      console.warn(
-        "[notifications] PushManager.subscribe() failed (browser may have rejected VAPID key)",
-      );
+    const subscribeResult = await ensureBrowserSubscriptionWithCurrentKey(
+      xmppClient,
+      userJid,
+      serviceJid,
+      reg,
+    );
+    if (!subscribeResult) {
+      // Either the server doesn't advertise a VAPID form, or
+      // pushManager.subscribe() rejected the key. The helper has
+      // already emitted a precise warning; the chat falls back to the
+      // foreground Notification API path.
       return false;
     }
+    if (subscribeResult.rotated) {
+      rotationBannerVisible.value = true;
+    }
+    const subscription = subscribeResult.subscription;
 
     const subJson = subscription.toJSON();
     const endpoint = subscription.endpoint;
@@ -338,12 +513,26 @@ export function usePushNotifications() {
       );
       return false;
     }
+    // Clean up rotation state: drop the persisted kid + cached
+    // advertisement so a re-enable starts from a fresh fetch. Both
+    // are keyed per `(account, server)` so this only invalidates the
+    // entry for the disabling account/service pair, not any other
+    // tenant on the same device.
+    const accountJid = barePart(userJid);
+    clearPersistedKid(accountJid, serviceJid);
+    clearCachedVapidKey(accountJid, serviceJid);
     return true;
+  }
+
+  function dismissRotationBanner() {
+    rotationBannerVisible.value = false;
   }
 
   return {
     permissionState,
     notificationsEnabled,
+    rotationBannerVisible,
+    dismissRotationBanner,
     requestPermission,
     showMentionNotification,
     showDmNotification,
@@ -402,6 +591,92 @@ function persistPushNodeId(node: string): void {
 function loadPushNodeId(): string | null {
   if (typeof window === "undefined") return null;
   return window.localStorage.getItem(PUSH_NODE_STORAGE_KEY);
+}
+
+/// Build the per-(account, service) localStorage key for the
+/// persisted VAPID kid. `JSON.stringify` on a two-element array gives
+/// an unambiguous encoding regardless of the individual values'
+/// content (JIDs legally contain `:` and most other plausible
+/// separators), matching the namespacing rule used by `vapid-cache.ts`.
+function pushKidStorageKey(accountJid: string, serviceJid: string): string {
+  return `${PUSH_KID_STORAGE_PREFIX}${JSON.stringify([accountJid, serviceJid])}`;
+}
+
+function persistKid(accountJid: string, serviceJid: string, kid: string): void {
+  if (typeof window === "undefined") return;
+  // Safari Lockdown Mode and some Firefox/Brave privacy configurations
+  // throw a SecurityError on `window.localStorage` access (not just on
+  // get/set). Wrap so a hardened browser doesn't kill the entire
+  // rotation flow on a single persistence call.
+  try {
+    window.localStorage.setItem(pushKidStorageKey(accountJid, serviceJid), kid);
+  } catch (error) {
+    console.warn("[notifications] localStorage unavailable; kid not persisted:", error);
+  }
+}
+
+function loadPersistedKid(accountJid: string, serviceJid: string): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.localStorage.getItem(pushKidStorageKey(accountJid, serviceJid));
+  } catch {
+    return null;
+  }
+}
+
+function clearPersistedKid(accountJid: string, serviceJid: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(pushKidStorageKey(accountJid, serviceJid));
+  } catch {
+    // best-effort cleanup
+  }
+}
+
+/// Strip the optional `/resource` from a full JID so the cache key is
+/// stable across reconnect cycles (XMPP resources rotate every
+/// connection). The bare-JID extraction mirrors `resolvePushServiceJid`'s
+/// behavior — both must treat `alice@example.com/abc` and
+/// `alice@example.com` as the same logical account.
+function barePart(userJid: string): string {
+  return userJid.split("/")[0] ?? userJid;
+}
+
+/// Compare an existing PushSubscription's applicationServerKey (the
+/// 65-byte uncompressed P-256 point the browser stored when the
+/// subscription was created) against the server's currently-advertised
+/// public key (in base64url-no-pad form). Used to detect a stale
+/// subscription whose kid we no longer have a record of — e.g. when
+/// localStorage was wiped but the SW registration survived.
+///
+/// Returns `true` when the subscription has no applicationServerKey
+/// (very old browsers / non-VAPID origin server endpoints) so callers
+/// don't churn the subscription on an irrelevant comparison.
+///
+/// Exported so the test suite can pin the comparison semantics
+/// (cleared-localStorage rotation path is the entire point of this
+/// helper; covering it via the full `ensureBrowserSubscriptionWithCurrentKey`
+/// would require stubbing every PushManager + SW surface).
+export function subscriptionApplicationKeyMatches(
+  subscription: { options: { applicationServerKey?: ArrayBuffer | ArrayBufferView | null } },
+  advertisedPublicKeyBase64Url: string,
+): boolean {
+  const existingKey = subscription.options.applicationServerKey;
+  if (!existingKey) return true;
+  let advertised: Uint8Array;
+  try {
+    advertised = urlBase64ToUint8Array(advertisedPublicKeyBase64Url);
+  } catch {
+    return false;
+  }
+  const existing = ArrayBuffer.isView(existingKey)
+    ? new Uint8Array(existingKey.buffer, existingKey.byteOffset, existingKey.byteLength)
+    : new Uint8Array(existingKey);
+  if (existing.length !== advertised.length) return false;
+  for (let i = 0; i < existing.length; i++) {
+    if (existing[i] !== advertised[i]) return false;
+  }
+  return true;
 }
 
 function urlBase64ToUint8Array(base64String: string): Uint8Array {

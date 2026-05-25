@@ -385,6 +385,11 @@ export interface RoomActivityEvent {
   roomJid: string;
   nick: string;
   body: string;
+  /** XEP-0359 stanza id of the originating message, if the server stamped one.
+   * Used by the foreground→service-worker dedup signal so a SW push that
+   * lands after a foreground notification with the same stanza id does not
+   * re-render the same banner. */
+  stanzaId?: string;
   /** XEP-0372 */
   mentions?: string[];
   /** XEP-0513 */
