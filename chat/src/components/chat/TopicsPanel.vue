@@ -8,8 +8,11 @@ import type { ChannelThreadInboxEntry } from "@/channels/inbox";
 import { groupChannelsBySpace } from "@/lib/channel-grouping";
 import {
   callParticipantCountForChannel,
-  candidateRoomJidsForChannel,
+  callRoomJidForChannel,
   collapsedGroupBadgeModel,
+  mucCallParticipantPreview,
+  refreshedMucCallRooms,
+  type RefreshedMucCallRoom,
 } from "@/lib/calls/muc-call-indicators";
 import { normalizeMucCallRoomJid } from "@/lib/calls/muc-call-presence";
 import { $callState } from "@/lib/calls/call-store";
@@ -53,6 +56,10 @@ const props = defineProps<{
    * the channel — matches Slack-Huddle / Discord-voice patterns.
    */
   callParticipantCounts?: Record<string, number>;
+  /** Per-room nick list from XEP-0272 Muji presence. Used only for
+   * richer call affordance copy; counts remain authoritative for
+   * visibility. */
+  callParticipants?: Record<string, string[]>;
   /** Trusted MUC service domain for id-only channel rows. */
   managedMucDomain?: string | null;
 }>();
@@ -76,16 +83,22 @@ function callParticipantCount(channel: ChannelSummary): number {
 }
 
 function callRoomJid(channel: ChannelSummary): string {
-  if (!props.callParticipantCounts) return "";
-  return candidateRoomJidsForChannel(channel, props.activeChannelJids, props.managedMucDomain)
-    .map(normalizeMucCallRoomJid)
-    .find((jid) => (props.callParticipantCounts?.[jid] ?? 0) > 0) ?? "";
+  return callRoomJidForChannel(
+    channel,
+    props.callParticipantCounts,
+    props.activeChannelJids,
+    props.managedMucDomain,
+  );
 }
 
 function channelCallAction(channel: ChannelSummary): "join" | "return" | "open" | null {
   if (callParticipantCount(channel) <= 0) return null;
   const roomJid = callRoomJid(channel);
   if (!roomJid) return null;
+  return groupCallAction(roomJid);
+}
+
+function groupCallAction(roomJid: string): "join" | "return" | "open" {
   const state = callState.value;
   if (
     (state.phase === "active" || state.phase === "muc-pending") &&
@@ -96,6 +109,17 @@ function channelCallAction(channel: ChannelSummary): "join" | "return" | "open" 
   }
   if (state.phase !== "idle" && state.phase !== "ended") return "open";
   return "join";
+}
+
+function groupCallActionLabel(roomJid: string): string {
+  switch (groupCallAction(roomJid)) {
+    case "join":
+      return "Join";
+    case "return":
+      return "Return";
+    case "open":
+      return "Open";
+  }
 }
 
 function channelCallActionLabel(channel: ChannelSummary): string {
@@ -115,9 +139,47 @@ function channelCallBadgeLabel(channel: ChannelSummary): string {
   const count = callParticipantCount(channel);
   const noun = count === 1 ? "person" : "people";
   const action = channelCallActionLabel(channel);
-  return action
+  const label = action
     ? `${action} live call, ${count} ${noun}`
     : `Live call, ${count} ${noun}`;
+  const preview = callParticipantPreviewForRoom(callRoomJid(channel));
+  return preview ? `${label}: ${preview}` : label;
+}
+
+function refreshedGroupCallBadgeLabel(row: RefreshedMucCallRoom): string {
+  const noun = row.participantCount === 1 ? "person" : "people";
+  const label = `${groupCallActionLabel(row.roomJid)} live call, ${row.participantCount} ${noun}`;
+  const preview = callParticipantPreviewForRoom(row.roomJid);
+  return preview ? `${label}: ${preview}` : label;
+}
+
+function refreshedGroupCallRowLabel(row: RefreshedMucCallRoom): string {
+  const noun = row.participantCount === 1 ? "person" : "people";
+  const action = groupCallAction(row.roomJid);
+  const preview = callParticipantPreviewForRoom(row.roomJid);
+  const base = [
+    `${row.title}, group call syncing`,
+    `${row.participantCount} ${noun}`,
+    ...(preview ? [`${preview} in call`] : []),
+  ].join(", ");
+  if (action === "join") return `${base}, click to join call`;
+  if (action === "return") return `${base}, click to return to call`;
+  return `${base}, click to open call`;
+}
+
+function isActiveGroupCallRow(row: RefreshedMucCallRoom): boolean {
+  return groupCallAction(row.roomJid) === "return";
+}
+
+function callParticipantPreviewForRoom(roomJid: string): string {
+  const normalized = normalizeMucCallRoomJid(roomJid);
+  if (!normalized) return "";
+  return mucCallParticipantPreview(props.callParticipants?.[normalized]);
+}
+
+function refreshedGroupCallMeta(row: RefreshedMucCallRoom): string {
+  const preview = callParticipantPreviewForRoom(row.roomJid);
+  return preview ? `${preview} in call` : "Group call syncing";
 }
 
 function hasActivity(channelId: string): boolean {
@@ -137,6 +199,14 @@ const channelGroups = computed(() =>
       unread: props.channelUnreadMap?.[channel.id] ?? { unread: 0, mentions: 0 },
     })),
   })),
+);
+const refreshedGroupCallRows = computed(() =>
+  refreshedMucCallRooms({
+    channels: props.channels,
+    activeChannelJids: props.activeChannelJids,
+    managedMucDomain: props.managedMucDomain,
+    callParticipantCounts: props.callParticipantCounts,
+  }),
 );
 
 function groupUnreadSummary(group: (typeof channelGroups.value)[number]) {
@@ -193,12 +263,16 @@ function channelRowLabel(
   unread: { unread: number; mentions: number },
   isActive: boolean,
 ) {
+  const roomJid = callRoomJid(channel);
+  const preview = callParticipantCount(channel) > 0
+    ? callParticipantPreviewForRoom(roomJid)
+    : "";
   const label = `${channel.name}, ${isActive ? "selected" : "not selected"}, ${activityLabel({
     unread: unread.unread,
     mentions: unread.mentions,
     hasActivity: hasActivity(channel.id),
     callCount: callParticipantCount(channel),
-  })}`;
+  })}${preview ? `, ${preview} in call` : ""}`;
   const action = !isActive ? channelCallAction(channel) : null;
   if (action === "join") return `${label}, click to join call`;
   if (action === "return") return `${label}, click to return to call`;
@@ -239,7 +313,7 @@ function truncateTitle(title: string | undefined, maxLen = 28): string {
 }
 
 const emit = defineEmits<{
-  selectChannel: [id: string, roomJid?: string];
+  selectChannel: [id: string | null, roomJid?: string];
   joinChannelCall: [channelId: string | null, roomJid: string, media: CallMedia];
   selectThread: [channelId: string, threadId: string];
   selectCommunitySurface: [surface: "feed" | "stories" | "events"];
@@ -258,6 +332,14 @@ function selectChannelRow(channel: ChannelSummary): void {
     return;
   }
   emit("selectChannel", channel.id, roomJid || undefined);
+}
+
+function selectRefreshedGroupCallRow(row: RefreshedMucCallRoom): void {
+  if (groupCallAction(row.roomJid) === "join") {
+    emit("joinChannelCall", null, row.roomJid, { audio: true, video: false });
+    return;
+  }
+  emit("selectChannel", null, row.roomJid);
 }
 
 function isGroupCollapsed(groupId: string): boolean {
@@ -323,6 +405,60 @@ watch(
     <!-- Channel list -->
     <div class="chat-pane-scroll chat-sidebar-scroll">
       <div class="chat-panel-stack">
+        <div
+          v-if="refreshedGroupCallRows.length > 0"
+          class="chat-list-stack"
+        >
+          <section class="grid gap-1" aria-label="Active group calls">
+            <div class="type-section-label flex items-center gap-1.5 px-2 pt-2 pb-1 text-sidebar-muted">
+              <Phone class="h-3 w-3 text-primary" aria-hidden="true" />
+              <span class="flex-1 truncate">Active calls</span>
+              <span
+                class="chat-badge-glow--primary type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-primary/15 text-primary ring-1 ring-primary/30"
+                aria-hidden="true"
+              >
+                {{ refreshedGroupCallRows.length }}
+              </span>
+            </div>
+            <button
+              v-for="row in refreshedGroupCallRows"
+              :key="row.key"
+              class="chat-list-row w-full min-h-10 flex items-center gap-2.5 px-3 py-2 text-left group text-sidebar-muted hover:bg-sidebar-accent/50 hover:text-sidebar-foreground"
+              :class="isActiveGroupCallRow(row) ? 'chat-list-row--active bg-sidebar-accent text-sidebar-foreground' : ''"
+              type="button"
+              :aria-current="isActiveGroupCallRow(row) ? 'page' : undefined"
+              :aria-label="refreshedGroupCallRowLabel(row)"
+              @click="selectRefreshedGroupCallRow(row)"
+            >
+              <span class="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
+                <Phone class="h-3.5 w-3.5" aria-hidden="true" />
+              </span>
+              <span class="min-w-0 flex-1">
+                <span class="type-control type-strong block truncate text-sidebar-foreground">
+                  {{ row.title }}
+                </span>
+                <span class="type-meta block truncate text-sidebar-muted" :title="row.roomJid">
+                  {{ refreshedGroupCallMeta(row) }}
+                </span>
+              </span>
+              <span
+                class="chat-badge-glow--primary type-count-badge inline-flex items-center gap-0.5 h-[18px] px-1.5 rounded-full bg-primary/15 text-primary ring-1 ring-primary/30 motion-safe:animate-pulse"
+                :title="refreshedGroupCallBadgeLabel(row)"
+                aria-hidden="true"
+              >
+                <Phone class="w-3 h-3" />
+                <span class="type-numeric leading-none">{{ row.participantCount }}</span>
+              </span>
+              <span
+                class="type-meta hidden shrink-0 rounded-md border border-primary/25 bg-primary/10 px-1.5 py-0.5 text-primary xl:inline-flex"
+                aria-hidden="true"
+              >
+                {{ groupCallActionLabel(row.roomJid) }}
+              </span>
+            </button>
+          </section>
+        </div>
+
         <div v-if="isLoading" class="chat-list-stack" aria-hidden="true">
           <section
             v-for="i in 2"

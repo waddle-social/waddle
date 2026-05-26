@@ -42,10 +42,13 @@ const {
   selfDomain,
   openUserSettings,
   openHome,
+  openDmList,
+  openCommunitySurface,
   handleLogout,
   handleRequestNotifications,
   handleToggleNotifications,
   selectChannel,
+  selectChannelByRoomJid,
   onSelectThread,
   selectDm,
   selectExtensionRoute,
@@ -57,14 +60,16 @@ const {
 } = props.controller;
 
 function selectCommunitySurface(surface: "feed" | "stories" | "events") {
-  ui.activePage.value = "chat";
-  ui.activeCommunitySurface.value = surface;
-  ui.showMobileNav.value = false;
+  openCommunitySurface(surface);
 }
 
-function selectChannelFromMobile(id: string, roomJid?: string) {
+function selectChannelFromMobile(id: string | null, roomJid?: string) {
   ui.activeCommunitySurface.value = null;
-  void selectChannel(id, roomJid ? { roomJid } : undefined);
+  if (id) {
+    void selectChannel(id, roomJid ? { roomJid } : undefined);
+    return;
+  }
+  if (roomJid) void selectChannelByRoomJid(roomJid);
 }
 
 function joinChannelCallFromMobile(channelId: string | null, roomJid: string, media: CallMedia) {
@@ -129,7 +134,7 @@ function openExtensionRoute(route: DiscoveredExtensionRoute) {
             horizontal
             @open-home="openHome"
             @toggle-channels="ui.sidebarMode.value = 'channels'"
-            @toggle-dms="ui.sidebarMode.value = 'dms'"
+            @toggle-dms="openDmList"
           />
         </div>
         <TopicsPanel
@@ -147,6 +152,7 @@ function openExtensionRoute(route: DiscoveredExtensionRoute) {
           :collapsed-group-ids="ui.collapsedSpaceGroupIds.value"
           :channel-unread-map="computedChannelUnreadMap"
           :call-participant-counts="callParticipantCounts"
+          :call-participants="mucCallParticipantsStore"
           :managed-muc-domain="managedMucDomain"
           :thread-entries-fn="(roomJid: string) => channelUnread.threadEntries(roomJid)"
           :active-community-surface="ui.activeCommunitySurface.value"

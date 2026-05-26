@@ -264,6 +264,37 @@ describe("call activity dock model", () => {
     ]);
   });
 
+  test("resolves known-channel room JIDs from normalized call count keys", () => {
+    const entries = buildCallActivityDockEntries({
+      channels: [
+        { id: "general", name: "General", jid: "general@conference.example.com" },
+      ],
+      conversations: [],
+      activeChannelId: null,
+      activePeerJid: null,
+      sidebarMode: "channels",
+      activeChannelJids: new Set(),
+      managedMucDomain: "conference.example.com",
+      callParticipantCounts: {
+        "General@Conference.Example.com/alice": 2,
+      },
+      dmCallActivities: {},
+    });
+
+    expect(entries).toEqual([
+      {
+        kind: "channel",
+        key: "channel:general",
+        channelId: "general",
+        roomJid: "general@conference.example.com",
+        title: "General",
+        participantCount: 2,
+        isKnownChannel: true,
+        isActive: false,
+      },
+    ]);
+  });
+
   test("filters fallback group calls to the managed MUC domain", () => {
     const entries = buildCallActivityDockEntries({
       channels: [],
@@ -437,6 +468,7 @@ describe("CallActivityDock rendering", () => {
     expect(readyShell).toContain(":join-channel-call=\"joinChannelCallFromActivity\"");
     expect(readyShell).toContain(":active-channel-call-count=\"activeChannelCallCount\"");
     expect(readyShell).toContain(":active-dm-call-count=\"activeDmCallCount\"");
+    expect(readyShell).toContain(":call-participants=\"mucCallParticipantsStore\"");
     expect(readyShell).toContain("@select-channel=\"onSelectChannelFromSidebar\"");
     expect(readyShell).toContain("@join-channel-call=\"joinChannelCallFromActivity\"");
     expect(readyShell).toContain("@select-dm=\"selectDm\"");
@@ -446,6 +478,8 @@ describe("CallActivityDock rendering", () => {
     expect(mobileDrawers).toContain("@join-channel-call=\"joinChannelCallFromMobile\"");
     expect(mobileDrawers).toContain(":active-channel-call-count=\"activeChannelCallCount\"");
     expect(mobileDrawers).toContain(":active-dm-call-count=\"activeDmCallCount\"");
+    expect(mobileDrawers).toContain(":call-participants=\"mucCallParticipantsStore\"");
+    expect(mobileDrawers).toContain("@toggle-dms=\"openDmList\"");
   });
 
   test("renders rail-level active call indicators for spaces and DMs", async () => {
@@ -722,6 +756,47 @@ describe("CallActivityDock rendering", () => {
     expect(html).toContain("General, not selected, call ongoing with 2 participants, click to join call");
   });
 
+  test("renders refreshed group call rows while channel navigation is loading", async () => {
+    const html = await renderVueComponent("../src/components/chat/TopicsPanel.vue", {
+      ...topicsPanelBaseProps(),
+      isLoading: true,
+      callParticipantCounts: {
+        "general@conference.example.com": 2,
+      },
+      callParticipants: {
+        "general@conference.example.com": ["alice", "bob"],
+      },
+      managedMucDomain: "conference.example.com",
+    });
+
+    expect(html).toContain("Active calls");
+    expect(html).toContain("general");
+    expect(html).toContain("alice, bob in call");
+    expect(html).toContain("Join live call, 2 people");
+    expect(html).toContain("Join live call, 2 people: alice, bob");
+    expect(html).toContain("general, group call syncing, 2 people, alice, bob in call, click to join call");
+  });
+
+  test("does not duplicate refreshed group call rows for known channels", async () => {
+    const html = await renderVueComponent("../src/components/chat/TopicsPanel.vue", {
+      ...topicsPanelBaseProps(),
+      channels: [
+        { id: "general", name: "General", jid: "general@conference.example.com" },
+      ],
+      callParticipantCounts: {
+        "general@conference.example.com": 2,
+      },
+      callParticipants: {
+        "general@conference.example.com": ["alice", "bob", "carol"],
+      },
+      managedMucDomain: "conference.example.com",
+    });
+
+    expect(html).toContain("General, not selected, call ongoing with 2 participants, alice, bob +1 in call, click to join call");
+    expect(html).toContain("Join live call, 2 people: alice, bob +1");
+    expect(html).not.toContain("Group call syncing");
+  });
+
   test("keeps sidebar channel call rows navigation-only while another call is active", async () => {
     $callState.set({
       phase: "outgoing",
@@ -799,6 +874,55 @@ describe("CallActivityDock rendering", () => {
     ]);
   });
 
+  test("activates sidebar channel rows with normalized call count keys", async () => {
+    clearCallState();
+    const emitted: unknown[][] = [];
+    const channel = { id: "general", name: "General", jid: "general@conference.example.com" };
+    const bindings = await setupVueComponent("../src/components/chat/TopicsPanel.vue", {
+      ...topicsPanelBaseProps(),
+      channels: [channel],
+      callParticipantCounts: {
+        "General@Conference.Example.com/alice": 2,
+      },
+      managedMucDomain: "conference.example.com",
+    }, (...args) => {
+      emitted.push(args);
+    });
+
+    setupBindingFunction(bindings, "selectChannelRow")(channel);
+
+    expect(emitted).toEqual([
+      ["joinChannelCall", "general", "general@conference.example.com", { audio: true, video: false }],
+    ]);
+  });
+
+  test("activates refreshed group call rows through the join, open, and return event paths", async () => {
+    expect(await emittedRefreshedGroupCallRowEvents()).toEqual([
+      ["joinChannelCall", null, "general@conference.example.com", { audio: true, video: false }],
+    ]);
+
+    expect(await emittedRefreshedGroupCallRowEvents({
+      phase: "outgoing",
+      to: "bob@example.com",
+      sid: "dm-call",
+      media: { audio: true, video: false },
+    })).toEqual([
+      ["selectChannel", null, "general@conference.example.com"],
+    ]);
+
+    expect(await emittedRefreshedGroupCallRowEvents({
+      phase: "muc-pending",
+      kind: "muc",
+      peer: "general@conference.example.com",
+      sid: "muc-call",
+      media: { audio: true, video: false },
+      selfNick: "alice",
+      attemptId: "attempt-1",
+    })).toEqual([
+      ["selectChannel", null, "general@conference.example.com"],
+    ]);
+  });
+
   test("mobile drawer forwards sidebar join-call events to the shell handler", async () => {
     const forwarded: unknown[][] = [];
     const bindings = await setupVueComponent("../src/components/chat/ChatMobileDrawers.vue", {
@@ -817,6 +941,21 @@ describe("CallActivityDock rendering", () => {
     expect(forwarded).toEqual([
       ["general", "general@conference.example.com", { audio: true, video: false }],
     ]);
+  });
+
+  test("mobile drawer routes community surfaces through the controller", async () => {
+    const selected: unknown[][] = [];
+    const bindings = await setupVueComponent("../src/components/chat/ChatMobileDrawers.vue", {
+      controller: {
+        openCommunitySurface: (...args: unknown[]) => {
+          selected.push(args);
+        },
+      },
+    });
+
+    setupBindingFunction(bindings, "selectCommunitySurface")("stories");
+
+    expect(selected).toEqual([["stories"]]);
   });
 
   test("mobile drawer preserves room JID when channel call rows open or return", async () => {
@@ -841,6 +980,34 @@ describe("CallActivityDock rendering", () => {
     expect(ui.activeCommunitySurface.value).toBe(null);
     expect(selected).toEqual([
       ["general", { roomJid: "general@conference.example.com" }],
+    ]);
+  });
+
+  test("mobile drawer opens refreshed group call rows by room JID", async () => {
+    const selected: unknown[][] = [];
+    const ui = {
+      activeCommunitySurface: { value: "stories" },
+    };
+    const bindings = await setupVueComponent("../src/components/chat/ChatMobileDrawers.vue", {
+      controller: {
+        ui,
+        selectChannel: (...args: unknown[]) => {
+          selected.push(args);
+        },
+        selectChannelByRoomJid: (...args: unknown[]) => {
+          selected.push(["room", ...args]);
+        },
+      },
+    });
+
+    setupBindingFunction(bindings, "selectChannelFromMobile")(
+      null,
+      "general@conference.example.com",
+    );
+
+    expect(ui.activeCommunitySurface.value).toBe(null);
+    expect(selected).toEqual([
+      ["room", "general@conference.example.com"],
     ]);
   });
 
@@ -987,6 +1154,29 @@ async function emittedTopicChannelRowEvents(callState?: CallState): Promise<unkn
   });
 
   setupBindingFunction(bindings, "selectChannelRow")(channel);
+  return emitted;
+}
+
+async function emittedRefreshedGroupCallRowEvents(callState?: CallState): Promise<unknown[][]> {
+  clearCallState();
+  if (callState) $callState.set(callState);
+  const emitted: unknown[][] = [];
+  const bindings = await setupVueComponent("../src/components/chat/TopicsPanel.vue", {
+    ...topicsPanelBaseProps(),
+    callParticipantCounts: {
+      "general@conference.example.com": 2,
+    },
+    managedMucDomain: "conference.example.com",
+  }, (...args) => {
+    emitted.push(args);
+  });
+
+  setupBindingFunction(bindings, "selectRefreshedGroupCallRow")({
+    key: "group-call:general@conference.example.com",
+    roomJid: "general@conference.example.com",
+    title: "general",
+    participantCount: 2,
+  });
   return emitted;
 }
 
