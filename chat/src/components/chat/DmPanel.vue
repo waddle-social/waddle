@@ -1,9 +1,11 @@
 <script setup lang="ts">
+import { computed } from "vue";
 import { useStore } from "@nanostores/vue";
 import { MessageCircle, PhoneCall, Plus } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import { formatTimelineStamp } from "@/channels/timeline";
 import { $dmCallActivities } from "@/lib/calls/dm-call-activity";
+import type { DmCallActivity } from "@/lib/calls/dm-call-activity";
 import { barePeerJid } from "@/lib/xmpp/jid";
 import type { DmConversation } from "@/lib/xmpp-client";
 
@@ -18,6 +20,42 @@ const emit = defineEmits<{
 }>();
 
 const dmCallActivities = useStore($dmCallActivities);
+const activePeer = computed(() => normalizedPeerJid(props.activePeerJid ?? ""));
+const visibleConversations = computed<DmConversation[]>(() => {
+  const seen = new Set<string>();
+  for (const conversation of props.conversations) {
+    const peer = normalizedPeerJid(conversation.peerJid);
+    if (peer) seen.add(peer);
+  }
+  const callOnlyRows = Object.values(dmCallActivities.value)
+    .filter((activity) => {
+      const peer = normalizedPeerJid(activity.peerJid);
+      return !!peer && !seen.has(peer);
+    })
+    .map(callActivityConversation);
+  return [...props.conversations, ...callOnlyRows].sort(compareDmConversations);
+});
+
+function normalizedPeerJid(peerJid: string): string {
+  return barePeerJid(peerJid).toLowerCase();
+}
+
+function timestampMs(timestamp?: string): number {
+  const ms = Date.parse(timestamp ?? "");
+  return Number.isFinite(ms) ? ms : Number.NEGATIVE_INFINITY;
+}
+
+function conversationSortMs(conversation: DmConversation): number {
+  const callUpdatedAt = callActivity(conversation.peerJid)?.updatedAt;
+  return Math.max(timestampMs(conversation.lastMessageAt), timestampMs(callUpdatedAt));
+}
+
+function compareDmConversations(left: DmConversation, right: DmConversation): number {
+  const leftMs = conversationSortMs(left);
+  const rightMs = conversationSortMs(right);
+  if (leftMs !== rightMs) return rightMs - leftMs;
+  return normalizedPeerJid(left.peerJid).localeCompare(normalizedPeerJid(right.peerJid));
+}
 
 function preview(text?: string): string {
   if (!text) return "";
@@ -33,14 +71,42 @@ function dotClass(show?: DmConversation["presenceShow"]): string {
 }
 
 function hasCallActivity(peerJid: string): boolean {
-  const normalized = barePeerJid(peerJid).toLowerCase();
+  const normalized = normalizedPeerJid(peerJid);
   return !!normalized && !!dmCallActivities.value[normalized];
 }
 
+function callActivity(peerJid: string): DmCallActivity | null {
+  const normalized = normalizedPeerJid(peerJid);
+  return normalized ? dmCallActivities.value[normalized] ?? null : null;
+}
+
 function callActivityLabel(peerJid: string): string {
-  const normalized = barePeerJid(peerJid).toLowerCase();
-  const activity = normalized ? dmCallActivities.value[normalized] : null;
+  const activity = callActivity(peerJid);
   return activity?.state === "ringing" ? "Ringing" : "Live";
+}
+
+function callActivityDescription(activity: DmCallActivity): string {
+  const media = activity.media.video ? "Video" : "Voice";
+  if (activity.state === "accepted") return `${media} call live`;
+  if (activity.direction === "incoming") return `Incoming ${media.toLowerCase()} call`;
+  if (activity.direction === "outgoing") return `Calling ${media.toLowerCase()} call`;
+  return `${media} call ringing`;
+}
+
+function callActivityConversation(activity: DmCallActivity): DmConversation {
+  const peerJid = normalizedPeerJid(activity.peerJid);
+  return {
+    peerJid,
+    peerUsername: peerJid.split("@")[0] || peerJid,
+    lastMessageBody: callActivityDescription(activity),
+    lastMessageAt: activity.updatedAt,
+    unreadCount: 0,
+  };
+}
+
+function isActiveConversation(peerJid: string): boolean {
+  const peer = normalizedPeerJid(peerJid);
+  return !!peer && activePeer.value === peer;
 }
 </script>
 
@@ -66,7 +132,7 @@ function callActivityLabel(peerJid: string): string {
       <!-- Empty state — halo + MessageCircle glyph + caption + hint
            matches the iter-37 / 47 / 48 authored-empty-state pattern
            used elsewhere in the app. -->
-      <div v-if="conversations.length === 0" class="flex flex-col items-center justify-center gap-2 py-10 text-center">
+      <div v-if="visibleConversations.length === 0" class="flex flex-col items-center justify-center gap-2 py-10 text-center">
         <div class="chat-empty-state__halo">
           <span class="chat-empty-state__halo-glow chat-empty-state__halo-glow--primary" aria-hidden="true" />
           <span class="chat-empty-state__halo-ring chat-empty-state__halo-ring--primary">
@@ -81,13 +147,13 @@ function callActivityLabel(peerJid: string): string {
 
       <div v-else class="chat-list-stack">
         <button
-          v-for="conversation in conversations"
+          v-for="conversation in visibleConversations"
           :key="conversation.peerJid"
           class="chat-list-row w-full min-h-14 flex items-center gap-3 px-3 py-2 text-left group"
-          :class="activePeerJid === conversation.peerJid
+          :class="isActiveConversation(conversation.peerJid)
             ? 'chat-list-row--active bg-sidebar-accent text-sidebar-foreground'
             : 'text-sidebar-muted hover:bg-sidebar-accent/50 hover:text-sidebar-foreground'"
-          :aria-current="activePeerJid === conversation.peerJid ? 'page' : undefined"
+          :aria-current="isActiveConversation(conversation.peerJid) ? 'page' : undefined"
           type="button"
           @click="emit('selectDm', conversation.peerJid)"
         >
