@@ -368,7 +368,8 @@ describe("HomeDashboard activity rendering", () => {
     expect(html).toContain('aria-label="Reconnect Bob, Video call, Live"');
     expect(buttonForLabel(html, "Join General, Group call, 2 people")).toContain("Join");
     expect(buttonForLabel(html, "General, channel, no unread activity, active call with 2 people")).toContain("Active call");
-    expect(buttonForLabel(html, "Bob (bob@example.com), direct message, available, no unread activity, Video call live")).toContain("Live");
+    expect(buttonForLabel(html, "Reconnect Bob, Video call, Live")).toContain("Live");
+    expect(html).not.toContain("Bob (bob@example.com), direct message, available, no unread activity, Video call live");
   });
 
   test("pluralizes single thread reply badges", async () => {

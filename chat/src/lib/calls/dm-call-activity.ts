@@ -12,8 +12,12 @@ type DmCallActivityState = "ringing" | "accepted";
 
 export interface DmCallActivity {
   peerJid: string;
+  /** Full JID used for XEP-0353 responses when an incoming proposal
+   * is restored from MAM after refresh. */
+  remoteFullJid?: string;
   sid: string;
   media: CallMedia;
+  mediaKnown?: boolean;
   state: DmCallActivityState;
   direction: "incoming" | "outgoing" | "unknown";
   updatedAt: string;
@@ -36,9 +40,19 @@ function normalizedBare(jid?: string | null): string {
   return barePeerJid(jid ?? "").toLowerCase();
 }
 
-function eventMedia(event: CallEvent, previous?: DmCallActivity): CallMedia {
-  if ("media" in event) return event.media;
-  return previous?.media ?? { audio: true, video: false };
+export function hasKnownDmCallMedia(
+  activity: Pick<DmCallActivity, "mediaKnown">,
+): boolean {
+  return activity.mediaKnown !== false;
+}
+
+function eventMedia(
+  event: CallEvent,
+  previous?: DmCallActivity,
+): { media: CallMedia; known: boolean } {
+  if ("media" in event) return { media: event.media, known: true };
+  if (previous) return { media: previous.media, known: hasKnownDmCallMedia(previous) };
+  return { media: { audio: true, video: false }, known: false };
 }
 
 function timestampFromEnvelope(envelope: DmCallEventEnvelope): string {
@@ -171,6 +185,21 @@ function directionForEnvelope(envelope: DmCallEventEnvelope): DmCallActivity["di
   return fromBare === selfBare ? "outgoing" : "incoming";
 }
 
+function remoteFullJidForEnvelope(
+  envelope: DmCallEventEnvelope,
+  peerJid: string,
+): string | undefined {
+  const candidates = [
+    envelope.event.from,
+    envelope.to ?? envelope.event.to,
+  ];
+  for (const candidate of candidates) {
+    if (!candidate || !candidate.includes("/")) continue;
+    if (normalizedBare(candidate) === peerJid) return candidate;
+  }
+  return undefined;
+}
+
 function removeActivity(peerJid: string, sid: string): void {
   const current = $dmCallActivities.get()[peerJid];
   if (!current || current.sid !== sid) return;
@@ -206,14 +235,17 @@ export function applyDmCallEvent(envelope: DmCallEventEnvelope): void {
   const previous = $dmCallActivities.get()[peerJid];
   if (isOlderThanCurrent(timestamp, previous)) return;
   if (!isTerminalEvent(envelope.event) && isOlderThanTerminal(peerJid, envelope.event.sid, timestamp)) return;
+  const direction = directionForEnvelope(envelope);
+  const remoteFullJid = remoteFullJidForEnvelope(envelope, peerJid);
   switch (envelope.event.kind) {
     case "propose":
       $dmCallActivities.setKey(peerJid, {
         peerJid,
+        ...(remoteFullJid ? { remoteFullJid } : {}),
         sid: envelope.event.sid,
         media: envelope.event.media,
         state: "ringing",
-        direction: directionForEnvelope(envelope),
+        direction,
         updatedAt: timestamp,
       });
       scheduleActivityPrune(now);
@@ -221,12 +253,17 @@ export function applyDmCallEvent(envelope: DmCallEventEnvelope): void {
     case "proceed":
     case "session-initiate":
     case "session-accept":
+      const media = eventMedia(envelope.event, previous);
       $dmCallActivities.setKey(peerJid, {
         peerJid,
+        ...(previous?.remoteFullJid || remoteFullJid
+          ? { remoteFullJid: previous?.remoteFullJid ?? remoteFullJid }
+          : {}),
         sid: envelope.event.sid,
-        media: eventMedia(envelope.event, previous),
+        media: media.media,
+        ...(media.known ? {} : { mediaKnown: false }),
         state: "accepted",
-        direction: previous?.direction ?? directionForEnvelope(envelope),
+        direction: previous?.direction ?? direction,
         updatedAt: timestamp,
       });
       scheduleActivityPrune(now);

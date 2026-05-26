@@ -74,6 +74,7 @@ describe("call activity dock model", () => {
         kind: "dm",
         key: "dm:bob@example.com:dm-call-1",
         peerJid: "bob@example.com",
+        sid: "dm-call-1",
         title: "Bob",
         media: { audio: true, video: true },
         state: "accepted",
@@ -202,6 +203,31 @@ describe("call activity dock model", () => {
       channelId: "general",
       roomJid: "general@conference.example.com",
     });
+    expect(callActivityDockAction(entries[1], {
+      phase: "active",
+      kind: "dm",
+      peer: "bob@example.com/desktop",
+      sid: "live",
+      media: { audio: true, video: true },
+      join: { url: "wss://livekit.example.test", room: "dm", identity: "alice", token: "token" },
+    })).toBe("return");
+    expect(callActivityDockSelection(entries[1], {
+      phase: "active",
+      kind: "dm",
+      peer: "bob@example.com/desktop",
+      sid: "live",
+      media: { audio: true, video: true },
+      join: { url: "wss://livekit.example.test", room: "dm", identity: "alice", token: "token" },
+    })).toEqual({
+      kind: "dm-open",
+      peerJid: "bob@example.com",
+    });
+    expect(callActivityDockAction(entries[1], {
+      phase: "outgoing",
+      to: "dana@example.com",
+      sid: "other-call",
+      media: { audio: true, video: false },
+    })).toBe("open");
   });
 
   test("surfaces group calls while the channel directory is still loading", () => {
@@ -458,6 +484,37 @@ describe("CallActivityDock rendering", () => {
     expect(html).not.toContain("Answer");
   });
 
+  test("renders hydrated incoming 1:1 calls as answer affordances when the proposer full JID is known", async () => {
+    $dmCallActivities.set({
+      "bob@example.com": {
+        peerJid: "bob@example.com",
+        remoteFullJid: "bob@example.com/phone",
+        sid: "dm-call-1",
+        media: { audio: true, video: false },
+        state: "ringing",
+        direction: "incoming",
+        updatedAt: "2026-05-25T12:00:00.000Z",
+      },
+    });
+
+    const html = await renderCallActivityDock({
+      channels: [],
+      conversations: [
+        { peerJid: "bob@example.com", peerUsername: "Bob", unreadCount: 0 },
+      ],
+      activeChannelId: null,
+      activePeerJid: null,
+      sidebarMode: "dms",
+      activeChannelJids: new Set<string>(),
+    });
+
+    expect(html).toContain("Bob");
+    expect(html).toContain("Voice call");
+    expect(html).toContain("Ringing");
+    expect(html).toContain("Answer");
+    expect(html).toContain('aria-label="Answer Bob call, Ringing"');
+  });
+
   test("is mounted in the desktop sidebar and visible mobile shell", () => {
     const readyShell = readFileSync(new URL("../src/components/chat/ChatReadyShell.vue", import.meta.url), "utf8");
     const mobileDrawers = readFileSync(new URL("../src/components/chat/ChatMobileDrawers.vue", import.meta.url), "utf8");
@@ -466,16 +523,21 @@ describe("CallActivityDock rendering", () => {
     expect(readyShell.match(/<CallActivityDock/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
     expect(readyShell).toContain("class=\"call-activity-dock--mobile\"");
     expect(readyShell).toContain(":join-channel-call=\"joinChannelCallFromActivity\"");
+    expect(readyShell).toContain(":answer-dm=\"answerDmFromActivity\"");
+    expect(readyShell).toContain(":reconnect-dm=\"reconnectDmFromDock\"");
     expect(readyShell).toContain(":active-channel-call-count=\"activeChannelCallCount\"");
     expect(readyShell).toContain(":active-dm-call-count=\"activeDmCallCount\"");
     expect(readyShell).toContain(":call-participants=\"mucCallParticipantsStore\"");
     expect(readyShell).toContain("@select-channel=\"onSelectChannelFromSidebar\"");
     expect(readyShell).toContain("@join-channel-call=\"joinChannelCallFromActivity\"");
+    expect(readyShell).toContain("@answer-dm=\"answerDmFromActivity\"");
     expect(readyShell).toContain("@select-dm=\"selectDm\"");
     expect(readyShell).toContain("@reconnect-dm=\"reconnectDmFromDock\"");
 
     expect(mobileDrawers).not.toContain("CallActivityDock");
     expect(mobileDrawers).toContain("@join-channel-call=\"joinChannelCallFromMobile\"");
+    expect(mobileDrawers).toContain("@answer-dm=\"answerDmFromMobile\"");
+    expect(mobileDrawers).toContain("@reconnect-dm=\"reconnectDmFromMobile\"");
     expect(mobileDrawers).toContain(":active-channel-call-count=\"activeChannelCallCount\"");
     expect(mobileDrawers).toContain(":active-dm-call-count=\"activeDmCallCount\"");
     expect(mobileDrawers).toContain(":call-participants=\"mucCallParticipantsStore\"");
@@ -520,8 +582,10 @@ describe("CallActivityDock rendering", () => {
     });
 
     expect(html).not.toContain("No conversations yet");
+    expect(html).toContain("Active calls");
     expect(html).toContain("bob");
-    expect(html).toContain("Video call live");
+    expect(html).toContain("Live video call");
+    expect(html).toContain("Reconnect bob call, Live video call");
     expect(html).toContain("Live");
   });
 
@@ -548,9 +612,12 @@ describe("CallActivityDock rendering", () => {
       activePeerJid: "BOB@example.com/tablet",
     });
 
-    expect(html).toContain("Existing chat preview");
+    expect(html).toContain("Active calls");
+    expect(html).toContain("Bobby");
+    expect(html).toContain("Live video call");
     expect(html).toContain("Live");
     expect(html).toContain('aria-current="page"');
+    expect(html).not.toContain("Existing chat preview");
     expect(html).not.toContain("Video call live");
   });
 
@@ -572,8 +639,78 @@ describe("CallActivityDock rendering", () => {
     });
 
     expect(html).toContain("Calling voice call");
-    expect(html).toContain("Ringing");
+    expect(html).toContain("Open alice call, Calling voice call");
     expect(html).not.toContain("Voice call calling");
+  });
+
+  test("selects refreshed DM call rows as reconnect or return actions", async () => {
+    const activity: DmCallActivity = {
+      peerJid: "bob@example.com/phone",
+      sid: "dm-call-9",
+      media: { audio: true, video: true },
+      state: "accepted",
+      direction: "incoming",
+      updatedAt: "2026-05-25T12:00:00.000Z",
+    };
+    $dmCallActivities.set({ "bob@example.com": activity });
+    const emitted: unknown[][] = [];
+    const bindings = await setupVueComponent("../src/components/chat/DmPanel.vue", {
+      conversations: [],
+      activePeerJid: null,
+    }, (...args) => {
+      emitted.push(args);
+    });
+
+    setupBindingFunction(bindings, "selectCallActivity")(activity);
+    expect(emitted).toEqual([
+      ["reconnectDm", "bob@example.com", { audio: true, video: true }],
+    ]);
+
+    $callState.set({
+      phase: "active",
+      kind: "dm",
+      peer: "bob@example.com/laptop",
+      sid: "dm-call-9",
+      media: { audio: true, video: true },
+      join: { url: "wss://livekit.example.test", room: "dm", identity: "alice", token: "token" },
+    });
+    const activeEmitted: unknown[][] = [];
+    const activeBindings = await setupVueComponent("../src/components/chat/DmPanel.vue", {
+      conversations: [],
+      activePeerJid: "bob@example.com",
+    }, (...args) => {
+      activeEmitted.push(args);
+    });
+
+    setupBindingFunction(activeBindings, "selectCallActivity")(activity);
+    expect(activeEmitted).toEqual([
+      ["selectDm", "bob@example.com"],
+    ]);
+  });
+
+  test("selects hydrated incoming DM call rows as answer actions", async () => {
+    const activity: DmCallActivity = {
+      peerJid: "bob@example.com/phone",
+      remoteFullJid: "bob@example.com/phone",
+      sid: "dm-call-10",
+      media: { audio: true, video: false },
+      state: "ringing",
+      direction: "incoming",
+      updatedAt: "2026-05-25T12:00:00.000Z",
+    };
+    $dmCallActivities.set({ "bob@example.com": activity });
+    const emitted: unknown[][] = [];
+    const bindings = await setupVueComponent("../src/components/chat/DmPanel.vue", {
+      conversations: [],
+      activePeerJid: null,
+    }, (...args) => {
+      emitted.push(args);
+    });
+
+    setupBindingFunction(bindings, "selectCallActivity")(activity);
+    expect(emitted).toEqual([
+      ["answerDm", "bob@example.com", "bob@example.com/phone", "dm-call-10", { audio: true, video: false }],
+    ]);
   });
 
   test("orders refreshed call-only DMs with real conversations by recency", async () => {
@@ -607,14 +744,14 @@ describe("CallActivityDock rendering", () => {
       activePeerJid: null,
     });
 
-    const carolIndex = html.indexOf("Carol");
-    const bobIndex = html.indexOf("bob");
-    const aliceIndex = html.indexOf("alice");
-    expect(carolIndex).toBeGreaterThanOrEqual(0);
+    const bobIndex = html.indexOf("Live video call");
+    const aliceIndex = html.indexOf("Calling voice call", bobIndex);
+    const carolIndex = html.indexOf("Latest real conversation", aliceIndex);
     expect(bobIndex).toBeGreaterThanOrEqual(0);
     expect(aliceIndex).toBeGreaterThanOrEqual(0);
-    expect(carolIndex).toBeLessThan(bobIndex);
+    expect(carolIndex).toBeGreaterThanOrEqual(0);
     expect(bobIndex).toBeLessThan(aliceIndex);
+    expect(aliceIndex).toBeLessThan(carolIndex);
   });
 
   test("uses call activity recency when sorting an existing refreshed DM conversation", async () => {
@@ -654,7 +791,7 @@ describe("CallActivityDock rendering", () => {
     expect(bobbyIndex).toBeGreaterThanOrEqual(0);
     expect(carolIndex).toBeGreaterThanOrEqual(0);
     expect(bobbyIndex).toBeLessThan(carolIndex);
-    expect(html).toContain("Old message, active call");
+    expect(html).not.toContain("Old message, active call");
     expect(html).toContain("Live");
     expect(html).not.toContain("Video call live");
   });
@@ -737,7 +874,6 @@ describe("CallActivityDock rendering", () => {
     });
 
     expect(html).toContain("Video call ringing");
-    expect(html).toContain("Ringing");
   });
 
   test("renders sidebar channel rows as direct join affordances when idle", async () => {
@@ -1078,8 +1214,69 @@ describe("CallActivityDock rendering", () => {
     });
 
     expect(html).toContain("Video call live");
-    expect(html).toContain("Reconnect voice call");
     expect(html).toContain("Reconnect video call");
+    expect(html).not.toContain("Reconnect voice call");
+    expect(html).not.toContain("Start voice call");
+  });
+
+  test("does not reconnect proceed-only DM call activity with guessed voice media", async () => {
+    $dmCallActivities.set({
+      "bob@example.com": {
+        peerJid: "bob@example.com",
+        sid: "dm-call-unknown-media",
+        media: { audio: true, video: false },
+        mediaKnown: false,
+        state: "accepted",
+        direction: "incoming",
+        updatedAt: "2026-05-25T12:00:00.000Z",
+      },
+    });
+
+    const html = await renderVueComponent("../src/components/calls/CallButton.vue", {
+      peerBareJid: "bob@example.com",
+    });
+
+    expect(html).toContain("Call live");
+    expect(html).toContain("Open call");
+    expect(html).not.toContain("Reconnect voice call");
+    expect(html).not.toContain("Reconnect video call");
+  });
+
+  test("renders activity-answered incoming calls as connecting in the toast", async () => {
+    $callState.set({
+      phase: "incoming",
+      from: "bob@example.com/phone",
+      sid: "dm-call-answering",
+      media: { audio: true, video: false },
+      accepting: true,
+    });
+
+    const html = await renderVueComponent("../src/components/calls/IncomingCallToast.vue", {});
+
+    expect(html).toContain("Connecting");
+    expect(html).toContain("disabled");
+  });
+
+  test("renders hydrated incoming DM call controls as answer context", async () => {
+    $dmCallActivities.set({
+      "bob@example.com": {
+        peerJid: "bob@example.com",
+        remoteFullJid: "bob@example.com/phone",
+        sid: "dm-call-2",
+        media: { audio: true, video: false },
+        state: "ringing",
+        direction: "incoming",
+        updatedAt: "2026-05-25T12:00:00.000Z",
+      },
+    });
+
+    const html = await renderVueComponent("../src/components/calls/CallButton.vue", {
+      peerBareJid: "bob@example.com",
+    });
+
+    expect(html).toContain("Incoming voice call");
+    expect(html).toContain("Answer voice call");
+    expect(html).not.toContain("Reconnect voice call");
   });
 
   test("renders the group call header button when only ContentArea's room JID is known", async () => {

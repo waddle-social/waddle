@@ -21,6 +21,8 @@ import type { ChatAppController } from "@/shell/chat-app-controller";
 const props = defineProps<{
   controller: ChatAppController;
   joinChannelCall?: (channelId: string | null, roomJid: string, media: CallMedia) => void;
+  answerDm?: (peerJid: string, remoteFullJid: string, sid: string, media: CallMedia) => void;
+  reconnectDm?: (peerJid: string, media: CallMedia) => void;
 }>();
 
 const {
@@ -74,6 +76,14 @@ function selectChannelFromMobile(id: string | null, roomJid?: string) {
 
 function joinChannelCallFromMobile(channelId: string | null, roomJid: string, media: CallMedia) {
   props.joinChannelCall?.(channelId, roomJid, media);
+}
+
+function answerDmFromMobile(peerJid: string, remoteFullJid: string, sid: string, media: CallMedia) {
+  props.answerDm?.(peerJid, remoteFullJid, sid, media);
+}
+
+function reconnectDmFromMobile(peerJid: string, media: CallMedia) {
+  props.reconnectDm?.(peerJid, media);
 }
 
 // XEP-0272 Muji participant counts keyed by room JID — same derived
@@ -176,7 +186,9 @@ function openExtensionRoute(route: DiscoveredExtensionRoute) {
           :conversations="dmConversations.conversations.value"
           :active-peer-jid="dmConversations.activePeerJid.value"
           class="!w-full !border-r-0 !flex-1"
+          @answer-dm="answerDmFromMobile"
           @select-dm="selectDm"
+          @reconnect-dm="reconnectDmFromMobile"
           @new-dm="ui.showNewDm.value = true"
         />
         <ProfilePanel

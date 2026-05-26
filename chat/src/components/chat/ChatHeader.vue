@@ -5,7 +5,7 @@ import AppAvatar from "@/components/ui/AppAvatar.vue";
 import CallButton from "@/components/calls/CallButton.vue";
 import MucCallButton from "@/components/calls/MucCallButton.vue";
 import NotifyModeButton from "@/components/chat/NotifyModeButton.vue";
-import { useDmCallActivity } from "@/lib/calls/dm-call-activity";
+import { hasKnownDmCallMedia, useDmCallActivity } from "@/lib/calls/dm-call-activity";
 import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
 import type { ConnectionNoticeCopy } from "@/lib/connection-notice";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
@@ -81,10 +81,16 @@ const { activity: dmCallActivity } = useDmCallActivity(() => props.dmPeer?.peerJ
 const dmCallActivityLabel = computed(() => {
   const activity = dmCallActivity.value;
   if (!activity) return "";
+  if (!hasKnownDmCallMedia(activity)) {
+    if (activity.state === "accepted") return "Call active";
+    if (activity.direction === "incoming") return "Incoming call";
+    if (activity.direction === "outgoing") return "Calling";
+    return "Call ringing";
+  }
   const media = activity.media.video ? "Video" : "Voice";
   if (activity.state === "accepted") return `${media} call active`;
   if (activity.direction === "incoming") return `Incoming ${media.toLowerCase()} call`;
-  if (activity.direction === "outgoing") return `${media} call calling`;
+  if (activity.direction === "outgoing") return `Calling ${media.toLowerCase()} call`;
   return `${media} call ringing`;
 });
 

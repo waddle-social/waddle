@@ -1,16 +1,18 @@
 import {
   $callState,
+  acceptIncomingTieBreakPropose,
   beginOutgoingCall,
   reportCallError,
   scheduleOutgoingTimeout,
 } from "./call-store";
-import { clearDmCallActivity } from "./dm-call-activity";
+import { clearDmCallActivity, readDmCallActivity } from "./dm-call-activity";
 import {
   newCallSid,
   outboundCalls,
   type CallWireSender,
 } from "./outbound";
 import type { CallMedia } from "./types";
+import { barePeerJid } from "../xmpp/jid";
 
 export async function startDmCallAction(options: {
   peerBareJid: string;
@@ -41,6 +43,66 @@ export async function startDmCallAction(options: {
       $callState.set({ phase: "idle" });
     }
     clearDmCallActivity(options.peerBareJid, sid);
+    reportCallError(err);
+  }
+}
+
+export async function answerIncomingDmCallActivity(options: {
+  peerBareJid: string;
+  proposerFullJid: string;
+  sid: string;
+  media: CallMedia;
+  getSender: () => CallWireSender | null;
+}): Promise<void> {
+  const peer = barePeerJid(options.peerBareJid).toLowerCase();
+  const proposer = options.proposerFullJid.trim();
+  if (!peer || barePeerJid(proposer).toLowerCase() !== peer) return;
+
+  const sender = options.getSender();
+  if (!sender) return;
+
+  const current = $callState.get();
+  const canUseCurrentIncoming = current.phase === "incoming" &&
+    current.sid === options.sid &&
+    barePeerJid(current.from).toLowerCase() === peer;
+  const needsHydratedIncoming = current.phase === "idle" || current.phase === "ended";
+  if (!canUseCurrentIncoming && !needsHydratedIncoming) return;
+  const activity = needsHydratedIncoming ? readDmCallActivity(peer) : null;
+  if (needsHydratedIncoming && (
+    !activity ||
+    activity.sid !== options.sid ||
+    activity.state !== "ringing" ||
+    activity.direction !== "incoming" ||
+    !activity.remoteFullJid
+  )) return;
+  const responseTarget = canUseCurrentIncoming ? current.from : activity?.remoteFullJid ?? proposer;
+
+  if (needsHydratedIncoming) {
+    acceptIncomingTieBreakPropose({
+      kind: "propose",
+      from: responseTarget,
+      sid: options.sid,
+      media: activity?.media ?? options.media,
+    });
+  } else if (canUseCurrentIncoming) {
+    $callState.set({ ...current, accepting: true });
+  }
+  if (needsHydratedIncoming) {
+    const next = $callState.get();
+    if (next.phase === "incoming" && next.sid === options.sid) {
+      $callState.set({ ...next, accepting: true });
+    }
+  }
+
+  try {
+    await outboundCalls.proceed(sender, responseTarget, options.sid);
+  } catch (err) {
+    const next = $callState.get();
+    if (needsHydratedIncoming && next.phase === "incoming" && next.sid === options.sid) {
+      $callState.set({ phase: "idle" });
+    } else if (canUseCurrentIncoming && next.phase === "incoming" && next.sid === options.sid) {
+      $callState.set({ ...next, accepting: false });
+    }
     reportCallError(err);
   }
 }

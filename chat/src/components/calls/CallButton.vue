@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { useStore } from "@nanostores/vue";
-import { Phone, Video } from "lucide-vue-next";
+import { Phone, PhoneIncoming, Video } from "lucide-vue-next";
 import { $callState } from "@/lib/calls/call-store";
-import { useDmCallActivity } from "@/lib/calls/dm-call-activity";
-import { startDmCallAction } from "@/lib/calls/dm-call-actions";
+import { dmCallActivityAction } from "@/lib/calls/call-activity-dock";
+import { hasKnownDmCallMedia, useDmCallActivity } from "@/lib/calls/dm-call-activity";
+import { answerIncomingDmCallActivity, startDmCallAction } from "@/lib/calls/dm-call-actions";
 import type { CallWireSender } from "@/lib/calls/outbound";
 import { connectionStore } from "@/lib/connection-store";
 import type { CallMedia } from "@/lib/calls/types";
@@ -32,16 +33,48 @@ const inCall = computed(
 const hasPeerCallActivity = computed(() => !!peerCallActivity.value);
 const voiceLabel = computed(() => hasPeerCallActivity.value && !inCall.value ? "Reconnect voice call" : "Start voice call");
 const videoLabel = computed(() => hasPeerCallActivity.value && !inCall.value ? "Reconnect video call" : "Start video call");
-const reconnectingPeerCall = computed(() => hasPeerCallActivity.value && !inCall.value);
+const peerActivityAction = computed(() => {
+  const activity = peerCallActivity.value;
+  return activity ? dmCallActivityAction(activity, state.value) : null;
+});
 const activityBannerLabel = computed(() => {
   const activity = peerCallActivity.value;
   if (!activity) return "";
+  if (!hasKnownDmCallMedia(activity)) {
+    if (activity.state === "accepted") return "Call live";
+    if (activity.direction === "incoming") return "Incoming call";
+    if (activity.direction === "outgoing") return "Calling";
+    return "Call ringing";
+  }
   const media = activity.media.video ? "Video" : "Voice";
   if (activity.state === "accepted") return `${media} call live`;
   if (activity.direction === "incoming") return `Incoming ${media.toLowerCase()} call`;
-  if (activity.direction === "outgoing") return `${media} call calling`;
+  if (activity.direction === "outgoing") return `Calling ${media.toLowerCase()} call`;
   return `${media} call ringing`;
 });
+const activityButtonLabel = computed(() => {
+  const activity = peerCallActivity.value;
+  if (!activity) return "";
+  const media = hasKnownDmCallMedia(activity) ? (activity.media.video ? "video" : "voice") : "";
+  const call = media ? `${media} call` : "call";
+  switch (peerActivityAction.value) {
+    case "answer":
+      return `Answer ${call}`;
+    case "reconnect":
+      return `Reconnect ${call}`;
+    case "return":
+      return `Return to ${call}`;
+    case "open":
+      return `Open ${call}`;
+    default:
+      return "";
+  }
+});
+const activityButtonDisabled = computed(() =>
+  !peerActivityAction.value ||
+  peerActivityAction.value === "open" ||
+  peerActivityAction.value === "return",
+);
 
 function getSender(): CallWireSender | null {
   const client = connectionStore.client as unknown as { xmpp?: unknown } | null;
@@ -60,20 +93,61 @@ async function startCall(media: CallMedia): Promise<void> {
     getInitiator,
   });
 }
+
+async function handlePeerCallActivity(): Promise<void> {
+  const activity = peerCallActivity.value;
+  if (!activity) return;
+  switch (peerActivityAction.value) {
+    case "answer":
+      if (!activity.remoteFullJid) return;
+      await answerIncomingDmCallActivity({
+        peerBareJid: props.peerBareJid,
+        proposerFullJid: activity.remoteFullJid,
+        sid: activity.sid,
+        media: activity.media,
+        getSender,
+      });
+      return;
+    case "reconnect":
+      await startCall(activity.media);
+      return;
+    case "open":
+    case "return":
+    default:
+      return;
+  }
+}
 </script>
 
 <template>
   <div
     class="call-button-group"
-    :class="{ 'call-button-group--activity': reconnectingPeerCall }"
+    :class="{ 'call-button-group--activity': hasPeerCallActivity }"
   >
     <span
-      v-if="reconnectingPeerCall"
+      v-if="hasPeerCallActivity"
       class="call-button-group__hint type-meta"
       aria-hidden="true"
     >
       {{ activityBannerLabel }}
     </span>
+    <button
+      v-if="hasPeerCallActivity"
+      class="chat-icon-button chat-icon-button--md transition-all duration-200"
+      :class="activityButtonDisabled
+        ? 'text-muted-foreground opacity-40 cursor-not-allowed'
+        : 'text-success hover:bg-success/10 hover:text-success'"
+      type="button"
+      :title="activityButtonLabel"
+      :aria-label="activityButtonLabel"
+      :disabled="activityButtonDisabled"
+      @click="handlePeerCallActivity"
+    >
+      <PhoneIncoming v-if="peerActivityAction === 'answer'" class="w-3.5 h-3.5" />
+      <Video v-else-if="peerCallActivity && hasKnownDmCallMedia(peerCallActivity) && peerCallActivity.media.video" class="w-3.5 h-3.5" />
+      <Phone v-else class="w-3.5 h-3.5" />
+    </button>
+    <template v-else>
     <button
       class="chat-icon-button chat-icon-button--md transition-all duration-200"
       :class="inCall
@@ -100,6 +174,7 @@ async function startCall(media: CallMedia): Promise<void> {
     >
       <Video class="w-3.5 h-3.5" />
     </button>
+    </template>
   </div>
 </template>
 
