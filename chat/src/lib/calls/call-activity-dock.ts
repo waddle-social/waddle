@@ -32,8 +32,33 @@ export type CallActivityDockEntry =
       direction: DmCallActivity["direction"];
       updatedAt: string;
       isActive: boolean;
-    };
+  };
 type DmCallActivityDockEntry = Extract<CallActivityDockEntry, { kind: "dm" }>;
+
+type CallActivityDockSelection =
+  | { kind: "channel"; channelId: string | null; roomJid: string }
+  | { kind: "dm-open"; peerJid: string }
+  | { kind: "dm-reconnect"; peerJid: string; media: DmCallActivity["media"] };
+
+export function callActivityDockSelection(
+  entry: CallActivityDockEntry,
+): CallActivityDockSelection {
+  if (entry.kind === "channel") {
+    return {
+      kind: "channel",
+      channelId: entry.channelId,
+      roomJid: entry.roomJid,
+    };
+  }
+  if (entry.state === "accepted") {
+    return {
+      kind: "dm-reconnect",
+      peerJid: entry.peerJid,
+      media: entry.media,
+    };
+  }
+  return { kind: "dm-open", peerJid: entry.peerJid };
+}
 
 export function buildCallActivityDockEntries(options: {
   channels: ReadonlyArray<Pick<ChannelSummary, "id" | "name" | "jid">>;

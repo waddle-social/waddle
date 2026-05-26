@@ -2,9 +2,10 @@
 import { computed } from "vue";
 import { useStore } from "@nanostores/vue";
 import { Phone, Video } from "lucide-vue-next";
-import { $callState, beginOutgoingCall, reportCallError, scheduleOutgoingTimeout } from "@/lib/calls/call-store";
-import { clearDmCallActivity, useDmCallActivity } from "@/lib/calls/dm-call-activity";
-import { newCallSid, outboundCalls } from "@/lib/calls/outbound";
+import { $callState } from "@/lib/calls/call-store";
+import { useDmCallActivity } from "@/lib/calls/dm-call-activity";
+import { startDmCallAction } from "@/lib/calls/dm-call-actions";
+import type { CallWireSender } from "@/lib/calls/outbound";
 import { connectionStore } from "@/lib/connection-store";
 import type { CallMedia } from "@/lib/calls/types";
 
@@ -42,36 +43,22 @@ const activityBannerLabel = computed(() => {
   return `${media} call ringing`;
 });
 
-function getSender() {
+function getSender(): CallWireSender | null {
   const client = connectionStore.client as unknown as { xmpp?: unknown } | null;
-  return (client?.xmpp as Parameters<typeof outboundCalls.propose>[0] | undefined) ?? null;
+  return (client?.xmpp as CallWireSender | undefined) ?? null;
+}
+
+function getInitiator(): string | undefined {
+  return (connectionStore.client as unknown as { fullJid?: string } | null)?.fullJid;
 }
 
 async function startCall(media: CallMedia): Promise<void> {
-  if (inCall.value) return;
-  const sender = getSender();
-  if (!sender) return;
-  const initiator = (connectionStore.client as unknown as { fullJid?: string } | null)?.fullJid;
-  const sid = newCallSid();
-  beginOutgoingCall(props.peerBareJid, sid, media, initiator);
-  try {
-    await outboundCalls.propose(sender, props.peerBareJid, sid, media);
-    // Arm the auto-retract once the propose is on the wire — if we
-    // armed earlier and the propose itself failed, the timer would
-    // race the rollback.
-    scheduleOutgoingTimeout(sender, sid);
-  } catch (err) {
-    // The propose stanza failed at the wire boundary. Snap the slot
-    // back to idle so the UI doesn't strand on an outgoing toast
-    // that never resolves, and surface the error via the global
-    // call-error atom so the user knows the click did something.
-    const current = $callState.get();
-    if (current.phase === "outgoing" && current.sid === sid) {
-      $callState.set({ phase: "idle" });
-    }
-    clearDmCallActivity(props.peerBareJid, sid);
-    reportCallError(err);
-  }
+  await startDmCallAction({
+    peerBareJid: props.peerBareJid,
+    media,
+    getSender,
+    getInitiator,
+  });
 }
 </script>
 

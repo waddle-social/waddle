@@ -874,6 +874,7 @@ function dayDividerLabel(createdAt: string): string {
       :waddle="waddle"
       :channel="channel"
       :dm-peer="dmPeer"
+      :call-room-jid="callRoomJid"
       :is-forum-channel="isForumChannel"
       :can-manage-channels="canManageChannels"
       :member-count="memberCount"

@@ -9,6 +9,7 @@ import { renderToString } from "vue/server-renderer";
 import ts from "typescript";
 import {
   buildCallActivityDockEntries,
+  callActivityDockSelection,
 } from "../src/lib/calls/call-activity-dock";
 import { clearMucCallParticipants, $mucCallParticipants } from "../src/lib/calls/muc-call-presence";
 import { clearDmCallActivities, $dmCallActivities } from "../src/lib/calls/dm-call-activity";
@@ -111,6 +112,61 @@ describe("call activity dock model", () => {
       peerJid: "carol@example.com",
       isActive: true,
     });
+  });
+
+  test("maps accepted DM rows to reconnect instead of plain navigation", () => {
+    const entries = buildCallActivityDockEntries({
+      channels: [
+        { id: "general", name: "General", jid: "general@conference.example.com" },
+      ],
+      conversations: [
+        { peerJid: "bob@example.com", peerUsername: "Bob" },
+        { peerJid: "carol@example.com", peerUsername: "Carol" },
+      ],
+      activeChannelId: null,
+      activePeerJid: null,
+      sidebarMode: "dms",
+      activeChannelJids: new Set(),
+      managedMucDomain: "conference.example.com",
+      callParticipantCounts: {
+        "general@conference.example.com": 2,
+      },
+      dmCallActivities: {
+        "bob@example.com": {
+          peerJid: "bob@example.com",
+          sid: "live",
+          media: { audio: true, video: true },
+          state: "accepted",
+          direction: "incoming",
+          updatedAt: "2026-05-25T12:00:00.000Z",
+        },
+        "carol@example.com": {
+          peerJid: "carol@example.com",
+          sid: "ring",
+          media: { audio: true, video: false },
+          state: "ringing",
+          direction: "incoming",
+          updatedAt: "2026-05-25T11:00:00.000Z",
+        },
+      },
+    });
+
+    expect(entries.map(callActivityDockSelection)).toEqual([
+      {
+        kind: "channel",
+        channelId: "general",
+        roomJid: "general@conference.example.com",
+      },
+      {
+        kind: "dm-reconnect",
+        peerJid: "bob@example.com",
+        media: { audio: true, video: true },
+      },
+      {
+        kind: "dm-open",
+        peerJid: "carol@example.com",
+      },
+    ]);
   });
 
   test("surfaces group calls while the channel directory is still loading", () => {
@@ -277,6 +333,8 @@ describe("CallActivityDock rendering", () => {
     expect(html).toContain("2 people");
     expect(html).toContain("Live");
     expect(html).toContain("Open");
+    expect(html).toContain("Reconnect");
+    expect(html).toContain('aria-label="Reconnect Bob call, Live"');
     expect(html).not.toContain("Join");
   });
 
@@ -343,6 +401,7 @@ describe("CallActivityDock rendering", () => {
     expect(readyShell).toContain("class=\"call-activity-dock--mobile\"");
     expect(readyShell).toContain("@select-channel=\"onSelectChannelFromSidebar\"");
     expect(readyShell).toContain("@select-dm=\"selectDm\"");
+    expect(readyShell).toContain("@reconnect-dm=\"reconnectDmFromDock\"");
 
     expect(mobileDrawers).not.toContain("CallActivityDock");
   });
@@ -367,7 +426,45 @@ describe("CallActivityDock rendering", () => {
     expect(html).toContain("Reconnect voice call");
     expect(html).toContain("Reconnect video call");
   });
+
+  test("renders the group call header button when only ContentArea's room JID is known", async () => {
+    const withoutRoom = await renderVueComponent("../src/components/chat/ChatHeader.vue", {
+      ...chatHeaderBaseProps(),
+      channel: { id: "general", name: "General" },
+      callRoomJid: null,
+    });
+    const withRoom = await renderVueComponent("../src/components/chat/ChatHeader.vue", {
+      ...chatHeaderBaseProps(),
+      channel: { id: "general", name: "General" },
+      callRoomJid: "general@custom-muc.example.test",
+    });
+
+    expect(withoutRoom).not.toContain('data-vue-stub="true"');
+    expect(withRoom).toContain('data-vue-stub="true"');
+  });
 });
+
+function chatHeaderBaseProps(): Record<string, unknown> {
+  return {
+    waddle: { id: "team", name: "Team" },
+    channel: null,
+    dmPeer: null,
+    isForumChannel: false,
+    canManageChannels: false,
+    memberCount: 0,
+    memberState: "ready",
+    members: [],
+    connectionNotice: null,
+    connectionStatusClasses: null,
+    connectionStatusIcon: { name: "StatusIcon", render: () => null },
+    xmppClient: null,
+    notifySettings: {},
+    showSearch: false,
+    "onUpdate:showSearch": () => undefined,
+    showPinnedPanel: false,
+    "onUpdate:showPinnedPanel": () => undefined,
+  };
+}
 
 async function renderCallActivityDock(props: Record<string, unknown>) {
   return renderVueComponent("../src/components/calls/CallActivityDock.vue", props);

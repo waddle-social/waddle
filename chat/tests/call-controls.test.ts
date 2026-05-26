@@ -1,0 +1,93 @@
+import { afterEach, describe, expect, mock, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { $callState, clearCallState } from "../src/lib/calls/call-store";
+import { suspendCallForPageHide } from "../src/lib/calls/call-controls";
+import {
+  $dmCallActivities,
+  clearDmCallActivities,
+} from "../src/lib/calls/dm-call-activity";
+import { connectionStore } from "../src/lib/connection-store";
+import type { LiveKitJoin } from "../src/lib/calls/types";
+
+const join: LiveKitJoin = {
+  url: "wss://livekit.test",
+  room: "alice@waddle.test::c1",
+  identity: "alice@waddle.test/web",
+  token: "jwt",
+};
+
+afterEach(() => {
+  clearCallState();
+  clearDmCallActivities();
+  connectionStore.client = null;
+});
+
+describe("call page lifecycle controls", () => {
+  test("pagehide suspension clears only local media state, preserving rediscoverable DM activity", () => {
+    $callState.set({
+      phase: "active",
+      peer: "bob@waddle.test/desktop",
+      sid: "c1",
+      media: { audio: true, video: true },
+      join,
+      kind: "dm",
+    });
+    $dmCallActivities.set({
+      "bob@waddle.test": {
+        peerJid: "bob@waddle.test",
+        sid: "c1",
+        media: { audio: true, video: true },
+        state: "accepted",
+        direction: "incoming",
+        updatedAt: "2026-05-26T00:00:00.000Z",
+      },
+    });
+
+    suspendCallForPageHide();
+
+    expect($callState.get()).toEqual({ phase: "idle" });
+    expect($dmCallActivities.get()["bob@waddle.test"]).toMatchObject({
+      sid: "c1",
+      state: "accepted",
+    });
+  });
+
+  test("pagehide suspension does not emit XMPP call-ending stanzas", () => {
+    const sender = {
+      send_call_session_terminate: mock(async () => undefined),
+      send_call_finish: mock(async () => undefined),
+      update_muji_presence: mock(async () => undefined),
+      send_raw_iq: mock(async () => "<iq type='result'/>"),
+    };
+    connectionStore.client = {
+      xmpp: sender,
+    } as unknown as typeof connectionStore.client;
+    $callState.set({
+      phase: "active",
+      peer: "room@muc.waddle.test",
+      sid: "muc-1",
+      media: { audio: true, video: false },
+      join: { ...join, room: "room@muc.waddle.test" },
+      kind: "muc",
+      selfNick: "alice",
+      selfFullJid: "alice@waddle.test/web",
+    });
+
+    suspendCallForPageHide();
+
+    expect(sender.send_call_session_terminate).not.toHaveBeenCalled();
+    expect(sender.send_call_finish).not.toHaveBeenCalled();
+    expect(sender.update_muji_presence).not.toHaveBeenCalled();
+    expect(sender.send_raw_iq).not.toHaveBeenCalled();
+  });
+
+  test("CallOverlay wires the browser pagehide event to suspension, not hangup", () => {
+    const source = readFileSync(new URL("../src/components/calls/CallOverlay.vue", import.meta.url), "utf8");
+    const unmountBlock = source.slice(source.indexOf("onBeforeUnmount(() => {"));
+
+    expect(source).toContain('window.addEventListener("pagehide", handlePageHide)');
+    expect(source).toContain("suspendCallForPageHide();");
+    expect(unmountBlock).toContain("void engine.disconnect();");
+    expect(unmountBlock).not.toContain("tearDownActiveCall(");
+  });
+});

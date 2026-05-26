@@ -9,9 +9,11 @@ import {
 import { $dmCallActivities } from "@/lib/calls/dm-call-activity";
 import {
   buildCallActivityDockEntries,
+  callActivityDockSelection,
   type CallActivityDockEntry,
   type SidebarMode,
 } from "@/lib/calls/call-activity-dock";
+import type { CallMedia } from "@/lib/calls/types";
 import type { ChannelSummary } from "@/lib/chat-types";
 import type { DmConversation } from "@/lib/xmpp-client";
 
@@ -29,6 +31,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   selectChannel: [channelId: string | null, roomJid: string];
   selectDm: [peerJid: string];
+  reconnectDm: [peerJid: string, media: CallMedia];
 }>();
 
 const mucCallParticipantsStore = useStore($mucCallParticipants);
@@ -76,6 +79,7 @@ function entryMeta(entry: CallActivityDockEntry): string {
 
 function entryAction(entry: CallActivityDockEntry): string {
   if (entry.kind === "channel") return "Open";
+  if (callActivityDockSelection(entry).kind === "dm-reconnect") return "Reconnect";
   return "Open";
 }
 
@@ -89,11 +93,18 @@ function entryCanSelect(entry: CallActivityDockEntry): boolean {
 
 function selectEntry(entry: CallActivityDockEntry): void {
   if (!entryCanSelect(entry)) return;
-  if (entry.kind === "channel") {
-    emit("selectChannel", entry.channelId, entry.roomJid);
-    return;
+  const selection = callActivityDockSelection(entry);
+  switch (selection.kind) {
+    case "channel":
+      emit("selectChannel", selection.channelId, selection.roomJid);
+      return;
+    case "dm-reconnect":
+      emit("reconnectDm", selection.peerJid, selection.media);
+      return;
+    case "dm-open":
+      emit("selectDm", selection.peerJid);
+      return;
   }
-  emit("selectDm", entry.peerJid);
 }
 </script>
 

@@ -12,7 +12,7 @@ import { connectionStore } from "@/lib/connection-store";
 import {
   $callConnecting,
   resetCallControls,
-  teardownForPageHide,
+  suspendCallForPageHide,
 } from "@/lib/calls/call-controls";
 import { $callUiMode } from "@/lib/calls/ui-mode";
 
@@ -84,14 +84,14 @@ watch(
 );
 
 /**
- * Best-effort teardown for the tab-close path. `pagehide` fires
- * earlier in the unload sequence than `onBeforeUnmount` and is the
- * modern documented hook for unload-side networking. The authoritative
- * path is server-side: `cleanup_muc_presence` broadcasts unavailable
- * presence regardless of whether this client managed to send anything.
+ * Release local camera/mic during page lifecycle suspension without
+ * sending XMPP hangup stanzas. Browser refresh must preserve the
+ * remote-visible call so the new tab load can rediscover it through
+ * MAM call markers or MUC presence replay.
  */
-function handlePageHide(): void {
-  teardownForPageHide();
+function handlePageHide(event: PageTransitionEvent): void {
+  if (event.persisted) return;
+  suspendCallForPageHide();
 }
 
 onMounted(() => {
@@ -101,9 +101,9 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
-  // In-app overlay unmounts (route change, etc.) get the same
-  // best-effort cleanup as a tab close.
-  void tearDownActiveCall(getSender(), "gone");
+  // Component lifecycle is not a call lifecycle. Route changes and
+  // browser refreshes must not emit XMPP call-ending stanzas; explicit
+  // hangup/logout own that path.
   void engine.disconnect();
   if (typeof window !== "undefined") {
     window.removeEventListener("pagehide", handlePageHide);
