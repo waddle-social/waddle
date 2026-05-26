@@ -11,7 +11,7 @@ import {
   activeDmRailCallCount,
 } from "@/lib/calls/call-rail-counts";
 import { answerIncomingDmCallActivity, resumeDmCallActivity } from "@/lib/calls/dm-call-actions";
-import { startMucCallAction } from "@/lib/calls/muc-call-actions";
+import { leaveRetainedMucCallAction, startMucCallAction } from "@/lib/calls/muc-call-actions";
 import { normalizeMucServiceDomain } from "@/lib/calls/muc-call-indicators";
 import {
   $callState,
@@ -311,6 +311,15 @@ function joinChannelCallFromActivity(channelId: string | null, roomJid: string, 
     ensureJoined: async () => {
       await getClientJoiner()?.(roomJid);
     },
+  });
+}
+
+function leaveRetainedChannelCall(roomJid: string): void {
+  void leaveRetainedMucCallAction({
+    roomJid,
+    getSender: getMucCallSender,
+    getSelfNick: () => connectionStore.session?.username ?? undefined,
+    getSelfFullJid,
   });
 }
 
@@ -652,6 +661,7 @@ onUnmounted(() => {
               @open-dm="handleOpenDm"
               @open-thread="openThread"
               @join-channel-call="joinChannelCallFromActivity"
+              @leave-channel-call="leaveRetainedChannelCall"
               @answer-dm="answerDmFromActivity"
               @reconnect-dm="reconnectDmFromDock"
               :invoke-extension-action="invokeActiveExtensionAction"

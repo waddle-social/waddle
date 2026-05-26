@@ -1,4 +1,5 @@
 import { beginMucCall, reportCallError, type RawIqSender } from "./call-store";
+import { clearMucCallParticipant } from "./muc-call-presence";
 import type { CallMedia } from "./types";
 
 type MucCallStartActionOptions = {
@@ -11,6 +12,13 @@ type MucCallStartActionOptions = {
   getSelfFullJid?: () => string | null | undefined;
   getExpectedMixerJid?: () => string | null | undefined;
   ensureJoined?: () => Promise<void>;
+};
+
+type RetainedMucCallLeaveActionOptions = {
+  roomJid: string;
+  getSender: () => RawIqSender | null;
+  getSelfNick: () => string | undefined;
+  getSelfFullJid?: () => string | null | undefined;
 };
 
 /**
@@ -49,5 +57,40 @@ export async function startMucCallAction({
     return false;
   } finally {
     setStarting(false);
+  }
+}
+
+/**
+ * Hard-refresh recovery path for a MUC call this browser resource
+ * still advertises via Muji presence, but whose local LiveKit/call
+ * state was lost with the old JS context. We no longer have the
+ * per-attempt Jingle SID, so the conformant thing we can do is clear
+ * this occupant's XEP-0272 presence. The server echo will remove the
+ * call indicator for everyone; after the leave marker is sent, the
+ * local clear makes the refreshed tab responsive immediately.
+ */
+export async function leaveRetainedMucCallAction({
+  roomJid,
+  getSender,
+  getSelfNick,
+  getSelfFullJid,
+}: RetainedMucCallLeaveActionOptions): Promise<boolean> {
+  const sender = getSender();
+  const selfNick = getSelfNick();
+  if (!sender?.update_muji_presence || !selfNick) return false;
+  const selfFullJid = getSelfFullJid?.() ?? null;
+  try {
+    await sender.update_muji_presence(
+      roomJid,
+      selfNick,
+      false,
+      false,
+      false,
+    );
+    clearMucCallParticipant(roomJid, selfNick, selfFullJid);
+    return true;
+  } catch (err) {
+    reportCallError(err);
+    return false;
   }
 }

@@ -4,16 +4,18 @@ import {
   $lastCallError,
   beginOutgoingCall,
   clearCallState,
+  type RawIqSender,
   scheduleOutgoingTimeout,
   setSessionAcceptTimeoutMsForTests,
   tearDownActiveCall,
 } from "../src/lib/calls/call-store";
 import {
+  $mucCallParticipantOwners,
   $mucCallParticipants,
   applyMucCallPresence,
   clearMucCallParticipants,
 } from "../src/lib/calls/muc-call-presence";
-import { startMucCallAction } from "../src/lib/calls/muc-call-actions";
+import { leaveRetainedMucCallAction, startMucCallAction } from "../src/lib/calls/muc-call-actions";
 import type { CallWireSender } from "../src/lib/calls/outbound";
 import type { CallEvent, CallMedia, LiveKitJoin } from "../src/lib/calls/types";
 import { BrowserXmppClient } from "../src/lib/xmpp-client";
@@ -332,6 +334,81 @@ describe("tearDownActiveCall", () => {
     });
     await tearDownActiveCall(null, "gone");
     expect($callState.get()).toEqual({ phase: "idle" });
+  });
+});
+
+describe("leaveRetainedMucCallAction", () => {
+  test("clears this refreshed browser resource's Muji presence without dropping same-nick siblings", async () => {
+    applyMucCallPresence({
+      from: "chan@muc.test/alice",
+      muc_jid: "alice@waddle.test/web",
+      muji: { preparing: false, active: true },
+    });
+    applyMucCallPresence({
+      from: "chan@muc.test/alice",
+      muc_jid: "alice@waddle.test/phone",
+      muji: { preparing: false, active: true },
+    });
+    const sender: RawIqSender = {
+      update_muji_presence: mock(async () => undefined),
+    };
+
+    await leaveRetainedMucCallAction({
+      roomJid: "chan@muc.test",
+      getSender: () => sender,
+      getSelfNick: () => "alice",
+      getSelfFullJid: () => "alice@waddle.test/web",
+    });
+
+    expect(sender.update_muji_presence).toHaveBeenCalledWith(
+      "chan@muc.test",
+      "alice",
+      false,
+      false,
+      false,
+    );
+    expect($mucCallParticipants.get()).toEqual({
+      "chan@muc.test": ["alice"],
+    });
+    expect($mucCallParticipantOwners.get()).toEqual({
+      "chan@muc.test": [{ nick: "alice", realJid: "alice@waddle.test/phone" }],
+    });
+  });
+
+  test("keeps retained Muji state visible when the leave marker fails to send", async () => {
+    applyMucCallPresence({
+      from: "chan@muc.test/alice",
+      muc_jid: "alice@waddle.test/web",
+      muji: { preparing: false, active: true },
+    });
+    const sender: RawIqSender = {
+      update_muji_presence: mock(async () => {
+        throw new Error("simulated Muji leave failure");
+      }),
+    };
+
+    const result = await leaveRetainedMucCallAction({
+      roomJid: "chan@muc.test",
+      getSender: () => sender,
+      getSelfNick: () => "alice",
+      getSelfFullJid: () => "alice@waddle.test/web",
+    });
+
+    expect(result).toBe(false);
+    expect(sender.update_muji_presence).toHaveBeenCalledWith(
+      "chan@muc.test",
+      "alice",
+      false,
+      false,
+      false,
+    );
+    expect($mucCallParticipants.get()).toEqual({
+      "chan@muc.test": ["alice"],
+    });
+    expect($mucCallParticipantOwners.get()).toEqual({
+      "chan@muc.test": [{ nick: "alice", realJid: "alice@waddle.test/web" }],
+    });
+    expect($lastCallError.get()).toContain("simulated Muji leave failure");
   });
 });
 

@@ -91,7 +91,7 @@ type OwnerHandoff = {
 const SM_TTL_MS = 24 * 60 * 60 * 1000;
 const OWNER_LEASE_TTL_MS = 45_000;
 const OWNER_HEARTBEAT_MS = 15_000;
-const OWNER_HANDOFF_TTL_MS = 10_000;
+const OWNER_HANDOFF_TTL_MS = OWNER_LEASE_TTL_MS;
 const liveOwnerInstances = new Map<string, string>();
 const liveOwnerHeartbeats = new Set<string>();
 
