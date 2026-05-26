@@ -7,7 +7,7 @@ export function normalizeMucServiceDomain(serviceJid?: string | null): string {
   return bare.includes("@") ? bare.split("@")[1] ?? "" : bare;
 }
 
-export function candidateRoomJidsForChannel(
+function candidateRoomJidsForChannel(
   channel: Pick<ChannelSummary, "id" | "jid">,
   activeChannelJids: Iterable<string>,
   managedMucDomain?: string | null,
@@ -39,11 +39,91 @@ export function callParticipantCountForChannel(
   managedMucDomain?: string | null,
 ): number {
   if (!callParticipantCounts) return 0;
+  const countsByRoomJid = normalizedMucCallParticipantCounts(callParticipantCounts);
   for (const jid of candidateRoomJidsForChannel(channel, activeChannelJids, managedMucDomain)) {
-    const count = callParticipantCounts[normalizeMucCallRoomJid(jid)] ?? 0;
+    const count = countsByRoomJid.get(normalizeMucCallRoomJid(jid)) ?? 0;
     if (count > 0) return count;
   }
   return 0;
+}
+
+export function callRoomJidForChannel(
+  channel: Pick<ChannelSummary, "id" | "jid">,
+  callParticipantCounts: Record<string, number> | undefined,
+  activeChannelJids: Iterable<string>,
+  managedMucDomain?: string | null,
+): string {
+  if (!callParticipantCounts) return "";
+  const countsByRoomJid = normalizedMucCallParticipantCounts(callParticipantCounts);
+  return candidateRoomJidsForChannel(channel, activeChannelJids, managedMucDomain)
+    .map(normalizeMucCallRoomJid)
+    .find((jid) => (countsByRoomJid.get(jid) ?? 0) > 0) ?? "";
+}
+
+export type RefreshedMucCallRoom = {
+  key: string;
+  roomJid: string;
+  title: string;
+  participantCount: number;
+};
+
+export function refreshedMucCallRooms(options: {
+  channels: ReadonlyArray<Pick<ChannelSummary, "id" | "jid">>;
+  activeChannelJids: Iterable<string>;
+  managedMucDomain?: string | null;
+  callParticipantCounts: Record<string, number> | undefined;
+}): RefreshedMucCallRoom[] {
+  const trustedDomain = normalizeMucServiceDomain(options.managedMucDomain);
+  if (!trustedDomain || !options.callParticipantCounts) return [];
+
+  const countsByRoomJid = normalizedMucCallParticipantCounts(options.callParticipantCounts);
+
+  const matchedRoomJids = new Set<string>();
+  for (const channel of options.channels) {
+    for (const candidate of candidateRoomJidsForChannel(
+      channel,
+      options.activeChannelJids,
+      trustedDomain,
+    )) {
+      const normalized = normalizeMucCallRoomJid(candidate);
+      if (normalized && (countsByRoomJid.get(normalized) ?? 0) > 0) {
+        matchedRoomJids.add(normalized);
+      }
+    }
+  }
+
+  return [...countsByRoomJid.entries()]
+    .flatMap(([roomJid, participantCount]): RefreshedMucCallRoom[] => {
+      const roomDomain = roomJid.split("@")[1] ?? "";
+      if (roomDomain !== trustedDomain || matchedRoomJids.has(roomJid)) return [];
+      const title = roomJid.split("@")[0] || roomJid;
+      return [{
+        key: `group-call:${roomJid}`,
+        roomJid,
+        title,
+        participantCount,
+      }];
+    })
+    .sort((left, right) => left.title.localeCompare(right.title));
+}
+
+function normalizedMucCallParticipantCounts(
+  callParticipantCounts: Record<string, number>,
+): Map<string, number> {
+  const countsByRoomJid = new Map<string, number>();
+  for (const [roomJid, count] of Object.entries(callParticipantCounts)) {
+    const normalized = normalizeMucCallRoomJid(roomJid);
+    if (!normalized || count <= 0) continue;
+    countsByRoomJid.set(normalized, (countsByRoomJid.get(normalized) ?? 0) + count);
+  }
+  return countsByRoomJid;
+}
+
+export function mucCallParticipantPreview(nicks: readonly string[] | undefined, maxVisible = 2): string {
+  const visible = (nicks ?? []).map((nick) => nick.trim()).filter(Boolean);
+  if (visible.length === 0) return "";
+  if (visible.length <= maxVisible) return visible.join(", ");
+  return `${visible.slice(0, maxVisible).join(", ")} +${visible.length - maxVisible}`;
 }
 
 type CollapsedGroupActivitySummary = {

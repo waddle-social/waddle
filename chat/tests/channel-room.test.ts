@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { roomJidForChannelId, roomJidForChannelSummary } from "../src/lib/channel-room";
+import {
+  isTrustedManagedRoomJid,
+  knownChannelIdForRoomJid,
+  roomJidForChannelId,
+  roomJidForChannelSummary,
+} from "../src/lib/channel-room";
 import type { WaddleSession } from "../src/lib/server-auth";
 
 const session = {
@@ -34,4 +39,46 @@ describe("roomJidForChannelSummary", () => {
     ], "random")).toBe("random@conference.example.net");
   });
 
+});
+
+describe("knownChannelIdForRoomJid", () => {
+  test("prefers exact discovered room JID matches", () => {
+    expect(knownChannelIdForRoomJid("general@conference.example.net/alice", [
+      { id: "pretty-general", jid: "general@conference.example.net" },
+      { id: "general", jid: "general@muc.example.com" },
+    ])).toBe("pretty-general");
+  });
+
+  test("matches id-only managed channels by room localpart", () => {
+    expect(knownChannelIdForRoomJid("General@MUC.Example.com", [
+      { id: "general" },
+      { id: "random" },
+    ], "muc.example.com")).toBe("general");
+  });
+
+  test("does not map id-only channels from untrusted room domains", () => {
+    expect(knownChannelIdForRoomJid("general@foreign.example.com", [
+      { id: "general" },
+    ], "muc.example.com")).toBeNull();
+  });
+
+  test("does not use id fallback for channels with a mismatched explicit JID", () => {
+    expect(knownChannelIdForRoomJid("general@muc.example.com", [
+      { id: "general", jid: "general@conference.example.net" },
+    ], "muc.example.com")).toBeNull();
+  });
+
+  test("does not infer a channel id when the directory has no known match", () => {
+    expect(knownChannelIdForRoomJid("orphan@muc.example.com", [])).toBeNull();
+    expect(knownChannelIdForRoomJid("orphan@muc.example.com", [
+      { id: "general" },
+    ], "muc.example.com")).toBeNull();
+  });
+});
+
+describe("isTrustedManagedRoomJid", () => {
+  test("checks managed room domains using bare normalized JIDs", () => {
+    expect(isTrustedManagedRoomJid("General@MUC.Example.com/alice", "muc.example.com")).toBe(true);
+    expect(isTrustedManagedRoomJid("general@foreign.example.com", "muc.example.com")).toBe(false);
+  });
 });

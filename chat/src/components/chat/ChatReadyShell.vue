@@ -400,6 +400,7 @@ onUnmounted(() => {
           :collapsed-group-ids="ui.collapsedSpaceGroupIds.value"
           :channel-unread-map="computedChannelUnreadMap"
           :call-participant-counts="callParticipantCounts"
+          :call-participants="mucCallParticipantsStore"
           :managed-muc-domain="managedMucDomain"
           :thread-entries-fn="(roomJid: string) => channelUnread.threadEntries(roomJid)"
           :active-community-surface="ui.activeCommunitySurface.value"

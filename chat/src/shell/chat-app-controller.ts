@@ -21,7 +21,12 @@ import { resolveChannelBySlug } from "@/shell/route-helpers";
 import { barePeerJid, jidDomain, parseManagedRoomBareJid } from "@/lib/xmpp-client";
 import { createNotifySettingsStore } from "@/lib/notify-settings";
 import { mdsChatKey, setLastSeen } from "@/lib/last-seen-store";
-import { roomJidForChannelId as resolveRoomJidForChannelId } from "@/lib/channel-room";
+import {
+  isTrustedManagedRoomJid,
+  knownChannelIdForRoomJid,
+  roomJidForChannelId as resolveRoomJidForChannelId,
+} from "@/lib/channel-room";
+import { normalizeMucServiceDomain } from "@/lib/calls/muc-call-indicators";
 import { connectionStore } from "@/lib/connection-store";
 import { resetPinnedRooms } from "@/stores/pinned-messages";
 import { hydratePinnedBodiesOnPanelOpen } from "@/services/pinned-message-bodies";
@@ -158,6 +163,14 @@ export function useChatAppController(giphyApiKey: string) {
   );
   const extensionRoutes = ref<DiscoveredExtensionRoute[]>([]);
   const selectedChannelRoomJids = ref<Record<string, string>>({});
+  const selfDomain = computed(() => (session.value ? jidDomain(session.value.jid) : ""));
+  const managedMucDomain = computed(() =>
+    normalizeMucServiceDomain(waddles.mucServiceJid.value) || (selfDomain.value ? `muc.${selfDomain.value}` : ""),
+  );
+  const pendingChannelRoomJidSelection = ref<string | null>(null);
+  function clearPendingChannelRoomJidSelection() {
+    pendingChannelRoomJidSelection.value = null;
+  }
   const activeExtensionRouteKey = ref<{ channelId: string; pluginId: string; routeId: string } | null>(null);
   const activeExtensionRoute = computed(() => {
     const key = activeExtensionRouteKey.value;
@@ -190,6 +203,21 @@ export function useChatAppController(giphyApiKey: string) {
       );
       if (!channel || channel.id === waddles.activeChannelId.value) return;
       void selectChannel(channel.id, { roomJid: normalizedRoomJid });
+    },
+  );
+  watch(
+    [() => waddles.channels.value, managedMucDomain],
+    () => {
+      const roomJid = pendingChannelRoomJidSelection.value;
+      if (!roomJid) return;
+      const channelId = knownChannelIdForRoomJid(
+        roomJid,
+        waddles.channels.value,
+        managedMucDomain.value,
+      );
+      if (!channelId) return;
+      pendingChannelRoomJidSelection.value = null;
+      void selectChannel(channelId, { roomJid });
     },
   );
 
@@ -448,7 +476,6 @@ export function useChatAppController(giphyApiKey: string) {
     ui.sidebarMode.value === "dms" ? dmMessaging.isSearching.value : messaging.isSearching.value,
   );
 
-  const selfDomain = computed(() => (session.value ? jidDomain(session.value.jid) : ""));
   const members = useWaddleMembers(
     xmppClient,
     waddles.activeSpaceId,
@@ -1303,6 +1330,7 @@ export function useChatAppController(giphyApiKey: string) {
   );
 
   function openUserSettings() {
+    clearPendingChannelRoomJidSelection();
     ui.showMobileNav.value = false;
     ui.showMobileDetails.value = false;
     ui.activePage.value = "settings";
@@ -1314,6 +1342,7 @@ export function useChatAppController(giphyApiKey: string) {
    * page refresh lands back on /threads.
    */
   function openThreads() {
+    clearPendingChannelRoomJidSelection();
     ui.showMobileNav.value = false;
     ui.showMobileDetails.value = false;
     ui.activePage.value = "threads";
@@ -1341,6 +1370,7 @@ export function useChatAppController(giphyApiKey: string) {
    * clicks need to mirror what `applyRouteTarget` would do.
    */
   function openCommunitySurface(surface: "feed" | "stories" | "events") {
+    clearPendingChannelRoomJidSelection();
     ui.showMobileNav.value = false;
     ui.showMobileDetails.value = false;
     ui.activePage.value = "chat";
@@ -1361,6 +1391,7 @@ export function useChatAppController(giphyApiKey: string) {
    * rather than re-entering the last channel.
    */
   function openHome() {
+    clearPendingChannelRoomJidSelection();
     ui.showMobileNav.value = false;
     ui.showMobileDetails.value = false;
     ui.activePage.value = "dashboard";
@@ -1381,6 +1412,7 @@ export function useChatAppController(giphyApiKey: string) {
    * so refresh and back/forward land on the same place.
    */
   function openDmList() {
+    clearPendingChannelRoomJidSelection();
     ui.showMobileNav.value = false;
     ui.showMobileDetails.value = false;
     ui.activePage.value = "chat";
@@ -1473,6 +1505,7 @@ export function useChatAppController(giphyApiKey: string) {
   }
 
   async function applyRouteTarget(match: RouteMatch, requestId: number) {
+    clearPendingChannelRoomJidSelection();
     applyMatchToShellState(match);
     // Routes that don't reference a specific channel/DM target also
     // drop the chat-context state. (Channel/extension/dm routes set
@@ -1633,6 +1666,7 @@ export function useChatAppController(giphyApiKey: string) {
   // --- Actions ---
 
   async function handleLogout() {
+    clearPendingChannelRoomJidSelection();
     ui.activePage.value = "dashboard";
     messaging.disconnect();
     dmMessaging.disconnect();
@@ -1660,6 +1694,7 @@ export function useChatAppController(giphyApiKey: string) {
   }
 
   async function selectChannel(channelId: string, options: { roomJid?: string } = {}) {
+    clearPendingChannelRoomJidSelection();
     ui.activePage.value = "chat";
     ui.sidebarMode.value = "channels";
     activeExtensionRouteKey.value = null;
@@ -1694,16 +1729,30 @@ export function useChatAppController(giphyApiKey: string) {
   async function selectChannelByRoomJid(roomJid: string) {
     const normalizedRoomJid = barePeerJid(roomJid);
     if (!normalizedRoomJid) return;
-    const channel = waddles.channels.value.find((candidate) =>
-      candidate.jid ? barePeerJid(candidate.jid) === normalizedRoomJid : false
+    const channelId = knownChannelIdForRoomJid(
+      normalizedRoomJid,
+      waddles.channels.value,
+      managedMucDomain.value,
     );
-    const managedRoom = parseManagedRoomBareJid(normalizedRoomJid);
-    const channelId = channel?.id ?? managedRoom?.channelId;
-    if (!channelId) return;
+    if (!channelId) {
+      if (isTrustedManagedRoomJid(normalizedRoomJid, managedMucDomain.value)) {
+        pendingChannelRoomJidSelection.value = normalizedRoomJid;
+        ui.activePage.value = "chat";
+        ui.sidebarMode.value = "channels";
+        ui.activeCommunitySurface.value = null;
+        activeExtensionRouteKey.value = null;
+        dmConversations.closeDm();
+        memberJidByNick.value = {};
+        ui.showMobileNav.value = false;
+      }
+      return;
+    }
+    pendingChannelRoomJidSelection.value = null;
     await selectChannel(channelId, { roomJid: normalizedRoomJid });
   }
 
   async function selectExtensionRoute(channelId: string, route: DiscoveredExtensionRoute) {
+    clearPendingChannelRoomJidSelection();
     ui.activePage.value = "chat";
     ui.sidebarMode.value = "channels";
     dmConversations.closeDm();
@@ -1721,6 +1770,7 @@ export function useChatAppController(giphyApiKey: string) {
   }
 
   async function handleOpenDm(peerJid: string) {
+    clearPendingChannelRoomJidSelection();
     ui.activePage.value = "chat";
     ui.sidebarMode.value = "dms";
     activeExtensionRouteKey.value = null;
