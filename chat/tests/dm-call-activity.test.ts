@@ -40,6 +40,7 @@ describe("DM call activity", () => {
 
     expect(readDmCallActivity(bob, now)).toEqual({
       peerJid: bob,
+      remoteFullJid: `${bob}/phone`,
       sid: "call-1",
       media: audio,
       state: "ringing",
@@ -201,6 +202,26 @@ describe("DM call activity", () => {
       sid: "call-7",
       state: "accepted",
       updatedAt: "2026-05-25T10:05:00.000Z",
+    });
+  });
+
+  test("does not treat proceed-only accepted call media as known voice", () => {
+    applyDmCallEvent({
+      event: {
+        kind: "proceed",
+        from: `${bob}/phone`,
+        sid: "call-without-propose",
+      },
+      selfBareJid: self,
+      to: `${self}/web`,
+      timestamp: now.toISOString(),
+      now,
+    });
+
+    expect(readDmCallActivity(bob, now)).toMatchObject({
+      sid: "call-without-propose",
+      state: "accepted",
+      mediaKnown: false,
     });
   });
 

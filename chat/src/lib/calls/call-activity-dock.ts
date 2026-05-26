@@ -8,7 +8,7 @@ import {
   refreshedMucCallRooms,
 } from "./muc-call-indicators";
 import { normalizeMucCallRoomJid } from "./muc-call-presence";
-import type { DmCallActivity } from "./dm-call-activity";
+import { hasKnownDmCallMedia, type DmCallActivity } from "./dm-call-activity";
 
 export type SidebarMode = "channels" | "dms";
 
@@ -27,8 +27,11 @@ export type CallActivityDockEntry =
       kind: "dm";
       key: string;
       peerJid: string;
+      sid: string;
+      remoteFullJid?: string;
       title: string;
       media: DmCallActivity["media"];
+      mediaKnown?: boolean;
       state: DmCallActivity["state"];
       direction: DmCallActivity["direction"];
       updatedAt: string;
@@ -36,11 +39,12 @@ export type CallActivityDockEntry =
   };
 type DmCallActivityDockEntry = Extract<CallActivityDockEntry, { kind: "dm" }>;
 
-type CallActivityDockAction = "open" | "join" | "return" | "reconnect";
+type CallActivityDockAction = "answer" | "open" | "join" | "return" | "reconnect";
 
 type CallActivityDockSelection =
   | { kind: "channel"; channelId: string | null; roomJid: string }
   | { kind: "channel-join"; channelId: string | null; roomJid: string; media: CallMedia }
+  | { kind: "dm-answer"; peerJid: string; remoteFullJid: string; sid: string; media: DmCallActivity["media"] }
   | { kind: "dm-open"; peerJid: string }
   | { kind: "dm-reconnect"; peerJid: string; media: DmCallActivity["media"] };
 
@@ -50,8 +54,37 @@ function activeMucCallRoomJid(state: CallState): string {
   return normalizeMucCallRoomJid(state.peer);
 }
 
+function activeDmCallPeerJid(state: CallState): string {
+  if (state.phase === "active" && state.kind === "dm") {
+    return barePeerJid(state.peer).toLowerCase();
+  }
+  if (state.phase === "incoming") {
+    return barePeerJid(state.from).toLowerCase();
+  }
+  if (state.phase === "outgoing") {
+    return barePeerJid(state.to).toLowerCase();
+  }
+  return "";
+}
+
 function isBusy(state: CallState): boolean {
   return state.phase !== "idle" && state.phase !== "ended";
+}
+
+export function dmCallActivityAction(
+  activity: Pick<DmCallActivity, "peerJid" | "remoteFullJid" | "mediaKnown" | "state" | "direction">,
+  callState: CallState,
+): Extract<CallActivityDockAction, "answer" | "open" | "return" | "reconnect"> {
+  const peerJid = barePeerJid(activity.peerJid).toLowerCase();
+  if (peerJid && activeDmCallPeerJid(callState) === peerJid) return "return";
+  if (
+    activity.state === "ringing" &&
+    activity.direction === "incoming" &&
+    activity.remoteFullJid &&
+    !isBusy(callState)
+  ) return "answer";
+  if (activity.state === "accepted" && hasKnownDmCallMedia(activity) && !isBusy(callState)) return "reconnect";
+  return "open";
 }
 
 export function callActivityDockAction(
@@ -59,7 +92,7 @@ export function callActivityDockAction(
   callState: CallState,
 ): CallActivityDockAction {
   if (entry.kind === "dm") {
-    return entry.state === "accepted" ? "reconnect" : "open";
+    return dmCallActivityAction(entry, callState);
   }
 
   const roomJid = normalizeMucCallRoomJid(entry.roomJid);
@@ -87,7 +120,17 @@ export function callActivityDockSelection(
       roomJid: entry.roomJid,
     };
   }
-  if (entry.state === "accepted") {
+  const action = callActivityDockAction(entry, callState);
+  if (action === "answer" && entry.remoteFullJid) {
+    return {
+      kind: "dm-answer",
+      peerJid: entry.peerJid,
+      remoteFullJid: entry.remoteFullJid,
+      sid: entry.sid,
+      media: entry.media,
+    };
+  }
+  if (action === "reconnect") {
     return {
       kind: "dm-reconnect",
       peerJid: entry.peerJid,
@@ -170,8 +213,11 @@ export function buildCallActivityDockEntries(options: {
         kind: "dm",
         key: `dm:${peerJid}:${activity.sid}`,
         peerJid,
+        sid: activity.sid,
+        ...(activity.remoteFullJid ? { remoteFullJid: activity.remoteFullJid } : {}),
         title: conversationNames.get(peerJid) ?? fallbackName,
         media: activity.media,
+        ...(hasKnownDmCallMedia(activity) ? {} : { mediaKnown: false }),
         state: activity.state,
         direction: activity.direction,
         updatedAt: activity.updatedAt,

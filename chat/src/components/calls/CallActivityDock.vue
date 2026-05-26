@@ -19,7 +19,7 @@ import type { CallMedia } from "@/lib/calls/types";
 import type { ChannelSummary } from "@/lib/chat-types";
 import type { DmConversation } from "@/lib/xmpp-client";
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   channels: ChannelSummary[];
   conversations: DmConversation[];
   activeChannelId: string | null;
@@ -28,9 +28,13 @@ const props = defineProps<{
   sidebarMode: SidebarMode;
   activeChannelJids: Set<string>;
   managedMucDomain?: string | null;
-}>();
+  showDmCalls?: boolean;
+}>(), {
+  showDmCalls: true,
+});
 
 const emit = defineEmits<{
+  answerDm: [peerJid: string, remoteFullJid: string, sid: string, media: CallMedia];
   selectChannel: [channelId: string | null, roomJid: string];
   joinChannelCall: [channelId: string | null, roomJid: string, media: CallMedia];
   selectDm: [peerJid: string];
@@ -55,7 +59,7 @@ const entries = computed(() => buildCallActivityDockEntries({
   activeChannelJids: props.activeChannelJids,
   managedMucDomain: props.managedMucDomain ?? null,
   callParticipantCounts: callParticipantCounts.value,
-  dmCallActivities: dmCallActivities.value,
+  dmCallActivities: props.showDmCalls === false ? {} : dmCallActivities.value,
 }));
 const entryCount = computed(() => entries.value.length);
 
@@ -74,6 +78,7 @@ function entryStatus(entry: CallActivityDockEntry): string {
 
 function entryKindLabel(entry: CallActivityDockEntry): string {
   if (entry.kind === "channel") return entry.isKnownChannel ? "Group call" : "Group call · syncing";
+  if (entry.mediaKnown === false) return "Call";
   return entry.media.video ? "Video call" : "Voice call";
 }
 
@@ -83,6 +88,8 @@ function entryMeta(entry: CallActivityDockEntry): string {
 
 function entryAction(entry: CallActivityDockEntry): string {
   switch (callActivityDockAction(entry, callState.value)) {
+    case "answer":
+      return "Answer";
     case "join":
       return "Join";
     case "return":
@@ -106,6 +113,9 @@ function selectEntry(entry: CallActivityDockEntry): void {
   if (!entryCanSelect(entry)) return;
   const selection = callActivityDockSelection(entry, callState.value);
   switch (selection.kind) {
+    case "dm-answer":
+      emit("answerDm", selection.peerJid, selection.remoteFullJid, selection.sid, selection.media);
+      return;
     case "channel-join":
       emit("joinChannelCall", selection.channelId, selection.roomJid, selection.media);
       return;
@@ -153,7 +163,7 @@ function selectEntry(entry: CallActivityDockEntry): void {
       >
         <span class="call-activity-dock__icon" aria-hidden="true">
           <Hash v-if="entry.kind === 'channel'" class="h-3.5 w-3.5" />
-          <Video v-else-if="entry.media.video" class="h-3.5 w-3.5" />
+          <Video v-else-if="entry.mediaKnown !== false && entry.media.video" class="h-3.5 w-3.5" />
           <PhoneIncoming v-else-if="entry.state === 'ringing' && entry.direction === 'incoming'" class="h-3.5 w-3.5" />
           <PhoneOutgoing v-else-if="entry.state === 'ringing' && entry.direction === 'outgoing'" class="h-3.5 w-3.5" />
           <MessageCircle v-else-if="entry.state === 'ringing'" class="h-3.5 w-3.5" />

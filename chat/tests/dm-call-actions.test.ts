@@ -3,9 +3,14 @@ import {
   $callState,
   clearCallState,
 } from "../src/lib/calls/call-store";
-import { startDmCallAction } from "../src/lib/calls/dm-call-actions";
 import {
+  answerIncomingDmCallActivity,
+  startDmCallAction,
+} from "../src/lib/calls/dm-call-actions";
+import {
+  applyDmCallEvent,
   clearDmCallActivities,
+  clearDmCallActivity,
   readDmCallActivity,
 } from "../src/lib/calls/dm-call-activity";
 import type { CallWireSender } from "../src/lib/calls/outbound";
@@ -65,5 +70,122 @@ describe("startDmCallAction", () => {
 
     expect($callState.get()).toEqual({ phase: "idle" });
     expect(readDmCallActivity("bob@waddle.test")).toBeNull();
+  });
+
+  test("answers a hydrated incoming call with the stored proposer full JID", async () => {
+    const sender: CallWireSender = {
+      send_call_proceed: mock(async () => undefined),
+    };
+    applyDmCallEvent({
+      event: {
+        kind: "propose",
+        from: "bob@waddle.test/phone",
+        sid: "hydrated-incoming",
+        media: { audio: true, video: true },
+      },
+      selfBareJid: "alice@waddle.test",
+      to: "alice@waddle.test/web",
+      timestamp: "2026-05-26T12:00:00.000Z",
+      now: new Date("2026-05-26T12:00:00.000Z"),
+    });
+
+    await answerIncomingDmCallActivity({
+      peerBareJid: "bob@waddle.test",
+      proposerFullJid: "bob@waddle.test/phone",
+      sid: "hydrated-incoming",
+      media: { audio: true, video: true },
+      getSender: () => sender,
+    });
+
+    expect(sender.send_call_proceed).toHaveBeenCalledWith(
+      "bob@waddle.test/phone",
+      "hydrated-incoming",
+    );
+    expect($callState.get()).toEqual({
+      phase: "incoming",
+      from: "bob@waddle.test/phone",
+      sid: "hydrated-incoming",
+      media: { audio: true, video: true },
+      accepting: true,
+    });
+  });
+
+  test("does not answer a hydrated incoming call without a matching peer full JID", async () => {
+    const sender: CallWireSender = {
+      send_call_proceed: mock(async () => undefined),
+    };
+
+    await answerIncomingDmCallActivity({
+      peerBareJid: "bob@waddle.test",
+      proposerFullJid: "mallory@waddle.test/phone",
+      sid: "forged",
+      media: { audio: true, video: false },
+      getSender: () => sender,
+    });
+
+    expect(sender.send_call_proceed).not.toHaveBeenCalled();
+    expect($callState.get()).toEqual({ phase: "idle" });
+  });
+
+  test("does not answer when the hydrated incoming activity was already cleared", async () => {
+    const sender: CallWireSender = {
+      send_call_proceed: mock(async () => undefined),
+    };
+    applyDmCallEvent({
+      event: {
+        kind: "propose",
+        from: "bob@waddle.test/phone",
+        sid: "stale-call",
+        media: { audio: true, video: false },
+      },
+      selfBareJid: "alice@waddle.test",
+      to: "alice@waddle.test/web",
+      timestamp: "2026-05-26T12:00:00.000Z",
+      now: new Date("2026-05-26T12:00:00.000Z"),
+    });
+    clearDmCallActivity("bob@waddle.test", "stale-call");
+
+    await answerIncomingDmCallActivity({
+      peerBareJid: "bob@waddle.test",
+      proposerFullJid: "bob@waddle.test/phone",
+      sid: "stale-call",
+      media: { audio: true, video: false },
+      getSender: () => sender,
+    });
+
+    expect(sender.send_call_proceed).not.toHaveBeenCalled();
+    expect($callState.get()).toEqual({ phase: "idle" });
+  });
+
+  test("answers an existing live incoming call through the current full JID", async () => {
+    const sender: CallWireSender = {
+      send_call_proceed: mock(async () => undefined),
+    };
+    $callState.set({
+      phase: "incoming",
+      from: "bob@waddle.test/laptop",
+      sid: "same-call",
+      media: { audio: true, video: false },
+    });
+
+    await answerIncomingDmCallActivity({
+      peerBareJid: "bob@waddle.test",
+      proposerFullJid: "bob@waddle.test/stale-phone",
+      sid: "same-call",
+      media: { audio: true, video: true },
+      getSender: () => sender,
+    });
+
+    expect(sender.send_call_proceed).toHaveBeenCalledWith(
+      "bob@waddle.test/laptop",
+      "same-call",
+    );
+    expect($callState.get()).toEqual({
+      phase: "incoming",
+      from: "bob@waddle.test/laptop",
+      sid: "same-call",
+      media: { audio: true, video: false },
+      accepting: true,
+    });
   });
 });

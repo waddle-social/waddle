@@ -50,7 +50,7 @@ export type CallEvent =
  */
 export type CallState =
   | { phase: "idle" }
-  | { phase: "incoming"; from: string; sid: string; media: CallMedia }
+  | { phase: "incoming"; from: string; sid: string; media: CallMedia; accepting?: boolean }
   | { phase: "outgoing"; to: string; sid: string; media: CallMedia; initiator?: string }
   | {
       phase: "muc-pending";

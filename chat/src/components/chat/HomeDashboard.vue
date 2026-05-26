@@ -25,6 +25,7 @@ import {
   type CallActivityDockEntry,
 } from "@/lib/calls/call-activity-dock";
 import { $callState } from "@/lib/calls/call-store";
+import { hasKnownDmCallMedia } from "@/lib/calls/dm-call-activity";
 import { callParticipantCountForChannel } from "@/lib/calls/muc-call-indicators";
 import { barePeerJid } from "@/lib/xmpp/jid";
 import type { CallMedia } from "@/lib/calls/types";
@@ -51,6 +52,7 @@ const emit = defineEmits<{
   selectChannel: [id: string, roomJid?: string];
   selectChannelRoom: [roomJid: string];
   joinChannelCall: [channelId: string | null, roomJid: string, media: CallMedia];
+  answerDm: [peerJid: string, remoteFullJid: string, sid: string, media: CallMedia];
   selectContact: [jid: string];
   reconnectDm: [peerJid: string, media: CallMedia];
   openNav: [];
@@ -112,16 +114,23 @@ interface HeroSummaryPart {
 const groups = computed(() => groupChannelsBySpace(props.spaces, props.channels));
 const visibleChannelGroups = computed(() => groups.value.filter((group) => group.channels.length > 0));
 const activeChannelJids = computed(() => props.activeChannelJids ?? new Set<string>());
-const directMessages = computed(() => props.dmConversations ?? []);
 const callParticipantCounts = computed(() => props.callParticipantCounts ?? {});
 const dmCallActivities = computed(() => props.dmCallActivities ?? {});
+const activeDmCallPeers = computed(() =>
+  new Set(Object.values(dmCallActivities.value).map((activity) => barePeerJid(activity.peerJid).toLowerCase()).filter(Boolean)),
+);
+const directMessages = computed(() =>
+  (props.dmConversations ?? []).filter((conversation) =>
+    !activeDmCallPeers.value.has(barePeerJid(conversation.peerJid).toLowerCase())
+  ),
+);
 const callState = useStore($callState);
 const channelsBySpace = computed(() =>
   new Map(groups.value.flatMap((group) => group.space ? [[group.space.id, group.channels.length] as const] : [])),
 );
 const activeCallEntries = computed<CallActivityDockEntry[]>(() => buildCallActivityDockEntries({
   channels: props.channels,
-  conversations: directMessages.value,
+  conversations: props.dmConversations ?? [],
   activeChannelId: null,
   activeChannelRoomJid: null,
   activePeerJid: null,
@@ -156,6 +165,9 @@ function selectSpaceChannel(spaceId: string) {
 function selectCallEntry(entry: CallActivityDockEntry) {
   const selection = callActivityDockSelection(entry, callState.value);
   switch (selection.kind) {
+    case "dm-answer":
+      emit("answerDm", selection.peerJid, selection.remoteFullJid, selection.sid, selection.media);
+      return;
     case "channel-join":
       emit("joinChannelCall", selection.channelId, selection.roomJid, selection.media);
       return;
@@ -275,10 +287,16 @@ function dmSecondaryText(conversation: { peerUsername?: string; peerJid: string;
 function dmCallLabel(peerJid: string): string {
   const activity = dmCallActivityFor(peerJid);
   if (!activity) return "";
+  if (!hasKnownDmCallMedia(activity)) {
+    if (activity.state === "accepted") return "Call live";
+    if (activity.direction === "incoming") return "Incoming call";
+    if (activity.direction === "outgoing") return "Calling";
+    return "Call ringing";
+  }
   const media = activity.media.video ? "Video" : "Voice";
   if (activity.state === "accepted") return `${media} call live`;
   if (activity.direction === "incoming") return `Incoming ${media.toLowerCase()} call`;
-  if (activity.direction === "outgoing") return `${media} call calling`;
+  if (activity.direction === "outgoing") return `Calling ${media.toLowerCase()} call`;
   return `${media} call ringing`;
 }
 
@@ -318,6 +336,7 @@ function callEntryStatus(entry: CallActivityDockEntry): string {
 
 function callEntryKindLabel(entry: CallActivityDockEntry): string {
   if (entry.kind === "channel") return entry.isKnownChannel ? "Group call" : "Group call syncing";
+  if (entry.mediaKnown === false) return "Call";
   return entry.media.video ? "Video call" : "Voice call";
 }
 
@@ -328,6 +347,8 @@ function callEntryLabel(entry: CallActivityDockEntry): string {
 
 function callEntryActionLabel(entry: CallActivityDockEntry): string {
   switch (callActivityDockAction(entry, callState.value)) {
+    case "answer":
+      return "Answer";
     case "join":
       return "Join";
     case "return":
@@ -494,7 +515,7 @@ function onHeroCta() {
           >
             <span class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-success/10 text-success">
               <Hash v-if="entry.kind === 'channel'" class="h-4 w-4" />
-              <Video v-else-if="entry.media.video" class="h-4 w-4" />
+              <Video v-else-if="entry.mediaKnown !== false && entry.media.video" class="h-4 w-4" />
               <PhoneIncoming v-else-if="entry.state === 'ringing' && entry.direction === 'incoming'" class="h-4 w-4" />
               <PhoneOutgoing v-else-if="entry.state === 'ringing' && entry.direction === 'outgoing'" class="h-4 w-4" />
               <Phone v-else class="h-4 w-4" />

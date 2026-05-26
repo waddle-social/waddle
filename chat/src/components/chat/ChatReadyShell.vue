@@ -6,7 +6,7 @@ import {
   mucCallParticipantCounts,
 } from "@/lib/calls/muc-call-presence";
 import { $dmCallActivities } from "@/lib/calls/dm-call-activity";
-import { startDmCallAction } from "@/lib/calls/dm-call-actions";
+import { answerIncomingDmCallActivity, startDmCallAction } from "@/lib/calls/dm-call-actions";
 import { startMucCallAction } from "@/lib/calls/muc-call-actions";
 import { normalizeMucServiceDomain } from "@/lib/calls/muc-call-indicators";
 import {
@@ -273,6 +273,17 @@ function reconnectDmFromDock(peerJid: string, media: CallMedia): void {
   });
 }
 
+function answerDmFromActivity(peerJid: string, remoteFullJid: string, sid: string, media: CallMedia): void {
+  selectDm(peerJid);
+  void answerIncomingDmCallActivity({
+    peerBareJid: peerJid,
+    proposerFullJid: remoteFullJid,
+    sid,
+    media,
+    getSender: getCallSender,
+  });
+}
+
 function joinChannelCallFromActivity(channelId: string | null, roomJid: string, media: CallMedia): void {
   ui.activeCommunitySurface.value = null;
   if (channelId) {
@@ -337,6 +348,8 @@ onUnmounted(() => {
     <ChatMobileDrawers
       :controller="controller"
       :join-channel-call="joinChannelCallFromActivity"
+      :answer-dm="answerDmFromActivity"
+      :reconnect-dm="reconnectDmFromDock"
     />
     <CallActivityDock
       class="call-activity-dock--mobile"
@@ -350,6 +363,7 @@ onUnmounted(() => {
       :managed-muc-domain="managedMucDomain"
       @select-channel="onSelectChannelFromSidebar"
       @join-channel-call="joinChannelCallFromActivity"
+      @answer-dm="answerDmFromActivity"
       @select-dm="selectDm"
       @reconnect-dm="reconnectDmFromDock"
     />
@@ -422,7 +436,9 @@ onUnmounted(() => {
           v-else
           :conversations="dmConversations.conversations.value"
           :active-peer-jid="dmConversations.activePeerJid.value"
+          @answer-dm="answerDmFromActivity"
           @select-dm="selectDm"
+          @reconnect-dm="reconnectDmFromDock"
           @new-dm="ui.showNewDm.value = true"
         />
         <CallActivityDock
@@ -434,8 +450,10 @@ onUnmounted(() => {
           :sidebar-mode="ui.sidebarMode.value"
           :active-channel-jids="messaging.activeChannels.value"
           :managed-muc-domain="managedMucDomain"
+          :show-dm-calls="ui.sidebarMode.value !== 'dms'"
           @select-channel="onSelectChannelFromSidebar"
           @join-channel-call="joinChannelCallFromActivity"
+          @answer-dm="answerDmFromActivity"
           @select-dm="selectDm"
           @reconnect-dm="reconnectDmFromDock"
         />
@@ -448,6 +466,7 @@ onUnmounted(() => {
         @select-channel="(id: string, roomJid?: string) => selectChannel(id, roomJid ? { roomJid } : undefined)"
         @select-channel-room="selectChannelByRoomJid"
         @join-channel-call="joinChannelCallFromActivity"
+        @answer-dm="answerDmFromActivity"
         @select-contact="handleOpenDm"
         @reconnect-dm="reconnectDmFromDock"
         @open-nav="ui.showMobileNav.value = true"
