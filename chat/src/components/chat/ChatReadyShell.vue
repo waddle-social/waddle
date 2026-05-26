@@ -7,7 +7,12 @@ import {
 } from "@/lib/calls/muc-call-presence";
 import { $dmCallActivities } from "@/lib/calls/dm-call-activity";
 import { startDmCallAction } from "@/lib/calls/dm-call-actions";
+import { startMucCallAction } from "@/lib/calls/muc-call-actions";
 import { normalizeMucServiceDomain } from "@/lib/calls/muc-call-indicators";
+import {
+  $callState,
+  type RawIqSender,
+} from "@/lib/calls/call-store";
 import type { CallWireSender } from "@/lib/calls/outbound";
 import type { CallMedia } from "@/lib/calls/types";
 import HomeDashboard from "@/components/chat/HomeDashboard.vue";
@@ -30,6 +35,7 @@ import AdminView from "@/components/admin/AdminView.vue";
 import CallActivityDock from "@/components/calls/CallActivityDock.vue";
 import { navigate, useRouteMatch, type AdminMatch, type AdminPanel } from "@/router";
 import { buildHomeDashboardProps } from "@/home/dashboard-props";
+import { jidDomain } from "@/lib/xmpp/jid";
 import type { ChatAppController } from "@/shell/chat-app-controller";
 import type { DiscoveredExtensionRoute } from "@/lib/xmpp/extension-commands";
 import { installMessageToolbarLifecycleSuppression } from "@/stores/message-toolbar";
@@ -149,9 +155,14 @@ const {
  */
 const mucCallParticipantsStore = useStore($mucCallParticipants);
 const dmCallActivitiesStore = useStore($dmCallActivities);
+const activityGroupCallStarting = ref(false);
 const callParticipantCounts = computed<Record<string, number>>(() => {
   return mucCallParticipantCounts(mucCallParticipantsStore.value);
 });
+const activeChannelCallCount = computed(() =>
+  Object.values(callParticipantCounts.value).filter((count) => count > 0).length,
+);
+const activeDmCallCount = computed(() => Object.keys(dmCallActivitiesStore.value).length);
 const managedMucDomain = computed(() =>
   normalizeMucServiceDomain(waddles.mucServiceJid.value) || (selfDomain.value ? `muc.${selfDomain.value}` : ""),
 );
@@ -226,8 +237,30 @@ function getCallSender(): CallWireSender | null {
   return (client?.xmpp as CallWireSender | undefined) ?? null;
 }
 
+function getMucCallSender(): RawIqSender | null {
+  const client = connectionStore.client as unknown as { xmpp?: unknown } | null;
+  return (client?.xmpp as RawIqSender | undefined) ?? null;
+}
+
 function getSelfFullJid(): string | undefined {
   return (connectionStore.client as unknown as { fullJid?: string } | null)?.fullJid;
+}
+
+function getExpectedMixerJid(): string | undefined {
+  const accountJid = connectionStore.session?.jid;
+  return accountJid ? `calls.${jidDomain(accountJid)}` : undefined;
+}
+
+function getClientJoiner(): ((roomJid: string) => Promise<void>) | null {
+  const client = connectionStore.client as unknown as {
+    ensureJoined?: (roomJid: string) => Promise<void>;
+  } | null;
+  return client?.ensureJoined?.bind(client) ?? null;
+}
+
+function isGroupCallBusy(): boolean {
+  const current = $callState.get();
+  return activityGroupCallStarting.value || (current.phase !== "idle" && current.phase !== "ended");
 }
 
 function reconnectDmFromDock(peerJid: string, media: CallMedia): void {
@@ -237,6 +270,30 @@ function reconnectDmFromDock(peerJid: string, media: CallMedia): void {
     media,
     getSender: getCallSender,
     getInitiator: getSelfFullJid,
+  });
+}
+
+function joinChannelCallFromActivity(channelId: string | null, roomJid: string, media: CallMedia): void {
+  ui.activeCommunitySurface.value = null;
+  if (channelId) {
+    void selectChannel(channelId, { roomJid });
+  } else {
+    void selectChannelByRoomJid(roomJid);
+  }
+  void startMucCallAction({
+    roomJid,
+    media,
+    isBusy: isGroupCallBusy,
+    setStarting: (next) => {
+      activityGroupCallStarting.value = next;
+    },
+    getSender: getMucCallSender,
+    getSelfNick: () => connectionStore.session?.username ?? undefined,
+    getSelfFullJid,
+    getExpectedMixerJid,
+    ensureJoined: async () => {
+      await getClientJoiner()?.(roomJid);
+    },
   });
 }
 
@@ -277,7 +334,10 @@ onUnmounted(() => {
     @back="onAdminBack"
   />
   <div v-else class="chat-app-shell">
-    <ChatMobileDrawers :controller="controller" />
+    <ChatMobileDrawers
+      :controller="controller"
+      :join-channel-call="joinChannelCallFromActivity"
+    />
     <CallActivityDock
       class="call-activity-dock--mobile"
       :channels="waddles.sortedChannels.value"
@@ -289,6 +349,7 @@ onUnmounted(() => {
       :active-channel-jids="messaging.activeChannels.value"
       :managed-muc-domain="managedMucDomain"
       @select-channel="onSelectChannelFromSidebar"
+      @join-channel-call="joinChannelCallFromActivity"
       @select-dm="selectDm"
       @reconnect-dm="reconnectDmFromDock"
     />
@@ -303,6 +364,8 @@ onUnmounted(() => {
           :active-sidebar-mode="ui.sidebarMode.value"
           :active-page="ui.activePage.value"
           :has-unread-dms="dmConversations.hasUnread.value"
+          :active-channel-call-count="activeChannelCallCount"
+          :active-dm-call-count="activeDmCallCount"
           :session="connectionStore.session"
           :notification-permission="notifications.permissionState.value"
           :notifications-enabled="notifications.notificationsEnabled.value"
@@ -344,6 +407,7 @@ onUnmounted(() => {
           :upcoming-event-count="communityEvents.events.value.filter((e: { dtstartMs?: number }) => typeof e.dtstartMs === 'number' && e.dtstartMs > Date.now()).length"
           :is-threads-active="ui.activePage.value === 'threads'"
           @select-channel="onSelectChannelFromSidebar"
+          @join-channel-call="joinChannelCallFromActivity"
           @select-thread="onSelectThread"
           @select-community-surface="onSelectCommunitySurface"
           @select-threads-view="openThreads"
@@ -370,6 +434,7 @@ onUnmounted(() => {
           :active-channel-jids="messaging.activeChannels.value"
           :managed-muc-domain="managedMucDomain"
           @select-channel="onSelectChannelFromSidebar"
+          @join-channel-call="joinChannelCallFromActivity"
           @select-dm="selectDm"
           @reconnect-dm="reconnectDmFromDock"
         />
@@ -381,6 +446,7 @@ onUnmounted(() => {
         v-bind="homeDashboardProps"
         @select-channel="(id: string, roomJid?: string) => selectChannel(id, roomJid ? { roomJid } : undefined)"
         @select-channel-room="selectChannelByRoomJid"
+        @join-channel-call="joinChannelCallFromActivity"
         @select-contact="handleOpenDm"
         @reconnect-dm="reconnectDmFromDock"
         @open-nav="ui.showMobileNav.value = true"

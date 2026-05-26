@@ -364,8 +364,9 @@ describe("HomeDashboard activity rendering", () => {
 
     expect(html).toContain("Active calls");
     expect(html).toContain("<strong>2</strong> active calls");
-    expect(html).toContain('aria-label="Open General, Group call, 2 people"');
+    expect(html).toContain('aria-label="Join General, Group call, 2 people"');
     expect(html).toContain('aria-label="Reconnect Bob, Video call, Live"');
+    expect(buttonForLabel(html, "Join General, Group call, 2 people")).toContain("Join");
     expect(buttonForLabel(html, "General, channel, no unread activity, active call with 2 people")).toContain("Active call");
     expect(buttonForLabel(html, "Bob (bob@example.com), direct message, available, no unread activity, Video call live")).toContain("Live");
   });

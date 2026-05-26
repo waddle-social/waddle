@@ -9,13 +9,20 @@ import { renderToString } from "vue/server-renderer";
 import ts from "typescript";
 import {
   buildCallActivityDockEntries,
+  callActivityDockAction,
   callActivityDockSelection,
 } from "../src/lib/calls/call-activity-dock";
+import {
+  $callState,
+  clearCallState,
+} from "../src/lib/calls/call-store";
 import { clearMucCallParticipants, $mucCallParticipants } from "../src/lib/calls/muc-call-presence";
 import { clearDmCallActivities, $dmCallActivities } from "../src/lib/calls/dm-call-activity";
 import type { DmCallActivity } from "../src/lib/calls/dm-call-activity";
+import type { CallState } from "../src/lib/calls/types";
 
 afterEach(() => {
+  clearCallState();
   clearMucCallParticipants();
   clearDmCallActivities();
 });
@@ -114,7 +121,7 @@ describe("call activity dock model", () => {
     });
   });
 
-  test("maps accepted DM rows to reconnect instead of plain navigation", () => {
+  test("maps active rows to direct join, return, or reconnect actions", () => {
     const entries = buildCallActivityDockEntries({
       channels: [
         { id: "general", name: "General", jid: "general@conference.example.com" },
@@ -151,11 +158,12 @@ describe("call activity dock model", () => {
       },
     });
 
-    expect(entries.map(callActivityDockSelection)).toEqual([
+    expect(entries.map((entry) => callActivityDockSelection(entry))).toEqual([
       {
-        kind: "channel",
+        kind: "channel-join",
         channelId: "general",
         roomJid: "general@conference.example.com",
+        media: { audio: true, video: false },
       },
       {
         kind: "dm-reconnect",
@@ -167,6 +175,33 @@ describe("call activity dock model", () => {
         peerJid: "carol@example.com",
       },
     ]);
+    expect(callActivityDockAction(entries[0], {
+      phase: "active",
+      kind: "muc",
+      peer: "general@conference.example.com",
+      sid: "muc-call",
+      media: { audio: true, video: false },
+      join: { url: "wss://livekit.example.test", room: "general", identity: "alice", token: "token" },
+    })).toBe("return");
+    expect(callActivityDockAction(entries[0], {
+      phase: "muc-pending",
+      kind: "muc",
+      peer: "general@conference.example.com",
+      sid: "muc-call",
+      media: { audio: true, video: false },
+      selfNick: "alice",
+      attemptId: "attempt-1",
+    })).toBe("return");
+    expect(callActivityDockSelection(entries[0], {
+      phase: "outgoing",
+      to: "bob@example.com",
+      sid: "dm-call",
+      media: { audio: true, video: false },
+    })).toEqual({
+      kind: "channel",
+      channelId: "general",
+      roomJid: "general@conference.example.com",
+    });
   });
 
   test("surfaces group calls while the channel directory is still loading", () => {
@@ -332,10 +367,10 @@ describe("CallActivityDock rendering", () => {
     expect(html).toContain("Video call");
     expect(html).toContain("2 people");
     expect(html).toContain("Live");
-    expect(html).toContain("Open");
+    expect(html).toContain("Join");
     expect(html).toContain("Reconnect");
+    expect(html).toContain('aria-label="Join General call, 2 people"');
     expect(html).toContain('aria-label="Reconnect Bob call, Live"');
-    expect(html).not.toContain("Join");
   });
 
   test("renders active group calls before channel metadata hydrates", async () => {
@@ -357,8 +392,8 @@ describe("CallActivityDock rendering", () => {
     expect(html).toContain("general");
     expect(html).toContain("Group call · syncing");
     expect(html).toContain("2 people");
-    expect(html).toContain("Open");
-    expect(html).toContain("aria-label=\"Open general call, 2 people\"");
+    expect(html).toContain("Join");
+    expect(html).toContain("aria-label=\"Join general call, 2 people\"");
     expect(html).not.toContain("disabled");
   });
 
@@ -399,11 +434,226 @@ describe("CallActivityDock rendering", () => {
     expect(readyShell).toContain("import CallActivityDock");
     expect(readyShell.match(/<CallActivityDock/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
     expect(readyShell).toContain("class=\"call-activity-dock--mobile\"");
+    expect(readyShell).toContain(":join-channel-call=\"joinChannelCallFromActivity\"");
+    expect(readyShell).toContain(":active-channel-call-count=\"activeChannelCallCount\"");
+    expect(readyShell).toContain(":active-dm-call-count=\"activeDmCallCount\"");
     expect(readyShell).toContain("@select-channel=\"onSelectChannelFromSidebar\"");
+    expect(readyShell).toContain("@join-channel-call=\"joinChannelCallFromActivity\"");
     expect(readyShell).toContain("@select-dm=\"selectDm\"");
     expect(readyShell).toContain("@reconnect-dm=\"reconnectDmFromDock\"");
 
     expect(mobileDrawers).not.toContain("CallActivityDock");
+    expect(mobileDrawers).toContain("@join-channel-call=\"joinChannelCallFromMobile\"");
+    expect(mobileDrawers).toContain(":active-channel-call-count=\"activeChannelCallCount\"");
+    expect(mobileDrawers).toContain(":active-dm-call-count=\"activeDmCallCount\"");
+  });
+
+  test("renders rail-level active call indicators for spaces and DMs", async () => {
+    const html = await renderVueComponent("../src/components/chat/WaddlesSidebar.vue", {
+      waddles: [],
+      activeSpaceId: null,
+      activeSidebarMode: "channels",
+      activePage: "chat",
+      hasUnreadDms: true,
+      activeChannelCallCount: 2,
+      activeDmCallCount: 1,
+      session: null,
+    });
+
+    expect(html).toContain('aria-label="Spaces, 2 active calls"');
+    expect(html).toContain('title="Spaces, 2 active calls"');
+    expect(html).toContain('aria-label="Direct messages, unread messages, 1 active call"');
+    expect(html).toContain('title="Direct messages, unread messages, 1 active call"');
+    expect(html).toContain('title="2 active calls"');
+    expect(html).toContain('title="1 active call"');
+  });
+
+  test("renders sidebar channel rows as direct join affordances when idle", async () => {
+    const html = await renderVueComponent("../src/components/chat/TopicsPanel.vue", {
+      ...topicsPanelBaseProps(),
+      channels: [
+        { id: "general", name: "General", jid: "general@conference.example.com" },
+      ],
+      callParticipantCounts: {
+        "general@conference.example.com": 2,
+      },
+      managedMucDomain: "conference.example.com",
+    });
+
+    expect(html).toContain("Join live call, 2 people");
+    expect(html).toContain("General, not selected, call ongoing with 2 participants, click to join call");
+  });
+
+  test("keeps sidebar channel call rows navigation-only while another call is active", async () => {
+    $callState.set({
+      phase: "outgoing",
+      to: "bob@example.com",
+      sid: "dm-call",
+      media: { audio: true, video: false },
+    });
+
+    const html = await renderVueComponent("../src/components/chat/TopicsPanel.vue", {
+      ...topicsPanelBaseProps(),
+      channels: [
+        { id: "general", name: "General", jid: "general@conference.example.com" },
+      ],
+      callParticipantCounts: {
+        "general@conference.example.com": 2,
+      },
+      managedMucDomain: "conference.example.com",
+    });
+
+    expect(html).toContain("Open live call, 2 people");
+    expect(html).toContain("General, not selected, call ongoing with 2 participants, click to open call");
+    expect(html).not.toContain("click to join call");
+  });
+
+  test("renders sidebar channel rows as return affordances while the same room is joining", async () => {
+    $callState.set({
+      phase: "muc-pending",
+      kind: "muc",
+      peer: "general@conference.example.com",
+      sid: "muc-call",
+      media: { audio: true, video: false },
+      selfNick: "alice",
+      attemptId: "attempt-1",
+    });
+
+    const html = await renderVueComponent("../src/components/chat/TopicsPanel.vue", {
+      ...topicsPanelBaseProps(),
+      channels: [
+        { id: "general", name: "General", jid: "general@conference.example.com" },
+      ],
+      callParticipantCounts: {
+        "general@conference.example.com": 2,
+      },
+      managedMucDomain: "conference.example.com",
+    });
+
+    expect(html).toContain("Return live call, 2 people");
+    expect(html).toContain("General, not selected, call ongoing with 2 participants, click to return to call");
+  });
+
+  test("activates sidebar channel rows through the join, open, and return event paths", async () => {
+    expect(await emittedTopicChannelRowEvents()).toEqual([
+      ["joinChannelCall", "general", "general@conference.example.com", { audio: true, video: false }],
+    ]);
+
+    expect(await emittedTopicChannelRowEvents({
+      phase: "outgoing",
+      to: "bob@example.com",
+      sid: "dm-call",
+      media: { audio: true, video: false },
+    })).toEqual([
+      ["selectChannel", "general", "general@conference.example.com"],
+    ]);
+
+    expect(await emittedTopicChannelRowEvents({
+      phase: "muc-pending",
+      kind: "muc",
+      peer: "general@conference.example.com",
+      sid: "muc-call",
+      media: { audio: true, video: false },
+      selfNick: "alice",
+      attemptId: "attempt-1",
+    })).toEqual([
+      ["selectChannel", "general", "general@conference.example.com"],
+    ]);
+  });
+
+  test("mobile drawer forwards sidebar join-call events to the shell handler", async () => {
+    const forwarded: unknown[][] = [];
+    const bindings = await setupVueComponent("../src/components/chat/ChatMobileDrawers.vue", {
+      controller: {},
+      joinChannelCall: (...args: unknown[]) => {
+        forwarded.push(args);
+      },
+    });
+
+    setupBindingFunction(bindings, "joinChannelCallFromMobile")(
+      "general",
+      "general@conference.example.com",
+      { audio: true, video: false },
+    );
+
+    expect(forwarded).toEqual([
+      ["general", "general@conference.example.com", { audio: true, video: false }],
+    ]);
+  });
+
+  test("mobile drawer preserves room JID when channel call rows open or return", async () => {
+    const selected: unknown[][] = [];
+    const ui = {
+      activeCommunitySurface: { value: "stories" },
+    };
+    const bindings = await setupVueComponent("../src/components/chat/ChatMobileDrawers.vue", {
+      controller: {
+        ui,
+        selectChannel: (...args: unknown[]) => {
+          selected.push(args);
+        },
+      },
+    });
+
+    setupBindingFunction(bindings, "selectChannelFromMobile")(
+      "general",
+      "general@conference.example.com",
+    );
+
+    expect(ui.activeCommunitySurface.value).toBe(null);
+    expect(selected).toEqual([
+      ["general", { roomJid: "general@conference.example.com" }],
+    ]);
+  });
+
+  test("shell join-call handler clears community surfaces before selecting a channel", async () => {
+    const selected: unknown[][] = [];
+    const ui = {
+      activeCommunitySurface: { value: "feed" },
+    };
+    const bindings = await suppressVueLifecycleSetupWarnings(() =>
+      setupVueComponent("../src/components/chat/ChatReadyShell.vue", {
+        controller: {
+          ui,
+          connectionStore: { client: null, session: null },
+          waddles: { mucServiceJid: { value: "" } },
+          selfDomain: { value: "" },
+          rosterContacts: {
+            contacts: { value: [] },
+            isLoadingContacts: { value: false },
+          },
+          messaging: {
+            mentionedChannelCounts: { value: {} },
+            activeChannels: { value: new Set<string>() },
+          },
+          dmConversations: { conversations: { value: [] } },
+          computedChannelUnreadMap: { value: {} },
+          activeRightPanel: { value: null },
+          activeThreadStack: { value: [] },
+          communityEvents: { rsvp: () => undefined },
+          closePinnedPanel: () => undefined,
+          activateRightPanel: () => undefined,
+          selectDm: () => undefined,
+          selectChannel: (...args: unknown[]) => {
+            selected.push(args);
+          },
+          selectChannelByRoomJid: (...args: unknown[]) => {
+            selected.push(["room", ...args]);
+          },
+        },
+      }),
+    );
+
+    setupBindingFunction(bindings, "joinChannelCallFromActivity")(
+      "general",
+      "general@conference.example.com",
+      { audio: true, video: false },
+    );
+
+    expect(ui.activeCommunitySurface.value).toBe(null);
+    expect(selected).toEqual([
+      ["general", { roomJid: "general@conference.example.com" }],
+    ]);
   });
 
   test("renders hydrated DM call controls with reconnect context", async () => {
@@ -466,6 +716,42 @@ function chatHeaderBaseProps(): Record<string, unknown> {
   };
 }
 
+function topicsPanelBaseProps(): Record<string, unknown> {
+  return {
+    waddle: null,
+    spaces: [],
+    channels: [],
+    activeChannelId: null,
+    canManageChannels: false,
+    canManageCommunity: false,
+    isLoading: false,
+    memberCount: 0,
+    memberState: "ready",
+    activeChannelJids: new Set<string>(),
+    collapsedGroupIds: new Set<string>(),
+  };
+}
+
+async function emittedTopicChannelRowEvents(callState?: CallState): Promise<unknown[][]> {
+  clearCallState();
+  if (callState) $callState.set(callState);
+  const emitted: unknown[][] = [];
+  const channel = { id: "general", name: "General", jid: "general@conference.example.com" };
+  const bindings = await setupVueComponent("../src/components/chat/TopicsPanel.vue", {
+    ...topicsPanelBaseProps(),
+    channels: [channel],
+    callParticipantCounts: {
+      "general@conference.example.com": 2,
+    },
+    managedMucDomain: "conference.example.com",
+  }, (...args) => {
+    emitted.push(args);
+  });
+
+  setupBindingFunction(bindings, "selectChannelRow")(channel);
+  return emitted;
+}
+
 async function renderCallActivityDock(props: Record<string, unknown>) {
   return renderVueComponent("../src/components/calls/CallActivityDock.vue", props);
 }
@@ -475,11 +761,69 @@ async function renderVueComponent(path: string, props: Record<string, unknown>) 
   return renderToString(createSSRApp({ render: () => h(component, props) }));
 }
 
-async function loadVueComponent(path: string) {
+async function setupVueComponent(
+  path: string,
+  props: Record<string, unknown>,
+  emit: (...args: unknown[]) => void = () => undefined,
+): Promise<Record<string, unknown>> {
+  const component = await loadVueComponent(path, { inlineTemplate: false }) as {
+    setup?: (
+      props: Record<string, unknown>,
+      context: {
+        emit: (...args: unknown[]) => void;
+        expose: () => void;
+        attrs: Record<string, unknown>;
+        slots: Record<string, unknown>;
+      },
+    ) => Record<string, unknown>;
+  };
+  if (!component.setup) throw new Error(`${path} has no setup function`);
+  return component.setup(props, {
+    emit,
+    expose: () => undefined,
+    attrs: {},
+    slots: {},
+  });
+}
+
+function setupBindingFunction(
+  bindings: Record<string, unknown>,
+  key: string,
+): (...args: unknown[]) => unknown {
+  const binding = bindings[key];
+  if (typeof binding !== "function") {
+    throw new Error(`Expected setup binding ${key} to be a function`);
+  }
+  return binding as (...args: unknown[]) => unknown;
+}
+
+async function suppressVueLifecycleSetupWarnings<T>(fn: () => Promise<T>): Promise<T> {
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => {
+    const message = String(args[0] ?? "");
+    if (
+      message.includes("onMounted is called when there is no active component instance") ||
+      message.includes("onUnmounted is called when there is no active component instance")
+    ) {
+      return;
+    }
+    originalWarn(...args);
+  };
+  try {
+    return await fn();
+  } finally {
+    console.warn = originalWarn;
+  }
+}
+
+async function loadVueComponent(path: string, options: { inlineTemplate?: boolean } = {}) {
   const filename = new URL(path, import.meta.url);
   const source = readFileSync(filename, "utf8");
   const { descriptor } = parse(source, { filename: filename.pathname });
-  const script = compileScript(descriptor, { id: filename.pathname, inlineTemplate: true });
+  const script = compileScript(descriptor, {
+    id: filename.pathname,
+    inlineTemplate: options.inlineTemplate ?? true,
+  });
 
   const tempDir = mkdtempSync(join(tmpdir(), "waddle-vue-component-"));
   try {

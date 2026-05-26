@@ -6,8 +6,10 @@ import {
   $mucCallParticipants,
   mucCallParticipantCounts,
 } from "@/lib/calls/muc-call-presence";
+import { $callState } from "@/lib/calls/call-store";
 import { $dmCallActivities } from "@/lib/calls/dm-call-activity";
 import {
+  callActivityDockAction,
   buildCallActivityDockEntries,
   callActivityDockSelection,
   type CallActivityDockEntry,
@@ -30,11 +32,13 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   selectChannel: [channelId: string | null, roomJid: string];
+  joinChannelCall: [channelId: string | null, roomJid: string, media: CallMedia];
   selectDm: [peerJid: string];
   reconnectDm: [peerJid: string, media: CallMedia];
 }>();
 
 const mucCallParticipantsStore = useStore($mucCallParticipants);
+const callState = useStore($callState);
 const dmCallActivities = useStore($dmCallActivities);
 
 const callParticipantCounts = computed<Record<string, number>>(() => {
@@ -78,9 +82,16 @@ function entryMeta(entry: CallActivityDockEntry): string {
 }
 
 function entryAction(entry: CallActivityDockEntry): string {
-  if (entry.kind === "channel") return "Open";
-  if (callActivityDockSelection(entry).kind === "dm-reconnect") return "Reconnect";
-  return "Open";
+  switch (callActivityDockAction(entry, callState.value)) {
+    case "join":
+      return "Join";
+    case "return":
+      return "Return";
+    case "reconnect":
+      return "Reconnect";
+    case "open":
+      return "Open";
+  }
 }
 
 function entryTitle(entry: CallActivityDockEntry): string {
@@ -93,8 +104,11 @@ function entryCanSelect(entry: CallActivityDockEntry): boolean {
 
 function selectEntry(entry: CallActivityDockEntry): void {
   if (!entryCanSelect(entry)) return;
-  const selection = callActivityDockSelection(entry);
+  const selection = callActivityDockSelection(entry, callState.value);
   switch (selection.kind) {
+    case "channel-join":
+      emit("joinChannelCall", selection.channelId, selection.roomJid, selection.media);
+      return;
     case "channel":
       emit("selectChannel", selection.channelId, selection.roomJid);
       return;

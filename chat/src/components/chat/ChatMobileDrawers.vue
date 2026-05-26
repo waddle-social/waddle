@@ -5,6 +5,7 @@ import {
   $mucCallParticipants,
   mucCallParticipantCounts,
 } from "@/lib/calls/muc-call-presence";
+import { $dmCallActivities } from "@/lib/calls/dm-call-activity";
 import { normalizeMucServiceDomain } from "@/lib/calls/muc-call-indicators";
 import WaddlesSidebar from "@/components/chat/WaddlesSidebar.vue";
 import TopicsPanel from "@/components/chat/TopicsPanel.vue";
@@ -13,11 +14,13 @@ import SettingsMobileHeader from "@/components/chat/SettingsMobileHeader.vue";
 import ProfilePanel from "@/components/chat/ProfilePanel.vue";
 import AppDrawer from "@/components/ui/AppDrawer.vue";
 import { extensionRouteIconComponent, extensionRouteRailItems } from "./extension-route-rail-model";
+import type { CallMedia } from "@/lib/calls/types";
 import type { DiscoveredExtensionRoute } from "@/lib/xmpp/extension-commands";
 import type { ChatAppController } from "@/shell/chat-app-controller";
 
 const props = defineProps<{
   controller: ChatAppController;
+  joinChannelCall?: (channelId: string | null, roomJid: string, media: CallMedia) => void;
 }>();
 
 const {
@@ -59,13 +62,27 @@ function selectCommunitySurface(surface: "feed" | "stories" | "events") {
   ui.showMobileNav.value = false;
 }
 
+function selectChannelFromMobile(id: string, roomJid?: string) {
+  ui.activeCommunitySurface.value = null;
+  void selectChannel(id, roomJid ? { roomJid } : undefined);
+}
+
+function joinChannelCallFromMobile(channelId: string | null, roomJid: string, media: CallMedia) {
+  props.joinChannelCall?.(channelId, roomJid, media);
+}
+
 // XEP-0272 Muji participant counts keyed by room JID — same derived
 // reactive state as ChatReadyShell uses, so the mobile sidebar shows
 // the same "call ongoing" chip.
 const mucCallParticipantsStore = useStore($mucCallParticipants);
+const dmCallActivitiesStore = useStore($dmCallActivities);
 const callParticipantCounts = computed<Record<string, number>>(() => {
   return mucCallParticipantCounts(mucCallParticipantsStore.value);
 });
+const activeChannelCallCount = computed(() =>
+  Object.values(callParticipantCounts.value).filter((count) => count > 0).length,
+);
+const activeDmCallCount = computed(() => Object.keys(dmCallActivitiesStore.value).length);
 const managedMucDomain = computed(() =>
   normalizeMucServiceDomain(waddles.mucServiceJid.value) || (selfDomain.value ? `muc.${selfDomain.value}` : ""),
 );
@@ -106,6 +123,8 @@ function openExtensionRoute(route: DiscoveredExtensionRoute) {
             :active-sidebar-mode="ui.sidebarMode.value"
             :active-page="ui.activePage.value"
             :has-unread-dms="dmConversations.hasUnread.value"
+            :active-channel-call-count="activeChannelCallCount"
+            :active-dm-call-count="activeDmCallCount"
             :session="null"
             horizontal
             @open-home="openHome"
@@ -135,7 +154,8 @@ function openExtensionRoute(route: DiscoveredExtensionRoute) {
           :upcoming-event-count="communityEvents.events.value.filter((e: { dtstartMs?: number }) => typeof e.dtstartMs === 'number' && e.dtstartMs > Date.now()).length"
           :is-threads-active="ui.activePage.value === 'threads'"
           class="!w-full !border-r-0 !flex-1"
-          @select-channel="(id: string) => { ui.activeCommunitySurface.value = null; selectChannel(id); }"
+          @select-channel="selectChannelFromMobile"
+          @join-channel-call="joinChannelCallFromMobile"
           @select-thread="onSelectThread"
           @select-community-surface="selectCommunitySurface"
           @select-threads-view="openThreads"
