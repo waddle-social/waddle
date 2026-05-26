@@ -185,6 +185,7 @@ function openExtensionRoute(route: DiscoveredExtensionRoute) {
           v-else
           :conversations="dmConversations.conversations.value"
           :active-peer-jid="dmConversations.activePeerJid.value"
+          hide-current-call
           class="!w-full !border-r-0 !flex-1"
           @answer-dm="answerDmFromMobile"
           @select-dm="selectDm"

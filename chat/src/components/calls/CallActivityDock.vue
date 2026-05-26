@@ -5,6 +5,7 @@ import { ArrowRight, Hash, MessageCircle, Phone, PhoneIncoming, PhoneOutgoing, V
 import {
   $mucCallParticipants,
   mucCallParticipantCounts,
+  normalizeMucCallRoomJid,
 } from "@/lib/calls/muc-call-presence";
 import { $callState } from "@/lib/calls/call-store";
 import { $dmCallActivities } from "@/lib/calls/dm-call-activity";
@@ -18,6 +19,7 @@ import {
 import type { CallMedia } from "@/lib/calls/types";
 import type { ChannelSummary } from "@/lib/chat-types";
 import type { DmConversation } from "@/lib/xmpp-client";
+import { barePeerJid } from "@/lib/xmpp/jid";
 
 const props = withDefaults(defineProps<{
   channels: ChannelSummary[];
@@ -29,8 +31,10 @@ const props = withDefaults(defineProps<{
   activeChannelJids: Set<string>;
   managedMucDomain?: string | null;
   showDmCalls?: boolean;
+  hideCurrentCall?: boolean;
 }>(), {
   showDmCalls: true,
+  hideCurrentCall: false,
 });
 
 const emit = defineEmits<{
@@ -61,7 +65,23 @@ const entries = computed(() => buildCallActivityDockEntries({
   callParticipantCounts: callParticipantCounts.value,
   dmCallActivities: props.showDmCalls === false ? {} : dmCallActivities.value,
 }));
-const entryCount = computed(() => entries.value.length);
+const visibleEntries = computed(() =>
+  props.hideCurrentCall
+    ? entries.value.filter((entry) => !isCurrentCallEntry(entry))
+    : entries.value
+);
+const entryCount = computed(() => visibleEntries.value.length);
+
+function isCurrentCallEntry(entry: CallActivityDockEntry): boolean {
+  const current = callState.value;
+  if (entry.kind === "channel") {
+    if (current.phase !== "active" && current.phase !== "muc-pending") return false;
+    if (current.kind !== "muc") return false;
+    return normalizeMucCallRoomJid(entry.roomJid) === normalizeMucCallRoomJid(current.peer);
+  }
+  if (current.phase !== "active" || current.kind !== "dm") return false;
+  return entry.peerJid.toLowerCase() === barePeerJid(current.peer).toLowerCase();
+}
 
 function entryStatus(entry: CallActivityDockEntry): string {
   if (entry.kind === "channel") {
@@ -134,7 +154,7 @@ function selectEntry(entry: CallActivityDockEntry): void {
 
 <template>
   <div
-    v-if="entries.length > 0"
+    v-if="visibleEntries.length > 0"
     class="call-activity-dock"
     aria-label="Active calls"
   >
@@ -147,7 +167,7 @@ function selectEntry(entry: CallActivityDockEntry): void {
     </div>
     <div class="call-activity-dock__list">
       <button
-        v-for="entry in entries"
+        v-for="entry in visibleEntries"
         :key="entry.key"
         type="button"
         class="call-activity-dock__row"

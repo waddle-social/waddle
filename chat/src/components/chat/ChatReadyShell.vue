@@ -33,6 +33,7 @@ import UserSettingsPage from "@/components/chat/UserSettingsPage.vue";
 import WaddlesSidebar from "@/components/chat/WaddlesSidebar.vue";
 import AdminView from "@/components/admin/AdminView.vue";
 import CallActivityDock from "@/components/calls/CallActivityDock.vue";
+import CurrentCallPanel from "@/components/calls/CurrentCallPanel.vue";
 import { navigate, useRouteMatch, type AdminMatch, type AdminPanel } from "@/router";
 import { buildHomeDashboardProps } from "@/home/dashboard-props";
 import { jidDomain } from "@/lib/xmpp/jid";
@@ -351,6 +352,16 @@ onUnmounted(() => {
       :answer-dm="answerDmFromActivity"
       :reconnect-dm="reconnectDmFromDock"
     />
+    <CurrentCallPanel
+      class="current-call-panel--mobile"
+      :channels="waddles.sortedChannels.value"
+      :conversations="dmConversations.conversations.value"
+      :active-channel-id="waddles.activeChannelId.value"
+      :active-channel-room-jid="activeChannelRoomJid"
+      :active-peer-jid="dmConversations.activePeerJid.value"
+      @select-channel="onSelectChannelFromSidebar"
+      @select-dm="selectDm"
+    />
     <CallActivityDock
       class="call-activity-dock--mobile"
       :channels="waddles.sortedChannels.value"
@@ -361,6 +372,7 @@ onUnmounted(() => {
       :sidebar-mode="ui.sidebarMode.value"
       :active-channel-jids="messaging.activeChannels.value"
       :managed-muc-domain="managedMucDomain"
+      hide-current-call
       @select-channel="onSelectChannelFromSidebar"
       @join-channel-call="joinChannelCallFromActivity"
       @answer-dm="answerDmFromActivity"
@@ -436,10 +448,20 @@ onUnmounted(() => {
           v-else
           :conversations="dmConversations.conversations.value"
           :active-peer-jid="dmConversations.activePeerJid.value"
+          hide-current-call
           @answer-dm="answerDmFromActivity"
           @select-dm="selectDm"
           @reconnect-dm="reconnectDmFromDock"
           @new-dm="ui.showNewDm.value = true"
+        />
+        <CurrentCallPanel
+          :channels="waddles.sortedChannels.value"
+          :conversations="dmConversations.conversations.value"
+          :active-channel-id="waddles.activeChannelId.value"
+          :active-channel-room-jid="activeChannelRoomJid"
+          :active-peer-jid="dmConversations.activePeerJid.value"
+          @select-channel="onSelectChannelFromSidebar"
+          @select-dm="selectDm"
         />
         <CallActivityDock
           :channels="waddles.sortedChannels.value"
@@ -451,6 +473,7 @@ onUnmounted(() => {
           :active-channel-jids="messaging.activeChannels.value"
           :managed-muc-domain="managedMucDomain"
           :show-dm-calls="ui.sidebarMode.value !== 'dms'"
+          hide-current-call
           @select-channel="onSelectChannelFromSidebar"
           @join-channel-call="joinChannelCallFromActivity"
           @answer-dm="answerDmFromActivity"
