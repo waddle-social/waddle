@@ -640,6 +640,9 @@ onUnmounted(() => {
               @open-details="ui.showMobileDetails.value = true"
               @open-dm="handleOpenDm"
               @open-thread="openThread"
+              @join-channel-call="joinChannelCallFromActivity"
+              @answer-dm="answerDmFromActivity"
+              @reconnect-dm="reconnectDmFromDock"
               :invoke-extension-action="invokeActiveExtensionAction"
               @refresh-update="refreshAppUpdate"
             />

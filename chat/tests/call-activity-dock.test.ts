@@ -532,10 +532,228 @@ describe("CallActivityDock rendering", () => {
     expect(html).toContain('aria-label="Answer Bob call, Ringing"');
   });
 
+  test("renders a conversation group call banner and emits join", async () => {
+    $mucCallParticipants.set({
+      "general@conference.example.com": ["alice", "bob"],
+    });
+
+    const props = {
+      roomJid: "general@conference.example.com",
+      channelId: "general",
+      channelName: "General",
+      dmPeerJid: null,
+      dmPeerName: null,
+    };
+    const html = await renderVueComponent("../src/components/calls/ConversationCallBanner.vue", props);
+    expect(html).toContain("General has a live call");
+    expect(html).toContain("2 people connected in this channel.");
+    expect(html).toContain("Join call");
+
+    const emitted: unknown[][] = [];
+    const bindings = await setupVueComponent("../src/components/calls/ConversationCallBanner.vue", props, (...args) => {
+      emitted.push(args);
+    });
+    setupBindingFunction(bindings, "activateBanner")();
+
+    expect(emitted).toEqual([
+      ["joinChannelCall", "general", "general@conference.example.com", { audio: true, video: false }],
+    ]);
+  });
+
+  test("hides the conversation group banner while this resource is already in that call", async () => {
+    $mucCallParticipants.set({
+      "general@conference.example.com": ["alice", "bob"],
+    });
+    $callState.set({
+      phase: "active",
+      kind: "muc",
+      peer: "general@conference.example.com",
+      sid: "muc-live",
+      media: { audio: true, video: false },
+      join: liveKitJoin,
+    });
+
+    const html = await renderVueComponent("../src/components/calls/ConversationCallBanner.vue", {
+      roomJid: "general@conference.example.com",
+      channelId: "general",
+      channelName: "General",
+      dmPeerJid: null,
+      dmPeerName: null,
+    });
+
+    expect(html).not.toContain("General has a live call");
+  });
+
+  test("keeps the conversation call live region mounted before call activity arrives", async () => {
+    const html = await renderVueComponent("../src/components/calls/ConversationCallBanner.vue", {
+      roomJid: "general@conference.example.com",
+      channelId: "general",
+      channelName: "General",
+      dmPeerJid: null,
+      dmPeerName: null,
+    });
+
+    expect(html).toContain('role="region"');
+    expect(html).toContain('aria-label="Conversation call status"');
+    expect(html).toContain('aria-live="polite"');
+    expect(html).toContain('aria-atomic="true"');
+    expect(html).not.toContain("Join call");
+    expect(html).not.toContain("General has a live call");
+  });
+
+  test("renders a conversation DM accepted-call banner and emits reconnect", async () => {
+    $dmCallActivities.set({
+      "bob@example.com": {
+        peerJid: "bob@example.com/phone",
+        sid: "dm-live",
+        media: { audio: true, video: true },
+        state: "accepted",
+        direction: "incoming",
+        updatedAt: "2026-05-25T12:00:00.000Z",
+      },
+    });
+
+    const props = {
+      roomJid: null,
+      channelId: null,
+      channelName: null,
+      dmPeerJid: "bob@example.com",
+      dmPeerName: "Bob",
+    };
+    const html = await renderVueComponent("../src/components/calls/ConversationCallBanner.vue", props);
+    expect(html).toContain("Call with Bob is live");
+    expect(html).toContain("The video call is still live after refresh.");
+    expect(html).toContain("Rejoin");
+
+    const emitted: unknown[][] = [];
+    const bindings = await setupVueComponent("../src/components/calls/ConversationCallBanner.vue", props, (...args) => {
+      emitted.push(args);
+    });
+    setupBindingFunction(bindings, "activateBanner")();
+
+    expect(emitted).toEqual([
+      ["reconnectDm", "bob@example.com", { audio: true, video: true }],
+    ]);
+  });
+
+  test("renders a conversation DM incoming-call banner and emits answer", async () => {
+    $dmCallActivities.set({
+      "bob@example.com": {
+        peerJid: "bob@example.com/phone",
+        remoteFullJid: "bob@example.com/phone",
+        sid: "dm-ring",
+        media: { audio: true, video: false },
+        state: "ringing",
+        direction: "incoming",
+        updatedAt: "2026-05-25T12:00:00.000Z",
+      },
+    });
+
+    const props = {
+      roomJid: null,
+      channelId: null,
+      channelName: null,
+      dmPeerJid: "bob@example.com",
+      dmPeerName: "Bob",
+    };
+    const html = await renderVueComponent("../src/components/calls/ConversationCallBanner.vue", props);
+    expect(html).toContain("Bob is calling");
+    expect(html).toContain("Bob is calling with a voice call.");
+    expect(html).toContain("Answer");
+
+    const emitted: unknown[][] = [];
+    const bindings = await setupVueComponent("../src/components/calls/ConversationCallBanner.vue", props, (...args) => {
+      emitted.push(args);
+    });
+    setupBindingFunction(bindings, "activateBanner")();
+
+    expect(emitted).toEqual([
+      ["answerDm", "bob@example.com", "bob@example.com/phone", "dm-ring", { audio: true, video: false }],
+    ]);
+  });
+
+  test("keeps unavailable conversation DM banners passive", async () => {
+    $dmCallActivities.set({
+      "bob@example.com": {
+        peerJid: "bob@example.com/phone",
+        sid: "dm-live",
+        media: { audio: true, video: false },
+        mediaKnown: false,
+        state: "accepted",
+        direction: "incoming",
+        updatedAt: "2026-05-25T12:00:00.000Z",
+      },
+    });
+
+    const props = {
+      roomJid: null,
+      channelId: null,
+      channelName: null,
+      dmPeerJid: "bob@example.com",
+      dmPeerName: "Bob",
+    };
+    const html = await renderVueComponent("../src/components/calls/ConversationCallBanner.vue", props);
+    expect(html).toContain("Call with Bob is live");
+    expect(html).toContain("Waiting for call details to finish syncing.");
+    expect(html).toContain("Unavailable");
+    expect(html).toContain("disabled");
+
+    const emitted: unknown[][] = [];
+    const bindings = await setupVueComponent("../src/components/calls/ConversationCallBanner.vue", props, (...args) => {
+      emitted.push(args);
+    });
+    setupBindingFunction(bindings, "activateBanner")();
+    expect(emitted).toEqual([]);
+  });
+
+  test("suppresses header DM activity controls when the conversation banner owns them", async () => {
+    $dmCallActivities.set({
+      "bob@example.com": {
+        peerJid: "bob@example.com/phone",
+        remoteFullJid: "bob@example.com/phone",
+        sid: "dm-ring",
+        media: { audio: true, video: false },
+        state: "ringing",
+        direction: "incoming",
+        updatedAt: "2026-05-25T12:00:00.000Z",
+      },
+    });
+
+    const html = await renderVueComponent("../src/components/calls/CallButton.vue", {
+      peerBareJid: "bob@example.com",
+      showActivityControls: false,
+    });
+
+    expect(html).not.toContain("Answer voice call");
+    expect(html).not.toContain("Incoming voice call");
+    expect(html).not.toContain("Start voice call");
+  });
+
+  test("suppresses header MUC start controls when the conversation banner owns the live call", async () => {
+    $mucCallParticipants.set({
+      "general@conference.example.com": ["alice", "bob"],
+    });
+
+    const html = await renderVueComponent("../src/components/calls/MucCallButton.vue", {
+      roomJid: "general@conference.example.com",
+      showActivePill: false,
+      hideStartControlsWhenActiveCall: true,
+    });
+
+    expect(html).not.toContain("Start voice call in this channel");
+    expect(html).not.toContain("Start video call in this channel");
+    expect(html).not.toContain("Live call in this channel");
+  });
+
   test("is mounted in the desktop sidebar and visible mobile shell", () => {
     const readyShell = readFileSync(new URL("../src/components/chat/ChatReadyShell.vue", import.meta.url), "utf8");
     const mobileDrawers = readFileSync(new URL("../src/components/chat/ChatMobileDrawers.vue", import.meta.url), "utf8");
     const callActivityDock = readFileSync(new URL("../src/components/calls/CallActivityDock.vue", import.meta.url), "utf8");
+    const contentArea = readFileSync(new URL("../src/components/chat/ContentArea.vue", import.meta.url), "utf8");
+    const chatHeader = readFileSync(new URL("../src/components/chat/ChatHeader.vue", import.meta.url), "utf8");
+    const callButton = readFileSync(new URL("../src/components/calls/CallButton.vue", import.meta.url), "utf8");
+    const mucCallButton = readFileSync(new URL("../src/components/calls/MucCallButton.vue", import.meta.url), "utf8");
+    const conversationBanner = readFileSync(new URL("../src/components/calls/ConversationCallBanner.vue", import.meta.url), "utf8");
 
     expect(readyShell).toContain("import CallActivityDock");
     expect(readyShell).toContain("import CurrentCallPanel");
@@ -566,6 +784,34 @@ describe("CallActivityDock rendering", () => {
     expect(mobileDrawers).toContain("@toggle-dms=\"openDmList\"");
     expect(mobileDrawers).toContain("hide-current-call");
     expect(callActivityDock).toContain("entry.peerJid.toLowerCase() === barePeerJid(current.peer).toLowerCase()");
+
+    expect(contentArea).toContain("import ConversationCallBanner");
+    expect(contentArea).toContain("<ConversationCallBanner");
+    expect(contentArea).toContain(":show-call-active-pill=\"false\"");
+    expect(contentArea).toContain(":show-dm-call-activity-controls=\"false\"");
+    expect(contentArea).toContain(":hide-muc-start-controls-when-active-call=\"true\"");
+    expect(contentArea).toContain("@join-channel-call=\"(channelId, roomJid, media) => emit('joinChannelCall', channelId, roomJid, media)\"");
+    expect(contentArea).toContain("@answer-dm=\"(peerJid, remoteFullJid, sid, media) => emit('answerDm', peerJid, remoteFullJid, sid, media)\"");
+    expect(contentArea).toContain("@reconnect-dm=\"(peerJid, media) => emit('reconnectDm', peerJid, media)\"");
+    expect(readyShell).toContain("@join-channel-call=\"joinChannelCallFromActivity\"");
+    expect(readyShell).toContain("@answer-dm=\"answerDmFromActivity\"");
+    expect(readyShell).toContain("@reconnect-dm=\"reconnectDmFromDock\"");
+    expect(chatHeader).toContain("showCallActivePill?: boolean");
+    expect(chatHeader).toContain("showDmCallActivityControls?: boolean");
+    expect(chatHeader).toContain("hideMucStartControlsWhenActiveCall?: boolean");
+    expect(chatHeader).toContain(":show-activity-controls=\"showDmCallActivityControls !== false\"");
+    expect(chatHeader).toContain(":show-active-pill=\"showCallActivePill !== false\"");
+    expect(chatHeader).toContain(":hide-start-controls-when-active-call=\"hideMucStartControlsWhenActiveCall\"");
+    expect(callButton).toContain("showActivityControls?: boolean");
+    expect(callButton).toContain("v-if=\"showPeerCallActivity || showStartControls\"");
+    expect(callButton).toContain("v-if=\"showPeerCallActivity\"");
+    expect(mucCallButton).toContain("showActivePill?: boolean");
+    expect(mucCallButton).toContain("hideStartControlsWhenActiveCall?: boolean");
+    expect(mucCallButton).toContain("const roomCall = useRoomHasActiveCall(() => props.roomJid)");
+    expect(mucCallButton).toContain("props.hideStartControlsWhenActiveCall && roomCall.hasActiveCall.value");
+    expect(mucCallButton).toContain("v-if=\"showActivePill !== false\"");
+    expect(conversationBanner).toContain("import { dmCallActivityAction, isBusy }");
+    expect(conversationBanner).not.toContain("function isBusy");
   });
 
   test("renders the persistent current-call panel for an active DM call", async () => {

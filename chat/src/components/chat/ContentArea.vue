@@ -19,6 +19,7 @@ import {
 import { extractFilesFromEvent } from "@/lib/xmpp/file-upload";
 import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
 import type { ExtensionAnnotationAction, TimelineMessage, MarkupSpan, MessageReference } from "@/lib/chat-ui";
+import type { CallMedia } from "@/lib/calls/types";
 import type { MentionCandidate } from "@/lib/mentions";
 import type { BrowserXmppClient, MessageSearchResult, XmppStatusSnapshot, RoomAuthority, RoomHats, RoomPresence } from "@/lib/xmpp-client";
 import type { MemberLoadState } from "@/waddles/directory";
@@ -32,6 +33,7 @@ import { ArrowDown, ArrowUp } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import ChatHeader, { type ChannelHeaderMember } from "@/components/chat/ChatHeader.vue";
 import CallExpandedSurface from "@/components/calls/CallExpandedSurface.vue";
+import ConversationCallBanner from "@/components/calls/ConversationCallBanner.vue";
 import CallSplitContainer from "@/components/calls/CallSplitContainer.vue";
 import ExtensionPalette from "@/components/chat/ExtensionPalette.vue";
 import MessageCard from "@/components/chat/MessageCard.vue";
@@ -125,6 +127,9 @@ const emit = defineEmits<{
   clearSearch: [];
   openDm: [peerJid: string];
   openThread: [threadId: string, targetMessageId?: string];
+  joinChannelCall: [channelId: string | null, roomJid: string, media: CallMedia];
+  answerDm: [peerJid: string, remoteFullJid: string, sid: string, media: CallMedia];
+  reconnectDm: [peerJid: string, media: CallMedia];
   refreshUpdate: [];
   loadOlder: [];
   retryLoad: [];
@@ -885,10 +890,23 @@ function dayDividerLabel(createdAt: string): string {
       :connection-status-icon="connectionStatusIcon"
       :xmpp-client="xmppClient"
       :notify-settings="notifySettings"
+      :show-call-active-pill="false"
+      :show-dm-call-activity-controls="false"
+      :hide-muc-start-controls-when-active-call="true"
       @open-nav="emit('openNav')"
       @open-details="emit('openDetails')"
       @edit-channel="emit('editChannel')"
       @select-member="(jid: string) => emit('openDm', jid)"
+    />
+    <ConversationCallBanner
+      :room-jid="callRoomJid"
+      :channel-id="channel?.id ?? null"
+      :channel-name="channel?.name ?? null"
+      :dm-peer-jid="dmPeer?.peerJid ?? null"
+      :dm-peer-name="dmPeer?.peerUsername ?? null"
+      @join-channel-call="(channelId, roomJid, media) => emit('joinChannelCall', channelId, roomJid, media)"
+      @answer-dm="(peerJid, remoteFullJid, sid, media) => emit('answerDm', peerJid, remoteFullJid, sid, media)"
+      @reconnect-dm="(peerJid, media) => emit('reconnectDm', peerJid, media)"
     />
     <div
       v-if="connectionNotice && connectionStatusClasses"

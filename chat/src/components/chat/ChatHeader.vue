@@ -27,7 +27,7 @@ export interface ChannelHeaderMember {
   presence: OccupantPresence;
 }
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   waddle: SpaceSummary | null;
   channel: ChannelSummary | null;
   dmPeer?: { peerJid?: string; peerUsername: string; presenceShow?: string } | null;
@@ -49,7 +49,20 @@ const props = defineProps<{
   /** Per-controller XEP-0492 settings store — explicit wiring,
    * NOT a module singleton, per the PR-compliance note. */
   notifySettings: NotifySettingsStore;
-}>();
+  /** When a larger in-conversation call banner is mounted, suppress
+   *  the compact header pill so users get one join affordance. */
+  showCallActivePill?: boolean;
+  /** Same suppression for 1:1 answer/reconnect call activity in the
+   *  header; the conversation banner owns that action in ContentArea. */
+  showDmCallActivityControls?: boolean;
+  /** Hide channel start controls while a refreshed live-call banner
+   *  presents the join affordance for this room. */
+  hideMucStartControlsWhenActiveCall?: boolean;
+}>(), {
+  showCallActivePill: true,
+  showDmCallActivityControls: true,
+  hideMucStartControlsWhenActiveCall: false,
+});
 
 const MAX_HEADER_AVATARS = 4;
 
@@ -279,10 +292,13 @@ const memberButtonCopy = computed(() => {
         <CallButton
           v-if="dmPeer?.peerJid"
           :peer-bare-jid="dmPeer.peerJid"
+          :show-activity-controls="showDmCallActivityControls !== false"
         />
         <MucCallButton
           v-else-if="callRoomJid"
           :room-jid="callRoomJid"
+          :show-active-pill="showCallActivePill !== false"
+          :hide-start-controls-when-active-call="hideMucStartControlsWhenActiveCall"
         />
         <!-- Live presence stack — desktop only. The mobile header is
              already crowded with hamburger + channel chip + search/pin/

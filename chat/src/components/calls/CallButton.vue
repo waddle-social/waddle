@@ -10,13 +10,19 @@ import type { CallWireSender } from "@/lib/calls/outbound";
 import { connectionStore } from "@/lib/connection-store";
 import type { CallMedia } from "@/lib/calls/types";
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   /** Peer's bare JID — the `<propose/>` per XEP-0353 §0.2 is
    *  addressed bare so every online resource is rung; whichever
    *  resource accepts becomes the responder full JID stamped on
    *  the inbound `<proceed/>`. */
   peerBareJid: string;
-}>();
+  /** When the conversation owns a larger answer/reconnect banner,
+   *  suppress this compact header activity affordance to avoid
+   *  duplicate controls for the same XEP-0353 call activity. */
+  showActivityControls?: boolean;
+}>(), {
+  showActivityControls: true,
+});
 
 const state = useStore($callState);
 const { activity: peerCallActivity } = useDmCallActivity(() => props.peerBareJid);
@@ -31,8 +37,10 @@ const inCall = computed(
 );
 
 const hasPeerCallActivity = computed(() => !!peerCallActivity.value);
-const voiceLabel = computed(() => hasPeerCallActivity.value && !inCall.value ? "Reconnect voice call" : "Start voice call");
-const videoLabel = computed(() => hasPeerCallActivity.value && !inCall.value ? "Reconnect video call" : "Start video call");
+const showPeerCallActivity = computed(() => props.showActivityControls !== false && hasPeerCallActivity.value);
+const showStartControls = computed(() => !hasPeerCallActivity.value);
+const voiceLabel = computed(() => "Start voice call");
+const videoLabel = computed(() => "Start video call");
 const peerActivityAction = computed(() => {
   const activity = peerCallActivity.value;
   return activity ? dmCallActivityAction(activity, state.value) : null;
@@ -121,18 +129,19 @@ async function handlePeerCallActivity(): Promise<void> {
 
 <template>
   <div
+    v-if="showPeerCallActivity || showStartControls"
     class="call-button-group"
-    :class="{ 'call-button-group--activity': hasPeerCallActivity }"
+    :class="{ 'call-button-group--activity': showPeerCallActivity }"
   >
     <span
-      v-if="hasPeerCallActivity"
+      v-if="showPeerCallActivity"
       class="call-button-group__hint type-meta"
       aria-hidden="true"
     >
       {{ activityBannerLabel }}
     </span>
     <button
-      v-if="hasPeerCallActivity"
+      v-if="showPeerCallActivity"
       class="chat-icon-button chat-icon-button--md transition-all duration-200"
       :class="activityButtonDisabled
         ? 'text-muted-foreground opacity-40 cursor-not-allowed'
@@ -147,7 +156,7 @@ async function handlePeerCallActivity(): Promise<void> {
       <Video v-else-if="peerCallActivity && hasKnownDmCallMedia(peerCallActivity) && peerCallActivity.media.video" class="w-3.5 h-3.5" />
       <Phone v-else class="w-3.5 h-3.5" />
     </button>
-    <template v-else>
+    <template v-else-if="showStartControls">
     <button
       class="chat-icon-button chat-icon-button--md transition-all duration-200"
       :class="inCall

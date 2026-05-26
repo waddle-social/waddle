@@ -67,7 +67,7 @@ function activeDmCallPeerJid(state: CallState): string {
   return "";
 }
 
-function isBusy(state: CallState): boolean {
+export function isBusy(state: CallState): boolean {
   return state.phase !== "idle" && state.phase !== "ended";
 }
 
