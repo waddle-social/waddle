@@ -468,6 +468,244 @@ describe("CallActivityDock rendering", () => {
     expect(html).toContain('title="1 active call"');
   });
 
+  test("renders refreshed call-only DMs in the direct-message panel", async () => {
+    $dmCallActivities.set({
+      "bob@example.com": {
+        peerJid: "bob@example.com",
+        sid: "dm-call-1",
+        media: { audio: true, video: true },
+        state: "accepted",
+        direction: "incoming",
+        updatedAt: "2026-05-25T12:00:00.000Z",
+      },
+    });
+
+    const html = await renderVueComponent("../src/components/chat/DmPanel.vue", {
+      conversations: [],
+      activePeerJid: null,
+    });
+
+    expect(html).not.toContain("No conversations yet");
+    expect(html).toContain("bob");
+    expect(html).toContain("Video call live");
+    expect(html).toContain("Live");
+  });
+
+  test("does not duplicate refreshed DM call activity when the conversation already exists", async () => {
+    $dmCallActivities.set({
+      "bob@example.com": {
+        peerJid: "Bob@Example.com/laptop",
+        sid: "dm-call-1",
+        media: { audio: true, video: true },
+        state: "accepted",
+        direction: "incoming",
+        updatedAt: "2026-05-25T12:00:00.000Z",
+      },
+    });
+
+    const html = await renderVueComponent("../src/components/chat/DmPanel.vue", {
+      conversations: [{
+        peerJid: "bob@example.com/phone",
+        peerUsername: "Bobby",
+        lastMessageBody: "Existing chat preview",
+        lastMessageAt: "2026-05-25T11:00:00.000Z",
+        unreadCount: 0,
+      }],
+      activePeerJid: "BOB@example.com/tablet",
+    });
+
+    expect(html).toContain("Existing chat preview");
+    expect(html).toContain("Live");
+    expect(html).toContain('aria-current="page"');
+    expect(html).not.toContain("Video call live");
+  });
+
+  test("renders outgoing refreshed DM call rows with clear ringing copy", async () => {
+    $dmCallActivities.set({
+      "alice@example.com": {
+        peerJid: "alice@example.com",
+        sid: "dm-call-2",
+        media: { audio: true, video: false },
+        state: "ringing",
+        direction: "outgoing",
+        updatedAt: "2026-05-25T12:01:00.000Z",
+      },
+    });
+
+    const html = await renderVueComponent("../src/components/chat/DmPanel.vue", {
+      conversations: [],
+      activePeerJid: null,
+    });
+
+    expect(html).toContain("Calling voice call");
+    expect(html).toContain("Ringing");
+    expect(html).not.toContain("Voice call calling");
+  });
+
+  test("orders refreshed call-only DMs with real conversations by recency", async () => {
+    $dmCallActivities.set({
+      "bob@example.com": {
+        peerJid: "Bob@example.com/laptop",
+        sid: "dm-call-3",
+        media: { audio: true, video: true },
+        state: "accepted",
+        direction: "incoming",
+        updatedAt: "2026-05-25T12:00:00.000Z",
+      },
+      "alice@example.com": {
+        peerJid: "alice@example.com",
+        sid: "dm-call-4",
+        media: { audio: true, video: false },
+        state: "ringing",
+        direction: "outgoing",
+        updatedAt: "2026-05-25T11:00:00.000Z",
+      },
+    });
+
+    const html = await renderVueComponent("../src/components/chat/DmPanel.vue", {
+      conversations: [{
+        peerJid: "carol@example.com",
+        peerUsername: "Carol",
+        lastMessageBody: "Latest real conversation",
+        lastMessageAt: "2026-05-25T12:05:00.000Z",
+        unreadCount: 0,
+      }],
+      activePeerJid: null,
+    });
+
+    const carolIndex = html.indexOf("Carol");
+    const bobIndex = html.indexOf("bob");
+    const aliceIndex = html.indexOf("alice");
+    expect(carolIndex).toBeGreaterThanOrEqual(0);
+    expect(bobIndex).toBeGreaterThanOrEqual(0);
+    expect(aliceIndex).toBeGreaterThanOrEqual(0);
+    expect(carolIndex).toBeLessThan(bobIndex);
+    expect(bobIndex).toBeLessThan(aliceIndex);
+  });
+
+  test("uses call activity recency when sorting an existing refreshed DM conversation", async () => {
+    $dmCallActivities.set({
+      "bob@example.com": {
+        peerJid: "bob@example.com/laptop",
+        sid: "dm-call-5",
+        media: { audio: true, video: true },
+        state: "accepted",
+        direction: "incoming",
+        updatedAt: "2026-05-25T12:10:00.000Z",
+      },
+    });
+
+    const html = await renderVueComponent("../src/components/chat/DmPanel.vue", {
+      conversations: [
+        {
+          peerJid: "bob@example.com/phone",
+          peerUsername: "Bobby",
+          lastMessageBody: "Old message, active call",
+          lastMessageAt: "2026-05-25T10:00:00.000Z",
+          unreadCount: 0,
+        },
+        {
+          peerJid: "carol@example.com",
+          peerUsername: "Carol",
+          lastMessageBody: "Newer text-only conversation",
+          lastMessageAt: "2026-05-25T12:05:00.000Z",
+          unreadCount: 0,
+        },
+      ],
+      activePeerJid: null,
+    });
+
+    const bobbyIndex = html.indexOf("Bobby");
+    const carolIndex = html.indexOf("Carol");
+    expect(bobbyIndex).toBeGreaterThanOrEqual(0);
+    expect(carolIndex).toBeGreaterThanOrEqual(0);
+    expect(bobbyIndex).toBeLessThan(carolIndex);
+    expect(html).toContain("Old message, active call");
+    expect(html).toContain("Live");
+    expect(html).not.toContain("Video call live");
+  });
+
+  test("uses normalized bare JIDs as the equal-recency fallback order", async () => {
+    $dmCallActivities.set({
+      "bob@example.com": {
+        peerJid: "Bob@example.com/laptop",
+        sid: "dm-call-6",
+        media: { audio: true, video: true },
+        state: "accepted",
+        direction: "incoming",
+        updatedAt: "2026-05-25T12:00:00.000Z",
+      },
+      "alice@example.com": {
+        peerJid: "alice@example.com/phone",
+        sid: "dm-call-7",
+        media: { audio: true, video: true },
+        state: "accepted",
+        direction: "incoming",
+        updatedAt: "2026-05-25T12:00:00.000Z",
+      },
+    });
+
+    const html = await renderVueComponent("../src/components/chat/DmPanel.vue", {
+      conversations: [],
+      activePeerJid: null,
+    });
+
+    const aliceIndex = html.indexOf("alice");
+    const bobIndex = html.indexOf("bob");
+    expect(aliceIndex).toBeGreaterThanOrEqual(0);
+    expect(bobIndex).toBeGreaterThanOrEqual(0);
+    expect(aliceIndex).toBeLessThan(bobIndex);
+  });
+
+  test("uses normalized bare JIDs as the existing-conversation fallback order", async () => {
+    const html = await renderVueComponent("../src/components/chat/DmPanel.vue", {
+      conversations: [
+        {
+          peerJid: "Same@example.com/a",
+          peerUsername: "Same Upper",
+          lastMessageBody: "Same bare first",
+          lastMessageAt: "2026-05-25T12:00:00.000Z",
+          unreadCount: 0,
+        },
+        {
+          peerJid: "same@example.com/z",
+          peerUsername: "Same Lower",
+          lastMessageBody: "Same bare second",
+          lastMessageAt: "2026-05-25T12:00:00.000Z",
+          unreadCount: 0,
+        },
+      ],
+      activePeerJid: null,
+    });
+
+    const upperIndex = html.indexOf("Same Upper");
+    const lowerIndex = html.indexOf("Same Lower");
+    expect(upperIndex).toBeGreaterThanOrEqual(0);
+    expect(lowerIndex).toBeGreaterThanOrEqual(0);
+    expect(upperIndex).toBeLessThan(lowerIndex);
+  });
+
+  test("renders unknown-direction refreshed DM call rows with fallback ringing copy", async () => {
+    $dmCallActivities.set({
+      "casey@example.com": {
+        peerJid: "casey@example.com",
+        sid: "dm-call-8",
+        media: { audio: true, video: true },
+        state: "ringing",
+        direction: "unknown",
+        updatedAt: "2026-05-25T12:02:00.000Z",
+      },
+    });
+
+    const html = await renderVueComponent("../src/components/chat/DmPanel.vue", {
+      conversations: [],
+      activePeerJid: null,
+    });
+
+    expect(html).toContain("Video call ringing");
+    expect(html).toContain("Ringing");
+  });
+
   test("renders sidebar channel rows as direct join affordances when idle", async () => {
     const html = await renderVueComponent("../src/components/chat/TopicsPanel.vue", {
       ...topicsPanelBaseProps(),
