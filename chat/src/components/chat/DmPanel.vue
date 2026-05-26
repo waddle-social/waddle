@@ -12,10 +12,13 @@ import type { CallMedia } from "@/lib/calls/types";
 import { barePeerJid } from "@/lib/xmpp/jid";
 import type { DmConversation } from "@/lib/xmpp-client";
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   conversations: DmConversation[];
   activePeerJid: string | null;
-}>();
+  hideCurrentCall?: boolean;
+}>(), {
+  hideCurrentCall: false,
+});
 
 const emit = defineEmits<{
   answerDm: [peerJid: string, remoteFullJid: string, sid: string, media: CallMedia];
@@ -27,6 +30,11 @@ const emit = defineEmits<{
 const dmCallActivities = useStore($dmCallActivities);
 const callState = useStore($callState);
 const activePeer = computed(() => normalizedPeerJid(props.activePeerJid ?? ""));
+const currentActiveDmPeer = computed(() => {
+  const current = callState.value;
+  if (!props.hideCurrentCall || current.phase !== "active" || current.kind !== "dm") return "";
+  return normalizedPeerJid(current.peer);
+});
 const activeCallRows = computed(() =>
   Object.values(dmCallActivities.value)
     .map((activity) => ({
@@ -36,7 +44,7 @@ const activeCallRows = computed(() =>
       meta: callActivityMeta(activity),
       action: callActivityActionLabel(activity),
     }))
-    .filter((row) => row.peerJid)
+    .filter((row) => row.peerJid && row.peerJid !== currentActiveDmPeer.value)
     .sort((left, right) => {
       const rightMs = timestampMs(right.activity.updatedAt);
       const leftMs = timestampMs(left.activity.updatedAt);
