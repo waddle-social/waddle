@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { useStore } from "@nanostores/vue";
-import { Hash, MessageCircle, Phone, Video } from "lucide-vue-next";
+import { ArrowRight, Hash, MessageCircle, Phone, PhoneIncoming, PhoneOutgoing, Video } from "lucide-vue-next";
 import {
   $mucCallParticipants,
   mucCallParticipantCounts,
@@ -23,6 +23,7 @@ const props = defineProps<{
   activePeerJid: string | null;
   sidebarMode: SidebarMode;
   activeChannelJids: Set<string>;
+  managedMucDomain?: string | null;
 }>();
 
 const emit = defineEmits<{
@@ -45,9 +46,11 @@ const entries = computed(() => buildCallActivityDockEntries({
   activePeerJid: props.activePeerJid,
   sidebarMode: props.sidebarMode,
   activeChannelJids: props.activeChannelJids,
+  managedMucDomain: props.managedMucDomain ?? null,
   callParticipantCounts: callParticipantCounts.value,
   dmCallActivities: dmCallActivities.value,
 }));
+const entryCount = computed(() => entries.value.length);
 
 function entryStatus(entry: CallActivityDockEntry): string {
   if (entry.kind === "channel") {
@@ -62,14 +65,30 @@ function entryStatus(entry: CallActivityDockEntry): string {
   return "Live";
 }
 
+function entryKindLabel(entry: CallActivityDockEntry): string {
+  if (entry.kind === "channel") return entry.isKnownChannel ? "Group call" : "Group call · syncing";
+  return entry.media.video ? "Video call" : "Voice call";
+}
+
+function entryMeta(entry: CallActivityDockEntry): string {
+  return `${entryKindLabel(entry)} · ${entryStatus(entry)}`;
+}
+
+function entryAction(entry: CallActivityDockEntry): string {
+  if (entry.kind === "channel") return "Open";
+  return "Open";
+}
+
 function entryTitle(entry: CallActivityDockEntry): string {
-  if (entry.kind === "channel") {
-    return `Join ${entry.title} call, ${entryStatus(entry)}`;
-  }
-  return `Open ${entry.title} call, ${entryStatus(entry)}`;
+  return `${entryAction(entry)} ${entry.title} call, ${entryStatus(entry)}`;
+}
+
+function entryCanSelect(entry: CallActivityDockEntry): boolean {
+  return entry.kind !== "channel" || entry.roomJid.length > 0;
 }
 
 function selectEntry(entry: CallActivityDockEntry): void {
+  if (!entryCanSelect(entry)) return;
   if (entry.kind === "channel") {
     emit("selectChannel", entry.channelId, entry.roomJid);
     return;
@@ -86,7 +105,10 @@ function selectEntry(entry: CallActivityDockEntry): void {
   >
     <div class="call-activity-dock__header">
       <span class="call-activity-dock__pulse" aria-hidden="true" />
-      <span class="type-section-label">Calls</span>
+      <span class="type-section-label">Active calls</span>
+      <span class="call-activity-dock__total type-count-badge" aria-hidden="true">
+        {{ entryCount }}
+      </span>
     </div>
     <div class="call-activity-dock__list">
       <button
@@ -94,21 +116,28 @@ function selectEntry(entry: CallActivityDockEntry): void {
         :key="entry.key"
         type="button"
         class="call-activity-dock__row"
-        :class="{ 'call-activity-dock__row--active': entry.isActive }"
+        :class="{
+          'call-activity-dock__row--active': entry.isActive,
+          'call-activity-dock__row--disabled': !entryCanSelect(entry),
+        }"
+        :disabled="!entryCanSelect(entry)"
         :aria-current="entry.isActive ? 'page' : undefined"
         :title="entryTitle(entry)"
+        :aria-label="entryTitle(entry)"
         @click="selectEntry(entry)"
       >
         <span class="call-activity-dock__icon" aria-hidden="true">
           <Hash v-if="entry.kind === 'channel'" class="h-3.5 w-3.5" />
           <Video v-else-if="entry.media.video" class="h-3.5 w-3.5" />
+          <PhoneIncoming v-else-if="entry.state === 'ringing' && entry.direction === 'incoming'" class="h-3.5 w-3.5" />
+          <PhoneOutgoing v-else-if="entry.state === 'ringing' && entry.direction === 'outgoing'" class="h-3.5 w-3.5" />
           <MessageCircle v-else-if="entry.state === 'ringing'" class="h-3.5 w-3.5" />
           <Phone v-else class="h-3.5 w-3.5" />
         </span>
         <span class="call-activity-dock__copy">
           <span class="call-activity-dock__title type-control">{{ entry.title }}</span>
           <span class="call-activity-dock__status type-meta">
-            {{ entryStatus(entry) }}
+            {{ entryMeta(entry) }}
           </span>
         </span>
         <span
@@ -117,6 +146,10 @@ function selectEntry(entry: CallActivityDockEntry): void {
           aria-hidden="true"
         >
           {{ entry.participantCount }}
+        </span>
+        <span class="call-activity-dock__action type-meta" aria-hidden="true">
+          {{ entryAction(entry) }}
+          <ArrowRight v-if="entryCanSelect(entry)" class="h-3 w-3" />
         </span>
       </button>
     </div>
@@ -150,6 +183,18 @@ function selectEntry(entry: CallActivityDockEntry): void {
   color: var(--sidebar-muted);
 }
 
+.call-activity-dock__total {
+  display: inline-flex;
+  min-width: 1.125rem;
+  height: 1.125rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  background: color-mix(in oklab, var(--sidebar-accent) 76%, transparent);
+  color: var(--sidebar-foreground);
+  font-variant-numeric: tabular-nums;
+}
+
 .call-activity-dock__pulse {
   width: 0.375rem;
   height: 0.375rem;
@@ -167,12 +212,12 @@ function selectEntry(entry: CallActivityDockEntry): void {
 
 .call-activity-dock__row {
   display: grid;
-  grid-template-columns: 1.5rem minmax(0, 1fr) auto;
-  min-height: 2.5rem;
+  grid-template-columns: 1.75rem minmax(0, 1fr) auto auto;
+  min-height: 3rem;
   align-items: center;
   gap: 0.5rem;
   border-radius: var(--radius-sm);
-  padding: 0.25rem 0.5rem;
+  padding: 0.375rem 0.5rem;
   color: var(--sidebar-muted);
   text-align: left;
   transition:
@@ -181,14 +226,26 @@ function selectEntry(entry: CallActivityDockEntry): void {
     transform 160ms ease-out;
 }
 
-.call-activity-dock__row:hover,
+.call-activity-dock__row:hover:not(:disabled),
 .call-activity-dock__row--active {
   background: color-mix(in oklab, var(--sidebar-accent) 72%, transparent);
   color: var(--sidebar-foreground);
 }
 
-.call-activity-dock__row:hover {
+.call-activity-dock__row:hover:not(:disabled) {
   transform: translateY(-1px);
+}
+
+.call-activity-dock__row--disabled,
+.call-activity-dock__row--disabled:hover {
+  cursor: default;
+  opacity: 0.72;
+  transform: none;
+}
+
+.call-activity-dock__row--disabled .call-activity-dock__action {
+  background: color-mix(in oklab, var(--sidebar-accent) 58%, transparent);
+  color: var(--sidebar-muted);
 }
 
 .call-activity-dock__row:focus-visible {
@@ -198,8 +255,8 @@ function selectEntry(entry: CallActivityDockEntry): void {
 
 .call-activity-dock__icon {
   display: inline-flex;
-  width: 1.5rem;
-  height: 1.5rem;
+  width: 1.75rem;
+  height: 1.75rem;
   align-items: center;
   justify-content: center;
   border-radius: var(--radius-sm);
@@ -241,6 +298,31 @@ function selectEntry(entry: CallActivityDockEntry): void {
   font-variant-numeric: tabular-nums;
 }
 
+.call-activity-dock__action {
+  display: inline-flex;
+  min-width: 3.25rem;
+  height: 1.625rem;
+  align-items: center;
+  justify-content: center;
+  gap: 0.25rem;
+  border-radius: 9999px;
+  background: color-mix(in oklab, oklch(0.7 0.18 145) 16%, transparent);
+  color: oklch(0.46 0.14 145);
+  white-space: nowrap;
+}
+
+.call-activity-dock__row:hover:not(:disabled) .call-activity-dock__action,
+.call-activity-dock__row--active .call-activity-dock__action {
+  background: color-mix(in oklab, oklch(0.7 0.18 145) 26%, transparent);
+  color: oklch(0.38 0.14 145);
+}
+
+:global(.dark) .call-activity-dock__action,
+:global(.dark) .call-activity-dock__row:hover:not(:disabled) .call-activity-dock__action,
+:global(.dark) .call-activity-dock__row--active .call-activity-dock__action {
+  color: oklch(0.86 0.13 145);
+}
+
 .call-activity-dock.call-activity-dock--mobile {
   max-height: none;
   border-top: 0;
@@ -267,7 +349,7 @@ function selectEntry(entry: CallActivityDockEntry): void {
 }
 
 .call-activity-dock.call-activity-dock--mobile .call-activity-dock__row {
-  min-width: min(14rem, 78vw);
+  min-width: min(17rem, 84vw);
 }
 
 @media (min-width: 64rem) {

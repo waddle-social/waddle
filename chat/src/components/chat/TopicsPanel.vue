@@ -48,20 +48,23 @@ const props = defineProps<{
    * the channel — matches Slack-Huddle / Discord-voice patterns.
    */
   callParticipantCounts?: Record<string, number>;
+  /** Trusted MUC service domain for id-only channel rows. */
+  managedMucDomain?: string | null;
 }>();
 
 /**
  * Resolve the channel's MUC room JID and look up the live-call
  * count for it. Channel rows in the sidebar may store the JID
  * directly (`channel.jid`) or only the channel id; in the latter
- * case we fall back to searching `activeChannelJids` for a match —
- * same heuristic `hasActivity()` uses for the green dot.
+ * case we combine the id with the managed MUC domain so localpart
+ * fallback cannot cross domains.
  */
 function callParticipantCount(channel: ChannelSummary): number {
   return callParticipantCountForChannel(
     channel,
     props.callParticipantCounts,
     props.activeChannelJids,
+    props.managedMucDomain,
   );
 }
 

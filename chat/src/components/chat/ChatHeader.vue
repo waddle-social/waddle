@@ -78,8 +78,13 @@ const showPinnedPanel = defineModel<boolean>("showPinnedPanel", { default: false
 const { activity: dmCallActivity } = useDmCallActivity(() => props.dmPeer?.peerJid);
 
 const dmCallActivityLabel = computed(() => {
-  if (!dmCallActivity.value) return "";
-  return dmCallActivity.value.state === "accepted" ? "Call active" : "Ringing";
+  const activity = dmCallActivity.value;
+  if (!activity) return "";
+  const media = activity.media.video ? "Video" : "Voice";
+  if (activity.state === "accepted") return `${media} call active`;
+  if (activity.direction === "incoming") return `Incoming ${media.toLowerCase()} call`;
+  if (activity.direction === "outgoing") return `${media} call calling`;
+  return `${media} call ringing`;
 });
 
 const emit = defineEmits<{
@@ -175,14 +180,14 @@ const memberButtonCopy = computed(() => {
             </span>
             <span
               v-if="dmCallActivity"
-              class="type-meta inline-flex h-5 shrink-0 items-center gap-1 rounded-full border border-success/25 bg-success/10 px-2 text-success"
+              class="type-meta hidden h-5 max-w-[9rem] shrink-0 items-center gap-1 overflow-hidden rounded-full border border-success/25 bg-success/10 px-2 text-success lg:inline-flex"
             >
               <PhoneCall class="h-3 w-3" />
-              {{ dmCallActivityLabel }}
+              <span class="truncate">{{ dmCallActivityLabel }}</span>
             </span>
           </div>
           <div v-if="dmPeer" class="lg:hidden type-caption text-muted-foreground truncate">
-            {{ presenceText(dmPeer.presenceShow) }}
+            {{ dmCallActivityLabel || presenceText(dmPeer.presenceShow) }}
           </div>
           <!-- Desktop subtitle slot: prefer the channel's own description
                (its "topic") so rooms with a stated subject get character

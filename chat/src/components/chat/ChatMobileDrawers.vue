@@ -5,6 +5,7 @@ import {
   $mucCallParticipants,
   mucCallParticipantCounts,
 } from "@/lib/calls/muc-call-presence";
+import { normalizeMucServiceDomain } from "@/lib/calls/muc-call-indicators";
 import WaddlesSidebar from "@/components/chat/WaddlesSidebar.vue";
 import TopicsPanel from "@/components/chat/TopicsPanel.vue";
 import DmPanel from "@/components/chat/DmPanel.vue";
@@ -35,6 +36,7 @@ const {
   channelExtensionRoutes,
   activeExtensionRouteKey,
   activeRightPanel,
+  selfDomain,
   openUserSettings,
   openHome,
   handleLogout,
@@ -64,6 +66,9 @@ const mucCallParticipantsStore = useStore($mucCallParticipants);
 const callParticipantCounts = computed<Record<string, number>>(() => {
   return mucCallParticipantCounts(mucCallParticipantsStore.value);
 });
+const managedMucDomain = computed(() =>
+  normalizeMucServiceDomain(waddles.mucServiceJid.value) || (selfDomain.value ? `muc.${selfDomain.value}` : ""),
+);
 
 const drawerExtensionRoutes = computed(() =>
   extensionRouteRailItems(
@@ -123,6 +128,7 @@ function openExtensionRoute(route: DiscoveredExtensionRoute) {
           :collapsed-group-ids="ui.collapsedSpaceGroupIds.value"
           :channel-unread-map="computedChannelUnreadMap"
           :call-participant-counts="callParticipantCounts"
+          :managed-muc-domain="managedMucDomain"
           :thread-entries-fn="(roomJid: string) => channelUnread.threadEntries(roomJid)"
           :active-community-surface="ui.activeCommunitySurface.value"
           :stories-active-count="stories.activeStories.value.length"
