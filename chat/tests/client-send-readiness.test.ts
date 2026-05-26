@@ -7,6 +7,7 @@ import { useChannelMessages } from "../src/channels/messages";
 import { BrowserXmppClient, roomBareJidFor, type InboxEntry, type LiveDmMessage, type RoomActivityEvent } from "../src/lib/xmpp-client";
 import { enqueueQueuedMessage, listQueuedDmMessages, listQueuedRoomMessages } from "../src/lib/outbound-queue-store";
 import { clearDmCallActivities, readDmCallActivity } from "../src/lib/calls/dm-call-activity";
+import type { ResumePersistence } from "../src/lib/xmpp/resume-persistence";
 import { handlerStubs } from "./helpers/xmpp-client-mock";
 
 function session(partial: Partial<WaddleSession> = {}): WaddleSession {
@@ -526,6 +527,51 @@ describe("client send readiness", () => {
       retainedJoinedRoomJids: Set<string>;
     }).xmpp = xmpp;
     (client as unknown as { retainedJoinedRoomJids: Set<string> }).retainedJoinedRoomJids = new Set([roomJid]);
+    (client as unknown as { wireEvents: (xmpp: typeof xmpp) => void }).wireEvents(xmpp);
+
+    (client as unknown as {
+      handleSessionReady: (xmpp: typeof xmpp, lifecycle: { type: "resumed" }) => void;
+    }).handleSessionReady(xmpp, { type: "resumed" });
+    await settleReconnectCatchup();
+
+    expect(xmpp.join_room).toHaveBeenCalledWith(roomJid, "alice");
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "available",
+      muc_jid: (client as unknown as { fullJid: string }).fullJid,
+    });
+    await settleReconnectCatchup();
+    expect((client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.has(roomJid)).toBe(true);
+  });
+
+  test("session-ready rejoins retained rooms restored from refresh persistence", async () => {
+    const roomJid = "muted@muc.example.com";
+    const persistence: ResumePersistence = {
+      loadCatchup: () => null,
+      saveCatchup: () => undefined,
+      clearCatchup: () => undefined,
+      loadSm: () => null,
+      consumeSm: () => null,
+      saveSm: () => undefined,
+      clearSm: () => undefined,
+      preparePagehideHandoff: () => undefined,
+      loadJoinedRooms: () => [roomJid],
+      saveJoinedRooms: () => undefined,
+      clearJoinedRooms: () => undefined,
+    };
+    const client = new BrowserXmppClient(session(), persistence);
+    let onPresence: ((presence: {
+      from?: string;
+      presence_type?: string;
+      muc_jid?: string;
+    }) => void) | null = null;
+    const xmpp = {
+      join_room: mock(async () => undefined),
+      set_on_presence(cb: NonNullable<typeof onPresence>) {
+        onPresence = cb;
+      },
+    };
+    (client as unknown as { xmpp: typeof xmpp }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: typeof xmpp) => void }).wireEvents(xmpp);
 
     (client as unknown as {

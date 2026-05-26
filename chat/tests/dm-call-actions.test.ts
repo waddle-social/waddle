@@ -5,6 +5,7 @@ import {
 } from "../src/lib/calls/call-store";
 import {
   answerIncomingDmCallActivity,
+  resumeDmCallActivity,
   startDmCallAction,
 } from "../src/lib/calls/dm-call-actions";
 import {
@@ -14,6 +15,18 @@ import {
   readDmCallActivity,
 } from "../src/lib/calls/dm-call-activity";
 import type { CallWireSender } from "../src/lib/calls/outbound";
+
+function jwtWithExp(exp: number): string {
+  return [
+    base64Url(JSON.stringify({ alg: "none", typ: "JWT" })),
+    base64Url(JSON.stringify({ exp })),
+    "sig",
+  ].join(".");
+}
+
+function base64Url(value: string): string {
+  return btoa(value).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+}
 
 afterEach(() => {
   clearCallState();
@@ -187,5 +200,153 @@ describe("startDmCallAction", () => {
       media: { audio: true, video: false },
       accepting: true,
     });
+  });
+
+  test("resumes an accepted hydrated DM call when the LiveKit identity matches this resource", () => {
+    const join = {
+      url: "wss://livekit.waddle.test",
+      room: "dm-call-restored",
+      identity: "alice@waddle.test/web",
+      token: jwtWithExp(Date.parse("2026-05-26T13:00:00.000Z") / 1000),
+    };
+    applyDmCallEvent({
+      event: {
+        kind: "session-accept",
+        from: "bob@waddle.test/phone",
+        to: "alice@waddle.test/web",
+        sid: "hydrated-live",
+        media: { audio: true, video: true },
+        join,
+      },
+      selfBareJid: "alice@waddle.test",
+      timestamp: "2026-05-26T12:00:00.000Z",
+      now: new Date("2026-05-26T12:00:00.000Z"),
+    });
+
+    expect(resumeDmCallActivity({
+      peerBareJid: "bob@waddle.test",
+      getSelfFullJid: () => "alice@waddle.test/web",
+      now: new Date("2026-05-26T12:00:00.000Z"),
+    })).toBe(true);
+    expect($callState.get()).toEqual({
+      phase: "active",
+      kind: "dm",
+      peer: "bob@waddle.test/phone",
+      sid: "hydrated-live",
+      media: { audio: true, video: true },
+      join,
+      initiator: "alice@waddle.test/web",
+    });
+  });
+
+  test("does not resume another resource's archived LiveKit identity", () => {
+    applyDmCallEvent({
+      event: {
+        kind: "session-accept",
+        from: "bob@waddle.test/phone",
+        to: "alice@waddle.test/tablet",
+        sid: "other-resource-live",
+        media: { audio: true, video: false },
+        join: {
+          url: "wss://livekit.waddle.test",
+          room: "dm-call-other",
+          identity: "alice@waddle.test/tablet",
+          token: jwtWithExp(Date.parse("2026-05-26T13:00:00.000Z") / 1000),
+        },
+      },
+      selfBareJid: "alice@waddle.test",
+      timestamp: "2026-05-26T12:00:00.000Z",
+      now: new Date("2026-05-26T12:00:00.000Z"),
+    });
+
+    expect(resumeDmCallActivity({
+      peerBareJid: "bob@waddle.test",
+      getSelfFullJid: () => "alice@waddle.test/web",
+      now: new Date("2026-05-26T12:00:00.000Z"),
+    })).toBe(false);
+    expect($callState.get()).toEqual({ phase: "idle" });
+  });
+
+  test("does not resume archived LiveKit credentials before this resource is known", () => {
+    applyDmCallEvent({
+      event: {
+        kind: "session-accept",
+        from: "bob@waddle.test/phone",
+        to: "alice@waddle.test/web",
+        sid: "missing-local-resource",
+        media: { audio: true, video: false },
+        join: {
+          url: "wss://livekit.waddle.test",
+          room: "dm-call-local",
+          identity: "alice@waddle.test/web",
+          token: jwtWithExp(Date.parse("2026-05-26T13:00:00.000Z") / 1000),
+        },
+      },
+      selfBareJid: "alice@waddle.test",
+      timestamp: "2026-05-26T12:00:00.000Z",
+      now: new Date("2026-05-26T12:00:00.000Z"),
+    });
+
+    expect(resumeDmCallActivity({
+      peerBareJid: "bob@waddle.test",
+      now: new Date("2026-05-26T12:00:00.000Z"),
+    })).toBe(false);
+    expect($callState.get()).toEqual({ phase: "idle" });
+  });
+
+  test("does not resume archived LiveKit credentials after their token expires", () => {
+    applyDmCallEvent({
+      event: {
+        kind: "session-accept",
+        from: "bob@waddle.test/phone",
+        to: "alice@waddle.test/web",
+        sid: "expired-livekit-token",
+        media: { audio: true, video: true },
+        join: {
+          url: "wss://livekit.waddle.test",
+          room: "dm-call-expired",
+          identity: "alice@waddle.test/web",
+          token: jwtWithExp(Date.parse("2026-05-26T11:59:00.000Z") / 1000),
+        },
+      },
+      selfBareJid: "alice@waddle.test",
+      timestamp: "2026-05-26T12:00:00.000Z",
+      now: new Date("2026-05-26T12:00:00.000Z"),
+    });
+
+    expect(resumeDmCallActivity({
+      peerBareJid: "bob@waddle.test",
+      getSelfFullJid: () => "alice@waddle.test/web",
+      now: new Date("2026-05-26T12:00:00.000Z"),
+    })).toBe(false);
+    expect($callState.get()).toEqual({ phase: "idle" });
+  });
+
+  test("does not resume archived LiveKit credentials without the peer full JID", () => {
+    applyDmCallEvent({
+      event: {
+        kind: "session-accept",
+        from: "bob@waddle.test",
+        to: "alice@waddle.test/web",
+        sid: "missing-peer-resource",
+        media: { audio: true, video: false },
+        join: {
+          url: "wss://livekit.waddle.test",
+          room: "dm-call-no-peer-resource",
+          identity: "alice@waddle.test/web",
+          token: jwtWithExp(Date.parse("2026-05-26T13:00:00.000Z") / 1000),
+        },
+      },
+      selfBareJid: "alice@waddle.test",
+      timestamp: "2026-05-26T12:00:00.000Z",
+      now: new Date("2026-05-26T12:00:00.000Z"),
+    });
+
+    expect(resumeDmCallActivity({
+      peerBareJid: "bob@waddle.test",
+      getSelfFullJid: () => "alice@waddle.test/web",
+      now: new Date("2026-05-26T12:00:00.000Z"),
+    })).toBe(false);
+    expect($callState.get()).toEqual({ phase: "idle" });
   });
 });

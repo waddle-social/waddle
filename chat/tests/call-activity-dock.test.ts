@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, mock, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,6 +13,10 @@ import {
   callActivityDockSelection,
 } from "../src/lib/calls/call-activity-dock";
 import {
+  activeChannelRailCallCount,
+  activeDmRailCallCount,
+} from "../src/lib/calls/call-rail-counts";
+import {
   $callState,
   clearCallState,
 } from "../src/lib/calls/call-store";
@@ -26,6 +30,7 @@ import { clearMucCallParticipants, $mucCallParticipants } from "../src/lib/calls
 import { clearDmCallActivities, $dmCallActivities } from "../src/lib/calls/dm-call-activity";
 import type { DmCallActivity } from "../src/lib/calls/dm-call-activity";
 import type { CallState, LiveKitJoin } from "../src/lib/calls/types";
+import { connectionStore } from "../src/lib/connection-store";
 
 afterEach(() => {
   clearCallState();
@@ -35,6 +40,7 @@ afterEach(() => {
   $callMicEnabled.set(true);
   $callCamEnabled.set(true);
   $callUiMode.set("split");
+  connectionStore.client = null;
 });
 
 const liveKitJoin: LiveKitJoin = {
@@ -43,6 +49,27 @@ const liveKitJoin: LiveKitJoin = {
   identity: "alice@example.com/web",
   token: "token",
 };
+
+function liveKitJoinFor(identity = "alice@example.com/web"): LiveKitJoin {
+  return {
+    url: "wss://livekit.example.test",
+    room: "call-room",
+    identity,
+    token: jwtWithExp(4_102_444_800),
+  };
+}
+
+function jwtWithExp(exp: number): string {
+  return [
+    base64Url(JSON.stringify({ alg: "none", typ: "JWT" })),
+    base64Url(JSON.stringify({ exp })),
+    "sig",
+  ].join(".");
+}
+
+function base64Url(value: string): string {
+  return btoa(value).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+}
 
 describe("call activity dock model", () => {
   test("surfaces group calls and DM calls across sidebar modes", () => {
@@ -71,6 +98,9 @@ describe("call activity dock model", () => {
       callParticipantCounts: {
         "general@conference.example.com": 3,
       },
+      callParticipants: {
+        "general@conference.example.com": ["alice", "bob", "carol"],
+      },
       dmCallActivities: {
         "bob@example.com": dmActivity,
       },
@@ -84,6 +114,7 @@ describe("call activity dock model", () => {
         roomJid: "general@conference.example.com",
         title: "General",
         participantCount: 3,
+        participantLabels: ["alice", "bob", "carol"],
         isKnownChannel: true,
         isActive: true,
       },
@@ -161,6 +192,8 @@ describe("call activity dock model", () => {
           peerJid: "bob@example.com",
           sid: "live",
           media: { audio: true, video: true },
+          remoteFullJid: "bob@example.com/phone",
+          join: liveKitJoinFor(),
           state: "accepted",
           direction: "incoming",
           updatedAt: "2026-05-25T12:00:00.000Z",
@@ -176,7 +209,7 @@ describe("call activity dock model", () => {
       },
     });
 
-    expect(entries.map((entry) => callActivityDockSelection(entry))).toEqual([
+    expect(entries.map((entry) => callActivityDockSelection(entry, { phase: "idle" }, "alice@example.com/web"))).toEqual([
       {
         kind: "channel-join",
         channelId: "general",
@@ -200,7 +233,7 @@ describe("call activity dock model", () => {
       sid: "muc-call",
       media: { audio: true, video: false },
       join: { url: "wss://livekit.example.test", room: "general", identity: "alice", token: "token" },
-    })).toBe("return");
+    }, "alice@example.com/web")).toBe("return");
     expect(callActivityDockAction(entries[0], {
       phase: "muc-pending",
       kind: "muc",
@@ -209,13 +242,13 @@ describe("call activity dock model", () => {
       media: { audio: true, video: false },
       selfNick: "alice",
       attemptId: "attempt-1",
-    })).toBe("return");
+    }, "alice@example.com/web")).toBe("return");
     expect(callActivityDockSelection(entries[0], {
       phase: "outgoing",
       to: "bob@example.com",
       sid: "dm-call",
       media: { audio: true, video: false },
-    })).toEqual({
+    }, "alice@example.com/web")).toEqual({
       kind: "channel",
       channelId: "general",
       roomJid: "general@conference.example.com",
@@ -227,7 +260,7 @@ describe("call activity dock model", () => {
       sid: "live",
       media: { audio: true, video: true },
       join: { url: "wss://livekit.example.test", room: "dm", identity: "alice", token: "token" },
-    })).toBe("return");
+    }, "alice@example.com/web")).toBe("return");
     expect(callActivityDockSelection(entries[1], {
       phase: "active",
       kind: "dm",
@@ -235,7 +268,7 @@ describe("call activity dock model", () => {
       sid: "live",
       media: { audio: true, video: true },
       join: { url: "wss://livekit.example.test", room: "dm", identity: "alice", token: "token" },
-    })).toEqual({
+    }, "alice@example.com/web")).toEqual({
       kind: "dm-open",
       peerJid: "bob@example.com",
     });
@@ -244,7 +277,7 @@ describe("call activity dock model", () => {
       to: "dana@example.com",
       sid: "other-call",
       media: { audio: true, video: false },
-    })).toBe("open");
+    }, "alice@example.com/web")).toBe("open");
   });
 
   test("surfaces group calls while the channel directory is still loading", () => {
@@ -270,6 +303,7 @@ describe("call activity dock model", () => {
         roomJid: "general@conference.example.com",
         title: "general",
         participantCount: 2,
+        participantLabels: [],
         isKnownChannel: false,
         isActive: false,
       },
@@ -301,6 +335,7 @@ describe("call activity dock model", () => {
         roomJid: "general@custom-muc.example.test",
         title: "General",
         participantCount: 3,
+        participantLabels: [],
         isKnownChannel: true,
         isActive: false,
       },
@@ -332,6 +367,7 @@ describe("call activity dock model", () => {
         roomJid: "general@conference.example.com",
         title: "General",
         participantCount: 2,
+        participantLabels: [],
         isKnownChannel: true,
         isActive: false,
       },
@@ -415,9 +451,11 @@ describe("CallActivityDock rendering", () => {
         peerJid: "bob@example.com",
         sid: "dm-call-1",
         media: { audio: true, video: true },
+        remoteFullJid: "bob@example.com/phone",
+        join: liveKitJoinFor(),
         state: "accepted",
         direction: "incoming",
-        updatedAt: "2026-05-25T12:00:00.000Z",
+        updatedAt: new Date().toISOString(),
       },
     });
 
@@ -432,6 +470,7 @@ describe("CallActivityDock rendering", () => {
       activePeerJid: null,
       sidebarMode: "channels",
       activeChannelJids: new Set<string>(),
+      selfFullJid: "alice@example.com/web",
     });
 
     expect(html).toContain("Active calls");
@@ -440,11 +479,12 @@ describe("CallActivityDock rendering", () => {
     expect(html).toContain("Group call");
     expect(html).toContain("Video call");
     expect(html).toContain("2 people");
+    expect(html).toContain("alice, bob");
     expect(html).toContain("Live");
     expect(html).toContain("Join");
     expect(html).toContain("Reconnect");
-    expect(html).toContain('aria-label="Join General call, 2 people"');
-    expect(html).toContain('aria-label="Reconnect Bob call, Live"');
+    expect(html).toContain('aria-label="Join General, Group call · 2 people, alice, bob in call"');
+    expect(html).toContain('aria-label="Reconnect Bob, Video call · Live"');
   });
 
   test("renders active group calls before channel metadata hydrates", async () => {
@@ -466,9 +506,46 @@ describe("CallActivityDock rendering", () => {
     expect(html).toContain("general");
     expect(html).toContain("Group call · syncing");
     expect(html).toContain("2 people");
+    expect(html).toContain("alice, bob");
     expect(html).toContain("Join");
-    expect(html).toContain("aria-label=\"Join general call, 2 people\"");
+    expect(html).toContain("aria-label=\"Join general, Group call · syncing · 2 people, alice, bob in call\"");
     expect(html).not.toContain("disabled");
+  });
+
+  test("keeps group calls visible when the desktop DM dock suppresses DM rows", async () => {
+    $mucCallParticipants.set({
+      "general@conference.example.com": ["alice", "bob", "carol"],
+    });
+    $dmCallActivities.set({
+      "bob@example.com": {
+        peerJid: "bob@example.com",
+        sid: "dm-call-1",
+        media: { audio: true, video: true },
+        state: "accepted",
+        direction: "incoming",
+        updatedAt: new Date().toISOString(),
+      },
+    });
+
+    const html = await renderCallActivityDock({
+      channels: [
+        { id: "general", name: "General", jid: "general@conference.example.com" },
+      ],
+      conversations: [
+        { peerJid: "bob@example.com", peerUsername: "Bob", unreadCount: 0 },
+      ],
+      activeChannelId: null,
+      activePeerJid: "bob@example.com",
+      sidebarMode: "dms",
+      activeChannelJids: new Set<string>(),
+      showDmCalls: false,
+    });
+
+    expect(html).toContain("General");
+    expect(html).toContain("alice, bob +1");
+    expect(html).toContain('aria-label="Join General, Group call · 3 people, alice, bob +1 in call"');
+    expect(html).not.toContain("Bob");
+    expect(html).not.toContain("Video call");
   });
 
   test("renders incoming 1:1 call activity without a false answer affordance", async () => {
@@ -479,7 +556,7 @@ describe("CallActivityDock rendering", () => {
         media: { audio: true, video: false },
         state: "ringing",
         direction: "incoming",
-        updatedAt: "2026-05-25T12:00:00.000Z",
+        updatedAt: new Date().toISOString(),
       },
     });
 
@@ -510,7 +587,7 @@ describe("CallActivityDock rendering", () => {
         media: { audio: true, video: false },
         state: "ringing",
         direction: "incoming",
-        updatedAt: "2026-05-25T12:00:00.000Z",
+        updatedAt: new Date().toISOString(),
       },
     });
 
@@ -529,7 +606,7 @@ describe("CallActivityDock rendering", () => {
     expect(html).toContain("Voice call");
     expect(html).toContain("Ringing");
     expect(html).toContain("Answer");
-    expect(html).toContain('aria-label="Answer Bob call, Ringing"');
+    expect(html).toContain('aria-label="Answer Bob, Voice call · Ringing"');
   });
 
   test("renders a conversation group call banner and emits join", async () => {
@@ -545,7 +622,12 @@ describe("CallActivityDock rendering", () => {
       dmPeerName: null,
     };
     const html = await renderVueComponent("../src/components/calls/ConversationCallBanner.vue", props);
+    expect(html).toContain('role="region"');
+    expect(html).toContain('aria-label="General has a live call"');
     expect(html).toContain("General has a live call");
+    expect(html).toContain("Live now");
+    expect(html).toContain("Voice call");
+    expect(html).toContain("Channel");
     expect(html).toContain("2 people connected in this channel.");
     expect(html).toContain("Join call");
 
@@ -593,10 +675,10 @@ describe("CallActivityDock rendering", () => {
       dmPeerName: null,
     });
 
-    expect(html).toContain('role="region"');
-    expect(html).toContain('aria-label="Conversation call status"');
     expect(html).toContain('aria-live="polite"');
     expect(html).toContain('aria-atomic="true"');
+    expect(html).not.toContain('role="region"');
+    expect(html).not.toContain('aria-label="Conversation call status"');
     expect(html).not.toContain("Join call");
     expect(html).not.toContain("General has a live call");
   });
@@ -605,8 +687,10 @@ describe("CallActivityDock rendering", () => {
     $dmCallActivities.set({
       "bob@example.com": {
         peerJid: "bob@example.com/phone",
+        remoteFullJid: "bob@example.com/phone",
         sid: "dm-live",
         media: { audio: true, video: true },
+        join: liveKitJoinFor(),
         state: "accepted",
         direction: "incoming",
         updatedAt: "2026-05-25T12:00:00.000Z",
@@ -619,10 +703,14 @@ describe("CallActivityDock rendering", () => {
       channelName: null,
       dmPeerJid: "bob@example.com",
       dmPeerName: "Bob",
+      selfFullJid: "alice@example.com/web",
     };
     const html = await renderVueComponent("../src/components/calls/ConversationCallBanner.vue", props);
     expect(html).toContain("Call with Bob is live");
-    expect(html).toContain("The video call is still live after refresh.");
+    expect(html).toContain("Live now");
+    expect(html).toContain("Video call");
+    expect(html).toContain("1:1");
+    expect(html).toContain("The video call is still live.");
     expect(html).toContain("Rejoin");
 
     const emitted: unknown[][] = [];
@@ -645,7 +733,7 @@ describe("CallActivityDock rendering", () => {
         media: { audio: true, video: false },
         state: "ringing",
         direction: "incoming",
-        updatedAt: "2026-05-25T12:00:00.000Z",
+        updatedAt: new Date().toISOString(),
       },
     });
 
@@ -657,6 +745,9 @@ describe("CallActivityDock rendering", () => {
       dmPeerName: "Bob",
     };
     const html = await renderVueComponent("../src/components/calls/ConversationCallBanner.vue", props);
+    expect(html).toContain("Incoming call");
+    expect(html).toContain("Voice call");
+    expect(html).toContain("Ringing");
     expect(html).toContain("Bob is calling");
     expect(html).toContain("Bob is calling with a voice call.");
     expect(html).toContain("Answer");
@@ -694,9 +785,80 @@ describe("CallActivityDock rendering", () => {
     };
     const html = await renderVueComponent("../src/components/calls/ConversationCallBanner.vue", props);
     expect(html).toContain("Call with Bob is live");
-    expect(html).toContain("Waiting for call details to finish syncing.");
+    expect(html).toContain("Syncing");
+    expect(html).toContain("Details pending");
+    expect(html).toContain("Reconnect details are not available on this tab yet.");
     expect(html).toContain("Unavailable");
     expect(html).toContain("disabled");
+
+    const emitted: unknown[][] = [];
+    const bindings = await setupVueComponent("../src/components/calls/ConversationCallBanner.vue", props, (...args) => {
+      emitted.push(args);
+    });
+    setupBindingFunction(bindings, "activateBanner")();
+    expect(emitted).toEqual([]);
+  });
+
+  test("labels accepted DM calls that belong to another resource as unavailable here", async () => {
+    $dmCallActivities.set({
+      "bob@example.com": {
+        peerJid: "bob@example.com/phone",
+        remoteFullJid: "bob@example.com/phone",
+        sid: "dm-live-other-resource",
+        media: { audio: true, video: false },
+        join: liveKitJoinFor("alice@example.com/phone"),
+        state: "accepted",
+        direction: "incoming",
+        updatedAt: new Date().toISOString(),
+      },
+    });
+
+    const html = await renderVueComponent("../src/components/calls/ConversationCallBanner.vue", {
+      roomJid: null,
+      channelId: null,
+      channelName: null,
+      dmPeerJid: "bob@example.com",
+      dmPeerName: "Bob",
+      selfFullJid: "alice@example.com/web",
+    });
+
+    expect(html).toContain("Other device");
+    expect(html).toContain("This call is live on another browser or device.");
+    expect(html).toContain("Unavailable");
+    expect(html).not.toContain("Waiting for call details to finish syncing.");
+  });
+
+  test("labels expired conversation DM banners as passive", async () => {
+    $dmCallActivities.set({
+      "bob@example.com": {
+        peerJid: "bob@example.com/phone",
+        remoteFullJid: "bob@example.com/phone",
+        sid: "dm-live-expired",
+        media: { audio: true, video: true },
+        join: {
+          ...liveKitJoinFor("alice@example.com/web"),
+          token: jwtWithExp(Math.floor(Date.now() / 1000) + 10),
+        },
+        state: "accepted",
+        direction: "incoming",
+        updatedAt: new Date().toISOString(),
+      },
+    });
+
+    const props = {
+      roomJid: null,
+      channelId: null,
+      channelName: null,
+      dmPeerJid: "bob@example.com",
+      dmPeerName: "Bob",
+      selfFullJid: "alice@example.com/web",
+    };
+    const html = await renderVueComponent("../src/components/calls/ConversationCallBanner.vue", props);
+
+    expect(html).toContain("Expired");
+    expect(html).toContain("The saved reconnect details expired.");
+    expect(html).toContain("Unavailable");
+    expect(html).not.toContain("Rejoin");
 
     const emitted: unknown[][] = [];
     const bindings = await setupVueComponent("../src/components/calls/ConversationCallBanner.vue", props, (...args) => {
@@ -715,7 +877,7 @@ describe("CallActivityDock rendering", () => {
         media: { audio: true, video: false },
         state: "ringing",
         direction: "incoming",
-        updatedAt: "2026-05-25T12:00:00.000Z",
+        updatedAt: new Date().toISOString(),
       },
     });
 
@@ -814,6 +976,52 @@ describe("CallActivityDock rendering", () => {
     expect(conversationBanner).not.toContain("function isBusy");
   });
 
+  test("ContentArea forwards conversation call banner events at runtime", async () => {
+    const emitted: unknown[][] = [];
+    const previousProbe = (globalThis as {
+      __waddleConversationCallBannerProbe?: (
+        props: Record<string, unknown>,
+        emit: (event: string, ...args: unknown[]) => void,
+      ) => void;
+    }).__waddleConversationCallBannerProbe;
+    const media = { audio: true, video: false };
+    (globalThis as {
+      __waddleConversationCallBannerProbe?: (
+        props: Record<string, unknown>,
+        emit: (event: string, ...args: unknown[]) => void,
+      ) => void;
+    }).__waddleConversationCallBannerProbe = (props, emit) => {
+      expect(props.roomJid).toBe("general@conference.example.com");
+      expect(props.channelId).toBe("general");
+      expect(props.dmPeerJid).toBe("bob@example.com");
+      emit("joinChannelCall", "general", "general@conference.example.com", media);
+      emit("answerDm", "bob@example.com", "bob@example.com/phone", "sid-1", media);
+      emit("reconnectDm", "bob@example.com", media);
+    };
+
+    try {
+      await suppressVueLifecycleSetupWarnings(() => renderVueComponent("../src/components/chat/ContentArea.vue", {
+        ...contentAreaBaseProps(),
+        onJoinChannelCall: (...args: unknown[]) => emitted.push(["joinChannelCall", ...args]),
+        onAnswerDm: (...args: unknown[]) => emitted.push(["answerDm", ...args]),
+        onReconnectDm: (...args: unknown[]) => emitted.push(["reconnectDm", ...args]),
+      }));
+    } finally {
+      (globalThis as {
+        __waddleConversationCallBannerProbe?: (
+          props: Record<string, unknown>,
+          emit: (event: string, ...args: unknown[]) => void,
+        ) => void;
+      }).__waddleConversationCallBannerProbe = previousProbe;
+    }
+
+    expect(emitted).toEqual([
+      ["joinChannelCall", "general", "general@conference.example.com", media],
+      ["answerDm", "bob@example.com", "bob@example.com/phone", "sid-1", media],
+      ["reconnectDm", "bob@example.com", media],
+    ]);
+  });
+
   test("renders the persistent current-call panel for an active DM call", async () => {
     $callState.set({
       phase: "active",
@@ -874,10 +1082,37 @@ describe("CallActivityDock rendering", () => {
     expect(html).toContain("General");
     expect(html).toContain("Connecting...");
     expect(html).toContain("Group call");
-    expect(html).toContain("2 in call");
+    expect(html).toContain("alice, bob");
     expect(html).toContain("Viewing");
     expect(html).toContain('aria-label="Viewing General call"');
     expect(html).toContain("disabled");
+  });
+
+  test("renders the local group-call nick before Muji participant replay reaches the current panel", async () => {
+    $callState.set({
+      phase: "muc-pending",
+      kind: "muc",
+      peer: "general@conference.example.com",
+      sid: "muc-live",
+      media: { audio: true, video: false },
+      selfNick: "alice",
+      attemptId: "attempt-1",
+    });
+
+    const html = await renderVueComponent("../src/components/calls/CurrentCallPanel.vue", {
+      channels: [
+        { id: "general", name: "General", jid: "general@conference.example.com" },
+      ],
+      conversations: [],
+      activeChannelId: null,
+      activeChannelRoomJid: null,
+      activePeerJid: null,
+    });
+
+    expect(html).toContain("Starting call");
+    expect(html).toContain("Group call");
+    expect(html).toContain("alice");
+    expect(html).not.toContain("Group</span>");
   });
 
   test("routes the persistent current-call panel back to the owning conversation", async () => {
@@ -990,6 +1225,126 @@ describe("CallActivityDock rendering", () => {
     expect(dmHtml).not.toContain("bob");
   });
 
+  test("announces no other calls when the current call is filtered out", async () => {
+    $callState.set({
+      phase: "active",
+      kind: "dm",
+      peer: "bob@example.com/phone",
+      sid: "dm-live",
+      media: { audio: true, video: true },
+      join: liveKitJoin,
+    });
+    $dmCallActivities.set({
+      "bob@example.com": {
+        peerJid: "bob@example.com",
+        sid: "dm-live",
+        media: { audio: true, video: true },
+        state: "accepted",
+        direction: "incoming",
+        updatedAt: "2026-05-25T12:00:00.000Z",
+      },
+    });
+
+    const html = await renderVueComponent("../src/components/calls/CallActivityDock.vue", {
+      channels: [],
+      conversations: [{ peerJid: "bob@example.com", peerUsername: "Bob" }],
+      activeChannelId: null,
+      activePeerJid: null,
+      sidebarMode: "dms",
+      activeChannelJids: new Set<string>(),
+      hideCurrentCall: true,
+    });
+
+    expect(html).toContain("No other active calls.");
+    expect(html).not.toContain('aria-label="Active calls"');
+  });
+
+  test("announces no other calls while the current call has not echoed into activity yet", async () => {
+    $callState.set({
+      phase: "active",
+      kind: "dm",
+      peer: "bob@example.com/phone",
+      sid: "dm-live",
+      media: { audio: true, video: true },
+      join: liveKitJoinFor(),
+    });
+
+    const html = await renderVueComponent("../src/components/calls/CallActivityDock.vue", {
+      channels: [],
+      conversations: [{ peerJid: "bob@example.com", peerUsername: "Bob" }],
+      activeChannelId: null,
+      activePeerJid: null,
+      sidebarMode: "dms",
+      activeChannelJids: new Set<string>(),
+      hideCurrentCall: true,
+    });
+
+    expect(html).toContain("No other active calls.");
+    expect(html).not.toContain("No active calls.");
+    expect(html).not.toContain('aria-label="Active calls"');
+  });
+
+  test("labels non-resumable accepted DM calls truthfully in the activity dock", async () => {
+    $dmCallActivities.set({
+      "bob@example.com": {
+        peerJid: "bob@example.com",
+        remoteFullJid: "bob@example.com/phone",
+        sid: "dm-other-device",
+        media: { audio: true, video: true },
+        join: liveKitJoinFor("alice@example.com/phone"),
+        state: "accepted",
+        direction: "incoming",
+        updatedAt: "2026-05-25T12:00:00.000Z",
+      },
+    });
+
+    const html = await renderVueComponent("../src/components/calls/CallActivityDock.vue", {
+      channels: [],
+      conversations: [{ peerJid: "bob@example.com", peerUsername: "Bob" }],
+      activeChannelId: null,
+      activePeerJid: null,
+      sidebarMode: "channels",
+      activeChannelJids: new Set<string>(),
+      selfFullJid: "alice@example.com/web",
+    });
+
+    expect(html).toContain("Video call · Other device");
+    expect(html).toContain('aria-label="Open Bob, Video call · Other device"');
+    expect(html).not.toContain("Video call · Live");
+  });
+
+  test("downgrades expired accepted DM calls to open-only copy", async () => {
+    $dmCallActivities.set({
+      "bob@example.com": {
+        peerJid: "bob@example.com",
+        remoteFullJid: "bob@example.com/phone",
+        sid: "dm-expired",
+        media: { audio: true, video: true },
+        join: {
+          ...liveKitJoinFor("alice@example.com/web"),
+          token: jwtWithExp(Math.floor(Date.now() / 1000) + 10),
+        },
+        state: "accepted",
+        direction: "incoming",
+        updatedAt: "2026-05-25T12:00:00.000Z",
+      },
+    });
+
+    const html = await renderVueComponent("../src/components/calls/CallActivityDock.vue", {
+      channels: [],
+      conversations: [{ peerJid: "bob@example.com", peerUsername: "Bob" }],
+      activeChannelId: null,
+      activePeerJid: null,
+      sidebarMode: "channels",
+      activeChannelJids: new Set<string>(),
+      selfFullJid: "alice@example.com/web",
+    });
+
+    expect(html).toContain("Video call · Expired");
+    expect(html).toContain('aria-label="Open Bob, Video call · Expired"');
+    expect(html).not.toContain("Reconnect Bob");
+  });
+
   test("expands the persistent current-call panel into a known group channel", async () => {
     $callState.set({
       phase: "active",
@@ -1039,12 +1394,92 @@ describe("CallActivityDock rendering", () => {
     expect(html).toContain('title="1 active call"');
   });
 
+  test("counts local current calls in the rail before discovery echoes activity", () => {
+    expect(activeChannelRailCallCount({}, {
+      phase: "muc-pending",
+      kind: "muc",
+      peer: "General@Conference.Example.com/alice",
+      sid: "muc-call",
+      media: { audio: true, video: false },
+      selfNick: "alice",
+      attemptId: "attempt-1",
+    })).toBe(1);
+    expect(activeChannelRailCallCount({
+      "general@conference.example.com": 2,
+    }, {
+      phase: "active",
+      kind: "muc",
+      peer: "general@conference.example.com",
+      sid: "muc-call",
+      media: { audio: true, video: false },
+      join: liveKitJoin,
+      selfNick: "alice",
+    })).toBe(1);
+    expect(activeDmRailCallCount({}, {
+      phase: "active",
+      kind: "dm",
+      peer: "bob@example.com/phone",
+      sid: "dm-call",
+      media: { audio: true, video: true },
+      join: liveKitJoin,
+    })).toBe(1);
+    expect(activeDmRailCallCount({
+      "bob@example.com": {
+        peerJid: "bob@example.com",
+        sid: "dm-call",
+        media: { audio: true, video: true },
+        state: "accepted",
+        direction: "incoming",
+        updatedAt: "2026-05-25T12:00:00.000Z",
+      },
+    }, {
+      phase: "active",
+      kind: "dm",
+      peer: "bob@example.com/phone",
+      sid: "dm-call",
+      media: { audio: true, video: true },
+      join: liveKitJoin,
+    })).toBe(1);
+  });
+
   test("renders refreshed call-only DMs in the direct-message panel", async () => {
     $dmCallActivities.set({
       "bob@example.com": {
         peerJid: "bob@example.com",
+        remoteFullJid: "bob@example.com/phone",
         sid: "dm-call-1",
         media: { audio: true, video: true },
+        join: liveKitJoinFor(),
+        state: "accepted",
+        direction: "incoming",
+        updatedAt: "2026-05-25T12:00:00.000Z",
+      },
+    });
+    connectionStore.client = { fullJid: "alice@example.com/web" } as unknown as typeof connectionStore.client;
+
+    const html = await renderVueComponent("../src/components/chat/DmPanel.vue", {
+      conversations: [],
+      activePeerJid: null,
+      selfFullJid: "alice@example.com/web",
+    });
+
+    expect(html).not.toContain("No conversations yet");
+    expect(html).toContain("Active calls");
+    expect(html).toContain("bob");
+    expect(html).toContain("Live now");
+    expect(html).toContain("Live video call");
+    expect(html).toContain("Reconnect bob call, Live now, Live video call");
+    expect(html).toContain("Live");
+  });
+
+  test("labels non-resumable direct calls in the direct-message panel", async () => {
+    $dmCallActivities.set({
+      "bob@example.com": {
+        peerJid: "bob@example.com",
+        remoteFullJid: "bob@example.com/phone",
+        sid: "dm-call-other-device",
+        media: { audio: true, video: false },
+        join: liveKitJoinFor("alice@example.com/phone"),
         state: "accepted",
         direction: "incoming",
         updatedAt: "2026-05-25T12:00:00.000Z",
@@ -1054,14 +1489,44 @@ describe("CallActivityDock rendering", () => {
     const html = await renderVueComponent("../src/components/chat/DmPanel.vue", {
       conversations: [],
       activePeerJid: null,
+      selfFullJid: "alice@example.com/web",
     });
 
-    expect(html).not.toContain("No conversations yet");
-    expect(html).toContain("Active calls");
-    expect(html).toContain("bob");
-    expect(html).toContain("Live video call");
-    expect(html).toContain("Reconnect bob call, Live video call");
-    expect(html).toContain("Live");
+    expect(html).toContain("Other device");
+    expect(html).toContain("Voice call · Other device");
+    expect(html).toContain("This call is live on another browser or device.");
+    expect(html).toContain("Open bob call, Other device, Voice call · Other device");
+    expect(html).not.toContain("Reconnect bob call");
+  });
+
+  test("labels expired direct calls in the direct-message panel", async () => {
+    $dmCallActivities.set({
+      "bob@example.com": {
+        peerJid: "bob@example.com",
+        remoteFullJid: "bob@example.com/phone",
+        sid: "dm-call-expired",
+        media: { audio: true, video: true },
+        join: {
+          ...liveKitJoinFor("alice@example.com/web"),
+          token: jwtWithExp(Math.floor(Date.now() / 1000) + 10),
+        },
+        state: "accepted",
+        direction: "incoming",
+        updatedAt: "2026-05-25T12:00:00.000Z",
+      },
+    });
+
+    const html = await renderVueComponent("../src/components/chat/DmPanel.vue", {
+      conversations: [],
+      activePeerJid: null,
+      selfFullJid: "alice@example.com/web",
+    });
+
+    expect(html).toContain("Expired");
+    expect(html).toContain("Video call · Expired");
+    expect(html).toContain("The saved reconnect details expired.");
+    expect(html).toContain("Open bob call, Expired, Video call · Expired");
+    expect(html).not.toContain("Reconnect bob call");
   });
 
   test("does not duplicate refreshed DM call activity when the conversation already exists", async () => {
@@ -1089,11 +1554,80 @@ describe("CallActivityDock rendering", () => {
 
     expect(html).toContain("Active calls");
     expect(html).toContain("Bobby");
-    expect(html).toContain("Live video call");
-    expect(html).toContain("Live");
+    expect(html).toContain("Syncing");
+    expect(html).toContain("Video call · Details pending");
+    expect(html).toContain("Reconnect details are not available on this tab yet.");
     expect(html).toContain('aria-current="page"');
     expect(html).not.toContain("Existing chat preview");
     expect(html).not.toContain("Video call live");
+  });
+
+  test("labels the hidden current call separately in the direct-message panel", async () => {
+    $callState.set({
+      phase: "active",
+      kind: "dm",
+      peer: "bob@example.com/phone",
+      sid: "dm-call-current",
+      media: { audio: true, video: true },
+      join: liveKitJoinFor(),
+    });
+    $dmCallActivities.set({
+      "bob@example.com": {
+        peerJid: "bob@example.com/phone",
+        remoteFullJid: "bob@example.com/phone",
+        sid: "dm-call-current",
+        media: { audio: true, video: true },
+        join: liveKitJoinFor(),
+        state: "accepted",
+        direction: "incoming",
+        updatedAt: "2026-05-25T12:00:00.000Z",
+      },
+    });
+
+    const html = await renderVueComponent("../src/components/chat/DmPanel.vue", {
+      conversations: [{
+        peerJid: "bob@example.com",
+        peerUsername: "Bobby",
+        lastMessageBody: "Existing chat preview",
+        unreadCount: 0,
+      }],
+      activePeerJid: null,
+      selfFullJid: "alice@example.com/web",
+      hideCurrentCall: true,
+    });
+
+    expect(html).toContain("No other active direct calls.");
+    expect(html).toContain("Current call shown separately");
+    expect(html).toContain("Current call");
+    expect(html).toContain('aria-label="Bobby, not selected, Current call shown separately, Open conversation"');
+    expect(html).not.toContain("Return call");
+    expect(html).not.toContain("Reconnect call");
+  });
+
+  test("announces no other direct calls while the current call has not echoed into activity yet", async () => {
+    $callState.set({
+      phase: "active",
+      kind: "dm",
+      peer: "bob@example.com/phone",
+      sid: "dm-call-current",
+      media: { audio: true, video: true },
+      join: liveKitJoinFor(),
+    });
+
+    const html = await renderVueComponent("../src/components/chat/DmPanel.vue", {
+      conversations: [{
+        peerJid: "bob@example.com",
+        peerUsername: "Bobby",
+        lastMessageBody: "Existing chat preview",
+        unreadCount: 0,
+      }],
+      activePeerJid: null,
+      selfFullJid: "alice@example.com/web",
+      hideCurrentCall: true,
+    });
+
+    expect(html).toContain("No other active direct calls.");
+    expect(html).not.toContain("No active direct calls.");
   });
 
   test("renders outgoing refreshed DM call rows with clear ringing copy", async () => {
@@ -1114,15 +1648,17 @@ describe("CallActivityDock rendering", () => {
     });
 
     expect(html).toContain("Calling voice call");
-    expect(html).toContain("Open alice call, Calling voice call");
+    expect(html).toContain("Open alice call, Calling, Calling voice call");
     expect(html).not.toContain("Voice call calling");
   });
 
   test("selects refreshed DM call rows as reconnect or return actions", async () => {
     const activity: DmCallActivity = {
       peerJid: "bob@example.com/phone",
+      remoteFullJid: "bob@example.com/phone",
       sid: "dm-call-9",
       media: { audio: true, video: true },
+      join: liveKitJoinFor(),
       state: "accepted",
       direction: "incoming",
       updatedAt: "2026-05-25T12:00:00.000Z",
@@ -1132,6 +1668,7 @@ describe("CallActivityDock rendering", () => {
     const bindings = await setupVueComponent("../src/components/chat/DmPanel.vue", {
       conversations: [],
       activePeerJid: null,
+      selfFullJid: "alice@example.com/web",
     }, (...args) => {
       emitted.push(args);
     });
@@ -1219,7 +1756,7 @@ describe("CallActivityDock rendering", () => {
       activePeerJid: null,
     });
 
-    const bobIndex = html.indexOf("Live video call");
+    const bobIndex = html.indexOf("Video call · Details pending");
     const aliceIndex = html.indexOf("Calling voice call", bobIndex);
     const carolIndex = html.indexOf("Latest real conversation", aliceIndex);
     expect(bobIndex).toBeGreaterThanOrEqual(0);
@@ -1267,7 +1804,8 @@ describe("CallActivityDock rendering", () => {
     expect(carolIndex).toBeGreaterThanOrEqual(0);
     expect(bobbyIndex).toBeLessThan(carolIndex);
     expect(html).not.toContain("Old message, active call");
-    expect(html).toContain("Live");
+    expect(html).toContain("Syncing");
+    expect(html).toContain("Video call · Details pending");
     expect(html).not.toContain("Video call live");
   });
 
@@ -1554,6 +2092,46 @@ describe("CallActivityDock rendering", () => {
     ]);
   });
 
+  test("mobile drawer forwards DM answer rows to the shell handler", async () => {
+    const forwarded: unknown[][] = [];
+    const bindings = await setupVueComponent("../src/components/chat/ChatMobileDrawers.vue", {
+      controller: {},
+      answerDm: (...args: unknown[]) => {
+        forwarded.push(args);
+      },
+    });
+
+    setupBindingFunction(bindings, "answerDmFromMobile")(
+      "bob@example.com",
+      "bob@example.com/phone",
+      "dm-call-1",
+      { audio: true, video: false },
+    );
+
+    expect(forwarded).toEqual([
+      ["bob@example.com", "bob@example.com/phone", "dm-call-1", { audio: true, video: false }],
+    ]);
+  });
+
+  test("mobile drawer forwards DM reconnect rows to the shell handler", async () => {
+    const forwarded: unknown[][] = [];
+    const bindings = await setupVueComponent("../src/components/chat/ChatMobileDrawers.vue", {
+      controller: {},
+      reconnectDm: (...args: unknown[]) => {
+        forwarded.push(args);
+      },
+    });
+
+    setupBindingFunction(bindings, "reconnectDmFromMobile")(
+      "bob@example.com",
+      { audio: true, video: true },
+    );
+
+    expect(forwarded).toEqual([
+      ["bob@example.com", { audio: true, video: true }],
+    ]);
+  });
+
   test("mobile drawer routes community surfaces through the controller", async () => {
     const selected: unknown[][] = [];
     const bindings = await setupVueComponent("../src/components/chat/ChatMobileDrawers.vue", {
@@ -1622,6 +2200,94 @@ describe("CallActivityDock rendering", () => {
     ]);
   });
 
+  test("home dashboard routes refreshed calls through reconnect, open-only, and fallback room actions", async () => {
+    const emitted: unknown[][] = [];
+    const validDmEntry = buildCallActivityDockEntries({
+      channels: [],
+      conversations: [{ peerJid: "bob@example.com", peerUsername: "Bob" }],
+      activeChannelId: null,
+      activePeerJid: null,
+      sidebarMode: "channels",
+      activeChannelJids: new Set(),
+      managedMucDomain: "conference.example.com",
+      callParticipantCounts: {},
+      dmCallActivities: {
+        "bob@example.com": {
+          peerJid: "bob@example.com",
+          remoteFullJid: "bob@example.com/phone",
+          sid: "dm-live",
+          media: { audio: true, video: true },
+          join: liveKitJoinFor(),
+          state: "accepted",
+          direction: "incoming",
+          updatedAt: "2026-05-25T12:00:00.000Z",
+        },
+      },
+    })[0];
+    const staleDmEntry = buildCallActivityDockEntries({
+      channels: [],
+      conversations: [{ peerJid: "carol@example.com", peerUsername: "Carol" }],
+      activeChannelId: null,
+      activePeerJid: null,
+      sidebarMode: "channels",
+      activeChannelJids: new Set(),
+      managedMucDomain: "conference.example.com",
+      callParticipantCounts: {},
+      dmCallActivities: {
+        "carol@example.com": {
+          peerJid: "carol@example.com",
+          remoteFullJid: "carol@example.com/phone",
+          sid: "dm-stale",
+          media: { audio: true, video: false },
+          join: liveKitJoinFor("alice@example.com/other"),
+          state: "accepted",
+          direction: "incoming",
+          updatedAt: "2026-05-25T12:00:00.000Z",
+        },
+      },
+    })[0];
+    const fallbackRoomEntry = buildCallActivityDockEntries({
+      channels: [],
+      conversations: [],
+      activeChannelId: null,
+      activePeerJid: null,
+      sidebarMode: "channels",
+      activeChannelJids: new Set(["standup@conference.example.com"]),
+      managedMucDomain: "conference.example.com",
+      callParticipantCounts: { "standup@conference.example.com": 2 },
+      dmCallActivities: {},
+    })[0];
+    if (!validDmEntry || !staleDmEntry || !fallbackRoomEntry) {
+      throw new Error("expected call entries for dashboard routing test");
+    }
+    const bindings = await suppressVueLifecycleSetupWarnings(() =>
+      setupVueComponent("../src/components/chat/HomeDashboard.vue", {
+        spaces: [],
+        channels: [],
+        contacts: [],
+        isLoading: false,
+        channelUnreadMap: {},
+        activeChannelJids: new Set(["standup@conference.example.com"]),
+        managedMucDomain: "conference.example.com",
+        callParticipantCounts: { "standup@conference.example.com": 2 },
+        dmConversations: [],
+        selfFullJid: "alice@example.com/web",
+      }, (...args) => {
+        emitted.push(args);
+      })
+    );
+
+    setupBindingFunction(bindings, "selectCallEntry")(validDmEntry);
+    setupBindingFunction(bindings, "selectCallEntry")(staleDmEntry);
+    setupBindingFunction(bindings, "selectCallEntry")(fallbackRoomEntry);
+
+    expect(emitted).toEqual([
+      ["reconnectDm", "bob@example.com", { audio: true, video: true }],
+      ["selectContact", "carol@example.com"],
+      ["joinChannelCall", null, "standup@conference.example.com", { audio: true, video: false }],
+    ]);
+  });
+
   test("shell join-call handler clears community surfaces before selecting a channel", async () => {
     const selected: unknown[][] = [];
     const ui = {
@@ -1672,17 +2338,208 @@ describe("CallActivityDock rendering", () => {
     ]);
   });
 
-  test("renders hydrated DM call controls with reconnect context", async () => {
+  test("shell answer selects the DM and proceeds with the hydrated full JID", async () => {
+    clearCallState();
+    const now = new Date().toISOString();
     $dmCallActivities.set({
       "bob@example.com": {
         peerJid: "bob@example.com",
-        sid: "dm-call-1",
+        remoteFullJid: "bob@example.com/phone",
+        sid: "dm-ring",
+        media: { audio: true, video: false },
+        state: "ringing",
+        direction: "incoming",
+        updatedAt: now,
+      },
+    });
+    const selected: unknown[][] = [];
+    const sendCallProceed = mock(async () => undefined);
+    const bindings = await suppressVueLifecycleSetupWarnings(() =>
+      setupVueComponent("../src/components/chat/ChatReadyShell.vue", {
+        controller: {
+          ui: { activeCommunitySurface: { value: null } },
+          connectionStore: {
+            client: { fullJid: "alice@example.com/web", xmpp: { send_call_proceed: sendCallProceed } },
+            session: null,
+          },
+          waddles: { mucServiceJid: { value: "" } },
+          selfDomain: { value: "" },
+          rosterContacts: {
+            contacts: { value: [] },
+            isLoadingContacts: { value: false },
+          },
+          messaging: {
+            mentionedChannelCounts: { value: {} },
+            activeChannels: { value: new Set<string>() },
+          },
+          dmConversations: { conversations: { value: [] } },
+          computedChannelUnreadMap: { value: {} },
+          activeRightPanel: { value: null },
+          activeThreadStack: { value: [] },
+          communityEvents: { rsvp: () => undefined },
+          closePinnedPanel: () => undefined,
+          activateRightPanel: () => undefined,
+          selectDm: (...args: unknown[]) => {
+            selected.push(args);
+          },
+          selectChannel: () => undefined,
+          selectChannelByRoomJid: () => undefined,
+        },
+      }),
+    );
+
+    setupBindingFunction(bindings, "answerDmFromActivity")(
+      "bob@example.com",
+      "bob@example.com/phone",
+      "dm-ring",
+      { audio: true, video: false },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(selected).toEqual([["bob@example.com"]]);
+    expect(sendCallProceed).toHaveBeenCalledWith("bob@example.com/phone", "dm-ring");
+    expect($callState.get()).toMatchObject({
+      phase: "incoming",
+      from: "bob@example.com/phone",
+      sid: "dm-ring",
+      accepting: true,
+    });
+  });
+
+  test("shell reconnect resumes only same-resource archived LiveKit calls", async () => {
+    $dmCallActivities.set({
+      "bob@example.com": {
+        peerJid: "bob@example.com",
+        remoteFullJid: "bob@example.com/phone",
+        sid: "dm-resume",
+        media: { audio: true, video: true },
+        join: liveKitJoinFor(),
+        state: "accepted",
+        direction: "incoming",
+        updatedAt: new Date().toISOString(),
+      },
+    });
+    const selected: unknown[][] = [];
+    const bindings = await suppressVueLifecycleSetupWarnings(() =>
+      setupVueComponent("../src/components/chat/ChatReadyShell.vue", {
+        controller: {
+          ui: { activeCommunitySurface: { value: null } },
+          connectionStore: {
+            client: { fullJid: "alice@example.com/web" },
+            session: null,
+          },
+          waddles: { mucServiceJid: { value: "" } },
+          selfDomain: { value: "" },
+          rosterContacts: {
+            contacts: { value: [] },
+            isLoadingContacts: { value: false },
+          },
+          messaging: {
+            mentionedChannelCounts: { value: {} },
+            activeChannels: { value: new Set<string>() },
+          },
+          dmConversations: { conversations: { value: [] } },
+          computedChannelUnreadMap: { value: {} },
+          activeRightPanel: { value: null },
+          activeThreadStack: { value: [] },
+          communityEvents: { rsvp: () => undefined },
+          closePinnedPanel: () => undefined,
+          activateRightPanel: () => undefined,
+          selectDm: (...args: unknown[]) => {
+            selected.push(args);
+          },
+          selectChannel: () => undefined,
+          selectChannelByRoomJid: () => undefined,
+        },
+      }),
+    );
+
+    setupBindingFunction(bindings, "reconnectDmFromDock")(
+      "bob@example.com",
+      { audio: true, video: true },
+    );
+
+    expect(selected).toEqual([["bob@example.com"]]);
+    expect($callState.get()).toEqual({
+      phase: "active",
+      kind: "dm",
+      peer: "bob@example.com/phone",
+      sid: "dm-resume",
+      media: { audio: true, video: true },
+      join: liveKitJoinFor(),
+      initiator: "alice@example.com/web",
+    });
+  });
+
+  test("shell reconnect leaves stale accepted activity open-only instead of sending a new propose", async () => {
+    $dmCallActivities.set({
+      "bob@example.com": {
+        peerJid: "bob@example.com",
+        sid: "dm-stale",
         media: { audio: true, video: true },
         state: "accepted",
         direction: "incoming",
         updatedAt: "2026-05-25T12:00:00.000Z",
       },
     });
+    const selected: unknown[][] = [];
+    const bindings = await suppressVueLifecycleSetupWarnings(() =>
+      setupVueComponent("../src/components/chat/ChatReadyShell.vue", {
+        controller: {
+          ui: { activeCommunitySurface: { value: null } },
+          connectionStore: {
+            client: { fullJid: "alice@example.com/web" },
+            session: null,
+          },
+          waddles: { mucServiceJid: { value: "" } },
+          selfDomain: { value: "" },
+          rosterContacts: {
+            contacts: { value: [] },
+            isLoadingContacts: { value: false },
+          },
+          messaging: {
+            mentionedChannelCounts: { value: {} },
+            activeChannels: { value: new Set<string>() },
+          },
+          dmConversations: { conversations: { value: [] } },
+          computedChannelUnreadMap: { value: {} },
+          activeRightPanel: { value: null },
+          activeThreadStack: { value: [] },
+          communityEvents: { rsvp: () => undefined },
+          closePinnedPanel: () => undefined,
+          activateRightPanel: () => undefined,
+          selectDm: (...args: unknown[]) => {
+            selected.push(args);
+          },
+          selectChannel: () => undefined,
+          selectChannelByRoomJid: () => undefined,
+        },
+      }),
+    );
+
+    setupBindingFunction(bindings, "reconnectDmFromDock")(
+      "bob@example.com",
+      { audio: true, video: true },
+    );
+
+    expect(selected).toEqual([["bob@example.com"]]);
+    expect($callState.get()).toEqual({ phase: "idle" });
+  });
+
+  test("renders hydrated DM call controls with reconnect context", async () => {
+    $dmCallActivities.set({
+      "bob@example.com": {
+        peerJid: "bob@example.com",
+        remoteFullJid: "bob@example.com/phone",
+        sid: "dm-call-1",
+        media: { audio: true, video: true },
+        join: liveKitJoinFor(),
+        state: "accepted",
+        direction: "incoming",
+        updatedAt: "2026-05-25T12:00:00.000Z",
+      },
+    });
+    connectionStore.client = { fullJid: "alice@example.com/web" } as unknown as typeof connectionStore.client;
 
     const html = await renderVueComponent("../src/components/calls/CallButton.vue", {
       peerBareJid: "bob@example.com",
@@ -1692,6 +2549,72 @@ describe("CallActivityDock rendering", () => {
     expect(html).toContain("Reconnect video call");
     expect(html).not.toContain("Reconnect voice call");
     expect(html).not.toContain("Start voice call");
+  });
+
+  test("CallButton reconnects hydrated same-resource activity without sending a fresh propose", async () => {
+    const updatedAt = new Date().toISOString();
+    const sender = {
+      send_call_propose: mock(async () => undefined),
+    };
+    connectionStore.client = {
+      fullJid: "alice@example.com/web",
+      xmpp: sender,
+    } as unknown as typeof connectionStore.client;
+    $dmCallActivities.set({
+      "bob@example.com": {
+        peerJid: "bob@example.com",
+        remoteFullJid: "bob@example.com/phone",
+        sid: "dm-call-1",
+        media: { audio: true, video: true },
+        join: liveKitJoinFor(),
+        state: "accepted",
+        direction: "incoming",
+        updatedAt,
+      },
+    });
+    const bindings = await setupVueComponent("../src/components/calls/CallButton.vue", {
+      peerBareJid: "bob@example.com",
+    });
+
+    await setupBindingFunction(bindings, "handlePeerCallActivity")();
+
+    expect(sender.send_call_propose).not.toHaveBeenCalled();
+    expect($callState.get()).toMatchObject({
+      phase: "active",
+      kind: "dm",
+      peer: "bob@example.com/phone",
+      sid: "dm-call-1",
+      join: liveKitJoinFor(),
+    });
+  });
+
+  test("CallButton stale accepted activity stays open-only and never sends a new propose", async () => {
+    const sender = {
+      send_call_propose: mock(async () => undefined),
+    };
+    connectionStore.client = {
+      fullJid: "alice@example.com/web",
+      xmpp: sender,
+    } as unknown as typeof connectionStore.client;
+    $dmCallActivities.set({
+      "bob@example.com": {
+        peerJid: "bob@example.com",
+        remoteFullJid: "bob@example.com/phone",
+        sid: "dm-call-stale",
+        media: { audio: true, video: true },
+        state: "accepted",
+        direction: "incoming",
+        updatedAt: "2026-05-25T12:00:00.000Z",
+      },
+    });
+    const bindings = await setupVueComponent("../src/components/calls/CallButton.vue", {
+      peerBareJid: "bob@example.com",
+    });
+
+    await setupBindingFunction(bindings, "handlePeerCallActivity")();
+
+    expect(sender.send_call_propose).not.toHaveBeenCalled();
+    expect($callState.get()).toEqual({ phase: "idle" });
   });
 
   test("does not reconnect proceed-only DM call activity with guessed voice media", async () => {
@@ -1790,6 +2713,54 @@ function chatHeaderBaseProps(): Record<string, unknown> {
     "onUpdate:showSearch": () => undefined,
     showPinnedPanel: false,
     "onUpdate:showPinnedPanel": () => undefined,
+  };
+}
+
+function contentAreaBaseProps(): Record<string, unknown> {
+  return {
+    draft: "",
+    forumTitle: "",
+    pinnedPanelOpen: false,
+    waddle: { id: "team", name: "Team" },
+    channel: { id: "general", name: "General", jid: "general@conference.example.com", spaceId: "team" },
+    roomJid: null,
+    dmPeer: { peerJid: "bob@example.com", peerUsername: "Bob", presenceShow: "available" },
+    sidebarMode: "channels",
+    messages: [],
+    firstUnseenId: null,
+    xmppStatus: { state: "online" },
+    actionError: "",
+    errorActionLabel: null,
+    updateAvailable: false,
+    isApplyingUpdate: false,
+    isLoadingMessages: false,
+    isLoadingOlderMessages: false,
+    hasOlderMessages: false,
+    isSending: false,
+    canManageChannels: false,
+    memberCount: 0,
+    memberState: "ready",
+    typingUsers: [],
+    currentUser: "alice",
+    currentUserJid: "alice@example.com",
+    selfFullJid: "alice@example.com/web",
+    selfDomain: "example.com",
+    avatarUrlByAuthor: {},
+    authorJidByNick: {},
+    giphyApiKey: "",
+    mentionCandidates: [],
+    roomHats: {},
+    roomAuthority: {},
+    roomPresence: {},
+    roomLastSeen: {},
+    slowModeCooldown: 0,
+    searchResults: [],
+    isSearching: false,
+    uploadProgress: { uploading: false, progress: 0, filename: "" },
+    threadIndex: new Map(),
+    xmppClient: null,
+    notifySettings: {},
+    reactionMode: null,
   };
 }
 
@@ -1903,6 +2874,7 @@ async function suppressVueLifecycleSetupWarnings<T>(fn: () => Promise<T>): Promi
     const message = String(args[0] ?? "");
     if (
       message.includes("onMounted is called when there is no active component instance") ||
+      message.includes("onBeforeUnmount is called when there is no active component instance") ||
       message.includes("onUnmounted is called when there is no active component instance")
     ) {
       return;
@@ -1981,5 +2953,8 @@ function resolveSourcePath(basePath: string): string {
 
 function moduleUrlForPath(resolvedPath: string): string {
   if (!resolvedPath.endsWith(".vue")) return pathToFileURL(resolvedPath).href;
+  if (resolvedPath.endsWith("/components/calls/ConversationCallBanner.vue")) {
+    return new URL("./helpers/conversation-call-banner-stub.ts", import.meta.url).href;
+  }
   return new URL("./helpers/vue-sfc-stub.ts", import.meta.url).href;
 }

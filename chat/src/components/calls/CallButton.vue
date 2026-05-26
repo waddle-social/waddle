@@ -4,8 +4,12 @@ import { useStore } from "@nanostores/vue";
 import { Phone, PhoneIncoming, Video } from "lucide-vue-next";
 import { $callState } from "@/lib/calls/call-store";
 import { dmCallActivityAction } from "@/lib/calls/call-activity-dock";
-import { hasKnownDmCallMedia, useDmCallActivity } from "@/lib/calls/dm-call-activity";
-import { answerIncomingDmCallActivity, startDmCallAction } from "@/lib/calls/dm-call-actions";
+import {
+  hasKnownDmCallMedia,
+  refreshDmCallActivityAffordances,
+  useDmCallActivity,
+} from "@/lib/calls/dm-call-activity";
+import { answerIncomingDmCallActivity, resumeDmCallActivity, startDmCallAction } from "@/lib/calls/dm-call-actions";
 import type { CallWireSender } from "@/lib/calls/outbound";
 import { connectionStore } from "@/lib/connection-store";
 import type { CallMedia } from "@/lib/calls/types";
@@ -29,9 +33,8 @@ const { activity: peerCallActivity } = useDmCallActivity(() => props.peerBareJid
 
 /** A call is already in flight — disable the button so the
  *  caller can't start a parallel call while one is ringing or
- *  active. Hydrated peer activity alone stays actionable: sending
- *  a fresh XEP-0353 propose lets the peer's active resource migrate
- *  the call back to this refreshed client. */
+ *  active. Hydrated peer activity only becomes a reconnect affordance
+ *  when the archived LiveKit credentials still belong to this resource. */
 const inCall = computed(
   () => state.value.phase !== "idle" && state.value.phase !== "ended",
 );
@@ -43,7 +46,7 @@ const voiceLabel = computed(() => "Start voice call");
 const videoLabel = computed(() => "Start video call");
 const peerActivityAction = computed(() => {
   const activity = peerCallActivity.value;
-  return activity ? dmCallActivityAction(activity, state.value) : null;
+  return activity ? dmCallActivityAction(activity, state.value, getInitiator() ?? null) : null;
 });
 const activityBannerLabel = computed(() => {
   const activity = peerCallActivity.value;
@@ -117,7 +120,12 @@ async function handlePeerCallActivity(): Promise<void> {
       });
       return;
     case "reconnect":
-      await startCall(activity.media);
+      if (!resumeDmCallActivity({
+        peerBareJid: props.peerBareJid,
+        getSelfFullJid: getInitiator,
+      })) {
+        refreshDmCallActivityAffordances();
+      }
       return;
     case "open":
     case "return":
@@ -145,7 +153,7 @@ async function handlePeerCallActivity(): Promise<void> {
       class="chat-icon-button chat-icon-button--md transition-all duration-200"
       :class="activityButtonDisabled
         ? 'text-muted-foreground opacity-40 cursor-not-allowed'
-        : 'text-success hover:bg-success/10 hover:text-success'"
+        : 'text-success-foreground hover:bg-success/10 hover:text-success-foreground'"
       type="button"
       :title="activityButtonLabel"
       :aria-label="activityButtonLabel"
@@ -206,7 +214,7 @@ async function handlePeerCallActivity(): Promise<void> {
   max-width: 8rem;
   overflow: hidden;
   padding-inline: 0.375rem 0.125rem;
-  color: var(--success);
+  color: var(--success-foreground);
   text-overflow: ellipsis;
   white-space: nowrap;
 }

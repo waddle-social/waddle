@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -22,6 +22,7 @@ import {
   summarizeHomeActivity,
 } from "../src/home/activity";
 import { buildHomeChannelUnreadMap, buildHomeDashboardProps } from "../src/home/dashboard-props";
+import { $callState, clearCallState } from "../src/lib/calls/call-store";
 import type { ChannelSummary } from "../src/lib/chat-types";
 
 const channels: ChannelSummary[] = [
@@ -29,6 +30,22 @@ const channels: ChannelSummary[] = [
   { id: "planning", name: "Planning", jid: "planning@conference.example.com", spaceId: "team" },
   { id: "quiet", name: "Quiet", jid: "quiet@conference.example.com", spaceId: "team" },
 ];
+
+afterEach(() => {
+  clearCallState();
+});
+
+function liveKitToken(exp = 4_102_444_800): string {
+  return [
+    base64Url(JSON.stringify({ alg: "none", typ: "JWT" })),
+    base64Url(JSON.stringify({ exp })),
+    "sig",
+  ].join(".");
+}
+
+function base64Url(value: string): string {
+  return btoa(value).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+}
 
 describe("home activity summaries", () => {
   test("summarizes unread, mentions, and live room activity for spaces", () => {
@@ -329,6 +346,7 @@ describe("HomeDashboard activity rendering", () => {
   });
 
   test("renders refresh-discovered active calls on the home dashboard", async () => {
+    const updated = formatTimelineStamp("2026-05-26T00:00:00.000Z");
     const html = await renderHomeDashboard({
       spaces: [{ id: "team", name: "Team" }],
       channels: [
@@ -342,6 +360,9 @@ describe("HomeDashboard activity rendering", () => {
       callParticipantCounts: {
         "general@conference.example.com": 2,
       },
+      callParticipants: {
+        "general@conference.example.com": ["alice", "bob"],
+      },
       dmConversations: [
         {
           peerJid: "bob@example.com",
@@ -353,23 +374,206 @@ describe("HomeDashboard activity rendering", () => {
       dmCallActivities: {
         "bob@example.com": {
           peerJid: "bob@example.com",
+          remoteFullJid: "bob@example.com/phone",
           sid: "dm-call-1",
           media: { audio: true, video: true },
+          join: {
+            url: "wss://livekit.example.test",
+            room: "dm-call-1",
+            identity: "alice@example.com/web",
+            token: liveKitToken(),
+          },
           state: "accepted",
           direction: "incoming",
           updatedAt: "2026-05-26T00:00:00.000Z",
         },
       },
+      selfFullJid: "alice@example.com/web",
     });
 
     expect(html).toContain("Active calls");
     expect(html).toContain("<strong>2</strong> active calls");
-    expect(html).toContain('aria-label="Join General, Group call, 2 people"');
-    expect(html).toContain('aria-label="Reconnect Bob, Video call, Live"');
-    expect(buttonForLabel(html, "Join General, Group call, 2 people")).toContain("Join");
+    expect(html).toContain("2 live conversations");
+    expect(html).toContain("Live now");
+    expect(html).toContain("2 people connected in this channel: alice, bob.");
+    expect(html).toContain("alice, bob");
+    expect(html).toContain("The video call is still live.");
+    expect(html).toContain('aria-label="Join General, Group call, 2 people, Live now, 2 people connected in this channel: alice, bob., Group call"');
+    expect(html).toContain(`aria-label="Reconnect Bob, Video call, Live, Live now, The video call is still live., Live video call · Updated ${updated}"`);
+    expect(buttonForLabel(html, "Join General, Group call, 2 people, Live now, 2 people connected in this channel: alice, bob., Group call")).toContain("Join");
     expect(buttonForLabel(html, "General, channel, no unread activity, active call with 2 people")).toContain("Active call");
-    expect(buttonForLabel(html, "Reconnect Bob, Video call, Live")).toContain("Live");
+    expect(buttonForLabel(html, `Reconnect Bob, Video call, Live, Live now, The video call is still live., Live video call · Updated ${updated}`)).toContain("Live");
     expect(html).not.toContain("Bob (bob@example.com), direct message, available, no unread activity, Video call live");
+  });
+
+  test("labels non-resumable active direct calls on the home dashboard", async () => {
+    const updated = formatTimelineStamp("2026-05-26T00:00:00.000Z");
+    const html = await renderHomeDashboard({
+      spaces: [],
+      channels: [],
+      contacts: [],
+      isLoading: false,
+      channelUnreadMap: {},
+      activeChannelJids: new Set<string>(),
+      managedMucDomain: "conference.example.com",
+      callParticipantCounts: {},
+      dmConversations: [
+        {
+          peerJid: "bob@example.com",
+          peerUsername: "Bob",
+          unreadCount: 0,
+          presenceShow: "available",
+        },
+      ],
+      dmCallActivities: {
+        "bob@example.com": {
+          peerJid: "bob@example.com",
+          remoteFullJid: "bob@example.com/phone",
+          sid: "dm-call-other-device",
+          media: { audio: true, video: false },
+          join: {
+            url: "wss://livekit.example.test",
+            room: "dm-call-other-device",
+            identity: "alice@example.com/phone",
+            token: liveKitToken(),
+          },
+          state: "accepted",
+          direction: "incoming",
+          updatedAt: "2026-05-26T00:00:00.000Z",
+        },
+      },
+      selfFullJid: "alice@example.com/web",
+    });
+
+    expect(html).toContain("Other device");
+    expect(html).toContain("This call is live on another browser or device.");
+    expect(html).toContain("Voice call · Other device");
+    expect(html).toContain(`aria-label="Open Bob, Voice call, Live, Other device, This call is live on another browser or device., Voice call · Other device · Updated ${updated}"`);
+    expect(html).not.toContain("Reconnect Bob");
+  });
+
+  test("labels expired active direct calls on the home dashboard", async () => {
+    const updated = formatTimelineStamp("2026-05-26T00:00:00.000Z");
+    const html = await renderHomeDashboard({
+      spaces: [],
+      channels: [],
+      contacts: [],
+      isLoading: false,
+      channelUnreadMap: {},
+      activeChannelJids: new Set<string>(),
+      managedMucDomain: "conference.example.com",
+      callParticipantCounts: {},
+      dmConversations: [
+        {
+          peerJid: "bob@example.com",
+          peerUsername: "Bob",
+          unreadCount: 0,
+          presenceShow: "available",
+        },
+      ],
+      dmCallActivities: {
+        "bob@example.com": {
+          peerJid: "bob@example.com",
+          remoteFullJid: "bob@example.com/phone",
+          sid: "dm-call-expired",
+          media: { audio: true, video: true },
+          join: {
+            url: "wss://livekit.example.test",
+            room: "dm-call-expired",
+            identity: "alice@example.com/web",
+            token: liveKitToken(Math.floor(Date.now() / 1000) + 10),
+          },
+          state: "accepted",
+          direction: "incoming",
+          updatedAt: "2026-05-26T00:00:00.000Z",
+        },
+      },
+      selfFullJid: "alice@example.com/web",
+    });
+
+    expect(html).toContain("Expired");
+    expect(html).toContain("The saved reconnect details expired.");
+    expect(html).toContain("Video call · Expired");
+    expect(html).toContain(`aria-label="Open Bob, Video call, Live, Expired, The saved reconnect details expired., Video call · Expired · Updated ${updated}"`);
+    expect(html).not.toContain("Reconnect Bob");
+  });
+
+  test("counts the local current call before discovery echoes activity on the home dashboard", async () => {
+    $callState.set({
+      phase: "active",
+      kind: "dm",
+      peer: "bob@example.com/phone",
+      sid: "dm-current",
+      media: { audio: true, video: true },
+      join: {
+        url: "wss://livekit.example.test",
+        room: "dm-current",
+        identity: "alice@example.com/web",
+        token: liveKitToken(),
+      },
+    });
+
+    const html = await renderHomeDashboard({
+      spaces: [],
+      channels: [],
+      contacts: [],
+      isLoading: false,
+      channelUnreadMap: {},
+      activeChannelJids: new Set<string>(),
+      managedMucDomain: "conference.example.com",
+      callParticipantCounts: {},
+      dmConversations: [
+        {
+          peerJid: "bob@example.com",
+          peerUsername: "Bob",
+          unreadCount: 0,
+          presenceShow: "available",
+        },
+      ],
+      dmCallActivities: {},
+      selfFullJid: "alice@example.com/web",
+    });
+
+    expect(html).toContain("<strong>1</strong> active call");
+    expect(html).toContain("1 live conversation");
+    expect(html).toContain("Bob");
+    expect(html).toContain("The video call is still live.");
+    expect(html).toContain("Return");
+    expect(html).not.toContain("Bob (bob@example.com), direct message");
+    expect(html).not.toContain("No active calls.");
+  });
+
+  test("counts and renders the local current group call before Muji discovery echoes activity", async () => {
+    $callState.set({
+      phase: "muc-pending",
+      kind: "muc",
+      peer: "general@conference.example.com",
+      sid: "muc-current",
+      media: { audio: true, video: false },
+      selfNick: "alice",
+      attemptId: "attempt-1",
+    });
+
+    const html = await renderHomeDashboard({
+      spaces: [{ id: "team", name: "Team" }],
+      channels: [
+        { id: "general", name: "General", jid: "general@conference.example.com", spaceId: "team" },
+      ],
+      contacts: [],
+      isLoading: false,
+      channelUnreadMap: {},
+      activeChannelJids: new Set<string>(),
+      managedMucDomain: "conference.example.com",
+      callParticipantCounts: {},
+      dmConversations: [],
+    });
+
+    expect(html).toContain("<strong>1</strong> active call");
+    expect(html).toContain("1 live conversation");
+    expect(html).toContain("General");
+    expect(html).toContain("1 person connected in this channel: alice.");
+    expect(html).toContain('aria-label="Return General, Group call, 1 person, Live now, 1 person connected in this channel: alice., Group call"');
+    expect(html).not.toContain("No active calls.");
   });
 
   test("pluralizes single thread reply badges", async () => {
@@ -418,6 +622,7 @@ describe("HomeDashboard activity rendering", () => {
         lastMessageBody: "Can you review the plan?",
       }],
       callParticipantCounts: { "general@conference.example.com": 2 },
+      callParticipants: { "general@conference.example.com": ["alice", "bob"] },
       dmCallActivities: {
         "bob@example.com": {
           peerJid: "bob@example.com",
@@ -429,6 +634,7 @@ describe("HomeDashboard activity rendering", () => {
         },
       },
       managedMucDomain: "conference.example.com",
+      selfFullJid: "alice@example.com/web",
     });
 
     expect(props.channelUnreadMap?.general).toEqual({
@@ -441,8 +647,10 @@ describe("HomeDashboard activity rendering", () => {
     expect(props.activeChannelJids?.has("general@conference.example.com")).toBe(true);
     expect(props.dmConversations?.[0]?.unreadCount).toBe(2);
     expect(props.callParticipantCounts).toEqual({ "general@conference.example.com": 2 });
+    expect(props.callParticipants).toEqual({ "general@conference.example.com": ["alice", "bob"] });
     expect(props.dmCallActivities?.["bob@example.com"]?.state).toBe("accepted");
     expect(props.managedMucDomain).toBe("conference.example.com");
+    expect(props.selfFullJid).toBe("alice@example.com/web");
   });
 });
 

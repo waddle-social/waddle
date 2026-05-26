@@ -2,10 +2,12 @@ import { computed, type ComputedRef } from "vue";
 import { useStore } from "@nanostores/vue";
 import { $callState } from "./call-store";
 import {
+  $mucCallParticipantOwners,
   $mucCallParticipants,
   normalizeMucCallRoomJid,
 } from "./muc-call-presence";
 import { connectionStore } from "@/lib/connection-store";
+import { fullJidIdentityKey } from "@/lib/xmpp/jid";
 
 /**
  * Derived view of "is the local user currently in an active MUC group
@@ -76,6 +78,7 @@ export function useRoomHasActiveCall(
 } {
   const state = useStore($callState);
   const participants = useStore($mucCallParticipants);
+  const participantOwners = useStore($mucCallParticipantOwners);
 
   const normalizedRoomJid = computed<string | null>(() => {
     const normalized = normalizeMucCallRoomJid(roomJid());
@@ -98,8 +101,11 @@ export function useRoomHasActiveCall(
   const localResourceInCall = computed<boolean>(() => {
     const room = normalizedRoomJid.value;
     const s = state.value;
-    if (!room || s.phase !== "active" || s.kind !== "muc") return false;
-    return normalizeMucCallRoomJid(s.peer) === room;
+    if (!room) return false;
+    if (s.phase === "active" && s.kind === "muc" && normalizeMucCallRoomJid(s.peer) === room) {
+      return true;
+    }
+    return hasOwnerFullJid(participantOwners.value[room] ?? [], currentClientFullJid());
   });
 
   const participantCount = computed<number>(() => participantList.value.length);
@@ -118,17 +124,33 @@ export function readRoomHasActiveCall(roomJid: string): {
     return { hasActiveCall: false, selfInCall: false, localResourceInCall: false, participantCount: 0 };
   }
   const participants = $mucCallParticipants.get()[normalized] ?? [];
+  const participantOwners = $mucCallParticipantOwners.get()[normalized] ?? [];
   const nick = connectionStore.session?.username ?? null;
   const s = $callState.get();
   return {
     hasActiveCall: participants.length > 0,
     selfInCall: !!nick && participants.includes(nick),
     localResourceInCall:
-      s.phase === "active" &&
-      s.kind === "muc" &&
-      normalizeMucCallRoomJid(s.peer) === normalized,
+      (
+        s.phase === "active" &&
+        s.kind === "muc" &&
+        normalizeMucCallRoomJid(s.peer) === normalized
+      ) ||
+      hasOwnerFullJid(participantOwners, currentClientFullJid()),
     participantCount: participants.length,
   };
+}
+
+function currentClientFullJid(): string {
+  return fullJidIdentityKey((connectionStore.client as unknown as { fullJid?: string } | null)?.fullJid);
+}
+
+function hasOwnerFullJid(
+  owners: ReadonlyArray<{ realJid?: string }>,
+  fullJid: string,
+): boolean {
+  if (!fullJid) return false;
+  return owners.some((owner) => fullJidIdentityKey(owner.realJid) === fullJid);
 }
 
 /**

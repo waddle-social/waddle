@@ -25,13 +25,17 @@ import {
   type CallActivityDockEntry,
 } from "@/lib/calls/call-activity-dock";
 import { $callState } from "@/lib/calls/call-store";
-import { hasKnownDmCallMedia } from "@/lib/calls/dm-call-activity";
-import { callParticipantCountForChannel } from "@/lib/calls/muc-call-indicators";
+import { dmCallResumeBlockReason, hasKnownDmCallMedia } from "@/lib/calls/dm-call-activity";
+import {
+  callParticipantCountForChannel,
+  mucCallParticipantPreview,
+} from "@/lib/calls/muc-call-indicators";
+import { normalizeMucCallRoomJid } from "@/lib/calls/muc-call-presence";
 import { barePeerJid } from "@/lib/xmpp/jid";
 import type { CallMedia } from "@/lib/calls/types";
 import { groupChannelsBySpace } from "@/lib/channel-grouping";
 import { formatTimelineStamp } from "@/channels/timeline";
-import type { ChannelActivityState, HomeDashboardProps } from "@/home/dashboard-props";
+import type { HomeDashboardProps } from "@/home/dashboard-props";
 import {
   channelActivityPreview,
   channelActivityState,
@@ -43,6 +47,7 @@ import {
   dmPreviewText,
   spaceHomeLabel,
   summarizeHomeActivity,
+  type ChannelActivityState,
   type HomeActivitySummary,
 } from "@/home/activity";
 
@@ -115,20 +120,29 @@ const groups = computed(() => groupChannelsBySpace(props.spaces, props.channels)
 const visibleChannelGroups = computed(() => groups.value.filter((group) => group.channels.length > 0));
 const activeChannelJids = computed(() => props.activeChannelJids ?? new Set<string>());
 const callParticipantCounts = computed(() => props.callParticipantCounts ?? {});
+const callParticipants = computed(() => props.callParticipants ?? {});
 const dmCallActivities = computed(() => props.dmCallActivities ?? {});
-const activeDmCallPeers = computed(() =>
-  new Set(Object.values(dmCallActivities.value).map((activity) => barePeerJid(activity.peerJid).toLowerCase()).filter(Boolean)),
-);
+const callState = useStore($callState);
+const currentActiveDmPeer = computed(() => {
+  const current = callState.value;
+  return current.phase === "active" && current.kind === "dm"
+    ? barePeerJid(current.peer).toLowerCase()
+    : "";
+});
+const activeDmCallPeers = computed(() => {
+  const peers = new Set(Object.values(dmCallActivities.value).map((activity) => barePeerJid(activity.peerJid).toLowerCase()).filter(Boolean));
+  if (currentActiveDmPeer.value) peers.add(currentActiveDmPeer.value);
+  return peers;
+});
 const directMessages = computed(() =>
   (props.dmConversations ?? []).filter((conversation) =>
     !activeDmCallPeers.value.has(barePeerJid(conversation.peerJid).toLowerCase())
   ),
 );
-const callState = useStore($callState);
 const channelsBySpace = computed(() =>
   new Map(groups.value.flatMap((group) => group.space ? [[group.space.id, group.channels.length] as const] : [])),
 );
-const activeCallEntries = computed<CallActivityDockEntry[]>(() => buildCallActivityDockEntries({
+const discoveredCallEntries = computed<CallActivityDockEntry[]>(() => buildCallActivityDockEntries({
   channels: props.channels,
   conversations: props.dmConversations ?? [],
   activeChannelId: null,
@@ -138,8 +152,24 @@ const activeCallEntries = computed<CallActivityDockEntry[]>(() => buildCallActiv
   activeChannelJids: activeChannelJids.value,
   managedMucDomain: props.managedMucDomain ?? null,
   callParticipantCounts: callParticipantCounts.value,
+  callParticipants: callParticipants.value,
   dmCallActivities: dmCallActivities.value,
 }));
+const currentCallFallbackEntry = computed<CallActivityDockEntry | null>(() =>
+  buildCurrentCallFallbackEntry(),
+);
+const activeCallEntries = computed<CallActivityDockEntry[]>(() => {
+  const entries = discoveredCallEntries.value;
+  const currentEntry = currentCallFallbackEntry.value;
+  if (!currentEntry || entries.some(isSameCallEntry(currentEntry))) return entries;
+  return [currentEntry, ...entries];
+});
+const activeCallSummaryCount = computed(() => activeCallEntries.value.length);
+const activeCallStatusMessage = computed(() => {
+  const count = activeCallEntries.value.length;
+  if (count === 0) return "No active calls.";
+  return `${count} active ${count === 1 ? "call" : "calls"}.`;
+});
 const activityByChannelId = computed(() =>
   new Map(props.channels.map((channel) => [
     channel.id,
@@ -163,7 +193,7 @@ function selectSpaceChannel(spaceId: string) {
 }
 
 function selectCallEntry(entry: CallActivityDockEntry) {
-  const selection = callActivityDockSelection(entry, callState.value);
+  const selection = callActivityDockSelection(entry, callState.value, props.selfFullJid ?? null);
   switch (selection.kind) {
     case "dm-answer":
       emit("answerDm", selection.peerJid, selection.remoteFullJid, selection.sid, selection.media);
@@ -185,6 +215,95 @@ function selectCallEntry(entry: CallActivityDockEntry) {
       emit("selectContact", selection.peerJid);
       return;
   }
+}
+
+function isCurrentCallEntry(entry: CallActivityDockEntry): boolean {
+  const current = callState.value;
+  if (current.phase === "muc-pending" || (current.phase === "active" && current.kind === "muc")) {
+    if (entry.kind !== "channel") return false;
+    return normalizeMucCallRoomJid(entry.roomJid) === normalizeMucCallRoomJid(current.peer);
+  }
+  if (current.phase !== "active" || current.kind !== "dm" || entry.kind !== "dm") return false;
+  return entry.peerJid.toLowerCase() === barePeerJid(current.peer).toLowerCase();
+}
+
+function isSameCallEntry(target: CallActivityDockEntry): (entry: CallActivityDockEntry) => boolean {
+  return (entry) => {
+    if (target.kind !== entry.kind) return false;
+    if (target.kind === "channel" && entry.kind === "channel") {
+      return normalizeMucCallRoomJid(target.roomJid) === normalizeMucCallRoomJid(entry.roomJid);
+    }
+    if (target.kind === "dm" && entry.kind === "dm") {
+      return target.peerJid.toLowerCase() === entry.peerJid.toLowerCase();
+    }
+    return false;
+  };
+}
+
+function buildCurrentCallFallbackEntry(): CallActivityDockEntry | null {
+  const current = callState.value;
+  if (current.phase === "muc-pending" || (current.phase === "active" && current.kind === "muc")) {
+    const roomJid = normalizeMucCallRoomJid(current.peer);
+    if (!roomJid) return null;
+    const channel = props.channels.find((candidate) =>
+      normalizeMucCallRoomJid(candidate.jid ?? "") === roomJid
+    );
+    const participantLabels = participantLabelsForRoom(roomJid);
+    const fallbackLabels = participantLabels.length > 0
+      ? participantLabels
+      : current.selfNick
+        ? [current.selfNick]
+        : [];
+    return {
+      kind: "channel",
+      key: `current-channel:${roomJid}:${current.sid}`,
+      channelId: channel?.id ?? null,
+      roomJid,
+      title: channel?.name ?? roomJid.split("@")[0] ?? "Group call",
+      participantCount: Math.max(fallbackLabels.length, 1),
+      participantLabels: fallbackLabels,
+      isKnownChannel: Boolean(channel),
+      isActive: false,
+    };
+  }
+
+  if (current.phase === "active" && current.kind === "dm") {
+    const peerJid = barePeerJid(current.peer).toLowerCase();
+    if (!peerJid) return null;
+    const conversation = props.dmConversations?.find((candidate) =>
+      barePeerJid(candidate.peerJid).toLowerCase() === peerJid
+    );
+    return {
+      kind: "dm",
+      key: `current-dm:${peerJid}:${current.sid}`,
+      peerJid,
+      sid: current.sid,
+      remoteFullJid: current.peer,
+      join: current.join,
+      title: conversation?.peerUsername ?? peerJid.split("@")[0] ?? "Direct call",
+      media: current.media,
+      state: "accepted",
+      direction: "unknown",
+      updatedAt: "",
+      isActive: false,
+    };
+  }
+
+  return null;
+}
+
+function participantLabelsForRoom(roomJid: string): string[] {
+  const normalized = normalizeMucCallRoomJid(roomJid);
+  if (!normalized) return [];
+  const labels = new Set<string>();
+  for (const [candidate, nicks] of Object.entries(callParticipants.value)) {
+    if (normalizeMucCallRoomJid(candidate) !== normalized) continue;
+    for (const nick of nicks) {
+      const label = nick.trim();
+      if (label) labels.add(label);
+    }
+  }
+  return [...labels];
 }
 
 function channelsForSpace(spaceId: string): ChannelSummary[] {
@@ -340,13 +459,185 @@ function callEntryKindLabel(entry: CallActivityDockEntry): string {
   return entry.media.video ? "Video call" : "Voice call";
 }
 
+type CallEntryVisualTone = "primary" | "success" | "warning";
+
+function callEntryAcceptedAvailability(entry: CallActivityDockEntry): {
+  eyebrow: string;
+  meta: string;
+  description: string;
+  tone: CallEntryVisualTone;
+} | null {
+  if (entry.kind !== "dm" || entry.state !== "accepted") return null;
+  const mediaLabel = entry.mediaKnown === false ? "call" : `${entry.media.video ? "video" : "voice"} call`;
+  const mediaTitle = `${mediaLabel.charAt(0).toUpperCase()}${mediaLabel.slice(1)}`;
+  const reason = dmCallResumeBlockReason(entry, props.selfFullJid ?? null);
+  if (reason === null) {
+    return {
+      eyebrow: "Live now",
+      meta: `Live ${mediaLabel}`,
+      description: `The ${mediaLabel} is still live.`,
+      tone: "success",
+    };
+  }
+  if (reason === "other-resource") {
+    return {
+      eyebrow: "Other device",
+      meta: `${mediaTitle} · Other device`,
+      description: "This call is live on another browser or device.",
+      tone: "warning",
+    };
+  }
+  if (reason === "expired-token" || reason === "invalid-token") {
+    return {
+      eyebrow: "Expired",
+      meta: `${mediaTitle} · Expired`,
+      description: "The saved reconnect details expired.",
+      tone: "warning",
+    };
+  }
+  return {
+    eyebrow: "Syncing",
+    meta: `${mediaTitle} · Details pending`,
+    description: "Reconnect details are not available on this tab yet.",
+    tone: "primary",
+  };
+}
+
+function callEntryVisualTone(entry: CallActivityDockEntry): CallEntryVisualTone {
+  if (entry.kind === "dm" && entry.state === "ringing" && entry.direction === "incoming") return "warning";
+  if (entry.kind === "dm" && entry.state === "ringing" && entry.direction === "outgoing") return "primary";
+  return callEntryAcceptedAvailability(entry)?.tone ?? "success";
+}
+
 function callEntryLabel(entry: CallActivityDockEntry): string {
   const action = callEntryActionLabel(entry);
-  return `${action} ${entry.title}, ${callEntryKindLabel(entry)}, ${callEntryStatus(entry)}`;
+  return [
+    `${action} ${entry.title}`,
+    callEntryKindLabel(entry),
+    callEntryStatus(entry),
+    callEntryEyebrow(entry),
+    callEntryDescription(entry),
+    callEntryDetail(entry),
+  ].filter(Boolean).join(", ");
+}
+
+function callEntryEyebrow(entry: CallActivityDockEntry): string {
+  if (entry.kind === "channel") return entry.isActive ? "You're here" : "Live now";
+  if (entry.isActive) return "You're here";
+  const availability = callEntryAcceptedAvailability(entry);
+  if (availability) return availability.eyebrow;
+  if (entry.state === "accepted") return "Live now";
+  if (entry.direction === "incoming") return "Incoming call";
+  if (entry.direction === "outgoing") return "Calling";
+  return "Ringing";
+}
+
+function callEntryDescription(entry: CallActivityDockEntry): string {
+  if (entry.kind === "channel") {
+    const noun = entry.participantCount === 1 ? "person" : "people";
+    const location = entry.isKnownChannel ? "this channel" : "the channel";
+    const preview = callEntryParticipantPreview(entry);
+    if (preview) return `${entry.participantCount} ${noun} connected in ${location}: ${preview}.`;
+    return `${entry.participantCount} ${noun} connected in ${location}.`;
+  }
+
+  const availability = callEntryAcceptedAvailability(entry);
+  if (availability) return availability.description;
+
+  if (entry.mediaKnown === false) {
+    if (entry.state === "accepted") return "Call details are still syncing.";
+    if (entry.direction === "incoming") return "Incoming call details are still syncing.";
+    if (entry.direction === "outgoing") return "Outgoing call details are still syncing.";
+    return "Call details are still syncing.";
+  }
+
+  const media = entry.media.video ? "video" : "voice";
+  if (entry.state === "accepted") return `The ${media} call is still live.`;
+  if (entry.direction === "incoming") return `Incoming ${media} call from this direct message.`;
+  if (entry.direction === "outgoing") return `Outgoing ${media} call is still ringing.`;
+  return `${media.charAt(0).toUpperCase()}${media.slice(1)} call is ringing.`;
+}
+
+function callEntryDetail(entry: CallActivityDockEntry): string {
+  if (entry.kind === "channel") return callEntryKindLabel(entry);
+  const stamp = entry.updatedAt ? formatTimelineStamp(entry.updatedAt) : "";
+  return [
+    callEntryAcceptedAvailability(entry)?.meta ?? callEntryKindLabel(entry),
+    ...(stamp ? [`Updated ${stamp}`] : []),
+  ].join(" · ");
+}
+
+function callEntryParticipantPreview(entry: CallActivityDockEntry): string {
+  if (entry.kind !== "channel") return "";
+  return mucCallParticipantPreview(entry.participantLabels);
+}
+
+function callEntryVisibleParticipantLabels(entry: CallActivityDockEntry): string[] {
+  if (entry.kind !== "channel") return [];
+  return entry.participantLabels.slice(0, 3);
+}
+
+function callEntryParticipantInitial(label: string): string {
+  return label.trim().charAt(0).toUpperCase() || "?";
+}
+
+function callEntryToneClass(entry: CallActivityDockEntry): string {
+  switch (callEntryVisualTone(entry)) {
+    case "warning":
+      return "border-warning/25 bg-warning/10 hover:bg-warning/15";
+    case "primary":
+      return "border-primary/25 bg-primary/8 hover:bg-primary/12";
+    case "success":
+      return "border-success/20 bg-success/10 hover:bg-success/15";
+  }
+}
+
+function callEntryAccentClass(entry: CallActivityDockEntry): string {
+  switch (callEntryVisualTone(entry)) {
+    case "warning":
+      return "text-warning-foreground";
+    case "primary":
+      return "text-primary";
+    case "success":
+      return "text-success-foreground";
+  }
+}
+
+function callEntryIconClass(entry: CallActivityDockEntry): string {
+  switch (callEntryVisualTone(entry)) {
+    case "warning":
+      return "border-warning/25 bg-background/90 text-warning-foreground";
+    case "primary":
+      return "border-primary/25 bg-background/90 text-primary";
+    case "success":
+      return "border-success/25 bg-background/90 text-success-foreground";
+  }
+}
+
+function callEntryDotClass(entry: CallActivityDockEntry): string {
+  switch (callEntryVisualTone(entry)) {
+    case "warning":
+      return "bg-warning shadow-[0_0_6px_var(--warning)]";
+    case "primary":
+      return "bg-primary shadow-[0_0_6px_var(--primary)]";
+    case "success":
+      return "bg-success shadow-[0_0_6px_var(--success)]";
+  }
+}
+
+function callEntryPillClass(entry: CallActivityDockEntry): string {
+  switch (callEntryVisualTone(entry)) {
+    case "warning":
+      return "border-warning/25 bg-background/70 text-warning-foreground";
+    case "primary":
+      return "border-primary/25 bg-background/70 text-primary";
+    case "success":
+      return "border-success/25 bg-background/70 text-success-foreground";
+  }
 }
 
 function callEntryActionLabel(entry: CallActivityDockEntry): string {
-  switch (callActivityDockAction(entry, callState.value)) {
+  switch (callActivityDockAction(entry, callState.value, props.selfFullJid ?? null)) {
     case "answer":
       return "Answer";
     case "join":
@@ -386,7 +677,7 @@ const heroSummary = computed<HeroSummary>(() => {
     totalMentions,
     totalThreadUnread,
     dmUnread,
-    activeCalls: activeCallEntries.value.length,
+    activeCalls: activeCallSummaryCount.value,
     onlineFriends,
     hasUnread: totalUnread + totalMentions + totalThreadUnread + dmUnread > 0,
   };
@@ -496,50 +787,96 @@ function onHeroCta() {
       </section>
 
       <section
+        class="sr-only"
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+      >
+        {{ activeCallStatusMessage }}
+      </section>
+
+      <section
         v-if="activeCallEntries.length > 0"
         class="grid gap-3"
         aria-label="Active calls"
       >
-        <div class="flex items-center gap-2">
-          <PhoneCall class="h-4 w-4 text-success" />
-          <h2 class="type-pane-title">Active calls</h2>
+        <div class="flex items-end justify-between gap-3">
+          <div class="min-w-0">
+            <div class="flex items-center gap-2">
+              <PhoneCall class="h-4 w-4 text-success-foreground" aria-hidden="true" />
+              <h2 class="type-pane-title">Active calls</h2>
+            </div>
+            <p class="type-caption mt-0.5 text-muted-foreground">
+              {{ activeCallEntries.length }} {{ activeCallEntries.length === 1 ? "live conversation" : "live conversations" }}
+            </p>
+          </div>
         </div>
         <div class="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
           <button
             v-for="entry in activeCallEntries"
             :key="entry.key"
-            class="chat-list-row flex min-w-0 min-h-16 items-center gap-3 overflow-hidden rounded-lg border border-success/20 bg-success/10 px-4 py-3 text-left text-foreground hover:bg-success/20"
+            class="chat-list-row flex min-w-0 min-h-24 flex-col items-stretch justify-between gap-3 overflow-hidden rounded-lg border px-4 py-3 text-left text-foreground transition-colors"
+            :class="callEntryToneClass(entry)"
             type="button"
             :aria-label="callEntryLabel(entry)"
             @click="selectCallEntry(entry)"
           >
-            <span class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-success/10 text-success">
-              <Hash v-if="entry.kind === 'channel'" class="h-4 w-4" />
-              <Video v-else-if="entry.mediaKnown !== false && entry.media.video" class="h-4 w-4" />
-              <PhoneIncoming v-else-if="entry.state === 'ringing' && entry.direction === 'incoming'" class="h-4 w-4" />
-              <PhoneOutgoing v-else-if="entry.state === 'ringing' && entry.direction === 'outgoing'" class="h-4 w-4" />
-              <Phone v-else class="h-4 w-4" />
-            </span>
-            <span class="min-w-0 flex-1">
-              <span class="type-control block truncate">{{ entry.title }}</span>
-              <span class="type-caption block truncate text-muted-foreground">
-                {{ callEntryKindLabel(entry) }} · {{ callEntryStatus(entry) }}
+            <span class="flex min-w-0 items-start gap-3">
+              <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border shadow-sm" :class="callEntryIconClass(entry)">
+                <Hash v-if="entry.kind === 'channel'" class="h-4 w-4" aria-hidden="true" />
+                <Video v-else-if="entry.mediaKnown !== false && entry.media.video" class="h-4 w-4" aria-hidden="true" />
+                <PhoneIncoming v-else-if="entry.state === 'ringing' && entry.direction === 'incoming'" class="h-4 w-4" aria-hidden="true" />
+                <PhoneOutgoing v-else-if="entry.state === 'ringing' && entry.direction === 'outgoing'" class="h-4 w-4" aria-hidden="true" />
+                <Phone v-else class="h-4 w-4" aria-hidden="true" />
+              </span>
+              <span class="min-w-0 flex-1">
+                <span class="type-meta flex items-center gap-1.5" :class="callEntryAccentClass(entry)">
+                  <span class="h-1.5 w-1.5 rounded-full" :class="callEntryDotClass(entry)" aria-hidden="true" />
+                  <span class="truncate">{{ callEntryEyebrow(entry) }}</span>
+                </span>
+                <span class="type-control type-strong mt-0.5 block truncate">{{ entry.title }}</span>
+                <span class="type-caption mt-0.5 block text-muted-foreground">
+                  {{ callEntryDescription(entry) }}
+                </span>
+                <span
+                  v-if="entry.kind === 'channel' && callEntryParticipantPreview(entry)"
+                  class="mt-2 flex min-w-0 items-center gap-2 text-muted-foreground"
+                  :title="`${callEntryParticipantPreview(entry)} in call`"
+                >
+                  <span class="flex shrink-0 pl-0.5" aria-hidden="true">
+                    <span
+                      v-for="label in callEntryVisibleParticipantLabels(entry)"
+                      :key="`${entry.key}:${label}`"
+                      class="-ml-0.5 flex h-5 w-5 first:ml-0 items-center justify-center rounded-full border border-background bg-success/15 text-[0.625rem] font-bold leading-none text-success-foreground"
+                    >
+                      {{ callEntryParticipantInitial(label) }}
+                    </span>
+                  </span>
+                  <span class="type-meta min-w-0 truncate">
+                    {{ callEntryParticipantPreview(entry) }}
+                  </span>
+                </span>
               </span>
             </span>
-            <span
-              v-if="entry.kind === 'channel'"
-              class="type-count-badge inline-flex min-w-[18px] h-[18px] shrink-0 items-center justify-center rounded-full border border-success/25 bg-success/10 px-1 text-success"
-              aria-hidden="true"
-            >
-              {{ entry.participantCount }}
+            <span class="flex min-w-0 items-center gap-2">
+              <span class="type-meta min-w-0 flex-1 truncate text-muted-foreground">{{ callEntryDetail(entry) }}</span>
+              <span
+                v-if="entry.kind === 'channel'"
+                class="type-count-badge inline-flex min-w-[18px] h-[18px] shrink-0 items-center justify-center rounded-full border px-1"
+                :class="callEntryPillClass(entry)"
+                aria-hidden="true"
+              >
+                {{ entry.participantCount }}
+              </span>
+              <span
+                class="type-meta shrink-0 rounded-full border px-2 py-1"
+                :class="callEntryPillClass(entry)"
+                aria-hidden="true"
+              >
+                {{ callEntryActionLabel(entry) }}
+              </span>
+              <ArrowRight class="h-4 w-4 shrink-0" :class="callEntryAccentClass(entry)" aria-hidden="true" />
             </span>
-            <span
-              class="type-meta shrink-0 rounded-md border border-success/25 bg-background/70 px-2 py-1 text-success"
-              aria-hidden="true"
-            >
-              {{ callEntryActionLabel(entry) }}
-            </span>
-            <ArrowRight class="h-4 w-4 shrink-0 text-success" aria-hidden="true" />
           </button>
         </div>
       </section>
@@ -665,7 +1002,7 @@ function onHeroCta() {
                 <span class="flex shrink-0 items-center gap-1">
                   <span
                     v-if="channelCallCount(channel) > 0"
-                    class="type-meta inline-flex h-[18px] shrink-0 items-center gap-1 rounded-full border border-success/25 bg-success/10 px-1.5 text-success"
+                    class="type-meta inline-flex h-[18px] shrink-0 items-center gap-1 rounded-full border border-success/25 bg-success/10 px-1.5 text-success-foreground"
                     title="Active call"
                     aria-hidden="true"
                   >
@@ -761,7 +1098,7 @@ function onHeroCta() {
             </span>
             <span
               v-if="dmCallActivityFor(conversation.peerJid)"
-              class="type-meta inline-flex h-[18px] shrink-0 items-center gap-1 rounded-full border border-success/25 bg-success/10 px-1.5 text-success"
+              class="type-meta inline-flex h-[18px] shrink-0 items-center gap-1 rounded-full border border-success/25 bg-success/10 px-1.5 text-success-foreground"
               :title="dmCallLabel(conversation.peerJid)"
               aria-hidden="true"
             >

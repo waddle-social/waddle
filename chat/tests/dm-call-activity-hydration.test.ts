@@ -5,6 +5,7 @@ import {
   readDmCallActivity,
 } from "../src/lib/calls/dm-call-activity";
 import type { WaddleSession } from "../src/lib/server-auth";
+import type { ResumePersistence } from "../src/lib/xmpp/resume-persistence";
 
 function session(): WaddleSession {
   return {
@@ -22,6 +23,131 @@ describe("DM call activity hydration", () => {
 
   afterEach(() => {
     clearDmCallActivities();
+  });
+
+  test("reuses and consumes the persisted SM resource so same-resource joins remain valid after reload", () => {
+    let sm: ReturnType<ResumePersistence["loadSm"]> = {
+      previd: "prev",
+      inboundH: 1,
+      outboundH: 2,
+      resource: "web-existing-resource",
+    };
+    const consumedStates: NonNullable<typeof sm>[] = [];
+    const persistence: ResumePersistence = {
+      loadCatchup: () => null,
+      saveCatchup: () => undefined,
+      clearCatchup: () => undefined,
+      loadSm: () => sm,
+      consumeSm: () => {
+        const current = sm;
+        sm = null;
+        if (current) consumedStates.push(current);
+        return current;
+      },
+      saveSm: () => undefined,
+      clearSm: () => {
+        sm = null;
+      },
+      preparePagehideHandoff: () => undefined,
+      loadJoinedRooms: () => [],
+      saveJoinedRooms: () => undefined,
+      clearJoinedRooms: () => undefined,
+    };
+
+    const client = new BrowserXmppClient(session(), persistence);
+    const secondClient = new BrowserXmppClient(session(), persistence);
+
+    expect(client.fullJid).toBe("alice@example.com/web-existing-resource");
+    expect(consumedStates).toHaveLength(1);
+    expect(secondClient.fullJid).not.toBe("alice@example.com/web-existing-resource");
+  });
+
+  test("does not publish transient reconnect resources into shared SM persistence", () => {
+    let sm: ReturnType<ResumePersistence["loadSm"]> = null;
+    const savedStates: NonNullable<typeof sm>[] = [];
+    const persistence: ResumePersistence = {
+      loadCatchup: () => null,
+      saveCatchup: () => undefined,
+      clearCatchup: () => undefined,
+      loadSm: () => sm,
+      consumeSm: () => {
+        const current = sm;
+        sm = null;
+        return current;
+      },
+      saveSm: (state) => {
+        savedStates.push(state);
+        sm = state;
+      },
+      clearSm: () => {
+        sm = null;
+      },
+      preparePagehideHandoff: () => undefined,
+      loadJoinedRooms: () => [],
+      saveJoinedRooms: () => undefined,
+      clearJoinedRooms: () => undefined,
+    };
+    const client = new BrowserXmppClient(session(), persistence);
+    const resource = client.fullJid.split("/")[1];
+    const xmpp = {
+      get_resume_state_handle: () => ({ free: () => undefined }),
+      get_resume_state: () => ({ previd: "prev", inboundH: 1, outboundH: 2 }),
+    };
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).connected = true;
+
+    (client as unknown as { handleDisconnected: (xmpp: typeof xmpp) => void }).handleDisconnected(xmpp);
+    (client as unknown as { clearReconnectTimer: () => void }).clearReconnectTimer();
+
+    const secondClient = new BrowserXmppClient(session(), persistence);
+
+    expect(savedStates).toEqual([]);
+    expect(secondClient.fullJid).not.toBe(`alice@example.com/${resource}`);
+  });
+
+  test("pagehide persists real SM state with resource, including reconnect fallback state", () => {
+    let sm: ReturnType<ResumePersistence["loadSm"]> = null;
+    const savedStates: NonNullable<typeof sm>[] = [];
+    const persistence: ResumePersistence = {
+      loadCatchup: () => null,
+      saveCatchup: () => undefined,
+      clearCatchup: () => undefined,
+      loadSm: () => sm,
+      consumeSm: () => {
+        const current = sm;
+        sm = null;
+        return current;
+      },
+      saveSm: (state) => {
+        savedStates.push(state);
+        sm = state;
+      },
+      clearSm: () => {
+        sm = null;
+      },
+      preparePagehideHandoff: () => undefined,
+      loadJoinedRooms: () => [],
+      saveJoinedRooms: () => undefined,
+      clearJoinedRooms: () => undefined,
+    };
+    const client = new BrowserXmppClient(session(), persistence);
+    const resource = client.fullJid.split("/")[1];
+    const xmpp = {
+      get_resume_state_handle: () => ({ free: () => undefined }),
+      get_resume_state: () => ({ previd: "prev-live", inboundH: 7, outboundH: 9 }),
+    };
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).connected = true;
+
+    client.persistResumeStateForPageHide();
+    (client as unknown as { handleDisconnected: (xmpp: typeof xmpp) => void }).handleDisconnected(xmpp);
+    (client as unknown as { clearReconnectTimer: () => void }).clearReconnectTimer();
+    client.persistResumeStateForPageHide();
+
+    expect(savedStates).toEqual([
+      { previd: "prev-live", inboundH: 7, outboundH: 9, resource },
+      { previd: "prev-live", inboundH: 7, outboundH: 9, resource },
+    ]);
   });
 
   test("hydrates active call state from personal MAM pages without loading the DM timeline", async () => {

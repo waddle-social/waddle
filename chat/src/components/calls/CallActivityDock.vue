@@ -8,7 +8,8 @@ import {
   normalizeMucCallRoomJid,
 } from "@/lib/calls/muc-call-presence";
 import { $callState } from "@/lib/calls/call-store";
-import { $dmCallActivities } from "@/lib/calls/dm-call-activity";
+import { $dmCallActivities, dmCallResumeBlockReason } from "@/lib/calls/dm-call-activity";
+import { mucCallParticipantPreview } from "@/lib/calls/muc-call-indicators";
 import {
   callActivityDockAction,
   buildCallActivityDockEntries,
@@ -21,6 +22,8 @@ import type { ChannelSummary } from "@/lib/chat-types";
 import type { DmConversation } from "@/lib/xmpp-client";
 import { barePeerJid } from "@/lib/xmpp/jid";
 
+defineOptions({ inheritAttrs: false });
+
 const props = withDefaults(defineProps<{
   channels: ChannelSummary[];
   conversations: DmConversation[];
@@ -29,7 +32,9 @@ const props = withDefaults(defineProps<{
   activePeerJid: string | null;
   sidebarMode: SidebarMode;
   activeChannelJids: Set<string>;
+  callParticipants?: Record<string, readonly string[]>;
   managedMucDomain?: string | null;
+  selfFullJid?: string | null;
   showDmCalls?: boolean;
   hideCurrentCall?: boolean;
 }>(), {
@@ -49,8 +54,9 @@ const mucCallParticipantsStore = useStore($mucCallParticipants);
 const callState = useStore($callState);
 const dmCallActivities = useStore($dmCallActivities);
 
+const callParticipants = computed(() => props.callParticipants ?? mucCallParticipantsStore.value);
 const callParticipantCounts = computed<Record<string, number>>(() => {
-  return mucCallParticipantCounts(mucCallParticipantsStore.value);
+  return mucCallParticipantCounts(callParticipants.value);
 });
 
 const entries = computed(() => buildCallActivityDockEntries({
@@ -63,6 +69,7 @@ const entries = computed(() => buildCallActivityDockEntries({
   activeChannelJids: props.activeChannelJids,
   managedMucDomain: props.managedMucDomain ?? null,
   callParticipantCounts: callParticipantCounts.value,
+  callParticipants: callParticipants.value,
   dmCallActivities: props.showDmCalls === false ? {} : dmCallActivities.value,
 }));
 const visibleEntries = computed(() =>
@@ -71,6 +78,23 @@ const visibleEntries = computed(() =>
     : entries.value
 );
 const entryCount = computed(() => visibleEntries.value.length);
+const currentCallHidden = computed(() => {
+  if (!props.hideCurrentCall) return false;
+  const current = callState.value;
+  if (current.phase === "muc-pending") return current.kind === "muc";
+  if (current.phase !== "active") return false;
+  if (current.kind === "muc") return true;
+  return props.showDmCalls !== false && current.kind === "dm";
+});
+const statusMessage = computed(() => {
+  const count = entryCount.value;
+  const qualifier = props.showDmCalls === false ? "group " : "";
+  const other = currentCallHidden.value ? "other " : "";
+  if (count === 0) {
+    return `No ${other}active ${qualifier}calls.`;
+  }
+  return `${count} ${other}active ${qualifier}${count === 1 ? "call" : "calls"}.`;
+});
 
 function isCurrentCallEntry(entry: CallActivityDockEntry): boolean {
   const current = callState.value;
@@ -88,12 +112,21 @@ function entryStatus(entry: CallActivityDockEntry): string {
     const noun = entry.participantCount === 1 ? "person" : "people";
     return `${entry.participantCount} ${noun}`;
   }
+  if (entry.state === "accepted") return acceptedDmEntryStatus(entry);
   if (entry.state === "ringing") {
     if (entry.direction === "outgoing") return "Calling";
     if (entry.direction === "incoming") return "Ringing";
     return "Ringing";
   }
   return "Live";
+}
+
+function acceptedDmEntryStatus(entry: Extract<CallActivityDockEntry, { kind: "dm" }>): string {
+  const reason = dmCallResumeBlockReason(entry, props.selfFullJid ?? null);
+  if (reason === null) return "Live";
+  if (reason === "other-resource") return "Other device";
+  if (reason === "expired-token" || reason === "invalid-token") return "Expired";
+  return "Details pending";
 }
 
 function entryKindLabel(entry: CallActivityDockEntry): string {
@@ -106,8 +139,13 @@ function entryMeta(entry: CallActivityDockEntry): string {
   return `${entryKindLabel(entry)} · ${entryStatus(entry)}`;
 }
 
+function entryParticipantPreview(entry: CallActivityDockEntry): string {
+  if (entry.kind !== "channel") return "";
+  return mucCallParticipantPreview(entry.participantLabels);
+}
+
 function entryAction(entry: CallActivityDockEntry): string {
-  switch (callActivityDockAction(entry, callState.value)) {
+  switch (callActivityDockAction(entry, callState.value, props.selfFullJid ?? null)) {
     case "answer":
       return "Answer";
     case "join":
@@ -122,16 +160,27 @@ function entryAction(entry: CallActivityDockEntry): string {
 }
 
 function entryTitle(entry: CallActivityDockEntry): string {
-  return `${entryAction(entry)} ${entry.title} call, ${entryStatus(entry)}`;
+  const participants = entryParticipantPreview(entry);
+  const participantPart = participants ? `, ${participants} in call` : "";
+  return `${entryAction(entry)} ${entry.title}, ${entryMeta(entry)}${participantPart}`;
 }
 
 function entryCanSelect(entry: CallActivityDockEntry): boolean {
   return entry.kind !== "channel" || entry.roomJid.length > 0;
 }
 
+function visibleParticipantLabels(entry: CallActivityDockEntry): string[] {
+  if (entry.kind !== "channel") return [];
+  return entry.participantLabels.slice(0, 3);
+}
+
+function participantInitial(label: string): string {
+  return label.trim().charAt(0).toUpperCase() || "?";
+}
+
 function selectEntry(entry: CallActivityDockEntry): void {
   if (!entryCanSelect(entry)) return;
-  const selection = callActivityDockSelection(entry, callState.value);
+  const selection = callActivityDockSelection(entry, callState.value, props.selfFullJid ?? null);
   switch (selection.kind) {
     case "dm-answer":
       emit("answerDm", selection.peerJid, selection.remoteFullJid, selection.sid, selection.media);
@@ -153,65 +202,94 @@ function selectEntry(entry: CallActivityDockEntry): void {
 </script>
 
 <template>
-  <div
-    v-if="visibleEntries.length > 0"
-    class="call-activity-dock"
-    aria-label="Active calls"
-  >
-    <div class="call-activity-dock__header">
-      <span class="call-activity-dock__pulse" aria-hidden="true" />
-      <span class="type-section-label">Active calls</span>
-      <span class="call-activity-dock__total type-count-badge" aria-hidden="true">
-        {{ entryCount }}
-      </span>
-    </div>
-    <div class="call-activity-dock__list">
-      <button
-        v-for="entry in visibleEntries"
-        :key="entry.key"
-        type="button"
-        class="call-activity-dock__row"
-        :class="{
-          'call-activity-dock__row--active': entry.isActive,
-          'call-activity-dock__row--disabled': !entryCanSelect(entry),
-        }"
-        :disabled="!entryCanSelect(entry)"
-        :aria-current="entry.isActive ? 'page' : undefined"
-        :title="entryTitle(entry)"
-        :aria-label="entryTitle(entry)"
-        @click="selectEntry(entry)"
-      >
-        <span class="call-activity-dock__icon" aria-hidden="true">
-          <Hash v-if="entry.kind === 'channel'" class="h-3.5 w-3.5" />
-          <Video v-else-if="entry.mediaKnown !== false && entry.media.video" class="h-3.5 w-3.5" />
-          <PhoneIncoming v-else-if="entry.state === 'ringing' && entry.direction === 'incoming'" class="h-3.5 w-3.5" />
-          <PhoneOutgoing v-else-if="entry.state === 'ringing' && entry.direction === 'outgoing'" class="h-3.5 w-3.5" />
-          <MessageCircle v-else-if="entry.state === 'ringing'" class="h-3.5 w-3.5" />
-          <Phone v-else class="h-3.5 w-3.5" />
+  <div class="call-activity-dock-host">
+    <p class="sr-only" role="status" aria-live="polite" aria-atomic="true">
+      {{ statusMessage }}
+    </p>
+    <section
+      v-if="visibleEntries.length > 0"
+      class="call-activity-dock"
+      :class="$attrs.class"
+      role="region"
+      aria-label="Active calls"
+    >
+      <div class="call-activity-dock__header">
+        <span class="call-activity-dock__pulse" aria-hidden="true" />
+        <span class="type-section-label">Active calls</span>
+        <span class="call-activity-dock__total type-count-badge" aria-hidden="true">
+          {{ entryCount }}
         </span>
-        <span class="call-activity-dock__copy">
-          <span class="call-activity-dock__title type-control">{{ entry.title }}</span>
-          <span class="call-activity-dock__status type-meta">
-            {{ entryMeta(entry) }}
-          </span>
-        </span>
-        <span
-          v-if="entry.kind === 'channel'"
-          class="call-activity-dock__count type-count-badge"
-          aria-hidden="true"
+      </div>
+      <div class="call-activity-dock__list">
+        <button
+          v-for="entry in visibleEntries"
+          :key="entry.key"
+          type="button"
+          class="call-activity-dock__row"
+          :class="{
+            'call-activity-dock__row--active': entry.isActive,
+            'call-activity-dock__row--disabled': !entryCanSelect(entry),
+          }"
+          :disabled="!entryCanSelect(entry)"
+          :aria-current="entry.isActive ? 'page' : undefined"
+          :title="entryTitle(entry)"
+          :aria-label="entryTitle(entry)"
+          @click="selectEntry(entry)"
         >
-          {{ entry.participantCount }}
-        </span>
-        <span class="call-activity-dock__action type-meta" aria-hidden="true">
-          {{ entryAction(entry) }}
-          <ArrowRight v-if="entryCanSelect(entry)" class="h-3 w-3" />
-        </span>
-      </button>
-    </div>
+          <span class="call-activity-dock__icon" aria-hidden="true">
+            <Hash v-if="entry.kind === 'channel'" class="h-3.5 w-3.5" />
+            <Video v-else-if="entry.mediaKnown !== false && entry.media.video" class="h-3.5 w-3.5" />
+            <PhoneIncoming v-else-if="entry.state === 'ringing' && entry.direction === 'incoming'" class="h-3.5 w-3.5" />
+            <PhoneOutgoing v-else-if="entry.state === 'ringing' && entry.direction === 'outgoing'" class="h-3.5 w-3.5" />
+            <MessageCircle v-else-if="entry.state === 'ringing'" class="h-3.5 w-3.5" />
+            <Phone v-else class="h-3.5 w-3.5" />
+          </span>
+          <span class="call-activity-dock__copy">
+            <span class="call-activity-dock__title type-control">{{ entry.title }}</span>
+            <span class="call-activity-dock__status type-meta">
+              {{ entryMeta(entry) }}
+            </span>
+            <span
+              v-if="entryParticipantPreview(entry)"
+              class="call-activity-dock__participants type-meta"
+              :title="`${entryParticipantPreview(entry)} in call`"
+            >
+              <span class="call-activity-dock__participant-stack" aria-hidden="true">
+                <span
+                  v-for="label in visibleParticipantLabels(entry)"
+                  :key="`${entry.key}:${label}`"
+                  class="call-activity-dock__participant"
+                >
+                  {{ participantInitial(label) }}
+                </span>
+              </span>
+              <span class="call-activity-dock__participant-copy">
+                {{ entryParticipantPreview(entry) }}
+              </span>
+            </span>
+          </span>
+          <span
+            v-if="entry.kind === 'channel'"
+            class="call-activity-dock__count type-count-badge"
+            aria-hidden="true"
+          >
+            {{ entry.participantCount }}
+          </span>
+          <span class="call-activity-dock__action type-meta" aria-hidden="true">
+            {{ entryAction(entry) }}
+            <ArrowRight v-if="entryCanSelect(entry)" class="h-3 w-3" />
+          </span>
+        </button>
+      </div>
+    </section>
   </div>
 </template>
 
 <style scoped>
+.call-activity-dock-host {
+  display: contents;
+}
+
 .call-activity-dock {
   display: flex;
   flex-shrink: 0;
@@ -316,7 +394,7 @@ function selectEntry(entry: CallActivityDockEntry): void {
   justify-content: center;
   border-radius: var(--radius-sm);
   background: color-mix(in oklab, oklch(0.7 0.18 145) 12%, transparent);
-  color: oklch(0.54 0.15 145);
+  color: var(--success-foreground);
 }
 
 :global(.dark) .call-activity-dock__icon {
@@ -330,7 +408,9 @@ function selectEntry(entry: CallActivityDockEntry): void {
 }
 
 .call-activity-dock__title,
-.call-activity-dock__status {
+.call-activity-dock__status,
+.call-activity-dock__participants,
+.call-activity-dock__participant-copy {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -341,6 +421,38 @@ function selectEntry(entry: CallActivityDockEntry): void {
   color: var(--sidebar-muted);
 }
 
+.call-activity-dock__participants {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  color: var(--sidebar-muted);
+}
+
+.call-activity-dock__participant-stack {
+  display: inline-flex;
+  flex-shrink: 0;
+  padding-left: 0.125rem;
+}
+
+.call-activity-dock__participant {
+  display: inline-flex;
+  width: 1rem;
+  height: 1rem;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid color-mix(in oklab, var(--sidebar-border) 74%, transparent);
+  border-radius: 9999px;
+  background: color-mix(in oklab, var(--sidebar-accent) 82%, var(--card));
+  color: var(--sidebar-foreground);
+  font-size: 0.5625rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.call-activity-dock__participant + .call-activity-dock__participant {
+  margin-left: -0.25rem;
+}
+
 .call-activity-dock__count {
   display: inline-flex;
   min-width: 1.125rem;
@@ -349,7 +461,7 @@ function selectEntry(entry: CallActivityDockEntry): void {
   justify-content: center;
   border-radius: 9999px;
   background: color-mix(in oklab, oklch(0.7 0.18 145) 18%, transparent);
-  color: oklch(0.48 0.14 145);
+  color: var(--success-foreground);
   font-variant-numeric: tabular-nums;
 }
 
@@ -362,14 +474,14 @@ function selectEntry(entry: CallActivityDockEntry): void {
   gap: 0.25rem;
   border-radius: 9999px;
   background: color-mix(in oklab, oklch(0.7 0.18 145) 16%, transparent);
-  color: oklch(0.46 0.14 145);
+  color: var(--success-foreground);
   white-space: nowrap;
 }
 
 .call-activity-dock__row:hover:not(:disabled) .call-activity-dock__action,
 .call-activity-dock__row--active .call-activity-dock__action {
   background: color-mix(in oklab, oklch(0.7 0.18 145) 26%, transparent);
-  color: oklch(0.38 0.14 145);
+  color: var(--success-foreground);
 }
 
 :global(.dark) .call-activity-dock__action,

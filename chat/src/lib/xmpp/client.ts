@@ -24,7 +24,7 @@ import {
 import { useCallEngine } from "@/lib/calls/use-call-engine";
 import type { CallWireSender } from "@/lib/calls/outbound";
 import type { CallEvent } from "@/lib/calls/types";
-import { barePeerJid, jidDomain, roomBareJidFor } from "./jid";
+import { barePeerJid, fullJidIdentityKey, jidDomain, roomBareJidFor } from "./jid";
 import type {
   ChatStateEvent,
   ChatStateType,
@@ -60,6 +60,7 @@ import {
   createLocalStorageResumePersistence,
   type ResumePersistence,
 } from "./resume-persistence";
+import { clearDmCallJoinCacheForAccount } from "@/lib/calls/dm-call-join-cache";
 import { compareTimelineTimestamps } from "../timeline-timestamps";
 import {
   discoverExtensionCommands,
@@ -399,6 +400,7 @@ type XmppResumeState = {
   previd: string;
   inboundH: number;
   outboundH: number;
+  resource?: string;
 };
 
 type XmppResumeStateHandle = import("@waddle/xmpp-client-wasm").WaddleResumeState;
@@ -443,7 +445,7 @@ export class RoomMemberListUnavailableError extends Error {
 export class BrowserXmppClient {
   private session: WaddleSession;
   private get queueScope() { return barePeerJid(this.session.jid); }
-  private readonly resource = createXmppResource();
+  private readonly resource: string;
   private messageHandler: ((message: LiveRoomMessage) => void) | null = null;
   private pinEventHandler: ((event: { roomJid: string; event: import("./wasm-types").WasmPinEvent }) => void) | null = null;
   private directMessageHandler: ((message: LiveDmMessage) => void) | null = null;
@@ -555,7 +557,9 @@ export class BrowserXmppClient {
     // WASM client (live, same JS context), that takes precedence in
     // `doConnect`. The POD `resumeState` is the only piece that
     // survives a full page reload, so hydrate it eagerly.
-    this.resumeState = this.resumePersistence.loadSm();
+    this.resumeState = this.resumePersistence.consumeSm();
+    this.resource = this.resumeState?.resource || createXmppResource();
+    this.retainedJoinedRoomJids = new Set(this.resumePersistence.loadJoinedRooms());
   }
 
   /** Full JID (`bare/resource`) for this session. Needed by the
@@ -582,13 +586,13 @@ export class BrowserXmppClient {
 
   private ownFullJidCandidates(): Set<string> {
     return new Set([
-      this.fullJid.trim().toLowerCase(),
-      `${barePeerJid(this.session.jid)}/${this.resource}`.trim().toLowerCase(),
+      fullJidIdentityKey(this.fullJid),
+      fullJidIdentityKey(`${barePeerJid(this.session.jid)}/${this.resource}`),
     ]);
   }
 
   private isOwnMucSelfPresence(presence: { muc_jid?: string | null }): boolean {
-    const mucJid = presence.muc_jid?.trim().toLowerCase();
+    const mucJid = fullJidIdentityKey(presence.muc_jid);
     return !!mucJid && this.ownFullJidCandidates().has(mucJid);
   }
 
@@ -706,6 +710,7 @@ export class BrowserXmppClient {
     this.resumeState = null;
     this.setResumeStateHandle(null);
     this.resumePersistence.clearSm();
+    this.resumePersistence.clearJoinedRooms();
     // Only called from the `destroying` path — i.e. intentional
     // logout / shutdown. Drop the catch-up cursors too so a future
     // login on the same account (same browser) doesn't replay
@@ -713,6 +718,18 @@ export class BrowserXmppClient {
     // this method; they intentionally keep cursors so the next
     // resume can fill the gap.)
     this.catchup.reset();
+  }
+
+  persistResumeStateForPageHide(): void {
+    const xmpp = this.xmpp;
+    const state = xmpp?.get_resume_state?.() ?? this.resumeState;
+    this.resumePersistence.preparePagehideHandoff();
+    if (state) {
+      const snapshot = { ...state, resource: this.resource };
+      this.resumeState = snapshot;
+      this.resumePersistence.saveSm(snapshot);
+    }
+    this.persistRetainedJoinedRooms();
   }
 
   private setResumeStateHandle(handle: XmppResumeStateHandle | null | undefined) {
@@ -765,6 +782,7 @@ export class BrowserXmppClient {
         this.resumeState.inboundH,
         this.resumeState.outboundH,
       );
+      this.resumePersistence.clearSm();
       this.resumeState = null;
     }
     const xmpp = new mod.WaddleClient(config) as unknown as XmppClientInstance;
@@ -827,6 +845,7 @@ export class BrowserXmppClient {
     this.joinedMucs.clear();
     this.joinedMucJoinTokens.clear();
     this.joinedMucReady.clear();
+    clearDmCallJoinCacheForAccount(this.session.jid);
     clearDmCallActivities();
     clearMucCallParticipants();
     // Best-effort hangup: if we're in a call when the user logs out
@@ -951,7 +970,7 @@ export class BrowserXmppClient {
       }
       if (!existingToken && !this.joinedMucs.has(roomJid)) return;
       this.joinedMucReady.add(roomJid);
-      this.retainedJoinedRoomJids.add(roomJid);
+      this.rememberJoinedRoom(roomJid);
       return;
     }
     const promise = this.performMucJoin(roomJid);
@@ -962,7 +981,7 @@ export class BrowserXmppClient {
       await promise;
       if (this.joinedMucJoinTokens.get(roomJid) === joinToken) {
         this.joinedMucReady.add(roomJid);
-        this.retainedJoinedRoomJids.add(roomJid);
+        this.rememberJoinedRoom(roomJid);
       }
     } catch (err) {
       if (this.joinedMucJoinTokens.get(roomJid) === joinToken) {
@@ -972,6 +991,18 @@ export class BrowserXmppClient {
       }
       throw err;
     }
+  }
+
+  private rememberJoinedRoom(roomJid: string): void {
+    const normalized = roomJid.split("/")[0]?.trim().toLowerCase() ?? "";
+    if (!normalized) return;
+    const sizeBefore = this.retainedJoinedRoomJids.size;
+    this.retainedJoinedRoomJids.add(normalized);
+    if (this.retainedJoinedRoomJids.size !== sizeBefore) this.persistRetainedJoinedRooms();
+  }
+
+  private persistRetainedJoinedRooms(): void {
+    this.resumePersistence.saveJoinedRooms([...this.retainedJoinedRoomJids]);
   }
 
   private async performMucJoin(roomJid: string): Promise<void> {
@@ -1992,6 +2023,7 @@ export class BrowserXmppClient {
       applyDmCallEvent({
         event: message.call_event,
         selfBareJid: selfBare,
+        selfFullJid: this.fullJid,
         to: message.to,
         timestamp: message.timestamp,
       });
@@ -2462,20 +2494,23 @@ export class BrowserXmppClient {
     this.rejectRoomJoinWaiters(new Error("XMPP disconnected while joining a room"));
     this.retainedJoinedRoomJids = new Set([
       ...this.retainedJoinedRoomJids,
-      ...previouslyJoinedRooms,
+      ...previouslyJoinedRooms
+        .map((roomJid) => roomJid.split("/")[0]?.trim().toLowerCase() ?? "")
+        .filter(Boolean),
     ]);
+    this.persistRetainedJoinedRooms();
     this.joinedMucs.clear();
     this.joinedMucReady.clear();
     this.clearRoomPresenceCaches();
     if (this.destroying) { this.clearResumeState(); this.emitStatus({ state: "offline", detail: error?.message ?? "Disconnected" }); return; }
     this.setResumeStateHandle(xmpp.get_resume_state_handle?.() ?? null);
-    this.resumeState = xmpp.get_resume_state?.() ?? null;
-    // Persist the POD form so the next page-load can resume the
-    // XEP-0198 stream without re-binding. The live handle is a JS
-    // object that can't be serialized, so `doConnect` always tries
-    // the handle first (this JS context only) and falls back to
-    // the persisted POD across reloads.
-    if (this.resumeState) this.resumePersistence.saveSm(this.resumeState);
+    const resumeState = xmpp.get_resume_state?.() ?? null;
+    this.resumeState = resumeState ? { ...resumeState, resource: this.resource } : null;
+    // Keep transient reconnect state in this JS context only. The
+    // shared per-account persisted SM slot is a pagehide handoff for
+    // true tab replacement; writing it during ordinary disconnects
+    // would let another live tab claim this same resource while this
+    // client is still reconnecting with its in-memory handle.
     this.emitStatus({ state: "reconnecting", detail: countQueuedMessages(this.queueScope) > 0 ? "Connection lost — queued messages will send when reconnected" : (error?.message ?? "Connection lost, reconnecting...") });
     if (this.onceConnectFailed) { const fail = this.onceConnectFailed; this.onceConnected = null; this.onceConnectFailed = null; fail(error ?? new Error("XMPP connection failed")); }
     this.scheduleReconnect();
@@ -2548,6 +2583,7 @@ export class BrowserXmppClient {
       applyDmCallEvent({
         event: message.call_event,
         selfBareJid: barePeerJid(this.session.jid),
+        selfFullJid: this.fullJid,
         to: message.to ?? message.call_event.to,
         timestamp: message.timestamp,
       });
@@ -2822,6 +2858,7 @@ export class BrowserXmppClient {
         applyDmCallEvent({
           event,
           selfBareJid: selfBare,
+          selfFullJid: this.fullJid,
           to: event.to ?? currentDmPeer,
         });
       }

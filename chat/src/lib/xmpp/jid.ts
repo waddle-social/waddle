@@ -10,6 +10,16 @@ export function barePeerJid(fullJid: string): string {
   return fullJid.split("/")[0] ?? "";
 }
 
+export function fullJidIdentityKey(fullJid?: string | null): string {
+  const trimmed = fullJid?.trim() ?? "";
+  if (!trimmed) return "";
+  const separator = trimmed.indexOf("/");
+  if (separator < 0) return trimmed.toLowerCase();
+  const bare = trimmed.slice(0, separator).toLowerCase();
+  const resource = trimmed.slice(separator + 1);
+  return `${bare}/${resource}`;
+}
+
 export function parseManagedRoomBareJid(
   roomJid: string,
 ): { channelId: string } | null {

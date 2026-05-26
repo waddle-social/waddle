@@ -384,6 +384,7 @@ export function beginOutgoingCall(
       media,
     },
     selfBareJid: initiator ?? "",
+    selfFullJid: initiator,
     to,
     directionHint: "outgoing",
   });
