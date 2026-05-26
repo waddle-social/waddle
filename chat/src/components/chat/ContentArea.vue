@@ -85,6 +85,7 @@ const props = defineProps<{
   typingUsers: string[];
   currentUser?: string;
   currentUserJid?: string;
+  selfFullJid?: string | null;
   selfDomain?: string;
   avatarUrlByAuthor: Record<string, string | null>;
   authorJidByNick?: Record<string, string>;
@@ -904,6 +905,7 @@ function dayDividerLabel(createdAt: string): string {
       :channel-name="channel?.name ?? null"
       :dm-peer-jid="dmPeer?.peerJid ?? null"
       :dm-peer-name="dmPeer?.peerUsername ?? null"
+      :self-full-jid="selfFullJid ?? null"
       @join-channel-call="(channelId, roomJid, media) => emit('joinChannelCall', channelId, roomJid, media)"
       @answer-dm="(peerJid, remoteFullJid, sid, media) => emit('answerDm', peerJid, remoteFullJid, sid, media)"
       @reconnect-dm="(peerJid, media) => emit('reconnectDm', peerJid, media)"

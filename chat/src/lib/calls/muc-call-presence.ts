@@ -1,4 +1,5 @@
 import { map } from "nanostores";
+import { fullJidIdentityKey } from "@/lib/xmpp/jid";
 
 /**
  * Per-room map of nicks advertising XEP-0272 Muji presence with
@@ -20,6 +21,11 @@ import { map } from "nanostores";
  * change.
  */
 export const $mucCallParticipants = map<Record<string, string[]>>({});
+type MucCallParticipantOwner = {
+  nick: string;
+  realJid?: string;
+};
+export const $mucCallParticipantOwners = map<Record<string, MucCallParticipantOwner[]>>({});
 const $mucActiveParticipants = map<Record<string, string[]>>({});
 const $mucPreparingParticipants = map<Record<string, string[]>>({});
 const PARTICIPANT_KEY_SEPARATOR = "\u0000";
@@ -29,7 +35,7 @@ export function normalizeMucCallRoomJid(roomJid: string): string {
 }
 
 function normalizeFullJid(jid?: string | null): string {
-  return jid?.trim().toLowerCase() ?? "";
+  return fullJidIdentityKey(jid);
 }
 
 function preparingParticipantKey(nick: string, realJid?: string | null): string {
@@ -107,8 +113,21 @@ function syncActiveParticipantsForRoom(roomJid: string): void {
     const all = { ...$mucCallParticipants.get() };
     delete all[roomJid];
     $mucCallParticipants.set(all);
+    const owners = { ...$mucCallParticipantOwners.get() };
+    delete owners[roomJid];
+    $mucCallParticipantOwners.set(owners);
   } else {
     $mucCallParticipants.setKey(roomJid, nicks);
+    $mucCallParticipantOwners.setKey(
+      roomJid,
+      activeOwners.map((key) => {
+        const realJid = activeParticipantRealJid(key);
+        return {
+          nick: activeParticipantNick(key),
+          ...(realJid ? { realJid } : {}),
+        };
+      }),
+    );
   }
 }
 
@@ -225,6 +244,7 @@ export function mucCallParticipantCount(roomJid: string): number {
  */
 export function clearMucCallParticipants(): void {
   $mucCallParticipants.set({});
+  $mucCallParticipantOwners.set({});
   $mucActiveParticipants.set({});
   $mucPreparingParticipants.set({});
   // Drop any pending preparing-echo waiters too — they'd otherwise

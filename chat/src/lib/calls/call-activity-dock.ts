@@ -8,7 +8,7 @@ import {
   refreshedMucCallRooms,
 } from "./muc-call-indicators";
 import { normalizeMucCallRoomJid } from "./muc-call-presence";
-import { hasKnownDmCallMedia, type DmCallActivity } from "./dm-call-activity";
+import { canResumeDmCallActivity, hasKnownDmCallMedia, type DmCallActivity } from "./dm-call-activity";
 
 export type SidebarMode = "channels" | "dms";
 
@@ -20,6 +20,7 @@ export type CallActivityDockEntry =
       roomJid: string;
       title: string;
       participantCount: number;
+      participantLabels: string[];
       isKnownChannel: boolean;
       isActive: boolean;
     }
@@ -29,6 +30,7 @@ export type CallActivityDockEntry =
       peerJid: string;
       sid: string;
       remoteFullJid?: string;
+      join?: DmCallActivity["join"];
       title: string;
       media: DmCallActivity["media"];
       mediaKnown?: boolean;
@@ -72,8 +74,9 @@ export function isBusy(state: CallState): boolean {
 }
 
 export function dmCallActivityAction(
-  activity: Pick<DmCallActivity, "peerJid" | "remoteFullJid" | "mediaKnown" | "state" | "direction">,
+  activity: Pick<DmCallActivity, "peerJid" | "remoteFullJid" | "mediaKnown" | "state" | "direction" | "join">,
   callState: CallState,
+  selfFullJid?: string | null,
 ): Extract<CallActivityDockAction, "answer" | "open" | "return" | "reconnect"> {
   const peerJid = barePeerJid(activity.peerJid).toLowerCase();
   if (peerJid && activeDmCallPeerJid(callState) === peerJid) return "return";
@@ -83,16 +86,17 @@ export function dmCallActivityAction(
     activity.remoteFullJid &&
     !isBusy(callState)
   ) return "answer";
-  if (activity.state === "accepted" && hasKnownDmCallMedia(activity) && !isBusy(callState)) return "reconnect";
+  if (canResumeDmCallActivity(activity, selfFullJid) && !isBusy(callState)) return "reconnect";
   return "open";
 }
 
 export function callActivityDockAction(
   entry: CallActivityDockEntry,
   callState: CallState,
+  selfFullJid?: string | null,
 ): CallActivityDockAction {
   if (entry.kind === "dm") {
-    return dmCallActivityAction(entry, callState);
+    return dmCallActivityAction(entry, callState, selfFullJid);
   }
 
   const roomJid = normalizeMucCallRoomJid(entry.roomJid);
@@ -104,9 +108,10 @@ export function callActivityDockAction(
 export function callActivityDockSelection(
   entry: CallActivityDockEntry,
   callState: CallState = { phase: "idle" },
+  selfFullJid?: string | null,
 ): CallActivityDockSelection {
   if (entry.kind === "channel") {
-    if (callActivityDockAction(entry, callState) === "join") {
+    if (callActivityDockAction(entry, callState, selfFullJid) === "join") {
       return {
         kind: "channel-join",
         channelId: entry.channelId,
@@ -120,7 +125,7 @@ export function callActivityDockSelection(
       roomJid: entry.roomJid,
     };
   }
-  const action = callActivityDockAction(entry, callState);
+  const action = callActivityDockAction(entry, callState, selfFullJid);
   if (action === "answer" && entry.remoteFullJid) {
     return {
       kind: "dm-answer",
@@ -150,9 +155,11 @@ export function buildCallActivityDockEntries(options: {
   activeChannelJids: Iterable<string>;
   managedMucDomain?: string | null;
   callParticipantCounts: Record<string, number>;
+  callParticipants?: Record<string, readonly string[]>;
   dmCallActivities: Record<string, DmCallActivity>;
 }): CallActivityDockEntry[] {
   const activeChannelRoomJid = normalizeMucCallRoomJid(options.activeChannelRoomJid ?? "");
+  const participantLabelsByRoom = normalizedParticipantLabels(options.callParticipants ?? {});
   const channelEntries = options.channels.flatMap((channel): CallActivityDockEntry[] => {
     const participantCount = callParticipantCountForChannel(
       channel,
@@ -174,6 +181,7 @@ export function buildCallActivityDockEntries(options: {
       roomJid,
       title: channel.name,
       participantCount,
+      participantLabels: participantLabelsByRoom.get(roomJid) ?? [],
       isKnownChannel: true,
       isActive: options.sidebarMode === "channels" && (
         options.activeChannelId === channel.id || activeChannelRoomJid === roomJid
@@ -194,6 +202,7 @@ export function buildCallActivityDockEntries(options: {
       roomJid: room.roomJid,
       title: room.title,
       participantCount: room.participantCount,
+      participantLabels: participantLabelsByRoom.get(room.roomJid) ?? [],
       isKnownChannel: false,
       isActive: options.sidebarMode === "channels" && activeChannelRoomJid === room.roomJid,
     }));
@@ -215,6 +224,7 @@ export function buildCallActivityDockEntries(options: {
         peerJid,
         sid: activity.sid,
         ...(activity.remoteFullJid ? { remoteFullJid: activity.remoteFullJid } : {}),
+        ...(activity.join ? { join: activity.join } : {}),
         title: conversationNames.get(peerJid) ?? fallbackName,
         media: activity.media,
         ...(hasKnownDmCallMedia(activity) ? {} : { mediaKnown: false }),
@@ -234,4 +244,22 @@ export function buildCallActivityDockEntries(options: {
     });
 
   return [...channelEntries, ...fallbackChannelEntries, ...dmEntries];
+}
+
+function normalizedParticipantLabels(
+  participants: Record<string, readonly string[]>,
+): Map<string, string[]> {
+  const labels = new Map<string, string[]>();
+  for (const [roomJid, nicks] of Object.entries(participants)) {
+    const normalized = normalizeMucCallRoomJid(roomJid);
+    if (!normalized) continue;
+    const current = labels.get(normalized) ?? [];
+    labels.set(normalized, [
+      ...new Set([
+        ...current,
+        ...nicks.map((nick) => nick.trim()).filter(Boolean),
+      ]),
+    ]);
+  }
+  return labels;
 }

@@ -13,8 +13,10 @@ export interface HomeDashboardProps {
   activeChannelJids?: Set<string>;
   dmConversations?: DmConversation[];
   callParticipantCounts?: Record<string, number>;
+  callParticipants?: Record<string, string[]>;
   dmCallActivities?: Record<string, DmCallActivity>;
   managedMucDomain?: string | null;
+  selfFullJid?: string | null;
 }
 
 interface HomeDashboardSources extends Omit<HomeDashboardProps, "channelUnreadMap"> {
@@ -36,8 +38,10 @@ export function buildHomeDashboardProps(sources: HomeDashboardSources): HomeDash
     activeChannelJids: sources.activeChannelJids,
     dmConversations: sources.dmConversations,
     callParticipantCounts: sources.callParticipantCounts,
+    callParticipants: sources.callParticipants,
     dmCallActivities: sources.dmCallActivities,
     managedMucDomain: sources.managedMucDomain,
+    selfFullJid: sources.selfFullJid,
   };
 }
 

@@ -6,6 +6,11 @@ import {
   mucCallParticipantCounts,
 } from "@/lib/calls/muc-call-presence";
 import { $dmCallActivities } from "@/lib/calls/dm-call-activity";
+import { $callState } from "@/lib/calls/call-store";
+import {
+  activeChannelRailCallCount,
+  activeDmRailCallCount,
+} from "@/lib/calls/call-rail-counts";
 import { normalizeMucServiceDomain } from "@/lib/calls/muc-call-indicators";
 import WaddlesSidebar from "@/components/chat/WaddlesSidebar.vue";
 import TopicsPanel from "@/components/chat/TopicsPanel.vue";
@@ -91,15 +96,21 @@ function reconnectDmFromMobile(peerJid: string, media: CallMedia) {
 // the same "call ongoing" chip.
 const mucCallParticipantsStore = useStore($mucCallParticipants);
 const dmCallActivitiesStore = useStore($dmCallActivities);
+const callStateStore = useStore($callState);
 const callParticipantCounts = computed<Record<string, number>>(() => {
   return mucCallParticipantCounts(mucCallParticipantsStore.value);
 });
-const activeChannelCallCount = computed(() =>
-  Object.values(callParticipantCounts.value).filter((count) => count > 0).length,
-);
-const activeDmCallCount = computed(() => Object.keys(dmCallActivitiesStore.value).length);
+const activeChannelCallCount = computed(() => {
+  return activeChannelRailCallCount(callParticipantCounts.value, callStateStore.value);
+});
+const activeDmCallCount = computed(() => {
+  return activeDmRailCallCount(dmCallActivitiesStore.value, callStateStore.value);
+});
 const managedMucDomain = computed(() =>
   normalizeMucServiceDomain(waddles.mucServiceJid.value) || (selfDomain.value ? `muc.${selfDomain.value}` : ""),
+);
+const selfFullJid = computed(() =>
+  (connectionStore.client as unknown as { fullJid?: string } | null)?.fullJid ?? null
 );
 
 const drawerExtensionRoutes = computed(() =>
@@ -185,6 +196,7 @@ function openExtensionRoute(route: DiscoveredExtensionRoute) {
           v-else
           :conversations="dmConversations.conversations.value"
           :active-peer-jid="dmConversations.activePeerJid.value"
+          :self-full-jid="selfFullJid"
           hide-current-call
           class="!w-full !border-r-0 !flex-1"
           @answer-dm="answerDmFromMobile"

@@ -80,10 +80,27 @@ export async function hangupActiveCall(): Promise<void> {
  * `tearDownActiveCall` and sends the conformant call-ending stanzas.
  */
 export function suspendCallForPageHide(): void {
+  (connectionStore.client as unknown as {
+    persistResumeStateForPageHide?: () => void;
+  } | null)?.persistResumeStateForPageHide?.();
   const current = $callState.get();
   if (current.phase === "idle" || current.phase === "ended") return;
   clearCallState();
   void useCallEngine().engine.disconnect();
+}
+
+type PagehideTarget = Pick<Window, "addEventListener" | "removeEventListener">;
+
+export function installCallPagehideSuspension(windowTarget: PagehideTarget = window): () => void {
+  const handlePageHide = (event: PageTransitionEvent): void => {
+    if (event.persisted) return;
+    suspendCallForPageHide();
+  };
+
+  windowTarget.addEventListener("pagehide", handlePageHide as EventListener);
+  return () => {
+    windowTarget.removeEventListener("pagehide", handlePageHide as EventListener);
+  };
 }
 
 /**

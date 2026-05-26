@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { $callState } from "../src/lib/calls/call-store";
 import {
   $mucCallParticipants,
+  applyMucCallPresence,
   clearMucCallParticipants,
 } from "../src/lib/calls/muc-call-presence";
 import { connectionStore } from "../src/lib/connection-store";
@@ -28,6 +29,7 @@ const join: LiveKitJoin = {
 function setSession(username: string | null): void {
   if (username === null) {
     connectionStore.session = null;
+    connectionStore.client = null;
     return;
   }
   connectionStore.session = {
@@ -202,6 +204,62 @@ describe("readRoomHasActiveCall selector", () => {
       localResourceInCall: true,
       participantCount: 2,
     });
+  });
+
+  test("distinguishes same-resource Muji presence after refresh from another resource", () => {
+    setSession("alice");
+    connectionStore.client = { fullJid: "alice@waddle.test/web" } as unknown as typeof connectionStore.client;
+    $callState.set({ phase: "idle" });
+    applyMucCallPresence({
+      from: `${ROOM}/alice`,
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/mobile",
+      muji: { preparing: false, active: true },
+    });
+
+    expect(readRoomHasActiveCall(ROOM)).toEqual({
+      hasActiveCall: true,
+      selfInCall: true,
+      localResourceInCall: false,
+      participantCount: 1,
+    });
+
+    applyMucCallPresence({
+      from: `${ROOM}/alice`,
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/web",
+      muji: { preparing: false, active: true },
+    });
+
+    expect(readRoomHasActiveCall(ROOM)).toEqual({
+      hasActiveCall: true,
+      selfInCall: true,
+      localResourceInCall: true,
+      participantCount: 1,
+    });
+  });
+
+  test("preserves resourcepart case when matching Muji ownership to this browser", () => {
+    setSession("alice");
+    connectionStore.client = { fullJid: "alice@waddle.test/Web" } as unknown as typeof connectionStore.client;
+    $callState.set({ phase: "idle" });
+    applyMucCallPresence({
+      from: `${ROOM}/alice`,
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/web",
+      muji: { preparing: false, active: true },
+    });
+
+    expect(readRoomHasActiveCall(ROOM).localResourceInCall).toBe(false);
+
+    applyMucCallPresence({
+      from: `${ROOM}/alice`,
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/Web",
+      muji: { preparing: false, active: true },
+    });
+
+    expect(readRoomHasActiveCall(ROOM).localResourceInCall).toBe(true);
   });
 
   test("normalizes resource-suffixed room JIDs", () => {

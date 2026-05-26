@@ -28,6 +28,7 @@ import {
   $mucCallParticipants,
   normalizeMucCallRoomJid,
 } from "@/lib/calls/muc-call-presence";
+import { mucCallParticipantPreview } from "@/lib/calls/muc-call-indicators";
 import { barePeerJid } from "@/lib/xmpp/jid";
 import type { ChannelSummary } from "@/lib/chat-types";
 import type { DmConversation } from "@/lib/xmpp-client";
@@ -55,6 +56,7 @@ type CurrentCallPanelState = {
   connected: boolean;
   viewing: boolean;
   participantCount: number;
+  participantLabels: string[];
 };
 
 const state = useStore($callState);
@@ -79,7 +81,13 @@ const panel = computed<CurrentCallPanelState | null>(() => {
     const channel = props.channels.find((candidate) =>
       normalizeMucCallRoomJid(candidate.jid ?? "") === roomJid
     );
-    const participantCount = mucParticipants.value[roomJid]?.length ?? 0;
+    const participantLabels = mucParticipants.value[roomJid] ?? [];
+    const fallbackLabels = participantLabels.length > 0
+      ? participantLabels
+      : current.selfNick
+        ? [current.selfNick]
+        : [];
+    const participantCount = Math.max(fallbackLabels.length, current.phase === "muc-pending" ? 1 : 0);
     return {
       kind: "muc",
       title: channel?.name ?? roomJid.split("@")[0] ?? "Group call",
@@ -92,6 +100,7 @@ const panel = computed<CurrentCallPanelState | null>(() => {
         (!!activeChannelRoom.value && activeChannelRoom.value === roomJid)
       ),
       participantCount,
+      participantLabels: fallbackLabels,
     };
   }
 
@@ -109,6 +118,7 @@ const panel = computed<CurrentCallPanelState | null>(() => {
     connected: true,
     viewing: barePeerJid(props.activePeerJid ?? "").toLowerCase() === peerJid,
     participantCount: 2,
+    participantLabels: [],
   };
 });
 
@@ -130,6 +140,8 @@ const participantLabel = computed(() => {
   const current = panel.value;
   if (!current) return "";
   if (current.kind === "dm") return "1:1";
+  const preview = mucCallParticipantPreview(current.participantLabels);
+  if (preview) return preview;
   const count = current.participantCount;
   if (count <= 0) return "Group";
   return `${count} in call`;

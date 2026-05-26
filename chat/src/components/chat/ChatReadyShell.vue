@@ -6,7 +6,11 @@ import {
   mucCallParticipantCounts,
 } from "@/lib/calls/muc-call-presence";
 import { $dmCallActivities } from "@/lib/calls/dm-call-activity";
-import { answerIncomingDmCallActivity, startDmCallAction } from "@/lib/calls/dm-call-actions";
+import {
+  activeChannelRailCallCount,
+  activeDmRailCallCount,
+} from "@/lib/calls/call-rail-counts";
+import { answerIncomingDmCallActivity, resumeDmCallActivity } from "@/lib/calls/dm-call-actions";
 import { startMucCallAction } from "@/lib/calls/muc-call-actions";
 import { normalizeMucServiceDomain } from "@/lib/calls/muc-call-indicators";
 import {
@@ -156,17 +160,21 @@ const {
  */
 const mucCallParticipantsStore = useStore($mucCallParticipants);
 const dmCallActivitiesStore = useStore($dmCallActivities);
+const callStateStore = useStore($callState);
 const activityGroupCallStarting = ref(false);
 const callParticipantCounts = computed<Record<string, number>>(() => {
   return mucCallParticipantCounts(mucCallParticipantsStore.value);
 });
-const activeChannelCallCount = computed(() =>
-  Object.values(callParticipantCounts.value).filter((count) => count > 0).length,
-);
-const activeDmCallCount = computed(() => Object.keys(dmCallActivitiesStore.value).length);
+const activeChannelCallCount = computed(() => {
+  return activeChannelRailCallCount(callParticipantCounts.value, callStateStore.value);
+});
+const activeDmCallCount = computed(() => {
+  return activeDmRailCallCount(dmCallActivitiesStore.value, callStateStore.value);
+});
 const managedMucDomain = computed(() =>
   normalizeMucServiceDomain(waddles.mucServiceJid.value) || (selfDomain.value ? `muc.${selfDomain.value}` : ""),
 );
+const selfFullJid = computed(() => getSelfFullJid() ?? null);
 
 const homeDashboardProps = computed(() => buildHomeDashboardProps({
   spaces: waddles.sortedSpaces.value,
@@ -178,8 +186,10 @@ const homeDashboardProps = computed(() => buildHomeDashboardProps({
   activeChannelJids: messaging.activeChannels.value,
   dmConversations: dmConversations.conversations.value,
   callParticipantCounts: callParticipantCounts.value,
+  callParticipants: mucCallParticipantsStore.value,
   dmCallActivities: dmCallActivitiesStore.value,
   managedMucDomain: managedMucDomain.value,
+  selfFullJid: selfFullJid.value,
 }));
 
 const contentPaneClass = computed(() => {
@@ -264,14 +274,9 @@ function isGroupCallBusy(): boolean {
   return activityGroupCallStarting.value || (current.phase !== "idle" && current.phase !== "ended");
 }
 
-function reconnectDmFromDock(peerJid: string, media: CallMedia): void {
+function reconnectDmFromDock(peerJid: string, _media: CallMedia): void {
   selectDm(peerJid);
-  void startDmCallAction({
-    peerBareJid: peerJid,
-    media,
-    getSender: getCallSender,
-    getInitiator: getSelfFullJid,
-  });
+  resumeDmCallActivity({ peerBareJid: peerJid, getSelfFullJid });
 }
 
 function answerDmFromActivity(peerJid: string, remoteFullJid: string, sid: string, media: CallMedia): void {
@@ -371,7 +376,9 @@ onUnmounted(() => {
       :active-peer-jid="dmConversations.activePeerJid.value"
       :sidebar-mode="ui.sidebarMode.value"
       :active-channel-jids="messaging.activeChannels.value"
+      :call-participants="mucCallParticipantsStore"
       :managed-muc-domain="managedMucDomain"
+      :self-full-jid="selfFullJid"
       hide-current-call
       @select-channel="onSelectChannelFromSidebar"
       @join-channel-call="joinChannelCallFromActivity"
@@ -448,6 +455,7 @@ onUnmounted(() => {
           v-else
           :conversations="dmConversations.conversations.value"
           :active-peer-jid="dmConversations.activePeerJid.value"
+          :self-full-jid="selfFullJid"
           hide-current-call
           @answer-dm="answerDmFromActivity"
           @select-dm="selectDm"
@@ -471,7 +479,9 @@ onUnmounted(() => {
           :active-peer-jid="dmConversations.activePeerJid.value"
           :sidebar-mode="ui.sidebarMode.value"
           :active-channel-jids="messaging.activeChannels.value"
+          :call-participants="mucCallParticipantsStore"
           :managed-muc-domain="managedMucDomain"
+          :self-full-jid="selfFullJid"
           :show-dm-calls="ui.sidebarMode.value !== 'dms'"
           hide-current-call
           @select-channel="onSelectChannelFromSidebar"
@@ -604,6 +614,7 @@ onUnmounted(() => {
               :typing-users="activeTypingUsers"
               :current-user="connectionStore.session?.username"
               :current-user-jid="connectionStore.session?.jid"
+              :self-full-jid="selfFullJid"
               :self-domain="selfDomain"
               :avatar-url-by-author="avatarUrlByAuthor"
               :author-jid-by-nick="authorJidByNick"

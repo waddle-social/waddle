@@ -5,7 +5,7 @@ import {
   reportCallError,
   scheduleOutgoingTimeout,
 } from "./call-store";
-import { clearDmCallActivity, readDmCallActivity } from "./dm-call-activity";
+import { canResumeDmCallActivity, clearDmCallActivity, readDmCallActivity } from "./dm-call-activity";
 import {
   newCallSid,
   outboundCalls,
@@ -105,4 +105,33 @@ export async function answerIncomingDmCallActivity(options: {
     }
     reportCallError(err);
   }
+}
+
+export function resumeDmCallActivity(options: {
+  peerBareJid: string;
+  getSelfFullJid?: () => string | undefined;
+  now?: Date;
+}): boolean {
+  const current = $callState.get();
+  if (current.phase !== "idle" && current.phase !== "ended") return false;
+
+  const peer = barePeerJid(options.peerBareJid).toLowerCase();
+  if (!peer) return false;
+
+  const activity = readDmCallActivity(peer, options.now);
+  const selfFullJid = options.getSelfFullJid?.()?.trim() ?? "";
+  if (!activity || !canResumeDmCallActivity(activity, selfFullJid, options.now)) {
+    return false;
+  }
+
+  $callState.set({
+    phase: "active",
+    kind: "dm",
+    peer: activity.remoteFullJid,
+    sid: activity.sid,
+    media: activity.media,
+    join: activity.join,
+    initiator: selfFullJid,
+  });
+  return true;
 }

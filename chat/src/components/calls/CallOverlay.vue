@@ -11,8 +11,8 @@ import { useCallEngine } from "@/lib/calls/use-call-engine";
 import { connectionStore } from "@/lib/connection-store";
 import {
   $callConnecting,
+  installCallPagehideSuspension,
   resetCallControls,
-  suspendCallForPageHide,
 } from "@/lib/calls/call-controls";
 import { $callUiMode } from "@/lib/calls/ui-mode";
 
@@ -34,6 +34,7 @@ import { $callUiMode } from "@/lib/calls/ui-mode";
  */
 const state = useStore($callState);
 const { engine } = useCallEngine();
+let disconnectPagehideSuspension: (() => void) | null = null;
 
 function getSender(): CallWireSender | null {
   const client = connectionStore.client as unknown as { xmpp?: unknown } | null;
@@ -83,20 +84,9 @@ watch(
   { immediate: true },
 );
 
-/**
- * Release local camera/mic during page lifecycle suspension without
- * sending XMPP hangup stanzas. Browser refresh must preserve the
- * remote-visible call so the new tab load can rediscover it through
- * MAM call markers or MUC presence replay.
- */
-function handlePageHide(event: PageTransitionEvent): void {
-  if (event.persisted) return;
-  suspendCallForPageHide();
-}
-
 onMounted(() => {
   if (typeof window !== "undefined") {
-    window.addEventListener("pagehide", handlePageHide);
+    disconnectPagehideSuspension = installCallPagehideSuspension(window);
   }
 });
 
@@ -105,9 +95,8 @@ onBeforeUnmount(() => {
   // browser refreshes must not emit XMPP call-ending stanzas; explicit
   // hangup/logout own that path.
   void engine.disconnect();
-  if (typeof window !== "undefined") {
-    window.removeEventListener("pagehide", handlePageHide);
-  }
+  disconnectPagehideSuspension?.();
+  disconnectPagehideSuspension = null;
 });
 </script>
 
