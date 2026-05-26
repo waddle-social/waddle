@@ -1,6 +1,7 @@
 import type { ChannelSummary } from "@/lib/chat-types";
 import type { DmConversation } from "@/lib/xmpp/types";
 import { barePeerJid } from "@/lib/xmpp/jid";
+import type { CallMedia, CallState } from "./types";
 import {
   callParticipantCountForChannel,
   candidateRoomJidsForChannel,
@@ -35,15 +36,51 @@ export type CallActivityDockEntry =
   };
 type DmCallActivityDockEntry = Extract<CallActivityDockEntry, { kind: "dm" }>;
 
+type CallActivityDockAction = "open" | "join" | "return" | "reconnect";
+
 type CallActivityDockSelection =
   | { kind: "channel"; channelId: string | null; roomJid: string }
+  | { kind: "channel-join"; channelId: string | null; roomJid: string; media: CallMedia }
   | { kind: "dm-open"; peerJid: string }
   | { kind: "dm-reconnect"; peerJid: string; media: DmCallActivity["media"] };
 
+function activeMucCallRoomJid(state: CallState): string {
+  if (state.phase !== "active" && state.phase !== "muc-pending") return "";
+  if (state.kind !== "muc") return "";
+  return normalizeMucCallRoomJid(state.peer);
+}
+
+function isBusy(state: CallState): boolean {
+  return state.phase !== "idle" && state.phase !== "ended";
+}
+
+export function callActivityDockAction(
+  entry: CallActivityDockEntry,
+  callState: CallState,
+): CallActivityDockAction {
+  if (entry.kind === "dm") {
+    return entry.state === "accepted" ? "reconnect" : "open";
+  }
+
+  const roomJid = normalizeMucCallRoomJid(entry.roomJid);
+  if (!roomJid) return "open";
+  if (activeMucCallRoomJid(callState) === roomJid) return "return";
+  return isBusy(callState) ? "open" : "join";
+}
+
 export function callActivityDockSelection(
   entry: CallActivityDockEntry,
+  callState: CallState = { phase: "idle" },
 ): CallActivityDockSelection {
   if (entry.kind === "channel") {
+    if (callActivityDockAction(entry, callState) === "join") {
+      return {
+        kind: "channel-join",
+        channelId: entry.channelId,
+        roomJid: entry.roomJid,
+        media: { audio: true, video: false },
+      };
+    }
     return {
       kind: "channel",
       channelId: entry.channelId,

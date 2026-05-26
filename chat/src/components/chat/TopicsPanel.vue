@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, watch } from "vue";
+import { useStore } from "@nanostores/vue";
 import { CalendarDays, Camera, Hash, ListTree, MessageSquareText, MessagesSquare, Phone, Plus, Settings, Users, ChevronDown, ChevronRight, MessageCircle } from "lucide-vue-next";
 import { isForumChannel as detectForumChannel } from "@/lib/channel-types";
 import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
@@ -7,8 +8,12 @@ import type { ChannelThreadInboxEntry } from "@/channels/inbox";
 import { groupChannelsBySpace } from "@/lib/channel-grouping";
 import {
   callParticipantCountForChannel,
+  candidateRoomJidsForChannel,
   collapsedGroupBadgeModel,
 } from "@/lib/calls/muc-call-indicators";
+import { normalizeMucCallRoomJid } from "@/lib/calls/muc-call-presence";
+import { $callState } from "@/lib/calls/call-store";
+import type { CallMedia } from "@/lib/calls/types";
 import type { MemberLoadState } from "@/waddles/directory";
 import Skeleton from "@/components/ui/Skeleton.vue";
 
@@ -52,6 +57,8 @@ const props = defineProps<{
   managedMucDomain?: string | null;
 }>();
 
+const callState = useStore($callState);
+
 /**
  * Resolve the channel's MUC room JID and look up the live-call
  * count for it. Channel rows in the sidebar may store the JID
@@ -66,6 +73,51 @@ function callParticipantCount(channel: ChannelSummary): number {
     props.activeChannelJids,
     props.managedMucDomain,
   );
+}
+
+function callRoomJid(channel: ChannelSummary): string {
+  if (!props.callParticipantCounts) return "";
+  return candidateRoomJidsForChannel(channel, props.activeChannelJids, props.managedMucDomain)
+    .map(normalizeMucCallRoomJid)
+    .find((jid) => (props.callParticipantCounts?.[jid] ?? 0) > 0) ?? "";
+}
+
+function channelCallAction(channel: ChannelSummary): "join" | "return" | "open" | null {
+  if (callParticipantCount(channel) <= 0) return null;
+  const roomJid = callRoomJid(channel);
+  if (!roomJid) return null;
+  const state = callState.value;
+  if (
+    (state.phase === "active" || state.phase === "muc-pending") &&
+    state.kind === "muc" &&
+    normalizeMucCallRoomJid(state.peer) === roomJid
+  ) {
+    return "return";
+  }
+  if (state.phase !== "idle" && state.phase !== "ended") return "open";
+  return "join";
+}
+
+function channelCallActionLabel(channel: ChannelSummary): string {
+  switch (channelCallAction(channel)) {
+    case "join":
+      return "Join";
+    case "return":
+      return "Return";
+    case "open":
+      return "Open";
+    default:
+      return "";
+  }
+}
+
+function channelCallBadgeLabel(channel: ChannelSummary): string {
+  const count = callParticipantCount(channel);
+  const noun = count === 1 ? "person" : "people";
+  const action = channelCallActionLabel(channel);
+  return action
+    ? `${action} live call, ${count} ${noun}`
+    : `Live call, ${count} ${noun}`;
 }
 
 function hasActivity(channelId: string): boolean {
@@ -141,12 +193,17 @@ function channelRowLabel(
   unread: { unread: number; mentions: number },
   isActive: boolean,
 ) {
-  return `${channel.name}, ${isActive ? "selected" : "not selected"}, ${activityLabel({
+  const label = `${channel.name}, ${isActive ? "selected" : "not selected"}, ${activityLabel({
     unread: unread.unread,
     mentions: unread.mentions,
     hasActivity: hasActivity(channel.id),
     callCount: callParticipantCount(channel),
   })}`;
+  const action = !isActive ? channelCallAction(channel) : null;
+  if (action === "join") return `${label}, click to join call`;
+  if (action === "return") return `${label}, click to return to call`;
+  if (action === "open") return `${label}, click to open call`;
+  return label;
 }
 
 function threadRowLabel(thread: ChannelThreadInboxEntry) {
@@ -182,7 +239,8 @@ function truncateTitle(title: string | undefined, maxLen = 28): string {
 }
 
 const emit = defineEmits<{
-  selectChannel: [id: string];
+  selectChannel: [id: string, roomJid?: string];
+  joinChannelCall: [channelId: string | null, roomJid: string, media: CallMedia];
   selectThread: [channelId: string, threadId: string];
   selectCommunitySurface: [surface: "feed" | "stories" | "events"];
   selectThreadsView: [];
@@ -192,6 +250,15 @@ const emit = defineEmits<{
   openMembers: [];
   updateCollapsedGroupIds: [groupIds: Set<string>];
 }>();
+
+function selectChannelRow(channel: ChannelSummary): void {
+  const roomJid = callRoomJid(channel);
+  if (!isActiveChannelPage(channel) && channelCallAction(channel) === "join" && roomJid) {
+    emit("joinChannelCall", channel.id, roomJid, { audio: true, video: false });
+    return;
+  }
+  emit("selectChannel", channel.id, roomJid || undefined);
+}
 
 function isGroupCollapsed(groupId: string): boolean {
   return props.collapsedGroupIds.has(groupId);
@@ -454,7 +521,7 @@ watch(
                 :aria-current="isActiveChannelPage(channel) ? 'page' : undefined"
                 :aria-label="channelRowLabel(channel, unread, isActiveChannelPage(channel))"
                 type="button"
-                @click="emit('selectChannel', channel.id)"
+                @click="selectChannelRow(channel)"
               >
                 <component
                   :is="channelIcon(channel)"
@@ -489,10 +556,17 @@ watch(
                 <span
                   v-if="callParticipantCount(channel) > 0 && !isActiveChannelPage(channel)"
                   class="chat-badge-glow--primary type-count-badge inline-flex items-center gap-0.5 h-[18px] px-1.5 rounded-full bg-primary/15 text-primary ring-1 ring-primary/30 motion-safe:animate-pulse"
+                  :title="channelCallBadgeLabel(channel)"
                   aria-hidden="true"
                 >
                   <Phone class="w-3 h-3" />
                   <span class="type-numeric leading-none">{{ callParticipantCount(channel) }}</span>
+                  <span
+                    v-if="channelCallActionLabel(channel)"
+                    class="hidden 2xl:inline leading-none"
+                  >
+                    · {{ channelCallActionLabel(channel) }}
+                  </span>
                 </span>
                 <span
                   v-if="unread.mentions > 0 && !isActiveChannelPage(channel)"

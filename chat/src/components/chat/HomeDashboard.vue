@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { useStore } from "@nanostores/vue";
 import {
   ArrowRight,
   Hash,
@@ -18,10 +19,12 @@ import AppAvatar from "@/components/ui/AppAvatar.vue";
 import Skeleton from "@/components/ui/Skeleton.vue";
 import { isForumChannel } from "@/lib/channel-types";
 import {
+  callActivityDockAction,
   buildCallActivityDockEntries,
   callActivityDockSelection,
   type CallActivityDockEntry,
 } from "@/lib/calls/call-activity-dock";
+import { $callState } from "@/lib/calls/call-store";
 import { callParticipantCountForChannel } from "@/lib/calls/muc-call-indicators";
 import { barePeerJid } from "@/lib/xmpp/jid";
 import type { CallMedia } from "@/lib/calls/types";
@@ -47,6 +50,7 @@ const props = defineProps<HomeDashboardProps>();
 const emit = defineEmits<{
   selectChannel: [id: string, roomJid?: string];
   selectChannelRoom: [roomJid: string];
+  joinChannelCall: [channelId: string | null, roomJid: string, media: CallMedia];
   selectContact: [jid: string];
   reconnectDm: [peerJid: string, media: CallMedia];
   openNav: [];
@@ -111,6 +115,7 @@ const activeChannelJids = computed(() => props.activeChannelJids ?? new Set<stri
 const directMessages = computed(() => props.dmConversations ?? []);
 const callParticipantCounts = computed(() => props.callParticipantCounts ?? {});
 const dmCallActivities = computed(() => props.dmCallActivities ?? {});
+const callState = useStore($callState);
 const channelsBySpace = computed(() =>
   new Map(groups.value.flatMap((group) => group.space ? [[group.space.id, group.channels.length] as const] : [])),
 );
@@ -149,8 +154,11 @@ function selectSpaceChannel(spaceId: string) {
 }
 
 function selectCallEntry(entry: CallActivityDockEntry) {
-  const selection = callActivityDockSelection(entry);
+  const selection = callActivityDockSelection(entry, callState.value);
   switch (selection.kind) {
+    case "channel-join":
+      emit("joinChannelCall", selection.channelId, selection.roomJid, selection.media);
+      return;
     case "channel":
       if (selection.channelId) {
         emit("selectChannel", selection.channelId, selection.roomJid);
@@ -314,8 +322,21 @@ function callEntryKindLabel(entry: CallActivityDockEntry): string {
 }
 
 function callEntryLabel(entry: CallActivityDockEntry): string {
-  const action = callActivityDockSelection(entry).kind === "dm-reconnect" ? "Reconnect" : "Open";
+  const action = callEntryActionLabel(entry);
   return `${action} ${entry.title}, ${callEntryKindLabel(entry)}, ${callEntryStatus(entry)}`;
+}
+
+function callEntryActionLabel(entry: CallActivityDockEntry): string {
+  switch (callActivityDockAction(entry, callState.value)) {
+    case "join":
+      return "Join";
+    case "return":
+      return "Return";
+    case "reconnect":
+      return "Reconnect";
+    case "open":
+      return "Open";
+  }
 }
 
 const heroSummary = computed<HeroSummary>(() => {
@@ -490,6 +511,12 @@ function onHeroCta() {
               aria-hidden="true"
             >
               {{ entry.participantCount }}
+            </span>
+            <span
+              class="type-meta shrink-0 rounded-md border border-success/25 bg-background/70 px-2 py-1 text-success"
+              aria-hidden="true"
+            >
+              {{ callEntryActionLabel(entry) }}
             </span>
             <ArrowRight class="h-4 w-4 shrink-0 text-success" aria-hidden="true" />
           </button>
