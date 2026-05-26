@@ -31,6 +31,7 @@ const props = defineProps<{
   waddle: SpaceSummary | null;
   channel: ChannelSummary | null;
   dmPeer?: { peerJid?: string; peerUsername: string; presenceShow?: string } | null;
+  callRoomJid?: string | null;
   isForumChannel: boolean;
   canManageChannels: boolean;
   memberCount: number | null;
@@ -274,8 +275,8 @@ const memberButtonCopy = computed(() => {
           :peer-bare-jid="dmPeer.peerJid"
         />
         <MucCallButton
-          v-else-if="channel?.jid"
-          :room-jid="channel.jid"
+          v-else-if="callRoomJid"
+          :room-jid="callRoomJid"
         />
         <!-- Live presence stack — desktop only. The mobile header is
              already crowded with hamburger + channel chip + search/pin/

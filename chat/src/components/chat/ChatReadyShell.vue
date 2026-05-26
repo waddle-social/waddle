@@ -5,7 +5,11 @@ import {
   $mucCallParticipants,
   mucCallParticipantCounts,
 } from "@/lib/calls/muc-call-presence";
+import { $dmCallActivities } from "@/lib/calls/dm-call-activity";
+import { startDmCallAction } from "@/lib/calls/dm-call-actions";
 import { normalizeMucServiceDomain } from "@/lib/calls/muc-call-indicators";
+import type { CallWireSender } from "@/lib/calls/outbound";
+import type { CallMedia } from "@/lib/calls/types";
 import HomeDashboard from "@/components/chat/HomeDashboard.vue";
 import ThreadsView from "@/components/chat/ThreadsView.vue";
 import FeedPane from "@/components/community/FeedPane.vue";
@@ -136,6 +140,22 @@ const {
   jumpToPinnedMessage,
 } = props.controller;
 
+/**
+ * XEP-0272 Muji participant counts keyed by room JID. Derived from
+ * the per-room nick list so the sidebar badge updates as occupants
+ * join and leave the call without any extra round-trip. Computed
+ * once here and threaded through TopicsPanel so per-row lookups
+ * stay O(1).
+ */
+const mucCallParticipantsStore = useStore($mucCallParticipants);
+const dmCallActivitiesStore = useStore($dmCallActivities);
+const callParticipantCounts = computed<Record<string, number>>(() => {
+  return mucCallParticipantCounts(mucCallParticipantsStore.value);
+});
+const managedMucDomain = computed(() =>
+  normalizeMucServiceDomain(waddles.mucServiceJid.value) || (selfDomain.value ? `muc.${selfDomain.value}` : ""),
+);
+
 const homeDashboardProps = computed(() => buildHomeDashboardProps({
   spaces: waddles.sortedSpaces.value,
   channels: waddles.sortedChannels.value,
@@ -145,22 +165,10 @@ const homeDashboardProps = computed(() => buildHomeDashboardProps({
   mentionedRoomJids: messaging.mentionedChannelCounts.value,
   activeChannelJids: messaging.activeChannels.value,
   dmConversations: dmConversations.conversations.value,
+  callParticipantCounts: callParticipantCounts.value,
+  dmCallActivities: dmCallActivitiesStore.value,
+  managedMucDomain: managedMucDomain.value,
 }));
-
-/**
- * XEP-0272 Muji participant counts keyed by room JID. Derived from
- * the per-room nick list so the sidebar badge updates as occupants
- * join and leave the call without any extra round-trip. Computed
- * once here and threaded through TopicsPanel so per-row lookups
- * stay O(1).
- */
-const mucCallParticipantsStore = useStore($mucCallParticipants);
-const callParticipantCounts = computed<Record<string, number>>(() => {
-  return mucCallParticipantCounts(mucCallParticipantsStore.value);
-});
-const managedMucDomain = computed(() =>
-  normalizeMucServiceDomain(waddles.mucServiceJid.value) || (selfDomain.value ? `muc.${selfDomain.value}` : ""),
-);
 
 const contentPaneClass = computed(() => {
   if (ui.sidebarMode.value !== "channels") return "";
@@ -213,6 +221,25 @@ function onSelectChannelFromSidebar(id: string | null, roomJid?: string) {
   if (roomJid) selectChannelByRoomJid(roomJid);
 }
 
+function getCallSender(): CallWireSender | null {
+  const client = connectionStore.client as unknown as { xmpp?: unknown } | null;
+  return (client?.xmpp as CallWireSender | undefined) ?? null;
+}
+
+function getSelfFullJid(): string | undefined {
+  return (connectionStore.client as unknown as { fullJid?: string } | null)?.fullJid;
+}
+
+function reconnectDmFromDock(peerJid: string, media: CallMedia): void {
+  selectDm(peerJid);
+  void startDmCallAction({
+    peerBareJid: peerJid,
+    media,
+    getSender: getCallSender,
+    getInitiator: getSelfFullJid,
+  });
+}
+
 // ── Admin route plumbing ────────────────────────────────────────────
 // The admin view is rendered straight out of ChatReadyShell rather
 // than from a per-route page Vue island, so the panel slug is
@@ -263,6 +290,7 @@ onUnmounted(() => {
       :managed-muc-domain="managedMucDomain"
       @select-channel="onSelectChannelFromSidebar"
       @select-dm="selectDm"
+      @reconnect-dm="reconnectDmFromDock"
     />
 
     <!-- Desktop layout -->
@@ -343,6 +371,7 @@ onUnmounted(() => {
           :managed-muc-domain="managedMucDomain"
           @select-channel="onSelectChannelFromSidebar"
           @select-dm="selectDm"
+          @reconnect-dm="reconnectDmFromDock"
         />
       </div>
 
@@ -350,8 +379,10 @@ onUnmounted(() => {
       <HomeDashboard
         v-if="ui.activePage.value === 'dashboard'"
         v-bind="homeDashboardProps"
-        @select-channel="selectChannel"
+        @select-channel="(id: string, roomJid?: string) => selectChannel(id, roomJid ? { roomJid } : undefined)"
+        @select-channel-room="selectChannelByRoomJid"
         @select-contact="handleOpenDm"
+        @reconnect-dm="reconnectDmFromDock"
         @open-nav="ui.showMobileNav.value = true"
       />
       <FeedPane

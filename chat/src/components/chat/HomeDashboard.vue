@@ -1,11 +1,30 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
-import { ArrowRight, Hash, MessageCircle, MessagesSquare, Users } from "lucide-vue-next";
+import {
+  ArrowRight,
+  Hash,
+  MessageCircle,
+  MessagesSquare,
+  Phone,
+  PhoneCall,
+  PhoneIncoming,
+  PhoneOutgoing,
+  Users,
+  Video,
+} from "lucide-vue-next";
 import type { ChannelSummary } from "@/lib/chat-types";
 import type { RosterContact } from "@/lib/xmpp/types";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import Skeleton from "@/components/ui/Skeleton.vue";
 import { isForumChannel } from "@/lib/channel-types";
+import {
+  buildCallActivityDockEntries,
+  callActivityDockSelection,
+  type CallActivityDockEntry,
+} from "@/lib/calls/call-activity-dock";
+import { callParticipantCountForChannel } from "@/lib/calls/muc-call-indicators";
+import { barePeerJid } from "@/lib/xmpp/jid";
+import type { CallMedia } from "@/lib/calls/types";
 import { groupChannelsBySpace } from "@/lib/channel-grouping";
 import { formatTimelineStamp } from "@/channels/timeline";
 import type { ChannelActivityState, HomeDashboardProps } from "@/home/dashboard-props";
@@ -26,8 +45,10 @@ import {
 const props = defineProps<HomeDashboardProps>();
 
 const emit = defineEmits<{
-  selectChannel: [id: string];
+  selectChannel: [id: string, roomJid?: string];
+  selectChannelRoom: [roomJid: string];
   selectContact: [jid: string];
+  reconnectDm: [peerJid: string, media: CallMedia];
   openNav: [];
 }>();
 
@@ -74,6 +95,7 @@ interface HeroSummary {
   totalMentions: number;
   totalThreadUnread: number;
   dmUnread: number;
+  activeCalls: number;
   onlineFriends: number;
   hasUnread: boolean;
 }
@@ -87,9 +109,23 @@ const groups = computed(() => groupChannelsBySpace(props.spaces, props.channels)
 const visibleChannelGroups = computed(() => groups.value.filter((group) => group.channels.length > 0));
 const activeChannelJids = computed(() => props.activeChannelJids ?? new Set<string>());
 const directMessages = computed(() => props.dmConversations ?? []);
+const callParticipantCounts = computed(() => props.callParticipantCounts ?? {});
+const dmCallActivities = computed(() => props.dmCallActivities ?? {});
 const channelsBySpace = computed(() =>
   new Map(groups.value.flatMap((group) => group.space ? [[group.space.id, group.channels.length] as const] : [])),
 );
+const activeCallEntries = computed<CallActivityDockEntry[]>(() => buildCallActivityDockEntries({
+  channels: props.channels,
+  conversations: directMessages.value,
+  activeChannelId: null,
+  activeChannelRoomJid: null,
+  activePeerJid: null,
+  sidebarMode: "channels",
+  activeChannelJids: activeChannelJids.value,
+  managedMucDomain: props.managedMucDomain ?? null,
+  callParticipantCounts: callParticipantCounts.value,
+  dmCallActivities: dmCallActivities.value,
+}));
 const activityByChannelId = computed(() =>
   new Map(props.channels.map((channel) => [
     channel.id,
@@ -112,6 +148,25 @@ function selectSpaceChannel(spaceId: string) {
   if (channelId) emit("selectChannel", channelId);
 }
 
+function selectCallEntry(entry: CallActivityDockEntry) {
+  const selection = callActivityDockSelection(entry);
+  switch (selection.kind) {
+    case "channel":
+      if (selection.channelId) {
+        emit("selectChannel", selection.channelId, selection.roomJid);
+        return;
+      }
+      if (selection.roomJid) emit("selectChannelRoom", selection.roomJid);
+      return;
+    case "dm-reconnect":
+      emit("reconnectDm", selection.peerJid, selection.media);
+      return;
+    case "dm-open":
+      emit("selectContact", selection.peerJid);
+      return;
+  }
+}
+
 function channelsForSpace(spaceId: string): ChannelSummary[] {
   return groups.value.find((group) => group.space?.id === spaceId)?.channels ?? [];
 }
@@ -129,6 +184,20 @@ function spaceHasChannels(spaceId: string): boolean {
 function channelActivity(channel: ChannelSummary) {
   return activityByChannelId.value.get(channel.id)
     ?? { unread: 0, mentions: 0, threadUnread: 0, hasActivity: false };
+}
+
+function channelCallCount(channel: ChannelSummary): number {
+  return callParticipantCountForChannel(
+    channel,
+    callParticipantCounts.value,
+    activeChannelJids.value,
+    props.managedMucDomain ?? null,
+  );
+}
+
+function dmCallActivityFor(peerJid: string) {
+  const normalized = barePeerJid(peerJid).toLowerCase();
+  return normalized ? dmCallActivities.value[normalized] ?? null : null;
 }
 
 function groupActivity(groupId: string): HomeActivitySummary {
@@ -195,6 +264,60 @@ function dmSecondaryText(conversation: { peerUsername?: string; peerJid: string;
   return preview || conversation.peerJid;
 }
 
+function dmCallLabel(peerJid: string): string {
+  const activity = dmCallActivityFor(peerJid);
+  if (!activity) return "";
+  const media = activity.media.video ? "Video" : "Voice";
+  if (activity.state === "accepted") return `${media} call live`;
+  if (activity.direction === "incoming") return `Incoming ${media.toLowerCase()} call`;
+  if (activity.direction === "outgoing") return `${media} call calling`;
+  return `${media} call ringing`;
+}
+
+function channelHomeAriaLabel(channel: ChannelSummary): string {
+  const base = channelHomeLabel(channel, channelActivity(channel), activityStamp(channelActivity(channel).lastUpdated));
+  const count = channelCallCount(channel);
+  if (count <= 0) return base;
+  const noun = count === 1 ? "person" : "people";
+  return `${base}, active call with ${count} ${noun}`;
+}
+
+function dmHomeAriaLabel(conversation: {
+  peerUsername?: string;
+  peerJid: string;
+  lastMessageBody?: string;
+  lastMessageAt?: string;
+  unreadCount: number;
+  presenceShow?: "available" | "away" | "xa" | "dnd" | "offline";
+}): string {
+  const base = dmHomeLabel(
+    conversation,
+    conversation.lastMessageAt ? formatTimelineStamp(conversation.lastMessageAt) : "",
+  );
+  const call = dmCallLabel(conversation.peerJid);
+  return call ? `${base}, ${call}` : base;
+}
+
+function callEntryStatus(entry: CallActivityDockEntry): string {
+  if (entry.kind === "channel") {
+    const noun = entry.participantCount === 1 ? "person" : "people";
+    return `${entry.participantCount} ${noun}`;
+  }
+  if (entry.state === "accepted") return "Live";
+  if (entry.direction === "outgoing") return "Calling";
+  return "Ringing";
+}
+
+function callEntryKindLabel(entry: CallActivityDockEntry): string {
+  if (entry.kind === "channel") return entry.isKnownChannel ? "Group call" : "Group call syncing";
+  return entry.media.video ? "Video call" : "Voice call";
+}
+
+function callEntryLabel(entry: CallActivityDockEntry): string {
+  const action = callActivityDockSelection(entry).kind === "dm-reconnect" ? "Reconnect" : "Open";
+  return `${action} ${entry.title}, ${callEntryKindLabel(entry)}, ${callEntryStatus(entry)}`;
+}
+
 const heroSummary = computed<HeroSummary>(() => {
   let totalUnread = 0;
   let totalMentions = 0;
@@ -221,6 +344,7 @@ const heroSummary = computed<HeroSummary>(() => {
     totalMentions,
     totalThreadUnread,
     dmUnread,
+    activeCalls: activeCallEntries.value.length,
     onlineFriends,
     hasUnread: totalUnread + totalMentions + totalThreadUnread + dmUnread > 0,
   };
@@ -238,6 +362,9 @@ const heroSummaryParts = computed<HeroSummaryPart[]>(() => {
   }
   if (s.totalThreadUnread > 0) {
     parts.push({ count: s.totalThreadUnread, label: s.totalThreadUnread === 1 ? "thread reply" : "thread replies" });
+  }
+  if (s.activeCalls > 0) {
+    parts.push({ count: s.activeCalls, label: s.activeCalls === 1 ? "active call" : "active calls" });
   }
   if (s.onlineFriends > 0) {
     parts.push({ count: s.onlineFriends, label: s.onlineFriends === 1 ? "friend online" : "friends online" });
@@ -324,6 +451,49 @@ function onHeroCta() {
         >
           <Hash class="h-4 w-4" />
         </button>
+      </section>
+
+      <section
+        v-if="activeCallEntries.length > 0"
+        class="grid gap-3"
+        aria-label="Active calls"
+      >
+        <div class="flex items-center gap-2">
+          <PhoneCall class="h-4 w-4 text-success" />
+          <h2 class="type-pane-title">Active calls</h2>
+        </div>
+        <div class="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+          <button
+            v-for="entry in activeCallEntries"
+            :key="entry.key"
+            class="chat-list-row flex min-w-0 min-h-16 items-center gap-3 overflow-hidden rounded-lg border border-success/20 bg-success/10 px-4 py-3 text-left text-foreground hover:bg-success/20"
+            type="button"
+            :aria-label="callEntryLabel(entry)"
+            @click="selectCallEntry(entry)"
+          >
+            <span class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-success/10 text-success">
+              <Hash v-if="entry.kind === 'channel'" class="h-4 w-4" />
+              <Video v-else-if="entry.media.video" class="h-4 w-4" />
+              <PhoneIncoming v-else-if="entry.state === 'ringing' && entry.direction === 'incoming'" class="h-4 w-4" />
+              <PhoneOutgoing v-else-if="entry.state === 'ringing' && entry.direction === 'outgoing'" class="h-4 w-4" />
+              <Phone v-else class="h-4 w-4" />
+            </span>
+            <span class="min-w-0 flex-1">
+              <span class="type-control block truncate">{{ entry.title }}</span>
+              <span class="type-caption block truncate text-muted-foreground">
+                {{ callEntryKindLabel(entry) }} · {{ callEntryStatus(entry) }}
+              </span>
+            </span>
+            <span
+              v-if="entry.kind === 'channel'"
+              class="type-count-badge inline-flex min-w-[18px] h-[18px] shrink-0 items-center justify-center rounded-full border border-success/25 bg-success/10 px-1 text-success"
+              aria-hidden="true"
+            >
+              {{ entry.participantCount }}
+            </span>
+            <ArrowRight class="h-4 w-4 shrink-0 text-success" aria-hidden="true" />
+          </button>
+        </div>
       </section>
 
       <section class="grid gap-3">
@@ -426,7 +596,7 @@ function onHeroCta() {
                     ? 'chat-list-row--unread'
                     : ''"
                 type="button"
-                :aria-label="channelHomeLabel(channel, channelActivity(channel), activityStamp(channelActivity(channel).lastUpdated))"
+                :aria-label="channelHomeAriaLabel(channel)"
                 @click="emit('selectChannel', channel.id)"
               >
                 <component :is="isForumChannel(channel) ? MessagesSquare : Hash" class="h-3.5 w-3.5 text-primary/70" />
@@ -445,6 +615,15 @@ function onHeroCta() {
                   {{ activityStamp(channelActivity(channel).lastUpdated) }}
                 </span>
                 <span class="flex shrink-0 items-center gap-1">
+                  <span
+                    v-if="channelCallCount(channel) > 0"
+                    class="type-meta inline-flex h-[18px] shrink-0 items-center gap-1 rounded-full border border-success/25 bg-success/10 px-1.5 text-success"
+                    title="Active call"
+                    aria-hidden="true"
+                  >
+                    <PhoneCall class="h-3 w-3" />
+                    <span>{{ channelCallCount(channel) }}</span>
+                  </span>
                   <span
                     v-if="channelActivity(channel).mentions > 0"
                     class="chat-list-row--mention-badge type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-destructive text-destructive-foreground"
@@ -512,7 +691,7 @@ function onHeroCta() {
             class="chat-list-row flex min-w-0 min-h-14 items-center gap-3 overflow-hidden rounded-lg border border-border bg-card px-4 py-3 text-left hover:bg-muted/60"
             :class="conversation.unreadCount > 0 ? 'chat-list-row--unread' : ''"
             type="button"
-            :aria-label="dmHomeLabel(conversation, conversation.lastMessageAt ? formatTimelineStamp(conversation.lastMessageAt) : '')"
+            :aria-label="dmHomeAriaLabel(conversation)"
             @click="emit('selectContact', conversation.peerJid)"
           >
             <span class="relative">
@@ -531,6 +710,15 @@ function onHeroCta() {
               <span class="type-meta block text-muted-foreground">
                 {{ dmPresenceLabel(conversation.presenceShow) }}
               </span>
+            </span>
+            <span
+              v-if="dmCallActivityFor(conversation.peerJid)"
+              class="type-meta inline-flex h-[18px] shrink-0 items-center gap-1 rounded-full border border-success/25 bg-success/10 px-1.5 text-success"
+              :title="dmCallLabel(conversation.peerJid)"
+              aria-hidden="true"
+            >
+              <PhoneCall class="h-3 w-3" />
+              <span>{{ dmCallActivityFor(conversation.peerJid)?.state === 'accepted' ? 'Live' : 'Ringing' }}</span>
             </span>
             <span v-if="conversation.lastMessageAt" class="type-meta type-numeric text-muted-foreground">
               {{ formatTimelineStamp(conversation.lastMessageAt) }}

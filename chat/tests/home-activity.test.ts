@@ -328,6 +328,48 @@ describe("HomeDashboard activity rendering", () => {
     expect(buttonForLabel(html, "Empty, 0 channels, no unread activity")).not.toContain("opacity-75");
   });
 
+  test("renders refresh-discovered active calls on the home dashboard", async () => {
+    const html = await renderHomeDashboard({
+      spaces: [{ id: "team", name: "Team" }],
+      channels: [
+        { id: "general", name: "General", jid: "general@conference.example.com", spaceId: "team" },
+      ],
+      contacts: [],
+      isLoading: false,
+      channelUnreadMap: {},
+      activeChannelJids: new Set<string>(),
+      managedMucDomain: "conference.example.com",
+      callParticipantCounts: {
+        "general@conference.example.com": 2,
+      },
+      dmConversations: [
+        {
+          peerJid: "bob@example.com",
+          peerUsername: "Bob",
+          unreadCount: 0,
+          presenceShow: "available",
+        },
+      ],
+      dmCallActivities: {
+        "bob@example.com": {
+          peerJid: "bob@example.com",
+          sid: "dm-call-1",
+          media: { audio: true, video: true },
+          state: "accepted",
+          direction: "incoming",
+          updatedAt: "2026-05-26T00:00:00.000Z",
+        },
+      },
+    });
+
+    expect(html).toContain("Active calls");
+    expect(html).toContain("<strong>2</strong> active calls");
+    expect(html).toContain('aria-label="Open General, Group call, 2 people"');
+    expect(html).toContain('aria-label="Reconnect Bob, Video call, Live"');
+    expect(buttonForLabel(html, "General, channel, no unread activity, active call with 2 people")).toContain("Active call");
+    expect(buttonForLabel(html, "Bob (bob@example.com), direct message, available, no unread activity, Video call live")).toContain("Live");
+  });
+
   test("pluralizes single thread reply badges", async () => {
     const html = await renderHomeDashboard({
       spaces: [{ id: "team", name: "Team" }],
@@ -373,6 +415,18 @@ describe("HomeDashboard activity rendering", () => {
         unreadCount: 2,
         lastMessageBody: "Can you review the plan?",
       }],
+      callParticipantCounts: { "general@conference.example.com": 2 },
+      dmCallActivities: {
+        "bob@example.com": {
+          peerJid: "bob@example.com",
+          sid: "dm-call-1",
+          media: { audio: true, video: false },
+          state: "accepted",
+          direction: "incoming",
+          updatedAt: "2026-05-26T00:00:00.000Z",
+        },
+      },
+      managedMucDomain: "conference.example.com",
     });
 
     expect(props.channelUnreadMap?.general).toEqual({
@@ -384,6 +438,9 @@ describe("HomeDashboard activity rendering", () => {
     });
     expect(props.activeChannelJids?.has("general@conference.example.com")).toBe(true);
     expect(props.dmConversations?.[0]?.unreadCount).toBe(2);
+    expect(props.callParticipantCounts).toEqual({ "general@conference.example.com": 2 });
+    expect(props.dmCallActivities?.["bob@example.com"]?.state).toBe("accepted");
+    expect(props.managedMucDomain).toBe("conference.example.com");
   });
 });
 

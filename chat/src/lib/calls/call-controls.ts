@@ -1,6 +1,7 @@
 import { atom } from "nanostores";
 import {
   $callState,
+  clearCallState,
   reportCallError,
   tearDownActiveCall,
 } from "./call-store";
@@ -71,16 +72,18 @@ export async function hangupActiveCall(): Promise<void> {
 }
 
 /**
- * Best-effort tab-close path. `pagehide` fires earlier than
- * `onBeforeUnmount`, and the WebSocket is torn down before our async
- * stanza chain completes — so this is shortening the gap, not a
- * guarantee. The authoritative cleanup is the server's unclean-
- * disconnect handler (`cleanup_muc_presence`).
+ * Browser page lifecycle path. A full tab refresh emits `pagehide`
+ * before the new JS context reconnects; sending XEP-0166
+ * `<session-terminate/>` or XEP-0272 clearing presence here destroys
+ * the call the refreshed page is about to rediscover. Release local
+ * media only. Explicit hangup/logout still goes through
+ * `tearDownActiveCall` and sends the conformant call-ending stanzas.
  */
-export function teardownForPageHide(): void {
-  const sender = getSender();
-  if (!sender) return;
-  void tearDownActiveCall(sender, "gone");
+export function suspendCallForPageHide(): void {
+  const current = $callState.get();
+  if (current.phase === "idle" || current.phase === "ended") return;
+  clearCallState();
+  void useCallEngine().engine.disconnect();
 }
 
 /**
