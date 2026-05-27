@@ -51,6 +51,29 @@ pub(crate) fn unregister_participant_from_room(
     let _ = sfu.unregister_call_participant(&call_id, &identity);
 }
 
+/// Local-only teardown variant for the LiveKit webhook bridge. The
+/// SFU's `participant_left` event is the acknowledgement that
+/// LiveKit already removed the participant on its side — invoking
+/// the full `unregister_participant_from_room` here would loop a
+/// redundant `RemoveParticipant` admin call back to LiveKit (which
+/// returns `not_found`, mapped to success, but the round-trip is
+/// wasted and amplifies the race with quick rejoins). This helper
+/// runs only the bookkeeping side.
+pub(crate) fn note_participant_left_from_webhook(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    jid: &FullJid,
+) {
+    let Some(sfu) = state.deps.protocol.sfu.as_ref() else {
+        return;
+    };
+    let Ok(call_id) = CallId::new(room_jid.to_string()) else {
+        return;
+    };
+    let identity = Identity::from_jid(jid.clone());
+    sfu.note_participant_left(&call_id, &identity);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,6 +125,19 @@ mod tests {
                 .expect("recording lock")
                 .push((call_id.clone(), identity.clone()));
             CallState::Ended
+        }
+
+        fn note_participant_left(&self, call_id: &CallId, identity: &Identity) {
+            // The fake records `note_participant_left` calls into the
+            // same vec — these tests only assert that the helper
+            // dispatches *some* SFU teardown for the room/identity.
+            // The fixture's lifecycle distinction (webhook-driven vs
+            // graceful-unavailable) is exercised in `waddle-sfu`'s
+            // own unit tests.
+            self.calls
+                .lock()
+                .expect("recording lock")
+                .push((call_id.clone(), identity.clone()));
         }
 
         fn is_revoked(&self, _: &Jti) -> bool {

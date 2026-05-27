@@ -1045,6 +1045,17 @@ impl waddle_sfu::SfuService for RecordingSfu {
         waddle_sfu::CallState::Ended
     }
 
+    fn note_participant_left(&self, call_id: &waddle_sfu::CallId, identity: &waddle_sfu::Identity) {
+        // Webhook-bridge teardown: bookkeeping-only path. Tests
+        // recording the helper's `(call, identity)` dispatch don't
+        // need to differentiate the two paths here — the bridge's
+        // own integration tests cover that direction explicitly.
+        self.calls
+            .lock()
+            .expect("recording lock")
+            .push((call_id.clone(), identity.clone()));
+    }
+
     fn is_revoked(&self, _: &waddle_sfu::Jti) -> bool {
         false
     }

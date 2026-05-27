@@ -3,17 +3,20 @@
 //! Talks the Twirp JSON protocol exposed by LiveKit's `RoomService`:
 //! `POST /twirp/livekit.RoomService/{RemoveParticipant,DeleteRoom}`.
 //! Authentication is an HS256-signed admin JWT carrying
-//! `video.roomAdmin = true` (RemoveParticipant) plus
-//! `video.roomCreate = true` (DeleteRoom). Both flags travel together
-//! because every admin call sites either evicts a participant *and*
-//! best-effort closes the empty room.
+//! `video.roomAdmin = true`, room-scoped for least-privilege.
+//! `RemoveParticipant` and `DeleteRoom` are both gated on `roomAdmin`
+//! per LiveKit's docs; `roomCreate` is for `CreateRoom`, which this
+//! client never calls, so the grant intentionally omits it.
 //!
-//! Idempotency: LiveKit returns Twirp `not_found` (HTTP 404 / 4xx with
-//! `not_found` in the body) when the participant or room is already
-//! gone. The teardown hot path runs unconditionally so duplicate
-//! teardowns must succeed — those `not_found` shapes are mapped to
-//! `Ok(())` here so callers never re-invoke retry logic for a
-//! steady-state.
+//! Idempotency: LiveKit returns Twirp `not_found` (HTTP 404 or a 4xx
+//! whose envelope's `code` is `"not_found"`) when the participant or
+//! room is already gone. The teardown hot path runs unconditionally
+//! so duplicate teardowns must succeed — those `not_found` shapes are
+//! mapped to `Ok(())` here so callers never re-invoke retry logic for
+//! a steady-state. The 4xx body match parses the Twirp error envelope
+//! explicitly (not a substring match) so an unrelated error whose
+//! human-readable message merely mentions "not found" still surfaces
+//! as a failure.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -21,7 +24,7 @@ use std::time::Duration as StdDuration;
 
 use chrono::{Duration, Utc};
 use jsonwebtoken::{encode, EncodingKey, Header};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::call::{CallId, Identity};
@@ -29,9 +32,16 @@ use crate::config::{ApiKey, ApiSecret, WebsocketUrl};
 use crate::error::SfuError;
 
 /// TTL of every admin JWT minted by [`ReqwestLiveKitAdmin`]. Each
-/// admin call is a single HTTP round-trip, so 30 seconds is generous
-/// for clock skew without keeping a long-lived bearer token in flight.
-const ADMIN_JWT_TTL: Duration = Duration::seconds(30);
+/// admin call is a single HTTP round-trip; a 60-second TTL with `nbf`
+/// pre-dated by [`ADMIN_JWT_CLOCK_SKEW`] absorbs typical NTP skew
+/// without keeping a long-lived bearer token in flight.
+const ADMIN_JWT_TTL: Duration = Duration::seconds(60);
+
+/// Backdate `nbf` by this much when minting admin JWTs so a LiveKit
+/// pod whose wall clock is slightly ahead does not immediately
+/// reject a freshly-minted token with `token not yet valid`. Matches
+/// the slack LiveKit's own server SDKs apply.
+const ADMIN_JWT_CLOCK_SKEW: Duration = Duration::seconds(30);
 
 /// HTTP timeout for admin requests. Tight because the call sites are
 /// fire-and-forget from the teardown hot path: a stuck SFU must not
@@ -77,6 +87,13 @@ impl ReqwestLiveKitAdmin {
     ) -> Result<Self, SfuError> {
         let http = reqwest::Client::builder()
             .timeout(ADMIN_HTTP_TIMEOUT)
+            // Reject every redirect: an admin-token Bearer carrying
+            // root rights over LiveKit rooms must not be replayed
+            // against an attacker-controlled origin if the SFU host
+            // is compromised or misconfigured to issue 30x to a
+            // foreign URL. Mirrors the convention in
+            // `server/crates/waddle-xmpp/src/push/sender.rs`.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(SfuError::AdminHttpInit)?;
         Ok(Self {
@@ -92,12 +109,11 @@ impl ReqwestLiveKitAdmin {
         let claims = AdminClaims {
             iss: self.api_key.as_str().to_string(),
             iat: now.timestamp(),
-            nbf: now.timestamp(),
+            nbf: (now - ADMIN_JWT_CLOCK_SKEW).timestamp(),
             exp: (now + ADMIN_JWT_TTL).timestamp(),
             video: AdminGrant {
                 room: room.as_str().to_string(),
                 room_admin: true,
-                room_create: true,
             },
         };
         let key = EncodingKey::from_secret(self.api_secret.as_bytes());
@@ -105,11 +121,11 @@ impl ReqwestLiveKitAdmin {
             .map_err(SfuError::JwtSigning)
     }
 
-    async fn post(
+    async fn post<B: Serialize>(
         &self,
         room: &CallId,
         path: &str,
-        body: &serde_json::Value,
+        body: &B,
     ) -> Result<(), SfuError> {
         let token = self.mint_admin_token(room)?;
         let url = self.base_url.join(path).map_err(SfuError::AdminUrl)?;
@@ -126,15 +142,18 @@ impl ReqwestLiveKitAdmin {
             return Ok(());
         }
         // LiveKit Twirp returns either HTTP 404 or a 4xx with a JSON
-        // body containing `"code":"not_found"` when the participant
-        // or room has already been removed. Both shapes are the
+        // envelope whose `code` is exactly `"not_found"` when the
+        // participant or room is already gone. Both shapes are the
         // teardown idempotency contract: the desired post-condition
-        // (gone) already holds, so map them to `Ok(())`.
+        // (gone) already holds, so map them to `Ok(())`. The body
+        // match parses the envelope explicitly (not a substring test)
+        // so an unrelated error whose human-readable `msg` happens to
+        // contain "not found" still surfaces as a failure.
         if status == reqwest::StatusCode::NOT_FOUND {
             return Ok(());
         }
         let body = resp.text().await.unwrap_or_default();
-        if status.is_client_error() && body.contains("not_found") {
+        if status.is_client_error() && is_twirp_not_found(&body) {
             return Ok(());
         }
         Err(SfuError::AdminCallFailed {
@@ -150,10 +169,10 @@ impl LiveKitAdmin for ReqwestLiveKitAdmin {
         room: &'a CallId,
         identity: &'a Identity,
     ) -> Pin<Box<dyn Future<Output = Result<(), SfuError>> + Send + 'a>> {
-        let body = serde_json::json!({
-            "room": room.as_str(),
-            "identity": identity.as_livekit_identity(),
-        });
+        let body = RemoveParticipantRequest {
+            room: room.as_str().to_string(),
+            identity: identity.as_livekit_identity(),
+        };
         Box::pin(async move {
             self.post(room, "twirp/livekit.RoomService/RemoveParticipant", &body)
                 .await
@@ -164,7 +183,9 @@ impl LiveKitAdmin for ReqwestLiveKitAdmin {
         &'a self,
         room: &'a CallId,
     ) -> Pin<Box<dyn Future<Output = Result<(), SfuError>> + Send + 'a>> {
-        let body = serde_json::json!({ "room": room.as_str() });
+        let body = DeleteRoomRequest {
+            room: room.as_str().to_string(),
+        };
         Box::pin(async move {
             self.post(room, "twirp/livekit.RoomService/DeleteRoom", &body)
                 .await
@@ -176,7 +197,10 @@ impl LiveKitAdmin for ReqwestLiveKitAdmin {
 /// websocket URL. Both endpoints sit on the same Go binary in a
 /// stock LiveKit deployment, so swapping the scheme
 /// (`wss://` → `https://`, `ws://` → `http://`) and pinning the path
-/// at `/` gives the right base.
+/// at `/` gives the right base. Userinfo, query, and fragment are
+/// stripped: an operator who happened to set
+/// `LIVEKIT_WS_URL=wss://user:pass@sfu/` must not leak basic-auth
+/// alongside the admin Bearer.
 pub(crate) fn admin_base_url_from_ws(ws_url: &WebsocketUrl) -> Result<Url, SfuError> {
     let mut url: Url = ws_url.as_str().parse().map_err(SfuError::AdminUrl)?;
     let target = match url.scheme() {
@@ -189,6 +213,11 @@ pub(crate) fn admin_base_url_from_ws(ws_url: &WebsocketUrl) -> Result<Url, SfuEr
     url.set_path("/");
     url.set_query(None);
     url.set_fragment(None);
+    // Best-effort strip of any embedded userinfo. `set_username`
+    // and `set_password` only fail when the URL has no host, which
+    // a `WebsocketUrl` always does.
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
     Ok(url)
 }
 
@@ -203,14 +232,44 @@ struct AdminClaims {
 
 #[derive(Serialize)]
 struct AdminGrant {
-    /// Room-scoped grant for least-privilege: the admin token may only
-    /// touch the call we're tearing down. LiveKit honours per-room
-    /// scoping for both `roomAdmin` and `roomCreate` claims.
+    /// Room-scoped grant for least-privilege: the admin token may
+    /// only touch the call we're tearing down. LiveKit honours
+    /// per-room scoping of `roomAdmin`.
     room: String,
     #[serde(rename = "roomAdmin")]
     room_admin: bool,
-    #[serde(rename = "roomCreate")]
-    room_create: bool,
+}
+
+/// Twirp body for `livekit.RoomService/RemoveParticipant`. Typed so
+/// the wire boundary is the only place that turns a typed value into
+/// JSON, matching the project's typed-payloads hard rule.
+#[derive(Serialize)]
+struct RemoveParticipantRequest {
+    room: String,
+    identity: String,
+}
+
+/// Twirp body for `livekit.RoomService/DeleteRoom`.
+#[derive(Serialize)]
+struct DeleteRoomRequest {
+    room: String,
+}
+
+/// Twirp error envelope: a JSON object with `code` and `msg` fields
+/// returned by LiveKit for any 4xx response. Only `code` is read
+/// here; `msg` is human-text and may carry the operator's room name
+/// verbatim, so it intentionally never participates in control flow.
+#[derive(Deserialize)]
+struct TwirpError<'a> {
+    #[serde(borrow)]
+    code: Option<std::borrow::Cow<'a, str>>,
+}
+
+fn is_twirp_not_found(body: &str) -> bool {
+    serde_json::from_str::<TwirpError<'_>>(body)
+        .ok()
+        .and_then(|env| env.code)
+        .is_some_and(|c| c == "not_found")
 }
 
 fn truncate(mut s: String, max: usize) -> String {
@@ -276,5 +335,37 @@ mod tests {
     fn truncate_passes_short_strings_through_untouched() {
         let s = "short".to_string();
         assert_eq!(truncate(s.clone(), 256), s);
+    }
+
+    #[test]
+    fn admin_base_url_strips_userinfo() {
+        // Defensive: an operator who set
+        // `LIVEKIT_WS_URL=wss://user:pass@sfu/` must not have
+        // basic-auth credentials leak alongside the admin Bearer.
+        let ws = WebsocketUrl::new("wss://user:pass@sfu.waddle.social/".parse().unwrap()).unwrap();
+        let admin = admin_base_url_from_ws(&ws).unwrap();
+        assert_eq!(admin.as_str(), "https://sfu.waddle.social/");
+        assert_eq!(admin.username(), "");
+        assert!(admin.password().is_none());
+    }
+
+    #[test]
+    fn is_twirp_not_found_matches_canonical_envelope() {
+        assert!(is_twirp_not_found(
+            r#"{"code":"not_found","msg":"participant not found"}"#
+        ));
+    }
+
+    #[test]
+    fn is_twirp_not_found_does_not_match_other_codes() {
+        // Permission failures, validation errors, etc. that mention
+        // "not found" in their `msg` must NOT be swallowed as
+        // idempotent successes.
+        assert!(!is_twirp_not_found(
+            r#"{"code":"permission_denied","msg":"identity not found in this room"}"#
+        ));
+        assert!(!is_twirp_not_found(r#"{"code":"invalid_argument"}"#));
+        assert!(!is_twirp_not_found(""));
+        assert!(!is_twirp_not_found("not_found"));
     }
 }
