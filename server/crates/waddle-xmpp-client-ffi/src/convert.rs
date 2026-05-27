@@ -226,6 +226,8 @@ fn muji_presence_to_ffi(muji: MujiPresence) -> WaddleMujiPresence {
     WaddleMujiPresence {
         preparing: muji.preparing,
         active: muji.active,
+        audio: muji.audio,
+        video: muji.video,
     }
 }
 
@@ -886,15 +888,23 @@ mod tests {
         let active = muji_presence_to_ffi(MujiPresence {
             preparing: false,
             active: true,
+            audio: true,
+            video: true,
         });
         assert!(active.active);
         assert!(!active.preparing);
+        assert!(active.audio);
+        assert!(active.video);
 
         let preparing = muji_presence_to_ffi(MujiPresence {
             preparing: true,
             active: false,
+            audio: false,
+            video: false,
         });
         assert!(preparing.preparing);
         assert!(!preparing.active);
+        assert!(!preparing.audio);
+        assert!(!preparing.video);
     }
 }

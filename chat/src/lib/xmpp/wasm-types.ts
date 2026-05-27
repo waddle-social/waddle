@@ -194,14 +194,17 @@ export interface WasmPresence {
 /**
  * XEP-0272 Muji presence extension surfaced from the WASM bindings.
  * `active` is true when the presence advertised at least one
- * `<content/>` child; `preparing` is true when a `<preparing/>`
- * sentinel was present (XEP-0272 §Joining two-phase flow).
+ * `<content/>` child; `audio` / `video` mirror the advertised RTP
+ * media content; `preparing` is true when a `<preparing/>` sentinel
+ * was present (XEP-0272 §Joining two-phase flow).
  * Absence of the field (`muji` undefined) means the occupant is NOT
  * in the call — XEP-0272 §Leaving "absence is the leave marker."
  */
 export interface WasmMujiPresence {
   preparing: boolean;
   active: boolean;
+  audio: boolean;
+  video: boolean;
 }
 
 export interface WasmArchivedMessage extends WasmMessage {

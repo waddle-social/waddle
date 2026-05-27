@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { useStore } from "@nanostores/vue";
-import { ArrowRight, Hash, MessageCircle, Phone, PhoneIncoming, PhoneOutgoing, Video } from "lucide-vue-next";
+import { ArrowRight, Hash, MessageCircle, Phone, PhoneIncoming, PhoneOff, PhoneOutgoing, Video } from "lucide-vue-next";
 import {
   $mucCallParticipants,
   mucCallParticipantCounts,
@@ -13,10 +13,12 @@ import { mucCallParticipantPreview } from "@/lib/calls/muc-call-indicators";
 import {
   callActivityDockAction,
   buildCallActivityDockEntries,
+  canEndRecoveredDmCallActivity,
   callActivityDockSelection,
   type CallActivityDockEntry,
   type SidebarMode,
 } from "@/lib/calls/call-activity-dock";
+import { readRoomHasActiveCall } from "@/lib/calls/use-active-muc-call";
 import type { CallMedia } from "@/lib/calls/types";
 import type { ChannelSummary } from "@/lib/chat-types";
 import type { DmConversation } from "@/lib/xmpp-client";
@@ -33,6 +35,7 @@ const props = withDefaults(defineProps<{
   sidebarMode: SidebarMode;
   activeChannelJids: Set<string>;
   callParticipants?: Record<string, readonly string[]>;
+  callMediaByRoom?: Record<string, CallMedia>;
   managedMucDomain?: string | null;
   selfFullJid?: string | null;
   showDmCalls?: boolean;
@@ -45,9 +48,11 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   answerDm: [peerJid: string, remoteFullJid: string, sid: string, media: CallMedia];
   selectChannel: [channelId: string | null, roomJid: string];
+  leaveChannelCall: [roomJid: string];
   joinChannelCall: [channelId: string | null, roomJid: string, media: CallMedia];
   selectDm: [peerJid: string];
   reconnectDm: [peerJid: string, media: CallMedia];
+  endDm: [peerJid: string, sid?: string];
 }>();
 
 const mucCallParticipantsStore = useStore($mucCallParticipants);
@@ -70,6 +75,7 @@ const entries = computed(() => buildCallActivityDockEntries({
   managedMucDomain: props.managedMucDomain ?? null,
   callParticipantCounts: callParticipantCounts.value,
   callParticipants: callParticipants.value,
+  callMediaByRoom: props.callMediaByRoom,
   dmCallActivities: props.showDmCalls === false ? {} : dmCallActivities.value,
 }));
 const visibleEntries = computed(() =>
@@ -104,7 +110,8 @@ function isCurrentCallEntry(entry: CallActivityDockEntry): boolean {
     return normalizeMucCallRoomJid(entry.roomJid) === normalizeMucCallRoomJid(current.peer);
   }
   if (current.phase !== "active" || current.kind !== "dm") return false;
-  return entry.peerJid.toLowerCase() === barePeerJid(current.peer).toLowerCase();
+  return entry.peerJid.toLowerCase() === barePeerJid(current.peer).toLowerCase() &&
+    entry.sid === current.sid;
 }
 
 function entryStatus(entry: CallActivityDockEntry): string {
@@ -125,12 +132,17 @@ function acceptedDmEntryStatus(entry: Extract<CallActivityDockEntry, { kind: "dm
   const reason = dmCallResumeBlockReason(entry, props.selfFullJid ?? null);
   if (reason === null) return "Live";
   if (reason === "other-resource") return "Other device";
-  if (reason === "expired-token" || reason === "invalid-token") return "Expired";
+  if (reason === "expired-token" || reason === "invalid-token") {
+    return entryCanEndDm(entry) ? "End available" : "Expired";
+  }
   return "Details pending";
 }
 
 function entryKindLabel(entry: CallActivityDockEntry): string {
-  if (entry.kind === "channel") return entry.isKnownChannel ? "Group call" : "Group call · syncing";
+  if (entry.kind === "channel") {
+    const media = entry.media.video ? "Group video call" : "Group call";
+    return entry.isKnownChannel ? media : `${media} · syncing`;
+  }
   if (entry.mediaKnown === false) return "Call";
   return entry.media.video ? "Video call" : "Voice call";
 }
@@ -149,7 +161,7 @@ function entryAction(entry: CallActivityDockEntry): string {
     case "answer":
       return "Answer";
     case "join":
-      return "Join";
+      return entry.kind === "channel" && entryCanLeaveChannel(entry) ? "Rejoin" : "Join";
     case "return":
       return "Return";
     case "reconnect":
@@ -167,6 +179,51 @@ function entryTitle(entry: CallActivityDockEntry): string {
 
 function entryCanSelect(entry: CallActivityDockEntry): boolean {
   return entry.kind !== "channel" || entry.roomJid.length > 0;
+}
+
+function entryCanEndDm(entry: CallActivityDockEntry): boolean {
+  return entry.kind === "dm" &&
+    canEndRecoveredDmCallActivity(entry, callState.value, props.selfFullJid ?? null);
+}
+
+function entryCanLeaveChannel(entry: CallActivityDockEntry): boolean {
+  if (entry.kind !== "channel" || !entry.roomJid) return false;
+  if (currentMucCallRoomJid() === normalizeMucCallRoomJid(entry.roomJid)) return false;
+  return readRoomHasActiveCall(entry.roomJid).localResourceInCall;
+}
+
+function currentMucCallRoomJid(): string {
+  const current = callState.value;
+  if (current.phase !== "active" && current.phase !== "muc-pending") return "";
+  if (current.kind !== "muc") return "";
+  return normalizeMucCallRoomJid(current.peer);
+}
+
+function entryCanEnd(entry: CallActivityDockEntry): boolean {
+  return entryCanEndDm(entry) || entryCanLeaveChannel(entry);
+}
+
+function endEntryLabel(entry: CallActivityDockEntry): string {
+  if (entry.kind === "channel") return `Leave ${entry.title} call`;
+  return endDmLabel(entry);
+}
+
+function endEntry(entry: CallActivityDockEntry): void {
+  if (entry.kind === "channel" && entryCanLeaveChannel(entry)) {
+    emit("leaveChannelCall", entry.roomJid);
+    return;
+  }
+  if (entry.kind === "dm" && entryCanEndDm(entry)) {
+    emit("endDm", entry.peerJid, entry.sid);
+  }
+}
+
+function endDmLabel(entry: CallActivityDockEntry): string {
+  if (entry.kind !== "dm") return "";
+  const media = entry.mediaKnown !== false
+    ? `${entry.media.video ? "video" : "voice"} call`
+    : "call";
+  return `End ${entry.title} ${media}`;
 }
 
 function visibleParticipantLabels(entry: CallActivityDockEntry): string[] {
@@ -221,65 +278,80 @@ function selectEntry(entry: CallActivityDockEntry): void {
         </span>
       </div>
       <div class="call-activity-dock__list">
-        <button
+        <div
           v-for="entry in visibleEntries"
           :key="entry.key"
-          type="button"
-          class="call-activity-dock__row"
+          class="call-activity-dock__row-shell"
           :class="{
-            'call-activity-dock__row--active': entry.isActive,
-            'call-activity-dock__row--disabled': !entryCanSelect(entry),
+            'call-activity-dock__row-shell--active': entry.isActive,
+            'call-activity-dock__row-shell--disabled': !entryCanSelect(entry),
           }"
-          :disabled="!entryCanSelect(entry)"
-          :aria-current="entry.isActive ? 'page' : undefined"
-          :title="entryTitle(entry)"
-          :aria-label="entryTitle(entry)"
-          @click="selectEntry(entry)"
         >
-          <span class="call-activity-dock__icon" aria-hidden="true">
-            <Hash v-if="entry.kind === 'channel'" class="h-3.5 w-3.5" />
-            <Video v-else-if="entry.mediaKnown !== false && entry.media.video" class="h-3.5 w-3.5" />
-            <PhoneIncoming v-else-if="entry.state === 'ringing' && entry.direction === 'incoming'" class="h-3.5 w-3.5" />
-            <PhoneOutgoing v-else-if="entry.state === 'ringing' && entry.direction === 'outgoing'" class="h-3.5 w-3.5" />
-            <MessageCircle v-else-if="entry.state === 'ringing'" class="h-3.5 w-3.5" />
-            <Phone v-else class="h-3.5 w-3.5" />
-          </span>
-          <span class="call-activity-dock__copy">
-            <span class="call-activity-dock__title type-control">{{ entry.title }}</span>
-            <span class="call-activity-dock__status type-meta">
-              {{ entryMeta(entry) }}
+          <button
+            type="button"
+            class="call-activity-dock__row"
+            :disabled="!entryCanSelect(entry)"
+            :aria-current="entry.isActive ? 'page' : undefined"
+            :title="entryTitle(entry)"
+            :aria-label="entryTitle(entry)"
+            @click="selectEntry(entry)"
+          >
+            <span class="call-activity-dock__icon" aria-hidden="true">
+              <Video v-if="entry.kind === 'channel' && entry.media.video" class="h-3.5 w-3.5" />
+              <Hash v-else-if="entry.kind === 'channel'" class="h-3.5 w-3.5" />
+              <Video v-else-if="entry.mediaKnown !== false && entry.media.video" class="h-3.5 w-3.5" />
+              <PhoneIncoming v-else-if="entry.state === 'ringing' && entry.direction === 'incoming'" class="h-3.5 w-3.5" />
+              <PhoneOutgoing v-else-if="entry.state === 'ringing' && entry.direction === 'outgoing'" class="h-3.5 w-3.5" />
+              <MessageCircle v-else-if="entry.state === 'ringing'" class="h-3.5 w-3.5" />
+              <Phone v-else class="h-3.5 w-3.5" />
             </span>
-            <span
-              v-if="entryParticipantPreview(entry)"
-              class="call-activity-dock__participants type-meta"
-              :title="`${entryParticipantPreview(entry)} in call`"
-            >
-              <span class="call-activity-dock__participant-stack" aria-hidden="true">
-                <span
-                  v-for="label in visibleParticipantLabels(entry)"
-                  :key="`${entry.key}:${label}`"
-                  class="call-activity-dock__participant"
-                >
-                  {{ participantInitial(label) }}
+            <span class="call-activity-dock__copy">
+              <span class="call-activity-dock__title type-control">{{ entry.title }}</span>
+              <span class="call-activity-dock__status type-meta">
+                {{ entryMeta(entry) }}
+              </span>
+              <span
+                v-if="entryParticipantPreview(entry)"
+                class="call-activity-dock__participants type-meta"
+                :title="`${entryParticipantPreview(entry)} in call`"
+              >
+                <span class="call-activity-dock__participant-stack" aria-hidden="true">
+                  <span
+                    v-for="label in visibleParticipantLabels(entry)"
+                    :key="`${entry.key}:${label}`"
+                    class="call-activity-dock__participant"
+                  >
+                    {{ participantInitial(label) }}
+                  </span>
+                </span>
+                <span class="call-activity-dock__participant-copy">
+                  {{ entryParticipantPreview(entry) }}
                 </span>
               </span>
-              <span class="call-activity-dock__participant-copy">
-                {{ entryParticipantPreview(entry) }}
-              </span>
             </span>
-          </span>
-          <span
-            v-if="entry.kind === 'channel'"
-            class="call-activity-dock__count type-count-badge"
-            aria-hidden="true"
+            <span
+              v-if="entry.kind === 'channel'"
+              class="call-activity-dock__count type-count-badge"
+              aria-hidden="true"
+            >
+              {{ entry.participantCount }}
+            </span>
+            <span class="call-activity-dock__action type-meta" aria-hidden="true">
+              {{ entryAction(entry) }}
+              <ArrowRight v-if="entryCanSelect(entry)" class="h-3 w-3" />
+            </span>
+          </button>
+          <button
+            v-if="entryCanEnd(entry)"
+            type="button"
+            class="call-activity-dock__end"
+            :title="endEntryLabel(entry)"
+            :aria-label="endEntryLabel(entry)"
+            @click="endEntry(entry)"
           >
-            {{ entry.participantCount }}
-          </span>
-          <span class="call-activity-dock__action type-meta" aria-hidden="true">
-            {{ entryAction(entry) }}
-            <ArrowRight v-if="entryCanSelect(entry)" class="h-3 w-3" />
-          </span>
-        </button>
+            <PhoneOff class="h-3.5 w-3.5" aria-hidden="true" />
+          </button>
+        </div>
       </div>
     </section>
   </div>
@@ -343,8 +415,16 @@ function selectEntry(entry: CallActivityDockEntry): void {
   overflow-y: auto;
 }
 
+.call-activity-dock__row-shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.25rem;
+  border-radius: var(--radius-sm);
+}
+
 .call-activity-dock__row {
   display: grid;
+  width: 100%;
   grid-template-columns: 1.75rem minmax(0, 1fr) auto auto;
   min-height: 3rem;
   align-items: center;
@@ -360,7 +440,7 @@ function selectEntry(entry: CallActivityDockEntry): void {
 }
 
 .call-activity-dock__row:hover:not(:disabled),
-.call-activity-dock__row--active {
+.call-activity-dock__row-shell--active .call-activity-dock__row {
   background: color-mix(in oklab, var(--sidebar-accent) 72%, transparent);
   color: var(--sidebar-foreground);
 }
@@ -369,14 +449,14 @@ function selectEntry(entry: CallActivityDockEntry): void {
   transform: translateY(-1px);
 }
 
-.call-activity-dock__row--disabled,
-.call-activity-dock__row--disabled:hover {
+.call-activity-dock__row-shell--disabled .call-activity-dock__row,
+.call-activity-dock__row-shell--disabled .call-activity-dock__row:hover {
   cursor: default;
   opacity: 0.72;
   transform: none;
 }
 
-.call-activity-dock__row--disabled .call-activity-dock__action {
+.call-activity-dock__row-shell--disabled .call-activity-dock__action {
   background: color-mix(in oklab, var(--sidebar-accent) 58%, transparent);
   color: var(--sidebar-muted);
 }
@@ -479,15 +559,37 @@ function selectEntry(entry: CallActivityDockEntry): void {
 }
 
 .call-activity-dock__row:hover:not(:disabled) .call-activity-dock__action,
-.call-activity-dock__row--active .call-activity-dock__action {
+.call-activity-dock__row-shell--active .call-activity-dock__action {
   background: color-mix(in oklab, oklch(0.7 0.18 145) 26%, transparent);
   color: var(--success-foreground);
 }
 
 :global(.dark) .call-activity-dock__action,
 :global(.dark) .call-activity-dock__row:hover:not(:disabled) .call-activity-dock__action,
-:global(.dark) .call-activity-dock__row--active .call-activity-dock__action {
+:global(.dark) .call-activity-dock__row-shell--active .call-activity-dock__action {
   color: oklch(0.86 0.13 145);
+}
+
+.call-activity-dock__end {
+  display: inline-flex;
+  width: 2.25rem;
+  min-height: 3rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  color: var(--destructive);
+  transition:
+    background-color 160ms ease-out,
+    color 160ms ease-out;
+}
+
+.call-activity-dock__end:hover {
+  background: color-mix(in oklab, var(--destructive) 10%, transparent);
+}
+
+.call-activity-dock__end:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--destructive) 32%, transparent);
 }
 
 .call-activity-dock.call-activity-dock--mobile {
@@ -517,6 +619,10 @@ function selectEntry(entry: CallActivityDockEntry): void {
 
 .call-activity-dock.call-activity-dock--mobile .call-activity-dock__row {
   min-width: min(17rem, 84vw);
+}
+
+.call-activity-dock.call-activity-dock--mobile .call-activity-dock__row-shell {
+  min-width: min(20rem, 92vw);
 }
 
 @media (min-width: 64rem) {

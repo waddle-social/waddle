@@ -135,6 +135,7 @@ pub(super) async fn try_handle_muc_presence_update(
         return None;
     }
 
+    let clears_muji_presence = muji.as_ref().is_none_or(Muji::is_empty);
     let outcome = match muji {
         Some(muji) => match actor
             .ask(UpsertMujiPresence {
@@ -176,6 +177,16 @@ pub(super) async fn try_handle_muc_presence_update(
             }
         },
     };
+    if clears_muji_presence {
+        // XEP-0272 §Leaving is the absence of `<muji/>` in in-room
+        // presence. Mirror that XMPP-native leave marker to the SFU
+        // registry just like full MUC leave / unclean disconnect do,
+        // otherwise a hard-refreshed tab can clear the room indicator
+        // while its LiveKit participant and issued token JTIs linger.
+        super::super::super::muc_call_sfu::unregister_participant_from_room(
+            state, room_jid, sender_jid,
+        );
+    }
 
     // XEP-0045 §7.7: a user may change their *own* in-room presence
     // only. The resolved nick comes from the room actor's

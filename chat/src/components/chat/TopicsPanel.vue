@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, watch } from "vue";
 import { useStore } from "@nanostores/vue";
-import { CalendarDays, Camera, Hash, ListTree, MessageSquareText, MessagesSquare, Phone, Plus, Settings, Users, ChevronDown, ChevronRight, MessageCircle } from "lucide-vue-next";
+import { CalendarDays, Camera, Hash, ListTree, MessageSquareText, MessagesSquare, Phone, PhoneOff, Plus, Settings, Users, ChevronDown, ChevronRight, MessageCircle, Video } from "lucide-vue-next";
 import { isForumChannel as detectForumChannel } from "@/lib/channel-types";
 import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
 import type { ChannelThreadInboxEntry } from "@/channels/inbox";
@@ -14,8 +14,9 @@ import {
   refreshedMucCallRooms,
   type RefreshedMucCallRoom,
 } from "@/lib/calls/muc-call-indicators";
-import { normalizeMucCallRoomJid } from "@/lib/calls/muc-call-presence";
+import { mucCallMediaForRoom, normalizeMucCallRoomJid } from "@/lib/calls/muc-call-presence";
 import { $callState } from "@/lib/calls/call-store";
+import { readRoomHasActiveCall } from "@/lib/calls/use-active-muc-call";
 import type { CallMedia } from "@/lib/calls/types";
 import type { MemberLoadState } from "@/waddles/directory";
 import Skeleton from "@/components/ui/Skeleton.vue";
@@ -60,6 +61,7 @@ const props = defineProps<{
    * richer call affordance copy; counts remain authoritative for
    * visibility. */
   callParticipants?: Record<string, string[]>;
+  callMediaByRoom?: Record<string, CallMedia>;
   /** Trusted MUC service domain for id-only channel rows. */
   managedMucDomain?: string | null;
 }>();
@@ -98,6 +100,14 @@ function channelCallAction(channel: ChannelSummary): "join" | "return" | "open" 
   return groupCallAction(roomJid);
 }
 
+function groupCallMedia(roomJid: string): CallMedia {
+  return mucCallMediaForRoom(roomJid, props.callMediaByRoom);
+}
+
+function groupCallMediaLabel(roomJid: string): string {
+  return groupCallMedia(roomJid).video ? "video call" : "call";
+}
+
 function groupCallAction(roomJid: string): "join" | "return" | "open" {
   const state = callState.value;
   if (
@@ -114,7 +124,7 @@ function groupCallAction(roomJid: string): "join" | "return" | "open" {
 function groupCallActionLabel(roomJid: string): string {
   switch (groupCallAction(roomJid)) {
     case "join":
-      return "Join";
+      return canLeaveRetainedGroupCall(roomJid) ? "Rejoin" : "Join";
     case "return":
       return "Return";
     case "open":
@@ -123,32 +133,26 @@ function groupCallActionLabel(roomJid: string): string {
 }
 
 function channelCallActionLabel(channel: ChannelSummary): string {
-  switch (channelCallAction(channel)) {
-    case "join":
-      return "Join";
-    case "return":
-      return "Return";
-    case "open":
-      return "Open";
-    default:
-      return "";
-  }
+  const roomJid = callRoomJid(channel);
+  if (!roomJid || channelCallAction(channel) === null) return "";
+  return groupCallActionLabel(roomJid);
 }
 
 function channelCallBadgeLabel(channel: ChannelSummary): string {
   const count = callParticipantCount(channel);
   const noun = count === 1 ? "person" : "people";
   const action = channelCallActionLabel(channel);
+  const media = groupCallMediaLabel(callRoomJid(channel));
   const label = action
-    ? `${action} live call, ${count} ${noun}`
-    : `Live call, ${count} ${noun}`;
+    ? `${action} live ${media}, ${count} ${noun}`
+    : `Live ${media}, ${count} ${noun}`;
   const preview = callParticipantPreviewForRoom(callRoomJid(channel));
   return preview ? `${label}: ${preview}` : label;
 }
 
 function refreshedGroupCallBadgeLabel(row: RefreshedMucCallRoom): string {
   const noun = row.participantCount === 1 ? "person" : "people";
-  const label = `${groupCallActionLabel(row.roomJid)} live call, ${row.participantCount} ${noun}`;
+  const label = `${groupCallActionLabel(row.roomJid)} live ${groupCallMediaLabel(row.roomJid)}, ${row.participantCount} ${noun}`;
   const preview = callParticipantPreviewForRoom(row.roomJid);
   return preview ? `${label}: ${preview}` : label;
 }
@@ -158,7 +162,7 @@ function refreshedGroupCallRowLabel(row: RefreshedMucCallRoom): string {
   const action = groupCallAction(row.roomJid);
   const preview = callParticipantPreviewForRoom(row.roomJid);
   const base = [
-    `${row.title}, group call syncing`,
+    `${row.title}, group ${groupCallMediaLabel(row.roomJid)} syncing`,
     `${row.participantCount} ${noun}`,
     ...(preview ? [`${preview} in call`] : []),
   ].join(", ");
@@ -206,6 +210,7 @@ const refreshedGroupCallRows = computed(() =>
     activeChannelJids: props.activeChannelJids,
     managedMucDomain: props.managedMucDomain,
     callParticipantCounts: props.callParticipantCounts,
+    callMediaByRoom: props.callMediaByRoom,
   }),
 );
 
@@ -280,6 +285,33 @@ function channelRowLabel(
   return label;
 }
 
+function canLeaveRetainedGroupCall(roomJid: string): boolean {
+  const normalized = normalizeMucCallRoomJid(roomJid);
+  if (!normalized) return false;
+  const state = callState.value;
+  if (
+    (state.phase === "active" || state.phase === "muc-pending") &&
+    state.kind === "muc" &&
+    normalizeMucCallRoomJid(state.peer) === normalized
+  ) {
+    return false;
+  }
+  return readRoomHasActiveCall(normalized).localResourceInCall;
+}
+
+function canLeaveChannelCall(channel: ChannelSummary): boolean {
+  const roomJid = callRoomJid(channel);
+  return !!roomJid && canLeaveRetainedGroupCall(roomJid);
+}
+
+function leaveChannelCallLabel(channel: ChannelSummary): string {
+  return `Leave ${channel.name} call`;
+}
+
+function leaveRefreshedGroupCallLabel(row: RefreshedMucCallRoom): string {
+  return `Leave ${row.title} call`;
+}
+
 function threadRowLabel(thread: ChannelThreadInboxEntry) {
   const summary = thread.unread > 0 ? `${thread.unread} unread` : "no unread activity";
   const replies = `${thread.replyCount} ${thread.replyCount === 1 ? "reply" : "replies"}`;
@@ -315,6 +347,7 @@ function truncateTitle(title: string | undefined, maxLen = 28): string {
 const emit = defineEmits<{
   selectChannel: [id: string | null, roomJid?: string];
   joinChannelCall: [channelId: string | null, roomJid: string, media: CallMedia];
+  leaveChannelCall: [roomJid: string];
   selectThread: [channelId: string, threadId: string];
   selectCommunitySurface: [surface: "feed" | "stories" | "events"];
   selectThreadsView: [];
@@ -328,18 +361,29 @@ const emit = defineEmits<{
 function selectChannelRow(channel: ChannelSummary): void {
   const roomJid = callRoomJid(channel);
   if (!isActiveChannelPage(channel) && channelCallAction(channel) === "join" && roomJid) {
-    emit("joinChannelCall", channel.id, roomJid, { audio: true, video: false });
+    emit("joinChannelCall", channel.id, roomJid, groupCallMedia(roomJid));
     return;
   }
   emit("selectChannel", channel.id, roomJid || undefined);
 }
 
+function leaveChannelCall(channel: ChannelSummary): void {
+  const roomJid = callRoomJid(channel);
+  if (!roomJid || !canLeaveRetainedGroupCall(roomJid)) return;
+  emit("leaveChannelCall", roomJid);
+}
+
 function selectRefreshedGroupCallRow(row: RefreshedMucCallRoom): void {
   if (groupCallAction(row.roomJid) === "join") {
-    emit("joinChannelCall", null, row.roomJid, { audio: true, video: false });
+    emit("joinChannelCall", null, row.roomJid, row.media);
     return;
   }
   emit("selectChannel", null, row.roomJid);
+}
+
+function leaveRefreshedGroupCall(row: RefreshedMucCallRoom): void {
+  if (!canLeaveRetainedGroupCall(row.roomJid)) return;
+  emit("leaveChannelCall", row.roomJid);
 }
 
 function isGroupCollapsed(groupId: string): boolean {
@@ -420,42 +464,58 @@ watch(
                 {{ refreshedGroupCallRows.length }}
               </span>
             </div>
-            <button
+            <div
               v-for="row in refreshedGroupCallRows"
               :key="row.key"
-              class="chat-list-row w-full min-h-10 flex items-center gap-2.5 px-3 py-2 text-left group text-sidebar-muted hover:bg-sidebar-accent/50 hover:text-sidebar-foreground"
-              :class="isActiveGroupCallRow(row) ? 'chat-list-row--active bg-sidebar-accent text-sidebar-foreground' : ''"
-              type="button"
-              :aria-current="isActiveGroupCallRow(row) ? 'page' : undefined"
-              :aria-label="refreshedGroupCallRowLabel(row)"
-              @click="selectRefreshedGroupCallRow(row)"
+              class="flex items-center gap-1"
             >
-              <span class="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
-                <Phone class="h-3.5 w-3.5" aria-hidden="true" />
-              </span>
-              <span class="min-w-0 flex-1">
-                <span class="type-control type-strong block truncate text-sidebar-foreground">
-                  {{ row.title }}
-                </span>
-                <span class="type-meta block truncate text-sidebar-muted" :title="row.roomJid">
-                  {{ refreshedGroupCallMeta(row) }}
-                </span>
-              </span>
-              <span
-                class="chat-badge-glow--primary type-count-badge inline-flex items-center gap-0.5 h-[18px] px-1.5 rounded-full bg-primary/15 text-primary ring-1 ring-primary/30 motion-safe:animate-pulse"
-                :title="refreshedGroupCallBadgeLabel(row)"
-                aria-hidden="true"
+              <button
+                class="chat-list-row min-h-10 flex min-w-0 flex-1 items-center gap-2.5 px-3 py-2 text-left group text-sidebar-muted hover:bg-sidebar-accent/50 hover:text-sidebar-foreground"
+                :class="isActiveGroupCallRow(row) ? 'chat-list-row--active bg-sidebar-accent text-sidebar-foreground' : ''"
+                type="button"
+                :aria-current="isActiveGroupCallRow(row) ? 'page' : undefined"
+                :aria-label="refreshedGroupCallRowLabel(row)"
+                @click="selectRefreshedGroupCallRow(row)"
               >
-                <Phone class="w-3 h-3" />
-                <span class="type-numeric leading-none">{{ row.participantCount }}</span>
-              </span>
-              <span
-                class="type-meta hidden shrink-0 rounded-md border border-primary/25 bg-primary/10 px-1.5 py-0.5 text-primary xl:inline-flex"
-                aria-hidden="true"
+                <span class="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
+                  <Video v-if="row.media.video" class="h-3.5 w-3.5" aria-hidden="true" />
+                  <Phone v-else class="h-3.5 w-3.5" aria-hidden="true" />
+                </span>
+                <span class="min-w-0 flex-1">
+                  <span class="type-control type-strong block truncate text-sidebar-foreground">
+                    {{ row.title }}
+                  </span>
+                  <span class="type-meta block truncate text-sidebar-muted" :title="row.roomJid">
+                    {{ refreshedGroupCallMeta(row) }}
+                  </span>
+                </span>
+                <span
+                  class="chat-badge-glow--primary type-count-badge inline-flex items-center gap-0.5 h-[18px] px-1.5 rounded-full bg-primary/15 text-primary ring-1 ring-primary/30 motion-safe:animate-pulse"
+                  :title="refreshedGroupCallBadgeLabel(row)"
+                  aria-hidden="true"
+                >
+                  <Video v-if="row.media.video" class="w-3 h-3" />
+                  <Phone v-else class="w-3 h-3" />
+                  <span class="type-numeric leading-none">{{ row.participantCount }}</span>
+                </span>
+                <span
+                  class="type-meta hidden shrink-0 rounded-md border border-primary/25 bg-primary/10 px-1.5 py-0.5 text-primary xl:inline-flex"
+                  aria-hidden="true"
+                >
+                  {{ groupCallActionLabel(row.roomJid) }}
+                </span>
+              </button>
+              <button
+                v-if="canLeaveRetainedGroupCall(row.roomJid)"
+                type="button"
+                class="inline-flex h-10 w-9 shrink-0 items-center justify-center rounded-md text-destructive hover:bg-destructive/10"
+                :title="leaveRefreshedGroupCallLabel(row)"
+                :aria-label="leaveRefreshedGroupCallLabel(row)"
+                @click="leaveRefreshedGroupCall(row)"
               >
-                {{ groupCallActionLabel(row.roomJid) }}
-              </span>
-            </button>
+                <PhoneOff class="h-3.5 w-3.5" aria-hidden="true" />
+              </button>
+            </div>
           </section>
         </div>
 
@@ -642,84 +702,97 @@ watch(
                 </button>
               </div>
               <template v-for="{ channel, unread } in group.channels" :key="channel.id">
-              <button
-                class="chat-list-row w-full min-h-10 flex items-center gap-2.5 px-3 py-2 text-left group"
-                :class="[
-                  isActiveChannelPage(channel)
-                    ? 'chat-list-row--active bg-sidebar-accent text-sidebar-foreground'
-                    : 'text-sidebar-muted hover:bg-sidebar-accent/50 hover:text-sidebar-foreground',
-                  !isActiveChannelPage(channel) && unread.mentions > 0
-                    ? 'chat-list-row--unread chat-list-row--mention'
-                    : !isActiveChannelPage(channel) && unread.unread > 0
-                      ? 'chat-list-row--unread'
-                      : '',
-                ]"
-                :aria-current="isActiveChannelPage(channel) ? 'page' : undefined"
-                :aria-label="channelRowLabel(channel, unread, isActiveChannelPage(channel))"
-                type="button"
-                @click="selectChannelRow(channel)"
-              >
-                <component
-                  :is="channelIcon(channel)"
-                  class="w-3.5 h-3.5 flex-shrink-0 transition-colors duration-200"
-                  :class="isActiveChannelPage(channel) ? 'text-primary' : 'opacity-40 group-hover:opacity-70'"
-                />
-                <span
-                  class="type-control truncate flex-1"
+              <div class="flex items-center gap-1">
+                <button
+                  class="chat-list-row min-h-10 flex min-w-0 flex-1 items-center gap-2.5 px-3 py-2 text-left group"
                   :class="[
-                    isActiveChannelPage(channel) ? 'type-emphasis' : '',
-                    (unread.unread > 0 || hasActivity(channel.id)) && !isActiveChannelPage(channel) ? 'type-strong text-sidebar-foreground' : '',
+                    isActiveChannelPage(channel)
+                      ? 'chat-list-row--active bg-sidebar-accent text-sidebar-foreground'
+                      : 'text-sidebar-muted hover:bg-sidebar-accent/50 hover:text-sidebar-foreground',
+                    !isActiveChannelPage(channel) && unread.mentions > 0
+                      ? 'chat-list-row--unread chat-list-row--mention'
+                      : !isActiveChannelPage(channel) && unread.unread > 0
+                        ? 'chat-list-row--unread'
+                        : '',
                   ]"
-                >{{ channel.name }}</span>
-                <span
-                  v-if="detectForumChannel(channel)"
-                  class="type-badge rounded-full border border-primary/12 px-1.5 py-0.5 text-primary/70"
+                  :aria-current="isActiveChannelPage(channel) ? 'page' : undefined"
+                  :aria-label="channelRowLabel(channel, unread, isActiveChannelPage(channel))"
+                  type="button"
+                  @click="selectChannelRow(channel)"
                 >
-                  Forum
-                </span>
-                <!--
-                  XEP-0272 Muji "call ongoing in this channel" indicator.
-                  Sits before the unread/mention badges so it claims the
-                  spot closest to the channel name — Slack-Huddle and
-                  Discord-voice both place the call affordance there.
-                  Suppressed on the active channel (`!isActiveChannelPage`)
-                  since the room header's MucCallButton already shows
-                  participant count when you're inside the room. Visual
-                  language (pulsing primary ring + Phone icon + count)
-                  matches MucCallButton.vue:97-107 so the two reads as
-                  the same affordance.
-                -->
-                <span
-                  v-if="callParticipantCount(channel) > 0 && !isActiveChannelPage(channel)"
-                  class="chat-badge-glow--primary type-count-badge inline-flex items-center gap-0.5 h-[18px] px-1.5 rounded-full bg-primary/15 text-primary ring-1 ring-primary/30 motion-safe:animate-pulse"
+                  <component
+                    :is="channelIcon(channel)"
+                    class="w-3.5 h-3.5 flex-shrink-0 transition-colors duration-200"
+                    :class="isActiveChannelPage(channel) ? 'text-primary' : 'opacity-40 group-hover:opacity-70'"
+                  />
+                  <span
+                    class="type-control truncate flex-1"
+                    :class="[
+                      isActiveChannelPage(channel) ? 'type-emphasis' : '',
+                      (unread.unread > 0 || hasActivity(channel.id)) && !isActiveChannelPage(channel) ? 'type-strong text-sidebar-foreground' : '',
+                    ]"
+                  >{{ channel.name }}</span>
+                  <span
+                    v-if="detectForumChannel(channel)"
+                    class="type-badge rounded-full border border-primary/12 px-1.5 py-0.5 text-primary/70"
+                  >
+                    Forum
+                  </span>
+                  <!--
+                    XEP-0272 Muji "call ongoing in this channel" indicator.
+                    Sits before the unread/mention badges so it claims the
+                    spot closest to the channel name — Slack-Huddle and
+                    Discord-voice both place the call affordance there.
+                    Suppressed on the active channel (`!isActiveChannelPage`)
+                    since the room header's MucCallButton already shows
+                    participant count when you're inside the room. Visual
+                    language (pulsing primary ring + Phone icon + count)
+                    matches MucCallButton.vue:97-107 so the two reads as
+                    the same affordance.
+                  -->
+                  <span
+                    v-if="callParticipantCount(channel) > 0 && !isActiveChannelPage(channel)"
+                    class="chat-badge-glow--primary type-count-badge inline-flex items-center gap-0.5 h-[18px] px-1.5 rounded-full bg-primary/15 text-primary ring-1 ring-primary/30 motion-safe:animate-pulse"
                   :title="channelCallBadgeLabel(channel)"
                   aria-hidden="true"
                 >
-                  <Phone class="w-3 h-3" />
-                  <span class="type-numeric leading-none">{{ callParticipantCount(channel) }}</span>
-                  <span
-                    v-if="channelCallActionLabel(channel)"
-                    class="hidden 2xl:inline leading-none"
-                  >
-                    · {{ channelCallActionLabel(channel) }}
+                  <Video v-if="groupCallMedia(callRoomJid(channel)).video" class="w-3 h-3" />
+                  <Phone v-else class="w-3 h-3" />
+                    <span class="type-numeric leading-none">{{ callParticipantCount(channel) }}</span>
+                    <span
+                      v-if="channelCallActionLabel(channel)"
+                      class="hidden 2xl:inline leading-none"
+                    >
+                      · {{ channelCallActionLabel(channel) }}
+                    </span>
                   </span>
-                </span>
-                <span
-                  v-if="unread.mentions > 0 && !isActiveChannelPage(channel)"
-                  class="chat-list-row--mention-badge type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-destructive text-destructive-foreground"
-                  aria-hidden="true"
-                >{{ unread.mentions }}</span>
-                <span
-                  v-else-if="unread.unread > 0 && !isActiveChannelPage(channel)"
-                  class="chat-list-row--unread-badge type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-primary text-primary-foreground"
-                  aria-hidden="true"
-                >{{ unread.unread }}</span>
-                <span
-                  v-else-if="hasActivity(channel.id) && !isActiveChannelPage(channel)"
-                  class="w-2 h-2 bg-primary rounded-full flex-shrink-0 shadow-[0_0_6px_var(--glow-strong)]"
-                  aria-hidden="true"
-                />
-              </button>
+                  <span
+                    v-if="unread.mentions > 0 && !isActiveChannelPage(channel)"
+                    class="chat-list-row--mention-badge type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-destructive text-destructive-foreground"
+                    aria-hidden="true"
+                  >{{ unread.mentions }}</span>
+                  <span
+                    v-else-if="unread.unread > 0 && !isActiveChannelPage(channel)"
+                    class="chat-list-row--unread-badge type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-primary text-primary-foreground"
+                    aria-hidden="true"
+                  >{{ unread.unread }}</span>
+                  <span
+                    v-else-if="hasActivity(channel.id) && !isActiveChannelPage(channel)"
+                    class="w-2 h-2 bg-primary rounded-full flex-shrink-0 shadow-[0_0_6px_var(--glow-strong)]"
+                    aria-hidden="true"
+                  />
+                </button>
+                <button
+                  v-if="canLeaveChannelCall(channel)"
+                  type="button"
+                  class="inline-flex h-10 w-9 shrink-0 items-center justify-center rounded-md text-destructive hover:bg-destructive/10"
+                  :title="leaveChannelCallLabel(channel)"
+                  :aria-label="leaveChannelCallLabel(channel)"
+                  @click="leaveChannelCall(channel)"
+                >
+                  <PhoneOff class="h-3.5 w-3.5" aria-hidden="true" />
+                </button>
+              </div>
 
               <!-- Active threads for this channel -->
               <button

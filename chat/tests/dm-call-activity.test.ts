@@ -758,7 +758,7 @@ describe("DM call activity", () => {
         now: timerArmedAt,
       });
 
-      expect($dmCallActivities.get()[bob]?.sid).toBe("timer-pruned-call");
+      expect(readDmCallActivity(bob, timerArmedAt)?.sid).toBe("timer-pruned-call");
       expect(scheduledDelay).toBe(1_000);
       expect(scheduledPrune).not.toBeNull();
 
@@ -822,7 +822,7 @@ describe("DM call activity", () => {
       scheduledRefresh?.();
 
       expect($dmCallActivities.get()).not.toBe(before);
-      expect($dmCallActivities.get()[bob]).toMatchObject({
+      expect(readDmCallActivity(bob)).toMatchObject({
         sid: "expiring-call",
         join,
       });

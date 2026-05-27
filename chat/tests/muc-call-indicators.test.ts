@@ -104,6 +104,7 @@ describe("refreshedMucCallRooms", () => {
         roomJid: "general@muc.test",
         title: "general",
         participantCount: 2,
+        media: { audio: true, video: false },
       },
     ]);
   });
@@ -127,6 +128,29 @@ describe("refreshedMucCallRooms", () => {
         roomJid: "random@muc.test",
         title: "random",
         participantCount: 1,
+        media: { audio: true, video: false },
+      },
+    ]);
+  });
+
+  test("carries advertised room media into fallback rows", () => {
+    expect(refreshedMucCallRooms({
+      channels: [],
+      activeChannelJids: new Set(),
+      managedMucDomain: "muc.test",
+      callParticipantCounts: {
+        "general@muc.test": 2,
+      },
+      callMediaByRoom: {
+        "general@muc.test": { audio: true, video: true },
+      },
+    })).toEqual([
+      {
+        key: "group-call:general@muc.test",
+        roomJid: "general@muc.test",
+        title: "general",
+        participantCount: 2,
+        media: { audio: true, video: true },
       },
     ]);
   });

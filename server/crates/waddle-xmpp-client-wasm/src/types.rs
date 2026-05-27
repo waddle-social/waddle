@@ -282,9 +282,9 @@ pub struct WaddlePresence {
     pub vcard_avatar: Option<String>,
     /// XEP-0272 Muji `<muji xmlns='urn:xmpp:jingle:muji:0'/>`
     /// extension on a MUC occupant's presence, surfaced as
-    /// `{ preparing, active }` for the chat-side participant-tracking
-    /// store. `None` per XEP-0272 §Leaving means the occupant has
-    /// left the call.
+    /// `{ preparing, active, audio, video }` for the chat-side
+    /// participant-tracking store. `None` per XEP-0272 §Leaving
+    /// means the occupant has left the call.
     pub muji: Option<WaddleMujiPresence>,
 }
 
@@ -292,6 +292,8 @@ pub struct WaddlePresence {
 pub struct WaddleMujiPresence {
     pub preparing: bool,
     pub active: bool,
+    pub audio: bool,
+    pub video: bool,
 }
 
 #[derive(Debug, Serialize)]

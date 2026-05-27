@@ -1,13 +1,17 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { useStore } from "@nanostores/vue";
-import { ArrowRight, MessageCircle, Phone, PhoneCall, PhoneIncoming, PhoneOutgoing, Plus, Video } from "lucide-vue-next";
+import { ArrowRight, MessageCircle, Phone, PhoneCall, PhoneIncoming, PhoneOff, PhoneOutgoing, Plus, Video } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import { formatTimelineStamp } from "@/channels/timeline";
 import { $callState } from "@/lib/calls/call-store";
-import { dmCallActivityAction } from "@/lib/calls/call-activity-dock";
+import {
+  canEndRecoveredDmCallActivity,
+  dmCallActivityAction,
+} from "@/lib/calls/call-activity-dock";
 import {
   $dmCallActivities,
+  dmCallActivitiesForPeer,
   dmCallResumeBlockReason,
   hasKnownDmCallMedia,
 } from "@/lib/calls/dm-call-activity";
@@ -29,6 +33,7 @@ const emit = defineEmits<{
   answerDm: [peerJid: string, remoteFullJid: string, sid: string, media: CallMedia];
   selectDm: [peerJid: string];
   reconnectDm: [peerJid: string, media: CallMedia];
+  endDm: [peerJid: string, sid?: string];
   newDm: [];
 }>();
 
@@ -57,7 +62,7 @@ const activeCallRows = computed(() =>
       since: callActivitySince(activity),
       avatarUrl: callActivityAvatarUrl(activity),
     }))
-    .filter((row) => row.peerJid && row.peerJid !== currentActiveDmPeer.value)
+    .filter((row) => row.peerJid && !isCurrentDmActivity(row.activity))
     .sort((left, right) => {
       const rightMs = timestampMs(right.activity.updatedAt);
       const leftMs = timestampMs(left.activity.updatedAt);
@@ -113,8 +118,7 @@ function dotClass(show?: DmConversation["presenceShow"]): string {
 }
 
 function hasCallActivity(peerJid: string): boolean {
-  const normalized = normalizedPeerJid(peerJid);
-  return !!normalized && !!dmCallActivities.value[normalized];
+  return dmCallActivitiesForPeer(dmCallActivities.value, peerJid, props.selfFullJid ?? null).length > 0;
 }
 
 function isHiddenCurrentCallPeer(peerJid: string): boolean {
@@ -122,9 +126,15 @@ function isHiddenCurrentCallPeer(peerJid: string): boolean {
   return !!normalized && hiddenCurrentCallPeer.value === normalized;
 }
 
+function isCurrentDmActivity(activity: DmCallActivity): boolean {
+  const current = callState.value;
+  if (current.phase !== "active" || current.kind !== "dm") return false;
+  return normalizedPeerJid(activity.peerJid) === normalizedPeerJid(current.peer) &&
+    activity.sid === current.sid;
+}
+
 function callActivity(peerJid: string): DmCallActivity | null {
-  const normalized = normalizedPeerJid(peerJid);
-  return normalized ? dmCallActivities.value[normalized] ?? null : null;
+  return dmCallActivitiesForPeer(dmCallActivities.value, peerJid, props.selfFullJid ?? null)[0] ?? null;
 }
 
 function callActivityLabel(peerJid: string): string {
@@ -181,6 +191,14 @@ function acceptedCallAvailability(activity: DmCallActivity): {
     };
   }
   if (reason === "expired-token" || reason === "invalid-token") {
+    if (canEndRecoveredDmCallActivity(activity, callState.value, props.selfFullJid ?? null)) {
+      return {
+        eyebrow: "Recovered after refresh",
+        meta: `${mediaTitle} · End available`,
+        description: `The saved reconnect details expired, but this tab can still end the call.`,
+        tone: "warning",
+      };
+    }
     return {
       eyebrow: "Expired",
       meta: `${mediaTitle} · Expired`,
@@ -355,6 +373,23 @@ function selectCallActivity(activity: DmCallActivity): void {
   }
 }
 
+function canEndCallActivity(activity: DmCallActivity): boolean {
+  return canEndRecoveredDmCallActivity(activity, callState.value, props.selfFullJid ?? null);
+}
+
+function endCallActivity(activity: DmCallActivity): void {
+  const peerJid = normalizedPeerJid(activity.peerJid);
+  if (!peerJid || !canEndCallActivity(activity)) return;
+  emit("endDm", peerJid, activity.sid);
+}
+
+function endCallActivityLabel(row: { title: string; activity: DmCallActivity }): string {
+  const media = hasKnownDmCallMedia(row.activity)
+    ? `${row.activity.media.video ? "video" : "voice"} call`
+    : "call";
+  return `End ${row.title} ${media}`;
+}
+
 function isActiveConversation(peerJid: string): boolean {
   const peer = normalizedPeerJid(peerJid);
   return !!peer && activePeer.value === peer;
@@ -436,7 +471,7 @@ function conversationRowLabel(conversation: DmConversation): string {
               {{ activeCallRows.length }}
             </span>
           </div>
-          <button
+          <div
             v-for="row in activeCallRows"
             :key="`dm-call:${row.peerJid}:${row.activity.sid}`"
             class="chat-list-row w-full min-h-16 flex items-center gap-3 rounded-lg border px-3 py-2.5 text-left group text-sidebar-muted hover:text-sidebar-foreground"
@@ -444,41 +479,55 @@ function conversationRowLabel(conversation: DmConversation): string {
               callActivityToneClass(row.activity),
               isActiveConversation(row.peerJid) ? `chat-list-row--active ${callActivityActiveToneClass(row.activity)}` : '',
             ]"
-            type="button"
-            :aria-current="isActiveConversation(row.peerJid) ? 'page' : undefined"
-            :aria-label="activeCallRowLabel(row)"
-            @click="selectCallActivity(row.activity)"
           >
-            <span class="relative shrink-0">
-              <AppAvatar :name="row.title" :src="row.avatarUrl" size="sm" />
-              <span class="absolute -right-1 -bottom-1 flex h-4 w-4 items-center justify-center rounded-full border" :class="callActivityIconClass(row.activity)">
-                <Video v-if="hasKnownDmCallMedia(row.activity) && row.activity.media.video" class="h-2.5 w-2.5" aria-hidden="true" />
-                <PhoneIncoming v-else-if="row.activity.state === 'ringing' && row.activity.direction === 'incoming'" class="h-2.5 w-2.5" aria-hidden="true" />
-                <PhoneOutgoing v-else-if="row.activity.state === 'ringing' && row.activity.direction === 'outgoing'" class="h-2.5 w-2.5" aria-hidden="true" />
-                <Phone v-else class="h-2.5 w-2.5" aria-hidden="true" />
-              </span>
-            </span>
-            <span class="min-w-0 flex-1 space-y-0.5">
-              <span class="type-meta flex items-center gap-1" :class="callActivityAccentClass(row.activity)">
-                <span class="h-1.5 w-1.5 rounded-full" :class="callActivityDotClass(row.activity)" aria-hidden="true" />
-                <span class="truncate">{{ row.eyebrow }}</span>
-              </span>
-              <span class="type-control type-strong block truncate text-sidebar-foreground">
-                {{ row.title }}
-              </span>
-              <span class="type-meta block truncate text-sidebar-muted">
-                {{ row.meta }}<template v-if="row.description"> · {{ row.description }}</template><template v-if="row.since"> · {{ row.since }}</template>
-              </span>
-            </span>
-            <span
-              class="type-meta shrink-0 rounded-full border px-2 py-1"
-              :class="callActivityPillClass(row.activity)"
-              aria-hidden="true"
+            <button
+              class="flex min-w-0 flex-1 items-center gap-3 text-left"
+              type="button"
+              :aria-current="isActiveConversation(row.peerJid) ? 'page' : undefined"
+              :aria-label="activeCallRowLabel(row)"
+              @click="selectCallActivity(row.activity)"
             >
-              {{ row.action }}
-            </span>
-            <ArrowRight class="h-3.5 w-3.5 shrink-0" :class="callActivityAccentClass(row.activity)" aria-hidden="true" />
-          </button>
+              <span class="relative shrink-0">
+                <AppAvatar :name="row.title" :src="row.avatarUrl" size="sm" />
+                <span class="absolute -right-1 -bottom-1 flex h-4 w-4 items-center justify-center rounded-full border" :class="callActivityIconClass(row.activity)">
+                  <Video v-if="hasKnownDmCallMedia(row.activity) && row.activity.media.video" class="h-2.5 w-2.5" aria-hidden="true" />
+                  <PhoneIncoming v-else-if="row.activity.state === 'ringing' && row.activity.direction === 'incoming'" class="h-2.5 w-2.5" aria-hidden="true" />
+                  <PhoneOutgoing v-else-if="row.activity.state === 'ringing' && row.activity.direction === 'outgoing'" class="h-2.5 w-2.5" aria-hidden="true" />
+                  <Phone v-else class="h-2.5 w-2.5" aria-hidden="true" />
+                </span>
+              </span>
+              <span class="min-w-0 flex-1 space-y-0.5">
+                <span class="type-meta flex items-center gap-1" :class="callActivityAccentClass(row.activity)">
+                  <span class="h-1.5 w-1.5 rounded-full" :class="callActivityDotClass(row.activity)" aria-hidden="true" />
+                  <span class="truncate">{{ row.eyebrow }}</span>
+                </span>
+                <span class="type-control type-strong block truncate text-sidebar-foreground">
+                  {{ row.title }}
+                </span>
+                <span class="type-meta block truncate text-sidebar-muted">
+                  {{ row.meta }}<template v-if="row.description"> · {{ row.description }}</template><template v-if="row.since"> · {{ row.since }}</template>
+                </span>
+              </span>
+              <span
+                class="type-meta shrink-0 rounded-full border px-2 py-1"
+                :class="callActivityPillClass(row.activity)"
+                aria-hidden="true"
+              >
+                {{ row.action }}
+              </span>
+              <ArrowRight class="h-3.5 w-3.5 shrink-0" :class="callActivityAccentClass(row.activity)" aria-hidden="true" />
+            </button>
+            <button
+              v-if="canEndCallActivity(row.activity)"
+              type="button"
+              class="chat-icon-button shrink-0 text-destructive hover:bg-destructive/10 hover:text-destructive"
+              :title="endCallActivityLabel(row)"
+              :aria-label="endCallActivityLabel(row)"
+              @click="endCallActivity(row.activity)"
+            >
+              <PhoneOff class="h-3.5 w-3.5" aria-hidden="true" />
+            </button>
+          </div>
         </section>
 
         <button

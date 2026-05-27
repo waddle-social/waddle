@@ -3,9 +3,14 @@ import { computed, type Component } from "vue";
 import { useStore } from "@nanostores/vue";
 import { Phone, PhoneIncoming, PhoneOff, Video } from "lucide-vue-next";
 import { $callState } from "@/lib/calls/call-store";
-import { dmCallActivityAction, isBusy } from "@/lib/calls/call-activity-dock";
+import {
+  canEndRecoveredDmCallActivity,
+  dmCallActivityAction,
+  isBusy,
+} from "@/lib/calls/call-activity-dock";
 import {
   $dmCallActivities,
+  dmCallActivitiesForPeer,
   dmCallResumeBlockReason,
   hasKnownDmCallMedia,
   type DmCallActivity,
@@ -26,8 +31,10 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   joinChannelCall: [channelId: string | null, roomJid: string, media: CallMedia];
+  leaveChannelCall: [roomJid: string];
   answerDm: [peerJid: string, remoteFullJid: string, sid: string, media: CallMedia];
   reconnectDm: [peerJid: string, media: CallMedia];
+  endDm: [peerJid: string, sid?: string];
 }>();
 
 type BannerAction = "answer" | "join" | "reconnect" | "unavailable";
@@ -44,6 +51,9 @@ type BannerView = {
   actionLabel: string;
   ariaLabel: string;
   disabled: boolean;
+  secondaryAction?: "leave" | "end-dm";
+  secondaryActionLabel?: string;
+  secondaryAriaLabel?: string;
   icon: Component;
   actionIcon: Component;
   channelId?: string | null;
@@ -69,7 +79,7 @@ const roomParticipantLabels = computed(() => {
 const dmActivity = computed<DmCallActivity | null>(() => {
   const peerJid = normalizedDmPeerJid.value;
   if (!peerJid) return null;
-  return dmCallActivities.value[peerJid] ?? null;
+  return dmCallActivitiesForPeer(dmCallActivities.value, peerJid, props.selfFullJid ?? null)[0] ?? null;
 });
 
 const localGroupCallInThisRoom = computed(() => {
@@ -96,24 +106,38 @@ function groupCallBanner(): BannerView | null {
   const participantNoun = participantCount === 1 ? "person" : "people";
   const title = `${props.channelName || "This channel"} has a live call`;
   const busy = isBusy(callState.value);
+  const retainedLocalResource = roomCall.localResourceInCall.value && !localGroupCallInThisRoom.value;
+  const media = roomCall.media.value;
+  const mediaLabel = media.video ? "Video call" : "Voice call";
 
   return {
     kind: "group",
-    tone: busy ? "busy" : "live",
-    eyebrow: "Live now",
+    tone: busy ? "busy" : retainedLocalResource ? "syncing" : "live",
+    eyebrow: retainedLocalResource ? "Recovered after refresh" : "Live now",
     title,
-    body: `${participantCount} ${participantNoun} connected in this channel.`,
-    meta: ["Voice call", "Channel"],
+    body: retainedLocalResource
+      ? "This browser is still listed in the call after reload. Rejoin media or leave to clear your call presence."
+      : `${participantCount} ${participantNoun} connected in this channel.`,
+    meta: retainedLocalResource ? [mediaLabel, "This browser"] : [mediaLabel, "Channel"],
     avatarLabels: roomParticipantLabels.value,
     action: busy ? "unavailable" : "join",
-    actionLabel: busy ? "In another call" : "Join call",
-    ariaLabel: busy ? `${title}; already in another call` : `Join ${props.channelName || "channel"} call`,
+    actionLabel: busy ? "In another call" : retainedLocalResource ? "Rejoin call" : "Join call",
+    ariaLabel: busy
+      ? `${title}; already in another call`
+      : retainedLocalResource
+        ? `Rejoin ${props.channelName || "channel"} call after refresh`
+        : `Join ${props.channelName || "channel"} call`,
     disabled: busy,
-    icon: Phone,
-    actionIcon: busy ? PhoneOff : Phone,
+    ...(retainedLocalResource ? {
+      secondaryAction: "leave" as const,
+      secondaryActionLabel: "Leave call",
+      secondaryAriaLabel: `Leave ${props.channelName || "channel"} call after refresh`,
+    } : {}),
+    icon: media.video ? Video : Phone,
+    actionIcon: busy ? PhoneOff : media.video ? Video : Phone,
     channelId: props.channelId ?? null,
     roomJid,
-    media: { audio: true, video: false },
+    media,
   };
 }
 
@@ -153,22 +177,60 @@ function dmBanner(): BannerView | null {
     };
   }
 
+  const canEndRecoveredCall = canEndRecoveredDmCallActivity(
+    activity,
+    callState.value,
+    props.selfFullJid ?? null,
+  );
+
   if (action === "reconnect" && hasKnownDmCallMedia(activity)) {
     return {
       kind: "dm",
       tone: "live",
-      eyebrow: "Live now",
+      eyebrow: canEndRecoveredCall ? "Recovered after refresh" : "Live now",
       title,
-      body: `The ${mediaLabel} is still live.`,
+      body: canEndRecoveredCall
+        ? `The ${mediaLabel} is still live after reload. Rejoin media or end it from this tab.`
+        : `The ${mediaLabel} is still live.`,
       meta: [capitalizeLabel(mediaLabel), "1:1"],
       avatarLabels: [peerName],
       action: "reconnect",
       actionLabel: "Rejoin",
       ariaLabel: `Rejoin ${peerName} ${mediaLabel}`,
       disabled: false,
+      ...(canEndRecoveredCall ? {
+        secondaryAction: "end-dm" as const,
+        secondaryActionLabel: "End call",
+        secondaryAriaLabel: `End ${peerName} ${mediaLabel} after refresh`,
+      } : {}),
       icon: media.video ? Video : Phone,
       actionIcon: media.video ? Video : Phone,
       peerJid,
+      sid: activity.sid,
+      media,
+    };
+  }
+
+  if (canEndRecoveredCall && activity.state === "accepted") {
+    return {
+      kind: "dm",
+      tone: "syncing",
+      eyebrow: "Recovered after refresh",
+      title,
+      body: `The saved reconnect details for this ${mediaLabel} expired, but this tab can still end the call.`,
+      meta: [capitalizeLabel(mediaLabel), "1:1"],
+      avatarLabels: [peerName],
+      action: "unavailable",
+      actionLabel: "Unavailable",
+      ariaLabel: `${title}; reconnect details expired`,
+      disabled: true,
+      secondaryAction: "end-dm",
+      secondaryActionLabel: "End call",
+      secondaryAriaLabel: `End ${peerName} ${mediaLabel} after refresh`,
+      icon: media.video ? Video : Phone,
+      actionIcon: PhoneOff,
+      peerJid,
+      sid: activity.sid,
       media,
     };
   }
@@ -314,6 +376,18 @@ function activateBanner(): void {
     emit("reconnectDm", current.peerJid, current.media);
   }
 }
+
+function activateSecondaryBanner(): void {
+  const current = banner.value;
+  if (!current) return;
+  if (current.secondaryAction === "leave" && current.roomJid) {
+    emit("leaveChannelCall", current.roomJid);
+    return;
+  }
+  if (current.secondaryAction === "end-dm" && current.peerJid) {
+    emit("endDm", current.peerJid, current.sid);
+  }
+}
 </script>
 
 <template>
@@ -372,16 +446,28 @@ function activateBanner(): void {
             </div>
           </div>
         </div>
-        <button
-          type="button"
-          class="conversation-call-banner__action type-control"
-          :aria-label="banner.ariaLabel"
-          :disabled="banner.disabled"
-          @click="activateBanner"
-        >
-          <component :is="banner.actionIcon" class="h-3.5 w-3.5" aria-hidden="true" />
-          <span>{{ banner.actionLabel }}</span>
-        </button>
+        <div class="conversation-call-banner__actions">
+          <button
+            type="button"
+            class="conversation-call-banner__action type-control"
+            :aria-label="banner.ariaLabel"
+            :disabled="banner.disabled"
+            @click="activateBanner"
+          >
+            <component :is="banner.actionIcon" class="h-3.5 w-3.5" aria-hidden="true" />
+            <span>{{ banner.actionLabel }}</span>
+          </button>
+          <button
+            v-if="banner.secondaryAction"
+            type="button"
+            class="conversation-call-banner__action conversation-call-banner__action--secondary type-control"
+            :aria-label="banner.secondaryAriaLabel"
+            @click="activateSecondaryBanner"
+          >
+            <PhoneOff class="h-3.5 w-3.5" aria-hidden="true" />
+            <span>{{ banner.secondaryActionLabel }}</span>
+          </button>
+        </div>
       </div>
     </section>
   </div>
@@ -538,6 +624,13 @@ function activateBanner(): void {
   white-space: nowrap;
 }
 
+.conversation-call-banner__actions {
+  display: flex;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
 .conversation-call-banner__action {
   display: inline-flex;
   height: 2.25rem;
@@ -553,8 +646,17 @@ function activateBanner(): void {
   transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
 }
 
+.conversation-call-banner__action--secondary {
+  border-color: color-mix(in oklab, var(--destructive) 24%, var(--border));
+  color: var(--destructive);
+}
+
 .conversation-call-banner__action:hover {
   background: color-mix(in oklab, var(--primary) 11%, var(--background));
+}
+
+.conversation-call-banner__action--secondary:hover {
+  background: color-mix(in oklab, var(--destructive) 10%, var(--background));
 }
 
 .conversation-call-banner__action:focus-visible {

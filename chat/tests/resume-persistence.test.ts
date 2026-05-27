@@ -333,6 +333,43 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     expect(reloadedPage.consumeSm()).toEqual(state);
   });
 
+  test("a slow same-tab reload keeps the owner until the prior lease expires", () => {
+    const realNow = Date.now;
+    let now = 1_000_000;
+    Date.now = () => now;
+
+    try {
+      const reloadOwner = "slow-reload-owner";
+      const state = {
+        previd: "abc-123",
+        inboundH: 42,
+        outboundH: 7,
+        resource: "web-existing-resource",
+      };
+      const previousPage = createLocalStorageResumePersistence("alice@example.com", reloadOwner);
+      previousPage.saveSm(state);
+      previousPage.saveJoinedRooms(["general@conference.example.com"]);
+      previousPage.preparePagehideHandoff();
+      window.sessionStorage.setItem("waddle.chat.sm-resume.owner", reloadOwner);
+      window.localStorage.setItem(
+        `waddle.chat.sm-resume.owner-lease.${reloadOwner}`,
+        JSON.stringify({
+          ownerId: reloadOwner,
+          instanceId: "previous-page",
+          updatedAt: now,
+        }),
+      );
+
+      now += 15_000;
+      const reloadedPage = createLocalStorageResumePersistence("alice@example.com");
+
+      expect(reloadedPage.loadJoinedRooms()).toEqual(["general@conference.example.com"]);
+      expect(reloadedPage.consumeSm()).toEqual(state);
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
   test("BrowserXmppClient only reuses a refreshed resource for the owning tab", () => {
     const state = {
       previd: "abc-123",

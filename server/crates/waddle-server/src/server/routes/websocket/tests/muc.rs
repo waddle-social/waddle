@@ -995,6 +995,82 @@ fn preparing_muji() -> waddle_xmpp::xep::xep0272::Muji {
     waddle_xmpp::xep::xep0272::Muji::preparing()
 }
 
+fn empty_muji() -> waddle_xmpp::xep::xep0272::Muji {
+    waddle_xmpp::xep::xep0272::Muji::default()
+}
+
+#[derive(Default)]
+struct RecordingSfu {
+    calls: std::sync::Mutex<Vec<(waddle_sfu::CallId, waddle_sfu::Identity)>>,
+}
+
+impl RecordingSfu {
+    fn snapshot(&self) -> Vec<(waddle_sfu::CallId, waddle_sfu::Identity)> {
+        self.calls.lock().expect("recording lock").clone()
+    }
+}
+
+impl waddle_sfu::SfuService for RecordingSfu {
+    fn issue_join_token(
+        &self,
+        _: &waddle_sfu::CallId,
+        _: &waddle_sfu::Identity,
+        _: waddle_sfu::MediaCapabilities,
+    ) -> Result<waddle_sfu::JoinToken, waddle_sfu::SfuError> {
+        unimplemented!("not exercised by this test")
+    }
+
+    fn issue_turn_credentials(
+        &self,
+        _: &waddle_sfu::Identity,
+    ) -> Result<waddle_sfu::TurnCredential, waddle_sfu::SfuError> {
+        unimplemented!("not exercised by this test")
+    }
+
+    fn register_call_participant(&self, _: &waddle_sfu::CallId, _: &waddle_sfu::Identity) {}
+
+    fn has_call_participant(&self, _: &waddle_sfu::CallId, _: &waddle_sfu::Identity) -> bool {
+        false
+    }
+
+    fn unregister_call_participant(
+        &self,
+        call_id: &waddle_sfu::CallId,
+        identity: &waddle_sfu::Identity,
+    ) -> waddle_sfu::CallState {
+        self.calls
+            .lock()
+            .expect("recording lock")
+            .push((call_id.clone(), identity.clone()));
+        waddle_sfu::CallState::Ended
+    }
+
+    fn is_revoked(&self, _: &waddle_sfu::Jti) -> bool {
+        false
+    }
+
+    fn ws_url(&self) -> &waddle_sfu::WebsocketUrl {
+        unimplemented!("not exercised by this test")
+    }
+
+    fn turn_host(&self) -> &waddle_sfu::TurnHost {
+        unimplemented!("not exercised by this test")
+    }
+}
+
+async fn state_with_recording_sfu(
+    recorder: std::sync::Arc<RecordingSfu>,
+) -> std::sync::Arc<WebSocketState> {
+    let base = create_test_websocket_state().await;
+    let mut state = match std::sync::Arc::try_unwrap(base) {
+        Ok(state) => state,
+        Err(_) => panic!("test websocket state should be uniquely owned"),
+    };
+    let sfu: std::sync::Arc<dyn waddle_sfu::SfuService> = recorder;
+    state.deps.protocol.sfu = Some(sfu);
+    std::sync::Arc::new(state)
+}
+
 fn muc_user_item_jid(element: &Element) -> Option<String> {
     element
         .get_child("x", "http://jabber.org/protocol/muc#user")
@@ -1025,7 +1101,8 @@ fn muc_join_presence_to(room_jid: &BareJid, nick: &str) -> xmpp_parsers::presenc
 
 #[tokio::test]
 async fn available_presence_without_muji_clears_existing_muji_state() {
-    let state = create_test_websocket_state().await;
+    let recorder = std::sync::Arc::new(RecordingSfu::default());
+    let state = state_with_recording_sfu(std::sync::Arc::clone(&recorder)).await;
     let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
     let room_jid: BareJid = "muji-clear-channel@muc.example.com"
         .parse()
@@ -1086,6 +1163,15 @@ async fn available_presence_without_muji_clears_existing_muji_state() {
         &None,
     )
     .await;
+    let recorded = recorder.snapshot();
+    assert_eq!(
+        recorded.len(),
+        1,
+        "Muji clear must unregister the sender from the SFU"
+    );
+    assert_eq!(recorded[0].0.as_str(), "muji-clear-channel@muc.example.com");
+    assert_eq!(recorded[0].1.as_livekit_identity(), "alice@example.com/web");
+
     assert_eq!(responses.len(), 1, "sender receives reflected clear");
     let self_clear = Element::from_str(&responses[0]).expect("self clear XML");
     assert_eq!(
@@ -1139,6 +1225,69 @@ async fn available_presence_without_muji_clears_existing_muji_state() {
             .get_child("muji", waddle_xmpp::xep::xep0272::NS_MUJI)
             .is_none(),
         "late join replay must not include stale Muji"
+    );
+}
+
+#[tokio::test]
+async fn empty_muji_presence_unregisters_the_sfu_participant() {
+    let recorder = std::sync::Arc::new(RecordingSfu::default());
+    let state = state_with_recording_sfu(std::sync::Arc::clone(&recorder)).await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "empty-muji-clear@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        None,
+        &Some(owner_session.clone()),
+    )
+    .await;
+    let alice_phase = waddle_xmpp::protocol::ConnectionPhase::ready(alice.clone(), false);
+
+    let mut active = muc_presence_to(&room_jid, "alice");
+    active.payloads.push(active_muji().to_element());
+    let _ = handlers::presence::handle_presence(
+        active,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &alice_phase,
+        &Some(owner_session.clone()),
+    )
+    .await;
+
+    let mut empty = muc_presence_to(&room_jid, "alice");
+    empty.payloads.push(empty_muji().to_element());
+    let responses = handlers::presence::handle_presence(
+        empty,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &alice_phase,
+        &Some(owner_session),
+    )
+    .await;
+
+    let recorded = recorder.snapshot();
+    assert_eq!(
+        recorded.len(),
+        1,
+        "empty <muji/> leave marker must unregister the sender from the SFU"
+    );
+    assert_eq!(recorded[0].0.as_str(), "empty-muji-clear@muc.example.com");
+    assert_eq!(recorded[0].1.as_livekit_identity(), "alice@example.com/web");
+    let self_clear = Element::from_str(&responses[0]).expect("self clear XML");
+    assert!(
+        self_clear
+            .get_child("muji", waddle_xmpp::xep::xep0272::NS_MUJI)
+            .is_none(),
+        "empty <muji/> must reflect as a no-Muji leave marker"
     );
 }
 

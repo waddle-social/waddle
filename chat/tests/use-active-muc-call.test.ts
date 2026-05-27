@@ -7,6 +7,10 @@ import {
 } from "../src/lib/calls/muc-call-presence";
 import { connectionStore } from "../src/lib/connection-store";
 import { readActiveMucCall, readRoomHasActiveCall } from "../src/lib/calls/use-active-muc-call";
+import {
+  clearAllMucCallSessionCacheForTests,
+  markMucCallSessionTerminatePending,
+} from "../src/lib/calls/muc-call-session-cache";
 import type { CallMedia, LiveKitJoin } from "../src/lib/calls/types";
 import type { WaddleSession } from "../src/lib/server-auth";
 
@@ -42,12 +46,14 @@ describe("readActiveMucCall selector", () => {
   beforeEach(() => {
     $callState.set({ phase: "idle" });
     clearMucCallParticipants();
+    clearAllMucCallSessionCacheForTests();
     setSession(null);
   });
 
   afterEach(() => {
     $callState.set({ phase: "idle" });
     clearMucCallParticipants();
+    clearAllMucCallSessionCacheForTests();
     setSession(null);
   });
 
@@ -56,6 +62,7 @@ describe("readActiveMucCall selector", () => {
       activeRoomJid: null,
       selfInCall: false,
       participantCount: 0,
+      media: { audio: true, video: false },
     });
   });
 
@@ -74,6 +81,7 @@ describe("readActiveMucCall selector", () => {
       activeRoomJid: null,
       selfInCall: false,
       participantCount: 0,
+      media: { audio: true, video: false },
     });
   });
 
@@ -93,6 +101,7 @@ describe("readActiveMucCall selector", () => {
       activeRoomJid: ROOM,
       selfInCall: true,
       participantCount: 2,
+      media: { audio: true, video: true },
     });
   });
 
@@ -112,6 +121,7 @@ describe("readActiveMucCall selector", () => {
       activeRoomJid: ROOM,
       selfInCall: false,
       participantCount: 2,
+      media: { audio: true, video: true },
     });
   });
 
@@ -150,12 +160,14 @@ describe("readRoomHasActiveCall selector", () => {
   beforeEach(() => {
     $callState.set({ phase: "idle" });
     clearMucCallParticipants();
+    clearAllMucCallSessionCacheForTests();
     setSession(null);
   });
 
   afterEach(() => {
     $callState.set({ phase: "idle" });
     clearMucCallParticipants();
+    clearAllMucCallSessionCacheForTests();
     setSession(null);
   });
 
@@ -169,6 +181,7 @@ describe("readRoomHasActiveCall selector", () => {
       selfInCall: false,
       localResourceInCall: false,
       participantCount: 2,
+      media: { audio: true, video: false },
     });
   });
 
@@ -182,6 +195,7 @@ describe("readRoomHasActiveCall selector", () => {
       selfInCall: true,
       localResourceInCall: false,
       participantCount: 2,
+      media: { audio: true, video: false },
     });
   });
 
@@ -203,6 +217,7 @@ describe("readRoomHasActiveCall selector", () => {
       selfInCall: true,
       localResourceInCall: true,
       participantCount: 2,
+      media: { audio: true, video: true },
     });
   });
 
@@ -222,6 +237,7 @@ describe("readRoomHasActiveCall selector", () => {
       selfInCall: true,
       localResourceInCall: false,
       participantCount: 1,
+      media: { audio: true, video: false },
     });
 
     applyMucCallPresence({
@@ -236,6 +252,26 @@ describe("readRoomHasActiveCall selector", () => {
       selfInCall: true,
       localResourceInCall: true,
       participantCount: 1,
+      media: { audio: true, video: false },
+    });
+  });
+
+  test("treats ownerless self Muji presence as a retained local resource after refresh", () => {
+    setSession("alice");
+    connectionStore.client = { fullJid: "alice@waddle.test/web" } as unknown as typeof connectionStore.client;
+    $callState.set({ phase: "idle" });
+    applyMucCallPresence({
+      from: `${ROOM}/alice`,
+      presence_type: "available",
+      muji: { preparing: false, active: true },
+    });
+
+    expect(readRoomHasActiveCall(ROOM)).toEqual({
+      hasActiveCall: true,
+      selfInCall: true,
+      localResourceInCall: true,
+      participantCount: 1,
+      media: { audio: true, video: false },
     });
   });
 
@@ -271,6 +307,7 @@ describe("readRoomHasActiveCall selector", () => {
       selfInCall: false,
       localResourceInCall: false,
       participantCount: 1,
+      media: { audio: true, video: false },
     });
   });
 
@@ -283,12 +320,45 @@ describe("readRoomHasActiveCall selector", () => {
       selfInCall: false,
       localResourceInCall: false,
       participantCount: 0,
+      media: { audio: true, video: false },
     });
     expect(readRoomHasActiveCall("other@muc.waddle.test")).toEqual({
       hasActiveCall: false,
       selfInCall: false,
       localResourceInCall: false,
       participantCount: 0,
+      media: { audio: true, video: false },
+    });
+  });
+
+  test("reports video media from Muji content presence", () => {
+    setSession("alice");
+    applyMucCallPresence({
+      from: `${ROOM}/alice`,
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/web",
+      muji: { preparing: false, active: true, audio: true, video: true },
+    });
+
+    expect(readRoomHasActiveCall(ROOM).media).toEqual({ audio: true, video: true });
+  });
+
+  test("keeps a cached terminate failure retryable after local Muji presence is cleared", () => {
+    setSession("alice");
+    connectionStore.client = { fullJid: "alice@waddle.test/web" } as unknown as typeof connectionStore.client;
+    markMucCallSessionTerminatePending({
+      roomJid: ROOM,
+      sid: "muc-retry-live",
+      selfFullJid: "alice@waddle.test/web",
+      now: new Date("2026-05-26T12:00:00.000Z"),
+    });
+
+    expect(readRoomHasActiveCall(ROOM)).toEqual({
+      hasActiveCall: true,
+      selfInCall: true,
+      localResourceInCall: true,
+      participantCount: 1,
+      media: { audio: true, video: false },
     });
   });
 });

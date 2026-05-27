@@ -2,10 +2,17 @@ import { computed, type ComputedRef } from "vue";
 import { useStore } from "@nanostores/vue";
 import { $callState } from "./call-store";
 import {
+  $mucCallMedia,
   $mucCallParticipantOwners,
   $mucCallParticipants,
+  mucCallMediaForRoom,
   normalizeMucCallRoomJid,
 } from "./muc-call-presence";
+import {
+  $mucCallTerminatePendingSessions,
+  hasPendingMucCallTerminateSession,
+} from "./muc-call-session-cache";
+import type { CallMedia } from "./types";
 import { connectionStore } from "@/lib/connection-store";
 import { fullJidIdentityKey } from "@/lib/xmpp/jid";
 
@@ -32,9 +39,11 @@ export function useActiveMucCall(): {
   /** Convenience: count of nicks advertising active Muji presence in
    *  the call's room. Mirrors what `MucCallButton` displays. */
   participantCount: ComputedRef<number>;
+  media: ComputedRef<CallMedia>;
 } {
   const state = useStore($callState);
   const participants = useStore($mucCallParticipants);
+  const callMedia = useStore($mucCallMedia);
 
   const activeRoomJid = computed<string | null>(() => {
     const s = state.value;
@@ -58,7 +67,12 @@ export function useActiveMucCall(): {
     return (participants.value[roomJid] ?? []).length;
   });
 
-  return { activeRoomJid, selfInCall, participantCount };
+  const media = computed<CallMedia>(() => {
+    const roomJid = activeRoomJid.value;
+    return mediaForRoom(roomJid ?? "", state.value, callMedia.value);
+  });
+
+  return { activeRoomJid, selfInCall, participantCount, media };
 }
 
 /**
@@ -75,10 +89,13 @@ export function useRoomHasActiveCall(
   selfInCall: ComputedRef<boolean>;
   localResourceInCall: ComputedRef<boolean>;
   participantCount: ComputedRef<number>;
+  media: ComputedRef<CallMedia>;
 } {
   const state = useStore($callState);
   const participants = useStore($mucCallParticipants);
   const participantOwners = useStore($mucCallParticipantOwners);
+  const callMedia = useStore($mucCallMedia);
+  const pendingTerminates = useStore($mucCallTerminatePendingSessions);
 
   const normalizedRoomJid = computed<string | null>(() => {
     const normalized = normalizeMucCallRoomJid(roomJid());
@@ -91,11 +108,19 @@ export function useRoomHasActiveCall(
     return participants.value[room] ?? [];
   });
 
-  const hasActiveCall = computed<boolean>(() => participantList.value.length > 0);
+  const pendingTerminate = computed<boolean>(() =>
+    hasPendingMucCallTerminateSession(
+      pendingTerminates.value,
+      normalizedRoomJid.value ?? "",
+      currentClientFullJid(),
+    )
+  );
+
+  const hasActiveCall = computed<boolean>(() => participantList.value.length > 0 || pendingTerminate.value);
 
   const selfInCall = computed<boolean>(() => {
     const nick = connectionStore.session?.username;
-    return !!nick && participantList.value.includes(nick);
+    return !!nick && (participantList.value.includes(nick) || pendingTerminate.value);
   });
 
   const localResourceInCall = computed<boolean>(() => {
@@ -105,12 +130,20 @@ export function useRoomHasActiveCall(
     if (s.phase === "active" && s.kind === "muc" && normalizeMucCallRoomJid(s.peer) === room) {
       return true;
     }
-    return hasOwnerFullJid(participantOwners.value[room] ?? [], currentClientFullJid());
+    const fullJid = currentClientFullJid();
+    const owners = participantOwners.value[room] ?? [];
+    return hasOwnerFullJid(owners, fullJid) ||
+      hasUnownedSelfNick(owners, connectionStore.session?.username ?? null, participantList.value) ||
+      hasPendingMucCallTerminateSession(pendingTerminates.value, room, fullJid);
   });
 
-  const participantCount = computed<number>(() => participantList.value.length);
+  const participantCount = computed<number>(() => Math.max(participantList.value.length, pendingTerminate.value ? 1 : 0));
 
-  return { hasActiveCall, selfInCall, localResourceInCall, participantCount };
+  const media = computed<CallMedia>(() =>
+    mediaForRoom(normalizedRoomJid.value ?? "", state.value, callMedia.value)
+  );
+
+  return { hasActiveCall, selfInCall, localResourceInCall, participantCount, media };
 }
 
 export function readRoomHasActiveCall(roomJid: string): {
@@ -118,26 +151,39 @@ export function readRoomHasActiveCall(roomJid: string): {
   selfInCall: boolean;
   localResourceInCall: boolean;
   participantCount: number;
+  media: CallMedia;
 } {
   const normalized = normalizeMucCallRoomJid(roomJid);
   if (!normalized) {
-    return { hasActiveCall: false, selfInCall: false, localResourceInCall: false, participantCount: 0 };
+    return {
+      hasActiveCall: false,
+      selfInCall: false,
+      localResourceInCall: false,
+      participantCount: 0,
+      media: mucCallMediaForRoom(""),
+    };
   }
   const participants = $mucCallParticipants.get()[normalized] ?? [];
   const participantOwners = $mucCallParticipantOwners.get()[normalized] ?? [];
+  const pendingTerminates = $mucCallTerminatePendingSessions.get();
   const nick = connectionStore.session?.username ?? null;
+  const fullJid = currentClientFullJid();
   const s = $callState.get();
+  const pendingTerminate = hasPendingMucCallTerminateSession(pendingTerminates, normalized, fullJid);
   return {
-    hasActiveCall: participants.length > 0,
-    selfInCall: !!nick && participants.includes(nick),
+    hasActiveCall: participants.length > 0 || pendingTerminate,
+    selfInCall: !!nick && (participants.includes(nick) || pendingTerminate),
     localResourceInCall:
       (
         s.phase === "active" &&
         s.kind === "muc" &&
         normalizeMucCallRoomJid(s.peer) === normalized
       ) ||
-      hasOwnerFullJid(participantOwners, currentClientFullJid()),
-    participantCount: participants.length,
+      hasOwnerFullJid(participantOwners, fullJid) ||
+      hasUnownedSelfNick(participantOwners, nick, participants) ||
+      pendingTerminate,
+    participantCount: Math.max(participants.length, pendingTerminate ? 1 : 0),
+    media: mediaForRoom(normalized, s),
   };
 }
 
@@ -153,6 +199,15 @@ function hasOwnerFullJid(
   return owners.some((owner) => fullJidIdentityKey(owner.realJid) === fullJid);
 }
 
+function hasUnownedSelfNick(
+  owners: ReadonlyArray<{ nick: string; realJid?: string }>,
+  nick: string | null | undefined,
+  participants: ReadonlyArray<string>,
+): boolean {
+  if (!nick || !participants.includes(nick)) return false;
+  return owners.some((owner) => owner.nick === nick && !fullJidIdentityKey(owner.realJid));
+}
+
 /**
  * Imperative variant for non-component code paths (e.g. unit tests or
  * effect runners that don't have a Vue setup context). Reads the
@@ -163,14 +218,15 @@ export function readActiveMucCall(): {
   activeRoomJid: string | null;
   selfInCall: boolean;
   participantCount: number;
+  media: CallMedia;
 } {
   const s = $callState.get();
   if (s.phase !== "active" || s.kind !== "muc") {
-    return { activeRoomJid: null, selfInCall: false, participantCount: 0 };
+    return { activeRoomJid: null, selfInCall: false, participantCount: 0, media: mucCallMediaForRoom("") };
   }
   const roomJid = normalizeMucCallRoomJid(s.peer) || null;
   if (!roomJid) {
-    return { activeRoomJid: null, selfInCall: false, participantCount: 0 };
+    return { activeRoomJid: null, selfInCall: false, participantCount: 0, media: mucCallMediaForRoom("") };
   }
   const nicks = $mucCallParticipants.get()[roomJid] ?? [];
   const nick = connectionStore.session?.username ?? null;
@@ -178,5 +234,23 @@ export function readActiveMucCall(): {
     activeRoomJid: roomJid,
     selfInCall: nick !== null && nicks.includes(nick),
     participantCount: nicks.length,
+    media: mediaForRoom(roomJid, s),
   };
+}
+
+function mediaForRoom(
+  roomJid: string,
+  state: ReturnType<typeof $callState.get>,
+  mediaByRoom?: Record<string, CallMedia>,
+): CallMedia {
+  const normalized = normalizeMucCallRoomJid(roomJid);
+  if (
+    normalized &&
+    (state.phase === "active" || state.phase === "muc-pending") &&
+    state.kind === "muc" &&
+    normalizeMucCallRoomJid(state.peer) === normalized
+  ) {
+    return state.media;
+  }
+  return mucCallMediaForRoom(normalized, mediaByRoom);
 }

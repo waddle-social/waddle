@@ -143,6 +143,10 @@ pub struct WaddleMujiPresence {
     /// True when the presence advertised at least one `<content/>`
     /// child — the occupant is actively participating in the call.
     pub active: bool,
+    /// True when at least one content description advertises audio.
+    pub audio: bool,
+    /// True when at least one content description advertises video.
+    pub video: bool,
 }
 
 #[derive(uniffi::Record, Clone)]

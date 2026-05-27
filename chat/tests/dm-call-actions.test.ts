@@ -5,6 +5,7 @@ import {
 } from "../src/lib/calls/call-store";
 import {
   answerIncomingDmCallActivity,
+  endRecoveredDmCallAction,
   resumeDmCallActivity,
   startDmCallAction,
 } from "../src/lib/calls/dm-call-actions";
@@ -348,5 +349,295 @@ describe("startDmCallAction", () => {
       now: new Date("2026-05-26T12:00:00.000Z"),
     })).toBe(false);
     expect($callState.get()).toEqual({ phase: "idle" });
+  });
+
+  test("ends a recovered same-resource DM call without rejoining media", async () => {
+    const sender: CallWireSender = {
+      send_call_session_terminate: mock(async () => undefined),
+      send_call_finish: mock(async () => undefined),
+    };
+    applyDmCallEvent({
+      event: {
+        kind: "session-accept",
+        from: "bob@waddle.test/phone",
+        to: "alice@waddle.test/web",
+        sid: "recovered-live",
+        media: { audio: true, video: true },
+        join: {
+          url: "wss://livekit.waddle.test",
+          room: "dm-call-recovered",
+          identity: "alice@waddle.test/web",
+          token: jwtWithExp(Date.parse("2026-05-26T13:00:00.000Z") / 1000),
+        },
+      },
+      selfBareJid: "alice@waddle.test",
+      timestamp: "2026-05-26T12:00:00.000Z",
+      now: new Date("2026-05-26T12:00:00.000Z"),
+    });
+
+    await expect(endRecoveredDmCallAction({
+      peerBareJid: "bob@waddle.test",
+      getSender: () => sender,
+      getSelfFullJid: () => "alice@waddle.test/web",
+      now: new Date("2026-05-26T12:00:00.000Z"),
+    })).resolves.toBe(true);
+
+    expect(sender.send_call_session_terminate).toHaveBeenCalledWith(
+      "bob@waddle.test/phone",
+      "recovered-live",
+      "success",
+    );
+    expect(sender.send_call_finish).toHaveBeenCalledWith(
+      "bob@waddle.test/phone",
+      "recovered-live",
+    );
+    expect(readDmCallActivity("bob@waddle.test")).toBeNull();
+    expect($callState.get()).toEqual({ phase: "idle" });
+  });
+
+  test("ends a recovered same-resource DM call after its reconnect token expires", async () => {
+    const sender: CallWireSender = {
+      send_call_session_terminate: mock(async () => undefined),
+      send_call_finish: mock(async () => undefined),
+    };
+    applyDmCallEvent({
+      event: {
+        kind: "session-accept",
+        from: "bob@waddle.test/phone",
+        to: "alice@waddle.test/web",
+        sid: "expired-recovered-live",
+        media: { audio: true, video: true },
+        join: {
+          url: "wss://livekit.waddle.test",
+          room: "dm-call-expired",
+          identity: "alice@waddle.test/web",
+          token: jwtWithExp(Date.parse("2026-05-26T11:59:00.000Z") / 1000),
+        },
+      },
+      selfBareJid: "alice@waddle.test",
+      timestamp: "2026-05-26T12:00:00.000Z",
+      now: new Date("2026-05-26T12:00:00.000Z"),
+    });
+
+    await expect(endRecoveredDmCallAction({
+      peerBareJid: "bob@waddle.test",
+      getSender: () => sender,
+      getSelfFullJid: () => "alice@waddle.test/web",
+      now: new Date("2026-05-26T12:00:00.000Z"),
+    })).resolves.toBe(true);
+
+    expect(sender.send_call_session_terminate).toHaveBeenCalledWith(
+      "bob@waddle.test/phone",
+      "expired-recovered-live",
+      "success",
+    );
+    expect(sender.send_call_finish).toHaveBeenCalledWith(
+      "bob@waddle.test/phone",
+      "expired-recovered-live",
+    );
+    expect(readDmCallActivity("bob@waddle.test")).toBeNull();
+  });
+
+  test("ends a recovered DM call even while the local call slot is busy", async () => {
+    const sender: CallWireSender = {
+      send_call_session_terminate: mock(async () => undefined),
+      send_call_finish: mock(async () => undefined),
+    };
+    $callState.set({
+      phase: "active",
+      kind: "muc",
+      peer: "room@muc.waddle.test",
+      sid: "current-room",
+      media: { audio: true, video: false },
+      join: {
+        url: "wss://livekit.waddle.test",
+        room: "room@muc.waddle.test",
+        identity: "alice@waddle.test/web",
+        token: "opaque",
+      },
+    });
+    applyDmCallEvent({
+      event: {
+        kind: "session-accept",
+        from: "bob@waddle.test/phone",
+        to: "alice@waddle.test/web",
+        sid: "busy-recovered-live",
+        media: { audio: true, video: false },
+        join: {
+          url: "wss://livekit.waddle.test",
+          room: "dm-call-busy",
+          identity: "alice@waddle.test/web",
+          token: jwtWithExp(Date.parse("2026-05-26T11:59:00.000Z") / 1000),
+        },
+      },
+      selfBareJid: "alice@waddle.test",
+      timestamp: "2026-05-26T12:00:00.000Z",
+      now: new Date("2026-05-26T12:00:00.000Z"),
+    });
+
+    await expect(endRecoveredDmCallAction({
+      peerBareJid: "bob@waddle.test",
+      getSender: () => sender,
+      getSelfFullJid: () => "alice@waddle.test/web",
+      now: new Date("2026-05-26T12:00:00.000Z"),
+    })).resolves.toBe(true);
+
+    expect(sender.send_call_session_terminate).toHaveBeenCalledWith(
+      "bob@waddle.test/phone",
+      "busy-recovered-live",
+      "success",
+    );
+    expect($callState.get()).toMatchObject({
+      phase: "active",
+      kind: "muc",
+      sid: "current-room",
+    });
+  });
+
+  test("keeps recovered DM activity retryable when no end marker sends", async () => {
+    const sender: CallWireSender = {
+      send_call_session_terminate: mock(async () => {
+        throw new Error("terminate failed");
+      }),
+      send_call_finish: mock(async () => {
+        throw new Error("finish failed");
+      }),
+    };
+    applyDmCallEvent({
+      event: {
+        kind: "session-accept",
+        from: "bob@waddle.test/phone",
+        to: "alice@waddle.test/web",
+        sid: "retry-live",
+        media: { audio: true, video: false },
+        join: {
+          url: "wss://livekit.waddle.test",
+          room: "dm-call-retry",
+          identity: "alice@waddle.test/web",
+          token: jwtWithExp(Date.parse("2026-05-26T13:00:00.000Z") / 1000),
+        },
+      },
+      selfBareJid: "alice@waddle.test",
+      timestamp: "2026-05-26T12:00:00.000Z",
+      now: new Date("2026-05-26T12:00:00.000Z"),
+    });
+
+    await expect(endRecoveredDmCallAction({
+      peerBareJid: "bob@waddle.test",
+      getSender: () => sender,
+      getSelfFullJid: () => "alice@waddle.test/web",
+      now: new Date("2026-05-26T12:00:00.000Z"),
+    })).resolves.toBe(false);
+
+    expect(sender.send_call_finish).not.toHaveBeenCalled();
+    expect(readDmCallActivity("bob@waddle.test")).toMatchObject({
+      sid: "retry-live",
+      state: "accepted",
+    });
+  });
+
+  test("ends the requested same-resource sid without clearing another-resource activity", async () => {
+    const sender: CallWireSender = {
+      send_call_session_terminate: mock(async () => undefined),
+      send_call_finish: mock(async () => undefined),
+    };
+    applyDmCallEvent({
+      event: {
+        kind: "session-accept",
+        from: "bob@waddle.test/phone",
+        to: "alice@waddle.test/web",
+        sid: "own-live",
+        media: { audio: true, video: false },
+        join: {
+          url: "wss://livekit.waddle.test",
+          room: "dm-call-own",
+          identity: "alice@waddle.test/web",
+          token: jwtWithExp(Date.parse("2026-05-26T13:00:00.000Z") / 1000),
+        },
+      },
+      selfBareJid: "alice@waddle.test",
+      timestamp: "2026-05-26T12:00:00.000Z",
+      now: new Date("2026-05-26T12:00:00.000Z"),
+    });
+    applyDmCallEvent({
+      event: {
+        kind: "session-accept",
+        from: "bob@waddle.test/tablet",
+        to: "alice@waddle.test/phone",
+        sid: "other-resource-live",
+        media: { audio: true, video: true },
+        join: {
+          url: "wss://livekit.waddle.test",
+          room: "dm-call-other",
+          identity: "alice@waddle.test/phone",
+          token: jwtWithExp(Date.parse("2026-05-26T13:00:00.000Z") / 1000),
+        },
+      },
+      selfBareJid: "alice@waddle.test",
+      timestamp: "2026-05-26T12:01:00.000Z",
+      now: new Date("2026-05-26T12:01:00.000Z"),
+    });
+
+    expect(readDmCallActivity(
+      "bob@waddle.test",
+      new Date("2026-05-26T12:01:00.000Z"),
+      "alice@waddle.test/web",
+    )).toMatchObject({ sid: "own-live" });
+
+    await expect(endRecoveredDmCallAction({
+      peerBareJid: "bob@waddle.test",
+      sid: "own-live",
+      getSender: () => sender,
+      getSelfFullJid: () => "alice@waddle.test/web",
+      now: new Date("2026-05-26T12:01:00.000Z"),
+    })).resolves.toBe(true);
+
+    expect(sender.send_call_session_terminate).toHaveBeenCalledWith(
+      "bob@waddle.test/phone",
+      "own-live",
+      "success",
+    );
+    expect(readDmCallActivity(
+      "bob@waddle.test",
+      new Date("2026-05-26T12:01:00.000Z"),
+    )).toMatchObject({ sid: "other-resource-live" });
+  });
+
+  test("does not end another resource's recovered DM call", async () => {
+    const sender: CallWireSender = {
+      send_call_session_terminate: mock(async () => undefined),
+      send_call_finish: mock(async () => undefined),
+    };
+    applyDmCallEvent({
+      event: {
+        kind: "session-accept",
+        from: "bob@waddle.test/phone",
+        to: "alice@waddle.test/tablet",
+        sid: "other-resource-live",
+        media: { audio: true, video: false },
+        join: {
+          url: "wss://livekit.waddle.test",
+          room: "dm-call-other-resource",
+          identity: "alice@waddle.test/tablet",
+          token: jwtWithExp(Date.parse("2026-05-26T13:00:00.000Z") / 1000),
+        },
+      },
+      selfBareJid: "alice@waddle.test",
+      timestamp: "2026-05-26T12:00:00.000Z",
+      now: new Date("2026-05-26T12:00:00.000Z"),
+    });
+
+    await expect(endRecoveredDmCallAction({
+      peerBareJid: "bob@waddle.test",
+      getSender: () => sender,
+      getSelfFullJid: () => "alice@waddle.test/web",
+      now: new Date("2026-05-26T12:00:00.000Z"),
+    })).resolves.toBe(false);
+
+    expect(sender.send_call_session_terminate).not.toHaveBeenCalled();
+    expect(sender.send_call_finish).not.toHaveBeenCalled();
+    expect(readDmCallActivity("bob@waddle.test")).toMatchObject({
+      sid: "other-resource-live",
+    });
   });
 });

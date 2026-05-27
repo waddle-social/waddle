@@ -26,7 +26,7 @@ import {
   $callMicEnabled,
 } from "../src/lib/calls/call-controls";
 import { $callUiMode } from "../src/lib/calls/ui-mode";
-import { clearMucCallParticipants, $mucCallParticipants } from "../src/lib/calls/muc-call-presence";
+import { applyMucCallPresence, clearMucCallParticipants, $mucCallMedia, $mucCallParticipants } from "../src/lib/calls/muc-call-presence";
 import { clearDmCallActivities, $dmCallActivities } from "../src/lib/calls/dm-call-activity";
 import type { DmCallActivity } from "../src/lib/calls/dm-call-activity";
 import type { CallState, LiveKitJoin } from "../src/lib/calls/types";
@@ -41,6 +41,7 @@ afterEach(() => {
   $callCamEnabled.set(true);
   $callUiMode.set("split");
   connectionStore.client = null;
+  connectionStore.session = null;
 });
 
 const liveKitJoin: LiveKitJoin = {
@@ -115,6 +116,7 @@ describe("call activity dock model", () => {
         title: "General",
         participantCount: 3,
         participantLabels: ["alice", "bob", "carol"],
+        media: { audio: true, video: false },
         isKnownChannel: true,
         isActive: true,
       },
@@ -280,6 +282,38 @@ describe("call activity dock model", () => {
     }, "alice@example.com/web")).toBe("open");
   });
 
+  test("maps advertised Muji video media into group-call join selections", () => {
+    const entries = buildCallActivityDockEntries({
+      channels: [
+        { id: "general", name: "General", jid: "general@conference.example.com" },
+      ],
+      conversations: [],
+      activeChannelId: null,
+      activePeerJid: null,
+      sidebarMode: "channels",
+      activeChannelJids: new Set(),
+      managedMucDomain: "conference.example.com",
+      callParticipantCounts: {
+        "general@conference.example.com": 2,
+      },
+      callMediaByRoom: {
+        "general@conference.example.com": { audio: true, video: true },
+      },
+      dmCallActivities: {},
+    });
+
+    expect(entries[0]).toMatchObject({
+      kind: "channel",
+      media: { audio: true, video: true },
+    });
+    expect(callActivityDockSelection(entries[0], { phase: "idle" }, "alice@example.com/web")).toEqual({
+      kind: "channel-join",
+      channelId: "general",
+      roomJid: "general@conference.example.com",
+      media: { audio: true, video: true },
+    });
+  });
+
   test("surfaces group calls while the channel directory is still loading", () => {
     const entries = buildCallActivityDockEntries({
       channels: [],
@@ -304,6 +338,7 @@ describe("call activity dock model", () => {
         title: "general",
         participantCount: 2,
         participantLabels: [],
+        media: { audio: true, video: false },
         isKnownChannel: false,
         isActive: false,
       },
@@ -336,6 +371,7 @@ describe("call activity dock model", () => {
         title: "General",
         participantCount: 3,
         participantLabels: [],
+        media: { audio: true, video: false },
         isKnownChannel: true,
         isActive: false,
       },
@@ -368,6 +404,7 @@ describe("call activity dock model", () => {
         title: "General",
         participantCount: 2,
         participantLabels: [],
+        media: { audio: true, video: false },
         isKnownChannel: true,
         isActive: false,
       },
@@ -485,6 +522,86 @@ describe("CallActivityDock rendering", () => {
     expect(html).toContain("Reconnect");
     expect(html).toContain('aria-label="Join General, Group call · 2 people, alice, bob in call"');
     expect(html).toContain('aria-label="Reconnect Bob, Video call · Live"');
+    expect(html).toContain('aria-label="End Bob video call"');
+  });
+
+  test("renders discovered group video calls with video join media", async () => {
+    $mucCallParticipants.set({
+      "general@conference.example.com": ["alice", "bob"],
+    });
+    $mucCallMedia.set({
+      "general@conference.example.com": { audio: true, video: true },
+    });
+
+    const html = await renderCallActivityDock({
+      channels: [
+        { id: "general", name: "General", jid: "general@conference.example.com" },
+      ],
+      conversations: [],
+      activeChannelId: null,
+      activePeerJid: null,
+      sidebarMode: "channels",
+      activeChannelJids: new Set(["general@conference.example.com"]),
+      managedMucDomain: "conference.example.com",
+    });
+
+    expect(html).toContain("Group video call");
+    expect(html).toContain('aria-label="Join General, Group video call · 2 people, alice, bob in call"');
+  });
+
+  test("lets the activity dock leave a retained local group call after refresh", async () => {
+    connectionStore.session = {
+      username: "alice",
+      jid: "alice@example.com",
+    } as typeof connectionStore.session;
+    connectionStore.client = {
+      fullJid: "alice@example.com/web",
+    } as unknown as typeof connectionStore.client;
+    applyMucCallPresence({
+      from: "general@conference.example.com/alice",
+      muc_jid: "alice@example.com/web",
+      muji: { preparing: false, active: true },
+    });
+    applyMucCallPresence({
+      from: "general@conference.example.com/bob",
+      muc_jid: "bob@example.com/phone",
+      muji: { preparing: false, active: true },
+    });
+    const props = {
+      channels: [{ id: "general", name: "General", jid: "general@conference.example.com" }],
+      conversations: [],
+      activeChannelId: null,
+      activePeerJid: null,
+      sidebarMode: "channels",
+      activeChannelJids: new Set(["general@conference.example.com"]),
+      managedMucDomain: "conference.example.com",
+      selfFullJid: "alice@example.com/web",
+    };
+
+    const html = await renderCallActivityDock(props);
+    expect(html).toContain('aria-label="Leave General call"');
+    expect(html).toContain("Rejoin");
+
+    const emitted: unknown[][] = [];
+    const bindings = await setupVueComponent("../src/components/calls/CallActivityDock.vue", props, (...args) => {
+      emitted.push(args);
+    });
+    setupBindingFunction(bindings, "endEntry")({
+      kind: "channel",
+      key: "channel:general",
+      channelId: "general",
+      roomJid: "general@conference.example.com",
+      title: "General",
+      participantCount: 2,
+      participantLabels: ["alice", "bob"],
+      media: { audio: true, video: false },
+      isKnownChannel: true,
+      isActive: false,
+    });
+
+    expect(emitted).toEqual([
+      ["leaveChannelCall", "general@conference.example.com"],
+    ]);
   });
 
   test("renders active group calls before channel metadata hydrates", async () => {
@@ -666,6 +783,79 @@ describe("CallActivityDock rendering", () => {
     expect(html).not.toContain("General has a live call");
   });
 
+  test("lets a hard-refreshed tab leave its own retained group-call presence", async () => {
+    connectionStore.session = {
+      username: "alice",
+      jid: "alice@example.com",
+    } as typeof connectionStore.session;
+    connectionStore.client = {
+      fullJid: "alice@example.com/web",
+    } as unknown as typeof connectionStore.client;
+    applyMucCallPresence({
+      from: "general@conference.example.com/alice",
+      muc_jid: "alice@example.com/web",
+      muji: { preparing: false, active: true },
+    });
+    applyMucCallPresence({
+      from: "general@conference.example.com/bob",
+      muc_jid: "bob@example.com/phone",
+      muji: { preparing: false, active: true },
+    });
+
+    const props = {
+      roomJid: "general@conference.example.com",
+      channelId: "general",
+      channelName: "General",
+      dmPeerJid: null,
+      dmPeerName: null,
+    };
+    const html = await renderVueComponent("../src/components/calls/ConversationCallBanner.vue", props);
+    expect(html).toContain("Recovered after refresh");
+    expect(html).toContain("This browser is still listed in the call after reload.");
+    expect(html).toContain("Rejoin call");
+    expect(html).toContain("Leave call");
+    expect(html).toContain('aria-label="Leave General call after refresh"');
+
+    const emitted: unknown[][] = [];
+    const bindings = await setupVueComponent("../src/components/calls/ConversationCallBanner.vue", props, (...args) => {
+      emitted.push(args);
+    });
+    setupBindingFunction(bindings, "activateBanner")();
+    setupBindingFunction(bindings, "activateSecondaryBanner")();
+
+    expect(emitted).toEqual([
+      ["joinChannelCall", "general", "general@conference.example.com", { audio: true, video: false }],
+      ["leaveChannelCall", "general@conference.example.com"],
+    ]);
+  });
+
+  test("conversation group banner rejoins advertised video calls as video", async () => {
+    applyMucCallPresence({
+      from: "general@conference.example.com/alice",
+      muc_jid: "alice@example.com/web",
+      muji: { preparing: false, active: true, audio: true, video: true },
+    });
+    const props = {
+      roomJid: "general@conference.example.com",
+      channelId: "general",
+      channelName: "General",
+      dmPeerJid: null,
+      dmPeerName: null,
+    };
+    const html = await renderVueComponent("../src/components/calls/ConversationCallBanner.vue", props);
+    expect(html).toContain("Video call");
+
+    const emitted: unknown[][] = [];
+    const bindings = await setupVueComponent("../src/components/calls/ConversationCallBanner.vue", props, (...args) => {
+      emitted.push(args);
+    });
+    setupBindingFunction(bindings, "activateBanner")();
+
+    expect(emitted).toEqual([
+      ["joinChannelCall", "general", "general@conference.example.com", { audio: true, video: true }],
+    ]);
+  });
+
   test("keeps the conversation call live region mounted before call activity arrives", async () => {
     const html = await renderVueComponent("../src/components/calls/ConversationCallBanner.vue", {
       roomJid: "general@conference.example.com",
@@ -707,20 +897,23 @@ describe("CallActivityDock rendering", () => {
     };
     const html = await renderVueComponent("../src/components/calls/ConversationCallBanner.vue", props);
     expect(html).toContain("Call with Bob is live");
-    expect(html).toContain("Live now");
+    expect(html).toContain("Recovered after refresh");
     expect(html).toContain("Video call");
     expect(html).toContain("1:1");
-    expect(html).toContain("The video call is still live.");
+    expect(html).toContain("The video call is still live after reload.");
     expect(html).toContain("Rejoin");
+    expect(html).toContain("End call");
 
     const emitted: unknown[][] = [];
     const bindings = await setupVueComponent("../src/components/calls/ConversationCallBanner.vue", props, (...args) => {
       emitted.push(args);
     });
     setupBindingFunction(bindings, "activateBanner")();
+    setupBindingFunction(bindings, "activateSecondaryBanner")();
 
     expect(emitted).toEqual([
       ["reconnectDm", "bob@example.com", { audio: true, video: true }],
+      ["endDm", "bob@example.com", "dm-live"],
     ]);
   });
 
@@ -828,7 +1021,7 @@ describe("CallActivityDock rendering", () => {
     expect(html).not.toContain("Waiting for call details to finish syncing.");
   });
 
-  test("labels expired conversation DM banners as passive", async () => {
+  test("lets expired same-resource conversation DM banners still end the call", async () => {
     $dmCallActivities.set({
       "bob@example.com": {
         peerJid: "bob@example.com/phone",
@@ -855,9 +1048,10 @@ describe("CallActivityDock rendering", () => {
     };
     const html = await renderVueComponent("../src/components/calls/ConversationCallBanner.vue", props);
 
-    expect(html).toContain("Expired");
-    expect(html).toContain("The saved reconnect details expired.");
+    expect(html).toContain("Recovered after refresh");
+    expect(html).toContain("The saved reconnect details for this video call expired, but this tab can still end the call.");
     expect(html).toContain("Unavailable");
+    expect(html).toContain("End call");
     expect(html).not.toContain("Rejoin");
 
     const emitted: unknown[][] = [];
@@ -865,7 +1059,10 @@ describe("CallActivityDock rendering", () => {
       emitted.push(args);
     });
     setupBindingFunction(bindings, "activateBanner")();
-    expect(emitted).toEqual([]);
+    setupBindingFunction(bindings, "activateSecondaryBanner")();
+    expect(emitted).toEqual([
+      ["endDm", "bob@example.com", "dm-live-expired"],
+    ]);
   });
 
   test("suppresses header DM activity controls when the conversation banner owns them", async () => {
@@ -925,24 +1122,36 @@ describe("CallActivityDock rendering", () => {
     expect(readyShell).toContain("class=\"call-activity-dock--mobile\"");
     expect(readyShell.match(/hide-current-call/g)?.length ?? 0).toBeGreaterThanOrEqual(3);
     expect(readyShell).toContain(":join-channel-call=\"joinChannelCallFromActivity\"");
+    expect(readyShell).toContain(":leave-channel-call=\"leaveRetainedChannelCall\"");
     expect(readyShell).toContain(":answer-dm=\"answerDmFromActivity\"");
     expect(readyShell).toContain(":reconnect-dm=\"reconnectDmFromDock\"");
+    expect(readyShell).toContain(":end-dm=\"endRecoveredDmFromActivity\"");
     expect(readyShell).toContain(":active-channel-call-count=\"activeChannelCallCount\"");
     expect(readyShell).toContain(":active-dm-call-count=\"activeDmCallCount\"");
-    expect(readyShell).toContain(":call-participants=\"mucCallParticipantsStore\"");
+    expect(readyShell).toContain(":call-participants=\"retainedMucCallParticipantsStore\"");
+    expect(readyShell).toContain(":call-media-by-room=\"mucCallMediaStore\"");
     expect(readyShell).toContain("@select-channel=\"onSelectChannelFromSidebar\"");
     expect(readyShell).toContain("@join-channel-call=\"joinChannelCallFromActivity\"");
+    expect(readyShell.match(/@leave-channel-call="leaveRetainedChannelCall"/g)?.length ?? 0).toBeGreaterThanOrEqual(3);
     expect(readyShell).toContain("@answer-dm=\"answerDmFromActivity\"");
     expect(readyShell).toContain("@select-dm=\"selectDm\"");
     expect(readyShell).toContain("@reconnect-dm=\"reconnectDmFromDock\"");
+    expect(readyShell).toContain("@end-dm=\"endRecoveredDmFromActivity\"");
 
     expect(mobileDrawers).not.toContain("CallActivityDock");
     expect(mobileDrawers).toContain("@join-channel-call=\"joinChannelCallFromMobile\"");
+    expect(mobileDrawers).toContain("@leave-channel-call=\"leaveChannelCallFromMobile\"");
     expect(mobileDrawers).toContain("@answer-dm=\"answerDmFromMobile\"");
     expect(mobileDrawers).toContain("@reconnect-dm=\"reconnectDmFromMobile\"");
-    expect(mobileDrawers).toContain(":active-channel-call-count=\"activeChannelCallCount\"");
-    expect(mobileDrawers).toContain(":active-dm-call-count=\"activeDmCallCount\"");
-    expect(mobileDrawers).toContain(":call-participants=\"mucCallParticipantsStore\"");
+    expect(mobileDrawers).toContain("@end-dm=\"endDmFromMobile\"");
+    expect(readyShell).toContain(":call-participants=\"retainedMucCallParticipantsStore\"");
+    expect(readyShell).toContain(":active-channel-call-count=\"activeChannelCallCount\"");
+    expect(mobileDrawers).toContain(":active-channel-call-count=\"visibleActiveChannelCallCount\"");
+    expect(mobileDrawers).toContain(":active-dm-call-count=\"visibleActiveDmCallCount\"");
+    expect(mobileDrawers).toContain("visibleCallParticipants");
+    expect(mobileDrawers).toContain(":call-participants=\"visibleCallParticipants\"");
+    expect(mobileDrawers).toContain(":call-media-by-room=\"visibleCallMediaByRoom\"");
+    expect(mobileDrawers).toContain(":managed-muc-domain=\"visibleManagedMucDomain\"");
     expect(mobileDrawers).toContain("@toggle-dms=\"openDmList\"");
     expect(mobileDrawers).toContain("hide-current-call");
     expect(callActivityDock).toContain("entry.peerJid.toLowerCase() === barePeerJid(current.peer).toLowerCase()");
@@ -953,14 +1162,19 @@ describe("CallActivityDock rendering", () => {
     expect(contentArea).toContain(":show-dm-call-activity-controls=\"false\"");
     expect(contentArea).toContain(":hide-muc-start-controls-when-active-call=\"true\"");
     expect(contentArea).toContain("@join-channel-call=\"(channelId, roomJid, media) => emit('joinChannelCall', channelId, roomJid, media)\"");
+    expect(contentArea).toContain("@leave-channel-call=\"(roomJid) => emit('leaveChannelCall', roomJid)\"");
     expect(contentArea).toContain("@answer-dm=\"(peerJid, remoteFullJid, sid, media) => emit('answerDm', peerJid, remoteFullJid, sid, media)\"");
     expect(contentArea).toContain("@reconnect-dm=\"(peerJid, media) => emit('reconnectDm', peerJid, media)\"");
+    expect(contentArea).toContain("@end-dm=\"(peerJid, sid) => emit('endDm', peerJid, sid)\"");
     expect(readyShell).toContain("@join-channel-call=\"joinChannelCallFromActivity\"");
+    expect(readyShell).toContain("@leave-channel-call=\"leaveRetainedChannelCall\"");
     expect(readyShell).toContain("@answer-dm=\"answerDmFromActivity\"");
     expect(readyShell).toContain("@reconnect-dm=\"reconnectDmFromDock\"");
+    expect(readyShell).toContain("@end-dm=\"endRecoveredDmFromActivity\"");
     expect(chatHeader).toContain("showCallActivePill?: boolean");
     expect(chatHeader).toContain("showDmCallActivityControls?: boolean");
     expect(chatHeader).toContain("hideMucStartControlsWhenActiveCall?: boolean");
+    expect(chatHeader).toContain("showDmCallActivityStatus");
     expect(chatHeader).toContain(":show-activity-controls=\"showDmCallActivityControls !== false\"");
     expect(chatHeader).toContain(":show-active-pill=\"showCallActivePill !== false\"");
     expect(chatHeader).toContain(":hide-start-controls-when-active-call=\"hideMucStartControlsWhenActiveCall\"");
@@ -972,7 +1186,7 @@ describe("CallActivityDock rendering", () => {
     expect(mucCallButton).toContain("const roomCall = useRoomHasActiveCall(() => props.roomJid)");
     expect(mucCallButton).toContain("props.hideStartControlsWhenActiveCall && roomCall.hasActiveCall.value");
     expect(mucCallButton).toContain("v-if=\"showActivePill !== false\"");
-    expect(conversationBanner).toContain("import { dmCallActivityAction, isBusy }");
+    expect(conversationBanner).toContain("canEndRecoveredDmCallActivity");
     expect(conversationBanner).not.toContain("function isBusy");
   });
 
@@ -995,16 +1209,20 @@ describe("CallActivityDock rendering", () => {
       expect(props.channelId).toBe("general");
       expect(props.dmPeerJid).toBe("bob@example.com");
       emit("joinChannelCall", "general", "general@conference.example.com", media);
+      emit("leaveChannelCall", "general@conference.example.com");
       emit("answerDm", "bob@example.com", "bob@example.com/phone", "sid-1", media);
       emit("reconnectDm", "bob@example.com", media);
+      emit("endDm", "bob@example.com", "sid-2");
     };
 
     try {
       await suppressVueLifecycleSetupWarnings(() => renderVueComponent("../src/components/chat/ContentArea.vue", {
         ...contentAreaBaseProps(),
         onJoinChannelCall: (...args: unknown[]) => emitted.push(["joinChannelCall", ...args]),
+        onLeaveChannelCall: (...args: unknown[]) => emitted.push(["leaveChannelCall", ...args]),
         onAnswerDm: (...args: unknown[]) => emitted.push(["answerDm", ...args]),
         onReconnectDm: (...args: unknown[]) => emitted.push(["reconnectDm", ...args]),
+        onEndDm: (...args: unknown[]) => emitted.push(["endDm", ...args]),
       }));
     } finally {
       (globalThis as {
@@ -1017,8 +1235,10 @@ describe("CallActivityDock rendering", () => {
 
     expect(emitted).toEqual([
       ["joinChannelCall", "general", "general@conference.example.com", media],
+      ["leaveChannelCall", "general@conference.example.com"],
       ["answerDm", "bob@example.com", "bob@example.com/phone", "sid-1", media],
       ["reconnectDm", "bob@example.com", media],
+      ["endDm", "bob@example.com", "sid-2"],
     ]);
   });
 
@@ -1225,6 +1445,63 @@ describe("CallActivityDock rendering", () => {
     expect(dmHtml).not.toContain("bob");
   });
 
+  test("keeps different same-peer recovered call SIDs visible while the current call is hidden", async () => {
+    $callState.set({
+      phase: "active",
+      kind: "dm",
+      peer: "bob@example.com/phone",
+      sid: "dm-current",
+      media: { audio: true, video: true },
+      join: liveKitJoinFor("alice@example.com/web"),
+    });
+    $dmCallActivities.set({
+      "bob@example.com\u0000dm-current\u0000alice@example.com/web": {
+        peerJid: "bob@example.com",
+        remoteFullJid: "bob@example.com/phone",
+        sid: "dm-current",
+        media: { audio: true, video: true },
+        join: liveKitJoinFor("alice@example.com/web"),
+        state: "accepted",
+        direction: "incoming",
+        updatedAt: "2026-05-25T12:00:00.000Z",
+      },
+      "bob@example.com\u0000dm-orphan\u0000alice@example.com/web": {
+        peerJid: "bob@example.com",
+        remoteFullJid: "bob@example.com/laptop",
+        sid: "dm-orphan",
+        media: { audio: true, video: false },
+        join: liveKitJoinFor("alice@example.com/web"),
+        state: "accepted",
+        direction: "incoming",
+        updatedAt: "2026-05-25T12:02:00.000Z",
+      },
+    });
+
+    const dockHtml = await renderVueComponent("../src/components/calls/CallActivityDock.vue", {
+      channels: [],
+      conversations: [{ peerJid: "bob@example.com", peerUsername: "Bob" }],
+      activeChannelId: null,
+      activePeerJid: null,
+      sidebarMode: "dms",
+      activeChannelJids: new Set<string>(),
+      hideCurrentCall: true,
+      selfFullJid: "alice@example.com/web",
+    });
+    const dmHtml = await renderVueComponent("../src/components/chat/DmPanel.vue", {
+      conversations: [],
+      activePeerJid: null,
+      hideCurrentCall: true,
+      selfFullJid: "alice@example.com/web",
+    });
+
+    expect(dockHtml).toContain("Bob");
+    expect(dockHtml).toContain("Voice call · Live");
+    expect(dockHtml).toContain('aria-label="End Bob voice call"');
+    expect(dmHtml).toContain("bob");
+    expect(dmHtml).toContain("Live voice call");
+    expect(dmHtml).toContain('aria-label="End bob voice call"');
+  });
+
   test("announces no other calls when the current call is filtered out", async () => {
     $callState.set({
       phase: "active",
@@ -1313,7 +1590,7 @@ describe("CallActivityDock rendering", () => {
     expect(html).not.toContain("Video call · Live");
   });
 
-  test("downgrades expired accepted DM calls to open-only copy", async () => {
+  test("keeps expired same-resource DM calls endable in the dock", async () => {
     $dmCallActivities.set({
       "bob@example.com": {
         peerJid: "bob@example.com",
@@ -1340,8 +1617,9 @@ describe("CallActivityDock rendering", () => {
       selfFullJid: "alice@example.com/web",
     });
 
-    expect(html).toContain("Video call · Expired");
-    expect(html).toContain('aria-label="Open Bob, Video call · Expired"');
+    expect(html).toContain("Video call · End available");
+    expect(html).toContain('aria-label="Open Bob, Video call · End available"');
+    expect(html).toContain('aria-label="End Bob video call"');
     expect(html).not.toContain("Reconnect Bob");
   });
 
@@ -1499,7 +1777,7 @@ describe("CallActivityDock rendering", () => {
     expect(html).not.toContain("Reconnect bob call");
   });
 
-  test("labels expired direct calls in the direct-message panel", async () => {
+  test("keeps expired same-resource direct calls endable in the direct-message panel", async () => {
     $dmCallActivities.set({
       "bob@example.com": {
         peerJid: "bob@example.com",
@@ -1522,10 +1800,11 @@ describe("CallActivityDock rendering", () => {
       selfFullJid: "alice@example.com/web",
     });
 
-    expect(html).toContain("Expired");
-    expect(html).toContain("Video call · Expired");
-    expect(html).toContain("The saved reconnect details expired.");
-    expect(html).toContain("Open bob call, Expired, Video call · Expired");
+    expect(html).toContain("Recovered after refresh");
+    expect(html).toContain("Video call · End available");
+    expect(html).toContain("The saved reconnect details expired, but this tab can still end the call.");
+    expect(html).toContain("Open bob call, Recovered after refresh, Video call · End available");
+    expect(html).toContain('aria-label="End bob video call"');
     expect(html).not.toContain("Reconnect bob call");
   });
 
@@ -1674,8 +1953,10 @@ describe("CallActivityDock rendering", () => {
     });
 
     setupBindingFunction(bindings, "selectCallActivity")(activity);
+    setupBindingFunction(bindings, "endCallActivity")(activity);
     expect(emitted).toEqual([
       ["reconnectDm", "bob@example.com", { audio: true, video: true }],
+      ["endDm", "bob@example.com", "dm-call-9"],
     ]);
 
     $callState.set({
@@ -1905,6 +2186,85 @@ describe("CallActivityDock rendering", () => {
     expect(html).toContain("General, not selected, call ongoing with 2 participants, click to join call");
   });
 
+  test("sidebar channel rows rejoin video group calls with video enabled", async () => {
+    const emitted: unknown[][] = [];
+    const channel = { id: "general", name: "General", jid: "general@conference.example.com" };
+    const props = {
+      ...topicsPanelBaseProps(),
+      channels: [channel],
+      callParticipantCounts: {
+        "general@conference.example.com": 2,
+      },
+      callMediaByRoom: {
+        "general@conference.example.com": { audio: true, video: true },
+      },
+      managedMucDomain: "conference.example.com",
+    };
+
+    const html = await renderVueComponent("../src/components/chat/TopicsPanel.vue", props);
+    expect(html).toContain("Join live video call, 2 people");
+
+    const bindings = await setupVueComponent("../src/components/chat/TopicsPanel.vue", props, (...args) => {
+      emitted.push(args);
+    });
+    setupBindingFunction(bindings, "selectChannelRow")(channel);
+
+    expect(emitted).toEqual([
+      ["joinChannelCall", "general", "general@conference.example.com", { audio: true, video: true }],
+    ]);
+  });
+
+  test("renders sidebar leave controls for retained local group calls after refresh", async () => {
+    connectionStore.session = {
+      username: "alice",
+      jid: "alice@example.com",
+    } as typeof connectionStore.session;
+    connectionStore.client = {
+      fullJid: "alice@example.com/web",
+    } as unknown as typeof connectionStore.client;
+    applyMucCallPresence({
+      from: "general@conference.example.com/alice",
+      muc_jid: "alice@example.com/web",
+      muji: { preparing: false, active: true },
+    });
+    applyMucCallPresence({
+      from: "general@conference.example.com/bob",
+      muc_jid: "bob@example.com/phone",
+      muji: { preparing: false, active: true },
+    });
+    const props = {
+      ...topicsPanelBaseProps(),
+      channels: [
+        { id: "general", name: "General", jid: "general@conference.example.com" },
+      ],
+      callParticipantCounts: {
+        "general@conference.example.com": 2,
+      },
+      callParticipants: {
+        "general@conference.example.com": ["alice", "bob"],
+      },
+      managedMucDomain: "conference.example.com",
+    };
+
+    const html = await renderVueComponent("../src/components/chat/TopicsPanel.vue", props);
+    expect(html).toContain("Rejoin live call, 2 people");
+    expect(html).toContain('aria-label="Leave General call"');
+
+    const emitted: unknown[][] = [];
+    const bindings = await setupVueComponent("../src/components/chat/TopicsPanel.vue", props, (...args) => {
+      emitted.push(args);
+    });
+    setupBindingFunction(bindings, "leaveChannelCall")({
+      id: "general",
+      name: "General",
+      jid: "general@conference.example.com",
+    });
+
+    expect(emitted).toEqual([
+      ["leaveChannelCall", "general@conference.example.com"],
+    ]);
+  });
+
   test("renders refreshed group call rows while channel navigation is loading", async () => {
     const html = await renderVueComponent("../src/components/chat/TopicsPanel.vue", {
       ...topicsPanelBaseProps(),
@@ -1924,6 +2284,85 @@ describe("CallActivityDock rendering", () => {
     expect(html).toContain("Join live call, 2 people");
     expect(html).toContain("Join live call, 2 people: alice, bob");
     expect(html).toContain("general, group call syncing, 2 people, alice, bob in call, click to join call");
+  });
+
+  test("renders refreshed group video call rows with video join media", async () => {
+    const emitted: unknown[][] = [];
+    const props = {
+      ...topicsPanelBaseProps(),
+      isLoading: true,
+      callParticipantCounts: {
+        "general@conference.example.com": 2,
+      },
+      callParticipants: {
+        "general@conference.example.com": ["alice", "bob"],
+      },
+      callMediaByRoom: {
+        "general@conference.example.com": { audio: true, video: true },
+      },
+      managedMucDomain: "conference.example.com",
+    };
+
+    const html = await renderVueComponent("../src/components/chat/TopicsPanel.vue", props);
+    expect(html).toContain("Join live video call, 2 people");
+    expect(html).toContain("general, group video call syncing, 2 people, alice, bob in call, click to join call");
+
+    const bindings = await setupVueComponent("../src/components/chat/TopicsPanel.vue", props, (...args) => {
+      emitted.push(args);
+    });
+    const rows = (bindings.refreshedGroupCallRows as { value: Array<{ roomJid: string; media: CallMedia }> }).value;
+    expect(rows[0]?.media).toEqual({ audio: true, video: true });
+    setupBindingFunction(bindings, "selectRefreshedGroupCallRow")(rows[0]);
+
+    expect(emitted).toEqual([
+      ["joinChannelCall", null, "general@conference.example.com", { audio: true, video: true }],
+    ]);
+  });
+
+  test("renders refreshed group call leave controls for retained local resources", async () => {
+    connectionStore.session = {
+      username: "alice",
+      jid: "alice@example.com",
+    } as typeof connectionStore.session;
+    connectionStore.client = {
+      fullJid: "alice@example.com/web",
+    } as unknown as typeof connectionStore.client;
+    applyMucCallPresence({
+      from: "general@conference.example.com/alice",
+      muc_jid: "alice@example.com/web",
+      muji: { preparing: false, active: true },
+    });
+    const props = {
+      ...topicsPanelBaseProps(),
+      isLoading: true,
+      callParticipantCounts: {
+        "general@conference.example.com": 1,
+      },
+      callParticipants: {
+        "general@conference.example.com": ["alice"],
+      },
+      managedMucDomain: "conference.example.com",
+    };
+
+    const html = await renderVueComponent("../src/components/chat/TopicsPanel.vue", props);
+    expect(html).toContain("Rejoin live call, 1 person");
+    expect(html).toContain('aria-label="Leave general call"');
+
+    const emitted: unknown[][] = [];
+    const bindings = await setupVueComponent("../src/components/chat/TopicsPanel.vue", props, (...args) => {
+      emitted.push(args);
+    });
+    setupBindingFunction(bindings, "leaveRefreshedGroupCall")({
+      key: "group-call:general@conference.example.com",
+      roomJid: "general@conference.example.com",
+      title: "general",
+      participantCount: 1,
+      media: { audio: true, video: false },
+    });
+
+    expect(emitted).toEqual([
+      ["leaveChannelCall", "general@conference.example.com"],
+    ]);
   });
 
   test("does not duplicate refreshed group call rows for known channels", async () => {
@@ -2092,6 +2531,24 @@ describe("CallActivityDock rendering", () => {
     ]);
   });
 
+  test("mobile drawer forwards sidebar leave-call events to the shell handler", async () => {
+    const forwarded: unknown[][] = [];
+    const bindings = await setupVueComponent("../src/components/chat/ChatMobileDrawers.vue", {
+      controller: {},
+      leaveChannelCall: (...args: unknown[]) => {
+        forwarded.push(args);
+      },
+    });
+
+    setupBindingFunction(bindings, "leaveChannelCallFromMobile")(
+      "general@conference.example.com",
+    );
+
+    expect(forwarded).toEqual([
+      ["general@conference.example.com"],
+    ]);
+  });
+
   test("mobile drawer forwards DM answer rows to the shell handler", async () => {
     const forwarded: unknown[][] = [];
     const bindings = await setupVueComponent("../src/components/chat/ChatMobileDrawers.vue", {
@@ -2130,6 +2587,49 @@ describe("CallActivityDock rendering", () => {
     expect(forwarded).toEqual([
       ["bob@example.com", { audio: true, video: true }],
     ]);
+  });
+
+  test("mobile drawer forwards recovered DM end actions to the shell handler", async () => {
+    const forwarded: unknown[][] = [];
+    const bindings = await setupVueComponent("../src/components/chat/ChatMobileDrawers.vue", {
+      controller: {},
+      endDm: (...args: unknown[]) => {
+        forwarded.push(args);
+      },
+    });
+
+    setupBindingFunction(bindings, "endDmFromMobile")("bob@example.com");
+
+    expect(forwarded).toEqual([["bob@example.com"]]);
+  });
+
+  test("mobile drawer can receive retained hard-refresh group call state from the shell", async () => {
+    const bindings = await setupVueComponent("../src/components/chat/ChatMobileDrawers.vue", {
+      controller: {
+        connectionStore: { client: null, session: null },
+        waddles: { mucServiceJid: { value: "conference.example.com" } },
+        selfDomain: { value: "example.com" },
+      },
+      activeChannelCallCount: 1,
+      callParticipantCounts: { "general@conference.example.com": 1 },
+      callParticipants: { "general@conference.example.com": ["alice"] },
+      callMediaByRoom: { "general@conference.example.com": { audio: true, video: true } },
+      managedMucDomain: "conference.example.com",
+      selfFullJid: "alice@example.com/web",
+    });
+
+    expect(setupBindingRefValue(bindings, "visibleActiveChannelCallCount")).toBe(1);
+    expect(setupBindingRefValue(bindings, "visibleCallParticipantCounts")).toEqual({
+      "general@conference.example.com": 1,
+    });
+    expect(setupBindingRefValue(bindings, "visibleCallParticipants")).toEqual({
+      "general@conference.example.com": ["alice"],
+    });
+    expect(setupBindingRefValue(bindings, "visibleCallMediaByRoom")).toEqual({
+      "general@conference.example.com": { audio: true, video: true },
+    });
+    expect(setupBindingRefValue(bindings, "visibleManagedMucDomain")).toBe("conference.example.com");
+    expect(setupBindingRefValue(bindings, "visibleSelfFullJid")).toBe("alice@example.com/web");
   });
 
   test("mobile drawer routes community surfaces through the controller", async () => {
@@ -2285,6 +2785,109 @@ describe("CallActivityDock rendering", () => {
       ["reconnectDm", "bob@example.com", { audio: true, video: true }],
       ["selectContact", "carol@example.com"],
       ["joinChannelCall", null, "standup@conference.example.com", { audio: true, video: false }],
+    ]);
+  });
+
+  test("home dashboard leaves retained local group calls without rejoining media", async () => {
+    connectionStore.session = {
+      username: "alice",
+      jid: "alice@example.com",
+    } as typeof connectionStore.session;
+    connectionStore.client = {
+      fullJid: "alice@example.com/web",
+    } as unknown as typeof connectionStore.client;
+    applyMucCallPresence({
+      from: "standup@conference.example.com/alice",
+      muc_jid: "alice@example.com/web",
+      muji: { preparing: false, active: true },
+    });
+    const props = {
+      spaces: [],
+      channels: [],
+      contacts: [],
+      isLoading: false,
+      channelUnreadMap: {},
+      activeChannelJids: new Set(["standup@conference.example.com"]),
+      managedMucDomain: "conference.example.com",
+      callParticipantCounts: { "standup@conference.example.com": 1 },
+      callParticipants: { "standup@conference.example.com": ["alice"] },
+      dmConversations: [],
+      selfFullJid: "alice@example.com/web",
+    };
+    const html = await renderVueComponent("../src/components/chat/HomeDashboard.vue", props);
+    expect(html).toContain('aria-label="Leave standup call"');
+    expect(html).toContain("Rejoin");
+    expect(html).toContain("Leave call");
+
+    const fallbackRoomEntry = buildCallActivityDockEntries({
+      channels: [],
+      conversations: [],
+      activeChannelId: null,
+      activePeerJid: null,
+      sidebarMode: "channels",
+      activeChannelJids: new Set(["standup@conference.example.com"]),
+      managedMucDomain: "conference.example.com",
+      callParticipantCounts: { "standup@conference.example.com": 1 },
+      callParticipants: { "standup@conference.example.com": ["alice"] },
+      dmCallActivities: {},
+    })[0];
+    if (!fallbackRoomEntry) throw new Error("expected fallback room entry");
+    const emitted: unknown[][] = [];
+    const bindings = await suppressVueLifecycleSetupWarnings(() =>
+      setupVueComponent("../src/components/chat/HomeDashboard.vue", props, (...args) => {
+        emitted.push(args);
+      })
+    );
+
+    setupBindingFunction(bindings, "endCallEntry")(fallbackRoomEntry);
+
+    expect(emitted).toEqual([
+      ["leaveChannelCall", "standup@conference.example.com"],
+    ]);
+  });
+
+  test("home dashboard channel rows join or open live calls through the call action model", async () => {
+    const emitted: unknown[][] = [];
+    const channel = { id: "general", name: "General", jid: "general@conference.example.com", spaceId: "team" };
+    const props = {
+      spaces: [],
+      channels: [channel],
+      contacts: [],
+      isLoading: false,
+      channelUnreadMap: {},
+      activeChannelJids: new Set<string>(),
+      managedMucDomain: "conference.example.com",
+      callParticipantCounts: { "general@conference.example.com": 2 },
+      callParticipants: { "general@conference.example.com": ["alice", "bob"] },
+      callMediaByRoom: { "general@conference.example.com": { audio: true, video: true } },
+      dmConversations: [],
+      selfFullJid: "alice@example.com/web",
+    };
+    const bindings = await suppressVueLifecycleSetupWarnings(() =>
+      setupVueComponent("../src/components/chat/HomeDashboard.vue", props, (...args) => {
+        emitted.push(args);
+      })
+    );
+
+    setupBindingFunction(bindings, "selectHomeChannel")(channel);
+    $callState.set({
+      phase: "active",
+      kind: "dm",
+      peer: "bob@example.com/phone",
+      sid: "dm-live",
+      media: { audio: true, video: false },
+      join: liveKitJoinFor(),
+    });
+    const busyBindings = await suppressVueLifecycleSetupWarnings(() =>
+      setupVueComponent("../src/components/chat/HomeDashboard.vue", props, (...args) => {
+        emitted.push(args);
+      })
+    );
+    setupBindingFunction(busyBindings, "selectHomeChannel")(channel);
+
+    expect(emitted).toEqual([
+      ["joinChannelCall", "general", "general@conference.example.com", { audio: true, video: true }],
+      ["selectChannel", "general", "general@conference.example.com"],
     ]);
   });
 
@@ -2469,6 +3072,78 @@ describe("CallActivityDock rendering", () => {
       join: liveKitJoinFor(),
       initiator: "alice@example.com/web",
     });
+  });
+
+  test("shell end action terminates a recovered same-resource DM call", async () => {
+    $dmCallActivities.set({
+      "bob@example.com": {
+        peerJid: "bob@example.com",
+        remoteFullJid: "bob@example.com/phone",
+        sid: "dm-recovered-end",
+        media: { audio: true, video: true },
+        join: liveKitJoinFor(),
+        state: "accepted",
+        direction: "incoming",
+        updatedAt: new Date().toISOString(),
+      },
+    });
+    const selected: unknown[][] = [];
+    const sendCallSessionTerminate = mock(async () => undefined);
+    const sendCallFinish = mock(async () => undefined);
+    const bindings = await suppressVueLifecycleSetupWarnings(() =>
+      setupVueComponent("../src/components/chat/ChatReadyShell.vue", {
+        controller: {
+          ui: { activeCommunitySurface: { value: null } },
+          connectionStore: {
+            client: {
+              fullJid: "alice@example.com/web",
+              xmpp: {
+                send_call_session_terminate: sendCallSessionTerminate,
+                send_call_finish: sendCallFinish,
+              },
+            },
+            session: null,
+          },
+          waddles: { mucServiceJid: { value: "" } },
+          selfDomain: { value: "" },
+          rosterContacts: {
+            contacts: { value: [] },
+            isLoadingContacts: { value: false },
+          },
+          messaging: {
+            mentionedChannelCounts: { value: {} },
+            activeChannels: { value: new Set<string>() },
+          },
+          dmConversations: { conversations: { value: [] } },
+          computedChannelUnreadMap: { value: {} },
+          activeRightPanel: { value: null },
+          activeThreadStack: { value: [] },
+          communityEvents: { rsvp: () => undefined },
+          closePinnedPanel: () => undefined,
+          activateRightPanel: () => undefined,
+          selectDm: (...args: unknown[]) => {
+            selected.push(args);
+          },
+          selectChannel: () => undefined,
+          selectChannelByRoomJid: () => undefined,
+        },
+      }),
+    );
+
+    setupBindingFunction(bindings, "endRecoveredDmFromActivity")("bob@example.com");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(selected).toEqual([["bob@example.com"]]);
+    expect(sendCallSessionTerminate).toHaveBeenCalledWith(
+      "bob@example.com/phone",
+      "dm-recovered-end",
+      "success",
+    );
+    expect(sendCallFinish).toHaveBeenCalledWith(
+      "bob@example.com/phone",
+      "dm-recovered-end",
+    );
+    expect($dmCallActivities.get()["bob@example.com"]).toBeUndefined();
   });
 
   test("shell reconnect leaves stale accepted activity open-only instead of sending a new propose", async () => {
@@ -2692,6 +3367,34 @@ describe("CallActivityDock rendering", () => {
     expect(withoutRoom).not.toContain('data-vue-stub="true"');
     expect(withRoom).toContain('data-vue-stub="true"');
   });
+
+  test("suppresses the header DM activity status when the conversation banner owns it", async () => {
+    $dmCallActivities.set({
+      "bob@example.com": {
+        peerJid: "bob@example.com",
+        remoteFullJid: "bob@example.com/phone",
+        sid: "dm-live",
+        media: { audio: true, video: true },
+        state: "accepted",
+        direction: "incoming",
+        updatedAt: "2026-05-25T12:00:00.000Z",
+      },
+    });
+    const props = {
+      ...chatHeaderBaseProps(),
+      dmPeer: { peerJid: "bob@example.com", peerUsername: "Bob", presenceShow: "available" },
+    };
+
+    const visible = await renderVueComponent("../src/components/chat/ChatHeader.vue", props);
+    const suppressed = await renderVueComponent("../src/components/chat/ChatHeader.vue", {
+      ...props,
+      showDmCallActivityControls: false,
+    });
+
+    expect(visible).toContain("Video call active");
+    expect(suppressed).not.toContain("Video call active");
+    expect(suppressed).toContain("online");
+  });
 });
 
 function chatHeaderBaseProps(): Record<string, unknown> {
@@ -2819,6 +3522,7 @@ async function emittedRefreshedGroupCallRowEvents(callState?: CallState): Promis
     roomJid: "general@conference.example.com",
     title: "general",
     participantCount: 2,
+    media: { audio: true, video: false },
   });
   return emitted;
 }
@@ -2866,6 +3570,17 @@ function setupBindingFunction(
     throw new Error(`Expected setup binding ${key} to be a function`);
   }
   return binding as (...args: unknown[]) => unknown;
+}
+
+function setupBindingRefValue<T = unknown>(
+  bindings: Record<string, unknown>,
+  key: string,
+): T {
+  const binding = bindings[key];
+  if (!binding || typeof binding !== "object" || !("value" in binding)) {
+    throw new Error(`Expected setup binding ${key} to be a ref`);
+  }
+  return (binding as { value: T }).value;
 }
 
 async function suppressVueLifecycleSetupWarnings<T>(fn: () => Promise<T>): Promise<T> {

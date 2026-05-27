@@ -106,6 +106,12 @@ const dmCallActivityLabel = computed(() => {
   if (activity.direction === "outgoing") return `Calling ${media.toLowerCase()} call`;
   return `${media} call ringing`;
 });
+const showDmCallActivityStatus = computed(() =>
+  props.showDmCallActivityControls !== false && !!dmCallActivity.value,
+);
+const dmHeaderSecondaryText = computed(() =>
+  showDmCallActivityStatus.value ? dmCallActivityLabel.value : presenceText(props.dmPeer?.presenceShow),
+);
 
 const emit = defineEmits<{
   openNav: [];
@@ -199,7 +205,7 @@ const memberButtonCopy = computed(() => {
               · {{ presenceText(dmPeer.presenceShow) }}
             </span>
             <span
-              v-if="dmCallActivity"
+              v-if="showDmCallActivityStatus"
               class="type-meta hidden h-5 max-w-[9rem] shrink-0 items-center gap-1 overflow-hidden rounded-full border border-success/25 bg-success/10 px-2 text-success lg:inline-flex"
             >
               <PhoneCall class="h-3 w-3" />
@@ -207,7 +213,7 @@ const memberButtonCopy = computed(() => {
             </span>
           </div>
           <div v-if="dmPeer" class="lg:hidden type-caption text-muted-foreground truncate">
-            {{ dmCallActivityLabel || presenceText(dmPeer.presenceShow) }}
+            {{ dmHeaderSecondaryText }}
           </div>
           <!-- Desktop subtitle slot: prefer the channel's own description
                (its "topic") so rooms with a stated subject get character

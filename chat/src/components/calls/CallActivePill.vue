@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { Phone } from "lucide-vue-next";
+import { Phone, Video } from "lucide-vue-next";
 import { useRoomHasActiveCall } from "@/lib/calls/use-active-muc-call";
 
 /**
@@ -33,6 +33,7 @@ const {
   selfInCall,
   localResourceInCall,
   participantCount,
+  media,
 } = useRoomHasActiveCall(
   () => props.roomJid,
 );
@@ -48,13 +49,14 @@ const isVisible = computed(() => hasActiveCall.value && !localResourceInCall.val
 const ariaLabel = computed(() => {
   const count = participantCount.value;
   const noun = count === 1 ? "person" : "people";
+  const mediaLabel = media.value.video ? "video call" : "call";
   const device = selfInCall.value
     ? " This account is connected on another device."
     : "";
   if (props.disabled) {
-    return `Live call in this channel, ${count} ${noun}.${device} Join unavailable from this device.`;
+    return `Live ${mediaLabel} in this channel, ${count} ${noun}.${device} Join unavailable from this device.`;
   }
-  return `Live call in this channel, ${count} ${noun}.${device} Click to join from this device.`;
+  return `Live ${mediaLabel} in this channel, ${count} ${noun}.${device} Click to join from this device.`;
 });
 
 function onClick(): void {
@@ -75,7 +77,8 @@ function onClick(): void {
     @click="onClick"
   >
     <span class="call-active-pill__dot" aria-hidden="true" />
-    <Phone class="call-active-pill__icon" aria-hidden="true" />
+    <Video v-if="media.video" class="call-active-pill__icon" aria-hidden="true" />
+    <Phone v-else class="call-active-pill__icon" aria-hidden="true" />
     <span class="call-active-pill__count">{{ participantCount }}</span>
     <span class="call-active-pill__separator" aria-hidden="true">·</span>
     <span class="call-active-pill__state">Live</span>

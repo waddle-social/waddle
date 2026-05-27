@@ -1,5 +1,6 @@
 import type { ChannelSummary } from "@/lib/chat-types";
-import { normalizeMucCallRoomJid } from "./muc-call-presence";
+import { mucCallMediaForRoom, normalizeMucCallRoomJid } from "./muc-call-presence";
+import type { CallMedia } from "./types";
 
 export function normalizeMucServiceDomain(serviceJid?: string | null): string {
   const bare = serviceJid?.split("/")[0]?.trim().toLowerCase() ?? "";
@@ -65,6 +66,7 @@ export type RefreshedMucCallRoom = {
   roomJid: string;
   title: string;
   participantCount: number;
+  media: CallMedia;
 };
 
 export function refreshedMucCallRooms(options: {
@@ -72,6 +74,7 @@ export function refreshedMucCallRooms(options: {
   activeChannelJids: Iterable<string>;
   managedMucDomain?: string | null;
   callParticipantCounts: Record<string, number> | undefined;
+  callMediaByRoom?: Record<string, CallMedia>;
 }): RefreshedMucCallRoom[] {
   const trustedDomain = normalizeMucServiceDomain(options.managedMucDomain);
   if (!trustedDomain || !options.callParticipantCounts) return [];
@@ -102,6 +105,7 @@ export function refreshedMucCallRooms(options: {
         roomJid,
         title,
         participantCount,
+        media: mucCallMediaForRoom(roomJid, options.callMediaByRoom),
       }];
     })
     .sort((left, right) => left.title.localeCompare(right.title));

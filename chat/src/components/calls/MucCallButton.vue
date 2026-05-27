@@ -100,8 +100,8 @@ async function startCall(media: CallMedia): Promise<void> {
   });
 }
 
-function joinExistingAudio(): void {
-  void startCall({ audio: true, video: false });
+function joinExistingCall(): void {
+  void startCall(roomCall.media.value);
 }
 </script>
 
@@ -146,7 +146,7 @@ function joinExistingAudio(): void {
     <CallActivePill
       v-if="showActivePill !== false"
       :room-jid="roomJid"
-      :on-join="joinExistingAudio"
+      :on-join="joinExistingCall"
       :disabled="pillDisabled"
     />
   </div>

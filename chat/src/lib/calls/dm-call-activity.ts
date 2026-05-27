@@ -24,6 +24,12 @@ type DmCallResumeBlockReason =
   | "other-resource"
   | "invalid-token"
   | "expired-token";
+type DmCallEndBlockReason =
+  | "missing-self"
+  | "not-accepted"
+  | "missing-peer-resource"
+  | "missing-join"
+  | "other-resource";
 
 export interface DmCallActivity {
   peerJid: string;
@@ -79,6 +85,29 @@ export function canResumeDmCallActivity(
   join: LiveKitJoin;
 } {
   return dmCallResumeBlockReason(activity, selfFullJid, now) === null;
+}
+
+export function canEndRecoveredDmCallActivity(
+  activity: Pick<DmCallActivity, "state" | "remoteFullJid" | "join">,
+  selfFullJid: string | null | undefined,
+): activity is Pick<DmCallActivity, "state" | "remoteFullJid" | "join"> & {
+  remoteFullJid: string;
+  join: LiveKitJoin;
+} {
+  return dmCallEndBlockReason(activity, selfFullJid) === null;
+}
+
+function dmCallEndBlockReason(
+  activity: Pick<DmCallActivity, "state" | "remoteFullJid" | "join">,
+  selfFullJid: string | null | undefined,
+): DmCallEndBlockReason | null {
+  const self = selfFullJid?.trim();
+  if (!self) return "missing-self";
+  if (activity.state !== "accepted") return "not-accepted";
+  if (!activity.remoteFullJid) return "missing-peer-resource";
+  if (!activity.join) return "missing-join";
+  if (activity.join.identity !== self) return "other-resource";
+  return null;
 }
 
 export function dmCallResumeBlockReason(
@@ -186,6 +215,29 @@ function isOlderThanCurrent(timestamp: string, current?: DmCallActivity): boolea
   return nextMs < currentMs;
 }
 
+function activityStorageKey(peerJid: string, sid: string, selfFullJid?: string | null): string {
+  const normalized = normalizedBare(peerJid);
+  const self = selfFullJid?.trim();
+  return self ? `${normalized}\u0000${sid}\u0000${self}` : `${normalized}\u0000${sid}`;
+}
+
+function setActivity(
+  peerJid: string,
+  sid: string,
+  selfFullJid: string | null | undefined,
+  activity: DmCallActivity,
+): void {
+  const key = activityStorageKey(peerJid, sid, selfFullJid);
+  const next = { ...$dmCallActivities.get() };
+  for (const [existingKey, existing] of Object.entries(next)) {
+    if (normalizedBare(existing.peerJid) === normalizedBare(peerJid) && existing.sid === sid && existingKey !== key) {
+      delete next[existingKey];
+    }
+  }
+  next[key] = activity;
+  $dmCallActivities.set(next);
+}
+
 function terminalKey(peerJid: string, sid: string): string {
   return `${peerJid}\u0000${sid}`;
 }
@@ -256,13 +308,14 @@ export function pruneExpiredDmCallActivities(now = new Date()): void {
   const current = $dmCallActivities.get();
   const next: Record<string, DmCallActivity> = {};
   let changed = false;
-  for (const [peerJid, activity] of Object.entries(current)) {
+  for (const [key, activity] of Object.entries(current)) {
+    const peerJid = normalizedBare(activity.peerJid);
     if (isStale(activity.updatedAt, now)) {
       recordTerminal(peerJid, activity.sid, activity.updatedAt, now);
       changed = true;
       continue;
     }
-    next[peerJid] = activity;
+    next[key] = activity;
   }
   pruneTerminalTimestamps(now);
   if (changed) {
@@ -280,8 +333,8 @@ function recordTerminal(peerJid: string, sid: string, timestamp: string, now = n
 }
 
 function peerForSid(sid: string): string {
-  for (const [peerJid, activity] of Object.entries($dmCallActivities.get())) {
-    if (activity.sid === sid) return peerJid;
+  for (const activity of Object.values($dmCallActivities.get())) {
+    if (activity.sid === sid) return normalizedBare(activity.peerJid);
   }
   return "";
 }
@@ -319,13 +372,75 @@ function remoteFullJidForEnvelope(
   return undefined;
 }
 
+function dmCallActivityEntriesForPeer(
+  activities: Record<string, DmCallActivity>,
+  peerJid: string,
+): Array<[string, DmCallActivity]> {
+  const normalized = normalizedBare(peerJid);
+  if (!normalized) return [];
+  return Object.entries(activities)
+    .filter(([, activity]) => normalizedBare(activity.peerJid) === normalized);
+}
+
+export function dmCallActivitiesForPeer(
+  activities: Record<string, DmCallActivity>,
+  peerJid: string,
+  selfFullJid?: string | null,
+): DmCallActivity[] {
+  const self = selfFullJid?.trim();
+  return dmCallActivityEntriesForPeer(activities, peerJid)
+    .map(([, activity]) => activity)
+    .sort((left, right) => compareDmCallActivityPriority(left, right, self));
+}
+
+function compareDmCallActivityPriority(
+  left: DmCallActivity,
+  right: DmCallActivity,
+  selfFullJid?: string,
+): number {
+  if (selfFullJid) {
+    const leftOwnResource = isOwnAcceptedResourceActivity(left, selfFullJid);
+    const rightOwnResource = isOwnAcceptedResourceActivity(right, selfFullJid);
+    if (leftOwnResource !== rightOwnResource) return leftOwnResource ? -1 : 1;
+  }
+  const rightMs = Date.parse(right.updatedAt);
+  const leftMs = Date.parse(left.updatedAt);
+  if (Number.isFinite(rightMs) && Number.isFinite(leftMs) && rightMs !== leftMs) {
+    return rightMs - leftMs;
+  }
+  return right.sid.localeCompare(left.sid);
+}
+
+function isOwnAcceptedResourceActivity(activity: DmCallActivity, selfFullJid: string): boolean {
+  return activity.state === "accepted" &&
+    activity.join?.identity === selfFullJid &&
+    Boolean(activity.remoteFullJid);
+}
+
+function findActivityForSid(peerJid: string, sid: string): [string, DmCallActivity] | null {
+  return dmCallActivityEntriesForPeer($dmCallActivities.get(), peerJid)
+    .find(([, activity]) => activity.sid === sid) ?? null;
+}
+
+function bestActivityForPeer(
+  peerJid: string,
+  selfFullJid?: string | null,
+): DmCallActivity | null {
+  const entries = dmCallActivitiesForPeer($dmCallActivities.get(), peerJid, selfFullJid);
+  if (entries.length === 0) return null;
+  return entries[0] ?? null;
+}
+
 function removeActivity(peerJid: string, sid: string): void {
-  const current = $dmCallActivities.get()[peerJid];
-  if (!current || current.sid !== sid) return;
-  const selfBareJid = current.join ? normalizedBare(current.join.identity) : "";
-  if (selfBareJid) forgetDmCallJoin({ selfBareJid, peerJid, sid });
+  const entries = dmCallActivityEntriesForPeer($dmCallActivities.get(), peerJid)
+    .filter(([, activity]) => activity.sid === sid);
+  if (entries.length === 0) return;
   const next = { ...$dmCallActivities.get() };
-  delete next[peerJid];
+  for (const [key, current] of entries) {
+    const selfBareJid = current.join ? normalizedBare(current.join.identity) : "";
+    if (selfBareJid) forgetDmCallJoin({ selfBareJid, peerJid: normalizedBare(current.peerJid), sid });
+    delete next[key];
+  }
   $dmCallActivities.set(next);
   scheduleActivityPrune();
 }
@@ -333,16 +448,17 @@ function removeActivity(peerJid: string, sid: string): void {
 export function clearDmCallActivity(peerJid: string, sid?: string): void {
   const normalized = normalizedBare(peerJid);
   if (!normalized) return;
-  const current = $dmCallActivities.get()[normalized];
+  const currentEntries = dmCallActivityEntriesForPeer($dmCallActivities.get(), normalized);
   const now = new Date();
   if (sid) recordTerminal(normalized, sid, now.toISOString(), now);
-  if (!current) return;
-  if (sid && current.sid !== sid) return;
-  recordTerminal(normalized, current.sid, now.toISOString(), now);
-  const selfBareJid = current.join ? normalizedBare(current.join.identity) : "";
-  if (selfBareJid) forgetDmCallJoin({ selfBareJid, peerJid: normalized, sid: current.sid });
   const next = { ...$dmCallActivities.get() };
-  delete next[normalized];
+  for (const [key, current] of currentEntries) {
+    if (sid && current.sid !== sid) continue;
+    recordTerminal(normalized, current.sid, now.toISOString(), now);
+    const selfBareJid = current.join ? normalizedBare(current.join.identity) : "";
+    if (selfBareJid) forgetDmCallJoin({ selfBareJid, peerJid: normalized, sid: current.sid });
+    delete next[key];
+  }
   $dmCallActivities.set(next);
 }
 
@@ -355,14 +471,15 @@ export function applyDmCallEvent(envelope: DmCallEventEnvelope): void {
     removeActivity(peerJid, envelope.event.sid);
     return;
   }
-  const previous = $dmCallActivities.get()[peerJid];
-  if (isOlderThanCurrent(timestamp, previous)) return;
+  const previousForSidEntry = findActivityForSid(peerJid, envelope.event.sid);
+  const previousForSid = previousForSidEntry?.[1];
+  if (isOlderThanCurrent(timestamp, previousForSid)) return;
   if (!isTerminalEvent(envelope.event) && isOlderThanTerminal(peerJid, envelope.event.sid, timestamp)) return;
   const direction = directionForEnvelope(envelope);
   const remoteFullJid = remoteFullJidForEnvelope(envelope, peerJid);
   switch (envelope.event.kind) {
     case "propose":
-      $dmCallActivities.setKey(peerJid, {
+      setActivity(peerJid, envelope.event.sid, eventSelfFullJid(envelope), {
         peerJid,
         ...(remoteFullJid ? { remoteFullJid } : {}),
         sid: envelope.event.sid,
@@ -376,7 +493,6 @@ export function applyDmCallEvent(envelope: DmCallEventEnvelope): void {
     case "proceed":
     case "session-initiate":
     case "session-accept":
-      const previousForSid = previous?.sid === envelope.event.sid ? previous : undefined;
       const eventProvidedJoin = "join" in envelope.event ? envelope.event.join : undefined;
       const cachedJoin = eventProvidedJoin
         ? null
@@ -411,7 +527,7 @@ export function applyDmCallEvent(envelope: DmCallEventEnvelope): void {
           });
         }
       }
-      $dmCallActivities.setKey(peerJid, {
+      setActivity(peerJid, envelope.event.sid, join?.identity ?? eventSelfFullJid(envelope), {
         peerJid,
         ...(nextRemoteFullJid
           ? { remoteFullJid: nextRemoteFullJid }
@@ -443,11 +559,36 @@ export function clearDmCallActivities(): void {
   dmCallTerminalTimestamps.clear();
 }
 
-export function readDmCallActivity(peerJid: string, now = new Date()): DmCallActivity | null {
+export function readDmCallActivity(
+  peerJid: string,
+  now = new Date(),
+  selfFullJid?: string | null,
+): DmCallActivity | null {
   pruneExpiredDmCallActivities(now);
-  const normalized = normalizedBare(peerJid);
-  if (!normalized) return null;
-  return $dmCallActivities.get()[normalized] ?? null;
+  return bestActivityForPeer(peerJid, selfFullJid);
+}
+
+function readDmCallActivityForSid(
+  peerJid: string,
+  sid: string | null | undefined,
+  now = new Date(),
+): DmCallActivity | null {
+  pruneExpiredDmCallActivities(now);
+  if (!sid) return readDmCallActivity(peerJid, now);
+  return findActivityForSid(peerJid, sid)?.[1] ?? null;
+}
+
+export function readEndableDmCallActivity(
+  peerJid: string,
+  selfFullJid: string | null | undefined,
+  sid?: string | null,
+  now = new Date(),
+): DmCallActivity | null {
+  pruneExpiredDmCallActivities(now);
+  const candidates = sid
+    ? [readDmCallActivityForSid(peerJid, sid, now)].filter((activity): activity is DmCallActivity => !!activity)
+    : dmCallActivitiesForPeer($dmCallActivities.get(), peerJid);
+  return candidates.find((activity) => canEndRecoveredDmCallActivity(activity, selfFullJid)) ?? null;
 }
 
 export function useDmCallActivity(
@@ -458,9 +599,7 @@ export function useDmCallActivity(
 } {
   const activities = useStore($dmCallActivities);
   const activity = computed<DmCallActivity | null>(() => {
-    const normalized = normalizedBare(peerJid());
-    if (!normalized) return null;
-    return activities.value[normalized] ?? null;
+    return dmCallActivitiesForPeer(activities.value, peerJid() ?? "")[0] ?? null;
   });
   const hasActivity = computed<boolean>(() => activity.value !== null);
   return { activity, hasActivity };
