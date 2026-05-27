@@ -839,6 +839,8 @@ mod tests {
             api_key: ApiKey::new("APIxxxxxxxx"),
             api_secret: ApiSecret::from_text("super-secret-secret-32-bytes-min")
                 .expect("test secret meets min length"),
+            webhook_secret: ApiSecret::from_text("super-secret-secret-32-bytes-min")
+                .expect("test secret meets min length"),
             ws_url: WebsocketUrl::new("wss://livekit.test/".parse().unwrap()).unwrap(),
             turn_host: TurnHost::new("turn.test"),
             turn_tls_port: 443,

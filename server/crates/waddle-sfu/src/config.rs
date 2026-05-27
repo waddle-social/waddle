@@ -141,6 +141,13 @@ impl fmt::Debug for TurnSharedSecret {
 pub struct SfuConfig {
     pub api_key: ApiKey,
     pub api_secret: ApiSecret,
+    /// Shared secret LiveKit uses to sign webhook deliveries
+    /// (`Authorization` JWT, HS256 over the request body's SHA-256
+    /// claim). Defaults to [`Self::api_secret`] for dev/test parity
+    /// with LiveKit's stock dev configuration; production deployments
+    /// should set `LIVEKIT_WEBHOOK_SECRET` independently so a leaked
+    /// API secret does not also forge inbound webhook deliveries.
+    pub webhook_secret: ApiSecret,
     pub ws_url: WebsocketUrl,
     pub turn_host: crate::turn::TurnHost,
     pub turn_tls_port: u16,
@@ -165,7 +172,10 @@ impl SfuConfig {
     /// Optional with defaults: `LIVEKIT_TURN_TLS_PORT` (443),
     /// `LIVEKIT_TURN_UDP_PORT` (3478),
     /// `LIVEKIT_TOKEN_TTL_SECONDS` (3600),
-    /// `LIVEKIT_TURN_TTL_SECONDS` (3600).
+    /// `LIVEKIT_TURN_TTL_SECONDS` (3600),
+    /// `LIVEKIT_WEBHOOK_SECRET` (defaults to `LIVEKIT_API_SECRET` for
+    /// dev parity; production should set both independently so a
+    /// leaked API secret can't forge webhook deliveries).
     pub fn from_env() -> Result<Option<Self>, FromEnvError> {
         let api_key = std::env::var("LIVEKIT_API_KEY").ok();
         let api_secret = std::env::var("LIVEKIT_API_SECRET").ok();
@@ -197,9 +207,16 @@ impl SfuConfig {
         let token_ttl_seconds = parse_seconds_env("LIVEKIT_TOKEN_TTL_SECONDS", 3600)?;
         let turn_ttl_seconds = parse_seconds_env("LIVEKIT_TURN_TTL_SECONDS", 3600)?;
 
+        let webhook_secret_raw = std::env::var("LIVEKIT_WEBHOOK_SECRET")
+            .ok()
+            .unwrap_or_else(|| api_secret.clone());
+        let webhook_secret =
+            ApiSecret::from_text(&webhook_secret_raw).map_err(FromEnvError::WeakWebhookSecret)?;
+
         Ok(Some(Self {
             api_key: ApiKey::new(api_key),
             api_secret: ApiSecret::from_text(&api_secret).map_err(FromEnvError::WeakApiSecret)?,
+            webhook_secret,
             ws_url,
             turn_host: crate::turn::TurnHost::new(turn_host),
             turn_tls_port,
@@ -237,6 +254,8 @@ pub enum FromEnvError {
     InvalidNumber(&'static str),
     #[error("LIVEKIT_API_SECRET is too weak")]
     WeakApiSecret(#[source] WeakSecret),
+    #[error("LIVEKIT_WEBHOOK_SECRET is too weak")]
+    WeakWebhookSecret(#[source] WeakSecret),
 }
 
 #[cfg(test)]
