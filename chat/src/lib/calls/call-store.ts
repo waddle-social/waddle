@@ -993,6 +993,7 @@ export async function beginMucCall(
       sid: attemptId,
       selfFullJid,
       media,
+      join,
     });
     $lastCallError.set(null);
   } catch (err) {

@@ -12,7 +12,7 @@ import type { CallEvent, CallMedia, LiveKitJoin } from "./types";
 export const DM_CALL_ACTIVITY_ACTIVE_WINDOW_MS = 24 * 60 * 60 * 1000;
 const MAX_TERMINAL_TIMESTAMPS = 1024;
 const PRUNE_TIMER_SLACK_MS = 1_000;
-const LIVEKIT_JOIN_EXPIRY_SKEW_MS = 30_000;
+export const LIVEKIT_JOIN_EXPIRY_SKEW_MS = 30_000;
 
 type DmCallActivityState = "ringing" | "accepted";
 type DmCallResumeBlockReason =
@@ -157,7 +157,13 @@ function eventSelfFullJid(envelope: DmCallEventEnvelope, join?: LiveKitJoin): st
   return undefined;
 }
 
-function liveKitJoinTokenExpiresAt(token: string): Date | null {
+/**
+ * Decode a LiveKit join JWT and return its `exp` claim as a `Date`,
+ * or `null` for malformed input. Exported so the MUC resume path
+ * (`resumeMucCallActivity`) can reuse the same expiry check the DM
+ * resume path uses without re-implementing JWT decoding.
+ */
+export function liveKitJoinTokenExpiresAt(token: string): Date | null {
   const payload = token.split(".")[1];
   if (!payload) return null;
   try {

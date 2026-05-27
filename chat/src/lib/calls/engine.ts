@@ -56,7 +56,21 @@ export type CallEngineEvents = {
    * mute via unpublish path, etc).
    */
   localTrackUnpublished: (track: LocalMediaTrack) => void;
+  /**
+   * Fires when a remote participant transitions to LiveKit's `active`
+   * state. Source of truth for "this peer is in the call" for the
+   * `$mucCallParticipants` projection in `use-call-engine.ts`.
+   */
+  participantConnected: (identity: string) => void;
   participantDisconnected: (identity: string) => void;
+  /**
+   * Fires once `connect()` resolves and the local participant has
+   * reached the `active` state in LiveKit. Surfaces the initial
+   * remote-participant set so the projection can seed
+   * `$mucCallParticipants` without missing peers that connected
+   * before our event listener attached.
+   */
+  connected: (snapshot: { localIdentity: string; remoteIdentities: string[] }) => void;
   disconnected: (reason?: string) => void;
 };
 
@@ -76,7 +90,9 @@ export class CallEngine {
     trackUnsubscribed: new Set(),
     localTrackPublished: new Set(),
     localTrackUnpublished: new Set(),
+    participantConnected: new Set(),
     participantDisconnected: new Set(),
+    connected: new Set(),
     disconnected: new Set(),
   };
 
@@ -107,6 +123,7 @@ export class CallEngine {
     room.on(RoomEvent.TrackUnsubscribed, this.handleTrackUnsubscribed);
     room.on(RoomEvent.LocalTrackPublished, this.handleLocalTrackPublished);
     room.on(RoomEvent.LocalTrackUnpublished, this.handleLocalTrackUnpublished);
+    room.on(RoomEvent.ParticipantConnected, this.handleParticipantConnected);
     room.on(RoomEvent.ParticipantDisconnected, this.handleParticipantDisconnected);
     room.on(RoomEvent.Disconnected, this.handleDisconnected);
     try {
@@ -121,6 +138,13 @@ export class CallEngine {
       throw err;
     }
     this.room = room;
+    // Emit the initial participant snapshot so subscribers can seed
+    // their projection without missing peers that connected before
+    // our listeners attached.
+    this.emit("connected", {
+      localIdentity: room.localParticipant.identity,
+      remoteIdentities: Array.from(room.remoteParticipants.values()).map((p) => p.identity),
+    });
     // Post-connect setup must be atomic from the caller's POV: if a
     // permission prompt is denied for the mic or cam, throwing without
     // first tearing down the half-initialized room would leave
@@ -209,6 +233,7 @@ export class CallEngine {
     room.off(RoomEvent.TrackUnsubscribed, this.handleTrackUnsubscribed);
     room.off(RoomEvent.LocalTrackPublished, this.handleLocalTrackPublished);
     room.off(RoomEvent.LocalTrackUnpublished, this.handleLocalTrackUnpublished);
+    room.off(RoomEvent.ParticipantConnected, this.handleParticipantConnected);
     room.off(RoomEvent.ParticipantDisconnected, this.handleParticipantDisconnected);
     room.off(RoomEvent.Disconnected, this.handleDisconnected);
     await room.disconnect();
@@ -285,6 +310,10 @@ export class CallEngine {
       kind,
       track,
     });
+  };
+
+  private handleParticipantConnected = (participant: RemoteParticipant) => {
+    this.emit("participantConnected", participant.identity);
   };
 
   private handleParticipantDisconnected = (participant: RemoteParticipant) => {

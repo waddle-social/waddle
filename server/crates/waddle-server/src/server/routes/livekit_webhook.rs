@@ -31,7 +31,7 @@ use axum::Router;
 use jid::{BareJid, FullJid};
 use tracing::{debug, info, warn};
 use waddle_sfu::{
-    verify_webhook_signature, CallId, LiveKitWebhookEvent, ParticipantEnvelope, WebhookVerifyError,
+    verify_webhook_signature, LiveKitWebhookEvent, ParticipantEnvelope, WebhookVerifyError,
 };
 use waddle_xmpp::muc::build_occupant_presence;
 use waddle_xmpp::muc::room_actor::{ClearMujiPresence, MujiPresenceUpdateOutcome};
@@ -139,20 +139,12 @@ async fn livekit_webhook_handler(
             process_participant_left(&state, env).await;
         }
         LiveKitWebhookEvent::RoomFinished(env) => {
-            info!(room = %env.room.name, "LiveKit reported room finished; clearing SFU registry");
-            // The participant set in the SFU registry is the
-            // best-effort cleanup target. We don't have per-participant
-            // identity here (LK's `room_finished` carries only the
-            // room), so any surviving Muji presence will be cleaned by
-            // the XMPP-side disconnect path once individual sessions
-            // drop. Future enhancement: track participant set in the
-            // SFU registry and iterate here.
-            if let Ok(call_id) = CallId::new(env.room.name.clone()) {
-                // No public iteration API on LiveKitSfu; fall through.
-                // The participant_left events for each occupant will
-                // arrive separately per the LK delivery spec.
-                let _ = (call_id, sfu);
-            }
+            // Informational. LiveKit guarantees an individual
+            // `participant_left` for every still-connected participant
+            // before `room_finished` fires (per the LK delivery spec),
+            // and each of those is handled by the `ParticipantLeft`
+            // arm above. No additional MUC cleanup is required here.
+            info!(room = %env.room.name, "LiveKit reported room finished");
         }
         LiveKitWebhookEvent::ParticipantJoined(_) | LiveKitWebhookEvent::Other => {
             // Informational; the join path already flows through
