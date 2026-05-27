@@ -95,6 +95,7 @@ pub use state::{ProtocolServices, WebSocketDeps, WebSocketState, XmppServiceDoma
 pub(crate) use cleanup::{
     destroy_room_actor, get_or_create_room_actor, get_room_actor, is_muc_room_jid,
 };
+pub(crate) use muc_call_sfu::unregister_participant_from_room;
 pub(crate) use transport_xml::{
     build_iq_error_xml_typed, build_iq_result_xml, element_to_xml, iq_to_xml, stanza_to_xml,
 };

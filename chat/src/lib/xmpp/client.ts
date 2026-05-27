@@ -21,6 +21,7 @@ import {
   applyMucCallPresence,
   clearMucCallParticipants,
 } from "@/lib/calls/muc-call-presence";
+import { clearAllLiveCallParticipants } from "@/lib/calls/muc-call-live-participants";
 import { useCallEngine } from "@/lib/calls/use-call-engine";
 import type { CallWireSender } from "@/lib/calls/outbound";
 import type { CallEvent } from "@/lib/calls/types";
@@ -848,6 +849,7 @@ export class BrowserXmppClient {
     clearDmCallJoinCacheForAccount(this.session.jid);
     clearDmCallActivities();
     clearMucCallParticipants();
+    clearAllLiveCallParticipants();
     // Best-effort hangup: if we're in a call when the user logs out
     // we want the peer to see session-terminate before the stream
     // closes. `tearDownActiveCall` handles every phase and clears
@@ -2490,6 +2492,7 @@ export class BrowserXmppClient {
     // connected).
     clearCallState();
     clearMucCallParticipants();
+    clearAllLiveCallParticipants();
     void useCallEngine().engine.disconnect();
     this.rejectRoomJoinWaiters(new Error("XMPP disconnected while joining a room"));
     this.retainedJoinedRoomJids = new Set([

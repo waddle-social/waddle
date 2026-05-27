@@ -360,6 +360,10 @@ function joinChannelCallFromActivity(channelId: string | null, roomJid: string, 
     ensureJoined: async () => {
       await getClientJoiner()?.(roomJid);
     },
+    // Rejoining a call we were already in: prefer LiveKit-direct
+    // reconnect via the cached join over a fresh Jingle attempt.
+    // LK identity-uniqueness displaces any orphan session cleanly.
+    tryResumeFirst: true,
   });
 }
 

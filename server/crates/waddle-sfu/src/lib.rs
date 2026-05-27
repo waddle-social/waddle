@@ -26,6 +26,7 @@ mod error;
 mod livekit;
 mod token;
 mod turn;
+mod webhook;
 
 pub use call::{CallId, CallState, Identity, MediaCapabilities};
 pub use config::{ApiKey, ApiSecret, FromEnvError, SfuConfig, TurnSharedSecret, WebsocketUrl};
@@ -33,6 +34,10 @@ pub use error::SfuError;
 pub use livekit::LiveKitSfu;
 pub use token::{JoinToken, Jti, Jwt, VideoGrant};
 pub use turn::{TurnCredential, TurnHost, TurnPassword, TurnUsername};
+pub use webhook::{
+    verify_webhook_signature, LiveKitWebhookEvent, ParticipantEnvelope, ParticipantInfo,
+    RoomEnvelope, RoomInfo, WebhookVerifyError,
+};
 
 /// Abstract SFU service consumed by the XMPP layer.
 ///
@@ -97,4 +102,18 @@ pub trait SfuService: Send + Sync + 'static {
     /// TURN host advertised via XEP-0215 (e.g.
     /// `turn.waddle.social`).
     fn turn_host(&self) -> &TurnHost;
+
+    /// Shared secret used by [`verify_webhook_signature`] to validate
+    /// inbound LiveKit webhook deliveries. Typically distinct from
+    /// the JWT-signing API secret per LK operational guidance, but
+    /// defaults to the API secret for dev parity.
+    fn webhook_secret(&self) -> &ApiSecret;
+
+    /// Snapshot the currently-registered identities for `call_id`.
+    /// Used by the LiveKit webhook handler's `room_finished` arm to
+    /// clean up any per-participant state that an earlier
+    /// `participant_left` retry-exhausted before the room closed.
+    /// Returns an empty vec when the call has no recorded participants
+    /// (either never registered or already drained).
+    fn participants_for_call(&self, call_id: &CallId) -> Vec<Identity>;
 }

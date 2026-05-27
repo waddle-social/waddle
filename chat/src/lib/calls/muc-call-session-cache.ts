@@ -2,7 +2,7 @@ import { barePeerJid } from "@/lib/xmpp/jid";
 import { normalizeMucCallRoomJid } from "./muc-call-presence";
 import { reportError } from "@/lib/telemetry";
 import { map } from "nanostores";
-import type { CallMedia } from "./types";
+import type { CallMedia, LiveKitJoin } from "./types";
 
 const CACHE_PREFIX = "waddle.chat.muc-call-sessions";
 const CACHE_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -14,6 +14,19 @@ type CachedMucCallSession = {
   selfFullJid: string;
   updatedAt: string;
   media?: CallMedia;
+  /**
+   * LiveKit join credentials minted by the SFU during the original
+   * `beginMucCall` flow. Persisting them is what makes the resume
+   * path (`resumeMucCallActivity`) able to reconnect to the same
+   * LiveKit room without going through a fresh Jingle session-initiate
+   * handshake — LK identity-uniqueness then displaces any orphan
+   * session left from the dead pre-reload resource.
+   *
+   * Optional because retained-but-pending teardown entries (from
+   * `markMucCallSessionTerminatePending`) don't need fresh join
+   * credentials — they only carry the sid for the cleanup terminate.
+   */
+  join?: LiveKitJoin;
   terminatePending?: boolean;
 };
 
@@ -24,6 +37,7 @@ export function rememberMucCallSession(options: {
   sid: string;
   selfFullJid?: string | null;
   media?: CallMedia | null;
+  join?: LiveKitJoin | null;
   now?: Date;
 }): void {
   const entry = normalizeEntry({
@@ -31,6 +45,7 @@ export function rememberMucCallSession(options: {
     sid: options.sid,
     selfFullJid: options.selfFullJid?.trim() ?? "",
     ...(options.media ? { media: options.media } : {}),
+    ...(options.join ? { join: options.join } : {}),
     updatedAt: options.now?.toISOString() ?? new Date().toISOString(),
   });
   if (!entry) return;
@@ -170,12 +185,20 @@ function normalizeEntry(entry: CachedMucCallSession): CachedMucCallSession | nul
   if (!roomJid || !selfFullJid || !sid) return null;
   if (!normalizedBare(selfFullJid)) return null;
   if (Number.isNaN(Date.parse(entry.updatedAt))) return null;
+  // Discard a malformed join blob silently rather than dropping the
+  // whole entry — the resume path falls back to a fresh
+  // `beginMucCall` if `join` is missing, so a corrupted cached blob
+  // degrades cleanly instead of breaking the retained-leave path.
+  const validJoin = entry.join && isLiveKitJoin(entry.join) && entry.join.identity === selfFullJid
+    ? entry.join
+    : undefined;
   return {
     roomJid,
     sid,
     selfFullJid,
     updatedAt: entry.updatedAt,
     ...(isCallMedia(entry.media) ? { media: entry.media } : {}),
+    ...(validJoin ? { join: validJoin } : {}),
     ...(entry.terminatePending ? { terminatePending: true } : {}),
   };
 }
@@ -299,12 +322,25 @@ function isCachedMucCallSession(value: unknown): value is CachedMucCallSession {
     typeof candidate.selfFullJid === "string" &&
     typeof candidate.updatedAt === "string"
   );
+  // Optional `media`, `join`, and `terminatePending` are validated
+  // (and silently dropped if malformed) inside `normalizeEntry`.
 }
 
 function isCallMedia(value: unknown): value is CallMedia {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Record<string, unknown>;
   return typeof candidate.audio === "boolean" && typeof candidate.video === "boolean";
+}
+
+function isLiveKitJoin(value: unknown): value is LiveKitJoin {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Record<string, unknown>;
+  return (
+    typeof candidate.url === "string" &&
+    typeof candidate.room === "string" &&
+    typeof candidate.identity === "string" &&
+    typeof candidate.token === "string"
+  );
 }
 
 function storage(): Storage | null {

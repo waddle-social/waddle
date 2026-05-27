@@ -214,6 +214,17 @@ impl SfuService for LiveKitSfu {
     fn turn_host(&self) -> &TurnHost {
         &self.config.turn_host
     }
+
+    fn webhook_secret(&self) -> &crate::config::ApiSecret {
+        &self.config.webhook_secret
+    }
+
+    fn participants_for_call(&self, call_id: &CallId) -> Vec<Identity> {
+        self.calls
+            .get(call_id)
+            .map(|entry| entry.iter().cloned().collect())
+            .unwrap_or_default()
+    }
 }
 
 #[cfg(test)]
@@ -228,6 +239,8 @@ mod tests {
         SfuConfig {
             api_key: ApiKey::new("APIxxxxxxxx"),
             api_secret: ApiSecret::from_text("super-secret-secret-32-bytes-min")
+                .expect("test secret meets min length"),
+            webhook_secret: ApiSecret::from_text("super-secret-secret-32-bytes-min")
                 .expect("test secret meets min length"),
             ws_url: WebsocketUrl::new(Url::parse("wss://livekit.waddle.social").unwrap()).unwrap(),
             turn_host: TurnHost::new("turn.waddle.social"),

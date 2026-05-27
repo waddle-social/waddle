@@ -8,6 +8,7 @@ import {
   mucCallMediaForRoom,
   normalizeMucCallRoomJid,
 } from "./muc-call-presence";
+import { $mucCallLiveParticipants } from "./muc-call-live-participants";
 import {
   $mucCallTerminatePendingSessions,
   pendingMucCallTerminateSession,
@@ -96,15 +97,30 @@ export function useRoomHasActiveCall(
   const participantOwners = useStore($mucCallParticipantOwners);
   const callMedia = useStore($mucCallMedia);
   const pendingTerminates = useStore($mucCallTerminatePendingSessions);
+  const liveParticipants = useStore($mucCallLiveParticipants);
 
   const normalizedRoomJid = computed<string | null>(() => {
     const normalized = normalizeMucCallRoomJid(roomJid());
     return normalized || null;
   });
 
+  /**
+   * Prefer LiveKit's authoritative participant set when we are
+   * connected to this room's call. The LK projection arrives within
+   * seconds of the SFU's truth changing — typically before the
+   * MUC server's XEP-0198 ping detects a dead resource and the
+   * webhook bridge fires — eliminating the ghost-while-in-call
+   * symptom. When we are NOT in this room's call, the LK projection
+   * is empty for this room and we fall back to the Muji-derived
+   * view (kept honest by the server-side LK→MUC webhook bridge).
+   */
   const participantList = computed<ReadonlyArray<string>>(() => {
     const room = normalizedRoomJid.value;
     if (!room) return [];
+    const liveIdentities = liveParticipants.value[room] ?? [];
+    if (liveIdentities.length > 0) {
+      return identitiesToNicks(liveIdentities, participantOwners.value[room] ?? []);
+    }
     return participants.value[room] ?? [];
   });
 
@@ -218,6 +234,42 @@ function hasUnownedSelfNick(
 ): boolean {
   if (!nick || !participants.includes(nick)) return false;
   return owners.some((owner) => owner.nick === nick && !fullJidIdentityKey(owner.realJid));
+}
+
+/**
+ * Map LiveKit participant identities (full JIDs) to MUC nicks via
+ * the cached owner list, deduplicating identical nicks (the same
+ * person on two LK sessions). Identities without a known owner
+ * mapping degrade to the bare localpart so the UI still has a
+ * sensible label — once the Muji presence catches up the owner
+ * mapping resolves and the next render uses the canonical nick.
+ */
+function identitiesToNicks(
+  identities: ReadonlyArray<string>,
+  owners: ReadonlyArray<{ nick: string; realJid?: string }>,
+): string[] {
+  const byRealJid = new Map<string, string>();
+  for (const owner of owners) {
+    const key = fullJidIdentityKey(owner.realJid);
+    if (key) byRealJid.set(key, owner.nick);
+  }
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const identity of identities) {
+    const key = fullJidIdentityKey(identity);
+    if (!key) continue;
+    // Fall back to the JID's localpart (everything before `@`) when
+    // the Muji-derived owner map hasn't resolved this resource yet.
+    // Earlier this incorrectly used `identity.split("/").pop()` which
+    // returned the *resource* (e.g. `web` for `alice@host/web`); the
+    // localpart is the correct user-facing label until presence catches
+    // up. After: `alice` for `alice@host/web`.
+    const nick = byRealJid.get(key) ?? identity.split("@")[0] ?? identity;
+    if (seen.has(nick)) continue;
+    seen.add(nick);
+    out.push(nick);
+  }
+  return out;
 }
 
 /**

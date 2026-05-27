@@ -33,7 +33,7 @@ use super::state::WebSocketState;
 ///   theoretically reject some MUC bare JIDs — those are rooms with
 ///   no calling capability and there is nothing on the SFU to undo
 ///   for them anyway).
-pub(super) fn unregister_participant_from_room(
+pub(crate) fn unregister_participant_from_room(
     state: &WebSocketState,
     room_jid: &BareJid,
     jid: &FullJid,
@@ -114,6 +114,14 @@ mod tests {
 
         fn turn_host(&self) -> &TurnHost {
             unimplemented!("not exercised by these tests")
+        }
+
+        fn webhook_secret(&self) -> &waddle_sfu::ApiSecret {
+            unimplemented!("not exercised by these tests")
+        }
+
+        fn participants_for_call(&self, _: &CallId) -> Vec<Identity> {
+            Vec::new()
         }
     }
 
