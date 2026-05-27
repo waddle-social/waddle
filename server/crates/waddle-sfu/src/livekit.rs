@@ -5,10 +5,13 @@
 //! focus path to decide when a call has ended.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
+use tokio::runtime::Handle;
 
+use crate::admin::{admin_base_url_from_ws, LiveKitAdmin, ReqwestLiveKitAdmin};
 use crate::call::{CallId, CallState, Identity, MediaCapabilities};
 use crate::config::{SfuConfig, WebsocketUrl};
 use crate::error::SfuError;
@@ -25,7 +28,6 @@ use crate::SfuService;
 /// outstanding JTI is dropped and forgotten when the cap is hit.
 pub(crate) const MAX_ISSUED_PER_PARTICIPANT: usize = 16;
 
-#[derive(Debug)]
 pub struct LiveKitSfu {
     config: SfuConfig,
     calls: DashMap<CallId, HashSet<Identity>>,
@@ -48,15 +50,63 @@ pub struct LiveKitSfu {
     /// validation hook) or a shared revocation store (Redis) once
     /// Waddle scales past a single SFU instance.
     revoked: DashMap<Jti, DateTime<Utc>>,
+    /// LiveKit admin REST client. Used to evict participants and
+    /// delete empty rooms when a teardown signal arrives over XMPP —
+    /// without this, LiveKit only notices a hangup when the underlying
+    /// PeerConnection's DTLS read deadline expires, leaving "dtls
+    /// timeout" warnings in `livekit-sfu` logs and stale rooms
+    /// lingering up to `empty_timeout` (default 5 min).
+    admin: Arc<dyn LiveKitAdmin>,
+    /// Captured at construction time. Remote evict happens as a
+    /// `tokio::spawn` here so the synchronous `SfuService` surface
+    /// can stay sync and the IQ-result on session-terminate never
+    /// blocks on the SFU's admin endpoint. `None` when the SFU was
+    /// constructed outside a Tokio runtime (only the local-bookkeeping
+    /// unit tests do this) — in that case the remote leg is a no-op,
+    /// matching pre-LK-admin behaviour for those tests.
+    runtime: Option<Handle>,
+}
+
+impl std::fmt::Debug for LiveKitSfu {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LiveKitSfu")
+            .field("config", &self.config)
+            .field("calls_len", &self.calls.len())
+            .field("issued_len", &self.issued.len())
+            .field("revoked_len", &self.revoked.len())
+            .field("runtime_attached", &self.runtime.is_some())
+            .finish()
+    }
 }
 
 impl LiveKitSfu {
-    pub fn new(config: SfuConfig) -> Self {
+    /// Build a [`LiveKitSfu`] backed by the production reqwest admin
+    /// client. Captures the current Tokio runtime handle if one is
+    /// active so the teardown hot path can fire `RemoveParticipant` +
+    /// `DeleteRoom` admin calls without making the [`SfuService`]
+    /// surface async.
+    pub fn new(config: SfuConfig) -> Result<Self, SfuError> {
+        let admin_base = admin_base_url_from_ws(&config.ws_url)?;
+        let admin = ReqwestLiveKitAdmin::new(
+            admin_base,
+            config.api_key.clone(),
+            config.api_secret.clone(),
+        )?;
+        Ok(Self::with_admin(config, Arc::new(admin)))
+    }
+
+    /// Build with a caller-supplied admin client. Used by tests to
+    /// inject a recording mock without standing up an HTTP server;
+    /// production code goes through [`Self::new`] which constructs a
+    /// real [`crate::admin::ReqwestLiveKitAdmin`] backed by reqwest.
+    pub fn with_admin(config: SfuConfig, admin: Arc<dyn LiveKitAdmin>) -> Self {
         Self {
             config,
             calls: DashMap::new(),
             issued: DashMap::new(),
             revoked: DashMap::new(),
+            admin,
+            runtime: Handle::try_current().ok(),
         }
     }
 
@@ -95,6 +145,39 @@ impl LiveKitSfu {
     /// bounded under steady call churn.
     fn sweep_expired_revoked(&self, now: DateTime<Utc>) {
         self.revoked.retain(|_, exp| *exp > now);
+    }
+
+    /// Fire-and-forget the LiveKit admin REST calls that mirror a
+    /// local unregister. `RemoveParticipant` always runs;
+    /// `DeleteRoom` only when the local registry just transitioned
+    /// to [`CallState::Ended`]. Spawn target is the runtime handle
+    /// captured at construction; when none is attached (e.g. plain
+    /// `#[test]` fixtures) the remote leg silently drops, matching
+    /// pre-admin behaviour for those tests.
+    fn schedule_remote_teardown(&self, call_id: CallId, identity: Identity, state: CallState) {
+        let Some(runtime) = self.runtime.as_ref() else {
+            return;
+        };
+        let admin = Arc::clone(&self.admin);
+        runtime.spawn(async move {
+            if let Err(err) = admin.remove_participant(&call_id, &identity).await {
+                tracing::warn!(
+                    call_id = %call_id,
+                    identity = %identity.as_livekit_identity(),
+                    error = %err,
+                    "LiveKit RemoveParticipant failed; SFU may rely on DTLS timeout"
+                );
+            }
+            if matches!(state, CallState::Ended) {
+                if let Err(err) = admin.delete_room(&call_id).await {
+                    tracing::warn!(
+                        call_id = %call_id,
+                        error = %err,
+                        "LiveKit DeleteRoom failed; empty room will linger until empty_timeout"
+                    );
+                }
+            }
+        });
     }
 }
 
@@ -183,12 +266,24 @@ impl SfuService for LiveKitSfu {
         // as it adds, plus any older entries that have aged out.
         self.sweep_expired_revoked(Utc::now());
 
-        if remaining == 0 {
+        let state = if remaining == 0 {
             self.calls.remove(call_id);
             CallState::Ended
         } else {
             CallState::Active { remaining }
-        }
+        };
+
+        // Schedule the LiveKit-side evict. `RemoveParticipant` runs
+        // unconditionally; `DeleteRoom` only when the local registry
+        // says the call just ended, so the empty-room TTL window
+        // (LiveKit's `empty_timeout`, default 5 min) collapses to
+        // zero. Both calls are idempotent — LiveKit's `not_found`
+        // response is treated as success — so a duplicate teardown
+        // (e.g. a stream-close racing a graceful unavailable) is
+        // safe to schedule twice.
+        self.schedule_remote_teardown(call_id.clone(), identity.clone(), state);
+
+        state
     }
 
     fn is_revoked(&self, jti: &Jti) -> bool {
@@ -261,7 +356,7 @@ mod tests {
 
     #[test]
     fn registry_tracks_participants_per_call() {
-        let sfu = LiveKitSfu::new(fixture_config());
+        let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
         let call = CallId::new("r1").unwrap();
         let a = fixture_identity("alice");
         let b = fixture_identity("bob");
@@ -284,7 +379,7 @@ mod tests {
 
     #[test]
     fn issue_join_token_returns_room_scoped_jwt() {
-        let sfu = LiveKitSfu::new(fixture_config());
+        let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
         let call = CallId::new("c1").unwrap();
         let identity = fixture_identity("alice");
 
@@ -297,7 +392,7 @@ mod tests {
 
     #[test]
     fn issue_turn_credentials_yields_time_limited_pair() {
-        let sfu = LiveKitSfu::new(fixture_config());
+        let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
         let identity = fixture_identity("alice");
         let cred = sfu.issue_turn_credentials(&identity).expect("cred issued");
         assert!(cred.expires_at > chrono::Utc::now());
@@ -309,7 +404,7 @@ mod tests {
 
     #[test]
     fn unregister_revokes_every_jti_issued_to_the_participant() {
-        let sfu = LiveKitSfu::new(fixture_config());
+        let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
         let call = CallId::new("c-revoke").unwrap();
         let alice = fixture_identity("alice");
 
@@ -333,7 +428,7 @@ mod tests {
 
     #[test]
     fn revocation_is_scoped_per_participant() {
-        let sfu = LiveKitSfu::new(fixture_config());
+        let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
         let call = CallId::new("c-scope").unwrap();
         let alice = fixture_identity("alice");
         let bob = fixture_identity("bob");
@@ -356,7 +451,7 @@ mod tests {
 
     #[test]
     fn issued_jti_vec_is_capped_per_participant() {
-        let sfu = LiveKitSfu::new(fixture_config());
+        let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
         let call = CallId::new("c-cap").unwrap();
         let alice = fixture_identity("alice");
 
@@ -380,7 +475,7 @@ mod tests {
     #[test]
     fn revoked_entries_are_swept_once_past_expiry() {
         use chrono::Duration as ChronoDuration;
-        let sfu = LiveKitSfu::new(fixture_config());
+        let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
 
         // Seed the revoked map directly with a past-exp entry so
         // the test does not depend on real-time tickdown of the
@@ -415,12 +510,164 @@ mod tests {
 
     #[test]
     fn register_is_idempotent() {
-        let sfu = LiveKitSfu::new(fixture_config());
+        let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
         let call = CallId::new("c1").unwrap();
         let identity = fixture_identity("alice");
 
         sfu.register_call_participant(&call, &identity);
         sfu.register_call_participant(&call, &identity);
         assert_eq!(sfu.participant_count(&call), 1);
+    }
+
+    // -------- Admin-evict path (tokio runtime present) --------
+
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Mutex;
+
+    use crate::admin::LiveKitAdmin;
+
+    #[derive(Default)]
+    struct RecordingAdmin {
+        remove_calls: Mutex<Vec<(CallId, Identity)>>,
+        delete_calls: Mutex<Vec<CallId>>,
+    }
+
+    impl RecordingAdmin {
+        fn remove_snapshot(&self) -> Vec<(CallId, Identity)> {
+            self.remove_calls.lock().expect("recording lock").clone()
+        }
+
+        fn delete_snapshot(&self) -> Vec<CallId> {
+            self.delete_calls.lock().expect("recording lock").clone()
+        }
+    }
+
+    impl LiveKitAdmin for RecordingAdmin {
+        fn remove_participant<'a>(
+            &'a self,
+            room: &'a CallId,
+            identity: &'a Identity,
+        ) -> Pin<Box<dyn Future<Output = Result<(), SfuError>> + Send + 'a>> {
+            let room = room.clone();
+            let identity = identity.clone();
+            Box::pin(async move {
+                self.remove_calls
+                    .lock()
+                    .expect("recording lock")
+                    .push((room, identity));
+                Ok(())
+            })
+        }
+
+        fn delete_room<'a>(
+            &'a self,
+            room: &'a CallId,
+        ) -> Pin<Box<dyn Future<Output = Result<(), SfuError>> + Send + 'a>> {
+            let room = room.clone();
+            Box::pin(async move {
+                self.delete_calls.lock().expect("recording lock").push(room);
+                Ok(())
+            })
+        }
+    }
+
+    /// Yield enough times for any spawned admin task on the current
+    /// runtime to make progress. The spawned future does a couple of
+    /// `Mutex` operations and returns, so two yields are more than
+    /// sufficient; tighten or loosen if `RecordingAdmin` grows steps.
+    async fn drain_admin_tasks() {
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn unregister_schedules_remove_participant_on_the_admin_client() {
+        let admin = Arc::new(RecordingAdmin::default());
+        let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+        let call = CallId::new("r-evict").unwrap();
+        let alice = fixture_identity("alice");
+        let bob = fixture_identity("bob");
+
+        sfu.register_call_participant(&call, &alice);
+        sfu.register_call_participant(&call, &bob);
+
+        // Alice leaves: RemoveParticipant must fire; DeleteRoom must
+        // NOT fire because bob is still in the call.
+        let state = sfu.unregister_call_participant(&call, &alice);
+        assert!(matches!(state, CallState::Active { remaining: 1 }));
+        drain_admin_tasks().await;
+
+        let removes = admin.remove_snapshot();
+        assert_eq!(
+            removes.len(),
+            1,
+            "RemoveParticipant should fire exactly once"
+        );
+        assert_eq!(&removes[0].0, &call);
+        assert_eq!(
+            removes[0].1.as_livekit_identity(),
+            alice.as_livekit_identity()
+        );
+        assert!(
+            admin.delete_snapshot().is_empty(),
+            "DeleteRoom must not fire while the call still has participants"
+        );
+    }
+
+    #[tokio::test]
+    async fn unregister_last_participant_also_schedules_delete_room() {
+        let admin = Arc::new(RecordingAdmin::default());
+        let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+        let call = CallId::new("r-empty").unwrap();
+        let alice = fixture_identity("alice");
+
+        sfu.register_call_participant(&call, &alice);
+        let state = sfu.unregister_call_participant(&call, &alice);
+        assert_eq!(state, CallState::Ended);
+        drain_admin_tasks().await;
+
+        let deletes = admin.delete_snapshot();
+        assert_eq!(deletes.len(), 1, "DeleteRoom must fire on last participant");
+        assert_eq!(&deletes[0], &call);
+
+        let removes = admin.remove_snapshot();
+        assert_eq!(
+            removes.len(),
+            1,
+            "RemoveParticipant still fires for the last leaver"
+        );
+        assert_eq!(&removes[0].0, &call);
+    }
+
+    #[tokio::test]
+    async fn unregister_of_unknown_identity_still_fires_remove_participant() {
+        // Edge case: a session-terminate arrives without a matching
+        // register (e.g. server-side state was lost or the client
+        // races a re-init). The admin call must still fire so a
+        // ghost LK participant — independently registered through a
+        // stale JWT replay — is evicted.
+        let admin = Arc::new(RecordingAdmin::default());
+        let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+        let call = CallId::new("r-ghost").unwrap();
+        let ghost = fixture_identity("mallory");
+
+        let state = sfu.unregister_call_participant(&call, &ghost);
+        assert_eq!(state, CallState::Ended);
+        drain_admin_tasks().await;
+
+        let removes = admin.remove_snapshot();
+        assert_eq!(removes.len(), 1);
+        assert_eq!(
+            removes[0].1.as_livekit_identity(),
+            ghost.as_livekit_identity()
+        );
+        let deletes = admin.delete_snapshot();
+        assert_eq!(
+            deletes.len(),
+            1,
+            "DeleteRoom fires whenever the local state reports CallState::Ended"
+        );
     }
 }

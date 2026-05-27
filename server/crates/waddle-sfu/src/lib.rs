@@ -20,6 +20,7 @@
 
 #![deny(unsafe_code)]
 
+mod admin;
 mod call;
 mod config;
 mod error;
@@ -28,6 +29,7 @@ mod token;
 mod turn;
 mod webhook;
 
+pub use admin::LiveKitAdmin;
 pub use call::{CallId, CallState, Identity, MediaCapabilities};
 pub use config::{ApiKey, ApiSecret, FromEnvError, SfuConfig, TurnSharedSecret, WebsocketUrl};
 pub use error::SfuError;
