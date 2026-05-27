@@ -8,6 +8,7 @@ import { $callState } from "@/lib/calls/call-store";
 import {
   canEndRecoveredDmCallActivity,
   dmCallActivityAction,
+  dmCallActivitySortPriority,
 } from "@/lib/calls/call-activity-dock";
 import {
   $dmCallActivities,
@@ -63,12 +64,7 @@ const activeCallRows = computed(() =>
       avatarUrl: callActivityAvatarUrl(activity),
     }))
     .filter((row) => row.peerJid && !isCurrentDmActivity(row.activity))
-    .sort((left, right) => {
-      const rightMs = timestampMs(right.activity.updatedAt);
-      const leftMs = timestampMs(left.activity.updatedAt);
-      if (rightMs !== leftMs) return rightMs - leftMs;
-      return left.peerJid.localeCompare(right.peerJid);
-    }),
+    .sort(compareActiveCallRows),
 );
 const activeCallStatusMessage = computed(() => {
   const count = activeCallRows.value.length;
@@ -102,6 +98,19 @@ function compareDmConversations(left: DmConversation, right: DmConversation): nu
   const rightMs = conversationSortMs(right);
   if (leftMs !== rightMs) return rightMs - leftMs;
   return normalizedPeerJid(left.peerJid).localeCompare(normalizedPeerJid(right.peerJid));
+}
+
+function compareActiveCallRows(
+  left: { activity: DmCallActivity; peerJid: string },
+  right: { activity: DmCallActivity; peerJid: string },
+): number {
+  const leftPriority = dmCallActivitySortPriority(left.activity, callState.value, props.selfFullJid ?? null);
+  const rightPriority = dmCallActivitySortPriority(right.activity, callState.value, props.selfFullJid ?? null);
+  if (leftPriority !== rightPriority) return leftPriority - rightPriority;
+  const rightMs = timestampMs(right.activity.updatedAt);
+  const leftMs = timestampMs(left.activity.updatedAt);
+  if (rightMs !== leftMs) return rightMs - leftMs;
+  return left.peerJid.localeCompare(right.peerJid);
 }
 
 function preview(text?: string): string {
@@ -346,12 +355,17 @@ function activeCallRowLabel(row: {
   since: string;
 }): string {
   return [
-    `${row.action} ${row.title} call`,
+    activeCallRowActionPhrase(row),
     row.eyebrow,
     row.meta,
     row.description,
     row.since,
   ].filter(Boolean).join(", ");
+}
+
+function activeCallRowActionPhrase(row: { action: string; title: string }): string {
+  if (row.action === "Open") return `Open ${row.title} conversation`;
+  return `${row.action} ${row.title} call`;
 }
 
 function selectCallActivity(activity: DmCallActivity): void {

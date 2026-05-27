@@ -2,6 +2,7 @@ import { barePeerJid } from "@/lib/xmpp/jid";
 import { normalizeMucCallRoomJid } from "./muc-call-presence";
 import { reportError } from "@/lib/telemetry";
 import { map } from "nanostores";
+import type { CallMedia } from "./types";
 
 const CACHE_PREFIX = "waddle.chat.muc-call-sessions";
 const CACHE_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -12,6 +13,7 @@ type CachedMucCallSession = {
   sid: string;
   selfFullJid: string;
   updatedAt: string;
+  media?: CallMedia;
   terminatePending?: boolean;
 };
 
@@ -21,21 +23,28 @@ export function rememberMucCallSession(options: {
   roomJid: string;
   sid: string;
   selfFullJid?: string | null;
+  media?: CallMedia | null;
   now?: Date;
 }): void {
   const entry = normalizeEntry({
     roomJid: options.roomJid,
     sid: options.sid,
     selfFullJid: options.selfFullJid?.trim() ?? "",
+    ...(options.media ? { media: options.media } : {}),
     updatedAt: options.now?.toISOString() ?? new Date().toISOString(),
   });
   if (!entry) return;
-  forgetPendingEntry(entry);
+  forgetPendingEntriesForRoom(entry);
   const selfBare = normalizedBare(entry.selfFullJid);
   if (!selfBare) return;
   const now = options.now ?? new Date();
   const entries = readEntries(selfBare)
     .filter((candidate) => !isExpired(candidate.updatedAt, now))
+    .filter((candidate) =>
+      !candidate.terminatePending ||
+      candidate.roomJid !== entry.roomJid ||
+      candidate.selfFullJid !== entry.selfFullJid
+    )
     .filter((candidate) =>
       candidate.roomJid !== entry.roomJid ||
       candidate.sid !== entry.sid ||
@@ -76,12 +85,14 @@ export function markMucCallSessionTerminatePending(options: {
   roomJid: string;
   sid: string;
   selfFullJid?: string | null;
+  media?: CallMedia | null;
   now?: Date;
 }): void {
   const entry = normalizeEntry({
     roomJid: options.roomJid,
     sid: options.sid,
     selfFullJid: options.selfFullJid?.trim() ?? "",
+    ...(options.media ? { media: options.media } : {}),
     updatedAt: options.now?.toISOString() ?? new Date().toISOString(),
     terminatePending: true,
   });
@@ -95,7 +106,12 @@ export function markMucCallSessionTerminatePending(options: {
       candidate.roomJid === entry.roomJid &&
       candidate.sid === entry.sid &&
       candidate.selfFullJid === entry.selfFullJid
-        ? { ...candidate, terminatePending: true, updatedAt: entry.updatedAt }
+        ? {
+            ...candidate,
+            ...(entry.media ? { media: entry.media } : {}),
+            terminatePending: true,
+            updatedAt: entry.updatedAt,
+          }
         : candidate
     ));
   if (!entries.some((candidate) =>
@@ -159,6 +175,7 @@ function normalizeEntry(entry: CachedMucCallSession): CachedMucCallSession | nul
     sid,
     selfFullJid,
     updatedAt: entry.updatedAt,
+    ...(isCallMedia(entry.media) ? { media: entry.media } : {}),
     ...(entry.terminatePending ? { terminatePending: true } : {}),
   };
 }
@@ -220,19 +237,19 @@ export function hydrateMucCallTerminatePendingSessions(
   ));
 }
 
-export function hasPendingMucCallTerminateSession(
+export function pendingMucCallTerminateSession(
   sessions: Record<string, CachedMucCallSession>,
   roomJid: string,
   selfFullJid?: string | null,
-): boolean {
+): CachedMucCallSession | null {
   const room = normalizeMucCallRoomJid(roomJid);
   const self = selfFullJid?.trim() ?? "";
-  if (!room || !self) return false;
-  return Object.values(sessions).some((entry) =>
+  if (!room || !self) return null;
+  return Object.values(sessions).find((entry) =>
     entry.terminatePending &&
     entry.roomJid === room &&
     entry.selfFullJid === self
-  );
+  ) ?? null;
 }
 
 function syncPendingEntries(entries: CachedMucCallSession[]): void {
@@ -244,12 +261,15 @@ function syncPendingEntries(entries: CachedMucCallSession[]): void {
   $mucCallTerminatePendingSessions.set(next);
 }
 
-function forgetPendingEntry(entry: CachedMucCallSession): void {
+function forgetPendingEntriesForRoom(entry: CachedMucCallSession): void {
   const current = $mucCallTerminatePendingSessions.get();
-  const key = sessionKey(entry);
-  if (!(key in current)) return;
-  const next = { ...current };
-  delete next[key];
+  const next = Object.fromEntries(
+    Object.entries(current).filter(([, candidate]) =>
+      candidate.roomJid !== entry.roomJid ||
+      candidate.selfFullJid !== entry.selfFullJid
+    ),
+  );
+  if (Object.keys(next).length === Object.keys(current).length) return;
   $mucCallTerminatePendingSessions.set(next);
 }
 
@@ -279,6 +299,12 @@ function isCachedMucCallSession(value: unknown): value is CachedMucCallSession {
     typeof candidate.selfFullJid === "string" &&
     typeof candidate.updatedAt === "string"
   );
+}
+
+function isCallMedia(value: unknown): value is CallMedia {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Record<string, unknown>;
+  return typeof candidate.audio === "boolean" && typeof candidate.video === "boolean";
 }
 
 function storage(): Storage | null {

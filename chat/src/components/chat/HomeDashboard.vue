@@ -24,6 +24,7 @@ import {
   buildCallActivityDockEntries,
   canEndRecoveredDmCallActivity,
   callActivityDockSelection,
+  sortCallActivityDockEntries,
   type CallActivityDockEntry,
 } from "@/lib/calls/call-activity-dock";
 import { $callState } from "@/lib/calls/call-store";
@@ -153,28 +154,34 @@ const directMessages = computed(() =>
 const channelsBySpace = computed(() =>
   new Map(groups.value.flatMap((group) => group.space ? [[group.space.id, group.channels.length] as const] : [])),
 );
-const discoveredCallEntries = computed<CallActivityDockEntry[]>(() => buildCallActivityDockEntries({
-  channels: props.channels,
-  conversations: props.dmConversations ?? [],
-  activeChannelId: null,
-  activeChannelRoomJid: null,
-  activePeerJid: null,
-  sidebarMode: "channels",
-  activeChannelJids: activeChannelJids.value,
-  managedMucDomain: props.managedMucDomain ?? null,
-  callParticipantCounts: callParticipantCounts.value,
-  callParticipants: callParticipants.value,
-  callMediaByRoom: callMediaByRoom.value,
-  dmCallActivities: dmCallActivities.value,
-}));
+const discoveredCallEntries = computed<CallActivityDockEntry[]>(() =>
+  sortCallActivityDockEntries(
+    buildCallActivityDockEntries({
+      channels: props.channels,
+      conversations: props.dmConversations ?? [],
+      activeChannelId: null,
+      activeChannelRoomJid: null,
+      activePeerJid: null,
+      sidebarMode: "channels",
+      activeChannelJids: activeChannelJids.value,
+      managedMucDomain: props.managedMucDomain ?? null,
+      callParticipantCounts: callParticipantCounts.value,
+      callParticipants: callParticipants.value,
+      callMediaByRoom: callMediaByRoom.value,
+      dmCallActivities: dmCallActivities.value,
+    }),
+    callState.value,
+    props.selfFullJid ?? null,
+  )
+);
 const currentCallFallbackEntry = computed<CallActivityDockEntry | null>(() =>
   buildCurrentCallFallbackEntry(),
 );
 const activeCallEntries = computed<CallActivityDockEntry[]>(() => {
   const entries = discoveredCallEntries.value;
   const currentEntry = currentCallFallbackEntry.value;
-  if (!currentEntry || entries.some(isSameCallEntry(currentEntry))) return entries;
-  return [currentEntry, ...entries];
+  if (!currentEntry) return entries;
+  return [currentEntry, ...entries.filter((entry) => !isSameCallEntry(currentEntry)(entry))];
 });
 const activeCallSummaryCount = computed(() => activeCallEntries.value.length);
 const activeCallStatusMessage = computed(() => {
@@ -617,9 +624,8 @@ function callEntryVisualTone(entry: CallActivityDockEntry): CallEntryVisualTone 
 }
 
 function callEntryLabel(entry: CallActivityDockEntry): string {
-  const action = callEntryActionLabel(entry);
   return [
-    `${action} ${entry.title}`,
+    callEntryActionPhrase(entry),
     callEntryKindLabel(entry),
     callEntryStatus(entry),
     callEntryEyebrow(entry),
@@ -864,7 +870,22 @@ function onHeroCta() {
 function heroCallCtaLabel(entry: CallActivityDockEntry): string {
   const action = callEntryActionLabel(entry);
   if (action === "Return") return `Return to ${entry.title} call`;
+  if (action === "Open") {
+    return entry.kind === "dm"
+      ? `Open ${entry.title} conversation`
+      : `Open ${entry.title} channel`;
+  }
   return `${action} ${entry.title} call`;
+}
+
+function callEntryActionPhrase(entry: CallActivityDockEntry): string {
+  const action = callEntryActionLabel(entry);
+  if (action === "Open") {
+    return entry.kind === "dm"
+      ? `Open ${entry.title} conversation`
+      : `Open ${entry.title} channel`;
+  }
+  return `${action} ${entry.title}`;
 }
 </script>
 

@@ -398,7 +398,7 @@ describe("HomeDashboard activity rendering", () => {
     expect(html).toContain("2 people connected in this channel: alice, bob.");
     expect(html).toContain("alice, bob");
     expect(html).toContain("The video call is still live.");
-    expect(buttonForLabel(html, "Join General call")).toContain("Join General call");
+    expect(buttonForLabel(html, "Reconnect Bob call")).toContain("Reconnect Bob call");
     expect(html).toContain('aria-label="Join General, Group call, 2 people, Live now, 2 people connected in this channel: alice, bob., Group call"');
     expect(html).toContain(`aria-label="Reconnect Bob, Video call, Live, Live now, The video call is still live., Live video call · Updated ${updated}"`);
     expect(buttonForLabel(html, "Join General, Group call, 2 people, Live now, 2 people connected in this channel: alice, bob., Group call")).toContain("Join");
@@ -492,7 +492,8 @@ describe("HomeDashboard activity rendering", () => {
     expect(html).toContain("Other device");
     expect(html).toContain("This call is live on another browser or device.");
     expect(html).toContain("Voice call · Other device");
-    expect(html).toContain(`aria-label="Open Bob, Voice call, Live, Other device, This call is live on another browser or device., Voice call · Other device · Updated ${updated}"`);
+    expect(html).toContain("Open Bob conversation");
+    expect(html).toContain(`aria-label="Open Bob conversation, Voice call, Live, Other device, This call is live on another browser or device., Voice call · Other device · Updated ${updated}"`);
     expect(html).not.toContain("Reconnect Bob");
   });
 
@@ -538,7 +539,8 @@ describe("HomeDashboard activity rendering", () => {
     expect(html).toContain("Recovered after refresh");
     expect(html).toContain("The saved reconnect details expired, but this tab can still end the call.");
     expect(html).toContain("Video call · End available");
-    expect(html).toContain(`aria-label="Open Bob, Video call, Live, Recovered after refresh, The saved reconnect details expired, but this tab can still end the call., Video call · End available · Updated ${updated}"`);
+    expect(html).toContain("Open Bob conversation");
+    expect(html).toContain(`aria-label="Open Bob conversation, Video call, Live, Recovered after refresh, The saved reconnect details expired, but this tab can still end the call., Video call · End available · Updated ${updated}"`);
     expect(html).toContain('aria-label="End Bob video call"');
     expect(html).not.toContain("Reconnect Bob");
   });
@@ -586,6 +588,64 @@ describe("HomeDashboard activity rendering", () => {
     expect(html).toContain("Return");
     expect(html).not.toContain("Bob (bob@example.com), direct message");
     expect(html).not.toContain("No active calls.");
+  });
+
+  test("promotes the current call over a refreshed duplicate on the home dashboard", async () => {
+    $callState.set({
+      phase: "active",
+      kind: "dm",
+      peer: "bob@example.com/phone",
+      sid: "dm-current",
+      media: { audio: true, video: true },
+      join: {
+        url: "wss://livekit.example.test",
+        room: "dm-current",
+        identity: "alice@example.com/web",
+        token: liveKitToken(),
+      },
+    });
+
+    const html = await renderHomeDashboard({
+      spaces: [],
+      channels: [],
+      contacts: [],
+      isLoading: false,
+      channelUnreadMap: {},
+      activeChannelJids: new Set<string>(),
+      managedMucDomain: "conference.example.com",
+      callParticipantCounts: {},
+      dmConversations: [
+        {
+          peerJid: "bob@example.com",
+          peerUsername: "Bob",
+          unreadCount: 0,
+          presenceShow: "available",
+        },
+      ],
+      dmCallActivities: {
+        "bob@example.com": {
+          peerJid: "bob@example.com",
+          remoteFullJid: "bob@example.com/phone",
+          sid: "dm-current",
+          media: { audio: true, video: true },
+          join: {
+            url: "wss://livekit.example.test",
+            room: "dm-current",
+            identity: "alice@example.com/web",
+            token: liveKitToken(),
+          },
+          state: "accepted",
+          direction: "incoming",
+          updatedAt: "2026-05-26T00:00:00.000Z",
+        },
+      },
+      selfFullJid: "alice@example.com/web",
+    });
+
+    expect(html).toContain("<strong>1</strong> active call");
+    expect(html).toContain("1 live conversation");
+    expect(buttonForLabel(html, "Return to Bob call")).toContain("Return to Bob call");
+    expect(html).not.toContain("Reconnect Bob call");
   });
 
   test("counts and renders the local current group call before Muji discovery echoes activity", async () => {

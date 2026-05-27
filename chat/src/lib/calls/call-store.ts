@@ -992,6 +992,7 @@ export async function beginMucCall(
       roomJid: normalizedRoomJid,
       sid: attemptId,
       selfFullJid,
+      media,
     });
     $lastCallError.set(null);
   } catch (err) {

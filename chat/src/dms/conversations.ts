@@ -50,6 +50,8 @@ export function useDirectMessageConversations(
   const pendingMarkRead = new Set<string>();
   const queuedMarkRead = new Set<string>();
   const inboxAccountedMessageIdsByJid = new Map<string, Set<string>>();
+  let lastPeerCallHydrationKey = "";
+  let lastPeerCallHydrationClient: BrowserXmppClient | null = null;
 
   function storageKey() {
     const bare = session.value ? barePeerJid(session.value.jid) : "";
@@ -216,6 +218,25 @@ export function useDirectMessageConversations(
     await currentClient.hydrateRecentDmCallActivities().catch(() => undefined);
   }
 
+  function hydratePeerDmCallActivity(peerJid: string) {
+    const bare = barePeerJid(peerJid);
+    const currentClient = xmppClient.value;
+    const currentSessionJid = session.value?.jid ?? null;
+    if (!bare || !currentClient || !currentSessionJid) return;
+    const hydrateRecentDmCallActivity = currentClient.hydrateRecentDmCallActivity?.bind(currentClient);
+    if (!hydrateRecentDmCallActivity) return;
+    const hydrationKey = `${currentSessionJid}\n${bare}`;
+    if (hydrationKey === lastPeerCallHydrationKey && currentClient === lastPeerCallHydrationClient) return;
+    lastPeerCallHydrationKey = hydrationKey;
+    lastPeerCallHydrationClient = currentClient;
+    void hydrateRecentDmCallActivity(bare).catch(() => {
+      if (lastPeerCallHydrationKey === hydrationKey && lastPeerCallHydrationClient === currentClient) {
+        lastPeerCallHydrationKey = "";
+        lastPeerCallHydrationClient = null;
+      }
+    });
+  }
+
   async function hydrateFromInbox(): Promise<boolean> {
     const currentClient = xmppClient.value;
     const currentSessionJid = session.value?.jid ?? null;
@@ -270,6 +291,7 @@ export function useDirectMessageConversations(
     const bare = barePeerJid(peerJid);
     ensureConversation(bare);
     activePeerJid.value = bare;
+    hydratePeerDmCallActivity(bare);
     try {
       await xmppClient.value?.subscribeToPeerPresence(bare);
     } catch {
@@ -316,6 +338,8 @@ export function useDirectMessageConversations(
     () => session.value?.jid,
     () => {
       inboxRequestId += 1;
+      lastPeerCallHydrationKey = "";
+      lastPeerCallHydrationClient = null;
       pendingMarkRead.clear();
       queuedMarkRead.clear();
       inboxAccountedMessageIdsByJid.clear();
@@ -327,8 +351,16 @@ export function useDirectMessageConversations(
       for (const c of conversations.value) {
         xmppClient.value?.subscribeToPeerPresence(c.peerJid);
       }
+      if (activePeerJid.value) hydratePeerDmCallActivity(activePeerJid.value);
     },
     { immediate: true },
+  );
+
+  watch(
+    [xmppClient, activePeerJid],
+    () => {
+      if (activePeerJid.value) hydratePeerDmCallActivity(activePeerJid.value);
+    },
   );
 
   watch([conversations, activePeerJid], persist, { deep: true });

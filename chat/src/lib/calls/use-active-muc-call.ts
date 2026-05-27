@@ -10,7 +10,7 @@ import {
 } from "./muc-call-presence";
 import {
   $mucCallTerminatePendingSessions,
-  hasPendingMucCallTerminateSession,
+  pendingMucCallTerminateSession,
 } from "./muc-call-session-cache";
 import type { CallMedia } from "./types";
 import { connectionStore } from "@/lib/connection-store";
@@ -108,13 +108,14 @@ export function useRoomHasActiveCall(
     return participants.value[room] ?? [];
   });
 
-  const pendingTerminate = computed<boolean>(() =>
-    hasPendingMucCallTerminateSession(
+  const pendingTerminateSession = computed(() =>
+    pendingMucCallTerminateSession(
       pendingTerminates.value,
       normalizedRoomJid.value ?? "",
       currentClientFullJid(),
     )
   );
+  const pendingTerminate = computed<boolean>(() => !!pendingTerminateSession.value);
 
   const hasActiveCall = computed<boolean>(() => participantList.value.length > 0 || pendingTerminate.value);
 
@@ -134,13 +135,18 @@ export function useRoomHasActiveCall(
     const owners = participantOwners.value[room] ?? [];
     return hasOwnerFullJid(owners, fullJid) ||
       hasUnownedSelfNick(owners, connectionStore.session?.username ?? null, participantList.value) ||
-      hasPendingMucCallTerminateSession(pendingTerminates.value, room, fullJid);
+      !!pendingMucCallTerminateSession(pendingTerminates.value, room, fullJid);
   });
 
   const participantCount = computed<number>(() => Math.max(participantList.value.length, pendingTerminate.value ? 1 : 0));
 
   const media = computed<CallMedia>(() =>
-    mediaForRoom(normalizedRoomJid.value ?? "", state.value, callMedia.value)
+    mediaForRoomWithPendingFallback(
+      normalizedRoomJid.value ?? "",
+      state.value,
+      pendingTerminateSession.value?.media,
+      callMedia.value,
+    )
   );
 
   return { hasActiveCall, selfInCall, localResourceInCall, participantCount, media };
@@ -169,7 +175,8 @@ export function readRoomHasActiveCall(roomJid: string): {
   const nick = connectionStore.session?.username ?? null;
   const fullJid = currentClientFullJid();
   const s = $callState.get();
-  const pendingTerminate = hasPendingMucCallTerminateSession(pendingTerminates, normalized, fullJid);
+  const pendingTerminateSession = pendingMucCallTerminateSession(pendingTerminates, normalized, fullJid);
+  const pendingTerminate = !!pendingTerminateSession;
   return {
     hasActiveCall: participants.length > 0 || pendingTerminate,
     selfInCall: !!nick && (participants.includes(nick) || pendingTerminate),
@@ -183,7 +190,12 @@ export function readRoomHasActiveCall(roomJid: string): {
       hasUnownedSelfNick(participantOwners, nick, participants) ||
       pendingTerminate,
     participantCount: Math.max(participants.length, pendingTerminate ? 1 : 0),
-    media: mediaForRoom(normalized, s),
+    media: mediaForRoomWithPendingFallback(
+      normalized,
+      s,
+      pendingTerminateSession?.media,
+      $mucCallMedia.get(),
+    ),
   };
 }
 
@@ -253,4 +265,24 @@ function mediaForRoom(
     return state.media;
   }
   return mucCallMediaForRoom(normalized, mediaByRoom);
+}
+
+function mediaForRoomWithPendingFallback(
+  roomJid: string,
+  state: ReturnType<typeof $callState.get>,
+  pendingMedia?: CallMedia,
+  mediaByRoom?: Record<string, CallMedia>,
+): CallMedia {
+  const normalized = normalizeMucCallRoomJid(roomJid);
+  if (!normalized) return mucCallMediaForRoom("");
+  const liveMedia = mediaByRoom?.[normalized];
+  if (liveMedia) return liveMedia;
+  if (
+    (state.phase === "active" || state.phase === "muc-pending") &&
+    state.kind === "muc" &&
+    normalizeMucCallRoomJid(state.peer) === normalized
+  ) {
+    return state.media;
+  }
+  return pendingMedia ?? mucCallMediaForRoom(normalized, mediaByRoom);
 }
