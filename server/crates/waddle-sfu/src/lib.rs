@@ -26,6 +26,7 @@ mod error;
 mod livekit;
 mod token;
 mod turn;
+mod webhook;
 
 pub use call::{CallId, CallState, Identity, MediaCapabilities};
 pub use config::{ApiKey, ApiSecret, FromEnvError, SfuConfig, TurnSharedSecret, WebsocketUrl};
@@ -33,6 +34,10 @@ pub use error::SfuError;
 pub use livekit::LiveKitSfu;
 pub use token::{JoinToken, Jti, Jwt, VideoGrant};
 pub use turn::{TurnCredential, TurnHost, TurnPassword, TurnUsername};
+pub use webhook::{
+    verify_webhook_signature, LiveKitWebhookEvent, ParticipantEnvelope, ParticipantInfo,
+    RoomEnvelope, RoomInfo, WebhookVerifyError,
+};
 
 /// Abstract SFU service consumed by the XMPP layer.
 ///
