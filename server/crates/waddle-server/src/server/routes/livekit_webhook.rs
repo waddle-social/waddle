@@ -39,7 +39,7 @@ use waddle_xmpp::xep::xep0272::Muji;
 use waddle_xmpp::xep::xep0421::OccupantIdentity;
 use waddle_xmpp_core::Stanza;
 
-use super::websocket::{get_room_actor, unregister_participant_from_room, WebSocketState};
+use super::websocket::{get_room_actor, note_participant_left_from_webhook, WebSocketState};
 
 /// Upper bound on remembered event ids for delivery deduplication.
 /// LiveKit retries up to 5 times per delivery; a small LRU is enough
@@ -233,7 +233,7 @@ async fn process_participant_left_for_identity(
                 identity = %full_jid,
                 "LiveKit webhook: participant not in MUC actor; SFU registry cleanup only"
             );
-            unregister_participant_from_room(state, &room_jid, &full_jid);
+            note_participant_left_from_webhook(state, &room_jid, &full_jid);
             return;
         }
         Err(error) => {
@@ -243,13 +243,13 @@ async fn process_participant_left_for_identity(
                 error = ?error,
                 "LiveKit webhook: room actor rejected Muji clear; falling through to SFU unregister"
             );
-            unregister_participant_from_room(state, &room_jid, &full_jid);
+            note_participant_left_from_webhook(state, &room_jid, &full_jid);
             return;
         }
     };
 
     broadcast_muji_clear_from_sfu(state, &room_jid, &full_jid, &outcome);
-    unregister_participant_from_room(state, &room_jid, &full_jid);
+    note_participant_left_from_webhook(state, &room_jid, &full_jid);
 }
 
 /// Broadcast a server-originated Muji-presence clear to every remaining

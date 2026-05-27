@@ -1002,6 +1002,7 @@ fn empty_muji() -> waddle_xmpp::xep::xep0272::Muji {
 #[derive(Default)]
 struct RecordingSfu {
     calls: std::sync::Mutex<Vec<(waddle_sfu::CallId, waddle_sfu::Identity)>>,
+    note_calls: std::sync::Mutex<Vec<(waddle_sfu::CallId, waddle_sfu::Identity)>>,
 }
 
 impl RecordingSfu {
@@ -1043,6 +1044,16 @@ impl waddle_sfu::SfuService for RecordingSfu {
             .expect("recording lock")
             .push((call_id.clone(), identity.clone()));
         waddle_sfu::CallState::Ended
+    }
+
+    fn note_participant_left(&self, call_id: &waddle_sfu::CallId, identity: &waddle_sfu::Identity) {
+        // Recorded into `note_calls`, NOT `calls`: the trait splits
+        // admin-evict from bookkeeping-only dispatch, and tests need
+        // to distinguish which path was taken.
+        self.note_calls
+            .lock()
+            .expect("recording lock")
+            .push((call_id.clone(), identity.clone()));
     }
 
     fn is_revoked(&self, _: &waddle_sfu::Jti) -> bool {

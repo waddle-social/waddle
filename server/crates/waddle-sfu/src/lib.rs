@@ -20,6 +20,7 @@
 
 #![deny(unsafe_code)]
 
+mod admin;
 mod call;
 mod config;
 mod error;
@@ -28,6 +29,7 @@ mod token;
 mod turn;
 mod webhook;
 
+pub use admin::LiveKitAdmin;
 pub use call::{CallId, CallState, Identity, MediaCapabilities};
 pub use config::{ApiKey, ApiSecret, FromEnvError, SfuConfig, TurnSharedSecret, WebsocketUrl};
 pub use error::SfuError;
@@ -78,13 +80,30 @@ pub trait SfuService: Send + Sync + 'static {
     /// the call is still active. When the last participant leaves,
     /// the call entry is removed and [`CallState::Ended`] is
     /// returned, allowing the caller to clear the MUC presence
-    /// extension. Also revokes every JWT the SFU has minted for the
-    /// `(call_id, identity)` pair so a stolen token can't be replayed
-    /// after the legitimate hangup. (Revocation is bookkeeping —
-    /// LiveKit itself doesn't call back to verify jti, so the value
-    /// is local-side replay-resistance + an audit trail; see
-    /// [`Self::is_revoked`].)
+    /// extension. Implementations also revoke every JWT the SFU has
+    /// minted for the `(call_id, identity)` pair so a stolen token
+    /// can't be replayed after the legitimate hangup, and may
+    /// proactively notify the underlying SFU so the call doesn't
+    /// linger until the SFU's own session-timeout — production
+    /// [`LiveKitSfu`] does this via the LiveKit admin REST API.
+    ///
+    /// When `identity` was never registered for `call_id`, the
+    /// implementation MUST NOT report [`CallState::Ended`] (returning
+    /// `Active { remaining }` instead): a stale or replayed teardown
+    /// must not trigger room-end broadcast or SFU-side room deletion
+    /// for a call the caller does not actually own membership in.
     fn unregister_call_participant(&self, call_id: &CallId, identity: &Identity) -> CallState;
+
+    /// Local-only cleanup driven by an SFU-originated signal that
+    /// `identity` has already left `call_id` (e.g. LiveKit's
+    /// `participant_left` webhook). Mirrors the bookkeeping side of
+    /// [`Self::unregister_call_participant`] — registry removal +
+    /// JWT revocation — but MUST NOT issue a corresponding admin
+    /// call back to the SFU: the webhook is the acknowledgement
+    /// that the SFU already evicted the participant, and a
+    /// back-channel `RemoveParticipant` would amplify into a wasted
+    /// round-trip plus a race window against quick rejoins.
+    fn note_participant_left(&self, call_id: &CallId, identity: &Identity);
 
     /// Returns `true` if the SFU has marked `jti` as revoked. Useful
     /// for tests + future LiveKit-cooperative validation: when

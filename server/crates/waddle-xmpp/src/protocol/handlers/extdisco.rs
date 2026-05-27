@@ -189,7 +189,7 @@ mod tests {
             token_ttl: Duration::seconds(3600),
             turn_ttl: Duration::seconds(3600),
         };
-        Arc::new(LiveKitSfu::new(cfg))
+        Arc::new(LiveKitSfu::new(cfg).expect("LiveKitSfu init in test"))
     }
 
     fn test_jid() -> FullJid {

@@ -35,7 +35,7 @@ fn fixture_cred() -> TurnCredential {
         token_ttl: Duration::seconds(3600),
         turn_ttl: Duration::seconds(3600),
     };
-    let sfu = LiveKitSfu::new(cfg);
+    let sfu = LiveKitSfu::new(cfg).expect("LiveKitSfu init in test");
     let jid: jid::FullJid = "alice@waddle.social/desktop".parse().expect("valid jid");
     let identity = Identity::from_jid(jid);
     sfu.issue_turn_credentials(&identity)

@@ -160,7 +160,7 @@ mod tests {
             token_ttl: Duration::seconds(60),
             turn_ttl: Duration::seconds(60),
         };
-        let sfu = LiveKitSfu::new(cfg);
+        let sfu = LiveKitSfu::new(cfg).expect("LiveKitSfu init in test");
         let jid: jid::FullJid = "alice@waddle.social/desktop".parse().unwrap();
         let identity = waddle_sfu::Identity::from_jid(jid);
         sfu.issue_turn_credentials(&identity).unwrap()
