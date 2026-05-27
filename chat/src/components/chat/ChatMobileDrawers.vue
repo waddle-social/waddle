@@ -2,6 +2,7 @@
 import { computed } from "vue";
 import { useStore } from "@nanostores/vue";
 import {
+  $mucCallMedia,
   $mucCallParticipants,
   mucCallParticipantCounts,
 } from "@/lib/calls/muc-call-presence";
@@ -26,8 +27,10 @@ import type { ChatAppController } from "@/shell/chat-app-controller";
 const props = defineProps<{
   controller: ChatAppController;
   joinChannelCall?: (channelId: string | null, roomJid: string, media: CallMedia) => void;
+  leaveChannelCall?: (roomJid: string) => void;
   answerDm?: (peerJid: string, remoteFullJid: string, sid: string, media: CallMedia) => void;
   reconnectDm?: (peerJid: string, media: CallMedia) => void;
+  endDm?: (peerJid: string, sid?: string) => void;
 }>();
 
 const {
@@ -83,6 +86,10 @@ function joinChannelCallFromMobile(channelId: string | null, roomJid: string, me
   props.joinChannelCall?.(channelId, roomJid, media);
 }
 
+function leaveChannelCallFromMobile(roomJid: string) {
+  props.leaveChannelCall?.(roomJid);
+}
+
 function answerDmFromMobile(peerJid: string, remoteFullJid: string, sid: string, media: CallMedia) {
   props.answerDm?.(peerJid, remoteFullJid, sid, media);
 }
@@ -91,10 +98,15 @@ function reconnectDmFromMobile(peerJid: string, media: CallMedia) {
   props.reconnectDm?.(peerJid, media);
 }
 
+function endDmFromMobile(peerJid: string, sid?: string) {
+  props.endDm?.(peerJid, sid);
+}
+
 // XEP-0272 Muji participant counts keyed by room JID — same derived
 // reactive state as ChatReadyShell uses, so the mobile sidebar shows
 // the same "call ongoing" chip.
 const mucCallParticipantsStore = useStore($mucCallParticipants);
+const mucCallMediaStore = useStore($mucCallMedia);
 const dmCallActivitiesStore = useStore($dmCallActivities);
 const callStateStore = useStore($callState);
 const callParticipantCounts = computed<Record<string, number>>(() => {
@@ -174,6 +186,7 @@ function openExtensionRoute(route: DiscoveredExtensionRoute) {
           :channel-unread-map="computedChannelUnreadMap"
           :call-participant-counts="callParticipantCounts"
           :call-participants="mucCallParticipantsStore"
+          :call-media-by-room="mucCallMediaStore"
           :managed-muc-domain="managedMucDomain"
           :thread-entries-fn="(roomJid: string) => channelUnread.threadEntries(roomJid)"
           :active-community-surface="ui.activeCommunitySurface.value"
@@ -183,6 +196,7 @@ function openExtensionRoute(route: DiscoveredExtensionRoute) {
           class="!w-full !border-r-0 !flex-1"
           @select-channel="selectChannelFromMobile"
           @join-channel-call="joinChannelCallFromMobile"
+          @leave-channel-call="leaveChannelCallFromMobile"
           @select-thread="onSelectThread"
           @select-community-surface="selectCommunitySurface"
           @select-threads-view="openThreads"
@@ -202,6 +216,7 @@ function openExtensionRoute(route: DiscoveredExtensionRoute) {
           @answer-dm="answerDmFromMobile"
           @select-dm="selectDm"
           @reconnect-dm="reconnectDmFromMobile"
+          @end-dm="endDmFromMobile"
           @new-dm="ui.showNewDm.value = true"
         />
         <ProfilePanel

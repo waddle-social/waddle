@@ -1,5 +1,10 @@
 import { beginMucCall, reportCallError, type RawIqSender } from "./call-store";
 import { clearMucCallParticipant } from "./muc-call-presence";
+import {
+  forgetMucCallSession,
+  markMucCallSessionTerminatePending,
+  readMucCallSession,
+} from "./muc-call-session-cache";
 import type { CallMedia } from "./types";
 
 type MucCallStartActionOptions = {
@@ -63,11 +68,11 @@ export async function startMucCallAction({
 /**
  * Hard-refresh recovery path for a MUC call this browser resource
  * still advertises via Muji presence, but whose local LiveKit/call
- * state was lost with the old JS context. We no longer have the
- * per-attempt Jingle SID, so the conformant thing we can do is clear
- * this occupant's XEP-0272 presence. The server echo will remove the
- * call indicator for everyone; after the leave marker is sent, the
- * local clear makes the refreshed tab responsive immediately.
+ * state was lost with the old JS context. We clear this occupant's
+ * XEP-0272 presence first, then send the cached per-attempt Jingle
+ * `session-terminate` when available. That ordering follows
+ * XEP-0272 §Leaving while still giving the SFU the XEP-0166
+ * termination it expects.
  */
 export async function leaveRetainedMucCallAction({
   roomJid,
@@ -79,6 +84,8 @@ export async function leaveRetainedMucCallAction({
   const selfNick = getSelfNick();
   if (!sender?.update_muji_presence || !selfNick) return false;
   const selfFullJid = getSelfFullJid?.() ?? null;
+  const cachedSession = readMucCallSession({ roomJid, selfFullJid });
+  let terminated = !cachedSession;
   try {
     await sender.update_muji_presence(
       roomJid,
@@ -88,9 +95,32 @@ export async function leaveRetainedMucCallAction({
       false,
     );
     clearMucCallParticipant(roomJid, selfNick, selfFullJid);
-    return true;
   } catch (err) {
     reportCallError(err);
     return false;
   }
+  if (cachedSession) {
+    try {
+      if (!sender.send_muji_session_terminate) {
+        throw new Error(
+          "wasm client does not expose send_muji_session_terminate; rebuild the wasm bundle",
+        );
+      }
+      await sender.send_muji_session_terminate(cachedSession.roomJid, cachedSession.sid);
+      forgetMucCallSession({
+        roomJid: cachedSession.roomJid,
+        selfFullJid,
+        sid: cachedSession.sid,
+      });
+      terminated = true;
+    } catch (err) {
+      markMucCallSessionTerminatePending({
+        roomJid: cachedSession.roomJid,
+        selfFullJid,
+        sid: cachedSession.sid,
+      });
+      reportCallError(err);
+    }
+  }
+  return terminated;
 }

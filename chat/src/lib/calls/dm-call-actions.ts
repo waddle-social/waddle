@@ -5,7 +5,12 @@ import {
   reportCallError,
   scheduleOutgoingTimeout,
 } from "./call-store";
-import { canResumeDmCallActivity, clearDmCallActivity, readDmCallActivity } from "./dm-call-activity";
+import {
+  canResumeDmCallActivity,
+  clearDmCallActivity,
+  readDmCallActivity,
+  readEndableDmCallActivity,
+} from "./dm-call-activity";
 import {
   newCallSid,
   outboundCalls,
@@ -118,8 +123,8 @@ export function resumeDmCallActivity(options: {
   const peer = barePeerJid(options.peerBareJid).toLowerCase();
   if (!peer) return false;
 
-  const activity = readDmCallActivity(peer, options.now);
   const selfFullJid = options.getSelfFullJid?.()?.trim() ?? "";
+  const activity = readDmCallActivity(peer, options.now, selfFullJid);
   if (!activity || !canResumeDmCallActivity(activity, selfFullJid, options.now)) {
     return false;
   }
@@ -133,5 +138,48 @@ export function resumeDmCallActivity(options: {
     join: activity.join,
     initiator: selfFullJid,
   });
+  return true;
+}
+
+export async function endRecoveredDmCallAction(options: {
+  peerBareJid: string;
+  sid?: string | null;
+  getSender: () => CallWireSender | null;
+  getSelfFullJid?: () => string | undefined;
+  now?: Date;
+}): Promise<boolean> {
+  const peer = barePeerJid(options.peerBareJid).toLowerCase();
+  if (!peer) return false;
+
+  const sender = options.getSender();
+  if (!sender) return false;
+
+  const selfFullJid = options.getSelfFullJid?.()?.trim() ?? "";
+  const activity = readEndableDmCallActivity(peer, selfFullJid, options.sid, options.now);
+  if (!activity) {
+    return false;
+  }
+  const remoteFullJid = activity.remoteFullJid;
+  if (!remoteFullJid) return false;
+
+  try {
+    await outboundCalls.sessionTerminate(
+      sender,
+      remoteFullJid,
+      activity.sid,
+      "success",
+    );
+  } catch (err) {
+    reportCallError(err);
+    return false;
+  }
+
+  try {
+    await outboundCalls.finish(sender, remoteFullJid, activity.sid);
+  } catch (err) {
+    reportCallError(err);
+  }
+
+  clearDmCallActivity(peer, activity.sid);
   return true;
 }

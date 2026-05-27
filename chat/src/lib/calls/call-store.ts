@@ -12,6 +12,10 @@ import {
   applyDmCallEvent,
   clearDmCallActivity,
 } from "./dm-call-activity";
+import {
+  forgetMucCallSession,
+  rememberMucCallSession,
+} from "./muc-call-session-cache";
 import { barePeerJid } from "../xmpp/jid";
 
 /**
@@ -592,6 +596,11 @@ export async function tearDownActiveCall(
             }
             try {
               await sendMujiSessionTerminate(raw, s.peer, s.sid);
+              forgetMucCallSession({
+                roomJid: s.peer,
+                selfFullJid: s.selfFullJid,
+                sid: s.sid,
+              });
             } catch (err) {
               reportCallError(err);
             }
@@ -637,12 +646,17 @@ export async function tearDownActiveCall(
               } catch (err) {
                 reportCallError(err);
               } finally {
-                  clearMucCallParticipant(s.peer, s.selfNick, s.selfFullJid);
+                clearMucCallParticipant(s.peer, s.selfNick, s.selfFullJid);
               }
             }
             if (s.activePresencePublished) {
               try {
                 await sendMujiSessionTerminate(raw, s.peer, s.sid);
+                forgetMucCallSession({
+                  roomJid: s.peer,
+                  selfFullJid: s.selfFullJid,
+                  sid: s.sid,
+                });
               } catch (err) {
                 reportCallError(err);
               }
@@ -774,6 +788,7 @@ async function rollbackMucCallSetup(
         throw new Error("Cannot terminate Muji session without the active Jingle sid");
       }
       await sendMujiSessionTerminate(sender, roomJid, sid);
+      forgetMucCallSession({ roomJid, selfFullJid, sid });
     } catch (err) {
       reportCallError(err);
     }
@@ -971,6 +986,11 @@ export async function beginMucCall(
       join,
       kind: "muc",
       selfNick,
+      selfFullJid,
+    });
+    rememberMucCallSession({
+      roomJid: normalizedRoomJid,
+      sid: attemptId,
       selfFullJid,
     });
     $lastCallError.set(null);

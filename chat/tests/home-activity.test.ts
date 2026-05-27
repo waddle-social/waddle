@@ -491,10 +491,11 @@ describe("HomeDashboard activity rendering", () => {
       selfFullJid: "alice@example.com/web",
     });
 
-    expect(html).toContain("Expired");
-    expect(html).toContain("The saved reconnect details expired.");
-    expect(html).toContain("Video call · Expired");
-    expect(html).toContain(`aria-label="Open Bob, Video call, Live, Expired, The saved reconnect details expired., Video call · Expired · Updated ${updated}"`);
+    expect(html).toContain("Recovered after refresh");
+    expect(html).toContain("The saved reconnect details expired, but this tab can still end the call.");
+    expect(html).toContain("Video call · End available");
+    expect(html).toContain(`aria-label="Open Bob, Video call, Live, Recovered after refresh, The saved reconnect details expired, but this tab can still end the call., Video call · End available · Updated ${updated}"`);
+    expect(html).toContain('aria-label="End Bob video call"');
     expect(html).not.toContain("Reconnect Bob");
   });
 

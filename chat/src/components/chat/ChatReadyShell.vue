@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useStore } from "@nanostores/vue";
 import {
+  $mucCallMedia,
   $mucCallParticipants,
   mucCallParticipantCounts,
 } from "@/lib/calls/muc-call-presence";
@@ -10,8 +11,16 @@ import {
   activeChannelRailCallCount,
   activeDmRailCallCount,
 } from "@/lib/calls/call-rail-counts";
-import { answerIncomingDmCallActivity, resumeDmCallActivity } from "@/lib/calls/dm-call-actions";
+import {
+  answerIncomingDmCallActivity,
+  endRecoveredDmCallAction,
+  resumeDmCallActivity,
+} from "@/lib/calls/dm-call-actions";
 import { leaveRetainedMucCallAction, startMucCallAction } from "@/lib/calls/muc-call-actions";
+import {
+  $mucCallTerminatePendingSessions,
+  hydrateMucCallTerminatePendingSessions,
+} from "@/lib/calls/muc-call-session-cache";
 import { normalizeMucServiceDomain } from "@/lib/calls/muc-call-indicators";
 import {
   $callState,
@@ -159,11 +168,13 @@ const {
  * stay O(1).
  */
 const mucCallParticipantsStore = useStore($mucCallParticipants);
+const mucCallTerminatePendingStore = useStore($mucCallTerminatePendingSessions);
+const mucCallMediaStore = useStore($mucCallMedia);
 const dmCallActivitiesStore = useStore($dmCallActivities);
 const callStateStore = useStore($callState);
 const activityGroupCallStarting = ref(false);
 const callParticipantCounts = computed<Record<string, number>>(() => {
-  return mucCallParticipantCounts(mucCallParticipantsStore.value);
+  return mucCallParticipantCounts(retainedMucCallParticipantsStore.value);
 });
 const activeChannelCallCount = computed(() => {
   return activeChannelRailCallCount(callParticipantCounts.value, callStateStore.value);
@@ -175,6 +186,23 @@ const managedMucDomain = computed(() =>
   normalizeMucServiceDomain(waddles.mucServiceJid.value) || (selfDomain.value ? `muc.${selfDomain.value}` : ""),
 );
 const selfFullJid = computed(() => getSelfFullJid() ?? null);
+const retainedMucCallParticipantsStore = computed<Record<string, string[]>>(() => {
+  const next: Record<string, string[]> = {};
+  for (const [roomJid, nicks] of Object.entries(mucCallParticipantsStore.value)) {
+    next[roomJid] = [...nicks];
+  }
+  const self = selfFullJid.value;
+  const nick = connectionStore.session?.username;
+  if (!self || !nick) return next;
+  for (const session of Object.values(mucCallTerminatePendingStore.value)) {
+    if (!session.terminatePending || session.selfFullJid !== self) continue;
+    const current = next[session.roomJid] ?? [];
+    if (!current.includes(nick)) {
+      next[session.roomJid] = [...current, nick];
+    }
+  }
+  return next;
+});
 
 const homeDashboardProps = computed(() => buildHomeDashboardProps({
   spaces: waddles.sortedSpaces.value,
@@ -186,7 +214,8 @@ const homeDashboardProps = computed(() => buildHomeDashboardProps({
   activeChannelJids: messaging.activeChannels.value,
   dmConversations: dmConversations.conversations.value,
   callParticipantCounts: callParticipantCounts.value,
-  callParticipants: mucCallParticipantsStore.value,
+  callParticipants: retainedMucCallParticipantsStore.value,
+  callMediaByRoom: mucCallMediaStore.value,
   dmCallActivities: dmCallActivitiesStore.value,
   managedMucDomain: managedMucDomain.value,
   selfFullJid: selfFullJid.value,
@@ -290,6 +319,16 @@ function answerDmFromActivity(peerJid: string, remoteFullJid: string, sid: strin
   });
 }
 
+function endRecoveredDmFromActivity(peerJid: string, sid?: string): void {
+  selectDm(peerJid);
+  void endRecoveredDmCallAction({
+    peerBareJid: peerJid,
+    sid,
+    getSender: getCallSender,
+    getSelfFullJid,
+  });
+}
+
 function joinChannelCallFromActivity(channelId: string | null, roomJid: string, media: CallMedia): void {
   ui.activeCommunitySurface.value = null;
   if (channelId) {
@@ -345,6 +384,10 @@ onMounted(() => {
   disconnectMessageToolbarLifecycle = installMessageToolbarLifecycleSuppression();
 });
 
+watch(selfFullJid, (fullJid) => {
+  hydrateMucCallTerminatePendingSessions(fullJid);
+}, { immediate: true });
+
 onUnmounted(() => {
   disconnectMessageToolbarLifecycle?.();
   disconnectMessageToolbarLifecycle = null;
@@ -363,8 +406,10 @@ onUnmounted(() => {
     <ChatMobileDrawers
       :controller="controller"
       :join-channel-call="joinChannelCallFromActivity"
+      :leave-channel-call="leaveRetainedChannelCall"
       :answer-dm="answerDmFromActivity"
       :reconnect-dm="reconnectDmFromDock"
+      :end-dm="endRecoveredDmFromActivity"
     />
     <CurrentCallPanel
       class="current-call-panel--mobile"
@@ -385,15 +430,18 @@ onUnmounted(() => {
       :active-peer-jid="dmConversations.activePeerJid.value"
       :sidebar-mode="ui.sidebarMode.value"
       :active-channel-jids="messaging.activeChannels.value"
-      :call-participants="mucCallParticipantsStore"
+      :call-participants="retainedMucCallParticipantsStore"
+      :call-media-by-room="mucCallMediaStore"
       :managed-muc-domain="managedMucDomain"
       :self-full-jid="selfFullJid"
       hide-current-call
       @select-channel="onSelectChannelFromSidebar"
       @join-channel-call="joinChannelCallFromActivity"
+      @leave-channel-call="leaveRetainedChannelCall"
       @answer-dm="answerDmFromActivity"
       @select-dm="selectDm"
       @reconnect-dm="reconnectDmFromDock"
+      @end-dm="endRecoveredDmFromActivity"
     />
 
     <!-- Desktop layout -->
@@ -442,7 +490,8 @@ onUnmounted(() => {
           :collapsed-group-ids="ui.collapsedSpaceGroupIds.value"
           :channel-unread-map="computedChannelUnreadMap"
           :call-participant-counts="callParticipantCounts"
-          :call-participants="mucCallParticipantsStore"
+          :call-participants="retainedMucCallParticipantsStore"
+          :call-media-by-room="mucCallMediaStore"
           :managed-muc-domain="managedMucDomain"
           :thread-entries-fn="(roomJid: string) => channelUnread.threadEntries(roomJid)"
           :active-community-surface="ui.activeCommunitySurface.value"
@@ -451,6 +500,7 @@ onUnmounted(() => {
           :is-threads-active="ui.activePage.value === 'threads'"
           @select-channel="onSelectChannelFromSidebar"
           @join-channel-call="joinChannelCallFromActivity"
+          @leave-channel-call="leaveRetainedChannelCall"
           @select-thread="onSelectThread"
           @select-community-surface="onSelectCommunitySurface"
           @select-threads-view="openThreads"
@@ -469,6 +519,7 @@ onUnmounted(() => {
           @answer-dm="answerDmFromActivity"
           @select-dm="selectDm"
           @reconnect-dm="reconnectDmFromDock"
+          @end-dm="endRecoveredDmFromActivity"
           @new-dm="ui.showNewDm.value = true"
         />
         <CurrentCallPanel
@@ -488,16 +539,19 @@ onUnmounted(() => {
           :active-peer-jid="dmConversations.activePeerJid.value"
           :sidebar-mode="ui.sidebarMode.value"
           :active-channel-jids="messaging.activeChannels.value"
-          :call-participants="mucCallParticipantsStore"
+          :call-participants="retainedMucCallParticipantsStore"
+          :call-media-by-room="mucCallMediaStore"
           :managed-muc-domain="managedMucDomain"
           :self-full-jid="selfFullJid"
           :show-dm-calls="ui.sidebarMode.value !== 'dms'"
           hide-current-call
           @select-channel="onSelectChannelFromSidebar"
           @join-channel-call="joinChannelCallFromActivity"
+          @leave-channel-call="leaveRetainedChannelCall"
           @answer-dm="answerDmFromActivity"
           @select-dm="selectDm"
           @reconnect-dm="reconnectDmFromDock"
+          @end-dm="endRecoveredDmFromActivity"
         />
       </div>
 
@@ -508,9 +562,11 @@ onUnmounted(() => {
         @select-channel="(id: string, roomJid?: string) => selectChannel(id, roomJid ? { roomJid } : undefined)"
         @select-channel-room="selectChannelByRoomJid"
         @join-channel-call="joinChannelCallFromActivity"
+        @leave-channel-call="leaveRetainedChannelCall"
         @answer-dm="answerDmFromActivity"
         @select-contact="handleOpenDm"
         @reconnect-dm="reconnectDmFromDock"
+        @end-dm="endRecoveredDmFromActivity"
         @open-nav="ui.showMobileNav.value = true"
       />
       <FeedPane
@@ -664,6 +720,7 @@ onUnmounted(() => {
               @leave-channel-call="leaveRetainedChannelCall"
               @answer-dm="answerDmFromActivity"
               @reconnect-dm="reconnectDmFromDock"
+              @end-dm="endRecoveredDmFromActivity"
               :invoke-extension-action="invokeActiveExtensionAction"
               @refresh-update="refreshAppUpdate"
             />

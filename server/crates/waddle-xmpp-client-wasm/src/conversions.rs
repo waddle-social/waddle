@@ -582,6 +582,8 @@ pub(crate) fn presence_to_js(presence: InboundPresence) -> WaddlePresence {
         muji: presence.muji.map(|m| WaddleMujiPresence {
             preparing: m.preparing,
             active: m.active,
+            audio: m.audio,
+            video: m.video,
         }),
     }
 }

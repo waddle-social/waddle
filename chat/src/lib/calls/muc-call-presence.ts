@@ -1,5 +1,6 @@
 import { map } from "nanostores";
 import { fullJidIdentityKey } from "@/lib/xmpp/jid";
+import type { CallMedia } from "./types";
 
 /**
  * Per-room map of nicks advertising XEP-0272 Muji presence with
@@ -26,9 +27,12 @@ type MucCallParticipantOwner = {
   realJid?: string;
 };
 export const $mucCallParticipantOwners = map<Record<string, MucCallParticipantOwner[]>>({});
+export const $mucCallMedia = map<Record<string, CallMedia>>({});
 const $mucActiveParticipants = map<Record<string, string[]>>({});
 const $mucPreparingParticipants = map<Record<string, string[]>>({});
+const $mucActiveParticipantMedia = map<Record<string, Record<string, CallMedia>>>({});
 const PARTICIPANT_KEY_SEPARATOR = "\u0000";
+const DEFAULT_MUC_CALL_MEDIA: CallMedia = { audio: true, video: false };
 
 export function normalizeMucCallRoomJid(roomJid: string): string {
   return roomJid.split("/")[0]?.trim().toLowerCase() ?? "";
@@ -83,6 +87,15 @@ export function mucCallParticipantCounts(
   return counts;
 }
 
+export function mucCallMediaForRoom(
+  roomJid: string,
+  mediaByRoom: Record<string, CallMedia> = $mucCallMedia.get(),
+): CallMedia {
+  const normalized = normalizeMucCallRoomJid(roomJid);
+  if (!normalized) return { ...DEFAULT_MUC_CALL_MEDIA };
+  return mediaByRoom[normalized] ?? { ...DEFAULT_MUC_CALL_MEDIA };
+}
+
 export function clearMucCallParticipant(
   roomJid: string,
   nick: string,
@@ -116,6 +129,9 @@ function syncActiveParticipantsForRoom(roomJid: string): void {
     const owners = { ...$mucCallParticipantOwners.get() };
     delete owners[roomJid];
     $mucCallParticipantOwners.set(owners);
+    const media = { ...$mucCallMedia.get() };
+    delete media[roomJid];
+    $mucCallMedia.set(media);
   } else {
     $mucCallParticipants.setKey(roomJid, nicks);
     $mucCallParticipantOwners.setKey(
@@ -128,14 +144,58 @@ function syncActiveParticipantsForRoom(roomJid: string): void {
         };
       }),
     );
+    $mucCallMedia.setKey(roomJid, aggregateActiveCallMedia(roomJid, activeOwners));
   }
 }
 
-function addActiveParticipant(roomJid: string, nick: string, realJid?: string | null): void {
+function aggregateActiveCallMedia(roomJid: string, activeOwners: readonly string[]): CallMedia {
+  const mediaByParticipant = $mucActiveParticipantMedia.get()[roomJid] ?? {};
+  let audio = false;
+  let video = false;
+  for (const key of activeOwners) {
+    const media = mediaByParticipant[key] ?? DEFAULT_MUC_CALL_MEDIA;
+    audio ||= media.audio;
+    video ||= media.video;
+  }
+  return { audio: audio || activeOwners.length > 0, video };
+}
+
+function setActiveParticipantMedia(roomJid: string, key: string, media: CallMedia): void {
+  const currentByRoom = $mucActiveParticipantMedia.get()[roomJid] ?? {};
+  $mucActiveParticipantMedia.setKey(roomJid, {
+    ...currentByRoom,
+    [key]: media,
+  });
+}
+
+function removeActiveParticipantMedia(roomJid: string, keys: readonly string[]): void {
+  if (keys.length === 0) return;
+  const currentByRoom = $mucActiveParticipantMedia.get()[roomJid] ?? {};
+  const nextByRoom = { ...currentByRoom };
+  for (const key of keys) {
+    delete nextByRoom[key];
+  }
+  if (Object.keys(nextByRoom).length === 0) {
+    const all = { ...$mucActiveParticipantMedia.get() };
+    delete all[roomJid];
+    $mucActiveParticipantMedia.set(all);
+  } else {
+    $mucActiveParticipantMedia.setKey(roomJid, nextByRoom);
+  }
+}
+
+function addActiveParticipant(
+  roomJid: string,
+  nick: string,
+  realJid?: string | null,
+  media: CallMedia = DEFAULT_MUC_CALL_MEDIA,
+): void {
   const current = $mucActiveParticipants.get()[roomJid] ?? [];
   const key = activeParticipantKey(nick, realJid);
-  if (current.includes(key)) return;
-  $mucActiveParticipants.setKey(roomJid, [...current, key]);
+  if (!current.includes(key)) {
+    $mucActiveParticipants.setKey(roomJid, [...current, key]);
+  }
+  setActiveParticipantMedia(roomJid, key, media);
   syncActiveParticipantsForRoom(roomJid);
 }
 
@@ -156,6 +216,10 @@ function removeActiveParticipant(
     return activeParticipantNick(key) !== nick;
   });
   if (next.length === current.length) return;
+  removeActiveParticipantMedia(
+    roomJid,
+    current.filter((key) => !next.includes(key)),
+  );
   if (next.length === 0) {
     const all = { ...$mucActiveParticipants.get() };
     delete all[roomJid];
@@ -187,7 +251,7 @@ export function applyMucCallPresence(
     from?: string;
     presence_type?: string;
     muc_jid?: string | null;
-    muji?: { preparing: boolean; active: boolean };
+    muji?: { preparing: boolean; active: boolean; audio?: boolean; video?: boolean };
   },
 ): void {
   if (!presence.from) return;
@@ -222,7 +286,10 @@ export function applyMucCallPresence(
   }
 
   if (wantsActive) {
-    addActiveParticipant(roomJid, nick, presence.muc_jid);
+    addActiveParticipant(roomJid, nick, presence.muc_jid, {
+      audio: presence.muji?.audio !== false,
+      video: presence.muji?.video === true,
+    });
   } else if (shouldClear) {
     removeActiveParticipant(roomJid, nick, presence.muc_jid, {
       includeAggregate: !presence.muc_jid,
@@ -245,8 +312,10 @@ export function mucCallParticipantCount(roomJid: string): number {
 export function clearMucCallParticipants(): void {
   $mucCallParticipants.set({});
   $mucCallParticipantOwners.set({});
+  $mucCallMedia.set({});
   $mucActiveParticipants.set({});
   $mucPreparingParticipants.set({});
+  $mucActiveParticipantMedia.set({});
   // Drop any pending preparing-echo waiters too — they'd otherwise
   // resolve when the next presence echo arrives after reconnect,
   // which would race the new login's call setup.

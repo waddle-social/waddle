@@ -9,6 +9,7 @@ import {
   Phone,
   PhoneCall,
   PhoneIncoming,
+  PhoneOff,
   PhoneOutgoing,
   Users,
   Video,
@@ -21,16 +22,22 @@ import { isForumChannel } from "@/lib/channel-types";
 import {
   callActivityDockAction,
   buildCallActivityDockEntries,
+  canEndRecoveredDmCallActivity,
   callActivityDockSelection,
   type CallActivityDockEntry,
 } from "@/lib/calls/call-activity-dock";
 import { $callState } from "@/lib/calls/call-store";
-import { dmCallResumeBlockReason, hasKnownDmCallMedia } from "@/lib/calls/dm-call-activity";
+import {
+  dmCallActivitiesForPeer,
+  dmCallResumeBlockReason,
+  hasKnownDmCallMedia,
+} from "@/lib/calls/dm-call-activity";
 import {
   callParticipantCountForChannel,
   mucCallParticipantPreview,
 } from "@/lib/calls/muc-call-indicators";
 import { normalizeMucCallRoomJid } from "@/lib/calls/muc-call-presence";
+import { readRoomHasActiveCall } from "@/lib/calls/use-active-muc-call";
 import { barePeerJid } from "@/lib/xmpp/jid";
 import type { CallMedia } from "@/lib/calls/types";
 import { groupChannelsBySpace } from "@/lib/channel-grouping";
@@ -57,9 +64,11 @@ const emit = defineEmits<{
   selectChannel: [id: string, roomJid?: string];
   selectChannelRoom: [roomJid: string];
   joinChannelCall: [channelId: string | null, roomJid: string, media: CallMedia];
+  leaveChannelCall: [roomJid: string];
   answerDm: [peerJid: string, remoteFullJid: string, sid: string, media: CallMedia];
   selectContact: [jid: string];
   reconnectDm: [peerJid: string, media: CallMedia];
+  endDm: [peerJid: string, sid?: string];
   openNav: [];
 }>();
 
@@ -121,6 +130,7 @@ const visibleChannelGroups = computed(() => groups.value.filter((group) => group
 const activeChannelJids = computed(() => props.activeChannelJids ?? new Set<string>());
 const callParticipantCounts = computed(() => props.callParticipantCounts ?? {});
 const callParticipants = computed(() => props.callParticipants ?? {});
+const callMediaByRoom = computed(() => props.callMediaByRoom ?? {});
 const dmCallActivities = computed(() => props.dmCallActivities ?? {});
 const callState = useStore($callState);
 const currentActiveDmPeer = computed(() => {
@@ -153,6 +163,7 @@ const discoveredCallEntries = computed<CallActivityDockEntry[]>(() => buildCallA
   managedMucDomain: props.managedMucDomain ?? null,
   callParticipantCounts: callParticipantCounts.value,
   callParticipants: callParticipants.value,
+  callMediaByRoom: callMediaByRoom.value,
   dmCallActivities: dmCallActivities.value,
 }));
 const currentCallFallbackEntry = computed<CallActivityDockEntry | null>(() =>
@@ -217,6 +228,45 @@ function selectCallEntry(entry: CallActivityDockEntry) {
   }
 }
 
+function canEndCallEntry(entry: CallActivityDockEntry): boolean {
+  if (entry.kind === "channel") return canLeaveRetainedChannelCallEntry(entry);
+  return canEndRecoveredDmCallActivity(entry, callState.value, props.selfFullJid ?? null);
+}
+
+function endCallEntry(entry: CallActivityDockEntry): void {
+  if (!canEndCallEntry(entry)) return;
+  if (entry.kind === "channel") {
+    emit("leaveChannelCall", entry.roomJid);
+    return;
+  }
+  emit("endDm", entry.peerJid, entry.sid);
+}
+
+function endCallEntryLabel(entry: CallActivityDockEntry): string {
+  if (entry.kind === "channel") return `Leave ${entry.title} call`;
+  const media = entry.mediaKnown !== false
+    ? `${entry.media.video ? "video" : "voice"} call`
+    : "call";
+  return `End ${entry.title} ${media}`;
+}
+
+function endCallEntryButtonText(entry: CallActivityDockEntry): string {
+  return entry.kind === "channel" ? "Leave call" : "End call";
+}
+
+function canLeaveRetainedChannelCallEntry(entry: Extract<CallActivityDockEntry, { kind: "channel" }>): boolean {
+  const roomJid = normalizeMucCallRoomJid(entry.roomJid);
+  if (!roomJid || currentMucCallRoomJid() === roomJid) return false;
+  return readRoomHasActiveCall(roomJid).localResourceInCall;
+}
+
+function currentMucCallRoomJid(): string {
+  const current = callState.value;
+  if (current.phase !== "active" && current.phase !== "muc-pending") return "";
+  if (current.kind !== "muc") return "";
+  return normalizeMucCallRoomJid(current.peer);
+}
+
 function isCurrentCallEntry(entry: CallActivityDockEntry): boolean {
   const current = callState.value;
   if (current.phase === "muc-pending" || (current.phase === "active" && current.kind === "muc")) {
@@ -224,7 +274,8 @@ function isCurrentCallEntry(entry: CallActivityDockEntry): boolean {
     return normalizeMucCallRoomJid(entry.roomJid) === normalizeMucCallRoomJid(current.peer);
   }
   if (current.phase !== "active" || current.kind !== "dm" || entry.kind !== "dm") return false;
-  return entry.peerJid.toLowerCase() === barePeerJid(current.peer).toLowerCase();
+  return entry.peerJid.toLowerCase() === barePeerJid(current.peer).toLowerCase() &&
+    entry.sid === current.sid;
 }
 
 function isSameCallEntry(target: CallActivityDockEntry): (entry: CallActivityDockEntry) => boolean {
@@ -234,7 +285,8 @@ function isSameCallEntry(target: CallActivityDockEntry): (entry: CallActivityDoc
       return normalizeMucCallRoomJid(target.roomJid) === normalizeMucCallRoomJid(entry.roomJid);
     }
     if (target.kind === "dm" && entry.kind === "dm") {
-      return target.peerJid.toLowerCase() === entry.peerJid.toLowerCase();
+      return target.peerJid.toLowerCase() === entry.peerJid.toLowerCase() &&
+        target.sid === entry.sid;
     }
     return false;
   };
@@ -262,6 +314,7 @@ function buildCurrentCallFallbackEntry(): CallActivityDockEntry | null {
       title: channel?.name ?? roomJid.split("@")[0] ?? "Group call",
       participantCount: Math.max(fallbackLabels.length, 1),
       participantLabels: fallbackLabels,
+      media: current.media,
       isKnownChannel: Boolean(channel),
       isActive: false,
     };
@@ -335,8 +388,7 @@ function channelCallCount(channel: ChannelSummary): number {
 }
 
 function dmCallActivityFor(peerJid: string) {
-  const normalized = barePeerJid(peerJid).toLowerCase();
-  return normalized ? dmCallActivities.value[normalized] ?? null : null;
+  return dmCallActivitiesForPeer(dmCallActivities.value, peerJid, props.selfFullJid ?? null)[0] ?? null;
 }
 
 function groupActivity(groupId: string): HomeActivitySummary {
@@ -454,7 +506,10 @@ function callEntryStatus(entry: CallActivityDockEntry): string {
 }
 
 function callEntryKindLabel(entry: CallActivityDockEntry): string {
-  if (entry.kind === "channel") return entry.isKnownChannel ? "Group call" : "Group call syncing";
+  if (entry.kind === "channel") {
+    const media = entry.media.video ? "Group video call" : "Group call";
+    return entry.isKnownChannel ? media : `${media} syncing`;
+  }
   if (entry.mediaKnown === false) return "Call";
   return entry.media.video ? "Video call" : "Voice call";
 }
@@ -488,6 +543,14 @@ function callEntryAcceptedAvailability(entry: CallActivityDockEntry): {
     };
   }
   if (reason === "expired-token" || reason === "invalid-token") {
+    if (canEndRecoveredDmCallActivity(entry, callState.value, props.selfFullJid ?? null)) {
+      return {
+        eyebrow: "Recovered after refresh",
+        meta: `${mediaTitle} · End available`,
+        description: `The saved reconnect details expired, but this tab can still end the call.`,
+        tone: "warning",
+      };
+    }
     return {
       eyebrow: "Expired",
       meta: `${mediaTitle} · Expired`,
@@ -537,6 +600,10 @@ function callEntryDescription(entry: CallActivityDockEntry): string {
     const noun = entry.participantCount === 1 ? "person" : "people";
     const location = entry.isKnownChannel ? "this channel" : "the channel";
     const preview = callEntryParticipantPreview(entry);
+    if (entry.media.video) {
+      if (preview) return `${entry.participantCount} ${noun} connected to the video call in ${location}: ${preview}.`;
+      return `${entry.participantCount} ${noun} connected to the video call in ${location}.`;
+    }
     if (preview) return `${entry.participantCount} ${noun} connected in ${location}: ${preview}.`;
     return `${entry.participantCount} ${noun} connected in ${location}.`;
   }
@@ -641,7 +708,7 @@ function callEntryActionLabel(entry: CallActivityDockEntry): string {
     case "answer":
       return "Answer";
     case "join":
-      return "Join";
+      return entry.kind === "channel" && canLeaveRetainedChannelCallEntry(entry) ? "Rejoin" : "Join";
     case "return":
       return "Return";
     case "reconnect":
@@ -812,72 +879,88 @@ function onHeroCta() {
           </div>
         </div>
         <div class="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
-          <button
+          <div
             v-for="entry in activeCallEntries"
             :key="entry.key"
             class="chat-list-row flex min-w-0 min-h-24 flex-col items-stretch justify-between gap-3 overflow-hidden rounded-lg border px-4 py-3 text-left text-foreground transition-colors"
             :class="callEntryToneClass(entry)"
-            type="button"
-            :aria-label="callEntryLabel(entry)"
-            @click="selectCallEntry(entry)"
           >
-            <span class="flex min-w-0 items-start gap-3">
-              <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border shadow-sm" :class="callEntryIconClass(entry)">
-                <Hash v-if="entry.kind === 'channel'" class="h-4 w-4" aria-hidden="true" />
-                <Video v-else-if="entry.mediaKnown !== false && entry.media.video" class="h-4 w-4" aria-hidden="true" />
-                <PhoneIncoming v-else-if="entry.state === 'ringing' && entry.direction === 'incoming'" class="h-4 w-4" aria-hidden="true" />
-                <PhoneOutgoing v-else-if="entry.state === 'ringing' && entry.direction === 'outgoing'" class="h-4 w-4" aria-hidden="true" />
-                <Phone v-else class="h-4 w-4" aria-hidden="true" />
-              </span>
-              <span class="min-w-0 flex-1">
-                <span class="type-meta flex items-center gap-1.5" :class="callEntryAccentClass(entry)">
-                  <span class="h-1.5 w-1.5 rounded-full" :class="callEntryDotClass(entry)" aria-hidden="true" />
-                  <span class="truncate">{{ callEntryEyebrow(entry) }}</span>
+            <button
+              class="flex min-w-0 flex-1 flex-col items-stretch justify-between gap-3 text-left"
+              type="button"
+              :aria-label="callEntryLabel(entry)"
+              @click="selectCallEntry(entry)"
+            >
+              <span class="flex min-w-0 items-start gap-3">
+                <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border shadow-sm" :class="callEntryIconClass(entry)">
+                  <Video v-if="entry.kind === 'channel' && entry.media.video" class="h-4 w-4" aria-hidden="true" />
+                  <Hash v-else-if="entry.kind === 'channel'" class="h-4 w-4" aria-hidden="true" />
+                  <Video v-else-if="entry.mediaKnown !== false && entry.media.video" class="h-4 w-4" aria-hidden="true" />
+                  <PhoneIncoming v-else-if="entry.state === 'ringing' && entry.direction === 'incoming'" class="h-4 w-4" aria-hidden="true" />
+                  <PhoneOutgoing v-else-if="entry.state === 'ringing' && entry.direction === 'outgoing'" class="h-4 w-4" aria-hidden="true" />
+                  <Phone v-else class="h-4 w-4" aria-hidden="true" />
                 </span>
-                <span class="type-control type-strong mt-0.5 block truncate">{{ entry.title }}</span>
-                <span class="type-caption mt-0.5 block text-muted-foreground">
-                  {{ callEntryDescription(entry) }}
-                </span>
-                <span
-                  v-if="entry.kind === 'channel' && callEntryParticipantPreview(entry)"
-                  class="mt-2 flex min-w-0 items-center gap-2 text-muted-foreground"
-                  :title="`${callEntryParticipantPreview(entry)} in call`"
-                >
-                  <span class="flex shrink-0 pl-0.5" aria-hidden="true">
-                    <span
-                      v-for="label in callEntryVisibleParticipantLabels(entry)"
-                      :key="`${entry.key}:${label}`"
-                      class="-ml-0.5 flex h-5 w-5 first:ml-0 items-center justify-center rounded-full border border-background bg-success/15 text-[0.625rem] font-bold leading-none text-success-foreground"
-                    >
-                      {{ callEntryParticipantInitial(label) }}
+                <span class="min-w-0 flex-1">
+                  <span class="type-meta flex items-center gap-1.5" :class="callEntryAccentClass(entry)">
+                    <span class="h-1.5 w-1.5 rounded-full" :class="callEntryDotClass(entry)" aria-hidden="true" />
+                    <span class="truncate">{{ callEntryEyebrow(entry) }}</span>
+                  </span>
+                  <span class="type-control type-strong mt-0.5 block truncate">{{ entry.title }}</span>
+                  <span class="type-caption mt-0.5 block text-muted-foreground">
+                    {{ callEntryDescription(entry) }}
+                  </span>
+                  <span
+                    v-if="entry.kind === 'channel' && callEntryParticipantPreview(entry)"
+                    class="mt-2 flex min-w-0 items-center gap-2 text-muted-foreground"
+                    :title="`${callEntryParticipantPreview(entry)} in call`"
+                  >
+                    <span class="flex shrink-0 pl-0.5" aria-hidden="true">
+                      <span
+                        v-for="label in callEntryVisibleParticipantLabels(entry)"
+                        :key="`${entry.key}:${label}`"
+                        class="-ml-0.5 flex h-5 w-5 first:ml-0 items-center justify-center rounded-full border border-background bg-success/15 text-[0.625rem] font-bold leading-none text-success-foreground"
+                      >
+                        {{ callEntryParticipantInitial(label) }}
+                      </span>
+                    </span>
+                    <span class="type-meta min-w-0 truncate">
+                      {{ callEntryParticipantPreview(entry) }}
                     </span>
                   </span>
-                  <span class="type-meta min-w-0 truncate">
-                    {{ callEntryParticipantPreview(entry) }}
-                  </span>
                 </span>
               </span>
-            </span>
-            <span class="flex min-w-0 items-center gap-2">
-              <span class="type-meta min-w-0 flex-1 truncate text-muted-foreground">{{ callEntryDetail(entry) }}</span>
-              <span
-                v-if="entry.kind === 'channel'"
-                class="type-count-badge inline-flex min-w-[18px] h-[18px] shrink-0 items-center justify-center rounded-full border px-1"
-                :class="callEntryPillClass(entry)"
-                aria-hidden="true"
-              >
-                {{ entry.participantCount }}
+              <span class="flex min-w-0 items-center gap-2">
+                <span class="type-meta min-w-0 flex-1 truncate text-muted-foreground">{{ callEntryDetail(entry) }}</span>
+                <span
+                  v-if="entry.kind === 'channel'"
+                  class="type-count-badge inline-flex min-w-[18px] h-[18px] shrink-0 items-center justify-center rounded-full border px-1"
+                  :class="callEntryPillClass(entry)"
+                  aria-hidden="true"
+                >
+                  {{ entry.participantCount }}
+                </span>
+                <span
+                  class="type-meta shrink-0 rounded-full border px-2 py-1"
+                  :class="callEntryPillClass(entry)"
+                  aria-hidden="true"
+                >
+                  {{ callEntryActionLabel(entry) }}
+                </span>
+                <ArrowRight class="h-4 w-4 shrink-0" :class="callEntryAccentClass(entry)" aria-hidden="true" />
               </span>
-              <span
-                class="type-meta shrink-0 rounded-full border px-2 py-1"
-                :class="callEntryPillClass(entry)"
-                aria-hidden="true"
-              >
-                {{ callEntryActionLabel(entry) }}
-              </span>
-              <ArrowRight class="h-4 w-4 shrink-0" :class="callEntryAccentClass(entry)" aria-hidden="true" />
-            </span>
-          </button>
+            </button>
+            <button
+              v-if="canEndCallEntry(entry)"
+              type="button"
+              class="type-meta inline-flex h-8 items-center justify-center gap-1 rounded-full border border-destructive/25 bg-background/70 px-3 text-destructive hover:bg-destructive/10"
+              :title="endCallEntryLabel(entry)"
+              :aria-label="endCallEntryLabel(entry)"
+              @click="endCallEntry(entry)"
+            >
+              <PhoneOff class="h-3.5 w-3.5" aria-hidden="true" />
+              <span>{{ endCallEntryButtonText(entry) }}</span>
+            </button>
+          </div>
         </div>
       </section>
 

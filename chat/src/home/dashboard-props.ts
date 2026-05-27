@@ -3,6 +3,7 @@ import type { RosterContact } from "@/lib/xmpp/types";
 import type { DmConversation } from "@/lib/xmpp-client";
 import type { ChannelUnreadMap } from "@/home/activity";
 import type { DmCallActivity } from "@/lib/calls/dm-call-activity";
+import type { CallMedia } from "@/lib/calls/types";
 
 export interface HomeDashboardProps {
   spaces: SpaceSummary[];
@@ -14,6 +15,7 @@ export interface HomeDashboardProps {
   dmConversations?: DmConversation[];
   callParticipantCounts?: Record<string, number>;
   callParticipants?: Record<string, string[]>;
+  callMediaByRoom?: Record<string, CallMedia>;
   dmCallActivities?: Record<string, DmCallActivity>;
   managedMucDomain?: string | null;
   selfFullJid?: string | null;
@@ -39,6 +41,7 @@ export function buildHomeDashboardProps(sources: HomeDashboardSources): HomeDash
     dmConversations: sources.dmConversations,
     callParticipantCounts: sources.callParticipantCounts,
     callParticipants: sources.callParticipants,
+    callMediaByRoom: sources.callMediaByRoom,
     dmCallActivities: sources.dmCallActivities,
     managedMucDomain: sources.managedMucDomain,
     selfFullJid: sources.selfFullJid,

@@ -132,6 +132,7 @@ const emit = defineEmits<{
   leaveChannelCall: [roomJid: string];
   answerDm: [peerJid: string, remoteFullJid: string, sid: string, media: CallMedia];
   reconnectDm: [peerJid: string, media: CallMedia];
+  endDm: [peerJid: string, sid?: string];
   refreshUpdate: [];
   loadOlder: [];
   retryLoad: [];
@@ -911,6 +912,7 @@ function dayDividerLabel(createdAt: string): string {
       @leave-channel-call="(roomJid) => emit('leaveChannelCall', roomJid)"
       @answer-dm="(peerJid, remoteFullJid, sid, media) => emit('answerDm', peerJid, remoteFullJid, sid, media)"
       @reconnect-dm="(peerJid, media) => emit('reconnectDm', peerJid, media)"
+      @end-dm="(peerJid, sid) => emit('endDm', peerJid, sid)"
     />
     <div
       v-if="connectionNotice && connectionStatusClasses"
