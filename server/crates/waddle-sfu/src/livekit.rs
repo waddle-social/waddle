@@ -218,9 +218,12 @@ impl LiveKitSfu {
         let permits = Arc::clone(&self.admin_permits);
         let calls = Arc::clone(&self.calls);
         runtime.spawn(async move {
-            // `acquire_owned` returns `Err` only if the semaphore was
-            // closed — which only happens if the SFU itself is being
-            // dropped, in which case admitting more tasks is moot.
+            // `acquire_owned` returns `Err` only when the semaphore is
+            // explicitly `close()`d. Production code never closes
+            // `admin_permits`, so the `Err` arm is unreachable today;
+            // the early-return is defensive scaffolding for a future
+            // shutdown hook that may want to drain pending teardowns
+            // without admitting new ones.
             let Ok(_permit) = permits.acquire_owned().await else {
                 return;
             };

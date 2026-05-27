@@ -260,13 +260,12 @@ struct DeleteRoomRequest {
 /// here; `msg` is human-text and may carry the operator's room name
 /// verbatim, so it intentionally never participates in control flow.
 #[derive(Deserialize)]
-struct TwirpError<'a> {
-    #[serde(borrow)]
-    code: Option<std::borrow::Cow<'a, str>>,
+struct TwirpError {
+    code: Option<String>,
 }
 
 fn is_twirp_not_found(body: &str) -> bool {
-    serde_json::from_str::<TwirpError<'_>>(body)
+    serde_json::from_str::<TwirpError>(body)
         .ok()
         .and_then(|env| env.code)
         .is_some_and(|c| c == "not_found")
