@@ -94,7 +94,9 @@ export async function leaveRetainedMucCallAction({
       false,
       false,
     );
-    clearMucCallParticipant(roomJid, selfNick, selfFullJid);
+    clearMucCallParticipant(roomJid, selfNick, selfFullJid, {
+      includeAggregate: true,
+    });
   } catch (err) {
     reportCallError(err);
     return false;

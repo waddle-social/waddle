@@ -33,6 +33,7 @@ import {
   hasKnownDmCallMedia,
 } from "@/lib/calls/dm-call-activity";
 import {
+  callRoomJidForChannel,
   callParticipantCountForChannel,
   mucCallParticipantPreview,
 } from "@/lib/calls/muc-call-indicators";
@@ -387,6 +388,36 @@ function channelCallCount(channel: ChannelSummary): number {
   );
 }
 
+function channelCallRoomJid(channel: ChannelSummary): string {
+  return callRoomJidForChannel(
+    channel,
+    callParticipantCounts.value,
+    activeChannelJids.value,
+    props.managedMucDomain ?? null,
+  );
+}
+
+function channelCallEntry(channel: ChannelSummary): Extract<CallActivityDockEntry, { kind: "channel" }> | null {
+  const roomJid = channelCallRoomJid(channel);
+  if (!roomJid) return null;
+  return activeCallEntries.value.find((entry): entry is Extract<CallActivityDockEntry, { kind: "channel" }> =>
+    entry.kind === "channel" &&
+    (
+      entry.channelId === channel.id ||
+      normalizeMucCallRoomJid(entry.roomJid) === roomJid
+    )
+  ) ?? null;
+}
+
+function selectHomeChannel(channel: ChannelSummary): void {
+  const callEntry = channelCallEntry(channel);
+  if (callEntry) {
+    selectCallEntry(callEntry);
+    return;
+  }
+  emit("selectChannel", channel.id);
+}
+
 function dmCallActivityFor(peerJid: string) {
   return dmCallActivitiesForPeer(dmCallActivities.value, peerJid, props.selfFullJid ?? null)[0] ?? null;
 }
@@ -473,10 +504,23 @@ function dmCallLabel(peerJid: string): string {
 
 function channelHomeAriaLabel(channel: ChannelSummary): string {
   const base = channelHomeLabel(channel, channelActivity(channel), activityStamp(channelActivity(channel).lastUpdated));
-  const count = channelCallCount(channel);
+  const callEntry = channelCallEntry(channel);
+  const count = callEntry?.participantCount ?? channelCallCount(channel);
   if (count <= 0) return base;
   const noun = count === 1 ? "person" : "people";
-  return `${base}, active call with ${count} ${noun}`;
+  const action = callEntry ? channelCallActionHint(callEntry) : "click to open call";
+  return `${base}, active call with ${count} ${noun}, ${action}`;
+}
+
+function channelCallActionHint(entry: Extract<CallActivityDockEntry, { kind: "channel" }>): string {
+  switch (callActivityDockAction(entry, callState.value, props.selfFullJid ?? null)) {
+    case "join":
+      return canLeaveRetainedChannelCallEntry(entry) ? "click to rejoin call" : "click to join call";
+    case "return":
+      return "click to return to call";
+    default:
+      return "click to open call";
+  }
 }
 
 function dmHomeAriaLabel(conversation: {
@@ -782,6 +826,7 @@ const heroQuietMessage = computed(() => {
 });
 
 const heroPrimaryChannel = computed<ChannelSummary | undefined>(() => {
+  if (heroPrimaryCall.value) return undefined;
   let best: ChannelSummary | undefined;
   let bestActivity: ChannelActivityState | undefined;
   for (const channel of props.channels) {
@@ -795,14 +840,31 @@ const heroPrimaryChannel = computed<ChannelSummary | undefined>(() => {
   return best;
 });
 
+const heroPrimaryCall = computed<CallActivityDockEntry | null>(() =>
+  activeCallEntries.value[0] ?? null,
+);
+
 const heroCtaLabel = computed(() => {
+  const call = heroPrimaryCall.value;
+  if (call) return heroCallCtaLabel(call);
   const channel = heroPrimaryChannel.value;
   return channel ? `Jump into ${channel.name}` : "Browse channels";
 });
 
 function onHeroCta() {
+  const call = heroPrimaryCall.value;
+  if (call) {
+    selectCallEntry(call);
+    return;
+  }
   const channel = heroPrimaryChannel.value;
   if (channel) emit("selectChannel", channel.id);
+}
+
+function heroCallCtaLabel(entry: CallActivityDockEntry): string {
+  const action = callEntryActionLabel(entry);
+  if (action === "Return") return `Return to ${entry.title} call`;
+  return `${action} ${entry.title} call`;
 }
 </script>
 
@@ -830,9 +892,10 @@ function onHeroCta() {
             <template v-else>{{ heroQuietMessage }}</template>
           </p>
           <button
-            v-if="heroPrimaryChannel"
+            v-if="heroPrimaryCall || heroPrimaryChannel"
             type="button"
             class="home-hero__cta"
+            :aria-label="heroCtaLabel"
             @click="onHeroCta"
           >
             {{ heroCtaLabel }}
@@ -1065,7 +1128,7 @@ function onHeroCta() {
                     : ''"
                 type="button"
                 :aria-label="channelHomeAriaLabel(channel)"
-                @click="emit('selectChannel', channel.id)"
+                @click="selectHomeChannel(channel)"
               >
                 <component :is="isForumChannel(channel) ? MessagesSquare : Hash" class="h-3.5 w-3.5 text-primary/70" />
                 <span class="min-w-0 flex-1">

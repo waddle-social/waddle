@@ -100,11 +100,12 @@ export function clearMucCallParticipant(
   roomJid: string,
   nick: string,
   realJid?: string | null,
+  options: { includeAggregate?: boolean } = {},
 ): void {
   const normalized = normalizeMucCallRoomJid(roomJid);
   if (!normalized || !nick) return;
   removeActiveParticipant(normalized, nick, realJid, {
-    includeAggregate: !realJid,
+    includeAggregate: options.includeAggregate ?? !realJid,
   });
   if (realJid) return;
   const current = $mucCallParticipants.get()[normalized] ?? [];

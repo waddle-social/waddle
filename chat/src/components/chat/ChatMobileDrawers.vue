@@ -26,6 +26,13 @@ import type { ChatAppController } from "@/shell/chat-app-controller";
 
 const props = defineProps<{
   controller: ChatAppController;
+  activeChannelCallCount?: number;
+  activeDmCallCount?: number;
+  callParticipantCounts?: Record<string, number>;
+  callParticipants?: Record<string, string[]>;
+  callMediaByRoom?: Record<string, CallMedia>;
+  managedMucDomain?: string | null;
+  selfFullJid?: string | null;
   joinChannelCall?: (channelId: string | null, roomJid: string, media: CallMedia) => void;
   leaveChannelCall?: (roomJid: string) => void;
   answerDm?: (peerJid: string, remoteFullJid: string, sid: string, media: CallMedia) => void;
@@ -109,20 +116,34 @@ const mucCallParticipantsStore = useStore($mucCallParticipants);
 const mucCallMediaStore = useStore($mucCallMedia);
 const dmCallActivitiesStore = useStore($dmCallActivities);
 const callStateStore = useStore($callState);
-const callParticipantCounts = computed<Record<string, number>>(() => {
+const fallbackCallParticipantCounts = computed<Record<string, number>>(() => {
   return mucCallParticipantCounts(mucCallParticipantsStore.value);
 });
-const activeChannelCallCount = computed(() => {
-  return activeChannelRailCallCount(callParticipantCounts.value, callStateStore.value);
-});
-const activeDmCallCount = computed(() => {
-  return activeDmRailCallCount(dmCallActivitiesStore.value, callStateStore.value);
-});
-const managedMucDomain = computed(() =>
-  normalizeMucServiceDomain(waddles.mucServiceJid.value) || (selfDomain.value ? `muc.${selfDomain.value}` : ""),
+const visibleCallParticipantCounts = computed<Record<string, number>>(() =>
+  props.callParticipantCounts ?? fallbackCallParticipantCounts.value,
 );
-const selfFullJid = computed(() =>
-  (connectionStore.client as unknown as { fullJid?: string } | null)?.fullJid ?? null
+const visibleCallParticipants = computed<Record<string, string[]>>(() =>
+  props.callParticipants ?? mucCallParticipantsStore.value,
+);
+const visibleCallMediaByRoom = computed<Record<string, CallMedia>>(() =>
+  props.callMediaByRoom ?? mucCallMediaStore.value,
+);
+const visibleActiveChannelCallCount = computed(() => {
+  return props.activeChannelCallCount ??
+    activeChannelRailCallCount(visibleCallParticipantCounts.value, callStateStore.value);
+});
+const visibleActiveDmCallCount = computed(() => {
+  return props.activeDmCallCount ??
+    activeDmRailCallCount(dmCallActivitiesStore.value, callStateStore.value);
+});
+const visibleManagedMucDomain = computed(() =>
+  props.managedMucDomain ??
+  (normalizeMucServiceDomain(waddles.mucServiceJid.value) || (selfDomain.value ? `muc.${selfDomain.value}` : "")),
+);
+const visibleSelfFullJid = computed(() =>
+  props.selfFullJid ??
+  (connectionStore.client as unknown as { fullJid?: string } | null)?.fullJid ??
+  null
 );
 
 const drawerExtensionRoutes = computed(() =>
@@ -161,8 +182,8 @@ function openExtensionRoute(route: DiscoveredExtensionRoute) {
             :active-sidebar-mode="ui.sidebarMode.value"
             :active-page="ui.activePage.value"
             :has-unread-dms="dmConversations.hasUnread.value"
-            :active-channel-call-count="activeChannelCallCount"
-            :active-dm-call-count="activeDmCallCount"
+            :active-channel-call-count="visibleActiveChannelCallCount"
+            :active-dm-call-count="visibleActiveDmCallCount"
             :session="null"
             horizontal
             @open-home="openHome"
@@ -184,10 +205,10 @@ function openExtensionRoute(route: DiscoveredExtensionRoute) {
           :active-channel-jids="messaging.activeChannels.value"
           :collapsed-group-ids="ui.collapsedSpaceGroupIds.value"
           :channel-unread-map="computedChannelUnreadMap"
-          :call-participant-counts="callParticipantCounts"
-          :call-participants="mucCallParticipantsStore"
-          :call-media-by-room="mucCallMediaStore"
-          :managed-muc-domain="managedMucDomain"
+          :call-participant-counts="visibleCallParticipantCounts"
+          :call-participants="visibleCallParticipants"
+          :call-media-by-room="visibleCallMediaByRoom"
+          :managed-muc-domain="visibleManagedMucDomain"
           :thread-entries-fn="(roomJid: string) => channelUnread.threadEntries(roomJid)"
           :active-community-surface="ui.activeCommunitySurface.value"
           :stories-active-count="stories.activeStories.value.length"
@@ -210,7 +231,7 @@ function openExtensionRoute(route: DiscoveredExtensionRoute) {
           v-else
           :conversations="dmConversations.conversations.value"
           :active-peer-jid="dmConversations.activePeerJid.value"
-          :self-full-jid="selfFullJid"
+          :self-full-jid="visibleSelfFullJid"
           hide-current-call
           class="!w-full !border-r-0 !flex-1"
           @answer-dm="answerDmFromMobile"

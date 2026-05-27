@@ -1144,10 +1144,14 @@ describe("CallActivityDock rendering", () => {
     expect(mobileDrawers).toContain("@answer-dm=\"answerDmFromMobile\"");
     expect(mobileDrawers).toContain("@reconnect-dm=\"reconnectDmFromMobile\"");
     expect(mobileDrawers).toContain("@end-dm=\"endDmFromMobile\"");
-    expect(mobileDrawers).toContain(":active-channel-call-count=\"activeChannelCallCount\"");
-    expect(mobileDrawers).toContain(":active-dm-call-count=\"activeDmCallCount\"");
-    expect(mobileDrawers).toContain(":call-participants=\"mucCallParticipantsStore\"");
-    expect(mobileDrawers).toContain(":call-media-by-room=\"mucCallMediaStore\"");
+    expect(readyShell).toContain(":call-participants=\"retainedMucCallParticipantsStore\"");
+    expect(readyShell).toContain(":active-channel-call-count=\"activeChannelCallCount\"");
+    expect(mobileDrawers).toContain(":active-channel-call-count=\"visibleActiveChannelCallCount\"");
+    expect(mobileDrawers).toContain(":active-dm-call-count=\"visibleActiveDmCallCount\"");
+    expect(mobileDrawers).toContain("visibleCallParticipants");
+    expect(mobileDrawers).toContain(":call-participants=\"visibleCallParticipants\"");
+    expect(mobileDrawers).toContain(":call-media-by-room=\"visibleCallMediaByRoom\"");
+    expect(mobileDrawers).toContain(":managed-muc-domain=\"visibleManagedMucDomain\"");
     expect(mobileDrawers).toContain("@toggle-dms=\"openDmList\"");
     expect(mobileDrawers).toContain("hide-current-call");
     expect(callActivityDock).toContain("entry.peerJid.toLowerCase() === barePeerJid(current.peer).toLowerCase()");
@@ -1170,6 +1174,7 @@ describe("CallActivityDock rendering", () => {
     expect(chatHeader).toContain("showCallActivePill?: boolean");
     expect(chatHeader).toContain("showDmCallActivityControls?: boolean");
     expect(chatHeader).toContain("hideMucStartControlsWhenActiveCall?: boolean");
+    expect(chatHeader).toContain("showDmCallActivityStatus");
     expect(chatHeader).toContain(":show-activity-controls=\"showDmCallActivityControls !== false\"");
     expect(chatHeader).toContain(":show-active-pill=\"showCallActivePill !== false\"");
     expect(chatHeader).toContain(":hide-start-controls-when-active-call=\"hideMucStartControlsWhenActiveCall\"");
@@ -2598,6 +2603,35 @@ describe("CallActivityDock rendering", () => {
     expect(forwarded).toEqual([["bob@example.com"]]);
   });
 
+  test("mobile drawer can receive retained hard-refresh group call state from the shell", async () => {
+    const bindings = await setupVueComponent("../src/components/chat/ChatMobileDrawers.vue", {
+      controller: {
+        connectionStore: { client: null, session: null },
+        waddles: { mucServiceJid: { value: "conference.example.com" } },
+        selfDomain: { value: "example.com" },
+      },
+      activeChannelCallCount: 1,
+      callParticipantCounts: { "general@conference.example.com": 1 },
+      callParticipants: { "general@conference.example.com": ["alice"] },
+      callMediaByRoom: { "general@conference.example.com": { audio: true, video: true } },
+      managedMucDomain: "conference.example.com",
+      selfFullJid: "alice@example.com/web",
+    });
+
+    expect(setupBindingRefValue(bindings, "visibleActiveChannelCallCount")).toBe(1);
+    expect(setupBindingRefValue(bindings, "visibleCallParticipantCounts")).toEqual({
+      "general@conference.example.com": 1,
+    });
+    expect(setupBindingRefValue(bindings, "visibleCallParticipants")).toEqual({
+      "general@conference.example.com": ["alice"],
+    });
+    expect(setupBindingRefValue(bindings, "visibleCallMediaByRoom")).toEqual({
+      "general@conference.example.com": { audio: true, video: true },
+    });
+    expect(setupBindingRefValue(bindings, "visibleManagedMucDomain")).toBe("conference.example.com");
+    expect(setupBindingRefValue(bindings, "visibleSelfFullJid")).toBe("alice@example.com/web");
+  });
+
   test("mobile drawer routes community surfaces through the controller", async () => {
     const selected: unknown[][] = [];
     const bindings = await setupVueComponent("../src/components/chat/ChatMobileDrawers.vue", {
@@ -2809,6 +2843,51 @@ describe("CallActivityDock rendering", () => {
 
     expect(emitted).toEqual([
       ["leaveChannelCall", "standup@conference.example.com"],
+    ]);
+  });
+
+  test("home dashboard channel rows join or open live calls through the call action model", async () => {
+    const emitted: unknown[][] = [];
+    const channel = { id: "general", name: "General", jid: "general@conference.example.com", spaceId: "team" };
+    const props = {
+      spaces: [],
+      channels: [channel],
+      contacts: [],
+      isLoading: false,
+      channelUnreadMap: {},
+      activeChannelJids: new Set<string>(),
+      managedMucDomain: "conference.example.com",
+      callParticipantCounts: { "general@conference.example.com": 2 },
+      callParticipants: { "general@conference.example.com": ["alice", "bob"] },
+      callMediaByRoom: { "general@conference.example.com": { audio: true, video: true } },
+      dmConversations: [],
+      selfFullJid: "alice@example.com/web",
+    };
+    const bindings = await suppressVueLifecycleSetupWarnings(() =>
+      setupVueComponent("../src/components/chat/HomeDashboard.vue", props, (...args) => {
+        emitted.push(args);
+      })
+    );
+
+    setupBindingFunction(bindings, "selectHomeChannel")(channel);
+    $callState.set({
+      phase: "active",
+      kind: "dm",
+      peer: "bob@example.com/phone",
+      sid: "dm-live",
+      media: { audio: true, video: false },
+      join: liveKitJoinFor(),
+    });
+    const busyBindings = await suppressVueLifecycleSetupWarnings(() =>
+      setupVueComponent("../src/components/chat/HomeDashboard.vue", props, (...args) => {
+        emitted.push(args);
+      })
+    );
+    setupBindingFunction(busyBindings, "selectHomeChannel")(channel);
+
+    expect(emitted).toEqual([
+      ["joinChannelCall", "general", "general@conference.example.com", { audio: true, video: true }],
+      ["selectChannel", "general", "general@conference.example.com"],
     ]);
   });
 
@@ -3288,6 +3367,34 @@ describe("CallActivityDock rendering", () => {
     expect(withoutRoom).not.toContain('data-vue-stub="true"');
     expect(withRoom).toContain('data-vue-stub="true"');
   });
+
+  test("suppresses the header DM activity status when the conversation banner owns it", async () => {
+    $dmCallActivities.set({
+      "bob@example.com": {
+        peerJid: "bob@example.com",
+        remoteFullJid: "bob@example.com/phone",
+        sid: "dm-live",
+        media: { audio: true, video: true },
+        state: "accepted",
+        direction: "incoming",
+        updatedAt: "2026-05-25T12:00:00.000Z",
+      },
+    });
+    const props = {
+      ...chatHeaderBaseProps(),
+      dmPeer: { peerJid: "bob@example.com", peerUsername: "Bob", presenceShow: "available" },
+    };
+
+    const visible = await renderVueComponent("../src/components/chat/ChatHeader.vue", props);
+    const suppressed = await renderVueComponent("../src/components/chat/ChatHeader.vue", {
+      ...props,
+      showDmCallActivityControls: false,
+    });
+
+    expect(visible).toContain("Video call active");
+    expect(suppressed).not.toContain("Video call active");
+    expect(suppressed).toContain("online");
+  });
 });
 
 function chatHeaderBaseProps(): Record<string, unknown> {
@@ -3463,6 +3570,17 @@ function setupBindingFunction(
     throw new Error(`Expected setup binding ${key} to be a function`);
   }
   return binding as (...args: unknown[]) => unknown;
+}
+
+function setupBindingRefValue<T = unknown>(
+  bindings: Record<string, unknown>,
+  key: string,
+): T {
+  const binding = bindings[key];
+  if (!binding || typeof binding !== "object" || !("value" in binding)) {
+    throw new Error(`Expected setup binding ${key} to be a ref`);
+  }
+  return (binding as { value: T }).value;
 }
 
 async function suppressVueLifecycleSetupWarnings<T>(fn: () => Promise<T>): Promise<T> {

@@ -131,7 +131,9 @@ export function useRoomHasActiveCall(
       return true;
     }
     const fullJid = currentClientFullJid();
-    return hasOwnerFullJid(participantOwners.value[room] ?? [], fullJid) ||
+    const owners = participantOwners.value[room] ?? [];
+    return hasOwnerFullJid(owners, fullJid) ||
+      hasUnownedSelfNick(owners, connectionStore.session?.username ?? null, participantList.value) ||
       hasPendingMucCallTerminateSession(pendingTerminates.value, room, fullJid);
   });
 
@@ -178,6 +180,7 @@ export function readRoomHasActiveCall(roomJid: string): {
         normalizeMucCallRoomJid(s.peer) === normalized
       ) ||
       hasOwnerFullJid(participantOwners, fullJid) ||
+      hasUnownedSelfNick(participantOwners, nick, participants) ||
       pendingTerminate,
     participantCount: Math.max(participants.length, pendingTerminate ? 1 : 0),
     media: mediaForRoom(normalized, s),
@@ -194,6 +197,15 @@ function hasOwnerFullJid(
 ): boolean {
   if (!fullJid) return false;
   return owners.some((owner) => fullJidIdentityKey(owner.realJid) === fullJid);
+}
+
+function hasUnownedSelfNick(
+  owners: ReadonlyArray<{ nick: string; realJid?: string }>,
+  nick: string | null | undefined,
+  participants: ReadonlyArray<string>,
+): boolean {
+  if (!nick || !participants.includes(nick)) return false;
+  return owners.some((owner) => owner.nick === nick && !fullJidIdentityKey(owner.realJid));
 }
 
 /**

@@ -405,6 +405,13 @@ onUnmounted(() => {
   <div v-else class="chat-app-shell">
     <ChatMobileDrawers
       :controller="controller"
+      :active-channel-call-count="activeChannelCallCount"
+      :active-dm-call-count="activeDmCallCount"
+      :call-participant-counts="callParticipantCounts"
+      :call-participants="retainedMucCallParticipantsStore"
+      :call-media-by-room="mucCallMediaStore"
+      :managed-muc-domain="managedMucDomain"
+      :self-full-jid="selfFullJid"
       :join-channel-call="joinChannelCallFromActivity"
       :leave-channel-call="leaveRetainedChannelCall"
       :answer-dm="answerDmFromActivity"

@@ -256,6 +256,25 @@ describe("readRoomHasActiveCall selector", () => {
     });
   });
 
+  test("treats ownerless self Muji presence as a retained local resource after refresh", () => {
+    setSession("alice");
+    connectionStore.client = { fullJid: "alice@waddle.test/web" } as unknown as typeof connectionStore.client;
+    $callState.set({ phase: "idle" });
+    applyMucCallPresence({
+      from: `${ROOM}/alice`,
+      presence_type: "available",
+      muji: { preparing: false, active: true },
+    });
+
+    expect(readRoomHasActiveCall(ROOM)).toEqual({
+      hasActiveCall: true,
+      selfInCall: true,
+      localResourceInCall: true,
+      participantCount: 1,
+      media: { audio: true, video: false },
+    });
+  });
+
   test("preserves resourcepart case when matching Muji ownership to this browser", () => {
     setSession("alice");
     connectionStore.client = { fullJid: "alice@waddle.test/Web" } as unknown as typeof connectionStore.client;

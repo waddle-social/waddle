@@ -398,12 +398,56 @@ describe("HomeDashboard activity rendering", () => {
     expect(html).toContain("2 people connected in this channel: alice, bob.");
     expect(html).toContain("alice, bob");
     expect(html).toContain("The video call is still live.");
+    expect(buttonForLabel(html, "Join General call")).toContain("Join General call");
     expect(html).toContain('aria-label="Join General, Group call, 2 people, Live now, 2 people connected in this channel: alice, bob., Group call"');
     expect(html).toContain(`aria-label="Reconnect Bob, Video call, Live, Live now, The video call is still live., Live video call · Updated ${updated}"`);
     expect(buttonForLabel(html, "Join General, Group call, 2 people, Live now, 2 people connected in this channel: alice, bob., Group call")).toContain("Join");
-    expect(buttonForLabel(html, "General, channel, no unread activity, active call with 2 people")).toContain("Active call");
+    expect(buttonForLabel(html, "General, channel, no unread activity, active call with 2 people, click to join call")).toContain("Active call");
     expect(buttonForLabel(html, `Reconnect Bob, Video call, Live, Live now, The video call is still live., Live video call · Updated ${updated}`)).toContain("Live");
     expect(html).not.toContain("Bob (bob@example.com), direct message, available, no unread activity, Video call live");
+  });
+
+  test("promotes refresh-discovered direct calls into the home hero action", async () => {
+    const html = await renderHomeDashboard({
+      spaces: [],
+      channels: [],
+      contacts: [],
+      isLoading: false,
+      channelUnreadMap: {},
+      activeChannelJids: new Set<string>(),
+      managedMucDomain: "conference.example.com",
+      callParticipantCounts: {},
+      dmConversations: [
+        {
+          peerJid: "bob@example.com",
+          peerUsername: "Bob",
+          unreadCount: 0,
+          presenceShow: "available",
+        },
+      ],
+      dmCallActivities: {
+        "bob@example.com": {
+          peerJid: "bob@example.com",
+          remoteFullJid: "bob@example.com/phone",
+          sid: "dm-call-hero",
+          media: { audio: true, video: true },
+          join: {
+            url: "wss://livekit.example.test",
+            room: "dm-call-hero",
+            identity: "alice@example.com/web",
+            token: liveKitToken(),
+          },
+          state: "accepted",
+          direction: "incoming",
+          updatedAt: "2026-05-26T00:00:00.000Z",
+        },
+      },
+      selfFullJid: "alice@example.com/web",
+    });
+
+    expect(html).toContain("<strong>1</strong> active call");
+    expect(buttonForLabel(html, "Reconnect Bob call")).toContain("Reconnect Bob call");
+    expect(html).not.toContain("Browse channels");
   });
 
   test("labels non-resumable active direct calls on the home dashboard", async () => {

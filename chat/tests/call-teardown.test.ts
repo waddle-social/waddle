@@ -409,6 +409,33 @@ describe("leaveRetainedMucCallAction", () => {
     });
   });
 
+  test("clears ownerless retained Muji presence after hard reload", async () => {
+    applyMucCallPresence({
+      from: "chan@muc.test/alice",
+      muji: { preparing: false, active: true },
+    });
+    const sender: RawIqSender = {
+      update_muji_presence: mock(async () => undefined),
+    };
+
+    await leaveRetainedMucCallAction({
+      roomJid: "chan@muc.test",
+      getSender: () => sender,
+      getSelfNick: () => "alice",
+      getSelfFullJid: () => "alice@waddle.test/web",
+    });
+
+    expect(sender.update_muji_presence).toHaveBeenCalledWith(
+      "chan@muc.test",
+      "alice",
+      false,
+      false,
+      false,
+    );
+    expect($mucCallParticipants.get()).toEqual({});
+    expect($mucCallParticipantOwners.get()).toEqual({});
+  });
+
   test("terminates the cached Muji Jingle session after clearing retained presence", async () => {
     const sent: unknown[][] = [];
     applyMucCallPresence({
