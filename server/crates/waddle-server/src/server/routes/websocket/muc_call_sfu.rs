@@ -84,13 +84,19 @@ mod tests {
         TurnHost, WebsocketUrl,
     };
 
-    /// Recording fake: captures every `(call_id, identity)` passed to
-    /// `unregister_call_participant`. The other trait methods are
-    /// unimplemented because the production code path under test only
-    /// touches the unregister method.
+    /// Recording fake: captures `(call_id, identity)` separately for
+    /// each teardown dispatch — `unregister_call_participant` (the
+    /// admin-evict path) into `calls`, `note_participant_left` (the
+    /// webhook-bridge local-only path) into `note_calls`. Splitting
+    /// the vecs lets tests assert which trait method was actually
+    /// invoked, mirroring how `waddle-sfu`'s `RecordingAdmin` splits
+    /// `remove_calls` from `delete_calls`. The other trait methods
+    /// are unimplemented because the production code path under
+    /// test only touches the two dispatch surfaces.
     #[derive(Default)]
     struct RecordingSfu {
         calls: Mutex<Vec<(CallId, Identity)>>,
+        note_calls: Mutex<Vec<(CallId, Identity)>>,
     }
 
     impl RecordingSfu {
@@ -128,13 +134,14 @@ mod tests {
         }
 
         fn note_participant_left(&self, call_id: &CallId, identity: &Identity) {
-            // The fake records `note_participant_left` calls into the
-            // same vec — these tests only assert that the helper
-            // dispatches *some* SFU teardown for the room/identity.
-            // The fixture's lifecycle distinction (webhook-driven vs
-            // graceful-unavailable) is exercised in `waddle-sfu`'s
-            // own unit tests.
-            self.calls
+            // Recorded into `note_calls`, NOT `calls`: the two trait
+            // methods imply different downstream effects (admin
+            // RemoveParticipant vs. local-only bookkeeping) and the
+            // tests need to distinguish them. Keeping the dispatch
+            // record separated mirrors how `waddle-sfu`'s
+            // `RecordingAdmin` separates `remove_calls` from
+            // `delete_calls` for the same reason.
+            self.note_calls
                 .lock()
                 .expect("recording lock")
                 .push((call_id.clone(), identity.clone()));

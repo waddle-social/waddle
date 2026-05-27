@@ -108,6 +108,13 @@ impl ReqwestLiveKitAdmin {
         let now = Utc::now();
         let claims = AdminClaims {
             iss: self.api_key.as_str().to_string(),
+            // Admin tokens carry no participant identity. Set `sub`
+            // to the API key so LiveKit access logs attribute the
+            // call to a meaningful subject (instead of dropping the
+            // claim entirely), giving the on-call an audit trail
+            // when correlating admin actions against API-key
+            // rotation events.
+            sub: self.api_key.as_str().to_string(),
             iat: now.timestamp(),
             nbf: (now - ADMIN_JWT_CLOCK_SKEW).timestamp(),
             exp: (now + ADMIN_JWT_TTL).timestamp(),
@@ -224,6 +231,7 @@ pub(crate) fn admin_base_url_from_ws(ws_url: &WebsocketUrl) -> Result<Url, SfuEr
 #[derive(Serialize)]
 struct AdminClaims {
     iss: String,
+    sub: String,
     iat: i64,
     nbf: i64,
     exp: i64,
