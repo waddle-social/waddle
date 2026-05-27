@@ -26,6 +26,7 @@ use base64::Engine;
 use jsonwebtoken::{decode, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use thiserror::Error;
 
 use crate::config::ApiSecret;
@@ -108,7 +109,12 @@ pub fn verify_webhook_signature(
     let computed = Base64Standard.encode(digest);
 
     // Constant-time compare to avoid timing oracles on the body hash.
-    if !constant_time_eq(claimed.as_bytes(), computed.as_bytes()) {
+    // `subtle::ConstantTimeEq` returns false for mismatched lengths
+    // without a length-leaking early exit, so the comparison is
+    // genuinely fixed-time across both equal- and unequal-length
+    // inputs — robust even if LK ever switches to a non-base64 digest
+    // shape that changes the byte length.
+    if claimed.as_bytes().ct_eq(computed.as_bytes()).unwrap_u8() == 0 {
         return Err(WebhookVerifyError::BodyHashMismatch);
     }
 
@@ -131,17 +137,6 @@ fn strip_bearer(header: &str) -> Option<&str> {
         return Some(trimmed);
     }
     None
-}
-
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut acc: u8 = 0;
-    for (x, y) in a.iter().zip(b.iter()) {
-        acc |= x ^ y;
-    }
-    acc == 0
 }
 
 /// Typed projection of LiveKit's documented webhook payloads.

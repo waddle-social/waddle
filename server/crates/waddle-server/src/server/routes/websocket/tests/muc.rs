@@ -1060,6 +1060,10 @@ impl waddle_sfu::SfuService for RecordingSfu {
     fn webhook_secret(&self) -> &waddle_sfu::ApiSecret {
         unimplemented!("not exercised by this test")
     }
+
+    fn participants_for_call(&self, _: &waddle_sfu::CallId) -> Vec<waddle_sfu::Identity> {
+        Vec::new()
+    }
 }
 
 async fn state_with_recording_sfu(

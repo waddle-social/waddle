@@ -218,6 +218,13 @@ impl SfuService for LiveKitSfu {
     fn webhook_secret(&self) -> &crate::config::ApiSecret {
         &self.config.webhook_secret
     }
+
+    fn participants_for_call(&self, call_id: &CallId) -> Vec<Identity> {
+        self.calls
+            .get(call_id)
+            .map(|entry| entry.iter().cloned().collect())
+            .unwrap_or_default()
+    }
 }
 
 #[cfg(test)]

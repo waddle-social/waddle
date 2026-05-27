@@ -258,7 +258,13 @@ function identitiesToNicks(
   for (const identity of identities) {
     const key = fullJidIdentityKey(identity);
     if (!key) continue;
-    const nick = byRealJid.get(key) ?? identity.split("/").pop()?.split("@")[0] ?? identity;
+    // Fall back to the JID's localpart (everything before `@`) when
+    // the Muji-derived owner map hasn't resolved this resource yet.
+    // Earlier this incorrectly used `identity.split("/").pop()` which
+    // returned the *resource* (e.g. `web` for `alice@host/web`); the
+    // localpart is the correct user-facing label until presence catches
+    // up. After: `alice` for `alice@host/web`.
+    const nick = byRealJid.get(key) ?? identity.split("@")[0] ?? identity;
     if (seen.has(nick)) continue;
     seen.add(nick);
     out.push(nick);

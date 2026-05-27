@@ -31,7 +31,7 @@ use axum::Router;
 use jid::{BareJid, FullJid};
 use tracing::{debug, info, warn};
 use waddle_sfu::{
-    verify_webhook_signature, LiveKitWebhookEvent, ParticipantEnvelope, WebhookVerifyError,
+    verify_webhook_signature, CallId, LiveKitWebhookEvent, ParticipantEnvelope, WebhookVerifyError,
 };
 use waddle_xmpp::muc::build_occupant_presence;
 use waddle_xmpp::muc::room_actor::{ClearMujiPresence, MujiPresenceUpdateOutcome};
@@ -139,12 +139,32 @@ async fn livekit_webhook_handler(
             process_participant_left(&state, env).await;
         }
         LiveKitWebhookEvent::RoomFinished(env) => {
-            // Informational. LiveKit guarantees an individual
-            // `participant_left` for every still-connected participant
-            // before `room_finished` fires (per the LK delivery spec),
-            // and each of those is handled by the `ParticipantLeft`
-            // arm above. No additional MUC cleanup is required here.
-            info!(room = %env.room.name, "LiveKit reported room finished");
+            // LiveKit typically emits `participant_left` for every
+            // still-connected participant before `room_finished`, but
+            // each event is retried independently — a brief outage on
+            // our endpoint can exhaust the 5-retry budget for some
+            // participants while later events deliver successfully.
+            // Iterate the SFU registry's surviving identities and
+            // clear each one's MUC state as a safety net so a
+            // straggling participant_left loss can't leave permanent
+            // ghost Muji presence in the room.
+            info!(room = %env.room.name, "LiveKit reported room finished; sweeping surviving participants");
+            if let Ok(call_id) = CallId::new(env.room.name.clone()) {
+                let survivors = sfu.participants_for_call(&call_id);
+                for identity in survivors {
+                    process_participant_left_for_identity(
+                        &state,
+                        &env.room.name,
+                        identity.as_jid().to_string().as_str(),
+                    )
+                    .await;
+                }
+            } else {
+                warn!(
+                    room = %env.room.name,
+                    "LiveKit room_finished room name is not a valid MUC bare JID; cannot sweep survivors",
+                );
+            }
         }
         LiveKitWebhookEvent::ParticipantJoined(_) | LiveKitWebhookEvent::Other => {
             // Informational; the join path already flows through
@@ -156,18 +176,31 @@ async fn livekit_webhook_handler(
 }
 
 async fn process_participant_left(state: &WebSocketState, env: &ParticipantEnvelope) {
-    let Ok(full_jid) = env.participant.identity.parse::<FullJid>() else {
+    process_participant_left_for_identity(state, &env.room.name, &env.participant.identity).await;
+}
+
+/// Shared cleanup implementation used by both the
+/// `ParticipantLeft` / `ParticipantConnectionAborted` arms and the
+/// `RoomFinished` survivor sweep. Takes the raw identity string so
+/// the survivor sweep (which iterates `Identity` values out of the
+/// SFU registry) can call it with the same shape.
+async fn process_participant_left_for_identity(
+    state: &WebSocketState,
+    room_name: &str,
+    identity: &str,
+) {
+    let Ok(full_jid) = identity.parse::<FullJid>() else {
         warn!(
-            identity = %env.participant.identity,
-            room = %env.room.name,
+            identity = %identity,
+            room = %room_name,
             "LiveKit participant identity is not a valid full JID; skipping cleanup",
         );
         return;
     };
-    let Ok(room_jid) = env.room.name.parse::<BareJid>() else {
+    let Ok(room_jid) = room_name.parse::<BareJid>() else {
         warn!(
-            room = %env.room.name,
-            identity = %env.participant.identity,
+            room = %room_name,
+            identity = %identity,
             "LiveKit room name is not a valid MUC bare JID; skipping cleanup",
         );
         return;
@@ -176,7 +209,6 @@ async fn process_participant_left(state: &WebSocketState, env: &ParticipantEnvel
     debug!(
         room = %room_jid,
         identity = %full_jid,
-        event_id = ?env.id,
         "LiveKit webhook: clearing Muji presence for departed participant"
     );
 

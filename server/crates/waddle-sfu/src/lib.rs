@@ -108,4 +108,12 @@ pub trait SfuService: Send + Sync + 'static {
     /// the JWT-signing API secret per LK operational guidance, but
     /// defaults to the API secret for dev parity.
     fn webhook_secret(&self) -> &ApiSecret;
+
+    /// Snapshot the currently-registered identities for `call_id`.
+    /// Used by the LiveKit webhook handler's `room_finished` arm to
+    /// clean up any per-participant state that an earlier
+    /// `participant_left` retry-exhausted before the room closed.
+    /// Returns an empty vec when the call has no recorded participants
+    /// (either never registered or already drained).
+    fn participants_for_call(&self, call_id: &CallId) -> Vec<Identity>;
 }

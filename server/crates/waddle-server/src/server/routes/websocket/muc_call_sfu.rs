@@ -119,6 +119,10 @@ mod tests {
         fn webhook_secret(&self) -> &waddle_sfu::ApiSecret {
             unimplemented!("not exercised by these tests")
         }
+
+        fn participants_for_call(&self, _: &CallId) -> Vec<Identity> {
+            Vec::new()
+        }
     }
 
     #[tokio::test]
