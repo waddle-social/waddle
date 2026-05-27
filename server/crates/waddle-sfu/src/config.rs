@@ -207,15 +207,21 @@ impl SfuConfig {
         let token_ttl_seconds = parse_seconds_env("LIVEKIT_TOKEN_TTL_SECONDS", 3600)?;
         let turn_ttl_seconds = parse_seconds_env("LIVEKIT_TURN_TTL_SECONDS", 3600)?;
 
-        let webhook_secret_raw = std::env::var("LIVEKIT_WEBHOOK_SECRET")
-            .ok()
-            .unwrap_or_else(|| api_secret.clone());
-        let webhook_secret =
-            ApiSecret::from_text(&webhook_secret_raw).map_err(FromEnvError::WeakWebhookSecret)?;
+        // Validate the API secret first so the dedicated
+        // `WeakApiSecret` error still fires when both secrets are
+        // weak and `LIVEKIT_WEBHOOK_SECRET` is unset (it defaults to
+        // the API secret in that case, so checking webhook first
+        // would surface a misleading `WeakWebhookSecret`).
+        let api_secret_value =
+            ApiSecret::from_text(&api_secret).map_err(FromEnvError::WeakApiSecret)?;
+        let webhook_secret = match std::env::var("LIVEKIT_WEBHOOK_SECRET") {
+            Ok(raw) => ApiSecret::from_text(&raw).map_err(FromEnvError::WeakWebhookSecret)?,
+            Err(_) => api_secret_value.clone(),
+        };
 
         Ok(Some(Self {
             api_key: ApiKey::new(api_key),
-            api_secret: ApiSecret::from_text(&api_secret).map_err(FromEnvError::WeakApiSecret)?,
+            api_secret: api_secret_value,
             webhook_secret,
             ws_url,
             turn_host: crate::turn::TurnHost::new(turn_host),

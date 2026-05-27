@@ -214,6 +214,10 @@ impl SfuService for LiveKitSfu {
     fn turn_host(&self) -> &TurnHost {
         &self.config.turn_host
     }
+
+    fn webhook_secret(&self) -> &crate::config::ApiSecret {
+        &self.config.webhook_secret
+    }
 }
 
 #[cfg(test)]

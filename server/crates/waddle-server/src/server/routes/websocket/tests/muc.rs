@@ -1056,6 +1056,10 @@ impl waddle_sfu::SfuService for RecordingSfu {
     fn turn_host(&self) -> &waddle_sfu::TurnHost {
         unimplemented!("not exercised by this test")
     }
+
+    fn webhook_secret(&self) -> &waddle_sfu::ApiSecret {
+        unimplemented!("not exercised by this test")
+    }
 }
 
 async fn state_with_recording_sfu(

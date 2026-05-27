@@ -102,4 +102,10 @@ pub trait SfuService: Send + Sync + 'static {
     /// TURN host advertised via XEP-0215 (e.g.
     /// `turn.waddle.social`).
     fn turn_host(&self) -> &TurnHost;
+
+    /// Shared secret used by [`verify_webhook_signature`] to validate
+    /// inbound LiveKit webhook deliveries. Typically distinct from
+    /// the JWT-signing API secret per LK operational guidance, but
+    /// defaults to the API secret for dev parity.
+    fn webhook_secret(&self) -> &ApiSecret;
 }
