@@ -1,5 +1,5 @@
 import { describe, test, expect, mock } from "bun:test";
-import { ref } from "vue";
+import { nextTick, ref } from "vue";
 import { useDirectMessageConversations } from "../src/dms/conversations";
 import type { WaddleSession } from "../src/lib/server-auth";
 import type { BrowserXmppClient, InboxEntry, LiveDmMessage } from "../src/lib/xmpp-client";
@@ -12,6 +12,7 @@ type MockClient = BrowserXmppClient & {
   fetchInbox: ReturnType<typeof mock>;
   markInboxRead: ReturnType<typeof mock>;
   subscribeToPeerPresence: ReturnType<typeof mock>;
+  hydrateRecentDmCallActivity: ReturnType<typeof mock>;
   hydrateRecentDmCallActivities: ReturnType<typeof mock>;
 };
 
@@ -20,6 +21,7 @@ function makeClient(conversations: InboxEntry[] = []): MockClient {
     fetchInbox: mock(() => Promise.resolve({ totalUnread: conversations.reduce((sum, conversation) => sum + conversation.unread, 0), conversations })),
     markInboxRead: mock(() => Promise.resolve()),
     subscribeToPeerPresence: mock(() => Promise.resolve()),
+    hydrateRecentDmCallActivity: mock(() => Promise.resolve()),
     hydrateRecentDmCallActivities: mock(() => Promise.resolve()),
   } as unknown as MockClient;
 }
@@ -78,6 +80,43 @@ describe("useDirectMessageConversations", () => {
     await composable.openDm("bob@example.com");
     await composable.openDm("bob@example.com");
     expect(composable.conversations.value).toHaveLength(1);
+  });
+
+  test("openDm refreshes per-peer call activity for hard-reload recovery", async () => {
+    const client = makeClient();
+    const { composable } = makeComposable({ client });
+
+    await composable.openDm("bob@example.com/mobile");
+
+    expect(client.hydrateRecentDmCallActivity).toHaveBeenCalledTimes(1);
+    expect(client.hydrateRecentDmCallActivity).toHaveBeenCalledWith("bob@example.com");
+    expect(client.subscribeToPeerPresence).toHaveBeenCalledWith("bob@example.com");
+  });
+
+  test("restored active DM refreshes per-peer call activity when the client attaches", async () => {
+    const client = makeClient();
+    const { composable, client: clientRef } = makeComposable();
+
+    await composable.openDm("bob@example.com");
+    clientRef.value = client;
+    await nextTick();
+
+    expect(client.hydrateRecentDmCallActivity).toHaveBeenCalledTimes(1);
+    expect(client.hydrateRecentDmCallActivity).toHaveBeenCalledWith("bob@example.com");
+  });
+
+  test("active DM refreshes per-peer call activity again after client rotation", async () => {
+    const firstClient = makeClient();
+    const secondClient = makeClient();
+    const { composable, client: clientRef } = makeComposable({ client: firstClient });
+
+    await composable.openDm("bob@example.com");
+    clientRef.value = secondClient;
+    await nextTick();
+
+    expect(firstClient.hydrateRecentDmCallActivity).toHaveBeenCalledTimes(1);
+    expect(secondClient.hydrateRecentDmCallActivity).toHaveBeenCalledTimes(1);
+    expect(secondClient.hydrateRecentDmCallActivity).toHaveBeenCalledWith("bob@example.com");
   });
 
   test("closeDm clears activePeerJid", async () => {

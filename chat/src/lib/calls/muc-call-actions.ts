@@ -120,6 +120,7 @@ export async function leaveRetainedMucCallAction({
         roomJid: cachedSession.roomJid,
         selfFullJid,
         sid: cachedSession.sid,
+        media: cachedSession.media,
       });
       reportCallError(err);
     }

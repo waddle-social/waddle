@@ -15,6 +15,7 @@ import {
   buildCallActivityDockEntries,
   canEndRecoveredDmCallActivity,
   callActivityDockSelection,
+  sortCallActivityDockEntries,
   type CallActivityDockEntry,
   type SidebarMode,
 } from "@/lib/calls/call-activity-dock";
@@ -64,20 +65,26 @@ const callParticipantCounts = computed<Record<string, number>>(() => {
   return mucCallParticipantCounts(callParticipants.value);
 });
 
-const entries = computed(() => buildCallActivityDockEntries({
-  channels: props.channels,
-  conversations: props.conversations,
-  activeChannelId: props.activeChannelId,
-  activeChannelRoomJid: props.activeChannelRoomJid ?? null,
-  activePeerJid: props.activePeerJid,
-  sidebarMode: props.sidebarMode,
-  activeChannelJids: props.activeChannelJids,
-  managedMucDomain: props.managedMucDomain ?? null,
-  callParticipantCounts: callParticipantCounts.value,
-  callParticipants: callParticipants.value,
-  callMediaByRoom: props.callMediaByRoom,
-  dmCallActivities: props.showDmCalls === false ? {} : dmCallActivities.value,
-}));
+const entries = computed(() =>
+  sortCallActivityDockEntries(
+    buildCallActivityDockEntries({
+      channels: props.channels,
+      conversations: props.conversations,
+      activeChannelId: props.activeChannelId,
+      activeChannelRoomJid: props.activeChannelRoomJid ?? null,
+      activePeerJid: props.activePeerJid,
+      sidebarMode: props.sidebarMode,
+      activeChannelJids: props.activeChannelJids,
+      managedMucDomain: props.managedMucDomain ?? null,
+      callParticipantCounts: callParticipantCounts.value,
+      callParticipants: callParticipants.value,
+      callMediaByRoom: props.callMediaByRoom,
+      dmCallActivities: props.showDmCalls === false ? {} : dmCallActivities.value,
+    }),
+    callState.value,
+    props.selfFullJid ?? null,
+  )
+);
 const visibleEntries = computed(() =>
   props.hideCurrentCall
     ? entries.value.filter((entry) => !isCurrentCallEntry(entry))

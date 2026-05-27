@@ -343,14 +343,21 @@ describe("readRoomHasActiveCall selector", () => {
     expect(readRoomHasActiveCall(ROOM).media).toEqual({ audio: true, video: true });
   });
 
-  test("keeps a cached terminate failure retryable after local Muji presence is cleared", () => {
+  test("keeps live Muji media authoritative over stale pending cleanup media", () => {
     setSession("alice");
     connectionStore.client = { fullJid: "alice@waddle.test/web" } as unknown as typeof connectionStore.client;
     markMucCallSessionTerminatePending({
       roomJid: ROOM,
-      sid: "muc-retry-live",
+      sid: "muc-retry-video",
       selfFullJid: "alice@waddle.test/web",
+      media: { audio: true, video: true },
       now: new Date("2026-05-26T12:00:00.000Z"),
+    });
+    applyMucCallPresence({
+      from: `${ROOM}/alice`,
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/web",
+      muji: { preparing: false, active: true, audio: true, video: false },
     });
 
     expect(readRoomHasActiveCall(ROOM)).toEqual({
@@ -359,6 +366,26 @@ describe("readRoomHasActiveCall selector", () => {
       localResourceInCall: true,
       participantCount: 1,
       media: { audio: true, video: false },
+    });
+  });
+
+  test("keeps a cached terminate failure retryable after local Muji presence is cleared", () => {
+    setSession("alice");
+    connectionStore.client = { fullJid: "alice@waddle.test/web" } as unknown as typeof connectionStore.client;
+    markMucCallSessionTerminatePending({
+      roomJid: ROOM,
+      sid: "muc-retry-live",
+      selfFullJid: "alice@waddle.test/web",
+      media: { audio: true, video: true },
+      now: new Date("2026-05-26T12:00:00.000Z"),
+    });
+
+    expect(readRoomHasActiveCall(ROOM)).toEqual({
+      hasActiveCall: true,
+      selfInCall: true,
+      localResourceInCall: true,
+      participantCount: 1,
+      media: { audio: true, video: true },
     });
   });
 });

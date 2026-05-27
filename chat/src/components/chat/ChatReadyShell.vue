@@ -203,6 +203,16 @@ const retainedMucCallParticipantsStore = computed<Record<string, string[]>>(() =
   }
   return next;
 });
+const retainedMucCallMediaStore = computed<Record<string, CallMedia>>(() => {
+  const next: Record<string, CallMedia> = { ...mucCallMediaStore.value };
+  const self = selfFullJid.value;
+  if (!self) return next;
+  for (const session of Object.values(mucCallTerminatePendingStore.value)) {
+    if (!session.terminatePending || session.selfFullJid !== self || !session.media) continue;
+    if (!next[session.roomJid]) next[session.roomJid] = session.media;
+  }
+  return next;
+});
 
 const homeDashboardProps = computed(() => buildHomeDashboardProps({
   spaces: waddles.sortedSpaces.value,
@@ -215,7 +225,7 @@ const homeDashboardProps = computed(() => buildHomeDashboardProps({
   dmConversations: dmConversations.conversations.value,
   callParticipantCounts: callParticipantCounts.value,
   callParticipants: retainedMucCallParticipantsStore.value,
-  callMediaByRoom: mucCallMediaStore.value,
+  callMediaByRoom: retainedMucCallMediaStore.value,
   dmCallActivities: dmCallActivitiesStore.value,
   managedMucDomain: managedMucDomain.value,
   selfFullJid: selfFullJid.value,
@@ -409,7 +419,7 @@ onUnmounted(() => {
       :active-dm-call-count="activeDmCallCount"
       :call-participant-counts="callParticipantCounts"
       :call-participants="retainedMucCallParticipantsStore"
-      :call-media-by-room="mucCallMediaStore"
+      :call-media-by-room="retainedMucCallMediaStore"
       :managed-muc-domain="managedMucDomain"
       :self-full-jid="selfFullJid"
       :join-channel-call="joinChannelCallFromActivity"
@@ -438,7 +448,7 @@ onUnmounted(() => {
       :sidebar-mode="ui.sidebarMode.value"
       :active-channel-jids="messaging.activeChannels.value"
       :call-participants="retainedMucCallParticipantsStore"
-      :call-media-by-room="mucCallMediaStore"
+      :call-media-by-room="retainedMucCallMediaStore"
       :managed-muc-domain="managedMucDomain"
       :self-full-jid="selfFullJid"
       hide-current-call
@@ -498,7 +508,7 @@ onUnmounted(() => {
           :channel-unread-map="computedChannelUnreadMap"
           :call-participant-counts="callParticipantCounts"
           :call-participants="retainedMucCallParticipantsStore"
-          :call-media-by-room="mucCallMediaStore"
+          :call-media-by-room="retainedMucCallMediaStore"
           :managed-muc-domain="managedMucDomain"
           :thread-entries-fn="(roomJid: string) => channelUnread.threadEntries(roomJid)"
           :active-community-surface="ui.activeCommunitySurface.value"
@@ -547,7 +557,7 @@ onUnmounted(() => {
           :sidebar-mode="ui.sidebarMode.value"
           :active-channel-jids="messaging.activeChannels.value"
           :call-participants="retainedMucCallParticipantsStore"
-          :call-media-by-room="mucCallMediaStore"
+          :call-media-by-room="retainedMucCallMediaStore"
           :managed-muc-domain="managedMucDomain"
           :self-full-jid="selfFullJid"
           :show-dm-calls="ui.sidebarMode.value !== 'dms'"

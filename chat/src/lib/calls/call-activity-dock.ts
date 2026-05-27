@@ -167,6 +167,71 @@ export function callActivityDockSelection(
   return { kind: "dm-open", peerJid: entry.peerJid };
 }
 
+export function sortCallActivityDockEntries(
+  entries: readonly CallActivityDockEntry[],
+  callState: CallState = { phase: "idle" },
+  selfFullJid?: string | null,
+): CallActivityDockEntry[] {
+  return [...entries].sort((left, right) => compareCallActivityDockEntries(left, right, callState, selfFullJid));
+}
+
+function compareCallActivityDockEntries(
+  left: CallActivityDockEntry,
+  right: CallActivityDockEntry,
+  callState: CallState,
+  selfFullJid?: string | null,
+): number {
+  const leftPriority = callActivityDockPriority(left, callState, selfFullJid);
+  const rightPriority = callActivityDockPriority(right, callState, selfFullJid);
+  if (leftPriority !== rightPriority) return leftPriority - rightPriority;
+
+  const leftUpdatedAt = entryUpdatedAtMs(left);
+  const rightUpdatedAt = entryUpdatedAtMs(right);
+  if (leftUpdatedAt !== rightUpdatedAt) return rightUpdatedAt - leftUpdatedAt;
+
+  return entryTitleForSort(left).localeCompare(entryTitleForSort(right));
+}
+
+function callActivityDockPriority(
+  entry: CallActivityDockEntry,
+  callState: CallState,
+  selfFullJid?: string | null,
+): number {
+  const action = callActivityDockAction(entry, callState, selfFullJid);
+  if (action === "return") return 0;
+  if (entry.kind === "dm") {
+    return dmCallActivitySortPriority(entry, callState, selfFullJid);
+  }
+  if (action === "join") return 35;
+  return 70;
+}
+
+export function dmCallActivitySortPriority(
+  activity: Pick<DmCallActivity, "peerJid" | "remoteFullJid" | "mediaKnown" | "state" | "direction" | "join" | "sid">,
+  callState: CallState,
+  selfFullJid?: string | null,
+): number {
+  const action = dmCallActivityAction(activity, callState, selfFullJid);
+  if (action === "answer") return 10;
+  if (action === "reconnect") return 20;
+  if (canEndRecoveredDmCallActivity(activity, callState, selfFullJid)) return 25;
+  if (activity.state === "ringing" && activity.direction === "incoming") return 30;
+  if (activity.state === "accepted") return 40;
+  if (activity.state === "ringing") return 50;
+  return 60;
+}
+
+function entryUpdatedAtMs(entry: CallActivityDockEntry): number {
+  if (entry.kind !== "dm") return Number.NEGATIVE_INFINITY;
+  const ms = Date.parse(entry.updatedAt);
+  return Number.isFinite(ms) ? ms : Number.NEGATIVE_INFINITY;
+}
+
+function entryTitleForSort(entry: CallActivityDockEntry): string {
+  if (entry.kind === "channel") return `channel:${entry.title}`;
+  return `dm:${entry.title}`;
+}
+
 export function buildCallActivityDockEntries(options: {
   channels: ReadonlyArray<Pick<ChannelSummary, "id" | "name" | "jid">>;
   conversations: ReadonlyArray<Pick<DmConversation, "peerJid" | "peerUsername">>;

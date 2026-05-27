@@ -19,6 +19,7 @@ import { leaveRetainedMucCallAction, startMucCallAction } from "../src/lib/calls
 import {
   $mucCallTerminatePendingSessions,
   clearAllMucCallSessionCacheForTests,
+  markMucCallSessionTerminatePending,
   readMucCallSession,
   rememberMucCallSession,
 } from "../src/lib/calls/muc-call-session-cache";
@@ -487,6 +488,7 @@ describe("leaveRetainedMucCallAction", () => {
       roomJid: "chan@muc.test",
       sid: "muc-retry-live",
       selfFullJid: "alice@waddle.test/web",
+      media: { audio: true, video: true },
       now: new Date("2026-05-26T12:00:00.000Z"),
     });
     const sender: RawIqSender = {
@@ -526,6 +528,7 @@ describe("leaveRetainedMucCallAction", () => {
         roomJid: "chan@muc.test",
         sid: "muc-retry-live",
         selfFullJid: "alice@waddle.test/web",
+        media: { audio: true, video: true },
         updatedAt: expect.any(String),
         terminatePending: true,
       },
@@ -567,6 +570,34 @@ describe("leaveRetainedMucCallAction", () => {
       "chan@muc.test": [{ nick: "alice", realJid: "alice@waddle.test/web" }],
     });
     expect($lastCallError.get()).toContain("simulated Muji leave failure");
+  });
+
+  test("remembering a fresh Muji session clears stale pending cleanup for the same room", () => {
+    markMucCallSessionTerminatePending({
+      roomJid: "chan@muc.test",
+      sid: "muc-stale-video",
+      selfFullJid: "alice@waddle.test/web",
+      media: { audio: true, video: true },
+      now: new Date("2026-05-26T12:00:00.000Z"),
+    });
+
+    rememberMucCallSession({
+      roomJid: "chan@muc.test",
+      sid: "muc-fresh-voice",
+      selfFullJid: "alice@waddle.test/web",
+      media: { audio: true, video: false },
+      now: new Date("2026-05-26T12:01:00.000Z"),
+    });
+
+    expect($mucCallTerminatePendingSessions.get()).toEqual({});
+    expect(readMucCallSession({
+      roomJid: "chan@muc.test",
+      selfFullJid: "alice@waddle.test/web",
+      now: new Date("2026-05-26T12:01:00.000Z"),
+    })).toMatchObject({
+      sid: "muc-fresh-voice",
+      media: { audio: true, video: false },
+    });
   });
 });
 
