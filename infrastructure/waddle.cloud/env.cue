@@ -62,7 +62,7 @@ schema.#Project & {
 
 	ci: pipelines: {
 		default: {
-			mode: "expanded"
+			derivePaths: true
 			when: {
 				branch: ["main"]
 				defaultBranch: true
