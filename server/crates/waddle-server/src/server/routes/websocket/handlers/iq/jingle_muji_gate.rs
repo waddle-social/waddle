@@ -382,14 +382,13 @@ mod tests {
     #[test]
     fn muji_session_terminate_room_extracts_target_room() {
         let room: BareJid = "general@muc.example.com".parse().expect("valid room");
-        let iq = build_jingle_muji_iq(Action::SessionTerminate, room.as_str());
+        let iq = build_jingle_muji_iq(Action::SessionTerminate, "test-sid-terminate");
         assert_eq!(super::muji_session_terminate_room(&iq), Some(room));
     }
 
     #[test]
     fn muji_session_terminate_room_ignores_session_initiate() {
-        let room = "general@muc.example.com";
-        let iq = build_jingle_muji_iq(Action::SessionInitiate, room);
+        let iq = build_jingle_muji_iq(Action::SessionInitiate, "test-sid-initiate");
         assert_eq!(super::muji_session_terminate_room(&iq), None);
     }
 }
