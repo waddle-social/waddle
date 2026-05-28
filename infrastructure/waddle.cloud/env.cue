@@ -81,7 +81,15 @@ schema.#Project & {
 			args: ["-c", #"""
 					set -euo pipefail
 					echo "${GITHUB_TOKEN}" | helm registry login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
-					helm lint charts/livekit-sfu --set apiKeys.values.ci=abcdefghijklmnopqrstuvwxyz123456
+					helm lint charts/livekit-sfu \
+					  --set apiKeys.existingSecret=livekit-sfu-api-keys \
+					  --set webhook.enabled=true \
+					  --set webhook.apiKey=ci-key \
+					  --set 'webhook.urls={https://xmpp.waddle.social/api/v1/livekit/webhook}' \
+					  --set turn.secretName=turn-waddle-social-tls \
+					  --set livekit.turn.enabled=true \
+					  --set livekit.turn.domain=turn.waddle.social \
+					  --set nodePorts.turnUdp.enabled=true
 					helm package charts/livekit-sfu -d /tmp/charts
 					chart_version="$(helm show chart charts/livekit-sfu | awk '$1 == "version:" { print $2 }')"
 					if helm show chart oci://ghcr.io/waddle-social/waddle/charts/livekit-sfu --version "${chart_version}" >/dev/null 2>&1; then
@@ -90,7 +98,7 @@ schema.#Project & {
 					  helm push /tmp/charts/livekit-sfu-*.tgz oci://ghcr.io/waddle-social/waddle/charts
 					fi
 				"""#]
-			inputs: ["charts/**"]
+			inputs: ["charts/livekit-sfu/**", "env.cue"]
 		}
 		"gitops-push": schema.#Task & {
 			command: "bash"
@@ -106,7 +114,7 @@ schema.#Project & {
 					  --source="$(git config --get remote.origin.url)" \
 					  --revision="$(git rev-parse --short HEAD)"
 				"""#]
-			inputs: ["gitops/**"]
+			inputs: ["gitops/**", "env.cue"]
 		}
 	}
 }
