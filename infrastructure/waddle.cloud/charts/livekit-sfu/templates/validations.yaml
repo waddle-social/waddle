@@ -67,3 +67,9 @@
 {{- if and .Values.livekit.turn.enabled .Values.livekit.turn.tls_port (not .Values.livekit.turn.external_tls) (not .Values.turn.secretName) -}}
 {{- fail "turn.secretName is required when livekit.turn.tls_port is set and livekit.turn.external_tls=false" -}}
 {{- end -}}
+{{- if and .Values.webhook.enabled (eq (len .Values.webhook.urls) 0) -}}
+{{- fail "webhook.urls is required when webhook.enabled=true" -}}
+{{- end -}}
+{{- if and .Values.webhook.enabled (not .Values.webhook.apiKey) -}}
+{{- fail "webhook.apiKey is required when webhook.enabled=true" -}}
+{{- end -}}
