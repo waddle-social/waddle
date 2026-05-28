@@ -120,42 +120,26 @@ fn xdata_field_value(form: &Element, var: &str) -> Option<String> {
 }
 
 fn assert_iq_error_condition(xml: &str, id: &str, condition: &str) {
-    // Two error envelopes flow through the server: typed
-    // `build_iq_error_xml_typed` and stringly `generate_iq_error`. The
-    // typed one stamps `xmlns='jabber:client'` on the `<iq/>`, the
-    // stringly one omits it. Parsing the latter with `Element::from_str`
-    // fails on `MissingNamespace`, so fall back to a substring match
-    // when minidom rejects the frame outright. We still want to assert
-    // `type='error'` + the right condition element + the request id.
-    if let Ok(element) = Element::from_str(xml) {
-        assert_eq!(element.name(), "iq");
-        assert_eq!(element.attr("id"), Some(id));
-        assert_eq!(element.attr("type"), Some("error"));
-        let error = element
+    // Every IQ error envelope is now serialized via the typed
+    // `build_iq_error_xml_typed` builder, which stamps
+    // `xmlns='jabber:client'` on the `<iq/>`, so the frame always parses
+    // cleanly. Assert `type='error'` + the right condition element + the
+    // request id.
+    let element = Element::from_str(xml).unwrap_or_else(|err| {
+        panic!("error response must be well-formed XML ({err}): {xml}");
+    });
+    assert_eq!(element.name(), "iq");
+    assert_eq!(element.attr("id"), Some(id));
+    assert_eq!(element.attr("type"), Some("error"));
+    let error = element
+        .children()
+        .find(|child| child.name() == "error")
+        .unwrap_or_else(|| panic!("error envelope missing in: {xml}"));
+    assert!(
+        error
             .children()
-            .find(|child| child.name() == "error")
-            .unwrap_or_else(|| panic!("error envelope missing in: {xml}"));
-        assert!(
-            error
-                .children()
-                .any(|child| child.name() == condition && child.ns() == STANZA_ERROR_NS),
-            "expected {condition} stanza error: {xml}"
-        );
-        return;
-    }
-    assert!(
-        xml.contains(&format!("id='{id}'")) || xml.contains(&format!("id=\"{id}\"")),
-        "error response must echo the request id ({id}): {xml}"
-    );
-    assert!(
-        xml.contains("type='error'") || xml.contains("type=\"error\""),
-        "expected type='error': {xml}"
-    );
-    let condition_tag_open = format!("<{condition} ");
-    let condition_tag_self_closing = format!("<{condition}/>");
-    assert!(
-        xml.contains(&condition_tag_open) || xml.contains(&condition_tag_self_closing),
-        "expected <{condition}/> in error envelope: {xml}"
+            .any(|child| child.name() == condition && child.ns() == STANZA_ERROR_NS),
+        "expected {condition} stanza error: {xml}"
     );
 }
 

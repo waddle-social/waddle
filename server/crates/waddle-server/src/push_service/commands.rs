@@ -63,6 +63,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 use waddle_xmpp::commands::{CommandContext, CommandResult};
 use waddle_xmpp::xep::xep0004::{DataForm, Field, FormType};
+use waddle_xmpp::xep::xep0050::AdHocCommandCondition;
 use waddle_xmpp::XmppError;
 
 use crate::push_service::{DatabasePushServiceStore, PushDeviceRegistration};
@@ -240,14 +241,22 @@ async fn handle_register_device(
     };
 
     if !matches!(submitted.form_type, FormType::Submit) {
-        return CommandResult::Error(XmppError::bad_request(Some(
-            "register-device requires a submit form".to_string(),
-        )));
+        // §4.4 bad-payload: the submitted form is the wrong type.
+        return CommandResult::Error(XmppError::ad_hoc_command(
+            AdHocCommandCondition::BadPayload,
+            Some("register-device requires a submit form".to_string()),
+        ));
     }
 
     let request = match parse_register_request(submitted) {
         Ok(request) => request,
-        Err(error) => return CommandResult::Error(XmppError::bad_request(Some(error))),
+        // §4.4 bad-payload: required form fields missing/invalid.
+        Err(error) => {
+            return CommandResult::Error(XmppError::ad_hoc_command(
+                AdHocCommandCondition::BadPayload,
+                Some(error),
+            ))
+        }
     };
 
     // `ctx.from` carries the bound full JID — `not_authorized` is
@@ -305,14 +314,22 @@ async fn handle_disable_device(
     };
 
     if !matches!(submitted.form_type, FormType::Submit) {
-        return CommandResult::Error(XmppError::bad_request(Some(
-            "disable-device requires a submit form".to_string(),
-        )));
+        // §4.4 bad-payload: the submitted form is the wrong type.
+        return CommandResult::Error(XmppError::ad_hoc_command(
+            AdHocCommandCondition::BadPayload,
+            Some("disable-device requires a submit form".to_string()),
+        ));
     }
 
     let request = match parse_disable_request(submitted) {
         Ok(request) => request,
-        Err(error) => return CommandResult::Error(XmppError::bad_request(Some(error))),
+        // §4.4 bad-payload: required form fields missing/invalid.
+        Err(error) => {
+            return CommandResult::Error(XmppError::ad_hoc_command(
+                AdHocCommandCondition::BadPayload,
+                Some(error),
+            ))
+        }
     };
 
     // Dispatcher already gates unauthenticated callers; project to
@@ -324,17 +341,13 @@ async fn handle_disable_device(
         .disable_device_for_owner(&owner, &request.node, &request.device_id, None)
         .await
     {
-        // `Ok(_)` covers both "the row flipped active → disabled"
-        // (Ok(true)) and "the node existed but was no longer
-        // `active`, so the device row was already past its terminal
-        // state" (Ok(false)). Both satisfy the caller's "this
-        // device is no longer registered" assertion. The
-        // "node-doesn't-exist" path bypasses this arm — the storage
-        // helper returns `Err(item-not-found)` there, which falls
-        // through to the `Err` arm below and surfaces as a typed
-        // IQ stanza error so the chat can distinguish "node gone"
-        // from "device flipped" in its diagnostic chain.
-        Ok(_) => CommandResult::Completed {
+        // `Ok(())` means a matching `(node, device-id)` row existed and
+        // is now `disabled` (idempotent on re-disable). Both the
+        // "node-not-found" and "device-id-not-found" paths return
+        // `Err(item-not-found)` from the storage helper and surface as a
+        // typed IQ stanza error — so a stale/typo'd device-id is reported
+        // honestly instead of as a false success.
+        Ok(()) => CommandResult::Completed {
             form: None,
             notes: vec![],
         },

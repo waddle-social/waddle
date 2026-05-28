@@ -3,6 +3,7 @@ use std::str::FromStr;
 
 use thiserror::Error;
 
+use crate::error::{StanzaErrorCondition, StanzaErrorType};
 use crate::xep::xep0004::{DataForm, DataFormError};
 
 // ---------------------------------------------------------------------------
@@ -39,6 +40,69 @@ pub enum CommandError {
     /// The IQ stanza is not a command request.
     #[error("not a command IQ")]
     NotACommandIq,
+}
+
+// ---------------------------------------------------------------------------
+// §4.4 command-specific error conditions
+// ---------------------------------------------------------------------------
+
+/// XEP-0050 §4.4 command execution error conditions.
+///
+/// Each maps to a general RFC 6120 stanza error condition/type plus a
+/// specific-condition child element in the
+/// `http://jabber.org/protocol/commands` namespace
+/// ([`crate::xep::xep0050::NS_COMMANDS`]). The dispatch layer renders an
+/// [`crate::XmppError::AdHocCommand`] carrying one of these into the wire
+/// `<error>` envelope so generic XEP-0050 clients can distinguish, e.g.,
+/// a stale session (`<bad-sessionid/>`) from a malformed payload
+/// (`<bad-payload/>`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdHocCommandCondition {
+    /// The responding JID does not understand the specified action.
+    MalformedAction,
+    /// The responding JID cannot accept the specified action (e.g. an
+    /// `execute` carrying a sessionid, or a `complete` with none).
+    BadAction,
+    /// The responding JID cannot accept the specified language/locale.
+    BadLocale,
+    /// The responding JID cannot accept the specified payload (e.g. the
+    /// data form did not provide one or more required fields).
+    BadPayload,
+    /// The responding JID cannot accept the specified sessionid.
+    BadSessionId,
+    /// The requesting JID specified a sessionid that is no longer active.
+    SessionExpired,
+}
+
+impl AdHocCommandCondition {
+    /// The specific-condition element name in [`NS_COMMANDS`].
+    ///
+    /// [`NS_COMMANDS`]: crate::xep::xep0050::NS_COMMANDS
+    pub fn element_name(self) -> &'static str {
+        match self {
+            Self::MalformedAction => "malformed-action",
+            Self::BadAction => "bad-action",
+            Self::BadLocale => "bad-locale",
+            Self::BadPayload => "bad-payload",
+            Self::BadSessionId => "bad-sessionid",
+            Self::SessionExpired => "session-expired",
+        }
+    }
+
+    /// The general RFC 6120 `(error type, defined condition)` this maps to
+    /// per the XEP-0050 §4.4 table. All conditions are `modify` /
+    /// `bad-request` except `session-expired`, which is `cancel` /
+    /// `not-allowed`.
+    pub fn stanza_error(self) -> (StanzaErrorType, StanzaErrorCondition) {
+        match self {
+            Self::SessionExpired => (StanzaErrorType::Cancel, StanzaErrorCondition::NotAllowed),
+            Self::MalformedAction
+            | Self::BadAction
+            | Self::BadLocale
+            | Self::BadPayload
+            | Self::BadSessionId => (StanzaErrorType::Modify, StanzaErrorCondition::BadRequest),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

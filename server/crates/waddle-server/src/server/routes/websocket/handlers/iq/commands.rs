@@ -22,6 +22,20 @@ pub(super) async fn handle_command_iq(
 
     let command = match parse_command_from_iq(request_iq) {
         Ok(command) => command,
+        // XEP-0050 §4.4 malformed-action: the responder does not
+        // understand the specified `action` attribute value. Map this
+        // case to the command-namespaced `<malformed-action/>` child
+        // rather than a bare `<bad-request/>` so generic XEP-0050
+        // clients can distinguish it from other malformed requests.
+        Err(CommandError::InvalidAction(_)) => {
+            return vec![build_xmpp_error_response(
+                request_iq,
+                XmppError::ad_hoc_command(
+                    AdHocCommandCondition::MalformedAction,
+                    Some("unrecognised command action".to_string()),
+                ),
+            )];
+        }
         Err(err) => {
             return vec![build_xmpp_error_response(
                 request_iq,

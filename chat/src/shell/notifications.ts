@@ -2,12 +2,18 @@ import { ref, watch } from "vue";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import { getOrRegisterServiceWorker, registerServiceWorker as registerChatServiceWorker } from "@/lib/service-worker-registration";
 import { createPushFlowLock } from "./push-flow-lock";
+import {
+  clearDeviceId,
+  clearPushNodeId,
+  loadDeviceId,
+  loadPushNodeId,
+  persistDeviceId,
+  persistPushNodeId,
+} from "./push-device-store";
 import { clearCachedVapidKey, loadVapidPublicKey } from "./vapid-cache";
 import { withVapidRotationLock } from "./vapid-rotation-lock";
 
 const STORAGE_KEY = "waddle.chat.notifications-enabled";
-const DEVICE_ID_STORAGE_KEY = "waddle.chat.push-device-id";
-const PUSH_NODE_STORAGE_KEY = "waddle.chat.push-node-id";
 /// Prefix for the per-(account, service) persisted VAPID kid. The
 /// full key is built by `pushKidStorageKey(accountJid, serviceJid)`.
 /// Multi-account sessions MUST NOT share one global kid — without
@@ -344,6 +350,7 @@ export function usePushNotifications() {
       console.warn("[notifications] No XMPP Push Service JID resolved; push disabled");
       return false;
     }
+    const accountJid = barePart(userJid);
 
     // Resolve the browser-side PushSubscription against the server's
     // currently-advertised VAPID public key. PR-D3 swapped the build-
@@ -407,14 +414,14 @@ export function usePushNotifications() {
       // against a node the server may have rotated. Clear them so
       // the next opt-out is a clean no-op rather than surfacing a
       // server-side `item-not-found` to the user.
-      clearPushNodeId();
-      clearDeviceId();
+      clearPushNodeId(accountJid, serviceJid);
+      clearDeviceId(accountJid, serviceJid);
       return false;
     }
-    persistPushNodeId(registered.node);
+    persistPushNodeId(accountJid, serviceJid, registered.node);
     // Persist the server-assigned device id so the per-device
     // `disable-device` flow can later scope to this exact row.
-    persistDeviceId(registered.deviceId);
+    persistDeviceId(accountJid, serviceJid, registered.deviceId);
 
     const enabled = await xmppClient.enablePushNotifications({
       serviceJid,
@@ -470,8 +477,9 @@ export function usePushNotifications() {
       return true;
     }
 
-    const node = loadPushNodeId();
-    const deviceId = loadDeviceId();
+    const accountJid = barePart(userJid);
+    const node = loadPushNodeId(accountJid, serviceJid);
+    const deviceId = loadDeviceId(accountJid, serviceJid);
 
     // **Per-device opt-out only.** The user clicked "Disable
     // notifications" in THIS browser; this MUST NOT take down push
@@ -501,18 +509,30 @@ export function usePushNotifications() {
 
     const disabled = await xmppClient.disablePushDevice({ serviceJid, node, deviceId });
     if (!disabled) {
+      // KEEP the persisted node/deviceId on failure. The browser is
+      // already unsubscribed, but the server-side `disable-device` did
+      // NOT land, so the device row is still active. Clearing the ids
+      // here would strand that active row with no client-side handle to
+      // ever retry the opt-out (the `!node || !deviceId` guard above
+      // would short-circuit the next attempt as a no-op). Holding the
+      // ids lets a retry — or the next disable click — re-issue the IQ
+      // against the same row.
       console.warn(
         "[notifications] disable-device IQ failed; this device may still be " +
-        "registered with the Push Service",
+        "registered with the Push Service. Retaining node/deviceId so the " +
+        "opt-out can be retried.",
       );
       return false;
     }
-    // Clean up rotation state: drop the persisted kid + cached
-    // advertisement so a re-enable starts from a fresh fetch. Both
-    // are keyed per `(account, server)` so this only invalidates the
-    // entry for the disabling account/service pair, not any other
-    // tenant on the same device.
-    const accountJid = barePart(userJid);
+    // Success: the device row is now disabled, so the persisted ids no
+    // longer describe a live registration. Drop them together with the
+    // rotation kid + cached VAPID advertisement so a later re-enable
+    // starts from a clean fetch. All keys are per-(account, service), so
+    // this only invalidates the disabling pair, not any other tenant on
+    // the same device. (Previously only the kid + cache were cleared
+    // here, leaking a stale node/deviceId — adversarial finding.)
+    clearPushNodeId(accountJid, serviceJid);
+    clearDeviceId(accountJid, serviceJid);
     clearPersistedKid(accountJid, serviceJid);
     clearCachedVapidKey(accountJid, serviceJid);
     return true;
@@ -559,42 +579,6 @@ function loadEnabled(): boolean {
   } catch {
     return false;
   }
-}
-
-/// Persist the Push Service-assigned device id returned by the
-/// XEP-0050 `register-device` result form. Pre-cutover the chat
-/// minted its own `web-<uuid>` here; that scheme couldn't survive
-/// the per-device disable flow because the server's `device_id`
-/// (under the `urn:waddle:push-device:` namespace) never matched
-/// what the chat sent.
-function persistDeviceId(deviceId: string): void {
-  if (typeof window === "undefined") return;
-  window.localStorage.setItem(DEVICE_ID_STORAGE_KEY, deviceId);
-}
-
-function loadDeviceId(): string | null {
-  if (typeof window === "undefined") return null;
-  return window.localStorage.getItem(DEVICE_ID_STORAGE_KEY);
-}
-
-function persistPushNodeId(node: string): void {
-  if (typeof window === "undefined") return;
-  window.localStorage.setItem(PUSH_NODE_STORAGE_KEY, node);
-}
-
-function loadPushNodeId(): string | null {
-  if (typeof window === "undefined") return null;
-  return window.localStorage.getItem(PUSH_NODE_STORAGE_KEY);
-}
-
-function clearPushNodeId(): void {
-  if (typeof window === "undefined") return;
-  window.localStorage.removeItem(PUSH_NODE_STORAGE_KEY);
-}
-
-function clearDeviceId(): void {
-  if (typeof window === "undefined") return;
-  window.localStorage.removeItem(DEVICE_ID_STORAGE_KEY);
 }
 
 /// Build the per-(account, service) localStorage key for the

@@ -3,8 +3,6 @@
 use thiserror::Error;
 use waddle_xmpp_core::CoreError;
 
-use crate::parser::ns;
-
 /// XMPP server errors.
 #[derive(Debug, Error)]
 pub enum XmppError {
@@ -80,6 +78,24 @@ pub enum XmppError {
     /// `<invalid-payload/>` extension element.
     #[error("PubSub publish invalid payload: {0:?}")]
     PubSubInvalidPayload(Option<String>),
+
+    /// XEP-0050 §4.4 — an ad-hoc command failed with a command-specific
+    /// error condition. Carries the typed
+    /// [`AdHocCommandCondition`](crate::xep::xep0050::AdHocCommandCondition);
+    /// the dispatch layer renders it as the mapped RFC 6120 stanza error
+    /// (general condition + type) plus the command-namespaced
+    /// specific-condition child (e.g.
+    /// `<bad-sessionid xmlns='http://jabber.org/protocol/commands'/>`).
+    /// Distinct from [`Self::Stanza`] so the §4.4 application condition is
+    /// not flattened into stringly-typed `<text/>` (typed-payloads hard
+    /// rule).
+    #[error("ad-hoc command error: {condition:?}")]
+    AdHocCommand {
+        /// The XEP-0050 §4.4 specific condition.
+        condition: crate::xep::xep0050::AdHocCommandCondition,
+        /// Optional human-readable diagnostic text.
+        text: Option<String>,
+    },
 }
 
 impl XmppError {
@@ -238,6 +254,15 @@ impl XmppError {
     pub fn pubsub_invalid_payload(text: Option<String>) -> Self {
         Self::PubSubInvalidPayload(text)
     }
+
+    /// Create a XEP-0050 §4.4 command-specific error
+    /// ([`Self::AdHocCommand`]).
+    pub fn ad_hoc_command(
+        condition: crate::xep::xep0050::AdHocCommandCondition,
+        text: Option<String>,
+    ) -> Self {
+        Self::AdHocCommand { condition, text }
+    }
 }
 
 impl From<CoreError> for XmppError {
@@ -331,6 +356,38 @@ impl StanzaErrorCondition {
     }
 }
 
+impl StanzaErrorCondition {
+    /// Convert to the `xmpp_parsers` typed defined-condition for typed
+    /// `<error>` serialization (no stringly-typed XML construction).
+    pub fn to_xmpp(self) -> xmpp_parsers::stanza_error::DefinedCondition {
+        use xmpp_parsers::stanza_error::DefinedCondition as D;
+        match self {
+            Self::BadRequest => D::BadRequest,
+            Self::Conflict => D::Conflict,
+            Self::FeatureNotImplemented => D::FeatureNotImplemented,
+            Self::Forbidden => D::Forbidden,
+            Self::Gone => D::Gone { new_address: None },
+            Self::InternalServerError => D::InternalServerError,
+            Self::ItemNotFound => D::ItemNotFound,
+            Self::JidMalformed => D::JidMalformed,
+            Self::NotAcceptable => D::NotAcceptable,
+            Self::NotAllowed => D::NotAllowed,
+            Self::NotAuthorized => D::NotAuthorized,
+            Self::PolicyViolation => D::PolicyViolation,
+            Self::RecipientUnavailable => D::RecipientUnavailable,
+            Self::Redirect => D::Redirect { new_address: None },
+            Self::RegistrationRequired => D::RegistrationRequired,
+            Self::RemoteServerNotFound => D::RemoteServerNotFound,
+            Self::RemoteServerTimeout => D::RemoteServerTimeout,
+            Self::ResourceConstraint => D::ResourceConstraint,
+            Self::ServiceUnavailable => D::ServiceUnavailable,
+            Self::SubscriptionRequired => D::SubscriptionRequired,
+            Self::UndefinedCondition => D::UndefinedCondition,
+            Self::UnexpectedRequest => D::UnexpectedRequest,
+        }
+    }
+}
+
 impl std::fmt::Display for StanzaErrorCondition {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.as_str())
@@ -362,108 +419,23 @@ impl StanzaErrorType {
     }
 }
 
+impl StanzaErrorType {
+    /// Convert to the `xmpp_parsers` typed error type for typed
+    /// `<error>` serialization.
+    pub fn to_xmpp(self) -> xmpp_parsers::stanza_error::ErrorType {
+        use xmpp_parsers::stanza_error::ErrorType as E;
+        match self {
+            Self::Auth => E::Auth,
+            Self::Cancel => E::Cancel,
+            Self::Modify => E::Modify,
+            Self::Wait => E::Wait,
+        }
+    }
+}
+
 impl std::fmt::Display for StanzaErrorType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.as_str())
-    }
-}
-
-/// Generate an IQ error response.
-///
-/// Creates an error IQ stanza with the appropriate error element.
-///
-/// **Security note:** the `text`, `to`, `from`, and `id` arguments may
-/// carry attacker-controlled values that bubbled up from user input
-/// (e.g. an error message that echoes a malformed form field value
-/// the chat client submitted). They are XML-attribute / text-content
-/// escaped here so a `<` in the input cannot break the stanza envelope.
-/// This is a narrow patch on top of the legacy `format!`-built helper;
-/// a follow-up should migrate the entire helper to the typed
-/// `xmpp_parsers::iq::Iq` builders shared with the rest of the server.
-pub fn generate_iq_error(
-    id: &str,
-    to: Option<&str>,
-    from: Option<&str>,
-    condition: StanzaErrorCondition,
-    error_type: StanzaErrorType,
-    text: Option<&str>,
-) -> String {
-    let mut iq = format!("<iq type='error' id='{}'", xml_attr_escape(id));
-
-    if let Some(to) = to {
-        iq.push_str(&format!(" to='{}'", xml_attr_escape(to)));
-    }
-
-    if let Some(from) = from {
-        iq.push_str(&format!(" from='{}'", xml_attr_escape(from)));
-    }
-
-    iq.push_str(&format!(
-        "><error type='{}'><{} xmlns='{}'/>{}</error></iq>",
-        error_type.as_str(),
-        condition.as_str(),
-        ns::STANZAS,
-        text.map(|t| format!(
-            "<text xmlns='{}' xml:lang='en'>{}</text>",
-            ns::STANZAS,
-            xml_text_escape(t)
-        ))
-        .unwrap_or_default()
-    ));
-
-    iq
-}
-
-/// Escape an attribute value: replaces `&`, `<`, `>`, `'`, `"` with
-/// their XML entity references. Used by the legacy stanza builders
-/// (e.g. [`generate_iq_error`]) until they migrate to typed builders.
-fn xml_attr_escape(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for ch in value.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '\'' => out.push_str("&apos;"),
-            '"' => out.push_str("&quot;"),
-            other => out.push(other),
-        }
-    }
-    out
-}
-
-/// Escape a text node value: replaces `&`, `<`, `>` (but not quotes —
-/// XML text content is parsed differently from attribute values).
-fn xml_text_escape(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for ch in value.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            other => out.push(other),
-        }
-    }
-    out
-}
-
-#[cfg(test)]
-mod escape_tests {
-    use super::{xml_attr_escape, xml_text_escape};
-
-    #[test]
-    fn attr_escape_handles_all_xml_specials() {
-        assert_eq!(
-            xml_attr_escape("a&b<c>d'e\"f"),
-            "a&amp;b&lt;c&gt;d&apos;e&quot;f"
-        );
-    }
-
-    #[test]
-    fn text_escape_handles_lt_gt_amp_only() {
-        // Quotes are legal in text content; not escaping them keeps the
-        // diagnostic readable. `<` and `&` are the dangerous ones.
-        assert_eq!(xml_text_escape("a&b<c>d'e\"f"), "a&amp;b&lt;c&gt;d'e\"f");
     }
 }
 
@@ -544,25 +516,6 @@ pub mod stream_errors {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_iq_error_generation() {
-        let error = generate_iq_error(
-            "test-id",
-            Some("user@example.com"),
-            Some("server.example.com"),
-            StanzaErrorCondition::NotAuthorized,
-            StanzaErrorType::Auth,
-            Some("You must authenticate first"),
-        );
-
-        assert!(error.contains("type='error'"));
-        assert!(error.contains("id='test-id'"));
-        assert!(error.contains("to='user@example.com'"));
-        assert!(error.contains("from='server.example.com'"));
-        assert!(error.contains("<not-authorized"));
-        assert!(error.contains("You must authenticate first"));
-    }
 
     #[test]
     fn test_stream_error_generation() {

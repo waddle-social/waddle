@@ -1482,13 +1482,27 @@ impl DatabasePushServiceStore {
         Ok(device)
     }
 
+    /// Disable a single device on an owner's push node, clearing its
+    /// provider credentials.
+    ///
+    /// Returns:
+    /// - `Err(item-not-found)` if the node does not exist, **or** if no
+    ///   `(node, device-id)` row exists for it. The two are deliberately
+    ///   indistinguishable on the wire — both mean "there is nothing here
+    ///   to disable" — so a caller submitting a stale/typo'd device-id is
+    ///   told so rather than receiving a misleading success.
+    /// - `Err(forbidden)` if the node belongs to another user.
+    /// - `Ok(())` if a matching device row existed and is now `disabled`.
+    ///   Idempotent: re-disabling an already-disabled device succeeds
+    ///   (the row still matches), and disabling a device on a no-longer-
+    ///   active node still flips that device row.
     pub async fn disable_device_for_owner(
         &self,
         owner_bare_jid: &BareJid,
         node: &str,
         device_id: &str,
         error: Option<&str>,
-    ) -> Result<bool, XmppError> {
+    ) -> Result<(), XmppError> {
         validate_len("Push Service node", node, MAX_NODE_ID_LEN)?;
         validate_len("Push Service device-id", device_id, MAX_DEVICE_ID_LEN)?;
         let now_ms = crate::time::now_ms();
@@ -1510,9 +1524,6 @@ impl DatabasePushServiceStore {
             return Err(XmppError::forbidden(Some(
                 "Push node belongs to another user".to_string(),
             )));
-        }
-        if push_node.status != PushNodeStatus::Active {
-            return Ok(false);
         }
         let affected = tx
             .execute(
@@ -1540,7 +1551,17 @@ impl DatabasePushServiceStore {
         tx.commit()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
-        Ok(affected > 0)
+        // `affected == 0` ⇒ no row matched `(node, device-id)`. The node
+        // exists (checked above) and is owned by the caller, so the
+        // device-id itself is unknown — surface item-not-found rather
+        // than a false success (XEP-0050 §4.4 NONE-condition item-not-found,
+        // symmetric with the node-not-found path above).
+        if affected == 0 {
+            return Err(XmppError::item_not_found(Some(
+                "Push device not found on this node".to_string(),
+            )));
+        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -4962,10 +4983,10 @@ mod tests {
                 .expect("device");
         }
 
-        assert!(store
+        store
             .disable_device_for_owner(&owner, first_node.node(), "shared-device-id", None)
             .await
-            .expect("disable first node device"));
+            .expect("disable first node device");
 
         let first_result = store
             .publish_notification_from_user_server(

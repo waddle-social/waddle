@@ -397,6 +397,20 @@ pub async fn register_push_device<D: CommandDriver>(
     if completed.status != AdHocStatus::Completed {
         return Err(protocol_error("expected status='completed' in stage 4"));
     }
+    // XEP-0050 §3.4: the responder echoes the sessionid so the requester
+    // can correlate the response to the session it opened in stage 2.
+    // Reject a `completed` carrying a different (or absent) sessionid —
+    // otherwise a buggy/hostile Push Service, or two register dances
+    // crossing on the same stream, could graft the wrong node/device-id
+    // onto this registration even though the `from=` check passed.
+    match completed.session_id.as_deref() {
+        Some(returned) if returned == session_id => {}
+        _ => {
+            return Err(protocol_error(
+                "stage 4 sessionid did not match the session opened in stage 2",
+            ));
+        }
+    }
     let result_form = completed
         .form
         .ok_or_else(|| protocol_error("missing result form in stage 4"))?;

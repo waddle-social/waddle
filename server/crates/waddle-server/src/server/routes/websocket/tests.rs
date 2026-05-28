@@ -179,9 +179,9 @@ async fn create_test_websocket_state_with_extension_manager(
                         // `disable-device`) are registered here so the
                         // unit-test harness mirrors what `http.rs` wires
                         // up at boot. Without this, push command IQs would
-                        // fall through to the registry's
-                        // `service-unavailable` arm and shadow the actual
-                        // handler behaviour we want to assert.
+                        // fall through to the registry's unknown-node
+                        // `item-not-found` arm (XEP-0050 §4.4) and shadow
+                        // the actual handler behaviour we want to assert.
                         let registry = Arc::new(CommandRegistry::new());
                         crate::push_service::commands::register(
                             &registry,

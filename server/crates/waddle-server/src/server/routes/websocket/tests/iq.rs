@@ -1031,8 +1031,9 @@ async fn handle_iq_push_service_xep0050_registration_keeps_provider_tokens_insid
     // the stage-4 result form, never the provider secrets.
     use crate::push_service::commands::{DISABLE_DEVICE_FORM_TYPE, REGISTER_DEVICE_FORM_TYPE};
     use crate::push_service::commands::{
-        DISABLE_DEVICE_NODE, FIELD_APP_ID, FIELD_ENVIRONMENT, FIELD_NODE, FIELD_PLATFORM,
-        FIELD_WEB_PUSH_AUTH, FIELD_WEB_PUSH_ENDPOINT, FIELD_WEB_PUSH_P256DH, REGISTER_DEVICE_NODE,
+        DISABLE_DEVICE_NODE, FIELD_APP_ID, FIELD_DEVICE_ID, FIELD_ENVIRONMENT, FIELD_NODE,
+        FIELD_PLATFORM, FIELD_WEB_PUSH_AUTH, FIELD_WEB_PUSH_ENDPOINT, FIELD_WEB_PUSH_P256DH,
+        REGISTER_DEVICE_NODE,
     };
     let _ = DISABLE_DEVICE_FORM_TYPE; // referenced via constant; silence unused-warning if disable test omits
     let _ = DISABLE_DEVICE_NODE;
@@ -1099,6 +1100,44 @@ async fn handle_iq_push_service_xep0050_registration_keeps_provider_tokens_insid
     let assigned_node = xep0004_field_value(&completed_payload, FIELD_NODE)
         .expect("stage-4 result form carries `node`");
     assert!(!assigned_node.is_empty());
+
+    // Headline invariant: the stage-4 result form returns ONLY the
+    // assigned node id + device id — NEVER the provider credentials the
+    // chat submitted. A regression that echoed creds back would leak
+    // secrets to every entity that can observe the IQ result.
+    let result_form = completed_payload
+        .get_child("x", "jabber:x:data")
+        .expect("stage-4 result form");
+    let leaked_fields: Vec<String> = result_form
+        .children()
+        .filter(|child| child.name() == "field")
+        .filter_map(|field| field.attr("var").map(str::to_string))
+        .filter(|var| !matches!(var.as_str(), "FORM_TYPE" | FIELD_NODE | FIELD_DEVICE_ID))
+        .collect();
+    assert!(
+        leaked_fields.is_empty(),
+        "stage-4 result form leaked unexpected field(s): {leaked_fields:?}"
+    );
+    let form_values: Vec<String> = result_form
+        .children()
+        .filter(|child| child.name() == "field")
+        .flat_map(|field| {
+            field
+                .children()
+                .filter(|value| value.name() == "value")
+                .map(|value| value.text())
+        })
+        .collect();
+    for secret in [
+        "provider-secret",
+        "provider-key",
+        "https://push.example.com/endpoint",
+    ] {
+        assert!(
+            !form_values.iter().any(|value| value == secret),
+            "stage-4 result form leaked credential `{secret}`: {form_values:?}"
+        );
+    }
 
     // The chat client never sees `device-id`, so look up the device by
     // the server-allocated node + owner pair.
@@ -1205,15 +1244,35 @@ async fn handle_iq_push_service_xep0050_disable_device_is_per_device_scoped() {
         1,
         "exactly the sibling device remains active after per-device disable"
     );
+
+    // Prove the RIGHT device survived: device-b is still active and
+    // device-a is gone from the active set. A bug that disabled the
+    // wrong row would also leave exactly one active device and slip past
+    // the `attempted_devices() == 1` count above.
+    let active = state
+        .deps
+        .protocol
+        .push_service
+        .test_only_active_devices_for_owner_node(&owner, shared_node.node())
+        .await
+        .expect("active devices");
+    let active_ids: Vec<&str> = active.iter().map(|device| device.device_id()).collect();
+    assert_eq!(
+        active_ids,
+        vec![device_b_id],
+        "only the targeted device-a is disabled; the sibling device-b stays active"
+    );
 }
 
 /// XEP-0050 `disable-device` is idempotent: a second call against an
 /// already-disabled `(node, device_id)` row must surface
 /// `status='completed'` (NOT a stanza error) so the chat's opt-out
-/// retry path doesn't bounce on transient re-issue. The storage
-/// helper returns `Ok(false)` on the second call; the handler maps
-/// that to `Completed` the same as the happy path. Round-3
-/// adversarial test-rigor finding.
+/// retry path doesn't bounce on transient re-issue. The row still
+/// matches the storage helper's `WHERE (node, device-id)` clause on the
+/// second call, so it returns `Ok(())` and the handler maps that to
+/// `Completed` the same as the first round. Round-3 adversarial
+/// test-rigor finding; the post-loop assertion guards against the
+/// second call resurrecting or otherwise mutating active state.
 #[tokio::test]
 async fn handle_iq_push_service_xep0050_disable_device_is_idempotent() {
     use crate::push_service::commands::{
@@ -1280,6 +1339,282 @@ async fn handle_iq_push_service_xep0050_disable_device_is_idempotent() {
             "{round} disable-device must complete (idempotent)"
         );
     }
+
+    // No side effect from the second disable: the device stays disabled
+    // (zero active rows), it was never resurrected.
+    let active = state
+        .deps
+        .protocol
+        .push_service
+        .test_only_active_devices_for_owner_node(&owner, node.node())
+        .await
+        .expect("active devices");
+    assert!(
+        active.is_empty(),
+        "double-disable must leave the device disabled, not resurrect it: {active:?}"
+    );
+}
+
+/// XEP-0050 `disable-device` against a valid, owned, active node but an
+/// unknown `device-id` is NOT a silent success — the storage helper
+/// distinguishes "no such (node, device-id) row" from "row disabled"
+/// and the handler surfaces `item-not-found` so a stale/typo'd
+/// device-id is reported honestly (adversarial finding B2).
+#[tokio::test]
+async fn handle_iq_push_service_xep0050_disable_unknown_device_is_item_not_found() {
+    use crate::push_service::commands::{
+        DISABLE_DEVICE_FORM_TYPE, DISABLE_DEVICE_NODE, FIELD_DEVICE_ID, FIELD_NODE,
+    };
+
+    let state = create_test_websocket_state().await;
+    let owner: BareJid = "alice@example.com".parse().expect("owner");
+    let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
+    let node = state
+        .deps
+        .protocol
+        .push_service
+        .ensure_node(&owner, "web")
+        .await
+        .expect("node");
+    // A real device exists on the node, so the node is active — only the
+    // submitted device-id is bogus.
+    state
+        .deps
+        .protocol
+        .push_service
+        .upsert_device(
+            &owner,
+            crate::push_service::PushDeviceRegistration::new(
+                "real-device",
+                node.node(),
+                crate::push_service::PushDevicePlatform::Web,
+                "test",
+            ),
+        )
+        .await
+        .expect("device");
+
+    let submit_form = xep0004_submit_form(
+        DISABLE_DEVICE_FORM_TYPE,
+        &[
+            (FIELD_NODE, node.node()),
+            (FIELD_DEVICE_ID, "never-registered"),
+        ],
+    );
+    let disable = command_iq_payload(DISABLE_DEVICE_NODE, "execute", None, Some(submit_form));
+    let responses = handle_iq(
+        &iq_set_frame("push-disable-bogus", "push.example.com", disable),
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&jid),
+    )
+    .await;
+    let response = responses.first().expect("disable response");
+    let response_iq = parse_iq_for_test(response);
+    assert!(
+        matches!(response_iq.split().1, IqPayload::Error(_)),
+        "disabling an unknown device-id must be an error, not a false success: {response}"
+    );
+    let element = Element::from_str(response).expect("parse error iq");
+    let error = element
+        .children()
+        .find(|child| child.name() == "error")
+        .expect("error envelope");
+    assert!(
+        error
+            .children()
+            .any(|child| child.name() == "item-not-found"),
+        "unknown device-id must map to item-not-found: {response}"
+    );
+    // The real device is untouched — still active.
+    let active = state
+        .deps
+        .protocol
+        .push_service
+        .test_only_active_devices_for_owner_node(&owner, node.node())
+        .await
+        .expect("active devices");
+    let active_ids: Vec<&str> = active.iter().map(|device| device.device_id()).collect();
+    assert_eq!(active_ids, vec!["real-device"]);
+}
+
+/// Authorization: a caller cannot `disable-device` a device on a push
+/// node owned by ANOTHER user, even with a valid node + device-id. The
+/// storage owner-gate rejects with `forbidden` and the victim's device
+/// stays active. This pins the per-owner scoping invariant at the
+/// command-handler layer (the prior suite only exercised it at the
+/// storage layer with a single owner) — adversarial finding M3.
+#[tokio::test]
+async fn handle_iq_push_service_xep0050_disable_device_rejects_foreign_owner() {
+    use crate::push_service::commands::{
+        DISABLE_DEVICE_FORM_TYPE, DISABLE_DEVICE_NODE, FIELD_DEVICE_ID, FIELD_NODE,
+    };
+
+    let state = create_test_websocket_state().await;
+    let alice: BareJid = "alice@example.com".parse().expect("alice");
+    let alice_node = state
+        .deps
+        .protocol
+        .push_service
+        .ensure_node(&alice, "web")
+        .await
+        .expect("alice node");
+    state
+        .deps
+        .protocol
+        .push_service
+        .upsert_device(
+            &alice,
+            crate::push_service::PushDeviceRegistration::new(
+                "alice-device",
+                alice_node.node(),
+                crate::push_service::PushDevicePlatform::Web,
+                "test",
+            ),
+        )
+        .await
+        .expect("device");
+
+    // Bob is authenticated and submits Alice's node + device-id.
+    let bob: FullJid = "bob@example.com/web".parse().expect("bob");
+    let submit_form = xep0004_submit_form(
+        DISABLE_DEVICE_FORM_TYPE,
+        &[
+            (FIELD_NODE, alice_node.node()),
+            (FIELD_DEVICE_ID, "alice-device"),
+        ],
+    );
+    let disable = command_iq_payload(DISABLE_DEVICE_NODE, "execute", None, Some(submit_form));
+    let responses = handle_iq(
+        &iq_set_frame("push-disable-foreign", "push.example.com", disable),
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&bob),
+    )
+    .await;
+    let response = responses.first().expect("disable response");
+    let response_iq = parse_iq_for_test(response);
+    assert!(
+        matches!(response_iq.split().1, IqPayload::Error(_)),
+        "foreign-owner disable must be rejected: {response}"
+    );
+    let element = Element::from_str(response).expect("parse error iq");
+    let error = element
+        .children()
+        .find(|child| child.name() == "error")
+        .expect("error envelope");
+    assert!(
+        error.children().any(|child| child.name() == "forbidden"),
+        "foreign-owner disable must map to forbidden: {response}"
+    );
+
+    // Alice's device is untouched — still active.
+    let active = state
+        .deps
+        .protocol
+        .push_service
+        .test_only_active_devices_for_owner_node(&alice, alice_node.node())
+        .await
+        .expect("active devices");
+    let active_ids: Vec<&str> = active.iter().map(|device| device.device_id()).collect();
+    assert_eq!(active_ids, vec!["alice-device"]);
+}
+
+/// XEP-0050 §4.4 wire shape on the live dispatch path: a `complete`
+/// carrying a sessionid that was never issued is rejected with
+/// `modify`/`<bad-request/>` PLUS the command-namespaced
+/// `<bad-sessionid/>` specific condition. The conformant builders used
+/// to exist only as dead code while the live path emitted a bare
+/// `<bad-request/>`; this pins the application-condition child on the
+/// real path (adversarial conformance finding B1).
+#[tokio::test]
+async fn handle_iq_push_service_xep0050_complete_with_unknown_sessionid_is_bad_sessionid() {
+    use crate::push_service::commands::REGISTER_DEVICE_NODE;
+
+    let state = create_test_websocket_state().await;
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    // `complete` referencing a sessionid the server never issued.
+    let complete = command_iq_payload(
+        REGISTER_DEVICE_NODE,
+        "complete",
+        Some("never-issued-session"),
+        None,
+    );
+    let responses = handle_iq(
+        &iq_set_frame("push-bad-session", "push.example.com", complete),
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&jid),
+    )
+    .await;
+    let response = responses.first().expect("response");
+    let element = Element::from_str(response).expect("parse error iq");
+    assert_eq!(element.attr("type"), Some("error"));
+    let error = element
+        .children()
+        .find(|child| child.name() == "error")
+        .expect("error envelope");
+    assert_eq!(error.attr("type"), Some("modify"));
+    assert!(
+        error.children().any(|child| child.name() == "bad-request"),
+        "§4.4 general condition must be bad-request: {response}"
+    );
+    assert!(
+        error.children().any(|child| {
+            child.name() == "bad-sessionid"
+                && child.ns() == waddle_xmpp::xep::xep0050::NS_COMMANDS
+        }),
+        "§4.4 must carry the <bad-sessionid xmlns='http://jabber.org/protocol/commands'/> child: {response}"
+    );
+}
+
+/// XEP-0050 §4.4 wire shape on the live dispatch path: a command IQ
+/// carrying an `action` the responder does not understand is rejected
+/// with `modify`/`<bad-request/>` PLUS the command-namespaced
+/// `<malformed-action/>` specific condition (adversarial re-review
+/// finding — the `MalformedAction` variant was previously dead).
+#[tokio::test]
+async fn handle_iq_push_service_xep0050_unknown_action_is_malformed_action() {
+    use crate::push_service::commands::REGISTER_DEVICE_NODE;
+
+    let state = create_test_websocket_state().await;
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    // `action='frobnicate'` is not a valid XEP-0050 action.
+    let bogus = command_iq_payload(REGISTER_DEVICE_NODE, "frobnicate", None, None);
+    let responses = handle_iq(
+        &iq_set_frame("push-bad-action", "push.example.com", bogus),
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&jid),
+    )
+    .await;
+    let response = responses.first().expect("response");
+    let element = Element::from_str(response).expect("parse error iq");
+    assert_eq!(element.attr("type"), Some("error"));
+    let error = element
+        .children()
+        .find(|child| child.name() == "error")
+        .expect("error envelope");
+    assert_eq!(error.attr("type"), Some("modify"));
+    assert!(
+        error.children().any(|child| child.name() == "bad-request"),
+        "§4.4 general condition must be bad-request: {response}"
+    );
+    assert!(
+        error.children().any(|child| {
+            child.name() == "malformed-action"
+                && child.ns() == waddle_xmpp::xep::xep0050::NS_COMMANDS
+        }),
+        "§4.4 must carry the <malformed-action xmlns='http://jabber.org/protocol/commands'/> child: {response}"
+    );
 }
 
 #[tokio::test]

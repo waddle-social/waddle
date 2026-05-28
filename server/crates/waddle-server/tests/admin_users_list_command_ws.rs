@@ -57,10 +57,10 @@ async fn send_command(client: &mut WsXmppClient, id: &str, form_xml: &str) -> St
         ))
         .await
         .expect("send iq");
-    // The server returns IQ results via the typed xmpp_parsers builder
-    // (double-quoted attributes) but error stanzas via the pre-existing
-    // `generate_iq_error` helper (single-quoted attributes). Match
-    // either quote style so both paths land on the right frame.
+    // Both IQ results and IQ errors are now serialized via the typed
+    // `xmpp_parsers`/`minidom` builder (single-quoted attributes). Match
+    // the request id so we land on the response frame regardless of
+    // result-vs-error.
     client
         .recv_matching(|frame| {
             frame.contains("<iq")

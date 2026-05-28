@@ -61,8 +61,9 @@ use waddle_xmpp::{
         build_room_space_metadata_forms_with_description, build_search_response,
         build_server_role_form, build_spaces_metadata_form_for_requester, is_last_activity_query,
         is_search_request, is_time_query, is_version_query, parse_command_from_iq,
-        parse_moderation_iq, parse_search_request, ChannelResult, Command, CommandStatus,
-        Searchable, SpaceAffiliation, Xep0359StanzaId, NODE_COMMANDS, NS_CHANNEL_SEARCH,
+        parse_moderation_iq, parse_search_request, AdHocCommandCondition, ChannelResult, Command,
+        CommandError, CommandStatus, Searchable, SpaceAffiliation, Xep0359StanzaId, NODE_COMMANDS,
+        NS_CHANNEL_SEARCH,
     },
     Affiliation, SpaceDetails, Stanza, StanzaErrorCondition, StanzaErrorType, XmppError,
 };

@@ -106,7 +106,7 @@ fn executing_response_with_form(session_id: &str) -> Element {
     iq_with_command(command)
 }
 
-fn completed_response_with_outcome(node_id: &str, device_id: &str) -> Element {
+fn completed_response_with_outcome(session_id: &str, node_id: &str, device_id: &str) -> Element {
     let result_form = Element::builder("x", NS_DATA_FORMS)
         .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
         .append(form_type_field())
@@ -136,6 +136,12 @@ fn completed_response_with_outcome(node_id: &str, device_id: &str) -> Element {
             minidom::rxml::xml_ncname!("node").to_owned(),
             REGISTER_DEVICE_NODE,
         )
+        // The real Push Service echoes the sessionid on the completed
+        // response (XEP-0050 §3.4); the composer correlates against it.
+        .attr(
+            minidom::rxml::xml_ncname!("sessionid").to_owned(),
+            session_id,
+        )
         .attr(minidom::rxml::xml_ncname!("status").to_owned(), "completed")
         .append(result_form)
         .build();
@@ -146,7 +152,11 @@ fn completed_response_with_outcome(node_id: &str, device_id: &str) -> Element {
 async fn register_push_device_completes_multi_step_dance() {
     let driver = ScriptedDriver::new(vec![
         Ok(executing_response_with_form("session-1")),
-        Ok(completed_response_with_outcome("node-xyz", "device-abc")),
+        Ok(completed_response_with_outcome(
+            "session-1",
+            "node-xyz",
+            "device-abc",
+        )),
     ]);
     let credentials = PushDeviceCredentials::WebPush {
         endpoint: "https://fcm.googleapis.com/wp/abc".to_string(),
@@ -224,6 +234,53 @@ async fn register_push_device_completes_multi_step_dance() {
     );
     assert!(!fields.contains_key("apns-token"));
     assert!(!fields.contains_key("fcm-token"));
+}
+
+#[tokio::test]
+async fn register_push_device_rejects_completed_with_mismatched_sessionid() {
+    // XEP-0050 §3.4: the responder echoes the sessionid so the
+    // requester can correlate the response. A `completed` carrying a
+    // DIFFERENT sessionid (a crossed concurrent dance, or a hostile
+    // service splicing in another session's outcome) MUST be rejected —
+    // otherwise the composer would persist the wrong node/device-id even
+    // though the `from=` provenance check passed.
+    let driver = ScriptedDriver::new(vec![
+        Ok(executing_response_with_form("session-1")),
+        // Well-formed completed result form, but for a different session.
+        Ok(completed_response_with_outcome(
+            "session-OTHER",
+            "attacker-node",
+            "attacker-device",
+        )),
+    ]);
+    let credentials = PushDeviceCredentials::Apns {
+        device_token: "t".to_string(),
+    };
+    let err = register_push_device(
+        &driver,
+        "push.example.com",
+        "app-ios",
+        PushEnvironment::Sandbox,
+        &credentials,
+    )
+    .await
+    .expect_err("mismatched sessionid rejected");
+    match err {
+        ClientError::StanzaError(stanza_err) => {
+            assert!(
+                stanza_err
+                    .text
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("sessionid"),
+                "diagnostic must name the sessionid mismatch; got: {stanza_err:?}"
+            );
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+    // Both IQs went out, but the attacker's outcome was NOT persisted —
+    // the composer returned an error instead of a RegisterDeviceResult.
+    assert_eq!(driver.transcript().len(), 2);
 }
 
 #[tokio::test]
@@ -314,6 +371,10 @@ async fn register_push_device_rejects_completed_without_device_id_field() {
                 minidom::rxml::xml_ncname!("node").to_owned(),
                 REGISTER_DEVICE_NODE,
             )
+            .attr(
+                minidom::rxml::xml_ncname!("sessionid").to_owned(),
+                "session-1",
+            )
             .attr(minidom::rxml::xml_ncname!("status").to_owned(), "completed")
             .append(result_form)
             .build();
@@ -349,6 +410,10 @@ async fn register_push_device_rejects_completed_without_node_field() {
             .attr(
                 minidom::rxml::xml_ncname!("node").to_owned(),
                 REGISTER_DEVICE_NODE,
+            )
+            .attr(
+                minidom::rxml::xml_ncname!("sessionid").to_owned(),
+                "session-1",
             )
             .attr(minidom::rxml::xml_ncname!("status").to_owned(), "completed")
             .append(result_form)
