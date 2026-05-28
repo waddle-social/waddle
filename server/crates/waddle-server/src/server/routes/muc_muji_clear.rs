@@ -32,6 +32,7 @@ pub(crate) async fn clear_muji_presence_for_departure(
     );
 
     let Some(actor) = get_room_actor(state, room_jid).await else {
+        note_participant_left_from_webhook(state, room_jid, full_jid);
         return;
     };
     let outcome = match actor

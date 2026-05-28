@@ -339,6 +339,9 @@ export function clearCallState(): void {
       current.selfNick,
       new Error("Muji preparing wait cancelled while clearing call state"),
     );
+    clearLiveCallParticipants(current.peer);
+  } else if (current.phase === "active" && current.kind === "muc") {
+    clearLiveCallParticipants(current.peer);
   }
   $callState.set({ phase: "idle" });
   $lastCallError.set(null);
