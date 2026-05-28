@@ -6,7 +6,7 @@ import {
   $callState,
   type RawIqSender,
 } from "@/lib/calls/call-store";
-import { startMucCallAction } from "@/lib/calls/muc-call-actions";
+import { startMucCallAction, canResumeMucCallActivity } from "@/lib/calls/muc-call-actions";
 import { normalizeMucCallRoomJid } from "@/lib/calls/muc-call-presence";
 import { useRoomHasActiveCall } from "@/lib/calls/use-active-muc-call";
 import { connectionStore } from "@/lib/connection-store";
@@ -97,6 +97,12 @@ async function startCall(media: CallMedia): Promise<void> {
     ensureJoined: async () => {
       await getClientJoiner()?.(props.roomJid);
     },
+    tryResumeFirst:
+      roomCall.localResourceInCall.value ||
+      canResumeMucCallActivity({
+        roomJid: props.roomJid,
+        selfFullJid: getSelfFullJid() ?? null,
+      }),
   });
 }
 

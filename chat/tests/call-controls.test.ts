@@ -9,6 +9,10 @@ import {
   $dmCallActivities,
   clearDmCallActivities,
 } from "../src/lib/calls/dm-call-activity";
+import {
+  $mucCallLiveParticipants,
+  setLiveCallParticipants,
+} from "../src/lib/calls/muc-call-live-participants";
 import { connectionStore } from "../src/lib/connection-store";
 import type { LiveKitJoin } from "../src/lib/calls/types";
 
@@ -44,6 +48,7 @@ class PagehideHarness {
 afterEach(() => {
   clearCallState();
   clearDmCallActivities();
+  $mucCallLiveParticipants.set({});
   connectionStore.client = null;
 });
 
@@ -104,6 +109,27 @@ describe("call page lifecycle controls", () => {
     expect(sender.send_call_finish).not.toHaveBeenCalled();
     expect(sender.update_muji_presence).not.toHaveBeenCalled();
     expect(sender.send_raw_iq).not.toHaveBeenCalled();
+  });
+
+  test("pagehide suspension clears stale LiveKit participant projection for MUC calls", () => {
+    $callState.set({
+      phase: "active",
+      peer: "room@muc.waddle.test",
+      sid: "muc-1",
+      media: { audio: true, video: false },
+      join: { ...join, room: "room@muc.waddle.test" },
+      kind: "muc",
+      selfNick: "alice",
+      selfFullJid: "alice@waddle.test/web",
+    });
+    setLiveCallParticipants("room@muc.waddle.test", [
+      "alice@waddle.test/web",
+      "bob@waddle.test/phone",
+    ]);
+
+    suspendCallForPageHide();
+
+    expect($mucCallLiveParticipants.get()).toEqual({});
   });
 
   test("pagehide suspension persists stream resume state before clearing the local call slot", () => {

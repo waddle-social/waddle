@@ -1,11 +1,16 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { $callState, clearCallState } from "../src/lib/calls/call-store";
+import { $callState, clearCallState, tearDownActiveCall } from "../src/lib/calls/call-store";
 import {
   canResumeMucCallActivity,
   resumeMucCallActivity,
 } from "../src/lib/calls/muc-call-actions";
 import {
+  $mucCallLiveParticipants,
+  setLiveCallParticipants,
+} from "../src/lib/calls/muc-call-live-participants";
+import {
   clearAllMucCallSessionCacheForTests,
+  readMucCallSession,
   rememberMucCallSession,
 } from "../src/lib/calls/muc-call-session-cache";
 import type { CallMedia, LiveKitJoin } from "../src/lib/calls/types";
@@ -292,5 +297,47 @@ describe("resumeMucCallActivity", () => {
 
     expect(ok).toBe(false);
     expect($callState.get().phase).toBe("outgoing");
+  });
+
+  test("reload resume then hangup clears session cache and live participants", async () => {
+    const join = forgeLiveKitJoin({
+      identity: SELF_FULL_JID,
+      secondsFromNow: 600,
+    });
+    rememberMucCallSession({
+      roomJid: ROOM_JID,
+      sid: "sid-resume-hangup",
+      selfFullJid: SELF_FULL_JID,
+      media: AUDIO_CALL,
+      join,
+    });
+
+    const resumed = await resumeMucCallActivity({
+      roomJid: ROOM_JID,
+      getSender: () => ({
+        update_muji_presence: async () => undefined,
+        send_muji_session_terminate: async () => undefined,
+      }),
+      getSelfNick: () => SELF_NICK,
+      getSelfFullJid: () => SELF_FULL_JID,
+    });
+    expect(resumed).toBe(true);
+
+    setLiveCallParticipants(ROOM_JID, [SELF_FULL_JID, "bob@waddle.test/mobile"]);
+
+    await tearDownActiveCall(
+      {
+        update_muji_presence: async () => undefined,
+        send_muji_session_terminate: async () => undefined,
+      } as unknown as Parameters<typeof tearDownActiveCall>[0],
+      "success",
+    );
+
+    expect($callState.get()).toEqual({ phase: "idle" });
+    expect(readMucCallSession({
+      roomJid: ROOM_JID,
+      selfFullJid: SELF_FULL_JID,
+    })).toBeNull();
+    expect($mucCallLiveParticipants.get()[ROOM_JID]).toBeUndefined();
   });
 });

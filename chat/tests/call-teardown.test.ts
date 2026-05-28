@@ -438,6 +438,7 @@ describe("leaveRetainedMucCallAction", () => {
   });
 
   test("terminates the cached Muji Jingle session after clearing retained presence", async () => {
+    const now = new Date();
     const sent: unknown[][] = [];
     applyMucCallPresence({
       from: "chan@muc.test/alice",
@@ -448,7 +449,7 @@ describe("leaveRetainedMucCallAction", () => {
       roomJid: "chan@muc.test",
       sid: "muc-recovered-live",
       selfFullJid: "alice@waddle.test/web",
-      now: new Date("2026-05-26T12:00:00.000Z"),
+      now,
     });
     const sender: RawIqSender = {
       update_muji_presence: mock(async (...args) => {
@@ -474,11 +475,12 @@ describe("leaveRetainedMucCallAction", () => {
     expect(readMucCallSession({
       roomJid: "chan@muc.test",
       selfFullJid: "alice@waddle.test/web",
-      now: new Date("2026-05-26T12:00:00.000Z"),
+      now,
     })).toBeNull();
   });
 
   test("reports cached Muji terminate failure after retained presence is cleared", async () => {
+    const now = new Date();
     applyMucCallPresence({
       from: "chan@muc.test/alice",
       muc_jid: "alice@waddle.test/web",
@@ -489,7 +491,7 @@ describe("leaveRetainedMucCallAction", () => {
       sid: "muc-retry-live",
       selfFullJid: "alice@waddle.test/web",
       media: { audio: true, video: true },
-      now: new Date("2026-05-26T12:00:00.000Z"),
+      now,
     });
     const sender: RawIqSender = {
       update_muji_presence: mock(async () => undefined),
@@ -521,7 +523,7 @@ describe("leaveRetainedMucCallAction", () => {
     expect(readMucCallSession({
       roomJid: "chan@muc.test",
       selfFullJid: "alice@waddle.test/web",
-      now: new Date("2026-05-26T12:00:00.000Z"),
+      now,
     })).toMatchObject({ sid: "muc-retry-live" });
     expect($mucCallTerminatePendingSessions.get()).toEqual({
       "chan@muc.test\u0000muc-retry-live\u0000alice@waddle.test/web": {

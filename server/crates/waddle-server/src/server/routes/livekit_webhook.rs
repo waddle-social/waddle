@@ -33,13 +33,9 @@ use tracing::{debug, info, warn};
 use waddle_sfu::{
     verify_webhook_signature, CallId, LiveKitWebhookEvent, ParticipantEnvelope, WebhookVerifyError,
 };
-use waddle_xmpp::muc::build_occupant_presence;
-use waddle_xmpp::muc::room_actor::{ClearMujiPresence, MujiPresenceUpdateOutcome};
-use waddle_xmpp::xep::xep0272::Muji;
-use waddle_xmpp::xep::xep0421::OccupantIdentity;
-use waddle_xmpp_core::Stanza;
 
-use super::websocket::{get_room_actor, note_participant_left_from_webhook, WebSocketState};
+use super::muc_muji_clear::clear_muji_presence_for_departure;
+use super::websocket::WebSocketState;
 
 /// Upper bound on remembered event ids for delivery deduplication.
 /// LiveKit retries up to 5 times per delivery; a small LRU is enough
@@ -206,115 +202,7 @@ async fn process_participant_left_for_identity(
         return;
     };
 
-    debug!(
-        room = %room_jid,
-        identity = %full_jid,
-        "LiveKit webhook: clearing Muji presence for departed participant"
-    );
-
-    // Clear the room-actor's authoritative per-session Muji state for
-    // this participant. The handler is idempotent — a participant that
-    // already left via the XMPP-driven path returns `Ok(None)` and we
-    // skip the broadcast.
-    let Some(actor) = get_room_actor(state, &room_jid).await else {
-        // Room has no active actor (no occupants), nothing to clear.
-        return;
-    };
-    let outcome = match actor
-        .ask(ClearMujiPresence {
-            sender_jid: full_jid.clone(),
-        })
-        .await
-    {
-        Ok(Some(outcome)) => outcome,
-        Ok(None) => {
-            debug!(
-                room = %room_jid,
-                identity = %full_jid,
-                "LiveKit webhook: participant not in MUC actor; SFU registry cleanup only"
-            );
-            note_participant_left_from_webhook(state, &room_jid, &full_jid);
-            return;
-        }
-        Err(error) => {
-            warn!(
-                room = %room_jid,
-                identity = %full_jid,
-                error = ?error,
-                "LiveKit webhook: room actor rejected Muji clear; falling through to SFU unregister"
-            );
-            note_participant_left_from_webhook(state, &room_jid, &full_jid);
-            return;
-        }
-    };
-
-    broadcast_muji_clear_from_sfu(state, &room_jid, &full_jid, &outcome);
-    note_participant_left_from_webhook(state, &room_jid, &full_jid);
-}
-
-/// Broadcast a server-originated Muji-presence clear to every remaining
-/// occupant of the room.
-///
-/// Wire shape mirrors what the client-driven Muji-clear path emits in
-/// `muc_update::try_handle_muc_presence_update`: an in-room
-/// `<presence/>` per recipient per surviving Muji owner, with the
-/// departed participant getting an empty Muji payload (XEP-0272
-/// §Leaving: "absence of the `<muji/>` element is the leave marker").
-/// Sibling sessions with surviving Muji state retain their advertised
-/// `<muji/>` payload so multi-resource participants don't lose
-/// preparing/active state held by a different resource.
-fn broadcast_muji_clear_from_sfu(
-    state: &WebSocketState,
-    room_jid: &BareJid,
-    leaving_real_jid: &FullJid,
-    outcome: &MujiPresenceUpdateOutcome,
-) {
-    let from_room_jid = room_jid
-        .clone()
-        .with_resource_str(&outcome.update.sender_nick)
-        .unwrap_or_else(|_| leaving_real_jid.clone());
-
-    // Owner entries to reflect: the leaving session (no Muji payload =
-    // leave marker) plus every surviving sibling-session Muji.
-    let mut entries: Vec<(FullJid, Option<Muji>)> =
-        Vec::with_capacity(outcome.session_mujis.len() + 1);
-    entries.push((leaving_real_jid.clone(), None));
-    for (owner, muji) in &outcome.session_mujis {
-        if owner == leaving_real_jid {
-            continue;
-        }
-        entries.push((owner.clone(), Some(muji.clone())));
-    }
-
-    for recipient in &outcome.update.recipients {
-        for (owner_jid, muji) in &entries {
-            let owner_bare = owner_jid.to_bare();
-            let identity = OccupantIdentity {
-                bare_jid: &owner_bare,
-                real_jid: Some(owner_jid),
-                secret: &state.deps.occupant_id_secret,
-            };
-            let is_self = recipient.to_bare() == owner_bare;
-            let mut presence = build_occupant_presence(
-                &from_room_jid,
-                recipient,
-                outcome.update.sender_affiliation,
-                outcome.update.sender_role,
-                is_self,
-                &identity,
-            );
-            if let Some(muji_ref) = muji {
-                if !muji_ref.is_empty() {
-                    presence.payloads.push(muji_ref.to_element());
-                }
-            }
-            let _ = state
-                .deps
-                .protocol
-                .connection_registry
-                .try_send_to(recipient, Stanza::Presence(presence));
-        }
-    }
+    clear_muji_presence_for_departure(state, &room_jid, &full_jid).await;
 }
 
 #[cfg(test)]

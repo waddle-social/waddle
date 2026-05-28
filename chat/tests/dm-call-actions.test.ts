@@ -87,6 +87,7 @@ describe("startDmCallAction", () => {
   });
 
   test("answers a hydrated incoming call with the stored proposer full JID", async () => {
+    const now = new Date();
     const sender: CallWireSender = {
       send_call_proceed: mock(async () => undefined),
     };
@@ -99,8 +100,8 @@ describe("startDmCallAction", () => {
       },
       selfBareJid: "alice@waddle.test",
       to: "alice@waddle.test/web",
-      timestamp: "2026-05-26T12:00:00.000Z",
-      now: new Date("2026-05-26T12:00:00.000Z"),
+      timestamp: now.toISOString(),
+      now,
     });
 
     await answerIncomingDmCallActivity({
@@ -495,6 +496,8 @@ describe("startDmCallAction", () => {
   });
 
   test("keeps recovered DM activity retryable when no end marker sends", async () => {
+    const now = new Date();
+    const tokenExp = new Date(now.getTime() + 60 * 60 * 1000);
     const sender: CallWireSender = {
       send_call_session_terminate: mock(async () => {
         throw new Error("terminate failed");
@@ -514,23 +517,23 @@ describe("startDmCallAction", () => {
           url: "wss://livekit.waddle.test",
           room: "dm-call-retry",
           identity: "alice@waddle.test/web",
-          token: jwtWithExp(Date.parse("2026-05-26T13:00:00.000Z") / 1000),
+          token: jwtWithExp(tokenExp.getTime() / 1000),
         },
       },
       selfBareJid: "alice@waddle.test",
-      timestamp: "2026-05-26T12:00:00.000Z",
-      now: new Date("2026-05-26T12:00:00.000Z"),
+      timestamp: now.toISOString(),
+      now,
     });
 
     await expect(endRecoveredDmCallAction({
       peerBareJid: "bob@waddle.test",
       getSender: () => sender,
       getSelfFullJid: () => "alice@waddle.test/web",
-      now: new Date("2026-05-26T12:00:00.000Z"),
+      now,
     })).resolves.toBe(false);
 
     expect(sender.send_call_finish).not.toHaveBeenCalled();
-    expect(readDmCallActivity("bob@waddle.test")).toMatchObject({
+    expect(readDmCallActivity("bob@waddle.test", now)).toMatchObject({
       sid: "retry-live",
       state: "accepted",
     });
@@ -604,6 +607,8 @@ describe("startDmCallAction", () => {
   });
 
   test("does not end another resource's recovered DM call", async () => {
+    const now = new Date();
+    const tokenExp = new Date(now.getTime() + 60 * 60 * 1000);
     const sender: CallWireSender = {
       send_call_session_terminate: mock(async () => undefined),
       send_call_finish: mock(async () => undefined),
@@ -619,24 +624,24 @@ describe("startDmCallAction", () => {
           url: "wss://livekit.waddle.test",
           room: "dm-call-other-resource",
           identity: "alice@waddle.test/tablet",
-          token: jwtWithExp(Date.parse("2026-05-26T13:00:00.000Z") / 1000),
+          token: jwtWithExp(tokenExp.getTime() / 1000),
         },
       },
       selfBareJid: "alice@waddle.test",
-      timestamp: "2026-05-26T12:00:00.000Z",
-      now: new Date("2026-05-26T12:00:00.000Z"),
+      timestamp: now.toISOString(),
+      now,
     });
 
     await expect(endRecoveredDmCallAction({
       peerBareJid: "bob@waddle.test",
       getSender: () => sender,
       getSelfFullJid: () => "alice@waddle.test/web",
-      now: new Date("2026-05-26T12:00:00.000Z"),
+      now,
     })).resolves.toBe(false);
 
     expect(sender.send_call_session_terminate).not.toHaveBeenCalled();
     expect(sender.send_call_finish).not.toHaveBeenCalled();
-    expect(readDmCallActivity("bob@waddle.test")).toMatchObject({
+    expect(readDmCallActivity("bob@waddle.test", now)).toMatchObject({
       sid: "other-resource-live",
     });
   });

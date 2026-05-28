@@ -16,6 +16,7 @@ import {
   forgetMucCallSession,
   rememberMucCallSession,
 } from "./muc-call-session-cache";
+import { clearLiveCallParticipants } from "./muc-call-live-participants";
 import { barePeerJid } from "../xmpp/jid";
 
 /**
@@ -338,6 +339,9 @@ export function clearCallState(): void {
       current.selfNick,
       new Error("Muji preparing wait cancelled while clearing call state"),
     );
+    clearLiveCallParticipants(current.peer);
+  } else if (current.phase === "active" && current.kind === "muc") {
+    clearLiveCallParticipants(current.peer);
   }
   $callState.set({ phase: "idle" });
   $lastCallError.set(null);
@@ -594,6 +598,7 @@ export async function tearDownActiveCall(
                 clearMucCallParticipant(s.peer, s.selfNick, s.selfFullJid);
               }
             }
+            clearLiveCallParticipants(s.peer);
             try {
               await sendMujiSessionTerminate(raw, s.peer, s.sid);
               forgetMucCallSession({

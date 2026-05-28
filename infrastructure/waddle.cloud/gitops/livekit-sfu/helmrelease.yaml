@@ -16,12 +16,22 @@ spec:
         name: livekit-sfu
         namespace: livekit
       interval: 12h
+  valuesFrom:
+    - kind: Secret
+      name: livekit-sfu-api-keys
+      valuesKey: api-key
+      targetPath: webhook.apiKey
+      optional: false
   values:
     image:
       repository: livekit/livekit-server
       tag: v1.11.0
     apiKeys:
       existingSecret: livekit-sfu-api-keys
+    webhook:
+      enabled: true
+      urls:
+        - https://xmpp.waddle.social/api/v1/livekit/webhook
     livekit:
       log_level: info
       rtc:
