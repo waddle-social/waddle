@@ -126,8 +126,7 @@ pub(super) async fn handle_sans_io_iq(
         let ctx = ProtocolStanzaContext { domain, full_jid };
         let muji_terminate_room = super::jingle_muji_gate::muji_session_terminate_room(iq);
         let events = state.deps.protocol.dispatcher.dispatch_iq(iq, &ctx);
-        let muji_clear_after = muji_terminate_room
-            .filter(|_| !events_contain_iq_error(&events));
+        let muji_clear_after = muji_terminate_room.filter(|_| !events_contain_iq_error(&events));
         let deps = crate::server::routes::interpret::Deps {
             connection_registry: &state.deps.protocol.connection_registry,
             sm_session_registry: Some(&state.deps.protocol.sm_session_registry),
