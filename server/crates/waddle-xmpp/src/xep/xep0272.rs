@@ -252,7 +252,25 @@ impl TryFrom<&Element> for Muji {
             }
             match child.name() {
                 PREPARING_NAME => preparing = true,
-                CONTENT_NAME => contents.push(MujiContent::try_from_element(child)?),
+                CONTENT_NAME => {
+                    let content = MujiContent::try_from_element(child)?;
+                    // XEP-0166 §7.3: the (creator, name) tuple uniquely
+                    // identifies a content. A `<muji/>` carrying two
+                    // contents with the same pair is malformed; reject
+                    // it rather than storing a duplicate that would
+                    // pollute the presence-derived content list
+                    // broadcast to the MUC. The list is tiny (audio +
+                    // video), so a linear scan is cheaper than a set.
+                    if contents.iter().any(|existing: &MujiContent| {
+                        existing.creator == content.creator && existing.name == content.name
+                    }) {
+                        return Err(MujiParseError::DuplicateContent {
+                            creator: creator_as_attr(content.creator),
+                            name: content.name.0.clone(),
+                        });
+                    }
+                    contents.push(content);
+                }
                 _ => {
                     return Err(MujiParseError::UnexpectedChild(child.name().to_owned()));
                 }
@@ -291,6 +309,11 @@ pub enum MujiParseError {
     MissingDescription,
     #[error("unexpected child element in <muji/>: {0}")]
     UnexpectedChild(String),
+    #[error(
+        "duplicate <content/> for (creator={creator}, name={name}); \
+         XEP-0166 §7.3 requires the (creator, name) tuple to be unique"
+    )]
+    DuplicateContent { creator: &'static str, name: String },
 }
 
 fn creator_as_attr(creator: Creator) -> &'static str {
@@ -402,6 +425,45 @@ mod tests {
         let elem: Element = xml.parse().unwrap();
         let err = Muji::try_from(&elem).expect_err("creator validation");
         assert!(matches!(err, MujiParseError::InvalidCreator(_)));
+    }
+
+    #[test]
+    fn rejects_duplicate_content_creator_name_tuple() {
+        // XEP-0166 §7.3: (creator, name) must be unique. Two
+        // `<content creator='initiator' name='audio'>` children must
+        // be rejected rather than both stored and rebroadcast.
+        let xml = "<muji xmlns='urn:xmpp:jingle:muji:0'>\
+                     <content creator='initiator' name='audio'>\
+                       <description xmlns='urn:xmpp:jingle:apps:rtp:1' media='audio'/>\
+                     </content>\
+                     <content creator='initiator' name='audio'>\
+                       <description xmlns='urn:xmpp:jingle:apps:rtp:1' media='audio'/>\
+                     </content>\
+                   </muji>";
+        let elem: Element = xml.parse().unwrap();
+        let err = Muji::try_from(&elem).expect_err("duplicate content rejected");
+        assert!(matches!(
+            err,
+            MujiParseError::DuplicateContent { creator, ref name }
+                if creator == "initiator" && name == "audio"
+        ));
+    }
+
+    #[test]
+    fn allows_same_name_under_different_creators() {
+        // The uniqueness key is the (creator, name) *tuple*, so the
+        // same name under a different creator is permitted.
+        let xml = "<muji xmlns='urn:xmpp:jingle:muji:0'>\
+                     <content creator='initiator' name='audio'>\
+                       <description xmlns='urn:xmpp:jingle:apps:rtp:1' media='audio'/>\
+                     </content>\
+                     <content creator='responder' name='audio'>\
+                       <description xmlns='urn:xmpp:jingle:apps:rtp:1' media='audio'/>\
+                     </content>\
+                   </muji>";
+        let elem: Element = xml.parse().unwrap();
+        let muji = Muji::try_from(&elem).expect("distinct creators accepted");
+        assert_eq!(muji.contents.len(), 2);
     }
 
     #[test]

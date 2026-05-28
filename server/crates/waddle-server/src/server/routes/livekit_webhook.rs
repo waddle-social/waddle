@@ -21,6 +21,7 @@
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use std::time::Duration as StdDuration;
 
 use axum::body::Bytes;
 use axum::extract::{Extension, State};
@@ -31,7 +32,8 @@ use axum::Router;
 use jid::{BareJid, FullJid};
 use tracing::{debug, info, warn};
 use waddle_sfu::{
-    verify_webhook_signature, CallId, LiveKitWebhookEvent, ParticipantEnvelope, WebhookVerifyError,
+    verify_webhook_signature, CallId, LiveKitWebhookEvent, ParticipantEnvelope, SfuReconciler,
+    WebhookVerifyError, RECONCILE_GRACE_SECONDS,
 };
 
 use super::muc_muji_clear::clear_muji_presence_for_departure;
@@ -171,6 +173,70 @@ async fn livekit_webhook_handler(
     StatusCode::OK
 }
 
+/// How often the reconciliation backstop polls LiveKit for the true
+/// participant set of every active call. Frequent enough that a ghost
+/// left by a lost `participant_left`/`room_finished` webhook clears
+/// within ~a minute; infrequent enough that the `ListParticipants`
+/// fan-out is negligible even with many concurrent calls.
+const RECONCILE_INTERVAL: StdDuration = StdDuration::from_secs(60);
+
+/// `true` when `call_id` is a MUC (Muji) room JID and therefore has
+/// MUC presence to clear. A 1:1 call uses a scoped id
+/// (`<initiator-bare>::<sid>`) whose `::`-bearing domain part is not a
+/// valid JID, so it parses as `Err` — those are cleared from the SFU
+/// registry by the reconciler but carry no MUC `<presence/>`.
+fn is_muc_call(call_id: &str) -> bool {
+    call_id.parse::<BareJid>().is_ok()
+}
+
+/// Spawn the periodic SFU ghost-reconciliation task. Drives
+/// [`SfuReconciler::reconcile_active_calls`] on an interval and clears
+/// the MUC Muji presence of any participant LiveKit no longer reports —
+/// the safety net for a `participant_left`/`room_finished` webhook
+/// whose delivery (and all retries) were lost. No-op until the first
+/// tick after [`RECONCILE_INTERVAL`].
+pub fn spawn_reconciliation_task(state: Arc<WebSocketState>, reconciler: Arc<dyn SfuReconciler>) {
+    let grace = chrono::Duration::seconds(RECONCILE_GRACE_SECONDS);
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(RECONCILE_INTERVAL);
+        // Drop the immediate first tick `interval` yields so we don't
+        // reconcile at boot before any call exists.
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            reconcile_once(&state, reconciler.as_ref(), grace).await;
+        }
+    });
+}
+
+/// One reconciliation pass: sweep registry ghosts via the reconciler,
+/// then clear each swept MUC participant's Muji presence through the
+/// same idempotent path the `participant_left` webhook uses.
+async fn reconcile_once(
+    state: &WebSocketState,
+    reconciler: &dyn SfuReconciler,
+    grace: chrono::Duration,
+) {
+    let swept = reconciler.reconcile_active_calls(grace).await;
+    if swept.is_empty() {
+        return;
+    }
+    info!(
+        count = swept.len(),
+        "SFU reconciliation swept ghost participants; clearing MUC Muji presence"
+    );
+    for (call_id, identity) in swept {
+        if is_muc_call(call_id.as_str()) {
+            process_participant_left_for_identity(
+                state,
+                call_id.as_str(),
+                identity.as_jid().to_string().as_str(),
+            )
+            .await;
+        }
+    }
+}
+
 async fn process_participant_left(state: &WebSocketState, env: &ParticipantEnvelope) {
     process_participant_left_for_identity(state, &env.room.name, &env.participant.identity).await;
 }
@@ -223,6 +289,17 @@ mod tests {
         let seen = SeenEventIds::default();
         assert!(seen.observe(None));
         assert!(seen.observe(None));
+    }
+
+    #[test]
+    fn is_muc_call_distinguishes_room_jids_from_scoped_1to1_ids() {
+        // MUC (Muji) call ids are bare room JIDs → have presence.
+        assert!(is_muc_call("general@muc.waddle.social"));
+        assert!(is_muc_call("team-standup@muc.waddle.social"));
+        // 1:1 scoped ids (`<initiator-bare>::<sid>`) are not valid
+        // JIDs (the `::` lands in the domain part) → no MUC presence.
+        assert!(!is_muc_call("alice@waddle.social::c-abc123"));
+        assert!(!is_muc_call("c-abc123"));
     }
 
     #[test]

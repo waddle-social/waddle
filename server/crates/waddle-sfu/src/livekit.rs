@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use dashmap::DashMap;
 use tokio::runtime::Handle;
 use tokio::sync::Semaphore;
@@ -36,6 +36,16 @@ pub(crate) const MAX_ISSUED_PER_PARTICIPANT: usize = 16;
 /// many reqwest tasks. The semaphore is a fixed-size FIFO valve.
 const ADMIN_CONCURRENCY: usize = 32;
 
+/// Grace window after registration before a participant becomes
+/// eligible for ghost reconciliation. The registry is populated at
+/// Jingle `session-initiate` — *before* the client actually connects
+/// its WebSocket to LiveKit — so a freshly-registered participant is
+/// legitimately absent from LiveKit's `ListParticipants` for the few
+/// seconds it takes to ring + connect. Sweeping inside that window
+/// would tear down a call that is still coming up; this grace period
+/// keeps reconciliation to genuinely stale entries.
+pub const RECONCILE_GRACE_SECONDS: i64 = 120;
+
 /// Shared registry of in-call participants. Held in an `Arc` so the
 /// spawned admin teardown future can re-check membership before
 /// firing `DeleteRoom`, closing the race where a fresh joiner
@@ -53,6 +63,15 @@ pub struct LiveKitSfu {
     /// a misbehaving client cannot push the tracker into unbounded
     /// memory growth.
     issued: DashMap<(CallId, Identity), Vec<IssuedJti>>,
+    /// Wall-clock instant each `(call, identity)` was registered.
+    /// Read only by the reconciliation backstop to enforce
+    /// [`RECONCILE_GRACE_SECONDS`]: a participant absent from LiveKit's
+    /// `ListParticipants` is only swept once it has been registered
+    /// longer than the grace window, so a still-connecting joiner is
+    /// never mistaken for a ghost. Kept in lockstep with `calls`:
+    /// written in `register_call_participant`, removed in
+    /// `clear_local_state`.
+    registered_at: DashMap<(CallId, Identity), DateTime<Utc>>,
     /// Map of revoked JWT identifiers to the `exp` of the token they
     /// belonged to. Entries are swept lazily once `Utc::now() > exp`:
     /// a revoked token past its expiry cannot be replayed regardless
@@ -122,6 +141,7 @@ impl LiveKitSfu {
             config,
             calls: Arc::new(DashMap::new()),
             issued: DashMap::new(),
+            registered_at: DashMap::new(),
             revoked: DashMap::new(),
             admin,
             runtime: Handle::try_current().ok(),
@@ -186,6 +206,8 @@ impl LiveKitSfu {
                 self.revoked.insert(issued.jti, issued.exp);
             }
         }
+        self.registered_at
+            .remove(&(call_id.clone(), identity.clone()));
         self.sweep_expired_revoked(Utc::now());
 
         if remaining == 0 {
@@ -255,6 +277,92 @@ impl LiveKitSfu {
             }
         });
     }
+
+    /// One reconciliation pass against LiveKit's ground truth.
+    ///
+    /// For every call in the local registry, ask LiveKit who is
+    /// actually connected (`ListParticipants`) and sweep any locally
+    /// registered identity that LiveKit no longer reports — but only
+    /// once that identity has been registered longer than `grace`, so
+    /// a participant still ringing/connecting (the registry is
+    /// populated at `session-initiate`, before the WebSocket connects)
+    /// is never mistaken for a ghost. Returns the `(call, identity)`
+    /// pairs that were swept so the caller (the webhook route's
+    /// reconciliation task) can clear their MUC Muji presence via the
+    /// same idempotent path the `participant_left` webhook uses.
+    ///
+    /// Swept entries are cleared with [`Self::clear_local_state`]
+    /// (registry removal + JWT revocation) only — no admin
+    /// `RemoveParticipant`/`DeleteRoom` is fired, because LiveKit
+    /// already does not have these participants (that is precisely why
+    /// they are ghosts), and a room LiveKit reports as gone will lapse
+    /// on its own `empty_timeout`.
+    ///
+    /// A `ListParticipants` failure for a given call (network/5xx) is
+    /// logged and that call is skipped this pass — absence cannot be
+    /// confirmed, so nothing is swept. The next pass retries.
+    async fn reconcile_active_calls_inner(&self, grace: ChronoDuration) -> Vec<(CallId, Identity)> {
+        let now = Utc::now();
+        // Snapshot the registry into owned values up front so no
+        // DashMap guard is held across the `.await` on the admin call.
+        let snapshot: Vec<(CallId, Vec<Identity>)> = self
+            .calls
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().iter().cloned().collect()))
+            .collect();
+
+        let mut swept = Vec::new();
+        for (call_id, registered) in snapshot {
+            let live = match self.admin.list_participant_identities(&call_id).await {
+                Ok(live) => live,
+                Err(err) => {
+                    tracing::warn!(
+                        call_id = %call_id,
+                        error = %err,
+                        "SFU reconcile: ListParticipants failed; skipping this call this pass"
+                    );
+                    continue;
+                }
+            };
+            let live_set: HashSet<String> =
+                live.iter().map(Identity::as_livekit_identity).collect();
+
+            for identity in registered {
+                if live_set.contains(&identity.as_livekit_identity()) {
+                    continue; // genuinely connected — not a ghost
+                }
+                // Absent from LiveKit. Only sweep once past the grace
+                // window; a freshly-registered participant may simply
+                // not have finished connecting yet.
+                let aged_out = self
+                    .registered_at
+                    .get(&(call_id.clone(), identity.clone()))
+                    .map(|entry| now - *entry.value() >= grace)
+                    // No timestamp recorded (e.g. an entry registered
+                    // before this field existed) → treat as eligible.
+                    .unwrap_or(true);
+                if !aged_out {
+                    continue;
+                }
+                let (was_present, _) = self.clear_local_state(&call_id, &identity);
+                if was_present {
+                    tracing::info!(
+                        call_id = %call_id,
+                        identity = %identity.as_livekit_identity(),
+                        "SFU reconcile: swept ghost participant LiveKit no longer reports"
+                    );
+                    swept.push((call_id.clone(), identity));
+                }
+            }
+        }
+        swept
+    }
+}
+
+impl crate::SfuReconciler for LiveKitSfu {
+    fn reconcile_active_calls(&self, grace: ChronoDuration) -> crate::ReconcileFuture<'_> {
+        Box::pin(self.reconcile_active_calls_inner(grace))
+    }
 }
 
 impl SfuService for LiveKitSfu {
@@ -307,6 +415,11 @@ impl SfuService for LiveKitSfu {
             .entry(call_id.clone())
             .or_default()
             .insert(identity.clone());
+        // Stamp (or refresh) the registration time so the
+        // reconciliation backstop's grace window is measured from the
+        // most recent (re)join, not a stale earlier attempt.
+        self.registered_at
+            .insert((call_id.clone(), identity.clone()), Utc::now());
     }
 
     fn has_call_participant(&self, call_id: &CallId, identity: &Identity) -> bool {
@@ -601,6 +714,14 @@ mod tests {
     struct RecordingAdmin {
         remove_calls: Mutex<Vec<(CallId, Identity)>>,
         delete_calls: Mutex<Vec<CallId>>,
+        /// What LiveKit "reports" as connected per call. A call absent
+        /// from the map lists as empty (room not found). Drives the
+        /// reconciliation tests.
+        live: Mutex<std::collections::HashMap<CallId, Vec<Identity>>>,
+        /// When set, `list_participant_identities` errors instead of
+        /// returning a set — used to assert reconcile skips a call it
+        /// can't confirm rather than sweeping it.
+        list_errors: Mutex<bool>,
     }
 
     impl RecordingAdmin {
@@ -610,6 +731,17 @@ mod tests {
 
         fn delete_snapshot(&self) -> Vec<CallId> {
             self.delete_calls.lock().expect("recording lock").clone()
+        }
+
+        fn set_live(&self, call: &CallId, identities: Vec<Identity>) {
+            self.live
+                .lock()
+                .expect("recording lock")
+                .insert(call.clone(), identities);
+        }
+
+        fn fail_list(&self) {
+            *self.list_errors.lock().expect("recording lock") = true;
         }
     }
 
@@ -638,6 +770,25 @@ mod tests {
             Box::pin(async move {
                 self.delete_calls.lock().expect("recording lock").push(room);
                 Ok(())
+            })
+        }
+
+        fn list_participant_identities<'a>(
+            &'a self,
+            room: &'a CallId,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<Identity>, SfuError>> + Send + 'a>> {
+            let room = room.clone();
+            Box::pin(async move {
+                if *self.list_errors.lock().expect("recording lock") {
+                    return Err(SfuError::InvalidCallId("simulated list failure".into()));
+                }
+                Ok(self
+                    .live
+                    .lock()
+                    .expect("recording lock")
+                    .get(&room)
+                    .cloned()
+                    .unwrap_or_default())
             })
         }
     }
@@ -810,5 +961,99 @@ mod tests {
             "DeleteRoom must be suppressed by the rejoin re-check; got {:?}",
             admin.delete_snapshot(),
         );
+    }
+
+    // -------- Reconciliation backstop --------
+
+    use crate::SfuReconciler;
+
+    #[tokio::test]
+    async fn reconcile_sweeps_ghost_absent_from_livekit() {
+        // Alice + Bob registered; LiveKit reports only Alice connected
+        // (Bob's participant_left webhook was lost). With a zero grace
+        // window Bob must be swept and returned for presence cleanup;
+        // Alice must remain. No admin remove/delete is fired — the
+        // ghost is already gone from LiveKit.
+        let admin = Arc::new(RecordingAdmin::default());
+        let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+        let call = CallId::new("general@muc.waddle.social").unwrap();
+        let alice = fixture_identity("alice");
+        let bob = fixture_identity("bob");
+        sfu.register_call_participant(&call, &alice);
+        sfu.register_call_participant(&call, &bob);
+        admin.set_live(&call, vec![alice.clone()]);
+
+        let swept = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
+
+        assert_eq!(swept, vec![(call.clone(), bob.clone())]);
+        assert!(sfu.has_call_participant(&call, &alice), "Alice must remain");
+        assert!(
+            !sfu.has_call_participant(&call, &bob),
+            "Bob must be swept from the registry"
+        );
+        assert_eq!(sfu.participant_count(&call), 1);
+        assert!(
+            admin.remove_snapshot().is_empty() && admin.delete_snapshot().is_empty(),
+            "reconcile must not fire admin RemoveParticipant/DeleteRoom for already-gone ghosts"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_respects_registration_grace_window() {
+        // A just-registered participant LiveKit hasn't seen yet (still
+        // ringing/connecting) must NOT be swept while inside the grace
+        // window — sweeping here would tear down a call coming up.
+        let admin = Arc::new(RecordingAdmin::default());
+        let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+        let call = CallId::new("room@muc.waddle.social").unwrap();
+        let alice = fixture_identity("alice");
+        sfu.register_call_participant(&call, &alice);
+        // LiveKit reports nobody (room not yet created / mid-connect).
+        admin.set_live(&call, vec![]);
+
+        let swept = sfu
+            .reconcile_active_calls(ChronoDuration::seconds(3600))
+            .await;
+
+        assert!(
+            swept.is_empty(),
+            "a participant inside the grace window must not be swept"
+        );
+        assert_eq!(sfu.participant_count(&call), 1);
+    }
+
+    #[tokio::test]
+    async fn reconcile_keeps_genuinely_connected_participants() {
+        let admin = Arc::new(RecordingAdmin::default());
+        let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+        let call = CallId::new("room2@muc.waddle.social").unwrap();
+        let alice = fixture_identity("alice");
+        sfu.register_call_participant(&call, &alice);
+        admin.set_live(&call, vec![alice.clone()]);
+
+        let swept = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
+
+        assert!(swept.is_empty(), "connected participant must not be swept");
+        assert!(sfu.has_call_participant(&call, &alice));
+    }
+
+    #[tokio::test]
+    async fn reconcile_skips_calls_it_cannot_confirm() {
+        // If ListParticipants fails for a call, absence cannot be
+        // confirmed; nothing is swept and the next pass retries.
+        let admin = Arc::new(RecordingAdmin::default());
+        admin.fail_list();
+        let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+        let call = CallId::new("room3@muc.waddle.social").unwrap();
+        let alice = fixture_identity("alice");
+        sfu.register_call_participant(&call, &alice);
+
+        let swept = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
+
+        assert!(
+            swept.is_empty(),
+            "a call whose participant list could not be fetched must not be swept"
+        );
+        assert_eq!(sfu.participant_count(&call), 1);
     }
 }

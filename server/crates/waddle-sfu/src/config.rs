@@ -136,6 +136,17 @@ impl fmt::Debug for TurnSharedSecret {
     }
 }
 
+/// Default join-token TTL in seconds (10 minutes). Long enough to
+/// cover ringing plus the WebSocket connect handshake, short enough to
+/// bound token theft; once connected LiveKit rotates its own in-band
+/// refresh tokens, so the JWT TTL only gates the initial connect.
+pub const DEFAULT_TOKEN_TTL_SECONDS: i64 = 600;
+
+/// Hard upper bound on the configurable join-token TTL (1 hour).
+/// Rejects misconfiguration to multi-hour/day TTLs that would leave a
+/// stolen token usable far beyond any plausible connect window.
+pub const MAX_TOKEN_TTL_SECONDS: i64 = 3600;
+
 /// Full SFU bridge configuration. Constructed once at server start.
 #[derive(Debug, Clone)]
 pub struct SfuConfig {
@@ -153,7 +164,12 @@ pub struct SfuConfig {
     pub turn_tls_port: u16,
     pub turn_udp_port: u16,
     pub turn_shared_secret: TurnSharedSecret,
-    /// TTL of every minted join token (default: 1 hour).
+    /// TTL of every minted join token. Bounds the window in which a
+    /// stolen token can be replayed to join the room. LiveKit rotates
+    /// its own in-band refresh tokens once a participant is connected,
+    /// so this only gates the *initial* connect and can safely be
+    /// short. Default [`DEFAULT_TOKEN_TTL_SECONDS`], hard-capped at
+    /// [`MAX_TOKEN_TTL_SECONDS`].
     pub token_ttl: Duration,
     /// TTL of every minted TURN credential (default: 1 hour).
     pub turn_ttl: Duration,
@@ -171,7 +187,8 @@ impl SfuConfig {
     /// `LIVEKIT_TURN_SHARED_SECRET`.
     /// Optional with defaults: `LIVEKIT_TURN_TLS_PORT` (443),
     /// `LIVEKIT_TURN_UDP_PORT` (3478),
-    /// `LIVEKIT_TOKEN_TTL_SECONDS` (3600),
+    /// `LIVEKIT_TOKEN_TTL_SECONDS` (default 600, hard-capped at 3600;
+    /// out-of-range values are rejected),
     /// `LIVEKIT_TURN_TTL_SECONDS` (3600),
     /// `LIVEKIT_WEBHOOK_SECRET` (defaults to `LIVEKIT_API_SECRET` for
     /// dev parity; production should set both independently so a
@@ -204,7 +221,7 @@ impl SfuConfig {
 
         let turn_tls_port = parse_port_env("LIVEKIT_TURN_TLS_PORT", 443)?;
         let turn_udp_port = parse_port_env("LIVEKIT_TURN_UDP_PORT", 3478)?;
-        let token_ttl_seconds = parse_seconds_env("LIVEKIT_TOKEN_TTL_SECONDS", 3600)?;
+        let token_ttl_seconds = parse_token_ttl_env("LIVEKIT_TOKEN_TTL_SECONDS")?;
         let turn_ttl_seconds = parse_seconds_env("LIVEKIT_TURN_TTL_SECONDS", 3600)?;
 
         // Validate the API secret first so the dedicated
@@ -248,6 +265,26 @@ fn parse_seconds_env(name: &'static str, default: i64) -> Result<i64, FromEnvErr
     }
 }
 
+/// Parse and validate the join-token TTL. Defaults to
+/// [`DEFAULT_TOKEN_TTL_SECONDS`] when unset and rejects values outside
+/// `1..=MAX_TOKEN_TTL_SECONDS` so a misconfigured TTL can never mint
+/// already-expired or implausibly long-lived join tokens.
+fn parse_token_ttl_env(name: &'static str) -> Result<i64, FromEnvError> {
+    let seconds = match std::env::var(name) {
+        Ok(value) => value
+            .parse()
+            .map_err(|_| FromEnvError::InvalidNumber(name))?,
+        Err(_) => return Ok(DEFAULT_TOKEN_TTL_SECONDS),
+    };
+    if !(1..=MAX_TOKEN_TTL_SECONDS).contains(&seconds) {
+        return Err(FromEnvError::TokenTtlOutOfRange {
+            seconds,
+            max: MAX_TOKEN_TTL_SECONDS,
+        });
+    }
+    Ok(seconds)
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum FromEnvError {
     #[error("missing required env var: {0}")]
@@ -258,6 +295,8 @@ pub enum FromEnvError {
     InvalidScheme(#[source] InvalidWebsocketUrl),
     #[error("env var {0} is not a valid number")]
     InvalidNumber(&'static str),
+    #[error("LIVEKIT_TOKEN_TTL_SECONDS={seconds} is out of range (must be 1..={max})")]
+    TokenTtlOutOfRange { seconds: i64, max: i64 },
     #[error("LIVEKIT_API_SECRET is too weak")]
     WeakApiSecret(#[source] WeakSecret),
     #[error("LIVEKIT_WEBHOOK_SECRET is too weak")]
@@ -367,7 +406,7 @@ mod tests {
             .expect("some");
         assert_eq!(cfg.turn_tls_port, 443);
         assert_eq!(cfg.turn_udp_port, 3478);
-        assert_eq!(cfg.token_ttl, Duration::seconds(3600));
+        assert_eq!(cfg.token_ttl, Duration::seconds(DEFAULT_TOKEN_TTL_SECONDS));
         assert_eq!(cfg.turn_ttl, Duration::seconds(3600));
         assert_eq!(cfg.turn_host.as_str(), "turn.test");
     }
@@ -442,6 +481,66 @@ mod tests {
         assert!(matches!(
             err,
             FromEnvError::InvalidNumber("LIVEKIT_TURN_TLS_PORT")
+        ));
+    }
+
+    fn required_overrides() -> Vec<(&'static str, Option<&'static str>)> {
+        let mut overrides = all_unset_overrides();
+        overrides.extend([
+            ("LIVEKIT_API_KEY", Some("APIxxxxxxxx")),
+            (
+                "LIVEKIT_API_SECRET",
+                Some("super-secret-secret-32-bytes-min"),
+            ),
+            ("LIVEKIT_WS_URL", Some("wss://livekit.test/")),
+            ("LIVEKIT_TURN_HOST", Some("turn.test")),
+            ("LIVEKIT_TURN_SHARED_SECRET", Some("turn-shared-secret")),
+        ]);
+        overrides
+    }
+
+    #[test]
+    fn from_env_token_ttl_defaults_to_ten_minutes() {
+        let cfg = with_env(&required_overrides(), SfuConfig::from_env)
+            .expect("ok")
+            .expect("some");
+        assert_eq!(cfg.token_ttl, Duration::seconds(DEFAULT_TOKEN_TTL_SECONDS));
+        assert_eq!(DEFAULT_TOKEN_TTL_SECONDS, 600);
+    }
+
+    #[test]
+    fn from_env_custom_token_ttl_within_range_is_accepted() {
+        let mut overrides = required_overrides();
+        overrides.push(("LIVEKIT_TOKEN_TTL_SECONDS", Some("120")));
+        let cfg = with_env(&overrides, SfuConfig::from_env)
+            .expect("ok")
+            .expect("some");
+        assert_eq!(cfg.token_ttl, Duration::seconds(120));
+    }
+
+    #[test]
+    fn from_env_token_ttl_above_cap_is_rejected() {
+        let mut overrides = required_overrides();
+        // One second over the 1-hour cap.
+        overrides.push(("LIVEKIT_TOKEN_TTL_SECONDS", Some("3601")));
+        let err = with_env(&overrides, SfuConfig::from_env).expect_err("over-cap ttl is err");
+        assert!(matches!(
+            err,
+            FromEnvError::TokenTtlOutOfRange {
+                seconds: 3601,
+                max: MAX_TOKEN_TTL_SECONDS
+            }
+        ));
+    }
+
+    #[test]
+    fn from_env_non_positive_token_ttl_is_rejected() {
+        let mut overrides = required_overrides();
+        overrides.push(("LIVEKIT_TOKEN_TTL_SECONDS", Some("0")));
+        let err = with_env(&overrides, SfuConfig::from_env).expect_err("zero ttl is err");
+        assert!(matches!(
+            err,
+            FromEnvError::TokenTtlOutOfRange { seconds: 0, .. }
         ));
     }
 

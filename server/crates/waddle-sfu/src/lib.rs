@@ -20,6 +20,9 @@
 
 #![deny(unsafe_code)]
 
+use std::future::Future;
+use std::pin::Pin;
+
 mod admin;
 mod call;
 mod config;
@@ -33,7 +36,7 @@ pub use admin::LiveKitAdmin;
 pub use call::{CallId, CallState, Identity, MediaCapabilities};
 pub use config::{ApiKey, ApiSecret, FromEnvError, SfuConfig, TurnSharedSecret, WebsocketUrl};
 pub use error::SfuError;
-pub use livekit::LiveKitSfu;
+pub use livekit::{LiveKitSfu, RECONCILE_GRACE_SECONDS};
 pub use token::{JoinToken, Jti, Jwt, VideoGrant};
 pub use turn::{TurnCredential, TurnHost, TurnPassword, TurnUsername};
 pub use webhook::{
@@ -135,4 +138,28 @@ pub trait SfuService: Send + Sync + 'static {
     /// Returns an empty vec when the call has no recorded participants
     /// (either never registered or already drained).
     fn participants_for_call(&self, call_id: &CallId) -> Vec<Identity>;
+}
+
+/// Periodic reconciliation against the SFU's ground truth.
+///
+/// Separate from [`SfuService`] because it is inherently async (an
+/// HTTP round-trip to LiveKit's `ListParticipants`) whereas
+/// `SfuService` is deliberately sync. A background task in
+/// `waddle-server` drives this on an interval so that a lost
+/// `participant_left` / `room_finished` webhook delivery cannot leave
+/// a permanent ghost in the registry (and therefore in MUC presence):
+/// LiveKit, not our in-memory registry, is the authority on who is
+/// actually connected.
+/// Future returned by [`SfuReconciler::reconcile_active_calls`],
+/// resolving to the `(call, identity)` pairs swept this pass. Named so
+/// the boxed-future shape stays readable at the trait + impl sites.
+pub type ReconcileFuture<'a> = Pin<Box<dyn Future<Output = Vec<(CallId, Identity)>> + Send + 'a>>;
+
+pub trait SfuReconciler: Send + Sync + 'static {
+    /// Sweep registry entries LiveKit no longer reports as connected,
+    /// respecting a registration grace window so still-connecting
+    /// participants are not mistaken for ghosts. Returns the
+    /// `(call, identity)` pairs swept so the caller can clear the
+    /// corresponding MUC Muji presence idempotently.
+    fn reconcile_active_calls(&self, grace: chrono::Duration) -> ReconcileFuture<'_>;
 }

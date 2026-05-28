@@ -673,6 +673,22 @@ impl waddle_sfu::LiveKitAdmin for RecordingAdmin {
             Ok(())
         })
     }
+
+    fn list_participant_identities<'a>(
+        &'a self,
+        _room: &'a waddle_sfu::CallId,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<Vec<waddle_sfu::Identity>, waddle_sfu::SfuError>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        // These Muji teardown tests don't exercise the reconciliation
+        // backstop; report no live participants.
+        Box::pin(async move { Ok(Vec::new()) })
+    }
 }
 
 fn fixture_sfu_with_admin(admin: Arc<RecordingAdmin>) -> Arc<dyn SfuService> {
