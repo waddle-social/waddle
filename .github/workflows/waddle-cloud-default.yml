@@ -9,8 +9,10 @@ on:
     paths:
     - .github/workflows/waddle-cloud-default.yml
     - cue.mod/**
-    - infrastructure/waddle.cloud/**
+    - infrastructure/waddle.cloud/charts/livekit-sfu/**
     - infrastructure/waddle.cloud/env.cue
+    - infrastructure/waddle.cloud/env.cue/**
+    - infrastructure/waddle.cloud/gitops/**
     - infrastructure/waddle.cloud/schema/**
   workflow_dispatch: {}
 concurrency:
