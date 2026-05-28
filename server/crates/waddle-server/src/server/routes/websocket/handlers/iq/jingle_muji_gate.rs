@@ -107,6 +107,27 @@ pub(super) async fn verify_muji_jingle_request(
     verify_room_membership(state, full_jid, &room_jid).await
 }
 
+/// When `iq` is a Muji-bearing Jingle `session-terminate`, return the
+/// target MUC room JID so the websocket adapter can mirror the
+/// LiveKit webhook's Muji-clear broadcast after the sans-I/O handler
+/// unregisters the SFU participant.
+pub(super) fn muji_session_terminate_room(iq: &Iq) -> Option<BareJid> {
+    let Iq::Set { payload, .. } = iq else {
+        return None;
+    };
+    if payload.ns() != NS_JINGLE || payload.name() != "jingle" {
+        return None;
+    }
+    let muji_elem = find_muji(payload)?;
+    let muji = Muji::try_from(muji_elem).ok()?;
+    let room_jid = muji.room?;
+    let jingle = Jingle::try_from(payload.clone()).ok()?;
+    if !matches!(jingle.action, Action::SessionTerminate) {
+        return None;
+    }
+    Some(room_jid)
+}
+
 async fn verify_room_membership(
     state: &WebSocketState,
     full_jid: &FullJid,
@@ -356,5 +377,18 @@ mod tests {
         };
         let outcome = verify_muji_jingle_request(&state, &alice, &iq).await;
         assert!(matches!(outcome, GateOutcome::Allow));
+    }
+
+    #[test]
+    fn muji_session_terminate_room_extracts_target_room() {
+        let room: BareJid = "general@muc.example.com".parse().expect("valid room");
+        let iq = build_jingle_muji_iq(Action::SessionTerminate, "test-sid-terminate");
+        assert_eq!(super::muji_session_terminate_room(&iq), Some(room));
+    }
+
+    #[test]
+    fn muji_session_terminate_room_ignores_session_initiate() {
+        let iq = build_jingle_muji_iq(Action::SessionInitiate, "test-sid-initiate");
+        assert_eq!(super::muji_session_terminate_room(&iq), None);
     }
 }

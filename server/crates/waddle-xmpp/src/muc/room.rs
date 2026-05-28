@@ -121,8 +121,8 @@ pub struct MucRoom {
     /// room-actor shutdown by design (#414); persistence is a follow-up
     /// concern. Bounded by [`super::pin::MAX_PINNED_ENTRIES`].
     pub(super) pinned_entries: Vec<PinnedEntry>,
-    /// Per-occupant `<muji xmlns='urn:xmpp:jingle:muji:0'/>` advertised
-    /// state (XEP-0272), keyed by nick. Mirrors the client-emitted
+    /// Per-session `<muji xmlns='urn:xmpp:jingle:muji:0'/>` advertised
+    /// state (XEP-0272), keyed by nick and then by full JID. Mirrors the client-emitted
     /// presence extension so:
     ///
     /// 1. Joining occupants see existing call indicators when their
@@ -133,29 +133,28 @@ pub struct MucRoom {
     ///    the source of truth rather than echoing a possibly-stale
     ///    payload from the client.
     ///
-    /// Each entry records the originating `FullJid` so that when a
-    /// user has multiple sessions sharing the same nick (web + mobile),
-    /// the call advertisement is tied to the specific session that
-    /// joined the call. When that session leaves — clean hangup OR
-    /// unclean disconnect — its `<muji/>` advertisement is cleared
-    /// even if the user's other sessions are still in the room. Without
-    /// this per-session keying, alice's mobile staying in the channel
-    /// after her desktop (which was on the call) drops would keep the
-    /// chip lit forever for late joiners.
-    pub(super) muji_state: HashMap<String, MujiStateEntry>,
+    /// Each full-JID entry is independent so that when a user has
+    /// multiple sessions sharing the same nick (web + mobile), one
+    /// resource can join or leave the call without overwriting the
+    /// sibling resource's advertisement. The room-level wire shape is
+    /// still one occupant presence per nick; `muji_for_nick` aggregates
+    /// these session entries, preferring active contents over preparing.
+    pub(super) muji_state: HashMap<String, HashMap<FullJid, Muji>>,
 }
 
-/// One advertised `<muji/>` entry plus the session that owns it.
-///
-/// The `originator` field is the `FullJid` of the session that emitted
-/// the Muji presence update. When that exact session leaves the room
-/// (or its WebSocket drops), the entry is removed regardless of whether
-/// other sessions for the same nick remain — preventing ghost call
-/// advertisements on multi-resource occupants.
+/// Result of applying one session's Muji presence update.
 #[derive(Debug, Clone)]
-pub(super) struct MujiStateEntry {
-    pub originator: FullJid,
-    pub muji: Muji,
+pub struct MujiPresenceState {
+    /// The exact payload that should be reflected to the sender session.
+    pub sender_muji: Option<Muji>,
+    /// The aggregate payload that represents the occupant nick to every
+    /// other session in the room.
+    pub room_muji: Option<Muji>,
+    /// Exact per-session Muji payloads still advertised for this nick
+    /// after the update. Preparing is a resource-owned coordination
+    /// state, so callers that need to preserve XEP-0272 joining
+    /// semantics should prefer this list over the aggregate snapshot.
+    pub session_mujis: Vec<(FullJid, Muji)>,
 }
 
 impl MucRoom {
@@ -191,38 +190,90 @@ impl MucRoom {
     /// means the participant has left the call; we mirror that by
     /// clearing the entry when [`Muji::is_empty`] is true.
     ///
-    /// Returns the post-update state for `nick`: `Some(muji)` if a
-    /// live advertisement (preparing OR active contents) is now
-    /// present, `None` if cleared. The presence broadcaster uses the
-    /// return value to decide what to put on the wire — `None` means
-    /// "rebroadcast a presence WITHOUT the `<muji/>` child" so other
-    /// occupants stop seeing the indicator.
+    /// Returns the sender reflection and the post-update aggregate
+    /// state for `nick`. The presence broadcaster uses the aggregate
+    /// state for other occupants so one same-nick resource cannot hide
+    /// active or preparing state owned by another resource.
     pub fn upsert_muji_presence(
         &mut self,
         nick: &str,
         originator: FullJid,
         muji: Muji,
-    ) -> Option<Muji> {
+    ) -> MujiPresenceState {
         if muji.is_empty() {
-            self.muji_state.remove(nick);
-            None
+            if let Some(entries) = self.muji_state.get_mut(nick) {
+                entries.remove(&originator);
+                if entries.is_empty() {
+                    self.muji_state.remove(nick);
+                }
+            }
+            MujiPresenceState {
+                sender_muji: None,
+                room_muji: self.muji_for_nick(nick),
+                session_mujis: self.muji_sessions_for_nick(nick),
+            }
         } else {
-            self.muji_state.insert(
-                nick.to_owned(),
-                MujiStateEntry {
-                    originator,
-                    muji: muji.clone(),
-                },
-            );
-            Some(muji)
+            self.muji_state
+                .entry(nick.to_owned())
+                .or_default()
+                .insert(originator, muji.clone());
+            MujiPresenceState {
+                sender_muji: Some(muji),
+                room_muji: self.muji_for_nick(nick),
+                session_mujis: self.muji_sessions_for_nick(nick),
+            }
         }
     }
 
     /// Currently-advertised `<muji/>` element for `nick`, if any.
     /// Used by the join handler to enrich the replayed occupant
     /// presence list with active-call indicators for late joiners.
-    pub fn muji_for_nick(&self, nick: &str) -> Option<&Muji> {
-        self.muji_state.get(nick).map(|entry| &entry.muji)
+    pub fn muji_for_nick(&self, nick: &str) -> Option<Muji> {
+        let entries = self.muji_state.get(nick)?;
+        let mut preparing = false;
+        let mut contents = Vec::new();
+        let mut ordered_entries: Vec<_> = entries.iter().collect();
+        ordered_entries.sort_by_key(|(jid, _)| jid.to_string());
+        for (_, muji) in ordered_entries {
+            preparing |= muji.preparing;
+            for content in &muji.contents {
+                if !contents.contains(content) {
+                    contents.push(content.clone());
+                }
+            }
+        }
+        if !preparing && contents.is_empty() {
+            return None;
+        }
+        Some(Muji {
+            room: None,
+            preparing,
+            contents,
+        })
+    }
+
+    /// Currently-advertised Muji payload for one exact session.
+    pub fn muji_for_session(&self, nick: &str, jid: &FullJid) -> Option<Muji> {
+        self.muji_state
+            .get(nick)
+            .and_then(|entries| entries.get(jid))
+            .filter(|muji| !muji.is_empty())
+            .cloned()
+    }
+
+    /// Exact per-session Muji payloads for `nick`, sorted by full JID
+    /// for deterministic replay and broadcast ordering.
+    pub fn muji_sessions_for_nick(&self, nick: &str) -> Vec<(FullJid, Muji)> {
+        let Some(entries) = self.muji_state.get(nick) else {
+            return Vec::new();
+        };
+        let mut entries: Vec<_> = entries
+            .iter()
+            .filter(|(_, muji)| !muji.is_empty())
+            .map(|(jid, muji)| (jid.clone(), muji.clone()))
+            .collect();
+        entries.sort_by_key(|(jid, _)| jid.to_string());
+        entries
     }
 
     /// Clear a nickname's stored Muji advertisement if `originator`
@@ -233,14 +284,18 @@ impl MucRoom {
     /// A regular available presence without `<muji/>` is therefore a
     /// canonical clear signal for an occupant that previously
     /// advertised Muji state.
-    pub fn clear_muji_presence(&mut self, nick: &str, originator: &FullJid) -> bool {
-        let Some(entry) = self.muji_state.get(nick) else {
-            return false;
-        };
-        if &entry.originator != originator {
-            return false;
+    pub fn clear_muji_presence(&mut self, nick: &str, originator: &FullJid) -> MujiPresenceState {
+        if let Some(entries) = self.muji_state.get_mut(nick) {
+            entries.remove(originator);
+            if entries.is_empty() {
+                self.muji_state.remove(nick);
+            }
         }
-        self.muji_state.remove(nick).is_some()
+        MujiPresenceState {
+            sender_muji: None,
+            room_muji: self.muji_for_nick(nick),
+            session_mujis: self.muji_sessions_for_nick(nick),
+        }
     }
 
     /// Add an occupant to the room.
@@ -324,12 +379,11 @@ impl MucRoom {
         // even if peer sessions for the same nick remain. Without this
         // clause the chip would stay lit (and replay to late joiners)
         // until the user's LAST session for this nick departs.
-        if self
-            .muji_state
-            .get(nick)
-            .is_some_and(|entry| entry.originator == *jid)
-        {
-            self.muji_state.remove(nick);
+        if let Some(entries) = self.muji_state.get_mut(nick) {
+            entries.remove(jid);
+            if entries.is_empty() {
+                self.muji_state.remove(nick);
+            }
         }
 
         if sessions.is_empty() {

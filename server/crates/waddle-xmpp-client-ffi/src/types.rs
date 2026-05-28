@@ -79,6 +79,7 @@ pub struct WaddleArchivedMessage {
     pub reply_fallback_start: Option<u32>,
     pub reply_fallback_end: Option<u32>,
     pub shared_files: Vec<WaddleSharedFile>,
+    pub call_event: Option<WaddleCallEvent>,
 }
 
 #[derive(uniffi::Record, Clone)]
@@ -142,6 +143,10 @@ pub struct WaddleMujiPresence {
     /// True when the presence advertised at least one `<content/>`
     /// child — the occupant is actively participating in the call.
     pub active: bool,
+    /// True when at least one content description advertises audio.
+    pub audio: bool,
+    /// True when at least one content description advertises video.
+    pub video: bool,
 }
 
 #[derive(uniffi::Record, Clone)]
@@ -374,11 +379,13 @@ pub enum WaddleJingleReason {
 
 /// Typed A/V call event surfaced to Swift via `on_call(...)`.
 /// `from` is the stamped sender JID (a *full* JID for propose /
-/// session-initiate per XEP-0353 §0.6); `sid` is the Jingle
-/// session id used to correlate every later event in the call.
+/// session-initiate per XEP-0353 §0.6); `to` is the stamped stanza
+/// recipient when available; `sid` is the Jingle session id used to
+/// correlate every later event in the call.
 #[derive(uniffi::Record, Clone)]
 pub struct WaddleCallEvent {
     pub from: String,
+    pub to: Option<String>,
     pub sid: String,
     pub kind: WaddleCallEventKind,
 }

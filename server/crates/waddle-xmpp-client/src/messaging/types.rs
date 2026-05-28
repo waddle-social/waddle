@@ -529,7 +529,7 @@ pub struct InboundPresence {
 /// Parsed `<muji xmlns='urn:xmpp:jingle:muji:0'>` extension on a MUC
 /// presence. Wire-typed because chat-side consumers want the
 /// preparing-vs-active distinction without re-parsing the element
-/// shape.
+/// shape or the RTP content descriptions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MujiPresence {
     /// True when the presence carried a `<preparing/>` child (XEP-0272
@@ -540,6 +540,10 @@ pub struct MujiPresence {
     /// True when the presence advertised at least one `<content/>`
     /// child — the occupant is actively participating in the call.
     pub active: bool,
+    /// True when at least one content description advertises audio.
+    pub audio: bool,
+    /// True when at least one content description advertises video.
+    pub video: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

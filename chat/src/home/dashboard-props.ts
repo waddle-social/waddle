@@ -2,6 +2,8 @@ import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
 import type { RosterContact } from "@/lib/xmpp/types";
 import type { DmConversation } from "@/lib/xmpp-client";
 import type { ChannelUnreadMap } from "@/home/activity";
+import type { DmCallActivity } from "@/lib/calls/dm-call-activity";
+import type { CallMedia } from "@/lib/calls/types";
 
 export interface HomeDashboardProps {
   spaces: SpaceSummary[];
@@ -11,6 +13,12 @@ export interface HomeDashboardProps {
   channelUnreadMap?: ChannelUnreadMap;
   activeChannelJids?: Set<string>;
   dmConversations?: DmConversation[];
+  callParticipantCounts?: Record<string, number>;
+  callParticipants?: Record<string, string[]>;
+  callMediaByRoom?: Record<string, CallMedia>;
+  dmCallActivities?: Record<string, DmCallActivity>;
+  managedMucDomain?: string | null;
+  selfFullJid?: string | null;
 }
 
 interface HomeDashboardSources extends Omit<HomeDashboardProps, "channelUnreadMap"> {
@@ -31,6 +39,12 @@ export function buildHomeDashboardProps(sources: HomeDashboardSources): HomeDash
     ),
     activeChannelJids: sources.activeChannelJids,
     dmConversations: sources.dmConversations,
+    callParticipantCounts: sources.callParticipantCounts,
+    callParticipants: sources.callParticipants,
+    callMediaByRoom: sources.callMediaByRoom,
+    dmCallActivities: sources.dmCallActivities,
+    managedMucDomain: sources.managedMucDomain,
+    selfFullJid: sources.selfFullJid,
   };
 }
 

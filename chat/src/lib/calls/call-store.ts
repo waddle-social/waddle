@@ -8,6 +8,15 @@ import {
   clearMucCallParticipant,
   normalizeMucCallRoomJid,
 } from "./muc-call-presence";
+import {
+  applyDmCallEvent,
+  clearDmCallActivity,
+} from "./dm-call-activity";
+import {
+  forgetMucCallSession,
+  rememberMucCallSession,
+} from "./muc-call-session-cache";
+import { clearLiveCallParticipants } from "./muc-call-live-participants";
 import { barePeerJid } from "../xmpp/jid";
 
 /**
@@ -192,6 +201,9 @@ export function reduceCallState(current: CallState, event: CallEvent): CallState
       // is session-initiate. The reducer keeps the call in
       // `outgoing`; `call-effects.ts` reads `proceed.from` and
       // emits the session-initiate stanza.
+      if (current.phase === "incoming" && current.sid === event.sid) {
+        return { phase: "idle" };
+      }
       return current;
     case "reject":
     case "retract":
@@ -262,7 +274,7 @@ export function reduceCallState(current: CallState, event: CallEvent): CallState
         return {
           phase: "ended",
           sid: event.sid,
-          reason: event.kind === "session-terminate" ? event.reason : event.reason ?? null,
+          reason: event.reason ?? null,
         };
       }
       return current;
@@ -327,6 +339,9 @@ export function clearCallState(): void {
       current.selfNick,
       new Error("Muji preparing wait cancelled while clearing call state"),
     );
+    clearLiveCallParticipants(current.peer);
+  } else if (current.phase === "active" && current.kind === "muc") {
+    clearLiveCallParticipants(current.peer);
   }
   $callState.set({ phase: "idle" });
   $lastCallError.set(null);
@@ -369,6 +384,18 @@ export function beginOutgoingCall(
       ? { phase: "outgoing", to, sid, media, initiator }
       : { phase: "outgoing", to, sid, media },
   );
+  applyDmCallEvent({
+    event: {
+      kind: "propose",
+      from: initiator ?? "",
+      sid,
+      media,
+    },
+    selfBareJid: initiator ?? "",
+    selfFullJid: initiator,
+    to,
+    directionHint: "outgoing",
+  });
   $lastCallError.set(null);
 }
 
@@ -410,6 +437,7 @@ export function scheduleOutgoingTimeout(
     void outboundCalls
       .retract(sender, s.to, s.sid)
       .catch((err) => reportCallError(err));
+    clearDmCallActivity(s.to, sid);
     $callState.set({
       phase: "ended",
       sid,
@@ -440,6 +468,7 @@ export function scheduleSessionAcceptTimeout(
     void outboundCalls
       .sessionTerminate(sender, peerFullJid, sid, "timeout")
       .catch((err) => reportCallError(err));
+    clearDmCallActivity(peerFullJid, sid);
     $callState.set({
       phase: "ended",
       sid,
@@ -526,17 +555,21 @@ export async function tearDownActiveCall(
       switch (s.phase) {
         case "active":
           if (s.kind === "dm") {
-            await outboundCalls.sessionTerminate(sender, s.peer, s.sid, reason);
-            // XEP-0353 §3.5: both parties SHOULD send `<finish/>` after
-            // the call ends so MAM archives both sides consistently
-            // (the JMI message stack uses the finish marker to bookend
-            // the call record). Best-effort: a wasm bundle that
-            // doesn't expose `send_call_finish` shouldn't keep the
-            // terminate from clearing the local slot.
             try {
-              await outboundCalls.finish(sender, s.peer, s.sid);
-            } catch (err) {
-              reportCallError(err);
+              await outboundCalls.sessionTerminate(sender, s.peer, s.sid, reason);
+              // XEP-0353 §3.5: both parties SHOULD send `<finish/>` after
+              // the call ends so MAM archives both sides consistently
+              // (the JMI message stack uses the finish marker to bookend
+              // the call record). Best-effort: a wasm bundle that
+              // doesn't expose `send_call_finish` shouldn't keep the
+              // terminate from clearing the local slot.
+              try {
+                await outboundCalls.finish(sender, s.peer, s.sid);
+              } catch (err) {
+                reportCallError(err);
+              }
+            } finally {
+              clearDmCallActivity(s.peer, s.sid);
             }
           } else {
             // MUC group call: clear our Muji presence AND leave via
@@ -562,21 +595,35 @@ export async function tearDownActiveCall(
               } catch (err) {
                 reportCallError(err);
               } finally {
-                clearMucCallParticipant(s.peer, s.selfNick);
+                clearMucCallParticipant(s.peer, s.selfNick, s.selfFullJid);
               }
             }
+            clearLiveCallParticipants(s.peer);
             try {
               await sendMujiSessionTerminate(raw, s.peer, s.sid);
+              forgetMucCallSession({
+                roomJid: s.peer,
+                selfFullJid: s.selfFullJid,
+                sid: s.sid,
+              });
             } catch (err) {
               reportCallError(err);
             }
           }
           break;
         case "outgoing":
-          await outboundCalls.retract(sender, s.to, s.sid);
+          try {
+            await outboundCalls.retract(sender, s.to, s.sid);
+          } finally {
+            clearDmCallActivity(s.to, s.sid);
+          }
           break;
         case "incoming":
-          await outboundCalls.reject(sender, s.from, s.sid);
+          try {
+            await outboundCalls.reject(sender, s.from, s.sid);
+          } finally {
+            clearDmCallActivity(s.from, s.sid);
+          }
           break;
         case "muc-pending":
           rejectPendingMujiAccept(
@@ -604,12 +651,17 @@ export async function tearDownActiveCall(
               } catch (err) {
                 reportCallError(err);
               } finally {
-                clearMucCallParticipant(s.peer, s.selfNick);
+                clearMucCallParticipant(s.peer, s.selfNick, s.selfFullJid);
               }
             }
             if (s.activePresencePublished) {
               try {
                 await sendMujiSessionTerminate(raw, s.peer, s.sid);
+                forgetMucCallSession({
+                  roomJid: s.peer,
+                  selfFullJid: s.selfFullJid,
+                  sid: s.sid,
+                });
               } catch (err) {
                 reportCallError(err);
               }
@@ -716,6 +768,7 @@ async function rollbackMucCallSetup(
   sender: RawIqSender,
   roomJid: string,
   selfNick: string,
+  selfFullJid: string | null | undefined,
   terminateSfu: boolean,
   sid?: string,
 ): Promise<void> {
@@ -731,7 +784,7 @@ async function rollbackMucCallSetup(
     } catch (err) {
       reportCallError(err);
     } finally {
-      clearMucCallParticipant(roomJid, selfNick);
+      clearMucCallParticipant(roomJid, selfNick, selfFullJid);
     }
   }
   if (terminateSfu) {
@@ -740,6 +793,7 @@ async function rollbackMucCallSetup(
         throw new Error("Cannot terminate Muji session without the active Jingle sid");
       }
       await sendMujiSessionTerminate(sender, roomJid, sid);
+      forgetMucCallSession({ roomJid, selfFullJid, sid });
     } catch (err) {
       reportCallError(err);
     }
@@ -816,6 +870,7 @@ export async function beginMucCall(
   media: CallMedia,
   selfNick?: string,
   expectedMixerJid?: string | null,
+  selfFullJid?: string | null,
 ): Promise<void> {
   const normalizedRoomJid = normalizeMucCallRoomJid(roomJid);
   if (!normalizedRoomJid) {
@@ -842,6 +897,7 @@ export async function beginMucCall(
     media,
     kind: "muc",
     selfNick,
+    selfFullJid,
     attemptId,
   });
   $lastCallError.set(null);
@@ -858,6 +914,7 @@ export async function beginMucCall(
       normalizedRoomJid,
       selfNick,
       PREPARING_ECHO_TIMEOUT_MS,
+      selfFullJid,
     );
     await sender.update_muji_presence(
       normalizedRoomJid,
@@ -877,6 +934,7 @@ export async function beginMucCall(
       normalizedRoomJid,
       selfNick,
       PREPARING_PEERS_TIMEOUT_MS,
+      selfFullJid,
     );
     assertMucSetupStillPending(normalizedRoomJid, selfNick, attemptId);
 
@@ -891,7 +949,14 @@ export async function beginMucCall(
       media.video, // video
     );
     if (!mucSetupStillPending(normalizedRoomJid, selfNick, attemptId)) {
-      await rollbackMucCallSetup(sender, normalizedRoomJid, selfNick, false, attemptId);
+      await rollbackMucCallSetup(
+        sender,
+        normalizedRoomJid,
+        selfNick,
+        selfFullJid,
+        false,
+        attemptId,
+      );
       throw new Error(`Muji call setup for ${normalizedRoomJid} was cancelled`);
     }
     activePresencePublished = true;
@@ -902,6 +967,7 @@ export async function beginMucCall(
       media,
       kind: "muc",
       selfNick,
+      selfFullJid,
       attemptId,
       activePresencePublished: true,
     });
@@ -925,6 +991,14 @@ export async function beginMucCall(
       join,
       kind: "muc",
       selfNick,
+      selfFullJid,
+    });
+    rememberMucCallSession({
+      roomJid: normalizedRoomJid,
+      sid: attemptId,
+      selfFullJid,
+      media,
+      join,
     });
     $lastCallError.set(null);
   } catch (err) {
@@ -940,6 +1014,7 @@ export async function beginMucCall(
         sender,
         normalizedRoomJid,
         selfNick,
+        selfFullJid,
         activePresencePublished,
         attemptId,
       );

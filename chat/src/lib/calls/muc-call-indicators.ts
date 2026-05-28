@@ -1,34 +1,133 @@
 import type { ChannelSummary } from "@/lib/chat-types";
-import { normalizeMucCallRoomJid } from "./muc-call-presence";
+import { mucCallMediaForRoom, normalizeMucCallRoomJid } from "./muc-call-presence";
+import type { CallMedia } from "./types";
 
-function candidateRoomJids(
+export function normalizeMucServiceDomain(serviceJid?: string | null): string {
+  const bare = serviceJid?.split("/")[0]?.trim().toLowerCase() ?? "";
+  if (!bare) return "";
+  return bare.includes("@") ? bare.split("@")[1] ?? "" : bare;
+}
+
+function candidateRoomJidsForChannel(
   channel: Pick<ChannelSummary, "id" | "jid">,
   activeChannelJids: Iterable<string>,
+  managedMucDomain?: string | null,
 ): string[] {
   const candidates: string[] = [];
-  if (channel.jid) candidates.push(channel.jid);
+  const channelRoomJid = normalizeMucCallRoomJid(channel.jid ?? "");
+  const channelRoomDomain = channelRoomJid.split("@")[1] ?? "";
+  const trustedDomain = channelRoomDomain || normalizeMucServiceDomain(managedMucDomain);
+  if (channelRoomJid) candidates.push(channelRoomJid);
+  if (!channelRoomJid && trustedDomain) {
+    candidates.push(`${channel.id.toLowerCase()}@${trustedDomain}`);
+  }
   for (const jid of activeChannelJids) {
     const normalized = normalizeMucCallRoomJid(jid);
     if (!normalized) continue;
     const localpart = normalized.split("@")[0] ?? "";
-    if (localpart === channel.id.toLowerCase()) {
+    const domain = normalized.split("@")[1] ?? "";
+    if (trustedDomain && domain === trustedDomain && localpart === channel.id.toLowerCase()) {
       candidates.push(normalized);
     }
   }
-  return candidates;
+  return [...new Set(candidates)];
 }
 
 export function callParticipantCountForChannel(
   channel: Pick<ChannelSummary, "id" | "jid">,
   callParticipantCounts: Record<string, number> | undefined,
   activeChannelJids: Iterable<string>,
+  managedMucDomain?: string | null,
 ): number {
   if (!callParticipantCounts) return 0;
-  for (const jid of candidateRoomJids(channel, activeChannelJids)) {
-    const count = callParticipantCounts[normalizeMucCallRoomJid(jid)] ?? 0;
+  const countsByRoomJid = normalizedMucCallParticipantCounts(callParticipantCounts);
+  for (const jid of candidateRoomJidsForChannel(channel, activeChannelJids, managedMucDomain)) {
+    const count = countsByRoomJid.get(normalizeMucCallRoomJid(jid)) ?? 0;
     if (count > 0) return count;
   }
   return 0;
+}
+
+export function callRoomJidForChannel(
+  channel: Pick<ChannelSummary, "id" | "jid">,
+  callParticipantCounts: Record<string, number> | undefined,
+  activeChannelJids: Iterable<string>,
+  managedMucDomain?: string | null,
+): string {
+  if (!callParticipantCounts) return "";
+  const countsByRoomJid = normalizedMucCallParticipantCounts(callParticipantCounts);
+  return candidateRoomJidsForChannel(channel, activeChannelJids, managedMucDomain)
+    .map(normalizeMucCallRoomJid)
+    .find((jid) => (countsByRoomJid.get(jid) ?? 0) > 0) ?? "";
+}
+
+export type RefreshedMucCallRoom = {
+  key: string;
+  roomJid: string;
+  title: string;
+  participantCount: number;
+  media: CallMedia;
+};
+
+export function refreshedMucCallRooms(options: {
+  channels: ReadonlyArray<Pick<ChannelSummary, "id" | "jid">>;
+  activeChannelJids: Iterable<string>;
+  managedMucDomain?: string | null;
+  callParticipantCounts: Record<string, number> | undefined;
+  callMediaByRoom?: Record<string, CallMedia>;
+}): RefreshedMucCallRoom[] {
+  const trustedDomain = normalizeMucServiceDomain(options.managedMucDomain);
+  if (!trustedDomain || !options.callParticipantCounts) return [];
+
+  const countsByRoomJid = normalizedMucCallParticipantCounts(options.callParticipantCounts);
+
+  const matchedRoomJids = new Set<string>();
+  for (const channel of options.channels) {
+    for (const candidate of candidateRoomJidsForChannel(
+      channel,
+      options.activeChannelJids,
+      trustedDomain,
+    )) {
+      const normalized = normalizeMucCallRoomJid(candidate);
+      if (normalized && (countsByRoomJid.get(normalized) ?? 0) > 0) {
+        matchedRoomJids.add(normalized);
+      }
+    }
+  }
+
+  return [...countsByRoomJid.entries()]
+    .flatMap(([roomJid, participantCount]): RefreshedMucCallRoom[] => {
+      const roomDomain = roomJid.split("@")[1] ?? "";
+      if (roomDomain !== trustedDomain || matchedRoomJids.has(roomJid)) return [];
+      const title = roomJid.split("@")[0] || roomJid;
+      return [{
+        key: `group-call:${roomJid}`,
+        roomJid,
+        title,
+        participantCount,
+        media: mucCallMediaForRoom(roomJid, options.callMediaByRoom),
+      }];
+    })
+    .sort((left, right) => left.title.localeCompare(right.title));
+}
+
+function normalizedMucCallParticipantCounts(
+  callParticipantCounts: Record<string, number>,
+): Map<string, number> {
+  const countsByRoomJid = new Map<string, number>();
+  for (const [roomJid, count] of Object.entries(callParticipantCounts)) {
+    const normalized = normalizeMucCallRoomJid(roomJid);
+    if (!normalized || count <= 0) continue;
+    countsByRoomJid.set(normalized, (countsByRoomJid.get(normalized) ?? 0) + count);
+  }
+  return countsByRoomJid;
+}
+
+export function mucCallParticipantPreview(nicks: readonly string[] | undefined, maxVisible = 2): string {
+  const visible = (nicks ?? []).map((nick) => nick.trim()).filter(Boolean);
+  if (visible.length === 0) return "";
+  if (visible.length <= maxVisible) return visible.join(", ");
+  return `${visible.slice(0, maxVisible).join(", ")} +${visible.length - maxVisible}`;
 }
 
 type CollapsedGroupActivitySummary = {

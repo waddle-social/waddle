@@ -84,6 +84,7 @@ export function useChannelMessages(
   const mentionedChannelCounts = ref<Record<string, number>>({});
   const lastMentionActivity = ref<RoomActivityEvent | null>(null);
   const roomAvatarHashes = ref<Record<string, string>>({});
+  const roomJidOverrides = ref<Record<string, string>>({});
 
   const chatStates = useChannelChatStates({
     xmppClient,
@@ -138,10 +139,20 @@ export function useChannelMessages(
   function roomJidForChannel(channelId: string): string | null {
     const currentSession = session.value;
     if (!currentSession) return null;
-    const channel = currentChannel.value?.id === channelId
-      ? currentChannel.value
-      : { id: channelId };
-    return roomJidForChannelSummary(currentSession, channel);
+    const channel = currentChannel.value?.id === channelId ? currentChannel.value : null;
+    if (channel?.jid) return barePeerJid(channel.jid);
+    const override = roomJidOverrides.value[channelId];
+    if (override) return override;
+    return roomJidForChannelSummary(currentSession, channel ?? { id: channelId });
+  }
+
+  function rememberChannelRoomJid(channelId: string, roomJid: string) {
+    const normalizedRoomJid = barePeerJid(roomJid);
+    if (!channelId || !normalizedRoomJid) return;
+    roomJidOverrides.value = {
+      ...roomJidOverrides.value,
+      [channelId]: normalizedRoomJid,
+    };
   }
 
   function queuedMessagesForRoom(roomJid: string): TimelineMessage[] {
@@ -519,6 +530,7 @@ export function useChannelMessages(
     messageSearch.reset();
     pinnedEdgeScroller.disconnect();
     pendingEchoClientIds.clear();
+    roomJidOverrides.value = {};
     // $xmppStatus is authoritative and owned by XmppProvider; do not write it here.
     clearTypingState();
     clearLiveActivityState();
@@ -637,6 +649,7 @@ export function useChannelMessages(
     roomLastSeen,
     slowModeCooldown,
     loadMessages,
+    rememberChannelRoomJid,
     loadOlderMessages,
     ensureMessageLoaded,
     backfillThread,

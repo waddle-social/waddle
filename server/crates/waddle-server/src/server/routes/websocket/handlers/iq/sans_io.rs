@@ -1,5 +1,19 @@
 use super::*;
 
+fn events_contain_iq_error(events: &[waddle_xmpp::protocol::OutboundEvent]) -> bool {
+    use waddle_xmpp::protocol::OutboundEvent;
+    use waddle_xmpp::Stanza;
+    events.iter().any(|event| {
+        let OutboundEvent::SendStanza(stanza) = event else {
+            return false;
+        };
+        matches!(
+            stanza.as_ref(),
+            Stanza::Iq(iq) if matches!(iq.as_ref(), xmpp_parsers::iq::Iq::Error { .. })
+        )
+    })
+}
+
 pub(super) async fn handle_sans_io_iq(
     ctx: IqHandlerContext<'_>,
     state: &WebSocketState,
@@ -110,7 +124,9 @@ pub(super) async fn handle_sans_io_iq(
             }
         }
         let ctx = ProtocolStanzaContext { domain, full_jid };
+        let muji_terminate_room = super::jingle_muji_gate::muji_session_terminate_room(iq);
         let events = state.deps.protocol.dispatcher.dispatch_iq(iq, &ctx);
+        let muji_clear_after = muji_terminate_room.filter(|_| !events_contain_iq_error(&events));
         let deps = crate::server::routes::interpret::Deps {
             connection_registry: &state.deps.protocol.connection_registry,
             sm_session_registry: Some(&state.deps.protocol.sm_session_registry),
@@ -126,6 +142,12 @@ pub(super) async fn handle_sans_io_iq(
             pending_delivery_storage: Some(&state.deps.protocol.pending_delivery_storage),
         };
         let outcome = crate::server::routes::interpret::interpret(events, &deps).await;
+        if let Some(room_jid) = muji_clear_after {
+            crate::server::routes::muc_muji_clear::clear_muji_presence_for_departure(
+                state, &room_jid, full_jid,
+            )
+            .await;
+        }
         if outcome.close {
             warn!(
                 ns = %payload_ns,

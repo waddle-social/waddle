@@ -12,10 +12,13 @@
  */
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { ReconnectCatchup } from "../src/lib/xmpp/reconnect-catchup";
+import { BrowserXmppClient } from "../src/lib/xmpp/client";
+import type { WaddleSession } from "../src/lib/server-auth";
 import {
   createLocalStorageResumePersistence,
   nullResumePersistence,
   type PersistedReconnectCatchup,
+  type PersistedSmResumeState,
   type ResumePersistence,
 } from "../src/lib/xmpp/resume-persistence";
 
@@ -33,12 +36,13 @@ import {
 // and corrupt state across runs.
 const WINDOW_SENTINEL = Symbol("test-installed-window");
 type ShimmedGlobal = typeof globalThis & {
-  window?: { localStorage: Storage } & { [WINDOW_SENTINEL]?: true };
+  window?: { localStorage: Storage; sessionStorage: Storage } & { [WINDOW_SENTINEL]?: true };
 };
 beforeAll(() => {
   const g = globalThis as ShimmedGlobal;
   if (typeof g.window !== "undefined") return;
   const store = new Map<string, string>();
+  const sessionStore = new Map<string, string>();
   const storage: Storage = {
     get length() { return store.size; },
     clear: () => store.clear(),
@@ -47,7 +51,15 @@ beforeAll(() => {
     removeItem: (key) => { store.delete(key); },
     setItem: (key, value) => { store.set(key, String(value)); },
   };
-  g.window = Object.assign({ localStorage: storage }, { [WINDOW_SENTINEL]: true as const });
+  const sessionStorage: Storage = {
+    get length() { return sessionStore.size; },
+    clear: () => sessionStore.clear(),
+    getItem: (key) => sessionStore.get(key) ?? null,
+    key: (index) => Array.from(sessionStore.keys())[index] ?? null,
+    removeItem: (key) => { sessionStore.delete(key); },
+    setItem: (key, value) => { sessionStore.set(key, String(value)); },
+  };
+  g.window = Object.assign({ localStorage: storage, sessionStorage }, { [WINDOW_SENTINEL]: true as const });
 });
 
 afterAll(() => {
@@ -59,24 +71,36 @@ afterAll(() => {
 
 afterEach(() => {
   const g = globalThis as ShimmedGlobal;
-  if (g.window?.[WINDOW_SENTINEL]) g.window.localStorage.clear();
+  if (g.window?.[WINDOW_SENTINEL]) {
+    g.window.localStorage.clear();
+    g.window.sessionStorage.clear();
+  }
 });
 
 /** In-memory persistence for tests — same shape as the real adapter
  * but without touching localStorage. */
 function inMemoryPersistence(): ResumePersistence & {
   catchupSnapshot: () => PersistedReconnectCatchup | null;
-  smSnapshot: () => { previd: string; inboundH: number; outboundH: number } | null;
+  smSnapshot: () => PersistedSmResumeState | null;
 } {
   let catchup: PersistedReconnectCatchup | null = null;
-  let sm: { previd: string; inboundH: number; outboundH: number } | null = null;
+  let sm: PersistedSmResumeState | null = null;
   return {
     loadCatchup: () => catchup,
     saveCatchup: (snapshot) => { catchup = snapshot; },
     clearCatchup: () => { catchup = null; },
-    loadSm: () => sm,
+  loadSm: () => sm,
+    consumeSm: () => {
+      const current = sm;
+      sm = null;
+      return current;
+    },
     saveSm: (state) => { sm = state; },
     clearSm: () => { sm = null; },
+    preparePagehideHandoff: () => undefined,
+    loadJoinedRooms: () => [],
+    saveJoinedRooms: () => undefined,
+    clearJoinedRooms: () => undefined,
     catchupSnapshot: () => catchup,
     smSnapshot: () => sm,
   };
@@ -213,6 +237,217 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     // Round-trip strips the internal `savedAt` so the caller gets
     // the same shape it passed in.
     expect(persistence.loadSm()).toEqual(state);
+  });
+
+  test("round-trips the bound resource with SM resume state", () => {
+    const persistence = createLocalStorageResumePersistence("alice@example.com");
+    const state = {
+      previd: "abc-123",
+      inboundH: 42,
+      outboundH: 7,
+      resource: "web-existing-resource",
+    };
+    persistence.saveSm(state);
+    expect(persistence.loadSm()).toEqual(state);
+  });
+
+  test("consumeSm claims and clears the stored resource for only one client", () => {
+    const persistence = createLocalStorageResumePersistence("alice@example.com");
+    const state = {
+      previd: "abc-123",
+      inboundH: 42,
+      outboundH: 7,
+      resource: "web-existing-resource",
+    };
+    persistence.saveSm(state);
+    expect(persistence.consumeSm()).toEqual(state);
+    expect(persistence.consumeSm()).toBeNull();
+    expect(persistence.loadSm()).toBeNull();
+  });
+
+  test("consumeSm is scoped to the tab owner", () => {
+    const tabA = createLocalStorageResumePersistence("alice@example.com", "tab-a");
+    const tabB = createLocalStorageResumePersistence("alice@example.com", "tab-b");
+    const state = {
+      previd: "abc-123",
+      inboundH: 42,
+      outboundH: 7,
+      resource: "web-existing-resource",
+    };
+    tabA.saveSm(state);
+
+    expect(tabB.loadSm()).toBeNull();
+    expect(tabB.consumeSm()).toBeNull();
+    expect(tabA.consumeSm()).toEqual(state);
+    expect(tabA.consumeSm()).toBeNull();
+  });
+
+  test("a duplicated tab rotates a copied live owner before it can claim SM state", () => {
+    const copiedOwner = "copied-live-owner";
+    const state = {
+      previd: "abc-123",
+      inboundH: 42,
+      outboundH: 7,
+      resource: "web-existing-resource",
+    };
+    createLocalStorageResumePersistence("alice@example.com", copiedOwner).saveSm(state);
+    window.sessionStorage.setItem("waddle.chat.sm-resume.owner", copiedOwner);
+    window.localStorage.setItem(
+      `waddle.chat.sm-resume.owner-lease.${copiedOwner}`,
+      JSON.stringify({
+        ownerId: copiedOwner,
+        instanceId: "original-live-tab",
+        updatedAt: Date.now(),
+      }),
+    );
+
+    const duplicatedTab = createLocalStorageResumePersistence("alice@example.com");
+
+    expect(duplicatedTab.consumeSm()).toBeNull();
+    expect(createLocalStorageResumePersistence("alice@example.com", copiedOwner).consumeSm()).toEqual(state);
+  });
+
+  test("a pagehide handoff keeps the copied owner for same-tab reload consumption", () => {
+    const reloadOwner = "reload-owner";
+    const state = {
+      previd: "abc-123",
+      inboundH: 42,
+      outboundH: 7,
+      resource: "web-existing-resource",
+    };
+    const previousPage = createLocalStorageResumePersistence("alice@example.com", reloadOwner);
+    previousPage.saveSm(state);
+    previousPage.preparePagehideHandoff();
+    window.sessionStorage.setItem("waddle.chat.sm-resume.owner", reloadOwner);
+    window.localStorage.setItem(
+      `waddle.chat.sm-resume.owner-lease.${reloadOwner}`,
+      JSON.stringify({
+        ownerId: reloadOwner,
+        instanceId: "previous-page",
+        updatedAt: Date.now(),
+      }),
+    );
+
+    const reloadedPage = createLocalStorageResumePersistence("alice@example.com");
+
+    expect(reloadedPage.consumeSm()).toEqual(state);
+  });
+
+  test("a slow same-tab reload keeps the owner until the prior lease expires", () => {
+    const realNow = Date.now;
+    let now = 1_000_000;
+    Date.now = () => now;
+
+    try {
+      const reloadOwner = "slow-reload-owner";
+      const state = {
+        previd: "abc-123",
+        inboundH: 42,
+        outboundH: 7,
+        resource: "web-existing-resource",
+      };
+      const previousPage = createLocalStorageResumePersistence("alice@example.com", reloadOwner);
+      previousPage.saveSm(state);
+      previousPage.saveJoinedRooms(["general@conference.example.com"]);
+      previousPage.preparePagehideHandoff();
+      window.sessionStorage.setItem("waddle.chat.sm-resume.owner", reloadOwner);
+      window.localStorage.setItem(
+        `waddle.chat.sm-resume.owner-lease.${reloadOwner}`,
+        JSON.stringify({
+          ownerId: reloadOwner,
+          instanceId: "previous-page",
+          updatedAt: now,
+        }),
+      );
+
+      now += 15_000;
+      const reloadedPage = createLocalStorageResumePersistence("alice@example.com");
+
+      expect(reloadedPage.loadJoinedRooms()).toEqual(["general@conference.example.com"]);
+      expect(reloadedPage.consumeSm()).toEqual(state);
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
+  test("BrowserXmppClient only reuses a refreshed resource for the owning tab", () => {
+    const state = {
+      previd: "abc-123",
+      inboundH: 42,
+      outboundH: 7,
+      resource: "web-existing-resource",
+    };
+    createLocalStorageResumePersistence("alice@example.com", "tab-a").saveSm(state);
+
+    const tabB = new BrowserXmppClient(
+      { jid: "alice@example.com", username: "alice" } as WaddleSession,
+      createLocalStorageResumePersistence("alice@example.com", "tab-b"),
+    );
+    expect(tabB.fullJid).not.toBe("alice@example.com/web-existing-resource");
+
+    const tabA = new BrowserXmppClient(
+      { jid: "alice@example.com", username: "alice" } as WaddleSession,
+      createLocalStorageResumePersistence("alice@example.com", "tab-a"),
+    );
+    expect(tabA.fullJid).toBe("alice@example.com/web-existing-resource");
+  });
+
+  test("round-trips retained joined rooms for refresh-time group call discovery", () => {
+    const persistence = createLocalStorageResumePersistence("alice@example.com", "tab-a");
+    const otherTab = createLocalStorageResumePersistence("alice@example.com", "tab-b");
+    persistence.saveJoinedRooms([
+      "General@Conference.Example.com/alice",
+      "standup@conference.example.com",
+      "standup@conference.example.com",
+      "",
+    ]);
+
+    expect(persistence.loadJoinedRooms()).toEqual([
+      "general@conference.example.com",
+      "standup@conference.example.com",
+    ]);
+    expect(otherTab.loadJoinedRooms()).toEqual([]);
+    persistence.clearJoinedRooms();
+    expect(persistence.loadJoinedRooms()).toEqual([]);
+  });
+
+  test("consumeSm rejects a delayed claimant that observed the same original resource", () => {
+    const first = createLocalStorageResumePersistence("alice@example.com");
+    const second = createLocalStorageResumePersistence("alice@example.com");
+    const state: PersistedSmResumeState = {
+      previd: "abc-123",
+      inboundH: 42,
+      outboundH: 7,
+      resource: "web-existing-resource",
+    };
+    first.saveSm(state);
+
+    const storage = window.localStorage;
+    const originalSetItem = storage.setItem.bind(storage);
+    let reentered = false;
+    let secondResult: PersistedSmResumeState | null | undefined;
+    storage.setItem = ((key: string, value: string) => {
+      if (
+        key === "waddle.chat.sm-resume.alice@example.com"
+        && value.includes('"claimId"')
+        && !reentered
+      ) {
+        reentered = true;
+        secondResult = second.consumeSm();
+      }
+      originalSetItem(key, value);
+    }) as Storage["setItem"];
+
+    try {
+      const firstResult = first.consumeSm();
+
+      expect(secondResult).toEqual(state);
+      expect(firstResult).toBeNull();
+      expect(first.loadSm()).toBeNull();
+      expect(first.consumeSm()).toBeNull();
+    } finally {
+      storage.setItem = originalSetItem;
+    }
   });
 
   test("SM TTL: a stale envelope is rejected and cleared", () => {

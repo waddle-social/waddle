@@ -228,6 +228,7 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
 
     let extension_webhooks_router =
         routes::extension_webhooks::router(Arc::clone(&websocket_state));
+    let livekit_webhook_router = routes::livekit_webhook::router(Arc::clone(&websocket_state));
     let websocket_router = routes::websocket::router(websocket_state.clone());
 
     // Upload router for XEP-0363 HTTP File Upload
@@ -266,7 +267,8 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
         .merge(device_router)
         .merge(xmpp_oauth_router)
         .merge(auth_page_router)
-        .merge(extension_webhooks_router);
+        .merge(extension_webhooks_router)
+        .merge(livekit_webhook_router);
 
     // Test-only profile-publish route. Only mounted when:
     // 1. The fixed-account flag is on (the test harness opt-in).
@@ -361,18 +363,28 @@ async fn create_websocket_state(
         Ok(Some(sfu_config)) => {
             let turn_tls_port = sfu_config.turn_tls_port;
             let turn_udp_port = sfu_config.turn_udp_port;
-            let sfu: std::sync::Arc<dyn waddle_sfu::SfuService> =
-                std::sync::Arc::new(waddle_sfu::LiveKitSfu::new(sfu_config));
-            waddle_xmpp::protocol::handlers::register_call_handlers(
-                &mut stanza_dispatcher,
-                Arc::clone(&sfu),
-                turn_tls_port,
-                turn_udp_port,
-            );
-            sfu_service = Some(sfu);
-            tracing::info!(
-                "LiveKit SFU configured; XEP-0166 Jingle + XEP-0215 extdisco handlers registered"
-            );
+            match waddle_sfu::LiveKitSfu::new(sfu_config) {
+                Ok(sfu_impl) => {
+                    let sfu: std::sync::Arc<dyn waddle_sfu::SfuService> =
+                        std::sync::Arc::new(sfu_impl);
+                    waddle_xmpp::protocol::handlers::register_call_handlers(
+                        &mut stanza_dispatcher,
+                        Arc::clone(&sfu),
+                        turn_tls_port,
+                        turn_udp_port,
+                    );
+                    sfu_service = Some(sfu);
+                    tracing::info!(
+                        "LiveKit SFU configured; XEP-0166 Jingle + XEP-0215 extdisco handlers registered"
+                    );
+                }
+                Err(error) => {
+                    warn!(
+                        %error,
+                        "failed to build LiveKit SFU bridge; A/V calling will be unavailable"
+                    );
+                }
+            }
         }
         Ok(None) => {
             tracing::info!(

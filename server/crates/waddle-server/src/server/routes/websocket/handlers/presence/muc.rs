@@ -206,6 +206,11 @@ pub async fn handle_muc_join(
     };
 
     let occupant_count = join_outcome.occupant_count;
+    let self_muji = join_outcome
+        .existing_occupants
+        .iter()
+        .find(|existing| existing.nick == nick && existing.jid == *sender_jid)
+        .and_then(|existing| existing.muji.as_ref());
 
     info!(room = %room_jid, nick = %nick, occupants = occupant_count, "User joined MUC room");
 
@@ -227,13 +232,20 @@ pub async fn handle_muc_join(
 
     let mut responses = Vec::new();
 
-    // Replay one occupant presence per nick to the joiner. Same-bare multi-session
-    // joins must not turn into duplicate room occupants on the wire.
+    // Replay one base occupant presence per nick to the joiner, then
+    // append extra same-nick Muji payloads for additional sessions
+    // that own call state. Active call membership is nick-level, but
+    // XEP-0272 preparing is resource-owned coordination state, so the
+    // joiner needs the exact full JID that advertised it.
     let mut replayed_nicks = std::collections::HashSet::new();
-    for existing in join_outcome
+    let replay_occupants: Vec<_> = join_outcome
         .existing_occupants
         .iter()
         .filter(|existing| existing.nick != nick)
+        .collect();
+    for existing in replay_occupants
+        .iter()
+        .copied()
         .filter(|existing| replayed_nicks.insert(existing.nick.clone()))
     {
         // XEP-0045 §7.2 conformant occupant-list replay, plus the
@@ -254,6 +266,24 @@ pub async fn handle_muc_join(
             include_self_status: false,
             muji: existing.muji.as_ref(),
         }));
+
+        for extra in replay_occupants.iter().copied().filter(|candidate| {
+            candidate.nick == existing.nick
+                && candidate.jid != existing.jid
+                && candidate.muji.is_some()
+        }) {
+            responses.push(build_muc_join_presence_xml(MucJoinPresence {
+                occupant_id_secret: &state.deps.occupant_id_secret,
+                room_jid,
+                nick: &extra.nick,
+                to_jid: sender_jid,
+                affiliation: extra.affiliation,
+                role: extra.role,
+                real_jid: &extra.jid,
+                include_self_status: false,
+                muji: extra.muji.as_ref(),
+            }));
+        }
     }
 
     // Broadcast the new occupant's presence to all existing occupants.
@@ -262,7 +292,7 @@ pub async fn handle_muc_join(
     // Drop accounting is handled inside `try_send_to` (logs + metrics);
     // per-occupant outcome is discarded here because a missed join
     // presence self-heals via the next MUC presence/probe round-trip.
-    if !join_outcome.is_same_bare_multi_session_join {
+    if !join_outcome.is_same_bare_multi_session_join && !join_outcome.is_existing_session_rejoin {
         for existing in &join_outcome.existing_occupants {
             let presence_stanza = create_presence_stanza(
                 state,
@@ -292,10 +322,33 @@ pub async fn handle_muc_join(
         role: join_outcome.new_occupant_role,
         real_jid: sender_jid,
         include_self_status: true,
-        // Fresh join has no active call advertisement of its own —
-        // the joiner has not yet asserted one.
-        muji: None,
+        muji: self_muji,
     }));
+
+    // Same-account sibling resources share one MUC nick. If a
+    // sibling already advertised Muji for this nick, reflect exact
+    // per-session snapshots after the new session's own plain
+    // self-presence so a refresh/new tab can show "call active on
+    // another device" without misattributing `<preparing/>` to the
+    // joining resource.
+    for existing in join_outcome.existing_occupants.iter().filter(|existing| {
+        existing.nick == nick
+            && existing.jid.to_bare() == sender_jid.to_bare()
+            && existing.jid != *sender_jid
+            && existing.muji.is_some()
+    }) {
+        responses.push(build_muc_join_presence_xml(MucJoinPresence {
+            occupant_id_secret: &state.deps.occupant_id_secret,
+            room_jid,
+            nick,
+            to_jid: sender_jid,
+            affiliation: existing.affiliation,
+            role: existing.role,
+            real_jid: &existing.jid,
+            include_self_status: true,
+            muji: existing.muji.as_ref(),
+        }));
+    }
 
     // XEP-0045 §7.2.15 historical room subject. The typed builder
     // produces the conformant envelope: nick-form `from` + `<delay/>`
@@ -394,7 +447,9 @@ pub async fn handle_muc_leave(
     super::super::super::cleanup::broadcast_muc_leave_to_remaining(
         state, room_jid, sender_jid, &outcome,
     );
-    super::super::super::cleanup::broadcast_muc_muji_clear_to_remaining(state, room_jid, &outcome);
+    super::super::super::cleanup::broadcast_muc_muji_clear_to_remaining(
+        state, room_jid, sender_jid, &outcome,
+    );
 
     let response = vec![build_muc_self_unavailable_xml(
         state,

@@ -19,6 +19,7 @@ import {
 import { extractFilesFromEvent } from "@/lib/xmpp/file-upload";
 import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
 import type { ExtensionAnnotationAction, TimelineMessage, MarkupSpan, MessageReference } from "@/lib/chat-ui";
+import type { CallMedia } from "@/lib/calls/types";
 import type { MentionCandidate } from "@/lib/mentions";
 import type { BrowserXmppClient, MessageSearchResult, XmppStatusSnapshot, RoomAuthority, RoomHats, RoomPresence } from "@/lib/xmpp-client";
 import type { MemberLoadState } from "@/waddles/directory";
@@ -32,6 +33,7 @@ import { ArrowDown, ArrowUp } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import ChatHeader, { type ChannelHeaderMember } from "@/components/chat/ChatHeader.vue";
 import CallExpandedSurface from "@/components/calls/CallExpandedSurface.vue";
+import ConversationCallBanner from "@/components/calls/ConversationCallBanner.vue";
 import CallSplitContainer from "@/components/calls/CallSplitContainer.vue";
 import ExtensionPalette from "@/components/chat/ExtensionPalette.vue";
 import MessageCard from "@/components/chat/MessageCard.vue";
@@ -83,6 +85,7 @@ const props = defineProps<{
   typingUsers: string[];
   currentUser?: string;
   currentUserJid?: string;
+  selfFullJid?: string | null;
   selfDomain?: string;
   avatarUrlByAuthor: Record<string, string | null>;
   authorJidByNick?: Record<string, string>;
@@ -125,6 +128,11 @@ const emit = defineEmits<{
   clearSearch: [];
   openDm: [peerJid: string];
   openThread: [threadId: string, targetMessageId?: string];
+  joinChannelCall: [channelId: string | null, roomJid: string, media: CallMedia];
+  leaveChannelCall: [roomJid: string];
+  answerDm: [peerJid: string, remoteFullJid: string, sid: string, media: CallMedia];
+  reconnectDm: [peerJid: string, media: CallMedia];
+  endDm: [peerJid: string, sid?: string];
   refreshUpdate: [];
   loadOlder: [];
   retryLoad: [];
@@ -396,6 +404,7 @@ async function dispatchSlashCommand(
   return ok;
 }
 const inMucContext = computed(() => !!props.roomJid);
+const callRoomJid = computed(() => props.roomJid ?? props.channel?.jid ?? null);
 
 watch(
   () => props.xmppClient,
@@ -873,6 +882,7 @@ function dayDividerLabel(createdAt: string): string {
       :waddle="waddle"
       :channel="channel"
       :dm-peer="dmPeer"
+      :call-room-jid="callRoomJid"
       :is-forum-channel="isForumChannel"
       :can-manage-channels="canManageChannels"
       :member-count="memberCount"
@@ -883,10 +893,26 @@ function dayDividerLabel(createdAt: string): string {
       :connection-status-icon="connectionStatusIcon"
       :xmpp-client="xmppClient"
       :notify-settings="notifySettings"
+      :show-call-active-pill="false"
+      :show-dm-call-activity-controls="false"
+      :hide-muc-start-controls-when-active-call="true"
       @open-nav="emit('openNav')"
       @open-details="emit('openDetails')"
       @edit-channel="emit('editChannel')"
       @select-member="(jid: string) => emit('openDm', jid)"
+    />
+    <ConversationCallBanner
+      :room-jid="callRoomJid"
+      :channel-id="channel?.id ?? null"
+      :channel-name="channel?.name ?? null"
+      :dm-peer-jid="dmPeer?.peerJid ?? null"
+      :dm-peer-name="dmPeer?.peerUsername ?? null"
+      :self-full-jid="selfFullJid ?? null"
+      @join-channel-call="(channelId, roomJid, media) => emit('joinChannelCall', channelId, roomJid, media)"
+      @leave-channel-call="(roomJid) => emit('leaveChannelCall', roomJid)"
+      @answer-dm="(peerJid, remoteFullJid, sid, media) => emit('answerDm', peerJid, remoteFullJid, sid, media)"
+      @reconnect-dm="(peerJid, media) => emit('reconnectDm', peerJid, media)"
+      @end-dm="(peerJid, sid) => emit('endDm', peerJid, sid)"
     />
     <div
       v-if="connectionNotice && connectionStatusClasses"
@@ -1068,17 +1094,13 @@ function dayDividerLabel(createdAt: string): string {
       </div>
     </div>
 
-    <!-- Inline split-view for an active group call in this channel.
-         Renders ONLY when (a) a MUC call is active, (b) the call's
-         room matches this channel, (c) the local user is a
-         participant, and (d) the call UI mode is "split" (not
-         "fullscreen"). All of that gating is inside the component;
-         we mount it unconditionally and let it decide. The handle is
-         emitted as a sibling so it sits between the call region and
-         the timeline in the parent flex column. -->
+    <!-- Inline split-view for an active call in this conversation.
+         MUC and DM ownership gates live inside the component. -->
     <CallSplitContainer
-      v-if="channel?.jid"
-      :room-jid="channel.jid"
+      v-if="callRoomJid || dmPeer?.peerJid"
+      :room-jid="callRoomJid ?? undefined"
+      :dm-peer-jid="dmPeer?.peerJid"
+      :dm-peer-name="dmPeer?.peerUsername"
     />
 
     <!-- Composer (social / top-pinned mode) -->
@@ -1470,8 +1492,10 @@ function dayDividerLabel(createdAt: string): string {
          panel — stays visible. Decides its own visibility based on
          call state + ui mode. -->
     <CallExpandedSurface
-      v-if="channel?.jid"
-      :room-jid="channel.jid"
+      v-if="callRoomJid || dmPeer?.peerJid"
+      :room-jid="callRoomJid ?? undefined"
+      :dm-peer-jid="dmPeer?.peerJid"
+      :dm-peer-name="dmPeer?.peerUsername"
     />
   </div>
 </template>

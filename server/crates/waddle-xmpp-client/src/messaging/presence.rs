@@ -48,9 +48,31 @@ pub(super) fn parse_presence(el: &Element) -> InboundPresence {
     // Active = has at least one `<content/>` (XEP-0272 §Joining).
     // Absent = the occupant has left the call (XEP-0272 §Leaving).
     let muji = el.get_child("muji", NS_MUJI).map(|muji_el| {
-        let preparing = muji_el.children().any(|c| c.name() == "preparing");
-        let active = muji_el.children().any(|c| c.name() == "content");
-        MujiPresence { preparing, active }
+        let preparing = muji_el
+            .children()
+            .any(|c| c.name() == "preparing" && c.ns() == NS_MUJI);
+        let mut active = false;
+        let mut audio = false;
+        let mut video = false;
+        for content in muji_el
+            .children()
+            .filter(|c| c.name() == "content" && c.ns() == NS_MUJI)
+        {
+            active = true;
+            for media in muji_content_media(content) {
+                match media {
+                    "audio" => audio = true,
+                    "video" => video = true,
+                    _ => {}
+                }
+            }
+        }
+        MujiPresence {
+            preparing,
+            active,
+            audio,
+            video,
+        }
     });
 
     InboundPresence {
@@ -66,6 +88,13 @@ pub(super) fn parse_presence(el: &Element) -> InboundPresence {
         vcard_avatar,
         muji,
     }
+}
+
+fn muji_content_media(content: &Element) -> impl Iterator<Item = &str> {
+    content
+        .get_child("description", NS_JINGLE_RTP)
+        .and_then(|description| description.attr("media"))
+        .into_iter()
 }
 
 #[cfg(test)]
@@ -85,7 +114,46 @@ mod tests {
         let p = parse_presence(&elem);
         let muji = p.muji.expect("muji extension parsed");
         assert!(muji.active);
+        assert!(muji.audio);
+        assert!(!muji.video);
         assert!(!muji.preparing);
+    }
+
+    #[test]
+    fn parses_muji_video_content_media() {
+        let xml = r#"<presence xmlns="jabber:client" from="room@muc.test/alice">
+            <muji xmlns="urn:xmpp:jingle:muji:0">
+                <content creator="initiator" name="audio">
+                    <description xmlns="urn:xmpp:jingle:apps:rtp:1" media="audio"/>
+                </content>
+                <content creator="initiator" name="video">
+                    <description xmlns="urn:xmpp:jingle:apps:rtp:1" media="video"/>
+                </content>
+            </muji>
+        </presence>"#;
+        let elem: Element = xml.parse().unwrap();
+        let p = parse_presence(&elem);
+        let muji = p.muji.expect("muji extension parsed");
+        assert!(muji.active);
+        assert!(muji.audio);
+        assert!(muji.video);
+    }
+
+    #[test]
+    fn parses_muji_media_from_rtp_description_not_content_name() {
+        let xml = r#"<presence xmlns="jabber:client" from="room@muc.test/alice">
+            <muji xmlns="urn:xmpp:jingle:muji:0">
+                <content creator="initiator" name="video">
+                    <description xmlns="urn:xmpp:jingle:apps:rtp:1" media="audio"/>
+                </content>
+            </muji>
+        </presence>"#;
+        let elem: Element = xml.parse().unwrap();
+        let p = parse_presence(&elem);
+        let muji = p.muji.expect("muji extension parsed");
+        assert!(muji.active);
+        assert!(muji.audio);
+        assert!(!muji.video);
     }
 
     #[test]
@@ -101,6 +169,8 @@ mod tests {
             !muji.active,
             "preparing-only muji is not yet active (XEP-0272 §Joining two-phase flow)"
         );
+        assert!(!muji.audio);
+        assert!(!muji.video);
     }
 
     #[test]

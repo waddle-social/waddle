@@ -2,9 +2,17 @@
 import { computed } from "vue";
 import { useStore } from "@nanostores/vue";
 import {
+  $mucCallMedia,
   $mucCallParticipants,
   mucCallParticipantCounts,
 } from "@/lib/calls/muc-call-presence";
+import { $dmCallActivities } from "@/lib/calls/dm-call-activity";
+import { $callState } from "@/lib/calls/call-store";
+import {
+  activeChannelRailCallCount,
+  activeDmRailCallCount,
+} from "@/lib/calls/call-rail-counts";
+import { normalizeMucServiceDomain } from "@/lib/calls/muc-call-indicators";
 import WaddlesSidebar from "@/components/chat/WaddlesSidebar.vue";
 import TopicsPanel from "@/components/chat/TopicsPanel.vue";
 import DmPanel from "@/components/chat/DmPanel.vue";
@@ -12,11 +20,24 @@ import SettingsMobileHeader from "@/components/chat/SettingsMobileHeader.vue";
 import ProfilePanel from "@/components/chat/ProfilePanel.vue";
 import AppDrawer from "@/components/ui/AppDrawer.vue";
 import { extensionRouteIconComponent, extensionRouteRailItems } from "./extension-route-rail-model";
+import type { CallMedia } from "@/lib/calls/types";
 import type { DiscoveredExtensionRoute } from "@/lib/xmpp/extension-commands";
 import type { ChatAppController } from "@/shell/chat-app-controller";
 
 const props = defineProps<{
   controller: ChatAppController;
+  activeChannelCallCount?: number;
+  activeDmCallCount?: number;
+  callParticipantCounts?: Record<string, number>;
+  callParticipants?: Record<string, string[]>;
+  callMediaByRoom?: Record<string, CallMedia>;
+  managedMucDomain?: string | null;
+  selfFullJid?: string | null;
+  joinChannelCall?: (channelId: string | null, roomJid: string, media: CallMedia) => void;
+  leaveChannelCall?: (roomJid: string) => void;
+  answerDm?: (peerJid: string, remoteFullJid: string, sid: string, media: CallMedia) => void;
+  reconnectDm?: (peerJid: string, media: CallMedia) => void;
+  endDm?: (peerJid: string, sid?: string) => void;
 }>();
 
 const {
@@ -35,12 +56,16 @@ const {
   channelExtensionRoutes,
   activeExtensionRouteKey,
   activeRightPanel,
+  selfDomain,
   openUserSettings,
   openHome,
+  openDmList,
+  openCommunitySurface,
   handleLogout,
   handleRequestNotifications,
   handleToggleNotifications,
   selectChannel,
+  selectChannelByRoomJid,
   onSelectThread,
   selectDm,
   selectExtensionRoute,
@@ -52,18 +77,74 @@ const {
 } = props.controller;
 
 function selectCommunitySurface(surface: "feed" | "stories" | "events") {
-  ui.activePage.value = "chat";
-  ui.activeCommunitySurface.value = surface;
-  ui.showMobileNav.value = false;
+  openCommunitySurface(surface);
+}
+
+function selectChannelFromMobile(id: string | null, roomJid?: string) {
+  ui.activeCommunitySurface.value = null;
+  if (id) {
+    void selectChannel(id, roomJid ? { roomJid } : undefined);
+    return;
+  }
+  if (roomJid) void selectChannelByRoomJid(roomJid);
+}
+
+function joinChannelCallFromMobile(channelId: string | null, roomJid: string, media: CallMedia) {
+  props.joinChannelCall?.(channelId, roomJid, media);
+}
+
+function leaveChannelCallFromMobile(roomJid: string) {
+  props.leaveChannelCall?.(roomJid);
+}
+
+function answerDmFromMobile(peerJid: string, remoteFullJid: string, sid: string, media: CallMedia) {
+  props.answerDm?.(peerJid, remoteFullJid, sid, media);
+}
+
+function reconnectDmFromMobile(peerJid: string, media: CallMedia) {
+  props.reconnectDm?.(peerJid, media);
+}
+
+function endDmFromMobile(peerJid: string, sid?: string) {
+  props.endDm?.(peerJid, sid);
 }
 
 // XEP-0272 Muji participant counts keyed by room JID — same derived
 // reactive state as ChatReadyShell uses, so the mobile sidebar shows
 // the same "call ongoing" chip.
 const mucCallParticipantsStore = useStore($mucCallParticipants);
-const callParticipantCounts = computed<Record<string, number>>(() => {
+const mucCallMediaStore = useStore($mucCallMedia);
+const dmCallActivitiesStore = useStore($dmCallActivities);
+const callStateStore = useStore($callState);
+const fallbackCallParticipantCounts = computed<Record<string, number>>(() => {
   return mucCallParticipantCounts(mucCallParticipantsStore.value);
 });
+const visibleCallParticipantCounts = computed<Record<string, number>>(() =>
+  props.callParticipantCounts ?? fallbackCallParticipantCounts.value,
+);
+const visibleCallParticipants = computed<Record<string, string[]>>(() =>
+  props.callParticipants ?? mucCallParticipantsStore.value,
+);
+const visibleCallMediaByRoom = computed<Record<string, CallMedia>>(() =>
+  props.callMediaByRoom ?? mucCallMediaStore.value,
+);
+const visibleActiveChannelCallCount = computed(() => {
+  return props.activeChannelCallCount ??
+    activeChannelRailCallCount(visibleCallParticipantCounts.value, callStateStore.value);
+});
+const visibleActiveDmCallCount = computed(() => {
+  return props.activeDmCallCount ??
+    activeDmRailCallCount(dmCallActivitiesStore.value, callStateStore.value);
+});
+const visibleManagedMucDomain = computed(() =>
+  props.managedMucDomain ??
+  (normalizeMucServiceDomain(waddles.mucServiceJid.value) || (selfDomain.value ? `muc.${selfDomain.value}` : "")),
+);
+const visibleSelfFullJid = computed(() =>
+  props.selfFullJid ??
+  (connectionStore.client as unknown as { fullJid?: string } | null)?.fullJid ??
+  null
+);
 
 const drawerExtensionRoutes = computed(() =>
   extensionRouteRailItems(
@@ -101,11 +182,13 @@ function openExtensionRoute(route: DiscoveredExtensionRoute) {
             :active-sidebar-mode="ui.sidebarMode.value"
             :active-page="ui.activePage.value"
             :has-unread-dms="dmConversations.hasUnread.value"
+            :active-channel-call-count="visibleActiveChannelCallCount"
+            :active-dm-call-count="visibleActiveDmCallCount"
             :session="null"
             horizontal
             @open-home="openHome"
             @toggle-channels="ui.sidebarMode.value = 'channels'"
-            @toggle-dms="ui.sidebarMode.value = 'dms'"
+            @toggle-dms="openDmList"
           />
         </div>
         <TopicsPanel
@@ -122,14 +205,19 @@ function openExtensionRoute(route: DiscoveredExtensionRoute) {
           :active-channel-jids="messaging.activeChannels.value"
           :collapsed-group-ids="ui.collapsedSpaceGroupIds.value"
           :channel-unread-map="computedChannelUnreadMap"
-          :call-participant-counts="callParticipantCounts"
+          :call-participant-counts="visibleCallParticipantCounts"
+          :call-participants="visibleCallParticipants"
+          :call-media-by-room="visibleCallMediaByRoom"
+          :managed-muc-domain="visibleManagedMucDomain"
           :thread-entries-fn="(roomJid: string) => channelUnread.threadEntries(roomJid)"
           :active-community-surface="ui.activeCommunitySurface.value"
           :stories-active-count="stories.activeStories.value.length"
           :upcoming-event-count="communityEvents.events.value.filter((e: { dtstartMs?: number }) => typeof e.dtstartMs === 'number' && e.dtstartMs > Date.now()).length"
           :is-threads-active="ui.activePage.value === 'threads'"
           class="!w-full !border-r-0 !flex-1"
-          @select-channel="(id: string) => { ui.activeCommunitySurface.value = null; selectChannel(id); }"
+          @select-channel="selectChannelFromMobile"
+          @join-channel-call="joinChannelCallFromMobile"
+          @leave-channel-call="leaveChannelCallFromMobile"
           @select-thread="onSelectThread"
           @select-community-surface="selectCommunitySurface"
           @select-threads-view="openThreads"
@@ -143,8 +231,13 @@ function openExtensionRoute(route: DiscoveredExtensionRoute) {
           v-else
           :conversations="dmConversations.conversations.value"
           :active-peer-jid="dmConversations.activePeerJid.value"
+          :self-full-jid="visibleSelfFullJid"
+          hide-current-call
           class="!w-full !border-r-0 !flex-1"
+          @answer-dm="answerDmFromMobile"
           @select-dm="selectDm"
+          @reconnect-dm="reconnectDmFromMobile"
+          @end-dm="endDmFromMobile"
           @new-dm="ui.showNewDm.value = true"
         />
         <ProfilePanel

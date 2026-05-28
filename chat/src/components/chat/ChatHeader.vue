@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, type Component } from "vue";
-import { Hash, Menu, MessageCircle, MessagesSquare, Pin, Search, Settings, Users } from "lucide-vue-next";
+import { Hash, Menu, MessageCircle, MessagesSquare, PhoneCall, Pin, Search, Settings, Users } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import CallButton from "@/components/calls/CallButton.vue";
 import MucCallButton from "@/components/calls/MucCallButton.vue";
 import NotifyModeButton from "@/components/chat/NotifyModeButton.vue";
+import { hasKnownDmCallMedia, useDmCallActivity } from "@/lib/calls/dm-call-activity";
 import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
 import type { ConnectionNoticeCopy } from "@/lib/connection-notice";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
@@ -26,10 +27,11 @@ export interface ChannelHeaderMember {
   presence: OccupantPresence;
 }
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   waddle: SpaceSummary | null;
   channel: ChannelSummary | null;
   dmPeer?: { peerJid?: string; peerUsername: string; presenceShow?: string } | null;
+  callRoomJid?: string | null;
   isForumChannel: boolean;
   canManageChannels: boolean;
   memberCount: number | null;
@@ -47,7 +49,20 @@ const props = defineProps<{
   /** Per-controller XEP-0492 settings store — explicit wiring,
    * NOT a module singleton, per the PR-compliance note. */
   notifySettings: NotifySettingsStore;
-}>();
+  /** When a larger in-conversation call banner is mounted, suppress
+   *  the compact header pill so users get one join affordance. */
+  showCallActivePill?: boolean;
+  /** Same suppression for 1:1 answer/reconnect call activity in the
+   *  header; the conversation banner owns that action in ContentArea. */
+  showDmCallActivityControls?: boolean;
+  /** Hide channel start controls while a refreshed live-call banner
+   *  presents the join affordance for this room. */
+  hideMucStartControlsWhenActiveCall?: boolean;
+}>(), {
+  showCallActivePill: true,
+  showDmCallActivityControls: true,
+  hideMucStartControlsWhenActiveCall: false,
+});
 
 const MAX_HEADER_AVATARS = 4;
 
@@ -74,6 +89,29 @@ const onlineCount = computed(() => sortedMembers.value.filter((m) => m.presence 
 
 const showSearch = defineModel<boolean>("showSearch", { required: true });
 const showPinnedPanel = defineModel<boolean>("showPinnedPanel", { default: false });
+const { activity: dmCallActivity } = useDmCallActivity(() => props.dmPeer?.peerJid);
+
+const dmCallActivityLabel = computed(() => {
+  const activity = dmCallActivity.value;
+  if (!activity) return "";
+  if (!hasKnownDmCallMedia(activity)) {
+    if (activity.state === "accepted") return "Call active";
+    if (activity.direction === "incoming") return "Incoming call";
+    if (activity.direction === "outgoing") return "Calling";
+    return "Call ringing";
+  }
+  const media = activity.media.video ? "Video" : "Voice";
+  if (activity.state === "accepted") return `${media} call active`;
+  if (activity.direction === "incoming") return `Incoming ${media.toLowerCase()} call`;
+  if (activity.direction === "outgoing") return `Calling ${media.toLowerCase()} call`;
+  return `${media} call ringing`;
+});
+const showDmCallActivityStatus = computed(() =>
+  props.showDmCallActivityControls !== false && !!dmCallActivity.value,
+);
+const dmHeaderSecondaryText = computed(() =>
+  showDmCallActivityStatus.value ? dmCallActivityLabel.value : presenceText(props.dmPeer?.presenceShow),
+);
 
 const emit = defineEmits<{
   openNav: [];
@@ -166,9 +204,16 @@ const memberButtonCopy = computed(() => {
             <span v-if="dmPeer" class="hidden lg:inline type-meta text-muted-foreground">
               · {{ presenceText(dmPeer.presenceShow) }}
             </span>
+            <span
+              v-if="showDmCallActivityStatus"
+              class="type-meta hidden h-5 max-w-[9rem] shrink-0 items-center gap-1 overflow-hidden rounded-full border border-success/25 bg-success/10 px-2 text-success lg:inline-flex"
+            >
+              <PhoneCall class="h-3 w-3" />
+              <span class="truncate">{{ dmCallActivityLabel }}</span>
+            </span>
           </div>
           <div v-if="dmPeer" class="lg:hidden type-caption text-muted-foreground truncate">
-            {{ presenceText(dmPeer.presenceShow) }}
+            {{ dmHeaderSecondaryText }}
           </div>
           <!-- Desktop subtitle slot: prefer the channel's own description
                (its "topic") so rooms with a stated subject get character
@@ -253,10 +298,13 @@ const memberButtonCopy = computed(() => {
         <CallButton
           v-if="dmPeer?.peerJid"
           :peer-bare-jid="dmPeer.peerJid"
+          :show-activity-controls="showDmCallActivityControls !== false"
         />
         <MucCallButton
-          v-else-if="channel?.jid"
-          :room-jid="channel.jid"
+          v-else-if="callRoomJid"
+          :room-jid="callRoomJid"
+          :show-active-pill="showCallActivePill !== false"
+          :hide-start-controls-when-active-call="hideMucStartControlsWhenActiveCall"
         />
         <!-- Live presence stack — desktop only. The mobile header is
              already crowded with hamburger + channel chip + search/pin/

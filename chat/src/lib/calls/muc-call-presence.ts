@@ -1,4 +1,6 @@
 import { map } from "nanostores";
+import { fullJidIdentityKey } from "@/lib/xmpp/jid";
+import type { CallMedia } from "./types";
 
 /**
  * Per-room map of nicks advertising XEP-0272 Muji presence with
@@ -20,10 +22,51 @@ import { map } from "nanostores";
  * change.
  */
 export const $mucCallParticipants = map<Record<string, string[]>>({});
+type MucCallParticipantOwner = {
+  nick: string;
+  realJid?: string;
+};
+export const $mucCallParticipantOwners = map<Record<string, MucCallParticipantOwner[]>>({});
+export const $mucCallMedia = map<Record<string, CallMedia>>({});
+const $mucActiveParticipants = map<Record<string, string[]>>({});
 const $mucPreparingParticipants = map<Record<string, string[]>>({});
+const $mucActiveParticipantMedia = map<Record<string, Record<string, CallMedia>>>({});
+const PARTICIPANT_KEY_SEPARATOR = "\u0000";
+const DEFAULT_MUC_CALL_MEDIA: CallMedia = { audio: true, video: false };
 
 export function normalizeMucCallRoomJid(roomJid: string): string {
   return roomJid.split("/")[0]?.trim().toLowerCase() ?? "";
+}
+
+function normalizeFullJid(jid?: string | null): string {
+  return fullJidIdentityKey(jid);
+}
+
+function preparingParticipantKey(nick: string, realJid?: string | null): string {
+  const normalizedRealJid = normalizeFullJid(realJid);
+  return normalizedRealJid ? `${nick}${PARTICIPANT_KEY_SEPARATOR}${normalizedRealJid}` : nick;
+}
+
+function preparingParticipantNick(key: string): string {
+  return key.split(PARTICIPANT_KEY_SEPARATOR)[0] ?? key;
+}
+
+function preparingParticipantRealJid(key: string): string {
+  return key.includes(PARTICIPANT_KEY_SEPARATOR)
+    ? key.slice(key.indexOf(PARTICIPANT_KEY_SEPARATOR) + PARTICIPANT_KEY_SEPARATOR.length)
+    : "";
+}
+
+const activeParticipantKey = preparingParticipantKey;
+const activeParticipantNick = preparingParticipantNick;
+const activeParticipantRealJid = preparingParticipantRealJid;
+
+function samePreparingParticipant(key: string, nick: string, realJid?: string | null): boolean {
+  if (preparingParticipantNick(key) !== nick) return false;
+  const normalizedRealJid = normalizeFullJid(realJid);
+  const keyRealJid = preparingParticipantRealJid(key);
+  if (normalizedRealJid || keyRealJid) return normalizedRealJid === keyRealJid;
+  return true;
 }
 
 function mucCallParticipantsForRoom(roomJid: string): string[] {
@@ -44,9 +87,27 @@ export function mucCallParticipantCounts(
   return counts;
 }
 
-export function clearMucCallParticipant(roomJid: string, nick: string): void {
+export function mucCallMediaForRoom(
+  roomJid: string,
+  mediaByRoom: Record<string, CallMedia> = $mucCallMedia.get(),
+): CallMedia {
+  const normalized = normalizeMucCallRoomJid(roomJid);
+  if (!normalized) return { ...DEFAULT_MUC_CALL_MEDIA };
+  return mediaByRoom[normalized] ?? { ...DEFAULT_MUC_CALL_MEDIA };
+}
+
+export function clearMucCallParticipant(
+  roomJid: string,
+  nick: string,
+  realJid?: string | null,
+  options: { includeAggregate?: boolean } = {},
+): void {
   const normalized = normalizeMucCallRoomJid(roomJid);
   if (!normalized || !nick) return;
+  removeActiveParticipant(normalized, nick, realJid, {
+    includeAggregate: options.includeAggregate ?? !realJid,
+  });
+  if (realJid) return;
   const current = $mucCallParticipants.get()[normalized] ?? [];
   if (!current.includes(nick)) return;
   const next = current.filter((n) => n !== nick);
@@ -59,12 +120,125 @@ export function clearMucCallParticipant(roomJid: string, nick: string): void {
   }
 }
 
+function syncActiveParticipantsForRoom(roomJid: string): void {
+  const activeOwners = $mucActiveParticipants.get()[roomJid] ?? [];
+  const nicks = Array.from(new Set(activeOwners.map(activeParticipantNick).filter(Boolean)));
+  if (nicks.length === 0) {
+    const all = { ...$mucCallParticipants.get() };
+    delete all[roomJid];
+    $mucCallParticipants.set(all);
+    const owners = { ...$mucCallParticipantOwners.get() };
+    delete owners[roomJid];
+    $mucCallParticipantOwners.set(owners);
+    const media = { ...$mucCallMedia.get() };
+    delete media[roomJid];
+    $mucCallMedia.set(media);
+  } else {
+    $mucCallParticipants.setKey(roomJid, nicks);
+    $mucCallParticipantOwners.setKey(
+      roomJid,
+      activeOwners.map((key) => {
+        const realJid = activeParticipantRealJid(key);
+        return {
+          nick: activeParticipantNick(key),
+          ...(realJid ? { realJid } : {}),
+        };
+      }),
+    );
+    $mucCallMedia.setKey(roomJid, aggregateActiveCallMedia(roomJid, activeOwners));
+  }
+}
+
+function aggregateActiveCallMedia(roomJid: string, activeOwners: readonly string[]): CallMedia {
+  const mediaByParticipant = $mucActiveParticipantMedia.get()[roomJid] ?? {};
+  let audio = false;
+  let video = false;
+  for (const key of activeOwners) {
+    const media = mediaByParticipant[key] ?? DEFAULT_MUC_CALL_MEDIA;
+    audio ||= media.audio;
+    video ||= media.video;
+  }
+  return { audio: audio || activeOwners.length > 0, video };
+}
+
+function setActiveParticipantMedia(roomJid: string, key: string, media: CallMedia): void {
+  const currentByRoom = $mucActiveParticipantMedia.get()[roomJid] ?? {};
+  $mucActiveParticipantMedia.setKey(roomJid, {
+    ...currentByRoom,
+    [key]: media,
+  });
+}
+
+function removeActiveParticipantMedia(roomJid: string, keys: readonly string[]): void {
+  if (keys.length === 0) return;
+  const currentByRoom = $mucActiveParticipantMedia.get()[roomJid] ?? {};
+  const nextByRoom = { ...currentByRoom };
+  for (const key of keys) {
+    delete nextByRoom[key];
+  }
+  if (Object.keys(nextByRoom).length === 0) {
+    const all = { ...$mucActiveParticipantMedia.get() };
+    delete all[roomJid];
+    $mucActiveParticipantMedia.set(all);
+  } else {
+    $mucActiveParticipantMedia.setKey(roomJid, nextByRoom);
+  }
+}
+
+function addActiveParticipant(
+  roomJid: string,
+  nick: string,
+  realJid?: string | null,
+  media: CallMedia = DEFAULT_MUC_CALL_MEDIA,
+): void {
+  const current = $mucActiveParticipants.get()[roomJid] ?? [];
+  const key = activeParticipantKey(nick, realJid);
+  if (!current.includes(key)) {
+    $mucActiveParticipants.setKey(roomJid, [...current, key]);
+  }
+  setActiveParticipantMedia(roomJid, key, media);
+  syncActiveParticipantsForRoom(roomJid);
+}
+
+function removeActiveParticipant(
+  roomJid: string,
+  nick: string,
+  realJid?: string | null,
+  options: { includeAggregate?: boolean } = {},
+): void {
+  const current = $mucActiveParticipants.get()[roomJid] ?? [];
+  const normalizedRealJid = normalizeFullJid(realJid);
+  const next = current.filter((key) => {
+    if (activeParticipantNick(key) !== nick) return true;
+    if (normalizedRealJid) {
+      if (activeParticipantRealJid(key) === normalizedRealJid) return false;
+      return !(options.includeAggregate && !activeParticipantRealJid(key));
+    }
+    return activeParticipantNick(key) !== nick;
+  });
+  if (next.length === current.length) return;
+  removeActiveParticipantMedia(
+    roomJid,
+    current.filter((key) => !next.includes(key)),
+  );
+  if (next.length === 0) {
+    const all = { ...$mucActiveParticipants.get() };
+    delete all[roomJid];
+    $mucActiveParticipants.set(all);
+  } else {
+    $mucActiveParticipants.setKey(roomJid, next);
+  }
+  syncActiveParticipantsForRoom(roomJid);
+}
+
 /**
  * Apply an inbound presence update to the participants store. The
  * cases (XEP-0272 §Joining and §Leaving):
  * - Available presence + `muji.active === true` → add nick.
- * - Available presence + `muji.preparing === true` (but not active)
- *   → no-op; preparing alone does not count as in-call.
+ * - Available presence + `muji.preparing === true` → setup signal
+ *   only; preparing does not add OR clear active call membership,
+ *   even when a separate resource is already active under the same
+ *   nick.
  * - Available presence WITHOUT `muji` → remove nick (XEP-0272
  *   §Leaving: absence of the element is the leave marker).
  * - Unavailable presence → remove nick (occupant left the room).
@@ -77,7 +251,8 @@ export function applyMucCallPresence(
   presence: {
     from?: string;
     presence_type?: string;
-    muji?: { preparing: boolean; active: boolean };
+    muc_jid?: string | null;
+    muji?: { preparing: boolean; active: boolean; audio?: boolean; video?: boolean };
   },
 ): void {
   if (!presence.from) return;
@@ -87,39 +262,39 @@ export function applyMucCallPresence(
   const nick = presence.from.slice(slash + 1);
   if (!roomJid || !nick) return;
 
-  const wantsActive =
-    presence.presence_type !== "unavailable" &&
-    presence.muji?.active === true;
+  const isUnavailable = presence.presence_type === "unavailable";
+  const hasPreparing = !isUnavailable && presence.muji?.preparing === true;
+  const wantsActive = !isUnavailable && presence.muji?.active === true;
+  const shouldClear =
+    isUnavailable ||
+    !presence.muji ||
+    (presence.muji.preparing === false && presence.muji.active === false);
 
-  // XEP-0272 §Joining: a preparing-only presence echoed back from
-  // the MUC is the signal a waiting client uses to proceed to its
-  // content-declaring presence. Fire any registered one-shot
+  // XEP-0272 §Joining: a presence containing `<preparing/>` echoed
+  // back from the MUC is the signal a waiting client uses to proceed
+  // to its content-declaring presence. Some conformant stanzas can
+  // contain both `<preparing/>` and `<content/>`; preparing remains
+  // the setup signal in that case. Fire any registered one-shot
   // listener BEFORE we touch the participant store so the
   // beginMucCall flow unblocks deterministically.
-  if (presence.muji?.preparing && presence.muji?.active === false) {
-    addPreparingParticipant(roomJid, nick);
-    notifyPrepareEcho(roomJid, nick);
+  if (hasPreparing) {
+    addPreparingParticipant(roomJid, nick, presence.muc_jid);
+    notifyPrepareEcho(roomJid, nick, presence.muc_jid);
   } else {
-    removePreparingParticipant(roomJid, nick);
+    removePreparingParticipant(roomJid, nick, presence.muc_jid, {
+      includeAggregate: !presence.muc_jid,
+    });
   }
 
-  const current = mucCallParticipantsForRoom(roomJid);
-  const has = current.includes(nick);
-
-  if (wantsActive && !has) {
-    $mucCallParticipants.setKey(roomJid, [...current, nick]);
-  } else if (!wantsActive && has) {
-    const next = current.filter((n) => n !== nick);
-    if (next.length === 0) {
-      // Drop the room key entirely so consumers can read
-      // `$mucCallParticipants.get()[room] ?? []` and treat absence
-      // as "nobody in call" — same as the initial state.
-      const all = { ...$mucCallParticipants.get() };
-      delete all[roomJid];
-      $mucCallParticipants.set(all);
-    } else {
-      $mucCallParticipants.setKey(roomJid, next);
-    }
+  if (wantsActive) {
+    addActiveParticipant(roomJid, nick, presence.muc_jid, {
+      audio: presence.muji?.audio !== false,
+      video: presence.muji?.video === true,
+    });
+  } else if (shouldClear) {
+    removeActiveParticipant(roomJid, nick, presence.muc_jid, {
+      includeAggregate: !presence.muc_jid,
+    });
   }
 }
 
@@ -137,7 +312,11 @@ export function mucCallParticipantCount(roomJid: string): number {
  */
 export function clearMucCallParticipants(): void {
   $mucCallParticipants.set({});
+  $mucCallParticipantOwners.set({});
+  $mucCallMedia.set({});
+  $mucActiveParticipants.set({});
   $mucPreparingParticipants.set({});
+  $mucActiveParticipantMedia.set({});
   // Drop any pending preparing-echo waiters too — they'd otherwise
   // resolve when the next presence echo arrives after reconnect,
   // which would race the new login's call setup.
@@ -156,21 +335,35 @@ export function cancelMucCallPreparationWaiters(
 ): void {
   const normalized = normalizeMucCallRoomJid(roomJid);
   if (!normalized || !nick) return;
-  rejectPrepareEchoWaiter(`${normalized}/${nick}`, err);
-  rejectNoOtherPreparingWaiter(`${normalized}/${nick}`, err);
+  rejectPrepareEchoWaitersForParticipant(normalized, nick, err);
+  rejectNoOtherPreparingWaitersForParticipant(normalized, nick, err);
 }
 
-function addPreparingParticipant(roomJid: string, nick: string): void {
+function addPreparingParticipant(roomJid: string, nick: string, realJid?: string | null): void {
   const current = $mucPreparingParticipants.get()[roomJid] ?? [];
-  if (current.includes(nick)) return;
-  $mucPreparingParticipants.setKey(roomJid, [...current, nick]);
+  const key = preparingParticipantKey(nick, realJid);
+  if (current.includes(key)) return;
+  $mucPreparingParticipants.setKey(roomJid, [...current, key]);
   notifyPreparingChanged(roomJid);
 }
 
-function removePreparingParticipant(roomJid: string, nick: string): void {
+function removePreparingParticipant(
+  roomJid: string,
+  nick: string,
+  realJid?: string | null,
+  options: { includeAggregate?: boolean } = {},
+): void {
   const current = $mucPreparingParticipants.get()[roomJid] ?? [];
-  if (!current.includes(nick)) return;
-  const next = current.filter((n) => n !== nick);
+  const normalizedRealJid = normalizeFullJid(realJid);
+  const next = current.filter((key) => {
+    if (preparingParticipantNick(key) !== nick) return true;
+    if (normalizedRealJid) {
+      if (samePreparingParticipant(key, nick, normalizedRealJid)) return false;
+      return !(options.includeAggregate && !preparingParticipantRealJid(key));
+    }
+    return preparingParticipantNick(key) !== nick;
+  });
+  if (next.length === current.length) return;
   if (next.length === 0) {
     const all = { ...$mucPreparingParticipants.get() };
     delete all[roomJid];
@@ -183,8 +376,9 @@ function removePreparingParticipant(roomJid: string, nick: string): void {
 
 /**
  * Pending listeners awaiting a XEP-0272 §Joining preparing-presence
- * echo. Keyed by `<room-jid>/<nick>` so two calls in different rooms
- * (or with different nicks) get distinct one-shot resolvers.
+ * echo. Keyed by `<room-jid>/<nick>/<real-jid>` when the room exposes
+ * the occupant's real full JID, so same-account resources sharing a
+ * MUC nick cannot consume each other's XEP-0272 preparing echo.
  *
  * The XEP MANDATES that a client wait for the MUC to rebroadcast
  * its preparing presence before proceeding to the content-declaring
@@ -207,19 +401,37 @@ const noOtherPreparingListeners = new Map<
   {
     roomJid: string;
     selfNick: string;
+    selfFullJid?: string | null;
     resolve: () => void;
     reject: (err: Error) => void;
     timer: ReturnType<typeof setTimeout>;
   }
 >();
 
-function notifyPrepareEcho(roomJid: string, nick: string): void {
-  const key = `${roomJid}/${nick}`;
+function prepareEchoListenerKey(roomJid: string, nick: string, realJid?: string | null): string {
+  return `${roomJid}/${preparingParticipantKey(nick, realJid)}`;
+}
+
+function notifyPrepareEcho(roomJid: string, nick: string, realJid?: string | null): void {
+  const key = prepareEchoListenerKey(roomJid, nick, realJid);
   const listener = prepareEchoListeners.get(key);
   if (listener) {
     prepareEchoListeners.delete(key);
     clearTimeout(listener.timer);
     listener.resolve();
+  }
+}
+
+function listenerMatchesParticipant(key: string, roomJid: string, nick: string): boolean {
+  if (!key.startsWith(`${roomJid}/`)) return false;
+  const participantKey = key.slice(roomJid.length + 1);
+  return preparingParticipantNick(participantKey) === nick;
+}
+
+function rejectPrepareEchoWaitersForParticipant(roomJid: string, nick: string, err: Error): void {
+  for (const key of [...prepareEchoListeners.keys()]) {
+    if (!listenerMatchesParticipant(key, roomJid, nick)) continue;
+    rejectPrepareEchoWaiter(key, err);
   }
 }
 
@@ -239,14 +451,22 @@ function rejectPrepareEchoWaiter(key: string, err: Error): void {
   listener.reject(err);
 }
 
-function hasOtherPreparing(roomJid: string, selfNick: string): boolean {
-  return ($mucPreparingParticipants.get()[roomJid] ?? []).some((nick) => nick !== selfNick);
+function isSelfPreparingParticipant(key: string, selfNick: string, selfFullJid?: string | null): boolean {
+  if (preparingParticipantNick(key) !== selfNick) return false;
+  const normalizedSelfFullJid = normalizeFullJid(selfFullJid);
+  const realJid = preparingParticipantRealJid(key);
+  if (normalizedSelfFullJid && realJid) return normalizedSelfFullJid === realJid;
+  return !normalizedSelfFullJid && !realJid;
+}
+
+function hasOtherPreparing(roomJid: string, selfNick: string, selfFullJid?: string | null): boolean {
+  return ($mucPreparingParticipants.get()[roomJid] ?? []).some((key) => !isSelfPreparingParticipant(key, selfNick, selfFullJid));
 }
 
 function notifyPreparingChanged(roomJid: string): void {
   for (const [key, listener] of noOtherPreparingListeners) {
     if (listener.roomJid !== roomJid) continue;
-    if (hasOtherPreparing(listener.roomJid, listener.selfNick)) continue;
+    if (hasOtherPreparing(listener.roomJid, listener.selfNick, listener.selfFullJid)) continue;
     noOtherPreparingListeners.delete(key);
     clearTimeout(listener.timer);
     listener.resolve();
@@ -269,6 +489,13 @@ function rejectNoOtherPreparingWaiter(key: string, err: Error): void {
   listener.reject(err);
 }
 
+function rejectNoOtherPreparingWaitersForParticipant(roomJid: string, nick: string, err: Error): void {
+  for (const key of [...noOtherPreparingListeners.keys()]) {
+    if (!listenerMatchesParticipant(key, roomJid, nick)) continue;
+    rejectNoOtherPreparingWaiter(key, err);
+  }
+}
+
 /**
  * Wait for the MUC to rebroadcast our preparing-presence echo for
  * `nick` in `roomJid`, then resolve. If no echo arrives within
@@ -284,10 +511,11 @@ export function awaitPreparingEcho(
   roomJid: string,
   nick: string,
   timeoutMs: number,
+  selfFullJid?: string | null,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const normalized = normalizeMucCallRoomJid(roomJid);
-    const key = `${normalized}/${nick}`;
+    const key = prepareEchoListenerKey(normalized, nick, selfFullJid);
     // Replacing an existing listener silently is fine — there's
     // only ever one preparing-echo waiter per (room, nick) at a
     // time because beginMucCall serialises through the call store.
@@ -310,13 +538,14 @@ export function awaitNoOtherPreparing(
   roomJid: string,
   selfNick: string,
   timeoutMs: number,
+  selfFullJid?: string | null,
 ): Promise<void> {
   const normalized = normalizeMucCallRoomJid(roomJid);
-  if (!hasOtherPreparing(normalized, selfNick)) {
+  if (!hasOtherPreparing(normalized, selfNick, selfFullJid)) {
     return Promise.resolve();
   }
   return new Promise((resolve, reject) => {
-    const key = `${normalized}/${selfNick}`;
+    const key = prepareEchoListenerKey(normalized, selfNick, selfFullJid);
     const previous = noOtherPreparingListeners.get(key);
     if (previous) {
       clearTimeout(previous.timer);
@@ -331,6 +560,7 @@ export function awaitNoOtherPreparing(
     noOtherPreparingListeners.set(key, {
       roomJid: normalized,
       selfNick,
+      selfFullJid,
       resolve,
       reject,
       timer,

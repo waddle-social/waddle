@@ -226,6 +226,8 @@ fn muji_presence_to_ffi(muji: MujiPresence) -> WaddleMujiPresence {
     WaddleMujiPresence {
         preparing: muji.preparing,
         active: muji.active,
+        audio: muji.audio,
+        video: muji.video,
     }
 }
 
@@ -337,6 +339,7 @@ pub(super) fn call_event_to_ffi(event: InboundCallEvent) -> WaddleCallEvent {
     };
     WaddleCallEvent {
         from: event.from.to_string(),
+        to: event.to.map(|jid| jid.to_string()),
         sid: event.sid.0,
         kind,
     }
@@ -394,6 +397,7 @@ fn archived_to_ffi(archived: waddle_xmpp_client::ArchivedMessage) -> WaddleArchi
         Some(MessagingEvent::Message(m)) => Some(m),
         _ => None,
     };
+    let call_event = messaging::parse_call_event(&archived.inner).map(call_event_to_ffi);
     let (fb_start, fb_end) = parsed
         .as_ref()
         .and_then(|m| m.reply_fallback)
@@ -431,6 +435,7 @@ fn archived_to_ffi(archived: waddle_xmpp_client::ArchivedMessage) -> WaddleArchi
                     .collect()
             })
             .unwrap_or_default(),
+        call_event,
     }
 }
 
@@ -555,6 +560,7 @@ mod tests {
         let parsed = messaging::parse_call_event(&stanza).expect("propose parses");
         let ffi = call_event_to_ffi(parsed);
         assert_eq!(ffi.from, "alice@waddle.test/desktop");
+        assert_eq!(ffi.to.as_deref(), Some("bob@waddle.test"));
         assert_eq!(ffi.sid, "c1");
         match ffi.kind {
             WaddleCallEventKind::Propose { media } => assert_audio_video(&media),
@@ -713,6 +719,44 @@ mod tests {
         }
     }
 
+    fn parse_mam_archived(xml: &str) -> waddle_xmpp_client::ArchivedMessage {
+        let stanza: Element = xml.parse().expect("fixture parses");
+        waddle_xmpp_client::mam::parse_mam_result(&stanza).expect("expected MAM result")
+    }
+
+    #[test]
+    fn archived_to_ffi_preserves_jmi_only_call_events_for_dm_reload() {
+        let archived = parse_mam_archived(
+            "<message xmlns='jabber:client'>\
+               <result xmlns='urn:xmpp:mam:2' id='mam-call' queryid='q1'>\
+                 <forwarded xmlns='urn:xmpp:forward:0'>\
+                   <delay xmlns='urn:xmpp:delay' stamp='2026-05-25T10:00:00Z'/>\
+                   <message xmlns='jabber:client' type='chat' id='call-propose' \
+                            from='bob@waddle.test/phone' to='alice@waddle.test/web'>\
+                     <propose xmlns='urn:xmpp:jingle-message:0' id='call-1'>\
+                       <description xmlns='urn:xmpp:jingle:apps:rtp:1' media='audio'/>\
+                     </propose>\
+                     <store xmlns='urn:xmpp:hints'/>\
+                   </message>\
+                 </forwarded>\
+               </result>\
+             </message>",
+        );
+
+        let ffi = archived_to_ffi(archived);
+        let call_event = ffi.call_event.expect("call event should be present");
+
+        assert_eq!(ffi.mam_id, "mam-call");
+        assert_eq!(ffi.body, None);
+        assert_eq!(call_event.from, "bob@waddle.test/phone");
+        assert_eq!(call_event.to.as_deref(), Some("alice@waddle.test/web"));
+        assert_eq!(call_event.sid, "call-1");
+        match call_event.kind {
+            WaddleCallEventKind::Propose { media } => assert!(media.audio),
+            other => panic!("expected Propose, got {other:?}"),
+        }
+    }
+
     #[test]
     fn mds_displayed_entries_survive_inbound_to_ffi() {
         // XEP-0490 §3 PEP event payload pushed by the user's own
@@ -844,15 +888,23 @@ mod tests {
         let active = muji_presence_to_ffi(MujiPresence {
             preparing: false,
             active: true,
+            audio: true,
+            video: true,
         });
         assert!(active.active);
         assert!(!active.preparing);
+        assert!(active.audio);
+        assert!(active.video);
 
         let preparing = muji_presence_to_ffi(MujiPresence {
             preparing: true,
             active: false,
+            audio: false,
+            video: false,
         });
         assert!(preparing.preparing);
         assert!(!preparing.active);
+        assert!(!preparing.audio);
+        assert!(!preparing.video);
     }
 }

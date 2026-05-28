@@ -512,7 +512,7 @@ private func makeCallEvent(_ event: WaddleCallEvent) -> XMPPCallEvent {
             return .sessionTerminate(reason: reason.map(makeJingleReason))
         }
     }()
-    return XMPPCallEvent(from: event.from, sid: event.sid, kind: kind)
+    return XMPPCallEvent(from: event.from, to: event.to, sid: event.sid, kind: kind)
 }
 
 private func makeSharedFile(_ file: WaddleSharedFile) -> XMPPSharedFile {
@@ -579,7 +579,8 @@ private extension WaddleMamPage {
                 queryID: archived.queryId,
                 stanzaID: archived.stanzaId,
                 delayedDeliveryTimestamp: timestamp,
-                message: msgEvent
+                message: msgEvent,
+                callEvent: archived.callEvent.map(makeCallEvent)
             )
         }
 

@@ -3,6 +3,7 @@ import { computed, ref, watch } from "vue";
 import { useStore } from "@nanostores/vue";
 import { Phone, PhoneOff, Video } from "lucide-vue-next";
 import { $callState, $lastCallError, clearCallState, reportCallError } from "@/lib/calls/call-store";
+import { clearDmCallActivity } from "@/lib/calls/dm-call-activity";
 import { outboundCalls } from "@/lib/calls/outbound";
 import { connectionStore } from "@/lib/connection-store";
 
@@ -39,10 +40,16 @@ const mediaLabel = computed(() => {
 });
 
 const statusLabel = computed(() => {
-  if (accepting.value) return "Connecting…";
+  if (accepting.value || (state.value.phase === "incoming" && state.value.accepting)) return "Connecting…";
   if (declining.value) return "Declining…";
   return "ringing…";
 });
+
+const controlsDisabled = computed(() =>
+  accepting.value ||
+  declining.value ||
+  (state.value.phase === "incoming" && state.value.accepting === true),
+);
 
 function getSender() {
   // BrowserXmppClient stores the wasm client as `xmpp`; cast through unknown
@@ -54,7 +61,7 @@ function getSender() {
 
 async function accept(): Promise<void> {
   if (state.value.phase !== "incoming") return;
-  if (accepting.value || declining.value) return;
+  if (controlsDisabled.value) return;
   const { from, sid } = state.value;
   const sender = getSender();
   if (!sender) return;
@@ -71,7 +78,7 @@ async function accept(): Promise<void> {
 
 async function decline(): Promise<void> {
   if (state.value.phase !== "incoming") return;
-  if (accepting.value || declining.value) return;
+  if (controlsDisabled.value) return;
   const { from, sid } = state.value;
   const sender = getSender();
   declining.value = true;
@@ -82,6 +89,7 @@ async function decline(): Promise<void> {
       reportCallError(err);
     }
   }
+  clearDmCallActivity(from, sid);
   clearCallState();
 }
 </script>
@@ -114,7 +122,7 @@ async function decline(): Promise<void> {
       <button
         class="chat-action-button chat-action-button--secondary"
         type="button"
-        :disabled="accepting || declining"
+        :disabled="controlsDisabled"
         @click="decline"
       >
         <PhoneOff class="w-4 h-4" />
@@ -123,11 +131,11 @@ async function decline(): Promise<void> {
       <button
         class="chat-action-button chat-action-button--primary"
         type="button"
-        :disabled="accepting || declining"
+        :disabled="controlsDisabled"
         @click="accept"
       >
         <Phone class="w-4 h-4" />
-        <span class="type-control">{{ accepting ? "Connecting…" : "Accept" }}</span>
+        <span class="type-control">{{ controlsDisabled && !declining ? "Connecting…" : "Accept" }}</span>
       </button>
     </div>
   </div>

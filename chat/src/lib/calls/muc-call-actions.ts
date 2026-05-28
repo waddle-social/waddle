@@ -1,5 +1,12 @@
-import { beginMucCall, reportCallError, type RawIqSender } from "./call-store";
-import type { CallMedia } from "./types";
+import { $callState, beginMucCall, reportCallError, type RawIqSender } from "./call-store";
+import { LIVEKIT_JOIN_EXPIRY_SKEW_MS, liveKitJoinTokenExpiresAt } from "./dm-call-activity";
+import { clearMucCallParticipant } from "./muc-call-presence";
+import {
+  forgetMucCallSession,
+  markMucCallSessionTerminatePending,
+  readMucCallSession,
+} from "./muc-call-session-cache";
+import type { CallMedia, LiveKitJoin } from "./types";
 
 type MucCallStartActionOptions = {
   roomJid: string;
@@ -8,7 +15,24 @@ type MucCallStartActionOptions = {
   setStarting: (starting: boolean) => void;
   getSender: () => RawIqSender | null;
   getSelfNick: () => string | undefined;
+  getSelfFullJid?: () => string | null | undefined;
   getExpectedMixerJid?: () => string | null | undefined;
+  ensureJoined?: () => Promise<void>;
+  /**
+   * When true, attempt a direct LiveKit reconnect via
+   * `resumeMucCallActivity` before falling back to a fresh Jingle
+   * `beginMucCall`. The rejoin affordance after a tab reload sets
+   * this; the "join a call you weren't in" fresh-joiner button
+   * leaves it false.
+   */
+  tryResumeFirst?: boolean;
+};
+
+type RetainedMucCallLeaveActionOptions = {
+  roomJid: string;
+  getSender: () => RawIqSender | null;
+  getSelfNick: () => string | undefined;
+  getSelfFullJid?: () => string | null | undefined;
 };
 
 /**
@@ -23,19 +47,33 @@ export async function startMucCallAction({
   setStarting,
   getSender,
   getSelfNick,
+  getSelfFullJid,
   getExpectedMixerJid,
+  ensureJoined,
+  tryResumeFirst = false,
 }: MucCallStartActionOptions): Promise<boolean> {
   if (isBusy()) return false;
   const sender = getSender();
   if (!sender) return false;
   setStarting(true);
   try {
+    await ensureJoined?.();
+    if (tryResumeFirst) {
+      const resumed = await resumeMucCallActivity({
+        roomJid,
+        getSender,
+        getSelfNick,
+        getSelfFullJid,
+      });
+      if (resumed) return true;
+    }
     await beginMucCall(
       sender,
       roomJid,
       media,
       getSelfNick(),
       getExpectedMixerJid?.(),
+      getSelfFullJid?.(),
     );
     return true;
   } catch (err) {
@@ -44,4 +82,195 @@ export async function startMucCallAction({
   } finally {
     setStarting(false);
   }
+}
+
+/**
+ * Hard-refresh recovery path for a MUC call this browser resource
+ * still advertises via Muji presence, but whose local LiveKit/call
+ * state was lost with the old JS context. We clear this occupant's
+ * XEP-0272 presence first, then send the cached per-attempt Jingle
+ * `session-terminate` when available. That ordering follows
+ * XEP-0272 §Leaving while still giving the SFU the XEP-0166
+ * termination it expects.
+ */
+export async function leaveRetainedMucCallAction({
+  roomJid,
+  getSender,
+  getSelfNick,
+  getSelfFullJid,
+}: RetainedMucCallLeaveActionOptions): Promise<boolean> {
+  const sender = getSender();
+  const selfNick = getSelfNick();
+  if (!sender?.update_muji_presence || !selfNick) return false;
+  const selfFullJid = getSelfFullJid?.() ?? null;
+  const cachedSession = readMucCallSession({ roomJid, selfFullJid });
+  let terminated = !cachedSession;
+  try {
+    await sender.update_muji_presence(
+      roomJid,
+      selfNick,
+      false,
+      false,
+      false,
+    );
+    clearMucCallParticipant(roomJid, selfNick, selfFullJid, {
+      includeAggregate: true,
+    });
+  } catch (err) {
+    reportCallError(err);
+    return false;
+  }
+  if (cachedSession) {
+    try {
+      if (!sender.send_muji_session_terminate) {
+        throw new Error(
+          "wasm client does not expose send_muji_session_terminate; rebuild the wasm bundle",
+        );
+      }
+      await sender.send_muji_session_terminate(cachedSession.roomJid, cachedSession.sid);
+      forgetMucCallSession({
+        roomJid: cachedSession.roomJid,
+        selfFullJid,
+        sid: cachedSession.sid,
+      });
+      terminated = true;
+    } catch (err) {
+      markMucCallSessionTerminatePending({
+        roomJid: cachedSession.roomJid,
+        selfFullJid,
+        sid: cachedSession.sid,
+        media: cachedSession.media,
+      });
+      reportCallError(err);
+    }
+  }
+  return terminated;
+}
+
+/**
+ * Resume options for a recovered MUC group call. Mirror of
+ * `resumeDmCallActivity`'s shape.
+ */
+type ResumeMucCallActionOptions = {
+  roomJid: string;
+  getSender: () => RawIqSender | null;
+  getSelfNick: () => string | undefined;
+  getSelfFullJid?: () => string | null | undefined;
+  now?: Date;
+};
+
+/**
+ * Test whether the cached MUC session for `(roomJid, selfFullJid)`
+ * can be reused for a direct LiveKit reconnect without a fresh
+ * Jingle session-initiate handshake.
+ *
+ * The check is strictly local: a cached entry is usable only when it
+ * carries a `join`, the join's identity matches our current full JID
+ * (LiveKit identity-uniqueness then displaces the pre-reload session
+ * cleanly), and the JWT's `exp` claim sits comfortably ahead of
+ * `now`. Per LiveKit's documented operational behavior the JWT's TTL
+ * only gates the initial connect — once we reconnect, LK auto-rotates
+ * 10-minute refresh tokens in-band — but we still require headroom
+ * so a token that's seconds from expiry doesn't race the reconnect.
+ */
+export function canResumeMucCallActivity(options: {
+  roomJid: string;
+  selfFullJid: string | null | undefined;
+  now?: Date;
+}): boolean {
+  const selfFullJid = options.selfFullJid?.trim() ?? "";
+  if (!selfFullJid) return false;
+  const session = readMucCallSession({
+    roomJid: options.roomJid,
+    selfFullJid,
+    now: options.now,
+  });
+  if (!session || session.terminatePending) return false;
+  if (!session.join) return false;
+  if (session.join.identity !== selfFullJid) return false;
+  const expiresAt = liveKitJoinTokenExpiresAt(session.join.token);
+  const now = options.now ?? new Date();
+  if (!expiresAt) return false;
+  return expiresAt.getTime() > now.getTime() + LIVEKIT_JOIN_EXPIRY_SKEW_MS;
+}
+
+/**
+ * Hard-refresh recovery path for a MUC call this browser resource
+ * was actively in before the tab reload.
+ *
+ * Reads the persisted `LiveKitJoin` from the MUC session cache and
+ * promotes `$callState` directly to `active` with the cached
+ * credentials. The `CallOverlay` watcher (keyed on
+ * `state.value.sid`) then drives `engine.connect(active.join,
+ * active.media)`, which reconnects to the same LiveKit room as the
+ * same identity — LK's identity-uniqueness invariant kicks any
+ * orphan session left behind by the dead pre-reload resource.
+ *
+ * Critically, this path does NOT mint a fresh Jingle attempt: no
+ * new `attemptId`, no new SFU session, no doubled Muji presence.
+ * The pre-reload Muji=active presence is still in the MUC roster
+ * and remains the authoritative advertisement; explicit hangup
+ * clears it via the normal `tearDownActiveCall` path. If the cached
+ * token cannot be used (missing/expired/identity-mismatch) the
+ * caller falls back to `beginMucCall`.
+ *
+ * Best-effort re-publishes our Muji=active presence after promoting
+ * `$callState`: harmless when the server still has our previous
+ * presence (the rebroadcast is a no-op update from the room's
+ * perspective) but useful when SM-resume changed our resource and
+ * the room hasn't yet seen the new resource's Muji.
+ */
+export async function resumeMucCallActivity({
+  roomJid,
+  getSender,
+  getSelfNick,
+  getSelfFullJid,
+  now,
+}: ResumeMucCallActionOptions): Promise<boolean> {
+  const current = $callState.get();
+  if (current.phase !== "idle" && current.phase !== "ended") return false;
+
+  const selfFullJid = getSelfFullJid?.()?.trim() ?? "";
+  if (!selfFullJid) return false;
+  if (!canResumeMucCallActivity({ roomJid, selfFullJid, now })) return false;
+
+  const session = readMucCallSession({ roomJid, selfFullJid, now });
+  if (!session || !session.join || !session.media) return false;
+
+  const selfNick = getSelfNick();
+  if (!selfNick) return false;
+
+  const media: CallMedia = session.media;
+  const join: LiveKitJoin = session.join;
+
+  $callState.set({
+    phase: "active",
+    peer: session.roomJid,
+    sid: session.sid,
+    media,
+    join,
+    kind: "muc",
+    selfNick,
+    selfFullJid,
+  });
+
+  // Best-effort republish of Muji active presence under the current
+  // resource. Non-fatal — the LK→Muji webhook bridge will reconcile
+  // even if this rebroadcast races a transient send failure.
+  const sender = getSender();
+  if (sender?.update_muji_presence) {
+    try {
+      await sender.update_muji_presence(
+        session.roomJid,
+        selfNick,
+        true, // active
+        false, // preparing
+        media.video,
+      );
+    } catch (err) {
+      reportCallError(err);
+    }
+  }
+
+  return true;
 }

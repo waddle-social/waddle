@@ -2,7 +2,9 @@ import { afterEach, describe, expect, test } from "bun:test";
 import {
   $mucCallParticipants,
   applyMucCallPresence,
+  awaitNoOtherPreparing,
   awaitPreparingEcho,
+  clearMucCallParticipant,
   clearMucCallParticipants,
   mucCallParticipantCounts,
   mucCallParticipantCount,
@@ -18,6 +20,7 @@ afterEach(() => {
 // boolean pair that the WASM parser surfaces in `WasmMujiPresence`.
 const activeMuji = { preparing: false, active: true } as const;
 const preparingMuji = { preparing: true, active: false } as const;
+const activePreparingMuji = { preparing: true, active: true } as const;
 
 describe("applyMucCallPresence", () => {
   test("available presence with active Muji registers the nick", () => {
@@ -59,7 +62,7 @@ describe("applyMucCallPresence", () => {
     expect($mucCallParticipants.get()["room@muc.test"]).toBeUndefined();
   });
 
-  test("transitioning from active → preparing-only clears the nick", () => {
+  test("preparing-only Muji preserves an existing active nick for same-nick sibling joins", () => {
     applyMucCallPresence({
       from: "room@muc.test/alice",
       presence_type: "available",
@@ -70,7 +73,118 @@ describe("applyMucCallPresence", () => {
       presence_type: "available",
       muji: preparingMuji,
     });
+    expect($mucCallParticipants.get()["room@muc.test"]).toEqual(["alice"]);
+  });
+
+  test("plain same-nick sibling clear preserves the exact active owner", () => {
+    applyMucCallPresence({
+      from: "room@muc.test/alice",
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/desktop",
+      muji: activeMuji,
+    });
+    applyMucCallPresence({
+      from: "room@muc.test/alice",
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/mobile",
+    });
+    expect($mucCallParticipants.get()["room@muc.test"]).toEqual(["alice"]);
+
+    applyMucCallPresence({
+      from: "room@muc.test/alice",
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/desktop",
+    });
     expect($mucCallParticipants.get()["room@muc.test"]).toBeUndefined();
+  });
+
+  test("clearing one active same-nick owner preserves another active owner", () => {
+    applyMucCallPresence({
+      from: "room@muc.test/alice",
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/desktop",
+      muji: activeMuji,
+    });
+    applyMucCallPresence({
+      from: "room@muc.test/alice",
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/mobile",
+      muji: activeMuji,
+    });
+
+    applyMucCallPresence({
+      from: "room@muc.test/alice",
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/desktop",
+    });
+    expect($mucCallParticipants.get()["room@muc.test"]).toEqual(["alice"]);
+
+    applyMucCallPresence({
+      from: "room@muc.test/alice",
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/mobile",
+    });
+    expect($mucCallParticipants.get()["room@muc.test"]).toBeUndefined();
+  });
+
+  test("local exact clear preserves active same-nick siblings", () => {
+    applyMucCallPresence({
+      from: "room@muc.test/alice",
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/desktop",
+      muji: activeMuji,
+    });
+    applyMucCallPresence({
+      from: "room@muc.test/alice",
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/mobile",
+      muji: activeMuji,
+    });
+
+    clearMucCallParticipant("room@muc.test", "alice", "alice@waddle.test/desktop");
+    expect($mucCallParticipants.get()["room@muc.test"]).toEqual(["alice"]);
+
+    clearMucCallParticipant("room@muc.test", "alice", "alice@waddle.test/mobile");
+    expect($mucCallParticipants.get()["room@muc.test"]).toBeUndefined();
+  });
+
+  test("departed active same-nick resource clears before preparing sibling replay", () => {
+    applyMucCallPresence({
+      from: "room@muc.test/alice",
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/desktop",
+      muji: activeMuji,
+    });
+    applyMucCallPresence({
+      from: "room@muc.test/alice",
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/mobile",
+      muji: preparingMuji,
+    });
+    expect($mucCallParticipants.get()["room@muc.test"]).toEqual(["alice"]);
+
+    applyMucCallPresence({
+      from: "room@muc.test/alice",
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/desktop",
+    });
+    applyMucCallPresence({
+      from: "room@muc.test/alice",
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/mobile",
+      muji: preparingMuji,
+    });
+
+    expect($mucCallParticipants.get()["room@muc.test"]).toBeUndefined();
+  });
+
+  test("active+preparing Muji counts as active while preserving the setup signal", () => {
+    applyMucCallPresence({
+      from: "room@muc.test/alice",
+      presence_type: "available",
+      muji: activePreparingMuji,
+    });
+    expect($mucCallParticipants.get()["room@muc.test"]).toEqual(["alice"]);
   });
 
   test("available presence WITHOUT the Muji extension removes a previously-registered nick (XEP-0272 §Leaving)", () => {
@@ -265,9 +379,40 @@ describe("awaitPreparingEcho (XEP-0272 §Joining MUST)", () => {
     expect(aliceResolved).toBe(true);
   });
 
-  test("does NOT resolve on a content (active) presence — preparing-only is the trigger", async () => {
-    // A content presence is NOT a preparing echo; the waiter must
-    // continue to block until the MUC echoes preparing.
+  test("does NOT resolve on a same-nick sibling resource's preparing echo", async () => {
+    const aliceWait = awaitPreparingEcho(
+      "room@muc.test",
+      "alice",
+      200,
+      "alice@waddle.test/web",
+    );
+    let aliceResolved = false;
+    void aliceWait.then(() => {
+      aliceResolved = true;
+    }).catch(() => undefined);
+
+    applyMucCallPresence({
+      from: "room@muc.test/alice",
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/mobile",
+      muji: preparingMuji,
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(aliceResolved).toBe(false);
+
+    applyMucCallPresence({
+      from: "room@muc.test/alice",
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/web",
+      muji: preparingMuji,
+    });
+    await aliceWait;
+    expect(aliceResolved).toBe(true);
+  });
+
+  test("does NOT resolve on a content-only presence", async () => {
+    // A content-only presence is NOT a preparing echo; the waiter
+    // must continue to block until the MUC echoes preparing.
     const wait = awaitPreparingEcho("room@muc.test", "alice", 200);
     let resolved = false;
     void wait.then(() => {
@@ -283,11 +428,187 @@ describe("awaitPreparingEcho (XEP-0272 §Joining MUST)", () => {
     await expect(wait).rejects.toThrow("Timed out waiting for Muji preparing presence echo");
   });
 
+  test("resolves on active+preparing presence because preparing remains the setup signal", async () => {
+    const wait = awaitPreparingEcho(
+      "room@muc.test",
+      "alice",
+      200,
+      "alice@waddle.test/web",
+    );
+    applyMucCallPresence({
+      from: "room@muc.test/alice",
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/web",
+      muji: activePreparingMuji,
+    });
+    await wait;
+  });
+
   test("rejects on timeout when no echo arrives", async () => {
     // Missing preparing echo is fatal for strict XEP-0272 setup:
     // beginMucCall must roll back instead of proceeding with room
     // state the MUC never reflected.
     await expect(awaitPreparingEcho("room@muc.test/nobody", "alice", 50))
       .rejects.toThrow("Timed out waiting for Muji preparing presence echo");
+  });
+});
+
+describe("awaitNoOtherPreparing", () => {
+  test("same-nick sibling resources still count as other preparing participants", async () => {
+    applyMucCallPresence({
+      from: "room@muc.test/alice",
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/mobile",
+      muji: preparingMuji,
+    });
+
+    const wait = awaitNoOtherPreparing(
+      "room@muc.test",
+      "alice",
+      200,
+      "alice@waddle.test/web",
+    );
+    let resolved = false;
+    void wait.then(() => {
+      resolved = true;
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(resolved).toBe(false);
+
+    applyMucCallPresence({
+      from: "room@muc.test/alice",
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/mobile",
+      muji: activeMuji,
+    });
+
+    await wait;
+    expect(resolved).toBe(true);
+  });
+
+  test("active+preparing same-nick sibling remains a blocker until preparing clears", async () => {
+    applyMucCallPresence({
+      from: "room@muc.test/alice",
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/mobile",
+      muji: activePreparingMuji,
+    });
+
+    const wait = awaitNoOtherPreparing(
+      "room@muc.test",
+      "alice",
+      200,
+      "alice@waddle.test/web",
+    );
+    let resolved = false;
+    void wait.then(() => {
+      resolved = true;
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(resolved).toBe(false);
+    expect($mucCallParticipants.get()["room@muc.test"]).toEqual(["alice"]);
+
+    applyMucCallPresence({
+      from: "room@muc.test/alice",
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/mobile",
+      muji: activeMuji,
+    });
+
+    await wait;
+    expect(resolved).toBe(true);
+  });
+
+  test("plain same-nick sibling presence does not clear active+preparing owner", async () => {
+    applyMucCallPresence({
+      from: "room@muc.test/alice",
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/mobile",
+      muji: activePreparingMuji,
+    });
+
+    const wait = awaitNoOtherPreparing(
+      "room@muc.test",
+      "carol",
+      200,
+      "carol@waddle.test/web",
+    );
+    let resolved = false;
+    void wait.then(() => {
+      resolved = true;
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(resolved).toBe(false);
+
+    applyMucCallPresence({
+      from: "room@muc.test/alice",
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/desktop",
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(resolved).toBe(false);
+
+    applyMucCallPresence({
+      from: "room@muc.test/alice",
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/mobile",
+      muji: activeMuji,
+    });
+
+    await wait;
+    expect(resolved).toBe(true);
+  });
+
+  test("active+preparing exact owner leaves sibling preparing blockers intact", async () => {
+    applyMucCallPresence({
+      from: "room@muc.test/alice",
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/mobile",
+      muji: preparingMuji,
+    });
+    applyMucCallPresence({
+      from: "room@muc.test/alice",
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/tablet",
+      muji: preparingMuji,
+    });
+    applyMucCallPresence({
+      from: "room@muc.test/alice",
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/mobile",
+      muji: activePreparingMuji,
+    });
+
+    const wait = awaitNoOtherPreparing(
+      "room@muc.test",
+      "carol",
+      200,
+      "carol@waddle.test/web",
+    );
+    let resolved = false;
+    void wait.then(() => {
+      resolved = true;
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(resolved).toBe(false);
+
+    applyMucCallPresence({
+      from: "room@muc.test/alice",
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/tablet",
+      muji: activeMuji,
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(resolved).toBe(false);
+
+    applyMucCallPresence({
+      from: "room@muc.test/alice",
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/mobile",
+      muji: activeMuji,
+    });
+
+    await wait;
+    expect(resolved).toBe(true);
   });
 });

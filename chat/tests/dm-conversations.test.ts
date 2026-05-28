@@ -1,5 +1,5 @@
 import { describe, test, expect, mock } from "bun:test";
-import { ref } from "vue";
+import { nextTick, ref } from "vue";
 import { useDirectMessageConversations } from "../src/dms/conversations";
 import type { WaddleSession } from "../src/lib/server-auth";
 import type { BrowserXmppClient, InboxEntry, LiveDmMessage } from "../src/lib/xmpp-client";
@@ -12,6 +12,8 @@ type MockClient = BrowserXmppClient & {
   fetchInbox: ReturnType<typeof mock>;
   markInboxRead: ReturnType<typeof mock>;
   subscribeToPeerPresence: ReturnType<typeof mock>;
+  hydrateRecentDmCallActivity: ReturnType<typeof mock>;
+  hydrateRecentDmCallActivities: ReturnType<typeof mock>;
 };
 
 function makeClient(conversations: InboxEntry[] = []): MockClient {
@@ -19,6 +21,8 @@ function makeClient(conversations: InboxEntry[] = []): MockClient {
     fetchInbox: mock(() => Promise.resolve({ totalUnread: conversations.reduce((sum, conversation) => sum + conversation.unread, 0), conversations })),
     markInboxRead: mock(() => Promise.resolve()),
     subscribeToPeerPresence: mock(() => Promise.resolve()),
+    hydrateRecentDmCallActivity: mock(() => Promise.resolve()),
+    hydrateRecentDmCallActivities: mock(() => Promise.resolve()),
   } as unknown as MockClient;
 }
 
@@ -76,6 +80,43 @@ describe("useDirectMessageConversations", () => {
     await composable.openDm("bob@example.com");
     await composable.openDm("bob@example.com");
     expect(composable.conversations.value).toHaveLength(1);
+  });
+
+  test("openDm refreshes per-peer call activity for hard-reload recovery", async () => {
+    const client = makeClient();
+    const { composable } = makeComposable({ client });
+
+    await composable.openDm("bob@example.com/mobile");
+
+    expect(client.hydrateRecentDmCallActivity).toHaveBeenCalledTimes(1);
+    expect(client.hydrateRecentDmCallActivity).toHaveBeenCalledWith("bob@example.com");
+    expect(client.subscribeToPeerPresence).toHaveBeenCalledWith("bob@example.com");
+  });
+
+  test("restored active DM refreshes per-peer call activity when the client attaches", async () => {
+    const client = makeClient();
+    const { composable, client: clientRef } = makeComposable();
+
+    await composable.openDm("bob@example.com");
+    clientRef.value = client;
+    await nextTick();
+
+    expect(client.hydrateRecentDmCallActivity).toHaveBeenCalledTimes(1);
+    expect(client.hydrateRecentDmCallActivity).toHaveBeenCalledWith("bob@example.com");
+  });
+
+  test("active DM refreshes per-peer call activity again after client rotation", async () => {
+    const firstClient = makeClient();
+    const secondClient = makeClient();
+    const { composable, client: clientRef } = makeComposable({ client: firstClient });
+
+    await composable.openDm("bob@example.com");
+    clientRef.value = secondClient;
+    await nextTick();
+
+    expect(firstClient.hydrateRecentDmCallActivity).toHaveBeenCalledTimes(1);
+    expect(secondClient.hydrateRecentDmCallActivity).toHaveBeenCalledTimes(1);
+    expect(secondClient.hydrateRecentDmCallActivity).toHaveBeenCalledWith("bob@example.com");
   });
 
   test("closeDm clears activePeerJid", async () => {
@@ -140,6 +181,89 @@ describe("useDirectMessageConversations", () => {
       lastMessageAt: "2026-01-02T00:00:00Z",
       unreadCount: 1,
     });
+  });
+
+  test("hydrateFromInbox refreshes DM call activity from personal MAM", async () => {
+    const client = makeClient([
+      {
+        partner: "bob@example.com",
+        kind: "direct",
+        lastStanzaId: "sid-1",
+        lastUpdated: epochSeconds("2026-01-02T12:00:00Z"),
+        unread: 0,
+        preview: "from inbox",
+      },
+      {
+        partner: "carol@example.com/mobile",
+        kind: "direct",
+        lastStanzaId: "sid-2",
+        lastUpdated: epochSeconds("2026-01-02T12:05:00Z"),
+        unread: 0,
+        preview: "from inbox",
+      },
+    ]);
+    const { composable } = makeComposable({ client });
+
+    await composable.hydrateFromInbox();
+
+    expect(client.hydrateRecentDmCallActivities).toHaveBeenCalledTimes(1);
+  });
+
+  test("hydrateFromInbox keeps inbox results when DM call hydration fails", async () => {
+    const client = makeClient([
+      {
+        partner: "bob@example.com",
+        kind: "direct",
+        lastStanzaId: "sid-1",
+        lastUpdated: epochSeconds("2026-01-02T12:00:00Z"),
+        unread: 0,
+        preview: "from inbox",
+      },
+    ]);
+    client.hydrateRecentDmCallActivities = mock(async () => {
+      throw new Error("MAM unavailable");
+    });
+    const { composable } = makeComposable({ client });
+
+    const hydrated = await composable.hydrateFromInbox();
+
+    expect(hydrated).toBe(true);
+    expect(composable.conversations.value).toHaveLength(1);
+    expect(client.hydrateRecentDmCallActivities).toHaveBeenCalledTimes(1);
+  });
+
+  test("hydrateFromInbox still refreshes DM call activity when inbox fails", async () => {
+    const client = makeClient();
+    let resolveCallHydration!: () => void;
+    client.fetchInbox = mock(async () => {
+      throw new Error("inbox unavailable");
+    });
+    client.hydrateRecentDmCallActivities = mock(() => new Promise<void>((resolve) => {
+      resolveCallHydration = resolve;
+    }));
+    const { composable } = makeComposable({ client });
+
+    const hydrated = await composable.hydrateFromInbox();
+
+    expect(hydrated).toBe(false);
+    expect(client.hydrateRecentDmCallActivities).toHaveBeenCalledTimes(1);
+    resolveCallHydration();
+  });
+
+  test("hydrateFromInbox starts DM call activity before inbox returns", async () => {
+    const client = makeClient();
+    let resolveInbox!: (value: { totalUnread: number; conversations: InboxEntry[] }) => void;
+    client.fetchInbox = mock(() => new Promise((resolve) => {
+      resolveInbox = resolve;
+    }));
+    const { composable } = makeComposable({ client });
+
+    const hydration = composable.hydrateFromInbox();
+
+    expect(client.hydrateRecentDmCallActivities).toHaveBeenCalledTimes(1);
+
+    resolveInbox({ totalUnread: 0, conversations: [] });
+    expect(await hydration).toBe(true);
   });
 
   test("receiveIncomingDm creates conversation and increments unread", () => {

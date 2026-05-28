@@ -15,4 +15,19 @@ pub enum SfuError {
 
     #[error("failed to compute HMAC for TURN credentials")]
     HmacInit,
+
+    #[error("failed to build LiveKit admin HTTP client")]
+    AdminHttpInit(#[source] reqwest::Error),
+
+    #[error("failed to build LiveKit admin URL")]
+    AdminUrl(#[source] url::ParseError),
+
+    #[error("unexpected LiveKit websocket URL scheme for admin REST derivation: {0}")]
+    AdminScheme(String),
+
+    #[error("LiveKit admin request failed")]
+    AdminRequest(#[source] reqwest::Error),
+
+    #[error("LiveKit admin call returned status {status}: {body}")]
+    AdminCallFailed { status: u16, body: String },
 }

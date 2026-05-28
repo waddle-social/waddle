@@ -207,6 +207,8 @@ pub struct WaddleArchivedMessage {
     pub shared_files: Vec<WaddleSharedFile>,
     pub extension_envelope: Option<WaddleExtensionEnvelope>,
     pub extension_body_fallback: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_event: Option<WaddleCallEvent>,
 }
 
 #[derive(Debug, Serialize)]
@@ -250,6 +252,8 @@ pub struct WaddleLiveKitJoin {
 #[derive(Debug, Serialize)]
 pub struct WaddleCallEvent {
     pub from: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
     pub sid: String,
     pub kind: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -278,9 +282,9 @@ pub struct WaddlePresence {
     pub vcard_avatar: Option<String>,
     /// XEP-0272 Muji `<muji xmlns='urn:xmpp:jingle:muji:0'/>`
     /// extension on a MUC occupant's presence, surfaced as
-    /// `{ preparing, active }` for the chat-side participant-tracking
-    /// store. `None` per XEP-0272 §Leaving means the occupant has
-    /// left the call.
+    /// `{ preparing, active, audio, video }` for the chat-side
+    /// participant-tracking store. `None` per XEP-0272 §Leaving
+    /// means the occupant has left the call.
     pub muji: Option<WaddleMujiPresence>,
 }
 
@@ -288,6 +292,8 @@ pub struct WaddlePresence {
 pub struct WaddleMujiPresence {
     pub preparing: bool,
     pub active: bool,
+    pub audio: bool,
+    pub video: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -686,6 +692,7 @@ pub struct WaddleMamPageParam {
     pub kind: String,
     pub before: Option<String>,
     pub after: Option<String>,
+    pub start: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

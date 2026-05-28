@@ -150,6 +150,8 @@ mod tests {
             api_key: ApiKey::new("k"),
             api_secret: ApiSecret::from_text("api-secret-meets-min-length-32!!")
                 .expect("test secret meets min length"),
+            webhook_secret: ApiSecret::from_text("api-secret-meets-min-length-32!!")
+                .expect("test secret meets min length"),
             ws_url: WebsocketUrl::new("wss://h/".parse().unwrap()).unwrap(),
             turn_host: TurnHost::new("turn.waddle.social"),
             turn_tls_port: 443,
@@ -158,7 +160,7 @@ mod tests {
             token_ttl: Duration::seconds(60),
             turn_ttl: Duration::seconds(60),
         };
-        let sfu = LiveKitSfu::new(cfg);
+        let sfu = LiveKitSfu::new(cfg).expect("LiveKitSfu init in test");
         let jid: jid::FullJid = "alice@waddle.social/desktop".parse().unwrap();
         let identity = waddle_sfu::Identity::from_jid(jid);
         sfu.issue_turn_credentials(&identity).unwrap()

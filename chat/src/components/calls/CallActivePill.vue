@@ -1,13 +1,7 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
-import { useStore } from "@nanostores/vue";
-import { Phone } from "lucide-vue-next";
-import { $callState } from "@/lib/calls/call-store";
-import {
-  $mucCallParticipants,
-  normalizeMucCallRoomJid,
-} from "@/lib/calls/muc-call-presence";
-import { useActiveMucCall } from "@/lib/calls/use-active-muc-call";
+import { computed } from "vue";
+import { Phone, Video } from "lucide-vue-next";
+import { useRoomHasActiveCall } from "@/lib/calls/use-active-muc-call";
 
 /**
  * Live-call indicator shown in the channel header when the room owns
@@ -15,9 +9,9 @@ import { useActiveMucCall } from "@/lib/calls/use-active-muc-call";
  *
  * Replaces the previous in-button chip inside `MucCallButton` so the
  * "join" affordance now reads as a single statement: "a call is
- * happening, click to join". The pulsing dot + running duration give
- * the chip enough motion to grab the eye without owning a full row
- * of the header.
+ * happening, click to join". Muji presence proves that a call is live
+ * in the room, but it does not carry a protocol-backed start time, so
+ * this pill intentionally avoids rendering elapsed duration.
  *
  * Hides itself once the local user joins (the split-view surface
  * communicates the state from then on) and when the call ends.
@@ -34,83 +28,35 @@ const props = defineProps<{
   disabled?: boolean;
 }>();
 
-const state = useStore($callState);
-const participants = useStore($mucCallParticipants);
-const { selfInCall, activeRoomJid } = useActiveMucCall();
-
-const normalizedRoomJid = computed(() => normalizeMucCallRoomJid(props.roomJid));
-
-const callInThisRoom = computed(() => {
-  return (
-    activeRoomJid.value !== null &&
-    activeRoomJid.value === normalizedRoomJid.value
-  );
-});
+const {
+  hasActiveCall,
+  selfInCall,
+  localResourceInCall,
+  participantCount,
+  media,
+} = useRoomHasActiveCall(
+  () => props.roomJid,
+);
 
 /**
  * The pill is visible only when:
- *   - There is an active MUC call in THIS room.
- *   - The local user is not currently joined to it (otherwise the
- *     split surface is already painting the state for them).
+ *   - There is an active MUC call in THIS room per Muji presence.
+ *   - This browser resource is not currently joined to it (otherwise
+ *     the split surface is already painting the state for them).
  */
-const isVisible = computed(() => callInThisRoom.value && !selfInCall.value);
-
-const participantCount = computed<number>(() => {
-  if (!callInThisRoom.value) return 0;
-  return (participants.value[normalizedRoomJid.value] ?? []).length;
-});
-
-/**
- * Running call duration. Pegged to a single shared 1Hz tick so we
- * don't spawn a setInterval per pill on chat shells with many
- * channels open at once. `startedAt` does not exist on the call
- * state today — derive a stable t0 from the moment the call first
- * appeared as active in THIS room, and keep ticking from there.
- */
-const callStartTimestamp = ref<number | null>(null);
-const now = ref(Date.now());
-let tick: ReturnType<typeof setInterval> | null = null;
-
-function ensureStart(): void {
-  if (!callInThisRoom.value) {
-    callStartTimestamp.value = null;
-    return;
-  }
-  if (callStartTimestamp.value === null) {
-    callStartTimestamp.value = Date.now();
-  }
-}
-
-onMounted(() => {
-  ensureStart();
-  tick = setInterval(() => {
-    now.value = Date.now();
-    ensureStart();
-  }, 1000);
-});
-
-onBeforeUnmount(() => {
-  if (tick) {
-    clearInterval(tick);
-    tick = null;
-  }
-});
-
-const durationLabel = computed<string>(() => {
-  if (!callStartTimestamp.value) return "00:00";
-  const seconds = Math.max(0, Math.floor((now.value - callStartTimestamp.value) / 1000));
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  const s = seconds % 60;
-  const mm = m.toString().padStart(2, "0");
-  const ss = s.toString().padStart(2, "0");
-  return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
-});
+const isVisible = computed(() => hasActiveCall.value && !localResourceInCall.value);
 
 const ariaLabel = computed(() => {
   const count = participantCount.value;
   const noun = count === 1 ? "person" : "people";
-  return `Live call in this channel, ${count} ${noun}, ${durationLabel.value} elapsed. Click to join.`;
+  const mediaLabel = media.value.video ? "video call" : "call";
+  const device = selfInCall.value
+    ? " This account is connected on another device."
+    : "";
+  if (props.disabled) {
+    return `Live ${mediaLabel} in this channel, ${count} ${noun}.${device} Join unavailable from this device.`;
+  }
+  return `Live ${mediaLabel} in this channel, ${count} ${noun}.${device} Click to join from this device.`;
 });
 
 function onClick(): void {
@@ -128,15 +74,14 @@ function onClick(): void {
     :disabled="disabled"
     :aria-label="ariaLabel"
     :title="ariaLabel"
-    role="status"
-    aria-live="polite"
     @click="onClick"
   >
     <span class="call-active-pill__dot" aria-hidden="true" />
-    <Phone class="call-active-pill__icon" aria-hidden="true" />
+    <Video v-if="media.video" class="call-active-pill__icon" aria-hidden="true" />
+    <Phone v-else class="call-active-pill__icon" aria-hidden="true" />
     <span class="call-active-pill__count">{{ participantCount }}</span>
     <span class="call-active-pill__separator" aria-hidden="true">·</span>
-    <span class="call-active-pill__duration tabular-nums">{{ durationLabel }}</span>
+    <span class="call-active-pill__state">Live</span>
   </button>
 </template>
 
@@ -211,7 +156,7 @@ function onClick(): void {
 }
 
 .call-active-pill__count,
-.call-active-pill__duration {
+.call-active-pill__state {
   font-variant-numeric: tabular-nums;
 }
 </style>

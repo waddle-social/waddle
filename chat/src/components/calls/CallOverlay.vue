@@ -11,8 +11,8 @@ import { useCallEngine } from "@/lib/calls/use-call-engine";
 import { connectionStore } from "@/lib/connection-store";
 import {
   $callConnecting,
+  installCallPagehideSuspension,
   resetCallControls,
-  teardownForPageHide,
 } from "@/lib/calls/call-controls";
 import { $callUiMode } from "@/lib/calls/ui-mode";
 
@@ -34,6 +34,7 @@ import { $callUiMode } from "@/lib/calls/ui-mode";
  */
 const state = useStore($callState);
 const { engine } = useCallEngine();
+let disconnectPagehideSuspension: (() => void) | null = null;
 
 function getSender(): CallWireSender | null {
   const client = connectionStore.client as unknown as { xmpp?: unknown } | null;
@@ -83,31 +84,19 @@ watch(
   { immediate: true },
 );
 
-/**
- * Best-effort teardown for the tab-close path. `pagehide` fires
- * earlier in the unload sequence than `onBeforeUnmount` and is the
- * modern documented hook for unload-side networking. The authoritative
- * path is server-side: `cleanup_muc_presence` broadcasts unavailable
- * presence regardless of whether this client managed to send anything.
- */
-function handlePageHide(): void {
-  teardownForPageHide();
-}
-
 onMounted(() => {
   if (typeof window !== "undefined") {
-    window.addEventListener("pagehide", handlePageHide);
+    disconnectPagehideSuspension = installCallPagehideSuspension(window);
   }
 });
 
 onBeforeUnmount(() => {
-  // In-app overlay unmounts (route change, etc.) get the same
-  // best-effort cleanup as a tab close.
-  void tearDownActiveCall(getSender(), "gone");
+  // Component lifecycle is not a call lifecycle. Route changes and
+  // browser refreshes must not emit XMPP call-ending stanzas; explicit
+  // hangup/logout own that path.
   void engine.disconnect();
-  if (typeof window !== "undefined") {
-    window.removeEventListener("pagehide", handlePageHide);
-  }
+  disconnectPagehideSuspension?.();
+  disconnectPagehideSuspension = null;
 });
 </script>
 

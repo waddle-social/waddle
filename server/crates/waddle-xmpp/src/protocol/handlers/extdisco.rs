@@ -179,6 +179,8 @@ mod tests {
             api_key: ApiKey::new("APIxxxxxxxx"),
             api_secret: ApiSecret::from_text("api-secret-meets-min-length-32!!")
                 .expect("test secret meets min length"),
+            webhook_secret: ApiSecret::from_text("api-secret-meets-min-length-32!!")
+                .expect("test secret meets min length"),
             ws_url: WebsocketUrl::new("wss://livekit.test/".parse().unwrap()).unwrap(),
             turn_host: TurnHost::new("turn.test"),
             turn_tls_port: 443,
@@ -187,7 +189,7 @@ mod tests {
             token_ttl: Duration::seconds(3600),
             turn_ttl: Duration::seconds(3600),
         };
-        Arc::new(LiveKitSfu::new(cfg))
+        Arc::new(LiveKitSfu::new(cfg).expect("LiveKitSfu init in test"))
     }
 
     fn test_jid() -> FullJid {

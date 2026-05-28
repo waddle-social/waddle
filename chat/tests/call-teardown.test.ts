@@ -1,18 +1,28 @@
-import { afterEach, describe, expect, mock, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, mock, test } from "bun:test";
 import {
   $callState,
   $lastCallError,
   beginOutgoingCall,
   clearCallState,
+  type RawIqSender,
   scheduleOutgoingTimeout,
   setSessionAcceptTimeoutMsForTests,
   tearDownActiveCall,
 } from "../src/lib/calls/call-store";
 import {
+  $mucCallParticipantOwners,
   $mucCallParticipants,
+  applyMucCallPresence,
   clearMucCallParticipants,
 } from "../src/lib/calls/muc-call-presence";
-import { startMucCallAction } from "../src/lib/calls/muc-call-actions";
+import { leaveRetainedMucCallAction, startMucCallAction } from "../src/lib/calls/muc-call-actions";
+import {
+  $mucCallTerminatePendingSessions,
+  clearAllMucCallSessionCacheForTests,
+  markMucCallSessionTerminatePending,
+  readMucCallSession,
+  rememberMucCallSession,
+} from "../src/lib/calls/muc-call-session-cache";
 import type { CallWireSender } from "../src/lib/calls/outbound";
 import type { CallEvent, CallMedia, LiveKitJoin } from "../src/lib/calls/types";
 import { BrowserXmppClient } from "../src/lib/xmpp-client";
@@ -32,6 +42,7 @@ function wireClientEvents(sender: Partial<CallWireSender> = {}) {
   let onPresence: ((presence: {
     from?: string;
     presence_type?: string;
+    muc_jid?: string | null;
     muji?: { preparing: boolean; active: boolean };
   }) => void) | null = null;
   let onCall: ((event: CallEvent) => void) | null = null;
@@ -105,6 +116,7 @@ function wireEmitterPresenceEvents() {
  */
 function mockUpdateMujiPresenceWithEcho(
   emitPresence: ReturnType<typeof wireClientEvents>["emitPresence"],
+  mucJid?: string | null,
 ) {
   return mock(
     async (
@@ -118,6 +130,7 @@ function mockUpdateMujiPresenceWithEcho(
         emitPresence({
           from: `${roomJid}/${nick}`,
           presence_type: "available",
+          muc_jid: mucJid,
           muji: { preparing: true, active: false },
         });
       }
@@ -125,6 +138,7 @@ function mockUpdateMujiPresenceWithEcho(
         emitPresence({
           from: `${roomJid}/${nick}`,
           presence_type: "available",
+          muc_jid: mucJid,
           muji: { preparing: false, active: true },
         });
       }
@@ -183,6 +197,33 @@ function mockSender(): CallWireSender {
   };
 }
 
+const WINDOW_SENTINEL = Symbol("call-teardown-window");
+type ShimmedGlobal = typeof globalThis & {
+  window?: { localStorage: Storage } & { [WINDOW_SENTINEL]?: true };
+};
+
+beforeAll(() => {
+  const g = globalThis as ShimmedGlobal;
+  if (typeof g.window !== "undefined") return;
+  const store = new Map<string, string>();
+  const storage: Storage = {
+    get length() { return store.size; },
+    clear: () => store.clear(),
+    getItem: (key) => store.get(key) ?? null,
+    key: (index) => Array.from(store.keys())[index] ?? null,
+    removeItem: (key) => { store.delete(key); },
+    setItem: (key, value) => { store.set(key, String(value)); },
+  };
+  g.window = Object.assign({ localStorage: storage }, { [WINDOW_SENTINEL]: true as const });
+});
+
+afterAll(() => {
+  const g = globalThis as ShimmedGlobal;
+  if (g.window?.[WINDOW_SENTINEL]) {
+    delete (g as { window?: unknown }).window;
+  }
+});
+
 afterEach(() => {
   clearCallState();
   $lastCallError.set(null);
@@ -191,6 +232,7 @@ afterEach(() => {
   // keeps that state from leaking into other test files (e.g.
   // `muc-call-presence.test.ts`) that expect an empty store.
   clearMucCallParticipants();
+  clearAllMucCallSessionCacheForTests();
 });
 
 describe("tearDownActiveCall", () => {
@@ -330,7 +372,314 @@ describe("tearDownActiveCall", () => {
   });
 });
 
+describe("leaveRetainedMucCallAction", () => {
+  test("clears this refreshed browser resource's Muji presence without dropping same-nick siblings", async () => {
+    applyMucCallPresence({
+      from: "chan@muc.test/alice",
+      muc_jid: "alice@waddle.test/web",
+      muji: { preparing: false, active: true },
+    });
+    applyMucCallPresence({
+      from: "chan@muc.test/alice",
+      muc_jid: "alice@waddle.test/phone",
+      muji: { preparing: false, active: true },
+    });
+    const sender: RawIqSender = {
+      update_muji_presence: mock(async () => undefined),
+    };
+
+    await leaveRetainedMucCallAction({
+      roomJid: "chan@muc.test",
+      getSender: () => sender,
+      getSelfNick: () => "alice",
+      getSelfFullJid: () => "alice@waddle.test/web",
+    });
+
+    expect(sender.update_muji_presence).toHaveBeenCalledWith(
+      "chan@muc.test",
+      "alice",
+      false,
+      false,
+      false,
+    );
+    expect($mucCallParticipants.get()).toEqual({
+      "chan@muc.test": ["alice"],
+    });
+    expect($mucCallParticipantOwners.get()).toEqual({
+      "chan@muc.test": [{ nick: "alice", realJid: "alice@waddle.test/phone" }],
+    });
+  });
+
+  test("clears ownerless retained Muji presence after hard reload", async () => {
+    applyMucCallPresence({
+      from: "chan@muc.test/alice",
+      muji: { preparing: false, active: true },
+    });
+    const sender: RawIqSender = {
+      update_muji_presence: mock(async () => undefined),
+    };
+
+    await leaveRetainedMucCallAction({
+      roomJid: "chan@muc.test",
+      getSender: () => sender,
+      getSelfNick: () => "alice",
+      getSelfFullJid: () => "alice@waddle.test/web",
+    });
+
+    expect(sender.update_muji_presence).toHaveBeenCalledWith(
+      "chan@muc.test",
+      "alice",
+      false,
+      false,
+      false,
+    );
+    expect($mucCallParticipants.get()).toEqual({});
+    expect($mucCallParticipantOwners.get()).toEqual({});
+  });
+
+  test("terminates the cached Muji Jingle session after clearing retained presence", async () => {
+    const now = new Date();
+    const sent: unknown[][] = [];
+    applyMucCallPresence({
+      from: "chan@muc.test/alice",
+      muc_jid: "alice@waddle.test/web",
+      muji: { preparing: false, active: true },
+    });
+    rememberMucCallSession({
+      roomJid: "chan@muc.test",
+      sid: "muc-recovered-live",
+      selfFullJid: "alice@waddle.test/web",
+      now,
+    });
+    const sender: RawIqSender = {
+      update_muji_presence: mock(async (...args) => {
+        sent.push(["presence", ...args]);
+      }),
+      send_muji_session_terminate: mock(async (...args) => {
+        sent.push(["terminate", ...args]);
+      }),
+    };
+
+    await expect(leaveRetainedMucCallAction({
+      roomJid: "chan@muc.test",
+      getSender: () => sender,
+      getSelfNick: () => "alice",
+      getSelfFullJid: () => "alice@waddle.test/web",
+    })).resolves.toBe(true);
+
+    expect(sent).toEqual([
+      ["presence", "chan@muc.test", "alice", false, false, false],
+      ["terminate", "chan@muc.test", "muc-recovered-live"],
+    ]);
+    expect($mucCallParticipants.get()).toEqual({});
+    expect(readMucCallSession({
+      roomJid: "chan@muc.test",
+      selfFullJid: "alice@waddle.test/web",
+      now,
+    })).toBeNull();
+  });
+
+  test("reports cached Muji terminate failure after retained presence is cleared", async () => {
+    const now = new Date();
+    applyMucCallPresence({
+      from: "chan@muc.test/alice",
+      muc_jid: "alice@waddle.test/web",
+      muji: { preparing: false, active: true },
+    });
+    rememberMucCallSession({
+      roomJid: "chan@muc.test",
+      sid: "muc-retry-live",
+      selfFullJid: "alice@waddle.test/web",
+      media: { audio: true, video: true },
+      now,
+    });
+    const sender: RawIqSender = {
+      update_muji_presence: mock(async () => undefined),
+      send_muji_session_terminate: mock(async () => {
+        throw new Error("simulated Muji terminate failure");
+      }),
+    };
+
+    const result = await leaveRetainedMucCallAction({
+      roomJid: "chan@muc.test",
+      getSender: () => sender,
+      getSelfNick: () => "alice",
+      getSelfFullJid: () => "alice@waddle.test/web",
+    });
+
+    expect(result).toBe(false);
+    expect(sender.update_muji_presence).toHaveBeenCalledWith(
+      "chan@muc.test",
+      "alice",
+      false,
+      false,
+      false,
+    );
+    expect(sender.send_muji_session_terminate).toHaveBeenCalledWith(
+      "chan@muc.test",
+      "muc-retry-live",
+    );
+    expect($mucCallParticipants.get()).toEqual({});
+    expect(readMucCallSession({
+      roomJid: "chan@muc.test",
+      selfFullJid: "alice@waddle.test/web",
+      now,
+    })).toMatchObject({ sid: "muc-retry-live" });
+    expect($mucCallTerminatePendingSessions.get()).toEqual({
+      "chan@muc.test\u0000muc-retry-live\u0000alice@waddle.test/web": {
+        roomJid: "chan@muc.test",
+        sid: "muc-retry-live",
+        selfFullJid: "alice@waddle.test/web",
+        media: { audio: true, video: true },
+        updatedAt: expect.any(String),
+        terminatePending: true,
+      },
+    });
+    expect($lastCallError.get()).toContain("simulated Muji terminate failure");
+  });
+
+  test("keeps retained Muji state visible when the leave marker fails to send", async () => {
+    applyMucCallPresence({
+      from: "chan@muc.test/alice",
+      muc_jid: "alice@waddle.test/web",
+      muji: { preparing: false, active: true },
+    });
+    const sender: RawIqSender = {
+      update_muji_presence: mock(async () => {
+        throw new Error("simulated Muji leave failure");
+      }),
+    };
+
+    const result = await leaveRetainedMucCallAction({
+      roomJid: "chan@muc.test",
+      getSender: () => sender,
+      getSelfNick: () => "alice",
+      getSelfFullJid: () => "alice@waddle.test/web",
+    });
+
+    expect(result).toBe(false);
+    expect(sender.update_muji_presence).toHaveBeenCalledWith(
+      "chan@muc.test",
+      "alice",
+      false,
+      false,
+      false,
+    );
+    expect($mucCallParticipants.get()).toEqual({
+      "chan@muc.test": ["alice"],
+    });
+    expect($mucCallParticipantOwners.get()).toEqual({
+      "chan@muc.test": [{ nick: "alice", realJid: "alice@waddle.test/web" }],
+    });
+    expect($lastCallError.get()).toContain("simulated Muji leave failure");
+  });
+
+  test("remembering a fresh Muji session clears stale pending cleanup for the same room", () => {
+    markMucCallSessionTerminatePending({
+      roomJid: "chan@muc.test",
+      sid: "muc-stale-video",
+      selfFullJid: "alice@waddle.test/web",
+      media: { audio: true, video: true },
+      now: new Date("2026-05-26T12:00:00.000Z"),
+    });
+
+    rememberMucCallSession({
+      roomJid: "chan@muc.test",
+      sid: "muc-fresh-voice",
+      selfFullJid: "alice@waddle.test/web",
+      media: { audio: true, video: false },
+      now: new Date("2026-05-26T12:01:00.000Z"),
+    });
+
+    expect($mucCallTerminatePendingSessions.get()).toEqual({});
+    expect(readMucCallSession({
+      roomJid: "chan@muc.test",
+      selfFullJid: "alice@waddle.test/web",
+      now: new Date("2026-05-26T12:01:00.000Z"),
+    })).toMatchObject({
+      sid: "muc-fresh-voice",
+      media: { audio: true, video: false },
+    });
+  });
+});
+
 describe("1:1 call event wiring", () => {
+  test("self-originated sibling propose does not surface as an incoming call", async () => {
+    const sender = mockSender();
+    const events = wireClientEvents(sender);
+
+    events.emitCall({
+      kind: "propose",
+      from: "alice@waddle.test/phone",
+      to: "bob@waddle.test/desktop",
+      sid: "sibling-started",
+      media: audioVideo,
+    });
+    await flushCallSideEffects();
+
+    expect($callState.get()).toEqual({ phase: "idle" });
+    expect(sender.send_call_reject).not.toHaveBeenCalled();
+  });
+
+  test("self-originated sibling reject does not end this resource's active DM call", async () => {
+    const events = wireClientEvents();
+    $callState.set({
+      phase: "active",
+      peer: "bob@waddle.test/desktop",
+      sid: "shared-call",
+      media: audioVideo,
+      join,
+      kind: "dm",
+      initiator: "alice@waddle.test/web",
+    });
+
+    events.emitCall({
+      kind: "reject",
+      from: "alice@waddle.test/phone",
+      to: "bob@waddle.test/desktop",
+      sid: "shared-call",
+      reason: "decline",
+    });
+    await flushCallSideEffects();
+
+    expect($callState.get()).toEqual({
+      phase: "active",
+      peer: "bob@waddle.test/desktop",
+      sid: "shared-call",
+      media: audioVideo,
+      join,
+      kind: "dm",
+      initiator: "alice@waddle.test/web",
+    });
+  });
+
+  test("self-originated sibling reject clears this resource's incoming DM ring", async () => {
+    const sender = mockSender();
+    const events = wireClientEvents(sender);
+    $callState.set({
+      phase: "incoming",
+      from: "bob@waddle.test/desktop",
+      sid: "shared-call",
+      media: audioVideo,
+    });
+
+    events.emitCall({
+      kind: "reject",
+      from: "alice@waddle.test/phone",
+      to: "bob@waddle.test/desktop",
+      sid: "shared-call",
+      reason: "decline",
+    });
+    await flushCallSideEffects();
+
+    expect($callState.get()).toEqual({
+      phase: "ended",
+      sid: "shared-call",
+      reason: "reject",
+    });
+    expect(sender.send_call_reject).not.toHaveBeenCalled();
+  });
+
   test("real on_call propose event applies lower-sid tie-break and surfaces incoming UI", async () => {
     const send_call_retract_tie_break = mock(async () => undefined);
     const events = wireClientEvents({ send_call_retract_tie_break });
@@ -764,14 +1113,25 @@ describe("MUC group call", () => {
       identity: "alice@waddle.test/web",
       token: "jwt.payload.sig",
     };
-    const update_muji_presence = mockUpdateMujiPresenceWithEcho(events.emitPresence);
+    const selfFullJid = "alice@waddle.test/web";
+    const update_muji_presence = mockUpdateMujiPresenceWithEcho(
+      events.emitPresence,
+      selfFullJid,
+    );
     const sender = {
       send_muji_session_initiate:
         mockSendMujiSessionInitiateWithAccept(expectedJoin, events.emitCall),
       update_muji_presence,
     };
     const { beginMucCall } = await import("../src/lib/calls/call-store");
-    await beginMucCall(sender, "chan@muc.test", audioVideo, "alice");
+    await beginMucCall(
+      sender,
+      "chan@muc.test",
+      audioVideo,
+      "alice",
+      undefined,
+      selfFullJid,
+    );
     const state = $callState.get();
     expect(state).toMatchObject({
       phase: "active",
@@ -780,6 +1140,7 @@ describe("MUC group call", () => {
       join: expectedJoin,
       kind: "muc",
       selfNick: "alice",
+      selfFullJid,
     });
     expect(typeof (state as { sid?: unknown }).sid).toBe("string");
     expect((state as { sid: string }).sid).not.toBe("chan@muc.test");
@@ -1396,6 +1757,45 @@ describe("MUC group call", () => {
     expect($callState.get()).toEqual({ phase: "idle" });
   });
 
+  test("tearDownActiveCall clears only this MUC resource's active owner", async () => {
+    applyMucCallPresence({
+      from: "chan@muc.test/alice",
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/desktop",
+      muji: { preparing: false, active: true },
+    });
+    applyMucCallPresence({
+      from: "chan@muc.test/alice",
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/mobile",
+      muji: { preparing: false, active: true },
+    });
+    $callState.set({
+      phase: "active",
+      peer: "chan@muc.test",
+      sid: "muc-attempt",
+      media: audioVideo,
+      join,
+      kind: "muc",
+      selfNick: "alice",
+      selfFullJid: "alice@waddle.test/desktop",
+    });
+    const update_muji_presence = mock(async () => {});
+    const send_muji_session_terminate = mock(async () => {});
+
+    await tearDownActiveCall(
+      {
+        update_muji_presence,
+        send_muji_session_terminate,
+      } as unknown as Parameters<typeof tearDownActiveCall>[0],
+      "success",
+    );
+
+    expect(update_muji_presence).toHaveBeenCalledTimes(1);
+    expect(send_muji_session_terminate).toHaveBeenCalledTimes(1);
+    expect($mucCallParticipants.get()["chan@muc.test"]).toEqual(["alice"]);
+  });
+
   test("beginMucCall treats active Muji presence failure as fatal and rolls back SFU/session work", async () => {
     const events = wireClientEvents();
     const send_muji_session_terminate = mock(async () => undefined);
@@ -1445,7 +1845,7 @@ describe("MUC group call", () => {
     expect($mucCallParticipants.get()["chan@muc.test"]).toBeUndefined();
   });
 
-  test("room switch tears down the old room's active MUC call before leaving", async () => {
+  test("room switch preserves the old room's active MUC call and keeps MUC membership", async () => {
     const events = wireClientEvents();
     const send_muji_session_terminate = mock(async () => undefined);
     const update_muji_presence = mockUpdateMujiPresenceWithEcho(events.emitPresence);
@@ -1466,6 +1866,7 @@ describe("MUC group call", () => {
         operationOrder.push(`presence:${active}:${preparing}`);
         await update_muji_presence(roomJid, nick, active, preparing, video);
       }),
+      join_room: mock(async () => undefined),
       leave_room: mock(async (roomJid: string, nick: string) => {
         operationOrder.push(`leave:${roomJid}/${nick}`);
         await leave_room(roomJid, nick);
@@ -1474,14 +1875,12 @@ describe("MUC group call", () => {
     const client = events.client as unknown as {
       xmpp: typeof xmpp;
       currentRoom: string | null;
-      roomHats: Record<string, unknown>;
-      roomAuthority: Record<string, unknown>;
-      roomPresence: Record<string, unknown>;
-      roomMemberJids: Record<string, string>;
+      joinedMucs: Map<string, Promise<void>>;
       performRoomSwitch: (roomJid: string) => Promise<void>;
     };
     Object.assign(client.xmpp, xmpp);
     client.currentRoom = "old@muc.test";
+    client.joinedMucs.set("new@muc.test", Promise.resolve());
     $callState.set({
       phase: "active",
       peer: "old@muc.test",
@@ -1494,33 +1893,35 @@ describe("MUC group call", () => {
 
     await client.performRoomSwitch("new@muc.test");
 
-    expect(operationOrder).toEqual([
-      "presence:false:false",
-      "terminate:old@muc.test:old-muc-attempt",
-      "leave:old@muc.test/alice",
-    ]);
-    expect($callState.get()).toEqual({ phase: "idle" });
+    expect(operationOrder).toEqual([]);
+    expect(xmpp.leave_room).not.toHaveBeenCalled();
+    expect($callState.get()).toMatchObject({
+      phase: "active",
+      peer: "old@muc.test",
+      sid: "old-muc-attempt",
+      kind: "muc",
+    });
   });
 
-  test("room switch does not join the new room after a concurrent disconnect", async () => {
+  test("room switch bails out cleanly when a concurrent disconnect races the join", async () => {
     const events = wireClientEvents();
-    let releaseLeave: (() => void) | null = null;
-    let leaveStarted: (() => void) | null = null;
-    const leaveGate = new Promise<void>((resolve) => {
-      releaseLeave = resolve;
+    let releaseJoin: (() => void) | null = null;
+    let joinStarted: (() => void) | null = null;
+    const joinGate = new Promise<void>((resolve) => {
+      releaseJoin = resolve;
     });
-    const leaveStartedWait = new Promise<void>((resolve) => {
-      leaveStarted = resolve;
+    const joinStartedWait = new Promise<void>((resolve) => {
+      joinStarted = resolve;
     });
-    let leaveCalls = 0;
-    const leave_room = mock(async () => {
-      leaveCalls += 1;
-      if (leaveCalls === 1) {
-        leaveStarted?.();
-        await leaveGate;
+    let joinCalls = 0;
+    const join_room = mock(async () => {
+      joinCalls += 1;
+      if (joinCalls === 1) {
+        joinStarted?.();
+        await joinGate;
       }
     });
-    const join_room = mock(async () => undefined);
+    const leave_room = mock(async () => undefined);
     const disconnect = mock(async () => undefined);
     const xmpp = { leave_room, join_room, disconnect };
     const client = events.client as unknown as {
@@ -1533,17 +1934,18 @@ describe("MUC group call", () => {
     client.currentRoom = "old@muc.test";
 
     const switched = client.performRoomSwitch("new@muc.test");
-    await leaveStartedWait;
+    await joinStartedWait;
     const disconnected = client.disconnect();
-    releaseLeave?.();
+    releaseJoin?.();
     await switched;
     await disconnected;
 
-    expect(join_room).not.toHaveBeenCalled();
+    expect(join_room).toHaveBeenCalledTimes(1);
+    expect(leave_room.mock.calls.map((call) => call[0] as string)).not.toContain("old@muc.test");
     expect(client.currentRoom).toBe(null);
   });
 
-  test("room switch cancels the old room's pending MUC call before leaving", async () => {
+  test("room switch preserves the old room's pending MUC call without leaving the MUC", async () => {
     const events = wireClientEvents();
     const send_muji_session_initiate = mock(async () => undefined);
     const send_muji_session_terminate = mock(async () => undefined);
@@ -1569,6 +1971,7 @@ describe("MUC group call", () => {
         operationOrder.push(`presence:${active}:${preparing}:${video}`);
         await update_muji_presence(roomJid, nick, active, preparing, video);
       }),
+      join_room: mock(async () => undefined),
       leave_room: mock(async (roomJid: string, nick: string) => {
         operationOrder.push(`leave:${roomJid}/${nick}`);
         await leave_room(roomJid, nick);
@@ -1577,10 +1980,7 @@ describe("MUC group call", () => {
     const client = events.client as unknown as {
       xmpp: typeof xmpp;
       currentRoom: string | null;
-      roomHats: Record<string, unknown>;
-      roomAuthority: Record<string, unknown>;
-      roomPresence: Record<string, unknown>;
-      roomMemberJids: Record<string, string>;
+      joinedMucs: Map<string, Promise<void>>;
       performRoomSwitch: (roomJid: string) => Promise<void>;
     };
     Object.assign(client.xmpp, xmpp);
@@ -1594,22 +1994,33 @@ describe("MUC group call", () => {
     expect(send_muji_session_initiate).toHaveBeenCalledTimes(1);
     const attemptSid = firstMockCallArg(send_muji_session_initiate, 1);
     expect(attemptSid).not.toBe("old@muc.test");
+    client.joinedMucs.set("new@muc.test", Promise.resolve());
 
     await client.performRoomSwitch("new@muc.test");
 
-    await expect(pending).rejects.toThrow("cancelled");
+    events.emitCall({
+      kind: "session-accept",
+      from: "calls.waddle.test",
+      sid: attemptSid,
+      media: audioVideo,
+      join: { ...join, room: "old@muc.test" },
+    });
+    await expect(pending).resolves.toBeUndefined();
     expect(operationOrder).toEqual([
       "presence:false:true:false",
       "presence:true:false:true",
       "initiate:old@muc.test:true",
-      "presence:false:false:false",
-      `terminate:old@muc.test:${attemptSid}`,
-      "leave:old@muc.test/alice",
     ]);
-    expect($callState.get()).toEqual({ phase: "idle" });
+    expect(xmpp.leave_room).not.toHaveBeenCalled();
+    expect($callState.get()).toMatchObject({
+      phase: "active",
+      peer: "old@muc.test",
+      sid: attemptSid,
+      kind: "muc",
+    });
   });
 
-  test("room switch cancels a MUC start waiting for the old room's preparing echo", async () => {
+  test("room switch preserves a MUC start waiting for the old room's preparing echo", async () => {
     const events = wireClientEvents();
     const send_muji_session_initiate = mock(async () => undefined);
     const update_muji_presence = mock(async () => undefined);
@@ -1630,6 +2041,7 @@ describe("MUC group call", () => {
         operationOrder.push(`presence:${roomJid}/${nick}:${active}:${preparing}:${video}`);
         await update_muji_presence(roomJid, nick, active, preparing, video);
       }),
+      join_room: mock(async () => undefined),
       leave_room: mock(async (roomJid: string, nick: string) => {
         operationOrder.push(`leave:${roomJid}/${nick}`);
         await leave_room(roomJid, nick);
@@ -1638,10 +2050,7 @@ describe("MUC group call", () => {
     const client = events.client as unknown as {
       xmpp: typeof xmpp;
       currentRoom: string | null;
-      roomHats: Record<string, unknown>;
-      roomAuthority: Record<string, unknown>;
-      roomPresence: Record<string, unknown>;
-      roomMemberJids: Record<string, string>;
+      joinedMucs: Map<string, Promise<void>>;
       performRoomSwitch: (roomJid: string) => Promise<void>;
     };
     Object.assign(client.xmpp, xmpp);
@@ -1653,9 +2062,9 @@ describe("MUC group call", () => {
     await flushCallSideEffects();
     expect($callState.get().phase).toBe("muc-pending");
     expect(send_muji_session_initiate).toHaveBeenCalledTimes(0);
+    client.joinedMucs.set("new@muc.test", Promise.resolve());
 
     await client.performRoomSwitch("new@muc.test");
-    await expect(pending).rejects.toThrow("cancelled");
 
     events.emitPresence({
       from: "old@muc.test/alice",
@@ -1664,13 +2073,28 @@ describe("MUC group call", () => {
     });
     await flushCallSideEffects();
 
-    expect(send_muji_session_initiate).toHaveBeenCalledTimes(0);
+    expect(send_muji_session_initiate).toHaveBeenCalledTimes(1);
+    const attemptSid = firstMockCallArg(send_muji_session_initiate, 1);
+    events.emitCall({
+      kind: "session-accept",
+      from: "calls.waddle.test",
+      sid: attemptSid,
+      media: audioVideo,
+      join: { ...join, room: "old@muc.test" },
+    });
+    await expect(pending).resolves.toBeUndefined();
     expect(operationOrder).toEqual([
       "presence:old@muc.test/alice:false:true:false",
-      "presence:old@muc.test/alice:false:false:false",
-      "leave:old@muc.test/alice",
+      "presence:old@muc.test/alice:true:false:true",
+      "initiate:old@muc.test:true",
     ]);
-    expect($callState.get()).toEqual({ phase: "idle" });
+    expect(xmpp.leave_room).not.toHaveBeenCalled();
+    expect($callState.get()).toMatchObject({
+      phase: "active",
+      peer: "old@muc.test",
+      sid: attemptSid,
+      kind: "muc",
+    });
   });
 });
 

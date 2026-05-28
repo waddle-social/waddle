@@ -36,6 +36,7 @@ use jid::{BareJid, FullJid};
 use tracing::{debug, warn};
 use waddle_xmpp::muc::{
     build_occupant_presence_update,
+    presence::NS_MUC,
     room_actor::{ClearMujiPresence, UpsertMujiPresence},
 };
 use waddle_xmpp::xep::xep0272::{find_muji, Muji, NS_MUJI};
@@ -59,6 +60,55 @@ pub(super) fn extract_muji(presence: &Presence) -> Option<Muji> {
         .and_then(|elem| Muji::try_from(elem).ok())
 }
 
+fn is_muc_join_presence(presence: &Presence) -> bool {
+    presence
+        .payloads
+        .iter()
+        .any(|elem| elem.name() == "x" && elem.ns() == NS_MUC)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ReflectedMujiEntry<'a> {
+    owner_jid: &'a FullJid,
+    muji: Option<&'a Muji>,
+}
+
+fn muji_reflection_rank(muji: Option<&Muji>) -> u8 {
+    match muji {
+        None => 0,
+        Some(muji) if muji.is_empty() => 0,
+        Some(muji) if muji.is_active() => 2,
+        Some(_) => 1,
+    }
+}
+
+fn reflected_muji_entries<'a>(
+    sender_jid: &'a FullJid,
+    sender_muji: Option<&'a Muji>,
+    session_mujis: &'a [(FullJid, Muji)],
+) -> Vec<ReflectedMujiEntry<'a>> {
+    let mut entries = vec![ReflectedMujiEntry {
+        owner_jid: sender_jid,
+        muji: sender_muji,
+    }];
+    entries.extend(
+        session_mujis
+            .iter()
+            .filter(|(owner_jid, _)| owner_jid != sender_jid)
+            .map(|(owner_jid, muji)| ReflectedMujiEntry {
+                owner_jid,
+                muji: Some(muji),
+            }),
+    );
+    entries.sort_by_key(|entry| {
+        (
+            muji_reflection_rank(entry.muji),
+            entry.owner_jid.to_string(),
+        )
+    });
+    entries
+}
+
 /// Try to broadcast an in-room presence update for an existing
 /// occupant. Returns `Some(replies)` when the room actor confirmed
 /// the sender is already an occupant — even if there's nothing to
@@ -75,7 +125,17 @@ pub(super) async fn try_handle_muc_presence_update(
 ) -> Option<Vec<String>> {
     let actor = get_room_actor(state, room_jid).await?;
     let muji = extract_muji(incoming);
+    // XEP-0045 join/rejoin presence carries `<x xmlns='.../muc'/>`.
+    // On stream resume the client may replay that autojoin while the
+    // room actor still has the full JID as an occupant. Treating that
+    // as a Muji clear would suppress the join replay that refreshes
+    // active-call state; XEP-0272 leave markers are plain available
+    // presence without this MUC join payload.
+    if muji.is_none() && is_muc_join_presence(incoming) {
+        return None;
+    }
 
+    let clears_muji_presence = muji.as_ref().is_none_or(Muji::is_empty);
     let outcome = match muji {
         Some(muji) => match actor
             .ask(UpsertMujiPresence {
@@ -117,6 +177,16 @@ pub(super) async fn try_handle_muc_presence_update(
             }
         },
     };
+    if clears_muji_presence {
+        // XEP-0272 §Leaving is the absence of `<muji/>` in in-room
+        // presence. Mirror that XMPP-native leave marker to the SFU
+        // registry just like full MUC leave / unclean disconnect do,
+        // otherwise a hard-refreshed tab can clear the room indicator
+        // while its LiveKit participant and issued token JTIs linger.
+        super::super::super::muc_call_sfu::unregister_participant_from_room(
+            state, room_jid, sender_jid,
+        );
+    }
 
     // XEP-0045 §7.7: a user may change their *own* in-room presence
     // only. The resolved nick comes from the room actor's
@@ -139,6 +209,7 @@ pub(super) async fn try_handle_muc_presence_update(
         room = %room_jid,
         nick = %outcome.update.sender_nick,
         active = outcome.active_muji.is_some(),
+        session_mujis = outcome.session_mujis.len(),
         recipients = outcome.update.recipients.len(),
         "Broadcasting MUC Muji presence update"
     );
@@ -147,12 +218,11 @@ pub(super) async fn try_handle_muc_presence_update(
         .clone()
         .with_resource_str(&outcome.update.sender_nick)
         .unwrap_or_else(|_| sender_jid.clone());
-    let real_bare = sender_jid.to_bare();
-    let identity = OccupantIdentity {
-        bare_jid: &real_bare,
-        real_jid: Some(sender_jid),
-        secret: &state.deps.occupant_id_secret,
-    };
+    let reflected_entries = reflected_muji_entries(
+        sender_jid,
+        outcome.sender_muji.as_ref(),
+        &outcome.session_mujis,
+    );
 
     // Author the canonical presence the server will reflect. Built
     // ONCE here, cloned per recipient for the self vs other status
@@ -163,56 +233,50 @@ pub(super) async fn try_handle_muc_presence_update(
     // bogus `<x xmlns='muc#user'>` items.
     let mut responses = Vec::new();
     for recipient in &outcome.update.recipients {
-        // XEP-0045 §7.1: every session sharing the sender's occupant
-        // nick must receive a presence stamped with `<status code='110'/>`,
-        // not just the exact full JID that emitted the stanza. The
-        // occupant_sessions table is keyed by nick and holds every
-        // active full JID under that nick, so a same-bare multi-
-        // session join (Alice on web AND mobile) needs `is_self` for
-        // BOTH recipients when Alice updates her presence from web.
-        let is_self = recipient.to_bare() == sender_jid.to_bare();
-        // `is_self` covers stanza SHAPE (status-110 stamping). The
-        // delivery CHANNEL is a separate question: only the exact
-        // full JID that emitted this presence shares the inbound
-        // WebSocket, so only that recipient can be returned via the
-        // `responses` vec. Every other recipient — including a
-        // sibling resource of the same bare JID, which is on a
-        // different WebSocket — must be dispatched through the
-        // cross-session connection registry, otherwise the sibling
-        // never receives the Muji reflection and its "call ongoing"
-        // indicator never lights up.
-        let is_sender_session = recipient == sender_jid;
-        let mut presence = build_occupant_presence_update(
-            incoming,
-            &from_room_jid,
-            recipient,
-            outcome.update.sender_affiliation,
-            outcome.update.sender_role,
-            is_self,
-            &identity,
-        );
+        for entry in &reflected_entries {
+            // XEP-0045 §7.1: sessions sharing the owner bare JID
+            // receive status-110 for that occupant presence. Muji
+            // preparing state remains resource-owned, so reflections
+            // use the exact session JID that owns each `<muji/>`.
+            let owner_bare = entry.owner_jid.to_bare();
+            let identity = OccupantIdentity {
+                bare_jid: &owner_bare,
+                real_jid: Some(entry.owner_jid),
+                secret: &state.deps.occupant_id_secret,
+            };
+            let is_self = recipient.to_bare() == owner_bare;
+            let mut presence = build_occupant_presence_update(
+                incoming,
+                &from_room_jid,
+                recipient,
+                outcome.update.sender_affiliation,
+                outcome.update.sender_role,
+                is_self,
+                &identity,
+            );
 
-        // If the actor cleared the Muji state (participant left the
-        // call), the client's `<muji/>` element WAS preserved by
-        // `build_occupant_presence_update`'s clone — but the room's
-        // authoritative view says no call is active. Strip the
-        // extension so the wire reflects the persisted state, not
-        // the client's transitional message.
-        if outcome.active_muji.is_none() {
+            // Replace the client-authored `<muji/>` with the room
+            // actor's authoritative per-session state. A `None` entry
+            // is still the sender's exact clear marker; sibling Muji
+            // entries then preserve any remaining preparing/active
+            // state under their real full JID.
             presence
                 .payloads
                 .retain(|payload| !(payload.name() == "muji" && payload.ns() == NS_MUJI));
-        }
+            if let Some(muji) = entry.muji {
+                presence.payloads.push(muji.to_element());
+            }
 
-        if is_sender_session {
-            responses.push(stanza_to_xml(&Stanza::Presence(presence)));
-        } else {
-            let stanza = Stanza::Presence(presence);
-            let _ = state
-                .deps
-                .protocol
-                .connection_registry
-                .try_send_to(recipient, stanza);
+            if recipient == sender_jid {
+                responses.push(stanza_to_xml(&Stanza::Presence(presence)));
+            } else {
+                let stanza = Stanza::Presence(presence);
+                let _ = state
+                    .deps
+                    .protocol
+                    .connection_registry
+                    .try_send_to(recipient, stanza);
+            }
         }
     }
 
@@ -273,12 +337,27 @@ mod tests {
 
     #[test]
     fn extract_muji_returns_none_for_missing_payload() {
-        // A presence with no `<muji/>` extension. The dispatcher uses
-        // this as the signal to fall through to the regular join
-        // path — never to silently treat the presence as a call
-        // advertisement.
+        // A presence with no `<muji/>` extension. The update path may
+        // use this as a clear marker, but never as a call advertisement.
         let presence = ParsedPresence::new(PresenceType::None);
         assert!(extract_muji(&presence).is_none());
+    }
+
+    #[test]
+    fn is_muc_join_presence_detects_xep0045_join_payload() {
+        let mut presence = ParsedPresence::new(PresenceType::None);
+        presence
+            .payloads
+            .push(Element::builder("x", NS_MUC).build());
+
+        assert!(is_muc_join_presence(&presence));
+    }
+
+    #[test]
+    fn is_muc_join_presence_ignores_plain_muji_clear_presence() {
+        let presence = ParsedPresence::new(PresenceType::None);
+
+        assert!(!is_muc_join_presence(&presence));
     }
 
     #[test]
@@ -290,5 +369,56 @@ mod tests {
         presence.payloads.push(muji);
         assert!(extract_muji(&presence).is_none());
         let _ = NS_MUJI; // import sanity
+    }
+
+    #[test]
+    fn reflected_muji_entries_preserve_sibling_preparing_after_sender_clear() {
+        let sender: FullJid = "alice@example.com/mobile".parse().expect("sender");
+        let sibling: FullJid = "alice@example.com/desktop".parse().expect("sibling");
+        let session_mujis = vec![(sibling.clone(), Muji::preparing())];
+        let entries = reflected_muji_entries(&sender, None, &session_mujis);
+
+        assert_eq!(entries.len(), 2);
+        assert!(
+            entries[0].owner_jid == &sender && entries[0].muji.is_none(),
+            "the sender's exact clear is emitted first"
+        );
+        assert!(
+            entries[1].owner_jid == &sibling
+                && entries[1]
+                    .muji
+                    .is_some_and(|muji| muji.preparing && !muji.is_active()),
+            "remaining sibling preparing state is preserved with its exact owner"
+        );
+    }
+
+    #[test]
+    fn reflected_muji_entries_preserve_sender_and_sibling_state() {
+        let sender: FullJid = "alice@example.com/mobile".parse().expect("sender");
+        let sibling: FullJid = "alice@example.com/desktop".parse().expect("sibling");
+        let preparing = Muji::preparing();
+        let active = extract_muji(&presence_with_muji_contents()).expect("active fixture parses");
+        let session_mujis = vec![(sender.clone(), preparing.clone()), (sibling, active)];
+        let entries = reflected_muji_entries(&sender, Some(&preparing), &session_mujis);
+
+        assert_eq!(entries.len(), 2);
+        assert!(entries[0].muji.is_some_and(|muji| muji.preparing));
+        assert!(entries[1].muji.is_some_and(Muji::is_active));
+    }
+
+    #[test]
+    fn reflected_muji_entries_emit_active_state_last_for_legacy_clients() {
+        let sender: FullJid = "alice@example.com/web".parse().expect("sender");
+        let sibling: FullJid = "alice@example.com/zphone".parse().expect("sibling");
+        let active = extract_muji(&presence_with_muji_contents()).expect("active fixture parses");
+        let preparing = Muji::preparing();
+        let session_mujis = vec![(sender.clone(), active.clone()), (sibling, preparing)];
+        let entries = reflected_muji_entries(&sender, Some(&active), &session_mujis);
+
+        assert_eq!(entries.len(), 2);
+        assert!(
+            entries.last().is_some_and(|entry| entry.muji.is_some_and(Muji::is_active)),
+            "the final same-nick stanza must carry active Muji so non-occupant-id clients do not settle on preparing"
+        );
     }
 }

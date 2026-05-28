@@ -1,11 +1,18 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { $callState } from "../src/lib/calls/call-store";
 import {
+  $mucCallParticipantOwners,
   $mucCallParticipants,
+  applyMucCallPresence,
   clearMucCallParticipants,
 } from "../src/lib/calls/muc-call-presence";
 import { connectionStore } from "../src/lib/connection-store";
-import { readActiveMucCall } from "../src/lib/calls/use-active-muc-call";
+import { readActiveMucCall, readRoomHasActiveCall } from "../src/lib/calls/use-active-muc-call";
+import { setLiveCallParticipants, clearAllLiveCallParticipants } from "../src/lib/calls/muc-call-live-participants";
+import {
+  clearAllMucCallSessionCacheForTests,
+  markMucCallSessionTerminatePending,
+} from "../src/lib/calls/muc-call-session-cache";
 import type { CallMedia, LiveKitJoin } from "../src/lib/calls/types";
 import type { WaddleSession } from "../src/lib/server-auth";
 
@@ -28,6 +35,7 @@ const join: LiveKitJoin = {
 function setSession(username: string | null): void {
   if (username === null) {
     connectionStore.session = null;
+    connectionStore.client = null;
     return;
   }
   connectionStore.session = {
@@ -40,12 +48,14 @@ describe("readActiveMucCall selector", () => {
   beforeEach(() => {
     $callState.set({ phase: "idle" });
     clearMucCallParticipants();
+    clearAllMucCallSessionCacheForTests();
     setSession(null);
   });
 
   afterEach(() => {
     $callState.set({ phase: "idle" });
     clearMucCallParticipants();
+    clearAllMucCallSessionCacheForTests();
     setSession(null);
   });
 
@@ -54,6 +64,7 @@ describe("readActiveMucCall selector", () => {
       activeRoomJid: null,
       selfInCall: false,
       participantCount: 0,
+      media: { audio: true, video: false },
     });
   });
 
@@ -72,6 +83,7 @@ describe("readActiveMucCall selector", () => {
       activeRoomJid: null,
       selfInCall: false,
       participantCount: 0,
+      media: { audio: true, video: false },
     });
   });
 
@@ -91,6 +103,7 @@ describe("readActiveMucCall selector", () => {
       activeRoomJid: ROOM,
       selfInCall: true,
       participantCount: 2,
+      media: { audio: true, video: true },
     });
   });
 
@@ -110,6 +123,7 @@ describe("readActiveMucCall selector", () => {
       activeRoomJid: ROOM,
       selfInCall: false,
       participantCount: 2,
+      media: { audio: true, video: true },
     });
   });
 
@@ -141,5 +155,259 @@ describe("readActiveMucCall selector", () => {
     });
     $mucCallParticipants.set({ [ROOM]: ["alice"] });
     expect(readActiveMucCall().selfInCall).toBe(false);
+  });
+});
+
+describe("readRoomHasActiveCall selector", () => {
+  beforeEach(() => {
+    $callState.set({ phase: "idle" });
+    clearMucCallParticipants();
+    clearAllLiveCallParticipants();
+    clearAllMucCallSessionCacheForTests();
+    setSession(null);
+  });
+
+  afterEach(() => {
+    $callState.set({ phase: "idle" });
+    clearMucCallParticipants();
+    clearAllLiveCallParticipants();
+    clearAllMucCallSessionCacheForTests();
+    setSession(null);
+  });
+
+  test("reports a room call from Muji presence even when local call state is idle", () => {
+    setSession("carol");
+    $callState.set({ phase: "idle" });
+    $mucCallParticipants.set({ [ROOM]: ["alice", "bob"] });
+
+    expect(readRoomHasActiveCall(ROOM)).toEqual({
+      hasActiveCall: true,
+      selfInCall: false,
+      localResourceInCall: false,
+      participantCount: 2,
+      media: { audio: true, video: false },
+    });
+  });
+
+  test("distinguishes same-nick presence from this browser resource being in media", () => {
+    setSession("alice");
+    $callState.set({ phase: "idle" });
+    $mucCallParticipants.set({ [ROOM]: ["alice", "bob"] });
+
+    expect(readRoomHasActiveCall(ROOM)).toEqual({
+      hasActiveCall: true,
+      selfInCall: true,
+      localResourceInCall: false,
+      participantCount: 2,
+      media: { audio: true, video: false },
+    });
+  });
+
+  test("reports localResourceInCall when this browser owns the active MUC call", () => {
+    setSession("alice");
+    $callState.set({
+      phase: "active",
+      kind: "muc",
+      peer: ROOM,
+      sid: "c1",
+      media: audioVideo,
+      join,
+      selfNick: "alice",
+    });
+    $mucCallParticipants.set({ [ROOM]: ["alice", "bob"] });
+
+    expect(readRoomHasActiveCall(ROOM)).toEqual({
+      hasActiveCall: true,
+      selfInCall: true,
+      localResourceInCall: true,
+      participantCount: 2,
+      media: { audio: true, video: true },
+    });
+  });
+
+  test("distinguishes same-resource Muji presence after refresh from another resource", () => {
+    setSession("alice");
+    connectionStore.client = { fullJid: "alice@waddle.test/web" } as unknown as typeof connectionStore.client;
+    $callState.set({ phase: "idle" });
+    applyMucCallPresence({
+      from: `${ROOM}/alice`,
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/mobile",
+      muji: { preparing: false, active: true },
+    });
+
+    expect(readRoomHasActiveCall(ROOM)).toEqual({
+      hasActiveCall: true,
+      selfInCall: true,
+      localResourceInCall: false,
+      participantCount: 1,
+      media: { audio: true, video: false },
+    });
+
+    applyMucCallPresence({
+      from: `${ROOM}/alice`,
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/web",
+      muji: { preparing: false, active: true },
+    });
+
+    expect(readRoomHasActiveCall(ROOM)).toEqual({
+      hasActiveCall: true,
+      selfInCall: true,
+      localResourceInCall: true,
+      participantCount: 1,
+      media: { audio: true, video: false },
+    });
+  });
+
+  test("treats ownerless self Muji presence as a retained local resource after refresh", () => {
+    setSession("alice");
+    connectionStore.client = { fullJid: "alice@waddle.test/web" } as unknown as typeof connectionStore.client;
+    $callState.set({ phase: "idle" });
+    applyMucCallPresence({
+      from: `${ROOM}/alice`,
+      presence_type: "available",
+      muji: { preparing: false, active: true },
+    });
+
+    expect(readRoomHasActiveCall(ROOM)).toEqual({
+      hasActiveCall: true,
+      selfInCall: true,
+      localResourceInCall: true,
+      participantCount: 1,
+      media: { audio: true, video: false },
+    });
+  });
+
+  test("preserves resourcepart case when matching Muji ownership to this browser", () => {
+    setSession("alice");
+    connectionStore.client = { fullJid: "alice@waddle.test/Web" } as unknown as typeof connectionStore.client;
+    $callState.set({ phase: "idle" });
+    applyMucCallPresence({
+      from: `${ROOM}/alice`,
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/web",
+      muji: { preparing: false, active: true },
+    });
+
+    expect(readRoomHasActiveCall(ROOM).localResourceInCall).toBe(false);
+
+    applyMucCallPresence({
+      from: `${ROOM}/alice`,
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/Web",
+      muji: { preparing: false, active: true },
+    });
+
+    expect(readRoomHasActiveCall(ROOM).localResourceInCall).toBe(true);
+  });
+
+  test("normalizes resource-suffixed room JIDs", () => {
+    setSession("alice");
+    $mucCallParticipants.set({ [ROOM]: ["bob"] });
+
+    expect(readRoomHasActiveCall(`${ROOM}/alice`)).toEqual({
+      hasActiveCall: true,
+      selfInCall: false,
+      localResourceInCall: false,
+      participantCount: 1,
+      media: { audio: true, video: false },
+    });
+  });
+
+  test("treats missing or empty rooms as no active call", () => {
+    setSession("alice");
+    $mucCallParticipants.set({ [ROOM]: ["alice"] });
+
+    expect(readRoomHasActiveCall("")).toEqual({
+      hasActiveCall: false,
+      selfInCall: false,
+      localResourceInCall: false,
+      participantCount: 0,
+      media: { audio: true, video: false },
+    });
+    expect(readRoomHasActiveCall("other@muc.waddle.test")).toEqual({
+      hasActiveCall: false,
+      selfInCall: false,
+      localResourceInCall: false,
+      participantCount: 0,
+      media: { audio: true, video: false },
+    });
+  });
+
+  test("reports video media from Muji content presence", () => {
+    setSession("alice");
+    applyMucCallPresence({
+      from: `${ROOM}/alice`,
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/web",
+      muji: { preparing: false, active: true, audio: true, video: true },
+    });
+
+    expect(readRoomHasActiveCall(ROOM).media).toEqual({ audio: true, video: true });
+  });
+
+  test("keeps live Muji media authoritative over stale pending cleanup media", () => {
+    setSession("alice");
+    connectionStore.client = { fullJid: "alice@waddle.test/web" } as unknown as typeof connectionStore.client;
+    markMucCallSessionTerminatePending({
+      roomJid: ROOM,
+      sid: "muc-retry-video",
+      selfFullJid: "alice@waddle.test/web",
+      media: { audio: true, video: true },
+      now: new Date("2026-05-26T12:00:00.000Z"),
+    });
+    applyMucCallPresence({
+      from: `${ROOM}/alice`,
+      presence_type: "available",
+      muc_jid: "alice@waddle.test/web",
+      muji: { preparing: false, active: true, audio: true, video: false },
+    });
+
+    expect(readRoomHasActiveCall(ROOM)).toEqual({
+      hasActiveCall: true,
+      selfInCall: true,
+      localResourceInCall: true,
+      participantCount: 1,
+      media: { audio: true, video: false },
+    });
+  });
+
+  test("keeps a cached terminate failure retryable after local Muji presence is cleared", () => {
+    setSession("alice");
+    connectionStore.client = { fullJid: "alice@waddle.test/web" } as unknown as typeof connectionStore.client;
+    markMucCallSessionTerminatePending({
+      roomJid: ROOM,
+      sid: "muc-retry-live",
+      selfFullJid: "alice@waddle.test/web",
+      media: { audio: true, video: true },
+      now: new Date("2026-05-26T12:00:00.000Z"),
+    });
+
+    expect(readRoomHasActiveCall(ROOM)).toEqual({
+      hasActiveCall: true,
+      selfInCall: true,
+      localResourceInCall: true,
+      participantCount: 1,
+      media: { audio: true, video: true },
+    });
+  });
+
+  test("readRoomHasActiveCall prefers LiveKit live participants over stale Muji counts", () => {
+    setSession("alice");
+    $mucCallParticipants.set({ [ROOM]: ["alice", "ghost"] });
+    $mucCallParticipantOwners.set({
+      [ROOM]: [
+        { nick: "alice", realJid: "alice@waddle.test/web" },
+        { nick: "ghost", realJid: "ghost@waddle.test/web" },
+      ],
+    });
+    setLiveCallParticipants(ROOM, ["alice@waddle.test/web"]);
+
+    expect(readRoomHasActiveCall(ROOM)).toMatchObject({
+      hasActiveCall: true,
+      participantCount: 1,
+      selfInCall: true,
+    });
   });
 });

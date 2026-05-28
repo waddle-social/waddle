@@ -307,6 +307,8 @@ fn fixture_sfu() -> Arc<dyn SfuService> {
         api_key: ApiKey::new("APIxxxxxxxx"),
         api_secret: ApiSecret::from_text("super-secret-secret-32-bytes-min")
             .expect("test secret meets min length"),
+        webhook_secret: ApiSecret::from_text("super-secret-secret-32-bytes-min")
+            .expect("test secret meets min length"),
         ws_url: WebsocketUrl::new("wss://livekit.test/".parse().unwrap()).unwrap(),
         turn_host: TurnHost::new("turn.test"),
         turn_tls_port: 443,
@@ -315,7 +317,7 @@ fn fixture_sfu() -> Arc<dyn SfuService> {
         token_ttl: Duration::seconds(3600),
         turn_ttl: Duration::seconds(3600),
     };
-    Arc::new(LiveKitSfu::new(cfg))
+    Arc::new(LiveKitSfu::new(cfg).expect("LiveKitSfu init in test"))
 }
 
 const TEST_DOMAIN: &str = "waddle.test";
@@ -614,5 +616,181 @@ fn muji_session_terminate_to_local_mixer_passes_federation_guard() {
     assert!(
         saw_non_error_reply,
         "expected non-error reply to session-terminate: {events:?}",
+    );
+}
+
+// ── Admin-evict bridge (XMPP teardown → LiveKit RemoveParticipant) ───────
+
+/// Recording admin client: captures every admin invocation so the
+/// test can assert the XMPP teardown path correctly mirrors itself
+/// onto LiveKit's REST surface. The production
+/// [`waddle_sfu::LiveKitSfu::new`] uses a reqwest-backed client;
+/// tests swap that out via [`waddle_sfu::LiveKitSfu::with_admin`].
+#[derive(Default)]
+struct RecordingAdmin {
+    remove_calls: std::sync::Mutex<Vec<(waddle_sfu::CallId, waddle_sfu::Identity)>>,
+    delete_calls: std::sync::Mutex<Vec<waddle_sfu::CallId>>,
+}
+
+impl RecordingAdmin {
+    fn remove_snapshot(&self) -> Vec<(waddle_sfu::CallId, waddle_sfu::Identity)> {
+        self.remove_calls.lock().expect("recording lock").clone()
+    }
+
+    fn delete_snapshot(&self) -> Vec<waddle_sfu::CallId> {
+        self.delete_calls.lock().expect("recording lock").clone()
+    }
+}
+
+impl waddle_sfu::LiveKitAdmin for RecordingAdmin {
+    fn remove_participant<'a>(
+        &'a self,
+        room: &'a waddle_sfu::CallId,
+        identity: &'a waddle_sfu::Identity,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(), waddle_sfu::SfuError>> + Send + 'a>,
+    > {
+        let room = room.clone();
+        let identity = identity.clone();
+        Box::pin(async move {
+            self.remove_calls
+                .lock()
+                .expect("recording lock")
+                .push((room, identity));
+            Ok(())
+        })
+    }
+
+    fn delete_room<'a>(
+        &'a self,
+        room: &'a waddle_sfu::CallId,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(), waddle_sfu::SfuError>> + Send + 'a>,
+    > {
+        let room = room.clone();
+        Box::pin(async move {
+            self.delete_calls.lock().expect("recording lock").push(room);
+            Ok(())
+        })
+    }
+}
+
+fn fixture_sfu_with_admin(admin: Arc<RecordingAdmin>) -> Arc<dyn SfuService> {
+    let cfg = SfuConfig {
+        api_key: ApiKey::new("APIxxxxxxxx"),
+        api_secret: ApiSecret::from_text("super-secret-secret-32-bytes-min")
+            .expect("test secret meets min length"),
+        webhook_secret: ApiSecret::from_text("super-secret-secret-32-bytes-min")
+            .expect("test secret meets min length"),
+        ws_url: WebsocketUrl::new("wss://livekit.test/".parse().unwrap()).unwrap(),
+        turn_host: TurnHost::new("turn.test"),
+        turn_tls_port: 443,
+        turn_udp_port: 3478,
+        turn_shared_secret: TurnSharedSecret::from_text("turn-secret"),
+        token_ttl: Duration::seconds(3600),
+        turn_ttl: Duration::seconds(3600),
+    };
+    Arc::new(LiveKitSfu::with_admin(
+        cfg,
+        admin as Arc<dyn waddle_sfu::LiveKitAdmin>,
+    ))
+}
+
+async fn drain_spawned_admin_tasks() {
+    // The spawn from `LiveKitSfu::unregister_call_participant` lands
+    // on the current tokio runtime; a handful of cooperative yields
+    // is more than enough to let the recording mock complete its
+    // mutex pushes.
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+}
+
+#[tokio::test]
+async fn muji_session_terminate_evicts_participant_via_livekit_admin() {
+    // XMPP teardown must mirror onto LiveKit's REST admin surface,
+    // not rely on the SFU's DTLS read-timeout to detect the dead
+    // PeerConnection. Without this, kubectl logs show "dtls timeout"
+    // warnings on every hangup and the room object lingers until
+    // `empty_timeout` (LK default 5 min) — visible in production as
+    // a stuck call indicator in the chat UI.
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = fixture_sfu_with_admin(Arc::clone(&admin));
+
+    // Pre-register so the call is non-empty at terminate time — the
+    // sequence under test is "join, then terminate", which is what
+    // the chat client does via session-initiate + session-terminate.
+    let room_jid_str = "room@muc.waddle.test";
+    let call_id = CallId::new(room_jid_str).expect("valid call id");
+    let initiator = test_full_jid();
+    sfu.register_call_participant(&call_id, &waddle_sfu::Identity::from_jid(initiator.clone()));
+
+    let iq = muji_session_terminate_iq(
+        TEST_INITIATOR,
+        &calls_mixer_jid(TEST_DOMAIN).to_string(),
+        room_jid_str,
+        "muji-1",
+    );
+    let handler = JingleHandler::new(sfu);
+    let _events = handler.handle(&iq, &ctx(&initiator));
+    drain_spawned_admin_tasks().await;
+
+    let removes = admin.remove_snapshot();
+    assert_eq!(
+        removes.len(),
+        1,
+        "session-terminate must trigger exactly one LiveKit RemoveParticipant; got {removes:?}",
+    );
+    assert_eq!(removes[0].0.as_str(), room_jid_str);
+    assert_eq!(
+        removes[0].1.as_livekit_identity(),
+        TEST_INITIATOR,
+        "RemoveParticipant identity must match the Jingle session-terminate sender",
+    );
+
+    // The initiator was the only registered participant, so the call
+    // transitions to `CallState::Ended` and DeleteRoom should also
+    // fire — collapsing LK's empty-room TTL window to zero.
+    let deletes = admin.delete_snapshot();
+    assert_eq!(
+        deletes.len(),
+        1,
+        "last-participant terminate must also trigger DeleteRoom; got {deletes:?}",
+    );
+    assert_eq!(deletes[0].as_str(), room_jid_str);
+}
+
+#[tokio::test]
+async fn muji_session_terminate_skips_delete_room_when_call_still_has_participants() {
+    // Bob's terminate while alice is still in the call must NOT
+    // trigger DeleteRoom — only the per-participant evict.
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = fixture_sfu_with_admin(Arc::clone(&admin));
+
+    let room_jid_str = "room@muc.waddle.test";
+    let call_id = CallId::new(room_jid_str).expect("valid call id");
+    let alice = test_full_jid();
+    let bob: jid::FullJid = "bob@waddle.test/desktop".parse().unwrap();
+    sfu.register_call_participant(&call_id, &waddle_sfu::Identity::from_jid(alice.clone()));
+    sfu.register_call_participant(&call_id, &waddle_sfu::Identity::from_jid(bob.clone()));
+
+    let iq = muji_session_terminate_iq(
+        &bob.to_string(),
+        &calls_mixer_jid(TEST_DOMAIN).to_string(),
+        room_jid_str,
+        "muji-2",
+    );
+    let handler = JingleHandler::new(sfu);
+    let _events = handler.handle(&iq, &ctx(&bob));
+    drain_spawned_admin_tasks().await;
+
+    let removes = admin.remove_snapshot();
+    assert_eq!(removes.len(), 1);
+    assert_eq!(removes[0].1.as_livekit_identity(), bob.to_string());
+
+    let deletes = admin.delete_snapshot();
+    assert!(
+        deletes.is_empty(),
+        "DeleteRoom must not fire while the call still has participants; got {deletes:?}",
     );
 }

@@ -2,6 +2,9 @@
 {{- if or .Values.apiKeys.existingSecret (gt (len .Values.apiKeys.values) 0) -}}
 {{- $_ := set $config "key_file" .Values.apiKeys.mountPath -}}
 {{- end -}}
+{{- if and .Values.webhook.enabled .Values.webhook.apiKey (gt (len .Values.webhook.urls) 0) -}}
+{{- $_ := set $config "webhook" (dict "api_key" .Values.webhook.apiKey "urls" .Values.webhook.urls) -}}
+{{- end -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:

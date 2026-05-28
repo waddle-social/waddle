@@ -33,7 +33,7 @@ use super::state::WebSocketState;
 ///   theoretically reject some MUC bare JIDs — those are rooms with
 ///   no calling capability and there is nothing on the SFU to undo
 ///   for them anyway).
-pub(super) fn unregister_participant_from_room(
+pub(crate) fn unregister_participant_from_room(
     state: &WebSocketState,
     room_jid: &BareJid,
     jid: &FullJid,
@@ -51,6 +51,29 @@ pub(super) fn unregister_participant_from_room(
     let _ = sfu.unregister_call_participant(&call_id, &identity);
 }
 
+/// Local-only teardown variant for the LiveKit webhook bridge. The
+/// SFU's `participant_left` event is the acknowledgement that
+/// LiveKit already removed the participant on its side — invoking
+/// the full `unregister_participant_from_room` here would loop a
+/// redundant `RemoveParticipant` admin call back to LiveKit (which
+/// returns `not_found`, mapped to success, but the round-trip is
+/// wasted and amplifies the race with quick rejoins). This helper
+/// runs only the bookkeeping side.
+pub(crate) fn note_participant_left_from_webhook(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    jid: &FullJid,
+) {
+    let Some(sfu) = state.deps.protocol.sfu.as_ref() else {
+        return;
+    };
+    let Ok(call_id) = CallId::new(room_jid.to_string()) else {
+        return;
+    };
+    let identity = Identity::from_jid(jid.clone());
+    sfu.note_participant_left(&call_id, &identity);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -61,13 +84,19 @@ mod tests {
         TurnHost, WebsocketUrl,
     };
 
-    /// Recording fake: captures every `(call_id, identity)` passed to
-    /// `unregister_call_participant`. The other trait methods are
-    /// unimplemented because the production code path under test only
-    /// touches the unregister method.
+    /// Recording fake: captures `(call_id, identity)` separately for
+    /// each teardown dispatch — `unregister_call_participant` (the
+    /// admin-evict path) into `calls`, `note_participant_left` (the
+    /// webhook-bridge local-only path) into `note_calls`. Splitting
+    /// the vecs lets tests assert which trait method was actually
+    /// invoked, mirroring how `waddle-sfu`'s `RecordingAdmin` splits
+    /// `remove_calls` from `delete_calls`. The other trait methods
+    /// are unimplemented because the production code path under
+    /// test only touches the two dispatch surfaces.
     #[derive(Default)]
     struct RecordingSfu {
         calls: Mutex<Vec<(CallId, Identity)>>,
+        note_calls: Mutex<Vec<(CallId, Identity)>>,
     }
 
     impl RecordingSfu {
@@ -104,6 +133,20 @@ mod tests {
             CallState::Ended
         }
 
+        fn note_participant_left(&self, call_id: &CallId, identity: &Identity) {
+            // Recorded into `note_calls`, NOT `calls`: the two trait
+            // methods imply different downstream effects (admin
+            // RemoveParticipant vs. local-only bookkeeping) and the
+            // tests need to distinguish them. Keeping the dispatch
+            // record separated mirrors how `waddle-sfu`'s
+            // `RecordingAdmin` separates `remove_calls` from
+            // `delete_calls` for the same reason.
+            self.note_calls
+                .lock()
+                .expect("recording lock")
+                .push((call_id.clone(), identity.clone()));
+        }
+
         fn is_revoked(&self, _: &Jti) -> bool {
             false
         }
@@ -114,6 +157,14 @@ mod tests {
 
         fn turn_host(&self) -> &TurnHost {
             unimplemented!("not exercised by these tests")
+        }
+
+        fn webhook_secret(&self) -> &waddle_sfu::ApiSecret {
+            unimplemented!("not exercised by these tests")
+        }
+
+        fn participants_for_call(&self, _: &CallId) -> Vec<Identity> {
+            Vec::new()
         }
     }
 
