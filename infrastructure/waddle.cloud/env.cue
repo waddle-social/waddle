@@ -62,6 +62,7 @@ schema.#Project & {
 
 	ci: pipelines: {
 		default: {
+			mode: "expanded"
 			when: {
 				branch: ["main"]
 				defaultBranch: true
@@ -71,12 +72,12 @@ schema.#Project & {
 				packages:   "write"
 				"id-token": "write"
 			}
-			tasks: [_t["helm-push"], _t["gitops-push"]]
+			tasks: [_t.helmPush, _t.gitopsPush]
 		}
 	}
 
 	tasks: {
-		"helm-push": schema.#Task & {
+		helmPush: schema.#Task & {
 			command: "bash"
 			args: ["-c", #"""
 					set -euo pipefail
@@ -100,7 +101,7 @@ schema.#Project & {
 				"""#]
 			inputs: ["charts/livekit-sfu/**", "env.cue"]
 		}
-		"gitops-push": schema.#Task & {
+		gitopsPush: schema.#Task & {
 			command: "bash"
 			args: ["-c", #"""
 					set -euo pipefail
