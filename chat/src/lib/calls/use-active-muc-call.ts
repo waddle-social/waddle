@@ -184,7 +184,6 @@ export function readRoomHasActiveCall(roomJid: string): {
       media: mucCallMediaForRoom(""),
     };
   }
-  const participants = $mucCallParticipants.get()[normalized] ?? [];
   const participantOwners = $mucCallParticipantOwners.get()[normalized] ?? [];
   const liveParticipants = $mucCallLiveParticipants.get();
   const participantList = resolveRoomParticipantList(
@@ -249,9 +248,9 @@ function hasUnownedSelfNick(
  */
 function resolveRoomParticipantList(
   roomJid: string | null,
-  participantsByRoom: Record<string, string[]>,
-  ownersByRoom: Record<string, ReadonlyArray<{ nick: string; realJid?: string }>>,
-  liveParticipantsByRoom: Record<string, string[]>,
+  participantsByRoom: Readonly<Record<string, ReadonlyArray<string>>>,
+  ownersByRoom: Readonly<Record<string, ReadonlyArray<{ nick: string; realJid?: string }>>>,
+  liveParticipantsByRoom: Readonly<Record<string, ReadonlyArray<string>>>,
 ): string[] {
   const room = roomJid ? normalizeMucCallRoomJid(roomJid) : "";
   if (!room) return [];
