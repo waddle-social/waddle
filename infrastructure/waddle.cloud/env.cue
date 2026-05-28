@@ -79,8 +79,14 @@ schema.#Project & {
 	tasks: {
 		helmPush: schema.#Task & {
 			command: "bash"
+			env: {
+				CI_GITHUB_TOKEN: schema.#EnvPassthrough & {name: "GITHUB_TOKEN"}
+				CI_GITHUB_ACTOR: schema.#EnvPassthrough & {name: "GITHUB_ACTOR"}
+			}
 			args: ["-c", #"""
 					set -euo pipefail
+					GITHUB_TOKEN="${CI_GITHUB_TOKEN:?missing GITHUB_TOKEN}"
+					GITHUB_ACTOR="${CI_GITHUB_ACTOR:?missing GITHUB_ACTOR}"
 					echo "${GITHUB_TOKEN}" | helm registry login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
 					helm lint charts/livekit-sfu \
 					  --set apiKeys.existingSecret=livekit-sfu-api-keys \
@@ -103,8 +109,16 @@ schema.#Project & {
 		}
 		gitopsPush: schema.#Task & {
 			command: "bash"
+			env: {
+				CI_GITHUB_TOKEN: schema.#EnvPassthrough & {name: "GITHUB_TOKEN"}
+				CI_GITHUB_ACTOR: schema.#EnvPassthrough & {name: "GITHUB_ACTOR"}
+			}
 			args: ["-c", #"""
 					set -euo pipefail
+					GITHUB_TOKEN="${CI_GITHUB_TOKEN:?missing GITHUB_TOKEN}"
+					GITHUB_ACTOR="${CI_GITHUB_ACTOR:?missing GITHUB_ACTOR}"
+					echo "${GITHUB_TOKEN}" | helm registry login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+
 					flux push artifact oci://ghcr.io/waddle-social/waddle/gitops:latest \
 					  --path=./gitops \
 					  --source="$(git config --get remote.origin.url)" \
