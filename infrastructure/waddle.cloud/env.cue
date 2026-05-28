@@ -117,7 +117,7 @@ schema.#Project & {
 					set -euo pipefail
 					GITHUB_TOKEN="${CI_GITHUB_TOKEN:?missing GITHUB_TOKEN}"
 					GITHUB_ACTOR="${CI_GITHUB_ACTOR:?missing GITHUB_ACTOR}"
-					echo "${GITHUB_TOKEN}" | helm registry login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+					echo "${GITHUB_TOKEN}" | oras login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
 
 					flux push artifact oci://ghcr.io/waddle-social/waddle/gitops:latest \
 					  --path=./gitops \
