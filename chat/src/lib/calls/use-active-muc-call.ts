@@ -258,7 +258,7 @@ function resolveRoomParticipantList(
   if (liveIdentities.length > 0) {
     return identitiesToNicks(liveIdentities, ownersByRoom[room] ?? []);
   }
-  return participantsByRoom[room] ?? [];
+  return [...(participantsByRoom[room] ?? [])];
 }
 
 /**
