@@ -13,6 +13,7 @@ import {
   $mucCallLiveParticipants,
   setLiveCallParticipants,
 } from "../src/lib/calls/muc-call-live-participants";
+import { connectionStore } from "../src/lib/connection-store";
 import type { LiveKitJoin } from "../src/lib/calls/types";
 
 const join: LiveKitJoin = {
