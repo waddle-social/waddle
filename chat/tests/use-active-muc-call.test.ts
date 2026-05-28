@@ -1,12 +1,14 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { $callState } from "../src/lib/calls/call-store";
 import {
+  $mucCallParticipantOwners,
   $mucCallParticipants,
   applyMucCallPresence,
   clearMucCallParticipants,
 } from "../src/lib/calls/muc-call-presence";
 import { connectionStore } from "../src/lib/connection-store";
 import { readActiveMucCall, readRoomHasActiveCall } from "../src/lib/calls/use-active-muc-call";
+import { setLiveCallParticipants, clearAllLiveCallParticipants } from "../src/lib/calls/muc-call-live-participants";
 import {
   clearAllMucCallSessionCacheForTests,
   markMucCallSessionTerminatePending,
@@ -160,6 +162,7 @@ describe("readRoomHasActiveCall selector", () => {
   beforeEach(() => {
     $callState.set({ phase: "idle" });
     clearMucCallParticipants();
+    clearAllLiveCallParticipants();
     clearAllMucCallSessionCacheForTests();
     setSession(null);
   });
@@ -167,6 +170,7 @@ describe("readRoomHasActiveCall selector", () => {
   afterEach(() => {
     $callState.set({ phase: "idle" });
     clearMucCallParticipants();
+    clearAllLiveCallParticipants();
     clearAllMucCallSessionCacheForTests();
     setSession(null);
   });
@@ -386,6 +390,24 @@ describe("readRoomHasActiveCall selector", () => {
       localResourceInCall: true,
       participantCount: 1,
       media: { audio: true, video: true },
+    });
+  });
+
+  test("readRoomHasActiveCall prefers LiveKit live participants over stale Muji counts", () => {
+    setSession("alice");
+    $mucCallParticipants.set({ [ROOM]: ["alice", "ghost"] });
+    $mucCallParticipantOwners.set({
+      [ROOM]: [
+        { nick: "alice", realJid: "alice@waddle.test/web" },
+        { nick: "ghost", realJid: "ghost@waddle.test/web" },
+      ],
+    });
+    setLiveCallParticipants(ROOM, ["alice@waddle.test/web"]);
+
+    expect(readRoomHasActiveCall(ROOM)).toMatchObject({
+      hasActiveCall: true,
+      participantCount: 1,
+      selfInCall: true,
     });
   });
 });

@@ -114,15 +114,14 @@ export function useRoomHasActiveCall(
    * is empty for this room and we fall back to the Muji-derived
    * view (kept honest by the server-side LK→MUC webhook bridge).
    */
-  const participantList = computed<ReadonlyArray<string>>(() => {
-    const room = normalizedRoomJid.value;
-    if (!room) return [];
-    const liveIdentities = liveParticipants.value[room] ?? [];
-    if (liveIdentities.length > 0) {
-      return identitiesToNicks(liveIdentities, participantOwners.value[room] ?? []);
-    }
-    return participants.value[room] ?? [];
-  });
+  const participantList = computed<ReadonlyArray<string>>(() =>
+    resolveRoomParticipantList(
+      normalizedRoomJid.value,
+      participants.value,
+      participantOwners.value,
+      liveParticipants.value,
+    ),
+  );
 
   const pendingTerminateSession = computed(() =>
     pendingMucCallTerminateSession(
@@ -187,6 +186,13 @@ export function readRoomHasActiveCall(roomJid: string): {
   }
   const participants = $mucCallParticipants.get()[normalized] ?? [];
   const participantOwners = $mucCallParticipantOwners.get()[normalized] ?? [];
+  const liveParticipants = $mucCallLiveParticipants.get();
+  const participantList = resolveRoomParticipantList(
+    normalized,
+    $mucCallParticipants.get(),
+    $mucCallParticipantOwners.get(),
+    liveParticipants,
+  );
   const pendingTerminates = $mucCallTerminatePendingSessions.get();
   const nick = connectionStore.session?.username ?? null;
   const fullJid = currentClientFullJid();
@@ -194,8 +200,8 @@ export function readRoomHasActiveCall(roomJid: string): {
   const pendingTerminateSession = pendingMucCallTerminateSession(pendingTerminates, normalized, fullJid);
   const pendingTerminate = !!pendingTerminateSession;
   return {
-    hasActiveCall: participants.length > 0 || pendingTerminate,
-    selfInCall: !!nick && (participants.includes(nick) || pendingTerminate),
+    hasActiveCall: participantList.length > 0 || pendingTerminate,
+    selfInCall: !!nick && (participantList.includes(nick) || pendingTerminate),
     localResourceInCall:
       (
         s.phase === "active" &&
@@ -203,9 +209,9 @@ export function readRoomHasActiveCall(roomJid: string): {
         normalizeMucCallRoomJid(s.peer) === normalized
       ) ||
       hasOwnerFullJid(participantOwners, fullJid) ||
-      hasUnownedSelfNick(participantOwners, nick, participants) ||
+      hasUnownedSelfNick(participantOwners, nick, participantList) ||
       pendingTerminate,
-    participantCount: Math.max(participants.length, pendingTerminate ? 1 : 0),
+    participantCount: Math.max(participantList.length, pendingTerminate ? 1 : 0),
     media: mediaForRoomWithPendingFallback(
       normalized,
       s,
@@ -234,6 +240,26 @@ function hasUnownedSelfNick(
 ): boolean {
   if (!nick || !participants.includes(nick)) return false;
   return owners.some((owner) => owner.nick === nick && !fullJidIdentityKey(owner.realJid));
+}
+
+/**
+ * Resolve the nick list for a room, preferring LiveKit's live
+ * participant projection when populated (same semantics as
+ * `useRoomHasActiveCall`'s composable path).
+ */
+function resolveRoomParticipantList(
+  roomJid: string | null,
+  participantsByRoom: Record<string, string[]>,
+  ownersByRoom: Record<string, ReadonlyArray<{ nick: string; realJid?: string }>>,
+  liveParticipantsByRoom: Record<string, string[]>,
+): string[] {
+  const room = roomJid ? normalizeMucCallRoomJid(roomJid) : "";
+  if (!room) return [];
+  const liveIdentities = liveParticipantsByRoom[room] ?? [];
+  if (liveIdentities.length > 0) {
+    return identitiesToNicks(liveIdentities, ownersByRoom[room] ?? []);
+  }
+  return participantsByRoom[room] ?? [];
 }
 
 /**

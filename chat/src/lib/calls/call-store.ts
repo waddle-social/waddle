@@ -16,6 +16,7 @@ import {
   forgetMucCallSession,
   rememberMucCallSession,
 } from "./muc-call-session-cache";
+import { clearLiveCallParticipants } from "./muc-call-live-participants";
 import { barePeerJid } from "../xmpp/jid";
 
 /**
@@ -594,6 +595,7 @@ export async function tearDownActiveCall(
                 clearMucCallParticipant(s.peer, s.selfNick, s.selfFullJid);
               }
             }
+            clearLiveCallParticipants(s.peer);
             try {
               await sendMujiSessionTerminate(raw, s.peer, s.sid);
               forgetMucCallSession({

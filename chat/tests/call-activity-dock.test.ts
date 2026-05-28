@@ -1180,6 +1180,10 @@ describe("CallActivityDock rendering", () => {
     const mucCallButton = readFileSync(new URL("../src/components/calls/MucCallButton.vue", import.meta.url), "utf8");
     const conversationBanner = readFileSync(new URL("../src/components/calls/ConversationCallBanner.vue", import.meta.url), "utf8");
 
+    expect(mucCallButton).toContain("canResumeMucCallActivity");
+    expect(mucCallButton).toContain("tryResumeFirst:");
+    expect(mucCallButton).toContain("roomCall.localResourceInCall.value");
+
     expect(readyShell).toContain("import CallActivityDock");
     expect(readyShell).toContain("import CurrentCallPanel");
     expect(readyShell.match(/<CallActivityDock/g)?.length ?? 0).toBeGreaterThanOrEqual(2);

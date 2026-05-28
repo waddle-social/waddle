@@ -36,6 +36,13 @@ apiKeys:
   mountPath: /etc/livekit/keys/keys.yaml
   values: {}
 
+# LiveKit → waddle-server SFU-authoritative MUC call cleanup.
+# `apiKey` is injected at deploy time (must match a key in keys.yaml).
+webhook:
+  enabled: false
+  apiKey: ""
+  urls: []
+
 livekit:
   port: 7880
   log_level: info
