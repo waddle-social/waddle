@@ -19,6 +19,35 @@ use minidom::Element;
 /// XEP-0492 namespace.
 pub const NS_NOTIFICATION_SETTINGS: &str = "urn:xmpp:notification-settings:1";
 
+/// Waddle rich XEP-0357 push-summary opt-in namespace.
+///
+/// Mirrors `waddle_xmpp::xep::xep0492::NS_PUSH_RICH_PAYLOAD` (the
+/// client crate keeps its own copy — it does not depend on the
+/// server `waddle-xmpp` crate). XEP-0492 §2.3 reserves the optional
+/// `<advanced/>` child for "finer-grained notification settings using
+/// custom namespaces"; `<rich-payload xmlns='urn:waddle:push:rich:0'/>`
+/// is the Waddle opt-in to a rich XEP-0357 summary carrying
+/// `last-message-sender` + `last-message-body` (#719). The read/write
+/// helpers here MUST stay byte-compatible with the server-side
+/// `parse_rich_payload_opt_in`.
+pub const NS_PUSH_RICH_PAYLOAD: &str = "urn:waddle:push:rich:0";
+
+/// Read the Waddle rich-payload opt-in from a XEP-0492 `<notify/>`.
+///
+/// Returns `true` when any setting child (fallback or identity-scoped)
+/// carries an `<advanced/>` holding a
+/// `<rich-payload xmlns='urn:waddle:push:rich:0'/>` child. Mirrors the
+/// server-side `parse_rich_payload_opt_in` so the write side here and
+/// the read side there agree on one wire shape (#719). Absence of the
+/// element is opt-out — the minimal XEP-0357 summary payload.
+pub fn read_rich_payload_opt_in(notify: &Element) -> bool {
+    notify
+        .children()
+        .filter(|child| child.ns() == NS_NOTIFICATION_SETTINGS)
+        .filter_map(|setting| setting.get_child("advanced", NS_NOTIFICATION_SETTINGS))
+        .any(|advanced| advanced.has_child("rich-payload", NS_PUSH_RICH_PAYLOAD))
+}
+
 /// Typed XEP-0492 fallback setting — the single child element under
 /// `<notify/>` carrying no `identity-*` attributes.
 ///
@@ -147,9 +176,23 @@ pub fn read_fallback_mode(notify: &Element) -> Option<NotifyMode> {
 ///   the requested mode), the `<advanced/>` child is preserved
 ///   verbatim — nothing to invalidate.
 ///
+/// * The Waddle rich XEP-0357 push-summary opt-in
+///   (`<advanced><rich-payload xmlns='urn:waddle:push:rich:0'/></advanced>`,
+///   #719) is **ours** to manage, so `rich_payload_opt_in` toggles it
+///   on the new fallback: `true` ensures exactly one `<rich-payload/>`
+///   inside the fallback's `<advanced/>`; `false` removes it. Foreign
+///   `<advanced/>` children are preserved either way (§3 ¶1 MUST NOT
+///   delete/alter unsupported advanced settings); if removing our
+///   `<rich-payload/>` leaves the `<advanced/>` empty it is dropped
+///   (§2.3 `<advanced/>` SHOULD NOT be empty).
+///
 /// The function is pure — it takes a borrowed `extensions` element
 /// and returns an owned new element.
-pub fn merge_notify_into_extensions(extensions: Option<&Element>, mode: NotifyMode) -> Element {
+pub fn merge_notify_into_extensions(
+    extensions: Option<&Element>,
+    mode: NotifyMode,
+    rich_payload_opt_in: bool,
+) -> Element {
     let mut builder = Element::builder("extensions", crate::pep::NS_BOOKMARKS);
     let mut notify_setting_children: Vec<Element> = Vec::new();
 
@@ -178,7 +221,11 @@ pub fn merge_notify_into_extensions(extensions: Option<&Element>, mode: NotifyMo
     }
 
     builder
-        .append(build_merged_notify_element(notify_setting_children, mode))
+        .append(build_merged_notify_element(
+            notify_setting_children,
+            mode,
+            rich_payload_opt_in,
+        ))
         .build()
 }
 
@@ -218,7 +265,11 @@ pub fn merge_notify_into_extensions(extensions: Option<&Element>, mode: NotifyMo
 /// (`always` → `on-mention` → `never`), with identity-scoped
 /// siblings ordered after the no-attrs fallback within each mode
 /// group — round-8 XEP reviewer P2.
-fn build_merged_notify_element(setting_children: Vec<Element>, mode: NotifyMode) -> Element {
+fn build_merged_notify_element(
+    setting_children: Vec<Element>,
+    mode: NotifyMode,
+    rich_payload_opt_in: bool,
+) -> Element {
     let mut identity_scoped: Vec<Element> = Vec::new();
     let mut preserved_advanced: Vec<Element> = Vec::new();
     let mut foreign: Vec<Element> = Vec::new();
@@ -229,8 +280,19 @@ fn build_merged_notify_element(setting_children: Vec<Element>, mode: NotifyMode)
         let has_identity_attr =
             child.attr("identity-category").is_some() || child.attr("identity-type").is_some();
         if is_setting && has_identity_attr {
-            // Identity-scoped sibling — preserve verbatim.
-            identity_scoped.push(child);
+            // Identity-scoped sibling. Foreign rules are preserved
+            // verbatim (§3 ¶1), but our OWN `<rich-payload/>` marker is
+            // ours to manage: on opt-out we strip it here too, so the
+            // opt-in readers (client `read_rich_payload_opt_in` and the
+            // server `parse_rich_payload_opt_in`, both of which honor
+            // the marker on ANY setting) can't keep reporting opted-in
+            // after the user opted out. On opt-in we leave the sibling
+            // untouched — the user's opt-in is recorded on the fallback.
+            identity_scoped.push(if rich_payload_opt_in {
+                child
+            } else {
+                strip_rich_payload_from_setting(child)
+            });
         } else if is_setting {
             // No-attrs fallback (possibly more than one, in
             // malformed input). Salvage any `<advanced/>` child
@@ -249,9 +311,10 @@ fn build_merged_notify_element(setting_children: Vec<Element>, mode: NotifyMode)
     }
 
     // Build the single output fallback for the user's chosen mode,
-    // re-parenting any preserved `<advanced/>` children under it.
+    // re-parenting any preserved `<advanced/>` children under it and
+    // toggling the Waddle `<rich-payload/>` opt-in (#719).
     let mut new_fallback = Element::builder(mode.as_wire_name(), NS_NOTIFICATION_SETTINGS);
-    for advanced in preserved_advanced {
+    for advanced in apply_rich_payload(preserved_advanced, rich_payload_opt_in) {
         new_fallback = new_fallback.append(advanced);
     }
     let new_fallback = new_fallback.build();
@@ -273,6 +336,79 @@ fn build_merged_notify_element(setting_children: Vec<Element>, mode: NotifyMode)
     let mut builder = Element::builder("notify", NS_NOTIFICATION_SETTINGS);
     for child in emit {
         builder = builder.append(child);
+    }
+    builder.build()
+}
+
+/// Normalize the `<advanced/>` blocks salvaged from the prior fallback
+/// onto the new fallback, toggling the Waddle `<rich-payload/>` opt-in.
+///
+/// XEP-0492 forbids more than one `<advanced/>` per setting (the server
+/// validator rejects it), so the salvaged blocks are folded into a
+/// single `<advanced/>` whose foreign children are preserved verbatim
+/// and in order (§3 ¶1 MUST NOT delete or alter unsupported advanced
+/// settings). Our own `<rich-payload xmlns='urn:waddle:push:rich:0'/>`
+/// is stripped first (we own it) and re-added exactly once iff
+/// `opt_in`, so the function is idempotent over repeated merges. When
+/// the result would be empty the `<advanced/>` is omitted entirely
+/// (§2.3 `<advanced/>` SHOULD NOT be empty). Returns at most one
+/// element.
+fn apply_rich_payload(advanced_blocks: Vec<Element>, opt_in: bool) -> Vec<Element> {
+    let mut children: Vec<Element> = Vec::new();
+    for advanced in advanced_blocks {
+        for child in advanced.children() {
+            // Our own opt-in marker — drop here, re-add below so a
+            // repeated merge never accumulates duplicates.
+            if child.is("rich-payload", NS_PUSH_RICH_PAYLOAD) {
+                continue;
+            }
+            children.push(child.clone());
+        }
+    }
+    if opt_in {
+        children.push(Element::builder("rich-payload", NS_PUSH_RICH_PAYLOAD).build());
+    }
+    if children.is_empty() {
+        return Vec::new();
+    }
+    let mut advanced = Element::builder("advanced", NS_NOTIFICATION_SETTINGS);
+    for child in children {
+        advanced = advanced.append(child);
+    }
+    vec![advanced.build()]
+}
+
+/// Return a copy of an identity-scoped setting element with our
+/// `<rich-payload xmlns='urn:waddle:push:rich:0'/>` marker removed from
+/// its `<advanced/>` child, dropping a thereby-emptied `<advanced/>`
+/// (§2.3 SHOULD NOT be empty). All foreign children — including foreign
+/// `<advanced/>` rules and the setting's `identity-*` attributes — are
+/// preserved verbatim (§3 ¶1). Used on opt-out so the marker is cleared
+/// wherever a (cross-client) writer may have placed it, keeping the
+/// write side symmetric with the read side. #719.
+fn strip_rich_payload_from_setting(setting: Element) -> Element {
+    let mut builder = Element::builder(setting.name(), setting.ns());
+    for ((ns, name), value) in setting.attrs().iter() {
+        builder = builder.attr_ns(ns.clone(), name.clone(), value);
+    }
+    for child in setting.children() {
+        if child.is("advanced", NS_NOTIFICATION_SETTINGS) {
+            let kept: Vec<Element> = child
+                .children()
+                .filter(|grandchild| !grandchild.is("rich-payload", NS_PUSH_RICH_PAYLOAD))
+                .cloned()
+                .collect();
+            if kept.is_empty() {
+                continue;
+            }
+            let mut advanced = Element::builder("advanced", NS_NOTIFICATION_SETTINGS);
+            for grandchild in kept {
+                advanced = advanced.append(grandchild);
+            }
+            builder = builder.append(advanced.build());
+        } else {
+            builder = builder.append(child.clone());
+        }
     }
     builder.build()
 }
@@ -355,7 +491,7 @@ mod tests {
 
     #[test]
     fn merge_into_empty_extensions_emits_single_fallback_child() {
-        let extensions = merge_notify_into_extensions(None, NotifyMode::OnMention);
+        let extensions = merge_notify_into_extensions(None, NotifyMode::OnMention, false);
         let elem = find_notify_in_extensions(&extensions).expect("notify present");
         assert_eq!(elem.name(), "notify");
         assert_eq!(elem.ns(), NS_NOTIFICATION_SETTINGS);
@@ -388,7 +524,7 @@ mod tests {
 
     #[test]
     fn merge_inserts_notify_into_empty_extensions() {
-        let merged = merge_notify_into_extensions(None, NotifyMode::Never);
+        let merged = merge_notify_into_extensions(None, NotifyMode::Never, false);
         assert_eq!(merged.name(), "extensions");
         let notify = find_notify_in_extensions(&merged).expect("notify present");
         assert_eq!(read_fallback_mode(notify), Some(NotifyMode::Never));
@@ -403,7 +539,7 @@ mod tests {
                     </notify>\
                     </extensions>";
         let extensions: Element = extensions_xml.parse().expect("valid xml");
-        let merged = merge_notify_into_extensions(Some(&extensions), NotifyMode::OnMention);
+        let merged = merge_notify_into_extensions(Some(&extensions), NotifyMode::OnMention, false);
 
         let notify = find_notify_in_extensions(&merged).expect("notify present");
         // Identity-scoped sibling preserved verbatim.
@@ -445,7 +581,7 @@ mod tests {
                     </notify>\
                     </extensions>";
         let extensions: Element = extensions_xml.parse().expect("valid xml");
-        let merged = merge_notify_into_extensions(Some(&extensions), NotifyMode::Never);
+        let merged = merge_notify_into_extensions(Some(&extensions), NotifyMode::Never, false);
         let notify = find_notify_in_extensions(&merged).expect("notify present");
 
         assert_eq!(read_fallback_mode(notify), Some(NotifyMode::Never));
@@ -472,7 +608,7 @@ mod tests {
         // i.e. children MUST be in a namespace other than
         // `urn:xmpp:bookmarks:1`. Our writer must never produce a
         // child in the bookmarks namespace.
-        let merged = merge_notify_into_extensions(None, NotifyMode::Always);
+        let merged = merge_notify_into_extensions(None, NotifyMode::Always, false);
         for child in merged.children() {
             assert_ne!(
                 child.ns(),
@@ -504,7 +640,7 @@ mod tests {
                     </notify>\
                     </extensions>";
         let extensions: Element = extensions_xml.parse().expect("valid xml");
-        let merged = merge_notify_into_extensions(Some(&extensions), NotifyMode::OnMention);
+        let merged = merge_notify_into_extensions(Some(&extensions), NotifyMode::OnMention, false);
         let notify = find_notify_in_extensions(&merged).expect("notify present");
 
         // Exactly one no-attrs fallback element on output.
@@ -519,8 +655,12 @@ mod tests {
             .count();
         assert_eq!(fallback_count, 1);
 
-        // The single fallback carries both salvaged advanced
-        // children — no rules dropped.
+        // The single fallback carries exactly one `<advanced/>` folding
+        // both salvaged foreign children — no rules dropped. XEP-0492
+        // forbids more than one `<advanced/>` per setting (the server
+        // validator rejects it), so the rich-payload normalizer (#719)
+        // merges the two malformed-input blocks into one while
+        // preserving every foreign child verbatim (§3 ¶1).
         let fallback = notify
             .children()
             .find(|c| c.name() == "on-mention" && c.attr("identity-category").is_none())
@@ -529,16 +669,10 @@ mod tests {
             .children()
             .filter(|c| c.is("advanced", NS_NOTIFICATION_SETTINGS))
             .collect();
-        // Two `<advanced/>` blocks are kept verbatim; we don't try
-        // to merge their inner foreign children (they may not be
-        // commutative).
-        assert_eq!(advanced.len(), 2);
-        assert!(advanced
-            .iter()
-            .any(|a| a.children().any(|c| c.ns() == "custom:a:1")));
-        assert!(advanced
-            .iter()
-            .any(|a| a.children().any(|c| c.ns() == "custom:b:1")));
+        assert_eq!(advanced.len(), 1);
+        let advanced = advanced[0];
+        assert!(advanced.children().any(|c| c.ns() == "custom:a:1"));
+        assert!(advanced.children().any(|c| c.ns() == "custom:b:1"));
     }
 
     #[test]
@@ -555,7 +689,7 @@ mod tests {
                     </notify>\
                     </extensions>";
         let extensions: Element = extensions_xml.parse().expect("valid xml");
-        let merged = merge_notify_into_extensions(Some(&extensions), NotifyMode::Always);
+        let merged = merge_notify_into_extensions(Some(&extensions), NotifyMode::Always, false);
         let notify = find_notify_in_extensions(&merged).expect("notify present");
         let always_elem = notify
             .children()
@@ -587,7 +721,7 @@ mod tests {
                     </notify>\
                     </extensions>";
         let extensions: Element = extensions_xml.parse().expect("valid xml");
-        let merged = merge_notify_into_extensions(Some(&extensions), NotifyMode::Always);
+        let merged = merge_notify_into_extensions(Some(&extensions), NotifyMode::Always, false);
         let notify = find_notify_in_extensions(&merged).expect("notify present");
 
         let names: Vec<&str> = notify.children().map(|c| c.name()).collect();
@@ -611,7 +745,7 @@ mod tests {
                     </notify>\
                     </extensions>";
         let extensions: Element = extensions_xml.parse().expect("valid xml");
-        let merged = merge_notify_into_extensions(Some(&extensions), NotifyMode::OnMention);
+        let merged = merge_notify_into_extensions(Some(&extensions), NotifyMode::OnMention, false);
 
         // Exactly one `<notify/>` wrapper.
         let notify_wrappers: Vec<_> = merged
@@ -658,7 +792,7 @@ mod tests {
                     </notify>\
                     </extensions>";
         let extensions: Element = extensions_xml.parse().expect("valid xml");
-        let merged = merge_notify_into_extensions(Some(&extensions), NotifyMode::OnMention);
+        let merged = merge_notify_into_extensions(Some(&extensions), NotifyMode::OnMention, false);
 
         // Sibling extension preserved.
         assert!(merged
@@ -668,5 +802,199 @@ mod tests {
         // Notify rewritten.
         let notify = find_notify_in_extensions(&merged).expect("notify present");
         assert_eq!(read_fallback_mode(notify), Some(NotifyMode::OnMention));
+    }
+
+    #[test]
+    fn merge_with_opt_in_round_trips_rich_payload() {
+        // Tracer bullet — opting in writes the XEP-0492 §2.3
+        // `<advanced><rich-payload xmlns='urn:waddle:push:rich:0'/>`
+        // under the fallback, and the reader recovers it. This is the
+        // exact wire shape the server's `parse_rich_payload_opt_in`
+        // consumes (#719).
+        let extensions = merge_notify_into_extensions(None, NotifyMode::Always, true);
+        let notify = find_notify_in_extensions(&extensions).expect("notify present");
+        assert!(read_rich_payload_opt_in(notify));
+
+        // §2.3 shape: `<rich-payload/>` nests inside `<advanced/>`
+        // inside the fallback, not directly on the fallback.
+        let fallback = notify
+            .children()
+            .find(|c| c.name() == "always")
+            .expect("fallback present");
+        let advanced = fallback
+            .get_child("advanced", NS_NOTIFICATION_SETTINGS)
+            .expect("advanced present");
+        assert!(advanced.has_child("rich-payload", NS_PUSH_RICH_PAYLOAD));
+    }
+
+    #[test]
+    fn read_rich_payload_opt_in_false_without_advanced() {
+        let notify: Element =
+            "<notify xmlns='urn:xmpp:notification-settings:1'><always /></notify>"
+                .parse()
+                .expect("valid xml");
+        assert!(!read_rich_payload_opt_in(&notify));
+    }
+
+    #[test]
+    fn opt_out_removes_rich_payload_but_keeps_foreign_advanced() {
+        // XEP-0492 §3 ¶1 — opting out drops OUR `<rich-payload/>` but
+        // MUST NOT delete the foreign `<weekend/>` advanced setting.
+        let extensions_xml = "<extensions xmlns='urn:xmpp:bookmarks:1'>\
+                    <notify xmlns='urn:xmpp:notification-settings:1'>\
+                        <always>\
+                            <advanced xmlns='urn:xmpp:notification-settings:1'>\
+                                <weekend xmlns='custom:other-client:1'/>\
+                                <rich-payload xmlns='urn:waddle:push:rich:0'/>\
+                            </advanced>\
+                        </always>\
+                    </notify>\
+                    </extensions>";
+        let extensions: Element = extensions_xml.parse().expect("valid xml");
+        let merged = merge_notify_into_extensions(Some(&extensions), NotifyMode::Always, false);
+        let notify = find_notify_in_extensions(&merged).expect("notify present");
+
+        assert!(!read_rich_payload_opt_in(notify));
+        let advanced = notify
+            .children()
+            .find(|c| c.name() == "always")
+            .and_then(|f| f.get_child("advanced", NS_NOTIFICATION_SETTINGS))
+            .expect("advanced kept for the foreign child");
+        assert!(advanced
+            .children()
+            .any(|c| c.name() == "weekend" && c.ns() == "custom:other-client:1"));
+        assert!(!advanced.has_child("rich-payload", NS_PUSH_RICH_PAYLOAD));
+    }
+
+    #[test]
+    fn opt_out_drops_advanced_left_empty() {
+        // §2.3 `<advanced/>` SHOULD NOT be empty — when our
+        // `<rich-payload/>` was the only child, opting out removes the
+        // now-empty `<advanced/>` entirely.
+        let extensions_xml = "<extensions xmlns='urn:xmpp:bookmarks:1'>\
+                    <notify xmlns='urn:xmpp:notification-settings:1'>\
+                        <always>\
+                            <advanced xmlns='urn:xmpp:notification-settings:1'>\
+                                <rich-payload xmlns='urn:waddle:push:rich:0'/>\
+                            </advanced>\
+                        </always>\
+                    </notify>\
+                    </extensions>";
+        let extensions: Element = extensions_xml.parse().expect("valid xml");
+        let merged = merge_notify_into_extensions(Some(&extensions), NotifyMode::Always, false);
+        let notify = find_notify_in_extensions(&merged).expect("notify present");
+        let fallback = notify
+            .children()
+            .find(|c| c.name() == "always")
+            .expect("fallback present");
+        assert!(fallback
+            .get_child("advanced", NS_NOTIFICATION_SETTINGS)
+            .is_none());
+    }
+
+    #[test]
+    fn opt_in_is_idempotent() {
+        // Re-merging an already-opted-in setting MUST NOT accumulate a
+        // second `<rich-payload/>` (§3 ¶3 — no duplicate elements).
+        let once = merge_notify_into_extensions(None, NotifyMode::Always, true);
+        let twice = merge_notify_into_extensions(Some(&once), NotifyMode::Always, true);
+        let notify = find_notify_in_extensions(&twice).expect("notify present");
+        let advanced = notify
+            .children()
+            .find(|c| c.name() == "always")
+            .and_then(|f| f.get_child("advanced", NS_NOTIFICATION_SETTINGS))
+            .expect("advanced present");
+        let rich_count = advanced
+            .children()
+            .filter(|c| c.is("rich-payload", NS_PUSH_RICH_PAYLOAD))
+            .count();
+        assert_eq!(rich_count, 1);
+    }
+
+    #[test]
+    fn opt_out_strips_rich_payload_from_identity_scoped_setting() {
+        // Cross-client robustness: a `<rich-payload/>` marker placed on
+        // an identity-scoped setting by another writer must also be
+        // cleared on opt-out, since both the client reader and the
+        // server `parse_rich_payload_opt_in` honor the marker on ANY
+        // setting — otherwise the opt-out would be a silent no-op and
+        // the UI checkbox would snap back on. The setting's foreign
+        // `<weekend/>` rule and identity attrs are preserved (§3 ¶1).
+        let extensions_xml = "<extensions xmlns='urn:xmpp:bookmarks:1'>\
+                    <notify xmlns='urn:xmpp:notification-settings:1'>\
+                        <always />\
+                        <never identity-category='client' identity-type='pc'>\
+                            <advanced xmlns='urn:xmpp:notification-settings:1'>\
+                                <weekend xmlns='custom:other-client:1'/>\
+                                <rich-payload xmlns='urn:waddle:push:rich:0'/>\
+                            </advanced>\
+                        </never>\
+                    </notify>\
+                    </extensions>";
+        let extensions: Element = extensions_xml.parse().expect("valid xml");
+        let merged = merge_notify_into_extensions(Some(&extensions), NotifyMode::Always, false);
+        let notify = find_notify_in_extensions(&merged).expect("notify present");
+
+        // The opt-in is now fully cleared — no setting carries it.
+        assert!(!read_rich_payload_opt_in(notify));
+        // The identity-scoped setting survives with its foreign rule
+        // and attrs intact.
+        let never = notify
+            .children()
+            .find(|c| {
+                c.name() == "never"
+                    && c.attr("identity-category") == Some("client")
+                    && c.attr("identity-type") == Some("pc")
+            })
+            .expect("identity-scoped setting preserved");
+        let advanced = never
+            .get_child("advanced", NS_NOTIFICATION_SETTINGS)
+            .expect("advanced kept for the foreign child");
+        assert!(advanced
+            .children()
+            .any(|c| c.ns() == "custom:other-client:1"));
+        assert!(!advanced.has_child("rich-payload", NS_PUSH_RICH_PAYLOAD));
+    }
+
+    #[test]
+    fn opt_in_leaves_identity_scoped_setting_verbatim() {
+        // On opt-in we record the marker on the fallback and do NOT
+        // touch identity-scoped siblings — a foreign rule there is
+        // preserved exactly.
+        let extensions_xml = "<extensions xmlns='urn:xmpp:bookmarks:1'>\
+                    <notify xmlns='urn:xmpp:notification-settings:1'>\
+                        <always />\
+                        <never identity-category='client'>\
+                            <advanced xmlns='urn:xmpp:notification-settings:1'>\
+                                <weekend xmlns='custom:other-client:1'/>\
+                            </advanced>\
+                        </never>\
+                    </notify>\
+                    </extensions>";
+        let extensions: Element = extensions_xml.parse().expect("valid xml");
+        let merged = merge_notify_into_extensions(Some(&extensions), NotifyMode::Always, true);
+        let notify = find_notify_in_extensions(&merged).expect("notify present");
+        assert!(read_rich_payload_opt_in(notify));
+        let never = notify
+            .children()
+            .find(|c| c.name() == "never" && c.attr("identity-category") == Some("client"))
+            .expect("identity-scoped setting preserved");
+        let advanced = never
+            .get_child("advanced", NS_NOTIFICATION_SETTINGS)
+            .expect("foreign advanced preserved");
+        assert!(advanced
+            .children()
+            .any(|c| c.ns() == "custom:other-client:1"));
+    }
+
+    #[test]
+    fn opt_in_carries_through_mode_change() {
+        // Changing the fallback name (always → never) while opting in
+        // re-parents the opt-in under the new fallback (§3 ¶1).
+        let always_opted = merge_notify_into_extensions(None, NotifyMode::Always, true);
+        let now_never = merge_notify_into_extensions(Some(&always_opted), NotifyMode::Never, true);
+        let notify = find_notify_in_extensions(&now_never).expect("notify present");
+        assert_eq!(read_fallback_mode(notify), Some(NotifyMode::Never));
+        assert!(read_rich_payload_opt_in(notify));
     }
 }

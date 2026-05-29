@@ -326,7 +326,7 @@ mod tests {
 
     #[test]
     fn build_conference_round_trips_extension_children() {
-        let merged = merge_notify_into_extensions(None, NotifyMode::Never);
+        let merged = merge_notify_into_extensions(None, NotifyMode::Never, false);
         let item = BookmarkItem {
             jid: "theplay@conference.example.com".parse().unwrap(),
             name: Some("The Play".into()),

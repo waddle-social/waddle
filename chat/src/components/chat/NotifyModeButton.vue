@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
-import { AtSign, Bell, BellOff } from "lucide-vue-next";
+import { AtSign, Bell, BellOff, Check } from "lucide-vue-next";
 import type { BrowserXmppClient, NotifyMode } from "@/lib/xmpp-client";
 import {
   effectiveNotifyMode,
@@ -48,17 +48,28 @@ const props = defineProps<{
 
 const open = ref(false);
 const submitting = ref<NotifyMode | null>(null);
+const submittingRich = ref(false);
 const errorMessage = ref<string | null>(null);
 const rootEl = ref<HTMLElement | null>(null);
 const triggerEl = ref<HTMLButtonElement | null>(null);
 const optionRefs = ref<(HTMLButtonElement | null)[]>([]);
 
 const MODES: NotifyMode[] = ["always", "on-mention", "never"];
+// Menu rows participating in arrow-key navigation: the three mode
+// radios plus the rich-payload checkbox at the end.
+const MENU_ITEM_COUNT = MODES.length + 1;
+const RICH_INDEX = MODES.length;
 
 const currentMode = computed<NotifyMode>(() => {
   const bookmark = props.store.bookmarks.value[props.roomJid];
   return effectiveNotifyMode(bookmark, props.conversationKind);
 });
+
+const richOptIn = computed<boolean>(() => props.store.getRichPayloadOptIn(props.roomJid));
+
+// Any in-flight publish (mode or opt-in) freezes the whole menu so two
+// fetch-merge-publish round-trips can't race on the same bookmark.
+const busy = computed(() => submitting.value !== null || submittingRich.value);
 
 const icon = computed(() => {
   switch (currentMode.value) {
@@ -112,7 +123,7 @@ function closeAndReturnFocus() {
 
 async function selectMode(mode: NotifyMode) {
   if (!props.client) return;
-  if (submitting.value !== null) return;
+  if (busy.value) return;
   if (mode === currentMode.value) {
     closeAndReturnFocus();
     return;
@@ -153,17 +164,58 @@ async function selectMode(mode: NotifyMode) {
   }
 }
 
+async function toggleRichPayload() {
+  if (!props.client) return;
+  if (busy.value) return;
+  submittingRich.value = true;
+  errorMessage.value = null;
+  try {
+    let result: Awaited<ReturnType<typeof props.store.setRichPayloadOptIn>>;
+    try {
+      result = await props.store.setRichPayloadOptIn(props.client, {
+        roomJid: props.roomJid,
+        optIn: !richOptIn.value,
+        kind: props.conversationKind,
+        name: props.roomName,
+      });
+    } catch (error) {
+      // Defence-in-depth, mirroring selectMode — a lower-layer
+      // regression that throws surfaces in the banner rather than
+      // leaving the toggle in a silent dead state.
+      console.warn("[NotifyModeButton] props.store.setRichPayloadOptIn threw:", error);
+      errorMessage.value = "Couldn't save the setting. Try again in a moment.";
+      return;
+    }
+    // The toggle is a stay-put interaction (unlike picking a mode,
+    // which dismisses), so the popover stays open on success.
+    if (result === "node-config-mismatch") {
+      errorMessage.value =
+        "This room's settings node was created by an older client. Ask a server admin to delete the node so Waddle can re-create it.";
+    } else if (result !== "ok") {
+      errorMessage.value = "Couldn't save the setting. Try again in a moment.";
+    }
+  } finally {
+    submittingRich.value = false;
+    // The toggle was `disabled` while busy, which blurs it. Now that
+    // it has re-enabled, re-land focus on it (after the DOM updates)
+    // so keyboard / AT users keep their place in the open menu.
+    if (open.value) {
+      void nextTick().then(() => focusOptionAt(RICH_INDEX));
+    }
+  }
+}
+
 function onMenuKeydown(event: KeyboardEvent) {
   switch (event.key) {
     case "ArrowDown":
     case "ArrowRight":
       event.preventDefault();
-      focusOptionAt(nextMenuIndex(focusedIndex(), 1, MODES.length));
+      focusOptionAt(nextMenuIndex(focusedIndex(), 1, MENU_ITEM_COUNT));
       break;
     case "ArrowUp":
     case "ArrowLeft":
       event.preventDefault();
-      focusOptionAt(nextMenuIndex(focusedIndex(), -1, MODES.length));
+      focusOptionAt(nextMenuIndex(focusedIndex(), -1, MENU_ITEM_COUNT));
       break;
     case "Home":
       event.preventDefault();
@@ -171,7 +223,7 @@ function onMenuKeydown(event: KeyboardEvent) {
       break;
     case "End":
       event.preventDefault();
-      focusOptionAt(MODES.length - 1);
+      focusOptionAt(MENU_ITEM_COUNT - 1);
       break;
     case "Escape":
       event.preventDefault();
@@ -250,7 +302,7 @@ onUnmounted(() => {
         type="button"
         role="menuitemradio"
         :aria-checked="currentMode === mode"
-        :disabled="submitting !== null"
+        :disabled="busy"
         class="flex w-full flex-col items-start gap-0.5 rounded-md px-2 py-2 text-left hover:bg-muted focus:bg-muted focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
         :class="{ 'bg-muted/60': currentMode === mode }"
         @click="selectMode(mode)"
@@ -262,6 +314,26 @@ onUnmounted(() => {
         </div>
         <span class="type-meta text-muted-foreground">{{ NOTIFY_MODE_HINT[mode] }}</span>
       </button>
+
+      <div class="my-1 border-t border-border" role="separator" />
+      <button
+        :ref="(el) => optionRefs[RICH_INDEX] = (el as HTMLButtonElement | null)"
+        type="button"
+        role="menuitemcheckbox"
+        :aria-checked="richOptIn"
+        :disabled="busy"
+        class="flex w-full flex-col items-start gap-0.5 rounded-md px-2 py-2 text-left hover:bg-muted focus:bg-muted focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
+        :class="{ 'bg-muted/60': richOptIn }"
+        @click="toggleRichPayload"
+      >
+        <div class="flex w-full items-center justify-between">
+          <span class="type-field text-foreground">Rich notification previews</span>
+          <span v-if="submittingRich" class="type-meta text-muted-foreground">Saving…</span>
+          <Check v-else-if="richOptIn" class="h-3.5 w-3.5 text-primary" aria-hidden="true" />
+        </div>
+        <span class="type-meta text-muted-foreground">Show the sender and a message preview in push notifications for this chat.</span>
+      </button>
+
       <p
         v-if="errorMessage"
         class="type-meta mt-1 rounded-md bg-destructive/10 px-2 py-1.5 text-destructive"

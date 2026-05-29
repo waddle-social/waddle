@@ -320,6 +320,11 @@ export interface UserBookmarkItem {
   name: string | null;
   autojoin: boolean;
   notifyMode: NotifyMode | null;
+  /** Waddle rich XEP-0357 push-summary opt-in, carried in the
+   * XEP-0492 §2.3 `<advanced/>` block of this conversation's
+   * `<notify/>` as `<rich-payload xmlns='urn:waddle:push:rich:0'/>`
+   * (#719). `false` is the default — the minimal push payload. */
+  richPayloadOptIn: boolean;
 }
 
 /** Typed outcome of [[BrowserXmppClient.setRoomNotificationMode]].
@@ -379,6 +384,7 @@ type XmppClientInstance = Partial<WasmClient> & CompatEmitter & {
     roomJid: string;
     mode: NotifyMode;
     name?: string;
+    richPayloadOptIn?: boolean;
   }) => Promise<SetRoomNotificationModeOutcome>;
 };
 
@@ -1728,6 +1734,9 @@ export class BrowserXmppClient {
     roomJid: string;
     mode: "always" | "on-mention" | "never";
     name?: string;
+    /** Waddle rich XEP-0357 push-summary opt-in (#719). When omitted,
+     * the WASM bridge defaults it to `false` (minimal payload). */
+    richPayloadOptIn?: boolean;
   }): Promise<SetRoomNotificationModeOutcome> {
     // Wrap the WHOLE call — including `requireConnectedXmpp()` — so
     // a reconnect/teardown race (the client instance exists but the
@@ -1746,6 +1755,7 @@ export class BrowserXmppClient {
         roomJid: opts.roomJid,
         mode: opts.mode,
         name: opts.name,
+        richPayloadOptIn: opts.richPayloadOptIn,
       })) as SetRoomNotificationModeOutcome;
       if (outcome.kind === "error") {
         console.warn("[xmpp] XEP-0492 bookmark publish rejected");

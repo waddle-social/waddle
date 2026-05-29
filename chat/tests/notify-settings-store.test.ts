@@ -22,7 +22,12 @@ import type {
 class FakeXmppClient {
   constructor(
     private bookmarks: UserBookmarkItem[],
-    public published: { roomJid: string; mode: NotifyMode; name?: string }[] = [],
+    public published: {
+      roomJid: string;
+      mode: NotifyMode;
+      name?: string;
+      richPayloadOptIn?: boolean;
+    }[] = [],
   ) {}
 
   async fetchUserBookmarks(): Promise<UserBookmarkItem[]> {
@@ -33,17 +38,29 @@ class FakeXmppClient {
     roomJid: string;
     mode: NotifyMode;
     name?: string;
+    richPayloadOptIn?: boolean;
   }): Promise<SetRoomNotificationModeOutcome> {
     this.published.push(opts);
+    // Mirror the WASM bridge: the opt-in defaults to false when the
+    // caller omits it (#719).
+    const richPayloadOptIn = opts.richPayloadOptIn ?? false;
     const updated: UserBookmarkItem = {
       jid: opts.roomJid,
       name: opts.name ?? null,
       autojoin: false,
       notifyMode: opts.mode,
+      richPayloadOptIn,
     };
     const idx = this.bookmarks.findIndex((b) => b.jid === opts.roomJid);
-    if (idx >= 0) this.bookmarks[idx] = { ...this.bookmarks[idx], notifyMode: opts.mode };
-    else this.bookmarks.push(updated);
+    if (idx >= 0) {
+      this.bookmarks[idx] = {
+        ...this.bookmarks[idx],
+        notifyMode: opts.mode,
+        richPayloadOptIn,
+      };
+    } else {
+      this.bookmarks.push(updated);
+    }
     return { kind: "ok", item: updated };
   }
 }
@@ -70,6 +87,7 @@ describe("effectiveNotifyMode", () => {
       name: null,
       autojoin: false,
       notifyMode: "never",
+      richPayloadOptIn: false,
     };
     expect(effectiveNotifyMode(bookmark, "public-group")).toBe("never");
   });
@@ -80,6 +98,7 @@ describe("effectiveNotifyMode", () => {
       name: null,
       autojoin: false,
       notifyMode: null,
+      richPayloadOptIn: false,
     };
     expect(effectiveNotifyMode(bookmark, "public-group")).toBe("on-mention");
     expect(effectiveNotifyMode(bookmark, "private-group")).toBe("always");
@@ -113,7 +132,7 @@ describe("hydrate preserves cache across reconnects (no flicker)", () => {
     const store = createNotifySettingsStore();
     // Initial hydrate.
     await store.hydrate(asClient(new FakeXmppClient([
-      { jid: "a@example.com", name: "A", autojoin: false, notifyMode: "never" },
+      { jid: "a@example.com", name: "A", autojoin: false, notifyMode: "never", richPayloadOptIn: false },
     ])));
     expect(store.bookmarks.value["a@example.com"].notifyMode).toBe("never");
 
@@ -136,8 +155,8 @@ describe("hydrate preserves cache across reconnects (no flicker)", () => {
     expect(store.bookmarks.value["a@example.com"].notifyMode).toBe("never");
 
     resolveFetch([
-      { jid: "a@example.com", name: "A", autojoin: false, notifyMode: "always" },
-      { jid: "b@example.com", name: "B", autojoin: false, notifyMode: "never" },
+      { jid: "a@example.com", name: "A", autojoin: false, notifyMode: "always", richPayloadOptIn: false },
+      { jid: "b@example.com", name: "B", autojoin: false, notifyMode: "never", richPayloadOptIn: false },
     ]);
     await pending;
     expect(store.hydrating.value).toBe(false);
@@ -150,8 +169,8 @@ describe("createNotifySettingsStore", () => {
   test("hydrate populates the cache from fetchUserBookmarks", async () => {
     const store = createNotifySettingsStore();
     const fake = new FakeXmppClient([
-      { jid: "a@example.com", name: "A", autojoin: true, notifyMode: "never" },
-      { jid: "b@example.com", name: "B", autojoin: false, notifyMode: null },
+      { jid: "a@example.com", name: "A", autojoin: true, notifyMode: "never", richPayloadOptIn: false },
+      { jid: "b@example.com", name: "B", autojoin: false, notifyMode: null, richPayloadOptIn: false },
     ]);
 
     expect(store.hydrating.value).toBe(false);
@@ -169,7 +188,7 @@ describe("createNotifySettingsStore", () => {
   test("getMode reads from the cache; falls back to default when absent", () => {
     const store = createNotifySettingsStore();
     store.replaceAll([
-      { jid: "muted@example.com", name: null, autojoin: false, notifyMode: "never" },
+      { jid: "muted@example.com", name: null, autojoin: false, notifyMode: "never", richPayloadOptIn: false },
     ]);
 
     expect(store.getMode("muted@example.com", "private-group")).toBe("never");
@@ -186,8 +205,9 @@ describe("createNotifySettingsStore", () => {
       name: "general",
     });
     expect(result).toBe("ok");
+    // No prior bookmark → the opt-in defaults to false (minimal payload).
     expect(fake.published).toEqual([
-      { roomJid: "general@example.com", mode: "on-mention", name: "general" },
+      { roomJid: "general@example.com", mode: "on-mention", name: "general", richPayloadOptIn: false },
     ]);
     expect(store.bookmarks.value["general@example.com"].notifyMode).toBe("on-mention");
   });
@@ -195,7 +215,7 @@ describe("createNotifySettingsStore", () => {
   test("setMode preserves cached entries for other rooms", async () => {
     const store = createNotifySettingsStore();
     store.replaceAll([
-      { jid: "other@example.com", name: "Other", autojoin: false, notifyMode: "always" },
+      { jid: "other@example.com", name: "Other", autojoin: false, notifyMode: "always", richPayloadOptIn: false },
     ]);
     const fake = new FakeXmppClient([]);
     await store.setMode(asClient(fake), { roomJid: "new@example.com", mode: "never" });
@@ -206,7 +226,7 @@ describe("createNotifySettingsStore", () => {
   test("setMode failure leaves the rest of the cache unchanged (round-8 P2)", async () => {
     const store = createNotifySettingsStore();
     store.replaceAll([
-      { jid: "kept@example.com", name: "Kept", autojoin: false, notifyMode: "never" },
+      { jid: "kept@example.com", name: "Kept", autojoin: false, notifyMode: "never", richPayloadOptIn: false },
     ]);
     const rejecting = {
       async fetchUserBookmarks(): Promise<UserBookmarkItem[]> {
@@ -251,7 +271,7 @@ describe("createNotifySettingsStore", () => {
     // the lifecycle handler's `void` dispatch.
     const store = createNotifySettingsStore();
     store.replaceAll([
-      { jid: "kept@example.com", name: "Kept", autojoin: false, notifyMode: "always" },
+      { jid: "kept@example.com", name: "Kept", autojoin: false, notifyMode: "always", richPayloadOptIn: false },
     ]);
     const throwing = {
       async fetchUserBookmarks(): Promise<UserBookmarkItem[]> {
@@ -289,7 +309,7 @@ describe("createNotifySettingsStore", () => {
 
     // Old account's fetch now resolves.
     resolveFetch([
-      { jid: "stale@example.com", name: "stale", autojoin: false, notifyMode: "always" },
+      { jid: "stale@example.com", name: "stale", autojoin: false, notifyMode: "always", richPayloadOptIn: false },
     ]);
     await pending;
 
@@ -322,7 +342,7 @@ describe("createNotifySettingsStore", () => {
   test("setMode-during-reset: stale publish result is discarded (round-12 P1)", async () => {
     const store = createNotifySettingsStore();
     store.replaceAll([
-      { jid: "kept@example.com", name: "Kept", autojoin: false, notifyMode: "always" },
+      { jid: "kept@example.com", name: "Kept", autojoin: false, notifyMode: "always", richPayloadOptIn: false },
     ]);
     let resolvePublish: (outcome: SetRoomNotificationModeOutcome) => void = () => {};
     const slowClient = {
@@ -345,7 +365,7 @@ describe("createNotifySettingsStore", () => {
     // Old account's publish now resolves successfully.
     resolvePublish({
       kind: "ok",
-      item: { jid: "stale@example.com", name: null, autojoin: false, notifyMode: "never" },
+      item: { jid: "stale@example.com", name: null, autojoin: false, notifyMode: "never", richPayloadOptIn: false },
     });
     await pending;
 
@@ -356,8 +376,8 @@ describe("createNotifySettingsStore", () => {
   test("reset clears the cache for logout / account-switch (round-8 P1)", async () => {
     const store = createNotifySettingsStore();
     store.replaceAll([
-      { jid: "a@example.com", name: "A", autojoin: false, notifyMode: "never" },
-      { jid: "b@example.com", name: "B", autojoin: false, notifyMode: "on-mention" },
+      { jid: "a@example.com", name: "A", autojoin: false, notifyMode: "never", richPayloadOptIn: false },
+      { jid: "b@example.com", name: "B", autojoin: false, notifyMode: "on-mention", richPayloadOptIn: false },
     ]);
     expect(Object.keys(store.bookmarks.value).length).toBe(2);
     store.reset();
@@ -387,8 +407,74 @@ describe("createNotifySettingsStore", () => {
     const second = store.hydrate(slowClient as unknown as BrowserXmppClient);
     expect(calls).toBe(1);
 
-    resolveFetch([{ jid: "x@example.com", name: "X", autojoin: false, notifyMode: "never" }]);
+    resolveFetch([
+      { jid: "x@example.com", name: "X", autojoin: false, notifyMode: "never", richPayloadOptIn: false },
+    ]);
     await Promise.all([first, second]);
     expect(calls).toBe(1);
+  });
+});
+
+describe("rich-payload opt-in (#719)", () => {
+  test("getRichPayloadOptIn defaults to false and reads the cache", () => {
+    const store = createNotifySettingsStore();
+    store.replaceAll([
+      { jid: "rich@example.com", name: "Rich", autojoin: false, notifyMode: "always", richPayloadOptIn: true },
+      { jid: "plain@example.com", name: "Plain", autojoin: false, notifyMode: "always", richPayloadOptIn: false },
+    ]);
+    expect(store.getRichPayloadOptIn("rich@example.com")).toBe(true);
+    expect(store.getRichPayloadOptIn("plain@example.com")).toBe(false);
+    // Absent bookmark — opt-out default (minimal payload).
+    expect(store.getRichPayloadOptIn("unknown@example.com")).toBe(false);
+  });
+
+  test("setRichPayloadOptIn publishes the opt-in while preserving the current mode", async () => {
+    const store = createNotifySettingsStore();
+    store.replaceAll([
+      { jid: "room@example.com", name: "Room", autojoin: false, notifyMode: "on-mention", richPayloadOptIn: false },
+    ]);
+    const fake = new FakeXmppClient([]);
+    const result = await store.setRichPayloadOptIn(asClient(fake), {
+      roomJid: "room@example.com",
+      optIn: true,
+      kind: "private-group",
+    });
+    expect(result).toBe("ok");
+    // The publish carries the EXISTING mode (on-mention), not a reset
+    // to the conversation-kind default — only the opt-in changed.
+    expect(fake.published).toEqual([
+      { roomJid: "room@example.com", mode: "on-mention", name: undefined, richPayloadOptIn: true },
+    ]);
+    expect(store.getRichPayloadOptIn("room@example.com")).toBe(true);
+    expect(store.getMode("room@example.com", "private-group")).toBe("on-mention");
+  });
+
+  test("setRichPayloadOptIn on an unknown room uses the XEP-0492 §3 default mode", async () => {
+    const store = createNotifySettingsStore();
+    const fake = new FakeXmppClient([]);
+    await store.setRichPayloadOptIn(asClient(fake), {
+      roomJid: "fresh@example.com",
+      optIn: true,
+      kind: "public-group",
+      name: "Fresh",
+    });
+    expect(fake.published).toEqual([
+      { roomJid: "fresh@example.com", mode: "on-mention", name: "Fresh", richPayloadOptIn: true },
+    ]);
+    expect(store.getRichPayloadOptIn("fresh@example.com")).toBe(true);
+  });
+
+  test("setMode preserves the existing rich-payload opt-in", async () => {
+    const store = createNotifySettingsStore();
+    store.replaceAll([
+      { jid: "room@example.com", name: "Room", autojoin: false, notifyMode: "always", richPayloadOptIn: true },
+    ]);
+    const fake = new FakeXmppClient([]);
+    await store.setMode(asClient(fake), { roomJid: "room@example.com", mode: "never" });
+    // Changing the mode MUST NOT silently drop the opt-in.
+    expect(fake.published).toEqual([
+      { roomJid: "room@example.com", mode: "never", name: undefined, richPayloadOptIn: true },
+    ]);
+    expect(store.getRichPayloadOptIn("room@example.com")).toBe(true);
   });
 });

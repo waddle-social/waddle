@@ -33,6 +33,10 @@ export class WaddleClient {
      * Single-step `action='execute'` carrying the `node` + `device-id`
      * fields. The Push Service marks the row inactive — no payload
      * shape returned, the caller only cares about success vs. error.
+     *
+     * Verifies the response's `from=` matches `service_jid` before
+     * returning (RFC 6120 §8.1.2.1 / §10.5 defense-in-depth — same
+     * pattern as `fetch_vapid_public_key` above).
      */
     disable_push_device(service_jid: string, node: string, device_id: string): Promise<any>;
     /**
@@ -363,7 +367,10 @@ export class WaddleClient {
      * * Replace the fallback `<notify/>` child via
      *   [`merge_notify_into_extensions`] — foreign `<advanced/>`
      *   children and identity-scoped siblings written by other
-     *   clients are preserved verbatim (XEP-0492 §3).
+     *   clients are preserved verbatim (XEP-0492 §3). The same call
+     *   toggles the Waddle rich XEP-0357 push-summary opt-in
+     *   (`options.richPayloadOptIn`, #719) inside the fallback's
+     *   `<advanced/>`.
      * * Publish the merged item back.
      *
      * Resolves to the new [`WaddleBookmarkItem`] so the chat UI can
