@@ -320,7 +320,12 @@ export function applyMucCallPresence(
 function clearLeavingMarkerWhenMujiCaughtUp(roomJid: string): void {
   const leavingNick = mucCallRoomLeavingNick($mucCallLeavingRooms.get(), roomJid);
   if (!leavingNick) return;
-  const stillPresent = ($mucCallParticipants.get()[roomJid] ?? []).includes(leavingNick);
+  // `$mucCallParticipants` is keyed by normalized JIDs, so normalize
+  // the lookup too — an unnormalized caller would otherwise read
+  // `undefined` and clear the marker before the Muji view has actually
+  // caught up. Matches every other map lookup in this file.
+  const normalized = normalizeMucCallRoomJid(roomJid);
+  const stillPresent = ($mucCallParticipants.get()[normalized] ?? []).includes(leavingNick);
   if (!stillPresent) clearRoomLeavingCall(roomJid);
 }
 
