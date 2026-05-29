@@ -1,14 +1,21 @@
 use super::*;
 
+// #757: the MUC disco#info router compares a target's domain against
+// `service_domains.muc`, so that value MUST equal the domain the MUC room
+// registry is built from — the deployment-authoritative `WADDLE_MUC_DOMAIN`
+// (and `WADDLE_SPACES_JID`), not a re-derived `muc.<domain>`. The remaining
+// components have no override and are still derived from the base domain.
 #[test]
-fn service_domains_use_xmpp_domain_for_all_components() {
-    let domains = XmppServiceDomains::new("waddle.social");
+fn service_domains_use_authoritative_muc_and_spaces_and_derive_the_rest() {
+    let domains =
+        XmppServiceDomains::new("waddle.social", "chat.waddle.social", "rooms.waddle.social");
 
+    assert_eq!(domains.muc, "chat.waddle.social");
+    assert_eq!(domains.spaces, "rooms.waddle.social");
     assert_eq!(domains.extensions, "extensions.waddle.social");
-    assert_eq!(domains.muc, "muc.waddle.social");
     assert_eq!(domains.push, "push.waddle.social");
-    assert_eq!(domains.spaces, "spaces.waddle.social");
     assert_eq!(domains.upload, "upload.waddle.social");
+    assert_eq!(domains.community, "community.waddle.social");
 }
 
 #[tokio::test]
