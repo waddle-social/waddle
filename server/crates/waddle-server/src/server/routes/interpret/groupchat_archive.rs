@@ -61,7 +61,7 @@ pub(super) async fn finish_archive_groupchat_message(
     // None-vs-empty distinction so subject-only / reaction-only
     // groupchat messages don't materialize a fake empty body in the
     // archive's denormalized projection.
-    let body = prototype_body(&archive_clone);
+    let body = super::prototype_body(&archive_clone);
     let reply = extract_groupchat_reply_reference(&archive_clone, room);
     let origin_id = extract_origin_id(&archive_clone);
     let rich = rich_archive_payload(&archive_clone);
@@ -413,14 +413,6 @@ pub(crate) fn room_scoped_reply_to_attr(value: &str, room: &BareJid) -> Option<J
 
 pub(super) fn extract_origin_id(message: &Message) -> Option<waddle_xmpp_core::xep0359::OriginId> {
     waddle_xmpp_core::xep0359::extract_origin_id(message)
-}
-
-pub(super) fn prototype_body(message: &Message) -> Option<String> {
-    message
-        .bodies
-        .get("")
-        .or_else(|| message.bodies.values().next())
-        .cloned()
 }
 
 pub(super) fn serialize_groupchat_stanza_xml(message: &Message) -> Option<String> {

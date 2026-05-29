@@ -308,6 +308,21 @@ fn rewrite_stanza_id(stanza_id: &mut Xep0359StanzaId, rewrites: &[ArchiveIdRewri
     }
 }
 
+/// Best-effort plain-text body of a message: the default-language
+/// `<body/>` if present, else any body.
+///
+/// Shared interpret-layer helper used by both the DM and groupchat
+/// notification-candidate paths (and the groupchat archive prototype) so
+/// neither emission site has to reach into a sibling module for body
+/// extraction.
+pub(crate) fn prototype_body(message: &Message) -> Option<String> {
+    message
+        .bodies
+        .get("")
+        .or_else(|| message.bodies.values().next())
+        .cloned()
+}
+
 /// Internal entry point that threads the recursion depth. The public
 /// [`interpret`] starts at depth 0; the offline-recipient pass
 /// re-enters at depth 1 via [`run_headless_recipient_pass`].

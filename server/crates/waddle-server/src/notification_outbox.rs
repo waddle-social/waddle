@@ -62,7 +62,7 @@ const NOTIFICATION_OUTBOX_CLASS_VALUES: [&str; 6] = [
 const NOTIFICATION_OUTBOX_CLASS_CHECK_SQL: &str = "class IN ('dm', 'dm_mention', 'personal_mention', 'channel_mention', 'active_channel_mention', 'notify_all')";
 const NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_CHECK_NAME: &str =
     "notification_candidates_suppressed_reason_check";
-const NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_VALUES: [&str; 14] = [
+const NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_VALUES: [&str; 12] = [
     "xep0357_self",
     "xep0357_no_registration",
     "xep0357_registration_disabled",
@@ -71,14 +71,12 @@ const NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_VALUES: [&str; 14] = [
     "xep0191_blocked",
     "xep0513_noping",
     "xep0513_active_miss",
-    "xep0334_no_store",
-    "xep0334_no_permanent_store",
     "waddle_dnd",
     "provider_rejected",
     "provider_token_expired",
     "xep0357_push_service_degraded",
 ];
-const NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_CHECK_SQL: &str = "suppressed_reason IS NULL OR suppressed_reason IN ('xep0357_self', 'xep0357_no_registration', 'xep0357_registration_disabled', 'xep0492_never', 'xep0492_on_mention_miss', 'xep0191_blocked', 'xep0513_noping', 'xep0513_active_miss', 'xep0334_no_store', 'xep0334_no_permanent_store', 'waddle_dnd', 'provider_rejected', 'provider_token_expired', 'xep0357_push_service_degraded')";
+const NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_CHECK_SQL: &str = "suppressed_reason IS NULL OR suppressed_reason IN ('xep0357_self', 'xep0357_no_registration', 'xep0357_registration_disabled', 'xep0492_never', 'xep0492_on_mention_miss', 'xep0191_blocked', 'xep0513_noping', 'xep0513_active_miss', 'waddle_dnd', 'provider_rejected', 'provider_token_expired', 'xep0357_push_service_degraded')";
 const NOTIFICATION_CANDIDATES_INDEXES: [&str; 4] = [
     "idx_notification_candidates_recipient_created",
     "idx_notification_candidates_identity",
@@ -257,10 +255,6 @@ pub(crate) enum SuppressedReason {
     /// XEP-0513 `<active/>` filter missed — reserved variant; emitted
     /// in slice 2b once the `notification_activity` projection lands.
     Xep0513ActiveMiss,
-    /// XEP-0334 `<no-store/>` hint on the message.
-    Xep0334NoStore,
-    /// XEP-0334 `<no-permanent-store/>` hint on the message.
-    Xep0334NoPermanentStore,
     /// Waddle DnD state is active for the recipient.
     WaddleDnd,
     /// Push provider rejected the published payload. Reserved variant;
@@ -301,8 +295,6 @@ impl SuppressedReason {
         Self::Xep0191Blocked,
         Self::Xep0513Noping,
         Self::Xep0513ActiveMiss,
-        Self::Xep0334NoStore,
-        Self::Xep0334NoPermanentStore,
         Self::WaddleDnd,
         Self::ProviderRejected,
         Self::ProviderTokenExpired,
@@ -319,8 +311,6 @@ impl SuppressedReason {
             Self::Xep0191Blocked => "xep0191_blocked",
             Self::Xep0513Noping => "xep0513_noping",
             Self::Xep0513ActiveMiss => "xep0513_active_miss",
-            Self::Xep0334NoStore => "xep0334_no_store",
-            Self::Xep0334NoPermanentStore => "xep0334_no_permanent_store",
             Self::WaddleDnd => "waddle_dnd",
             Self::ProviderRejected => "provider_rejected",
             Self::ProviderTokenExpired => "provider_token_expired",
@@ -383,13 +373,20 @@ pub struct NotificationCandidate {
     /// recipient out of being pinged for this mention.
     noping: bool,
     /// XEP-0334 `<no-store/>` hint, message-frozen at T0. When `true`
-    /// the T1 evaluator suppresses with
-    /// [`SuppressedReason::Xep0334NoStore`].
+    /// the body is stripped from the XEP-0357 summary at T1 (the
+    /// minimal push still fires).
     no_store: bool,
     /// XEP-0334 `<no-permanent-store/>` hint, message-frozen at T0.
-    /// When `true` the T1 evaluator suppresses with
-    /// [`SuppressedReason::Xep0334NoPermanentStore`].
+    /// When `true` the body is stripped from the XEP-0357 summary at T1
+    /// (the minimal push still fires).
     no_permanent_store: bool,
+    /// Snapshot of the message body, message-frozen at T0, used to build
+    /// the optional XEP-0357 §5.4 `last-message-body` field when the
+    /// recipient opts in (see [`RichSummary`]). `None` when the message
+    /// had no body OR when an XEP-0334 `<no-store/>`/`<no-permanent-store/>`
+    /// hint applies — an off-the-record body is never persisted onto the
+    /// candidate row, even temporarily (XEP-0334 §3 storage conformance).
+    last_message_body: Option<String>,
 }
 
 /// Message-frozen suppression hints carried on a
@@ -495,6 +492,7 @@ impl NotificationCandidate {
             noping: hints.noping,
             no_store: hints.no_store,
             no_permanent_store: hints.no_permanent_store,
+            last_message_body: None,
         })
     }
 
@@ -560,7 +558,30 @@ impl NotificationCandidate {
             noping: hints.noping,
             no_store: hints.no_store,
             no_permanent_store: hints.no_permanent_store,
+            last_message_body: None,
         })
+    }
+
+    /// Snapshot the message body for the optional XEP-0357 §5.4
+    /// `last-message-body` field.
+    ///
+    /// XEP-0334 §3 storage conformance: when this candidate carries a
+    /// `<no-store/>` or `<no-permanent-store/>` hint, the body is dropped
+    /// here so an off-the-record body is never persisted onto the
+    /// candidate row — not even temporarily. The T1 evaluator applies the
+    /// same hint precedence again when resolving the [`RichSummary`]
+    /// (defense in depth + the XEP-defined T1 decision point).
+    pub fn with_last_message_body(mut self, body: Option<String>) -> Self {
+        self.last_message_body = if self.no_store || self.no_permanent_store {
+            None
+        } else {
+            body
+        };
+        self
+    }
+
+    pub fn last_message_body(&self) -> Option<&str> {
+        self.last_message_body.as_deref()
     }
 
     pub fn recipient_bare_jid(&self) -> &BareJid {
@@ -640,6 +661,10 @@ pub struct NotificationOutboxJob {
     class: NotificationClass,
     message_count: u32,
     context: Element,
+    /// Resolved XEP-0357 §5.4 rich summary fields, decided at T1 drain
+    /// from the recipient's XEP-0492 opt-in and the candidate's
+    /// XEP-0334 hints. Defaults to [`RichSummary::minimal`] (opt-out).
+    rich_summary: RichSummary,
     status: NotificationOutboxStatus,
     attempt_count: i64,
     policy_error_count: i64,
@@ -707,11 +732,16 @@ impl NotificationOutboxJob {
         self.claim_token.as_deref()
     }
 
+    pub fn rich_summary(&self) -> &RichSummary {
+        &self.rich_summary
+    }
+
     pub fn to_xep0357_pubsub_item_with_count(&self, message_count: u32) -> PubSubItem {
         PubSubItem::new(
             Some(self.job_id.as_str().to_string()),
             Some(build_xep0357_notification_payload(
                 message_count,
+                &self.rich_summary,
                 &self.context,
             )),
         )
@@ -1057,6 +1087,7 @@ fn notification_candidates_table_sql(i64_type: &str, if_not_exists: bool) -> Str
             noping INTEGER NOT NULL DEFAULT 0,
             no_store INTEGER NOT NULL DEFAULT 0,
             no_permanent_store INTEGER NOT NULL DEFAULT 0,
+            last_message_body TEXT,
             PRIMARY KEY (recipient_bare_jid, conversation_jid, thread_id, stanza_id_by, stanza_id, class)
         )
         "#
@@ -1079,6 +1110,14 @@ fn notification_outbox_table_sql(i64_type: &str, if_not_exists: bool) -> String 
             class TEXT NOT NULL CONSTRAINT {NOTIFICATION_OUTBOX_CLASS_CHECK_NAME} CHECK ({NOTIFICATION_OUTBOX_CLASS_CHECK_SQL}),
             message_count INTEGER NOT NULL,
             context_xml TEXT NOT NULL,
+            -- #719 rich XEP-0357 §5.4 summary fields. Both nullable and
+            -- written together: `summary_sender_jid` is the
+            -- `last-message-sender` (present iff the recipient opted in),
+            -- `summary_body` the (hint-stripped) `last-message-body`.
+            -- Stored explicitly rather than inferred from the routing
+            -- `sender_jid`, so `RichSummary` round-trips 1:1.
+            summary_sender_jid TEXT,
+            summary_body TEXT,
             status TEXT NOT NULL CHECK (status IN ('queued', 'in-progress', 'published', 'failed')),
             attempt_count INTEGER NOT NULL DEFAULT 0,
             policy_error_count INTEGER NOT NULL DEFAULT 0,
@@ -1138,10 +1177,23 @@ fn notification_outbox_class_constraint_matches_expected(definition: &str) -> bo
 
 fn notification_candidates_suppressed_reason_constraint_matches_expected(definition: &str) -> bool {
     let normalized = definition.to_ascii_lowercase();
-    normalized.contains("suppressed_reason")
-        && NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_VALUES
-            .iter()
-            .all(|reason| constraint_definition_quotes_value(&normalized, reason))
+    if !normalized.contains("suppressed_reason") {
+        return false;
+    }
+    let all_present = NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_VALUES
+        .iter()
+        .all(|reason| constraint_definition_quotes_value(&normalized, reason));
+    // Reject a stale *superset* constraint. The audit set can SHRINK
+    // (e.g. the removed `xep0334_no_store`/`xep0334_no_permanent_store`
+    // variants), and a subset-only check would treat an old definition
+    // that still lists a dropped label as up-to-date — leaving the DB
+    // willing to store `suppressed_reason` values the Rust enum no
+    // longer understands. The only single-quoted tokens in the CHECK
+    // are the reason values (SQLite `'v'` and Postgres `'v'::...`), so
+    // an exact token count pins the constraint to exactly the current
+    // set and forces a rebuild when it diverges in either direction.
+    let quoted_value_count = normalized.matches('\'').count() / 2;
+    all_present && quoted_value_count == NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_VALUES.len()
 }
 
 #[derive(Clone)]
@@ -1214,6 +1266,11 @@ impl NotificationOutboxStore {
             "no_permanent_store INTEGER NOT NULL DEFAULT 0",
         )
         .await?;
+        // #719: message-body snapshot for the optional XEP-0357 §5.4
+        // `last-message-body`. Nullable — dropped when a XEP-0334
+        // storage hint applies.
+        self.add_column_if_missing("notification_candidates", "last_message_body TEXT")
+            .await?;
         self.migrate_notification_candidates_suppressed_reason_constraint(i64_type)
             .await?;
         self.execute(
@@ -1257,6 +1314,20 @@ impl NotificationOutboxStore {
         )
         .await?;
         self.migrate_notification_outbox_class_constraint(i64_type)
+            .await?;
+        // #719: T1-resolved XEP-0357 §5.4 rich summary fields.
+        // `summary_sender_jid` is the `last-message-sender` (NULL unless
+        // the recipient opted in); `summary_body` is the (hint-stripped)
+        // `last-message-body`.
+        //
+        // These ALTERs run AFTER the class-constraint rebuild: that
+        // rebuild's INSERT…SELECT only copies the original column set,
+        // so columns added before it would be silently dropped on a
+        // legacy-CHECK DB (same ordering rule the candidates side
+        // documents above).
+        self.add_column_if_missing("notification_outbox", "summary_sender_jid TEXT")
+            .await?;
+        self.add_column_if_missing("notification_outbox", "summary_body TEXT")
             .await?;
         self.execute(
             "DROP INDEX IF EXISTS idx_notification_outbox_queued_coalesce",
@@ -1928,8 +1999,9 @@ impl NotificationOutboxStore {
                     suppressed_reason,
                     noping,
                     no_store,
-                    no_permanent_store
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?)
+                    no_permanent_store,
+                    last_message_body
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?)
                 ON CONFLICT DO NOTHING
                 "#,
                 crate::db_params![
@@ -1946,6 +2018,7 @@ impl NotificationOutboxStore {
                     i64::from(candidate.noping),
                     i64::from(candidate.no_store),
                     i64::from(candidate.no_permanent_store),
+                    candidate.last_message_body.clone(),
                 ],
             )
             .await?;
@@ -2101,7 +2174,7 @@ impl NotificationOutboxStore {
                     continue;
                 }
             };
-            match outcome {
+            let rich = match outcome {
                 T1PushDispatchOutcome::Suppressed { reason } => {
                     tracing::info!(
                         recipient = %candidate.recipient_bare_jid(),
@@ -2138,8 +2211,8 @@ impl NotificationOutboxStore {
                     self.defer_candidate_policy_error(&candidate).await?;
                     continue;
                 }
-                T1PushDispatchOutcome::Deliver => {}
-            }
+                T1PushDispatchOutcome::Deliver { rich } => rich,
+            };
             let recipient_key = candidate.recipient_bare_jid.clone();
             if !target_cache.contains_key(&recipient_key) {
                 let resolved = resolve_first_party_targets(
@@ -2163,7 +2236,7 @@ impl NotificationOutboxStore {
                 continue;
             }
             for target in &targets {
-                enqueue_outbox_job_tx(&mut tx, &candidate, target, &context, now_ms).await?;
+                enqueue_outbox_job_tx(&mut tx, &candidate, target, &context, &rich, now_ms).await?;
             }
             tx.commit().await?;
             processed += 1;
@@ -2226,7 +2299,8 @@ impl NotificationOutboxStore {
                        policy_error_count,
                        noping,
                        no_store,
-                       no_permanent_store
+                       no_permanent_store,
+                       last_message_body
                 FROM notification_candidates
                 WHERE outboxed_at_ms IS NULL
                   AND (next_attempt_at_ms IS NULL OR next_attempt_at_ms <= ?)
@@ -2344,7 +2418,9 @@ impl NotificationOutboxStore {
                        status,
                        attempt_count,
                        policy_error_count,
-                       claim_token
+                       claim_token,
+                       summary_sender_jid,
+                       summary_body
                 FROM notification_outbox
                 WHERE status IN (?, ?)
                 ORDER BY created_at_ms ASC, job_id ASC
@@ -2383,7 +2459,9 @@ impl NotificationOutboxStore {
                        status,
                        attempt_count,
                        policy_error_count,
-                       claim_token
+                       claim_token,
+                       summary_sender_jid,
+                       summary_body
                 FROM notification_outbox
                 WHERE (
                     status = ?
@@ -2963,15 +3041,17 @@ impl NotificationOutboxStore {
 /// push), and silently picking either would either drop legitimate
 /// private-room pushes or fan out unwanted public-room pushes. Slice
 /// 2 will replace the live actor lookup with a durable projection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum T1PushDispatchOutcome {
-    /// Push gate decided to fan out; enqueue the push job.
-    Deliver,
+    /// Push gate decided to fan out; enqueue the push job. `rich`
+    /// carries the T1-resolved XEP-0357 §5.4 summary fields (minimal at
+    /// T0Emit; resolved from the recipient's XEP-0492 opt-in and the
+    /// candidate's XEP-0334 hints at T1Drain).
+    Deliver { rich: RichSummary },
     /// Push gate decided to suppress; mark candidate outboxed without
     /// enqueueing a job. `reason` is the typed audit reason that
     /// caused suppression (XEP-0492 `<never/>` / `<on-mention/>` miss,
-    /// XEP-0191 blocking, XEP-0513 `<noping/>`, XEP-0334 hint, or
-    /// Waddle DnD).
+    /// XEP-0191 blocking, XEP-0513 `<noping/>`, or Waddle DnD).
     Suppressed { reason: SuppressedReason },
     /// MUC config could not be resolved (room actor unavailable or
     /// failed). Defer with policy-error backoff so the next drain
@@ -3150,30 +3230,27 @@ pub(crate) async fn evaluate_push_gate_at_dispatch(
     let room_policy_cache = &mut *caches.room_policy;
     let dnd_cache = &mut *caches.dnd;
     let activity_cache = &mut *caches.activity;
-    // Message-frozen suppressors (`<noping/>`, XEP-0334 storage hints)
-    // run ONLY at T1Drain so the candidate row is persisted with its
-    // hint bits and the typed `suppressed_reason` audit can fire. At
-    // T0Emit the row doesn't exist yet — suppressing here would leave
-    // no audit trail, defeating the whole purpose of snapshotting the
-    // hint bits onto `NotificationCandidate` in the first place. The
-    // sender-precedence ordering (hints before recipient-state reads)
-    // is preserved within T1Drain.
-    if stage == PushEvalStage::T1Drain {
-        if candidate.noping() {
-            return Ok(T1PushDispatchOutcome::Suppressed {
-                reason: SuppressedReason::Xep0513Noping,
-            });
-        }
-        if candidate.no_store() {
-            return Ok(T1PushDispatchOutcome::Suppressed {
-                reason: SuppressedReason::Xep0334NoStore,
-            });
-        }
-        if candidate.no_permanent_store() {
-            return Ok(T1PushDispatchOutcome::Suppressed {
-                reason: SuppressedReason::Xep0334NoPermanentStore,
-            });
-        }
+    // Message-frozen suppressor (`<noping/>`) runs ONLY at T1Drain so
+    // the candidate row is persisted with its hint bits and the typed
+    // `suppressed_reason` audit can fire. At T0Emit the row doesn't
+    // exist yet — suppressing here would leave no audit trail,
+    // defeating the whole purpose of snapshotting the hint bits onto
+    // `NotificationCandidate` in the first place.
+    //
+    // XEP-0334 `<no-store/>`/`<no-permanent-store/>` are NOT push
+    // suppressors. Per XEP-0334 §3 they scope to message *storage*
+    // (archives, offline queues, logs), and §8 cautions that hints
+    // MUST NOT be relied on for any particular purpose — a transient
+    // push notification is not "storage". They instead strip the
+    // `last-message-body` from the rich XEP-0357 summary (the body, not
+    // the notification, is what would become a semi-permanent record at
+    // the push gateway). That stripping is resolved alongside the
+    // recipient's opt-in in `resolve_rich_summary` below; the minimal
+    // push still fires.
+    if stage == PushEvalStage::T1Drain && candidate.noping() {
+        return Ok(T1PushDispatchOutcome::Suppressed {
+            reason: SuppressedReason::Xep0513Noping,
+        });
     }
 
     let (conversation_kind, is_mention) = match candidate.class() {
@@ -3297,8 +3374,12 @@ pub(crate) async fn evaluate_push_gate_at_dispatch(
             });
         }
     }
-    let level = settings_projection
-        .effective_setting(
+    // One projection read yields both the XEP-0492 level and the
+    // rich-payload opt-in — the delivery path needs both, and fetching
+    // the row twice would double projection-store IO per delivering
+    // candidate on a channel fan-out.
+    let (level, rich_opt_in) = settings_projection
+        .effective_setting_and_rich_opt_in(
             candidate.recipient_bare_jid(),
             candidate.conversation_jid(),
             conversation_kind,
@@ -3308,7 +3389,8 @@ pub(crate) async fn evaluate_push_gate_at_dispatch(
         crate::notification_settings_projection::PushDispatchDecision::evaluate(level, is_mention);
     Ok(match decision {
         crate::notification_settings_projection::PushDispatchDecision::Deliver => {
-            T1PushDispatchOutcome::Deliver
+            let rich = resolve_rich_summary(stage, rich_opt_in, candidate);
+            T1PushDispatchOutcome::Deliver { rich }
         }
         crate::notification_settings_projection::PushDispatchDecision::Suppressed { reason } => {
             T1PushDispatchOutcome::Suppressed {
@@ -3316,6 +3398,47 @@ pub(crate) async fn evaluate_push_gate_at_dispatch(
             }
         }
     })
+}
+
+/// Resolve the XEP-0357 §5.4 rich summary fields for a delivering
+/// candidate.
+///
+/// The rich summary is a T1 concern: the recipient's XEP-0492
+/// `<advanced/>` opt-in is recipient state read fresh at drain (passed
+/// in as `opt_in`), and the minimal default (no rich fields) is correct
+/// at T0Emit, where the candidate-persistence decision does not need it.
+///
+/// When the recipient has opted in:
+/// - `last-message-sender` is the candidate's full sender JID — routing
+///   metadata present in any delivery, preserved even when a hint
+///   strips the body. For groupchat this is the room-occupant JID
+///   (`room@muc/nick`), never a real JID: the candidate constructor
+///   enforces `sender_jid.to_bare() == conversation_jid` via
+///   `require_sender_matches_conversation`.
+/// - `last-message-body` is included only when no XEP-0334
+///   `<no-store/>`/`<no-permanent-store/>` hint applies. The hint always
+///   wins over the opt-in: shipping the body to a third-party push
+///   gateway is a semi-permanent store of the message. (The body is
+///   already `None` on hinted candidates — it was never persisted at T0
+///   — but the explicit check keeps the XEP-defined precedence visible
+///   and testable at the T1 decision point.)
+fn resolve_rich_summary(
+    stage: PushEvalStage,
+    opt_in: bool,
+    candidate: &NotificationCandidate,
+) -> RichSummary {
+    if stage != PushEvalStage::T1Drain || !opt_in {
+        return RichSummary::minimal();
+    }
+    let body = if candidate.no_store() || candidate.no_permanent_store() {
+        None
+    } else {
+        candidate.last_message_body().map(str::to_owned)
+    };
+    RichSummary {
+        sender: Some(candidate.sender_jid().clone()),
+        body,
+    }
 }
 
 /// Translates a XEP-0492 [`waddle_xmpp::xep::NotificationLevel`]
@@ -3481,17 +3604,19 @@ async fn enqueue_outbox_job_tx(
     candidate: &NotificationCandidate,
     target: &NotificationOutboxTarget,
     context: &Element,
+    rich: &RichSummary,
     now_ms: i64,
 ) -> Result<(), NotificationOutboxError> {
     // The durable schema stores XML as TEXT; keep protocol context typed until this DB write edge.
     let context_xml = String::from(context);
     for _ in 0..8 {
         let inserted =
-            insert_outbox_job_tx(tx, candidate, target, context_xml.as_str(), now_ms).await?;
+            insert_outbox_job_tx(tx, candidate, target, context_xml.as_str(), rich, now_ms).await?;
         if inserted > 0 {
             return Ok(());
         }
-        match merge_outbox_job_tx(tx, candidate, target, context_xml.as_str(), now_ms).await? {
+        match merge_outbox_job_tx(tx, candidate, target, context_xml.as_str(), rich, now_ms).await?
+        {
             OutboxMergeOutcome::Merged => return Ok(()),
             OutboxMergeOutcome::MalformedExistingJobFailed
             | OutboxMergeOutcome::QueuedJobNotFound
@@ -3506,6 +3631,7 @@ async fn insert_outbox_job_tx(
     candidate: &NotificationCandidate,
     target: &NotificationOutboxTarget,
     context_xml: &str,
+    rich: &RichSummary,
     now_ms: i64,
 ) -> Result<u64, NotificationOutboxError> {
     let job_id = NotificationOutboxJobId::fresh();
@@ -3525,6 +3651,8 @@ async fn insert_outbox_job_tx(
                 class,
                 message_count,
                 context_xml,
+                summary_sender_jid,
+                summary_body,
                 status,
                 attempt_count,
                 policy_error_count,
@@ -3535,7 +3663,7 @@ async fn insert_outbox_job_tx(
                 created_at_ms,
                 updated_at_ms,
                 published_at_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 0, 0, NULL, NULL, NULL, NULL, ?, ?, NULL)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, 0, 0, NULL, NULL, NULL, NULL, ?, ?, NULL)
             ON CONFLICT DO NOTHING
             "#,
             crate::db_params![
@@ -3549,6 +3677,8 @@ async fn insert_outbox_job_tx(
                 candidate.thread_id.as_str(),
                 candidate.class.as_db_value(),
                 context_xml,
+                rich.sender.as_ref().map(ToString::to_string),
+                rich.body.clone(),
                 STATUS_QUEUED,
                 now_ms,
                 now_ms,
@@ -3569,6 +3699,7 @@ async fn merge_outbox_job_tx(
     candidate: &NotificationCandidate,
     target: &NotificationOutboxTarget,
     context_xml: &str,
+    rich: &RichSummary,
     now_ms: i64,
 ) -> Result<OutboxMergeOutcome, NotificationOutboxError> {
     let mut rows = tx
@@ -3660,6 +3791,8 @@ async fn merge_outbox_job_tx(
             context_xml = ?,
             sender_jid = ?,
             sender_jids = ?,
+            summary_sender_jid = ?,
+            summary_body = ?,
             policy_error_count = 0,
             last_error = NULL,
             next_attempt_at_ms = NULL,
@@ -3671,6 +3804,8 @@ async fn merge_outbox_job_tx(
                 context_xml,
                 candidate.sender_jid.to_string(),
                 sender_jids,
+                rich.sender.as_ref().map(ToString::to_string),
+                rich.body.clone(),
                 now_ms,
                 job_id_raw,
                 STATUS_QUEUED,
@@ -3890,6 +4025,7 @@ fn decode_candidate(row: &Row) -> Result<NotificationCandidate, NotificationOutb
         noping: row.get::<i64>(9)? != 0,
         no_store: row.get::<i64>(10)? != 0,
         no_permanent_store: row.get::<i64>(11)? != 0,
+        last_message_body: row.get::<Option<String>>(12)?,
     })
 }
 
@@ -3905,6 +4041,8 @@ fn decode_outbox_job(row: &Row) -> Result<NotificationOutboxJob, NotificationOut
         .ok_or(NotificationOutboxError::MissingSenderJidSet)?;
     let message_count: i64 = row.get(9)?;
     let context_xml: String = row.get(10)?;
+    let summary_sender_raw: Option<String> = row.get(15)?;
+    let summary_body: Option<String> = row.get(16)?;
     let sender_jid: Jid = sender_raw
         .parse()
         .map_err(|_| NotificationOutboxError::InvalidSenderJid(sender_raw))?;
@@ -3917,6 +4055,21 @@ fn decode_outbox_job(row: &Row) -> Result<NotificationOutboxJob, NotificationOut
     require_full_sender_jid_set(&sender_jids)?;
     require_sender_set_matches_conversation(&sender_jids, &conversation_jid)?;
     require_sender_set_contains_scalar(&sender_jids, &sender_jid)?;
+    // Rehydrate the T1-resolved rich summary directly from its own
+    // columns — `summary_sender_jid` is the `last-message-sender`
+    // (present iff the recipient opted in), `summary_body` the
+    // (hint-stripped) `last-message-body`. Stored explicitly, so no
+    // inference from the routing `sender_jid` is needed.
+    let summary_sender = summary_sender_raw
+        .map(|raw| {
+            raw.parse::<Jid>()
+                .map_err(|_| NotificationOutboxError::InvalidSenderJid(raw))
+        })
+        .transpose()?;
+    let rich_summary = RichSummary {
+        sender: summary_sender,
+        body: summary_body,
+    };
     Ok(NotificationOutboxJob {
         job_id: NotificationOutboxJobId::from(row.get::<String>(0)?),
         recipient_bare_jid: recipient_raw
@@ -3936,6 +4089,7 @@ fn decode_outbox_job(row: &Row) -> Result<NotificationOutboxJob, NotificationOut
         context: context_xml
             .parse::<Element>()
             .map_err(|error| NotificationOutboxError::InvalidContextXml(error.to_string()))?,
+        rich_summary,
         status: NotificationOutboxStatus::from_db_value(&row.get::<String>(11)?)?,
         attempt_count: row.get(12)?,
         policy_error_count: row.get(13)?,
@@ -3960,24 +4114,65 @@ fn build_waddle_context(candidate: &NotificationCandidate) -> Element {
         .build()
 }
 
-pub fn build_xep0357_notification_payload(message_count: u32, context: &Element) -> Element {
+/// Resolved XEP-0357 §5.4 rich summary fields, decided at T1.
+///
+/// The push decision evaluator resolves these from the recipient's
+/// XEP-0492 `<advanced/>` rich-payload opt-in and the message-frozen
+/// XEP-0334 storage hints (see [`evaluate_push_gate_at_dispatch`]):
+///
+/// - `sender` (`last-message-sender`) is set iff the recipient opted in;
+///   it is a routing JID present in any delivery and is preserved even
+///   when a storage hint strips the body.
+/// - `body` (`last-message-body`) is set iff the recipient opted in AND
+///   no XEP-0334 `<no-store/>`/`<no-permanent-store/>` hint applies —
+///   shipping the body to a third-party push gateway is a semi-permanent
+///   store, so the hint always wins over the opt-in.
+///
+/// The default (`None`/`None`) is the minimal summary: `message-count`
+/// plus the Waddle routing context only.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RichSummary {
+    pub sender: Option<Jid>,
+    pub body: Option<String>,
+}
+
+impl RichSummary {
+    /// The minimal default — no rich fields (opt-out).
+    pub fn minimal() -> Self {
+        Self::default()
+    }
+}
+
+pub fn build_xep0357_notification_payload(
+    message_count: u32,
+    rich: &RichSummary,
+    context: &Element,
+) -> Element {
     Element::builder("notification", waddle_xmpp::xep::xep0357::NS_PUSH)
-        .append(build_xep0357_summary_form(message_count))
+        .append(build_xep0357_summary_form(message_count, rich))
         .append(context.clone())
         .build()
 }
 
-fn build_xep0357_summary_form(message_count: u32) -> Element {
+fn build_xep0357_summary_form(message_count: u32, rich: &RichSummary) -> Element {
     // XEP-0357 §4 example shows `<x xmlns='jabber:x:data'>` with NO
     // `type` attribute — the form is a passively-encapsulated summary,
     // not the result of a search/query. XEP-0004 §3.2 reserves
     // `type='result'` for query-response contexts which doesn't apply
     // here; emitting it confused at least one client we tested
     // against. Match the §4 example literally.
-    Element::builder("x", NS_DATA_FORMS)
+    let mut builder = Element::builder("x", NS_DATA_FORMS)
         .append(xdata_hidden_field("FORM_TYPE", XEP0357_SUMMARY_FORM_TYPE))
-        .append(xdata_field("message-count", &message_count.to_string()))
-        .build()
+        .append(xdata_field("message-count", &message_count.to_string()));
+    // XEP-0357 §5.4 optional rich fields. Order matches the spec
+    // example: sender before body.
+    if let Some(sender) = &rich.sender {
+        builder = builder.append(xdata_field("last-message-sender", &sender.to_string()));
+    }
+    if let Some(body) = &rich.body {
+        builder = builder.append(xdata_field("last-message-body", body));
+    }
+    builder.build()
 }
 
 fn xdata_hidden_field(var: &str, value: &str) -> Element {
@@ -4109,6 +4304,43 @@ mod tests {
             class,
         )
         .expect("groupchat candidate")
+    }
+
+    #[test]
+    fn candidate_snapshots_body_when_unhinted() {
+        let candidate = candidate("archive-body")
+            .with_last_message_body(Some("Wherefore art thou, Romeo?".to_string()));
+        assert_eq!(
+            candidate.last_message_body(),
+            Some("Wherefore art thou, Romeo?")
+        );
+    }
+
+    #[test]
+    fn candidate_drops_body_when_storage_hint_present() {
+        // XEP-0334 storage conformance: an off-the-record body is never
+        // persisted onto the candidate row, even temporarily.
+        let recipient = bare("alice@example.com");
+        let sender_jid: Jid = "bob@example.com/res".parse().expect("jid");
+        for hints in [
+            NotificationMessageHints::none().with_xep0334(true, false),
+            NotificationMessageHints::none().with_xep0334(false, true),
+        ] {
+            let candidate = NotificationCandidate::direct_message_with_hints(
+                recipient.clone(),
+                sender_jid.clone(),
+                StanzaId::new("archive-hinted", Jid::from(recipient.clone())),
+                false,
+                hints,
+            )
+            .expect("candidate")
+            .with_last_message_body(Some("secret".to_string()));
+            assert_eq!(
+                candidate.last_message_body(),
+                None,
+                "storage hint must drop the snapshotted body"
+            );
+        }
     }
 
     #[test]
@@ -4842,6 +5074,85 @@ mod tests {
         let _ = sender_bare;
     }
 
+    /// #719 migration regression: a legacy `notification_outbox` table
+    /// with a stale `class` CHECK (pre-`dm_mention`) and WITHOUT the
+    /// rich-summary columns (`summary_sender_jid`, `summary_body`) must upgrade
+    /// cleanly. Store init runs the class-constraint rebuild followed by
+    /// the column ALTERs (the documented ordering); a legacy queued row
+    /// must remain decodable afterwards with a minimal rich summary.
+    #[tokio::test]
+    async fn store_initialization_migrates_legacy_outbox_without_rich_summary_columns() {
+        let db = Database::in_memory("notification-outbox-legacy-rich-summary")
+            .await
+            .unwrap();
+        let conn = db.guard().await.expect("db guard");
+        conn.execute(
+            r#"
+            CREATE TABLE notification_outbox (
+                job_id TEXT PRIMARY KEY,
+                recipient_bare_jid TEXT NOT NULL,
+                push_service_jid TEXT NOT NULL,
+                node TEXT NOT NULL,
+                conversation_jid TEXT NOT NULL,
+                sender_jid TEXT NOT NULL,
+                sender_jids TEXT NOT NULL,
+                thread_id TEXT NOT NULL DEFAULT '',
+                class TEXT NOT NULL CHECK (class IN ('dm', 'personal_mention', 'channel_mention', 'active_channel_mention', 'notify_all')),
+                message_count INTEGER NOT NULL,
+                context_xml TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('queued', 'in-progress', 'published', 'failed')),
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                policy_error_count INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                next_attempt_at_ms INTEGER,
+                claimed_at_ms INTEGER,
+                claim_token TEXT,
+                created_at_ms INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                published_at_ms INTEGER
+            )
+            "#,
+            (),
+        )
+        .await
+        .expect("create legacy outbox table");
+        conn.execute(
+            r#"
+            INSERT INTO notification_outbox (
+                job_id, recipient_bare_jid, push_service_jid, node,
+                conversation_jid, sender_jid, sender_jids, thread_id,
+                class, message_count, context_xml, status,
+                attempt_count, policy_error_count, last_error,
+                next_attempt_at_ms, claimed_at_ms, claim_token,
+                created_at_ms, updated_at_ms, published_at_ms
+            ) VALUES (
+                'legacy-job', 'bob@example.com', 'push.example.com', 'web-node',
+                'alice@example.com', 'alice@example.com/web',
+                '["alice@example.com/web"]', '',
+                'dm', 1,
+                '<notification xmlns=''urn:xmpp:push:0''/>', 'queued',
+                0, 0, NULL, NULL, NULL, NULL, 1, 1, NULL
+            )
+            "#,
+            (),
+        )
+        .await
+        .expect("insert legacy outbox row");
+        drop(conn);
+
+        let store = NotificationOutboxStore::new(db)
+            .await
+            .expect("store initializes and migrates legacy outbox");
+
+        // The legacy row decodes through the new SELECT/decoder, which
+        // reads `summary_sender_jid`/`summary_body` at the appended indices —
+        // proving the columns were added by migration.
+        let jobs = store.pending_outbox_jobs().await.expect("jobs");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].job_id().as_str(), "legacy-job");
+        assert_eq!(jobs[0].rich_summary(), &RichSummary::minimal());
+    }
+
     /// Round-trip regression for the new `DirectMessageMention` class /
     /// `OfflineDirectMessageMention` reason variants introduced in
     /// slice 1 of #526. Inserts a DM candidate with `is_mention=true`
@@ -5199,9 +5510,16 @@ mod tests {
             .await
             .expect("mark candidate outboxed");
         for target in targets {
-            enqueue_outbox_job_tx(&mut tx, candidate, target, &context, now_ms)
-                .await
-                .expect("enqueue outbox job");
+            enqueue_outbox_job_tx(
+                &mut tx,
+                candidate,
+                target,
+                &context,
+                &RichSummary::minimal(),
+                now_ms,
+            )
+            .await
+            .expect("enqueue outbox job");
         }
         tx.commit().await.expect("commit tx");
     }
@@ -5519,6 +5837,7 @@ mod tests {
                 conversation_kind:
                     crate::notification_settings_projection::ConversationKind::Direct,
                 mode: waddle_xmpp::xep::NotificationLevel::Never,
+                rich_payload_opt_in: false,
                 source_version: 1,
                 updated_at_ms: crate::time::now_ms(),
                 source:
@@ -6474,6 +6793,7 @@ mod tests {
             class: NotificationClass::ChannelMention,
             message_count: 1,
             context: Element::builder("notification", waddle_xmpp::xep::xep0357::NS_PUSH).build(),
+            rich_summary: RichSummary::minimal(),
             status: NotificationOutboxStatus::Queued,
             attempt_count: 0,
             policy_error_count: 0,
@@ -6802,7 +7122,7 @@ mod tests {
             .attr(minidom::rxml::xml_ncname!("thread").to_owned(), "")
             .attr(minidom::rxml::xml_ncname!("class").to_owned(), "dm")
             .build();
-        let payload = build_xep0357_notification_payload(3, &context);
+        let payload = build_xep0357_notification_payload(3, &RichSummary::minimal(), &context);
 
         assert!(payload.is("notification", waddle_xmpp::xep::xep0357::NS_PUSH));
         let summary = payload
@@ -6840,6 +7160,76 @@ mod tests {
             .expect("waddle context");
         assert_eq!(context.attr("conversation"), Some("bob@example.com"));
         assert_eq!(context.attr("class"), Some("dm"));
+    }
+
+    #[test]
+    fn xep0357_summary_form_emits_rich_fields_when_opted_in() {
+        let context = Element::builder("context", WADDLE_PUSH_CONTEXT_NS)
+            .attr(
+                minidom::rxml::xml_ncname!("conversation").to_owned(),
+                "juliet@capulet.example",
+            )
+            .attr(minidom::rxml::xml_ncname!("thread").to_owned(), "")
+            .attr(minidom::rxml::xml_ncname!("class").to_owned(), "dm")
+            .build();
+        let rich = RichSummary {
+            sender: Some("juliet@capulet.example/balcony".parse().expect("jid")),
+            body: Some("Wherefore art thou, Romeo?".to_string()),
+        };
+        let payload = build_xep0357_notification_payload(1, &rich, &context);
+
+        let summary = payload
+            .children()
+            .find(|child| child.is("x", NS_DATA_FORMS))
+            .expect("summary form");
+        let field_value = |var: &str| -> Option<String> {
+            summary
+                .children()
+                .find(|field| field.is("field", NS_DATA_FORMS) && field.attr("var") == Some(var))
+                .and_then(|field| {
+                    field
+                        .children()
+                        .find(|value| value.is("value", NS_DATA_FORMS))
+                })
+                .map(|value| value.text())
+        };
+        assert_eq!(field_value("message-count").as_deref(), Some("1"));
+        assert_eq!(
+            field_value("last-message-sender").as_deref(),
+            Some("juliet@capulet.example/balcony")
+        );
+        assert_eq!(
+            field_value("last-message-body").as_deref(),
+            Some("Wherefore art thou, Romeo?")
+        );
+    }
+
+    #[test]
+    fn xep0357_summary_form_strips_body_but_keeps_sender_when_hint_stripped() {
+        let context = Element::builder("context", WADDLE_PUSH_CONTEXT_NS)
+            .attr(
+                minidom::rxml::xml_ncname!("conversation").to_owned(),
+                "juliet@capulet.example",
+            )
+            .attr(minidom::rxml::xml_ncname!("thread").to_owned(), "")
+            .attr(minidom::rxml::xml_ncname!("class").to_owned(), "dm")
+            .build();
+        // Sender preserved, body stripped (XEP-0334 hint precedence).
+        let rich = RichSummary {
+            sender: Some("juliet@capulet.example/balcony".parse().expect("jid")),
+            body: None,
+        };
+        let payload = build_xep0357_notification_payload(1, &rich, &context);
+        let summary = payload
+            .children()
+            .find(|child| child.is("x", NS_DATA_FORMS))
+            .expect("summary form");
+        assert!(summary
+            .children()
+            .any(|field| field.attr("var") == Some("last-message-sender")));
+        assert!(!summary
+            .children()
+            .any(|field| field.attr("var") == Some("last-message-body")));
     }
 
     #[tokio::test]
@@ -8167,7 +8557,7 @@ mod tests {
 
     #[test]
     fn postgres_suppressed_reason_constraint_match_accepts_current_definition() {
-        let postgres_definition = "CHECK (((suppressed_reason IS NULL) OR ((suppressed_reason)::text = ANY ((ARRAY['xep0357_self'::character varying, 'xep0357_no_registration'::character varying, 'xep0357_registration_disabled'::character varying, 'xep0492_never'::character varying, 'xep0492_on_mention_miss'::character varying, 'xep0191_blocked'::character varying, 'xep0513_noping'::character varying, 'xep0513_active_miss'::character varying, 'xep0334_no_store'::character varying, 'xep0334_no_permanent_store'::character varying, 'waddle_dnd'::character varying, 'provider_rejected'::character varying, 'provider_token_expired'::character varying, 'xep0357_push_service_degraded'::character varying])::text[]))))";
+        let postgres_definition = "CHECK (((suppressed_reason IS NULL) OR ((suppressed_reason)::text = ANY ((ARRAY['xep0357_self'::character varying, 'xep0357_no_registration'::character varying, 'xep0357_registration_disabled'::character varying, 'xep0492_never'::character varying, 'xep0492_on_mention_miss'::character varying, 'xep0191_blocked'::character varying, 'xep0513_noping'::character varying, 'xep0513_active_miss'::character varying, 'waddle_dnd'::character varying, 'provider_rejected'::character varying, 'provider_token_expired'::character varying, 'xep0357_push_service_degraded'::character varying])::text[]))))";
         assert!(
             notification_candidates_suppressed_reason_constraint_matches_expected(
                 postgres_definition
@@ -8184,6 +8574,21 @@ mod tests {
             !notification_candidates_suppressed_reason_constraint_matches_expected(
                 sqlite_create_sql
             ),
+        );
+    }
+
+    #[test]
+    fn suppressed_reason_constraint_match_rejects_stale_superset_definition() {
+        // #719 / Codex review: when the audit set SHRINKS, a legacy
+        // CHECK that still lists a removed label (here the dropped
+        // `xep0334_no_store`/`xep0334_no_permanent_store`) must be
+        // flagged stale — otherwise the DB keeps accepting
+        // `suppressed_reason` values the Rust enum no longer
+        // understands. A subset-only matcher would wrongly accept this.
+        let superset = "suppressed_reason IS NULL OR suppressed_reason IN ('xep0357_self', 'xep0357_no_registration', 'xep0357_registration_disabled', 'xep0492_never', 'xep0492_on_mention_miss', 'xep0191_blocked', 'xep0513_noping', 'xep0513_active_miss', 'xep0334_no_store', 'xep0334_no_permanent_store', 'waddle_dnd', 'provider_rejected', 'provider_token_expired', 'xep0357_push_service_degraded')";
+        assert!(
+            !notification_candidates_suppressed_reason_constraint_matches_expected(superset),
+            "a CHECK listing removed labels must be treated as stale so the rebuild fires"
         );
     }
 
@@ -8285,6 +8690,7 @@ mod tests {
                     crate::notification_settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
                 source_item_jid: sender.clone(),
                 updated_at_ms: 1,
+                rich_payload_opt_in: false,
                 source_version: 1,
             })
             .await
@@ -8363,6 +8769,7 @@ mod tests {
                     crate::notification_settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
                 source_item_jid: sender.clone(),
                 updated_at_ms: 1,
+                rich_payload_opt_in: false,
                 source_version: 1,
             })
             .await
@@ -8496,7 +8903,7 @@ mod tests {
         .await
         .expect("t0 eval");
         assert!(
-            matches!(t0, T1PushDispatchOutcome::Deliver),
+            matches!(t0, T1PushDispatchOutcome::Deliver { .. }),
             "T0Emit must NOT suppress on message-frozen `<noping/>` so the candidate persists; got {t0:?}"
         );
 
@@ -8519,7 +8926,10 @@ mod tests {
             "T1Drain must suppress noping with the typed Xep0513Noping reason; got {t1:?}"
         );
 
-        // Sanity: the same split applies to XEP-0334 hint bits.
+        // Contrast: XEP-0334 storage hints are NOT push suppressors.
+        // Per XEP-0334 §3/§8 they scope to message storage, not push
+        // delivery, so a `<no-store/>` candidate delivers a (minimal)
+        // push at both stages — the hint only strips the rich body.
         let no_store_candidate = NotificationCandidate::direct_message_with_hints(
             recipient.clone(),
             sender_jid,
@@ -8536,7 +8946,7 @@ mod tests {
         )
         .await
         .expect("t0 eval");
-        assert!(matches!(t0_no_store, T1PushDispatchOutcome::Deliver));
+        assert!(matches!(t0_no_store, T1PushDispatchOutcome::Deliver { .. }));
         let t1_no_store = evaluate_push_gate_at_dispatch(
             PushEvalStage::T1Drain,
             eval_deps,
@@ -8545,12 +8955,10 @@ mod tests {
         )
         .await
         .expect("t1 eval");
-        assert!(matches!(
-            t1_no_store,
-            T1PushDispatchOutcome::Suppressed {
-                reason: SuppressedReason::Xep0334NoStore
-            }
-        ));
+        assert!(
+            matches!(t1_no_store, T1PushDispatchOutcome::Deliver { .. }),
+            "XEP-0334 <no-store/> must not suppress the push; got {t1_no_store:?}"
+        );
     }
 
     /// XEP-0513 `<noping/>` carried on the candidate row MUST suppress
@@ -8613,12 +9021,36 @@ mod tests {
         assert!(rendered.contains("waddle_push_suppressed_total{reason=\"xep0513_noping\"} 1"),);
     }
 
-    /// XEP-0334 `<no-store/>` hint snapshotted onto a candidate row
-    /// MUST suppress at T1 with the typed `Xep0334NoStore` reason.
+    /// Upsert a per-conversation rich-payload opt-in for a DM so the
+    /// drain's T1 evaluator resolves rich XEP-0357 summaries.
+    async fn opt_in_rich_payload(
+        projection: &crate::notification_settings_projection::NotificationSettingsProjectionStore,
+        recipient: &BareJid,
+        conversation: &BareJid,
+    ) {
+        projection
+            .upsert(&crate::notification_settings_projection::NotificationSettingsProjection {
+                owner_bare_jid: recipient.clone(),
+                conversation_jid: conversation.clone(),
+                conversation_kind:
+                    crate::notification_settings_projection::ConversationKind::Direct,
+                mode: waddle_xmpp::xep::NotificationLevel::Always,
+                rich_payload_opt_in: true,
+                source_version: 1,
+                updated_at_ms: 1,
+                source:
+                    crate::notification_settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
+                source_item_jid: conversation.clone(),
+            })
+            .await
+            .expect("opt-in upsert");
+    }
+
+    /// #719: with the rich-payload opt-in set and no XEP-0334 storage
+    /// hint, the drained push carries the full XEP-0357 §5.4 summary —
+    /// both `last-message-sender` and `last-message-body`.
     #[tokio::test]
-    async fn t1_no_store_records_typed_suppressed_reason() {
-        let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
-        waddle_xmpp::prometheus::reset_metrics_for_test();
+    async fn t1_opt_in_without_hint_emits_rich_summary() {
         let store = store().await;
         let push_store = waddle_xmpp::push::InMemoryPushStore::new();
         let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
@@ -8626,17 +9058,18 @@ mod tests {
         let room_policy = StubRoomPolicy::new();
         let dnd_reader = NoopDndReader;
         let recipient = bare("alice@example.com");
+        let conversation = bare("bob@example.com");
         let sender_jid: Jid = "bob@example.com/web".parse().expect("full sender");
-        let candidate = NotificationCandidate::direct_message_with_hints(
+        opt_in_rich_payload(&projection, &recipient, &conversation).await;
+        register_push_target(&push_store, &recipient, &target()).await;
+        let candidate = NotificationCandidate::direct_message(
             recipient.clone(),
-            sender_jid,
-            StanzaId::new("t1-no-store", Jid::from(recipient.clone())),
+            sender_jid.clone(),
+            StanzaId::new("t1-rich", Jid::from(recipient.clone())),
             false,
-            NotificationMessageHints::none().with_xep0334(true, false),
         )
-        .expect("candidate");
-        assert!(candidate.no_store());
-        assert!(!candidate.no_permanent_store());
+        .expect("candidate")
+        .with_last_message_body(Some("Wherefore art thou, Romeo?".to_string()));
         store
             .insert_candidate(&candidate)
             .await
@@ -8655,6 +9088,135 @@ mod tests {
             .await
             .expect("drain candidates");
 
+        let jobs = store.pending_outbox_jobs().await.expect("jobs");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].rich_summary().sender.as_ref(), Some(&sender_jid));
+        assert_eq!(
+            jobs[0].rich_summary().body.as_deref(),
+            Some("Wherefore art thou, Romeo?")
+        );
+        // End-to-end: the dispatched XEP-0357 §5.4 wire shape carries
+        // both optional fields.
+        let item = jobs[0].to_xep0357_pubsub_item();
+        let payload = item.payload.expect("payload");
+        let summary = payload
+            .children()
+            .find(|child| child.is("x", NS_DATA_FORMS))
+            .expect("summary form");
+        assert!(summary
+            .children()
+            .any(|field| field.attr("var") == Some("last-message-sender")));
+        assert!(summary
+            .children()
+            .any(|field| field.attr("var") == Some("last-message-body")));
+    }
+
+    /// #719 privacy invariant: for a groupchat, `last-message-sender`
+    /// is the room-occupant JID (`room@muc/nick`), never a real JID.
+    /// The candidate constructor enforces
+    /// `sender_jid.to_bare() == conversation_jid`, so the summary cannot
+    /// leak a real JID to the push gateway regardless of room anonymity.
+    #[tokio::test]
+    async fn t1_groupchat_rich_sender_is_occupant_jid() {
+        let store = store().await;
+        let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+        let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let projection = settings_projection().await;
+        let room_policy = StubRoomPolicy::new();
+        let dnd_reader = NoopDndReader;
+        let recipient = bare("alice@example.com");
+        let room = bare("team@muc.example.com");
+        let occupant: Jid = "team@muc.example.com/bob".parse().expect("occupant jid");
+        // StubRoomPolicy resolves the room as public; a PersonalMention
+        // is a mention, and the stored Always row delivers regardless.
+        opt_in_rich_payload(&projection, &recipient, &room).await;
+        register_push_target(&push_store, &recipient, &target()).await;
+        let candidate = NotificationCandidate::groupchat(
+            recipient.clone(),
+            room.clone(),
+            occupant.clone(),
+            NotificationThreadId::root(),
+            StanzaId::new("gc-rich", Jid::from(room.clone())),
+            NotificationClass::PersonalMention,
+        )
+        .expect("groupchat candidate")
+        .with_last_message_body(Some("hi team".to_string()));
+        store
+            .insert_candidate(&candidate)
+            .await
+            .expect("insert candidate");
+
+        let deps = drain_deps_with_noop_activity(&room_policy, &dnd_reader, noop_activity_reader());
+        store
+            .drain_pending_candidates_into_outbox(
+                &push_store,
+                &blocking,
+                &projection,
+                deps,
+                &bare("push.example.com"),
+                16,
+            )
+            .await
+            .expect("drain candidates");
+
+        let jobs = store.pending_outbox_jobs().await.expect("jobs");
+        assert_eq!(jobs.len(), 1);
+        let sender = jobs[0].rich_summary().sender.as_ref().expect("sender");
+        assert_eq!(sender, &occupant);
+        assert_eq!(
+            sender.to_bare(),
+            room,
+            "sender must be the room-occupant JID"
+        );
+    }
+
+    /// #719 / XEP-0334 §3 precedence: even with the rich-payload opt-in
+    /// set, a `<no-store/>` candidate delivers a push whose summary
+    /// carries NO `last-message-body` — the sender is preserved, and the
+    /// body is never persisted onto the candidate row.
+    #[tokio::test]
+    async fn t1_no_store_strips_body_but_still_delivers_with_opt_in() {
+        let store = store().await;
+        let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+        let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let projection = settings_projection().await;
+        let room_policy = StubRoomPolicy::new();
+        let dnd_reader = NoopDndReader;
+        let recipient = bare("alice@example.com");
+        let conversation = bare("bob@example.com");
+        let sender_jid: Jid = "bob@example.com/web".parse().expect("full sender");
+        opt_in_rich_payload(&projection, &recipient, &conversation).await;
+        register_push_target(&push_store, &recipient, &target()).await;
+        let candidate = NotificationCandidate::direct_message_with_hints(
+            recipient.clone(),
+            sender_jid,
+            StanzaId::new("t1-no-store", Jid::from(recipient.clone())),
+            false,
+            NotificationMessageHints::none().with_xep0334(true, false),
+        )
+        .expect("candidate")
+        .with_last_message_body(Some("secret".to_string()));
+        // Storage conformance: the body is never even persisted.
+        assert_eq!(candidate.last_message_body(), None);
+        store
+            .insert_candidate(&candidate)
+            .await
+            .expect("insert candidate");
+
+        let deps = drain_deps_with_noop_activity(&room_policy, &dnd_reader, noop_activity_reader());
+        store
+            .drain_pending_candidates_into_outbox(
+                &push_store,
+                &blocking,
+                &projection,
+                deps,
+                &bare("push.example.com"),
+                16,
+            )
+            .await
+            .expect("drain candidates");
+
+        // The push is delivered (no suppression recorded)...
         let mut rows = store
             .query(
                 "SELECT suppressed_reason FROM notification_candidates WHERE stanza_id = ?",
@@ -8665,22 +9227,20 @@ mod tests {
         let row = rows.next().await.expect("row").expect("row exists");
         assert_eq!(
             row.get::<Option<String>>(0).expect("reason").as_deref(),
-            Some("xep0334_no_store"),
+            None,
+            "<no-store/> must NOT suppress the push under #719",
         );
-        let rendered = waddle_xmpp::prometheus::render_metrics();
-        assert!(
-            rendered.contains("waddle_push_suppressed_total{reason=\"xep0334_no_store\"} 1"),
-            "T1 XEP-0334 <no-store/> suppression must increment the typed metric counter",
-        );
+        // ...but the summary carries the sender and NOT the body.
+        let jobs = store.pending_outbox_jobs().await.expect("jobs");
+        assert_eq!(jobs.len(), 1);
+        assert!(jobs[0].rich_summary().sender.is_some());
+        assert_eq!(jobs[0].rich_summary().body, None);
     }
 
-    /// XEP-0334 `<no-permanent-store/>` hint snapshotted onto a
-    /// candidate row MUST suppress at T1 with
-    /// `Xep0334NoPermanentStore`.
+    /// #719 / XEP-0334 §3 precedence for `<no-permanent-store/>`: same
+    /// as `<no-store/>` — body stripped, push delivered.
     #[tokio::test]
-    async fn t1_no_permanent_store_records_typed_suppressed_reason() {
-        let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
-        waddle_xmpp::prometheus::reset_metrics_for_test();
+    async fn t1_no_permanent_store_strips_body_but_still_delivers_with_opt_in() {
         let store = store().await;
         let push_store = waddle_xmpp::push::InMemoryPushStore::new();
         let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
@@ -8688,7 +9248,10 @@ mod tests {
         let room_policy = StubRoomPolicy::new();
         let dnd_reader = NoopDndReader;
         let recipient = bare("alice@example.com");
+        let conversation = bare("bob@example.com");
         let sender_jid: Jid = "bob@example.com/web".parse().expect("full sender");
+        opt_in_rich_payload(&projection, &recipient, &conversation).await;
+        register_push_target(&push_store, &recipient, &target()).await;
         let candidate = NotificationCandidate::direct_message_with_hints(
             recipient.clone(),
             sender_jid,
@@ -8696,7 +9259,9 @@ mod tests {
             false,
             NotificationMessageHints::none().with_xep0334(false, true),
         )
-        .expect("candidate");
+        .expect("candidate")
+        .with_last_message_body(Some("secret".to_string()));
+        assert_eq!(candidate.last_message_body(), None);
         store
             .insert_candidate(&candidate)
             .await
@@ -8725,14 +9290,13 @@ mod tests {
         let row = rows.next().await.expect("row").expect("row exists");
         assert_eq!(
             row.get::<Option<String>>(0).expect("reason").as_deref(),
-            Some("xep0334_no_permanent_store"),
+            None,
+            "<no-permanent-store/> must NOT suppress the push under #719",
         );
-        let rendered = waddle_xmpp::prometheus::render_metrics();
-        assert!(
-            rendered
-                .contains("waddle_push_suppressed_total{reason=\"xep0334_no_permanent_store\"} 1"),
-            "T1 XEP-0334 <no-permanent-store/> suppression must increment the typed metric counter",
-        );
+        let jobs = store.pending_outbox_jobs().await.expect("jobs");
+        assert_eq!(jobs.len(), 1);
+        assert!(jobs[0].rich_summary().sender.is_some());
+        assert_eq!(jobs[0].rich_summary().body, None);
     }
 
     /// `NoopDndReader` MUST report every user as `Inactive` so slice
@@ -9009,6 +9573,7 @@ mod tests {
                     crate::notification_settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
                 source_item_jid: sender.clone(),
                 updated_at_ms: 1,
+                rich_payload_opt_in: false,
                 source_version: 1,
             })
             .await
@@ -9104,6 +9669,7 @@ mod tests {
                     crate::notification_settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
                 source_item_jid: sender.clone(),
                 updated_at_ms: 1,
+                rich_payload_opt_in: false,
                 source_version: 1,
             })
             .await
@@ -9318,13 +9884,13 @@ mod tests {
         );
     }
 
-    /// XEP-0334 `<no-store/>` is a message-frozen hint suppressed at
-    /// T1: candidate row persists with the no_store bit, T1 records
-    /// `xep0334_no_store`. Upstream storage preserved.
+    /// #719 regression: a `<no-store/>` candidate is NOT push-suppressed
+    /// — the candidate row persists with the no_store bit, T1 records NO
+    /// `suppressed_reason`, an outbox job is enqueued, and upstream
+    /// storage is untouched. With the default (opt-out) the summary stays
+    /// minimal.
     #[tokio::test]
-    async fn xep0334_no_store_t1_suppression_persists_audit_and_keeps_storage() {
-        let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
-        waddle_xmpp::prometheus::reset_metrics_for_test();
+    async fn xep0334_no_store_delivers_minimal_push_and_keeps_storage() {
         let store = store().await;
         let push_store = waddle_xmpp::push::InMemoryPushStore::new();
         let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
@@ -9337,6 +9903,7 @@ mod tests {
 
         let (inbox, witness) =
             seed_inbox_witness(&recipient, &sender, "archive-no-store-witness", 17, 1).await;
+        register_push_target(&push_store, &recipient, &target()).await;
 
         let candidate = NotificationCandidate::direct_message_with_hints(
             recipient.clone(),
@@ -9345,7 +9912,8 @@ mod tests {
             false,
             NotificationMessageHints::none().with_xep0334(true, false),
         )
-        .expect("candidate");
+        .expect("candidate")
+        .with_last_message_body(Some("secret".to_string()));
         store
             .insert_candidate(&candidate)
             .await
@@ -9366,7 +9934,7 @@ mod tests {
 
         let mut rows = store
             .query(
-                "SELECT suppressed_reason, outboxed_at_ms, no_store FROM notification_candidates WHERE stanza_id = ?",
+                "SELECT suppressed_reason, outboxed_at_ms, no_store, last_message_body FROM notification_candidates WHERE stanza_id = ?",
                 crate::db_params!["no-store-t1"],
             )
             .await
@@ -9374,28 +9942,27 @@ mod tests {
         let row = rows.next().await.expect("row").expect("row exists");
         assert_eq!(
             row.get::<Option<String>>(0).expect("reason").as_deref(),
-            Some("xep0334_no_store"),
+            None,
+            "<no-store/> must not push-suppress under #719",
         );
         assert!(row.get::<Option<i64>>(1).expect("outboxed").is_some());
         assert_eq!(row.get::<i64>(2).expect("no_store"), 1);
-        assert!(store.pending_outbox_jobs().await.expect("jobs").is_empty(),);
+        // Off-the-record body was never persisted onto the candidate.
+        assert_eq!(row.get::<Option<String>>(3).expect("body"), None);
+
+        let jobs = store.pending_outbox_jobs().await.expect("jobs");
+        assert_eq!(jobs.len(), 1, "the minimal push must still be enqueued");
+        // Default opt-out → minimal summary, no rich fields.
+        assert_eq!(jobs[0].rich_summary(), &RichSummary::minimal());
 
         assert_inbox_witness_unchanged(&inbox, &recipient, &witness).await;
-
-        let rendered = waddle_xmpp::prometheus::render_metrics();
-        assert!(
-            rendered.contains("waddle_push_suppressed_total{reason=\"xep0334_no_store\"} 1"),
-            "metric counter for xep0334_no_store must increment; rendered={rendered}",
-        );
     }
 
-    /// XEP-0334 `<no-permanent-store/>` parallel of the no-store
-    /// regression: T1 records `xep0334_no_permanent_store`, upstream
-    /// storage preserved.
+    /// #719 parallel of the `<no-store/>` regression for
+    /// `<no-permanent-store/>`: delivered, not suppressed, storage
+    /// preserved.
     #[tokio::test]
-    async fn xep0334_no_permanent_store_t1_suppression_persists_audit_and_keeps_storage() {
-        let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
-        waddle_xmpp::prometheus::reset_metrics_for_test();
+    async fn xep0334_no_permanent_store_delivers_minimal_push_and_keeps_storage() {
         let store = store().await;
         let push_store = waddle_xmpp::push::InMemoryPushStore::new();
         let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
@@ -9408,6 +9975,7 @@ mod tests {
 
         let (inbox, witness) =
             seed_inbox_witness(&recipient, &sender, "archive-no-perm-store-witness", 23, 1).await;
+        register_push_target(&push_store, &recipient, &target()).await;
 
         let candidate = NotificationCandidate::direct_message_with_hints(
             recipient.clone(),
@@ -9416,7 +9984,8 @@ mod tests {
             false,
             NotificationMessageHints::none().with_xep0334(false, true),
         )
-        .expect("candidate");
+        .expect("candidate")
+        .with_last_message_body(Some("secret".to_string()));
         store
             .insert_candidate(&candidate)
             .await
@@ -9437,7 +10006,7 @@ mod tests {
 
         let mut rows = store
             .query(
-                "SELECT suppressed_reason, no_permanent_store FROM notification_candidates WHERE stanza_id = ?",
+                "SELECT suppressed_reason, no_permanent_store, last_message_body FROM notification_candidates WHERE stanza_id = ?",
                 crate::db_params!["no-perm-store-t1"],
             )
             .await
@@ -9445,19 +10014,17 @@ mod tests {
         let row = rows.next().await.expect("row").expect("row exists");
         assert_eq!(
             row.get::<Option<String>>(0).expect("reason").as_deref(),
-            Some("xep0334_no_permanent_store"),
+            None,
+            "<no-permanent-store/> must not push-suppress under #719",
         );
         assert_eq!(row.get::<i64>(1).expect("no_permanent_store"), 1);
-        assert!(store.pending_outbox_jobs().await.expect("jobs").is_empty(),);
+        assert_eq!(row.get::<Option<String>>(2).expect("body"), None);
+
+        let jobs = store.pending_outbox_jobs().await.expect("jobs");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].rich_summary(), &RichSummary::minimal());
 
         assert_inbox_witness_unchanged(&inbox, &recipient, &witness).await;
-
-        let rendered = waddle_xmpp::prometheus::render_metrics();
-        assert!(
-            rendered
-                .contains("waddle_push_suppressed_total{reason=\"xep0334_no_permanent_store\"} 1"),
-            "metric counter for xep0334_no_permanent_store must increment; rendered={rendered}",
-        );
     }
 
     /// Waddle DnD suppression at T1 via the `DndReader` trait. Uses
@@ -10053,7 +10620,7 @@ mod tests {
         // public-group `OnMention` default → mention bit on
         // `ActiveChannelMention` is `true`, so the gate Delivers.
         assert!(
-            matches!(outcome, T1PushDispatchOutcome::Deliver),
+            matches!(outcome, T1PushDispatchOutcome::Deliver { .. }),
             "T0Emit MUST NOT suppress with Xep0513ActiveMiss; got {outcome:?}"
         );
         assert_eq!(

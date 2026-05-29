@@ -32,6 +32,18 @@ use minidom::Element;
 /// Namespace for XEP-0492 Chat Notification Settings.
 pub const NS_NOTIFICATION_SETTINGS: &str = "urn:xmpp:notification-settings:1";
 
+/// Waddle-specific XEP-0492 `<advanced/>` extension namespace.
+///
+/// XEP-0492 §2.3 reserves the optional `<advanced/>` child for
+/// "finer-grained notification settings using custom namespaces". This
+/// is the conformant home for the Waddle-specific opt-in to a rich
+/// XEP-0357 push summary (`last-message-sender` + `last-message-body`):
+/// the `<advanced/>` element is the XEP-defined container, and the
+/// `<rich-payload/>` child carries the Waddle semantics under a
+/// `urn:waddle:*` namespace. Presence of the child means opt-in;
+/// absence means the minimal default payload.
+pub const NS_PUSH_RICH_PAYLOAD: &str = "urn:waddle:push:rich:0";
+
 /// Notification setting for a chat.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum NotificationLevel {
@@ -255,6 +267,34 @@ pub fn parse_notification_setting(elem: &Element) -> Option<NotificationLevel> {
     parse_notify_fallback_setting(elem).ok().flatten()
 }
 
+/// Parse the Waddle rich-payload opt-in from a XEP-0492 `<notify/>`.
+///
+/// Returns `true` when ANY notification setting — the account-wide
+/// fallback OR an identity-scoped setting — carries an `<advanced/>`
+/// child holding `<rich-payload xmlns='urn:waddle:push:rich:0'/>` (see
+/// [`NS_PUSH_RICH_PAYLOAD`]). Absence — the default — returns `false`,
+/// preserving the minimal XEP-0357 summary payload. Malformed or
+/// non-XEP-0492 input also returns `false`.
+///
+/// XEP-0492's reading rule sorts settings most-specific-first with the
+/// account-wide fallback as the floor, and the §2.3 `<advanced/>`
+/// examples deliberately attach the payload to identity-scoped settings
+/// (e.g. `client/phone`). Waddle resolves a single per-conversation push
+/// decision per recipient JID — it has no per-client-identity notion at
+/// push time — so the conformant reduction is "opted in if the user
+/// expressed the opt-in anywhere for this chat", rather than silently
+/// dropping an opt-in written onto an identity-scoped element.
+pub fn parse_rich_payload_opt_in(notify: &Element) -> bool {
+    if !is_notify_element(notify) {
+        return false;
+    }
+    notify
+        .children()
+        .filter(|child| is_setting_element(child))
+        .filter_map(|setting| setting.get_child("advanced", NS_NOTIFICATION_SETTINGS))
+        .any(|advanced| advanced.has_child("rich-payload", NS_PUSH_RICH_PAYLOAD))
+}
+
 // ── Building ─────────────────────────────────────────────────────────
 
 /// Build a XEP-0492 notification child element.
@@ -272,6 +312,28 @@ pub fn build_notify_element(level: NotificationLevel) -> Element {
 /// Build a XEP-0492 `<notify/>` element with an account-wide fallback child.
 pub fn build_notification_settings_element(level: NotificationLevel) -> Element {
     build_notify_element(level)
+}
+
+/// Build the `<advanced/>` child carrying the Waddle rich-payload opt-in.
+///
+/// Shapes the XEP-0492 §2.3 `<advanced/>` container with a single
+/// `<rich-payload xmlns='urn:waddle:push:rich:0'/>` child
+/// (see [`NS_PUSH_RICH_PAYLOAD`]). The `<advanced/>` element is kept
+/// non-empty per XEP-0492 §2.3.
+pub fn build_rich_payload_advanced() -> Element {
+    Element::builder("advanced", NS_NOTIFICATION_SETTINGS)
+        .append(Element::builder("rich-payload", NS_PUSH_RICH_PAYLOAD).build())
+        .build()
+}
+
+/// Build a XEP-0492 `<notify/>` whose fallback setting opts in to the
+/// Waddle rich XEP-0357 push summary.
+pub fn build_notify_element_with_rich_payload(level: NotificationLevel) -> Element {
+    let mut fallback = build_notification_setting_child(level);
+    fallback.append_child(build_rich_payload_advanced());
+    Element::builder("notify", NS_NOTIFICATION_SETTINGS)
+        .append(fallback)
+        .build()
 }
 
 /// Replace the account-wide fallback setting while preserving unknown
@@ -571,6 +633,64 @@ mod tests {
             parse_notify_fallback_setting(&elem),
             Err(NotificationSettingsError::MultipleFallbackSettings)
         );
+    }
+
+    #[test]
+    fn parses_rich_payload_opt_in_from_advanced_child() {
+        let elem: Element = "<notify xmlns='urn:xmpp:notification-settings:1'>\
+                <always>\
+                    <advanced>\
+                        <rich-payload xmlns='urn:waddle:push:rich:0' />\
+                    </advanced>\
+                </always>\
+            </notify>"
+            .parse()
+            .expect("valid notify");
+
+        assert!(parse_rich_payload_opt_in(&elem));
+    }
+
+    #[test]
+    fn rich_payload_opt_in_round_trips_through_builder() {
+        let notify = build_notify_element_with_rich_payload(NotificationLevel::OnMention);
+
+        // The XEP-0492 wire shape still validates: the rich-payload lives
+        // inside `<advanced/>` under a non-XEP-0492 namespace.
+        assert_eq!(validate_notify_element(&notify), Ok(()));
+        assert_eq!(
+            parse_notify_fallback_setting(&notify),
+            Ok(Some(NotificationLevel::OnMention))
+        );
+        assert!(parse_rich_payload_opt_in(&notify));
+    }
+
+    #[test]
+    fn parses_rich_payload_opt_in_from_identity_scoped_advanced_child() {
+        // XEP-0492 §2.3 examples attach <advanced/> to identity-scoped
+        // settings (e.g. client/phone). The opt-in must be honored
+        // there, not only on the bare fallback — otherwise a
+        // multi-device client silently loses the rich payload.
+        let elem: Element = "<notify xmlns='urn:xmpp:notification-settings:1'>\
+                <on-mention identity-category='client' identity-type='phone'>\
+                    <advanced>\
+                        <rich-payload xmlns='urn:waddle:push:rich:0' />\
+                    </advanced>\
+                </on-mention>\
+                <always />\
+            </notify>"
+            .parse()
+            .expect("valid notify");
+
+        assert!(parse_rich_payload_opt_in(&elem));
+    }
+
+    #[test]
+    fn rich_payload_opt_in_absent_when_no_advanced_extension() {
+        let elem: Element = "<notify xmlns='urn:xmpp:notification-settings:1'><always /></notify>"
+            .parse()
+            .expect("valid notify");
+
+        assert!(!parse_rich_payload_opt_in(&elem));
     }
 
     #[test]

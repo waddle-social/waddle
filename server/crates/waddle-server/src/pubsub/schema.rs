@@ -16,7 +16,10 @@ use super::DatabasePubSubStorage;
 /// * v5 — initial `dnd_projection` (#367)
 /// * v6 — added `dnd_projection_source_version` singleton counter
 ///   to replace wall-clock millis as the LWW key (round-7 review)
-const PUBSUB_SCHEMA_VERSION: i64 = 6;
+// v7 (#719): notification_settings_projection gains the
+// `rich_payload_opt_in` column (XEP-0492 `<advanced/>` rich-payload
+// opt-in). Version-gated drop-and-recreate carries the schema change.
+const PUBSUB_SCHEMA_VERSION: i64 = 7;
 
 impl DatabasePubSubStorage {
     pub(super) async fn initialize(&self) -> Result<(), XmppError> {
@@ -147,6 +150,7 @@ impl DatabasePubSubStorage {
                     conversation_jid TEXT NOT NULL,
                     conversation_kind TEXT NOT NULL CHECK (conversation_kind IN ('direct', 'private_group', 'public_group')),
                     mode TEXT NOT NULL CHECK (mode IN ('always', 'on-mention', 'never')),
+                    rich_payload_opt_in INTEGER NOT NULL DEFAULT 0 CHECK (rich_payload_opt_in IN (0, 1)),
                     source_version INTEGER NOT NULL,
                     updated_at_ms INTEGER NOT NULL,
                     source_node TEXT NOT NULL,
@@ -162,6 +166,7 @@ impl DatabasePubSubStorage {
                     conversation_jid TEXT NOT NULL,
                     conversation_kind TEXT NOT NULL CHECK (conversation_kind IN ('direct', 'private_group', 'public_group')),
                     mode TEXT NOT NULL CHECK (mode IN ('always', 'on-mention', 'never')),
+                    rich_payload_opt_in INTEGER NOT NULL DEFAULT 0 CHECK (rich_payload_opt_in IN (0, 1)),
                     source_version BIGINT NOT NULL,
                     updated_at_ms BIGINT NOT NULL,
                     source_node TEXT NOT NULL,

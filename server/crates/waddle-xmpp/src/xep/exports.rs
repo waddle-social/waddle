@@ -348,10 +348,12 @@ pub use waddle_xmpp_core::xep0472::{
 
 pub use super::xep0492::{
     build_notification_setting_child, build_notification_settings_element, build_notify_element,
+    build_notify_element_with_rich_payload, build_rich_payload_advanced,
     is_notification_settings_element, is_notify_element, parse_notification_setting,
-    parse_notify_fallback_setting, replace_fallback_notification_setting, validate_notify_element,
-    NotificationLevel, NotificationSettings, NotificationSettingsError, RoomNotificationSetting,
-    NS_NOTIFICATION_SETTINGS,
+    parse_notify_fallback_setting, parse_rich_payload_opt_in,
+    replace_fallback_notification_setting, validate_notify_element, NotificationLevel,
+    NotificationSettings, NotificationSettingsError, RoomNotificationSetting,
+    NS_NOTIFICATION_SETTINGS, NS_PUSH_RICH_PAYLOAD,
 };
 
 pub use super::xep0469::{

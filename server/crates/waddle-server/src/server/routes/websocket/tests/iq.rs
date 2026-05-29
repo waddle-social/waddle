@@ -3672,6 +3672,7 @@ async fn xep0402_bookmark_publish_without_notify_deletes_xep0492_projection() {
                 conversation_kind:
                     crate::notification_settings_projection::ConversationKind::PrivateGroup,
                 mode: waddle_xmpp::xep::NotificationLevel::Never,
+                rich_payload_opt_in: false,
                 source_version: 1,
                 updated_at_ms: 1,
                 source: crate::notification_settings_projection::NotificationSettingsSource::Xep0402Bookmarks,

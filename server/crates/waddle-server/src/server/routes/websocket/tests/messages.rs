@@ -626,6 +626,7 @@ async fn drive_xep0492_direct_chat_push_gate(
             conversation_jid: sender.clone(),
             conversation_kind: crate::notification_settings_projection::ConversationKind::Direct,
             mode: level,
+            rich_payload_opt_in: false,
             source_version: 1,
             updated_at_ms: crate::time::now_ms(),
             source: crate::notification_settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
@@ -809,6 +810,7 @@ async fn drive_xep0492_direct_chat_emission_shape(
             conversation_jid: sender.clone(),
             conversation_kind: crate::notification_settings_projection::ConversationKind::Direct,
             mode: level,
+            rich_payload_opt_in: false,
             source_version: 1,
             updated_at_ms: crate::time::now_ms(),
             source: crate::notification_settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
@@ -1185,6 +1187,7 @@ async fn groupchat_xep0492_never_suppresses_personal_mentions_and_plain_messages
                 conversation_kind:
                     crate::notification_settings_projection::ConversationKind::PublicGroup,
                 mode: waddle_xmpp::xep::NotificationLevel::Never,
+                rich_payload_opt_in: false,
                 source_version: 1,
                 updated_at_ms: crate::time::now_ms(),
                 source:
@@ -1407,6 +1410,7 @@ async fn groupchat_public_default_suppresses_plain_push_until_always() {
                         conversation_kind:
                             crate::notification_settings_projection::ConversationKind::PublicGroup,
                         mode: level,
+                        rich_payload_opt_in: false,
                         source_version: 1,
                         updated_at_ms: crate::time::now_ms(),
                         source:
@@ -1900,6 +1904,7 @@ async fn queue_offline_delivery_suppresses_xep0357_when_xep0492_direct_chat_is_n
             conversation_jid: sender.clone(),
             conversation_kind: crate::notification_settings_projection::ConversationKind::Direct,
             mode: waddle_xmpp::xep::NotificationLevel::Never,
+            rich_payload_opt_in: false,
             source_version: 1,
             updated_at_ms: crate::time::now_ms(),
             source: crate::notification_settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
@@ -2001,6 +2006,7 @@ async fn xep0357_suppression_preserves_mam_inbox_pending_delivery_and_audit() {
             conversation_jid: sender.clone(),
             conversation_kind: crate::notification_settings_projection::ConversationKind::Direct,
             mode: waddle_xmpp::xep::NotificationLevel::Never,
+            rich_payload_opt_in: false,
             source_version: 1,
             updated_at_ms: crate::time::now_ms(),
             source: crate::notification_settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
