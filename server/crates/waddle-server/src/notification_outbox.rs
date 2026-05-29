@@ -1110,7 +1110,11 @@ fn notification_outbox_table_sql(i64_type: &str, if_not_exists: bool) -> String 
             class TEXT NOT NULL CONSTRAINT {NOTIFICATION_OUTBOX_CLASS_CHECK_NAME} CHECK ({NOTIFICATION_OUTBOX_CLASS_CHECK_SQL}),
             message_count INTEGER NOT NULL,
             context_xml TEXT NOT NULL,
-            rich_opt_in INTEGER NOT NULL DEFAULT 0 CHECK (rich_opt_in IN (0, 1)),
+            -- No CHECK: matches the sibling boolean columns (noping,
+            -- no_store, ...) and avoids divergence with the
+            -- ALTER-upgrade path, which cannot add a column-level CHECK.
+            -- The value is written exclusively from a typed Rust bool.
+            rich_opt_in INTEGER NOT NULL DEFAULT 0,
             summary_body TEXT,
             status TEXT NOT NULL CHECK (status IN ('queued', 'in-progress', 'published', 'failed')),
             attempt_count INTEGER NOT NULL DEFAULT 0,
@@ -1294,17 +1298,23 @@ impl NotificationOutboxStore {
             "policy_error_count INTEGER NOT NULL DEFAULT 0",
         )
         .await?;
+        self.migrate_notification_outbox_class_constraint(i64_type)
+            .await?;
         // #719: T1-resolved XEP-0357 §5.4 rich summary fields.
         // `rich_opt_in` flags whether `last-message-sender` is emitted;
         // `summary_body` is the (hint-stripped) `last-message-body`.
+        //
+        // These ALTERs run AFTER the class-constraint rebuild: that
+        // rebuild's INSERT…SELECT only copies the original column set,
+        // so columns added before it would be silently dropped on a
+        // legacy-CHECK DB (same ordering rule the candidates side
+        // documents above).
         self.add_column_if_missing(
             "notification_outbox",
             "rich_opt_in INTEGER NOT NULL DEFAULT 0",
         )
         .await?;
         self.add_column_if_missing("notification_outbox", "summary_body TEXT")
-            .await?;
-        self.migrate_notification_outbox_class_constraint(i64_type)
             .await?;
         self.execute(
             "DROP INDEX IF EXISTS idx_notification_outbox_queued_coalesce",
@@ -5041,6 +5051,85 @@ mod tests {
         // Touch unused fields to keep them documented as required
         // identity inputs for the candidate row.
         let _ = sender_bare;
+    }
+
+    /// #719 migration regression: a legacy `notification_outbox` table
+    /// with a stale `class` CHECK (pre-`dm_mention`) and WITHOUT the
+    /// rich-summary columns (`rich_opt_in`, `summary_body`) must upgrade
+    /// cleanly. Store init runs the class-constraint rebuild followed by
+    /// the column ALTERs (the documented ordering); a legacy queued row
+    /// must remain decodable afterwards with a minimal rich summary.
+    #[tokio::test]
+    async fn store_initialization_migrates_legacy_outbox_without_rich_summary_columns() {
+        let db = Database::in_memory("notification-outbox-legacy-rich-summary")
+            .await
+            .unwrap();
+        let conn = db.guard().await.expect("db guard");
+        conn.execute(
+            r#"
+            CREATE TABLE notification_outbox (
+                job_id TEXT PRIMARY KEY,
+                recipient_bare_jid TEXT NOT NULL,
+                push_service_jid TEXT NOT NULL,
+                node TEXT NOT NULL,
+                conversation_jid TEXT NOT NULL,
+                sender_jid TEXT NOT NULL,
+                sender_jids TEXT NOT NULL,
+                thread_id TEXT NOT NULL DEFAULT '',
+                class TEXT NOT NULL CHECK (class IN ('dm', 'personal_mention', 'channel_mention', 'active_channel_mention', 'notify_all')),
+                message_count INTEGER NOT NULL,
+                context_xml TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('queued', 'in-progress', 'published', 'failed')),
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                policy_error_count INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                next_attempt_at_ms INTEGER,
+                claimed_at_ms INTEGER,
+                claim_token TEXT,
+                created_at_ms INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                published_at_ms INTEGER
+            )
+            "#,
+            (),
+        )
+        .await
+        .expect("create legacy outbox table");
+        conn.execute(
+            r#"
+            INSERT INTO notification_outbox (
+                job_id, recipient_bare_jid, push_service_jid, node,
+                conversation_jid, sender_jid, sender_jids, thread_id,
+                class, message_count, context_xml, status,
+                attempt_count, policy_error_count, last_error,
+                next_attempt_at_ms, claimed_at_ms, claim_token,
+                created_at_ms, updated_at_ms, published_at_ms
+            ) VALUES (
+                'legacy-job', 'bob@example.com', 'push.example.com', 'web-node',
+                'alice@example.com', 'alice@example.com/web',
+                '["alice@example.com/web"]', '',
+                'dm', 1,
+                '<notification xmlns=''urn:xmpp:push:0''/>', 'queued',
+                0, 0, NULL, NULL, NULL, NULL, 1, 1, NULL
+            )
+            "#,
+            (),
+        )
+        .await
+        .expect("insert legacy outbox row");
+        drop(conn);
+
+        let store = NotificationOutboxStore::new(db)
+            .await
+            .expect("store initializes and migrates legacy outbox");
+
+        // The legacy row decodes through the new SELECT/decoder, which
+        // reads `rich_opt_in`/`summary_body` at the appended indices —
+        // proving the columns were added by migration.
+        let jobs = store.pending_outbox_jobs().await.expect("jobs");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].job_id().as_str(), "legacy-job");
+        assert_eq!(jobs[0].rich_summary(), &RichSummary::minimal());
     }
 
     /// Round-trip regression for the new `DirectMessageMention` class /
