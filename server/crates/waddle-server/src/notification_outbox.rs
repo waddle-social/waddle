@@ -1110,11 +1110,13 @@ fn notification_outbox_table_sql(i64_type: &str, if_not_exists: bool) -> String 
             class TEXT NOT NULL CONSTRAINT {NOTIFICATION_OUTBOX_CLASS_CHECK_NAME} CHECK ({NOTIFICATION_OUTBOX_CLASS_CHECK_SQL}),
             message_count INTEGER NOT NULL,
             context_xml TEXT NOT NULL,
-            -- No CHECK: matches the sibling boolean columns (noping,
-            -- no_store, ...) and avoids divergence with the
-            -- ALTER-upgrade path, which cannot add a column-level CHECK.
-            -- The value is written exclusively from a typed Rust bool.
-            rich_opt_in INTEGER NOT NULL DEFAULT 0,
+            -- #719 rich XEP-0357 §5.4 summary fields. Both nullable and
+            -- written together: `summary_sender_jid` is the
+            -- `last-message-sender` (present iff the recipient opted in),
+            -- `summary_body` the (hint-stripped) `last-message-body`.
+            -- Stored explicitly rather than inferred from the routing
+            -- `sender_jid`, so `RichSummary` round-trips 1:1.
+            summary_sender_jid TEXT,
             summary_body TEXT,
             status TEXT NOT NULL CHECK (status IN ('queued', 'in-progress', 'published', 'failed')),
             attempt_count INTEGER NOT NULL DEFAULT 0,
@@ -1175,10 +1177,23 @@ fn notification_outbox_class_constraint_matches_expected(definition: &str) -> bo
 
 fn notification_candidates_suppressed_reason_constraint_matches_expected(definition: &str) -> bool {
     let normalized = definition.to_ascii_lowercase();
-    normalized.contains("suppressed_reason")
-        && NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_VALUES
-            .iter()
-            .all(|reason| constraint_definition_quotes_value(&normalized, reason))
+    if !normalized.contains("suppressed_reason") {
+        return false;
+    }
+    let all_present = NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_VALUES
+        .iter()
+        .all(|reason| constraint_definition_quotes_value(&normalized, reason));
+    // Reject a stale *superset* constraint. The audit set can SHRINK
+    // (e.g. the removed `xep0334_no_store`/`xep0334_no_permanent_store`
+    // variants), and a subset-only check would treat an old definition
+    // that still lists a dropped label as up-to-date — leaving the DB
+    // willing to store `suppressed_reason` values the Rust enum no
+    // longer understands. The only single-quoted tokens in the CHECK
+    // are the reason values (SQLite `'v'` and Postgres `'v'::...`), so
+    // an exact token count pins the constraint to exactly the current
+    // set and forces a rebuild when it diverges in either direction.
+    let quoted_value_count = normalized.matches('\'').count() / 2;
+    all_present && quoted_value_count == NOTIFICATION_CANDIDATES_SUPPRESSED_REASON_VALUES.len()
 }
 
 #[derive(Clone)]
@@ -1301,19 +1316,17 @@ impl NotificationOutboxStore {
         self.migrate_notification_outbox_class_constraint(i64_type)
             .await?;
         // #719: T1-resolved XEP-0357 §5.4 rich summary fields.
-        // `rich_opt_in` flags whether `last-message-sender` is emitted;
-        // `summary_body` is the (hint-stripped) `last-message-body`.
+        // `summary_sender_jid` is the `last-message-sender` (NULL unless
+        // the recipient opted in); `summary_body` is the (hint-stripped)
+        // `last-message-body`.
         //
         // These ALTERs run AFTER the class-constraint rebuild: that
         // rebuild's INSERT…SELECT only copies the original column set,
         // so columns added before it would be silently dropped on a
         // legacy-CHECK DB (same ordering rule the candidates side
         // documents above).
-        self.add_column_if_missing(
-            "notification_outbox",
-            "rich_opt_in INTEGER NOT NULL DEFAULT 0",
-        )
-        .await?;
+        self.add_column_if_missing("notification_outbox", "summary_sender_jid TEXT")
+            .await?;
         self.add_column_if_missing("notification_outbox", "summary_body TEXT")
             .await?;
         self.execute(
@@ -2406,7 +2419,7 @@ impl NotificationOutboxStore {
                        attempt_count,
                        policy_error_count,
                        claim_token,
-                       rich_opt_in,
+                       summary_sender_jid,
                        summary_body
                 FROM notification_outbox
                 WHERE status IN (?, ?)
@@ -2447,7 +2460,7 @@ impl NotificationOutboxStore {
                        attempt_count,
                        policy_error_count,
                        claim_token,
-                       rich_opt_in,
+                       summary_sender_jid,
                        summary_body
                 FROM notification_outbox
                 WHERE (
@@ -3638,7 +3651,7 @@ async fn insert_outbox_job_tx(
                 class,
                 message_count,
                 context_xml,
-                rich_opt_in,
+                summary_sender_jid,
                 summary_body,
                 status,
                 attempt_count,
@@ -3664,7 +3677,7 @@ async fn insert_outbox_job_tx(
                 candidate.thread_id.as_str(),
                 candidate.class.as_db_value(),
                 context_xml,
-                i64::from(rich.sender.is_some()),
+                rich.sender.as_ref().map(ToString::to_string),
                 rich.body.clone(),
                 STATUS_QUEUED,
                 now_ms,
@@ -3778,7 +3791,7 @@ async fn merge_outbox_job_tx(
             context_xml = ?,
             sender_jid = ?,
             sender_jids = ?,
-            rich_opt_in = ?,
+            summary_sender_jid = ?,
             summary_body = ?,
             policy_error_count = 0,
             last_error = NULL,
@@ -3791,7 +3804,7 @@ async fn merge_outbox_job_tx(
                 context_xml,
                 candidate.sender_jid.to_string(),
                 sender_jids,
-                i64::from(rich.sender.is_some()),
+                rich.sender.as_ref().map(ToString::to_string),
                 rich.body.clone(),
                 now_ms,
                 job_id_raw,
@@ -4028,7 +4041,7 @@ fn decode_outbox_job(row: &Row) -> Result<NotificationOutboxJob, NotificationOut
         .ok_or(NotificationOutboxError::MissingSenderJidSet)?;
     let message_count: i64 = row.get(9)?;
     let context_xml: String = row.get(10)?;
-    let rich_opt_in: i64 = row.get(15)?;
+    let summary_sender_raw: Option<String> = row.get(15)?;
     let summary_body: Option<String> = row.get(16)?;
     let sender_jid: Jid = sender_raw
         .parse()
@@ -4042,12 +4055,19 @@ fn decode_outbox_job(row: &Row) -> Result<NotificationOutboxJob, NotificationOut
     require_full_sender_jid_set(&sender_jids)?;
     require_sender_set_matches_conversation(&sender_jids, &conversation_jid)?;
     require_sender_set_contains_scalar(&sender_jids, &sender_jid)?;
-    // Reconstruct the T1-resolved rich summary. `last-message-sender` is
-    // the routing sender JID, included iff the recipient opted in;
-    // `last-message-body` is non-null only when the opt-in held and no
-    // XEP-0334 storage hint stripped it.
+    // Rehydrate the T1-resolved rich summary directly from its own
+    // columns — `summary_sender_jid` is the `last-message-sender`
+    // (present iff the recipient opted in), `summary_body` the
+    // (hint-stripped) `last-message-body`. Stored explicitly, so no
+    // inference from the routing `sender_jid` is needed.
+    let summary_sender = summary_sender_raw
+        .map(|raw| {
+            raw.parse::<Jid>()
+                .map_err(|_| NotificationOutboxError::InvalidSenderJid(raw))
+        })
+        .transpose()?;
     let rich_summary = RichSummary {
-        sender: (rich_opt_in != 0).then(|| sender_jid.clone()),
+        sender: summary_sender,
         body: summary_body,
     };
     Ok(NotificationOutboxJob {
@@ -5056,7 +5076,7 @@ mod tests {
 
     /// #719 migration regression: a legacy `notification_outbox` table
     /// with a stale `class` CHECK (pre-`dm_mention`) and WITHOUT the
-    /// rich-summary columns (`rich_opt_in`, `summary_body`) must upgrade
+    /// rich-summary columns (`summary_sender_jid`, `summary_body`) must upgrade
     /// cleanly. Store init runs the class-constraint rebuild followed by
     /// the column ALTERs (the documented ordering); a legacy queued row
     /// must remain decodable afterwards with a minimal rich summary.
@@ -5125,7 +5145,7 @@ mod tests {
             .expect("store initializes and migrates legacy outbox");
 
         // The legacy row decodes through the new SELECT/decoder, which
-        // reads `rich_opt_in`/`summary_body` at the appended indices —
+        // reads `summary_sender_jid`/`summary_body` at the appended indices —
         // proving the columns were added by migration.
         let jobs = store.pending_outbox_jobs().await.expect("jobs");
         assert_eq!(jobs.len(), 1);
@@ -8554,6 +8574,21 @@ mod tests {
             !notification_candidates_suppressed_reason_constraint_matches_expected(
                 sqlite_create_sql
             ),
+        );
+    }
+
+    #[test]
+    fn suppressed_reason_constraint_match_rejects_stale_superset_definition() {
+        // #719 / Codex review: when the audit set SHRINKS, a legacy
+        // CHECK that still lists a removed label (here the dropped
+        // `xep0334_no_store`/`xep0334_no_permanent_store`) must be
+        // flagged stale — otherwise the DB keeps accepting
+        // `suppressed_reason` values the Rust enum no longer
+        // understands. A subset-only matcher would wrongly accept this.
+        let superset = "suppressed_reason IS NULL OR suppressed_reason IN ('xep0357_self', 'xep0357_no_registration', 'xep0357_registration_disabled', 'xep0492_never', 'xep0492_on_mention_miss', 'xep0191_blocked', 'xep0513_noping', 'xep0513_active_miss', 'xep0334_no_store', 'xep0334_no_permanent_store', 'waddle_dnd', 'provider_rejected', 'provider_token_expired', 'xep0357_push_service_degraded')";
+        assert!(
+            !notification_candidates_suppressed_reason_constraint_matches_expected(superset),
+            "a CHECK listing removed labels must be treated as stale so the rebuild fires"
         );
     }
 

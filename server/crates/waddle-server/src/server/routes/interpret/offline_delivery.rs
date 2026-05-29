@@ -332,7 +332,7 @@ async fn enqueue_xep0357_notification_candidate_for_message(
         // `last-message-body`; the candidate drops it when a XEP-0334
         // storage hint applies (off-the-record bodies are never
         // persisted).
-        Ok(candidate) => candidate.with_last_message_body(super::groupchat_archive::prototype_body(
+        Ok(candidate) => candidate.with_last_message_body(super::prototype_body(
             original_message,
         )),
         Err(

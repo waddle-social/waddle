@@ -361,9 +361,7 @@ async fn insert_groupchat_notification_candidate(
         // Snapshot the body for the optional XEP-0357 §5.4
         // `last-message-body`; dropped when a XEP-0334 storage hint
         // applies.
-        Ok(candidate) => {
-            candidate.with_last_message_body(super::groupchat_archive::prototype_body(message))
-        }
+        Ok(candidate) => candidate.with_last_message_body(super::prototype_body(message)),
         Err(error) => {
             warn!(
                 recipient = %owner,
