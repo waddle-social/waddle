@@ -181,12 +181,14 @@ async fn livekit_webhook_handler(
 const RECONCILE_INTERVAL: StdDuration = StdDuration::from_secs(60);
 
 /// `true` when `call_id` is a MUC (Muji) room JID and therefore has
-/// MUC presence to clear. A 1:1 call uses a scoped id
-/// (`<initiator-bare>::<sid>`) whose `::`-bearing domain part is not a
-/// valid JID, so it parses as `Err` — those are cleared from the SFU
-/// registry by the reconciler but carry no MUC `<presence/>`.
+/// MUC presence to clear. A MUC room is `localpart@muc.domain`, so we
+/// require both the `@` (a bare *domain-only* string like `c-abc123`
+/// is a valid JID but is not a room) and a successful `BareJid` parse
+/// (a 1:1 scoped id `<initiator-bare>::<sid>` has a `::`-bearing domain
+/// part that fails to parse). 1:1 ids are still cleared from the SFU
+/// registry by the reconciler; they just carry no MUC `<presence/>`.
 fn is_muc_call(call_id: &str) -> bool {
-    call_id.parse::<BareJid>().is_ok()
+    call_id.contains('@') && call_id.parse::<BareJid>().is_ok()
 }
 
 /// Spawn the periodic SFU ghost-reconciliation task. Drives
