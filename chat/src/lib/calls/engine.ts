@@ -11,6 +11,7 @@ import {
 } from "livekit-client";
 import type { LiveKitJoin } from "./types";
 import { $devicePrefs } from "./device-prefs";
+import { validateLiveKitGrant } from "./dm-call-activity";
 
 /**
  * Identifies a remote media track surfaced to the UI. The `kind`
@@ -105,6 +106,15 @@ export class CallEngine {
 
   async connect(join: LiveKitJoin, opts: { audio: boolean; video: boolean }): Promise<void> {
     if (this.room) throw new Error("CallEngine already connected");
+    // Defensive pre-flight: confirm the JWT actually carries a usable
+    // `video` grant (roomJoin + a room) before the SDK opens its
+    // WebSocket. A mismatched / misconfigured token otherwise fails
+    // deep inside `room.connect` with an opaque rejection; this turns
+    // it into a clear, actionable local error.
+    const grant = validateLiveKitGrant(join.token);
+    if (!grant.ok) {
+      throw new Error(`Invalid LiveKit join token: ${grant.reason}`);
+    }
     const prefs = $devicePrefs.get();
     const room = new Room({
       adaptiveStream: true,

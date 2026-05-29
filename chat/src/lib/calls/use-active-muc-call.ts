@@ -8,7 +8,11 @@ import {
   mucCallMediaForRoom,
   normalizeMucCallRoomJid,
 } from "./muc-call-presence";
-import { $mucCallLiveParticipants } from "./muc-call-live-participants";
+import {
+  $mucCallLeavingRooms,
+  $mucCallLiveParticipants,
+  mucCallRoomLeavingNick,
+} from "./muc-call-live-participants";
 import {
   $mucCallTerminatePendingSessions,
   pendingMucCallTerminateSession,
@@ -98,6 +102,7 @@ export function useRoomHasActiveCall(
   const callMedia = useStore($mucCallMedia);
   const pendingTerminates = useStore($mucCallTerminatePendingSessions);
   const liveParticipants = useStore($mucCallLiveParticipants);
+  const leavingRooms = useStore($mucCallLeavingRooms);
 
   const normalizedRoomJid = computed<string | null>(() => {
     const normalized = normalizeMucCallRoomJid(roomJid());
@@ -120,6 +125,7 @@ export function useRoomHasActiveCall(
       participants.value,
       participantOwners.value,
       liveParticipants.value,
+      leavingRooms.value,
     ),
   );
 
@@ -191,6 +197,7 @@ export function readRoomHasActiveCall(roomJid: string): {
     $mucCallParticipants.get(),
     $mucCallParticipantOwners.get(),
     liveParticipants,
+    $mucCallLeavingRooms.get(),
   );
   const pendingTerminates = $mucCallTerminatePendingSessions.get();
   const nick = connectionStore.session?.username ?? null;
@@ -245,12 +252,20 @@ function hasUnownedSelfNick(
  * Resolve the nick list for a room, preferring LiveKit's live
  * participant projection when populated (same semantics as
  * `useRoomHasActiveCall`'s composable path).
+ *
+ * When the room carries a transient "leaving" marker (the local user
+ * just disconnected and the LK projection was cleared), our own stale
+ * Muji nick is excluded from the fallback list so the count decreases
+ * monotonically to 0. The marker is consumed once the Muji view drops
+ * our nick on its own — at which point keeping it would needlessly
+ * mask a genuine re-join.
  */
 function resolveRoomParticipantList(
   roomJid: string | null,
   participantsByRoom: Readonly<Record<string, ReadonlyArray<string>>>,
   ownersByRoom: Readonly<Record<string, ReadonlyArray<{ nick: string; realJid?: string }>>>,
   liveParticipantsByRoom: Readonly<Record<string, ReadonlyArray<string>>>,
+  leavingByRoom: Readonly<Record<string, string>> = {},
 ): string[] {
   const room = roomJid ? normalizeMucCallRoomJid(roomJid) : "";
   if (!room) return [];
@@ -258,7 +273,14 @@ function resolveRoomParticipantList(
   if (liveIdentities.length > 0) {
     return identitiesToNicks(liveIdentities, ownersByRoom[room] ?? []);
   }
-  return [...(participantsByRoom[room] ?? [])];
+  const mujiNicks = participantsByRoom[room] ?? [];
+  const leavingNick = mucCallRoomLeavingNick(leavingByRoom, room);
+  // Pure read: when the room is locally leaving and Muji still lists
+  // our own nick, suppress it. Once Muji drops the nick the marker is
+  // a no-op here; it is cleared by `applyMucCallPresence` (the
+  // server-authoritative drop) or by a fresh (re)join.
+  if (!leavingNick) return [...mujiNicks];
+  return mujiNicks.filter((nick) => nick !== leavingNick);
 }
 
 /**

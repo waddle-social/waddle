@@ -4,10 +4,12 @@ import {
   applyMucCallPresence,
   awaitNoOtherPreparing,
   awaitPreparingEcho,
+  cancelMucCallPreparationWaiters,
   clearMucCallParticipant,
   clearMucCallParticipants,
   mucCallParticipantCounts,
   mucCallParticipantCount,
+  pendingMucCallPreparationWaiterCountForTests,
 } from "../src/lib/calls/muc-call-presence";
 
 afterEach(() => {
@@ -610,5 +612,105 @@ describe("awaitNoOtherPreparing", () => {
 
     await wait;
     expect(resolved).toBe(true);
+  });
+});
+
+describe("preparation waiter lifecycle (no dangling listeners/timers)", () => {
+  test("a resolved echo waiter leaves no live listener", async () => {
+    expect(pendingMucCallPreparationWaiterCountForTests()).toBe(0);
+    const wait = awaitPreparingEcho("room@muc.test", "alice", 5000);
+    expect(pendingMucCallPreparationWaiterCountForTests()).toBe(1);
+    applyMucCallPresence({
+      from: "room@muc.test/alice",
+      presence_type: "available",
+      muji: preparingMuji,
+    });
+    await wait;
+    expect(pendingMucCallPreparationWaiterCountForTests()).toBe(0);
+  });
+
+  test("a timed-out echo waiter leaves no live listener", async () => {
+    const wait = awaitPreparingEcho("room@muc.test", "alice", 20);
+    expect(pendingMucCallPreparationWaiterCountForTests()).toBe(1);
+    await expect(wait).rejects.toThrow("Timed out");
+    expect(pendingMucCallPreparationWaiterCountForTests()).toBe(0);
+  });
+
+  test("cancel() on an abandoned echo waiter rejects and releases it immediately", async () => {
+    const wait = awaitPreparingEcho("room@muc.test", "alice", 60_000);
+    expect(pendingMucCallPreparationWaiterCountForTests()).toBe(1);
+    const settled = wait.then(() => "resolved" as const).catch((err: Error) => err);
+    wait.cancel();
+    const result = await settled;
+    expect(result).toBeInstanceOf(Error);
+    // The map entry AND its 60s timer are gone the instant we cancel —
+    // not parked until the (now-cancelled) timeout would have fired.
+    expect(pendingMucCallPreparationWaiterCountForTests()).toBe(0);
+  });
+
+  test("cancel() on an abandoned no-other-preparing waiter rejects and releases it immediately", async () => {
+    // A real OTHER preparing participant so the waiter actually parks.
+    applyMucCallPresence({
+      from: "room@muc.test/bob",
+      presence_type: "available",
+      muc_jid: "bob@waddle.test/web",
+      muji: preparingMuji,
+    });
+    const wait = awaitNoOtherPreparing(
+      "room@muc.test",
+      "alice",
+      60_000,
+      "alice@waddle.test/web",
+    );
+    expect(pendingMucCallPreparationWaiterCountForTests()).toBe(1);
+    const settled = wait.then(() => "resolved" as const).catch((err: Error) => err);
+    wait.cancel(new Error("attempt abandoned"));
+    const result = await settled;
+    expect(result).toBeInstanceOf(Error);
+    expect((result as Error).message).toContain("attempt abandoned");
+    expect(pendingMucCallPreparationWaiterCountForTests()).toBe(0);
+  });
+
+  test("cancel() is a harmless no-op for an already-resolved no-other-preparing fast path", async () => {
+    // No other preparing participants → resolves synchronously with no
+    // registered listener. cancel() must not throw or leave state.
+    const wait = awaitNoOtherPreparing("room@muc.test", "alice", 5000);
+    await wait;
+    expect(() => wait.cancel()).not.toThrow();
+    expect(pendingMucCallPreparationWaiterCountForTests()).toBe(0);
+  });
+
+  test("cancelMucCallPreparationWaiters releases both waiter kinds for the attempt", async () => {
+    applyMucCallPresence({
+      from: "room@muc.test/bob",
+      presence_type: "available",
+      muc_jid: "bob@waddle.test/web",
+      muji: preparingMuji,
+    });
+    const echo = awaitPreparingEcho("room@muc.test", "alice", 60_000, "alice@waddle.test/web");
+    const noOther = awaitNoOtherPreparing("room@muc.test", "alice", 60_000, "alice@waddle.test/web");
+    const echoSettled = echo.then(() => "resolved" as const).catch((err: Error) => err);
+    const noOtherSettled = noOther.then(() => "resolved" as const).catch((err: Error) => err);
+    expect(pendingMucCallPreparationWaiterCountForTests()).toBe(2);
+
+    cancelMucCallPreparationWaiters("room@muc.test", "alice", new Error("call setup cancelled"));
+
+    expect(await echoSettled).toBeInstanceOf(Error);
+    expect(await noOtherSettled).toBeInstanceOf(Error);
+    expect(pendingMucCallPreparationWaiterCountForTests()).toBe(0);
+  });
+
+  test("rapid re-registration of the same attempt does not accumulate listeners", async () => {
+    const first = awaitPreparingEcho("room@muc.test", "alice", 60_000, "alice@waddle.test/web");
+    const firstSettled = first.then(() => "resolved" as const).catch((err: Error) => err);
+    const second = awaitPreparingEcho("room@muc.test", "alice", 60_000, "alice@waddle.test/web");
+    const secondSettled = second.then(() => "resolved" as const).catch((err: Error) => err);
+    // The second registration replaced the first — exactly one live waiter.
+    expect(pendingMucCallPreparationWaiterCountForTests()).toBe(1);
+    expect(await firstSettled).toBeInstanceOf(Error);
+
+    second.cancel();
+    expect(await secondSettled).toBeInstanceOf(Error);
+    expect(pendingMucCallPreparationWaiterCountForTests()).toBe(0);
   });
 });

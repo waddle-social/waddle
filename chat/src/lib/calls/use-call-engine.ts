@@ -4,6 +4,7 @@ import { CallEngine, type LocalMediaTrack, type RemoteMediaTrack } from "./engin
 import {
   addLiveCallParticipant,
   clearLiveCallParticipants,
+  markRoomLeavingCall,
   removeLiveCallParticipant,
   setLiveCallParticipants,
 } from "./muc-call-live-participants";
@@ -76,8 +77,15 @@ export function useCallEngine(): {
       // view. Drop the LK snapshot so the room's UI reverts to the
       // Muji-derived (server-bridged) view, which the LK webhook
       // bridge keeps honest within seconds.
-      const roomJid = activeMucRoomJid();
-      if (roomJid) clearLiveCallParticipants(roomJid);
+      const slot = activeMucCallSlot();
+      if (!slot) return;
+      // Suppress our own stale Muji nick for one render cycle: the
+      // server-authoritative `<muji/>` absence broadcast arrives ~1
+      // RTT after LK fires `disconnected`, so without this marker the
+      // resolved participant list would fall back to a Muji view that
+      // still lists us — bouncing the indicator 0 → N → 0.
+      markRoomLeavingCall(slot.roomJid, slot.selfNick);
+      clearLiveCallParticipants(slot.roomJid);
     });
   }
   return { engine: singletonEngine, remoteTracks, localTracks };
@@ -90,8 +98,18 @@ export function useCallEngine(): {
  * leak into the MUC participant store.
  */
 function activeMucRoomJid(): string | null {
+  return activeMucCallSlot()?.roomJid ?? null;
+}
+
+/**
+ * Read the active MUC call's room JID together with our own MUC nick,
+ * or `null` when no MUC call is bound to the slot. The nick lets the
+ * teardown path suppress our own stale Muji presence until the server
+ * broadcasts our `<muji/>` absence.
+ */
+function activeMucCallSlot(): { roomJid: string; selfNick: string | null } | null {
   const state = $callState.get();
   if (state.phase !== "active" && state.phase !== "muc-pending") return null;
   if (state.kind !== "muc") return null;
-  return state.peer;
+  return { roomJid: state.peer, selfNick: state.selfNick ?? null };
 }

@@ -8,6 +8,7 @@ import {
   dmCallResumeBlockReason,
   pruneExpiredDmCallActivities,
   readDmCallActivity,
+  validateLiveKitGrant,
 } from "../src/lib/calls/dm-call-activity";
 import { clearAllDmCallJoinCacheForTests } from "../src/lib/calls/dm-call-join-cache";
 import type { CallEvent } from "../src/lib/calls/types";
@@ -865,5 +866,69 @@ describe("DM call activity", () => {
     clearDmCallActivity(bob, "call-5");
 
     expect(readDmCallActivity(bob, now)).toBeNull();
+  });
+});
+
+describe("validateLiveKitGrant (defensive pre-connect check)", () => {
+  const ROOM = "design@muc.waddle.test";
+
+  function grantToken(video: unknown): string {
+    return jwtWithPayload({ exp: 4_102_444_800, video });
+  }
+
+  test("accepts a server-minted camelCase grant with roomJoin + room", () => {
+    const token = grantToken({
+      roomJoin: true,
+      room: ROOM,
+      canPublish: true,
+      canSubscribe: true,
+      canPublishData: true,
+    });
+    expect(validateLiveKitGrant(token)).toEqual({ ok: true });
+  });
+
+  test("accepts a join-only grant (publish/subscribe flags are not required)", () => {
+    expect(validateLiveKitGrant(grantToken({ roomJoin: true, room: ROOM }))).toEqual({ ok: true });
+  });
+
+  test("rejects a token whose payload segment is not decodable", () => {
+    expect(validateLiveKitGrant("not-a-jwt")).toEqual({ ok: false, reason: "malformed-token" });
+    expect(validateLiveKitGrant("")).toEqual({ ok: false, reason: "malformed-token" });
+  });
+
+  test("rejects a token that carries no video grant", () => {
+    expect(validateLiveKitGrant(jwtWithPayload({ exp: 4_102_444_800 }))).toEqual({
+      ok: false,
+      reason: "missing-grant",
+    });
+    expect(validateLiveKitGrant(grantToken(null))).toEqual({ ok: false, reason: "missing-grant" });
+  });
+
+  test("rejects a grant that does not actually grant roomJoin", () => {
+    expect(validateLiveKitGrant(grantToken({ room: ROOM }))).toEqual({
+      ok: false,
+      reason: "join-not-granted",
+    });
+    expect(validateLiveKitGrant(grantToken({ roomJoin: false, room: ROOM }))).toEqual({
+      ok: false,
+      reason: "join-not-granted",
+    });
+    // A truthy-but-not-true value (e.g. a stringified flag) must not
+    // sneak past — LiveKit grants are strict booleans.
+    expect(validateLiveKitGrant(grantToken({ roomJoin: "true", room: ROOM }))).toEqual({
+      ok: false,
+      reason: "join-not-granted",
+    });
+  });
+
+  test("rejects a grant with a missing or empty room", () => {
+    expect(validateLiveKitGrant(grantToken({ roomJoin: true }))).toEqual({
+      ok: false,
+      reason: "missing-room",
+    });
+    expect(validateLiveKitGrant(grantToken({ roomJoin: true, room: "   " }))).toEqual({
+      ok: false,
+      reason: "missing-room",
+    });
   });
 });
