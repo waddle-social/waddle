@@ -140,6 +140,11 @@ pub trait SfuService: Send + Sync + 'static {
     fn participants_for_call(&self, call_id: &CallId) -> Vec<Identity>;
 }
 
+/// Future returned by [`SfuReconciler::reconcile_active_calls`],
+/// resolving to the `(call, identity)` pairs swept this pass. Named so
+/// the boxed-future shape stays readable at the trait + impl sites.
+pub type ReconcileFuture<'a> = Pin<Box<dyn Future<Output = Vec<(CallId, Identity)>> + Send + 'a>>;
+
 /// Periodic reconciliation against the SFU's ground truth.
 ///
 /// Separate from [`SfuService`] because it is inherently async (an
@@ -150,11 +155,6 @@ pub trait SfuService: Send + Sync + 'static {
 /// a permanent ghost in the registry (and therefore in MUC presence):
 /// LiveKit, not our in-memory registry, is the authority on who is
 /// actually connected.
-/// Future returned by [`SfuReconciler::reconcile_active_calls`],
-/// resolving to the `(call, identity)` pairs swept this pass. Named so
-/// the boxed-future shape stays readable at the trait + impl sites.
-pub type ReconcileFuture<'a> = Pin<Box<dyn Future<Output = Vec<(CallId, Identity)>> + Send + 'a>>;
-
 pub trait SfuReconciler: Send + Sync + 'static {
     /// Sweep registry entries LiveKit no longer reports as connected,
     /// respecting a registration grace window so still-connecting
