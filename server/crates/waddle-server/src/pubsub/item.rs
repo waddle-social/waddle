@@ -544,15 +544,17 @@ async fn apply_projection_mutation_tx(
                     conversation_jid,
                     conversation_kind,
                     mode,
+                    rich_payload_opt_in,
                     source_version,
                     updated_at_ms,
                     source_node,
                     source_item_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(owner_bare_jid, conversation_jid) DO UPDATE SET
                     conversation_kind = excluded.conversation_kind,
                     mode = excluded.mode,
+                    rich_payload_opt_in = excluded.rich_payload_opt_in,
                     source_version = excluded.source_version,
                     updated_at_ms = excluded.updated_at_ms,
                     source_node = excluded.source_node,
@@ -563,6 +565,7 @@ async fn apply_projection_mutation_tx(
                     projection.conversation_jid.to_string(),
                     projection.conversation_kind.as_db_value(),
                     projection.mode.element_name(),
+                    i64::from(projection.rich_payload_opt_in),
                     projection.source_version,
                     projection.updated_at_ms,
                     projection.source.node(),

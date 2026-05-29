@@ -5519,6 +5519,7 @@ mod tests {
                 conversation_kind:
                     crate::notification_settings_projection::ConversationKind::Direct,
                 mode: waddle_xmpp::xep::NotificationLevel::Never,
+                rich_payload_opt_in: false,
                 source_version: 1,
                 updated_at_ms: crate::time::now_ms(),
                 source:
@@ -8285,6 +8286,7 @@ mod tests {
                     crate::notification_settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
                 source_item_jid: sender.clone(),
                 updated_at_ms: 1,
+                rich_payload_opt_in: false,
                 source_version: 1,
             })
             .await
@@ -8363,6 +8365,7 @@ mod tests {
                     crate::notification_settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
                 source_item_jid: sender.clone(),
                 updated_at_ms: 1,
+                rich_payload_opt_in: false,
                 source_version: 1,
             })
             .await
@@ -9009,6 +9012,7 @@ mod tests {
                     crate::notification_settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
                 source_item_jid: sender.clone(),
                 updated_at_ms: 1,
+                rich_payload_opt_in: false,
                 source_version: 1,
             })
             .await
@@ -9104,6 +9108,7 @@ mod tests {
                     crate::notification_settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
                 source_item_jid: sender.clone(),
                 updated_at_ms: 1,
+                rich_payload_opt_in: false,
                 source_version: 1,
             })
             .await

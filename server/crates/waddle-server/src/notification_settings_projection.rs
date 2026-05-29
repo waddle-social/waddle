@@ -76,6 +76,13 @@ pub struct NotificationSettingsProjection {
     pub conversation_jid: BareJid,
     pub conversation_kind: ConversationKind,
     pub mode: NotificationLevel,
+    /// Waddle XEP-0492 `<advanced/>` rich-payload opt-in
+    /// (see [`waddle_xmpp::xep::xep0492::NS_PUSH_RICH_PAYLOAD`]). When
+    /// `true`, the T1 push evaluator may emit a rich XEP-0357 summary
+    /// (`last-message-sender` + `last-message-body`) for this
+    /// conversation, subject to XEP-0334 hint stripping. Defaults to
+    /// `false` — the minimal summary payload.
+    pub rich_payload_opt_in: bool,
     pub source_version: i64,
     pub updated_at_ms: i64,
     pub source: NotificationSettingsSource,
@@ -139,15 +146,17 @@ impl NotificationSettingsProjectionStore {
                 conversation_jid,
                 conversation_kind,
                 mode,
+                rich_payload_opt_in,
                 source_version,
                 updated_at_ms,
                 source_node,
                 source_item_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(owner_bare_jid, conversation_jid) DO UPDATE SET
                 conversation_kind = excluded.conversation_kind,
                 mode = excluded.mode,
+                rich_payload_opt_in = excluded.rich_payload_opt_in,
                 source_version = excluded.source_version,
                 updated_at_ms = excluded.updated_at_ms,
                 source_node = excluded.source_node,
@@ -158,6 +167,7 @@ impl NotificationSettingsProjectionStore {
                 projection.conversation_jid.to_string(),
                 projection.conversation_kind.as_db_value(),
                 projection.mode.element_name(),
+                i64::from(projection.rich_payload_opt_in),
                 projection.source_version,
                 projection.updated_at_ms,
                 projection.source.node(),
@@ -217,6 +227,7 @@ impl NotificationSettingsProjectionStore {
                        conversation_jid,
                        conversation_kind,
                        mode,
+                       rich_payload_opt_in,
                        source_version,
                        updated_at_ms,
                        source_node,
@@ -241,6 +252,24 @@ impl NotificationSettingsProjectionStore {
             .await?
             .map(|projection| projection.mode)
             .unwrap_or_else(|| conversation_kind.default_notification_setting()))
+    }
+
+    /// Resolve the Waddle rich-payload opt-in for a conversation.
+    ///
+    /// Returns the stored per-conversation opt-in
+    /// (see [`NotificationSettingsProjection::rich_payload_opt_in`]).
+    /// Absence of a projection row — the default — is opt-out (`false`),
+    /// preserving the minimal XEP-0357 summary payload.
+    pub async fn effective_rich_payload_opt_in(
+        &self,
+        owner_bare_jid: &BareJid,
+        conversation_jid: &BareJid,
+    ) -> Result<bool, NotificationSettingsProjectionError> {
+        Ok(self
+            .get(owner_bare_jid, conversation_jid)
+            .await?
+            .map(|projection| projection.rich_payload_opt_in)
+            .unwrap_or(false))
     }
 }
 
@@ -345,6 +374,7 @@ pub fn derive_validated_bookmark_projection_mutation(
         }
         Err(error) => return Err(error.into()),
     };
+    let rich_payload_opt_in = waddle_xmpp::xep::xep0492::parse_rich_payload_opt_in(notify);
 
     Ok(NotificationSettingsProjectionMutation::Upsert(
         NotificationSettingsProjection {
@@ -352,6 +382,7 @@ pub fn derive_validated_bookmark_projection_mutation(
             conversation_jid: bookmark.jid.clone(),
             conversation_kind,
             mode,
+            rich_payload_opt_in,
             source_version,
             updated_at_ms,
             source: NotificationSettingsSource::Xep0402Bookmarks,
@@ -476,10 +507,11 @@ fn decode_projection(
     let conversation_raw: String = row.get(1)?;
     let conversation_kind_raw: String = row.get(2)?;
     let mode_raw: String = row.get(3)?;
-    let source_version: i64 = row.get(4)?;
-    let updated_at_ms: i64 = row.get(5)?;
-    let source_node_raw: String = row.get(6)?;
-    let source_item_raw: String = row.get(7)?;
+    let rich_payload_opt_in: i64 = row.get(4)?;
+    let source_version: i64 = row.get(5)?;
+    let updated_at_ms: i64 = row.get(6)?;
+    let source_node_raw: String = row.get(7)?;
+    let source_item_raw: String = row.get(8)?;
 
     let owner_bare_jid = owner_raw
         .parse()
@@ -500,6 +532,7 @@ fn decode_projection(
         conversation_jid,
         conversation_kind,
         mode,
+        rich_payload_opt_in: rich_payload_opt_in != 0,
         source_version,
         updated_at_ms,
         source,
@@ -577,6 +610,7 @@ mod tests {
                     conversation_jid: conversation.clone(),
                     conversation_kind: ConversationKind::PrivateGroup,
                     mode: NotificationLevel::Never,
+                    rich_payload_opt_in: true,
                     source_version: 7,
                     updated_at_ms: 42,
                     source: NotificationSettingsSource::Xep0402Bookmarks,
@@ -597,6 +631,7 @@ mod tests {
                 .expect("get")
                 .expect("row");
             assert_eq!(loaded.mode, NotificationLevel::Never);
+            assert!(loaded.rich_payload_opt_in);
             assert_eq!(loaded.conversation_kind, ConversationKind::PrivateGroup);
             assert_eq!(loaded.source_version, 7);
             assert_eq!(loaded.updated_at_ms, 42);
@@ -630,6 +665,7 @@ mod tests {
                     conversation_jid: conversation.clone(),
                     conversation_kind: ConversationKind::PrivateGroup,
                     mode: NotificationLevel::Never,
+                    rich_payload_opt_in: false,
                     source_version: 7,
                     updated_at_ms: 42,
                     source: NotificationSettingsSource::Xep0402Bookmarks,
@@ -659,6 +695,76 @@ mod tests {
             .await
             .expect("bob room one")
             .is_some());
+    }
+
+    #[test]
+    fn derives_rich_payload_opt_in_from_xep0492_advanced_extension() {
+        let owner = bare("alice@example.com");
+        let payload: Element = "<conference xmlns='urn:xmpp:bookmarks:1'>\
+                <extensions>\
+                    <notify xmlns='urn:xmpp:notification-settings:1'>\
+                        <always>\
+                            <advanced>\
+                                <rich-payload xmlns='urn:waddle:push:rich:0' />\
+                            </advanced>\
+                        </always>\
+                    </notify>\
+                </extensions>\
+            </conference>"
+            .parse()
+            .expect("valid bookmark payload");
+
+        let mutation = derive_bookmark_projection_mutation(
+            &owner,
+            "room@muc.example.com",
+            Some(&payload),
+            ConversationKind::PrivateGroup,
+            7,
+            11,
+        )
+        .expect("derive");
+
+        let NotificationSettingsProjectionMutation::Upsert(projection) = mutation else {
+            panic!("expected upsert mutation");
+        };
+        assert_eq!(projection.mode, NotificationLevel::Always);
+        assert!(
+            projection.rich_payload_opt_in,
+            "XEP-0492 <advanced/> rich-payload child must set the opt-in"
+        );
+    }
+
+    #[tokio::test]
+    async fn effective_rich_payload_opt_in_defaults_off_and_round_trips() {
+        let store = migrated_in_memory_store().await;
+        let owner = bare("alice@example.com");
+        let conversation = bare("room@muc.example.com");
+
+        // Default — no projection row — is opt-out (minimal payload).
+        assert!(!store
+            .effective_rich_payload_opt_in(&owner, &conversation)
+            .await
+            .expect("default opt-in"));
+
+        store
+            .upsert(&NotificationSettingsProjection {
+                owner_bare_jid: owner.clone(),
+                conversation_jid: conversation.clone(),
+                conversation_kind: ConversationKind::PrivateGroup,
+                mode: NotificationLevel::Always,
+                rich_payload_opt_in: true,
+                source_version: 7,
+                updated_at_ms: 42,
+                source: NotificationSettingsSource::Xep0402Bookmarks,
+                source_item_jid: conversation.clone(),
+            })
+            .await
+            .expect("upsert");
+
+        assert!(store
+            .effective_rich_payload_opt_in(&owner, &conversation)
+            .await
+            .expect("stored opt-in"));
     }
 
     #[test]
