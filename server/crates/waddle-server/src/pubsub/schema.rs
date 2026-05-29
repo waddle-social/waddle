@@ -16,7 +16,10 @@ use super::DatabasePubSubStorage;
 /// * v5 — initial `dnd_projection` (#367)
 /// * v6 — added `dnd_projection_source_version` singleton counter
 ///   to replace wall-clock millis as the LWW key (round-7 review)
-const PUBSUB_SCHEMA_VERSION: i64 = 6;
+// v7 (#719): notification_settings_projection gains the
+// `rich_payload_opt_in` column (XEP-0492 `<advanced/>` rich-payload
+// opt-in). Version-gated drop-and-recreate carries the schema change.
+const PUBSUB_SCHEMA_VERSION: i64 = 7;
 
 impl DatabasePubSubStorage {
     pub(super) async fn initialize(&self) -> Result<(), XmppError> {

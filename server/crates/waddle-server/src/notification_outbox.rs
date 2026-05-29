@@ -1247,6 +1247,11 @@ impl NotificationOutboxStore {
             "no_permanent_store INTEGER NOT NULL DEFAULT 0",
         )
         .await?;
+        // #719: message-body snapshot for the optional XEP-0357 §5.4
+        // `last-message-body`. Nullable — dropped when a XEP-0334
+        // storage hint applies.
+        self.add_column_if_missing("notification_candidates", "last_message_body TEXT")
+            .await?;
         self.migrate_notification_candidates_suppressed_reason_constraint(i64_type)
             .await?;
         self.execute(
@@ -1289,6 +1294,16 @@ impl NotificationOutboxStore {
             "policy_error_count INTEGER NOT NULL DEFAULT 0",
         )
         .await?;
+        // #719: T1-resolved XEP-0357 §5.4 rich summary fields.
+        // `rich_opt_in` flags whether `last-message-sender` is emitted;
+        // `summary_body` is the (hint-stripped) `last-message-body`.
+        self.add_column_if_missing(
+            "notification_outbox",
+            "rich_opt_in INTEGER NOT NULL DEFAULT 0",
+        )
+        .await?;
+        self.add_column_if_missing("notification_outbox", "summary_body TEXT")
+            .await?;
         self.migrate_notification_outbox_class_constraint(i64_type)
             .await?;
         self.execute(
