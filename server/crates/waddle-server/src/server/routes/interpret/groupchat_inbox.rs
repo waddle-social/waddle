@@ -358,7 +358,12 @@ async fn insert_groupchat_notification_candidate(
         class,
         hints,
     ) {
-        Ok(candidate) => candidate,
+        // Snapshot the body for the optional XEP-0357 §5.4
+        // `last-message-body`; dropped when a XEP-0334 storage hint
+        // applies.
+        Ok(candidate) => {
+            candidate.with_last_message_body(super::groupchat_archive::prototype_body(message))
+        }
         Err(error) => {
             warn!(
                 recipient = %owner,
@@ -451,7 +456,7 @@ async fn insert_groupchat_notification_candidate(
         }
     };
     match outcome {
-        crate::notification_outbox::T1PushDispatchOutcome::Deliver => {}
+        crate::notification_outbox::T1PushDispatchOutcome::Deliver { .. } => {}
         crate::notification_outbox::T1PushDispatchOutcome::Suppressed { reason } => {
             info!(
                 recipient = %owner,

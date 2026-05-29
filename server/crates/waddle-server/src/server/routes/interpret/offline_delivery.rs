@@ -328,7 +328,13 @@ async fn enqueue_xep0357_notification_candidate_for_message(
         is_mention,
         hints,
     ) {
-        Ok(candidate) => candidate,
+        // Snapshot the body for the optional XEP-0357 §5.4
+        // `last-message-body`; the candidate drops it when a XEP-0334
+        // storage hint applies (off-the-record bodies are never
+        // persisted).
+        Ok(candidate) => candidate.with_last_message_body(super::groupchat_archive::prototype_body(
+            original_message,
+        )),
         Err(
             crate::notification_outbox::NotificationOutboxError::SelfDirectedNotificationCandidate(
                 _,
@@ -421,7 +427,7 @@ async fn enqueue_xep0357_notification_candidate_for_message(
         }
     };
     match outcome {
-        crate::notification_outbox::T1PushDispatchOutcome::Deliver => {}
+        crate::notification_outbox::T1PushDispatchOutcome::Deliver { .. } => {}
         crate::notification_outbox::T1PushDispatchOutcome::Suppressed { reason } => {
             info!(
                 recipient = %recipient,
