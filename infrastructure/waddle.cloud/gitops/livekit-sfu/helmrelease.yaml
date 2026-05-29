@@ -17,9 +17,14 @@ spec:
         namespace: livekit
       interval: 12h
   valuesFrom:
+    # Inject the dedicated webhook signer key NAME so LiveKit signs
+    # webhook deliveries with the `webhook-key`/`webhook-secret` pair
+    # (not the room-JWT `api-key`/`api-secret` pair). The matching
+    # `webhook-secret` is what waddle-server verifies with, so a leaked
+    # room-JWT secret cannot forge inbound webhooks.
     - kind: Secret
       name: livekit-sfu-api-keys
-      valuesKey: api-key
+      valuesKey: webhook-key
       targetPath: webhook.apiKey
       optional: false
   values:
