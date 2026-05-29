@@ -280,8 +280,19 @@ fn build_merged_notify_element(
         let has_identity_attr =
             child.attr("identity-category").is_some() || child.attr("identity-type").is_some();
         if is_setting && has_identity_attr {
-            // Identity-scoped sibling — preserve verbatim.
-            identity_scoped.push(child);
+            // Identity-scoped sibling. Foreign rules are preserved
+            // verbatim (§3 ¶1), but our OWN `<rich-payload/>` marker is
+            // ours to manage: on opt-out we strip it here too, so the
+            // opt-in readers (client `read_rich_payload_opt_in` and the
+            // server `parse_rich_payload_opt_in`, both of which honor
+            // the marker on ANY setting) can't keep reporting opted-in
+            // after the user opted out. On opt-in we leave the sibling
+            // untouched — the user's opt-in is recorded on the fallback.
+            identity_scoped.push(if rich_payload_opt_in {
+                child
+            } else {
+                strip_rich_payload_from_setting(child)
+            });
         } else if is_setting {
             // No-attrs fallback (possibly more than one, in
             // malformed input). Salvage any `<advanced/>` child
@@ -365,6 +376,41 @@ fn apply_rich_payload(advanced_blocks: Vec<Element>, opt_in: bool) -> Vec<Elemen
         advanced = advanced.append(child);
     }
     vec![advanced.build()]
+}
+
+/// Return a copy of an identity-scoped setting element with our
+/// `<rich-payload xmlns='urn:waddle:push:rich:0'/>` marker removed from
+/// its `<advanced/>` child, dropping a thereby-emptied `<advanced/>`
+/// (§2.3 SHOULD NOT be empty). All foreign children — including foreign
+/// `<advanced/>` rules and the setting's `identity-*` attributes — are
+/// preserved verbatim (§3 ¶1). Used on opt-out so the marker is cleared
+/// wherever a (cross-client) writer may have placed it, keeping the
+/// write side symmetric with the read side. #719.
+fn strip_rich_payload_from_setting(setting: Element) -> Element {
+    let mut builder = Element::builder(setting.name(), setting.ns());
+    for ((ns, name), value) in setting.attrs().iter() {
+        builder = builder.attr_ns(ns.clone(), name.clone(), value);
+    }
+    for child in setting.children() {
+        if child.is("advanced", NS_NOTIFICATION_SETTINGS) {
+            let kept: Vec<Element> = child
+                .children()
+                .filter(|grandchild| !grandchild.is("rich-payload", NS_PUSH_RICH_PAYLOAD))
+                .cloned()
+                .collect();
+            if kept.is_empty() {
+                continue;
+            }
+            let mut advanced = Element::builder("advanced", NS_NOTIFICATION_SETTINGS);
+            for grandchild in kept {
+                advanced = advanced.append(grandchild);
+            }
+            builder = builder.append(advanced.build());
+        } else {
+            builder = builder.append(child.clone());
+        }
+    }
+    builder.build()
 }
 
 fn sort_key(el: &Element) -> (u8, Option<&str>, Option<&str>) {
@@ -863,6 +909,82 @@ mod tests {
             .filter(|c| c.is("rich-payload", NS_PUSH_RICH_PAYLOAD))
             .count();
         assert_eq!(rich_count, 1);
+    }
+
+    #[test]
+    fn opt_out_strips_rich_payload_from_identity_scoped_setting() {
+        // Cross-client robustness: a `<rich-payload/>` marker placed on
+        // an identity-scoped setting by another writer must also be
+        // cleared on opt-out, since both the client reader and the
+        // server `parse_rich_payload_opt_in` honor the marker on ANY
+        // setting — otherwise the opt-out would be a silent no-op and
+        // the UI checkbox would snap back on. The setting's foreign
+        // `<weekend/>` rule and identity attrs are preserved (§3 ¶1).
+        let extensions_xml = "<extensions xmlns='urn:xmpp:bookmarks:1'>\
+                    <notify xmlns='urn:xmpp:notification-settings:1'>\
+                        <always />\
+                        <never identity-category='client' identity-type='pc'>\
+                            <advanced xmlns='urn:xmpp:notification-settings:1'>\
+                                <weekend xmlns='custom:other-client:1'/>\
+                                <rich-payload xmlns='urn:waddle:push:rich:0'/>\
+                            </advanced>\
+                        </never>\
+                    </notify>\
+                    </extensions>";
+        let extensions: Element = extensions_xml.parse().expect("valid xml");
+        let merged = merge_notify_into_extensions(Some(&extensions), NotifyMode::Always, false);
+        let notify = find_notify_in_extensions(&merged).expect("notify present");
+
+        // The opt-in is now fully cleared — no setting carries it.
+        assert!(!read_rich_payload_opt_in(notify));
+        // The identity-scoped setting survives with its foreign rule
+        // and attrs intact.
+        let never = notify
+            .children()
+            .find(|c| {
+                c.name() == "never"
+                    && c.attr("identity-category") == Some("client")
+                    && c.attr("identity-type") == Some("pc")
+            })
+            .expect("identity-scoped setting preserved");
+        let advanced = never
+            .get_child("advanced", NS_NOTIFICATION_SETTINGS)
+            .expect("advanced kept for the foreign child");
+        assert!(advanced
+            .children()
+            .any(|c| c.ns() == "custom:other-client:1"));
+        assert!(!advanced.has_child("rich-payload", NS_PUSH_RICH_PAYLOAD));
+    }
+
+    #[test]
+    fn opt_in_leaves_identity_scoped_setting_verbatim() {
+        // On opt-in we record the marker on the fallback and do NOT
+        // touch identity-scoped siblings — a foreign rule there is
+        // preserved exactly.
+        let extensions_xml = "<extensions xmlns='urn:xmpp:bookmarks:1'>\
+                    <notify xmlns='urn:xmpp:notification-settings:1'>\
+                        <always />\
+                        <never identity-category='client'>\
+                            <advanced xmlns='urn:xmpp:notification-settings:1'>\
+                                <weekend xmlns='custom:other-client:1'/>\
+                            </advanced>\
+                        </never>\
+                    </notify>\
+                    </extensions>";
+        let extensions: Element = extensions_xml.parse().expect("valid xml");
+        let merged = merge_notify_into_extensions(Some(&extensions), NotifyMode::Always, true);
+        let notify = find_notify_in_extensions(&merged).expect("notify present");
+        assert!(read_rich_payload_opt_in(notify));
+        let never = notify
+            .children()
+            .find(|c| c.name() == "never" && c.attr("identity-category") == Some("client"))
+            .expect("identity-scoped setting preserved");
+        let advanced = never
+            .get_child("advanced", NS_NOTIFICATION_SETTINGS)
+            .expect("foreign advanced preserved");
+        assert!(advanced
+            .children()
+            .any(|c| c.ns() == "custom:other-client:1"));
     }
 
     #[test]

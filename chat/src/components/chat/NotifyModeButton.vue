@@ -186,19 +186,22 @@ async function toggleRichPayload() {
       errorMessage.value = "Couldn't save the setting. Try again in a moment.";
       return;
     }
-    if (result === "ok") {
-      // Keep the popover open — toggling a preference is a stay-put
-      // interaction, unlike picking a mode which dismisses.
-      return;
-    }
+    // The toggle is a stay-put interaction (unlike picking a mode,
+    // which dismisses), so the popover stays open on success.
     if (result === "node-config-mismatch") {
       errorMessage.value =
         "This room's settings node was created by an older client. Ask a server admin to delete the node so Waddle can re-create it.";
-    } else {
+    } else if (result !== "ok") {
       errorMessage.value = "Couldn't save the setting. Try again in a moment.";
     }
   } finally {
     submittingRich.value = false;
+    // The toggle was `disabled` while busy, which blurs it. Now that
+    // it has re-enabled, re-land focus on it (after the DOM updates)
+    // so keyboard / AT users keep their place in the open menu.
+    if (open.value) {
+      void nextTick().then(() => focusOptionAt(RICH_INDEX));
+    }
   }
 }
 
