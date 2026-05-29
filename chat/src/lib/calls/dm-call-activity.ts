@@ -158,23 +158,71 @@ function eventSelfFullJid(envelope: DmCallEventEnvelope, join?: LiveKitJoin): st
 }
 
 /**
+ * Decode a LiveKit join JWT's payload (the middle segment) into a
+ * plain object, or `null` for malformed/undecodable input. Shared by
+ * the expiry check and the video-grant validation so both parse the
+ * token exactly once per concern without duplicating the base64url +
+ * JSON dance.
+ */
+function decodeLiveKitJwtPayload(token: string): Record<string, unknown> | null {
+  const payload = token.split(".")[1];
+  if (!payload) return null;
+  try {
+    const parsed = JSON.parse(decodeBase64UrlUtf8(payload)) as unknown;
+    if (!parsed || typeof parsed !== "object") return null;
+    return parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Decode a LiveKit join JWT and return its `exp` claim as a `Date`,
  * or `null` for malformed input. Exported so the MUC resume path
  * (`resumeMucCallActivity`) can reuse the same expiry check the DM
  * resume path uses without re-implementing JWT decoding.
  */
 export function liveKitJoinTokenExpiresAt(token: string): Date | null {
-  const payload = token.split(".")[1];
-  if (!payload) return null;
-  try {
-    const decoded = decodeBase64UrlUtf8(payload);
-    const parsed = JSON.parse(decoded) as { exp?: unknown };
-    const exp = Number(parsed.exp);
-    if (!Number.isFinite(exp) || exp <= 0) return null;
-    return new Date(exp * 1000);
-  } catch {
-    return null;
+  const parsed = decodeLiveKitJwtPayload(token);
+  if (!parsed) return null;
+  const exp = Number(parsed.exp);
+  if (!Number.isFinite(exp) || exp <= 0) return null;
+  return new Date(exp * 1000);
+}
+
+/**
+ * Outcome of validating a LiveKit join token's `video` grant before
+ * we hand it to the SDK. `ok` is the only success; every failure
+ * names the specific defect so the call surface can surface a clear
+ * error instead of the SDK's opaque late rejection.
+ */
+type LiveKitGrantValidation =
+  | { ok: true }
+  | { ok: false; reason: "malformed-token" | "missing-grant" | "join-not-granted" | "missing-room" };
+
+/**
+ * Defensively validate the `video` grant encoded in a LiveKit join
+ * JWT before `Room.connect`. The server mints camelCase grant fields
+ * (`roomJoin`, `room`, `canPublish`, `canSubscribe`,
+ * `canPublishData`); at minimum a usable join token must grant
+ * `roomJoin === true` for a non-empty `room`. Failing fast here turns
+ * a misconfigured / mismatched token into a clear local error rather
+ * than letting the SDK reject the WebSocket upgrade opaquely.
+ *
+ * Pure: no I/O, no SDK dependency, so it's trivially unit-testable
+ * alongside the other token helpers.
+ */
+export function validateLiveKitGrant(token: string): LiveKitGrantValidation {
+  const parsed = decodeLiveKitJwtPayload(token);
+  if (!parsed) return { ok: false, reason: "malformed-token" };
+  const grant = parsed.video;
+  if (!grant || typeof grant !== "object") return { ok: false, reason: "missing-grant" };
+  const video = grant as Record<string, unknown>;
+  if (video.roomJoin !== true) return { ok: false, reason: "join-not-granted" };
+  if (typeof video.room !== "string" || video.room.trim() === "") {
+    return { ok: false, reason: "missing-room" };
   }
+  return { ok: true };
 }
 
 function decodeBase64UrlUtf8(value: string): string {

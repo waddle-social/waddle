@@ -6,6 +6,21 @@
 {{- fail (printf "apiKeys.values.%s must be at least 32 characters" $apiKey) -}}
 {{- end -}}
 {{- end -}}
+{{- /*
+  Single-replica is intentional but has NO high availability: there is
+  exactly one SFU pod, so a node drain, kernel/node upgrade, helm
+  rollout, or pod eviction drops every active call (media has no second
+  replica to fail over to, and WebRTC sessions are stateful in-process).
+  Operational guidance:
+    - Schedule node maintenance / upgrades in announced maintenance
+      windows when call volume is lowest.
+    - Cordon + wait for calls to drain rather than hard-draining;
+      `terminationGracePeriodSeconds` (values.yaml, default 18000s = 5h)
+      lets in-flight calls finish before the pod is killed.
+    - Going multi-replica requires a LiveKit setup with Redis-backed
+      room distribution and node selection — not just bumping
+      `replicaCount`; hence this hard guard.
+*/ -}}
 {{- if ne (int .Values.replicaCount) 1 -}}
 {{- fail "livekit-sfu is intentionally single-node for now; replicaCount must be 1" -}}
 {{- end -}}

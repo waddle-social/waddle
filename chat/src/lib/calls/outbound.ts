@@ -11,7 +11,7 @@ export type CallWireSender = {
   send_call_proceed?: (peer_full_jid: string, sid: string) => Promise<unknown>;
   send_call_reject?: (peer_full_jid: string, sid: string) => Promise<unknown>;
   send_call_reject_tie_break?: (peer_full_jid: string, sid: string) => Promise<unknown>;
-  send_call_retract?: (peer_jid: string, sid: string) => Promise<unknown>;
+  send_call_retract?: (peer_bare_jid: string, sid: string) => Promise<unknown>;
   send_call_retract_tie_break?: (peer_full_jid: string, sid: string) => Promise<unknown>;
   send_call_finish?: (peer_full_jid: string, sid: string) => Promise<unknown>;
   send_call_finish_migrated?: (peer_full_jid: string, old_sid: string, new_sid: string) => Promise<unknown>;
@@ -86,9 +86,9 @@ export const outboundCalls = {
     await client.send_call_reject_tie_break(peerFullJid, sid);
   },
 
-  async retract(client: CallWireSender, peerJid: string, sid: string): Promise<void> {
+  async retract(client: CallWireSender, peerBareJid: string, sid: string): Promise<void> {
     if (!client.send_call_retract) throw new WasmCallApiUnavailable("send_call_retract");
-    await client.send_call_retract(peerJid, sid);
+    await client.send_call_retract(peerBareJid, sid);
   },
 
   async retractTieBreak(client: CallWireSender, peerFullJid: string, sid: string): Promise<void> {

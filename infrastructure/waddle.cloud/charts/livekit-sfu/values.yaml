@@ -105,7 +105,21 @@ tmpDir:
   mountPath: /tmp
   sizeLimit: 64Mi
 
-resources: {}
+# Default resource requests/limits. An empty `resources: {}` lets the
+# pod run unbounded and means a single misbehaving SFU can starve the
+# node or get OOM-killed without a guaranteed floor — production must
+# not rely on the Flux HelmRelease override to supply these. These
+# defaults match `gitops/livekit-sfu/helmrelease.yaml`; tune per node
+# size. CPU limit is set well above the request because media muxing is
+# bursty and CPU throttling degrades call quality more than it protects
+# the node.
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    cpu: "2"
+    memory: 2Gi
 
 nodeSelector: {}
 tolerations: []

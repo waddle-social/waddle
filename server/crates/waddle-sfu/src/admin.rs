@@ -64,6 +64,18 @@ pub trait LiveKitAdmin: Send + Sync + 'static {
         &'a self,
         room: &'a CallId,
     ) -> Pin<Box<dyn Future<Output = Result<(), SfuError>> + Send + 'a>>;
+
+    /// List the identities LiveKit currently reports as joined to
+    /// `room`. The authoritative answer to "who is *actually* in this
+    /// call right now", used by the reconciliation backstop to detect
+    /// registry ghosts left behind when a `participant_left` /
+    /// `room_finished` webhook delivery was lost. A `not_found` room
+    /// (LiveKit has GC'd it or never saw it) resolves to an empty
+    /// vec — nobody is connected — not an error.
+    fn list_participant_identities<'a>(
+        &'a self,
+        room: &'a CallId,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Identity>, SfuError>> + Send + 'a>>;
 }
 
 /// Production admin client. Holds a long-lived `reqwest::Client` so
@@ -168,6 +180,44 @@ impl ReqwestLiveKitAdmin {
             body: truncate(body, 256),
         })
     }
+
+    /// Like [`Self::post`] but deserializes the response body. Returns
+    /// `Ok(None)` for the Twirp `not_found` shapes (HTTP 404 or a 4xx
+    /// whose envelope `code` is `"not_found"`) so callers can treat a
+    /// missing room as "no participants" rather than an error.
+    async fn post_returning<B: Serialize, R: for<'de> Deserialize<'de>>(
+        &self,
+        room: &CallId,
+        path: &str,
+        body: &B,
+    ) -> Result<Option<R>, SfuError> {
+        let token = self.mint_admin_token(room)?;
+        let url = self.base_url.join(path).map_err(SfuError::AdminUrl)?;
+        let resp = self
+            .http
+            .post(url)
+            .bearer_auth(token)
+            .json(body)
+            .send()
+            .await
+            .map_err(SfuError::AdminRequest)?;
+        let status = resp.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if status.is_success() {
+            let parsed = resp.json::<R>().await.map_err(SfuError::AdminRequest)?;
+            return Ok(Some(parsed));
+        }
+        let body = resp.text().await.unwrap_or_default();
+        if status.is_client_error() && is_twirp_not_found(&body) {
+            return Ok(None);
+        }
+        Err(SfuError::AdminCallFailed {
+            status: status.as_u16(),
+            body: truncate(body, 256),
+        })
+    }
 }
 
 impl LiveKitAdmin for ReqwestLiveKitAdmin {
@@ -196,6 +246,37 @@ impl LiveKitAdmin for ReqwestLiveKitAdmin {
         Box::pin(async move {
             self.post(room, "twirp/livekit.RoomService/DeleteRoom", &body)
                 .await
+        })
+    }
+
+    fn list_participant_identities<'a>(
+        &'a self,
+        room: &'a CallId,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Identity>, SfuError>> + Send + 'a>> {
+        let body = ListParticipantsRequest {
+            room: room.as_str().to_string(),
+        };
+        Box::pin(async move {
+            let resp: Option<ListParticipantsResponse> = self
+                .post_returning(room, "twirp/livekit.RoomService/ListParticipants", &body)
+                .await?;
+            // `None` => room not found on LiveKit => nobody connected.
+            let Some(resp) = resp else {
+                return Ok(Vec::new());
+            };
+            // LiveKit identities are the stringified FullJids we minted
+            // into the JWT `sub`. Parse each back into a typed
+            // [`Identity`]; silently skip any that don't round-trip (a
+            // foreign participant or a malformed identity is simply not
+            // one of our registry entries, so it can't be a ghost we
+            // own).
+            let identities = resp
+                .participants
+                .into_iter()
+                .filter_map(|p| p.identity.parse::<jid::FullJid>().ok())
+                .map(Identity::from_jid)
+                .collect();
+            Ok(identities)
         })
     }
 }
@@ -261,6 +342,29 @@ struct RemoveParticipantRequest {
 #[derive(Serialize)]
 struct DeleteRoomRequest {
     room: String,
+}
+
+/// Twirp body for `livekit.RoomService/ListParticipants`.
+#[derive(Serialize)]
+struct ListParticipantsRequest {
+    room: String,
+}
+
+/// Twirp response for `livekit.RoomService/ListParticipants`. LiveKit
+/// returns a `participants` array of `ParticipantInfo`; only the
+/// `identity` is load-bearing for ghost reconciliation. Other fields
+/// (`sid`, `state`, `tracks`, …) are ignored via serde's default
+/// unknown-field handling.
+#[derive(Deserialize)]
+struct ListParticipantsResponse {
+    #[serde(default)]
+    participants: Vec<ListedParticipant>,
+}
+
+#[derive(Deserialize)]
+struct ListedParticipant {
+    #[serde(default)]
+    identity: String,
 }
 
 /// Twirp error envelope: a JSON object with `code` and `msg` fields
@@ -361,6 +465,33 @@ mod tests {
         assert!(is_twirp_not_found(
             r#"{"code":"not_found","msg":"participant not found"}"#
         ));
+    }
+
+    #[test]
+    fn list_participants_response_parses_livekit_wire_shape() {
+        // Lock the LiveKit `ListParticipantsResponse` wire shape: a
+        // `participants` array whose elements carry at least `identity`
+        // (plus fields we ignore). Absent/empty array must parse too.
+        let body = r#"{"participants":[
+            {"sid":"PA_1","identity":"alice@waddle.social/desktop","state":"ACTIVE"},
+            {"sid":"PA_2","identity":"bob@waddle.social/mobile"}
+        ]}"#;
+        let parsed: ListParticipantsResponse = serde_json::from_str(body).expect("parses");
+        let identities: Vec<String> = parsed
+            .participants
+            .into_iter()
+            .map(|p| p.identity)
+            .collect();
+        assert_eq!(
+            identities,
+            vec![
+                "alice@waddle.social/desktop".to_string(),
+                "bob@waddle.social/mobile".to_string()
+            ]
+        );
+
+        let empty: ListParticipantsResponse = serde_json::from_str(r#"{}"#).expect("empty parses");
+        assert!(empty.participants.is_empty());
     }
 
     #[test]

@@ -116,13 +116,6 @@ fn message_with_jmi_to_full(to: &str, jmi: Element) -> Result<Element, JsValue> 
     Ok(message_with_jmi(full.into(), jmi))
 }
 
-fn message_with_jmi_to_any(to: &str, jmi: Element) -> Result<Element, JsValue> {
-    let jid: jid::Jid = to
-        .parse()
-        .map_err(|_| js_error(format!("invalid JID for JMI envelope: {to}")))?;
-    Ok(message_with_jmi(jid, jmi))
-}
-
 fn iq_set(to: &str, payload: Element) -> Element {
     Element::builder("iq", NS_JABBER_CLIENT)
         .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
@@ -214,10 +207,17 @@ impl WaddleClient {
         })
     }
 
-    pub fn send_call_retract(&self, peer_jid: String, sid_str: String) -> Promise {
+    /// Send a JMI `<retract/>` to the peer's bare JID (XEP-0353 §3).
+    /// Like `<propose/>`, retract is addressed to the BARE JID so the
+    /// responder's server can fan the disavowal out to every resource
+    /// that may have seen the original ring. Typing the parameter as a
+    /// bare JID (and routing through `message_with_jmi_to_bare`, which
+    /// rejects a resource-bearing JID) enforces that on the wire — the
+    /// resource-targeted variant is `send_call_retract_tie_break`.
+    pub fn send_call_retract(&self, peer_bare_jid: String, sid_str: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            let stanza = message_with_jmi_to_any(&peer_jid, build_retract(&sid(sid_str)))?;
+            let stanza = message_with_jmi_to_bare(&peer_bare_jid, build_retract(&sid(sid_str)))?;
             send_stanza_command(inner, stanza).await?;
             Ok(JsValue::UNDEFINED)
         })
@@ -593,6 +593,39 @@ mod tests {
                     .children()
                     .any(|condition| condition.name() == "expired" && condition.ns() == NS_JINGLE)
         }));
+    }
+
+    /// XEP-0353 §3: a non-tie-break `<retract/>` is addressed to the
+    /// responder's BARE JID (like `<propose/>`), so the disavowal fans
+    /// out to every resource that may have seen the ring. The bare-JID
+    /// helper backing `send_call_retract` therefore MUST reject a
+    /// resource-bearing JID — only `send_call_retract_tie_break` (which
+    /// routes through the full-JID helper) targets a single resource.
+    #[test]
+    fn jmi_retract_targets_bare_jid_and_rejects_full_jid() {
+        use waddle_xmpp_client::messaging::{build_retract, SessionId};
+
+        let stanza = super::message_with_jmi_to_bare(
+            "bob@waddle.test",
+            build_retract(&SessionId("c1".into())),
+        )
+        .expect("bare JID accepted for retract");
+        assert_eq!(stanza.attr("to"), Some("bob@waddle.test"));
+        assert!(
+            stanza
+                .children()
+                .any(|child| child.name() == "retract" && child.ns() == NS_JINGLE_MESSAGE),
+            "JMI retract child preserved"
+        );
+
+        // A resource-bearing JID must be refused so a plain retract can
+        // never accidentally target a single resource. Assert at the
+        // JID-parse layer that `message_with_jmi_to_bare` routes
+        // through (a full JID is not a valid `BareJid`) — the helper's
+        // own error arm builds a `JsValue`, which aborts on the
+        // non-wasm host test target, so we check the parse directly the
+        // same way `jmi_response_envelope_requires_full_jid` does.
+        assert!("bob@waddle.test/phone".parse::<jid::BareJid>().is_err());
     }
 
     #[test]

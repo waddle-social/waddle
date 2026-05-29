@@ -1,5 +1,10 @@
 import { map } from "nanostores";
 import { fullJidIdentityKey } from "@/lib/xmpp/jid";
+import {
+  $mucCallLeavingRooms,
+  clearRoomLeavingCall,
+  mucCallRoomLeavingNick,
+} from "./muc-call-live-participants";
 import type { CallMedia } from "./types";
 
 /**
@@ -109,7 +114,10 @@ export function clearMucCallParticipant(
   });
   if (realJid) return;
   const current = $mucCallParticipants.get()[normalized] ?? [];
-  if (!current.includes(nick)) return;
+  if (!current.includes(nick)) {
+    clearLeavingMarkerWhenMujiCaughtUp(normalized);
+    return;
+  }
   const next = current.filter((n) => n !== nick);
   if (next.length === 0) {
     const all = { ...$mucCallParticipants.get() };
@@ -118,6 +126,7 @@ export function clearMucCallParticipant(
   } else {
     $mucCallParticipants.setKey(normalized, next);
   }
+  clearLeavingMarkerWhenMujiCaughtUp(normalized);
 }
 
 function syncActiveParticipantsForRoom(roomJid: string): void {
@@ -296,6 +305,28 @@ export function applyMucCallPresence(
       includeAggregate: !presence.muc_jid,
     });
   }
+
+  clearLeavingMarkerWhenMujiCaughtUp(roomJid);
+}
+
+/**
+ * Drop the room's transient "leaving" marker once the
+ * server-authoritative Muji view no longer lists the suppressed
+ * self-nick. Keeping a stale marker would wrongly suppress our nick
+ * from a later observer-side Muji broadcast (e.g. a sibling resource
+ * re-joining the call). No-op when no marker is set or the nick is
+ * still present (the suppression is still doing its job).
+ */
+function clearLeavingMarkerWhenMujiCaughtUp(roomJid: string): void {
+  const leavingNick = mucCallRoomLeavingNick($mucCallLeavingRooms.get(), roomJid);
+  if (!leavingNick) return;
+  // `$mucCallParticipants` is keyed by normalized JIDs, so normalize
+  // the lookup too — an unnormalized caller would otherwise read
+  // `undefined` and clear the marker before the Muji view has actually
+  // caught up. Matches every other map lookup in this file.
+  const normalized = normalizeMucCallRoomJid(roomJid);
+  const stillPresent = ($mucCallParticipants.get()[normalized] ?? []).includes(leavingNick);
+  if (!stillPresent) clearRoomLeavingCall(roomJid);
 }
 
 /**
@@ -317,6 +348,9 @@ export function clearMucCallParticipants(): void {
   $mucActiveParticipants.set({});
   $mucPreparingParticipants.set({});
   $mucActiveParticipantMedia.set({});
+  // Full call-presence reset — drop any transient leaving markers so a
+  // fresh login doesn't carry stale self-nick suppression.
+  $mucCallLeavingRooms.set({});
   // Drop any pending preparing-echo waiters too — they'd otherwise
   // resolve when the next presence echo arrives after reconnect,
   // which would race the new login's call setup.
@@ -497,6 +531,30 @@ function rejectNoOtherPreparingWaitersForParticipant(roomJid: string, nick: stri
 }
 
 /**
+ * A pending preparation wait that the originator can cancel directly.
+ *
+ * It is a real `Promise<void>` (so `await wait` and `wait.catch(...)`
+ * keep working for callers that don't care about cancellation) carrying
+ * an extra `cancel` method. Calling `cancel` rejects the promise,
+ * clears the backing timer, and removes the map entry immediately —
+ * so an abandoned call attempt (navigate away, rapid join/leave
+ * toggling) releases its listener and timer right away instead of
+ * lingering until the multi-second join timeout fires.
+ */
+type CancellablePreparation = Promise<void> & {
+  cancel: (err?: Error) => void;
+};
+
+function toCancellablePreparation(
+  promise: Promise<void>,
+  cancel: (err?: Error) => void,
+): CancellablePreparation {
+  return Object.assign(promise, { cancel });
+}
+
+const DEFAULT_PREPARATION_CANCEL_ERROR = "Muji preparation wait cancelled";
+
+/**
  * Wait for the MUC to rebroadcast our preparing-presence echo for
  * `nick` in `roomJid`, then resolve. If no echo arrives within
  * `timeoutMs`, reject: XEP-0272 makes the echoed preparing
@@ -505,17 +563,19 @@ function rejectNoOtherPreparingWaitersForParticipant(roomJid: string, nick: stri
  *
  * Caller must register the listener BEFORE emitting the preparing
  * presence to avoid races where the echo arrives before
- * `applyMucCallPresence` has a listener to fire.
+ * `applyMucCallPresence` has a listener to fire. The returned handle's
+ * `cancel` releases the listener + timer immediately when the attempt
+ * is abandoned.
  */
 export function awaitPreparingEcho(
   roomJid: string,
   nick: string,
   timeoutMs: number,
   selfFullJid?: string | null,
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const normalized = normalizeMucCallRoomJid(roomJid);
-    const key = prepareEchoListenerKey(normalized, nick, selfFullJid);
+): CancellablePreparation {
+  const normalized = normalizeMucCallRoomJid(roomJid);
+  const key = prepareEchoListenerKey(normalized, nick, selfFullJid);
+  const promise = new Promise<void>((resolve, reject) => {
     // Replacing an existing listener silently is fine — there's
     // only ever one preparing-echo waiter per (room, nick) at a
     // time because beginMucCall serialises through the call store.
@@ -532,6 +592,9 @@ export function awaitPreparingEcho(
     }, timeoutMs);
     prepareEchoListeners.set(key, { resolve, reject, timer });
   });
+  return toCancellablePreparation(promise, (err) => {
+    rejectPrepareEchoWaiter(key, err ?? new Error(DEFAULT_PREPARATION_CANCEL_ERROR));
+  });
 }
 
 export function awaitNoOtherPreparing(
@@ -539,13 +602,13 @@ export function awaitNoOtherPreparing(
   selfNick: string,
   timeoutMs: number,
   selfFullJid?: string | null,
-): Promise<void> {
+): CancellablePreparation {
   const normalized = normalizeMucCallRoomJid(roomJid);
   if (!hasOtherPreparing(normalized, selfNick, selfFullJid)) {
-    return Promise.resolve();
+    return toCancellablePreparation(Promise.resolve(), () => undefined);
   }
-  return new Promise((resolve, reject) => {
-    const key = prepareEchoListenerKey(normalized, selfNick, selfFullJid);
+  const key = prepareEchoListenerKey(normalized, selfNick, selfFullJid);
+  const promise = new Promise<void>((resolve, reject) => {
     const previous = noOtherPreparingListeners.get(key);
     if (previous) {
       clearTimeout(previous.timer);
@@ -566,4 +629,17 @@ export function awaitNoOtherPreparing(
       timer,
     });
   });
+  return toCancellablePreparation(promise, (err) => {
+    rejectNoOtherPreparingWaiter(key, err ?? new Error(DEFAULT_PREPARATION_CANCEL_ERROR));
+  });
+}
+
+/**
+ * Test-only introspection: total number of preparation waiters still
+ * holding a `resolve`/`reject`/`timer` triple. A correctly cancelled or
+ * resolved attempt must leave this at 0 — leaks here are exactly the
+ * dangling-timer / dangling-closure bug class this module guards.
+ */
+export function pendingMucCallPreparationWaiterCountForTests(): number {
+  return prepareEchoListeners.size + noOtherPreparingListeners.size;
 }

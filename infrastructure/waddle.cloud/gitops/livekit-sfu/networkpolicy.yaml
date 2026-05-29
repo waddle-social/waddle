@@ -1,0 +1,115 @@
+# Default-deny + targeted-allow isolation for the LiveKit SFU pod.
+#
+# This is a CiliumNetworkPolicy (not a vanilla Kubernetes NetworkPolicy)
+# on purpose: this cluster runs Cilium with the Gateway API enabled
+# (`gatewayAPI.enabled=true`, `gatewayAPI.hostNetwork.enabled=true`).
+# Cilium assigns gateway/ingress-proxy traffic the reserved `ingress`
+# identity and host-sourced traffic the `host`/`remote-node` identities;
+# a plain NetworkPolicy `namespaceSelector` CANNOT match those reserved
+# identities, so it would silently break signaling. `fromEntities` /
+# `toEntities` is the only correct way to express these allows here.
+#
+# An endpoint enters default-deny for a direction as soon as ANY policy
+# selecting it has that direction's section, so the single
+# `ingress:`/`egress:` block below makes the SFU pod default-deny on both
+# directions and then re-opens only what the SFU legitimately needs.
+#
+# IMPORTANT — NodePort / host-level traffic is NOT gated here:
+#   The RTC media (30881/TCP, 30882/UDP) and TURN/UDP (30478/UDP) paths
+#   are exposed as NodePort Services and are internet-facing by design
+#   (WebRTC/ICE/TURN must reach arbitrary client IPs). NodePort packets
+#   are DNAT'd by the host before reaching the pod, so they arrive with
+#   `host`/`remote-node` identity rather than `world`, and Cilium does
+#   not enforce pod policy on the host-network ingestion of NodePort
+#   traffic. NetworkPolicy therefore cannot meaningfully restrict who
+#   reaches those ports — that surface must be defended at the
+#   node/firewall/cloud-LB layer, not here. The ingress allow for
+#   `host`/`remote-node` below keeps that data plane working; it does
+#   not (and cannot) narrow it.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: livekit-sfu
+  namespace: livekit
+spec:
+  # Must match the SFU pod's selector labels (chart `_helpers.tpl`
+  # `livekit-sfu.selectorLabels`; release name is `livekit-sfu`).
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: livekit-sfu
+      app.kubernetes.io/instance: livekit-sfu
+  ingress:
+    # Signaling: the Cilium gateway proxy fronts `sfu.waddle.social`
+    # and forwards to `livekit-sfu:7880`. Gateway traffic carries the
+    # reserved `ingress` identity; with `gatewayAPI.hostNetwork.enabled`
+    # the Envoy proxy runs host-network, so allow `host`/`remote-node`
+    # too. This is the one path NetworkPolicy actually constrains.
+    - fromEntities:
+        - ingress
+        - host
+        - remote-node
+      toPorts:
+        - ports:
+            - port: "7880"
+              protocol: TCP
+    # RTC + TURN media data plane (NodePort, internet-facing — see the
+    # header note: this allow keeps host-DNAT'd NodePort packets flowing
+    # to the pod; it is not a meaningful access restriction).
+    - fromEntities:
+        - host
+        - remote-node
+        - world
+      toPorts:
+        - ports:
+            - port: "30881"
+              protocol: TCP
+            - port: "30882"
+              protocol: UDP
+            - port: "30478"
+              protocol: UDP
+  egress:
+    # DNS resolution (kube-dns / CoreDNS in kube-system). Needed to
+    # resolve the webhook host (`xmpp.waddle.social`) and ICE/TURN peers.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s:k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+    # Outbound to the public internet on 443/TCP:
+    #   - LiveKit posts SFU-authoritative MUC-call cleanup webhooks to
+    #     `https://xmpp.waddle.social/api/v1/livekit/webhook` (a public
+    #     hostname that routes back in through the gateway's external IP,
+    #     i.e. `world`, not an in-cluster service).
+    - toEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+    # WebRTC / TURN media egress to participants. The SFU relays RTP and
+    # serves TURN relays to arbitrary client IPs/ports on the internet,
+    # so the media egress target is `world`. Scoped to the relay UDP
+    # range (`livekit.turn.relay_range_start..relay_range_end`, default
+    # 30000-40000) plus the RTC media ports; no TCP egress is opened
+    # beyond 443 above.
+    - toEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "30000"
+              endPort: 40000
+              protocol: UDP
+            - port: "30882"
+              protocol: UDP
+            - port: "30881"
+              protocol: TCP
+    # Signaling responses back to the gateway proxy / host data path.
+    - toEntities:
+        - ingress
+        - host
+        - remote-node

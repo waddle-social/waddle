@@ -359,14 +359,24 @@ async fn create_websocket_state(
     // showing the user as "in call" until the SFU notices on its
     // own.
     let mut sfu_service: Option<std::sync::Arc<dyn waddle_sfu::SfuService>> = None;
+    // The async reconciliation view of the same concrete SFU, captured
+    // here so a background task can poll LiveKit for ghosts once
+    // `websocket_state` exists (see `spawn_reconciliation_task` below).
+    let mut sfu_reconciler: Option<std::sync::Arc<dyn waddle_sfu::SfuReconciler>> = None;
     match waddle_sfu::SfuConfig::from_env() {
         Ok(Some(sfu_config)) => {
             let turn_tls_port = sfu_config.turn_tls_port;
             let turn_udp_port = sfu_config.turn_udp_port;
             match waddle_sfu::LiveKitSfu::new(sfu_config) {
                 Ok(sfu_impl) => {
-                    let sfu: std::sync::Arc<dyn waddle_sfu::SfuService> =
-                        std::sync::Arc::new(sfu_impl);
+                    // Build the concrete SFU once, then hand out two
+                    // trait-object views of it: the sync `SfuService`
+                    // the XMPP handlers + WebSocket layer consume, and
+                    // the async `SfuReconciler` the webhook route's
+                    // background reconciliation task drives.
+                    let sfu_concrete = std::sync::Arc::new(sfu_impl);
+                    let sfu: std::sync::Arc<dyn waddle_sfu::SfuService> = sfu_concrete.clone();
+                    let reconciler: std::sync::Arc<dyn waddle_sfu::SfuReconciler> = sfu_concrete;
                     waddle_xmpp::protocol::handlers::register_call_handlers(
                         &mut stanza_dispatcher,
                         Arc::clone(&sfu),
@@ -374,6 +384,7 @@ async fn create_websocket_state(
                         turn_udp_port,
                     );
                     sfu_service = Some(sfu);
+                    sfu_reconciler = Some(reconciler);
                     tracing::info!(
                         "LiveKit SFU configured; XEP-0166 Jingle + XEP-0215 extdisco handlers registered"
                     );
@@ -573,6 +584,17 @@ async fn create_websocket_state(
     deferred_extension_host_tools.set(Arc::new(extension_host_adapter::ExtensionHostAdapter::new(
         Arc::clone(&websocket_state),
     )));
+    // Start the SFU ghost-reconciliation backstop: periodically ask
+    // LiveKit who is actually connected and sweep registry entries (and
+    // their MUC Muji presence) left behind by a lost
+    // `participant_left`/`room_finished` webhook delivery. No-op when
+    // A/V calling is unconfigured (`sfu_reconciler` is `None`).
+    if let Some(reconciler) = sfu_reconciler {
+        routes::livekit_webhook::spawn_reconciliation_task(
+            Arc::clone(&websocket_state),
+            reconciler,
+        );
+    }
     Ok(websocket_state)
 }
 

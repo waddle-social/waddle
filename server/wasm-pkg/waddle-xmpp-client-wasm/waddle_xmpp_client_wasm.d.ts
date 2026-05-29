@@ -226,7 +226,16 @@ export class WaddleClient {
     send_call_propose(peer_bare_jid: string, sid_str: string, audio: boolean, video: boolean): Promise<any>;
     send_call_reject(peer_full_jid: string, sid_str: string): Promise<any>;
     send_call_reject_tie_break(peer_full_jid: string, sid_str: string): Promise<any>;
-    send_call_retract(peer_jid: string, sid_str: string): Promise<any>;
+    /**
+     * Send a JMI `<retract/>` to the peer's bare JID (XEP-0353 §3).
+     * Like `<propose/>`, retract is addressed to the BARE JID so the
+     * responder's server can fan the disavowal out to every resource
+     * that may have seen the original ring. Typing the parameter as a
+     * bare JID (and routing through `message_with_jmi_to_bare`, which
+     * rejects a resource-bearing JID) enforces that on the wire — the
+     * resource-targeted variant is `send_call_retract_tie_break`.
+     */
+    send_call_retract(peer_bare_jid: string, sid_str: string): Promise<any>;
     send_call_retract_tie_break(peer_full_jid: string, sid_str: string): Promise<any>;
     /**
      * Send a Jingle `session-accept` IQ in response to a received

@@ -22,6 +22,19 @@ spec:
         {{- if and (not .Values.apiKeys.existingSecret) (gt (len .Values.apiKeys.values) 0) }}
         checksum/api-keys: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
         {{- end }}
+        # NOTE: there is intentionally NO checksum annotation for the
+        # cert-manager-issued TURN cert Secret (`turn.secretName`).
+        # Hashing it would force a pod restart on every cert renewal,
+        # and since this is a single-replica SFU (see validations.yaml)
+        # a restart drops every active call. The cert is mounted as a
+        # projected Secret volume, so kubelet syncs the renewed
+        # material into the pod within its sync period (~60s by default,
+        # bounded by `--sync-frequency`). LiveKit reloads the TURN/TLS
+        # certificate from disk, so calls keep running across a renewal
+        # without a restart. The ~60s propagation lag is acceptable
+        # because cert-manager renews well before expiry (default 2/3 of
+        # lifetime). If a future multi-replica setup makes restarts
+        # non-disruptive, re-add a `checksum/turn-cert` here.
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
