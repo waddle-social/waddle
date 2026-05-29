@@ -72,6 +72,103 @@ fn data_form_value_for_test(frame: &str, var: &str) -> Option<String> {
     Some(value[..close].to_string())
 }
 
+/// Build a `<command/>` payload Element addressed at a XEP-0050
+/// component. Wraps it in a `<x type='submit'>` data form when one is
+/// provided so the call sites stay declarative.
+fn command_iq_payload(
+    node: &str,
+    action: &str,
+    session_id: Option<&str>,
+    submit_form: Option<Element>,
+) -> Element {
+    let mut command = Element::builder("command", "http://jabber.org/protocol/commands")
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+        .attr(minidom::rxml::xml_ncname!("action").to_owned(), action);
+    if let Some(session_id) = session_id {
+        command = command.attr(
+            minidom::rxml::xml_ncname!("sessionid").to_owned(),
+            session_id,
+        );
+    }
+    if let Some(form) = submit_form {
+        command = command.append(form);
+    }
+    command.build()
+}
+
+/// Build a XEP-0004 `<x type='submit'>` Element pinning the given
+/// `FORM_TYPE` and a list of `(var, value)` text-single fields. Keeps
+/// the test sites focused on the field values rather than the XML
+/// scaffolding around them.
+fn xep0004_submit_form(form_type: &str, fields: &[(&str, &str)]) -> Element {
+    const DATA_FORMS: &str = "jabber:x:data";
+    let mut form = Element::builder("x", DATA_FORMS)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit");
+    form = form.append(text_field(
+        DATA_FORMS,
+        "FORM_TYPE",
+        form_type,
+        Some("hidden"),
+    ));
+    for (var, value) in fields {
+        form = form.append(text_field(DATA_FORMS, var, value, None));
+    }
+    form.build()
+}
+
+fn text_field(ns: &str, var: &str, value: &str, type_attr: Option<&str>) -> Element {
+    let mut field =
+        Element::builder("field", ns).attr(minidom::rxml::xml_ncname!("var").to_owned(), var);
+    if let Some(type_attr) = type_attr {
+        field = field.attr(minidom::rxml::xml_ncname!("type").to_owned(), type_attr);
+    }
+    field
+        .append(Element::builder("value", ns).append(value).build())
+        .build()
+}
+
+/// Look up a XEP-0004 field value by `var` inside a stage-4 result
+/// form `<command><x type='result'>…</x></command>`. The XEP-0050
+/// payload Element is the `<command/>` itself; this helper walks into
+/// its `<x>` data-form child.
+fn xep0004_field_value(command: &Element, var: &str) -> Option<String> {
+    let form = command
+        .children()
+        .find(|child| child.is("x", "jabber:x:data"))?;
+    form.children()
+        .find(|child| child.is("field", "jabber:x:data") && child.attr("var") == Some(var))
+        .and_then(|field| {
+            field
+                .children()
+                .find(|child| child.is("value", "jabber:x:data"))
+        })
+        .map(|value| value.text())
+}
+
+/// Look up the first ACTIVE `push_devices` row registered against the
+/// given (owner, node) pair via the test-only DB query helpers. Used
+/// by sites that want to assert "a device exists" without knowing
+/// the specific server-assigned `device_id`. Tests that DO care about
+/// the assigned device id read it from the stage-4 result form
+/// instead.
+async fn first_active_device_for_owner_node(
+    state: &WebSocketState,
+    owner: &BareJid,
+    node: &str,
+) -> crate::push_service::PushServiceDevice {
+    let devices = state
+        .deps
+        .protocol
+        .push_service
+        .test_only_active_devices_for_owner_node(owner, node)
+        .await
+        .expect("active devices");
+    devices
+        .into_iter()
+        .next()
+        .expect("at least one active device persisted")
+}
+
 #[tokio::test]
 async fn handle_iq_roster_query_returns_parseable_result() {
     let state = create_test_websocket_state().await;
@@ -362,6 +459,7 @@ async fn handle_iq_command_request_routes_to_registry() {
                     ),
                     session_id: ctx.command.session_id.unwrap_or_default(),
                     notes: vec![],
+                    actions: None,
                 }
             },
         )
@@ -413,6 +511,7 @@ async fn handle_iq_command_request_requires_ready_phase() {
                     ),
                     session_id: String::new(),
                     notes: vec![],
+                    actions: None,
                 }
             },
         )
@@ -923,65 +1022,29 @@ async fn handle_iq_disco_info_push_node_is_owner_scoped() {
 }
 
 #[tokio::test]
-async fn handle_iq_push_service_custom_registration_keeps_provider_tokens_inside_service() {
+async fn handle_iq_push_service_xep0050_registration_keeps_provider_tokens_inside_service() {
+    // The XEP-0050 cutover replaces the custom `urn:waddle:push-service:0`
+    // IQ shape with two ad-hoc commands at `push.<domain>`. Drive the
+    // full multi-step dance and verify the persisted `push_devices` row
+    // still carries the platform credentials inside the service
+    // boundary — the chat client only ever sees the assigned node id in
+    // the stage-4 result form, never the provider secrets.
+    use crate::push_service::commands::{DISABLE_DEVICE_FORM_TYPE, REGISTER_DEVICE_FORM_TYPE};
+    use crate::push_service::commands::{
+        DISABLE_DEVICE_NODE, FIELD_APP_ID, FIELD_DEVICE_ID, FIELD_ENVIRONMENT, FIELD_NODE,
+        FIELD_PLATFORM, FIELD_WEB_PUSH_AUTH, FIELD_WEB_PUSH_ENDPOINT, FIELD_WEB_PUSH_P256DH,
+        REGISTER_DEVICE_NODE,
+    };
+    let _ = DISABLE_DEVICE_FORM_TYPE; // referenced via constant; silence unused-warning if disable test omits
+    let _ = DISABLE_DEVICE_NODE;
     let state = create_test_websocket_state().await;
     let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
-    let ensure = Element::builder("ensure-node", crate::push_service::WADDLE_PUSH_SERVICE_NS)
-        .attr(minidom::rxml::xml_ncname!("app-id").to_owned(), "web")
-        .build();
-    let responses = handle_iq(
-        &iq_set_frame("push-node-1", "push.example.com", ensure),
-        "example.com",
-        "muc.example.com",
-        state.as_ref(),
-        &None,
-        &ready_phase(&jid),
-    )
-    .await;
-    let node_iq = parse_iq_for_test(responses.first().expect("node response"));
-    let node_id = match node_iq.split().1 {
-        IqPayload::Result(Some(payload)) => payload.attr("id").expect("node id").to_string(),
-        _ => panic!("expected node result, got non-result"),
-    };
 
-    let register = Element::builder(
-        "register-device",
-        crate::push_service::WADDLE_PUSH_SERVICE_NS,
-    )
-    .attr(
-        minidom::rxml::xml_ncname!("node").to_owned(),
-        node_id.as_str(),
-    )
-    .attr(minidom::rxml::xml_ncname!("device-id").to_owned(), "web-1")
-    .attr(minidom::rxml::xml_ncname!("platform").to_owned(), "web")
-    .attr(minidom::rxml::xml_ncname!("environment").to_owned(), "test")
-    .append(
-        Element::builder(
-            "provider-endpoint",
-            crate::push_service::WADDLE_PUSH_SERVICE_NS,
-        )
-        .append("https://push.example.com/endpoint")
-        .build(),
-    )
-    .append(
-        Element::builder(
-            "provider-token",
-            crate::push_service::WADDLE_PUSH_SERVICE_NS,
-        )
-        .append("provider-secret")
-        .build(),
-    )
-    .append(
-        Element::builder(
-            "provider-key-material",
-            crate::push_service::WADDLE_PUSH_SERVICE_NS,
-        )
-        .append("provider-key")
-        .build(),
-    )
-    .build();
+    // Stage 1 → 2: execute, expect status='executing' + sessionid +
+    // form prompt back.
+    let execute = command_iq_payload(REGISTER_DEVICE_NODE, "execute", None, None);
     let responses = handle_iq(
-        &iq_set_frame("push-device-1", "push.example.com", register),
+        &iq_set_frame("push-register-execute", "push.example.com", execute),
         "example.com",
         "muc.example.com",
         state.as_ref(),
@@ -989,23 +1052,97 @@ async fn handle_iq_push_service_custom_registration_keeps_provider_tokens_inside
         &ready_phase(&jid),
     )
     .await;
-    let device_iq = parse_iq_for_test(responses.first().expect("device response"));
-    match device_iq.split().1 {
-        IqPayload::Result(Some(payload)) => {
-            assert_eq!(payload.name(), "device");
-            assert_eq!(payload.attr("status"), Some("active"));
-        }
-        _ => panic!("expected device result, got non-result"),
+    let executing_iq = parse_iq_for_test(responses.first().expect("executing response"));
+    let executing_payload = match executing_iq.split().1 {
+        IqPayload::Result(Some(payload)) => payload,
+        _ => panic!("expected executing command result"),
+    };
+    assert_eq!(executing_payload.attr("status"), Some("executing"));
+    let session_id = executing_payload
+        .attr("sessionid")
+        .expect("XEP-0050 §3 sessionid")
+        .to_string();
+
+    // Stage 3 → 4: complete with the platform-discriminated submit
+    // form, expect status='completed' + result form carrying `node`.
+    let submit_form = xep0004_submit_form(
+        REGISTER_DEVICE_FORM_TYPE,
+        &[
+            (FIELD_PLATFORM, "web"),
+            (FIELD_ENVIRONMENT, "prod"),
+            (FIELD_APP_ID, "web"),
+            (FIELD_WEB_PUSH_ENDPOINT, "https://push.example.com/endpoint"),
+            (FIELD_WEB_PUSH_P256DH, "provider-key"),
+            (FIELD_WEB_PUSH_AUTH, "provider-secret"),
+        ],
+    );
+    let complete = command_iq_payload(
+        REGISTER_DEVICE_NODE,
+        "complete",
+        Some(&session_id),
+        Some(submit_form),
+    );
+    let responses = handle_iq(
+        &iq_set_frame("push-register-complete", "push.example.com", complete),
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&jid),
+    )
+    .await;
+    let completed_iq = parse_iq_for_test(responses.first().expect("completed response"));
+    let completed_payload = match completed_iq.split().1 {
+        IqPayload::Result(Some(payload)) => payload,
+        _ => panic!("expected completed command result"),
+    };
+    assert_eq!(completed_payload.attr("status"), Some("completed"));
+    let assigned_node = xep0004_field_value(&completed_payload, FIELD_NODE)
+        .expect("stage-4 result form carries `node`");
+    assert!(!assigned_node.is_empty());
+
+    // Headline invariant: the stage-4 result form returns ONLY the
+    // assigned node id + device id — NEVER the provider credentials the
+    // chat submitted. A regression that echoed creds back would leak
+    // secrets to every entity that can observe the IQ result.
+    let result_form = completed_payload
+        .get_child("x", "jabber:x:data")
+        .expect("stage-4 result form");
+    let leaked_fields: Vec<String> = result_form
+        .children()
+        .filter(|child| child.name() == "field")
+        .filter_map(|field| field.attr("var").map(str::to_string))
+        .filter(|var| !matches!(var.as_str(), "FORM_TYPE" | FIELD_NODE | FIELD_DEVICE_ID))
+        .collect();
+    assert!(
+        leaked_fields.is_empty(),
+        "stage-4 result form leaked unexpected field(s): {leaked_fields:?}"
+    );
+    let form_values: Vec<String> = result_form
+        .children()
+        .filter(|child| child.name() == "field")
+        .flat_map(|field| {
+            field
+                .children()
+                .filter(|value| value.name() == "value")
+                .map(|value| value.text())
+        })
+        .collect();
+    for secret in [
+        "provider-secret",
+        "provider-key",
+        "https://push.example.com/endpoint",
+    ] {
+        assert!(
+            !form_values.iter().any(|value| value == secret),
+            "stage-4 result form leaked credential `{secret}`: {form_values:?}"
+        );
     }
 
-    let device = state
-        .deps
-        .protocol
-        .push_service
-        .get_device_for_owner(&"alice@example.com".parse().expect("owner"), "web-1")
-        .await
-        .expect("device lookup")
-        .expect("device");
+    // The chat client never sees `device-id`, so look up the device by
+    // the server-allocated node + owner pair.
+    let owner: BareJid = "alice@example.com".parse().expect("owner");
+    let device = first_active_device_for_owner_node(state.as_ref(), &owner, &assigned_node).await;
     assert_eq!(
         device.provider_endpoint(),
         Some("https://push.example.com/endpoint")
@@ -1015,25 +1152,34 @@ async fn handle_iq_push_service_custom_registration_keeps_provider_tokens_inside
 }
 
 #[tokio::test]
-async fn handle_iq_push_service_disable_device_is_node_scoped() {
+async fn handle_iq_push_service_xep0050_disable_device_is_per_device_scoped() {
+    // XEP-0050 `disable-device` carries BOTH the push node id and the
+    // device id. The handler retires only the targeted `(node,
+    // device_id)` row for the calling owner. Sibling devices on the
+    // same node — and devices on other nodes — remain active. This
+    // is the contract the chat's per-browser opt-out relies on:
+    // unsubscribing one browser MUST NOT take down push for sibling
+    // Apple / Android / other-browser installations on the same
+    // `(user, app_id)` node.
+    use crate::push_service::commands::{
+        DISABLE_DEVICE_FORM_TYPE, DISABLE_DEVICE_NODE, FIELD_DEVICE_ID, FIELD_NODE,
+    };
+
     let state = create_test_websocket_state().await;
     let owner: BareJid = "alice@example.com".parse().expect("owner");
     let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
-    let first_node = state
+    let shared_node = state
         .deps
         .protocol
         .push_service
         .ensure_node(&owner, "web")
         .await
-        .expect("first node");
-    let second_node = state
-        .deps
-        .protocol
-        .push_service
-        .ensure_node(&owner, "mobile")
-        .await
-        .expect("second node");
-    for node in [first_node.node(), second_node.node()] {
+        .expect("shared node");
+    // Two devices on the SAME node — the per-device opt-out must
+    // disable only the targeted row.
+    let device_a_id = "device-a";
+    let device_b_id = "device-b";
+    for device_id in [device_a_id, device_b_id] {
         state
             .deps
             .protocol
@@ -1041,8 +1187,8 @@ async fn handle_iq_push_service_disable_device_is_node_scoped() {
             .upsert_device(
                 &owner,
                 crate::push_service::PushDeviceRegistration::new(
-                    "shared-device",
-                    node,
+                    device_id,
+                    shared_node.node(),
                     crate::push_service::PushDevicePlatform::Web,
                     "test",
                 ),
@@ -1051,19 +1197,14 @@ async fn handle_iq_push_service_disable_device_is_node_scoped() {
             .expect("device");
     }
 
-    let disable = Element::builder(
-        "disable-device",
-        crate::push_service::WADDLE_PUSH_SERVICE_NS,
-    )
-    .attr(
-        minidom::rxml::xml_ncname!("node").to_owned(),
-        first_node.node(),
-    )
-    .attr(
-        minidom::rxml::xml_ncname!("device-id").to_owned(),
-        "shared-device",
-    )
-    .build();
+    let submit_form = xep0004_submit_form(
+        DISABLE_DEVICE_FORM_TYPE,
+        &[
+            (FIELD_NODE, shared_node.node()),
+            (FIELD_DEVICE_ID, device_a_id),
+        ],
+    );
+    let disable = command_iq_payload(DISABLE_DEVICE_NODE, "execute", None, Some(submit_form));
     let responses = handle_iq(
         &iq_set_frame("push-disable-1", "push.example.com", disable),
         "example.com",
@@ -1074,46 +1215,406 @@ async fn handle_iq_push_service_disable_device_is_node_scoped() {
     )
     .await;
     let response_iq = parse_iq_for_test(responses.first().expect("disable response"));
-    match response_iq.split().1 {
-        IqPayload::Result(Some(payload)) => {
-            assert_eq!(payload.name(), "device");
-            assert_eq!(payload.attr("node"), Some(first_node.node()));
-            assert_eq!(payload.attr("status"), Some("disabled"));
-        }
+    let completed_payload = match response_iq.split().1 {
+        IqPayload::Result(Some(payload)) => payload,
         _ => panic!("expected disable-device result, got non-result"),
+    };
+    assert_eq!(completed_payload.attr("status"), Some("completed"));
+
+    // The node is still active — the user-server XEP-0357
+    // registration stays alive — and the sibling device row keeps
+    // receiving fan-out. Publishing to the node MUST reach device B
+    // (one attempted) and NOT device A (filtered to active rows).
+    let publish = state
+        .deps
+        .protocol
+        .push_service
+        .publish_notification_from_user_server(
+            shared_node.node(),
+            &waddle_xmpp::pubsub::PubSubItem::new(
+                Some("after-disable".to_string()),
+                Some(Element::builder("notification", waddle_xmpp::xep::xep0357::NS_PUSH).build()),
+            ),
+            &owner,
+        )
+        .await
+        .expect("publish still routes to sibling device");
+    assert_eq!(
+        publish.attempted_devices(),
+        1,
+        "exactly the sibling device remains active after per-device disable"
+    );
+
+    // Prove the RIGHT device survived: device-b is still active and
+    // device-a is gone from the active set. A bug that disabled the
+    // wrong row would also leave exactly one active device and slip past
+    // the `attempted_devices() == 1` count above.
+    let active = state
+        .deps
+        .protocol
+        .push_service
+        .test_only_active_devices_for_owner_node(&owner, shared_node.node())
+        .await
+        .expect("active devices");
+    let active_ids: Vec<&str> = active.iter().map(|device| device.device_id()).collect();
+    assert_eq!(
+        active_ids,
+        vec![device_b_id],
+        "only the targeted device-a is disabled; the sibling device-b stays active"
+    );
+}
+
+/// XEP-0050 `disable-device` is idempotent: a second call against an
+/// already-disabled `(node, device_id)` row must surface
+/// `status='completed'` (NOT a stanza error) so the chat's opt-out
+/// retry path doesn't bounce on transient re-issue. The row still
+/// matches the storage helper's `WHERE (node, device-id)` clause on the
+/// second call, so it returns `Ok(())` and the handler maps that to
+/// `Completed` the same as the first round. Round-3 adversarial
+/// test-rigor finding; the post-loop assertion guards against the
+/// second call resurrecting or otherwise mutating active state.
+#[tokio::test]
+async fn handle_iq_push_service_xep0050_disable_device_is_idempotent() {
+    use crate::push_service::commands::{
+        DISABLE_DEVICE_FORM_TYPE, DISABLE_DEVICE_NODE, FIELD_DEVICE_ID, FIELD_NODE,
+    };
+
+    let state = create_test_websocket_state().await;
+    let owner: BareJid = "alice@example.com".parse().expect("owner");
+    let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
+    let node = state
+        .deps
+        .protocol
+        .push_service
+        .ensure_node(&owner, "web")
+        .await
+        .expect("node");
+    let device_id = "device-idempotent";
+    state
+        .deps
+        .protocol
+        .push_service
+        .upsert_device(
+            &owner,
+            crate::push_service::PushDeviceRegistration::new(
+                device_id,
+                node.node(),
+                crate::push_service::PushDevicePlatform::Web,
+                "test",
+            ),
+        )
+        .await
+        .expect("device");
+
+    let build_disable_payload = || {
+        let submit_form = xep0004_submit_form(
+            DISABLE_DEVICE_FORM_TYPE,
+            &[(FIELD_NODE, node.node()), (FIELD_DEVICE_ID, device_id)],
+        );
+        command_iq_payload(DISABLE_DEVICE_NODE, "execute", None, Some(submit_form))
+    };
+
+    for round in ["first", "second"] {
+        let responses = handle_iq(
+            &iq_set_frame(
+                &format!("push-disable-{round}"),
+                "push.example.com",
+                build_disable_payload(),
+            ),
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &None,
+            &ready_phase(&jid),
+        )
+        .await;
+        let response_iq = parse_iq_for_test(responses.first().expect("disable response"));
+        let completed_payload = match response_iq.split().1 {
+            IqPayload::Result(Some(payload)) => payload,
+            _ => panic!("expected disable-device result on {round} round"),
+        };
+        assert_eq!(
+            completed_payload.attr("status"),
+            Some("completed"),
+            "{round} disable-device must complete (idempotent)"
+        );
     }
 
-    let first_publish = state
+    // No side effect from the second disable: the device stays disabled
+    // (zero active rows), it was never resurrected.
+    let active = state
         .deps
         .protocol
         .push_service
-        .publish_notification_from_user_server(
-            first_node.node(),
-            &waddle_xmpp::pubsub::PubSubItem::new(
-                Some("first".to_string()),
-                Some(Element::builder("notification", waddle_xmpp::xep::xep0357::NS_PUSH).build()),
-            ),
-            &owner,
-        )
+        .test_only_active_devices_for_owner_node(&owner, node.node())
         .await
-        .expect("first publish");
-    let second_publish = state
-        .deps
-        .protocol
-        .push_service
-        .publish_notification_from_user_server(
-            second_node.node(),
-            &waddle_xmpp::pubsub::PubSubItem::new(
-                Some("second".to_string()),
-                Some(Element::builder("notification", waddle_xmpp::xep::xep0357::NS_PUSH).build()),
-            ),
-            &owner,
-        )
-        .await
-        .expect("second publish");
+        .expect("active devices");
+    assert!(
+        active.is_empty(),
+        "double-disable must leave the device disabled, not resurrect it: {active:?}"
+    );
+}
 
-    assert_eq!(first_publish.attempted_devices(), 0);
-    assert_eq!(second_publish.attempted_devices(), 1);
+/// XEP-0050 `disable-device` against a valid, owned, active node but an
+/// unknown `device-id` is NOT a silent success — the storage helper
+/// distinguishes "no such (node, device-id) row" from "row disabled"
+/// and the handler surfaces `item-not-found` so a stale/typo'd
+/// device-id is reported honestly (adversarial finding B2).
+#[tokio::test]
+async fn handle_iq_push_service_xep0050_disable_unknown_device_is_item_not_found() {
+    use crate::push_service::commands::{
+        DISABLE_DEVICE_FORM_TYPE, DISABLE_DEVICE_NODE, FIELD_DEVICE_ID, FIELD_NODE,
+    };
+
+    let state = create_test_websocket_state().await;
+    let owner: BareJid = "alice@example.com".parse().expect("owner");
+    let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
+    let node = state
+        .deps
+        .protocol
+        .push_service
+        .ensure_node(&owner, "web")
+        .await
+        .expect("node");
+    // A real device exists on the node, so the node is active — only the
+    // submitted device-id is bogus.
+    state
+        .deps
+        .protocol
+        .push_service
+        .upsert_device(
+            &owner,
+            crate::push_service::PushDeviceRegistration::new(
+                "real-device",
+                node.node(),
+                crate::push_service::PushDevicePlatform::Web,
+                "test",
+            ),
+        )
+        .await
+        .expect("device");
+
+    let submit_form = xep0004_submit_form(
+        DISABLE_DEVICE_FORM_TYPE,
+        &[
+            (FIELD_NODE, node.node()),
+            (FIELD_DEVICE_ID, "never-registered"),
+        ],
+    );
+    let disable = command_iq_payload(DISABLE_DEVICE_NODE, "execute", None, Some(submit_form));
+    let responses = handle_iq(
+        &iq_set_frame("push-disable-bogus", "push.example.com", disable),
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&jid),
+    )
+    .await;
+    let response = responses.first().expect("disable response");
+    let response_iq = parse_iq_for_test(response);
+    assert!(
+        matches!(response_iq.split().1, IqPayload::Error(_)),
+        "disabling an unknown device-id must be an error, not a false success: {response}"
+    );
+    let element = Element::from_str(response).expect("parse error iq");
+    let error = element
+        .children()
+        .find(|child| child.name() == "error")
+        .expect("error envelope");
+    assert!(
+        error
+            .children()
+            .any(|child| child.name() == "item-not-found"),
+        "unknown device-id must map to item-not-found: {response}"
+    );
+    // The real device is untouched — still active.
+    let active = state
+        .deps
+        .protocol
+        .push_service
+        .test_only_active_devices_for_owner_node(&owner, node.node())
+        .await
+        .expect("active devices");
+    let active_ids: Vec<&str> = active.iter().map(|device| device.device_id()).collect();
+    assert_eq!(active_ids, vec!["real-device"]);
+}
+
+/// Authorization: a caller cannot `disable-device` a device on a push
+/// node owned by ANOTHER user, even with a valid node + device-id. The
+/// storage owner-gate rejects with `forbidden` and the victim's device
+/// stays active. This pins the per-owner scoping invariant at the
+/// command-handler layer (the prior suite only exercised it at the
+/// storage layer with a single owner) — adversarial finding M3.
+#[tokio::test]
+async fn handle_iq_push_service_xep0050_disable_device_rejects_foreign_owner() {
+    use crate::push_service::commands::{
+        DISABLE_DEVICE_FORM_TYPE, DISABLE_DEVICE_NODE, FIELD_DEVICE_ID, FIELD_NODE,
+    };
+
+    let state = create_test_websocket_state().await;
+    let alice: BareJid = "alice@example.com".parse().expect("alice");
+    let alice_node = state
+        .deps
+        .protocol
+        .push_service
+        .ensure_node(&alice, "web")
+        .await
+        .expect("alice node");
+    state
+        .deps
+        .protocol
+        .push_service
+        .upsert_device(
+            &alice,
+            crate::push_service::PushDeviceRegistration::new(
+                "alice-device",
+                alice_node.node(),
+                crate::push_service::PushDevicePlatform::Web,
+                "test",
+            ),
+        )
+        .await
+        .expect("device");
+
+    // Bob is authenticated and submits Alice's node + device-id.
+    let bob: FullJid = "bob@example.com/web".parse().expect("bob");
+    let submit_form = xep0004_submit_form(
+        DISABLE_DEVICE_FORM_TYPE,
+        &[
+            (FIELD_NODE, alice_node.node()),
+            (FIELD_DEVICE_ID, "alice-device"),
+        ],
+    );
+    let disable = command_iq_payload(DISABLE_DEVICE_NODE, "execute", None, Some(submit_form));
+    let responses = handle_iq(
+        &iq_set_frame("push-disable-foreign", "push.example.com", disable),
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&bob),
+    )
+    .await;
+    let response = responses.first().expect("disable response");
+    let response_iq = parse_iq_for_test(response);
+    assert!(
+        matches!(response_iq.split().1, IqPayload::Error(_)),
+        "foreign-owner disable must be rejected: {response}"
+    );
+    let element = Element::from_str(response).expect("parse error iq");
+    let error = element
+        .children()
+        .find(|child| child.name() == "error")
+        .expect("error envelope");
+    assert!(
+        error.children().any(|child| child.name() == "forbidden"),
+        "foreign-owner disable must map to forbidden: {response}"
+    );
+
+    // Alice's device is untouched — still active.
+    let active = state
+        .deps
+        .protocol
+        .push_service
+        .test_only_active_devices_for_owner_node(&alice, alice_node.node())
+        .await
+        .expect("active devices");
+    let active_ids: Vec<&str> = active.iter().map(|device| device.device_id()).collect();
+    assert_eq!(active_ids, vec!["alice-device"]);
+}
+
+/// XEP-0050 §4.4 wire shape on the live dispatch path: a `complete`
+/// carrying a sessionid that was never issued is rejected with
+/// `modify`/`<bad-request/>` PLUS the command-namespaced
+/// `<bad-sessionid/>` specific condition. The conformant builders used
+/// to exist only as dead code while the live path emitted a bare
+/// `<bad-request/>`; this pins the application-condition child on the
+/// real path (adversarial conformance finding B1).
+#[tokio::test]
+async fn handle_iq_push_service_xep0050_complete_with_unknown_sessionid_is_bad_sessionid() {
+    use crate::push_service::commands::REGISTER_DEVICE_NODE;
+
+    let state = create_test_websocket_state().await;
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    // `complete` referencing a sessionid the server never issued.
+    let complete = command_iq_payload(
+        REGISTER_DEVICE_NODE,
+        "complete",
+        Some("never-issued-session"),
+        None,
+    );
+    let responses = handle_iq(
+        &iq_set_frame("push-bad-session", "push.example.com", complete),
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&jid),
+    )
+    .await;
+    let response = responses.first().expect("response");
+    let element = Element::from_str(response).expect("parse error iq");
+    assert_eq!(element.attr("type"), Some("error"));
+    let error = element
+        .children()
+        .find(|child| child.name() == "error")
+        .expect("error envelope");
+    assert_eq!(error.attr("type"), Some("modify"));
+    assert!(
+        error.children().any(|child| child.name() == "bad-request"),
+        "§4.4 general condition must be bad-request: {response}"
+    );
+    assert!(
+        error.children().any(|child| {
+            child.name() == "bad-sessionid"
+                && child.ns() == waddle_xmpp::xep::xep0050::NS_COMMANDS
+        }),
+        "§4.4 must carry the <bad-sessionid xmlns='http://jabber.org/protocol/commands'/> child: {response}"
+    );
+}
+
+/// XEP-0050 §4.4 wire shape on the live dispatch path: a command IQ
+/// carrying an `action` the responder does not understand is rejected
+/// with `modify`/`<bad-request/>` PLUS the command-namespaced
+/// `<malformed-action/>` specific condition (adversarial re-review
+/// finding — the `MalformedAction` variant was previously dead).
+#[tokio::test]
+async fn handle_iq_push_service_xep0050_unknown_action_is_malformed_action() {
+    use crate::push_service::commands::REGISTER_DEVICE_NODE;
+
+    let state = create_test_websocket_state().await;
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    // `action='frobnicate'` is not a valid XEP-0050 action.
+    let bogus = command_iq_payload(REGISTER_DEVICE_NODE, "frobnicate", None, None);
+    let responses = handle_iq(
+        &iq_set_frame("push-bad-action", "push.example.com", bogus),
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&jid),
+    )
+    .await;
+    let response = responses.first().expect("response");
+    let element = Element::from_str(response).expect("parse error iq");
+    assert_eq!(element.attr("type"), Some("error"));
+    let error = element
+        .children()
+        .find(|child| child.name() == "error")
+        .expect("error envelope");
+    assert_eq!(error.attr("type"), Some("modify"));
+    assert!(
+        error.children().any(|child| child.name() == "bad-request"),
+        "§4.4 general condition must be bad-request: {response}"
+    );
+    assert!(
+        error.children().any(|child| {
+            child.name() == "malformed-action"
+                && child.ns() == waddle_xmpp::xep::xep0050::NS_COMMANDS
+        }),
+        "§4.4 must carry the <malformed-action xmlns='http://jabber.org/protocol/commands'/> child: {response}"
+    );
 }
 
 #[tokio::test]

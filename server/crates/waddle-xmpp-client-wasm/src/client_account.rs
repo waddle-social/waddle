@@ -17,98 +17,67 @@ impl WaddleClient {
         })
     }
 
-    pub fn enable_push_notifications(
-        &self,
-        service_jid: String,
-        node: String,
-        token: String,
-    ) -> Promise {
+    /// XEP-0357 §5 `<enable/>` IQ. No provider credentials — those
+    /// flow through `register_push_device` (XEP-0050) against the
+    /// Push Service component.
+    pub fn enable_push_notifications(&self, service_jid: String, node: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            let iq = build_enable_push_iq(&service_jid, &node, &token);
-            let _ = send_iq_command(inner, iq).await?;
-            Ok(JsValue::UNDEFINED)
-        })
-    }
-
-    pub fn disable_push_notifications(&self, service_jid: String, node: String) -> Promise {
-        let inner = self.inner.clone();
-        future_to_promise(async move {
-            let iq = build_disable_push_iq(&service_jid, &node);
-            let _ = send_iq_command(inner, iq).await?;
-            Ok(JsValue::UNDEFINED)
-        })
-    }
-
-    /// `<ensure-node app-id='…'/>` on the Push Service. Resolves to the
-    /// stable per-(user, app-id) node id the chat should hand to
-    /// `register_web_push_device` and to `enable_push_notifications`.
-    /// Idempotent — repeated calls return the same node.
-    pub fn ensure_push_node(&self, service_jid: String, app_id: String) -> Promise {
-        let inner = self.inner.clone();
-        future_to_promise(async move {
-            let iq = build_ensure_push_node_iq(&service_jid, &app_id);
-            let result = send_iq_command(inner, iq).await?;
-            let node = result
-                .get_child("node", WADDLE_PUSH_SERVICE_NS)
-                .ok_or_else(|| JsValue::from_str("ensure-node response missing <node/>"))?;
-            // Hard-fail on missing/empty required attrs. The server
-            // always emits all three on success; an empty here means
-            // the wire response is malformed. Persisting `node.id = ""`
-            // would silently brick the user's push pipeline (the
-            // subsequent register-device and enable IQs would target
-            // an empty node). Surface as a rejected Promise so the
-            // chat's `console.warn` chain has something to grep.
-            let id = require_non_empty_attr(node, "id", "ensure-node")?;
-            let jid = require_non_empty_attr(node, "jid", "ensure-node")?;
-            let app_id = require_non_empty_attr(node, "app-id", "ensure-node")?;
-            let response = PushServiceNode { id, jid, app_id };
-            to_js_value(&response)
-        })
-    }
-
-    /// `<register-device …><provider-…/></register-device>` on the
-    /// Push Service. Idempotent on `(node, device_id)`; subsequent
-    /// calls UPDATE the row with the latest Web Push credentials.
-    /// All three `provider_*` arguments are required for Web Push
-    /// (they map to `PushSubscription.endpoint`, `.keys.auth`,
-    /// `.keys.p256dh` respectively). Passing an empty string for any
-    /// of them omits the corresponding child from the wire IQ.
-    pub fn register_web_push_device(&self, options: JsValue) -> Promise {
-        let inner = self.inner.clone();
-        future_to_promise(async move {
-            let opts: RegisterWebPushDeviceOptions = serde_wasm_bindgen::from_value(options)
-                .map_err(|err| JsValue::from_str(&err.to_string()))?;
-            // `environment` is wire-typed via `PushEnvironment` on
-            // the options struct — serde rejects unknown variants
-            // at the JS↔Rust boundary before reaching the IQ builder.
-            let registration = PushDeviceRegistration {
-                node: &opts.node,
-                device_id: &opts.device_id,
-                environment: opts.environment,
-                provider_endpoint: non_empty(&opts.provider_endpoint),
-                provider_token: non_empty(&opts.provider_token),
-                provider_key_material: non_empty(&opts.provider_key_material),
-            };
-            let iq = build_register_push_device_iq(
-                &opts.service_jid,
-                PushDevicePlatform::Web,
-                &registration,
+            let iq = waddle_xmpp_client::xep::xep0357::build_xep0357_enable_iq(
+                &service_jid,
+                &node,
+                None,
             );
-            let result = send_iq_command(inner, iq).await?;
-            let device = result
-                .get_child("device", WADDLE_PUSH_SERVICE_NS)
-                .ok_or_else(|| JsValue::from_str("register-device response missing <device/>"))?;
-            let response = PushServiceDevice {
-                id: require_non_empty_attr(device, "id", "register-device")?,
-                node: require_non_empty_attr(device, "node", "register-device")?,
-                status: PushDeviceStatus::from_wire(&require_non_empty_attr(
-                    device,
-                    "status",
-                    "register-device",
-                )?)?,
-            };
-            to_js_value(&response)
+            let _ = send_iq_command(inner, iq).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    /// XEP-0357 §6.1 `<disable/>` IQ. A `None`/missing `node` disables
+    /// ALL push nodes at the service for this user.
+    pub fn disable_push_notifications(&self, service_jid: String, node: Option<String>) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let iq = waddle_xmpp_client::xep::xep0357::build_xep0357_disable_iq(
+                &service_jid,
+                node.as_deref(),
+            );
+            let _ = send_iq_command(inner, iq).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    /// XEP-0050 `register-device` ad-hoc command on `push.<domain>`.
+    /// Drives the multi-step dance and resolves to the assigned
+    /// XEP-0357 node id. Polymorphic over Web Push / APNs / FCM via
+    /// the `platform`-discriminated [`RegisterPushDeviceOptions`].
+    ///
+    /// Replaces the pre-cutover `ensure_push_node` +
+    /// `register_web_push_device` pair: the XEP-0050 result form
+    /// carries the assigned node id directly.
+    pub fn register_push_device(&self, options: JsValue) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let opts: RegisterPushDeviceOptions = serde_wasm_bindgen::from_value(options)
+                .map_err(|err| JsValue::from_str(&err.to_string()))?;
+            let service_jid = opts.service_jid.clone();
+            let app_id = opts.app_id.clone();
+            let environment = opts.environment;
+            let credentials = opts.into_credentials().map_err(js_error)?;
+            let driver = WasmCommandDriver { inner };
+            let outcome = waddle_xmpp_client::push::register_push_device(
+                &driver,
+                &service_jid,
+                &app_id,
+                environment,
+                &credentials,
+            )
+            .await
+            .map_err(|err| JsValue::from_str(&err.to_string()))?;
+            to_js_value(&WaddleRegisterDeviceResult {
+                node: outcome.node.into_string(),
+                device_id: outcome.device_id.into_string(),
+            })
         })
     }
 
@@ -149,12 +118,14 @@ impl WaddleClient {
         })
     }
 
-    /// `<disable-device node='…' device-id='…'/>` on the Push Service.
-    /// Idempotent — operates on the (node, device-id) row only.
-    /// Resolves to the typed `PushServiceDevice` shape so the chat
-    /// caller can observe the post-disable status (round-5 Copilot
-    /// review on PR #760 — match `register_web_push_device`'s
-    /// contract instead of resolving void).
+    /// XEP-0050 `disable-device` ad-hoc command on `push.<domain>`.
+    /// Single-step `action='execute'` carrying the `node` + `device-id`
+    /// fields. The Push Service marks the row inactive — no payload
+    /// shape returned, the caller only cares about success vs. error.
+    ///
+    /// Verifies the response's `from=` matches `service_jid` before
+    /// returning (RFC 6120 §8.1.2.1 / §10.5 defense-in-depth — same
+    /// pattern as `fetch_vapid_public_key` above).
     pub fn disable_push_device(
         &self,
         service_jid: String,
@@ -163,21 +134,17 @@ impl WaddleClient {
     ) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            let iq = build_disable_push_device_iq(&service_jid, &node, &device_id);
-            let result = send_iq_command(inner, iq).await?;
-            let device = result
-                .get_child("device", WADDLE_PUSH_SERVICE_NS)
-                .ok_or_else(|| JsValue::from_str("disable-device response missing <device/>"))?;
-            let response = PushServiceDevice {
-                id: require_non_empty_attr(device, "id", "disable-device")?,
-                node: require_non_empty_attr(device, "node", "disable-device")?,
-                status: PushDeviceStatus::from_wire(&require_non_empty_attr(
-                    device,
-                    "status",
-                    "disable-device",
-                )?)?,
-            };
-            to_js_value(&response)
+            let form =
+                waddle_xmpp_client::push::build_disable_device_submit_form(&node, &device_id);
+            let iq = waddle_xmpp_client::xep::xep0050::build_xep0050_command_request(
+                &service_jid,
+                waddle_xmpp_client::push::DISABLE_DEVICE_NODE,
+                waddle_xmpp_client::xep::xep0050::AdHocAction::Execute,
+                Some(form),
+            );
+            let response = send_iq_command(inner, iq).await?;
+            verify_iq_from_matches_query(response.attr("from"), &service_jid).map_err(js_error)?;
+            Ok(JsValue::UNDEFINED)
         })
     }
 
@@ -728,27 +695,33 @@ fn surface_bookmark(item: BookmarkItem) -> WaddleBookmarkItem {
     }
 }
 
-/// Extract a required non-empty XML attribute from a typed response
-/// element. Round-5 review on PR #760 flagged that `unwrap_or_default()`
-/// on Push Service response attributes would silently persist empty
-/// strings (e.g. `node.id = ""`) and brick subsequent IQs that target
-/// the broken value. Hard-fail instead — the server always emits
-/// these attrs on success, so an empty here means the wire shape has
-/// drifted and the chat must surface the error rather than continue.
-fn require_non_empty_attr(
-    element: &Element,
-    attr: &str,
-    response_kind: &str,
-) -> Result<String, JsValue> {
-    element
-        .attr(attr)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .ok_or_else(|| {
-            JsValue::from_str(&format!(
-                "{response_kind} response missing required attribute '{attr}'"
-            ))
+/// `CommandDriver` impl that forwards through the WASM client's
+/// `send_iq_command` pipeline. The composer's typed `ClientResult`
+/// surface meets the JS boundary's stringly-typed `JsValue` errors
+/// here — any error from the WASM driver is wrapped as a typed
+/// `StanzaError` so the composer's diagnostic chain stays consistent.
+pub(crate) struct WasmCommandDriver {
+    pub(crate) inner: Rc<RefCell<WaddleClientInner>>,
+}
+
+impl waddle_xmpp_client::push::CommandDriver for WasmCommandDriver {
+    async fn send_iq(
+        &self,
+        iq: Element,
+    ) -> Result<Element, waddle_xmpp_client::error::ClientError> {
+        send_iq_command(self.inner.clone(), iq).await.map_err(|js| {
+            let text = js
+                .as_string()
+                .unwrap_or_else(|| "WASM send_iq failed".to_string());
+            waddle_xmpp_client::error::ClientError::StanzaError(
+                waddle_xmpp_client::error::StanzaError {
+                    error_type: waddle_xmpp_client::error::StanzaErrorType::Cancel,
+                    condition: "internal-server-error".to_string(),
+                    text: Some(text),
+                },
+            )
         })
+    }
 }
 
 /// Defense-in-depth check for `fetch_vapid_public_key`: refuse to accept

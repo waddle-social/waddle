@@ -99,15 +99,3 @@ pub(crate) fn to_js_value<T: Serialize + ?Sized>(value: &T) -> Result<JsValue, J
 pub(crate) fn js_error(message: impl ToString) -> JsValue {
     JsValue::from_str(&message.to_string())
 }
-
-/// Return `Some(s)` iff `s` is non-empty, else `None`. Used at the
-/// JS↔Rust boundary where JS empty strings map to "field absent" on
-/// the wire (the typed IQ builders omit absent children rather than
-/// emit empty ones).
-pub(crate) fn non_empty(s: &str) -> Option<&str> {
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
-    }
-}

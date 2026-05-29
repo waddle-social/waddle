@@ -1,4 +1,4 @@
-use super::extension_forms::is_extension_command_node;
+use super::extension_forms::CommandBoundary;
 use super::*;
 
 pub(super) async fn handle_command_iq(
@@ -6,6 +6,7 @@ pub(super) async fn handle_command_iq(
     state: &WebSocketState,
     domain: &str,
     extensions_domain: &str,
+    push_domain: &str,
     authenticated_session: &Option<Session>,
     bound_jid: Option<&FullJid>,
 ) -> Vec<String> {
@@ -21,6 +22,20 @@ pub(super) async fn handle_command_iq(
 
     let command = match parse_command_from_iq(request_iq) {
         Ok(command) => command,
+        // XEP-0050 §4.4 malformed-action: the responder does not
+        // understand the specified `action` attribute value. Map this
+        // case to the command-namespaced `<malformed-action/>` child
+        // rather than a bare `<bad-request/>` so generic XEP-0050
+        // clients can distinguish it from other malformed requests.
+        Err(CommandError::InvalidAction(_)) => {
+            return vec![build_xmpp_error_response(
+                request_iq,
+                XmppError::ad_hoc_command(
+                    AdHocCommandCondition::MalformedAction,
+                    Some("unrecognised command action".to_string()),
+                ),
+            )];
+        }
         Err(err) => {
             return vec![build_xmpp_error_response(
                 request_iq,
@@ -34,13 +49,12 @@ pub(super) async fn handle_command_iq(
         .to()
         .map(|jid| jid.to_bare().to_string())
         .unwrap_or_else(|| domain.to_string());
-    let extension_command = is_extension_command_node(&node);
-    let allowed_target = if extension_command {
-        Some(extensions_domain)
-    } else {
-        Some(domain)
+    let allowed_target = match CommandBoundary::classify(&node) {
+        CommandBoundary::Server => domain,
+        CommandBoundary::Extensions => extensions_domain,
+        CommandBoundary::PushService => push_domain,
     };
-    if Some(target.as_str()) != allowed_target {
+    if target.as_str() != allowed_target {
         return vec![build_xmpp_error_response(
             request_iq,
             XmppError::service_unavailable(Some(
@@ -64,12 +78,14 @@ pub(super) async fn handle_command_iq(
             form,
             session_id,
             notes,
+            actions,
         } => {
             let mut command = Command::new(node.clone());
             command.status = Some(CommandStatus::Executing);
             command.session_id = Some(session_id);
             command.form = Some(form);
             command.notes = notes;
+            command.actions = actions;
             command
         }
         CommandResult::Completed { form, notes } => {

@@ -13,7 +13,7 @@ use uuid::Uuid;
 use xmpp_parsers::iq::Iq;
 
 use crate::xep::xep0004::DataForm;
-use crate::xep::xep0050::{Action, Command, Note};
+use crate::xep::xep0050::{Action, AdHocCommandCondition, Command, Note};
 use crate::XmppError;
 
 /// Time-to-live for command sessions (5 minutes)
@@ -26,6 +26,15 @@ pub enum CommandResult {
         form: DataForm,
         session_id: String,
         notes: Vec<Note>,
+        /// XEP-0050 §3 / §5.2 `<actions/>` element advertising which
+        /// actions the requester may submit at the next stage. When
+        /// `None`, no `<actions/>` is emitted (XEP-0050 §5.2 says the
+        /// element MAY be omitted if `execute` defaults to `next`).
+        /// Multi-step commands with a single follow-up SHOULD set this
+        /// to `AllowedActions::new(Action::Complete).with_complete()`
+        /// so generic XEP-0050 clients know `complete` finishes the
+        /// wizard.
+        actions: Option<crate::xep::xep0050::AllowedActions>,
     },
     /// Command completed successfully.
     Completed {
@@ -195,7 +204,12 @@ impl CommandRegistry {
             match commands.get(node) {
                 Some(cmd) => Arc::clone(&cmd.handler),
                 None => {
-                    return CommandResult::Error(XmppError::service_unavailable(Some(format!(
+                    // XEP-0050 §4.4: an unknown command node is
+                    // `cancel`/`item-not-found` (no command-specific
+                    // child), not `service-unavailable` (which §4.4
+                    // reserves for "this JID does not support commands
+                    // at all").
+                    return CommandResult::Error(XmppError::item_not_found(Some(format!(
                         "Command '{}' not found",
                         node
                     ))));
@@ -215,9 +229,12 @@ impl CommandRegistry {
         match action {
             Action::Execute => {
                 if ctx.command.session_id.is_some() {
-                    return CommandResult::Error(XmppError::bad_request(Some(
-                        "execute must not include an existing sessionid".to_string(),
-                    )));
+                    // §4.4 bad-action: the responder cannot accept an
+                    // `execute` that carries an existing sessionid.
+                    return CommandResult::Error(XmppError::ad_hoc_command(
+                        AdHocCommandCondition::BadAction,
+                        Some("execute must not include an existing sessionid".to_string()),
+                    ));
                 }
                 // Create a new session
                 let session_id = Uuid::new_v4().to_string();
@@ -240,9 +257,18 @@ impl CommandRegistry {
                 if let Some(ref session_id) = ctx.command.session_id {
                     let session = self.sessions.read().await.get(session_id).cloned();
                     if !session_matches_request(session.as_ref(), node, from) {
-                        return CommandResult::Error(XmppError::bad_request(Some(
-                            "Session not found, expired, or owned by another requester".to_string(),
-                        )));
+                        // §4.4 bad-sessionid: the sessionid is not valid
+                        // for this requester/node (unknown, expired, or
+                        // owned by someone else — indistinguishable once
+                        // the session has been evicted, so we report the
+                        // honest "cannot accept this sessionid").
+                        return CommandResult::Error(XmppError::ad_hoc_command(
+                            AdHocCommandCondition::BadSessionId,
+                            Some(
+                                "Session not found, expired, or owned by another requester"
+                                    .to_string(),
+                            ),
+                        ));
                     }
                     self.sessions.write().await.remove(session_id);
                     debug!(
@@ -255,25 +281,36 @@ impl CommandRegistry {
             }
             Action::Complete | Action::Next | Action::Prev => {
                 if ctx.command.session_id.is_none() {
-                    return CommandResult::Error(XmppError::bad_request(Some(
-                        "Command sessionid is required for next, prev, and complete actions"
-                            .to_string(),
-                    )));
+                    // §4.4 bad-action: next/prev/complete cannot be
+                    // accepted without an established session.
+                    return CommandResult::Error(XmppError::ad_hoc_command(
+                        AdHocCommandCondition::BadAction,
+                        Some(
+                            "Command sessionid is required for next, prev, and complete actions"
+                                .to_string(),
+                        ),
+                    ));
                 }
                 // Touch the session to update last_accessed
                 if let Some(ref session_id) = ctx.command.session_id {
                     if let Some(session) = self.sessions.write().await.get_mut(session_id) {
                         if !session_matches_request(Some(session), node, from) {
-                            return CommandResult::Error(XmppError::bad_request(Some(
-                                "Session not found, expired, or owned by another requester"
-                                    .to_string(),
-                            )));
+                            // §4.4 bad-sessionid (see Cancel arm).
+                            return CommandResult::Error(XmppError::ad_hoc_command(
+                                AdHocCommandCondition::BadSessionId,
+                                Some(
+                                    "Session not found, expired, or owned by another requester"
+                                        .to_string(),
+                                ),
+                            ));
                         }
                         session.touch();
                     } else {
-                        return CommandResult::Error(XmppError::bad_request(Some(
-                            "Session not found or expired".to_string(),
-                        )));
+                        // §4.4 bad-sessionid: no such active session.
+                        return CommandResult::Error(XmppError::ad_hoc_command(
+                            AdHocCommandCondition::BadSessionId,
+                            Some("Session not found or expired".to_string()),
+                        ));
                     }
                 }
             }
@@ -289,11 +326,13 @@ impl CommandRegistry {
                     form,
                     session_id: response_session_id,
                     notes,
+                    actions,
                 },
             ) if response_session_id.is_empty() => CommandResult::Executing {
                 form,
                 session_id,
                 notes,
+                actions,
             },
             (_, result) => result,
         };
@@ -411,6 +450,7 @@ mod tests {
                         form: DataForm::new(crate::xep::xep0004::FormType::Form),
                         session_id: ctx.command.session_id.unwrap_or_default(),
                         notes: vec![],
+                        actions: None,
                     }
                 },
             )

@@ -435,42 +435,6 @@ fn disco_info_result_has_feature_check() {
 }
 
 #[test]
-fn build_enable_push_iq_omits_publish_options_for_empty_token() {
-    let iq = build_enable_push_iq("push.example.com", "web-push", "");
-    let enable = iq.get_child("enable", PUSH_NS).expect("enable");
-
-    assert_eq!(enable.attr("jid"), Some("push.example.com"));
-    assert_eq!(enable.attr("node"), Some("web-push"));
-    assert!(enable.get_child("x", DATA_FORMS_NS).is_none());
-}
-
-#[test]
-fn build_enable_push_iq_includes_secret_publish_options_for_non_empty_token() {
-    let iq = build_enable_push_iq("push.example.com", "web-push", "opaque-secret");
-    let enable = iq.get_child("enable", PUSH_NS).expect("enable");
-    let form = enable
-        .get_child("x", DATA_FORMS_NS)
-        .expect("publish options");
-    let fields = form
-        .children()
-        .filter(|child| child.name() == "field" && child.ns() == DATA_FORMS_NS)
-        .filter_map(|field| {
-            Some((
-                field.attr("var")?.to_string(),
-                field.get_child("value", DATA_FORMS_NS)?.text(),
-            ))
-        })
-        .collect::<Vec<_>>();
-
-    assert!(fields.iter().any(|(var, value)| {
-        var == "FORM_TYPE" && value == "http://jabber.org/protocol/pubsub#publish-options"
-    }));
-    assert!(fields
-        .iter()
-        .any(|(var, value)| var == "secret" && value == "opaque-secret"));
-}
-
-#[test]
 fn build_waddle_inbox_mark_read_supports_thread() {
     let iq = build_waddle_inbox_mark_read_iq(
         "me@example.com",
@@ -767,101 +731,12 @@ fn resolve_component_services_first_match_wins() {
     assert_eq!(resolved.muc, bare("muc1.waddle.test"));
 }
 
-// ── urn:waddle:push-service:0 builders (issue #528) ──────────────────────────
+// XEP-0068 form-type discrimination — these tests pin the disco#info
+// parser's refusal to honor a smuggled FORM_TYPE in a non-disco form.
+// Push command wire-shape coverage lives alongside the typed builders
+// in `xep/xep0050.rs`, `xep/xep0357.rs`, and the integration test at
+// `tests/register_push_device_against_fake_service.rs`.
 
-#[test]
-fn build_ensure_push_node_carries_app_id_and_target_jid() {
-    let iq = build_ensure_push_node_iq("push.example.com", "web");
-    assert_eq!(iq.attr("type"), Some("set"));
-    assert_eq!(iq.attr("to"), Some("push.example.com"));
-    let ensure = iq
-        .get_child("ensure-node", WADDLE_PUSH_SERVICE_NS)
-        .expect("ensure-node child");
-    assert_eq!(ensure.attr("app-id"), Some("web"));
-}
-
-#[test]
-fn build_register_push_device_carries_web_push_fields() {
-    let registration = PushDeviceRegistration {
-        node: "node-abc",
-        device_id: "web-1234",
-        environment: PushEnvironment::Prod,
-        provider_endpoint: Some("https://fcm.googleapis.com/wp/abcdef"),
-        provider_token: Some("vapid-auth-secret"),
-        provider_key_material: Some("p256dh-public-key"),
-    };
-    let iq =
-        build_register_push_device_iq("push.example.com", PushDevicePlatform::Web, &registration);
-    assert_eq!(iq.attr("type"), Some("set"));
-    assert_eq!(iq.attr("to"), Some("push.example.com"));
-    let register = iq
-        .get_child("register-device", WADDLE_PUSH_SERVICE_NS)
-        .expect("register-device child");
-    assert_eq!(register.attr("node"), Some("node-abc"));
-    assert_eq!(register.attr("device-id"), Some("web-1234"));
-    assert_eq!(register.attr("platform"), Some("web"));
-    assert_eq!(register.attr("environment"), Some("prod"));
-    let endpoint = register
-        .get_child("provider-endpoint", WADDLE_PUSH_SERVICE_NS)
-        .expect("provider-endpoint child");
-    assert_eq!(endpoint.text(), "https://fcm.googleapis.com/wp/abcdef");
-    let token = register
-        .get_child("provider-token", WADDLE_PUSH_SERVICE_NS)
-        .expect("provider-token child");
-    assert_eq!(token.text(), "vapid-auth-secret");
-    let key = register
-        .get_child("provider-key-material", WADDLE_PUSH_SERVICE_NS)
-        .expect("provider-key-material child");
-    assert_eq!(key.text(), "p256dh-public-key");
-}
-
-#[test]
-fn build_register_push_device_omits_missing_provider_fields() {
-    // APNs / FCM (later PRs) populate a subset of the provider fields.
-    // Verify the builder omits the elements rather than emitting them
-    // empty, so the server's text-extractor returns None.
-    let registration = PushDeviceRegistration {
-        node: "node-abc",
-        device_id: "ios-1234",
-        environment: PushEnvironment::Prod,
-        provider_endpoint: None,
-        provider_token: Some("apns-device-token"),
-        provider_key_material: None,
-    };
-    let iq =
-        build_register_push_device_iq("push.example.com", PushDevicePlatform::Apns, &registration);
-    let register = iq
-        .get_child("register-device", WADDLE_PUSH_SERVICE_NS)
-        .expect("register-device child");
-    assert!(register
-        .get_child("provider-endpoint", WADDLE_PUSH_SERVICE_NS)
-        .is_none());
-    assert!(register
-        .get_child("provider-key-material", WADDLE_PUSH_SERVICE_NS)
-        .is_none());
-    let token = register
-        .get_child("provider-token", WADDLE_PUSH_SERVICE_NS)
-        .expect("provider-token child");
-    assert_eq!(token.text(), "apns-device-token");
-}
-
-#[test]
-fn build_disable_push_device_carries_node_and_device_id() {
-    let iq = build_disable_push_device_iq("push.example.com", "node-abc", "web-1234");
-    assert_eq!(iq.attr("type"), Some("set"));
-    assert_eq!(iq.attr("to"), Some("push.example.com"));
-    let disable = iq
-        .get_child("disable-device", WADDLE_PUSH_SERVICE_NS)
-        .expect("disable-device child");
-    assert_eq!(disable.attr("node"), Some("node-abc"));
-    assert_eq!(disable.attr("device-id"), Some("web-1234"));
-}
-
-/// Acceptance criterion #2 verification — XEP-0357 enable IQ carries
-/// the Push Service JID + node and NO provider fields. The existing
-/// `build_enable_push_iq_omits_publish_options_for_empty_token` test
-/// covers this for the empty-token branch; this test pins the
-/// EXACT shape #528 promises to land.
 #[test]
 fn parse_disco_data_form_ignores_form_type_in_submit_form() {
     // XEP-0068 §4.3: a FORM_TYPE field is only a context indicator
@@ -955,23 +830,6 @@ fn parse_disco_data_form_ignores_form_type_when_x_type_missing() {
     assert_eq!(result.forms[0].form_type, None);
 }
 
-#[test]
-fn xep0357_enable_for_web_push_carries_no_provider_fields() {
-    let iq = build_enable_push_iq("push.example.com", "node-abc", "");
-    let enable = iq.get_child("enable", PUSH_NS).expect("enable");
-    assert_eq!(enable.attr("jid"), Some("push.example.com"));
-    assert_eq!(enable.attr("node"), Some("node-abc"));
-    // No XEP-0004 form, no provider-endpoint, no provider-token, no
-    // provider-key-material. The Push Service is the only consumer
-    // of those values (registered separately via build_register_push_device_iq).
-    assert!(enable.get_child("x", DATA_FORMS_NS).is_none());
-    assert!(enable
-        .get_child("provider-endpoint", WADDLE_PUSH_SERVICE_NS)
-        .is_none());
-    assert!(enable
-        .get_child("provider-token", WADDLE_PUSH_SERVICE_NS)
-        .is_none());
-    assert!(enable
-        .get_child("provider-key-material", WADDLE_PUSH_SERVICE_NS)
-        .is_none());
-}
+// XEP-0357 wire-shape coverage moved to
+// `crate::xep::xep0357::tests::enable_iq_with_no_publish_options_carries_no_form_or_provider_fields`
+// where it lives alongside the typed builder.

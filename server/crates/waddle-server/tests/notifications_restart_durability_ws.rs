@@ -57,8 +57,11 @@ use ws_common::{TestServer, WsXmppClient};
 use xmpp_parsers::minidom::Element;
 
 const CLIENT_NS: &str = "jabber:client";
+const NS_COMMANDS: &str = "http://jabber.org/protocol/commands";
+const NS_DATA_FORMS: &str = "jabber:x:data";
 const NS_PUSH: &str = "urn:xmpp:push:0";
-const NS_WADDLE_PUSH_SERVICE: &str = "urn:waddle:push-service:0";
+const REGISTER_DEVICE_NODE: &str = "register-device";
+const REGISTER_DEVICE_FORM_TYPE: &str = "urn:waddle:push-service:commands:register-device:0";
 const DOMAIN: &str = "localhost";
 const USERNAME: &str = "admin";
 const PUSH_SERVICE_JID: &str = "push.localhost";
@@ -92,12 +95,123 @@ async fn send_iq(client: &mut WsXmppClient, frame: String, id: &str) -> String {
         .expect("await iq response")
 }
 
-fn child_attr(xml: &str, child_name: &str, attr: &str) -> Option<String> {
-    let parsed = Element::from_str(xml).ok()?;
-    parsed
+/// Build a XEP-0050 `<command/>` Element targeting the push service.
+fn command_element(
+    node: &str,
+    action: &str,
+    session_id: Option<&str>,
+    submit_form: Option<Element>,
+) -> Element {
+    let mut command = Element::builder("command", NS_COMMANDS)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+        .attr(minidom::rxml::xml_ncname!("action").to_owned(), action);
+    if let Some(session_id) = session_id {
+        command = command.attr(
+            minidom::rxml::xml_ncname!("sessionid").to_owned(),
+            session_id,
+        );
+    }
+    if let Some(form) = submit_form {
+        command = command.append(form);
+    }
+    command.build()
+}
+
+fn submit_form(form_type: &str, fields: &[(&str, &str)]) -> Element {
+    let mut form = Element::builder("x", NS_DATA_FORMS)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit");
+    form = form.append(form_field("FORM_TYPE", form_type, Some("hidden")));
+    for (var, value) in fields {
+        form = form.append(form_field(var, value, None));
+    }
+    form.build()
+}
+
+fn form_field(var: &str, value: &str, type_attr: Option<&str>) -> Element {
+    let mut field = Element::builder("field", NS_DATA_FORMS)
+        .attr(minidom::rxml::xml_ncname!("var").to_owned(), var);
+    if let Some(type_attr) = type_attr {
+        field = field.attr(minidom::rxml::xml_ncname!("type").to_owned(), type_attr);
+    }
+    field
+        .append(
+            Element::builder("value", NS_DATA_FORMS)
+                .append(value)
+                .build(),
+        )
+        .build()
+}
+
+fn xdata_field_value_in(parent: &Element, var: &str) -> Option<String> {
+    let form = parent
         .children()
-        .find(|c| c.name() == child_name)
-        .and_then(|c| c.attr(attr).map(str::to_string))
+        .find(|child| child.is("x", NS_DATA_FORMS))?;
+    form.children()
+        .find(|child| child.is("field", NS_DATA_FORMS) && child.attr("var") == Some(var))
+        .and_then(|field| {
+            field
+                .children()
+                .find(|child| child.is("value", NS_DATA_FORMS))
+        })
+        .map(|value| value.text())
+}
+
+async fn register_web_push_device_via_xep0050(
+    client: &mut WsXmppClient,
+    id_prefix: &str,
+    app_id: &str,
+    endpoint: &str,
+    p256dh: &str,
+    auth: &str,
+) -> String {
+    let execute_id = format!("{id_prefix}-execute");
+    let execute = command_element(REGISTER_DEVICE_NODE, "execute", None, None);
+    let executing_response = send_iq(
+        client,
+        iq_frame("set", &execute_id, PUSH_SERVICE_JID, execute),
+        &execute_id,
+    )
+    .await;
+    let executing_iq = Element::from_str(&executing_response).expect("executing iq");
+    let executing_command = executing_iq
+        .children()
+        .find(|child| child.is("command", NS_COMMANDS))
+        .expect("command in executing response");
+    let session_id = executing_command
+        .attr("sessionid")
+        .expect("XEP-0050 sessionid")
+        .to_string();
+
+    let complete_id = format!("{id_prefix}-complete");
+    let form = submit_form(
+        REGISTER_DEVICE_FORM_TYPE,
+        &[
+            ("platform", "web"),
+            ("environment", "prod"),
+            ("app-id", app_id),
+            ("web-push-endpoint", endpoint),
+            ("web-push-p256dh", p256dh),
+            ("web-push-auth", auth),
+        ],
+    );
+    let complete = command_element(
+        REGISTER_DEVICE_NODE,
+        "complete",
+        Some(&session_id),
+        Some(form),
+    );
+    let completed_response = send_iq(
+        client,
+        iq_frame("set", &complete_id, PUSH_SERVICE_JID, complete),
+        &complete_id,
+    )
+    .await;
+    let completed_iq = Element::from_str(&completed_response).expect("completed iq");
+    let completed_command = completed_iq
+        .children()
+        .find(|child| child.is("command", NS_COMMANDS))
+        .expect("command in completed response");
+    xdata_field_value_in(completed_command, "node").expect("stage 4 result form carries `node`")
 }
 
 /// Opens a `SqlitePool` against the persistent test database with a
@@ -194,43 +308,13 @@ async fn push_pipeline_durable_rows_survive_server_restart() {
     .await
     .expect("bob connection (phase 1)");
 
-    let node_response = send_iq(
+    let node = register_web_push_device_via_xep0050(
         &mut bob,
-        iq_frame(
-            "set",
-            "restart-bob-ensure-node",
-            PUSH_SERVICE_JID,
-            Element::builder("ensure-node", NS_WADDLE_PUSH_SERVICE)
-                .attr(minidom::rxml::xml_ncname!("app-id").to_owned(), "web")
-                .build(),
-        ),
-        "restart-bob-ensure-node",
-    )
-    .await;
-    let node = child_attr(&node_response, "node", "id").expect("node id");
-    let register_device = Element::builder("register-device", NS_WADDLE_PUSH_SERVICE)
-        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node.as_str())
-        .attr(
-            minidom::rxml::xml_ncname!("device-id").to_owned(),
-            "bob-web-restart",
-        )
-        .attr(minidom::rxml::xml_ncname!("platform").to_owned(), "web")
-        .attr(minidom::rxml::xml_ncname!("environment").to_owned(), "test")
-        .append(
-            Element::builder("provider-token", NS_WADDLE_PUSH_SERVICE)
-                .append("bob-restart-provider-secret")
-                .build(),
-        )
-        .build();
-    let _ = send_iq(
-        &mut bob,
-        iq_frame(
-            "set",
-            "restart-bob-register-device",
-            PUSH_SERVICE_JID,
-            register_device,
-        ),
-        "restart-bob-register-device",
+        "restart-bob-push",
+        "web",
+        "https://push.example.com/endpoint/restart-bob",
+        "bob-restart-p256-key",
+        "bob-restart-provider-secret",
     )
     .await;
     let enable = Element::builder("enable", NS_PUSH)

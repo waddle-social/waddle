@@ -44,15 +44,22 @@ pub(super) async fn handle_disco_items_iq(
 
         if target_to == Some(domain) && query.node.as_deref() == Some(NODE_COMMANDS) {
             let commands = state.deps.protocol.command_registry.list_commands().await;
-            let command_refs = command_refs_by_boundary(&commands, false);
+            let command_refs = command_refs_by_boundary(&commands, CommandBoundary::Server);
             let response = build_command_items(request_iq, &command_refs, domain);
             return vec![iq_to_xml(response)];
         }
 
         if target_to == Some(extensions_domain) && query.node.as_deref() == Some(NODE_COMMANDS) {
             let commands = state.deps.protocol.command_registry.list_commands().await;
-            let command_refs = command_refs_by_boundary(&commands, true);
+            let command_refs = command_refs_by_boundary(&commands, CommandBoundary::Extensions);
             let response = build_command_items(request_iq, &command_refs, extensions_domain);
+            return vec![iq_to_xml(response)];
+        }
+
+        if target_to == Some(push_domain) && query.node.as_deref() == Some(NODE_COMMANDS) {
+            let commands = state.deps.protocol.command_registry.list_commands().await;
+            let command_refs = command_refs_by_boundary(&commands, CommandBoundary::PushService);
+            let response = build_command_items(request_iq, &command_refs, push_domain);
             return vec![iq_to_xml(response)];
         }
 

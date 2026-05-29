@@ -14,11 +14,22 @@ use xmpp_parsers::minidom::Element;
 const CLIENT_NS: &str = "jabber:client";
 const DISCO_INFO_NS: &str = "http://jabber.org/protocol/disco#info";
 const DISCO_ITEMS_NS: &str = "http://jabber.org/protocol/disco#items";
+const NS_COMMANDS: &str = "http://jabber.org/protocol/commands";
+const NS_DATA_FORMS: &str = "jabber:x:data";
 const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
 const NS_PUSH: &str = "urn:xmpp:push:0";
-const NS_WADDLE_PUSH_SERVICE: &str = "urn:waddle:push-service:0";
 const NS_WADDLE_PUSH_CONTEXT: &str = "urn:waddle:push:context:0";
 const STANZA_ERROR_NS: &str = "urn:ietf:params:xml:ns:xmpp-stanzas";
+
+/// XEP-0050 node identifier for push device registration. Mirrors
+/// `crate::push_service::commands::REGISTER_DEVICE_NODE`.
+const REGISTER_DEVICE_NODE: &str = "register-device";
+/// XEP-0050 node identifier for push device deregistration.
+const DISABLE_DEVICE_NODE: &str = "disable-device";
+/// FORM_TYPE the server expects on the `register-device` submit form.
+const REGISTER_DEVICE_FORM_TYPE: &str = "urn:waddle:push-service:commands:register-device:0";
+/// FORM_TYPE the server expects on the `disable-device` submit form.
+const DISABLE_DEVICE_FORM_TYPE: &str = "urn:waddle:push-service:commands:disable-device:0";
 
 const DOMAIN: &str = "localhost";
 const USERNAME: &str = "admin";
@@ -64,17 +75,10 @@ async fn send_iq(client: &mut WsXmppClient, frame: String, id: &str) -> String {
         .expect("iq response")
 }
 
-fn child_attr(xml: &str, child_name: &str, attr: &str) -> Option<String> {
-    let element = Element::from_str(xml).ok()?;
-    element
-        .children()
-        .find(|child| child.name() == child_name)
-        .and_then(|child| child.attr(attr))
-        .map(str::to_string)
-}
-
 fn parse_iq_element(xml: &str, id: &str, iq_type: &str) -> Element {
-    let element = Element::from_str(xml).expect("valid XML response");
+    let element = Element::from_str(xml).unwrap_or_else(|err| {
+        panic!("invalid XML response (err={err}): {xml}");
+    });
     assert_eq!(element.name(), "iq");
     assert_eq!(element.ns(), CLIENT_NS);
     assert_eq!(element.attr("id"), Some(id));
@@ -116,8 +120,21 @@ fn xdata_field_value(form: &Element, var: &str) -> Option<String> {
 }
 
 fn assert_iq_error_condition(xml: &str, id: &str, condition: &str) {
-    let iq = parse_iq_element(xml, id, "error");
-    let error = single_child(&iq, "error", CLIENT_NS);
+    // Every IQ error envelope is now serialized via the typed
+    // `build_iq_error_xml_typed` builder, which stamps
+    // `xmlns='jabber:client'` on the `<iq/>`, so the frame always parses
+    // cleanly. Assert `type='error'` + the right condition element + the
+    // request id.
+    let element = Element::from_str(xml).unwrap_or_else(|err| {
+        panic!("error response must be well-formed XML ({err}): {xml}");
+    });
+    assert_eq!(element.name(), "iq");
+    assert_eq!(element.attr("id"), Some(id));
+    assert_eq!(element.attr("type"), Some("error"));
+    let error = element
+        .children()
+        .find(|child| child.name() == "error")
+        .unwrap_or_else(|| panic!("error envelope missing in: {xml}"));
     assert!(
         error
             .children()
@@ -168,6 +185,159 @@ async fn notification_candidate_count(database_url: &str, recipient: &str) -> i6
     .await
     .expect("query notification candidates");
     row.get("count")
+}
+
+/// Build a XEP-0050 `<command/>` Element targeting the push service.
+fn command_element(
+    node: &str,
+    action: &str,
+    session_id: Option<&str>,
+    submit_form: Option<Element>,
+) -> Element {
+    let mut command = Element::builder("command", NS_COMMANDS)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+        .attr(minidom::rxml::xml_ncname!("action").to_owned(), action);
+    if let Some(session_id) = session_id {
+        command = command.attr(
+            minidom::rxml::xml_ncname!("sessionid").to_owned(),
+            session_id,
+        );
+    }
+    if let Some(form) = submit_form {
+        command = command.append(form);
+    }
+    command.build()
+}
+
+/// Build a XEP-0004 `<x type='submit'>` Element pinning the given
+/// `FORM_TYPE` and a list of `(var, value)` text-single fields.
+fn submit_form(form_type: &str, fields: &[(&str, &str)]) -> Element {
+    let mut form = Element::builder("x", NS_DATA_FORMS)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit");
+    form = form.append(form_field("FORM_TYPE", form_type, Some("hidden")));
+    for (var, value) in fields {
+        form = form.append(form_field(var, value, None));
+    }
+    form.build()
+}
+
+fn form_field(var: &str, value: &str, type_attr: Option<&str>) -> Element {
+    let mut field = Element::builder("field", NS_DATA_FORMS)
+        .attr(minidom::rxml::xml_ncname!("var").to_owned(), var);
+    if let Some(type_attr) = type_attr {
+        field = field.attr(minidom::rxml::xml_ncname!("type").to_owned(), type_attr);
+    }
+    field
+        .append(
+            Element::builder("value", NS_DATA_FORMS)
+                .append(value)
+                .build(),
+        )
+        .build()
+}
+
+/// Outcome of a successful `register-device` XEP-0050 round. Both
+/// fields are extracted from the stage-4 result form — the chat
+/// client persists them so the matching `disable-device` round can
+/// scope to the assigned device row. Most existing call sites only
+/// need the node id and stay on
+/// [`register_web_push_device_via_xep0050`]; the per-device disable
+/// test uses [`register_web_push_device_via_xep0050_with_device_id`].
+struct RegisterDeviceOutcome {
+    node: String,
+    device_id: String,
+}
+
+/// Drive the full 4-stage XEP-0050 `register-device` dance against
+/// `push.<domain>` and return the assigned XEP-0357 node id. Used by
+/// every WS test that needs a registered push device before it can
+/// exercise XEP-0357 enable / publish flows.
+async fn register_web_push_device_via_xep0050(
+    client: &mut WsXmppClient,
+    id_prefix: &str,
+    app_id: &str,
+    endpoint: &str,
+    p256dh: &str,
+    auth: &str,
+) -> String {
+    register_web_push_device_via_xep0050_with_device_id(
+        client, id_prefix, app_id, endpoint, p256dh, auth,
+    )
+    .await
+    .node
+}
+
+async fn register_web_push_device_via_xep0050_with_device_id(
+    client: &mut WsXmppClient,
+    id_prefix: &str,
+    app_id: &str,
+    endpoint: &str,
+    p256dh: &str,
+    auth: &str,
+) -> RegisterDeviceOutcome {
+    // Stage 1 → 2: execute, expect status='executing' + sessionid.
+    let execute_id = format!("{id_prefix}-execute");
+    let execute = command_element(REGISTER_DEVICE_NODE, "execute", None, None);
+    let executing_response = send_iq(
+        client,
+        iq_frame("set", &execute_id, PUSH_SERVICE_JID, execute),
+        &execute_id,
+    )
+    .await;
+    let executing_iq = parse_iq_element(&executing_response, &execute_id, "result");
+    let executing_command = single_child(&executing_iq, "command", NS_COMMANDS);
+    assert_eq!(
+        executing_command.attr("status"),
+        Some("executing"),
+        "stage 2 must carry status='executing': {executing_response}"
+    );
+    let session_id = executing_command
+        .attr("sessionid")
+        .expect("XEP-0050 §3 sessionid")
+        .to_string();
+
+    // Stage 3 → 4: complete with the platform-discriminated form,
+    // expect status='completed' + result form carrying `node`.
+    let complete_id = format!("{id_prefix}-complete");
+    let form = submit_form(
+        REGISTER_DEVICE_FORM_TYPE,
+        &[
+            ("platform", "web"),
+            ("environment", "prod"),
+            ("app-id", app_id),
+            ("web-push-endpoint", endpoint),
+            ("web-push-p256dh", p256dh),
+            ("web-push-auth", auth),
+        ],
+    );
+    let complete = command_element(
+        REGISTER_DEVICE_NODE,
+        "complete",
+        Some(&session_id),
+        Some(form),
+    );
+    let completed_response = send_iq(
+        client,
+        iq_frame("set", &complete_id, PUSH_SERVICE_JID, complete),
+        &complete_id,
+    )
+    .await;
+    let completed_iq = parse_iq_element(&completed_response, &complete_id, "result");
+    let completed_command = single_child(&completed_iq, "command", NS_COMMANDS);
+    assert_eq!(
+        completed_command.attr("status"),
+        Some("completed"),
+        "stage 4 must carry status='completed': {completed_response}"
+    );
+    let result_form = completed_command
+        .children()
+        .find(|child| child.is("x", NS_DATA_FORMS))
+        .expect("stage 4 result form");
+    let node = xdata_field_value(result_form, "node")
+        .expect("stage 4 result form must carry the `node` field");
+    let device_id = xdata_field_value(result_form, "device-id")
+        .expect("stage 4 result form must carry the `device-id` field");
+    RegisterDeviceOutcome { node, device_id }
 }
 
 #[tokio::test]
@@ -287,21 +457,15 @@ async fn push_service_node_disco_omits_xep0128_vapid_form() {
 
     let (_server, mut client) = setup().await;
 
-    let ensure_node = Element::builder("ensure-node", NS_WADDLE_PUSH_SERVICE)
-        .attr(minidom::rxml::xml_ncname!("app-id").to_owned(), "web")
-        .build();
-    let node_response = send_iq(
+    let node = register_web_push_device_via_xep0050(
         &mut client,
-        iq_frame(
-            "set",
-            "push-vapid-leaf-ensure-node",
-            PUSH_SERVICE_JID,
-            ensure_node,
-        ),
-        "push-vapid-leaf-ensure-node",
+        "push-vapid-leaf",
+        "web",
+        "https://push.example.com/endpoint/vapid-leaf",
+        "p256-key-vapid-leaf",
+        "auth-secret-vapid-leaf",
     )
     .await;
-    let node = child_attr(&node_response, "node", "id").expect("node id");
 
     let query = Element::builder("query", DISCO_INFO_NS)
         .attr(minidom::rxml::xml_ncname!("node").to_owned(), node.as_str())
@@ -331,16 +495,15 @@ async fn push_service_node_disco_omits_xep0128_vapid_form() {
 async fn xep0357_push_service_rejects_client_origin_pubsub_notification_publish() {
     let (_server, mut client) = setup().await;
 
-    let ensure_node = Element::builder("ensure-node", NS_WADDLE_PUSH_SERVICE)
-        .attr(minidom::rxml::xml_ncname!("app-id").to_owned(), "web")
-        .build();
-    let node_response = send_iq(
+    let node = register_web_push_device_via_xep0050(
         &mut client,
-        iq_frame("set", "push-ensure-node", PUSH_SERVICE_JID, ensure_node),
-        "push-ensure-node",
+        "push-cors-reject",
+        "web",
+        "https://push.example.com/endpoint",
+        "provider-key",
+        "provider-secret",
     )
     .await;
-    let node = child_attr(&node_response, "node", "id").expect("node id");
 
     let items_query = Element::builder("query", DISCO_ITEMS_NS).build();
     let items_response = send_iq(
@@ -362,37 +525,6 @@ async fn xep0357_push_service_rejects_client_origin_pubsub_notification_publish(
     );
     assert_eq!(items[0].attr("jid"), Some(PUSH_SERVICE_JID));
     assert_eq!(items[0].attr("node"), Some(node.as_str()));
-
-    let register_device = Element::builder("register-device", NS_WADDLE_PUSH_SERVICE)
-        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node.as_str())
-        .attr(minidom::rxml::xml_ncname!("device-id").to_owned(), "web-1")
-        .attr(minidom::rxml::xml_ncname!("platform").to_owned(), "web")
-        .attr(minidom::rxml::xml_ncname!("environment").to_owned(), "test")
-        .append(
-            Element::builder("provider-endpoint", NS_WADDLE_PUSH_SERVICE)
-                .append("https://push.example.com/endpoint")
-                .build(),
-        )
-        .append(
-            Element::builder("provider-token", NS_WADDLE_PUSH_SERVICE)
-                .append("provider-secret")
-                .build(),
-        )
-        .build();
-    let register_response = send_iq(
-        &mut client,
-        iq_frame(
-            "set",
-            "push-register-device",
-            PUSH_SERVICE_JID,
-            register_device,
-        ),
-        "push-register-device",
-    )
-    .await;
-    let register_iq = parse_iq_element(&register_response, "push-register-device", "result");
-    let device = single_child(&register_iq, "device", NS_WADDLE_PUSH_SERVICE);
-    assert_eq!(device.attr("status"), Some("active"));
 
     let notification = Element::builder("notification", NS_PUSH).build();
     let item = Element::builder("item", NS_PUBSUB)
@@ -436,43 +568,13 @@ async fn xep0357_offline_dm_emits_durable_summary_pubsub_publish_job() {
     .await
     .expect("bob connection");
 
-    let node_response = send_iq(
+    let node = register_web_push_device_via_xep0050(
         &mut bob,
-        iq_frame(
-            "set",
-            "bob-offline-push-ensure-node",
-            PUSH_SERVICE_JID,
-            Element::builder("ensure-node", NS_WADDLE_PUSH_SERVICE)
-                .attr(minidom::rxml::xml_ncname!("app-id").to_owned(), "web")
-                .build(),
-        ),
-        "bob-offline-push-ensure-node",
-    )
-    .await;
-    let node = child_attr(&node_response, "node", "id").expect("node id");
-    let register_device = Element::builder("register-device", NS_WADDLE_PUSH_SERVICE)
-        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node.as_str())
-        .attr(
-            minidom::rxml::xml_ncname!("device-id").to_owned(),
-            "bob-web-1",
-        )
-        .attr(minidom::rxml::xml_ncname!("platform").to_owned(), "web")
-        .attr(minidom::rxml::xml_ncname!("environment").to_owned(), "test")
-        .append(
-            Element::builder("provider-token", NS_WADDLE_PUSH_SERVICE)
-                .append("bob-provider-secret")
-                .build(),
-        )
-        .build();
-    let _ = send_iq(
-        &mut bob,
-        iq_frame(
-            "set",
-            "bob-offline-push-register-device",
-            PUSH_SERVICE_JID,
-            register_device,
-        ),
-        "bob-offline-push-register-device",
+        "bob-offline-push",
+        "web",
+        "https://push.example.com/endpoint/bob-offline",
+        "bob-p256-key",
+        "bob-provider-secret",
     )
     .await;
     let enable = Element::builder("enable", NS_PUSH)
@@ -592,69 +694,21 @@ async fn xep0357_first_party_enable_requires_owned_active_node_with_device() {
         "item-not-found",
     );
 
-    let ensure_node = Element::builder("ensure-node", NS_WADDLE_PUSH_SERVICE)
-        .attr(minidom::rxml::xml_ncname!("app-id").to_owned(), "web")
-        .build();
-    let node_response = send_iq(
-        &mut client,
-        iq_frame(
-            "set",
-            "push-enable-ensure-node",
-            PUSH_SERVICE_JID,
-            ensure_node,
-        ),
-        "push-enable-ensure-node",
-    )
-    .await;
-    let node = child_attr(&node_response, "node", "id").expect("node id");
+    // Under the XEP-0050 cutover, a node only exists AFTER a successful
+    // `register-device` round — there is no separate `ensure-node`
+    // round-trip. The stage-3 form atomically allocates the node and
+    // upserts the device row, so the "enable without a device" case
+    // collapses into "enable a node that was never registered" (above).
 
-    let enable_without_device = Element::builder("enable", NS_PUSH)
-        .attr(
-            minidom::rxml::xml_ncname!("jid").to_owned(),
-            PUSH_SERVICE_JID,
-        )
-        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node.as_str())
-        .build();
-    let missing_device_response = send_iq(
+    let node = register_web_push_device_via_xep0050(
         &mut client,
-        iq_frame(
-            "set",
-            "push-enable-without-device",
-            DOMAIN,
-            enable_without_device,
-        ),
-        "push-enable-without-device",
+        "push-enable-register",
+        "web",
+        "https://push.example.com/endpoint/enable",
+        "p256-key-enable",
+        "provider-secret-enable",
     )
     .await;
-    assert_iq_error_condition(
-        &missing_device_response,
-        "push-enable-without-device",
-        "bad-request",
-    );
-
-    let register_device = Element::builder("register-device", NS_WADDLE_PUSH_SERVICE)
-        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node.as_str())
-        .attr(minidom::rxml::xml_ncname!("device-id").to_owned(), "web-1")
-        .attr(minidom::rxml::xml_ncname!("platform").to_owned(), "web")
-        .attr(minidom::rxml::xml_ncname!("environment").to_owned(), "test")
-        .append(
-            Element::builder("provider-token", NS_WADDLE_PUSH_SERVICE)
-                .append("provider-secret")
-                .build(),
-        )
-        .build();
-    let register_response = send_iq(
-        &mut client,
-        iq_frame(
-            "set",
-            "push-enable-register-device",
-            PUSH_SERVICE_JID,
-            register_device,
-        ),
-        "push-enable-register-device",
-    )
-    .await;
-    let _ = parse_iq_element(&register_response, "push-enable-register-device", "result");
 
     let enable = Element::builder("enable", NS_PUSH)
         .attr(
@@ -768,46 +822,13 @@ async fn xep0357_first_party_enable_rejects_foreign_push_service_node() {
     .await
     .expect("bob connection");
 
-    let bob_node_response = send_iq(
+    let bob_node = register_web_push_device_via_xep0050(
         &mut bob,
-        iq_frame(
-            "set",
-            "bob-push-ensure-node",
-            PUSH_SERVICE_JID,
-            Element::builder("ensure-node", NS_WADDLE_PUSH_SERVICE)
-                .attr(minidom::rxml::xml_ncname!("app-id").to_owned(), "web")
-                .build(),
-        ),
-        "bob-push-ensure-node",
-    )
-    .await;
-    let bob_node = child_attr(&bob_node_response, "node", "id").expect("bob node id");
-    let bob_device = Element::builder("register-device", NS_WADDLE_PUSH_SERVICE)
-        .attr(
-            minidom::rxml::xml_ncname!("node").to_owned(),
-            bob_node.as_str(),
-        )
-        .attr(
-            minidom::rxml::xml_ncname!("device-id").to_owned(),
-            "bob-web-1",
-        )
-        .attr(minidom::rxml::xml_ncname!("platform").to_owned(), "web")
-        .attr(minidom::rxml::xml_ncname!("environment").to_owned(), "test")
-        .append(
-            Element::builder("provider-token", NS_WADDLE_PUSH_SERVICE)
-                .append("bob-provider-secret")
-                .build(),
-        )
-        .build();
-    let _ = send_iq(
-        &mut bob,
-        iq_frame(
-            "set",
-            "bob-push-register-device",
-            PUSH_SERVICE_JID,
-            bob_device,
-        ),
-        "bob-push-register-device",
+        "bob-push-foreign",
+        "web",
+        "https://push.example.com/endpoint/bob-foreign",
+        "bob-p256-key",
+        "bob-provider-secret",
     )
     .await;
 
@@ -834,28 +855,285 @@ async fn xep0357_first_party_enable_rejects_foreign_push_service_node() {
 }
 
 #[tokio::test]
-async fn xep0357_push_service_rejects_oversized_custom_node_request() {
+async fn xep0050_push_service_register_device_rejects_oversized_app_id() {
+    // The XEP-0050 cutover folds the legacy `ensure-node` round-trip
+    // into stage-3 of `register-device`. The storage-layer cap on
+    // `app_id` length (MAX_APP_ID_LEN = 128) is the same. Submit an
+    // oversized app_id and assert the storage validation surfaces a
+    // bad-request stanza error through the registry.
     let (_server, mut client) = setup().await;
-    let ensure_node = Element::builder("ensure-node", NS_WADDLE_PUSH_SERVICE)
-        .attr(
-            minidom::rxml::xml_ncname!("app-id").to_owned(),
-            "x".repeat(129),
-        )
-        .build();
 
+    // Stage 1 → 2: execute, capture the sessionid.
+    let execute = command_element(REGISTER_DEVICE_NODE, "execute", None, None);
+    let executing_response = send_iq(
+        &mut client,
+        iq_frame(
+            "set",
+            "push-oversized-app-execute",
+            PUSH_SERVICE_JID,
+            execute,
+        ),
+        "push-oversized-app-execute",
+    )
+    .await;
+    let executing_iq =
+        parse_iq_element(&executing_response, "push-oversized-app-execute", "result");
+    let executing_command = single_child(&executing_iq, "command", NS_COMMANDS);
+    let session_id = executing_command
+        .attr("sessionid")
+        .expect("XEP-0050 sessionid")
+        .to_string();
+
+    // Stage 3: submit a form with an oversized app_id.
+    let oversized_app_id = "x".repeat(129);
+    let form = submit_form(
+        REGISTER_DEVICE_FORM_TYPE,
+        &[
+            ("platform", "web"),
+            ("environment", "prod"),
+            ("app-id", &oversized_app_id),
+            ("web-push-endpoint", "https://push.example.com/endpoint/big"),
+            ("web-push-p256dh", "p256-key-big"),
+            ("web-push-auth", "auth-secret-big"),
+        ],
+    );
+    let complete = command_element(
+        REGISTER_DEVICE_NODE,
+        "complete",
+        Some(&session_id),
+        Some(form),
+    );
     let response = send_iq(
         &mut client,
         iq_frame(
             "set",
-            "push-ensure-node-too-large",
+            "push-oversized-app-complete",
             PUSH_SERVICE_JID,
-            ensure_node,
+            complete,
         ),
-        "push-ensure-node-too-large",
+        "push-oversized-app-complete",
     )
     .await;
+    assert_iq_error_condition(&response, "push-oversized-app-complete", "bad-request");
 
-    assert_iq_error_condition(&response, "push-ensure-node-too-large", "bad-request");
+    let _ = client.close().await;
+}
+
+#[tokio::test]
+async fn xep0050_register_device_completes_and_persists_device_row() {
+    // End-to-end XEP-0050 contract pin: disco#info advertises the
+    // commands feature; disco#items lists the two registered commands;
+    // the multi-step `register-device` dance round-trips through to
+    // typed storage; `disable-device` retires the node.
+    use sqlx::Row;
+
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let db_path = temp_dir.path().join("xep0050-register-device.sqlite3");
+    let database_url = format!("sqlite://{}?mode=rwc", db_path.display());
+    let server = TestServer::start_persistent_with_extra_accounts(&database_url, &[]);
+    let password = server.fixed_account_password().to_string();
+    let mut client = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        USERNAME,
+        &password,
+        &format!("xep0050-register-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("websocket connection");
+
+    // disco#info on push.<domain> must advertise the commands feature.
+    let disco_info_query = Element::builder("query", DISCO_INFO_NS).build();
+    let info_response = send_iq(
+        &mut client,
+        iq_frame(
+            "get",
+            "xep0050-disco-info",
+            PUSH_SERVICE_JID,
+            disco_info_query,
+        ),
+        "xep0050-disco-info",
+    )
+    .await;
+    let info_iq = parse_iq_element(&info_response, "xep0050-disco-info", "result");
+    let info_query = info_iq
+        .children()
+        .find(|child| child.is("query", DISCO_INFO_NS))
+        .expect("disco#info query child");
+    let features = disco_feature_vars(info_query);
+    assert!(
+        features.contains(NS_COMMANDS),
+        "push.<domain> disco#info MUST advertise XEP-0050 commands: {info_response}"
+    );
+
+    // disco#items on push.<domain>?node=http://jabber.org/protocol/commands
+    // must list the two registered ad-hoc command nodes.
+    let commands_items_query = Element::builder("query", DISCO_ITEMS_NS)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), NS_COMMANDS)
+        .build();
+    let items_response = send_iq(
+        &mut client,
+        iq_frame(
+            "get",
+            "xep0050-disco-commands",
+            PUSH_SERVICE_JID,
+            commands_items_query,
+        ),
+        "xep0050-disco-commands",
+    )
+    .await;
+    let items_iq = parse_iq_element(&items_response, "xep0050-disco-commands", "result");
+    let items_query = single_child(&items_iq, "query", DISCO_ITEMS_NS);
+    let item_nodes: std::collections::BTreeSet<String> = items_query
+        .children()
+        .filter(|child| child.is("item", DISCO_ITEMS_NS))
+        .filter_map(|child| child.attr("node").map(str::to_string))
+        .collect();
+    assert!(
+        item_nodes.contains(REGISTER_DEVICE_NODE),
+        "disco#items must list register-device: {items_response}"
+    );
+    assert!(
+        item_nodes.contains(DISABLE_DEVICE_NODE),
+        "disco#items must list disable-device: {items_response}"
+    );
+
+    // Drive the multi-step register-device dance.
+    let endpoint = "https://push.example.com/endpoint/xep0050-end-to-end";
+    let p256dh = "p256-key-xep0050-end-to-end";
+    let auth = "auth-secret-xep0050-end-to-end";
+    let outcome = register_web_push_device_via_xep0050_with_device_id(
+        &mut client,
+        "xep0050-register-flow",
+        "web",
+        endpoint,
+        p256dh,
+        auth,
+    )
+    .await;
+    assert!(!outcome.node.is_empty(), "node id must not be empty");
+    assert!(!outcome.device_id.is_empty(), "device id must not be empty");
+
+    // Verify the persisted `push_devices` row carries the full set of
+    // Web Push provider credentials so a field-shuffle regression in
+    // `build_registration` can't silently land garbage. Round-2
+    // test-rigor adversarial finding.
+    let pool = sqlx::SqlitePool::connect(&database_url)
+        .await
+        .expect("open sqlite db");
+    let row = sqlx::query(
+        "SELECT d.platform, d.environment, d.provider_endpoint, d.provider_token, \
+                d.provider_key_material, d.device_id, n.app_id, n.owner_bare_jid \
+         FROM push_devices d \
+         JOIN push_nodes n ON n.node = d.node \
+         WHERE d.node = ? AND n.owner_bare_jid = ? AND d.status = 'active' \
+         LIMIT 1",
+    )
+    .bind(&outcome.node)
+    .bind(format!("{USERNAME}@{DOMAIN}"))
+    .fetch_one(&pool)
+    .await
+    .expect("active device row exists");
+    let platform: String = row.get("platform");
+    let environment: String = row.get("environment");
+    let provider_endpoint: String = row.get("provider_endpoint");
+    let provider_token: String = row.get("provider_token");
+    let provider_key_material: String = row.get("provider_key_material");
+    let row_device_id: String = row.get("device_id");
+    let row_app_id: String = row.get("app_id");
+    let row_owner: String = row.get("owner_bare_jid");
+    assert_eq!(platform, "web");
+    assert_eq!(environment, "prod");
+    assert_eq!(row_device_id, outcome.device_id);
+    assert_eq!(row_app_id, "web");
+    assert_eq!(row_owner, format!("{USERNAME}@{DOMAIN}"));
+    // Provider credentials are stored encrypted at rest
+    // (`waddle-push-secret-v1:…` envelope) so we can't compare raw
+    // plaintexts here. Instead pin that (a) every provider field is
+    // present and non-empty AND (b) the three ciphertexts are
+    // distinct — a field-shuffle bug in `build_registration` that
+    // wrote the same plaintext into two columns would round-trip to
+    // identical ciphertexts under the deterministic encryption
+    // scheme and fail this assertion. Round-2 test-rigor adversarial
+    // finding.
+    const ENCRYPTED_ENVELOPE_PREFIX: &str = "waddle-push-secret-v1:";
+    for (name, value) in [
+        ("provider_endpoint", &provider_endpoint),
+        ("provider_token", &provider_token),
+        ("provider_key_material", &provider_key_material),
+    ] {
+        assert!(
+            value.starts_with(ENCRYPTED_ENVELOPE_PREFIX),
+            "{name} must be stored encrypted: got {value}"
+        );
+    }
+    assert_ne!(provider_endpoint, provider_token);
+    assert_ne!(provider_token, provider_key_material);
+    assert_ne!(provider_endpoint, provider_key_material);
+
+    // Drive per-device `disable-device` using the device-id the
+    // service returned in stage 4. The XEP-0050 cutover scopes
+    // disable to a single row — sibling devices on the same node
+    // keep receiving fan-out so a per-browser opt-out doesn't take
+    // down push for the user's other installs.
+    let disable_form = submit_form(
+        DISABLE_DEVICE_FORM_TYPE,
+        &[
+            ("node", outcome.node.as_str()),
+            ("device-id", outcome.device_id.as_str()),
+        ],
+    );
+    let disable_cmd = command_element(DISABLE_DEVICE_NODE, "execute", None, Some(disable_form));
+    let disable_response = send_iq(
+        &mut client,
+        iq_frame("set", "xep0050-disable", PUSH_SERVICE_JID, disable_cmd),
+        "xep0050-disable",
+    )
+    .await;
+    let disable_iq = parse_iq_element(&disable_response, "xep0050-disable", "result");
+    let disable_command = single_child(&disable_iq, "command", NS_COMMANDS);
+    assert_eq!(
+        disable_command.attr("status"),
+        Some("completed"),
+        "disable-device must complete in one step: {disable_response}"
+    );
+
+    // The targeted device row flips to `disabled`; the node + node
+    // record stays alive so a re-register can resurrect it.
+    let row_status: String =
+        sqlx::query("SELECT status FROM push_devices WHERE node = ? AND device_id = ?")
+            .bind(&outcome.node)
+            .bind(&outcome.device_id)
+            .fetch_one(&pool)
+            .await
+            .expect("query device row status")
+            .get("status");
+    assert_eq!(
+        row_status, "disabled",
+        "disable-device must flip the targeted row to 'disabled'"
+    );
+    let post_disable: i64 = sqlx::query(
+        "SELECT COUNT(*) AS count \
+         FROM push_devices \
+         WHERE node = ? AND status = 'active'",
+    )
+    .bind(&outcome.node)
+    .fetch_one(&pool)
+    .await
+    .expect("query active devices count")
+    .get("count");
+    // After the per-device disable, the single web-push row is the
+    // only device on the node, so the active count drops to 0.
+    // Multi-device coverage (a second sibling device on the same
+    // node that stays active after the targeted disable) lives in
+    // the lib-level unit test
+    // `handle_iq_push_service_xep0050_disable_device_is_per_device_scoped`
+    // — keeping that probe out of the WS layer avoids spinning up a
+    // second authenticated WS client just to register a sibling.
+    assert_eq!(
+        post_disable, 0,
+        "disable-device flipped the only device on the node to 'disabled'"
+    );
 
     let _ = client.close().await;
 }

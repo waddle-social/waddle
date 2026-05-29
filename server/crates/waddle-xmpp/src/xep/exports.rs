@@ -14,15 +14,11 @@ pub use super::xep0047::{
 };
 
 pub use super::xep0050::{
-    build_bad_request as build_command_bad_request, build_bad_session_id, build_command_error,
-    build_command_items, build_command_result, build_forbidden as build_command_forbidden,
-    build_item_not_found as build_command_item_not_found,
-    build_not_allowed as build_command_not_allowed, build_session_expired,
-    is_command_node_disco_info, is_command_request, is_commands_disco_info,
-    is_commands_disco_items, parse_command_from_iq, Action as CommandAction,
-    AllowedActions as CommandAllowedActions, Command, CommandDefinition, CommandError,
-    Note as CommandNote, NoteType as CommandNoteType, Status as CommandStatus, NODE_COMMANDS,
-    NS_COMMANDS,
+    build_command_items, build_command_result, is_command_node_disco_info, is_command_request,
+    is_commands_disco_info, is_commands_disco_items, parse_command_from_iq,
+    Action as CommandAction, AdHocCommandCondition, AllowedActions as CommandAllowedActions,
+    Command, CommandDefinition, CommandError, Note as CommandNote, NoteType as CommandNoteType,
+    Status as CommandStatus, NODE_COMMANDS, NS_COMMANDS,
 };
 
 pub use super::xep0054::{

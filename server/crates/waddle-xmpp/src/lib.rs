@@ -56,8 +56,7 @@ pub use app_state::{
 };
 
 pub use error::{
-    generate_iq_error, generate_stream_error, stream_errors, StanzaErrorCondition, StanzaErrorType,
-    XmppError,
+    generate_stream_error, stream_errors, StanzaErrorCondition, StanzaErrorType, XmppError,
 };
 pub use parser::{ns, StreamHeader};
 pub use routing::{RouterConfig, RoutingDestination, RoutingResult, StanzaRouter};

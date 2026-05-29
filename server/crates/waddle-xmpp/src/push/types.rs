@@ -580,8 +580,8 @@ pub enum WebPushOutcome {
     /// 2xx — push relay accepted the message.
     Delivered { status: u16 },
     /// 404/410 — subscription is permanently gone; trigger XEP-0357 §6
-    /// cleanup forward (IQ-error to publisher) and
-    /// `urn:waddle:push-service:0` disable-device reverse.
+    /// cleanup forward (IQ-error to publisher) and the XEP-0050
+    /// `disable-device` reverse against `push.<domain>`.
     SubscriptionGone { status: u16 },
     /// 401 with `WWW-Authenticate: vapid` (RFC 7235 §4.1) — the
     /// canonical signal per RFC 8292 §3 that the VAPID JWT itself was

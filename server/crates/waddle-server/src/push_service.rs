@@ -5,6 +5,7 @@
 //! [`crate::push_registrations`]. Provider endpoints and tokens live here,
 //! behind the `push.<domain>` service boundary.
 
+pub mod commands;
 pub(crate) mod dispatch;
 pub mod vapid_storage;
 
@@ -26,8 +27,6 @@ use xmpp_parsers::iq::Iq;
 use zeroize::ZeroizeOnDrop;
 
 use crate::db::{Database, IntoParams};
-
-pub const WADDLE_PUSH_SERVICE_NS: &str = "urn:waddle:push-service:0";
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -1138,7 +1137,7 @@ impl DatabasePushServiceStore {
         let now_ms = crate::time::now_ms();
         let mut tx = self
             .db
-            .begin()
+            .begin_immediate()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
         lock_owner_tx(&mut tx, owner_bare_jid, now_ms).await?;
@@ -1283,7 +1282,7 @@ impl DatabasePushServiceStore {
         let now_ms = crate::time::now_ms();
         let mut tx = self
             .db
-            .begin()
+            .begin_immediate()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
         validate_first_party_enable_node_tx(&mut tx, owner_bare_jid, node, now_ms).await?;
@@ -1306,7 +1305,7 @@ impl DatabasePushServiceStore {
         let now_ms = crate::time::now_ms();
         let mut tx = self
             .db
-            .begin()
+            .begin_immediate()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
         lock_owner_tx(&mut tx, owner_bare_jid, now_ms).await?;
@@ -1377,7 +1376,7 @@ impl DatabasePushServiceStore {
         let now_ms = crate::time::now_ms();
         let mut tx = self
             .db
-            .begin()
+            .begin_immediate()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
         if get_node_tx(&mut tx, &registration.node).await?.is_none() {
@@ -1483,19 +1482,33 @@ impl DatabasePushServiceStore {
         Ok(device)
     }
 
+    /// Disable a single device on an owner's push node, clearing its
+    /// provider credentials.
+    ///
+    /// Returns:
+    /// - `Err(item-not-found)` if the node does not exist, **or** if no
+    ///   `(node, device-id)` row exists for it. The two are deliberately
+    ///   indistinguishable on the wire — both mean "there is nothing here
+    ///   to disable" — so a caller submitting a stale/typo'd device-id is
+    ///   told so rather than receiving a misleading success.
+    /// - `Err(forbidden)` if the node belongs to another user.
+    /// - `Ok(())` if a matching device row existed and is now `disabled`.
+    ///   Idempotent: re-disabling an already-disabled device succeeds
+    ///   (the row still matches), and disabling a device on a no-longer-
+    ///   active node still flips that device row.
     pub async fn disable_device_for_owner(
         &self,
         owner_bare_jid: &BareJid,
         node: &str,
         device_id: &str,
         error: Option<&str>,
-    ) -> Result<bool, XmppError> {
+    ) -> Result<(), XmppError> {
         validate_len("Push Service node", node, MAX_NODE_ID_LEN)?;
         validate_len("Push Service device-id", device_id, MAX_DEVICE_ID_LEN)?;
         let now_ms = crate::time::now_ms();
         let mut tx = self
             .db
-            .begin()
+            .begin_immediate()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
         if get_node_tx(&mut tx, node).await?.is_none() {
@@ -1511,9 +1524,6 @@ impl DatabasePushServiceStore {
             return Err(XmppError::forbidden(Some(
                 "Push node belongs to another user".to_string(),
             )));
-        }
-        if push_node.status != PushNodeStatus::Active {
-            return Ok(false);
         }
         let affected = tx
             .execute(
@@ -1541,7 +1551,17 @@ impl DatabasePushServiceStore {
         tx.commit()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
-        Ok(affected > 0)
+        // `affected == 0` ⇒ no row matched `(node, device-id)`. The node
+        // exists (checked above) and is owned by the caller, so the
+        // device-id itself is unknown — surface item-not-found rather
+        // than a false success (XEP-0050 §4.4 NONE-condition item-not-found,
+        // symmetric with the node-not-found path above).
+        if affected == 0 {
+            return Err(XmppError::item_not_found(Some(
+                "Push device not found on this node".to_string(),
+            )));
+        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -1574,6 +1594,45 @@ impl DatabasePushServiceStore {
         Ok(Some(decode_device(&row, &self.secrets)?))
     }
 
+    /// Test-only: list every ACTIVE `push_devices` row registered
+    /// against the given `(owner, node)` pair. Used by the XEP-0050
+    /// cutover tests as a convenience for sites that only need to
+    /// assert "a device exists" for an owner/node without pinning the
+    /// specific server-assigned `device_id`. (The chat client DOES
+    /// learn `device_id` — the stage-4 `register-device` result form
+    /// returns it and the per-device `disable-device` opt-out requires
+    /// it; tests that care about the exact id read it from that result
+    /// form instead.)
+    #[cfg(test)]
+    pub async fn test_only_active_devices_for_owner_node(
+        &self,
+        owner_bare_jid: &BareJid,
+        node: &str,
+    ) -> Result<Vec<PushServiceDevice>, XmppError> {
+        let mut rows = self
+            .query(
+                r#"
+                SELECT d.device_id, d.node, d.platform, d.environment,
+                       d.provider_endpoint, d.provider_token, d.provider_key_material
+                FROM push_devices d
+                JOIN push_nodes n ON n.node = d.node
+                WHERE n.owner_bare_jid = ? AND d.node = ? AND d.status = ?
+                ORDER BY d.created_at_ms ASC
+                "#,
+                crate::db_params![owner_bare_jid.to_string(), node, DEVICE_STATUS_ACTIVE],
+            )
+            .await?;
+        let mut devices = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?
+        {
+            devices.push(decode_device(&row, &self.secrets)?);
+        }
+        Ok(devices)
+    }
+
     pub async fn disable_nodes_for_owner(
         &self,
         owner_bare_jid: &BareJid,
@@ -1585,7 +1644,7 @@ impl DatabasePushServiceStore {
         let now_ms = crate::time::now_ms();
         let mut tx = self
             .db
-            .begin()
+            .begin_immediate()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
         lock_owner_tx(&mut tx, owner_bare_jid, now_ms).await?;
@@ -1661,7 +1720,7 @@ impl DatabasePushServiceStore {
         let now_ms = crate::time::now_ms();
         let mut tx = self
             .db
-            .begin()
+            .begin_immediate()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
         lock_owner_tx(&mut tx, owner_bare_jid, now_ms).await?;
@@ -2051,7 +2110,7 @@ impl DatabasePushServiceStore {
     ) -> Result<PushPublishJobEnqueue, XmppError> {
         let mut tx = self
             .db
-            .begin()
+            .begin_immediate()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
         let now_ms = crate::time::now_ms();
@@ -4924,10 +4983,10 @@ mod tests {
                 .expect("device");
         }
 
-        assert!(store
+        store
             .disable_device_for_owner(&owner, first_node.node(), "shared-device-id", None)
             .await
-            .expect("disable first node device"));
+            .expect("disable first node device");
 
         let first_result = store
             .publish_notification_from_user_server(

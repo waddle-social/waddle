@@ -4,8 +4,7 @@ use crate::client::ClientHandle;
 use crate::error::{ClientError, ClientResult, StanzaError, StanzaErrorType};
 
 use super::iq::{
-    build_disable_push_iq, build_disco_info_iq, build_disco_items_iq, build_enable_push_iq,
-    build_pubsub_items_iq, build_upload_slot_iq,
+    build_disco_info_iq, build_disco_items_iq, build_pubsub_items_iq, build_upload_slot_iq,
 };
 use super::parsing::{
     parse_disco_info_result, parse_disco_items_result, parse_space_channels_result,
@@ -55,19 +54,26 @@ pub trait DiscoveryExt {
         content_type: &str,
     ) -> ClientResult<UploadSlot>;
 
-    /// Enable push notifications via a push service (XEP-0357).
+    /// Enable push notifications via a push service (XEP-0357 §5).
+    ///
+    /// `publish_options` carries an optional XEP-0004 data form keyed
+    /// on `http://jabber.org/protocol/pubsub#publish-options` — the
+    /// user server passes it through verbatim. Provider credentials
+    /// MUST NOT be carried here; they live behind the Push Service
+    /// component (registered separately via XEP-0050).
     async fn enable_push_notifications(
         &self,
         push_service_jid: &str,
         node: &str,
-        token: &str,
+        publish_options: Option<xmpp_parsers::data_forms::DataForm>,
     ) -> ClientResult<()>;
 
-    /// Disable push notifications for a previously-registered push node.
+    /// Disable push notifications. A `None` `node` disables ALL nodes
+    /// at the service for this user (XEP-0357 §6.1).
     async fn disable_push_notifications(
         &self,
         push_service_jid: &str,
-        node: &str,
+        node: Option<&str>,
     ) -> ClientResult<()>;
 
     /// Discover XEP-0503 spaces from the spaces service.
@@ -147,18 +153,19 @@ impl DiscoveryExt for ClientHandle {
         &self,
         push_service_jid: &str,
         node: &str,
-        token: &str,
+        publish_options: Option<xmpp_parsers::data_forms::DataForm>,
     ) -> ClientResult<()> {
-        let iq = build_enable_push_iq(push_service_jid, node, token);
+        let iq =
+            crate::xep::xep0357::build_xep0357_enable_iq(push_service_jid, node, publish_options);
         self.send_iq(iq).await.map(|_| ())
     }
 
     async fn disable_push_notifications(
         &self,
         push_service_jid: &str,
-        node: &str,
+        node: Option<&str>,
     ) -> ClientResult<()> {
-        let iq = build_disable_push_iq(push_service_jid, node);
+        let iq = crate::xep::xep0357::build_xep0357_disable_iq(push_service_jid, node);
         self.send_iq(iq).await.map(|_| ())
     }
 

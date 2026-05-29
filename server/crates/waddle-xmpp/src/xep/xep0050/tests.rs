@@ -327,153 +327,43 @@ fn test_build_command_result() {
     }
 }
 
-// --- Error helpers ---
+// --- §4.4 command-specific error conditions ---
 
 #[test]
-fn test_build_bad_request() {
-    use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType};
-
-    let cmd_elem = Element::builder("command", NS_COMMANDS)
-        .attr(minidom::rxml::xml_ncname!("node").to_owned(), "test")
-        .build();
-    let iq = Iq::Set {
-        from: Some("alice@example.com".parse().unwrap()),
-        to: Some("example.com".parse().unwrap()),
-        id: "err-1".to_string(),
-        payload: cmd_elem,
-    };
-
-    let err = build_bad_request(&iq, Some("bad-payload"));
-    match err {
-        Iq::Error { error: se, .. } => {
-            assert_eq!(se.type_, ErrorType::Modify);
-            assert_eq!(se.defined_condition, DefinedCondition::BadRequest);
-            let ext = se.other.as_ref().expect("command extension");
-            assert_eq!(ext.name(), "bad-payload");
-            assert_eq!(ext.ns(), NS_COMMANDS);
-        }
-        _ => panic!("Expected Error payload"),
-    }
+fn ad_hoc_command_condition_element_names_match_xep0050_4_4() {
+    use super::AdHocCommandCondition as C;
+    assert_eq!(C::MalformedAction.element_name(), "malformed-action");
+    assert_eq!(C::BadAction.element_name(), "bad-action");
+    assert_eq!(C::BadLocale.element_name(), "bad-locale");
+    assert_eq!(C::BadPayload.element_name(), "bad-payload");
+    assert_eq!(C::BadSessionId.element_name(), "bad-sessionid");
+    assert_eq!(C::SessionExpired.element_name(), "session-expired");
 }
 
 #[test]
-fn test_build_bad_session_id() {
-    use xmpp_parsers::stanza_error::DefinedCondition;
+fn ad_hoc_command_condition_stanza_mapping_matches_xep0050_4_4() {
+    use super::AdHocCommandCondition as C;
+    use crate::error::{StanzaErrorCondition, StanzaErrorType};
 
-    let cmd_elem = Element::builder("command", NS_COMMANDS)
-        .attr(minidom::rxml::xml_ncname!("node").to_owned(), "test")
-        .build();
-    let iq = Iq::Set {
-        from: None,
-        to: None,
-        id: "err-2".to_string(),
-        payload: cmd_elem,
-    };
-
-    let err = build_bad_session_id(&iq);
-    match err {
-        Iq::Error { error: se, .. } => {
-            assert_eq!(se.defined_condition, DefinedCondition::BadRequest);
-            let ext = se.other.as_ref().expect("command extension");
-            assert_eq!(ext.name(), "bad-sessionid");
-            assert_eq!(ext.ns(), NS_COMMANDS);
-        }
-        _ => panic!("Expected Error payload"),
+    // All §4.4 conditions are modify/bad-request except session-expired,
+    // which the table maps to cancel/not-allowed.
+    for cond in [
+        C::MalformedAction,
+        C::BadAction,
+        C::BadLocale,
+        C::BadPayload,
+        C::BadSessionId,
+    ] {
+        assert_eq!(
+            cond.stanza_error(),
+            (StanzaErrorType::Modify, StanzaErrorCondition::BadRequest),
+            "{cond:?} must map to modify/bad-request",
+        );
     }
-}
-
-#[test]
-fn test_build_item_not_found() {
-    use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType};
-
-    let cmd_elem = Element::builder("command", NS_COMMANDS)
-        .attr(minidom::rxml::xml_ncname!("node").to_owned(), "nonexistent")
-        .build();
-    let iq = Iq::Set {
-        from: None,
-        to: None,
-        id: "err-3".to_string(),
-        payload: cmd_elem,
-    };
-
-    let err = build_item_not_found(&iq);
-    match err {
-        Iq::Error { error: se, .. } => {
-            assert_eq!(se.type_, ErrorType::Cancel);
-            assert_eq!(se.defined_condition, DefinedCondition::ItemNotFound);
-            assert!(se.other.is_none());
-        }
-        _ => panic!("Expected Error payload"),
-    }
-}
-
-#[test]
-fn test_build_not_allowed() {
-    use xmpp_parsers::stanza_error::ErrorType;
-
-    let cmd_elem = Element::builder("command", NS_COMMANDS)
-        .attr(minidom::rxml::xml_ncname!("node").to_owned(), "x")
-        .build();
-    let iq = Iq::Set {
-        from: None,
-        to: None,
-        id: "err-4".to_string(),
-        payload: cmd_elem,
-    };
-
-    let err = build_not_allowed(&iq);
-    match err {
-        Iq::Error { error: se, .. } => {
-            assert_eq!(se.type_, ErrorType::Cancel);
-        }
-        _ => panic!("Expected Error payload"),
-    }
-}
-
-#[test]
-fn test_build_forbidden() {
-    use xmpp_parsers::stanza_error::ErrorType;
-
-    let cmd_elem = Element::builder("command", NS_COMMANDS)
-        .attr(minidom::rxml::xml_ncname!("node").to_owned(), "x")
-        .build();
-    let iq = Iq::Set {
-        from: None,
-        to: None,
-        id: "err-5".to_string(),
-        payload: cmd_elem,
-    };
-
-    let err = build_forbidden(&iq);
-    match err {
-        Iq::Error { error: se, .. } => {
-            assert_eq!(se.type_, ErrorType::Auth);
-        }
-        _ => panic!("Expected Error payload"),
-    }
-}
-
-#[test]
-fn test_build_session_expired() {
-    let cmd_elem = Element::builder("command", NS_COMMANDS)
-        .attr(minidom::rxml::xml_ncname!("node").to_owned(), "x")
-        .build();
-    let iq = Iq::Set {
-        from: None,
-        to: None,
-        id: "err-6".to_string(),
-        payload: cmd_elem,
-    };
-
-    let err = build_session_expired(&iq);
-    match err {
-        Iq::Error { error: se, .. } => {
-            let ext = se.other.as_ref().expect("command extension");
-            assert_eq!(ext.name(), "session-expired");
-            assert_eq!(ext.ns(), NS_COMMANDS);
-        }
-        _ => panic!("Expected Error payload"),
-    }
+    assert_eq!(
+        C::SessionExpired.stanza_error(),
+        (StanzaErrorType::Cancel, StanzaErrorCondition::NotAllowed),
+    );
 }
 
 // --- Disco helpers ---

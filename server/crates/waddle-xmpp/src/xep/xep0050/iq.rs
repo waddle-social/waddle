@@ -34,87 +34,9 @@ pub fn build_command_result(original_iq: &Iq, command: &Command) -> Iq {
     }
 }
 
-/// Build a command IQ error response with a specific condition.
-///
-/// The error element includes the command-specific condition from the
-/// `http://jabber.org/protocol/commands` namespace alongside the standard
-/// stanza error condition via the `other` extension field.
-pub fn build_command_error(
-    original_iq: &Iq,
-    error_type: &str,
-    stanza_condition: &str,
-    command_condition: Option<&str>,
-) -> Iq {
-    use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
-
-    let et = match error_type {
-        "modify" => ErrorType::Modify,
-        "cancel" => ErrorType::Cancel,
-        "auth" => ErrorType::Auth,
-        "wait" => ErrorType::Wait,
-        _ => ErrorType::Cancel,
-    };
-
-    let dc = match stanza_condition {
-        "bad-request" => DefinedCondition::BadRequest,
-        "not-allowed" => DefinedCondition::NotAllowed,
-        "forbidden" => DefinedCondition::Forbidden,
-        "item-not-found" => DefinedCondition::ItemNotFound,
-        "feature-not-implemented" => DefinedCondition::FeatureNotImplemented,
-        "not-acceptable" => DefinedCondition::NotAcceptable,
-        "service-unavailable" => DefinedCondition::ServiceUnavailable,
-        _ => DefinedCondition::UndefinedCondition,
-    };
-
-    let mut stanza_error = StanzaError::new(et, dc, "en", "");
-
-    if let Some(cc) = command_condition {
-        stanza_error.other = Some(Element::builder(cc, NS_COMMANDS).build());
-    }
-
-    Iq::Error {
-        from: original_iq.to().cloned(),
-        to: original_iq.from().cloned(),
-        id: original_iq.id().to_string(),
-        error: stanza_error,
-        payload: None,
-    }
-}
-
-/// Build a `bad-request` error with an optional command-specific condition.
-pub fn build_bad_request(original_iq: &Iq, command_condition: Option<&str>) -> Iq {
-    build_command_error(original_iq, "modify", "bad-request", command_condition)
-}
-
-/// Build a `not-allowed` error (e.g., requester lacks permission).
-pub fn build_not_allowed(original_iq: &Iq) -> Iq {
-    build_command_error(original_iq, "cancel", "not-allowed", None)
-}
-
-/// Build a `forbidden` error.
-pub fn build_forbidden(original_iq: &Iq) -> Iq {
-    build_command_error(original_iq, "auth", "forbidden", None)
-}
-
-/// Build an `item-not-found` error (unknown command node).
-pub fn build_item_not_found(original_iq: &Iq) -> Iq {
-    build_command_error(original_iq, "cancel", "item-not-found", None)
-}
-
-/// Build a `bad-sessionid` error (invalid or expired session).
-pub fn build_bad_session_id(original_iq: &Iq) -> Iq {
-    build_command_error(original_iq, "modify", "bad-request", Some("bad-sessionid"))
-}
-
-/// Build a `session-expired` error.
-pub fn build_session_expired(original_iq: &Iq) -> Iq {
-    build_command_error(
-        original_iq,
-        "modify",
-        "not-allowed",
-        Some("session-expired"),
-    )
-}
+// Command §4.4 error responses are built typed from `XmppError::AdHocCommand`
+// at the dispatch boundary (see `build_xmpp_error_response`), so this module
+// no longer hand-rolls per-condition `Iq::Error` builders.
 
 // ---------------------------------------------------------------------------
 // Disco helpers

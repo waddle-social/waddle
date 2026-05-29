@@ -5,28 +5,61 @@ pub(super) fn build_xmpp_error_response(
     request_iq: &xmpp_parsers::iq::Iq,
     err: XmppError,
 ) -> String {
-    match err {
+    let error = match err {
         XmppError::Stanza {
             condition,
             error_type,
             text,
-        } => waddle_xmpp::generate_iq_error(
-            request_iq.id(),
-            request_iq.from().map(|jid| jid.to_string()).as_deref(),
-            request_iq.to().map(|jid| jid.to_string()).as_deref(),
-            condition,
-            error_type,
-            text.as_deref(),
-        ),
-        other => waddle_xmpp::generate_iq_error(
-            request_iq.id(),
-            request_iq.from().map(|jid| jid.to_string()).as_deref(),
-            request_iq.to().map(|jid| jid.to_string()).as_deref(),
-            StanzaErrorCondition::InternalServerError,
+        } => stanza_error_from_parts(error_type, condition, text, None),
+        // XEP-0050 §4.4: render the command-specific condition child in
+        // the commands namespace alongside the mapped general condition.
+        XmppError::AdHocCommand { condition, text } => {
+            let (error_type, general) = condition.stanza_error();
+            let child = xmpp_parsers::minidom::Element::builder(
+                condition.element_name(),
+                waddle_xmpp::xep::xep0050::NS_COMMANDS,
+            )
+            .build();
+            stanza_error_from_parts(error_type, general, text, Some(child))
+        }
+        other => stanza_error_from_parts(
             StanzaErrorType::Wait,
-            Some(&other.to_string()),
+            StanzaErrorCondition::InternalServerError,
+            Some(other.to_string()),
+            None,
         ),
-    }
+    };
+    build_iq_error_xml_typed(
+        request_iq.id(),
+        request_iq.to().map(|jid| jid.to_string()).as_deref(),
+        request_iq.from().map(|jid| jid.to_string()).as_deref(),
+        error,
+    )
+}
+
+/// Build a typed [`StanzaError`] from Waddle's typed condition/type enums,
+/// omitting the `<text/>` child entirely when no diagnostic is supplied
+/// (matching the prior wire shape) and attaching an optional
+/// protocol-specific extension element (e.g. a XEP-0050 §4.4 condition).
+fn stanza_error_from_parts(
+    error_type: StanzaErrorType,
+    condition: StanzaErrorCondition,
+    text: Option<String>,
+    other: Option<xmpp_parsers::minidom::Element>,
+) -> xmpp_parsers::stanza_error::StanzaError {
+    use xmpp_parsers::stanza_error::StanzaError;
+    let mut error = match text {
+        Some(text) => StanzaError::new(error_type.to_xmpp(), condition.to_xmpp(), "en", text),
+        None => StanzaError {
+            type_: error_type.to_xmpp(),
+            by: None,
+            defined_condition: condition.to_xmpp(),
+            texts: std::collections::BTreeMap::new(),
+            other: None,
+        },
+    };
+    error.other = other;
+    error
 }
 
 pub(super) async fn global_database(
