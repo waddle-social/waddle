@@ -200,7 +200,10 @@ impl WaddleClient {
     /// * Replace the fallback `<notify/>` child via
     ///   [`merge_notify_into_extensions`] — foreign `<advanced/>`
     ///   children and identity-scoped siblings written by other
-    ///   clients are preserved verbatim (XEP-0492 §3).
+    ///   clients are preserved verbatim (XEP-0492 §3). The same call
+    ///   toggles the Waddle rich XEP-0357 push-summary opt-in
+    ///   (`options.richPayloadOptIn`, #719) inside the fallback's
+    ///   `<advanced/>`.
     /// * Publish the merged item back.
     ///
     /// Resolves to the new [`WaddleBookmarkItem`] so the chat UI can
@@ -250,8 +253,11 @@ impl WaddleClient {
             let existing = items.iter().find(|item| item.jid == room_jid);
             let existing_extensions =
                 existing.map(|item| build_extensions_wrapper(&item.extensions));
-            let merged_extensions =
-                merge_notify_into_extensions(existing_extensions.as_ref(), opts.mode);
+            let merged_extensions = merge_notify_into_extensions(
+                existing_extensions.as_ref(),
+                opts.mode,
+                opts.rich_payload_opt_in,
+            );
             let extensions_children: Vec<Element> = merged_extensions.children().cloned().collect();
 
             let merged_item = BookmarkItem {
@@ -677,21 +683,20 @@ fn build_extensions_wrapper(children: &[Element]) -> Element {
 /// `notify_mode`. Used by both `fetch_user_bookmarks` (per-item map)
 /// and `set_room_notification_mode` (response shaping).
 fn surface_bookmark(item: BookmarkItem) -> WaddleBookmarkItem {
-    let notify_mode = item.extensions.iter().find_map(|ext| {
-        if ext.is(
+    let notify = item.extensions.iter().find(|ext| {
+        ext.is(
             "notify",
             waddle_xmpp_client::xep::xep0492::NS_NOTIFICATION_SETTINGS,
-        ) {
-            read_fallback_mode(ext)
-        } else {
-            None
-        }
+        )
     });
+    let notify_mode = notify.and_then(read_fallback_mode);
+    let rich_payload_opt_in = notify.is_some_and(read_rich_payload_opt_in);
     WaddleBookmarkItem {
         jid: item.jid.to_string(),
         name: item.name,
         autojoin: item.autojoin,
         notify_mode,
+        rich_payload_opt_in,
     }
 }
 
@@ -830,5 +835,56 @@ mod tests {
     fn verify_iq_from_rejects_empty_from() {
         let err = verify_iq_from_matches_query(Some(""), "push.example.com").unwrap_err();
         assert!(err.contains("push.example.com"));
+    }
+
+    #[test]
+    fn surface_bookmark_reads_rich_payload_opt_in() {
+        // #719 — the JS-facing item exposes the XEP-0492 §2.3
+        // `<advanced><rich-payload xmlns='urn:waddle:push:rich:0'/>`
+        // opt-in alongside the fallback notify mode.
+        let extensions: Element = "<extensions xmlns='urn:xmpp:bookmarks:1'>\
+                <notify xmlns='urn:xmpp:notification-settings:1'>\
+                    <always>\
+                        <advanced xmlns='urn:xmpp:notification-settings:1'>\
+                            <rich-payload xmlns='urn:waddle:push:rich:0'/>\
+                        </advanced>\
+                    </always>\
+                </notify>\
+            </extensions>"
+            .parse()
+            .expect("valid extensions");
+        let item = BookmarkItem {
+            jid: "room@muc.example.com".parse().expect("valid jid"),
+            name: None,
+            autojoin: false,
+            nick: None,
+            password: None,
+            extensions: extensions.children().cloned().collect(),
+        };
+        let surfaced = surface_bookmark(item);
+        assert!(surfaced.rich_payload_opt_in);
+        assert_eq!(
+            surfaced.notify_mode,
+            Some(waddle_xmpp_client::xep::xep0492::NotifyMode::Always)
+        );
+    }
+
+    #[test]
+    fn surface_bookmark_opt_in_defaults_off_without_advanced() {
+        let extensions: Element = "<extensions xmlns='urn:xmpp:bookmarks:1'>\
+                <notify xmlns='urn:xmpp:notification-settings:1'><never /></notify>\
+            </extensions>"
+            .parse()
+            .expect("valid extensions");
+        let item = BookmarkItem {
+            jid: "room@muc.example.com".parse().expect("valid jid"),
+            name: None,
+            autojoin: false,
+            nick: None,
+            password: None,
+            extensions: extensions.children().cloned().collect(),
+        };
+        let surfaced = surface_bookmark(item);
+        assert!(!surfaced.rich_payload_opt_in);
     }
 }

@@ -799,6 +799,13 @@ pub struct WaddleBookmarkItem {
     pub name: Option<String>,
     pub autojoin: bool,
     pub notify_mode: Option<waddle_xmpp_client::xep::xep0492::NotifyMode>,
+    /// Waddle rich XEP-0357 push-summary opt-in carried in the
+    /// XEP-0492 §2.3 `<advanced/>` block of this conversation's
+    /// `<notify/>` (see
+    /// [`waddle_xmpp_client::xep::xep0492::read_rich_payload_opt_in`]).
+    /// `false` — the default and absence-of-marker case — keeps the
+    /// minimal XEP-0357 summary payload (#719).
+    pub rich_payload_opt_in: bool,
 }
 
 /// JS-facing tagged outcome of `WaddleClient::set_room_notification_mode`.
@@ -852,6 +859,14 @@ pub struct SetRoomNotificationModeOptions {
     /// bookmark its existing `name` is preserved verbatim regardless
     /// of this field.
     pub name: Option<String>,
+    /// Waddle rich XEP-0357 push-summary opt-in (#719). When `true`,
+    /// the publish writes `<advanced><rich-payload
+    /// xmlns='urn:waddle:push:rich:0'/></advanced>` under the fallback
+    /// `<notify/>` setting; when `false` it strips our marker while
+    /// preserving any foreign `<advanced/>` children. Defaults to
+    /// `false` (minimal payload) when the JS caller omits the field.
+    #[serde(default)]
+    pub rich_payload_opt_in: bool,
 }
 
 #[cfg(test)]

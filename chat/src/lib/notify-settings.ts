@@ -107,6 +107,21 @@ export interface NotifySettingsStore {
   ): Promise<SetModeResult>;
   /** Resolve the effective mode for `roomJid`. */
   getMode(roomJid: string, kind: ConversationKind): NotifyMode;
+  /** Resolve the Waddle rich XEP-0357 push-summary opt-in for
+   * `roomJid` from the cached bookmark. Absence — or an un-opted
+   * bookmark — is `false` (the minimal push payload). #719. */
+  getRichPayloadOptIn(roomJid: string): boolean;
+  /** Publish a new rich-payload opt-in for one conversation while
+   * preserving its current notification mode. The opt-in and the
+   * `<notify>` mode share one XEP-0402 bookmark publish (the opt-in
+   * lives in the `<advanced>` of the fallback setting), so this
+   * resolves the conversation's effective mode (via [[getMode]] with
+   * `kind`) and republishes both. Mirrors [[setMode]]'s typed
+   * outcome. #719. */
+  setRichPayloadOptIn(
+    client: BrowserXmppClient,
+    opts: { roomJid: string; optIn: boolean; kind: ConversationKind; name?: string },
+  ): Promise<SetModeResult>;
   /** Replace the cache wholesale — used by tests to set up fixtures
    * without going through the WASM client. */
   replaceAll(items: UserBookmarkItem[]): void;
@@ -194,9 +209,12 @@ export function createNotifySettingsStore(): NotifySettingsStore {
     }
   }
 
-  async function setMode(
+  // Shared fetch-merge-publish path for both the notify mode and the
+  // rich-payload opt-in — they live in the same XEP-0402 bookmark
+  // `<notify>` element and so travel in one publish. #719.
+  async function publish(
     client: BrowserXmppClient,
-    opts: { roomJid: string; mode: NotifyMode; name?: string },
+    opts: { roomJid: string; mode: NotifyMode; richPayloadOptIn: boolean; name?: string },
   ): Promise<SetModeResult> {
     // Capture the generation at call-start. If `reset()` fires
     // during the await (the user signed out / switched accounts),
@@ -233,8 +251,45 @@ export function createNotifySettingsStore(): NotifySettingsStore {
     return "error";
   }
 
+  async function setMode(
+    client: BrowserXmppClient,
+    opts: { roomJid: string; mode: NotifyMode; name?: string },
+  ): Promise<SetModeResult> {
+    // Changing the mode preserves the conversation's current rich-
+    // payload opt-in: both settings share one bookmark publish, so
+    // re-send the cached opt-in rather than letting the WASM bridge
+    // default it back to false and silently undo the user's choice.
+    // #719.
+    return publish(client, {
+      roomJid: opts.roomJid,
+      mode: opts.mode,
+      name: opts.name,
+      richPayloadOptIn: getRichPayloadOptIn(opts.roomJid),
+    });
+  }
+
+  async function setRichPayloadOptIn(
+    client: BrowserXmppClient,
+    opts: { roomJid: string; optIn: boolean; kind: ConversationKind; name?: string },
+  ): Promise<SetModeResult> {
+    // The opt-in nests in the `<advanced>` of the fallback `<notify>`
+    // setting, so flipping it republishes the conversation's current
+    // effective mode unchanged (XEP-0492 §3 default when no bookmark
+    // covers it yet). #719.
+    return publish(client, {
+      roomJid: opts.roomJid,
+      mode: getMode(opts.roomJid, opts.kind),
+      name: opts.name,
+      richPayloadOptIn: opts.optIn,
+    });
+  }
+
   function getMode(roomJid: string, kind: ConversationKind): NotifyMode {
     return effectiveNotifyMode(bookmarks.value[roomJid], kind);
+  }
+
+  function getRichPayloadOptIn(roomJid: string): boolean {
+    return bookmarks.value[roomJid]?.richPayloadOptIn ?? false;
   }
 
   function replaceAll(items: UserBookmarkItem[]): void {
@@ -247,5 +302,15 @@ export function createNotifySettingsStore(): NotifySettingsStore {
     hydrating.value = false;
   }
 
-  return { bookmarks, hydrating, hydrate, setMode, getMode, replaceAll, reset };
+  return {
+    bookmarks,
+    hydrating,
+    hydrate,
+    setMode,
+    setRichPayloadOptIn,
+    getMode,
+    getRichPayloadOptIn,
+    replaceAll,
+    reset,
+  };
 }
