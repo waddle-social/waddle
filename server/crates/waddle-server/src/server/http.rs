@@ -335,7 +335,10 @@ async fn create_websocket_state(
     let service_domains = XmppServiceDomains::new(
         &xmpp_domain,
         xmpp_config.muc_domain.as_str(),
-        &xmpp_config.spaces_jid.to_string(),
+        // `spaces` is consumed as a plain domain in disco routing
+        // (`target_to == spaces_domain`); take the domain part so a
+        // node-qualified `WADDLE_SPACES_JID` cannot break the comparison.
+        xmpp_config.spaces_jid.domain().as_str(),
     );
     let room_registry = state.room_registry.clone();
     let pubsub_storage = Arc::clone(&state.pubsub_storage);
