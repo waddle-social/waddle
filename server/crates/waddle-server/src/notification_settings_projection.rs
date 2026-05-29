@@ -271,6 +271,33 @@ impl NotificationSettingsProjectionStore {
             .map(|projection| projection.rich_payload_opt_in)
             .unwrap_or(false))
     }
+
+    /// Resolve the effective XEP-0492 level AND the Waddle rich-payload
+    /// opt-in for a conversation in a SINGLE projection read.
+    ///
+    /// The T1 push evaluator needs both on the delivery path; fetching
+    /// the row once (rather than calling [`Self::effective_setting`] and
+    /// [`Self::effective_rich_payload_opt_in`] separately) halves the
+    /// projection-store IO per delivering candidate — significant on a
+    /// large channel fan-out, where the established per-batch caches
+    /// cannot help (the key is per-recipient-per-conversation, unique
+    /// per candidate).
+    pub async fn effective_setting_and_rich_opt_in(
+        &self,
+        owner_bare_jid: &BareJid,
+        conversation_jid: &BareJid,
+        conversation_kind: ConversationKind,
+    ) -> Result<(NotificationLevel, bool), NotificationSettingsProjectionError> {
+        let projection = self.get(owner_bare_jid, conversation_jid).await?;
+        let level = projection
+            .as_ref()
+            .map(|projection| projection.mode)
+            .unwrap_or_else(|| conversation_kind.default_notification_setting());
+        let rich_payload_opt_in = projection
+            .map(|projection| projection.rich_payload_opt_in)
+            .unwrap_or(false);
+        Ok((level, rich_payload_opt_in))
+    }
 }
 
 /// Typed outcome of the XEP-0492 push-dispatch gate.

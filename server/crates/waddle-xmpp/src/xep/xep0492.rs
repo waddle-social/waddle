@@ -269,18 +269,28 @@ pub fn parse_notification_setting(elem: &Element) -> Option<NotificationLevel> {
 
 /// Parse the Waddle rich-payload opt-in from a XEP-0492 `<notify/>`.
 ///
-/// Returns `true` when the account-wide fallback setting carries an
-/// `<advanced/>` child holding `<rich-payload xmlns='urn:waddle:push:rich:0'/>`
-/// (see [`NS_PUSH_RICH_PAYLOAD`]). Absence — the default — returns
-/// `false`, preserving the minimal XEP-0357 summary payload. Malformed
-/// or non-XEP-0492 input also returns `false`.
+/// Returns `true` when ANY notification setting — the account-wide
+/// fallback OR an identity-scoped setting — carries an `<advanced/>`
+/// child holding `<rich-payload xmlns='urn:waddle:push:rich:0'/>` (see
+/// [`NS_PUSH_RICH_PAYLOAD`]). Absence — the default — returns `false`,
+/// preserving the minimal XEP-0357 summary payload. Malformed or
+/// non-XEP-0492 input also returns `false`.
+///
+/// XEP-0492's reading rule sorts settings most-specific-first with the
+/// account-wide fallback as the floor, and the §2.3 `<advanced/>`
+/// examples deliberately attach the payload to identity-scoped settings
+/// (e.g. `client/phone`). Waddle resolves a single per-conversation push
+/// decision per recipient JID — it has no per-client-identity notion at
+/// push time — so the conformant reduction is "opted in if the user
+/// expressed the opt-in anywhere for this chat", rather than silently
+/// dropping an opt-in written onto an identity-scoped element.
 pub fn parse_rich_payload_opt_in(notify: &Element) -> bool {
     if !is_notify_element(notify) {
         return false;
     }
     notify
         .children()
-        .filter(|child| is_setting_element(child) && !has_identity_attributes(child))
+        .filter(|child| is_setting_element(child))
         .filter_map(|setting| setting.get_child("advanced", NS_NOTIFICATION_SETTINGS))
         .any(|advanced| advanced.has_child("rich-payload", NS_PUSH_RICH_PAYLOAD))
 }
@@ -652,6 +662,26 @@ mod tests {
             Ok(Some(NotificationLevel::OnMention))
         );
         assert!(parse_rich_payload_opt_in(&notify));
+    }
+
+    #[test]
+    fn parses_rich_payload_opt_in_from_identity_scoped_advanced_child() {
+        // XEP-0492 §2.3 examples attach <advanced/> to identity-scoped
+        // settings (e.g. client/phone). The opt-in must be honored
+        // there, not only on the bare fallback — otherwise a
+        // multi-device client silently loses the rich payload.
+        let elem: Element = "<notify xmlns='urn:xmpp:notification-settings:1'>\
+                <on-mention identity-category='client' identity-type='phone'>\
+                    <advanced>\
+                        <rich-payload xmlns='urn:waddle:push:rich:0' />\
+                    </advanced>\
+                </on-mention>\
+                <always />\
+            </notify>"
+            .parse()
+            .expect("valid notify");
+
+        assert!(parse_rich_payload_opt_in(&elem));
     }
 
     #[test]

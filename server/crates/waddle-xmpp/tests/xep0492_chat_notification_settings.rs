@@ -157,3 +157,22 @@ fn absent_rich_payload_advanced_parses_as_opt_out() {
     let notify = build_notification_settings_element(NotificationLevel::Always);
     assert!(!parse_rich_payload_opt_in(&notify));
 }
+
+#[test]
+fn waddle_rich_payload_opt_in_honored_on_identity_scoped_advanced() {
+    // XEP-0492 §2.3 attaches <advanced/> to identity-scoped settings in
+    // its own examples; an opt-in written there (e.g. by a phone client)
+    // must be honored, not silently dropped in favor of the bare
+    // fallback only.
+    let notify: Element = "<notify xmlns='urn:xmpp:notification-settings:1'>\
+            <on-mention identity-category='client' identity-type='phone'>\
+                <advanced><rich-payload xmlns='urn:waddle:push:rich:0' /></advanced>\
+            </on-mention>\
+            <always />\
+        </notify>"
+        .parse()
+        .expect("valid XEP-0492 notify element");
+
+    assert_eq!(validate_notify_element(&notify), Ok(()));
+    assert!(parse_rich_payload_opt_in(&notify));
+}

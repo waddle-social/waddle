@@ -3361,8 +3361,12 @@ pub(crate) async fn evaluate_push_gate_at_dispatch(
             });
         }
     }
-    let level = settings_projection
-        .effective_setting(
+    // One projection read yields both the XEP-0492 level and the
+    // rich-payload opt-in — the delivery path needs both, and fetching
+    // the row twice would double projection-store IO per delivering
+    // candidate on a channel fan-out.
+    let (level, rich_opt_in) = settings_projection
+        .effective_setting_and_rich_opt_in(
             candidate.recipient_bare_jid(),
             candidate.conversation_jid(),
             conversation_kind,
@@ -3372,7 +3376,7 @@ pub(crate) async fn evaluate_push_gate_at_dispatch(
         crate::notification_settings_projection::PushDispatchDecision::evaluate(level, is_mention);
     Ok(match decision {
         crate::notification_settings_projection::PushDispatchDecision::Deliver => {
-            let rich = resolve_rich_summary(stage, settings_projection, candidate).await?;
+            let rich = resolve_rich_summary(stage, rich_opt_in, candidate);
             T1PushDispatchOutcome::Deliver { rich }
         }
         crate::notification_settings_projection::PushDispatchDecision::Suppressed { reason } => {
@@ -3387,14 +3391,17 @@ pub(crate) async fn evaluate_push_gate_at_dispatch(
 /// candidate.
 ///
 /// The rich summary is a T1 concern: the recipient's XEP-0492
-/// `<advanced/>` opt-in is recipient state read fresh at drain, and the
-/// minimal default (no rich fields) is correct at T0Emit, where the
-/// candidate-persistence decision does not need it.
+/// `<advanced/>` opt-in is recipient state read fresh at drain (passed
+/// in as `opt_in`), and the minimal default (no rich fields) is correct
+/// at T0Emit, where the candidate-persistence decision does not need it.
 ///
 /// When the recipient has opted in:
 /// - `last-message-sender` is the candidate's full sender JID — routing
 ///   metadata present in any delivery, preserved even when a hint
-///   strips the body.
+///   strips the body. For groupchat this is the room-occupant JID
+///   (`room@muc/nick`), never a real JID: the candidate constructor
+///   enforces `sender_jid.to_bare() == conversation_jid` via
+///   `require_sender_matches_conversation`.
 /// - `last-message-body` is included only when no XEP-0334
 ///   `<no-store/>`/`<no-permanent-store/>` hint applies. The hint always
 ///   wins over the opt-in: shipping the body to a third-party push
@@ -3402,29 +3409,23 @@ pub(crate) async fn evaluate_push_gate_at_dispatch(
 ///   already `None` on hinted candidates — it was never persisted at T0
 ///   — but the explicit check keeps the XEP-defined precedence visible
 ///   and testable at the T1 decision point.)
-async fn resolve_rich_summary(
+fn resolve_rich_summary(
     stage: PushEvalStage,
-    settings_projection: &crate::notification_settings_projection::NotificationSettingsProjectionStore,
+    opt_in: bool,
     candidate: &NotificationCandidate,
-) -> Result<RichSummary, NotificationOutboxError> {
-    if stage != PushEvalStage::T1Drain {
-        return Ok(RichSummary::minimal());
-    }
-    let opt_in = settings_projection
-        .effective_rich_payload_opt_in(candidate.recipient_bare_jid(), candidate.conversation_jid())
-        .await?;
-    if !opt_in {
-        return Ok(RichSummary::minimal());
+) -> RichSummary {
+    if stage != PushEvalStage::T1Drain || !opt_in {
+        return RichSummary::minimal();
     }
     let body = if candidate.no_store() || candidate.no_permanent_store() {
         None
     } else {
         candidate.last_message_body().map(str::to_owned)
     };
-    Ok(RichSummary {
+    RichSummary {
         sender: Some(candidate.sender_jid().clone()),
         body,
-    })
+    }
 }
 
 /// Translates a XEP-0492 [`waddle_xmpp::xep::NotificationLevel`]
@@ -9073,6 +9074,65 @@ mod tests {
         assert!(summary
             .children()
             .any(|field| field.attr("var") == Some("last-message-body")));
+    }
+
+    /// #719 privacy invariant: for a groupchat, `last-message-sender`
+    /// is the room-occupant JID (`room@muc/nick`), never a real JID.
+    /// The candidate constructor enforces
+    /// `sender_jid.to_bare() == conversation_jid`, so the summary cannot
+    /// leak a real JID to the push gateway regardless of room anonymity.
+    #[tokio::test]
+    async fn t1_groupchat_rich_sender_is_occupant_jid() {
+        let store = store().await;
+        let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+        let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+        let projection = settings_projection().await;
+        let room_policy = StubRoomPolicy::new();
+        let dnd_reader = NoopDndReader;
+        let recipient = bare("alice@example.com");
+        let room = bare("team@muc.example.com");
+        let occupant: Jid = "team@muc.example.com/bob".parse().expect("occupant jid");
+        // StubRoomPolicy resolves the room as public; a PersonalMention
+        // is a mention, and the stored Always row delivers regardless.
+        opt_in_rich_payload(&projection, &recipient, &room).await;
+        register_push_target(&push_store, &recipient, &target()).await;
+        let candidate = NotificationCandidate::groupchat(
+            recipient.clone(),
+            room.clone(),
+            occupant.clone(),
+            NotificationThreadId::root(),
+            StanzaId::new("gc-rich", Jid::from(room.clone())),
+            NotificationClass::PersonalMention,
+        )
+        .expect("groupchat candidate")
+        .with_last_message_body(Some("hi team".to_string()));
+        store
+            .insert_candidate(&candidate)
+            .await
+            .expect("insert candidate");
+
+        let deps = drain_deps_with_noop_activity(&room_policy, &dnd_reader, noop_activity_reader());
+        store
+            .drain_pending_candidates_into_outbox(
+                &push_store,
+                &blocking,
+                &projection,
+                deps,
+                &bare("push.example.com"),
+                16,
+            )
+            .await
+            .expect("drain candidates");
+
+        let jobs = store.pending_outbox_jobs().await.expect("jobs");
+        assert_eq!(jobs.len(), 1);
+        let sender = jobs[0].rich_summary().sender.as_ref().expect("sender");
+        assert_eq!(sender, &occupant);
+        assert_eq!(
+            sender.to_bare(),
+            room,
+            "sender must be the room-occupant JID"
+        );
     }
 
     /// #719 / XEP-0334 §3 precedence: even with the rich-payload opt-in
