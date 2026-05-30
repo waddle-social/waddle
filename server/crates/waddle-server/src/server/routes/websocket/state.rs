@@ -15,10 +15,17 @@ pub struct XmppServiceDomains {
 }
 
 impl XmppServiceDomains {
-    pub fn new(xmpp_domain: &str) -> Self {
+    /// `muc` and `spaces` are the deployment-authoritative service domains —
+    /// overridable via `WADDLE_MUC_DOMAIN` / `WADDLE_SPACES_JID` — and MUST be
+    /// the exact values the MUC room registry and spaces component are built
+    /// from. disco#info routing compares targets against `muc` (#757); a
+    /// re-derived `muc.<domain>` would diverge from the registry under an
+    /// override and silently break room disco#info. The remaining components
+    /// have no override and are derived from `xmpp_domain`.
+    pub fn new(xmpp_domain: &str, muc: &str, spaces: &str) -> Self {
         Self {
-            muc: format!("muc.{xmpp_domain}"),
-            spaces: format!("spaces.{xmpp_domain}"),
+            muc: muc.to_string(),
+            spaces: spaces.to_string(),
             upload: format!("upload.{xmpp_domain}"),
             extensions: format!("extensions.{xmpp_domain}"),
             push: format!("push.{xmpp_domain}"),

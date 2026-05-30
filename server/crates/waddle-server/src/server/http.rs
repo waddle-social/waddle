@@ -329,7 +329,17 @@ async fn create_websocket_state(
     // `AppState` — both are built in `start_with_config` so admin V2
     // handlers and the WebSocket transport operate on the same handles.
     let xmpp_domain = auth_state.xmpp_domain.clone();
-    let service_domains = XmppServiceDomains::new(&xmpp_domain);
+    // #757: `muc`/`spaces` must match the registry/component domains the rest
+    // of the server is built from, honoring `WADDLE_MUC_DOMAIN` /
+    // `WADDLE_SPACES_JID`, rather than re-deriving `muc.<domain>`.
+    let service_domains = XmppServiceDomains::new(
+        &xmpp_domain,
+        xmpp_config.muc_domain.as_str(),
+        // `spaces` is consumed as a plain domain in disco routing
+        // (`target_to == spaces_domain`); take the domain part so a
+        // node-qualified `WADDLE_SPACES_JID` cannot break the comparison.
+        xmpp_config.spaces_jid.domain().as_str(),
+    );
     let room_registry = state.room_registry.clone();
     let pubsub_storage = Arc::clone(&state.pubsub_storage);
 
