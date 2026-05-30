@@ -134,6 +134,20 @@ pub fn actor_request_timeouts() -> Counter<u64> {
         .build()
 }
 
+/// Counter for per-stanza dispatch wedge-backstop timeouts (#808).
+///
+/// Distinct axis from [`actor_request_timeouts`] (which is keyed by actor): this
+/// counts inbound stanzas whose handler exceeded the per-connection
+/// frame-loop budget, keyed by stanza kind and payload namespace, so the
+/// namespace distribution reveals *which* handler family wedged.
+pub fn stanza_handler_timeouts() -> Counter<u64> {
+    meter()
+        .u64_counter("xmpp.stanza.handler.timeout")
+        .with_description("Inbound stanza handlers that exceeded the per-connection wedge backstop")
+        .with_unit("stanza")
+        .build()
+}
+
 /// Counter for actor restarts.
 pub fn actor_restarts() -> Counter<u64> {
     meter()
@@ -237,6 +251,18 @@ pub fn record_actor_request_timeout(actor: &str, operation: &str, message_class:
             KeyValue::new("actor", actor.to_string()),
             KeyValue::new("operation", operation.to_string()),
             KeyValue::new("class", message_class.to_string()),
+        ],
+    );
+}
+
+/// Record a per-stanza dispatch wedge-backstop timeout (#808), keyed by stanza
+/// kind (`iq`/`message`/`presence`) and the payload namespace.
+pub fn record_stanza_handler_timeout(stanza_kind: &str, payload_ns: &str) {
+    stanza_handler_timeouts().add(
+        1,
+        &[
+            KeyValue::new("kind", stanza_kind.to_string()),
+            KeyValue::new("payload_ns", payload_ns.to_string()),
         ],
     );
 }

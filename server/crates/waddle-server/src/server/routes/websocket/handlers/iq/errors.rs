@@ -116,6 +116,21 @@ pub(crate) fn internal_server_error_iq_error(text: &str) -> StanzaError {
     )
 }
 
+/// `<resource-constraint/>` (wait) — the server could not service the request
+/// within its time budget (the #808 per-connection wedge backstop). RFC 6120
+/// §8.3.3 pairs `resource-constraint` with error type `wait`: a temporary,
+/// retryable condition, which is exactly what a handler that blew its budget
+/// represents. The `wait` type tells the client to retry rather than treat the
+/// request as permanently rejected.
+pub(crate) fn resource_constraint_iq_error(text: &str) -> StanzaError {
+    StanzaError::new(
+        ErrorType::Wait,
+        DefinedCondition::ResourceConstraint,
+        DEFAULT_LANG,
+        text,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

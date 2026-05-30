@@ -72,6 +72,7 @@ use waddle_xmpp::pubsub::PubSubStorage;
 mod cleanup;
 mod connection;
 mod frame;
+mod frame_backstop;
 mod interpret_loop;
 mod muc_call_sfu;
 mod outbound;
