@@ -127,53 +127,53 @@ pub(super) async fn handle_disco_info_iq(
     };
 
     if let Some(response) = muc::handle_muc_disco_info(&request, state).await {
-        debug!(id = %ctx.id, target = %target, handler = "muc", "disco#info answered");
+        info!(id = %ctx.id, target = %target, handler = "muc", "disco#info answered");
         return disco_info_xml(response);
     }
 
     if let Some(response) = calls_mixer::handle_calls_mixer_disco_info(&request) {
-        debug!(id = %ctx.id, target = %target, handler = "calls_mixer", "disco#info answered");
+        info!(id = %ctx.id, target = %target, handler = "calls_mixer", "disco#info answered");
         return disco_info_xml(response);
     }
 
     if let Some(response) = server_info::handle_command_disco_info(&request, state).await {
-        debug!(id = %ctx.id, target = %target, handler = "commands", "disco#info answered");
+        info!(id = %ctx.id, target = %target, handler = "commands", "disco#info answered");
         return disco_info_xml(response);
     }
 
     if let Some(response) = extensions::handle_extensions_disco_info(&request, state).await {
-        debug!(id = %ctx.id, target = %target, handler = "extensions", "disco#info answered");
+        info!(id = %ctx.id, target = %target, handler = "extensions", "disco#info answered");
         return disco_info_xml(response);
     }
 
     if let Some(response) =
         spaces::handle_spaces_disco_info(&request, state, authenticated_session.as_ref()).await
     {
-        debug!(id = %ctx.id, target = %target, handler = "spaces", "disco#info answered");
+        info!(id = %ctx.id, target = %target, handler = "spaces", "disco#info answered");
         return disco_info_xml(response);
     }
 
     if let Some(response) = community::handle_community_disco_info(&request) {
-        debug!(id = %ctx.id, target = %target, handler = "community", "disco#info answered");
+        info!(id = %ctx.id, target = %target, handler = "community", "disco#info answered");
         return disco_info_xml(response);
     }
 
     if let Some(response) = services::handle_upload_disco_info(&request) {
-        debug!(id = %ctx.id, target = %target, handler = "upload", "disco#info answered");
+        info!(id = %ctx.id, target = %target, handler = "upload", "disco#info answered");
         return disco_info_xml(response);
     }
 
     if let Some(response) = services::handle_push_service_disco_info(&request, state, phase).await {
-        debug!(id = %ctx.id, target = %target, handler = "push", "disco#info answered");
+        info!(id = %ctx.id, target = %target, handler = "push", "disco#info answered");
         return disco_info_xml(response);
     }
 
     if let Some(response) = account::handle_account_disco_info(&request, state, phase).await {
-        debug!(id = %ctx.id, target = %target, handler = "account", "disco#info answered");
+        info!(id = %ctx.id, target = %target, handler = "account", "disco#info answered");
         return disco_info_xml(response);
     }
 
-    debug!(id = %ctx.id, target = %target, handler = "server_fallback", "disco#info answered");
+    info!(id = %ctx.id, target = %target, handler = "server_fallback", "disco#info answered");
     disco_info_xml(
         server_info::handle_server_disco_info(&request, state, authenticated_session.as_ref())
             .await,
