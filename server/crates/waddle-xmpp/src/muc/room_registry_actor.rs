@@ -39,6 +39,18 @@ pub enum RoomRegistryError {
     RoomAlreadyExists(BareJid),
     #[error("room actor state for {0} was lost; explicit destroy/recreate is required")]
     RoomActorStateLost(BareJid),
+    /// A request to the registry actor exceeded
+    /// [`ROOM_REGISTRY_REPLY_TIMEOUT`](crate::muc::room_registry_handle::ROOM_REGISTRY_REPLY_TIMEOUT)
+    /// without a reply. Surfaced (instead of hanging the caller indefinitely)
+    /// so a wedged registry produces a visible, typed failure — the #757
+    /// production incident class.
+    #[error("room registry request timed out")]
+    Timeout,
+    /// The registry actor could not be reached (stopped, or its mailbox is
+    /// saturated/closed). Distinct from [`RoomRegistryError::Timeout`]: the
+    /// request never entered processing.
+    #[error("room registry unavailable")]
+    Unavailable,
 }
 
 impl RoomRegistryActor {
@@ -300,6 +312,27 @@ impl kameo::message::Message<RoomCount> for RoomRegistryActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.rooms.len()
+    }
+}
+
+/// Test-only message whose handler never returns, used to deterministically
+/// exercise the [`RoomRegistry`](crate::muc::room_registry_handle::RoomRegistry)
+/// reply-timeout path (the #757 wedge) under `tokio::time` pause/advance.
+#[cfg(test)]
+pub(crate) struct HangForever;
+
+#[cfg(test)]
+impl kameo::message::Message<HangForever> for RoomRegistryActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        _msg: HangForever,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        // Park forever: the registry's single-consumer loop is blocked here,
+        // mirroring a wedged handler. The caller must rely on its reply timeout.
+        std::future::pending::<()>().await
     }
 }
 
