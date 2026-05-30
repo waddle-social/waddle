@@ -304,13 +304,17 @@ impl RoomRegistry {
 }
 
 /// A short, stable reason label for [`metrics::record_actor_request_dropped`].
+///
+/// Only the transport-failure variants reach this helper: [`RoomRegistry::classify`]
+/// matches `HandlerError` and `Timeout` before its `Err(other)` arm calls this,
+/// so those map through the catch-all rather than dedicated arms (which would be
+/// dead code from the sole call site).
 fn send_error_reason<M, E>(error: &SendError<M, E>) -> &'static str {
     match error {
         SendError::ActorNotRunning(_) => "actor_not_running",
         SendError::ActorStopped => "actor_stopped",
         SendError::MailboxFull(_) => "mailbox_full",
-        SendError::HandlerError(_) => "handler_error",
-        SendError::Timeout(_) => "timeout",
+        _ => "unknown",
     }
 }
 

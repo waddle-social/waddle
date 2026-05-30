@@ -232,6 +232,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn resource_constraint_typed() {
+        // #808: the wedge backstop must emit a retryable `wait` error so the
+        // client retries rather than treating the IQ as permanently rejected
+        // (RFC 6120 §8.3.3).
+        assert_round_trip(
+            resource_constraint_iq_error("nope"),
+            ErrorType::Wait,
+            DefinedCondition::ResourceConstraint,
+        );
+    }
+
     /// Wire-shape assertion: the typed helper emits the same
     /// `<iq>/<error>/<defined-condition>` shape the previous
     /// stringly-typed builder did. The exact byte-for-byte serialisation
