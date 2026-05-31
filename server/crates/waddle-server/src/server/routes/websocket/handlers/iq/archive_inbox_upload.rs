@@ -230,7 +230,7 @@ pub(super) async fn handle_archive_inbox_upload_iq(
             let request = match parse_upload_request(request_iq) {
                 Ok(req) => req,
                 Err(e) => {
-                    return vec![build_upload_error(id, &e)];
+                    return vec![iq_to_xml(build_upload_error(request_iq, &e))];
                 }
             };
 
@@ -239,19 +239,19 @@ pub(super) async fn handle_archive_inbox_upload_iq(
             // so accepted XEP-0363 sizes are stored losslessly.
             let max_size = crate::server::routes::uploads::max_upload_size();
             if request.size > max_size {
-                return vec![build_upload_error(
-                    id,
+                return vec![iq_to_xml(build_upload_error(
+                    request_iq,
                     &UploadError::FileTooLarge { max_size },
-                )];
+                ))];
             }
             let Some(size_bytes) = crate::server::routes::uploads::upload_size_to_i64(request.size)
             else {
-                return vec![build_upload_error(
-                    id,
+                return vec![iq_to_xml(build_upload_error(
+                    request_iq,
                     &UploadError::FileTooLarge {
                         max_size: crate::server::routes::uploads::MAX_DATABASE_UPLOAD_SIZE,
                     },
-                )];
+                ))];
             };
 
             let safe_filename = sanitize_filename(&request.filename);
@@ -285,10 +285,10 @@ pub(super) async fn handle_archive_inbox_upload_iq(
                 .await
             {
                 warn!(error = %e, "Failed to create upload slot in database");
-                return vec![build_upload_error(
-                    id,
-                    &UploadError::InternalError(format!("Database error: {}", e)),
-                )];
+                return vec![iq_to_xml(build_upload_error(
+                    request_iq,
+                    &UploadError::InternalError,
+                ))];
             }
 
             debug!(

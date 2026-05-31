@@ -10,17 +10,20 @@
 //! - §3.2 slot response shape: `<slot><put url=…/><get url=…/></slot>`
 //!   plus optional `<header>` children on `<put>`,
 //! - §3.3 error responses: `<not-acceptable/>` + `<file-too-large>`
-//!   for FileTooLarge, `<resource-constraint/>` + `<retry/>` for
-//!   QuotaReached, `<forbidden/>` for NotAllowed.
+//!   for FileTooLarge, `<resource-constraint/>` + `<retry stamp='…'/>`
+//!   for QuotaReached, `<forbidden/>` for NotAllowed.
 
+use chrono::{DateTime, FixedOffset};
 use minidom::Element;
+use std::str::FromStr;
 use waddle_xmpp::disco::{server_features, upload_service_features, Feature};
 use waddle_xmpp::xep::xep0363::{
     build_upload_error, build_upload_slot_response, effective_content_type, is_upload_request,
-    parse_upload_request, sanitize_filename, UploadError, UploadRequest, UploadSlot,
-    DEFAULT_MAX_FILE_SIZE, NS_HTTP_UPLOAD,
+    parse_upload_request, sanitize_filename, UploadBadRequest, UploadError, UploadRequest,
+    UploadSlot, DEFAULT_MAX_FILE_SIZE, NS_HTTP_UPLOAD,
 };
 use xmpp_parsers::iq::Iq;
+use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
 // ── §3 namespace ─────────────────────────────────────────────────────
 
@@ -220,6 +223,40 @@ fn xep0363_slot_response_emits_put_get_and_optional_headers() {
 
 // ── §3.3 error-response shapes ──────────────────────────────────────
 
+fn assert_upload_error_iq(
+    iq: Iq,
+    expected_type: ErrorType,
+    expected_condition: DefinedCondition,
+    expected_id: &str,
+) -> (StanzaError, Element) {
+    let Iq::Error {
+        id, error, payload, ..
+    } = iq
+    else {
+        panic!("expected upload error IQ");
+    };
+
+    assert_eq!(id, expected_id);
+    assert_eq!(error.type_, expected_type);
+    assert_eq!(error.defined_condition, expected_condition);
+
+    let payload = payload.expect("error IQ carries original request payload");
+    assert_eq!(payload.name(), "request");
+    assert_eq!(payload.ns(), NS_HTTP_UPLOAD);
+    (error, payload)
+}
+
+fn fixed_retry_at() -> chrono::DateTime<chrono::Utc> {
+    DateTime::parse_from_rfc3339("2026-05-31T12:34:56Z")
+        .expect("fixed retry timestamp")
+        .with_timezone(&chrono::Utc)
+}
+
+fn serialized_iq_element(iq: Iq) -> Element {
+    let serialized = String::from(&waddle_xmpp::Stanza::Iq(Box::new(iq)).to_element());
+    serialized.parse::<Element>().expect("well-formed XML")
+}
+
 #[test]
 fn xep0363_file_too_large_error_carries_max_file_size_child() {
     // §3.3 FileTooLarge: `<not-acceptable/>` plus a
@@ -227,71 +264,200 @@ fn xep0363_file_too_large_error_carries_max_file_size_child() {
     //   <max-file-size>BYTES</max-file-size>
     // </file-too-large>` app-error child so the client knows the
     // server-enforced limit.
-    let xml = build_upload_error(
-        "err-too-big",
-        &UploadError::FileTooLarge {
-            max_size: 10_485_760,
-        },
+    let request_iq = upload_request_iq("too-big.jpg", 20_000_000, Some("image/jpeg"));
+    let (error, payload) = assert_upload_error_iq(
+        build_upload_error(
+            &request_iq,
+            &UploadError::FileTooLarge {
+                max_size: 10_485_760,
+            },
+        ),
+        ErrorType::Modify,
+        DefinedCondition::NotAcceptable,
+        "u-1",
     );
 
-    assert!(xml.contains("<not-acceptable"));
-    assert!(xml.contains("<file-too-large"));
-    assert!(xml.contains(NS_HTTP_UPLOAD));
-    assert!(xml.contains("<max-file-size>10485760</max-file-size>"));
-    assert!(xml.contains("id='err-too-big'"));
+    assert_eq!(payload.attr("filename"), Some("too-big.jpg"));
+    assert_eq!(payload.attr("size"), Some("20000000"));
+    assert_eq!(payload.attr("content-type"), Some("image/jpeg"));
+
+    let app_error = error.other.expect("file-too-large app error");
+    assert_eq!(app_error.name(), "file-too-large");
+    assert_eq!(app_error.ns(), NS_HTTP_UPLOAD);
+    let max_file_size = app_error
+        .get_child("max-file-size", NS_HTTP_UPLOAD)
+        .expect("max-file-size child");
+    assert_eq!(max_file_size.text(), "10485760");
+    assert_eq!(
+        app_error
+            .children()
+            .filter(|child| child.name() == "max-file-size" && child.ns() == NS_HTTP_UPLOAD)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn xep0363_upload_error_swaps_request_addresses() {
+    let request_iq = Iq::Get {
+        from: Some(jid::Jid::from_str("romeo@example.test/garden").expect("from JID")),
+        to: Some(jid::Jid::from_str("upload.example.test").expect("to JID")),
+        id: "addr-1".into(),
+        payload: Element::builder("request", NS_HTTP_UPLOAD)
+            .attr(minidom::rxml::xml_ncname!("filename").to_owned(), "a.jpg")
+            .attr(minidom::rxml::xml_ncname!("size").to_owned(), "100")
+            .build(),
+    };
+
+    let Iq::Error { from, to, id, .. } = build_upload_error(&request_iq, &UploadError::NotAllowed)
+    else {
+        panic!("expected upload error IQ");
+    };
+
+    assert_eq!(id, "addr-1");
+    assert_eq!(
+        from.as_ref().map(ToString::to_string).as_deref(),
+        Some("upload.example.test")
+    );
+    assert_eq!(
+        to.as_ref().map(ToString::to_string).as_deref(),
+        Some("romeo@example.test/garden")
+    );
 }
 
 #[test]
 fn xep0363_quota_reached_error_carries_retry_child() {
     // §3.3 QuotaReached: `<resource-constraint/>` plus
-    // `<retry xmlns='urn:xmpp:http:upload:0'/>` so the client
-    // knows the failure is transient and a retry will eventually
-    // succeed.
-    let xml = build_upload_error("err-quota", &UploadError::QuotaReached);
-    assert!(xml.contains("<resource-constraint"));
-    assert!(xml.contains("<retry"));
-    assert!(xml.contains(NS_HTTP_UPLOAD));
+    // `<retry xmlns='urn:xmpp:http:upload:0' stamp='...'/>` so
+    // the client knows the failure is transient and when it may try
+    // again.
+    let (error, _) = assert_upload_error_iq(
+        build_upload_error(
+            &upload_request_iq("quota.jpg", 100, None),
+            &UploadError::QuotaReached {
+                retry_at: fixed_retry_at(),
+            },
+        ),
+        ErrorType::Wait,
+        DefinedCondition::ResourceConstraint,
+        "u-1",
+    );
+    let retry = error.other.expect("retry app error");
+    assert_eq!(retry.name(), "retry");
+    assert_eq!(retry.ns(), NS_HTTP_UPLOAD);
+    let stamp = retry.attr("stamp").expect("retry stamp");
+    assert_eq!(stamp, "2026-05-31T12:34:56Z");
+    assert!(stamp.ends_with('Z'), "retry stamp must be UTC: {stamp}");
+    let parsed: DateTime<FixedOffset> =
+        DateTime::parse_from_rfc3339(stamp).expect("retry stamp is XEP-0082/RFC3339 date-time");
+    assert_eq!(parsed.offset().local_minus_utc(), 0);
+}
+
+#[test]
+fn xep0363_file_too_large_app_error_survives_serialization() {
+    let parsed = serialized_iq_element(build_upload_error(
+        &upload_request_iq("serialise<&>.jpg", 20_000_000, None),
+        &UploadError::FileTooLarge {
+            max_size: 10_485_760,
+        },
+    ));
+    let error = parsed
+        .get_child("error", "jabber:client")
+        .expect("error child");
+    let app_error = error
+        .get_child("file-too-large", NS_HTTP_UPLOAD)
+        .expect("serialized file-too-large app error");
+    assert_eq!(
+        app_error
+            .get_child("max-file-size", NS_HTTP_UPLOAD)
+            .expect("serialized max-file-size")
+            .text(),
+        "10485760"
+    );
+    let request = parsed
+        .get_child("request", NS_HTTP_UPLOAD)
+        .expect("serialized original request");
+    assert_eq!(request.attr("filename"), Some("serialise<&>.jpg"));
+}
+
+#[test]
+fn xep0363_quota_retry_app_error_survives_serialization() {
+    let parsed = serialized_iq_element(build_upload_error(
+        &upload_request_iq("quota.jpg", 100, None),
+        &UploadError::QuotaReached {
+            retry_at: fixed_retry_at(),
+        },
+    ));
+    let error = parsed
+        .get_child("error", "jabber:client")
+        .expect("error child");
+    let retry = error
+        .get_child("retry", NS_HTTP_UPLOAD)
+        .expect("serialized retry app error");
+    assert_eq!(retry.attr("stamp"), Some("2026-05-31T12:34:56Z"));
 }
 
 #[test]
 fn xep0363_not_allowed_error_uses_forbidden_condition() {
     // §3.3 NotAllowed: `<forbidden/>` with no app-error child —
     // there's nothing extra the client can do to recover.
-    let xml = build_upload_error("err-forbidden", &UploadError::NotAllowed);
-    assert!(xml.contains("<forbidden"));
-    assert!(
-        !xml.contains("<retry") && !xml.contains("<file-too-large"),
-        "NotAllowed MUST NOT carry app-error children (would imply recovery)"
+    let (error, _) = assert_upload_error_iq(
+        build_upload_error(
+            &upload_request_iq("blocked.jpg", 100, None),
+            &UploadError::NotAllowed,
+        ),
+        ErrorType::Auth,
+        DefinedCondition::Forbidden,
+        "u-1",
     );
+    assert!(error.other.is_none());
 }
 
 #[test]
 fn xep0363_bad_request_and_internal_error_use_xmpp_stanza_conditions() {
-    let bad = build_upload_error("err-bad", &UploadError::BadRequest("nope".into()));
-    assert!(bad.contains("<bad-request"));
+    let (bad, _) = assert_upload_error_iq(
+        build_upload_error(
+            &upload_request_iq("bad.jpg", 100, None),
+            &UploadError::BadRequest(UploadBadRequest::InvalidSize),
+        ),
+        ErrorType::Modify,
+        DefinedCondition::BadRequest,
+        "u-1",
+    );
+    assert!(bad.other.is_none());
 
-    let internal = build_upload_error("err-internal", &UploadError::InternalError("crash".into()));
-    assert!(internal.contains("<internal-server-error"));
+    let (internal, _) = assert_upload_error_iq(
+        build_upload_error(
+            &upload_request_iq("internal.jpg", 100, None),
+            &UploadError::InternalError,
+        ),
+        ErrorType::Wait,
+        DefinedCondition::InternalServerError,
+        "u-1",
+    );
+    assert!(internal.other.is_none());
 }
 
 #[test]
-fn xep0363_error_xml_is_well_formed_minidom_serialisation() {
-    // The error builder must produce parseable XML — round-trip
-    // through minidom proves there's no manual-format!
-    // string-concat lurking that could emit broken markup.
-    for variant in [
-        UploadError::FileTooLarge { max_size: 1024 },
-        UploadError::NotAllowed,
-        UploadError::QuotaReached,
-        UploadError::BadRequest("nope".into()),
-        UploadError::InternalError("boom".into()),
-    ] {
-        let xml = build_upload_error("err", &variant);
-        let parsed = xml.parse::<Element>().expect("well-formed XML");
-        assert_eq!(parsed.name(), "iq");
-        assert_eq!(parsed.attr("type"), Some("error"));
-        assert_eq!(parsed.attr("id"), Some("err"));
-    }
+fn xep0363_error_serialization_escapes_text_and_stays_well_formed() {
+    let parsed = serialized_iq_element(build_upload_error(
+        &upload_request_iq("bad <name> & \"type\".jpg", 100, None),
+        &UploadError::BadRequest(UploadBadRequest::InvalidSize),
+    ));
+
+    assert_eq!(parsed.name(), "iq");
+    assert_eq!(parsed.attr("type"), Some("error"));
+    let error = parsed
+        .get_child("error", "jabber:client")
+        .expect("error child");
+    let text = error
+        .get_child("text", "urn:ietf:params:xml:ns:xmpp-stanzas")
+        .expect("error text");
+    assert_eq!(text.text(), "Bad request: invalid size attribute");
+    let request = parsed
+        .get_child("request", NS_HTTP_UPLOAD)
+        .expect("original request");
+    assert_eq!(request.attr("filename"), Some("bad <name> & \"type\".jpg"));
 }
 
 // ── Filename sanitisation + content-type defaults ───────────────────

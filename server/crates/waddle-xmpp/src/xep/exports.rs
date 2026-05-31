@@ -46,8 +46,8 @@ pub use super::xep0249::{
 
 pub use super::xep0363::{
     build_upload_error, build_upload_slot_response, effective_content_type, is_upload_request,
-    parse_upload_request, sanitize_filename, UploadError, UploadRequest, UploadSlot,
-    DEFAULT_MAX_FILE_SIZE, NS_HTTP_UPLOAD,
+    parse_upload_request, sanitize_filename, UploadBadRequest, UploadError, UploadRequest,
+    UploadSlot, DEFAULT_MAX_FILE_SIZE, NS_HTTP_UPLOAD,
 };
 
 pub use super::xep0191::{

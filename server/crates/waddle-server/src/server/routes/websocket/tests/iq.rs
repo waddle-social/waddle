@@ -3387,6 +3387,96 @@ async fn upload_slot_request_requires_ready_phase() {
 }
 
 #[tokio::test]
+async fn upload_slot_too_large_error_is_typed_xep0363_iq() {
+    let state = create_test_websocket_state().await;
+    let session = create_test_session(state.as_ref(), "alice").await;
+    let bound_jid: FullJid = "alice@example.com/web".parse().expect("bound jid");
+    let ready = ready_phase(&bound_jid);
+    let max_size = crate::server::routes::uploads::max_upload_size();
+    let too_large = max_size
+        .checked_add(1)
+        .expect("test max upload size leaves room for an over-limit request");
+    let request = Element::builder("request", "urn:xmpp:http:upload:0")
+        .attr(
+            minidom::rxml::xml_ncname!("filename").to_owned(),
+            "huge.bin",
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("size").to_owned(),
+            too_large.to_string(),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("content-type").to_owned(),
+            "application/octet-stream",
+        )
+        .build();
+    let frame = stanza_to_xml(&Stanza::Iq(Box::new(Iq::Get {
+        from: Some(bound_jid.clone().into()),
+        to: Some("upload.example.com".parse().expect("upload jid")),
+        id: "upload-too-big-1".to_string(),
+        payload: request,
+    })));
+
+    let responses = handle_iq(
+        &frame,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(session),
+        &ready,
+    )
+    .await;
+
+    assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
+    let iq = parse_iq_for_test(&responses[0]);
+    let Iq::Error {
+        from,
+        to,
+        id,
+        error,
+        payload,
+    } = iq
+    else {
+        panic!("expected upload too-large IQ error: {}", responses[0]);
+    };
+
+    assert_eq!(id, "upload-too-big-1");
+    assert_eq!(
+        from.as_ref().map(ToString::to_string).as_deref(),
+        Some("upload.example.com")
+    );
+    assert_eq!(
+        to.as_ref().map(ToString::to_string).as_deref(),
+        Some("alice@example.com/web")
+    );
+    assert_eq!(error.type_, xmpp_parsers::stanza_error::ErrorType::Modify);
+    assert_eq!(
+        error.defined_condition,
+        xmpp_parsers::stanza_error::DefinedCondition::NotAcceptable
+    );
+
+    let original_request = payload.expect("original upload request payload");
+    assert_eq!(original_request.name(), "request");
+    assert_eq!(original_request.ns(), "urn:xmpp:http:upload:0");
+    assert_eq!(original_request.attr("filename"), Some("huge.bin"));
+    assert_eq!(
+        original_request.attr("size"),
+        Some(too_large.to_string().as_str())
+    );
+
+    let app_error = error.other.expect("file-too-large app error");
+    assert_eq!(app_error.name(), "file-too-large");
+    assert_eq!(app_error.ns(), "urn:xmpp:http:upload:0");
+    assert_eq!(
+        app_error
+            .get_child("max-file-size", "urn:xmpp:http:upload:0")
+            .expect("max-file-size")
+            .text(),
+        max_size.to_string()
+    );
+}
+
+#[tokio::test]
 async fn handle_iq_pubsub_publish_returns_result() {
     let state = create_test_websocket_state().await;
     let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
