@@ -34,6 +34,7 @@ use xmpp_parsers::iq::{Iq, IqPayload};
 use xmpp_parsers::message::MessageType as XmppMessageType;
 
 mod broadcast;
+mod disco_trace;
 mod dispatch;
 mod frame_parsing;
 mod iq;

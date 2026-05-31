@@ -1,5 +1,6 @@
 use super::*;
 use super::{
+    frame_backstop::{run_with_backstop, StanzaBackstop},
     parse_errors::{is_sasl_parse_failure, parse_error_responses},
     resource_binding::handle_resource_binding,
     sasl::{handle_sasl_oauthbearer, handle_sasl_scram_client_first, handle_sasl_scram_response},
@@ -140,58 +141,73 @@ pub(super) async fn handle_xmpp_frame(
                 sm_state.increment_inbound();
             }
 
-            match *stanza {
-                Stanza::Iq(iq) => {
-                    let is_bind = match &*iq {
-                        xmpp_parsers::iq::Iq::Set { payload: e, .. }
-                        | xmpp_parsers::iq::Iq::Get { payload: e, .. } => {
-                            e.ns() == waddle_xmpp::ns::BIND
-                        }
-                        _ => false,
-                    };
-                    if is_bind {
-                        return handle_resource_binding(&iq, domain, phase);
-                    }
-                    let mut iq_conn_state = handlers::iq::IqConnState {
-                        carbons_enabled,
-                        roster_interested,
-                        state_machine: state_machine.as_mut(),
-                    };
-                    handlers::iq::handle_iq_with_conn_state(
-                        *iq,
-                        domain,
-                        &muc_domain,
-                        state,
-                        authenticated_session,
-                        phase,
-                        &mut iq_conn_state,
-                    )
-                    .await
-                }
-
-                Stanza::Presence(presence) => {
-                    handlers::presence::handle_presence(
-                        presence,
-                        domain,
-                        &muc_domain,
-                        state,
-                        phase,
-                        authenticated_session,
-                    )
-                    .await
-                }
-
-                Stanza::Message(message) => {
-                    handlers::message::handle_message(
-                        message,
-                        state,
-                        phase,
-                        state_machine.as_mut(),
-                        authenticated_session.as_ref(),
-                    )
-                    .await
+            // Resource binding is stream setup, not request processing: handle
+            // it inline and return BEFORE the wedge backstop (#808 ADR-008 scope
+            // guard). It must never be subject to, or delayed by, the timeout.
+            if let Stanza::Iq(iq) = &*stanza {
+                let is_bind = matches!(
+                    &**iq,
+                    xmpp_parsers::iq::Iq::Set { payload: e, .. }
+                        | xmpp_parsers::iq::Iq::Get { payload: e, .. }
+                        if e.ns() == waddle_xmpp::ns::BIND
+                );
+                if is_bind {
+                    return handle_resource_binding(iq, domain, phase);
                 }
             }
+
+            // #808: capture the conformant-reply metadata before the stanza is
+            // moved into the dispatch future, then run dispatch under the
+            // per-connection wedge backstop. A single slow/wedged handler can no
+            // longer freeze the connection's frame loop indefinitely; on elapse
+            // an IQ get/set gets a conformant resource-constraint/wait error and
+            // message/presence are dropped (logged + metered).
+            let backstop = StanzaBackstop::capture(&stanza);
+            let dispatch = async {
+                match *stanza {
+                    Stanza::Iq(iq) => {
+                        let mut iq_conn_state = handlers::iq::IqConnState {
+                            carbons_enabled,
+                            roster_interested,
+                            state_machine: state_machine.as_mut(),
+                        };
+                        handlers::iq::handle_iq_with_conn_state(
+                            *iq,
+                            domain,
+                            &muc_domain,
+                            state,
+                            authenticated_session,
+                            phase,
+                            &mut iq_conn_state,
+                        )
+                        .await
+                    }
+
+                    Stanza::Presence(presence) => {
+                        handlers::presence::handle_presence(
+                            presence,
+                            domain,
+                            &muc_domain,
+                            state,
+                            phase,
+                            authenticated_session,
+                        )
+                        .await
+                    }
+
+                    Stanza::Message(message) => {
+                        handlers::message::handle_message(
+                            message,
+                            state,
+                            phase,
+                            state_machine.as_mut(),
+                            authenticated_session.as_ref(),
+                        )
+                        .await
+                    }
+                }
+            };
+            run_with_backstop(backstop, dispatch).await
         }
     }
 }

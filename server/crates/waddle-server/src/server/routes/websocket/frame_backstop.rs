@@ -1,0 +1,166 @@
+//! Per-connection stanza-handler **wedge backstop** (#808).
+//!
+//! Fix-4 of the #757 production incident. The per-connection frame loop awaits
+//! stanza dispatch inline; before this, a single handler that blocked forever
+//! (a wedged actor, a stuck lock) froze the whole connection — the #757
+//! symptom. This module wraps stanza dispatch in a bounded
+//! [`tokio::time::timeout`] so no single stanza can stall the connection
+//! indefinitely. Processing stays strictly serial, so RFC 6120 §10.1 in-order
+//! processing is preserved (no spawn-based concurrency — see
+//! `docs/adr/008-stanza-handler-wedge-backstop.md`).
+//!
+//! On elapse the response is **conformant** (RFC 6120 §8.2.3 / §8.3): a timed-out
+//! IQ `get`/`set` still owes exactly one reply, so we synthesize
+//! `<iq type='error'><resource-constraint/></iq>` with error type `wait` (a
+//! temporary, retryable condition). Message/Presence owe no reply, so they are
+//! dropped (logged + metered) on elapse.
+//!
+//! Observability (all OTEL-native via the existing providers): a per-dispatch
+//! `info_span!` (→ OTEL span), a `warn!` with stable fields (→ OTLP log), and
+//! the [`metrics::record_stanza_handler_timeout`] counter (→ OTLP metric).
+
+use std::future::Future;
+use std::time::Duration;
+
+use tracing::{info_span, warn, Instrument, Span};
+use waddle_xmpp::metrics;
+use waddle_xmpp::Stanza;
+
+use super::handlers::iq::errors::resource_constraint_iq_error;
+
+/// Maximum wall-clock a single stanza's dispatch may take before the backstop
+/// fires. This is a coarse *wedge* backstop, not a latency SLO: it sits above
+/// the slowest legitimate handler's own internal budget (the 10s
+/// `profile::fetch::TOTAL_TIMEOUT`) with margin, and below the wasm client's own
+/// ~30s IQ timeout so the synthesized `wait` error is actionable. Complements
+/// the tighter per-`.ask()` reply timeout in `waddle_xmpp::muc::RoomRegistry`
+/// (#807), which is the fast, specific fail-path for the known actor wedge.
+pub(super) const STANZA_HANDLER_WEDGE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// The conformant reply addressing for a timed-out IQ `get`/`set`. The response
+/// echoes the request `id` and swaps `from`/`to` (RFC 6120 §8.2.3).
+struct IqReply {
+    id: String,
+    /// Response `from` = the request's `to`.
+    from: Option<String>,
+    /// Response `to` = the request's `from`.
+    to: Option<String>,
+}
+
+/// Captured, owned metadata for one inbound stanza: enough to build the
+/// conformant timeout reply and the diagnostic span/log without holding a borrow
+/// on the stanza (which is moved into the dispatch future).
+pub(super) struct StanzaBackstop {
+    /// `"iq"` | `"message"` | `"presence"` — the stanza kind label.
+    kind: &'static str,
+    /// The request payload namespace (empty when absent), for the metric axis.
+    payload_ns: String,
+    /// `Some` only for an IQ `get`/`set`, which owes exactly one response.
+    iq_reply: Option<IqReply>,
+    /// Per-dispatch diagnostic span; becomes an OTEL span via the global bridge.
+    span: Span,
+}
+
+impl StanzaBackstop {
+    /// Capture backstop metadata from a borrowed stanza before it is moved into
+    /// the dispatch future.
+    pub(super) fn capture(stanza: &Stanza) -> Self {
+        match stanza {
+            // Only IQ `get`/`set` carry a request payload AND owe a response, so
+            // a single match keeps the namespace and the reply addressing in
+            // lockstep — result/error IQs fall through to "no reply owed".
+            Stanza::Iq(iq) => match &**iq {
+                xmpp_parsers::iq::Iq::Get { payload, .. }
+                | xmpp_parsers::iq::Iq::Set { payload, .. } => Self::build(
+                    "iq",
+                    payload.ns(),
+                    Some(IqReply {
+                        id: iq.id().to_string(),
+                        from: iq.to().map(|jid| jid.to_string()),
+                        to: iq.from().map(|jid| jid.to_string()),
+                    }),
+                ),
+                _ => Self::build("iq", String::new(), None),
+            },
+            Stanza::Presence(_) => Self::build("presence", String::new(), None),
+            Stanza::Message(_) => Self::build("message", String::new(), None),
+        }
+    }
+
+    fn build(kind: &'static str, payload_ns: String, iq_reply: Option<IqReply>) -> Self {
+        // `otel.status_code` is declared Empty and recorded as ERROR on elapse;
+        // `tracing-opentelemetry` maps that field onto the OTEL span status.
+        let span = info_span!(
+            "xmpp.stanza.dispatch",
+            stanza_kind = kind,
+            payload_ns = %payload_ns,
+            otel.status_code = tracing::field::Empty,
+        );
+        Self {
+            kind,
+            payload_ns,
+            iq_reply,
+            span,
+        }
+    }
+
+    /// Build the conformant response set for a dispatch that exceeded
+    /// [`STANZA_HANDLER_WEDGE_TIMEOUT`]: a `resource-constraint`/`wait` IQ error
+    /// for get/set, nothing for everything else. Records the timeout metric and
+    /// a `warn!`, and marks the span errored.
+    fn on_timeout(self) -> Vec<String> {
+        metrics::record_stanza_handler_timeout(self.kind, &self.payload_ns);
+        self.span.record("otel.status_code", "ERROR");
+        let _enter = self.span.enter();
+        match &self.iq_reply {
+            Some(reply) => {
+                warn!(
+                    stanza_kind = self.kind,
+                    id = %reply.id,
+                    // ADR-008 §5 stable field set; from/to identify the affected
+                    // peer JID for grep/OTLP triage — the primary #757 gap.
+                    // (Response addressing: from = request `to`, to = request `from`.)
+                    from = ?reply.from,
+                    to = ?reply.to,
+                    payload_ns = %self.payload_ns,
+                    timeout_secs = STANZA_HANDLER_WEDGE_TIMEOUT.as_secs(),
+                    "stanza handler exceeded wedge backstop; returning resource-constraint"
+                );
+                vec![super::build_iq_error_xml_typed(
+                    &reply.id,
+                    reply.from.as_deref(),
+                    reply.to.as_deref(),
+                    resource_constraint_iq_error(
+                        "The server could not process this request in time; please retry.",
+                    ),
+                )]
+            }
+            None => {
+                warn!(
+                    stanza_kind = self.kind,
+                    payload_ns = %self.payload_ns,
+                    timeout_secs = STANZA_HANDLER_WEDGE_TIMEOUT.as_secs(),
+                    "stanza handler exceeded wedge backstop; dropping (no reply owed)"
+                );
+                Vec::new()
+            }
+        }
+    }
+}
+
+/// Drive a stanza's dispatch under the wedge backstop: run `dispatch` within the
+/// backstop span and the [`STANZA_HANDLER_WEDGE_TIMEOUT`]; on elapse, return the
+/// conformant timeout response instead of letting the connection hang.
+pub(super) async fn run_with_backstop<F>(backstop: StanzaBackstop, dispatch: F) -> Vec<String>
+where
+    F: Future<Output = Vec<String>>,
+{
+    let span = backstop.span.clone();
+    match tokio::time::timeout(STANZA_HANDLER_WEDGE_TIMEOUT, dispatch.instrument(span)).await {
+        Ok(responses) => responses,
+        Err(_elapsed) => backstop.on_timeout(),
+    }
+}
+
+#[cfg(test)]
+mod tests;

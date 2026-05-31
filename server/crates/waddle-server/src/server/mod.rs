@@ -8,6 +8,7 @@ mod fixed_account;
 mod health;
 mod http;
 pub(crate) mod profile_publish_route;
+mod room_registry_gauge;
 mod session_janitors;
 mod state;
 pub(crate) mod state_inventory;
@@ -162,12 +163,16 @@ pub async fn start_with_config(
             .map_err(|error| anyhow::anyhow!("Failed to initialize PubSub storage: {}", error))?;
     let pubsub_storage: Arc<dyn waddle_xmpp::pubsub::PubSubStorage> =
         pubsub_database_storage.clone();
-    let room_registry = waddle_xmpp::muc::room_registry_actor::RoomRegistryActor::spawn(
-        waddle_xmpp::muc::room_registry_actor::RoomRegistryActor::new(
-            xmpp_config.muc_domain.to_string(),
-            server_config.occupant_id_secret.clone(),
-        ),
+    // #807: spawn the registry behind the instrumented, explicitly-bounded
+    // handle (named bounded mailbox + per-request reply timeout + typed errors),
+    // and start the periodic mailbox-depth gauge. The shared graph still stores
+    // the underlying `ActorRef`, so existing call sites are unchanged.
+    let room_registry_handle = waddle_xmpp::muc::RoomRegistry::spawn(
+        xmpp_config.muc_domain.to_string(),
+        server_config.occupant_id_secret.clone(),
     );
+    room_registry_gauge::spawn(room_registry_handle.clone(), stop_token.clone());
+    let room_registry = room_registry_handle.actor_ref().clone();
 
     // Create HTTP state (shares db_pool via Arc)
     let blob_storage = crate::storage::build_blob_storage()
