@@ -1,13 +1,15 @@
 use jid::BareJid;
 use tracing::warn;
 use waddle_xmpp::pubsub::{PubSubItem, PubSubNode, PublishResult, StoredItem};
+use waddle_xmpp::xep::xep_waddle_dm_bookmarks::{is_dm_bookmarks_node, DmBookmark};
 use waddle_xmpp::XmppError;
 
 use super::DatabasePubSubStorage;
 use crate::dnd_projection::{delete_dnd_projection_tx, upsert_dnd_projection_tx, DndProjection};
 use crate::notification_settings_projection::{
-    derive_validated_bookmark_projection_mutation, validate_xep0402_bookmark_publish,
-    ConversationKind, NotificationSettingsProjectionMutation,
+    derive_dm_bookmark_projection_mutation, derive_validated_bookmark_projection_mutation,
+    validate_dm_bookmark_publish, validate_xep0402_bookmark_publish, ConversationKind,
+    NotificationSettingsProjectionMutation, NotificationSettingsSource,
 };
 
 impl DatabasePubSubStorage {
@@ -31,6 +33,26 @@ impl DatabasePubSubStorage {
             })?;
             Some(
                 validate_xep0402_bookmark_publish(&item_id, payload)
+                    .map_err(|error| XmppError::bad_request(Some(error.to_string())))?,
+            )
+        } else {
+            None
+        };
+        // DM-bookmark carrier (`urn:waddle:dm-bookmarks:0`) — the direct
+        // (1:1) counterpart of the XEP-0402 MUC bookmark above. Validate
+        // up-front so a malformed `<dm-bookmark>` gets a `<bad-request/>`
+        // instead of leaving the PEP item in place with a stale Direct
+        // projection alongside. PEP authz already enforces owner-only
+        // publish, so (mirroring the bookmark branch) there is no extra
+        // publisher==owner check here.
+        let validated_dm_bookmark: Option<DmBookmark> = if is_dm_bookmarks_node(node_name) {
+            let payload = item.payload.as_ref().ok_or_else(|| {
+                XmppError::bad_request(Some(
+                    "Waddle DM-bookmark publish requires a <dm-bookmark> payload".to_string(),
+                ))
+            })?;
+            Some(
+                validate_dm_bookmark_publish(&item_id, payload)
                     .map_err(|error| XmppError::bad_request(Some(error.to_string())))?,
             )
         } else {
@@ -176,6 +198,25 @@ impl DatabasePubSubStorage {
                 delete_bookmark_projection_for_item_tx(&mut tx, owner, evicted_item_id).await?;
             }
         }
+        if let Some(dm_bookmark) = validated_dm_bookmark.as_ref() {
+            let source_version = next_notification_settings_source_version_tx(&mut tx).await?;
+            let mutation = derive_dm_bookmark_projection_mutation(
+                owner,
+                dm_bookmark,
+                published_at_ms,
+                source_version,
+            )
+            .map_err(|error| XmppError::internal(error.to_string()))?;
+            apply_projection_mutation_tx(&mut tx, mutation).await?;
+            // An eviction can drop a DM item whose projection row keys on
+            // its item id (the contact bare JID); clear it in the same tx.
+            // `delete_bookmark_projection_for_item_tx` deletes by
+            // (owner, conversation_jid=item_id) and DM/MUC JIDs never
+            // collide, so reuse is safe.
+            for evicted_item_id in &evicted_item_ids {
+                delete_bookmark_projection_for_item_tx(&mut tx, owner, evicted_item_id).await?;
+            }
+        }
         if let Some((dnd_owner, parsed)) = dnd_publish_owner {
             // Monotonic DB-backed source_version. The earlier
             // implementation used `published_at_ms` (wall-clock); an
@@ -282,7 +323,11 @@ impl DatabasePubSubStorage {
         node_name: &str,
         item_id: &str,
     ) -> Result<bool, XmppError> {
-        if is_bookmarks_node(node_name) {
+        if is_bookmarks_node(node_name) || is_dm_bookmarks_node(node_name) {
+            // Both the XEP-0402 MUC carrier and the Waddle DM carrier key
+            // their projection row on (owner, conversation_jid=item_id).
+            // DM and MUC JIDs never collide, so a single branch clears the
+            // right row regardless of which carrier this retract targets.
             let mut tx = self
                 .db
                 .begin()
@@ -345,7 +390,17 @@ impl DatabasePubSubStorage {
         owner: &BareJid,
         node_name: &str,
     ) -> Result<u64, XmppError> {
-        if is_bookmarks_node(node_name) {
+        if is_bookmarks_node(node_name) || is_dm_bookmarks_node(node_name) {
+            // Clear exactly the projection rows fed by the carrier being
+            // purged: the XEP-0402 MUC node clears `Xep0402Bookmarks`
+            // rows, the Waddle DM node clears `WaddleDmBookmarks` rows.
+            // Keying on the source (not the conversation JID) leaves the
+            // other carrier's rows untouched.
+            let source = if is_dm_bookmarks_node(node_name) {
+                NotificationSettingsSource::WaddleDmBookmarks
+            } else {
+                NotificationSettingsSource::Xep0402Bookmarks
+            };
             let mut tx = self
                 .db
                 .begin()
@@ -358,7 +413,7 @@ impl DatabasePubSubStorage {
                 )
                 .await
                 .map_err(|error| XmppError::internal(error.to_string()))?;
-            clear_bookmark_projection_tx(&mut tx, owner).await?;
+            clear_projection_for_source_tx(&mut tx, owner, source).await?;
             tx.commit()
                 .await
                 .map_err(|error| XmppError::internal(error.to_string()))?;
@@ -491,20 +546,29 @@ impl DatabasePubSubStorage {
     }
 }
 
+/// Clear every projection row fed by the XEP-0402 MUC bookmark carrier
+/// for `owner`. Used by node-delete (`node.rs`), which is MUC-only.
 pub(super) async fn clear_bookmark_projection_tx(
     tx: &mut crate::db::Transaction<'_>,
     owner: &BareJid,
+) -> Result<(), XmppError> {
+    clear_projection_for_source_tx(tx, owner, NotificationSettingsSource::Xep0402Bookmarks).await
+}
+
+/// Clear every projection row fed by `source` for `owner`, keying on the
+/// `source_node` column. Used by the carrier-purge paths so purging one
+/// carrier (MUC vs DM) leaves the other carrier's rows untouched.
+async fn clear_projection_for_source_tx(
+    tx: &mut crate::db::Transaction<'_>,
+    owner: &BareJid,
+    source: NotificationSettingsSource,
 ) -> Result<(), XmppError> {
     tx.execute(
         r#"
         DELETE FROM notification_settings_projection
         WHERE owner_bare_jid = ? AND source_node = ?
         "#,
-        crate::db_params![
-            owner.to_string(),
-            crate::notification_settings_projection::NotificationSettingsSource::Xep0402Bookmarks
-                .node(),
-        ],
+        crate::db_params![owner.to_string(), source.node()],
     )
     .await
     .map_err(|error| XmppError::internal(error.to_string()))?;

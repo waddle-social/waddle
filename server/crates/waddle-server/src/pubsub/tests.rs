@@ -988,3 +988,285 @@ async fn dnd_publish_from_non_owner_is_forbidden() {
         .await
         .expect("owner publish should succeed");
 }
+
+fn dm_bookmark_payload(inner: &str) -> minidom::Element {
+    format!("<dm-bookmark xmlns='urn:waddle:dm-bookmarks:0'>{inner}</dm-bookmark>")
+        .parse()
+        .expect("valid dm-bookmark payload")
+}
+
+/// End-to-end at the store layer for the Waddle DM carrier
+/// (`urn:waddle:dm-bookmarks:0`): publishing a `<dm-bookmark>` with a
+/// `<never/>` override writes a `Direct` projection row keyed on the
+/// contact JID, and retracting that item clears the row in the same tx.
+#[tokio::test]
+async fn dm_bookmark_publish_then_retract_round_trips_direct_projection() {
+    use crate::notification_settings_projection::{
+        ConversationKind, NotificationSettingsProjectionStore, NotificationSettingsSource,
+    };
+    use waddle_xmpp::xep::xep_waddle_dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS;
+
+    let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("storage");
+    let projection = NotificationSettingsProjectionStore::new(storage.database());
+    let alice = jid("alice@example.com");
+    let bob = jid("bob@example.com");
+
+    storage
+        .get_or_create_node(&alice, PEP_NODE_WADDLE_DM_BOOKMARKS)
+        .await
+        .expect("dm-bookmarks node");
+
+    let item = waddle_xmpp::pubsub::PubSubItem {
+        id: Some("bob@example.com".to_string()),
+        publisher: None,
+        payload: Some(dm_bookmark_payload(
+            "<notify xmlns='urn:xmpp:notification-settings:1'><never /></notify>",
+        )),
+    };
+    storage
+        .publish_item(
+            &alice,
+            PEP_NODE_WADDLE_DM_BOOKMARKS,
+            &item,
+            Some(&alice),
+            false,
+        )
+        .await
+        .expect("dm-bookmark publish");
+
+    let row = projection
+        .get(&alice, &bob)
+        .await
+        .expect("get projection")
+        .expect("projection row present after publish");
+    assert_eq!(row.conversation_kind, ConversationKind::Direct);
+    assert_eq!(
+        row.mode,
+        waddle_xmpp::xep::NotificationLevel::Never,
+        "DM <never/> override must persist as Never"
+    );
+    assert_eq!(row.source, NotificationSettingsSource::WaddleDmBookmarks);
+    assert_eq!(row.source_item_jid, bob);
+
+    let retracted = storage
+        .retract_item(&alice, PEP_NODE_WADDLE_DM_BOOKMARKS, "bob@example.com")
+        .await
+        .expect("retract");
+    assert!(retracted, "the published DM item must be retracted");
+    assert!(
+        projection
+            .get(&alice, &bob)
+            .await
+            .expect("get projection after retract")
+            .is_none(),
+        "retracting the DM item must clear its Direct projection row"
+    );
+}
+
+/// Republishing a DM bookmark with an EMPTY `<dm-bookmark/>` (no
+/// `<notify>` — "no override") deletes any existing Direct projection
+/// row in the same publish tx, mirroring the XEP-0402 missing-notify
+/// behavior.
+#[tokio::test]
+async fn dm_bookmark_publish_without_notify_clears_direct_projection() {
+    use crate::notification_settings_projection::NotificationSettingsProjectionStore;
+    use waddle_xmpp::xep::xep_waddle_dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS;
+
+    let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("storage");
+    let projection = NotificationSettingsProjectionStore::new(storage.database());
+    let alice = jid("alice@example.com");
+    let bob = jid("bob@example.com");
+
+    storage
+        .get_or_create_node(&alice, PEP_NODE_WADDLE_DM_BOOKMARKS)
+        .await
+        .expect("dm-bookmarks node");
+
+    let with_override = waddle_xmpp::pubsub::PubSubItem {
+        id: Some("bob@example.com".to_string()),
+        publisher: None,
+        payload: Some(dm_bookmark_payload(
+            "<notify xmlns='urn:xmpp:notification-settings:1'><never /></notify>",
+        )),
+    };
+    storage
+        .publish_item(
+            &alice,
+            PEP_NODE_WADDLE_DM_BOOKMARKS,
+            &with_override,
+            Some(&alice),
+            false,
+        )
+        .await
+        .expect("publish override");
+    assert!(projection.get(&alice, &bob).await.expect("get").is_some());
+
+    let cleared = waddle_xmpp::pubsub::PubSubItem {
+        id: Some("bob@example.com".to_string()),
+        publisher: None,
+        payload: Some(dm_bookmark_payload("")),
+    };
+    storage
+        .publish_item(
+            &alice,
+            PEP_NODE_WADDLE_DM_BOOKMARKS,
+            &cleared,
+            Some(&alice),
+            false,
+        )
+        .await
+        .expect("publish cleared override");
+    assert!(
+        projection
+            .get(&alice, &bob)
+            .await
+            .expect("get after clear")
+            .is_none(),
+        "an empty <dm-bookmark/> publish must delete the Direct projection row"
+    );
+}
+
+/// A malformed `<dm-bookmark>` publish (two account-wide fallbacks in
+/// the hosted `<notify>`) MUST be rejected with `<bad-request/>` and
+/// leave no `pubsub_items` row behind.
+#[tokio::test]
+async fn dm_bookmark_publish_with_malformed_notify_is_bad_request() {
+    use waddle_xmpp::xep::xep_waddle_dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS;
+
+    let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("storage");
+    let alice = jid("alice@example.com");
+    storage
+        .get_or_create_node(&alice, PEP_NODE_WADDLE_DM_BOOKMARKS)
+        .await
+        .expect("dm-bookmarks node");
+
+    let item = waddle_xmpp::pubsub::PubSubItem {
+        id: Some("bob@example.com".to_string()),
+        publisher: None,
+        payload: Some(dm_bookmark_payload(
+            "<notify xmlns='urn:xmpp:notification-settings:1'><always /><never /></notify>",
+        )),
+    };
+    let err = storage
+        .publish_item(
+            &alice,
+            PEP_NODE_WADDLE_DM_BOOKMARKS,
+            &item,
+            Some(&alice),
+            false,
+        )
+        .await
+        .expect_err("malformed DM bookmark must be rejected");
+    match &err {
+        waddle_xmpp::XmppError::Stanza { condition, .. } => {
+            assert!(
+                format!("{condition:?}")
+                    .to_lowercase()
+                    .contains("badrequest"),
+                "expected <bad-request/> condition, got: {condition:?}"
+            );
+        }
+        other => panic!("expected Stanza bad-request error, got: {other:?}"),
+    }
+
+    let stored = storage
+        .get_items(&alice, PEP_NODE_WADDLE_DM_BOOKMARKS, None, &[])
+        .await
+        .expect("get items");
+    assert!(
+        stored.is_empty(),
+        "a rejected DM publish must not leave a pubsub_items row"
+    );
+}
+
+/// Purging the DM-bookmarks node clears its Direct projection rows but
+/// leaves the XEP-0402 MUC carrier's rows untouched (the purge keys on
+/// `source_node`, not the conversation JID).
+#[tokio::test]
+async fn dm_bookmark_purge_clears_only_direct_projection_rows() {
+    use crate::notification_settings_projection::{
+        ConversationKind, NotificationSettingsProjection, NotificationSettingsProjectionStore,
+        NotificationSettingsSource,
+    };
+    use waddle_xmpp::xep::xep_waddle_dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS;
+
+    let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("storage");
+    let projection = NotificationSettingsProjectionStore::new(storage.database());
+    let alice = jid("alice@example.com");
+    let bob = jid("bob@example.com");
+    let room = jid("room@muc.example.com");
+
+    // Seed a MUC (XEP-0402) projection row directly.
+    projection
+        .upsert(&NotificationSettingsProjection {
+            owner_bare_jid: alice.clone(),
+            conversation_jid: room.clone(),
+            conversation_kind: ConversationKind::PrivateGroup,
+            mode: waddle_xmpp::xep::NotificationLevel::Never,
+            rich_payload_opt_in: false,
+            source_version: 1,
+            updated_at_ms: 1,
+            source: NotificationSettingsSource::Xep0402Bookmarks,
+            source_item_jid: room.clone(),
+        })
+        .await
+        .expect("seed muc row");
+
+    // Publish a DM override so a Direct row exists.
+    storage
+        .get_or_create_node(&alice, PEP_NODE_WADDLE_DM_BOOKMARKS)
+        .await
+        .expect("dm-bookmarks node");
+    let item = waddle_xmpp::pubsub::PubSubItem {
+        id: Some("bob@example.com".to_string()),
+        publisher: None,
+        payload: Some(dm_bookmark_payload(
+            "<notify xmlns='urn:xmpp:notification-settings:1'><never /></notify>",
+        )),
+    };
+    storage
+        .publish_item(
+            &alice,
+            PEP_NODE_WADDLE_DM_BOOKMARKS,
+            &item,
+            Some(&alice),
+            false,
+        )
+        .await
+        .expect("publish dm override");
+    assert!(projection
+        .get(&alice, &bob)
+        .await
+        .expect("dm row")
+        .is_some());
+
+    storage
+        .purge_node(&alice, PEP_NODE_WADDLE_DM_BOOKMARKS)
+        .await
+        .expect("purge dm node");
+
+    assert!(
+        projection
+            .get(&alice, &bob)
+            .await
+            .expect("dm row after purge")
+            .is_none(),
+        "purging the DM node must clear its Direct projection rows"
+    );
+    assert!(
+        projection
+            .get(&alice, &room)
+            .await
+            .expect("muc row after purge")
+            .is_some(),
+        "purging the DM node must NOT touch XEP-0402 MUC projection rows"
+    );
+}
