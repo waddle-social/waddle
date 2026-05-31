@@ -251,7 +251,8 @@ pub use super::xep0048::{
 
 pub use super::xep0049::{
     build_private_storage_result, build_private_storage_success, is_private_storage_query,
-    parse_private_storage_get, parse_private_storage_set, PrivateStorageKey, NS_PRIVATE,
+    parse_private_storage_get, parse_private_storage_set, parse_stored_private_storage_value,
+    PrivateStorageError, PrivateStorageKey, PrivateStorageValue, NS_PRIVATE,
 };
 
 pub use super::xep0084::{

@@ -28,6 +28,18 @@ pub(crate) fn bad_request_iq_error(text: &str) -> StanzaError {
     )
 }
 
+/// `<bad-request/>` (modify) for legacy specs that describe the same
+/// syntax failure as "bad format"; RFC 6120 does not define a
+/// `bad-format` stanza-error condition.
+pub(crate) fn bad_format_iq_error(text: &str) -> StanzaError {
+    StanzaError::new(
+        ErrorType::Modify,
+        DefinedCondition::BadRequest,
+        DEFAULT_LANG,
+        text,
+    )
+}
+
 /// `<jid-malformed/>` (modify) — `<iq to=…>` carried a JID the parser
 /// rejected.
 pub(crate) fn jid_malformed_iq_error(text: &str) -> StanzaError {
