@@ -67,6 +67,27 @@ export class WaddleClient {
      * error which surfaces as a rejected Promise.
      */
     feed_publish(spaces_jid: string, entry: any): Promise<any>;
+    /**
+     * Fetch the user's Waddle DM-bookmark items (issue #720) from PEP,
+     * surfaced as a typed array carrying the XEP-0492 fallback
+     * notification mode + rich-payload opt-in (#719) per direct-chat
+     * contact. The DM counterpart to [`Self::fetch_user_bookmarks`].
+     *
+     * The carrier node `urn:waddle:dm-bookmarks:0` is sparse /
+     * override-only: an item exists ONLY when the DM has an override
+     * beyond the XEP-0492 §3 direct-chat default. A `None` `notify_mode`
+     * means the hosted `<notify/>` carries only identity-scoped
+     * siblings; the chat resolves it against the §3 default (`always`).
+     *
+     * Resolves to an empty array when the PEP node is absent (no DM has
+     * an override yet) — XEP-0163 returns `item-not-found`, caught here
+     * and treated as the empty list rather than rejecting the Promise.
+     *
+     * **Deferred** (same as the MUC path): no XEP-0163 §4.4 `+notify`
+     * self-subscription on the DM node yet, so a change in another
+     * client reaches this one on the next session-ready re-fetch.
+     */
+    fetch_dm_bookmarks(): Promise<any>;
     fetch_dm_history(peer_jid: string, max: number, before_id?: string | null): Promise<any>;
     fetch_dm_history_page(peer_jid: string, max: number, page_param: any): Promise<any>;
     fetch_extension_route_items(route: any, room_jid: string): Promise<any>;
@@ -326,6 +347,33 @@ export class WaddleClient {
     send_raw_iq(xml: string): Promise<any>;
     send_reaction(to: string, msg_type: string, target_id: string, emojis: string[], thread_id?: string | null, thread_parent?: string | null): Promise<any>;
     send_retraction(to: string, msg_type: string, retracts_id: string, thread_id?: string | null, thread_parent?: string | null): Promise<any>;
+    /**
+     * Set the per-DM XEP-0492 notification mode for one direct-chat
+     * contact by merging into the Waddle DM-bookmark carrier (issue
+     * #720). The DM counterpart to [`Self::set_room_notification_mode`].
+     *
+     * Semantics:
+     * * Parse [`SetDmNotificationModeOptions`]; `dmJid` MUST parse as a
+     *   `BareJid` with a localpart, else a typed JS error (the PEP item
+     *   id is the contact bare JID).
+     * * Fetch existing DM items (first-publish `item-not-found` →
+     *   empty); find the one whose id == `dmJid` and read its hosted
+     *   `<notify/>` via [`read_dm_bookmark_notify`].
+     * * Merge the new mode via [`merge_notify`] (the single §3-conformant
+     *   core shared with the MUC carrier — foreign `<advanced/>` and
+     *   identity-scoped siblings preserved verbatim; rich opt-in (#719)
+     *   toggled).
+     * * The node is sparse / override-only: if the merged `<notify/>`
+     *   collapses to the §3 direct-chat default (`always`, no opt-in, no
+     *   foreign `<advanced/>`) per [`dm_notify_is_default`], RETRACT the
+     *   item and resolve to `Removed` instead of publishing. Otherwise
+     *   publish and resolve to `Ok` with the surfaced item — the chat
+     *   reconciles without a refetch.
+     * * `precondition-not-met` maps to the same `NodeConfigMismatch`
+     *   outcome the room path uses; other stanza errors map to `Error`
+     *   (the condition stays on the Rust side as a `tracing::warn`).
+     */
+    set_dm_notification_mode(options: any): Promise<any>;
     /**
      * Register a callback for inbound XMPP-native call events
      * (XEP-0353 JMI envelopes + XEP-0166 Jingle session control
