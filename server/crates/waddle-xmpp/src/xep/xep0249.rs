@@ -27,6 +27,8 @@
 use jid::BareJid;
 use minidom::Element;
 use tracing::debug;
+use waddle_xmpp_core::mam::ThreadId;
+use xmpp_parsers::message::{Message, MessageType};
 
 /// Namespace for XEP-0249 Direct MUC Invitations.
 pub const NS_CONFERENCE: &str = "jabber:x:conference";
@@ -40,6 +42,10 @@ pub struct DirectInvite {
     pub reason: Option<String>,
     /// Optional password for password-protected rooms.
     pub password: Option<String>,
+    /// Whether the room continues an existing one-to-one chat.
+    pub continue_chat: bool,
+    /// Optional one-to-one chat thread being continued.
+    pub thread: Option<ThreadId>,
 }
 
 impl DirectInvite {
@@ -49,6 +55,8 @@ impl DirectInvite {
             jid,
             reason: None,
             password: None,
+            continue_chat: false,
+            thread: None,
         }
     }
 
@@ -58,6 +66,8 @@ impl DirectInvite {
             jid,
             reason: Some(reason.into()),
             password: None,
+            continue_chat: false,
+            thread: None,
         }
     }
 
@@ -71,6 +81,8 @@ impl DirectInvite {
             jid,
             reason,
             password: Some(password.into()),
+            continue_chat: false,
+            thread: None,
         }
     }
 
@@ -82,6 +94,12 @@ impl DirectInvite {
     /// Set the password for the invitation.
     pub fn set_password(&mut self, password: impl Into<String>) {
         self.password = Some(password.into());
+    }
+
+    /// Mark the invitation as a continuation of a one-to-one chat.
+    pub fn set_continue(&mut self, thread: Option<ThreadId>) {
+        self.continue_chat = true;
+        self.thread = thread;
     }
 }
 
@@ -135,6 +153,15 @@ fn parse_invite_element(x_elem: &Element) -> Option<DirectInvite> {
         .attr("password")
         .filter(|s| !s.is_empty())
         .map(String::from);
+    let continue_chat = match x_elem.attr("continue") {
+        Some("true") | Some("1") => true,
+        Some("false") | Some("0") | None => false,
+        Some(_) => return None,
+    };
+    let thread = x_elem
+        .attr("thread")
+        .filter(|s| !s.is_empty())
+        .and_then(ThreadId::new);
 
     debug!(
         room = %jid,
@@ -147,6 +174,8 @@ fn parse_invite_element(x_elem: &Element) -> Option<DirectInvite> {
         jid,
         reason,
         password,
+        continue_chat,
+        thread,
     })
 }
 
@@ -173,50 +202,36 @@ pub fn build_direct_invite(invite: &DirectInvite) -> Element {
         );
     }
 
+    if invite.continue_chat {
+        builder = builder.attr(minidom::rxml::xml_ncname!("continue").to_owned(), "true");
+    }
+
+    if let Some(ref thread) = invite.thread {
+        builder = builder.attr(
+            minidom::rxml::xml_ncname!("thread").to_owned(),
+            thread.as_str(),
+        );
+    }
+
     builder.build()
 }
 
-/// Build a complete message stanza containing a direct MUC invitation.
+/// Build a typed message stanza containing a direct MUC invitation.
 ///
 /// # Arguments
 ///
 /// * `from` - The JID of the user sending the invitation
 /// * `to` - The JID of the user being invited
 /// * `invite` - The invitation details
-/// * `body` - Optional message body (some clients display this)
 ///
 /// # Returns
 ///
-/// An XML string representing the complete message stanza.
-pub fn build_invite_message(
-    from: &jid::Jid,
-    to: &jid::Jid,
-    invite: &DirectInvite,
-    body: Option<&str>,
-) -> String {
-    let invite_elem = build_direct_invite(invite);
-    let invite_xml = String::from(&invite_elem);
-
-    let body_xml = body
-        .map(|b| format!("<body>{}</body>", escape_xml(b)))
-        .unwrap_or_default();
-
-    format!(
-        "<message from='{}' to='{}'>{}{}</message>",
-        escape_xml(&from.to_string()),
-        escape_xml(&to.to_string()),
-        body_xml,
-        invite_xml
-    )
-}
-
-/// Escape XML special characters.
-fn escape_xml(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
+/// A typed message stanza. XML serialization happens at the transport boundary.
+pub fn build_invite_message(from: &jid::Jid, to: &jid::Jid, invite: &DirectInvite) -> Message {
+    let mut msg = Message::new_with_type(MessageType::Normal, Some(to.clone()));
+    msg.from = Some(from.clone());
+    msg.payloads.push(build_direct_invite(invite));
+    msg
 }
 
 #[cfg(test)]
@@ -283,8 +298,10 @@ mod tests {
         let xml = r#"<message xmlns='jabber:client'>
             <x xmlns='jabber:x:conference'
                jid='darkcave@macbeth.shakespeare.lit'
+               continue='true'
                reason='Hey Hecate, this is the place for all good witches!'
-               password='cauldronburn'/>
+               password='cauldronburn'
+               thread='e0ffe42b28561960c6b12b944a092794b9683a38'/>
         </message>"#;
         let element: Element = xml.parse().unwrap();
 
@@ -295,6 +312,11 @@ mod tests {
             Some("Hey Hecate, this is the place for all good witches!")
         );
         assert_eq!(invite.password.as_deref(), Some("cauldronburn"));
+        assert!(invite.continue_chat);
+        assert_eq!(
+            invite.thread.as_ref().map(ThreadId::as_str),
+            Some("e0ffe42b28561960c6b12b944a092794b9683a38")
+        );
     }
 
     #[test]
@@ -323,6 +345,31 @@ mod tests {
         </message>"#;
         let element: Element = xml.parse().unwrap();
         assert!(parse_direct_invite(&element).is_none());
+    }
+
+    #[test]
+    fn test_parse_direct_invite_invalid_continue() {
+        let xml = r#"<message xmlns='jabber:client'>
+            <x xmlns='jabber:x:conference'
+               jid='room@conference.example.com'
+               continue='maybe'/>
+        </message>"#;
+        let element: Element = xml.parse().unwrap();
+
+        assert!(parse_direct_invite(&element).is_none());
+    }
+
+    #[test]
+    fn test_parse_direct_invite_false_continue() {
+        let xml = r#"<message xmlns='jabber:client'>
+            <x xmlns='jabber:x:conference'
+               jid='room@conference.example.com'
+               continue='false'/>
+        </message>"#;
+        let element: Element = xml.parse().unwrap();
+
+        let invite = parse_direct_invite(&element).unwrap();
+        assert!(!invite.continue_chat);
     }
 
     #[test]
@@ -366,7 +413,7 @@ mod tests {
     #[test]
     fn test_build_direct_invite_full() {
         let jid: BareJid = "room@conference.example.com".parse().unwrap();
-        let password = format!("test-{}", uuid::Uuid::new_v4());
+        let password = uuid::Uuid::new_v4().to_string();
         let invite = DirectInvite::with_password(jid, Some("Join us!".to_string()), &password);
 
         let elem = build_direct_invite(&invite);
@@ -374,6 +421,20 @@ mod tests {
         assert_eq!(elem.attr("jid"), Some("room@conference.example.com"));
         assert_eq!(elem.attr("reason"), Some("Join us!"));
         assert_eq!(elem.attr("password"), Some(password.as_str()));
+        assert!(elem.attr("continue").is_none());
+        assert!(elem.attr("thread").is_none());
+    }
+
+    #[test]
+    fn test_build_direct_invite_continue_thread() {
+        let jid: BareJid = "room@conference.example.com".parse().unwrap();
+        let mut invite = DirectInvite::new(jid);
+        invite.set_continue(ThreadId::new("thread-1"));
+
+        let elem = build_direct_invite(&invite);
+
+        assert_eq!(elem.attr("continue"), Some("true"));
+        assert_eq!(elem.attr("thread"), Some("thread-1"));
     }
 
     #[test]
@@ -383,33 +444,36 @@ mod tests {
         let jid: BareJid = "darkcave@macbeth.shakespeare.lit".parse().unwrap();
         let invite = DirectInvite::with_reason(jid, "Join us!");
 
-        let msg = build_invite_message(&from, &to, &invite, None);
+        let msg = build_invite_message(&from, &to, &invite);
 
-        // Check the message wrapper has proper from/to attributes
-        assert!(msg.contains("from='crone1@shakespeare.lit/desktop'"));
-        assert!(msg.contains("to='hecate@shakespeare.lit'"));
-        // Check the invite element is present with correct namespace and attributes
-        assert!(msg.contains("jabber:x:conference"));
-        assert!(msg.contains("darkcave@macbeth.shakespeare.lit"));
-        assert!(msg.contains("Join us!"));
+        assert_eq!(msg.from.as_ref(), Some(&from));
+        assert_eq!(msg.to.as_ref(), Some(&to));
+        assert_eq!(msg.type_, MessageType::Normal);
+        assert!(msg.bodies.is_empty());
+
+        let invite_elem = msg
+            .payloads
+            .iter()
+            .find(|p| p.name() == "x" && p.ns() == NS_CONFERENCE)
+            .expect("direct invite payload");
+        assert_eq!(
+            invite_elem.attr("jid"),
+            Some("darkcave@macbeth.shakespeare.lit")
+        );
+        assert_eq!(invite_elem.attr("reason"), Some("Join us!"));
     }
 
     #[test]
-    fn test_build_invite_message_with_body() {
+    fn test_build_invite_message_has_no_body() {
         let from: jid::Jid = "user@example.com".parse().unwrap();
         let to: jid::Jid = "friend@example.com".parse().unwrap();
         let jid: BareJid = "room@conference.example.com".parse().unwrap();
         let invite = DirectInvite::new(jid);
 
-        let msg = build_invite_message(
-            &from,
-            &to,
-            &invite,
-            Some("You've been invited to join a room!"),
-        );
+        let msg = build_invite_message(&from, &to, &invite);
 
-        assert!(msg.contains("<body>You&apos;ve been invited to join a room!</body>"));
-        assert!(msg.contains("xmlns='jabber:x:conference'"));
+        assert!(msg.bodies.is_empty());
+        assert!(message_has_direct_invite(&msg));
     }
 
     #[test]
@@ -423,7 +487,7 @@ mod tests {
         invite.set_reason("Come join!");
         assert_eq!(invite.reason.as_deref(), Some("Come join!"));
 
-        let password = format!("test-{}", uuid::Uuid::new_v4());
+        let password = uuid::Uuid::new_v4().to_string();
         invite.set_password(&password);
         assert!(invite.password.is_some());
     }
@@ -434,7 +498,7 @@ mod tests {
         let original = DirectInvite::with_password(
             jid,
             Some("Test roundtrip".to_string()),
-            format!("test-{}", uuid::Uuid::new_v4()),
+            uuid::Uuid::new_v4().to_string(),
         );
 
         // Build the element
@@ -459,10 +523,31 @@ mod tests {
         let mut invite = DirectInvite::new(jid);
         invite.set_reason("Join <us> & have fun!");
 
-        let msg = build_invite_message(&from, &to, &invite, Some("Check this <out>!"));
+        let msg = build_invite_message(&from, &to, &invite);
+        let elem = Element::from(msg.clone());
+        let xml = String::from(&elem);
 
-        // Verify special characters are escaped in body
-        assert!(msg.contains("Check this &lt;out&gt;!"));
-        // Note: The element builder handles attribute escaping, so reason may appear differently
+        assert!(xml.contains("Join &lt;us&gt; &amp; have fun!"));
+
+        let parsed = parse_direct_invite_from_message(&msg).unwrap();
+        assert_eq!(parsed.reason.as_deref(), Some("Join <us> & have fun!"));
+    }
+
+    #[test]
+    fn test_xep0249_module_does_not_hand_build_xml() {
+        let source = include_str!("xep0249.rs");
+        let builder = source
+            .split("pub fn build_invite_message")
+            .nth(1)
+            .and_then(|rest| rest.split("#[cfg(test)]").next())
+            .expect("build_invite_message source");
+        let forbidden_macro = ["format", "!"].join("");
+        let forbidden_escape_helper = ["escape", "_xml"].join("");
+
+        assert!(!builder.contains(&forbidden_escape_helper));
+        assert!(!builder.contains(&forbidden_macro));
+        assert!(!builder.contains("<message"));
+        assert!(!builder.contains("<body"));
+        assert!(!builder.contains("String::from"));
     }
 }
