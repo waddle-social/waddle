@@ -1,7 +1,7 @@
 //! Waddle MUC thread metadata.
 //!
-//! This is a private Waddle message payload used by the chat UI while real
-//! XEP-0508 support is implemented through PubSub/XEP-0472.
+//! This is a private Waddle message payload used by the chat UI while official
+//! forum support is implemented through PubSub/XEP-0472.
 //!
 //! ## XML Format
 //!

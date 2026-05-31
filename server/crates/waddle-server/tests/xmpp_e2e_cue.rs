@@ -22,72 +22,6 @@ use xmpp_parsers::presence::{Presence, Show as PresenceShow, Type as PresenceTyp
 
 static TEST_SERIAL: Mutex<()> = Mutex::const_new(());
 const RECV_TIMEOUT: Duration = Duration::from_secs(10);
-const SUPPORTED_XEPS: &[&str] = &[
-    "XEP-0004",
-    "XEP-0012",
-    "XEP-0030",
-    "XEP-0045",
-    "XEP-0048",
-    "XEP-0049",
-    "XEP-0050",
-    "XEP-0054",
-    "XEP-0055",
-    "XEP-0059",
-    "XEP-0060",
-    "XEP-0084",
-    "XEP-0085",
-    "XEP-0092",
-    "XEP-0103",
-    "XEP-0107",
-    "XEP-0108",
-    "XEP-0115",
-    "XEP-0118",
-    "XEP-0153",
-    "XEP-0160",
-    "XEP-0163",
-    "XEP-0184",
-    "XEP-0191",
-    "XEP-0198",
-    "XEP-0199",
-    "XEP-0201",
-    "XEP-0202",
-    "XEP-0203",
-    "XEP-0237",
-    "XEP-0280",
-    "XEP-0292",
-    "XEP-0297",
-    "XEP-0308",
-    "XEP-0313",
-    "XEP-0317",
-    "XEP-0333",
-    "XEP-0334",
-    "XEP-0357",
-    "XEP-0359",
-    "XEP-0363",
-    "XEP-0372",
-    "XEP-0402",
-    "XEP-0410",
-    "XEP-0421",
-    "XEP-0424",
-    "XEP-0425",
-    "XEP-0428",
-    "XEP-0430",
-    "XEP-0431",
-    "XEP-0433",
-    "XEP-0444",
-    "XEP-0446",
-    "XEP-0447",
-    "XEP-0461",
-    "XEP-0472",
-    "XEP-0492",
-    "XEP-0501",
-    "XEP-0503",
-    "XEP-0511",
-    "XEP-0513",
-    // xCal calendaring lives under the ProtoXEP umbrella (no XEP
-    // number yet); the cuenv scenario tags itself with this label.
-    "PROTO-CALENDAR",
-];
 
 const ADVERTISED_FEATURE_XEPS: &[(&str, &str)] = &[
     ("http://jabber.org/protocol/disco#info", "XEP-0030"),
@@ -159,6 +93,10 @@ const ADVERTISED_FEATURE_XEPS: &[(&str, &str)] = &[
     ),
     ("http://jabber.org/protocol/pubsub#multi-items", "XEP-0060"),
     ("http://jabber.org/protocol/pubsub#item-ids", "XEP-0060"),
+    (
+        "http://jabber.org/protocol/pubsub#publish-only-affiliation",
+        "XEP-0060",
+    ),
     ("jabber:iq:private", "XEP-0049"),
     ("http://jabber.org/protocol/commands", "XEP-0050"),
     ("vcard-temp", "XEP-0054"),
@@ -179,6 +117,13 @@ const ADVERTISED_FEATURE_XEPS: &[(&str, &str)] = &[
     ("urn:xmpp:mentions:0", "XEP-0513"),
     ("urn:xmpp:mentions:0#channel", "XEP-0513"),
     ("jabber:iq:search", "XEP-0055"),
+    ("urn:xmpp:jingle:1", "XEP-0166"),
+    ("urn:xmpp:jingle:apps:rtp:1", "XEP-0167"),
+    ("urn:xmpp:jingle:apps:rtp:audio", "XEP-0167"),
+    ("urn:xmpp:jingle:apps:rtp:video", "XEP-0167"),
+    ("urn:xmpp:jingle-message:0", "XEP-0353"),
+    ("urn:xmpp:extdisco:2", "XEP-0215"),
+    ("urn:xmpp:jingle:muji:0", "XEP-0272"),
     ("urn:xmpp:pubsub-social-feed:0", "XEP-0472"),
     ("urn:xmpp:stories:0", "XEP-0501"),
     ("urn:xmpp:inbox:0", "XEP-0430"),
@@ -189,34 +134,214 @@ const ADVERTISED_FEATURE_XEPS: &[(&str, &str)] = &[
     ("urn:ietf:params:xml:ns:xcal", "PROTO-CALENDAR"),
 ];
 
-const ADVERTISED_FEATURE_EXEMPTIONS: &[&str] = &[
-    "jabber:iq:roster",
-    "muc_membersonly",
-    "muc_moderated",
-    "muc_nonanonymous",
-    "muc_open",
-    "muc_persistent",
-    "muc_public",
-    "muc_semianonymous",
-    "muc_temporary",
-    "muc_unmoderated",
-    "urn:waddle:admin:channels:affiliations:0",
-    "urn:waddle:admin:channels:create:0",
-    "urn:waddle:admin:channels:delete:0",
-    "urn:waddle:admin:channels:kick:0",
-    "urn:waddle:admin:channels:list:0",
-    "urn:waddle:admin:channels:occupants:0",
-    "urn:waddle:admin:channels:set-affiliation:0",
-    "urn:waddle:admin:channels:update:0",
-    "urn:waddle:admin:spaces:create:0",
-    "urn:waddle:admin:spaces:delete:0",
-    "urn:waddle:admin:spaces:list:0",
-    "urn:waddle:admin:spaces:members:0",
-    "urn:waddle:admin:spaces:set-role:0",
-    "urn:waddle:admin:spaces:update:0",
-    "urn:waddle:admin:users:list:0",
-    "urn:waddle:mam-thread:0",
+const ADVERTISED_FEATURE_EXEMPTIONS: &[FeatureCoverageExemption] = &[
+    FeatureCoverageExemption {
+        feature: "jabber:iq:roster",
+        reason: "Core roster feature has no XEP-numbered module in this repository.",
+    },
+    FeatureCoverageExemption {
+        feature: "muc_membersonly",
+        reason: "XEP-0045 room configuration identity flag, not a separate XEP namespace.",
+    },
+    FeatureCoverageExemption {
+        feature: "muc_moderated",
+        reason: "XEP-0045 room configuration identity flag, not a separate XEP namespace.",
+    },
+    FeatureCoverageExemption {
+        feature: "muc_nonanonymous",
+        reason: "XEP-0045 room configuration identity flag, not a separate XEP namespace.",
+    },
+    FeatureCoverageExemption {
+        feature: "muc_open",
+        reason: "XEP-0045 room configuration identity flag, not a separate XEP namespace.",
+    },
+    FeatureCoverageExemption {
+        feature: "muc_persistent",
+        reason: "XEP-0045 room configuration identity flag, not a separate XEP namespace.",
+    },
+    FeatureCoverageExemption {
+        feature: "muc_public",
+        reason: "XEP-0045 room configuration identity flag, not a separate XEP namespace.",
+    },
+    FeatureCoverageExemption {
+        feature: "muc_semianonymous",
+        reason: "XEP-0045 room configuration identity flag, not a separate XEP namespace.",
+    },
+    FeatureCoverageExemption {
+        feature: "muc_temporary",
+        reason: "XEP-0045 room configuration identity flag, not a separate XEP namespace.",
+    },
+    FeatureCoverageExemption {
+        feature: "muc_unmoderated",
+        reason: "XEP-0045 room configuration identity flag, not a separate XEP namespace.",
+    },
+    FeatureCoverageExemption {
+        feature: "urn:waddle:admin:channels:affiliations:0",
+        reason: "Private Waddle ad-hoc command namespace, not official XEP coverage.",
+    },
+    FeatureCoverageExemption {
+        feature: "urn:waddle:admin:channels:create:0",
+        reason: "Private Waddle ad-hoc command namespace, not official XEP coverage.",
+    },
+    FeatureCoverageExemption {
+        feature: "urn:waddle:admin:channels:delete:0",
+        reason: "Private Waddle ad-hoc command namespace, not official XEP coverage.",
+    },
+    FeatureCoverageExemption {
+        feature: "urn:waddle:admin:channels:kick:0",
+        reason: "Private Waddle ad-hoc command namespace, not official XEP coverage.",
+    },
+    FeatureCoverageExemption {
+        feature: "urn:waddle:admin:channels:list:0",
+        reason: "Private Waddle ad-hoc command namespace, not official XEP coverage.",
+    },
+    FeatureCoverageExemption {
+        feature: "urn:waddle:admin:channels:occupants:0",
+        reason: "Private Waddle ad-hoc command namespace, not official XEP coverage.",
+    },
+    FeatureCoverageExemption {
+        feature: "urn:waddle:admin:channels:set-affiliation:0",
+        reason: "Private Waddle ad-hoc command namespace, not official XEP coverage.",
+    },
+    FeatureCoverageExemption {
+        feature: "urn:waddle:admin:channels:update:0",
+        reason: "Private Waddle ad-hoc command namespace, not official XEP coverage.",
+    },
+    FeatureCoverageExemption {
+        feature: "urn:waddle:admin:spaces:create:0",
+        reason: "Private Waddle ad-hoc command namespace, not official XEP coverage.",
+    },
+    FeatureCoverageExemption {
+        feature: "urn:waddle:admin:spaces:delete:0",
+        reason: "Private Waddle ad-hoc command namespace, not official XEP coverage.",
+    },
+    FeatureCoverageExemption {
+        feature: "urn:waddle:admin:spaces:list:0",
+        reason: "Private Waddle ad-hoc command namespace, not official XEP coverage.",
+    },
+    FeatureCoverageExemption {
+        feature: "urn:waddle:admin:spaces:members:0",
+        reason: "Private Waddle ad-hoc command namespace, not official XEP coverage.",
+    },
+    FeatureCoverageExemption {
+        feature: "urn:waddle:admin:spaces:set-role:0",
+        reason: "Private Waddle ad-hoc command namespace, not official XEP coverage.",
+    },
+    FeatureCoverageExemption {
+        feature: "urn:waddle:admin:spaces:update:0",
+        reason: "Private Waddle ad-hoc command namespace, not official XEP coverage.",
+    },
+    FeatureCoverageExemption {
+        feature: "urn:waddle:admin:users:list:0",
+        reason: "Private Waddle ad-hoc command namespace, not official XEP coverage.",
+    },
+    FeatureCoverageExemption {
+        feature: "urn:waddle:mam-thread:0",
+        reason: "Private Waddle MAM extension namespace, not official XEP coverage.",
+    },
+    FeatureCoverageExemption {
+        feature: "urn:waddle:transports:livekit:0",
+        reason: "Private Waddle Jingle transport namespace, not official XEP coverage.",
+    },
 ];
+
+const CUE_ONLY_XEP_TAGS: &[XepCoverageExemption] = &[
+    XepCoverageExemption {
+        xep: "XEP-0103",
+        reason: "URL address payload is exercised through the FileShare CUE DSL; no standalone module exists.",
+    },
+    XepCoverageExemption {
+        xep: "XEP-0511",
+        reason: "Link metadata enrichment is server behavior exercised by CUE; no standalone module exists.",
+    },
+    XepCoverageExemption {
+        xep: "PROTO-CALENDAR",
+        reason: "XSF ProtoXEP xCal node has no assigned XEP number.",
+    },
+];
+
+const IMPLEMENTED_XEP_COVERAGE_EXEMPTIONS: &[XepCoverageExemption] = &[
+    XepCoverageExemption {
+        xep: "XEP-0077",
+        reason: "Library-only registration parser is not advertised by the server; XML-builder fix/coverage tracked separately.",
+    },
+    XepCoverageExemption {
+        xep: "XEP-0249",
+        reason: "Library-only direct-invite helper is not wired into server behavior; XML-builder fix/coverage tracked separately.",
+    },
+    XepCoverageExemption {
+        xep: "XEP-0319",
+        reason: "Library-only idle-presence element helper is not advertised or synthesized by the server.",
+    },
+    XepCoverageExemption {
+        xep: "XEP-0377",
+        reason: "Spam-reporting payload helper is not wired into server blocking behavior yet.",
+    },
+    XepCoverageExemption {
+        xep: "XEP-0392",
+        reason: "Pure deterministic color-generation library with no server wire behavior.",
+    },
+    XepCoverageExemption {
+        xep: "XEP-0401",
+        reason: "Invite command data model is not registered as a server ad-hoc command yet.",
+    },
+    XepCoverageExemption {
+        xep: "XEP-0437",
+        reason: "Unread tracker is an in-memory library helper with no advertised server protocol surface.",
+    },
+    XepCoverageExemption {
+        xep: "XEP-0445",
+        reason: "Pre-auth registration element helper is not wired into a server registration flow yet.",
+    },
+    XepCoverageExemption {
+        xep: "XEP-0448",
+        reason: "Encrypted SFS payload model is client-carried message XML with no server-specific behavior.",
+    },
+    XepCoverageExemption {
+        xep: "XEP-0449",
+        reason: "Sticker payload model is client-carried message XML with no server-specific behavior.",
+    },
+    XepCoverageExemption {
+        xep: "XEP-0452",
+        reason: "Legacy MUC mention-notification payload is not advertised; server behavior uses XEP-0513.",
+    },
+    XepCoverageExemption {
+        xep: "XEP-0469",
+        reason: "Bookmark pinning helper is only consumed inside bookmark payload projection, not advertised separately.",
+    },
+    XepCoverageExemption {
+        xep: "XEP-0470",
+        reason: "PubSub attachment helper backs Waddle pin projection but is not advertised as standalone XEP-0470 support.",
+    },
+    XepCoverageExemption {
+        xep: "XEP-0486",
+        reason: "MUC avatar cache helper has no advertised server feature or dedicated server behavior yet.",
+    },
+    XepCoverageExemption {
+        xep: "XEP-0488",
+        reason: "MUC token invite payload helper is not wired into server room invite behavior yet.",
+    },
+    XepCoverageExemption {
+        xep: "XEP-0500",
+        reason: "Slow-mode config/rate-limit helper is not wired into MUC send authorization yet.",
+    },
+    XepCoverageExemption {
+        xep: "XEP-0502",
+        reason: "MUC activity payload helper is not advertised or emitted by the server yet.",
+    },
+];
+
+#[derive(Debug, Clone, Copy)]
+struct XepCoverageExemption {
+    xep: &'static str,
+    reason: &'static str,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FeatureCoverageExemption {
+    feature: &'static str,
+    reason: &'static str,
+}
 
 #[derive(Debug, Deserialize)]
 struct ScenarioFile {
@@ -700,57 +825,96 @@ async fn cue_scenarios_run_over_websocket() -> Result<()> {
 }
 
 #[test]
-fn cue_scenarios_cover_supported_xeps_manifest() -> Result<()> {
+fn cue_scenario_xep_tags_are_known_and_evidence_backed() -> Result<()> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/xmpp_e2e_scenarios");
-    let supported = SUPPORTED_XEPS.iter().copied().collect::<BTreeSet<_>>();
-    let covered = cue_scenario_xep_tags(&root)?;
+    let known = known_cue_xep_tags()?;
     let mut unknown = Vec::new();
+    let mut missing_evidence = Vec::new();
 
     for scenario_file in discover_scenario_files(&root)? {
         let scenario = load_scenario_from_file(&root, &scenario_file)
             .with_context(|| format!("load {}", scenario_file.display()))?;
+        let evidence = scenario_xep_evidence(&scenario);
         for xep in &scenario.xeps {
-            if !supported.contains(xep.as_str()) {
+            if !known.contains(xep.as_str()) {
                 unknown.push(format!("{} declares {xep}", scenario.name));
+                continue;
+            }
+            if !known_xep_evidence_rules().contains(xep.as_str()) {
+                missing_evidence.push(format!(
+                    "{} declares {xep} with no evidence rule",
+                    scenario.name
+                ));
+                continue;
+            }
+            if !evidence.contains(xep.as_str()) {
+                missing_evidence.push(format!(
+                    "{} declares {xep} without structural step evidence",
+                    scenario.name
+                ));
             }
         }
     }
 
-    let missing = SUPPORTED_XEPS
-        .iter()
-        .filter(|xep| !covered.contains(**xep))
-        .copied()
-        .collect::<Vec<_>>();
-
-    if missing.is_empty() && unknown.is_empty() {
+    if unknown.is_empty() && missing_evidence.is_empty() {
         return Ok(());
     }
 
     Err(anyhow!(
-        "CUE XEP coverage drift: missing scenario tags for [{}]; unknown tags [{}]",
-        missing.join(", "),
-        unknown.join(", ")
+        "CUE XEP tag drift: unknown tags [{}]; missing evidence [{}]",
+        unknown.join(", "),
+        missing_evidence.join(", ")
     ))
 }
 
 #[test]
-fn advertised_features_have_cue_xep_coverage() -> Result<()> {
+fn implemented_xep_modules_have_explicit_coverage() -> Result<()> {
+    let implemented = implemented_official_xep_modules()?;
+    let rust = dedicated_rust_xep_suites()?;
+    let exemptions = xep_exemption_map(IMPLEMENTED_XEP_COVERAGE_EXEMPTIONS)?;
+    let mut missing = Vec::new();
+    let mut stale_exemptions = Vec::new();
+
+    for xep in &implemented {
+        if rust.contains(xep.as_str()) || exemptions.contains_key(xep.as_str()) {
+            continue;
+        }
+        missing.push(xep.clone());
+    }
+
+    for xep in exemptions.keys() {
+        if !implemented.contains(*xep) {
+            stale_exemptions.push((*xep).to_string());
+        }
+    }
+
+    if missing.is_empty() && stale_exemptions.is_empty() {
+        return Ok(());
+    }
+
+    Err(anyhow!(
+        "implemented XEP coverage drift: missing explicit coverage [{}]; stale exemptions [{}]",
+        missing.join(", "),
+        stale_exemptions.join(", ")
+    ))
+}
+
+#[test]
+fn advertised_features_have_explicit_xep_coverage() -> Result<()> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/xmpp_e2e_scenarios");
-    let covered = cue_scenario_xep_tags(&root)?;
+    let cue_features = meaningful_cue_feature_coverage(&root)?;
+    let rust_features = meaningful_rust_feature_coverage()?;
     let feature_xeps = ADVERTISED_FEATURE_XEPS
         .iter()
         .copied()
         .collect::<BTreeMap<_, _>>();
-    let exemptions = ADVERTISED_FEATURE_EXEMPTIONS
-        .iter()
-        .copied()
-        .collect::<BTreeSet<_>>();
+    let exemptions = feature_exemption_map(ADVERTISED_FEATURE_EXEMPTIONS)?;
     let advertised = advertised_feature_vars();
 
     let unmapped = advertised
         .iter()
         .filter(|feature| !feature_xeps.contains_key(feature.as_str()))
-        .filter(|feature| !exemptions.contains(feature.as_str()))
+        .filter(|feature| !exemptions.contains_key(feature.as_str()))
         .cloned()
         .collect::<Vec<_>>();
     let uncovered = advertised
@@ -758,7 +922,10 @@ fn advertised_features_have_cue_xep_coverage() -> Result<()> {
         .filter_map(|feature| {
             feature_xeps
                 .get(feature.as_str())
-                .filter(|xep| !covered.contains(**xep))
+                .filter(|_| {
+                    !rust_features.contains(feature.as_str())
+                        && !cue_features.contains(feature.as_str())
+                })
                 .map(|xep| format!("{feature} -> {xep}"))
         })
         .collect::<Vec<_>>();
@@ -768,20 +935,668 @@ fn advertised_features_have_cue_xep_coverage() -> Result<()> {
     }
 
     Err(anyhow!(
-        "advertised feature coverage drift: unmapped features [{}]; uncovered XEPs [{}]",
+        "advertised feature coverage drift: unmapped features [{}]; uncovered feature XEPs [{}]",
         unmapped.join(", "),
         uncovered.join(", ")
     ))
 }
 
-fn cue_scenario_xep_tags(root: &Path) -> Result<BTreeSet<String>> {
+fn known_cue_xep_tags() -> Result<BTreeSet<String>> {
+    let mut known = BTreeSet::new();
+    known.extend(implemented_official_xep_modules()?);
+    known.extend(
+        ADVERTISED_FEATURE_XEPS
+            .iter()
+            .map(|(_, xep)| (*xep).to_string()),
+    );
+    known.extend(
+        CUE_ONLY_XEP_TAGS
+            .iter()
+            .map(|exemption| exemption.xep.to_string()),
+    );
+    Ok(known)
+}
+
+fn meaningful_cue_feature_coverage(root: &Path) -> Result<BTreeSet<String>> {
     let mut covered = BTreeSet::new();
     for scenario_file in discover_scenario_files(root)? {
         let scenario = load_scenario_from_file(root, &scenario_file)
             .with_context(|| format!("load {}", scenario_file.display()))?;
-        covered.extend(scenario.xeps);
+        covered.extend(scenario_feature_evidence(&scenario));
     }
     Ok(covered)
+}
+
+fn known_xep_evidence_rules() -> BTreeSet<&'static str> {
+    [
+        "PROTO-CALENDAR",
+        "XEP-0004",
+        "XEP-0012",
+        "XEP-0030",
+        "XEP-0045",
+        "XEP-0048",
+        "XEP-0049",
+        "XEP-0050",
+        "XEP-0054",
+        "XEP-0055",
+        "XEP-0059",
+        "XEP-0060",
+        "XEP-0084",
+        "XEP-0085",
+        "XEP-0092",
+        "XEP-0103",
+        "XEP-0107",
+        "XEP-0108",
+        "XEP-0115",
+        "XEP-0118",
+        "XEP-0153",
+        "XEP-0160",
+        "XEP-0163",
+        "XEP-0184",
+        "XEP-0191",
+        "XEP-0198",
+        "XEP-0199",
+        "XEP-0201",
+        "XEP-0202",
+        "XEP-0203",
+        "XEP-0237",
+        "XEP-0280",
+        "XEP-0292",
+        "XEP-0297",
+        "XEP-0308",
+        "XEP-0313",
+        "XEP-0317",
+        "XEP-0333",
+        "XEP-0334",
+        "XEP-0357",
+        "XEP-0359",
+        "XEP-0363",
+        "XEP-0372",
+        "XEP-0402",
+        "XEP-0410",
+        "XEP-0421",
+        "XEP-0424",
+        "XEP-0425",
+        "XEP-0428",
+        "XEP-0430",
+        "XEP-0431",
+        "XEP-0433",
+        "XEP-0444",
+        "XEP-0446",
+        "XEP-0447",
+        "XEP-0461",
+        "XEP-0472",
+        "XEP-0492",
+        "XEP-0501",
+        "XEP-0503",
+        "XEP-0511",
+        "XEP-0513",
+    ]
+    .into_iter()
+    .collect()
+}
+
+fn scenario_xep_evidence(scenario: &Scenario) -> BTreeSet<&'static str> {
+    let mut evidence = BTreeSet::new();
+    for step in &scenario.steps {
+        add_step_xep_evidence(step, &mut evidence);
+    }
+    evidence
+}
+
+fn scenario_feature_evidence(scenario: &Scenario) -> BTreeSet<String> {
+    let mut evidence = BTreeSet::new();
+    let mut disco_info_ids = BTreeSet::new();
+    for step in &scenario.steps {
+        if let Step::SendIq {
+            id: Some(id),
+            payload: Some(payload),
+            ..
+        } = step
+        {
+            if payload.name == "query" && payload.ns == "http://jabber.org/protocol/disco#info" {
+                disco_info_ids.insert(id.as_str());
+            }
+        }
+        if let Step::ExpectIq {
+            id: Some(id),
+            type_: Some(IqResponseKind::Result),
+            contains,
+            elements,
+            ..
+        } = step
+        {
+            if disco_info_ids.contains(id.as_str()) {
+                for text in contains {
+                    add_text_feature_evidence(text, &mut evidence);
+                }
+                for element in elements {
+                    add_xml_spec_feature_evidence(element, &mut evidence);
+                }
+            }
+        }
+    }
+    evidence
+}
+
+fn add_step_xep_evidence(step: &Step, evidence: &mut BTreeSet<&'static str>) {
+    match step {
+        Step::EnableCarbons { .. } => {
+            evidence.insert("XEP-0280");
+        }
+        Step::StreamManagement { .. } => {
+            evidence.insert("XEP-0198");
+        }
+        Step::DisconnectActor { .. } => {
+            evidence.insert("XEP-0160");
+        }
+        Step::ConnectActor { .. } | Step::WaitMillis { .. } | Step::ExpectNoStanza { .. } => {}
+        Step::SendIq { payload, .. } => {
+            if let Some(payload) = payload {
+                add_xml_spec_xep_evidence(payload, evidence);
+            }
+            if let Step::SendIq {
+                to: Some(to),
+                payload: Some(payload),
+                ..
+            } = step
+            {
+                if payload.name == "ping" && payload.ns == "urn:xmpp:ping" && to.contains('/') {
+                    evidence.insert("XEP-0410");
+                }
+            }
+        }
+        Step::ExpectIq {
+            contains, elements, ..
+        } => {
+            for text in contains {
+                add_text_xep_evidence(text, evidence);
+            }
+            for element in elements {
+                add_xml_spec_xep_evidence(element, evidence);
+            }
+        }
+        Step::SendPresence { payloads, .. }
+        | Step::ExpectPresence {
+            elements: payloads, ..
+        } => {
+            for payload in payloads {
+                add_xml_spec_xep_evidence(payload, evidence);
+            }
+        }
+        Step::SendMessage { body, payloads, .. } => {
+            add_payloads_xep_evidence(payloads, evidence);
+            if body.is_some()
+                && payloads
+                    .iter()
+                    .any(|payload| matches!(payload, Payload::FileShare { .. }))
+            {
+                evidence.insert("XEP-0428");
+            }
+        }
+        Step::SendMessageBurst { .. } => {}
+        Step::ExpectMessage {
+            payloads,
+            contains,
+            elements,
+            ..
+        }
+        | Step::ExpectCarbon {
+            payloads,
+            contains,
+            elements,
+            ..
+        }
+        | Step::ExpectMamResult {
+            payloads,
+            contains,
+            elements,
+            ..
+        } => {
+            add_payloads_xep_evidence(payloads, evidence);
+            for text in contains {
+                add_text_xep_evidence(text, evidence);
+            }
+            for element in elements {
+                add_xml_spec_xep_evidence(element, evidence);
+            }
+            if matches!(step, Step::ExpectMamResult { .. }) {
+                evidence.insert("XEP-0297");
+            }
+        }
+        Step::JoinMuc { .. }
+        | Step::SetMucAffiliation { .. }
+        | Step::ExpectMucAffiliation { .. }
+        | Step::ExpectMucAdminDenied { .. } => {
+            evidence.insert("XEP-0045");
+        }
+        Step::QueryMam { fulltext, .. } => {
+            evidence.insert("XEP-0004");
+            evidence.insert("XEP-0059");
+            evidence.insert("XEP-0313");
+            if fulltext.is_some() {
+                evidence.insert("XEP-0431");
+            }
+        }
+        Step::ExpectNoMamResult {
+            contains, elements, ..
+        } => {
+            for text in contains {
+                add_text_xep_evidence(text, evidence);
+            }
+            for element in elements {
+                add_xml_spec_xep_evidence(element, evidence);
+            }
+        }
+        Step::ExpectFrame {
+            contains, elements, ..
+        } => {
+            for text in contains {
+                add_text_xep_evidence(text, evidence);
+            }
+            for element in elements {
+                add_xml_spec_xep_evidence(element, evidence);
+            }
+        }
+        Step::DrainFrames {
+            contains, elements, ..
+        } => {
+            for text in contains {
+                add_text_xep_evidence(text, evidence);
+            }
+            for element in elements {
+                add_xml_spec_xep_evidence(element, evidence);
+            }
+        }
+    }
+}
+
+fn add_payloads_xep_evidence(payloads: &[Payload], evidence: &mut BTreeSet<&'static str>) {
+    for payload in payloads {
+        match payload {
+            Payload::FileShare { .. } => {
+                evidence.insert("XEP-0103");
+                evidence.insert("XEP-0446");
+                evidence.insert("XEP-0447");
+            }
+            Payload::LinkMetadata { .. } => {
+                evidence.insert("XEP-0511");
+            }
+            Payload::MessageCorrection { .. } => {
+                evidence.insert("XEP-0308");
+            }
+            Payload::Reactions { .. } => {
+                evidence.insert("XEP-0444");
+            }
+            Payload::ProcessingHint { .. } => {
+                evidence.insert("XEP-0334");
+            }
+            Payload::PinAttachment { .. } | Payload::PinEvent { .. } => {}
+            Payload::Xml {
+                element,
+                expect_elements,
+            } => {
+                add_xml_spec_xep_evidence(element, evidence);
+                for element in expect_elements {
+                    add_xml_spec_xep_evidence(element, evidence);
+                }
+            }
+        }
+    }
+}
+
+fn add_xml_spec_xep_evidence(element: &XmlElementSpec, evidence: &mut BTreeSet<&'static str>) {
+    add_namespace_xep_evidence(&element.ns, evidence);
+    for value in element.attrs.values().chain(element.attrs_from.values()) {
+        add_text_xep_evidence(value, evidence);
+    }
+    if let Some(text) = &element.text {
+        add_text_xep_evidence(text, evidence);
+    }
+    for child in &element.children {
+        add_xml_spec_xep_evidence(child, evidence);
+    }
+}
+
+fn add_xml_spec_feature_evidence(element: &XmlElementSpec, evidence: &mut BTreeSet<String>) {
+    add_text_feature_evidence(&element.ns, evidence);
+    for value in element.attrs.values().chain(element.attrs_from.values()) {
+        add_text_feature_evidence(value, evidence);
+    }
+    if let Some(text) = &element.text {
+        add_text_feature_evidence(text, evidence);
+    }
+    for child in &element.children {
+        add_xml_spec_feature_evidence(child, evidence);
+    }
+}
+
+fn add_text_xep_evidence(text: &str, evidence: &mut BTreeSet<&'static str>) {
+    for (needle, xep) in [
+        ("urn:ietf:params:xml:ns:xcal", "PROTO-CALENDAR"),
+        ("jabber:x:data", "XEP-0004"),
+        ("jabber:iq:last", "XEP-0012"),
+        ("http://jabber.org/protocol/disco#info", "XEP-0030"),
+        ("http://jabber.org/protocol/disco#items", "XEP-0030"),
+        ("http://jabber.org/protocol/muc", "XEP-0045"),
+        ("storage:bookmarks", "XEP-0048"),
+        ("jabber:iq:private", "XEP-0049"),
+        ("http://jabber.org/protocol/commands", "XEP-0050"),
+        ("vcard-temp", "XEP-0054"),
+        ("jabber:iq:search", "XEP-0055"),
+        ("http://jabber.org/protocol/pubsub", "XEP-0060"),
+        ("http://jabber.org/protocol/pubsub#pep", "XEP-0163"),
+        ("urn:xmpp:avatar:metadata", "XEP-0084"),
+        ("urn:xmpp:avatar:data", "XEP-0084"),
+        ("http://jabber.org/protocol/chatstates", "XEP-0085"),
+        ("jabber:iq:version", "XEP-0092"),
+        ("http://jabber.org/protocol/mood", "XEP-0107"),
+        ("http://jabber.org/protocol/activity", "XEP-0108"),
+        ("http://jabber.org/protocol/caps", "XEP-0115"),
+        ("http://jabber.org/protocol/tune", "XEP-0118"),
+        ("vcard-temp:x:update", "XEP-0153"),
+        ("urn:xmpp:receipts", "XEP-0184"),
+        ("urn:xmpp:blocking", "XEP-0191"),
+        ("urn:xmpp:sm:3", "XEP-0198"),
+        ("urn:xmpp:ping", "XEP-0199"),
+        ("urn:xmpp:time", "XEP-0202"),
+        ("urn:xmpp:delay", "XEP-0203"),
+        ("urn:xmpp:features:rosterver", "XEP-0237"),
+        ("urn:ietf:params:xml:ns:vcard-4.0", "XEP-0292"),
+        ("urn:xmpp:forward:0", "XEP-0297"),
+        ("urn:xmpp:message-correct:0", "XEP-0308"),
+        ("urn:xmpp:mam:2", "XEP-0313"),
+        ("urn:xmpp:hats:0", "XEP-0317"),
+        ("urn:xmpp:chat-markers:0", "XEP-0333"),
+        ("urn:xmpp:push:0", "XEP-0357"),
+        ("urn:xmpp:sid:0", "XEP-0359"),
+        ("urn:xmpp:http:upload:0", "XEP-0363"),
+        ("urn:xmpp:reference:0", "XEP-0372"),
+        ("urn:xmpp:bookmarks:1", "XEP-0402"),
+        ("urn:xmpp:occupant-id:0", "XEP-0421"),
+        ("urn:xmpp:message-retract:1", "XEP-0424"),
+        ("urn:xmpp:message-moderate:1", "XEP-0425"),
+        ("urn:xmpp:fallback:0", "XEP-0428"),
+        ("urn:xmpp:inbox:0", "XEP-0430"),
+        ("urn:xmpp:fulltext:0", "XEP-0431"),
+        ("urn:xmpp:channel-search:0", "XEP-0433"),
+        ("urn:xmpp:reactions:0", "XEP-0444"),
+        ("urn:xmpp:file:metadata:0", "XEP-0446"),
+        ("urn:xmpp:sfs:0", "XEP-0447"),
+        ("urn:xmpp:reply:0", "XEP-0461"),
+        ("urn:xmpp:pubsub-social-feed:0", "XEP-0472"),
+        ("urn:xmpp:notification-settings:1", "XEP-0492"),
+        ("urn:xmpp:stories:0", "XEP-0501"),
+        ("urn:xmpp:spaces:0", "XEP-0503"),
+        ("urn:xmpp:mentions:0", "XEP-0513"),
+    ] {
+        if text.contains(needle) {
+            evidence.insert(xep);
+        }
+    }
+    if text.contains("thread") {
+        evidence.insert("XEP-0201");
+    }
+    if text.contains("cue-muc-self-ping") {
+        evidence.insert("XEP-0410");
+    }
+}
+
+fn add_namespace_xep_evidence(ns: &str, evidence: &mut BTreeSet<&'static str>) {
+    add_text_xep_evidence(ns, evidence);
+}
+
+fn add_text_feature_evidence(text: &str, evidence: &mut BTreeSet<String>) {
+    for (feature, _) in ADVERTISED_FEATURE_XEPS {
+        if text == *feature
+            || text.contains(&format!("var='{feature}'"))
+            || text.contains(&format!("\"{feature}\""))
+            || text.contains(&format!("'{feature}'"))
+        {
+            evidence.insert((*feature).to_string());
+        }
+    }
+}
+
+fn implemented_official_xep_modules() -> Result<BTreeSet<String>> {
+    let xep_mod = server_root().join("crates/waddle-xmpp/src/xep/mod.rs");
+    let content =
+        fs::read_to_string(&xep_mod).with_context(|| format!("read {}", xep_mod.display()))?;
+    let mut implemented = BTreeSet::new();
+    for line in content.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("pub mod xep") else {
+            continue;
+        };
+        let Some(number) = rest.strip_suffix(';') else {
+            continue;
+        };
+        if number.len() == 4 && number.chars().all(|c| c.is_ascii_digit()) {
+            implemented.insert(format!("XEP-{number}"));
+        }
+    }
+    for xep in discover_xep_modules_in_dir(&server_root().join("crates/waddle-xmpp-core/src"))? {
+        implemented.insert(xep);
+    }
+    Ok(implemented)
+}
+
+fn discover_xep_modules_in_dir(dir: &Path) -> Result<BTreeSet<String>> {
+    let mut modules = BTreeSet::new();
+    for entry in fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
+        let path = entry?.path();
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !file_name.starts_with("xep")
+            || path.extension().and_then(|ext| ext.to_str()) != Some("rs")
+        {
+            continue;
+        }
+        modules.extend(xep_ids_in_name(file_name));
+    }
+    Ok(modules)
+}
+
+fn dedicated_rust_xep_suites() -> Result<BTreeSet<String>> {
+    let server = server_root();
+    let mut suites = BTreeSet::new();
+
+    for dir in [
+        server.join("crates/waddle-xmpp/tests"),
+        server.join("crates/waddle-server/tests"),
+    ] {
+        collect_integration_xep_suites(&dir, &mut suites)?;
+    }
+
+    collect_module_xep_suites(&server.join("crates/waddle-xmpp/src/xep"), &mut suites)?;
+    collect_module_xep_suites(&server.join("crates/waddle-xmpp-core/src"), &mut suites)?;
+
+    Ok(suites)
+}
+
+fn collect_integration_xep_suites(dir: &Path, suites: &mut BTreeSet<String>) -> Result<()> {
+    for path in rust_files_in(dir)? {
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            continue;
+        }
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !file_name.starts_with("xep") {
+            continue;
+        }
+        if !rust_file_has_test_function(&path)? {
+            continue;
+        }
+        suites.extend(xep_ids_in_name(file_name));
+    }
+    Ok(())
+}
+
+fn collect_module_xep_suites(dir: &Path, suites: &mut BTreeSet<String>) -> Result<()> {
+    for path in rust_files_in(dir)? {
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if file_name == "tests.rs" {
+            if !rust_file_has_test_function(&path)? {
+                continue;
+            }
+            if let Some(parent) = path
+                .parent()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+            {
+                suites.extend(xep_ids_in_name(parent));
+            }
+        } else if (file_name.contains("_tests") && rust_file_has_test_function(&path)?)
+            || (file_name.starts_with("xep") && source_file_has_inline_test_module(&path)?)
+        {
+            suites.extend(xep_ids_in_name(file_name));
+        }
+    }
+    Ok(())
+}
+
+fn source_file_has_inline_test_module(path: &Path) -> Result<bool> {
+    let content = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    Ok(content.contains("#[cfg(test)]")
+        && content.contains("mod tests")
+        && rust_file_has_test_function(path)?)
+}
+
+fn meaningful_rust_feature_coverage() -> Result<BTreeSet<String>> {
+    let server = server_root();
+    let mut covered = BTreeSet::new();
+    for dir in [
+        server.join("crates/waddle-server/tests"),
+        server.join("crates/waddle-xmpp/tests"),
+    ] {
+        for path in rust_files_in(&dir)? {
+            if path.file_name().and_then(|name| name.to_str()) == Some("xmpp_e2e_cue.rs") {
+                continue;
+            }
+            if !rust_file_has_test_function(&path)? {
+                continue;
+            }
+            let content =
+                fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+            for line in content
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+            {
+                add_text_feature_evidence(line, &mut covered);
+            }
+        }
+    }
+    Ok(covered)
+}
+
+fn rust_file_has_test_function(path: &Path) -> Result<bool> {
+    let content = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    Ok(content.contains("#[test]") || content.contains("#[tokio::test]"))
+}
+
+fn rust_files_in(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    collect_rust_files(dir, &mut files)?;
+    Ok(files)
+}
+
+fn collect_rust_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
+        let path = entry?.path();
+        if path.is_dir() {
+            collect_rust_files(&path, files)?;
+        } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn xep_ids_in_name(name: &str) -> BTreeSet<String> {
+    let mut ids = BTreeSet::new();
+    let bytes = name.as_bytes();
+    for (idx, window) in bytes.windows(4).enumerate() {
+        if !window.iter().all(|byte| byte.is_ascii_digit()) {
+            continue;
+        }
+        let before = idx.checked_sub(1).and_then(|i| bytes.get(i)).copied();
+        let after = bytes.get(idx + 4).copied();
+        if before.is_some_and(|byte| byte.is_ascii_digit())
+            || after.is_some_and(|byte| byte.is_ascii_digit())
+        {
+            continue;
+        }
+        let number = &name[idx..idx + 4];
+        ids.insert(format!("XEP-{number}"));
+    }
+    ids
+}
+
+fn xep_exemption_map(
+    exemptions: &'static [XepCoverageExemption],
+) -> Result<BTreeMap<&'static str, &'static str>> {
+    let mut by_xep = BTreeMap::new();
+    let mut errors = Vec::new();
+    for exemption in exemptions {
+        if exemption.reason.trim().is_empty() {
+            errors.push(format!("{} has an empty exemption reason", exemption.xep));
+        }
+        if by_xep.insert(exemption.xep, exemption.reason).is_some() {
+            errors.push(format!("{} has duplicate exemptions", exemption.xep));
+        }
+    }
+    if errors.is_empty() {
+        Ok(by_xep)
+    } else {
+        Err(anyhow!(
+            "invalid XEP coverage exemptions: {}",
+            errors.join(", ")
+        ))
+    }
+}
+
+fn feature_exemption_map(
+    exemptions: &'static [FeatureCoverageExemption],
+) -> Result<BTreeMap<&'static str, &'static str>> {
+    let mut by_feature = BTreeMap::new();
+    let mut errors = Vec::new();
+    for exemption in exemptions {
+        if exemption.reason.trim().is_empty() {
+            errors.push(format!(
+                "{} has an empty exemption reason",
+                exemption.feature
+            ));
+        }
+        if by_feature
+            .insert(exemption.feature, exemption.reason)
+            .is_some()
+        {
+            errors.push(format!("{} has duplicate exemptions", exemption.feature));
+        }
+    }
+    if errors.is_empty() {
+        Ok(by_feature)
+    } else {
+        Err(anyhow!(
+            "invalid advertised feature coverage exemptions: {}",
+            errors.join(", ")
+        ))
+    }
+}
+
+fn server_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("waddle-server lives under server/crates")
+        .to_path_buf()
 }
 
 fn advertised_feature_vars() -> BTreeSet<String> {
@@ -789,11 +1604,14 @@ fn advertised_feature_vars() -> BTreeSet<String> {
         .into_iter()
         .chain(waddle_xmpp::disco::info::upload_service_features())
         .chain(waddle_xmpp::disco::info::pubsub_service_features())
+        .chain(waddle_xmpp::disco::info::push_service_features())
+        .chain(waddle_xmpp::disco::info::community_service_features())
         .chain(waddle_xmpp::disco::info::spaces_service_features())
         .chain(waddle_xmpp::disco::info::muc_service_features())
         .chain(waddle_xmpp::disco::info::muc_room_features(
             true, true, false, true,
         ))
+        .chain(waddle_xmpp::disco::info::call_features())
         .chain(waddle_xmpp::pubsub::pep_features())
         .chain([waddle_xmpp::disco::Feature::new("jabber:iq:search")])
         .map(|feature| feature.0)

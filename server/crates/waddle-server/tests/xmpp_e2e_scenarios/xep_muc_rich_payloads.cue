@@ -71,6 +71,7 @@ scenario: #Scenario & {
 				"affiliation='owner'",
 				"role='moderator'",
 			]
+			absentElements: [#XmlElement & {name: "hats", ns: "urn:xmpp:hats:0"}]
 		},
 		#SendPresence & {
 			actor: bobPhone
@@ -92,6 +93,38 @@ scenario: #Scenario & {
 		#ExpectPresence & {
 			target:   bobPhone
 			contains: ["status code='110'"]
+		},
+		#SendIq & {
+			actor: adminPhone
+			type:  "get"
+			id:    "cue-room-disco-rich-features"
+			to:    roomJid
+			payload: #XmlElement & {
+				name: "query"
+				ns:   "http://jabber.org/protocol/disco#info"
+			}
+		},
+		#ExpectIq & {
+			target: adminPhone
+			id:     "cue-room-disco-rich-features"
+			type:   "result"
+			contains: [
+				"http://jabber.org/protocol/muc#self-ping-optimization",
+				"http://jabber.org/protocol/chatstates",
+				"urn:xmpp:message-correct:0",
+				"urn:xmpp:chat-markers:0",
+				"urn:xmpp:fallback:0",
+				"urn:xmpp:message-moderate:1",
+				"urn:xmpp:message-retract:1",
+				"urn:xmpp:message-retract:1#tombstone",
+				"urn:xmpp:occupant-id:0",
+				"urn:xmpp:reference:0",
+				"urn:xmpp:reply:0",
+				"urn:xmpp:reactions:0",
+				"urn:xmpp:hats:0",
+				"urn:xmpp:mentions:0",
+				"urn:xmpp:mentions:0#channel",
+			]
 		},
 		#ExpectPresence & {
 			target:   adminPhone

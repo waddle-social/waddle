@@ -236,9 +236,9 @@ mod tests {
         let room = bare("team@conf.example.com");
         let sender = full("alice@example.com/web");
         let mut msg = groupchat(&room, &sender, "");
-        crate::xep::xep0508::set_thread_create(
+        crate::xep::xep_waddle_forums::set_thread_create(
             &mut msg,
-            &crate::xep::xep0508::ThreadCreate::new("Roadmap"),
+            &crate::xep::xep_waddle_forums::ThreadCreate::new("Roadmap"),
         );
 
         let events = run(&room, &sender, &mut msg);
@@ -257,7 +257,7 @@ mod tests {
         // a target message's `<thread/>` so receivers can scope them to
         // the same conversation. That makes `<thread/>` scope metadata,
         // not content — a stanza that carries only a thread reference
-        // (no body, no subject, no XEP-0444/0424/0425/0508/file/sticker
+        // (no body, no subject, no XEP-0444/0424/0425/forum/file/sticker
         // payload) MUST NOT be archived; otherwise the next MAM replay
         // would surface the bodyless metadata stanza as an empty row
         // inside the thread.
@@ -335,9 +335,9 @@ mod tests {
         let room = bare("team@conf.example.com");
         let sender = full("alice@example.com/web");
         let mut msg = groupchat(&room, &sender, "");
-        crate::xep::xep0508::set_thread_reply(
+        crate::xep::xep_waddle_forums::set_thread_reply(
             &mut msg,
-            &crate::xep::xep0508::ThreadReply::new("topic-root"),
+            &crate::xep::xep_waddle_forums::ThreadReply::new("topic-root"),
         );
 
         let events = run(&room, &sender, &mut msg);
@@ -403,27 +403,29 @@ mod tests {
         let room = bare("team@conf.example.com");
         let sender = full("alice@example.com/web");
         let mut msg = groupchat(&room, &sender, "");
-        msg.payloads
-            .push(Element::builder("thread-create", crate::xep::xep0508::NS_FORUMS).build());
         msg.payloads.push(
-            Element::builder("thread-create", crate::xep::xep0508::NS_FORUMS)
+            Element::builder("thread-create", crate::xep::xep_waddle_forums::NS_FORUMS).build(),
+        );
+        msg.payloads.push(
+            Element::builder("thread-create", crate::xep::xep_waddle_forums::NS_FORUMS)
                 .attr(minidom::rxml::xml_ncname!("title").to_owned(), "")
                 .build(),
         );
         msg.payloads.push(
-            Element::builder("thread-create", crate::xep::xep0508::NS_FORUMS)
+            Element::builder("thread-create", crate::xep::xep_waddle_forums::NS_FORUMS)
                 .attr(minidom::rxml::xml_ncname!("title").to_owned(), "   ")
                 .build(),
         );
-        msg.payloads
-            .push(Element::builder("thread-reply", crate::xep::xep0508::NS_FORUMS).build());
         msg.payloads.push(
-            Element::builder("thread-reply", crate::xep::xep0508::NS_FORUMS)
+            Element::builder("thread-reply", crate::xep::xep_waddle_forums::NS_FORUMS).build(),
+        );
+        msg.payloads.push(
+            Element::builder("thread-reply", crate::xep::xep_waddle_forums::NS_FORUMS)
                 .attr(minidom::rxml::xml_ncname!("thread-id").to_owned(), "")
                 .build(),
         );
         msg.payloads.push(
-            Element::builder("thread-reply", crate::xep::xep0508::NS_FORUMS)
+            Element::builder("thread-reply", crate::xep::xep_waddle_forums::NS_FORUMS)
                 .attr(minidom::rxml::xml_ncname!("thread-id").to_owned(), "   ")
                 .build(),
         );

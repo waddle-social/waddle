@@ -25,7 +25,7 @@
 use super::context::RoomContext;
 use super::traits::{RoomHandler, RoomHandlerOutcome};
 use crate::xep::xep0421::{generate_occupant_id, set_occupant_id_on_message};
-use crate::xep::xep0508::{extract_forum_action, ForumAction};
+use crate::xep::xep_waddle_forums::{extract_forum_action, ForumAction};
 use jid::{BareJid, Jid};
 use waddle_xmpp_core::mam::ThreadId;
 use waddle_xmpp_core::xep0201::{
@@ -143,7 +143,7 @@ mod tests {
     use crate::protocol::room::context::OccupantSnapshot;
     use crate::types::{Affiliation, Role};
     use crate::xep::xep0421::{extract_occupant_id_from_message, OccupantId, OccupantIdSecret};
-    use crate::xep::xep0508::{set_thread_create, ThreadCreate};
+    use crate::xep::xep_waddle_forums::{set_thread_create, ThreadCreate};
     use jid::FullJid;
     use waddle_xmpp_core::xep0201::thread_info_from_message;
     use waddle_xmpp_core::xep0359::{build_stanza_id_element, extract_stanza_ids};
@@ -261,9 +261,9 @@ mod tests {
         let room = bare("team@conf.example.com");
         let sender = full("alice@example.com/web");
         let mut msg = groupchat(&room, &sender, "reply");
-        crate::xep::xep0508::set_thread_reply(
+        crate::xep::xep_waddle_forums::set_thread_reply(
             &mut msg,
-            &crate::xep::xep0508::ThreadReply::new("topic-root"),
+            &crate::xep::xep_waddle_forums::ThreadReply::new("topic-root"),
         );
 
         run(&room, &sender, "alice-nick", &mut msg, "reply-stanza-id");
@@ -280,9 +280,9 @@ mod tests {
         let sender = full("alice@example.com/web");
         let mut msg = groupchat(&room, &sender, "reply");
         set_thread_id(&mut msg, "explicit-thread");
-        crate::xep::xep0508::set_thread_reply(
+        crate::xep::xep_waddle_forums::set_thread_reply(
             &mut msg,
-            &crate::xep::xep0508::ThreadReply::new("topic-root"),
+            &crate::xep::xep_waddle_forums::ThreadReply::new("topic-root"),
         );
 
         run(&room, &sender, "alice-nick", &mut msg, "reply-stanza-id");
@@ -303,9 +303,9 @@ mod tests {
             &ThreadInfo::child(tid("payload-conflict"), tid("parent-conflict")),
             CLIENT_STANZA_NS,
         ));
-        crate::xep::xep0508::set_thread_reply(
+        crate::xep::xep_waddle_forums::set_thread_reply(
             &mut msg,
-            &crate::xep::xep0508::ThreadReply::new("topic-root"),
+            &crate::xep::xep_waddle_forums::ThreadReply::new("topic-root"),
         );
 
         run(&room, &sender, "alice-nick", &mut msg, "reply-stanza-id");
@@ -325,9 +325,9 @@ mod tests {
             &ThreadInfo::child(tid("child-thread"), tid("root-thread")),
             CLIENT_STANZA_NS,
         ));
-        crate::xep::xep0508::set_thread_reply(
+        crate::xep::xep_waddle_forums::set_thread_reply(
             &mut msg,
-            &crate::xep::xep0508::ThreadReply::new("child-thread"),
+            &crate::xep::xep_waddle_forums::ThreadReply::new("child-thread"),
         );
 
         run(&room, &sender, "alice-nick", &mut msg, "reply-stanza-id");
@@ -347,9 +347,9 @@ mod tests {
             &ThreadInfo::child(tid("topic-root"), tid("bad-parent")),
             SERVER_STANZA_NS,
         ));
-        crate::xep::xep0508::set_thread_reply(
+        crate::xep::xep_waddle_forums::set_thread_reply(
             &mut msg,
-            &crate::xep::xep0508::ThreadReply::new("topic-root"),
+            &crate::xep::xep_waddle_forums::ThreadReply::new("topic-root"),
         );
 
         run(&room, &sender, "alice-nick", &mut msg, "reply-stanza-id");
