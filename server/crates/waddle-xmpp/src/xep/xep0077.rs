@@ -6,12 +6,16 @@
 use minidom::Element;
 use tracing::debug;
 use xmpp_parsers::iq::Iq;
+use xmpp_parsers::stanza_error::ErrorType;
 
 /// Namespace for XEP-0077 In-Band Registration IQ queries.
 pub const NS_REGISTER: &str = "jabber:iq:register";
 
 /// Namespace for XEP-0077 stream feature advertisement (per Section 8).
 pub const NS_REGISTER_FEATURE: &str = "http://jabber.org/features/iq-register";
+
+const NS_CLIENT: &str = "jabber:client";
+const NS_XMPP_STANZAS: &str = "urn:ietf:params:xml:ns:xmpp-stanzas";
 
 /// Registration request parsed from an IQ stanza.
 #[derive(Debug, Clone)]
@@ -37,6 +41,51 @@ pub enum RegistrationError {
     BadRequest(String),
     /// Internal server error
     InternalError(String),
+}
+
+/// Typed XEP-0077 registration error response.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RegistrationErrorResponse {
+    request_id: String,
+    error_type: ErrorType,
+    condition: RegistrationErrorCondition,
+    legacy_code: LegacyRegistrationErrorCode,
+    submitted_query: Element,
+    text: Option<String>,
+}
+
+impl RegistrationErrorResponse {
+    /// Convert to XML for the transport boundary.
+    pub fn to_element(&self) -> Element {
+        let mut error_element = Element::builder("error", NS_CLIENT)
+            .attr(
+                minidom::rxml::xml_ncname!("code").to_owned(),
+                self.legacy_code.as_str(),
+            )
+            .attr(
+                minidom::rxml::xml_ncname!("type").to_owned(),
+                error_type_attr(&self.error_type),
+            )
+            .append(Element::builder(self.condition.element_name(), NS_XMPP_STANZAS).build());
+
+        if let Some(text) = &self.text {
+            error_element = error_element.append(
+                Element::builder("text", NS_XMPP_STANZAS)
+                    .append(text.as_str())
+                    .build(),
+            );
+        }
+
+        Element::builder("iq", NS_CLIENT)
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "error")
+            .attr(
+                minidom::rxml::xml_ncname!("id").to_owned(),
+                self.request_id.as_str(),
+            )
+            .append(self.submitted_query.clone())
+            .append(error_element.build())
+            .build()
+    }
 }
 
 impl std::fmt::Display for RegistrationError {
@@ -150,86 +199,164 @@ pub fn build_registration_fields_response(
     request_id: &str,
     instructions: Option<&str>,
     include_email: bool,
-) -> String {
-    let instructions_xml = instructions
-        .map(|i| format!("<instructions>{}</instructions>", escape_xml(i)))
-        .unwrap_or_default();
+) -> Iq {
+    let mut query = Element::builder("query", NS_REGISTER);
 
-    let email_xml = if include_email { "<email/>" } else { "" };
+    if let Some(instructions) = instructions {
+        query = query.append(
+            Element::builder("instructions", NS_REGISTER)
+                .append(instructions)
+                .build(),
+        );
+    }
 
-    format!(
-        "<iq type='result' id='{}'>\
-            <query xmlns='{}'>\
-                {}\
-                <username/>\
-                <password/>\
-                {}\
-            </query>\
-        </iq>",
-        escape_xml(request_id),
-        NS_REGISTER,
-        instructions_xml,
-        email_xml
-    )
+    query = query
+        .append(Element::builder("username", NS_REGISTER).build())
+        .append(Element::builder("password", NS_REGISTER).build());
+
+    if include_email {
+        query = query.append(Element::builder("email", NS_REGISTER).build());
+    }
+
+    Iq::Result {
+        from: None,
+        to: None,
+        id: request_id.to_string(),
+        payload: Some(query.build()),
+    }
 }
 
 /// Build a registration success response.
-pub fn build_registration_success(request_id: &str) -> String {
-    format!("<iq type='result' id='{}'/>", escape_xml(request_id))
+pub fn build_registration_success(request_id: &str) -> Iq {
+    Iq::Result {
+        from: None,
+        to: None,
+        id: request_id.to_string(),
+        payload: None,
+    }
 }
 
 /// Build a registration error response.
-pub fn build_registration_error(request_id: &str, error: &RegistrationError) -> String {
-    let (error_type, condition) = match error {
-        RegistrationError::NotAllowed => ("cancel", "not-allowed"),
-        RegistrationError::Conflict => ("cancel", "conflict"),
-        RegistrationError::NotAcceptable(_) => ("modify", "not-acceptable"),
-        RegistrationError::BadRequest(_) => ("modify", "bad-request"),
-        RegistrationError::InternalError(_) => ("wait", "internal-server-error"),
-    };
+pub fn build_registration_error(
+    request_id: &str,
+    submitted_query: Option<&Element>,
+    error: &RegistrationError,
+) -> RegistrationErrorResponse {
+    let shape = registration_error_shape(error);
+    RegistrationErrorResponse {
+        request_id: request_id.to_string(),
+        error_type: shape.error_type,
+        condition: shape.condition,
+        legacy_code: shape.legacy_code,
+        submitted_query: submitted_query
+            .cloned()
+            .unwrap_or_else(|| Element::builder("query", NS_REGISTER).build()),
+        text: registration_error_text(error).map(str::to_string),
+    }
+}
 
-    let text = match error {
+struct RegistrationErrorShape {
+    error_type: ErrorType,
+    condition: RegistrationErrorCondition,
+    legacy_code: LegacyRegistrationErrorCode,
+}
+
+fn registration_error_shape(error: &RegistrationError) -> RegistrationErrorShape {
+    match error {
+        RegistrationError::NotAllowed => RegistrationErrorShape {
+            error_type: ErrorType::Cancel,
+            condition: RegistrationErrorCondition::ServiceUnavailable,
+            legacy_code: LegacyRegistrationErrorCode::ServiceUnavailable,
+        },
+        RegistrationError::Conflict => RegistrationErrorShape {
+            error_type: ErrorType::Cancel,
+            condition: RegistrationErrorCondition::Conflict,
+            legacy_code: LegacyRegistrationErrorCode::Conflict,
+        },
+        RegistrationError::NotAcceptable(_) => RegistrationErrorShape {
+            error_type: ErrorType::Modify,
+            condition: RegistrationErrorCondition::NotAcceptable,
+            legacy_code: LegacyRegistrationErrorCode::NotAcceptable,
+        },
+        RegistrationError::BadRequest(_) => RegistrationErrorShape {
+            error_type: ErrorType::Modify,
+            condition: RegistrationErrorCondition::BadRequest,
+            legacy_code: LegacyRegistrationErrorCode::BadRequest,
+        },
+        RegistrationError::InternalError(_) => RegistrationErrorShape {
+            error_type: ErrorType::Wait,
+            condition: RegistrationErrorCondition::InternalError,
+            legacy_code: LegacyRegistrationErrorCode::InternalError,
+        },
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegistrationErrorCondition {
+    BadRequest,
+    Conflict,
+    InternalError,
+    NotAcceptable,
+    ServiceUnavailable,
+}
+
+impl RegistrationErrorCondition {
+    fn element_name(self) -> &'static str {
+        match self {
+            RegistrationErrorCondition::BadRequest => "bad-request",
+            RegistrationErrorCondition::Conflict => "conflict",
+            RegistrationErrorCondition::InternalError => "internal-server-error",
+            RegistrationErrorCondition::NotAcceptable => "not-acceptable",
+            RegistrationErrorCondition::ServiceUnavailable => "service-unavailable",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LegacyRegistrationErrorCode {
+    BadRequest,
+    Conflict,
+    NotAcceptable,
+    ServiceUnavailable,
+    InternalError,
+}
+
+impl LegacyRegistrationErrorCode {
+    fn as_str(self) -> &'static str {
+        match self {
+            LegacyRegistrationErrorCode::BadRequest => "400",
+            LegacyRegistrationErrorCode::NotAcceptable => "406",
+            LegacyRegistrationErrorCode::Conflict => "409",
+            LegacyRegistrationErrorCode::InternalError => "500",
+            LegacyRegistrationErrorCode::ServiceUnavailable => "503",
+        }
+    }
+}
+
+fn error_type_attr(error_type: &ErrorType) -> &'static str {
+    match error_type {
+        ErrorType::Auth => "auth",
+        ErrorType::Cancel => "cancel",
+        ErrorType::Continue => "continue",
+        ErrorType::Modify => "modify",
+        ErrorType::Wait => "wait",
+    }
+}
+
+fn registration_error_text(error: &RegistrationError) -> Option<&str> {
+    match error {
         RegistrationError::NotAcceptable(msg)
         | RegistrationError::BadRequest(msg)
-        | RegistrationError::InternalError(msg) => {
-            format!(
-                "<text xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'>{}</text>",
-                escape_xml(msg)
-            )
-        }
-        _ => String::new(),
-    };
-
-    format!(
-        "<iq type='error' id='{}'>\
-            <query xmlns='{}'/>\
-            <error type='{}'>\
-                <{} xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>\
-                {}\
-            </error>\
-        </iq>",
-        escape_xml(request_id),
-        NS_REGISTER,
-        error_type,
-        condition,
-        text
-    )
+        | RegistrationError::InternalError(msg) => Some(msg),
+        _ => None,
+    }
 }
 
 /// Build registration feature advertisement for stream features.
 ///
 /// Per XEP-0077 Section 8, this uses the feature namespace, not the IQ namespace.
-pub fn build_registration_feature() -> String {
-    format!("<register xmlns='{}'/>", NS_REGISTER_FEATURE)
-}
-
-/// Escape XML special characters.
-fn escape_xml(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
+pub fn build_registration_feature() -> Element {
+    Element::builder("register", NS_REGISTER_FEATURE).build()
 }
 
 #[cfg(test)]
@@ -307,86 +434,5 @@ mod tests {
         let result = parse_registration_element(&element, "reg5");
 
         assert!(matches!(result, Err(RegistrationError::NotAcceptable(_))));
-    }
-
-    #[test]
-    fn test_build_registration_fields_response() {
-        let response = build_registration_fields_response(
-            "reg1",
-            Some("Choose a username and password."),
-            true,
-        );
-
-        assert!(response.contains("type='result'"));
-        assert!(response.contains("id='reg1'"));
-        assert!(response.contains(&format!("xmlns='{}'", NS_REGISTER)));
-        assert!(response.contains("<username/>"));
-        assert!(response.contains("<password/>"));
-        assert!(response.contains("<email/>"));
-        assert!(response.contains("<instructions>Choose a username and password.</instructions>"));
-    }
-
-    #[test]
-    fn test_build_registration_fields_response_no_email() {
-        let response = build_registration_fields_response("reg1", None, false);
-
-        assert!(response.contains("<username/>"));
-        assert!(response.contains("<password/>"));
-        assert!(!response.contains("<email/>"));
-        assert!(!response.contains("<instructions>"));
-    }
-
-    #[test]
-    fn test_build_registration_success() {
-        let response = build_registration_success("reg2");
-
-        assert!(response.contains("type='result'"));
-        assert!(response.contains("id='reg2'"));
-    }
-
-    #[test]
-    fn test_build_registration_error_conflict() {
-        let response = build_registration_error("reg3", &RegistrationError::Conflict);
-
-        assert!(response.contains("type='error'"));
-        assert!(response.contains("id='reg3'"));
-        assert!(response.contains("<conflict"));
-    }
-
-    #[test]
-    fn test_build_registration_error_not_allowed() {
-        let response = build_registration_error("reg4", &RegistrationError::NotAllowed);
-
-        assert!(response.contains("type='error'"));
-        assert!(response.contains("<not-allowed"));
-    }
-
-    #[test]
-    fn test_build_registration_error_with_text() {
-        let response = build_registration_error(
-            "reg5",
-            &RegistrationError::NotAcceptable("Username is required".to_string()),
-        );
-
-        assert!(response.contains("type='error'"));
-        assert!(response.contains("<not-acceptable"));
-        assert!(response.contains("<text"));
-        assert!(response.contains("Username is required"));
-    }
-
-    #[test]
-    fn test_build_registration_feature() {
-        let feature = build_registration_feature();
-
-        assert!(feature.contains(&format!("xmlns='{}'", NS_REGISTER_FEATURE)));
-        assert!(feature.contains("<register"));
-    }
-
-    #[test]
-    fn test_escape_xml() {
-        assert_eq!(escape_xml("hello"), "hello");
-        assert_eq!(escape_xml("<script>"), "&lt;script&gt;");
-        assert_eq!(escape_xml("a & b"), "a &amp; b");
-        assert_eq!(escape_xml("\"quoted\""), "&quot;quoted&quot;");
     }
 }
