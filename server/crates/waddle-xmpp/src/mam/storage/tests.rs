@@ -484,6 +484,73 @@ async fn assert_rsm_before_uses_archive_order_not_lexical_id_order(storage: &dyn
 }
 
 #[tokio::test]
+async fn test_sqlite_rsm_cursors_page_same_timestamp_by_archive_id() {
+    let storage = create_test_storage().await;
+    assert_rsm_cursors_page_same_timestamp_by_archive_id(&storage).await;
+}
+
+#[tokio::test]
+async fn test_inmemory_rsm_cursors_page_same_timestamp_by_archive_id() {
+    let storage = InMemoryMamStorage::new();
+    assert_rsm_cursors_page_same_timestamp_by_archive_id(&storage).await;
+}
+
+async fn assert_rsm_cursors_page_same_timestamp_by_archive_id(storage: &dyn MamStorage) {
+    let archive = bare("room@conference.example.com");
+    let timestamp = chrono::DateTime::parse_from_rfc3339("2026-05-01T10:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    for id in ["id-c", "id-a", "id-d", "id-b"] {
+        storage
+            .store_message(
+                &archive,
+                &ArchivedMessage {
+                    id: id.to_string(),
+                    timestamp,
+                    body: Some(id.to_string()),
+                    ..archived_groupchat(&archive)
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    let after = storage
+        .query_messages(
+            &archive,
+            &MamQuery {
+                max: Some(2),
+                after_id: Some("id-b".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let after_ids: Vec<&str> = after.messages.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(after_ids, vec!["id-c", "id-d"]);
+    assert_eq!(after.first_id.as_deref(), Some("id-c"));
+    assert_eq!(after.last_id.as_deref(), Some("id-d"));
+    assert!(after.complete);
+
+    let before = storage
+        .query_messages(
+            &archive,
+            &MamQuery {
+                max: Some(2),
+                before_id: Some("id-d".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let before_ids: Vec<&str> = before.messages.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(before_ids, vec!["id-b", "id-c"]);
+    assert_eq!(before.first_id.as_deref(), Some("id-b"));
+    assert_eq!(before.last_id.as_deref(), Some("id-c"));
+    assert!(!before.complete);
+}
+
+#[tokio::test]
 async fn test_sqlite_extended_before_id_filters_without_flipping_order() {
     let storage = create_test_storage().await;
     assert_extended_before_id_filters_without_flipping_order(&storage).await;
@@ -706,6 +773,93 @@ async fn assert_rsm_cursor_outside_query_filters_still_pages(storage: &dyn MamSt
         .unwrap();
 
     assert_eq!(bodies(&result), vec!["four", "five"]);
+}
+
+#[tokio::test]
+async fn test_sqlite_rsm_max_zero_returns_count_only() {
+    let storage = create_test_storage().await;
+    assert_rsm_max_zero_returns_count_only(&storage).await;
+}
+
+#[tokio::test]
+async fn test_inmemory_rsm_max_zero_returns_count_only() {
+    let storage = InMemoryMamStorage::new();
+    assert_rsm_max_zero_returns_count_only(&storage).await;
+}
+
+async fn assert_rsm_max_zero_returns_count_only(storage: &dyn MamStorage) {
+    let archive = bare("room@conference.example.com");
+    let base = Utc::now();
+    store_nonlexical_archive_order_messages(storage, &archive, base).await;
+
+    let result = storage
+        .query_messages(
+            &archive,
+            &MamQuery {
+                max: Some(0),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    assert!(result.messages.is_empty());
+    assert_eq!(result.first_id, None);
+    assert_eq!(result.last_id, None);
+    assert_eq!(result.count, Some(5));
+    assert!(result.complete);
+}
+
+#[tokio::test]
+async fn test_sqlite_rsm_empty_edge_pages_omit_first_and_last() {
+    let storage = create_test_storage().await;
+    assert_rsm_empty_edge_pages_omit_first_and_last(&storage).await;
+}
+
+#[tokio::test]
+async fn test_inmemory_rsm_empty_edge_pages_omit_first_and_last() {
+    let storage = InMemoryMamStorage::new();
+    assert_rsm_empty_edge_pages_omit_first_and_last(&storage).await;
+}
+
+async fn assert_rsm_empty_edge_pages_omit_first_and_last(storage: &dyn MamStorage) {
+    let archive = bare("room@conference.example.com");
+    let base = Utc::now();
+    store_nonlexical_archive_order_messages(storage, &archive, base).await;
+
+    let after_last = storage
+        .query_messages(
+            &archive,
+            &MamQuery {
+                max: Some(2),
+                after_id: Some("x-fifth".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(after_last.messages.is_empty());
+    assert!(after_last.complete);
+    assert_eq!(after_last.first_id, None);
+    assert_eq!(after_last.last_id, None);
+    assert_eq!(after_last.count, Some(5));
+
+    let before_first = storage
+        .query_messages(
+            &archive,
+            &MamQuery {
+                max: Some(2),
+                before_id: Some("z-first".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(before_first.messages.is_empty());
+    assert!(before_first.complete);
+    assert_eq!(before_first.first_id, None);
+    assert_eq!(before_first.last_id, None);
+    assert_eq!(before_first.count, Some(5));
 }
 
 fn bodies(result: &MamResult) -> Vec<&str> {

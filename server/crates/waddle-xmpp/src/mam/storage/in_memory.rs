@@ -199,7 +199,7 @@ impl MamStorage for InMemoryMamStorage {
         let mut complete = true;
         if messages.len() > actual_limit {
             messages.truncate(actual_limit);
-            complete = false;
+            complete = actual_limit == 0;
         }
 
         if uses_backward_pagination(query) {
