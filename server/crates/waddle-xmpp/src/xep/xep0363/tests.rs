@@ -1,4 +1,26 @@
 use super::*;
+use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType};
+
+fn upload_request_iq(id: &str, filename: &str, size: u64) -> Iq {
+    Iq::Get {
+        from: None,
+        to: None,
+        id: id.to_string(),
+        payload: Element::builder("request", NS_HTTP_UPLOAD)
+            .attr(minidom::rxml::xml_ncname!("filename").to_owned(), filename)
+            .attr(
+                minidom::rxml::xml_ncname!("size").to_owned(),
+                size.to_string(),
+            )
+            .build(),
+    }
+}
+
+fn fixed_retry_at() -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339("2026-05-31T12:34:56Z")
+        .expect("fixed retry timestamp")
+        .with_timezone(&chrono::Utc)
+}
 
 #[test]
 fn test_is_upload_request() {
@@ -289,35 +311,73 @@ fn test_build_upload_slot_response_no_headers() {
 
 #[test]
 fn test_build_upload_error_file_too_large() {
-    // The builder now produces XML via minidom, so the serialised
-    // attribute quotes are double-quoted (XML semantics are
-    // identical to single-quoted; the literal differs).
+    let request = upload_request_iq("error-1", "large.jpg", 20_000_000);
     let error_response =
-        build_upload_error("error-1", &UploadError::FileTooLarge { max_size: 10485760 });
+        build_upload_error(&request, &UploadError::FileTooLarge { max_size: 10485760 });
 
-    assert!(error_response.contains("type='error'"));
-    assert!(error_response.contains("id='error-1'"));
-    assert!(error_response.contains("<not-acceptable"));
-    assert!(error_response.contains("<file-too-large"));
-    assert!(error_response.contains("<max-file-size>10485760</max-file-size>"));
+    let Iq::Error {
+        id, error, payload, ..
+    } = error_response
+    else {
+        panic!("Expected upload error IQ");
+    };
+    assert_eq!(id, "error-1");
+    assert_eq!(error.type_, ErrorType::Modify);
+    assert_eq!(error.defined_condition, DefinedCondition::NotAcceptable);
+    let app_error = error.other.expect("file-too-large app error");
+    assert_eq!(app_error.name(), "file-too-large");
+    assert_eq!(app_error.ns(), NS_HTTP_UPLOAD);
+    assert_eq!(
+        app_error
+            .get_child("max-file-size", NS_HTTP_UPLOAD)
+            .expect("max-file-size")
+            .text(),
+        "10485760"
+    );
+    assert_eq!(
+        payload.expect("original request").attr("filename"),
+        Some("large.jpg")
+    );
 }
 
 #[test]
 fn test_build_upload_error_not_allowed() {
-    let error_response = build_upload_error("error-2", &UploadError::NotAllowed);
+    let error_response = build_upload_error(
+        &upload_request_iq("error-2", "blocked.jpg", 100),
+        &UploadError::NotAllowed,
+    );
 
-    assert!(error_response.contains("type='error'"));
-    assert!(error_response.contains("id='error-2'"));
-    assert!(error_response.contains("<forbidden"));
+    let Iq::Error { id, error, .. } = error_response else {
+        panic!("Expected upload error IQ");
+    };
+    assert_eq!(id, "error-2");
+    assert_eq!(error.type_, ErrorType::Auth);
+    assert_eq!(error.defined_condition, DefinedCondition::Forbidden);
+    assert!(error.other.is_none());
 }
 
 #[test]
 fn test_build_upload_error_quota_reached() {
-    let error_response = build_upload_error("error-3", &UploadError::QuotaReached);
+    let error_response = build_upload_error(
+        &upload_request_iq("error-3", "quota.jpg", 100),
+        &UploadError::QuotaReached {
+            retry_at: fixed_retry_at(),
+        },
+    );
 
-    assert!(error_response.contains("type='error'"));
-    assert!(error_response.contains("<resource-constraint"));
-    assert!(error_response.contains("<retry"));
+    let Iq::Error { id, error, .. } = error_response else {
+        panic!("Expected upload error IQ");
+    };
+    assert_eq!(id, "error-3");
+    assert_eq!(error.type_, ErrorType::Wait);
+    assert_eq!(
+        error.defined_condition,
+        DefinedCondition::ResourceConstraint
+    );
+    let retry = error.other.expect("retry app error");
+    assert_eq!(retry.name(), "retry");
+    assert_eq!(retry.ns(), NS_HTTP_UPLOAD);
+    assert_eq!(retry.attr("stamp"), Some("2026-05-31T12:34:56Z"));
 }
 
 #[test]
@@ -331,16 +391,19 @@ fn test_upload_error_display() {
         "Not allowed to upload files"
     );
     assert_eq!(
-        UploadError::QuotaReached.to_string(),
+        UploadError::QuotaReached {
+            retry_at: fixed_retry_at(),
+        }
+        .to_string(),
         "Upload quota exceeded"
     );
     assert_eq!(
-        UploadError::BadRequest("test".to_string()).to_string(),
-        "Bad request: test"
+        UploadError::BadRequest(UploadBadRequest::MissingSize).to_string(),
+        "Bad request: missing size attribute"
     );
     assert_eq!(
-        UploadError::InternalError("err".to_string()).to_string(),
-        "Internal error: err"
+        UploadError::InternalError.to_string(),
+        "Internal server error"
     );
 }
 

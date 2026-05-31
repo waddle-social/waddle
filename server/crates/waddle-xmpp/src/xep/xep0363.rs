@@ -55,9 +55,11 @@
 //! </iq>
 //! ```
 
+use chrono::{DateTime, SecondsFormat, Utc};
 use minidom::Element;
 use tracing::debug;
 use xmpp_parsers::iq::Iq;
+use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
 /// Namespace for XEP-0363 HTTP File Upload.
 pub const NS_HTTP_UPLOAD: &str = "urn:xmpp:http:upload:0";
@@ -95,11 +97,22 @@ pub enum UploadError {
     /// User is not allowed to upload files.
     NotAllowed,
     /// User has exceeded their upload quota.
-    QuotaReached,
+    QuotaReached { retry_at: DateTime<Utc> },
     /// Bad request (missing or invalid attributes).
-    BadRequest(String),
+    BadRequest(UploadBadRequest),
     /// Internal server error.
-    InternalError(String),
+    InternalError,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UploadBadRequest {
+    MissingRequestElement,
+    ExpectedIqGet,
+    MissingFilename,
+    EmptyFilename,
+    MissingSize,
+    InvalidSize,
+    ZeroSize,
 }
 
 impl std::fmt::Display for UploadError {
@@ -109,14 +122,28 @@ impl std::fmt::Display for UploadError {
                 write!(f, "File too large. Maximum size is {} bytes.", max_size)
             }
             UploadError::NotAllowed => write!(f, "Not allowed to upload files"),
-            UploadError::QuotaReached => write!(f, "Upload quota exceeded"),
-            UploadError::BadRequest(msg) => write!(f, "Bad request: {}", msg),
-            UploadError::InternalError(msg) => write!(f, "Internal error: {}", msg),
+            UploadError::QuotaReached { .. } => write!(f, "Upload quota exceeded"),
+            UploadError::BadRequest(error) => write!(f, "Bad request: {}", error),
+            UploadError::InternalError => write!(f, "Internal server error"),
         }
     }
 }
 
 impl std::error::Error for UploadError {}
+
+impl std::fmt::Display for UploadBadRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UploadBadRequest::MissingRequestElement => write!(f, "missing upload request element"),
+            UploadBadRequest::ExpectedIqGet => write!(f, "expected IQ get for upload request"),
+            UploadBadRequest::MissingFilename => write!(f, "missing filename attribute"),
+            UploadBadRequest::EmptyFilename => write!(f, "filename cannot be empty"),
+            UploadBadRequest::MissingSize => write!(f, "missing size attribute"),
+            UploadBadRequest::InvalidSize => write!(f, "invalid size attribute"),
+            UploadBadRequest::ZeroSize => write!(f, "file size cannot be zero"),
+        }
+    }
+}
 
 /// Check if an IQ stanza is an HTTP upload slot request (XEP-0363).
 pub fn is_upload_request(iq: &Iq) -> bool {
@@ -138,42 +165,34 @@ pub fn parse_upload_request(iq: &Iq) -> Result<UploadRequest, UploadError> {
                 elem
             } else {
                 return Err(UploadError::BadRequest(
-                    "Missing upload request element".to_string(),
+                    UploadBadRequest::MissingRequestElement,
                 ));
             }
         }
-        _ => {
-            return Err(UploadError::BadRequest(
-                "Expected IQ get for upload request".to_string(),
-            ))
-        }
+        _ => return Err(UploadError::BadRequest(UploadBadRequest::ExpectedIqGet)),
     };
 
     // Parse required 'filename' attribute
     let filename = elem
         .attr("filename")
-        .ok_or_else(|| UploadError::BadRequest("Missing 'filename' attribute".to_string()))?
+        .ok_or(UploadError::BadRequest(UploadBadRequest::MissingFilename))?
         .to_string();
 
     if filename.is_empty() {
-        return Err(UploadError::BadRequest(
-            "Filename cannot be empty".to_string(),
-        ));
+        return Err(UploadError::BadRequest(UploadBadRequest::EmptyFilename));
     }
 
     // Parse required 'size' attribute
     let size_str = elem
         .attr("size")
-        .ok_or_else(|| UploadError::BadRequest("Missing 'size' attribute".to_string()))?;
+        .ok_or(UploadError::BadRequest(UploadBadRequest::MissingSize))?;
 
     let size: u64 = size_str
         .parse()
-        .map_err(|_| UploadError::BadRequest(format!("Invalid 'size' attribute: {}", size_str)))?;
+        .map_err(|_| UploadError::BadRequest(UploadBadRequest::InvalidSize))?;
 
     if size == 0 {
-        return Err(UploadError::BadRequest(
-            "File size cannot be zero".to_string(),
-        ));
+        return Err(UploadError::BadRequest(UploadBadRequest::ZeroSize));
     }
 
     // Parse optional 'content-type' attribute
@@ -233,62 +252,53 @@ pub fn build_upload_slot_response(original_iq: &Iq, slot: &UploadSlot) -> Iq {
 /// Returns an IQ error with the appropriate XMPP error condition
 /// and XEP-0363-specific app-error elements per §"Error
 /// conditions": `<file-too-large><max-file-size>` for
-/// FileTooLarge, `<retry/>` for QuotaReached.
-///
-/// The result is the serialised XML string ready to write to the
-/// wire — the typed `minidom::Element` is built first and
-/// serialised exactly once at the I/O boundary, satisfying the
-/// project's XML-via-builder hard rule.
-pub fn build_upload_error(request_id: &str, error: &UploadError) -> String {
-    const NS_XMPP_STANZAS: &str = "urn:ietf:params:xml:ns:xmpp-stanzas";
-
-    let (error_type, condition) = match error {
-        UploadError::FileTooLarge { .. } => ("modify", "not-acceptable"),
-        UploadError::NotAllowed => ("auth", "forbidden"),
-        UploadError::QuotaReached => ("wait", "resource-constraint"),
-        UploadError::BadRequest(_) => ("modify", "bad-request"),
-        UploadError::InternalError(_) => ("wait", "internal-server-error"),
+/// FileTooLarge, `<retry stamp='...'/>` for QuotaReached.
+pub fn build_upload_error(original_iq: &Iq, error: &UploadError) -> Iq {
+    let (error_type, defined_condition) = match error {
+        UploadError::FileTooLarge { .. } => (ErrorType::Modify, DefinedCondition::NotAcceptable),
+        UploadError::NotAllowed => (ErrorType::Auth, DefinedCondition::Forbidden),
+        UploadError::QuotaReached { .. } => (ErrorType::Wait, DefinedCondition::ResourceConstraint),
+        UploadError::BadRequest(_) => (ErrorType::Modify, DefinedCondition::BadRequest),
+        UploadError::InternalError => (ErrorType::Wait, DefinedCondition::InternalServerError),
     };
 
-    let mut err_builder = Element::builder("error", "jabber:client")
-        .attr(minidom::rxml::xml_ncname!("type").to_owned(), error_type)
-        .append(Element::builder(condition, NS_XMPP_STANZAS).build())
-        .append(
-            Element::builder("text", NS_XMPP_STANZAS)
-                .append(error.to_string().as_str())
+    let mut stanza_error = StanzaError::new(error_type, defined_condition, "en", error.to_string());
+
+    stanza_error.other = match error {
+        UploadError::FileTooLarge { max_size } => Some(
+            Element::builder("file-too-large", NS_HTTP_UPLOAD)
+                .append(
+                    Element::builder("max-file-size", NS_HTTP_UPLOAD)
+                        .append(max_size.to_string().as_str())
+                        .build(),
+                )
                 .build(),
-        );
-
-    // Append the XEP-0363 §"Error conditions" app-error child for
-    // the variants that have one — minidom's element builder
-    // namespace-qualifies the children so we don't have to
-    // string-template the `xmlns=` attribute.
-    match error {
-        UploadError::FileTooLarge { max_size } => {
-            err_builder = err_builder.append(
-                Element::builder("file-too-large", NS_HTTP_UPLOAD)
-                    .append(
-                        Element::builder("max-file-size", NS_HTTP_UPLOAD)
-                            .append(max_size.to_string().as_str())
-                            .build(),
-                    )
+        ),
+        UploadError::QuotaReached { retry_at } => {
+            let stamp = retry_at.to_rfc3339_opts(SecondsFormat::Secs, true);
+            Some(
+                Element::builder("retry", NS_HTTP_UPLOAD)
+                    .attr(minidom::rxml::xml_ncname!("stamp").to_owned(), stamp)
                     .build(),
-            );
+            )
         }
-        UploadError::QuotaReached => {
-            err_builder = err_builder.append(Element::builder("retry", NS_HTTP_UPLOAD).build());
-        }
-        _ => {}
+        _ => None,
+    };
+
+    Iq::Error {
+        from: original_iq.to().cloned(),
+        to: original_iq.from().cloned(),
+        id: original_iq.id().to_string(),
+        error: stanza_error,
+        payload: upload_error_payload(original_iq),
     }
+}
 
-    let iq = Element::builder("iq", "jabber:client")
-        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "error")
-        .attr(minidom::rxml::xml_ncname!("id").to_owned(), request_id)
-        .append(Element::builder("request", NS_HTTP_UPLOAD).build())
-        .append(err_builder.build())
-        .build();
-
-    String::from(&iq)
+fn upload_error_payload(original_iq: &Iq) -> Option<Element> {
+    match original_iq {
+        Iq::Get { payload, .. } | Iq::Set { payload, .. } => Some(payload.clone()),
+        Iq::Result { .. } | Iq::Error { .. } => None,
+    }
 }
 
 /// Sanitize filename for use in URLs and storage.
