@@ -4,9 +4,12 @@ import { BrowserXmppClient } from "../src/lib/xmpp-client";
 import {
   __setFaroForTesting,
   initTelemetry,
+  reportCatchup,
   reportMessageAcked,
   reportMessageFailed,
   reportQueueDepthChange,
+  reportReconnectScheduled,
+  reportResumeDrain,
   reportSendEnqueued,
   reportSessionLifecycle,
   reportStatusChange,
@@ -69,8 +72,8 @@ function createFaroStub() {
         type: string;
         values: Record<string, number>;
         context?: Record<string, string>;
-      }) => {
-        measurements.push(payload);
+      }, options?: { context?: Record<string, string> }) => {
+        measurements.push({ ...payload, context: options?.context });
       },
       pushError: (
         error: Error,
@@ -128,6 +131,9 @@ describe("telemetry module no-op behaviour", () => {
       reportQueueDepthChange({ persisted: 0, inflight: 0 });
       reportSessionLifecycle({ type: "fresh" });
       reportStatusChange({ state: "online" });
+      reportReconnectScheduled({ attempt: 1, delayMs: 2_000 });
+      reportCatchup({ conversations: 1, pages: 1, messages: 1, durationMs: 10 });
+      reportResumeDrain({ buffered: 1, durationMs: 10 });
     }).not.toThrow();
   });
 
@@ -142,6 +148,16 @@ describe("telemetry module no-op behaviour", () => {
     reportSessionLifecycle({ type: "resumed" });
     reportStatusChange({ state: "reconnecting", detail: "lost" });
     reportStatusChange({ state: "online", reconnectDurationMs: 4_321 });
+    reportReconnectScheduled({ attempt: 3, delayMs: 8_000 });
+    reportCatchup({
+      conversations: 2,
+      processedConversations: 1,
+      pages: 4,
+      messages: 12,
+      durationMs: 88.6,
+      outcome: "aborted",
+    });
+    reportResumeDrain({ buffered: 5, durationMs: 12.4 });
 
     const eventNames = stub.events.map((e) => e.name);
     expect(eventNames).toEqual([
@@ -151,6 +167,7 @@ describe("telemetry module no-op behaviour", () => {
       "chat.xmpp.session.lifecycle",
       "chat.xmpp.status",
       "chat.xmpp.status",
+      "chat.xmpp.reconnect.scheduled",
     ]);
 
     const measurementTypes = stub.measurements.map((m) => m.type);
@@ -158,6 +175,9 @@ describe("telemetry module no-op behaviour", () => {
       "chat.xmpp.message.acked.latency_ms",
       "chat.xmpp.queue.depth",
       "chat.xmpp.reconnect.duration_ms",
+      "chat.xmpp.reconnect.attempt",
+      "chat.xmpp.catchup",
+      "chat.xmpp.resume_drain",
     ]);
 
     const ackMeasurement = stub.measurements[0];
@@ -169,6 +189,34 @@ describe("telemetry module no-op behaviour", () => {
 
     const reconnectMeasurement = stub.measurements[2];
     expect(reconnectMeasurement.values.duration_ms).toBe(4_321);
+
+    const reconnectAttempt = stub.measurements[3];
+    expect(reconnectAttempt.values).toEqual({
+      count: 1,
+      attempt: 3,
+      delay_ms: 8_000,
+      hidden_ms: 0,
+    });
+    expect(reconnectAttempt.context).toEqual({ visibility: "visible", hidden_bucket: "visible" });
+
+    const catchup = stub.measurements[4];
+    expect(catchup.values).toEqual({
+      conversations: 2,
+      processed_conversations: 1,
+      pages: 4,
+      messages: 12,
+      duration_ms: 89,
+      hidden_ms: 0,
+    });
+    expect(catchup.context).toEqual({
+      visibility: "visible",
+      hidden_bucket: "visible",
+      outcome: "aborted",
+    });
+
+    const resumeDrain = stub.measurements[5];
+    expect(resumeDrain.values).toEqual({ buffered: 5, duration_ms: 12, hidden_ms: 0 });
+    expect(resumeDrain.context).toEqual({ visibility: "visible", hidden_bucket: "visible" });
   });
 });
 
@@ -228,6 +276,17 @@ describe("BrowserXmppClient telemetry hooks", () => {
       wireEvents: (xmpp: unknown) => void;
       emitStatus: (snap: { state: string; detail?: string }) => void;
       emitSessionLifecycle: (evt: { type: "fresh" | "resumed" }) => void;
+      fireHook: <Args extends unknown[]>(hooks: Array<(...args: Args) => void>, ...args: Args) => void;
+      reconnectScheduledHooks: Array<(info: { attempt: number; delayMs: number }) => void>;
+      catchupHooks: Array<(info: {
+        conversations: number;
+        processedConversations: number;
+        pages: number;
+        messages: number;
+        durationMs: number;
+        outcome: "completed" | "aborted" | "failed";
+      }) => void>;
+      resumeDrainHooks: Array<(info: { buffered: number; durationMs: number }) => void>;
     };
     const handlers = new Map<string, Array<(msg: unknown) => void>>();
     const stubXmpp = {
@@ -255,11 +314,23 @@ describe("BrowserXmppClient telemetry hooks", () => {
     internal.emitSessionLifecycle({ type: "resumed" });
     internal.emitStatus({ state: "reconnecting", detail: "ws dropped" });
     internal.emitStatus({ state: "online", detail: "back" });
+    // Background-tab health hooks
+    internal.fireHook(internal.reconnectScheduledHooks, { attempt: 1, delayMs: 2_000 });
+    internal.fireHook(internal.catchupHooks, {
+      conversations: 1,
+      processedConversations: 1,
+      pages: 2,
+      messages: 3,
+      durationMs: 4,
+      outcome: "completed",
+    });
+    internal.fireHook(internal.resumeDrainHooks, { buffered: 7, durationMs: 8 });
 
     const eventNames = stub.events.map((e) => e.name);
     expect(eventNames).toContain("chat.xmpp.message.acked");
     expect(eventNames).toContain("chat.xmpp.message.failed");
     expect(eventNames).toContain("chat.xmpp.session.lifecycle");
+    expect(eventNames).toContain("chat.xmpp.reconnect.scheduled");
     expect(eventNames.filter((n) => n === "chat.xmpp.status")).toHaveLength(2);
 
     const reconnectMeasurement = stub.measurements.find(
@@ -267,6 +338,66 @@ describe("BrowserXmppClient telemetry hooks", () => {
     );
     expect(reconnectMeasurement).toBeDefined();
     expect(reconnectMeasurement?.values.duration_ms).toBeGreaterThanOrEqual(0);
+    expect(stub.measurements.some((m) => m.type === "chat.xmpp.reconnect.attempt")).toBe(true);
+    expect(stub.measurements.some((m) => m.type === "chat.xmpp.catchup")).toBe(true);
+    expect(stub.measurements.some((m) => m.type === "chat.xmpp.resume_drain")).toBe(true);
+  });
+
+  test("catch-up hook reports failed outcomes and processed conversation count", async () => {
+    const client = new BrowserXmppClient(session());
+    const events: Array<{
+      conversations: number;
+      processedConversations: number;
+      pages: number;
+      messages: number;
+      outcome: string;
+    }> = [];
+    client.onCatchup((info) => events.push(info));
+
+    const xmpp = {
+      fetch_dm_history_page: mock(async (peer: string) => {
+        if (peer === "carol@example.com") throw new Error("MAM failed");
+        return {
+          messages: [{
+            mam_id: "mam-2",
+            id: "dm-2",
+            from: "bob@example.com/phone",
+            to: "alice@example.com/desktop",
+            message_type: "chat",
+            body: "missed while suspended",
+            timestamp: "2024-01-01T00:00:01.000Z",
+            reaction_emojis: [],
+            shared_files: [],
+          }],
+          complete: true,
+        };
+      }),
+    };
+
+    const internal = client as unknown as {
+      xmpp: unknown;
+      connected: boolean;
+      runReconnectCatchup: (
+        xmpp: unknown,
+        entries: Array<{ kind: "dm"; key: string; after?: string }>,
+      ) => Promise<void>;
+    };
+    internal.xmpp = xmpp;
+    internal.connected = true;
+
+    await internal.runReconnectCatchup(xmpp, [
+      { kind: "dm", key: "bob@example.com", after: "mam-1" },
+      { kind: "dm", key: "carol@example.com", after: "mam-1" },
+    ]);
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      conversations: 2,
+      processedConversations: 2,
+      pages: 1,
+      messages: 1,
+      outcome: "failed",
+    });
   });
 
   test("client.onError forwards XMPP failures to Faro pushError with kind tagging", () => {

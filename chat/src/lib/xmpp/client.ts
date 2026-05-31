@@ -233,6 +233,8 @@ function shouldSkipRawCatchupMessage(
 const DM_CALL_ACTIVITY_PAGE_SIZE = 100;
 const DM_CALL_ACTIVITY_MAX_PAGES = 50;
 
+type CatchupRunStats = { pages: number; messages: number };
+type CatchupOutcome = "completed" | "aborted" | "failed";
 type DmCallActivityHydrationOptions = { since?: string; pageSize?: number; maxPages?: number };
 
 async function collectRecentMamPages(
@@ -576,6 +578,20 @@ export class BrowserXmppClient {
   private readonly sendEnqueuedHooks: Array<(info: { kind: "room" | "dm"; reason: string }) => void> = [];
   private readonly queueDepthHooks: Array<(depth: { persisted: number; inflight: number }) => void> = [];
   private readonly errorHooks: Array<(event: XmppErrorEvent) => void> = [];
+  // Observe-only health hooks for the background-tab RESULT_CODE_HUNG
+  // investigation (see docs/planning/hung-tab-investigation.md). The
+  // client stays telemetry-agnostic; xmpp-instrumentation.ts binds these
+  // to the Faro report* sink.
+  private readonly reconnectScheduledHooks: Array<(info: { attempt: number; delayMs: number }) => void> = [];
+  private readonly catchupHooks: Array<(info: {
+    conversations: number;
+    processedConversations: number;
+    pages: number;
+    messages: number;
+    durationMs: number;
+    outcome: CatchupOutcome;
+  }) => void> = [];
+  private readonly resumeDrainHooks: Array<(info: { buffered: number; durationMs: number }) => void> = [];
   private readonly roomJoinWaiters = new Map<string, { resolve: () => void; reject: (error: Error) => void }>();
   private readonly carbonDedupIds = new Set<string>();
   readonly catchup: ReconnectCatchup;
@@ -723,6 +739,16 @@ export class BrowserXmppClient {
   onSendEnqueued(hook: (info: { kind: "room" | "dm"; reason: string }) => void) { this.sendEnqueuedHooks.push(hook); }
   onQueueDepthChange(hook: (depth: { persisted: number; inflight: number }) => void) { this.queueDepthHooks.push(hook); }
   onError(hook: (event: XmppErrorEvent) => void) { this.errorHooks.push(hook); }
+  onReconnectScheduled(hook: (info: { attempt: number; delayMs: number }) => void) { this.reconnectScheduledHooks.push(hook); }
+  onCatchup(hook: (info: {
+    conversations: number;
+    processedConversations: number;
+    pages: number;
+    messages: number;
+    durationMs: number;
+    outcome: CatchupOutcome;
+  }) => void) { this.catchupHooks.push(hook); }
+  onResumeDrain(hook: (info: { buffered: number; durationMs: number }) => void) { this.resumeDrainHooks.push(hook); }
 
   private fireHook<Args extends unknown[]>(hooks: Array<(...args: Args) => void>, ...args: Args) {
     for (const hook of hooks) {
@@ -836,6 +862,7 @@ export class BrowserXmppClient {
     if (this.destroying || this.reconnectTimer) return;
     const delay = Math.min(2000 * (2 ** this.reconnectAttempt), 60000);
     this.reconnectAttempt += 1;
+    this.fireHook(this.reconnectScheduledHooks, { attempt: this.reconnectAttempt, delayMs: delay });
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       void this.connect().catch(() => undefined);
@@ -2646,7 +2673,15 @@ export class BrowserXmppClient {
     // `dispatchLiveBodyMessage` path that a fresh socket arrival
     // would, so cursor advance + downstream `messageHandler` /
     // `directMessageHandler` dedup behave identically.
+    // Observe-only: the buffer drain is a single synchronous task over
+    // everything that arrived during the resume barrier — a prime
+    // background-tab HUNG suspect. Measure its size + wall-clock.
+    const drainStartedAt = performance.now();
     for (const m of buffered) this.dispatchLiveBodyMessage(m);
+    this.fireHook(this.resumeDrainHooks, {
+      buffered: buffered.length,
+      durationMs: performance.now() - drainStartedAt,
+    });
   }
 
   private flushAfterSessionReady(xmpp: XmppClientInstance) {
@@ -2855,29 +2890,61 @@ export class BrowserXmppClient {
     entries: Array<{ kind: "dm" | "room"; key: string; after?: string; since?: string; seenIds?: string[] }>,
   ) {
     const sessionJid = this.session.jid;
-    for (const entry of entries) {
-      if (!this.isCurrentConnectedXmpp(xmpp, sessionJid)) return;
-      try {
-        if (entry.kind === "dm") {
-          await this.runDmReconnectCatchup(xmpp, entry, sessionJid);
-        } else {
-          await this.runRoomReconnectCatchup(xmpp, entry, sessionJid);
+    // Observe-only: measure how much work a single catch-up did and how
+    // long it took (background-tab HUNG investigation). Keep stats local
+    // because old/new xmpp handles can briefly overlap during reconnects.
+    const startedAt = performance.now();
+    const stats: CatchupRunStats = { pages: 0, messages: 0 };
+    let processedConversations = 0;
+    let outcome: CatchupOutcome = "completed";
+    try {
+      for (const entry of entries) {
+        if (!this.isCurrentConnectedXmpp(xmpp, sessionJid)) {
+          outcome = "aborted";
+          return;
         }
-      } catch (error) {
-        if (!this.isCurrentConnectedXmpp(xmpp, sessionJid)) return;
-        this.emitError({
-          kind: "history",
-          recoverable: true,
-          detail: `Reconnect catch-up failed for ${entry.key}`,
-          cause: error,
-        });
+        try {
+          if (entry.kind === "dm") {
+            await this.runDmReconnectCatchup(xmpp, entry, sessionJid, stats);
+          } else {
+            await this.runRoomReconnectCatchup(xmpp, entry, sessionJid, stats);
+          }
+          if (!this.isCurrentConnectedXmpp(xmpp, sessionJid)) {
+            outcome = "aborted";
+            return;
+          }
+          processedConversations += 1;
+        } catch (error) {
+          if (!this.isCurrentConnectedXmpp(xmpp, sessionJid)) {
+            outcome = "aborted";
+            return;
+          }
+          outcome = "failed";
+          processedConversations += 1;
+          this.emitError({
+            kind: "history",
+            recoverable: true,
+            detail: `Reconnect catch-up failed for ${entry.key}`,
+            cause: error,
+          });
+        }
       }
+    } finally {
+      this.fireHook(this.catchupHooks, {
+        conversations: entries.length,
+        processedConversations,
+        pages: stats.pages,
+        messages: stats.messages,
+        durationMs: performance.now() - startedAt,
+        outcome,
+      });
     }
   }
   private async runDmReconnectCatchup(
     xmpp: XmppClientInstance,
     entry: { key: string; after?: string; since?: string; seenIds?: string[] },
     sessionJid: string,
+    stats: CatchupRunStats,
   ) {
     if (!xmpp.fetch_dm_history_page) return;
     if (entry.after) {
@@ -2892,14 +2959,14 @@ export class BrowserXmppClient {
         } catch (error) {
           if (isMamCursorNotFound(classifyMamError(error))) {
             const since = entry.since ?? this.catchup.getDmLastSeen(entry.key);
-            if (since) await this.runDmTimestampCatchup(xmpp, entry.key, since, sessionJid, entry.seenIds);
+            if (since) await this.runDmTimestampCatchup(xmpp, entry.key, since, sessionJid, entry.seenIds, stats);
             return;
           }
           throw error;
         }
         if (!this.isCurrentConnectedXmpp(xmpp, sessionJid)) return;
         if (pageContainsArchiveId(page, after)) throw new Error(`Reconnect catch-up received non-advancing archive cursor for ${entry.key}`);
-        const nextAfter = this.applyDmCatchupPage(page, undefined, entry.seenIds);
+        const nextAfter = this.applyDmCatchupPage(page, undefined, entry.seenIds, { stats });
         if (isMamPageComplete(page)) return;
         if (!nextAfter || nextAfter === after) throw new Error(`Reconnect catch-up could not advance archive cursor for ${entry.key}`);
         after = nextAfter;
@@ -2908,12 +2975,13 @@ export class BrowserXmppClient {
     }
     const since = entry.since ?? this.catchup.getDmLastSeen(entry.key);
     if (!since) return;
-    await this.runDmTimestampCatchup(xmpp, entry.key, since, sessionJid, entry.seenIds);
+    await this.runDmTimestampCatchup(xmpp, entry.key, since, sessionJid, entry.seenIds, stats);
   }
   private async runRoomReconnectCatchup(
     xmpp: XmppClientInstance,
     entry: { key: string; after?: string; since?: string; seenIds?: string[] },
     sessionJid: string,
+    stats: CatchupRunStats,
   ) {
     if (!xmpp.fetch_room_history_page) return;
     if (entry.after) {
@@ -2928,14 +2996,14 @@ export class BrowserXmppClient {
         } catch (error) {
           if (isMamCursorNotFound(classifyMamError(error))) {
             const since = entry.since ?? this.catchup.getRoomLastSeen(entry.key);
-            if (since) await this.runRoomTimestampCatchup(xmpp, entry.key, since, sessionJid, entry.seenIds);
+            if (since) await this.runRoomTimestampCatchup(xmpp, entry.key, since, sessionJid, entry.seenIds, stats);
             return;
           }
           throw error;
         }
         if (!this.isCurrentConnectedXmpp(xmpp, sessionJid)) return;
         if (pageContainsArchiveId(page, after)) throw new Error(`Reconnect catch-up received non-advancing archive cursor for ${entry.key}`);
-        const nextAfter = this.applyRoomCatchupPage(page, undefined, entry.seenIds);
+        const nextAfter = this.applyRoomCatchupPage(page, undefined, entry.seenIds, stats);
         if (isMamPageComplete(page)) return;
         if (!nextAfter || nextAfter === after) throw new Error(`Reconnect catch-up could not advance archive cursor for ${entry.key}`);
         after = nextAfter;
@@ -2944,7 +3012,7 @@ export class BrowserXmppClient {
     }
     const since = entry.since ?? this.catchup.getRoomLastSeen(entry.key);
     if (!since) return;
-    await this.runRoomTimestampCatchup(xmpp, entry.key, since, sessionJid, entry.seenIds);
+    await this.runRoomTimestampCatchup(xmpp, entry.key, since, sessionJid, entry.seenIds, stats);
   }
   private async runDmTimestampCatchup(
     xmpp: XmppClientInstance,
@@ -2952,6 +3020,7 @@ export class BrowserXmppClient {
     since: string,
     sessionJid: string,
     seenIds?: ReadonlyArray<string>,
+    stats?: CatchupRunStats,
   ) {
     let pageParam: MamPageParam = { type: "latest" };
     const seenBefore = new Set<string>();
@@ -2969,7 +3038,7 @@ export class BrowserXmppClient {
     }
     const selfBare = barePeerJid(this.session.jid);
     for (const page of [...pages].reverse()) {
-      this.applyDmCatchupPage(page, since, seenIds, { applyCallEvents: false });
+      this.applyDmCatchupPage(page, since, seenIds, { applyCallEvents: false, stats });
     }
     for (const page of [...pages].reverse()) {
       this.applyDmCallEventsFromMamPage(page, selfBare, { since, seenIds });
@@ -2981,6 +3050,7 @@ export class BrowserXmppClient {
     since: string,
     sessionJid: string,
     seenIds?: ReadonlyArray<string>,
+    stats?: CatchupRunStats,
   ) {
     let pageParam: MamPageParam = { type: "latest" };
     const seenBefore = new Set<string>();
@@ -2997,17 +3067,18 @@ export class BrowserXmppClient {
       pageParam = { type: "before", before: firstArchiveId };
     }
     for (const page of [...pages].reverse()) {
-      this.applyRoomCatchupPage(page, since, seenIds);
+      this.applyRoomCatchupPage(page, since, seenIds, stats);
     }
   }
   private applyDmCatchupPage(
     page: WasmMamPage | null | undefined,
     since?: string,
     seenIds?: ReadonlyArray<string>,
-    options: { applyCallEvents?: boolean } = {},
+    options: { applyCallEvents?: boolean; stats?: CatchupRunStats } = {},
   ): string | undefined {
     let lastArchiveId = pageLastArchiveId(page);
     const selfBare = barePeerJid(this.session.jid);
+    if (options.stats) options.stats.pages += 1;
     if (options.applyCallEvents !== false) {
       this.applyDmCallEventsFromMamPage(page, selfBare, { since, seenIds });
     }
@@ -3016,12 +3087,14 @@ export class BrowserXmppClient {
       if (!converted || shouldSkipCatchupMessage(converted, since, seenIds)) continue;
       this.catchup.recordDmSeen(converted.peerJid, converted.createdAt, converted.archiveId, messageSeenIds(converted));
       this.directMessageHandler?.(converted);
+      if (options.stats) options.stats.messages += 1;
       lastArchiveId = converted.archiveId ?? lastArchiveId;
     }
     return lastArchiveId;
   }
-  private applyRoomCatchupPage(page: WasmMamPage | null | undefined, since?: string, seenIds?: ReadonlyArray<string>): string | undefined {
+  private applyRoomCatchupPage(page: WasmMamPage | null | undefined, since?: string, seenIds?: ReadonlyArray<string>, stats?: CatchupRunStats): string | undefined {
     let lastArchiveId = pageLastArchiveId(page);
+    if (stats) stats.pages += 1;
     for (const message of page?.messages ?? []) {
       const converted = roomMessageFromArchived(message);
       if (!converted || shouldSkipCatchupMessage(converted, since, seenIds)) continue;
@@ -3031,6 +3104,7 @@ export class BrowserXmppClient {
       } else {
         this.messageHandler?.(converted);
       }
+      if (stats) stats.messages += 1;
       lastArchiveId = converted.archiveId ?? lastArchiveId;
     }
     return lastArchiveId;
