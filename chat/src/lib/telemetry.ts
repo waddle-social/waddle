@@ -117,6 +117,7 @@ export function initTelemetry(options: InitTelemetryOptions): void {
     console.error("Faro initialization failed", err);
     faro = null;
   }
+  installClientHealthTelemetry();
 }
 
 /**
@@ -282,4 +283,159 @@ export function reportStatusChange(payload: {
       values: { duration_ms: payload.reconnectDurationMs },
     });
   }
+}
+
+// ── Client-health telemetry ─────────────────────────────────────────
+//
+// Observe-only signals for the background-tab `RESULT_CODE_HUNG`
+// investigation (`docs/planning/hung-tab-investigation.md`). Every
+// signal is tagged with the page's `visibilityState` and how long it
+// has been hidden, so the backend can show what happens **in the
+// background** — escalating long tasks (synchronous-burst hang),
+// reconnect flapping, or unbounded heap growth (leak / GC death-spiral)
+// while `hidden` each name a different root cause. No behavior change.
+
+/** Sampling cadence for the JS heap. Background timers are clamped to
+ * ≥1 min, so a 60 s base interval is the finest useful resolution while
+ * backgrounded; foreground samples are exact. */
+const HEAP_SAMPLE_INTERVAL_MS = 60_000;
+
+let healthInstalled = false;
+let visibility: string =
+  typeof document !== "undefined" ? document.visibilityState : "visible";
+let hiddenSinceMs: number | null =
+  visibility === "hidden" && typeof performance !== "undefined" ? performance.now() : null;
+
+/** Common tags so every health signal can be sliced by foreground vs
+ * background and by how deep into a background idle it occurred. */
+function visibilityTags(): { visibility: string; ms_hidden: string } {
+  const msHidden =
+    hiddenSinceMs === null ? 0 : Math.round(performance.now() - hiddenSinceMs);
+  return { visibility, ms_hidden: String(msHidden) };
+}
+
+function reportVisibility(): void {
+  faro?.api.pushEvent("chat.client.visibility", visibilityTags());
+}
+
+function reportLongTask(durationMs: number): void {
+  faro?.api.pushMeasurement({
+    type: "chat.client.longtask.duration_ms",
+    values: { duration_ms: Math.round(durationMs) },
+    context: visibilityTags(),
+  });
+}
+
+interface ChromeMemory {
+  usedJSHeapSize: number;
+  totalJSHeapSize: number;
+  jsHeapSizeLimit: number;
+}
+
+function sampleHeap(): void {
+  if (!faro || typeof performance === "undefined") return;
+  const mem = (performance as Performance & { memory?: ChromeMemory }).memory;
+  if (!mem) return; // Chrome-only API; absent elsewhere
+  faro.api.pushMeasurement({
+    type: "chat.client.heap",
+    values: {
+      used_mb: Math.round(mem.usedJSHeapSize / 1_048_576),
+      total_mb: Math.round(mem.totalJSHeapSize / 1_048_576),
+      limit_mb: Math.round(mem.jsHeapSizeLimit / 1_048_576),
+    },
+    context: visibilityTags(),
+  });
+}
+
+/** Background-flapping detector: one event + counter per scheduled
+ * reconnect, tagged with visibility/ms-hidden. A burst while `hidden`
+ * points at keepalive-throttling → server idle timeout → reconnect loops. */
+export function reportReconnectScheduled(payload: { attempt: number; delayMs: number }): void {
+  if (!faro) return;
+  const tags = visibilityTags();
+  faro.api.pushEvent("chat.xmpp.reconnect.scheduled", {
+    attempt: String(payload.attempt),
+    delay_ms: String(Math.round(payload.delayMs)),
+    ...tags,
+  });
+  faro.api.pushMeasurement({
+    type: "chat.xmpp.reconnect.attempt",
+    values: { attempt: payload.attempt },
+    context: tags,
+  });
+}
+
+/** Catch-up cost: how much work a single reconnect catch-up did. Large
+ * or repeated bursts while `hidden` point at the unbounded resume apply. */
+export function reportCatchup(payload: {
+  conversations: number;
+  pages: number;
+  messages: number;
+  durationMs: number;
+}): void {
+  faro?.api.pushMeasurement({
+    type: "chat.xmpp.catchup",
+    values: {
+      conversations: payload.conversations,
+      pages: payload.pages,
+      messages: payload.messages,
+      duration_ms: Math.round(payload.durationMs),
+    },
+    context: visibilityTags(),
+  });
+}
+
+/** Resume live-buffer drain: how many buffered messages were applied
+ * synchronously on session-ready, and how long that one task took. */
+export function reportResumeDrain(payload: { buffered: number; durationMs: number }): void {
+  faro?.api.pushMeasurement({
+    type: "chat.xmpp.resume_drain",
+    values: { buffered: payload.buffered, duration_ms: Math.round(payload.durationMs) },
+    context: visibilityTags(),
+  });
+}
+
+/**
+ * Install the page-global client-health observers (long tasks, JS heap,
+ * visibility transitions). Idempotent and a no-op without Faro or
+ * outside the browser. Called once from {@link initTelemetry}.
+ */
+function installClientHealthTelemetry(): void {
+  if (healthInstalled) return;
+  if (!faro || typeof window === "undefined" || typeof document === "undefined") return;
+  healthInstalled = true;
+
+  // Visibility transitions — maintain `hidden-since` for tagging and
+  // grab a heap sample on every transition so the bg/fg trajectory is
+  // captured even between timer ticks.
+  document.addEventListener("visibilitychange", () => {
+    const next = document.visibilityState;
+    if (next === visibility) return;
+    visibility = next;
+    hiddenSinceMs = next === "hidden" ? performance.now() : null;
+    reportVisibility();
+    sampleHeap();
+  });
+
+  // Long tasks — the smoking gun for a HUNG renderer. The task that
+  // ultimately wedges the tab won't complete (so won't be reported), but
+  // the escalating tasks before it will, tagged `hidden`.
+  if (
+    "PerformanceObserver" in window &&
+    PerformanceObserver.supportedEntryTypes?.includes("longtask")
+  ) {
+    try {
+      const observer = new PerformanceObserver((list) => {
+        for (const entry of list.getEntries()) reportLongTask(entry.duration);
+      });
+      observer.observe({ entryTypes: ["longtask"] });
+    } catch {
+      // longtask unsupported in this engine — skip silently.
+    }
+  }
+
+  // JS heap trend (Chrome `performance.memory`). Detects a leak / GC
+  // death-spiral building over a long background idle.
+  window.setInterval(sampleHeap, HEAP_SAMPLE_INTERVAL_MS);
+  sampleHeap();
 }

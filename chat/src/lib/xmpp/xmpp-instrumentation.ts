@@ -10,10 +10,13 @@ import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import type { ErrorKind } from "@/lib/telemetry";
 import type { XmppErrorKind } from "@/lib/xmpp/types";
 import {
+  reportCatchup,
   reportError,
   reportMessageAcked,
   reportMessageFailed,
   reportQueueDepthChange,
+  reportReconnectScheduled,
+  reportResumeDrain,
   reportSendEnqueued,
   reportSessionLifecycle,
   reportStatusChange,
@@ -59,4 +62,10 @@ export function installInstrumentation(client: BrowserXmppClient): void {
       ...(event.condition ? { condition: event.condition } : {}),
     });
   });
+  // Background-tab RESULT_CODE_HUNG investigation (observe-only). These
+  // pair with the page-global longtask/heap/visibility signals installed
+  // by `installClientHealthTelemetry()` in `@/lib/telemetry`.
+  client.onReconnectScheduled((info) => reportReconnectScheduled(info));
+  client.onCatchup((info) => reportCatchup(info));
+  client.onResumeDrain((info) => reportResumeDrain(info));
 }
