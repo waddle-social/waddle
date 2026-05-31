@@ -44,7 +44,7 @@ pub(super) fn finalize_result(
     count: Option<u32>,
 ) -> MamResult {
     let actual_limit = query.max.unwrap_or(100).min(500) as usize;
-    let complete = messages.len() <= actual_limit;
+    let complete = actual_limit == 0 || messages.len() <= actual_limit;
 
     if messages.len() > actual_limit {
         messages.pop();
