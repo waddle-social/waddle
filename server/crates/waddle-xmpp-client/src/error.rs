@@ -72,6 +72,8 @@ pub enum ClientError {
     UnsupportedWebSocketMessage,
     #[error("websocket transport is already closed")]
     TransportClosed,
+    #[error("request was cancelled")]
+    RequestCancelled,
     #[error("the XMPP session is disconnected")]
     Disconnected,
     #[error("server returned a stanza error: {0}")]

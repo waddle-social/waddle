@@ -166,6 +166,10 @@ pub(crate) enum WasmCommand {
         query_id: String,
         responder: oneshot::Sender<DriverResult<InboxPage>>,
     },
+    CancelIq {
+        id: String,
+        responder: oneshot::Sender<DriverResult<()>>,
+    },
     Disconnect {
         responder: oneshot::Sender<DriverResult<()>>,
     },
@@ -190,6 +194,15 @@ pub(crate) enum DeferredWasmCommand {
         query_id: String,
         responder: oneshot::Sender<DriverResult<InboxPage>>,
     },
+}
+
+impl DeferredWasmCommand {
+    pub(crate) fn raw_iq_id(&self) -> Option<&str> {
+        match self {
+            Self::Iq { stanza, .. } => stanza.attr("id"),
+            Self::Stanza { .. } | Self::MamQuery { .. } | Self::InboxQuery { .. } => None,
+        }
+    }
 }
 
 /// Result of one streamed XEP-0430 inbox query.

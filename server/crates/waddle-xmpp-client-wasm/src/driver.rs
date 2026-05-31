@@ -179,6 +179,11 @@ impl WasmDriverTask {
                 self.send_inbox_query_command(stanza, query_id, responder)
                     .await
             }
+            Some(WasmCommand::CancelIq { id, responder }) => {
+                self.cancel_iq_command(&id);
+                let _ = responder.send(Ok(()));
+                true
+            }
             Some(WasmCommand::Disconnect { responder }) => {
                 self.explicit_disconnect = true;
                 self.publish_resume_state_snapshot();
@@ -191,6 +196,10 @@ impl WasmDriverTask {
             }
             None => false,
         }
+    }
+
+    fn cancel_iq_command(&mut self, id: &str) {
+        cancel_raw_iq_state(&mut self.pending_iqs, &mut self.deferred_commands, id);
     }
 
     async fn send_stanza_command(
@@ -611,9 +620,33 @@ fn publish_resume_state_snapshot(
     inner.borrow_mut().resume_state = resume_state;
 }
 
+fn cancel_raw_iq_state(
+    pending_iqs: &mut HashMap<String, oneshot::Sender<DriverResult<Element>>>,
+    deferred_commands: &mut VecDeque<DeferredWasmCommand>,
+    id: &str,
+) {
+    if let Some(responder) = pending_iqs.remove(id) {
+        let _ = responder.send(Err(ClientError::RequestCancelled));
+    }
+
+    let mut retained = VecDeque::with_capacity(deferred_commands.len());
+    while let Some(command) = deferred_commands.pop_front() {
+        if command.raw_iq_id() == Some(id) {
+            if let DeferredWasmCommand::Iq { responder, .. } = command {
+                let _ = responder.send(Err(ClientError::RequestCancelled));
+            }
+        } else {
+            retained.push_back(command);
+        }
+    }
+    *deferred_commands = retained;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::executor::block_on;
+    use waddle_xmpp_client::discovery::DISCO_INFO_NS;
 
     fn test_inner() -> Rc<RefCell<WaddleClientInner>> {
         Rc::new(RefCell::new(WaddleClientInner {
@@ -737,5 +770,62 @@ mod tests {
         publish_resume_state_snapshot(&inner, &runtime, true);
 
         assert!(inner.borrow().resume_state.is_none());
+    }
+
+    fn iq(id: &str) -> Element {
+        Element::builder("iq", NS_CLIENT)
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+            .append(Element::builder("query", DISCO_INFO_NS).build())
+            .build()
+    }
+
+    #[test]
+    fn cancel_raw_iq_removes_sent_pending_responder() {
+        let (responder, rx) = oneshot::channel();
+        let mut pending_iqs = HashMap::from([("sent-1".to_string(), responder)]);
+        let mut deferred_commands = VecDeque::new();
+
+        cancel_raw_iq_state(&mut pending_iqs, &mut deferred_commands, "sent-1");
+
+        assert!(!pending_iqs.contains_key("sent-1"));
+        assert!(matches!(
+            block_on(rx).expect("responder should send"),
+            Err(ClientError::RequestCancelled)
+        ));
+
+        let late = iq("sent-1");
+        assert!(pending_iqs.remove("sent-1").is_none());
+        drop(late);
+    }
+
+    #[test]
+    fn cancel_raw_iq_removes_not_yet_sent_deferred_responder() {
+        let (cancelled_responder, cancelled_rx) = oneshot::channel();
+        let (retained_responder, mut retained_rx) = oneshot::channel();
+        let mut pending_iqs = HashMap::new();
+        let mut deferred_commands = VecDeque::from([
+            DeferredWasmCommand::Iq {
+                stanza: iq("deferred-1"),
+                responder: cancelled_responder,
+            },
+            DeferredWasmCommand::Iq {
+                stanza: iq("deferred-2"),
+                responder: retained_responder,
+            },
+        ]);
+
+        cancel_raw_iq_state(&mut pending_iqs, &mut deferred_commands, "deferred-1");
+
+        assert_eq!(deferred_commands.len(), 1);
+        assert_eq!(deferred_commands[0].raw_iq_id(), Some("deferred-2"));
+        assert!(matches!(
+            block_on(cancelled_rx).expect("responder should send"),
+            Err(ClientError::RequestCancelled)
+        ));
+        assert!(retained_rx
+            .try_recv()
+            .expect("receiver should remain open")
+            .is_none());
     }
 }
