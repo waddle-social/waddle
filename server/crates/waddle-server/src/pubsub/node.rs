@@ -331,6 +331,9 @@ fn bounded_node_config(node_name: &str, config: &NodeConfig) -> NodeConfig {
     if is_bookmarks_node(node_name) {
         return config.clone().normalize_xep0402_bookmarks();
     }
+    if is_dm_bookmarks_node(node_name) {
+        return config.clone().normalize_waddle_dm_bookmarks();
+    }
     config.clone()
 }
 

@@ -227,6 +227,63 @@ async fn xep0402_bookmark_node_config_clamps_unbounded_max_items() {
 }
 
 #[tokio::test]
+async fn dm_bookmark_node_config_clamps_unbounded_max_items_and_pins_whitelist() {
+    // Parity with the XEP-0402 bookmarks node: an owner reconfiguring
+    // their own urn:waddle:dm-bookmarks:0 node MUST NOT be able to set
+    // max_items=max (which would re-disable eviction, the anti-DoS hole
+    // from the adversarial review) or access_model=open (which would
+    // leak which contacts they have muted to roster peers).
+    use waddle_xmpp_core::pubsub::AccessModel;
+    let dm_node = waddle_xmpp::xep::xep_waddle_dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS;
+
+    let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("storage");
+    let owner = jid("alice@example.com");
+    let (node, _) = storage
+        .get_or_create_node(&owner, dm_node)
+        .await
+        .expect("node");
+
+    let mut config = node.config.clone();
+    config.max_items = u32::MAX;
+    config.access_model = AccessModel::Open;
+    storage
+        .update_node_config(&owner, dm_node, &config)
+        .await
+        .expect("reconfigure");
+    let node = storage
+        .get_node(&owner, dm_node)
+        .await
+        .expect("node lookup")
+        .expect("node exists");
+    assert_eq!(
+        node.config.max_items,
+        waddle_xmpp::pubsub::PEP_BOOKMARK_MAX_ITEMS,
+        "unbounded max_items must clamp to the anti-DoS cap"
+    );
+    assert_eq!(
+        node.config.access_model,
+        AccessModel::Whitelist,
+        "access_model must be forced back to whitelist (privacy)"
+    );
+
+    // A bounded value within the cap is preserved.
+    let mut config = node.config.clone();
+    config.max_items = 8;
+    storage
+        .update_node_config(&owner, dm_node, &config)
+        .await
+        .expect("allow bounded value");
+    let node = storage
+        .get_node(&owner, dm_node)
+        .await
+        .expect("node lookup")
+        .expect("node exists");
+    assert_eq!(node.config.max_items, 8);
+}
+
+#[tokio::test]
 async fn xep0402_bookmark_node_config_forces_private_durable_fields() {
     let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
         .await

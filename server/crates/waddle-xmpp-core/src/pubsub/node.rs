@@ -368,6 +368,27 @@ impl NodeConfig {
         self
     }
 
+    /// Force the `urn:waddle:dm-bookmarks:0` privacy and durability
+    /// invariants onto a config.
+    ///
+    /// Applied on every owner reconfigure (not just auto-create) so the
+    /// anti-DoS `max_items` cap and the whitelist/send-last privacy of the
+    /// DM carrier cannot be reverted via `pubsub#owner` configure — full
+    /// parity with [`Self::normalize_xep0402_bookmarks`] on the sibling
+    /// MUC node. Without this, an owner could set `max_items=max`,
+    /// re-disabling eviction, or `access_model=open`, leaking which
+    /// contacts they have muted.
+    pub fn normalize_waddle_dm_bookmarks(mut self) -> Self {
+        self.access_model = AccessModel::Whitelist;
+        self.publish_model = PublishModel::Publishers;
+        if self.max_items == 0 || self.max_items > PEP_BOOKMARK_MAX_ITEMS {
+            self.max_items = PEP_BOOKMARK_MAX_ITEMS;
+        }
+        self.persist_items = true;
+        self.send_last_published_item = SendLastPublishedItem::Never;
+        self
+    }
+
     /// Configuration for a public node.
     pub fn public() -> Self {
         Self {
