@@ -57,6 +57,7 @@ import { prepareEncryptedAttachmentUpload } from "./encrypted-attachments";
 import { discoverChannels, discoverTopology } from "./discovery";
 import { discoverUploadService, uploadFile, type UploadProgress } from "./file-upload";
 import { ReconnectCatchup } from "./reconnect-catchup";
+import { classifyMamError, isMamCursorNotFound } from "./mam";
 import { parseRegisterDeviceResult, type RegisterDeviceResult } from "./push-register-result";
 import {
   createLocalStorageResumePersistence,
@@ -177,6 +178,10 @@ function pageLastArchiveId(page: WasmMamPage | null | undefined): string | undef
 function pageFirstArchiveId(page: WasmMamPage | null | undefined): string | undefined {
   const compat = page as (WasmMamPage & { firstArchiveId?: string }) | null | undefined;
   return compat?.first_id ?? compat?.firstArchiveId;
+}
+
+function pageContainsArchiveId(page: WasmMamPage | null | undefined, archiveId: string): boolean {
+  return (page?.messages ?? []).some((message) => message.mam_id === archiveId);
 }
 
 function compareTimestamps(left: string, right: string): number {
@@ -2686,11 +2691,22 @@ export class BrowserXmppClient {
       while (after) {
         if (seenAfter.has(after)) throw new Error(`Reconnect catch-up repeated archive cursor for ${entry.key}`);
         seenAfter.add(after);
-        const page = await xmpp.fetch_dm_history_page(entry.key, 100, { type: "after", after }) as WasmMamPage;
+        let page: WasmMamPage;
+        try {
+          page = await xmpp.fetch_dm_history_page(entry.key, 100, { type: "after", after }) as WasmMamPage;
+        } catch (error) {
+          if (isMamCursorNotFound(classifyMamError(error))) {
+            const since = entry.since ?? this.catchup.getDmLastSeen(entry.key);
+            if (since) await this.runDmTimestampCatchup(xmpp, entry.key, since, sessionJid, entry.seenIds);
+            return;
+          }
+          throw error;
+        }
         if (!this.isCurrentConnectedXmpp(xmpp, sessionJid)) return;
+        if (pageContainsArchiveId(page, after)) throw new Error(`Reconnect catch-up received non-advancing archive cursor for ${entry.key}`);
         const nextAfter = this.applyDmCatchupPage(page, undefined, entry.seenIds);
         if (isMamPageComplete(page)) return;
-        if (!nextAfter) throw new Error(`Reconnect catch-up could not advance archive cursor for ${entry.key}`);
+        if (!nextAfter || nextAfter === after) throw new Error(`Reconnect catch-up could not advance archive cursor for ${entry.key}`);
         after = nextAfter;
       }
       return;
@@ -2711,11 +2727,22 @@ export class BrowserXmppClient {
       while (after) {
         if (seenAfter.has(after)) throw new Error(`Reconnect catch-up repeated archive cursor for ${entry.key}`);
         seenAfter.add(after);
-        const page = await xmpp.fetch_room_history_page(entry.key, 100, { type: "after", after }) as WasmMamPage;
+        let page: WasmMamPage;
+        try {
+          page = await xmpp.fetch_room_history_page(entry.key, 100, { type: "after", after }) as WasmMamPage;
+        } catch (error) {
+          if (isMamCursorNotFound(classifyMamError(error))) {
+            const since = entry.since ?? this.catchup.getRoomLastSeen(entry.key);
+            if (since) await this.runRoomTimestampCatchup(xmpp, entry.key, since, sessionJid, entry.seenIds);
+            return;
+          }
+          throw error;
+        }
         if (!this.isCurrentConnectedXmpp(xmpp, sessionJid)) return;
+        if (pageContainsArchiveId(page, after)) throw new Error(`Reconnect catch-up received non-advancing archive cursor for ${entry.key}`);
         const nextAfter = this.applyRoomCatchupPage(page, undefined, entry.seenIds);
         if (isMamPageComplete(page)) return;
-        if (!nextAfter) throw new Error(`Reconnect catch-up could not advance archive cursor for ${entry.key}`);
+        if (!nextAfter || nextAfter === after) throw new Error(`Reconnect catch-up could not advance archive cursor for ${entry.key}`);
         after = nextAfter;
       }
       return;

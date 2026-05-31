@@ -37,6 +37,8 @@ type CatchupEntry =
 type SeenCursor = {
   timestamp: string;
   archiveId?: string;
+  archiveTimestamp?: string;
+  archiveSeenIds?: string[];
   seenIds?: string[];
 };
 
@@ -96,10 +98,10 @@ export class ReconnectCatchup {
 
   private absorbRemoteSnapshot(remote: PersistedReconnectCatchup): void {
     for (const [key, cursor] of remote.dmLastSeen) {
-      advance(this.dmLastSeen, key, cursor.timestamp, cursor.archiveId, cursor.seenIds);
+      advance(this.dmLastSeen, key, cursor.timestamp, cursor.archiveId, cursor.seenIds, cursor.archiveTimestamp, cursor.archiveSeenIds);
     }
     for (const [key, cursor] of remote.roomLastSeen) {
-      advance(this.roomLastSeen, key, cursor.timestamp, cursor.archiveId, cursor.seenIds);
+      advance(this.roomLastSeen, key, cursor.timestamp, cursor.archiveId, cursor.seenIds, cursor.archiveTimestamp, cursor.archiveSeenIds);
     }
   }
 
@@ -168,11 +170,13 @@ function catchupEntry(kind: "dm" | "room", key: string, cursor: SeenCursor): Cat
       ...(cursor.seenIds?.length ? { seenIds: cursor.seenIds } : {}),
     };
   }
+  const seenIds = mergeSeenIds(cursor.archiveSeenIds, cursor.seenIds);
   return {
     kind,
     key,
     after: cursor.archiveId,
-    ...(cursor.seenIds?.length ? { seenIds: cursor.seenIds } : {}),
+    since: cursor.archiveTimestamp ?? cursor.timestamp,
+    ...(seenIds.length ? { seenIds } : {}),
   };
 }
 
@@ -182,27 +186,50 @@ function advance(
   timestamp: string,
   archiveId?: string,
   seenIds?: ReadonlyArray<string>,
+  archiveTimestamp?: string,
+  archiveSeenIds?: ReadonlyArray<string>,
 ): void {
   const normalizedTimestamp = normalizeTimestamp(timestamp);
+  const normalizedArchiveTimestamp = archiveTimestamp ? normalizeTimestamp(archiveTimestamp) : undefined;
   const current = map.get(key);
   const ordering = current ? compareTimestamps(normalizedTimestamp, current.timestamp) : 1;
   if (current === undefined || ordering > 0) {
     const nextArchiveId = archiveId ?? current?.archiveId;
+    const nextArchiveTimestamp = archiveId ? (normalizedArchiveTimestamp ?? normalizedTimestamp) : current?.archiveTimestamp;
+    const preservedArchiveSeenIds = current?.archiveSeenIds ?? (current?.archiveId ? current.seenIds : undefined);
+    const nextArchiveSeenIds = archiveId
+      ? mergeSeenIds(archiveSeenIds, seenIds)
+      : mergeSeenIds(preservedArchiveSeenIds, archiveSeenIds);
+    const nextSeenIds = nextArchiveId && !archiveId
+      ? mergeSeenIds(current?.seenIds, seenIds)
+      : mergeSeenIds(undefined, seenIds);
     map.set(key, {
       timestamp: normalizedTimestamp,
       ...(nextArchiveId ? { archiveId: nextArchiveId } : {}),
-      ...nonEmptySeenIds(seenIds),
+      ...(nextArchiveTimestamp ? { archiveTimestamp: nextArchiveTimestamp } : {}),
+      ...nonEmptyArchiveSeenIds(nextArchiveSeenIds),
+      ...nonEmptySeenIds(nextSeenIds),
     });
     return;
   }
   if (ordering === 0) {
     const nextSeenIds = mergeSeenIds(current.seenIds, seenIds);
+    const nextArchiveSeenIds = archiveId
+      ? mergeSeenIds(current.archiveSeenIds, mergeSeenIds(archiveSeenIds, seenIds))
+      : mergeSeenIds(current.archiveSeenIds, archiveSeenIds);
     map.set(key, {
       ...current,
       ...(archiveId ? { archiveId } : {}),
+      ...(archiveId ? { archiveTimestamp: normalizedArchiveTimestamp ?? normalizedTimestamp } : {}),
+      ...nonEmptyArchiveSeenIds(nextArchiveSeenIds),
       ...nonEmptySeenIds(nextSeenIds),
     });
   }
+}
+
+function nonEmptyArchiveSeenIds(seenIds: ReadonlyArray<string> | undefined): Partial<Pick<SeenCursor, "archiveSeenIds">> {
+  const normalized = mergeSeenIds(undefined, seenIds);
+  return normalized.length > 0 ? { archiveSeenIds: normalized } : {};
 }
 
 function nonEmptySeenIds(seenIds: ReadonlyArray<string> | undefined): Partial<Pick<SeenCursor, "seenIds">> {

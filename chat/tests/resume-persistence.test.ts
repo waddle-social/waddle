@@ -146,7 +146,7 @@ describe("ReconnectCatchup persistence — hydrate from snapshot on construct", 
     const c = new ReconnectCatchup(persistence);
     const entries = c.onSessionStarted();
     expect(entries).toEqual([
-      { kind: "dm", key: "bob@example.com", after: "dm-arch-1" },
+      { kind: "dm", key: "bob@example.com", after: "dm-arch-1", since: "2026-05-20T10:00:00.000Z" },
     ]);
   });
 
@@ -177,7 +177,11 @@ describe("ReconnectCatchup persistence — writes back on advance", () => {
     expect(snapshot).not.toBeNull();
     expect(snapshot!.dmLastSeen).toContainEqual([
       "bob@example.com",
-      { timestamp: "2026-05-20T10:00:00.000Z", archiveId: "dm-arch-1" },
+      {
+        timestamp: "2026-05-20T10:00:00.000Z",
+        archiveId: "dm-arch-1",
+        archiveTimestamp: "2026-05-20T10:00:00.000Z",
+      },
     ]);
   });
 

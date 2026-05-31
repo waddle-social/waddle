@@ -31,11 +31,13 @@ describe("ReconnectCatchup", () => {
       kind: "dm",
       key: "bob@example.com",
       after: "dm-arch-1",
+      since: "2024-01-01T00:00:00.000Z",
     });
     expect(entries).toContainEqual({
       kind: "room",
       key: "general@muc.example.com",
       after: "room-arch-1",
+      since: "2024-01-02T00:00:00.000Z",
     });
   });
 
@@ -100,7 +102,7 @@ describe("ReconnectCatchup", () => {
     c.onSessionStarted();
 
     expect(c.onSessionStarted()).toEqual([
-      { kind: "dm", key: "bob@example.com", after: "dm-arch-2" },
+      { kind: "dm", key: "bob@example.com", after: "dm-arch-2", since: "2024-01-02T00:00:00.000Z" },
     ]);
   });
 
@@ -112,14 +114,15 @@ describe("ReconnectCatchup", () => {
     c.onSessionStarted();
 
     expect(c.onSessionStarted()).toEqual([
-      { kind: "dm", key: "bob@example.com", after: "dm-arch-2" },
+      { kind: "dm", key: "bob@example.com", after: "dm-arch-2", since: "2024-01-02T00:00:00.000Z" },
     ]);
   });
 
   test("newer live timestamps do not discard the last authoritative archive id", () => {
     const c = new ReconnectCatchup();
-    c.recordDmSeen("bob@example.com", "2024-01-02T00:00:00Z", "dm-arch-2");
-    c.recordDmSeen("bob@example.com", "2024-01-02T00:00:01Z", undefined, ["dm-live-3"]);
+    c.recordDmSeen("bob@example.com", "2024-01-02T00:00:00Z", "dm-arch-2", ["dm-arch-message"]);
+    c.recordDmSeen("bob@example.com", "2024-01-02T00:00:01Z", undefined, ["dm-live-1"]);
+    c.recordDmSeen("bob@example.com", "2024-01-02T00:00:02Z", undefined, ["dm-live-2"]);
 
     c.onSessionStarted();
 
@@ -128,7 +131,8 @@ describe("ReconnectCatchup", () => {
         kind: "dm",
         key: "bob@example.com",
         after: "dm-arch-2",
-        seenIds: ["dm-live-3"],
+        since: "2024-01-02T00:00:00.000Z",
+        seenIds: ["dm-arch-message", "dm-live-1", "dm-live-2"],
       },
     ]);
   });
@@ -145,6 +149,7 @@ describe("ReconnectCatchup", () => {
         kind: "dm",
         key: "bob@example.com",
         after: "dm-arch-2",
+        since: "2024-01-02T00:00:00.000Z",
         seenIds: ["dm-live-same-time"],
       },
     ]);
