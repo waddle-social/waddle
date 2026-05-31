@@ -869,6 +869,84 @@ pub struct SetRoomNotificationModeOptions {
     pub rich_payload_opt_in: bool,
 }
 
+/// JS-facing shape for one Waddle DM-bookmark item (issue #720)
+/// exposed via `WaddleClient::fetch_dm_bookmarks`.
+///
+/// The DM counterpart to [`WaddleBookmarkItem`]: the carrier is the
+/// project-local `urn:waddle:dm-bookmarks:0` PEP node, whose item id
+/// is the contact's bare JID and whose payload directly hosts one
+/// official XEP-0492 `<notify/>` (no `<extensions/>` wrapper, no
+/// native bookmark field). `jid` is that contact bare JID as a string;
+/// `notify_mode` is the XEP-0492 fallback setting (no `identity-*`
+/// attrs). The DM node is sparse / override-only — an item exists ONLY
+/// when the DM has an override — so a `None` `notify_mode` means the
+/// `<notify/>` carries only identity-scoped siblings; the chat UI
+/// resolves against the XEP-0492 §3 direct-chat default (`always`).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WaddleDmBookmarkItem {
+    /// The contact's bare JID (PEP item id) as a string.
+    pub jid: String,
+    /// XEP-0492 fallback setting read from the hosted `<notify/>`.
+    pub notify_mode: Option<waddle_xmpp_client::xep::xep0492::NotifyMode>,
+    /// Waddle rich XEP-0357 push-summary opt-in carried in the
+    /// XEP-0492 §2.3 `<advanced/>` block of this DM's `<notify/>`
+    /// (#719). `false` is the default / absence-of-marker case.
+    pub rich_payload_opt_in: bool,
+}
+
+/// JS-facing tagged outcome of `WaddleClient::set_dm_notification_mode`
+/// (issue #720).
+///
+/// Mirrors [`WaddleSetRoomNotificationModeOutcome`] but for the DM
+/// carrier, with one extra variant: the DM node is sparse /
+/// override-only, so returning a DM to the XEP-0492 §3 direct-chat
+/// default (`always`, no opt-in, no foreign `<advanced/>`) RETRACTS the
+/// item instead of publishing. That path resolves to `Removed`, letting
+/// the chat reconcile its store to "no override" without a refetch.
+/// Always-resolves the Promise on stanza-level errors (transport /
+/// serialization failures still reject via `JsValue`).
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum WaddleSetDmNotificationModeOutcome {
+    /// The DM carried an override; the item was published. Carries the
+    /// surfaced item so the chat reconciles without a refetch.
+    Ok { item: WaddleDmBookmarkItem },
+    /// The merged `<notify/>` collapsed to the §3 direct-chat default,
+    /// so the item was retracted (XEP-0060 `<retract>`). `jid` echoes
+    /// the contact so the chat can drop its override entry.
+    Removed { jid: String },
+    /// XEP-0060 `precondition-not-met` on the publish — a pre-existing
+    /// node with a divergent `access_model`. Same semantics as the
+    /// room path's variant of the same name.
+    NodeConfigMismatch,
+    /// Any other stanza-level error. The specific RFC 6120 §8.3
+    /// condition stays on the Rust side (emitted via `tracing::warn`)
+    /// rather than crossing the JS boundary as a stringly-typed
+    /// payload — matching [`WaddleSetRoomNotificationModeOutcome`].
+    Error,
+}
+
+/// Options bag for `WaddleClient::set_dm_notification_mode` (issue
+/// #720). Mirrors [`SetRoomNotificationModeOptions`]'s camelCase wire
+/// contract; a DM has no `name` field (no `<conference/>` to label).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetDmNotificationModeOptions {
+    /// Bare JID of the direct-chat contact whose DM-bookmark carries
+    /// the XEP-0492 `<notify/>`. Serialized as `dmJid` on the JS side.
+    pub dm_jid: String,
+    /// Typed at the WASM boundary — unknown values fail at
+    /// `serde_wasm_bindgen::from_value` rather than reaching the IQ
+    /// builder.
+    pub mode: waddle_xmpp_client::xep::xep0492::NotifyMode,
+    /// Waddle rich XEP-0357 push-summary opt-in (#719). Serialized as
+    /// `richPayloadOptIn`. Defaults to `false` (minimal payload) when
+    /// the JS caller omits the field.
+    #[serde(default)]
+    pub rich_payload_opt_in: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::RegisterPushDeviceOptions;

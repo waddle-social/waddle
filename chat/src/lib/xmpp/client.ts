@@ -343,6 +343,41 @@ export type SetRoomNotificationModeOutcome =
   | { kind: "node-config-mismatch" }
   | { kind: "error" };
 
+/**
+ * One per-DM notification entry surfaced from
+ * `WaddleClient.fetchDmBookmarks` / `setDmNotificationMode`,
+ * backed by the `urn:waddle:dm-bookmarks:0` PEP node (#720).
+ *
+ * Structurally identical to [[UserBookmarkItem]] minus the MUC-only
+ * `name` / `autojoin` attributes — a DM has no room name or autojoin.
+ * The chat store merges DM and MUC entries into one JID-keyed cache;
+ * Waddle's DM (user) and MUC (service) JIDs are disjoint in practice,
+ * and the server source-scopes its projection cleanup, so the unified
+ * cache is safe.
+ * `notifyMode` is `null` when the entry exists but carries no
+ * XEP-0492 `<notify/>` mode yet; the chat resolves `null` against the
+ * `direct-chat` §3 default (`always`) via `resolveDefaultNotifyMode`.
+ */
+export interface DmBookmarkItem {
+  jid: string;
+  notifyMode: NotifyMode | null;
+  /** Waddle rich XEP-0357 push-summary opt-in for this DM (#719). */
+  richPayloadOptIn: boolean;
+}
+
+/** Typed outcome of [[BrowserXmppClient.setDmNotificationMode]].
+ *
+ * Mirrors [[SetRoomNotificationModeOutcome]] plus the `removed`
+ * variant: when a DM reverts to its XEP-0492 §3 default (`always`),
+ * the `urn:waddle:dm-bookmarks:0` PEP item is retracted server-side,
+ * so the chat drops that JID's cache entry rather than storing a
+ * default-valued bookmark. */
+export type SetDmNotificationModeResult =
+  | { kind: "ok"; item: DmBookmarkItem }
+  | { kind: "removed"; jid: string }
+  | { kind: "node-config-mismatch" }
+  | { kind: "error" };
+
 type CompatEmitter = {
   on?: (event: string, handler: (...args: any[]) => void) => void;
   off?: (event: string, handler: (...args: any[]) => void) => void;
@@ -391,6 +426,12 @@ type XmppClientInstance = Partial<WasmClient> & CompatEmitter & {
     name?: string;
     richPayloadOptIn?: boolean;
   }) => Promise<SetRoomNotificationModeOutcome>;
+  fetch_dm_bookmarks?: () => Promise<DmBookmarkItem[] | null>;
+  set_dm_notification_mode?: (options: {
+    dmJid: string;
+    mode: NotifyMode;
+    richPayloadOptIn: boolean;
+  }) => Promise<SetDmNotificationModeResult>;
 };
 
 /**
@@ -1859,6 +1900,72 @@ export class BrowserXmppClient {
       // failures. Stanza errors are surfaced via the typed outcome
       // above and never reach here.
       console.warn("[xmpp] XEP-0492 bookmark publish failed:", error);
+      return { kind: "error" };
+    }
+  }
+
+  /**
+   * Fetch the user's per-DM XEP-0492 notification settings from the
+   * `urn:waddle:dm-bookmarks:0` PEP node (#720).
+   *
+   * Returns an empty list when the user has not yet published any
+   * per-DM override — the on-first-connect state — and the chat UI
+   * resolves the `direct-chat` §3 default (`always`) via
+   * [[resolveDefaultNotifyMode]]. `item-not-found` (the node has never
+   * been created) collapses to an empty array on the WASM side.
+   *
+   * Wrapped like [[fetchUserBookmarks]] so a reconnect/teardown race
+   * never escapes as an unhandled rejection out of the lifecycle
+   * handler's `void`-dispatched hydrate.
+   */
+  async fetchDmBookmarks(): Promise<DmBookmarkItem[]> {
+    try {
+      const xmpp = await this.requireConnectedXmpp();
+      if (!xmpp.fetch_dm_bookmarks) return [];
+      const items = (await xmpp.fetch_dm_bookmarks()) as DmBookmarkItem[] | null;
+      return items ?? [];
+    } catch (error) {
+      console.warn("[xmpp] DM notification-settings fetch failed:", error);
+      return [];
+    }
+  }
+
+  /**
+   * Set the XEP-0492 fallback notification mode for one DM, persisted
+   * to the `urn:waddle:dm-bookmarks:0` PEP node (#720).
+   *
+   * Resolves to a typed tagged outcome mirroring
+   * [[setRoomNotificationMode]] plus a `removed` variant: a request
+   * that reverts the DM to its §3 default (`always`) retracts the PEP
+   * item server-side and resolves `{ kind: "removed", jid }` so the
+   * chat store can drop the cache entry. A `dmJid` without a localpart
+   * REJECTS on the WASM side; we map that — and any session-not-ready
+   * / transport failure — to the typed `{ kind: "error" }` so the
+   * UI banner contract holds and no exception escapes the call site.
+   */
+  async setDmNotificationMode(opts: {
+    dmJid: string;
+    mode: "always" | "on-mention" | "never";
+    richPayloadOptIn: boolean;
+  }): Promise<SetDmNotificationModeResult> {
+    try {
+      const xmpp = await this.requireConnectedXmpp();
+      if (!xmpp.set_dm_notification_mode) return { kind: "error" };
+      const outcome = (await xmpp.set_dm_notification_mode({
+        dmJid: opts.dmJid,
+        mode: opts.mode,
+        richPayloadOptIn: opts.richPayloadOptIn,
+      })) as SetDmNotificationModeResult;
+      if (outcome.kind === "error") {
+        console.warn("[xmpp] DM notification-settings publish rejected");
+      }
+      return outcome;
+    } catch (error) {
+      // Reached for a malformed `dmJid` (no localpart → typed JS
+      // reject), session-not-ready exceptions, and transport /
+      // serialization failures. Stanza errors surface via the typed
+      // outcome above and never reach here.
+      console.warn("[xmpp] DM notification-settings publish failed:", error);
       return { kind: "error" };
     }
   }

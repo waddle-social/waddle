@@ -51,18 +51,25 @@ impl ConversationKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotificationSettingsSource {
     Xep0402Bookmarks,
+    WaddleDmBookmarks,
 }
 
 impl NotificationSettingsSource {
     pub(crate) fn node(self) -> &'static str {
         match self {
             Self::Xep0402Bookmarks => waddle_xmpp::xep::xep0402::PEP_NODE,
+            Self::WaddleDmBookmarks => {
+                waddle_xmpp::xep::xep_waddle_dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS
+            }
         }
     }
 
     fn from_node(node: &str) -> Result<Self, NotificationSettingsProjectionError> {
         match node {
             waddle_xmpp::xep::xep0402::PEP_NODE => Ok(Self::Xep0402Bookmarks),
+            waddle_xmpp::xep::xep_waddle_dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS => {
+                Ok(Self::WaddleDmBookmarks)
+            }
             _ => Err(NotificationSettingsProjectionError::InvalidSourceNode(
                 node.to_string(),
             )),
@@ -95,6 +102,13 @@ pub enum NotificationSettingsProjectionMutation {
     Delete {
         owner_bare_jid: BareJid,
         conversation_jid: BareJid,
+        /// The carrier whose ingestion derived this delete. The applied
+        /// DELETE is scoped to this `source_node` so a publish that
+        /// clears one carrier's override (an empty/absent `<notify>`)
+        /// cannot clobber a row written by the OTHER carrier sharing the
+        /// same `conversation_jid` — the DM vs XEP-0402 same-JID overlap
+        /// the retract/eviction paths already guard against.
+        source: NotificationSettingsSource,
     },
 }
 
@@ -120,6 +134,8 @@ pub enum NotificationSettingsProjectionError {
     MultipleNotifyElements,
     #[error("invalid XEP-0402 bookmark payload: {0}")]
     InvalidBookmark(#[from] waddle_xmpp::xep::xep0402::BookmarkError),
+    #[error("invalid Waddle DM-bookmark payload: {0}")]
+    InvalidDmBookmark(#[from] waddle_xmpp::xep::xep_waddle_dm_bookmarks::DmBookmarkError),
     #[error("invalid XEP-0492 notify payload: {0}")]
     InvalidNotify(#[from] waddle_xmpp::xep::NotificationSettingsError),
 }
@@ -388,6 +404,7 @@ pub fn derive_validated_bookmark_projection_mutation(
         return Ok(NotificationSettingsProjectionMutation::Delete {
             owner_bare_jid: owner_bare_jid.clone(),
             conversation_jid: bookmark.jid.clone(),
+            source: NotificationSettingsSource::Xep0402Bookmarks,
         });
     };
 
@@ -397,6 +414,7 @@ pub fn derive_validated_bookmark_projection_mutation(
             return Ok(NotificationSettingsProjectionMutation::Delete {
                 owner_bare_jid: owner_bare_jid.clone(),
                 conversation_jid: bookmark.jid.clone(),
+                source: NotificationSettingsSource::Xep0402Bookmarks,
             });
         }
         Err(error) => return Err(error.into()),
@@ -435,6 +453,83 @@ pub fn validate_xep0402_bookmark_publish(
     validate_xep0402_conference_shape(payload)?;
     validate_xep0492_notify_extensions(payload)?;
     Ok(bookmark)
+}
+
+/// Publish-time validator for the Waddle DM-bookmark carrier
+/// (`urn:waddle:dm-bookmarks:0`).
+///
+/// DM counterpart of [`validate_xep0402_bookmark_publish`]: it delegates
+/// to the strict foundation parser
+/// [`waddle_xmpp::xep::xep_waddle_dm_bookmarks::parse_dm_bookmark`],
+/// which pins the `<dm-bookmark>` root, requires the item id to be a bare
+/// JID with a localpart, and validates the single hosted XEP-0492
+/// `<notify>`. The error maps to
+/// [`NotificationSettingsProjectionError::InvalidDmBookmark`] via
+/// `#[from]`.
+pub fn validate_dm_bookmark_publish(
+    item_id: &str,
+    payload: &Element,
+) -> Result<
+    waddle_xmpp::xep::xep_waddle_dm_bookmarks::DmBookmark,
+    NotificationSettingsProjectionError,
+> {
+    Ok(waddle_xmpp::xep::xep_waddle_dm_bookmarks::parse_dm_bookmark(item_id, payload)?)
+}
+
+/// Derive the projection mutation for a validated DM bookmark.
+///
+/// DM counterpart of [`derive_validated_bookmark_projection_mutation`].
+/// The conversation kind is always [`ConversationKind::Direct`] and the
+/// hosted XEP-0492 `<notify>` is [`DmBookmark::notify`] directly — there
+/// is no XEP-0402 `<extensions>` indirection.
+///
+/// * `notify == None` (no `<notify>` child) → [`NotificationSettingsProjectionMutation::Delete`].
+/// * `notify == Some(_)` with a parseable fallback setting → [`NotificationSettingsProjectionMutation::Upsert`].
+/// * `notify == Some(_)` whose fallback resolves to `None` → `Delete` (no override).
+/// * a malformed `<notify>` fallback → propagated [`NotificationSettingsProjectionError::InvalidNotify`].
+///
+/// [`DmBookmark`]: waddle_xmpp::xep::xep_waddle_dm_bookmarks::DmBookmark
+/// [`DmBookmark::notify`]: waddle_xmpp::xep::xep_waddle_dm_bookmarks::DmBookmark::notify
+pub fn derive_dm_bookmark_projection_mutation(
+    owner_bare_jid: &BareJid,
+    dm_bookmark: &waddle_xmpp::xep::xep_waddle_dm_bookmarks::DmBookmark,
+    updated_at_ms: i64,
+    source_version: i64,
+) -> Result<NotificationSettingsProjectionMutation, NotificationSettingsProjectionError> {
+    let Some(notify) = dm_bookmark.notify.as_ref() else {
+        return Ok(NotificationSettingsProjectionMutation::Delete {
+            owner_bare_jid: owner_bare_jid.clone(),
+            conversation_jid: dm_bookmark.jid.clone(),
+            source: NotificationSettingsSource::WaddleDmBookmarks,
+        });
+    };
+
+    let mode = match parse_notify_fallback_setting(notify) {
+        Ok(Some(mode)) => mode,
+        Ok(None) => {
+            return Ok(NotificationSettingsProjectionMutation::Delete {
+                owner_bare_jid: owner_bare_jid.clone(),
+                conversation_jid: dm_bookmark.jid.clone(),
+                source: NotificationSettingsSource::WaddleDmBookmarks,
+            });
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let rich_payload_opt_in = waddle_xmpp::xep::xep0492::parse_rich_payload_opt_in(notify);
+
+    Ok(NotificationSettingsProjectionMutation::Upsert(
+        NotificationSettingsProjection {
+            owner_bare_jid: owner_bare_jid.clone(),
+            conversation_jid: dm_bookmark.jid.clone(),
+            conversation_kind: ConversationKind::Direct,
+            mode,
+            rich_payload_opt_in,
+            source_version,
+            updated_at_ms,
+            source: NotificationSettingsSource::WaddleDmBookmarks,
+            source_item_jid: dm_bookmark.jid.clone(),
+        },
+    ))
 }
 
 fn validate_xep0402_conference_shape(
@@ -881,6 +976,7 @@ mod tests {
             NotificationSettingsProjectionMutation::Delete {
                 owner_bare_jid: owner,
                 conversation_jid: bare("room@muc.example.com"),
+                source: NotificationSettingsSource::Xep0402Bookmarks,
             }
         );
     }
@@ -912,7 +1008,161 @@ mod tests {
             NotificationSettingsProjectionMutation::Delete {
                 owner_bare_jid: owner,
                 conversation_jid: bare("room@muc.example.com"),
+                source: NotificationSettingsSource::Xep0402Bookmarks,
             }
+        );
+    }
+
+    fn dm_bookmark(
+        item_id: &str,
+        inner: &str,
+    ) -> waddle_xmpp::xep::xep_waddle_dm_bookmarks::DmBookmark {
+        let payload: Element =
+            format!("<dm-bookmark xmlns='urn:waddle:dm-bookmarks:0'>{inner}</dm-bookmark>")
+                .parse()
+                .expect("valid dm-bookmark payload");
+        validate_dm_bookmark_publish(item_id, &payload).expect("dm-bookmark validates")
+    }
+
+    #[test]
+    fn derives_direct_projection_from_dm_bookmark_never_override() {
+        let owner = bare("alice@example.com");
+        let bookmark = dm_bookmark(
+            "bob@example.com",
+            "<notify xmlns='urn:xmpp:notification-settings:1'><never /></notify>",
+        );
+
+        let mutation =
+            derive_dm_bookmark_projection_mutation(&owner, &bookmark, 42, 11).expect("derive");
+
+        let NotificationSettingsProjectionMutation::Upsert(projection) = mutation else {
+            panic!("expected upsert mutation");
+        };
+        assert_eq!(projection.owner_bare_jid, owner);
+        assert_eq!(projection.conversation_jid, bare("bob@example.com"));
+        assert_eq!(projection.conversation_kind, ConversationKind::Direct);
+        assert_eq!(projection.mode, NotificationLevel::Never);
+        assert_eq!(
+            projection.source,
+            NotificationSettingsSource::WaddleDmBookmarks
+        );
+        assert_eq!(projection.source_item_jid, bare("bob@example.com"));
+        assert_eq!(projection.source_version, 11);
+        assert_eq!(projection.updated_at_ms, 42);
+        assert!(!projection.rich_payload_opt_in);
+    }
+
+    #[test]
+    fn missing_dm_bookmark_notify_deletes_existing_projection() {
+        let owner = bare("alice@example.com");
+        // An empty <dm-bookmark/> carries no override.
+        let bookmark = dm_bookmark("bob@example.com", "");
+
+        let mutation =
+            derive_dm_bookmark_projection_mutation(&owner, &bookmark, 7, 11).expect("derive");
+
+        assert_eq!(
+            mutation,
+            NotificationSettingsProjectionMutation::Delete {
+                owner_bare_jid: owner,
+                conversation_jid: bare("bob@example.com"),
+                source: NotificationSettingsSource::WaddleDmBookmarks,
+            }
+        );
+    }
+
+    #[test]
+    fn malformed_dm_bookmark_notify_is_rejected_at_publish_validation() {
+        // Two account-wide fallback settings violate XEP-0492 §3. The
+        // strict DM parser rejects this at publish-validation time and
+        // surfaces it as InvalidDmBookmark(InvalidNotify(..)).
+        let payload: Element = "<dm-bookmark xmlns='urn:waddle:dm-bookmarks:0'>\
+                <notify xmlns='urn:xmpp:notification-settings:1'>\
+                    <always />\
+                    <never />\
+                </notify>\
+            </dm-bookmark>"
+            .parse()
+            .expect("valid XML payload");
+
+        let error = validate_dm_bookmark_publish("bob@example.com", &payload)
+            .expect_err("malformed hosted XEP-0492 notify must be rejected");
+
+        assert!(
+            matches!(
+                error,
+                NotificationSettingsProjectionError::InvalidDmBookmark(
+                    waddle_xmpp::xep::xep_waddle_dm_bookmarks::DmBookmarkError::InvalidNotify(
+                        waddle_xmpp::xep::NotificationSettingsError::MultipleFallbackSettings
+                    )
+                )
+            ),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn derives_rich_payload_opt_in_from_dm_bookmark_advanced_extension() {
+        let owner = bare("alice@example.com");
+        let bookmark = dm_bookmark(
+            "bob@example.com",
+            "<notify xmlns='urn:xmpp:notification-settings:1'>\
+                <always>\
+                    <advanced>\
+                        <rich-payload xmlns='urn:waddle:push:rich:0' />\
+                    </advanced>\
+                </always>\
+            </notify>",
+        );
+
+        let mutation =
+            derive_dm_bookmark_projection_mutation(&owner, &bookmark, 7, 11).expect("derive");
+
+        let NotificationSettingsProjectionMutation::Upsert(projection) = mutation else {
+            panic!("expected upsert mutation");
+        };
+        assert_eq!(projection.mode, NotificationLevel::Always);
+        assert_eq!(projection.conversation_kind, ConversationKind::Direct);
+        assert!(
+            projection.rich_payload_opt_in,
+            "XEP-0492 <advanced/> rich-payload child must set the opt-in"
+        );
+    }
+
+    #[tokio::test]
+    async fn dm_bookmark_projection_round_trips_through_store_as_direct_row() {
+        let store = migrated_in_memory_store().await;
+        let owner = bare("alice@example.com");
+        let contact = bare("bob@example.com");
+
+        let bookmark = dm_bookmark(
+            "bob@example.com",
+            "<notify xmlns='urn:xmpp:notification-settings:1'><never /></notify>",
+        );
+        let mutation =
+            derive_dm_bookmark_projection_mutation(&owner, &bookmark, 42, 7).expect("derive");
+        let NotificationSettingsProjectionMutation::Upsert(projection) = mutation else {
+            panic!("expected upsert mutation");
+        };
+        store.upsert(&projection).await.expect("upsert");
+
+        let loaded = store
+            .get(&owner, &contact)
+            .await
+            .expect("get")
+            .expect("row present");
+        assert_eq!(loaded.conversation_kind, ConversationKind::Direct);
+        assert_eq!(loaded.mode, NotificationLevel::Never);
+        assert_eq!(loaded.source, NotificationSettingsSource::WaddleDmBookmarks);
+        assert_eq!(loaded.source_item_jid, contact);
+
+        // A Direct row default for a contact with no projection is Always.
+        assert_eq!(
+            store
+                .effective_setting(&owner, &bare("carol@example.com"), ConversationKind::Direct)
+                .await
+                .expect("default"),
+            NotificationLevel::Always
         );
     }
 }

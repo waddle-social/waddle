@@ -2,7 +2,10 @@ use jid::BareJid;
 use waddle_xmpp::pubsub::{NodeConfig, PubSubNode};
 use waddle_xmpp::XmppError;
 
-use super::{item::clear_bookmark_projection_tx, DatabasePubSubStorage};
+use super::{
+    item::{clear_bookmark_projection_tx, clear_dm_bookmark_projection_tx},
+    DatabasePubSubStorage,
+};
 
 impl DatabasePubSubStorage {
     pub(super) async fn insert_node(&self, node: &PubSubNode) -> Result<(), XmppError> {
@@ -81,7 +84,15 @@ impl DatabasePubSubStorage {
         owner: &BareJid,
         node_name: &str,
     ) -> Result<bool, XmppError> {
-        if is_bookmarks_node(node_name) {
+        // Deleting either notification-settings carrier MUST clear the
+        // projection rows it fed in the same tx, scoped to that carrier's
+        // source — otherwise the rows orphan (stale push suppression with
+        // no wire way to clear them). The XEP-0402 MUC node clears
+        // `Xep0402Bookmarks` rows; the Waddle DM node clears
+        // `WaddleDmBookmarks` rows. Keying on the source leaves the other
+        // carrier's rows untouched (mirrors the purge path).
+        if is_bookmarks_node(node_name) || is_dm_bookmarks_node(node_name) {
+            let is_dm = is_dm_bookmarks_node(node_name);
             let mut tx = self
                 .db
                 .begin()
@@ -95,7 +106,11 @@ impl DatabasePubSubStorage {
                 .await
                 .map_err(|error| XmppError::internal(error.to_string()))?;
             if affected > 0 {
-                clear_bookmark_projection_tx(&mut tx, owner).await?;
+                if is_dm {
+                    clear_dm_bookmark_projection_tx(&mut tx, owner).await?;
+                } else {
+                    clear_bookmark_projection_tx(&mut tx, owner).await?;
+                }
             }
             tx.commit()
                 .await
@@ -316,9 +331,16 @@ fn bounded_node_config(node_name: &str, config: &NodeConfig) -> NodeConfig {
     if is_bookmarks_node(node_name) {
         return config.clone().normalize_xep0402_bookmarks();
     }
+    if is_dm_bookmarks_node(node_name) {
+        return config.clone().normalize_waddle_dm_bookmarks();
+    }
     config.clone()
 }
 
 fn is_bookmarks_node(node_name: &str) -> bool {
     node_name == waddle_xmpp::xep::xep0402::PEP_NODE
+}
+
+fn is_dm_bookmarks_node(node_name: &str) -> bool {
+    waddle_xmpp::xep::xep_waddle_dm_bookmarks::is_dm_bookmarks_node(node_name)
 }

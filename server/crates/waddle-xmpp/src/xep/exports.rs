@@ -244,6 +244,11 @@ pub use super::xep0402::{
     BookmarkError, NS_BOOKMARKS2, PEP_NODE as BOOKMARKS_PEP_NODE,
 };
 
+pub use super::xep_waddle_dm_bookmarks::{
+    build_dm_bookmark_element, is_dm_bookmarks_node, parse_dm_bookmark, DmBookmark,
+    DmBookmarkError, NS_WADDLE_DM_BOOKMARKS_V0, PEP_NODE_WADDLE_DM_BOOKMARKS,
+};
+
 pub use super::xep0048::{
     build_legacy_bookmarks_element, from_native_bookmark, is_legacy_bookmarks_namespace,
     parse_legacy_bookmarks, to_native_bookmark, LegacyBookmark, NS_BOOKMARKS_LEGACY,

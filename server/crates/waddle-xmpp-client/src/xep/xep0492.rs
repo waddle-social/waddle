@@ -14,10 +14,50 @@
 //! so a Waddle client never destroys settings another client wrote
 //! (XEP-0492 §3 first paragraph).
 
+use jid::BareJid;
 use minidom::Element;
+
+use crate::pep::NS_PUBSUB;
+
+/// `jabber:client` stream namespace for the IQ envelopes the DM-carrier
+/// builders emit.
+const NS_CLIENT: &str = "jabber:client";
 
 /// XEP-0492 namespace.
 pub const NS_NOTIFICATION_SETTINGS: &str = "urn:xmpp:notification-settings:1";
+
+/// Waddle-custom DM-bookmark carrier namespace + PEP node (issue #720).
+///
+/// The DM counterpart to the XEP-0402 MUC bookmarks node: a
+/// Waddle-custom PEP carrier that hosts a single official XEP-0492
+/// `<notify>` per direct-chat contact (PEP item id == the contact's
+/// bare JID). XEP-0402 is conference-only and no XEP-defined "DM
+/// bookmark" exists, so the carrier lives in the project-local
+/// `urn:waddle:dm-bookmarks:0` namespace per the CLAUDE.md XEP-
+/// conformance hard rule. See `docs/specs/urn-waddle-dm-bookmarks.md`.
+///
+/// The client keeps its own copy (it does NOT depend on the server
+/// `waddle-xmpp` crate). It MUST stay byte-compatible with the server
+/// module
+/// `waddle_xmpp::xep::xep_waddle_dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS`
+/// and the core constant
+/// `waddle_xmpp_core::pubsub::pep::PEP_NODE_WADDLE_DM_BOOKMARKS`, whose
+/// value is `urn:waddle:dm-bookmarks:0` (node name == namespace, as in
+/// XEP-0402).
+pub const NS_WADDLE_DM_BOOKMARKS: &str = "urn:waddle:dm-bookmarks:0";
+
+/// Finite `pubsub#max_items` cap requested for the DM-bookmarks node.
+///
+/// MUST stay byte-compatible with the server node default
+/// `waddle_xmpp_core::pubsub::PEP_BOOKMARK_MAX_ITEMS` (the client crate
+/// keeps its own copy — it does not depend on the server crates). The
+/// DM node deliberately caps retention rather than requesting `max`
+/// (`u32::MAX`): an unbounded node disables server-side eviction, so a
+/// client could grow its own DM node without limit. The publish-options
+/// request below therefore pins the same finite cap the node defaults
+/// to, so the requested config matches what the server creates on first
+/// publish (anti-DoS parity with the XEP-0402 bookmarks node).
+pub const DM_BOOKMARK_MAX_ITEMS: u32 = 1024;
 
 /// Waddle rich XEP-0357 push-summary opt-in namespace.
 ///
@@ -199,16 +239,7 @@ pub fn merge_notify_into_extensions(
     if let Some(existing) = extensions {
         for child in existing.children() {
             if child.is("notify", NS_NOTIFICATION_SETTINGS) {
-                for setting in child.children() {
-                    // Dedupe identical (name, attrs) elements per §3 ¶3.
-                    if notify_setting_children
-                        .iter()
-                        .any(|prior| settings_equivalent(prior, setting))
-                    {
-                        continue;
-                    }
-                    notify_setting_children.push(setting.clone());
-                }
+                gather_notify_settings(child, &mut notify_setting_children);
             } else if child.ns() == crate::pep::NS_BOOKMARKS {
                 // XEP-0402 XSD `<extensions/>` content is
                 // `<xs:any namespace='##other'>` — drop any
@@ -226,6 +257,279 @@ pub fn merge_notify_into_extensions(
             mode,
             rich_payload_opt_in,
         ))
+        .build()
+}
+
+/// Gather the setting children of one `<notify/>` element into `out`,
+/// de-duplicating identical `(name, ns, identity-*)` elements per
+/// XEP-0492 v0.2.0 §3 ¶3. Folds multiple `<notify/>` siblings into one
+/// pool when called repeatedly with the same `out` vector (the
+/// malformed-but-possible multi-`<notify/>` case the merge collapses).
+fn gather_notify_settings(notify: &Element, out: &mut Vec<Element>) {
+    for setting in notify.children() {
+        if out.iter().any(|prior| settings_equivalent(prior, setting)) {
+            continue;
+        }
+        out.push(setting.clone());
+    }
+}
+
+/// Parent-agnostic XEP-0492 `<notify/>` merge core.
+///
+/// Both carriers reuse this: the MUC carrier (XEP-0402
+/// `<extensions/>` → [`merge_notify_into_extensions`]) and the Waddle
+/// DM carrier (`<dm-bookmark>`, issue #720) host the SAME `<notify/>`
+/// shape but at different nesting depths — MUC wraps it in
+/// `<extensions/>`, the DM hosts it directly. This function takes the
+/// existing `<notify/>` (if any) and produces the merged `<notify/>`,
+/// so the §3-preservation logic lives in exactly one place.
+///
+/// Semantics are identical to [`merge_notify_into_extensions`]: the
+/// single no-attrs fallback is replaced with `mode`; identity-scoped
+/// siblings and foreign `<advanced/>` children are preserved verbatim
+/// (XEP-0492 §3 ¶1); multiple `<notify/>` settings are de-duplicated
+/// and folded; the Waddle `<rich-payload/>` opt-in (#719) is toggled
+/// by `rich_payload_opt_in`. Pure — borrows the input, returns an
+/// owned `<notify/>`.
+pub fn merge_notify(
+    existing_notify: Option<&Element>,
+    mode: NotifyMode,
+    rich_payload_opt_in: bool,
+) -> Element {
+    let mut notify_setting_children: Vec<Element> = Vec::new();
+    if let Some(existing) = existing_notify {
+        gather_notify_settings(existing, &mut notify_setting_children);
+    }
+    build_merged_notify_element(notify_setting_children, mode, rich_payload_opt_in)
+}
+
+/// DM-carrier retract predicate (issue #720, sparse / override-only).
+///
+/// Returns `true` iff a merged `<notify/>` carries NOTHING beyond the
+/// XEP-0492 §3 conversation default `default_mode` (for direct chats,
+/// `always`). An item exists on the DM node ONLY when the DM has an
+/// override; when this returns `true` the caller retracts the item
+/// (absence == the §3 default). Concretely, the `<notify/>` is
+/// default-only when ALL of:
+///
+/// * its fallback mode equals `default_mode` (the no-attrs setting),
+/// * the Waddle rich-payload opt-in (#719) is NOT set on any setting,
+/// * there are no identity-scoped sibling settings (carrying
+///   `identity-category` / `identity-type`) written by another client,
+/// * no setting carries a foreign `<advanced/>` child.
+///
+/// A `<notify/>` with no fallback child at all (only identity-scoped
+/// siblings) is therefore NOT default — the siblings are foreign state
+/// we must keep on the wire.
+pub fn dm_notify_is_default(notify: &Element, default_mode: NotifyMode) -> bool {
+    // Rich opt-in is honored on ANY setting (matching the readers), so
+    // an opt-in anywhere means the DM carries an override.
+    if read_rich_payload_opt_in(notify) {
+        return false;
+    }
+    // Any direct child of `<notify/>` that is NOT a recognized XEP-0492
+    // setting element (a foreign namespace, or an unknown name in the
+    // notification-settings namespace) is foreign/unknown state. Be
+    // conservative: treat the `<notify/>` as a non-default override so
+    // the item is preserved rather than retracted, which would drop the
+    // foreign state `merge_notify` otherwise carries verbatim (Copilot
+    // review). The server's `validate_notify_element` already rejects
+    // such children, so this is a defence-in-depth guard for inputs that
+    // did not pass through that gate.
+    let all_children_are_settings = notify.children().all(|child| {
+        child.ns() == NS_NOTIFICATION_SETTINGS && NotifyMode::from_wire_name(child.name()).is_some()
+    });
+    if !all_children_are_settings {
+        return false;
+    }
+    let settings: Vec<&Element> = notify
+        .children()
+        .filter(|child| {
+            child.ns() == NS_NOTIFICATION_SETTINGS
+                && NotifyMode::from_wire_name(child.name()).is_some()
+        })
+        .collect();
+    let mut saw_default_fallback = false;
+    for setting in settings {
+        let identity_scoped =
+            setting.attr("identity-category").is_some() || setting.attr("identity-type").is_some();
+        if identity_scoped {
+            // Foreign identity-scoped state — never the bare default.
+            return false;
+        }
+        // Any `<advanced/>` on the no-attrs fallback is foreign (our own
+        // `<rich-payload/>` was already ruled out above), so it's an
+        // override worth keeping.
+        if setting.has_child("advanced", NS_NOTIFICATION_SETTINGS) {
+            return false;
+        }
+        match NotifyMode::from_wire_name(setting.name()) {
+            Some(found) if found == default_mode => saw_default_fallback = true,
+            // A non-default fallback (or any unrecognized mode) is an
+            // override.
+            _ => return false,
+        }
+    }
+    saw_default_fallback
+}
+
+/// Build the `<dm-bookmark xmlns='urn:waddle:dm-bookmarks:0'>` PEP
+/// payload directly hosting one XEP-0492 `<notify/>` (issue #720).
+///
+/// No `<extensions/>` wrapper and no native field — a DM has no
+/// autojoin / nick / password. The `<notify/>` is cloned in verbatim;
+/// its namespace and children stay byte-identical to official XEP-0492
+/// (Waddle hosts it, it does not fork it). Pure.
+pub fn build_dm_bookmark_element(notify: &Element) -> Element {
+    Element::builder("dm-bookmark", NS_WADDLE_DM_BOOKMARKS)
+        .append(notify.clone())
+        .build()
+}
+
+/// Read the XEP-0492 `<notify/>` child of a `<dm-bookmark>` payload
+/// (issue #720), if present. Returns `None` for a malformed payload
+/// missing the `<notify/>`. Borrows.
+pub fn read_dm_bookmark_notify(payload: &Element) -> Option<&Element> {
+    payload.get_child("notify", NS_NOTIFICATION_SETTINGS)
+}
+
+/// Build a `get` IQ requesting the user's DM-bookmark items from their
+/// own PEP [`NS_WADDLE_DM_BOOKMARKS`] node (issue #720).
+///
+/// `to=` is omitted so the server routes the request to the account's
+/// own PEP service (XEP-0163 §3.5), mirroring
+/// [`crate::xep::xep0402::build_fetch_bookmarks_iq`].
+pub fn build_fetch_dm_bookmarks_iq(request_id: &str) -> Element {
+    Element::builder("iq", NS_CLIENT)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), request_id)
+        .append(
+            Element::builder("pubsub", NS_PUBSUB)
+                .append(
+                    Element::builder("items", NS_PUBSUB)
+                        .attr(
+                            minidom::rxml::xml_ncname!("node").to_owned(),
+                            NS_WADDLE_DM_BOOKMARKS,
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .build()
+}
+
+/// Build a `set` IQ that publishes one DM-bookmark item to the user's
+/// own PEP [`NS_WADDLE_DM_BOOKMARKS`] node (issue #720).
+///
+/// The item id is the contact's bare JID; the payload is the
+/// [`build_dm_bookmark_element`] wrapper directly hosting `notify`.
+/// Pins the `publish-options` form so the server creates a private,
+/// sparse node on first publish: `access_model=whitelist`,
+/// `persist_items=true`, `send_last_published_item=never`, and a FINITE
+/// `max_items` cap ([`DM_BOOKMARK_MAX_ITEMS`]). The cap matches the
+/// server node default — unlike the XEP-0402 bookmark publish's
+/// `max_items=max`, the DM node bounds retention so server-side eviction
+/// stays enabled (anti-DoS parity with the bookmarks node). `to=` is
+/// omitted (XEP-0163 §3.5).
+pub fn build_publish_dm_bookmark_iq(jid: &BareJid, notify: &Element, request_id: &str) -> Element {
+    let publish_options = Element::builder("publish-options", NS_PUBSUB)
+        .append(
+            Element::builder("x", "jabber:x:data")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
+                .append(
+                    Element::builder("field", "jabber:x:data")
+                        .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
+                        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "hidden")
+                        .append(
+                            Element::builder("value", "jabber:x:data")
+                                .append("http://jabber.org/protocol/pubsub#publish-options")
+                                .build(),
+                        )
+                        .build(),
+                )
+                .append(submit_value_field("pubsub#persist_items", "true"))
+                .append(submit_value_field(
+                    "pubsub#max_items",
+                    &DM_BOOKMARK_MAX_ITEMS.to_string(),
+                ))
+                .append(submit_value_field(
+                    "pubsub#send_last_published_item",
+                    "never",
+                ))
+                .append(submit_value_field("pubsub#access_model", "whitelist"))
+                .build(),
+        )
+        .build();
+
+    Element::builder("iq", NS_CLIENT)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), request_id)
+        .append(
+            Element::builder("pubsub", NS_PUBSUB)
+                .append(
+                    Element::builder("publish", NS_PUBSUB)
+                        .attr(
+                            minidom::rxml::xml_ncname!("node").to_owned(),
+                            NS_WADDLE_DM_BOOKMARKS,
+                        )
+                        .append(
+                            Element::builder("item", NS_PUBSUB)
+                                .attr(minidom::rxml::xml_ncname!("id").to_owned(), jid.to_string())
+                                .append(build_dm_bookmark_element(notify))
+                                .build(),
+                        )
+                        .build(),
+                )
+                .append(publish_options)
+                .build(),
+        )
+        .build()
+}
+
+/// Build a `set` IQ that retracts the DM-bookmark item id `jid` from
+/// the user's own PEP [`NS_WADDLE_DM_BOOKMARKS`] node via XEP-0060
+/// `<retract>` (issue #720).
+///
+/// The DM node is sparse / override-only: returning a DM to the
+/// XEP-0492 §3 direct-chat default removes the item, so absence of an
+/// item == the default. `notify='true'` asks the server to broadcast a
+/// retract event to subscribers (mirroring XEP-0060 §7.2). `to=` is
+/// omitted (XEP-0163 §3.5).
+pub fn build_retract_dm_bookmark_iq(jid: &BareJid, request_id: &str) -> Element {
+    Element::builder("iq", NS_CLIENT)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), request_id)
+        .append(
+            Element::builder("pubsub", NS_PUBSUB)
+                .append(
+                    Element::builder("retract", NS_PUBSUB)
+                        .attr(
+                            minidom::rxml::xml_ncname!("node").to_owned(),
+                            NS_WADDLE_DM_BOOKMARKS,
+                        )
+                        .attr(minidom::rxml::xml_ncname!("notify").to_owned(), "true")
+                        .append(
+                            Element::builder("item", NS_PUBSUB)
+                                .attr(minidom::rxml::xml_ncname!("id").to_owned(), jid.to_string())
+                                .build(),
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .build()
+}
+
+/// XEP-0004 `<field var='…'><value>…</value></field>` submit row for
+/// the DM-carrier publish-options form.
+fn submit_value_field(var: &str, value: &str) -> Element {
+    Element::builder("field", "jabber:x:data")
+        .attr(minidom::rxml::xml_ncname!("var").to_owned(), var)
+        .append(
+            Element::builder("value", "jabber:x:data")
+                .append(value)
+                .build(),
+        )
         .build()
 }
 
@@ -996,5 +1300,307 @@ mod tests {
         let notify = find_notify_in_extensions(&now_never).expect("notify present");
         assert_eq!(read_fallback_mode(notify), Some(NotifyMode::Never));
         assert!(read_rich_payload_opt_in(notify));
+    }
+
+    // --- DM carrier (#720) ---
+
+    #[test]
+    fn merge_notify_from_none_emits_single_fallback() {
+        // The DM carrier's first-write path: no existing `<notify/>`.
+        let notify = merge_notify(None, NotifyMode::Never, false);
+        assert_eq!(notify.name(), "notify");
+        assert_eq!(notify.ns(), NS_NOTIFICATION_SETTINGS);
+        let children: Vec<_> = notify.children().collect();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].name(), "never");
+        assert!(children[0].attr("identity-category").is_none());
+        assert_eq!(read_fallback_mode(&notify), Some(NotifyMode::Never));
+    }
+
+    #[test]
+    fn merge_notify_replaces_fallback_and_preserves_siblings() {
+        // Existing `<notify/>` carried directly (DM shape — no
+        // `<extensions/>` wrapper): the no-attrs fallback is rewritten
+        // and the identity-scoped sibling survives verbatim.
+        let existing: Element = "<notify xmlns='urn:xmpp:notification-settings:1'>\
+                <never identity-category='client' identity-type='pc' />\
+                <always />\
+                </notify>"
+            .parse()
+            .expect("valid xml");
+        let merged = merge_notify(Some(&existing), NotifyMode::OnMention, false);
+        assert_eq!(read_fallback_mode(&merged), Some(NotifyMode::OnMention));
+        assert!(merged.children().any(|c| {
+            c.name() == "never"
+                && c.attr("identity-category") == Some("client")
+                && c.attr("identity-type") == Some("pc")
+        }));
+        let fallback_count = merged
+            .children()
+            .filter(|c| {
+                c.ns() == NS_NOTIFICATION_SETTINGS
+                    && NotifyMode::from_wire_name(c.name()).is_some()
+                    && c.attr("identity-category").is_none()
+                    && c.attr("identity-type").is_none()
+            })
+            .count();
+        assert_eq!(fallback_count, 1);
+    }
+
+    #[test]
+    fn merge_notify_round_trips_rich_payload_opt_in() {
+        let merged = merge_notify(None, NotifyMode::Always, true);
+        assert!(read_rich_payload_opt_in(&merged));
+        // Re-merging is idempotent (no duplicate `<rich-payload/>`).
+        let again = merge_notify(Some(&merged), NotifyMode::Always, true);
+        let advanced = again
+            .children()
+            .find(|c| c.name() == "always")
+            .and_then(|f| f.get_child("advanced", NS_NOTIFICATION_SETTINGS))
+            .expect("advanced present");
+        let rich_count = advanced
+            .children()
+            .filter(|c| c.is("rich-payload", NS_PUSH_RICH_PAYLOAD))
+            .count();
+        assert_eq!(rich_count, 1);
+    }
+
+    #[test]
+    fn merge_notify_and_extensions_share_one_core() {
+        // The refactor MUST keep MUC and DM byte-identical for the
+        // `<notify/>` child: the `<extensions/>` wrapper's notify must
+        // equal the bare `merge_notify` output for the same inputs.
+        let extensions = merge_notify_into_extensions(None, NotifyMode::OnMention, true);
+        let from_extensions = find_notify_in_extensions(&extensions).expect("notify present");
+        let bare = merge_notify(None, NotifyMode::OnMention, true);
+        assert_eq!(from_extensions, &bare);
+    }
+
+    #[test]
+    fn dm_notify_is_default_true_for_plain_default() {
+        // always + no opt-in + no foreign → default, retract the item.
+        let notify = merge_notify(None, NotifyMode::Always, false);
+        assert!(dm_notify_is_default(&notify, NotifyMode::Always));
+    }
+
+    #[test]
+    fn dm_notify_is_default_false_for_on_mention() {
+        let notify = merge_notify(None, NotifyMode::OnMention, false);
+        assert!(!dm_notify_is_default(&notify, NotifyMode::Always));
+    }
+
+    #[test]
+    fn dm_notify_is_default_false_for_never() {
+        let notify = merge_notify(None, NotifyMode::Never, false);
+        assert!(!dm_notify_is_default(&notify, NotifyMode::Always));
+    }
+
+    #[test]
+    fn dm_notify_is_default_false_with_rich_opt_in() {
+        // always + opt-in → an override (#719), keep the item.
+        let notify = merge_notify(None, NotifyMode::Always, true);
+        assert!(!dm_notify_is_default(&notify, NotifyMode::Always));
+    }
+
+    #[test]
+    fn dm_notify_is_default_false_with_foreign_advanced() {
+        // always fallback but a foreign `<advanced/>` rule another
+        // client wrote → override, keep the item (§3 ¶1).
+        let notify: Element = "<notify xmlns='urn:xmpp:notification-settings:1'>\
+                <always>\
+                    <advanced xmlns='urn:xmpp:notification-settings:1'>\
+                        <weekend xmlns='custom:other-client:1'/>\
+                    </advanced>\
+                </always>\
+                </notify>"
+            .parse()
+            .expect("valid xml");
+        assert!(!dm_notify_is_default(&notify, NotifyMode::Always));
+    }
+
+    #[test]
+    fn dm_notify_is_default_false_with_foreign_direct_child() {
+        // always fallback PLUS a foreign element directly under
+        // `<notify/>` (not a recognized XEP-0492 setting). It is unknown
+        // state — be conservative and keep the item rather than retract
+        // it, which would drop the foreign child (Copilot review).
+        let notify: Element = "<notify xmlns='urn:xmpp:notification-settings:1'>\
+                <always />\
+                <future-thing xmlns='custom:other-client:2'/>\
+                </notify>"
+            .parse()
+            .expect("valid xml");
+        assert!(!dm_notify_is_default(&notify, NotifyMode::Always));
+    }
+
+    #[test]
+    fn dm_notify_is_default_false_with_identity_scoped_sibling() {
+        // always fallback but a foreign identity-scoped sibling →
+        // override, keep the item.
+        let notify: Element = "<notify xmlns='urn:xmpp:notification-settings:1'>\
+                <always />\
+                <never identity-category='client' identity-type='phone' />\
+                </notify>"
+            .parse()
+            .expect("valid xml");
+        assert!(!dm_notify_is_default(&notify, NotifyMode::Always));
+    }
+
+    #[test]
+    fn dm_notify_is_default_false_without_fallback() {
+        // No fallback child at all — only an identity-scoped sibling.
+        // The siblings are foreign state, so this is NOT the bare
+        // default; the item must persist.
+        let notify: Element = "<notify xmlns='urn:xmpp:notification-settings:1'>\
+                <never identity-category='client' />\
+                </notify>"
+            .parse()
+            .expect("valid xml");
+        assert!(!dm_notify_is_default(&notify, NotifyMode::Always));
+    }
+
+    #[test]
+    fn build_and_read_dm_bookmark_round_trip() {
+        let notify = merge_notify(None, NotifyMode::Never, false);
+        let payload = build_dm_bookmark_element(&notify);
+        assert_eq!(payload.name(), "dm-bookmark");
+        assert_eq!(payload.ns(), NS_WADDLE_DM_BOOKMARKS);
+        let recovered = read_dm_bookmark_notify(&payload).expect("notify present");
+        assert_eq!(read_fallback_mode(recovered), Some(NotifyMode::Never));
+        // The hosted `<notify/>` is byte-identical to the input —
+        // Waddle hosts XEP-0492, it does not fork it.
+        assert_eq!(recovered, &notify);
+    }
+
+    #[test]
+    fn read_dm_bookmark_notify_returns_none_when_absent() {
+        let payload = Element::builder("dm-bookmark", NS_WADDLE_DM_BOOKMARKS).build();
+        assert!(read_dm_bookmark_notify(&payload).is_none());
+    }
+
+    #[test]
+    fn ns_waddle_dm_bookmarks_is_byte_stable() {
+        // Pin the client's own copy against the live core constant (the
+        // canonical node/namespace string) — NOT a hardcoded literal — so
+        // a core bump (e.g. to `urn:waddle:dm-bookmarks:1`) that forgets
+        // this client copy fails CI here rather than silently diverging
+        // the client's wire value from the server's (greptile review).
+        assert_eq!(
+            NS_WADDLE_DM_BOOKMARKS,
+            waddle_xmpp_core::pubsub::PEP_NODE_WADDLE_DM_BOOKMARKS
+        );
+    }
+
+    #[test]
+    fn dm_bookmark_max_items_matches_server_node_default() {
+        // The publish-options request MUST pin the same finite cap the
+        // server node defaults to, so the requested config matches the
+        // node the server creates on first publish. Anti-DoS parity with
+        // the XEP-0402 bookmarks node — guard against future drift between
+        // the client constant and the server core constant.
+        assert_eq!(
+            DM_BOOKMARK_MAX_ITEMS,
+            waddle_xmpp_core::pubsub::PEP_BOOKMARK_MAX_ITEMS,
+        );
+        assert_ne!(DM_BOOKMARK_MAX_ITEMS, u32::MAX);
+    }
+
+    #[test]
+    fn build_fetch_dm_bookmarks_iq_targets_dm_node_without_to() {
+        let iq = build_fetch_dm_bookmarks_iq("req-dm-fetch");
+        assert_eq!(iq.attr("type"), Some("get"));
+        // XEP-0163 §3.5 — omit `to=` so the server routes to the
+        // account's own PEP service.
+        assert!(iq.attr("to").is_none());
+        let items = iq
+            .get_child("pubsub", NS_PUBSUB)
+            .and_then(|p| p.get_child("items", NS_PUBSUB))
+            .expect("items present");
+        assert_eq!(items.attr("node"), Some(NS_WADDLE_DM_BOOKMARKS));
+    }
+
+    #[test]
+    fn build_publish_dm_bookmark_iq_uses_jid_id_and_hosts_notify() {
+        let jid: BareJid = "bob@example.com".parse().expect("valid jid");
+        let notify = merge_notify(None, NotifyMode::Never, false);
+        let iq = build_publish_dm_bookmark_iq(&jid, &notify, "req-dm-pub");
+        assert_eq!(iq.attr("type"), Some("set"));
+        assert!(iq.attr("to").is_none());
+
+        let publish = iq
+            .get_child("pubsub", NS_PUBSUB)
+            .and_then(|p| p.get_child("publish", NS_PUBSUB))
+            .expect("publish present");
+        assert_eq!(publish.attr("node"), Some(NS_WADDLE_DM_BOOKMARKS));
+        let item = publish.get_child("item", NS_PUBSUB).expect("item present");
+        // Item id MUST be the contact's bare JID.
+        assert_eq!(item.attr("id"), Some("bob@example.com"));
+        // Payload is `<dm-bookmark>` directly hosting the `<notify/>`.
+        let payload = item
+            .get_child("dm-bookmark", NS_WADDLE_DM_BOOKMARKS)
+            .expect("dm-bookmark payload present");
+        let hosted = read_dm_bookmark_notify(payload).expect("notify hosted");
+        assert_eq!(read_fallback_mode(hosted), Some(NotifyMode::Never));
+    }
+
+    #[test]
+    fn build_publish_dm_bookmark_iq_pins_canonical_publish_options() {
+        let jid: BareJid = "bob@example.com".parse().expect("valid jid");
+        let notify = merge_notify(None, NotifyMode::Never, false);
+        let iq = build_publish_dm_bookmark_iq(&jid, &notify, "req-dm-pub-opts");
+        let form = iq
+            .get_child("pubsub", NS_PUBSUB)
+            .and_then(|p| p.get_child("publish-options", NS_PUBSUB))
+            .and_then(|po| po.get_child("x", "jabber:x:data"))
+            .expect("publish-options form present");
+        assert_eq!(form.attr("type"), Some("submit"));
+        let value_of = |var: &str| -> Option<String> {
+            form.children()
+                .find(|child| child.attr("var") == Some(var))
+                .and_then(|field| field.get_child("value", "jabber:x:data"))
+                .map(|value| value.text())
+        };
+        assert_eq!(
+            value_of("FORM_TYPE").as_deref(),
+            Some("http://jabber.org/protocol/pubsub#publish-options"),
+        );
+        assert_eq!(value_of("pubsub#persist_items").as_deref(), Some("true"));
+        // The DM node requests a FINITE cap (anti-DoS parity with the
+        // XEP-0402 bookmarks node) rather than `max` — an unbounded node
+        // disables server-side eviction. The value MUST match the server
+        // node default `PEP_BOOKMARK_MAX_ITEMS`.
+        assert_eq!(
+            value_of("pubsub#max_items").as_deref(),
+            Some(DM_BOOKMARK_MAX_ITEMS.to_string().as_str()),
+        );
+        assert_ne!(
+            value_of("pubsub#max_items").as_deref(),
+            Some("max"),
+            "DM node must request a finite cap so eviction stays enabled"
+        );
+        assert_eq!(
+            value_of("pubsub#send_last_published_item").as_deref(),
+            Some("never"),
+        );
+        assert_eq!(
+            value_of("pubsub#access_model").as_deref(),
+            Some("whitelist"),
+        );
+    }
+
+    #[test]
+    fn build_retract_dm_bookmark_iq_retracts_jid_item() {
+        let jid: BareJid = "bob@example.com".parse().expect("valid jid");
+        let iq = build_retract_dm_bookmark_iq(&jid, "req-dm-retract");
+        assert_eq!(iq.attr("type"), Some("set"));
+        assert!(iq.attr("to").is_none());
+        let retract = iq
+            .get_child("pubsub", NS_PUBSUB)
+            .and_then(|p| p.get_child("retract", NS_PUBSUB))
+            .expect("retract present");
+        assert_eq!(retract.attr("node"), Some(NS_WADDLE_DM_BOOKMARKS));
+        assert_eq!(retract.attr("notify"), Some("true"));
+        let item = retract.get_child("item", NS_PUBSUB).expect("item present");
+        assert_eq!(item.attr("id"), Some("bob@example.com"));
     }
 }
