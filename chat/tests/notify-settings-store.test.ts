@@ -733,4 +733,46 @@ describe("per-DM notification settings (#720)", () => {
     // Stale publish MUST NOT commit into the post-reset cache.
     expect(store.bookmarks.value["alice@example.com"]).toBeUndefined();
   });
+
+  test("stale 'removed' outcome under generation mismatch does not drop the cache entry", async () => {
+    const store = createNotifySettingsStore();
+    store.replaceAll([
+      { jid: "alice@example.com", name: null, autojoin: false, notifyMode: "never", richPayloadOptIn: false },
+    ]);
+    let resolvePublish: (outcome: SetDmNotificationModeResult) => void = () => {};
+    const slowClient = {
+      fetchUserBookmarks: async () => [] as UserBookmarkItem[],
+      fetchDmBookmarks: async () => [] as DmBookmarkItem[],
+      setDmNotificationMode: (): Promise<SetDmNotificationModeResult> =>
+        new Promise((resolve) => {
+          resolvePublish = resolve;
+        }),
+    };
+
+    const pending = store.setMode(slowClient as unknown as BrowserXmppClient, {
+      roomJid: "alice@example.com",
+      mode: "always",
+      kind: "direct-chat",
+    });
+
+    // Generation bumps mid-publish (logout / account-switch). reset()
+    // clears the cache; the post-reset entry below stands in for the
+    // NEW session's own bookmark for the same jid.
+    store.reset();
+    expect(store.bookmarks.value["alice@example.com"]).toBeUndefined();
+    store.replaceAll([
+      { jid: "alice@example.com", name: null, autojoin: false, notifyMode: "on-mention", richPayloadOptIn: true },
+    ]);
+
+    // Old account's publish now resolves with a retraction.
+    resolvePublish({ kind: "removed", jid: "alice@example.com" });
+    const result = await pending;
+
+    // The generation guard short-circuits before dropFromCache, so the
+    // stale retraction reports ok to its caller WITHOUT clobbering the
+    // new session's entry for the same jid.
+    expect(result).toBe("ok");
+    expect(store.bookmarks.value["alice@example.com"]?.notifyMode).toBe("on-mention");
+    expect(store.bookmarks.value["alice@example.com"]?.richPayloadOptIn).toBe(true);
+  });
 });

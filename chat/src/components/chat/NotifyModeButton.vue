@@ -84,6 +84,18 @@ const icon = computed(() => {
 
 const disabled = computed(() => props.client === null || props.store.hydrating.value);
 
+// Round-15 UX: the `node-config-mismatch` recovery copy depends on the
+// carrier. Group kinds ride a shared XEP-0402 bookmark node that a
+// server admin can delete; a direct chat rides the user's OWN
+// `urn:waddle:dm-bookmarks:0` personal PEP node — there is no "room"
+// and no "server admin" remediation, so the DM copy points at a
+// self-service reset instead.
+const nodeMismatchMessage = computed(() =>
+  props.conversationKind === "direct-chat"
+    ? "Your direct-message notification settings couldn't be saved — the storage node was created by an older client. Reset it from settings to fix this."
+    : "This room's settings node was created by an older client. Ask a server admin to delete the node so Waddle can re-create it.",
+);
+
 const buttonTitle = computed(() => {
   if (props.client === null) return "Notifications: connecting…";
   if (props.store.hydrating.value) return "Notifications: syncing…";
@@ -154,9 +166,9 @@ async function selectMode(mode: NotifyMode) {
     } else if (result === "node-config-mismatch") {
       // Round-8 UX P2: distinguish the recoverable XEP-0060
       // precondition-not-met case so the user gets an actionable
-      // hint instead of a generic "didn't save".
-      errorMessage.value =
-        "This room's settings node was created by an older client. Ask a server admin to delete the node so Waddle can re-create it.";
+      // hint instead of a generic "didn't save". Copy is
+      // carrier-aware — see `nodeMismatchMessage`.
+      errorMessage.value = nodeMismatchMessage.value;
     } else {
       errorMessage.value = "Couldn't save the setting. Try again in a moment.";
     }
@@ -190,8 +202,7 @@ async function toggleRichPayload() {
     // The toggle is a stay-put interaction (unlike picking a mode,
     // which dismisses), so the popover stays open on success.
     if (result === "node-config-mismatch") {
-      errorMessage.value =
-        "This room's settings node was created by an older client. Ask a server admin to delete the node so Waddle can re-create it.";
+      errorMessage.value = nodeMismatchMessage.value;
     } else if (result !== "ok") {
       errorMessage.value = "Couldn't save the setting. Try again in a moment.";
     }
