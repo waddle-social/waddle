@@ -5,8 +5,9 @@ pub(crate) async fn driver_loop(
     ws: WasmWebSocket,
     cmd_rx: mpsc::Receiver<WasmCommand>,
     event_tx: mpsc::Sender<DriverEvent>,
+    inner: Rc<RefCell<WaddleClientInner>>,
 ) {
-    let mut task = match WasmDriverTask::new(config, ws, cmd_rx, event_tx.clone()) {
+    let mut task = match WasmDriverTask::new(config, ws, cmd_rx, event_tx.clone(), inner) {
         Ok(task) => task,
         Err(err) => {
             let mut event_tx = event_tx;
@@ -24,12 +25,14 @@ impl WasmDriverTask {
         ws: WasmWebSocket,
         cmd_rx: mpsc::Receiver<WasmCommand>,
         event_tx: mpsc::Sender<DriverEvent>,
+        inner: Rc<RefCell<WaddleClientInner>>,
     ) -> DriverResult<Self> {
         Ok(Self {
             runtime: XmppRuntime::new(config)?,
             ws,
             cmd_rx,
             event_tx,
+            inner,
             pending_iqs: HashMap::new(),
             pending_mam_queries: HashMap::new(),
             pending_inbox_queries: HashMap::new(),
@@ -41,6 +44,7 @@ impl WasmDriverTask {
     async fn run(&mut self) {
         match self.runtime.queue_request(ClientRequest::Connect) {
             Ok(events) => {
+                self.publish_resume_state_snapshot();
                 for event in events {
                     if !self.handle_client_event(event).await {
                         self.finish().await;
@@ -177,6 +181,7 @@ impl WasmDriverTask {
             }
             Some(WasmCommand::Disconnect { responder }) => {
                 self.explicit_disconnect = true;
+                self.publish_resume_state_snapshot();
                 let result = self
                     .send_transport_message(TransportMessage::Close(StreamClose))
                     .await;
@@ -354,6 +359,7 @@ impl WasmDriverTask {
                 return false;
             }
         };
+        self.publish_resume_state_snapshot();
 
         for event in events {
             if !self.handle_client_event(event).await {
@@ -380,6 +386,7 @@ impl WasmDriverTask {
 
     async fn apply_sent_event(&mut self, event: TransportEvent) -> DriverResult<()> {
         let events = self.runtime.apply_transport_event(event)?;
+        self.publish_resume_state_snapshot();
         for event in events {
             if self.dispatch_client_event(event).await.is_some() {
                 return Err(ClientError::Disconnected);
@@ -548,12 +555,13 @@ impl WasmDriverTask {
             .await;
     }
 
+    fn publish_resume_state_snapshot(&self) {
+        publish_resume_state_snapshot(&self.inner, &self.runtime, self.explicit_disconnect);
+    }
+
     async fn finish(&mut self) {
-        let resume_state = if self.explicit_disconnect {
-            None
-        } else {
-            self.runtime.resume_state()
-        };
+        self.publish_resume_state_snapshot();
+        let resume_state = self.inner.borrow().resume_state.clone();
         let _ = self
             .event_tx
             .clone()
@@ -587,5 +595,147 @@ impl WasmDriverTask {
         }
 
         let _ = self.event_tx.clone().send(DriverEvent::Disconnected).await;
+    }
+}
+
+fn publish_resume_state_snapshot(
+    inner: &Rc<RefCell<WaddleClientInner>>,
+    runtime: &XmppRuntime,
+    explicit_disconnect: bool,
+) {
+    let resume_state = if explicit_disconnect {
+        None
+    } else {
+        runtime.resume_state()
+    };
+    inner.borrow_mut().resume_state = resume_state;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_inner() -> Rc<RefCell<WaddleClientInner>> {
+        Rc::new(RefCell::new(WaddleClientInner {
+            config: StoredConfig {
+                server_url: "wss://xmpp.example.test".to_string(),
+                jid: "alice@example.test".to_string(),
+                access_token: "token".to_string(),
+                resource: "web".to_string(),
+                resume_state: None,
+            },
+            cmd_tx: None,
+            on_message: None,
+            on_presence: None,
+            on_connected: None,
+            on_session_lifecycle: None,
+            on_disconnected: None,
+            on_error: None,
+            on_message_delivery_acked: None,
+            on_message_delivery_failed: None,
+            on_mds_displayed: None,
+            on_call: None,
+            resume_state: None,
+        }))
+    }
+
+    #[test]
+    fn publish_resume_state_snapshot_updates_shared_client_state() {
+        let inner = test_inner();
+        let stored = StoredConfig {
+            server_url: "wss://xmpp.example.test".to_string(),
+            jid: "alice@example.test".to_string(),
+            access_token: "token".to_string(),
+            resource: "web".to_string(),
+            resume_state: Some(
+                waddle_xmpp_client::SmResumeState::new("previous-stream", 4, 9)
+                    .expect("resume state"),
+            ),
+        };
+        let runtime =
+            XmppRuntime::new(build_client_config(&stored).expect("config")).expect("runtime");
+
+        publish_resume_state_snapshot(&inner, &runtime, false);
+
+        let borrowed = inner.borrow();
+        let snapshot = borrowed.resume_state.as_ref().expect("snapshot");
+        assert_eq!(snapshot.previd(), "previous-stream");
+        assert_eq!(snapshot.inbound_h(), 4);
+        assert_eq!(snapshot.outbound_h(), 9);
+    }
+
+    #[test]
+    fn publish_resume_state_snapshot_tracks_live_ack_mutations() {
+        let inner = test_inner();
+        let stanza = Element::builder("message", NS_CLIENT)
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "unacked")
+            .build();
+        let stored = StoredConfig {
+            server_url: "wss://xmpp.example.test".to_string(),
+            jid: "alice@example.test".to_string(),
+            access_token: "token".to_string(),
+            resource: "web".to_string(),
+            resume_state: None,
+        };
+        let mut runtime =
+            XmppRuntime::new(build_client_config(&stored).expect("config")).expect("runtime");
+        runtime
+            .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
+                waddle_xmpp_client::stream_management::SmState::build_enable(true),
+            )))
+            .expect("enable sent");
+        runtime
+            .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+                Element::builder("enabled", waddle_xmpp_client::stream_management::NS_SM)
+                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), "live-stream")
+                    .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "true")
+                    .build(),
+            )))
+            .expect("enabled");
+        runtime
+            .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
+                stanza,
+            )))
+            .expect("message sent");
+
+        publish_resume_state_snapshot(&inner, &runtime, false);
+        assert!(inner
+            .borrow()
+            .resume_state
+            .as_ref()
+            .expect("snapshot")
+            .has_unhandled_outbound_stanzas());
+
+        let ack = Element::builder("a", waddle_xmpp_client::stream_management::NS_SM)
+            .attr(minidom::rxml::xml_ncname!("h").to_owned(), "1")
+            .build();
+        runtime
+            .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+                ack,
+            )))
+            .expect("ack");
+        publish_resume_state_snapshot(&inner, &runtime, false);
+
+        assert!(!inner
+            .borrow()
+            .resume_state
+            .as_ref()
+            .expect("snapshot")
+            .has_unhandled_outbound_stanzas());
+    }
+
+    #[test]
+    fn publish_resume_state_snapshot_clears_on_explicit_disconnect() {
+        let inner = test_inner();
+        inner.borrow_mut().resume_state = Some(
+            waddle_xmpp_client::SmResumeState::new("previous-stream", 4, 9).expect("resume state"),
+        );
+        let stored = inner.borrow().config.clone();
+        let runtime =
+            XmppRuntime::new(build_client_config(&stored).expect("config")).expect("runtime");
+
+        publish_resume_state_snapshot(&inner, &runtime, true);
+
+        assert!(inner.borrow().resume_state.is_none());
     }
 }

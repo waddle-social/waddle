@@ -47,6 +47,29 @@ impl WaddleConfig {
         Ok(())
     }
 
+    pub fn with_resume_state_stanzas(
+        &mut self,
+        previd: String,
+        inbound_h: u32,
+        outbound_h: u32,
+        stanzas: Vec<String>,
+    ) -> Result<(), JsValue> {
+        let stanzas = stanzas
+            .into_iter()
+            .map(|xml| {
+                xml.parse::<Element>()
+                    .map_err(|err| js_error(format!("invalid resume stanza XML: {err}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.resume_state = Some(
+            waddle_xmpp_client::SmResumeState::from_unhandled_outbound_stanzas(
+                previd, inbound_h, outbound_h, stanzas,
+            )
+            .map_err(|err| js_error(err.to_string()))?,
+        );
+        Ok(())
+    }
+
     pub fn with_resume_state_handle(&mut self, state: &WaddleResumeState) {
         self.resume_state = Some(state.inner.clone());
     }
@@ -79,14 +102,22 @@ pub(crate) struct JsResumeState {
     pub(crate) previd: String,
     pub(crate) inbound_h: u32,
     pub(crate) outbound_h: u32,
+    pub(crate) has_unacked_outbound: bool,
+    pub(crate) unhandled_outbound_stanzas: Vec<String>,
 }
 
 impl From<waddle_xmpp_client::SmResumeState> for JsResumeState {
     fn from(value: waddle_xmpp_client::SmResumeState) -> Self {
+        let unhandled_outbound_stanzas = value
+            .unhandled_outbound_stanzas()
+            .filter_map(|element| element_to_xml_string(element).ok())
+            .collect();
         Self {
             previd: value.previd().to_string(),
             inbound_h: value.inbound_h(),
             outbound_h: value.outbound_h(),
+            has_unacked_outbound: value.has_unhandled_outbound_stanzas(),
+            unhandled_outbound_stanzas,
         }
     }
 }
@@ -196,6 +227,7 @@ pub(crate) struct WasmDriverTask {
     pub(crate) ws: WasmWebSocket,
     pub(crate) cmd_rx: mpsc::Receiver<WasmCommand>,
     pub(crate) event_tx: mpsc::Sender<DriverEvent>,
+    pub(crate) inner: Rc<RefCell<WaddleClientInner>>,
     pub(crate) pending_iqs: HashMap<String, oneshot::Sender<DriverResult<Element>>>,
     pub(crate) pending_mam_queries: HashMap<String, PendingMamQuery>,
     pub(crate) pending_inbox_queries: HashMap<String, PendingInboxQuery>,
