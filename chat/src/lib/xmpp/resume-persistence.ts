@@ -16,9 +16,11 @@
  *     (`PersistedSmResumeState`) — the `previd` plus inbound /
  *     outbound stanza counts. The richer "handle" form from the
  *     WASM client is a live JS object that cannot be serialized;
- *     the POD `{previd, inboundH, outboundH}` triple can be, and
- *     the fallback path in `doConnect` already knows how to feed
- *     it back via `with_resume_state`.
+ *     the POD `{previd, inboundH, outboundH}` triple can be. When
+ *     the native XEP-0198 queue still has unhandled outbound stanzas,
+ *     their XML is serialized too so `doConnect` can restore sender
+ *     responsibility after a full reload instead of creating a false
+ *     resume state with an empty replay queue.
  *
  * The shape mirrors `outbound-queue-store.ts` (same `waddle.chat.*`
  * prefix family, same per-account key namespacing, same defensive
@@ -55,6 +57,7 @@ export type PersistedSmResumeState = {
   previd: string;
   inboundH: number;
   outboundH: number;
+  unhandledOutboundStanzas?: string[];
   resource?: string;
 };
 
@@ -153,8 +156,14 @@ export function createLocalStorageResumePersistence(accountKey: string, ownerId?
       }
       if (envelope.ownerId !== owner.ownerId) return null;
       if (envelope.claimId) return null;
-      const { previd, inboundH, outboundH, resource } = envelope;
-      return { previd, inboundH, outboundH, ...(resource ? { resource } : {}) };
+      const { previd, inboundH, outboundH, resource, unhandledOutboundStanzas } = envelope;
+      return {
+        previd,
+        inboundH,
+        outboundH,
+        ...(unhandledOutboundStanzas?.length ? { unhandledOutboundStanzas: [...unhandledOutboundStanzas] } : {}),
+        ...(resource ? { resource } : {}),
+      };
     },
     consumeSm() {
       return consumeSmEnvelope(smKey, owner.ownerId);
@@ -224,8 +233,14 @@ function consumeSmEnvelope(key: string, ownerId: string): PersistedSmResumeState
 
     s.setItem(consumedKey, consumedMarker);
     s.removeItem(key);
-    const { previd, inboundH, outboundH, resource } = claimed;
-    return { previd, inboundH, outboundH, ...(resource ? { resource } : {}) };
+    const { previd, inboundH, outboundH, resource, unhandledOutboundStanzas } = claimed;
+    return {
+      previd,
+      inboundH,
+      outboundH,
+      ...(unhandledOutboundStanzas?.length ? { unhandledOutboundStanzas: [...unhandledOutboundStanzas] } : {}),
+      ...(resource ? { resource } : {}),
+    };
   } catch (err) {
     reportError("storage.read", err, {
       recoverable: true,
@@ -470,6 +485,7 @@ function isPersistedSmEnvelope(value: unknown): value is PersistedSmEnvelope {
     typeof candidate.previd === "string"
     && typeof candidate.inboundH === "number"
     && typeof candidate.outboundH === "number"
+    && (candidate.unhandledOutboundStanzas === undefined || isStringArray(candidate.unhandledOutboundStanzas))
     && (candidate.resource === undefined || typeof candidate.resource === "string")
     && (candidate.ownerId === undefined || typeof candidate.ownerId === "string")
     && (candidate.claimId === undefined || typeof candidate.claimId === "string")

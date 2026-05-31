@@ -474,6 +474,7 @@ export class WaddleConfig {
     constructor(server_url: string, jid: string, access_token: string, resource: string);
     with_resume_state(previd: string, inbound_h: number, outbound_h: number): void;
     with_resume_state_handle(state: WaddleResumeState): void;
+    with_resume_state_stanzas(previd: string, inbound_h: number, outbound_h: number, stanzas: string[]): void;
 }
 
 export class WaddleResumeState {

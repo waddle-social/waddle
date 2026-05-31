@@ -282,6 +282,12 @@ describe("client send readiness", () => {
     expect(typeof result?.id).toBe("string");
     expect(result?.state).toBe("sending");
     expect(xmpp.send_groupchat_message).toHaveBeenCalledTimes(1);
+    expect(listQueuedRoomMessages("alice@example.com", roomJid).map((message) => message.id)).toEqual([
+      result?.id,
+    ]);
+
+    (client as unknown as { handleMessageAck: (id: string) => void }).handleMessageAck(result!.id!);
+    expect(listQueuedRoomMessages("alice@example.com", roomJid)).toEqual([]);
   });
 
   test("XEP-0201: BrowserXmppClient.sendGroupMessage accepts bodyless thread metadata sends", async () => {
@@ -608,6 +614,46 @@ describe("client send readiness", () => {
       "Reconnection timed out",
     );
     expect(xmpp.sendMessage).toHaveBeenCalledTimes(0);
+  });
+
+  test("DM sends are durable until XEP-0198 ack confirms server handling", async () => {
+    const xmpp = { send_chat_message: mock(async (_peer: string, _body: string, opts: { stanza_id?: string }) => opts.stanza_id) };
+    const client = new BrowserXmppClient(session());
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+
+    const result = await client.sendDirectMessage("bob@example.com", "hello", { id: "dm-live-1" });
+
+    expect(result).toEqual({ id: "dm-live-1", state: "sending" });
+    expect(listQueuedDmMessages("alice@example.com", "bob@example.com").map((message) => message.id)).toEqual([
+      "dm-live-1",
+    ]);
+
+    (client as unknown as { handleMessageAck: (id: string) => void }).handleMessageAck("dm-live-1");
+    expect(listQueuedDmMessages("alice@example.com", "bob@example.com")).toEqual([]);
+  });
+
+  test("native failed-resume fallback owns resend for live unacked DM sends", async () => {
+    const xmpp = {
+      send_chat_message: mock(async (_peer: string, _body: string, opts: { stanza_id?: string }) => opts.stanza_id),
+      get_resume_state: () => ({
+        previd: "live-sm-id",
+        inboundH: 4,
+        outboundH: 9,
+        hasUnackedOutbound: true,
+        unhandledOutboundStanzas: ["<message xmlns='jabber:client' id='dm-live-1'/>"],
+      }),
+    };
+    const client = new BrowserXmppClient(session());
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+
+    await client.sendDirectMessage("bob@example.com", "hello", { id: "dm-live-1" });
+    (client as unknown as { handleDisconnected: (xmpp: typeof xmpp) => void }).handleDisconnected(xmpp);
+    (client as unknown as { handleMessageFailed: (id: string) => void }).handleMessageFailed("dm-live-1");
+    (client as unknown as { clearReconnectTimer: () => void }).clearReconnectTimer();
+
+    expect(listQueuedDmMessages("alice@example.com", "bob@example.com")).toEqual([]);
   });
 });
 

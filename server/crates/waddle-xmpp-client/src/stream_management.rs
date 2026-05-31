@@ -51,6 +51,23 @@ impl SmResumeState {
         Ok(state)
     }
 
+    pub fn from_unhandled_outbound_stanzas(
+        previd: impl Into<String>,
+        inbound_h: u32,
+        outbound_h: u32,
+        stanzas: impl IntoIterator<Item = Element>,
+    ) -> ClientResult<Self> {
+        let outbound_queue = stanzas
+            .into_iter()
+            .map(|element| QueuedOutboundStanza {
+                message_stanza_id: message_delivery_stanza_id(&element),
+                sent_at: existing_delay_stamp(&element).unwrap_or_else(Utc::now),
+                element,
+            })
+            .collect();
+        Self::from_outbound_queue(previd, inbound_h, outbound_h, outbound_queue)
+    }
+
     pub fn previd(&self) -> &str {
         &self.previd
     }
@@ -61,6 +78,14 @@ impl SmResumeState {
 
     pub fn outbound_h(&self) -> u32 {
         self.outbound_h
+    }
+
+    pub fn has_unhandled_outbound_stanzas(&self) -> bool {
+        !self.outbound_queue.is_empty()
+    }
+
+    pub fn unhandled_outbound_stanzas(&self) -> impl Iterator<Item = &Element> {
+        self.outbound_queue.iter().map(|queued| &queued.element)
     }
 }
 
@@ -566,6 +591,48 @@ mod tests {
                 .map(|stanza_id| stanza_id.as_str())
                 .collect::<Vec<_>>(),
             vec!["msg-10"]
+        );
+    }
+
+    #[test]
+    fn resume_state_reports_unhandled_outbound_queue_presence() {
+        let mut state = SmState::new();
+        state.start_outbound();
+        state.previd = Some("previous-stream".to_string());
+        state.record_sent_stanza(
+            &Element::builder("message", "jabber:client")
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "unacked")
+                .build(),
+        );
+
+        let resume_state = state.resume_state().expect("resume state");
+        assert!(resume_state.has_unhandled_outbound_stanzas());
+
+        state.process_ack(1);
+        let resume_state = state.resume_state().expect("resume state");
+        assert!(!resume_state.has_unhandled_outbound_stanzas());
+    }
+
+    #[test]
+    fn resume_state_can_restore_serialized_unhandled_stanzas() {
+        let stanza = Element::builder("message", "jabber:client")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "unacked")
+            .build();
+
+        let resume_state = SmResumeState::from_unhandled_outbound_stanzas(
+            "previous-stream",
+            4,
+            9,
+            [stanza.clone()],
+        )
+        .expect("resume state");
+
+        assert!(resume_state.has_unhandled_outbound_stanzas());
+        assert_eq!(
+            resume_state
+                .unhandled_outbound_stanzas()
+                .collect::<Vec<_>>(),
+            vec![&stanza],
         );
     }
 
