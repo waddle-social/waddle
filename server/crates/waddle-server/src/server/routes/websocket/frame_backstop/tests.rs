@@ -18,6 +18,18 @@ fn iq_get_stanza(id: &str, from: &str, to: &str) -> Stanza {
     Stanza::Iq(Box::new(iq))
 }
 
+fn iq_result_stanza(id: &str) -> Stanza {
+    // A `result` IQ is a response, not a request — it owes no reply even if it
+    // somehow reaches dispatch and times out.
+    let iq = Iq::Result {
+        id: id.to_string(),
+        from: Some("upload.example.com".parse().expect("from jid")),
+        to: Some("alice@example.com/web".parse().expect("to jid")),
+        payload: None,
+    };
+    Stanza::Iq(Box::new(iq))
+}
+
 fn message_stanza() -> Stanza {
     let to: xmpp_parsers::jid::Jid = "bob@example.com".parse().expect("to jid");
     Stanza::Message(Message::new(Some(to)))
@@ -100,6 +112,24 @@ async fn presence_timeout_yields_no_response() {
     let responses = fut.await;
 
     assert!(responses.is_empty(), "a timed-out presence owes no reply");
+}
+
+#[tokio::test(start_paused = true)]
+async fn iq_result_timeout_yields_no_response() {
+    // RFC 6120 §8.2.3: only `get`/`set` owe a response. A timed-out `result`
+    // IQ must NOT synthesize an error reply (locks the `_ => None` arm in
+    // `capture`).
+    let stanza = iq_result_stanza("ack-1");
+    let backstop = StanzaBackstop::capture(&stanza);
+
+    let fut = run_with_backstop(backstop, pending::<Vec<String>>());
+    tokio::time::advance(STANZA_HANDLER_WEDGE_TIMEOUT + Duration::from_millis(1)).await;
+    let responses = fut.await;
+
+    assert!(
+        responses.is_empty(),
+        "a timed-out IQ result owes no reply: {responses:?}"
+    );
 }
 
 #[tokio::test(start_paused = true)]

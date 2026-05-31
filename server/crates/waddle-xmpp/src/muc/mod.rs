@@ -51,7 +51,7 @@ pub use room_actor::RoomActorError;
 pub use room_registry::{MucRoomRegistry, RoomHandle, RoomInfo, RoomMessage};
 pub use room_registry_actor::RoomRegistryError;
 pub use room_registry_handle::{
-    RoomRegistry, ROOM_REGISTRY_MAILBOX_CAPACITY, ROOM_REGISTRY_REPLY_TIMEOUT,
-    ROOM_REGISTRY_SLOW_ASK_WARN,
+    RoomRegistry, ROOM_REGISTRY_MAILBOX_CAPACITY, ROOM_REGISTRY_MAILBOX_TIMEOUT,
+    ROOM_REGISTRY_REPLY_TIMEOUT, ROOM_REGISTRY_SLOW_ASK_WARN,
 };
 pub use subject::{RoomSubjectTexts, SubjectState};

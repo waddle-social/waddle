@@ -66,25 +66,22 @@ impl StanzaBackstop {
     /// the dispatch future.
     pub(super) fn capture(stanza: &Stanza) -> Self {
         match stanza {
-            Stanza::Iq(iq) => {
-                let payload_ns = match &**iq {
-                    xmpp_parsers::iq::Iq::Get { payload, .. }
-                    | xmpp_parsers::iq::Iq::Set { payload, .. } => payload.ns(),
-                    _ => String::new(),
-                };
-                // Only get/set owe a response; result/error do not.
-                let iq_reply = match &**iq {
-                    xmpp_parsers::iq::Iq::Get { .. } | xmpp_parsers::iq::Iq::Set { .. } => {
-                        Some(IqReply {
-                            id: iq.id().to_string(),
-                            from: iq.to().map(|jid| jid.to_string()),
-                            to: iq.from().map(|jid| jid.to_string()),
-                        })
-                    }
-                    _ => None,
-                };
-                Self::build("iq", payload_ns, iq_reply)
-            }
+            // Only IQ `get`/`set` carry a request payload AND owe a response, so
+            // a single match keeps the namespace and the reply addressing in
+            // lockstep — result/error IQs fall through to "no reply owed".
+            Stanza::Iq(iq) => match &**iq {
+                xmpp_parsers::iq::Iq::Get { payload, .. }
+                | xmpp_parsers::iq::Iq::Set { payload, .. } => Self::build(
+                    "iq",
+                    payload.ns(),
+                    Some(IqReply {
+                        id: iq.id().to_string(),
+                        from: iq.to().map(|jid| jid.to_string()),
+                        to: iq.from().map(|jid| jid.to_string()),
+                    }),
+                ),
+                _ => Self::build("iq", String::new(), None),
+            },
             Stanza::Presence(_) => Self::build("presence", String::new(), None),
             Stanza::Message(_) => Self::build("message", String::new(), None),
         }
@@ -120,6 +117,11 @@ impl StanzaBackstop {
                 warn!(
                     stanza_kind = self.kind,
                     id = %reply.id,
+                    // ADR-008 §5 stable field set; from/to identify the affected
+                    // peer JID for grep/OTLP triage — the primary #757 gap.
+                    // (Response addressing: from = request `to`, to = request `from`.)
+                    from = ?reply.from,
+                    to = ?reply.to,
                     payload_ns = %self.payload_ns,
                     timeout_secs = STANZA_HANDLER_WEDGE_TIMEOUT.as_secs(),
                     "stanza handler exceeded wedge backstop; returning resource-constraint"

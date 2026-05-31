@@ -32,9 +32,7 @@ use waddle_xmpp::{
     mam::MamStorage,
     muc::{
         room_actor::{LeaveByRealJid, RoomActor},
-        room_registry_actor::{
-            DestroyRoom, GetOrCreateRoom, GetRoom, IsMucJid, ListRooms, RoomRegistryActor,
-        },
+        room_registry_actor::RoomRegistryActor,
         RoomConfig,
     },
     protocol::{

@@ -56,6 +56,17 @@ pub const ROOM_REGISTRY_MAILBOX_CAPACITY: usize = 128;
 /// coarse frame timeout would fire.
 pub const ROOM_REGISTRY_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Hard fail-fast budget for *enqueuing* a request into the bounded mailbox.
+///
+/// `reply_timeout` only bounds the wait for the actor's reply — not the wait for
+/// free mailbox capacity. When a wedged actor's 128-slot mailbox saturates, a
+/// caller would otherwise block indefinitely on `send` before its request is
+/// even enqueued. Bounding the enqueue wait too means a saturated mailbox
+/// surfaces as a typed [`RoomRegistryError`] instead of freezing the caller.
+/// Same budget as the reply timeout; worst-case total stays below the #808 15s
+/// frame backstop.
+pub const ROOM_REGISTRY_MAILBOX_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Latency above which a single registry request is logged at `warn!` — a
 /// leading indicator of saturation before the hard [`ROOM_REGISTRY_REPLY_TIMEOUT`].
 pub const ROOM_REGISTRY_SLOW_ASK_WARN: Duration = Duration::from_millis(500);
@@ -92,6 +103,18 @@ impl RoomRegistry {
             inner,
             max_capacity,
         }
+    }
+
+    /// Wrap a shared `ActorRef` with the deployment's default mailbox capacity.
+    ///
+    /// Convenience for production call sites that hold the raw
+    /// `ActorRef<RoomRegistryActor>` from shared state and want the instrumented
+    /// typed methods (reply + mailbox timeout, typed errors, latency metrics) per
+    /// request, without threading the capacity constant through every site. The
+    /// capacity only feeds [`RoomRegistry::mailbox_depth`] (the gauge), so the
+    /// spawn-time default is correct for the ask path.
+    pub fn wrap(inner: ActorRef<RoomRegistryActor>) -> Self {
+        Self::from_actor_ref(inner, ROOM_REGISTRY_MAILBOX_CAPACITY)
     }
 
     /// The underlying actor ref, for the few call sites that still need it
@@ -138,24 +161,37 @@ impl RoomRegistry {
     where
         E: Into<RoomRegistryError>,
     {
+        // A completed round-trip (the actor processed the request and replied,
+        // with a value OR a typed handler error) is a representative latency
+        // sample; record both so a slow handler that *errors* still appears on
+        // P95/P99 dashboards. Only Timeout/transport-drop — where the actor
+        // never replied — are excluded.
+        let record_round_trip = |outcome: &str| {
+            metrics::record_actor_mailbox_latency(
+                ACTOR_LABEL,
+                operation,
+                "ask",
+                elapsed.as_secs_f64() * 1000.0,
+            );
+            if elapsed >= ROOM_REGISTRY_SLOW_ASK_WARN {
+                warn!(
+                    operation,
+                    outcome,
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    "RoomRegistryActor request slow"
+                );
+            }
+        };
+
         match result {
             Ok(reply) => {
-                metrics::record_actor_mailbox_latency(
-                    ACTOR_LABEL,
-                    operation,
-                    "ask",
-                    elapsed.as_secs_f64() * 1000.0,
-                );
-                if elapsed >= ROOM_REGISTRY_SLOW_ASK_WARN {
-                    warn!(
-                        operation,
-                        elapsed_ms = elapsed.as_millis() as u64,
-                        "RoomRegistryActor request slow"
-                    );
-                }
+                record_round_trip("ok");
                 Ok(reply)
             }
-            Err(SendError::HandlerError(error)) => Err(error.into()),
+            Err(SendError::HandlerError(error)) => {
+                record_round_trip("handler_error");
+                Err(error.into())
+            }
             Err(SendError::Timeout(_)) => {
                 metrics::record_actor_request_timeout(ACTOR_LABEL, operation, "ask");
                 warn!(
@@ -207,6 +243,7 @@ macro_rules! registry_method {
             let result = self
                 .inner
                 .ask($msg)
+                .mailbox_timeout(ROOM_REGISTRY_MAILBOX_TIMEOUT)
                 .reply_timeout(ROOM_REGISTRY_REPLY_TIMEOUT)
                 .await;
             Self::classify($op, started.elapsed(), result)
@@ -297,6 +334,7 @@ impl RoomRegistry {
         let result = self
             .inner
             .ask(super::room_registry_actor::HangForever)
+            .mailbox_timeout(ROOM_REGISTRY_MAILBOX_TIMEOUT)
             .reply_timeout(ROOM_REGISTRY_REPLY_TIMEOUT)
             .await;
         Self::classify("hang_forever", started.elapsed(), result)

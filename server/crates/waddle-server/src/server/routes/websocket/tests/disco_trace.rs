@@ -42,7 +42,11 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
     }
 }
 
-#[tokio::test]
+// Current-thread runtime so the thread-local `set_default` subscriber stays
+// bound for the whole test: on the default multi-thread runtime the future (and
+// any work inside `handle_iq`) can hop worker threads, losing the binding and
+// making the log-capture assertion flaky.
+#[tokio::test(flavor = "current_thread")]
 async fn disco_info_answered_trace_surfaces_at_info_level() {
     // Capture only INFO-and-above so a DEBUG trace is filtered out exactly as
     // it would be in production. `set_default` binds the subscriber to this

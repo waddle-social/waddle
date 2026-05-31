@@ -3,6 +3,7 @@ use super::{
     replay::drain_outbound_into_replay, state::WsConnState, stream_management::sm_show_from_name,
 };
 use waddle_xmpp::muc::room_actor::LeaveOutcome;
+use waddle_xmpp::muc::RoomRegistry;
 use waddle_xmpp::xep::xep0272::Muji;
 use waddle_xmpp::xep::xep0421::OccupantIdentity;
 
@@ -476,18 +477,13 @@ pub(crate) async fn get_room_actor(
     state: &WebSocketState,
     room_jid: &BareJid,
 ) -> Option<ActorRef<RoomActor>> {
-    match state
-        .deps
-        .protocol
-        .room_registry
-        .ask(GetRoom {
-            room_jid: room_jid.clone(),
-        })
+    match RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+        .get_room(room_jid.clone())
         .await
     {
         Ok(actor) => actor,
         Err(error) => {
-            warn!(room = %room_jid, error = ?error, "Failed to get room actor");
+            warn!(room = %room_jid, error = %error, "Failed to get room actor");
             None
         }
     }
@@ -500,67 +496,52 @@ pub(crate) async fn get_or_create_room_actor(
     waddle_id: String,
     channel_id: String,
 ) -> Option<ActorRef<RoomActor>> {
-    match state
-        .deps
-        .protocol
-        .room_registry
-        .ask(GetOrCreateRoom {
-            room_jid: room_jid.clone(),
-            waddle_id,
-            channel_id,
-            config,
-        })
+    match RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+        .get_or_create_room(room_jid.clone(), waddle_id, channel_id, config)
         .await
     {
         Ok(actor) => Some(actor),
         Err(error) => {
-            warn!(room = %room_jid, error = ?error, "Failed to get or create room actor");
+            warn!(room = %room_jid, error = %error, "Failed to get or create room actor");
             None
         }
     }
 }
 
 pub(crate) async fn list_room_jids(state: &WebSocketState) -> Vec<BareJid> {
-    match state.deps.protocol.room_registry.ask(ListRooms).await {
+    match RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+        .list_rooms()
+        .await
+    {
         Ok(rooms) => rooms,
         Err(error) => {
-            warn!(error = ?error, "Failed to list room actors");
+            warn!(error = %error, "Failed to list room actors");
             Vec::new()
         }
     }
 }
 
 pub(crate) async fn is_muc_room_jid(state: &WebSocketState, room_jid: &BareJid) -> bool {
-    match state
-        .deps
-        .protocol
-        .room_registry
-        .ask(IsMucJid {
-            jid: room_jid.clone(),
-        })
+    match RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+        .is_muc_jid(room_jid.clone())
         .await
     {
         Ok(is_muc_jid) => is_muc_jid,
         Err(error) => {
-            warn!(room = %room_jid, error = ?error, "Failed to validate MUC JID");
+            warn!(room = %room_jid, error = %error, "Failed to validate MUC JID");
             false
         }
     }
 }
 
 pub(crate) async fn destroy_room_actor(state: &WebSocketState, room_jid: &BareJid) -> bool {
-    match state
-        .deps
-        .protocol
-        .room_registry
-        .ask(DestroyRoom {
-            room_jid: room_jid.clone(),
-        })
+    match RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+        .destroy_room(room_jid.clone())
         .await
     {
         Ok(destroyed) => destroyed,
         Err(error) => {
-            warn!(room = %room_jid, error = ?error, "Failed to destroy room actor");
+            warn!(room = %room_jid, error = %error, "Failed to destroy room actor");
             false
         }
     }
