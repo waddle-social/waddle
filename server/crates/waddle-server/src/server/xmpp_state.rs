@@ -324,7 +324,7 @@ impl waddle_xmpp::AppState for XmppAppState {
     // =========================================================================
 
     /// Get all blocked JIDs for a user.
-    async fn get_blocklist(&self, user_jid: &jid::BareJid) -> Result<Vec<String>, XmppError> {
+    async fn get_blocklist(&self, user_jid: &jid::BareJid) -> Result<Vec<jid::Jid>, XmppError> {
         super::xmpp_user_storage_state::get_blocklist(self.global_database().await?, user_jid).await
     }
 
@@ -346,7 +346,7 @@ impl waddle_xmpp::AppState for XmppAppState {
     async fn add_blocks(
         &self,
         user_jid: &jid::BareJid,
-        blocked_jids: &[String],
+        blocked_jids: &[jid::Jid],
     ) -> Result<usize, XmppError> {
         super::xmpp_user_storage_state::add_blocks(
             self.global_database().await?,
@@ -360,7 +360,7 @@ impl waddle_xmpp::AppState for XmppAppState {
     async fn remove_blocks(
         &self,
         user_jid: &jid::BareJid,
-        blocked_jids: &[String],
+        blocked_jids: &[jid::Jid],
     ) -> Result<usize, XmppError> {
         super::xmpp_user_storage_state::remove_blocks(
             self.global_database().await?,

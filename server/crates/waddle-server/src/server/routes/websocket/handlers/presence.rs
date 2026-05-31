@@ -47,7 +47,7 @@ use regular::handle_regular_presence_update;
 pub use subscription::broadcast_unavailable_for_expired_detached_session;
 use subscription::{handle_directed_presence, handle_subscription_presence};
 pub(super) use subscription::{
-    send_current_presence_from_user_to_user, send_unavailable_presence_from_user_to_user,
+    send_current_presence_from_user_to_jid, send_unavailable_presence_from_user_to_jid,
 };
 
 pub async fn handle_presence(

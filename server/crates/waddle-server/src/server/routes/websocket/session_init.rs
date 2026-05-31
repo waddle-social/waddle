@@ -26,7 +26,10 @@ pub(super) async fn load_blocklist_for_bind(
 ) -> Result<Blocklist, crate::db::blocking::BlockingStorageError> {
     let bare = full_jid.to_bare();
     let storage = crate::db::blocking::DatabaseBlockingStorage::new(db_pool.global().clone());
-    storage.list_blocked_jids(&bare).await.map(Blocklist::new)
+    storage
+        .list_blocked_jid_entries(&bare)
+        .await
+        .map(Blocklist::new)
 }
 
 /// Build a `<stream:error>` close frame for a fatal session-init

@@ -51,7 +51,10 @@ use async_trait::async_trait;
 use jid::{BareJid, Jid};
 use minidom::Element;
 use tracing::debug;
-use xmpp_parsers::iq::Iq;
+use xmpp_parsers::{
+    iq::Iq,
+    stanza_error::{DefinedCondition, ErrorType, StanzaError},
+};
 
 /// Namespace for XEP-0191 Blocking Command.
 pub const NS_BLOCKING: &str = "urn:xmpp:blocking";
@@ -111,9 +114,9 @@ pub trait BlockingStorage: Send + Sync {
     /// Return blocked JID entries in their stored XEP-0191 form.
     ///
     /// XEP-0191 block items may be bare JIDs, full JIDs, or domain JIDs.
-    /// Existing session snapshots still consume [`Self::list_blocked_jids`]
-    /// because that path currently performs bare-JID matching only; policy
-    /// gates that must honor full/domain entries use this read.
+    /// Policy gates that need exact XEP-0191 matching semantics should use this
+    /// read so full-JID, bare-JID, domain, and domain-resource entries are
+    /// preserved.
     async fn list_blocked_jid_entries(
         &self,
         user: &BareJid,
@@ -201,41 +204,84 @@ impl BlockingStorage for InMemoryBlockingStorage {
 }
 
 /// Request type for blocking operations.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlockingRequest {
     /// Get the current blocklist
     GetBlocklist,
     /// Block one or more JIDs
-    Block(Vec<String>),
+    Block(Vec<Jid>),
     /// Unblock one or more JIDs (empty vec means unblock all)
-    Unblock(Vec<String>),
+    Unblock(Vec<Jid>),
+}
+
+/// Malformed blocking-request shapes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockingBadRequest {
+    /// IQ get did not contain a `<blocklist/>` payload.
+    ExpectedBlocklistElement,
+    /// IQ set payload used a namespace other than `urn:xmpp:blocking`.
+    InvalidNamespace,
+    /// IQ set payload used neither `<block/>` nor `<unblock/>`.
+    UnknownElement,
+    /// `<block/>` did not contain any `<item/>` children.
+    MissingBlockItem,
+    /// An `<item/>` child omitted its required `jid` attribute.
+    MissingItemJid,
+    /// An `<item/>` child contained a malformed XMPP JID.
+    MalformedItemJid,
+    /// A `<block/>`, `<unblock/>`, or `<blocklist/>` child was not a blocking `<item/>`.
+    UnexpectedChild,
+    /// The stanza was not an IQ get or set request.
+    ExpectedIqGetOrSet,
+}
+
+impl std::fmt::Display for BlockingBadRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let message = match self {
+            BlockingBadRequest::ExpectedBlocklistElement => "expected blocklist element",
+            BlockingBadRequest::InvalidNamespace => "invalid namespace for blocking request",
+            BlockingBadRequest::UnknownElement => "unknown blocking element",
+            BlockingBadRequest::MissingBlockItem => "block request must contain at least one item",
+            BlockingBadRequest::MissingItemJid => "item element missing jid attribute",
+            BlockingBadRequest::MalformedItemJid => "item element contains malformed jid",
+            BlockingBadRequest::UnexpectedChild => "blocking element contains unexpected child",
+            BlockingBadRequest::ExpectedIqGetOrSet => "expected IQ get or set for blocking",
+        };
+        f.write_str(message)
+    }
 }
 
 /// Errors that can occur during blocking operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlockingError {
     /// Bad request (malformed blocking stanza)
-    BadRequest(String),
+    BadRequest(BlockingBadRequest),
     /// Not authorized to perform this action
     NotAuthorized,
     /// Internal server error
-    InternalError(String),
+    InternalError,
     /// Item not found (e.g., trying to unblock a JID that isn't blocked)
-    ItemNotFound(String),
+    ItemNotFound,
 }
 
 impl std::fmt::Display for BlockingError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            BlockingError::BadRequest(msg) => write!(f, "Bad request: {}", msg),
+            BlockingError::BadRequest(reason) => write!(f, "Bad request: {}", reason),
             BlockingError::NotAuthorized => write!(f, "Not authorized"),
-            BlockingError::InternalError(msg) => write!(f, "Internal error: {}", msg),
-            BlockingError::ItemNotFound(msg) => write!(f, "Item not found: {}", msg),
+            BlockingError::InternalError => write!(f, "Internal error"),
+            BlockingError::ItemNotFound => write!(f, "Item not found"),
         }
     }
 }
 
 impl std::error::Error for BlockingError {}
+
+impl From<BlockingBadRequest> for BlockingError {
+    fn from(value: BlockingBadRequest) -> Self {
+        BlockingError::BadRequest(value)
+    }
+}
 
 /// Check if an IQ stanza is a blocking query (XEP-0191).
 ///
@@ -289,16 +335,12 @@ pub fn parse_blocking_request(iq: &Iq) -> Result<BlockingRequest, BlockingError>
             if elem.name() == "blocklist" && elem.ns() == NS_BLOCKING {
                 Ok(BlockingRequest::GetBlocklist)
             } else {
-                Err(BlockingError::BadRequest(
-                    "Expected blocklist element".to_string(),
-                ))
+                Err(BlockingBadRequest::ExpectedBlocklistElement.into())
             }
         }
         xmpp_parsers::iq::Iq::Set { payload: elem, .. } => {
             if elem.ns() != NS_BLOCKING {
-                return Err(BlockingError::BadRequest(
-                    "Invalid namespace for blocking request".to_string(),
-                ));
+                return Err(BlockingBadRequest::InvalidNamespace.into());
             }
 
             let jids = extract_jids_from_element(elem)?;
@@ -306,9 +348,7 @@ pub fn parse_blocking_request(iq: &Iq) -> Result<BlockingRequest, BlockingError>
             match elem.name() {
                 "block" => {
                     if jids.is_empty() {
-                        Err(BlockingError::BadRequest(
-                            "Block request must contain at least one item".to_string(),
-                        ))
+                        Err(BlockingBadRequest::MissingBlockItem.into())
                     } else {
                         Ok(BlockingRequest::Block(jids))
                     }
@@ -317,31 +357,31 @@ pub fn parse_blocking_request(iq: &Iq) -> Result<BlockingRequest, BlockingError>
                     // Empty unblock means unblock all
                     Ok(BlockingRequest::Unblock(jids))
                 }
-                _ => Err(BlockingError::BadRequest(format!(
-                    "Unknown blocking element: {}",
-                    elem.name()
-                ))),
+                _ => Err(BlockingBadRequest::UnknownElement.into()),
             }
         }
-        _ => Err(BlockingError::BadRequest(
-            "Expected IQ get or set for blocking".to_string(),
-        )),
+        _ => Err(BlockingBadRequest::ExpectedIqGetOrSet.into()),
     }
 }
 
 /// Extract JIDs from item children of a blocking element.
-fn extract_jids_from_element(elem: &Element) -> Result<Vec<String>, BlockingError> {
+fn extract_jids_from_element(elem: &Element) -> Result<Vec<Jid>, BlockingError> {
     let mut jids = Vec::new();
 
     for child in elem.children() {
-        if child.name() == "item" {
-            if let Some(jid) = child.attr("jid") {
-                jids.push(jid.to_string());
-            } else {
-                return Err(BlockingError::BadRequest(
-                    "Item element missing jid attribute".to_string(),
-                ));
-            }
+        if child.name() != "item" || child.ns() != NS_BLOCKING {
+            return Err(BlockingBadRequest::UnexpectedChild.into());
+        }
+        if child.children().next().is_some() || !child.text().is_empty() {
+            return Err(BlockingBadRequest::UnexpectedChild.into());
+        }
+        if let Some(jid) = child.attr("jid") {
+            let jid = jid
+                .parse::<Jid>()
+                .map_err(|_| BlockingError::from(BlockingBadRequest::MalformedItemJid))?;
+            jids.push(jid);
+        } else {
+            return Err(BlockingBadRequest::MissingItemJid.into());
         }
     }
 
@@ -350,14 +390,11 @@ fn extract_jids_from_element(elem: &Element) -> Result<Vec<String>, BlockingErro
 }
 
 /// Build a blocklist response IQ.
-pub fn build_blocklist_response(original_iq: &Iq, blocked_jids: &[String]) -> Iq {
+pub fn build_blocklist_response(original_iq: &Iq, blocked_jids: &[Jid]) -> Iq {
     let mut blocklist_builder = Element::builder("blocklist", NS_BLOCKING);
 
     for jid in blocked_jids {
-        let item = Element::builder("item", NS_BLOCKING)
-            .attr(minidom::rxml::xml_ncname!("jid").to_owned(), jid.as_str())
-            .build();
-        blocklist_builder = blocklist_builder.append(item);
+        blocklist_builder = blocklist_builder.append(blocking_item(jid));
     }
 
     let blocklist = blocklist_builder.build();
@@ -383,38 +420,36 @@ pub fn build_blocking_success(original_iq: &Iq) -> Iq {
 /// Build a blocking push notification IQ.
 ///
 /// This is sent to all user resources when the blocklist changes.
-pub fn build_block_push(to: &jid::Jid, blocked_jids: &[String]) -> Iq {
+pub fn build_block_push(to: &jid::Jid, blocked_jids: &[Jid]) -> Result<Iq, BlockingError> {
+    if blocked_jids.is_empty() {
+        return Err(BlockingBadRequest::MissingBlockItem.into());
+    }
+
     let mut block_builder = Element::builder("block", NS_BLOCKING);
 
     for jid in blocked_jids {
-        let item = Element::builder("item", NS_BLOCKING)
-            .attr(minidom::rxml::xml_ncname!("jid").to_owned(), jid.as_str())
-            .build();
-        block_builder = block_builder.append(item);
+        block_builder = block_builder.append(blocking_item(jid));
     }
 
     let block = block_builder.build();
 
-    Iq::Set {
+    Ok(Iq::Set {
         from: None,
         to: Some(to.clone()),
-        id: format!("push-block-{}", uuid::Uuid::new_v4()),
+        id: uuid::Uuid::new_v4().to_string(),
         payload: block,
-    }
+    })
 }
 
 /// Build an unblock push notification IQ.
 ///
 /// This is sent to all user resources when JIDs are unblocked.
 /// An empty jids list means all JIDs were unblocked.
-pub fn build_unblock_push(to: &jid::Jid, unblocked_jids: &[String]) -> Iq {
+pub fn build_unblock_push(to: &jid::Jid, unblocked_jids: &[Jid]) -> Iq {
     let mut unblock_builder = Element::builder("unblock", NS_BLOCKING);
 
     for jid in unblocked_jids {
-        let item = Element::builder("item", NS_BLOCKING)
-            .attr(minidom::rxml::xml_ncname!("jid").to_owned(), jid.as_str())
-            .build();
-        unblock_builder = unblock_builder.append(item);
+        unblock_builder = unblock_builder.append(blocking_item(jid));
     }
 
     let unblock = unblock_builder.build();
@@ -422,55 +457,55 @@ pub fn build_unblock_push(to: &jid::Jid, unblocked_jids: &[String]) -> Iq {
     Iq::Set {
         from: None,
         to: Some(to.clone()),
-        id: format!("push-unblock-{}", uuid::Uuid::new_v4()),
+        id: uuid::Uuid::new_v4().to_string(),
         payload: unblock,
     }
 }
 
-/// Build a blocking error response.
-pub fn build_blocking_error(request_id: &str, error: &BlockingError) -> String {
-    let (error_type, condition) = match error {
-        BlockingError::BadRequest(_) => ("modify", "bad-request"),
-        BlockingError::NotAuthorized => ("auth", "not-authorized"),
-        BlockingError::InternalError(_) => ("wait", "internal-server-error"),
-        BlockingError::ItemNotFound(_) => ("cancel", "item-not-found"),
-    };
-
-    let text = match error {
-        BlockingError::BadRequest(msg)
-        | BlockingError::InternalError(msg)
-        | BlockingError::ItemNotFound(msg) => {
-            format!(
-                "<text xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'>{}</text>",
-                escape_xml(msg)
-            )
-        }
-        _ => String::new(),
-    };
-
-    format!(
-        "<iq type='error' id='{}'>\
-            <blocklist xmlns='{}'/>\
-            <error type='{}'>\
-                <{} xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>\
-                {}\
-            </error>\
-        </iq>",
-        escape_xml(request_id),
-        NS_BLOCKING,
-        error_type,
-        condition,
-        text
-    )
+fn blocking_item(jid: &Jid) -> Element {
+    Element::builder("item", NS_BLOCKING)
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            jid.to_string(),
+        )
+        .build()
 }
 
-/// Escape XML special characters.
-fn escape_xml(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
+/// Build a blocking error response.
+pub fn build_blocking_error(original_iq: &Iq, error: &BlockingError) -> Iq {
+    let (error_type, condition) = error.stanza_error_kind();
+    let payload = match original_iq {
+        Iq::Get { payload, .. } | Iq::Set { payload, .. } => Some(payload.clone()),
+        Iq::Result { .. } | Iq::Error { .. } => None,
+    };
+
+    Iq::Error {
+        from: original_iq.to().cloned(),
+        to: original_iq.from().cloned(),
+        id: original_iq.id().to_string(),
+        payload,
+        error: StanzaError {
+            type_: error_type,
+            by: None,
+            defined_condition: condition,
+            texts: Default::default(),
+            other: None,
+        },
+    }
+}
+
+impl BlockingError {
+    /// Return the XMPP stanza-error type and condition for this blocking error.
+    pub fn stanza_error_kind(&self) -> (ErrorType, DefinedCondition) {
+        match self {
+            BlockingError::BadRequest(_) => (ErrorType::Modify, DefinedCondition::BadRequest),
+            BlockingError::NotAuthorized => (ErrorType::Auth, DefinedCondition::NotAuthorized),
+            BlockingError::InternalError => {
+                (ErrorType::Wait, DefinedCondition::InternalServerError)
+            }
+            BlockingError::ItemNotFound => (ErrorType::Cancel, DefinedCondition::ItemNotFound),
+        }
+    }
 }
 
 #[cfg(test)]

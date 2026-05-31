@@ -10,7 +10,7 @@ use crate::db::{row_value, Database, Value, ValueExt};
 pub(crate) async fn get_blocklist(
     db: Database,
     user_jid: &jid::BareJid,
-) -> Result<Vec<String>, XmppError> {
+) -> Result<Vec<jid::Jid>, XmppError> {
     debug!(jid = %user_jid, "Getting blocklist");
 
     let storage = DatabaseBlockingStorage::new(db);
@@ -37,7 +37,7 @@ pub(crate) async fn is_blocked(
 pub(crate) async fn add_blocks(
     db: Database,
     user_jid: &jid::BareJid,
-    blocked_jids: &[String],
+    blocked_jids: &[jid::Jid],
 ) -> Result<usize, XmppError> {
     debug!(jid = %user_jid, count = blocked_jids.len(), "Adding blocks");
 
@@ -54,7 +54,7 @@ pub(crate) async fn add_blocks(
 pub(crate) async fn remove_blocks(
     db: Database,
     user_jid: &jid::BareJid,
-    blocked_jids: &[String],
+    blocked_jids: &[jid::Jid],
 ) -> Result<usize, XmppError> {
     debug!(jid = %user_jid, count = blocked_jids.len(), "Removing blocks");
 

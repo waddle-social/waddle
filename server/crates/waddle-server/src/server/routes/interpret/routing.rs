@@ -42,7 +42,7 @@ pub(super) async fn run_headless_recipient_pass(
     // already logged the routing intent, and the sender's archive
     // entry survives independently of the recipient pass.
     let blocklist = match deps.blocking_storage {
-        Some(storage) => match storage.list_blocked_jids(recipient_bare).await {
+        Some(storage) => match storage.list_blocked_jid_entries(recipient_bare).await {
             Ok(jids) => Blocklist::new(jids),
             Err(error) => {
                 warn!(

@@ -82,6 +82,7 @@ pub(super) struct SmCtx<'a> {
     /// in the unacked queue.
     pub(super) suppress_sm_record_next_batch: &'a mut bool,
     pub(super) roster_interested: &'a mut bool,
+    pub(super) blocklist_interested: &'a mut bool,
 }
 
 /// Dispatch an XEP-0198 control nonza. Isolated helper so the main frame
@@ -221,6 +222,7 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
         pending_resume_h,
         suppress_sm_record_next_batch,
         roster_interested,
+        blocklist_interested,
     } = ctx;
 
     // Stream resumption is only legal before this transport has established a
@@ -342,6 +344,7 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
     *authenticated_session = resumed_session;
     *carbons_enabled = detached.carbons_enabled;
     *roster_interested = detached.roster_interested;
+    *blocklist_interested = detached.blocklist_interested;
     *presence_available = detached.presence_available;
     *presence_show = detached.presence_show.clone();
     *presence_status = detached.presence_status.clone();

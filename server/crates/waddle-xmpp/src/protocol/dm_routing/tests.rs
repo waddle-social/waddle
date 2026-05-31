@@ -1,6 +1,7 @@
 use super::*;
 use crate::xep::xep0085::{build_chat_state_element, ChatState};
 use crate::xep::xep0334::{add_hint, Hint};
+use jid::{BareJid, Jid};
 use xmpp_parsers::message::MessageType;
 
 fn full(s: &str) -> FullJid {

@@ -37,20 +37,23 @@ pub(super) fn decode_session(row: &crate::db::Row) -> Result<PersistedSession, S
     let roster_interested: i64 = row
         .get(10)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-    let presence_available: i64 = row
+    let blocklist_interested: i64 = row
         .get(11)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-    let presence_show_raw: Option<String> = row
+    let presence_available: i64 = row
         .get(12)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-    let presence_status: Option<String> = row
+    let presence_show_raw: Option<String> = row
         .get(13)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-    let presence_priority: i64 = row
+    let presence_status: Option<String> = row
         .get(14)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-    let replay_gap_through: Option<i64> = row
+    let presence_priority: i64 = row
         .get(15)
+        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+    let replay_gap_through: Option<i64> = row
+        .get(16)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
 
     let detached_at = DateTime::<Utc>::from_timestamp_millis(detached_at_ms)
@@ -72,6 +75,7 @@ pub(super) fn decode_session(row: &crate::db::Row) -> Result<PersistedSession, S
         max_resume_duration,
         carbons_enabled: carbons_enabled != 0,
         roster_interested: roster_interested != 0,
+        blocklist_interested: blocklist_interested != 0,
         presence_available: presence_available != 0,
         presence_show,
         presence_status,
@@ -112,8 +116,8 @@ pub(super) fn decode_unacked(
 
 /// Decode an unacked-stanza row from a JOIN result. Reads
 /// `stream_id` from column 0 (the session's stream_id),
-/// `stanza_xml` from column 17, and `original_receipt_at_ms`
-/// from column 18. Caller already has `sequence` (column 16).
+/// `stanza_xml` from column 18, and `original_receipt_at_ms`
+/// from column 19. Caller already has `sequence` (column 17).
 /// Used by `list_all_sessions_with_unacked` (issue #209 PR #405).
 pub(super) fn decode_unacked_join_row(
     row: &crate::db::Row,
@@ -123,10 +127,10 @@ pub(super) fn decode_unacked_join_row(
         .get(0)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     let stanza_xml: String = row
-        .get(17)
+        .get(18)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     let receipt_ms: i64 = row
-        .get(18)
+        .get(19)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     let original_receipt_at = DateTime::<Utc>::from_timestamp_millis(receipt_ms)
         .ok_or_else(|| SmPersistenceError::Other("invalid unacked receipt timestamp".into()))?;

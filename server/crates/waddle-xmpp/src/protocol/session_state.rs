@@ -52,14 +52,14 @@ fn jid_addresses_full(to: &Jid, local: &FullJid) -> bool {
 /// snapshots and tests.
 #[derive(Debug, Default, Clone)]
 pub struct Blocklist {
-    entries: BTreeSet<BareJid>,
+    entries: BTreeSet<Jid>,
 }
 
 impl Blocklist {
-    /// Build a blocklist from its bare JID entries.
-    pub fn new(entries: impl IntoIterator<Item = BareJid>) -> Self {
+    /// Build a blocklist from XEP-0191 JID entries.
+    pub fn new(entries: impl IntoIterator<Item = impl Into<Jid>>) -> Self {
         Self {
-            entries: entries.into_iter().collect(),
+            entries: entries.into_iter().map(Into::into).collect(),
         }
     }
 
@@ -69,19 +69,40 @@ impl Blocklist {
         Self::default()
     }
 
-    /// True when the bare JID of `peer` matches any entry.
+    /// True when `peer` matches any entry by XEP-0191's JID matching order.
+    pub fn contains_jid(&self, peer: &Jid) -> bool {
+        self.entries
+            .iter()
+            .any(|blocked| blocked_jid_matches(blocked, peer))
+    }
+
+    /// True when the bare JID of `peer` matches any bare or domain entry.
     ///
-    /// XEP-0191 entries can be full JIDs, bare JIDs, or domain JIDs; for
-    /// the message-pipeline read path we currently match on the peer's
-    /// bare JID only. Domain-JID and full-JID matching land alongside the
-    /// XEP-0191 IQ-set handler in a later PR.
+    /// Prefer [`Self::contains_jid`] when the original stanza JID is available;
+    /// this compatibility path cannot match full-JID block entries.
     pub fn contains(&self, peer: &BareJid) -> bool {
-        self.entries.contains(peer)
+        self.contains_jid(peer)
     }
 
     /// Iterate over the entries in the blocklist.
-    pub fn iter(&self) -> impl Iterator<Item = &BareJid> {
+    pub fn iter(&self) -> impl Iterator<Item = &Jid> {
         self.entries.iter()
+    }
+}
+
+fn blocked_jid_matches(blocked: &Jid, peer: &Jid) -> bool {
+    match (blocked.node(), blocked.resource()) {
+        // user@domain/resource matches only that exact full JID.
+        (Some(_), Some(_)) => blocked == peer,
+        // domain/resource matches that resource at the domain, independent of
+        // localpart.
+        (None, Some(resource)) => {
+            blocked.domain() == peer.domain() && peer.resource() == Some(resource)
+        }
+        // user@domain matches any resource for that same bare JID.
+        (Some(_), None) => blocked.to_bare() == peer.to_bare(),
+        // domain matches the domain itself, any user@domain, and domain/resource.
+        (None, None) => blocked.domain() == peer.domain(),
     }
 }
 
@@ -252,6 +273,28 @@ mod tests {
         let bl = Blocklist::new([bare("blocked@example.com")]);
         assert!(bl.contains(&bare("blocked@example.com")));
         assert!(!bl.contains(&bare("ok@example.com")));
+    }
+
+    #[test]
+    fn blocklist_contains_jid_matches_xep0191_forms() {
+        let bl = Blocklist::new([
+            "alice@example.com/phone".parse::<Jid>().unwrap(),
+            "bob@example.com".parse().unwrap(),
+            "conference.example.com/room".parse().unwrap(),
+            "blocked.example.com".parse().unwrap(),
+        ]);
+
+        assert!(bl.contains_jid(&"alice@example.com/phone".parse().unwrap()));
+        assert!(!bl.contains_jid(&"alice@example.com/laptop".parse().unwrap()));
+        assert!(bl.contains_jid(&"bob@example.com/tablet".parse().unwrap()));
+        assert!(bl.contains_jid(&"conference.example.com/room".parse().unwrap()));
+        assert!(bl.contains_jid(&"alice@conference.example.com/room".parse().unwrap()));
+        assert!(!bl.contains_jid(&"conference.example.com/other".parse().unwrap()));
+        assert!(!bl.contains_jid(&"alice@conference.example.com/other".parse().unwrap()));
+        assert!(!bl.contains_jid(&"alice@elsewhere.example/room".parse().unwrap()));
+        assert!(bl.contains_jid(&"blocked.example.com".parse().unwrap()));
+        assert!(bl.contains_jid(&"carol@blocked.example.com".parse().unwrap()));
+        assert!(bl.contains_jid(&"blocked.example.com/resource".parse().unwrap()));
     }
 
     #[test]

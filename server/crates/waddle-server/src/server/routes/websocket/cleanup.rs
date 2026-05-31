@@ -262,6 +262,7 @@ pub(super) async fn cleanup_connection_shutdown(
                 jid: jid.clone(),
                 carbons_enabled,
                 roster_interested: conn.roster_interested,
+                blocklist_interested: conn.blocklist_interested,
                 presence_available,
                 presence_show: presence_state
                     .as_ref()

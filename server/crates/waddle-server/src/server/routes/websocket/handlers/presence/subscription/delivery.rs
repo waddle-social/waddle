@@ -115,6 +115,34 @@ pub(in crate::server::routes::websocket::handlers) async fn send_current_presenc
     }
 }
 
+pub(in crate::server::routes::websocket::handlers) async fn send_current_presence_from_user_to_jid(
+    state: &WebSocketState,
+    from: &BareJid,
+    to: &Jid,
+) {
+    for resource in available_live_and_detached_resources_for_user(state, from).await {
+        let presence_state = presence_state_for_available_resource(state, &resource).await;
+        let mut presence = build_available_presence(
+            &resource,
+            &to.to_bare(),
+            presence_state
+                .as_ref()
+                .and_then(|state| state.show.as_ref())
+                .map(show_name),
+            presence_state
+                .as_ref()
+                .and_then(|state| state.status.as_deref()),
+            presence_state
+                .as_ref()
+                .map(|state| state.priority)
+                .unwrap_or(0),
+        );
+        presence.to = Some(to.clone());
+        send_presence_stanza_to_jid(state, to, Stanza::Presence(presence), "current presence")
+            .await;
+    }
+}
+
 pub(in crate::server::routes::websocket::handlers) async fn send_unavailable_presence_from_user_to_user(
     state: &WebSocketState,
     from: &BareJid,
@@ -131,6 +159,70 @@ pub(in crate::server::routes::websocket::handlers) async fn send_unavailable_pre
             to,
             &stanza,
             "unavailable presence",
+        )
+        .await;
+    }
+}
+
+pub(in crate::server::routes::websocket::handlers) async fn send_unavailable_presence_from_user_to_jid(
+    state: &WebSocketState,
+    from: &BareJid,
+    to: &Jid,
+) {
+    for resource in available_live_and_detached_resources_for_user(state, from).await {
+        let mut presence =
+            xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::Unavailable);
+        presence.from = Some(Jid::from(resource));
+        presence.to = Some(to.clone());
+        send_presence_stanza_to_jid(
+            state,
+            to,
+            Stanza::Presence(presence),
+            "unavailable presence",
+        )
+        .await;
+    }
+}
+
+async fn send_presence_stanza_to_jid(
+    state: &WebSocketState,
+    to: &Jid,
+    stanza: Stanza,
+    context: &'static str,
+) {
+    if let Ok(full_to) = to.clone().try_into_full() {
+        let sent = state
+            .deps
+            .protocol
+            .connection_registry
+            .send_to(&full_to, stanza.clone())
+            .await
+            .is_sent();
+        if !sent {
+            match state
+                .deps
+                .protocol
+                .sm_session_registry
+                .record_stanza_for_detached_bound_resource(&full_to, &stanza, chrono::Utc::now())
+                .await
+            {
+                Ok(_) => {}
+                Err(error) => {
+                    warn!(
+                        resource = %full_to,
+                        error = %error,
+                        context,
+                        "Failed to stash exact-JID presence side effect for detached resource"
+                    );
+                }
+            }
+        }
+    } else {
+        send_stanza_to_available_user_resources_and_detached_available(
+            state,
+            &to.to_bare(),
+            &stanza,
+            context,
         )
         .await;
     }

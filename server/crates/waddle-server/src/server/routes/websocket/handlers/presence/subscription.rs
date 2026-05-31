@@ -8,7 +8,8 @@ mod storage;
 pub use delivery::broadcast_unavailable_for_expired_detached_session;
 pub(super) use delivery::record_stanza_for_detached_available_resources_excluding;
 pub(in crate::server::routes::websocket::handlers) use delivery::{
-    send_current_presence_from_user_to_user, send_unavailable_presence_from_user_to_user,
+    send_current_presence_from_user_to_jid, send_current_presence_from_user_to_user,
+    send_unavailable_presence_from_user_to_jid, send_unavailable_presence_from_user_to_user,
 };
 pub(super) use directed::handle_directed_presence;
 pub(super) use roster_state::parse_subscription_state;

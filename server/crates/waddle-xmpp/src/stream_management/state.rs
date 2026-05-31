@@ -17,6 +17,7 @@ pub struct DetachedSessionSnapshot {
     pub jid: jid::FullJid,
     pub carbons_enabled: bool,
     pub roster_interested: bool,
+    pub blocklist_interested: bool,
     pub presence_available: bool,
     pub presence_show: Option<xmpp_parsers::presence::Show>,
     pub presence_status: Option<String>,
@@ -300,6 +301,7 @@ impl StreamManagementState {
             detached_at: Instant::now(),
             carbons_enabled: snapshot.carbons_enabled,
             roster_interested: snapshot.roster_interested,
+            blocklist_interested: snapshot.blocklist_interested,
             presence_available: snapshot.presence_available,
             presence_show: snapshot.presence_show,
             presence_status: snapshot.presence_status,
@@ -490,6 +492,7 @@ mod tests {
                 jid: jid.clone(),
                 carbons_enabled: false,
                 roster_interested: true,
+                blocklist_interested: true,
                 presence_available: true,
                 presence_show: Some(xmpp_parsers::presence::Show::Chat),
                 presence_status: Some("ready".to_string()),
@@ -504,6 +507,10 @@ mod tests {
             detached_off.roster_interested,
             "roster_interested=true must round-trip through DetachedSession"
         );
+        assert!(
+            detached_off.blocklist_interested,
+            "blocklist_interested=true must round-trip through DetachedSession"
+        );
 
         let detached_on = state
             .to_detached_session(DetachedSessionSnapshot {
@@ -511,6 +518,7 @@ mod tests {
                 jid,
                 carbons_enabled: true,
                 roster_interested: false,
+                blocklist_interested: false,
                 presence_available: false,
                 presence_show: None,
                 presence_status: None,
@@ -583,6 +591,7 @@ mod tests {
             detached_at: Instant::now(),
             carbons_enabled: false,
             roster_interested: false,
+            blocklist_interested: false,
             presence_available: false,
             presence_show: None,
             presence_status: None,

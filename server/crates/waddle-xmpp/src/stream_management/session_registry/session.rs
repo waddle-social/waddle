@@ -71,6 +71,12 @@ pub struct DetachedSession {
     /// XEP-0198 resumption continues the same stream, so an already
     /// interested resource remains interested after a successful resume.
     pub roster_interested: bool,
+    /// XEP-0191 blocklist-interest state at detach time.
+    ///
+    /// XEP-0198 resumption continues the same stream, so a resource that
+    /// requested the blocklist remains eligible for block/unblock pushes while
+    /// detached and after resume.
+    pub blocklist_interested: bool,
     /// Whether the resource had sent available presence at detach time.
     ///
     /// Presence side effects required by RFC 6121 still apply to detached

@@ -179,8 +179,8 @@ use super::super::{
     is_muc_room_jid, stanza_to_xml, WebSocketState,
 };
 use super::presence::{
-    get_managed_channel_for_room, send_current_presence_from_user_to_user,
-    send_unavailable_presence_from_user_to_user,
+    get_managed_channel_for_room, send_current_presence_from_user_to_jid,
+    send_unavailable_presence_from_user_to_jid,
 };
 use crate::auth::{NativeUserStore, Session};
 use crate::db::actor::{DbExecute, DbQuery, DbQueryOne, GetDatabase};

@@ -138,6 +138,8 @@ pub struct ConnectionEntry {
     pub presence_priority: Arc<std::sync::atomic::AtomicI8>,
     /// Whether this stream requested its roster during the current session.
     pub roster_interested: Arc<AtomicBool>,
+    /// Whether this stream requested its XEP-0191 blocklist during the current session.
+    pub blocklist_interested: Arc<AtomicBool>,
     /// Whether this stream has already received its XEP-0160 offline-message
     /// flush. Set on first non-negative-priority presence (locked Q7a +
     /// Q7d) so subsequent presence updates do not re-flush an already-
@@ -166,6 +168,7 @@ impl ConnectionEntry {
             presence_available: Arc::new(AtomicBool::new(false)),
             presence_priority: Arc::new(std::sync::atomic::AtomicI8::new(0)),
             roster_interested: Arc::new(AtomicBool::new(false)),
+            blocklist_interested: Arc::new(AtomicBool::new(false)),
             offline_flushed: Arc::new(AtomicBool::new(false)),
             sm_stream_id: Arc::new(std::sync::Mutex::new(None)),
         }

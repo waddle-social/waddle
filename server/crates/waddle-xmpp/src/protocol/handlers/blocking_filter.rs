@@ -52,8 +52,7 @@ impl MessageHandler for BlockingFilterHandler {
             // recipient; reply with not-acceptable + <blocked/>.
             Locality::Sender | Locality::Both => {
                 if let Some(to) = message.to.as_ref() {
-                    let to_bare = to.to_bare();
-                    if ctx.blocklist.contains(&to_bare) {
+                    if ctx.blocklist.contains_jid(to) {
                         if is_error_stanza {
                             return HandlerOutcome::Halt(Vec::new());
                         }
@@ -63,8 +62,7 @@ impl MessageHandler for BlockingFilterHandler {
                 }
                 if matches!(ctx.locality, Locality::Both) {
                     if let Some(from) = message.from.as_ref() {
-                        let from_bare = from.to_bare();
-                        if ctx.blocklist.contains(&from_bare) {
+                        if ctx.blocklist.contains_jid(from) {
                             // Self-blocked; treat as silent drop on the
                             // recipient side.
                             return HandlerOutcome::Halt(Vec::new());
@@ -77,8 +75,7 @@ impl MessageHandler for BlockingFilterHandler {
             // from blocked senders.
             Locality::Recipient => {
                 if let Some(from) = message.from.as_ref() {
-                    let from_bare = from.to_bare();
-                    if ctx.blocklist.contains(&from_bare) {
+                    if ctx.blocklist.contains_jid(from) {
                         return HandlerOutcome::Halt(Vec::new());
                     }
                 }
@@ -110,6 +107,10 @@ mod tests {
 
     fn bare(s: &str) -> BareJid {
         s.parse().expect("valid bare jid")
+    }
+
+    fn jid(s: &str) -> jid::Jid {
+        s.parse().expect("valid jid")
     }
 
     fn chat_msg(from: &str, to: &str) -> Message {
@@ -192,6 +193,28 @@ mod tests {
         let mut msg = chat_msg("alice@example.com/web", "bob@example.com");
         let (outcome, _) = run(&local, &bl, &mut msg);
         assert!(matches!(outcome, HandlerOutcome::Continue(ref e) if e.is_empty()));
+    }
+
+    #[test]
+    fn xep_0191_recipient_pass_honors_full_jid_block() {
+        let local = full("bob@example.com/desk");
+        let bl = Blocklist::new([jid("alice@example.com/web")]);
+        let mut blocked = chat_msg("alice@example.com/web", "bob@example.com");
+        let (blocked_outcome, _) = run(&local, &bl, &mut blocked);
+        assert_halt_no_events(&blocked_outcome);
+
+        let mut other_resource = chat_msg("alice@example.com/mobile", "bob@example.com");
+        let (other_outcome, _) = run(&local, &bl, &mut other_resource);
+        assert!(matches!(other_outcome, HandlerOutcome::Continue(ref e) if e.is_empty()));
+    }
+
+    #[test]
+    fn xep_0191_recipient_pass_honors_domain_block() {
+        let local = full("bob@example.com/desk");
+        let bl = Blocklist::new([jid("blocked.example.com")]);
+        let mut msg = chat_msg("alice@blocked.example.com/web", "bob@example.com");
+        let (outcome, _) = run(&local, &bl, &mut msg);
+        assert_halt_no_events(&outcome);
     }
 
     // -----------------------------------------------------------------

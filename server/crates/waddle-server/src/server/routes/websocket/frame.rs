@@ -31,6 +31,7 @@ pub(super) async fn handle_xmpp_frame(
         presence_status,
         presence_priority,
         roster_interested,
+        blocklist_interested,
         pending_resume_stream_id,
         pending_resume_h,
         suppress_sm_record_next_batch,
@@ -56,6 +57,7 @@ pub(super) async fn handle_xmpp_frame(
                 pending_resume_h,
                 suppress_sm_record_next_batch,
                 roster_interested,
+                blocklist_interested,
             };
             return handle_sm_stanza(sm, state, ctx).await;
         }
@@ -169,6 +171,7 @@ pub(super) async fn handle_xmpp_frame(
                         let mut iq_conn_state = handlers::iq::IqConnState {
                             carbons_enabled,
                             roster_interested,
+                            blocklist_interested,
                             state_machine: state_machine.as_mut(),
                         };
                         handlers::iq::handle_iq_with_conn_state(

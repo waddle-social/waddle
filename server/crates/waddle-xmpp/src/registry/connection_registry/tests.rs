@@ -91,6 +91,42 @@ fn test_register_replacement_does_not_inherit_roster_interest() {
 }
 
 #[test]
+fn test_blocklist_interest_tracks_only_requesting_resources() {
+    let registry = ConnectionRegistry::new();
+    let web: FullJid = "user@example.com/web".parse().unwrap();
+    let phone: FullJid = "user@example.com/phone".parse().unwrap();
+    let bare = web.to_bare();
+
+    let (web_tx, _web_rx) = mpsc::channel(16);
+    let (phone_tx, _phone_rx) = mpsc::channel(16);
+
+    registry.register(web.clone(), web_tx);
+    registry.register(phone.clone(), phone_tx);
+    registry.mark_blocklist_interested(&web);
+
+    assert_eq!(
+        registry.get_blocklist_interested_resources_for_user(&bare),
+        vec![web]
+    );
+}
+
+#[test]
+fn test_register_with_stream_state_seeds_blocklist_interest() {
+    let registry = ConnectionRegistry::new();
+    let jid: FullJid = "user@example.com/web".parse().unwrap();
+    let bare = jid.to_bare();
+    let (tx, _rx) = mpsc::channel(16);
+
+    registry.register_with_stream_state(jid.clone(), tx, false, false, true);
+
+    assert!(registry.is_blocklist_interested(&jid));
+    assert_eq!(
+        registry.get_blocklist_interested_resources_for_user(&bare),
+        vec![jid]
+    );
+}
+
+#[test]
 fn test_unregister_connection() {
     let registry = ConnectionRegistry::new();
     let jid = test_jid("user1");

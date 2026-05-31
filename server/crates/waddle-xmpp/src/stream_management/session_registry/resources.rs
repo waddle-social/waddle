@@ -52,6 +52,43 @@ impl InMemorySmSessionRegistry {
         Ok(resources)
     }
 
+    /// List detached resources for `bare_jid` that requested the XEP-0191 blocklist.
+    pub async fn blocklist_interested_detached_resources_for_user(
+        &self,
+        bare_jid: &BareJid,
+    ) -> Result<Vec<FullJid>, SmRegistryError> {
+        let sessions = self
+            .sessions
+            .read()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+
+        let mut resources: Vec<FullJid> = sessions
+            .values()
+            .filter(|session| {
+                !session.is_expired()
+                    && session.blocklist_interested
+                    && session.jid.to_bare() == *bare_jid
+            })
+            .map(|session| session.jid.clone())
+            .collect();
+        drop(sessions);
+        let claimed = self
+            .claimed_sessions
+            .read()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        resources.extend(
+            claimed
+                .values()
+                .filter(|session| {
+                    !session.is_expired()
+                        && session.blocklist_interested
+                        && session.jid.to_bare() == *bare_jid
+                })
+                .map(|session| session.jid.clone()),
+        );
+        Ok(resources)
+    }
+
     /// Record a stanza for one detached interested resource.
     async fn record_outbound_for_detached_resource(
         &self,
@@ -68,6 +105,26 @@ impl InMemorySmSessionRegistry {
         self.update_detached_session_snapshot(
             &stream_id,
             |session| !session.is_expired() && session.roster_interested && session.jid == *jid,
+            |session| session.record_detached_outbound(stanza_xml, original_receipt_at),
+        )
+        .await
+    }
+
+    async fn record_outbound_for_detached_blocklist_resource(
+        &self,
+        jid: &FullJid,
+        stanza_xml: String,
+        original_receipt_at: DateTime<Utc>,
+    ) -> Result<bool, SmRegistryError> {
+        let Some(stream_id) = self.find_session_id_matching(|session| {
+            !session.is_expired() && session.blocklist_interested && session.jid == *jid
+        })?
+        else {
+            return Ok(false);
+        };
+        self.update_detached_session_snapshot(
+            &stream_id,
+            |session| !session.is_expired() && session.blocklist_interested && session.jid == *jid,
             |session| session.record_detached_outbound(stanza_xml, original_receipt_at),
         )
         .await
@@ -100,6 +157,21 @@ impl InMemorySmSessionRegistry {
         original_receipt_at: DateTime<Utc>,
     ) -> Result<bool, SmRegistryError> {
         self.record_outbound_for_detached_resource(
+            jid,
+            Self::stanza_to_replay_xml(stanza),
+            original_receipt_at,
+        )
+        .await
+    }
+
+    /// Record a typed stanza for one detached XEP-0191 blocklist-interested resource.
+    pub async fn record_stanza_for_detached_blocklist_resource(
+        &self,
+        jid: &FullJid,
+        stanza: &Stanza,
+        original_receipt_at: DateTime<Utc>,
+    ) -> Result<bool, SmRegistryError> {
+        self.record_outbound_for_detached_blocklist_resource(
             jid,
             Self::stanza_to_replay_xml(stanza),
             original_receipt_at,

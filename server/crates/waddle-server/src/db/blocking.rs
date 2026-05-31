@@ -23,9 +23,18 @@ impl DatabaseBlockingStorage {
         Self { db }
     }
 
-    /// Get all blocked JIDs for a user.
+    /// Get all blocked JIDs for a user as typed XEP-0191 entries.
     #[instrument(skip(self), fields(user = %user_jid))]
     pub async fn get_blocklist(
+        &self,
+        user_jid: &BareJid,
+    ) -> Result<Vec<Jid>, BlockingStorageError> {
+        self.load_blocklist_rows(user_jid)
+            .await
+            .map(|rows| parse_blocklist_entries(user_jid, rows))
+    }
+
+    async fn load_blocklist_rows(
         &self,
         user_jid: &BareJid,
     ) -> Result<Vec<String>, BlockingStorageError> {
@@ -54,7 +63,7 @@ impl DatabaseBlockingStorage {
 
     /// Get all blocked JIDs for a user as typed [`BareJid`]s.
     ///
-    /// Same query path as [`Self::get_blocklist`] but parses each row's
+    /// Same query path as [`Self::get_blocklist`] but narrows each row's
     /// `blocked_jid` text column into a typed [`BareJid`] before
     /// returning. Rows that fail to parse are skipped and logged at
     /// WARN — the legacy `is_blocked` per-message check tolerates the
@@ -77,14 +86,13 @@ impl DatabaseBlockingStorage {
         let raw = self.get_blocklist(user_jid).await?;
         let mut entries = Vec::with_capacity(raw.len());
         for blocked in raw {
-            match blocked.parse::<BareJid>() {
+            match blocked.clone().try_into() {
                 Ok(jid) => entries.push(jid),
-                Err(error) => {
+                Err(_) => {
                     tracing::warn!(
                         user = %user_jid,
                         blocked = %blocked,
-                        %error,
-                        "Skipping malformed blocklist row"
+                        "Skipping non-bare blocklist row for bare-JID snapshot"
                     );
                 }
             }
@@ -103,23 +111,7 @@ impl DatabaseBlockingStorage {
         &self,
         user_jid: &BareJid,
     ) -> Result<Vec<Jid>, BlockingStorageError> {
-        let raw = self.get_blocklist(user_jid).await?;
-        let mut entries = Vec::with_capacity(raw.len());
-        for blocked in raw {
-            match blocked.parse::<Jid>() {
-                Ok(jid) => entries.push(jid),
-                Err(error) => {
-                    tracing::warn!(
-                        user = %user_jid,
-                        blocked = %blocked,
-                        %error,
-                        "Skipping malformed blocklist row"
-                    );
-                }
-            }
-        }
-        debug!(count = entries.len(), "Loaded typed blocklist entries");
-        Ok(entries)
+        self.get_blocklist(user_jid).await
     }
 
     /// Check if a JID is blocked by a user.
@@ -129,19 +121,20 @@ impl DatabaseBlockingStorage {
         user_jid: &BareJid,
         blocked_jid: &BareJid,
     ) -> Result<bool, BlockingStorageError> {
-        let mut rows = self
-            .query_with_persistent(
-                "SELECT 1 FROM blocking_list WHERE user_jid = ? AND blocked_jid = ?",
-                crate::db_params![user_jid.to_string(), blocked_jid.to_string()],
-            )
-            .await?;
-
-        let is_blocked = rows
-            .next()
+        self.is_blocked_jid(user_jid, &Jid::from(blocked_jid.clone()))
             .await
-            .map_err(|e| BlockingStorageError::QueryFailed(format!("Failed to read row: {}", e)))?
-            .is_some();
+    }
 
+    /// Check if a typed JID is blocked by a user using XEP-0191 matching.
+    #[instrument(skip(self), fields(user = %user_jid, blocked = %blocked_jid))]
+    pub async fn is_blocked_jid(
+        &self,
+        user_jid: &BareJid,
+        blocked_jid: &Jid,
+    ) -> Result<bool, BlockingStorageError> {
+        let blocklist =
+            waddle_xmpp::protocol::Blocklist::new(self.list_blocked_jid_entries(user_jid).await?);
+        let is_blocked = blocklist.contains_jid(blocked_jid);
         debug!(is_blocked, "Checked if JID is blocked");
         Ok(is_blocked)
     }
@@ -153,7 +146,7 @@ impl DatabaseBlockingStorage {
     pub async fn add_blocks(
         &self,
         user_jid: &BareJid,
-        blocked_jids: &[String],
+        blocked_jids: &[Jid],
     ) -> Result<usize, BlockingStorageError> {
         let mut added = 0;
         for blocked_jid in blocked_jids {
@@ -161,7 +154,7 @@ impl DatabaseBlockingStorage {
             let result = self
                 .execute_with_persistent(
                     "INSERT OR IGNORE INTO blocking_list (user_jid, blocked_jid) VALUES (?, ?)",
-                    crate::db_params![user_jid.to_string(), blocked_jid.clone()],
+                    crate::db_params![user_jid.to_string(), blocked_jid.to_string()],
                 )
                 .await?;
 
@@ -181,14 +174,14 @@ impl DatabaseBlockingStorage {
     pub async fn remove_blocks(
         &self,
         user_jid: &BareJid,
-        blocked_jids: &[String],
+        blocked_jids: &[Jid],
     ) -> Result<usize, BlockingStorageError> {
         let mut removed = 0;
         for blocked_jid in blocked_jids {
             let result = self
                 .execute_with_persistent(
                     "DELETE FROM blocking_list WHERE user_jid = ? AND blocked_jid = ?",
-                    crate::db_params![user_jid.to_string(), blocked_jid.clone()],
+                    crate::db_params![user_jid.to_string(), blocked_jid.to_string()],
                 )
                 .await?;
 
@@ -253,6 +246,25 @@ impl DatabaseBlockingStorage {
     }
 }
 
+fn parse_blocklist_entries(user_jid: &BareJid, rows: Vec<String>) -> Vec<Jid> {
+    let mut entries = Vec::with_capacity(rows.len());
+    for blocked in rows {
+        match blocked.parse::<Jid>() {
+            Ok(jid) => entries.push(jid),
+            Err(error) => {
+                tracing::warn!(
+                    user = %user_jid,
+                    blocked = %blocked,
+                    %error,
+                    "Skipping malformed blocklist row"
+                );
+            }
+        }
+    }
+    debug!(count = entries.len(), "Loaded typed blocklist entries");
+    entries
+}
+
 /// Errors that can occur during blocking storage operations.
 #[derive(Debug, thiserror::Error)]
 pub enum BlockingStorageError {
@@ -306,8 +318,8 @@ mod tests {
         let storage = DatabaseBlockingStorage::new(db);
 
         let user_jid: BareJid = "alice@example.com".parse().unwrap();
-        let blocked_jid1 = "bob@example.com".to_string();
-        let blocked_jid2 = "carol@example.com".to_string();
+        let blocked_jid1: Jid = "bob@example.com".parse().unwrap();
+        let blocked_jid2: Jid = "carol@example.com".parse().unwrap();
 
         // Initially empty
         let blocklist = storage.get_blocklist(&user_jid).await.unwrap();
@@ -361,7 +373,7 @@ mod tests {
         let storage = DatabaseBlockingStorage::new(db);
 
         let user_jid: BareJid = "alice@example.com".parse().unwrap();
-        let blocked_jid = "bob@example.com".to_string();
+        let blocked_jid: Jid = "bob@example.com".parse().unwrap();
 
         // Add block
         let added = storage
@@ -388,7 +400,7 @@ mod tests {
         let storage = DatabaseBlockingStorage::new(db);
 
         let user_jid: BareJid = "alice@example.com".parse().unwrap();
-        let blocked_jid = "bob@example.com".to_string();
+        let blocked_jid: Jid = "bob@example.com".parse().unwrap();
 
         // Remove nonexistent block - should succeed with 0 removed
         let removed = storage
@@ -404,7 +416,7 @@ mod tests {
         let storage = DatabaseBlockingStorage::new(db);
 
         let user_jid: BareJid = "alice@example.com".parse().unwrap();
-        let blocked = "bob@example.com".to_string();
+        let blocked: Jid = "bob@example.com".parse().unwrap();
         storage
             .add_blocks(&user_jid, std::slice::from_ref(&blocked))
             .await
@@ -423,17 +435,44 @@ mod tests {
 
         let user_jid: BareJid = "alice@example.com".parse().unwrap();
         let blocked = vec![
-            "bob@example.com/phone".to_string(),
-            "blocked.example.com".to_string(),
+            "bob@example.com/phone".parse().unwrap(),
+            "blocked.example.com".parse().unwrap(),
         ];
         storage.add_blocks(&user_jid, &blocked).await.unwrap();
 
         let entries = storage.list_blocked_jid_entries(&user_jid).await.unwrap();
-        let expected: Vec<Jid> = blocked
-            .iter()
-            .map(|entry| entry.parse().expect("valid blocked JID"))
-            .collect();
-        assert_eq!(entries, expected);
+        assert_eq!(entries, blocked);
+    }
+
+    #[tokio::test]
+    async fn is_blocked_jid_matches_full_bare_and_domain_entries() {
+        let db = setup_test_db().await;
+        let storage = DatabaseBlockingStorage::new(db);
+
+        let user_jid: BareJid = "alice@example.com".parse().unwrap();
+        let blocked = vec![
+            "bob@example.com/phone".parse().unwrap(),
+            "carol@example.com".parse().unwrap(),
+            "blocked.example.com".parse().unwrap(),
+        ];
+        storage.add_blocks(&user_jid, &blocked).await.unwrap();
+
+        assert!(storage
+            .is_blocked_jid(&user_jid, &"bob@example.com/phone".parse().unwrap())
+            .await
+            .unwrap());
+        assert!(!storage
+            .is_blocked_jid(&user_jid, &"bob@example.com/laptop".parse().unwrap())
+            .await
+            .unwrap());
+        assert!(storage
+            .is_blocked_jid(&user_jid, &"carol@example.com/tablet".parse().unwrap())
+            .await
+            .unwrap());
+        assert!(storage
+            .is_blocked_jid(&user_jid, &"dave@blocked.example.com".parse().unwrap())
+            .await
+            .unwrap());
     }
 
     #[tokio::test]
@@ -443,7 +482,7 @@ mod tests {
 
         let alice_jid: BareJid = "alice@example.com".parse().unwrap();
         let bob_jid: BareJid = "bob@example.com".parse().unwrap();
-        let blocked_jid = "eve@example.com".to_string();
+        let blocked_jid: Jid = "eve@example.com".parse().unwrap();
 
         // Alice blocks Eve
         storage

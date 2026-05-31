@@ -24,6 +24,7 @@ fn fixture_session(stream_id: &str) -> PersistedSession {
         max_resume_duration: Duration::from_secs(60),
         carbons_enabled: true,
         roster_interested: true,
+        blocklist_interested: true,
         presence_available: true,
         presence_show: Some(Show::Chat),
         presence_status: Some("at the keyboard".to_string()),
@@ -66,6 +67,7 @@ async fn round_trip_session_preserves_every_field() {
     assert_eq!(loaded.max_resume_duration, s.max_resume_duration);
     assert_eq!(loaded.carbons_enabled, s.carbons_enabled);
     assert_eq!(loaded.roster_interested, s.roster_interested);
+    assert_eq!(loaded.blocklist_interested, s.blocklist_interested);
     assert_eq!(loaded.presence_available, s.presence_available);
     assert_eq!(loaded.presence_show, s.presence_show);
     assert_eq!(loaded.presence_status, s.presence_status);

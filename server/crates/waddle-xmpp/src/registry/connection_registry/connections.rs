@@ -25,17 +25,18 @@ impl ConnectionRegistry {
         sender: mpsc::Sender<OutboundStanza>,
         carbons_enabled: bool,
     ) -> Arc<AtomicBool> {
-        self.register_with_stream_state(jid, sender, carbons_enabled, false)
+        self.register_with_stream_state(jid, sender, carbons_enabled, false, false)
     }
 
     /// Register a connection and seed per-stream feature state.
-    #[instrument(skip(self, sender), fields(jid = %jid, carbons = carbons_enabled, roster_interested = roster_interested))]
+    #[instrument(skip(self, sender), fields(jid = %jid, carbons = carbons_enabled, roster_interested = roster_interested, blocklist_interested = blocklist_interested))]
     pub fn register_with_stream_state(
         &self,
         jid: FullJid,
         sender: mpsc::Sender<OutboundStanza>,
         carbons_enabled: bool,
         roster_interested: bool,
+        blocklist_interested: bool,
     ) -> Arc<AtomicBool> {
         let entry = ConnectionEntry::new(sender);
         if carbons_enabled {
@@ -43,6 +44,9 @@ impl ConnectionRegistry {
         }
         if roster_interested {
             entry.roster_interested.store(true, Ordering::Relaxed);
+        }
+        if blocklist_interested {
+            entry.blocklist_interested.store(true, Ordering::Relaxed);
         }
         let carbons_handle = entry.carbons_handle();
         let existing = self.connections.insert(jid.clone(), entry);

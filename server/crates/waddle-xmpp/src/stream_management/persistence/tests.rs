@@ -23,6 +23,7 @@ fn fixture_session(stream_id: &str) -> PersistedSession {
         max_resume_duration: Duration::from_secs(60),
         carbons_enabled: true,
         roster_interested: true,
+        blocklist_interested: true,
         presence_available: true,
         presence_show: None,
         presence_status: None,
@@ -56,6 +57,7 @@ async fn upsert_get_round_trip() {
     let loaded = store.get_session(&sid("stream-1")).await.unwrap().unwrap();
     assert_eq!(loaded.user_id, s.user_id);
     assert!(loaded.carbons_enabled);
+    assert!(loaded.blocklist_interested);
     assert_eq!(loaded.replay_gap_through, Some(9));
 }
 

@@ -73,6 +73,7 @@ pub(super) async fn register_bound_connection_after_frame(
             tx,
             conn.carbons_enabled,
             conn.roster_interested,
+            conn.blocklist_interested,
         );
     conn.registry_owner = Some(owner.clone());
 

@@ -3513,10 +3513,12 @@ async fn inbox_query_requires_ready_phase() {
     let pending_jid: FullJid = "bob@example.com/pending".parse().expect("pending jid");
     let mut carbons_enabled = false;
     let mut roster_interested = false;
+    let mut blocklist_interested = false;
     let frame = r#"<iq xmlns='jabber:client' type='get' to='bob@example.com' id='inbox-prebind-1'><inbox xmlns='urn:xmpp:inbox:0'/></iq>"#;
     let mut conn_state = IqConnState {
         carbons_enabled: &mut carbons_enabled,
         roster_interested: &mut roster_interested,
+        blocklist_interested: &mut blocklist_interested,
         state_machine: None,
     };
     let responses = handle_iq_with_conn_state(

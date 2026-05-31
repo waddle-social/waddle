@@ -338,11 +338,11 @@ pub trait AppState: Send + Sync + 'static {
 
     /// Get all blocked JIDs for a user.
     ///
-    /// Returns a list of bare JID strings that the user has blocked.
+    /// Returns the user's stored XEP-0191 JID entries.
     fn get_blocklist(
         &self,
         user_jid: &jid::BareJid,
-    ) -> impl std::future::Future<Output = Result<Vec<String>, XmppError>> + Send;
+    ) -> impl std::future::Future<Output = Result<Vec<jid::Jid>, XmppError>> + Send;
 
     /// Check if a JID is blocked by a user.
     ///
@@ -359,7 +359,7 @@ pub trait AppState: Send + Sync + 'static {
     fn add_blocks(
         &self,
         user_jid: &jid::BareJid,
-        blocked_jids: &[String],
+        blocked_jids: &[jid::Jid],
     ) -> impl std::future::Future<Output = Result<usize, XmppError>> + Send;
 
     /// Remove JIDs from a user's blocklist.
@@ -368,7 +368,7 @@ pub trait AppState: Send + Sync + 'static {
     fn remove_blocks(
         &self,
         user_jid: &jid::BareJid,
-        blocked_jids: &[String],
+        blocked_jids: &[jid::Jid],
     ) -> impl std::future::Future<Output = Result<usize, XmppError>> + Send;
 
     /// Remove all JIDs from a user's blocklist.
