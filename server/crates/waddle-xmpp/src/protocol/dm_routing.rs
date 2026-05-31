@@ -41,7 +41,7 @@ use crate::protocol::handlers::archive::has_archivable_content;
 use crate::protocol::session_state::Blocklist;
 use crate::xep::xep0085::is_standalone_notification;
 use crate::xep::xep0334::{has_hint, Hint};
-use jid::{BareJid, FullJid, Jid};
+use jid::FullJid;
 use std::collections::BTreeMap;
 use waddle_xmpp_core::carbons::CARBONS_NS;
 use xmpp_parsers::message::{Message, MessageType};
@@ -181,8 +181,8 @@ pub fn classify_dm_intake(
     blocklist: &Blocklist,
 ) -> DmRouting {
     // ── XEP-0191 §2 step 4: blocked sender → drop entirely ────────────
-    if let Some(sender_bare) = sender_bare(message) {
-        if blocklist.contains(&sender_bare) {
+    if let Some(sender) = message.from.as_ref() {
+        if blocklist.contains_jid(sender) {
             return DmRouting::dropped();
         }
     }
@@ -360,11 +360,6 @@ pub fn classify_dm_intake(
         live,
         inbox,
     }
-}
-
-/// Extract the sender's bare JID from a message, if present.
-fn sender_bare(message: &Message) -> Option<BareJid> {
-    message.from.as_ref().map(Jid::to_bare)
 }
 
 /// Determine the live-delivery shape from the message's `to` attribute.

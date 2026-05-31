@@ -1468,6 +1468,7 @@ async fn xep0160_promoted_stanzas_carry_original_receipt_time_in_delay() {
             jid: alice_jid.clone(),
             carbons_enabled: false,
             roster_interested: false,
+            blocklist_interested: false,
             presence_available: false,
             presence_show: None,
             presence_status: None,

@@ -135,6 +135,7 @@ impl ExtensionHostAdapter {
             }
             let blocking =
                 DatabaseBlockingStorage::new(self.state.deps.app_state.db_pool.global().clone());
+            let actor_jid = jid::Jid::from(invocation.actor_jid.clone());
             let requester_blocks_target = blocking
                 .is_blocked(&invocation.actor_jid.to_bare(), target)
                 .await
@@ -143,7 +144,7 @@ impl ExtensionHostAdapter {
                 return Err(ExtensionHostAdapterError::NotAuthorized);
             }
             let blocked = blocking
-                .is_blocked(target, &invocation.actor_jid.to_bare())
+                .is_blocked_jid(target, &actor_jid)
                 .await
                 .map_err(|error| ExtensionHostAdapterError::Storage(error.to_string()))?;
             if blocked {

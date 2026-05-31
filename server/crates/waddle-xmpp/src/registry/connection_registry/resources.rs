@@ -67,6 +67,39 @@ impl ConnectionRegistry {
             .collect()
     }
 
+    /// Mark a connected resource as interested in XEP-0191 blocklist pushes.
+    ///
+    /// XEP-0191 sends block/unblock pushes only to resources that requested the
+    /// blocklist during the current session.
+    pub fn mark_blocklist_interested(&self, jid: &FullJid) {
+        if let Some(entry) = self.connections.get(jid) {
+            entry
+                .value()
+                .blocklist_interested
+                .store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Check whether a connected resource is interested in XEP-0191 blocklist pushes.
+    pub fn is_blocklist_interested(&self, jid: &FullJid) -> bool {
+        self.connections
+            .get(jid)
+            .map(|entry| entry.value().blocklist_interested.load(Ordering::Relaxed))
+            .unwrap_or(false)
+    }
+
+    /// Get all connected resources for a bare JID that requested the blocklist.
+    pub fn get_blocklist_interested_resources_for_user(&self, bare_jid: &BareJid) -> Vec<FullJid> {
+        self.connections
+            .iter()
+            .filter(|entry| {
+                entry.key().to_bare() == *bare_jid
+                    && entry.value().blocklist_interested.load(Ordering::Relaxed)
+            })
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
+
     /// Send a stanza to multiple recipients.
     ///
     /// Returns a vector of (jid, result) pairs for each recipient.

@@ -260,6 +260,7 @@ async fn sm_resume_rejects_when_replay_window_has_gap() {
         detached_at: std::time::Instant::now(),
         carbons_enabled: false,
         roster_interested: false,
+        blocklist_interested: false,
         presence_available: false,
         presence_show: None,
         presence_status: None,
@@ -341,6 +342,7 @@ async fn sm_resume_rejects_authenticated_identity_mismatch_and_preserves_session
         detached_at: std::time::Instant::now(),
         carbons_enabled: false,
         roster_interested: false,
+        blocklist_interested: false,
         presence_available: false,
         presence_show: None,
         presence_status: None,
@@ -420,6 +422,7 @@ async fn sm_resume_matching_authenticated_identity_preserves_current_session_wit
             detached_at: std::time::Instant::now(),
             carbons_enabled: true,
             roster_interested: false,
+            blocklist_interested: false,
             presence_available: false,
             presence_show: None,
             presence_status: None,
@@ -495,6 +498,7 @@ async fn sm_resume_matching_authenticated_identity_prefers_detached_sidecar_sess
             detached_at: std::time::Instant::now(),
             carbons_enabled: false,
             roster_interested: false,
+            blocklist_interested: false,
             presence_available: false,
             presence_show: None,
             presence_status: None,
@@ -646,6 +650,7 @@ async fn sm_resume_restores_session_and_replays_unacked() {
         detached_at: std::time::Instant::now(),
         carbons_enabled: true,
         roster_interested: false,
+        blocklist_interested: false,
         presence_available: false,
         presence_show: None,
         presence_status: None,
@@ -721,6 +726,7 @@ async fn sm_resume_rejects_impossible_client_handled_count() {
             detached_at: std::time::Instant::now(),
             carbons_enabled: false,
             roster_interested: false,
+            blocklist_interested: false,
             presence_available: false,
             presence_show: None,
             presence_status: None,
@@ -790,6 +796,7 @@ async fn sm_resume_replays_roster_push_recorded_while_detached() {
             detached_at: std::time::Instant::now(),
             carbons_enabled: false,
             roster_interested: true,
+            blocklist_interested: false,
             presence_available: false,
             presence_show: None,
             presence_status: None,
@@ -862,6 +869,7 @@ async fn direct_full_jid_message_records_for_detached_resource_replay() {
             detached_at: std::time::Instant::now(),
             carbons_enabled: false,
             roster_interested: false,
+            blocklist_interested: false,
             presence_available: false,
             presence_show: None,
             presence_status: None,
@@ -930,6 +938,7 @@ async fn bare_jid_message_records_for_detached_resource_replay() {
             detached_at: std::time::Instant::now(),
             carbons_enabled: false,
             roster_interested: false,
+            blocklist_interested: false,
             presence_available: false,
             presence_show: None,
             presence_status: None,
@@ -1006,6 +1015,7 @@ async fn message_carbons_record_for_detached_enabled_resources() {
             detached_at: std::time::Instant::now(),
             carbons_enabled: true,
             roster_interested: false,
+            blocklist_interested: false,
             presence_available: false,
             presence_show: None,
             presence_status: None,
@@ -1068,6 +1078,7 @@ async fn message_carbons_record_for_detached_enabled_resources() {
             detached_at: std::time::Instant::now(),
             carbons_enabled: true,
             roster_interested: false,
+            blocklist_interested: false,
             presence_available: false,
             presence_show: None,
             presence_status: None,
@@ -1253,6 +1264,7 @@ async fn roster_set_records_push_for_detached_interested_resource() {
             detached_at: std::time::Instant::now(),
             carbons_enabled: false,
             roster_interested: true,
+            blocklist_interested: false,
             presence_available: false,
             presence_show: None,
             presence_status: None,
@@ -1289,6 +1301,71 @@ async fn roster_set_records_push_for_detached_interested_resource() {
         "detached interested resource should replay roster fanout push: {replay:?}"
     );
     assert!(resumed.roster_interested);
+}
+
+#[tokio::test]
+async fn blocking_set_records_push_for_detached_blocklist_interested_resource() {
+    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+    let state = create_test_websocket_state().await;
+
+    let detached_jid: FullJid = "alice@example.com/web".parse().expect("detached jid");
+    let source_jid: FullJid = "alice@example.com/phone".parse().expect("source jid");
+    let stream_id = "stream-blocking-fanout".to_string();
+    state
+        .deps
+        .protocol
+        .sm_session_registry
+        .store_session(DetachedSession {
+            stream_id: stream_id.clone(),
+            user_id: "alice@example.com".to_string(),
+            jid: detached_jid.clone(),
+            inbound_count: 0,
+            outbound_count: 0,
+            last_acked: 0,
+            replay_gap_through: None,
+            unacked_stanzas: Vec::new(),
+            max_resume_time: Some(300),
+            detached_at: std::time::Instant::now(),
+            carbons_enabled: false,
+            roster_interested: false,
+            blocklist_interested: true,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+        })
+        .await
+        .expect("store detached session");
+
+    let mut source = WsConnState::new();
+    source.phase = ConnectionPhase::ready(source_jid, false);
+    let responses = handle_xmpp_frame(
+        r#"<iq xmlns="jabber:client" type="set" id="blocking-detached-fanout"><block xmlns="urn:xmpp:blocking"><item jid="bob@example.com"/></block></iq>"#,
+        "example.com",
+        state.as_ref(),
+        &mut source,
+    )
+    .await;
+    assert!(
+        responses
+            .iter()
+            .any(|frame| frame.contains("blocking-detached-fanout")
+                && frame.contains("type='result'")),
+        "block set should succeed: {responses:?}"
+    );
+
+    let mut resumed = WsConnState::new();
+    resumed.phase = ConnectionPhase::authenticated(&detached_jid);
+    let resume_frame = resume_frame_xml(&stream_id, 0);
+    let replay =
+        handle_xmpp_frame(&resume_frame, "example.com", state.as_ref(), &mut resumed).await;
+    assert!(
+        replay
+            .iter()
+            .any(|frame| frame.contains("urn:xmpp:blocking") && frame.contains("bob@example.com")),
+        "detached blocklist-interested resource should replay blocking push: {replay:?}"
+    );
+    assert!(resumed.blocklist_interested);
 }
 
 #[tokio::test]
@@ -1345,6 +1422,7 @@ async fn subscription_approval_replays_current_presence_from_detached_available_
             detached_at: std::time::Instant::now(),
             carbons_enabled: false,
             roster_interested: false,
+            blocklist_interested: false,
             presence_available: true,
             presence_show: Some(xmpp_parsers::presence::Show::Chat),
             presence_status: Some("ready from detach".to_string()),
@@ -1433,6 +1511,7 @@ async fn presence_probe_returns_detached_available_resource_presence() {
             detached_at: std::time::Instant::now(),
             carbons_enabled: false,
             roster_interested: false,
+            blocklist_interested: false,
             presence_available: true,
             presence_show: Some(xmpp_parsers::presence::Show::Away),
             presence_status: Some("stepped away".to_string()),
@@ -1532,6 +1611,7 @@ async fn full_jid_presence_probe_returns_only_that_resources_availability() {
                 detached_at: std::time::Instant::now(),
                 carbons_enabled: false,
                 roster_interested: false,
+                blocklist_interested: false,
                 presence_available: true,
                 presence_show: Some(show),
                 presence_status: Some(status.to_string()),
@@ -1602,6 +1682,7 @@ async fn presence_probe_without_subscription_does_not_reveal_detached_presence()
             detached_at: std::time::Instant::now(),
             carbons_enabled: false,
             roster_interested: false,
+            blocklist_interested: false,
             presence_available: true,
             presence_show: Some(xmpp_parsers::presence::Show::Away),
             presence_status: Some("private".to_string()),
@@ -1761,6 +1842,7 @@ async fn subscription_approval_records_roster_push_for_detached_interested_resou
             detached_at: std::time::Instant::now(),
             carbons_enabled: false,
             roster_interested: true,
+            blocklist_interested: false,
             presence_available: false,
             presence_show: None,
             presence_status: None,
@@ -1819,6 +1901,7 @@ async fn subscribe_to_detached_available_resource_replays_on_resume() {
             detached_at: std::time::Instant::now(),
             carbons_enabled: false,
             roster_interested: false,
+            blocklist_interested: false,
             presence_available: true,
             presence_show: None,
             presence_status: None,
@@ -1895,6 +1978,7 @@ async fn presence_broadcast_to_detached_available_subscriber_replays_on_resume()
             detached_at: std::time::Instant::now(),
             carbons_enabled: false,
             roster_interested: false,
+            blocklist_interested: false,
             presence_available: true,
             presence_show: None,
             presence_status: None,
@@ -1980,6 +2064,7 @@ async fn sm_resume_signals_suppress_record_so_main_loop_skips_replay() {
         detached_at: std::time::Instant::now(),
         carbons_enabled: false,
         roster_interested: false,
+        blocklist_interested: false,
         presence_available: false,
         presence_show: None,
         presence_status: None,
@@ -2243,6 +2328,7 @@ async fn sm_janitor_helper_drains_expired_and_cleans_muc() {
             detached_at: std::time::Instant::now(),
             carbons_enabled: false,
             roster_interested: false,
+            blocklist_interested: false,
             presence_available: false,
             presence_show: None,
             presence_status: None,

@@ -222,6 +222,19 @@ scenario: #Scenario & {
 		},
 		#SendIq & {
 			actor: adminPhone
+			type:  "get"
+			id:    "cue-block-get-empty"
+			payload: #XmlElement & {name: "blocklist", ns: "urn:xmpp:blocking"}
+		},
+		#ExpectIq & {
+			target:   adminPhone
+			id:       "cue-block-get-empty"
+			type:     "result"
+			contains: ["urn:xmpp:blocking"]
+			absent:   ["spammer@localhost"]
+		},
+		#SendIq & {
+			actor: adminPhone
 			type:  "set"
 			id:    "cue-block-set"
 			payload: #XmlElement & {

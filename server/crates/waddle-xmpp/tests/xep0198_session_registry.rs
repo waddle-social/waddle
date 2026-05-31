@@ -33,6 +33,7 @@ fn detached_session(stream_id: &str, jid: &str) -> DetachedSession {
         detached_at: Instant::now(),
         carbons_enabled: true,
         roster_interested: true,
+        blocklist_interested: false,
         presence_available: true,
         presence_show: None,
         presence_status: Some("available".to_string()),

@@ -166,6 +166,7 @@ fn reset_registered_resume_attempt(
     conn.phase = ConnectionPhase::authenticated(jid);
     conn.state_machine = None;
     conn.sm_state = StreamManagementState::new();
+    conn.blocklist_interested = false;
     conn.suppress_sm_record_next_batch = false;
 }
 

@@ -194,6 +194,8 @@ pub(super) struct WsConnState {
     pub(super) carbons_enabled: bool,
     /// Per-stream RFC 6121 roster-interest state restored only on true SM resume.
     pub(super) roster_interested: bool,
+    /// Per-stream XEP-0191 blocklist-interest state restored only on true SM resume.
+    pub(super) blocklist_interested: bool,
     /// Presence availability restored from XEP-0198 detached state.
     pub(super) presence_available: bool,
     pub(super) presence_show: Option<xmpp_parsers::presence::Show>,
@@ -238,6 +240,7 @@ impl WsConnState {
             sm_state: StreamManagementState::new(),
             carbons_enabled: false,
             roster_interested: false,
+            blocklist_interested: false,
             presence_available: false,
             presence_show: None,
             presence_status: None,

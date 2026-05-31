@@ -68,7 +68,7 @@ pub(super) async fn handle_last_activity_iq(
         };
         let blocking_storage = DatabaseBlockingStorage::new(global_db);
         match blocking_storage
-            .is_blocked(&target_bare, &sender_jid.to_bare())
+            .is_blocked_jid(&target_bare, &Jid::from(sender_jid.clone()))
             .await
         {
             Ok(true) => {

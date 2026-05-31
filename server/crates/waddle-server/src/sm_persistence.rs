@@ -186,9 +186,9 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
             INSERT INTO sm_sessions (
                 stream_id, user_id, full_jid, inbound_count, outbound_count,
                 last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms,
-                carbons_enabled, roster_interested, presence_available,
+                carbons_enabled, roster_interested, blocklist_interested, presence_available,
                 presence_show, presence_status, presence_priority, replay_gap_through
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (stream_id) DO UPDATE SET
                 user_id = excluded.user_id,
                 full_jid = excluded.full_jid,
@@ -200,6 +200,7 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
                 max_resume_duration_ms = excluded.max_resume_duration_ms,
                 carbons_enabled = excluded.carbons_enabled,
                 roster_interested = excluded.roster_interested,
+                blocklist_interested = excluded.blocklist_interested,
                 presence_available = excluded.presence_available,
                 presence_show = excluded.presence_show,
                 presence_status = excluded.presence_status,
@@ -218,6 +219,7 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
                 max_resume_duration_ms,
                 i64::from(session.carbons_enabled),
                 i64::from(session.roster_interested),
+                i64::from(session.blocklist_interested),
                 i64::from(session.presence_available),
                 presence_show_str.map(str::to_string),
                 session.presence_status,
@@ -237,7 +239,7 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
             .query(
                 "SELECT stream_id, user_id, full_jid, inbound_count, outbound_count, \
                         last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms, \
-                        carbons_enabled, roster_interested, presence_available, \
+                        carbons_enabled, roster_interested, blocklist_interested, presence_available, \
                         presence_show, presence_status, presence_priority, replay_gap_through \
                  FROM sm_sessions WHERE stream_id = ?",
                 crate::db_params![stream_id.as_str().to_string()],
@@ -384,7 +386,7 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
             .query(
                 "SELECT stream_id, user_id, full_jid, inbound_count, outbound_count, \
                         last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms, \
-                        carbons_enabled, roster_interested, presence_available, \
+                        carbons_enabled, roster_interested, blocklist_interested, presence_available, \
                         presence_show, presence_status, presence_priority, replay_gap_through \
                  FROM sm_sessions WHERE detached_at_ms + max_resume_duration_ms <= ?",
                 crate::db_params![now_ms],
@@ -406,7 +408,7 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
             .query(
                 "SELECT stream_id, user_id, full_jid, inbound_count, outbound_count, \
                         last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms, \
-                        carbons_enabled, roster_interested, presence_available, \
+                        carbons_enabled, roster_interested, blocklist_interested, presence_available, \
                         presence_show, presence_status, presence_priority, replay_gap_through \
                  FROM sm_sessions",
                 (),

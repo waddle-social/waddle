@@ -54,6 +54,7 @@ fn make_test_session_for_jid(stream_id: &str, jid: FullJid) -> DetachedSession {
         detached_at: Instant::now(),
         carbons_enabled: false,
         roster_interested: false,
+        blocklist_interested: false,
         presence_available: false,
         presence_show: None,
         presence_status: None,
@@ -512,6 +513,74 @@ async fn test_claimed_session_remains_writable_for_handoff_fanout() {
 }
 
 #[tokio::test]
+async fn blocklist_interested_detached_resources_include_claimed_sessions_and_record_pushes() {
+    let registry = InMemorySmSessionRegistry::new();
+
+    let mut stored = make_test_session_for_jid(
+        "stream-blocklist-stored",
+        "user@example.com/web".parse().unwrap(),
+    );
+    stored.blocklist_interested = true;
+    let mut claimed = make_test_session_for_jid(
+        "stream-blocklist-claimed",
+        "user@example.com/phone".parse().unwrap(),
+    );
+    claimed.blocklist_interested = true;
+    let claimed_jid = claimed.jid.clone();
+
+    registry.store_session(stored).await.unwrap();
+    registry.store_session(claimed).await.unwrap();
+    registry
+        .claim_session("stream-blocklist-claimed")
+        .await
+        .unwrap()
+        .expect("claim");
+
+    let bare: jid::BareJid = "user@example.com".parse().unwrap();
+    let resources = registry
+        .blocklist_interested_detached_resources_for_user(&bare)
+        .await
+        .unwrap();
+    assert_eq!(resources.len(), 2);
+    assert!(resources.contains(&"user@example.com/web".parse().unwrap()));
+    assert!(resources.contains(&claimed_jid));
+
+    let mut message =
+        xmpp_parsers::message::Message::new(Some(jid::Jid::from(claimed_jid.clone())));
+    message.id = Some(xmpp_parsers::message::Id("block-push-test".to_string()));
+    assert!(
+        registry
+            .record_stanza_for_detached_blocklist_resource(
+                &claimed_jid,
+                &Stanza::Message(message),
+                Utc::now(),
+            )
+            .await
+            .unwrap(),
+        "blocklist push should record to a claimed blocklist-interested session"
+    );
+
+    let completed = registry
+        .complete_claim("stream-blocklist-claimed")
+        .await
+        .unwrap()
+        .expect("completed claim");
+    match completed {
+        SmClaimCompletion::Resumed(completed) => assert!(
+            completed
+                .unacked_stanzas
+                .iter()
+                .any(|entry| entry.stanza_xml.contains("block-push-test")),
+            "completed claim must include blocklist push recorded during handoff"
+        ),
+        SmClaimCompletion::Expired(_) => panic!("claim should still be resumable"),
+        SmClaimCompletion::ReplayWindowTruncated(_) => {
+            panic!("claim should still have a complete replay window")
+        }
+    }
+}
+
+#[tokio::test]
 async fn complete_claim_releases_when_handoff_creates_replay_gap() {
     let registry = InMemorySmSessionRegistry::new();
     let mut session = make_test_session_with_unacked("stream-handoff-gap", Vec::new());
@@ -718,6 +787,7 @@ fn realistic_test_session_for_jid(stream_id: &str, jid: FullJid) -> DetachedSess
         detached_at: Instant::now(),
         carbons_enabled: true,
         roster_interested: true,
+        blocklist_interested: false,
         presence_available: true,
         presence_show: Some(Show::Chat),
         presence_status: Some("online".to_string()),
@@ -897,6 +967,7 @@ async fn restore_skips_and_deletes_expired_sessions() {
         max_resume_duration: Duration::from_secs(60),
         carbons_enabled: false,
         roster_interested: false,
+        blocklist_interested: false,
         presence_available: false,
         presence_show: None,
         presence_status: None,

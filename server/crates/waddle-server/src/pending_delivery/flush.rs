@@ -79,9 +79,9 @@ where
     // `interpret.rs::offline_recipient_pass_blocklist_storage_error_skips_recipient_persistence`:
     // on storage error, abort the flush rather than degrade to an
     // empty blocklist (which would let blocked senders through).
-    let blocklist: Option<std::collections::HashSet<jid::BareJid>> = match blocking_storage {
-        Some(bs) => match bs.list_blocked_jids(recipient).await {
-            Ok(jids) => Some(jids.into_iter().collect()),
+    let blocklist: Option<waddle_xmpp::protocol::Blocklist> = match blocking_storage {
+        Some(bs) => match bs.list_blocked_jid_entries(recipient).await {
+            Ok(jids) => Some(waddle_xmpp::protocol::Blocklist::new(jids)),
             Err(error) => {
                 warn!(
                     error = %error,
@@ -148,9 +148,9 @@ where
         // after the row was queued, drop it. Block is final until
         // the recipient lifts it — `delete_row` not `release_row`.
         if let Some(blocked) = blocklist.as_ref() {
-            let sender_bare = sender_bare_for_payload(&payload);
-            if let Some(sender) = sender_bare {
-                if blocked.contains(&sender) {
+            let sender_jid = sender_jid_for_payload(&payload);
+            if let Some(sender) = sender_jid {
+                if blocked.contains_jid(sender) {
                     debug!(
                         row_id = %row.id,
                         recipient = %recipient,
@@ -331,13 +331,13 @@ where
     }
 }
 
-/// Extract the sender's bare JID from a materialized payload for the
+/// Extract the sender's JID from a materialized payload for the
 /// XEP-0191 §2 step 4 flush-time block re-evaluation. Returns `None`
 /// when the message has no `from` attribute (server-origin replays
 /// have no flesh-and-blood sender to block).
-fn sender_bare_for_payload(payload: &MaterializedPayload) -> Option<jid::BareJid> {
+fn sender_jid_for_payload(payload: &MaterializedPayload) -> Option<&jid::Jid> {
     let message: &xmpp_parsers::message::Message = match payload {
         MaterializedPayload::Archived(m) | MaterializedPayload::Transient(m) => m,
     };
-    message.from.as_ref().map(|jid| jid.to_bare())
+    message.from.as_ref()
 }

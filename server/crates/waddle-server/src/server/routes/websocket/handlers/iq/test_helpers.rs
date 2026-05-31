@@ -19,6 +19,7 @@ pub async fn handle_iq(
             .is_carbons_enabled(jid)
     });
     let mut roster_interested = false;
+    let mut blocklist_interested = false;
 
     let iq = match parse_frame(frame) {
         Ok(InboundFrame::Stanza(stanza)) => match *stanza {
@@ -31,6 +32,7 @@ pub async fn handle_iq(
     let mut conn_state = IqConnState {
         carbons_enabled: &mut carbons_enabled,
         roster_interested: &mut roster_interested,
+        blocklist_interested: &mut blocklist_interested,
         state_machine: None,
     };
     handle_iq_with_conn_state(

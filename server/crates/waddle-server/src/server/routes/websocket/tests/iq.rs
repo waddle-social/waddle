@@ -521,10 +521,12 @@ async fn handle_iq_command_request_requires_ready_phase() {
     let pending_jid: FullJid = "alice@example.com/pending".parse().expect("pending jid");
     let mut carbons_enabled = false;
     let mut roster_interested = false;
+    let mut blocklist_interested = false;
     let frame = r#"<iq xmlns="jabber:client" id="cmd-prebind-1" type="set" to="example.com"><command xmlns="http://jabber.org/protocol/commands" node="test:adhoc-command" action="execute"/></iq>"#;
     let mut conn_state = IqConnState {
         carbons_enabled: &mut carbons_enabled,
         roster_interested: &mut roster_interested,
+        blocklist_interested: &mut blocklist_interested,
         state_machine: None,
     };
     let responses = handle_iq_with_conn_state(

@@ -98,7 +98,7 @@ pub(super) async fn route_full_jid_iq(
     };
     let blocking = DatabaseBlockingStorage::new(state.deps.app_state.db_pool.global().clone());
     match blocking
-        .is_blocked(&target.to_bare(), &sender_jid.to_bare())
+        .is_blocked_jid(&target.to_bare(), &Jid::from(sender_jid.clone()))
         .await
     {
         Ok(true) => {

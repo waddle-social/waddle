@@ -1,13 +1,32 @@
 use super::*;
+use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType};
+
+fn jid(value: &str) -> Jid {
+    value.parse().expect("valid jid")
+}
+
+fn blocking_item(value: &str) -> Element {
+    Element::builder("item", NS_BLOCKING)
+        .attr(minidom::rxml::xml_ncname!("jid").to_owned(), value)
+        .build()
+}
+
+fn set_iq(id: &str, payload: Element) -> Iq {
+    Iq::Set {
+        from: None,
+        to: None,
+        id: id.to_string(),
+        payload,
+    }
+}
 
 #[test]
 fn test_is_blocking_query_get_blocklist() {
-    let blocklist_elem = Element::builder("blocklist", NS_BLOCKING).build();
     let iq = Iq::Get {
         from: None,
         to: None,
         id: "blocklist-1".to_string(),
-        payload: blocklist_elem,
+        payload: Element::builder("blocklist", NS_BLOCKING).build(),
     };
 
     assert!(is_blocking_query(&iq));
@@ -18,22 +37,12 @@ fn test_is_blocking_query_get_blocklist() {
 
 #[test]
 fn test_is_blocking_query_block() {
-    let block_elem = Element::builder("block", NS_BLOCKING)
-        .append(
-            Element::builder("item", NS_BLOCKING)
-                .attr(
-                    minidom::rxml::xml_ncname!("jid").to_owned(),
-                    "romeo@montague.net",
-                )
-                .build(),
-        )
-        .build();
-    let iq = Iq::Set {
-        from: None,
-        to: None,
-        id: "block-1".to_string(),
-        payload: block_elem,
-    };
+    let iq = set_iq(
+        "block-1",
+        Element::builder("block", NS_BLOCKING)
+            .append(blocking_item("romeo@montague.net"))
+            .build(),
+    );
 
     assert!(is_blocking_query(&iq));
     assert!(!is_blocklist_get(&iq));
@@ -43,22 +52,12 @@ fn test_is_blocking_query_block() {
 
 #[test]
 fn test_is_blocking_query_unblock() {
-    let unblock_elem = Element::builder("unblock", NS_BLOCKING)
-        .append(
-            Element::builder("item", NS_BLOCKING)
-                .attr(
-                    minidom::rxml::xml_ncname!("jid").to_owned(),
-                    "romeo@montague.net",
-                )
-                .build(),
-        )
-        .build();
-    let iq = Iq::Set {
-        from: None,
-        to: None,
-        id: "unblock-1".to_string(),
-        payload: unblock_elem,
-    };
+    let iq = set_iq(
+        "unblock-1",
+        Element::builder("unblock", NS_BLOCKING)
+            .append(blocking_item("romeo@montague.net"))
+            .build(),
+    );
 
     assert!(is_blocking_query(&iq));
     assert!(!is_blocklist_get(&iq));
@@ -68,12 +67,11 @@ fn test_is_blocking_query_unblock() {
 
 #[test]
 fn test_is_not_blocking_query_wrong_ns() {
-    let elem = Element::builder("blocklist", "wrong:namespace").build();
     let iq = Iq::Get {
         from: None,
         to: None,
         id: "test-1".to_string(),
-        payload: elem,
+        payload: Element::builder("blocklist", "wrong:namespace").build(),
     };
 
     assert!(!is_blocking_query(&iq));
@@ -81,12 +79,11 @@ fn test_is_not_blocking_query_wrong_ns() {
 
 #[test]
 fn test_parse_blocklist_get() {
-    let blocklist_elem = Element::builder("blocklist", NS_BLOCKING).build();
     let iq = Iq::Get {
         from: None,
         to: None,
         id: "blocklist-1".to_string(),
-        payload: blocklist_elem,
+        payload: Element::builder("blocklist", NS_BLOCKING).build(),
     };
 
     let request = parse_blocking_request(&iq).unwrap();
@@ -94,138 +91,235 @@ fn test_parse_blocklist_get() {
 }
 
 #[test]
-fn test_parse_block_request() {
-    let block_elem = Element::builder("block", NS_BLOCKING)
-        .append(
-            Element::builder("item", NS_BLOCKING)
-                .attr(
-                    minidom::rxml::xml_ncname!("jid").to_owned(),
-                    "romeo@montague.net",
-                )
-                .build(),
-        )
-        .append(
-            Element::builder("item", NS_BLOCKING)
-                .attr(
-                    minidom::rxml::xml_ncname!("jid").to_owned(),
-                    "iago@shakespeare.lit",
-                )
-                .build(),
-        )
-        .build();
-    let iq = Iq::Set {
-        from: None,
-        to: None,
-        id: "block-1".to_string(),
-        payload: block_elem,
-    };
+fn test_parse_block_request_uses_typed_jids() {
+    let iq = set_iq(
+        "block-1",
+        Element::builder("block", NS_BLOCKING)
+            .append(blocking_item("romeo@montague.net"))
+            .append(blocking_item("iago@shakespeare.lit"))
+            .build(),
+    );
 
-    let request = parse_blocking_request(&iq).unwrap();
-    match request {
-        BlockingRequest::Block(jids) => {
-            assert_eq!(jids.len(), 2);
-            assert!(jids.contains(&"romeo@montague.net".to_string()));
-            assert!(jids.contains(&"iago@shakespeare.lit".to_string()));
-        }
-        _ => panic!("Expected Block request"),
-    }
+    assert_eq!(
+        parse_blocking_request(&iq).unwrap(),
+        BlockingRequest::Block(vec![jid("romeo@montague.net"), jid("iago@shakespeare.lit")])
+    );
+}
+
+#[test]
+fn test_parse_block_request_accepts_bare_full_and_domain_jids() {
+    let iq = set_iq(
+        "block-typed-jids",
+        Element::builder("block", NS_BLOCKING)
+            .append(blocking_item("romeo@montague.net"))
+            .append(blocking_item("romeo@montague.net/balcony"))
+            .append(blocking_item("montague.net"))
+            .append(blocking_item("montague.net/courtyard"))
+            .build(),
+    );
+
+    assert_eq!(
+        parse_blocking_request(&iq).unwrap(),
+        BlockingRequest::Block(vec![
+            jid("romeo@montague.net"),
+            jid("romeo@montague.net/balcony"),
+            jid("montague.net"),
+            jid("montague.net/courtyard")
+        ])
+    );
+}
+
+#[test]
+fn test_parse_block_request_rejects_malformed_jid() {
+    let iq = set_iq(
+        "block-bad-jid",
+        Element::builder("block", NS_BLOCKING)
+            .append(blocking_item("@@"))
+            .build(),
+    );
+
+    assert_eq!(
+        parse_blocking_request(&iq).unwrap_err(),
+        BlockingError::BadRequest(BlockingBadRequest::MalformedItemJid)
+    );
+}
+
+#[test]
+fn test_parse_block_request_rejects_missing_jid_attribute() {
+    let iq = set_iq(
+        "block-missing-jid",
+        Element::builder("block", NS_BLOCKING)
+            .append(Element::builder("item", NS_BLOCKING).build())
+            .build(),
+    );
+
+    assert_eq!(
+        parse_blocking_request(&iq).unwrap_err(),
+        BlockingError::BadRequest(BlockingBadRequest::MissingItemJid)
+    );
+}
+
+#[test]
+fn test_parse_block_request_rejects_item_text() {
+    let iq = set_iq(
+        "block-item-text",
+        Element::builder("block", NS_BLOCKING)
+            .append(
+                Element::builder("item", NS_BLOCKING)
+                    .attr(
+                        minidom::rxml::xml_ncname!("jid").to_owned(),
+                        "romeo@montague.net",
+                    )
+                    .append("not empty")
+                    .build(),
+            )
+            .build(),
+    );
+
+    assert_eq!(
+        parse_blocking_request(&iq).unwrap_err(),
+        BlockingError::BadRequest(BlockingBadRequest::UnexpectedChild)
+    );
+}
+
+#[test]
+fn test_parse_block_request_rejects_item_whitespace() {
+    let iq = set_iq(
+        "block-item-whitespace",
+        Element::builder("block", NS_BLOCKING)
+            .append(
+                Element::builder("item", NS_BLOCKING)
+                    .attr(
+                        minidom::rxml::xml_ncname!("jid").to_owned(),
+                        "romeo@montague.net",
+                    )
+                    .append(" ")
+                    .build(),
+            )
+            .build(),
+    );
+
+    assert_eq!(
+        parse_blocking_request(&iq).unwrap_err(),
+        BlockingError::BadRequest(BlockingBadRequest::UnexpectedChild)
+    );
+}
+
+#[test]
+fn test_parse_block_request_rejects_item_child() {
+    let iq = set_iq(
+        "block-item-child",
+        Element::builder("block", NS_BLOCKING)
+            .append(
+                Element::builder("item", NS_BLOCKING)
+                    .attr(
+                        minidom::rxml::xml_ncname!("jid").to_owned(),
+                        "romeo@montague.net",
+                    )
+                    .append(Element::builder("extra", NS_BLOCKING).build())
+                    .build(),
+            )
+            .build(),
+    );
+
+    assert_eq!(
+        parse_blocking_request(&iq).unwrap_err(),
+        BlockingError::BadRequest(BlockingBadRequest::UnexpectedChild)
+    );
+}
+
+#[test]
+fn test_parse_unblock_rejects_unknown_child_instead_of_unblock_all() {
+    let iq = set_iq(
+        "unblock-bad-child",
+        Element::builder("unblock", NS_BLOCKING)
+            .append(Element::builder("foo", NS_BLOCKING).build())
+            .build(),
+    );
+
+    assert_eq!(
+        parse_blocking_request(&iq).unwrap_err(),
+        BlockingError::BadRequest(BlockingBadRequest::UnexpectedChild)
+    );
+}
+
+#[test]
+fn test_parse_unblock_rejects_wrong_namespace_item_instead_of_unblock_all() {
+    let iq = set_iq(
+        "unblock-wrong-ns-item",
+        Element::builder("unblock", NS_BLOCKING)
+            .append(
+                Element::builder("item", "urn:example:wrong")
+                    .attr(
+                        minidom::rxml::xml_ncname!("jid").to_owned(),
+                        "romeo@montague.net",
+                    )
+                    .build(),
+            )
+            .build(),
+    );
+
+    assert_eq!(
+        parse_blocking_request(&iq).unwrap_err(),
+        BlockingError::BadRequest(BlockingBadRequest::UnexpectedChild)
+    );
 }
 
 #[test]
 fn test_parse_unblock_request() {
-    let unblock_elem = Element::builder("unblock", NS_BLOCKING)
-        .append(
-            Element::builder("item", NS_BLOCKING)
-                .attr(
-                    minidom::rxml::xml_ncname!("jid").to_owned(),
-                    "romeo@montague.net",
-                )
-                .build(),
-        )
-        .build();
-    let iq = Iq::Set {
-        from: None,
-        to: None,
-        id: "unblock-1".to_string(),
-        payload: unblock_elem,
-    };
+    let iq = set_iq(
+        "unblock-1",
+        Element::builder("unblock", NS_BLOCKING)
+            .append(blocking_item("romeo@montague.net"))
+            .build(),
+    );
 
-    let request = parse_blocking_request(&iq).unwrap();
-    match request {
-        BlockingRequest::Unblock(jids) => {
-            assert_eq!(jids.len(), 1);
-            assert_eq!(jids[0], "romeo@montague.net");
-        }
-        _ => panic!("Expected Unblock request"),
-    }
+    assert_eq!(
+        parse_blocking_request(&iq).unwrap(),
+        BlockingRequest::Unblock(vec![jid("romeo@montague.net")])
+    );
 }
 
 #[test]
 fn test_parse_unblock_all_request() {
-    let unblock_elem = Element::builder("unblock", NS_BLOCKING).build();
-    let iq = Iq::Set {
-        from: None,
-        to: None,
-        id: "unblock-all-1".to_string(),
-        payload: unblock_elem,
-    };
+    let iq = set_iq(
+        "unblock-all-1",
+        Element::builder("unblock", NS_BLOCKING).build(),
+    );
 
-    let request = parse_blocking_request(&iq).unwrap();
-    match request {
-        BlockingRequest::Unblock(jids) => {
-            assert!(jids.is_empty());
-        }
-        _ => panic!("Expected Unblock request"),
-    }
+    assert_eq!(
+        parse_blocking_request(&iq).unwrap(),
+        BlockingRequest::Unblock(Vec::new())
+    );
 }
 
 #[test]
 fn test_parse_empty_block_request_error() {
-    let block_elem = Element::builder("block", NS_BLOCKING).build();
-    let iq = Iq::Set {
-        from: None,
-        to: None,
-        id: "block-empty-1".to_string(),
-        payload: block_elem,
-    };
+    let iq = set_iq(
+        "block-empty-1",
+        Element::builder("block", NS_BLOCKING).build(),
+    );
 
-    let result = parse_blocking_request(&iq);
-    assert!(result.is_err());
-    match result.unwrap_err() {
-        BlockingError::BadRequest(msg) => {
-            assert!(msg.contains("at least one item"));
-        }
-        _ => panic!("Expected BadRequest error"),
-    }
+    assert_eq!(
+        parse_blocking_request(&iq).unwrap_err(),
+        BlockingError::BadRequest(BlockingBadRequest::MissingBlockItem)
+    );
 }
 
 #[test]
 fn test_build_blocklist_response() {
-    let blocklist_elem = Element::builder("blocklist", NS_BLOCKING).build();
     let original_iq = Iq::Get {
         from: Some("user@example.com".parse().unwrap()),
         to: Some("server.example.com".parse().unwrap()),
         id: "blocklist-get-1".to_string(),
-        payload: blocklist_elem,
+        payload: Element::builder("blocklist", NS_BLOCKING).build(),
     };
-
-    let blocked_jids = vec![
-        "romeo@montague.net".to_string(),
-        "iago@shakespeare.lit".to_string(),
-    ];
+    let blocked_jids = vec![jid("romeo@montague.net"), jid("iago@shakespeare.lit")];
 
     let response = build_blocklist_response(&original_iq, &blocked_jids);
 
     assert_eq!(response.id(), "blocklist-get-1");
-    assert!(matches!(
-        response,
-        xmpp_parsers::iq::Iq::Result {
-            payload: Some(_),
-            ..
-        }
-    ));
-
-    if let xmpp_parsers::iq::Iq::Result {
+    if let Iq::Result {
         payload: Some(elem),
         ..
     } = &response
@@ -237,8 +331,7 @@ fn test_build_blocklist_response() {
         assert_eq!(items.len(), 2);
 
         let jids: Vec<_> = items.iter().filter_map(|item| item.attr("jid")).collect();
-        assert!(jids.contains(&"romeo@montague.net"));
-        assert!(jids.contains(&"iago@shakespeare.lit"));
+        assert_eq!(jids, vec!["romeo@montague.net", "iago@shakespeare.lit"]);
     } else {
         panic!("Expected Result with blocklist element");
     }
@@ -248,10 +341,7 @@ fn test_build_blocklist_response() {
 async fn in_memory_blocking_storage_preserves_stored_jid_forms() {
     let storage = InMemoryBlockingStorage::new();
     let user: BareJid = "alice@example.com".parse().unwrap();
-    let entries: Vec<Jid> = vec![
-        "bob@example.com/phone".parse().unwrap(),
-        "blocked.example.com".parse().unwrap(),
-    ];
+    let entries = vec![jid("bob@example.com/phone"), jid("blocked.example.com")];
 
     storage.set_blocklist_jids(user.clone(), entries.clone());
 
@@ -271,18 +361,17 @@ async fn in_memory_blocking_storage_preserves_stored_jid_forms() {
 
 #[test]
 fn test_build_empty_blocklist_response() {
-    let blocklist_elem = Element::builder("blocklist", NS_BLOCKING).build();
     let original_iq = Iq::Get {
         from: Some("user@example.com".parse().unwrap()),
         to: None,
         id: "blocklist-get-2".to_string(),
-        payload: blocklist_elem,
+        payload: Element::builder("blocklist", NS_BLOCKING).build(),
     };
 
     let response = build_blocklist_response(&original_iq, &[]);
 
     assert_eq!(response.id(), "blocklist-get-2");
-    if let xmpp_parsers::iq::Iq::Result {
+    if let Iq::Result {
         payload: Some(elem),
         ..
     } = &response
@@ -296,30 +385,24 @@ fn test_build_empty_blocklist_response() {
 
 #[test]
 fn test_build_blocking_success() {
-    let block_elem = Element::builder("block", NS_BLOCKING).build();
-    let original_iq = Iq::Set {
-        from: Some("user@example.com".parse().unwrap()),
-        to: None,
-        id: "block-set-1".to_string(),
-        payload: block_elem,
-    };
+    let original_iq = set_iq(
+        "block-set-1",
+        Element::builder("block", NS_BLOCKING).build(),
+    );
 
     let response = build_blocking_success(&original_iq);
 
     assert_eq!(response.id(), "block-set-1");
-    assert!(matches!(
-        response,
-        xmpp_parsers::iq::Iq::Result { payload: None, .. }
-    ));
+    assert!(matches!(response, Iq::Result { payload: None, .. }));
 }
 
 #[test]
 fn test_build_block_push() {
-    let blocked_jids = vec!["romeo@montague.net".to_string()];
-    let to: jid::Jid = "user@example.com/resource".parse().expect("valid jid");
-    let push = build_block_push(&to, &blocked_jids);
+    let blocked_jids = vec![jid("romeo@montague.net")];
+    let to: Jid = "user@example.com/resource".parse().expect("valid jid");
+    let push = build_block_push(&to, &blocked_jids).expect("non-empty block push");
 
-    assert!(push.id().starts_with("push-block-"));
+    assert!(uuid::Uuid::parse_str(push.id()).is_ok());
     if let Iq::Set { payload: elem, .. } = &push {
         assert_eq!(elem.name(), "block");
         assert_eq!(elem.ns(), NS_BLOCKING);
@@ -332,12 +415,23 @@ fn test_build_block_push() {
 }
 
 #[test]
+fn test_build_block_push_rejects_empty_items() {
+    let to: Jid = "user@example.com/resource".parse().expect("valid jid");
+    assert_eq!(
+        build_block_push(&to, &[]),
+        Err(BlockingError::BadRequest(
+            BlockingBadRequest::MissingBlockItem
+        ))
+    );
+}
+
+#[test]
 fn test_build_unblock_push() {
-    let unblocked_jids = vec!["romeo@montague.net".to_string()];
-    let to: jid::Jid = "user@example.com/resource".parse().expect("valid jid");
+    let unblocked_jids = vec![jid("romeo@montague.net")];
+    let to: Jid = "user@example.com/resource".parse().expect("valid jid");
     let push = build_unblock_push(&to, &unblocked_jids);
 
-    assert!(push.id().starts_with("push-unblock-"));
+    assert!(uuid::Uuid::parse_str(push.id()).is_ok());
     if let Iq::Set { payload: elem, .. } = &push {
         assert_eq!(elem.name(), "unblock");
         assert_eq!(elem.ns(), NS_BLOCKING);
@@ -350,31 +444,69 @@ fn test_build_unblock_push() {
 }
 
 #[test]
-fn test_build_blocking_error() {
+fn test_build_unblock_all_push_is_empty_unblock() {
+    let to: Jid = "user@example.com/resource".parse().expect("valid jid");
+    let push = build_unblock_push(&to, &[]);
+
+    if let Iq::Set { payload: elem, .. } = &push {
+        assert_eq!(elem.name(), "unblock");
+        assert_eq!(elem.ns(), NS_BLOCKING);
+        assert!(elem.children().next().is_none());
+    } else {
+        panic!("Expected Set with unblock element");
+    }
+}
+
+#[test]
+fn test_build_blocking_error_is_typed_iq_error() {
+    let original_iq = set_iq("error-1", Element::builder("block", NS_BLOCKING).build());
+
     let error_response = build_blocking_error(
-        "error-1",
-        &BlockingError::BadRequest("Invalid JID".to_string()),
+        &original_iq,
+        &BlockingError::BadRequest(BlockingBadRequest::MissingBlockItem),
     );
 
-    assert!(error_response.contains("type='error'"));
-    assert!(error_response.contains("id='error-1'"));
-    assert!(error_response.contains("<bad-request"));
-    assert!(error_response.contains("Invalid JID"));
+    if let Iq::Error { error, payload, .. } = error_response {
+        assert_eq!(error.type_, ErrorType::Modify);
+        assert_eq!(error.defined_condition, DefinedCondition::BadRequest);
+        assert!(payload.is_some());
+    } else {
+        panic!("Expected typed IQ error");
+    }
+}
+
+#[test]
+fn test_blocking_error_kind_mappings() {
+    assert_eq!(
+        BlockingError::NotAuthorized.stanza_error_kind(),
+        (ErrorType::Auth, DefinedCondition::NotAuthorized)
+    );
+    assert_eq!(
+        BlockingError::InternalError.stanza_error_kind(),
+        (ErrorType::Wait, DefinedCondition::InternalServerError)
+    );
+    assert_eq!(
+        BlockingError::ItemNotFound.stanza_error_kind(),
+        (ErrorType::Cancel, DefinedCondition::ItemNotFound)
+    );
 }
 
 #[test]
 fn test_blocking_error_display() {
     assert_eq!(
-        BlockingError::BadRequest("test".to_string()).to_string(),
-        "Bad request: test"
+        BlockingError::BadRequest(BlockingBadRequest::MissingBlockItem).to_string(),
+        "Bad request: block request must contain at least one item"
     );
     assert_eq!(BlockingError::NotAuthorized.to_string(), "Not authorized");
-    assert_eq!(
-        BlockingError::InternalError("err".to_string()).to_string(),
-        "Internal error: err"
-    );
-    assert_eq!(
-        BlockingError::ItemNotFound("jid".to_string()).to_string(),
-        "Item not found: jid"
-    );
+    assert_eq!(BlockingError::InternalError.to_string(), "Internal error");
+    assert_eq!(BlockingError::ItemNotFound.to_string(), "Item not found");
+}
+
+#[test]
+fn xep0191_module_has_no_manual_error_xml_or_escape_helper() {
+    let source = include_str!("../xep0191.rs");
+
+    assert!(!source.contains("escape_xml"));
+    assert!(!source.contains("pub fn build_blocking_error(request_id: &str"));
+    assert!(!source.contains("<iq type='error'"));
 }

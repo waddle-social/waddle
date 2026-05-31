@@ -87,8 +87,8 @@ pub(super) async fn roster_caps_fan_out(
     // not via a round-trip per check (PR #439 review). The
     // contact→owner direction still needs a per-contact query
     // because we don't have the contacts' blocklists pre-loaded.
-    let owner_blocklist: HashSet<BareJid> = match blocking.list_blocked_jids(owner).await {
-        Ok(list) => list.into_iter().collect(),
+    let owner_blocklist = match blocking.list_blocked_jid_entries(owner).await {
+        Ok(list) => waddle_xmpp::protocol::Blocklist::new(list),
         Err(error) => {
             warn!(
                 error = %error,
@@ -104,12 +104,20 @@ pub(super) async fn roster_caps_fan_out(
     for contact_bare in presence_subscribers {
         // XEP-0191 §2: do not deliver if either party blocked the other.
         if owner_blocklist.contains(&contact_bare)
-            || is_blocked(&blocking, &contact_bare, owner).await
+            || is_blocked_jid(&blocking, &contact_bare, ctx.from).await
         {
             continue;
         }
 
-        deliver_to_user_resources(state, &contact_bare, ctx, already_delivered, &mut metrics).await;
+        deliver_to_user_resources(
+            state,
+            &contact_bare,
+            ctx,
+            Some(&owner_blocklist),
+            already_delivered,
+            &mut metrics,
+        )
+        .await;
     }
 
     metrics
@@ -130,7 +138,7 @@ pub(super) async fn owner_self_caps_fan_out(
     already_delivered: &mut HashSet<FullJid>,
 ) -> FanOutMetrics {
     let mut metrics = FanOutMetrics::default();
-    deliver_to_user_resources(state, owner, ctx, already_delivered, &mut metrics).await;
+    deliver_to_user_resources(state, owner, ctx, None, already_delivered, &mut metrics).await;
     metrics
 }
 
@@ -158,6 +166,7 @@ async fn deliver_to_user_resources(
     state: &WebSocketState,
     target: &BareJid,
     ctx: &CapsFanOutCtx<'_>,
+    blocked_by_owner: Option<&waddle_xmpp::protocol::Blocklist>,
     already_delivered: &mut HashSet<FullJid>,
     metrics: &mut FanOutMetrics,
 ) {
@@ -171,6 +180,11 @@ async fn deliver_to_user_resources(
         .collect();
 
     for resource in resources {
+        if blocked_by_owner
+            .is_some_and(|blocklist| blocklist.contains_jid(&Jid::from(resource.clone())))
+        {
+            continue;
+        }
         if already_delivered.contains(&resource) {
             continue;
         }
@@ -245,12 +259,12 @@ async fn deliver_to_user_resources(
     }
 }
 
-async fn is_blocked(
+async fn is_blocked_jid(
     storage: &DatabaseBlockingStorage,
     recipient: &BareJid,
-    sender: &BareJid,
+    sender: &Jid,
 ) -> bool {
-    match storage.is_blocked(recipient, sender).await {
+    match storage.is_blocked_jid(recipient, sender).await {
         Ok(blocked) => blocked,
         Err(error) => {
             warn!(

@@ -1,6 +1,7 @@
 pub struct IqConnState<'a> {
     pub carbons_enabled: &'a mut bool,
     pub roster_interested: &'a mut bool,
+    pub blocklist_interested: &'a mut bool,
     /// Per-connection [`waddle_xmpp::protocol::XmppStateMachine`].
     /// Required so XEP-0191 block/unblock IQs can mirror their
     /// effect into the dispatcher's session-state snapshot — without

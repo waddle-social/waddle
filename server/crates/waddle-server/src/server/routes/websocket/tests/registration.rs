@@ -169,6 +169,7 @@ async fn register_bound_connection_after_frame_completes_pending_resume_claim() 
             detached_at: std::time::Instant::now(),
             carbons_enabled: true,
             roster_interested: true,
+            blocklist_interested: false,
             presence_available: true,
             presence_show: Some(xmpp_parsers::presence::Show::Chat),
             presence_status: Some("back".to_string()),
@@ -271,6 +272,106 @@ async fn register_bound_connection_after_frame_completes_pending_resume_claim() 
 }
 
 #[tokio::test]
+async fn replay_gap_during_resume_finalization_clears_blocklist_interest_for_fresh_bind() {
+    use waddle_xmpp::stream_management::{
+        DetachedSession, SmSessionRegistry, DEFAULT_MAX_UNACKED_QUEUE_SIZE,
+    };
+
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    let stream_id = "registration-resume-gap-stream".to_string();
+    let session = create_test_session(state.as_ref(), "alice").await;
+
+    state
+        .deps
+        .protocol
+        .resumable_sessions
+        .insert(stream_id.clone(), session.clone());
+    state
+        .deps
+        .protocol
+        .sm_session_registry
+        .store_session(DetachedSession {
+            stream_id: stream_id.clone(),
+            user_id: session.user_id.clone(),
+            jid: jid.clone(),
+            inbound_count: 4,
+            outbound_count: 0,
+            last_acked: 0,
+            replay_gap_through: None,
+            unacked_stanzas: Vec::new(),
+            max_resume_time: Some(300),
+            detached_at: std::time::Instant::now(),
+            carbons_enabled: false,
+            roster_interested: false,
+            blocklist_interested: true,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+        })
+        .await
+        .expect("store detached session");
+
+    conn.phase = ConnectionPhase::authenticated(&jid);
+    conn.authenticated_session = Some(session);
+    let resume_frame = element_to_xml(
+        Element::builder("resume", SM_NS)
+            .attr(
+                minidom::rxml::xml_ncname!("previd").to_owned(),
+                stream_id.as_str(),
+            )
+            .attr(minidom::rxml::xml_ncname!("h").to_owned(), "0")
+            .build(),
+    );
+    let resume_responses =
+        handle_xmpp_frame(&resume_frame, "example.com", state.as_ref(), &mut conn).await;
+
+    assert!(!resume_responses.is_empty());
+    assert!(
+        conn.blocklist_interested,
+        "resume should restore the detached stream's blocklist interest before finalization"
+    );
+
+    for index in 0..=DEFAULT_MAX_UNACKED_QUEUE_SIZE {
+        let mut message = xmpp_parsers::message::Message::new(None::<jid::Jid>);
+        message.id = Some(xmpp_parsers::message::Id(format!("gap-{index}")));
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .record_stanza_for_detached_bound_resource(
+                &jid,
+                &Stanza::Message(message),
+                chrono::Utc::now(),
+            )
+            .await
+            .expect("record into claimed session");
+    }
+
+    let (tx, _rx) = mpsc::channel::<OutboundStanza>(1);
+    let mut pending_tx = Some(tx);
+    let result = register_bound_connection_after_frame(
+        state.as_ref(),
+        "example.com",
+        &mut conn,
+        &mut pending_tx,
+    )
+    .await;
+
+    assert!(matches!(
+        result,
+        RegistrationAfterFrame::Registered(SmRegistrationFinalization::ReplaceWithFailed(_))
+    ));
+    assert!(matches!(conn.phase, ConnectionPhase::Authenticated { .. }));
+    assert!(
+        !conn.blocklist_interested,
+        "failed resume reset must not make the following fresh bind blocklist-interested"
+    );
+}
+
+#[tokio::test]
 async fn ensure_state_machine_seeds_blocklist_from_database_at_bind() {
     // #229 PR13: bind-time SM seeding from
     // `DatabaseBlockingStorage`. Persist a single blocked entry
@@ -293,7 +394,7 @@ async fn ensure_state_machine_seeds_blocklist_from_database_at_bind() {
     // Seed persistence with one entry.
     let storage = DatabaseBlockingStorage::new(state.deps.app_state.db_pool.global().clone());
     storage
-        .add_blocks(&alice_bare, &[blocked_bare.to_string()])
+        .add_blocks(&alice_bare, &[blocked_bare.clone().into()])
         .await
         .expect("add_blocks");
 
@@ -302,7 +403,8 @@ async fn ensure_state_machine_seeds_blocklist_from_database_at_bind() {
         .await
         .expect("blocklist load succeeds when storage is healthy");
     let loaded: Vec<_> = blocklist.iter().cloned().collect();
-    assert_eq!(loaded, vec![blocked_bare.clone()]);
+    let expected: jid::Jid = blocked_bare.clone().into();
+    assert_eq!(loaded, vec![expected]);
 
     // Build a probe-only dispatcher so the assertion isolates
     // the SM seeding behaviour from any side effects of the

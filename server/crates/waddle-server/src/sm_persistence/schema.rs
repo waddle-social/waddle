@@ -43,6 +43,7 @@ pub(super) async fn initialize(storage: &DatabaseSmPersistence) -> Result<(), Sm
                 max_resume_duration_ms {bigint} NOT NULL,
                 carbons_enabled INTEGER NOT NULL,
                 roster_interested INTEGER NOT NULL,
+                blocklist_interested INTEGER NOT NULL DEFAULT 0,
                 presence_available INTEGER NOT NULL,
                 presence_show TEXT,
                 presence_status TEXT,
@@ -75,6 +76,12 @@ pub(super) async fn initialize(storage: &DatabaseSmPersistence) -> Result<(), Sm
         storage,
         "sm_sessions",
         &format!("replay_gap_through {bigint}"),
+    )
+    .await?;
+    add_column_if_missing(
+        storage,
+        "sm_sessions",
+        "blocklist_interested INTEGER NOT NULL DEFAULT 0",
     )
     .await?;
     widen_existing_postgres_i64_columns(storage).await?;

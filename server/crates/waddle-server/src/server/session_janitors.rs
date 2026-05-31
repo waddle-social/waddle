@@ -107,7 +107,7 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                     .deps
                     .protocol
                     .blocking_storage
-                    .list_blocked_jids(&session.jid.to_bare())
+                    .list_blocked_jid_entries(&session.jid.to_bare())
                     .await
                 {
                     Ok(jids) => waddle_xmpp::protocol::session_state::Blocklist::new(jids),
@@ -735,7 +735,7 @@ pub(crate) fn spawn_graceful_shutdown_drain(
                     .deps
                     .protocol
                     .blocking_storage
-                    .list_blocked_jids(&session.jid.to_bare())
+                    .list_blocked_jid_entries(&session.jid.to_bare())
                     .await
                 {
                     Ok(jids) => waddle_xmpp::protocol::session_state::Blocklist::new(jids),

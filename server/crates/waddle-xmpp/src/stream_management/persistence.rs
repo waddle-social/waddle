@@ -72,6 +72,7 @@ pub struct PersistedSession {
     pub max_resume_duration: Duration,
     pub carbons_enabled: bool,
     pub roster_interested: bool,
+    pub blocklist_interested: bool,
     pub presence_available: bool,
     pub presence_show: Option<Show>,
     pub presence_status: Option<String>,

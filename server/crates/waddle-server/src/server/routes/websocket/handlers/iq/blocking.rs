@@ -7,6 +7,7 @@ pub(super) async fn handle_blocking_iq(
     sender_jid: Option<&FullJid>,
     response_from: Option<&str>,
     response_to: Option<&str>,
+    blocklist_interested: &mut bool,
     state_machine: Option<&mut waddle_xmpp::protocol::XmppStateMachine>,
 ) -> Vec<String> {
     let Some(sender_jid) = sender_jid else {
@@ -46,10 +47,18 @@ pub(super) async fn handle_blocking_iq(
 
     let response = match request {
         waddle_xmpp::xep::xep0191::BlockingRequest::GetBlocklist => {
-            return match storage.get_blocklist(&user_bare).await {
-                Ok(blocked) => vec![iq_to_xml(
-                    waddle_xmpp::xep::xep0191::build_blocklist_response(iq, &blocked),
-                )],
+            return match storage.list_blocked_jid_entries(&user_bare).await {
+                Ok(blocked) => {
+                    state
+                        .deps
+                        .protocol
+                        .connection_registry
+                        .mark_blocklist_interested(sender_jid);
+                    *blocklist_interested = true;
+                    vec![iq_to_xml(
+                        waddle_xmpp::xep::xep0191::build_blocklist_response(iq, &blocked),
+                    )]
+                }
                 Err(error) => {
                     warn!(jid = %user_bare, error = %error, "Failed to load blocklist");
                     vec![build_iq_error_xml_typed(
@@ -71,15 +80,16 @@ pub(super) async fn handle_blocking_iq(
                     internal_server_error_iq_error("Internal server error."),
                 )];
             }
-            send_blocking_presence_side_effects(state, &user_bare, &jids, true).await;
+            send_blocking_presence_side_effects(state, &user_bare, &jids, true, None).await;
             send_blocking_pushes(state, &user_bare, true, &jids).await;
             vec![iq_to_xml(
                 waddle_xmpp::xep::xep0191::build_blocking_success(iq),
             )]
         }
         waddle_xmpp::xep::xep0191::BlockingRequest::Unblock(jids) => {
-            let unblocked_jids = if jids.is_empty() {
-                let current = match storage.get_blocklist(&user_bare).await {
+            let unblock_all = jids.is_empty();
+            let unblocked_jids = if unblock_all {
+                let current = match storage.list_blocked_jid_entries(&user_bare).await {
                     Ok(current) => current,
                     Err(error) => {
                         warn!(jid = %user_bare, error = %error, "Failed to load blocklist before unblock-all");
@@ -113,8 +123,31 @@ pub(super) async fn handle_blocking_iq(
                 }
                 jids
             };
-            send_blocking_presence_side_effects(state, &user_bare, &unblocked_jids, false).await;
-            send_blocking_pushes(state, &user_bare, false, &unblocked_jids).await;
+            let remaining_blocklist = if unblock_all {
+                Some(waddle_xmpp::protocol::Blocklist::empty())
+            } else {
+                match storage.list_blocked_jid_entries(&user_bare).await {
+                    Ok(entries) => Some(waddle_xmpp::protocol::Blocklist::new(entries)),
+                    Err(error) => {
+                        warn!(jid = %user_bare, error = %error, "Failed to load blocklist after unblock for presence side effects");
+                        None
+                    }
+                }
+            };
+            send_blocking_presence_side_effects(
+                state,
+                &user_bare,
+                &unblocked_jids,
+                false,
+                remaining_blocklist.as_ref(),
+            )
+            .await;
+            let push_jids = if unblock_all {
+                &[][..]
+            } else {
+                unblocked_jids.as_slice()
+            };
+            send_blocking_pushes(state, &user_bare, false, push_jids).await;
             vec![iq_to_xml(
                 waddle_xmpp::xep::xep0191::build_blocking_success(iq),
             )]
@@ -133,7 +166,7 @@ pub(super) async fn handle_blocking_iq(
     // reload, while the request itself already succeeded for the
     // client.
     if let Some(sm) = state_machine {
-        match storage.list_blocked_jids(&user_bare).await {
+        match storage.list_blocked_jid_entries(&user_bare).await {
             Ok(jids) => {
                 sm.set_blocklist(waddle_xmpp::protocol::Blocklist::new(jids));
             }
@@ -154,9 +187,18 @@ pub(super) async fn handle_blocking_iq(
 async fn send_blocking_presence_side_effects(
     state: &WebSocketState,
     user_bare: &BareJid,
-    jids: &[String],
+    jids: &[Jid],
     blocked: bool,
+    remaining_blocklist: Option<&waddle_xmpp::protocol::Blocklist>,
 ) {
+    if !blocked && remaining_blocklist.is_none() {
+        warn!(
+            jid = %user_bare,
+            "Skipping XEP-0191 current-presence side effects because remaining blocklist is unavailable"
+        );
+        return;
+    }
+
     let storage = match roster_storage_for_state(state).await {
         Ok(storage) => storage,
         Err(error) => {
@@ -177,24 +219,45 @@ async fn send_blocking_presence_side_effects(
     let mut targets = Vec::new();
     let mut seen = HashSet::new();
     for jid in jids {
-        let Ok(target) = jid.parse::<Jid>() else {
-            warn!(
-                jid,
-                "Skipping invalid XEP-0191 target JID for presence side effects"
-            );
+        if let Some(resource) = jid.resource() {
+            if jid.node().is_some() {
+                let target_bare = jid.to_bare();
+                if subscriber_bares.contains(&target_bare) && seen.insert(jid.clone()) {
+                    targets.push(jid.clone());
+                }
+            } else {
+                for subscriber in &subscriber_bares {
+                    if subscriber.domain() == jid.domain() {
+                        let target = Jid::from(subscriber.with_resource(resource));
+                        if seen.insert(target.clone()) {
+                            targets.push(target);
+                        }
+                    }
+                }
+            }
             continue;
-        };
-        let target_bare = target.to_bare();
-        if subscriber_bares.contains(&target_bare) && seen.insert(target_bare.clone()) {
-            targets.push(target_bare);
+        }
+
+        let single_entry_blocklist = waddle_xmpp::protocol::Blocklist::new([jid.clone()]);
+        for subscriber in &subscriber_bares {
+            let subscriber_jid = Jid::from(subscriber.clone());
+            if single_entry_blocklist.contains_jid(&subscriber_jid)
+                && seen.insert(subscriber_jid.clone())
+            {
+                targets.push(subscriber_jid);
+            }
         }
     }
 
     for target in targets {
+        if !blocked && remaining_blocklist.is_some_and(|blocklist| blocklist.contains_jid(&target))
+        {
+            continue;
+        }
         if blocked {
-            send_unavailable_presence_from_user_to_user(state, user_bare, &target).await;
+            send_unavailable_presence_from_user_to_jid(state, user_bare, &target).await;
         } else {
-            send_current_presence_from_user_to_user(state, user_bare, &target).await;
+            send_current_presence_from_user_to_jid(state, user_bare, &target).await;
         }
     }
 }
@@ -203,16 +266,72 @@ async fn send_blocking_pushes(
     state: &WebSocketState,
     user_bare: &BareJid,
     blocked: bool,
-    jids: &[String],
+    jids: &[Jid],
 ) {
+    let detached_resources = match state
+        .deps
+        .protocol
+        .sm_session_registry
+        .blocklist_interested_detached_resources_for_user(user_bare)
+        .await
+    {
+        Ok(resources) => resources,
+        Err(error) => {
+            warn!(jid = %user_bare, error = %error, "Failed to load detached XEP-0191 blocklist-interested resources; continuing with live fanout");
+            Vec::new()
+        }
+    };
+    let mut recorded_detached = HashSet::new();
+    for resource_jid in detached_resources {
+        let push = if blocked {
+            match waddle_xmpp::xep::xep0191::build_block_push(&resource_jid.clone().into(), jids) {
+                Ok(push) => push,
+                Err(error) => {
+                    warn!(jid = %user_bare, error = %error, "Skipping invalid detached XEP-0191 block push");
+                    continue;
+                }
+            }
+        } else {
+            waddle_xmpp::xep::xep0191::build_unblock_push(&resource_jid.clone().into(), jids)
+        };
+        match state
+            .deps
+            .protocol
+            .sm_session_registry
+            .record_stanza_for_detached_blocklist_resource(
+                &resource_jid,
+                &Stanza::Iq(Box::new(push)),
+                chrono::Utc::now(),
+            )
+            .await
+        {
+            Ok(true) => {
+                recorded_detached.insert(resource_jid);
+            }
+            Ok(false) => {}
+            Err(error) => {
+                warn!(jid = %resource_jid, error = %error, "Failed to record XEP-0191 blocklist push for detached resource");
+            }
+        }
+    }
+
     for resource_jid in state
         .deps
         .protocol
         .connection_registry
-        .get_resources_for_user(user_bare)
+        .get_blocklist_interested_resources_for_user(user_bare)
     {
+        if recorded_detached.contains(&resource_jid) {
+            continue;
+        }
         let push = if blocked {
-            waddle_xmpp::xep::xep0191::build_block_push(&resource_jid.clone().into(), jids)
+            match waddle_xmpp::xep::xep0191::build_block_push(&resource_jid.clone().into(), jids) {
+                Ok(push) => push,
+                Err(error) => {
+                    warn!(jid = %user_bare, error = %error, "Skipping invalid XEP-0191 block push");
+                    continue;
+                }
+            }
         } else {
             waddle_xmpp::xep::xep0191::build_unblock_push(&resource_jid.clone().into(), jids)
         };

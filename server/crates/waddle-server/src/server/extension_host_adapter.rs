@@ -184,7 +184,7 @@ impl ExtensionHostAdapter {
             .deps
             .protocol
             .blocking_storage
-            .list_blocked_jids(&invocation.actor_jid.to_bare())
+            .list_blocked_jid_entries(&invocation.actor_jid.to_bare())
             .await
             .map_err(|error| ExtensionHostAdapterError::Storage(error.to_string()))?;
         sm.set_blocklist(Blocklist::new(blocklist));

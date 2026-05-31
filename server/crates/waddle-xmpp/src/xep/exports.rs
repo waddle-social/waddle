@@ -53,7 +53,7 @@ pub use super::xep0363::{
 pub use super::xep0191::{
     build_block_push, build_blocking_error, build_blocking_success, build_blocklist_response,
     build_unblock_push, is_block_set, is_blocking_query, is_blocklist_get, is_unblock_set,
-    parse_blocking_request, BlockingError, BlockingRequest, NS_BLOCKING,
+    parse_blocking_request, BlockingBadRequest, BlockingError, BlockingRequest, NS_BLOCKING,
 };
 
 pub use super::xep0085::{

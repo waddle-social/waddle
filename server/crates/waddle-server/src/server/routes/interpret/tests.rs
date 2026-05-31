@@ -232,6 +232,7 @@ async fn xep_0280_send_carbons_queues_for_detached_xep_0198_resources() {
         detached_at: std::time::Instant::now(),
         carbons_enabled: true,
         roster_interested: false,
+        blocklist_interested: false,
         presence_available: false,
         presence_show: None,
         presence_status: None,

@@ -45,6 +45,7 @@ pub(super) async fn handle_misc_iq(
             phase.bound_jid(),
             response_from,
             response_to,
+            conn_state.blocklist_interested,
             conn_state.state_machine.as_deref_mut(),
         )
         .await;
