@@ -37,9 +37,16 @@ XEP-0402 bookmarks node:
 ```
 pubsub#access_model   = whitelist   (private to the owner)
 pubsub#persist_items  = true
-pubsub#max_items      = max
+pubsub#max_items      = 1024         (finite cap, anti-DoS parity with the bookmarks node)
 pubsub#send_last_published_item = never
 ```
+
+`max_items` is a **finite** cap (`1024`, the bookmarks node's
+`PEP_BOOKMARK_MAX_ITEMS`), not `max`. An unbounded node would disable
+server-side eviction entirely, letting an authenticated client grow its
+own DM node without limit — the cap is the same anti-DoS bound the
+XEP-0402 bookmarks node uses, far larger than any realistic per-contact
+override count while still finite.
 
 ## Payload shape
 
@@ -69,7 +76,8 @@ it.
         </field>
         <field var='pubsub#access_model'><value>whitelist</value></field>
         <field var='pubsub#persist_items'><value>true</value></field>
-        <field var='pubsub#max_items'><value>max</value></field>
+        <field var='pubsub#max_items'><value>1024</value></field>
+        <field var='pubsub#send_last_published_item'><value>never</value></field>
       </x>
     </publish-options>
   </pubsub>

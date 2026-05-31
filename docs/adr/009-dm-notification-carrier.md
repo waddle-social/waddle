@@ -73,8 +73,10 @@ internal code organization:
 
 1. **PEP transport** (XEP-0163), as XEP-0402 uses — not a private side
    channel.
-2. **`pubsub#access_model=whitelist`** + `persist_items` + `max_items=max`
-   — identical to XEP-0402's recommended node config.
+2. **`pubsub#access_model=whitelist`** + `persist_items` + a finite
+   `max_items` cap — mirroring XEP-0402's recommended node config. The
+   cap is `PEP_BOOKMARK_MAX_ITEMS` (`1024`), the same anti-DoS bound the
+   bookmarks node uses; see the node-config sub-decision below.
 3. **Item-id = the contact's bare JID** — this is the JID-identification
    mechanism XEP-0492 §2.1 requires.
 4. **`<notify>` byte-identical to official XEP-0492** — same
@@ -96,6 +98,17 @@ internal code organization:
   XEP-0492-compliant (JID-identification comes from the item id); the
   minimal shape keeps the custom surface as small as the namespace policy
   wants.
+- **Node config — bounded retention.** `access_model=whitelist`,
+  `persist_items=true`, `send_last_published_item=never`, and a **finite**
+  `max_items` cap of `PEP_BOOKMARK_MAX_ITEMS` (`1024`). The cap is the
+  decisive difference from a naïve `max_items=max`: an unbounded node
+  disables server-side eviction (`enforce_max_items_tx` short-circuits on
+  `u32::MAX`), so an authenticated client could grow its own DM node
+  without limit. Capping retention at the bookmarks node's anti-DoS bound
+  keeps eviction enabled while staying far above any realistic
+  per-contact override count. The client publish-options request and the
+  server node default both pin this value so the requested and created
+  configs agree.
 - **Projection — shared table.** Reuse the `notification_settings_projection`
   table keyed by `(owner_bare_jid, conversation_jid)`. Add one
   `NotificationSettingsSource::WaddleDmBookmarks` variant → the DM node.

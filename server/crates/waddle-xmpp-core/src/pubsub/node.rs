@@ -255,8 +255,13 @@ impl NodeConfig {
     /// The DM notification-settings carrier hosts one official
     /// XEP-0492 `<notify>` per direct-chat contact, keyed by the
     /// contact's bare JID. Like the XEP-0402 MUC bookmarks node, it
-    /// holds many persistent items, so `max_items = max` (the bookmark
-    /// idiom, mapped to `u32::MAX`). The authoritative consumer is the
+    /// holds many persistent items, so it shares that node's bounded
+    /// cap (`PEP_BOOKMARK_MAX_ITEMS`). The cap is deliberate anti-DoS
+    /// parity with the bookmarks node: an unbounded `max_items` would
+    /// disable eviction entirely (see `enforce_max_items_tx`), letting
+    /// an authenticated client grow its own DM node without limit. The
+    /// cap is far larger than any realistic per-contact override count
+    /// while still finite. The authoritative consumer is the
     /// server-side projection consulted at the T1 push gate — no roster
     /// contact needs to read this node. Force `whitelist` access and
     /// `never` send-last-published so a fresh roster subscription does
@@ -271,7 +276,7 @@ impl NodeConfig {
         Self {
             access_model: AccessModel::Whitelist,
             publish_model: PublishModel::Publishers,
-            max_items: u32::MAX,
+            max_items: PEP_BOOKMARK_MAX_ITEMS,
             persist_items: true,
             deliver_payloads: true,
             notify_retract: false,
@@ -510,14 +515,23 @@ mod tests {
     }
 
     #[test]
-    fn waddle_dm_bookmarks_pep_config_is_whitelist_with_max_retention() {
+    fn waddle_dm_bookmarks_pep_config_is_whitelist_with_bounded_retention() {
         // The DM notification-settings carrier (#720) holds one item per
-        // direct-chat contact, so it needs max retention; and like DND it
-        // must stay off the roster fan-out (whitelist + send-last=never).
+        // direct-chat contact, so it needs many persistent items — but a
+        // FINITE cap, not `u32::MAX`. A `u32::MAX` cap would disable
+        // `enforce_max_items_tx` entirely, letting an authenticated client
+        // grow its own DM node unbounded. It shares the XEP-0402 bookmarks
+        // node's `PEP_BOOKMARK_MAX_ITEMS` anti-DoS cap. Like DND it must
+        // stay off the roster fan-out (whitelist + send-last=never).
         let config = NodeConfig::pep_for_node(super::super::pep::PEP_NODE_WADDLE_DM_BOOKMARKS);
         assert_eq!(config.access_model, AccessModel::Whitelist);
         assert_eq!(config.publish_model, PublishModel::Publishers);
-        assert_eq!(config.max_items, u32::MAX);
+        assert_eq!(config.max_items, PEP_BOOKMARK_MAX_ITEMS);
+        assert_ne!(
+            config.max_items,
+            u32::MAX,
+            "DM node must NOT be unbounded — eviction would never run"
+        );
         assert!(config.persist_items);
         assert!(!config.notify_retract);
         assert!(!config.notify_delete);

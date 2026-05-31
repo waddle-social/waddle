@@ -46,6 +46,19 @@ pub const NS_NOTIFICATION_SETTINGS: &str = "urn:xmpp:notification-settings:1";
 /// XEP-0402).
 pub const NS_WADDLE_DM_BOOKMARKS: &str = "urn:waddle:dm-bookmarks:0";
 
+/// Finite `pubsub#max_items` cap requested for the DM-bookmarks node.
+///
+/// MUST stay byte-compatible with the server node default
+/// `waddle_xmpp_core::pubsub::PEP_BOOKMARK_MAX_ITEMS` (the client crate
+/// keeps its own copy — it does not depend on the server crates). The
+/// DM node deliberately caps retention rather than requesting `max`
+/// (`u32::MAX`): an unbounded node disables server-side eviction, so a
+/// client could grow its own DM node without limit. The publish-options
+/// request below therefore pins the same finite cap the node defaults
+/// to, so the requested config matches what the server creates on first
+/// publish (anti-DoS parity with the XEP-0402 bookmarks node).
+pub const DM_BOOKMARK_MAX_ITEMS: u32 = 1024;
+
 /// Waddle rich XEP-0357 push-summary opt-in namespace.
 ///
 /// Mirrors `waddle_xmpp::xep::xep0492::NS_PUSH_RICH_PAYLOAD` (the
@@ -395,11 +408,14 @@ pub fn build_fetch_dm_bookmarks_iq(request_id: &str) -> Element {
 ///
 /// The item id is the contact's bare JID; the payload is the
 /// [`build_dm_bookmark_element`] wrapper directly hosting `notify`.
-/// Pins the same `publish-options` form the XEP-0402 bookmark publish
-/// uses (`access_model=whitelist`, `persist_items=true`,
-/// `max_items=max`, `send_last_published_item=never`) so the server
-/// creates a private, sparse node on first publish. `to=` is omitted
-/// (XEP-0163 §3.5).
+/// Pins the `publish-options` form so the server creates a private,
+/// sparse node on first publish: `access_model=whitelist`,
+/// `persist_items=true`, `send_last_published_item=never`, and a FINITE
+/// `max_items` cap ([`DM_BOOKMARK_MAX_ITEMS`]). The cap matches the
+/// server node default — unlike the XEP-0402 bookmark publish's
+/// `max_items=max`, the DM node bounds retention so server-side eviction
+/// stays enabled (anti-DoS parity with the bookmarks node). `to=` is
+/// omitted (XEP-0163 §3.5).
 pub fn build_publish_dm_bookmark_iq(jid: &BareJid, notify: &Element, request_id: &str) -> Element {
     let publish_options = Element::builder("publish-options", NS_PUBSUB)
         .append(
@@ -417,7 +433,10 @@ pub fn build_publish_dm_bookmark_iq(jid: &BareJid, notify: &Element, request_id:
                         .build(),
                 )
                 .append(submit_value_field("pubsub#persist_items", "true"))
-                .append(submit_value_field("pubsub#max_items", "max"))
+                .append(submit_value_field(
+                    "pubsub#max_items",
+                    &DM_BOOKMARK_MAX_ITEMS.to_string(),
+                ))
                 .append(submit_value_field(
                     "pubsub#send_last_published_item",
                     "never",
@@ -1438,6 +1457,20 @@ mod tests {
     }
 
     #[test]
+    fn dm_bookmark_max_items_matches_server_node_default() {
+        // The publish-options request MUST pin the same finite cap the
+        // server node defaults to, so the requested config matches the
+        // node the server creates on first publish. Anti-DoS parity with
+        // the XEP-0402 bookmarks node — guard against future drift between
+        // the client constant and the server core constant.
+        assert_eq!(
+            DM_BOOKMARK_MAX_ITEMS,
+            waddle_xmpp_core::pubsub::PEP_BOOKMARK_MAX_ITEMS,
+        );
+        assert_ne!(DM_BOOKMARK_MAX_ITEMS, u32::MAX);
+    }
+
+    #[test]
     fn build_fetch_dm_bookmarks_iq_targets_dm_node_without_to() {
         let iq = build_fetch_dm_bookmarks_iq("req-dm-fetch");
         assert_eq!(iq.attr("type"), Some("get"));
@@ -1497,7 +1530,19 @@ mod tests {
             Some("http://jabber.org/protocol/pubsub#publish-options"),
         );
         assert_eq!(value_of("pubsub#persist_items").as_deref(), Some("true"));
-        assert_eq!(value_of("pubsub#max_items").as_deref(), Some("max"));
+        // The DM node requests a FINITE cap (anti-DoS parity with the
+        // XEP-0402 bookmarks node) rather than `max` — an unbounded node
+        // disables server-side eviction. The value MUST match the server
+        // node default `PEP_BOOKMARK_MAX_ITEMS`.
+        assert_eq!(
+            value_of("pubsub#max_items").as_deref(),
+            Some(DM_BOOKMARK_MAX_ITEMS.to_string().as_str()),
+        );
+        assert_ne!(
+            value_of("pubsub#max_items").as_deref(),
+            Some("max"),
+            "DM node must request a finite cap so eviction stays enabled"
+        );
         assert_eq!(
             value_of("pubsub#send_last_published_item").as_deref(),
             Some("never"),
