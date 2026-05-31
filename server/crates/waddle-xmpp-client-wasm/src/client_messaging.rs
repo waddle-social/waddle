@@ -236,4 +236,12 @@ impl WaddleClient {
             Ok(JsValue::from_str(&element_to_xml_string(&result)?))
         })
     }
+
+    pub fn cancel_raw_iq(&self, id: String) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            cancel_iq_command(inner, id).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
 }

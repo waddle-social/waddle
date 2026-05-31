@@ -52,6 +52,9 @@ scenario: #Scenario & {
 				"urn:xmpp:sm:3",
 				"jabber:iq:roster",
 				"urn:xmpp:carbons:2",
+				"urn:xmpp:carbons:rules:0",
+				"urn:xmpp:receipts",
+				"msgoffline",
 				"vcard-temp",
 				"urn:ietf:params:xml:ns:vcard-4.0",
 				"urn:xmpp:http:upload:0",
@@ -257,6 +260,25 @@ scenario: #Scenario & {
 			id:       "cue-upload-disco"
 			type:     "result"
 			contains: ["urn:xmpp:http:upload:0"]
+		},
+		#SendIq & {
+			actor: adminPhone
+			type:  "get"
+			id:    "cue-push-service-disco"
+			to:    "push.\(scenario.domain)"
+			payload: #XmlElement & {
+				name: "query"
+				ns:   "http://jabber.org/protocol/disco#info"
+			}
+		},
+		#ExpectIq & {
+			target: adminPhone
+			id:     "cue-push-service-disco"
+			type:   "result"
+			contains: [
+				"http://jabber.org/protocol/pubsub#access-whitelist",
+				"http://jabber.org/protocol/pubsub#publish-only-affiliation",
+			]
 		},
 		#SendIq & {
 			actor: adminPhone

@@ -65,6 +65,23 @@ describe("withIqTimeout (RFC 6120 §8.2.3 defense)", () => {
     // fires after the success path resolved.
     await new Promise((resolve) => setTimeout(resolve, 20));
   });
+
+  test("cancels the raw IQ request when the timeout wins", async () => {
+    const cancelled: string[] = [];
+    const late = new Promise<string>((resolve) => {
+      setTimeout(() => resolve("<iq type='result'/>"), 40);
+    });
+
+    await expect(withIqTimeout(
+      late,
+      "extensions.example.test",
+      undefined,
+      5,
+      { cancel: async () => { cancelled.push("iq-timeout-1"); } },
+    )).rejects.toBeInstanceOf(DiscoTimeoutError);
+
+    expect(cancelled).toEqual(["iq-timeout-1"]);
+  });
 });
 
 describe("discoverTopology partial-failure resilience", () => {
@@ -95,6 +112,28 @@ describe("discoverTopology partial-failure resilience", () => {
         // extensions.example.test never resolved → timeout fired and the
         // conventional spaces.<domain> fallback kicked in.
         expect(topology.services.spaces).toBe("spaces.example.test");
+      });
+    } finally {
+      __setDiscoIqTimeoutForTest(null);
+    }
+  });
+
+  test("cancels the driver raw IQ when a component disco#info timeout fires", async () => {
+    __setDiscoIqTimeoutForTest(30);
+    try {
+      await withFakeDomParser(async () => {
+        const client = neverResolvesForComponent("extensions.example.test");
+        const cancelledIds: string[] = [];
+        const topology = await discoverTopology({
+          ...client,
+          async cancel_raw_iq(id: string): Promise<void> {
+            cancelledIds.push(id);
+          },
+        }, "alice@example.test");
+
+        expect(topology.services.spaces).toBe("spaces.example.test");
+        expect(cancelledIds.length).toBe(1);
+        expect(cancelledIds[0]).toBe(discoveryIqIdFor(client.sentIqs, "extensions.example.test", "disco#info"));
       });
     } finally {
       __setDiscoIqTimeoutForTest(null);
@@ -153,8 +192,11 @@ type ResilientClientOptions = {
 };
 
 function neverResolvesForComponent(jid: string) {
+  const sentIqs: string[] = [];
   return {
+    sentIqs,
     async send_raw_iq(xml: string): Promise<string> {
+      sentIqs.push(xml);
       if (xml.includes('xmlns="http://jabber.org/protocol/disco#items"')) {
         if (xml.includes('to="example.test"')) {
           return discoItemsXml([
@@ -187,6 +229,11 @@ function neverResolvesForComponent(jid: string) {
       return discoItemsXml([]);
     },
   };
+}
+
+function discoveryIqIdFor(sentIqs: string[], to: string, namespaceFragment: string): string | undefined {
+  const iq = sentIqs.find((xml) => xml.includes(`to="${to}"`) && xml.includes(namespaceFragment));
+  return iq?.match(/\sid="([^"]+)"/)?.[1];
 }
 
 function customMucWithBrokenSibling() {
@@ -306,4 +353,3 @@ function resilientClient(options: ResilientClientOptions = {}) {
     },
   };
 }
-

@@ -27,6 +27,7 @@ export class WaddleClient {
      * owner" and falls back to the empty-state screen.
      */
     admin_users_list(prefix?: string | null, page_size?: number | null, after_cursor?: string | null): Promise<any>;
+    cancel_raw_iq(id: string): Promise<any>;
     connect(): Promise<any>;
     /**
      * XEP-0050 `disable-device` ad-hoc command on `push.<domain>`.
@@ -522,6 +523,7 @@ export class WaddleConfig {
     constructor(server_url: string, jid: string, access_token: string, resource: string);
     with_resume_state(previd: string, inbound_h: number, outbound_h: number): void;
     with_resume_state_handle(state: WaddleResumeState): void;
+    with_resume_state_stanzas(previd: string, inbound_h: number, outbound_h: number, stanzas: string[]): void;
 }
 
 export class WaddleResumeState {

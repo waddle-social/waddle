@@ -107,7 +107,7 @@ impl WaddleClient {
             inner.borrow_mut().cmd_tx = Some(cmd_tx);
 
             spawn_local(event_dispatch_loop(inner.clone(), event_rx));
-            spawn_local(driver_loop(config, ws, cmd_rx, event_tx));
+            spawn_local(driver_loop(config, ws, cmd_rx, event_tx, inner.clone()));
 
             Ok(JsValue::UNDEFINED)
         })

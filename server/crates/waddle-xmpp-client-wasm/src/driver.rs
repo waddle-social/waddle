@@ -5,8 +5,9 @@ pub(crate) async fn driver_loop(
     ws: WasmWebSocket,
     cmd_rx: mpsc::Receiver<WasmCommand>,
     event_tx: mpsc::Sender<DriverEvent>,
+    inner: Rc<RefCell<WaddleClientInner>>,
 ) {
-    let mut task = match WasmDriverTask::new(config, ws, cmd_rx, event_tx.clone()) {
+    let mut task = match WasmDriverTask::new(config, ws, cmd_rx, event_tx.clone(), inner) {
         Ok(task) => task,
         Err(err) => {
             let mut event_tx = event_tx;
@@ -24,12 +25,14 @@ impl WasmDriverTask {
         ws: WasmWebSocket,
         cmd_rx: mpsc::Receiver<WasmCommand>,
         event_tx: mpsc::Sender<DriverEvent>,
+        inner: Rc<RefCell<WaddleClientInner>>,
     ) -> DriverResult<Self> {
         Ok(Self {
             runtime: XmppRuntime::new(config)?,
             ws,
             cmd_rx,
             event_tx,
+            inner,
             pending_iqs: HashMap::new(),
             pending_mam_queries: HashMap::new(),
             pending_inbox_queries: HashMap::new(),
@@ -41,6 +44,7 @@ impl WasmDriverTask {
     async fn run(&mut self) {
         match self.runtime.queue_request(ClientRequest::Connect) {
             Ok(events) => {
+                self.publish_resume_state_snapshot();
                 for event in events {
                     if !self.handle_client_event(event).await {
                         self.finish().await;
@@ -175,8 +179,14 @@ impl WasmDriverTask {
                 self.send_inbox_query_command(stanza, query_id, responder)
                     .await
             }
+            Some(WasmCommand::CancelIq { id, responder }) => {
+                self.cancel_iq_command(&id);
+                let _ = responder.send(Ok(()));
+                true
+            }
             Some(WasmCommand::Disconnect { responder }) => {
                 self.explicit_disconnect = true;
+                self.publish_resume_state_snapshot();
                 let result = self
                     .send_transport_message(TransportMessage::Close(StreamClose))
                     .await;
@@ -186,6 +196,10 @@ impl WasmDriverTask {
             }
             None => false,
         }
+    }
+
+    fn cancel_iq_command(&mut self, id: &str) {
+        cancel_raw_iq_state(&mut self.pending_iqs, &mut self.deferred_commands, id);
     }
 
     async fn send_stanza_command(
@@ -354,6 +368,7 @@ impl WasmDriverTask {
                 return false;
             }
         };
+        self.publish_resume_state_snapshot();
 
         for event in events {
             if !self.handle_client_event(event).await {
@@ -380,6 +395,7 @@ impl WasmDriverTask {
 
     async fn apply_sent_event(&mut self, event: TransportEvent) -> DriverResult<()> {
         let events = self.runtime.apply_transport_event(event)?;
+        self.publish_resume_state_snapshot();
         for event in events {
             if self.dispatch_client_event(event).await.is_some() {
                 return Err(ClientError::Disconnected);
@@ -548,12 +564,13 @@ impl WasmDriverTask {
             .await;
     }
 
+    fn publish_resume_state_snapshot(&self) {
+        publish_resume_state_snapshot(&self.inner, &self.runtime, self.explicit_disconnect);
+    }
+
     async fn finish(&mut self) {
-        let resume_state = if self.explicit_disconnect {
-            None
-        } else {
-            self.runtime.resume_state()
-        };
+        self.publish_resume_state_snapshot();
+        let resume_state = self.inner.borrow().resume_state.clone();
         let _ = self
             .event_tx
             .clone()
@@ -587,5 +604,228 @@ impl WasmDriverTask {
         }
 
         let _ = self.event_tx.clone().send(DriverEvent::Disconnected).await;
+    }
+}
+
+fn publish_resume_state_snapshot(
+    inner: &Rc<RefCell<WaddleClientInner>>,
+    runtime: &XmppRuntime,
+    explicit_disconnect: bool,
+) {
+    let resume_state = if explicit_disconnect {
+        None
+    } else {
+        runtime.resume_state()
+    };
+    inner.borrow_mut().resume_state = resume_state;
+}
+
+fn cancel_raw_iq_state(
+    pending_iqs: &mut HashMap<String, oneshot::Sender<DriverResult<Element>>>,
+    deferred_commands: &mut VecDeque<DeferredWasmCommand>,
+    id: &str,
+) {
+    if let Some(responder) = pending_iqs.remove(id) {
+        let _ = responder.send(Err(ClientError::RequestCancelled));
+    }
+
+    let mut retained = VecDeque::with_capacity(deferred_commands.len());
+    while let Some(command) = deferred_commands.pop_front() {
+        if command.raw_iq_id() == Some(id) {
+            if let DeferredWasmCommand::Iq { responder, .. } = command {
+                let _ = responder.send(Err(ClientError::RequestCancelled));
+            }
+        } else {
+            retained.push_back(command);
+        }
+    }
+    *deferred_commands = retained;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::executor::block_on;
+    use waddle_xmpp_client::discovery::DISCO_INFO_NS;
+
+    fn test_inner() -> Rc<RefCell<WaddleClientInner>> {
+        Rc::new(RefCell::new(WaddleClientInner {
+            config: StoredConfig {
+                server_url: "wss://xmpp.example.test".to_string(),
+                jid: "alice@example.test".to_string(),
+                access_token: "token".to_string(),
+                resource: "web".to_string(),
+                resume_state: None,
+            },
+            cmd_tx: None,
+            on_message: None,
+            on_presence: None,
+            on_connected: None,
+            on_session_lifecycle: None,
+            on_disconnected: None,
+            on_error: None,
+            on_message_delivery_acked: None,
+            on_message_delivery_failed: None,
+            on_mds_displayed: None,
+            on_call: None,
+            resume_state: None,
+        }))
+    }
+
+    #[test]
+    fn publish_resume_state_snapshot_updates_shared_client_state() {
+        let inner = test_inner();
+        let stored = StoredConfig {
+            server_url: "wss://xmpp.example.test".to_string(),
+            jid: "alice@example.test".to_string(),
+            access_token: "token".to_string(),
+            resource: "web".to_string(),
+            resume_state: Some(
+                waddle_xmpp_client::SmResumeState::new("previous-stream", 4, 9)
+                    .expect("resume state"),
+            ),
+        };
+        let runtime =
+            XmppRuntime::new(build_client_config(&stored).expect("config")).expect("runtime");
+
+        publish_resume_state_snapshot(&inner, &runtime, false);
+
+        let borrowed = inner.borrow();
+        let snapshot = borrowed.resume_state.as_ref().expect("snapshot");
+        assert_eq!(snapshot.previd(), "previous-stream");
+        assert_eq!(snapshot.inbound_h(), 4);
+        assert_eq!(snapshot.outbound_h(), 9);
+    }
+
+    #[test]
+    fn publish_resume_state_snapshot_tracks_live_ack_mutations() {
+        let inner = test_inner();
+        let stanza = Element::builder("message", NS_CLIENT)
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "unacked")
+            .build();
+        let stored = StoredConfig {
+            server_url: "wss://xmpp.example.test".to_string(),
+            jid: "alice@example.test".to_string(),
+            access_token: "token".to_string(),
+            resource: "web".to_string(),
+            resume_state: None,
+        };
+        let mut runtime =
+            XmppRuntime::new(build_client_config(&stored).expect("config")).expect("runtime");
+        runtime
+            .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
+                waddle_xmpp_client::stream_management::SmState::build_enable(true),
+            )))
+            .expect("enable sent");
+        runtime
+            .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+                Element::builder("enabled", waddle_xmpp_client::stream_management::NS_SM)
+                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), "live-stream")
+                    .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "true")
+                    .build(),
+            )))
+            .expect("enabled");
+        runtime
+            .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
+                stanza,
+            )))
+            .expect("message sent");
+
+        publish_resume_state_snapshot(&inner, &runtime, false);
+        assert!(inner
+            .borrow()
+            .resume_state
+            .as_ref()
+            .expect("snapshot")
+            .has_unhandled_outbound_stanzas());
+
+        let ack = Element::builder("a", waddle_xmpp_client::stream_management::NS_SM)
+            .attr(minidom::rxml::xml_ncname!("h").to_owned(), "1")
+            .build();
+        runtime
+            .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+                ack,
+            )))
+            .expect("ack");
+        publish_resume_state_snapshot(&inner, &runtime, false);
+
+        assert!(!inner
+            .borrow()
+            .resume_state
+            .as_ref()
+            .expect("snapshot")
+            .has_unhandled_outbound_stanzas());
+    }
+
+    #[test]
+    fn publish_resume_state_snapshot_clears_on_explicit_disconnect() {
+        let inner = test_inner();
+        inner.borrow_mut().resume_state = Some(
+            waddle_xmpp_client::SmResumeState::new("previous-stream", 4, 9).expect("resume state"),
+        );
+        let stored = inner.borrow().config.clone();
+        let runtime =
+            XmppRuntime::new(build_client_config(&stored).expect("config")).expect("runtime");
+
+        publish_resume_state_snapshot(&inner, &runtime, true);
+
+        assert!(inner.borrow().resume_state.is_none());
+    }
+
+    fn iq(id: &str) -> Element {
+        Element::builder("iq", NS_CLIENT)
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+            .append(Element::builder("query", DISCO_INFO_NS).build())
+            .build()
+    }
+
+    #[test]
+    fn cancel_raw_iq_removes_sent_pending_responder() {
+        let (responder, rx) = oneshot::channel();
+        let mut pending_iqs = HashMap::from([("sent-1".to_string(), responder)]);
+        let mut deferred_commands = VecDeque::new();
+
+        cancel_raw_iq_state(&mut pending_iqs, &mut deferred_commands, "sent-1");
+
+        assert!(!pending_iqs.contains_key("sent-1"));
+        assert!(matches!(
+            block_on(rx).expect("responder should send"),
+            Err(ClientError::RequestCancelled)
+        ));
+
+        let late = iq("sent-1");
+        assert!(pending_iqs.remove("sent-1").is_none());
+        drop(late);
+    }
+
+    #[test]
+    fn cancel_raw_iq_removes_not_yet_sent_deferred_responder() {
+        let (cancelled_responder, cancelled_rx) = oneshot::channel();
+        let (retained_responder, mut retained_rx) = oneshot::channel();
+        let mut pending_iqs = HashMap::new();
+        let mut deferred_commands = VecDeque::from([
+            DeferredWasmCommand::Iq {
+                stanza: iq("deferred-1"),
+                responder: cancelled_responder,
+            },
+            DeferredWasmCommand::Iq {
+                stanza: iq("deferred-2"),
+                responder: retained_responder,
+            },
+        ]);
+
+        cancel_raw_iq_state(&mut pending_iqs, &mut deferred_commands, "deferred-1");
+
+        assert_eq!(deferred_commands.len(), 1);
+        assert_eq!(deferred_commands[0].raw_iq_id(), Some("deferred-2"));
+        assert!(matches!(
+            block_on(cancelled_rx).expect("responder should send"),
+            Err(ClientError::RequestCancelled)
+        ));
+        assert!(retained_rx
+            .try_recv()
+            .expect("receiver should remain open")
+            .is_none());
     }
 }

@@ -57,6 +57,7 @@ import { prepareEncryptedAttachmentUpload } from "./encrypted-attachments";
 import { discoverChannels, discoverTopology } from "./discovery";
 import { discoverUploadService, uploadFile, type UploadProgress } from "./file-upload";
 import { ReconnectCatchup } from "./reconnect-catchup";
+import { classifyMamError, isMamCursorNotFound } from "./mam";
 import { parseRegisterDeviceResult, type RegisterDeviceResult } from "./push-register-result";
 import {
   createLocalStorageResumePersistence,
@@ -177,6 +178,10 @@ function pageLastArchiveId(page: WasmMamPage | null | undefined): string | undef
 function pageFirstArchiveId(page: WasmMamPage | null | undefined): string | undefined {
   const compat = page as (WasmMamPage & { firstArchiveId?: string }) | null | undefined;
   return compat?.first_id ?? compat?.firstArchiveId;
+}
+
+function pageContainsArchiveId(page: WasmMamPage | null | undefined, archiveId: string): boolean {
+  return (page?.messages ?? []).some((message) => message.mam_id === archiveId);
 }
 
 function compareTimestamps(left: string, right: string): number {
@@ -447,6 +452,8 @@ type XmppResumeState = {
   previd: string;
   inboundH: number;
   outboundH: number;
+  hasUnackedOutbound?: boolean;
+  unhandledOutboundStanzas?: string[];
   resource?: string;
 };
 
@@ -462,6 +469,19 @@ let wasmModulePromise: Promise<WasmModule> | null = null;
 function createXmppResource() {
   const randomId = globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2);
   return `web-${randomId}`;
+}
+
+function messageStanzaIdFromSerializedXml(xml: string): string | null {
+  if (typeof DOMParser !== "undefined") {
+    try {
+      const doc = new DOMParser().parseFromString(xml, "application/xml");
+      const root = doc.documentElement;
+      if (root.localName === "message") return root.getAttribute("id");
+    } catch {}
+  }
+
+  const match = xml.match(/^<message\b[^>]*\sid=(["'])([^"']+)\1/i);
+  return match?.[2] ?? null;
 }
 
 async function loadWasmModule(): Promise<WasmModule> {
@@ -545,6 +565,7 @@ export class BrowserXmppClient {
   private directQueueFlushPromise: Promise<void> | null = null;
   private readonly roomQueueFlushes = new Map<string, Promise<void>>();
   private readonly inflightQueuedIds = new Set<string>();
+  private readonly resumeReplayQueuedIds = new Set<string>();
   private readonly pendingSendAt = new Map<string, { at: number; kind: "room" | "dm" }>();
   private readonly messageAckHooks: Array<(id: string, meta: { kind: "room" | "dm"; latencyMs: number }) => void> = [];
   private readonly messageFailHooks: Array<(id: string, meta: { kind: "room" | "dm" }) => void> = [];
@@ -606,6 +627,7 @@ export class BrowserXmppClient {
     // survives a full page reload, so hydrate it eagerly.
     this.resumeState = this.resumePersistence.consumeSm();
     this.resource = this.resumeState?.resource || createXmppResource();
+    this.seedNativeReplayQueueIds(this.resumeState);
     this.retainedJoinedRoomJids = new Set(this.resumePersistence.loadJoinedRooms());
   }
 
@@ -741,6 +763,16 @@ export class BrowserXmppClient {
     });
   }
 
+  private seedNativeReplayQueueIds(state: XmppResumeState | null | undefined): void {
+    for (const xml of state?.unhandledOutboundStanzas ?? []) {
+      const id = messageStanzaIdFromSerializedXml(xml);
+      if (id) {
+        this.inflightQueuedIds.add(id);
+        this.resumeReplayQueuedIds.add(id);
+      }
+    }
+  }
+
   private recordPendingSend(id: string | null, kind: "room" | "dm") {
     if (!id) return;
     this.pendingSendAt.set(id, { at: performance.now(), kind });
@@ -772,6 +804,12 @@ export class BrowserXmppClient {
     const state = xmpp?.get_resume_state?.() ?? this.resumeState;
     this.resumePersistence.preparePagehideHandoff();
     if (state) {
+      if (state.hasUnackedOutbound && !state.unhandledOutboundStanzas?.length) {
+        this.resumeState = null;
+        this.resumePersistence.clearSm();
+        this.persistRetainedJoinedRooms();
+        return;
+      }
       const snapshot = { ...state, resource: this.resource };
       this.resumeState = snapshot;
       this.resumePersistence.saveSm(snapshot);
@@ -824,11 +862,20 @@ export class BrowserXmppClient {
       (config as any).with_resume_state_handle(handle);
       this.clearResumeState();
     } else if (this.resumeState) {
-      (config as any).with_resume_state?.(
-        this.resumeState.previd,
-        this.resumeState.inboundH,
-        this.resumeState.outboundH,
-      );
+      if (this.resumeState.unhandledOutboundStanzas?.length && typeof (config as any).with_resume_state_stanzas === "function") {
+        (config as any).with_resume_state_stanzas(
+          this.resumeState.previd,
+          this.resumeState.inboundH,
+          this.resumeState.outboundH,
+          this.resumeState.unhandledOutboundStanzas,
+        );
+      } else {
+        (config as any).with_resume_state?.(
+          this.resumeState.previd,
+          this.resumeState.inboundH,
+          this.resumeState.outboundH,
+        );
+      }
       this.resumePersistence.clearSm();
       this.resumeState = null;
     }
@@ -1208,6 +1255,43 @@ export class BrowserXmppClient {
     return { id: queuedId, state: "queued" };
   }
 
+  private persistPendingRoomSend(roomJid: string, body: string, opts: SendGroupMessageOptions & { id: string }): void {
+    enqueueQueuedMessage(this.queueScope, {
+      kind: "room",
+      id: opts.id,
+      createdAt: new Date().toISOString(),
+      roomJid,
+      body,
+      ...(opts.markup?.length ? { markup: opts.markup } : {}),
+      ...(opts.references?.length ? { references: opts.references } : {}),
+      ...(opts.mentionJidsByNick ? { mentionJidsByNick: opts.mentionJidsByNick } : {}),
+      ...(opts.files?.length ? { files: opts.files } : {}),
+      ...(opts.replyTo ? { replyTo: opts.replyTo } : {}),
+      ...(opts.threadId ? { threadId: opts.threadId } : {}),
+      ...(opts.parentThreadId ? { parentThreadId: opts.parentThreadId } : {}),
+      ...(opts.threadCreate ? { threadCreate: opts.threadCreate } : {}),
+      ...(opts.threadReply ? { threadReply: opts.threadReply } : {}),
+    });
+    this.emitQueueDepth();
+  }
+
+  private persistPendingDirectSend(peerJid: string, body: string, opts: SendDirectMessageOptions & { id: string }): void {
+    enqueueQueuedMessage(this.queueScope, {
+      kind: "dm",
+      id: opts.id,
+      createdAt: new Date().toISOString(),
+      peerJid: barePeerJid(peerJid),
+      body,
+      ...(opts.markup?.length ? { markup: opts.markup } : {}),
+      ...(opts.references?.length ? { references: opts.references } : {}),
+      ...(opts.files?.length ? { files: opts.files } : {}),
+      ...(opts.replyTo ? { replyTo: opts.replyTo } : {}),
+      ...(opts.threadId ? { threadId: opts.threadId } : {}),
+      ...(opts.parentThreadId ? { parentThreadId: opts.parentThreadId } : {}),
+    });
+    this.emitQueueDepth();
+  }
+
   private async compatSendGroupMessage(xmpp: XmppClientInstance, roomJid: string, body: string, opts: SendGroupMessageOptions): Promise<string | null> {
     const { effectiveBody, replyFallbackLength, rebasedMarkup, rebasedReferences } = encodeBodyForSend(body, opts.replyTo, opts.markup, opts.references);
     const wasmOpts = buildWasmSendOptions({ ...opts, markup: rebasedMarkup, references: rebasedReferences }, replyFallbackLength);
@@ -1313,7 +1397,11 @@ export class BrowserXmppClient {
     if (!body.trim() && !hasFiles && !hasThreadMetadata && !hasForumMetadata) return null;
     const roomJid = this.roomJidForChannel(channelId);
     if (this.roomIsReady(roomJid) && this.xmpp) {
-      const id = await this.compatSendGroupMessage(this.xmpp, roomJid, body, { ...opts, mentionJidsByNick: { ...(opts.mentionJidsByNick ?? {}), ...this.memberJidsFor(roomJid) } });
+      const outboundId = opts.id ?? crypto.randomUUID();
+      const sendOpts = { ...opts, id: outboundId, mentionJidsByNick: { ...(opts.mentionJidsByNick ?? {}), ...this.memberJidsFor(roomJid) } };
+      this.persistPendingRoomSend(roomJid, body, sendOpts);
+      const id = await this.compatSendGroupMessage(this.xmpp, roomJid, body, sendOpts);
+      if (id) this.inflightQueuedIds.add(id);
       this.recordPendingSend(id, "room");
       return { id, state: "sending" };
     }
@@ -1326,7 +1414,11 @@ export class BrowserXmppClient {
     if (!body.trim() && !opts.files?.length) return null;
     const normalizedPeerJid = barePeerJid(peerJid);
     if (this.canUseConnectedSession() && this.xmpp) {
-      const id = await this.compatSendDirectMessage(this.xmpp, normalizedPeerJid, body, opts);
+      const outboundId = opts.id ?? crypto.randomUUID();
+      const sendOpts = { ...opts, id: outboundId };
+      this.persistPendingDirectSend(normalizedPeerJid, body, sendOpts);
+      const id = await this.compatSendDirectMessage(this.xmpp, normalizedPeerJid, body, sendOpts);
+      if (id) this.inflightQueuedIds.add(id);
       this.recordPendingSend(id, "dm");
       return { id, state: "sending" };
     }
@@ -2459,8 +2551,8 @@ export class BrowserXmppClient {
   private startSelfPing() { this.stopSelfPing(); this.selfPingTimer = setInterval(() => { void this.doSelfPing(); }, 60000); }
   private stopSelfPing() { if (this.selfPingTimer) { clearInterval(this.selfPingTimer); this.selfPingTimer = null; } }
   private async doSelfPing() { if (!this.xmpp?.send_raw_iq || !this.currentRoom) return; try { await this.xmpp.send_raw_iq(`<iq type="get" id="${crypto.randomUUID()}" to="${this.currentRoom}/${this.session.username}"><ping xmlns="urn:xmpp:ping"/></iq>`); } catch { this.roomDisconnectHandler?.(); } }
-  private handleMessageAck(id: string) { const wasQueued = this.inflightQueuedIds.delete(id); if (wasQueued) removeQueuedMessage(this.queueScope, id); this.messageAckHandler?.(id); const pending = this.pendingSendAt.get(id); if (pending) { this.pendingSendAt.delete(id); this.fireHook(this.messageAckHooks, id, { kind: pending.kind, latencyMs: performance.now() - pending.at }); } if (wasQueued) this.emitQueueDepth(); }
-  private handleMessageFailed(id: string) { const wasQueued = this.inflightQueuedIds.delete(id); this.messageDeliveryFailureHandler?.(id); const pending = this.pendingSendAt.get(id); if (pending) { this.pendingSendAt.delete(id); this.fireHook(this.messageFailHooks, id, { kind: pending.kind }); } if (wasQueued) this.emitQueueDepth(); }
+  private handleMessageAck(id: string) { const wasQueued = this.inflightQueuedIds.delete(id); this.resumeReplayQueuedIds.delete(id); if (wasQueued) removeQueuedMessage(this.queueScope, id); this.messageAckHandler?.(id); const pending = this.pendingSendAt.get(id); if (pending) { this.pendingSendAt.delete(id); this.fireHook(this.messageAckHooks, id, { kind: pending.kind, latencyMs: performance.now() - pending.at }); } if (wasQueued) this.emitQueueDepth(); }
+  private handleMessageFailed(id: string) { const wasQueued = this.inflightQueuedIds.delete(id); const wasResumeReplay = this.resumeReplayQueuedIds.delete(id); if (wasResumeReplay) removeQueuedMessage(this.queueScope, id); this.messageDeliveryFailureHandler?.(id); const pending = this.pendingSendAt.get(id); if (pending) { this.pendingSendAt.delete(id); this.fireHook(this.messageFailHooks, id, { kind: pending.kind }); } if (wasQueued || wasResumeReplay) this.emitQueueDepth(); }
   private handleSessionReady(xmpp: XmppClientInstance, lifecycle: SessionLifecycleEvent) {
     void this.runSessionReady(xmpp, lifecycle);
   }
@@ -2636,6 +2728,7 @@ export class BrowserXmppClient {
     this.setResumeStateHandle(xmpp.get_resume_state_handle?.() ?? null);
     const resumeState = xmpp.get_resume_state?.() ?? null;
     this.resumeState = resumeState ? { ...resumeState, resource: this.resource } : null;
+    this.seedNativeReplayQueueIds(this.resumeState);
     // Keep transient reconnect state in this JS context only. The
     // shared per-account persisted SM slot is a pagehide handoff for
     // true tab replacement; writing it during ordinary disconnects
@@ -2791,11 +2884,22 @@ export class BrowserXmppClient {
       while (after) {
         if (seenAfter.has(after)) throw new Error(`Reconnect catch-up repeated archive cursor for ${entry.key}`);
         seenAfter.add(after);
-        const page = await xmpp.fetch_dm_history_page(entry.key, 100, { type: "after", after }) as WasmMamPage;
+        let page: WasmMamPage;
+        try {
+          page = await xmpp.fetch_dm_history_page(entry.key, 100, { type: "after", after }) as WasmMamPage;
+        } catch (error) {
+          if (isMamCursorNotFound(classifyMamError(error))) {
+            const since = entry.since ?? this.catchup.getDmLastSeen(entry.key);
+            if (since) await this.runDmTimestampCatchup(xmpp, entry.key, since, sessionJid, entry.seenIds);
+            return;
+          }
+          throw error;
+        }
         if (!this.isCurrentConnectedXmpp(xmpp, sessionJid)) return;
+        if (pageContainsArchiveId(page, after)) throw new Error(`Reconnect catch-up received non-advancing archive cursor for ${entry.key}`);
         const nextAfter = this.applyDmCatchupPage(page, undefined, entry.seenIds);
         if (isMamPageComplete(page)) return;
-        if (!nextAfter) throw new Error(`Reconnect catch-up could not advance archive cursor for ${entry.key}`);
+        if (!nextAfter || nextAfter === after) throw new Error(`Reconnect catch-up could not advance archive cursor for ${entry.key}`);
         after = nextAfter;
       }
       return;
@@ -2816,11 +2920,22 @@ export class BrowserXmppClient {
       while (after) {
         if (seenAfter.has(after)) throw new Error(`Reconnect catch-up repeated archive cursor for ${entry.key}`);
         seenAfter.add(after);
-        const page = await xmpp.fetch_room_history_page(entry.key, 100, { type: "after", after }) as WasmMamPage;
+        let page: WasmMamPage;
+        try {
+          page = await xmpp.fetch_room_history_page(entry.key, 100, { type: "after", after }) as WasmMamPage;
+        } catch (error) {
+          if (isMamCursorNotFound(classifyMamError(error))) {
+            const since = entry.since ?? this.catchup.getRoomLastSeen(entry.key);
+            if (since) await this.runRoomTimestampCatchup(xmpp, entry.key, since, sessionJid, entry.seenIds);
+            return;
+          }
+          throw error;
+        }
         if (!this.isCurrentConnectedXmpp(xmpp, sessionJid)) return;
+        if (pageContainsArchiveId(page, after)) throw new Error(`Reconnect catch-up received non-advancing archive cursor for ${entry.key}`);
         const nextAfter = this.applyRoomCatchupPage(page, undefined, entry.seenIds);
         if (isMamPageComplete(page)) return;
-        if (!nextAfter) throw new Error(`Reconnect catch-up could not advance archive cursor for ${entry.key}`);
+        if (!nextAfter || nextAfter === after) throw new Error(`Reconnect catch-up could not advance archive cursor for ${entry.key}`);
         after = nextAfter;
       }
       return;

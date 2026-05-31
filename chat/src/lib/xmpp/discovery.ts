@@ -18,6 +18,7 @@ type DiscoveryRole = "owner" | "admin" | "moderator" | "member" | null;
 
 type HybridClient = Partial<WaddleClient> & {
   send_raw_iq?: (xml: string) => Promise<string>;
+  cancel_raw_iq?: (id: string) => Promise<void>;
 };
 
 export type DiscoInfoData = {
@@ -78,18 +79,36 @@ export function withIqTimeout<T>(
   to: string,
   node: string | undefined,
   timeoutMs?: number,
+  options: { cancel?: () => void | Promise<void> } = {},
 ): Promise<T> {
   // Read `DISCO_IQ_TIMEOUT_MS` at call time, not at function-definition
   // time, so `__setDiscoIqTimeoutForTest` correctly overrides for the
   // duration of a test case.
   const effectiveTimeout = timeoutMs ?? DISCO_IQ_TIMEOUT_MS;
+  let didTimeout = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new DiscoTimeoutError(to, node, effectiveTimeout)), effectiveTimeout);
+    timer = setTimeout(() => {
+      didTimeout = true;
+      reject(new DiscoTimeoutError(to, node, effectiveTimeout));
+    }, effectiveTimeout);
   });
-  return Promise.race([raw, timeout]).finally(() => {
+  return Promise.race([raw, timeout]).finally(async () => {
     if (timer !== undefined) clearTimeout(timer);
+    if (didTimeout) {
+      try {
+        await options.cancel?.();
+      } catch (err) {
+        console.warn("[disco] raw IQ cancellation failed", { to, node, err });
+      }
+    }
   });
+}
+
+function cancelRawIqOnTimeout(xmpp: HybridClient, id: string): { cancel?: () => Promise<void> } {
+  return typeof xmpp.cancel_raw_iq === "function"
+    ? { cancel: () => xmpp.cancel_raw_iq!(id) }
+    : {};
 }
 
 function parseXml(xml: string): Document {
@@ -171,6 +190,8 @@ async function sendDiscoInfo(xmpp: HybridClient, to: string, node?: string): Pro
       xmpp.send_raw_iq(`<iq type="get" id="${id}" to="${to}"><query xmlns="${DISCO_INFO_NS}"${nodeAttr}/></iq>`),
       to,
       node,
+      undefined,
+      cancelRawIqOnTimeout(xmpp, id),
     );
   } catch (err) {
     logDiscoFailure("info", to, node, err);
@@ -201,7 +222,7 @@ async function sendDiscoItems(xmpp: HybridClient, to: string, node?: string): Pr
   const xml = `<iq type="get" id="${id}" to="${to}"><query xmlns="${DISCO_ITEMS_NS}"${nodeAttr}/></iq>`;
   let responseXml: string;
   try {
-    responseXml = await withIqTimeout(xmpp.send_raw_iq(xml), to, node);
+    responseXml = await withIqTimeout(xmpp.send_raw_iq(xml), to, node, undefined, cancelRawIqOnTimeout(xmpp, id));
   } catch (err) {
     logDiscoFailure("items", to, node, err);
     throw err;
@@ -230,6 +251,8 @@ async function sendPubsubItems(xmpp: HybridClient, to: string, node: string): Pr
       xmpp.send_raw_iq(`<iq type="get" id="${id}" to="${to}"><pubsub xmlns="${NS_PUBSUB}"><items node="${node}"/></pubsub></iq>`),
       to,
       node,
+      undefined,
+      cancelRawIqOnTimeout(xmpp, id),
     );
   } catch (err) {
     logDiscoFailure("pubsub", to, node, err);

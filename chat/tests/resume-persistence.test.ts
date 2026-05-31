@@ -13,6 +13,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { ReconnectCatchup } from "../src/lib/xmpp/reconnect-catchup";
 import { BrowserXmppClient } from "../src/lib/xmpp/client";
+import { enqueueQueuedMessage, listQueuedDmMessages } from "../src/lib/outbound-queue-store";
 import type { WaddleSession } from "../src/lib/server-auth";
 import {
   createLocalStorageResumePersistence,
@@ -82,27 +83,33 @@ afterEach(() => {
 function inMemoryPersistence(): ResumePersistence & {
   catchupSnapshot: () => PersistedReconnectCatchup | null;
   smSnapshot: () => PersistedSmResumeState | null;
+  joinedRoomsSnapshot: () => string[];
+  clearSmCount: () => number;
 } {
   let catchup: PersistedReconnectCatchup | null = null;
   let sm: PersistedSmResumeState | null = null;
+  let joinedRooms: string[] = [];
+  let smClears = 0;
   return {
     loadCatchup: () => catchup,
     saveCatchup: (snapshot) => { catchup = snapshot; },
     clearCatchup: () => { catchup = null; },
-  loadSm: () => sm,
+    loadSm: () => sm,
     consumeSm: () => {
       const current = sm;
       sm = null;
       return current;
     },
     saveSm: (state) => { sm = state; },
-    clearSm: () => { sm = null; },
+    clearSm: () => { smClears += 1; sm = null; },
     preparePagehideHandoff: () => undefined,
-    loadJoinedRooms: () => [],
-    saveJoinedRooms: () => undefined,
-    clearJoinedRooms: () => undefined,
+    loadJoinedRooms: () => [...joinedRooms],
+    saveJoinedRooms: (rooms) => { joinedRooms = [...rooms]; },
+    clearJoinedRooms: () => { joinedRooms = []; },
     catchupSnapshot: () => catchup,
     smSnapshot: () => sm,
+    joinedRoomsSnapshot: () => [...joinedRooms],
+    clearSmCount: () => smClears,
   };
 }
 
@@ -146,7 +153,7 @@ describe("ReconnectCatchup persistence — hydrate from snapshot on construct", 
     const c = new ReconnectCatchup(persistence);
     const entries = c.onSessionStarted();
     expect(entries).toEqual([
-      { kind: "dm", key: "bob@example.com", after: "dm-arch-1" },
+      { kind: "dm", key: "bob@example.com", after: "dm-arch-1", since: "2026-05-20T10:00:00.000Z" },
     ]);
   });
 
@@ -177,7 +184,11 @@ describe("ReconnectCatchup persistence — writes back on advance", () => {
     expect(snapshot).not.toBeNull();
     expect(snapshot!.dmLastSeen).toContainEqual([
       "bob@example.com",
-      { timestamp: "2026-05-20T10:00:00.000Z", archiveId: "dm-arch-1" },
+      {
+        timestamp: "2026-05-20T10:00:00.000Z",
+        archiveId: "dm-arch-1",
+        archiveTimestamp: "2026-05-20T10:00:00.000Z",
+      },
     ]);
   });
 
@@ -232,7 +243,12 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
 
   test("round-trips an SM resume state through localStorage (with internal savedAt)", () => {
     const persistence = createLocalStorageResumePersistence("alice@example.com");
-    const state = { previd: "abc-123", inboundH: 42, outboundH: 7 };
+    const state = {
+      previd: "abc-123",
+      inboundH: 42,
+      outboundH: 7,
+      unhandledOutboundStanzas: ["<message xmlns='jabber:client' id='m1'/>"],
+    };
     persistence.saveSm(state);
     // Round-trip strips the internal `savedAt` so the caller gets
     // the same shape it passed in.
@@ -390,6 +406,146 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       createLocalStorageResumePersistence("alice@example.com", "tab-a"),
     );
     expect(tabA.fullJid).toBe("alice@example.com/web-existing-resource");
+  });
+
+  test("BrowserXmppClient does not persist lossy SM state while outbound stanzas are unacked", () => {
+    const persistence = inMemoryPersistence();
+    persistence.saveJoinedRooms(["general@conference.example.com"]);
+    const consumedClearCount = persistence.clearSmCount();
+    const client = new BrowserXmppClient(
+      { jid: "alice@example.com", username: "alice" } as WaddleSession,
+      persistence,
+    );
+    (client as unknown as {
+      xmpp: { get_resume_state: () => { previd: string; inboundH: number; outboundH: number; hasUnackedOutbound: boolean } };
+    }).xmpp = {
+      get_resume_state: () => ({
+        previd: "live-sm-id",
+        inboundH: 4,
+        outboundH: 9,
+        hasUnackedOutbound: true,
+      }),
+    };
+
+    client.persistResumeStateForPageHide();
+
+    expect(persistence.smSnapshot()).toBeNull();
+    expect(persistence.clearSmCount()).toBe(consumedClearCount + 1);
+    expect(persistence.joinedRoomsSnapshot()).toEqual(["general@conference.example.com"]);
+  });
+
+  test("BrowserXmppClient persists SM state when unacked outbound stanzas are serializable", () => {
+    const persistence = inMemoryPersistence();
+    const client = new BrowserXmppClient(
+      { jid: "alice@example.com", username: "alice" } as WaddleSession,
+      persistence,
+    );
+    (client as unknown as {
+      xmpp: {
+        get_resume_state: () => {
+          previd: string;
+          inboundH: number;
+          outboundH: number;
+          hasUnackedOutbound: boolean;
+          unhandledOutboundStanzas: string[];
+        };
+      };
+    }).xmpp = {
+      get_resume_state: () => ({
+        previd: "live-sm-id",
+        inboundH: 4,
+        outboundH: 9,
+        hasUnackedOutbound: true,
+        unhandledOutboundStanzas: ["<message xmlns='jabber:client' id='unacked'/>"],
+      }),
+    };
+
+    client.persistResumeStateForPageHide();
+
+    expect(persistence.smSnapshot()).toMatchObject({
+      previd: "live-sm-id",
+      inboundH: 4,
+      outboundH: 9,
+      unhandledOutboundStanzas: ["<message xmlns='jabber:client' id='unacked'/>"],
+    });
+  });
+
+  test("BrowserXmppClient treats restored SM message stanzas as inflight queued sends", () => {
+    const persistence = inMemoryPersistence();
+    persistence.saveSm({
+      previd: "live-sm-id",
+      inboundH: 4,
+      outboundH: 9,
+      unhandledOutboundStanzas: ["<message xmlns='jabber:client' id='dm-live-1'/>"],
+    });
+    enqueueQueuedMessage("alice@example.com", {
+      kind: "dm",
+      id: "dm-live-1",
+      createdAt: new Date().toISOString(),
+      peerJid: "bob@example.com",
+      body: "hello",
+    });
+
+    const client = new BrowserXmppClient(
+      { jid: "alice@example.com", username: "alice" } as WaddleSession,
+      persistence,
+    );
+
+    (client as unknown as { handleMessageAck: (id: string) => void }).handleMessageAck("dm-live-1");
+
+    expect(listQueuedDmMessages("alice@example.com", "bob@example.com")).toEqual([]);
+  });
+
+  test("BrowserXmppClient removes restored SM queue entries when native fallback retry owns resend", () => {
+    const persistence = inMemoryPersistence();
+    persistence.saveSm({
+      previd: "live-sm-id",
+      inboundH: 4,
+      outboundH: 9,
+      unhandledOutboundStanzas: ["<message xmlns='jabber:client' id='dm-live-1'/>"],
+    });
+    enqueueQueuedMessage("alice@example.com", {
+      kind: "dm",
+      id: "dm-live-1",
+      createdAt: new Date().toISOString(),
+      peerJid: "bob@example.com",
+      body: "hello",
+    });
+
+    const client = new BrowserXmppClient(
+      { jid: "alice@example.com", username: "alice" } as WaddleSession,
+      persistence,
+    );
+
+    (client as unknown as { handleMessageFailed: (id: string) => void }).handleMessageFailed("dm-live-1");
+
+    expect(listQueuedDmMessages("alice@example.com", "bob@example.com")).toEqual([]);
+  });
+
+  test("BrowserXmppClient persists SM state when the native replay queue is empty", () => {
+    const persistence = inMemoryPersistence();
+    const client = new BrowserXmppClient(
+      { jid: "alice@example.com", username: "alice" } as WaddleSession,
+      persistence,
+    );
+    (client as unknown as {
+      xmpp: { get_resume_state: () => { previd: string; inboundH: number; outboundH: number; hasUnackedOutbound: boolean } };
+    }).xmpp = {
+      get_resume_state: () => ({
+        previd: "live-sm-id",
+        inboundH: 4,
+        outboundH: 9,
+        hasUnackedOutbound: false,
+      }),
+    };
+
+    client.persistResumeStateForPageHide();
+
+    expect(persistence.smSnapshot()).toMatchObject({
+      previd: "live-sm-id",
+      inboundH: 4,
+      outboundH: 9,
+    });
   });
 
   test("round-trips retained joined rooms for refresh-time group call discovery", () => {
