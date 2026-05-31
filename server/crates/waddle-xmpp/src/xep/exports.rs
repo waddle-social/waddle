@@ -405,7 +405,7 @@ pub use super::xep0513::{
     FIELD_MENTIONS_INDIVIDUAL, NS_EXPLICIT_MENTIONS,
 };
 
-pub use super::xep0508::{
+pub use super::xep_waddle_forums::{
     build_thread_create_element, build_thread_reply_element, extract_forum_action,
     has_forum_action, is_forum_element, set_thread_create, set_thread_reply, strip_forum,
     ForumAction, ForumCarrier, ThreadCreate, ThreadReply, ThreadSummary, FIELD_FORUM_MODE,

@@ -2,7 +2,7 @@ package xmpp_e2e_scenarios
 
 scenario: #Scenario & {
 	name: "dm-delivery-and-mam"
-	xeps: ["XEP-0004", "XEP-0059", "XEP-0203", "XEP-0297", "XEP-0313"]
+	xeps: ["XEP-0004", "XEP-0059", "XEP-0297", "XEP-0313"]
 	users: {
 		alice: devices: phone: #Actor & {
 			user:     "alice"

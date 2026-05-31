@@ -33,6 +33,32 @@ scenario: #Scenario & {
 		#SendIq & {
 			actor: adminPhone
 			type:  "get"
+			id:    "cue-spaces-disco"
+			to:    "spaces.\(scenario.domain)"
+			payload: #XmlElement & {
+				name: "query"
+				ns:   "http://jabber.org/protocol/disco#info"
+			}
+		},
+		#ExpectIq & {
+			target: adminPhone
+			id:     "cue-spaces-disco"
+			type:   "result"
+			contains: [
+				"http://jabber.org/protocol/pubsub#subscribe",
+				"http://jabber.org/protocol/pubsub#create-nodes",
+				"http://jabber.org/protocol/pubsub#config-node",
+				"http://jabber.org/protocol/pubsub#meta-data",
+				"http://jabber.org/protocol/pubsub#delete-nodes",
+				"http://jabber.org/protocol/pubsub#delete-items",
+				"http://jabber.org/protocol/pubsub#retract-items",
+				"http://jabber.org/protocol/pubsub#multi-items",
+				"http://jabber.org/protocol/pubsub#item-ids",
+			]
+		},
+		#SendIq & {
+			actor: adminPhone
+			type:  "get"
 			id:    "cue-general-space-items"
 			to:    "spaces.\(scenario.domain)"
 			payload: #XmlElement & {

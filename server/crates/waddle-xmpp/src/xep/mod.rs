@@ -121,8 +121,8 @@
 //!   to here" sync via the `urn:xmpp:mds:displayed:0` PEP node.
 //! - **XEP-0513**: Explicit Mentions - @everyone, @here, @role, @user
 //!   mentions with notification decision logic.
-//! - Private Waddle MUC thread metadata, used until XEP-0508 is implemented
-//!   through PubSub/XEP-0472 forum nodes.
+//! - Private Waddle MUC thread metadata, used until official forum support is
+//!   implemented through PubSub/XEP-0472 forum nodes.
 //! - **XEP-0503**: Server-side Spaces - Community discovery via pubsub.
 
 pub mod xep0004;
@@ -197,9 +197,9 @@ pub mod xep0492;
 pub mod xep0500;
 pub mod xep0502;
 pub mod xep0503;
-pub mod xep0508;
 pub mod xep0513;
 pub mod xep_waddle_dnd;
+pub mod xep_waddle_forums;
 pub mod xep_waddle_livekit_transport;
 pub mod xep_waddle_pin;
 
