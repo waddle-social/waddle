@@ -1,19 +1,29 @@
 // XEP-0492 per-chat notification settings (#532), backed by the
-// user's XEP-0402 PEP bookmarks. Account-wide entries only — no
-// identity-specific (identity-category / identity-type) entries in
-// this slice. Per-DM settings are deferred to #720 because the DM
-// carrier for XEP-0492 is not yet decided.
+// user's XEP-0402 PEP bookmarks for MUCs. Account-wide entries only —
+// no identity-specific (identity-category / identity-type) entries in
+// this slice. Per-DM settings (#720) are now implemented via the
+// `urn:waddle:dm-bookmarks:0` PEP node — a DM has no XEP-0402 bookmark
+// (those carry room name + autojoin, which don't apply to a 1:1 chat),
+// so its XEP-0492 `<notify/>` mode and #719 rich-payload opt-in live in
+// that dedicated node instead. Both result sets merge into one
+// JID-keyed cache; DM JIDs and room JIDs never collide, so a single
+// cache and a single `kind`-driven resolver serve both.
 //
 // Cross-client coherence: we do NOT yet subscribe to PEP `+notify`
-// headlines on `urn:xmpp:bookmarks:1` (XEP-0163 §4.4). The chat
-// re-fetches on every fresh session-ready via `hydrate(client)`,
-// so a setting changed in another tab reaches this tab on the next
-// reconnect. Wiring the conformant headline route is deferred to
-// a follow-up slice — it adds a new WASM event pipeline that's
-// scoped out of #532.
+// headlines on `urn:xmpp:bookmarks:1` / `urn:waddle:dm-bookmarks:0`
+// (XEP-0163 §4.4). The chat re-fetches on every fresh session-ready via
+// `hydrate(client)`, so a setting changed in another tab reaches this
+// tab on the next reconnect. Wiring the conformant headline route is
+// deferred to a follow-up slice — it adds a new WASM event pipeline
+// that's scoped out of #532 / #720.
 
 import { ref, shallowRef, type Ref } from "vue";
-import type { BrowserXmppClient, NotifyMode, UserBookmarkItem } from "@/lib/xmpp-client";
+import type {
+  BrowserXmppClient,
+  DmBookmarkItem,
+  NotifyMode,
+  UserBookmarkItem,
+} from "@/lib/xmpp-client";
 
 /** User-visible copy for one notification mode, keyed by the XEP wire
  * name so the radio control and the i18n surface map 1:1.
@@ -31,12 +41,10 @@ export const NOTIFY_MODE_HINT: Record<NotifyMode, string> = {
   never: "Don't notify me. Messages still appear in the chat.",
 };
 
-/** Conversation discriminator used by `resolveDefaultNotifyMode`.
- *
- * #532 v1 ships group/channel settings; per-DM is deferred to #720
- * because the DM carrier is undecided, but the resolver covers both
- * so the chat doesn't have to special-case once the DM slice lands.
- */
+/** Conversation discriminator used by `resolveDefaultNotifyMode` and
+ * by [[NotifySettingsStore.setMode]] to route the publish to the right
+ * PEP carrier: `direct-chat` → `urn:waddle:dm-bookmarks:0` (#720), the
+ * group kinds → XEP-0402 bookmarks (#532). */
 export type ConversationKind = "direct-chat" | "private-group" | "public-group";
 
 /** XEP-0492 §3 last paragraph: "always" for direct chats and private
@@ -90,20 +98,26 @@ export interface NotifySettingsStore {
   /** True while the initial bookmark fetch is in flight; the UI uses
    * this to disable the mode picker until the cache is hydrated. */
   readonly hydrating: Ref<boolean>;
-  /** Hydrate the cache by fetching every XEP-0402 bookmark from the
-   * user's PEP node. Re-entrancy guarded — concurrent calls
-   * (`onConnectionReady` + lifecycle handler firing together)
-   * collapse into one in-flight fetch. */
+  /** Hydrate the cache by fetching every XEP-0402 MUC bookmark AND
+   * every `urn:waddle:dm-bookmarks:0` per-DM entry from the user's PEP
+   * nodes, merging both into the one JID-keyed cache (#720).
+   * Re-entrancy guarded — concurrent calls (`onConnectionReady` +
+   * lifecycle handler firing together) collapse into one in-flight
+   * fetch. */
   hydrate(client: BrowserXmppClient): Promise<void>;
-  /** Publish a new notification mode for one room and update the
-   * cached bookmark on success. Returns `"ok"` when the publish
-   * round-trip succeeded, `"node-config-mismatch"` when the server
-   * rejected with `precondition-not-met` (typically a pre-existing
-   * XEP-0223-style node with `access_model=open`), `"error"` for
-   * any other failure. */
+  /** Publish a new notification mode for one conversation and update
+   * the cached entry on success. The `kind` routes the publish to the
+   * right PEP carrier: `direct-chat` → `urn:waddle:dm-bookmarks:0`
+   * (#720), group kinds → the XEP-0402 bookmark (#532). Returns `"ok"`
+   * when the publish round-trip succeeded (including the DM `removed`
+   * case, where reverting to the §3 default retracts the PEP item and
+   * the cache entry is dropped), `"node-config-mismatch"` when the
+   * server rejected with `precondition-not-met` (typically a
+   * pre-existing XEP-0223-style node with `access_model=open`),
+   * `"error"` for any other failure. */
   setMode(
     client: BrowserXmppClient,
-    opts: { roomJid: string; mode: NotifyMode; name?: string },
+    opts: { roomJid: string; mode: NotifyMode; kind: ConversationKind; name?: string },
   ): Promise<SetModeResult>;
   /** Resolve the effective mode for `roomJid`. */
   getMode(roomJid: string, kind: ConversationKind): NotifyMode;
@@ -163,6 +177,20 @@ export function createNotifySettingsStore(): NotifySettingsStore {
     bookmarks.value = next;
   }
 
+  // Adapt a `urn:waddle:dm-bookmarks:0` entry to the cache's
+  // `UserBookmarkItem` shape (#720). A DM has no XEP-0402 room name or
+  // autojoin, so those slots are `null` / `false`; only the JID,
+  // `<notify/>` mode, and #719 rich-payload opt-in carry over.
+  function dmToCacheItem(item: DmBookmarkItem): UserBookmarkItem {
+    return {
+      jid: item.jid,
+      name: null,
+      autojoin: false,
+      notifyMode: item.notifyMode,
+      richPayloadOptIn: item.richPayloadOptIn,
+    };
+  }
+
   async function hydrate(client: BrowserXmppClient): Promise<void> {
     // Re-entrancy guard — round-8 UX reviewer P2. `onConnectionReady`
     // and the session-lifecycle handler both fire `hydrate` on first
@@ -178,18 +206,24 @@ export function createNotifySettingsStore(): NotifySettingsStore {
     const myGen = generation;
     hydrating.value = true;
     try {
-      // Defence-in-depth — `client.fetchUserBookmarks` is supposed
-      // to always resolve to a (possibly empty) array, but the
+      // Defence-in-depth — both fetches are supposed to always
+      // resolve to a (possibly empty) array, but the
       // session-lifecycle handler invokes hydrate with `void`, so
       // any thrown rejection from a lower layer would surface as
       // an unhandled Promise rejection on flaky networks. Catch
       // and log, then proceed without committing. Round-14 PR
-      // review.
-      let items: UserBookmarkItem[];
+      // review. Fetch the MUC bookmarks and the per-DM entries
+      // concurrently — they hit separate PEP nodes (#720) — then
+      // merge both into the one JID-keyed cache.
+      let mucItems: UserBookmarkItem[];
+      let dmItems: DmBookmarkItem[];
       try {
-        items = await client.fetchUserBookmarks();
+        [mucItems, dmItems] = await Promise.all([
+          client.fetchUserBookmarks(),
+          client.fetchDmBookmarks(),
+        ]);
       } catch (error) {
-        console.warn("[notify-settings] fetchUserBookmarks threw:", error);
+        console.warn("[notify-settings] bookmark fetch threw:", error);
         return;
       }
       if (myGen !== generation) {
@@ -198,7 +232,9 @@ export function createNotifySettingsStore(): NotifySettingsStore {
         // belong in the cache. Drop them on the floor.
         return;
       }
-      commit(items);
+      // DM JIDs and room JIDs never collide, so the merge is a plain
+      // concatenation into the JID-keyed map (#720).
+      commit([...mucItems, ...dmItems.map(dmToCacheItem)]);
     } finally {
       // Only clear the in-flight flag if we still own it. If a
       // reset() ran during our fetch it has already cleared the
@@ -209,10 +245,42 @@ export function createNotifySettingsStore(): NotifySettingsStore {
     }
   }
 
+  // Drop one JID from the cache without disturbing the rest. Used for
+  // the DM `removed` outcome (the entry reverted to its §3 default and
+  // the PEP item was retracted server-side, #720).
+  function dropFromCache(jid: string): void {
+    if (!(jid in bookmarks.value)) return;
+    const next = { ...bookmarks.value };
+    delete next[jid];
+    bookmarks.value = next;
+  }
+
   // Shared fetch-merge-publish path for both the notify mode and the
-  // rich-payload opt-in — they live in the same XEP-0402 bookmark
-  // `<notify>` element and so travel in one publish. #719.
+  // rich-payload opt-in — they live in the same `<notify>` element and
+  // so travel in one publish (#719). The `kind` routes the publish to
+  // the right PEP carrier: `direct-chat` → `urn:waddle:dm-bookmarks:0`
+  // (#720), group kinds → the XEP-0402 bookmark (#532).
   async function publish(
+    client: BrowserXmppClient,
+    opts: {
+      roomJid: string;
+      mode: NotifyMode;
+      kind: ConversationKind;
+      richPayloadOptIn: boolean;
+      name?: string;
+    },
+  ): Promise<SetModeResult> {
+    if (opts.kind === "direct-chat") {
+      return publishDm(client, {
+        roomJid: opts.roomJid,
+        mode: opts.mode,
+        richPayloadOptIn: opts.richPayloadOptIn,
+      });
+    }
+    return publishRoom(client, opts);
+  }
+
+  async function publishRoom(
     client: BrowserXmppClient,
     opts: { roomJid: string; mode: NotifyMode; richPayloadOptIn: boolean; name?: string },
   ): Promise<SetModeResult> {
@@ -229,7 +297,12 @@ export function createNotifySettingsStore(): NotifySettingsStore {
     // Round-13 PR review.
     let outcome: Awaited<ReturnType<typeof client.setRoomNotificationMode>>;
     try {
-      outcome = await client.setRoomNotificationMode(opts);
+      outcome = await client.setRoomNotificationMode({
+        roomJid: opts.roomJid,
+        mode: opts.mode,
+        name: opts.name,
+        richPayloadOptIn: opts.richPayloadOptIn,
+      });
     } catch (error) {
       console.warn("[notify-settings] setRoomNotificationMode threw:", error);
       return "error";
@@ -251,18 +324,59 @@ export function createNotifySettingsStore(): NotifySettingsStore {
     return "error";
   }
 
+  async function publishDm(
+    client: BrowserXmppClient,
+    opts: { roomJid: string; mode: NotifyMode; richPayloadOptIn: boolean },
+  ): Promise<SetModeResult> {
+    // Same generation-guard semantics as the room path — a logout /
+    // account-switch mid-publish must not let the prior account's DM
+    // entry commit into the new cache (#720).
+    const myGen = generation;
+    let outcome: Awaited<ReturnType<typeof client.setDmNotificationMode>>;
+    try {
+      outcome = await client.setDmNotificationMode({
+        dmJid: opts.roomJid,
+        mode: opts.mode,
+        richPayloadOptIn: opts.richPayloadOptIn,
+      });
+    } catch (error) {
+      console.warn("[notify-settings] setDmNotificationMode threw:", error);
+      return "error";
+    }
+    if (myGen !== generation) {
+      // Stale publish from a prior session; return the typed result
+      // but skip every cache mutation.
+      if (outcome.kind === "ok" || outcome.kind === "removed") return "ok";
+      if (outcome.kind === "node-config-mismatch") return "node-config-mismatch";
+      return "error";
+    }
+    if (outcome.kind === "ok") {
+      bookmarks.value = { ...bookmarks.value, [outcome.item.jid]: dmToCacheItem(outcome.item) };
+      return "ok";
+    }
+    if (outcome.kind === "removed") {
+      // The DM reverted to its §3 default (`always`) → the PEP item
+      // was retracted, so drop the cache entry and let the resolver
+      // fall back to the default. Still an "ok" from the UI's view.
+      dropFromCache(outcome.jid);
+      return "ok";
+    }
+    if (outcome.kind === "node-config-mismatch") return "node-config-mismatch";
+    return "error";
+  }
+
   async function setMode(
     client: BrowserXmppClient,
-    opts: { roomJid: string; mode: NotifyMode; name?: string },
+    opts: { roomJid: string; mode: NotifyMode; kind: ConversationKind; name?: string },
   ): Promise<SetModeResult> {
     // Changing the mode preserves the conversation's current rich-
-    // payload opt-in: both settings share one bookmark publish, so
-    // re-send the cached opt-in rather than letting the WASM bridge
-    // default it back to false and silently undo the user's choice.
-    // #719.
+    // payload opt-in: both settings share one publish, so re-send the
+    // cached opt-in rather than letting the bridge default it back to
+    // false and silently undo the user's choice. #719.
     return publish(client, {
       roomJid: opts.roomJid,
       mode: opts.mode,
+      kind: opts.kind,
       name: opts.name,
       richPayloadOptIn: getRichPayloadOptIn(opts.roomJid),
     });
@@ -274,11 +388,12 @@ export function createNotifySettingsStore(): NotifySettingsStore {
   ): Promise<SetModeResult> {
     // The opt-in nests in the `<advanced>` of the fallback `<notify>`
     // setting, so flipping it republishes the conversation's current
-    // effective mode unchanged (XEP-0492 §3 default when no bookmark
+    // effective mode unchanged (XEP-0492 §3 default when no entry
     // covers it yet). #719.
     return publish(client, {
       roomJid: opts.roomJid,
       mode: getMode(opts.roomJid, opts.kind),
+      kind: opts.kind,
       name: opts.name,
       richPayloadOptIn: opts.optIn,
     });

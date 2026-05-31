@@ -285,6 +285,20 @@ const memberButtonCopy = computed(() => {
           :client="xmppClient ?? null"
           :store="notifySettings"
         />
+        <!-- Per-DM XEP-0492 notify picker (#720). The DM's bare peer
+             JID keys the same unified store as channels; the
+             `direct-chat` kind routes the publish to the
+             `urn:waddle:dm-bookmarks:0` PEP node and resolves the §3
+             default (`always`). The rich-payload toggle (#719) is the
+             same control channels expose. -->
+        <NotifyModeButton
+          v-else-if="dmPeer?.peerJid"
+          :room-jid="dmPeer.peerJid"
+          :room-name="dmPeer.peerUsername"
+          conversation-kind="direct-chat"
+          :client="xmppClient ?? null"
+          :store="notifySettings"
+        />
         <button
           v-if="canManageChannels && channel"
           class="chat-icon-button chat-icon-button--md text-muted-foreground hover:bg-muted hover:text-foreground"

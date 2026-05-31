@@ -136,6 +136,7 @@ async function selectMode(mode: NotifyMode) {
       result = await props.store.setMode(props.client, {
         roomJid: props.roomJid,
         mode,
+        kind: props.conversationKind,
         name: props.roomName,
       });
     } catch (error) {

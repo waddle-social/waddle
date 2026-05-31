@@ -5,7 +5,9 @@ export {
 export type {
   AdminUserEntry,
   AdminUsersPage,
+  DmBookmarkItem,
   NotifyMode,
+  SetDmNotificationModeResult,
   SetRoomNotificationModeOutcome,
   UserBookmarkItem,
 } from "./client";
