@@ -351,7 +351,9 @@ export type SetRoomNotificationModeOutcome =
  * Structurally identical to [[UserBookmarkItem]] minus the MUC-only
  * `name` / `autojoin` attributes — a DM has no room name or autojoin.
  * The chat store merges DM and MUC entries into one JID-keyed cache;
- * DM JIDs and room JIDs never collide, so the unified cache works.
+ * Waddle's DM (user) and MUC (service) JIDs are disjoint in practice,
+ * and the server source-scopes its projection cleanup, so the unified
+ * cache is safe.
  * `notifyMode` is `null` when the entry exists but carries no
  * XEP-0492 `<notify/>` mode yet; the chat resolves `null` against the
  * `direct-chat` §3 default (`always`) via `resolveDefaultNotifyMode`.

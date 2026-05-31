@@ -726,13 +726,23 @@ async fn apply_projection_mutation_tx(
         NotificationSettingsProjectionMutation::Delete {
             owner_bare_jid,
             conversation_jid,
+            source,
         } => {
+            // Scope the delete to the deriving carrier's `source_node`.
+            // An empty/absent `<notify>` on one carrier MUST NOT clear a
+            // row the OTHER carrier wrote for the same `conversation_jid`
+            // (the DM vs XEP-0402 same-JID overlap the retract/eviction
+            // paths also guard).
             tx.execute(
                 r#"
                 DELETE FROM notification_settings_projection
-                WHERE owner_bare_jid = ? AND conversation_jid = ?
+                WHERE owner_bare_jid = ? AND conversation_jid = ? AND source_node = ?
                 "#,
-                crate::db_params![owner_bare_jid.to_string(), conversation_jid.to_string()],
+                crate::db_params![
+                    owner_bare_jid.to_string(),
+                    conversation_jid.to_string(),
+                    source.node(),
+                ],
             )
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;

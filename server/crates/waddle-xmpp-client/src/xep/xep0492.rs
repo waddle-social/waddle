@@ -1480,10 +1480,15 @@ mod tests {
 
     #[test]
     fn ns_waddle_dm_bookmarks_is_byte_stable() {
-        // Pins the wire value byte-compatible with the server module
-        // `waddle_xmpp::xep::xep_waddle_dm_bookmarks` and the core
-        // constant `waddle_xmpp_core::pubsub::pep`.
-        assert_eq!(NS_WADDLE_DM_BOOKMARKS, "urn:waddle:dm-bookmarks:0");
+        // Pin the client's own copy against the live core constant (the
+        // canonical node/namespace string) — NOT a hardcoded literal — so
+        // a core bump (e.g. to `urn:waddle:dm-bookmarks:1`) that forgets
+        // this client copy fails CI here rather than silently diverging
+        // the client's wire value from the server's (greptile review).
+        assert_eq!(
+            NS_WADDLE_DM_BOOKMARKS,
+            waddle_xmpp_core::pubsub::PEP_NODE_WADDLE_DM_BOOKMARKS
+        );
     }
 
     #[test]

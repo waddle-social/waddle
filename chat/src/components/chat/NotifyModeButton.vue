@@ -92,7 +92,7 @@ const disabled = computed(() => props.client === null || props.store.hydrating.v
 // self-service reset instead.
 const nodeMismatchMessage = computed(() =>
   props.conversationKind === "direct-chat"
-    ? "Your direct-message notification settings couldn't be saved — the storage node was created by an older client. Reset it from settings to fix this."
+    ? "Your direct-message notification settings couldn't be saved — their storage was created by an incompatible older client."
     : "This room's settings node was created by an older client. Ask a server admin to delete the node so Waddle can re-create it.",
 );
 

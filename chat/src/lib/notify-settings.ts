@@ -6,8 +6,13 @@
 // (those carry room name + autojoin, which don't apply to a 1:1 chat),
 // so its XEP-0492 `<notify/>` mode and #719 rich-payload opt-in live in
 // that dedicated node instead. Both result sets merge into one
-// JID-keyed cache; DM JIDs and room JIDs never collide, so a single
-// cache and a single `kind`-driven resolver serve both.
+// JID-keyed cache: Waddle's MUC bookmarks are keyed by MUC-service JIDs
+// (`room@conference.…`) and DM bookmarks by user bare JIDs (`user@…`) —
+// disjoint spaces in practice — so a single cache and a single
+// `kind`-driven resolver serve both. The server additionally
+// source-scopes its projection cleanup (`source_node`), so even a
+// malformed cross-carrier item id sharing a JID cannot corrupt push
+// delivery; this cache is only the client-side read model.
 //
 // Cross-client coherence: we do NOT yet subscribe to PEP `+notify`
 // headlines on `urn:xmpp:bookmarks:1` / `urn:waddle:dm-bookmarks:0`
@@ -232,8 +237,10 @@ export function createNotifySettingsStore(): NotifySettingsStore {
         // belong in the cache. Drop them on the floor.
         return;
       }
-      // DM JIDs and room JIDs never collide, so the merge is a plain
-      // concatenation into the JID-keyed map (#720).
+      // Waddle's MUC (service) and DM (user) bookmark JIDs occupy
+      // disjoint spaces, so the merge is a plain concatenation into the
+      // JID-keyed map (#720); see the module header on cross-carrier
+      // safety.
       commit([...mucItems, ...dmItems.map(dmToCacheItem)]);
     } finally {
       // Only clear the in-flight flag if we still own it. If a

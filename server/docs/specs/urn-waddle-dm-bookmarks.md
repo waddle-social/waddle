@@ -129,8 +129,13 @@ Publishes and retractions to the DM node feed the shared
   row in the same transaction (same pattern as the bookmarks /
   `urn:waddle:dnd:0` nodes).
 - The push-evaluation read path (`effective_setting*`) is source-agnostic
-  and unchanged — a DM row and a MUC row are indistinguishable to the
-  reader, and DM/MUC JIDs never collide.
+  and unchanged — a DM row and a MUC row are read the same way. Each row
+  records its `source_node`, and every cross-carrier cleanup
+  (retract, eviction, node delete, and a publish that clears an override)
+  is **source-scoped**, so even a malformed item id shared between the DM
+  and XEP-0402 carriers cannot clobber the other carrier's row. (Waddle's
+  own MUC and DM bookmark JIDs occupy disjoint spaces, so this is a
+  defence-in-depth guard rather than an expected case.)
 
 ### Validation
 

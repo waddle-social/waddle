@@ -102,6 +102,13 @@ pub enum NotificationSettingsProjectionMutation {
     Delete {
         owner_bare_jid: BareJid,
         conversation_jid: BareJid,
+        /// The carrier whose ingestion derived this delete. The applied
+        /// DELETE is scoped to this `source_node` so a publish that
+        /// clears one carrier's override (an empty/absent `<notify>`)
+        /// cannot clobber a row written by the OTHER carrier sharing the
+        /// same `conversation_jid` — the DM vs XEP-0402 same-JID overlap
+        /// the retract/eviction paths already guard against.
+        source: NotificationSettingsSource,
     },
 }
 
@@ -397,6 +404,7 @@ pub fn derive_validated_bookmark_projection_mutation(
         return Ok(NotificationSettingsProjectionMutation::Delete {
             owner_bare_jid: owner_bare_jid.clone(),
             conversation_jid: bookmark.jid.clone(),
+            source: NotificationSettingsSource::Xep0402Bookmarks,
         });
     };
 
@@ -406,6 +414,7 @@ pub fn derive_validated_bookmark_projection_mutation(
             return Ok(NotificationSettingsProjectionMutation::Delete {
                 owner_bare_jid: owner_bare_jid.clone(),
                 conversation_jid: bookmark.jid.clone(),
+                source: NotificationSettingsSource::Xep0402Bookmarks,
             });
         }
         Err(error) => return Err(error.into()),
@@ -491,6 +500,7 @@ pub fn derive_dm_bookmark_projection_mutation(
         return Ok(NotificationSettingsProjectionMutation::Delete {
             owner_bare_jid: owner_bare_jid.clone(),
             conversation_jid: dm_bookmark.jid.clone(),
+            source: NotificationSettingsSource::WaddleDmBookmarks,
         });
     };
 
@@ -500,6 +510,7 @@ pub fn derive_dm_bookmark_projection_mutation(
             return Ok(NotificationSettingsProjectionMutation::Delete {
                 owner_bare_jid: owner_bare_jid.clone(),
                 conversation_jid: dm_bookmark.jid.clone(),
+                source: NotificationSettingsSource::WaddleDmBookmarks,
             });
         }
         Err(error) => return Err(error.into()),
@@ -965,6 +976,7 @@ mod tests {
             NotificationSettingsProjectionMutation::Delete {
                 owner_bare_jid: owner,
                 conversation_jid: bare("room@muc.example.com"),
+                source: NotificationSettingsSource::Xep0402Bookmarks,
             }
         );
     }
@@ -996,6 +1008,7 @@ mod tests {
             NotificationSettingsProjectionMutation::Delete {
                 owner_bare_jid: owner,
                 conversation_jid: bare("room@muc.example.com"),
+                source: NotificationSettingsSource::Xep0402Bookmarks,
             }
         );
     }
@@ -1053,6 +1066,7 @@ mod tests {
             NotificationSettingsProjectionMutation::Delete {
                 owner_bare_jid: owner,
                 conversation_jid: bare("bob@example.com"),
+                source: NotificationSettingsSource::WaddleDmBookmarks,
             }
         );
     }
