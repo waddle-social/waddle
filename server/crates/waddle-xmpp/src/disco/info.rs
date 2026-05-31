@@ -99,6 +99,16 @@ mod tests {
     }
 
     #[test]
+    fn server_features_do_not_advertise_message_styling_parser() {
+        // XEP-0393 discovery is for entities that support rendering
+        // message styling. The server library exposes a conformant body
+        // parser and `<unstyled/>` helper, but routing/archive entities
+        // must not advertise the client-rendering feature from that alone.
+        let features = server_features();
+        assert!(!features.contains(&Feature::new(crate::xep::NS_STYLING)));
+    }
+
+    #[test]
     fn call_features_returns_eight_canonical_namespaces() {
         let features = call_features();
         let expected = [

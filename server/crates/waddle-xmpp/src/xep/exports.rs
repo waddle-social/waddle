@@ -173,8 +173,9 @@ pub use waddle_xmpp_core::xep0392::{
 };
 
 pub use super::xep0393::{
-    blocks_to_html, blocks_to_plain, parse_blocks, parse_spans, spans_to_html, spans_to_plain,
-    Block, Span, StyledBody,
+    add_unstyled, blocks_to_html, blocks_to_plain, build_unstyled_element, has_unstyled,
+    is_unstyled_element, parse_blocks, parse_message_body, parse_spans, spans_to_html,
+    spans_to_plain, strip_unstyled, Block, Span, StyledBody, StylingCarrier, NS_STYLING,
 };
 
 pub use waddle_xmpp_core::xep0359::{

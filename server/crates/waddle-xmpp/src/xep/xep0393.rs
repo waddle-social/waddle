@@ -1,7 +1,8 @@
 //! XEP-0393: Message Styling
 //!
 //! Parses inline text styling directives from XMPP message bodies.
-//! This is a body-level formatting spec (not XML element payloads).
+//! The text styling grammar operates on `<body/>` text; the
+//! `<unstyled/>` payload is the stanza-level opt-out defined by the XEP.
 //!
 //! ## Supported Styles
 //!
@@ -14,11 +15,18 @@
 //!
 //! ## Rules
 //!
-//! - Styling directives must start at a word boundary (start of line,
-//!   or preceded by whitespace/punctuation).
-//! - Closing directive must end at a word boundary.
+//! - Styling directives must start at the beginning of a line, after
+//!   whitespace, or after a different opening styling directive.
+//! - Opening directives must not be followed by whitespace; closing
+//!   directives must not be preceded by whitespace.
 //! - Inline code and preformatted blocks suppress all other formatting.
 //! - Spans cannot cross line boundaries (except preformatted blocks).
+
+use minidom::Element;
+use xmpp_parsers::message::Message;
+
+/// Namespace for XEP-0393 Message Styling.
+pub const NS_STYLING: &str = "urn:xmpp:styling:0";
 
 /// A parsed span of styled text.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +77,70 @@ impl StyledBody for String {
     }
 }
 
+/// Trait for XMPP messages whose styling payload can be interpreted.
+pub trait StylingCarrier {
+    /// Returns `true` when the message carries XEP-0393 `<unstyled/>`.
+    fn styling_disabled(&self) -> bool;
+
+    /// Parse the default body, respecting the XEP-0393 `<unstyled/>` opt-out.
+    fn styled_body_blocks(&self) -> Option<Vec<Block>>;
+}
+
+impl StylingCarrier for Message {
+    fn styling_disabled(&self) -> bool {
+        has_unstyled(self)
+    }
+
+    fn styled_body_blocks(&self) -> Option<Vec<Block>> {
+        parse_message_body(self)
+    }
+}
+
+// ── Stanza-level opt-out ────────────────────────────────────────────
+
+/// Check if an element is `<unstyled xmlns='urn:xmpp:styling:0'/>`.
+pub fn is_unstyled_element(elem: &Element) -> bool {
+    elem.ns() == NS_STYLING
+        && elem.name() == "unstyled"
+        && elem.children().next().is_none()
+        && elem.text().is_empty()
+}
+
+/// Check if a message carries the XEP-0393 message-level styling opt-out.
+pub fn has_unstyled(msg: &Message) -> bool {
+    msg.payloads.iter().any(is_unstyled_element)
+}
+
+/// Build an empty `<unstyled xmlns='urn:xmpp:styling:0'/>` element.
+pub fn build_unstyled_element() -> Element {
+    Element::builder("unstyled", NS_STYLING).build()
+}
+
+/// Add the XEP-0393 message-level styling opt-out if it is not present.
+pub fn add_unstyled(msg: &mut Message) {
+    if !has_unstyled(msg) {
+        msg.payloads.push(build_unstyled_element());
+    }
+}
+
+/// Remove all XEP-0393 styling opt-out payloads from a message.
+pub fn strip_unstyled(msg: &mut Message) {
+    msg.payloads.retain(|elem| !is_unstyled_element(elem));
+}
+
+/// Parse the default message body, bypassing styling when `<unstyled/>` exists.
+pub fn parse_message_body(msg: &Message) -> Option<Vec<Block>> {
+    let body = default_body(msg)?;
+    if has_unstyled(msg) {
+        return Some(vec![Block::Paragraph(vec![Span::Plain(body.to_owned())])]);
+    }
+    Some(parse_blocks(body))
+}
+
+fn default_body(msg: &Message) -> Option<&str> {
+    msg.bodies.get("").map(String::as_str)
+}
+
 // ── Block-level parsing ──────────────────────────────────────────────
 
 /// Parse a message body into blocks.
@@ -81,7 +153,7 @@ pub fn parse_blocks(input: &str) -> Vec<Block> {
         if line.starts_with("```") {
             let mut code = String::new();
             for inner in lines.by_ref() {
-                if inner.starts_with("```") {
+                if inner == "```" {
                     break;
                 }
                 if !code.is_empty() {
@@ -94,18 +166,13 @@ pub fn parse_blocks(input: &str) -> Vec<Block> {
         }
 
         // Block quote
-        if line.starts_with("> ") || line == ">" {
+        if let Some(stripped) = quote_line_body(line) {
             let mut quote_lines = Vec::new();
-            let stripped = if line == ">" { "" } else { &line[2..] };
             quote_lines.push(stripped.to_owned());
 
             while let Some(next) = lines.peek() {
-                if next.starts_with("> ") || *next == ">" {
-                    let s = if *next == ">" {
-                        "".to_owned()
-                    } else {
-                        next[2..].to_owned()
-                    };
+                if let Some(stripped) = quote_line_body(next) {
+                    let s = stripped.to_owned();
                     quote_lines.push(s);
                     lines.next();
                 } else {
@@ -132,6 +199,19 @@ pub fn parse_blocks(input: &str) -> Vec<Block> {
     blocks
 }
 
+fn quote_line_body(line: &str) -> Option<&str> {
+    let quoted = line.strip_prefix('>')?;
+    Some(trim_one_leading_whitespace(quoted))
+}
+
+fn trim_one_leading_whitespace(input: &str) -> &str {
+    input
+        .char_indices()
+        .next()
+        .filter(|(_, ch)| ch.is_whitespace())
+        .map_or(input, |(idx, ch)| &input[idx + ch.len_utf8()..])
+}
+
 // ── Inline span parsing ─────────────────────────────────────────────
 
 /// Parse inline styling spans from a single line of text.
@@ -145,8 +225,8 @@ pub fn parse_spans(input: &str) -> Vec<Span> {
         let ch = chars[pos];
 
         // Inline code: ` ... `
-        if ch == '`' {
-            if let Some(end) = find_closing_char(&chars, pos + 1, '`') {
+        if ch == '`' && is_span_start(&chars, pos, ch) {
+            if let Some(end) = find_closing_directive(&chars, pos, ch) {
                 flush_plain(&mut plain, &mut spans);
                 let code: String = chars[pos + 1..end].iter().collect();
                 spans.push(Span::InlineCode(code));
@@ -156,22 +236,20 @@ pub fn parse_spans(input: &str) -> Vec<Span> {
         }
 
         // Styled spans: * _ ~
-        if matches!(ch, '*' | '_' | '~') && is_span_start(&chars, pos) {
-            if let Some(end) = find_closing_char(&chars, pos + 1, ch) {
-                if is_span_end(&chars, end) {
-                    flush_plain(&mut plain, &mut spans);
-                    let inner: String = chars[pos + 1..end].iter().collect();
-                    let inner_spans = parse_spans(&inner);
-                    let styled = match ch {
-                        '*' => Span::Bold(inner_spans),
-                        '_' => Span::Italic(inner_spans),
-                        '~' => Span::Strikethrough(inner_spans),
-                        _ => unreachable!(),
-                    };
-                    spans.push(styled);
-                    pos = end + 1;
-                    continue;
-                }
+        if matches!(ch, '*' | '_' | '~') && is_span_start(&chars, pos, ch) {
+            if let Some(end) = find_closing_directive(&chars, pos, ch) {
+                flush_plain(&mut plain, &mut spans);
+                let inner: String = chars[pos + 1..end].iter().collect();
+                let inner_spans = parse_spans(&inner);
+                let styled = match ch {
+                    '*' => Span::Bold(inner_spans),
+                    '_' => Span::Italic(inner_spans),
+                    '~' => Span::Strikethrough(inner_spans),
+                    _ => unreachable!(),
+                };
+                spans.push(styled);
+                pos = end + 1;
+                continue;
             }
         }
 
@@ -189,31 +267,62 @@ fn flush_plain(plain: &mut String, spans: &mut Vec<Span>) {
     }
 }
 
-fn find_closing_char(chars: &[char], start: usize, closing: char) -> Option<usize> {
-    (start..chars.len()).find(|&i| chars[i] == closing)
+fn find_closing_directive(chars: &[char], opening: usize, closing: char) -> Option<usize> {
+    for pos in opening + 1..chars.len() {
+        if chars[pos] != closing {
+            continue;
+        }
+        if pos == opening + 1 {
+            return None;
+        }
+        if chars[pos - 1].is_whitespace() {
+            continue;
+        }
+        return Some(pos);
+    }
+    None
 }
 
-fn is_span_start(chars: &[char], pos: usize) -> bool {
+fn is_span_start(chars: &[char], pos: usize, directive: char) -> bool {
+    if chars.get(pos + 1).is_none_or(|next| next.is_whitespace()) {
+        return false;
+    }
+
     if pos == 0 {
         return true;
     }
+
     let prev = chars[pos - 1];
-    prev.is_whitespace() || is_punctuation(prev)
+    prev.is_whitespace() || is_after_different_opening_directive(chars, pos - 1, directive)
 }
 
-fn is_span_end(chars: &[char], pos: usize) -> bool {
-    if pos + 1 >= chars.len() {
-        return true;
+fn is_after_different_opening_directive(chars: &[char], mut pos: usize, directive: char) -> bool {
+    let mut current = chars[pos];
+    if !is_styling_directive(current) || current == directive {
+        return false;
     }
-    let next = chars[pos + 1];
-    next.is_whitespace() || is_punctuation(next)
+
+    loop {
+        if pos == 0 {
+            return true;
+        }
+
+        let prev = chars[pos - 1];
+        if prev.is_whitespace() {
+            return true;
+        }
+
+        if !is_styling_directive(prev) || prev == current {
+            return false;
+        }
+
+        pos -= 1;
+        current = prev;
+    }
 }
 
-fn is_punctuation(ch: char) -> bool {
-    matches!(
-        ch,
-        '.' | ',' | ';' | ':' | '!' | '?' | '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}'
-    )
+fn is_styling_directive(ch: char) -> bool {
+    matches!(ch, '*' | '_' | '~' | '`')
 }
 
 // ── Plain text extraction ────────────────────────────────────────────
