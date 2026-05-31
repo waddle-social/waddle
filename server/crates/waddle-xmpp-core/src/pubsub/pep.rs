@@ -41,6 +41,31 @@ pub const PEP_NODE_VCARD4: &str = "urn:xmpp:vcard4";
 /// consumer is the server-side projection at the T1 push gate.
 pub const PEP_NODE_WADDLE_DND: &str = "urn:waddle:dnd:0";
 
+/// Waddle DM-bookmarks PEP node + namespace (issue #720).
+///
+/// DM counterpart to the XEP-0402 MUC bookmarks node: a Waddle-custom
+/// carrier that hosts a single official XEP-0492 `<notify>` per
+/// direct-chat contact (item id == the contact's bare JID). XEP-0402
+/// is conference-only and no XEP-defined "DM bookmark" exists, so the
+/// carrier lives in the project-local `urn:waddle:dm-bookmarks:0`
+/// namespace per the CLAUDE.md XEP-conformance hard rule. See
+/// `docs/adr/009-dm-notification-carrier.md` and
+/// `docs/specs/urn-waddle-dm-bookmarks.md`.
+///
+/// Mirrored as
+/// `waddle_xmpp::xep::xep_waddle_dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS`
+/// so the well-known-node configuration table in
+/// `NodeConfig::pep_for_node` can reference it without pulling
+/// `waddle-xmpp` into `waddle-xmpp-core`. The two constants are pinned
+/// equal by a `waddle-xmpp` test.
+///
+/// The payload carries per-contact notification overrides; the
+/// well-known config forces `access_model = whitelist` and
+/// `send_last_published_item = never` to keep this off the
+/// roster-contact PEP fan-out. The authoritative consumer is the
+/// server-side projection at the T1 push gate.
+pub const PEP_NODE_WADDLE_DM_BOOKMARKS: &str = "urn:waddle:dm-bookmarks:0";
+
 /// Check if an IQ is a PEP request for the current user.
 pub fn is_pep_request(iq: &Iq, user_jid: &BareJid) -> bool {
     if !is_pubsub_iq(iq) {
@@ -77,6 +102,7 @@ impl PepHandler {
             || node == PEP_NODE_MDS_DISPLAYED
             || node == PEP_NODE_VCARD4
             || node == PEP_NODE_WADDLE_DND
+            || node == PEP_NODE_WADDLE_DM_BOOKMARKS
             || node == "http://jabber.org/protocol/nick"
             || node == "http://jabber.org/protocol/mood"
             || node == "http://jabber.org/protocol/activity"
@@ -90,6 +116,7 @@ impl PepHandler {
         if node == PEP_NODE_BOOKMARKS
             || node == PEP_NODE_MDS_DISPLAYED
             || node == PEP_NODE_WADDLE_DND
+            || node == PEP_NODE_WADDLE_DM_BOOKMARKS
         {
             return AccessModel::Whitelist;
         }
@@ -180,6 +207,15 @@ mod tests {
         assert!(!PepHandler::is_well_known_node(
             "eu.siacs.conversations.axolotl.devicelist"
         ));
+    }
+
+    #[test]
+    fn waddle_dm_bookmarks_node_is_well_known_and_whitelisted() {
+        assert!(PepHandler::is_well_known_node(PEP_NODE_WADDLE_DM_BOOKMARKS));
+        assert_eq!(
+            PepHandler::default_access_model_for_node(PEP_NODE_WADDLE_DM_BOOKMARKS),
+            AccessModel::Whitelist
+        );
     }
 
     #[test]

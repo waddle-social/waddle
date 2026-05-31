@@ -305,6 +305,152 @@ impl WaddleClient {
         })
     }
 
+    /// Fetch the user's Waddle DM-bookmark items (issue #720) from PEP,
+    /// surfaced as a typed array carrying the XEP-0492 fallback
+    /// notification mode + rich-payload opt-in (#719) per direct-chat
+    /// contact. The DM counterpart to [`Self::fetch_user_bookmarks`].
+    ///
+    /// The carrier node `urn:waddle:dm-bookmarks:0` is sparse /
+    /// override-only: an item exists ONLY when the DM has an override
+    /// beyond the XEP-0492 §3 direct-chat default. A `None` `notify_mode`
+    /// means the hosted `<notify/>` carries only identity-scoped
+    /// siblings; the chat resolves it against the §3 default (`always`).
+    ///
+    /// Resolves to an empty array when the PEP node is absent (no DM has
+    /// an override yet) — XEP-0163 returns `item-not-found`, caught here
+    /// and treated as the empty list rather than rejecting the Promise.
+    ///
+    /// **Deferred** (same as the MUC path): no XEP-0163 §4.4 `+notify`
+    /// self-subscription on the DM node yet, so a change in another
+    /// client reaches this one on the next session-ready re-fetch.
+    pub fn fetch_dm_bookmarks(&self) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let iq = build_fetch_dm_bookmarks_iq(&uuid::Uuid::new_v4().to_string());
+            let items = match send_iq_command_stanza_aware(inner, iq).await? {
+                Ok(elem) => parse_dm_bookmarks_response(&elem),
+                Err(stanza_err) if stanza_err.condition == "item-not-found" => Vec::new(),
+                Err(stanza_err) => return Err(js_error(stanza_err.to_string())),
+            };
+            to_js_value(&items)
+        })
+    }
+
+    /// Set the per-DM XEP-0492 notification mode for one direct-chat
+    /// contact by merging into the Waddle DM-bookmark carrier (issue
+    /// #720). The DM counterpart to [`Self::set_room_notification_mode`].
+    ///
+    /// Semantics:
+    /// * Parse [`SetDmNotificationModeOptions`]; `dmJid` MUST parse as a
+    ///   `BareJid` with a localpart, else a typed JS error (the PEP item
+    ///   id is the contact bare JID).
+    /// * Fetch existing DM items (first-publish `item-not-found` →
+    ///   empty); find the one whose id == `dmJid` and read its hosted
+    ///   `<notify/>` via [`read_dm_bookmark_notify`].
+    /// * Merge the new mode via [`merge_notify`] (the single §3-conformant
+    ///   core shared with the MUC carrier — foreign `<advanced/>` and
+    ///   identity-scoped siblings preserved verbatim; rich opt-in (#719)
+    ///   toggled).
+    /// * The node is sparse / override-only: if the merged `<notify/>`
+    ///   collapses to the §3 direct-chat default (`always`, no opt-in, no
+    ///   foreign `<advanced/>`) per [`dm_notify_is_default`], RETRACT the
+    ///   item and resolve to `Removed` instead of publishing. Otherwise
+    ///   publish and resolve to `Ok` with the surfaced item — the chat
+    ///   reconciles without a refetch.
+    /// * `precondition-not-met` maps to the same `NodeConfigMismatch`
+    ///   outcome the room path uses; other stanza errors map to `Error`
+    ///   (the condition stays on the Rust side as a `tracing::warn`).
+    pub fn set_dm_notification_mode(&self, options: JsValue) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let opts: SetDmNotificationModeOptions = serde_wasm_bindgen::from_value(options)
+                .map_err(|err| JsValue::from_str(&err.to_string()))?;
+            let dm_jid: jid::BareJid = opts
+                .dm_jid
+                .parse()
+                .map_err(|err: jid::Error| JsValue::from_str(&format!("invalid DM JID: {err}")))?;
+            // The DM-bookmark item id is the contact's bare JID — it MUST
+            // have a localpart (`<localpart>@<domain>`). A domain-only
+            // JID is not a valid direct-chat contact and the PEP service
+            // would reject the publish; reject early with a typed error.
+            if dm_jid.node().is_none() {
+                return Err(JsValue::from_str(
+                    "invalid DM JID: DM-bookmark id MUST have a localpart",
+                ));
+            }
+
+            // Fetch existing DM items so we merge into the contact's
+            // current `<notify/>` (preserving foreign `<advanced/>` +
+            // identity-scoped siblings). First-publish item-not-found is
+            // empty, not an error.
+            let fetch_iq = build_fetch_dm_bookmarks_iq(&uuid::Uuid::new_v4().to_string());
+            let items = match send_iq_command_stanza_aware(inner.clone(), fetch_iq).await? {
+                Ok(elem) => parse_dm_bookmark_payloads(&elem),
+                Err(stanza_err) if stanza_err.condition == "item-not-found" => Vec::new(),
+                Err(stanza_err) => return Err(js_error(stanza_err.to_string())),
+            };
+
+            let existing_notify = items
+                .iter()
+                .find(|(jid, _)| *jid == dm_jid)
+                .and_then(|(_, payload)| read_dm_bookmark_notify(payload))
+                .cloned();
+            let merged = merge_notify(
+                existing_notify.as_ref(),
+                opts.mode,
+                opts.rich_payload_opt_in,
+            );
+
+            // Sparse / override-only: a DM returned to the XEP-0492 §3
+            // direct-chat default (`always`, no opt-in, no foreign
+            // `<advanced/>`) has no item — retract it. Absence == default.
+            if dm_notify_is_default(&merged, NotifyMode::Always) {
+                let retract_iq =
+                    build_retract_dm_bookmark_iq(&dm_jid, &uuid::Uuid::new_v4().to_string());
+                let outcome = match send_iq_command_stanza_aware(inner, retract_iq).await? {
+                    Ok(_) => WaddleSetDmNotificationModeOutcome::Removed {
+                        jid: dm_jid.to_string(),
+                    },
+                    // A retract of an already-absent item returns
+                    // `item-not-found`; that's the desired end-state
+                    // (no override), so treat it as success.
+                    Err(stanza_err) if stanza_err.condition == "item-not-found" => {
+                        WaddleSetDmNotificationModeOutcome::Removed {
+                            jid: dm_jid.to_string(),
+                        }
+                    }
+                    Err(stanza_err) => {
+                        tracing::warn!(
+                            condition = %stanza_err.condition,
+                            "DM-bookmark retract rejected with stanza error",
+                        );
+                        WaddleSetDmNotificationModeOutcome::Error
+                    }
+                };
+                return to_js_value(&outcome);
+            }
+
+            let publish_iq =
+                build_publish_dm_bookmark_iq(&dm_jid, &merged, &uuid::Uuid::new_v4().to_string());
+            let outcome = match send_iq_command_stanza_aware(inner, publish_iq).await? {
+                Ok(_) => WaddleSetDmNotificationModeOutcome::Ok {
+                    item: surface_dm_bookmark(&dm_jid, &merged),
+                },
+                Err(stanza_err) if stanza_err.condition == "precondition-not-met" => {
+                    WaddleSetDmNotificationModeOutcome::NodeConfigMismatch
+                }
+                Err(stanza_err) => {
+                    tracing::warn!(
+                        condition = %stanza_err.condition,
+                        "DM-bookmark publish rejected with stanza error",
+                    );
+                    WaddleSetDmNotificationModeOutcome::Error
+                }
+            };
+            to_js_value(&outcome)
+        })
+    }
+
     pub fn get_server_version(&self) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -707,6 +853,66 @@ fn surface_bookmark(item: BookmarkItem) -> WaddleBookmarkItem {
         autojoin: item.autojoin,
         notify_mode,
         rich_payload_opt_in,
+    }
+}
+
+/// Extract each `(contact bare JID, <dm-bookmark> payload)` pair from a
+/// XEP-0060 items response targeting the Waddle DM-bookmark node
+/// (issue #720). Items with an unparseable id or a missing/malformed
+/// `<dm-bookmark>` payload are skipped. The id is the contact's bare
+/// JID (the PEP item id); the payload is the carrier element directly
+/// hosting one XEP-0492 `<notify/>`.
+///
+/// Returns the typed payloads so callers can read the hosted `<notify/>`
+/// (`set_dm_notification_mode` merges into it;
+/// `parse_dm_bookmarks_response` surfaces it).
+fn parse_dm_bookmark_payloads(iq: &Element) -> Vec<(jid::BareJid, Element)> {
+    let Some(items) = iq
+        .get_child("pubsub", waddle_xmpp_client::pep::NS_PUBSUB)
+        .and_then(|pubsub| pubsub.get_child("items", waddle_xmpp_client::pep::NS_PUBSUB))
+        .filter(|items| items.attr("node") == Some(NS_WADDLE_DM_BOOKMARKS))
+    else {
+        return Vec::new();
+    };
+    items
+        .children()
+        .filter(|child| child.name() == "item" && child.ns() == waddle_xmpp_client::pep::NS_PUBSUB)
+        .filter_map(|item| {
+            let jid: jid::BareJid = item.attr("id")?.parse().ok()?;
+            let payload = item.get_child("dm-bookmark", NS_WADDLE_DM_BOOKMARKS)?;
+            Some((jid, payload.clone()))
+        })
+        .collect()
+}
+
+/// Parse a DM-bookmark items response into the JS-facing surface
+/// (issue #720). Reads each payload's hosted `<notify/>` for the
+/// XEP-0492 fallback mode + rich-payload opt-in (#719). A payload
+/// missing its `<notify/>` yields `notify_mode = None` (the chat
+/// resolves it against the §3 direct-chat default).
+fn parse_dm_bookmarks_response(iq: &Element) -> Vec<WaddleDmBookmarkItem> {
+    parse_dm_bookmark_payloads(iq)
+        .into_iter()
+        .map(|(jid, payload)| match read_dm_bookmark_notify(&payload) {
+            Some(notify) => surface_dm_bookmark(&jid, notify),
+            None => WaddleDmBookmarkItem {
+                jid: jid.to_string(),
+                notify_mode: None,
+                rich_payload_opt_in: false,
+            },
+        })
+        .collect()
+}
+
+/// Surface one DM-bookmark `<notify/>` into the JS-facing
+/// [`WaddleDmBookmarkItem`] (issue #720). Used by both
+/// `fetch_dm_bookmarks` (per-item map) and `set_dm_notification_mode`
+/// (response shaping of the merged `<notify/>`).
+fn surface_dm_bookmark(jid: &jid::BareJid, notify: &Element) -> WaddleDmBookmarkItem {
+    WaddleDmBookmarkItem {
+        jid: jid.to_string(),
+        notify_mode: read_fallback_mode(notify),
+        rich_payload_opt_in: read_rich_payload_opt_in(notify),
     }
 }
 

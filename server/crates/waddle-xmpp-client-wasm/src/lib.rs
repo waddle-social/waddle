@@ -49,7 +49,11 @@ use waddle_xmpp_client::xep::{
     xep0402::{
         build_fetch_bookmarks_iq, build_publish_bookmark_iq, parse_bookmarks_response, BookmarkItem,
     },
-    xep0492::{merge_notify_into_extensions, read_fallback_mode, read_rich_payload_opt_in},
+    xep0492::{
+        build_fetch_dm_bookmarks_iq, build_publish_dm_bookmark_iq, build_retract_dm_bookmark_iq,
+        dm_notify_is_default, merge_notify, merge_notify_into_extensions, read_dm_bookmark_notify,
+        read_fallback_mode, read_rich_payload_opt_in, NotifyMode, NS_WADDLE_DM_BOOKMARKS,
+    },
 };
 use waddle_xmpp_client::{
     AccessToken, ArchivedMessage, ClientConfig, ClientError, ClientEvent, ClientRequest,
