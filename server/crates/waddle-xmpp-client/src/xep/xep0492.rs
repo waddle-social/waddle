@@ -327,6 +327,21 @@ pub fn dm_notify_is_default(notify: &Element, default_mode: NotifyMode) -> bool 
     if read_rich_payload_opt_in(notify) {
         return false;
     }
+    // Any direct child of `<notify/>` that is NOT a recognized XEP-0492
+    // setting element (a foreign namespace, or an unknown name in the
+    // notification-settings namespace) is foreign/unknown state. Be
+    // conservative: treat the `<notify/>` as a non-default override so
+    // the item is preserved rather than retracted, which would drop the
+    // foreign state `merge_notify` otherwise carries verbatim (Copilot
+    // review). The server's `validate_notify_element` already rejects
+    // such children, so this is a defence-in-depth guard for inputs that
+    // did not pass through that gate.
+    let all_children_are_settings = notify.children().all(|child| {
+        child.ns() == NS_NOTIFICATION_SETTINGS && NotifyMode::from_wire_name(child.name()).is_some()
+    });
+    if !all_children_are_settings {
+        return false;
+    }
     let settings: Vec<&Element> = notify
         .children()
         .filter(|child| {
@@ -1397,6 +1412,21 @@ mod tests {
                         <weekend xmlns='custom:other-client:1'/>\
                     </advanced>\
                 </always>\
+                </notify>"
+            .parse()
+            .expect("valid xml");
+        assert!(!dm_notify_is_default(&notify, NotifyMode::Always));
+    }
+
+    #[test]
+    fn dm_notify_is_default_false_with_foreign_direct_child() {
+        // always fallback PLUS a foreign element directly under
+        // `<notify/>` (not a recognized XEP-0492 setting). It is unknown
+        // state — be conservative and keep the item rather than retract
+        // it, which would drop the foreign child (Copilot review).
+        let notify: Element = "<notify xmlns='urn:xmpp:notification-settings:1'>\
+                <always />\
+                <future-thing xmlns='custom:other-client:2'/>\
                 </notify>"
             .parse()
             .expect("valid xml");

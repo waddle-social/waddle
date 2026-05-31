@@ -879,6 +879,12 @@ fn parse_dm_bookmark_payloads(iq: &Element) -> Vec<(jid::BareJid, Element)> {
         .filter(|child| child.name() == "item" && child.ns() == waddle_xmpp_client::pep::NS_PUBSUB)
         .filter_map(|item| {
             let jid: jid::BareJid = item.attr("id")?.parse().ok()?;
+            // The DM carrier contract requires the item id to be a
+            // contact bare JID WITH a localpart (`localpart@domain`).
+            // Skip a domain-only id so the chat never surfaces an
+            // impossible DM entry — mirrors the server-side
+            // `parse_dm_bookmark` localpart requirement (Copilot review).
+            jid.node()?;
             let payload = item.get_child("dm-bookmark", NS_WADDLE_DM_BOOKMARKS)?;
             Some((jid, payload.clone()))
         })
@@ -1009,6 +1015,34 @@ mod tests {
         let err = verify_iq_from_matches_query(None, "push.example.com").unwrap_err();
         assert!(err.contains("push.example.com"));
         assert!(err.contains("no `from`"));
+    }
+
+    #[test]
+    fn parse_dm_bookmark_payloads_skips_domain_only_item_id() {
+        // A domain-only id (no localpart) is not a valid DM contact JID
+        // — it must be skipped so the chat never surfaces an impossible
+        // DM entry (Copilot review). A well-formed sibling still parses.
+        let iq: Element = "<iq xmlns='jabber:client'>\
+                <pubsub xmlns='http://jabber.org/protocol/pubsub'>\
+                    <items node='urn:waddle:dm-bookmarks:0'>\
+                        <item id='bob@example.com'>\
+                            <dm-bookmark xmlns='urn:waddle:dm-bookmarks:0'>\
+                                <notify xmlns='urn:xmpp:notification-settings:1'><never/></notify>\
+                            </dm-bookmark>\
+                        </item>\
+                        <item id='example.com'>\
+                            <dm-bookmark xmlns='urn:waddle:dm-bookmarks:0'>\
+                                <notify xmlns='urn:xmpp:notification-settings:1'><never/></notify>\
+                            </dm-bookmark>\
+                        </item>\
+                    </items>\
+                </pubsub>\
+            </iq>"
+            .parse()
+            .expect("valid iq");
+        let parsed = parse_dm_bookmark_payloads(&iq);
+        assert_eq!(parsed.len(), 1, "domain-only id must be skipped");
+        assert_eq!(parsed[0].0.to_string(), "bob@example.com");
     }
 
     #[test]

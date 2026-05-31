@@ -69,6 +69,18 @@ impl DatabasePubSubStorage {
                     )));
                 }
             }
+            // The DM carrier requires the PubSub item id to be the
+            // contact's bare JID. Reject a missing id explicitly here —
+            // otherwise the `item_id` UUID fallback above flows into
+            // `validate_dm_bookmark_publish` and surfaces a confusing
+            // "invalid JID: <uuid>" instead of a carrier-specific
+            // `<bad-request/>` (Copilot review).
+            if item.id.is_none() {
+                return Err(XmppError::bad_request(Some(
+                    "urn:waddle:dm-bookmarks:0 publish requires the item id to be the contact bare JID"
+                        .to_string(),
+                )));
+            }
             let payload = item.payload.as_ref().ok_or_else(|| {
                 XmppError::bad_request(Some(
                     "Waddle DM-bookmark publish requires a <dm-bookmark> payload".to_string(),

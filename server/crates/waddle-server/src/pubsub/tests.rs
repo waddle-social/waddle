@@ -1242,6 +1242,62 @@ async fn dm_bookmark_publish_with_malformed_notify_is_bad_request() {
     );
 }
 
+/// A DM-bookmark publish that omits the PubSub item id is rejected with a
+/// carrier-specific `<bad-request/>` — the id MUST be the contact bare
+/// JID — rather than the confusing "invalid JID: <uuid>" the item_id
+/// UUID fallback would otherwise surface downstream (Copilot review).
+#[tokio::test]
+async fn dm_bookmark_publish_without_item_id_is_bad_request() {
+    use waddle_xmpp::xep::xep_waddle_dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS;
+
+    let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("storage");
+    let alice = jid("alice@example.com");
+    storage
+        .get_or_create_node(&alice, PEP_NODE_WADDLE_DM_BOOKMARKS)
+        .await
+        .expect("dm-bookmarks node");
+
+    let item = waddle_xmpp::pubsub::PubSubItem {
+        id: None,
+        publisher: None,
+        payload: Some(dm_bookmark_payload(
+            "<notify xmlns='urn:xmpp:notification-settings:1'><never /></notify>",
+        )),
+    };
+    let err = storage
+        .publish_item(
+            &alice,
+            PEP_NODE_WADDLE_DM_BOOKMARKS,
+            &item,
+            Some(&alice),
+            false,
+        )
+        .await
+        .expect_err("DM publish without an item id must be rejected");
+    match &err {
+        waddle_xmpp::XmppError::Stanza { condition, .. } => {
+            assert!(
+                format!("{condition:?}")
+                    .to_lowercase()
+                    .contains("badrequest"),
+                "expected <bad-request/> condition, got: {condition:?}"
+            );
+        }
+        other => panic!("expected Stanza bad-request error, got: {other:?}"),
+    }
+
+    let stored = storage
+        .get_items(&alice, PEP_NODE_WADDLE_DM_BOOKMARKS, None, &[])
+        .await
+        .expect("get items");
+    assert!(
+        stored.is_empty(),
+        "a rejected DM publish must not leave a pubsub_items row"
+    );
+}
+
 /// Purging the DM-bookmarks node clears its Direct projection rows but
 /// leaves the XEP-0402 MUC carrier's rows untouched (the purge keys on
 /// `source_node`, not the conversation JID).
