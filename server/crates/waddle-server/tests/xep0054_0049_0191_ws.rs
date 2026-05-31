@@ -12,9 +12,26 @@ const USERNAME: &str = "admin";
 const NS_PUBSUB_PUBLISH_OPTIONS: &str = "http://jabber.org/protocol/pubsub#publish-options";
 const NS_PUSH: &str = "urn:xmpp:push:0";
 const NS_XDATA: &str = "jabber:x:data";
+const NS_PRIVATE: &str = "jabber:iq:private";
+const NS_TEST_PRIVATE: &str = "urn:waddle:test";
 
 async fn setup() -> (TestServer, WsXmppClient) {
     let server = TestServer::start();
+    let password = server.fixed_account_password().to_string();
+    let client = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        USERNAME,
+        &password,
+        &format!("stateful-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("websocket connection");
+    (server, client)
+}
+
+async fn setup_with_database_url(database_url: &str) -> (TestServer, WsXmppClient) {
+    let server = TestServer::start_persistent_with_extra_accounts(database_url, &[]);
     let password = server.fixed_account_password().to_string();
     let client = WsXmppClient::connect_and_auth(
         &server.ws_url(),
@@ -96,6 +113,27 @@ fn element_to_xml(element: Element) -> String {
     let mut buf = Vec::new();
     element.write_to(&mut buf).expect("serialize XML element");
     String::from_utf8(buf).expect("minidom serializes UTF-8")
+}
+
+fn private_storage_iq(
+    id: &str,
+    iq_type: &str,
+    to: Option<&str>,
+    children: impl IntoIterator<Item = Element>,
+) -> String {
+    let mut query = Element::builder("query", NS_PRIVATE);
+    for child in children {
+        query = query.append(child);
+    }
+
+    let mut iq = Element::builder("iq", CLIENT_NS)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), iq_type)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id);
+    if let Some(to) = to {
+        iq = iq.attr(minidom::rxml::xml_ncname!("to").to_owned(), to);
+    }
+
+    element_to_xml(iq.append(query.build()).build())
 }
 
 fn push_enable_iq(id: &str, jid: &str, node: &str, publish_options: Option<Element>) -> String {
@@ -216,12 +254,15 @@ async fn websocket_vcard_set_then_get_roundtrips() {
 async fn websocket_private_xml_set_then_get_roundtrips() {
     let (_server, mut client) = setup().await;
 
-    client
-        .send(
-            r#"<iq xmlns="jabber:client" type="set" id="ws-private-set"><query xmlns="jabber:iq:private"><prefs xmlns="urn:waddle:test"><theme>dark</theme></prefs></query></iq>"#,
+    let prefs = Element::builder("prefs", NS_TEST_PRIVATE)
+        .append(
+            Element::builder("theme", NS_TEST_PRIVATE)
+                .append("dark")
+                .build(),
         )
-        .await
-        .expect("send private set");
+        .build();
+    let set_iq = private_storage_iq("ws-private-set", "set", None, [prefs]);
+    client.send(&set_iq).await.expect("send private set");
     let set_response = client
         .recv_matching(|frame| frame.contains("ws-private-set"))
         .await
@@ -231,12 +272,9 @@ async fn websocket_private_xml_set_then_get_roundtrips() {
         "expected private XML set result, got: {set_response}"
     );
 
-    client
-        .send(
-            r#"<iq xmlns="jabber:client" type="get" id="ws-private-get"><query xmlns="jabber:iq:private"><prefs xmlns="urn:waddle:test"/></query></iq>"#,
-        )
-        .await
-        .expect("send private get");
+    let requested = Element::builder("prefs", NS_TEST_PRIVATE).build();
+    let get_iq = private_storage_iq("ws-private-get", "get", None, [requested]);
+    client.send(&get_iq).await.expect("send private get");
     let get_response = client
         .recv_matching(|frame| frame.contains("ws-private-get"))
         .await
@@ -244,6 +282,111 @@ async fn websocket_private_xml_set_then_get_roundtrips() {
     assert!(
         get_response.contains("dark"),
         "expected stored private XML, got: {get_response}"
+    );
+
+    let _ = client.close().await;
+}
+
+#[tokio::test]
+async fn websocket_private_xml_get_without_child_returns_bad_format() {
+    let (_server, mut client) = setup().await;
+
+    let get_iq = private_storage_iq("ws-private-empty", "get", None, []);
+    client.send(&get_iq).await.expect("send private empty get");
+    let response = client
+        .recv_matching(|frame| frame.contains("ws-private-empty"))
+        .await
+        .expect("private empty get response");
+    assert!(
+        response.contains("bad-request"),
+        "expected bad-request for empty private get, got: {response}"
+    );
+
+    let _ = client.close().await;
+}
+
+#[tokio::test]
+async fn websocket_private_xml_get_with_duplicate_children_returns_bad_format() {
+    let (_server, mut client) = setup().await;
+
+    let first = Element::builder("prefs", NS_TEST_PRIVATE).build();
+    let second = Element::builder("other", NS_TEST_PRIVATE).build();
+    let get_iq = private_storage_iq("ws-private-duplicate", "get", None, [first, second]);
+    client
+        .send(&get_iq)
+        .await
+        .expect("send private duplicate get");
+    let response = client
+        .recv_matching(|frame| frame.contains("ws-private-duplicate"))
+        .await
+        .expect("private duplicate get response");
+    assert!(
+        response.contains("bad-request"),
+        "expected bad-request for duplicate private get, got: {response}"
+    );
+
+    let _ = client.close().await;
+}
+
+#[tokio::test]
+async fn websocket_private_xml_foreign_to_returns_forbidden() {
+    let (_server, mut alice, _bob) = connect_alice_bob().await;
+
+    let requested = Element::builder("prefs", NS_TEST_PRIVATE).build();
+    let get_iq = private_storage_iq(
+        "ws-private-foreign",
+        "get",
+        Some("bob@localhost"),
+        [requested],
+    );
+    alice.send(&get_iq).await.expect("send private foreign get");
+    let response = alice
+        .recv_matching(|frame| frame.contains("ws-private-foreign"))
+        .await
+        .expect("private foreign get response");
+    assert!(
+        response.contains("forbidden"),
+        "expected forbidden for foreign private XML access, got: {response}"
+    );
+
+    let _ = alice.close().await;
+}
+
+#[tokio::test]
+async fn websocket_private_xml_malformed_stored_xml_returns_error() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let database_url = format!(
+        "sqlite://{}?mode=rwc",
+        tempdir.path().join("waddle.db").display()
+    );
+    let (_server, mut client) = setup_with_database_url(&database_url).await;
+
+    let pool = sqlx::SqlitePool::connect(&database_url)
+        .await
+        .expect("connect sqlite");
+    sqlx::query(
+        "INSERT OR REPLACE INTO private_xml_storage (jid, namespace, xml_content) VALUES (?, ?, ?)",
+    )
+    .bind("admin@localhost")
+    .bind("urn:waddle:test:malformed")
+    .bind("<prefs xmlns='urn:waddle:test:malformed'>")
+    .execute(&pool)
+    .await
+    .expect("insert malformed private XML");
+
+    let requested = Element::builder("prefs", "urn:waddle:test:malformed").build();
+    let get_iq = private_storage_iq("ws-private-malformed", "get", None, [requested]);
+    client
+        .send(&get_iq)
+        .await
+        .expect("send private malformed get");
+    let response = client
+        .recv_matching(|frame| frame.contains("ws-private-malformed"))
+        .await
+        .expect("private malformed get response");
+    assert!(
+        response.contains("internal-server-error"),
+        "expected internal-server-error for malformed stored XML, got: {response}"
     );
 
     let _ = client.close().await;

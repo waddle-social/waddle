@@ -1,4 +1,5 @@
 use super::*;
+use waddle_xmpp::xep::xep0049::{self, PrivateStorageError};
 
 pub(super) async fn handle_vcard_iq(
     iq: &xmpp_parsers::iq::Iq,
@@ -115,7 +116,30 @@ pub(super) async fn handle_private_storage_iq(
     };
     let bare_jid = sender_jid.to_bare();
 
-    if let Some(key) = waddle_xmpp::xep::xep0049::parse_private_storage_get(iq) {
+    if let Some(to) = iq.to() {
+        if to.to_bare() != bare_jid {
+            return vec![build_iq_error_xml_typed(
+                iq.id(),
+                response_from,
+                response_to,
+                forbidden_iq_error("Operation not permitted."),
+            )];
+        }
+    }
+
+    if matches!(iq, xmpp_parsers::iq::Iq::Get { .. }) {
+        let key = match xep0049::parse_private_storage_get(iq) {
+            Ok(key) => key,
+            Err(error) => {
+                return vec![build_iq_error_xml_typed(
+                    iq.id(),
+                    response_from,
+                    response_to,
+                    private_storage_request_error(error),
+                )];
+            }
+        };
+
         if waddle_xmpp::xep::xep0048::is_legacy_bookmarks_namespace(&key.namespace) {
             let stored_items = state
                 .deps
@@ -137,11 +161,19 @@ pub(super) async fn handle_private_storage_iq(
                 .map(waddle_xmpp::xep::xep0048::from_native_bookmark)
                 .collect();
             let bookmarks = waddle_xmpp::xep::xep0048::build_legacy_bookmarks_element(&legacy);
-            let response = waddle_xmpp::xep::xep0049::build_private_storage_result(
-                iq,
-                Some(&String::from(&bookmarks)),
-                &key,
-            );
+            let value = match xep0049::PrivateStorageValue::from_element(bookmarks) {
+                Ok(value) => value,
+                Err(error) => {
+                    warn!(jid = %bare_jid, ?error, "Failed to build legacy private XML value");
+                    return vec![build_iq_error_xml_typed(
+                        iq.id(),
+                        response_from,
+                        response_to,
+                        internal_server_error_iq_error("Internal server error."),
+                    )];
+                }
+            };
+            let response = xep0049::build_private_storage_result(iq, Some(&value), &key);
             return vec![iq_to_xml(response)];
         }
 
@@ -187,15 +219,45 @@ pub(super) async fn handle_private_storage_iq(
             },
             None => None,
         };
-        let response =
-            waddle_xmpp::xep::xep0049::build_private_storage_result(iq, stored.as_deref(), &key);
+
+        let stored_value = match stored
+            .as_deref()
+            .map(xep0049::parse_stored_private_storage_value)
+            .transpose()
+        {
+            Ok(value) => value,
+            Err(error) => {
+                warn!(jid = %bare_jid, namespace = %key.namespace, ?error, "Failed to parse stored private XML");
+                return vec![build_iq_error_xml_typed(
+                    iq.id(),
+                    response_from,
+                    response_to,
+                    internal_server_error_iq_error("Stored private XML is malformed."),
+                )];
+            }
+        };
+
+        let response = xep0049::build_private_storage_result(iq, stored_value.as_ref(), &key);
         return vec![iq_to_xml(response)];
     }
 
-    if let Some((key, xml_content)) = waddle_xmpp::xep::xep0049::parse_private_storage_set(iq) {
+    if matches!(iq, xmpp_parsers::iq::Iq::Set { .. }) {
+        let value = match xep0049::parse_private_storage_set(iq) {
+            Ok(value) => value,
+            Err(error) => {
+                return vec![build_iq_error_xml_typed(
+                    iq.id(),
+                    response_from,
+                    response_to,
+                    private_storage_request_error(error),
+                )];
+            }
+        };
+        let key = value.key.clone();
+
         if waddle_xmpp::xep::xep0048::is_legacy_bookmarks_namespace(&key.namespace) {
-            if let Ok(elem) = xml_content.parse::<Element>() {
-                for legacy in waddle_xmpp::xep::xep0048::parse_legacy_bookmarks(&elem) {
+            for element in &value.elements {
+                for legacy in waddle_xmpp::xep::xep0048::parse_legacy_bookmarks(element) {
                     if let Some(native) = waddle_xmpp::xep::xep0048::to_native_bookmark(&legacy) {
                         let bookmark_elem =
                             waddle_xmpp::xep::xep0402::build_bookmark_element(&native);
@@ -216,11 +278,10 @@ pub(super) async fn handle_private_storage_iq(
                     }
                 }
             }
-            return vec![iq_to_xml(
-                waddle_xmpp::xep::xep0049::build_private_storage_success(iq),
-            )];
+            return vec![iq_to_xml(xep0049::build_private_storage_success(iq))];
         }
 
+        let xml_content = value.to_xml_string();
         if let Err(error) = state
             .deps
             .app_state
@@ -245,9 +306,7 @@ pub(super) async fn handle_private_storage_iq(
                             internal_server_error_iq_error("Internal server error."),
                         )];
         }
-        return vec![iq_to_xml(
-            waddle_xmpp::xep::xep0049::build_private_storage_success(iq),
-        )];
+        return vec![iq_to_xml(xep0049::build_private_storage_success(iq))];
     }
 
     vec![build_iq_error_xml_typed(
@@ -256,4 +315,29 @@ pub(super) async fn handle_private_storage_iq(
         response_to,
         bad_request_iq_error("Malformed IQ payload."),
     )]
+}
+
+fn private_storage_request_error(
+    error: PrivateStorageError,
+) -> xmpp_parsers::stanza_error::StanzaError {
+    match error {
+        PrivateStorageError::MissingPayload => {
+            bad_format_iq_error("Private XML query requires one child element.")
+        }
+        PrivateStorageError::MissingNamespace => {
+            bad_format_iq_error("Private XML child element requires a namespace.")
+        }
+        PrivateStorageError::MultiplePayloads => {
+            bad_format_iq_error("Private XML query must not contain multiple child elements.")
+        }
+        PrivateStorageError::MultipleNamespaces => {
+            bad_format_iq_error("Private XML set must use one child namespace.")
+        }
+        PrivateStorageError::UnexpectedIqType | PrivateStorageError::UnexpectedQuery => {
+            bad_request_iq_error("Malformed IQ payload.")
+        }
+        PrivateStorageError::MalformedStoredXml => {
+            internal_server_error_iq_error("Stored private XML is malformed.")
+        }
+    }
 }
