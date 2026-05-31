@@ -54,17 +54,19 @@ theory (which would hang on return) and favors mechanisms that run
 
 Add evidence-gathering instrumentation via the existing Faro/`@opentelemetry/api`
 stack (`chat/src/lib/telemetry.ts` `report*` + `BrowserXmppClient` hooks wired in
-`xmpp-instrumentation.ts`). Every signal tagged with `visibilityState` + ms-hidden
-so we can see what happens **in the background**:
+`xmpp-instrumentation.ts`). Every signal is tagged with `visibilityState` plus a
+coarse hidden-duration bucket, with exact hidden milliseconds carried as a numeric
+measurement value so we can see what happens **in the background** without creating
+one metric series per millisecond:
 
 | Signal | Discriminates | Where |
 |---|---|---|
 | `longtask` PerformanceObserver (smoking gun) | synchronous-burst hang + when | telemetry health init |
 | JS heap sampling (`usedJSHeapSize`, timer + on visibility change) | leak / GC death-spiral | telemetry health init |
-| Reconnect-attempt counter (visibility, ms-hidden) | background flapping | `scheduleReconnect` hook |
-| Catch-up span (rooms/dms/pages/messages/durationMs) | heavy/repeated catch-up | `runReconnectCatchup` hook |
+| Reconnect-attempt count (visibility, hidden bucket, attempt/delay values) | background flapping | `scheduleReconnect` hook |
+| Catch-up span (rooms/dms/pages/messages/durationMs/outcome) | heavy/repeated catch-up | `runReconnectCatchup` hook |
 | Resume-drain measurement (buffered size, durationMs) | synchronous drain burst | `completeResumeBarrier` hook |
-| Visibility transitions (state, hiddenMs) | correlation backbone | telemetry health init |
+| Visibility transitions (state, hidden bucket) | correlation backbone | telemetry health init |
 
 Deploy → collect telemetry across several background-death occurrences → the
 signal that fires (escalating longtasks `hidden` / reconnect flapping `hidden` /

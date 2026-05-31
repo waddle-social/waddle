@@ -233,8 +233,7 @@ export function reportMessageAcked(payload: {
   faro.api.pushMeasurement({
     type: "chat.xmpp.message.acked.latency_ms",
     values: { latency_ms: payload.latencyMs },
-    context: { kind: payload.kind },
-  });
+  }, { context: { kind: payload.kind } });
 }
 
 export function reportSendEnqueued(payload: {
@@ -289,11 +288,12 @@ export function reportStatusChange(payload: {
 //
 // Observe-only signals for the background-tab `RESULT_CODE_HUNG`
 // investigation (`docs/planning/hung-tab-investigation.md`). Every
-// signal is tagged with the page's `visibilityState` and how long it
-// has been hidden, so the backend can show what happens **in the
-// background** — escalating long tasks (synchronous-burst hang),
-// reconnect flapping, or unbounded heap growth (leak / GC death-spiral)
-// while `hidden` each name a different root cause. No behavior change.
+// signal is tagged with the page's `visibilityState` and a coarse
+// hidden-duration bucket, with exact hidden milliseconds as a numeric
+// measurement value. That lets the backend show what happens **in the
+// background** — escalating long tasks (synchronous-burst hang), reconnect
+// flapping, or unbounded heap growth (leak / GC death-spiral) while
+// `hidden` each name a different root cause. No behavior change.
 
 /** Sampling cadence for the JS heap. Background timers are clamped to
  * ≥1 min, so a 60 s base interval is the finest useful resolution while
@@ -307,11 +307,33 @@ let hiddenSinceMs: number | null =
   visibility === "hidden" && typeof performance !== "undefined" ? performance.now() : null;
 
 /** Common tags so every health signal can be sliced by foreground vs
- * background and by how deep into a background idle it occurred. */
-function visibilityTags(): { visibility: string; ms_hidden: string } {
+ * background without creating one metric series per millisecond hidden. */
+function visibilityTags(): { visibility: string; hidden_bucket: string } {
+  return { visibility, hidden_bucket: hiddenBucket(hiddenDurationMs()) };
+}
+
+function hiddenDurationMs(): number {
+  if (hiddenSinceMs === null) return 0;
+  if (typeof performance === "undefined") return 0;
+  return Math.max(0, Math.round(performance.now() - hiddenSinceMs));
+}
+
+function hiddenBucket(msHidden: number): string {
+  if (msHidden === 0) return "visible";
+  if (msHidden < 60_000) return "lt_1m";
+  if (msHidden < 5 * 60_000) return "1m_5m";
+  if (msHidden < 15 * 60_000) return "5m_15m";
+  if (msHidden < 60 * 60_000) return "15m_1h";
+  return "gt_1h";
+}
+
+function visibilityMetric(): {
+  context: { visibility: string; hidden_bucket: string };
+  hiddenMs: number;
+} {
   const msHidden =
-    hiddenSinceMs === null ? 0 : Math.round(performance.now() - hiddenSinceMs);
-  return { visibility, ms_hidden: String(msHidden) };
+    hiddenDurationMs();
+  return { context: { visibility, hidden_bucket: hiddenBucket(msHidden) }, hiddenMs: msHidden };
 }
 
 function reportVisibility(): void {
@@ -319,11 +341,11 @@ function reportVisibility(): void {
 }
 
 function reportLongTask(durationMs: number): void {
+  const metric = visibilityMetric();
   faro?.api.pushMeasurement({
     type: "chat.client.longtask.duration_ms",
-    values: { duration_ms: Math.round(durationMs) },
-    context: visibilityTags(),
-  });
+    values: { duration_ms: Math.round(durationMs), hidden_ms: metric.hiddenMs },
+  }, { context: metric.context });
 }
 
 interface ChromeMemory {
@@ -336,23 +358,25 @@ function sampleHeap(): void {
   if (!faro || typeof performance === "undefined") return;
   const mem = (performance as Performance & { memory?: ChromeMemory }).memory;
   if (!mem) return; // Chrome-only API; absent elsewhere
+  const metric = visibilityMetric();
   faro.api.pushMeasurement({
     type: "chat.client.heap",
     values: {
       used_mb: Math.round(mem.usedJSHeapSize / 1_048_576),
       total_mb: Math.round(mem.totalJSHeapSize / 1_048_576),
       limit_mb: Math.round(mem.jsHeapSizeLimit / 1_048_576),
+      hidden_ms: metric.hiddenMs,
     },
-    context: visibilityTags(),
-  });
+  }, { context: metric.context });
 }
 
-/** Background-flapping detector: one event + counter per scheduled
- * reconnect, tagged with visibility/ms-hidden. A burst while `hidden`
+/** Background-flapping detector: one event + one count per scheduled
+ * reconnect, tagged with visibility/hidden bucket. A burst while `hidden`
  * points at keepalive-throttling → server idle timeout → reconnect loops. */
 export function reportReconnectScheduled(payload: { attempt: number; delayMs: number }): void {
   if (!faro) return;
   const tags = visibilityTags();
+  const metric = visibilityMetric();
   faro.api.pushEvent("chat.xmpp.reconnect.scheduled", {
     attempt: String(payload.attempt),
     delay_ms: String(Math.round(payload.delayMs)),
@@ -360,9 +384,13 @@ export function reportReconnectScheduled(payload: { attempt: number; delayMs: nu
   });
   faro.api.pushMeasurement({
     type: "chat.xmpp.reconnect.attempt",
-    values: { attempt: payload.attempt },
-    context: tags,
-  });
+    values: {
+      count: 1,
+      attempt: payload.attempt,
+      delay_ms: Math.round(payload.delayMs),
+      hidden_ms: metric.hiddenMs,
+    },
+  }, { context: metric.context });
 }
 
 /** Catch-up cost: how much work a single reconnect catch-up did. Large
@@ -372,27 +400,31 @@ export function reportCatchup(payload: {
   pages: number;
   messages: number;
   durationMs: number;
+  processedConversations?: number;
+  outcome?: "completed" | "aborted" | "failed";
 }): void {
+  const metric = visibilityMetric();
   faro?.api.pushMeasurement({
     type: "chat.xmpp.catchup",
     values: {
       conversations: payload.conversations,
+      processed_conversations: payload.processedConversations ?? payload.conversations,
       pages: payload.pages,
       messages: payload.messages,
       duration_ms: Math.round(payload.durationMs),
+      hidden_ms: metric.hiddenMs,
     },
-    context: visibilityTags(),
-  });
+  }, { context: { ...metric.context, outcome: payload.outcome ?? "completed" } });
 }
 
 /** Resume live-buffer drain: how many buffered messages were applied
  * synchronously on session-ready, and how long that one task took. */
 export function reportResumeDrain(payload: { buffered: number; durationMs: number }): void {
+  const metric = visibilityMetric();
   faro?.api.pushMeasurement({
     type: "chat.xmpp.resume_drain",
-    values: { buffered: payload.buffered, duration_ms: Math.round(payload.durationMs) },
-    context: visibilityTags(),
-  });
+    values: { buffered: payload.buffered, duration_ms: Math.round(payload.durationMs), hidden_ms: metric.hiddenMs },
+  }, { context: metric.context });
 }
 
 /**
