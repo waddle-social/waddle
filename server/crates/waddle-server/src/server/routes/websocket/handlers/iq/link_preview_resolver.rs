@@ -1,5 +1,5 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use reqwest::header::{CONTENT_TYPE, LOCATION};
 use reqwest::{redirect, Client, StatusCode};
@@ -81,10 +81,19 @@ pub(super) async fn resolve_link_preview(
     policy: &LinkPreviewResolverPolicy,
 ) -> LinkPreviewResolverOutcome {
     let mut current = url.clone();
+    let deadline = Instant::now() + policy.timeout;
     for redirect_count in 0..=policy.max_redirects {
-        let fetch = match fetch_html_once(&current, policy).await {
+        let Some(timeout) = deadline.checked_duration_since(Instant::now()) else {
+            return LinkPreviewResolverOutcome::Failed;
+        };
+        let fetch = match fetch_html_once(&current, policy, timeout).await {
             Ok(fetch) => fetch,
-            Err(status) => return status.into(),
+            Err(LinkPreviewResolverStatus::Blocked) => return LinkPreviewResolverOutcome::Blocked,
+            Err(LinkPreviewResolverStatus::Failed) => return LinkPreviewResolverOutcome::Failed,
+            Err(LinkPreviewResolverStatus::Unsupported) => {
+                return LinkPreviewResolverOutcome::Unsupported;
+            }
+            Err(LinkPreviewResolverStatus::Ready) => unreachable!("ready is not a fetch error"),
         };
         match fetch {
             FetchOnceResult::Html { final_url, html } => {
@@ -103,17 +112,6 @@ pub(super) async fn resolve_link_preview(
     LinkPreviewResolverOutcome::Failed
 }
 
-impl From<LinkPreviewResolverStatus> for LinkPreviewResolverOutcome {
-    fn from(status: LinkPreviewResolverStatus) -> Self {
-        match status {
-            LinkPreviewResolverStatus::Ready => LinkPreviewResolverOutcome::Failed,
-            LinkPreviewResolverStatus::Blocked => LinkPreviewResolverOutcome::Blocked,
-            LinkPreviewResolverStatus::Failed => LinkPreviewResolverOutcome::Failed,
-            LinkPreviewResolverStatus::Unsupported => LinkPreviewResolverOutcome::Unsupported,
-        }
-    }
-}
-
 enum FetchOnceResult {
     Html { final_url: Url, html: String },
     Redirect(Url),
@@ -122,14 +120,17 @@ enum FetchOnceResult {
 async fn fetch_html_once(
     url: &Url,
     policy: &LinkPreviewResolverPolicy,
+    timeout: Duration,
 ) -> Result<FetchOnceResult, LinkPreviewResolverStatus> {
     let target = prepare_target(url, policy).await?;
     let mut builder = Client::builder()
-        .timeout(policy.timeout)
-        .connect_timeout(policy.timeout)
+        .timeout(timeout)
+        .connect_timeout(timeout)
         .redirect(redirect::Policy::none())
         .https_only(!policy.allow_http_loopback_for_tests);
     if let Host::Domain(host) = target.host {
+        // SSRF defense relies on reqwest dialing only the DNS results validated in
+        // prepare_target; dropping this pin would let reqwest re-resolve the host.
         builder = builder.resolve_to_addrs(host, &target.addrs);
     }
     let client = builder
@@ -184,7 +185,7 @@ async fn fetch_html_once(
         return Err(LinkPreviewResolverStatus::Unsupported);
     }
     if let Some(len) = response.content_length() {
-        if len as usize > policy.max_bytes {
+        if len > policy.max_bytes as u64 {
             return Err(LinkPreviewResolverStatus::Failed);
         }
     }
@@ -328,10 +329,32 @@ fn is_global_ipv6(ip: Ipv6Addr) -> bool {
     {
         return false;
     }
-    if let Some(v4) = ip.to_ipv4() {
+    if let Some(v4) = ip.to_ipv4_mapped().or_else(|| ip.to_ipv4()) {
         return is_global_ipv4(v4);
     }
     let segs = ip.segments();
+    if segs[0] == 0x2002 {
+        return is_global_ipv4(Ipv4Addr::new(
+            (segs[1] >> 8) as u8,
+            segs[1] as u8,
+            (segs[2] >> 8) as u8,
+            segs[2] as u8,
+        ));
+    }
+    if segs[0] == 0x0064
+        && segs[1] == 0xff9b
+        && segs[2] == 0
+        && segs[3] == 0
+        && segs[4] == 0
+        && segs[5] == 0
+    {
+        return is_global_ipv4(Ipv4Addr::new(
+            (segs[6] >> 8) as u8,
+            segs[6] as u8,
+            (segs[7] >> 8) as u8,
+            segs[7] as u8,
+        ));
+    }
     if (segs[0] & 0xffc0) == 0xfec0 {
         return false;
     }
@@ -361,6 +384,7 @@ fn extract_metadata_from_html_with_normalized_fallback(
         .filter(|url| {
             classify_url_with_policy(url, &LinkPreviewResolverPolicy::default())
                 == LinkPreviewResolverStatus::Ready
+                && same_domain_host(url, normalized_fallback_url)
         });
     let normalized_url = canonical_url
         .clone()
@@ -385,7 +409,7 @@ fn meta_content(html: &str, property: &str, max_bytes: usize) -> Option<String> 
     let mut remaining = html;
     while let Some(start) = find_ascii_case_insensitive(remaining, "<meta") {
         remaining = &remaining[start + "<meta".len()..];
-        let Some(end) = remaining.find('>') else {
+        let Some(end) = find_meta_tag_end(remaining) else {
             break;
         };
         if let Some(next_start) = find_ascii_case_insensitive(remaining, "<meta") {
@@ -415,6 +439,28 @@ fn meta_content(html: &str, property: &str, max_bytes: usize) -> Option<String> 
             if !content.is_empty() {
                 return Some(truncate_utf8_to_bytes(&content, max_bytes));
             }
+        }
+    }
+    None
+}
+
+fn same_domain_host(left: &Url, right: &Url) -> bool {
+    match (left.host(), right.host()) {
+        (Some(Host::Domain(left)), Some(Host::Domain(right))) => left
+            .trim_end_matches('.')
+            .eq_ignore_ascii_case(right.trim_end_matches('.')),
+        _ => false,
+    }
+}
+
+fn find_meta_tag_end(tag_tail: &str) -> Option<usize> {
+    let mut quote = None;
+    for (index, byte) in tag_tail.bytes().enumerate() {
+        match (quote, byte) {
+            (Some(open), current) if current == open => quote = None,
+            (None, b'"' | b'\'') => quote = Some(byte),
+            (None, b'>') => return Some(index),
+            _ => {}
         }
     }
     None
@@ -558,6 +604,16 @@ mod tests {
     }
 
     #[test]
+    fn meta_tag_terminator_ignores_greater_than_inside_quoted_attribute_values() {
+        let requested_url = Url::parse("https://example.com/articles").expect("url");
+        let html = r#"<meta property="og:title" content="A&gt;B">"#;
+
+        let metadata = extract_metadata_from_html(&requested_url, html).expect("metadata");
+
+        assert_eq!(metadata.title.as_deref(), Some("A>B"));
+    }
+
+    #[test]
     fn ignores_blocked_open_graph_canonical_urls() {
         let requested_url = Url::parse("https://example.com/articles").expect("url");
         let html = r#"<html><head>
@@ -568,6 +624,22 @@ mod tests {
         let metadata = extract_metadata_from_html(&requested_url, html).expect("metadata");
 
         assert_eq!(metadata.normalized_url, requested_url);
+    }
+
+    #[test]
+    fn ignores_cross_host_open_graph_canonical_urls() {
+        let requested_url = Url::parse("https://attacker.example/articles").expect("url");
+        let final_url = Url::parse("https://attacker.example/final").expect("url");
+        let html = r#"<html><head>
+                <meta property="og:title" content="Safe title">
+                <meta property="og:url" content="https://bank.example/login">
+              </head></html>"#;
+
+        let metadata =
+            extract_metadata_from_html_with_normalized_fallback(&requested_url, html, &final_url)
+                .expect("metadata");
+
+        assert_eq!(metadata.normalized_url, final_url);
     }
 
     #[test]
@@ -668,6 +740,8 @@ mod tests {
             "https://93.184.216.34/article",
             "https://[::1]/article",
             "https://[fc00::1]/article",
+            "https://[2002:0a00:0001::1]/article",
+            "https://[64:ff9b::0a00:0001]/article",
         ] {
             let url = Url::parse(raw).expect("url");
             assert_eq!(
@@ -741,6 +815,32 @@ mod tests {
             ..Default::default()
         };
         let url = Url::parse(&format!("{}/huge", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        assert_eq!(outcome.status(), LinkPreviewResolverStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn oversized_content_length_returns_failed_before_streaming() {
+        let server = MockServer::start().await;
+        let body = "x".repeat(65);
+        Mock::given(method("GET"))
+            .and(path("/huge-header"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/html")
+                    .insert_header("content-length", body.len().to_string())
+                    .set_body_raw(body, "text/html"),
+            )
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            max_bytes: 64,
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/huge-header", server.uri())).expect("url");
 
         let outcome = resolve_link_preview(&url, &policy).await;
 
