@@ -3,7 +3,7 @@ use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig};
 use crate::permissions::PermissionActor;
 use crate::server::AppStateDeps;
 use axum::body::Body;
-use axum::http::Request;
+use axum::http::{header, Request};
 use http_body_util::BodyExt;
 use kameo::actor::Spawn;
 use std::str::FromStr;
@@ -97,6 +97,89 @@ async fn create_expired_slot(state: &UploadState, slot_id: &str) {
     conn.execute(query, crate::db_params![slot_id, expires_at])
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn serves_cached_link_preview_media_by_content_hash() {
+    let (state, upload_dir) = create_test_upload_state().await;
+    let key =
+        "link-previews/sha256/86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16";
+    let bytes = bytes::Bytes::from_static(b"\x89PNG\r\n\x1a\ncached preview");
+    state
+        .app_state
+        .blob_storage
+        .put(key, bytes.clone(), "image/png")
+        .await
+        .expect("stored preview media");
+    let app = router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/link-preview-media/sha256/86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(header::CONTENT_TYPE).unwrap(),
+        "image/png"
+    );
+    assert_eq!(
+        response.headers().get(header::CACHE_CONTROL).unwrap(),
+        "private, max-age=300"
+    );
+    assert_eq!(
+        response.headers().get("x-content-type-options").unwrap(),
+        "nosniff"
+    );
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(body, bytes);
+    std::fs::remove_dir_all(upload_dir).ok();
+}
+
+#[tokio::test]
+async fn rejects_invalid_cached_link_preview_media_hash() {
+    let (state, upload_dir) = create_test_upload_state().await;
+    let app = router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/link-preview-media/sha256/not-a-hash")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    std::fs::remove_dir_all(upload_dir).ok();
+}
+
+#[tokio::test]
+async fn returns_not_found_for_missing_cached_link_preview_media() {
+    let (state, upload_dir) = create_test_upload_state().await;
+    let app = router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/link-preview-media/sha256/86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    std::fs::remove_dir_all(upload_dir).ok();
 }
 
 #[test]

@@ -377,7 +377,31 @@ fn parse_link_preview(el: &Element, first_url: Option<&Url>) -> Option<LinkPrevi
         normalized_url: og_text(el, "url").and_then(|value| parse_web_url(&value)),
         title: og_text(el, "title"),
         description: og_text(el, "description"),
+        image: parse_link_preview_image(el),
     })
+}
+
+fn parse_link_preview_image(el: &Element) -> Option<LinkPreviewImageData> {
+    let url = el
+        .children()
+        .find(|child| child.name() == "image" && child.ns() == NS_OPENGRAPH)
+        .and_then(|child| parse_cached_preview_image_url(child.text().trim()))?;
+    let media_type =
+        og_image_text(el, "type").filter(|value| safe_preview_image_media_type(value))?;
+    Some(LinkPreviewImageData {
+        url,
+        media_type,
+        width: og_image_text(el, "width").and_then(|value| value.parse().ok()),
+        height: og_image_text(el, "height").and_then(|value| value.parse().ok()),
+        alt: og_image_text(el, "alt"),
+    })
+}
+
+fn parse_cached_preview_image_url(value: &str) -> Option<Url> {
+    let url = parse_web_url(value)?;
+    let path = url.path();
+    let hash = path.strip_prefix("/api/link-preview-media/sha256/")?;
+    (hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(url)
 }
 
 fn parse_web_url(value: &str) -> Option<Url> {
@@ -411,6 +435,21 @@ fn og_text(el: &Element, name: &str) -> Option<String> {
         .map(Element::text)
         .map(|text| text.trim().to_string())
         .filter(|text| !text.is_empty())
+}
+
+fn og_image_text(el: &Element, name: &str) -> Option<String> {
+    el.children()
+        .find(|child| child.name() == name && child.ns() == NS_OPENGRAPH_IMAGE)
+        .map(Element::text)
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+}
+
+fn safe_preview_image_media_type(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+    )
 }
 
 fn has_moderation_retract(element: &Element) -> bool {

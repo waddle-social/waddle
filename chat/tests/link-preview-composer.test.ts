@@ -38,6 +38,32 @@ describe("composer link preview state", () => {
     });
   });
 
+  test("projects cached image metadata into the optimistic preview", () => {
+    const payload = linkPreviewPayloadFromLookup({
+      status: "ready",
+      token: "token-1",
+      originalUrl: "https://example.com/a",
+      normalizedUrl: "https://example.com/a",
+      expiresAt: "2999-01-01T00:00:00.000Z",
+      title: "Example",
+      image: {
+        url: "https://waddle.example/api/link-preview-media/sha256/86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16",
+        mediaType: "image/png",
+        width: 640,
+        height: 360,
+        alt: "Article screenshot",
+      },
+    });
+
+    expect(payload?.preview.image).toEqual({
+      url: "https://waddle.example/api/link-preview-media/sha256/86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16",
+      mediaType: "image/png",
+      width: 640,
+      height: 360,
+      alt: "Article screenshot",
+    });
+  });
+
   test("normal unsupported resolver states fail open with no send payload", () => {
     for (const status of ["unsupported", "blocked"] as const) {
       const unsupported = linkPreviewStateFromLookup("https://example.com/a", {

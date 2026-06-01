@@ -15,7 +15,7 @@ use crate::server::AppState;
 use axum::{
     body::Bytes,
     extract::{DefaultBodyLimit, Path, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode},
     response::IntoResponse,
     routing::{get, put},
     Json, Router,
@@ -89,8 +89,46 @@ pub fn router(upload_state: Arc<UploadState>) -> Router {
         )
         // Download endpoint (GET /api/files/{slot_id}/{filename})
         .route("/api/files/{slot_id}/{filename}", get(download_handler))
+        // Cached link-preview media (GET /api/link-preview-media/sha256/{hash})
+        .route(
+            "/api/link-preview-media/sha256/{hash}",
+            get(link_preview_media_handler),
+        )
         .layer(upload_body_limit())
         .with_state(upload_state)
+}
+
+async fn link_preview_media_handler(
+    State(state): State<Arc<UploadState>>,
+    Path(hash): Path<String>,
+) -> impl IntoResponse {
+    if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return (StatusCode::BAD_REQUEST, "invalid media hash").into_response();
+    }
+    let key = format!("link-previews/sha256/{}", hash.to_ascii_lowercase());
+    let (bytes, blob_meta) = match state.app_state.blob_storage.get(&key).await {
+        Ok(found) => found,
+        Err(crate::storage::StorageError::NotFound(_)) => {
+            return (StatusCode::NOT_FOUND, "media not found").into_response();
+        }
+        Err(error) => {
+            error!(key = %key, %error, "Failed to read cached link preview media");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "failed to read media").into_response();
+        }
+    };
+    let mut headers = HeaderMap::new();
+    if let Ok(content_type) = blob_meta.content_type.parse() {
+        headers.insert(header::CONTENT_TYPE, content_type);
+    }
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, max-age=300"),
+    );
+    headers.insert(
+        HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    );
+    (StatusCode::OK, headers, bytes).into_response()
 }
 
 /// OPTIONS /api/upload/{slot_id}

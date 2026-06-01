@@ -8,14 +8,15 @@ use chrono::{Duration, SecondsFormat, Utc};
 use minidom::rxml::xml_ncname;
 use url::Url;
 use waddle_xmpp::xep::{
-    encode_link_preview_token_checked, LinkPreviewTokenData, NS_WADDLE_LINK_PREVIEW,
+    encode_link_preview_token_checked, LinkPreviewTokenData, LinkPreviewTokenImage,
+    NS_WADDLE_LINK_PREVIEW,
 };
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::minidom::Element;
 
 use super::link_preview_resolver::{
-    resolve_link_preview, LinkPreviewResolverOutcome, LinkPreviewResolverPolicy,
-    LinkPreviewResolverStatus,
+    resolve_link_preview, LinkPreviewMediaCache, LinkPreviewResolverOutcome,
+    LinkPreviewResolverPolicy, LinkPreviewResolverStatus,
 };
 
 struct LinkPreviewLookupDeps<'a> {
@@ -42,7 +43,13 @@ pub(super) async fn handle_link_preview_lookup_iq(
     response_to: Option<&str>,
     secret: &[u8],
 ) -> Vec<String> {
-    let resolver_policy = LinkPreviewResolverPolicy::default();
+    let resolver_policy = LinkPreviewResolverPolicy {
+        media_cache: Some(LinkPreviewMediaCache::new(
+            state.deps.app_state.blob_storage.clone(),
+            state.deps.auth_state.base_url.as_str(),
+        )),
+        ..Default::default()
+    };
     handle_link_preview_lookup_iq_with_policy(
         iq,
         sender_jid,
@@ -135,6 +142,13 @@ async fn handle_link_preview_lookup_iq_with_policy(
         normalized_url: metadata.normalized_url,
         title: metadata.title,
         description: metadata.description,
+        image: metadata.image.map(|image| LinkPreviewTokenImage {
+            url: image.url,
+            media_type: image.media_type,
+            width: image.width,
+            height: image.height,
+            alt: image.alt,
+        }),
         expires_at_unix: expires_at.timestamp(),
     };
     let Some(token) = encode_link_preview_token_checked(&data, deps.secret) else {
@@ -242,6 +256,24 @@ fn build_link_preview_lookup_result(
             .build();
         append_text(&mut preview, "title", data.title.as_deref());
         append_text(&mut preview, "description", data.description.as_deref());
+        if let Some(image) = &data.image {
+            let mut image_elem = Element::builder("image", NS_WADDLE_LINK_PREVIEW)
+                .attr(xml_ncname!("url").to_owned(), image.url.as_str())
+                .attr(
+                    xml_ncname!("media-type").to_owned(),
+                    image.media_type.as_str(),
+                );
+            if let Some(width) = image.width {
+                image_elem = image_elem.attr(xml_ncname!("width").to_owned(), width.to_string());
+            }
+            if let Some(height) = image.height {
+                image_elem = image_elem.attr(xml_ncname!("height").to_owned(), height.to_string());
+            }
+            if let Some(alt) = image.alt.as_deref().filter(|alt| !alt.trim().is_empty()) {
+                image_elem = image_elem.attr(xml_ncname!("alt").to_owned(), alt.trim());
+            }
+            preview.append_child(image_elem.build());
+        }
         lookup = lookup.append(preview);
     }
     build_iq_result_xml(iq.id(), response_from, response_to, Some(lookup.build()))
@@ -283,21 +315,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handles_https_lookup_with_scoped_token_and_text_metadata() {
+    async fn handles_https_lookup_with_scoped_token_text_and_cached_image_metadata() {
         let server = MockServer::start().await;
+        let image_bytes = bytes::Bytes::from_static(b"\x89PNG\r\n\x1a\nlookup preview");
         Mock::given(method("GET"))
             .and(path("/a"))
             .respond_with(ResponseTemplate::new(200).set_body_raw(
-                r#"<html><head>
+                format!(
+                    r#"<html><head>
                     <meta property="og:title" content="Example Article">
                     <meta property="og:description" content="Plain text summary">
+                    <meta property="og:image" content="{}/preview.png">
+                    <meta property="og:image:width" content="640">
+                    <meta property="og:image:height" content="360">
+                    <meta property="og:image:alt" content="Article screenshot">
                   </head></html>"#,
+                    server.uri()
+                ),
                 "text/html",
             ))
             .mount(&server)
             .await;
+        Mock::given(method("GET"))
+            .and(path("/preview.png"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/png")
+                    .set_body_bytes(image_bytes),
+            )
+            .mount(&server)
+            .await;
+        let storage_dir =
+            std::env::temp_dir().join(format!("waddle-link-preview-{}", uuid::Uuid::new_v4()));
+        let storage: std::sync::Arc<dyn crate::storage::BlobStorage> =
+            std::sync::Arc::new(crate::storage::LocalStorage::new(storage_dir));
         let resolver_policy = LinkPreviewResolverPolicy {
             allow_http_loopback_for_tests: true,
+            media_cache: Some(LinkPreviewMediaCache::new(
+                storage,
+                "https://waddle.example",
+            )),
             ..Default::default()
         };
         let lookup_url = format!("{}/a", server.uri());
@@ -342,6 +399,16 @@ mod tests {
         assert_eq!(preview.attr("normalized-url"), Some(lookup_url.as_str()));
         assert!(preview.attr("token").is_some_and(|token| !token.is_empty()));
         assert!(preview.attr("expires-at").is_some());
+        let image = preview
+            .get_child("image", NS_WADDLE_LINK_PREVIEW)
+            .expect("image");
+        assert_eq!(image.attr("media-type"), Some("image/png"));
+        assert_eq!(image.attr("width"), Some("640"));
+        assert_eq!(image.attr("height"), Some("360"));
+        assert_eq!(image.attr("alt"), Some("Article screenshot"));
+        assert!(image.attr("url").is_some_and(|url| {
+            url.starts_with("https://waddle.example/api/link-preview-media/sha256/")
+        }));
         let token = waddle_xmpp::xep::LinkPreviewToken::new(
             preview.attr("token").expect("token").to_string(),
         )
@@ -350,6 +417,15 @@ mod tests {
             waddle_xmpp::xep::decode_link_preview_token(&token, secret(), i64::MIN).expect("token");
         assert_eq!(decoded.sender_jid.to_string(), "alice@example.com");
         assert_eq!(decoded.scope_jid.to_string(), "alice@example.com");
+        let decoded_image = decoded.image.expect("token image");
+        assert_eq!(decoded_image.media_type, "image/png");
+        assert_eq!(decoded_image.width, Some(640));
+        assert_eq!(decoded_image.height, Some(360));
+        assert_eq!(decoded_image.alt.as_deref(), Some("Article screenshot"));
+        assert!(decoded_image
+            .url
+            .as_str()
+            .starts_with("https://waddle.example/api/link-preview-media/sha256/"));
         assert_eq!(
             preview
                 .get_child("title", NS_WADDLE_LINK_PREVIEW)

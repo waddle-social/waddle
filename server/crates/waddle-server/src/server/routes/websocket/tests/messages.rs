@@ -3751,6 +3751,7 @@ async fn groupchat_preview_request_is_stamped_and_archived_without_private_paylo
         normalized_url: url::Url::parse("https://the.link.example/what-was-linked").expect("url"),
         title: Some("The Best Webpage".to_string()),
         description: Some("Plain text preview".to_string()),
+        image: None,
         expires_at_unix: chrono::Utc::now().timestamp() + 300,
     };
     let token =

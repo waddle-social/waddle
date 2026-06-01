@@ -68,6 +68,16 @@ pub struct WaddleLinkPreview {
     pub normalized_url: Option<String>,
     pub title: Option<String>,
     pub description: Option<String>,
+    pub image: Option<WaddleLinkPreviewImage>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WaddleLinkPreviewImage {
+    pub url: String,
+    pub media_type: String,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub alt: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

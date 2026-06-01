@@ -7,8 +7,8 @@ use minidom::Element;
 use url::Url;
 use waddle_xmpp::xep::{
     build_link_metadata_element, extract_link_metadata_from_message, parse_link_metadata_element,
-    set_link_metadata, strip_link_metadata, LinkMetadata, LinkMetadataError, NS_OPENGRAPH,
-    NS_RDF_SYNTAX,
+    set_link_metadata, strip_link_metadata, LinkMetadata, LinkMetadataError, LinkPreviewImage,
+    NS_OPENGRAPH, NS_OPENGRAPH_IMAGE, NS_RDF_SYNTAX,
 };
 use xmpp_parsers::message::Message;
 
@@ -52,6 +52,63 @@ fn xep0511_builds_rdf_description_with_namespaced_about_and_opengraph_children()
             .map(Element::text)
             .as_deref(),
         Some("https://example.com/canonical")
+    );
+}
+
+#[test]
+fn xep0511_builds_cached_image_metadata_with_opengraph_structured_properties() {
+    let image = LinkPreviewImage::new(
+        Url::parse("https://waddle.example/api/link-preview-media/sha256/86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16").expect("url"),
+    )
+    .with_media_type("image/png")
+    .with_dimensions(640, 360)
+    .with_alt("Screenshot of the article");
+    let metadata = LinkMetadata::new(Url::parse("https://the.link.example/article").expect("url"))
+        .with_title("The Best Webpage")
+        .with_image(image.clone());
+
+    let payload = build_link_metadata_element(&metadata);
+
+    assert_eq!(
+        payload
+            .get_child("image", NS_OPENGRAPH)
+            .map(Element::text)
+            .as_deref(),
+        Some("https://waddle.example/api/link-preview-media/sha256/86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16")
+    );
+    assert_eq!(
+        payload
+            .get_child("type", NS_OPENGRAPH_IMAGE)
+            .map(Element::text)
+            .as_deref(),
+        Some("image/png")
+    );
+    assert_eq!(
+        payload
+            .get_child("width", NS_OPENGRAPH_IMAGE)
+            .map(Element::text)
+            .as_deref(),
+        Some("640")
+    );
+    assert_eq!(
+        payload
+            .get_child("height", NS_OPENGRAPH_IMAGE)
+            .map(Element::text)
+            .as_deref(),
+        Some("360")
+    );
+    assert_eq!(
+        payload
+            .get_child("alt", NS_OPENGRAPH_IMAGE)
+            .map(Element::text)
+            .as_deref(),
+        Some("Screenshot of the article")
+    );
+    assert_eq!(
+        parse_link_metadata_element(&payload)
+            .expect("image metadata parses")
+            .images,
+        vec![image]
     );
 }
 

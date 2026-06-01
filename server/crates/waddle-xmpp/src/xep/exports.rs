@@ -424,8 +424,9 @@ pub use super::xep_waddle_link_preview::{
     build_link_preview_request_element, decode_link_preview_token, encode_link_preview_token,
     encode_link_preview_token_checked, extract_link_preview_request_from_message,
     is_link_preview_request_element, parse_link_preview_request_element,
-    strip_link_preview_requests, LinkPreviewToken, LinkPreviewTokenData, WaddleLinkPreviewError,
-    ELEMENT_PREVIEW_REQUEST, MAX_LINK_PREVIEW_TOKEN_BYTES, NS_WADDLE_LINK_PREVIEW,
+    strip_link_preview_requests, LinkPreviewToken, LinkPreviewTokenData, LinkPreviewTokenImage,
+    WaddleLinkPreviewError, ELEMENT_PREVIEW_REQUEST, MAX_LINK_PREVIEW_TOKEN_BYTES,
+    NS_WADDLE_LINK_PREVIEW,
 };
 
 pub use super::xep0503::{
@@ -439,7 +440,7 @@ pub use super::xep0503::{
 pub use super::xep0511::{
     build_link_metadata_element, extract_link_metadata_from_message, is_link_metadata_element,
     parse_link_metadata_element, set_link_metadata, strip_link_metadata, LinkMetadata,
-    LinkMetadataError, NS_OPENGRAPH, NS_OPENGRAPH_IMAGE, NS_RDF_SYNTAX,
+    LinkMetadataError, LinkPreviewImage, NS_OPENGRAPH, NS_OPENGRAPH_IMAGE, NS_RDF_SYNTAX,
 };
 
 // Re-export commonly used items at the xep module level

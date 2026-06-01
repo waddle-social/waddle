@@ -8,6 +8,15 @@ export interface LinkPreviewLookupReadyResult {
   expiresAt: string;
   title?: string;
   description?: string;
+  image?: LinkPreviewLookupImage;
+}
+
+export interface LinkPreviewLookupImage {
+  url: string;
+  mediaType: string;
+  width?: number;
+  height?: number;
+  alt?: string;
 }
 
 export interface LinkPreviewLookupUnsupportedResult {
@@ -43,6 +52,7 @@ export async function requestPlaintextLinkPreviewLookup(
   client: LinkPreviewIqClient | null | undefined,
   body: string,
   scopeJid: string,
+  trustedMediaOrigin?: string | null,
 ): Promise<LinkPreviewLookupResult | null> {
   const originalUrl = firstEligibleHttpsUrl(body);
   const trimmedScopeJid = scopeJid.trim();
@@ -60,10 +70,10 @@ export async function requestPlaintextLinkPreviewLookup(
   } catch {
     return null;
   }
-  return parseLookupResponse(response, originalUrl);
+  return parseLookupResponse(response, originalUrl, trustedMediaOrigin);
 }
 
-function parseLookupResponse(xml: string, requestedUrl: string): LinkPreviewLookupResult | null {
+function parseLookupResponse(xml: string, requestedUrl: string, trustedMediaOrigin?: string | null): LinkPreviewLookupResult | null {
   const doc = new DOMParser().parseFromString(xml, "text/xml");
   const lookup = doc.getElementsByTagNameNS(NS_WADDLE_LINK_PREVIEW, "lookup")[0];
   if (!lookup) return null;
@@ -92,6 +102,7 @@ function parseLookupResponse(xml: string, requestedUrl: string): LinkPreviewLook
     expiresAt,
     ...childText(preview, "title"),
     ...childText(preview, "description"),
+    ...previewImage(preview, trustedMediaOrigin),
   };
 }
 
@@ -180,4 +191,79 @@ function childText(parent: Element, name: "title" | "description"): Partial<Link
     ?.textContent
     ?.trim();
   return value ? { [name]: value } : {};
+}
+
+function previewImage(parent: Element, trustedMediaOrigin?: string | null): Partial<LinkPreviewLookupReadyResult> {
+  const image = Array.from(parent.children).find(
+    (child) => child.localName === "image" && child.namespaceURI === NS_WADDLE_LINK_PREVIEW,
+  );
+  if (!image) return {};
+  const url = image.getAttribute("url")?.trim();
+  const mediaType = image.getAttribute("media-type")?.trim();
+  if (!url || !mediaType || !isTrustedCachedPreviewImageUrl(url, trustedMediaOrigin) || !safePreviewImageMediaType(mediaType)) {
+    return {};
+  }
+  const width = optionalPositiveInteger(image.getAttribute("width"));
+  const height = optionalPositiveInteger(image.getAttribute("height"));
+  const alt = image.getAttribute("alt")?.trim();
+  return {
+    image: {
+      url,
+      mediaType: mediaType.toLowerCase(),
+      ...(width ? { width } : {}),
+      ...(height ? { height } : {}),
+      ...(alt ? { alt } : {}),
+    },
+  };
+}
+
+export function linkPreviewMediaOriginFromWebSocketUrl(websocketUrl: string): string | null {
+  try {
+    const url = new URL(websocketUrl);
+    if (url.protocol === "wss:") {
+      url.protocol = "https:";
+    } else if (url.protocol === "ws:") {
+      url.protocol = "http:";
+    } else {
+      return null;
+    }
+    return url.origin;
+  } catch {
+    return null;
+  }
+}
+
+export function isTrustedCachedPreviewImageUrl(value: string, trustedMediaOrigin?: string | null): boolean {
+  if (!trustedMediaOrigin) return false;
+  try {
+    const url = new URL(value);
+    const trusted = new URL(trustedMediaOrigin);
+    return trustedPreviewProtocolsMatch(url, trusted)
+      && url.origin === trusted.origin
+      && /^\/api\/link-preview-media\/sha256\/[a-f0-9]{64}$/i.test(url.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function trustedPreviewProtocolsMatch(url: URL, trusted: URL): boolean {
+  if (url.protocol === "https:" && trusted.protocol === "https:") return true;
+  return url.protocol === "http:" && trusted.protocol === "http:" && isLoopbackHost(url.hostname);
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  return hostname === "localhost"
+    || hostname === "127.0.0.1"
+    || hostname === "::1"
+    || hostname === "[::1]";
+}
+
+function safePreviewImageMediaType(value: string): boolean {
+  return ["image/png", "image/jpeg", "image/gif", "image/webp"].includes(value.toLowerCase());
+}
+
+function optionalPositiveInteger(value: string | null): number | undefined {
+  if (!value) return undefined;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
 }

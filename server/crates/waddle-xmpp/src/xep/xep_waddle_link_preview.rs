@@ -51,7 +51,18 @@ pub struct LinkPreviewTokenData {
     pub normalized_url: Url,
     pub title: Option<String>,
     pub description: Option<String>,
+    pub image: Option<LinkPreviewTokenImage>,
     pub expires_at_unix: i64,
+}
+
+/// Cached preview image metadata sealed inside a composer preview token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkPreviewTokenImage {
+    pub url: Url,
+    pub media_type: String,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub alt: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,7 +73,17 @@ struct LinkPreviewTokenWire {
     normalized_url: String,
     title: Option<String>,
     description: Option<String>,
+    image: Option<LinkPreviewTokenImageWire>,
     expires_at_unix: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LinkPreviewTokenImageWire {
+    url: String,
+    media_type: String,
+    width: Option<u32>,
+    height: Option<u32>,
+    alt: Option<String>,
 }
 
 /// Errors for private Waddle link-preview request parsing.
@@ -133,6 +154,13 @@ pub fn encode_link_preview_token(data: &LinkPreviewTokenData, secret: &[u8]) -> 
         normalized_url: data.normalized_url.as_str().to_string(),
         title: data.title.clone(),
         description: data.description.clone(),
+        image: data.image.as_ref().map(|image| LinkPreviewTokenImageWire {
+            url: image.url.as_str().to_string(),
+            media_type: image.media_type.clone(),
+            width: image.width,
+            height: image.height,
+            alt: image.alt.clone(),
+        }),
         expires_at_unix: data.expires_at_unix,
     };
     let json = serde_json::to_vec(&wire).expect("wire token is serializable");
@@ -198,6 +226,19 @@ pub fn decode_link_preview_token(
             .map_err(|_| WaddleLinkPreviewError::InvalidTokenUrl)?,
         title: wire.title,
         description: wire.description,
+        image: wire
+            .image
+            .map(|image| {
+                Ok(LinkPreviewTokenImage {
+                    url: Url::parse(&image.url)
+                        .map_err(|_| WaddleLinkPreviewError::InvalidTokenUrl)?,
+                    media_type: image.media_type,
+                    width: image.width,
+                    height: image.height,
+                    alt: image.alt,
+                })
+            })
+            .transpose()?,
         expires_at_unix: wire.expires_at_unix,
     })
 }
@@ -228,6 +269,14 @@ mod tests {
             normalized_url: Url::parse("https://example.com/path").expect("url"),
             title: Some("Example".to_string()),
             description: Some("Plain text preview".to_string()),
+            image: Some(LinkPreviewTokenImage {
+                url: Url::parse("https://waddle.example/api/link-preview-media/sha256/86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16")
+                    .expect("url"),
+                media_type: "image/png".to_string(),
+                width: Some(640),
+                height: Some(360),
+                alt: Some("Article screenshot".to_string()),
+            }),
             expires_at_unix: 1_900_000_000,
         };
 
@@ -248,6 +297,7 @@ mod tests {
             normalized_url: Url::parse("https://example.com/path").expect("url"),
             title: Some("Example".to_string()),
             description: Some("Plain text preview".to_string()),
+            image: None,
             expires_at_unix: 1_900_000_000,
         };
 
@@ -269,6 +319,7 @@ mod tests {
             normalized_url: Url::parse("https://example.com/").expect("url"),
             title: None,
             description: None,
+            image: None,
             expires_at_unix: 10,
         };
 
@@ -289,6 +340,7 @@ mod tests {
             normalized_url: Url::parse("https://example.com/").expect("url"),
             title: Some("t".repeat(MAX_LINK_PREVIEW_TOKEN_BYTES)),
             description: Some("d".repeat(MAX_LINK_PREVIEW_TOKEN_BYTES)),
+            image: None,
             expires_at_unix: 1_900_000_000,
         };
 
