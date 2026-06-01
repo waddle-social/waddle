@@ -632,6 +632,7 @@ watch(
           <div class="truncate text-muted-foreground">{{ linkPreview.description.value }}</div>
         </div>
         <button
+          v-if="linkPreview.canDismiss.value"
           type="button"
           class="h-8 w-8 flex items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
           title="Remove preview"

@@ -92,6 +92,7 @@ export function useComposerLinkPreview(
   return {
     state,
     showCard,
+    canDismiss: computed(() => "url" in state.value && state.value.kind !== "dismissed"),
     host,
     title,
     description,

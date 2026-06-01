@@ -80,13 +80,13 @@ describe("useChatSend.sendMessage — happy path", () => {
     const client = makeClient({ sendDirectMessage, lookupLinkPreview } as Partial<BrowserXmppClient>);
     const h = harness({ client, draft: "read https://example.com/article" });
 
-    const sent = await Promise.race([
-      h.send.sendMessage(undefined, []).then(() => true),
-      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 10)),
-    ]);
+    const sendPromise = h.send.sendMessage(undefined, []);
+    await Promise.resolve();
 
-    expect(sent).toBe(true);
+    expect(sendDirectMessage).toHaveBeenCalledTimes(1);
     expect(lookupLinkPreview).not.toHaveBeenCalled();
+    await sendPromise;
+
     const call = (sendDirectMessage as unknown as ReturnType<typeof mock>).mock.calls[0]!;
     expect(call[2].linkPreviewToken).toBeUndefined();
     expect(call[2].linkPreviewExpiresAt).toBeUndefined();

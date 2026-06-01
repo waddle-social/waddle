@@ -95,13 +95,13 @@ describe("useMucSend.sendMessage — happy path", () => {
     const client = makeClient({ sendGroupMessage, lookupLinkPreview } as Partial<BrowserXmppClient>);
     const h = harness({ client, draft: "read https://example.com/article and https://later.example/path" });
 
-    const sent = await Promise.race([
-      h.send.sendMessage(undefined, []).then(() => true),
-      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 10)),
-    ]);
+    const sendPromise = h.send.sendMessage(undefined, []);
+    await Promise.resolve();
 
-    expect(sent).toBe(true);
+    expect(sendGroupMessage).toHaveBeenCalledTimes(1);
     expect(lookupLinkPreview).not.toHaveBeenCalled();
+    await sendPromise;
+
     const call = (sendGroupMessage as unknown as ReturnType<typeof mock>).mock.calls[0]!;
     expect(call[3].linkPreviewToken).toBeUndefined();
     expect(call[3].linkPreviewExpiresAt).toBeUndefined();

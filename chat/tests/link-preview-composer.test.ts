@@ -77,11 +77,13 @@ describe("composer link preview state", () => {
     await nextTick();
 
     expect(h.preview.state.value).toEqual({ kind: "loading", url: "https://example.com/a" });
+    expect(h.preview.canDismiss.value).toBe(true);
     expect(h.preview.sendPayload.value).toBeUndefined();
 
     h.preview.dismiss();
 
     expect(h.preview.state.value).toEqual({ kind: "dismissed", url: "https://example.com/a" });
+    expect(h.preview.canDismiss.value).toBe(false);
     expect(h.preview.sendPayload.value).toBeUndefined();
     h.stop();
   });
