@@ -1,11 +1,24 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
+use chrono::Utc;
+use jid::BareJid;
+use kameo::actor::ActorRef;
 use reqwest::header::{CONTENT_TYPE, LOCATION};
 use reqwest::{redirect, Client, StatusCode};
+use sha2::{Digest, Sha256};
+use tracing::warn;
 use url::{Host, Url};
+use waddle_xmpp_core::PreviewImageMediaType;
+
+use crate::db::actor::{DbActor, DbExecute};
+use crate::db::Value;
+use crate::storage::BlobStorage;
 
 const DEFAULT_MAX_BYTES: usize = 256 * 1024;
+const DEFAULT_MAX_IMAGE_BYTES: usize = 2 * 1024 * 1024;
 const DEFAULT_MAX_REDIRECTS: usize = 3;
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(1_500);
 const LINK_PREVIEW_TITLE_MAX_BYTES: usize = 256;
@@ -17,23 +30,61 @@ pub(super) struct ResolvedLinkMetadata {
     pub normalized_url: Url,
     pub title: Option<String>,
     pub description: Option<String>,
+    pub image: Option<ResolvedLinkPreviewImage>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ResolvedLinkPreviewImage {
+    pub url: Url,
+    pub media_type: PreviewImageMediaType,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub alt: Option<String>,
+}
+
+#[derive(Clone)]
+pub(super) struct LinkPreviewMediaCache {
+    storage: Arc<dyn BlobStorage>,
+    public_base_url: String,
+    global_db_actor: ActorRef<DbActor>,
+    requester_jid: BareJid,
+}
+
+impl LinkPreviewMediaCache {
+    pub(super) fn new(
+        storage: Arc<dyn BlobStorage>,
+        public_base_url: impl Into<String>,
+        global_db_actor: ActorRef<DbActor>,
+        requester_jid: BareJid,
+    ) -> Self {
+        Self {
+            storage,
+            public_base_url: public_base_url.into().trim_end_matches('/').to_string(),
+            global_db_actor,
+            requester_jid,
+        }
+    }
+}
+
+#[derive(Clone)]
 pub(super) struct LinkPreviewResolverPolicy {
     pub max_bytes: usize,
+    pub max_image_bytes: usize,
     pub max_redirects: usize,
     pub timeout: Duration,
     pub allow_http_loopback_for_tests: bool,
+    pub media_cache: Option<LinkPreviewMediaCache>,
 }
 
 impl Default for LinkPreviewResolverPolicy {
     fn default() -> Self {
         Self {
             max_bytes: DEFAULT_MAX_BYTES,
+            max_image_bytes: DEFAULT_MAX_IMAGE_BYTES,
             max_redirects: DEFAULT_MAX_REDIRECTS,
             timeout: DEFAULT_TIMEOUT,
             allow_http_loopback_for_tests: false,
+            media_cache: None,
         }
     }
 }
@@ -97,9 +148,31 @@ pub(super) async fn resolve_link_preview(
         };
         match fetch {
             FetchOnceResult::Html { final_url, html } => {
-                return extract_metadata_from_html_with_normalized_fallback(url, &html, &final_url)
-                    .map(|metadata| LinkPreviewResolverOutcome::Ready(Box::new(metadata)))
-                    .unwrap_or(LinkPreviewResolverOutcome::Unsupported);
+                let Some((mut metadata, remote_image)) =
+                    extract_metadata_parts_from_html(url, &html, &final_url, policy)
+                else {
+                    return LinkPreviewResolverOutcome::Unsupported;
+                };
+                if let (Some(cache), Some(remote_image)) =
+                    (policy.media_cache.as_ref(), remote_image)
+                {
+                    match fetch_cached_preview_image(&remote_image, policy, cache, deadline).await {
+                        Ok(image) => metadata.image = Some(image),
+                        Err(LinkPreviewResolverStatus::Blocked) => warn!(
+                            url = %remote_image.url,
+                            "dropping blocked link preview image after metadata resolved"
+                        ),
+                        Err(LinkPreviewResolverStatus::Failed) => warn!(
+                            url = %remote_image.url,
+                            "dropping failed link preview image after metadata resolved"
+                        ),
+                        Err(LinkPreviewResolverStatus::Unsupported) => {}
+                        Err(LinkPreviewResolverStatus::Ready) => {
+                            unreachable!("ready is not an image fetch error")
+                        }
+                    }
+                }
+                return LinkPreviewResolverOutcome::Ready(Box::new(metadata));
             }
             FetchOnceResult::Redirect(next) => {
                 if redirect_count == policy.max_redirects {
@@ -110,6 +183,193 @@ pub(super) async fn resolve_link_preview(
         }
     }
     LinkPreviewResolverOutcome::Failed
+}
+
+async fn fetch_cached_preview_image(
+    remote: &RemotePreviewImage,
+    policy: &LinkPreviewResolverPolicy,
+    cache: &LinkPreviewMediaCache,
+    deadline: Instant,
+) -> Result<ResolvedLinkPreviewImage, LinkPreviewResolverStatus> {
+    let mut current = remote.url.clone();
+    for redirect_count in 0..=policy.max_redirects {
+        let Some(timeout) = deadline.checked_duration_since(Instant::now()) else {
+            return Err(LinkPreviewResolverStatus::Failed);
+        };
+        match fetch_image_once(&current, policy, timeout).await? {
+            FetchImageOnceResult::Image { bytes, media_type } => {
+                let hash = hex::encode(Sha256::digest(bytes.as_ref()));
+                let (slot_id, filename) =
+                    publish_cached_preview_image_slot(cache, &hash, bytes, media_type.as_str())
+                        .await?;
+                let url = Url::parse(&format!(
+                    "{}/api/files/{}/{}",
+                    cache.public_base_url, slot_id, filename
+                ))
+                .map_err(|error| {
+                    warn!(%error, "failed to build XEP-0363 cached link preview image URL");
+                    LinkPreviewResolverStatus::Unsupported
+                })?;
+                return Ok(ResolvedLinkPreviewImage {
+                    url,
+                    media_type,
+                    width: remote.width,
+                    height: remote.height,
+                    alt: remote.alt.clone(),
+                });
+            }
+            FetchImageOnceResult::Redirect(next) => {
+                if redirect_count == policy.max_redirects {
+                    return Err(LinkPreviewResolverStatus::Failed);
+                }
+                current = next;
+            }
+        }
+    }
+    Err(LinkPreviewResolverStatus::Failed)
+}
+
+async fn publish_cached_preview_image_slot(
+    cache: &LinkPreviewMediaCache,
+    hash: &str,
+    bytes: Bytes,
+    media_type: &str,
+) -> Result<(String, String), LinkPreviewResolverStatus> {
+    let key = format!("link-previews/sha256/{hash}");
+    cache
+        .storage
+        .put(&key, bytes.clone(), media_type)
+        .await
+        .map_err(|error| {
+            warn!(%error, key = %key, "failed to cache link preview image");
+            LinkPreviewResolverStatus::Unsupported
+        })?;
+
+    let slot_id = uuid::Uuid::new_v4().to_string();
+    let filename = format!(
+        "link-preview-{hash}.{}",
+        preview_image_extension(media_type)
+    );
+    let now = Utc::now();
+    let size_bytes = i64::try_from(bytes.len()).map_err(|_| LinkPreviewResolverStatus::Failed)?;
+    cache
+        .global_db_actor
+        .ask(DbExecute {
+            sql: "INSERT INTO upload_slots (id, requester_jid, filename, size_bytes, content_type, status, storage_key, expires_at, uploaded_at) VALUES (?, ?, ?, ?, ?, 'uploaded', ?, ?, ?)".to_string(),
+            params: vec![
+                Value::from(slot_id.clone()),
+                Value::from(cache.requester_jid.to_string()),
+                Value::from(filename.clone()),
+                Value::from(size_bytes),
+                Value::from(media_type.to_string()),
+                Value::from(key),
+                Value::from((now + chrono::Duration::minutes(15)).to_rfc3339()),
+                Value::from(now.to_rfc3339()),
+            ],
+        })
+        .await
+        .map_err(|error| {
+            warn!(%error, "failed to record XEP-0363 link preview upload slot");
+            LinkPreviewResolverStatus::Unsupported
+        })?;
+    Ok((slot_id, filename))
+}
+
+fn preview_image_extension(media_type: &str) -> &'static str {
+    match media_type {
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        _ => "png",
+    }
+}
+
+enum FetchImageOnceResult {
+    Image {
+        bytes: Bytes,
+        media_type: PreviewImageMediaType,
+    },
+    Redirect(Url),
+}
+
+async fn fetch_image_once(
+    url: &Url,
+    policy: &LinkPreviewResolverPolicy,
+    timeout: Duration,
+) -> Result<FetchImageOnceResult, LinkPreviewResolverStatus> {
+    let target = prepare_target(url, policy).await?;
+    let mut builder = Client::builder()
+        .timeout(timeout)
+        .connect_timeout(timeout)
+        .redirect(redirect::Policy::none())
+        .https_only(!policy.allow_http_loopback_for_tests);
+    if let Host::Domain(host) = target.host {
+        builder = builder.resolve_to_addrs(host, &target.addrs);
+    }
+    let client = builder
+        .build()
+        .map_err(|_| LinkPreviewResolverStatus::Failed)?;
+    let mut response = client
+        .get(url.clone())
+        .send()
+        .await
+        .map_err(|_| LinkPreviewResolverStatus::Failed)?;
+
+    if response.status().is_redirection() {
+        let Some(location) = response
+            .headers()
+            .get(LOCATION)
+            .and_then(|value| value.to_str().ok())
+        else {
+            return Err(LinkPreviewResolverStatus::Failed);
+        };
+        let next = url
+            .join(location)
+            .map_err(|_| LinkPreviewResolverStatus::Failed)?;
+        let status = classify_url_with_policy(&next, policy);
+        if status != LinkPreviewResolverStatus::Ready {
+            return Err(status);
+        }
+        return Ok(FetchImageOnceResult::Redirect(next));
+    }
+
+    if response.status() == StatusCode::NOT_FOUND {
+        return Err(LinkPreviewResolverStatus::Unsupported);
+    }
+    if !response.status().is_success() {
+        return Err(LinkPreviewResolverStatus::Failed);
+    }
+    let header_media_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(safe_preview_image_media_type)
+        .ok_or(LinkPreviewResolverStatus::Unsupported)?;
+    if let Some(len) = response.content_length() {
+        if len > policy.max_image_bytes as u64 {
+            return Err(LinkPreviewResolverStatus::Failed);
+        }
+    }
+    let mut body = Vec::with_capacity(policy.max_image_bytes.min(128 * 1024));
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| LinkPreviewResolverStatus::Failed)?
+    {
+        if body.len() + chunk.len() > policy.max_image_bytes {
+            return Err(LinkPreviewResolverStatus::Failed);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    let media_type =
+        sniff_safe_preview_image_media_type(&body).ok_or(LinkPreviewResolverStatus::Unsupported)?;
+    if header_media_type != media_type {
+        return Err(LinkPreviewResolverStatus::Unsupported);
+    }
+    Ok(FetchImageOnceResult::Image {
+        bytes: Bytes::from(body),
+        media_type,
+    })
 }
 
 enum FetchOnceResult {
@@ -374,18 +634,37 @@ fn extract_metadata_from_html(requested_url: &Url, html: &str) -> Option<Resolve
     extract_metadata_from_html_with_normalized_fallback(requested_url, html, requested_url)
 }
 
+#[cfg(test)]
 fn extract_metadata_from_html_with_normalized_fallback(
     requested_url: &Url,
     html: &str,
     normalized_fallback_url: &Url,
 ) -> Option<ResolvedLinkMetadata> {
+    let policy = LinkPreviewResolverPolicy::default();
+    extract_metadata_parts_from_html(requested_url, html, normalized_fallback_url, &policy)
+        .map(|(metadata, _)| metadata)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RemotePreviewImage {
+    url: Url,
+    width: Option<u32>,
+    height: Option<u32>,
+    alt: Option<String>,
+}
+
+fn extract_metadata_parts_from_html(
+    requested_url: &Url,
+    html: &str,
+    normalized_fallback_url: &Url,
+    policy: &LinkPreviewResolverPolicy,
+) -> Option<(ResolvedLinkMetadata, Option<RemotePreviewImage>)> {
     let title = meta_content(html, "og:title", LINK_PREVIEW_TITLE_MAX_BYTES);
     let description = meta_content(html, "og:description", LINK_PREVIEW_DESCRIPTION_MAX_BYTES);
     let canonical_url = meta_content(html, "og:url", usize::MAX)
         .and_then(|url| Url::parse(&url).ok())
         .filter(|url| {
-            classify_url_with_policy(url, &LinkPreviewResolverPolicy::default())
-                == LinkPreviewResolverStatus::Ready
+            classify_url_with_policy(url, policy) == LinkPreviewResolverStatus::Ready
                 && same_domain_host(url, normalized_fallback_url)
         });
     let normalized_url = canonical_url
@@ -399,12 +678,53 @@ fn extract_metadata_from_html_with_normalized_fallback(
         return None;
     }
 
-    Some(ResolvedLinkMetadata {
-        original_url: requested_url.clone(),
-        normalized_url,
-        title,
-        description,
-    })
+    let image = meta_content(html, "og:image", usize::MAX)
+        .and_then(|url| Url::parse(&url).ok())
+        .filter(|url| classify_url_with_policy(url, policy) == LinkPreviewResolverStatus::Ready)
+        .map(|url| RemotePreviewImage {
+            url,
+            width: meta_content(html, "og:image:width", 16).and_then(|raw| raw.parse().ok()),
+            height: meta_content(html, "og:image:height", 16).and_then(|raw| raw.parse().ok()),
+            alt: meta_content(html, "og:image:alt", LINK_PREVIEW_DESCRIPTION_MAX_BYTES),
+        });
+
+    Some((
+        ResolvedLinkMetadata {
+            original_url: requested_url.clone(),
+            normalized_url,
+            title,
+            description,
+            image: None,
+        },
+        image,
+    ))
+}
+
+fn safe_preview_image_media_type(value: &str) -> Option<PreviewImageMediaType> {
+    let media_type = value
+        .split(';')
+        .next()
+        .unwrap_or(value)
+        .trim()
+        .parse()
+        .ok()?;
+    Some(media_type)
+}
+
+fn sniff_safe_preview_image_media_type(bytes: &[u8]) -> Option<PreviewImageMediaType> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some(PreviewImageMediaType::Png);
+    }
+    if bytes.starts_with(b"\xff\xd8\xff") {
+        return Some(PreviewImageMediaType::Jpeg);
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return Some(PreviewImageMediaType::Gif);
+    }
+    if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return Some(PreviewImageMediaType::Webp);
+    }
+    None
 }
 
 fn meta_content(html: &str, property: &str, max_bytes: usize) -> Option<String> {
@@ -559,8 +879,75 @@ fn find_ascii_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig};
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Arc;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    struct FailingPutStorage;
+
+    impl crate::storage::BlobStorage for FailingPutStorage {
+        fn put(
+            &self,
+            _key: &str,
+            _data: bytes::Bytes,
+            _content_type: &str,
+        ) -> Pin<Box<dyn Future<Output = Result<(), crate::storage::StorageError>> + Send + '_>>
+        {
+            Box::pin(async {
+                Err(crate::storage::StorageError::Internal(
+                    "forced put failure".to_string(),
+                ))
+            })
+        }
+
+        fn get(
+            &self,
+            key: &str,
+        ) -> Pin<
+            Box<
+                dyn Future<
+                        Output = Result<
+                            (bytes::Bytes, crate::storage::BlobMeta),
+                            crate::storage::StorageError,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            let key = key.to_string();
+            Box::pin(async { Err(crate::storage::StorageError::NotFound(key)) })
+        }
+    }
+
+    async fn test_media_cache(
+        storage: Arc<dyn crate::storage::BlobStorage>,
+    ) -> LinkPreviewMediaCache {
+        let (cache, _) = test_media_cache_with_base_url(storage, "https://waddle.example").await;
+        cache
+    }
+
+    async fn test_media_cache_with_base_url(
+        storage: Arc<dyn crate::storage::BlobStorage>,
+        base_url: &str,
+    ) -> (LinkPreviewMediaCache, DatabasePool) {
+        let db_pool = DatabasePool::new(DatabaseConfig::default(), PoolConfig)
+            .await
+            .expect("db pool");
+        MigrationRunner::global()
+            .run(db_pool.global())
+            .await
+            .expect("migrations");
+        let cache = LinkPreviewMediaCache::new(
+            storage,
+            base_url,
+            db_pool.global_actor().clone(),
+            "alice@example.com".parse().expect("jid"),
+        );
+        (cache, db_pool)
+    }
 
     #[test]
     fn extracts_opengraph_text_metadata_from_html_without_executing_embeds() {
@@ -826,6 +1213,523 @@ mod tests {
         };
         assert_eq!(metadata.title.as_deref(), Some("Fetched title"));
         assert_eq!(metadata.description.as_deref(), Some("Fetched description"));
+    }
+
+    #[tokio::test]
+    async fn fetches_safe_preview_image_into_content_addressed_waddle_storage() {
+        let server = MockServer::start().await;
+        let image_bytes = bytes::Bytes::from_static(b"\x89PNG\r\n\x1a\nfake png bytes");
+        Mock::given(method("GET"))
+            .and(path("/article"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    r#"<html><head>
+                          <meta property="og:title" content="Fetched title">
+                          <meta property="og:image" content="{}/preview.png">
+                          <meta property="og:image:width" content="640">
+                          <meta property="og:image:height" content="360">
+                          <meta property="og:image:alt" content="Article screenshot">
+                        </head></html>"#,
+                    server.uri()
+                ),
+                "text/html; charset=utf-8",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/preview.png"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/png")
+                    .set_body_bytes(image_bytes.clone()),
+            )
+            .mount(&server)
+            .await;
+        let storage_dir =
+            std::env::temp_dir().join(format!("waddle-link-preview-{}", uuid::Uuid::new_v4()));
+        let storage: Arc<dyn crate::storage::BlobStorage> =
+            Arc::new(crate::storage::LocalStorage::new(storage_dir));
+        let (media_cache, db_pool) =
+            test_media_cache_with_base_url(storage.clone(), "https://waddle.example").await;
+        let policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
+            media_cache: Some(media_cache),
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/article", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        let LinkPreviewResolverOutcome::Ready(metadata) = outcome else {
+            panic!("expected ready outcome, got {outcome:?}");
+        };
+        let expected_hash = hex::encode(Sha256::digest(image_bytes.as_ref()));
+        let expected_key = format!("link-previews/sha256/{expected_hash}");
+        let image = metadata.image.expect("cached image metadata");
+        assert_eq!(image.url.scheme(), "https");
+        assert_eq!(image.url.domain(), Some("waddle.example"));
+        assert!(image.url.path().starts_with("/api/files/"));
+        assert!(image
+            .url
+            .path()
+            .ends_with(&format!("/link-preview-{expected_hash}.png")));
+        assert_eq!(image.media_type, PreviewImageMediaType::Png);
+        assert_eq!(image.width, Some(640));
+        assert_eq!(image.height, Some(360));
+        assert_eq!(image.alt.as_deref(), Some("Article screenshot"));
+        let slot_id = image
+            .url
+            .path_segments()
+            .and_then(|mut segments| segments.nth(2))
+            .expect("slot id");
+        let db = db_pool.global().guard().await.expect("db");
+        let mut rows = db
+            .query(
+                "SELECT filename, status, storage_key FROM upload_slots WHERE id = ?",
+                crate::db_params![slot_id],
+            )
+            .await
+            .expect("slot row");
+        let row = rows
+            .next()
+            .await
+            .expect("next row")
+            .expect("slot row exists");
+        assert_eq!(
+            row.get::<String>(0).expect("filename"),
+            format!("link-preview-{expected_hash}.png")
+        );
+        assert_eq!(row.get::<String>(1).expect("status"), "uploaded");
+        assert_eq!(
+            row.get::<Option<String>>(2).expect("storage_key"),
+            Some(expected_key.clone())
+        );
+        assert!(rows.next().await.expect("next row").is_none());
+        let (stored, meta) = storage.get(&expected_key).await.expect("cached bytes");
+        assert_eq!(stored, image_bytes);
+        assert_eq!(meta.content_type, "image/png");
+    }
+
+    #[tokio::test]
+    async fn rejects_unsafe_preview_image_media_types_without_caching_image() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/article"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    r#"<html><head>
+                          <meta property="og:title" content="Fetched title">
+                          <meta property="og:image" content="{}/preview.svg">
+                        </head></html>"#,
+                    server.uri()
+                ),
+                "text/html; charset=utf-8",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/preview.svg"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/svg+xml")
+                    .set_body_raw("<svg/>", "image/svg+xml"),
+            )
+            .mount(&server)
+            .await;
+        let storage_dir =
+            std::env::temp_dir().join(format!("waddle-link-preview-{}", uuid::Uuid::new_v4()));
+        let storage: Arc<dyn crate::storage::BlobStorage> =
+            Arc::new(crate::storage::LocalStorage::new(storage_dir));
+        let policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
+            media_cache: Some(test_media_cache(storage.clone()).await),
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/article", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        let LinkPreviewResolverOutcome::Ready(metadata) = outcome else {
+            panic!("expected ready outcome, got {outcome:?}");
+        };
+        assert_eq!(metadata.title.as_deref(), Some("Fetched title"));
+        assert_eq!(metadata.image, None);
+        assert!(storage
+            .get("link-previews/sha256/d4dc56669143034f31aa309635d4113d9ad76a02b1739da22c965ed2049be9e6")
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn follows_safe_preview_image_redirects_before_caching() {
+        let server = MockServer::start().await;
+        let image_bytes = bytes::Bytes::from_static(b"\x89PNG\r\n\x1a\nredirected png");
+        Mock::given(method("GET"))
+            .and(path("/article"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    r#"<html><head>
+                          <meta property="og:title" content="Fetched title">
+                          <meta property="og:image" content="{}/preview">
+                        </head></html>"#,
+                    server.uri()
+                ),
+                "text/html; charset=utf-8",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/preview"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", format!("{}/final.png", server.uri())),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/final.png"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/png")
+                    .set_body_bytes(image_bytes.clone()),
+            )
+            .mount(&server)
+            .await;
+        let storage_dir =
+            std::env::temp_dir().join(format!("waddle-link-preview-{}", uuid::Uuid::new_v4()));
+        let storage: Arc<dyn crate::storage::BlobStorage> =
+            Arc::new(crate::storage::LocalStorage::new(storage_dir));
+        let policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
+            media_cache: Some(test_media_cache(storage.clone()).await),
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/article", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        let LinkPreviewResolverOutcome::Ready(metadata) = outcome else {
+            panic!("expected ready outcome, got {outcome:?}");
+        };
+        let expected_hash = hex::encode(Sha256::digest(image_bytes.as_ref()));
+        let image = metadata.image.expect("cached image");
+        assert!(image.url.path().starts_with("/api/files/"));
+        assert!(image
+            .url
+            .path()
+            .ends_with(&format!("/link-preview-{expected_hash}.png")));
+    }
+
+    #[tokio::test]
+    async fn missing_preview_image_degrades_to_text_metadata() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/article"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    r#"<html><head>
+                          <meta property="og:title" content="Fetched title">
+                          <meta property="og:image" content="{}/missing.png">
+                        </head></html>"#,
+                    server.uri()
+                ),
+                "text/html; charset=utf-8",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/missing.png"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let storage_dir =
+            std::env::temp_dir().join(format!("waddle-link-preview-{}", uuid::Uuid::new_v4()));
+        let storage: Arc<dyn crate::storage::BlobStorage> =
+            Arc::new(crate::storage::LocalStorage::new(storage_dir));
+        let policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
+            media_cache: Some(test_media_cache(storage).await),
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/article", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        let LinkPreviewResolverOutcome::Ready(metadata) = outcome else {
+            panic!("expected ready outcome, got {outcome:?}");
+        };
+        assert_eq!(metadata.title.as_deref(), Some("Fetched title"));
+        assert_eq!(metadata.image, None);
+    }
+
+    #[tokio::test]
+    async fn mismatched_preview_image_header_and_bytes_degrades_to_text_metadata() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/article"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    r#"<html><head>
+                          <meta property="og:title" content="Fetched title">
+                          <meta property="og:image" content="{}/preview.png">
+                        </head></html>"#,
+                    server.uri()
+                ),
+                "text/html; charset=utf-8",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/preview.png"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/png")
+                    .set_body_bytes(bytes::Bytes::from_static(b"\xff\xd8\xffjpeg")),
+            )
+            .mount(&server)
+            .await;
+        let storage_dir =
+            std::env::temp_dir().join(format!("waddle-link-preview-{}", uuid::Uuid::new_v4()));
+        let storage: Arc<dyn crate::storage::BlobStorage> =
+            Arc::new(crate::storage::LocalStorage::new(storage_dir));
+        let policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
+            media_cache: Some(test_media_cache(storage).await),
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/article", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        let LinkPreviewResolverOutcome::Ready(metadata) = outcome else {
+            panic!("expected ready outcome, got {outcome:?}");
+        };
+        assert_eq!(metadata.title.as_deref(), Some("Fetched title"));
+        assert_eq!(metadata.image, None);
+    }
+
+    #[tokio::test]
+    async fn cached_image_url_construction_failure_degrades_to_text_metadata() {
+        let server = MockServer::start().await;
+        let image_bytes = bytes::Bytes::from_static(b"\x89PNG\r\n\x1a\nvalid png");
+        Mock::given(method("GET"))
+            .and(path("/article"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    r#"<html><head>
+                          <meta property="og:title" content="Fetched title">
+                          <meta property="og:image" content="{}/preview.png">
+                        </head></html>"#,
+                    server.uri()
+                ),
+                "text/html; charset=utf-8",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/preview.png"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/png")
+                    .set_body_bytes(image_bytes),
+            )
+            .mount(&server)
+            .await;
+        let storage_dir =
+            std::env::temp_dir().join(format!("waddle-link-preview-{}", uuid::Uuid::new_v4()));
+        let storage: Arc<dyn crate::storage::BlobStorage> =
+            Arc::new(crate::storage::LocalStorage::new(storage_dir));
+        let policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
+            media_cache: Some(test_media_cache_with_base_url(storage, "not a url").await.0),
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/article", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        let LinkPreviewResolverOutcome::Ready(metadata) = outcome else {
+            panic!("expected ready outcome, got {outcome:?}");
+        };
+        assert_eq!(metadata.title.as_deref(), Some("Fetched title"));
+        assert_eq!(metadata.image, None);
+    }
+
+    #[tokio::test]
+    async fn cached_image_storage_failure_degrades_to_text_metadata() {
+        let server = MockServer::start().await;
+        let image_bytes = bytes::Bytes::from_static(b"\x89PNG\r\n\x1a\nvalid png");
+        Mock::given(method("GET"))
+            .and(path("/article"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    r#"<html><head>
+                          <meta property="og:title" content="Fetched title">
+                          <meta property="og:image" content="{}/preview.png">
+                        </head></html>"#,
+                    server.uri()
+                ),
+                "text/html; charset=utf-8",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/preview.png"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/png")
+                    .set_body_bytes(image_bytes),
+            )
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
+            media_cache: Some(test_media_cache(Arc::new(FailingPutStorage)).await),
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/article", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        let LinkPreviewResolverOutcome::Ready(metadata) = outcome else {
+            panic!("expected ready outcome, got {outcome:?}");
+        };
+        assert_eq!(metadata.title.as_deref(), Some("Fetched title"));
+        assert_eq!(metadata.image, None);
+    }
+
+    #[tokio::test]
+    async fn blocked_preview_image_redirect_degrades_to_text_metadata() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/article"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    r#"<html><head>
+                          <meta property="og:title" content="Fetched title">
+                          <meta property="og:image" content="{}/preview">
+                        </head></html>"#,
+                    server.uri()
+                ),
+                "text/html; charset=utf-8",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/preview"))
+            .respond_with(
+                ResponseTemplate::new(302).insert_header("location", "https://127.0.0.1/admin"),
+            )
+            .mount(&server)
+            .await;
+        let storage_dir =
+            std::env::temp_dir().join(format!("waddle-link-preview-{}", uuid::Uuid::new_v4()));
+        let storage: Arc<dyn crate::storage::BlobStorage> =
+            Arc::new(crate::storage::LocalStorage::new(storage_dir));
+        let policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
+            media_cache: Some(test_media_cache(storage).await),
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/article", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        let LinkPreviewResolverOutcome::Ready(metadata) = outcome else {
+            panic!("expected ready outcome, got {outcome:?}");
+        };
+        assert_eq!(metadata.title.as_deref(), Some("Fetched title"));
+        assert_eq!(metadata.image, None);
+    }
+
+    #[tokio::test]
+    async fn failed_preview_image_response_degrades_to_text_metadata() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/article"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    r#"<html><head>
+                          <meta property="og:title" content="Fetched title">
+                          <meta property="og:image" content="{}/preview.png">
+                        </head></html>"#,
+                    server.uri()
+                ),
+                "text/html; charset=utf-8",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/preview.png"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let storage_dir =
+            std::env::temp_dir().join(format!("waddle-link-preview-{}", uuid::Uuid::new_v4()));
+        let storage: Arc<dyn crate::storage::BlobStorage> =
+            Arc::new(crate::storage::LocalStorage::new(storage_dir));
+        let policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
+            media_cache: Some(test_media_cache(storage).await),
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/article", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        let LinkPreviewResolverOutcome::Ready(metadata) = outcome else {
+            panic!("expected ready outcome, got {outcome:?}");
+        };
+        assert_eq!(metadata.title.as_deref(), Some("Fetched title"));
+        assert_eq!(metadata.image, None);
+    }
+
+    #[tokio::test]
+    async fn timed_out_preview_image_degrades_to_text_metadata() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/article"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    r#"<html><head>
+                          <meta property="og:title" content="Fetched title">
+                          <meta property="og:image" content="{}/preview.png">
+                        </head></html>"#,
+                    server.uri()
+                ),
+                "text/html; charset=utf-8",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/preview.png"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(100))
+                    .insert_header("content-type", "image/png")
+                    .set_body_bytes(bytes::Bytes::from_static(b"\x89PNG\r\n\x1a\nslow png")),
+            )
+            .mount(&server)
+            .await;
+        let storage_dir =
+            std::env::temp_dir().join(format!("waddle-link-preview-{}", uuid::Uuid::new_v4()));
+        let storage: Arc<dyn crate::storage::BlobStorage> =
+            Arc::new(crate::storage::LocalStorage::new(storage_dir));
+        let policy = LinkPreviewResolverPolicy {
+            timeout: Duration::from_millis(20),
+            allow_http_loopback_for_tests: true,
+            media_cache: Some(test_media_cache(storage).await),
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/article", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        let LinkPreviewResolverOutcome::Ready(metadata) = outcome else {
+            panic!("expected ready outcome, got {outcome:?}");
+        };
+        assert_eq!(metadata.title.as_deref(), Some("Fetched title"));
+        assert_eq!(metadata.image, None);
     }
 
     #[tokio::test]

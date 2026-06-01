@@ -39,7 +39,7 @@ pub use domain::{
     ChannelInfo, ChannelRoomInfo, ChannelType, UploadSlotInfo, WaddleDetails, WaddleInfo,
 };
 pub use error::{CoreError, CoreResult};
-pub use link_preview::first_eligible_https_url_text;
+pub use link_preview::{first_eligible_https_url_text, PreviewImageMediaType};
 pub use mam::{
     build_fin_iq, build_result_messages, is_mam_query, is_mam_query_response_message,
     parse_mam_query, ArchivedMessage, MamQuery, MamResult, DATA_FORMS_NS, FORWARD_NS, MAM_NS,

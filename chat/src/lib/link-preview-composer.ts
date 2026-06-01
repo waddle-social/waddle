@@ -29,6 +29,7 @@ export function linkPreviewPayloadFromLookup(
       normalizedUrl: result.normalizedUrl,
       ...(result.title ? { title: result.title } : {}),
       ...(result.description ? { description: result.description } : {}),
+      ...(result.image ? { image: result.image } : {}),
     },
   };
 }

@@ -147,8 +147,15 @@ describe("roomMessageFromArchived", () => {
         normalized_url: "https://example.com/article",
         title: "Example Article",
         description: "Plain text summary",
+        image: {
+          url: "https://waddle.example/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png",
+          media_type: "image/png",
+          width: 640,
+          height: 360,
+          alt: "Article screenshot",
+        },
       }],
-    });
+    }, { trustedMediaOrigin: "https://waddle.example" });
 
     expect(result).not.toBeNull();
     const timeline = mapLiveRoomMessageToTimeline(session, result!);
@@ -157,6 +164,13 @@ describe("roomMessageFromArchived", () => {
       normalizedUrl: "https://example.com/article",
       title: "Example Article",
       description: "Plain text summary",
+      image: {
+        url: "https://waddle.example/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png",
+        mediaType: "image/png",
+        width: 640,
+        height: 360,
+        alt: "Article screenshot",
+      },
     }]);
   });
 
@@ -480,8 +494,15 @@ describe("dmMessageFromArchived", () => {
         normalized_url: "https://example.com/article",
         title: "Example Article",
         description: "Plain text summary",
+        image: {
+          url: "https://waddle.example/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png",
+          media_type: "image/png",
+          width: 640,
+          height: 360,
+          alt: "Article screenshot",
+        },
       }],
-    }, "bob@example.com");
+    }, "bob@example.com", { trustedMediaOrigin: "https://waddle.example" });
 
     expect(result).not.toBeNull();
     const timeline = fromLiveDmMessage(session, result!);
@@ -490,6 +511,13 @@ describe("dmMessageFromArchived", () => {
       normalizedUrl: "https://example.com/article",
       title: "Example Article",
       description: "Plain text summary",
+      image: {
+        url: "https://waddle.example/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png",
+        mediaType: "image/png",
+        width: 640,
+        height: 360,
+        alt: "Article screenshot",
+      },
     }]);
   });
 

@@ -440,6 +440,13 @@ fn link_previews_to_js(previews: Vec<messaging::LinkPreviewData>) -> Vec<WaddleL
             normalized_url: preview.normalized_url.map(|url| url.to_string()),
             title: preview.title,
             description: preview.description,
+            image: preview.image.map(|image| WaddleLinkPreviewImage {
+                url: image.url.to_string(),
+                media_type: image.media_type.as_str().to_string(),
+                width: image.width,
+                height: image.height,
+                alt: image.alt,
+            }),
         })
         .collect()
 }
@@ -817,10 +824,15 @@ mod inbound_to_js_tests {
                    <message xmlns='jabber:client' type='groupchat' id='m-link' \
                             from='room@conf.example/alice'>\
                      <body>see https://the.link.example/what-was-linked</body>\
-                     <rdf:Description xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#' xmlns:og='https://ogp.me/ns#' rdf:about='https://the.link.example/what-was-linked'>\
+                     <rdf:Description xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#' xmlns:og='https://ogp.me/ns#' xmlns:ogi='https://ogp.me/ns#image:' rdf:about='https://the.link.example/what-was-linked'>\
                        <og:title>The Best Webpage</og:title>\
                        <og:description>Plain text preview</og:description>\
                        <og:url>https://the.link.example/what-was-linked</og:url>\
+                       <og:image>https://waddle.example/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png</og:image>\
+                       <ogi:type>image/png</ogi:type>\
+                       <ogi:width>640</ogi:width>\
+                       <ogi:height>360</ogi:height>\
+                       <ogi:alt>Article screenshot</ogi:alt>\
                      </rdf:Description>\
                    </message>\
                  </forwarded>\
@@ -842,6 +854,15 @@ mod inbound_to_js_tests {
         );
         assert_eq!(preview.title.as_deref(), Some("The Best Webpage"));
         assert_eq!(preview.description.as_deref(), Some("Plain text preview"));
+        let image = preview.image.as_ref().expect("cached image");
+        assert_eq!(
+            image.url,
+            "https://waddle.example/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png"
+        );
+        assert_eq!(image.media_type, "image/png");
+        assert_eq!(image.width, Some(640));
+        assert_eq!(image.height, Some(360));
+        assert_eq!(image.alt.as_deref(), Some("Article screenshot"));
     }
 
     #[test]

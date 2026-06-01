@@ -10,6 +10,7 @@ use minidom::{
 };
 use thiserror::Error;
 use url::Url;
+use waddle_xmpp_core::PreviewImageMediaType;
 use xmpp_parsers::message::Message;
 
 /// RDF syntax namespace used by XEP-0511's `<rdf:Description/>` payload.
@@ -41,6 +42,53 @@ pub enum LinkMetadataError {
     InvalidCanonicalUrl,
 }
 
+/// OpenGraph preview image metadata carried inside XEP-0511.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkPreviewImage {
+    /// Waddle-controlled image URL clients may dereference.
+    pub url: Url,
+    /// Safe MIME type observed when Waddle cached the image.
+    pub media_type: Option<PreviewImageMediaType>,
+    /// Image width in pixels, when available from metadata.
+    pub width: Option<u32>,
+    /// Image height in pixels, when available from metadata.
+    pub height: Option<u32>,
+    /// Human-readable alt text, when available.
+    pub alt: Option<String>,
+}
+
+impl LinkPreviewImage {
+    /// Create preview image metadata for a cached Waddle media URL.
+    pub fn new(url: Url) -> Self {
+        Self {
+            url,
+            media_type: None,
+            width: None,
+            height: None,
+            alt: None,
+        }
+    }
+
+    /// Set the safe MIME type.
+    pub fn with_media_type(mut self, media_type: PreviewImageMediaType) -> Self {
+        self.media_type = Some(media_type);
+        self
+    }
+
+    /// Set image dimensions.
+    pub fn with_dimensions(mut self, width: u32, height: u32) -> Self {
+        self.width = Some(width);
+        self.height = Some(height);
+        self
+    }
+
+    /// Set image alt text.
+    pub fn with_alt(mut self, alt: impl Into<String>) -> Self {
+        self.alt = Some(alt.into());
+        self
+    }
+}
+
 /// Typed plaintext subset of the OpenGraph metadata used by Waddle's first
 /// XEP-0511 tracer bullet.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +103,8 @@ pub struct LinkMetadata {
     pub canonical_url: Option<Url>,
     /// `og:site_name`, when present.
     pub site_name: Option<String>,
+    /// Cached preview images referenced through Waddle-controlled media URLs.
+    pub images: Vec<LinkPreviewImage>,
 }
 
 impl LinkMetadata {
@@ -66,6 +116,7 @@ impl LinkMetadata {
             description: None,
             canonical_url: None,
             site_name: None,
+            images: Vec::new(),
         }
     }
 
@@ -90,6 +141,12 @@ impl LinkMetadata {
     /// Set `og:site_name`.
     pub fn with_site_name(mut self, site_name: impl Into<String>) -> Self {
         self.site_name = Some(site_name.into());
+        self
+    }
+
+    /// Add cached preview image metadata.
+    pub fn with_image(mut self, image: LinkPreviewImage) -> Self {
+        self.images.push(image);
         self
     }
 }
@@ -121,6 +178,7 @@ pub fn parse_link_metadata_element(elem: &Element) -> Result<LinkMetadata, LinkM
         Some(raw) => Some(Url::parse(&raw).map_err(|_| LinkMetadataError::InvalidCanonicalUrl)?),
         None => None,
     };
+    metadata.images = parse_og_images(elem);
 
     Ok(metadata)
 }
@@ -146,6 +204,8 @@ pub fn build_link_metadata_element(metadata: &LinkMetadata) -> Element {
         .expect("static RDF prefix is unique")
         .prefix(Some("og".to_string()), NS_OPENGRAPH)
         .expect("static OpenGraph prefix is unique")
+        .prefix(Some("ogi".to_string()), NS_OPENGRAPH_IMAGE)
+        .expect("static OpenGraph image prefix is unique")
         .attr_ns(
             Namespace::from(NS_RDF_SYNTAX),
             xml_ncname!("about").to_owned(),
@@ -165,6 +225,17 @@ pub fn build_link_metadata_element(metadata: &LinkMetadata) -> Element {
         metadata.canonical_url.as_ref().map(Url::as_str),
     );
     append_og_text(&mut description, "site_name", metadata.site_name.as_deref());
+    for image in &metadata.images {
+        append_og_text(&mut description, "image", Some(image.url.as_str()));
+        append_og_image_text(
+            &mut description,
+            "type",
+            image.media_type.map(PreviewImageMediaType::as_str),
+        );
+        append_og_number(&mut description, "width", image.width);
+        append_og_number(&mut description, "height", image.height);
+        append_og_image_text(&mut description, "alt", image.alt.as_deref());
+    }
 
     description
 }
@@ -202,6 +273,69 @@ fn append_og_text(parent: &mut Element, name: &str, value: Option<&str>) {
     };
     parent.append_child(
         Element::builder(name, NS_OPENGRAPH)
+            .append(value.trim())
+            .build(),
+    );
+}
+
+fn parse_og_images(elem: &Element) -> Vec<LinkPreviewImage> {
+    let mut images = Vec::new();
+    let mut current: Option<LinkPreviewImage> = None;
+    for child in elem.children() {
+        if child.ns() == NS_OPENGRAPH && child.name() == "image" {
+            if let Some(image) = current.take() {
+                images.push(image);
+            }
+            current = Url::parse(child.text().trim())
+                .ok()
+                .map(LinkPreviewImage::new);
+            continue;
+        }
+        if child.ns() != NS_OPENGRAPH_IMAGE {
+            continue;
+        }
+        let Some(image) = current.as_mut() else {
+            continue;
+        };
+        let value = child.text().trim().to_string();
+        if value.is_empty() {
+            continue;
+        }
+        match child.name() {
+            "type" => {
+                if let Ok(media_type) = value.parse() {
+                    image.media_type = Some(media_type);
+                }
+            }
+            "width" => image.width = value.parse().ok(),
+            "height" => image.height = value.parse().ok(),
+            "alt" => image.alt = Some(value),
+            _ => {}
+        }
+    }
+    if let Some(image) = current {
+        images.push(image);
+    }
+    images
+}
+
+fn append_og_number(parent: &mut Element, name: &str, value: Option<u32>) {
+    let Some(value) = value else {
+        return;
+    };
+    parent.append_child(
+        Element::builder(name, NS_OPENGRAPH_IMAGE)
+            .append(value.to_string())
+            .build(),
+    );
+}
+
+fn append_og_image_text(parent: &mut Element, name: &str, value: Option<&str>) {
+    let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
+        return;
+    };
+    parent.append_child(
+        Element::builder(name, NS_OPENGRAPH_IMAGE)
             .append(value.trim())
             .build(),
     );

@@ -10,7 +10,9 @@ use minidom::Element;
 use crate::xep::encrypted_file::{self as xep_encrypted_file, NS_ESFS as NS_ENCRYPTED_FILE};
 use crate::xep::fallback::{body_fallbacks_for, strip_fallback_ranges, BodyFallback};
 use crate::xep::{reply as xep_reply, thread as xep_thread};
-use waddle_xmpp_core::{first_eligible_https_url_text, xep0359::StanzaId as StableStanzaId};
+use waddle_xmpp_core::{
+    first_eligible_https_url_text, xep0359::StanzaId as StableStanzaId, PreviewImageMediaType,
+};
 
 use self::files::{parse_file_sharing_element, parse_shared_file};
 use self::markup::parse_markup_spans;
@@ -377,7 +379,70 @@ fn parse_link_preview(el: &Element, first_url: Option<&Url>) -> Option<LinkPrevi
         normalized_url: og_text(el, "url").and_then(|value| parse_web_url(&value)),
         title: og_text(el, "title"),
         description: og_text(el, "description"),
+        image: parse_link_preview_image(el),
     })
+}
+
+fn parse_link_preview_image(el: &Element) -> Option<LinkPreviewImageData> {
+    let url = el
+        .children()
+        .find(|child| child.name() == "image" && child.ns() == NS_OPENGRAPH)
+        .and_then(|child| parse_cached_preview_image_url(child.text().trim()))?;
+    let media_type =
+        og_image_text(el, "type").and_then(|value| value.parse::<PreviewImageMediaType>().ok())?;
+    Some(LinkPreviewImageData {
+        url,
+        media_type,
+        width: og_image_text(el, "width").and_then(|value| value.parse().ok()),
+        height: og_image_text(el, "height").and_then(|value| value.parse().ok()),
+        alt: og_image_text(el, "alt"),
+    })
+}
+
+fn parse_cached_preview_image_url(value: &str) -> Option<Url> {
+    let url = Url::parse(value).ok()?;
+    if !cached_preview_media_origin_allowed(&url) {
+        return None;
+    }
+    let path = url.path();
+    is_link_preview_xep0363_file_path(path).then_some(url)
+}
+
+fn cached_preview_media_origin_allowed(url: &Url) -> bool {
+    match url.scheme() {
+        "https" => url.host().is_some(),
+        "http" => url.host().is_some_and(|host| match host {
+            url::Host::Domain(domain) => domain == "localhost",
+            url::Host::Ipv4(addr) => addr.is_loopback(),
+            url::Host::Ipv6(addr) => addr.is_loopback(),
+        }),
+        _ => false,
+    }
+}
+
+fn is_link_preview_xep0363_file_path(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("/api/files/") else {
+        return false;
+    };
+    let mut parts = rest.split('/');
+    let Some(slot_id) = parts.next() else {
+        return false;
+    };
+    let Some(filename) = parts.next() else {
+        return false;
+    };
+    if parts.next().is_some() || uuid::Uuid::parse_str(slot_id).is_err() {
+        return false;
+    }
+    let Some(name) = filename.strip_prefix("link-preview-") else {
+        return false;
+    };
+    let Some((hash, extension)) = name.rsplit_once('.') else {
+        return false;
+    };
+    matches!(extension, "png" | "jpg" | "gif" | "webp")
+        && hash.len() == 64
+        && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn parse_web_url(value: &str) -> Option<Url> {
@@ -408,6 +473,14 @@ fn body_without_reply_fallback<'a>(message: &Element, body: &'a str) -> Cow<'a, 
 fn og_text(el: &Element, name: &str) -> Option<String> {
     el.children()
         .find(|child| child.name() == name && child.ns() == NS_OPENGRAPH)
+        .map(Element::text)
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+}
+
+fn og_image_text(el: &Element, name: &str) -> Option<String> {
+    el.children()
+        .find(|child| child.name() == name && child.ns() == NS_OPENGRAPH_IMAGE)
         .map(Element::text)
         .map(|text| text.trim().to_string())
         .filter(|text| !text.is_empty())

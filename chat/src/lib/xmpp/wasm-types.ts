@@ -150,6 +150,15 @@ export interface WasmLinkPreview {
   normalized_url?: string | null;
   title?: string | null;
   description?: string | null;
+  image?: WasmLinkPreviewImage | null;
+}
+
+export interface WasmLinkPreviewImage {
+  url: string;
+  media_type: string;
+  width?: number | null;
+  height?: number | null;
+  alt?: string | null;
 }
 
 /** Pin/unpin event from a room system message (#414). */

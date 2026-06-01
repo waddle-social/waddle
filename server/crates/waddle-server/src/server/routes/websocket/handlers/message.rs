@@ -6,14 +6,16 @@ use waddle_xmpp::{
     protocol::handlers::errors::bad_request_reply,
     protocol::{frame::InboundFrame, InboundEvent, XmppStateMachine},
     xep::{
-        build_link_metadata_element, decode_link_preview_token,
+        add_reference, build_link_metadata_element, decode_link_preview_token,
         extract_link_preview_request_from_message, parse_fallbacks_from_message,
         strip_fallback_ranges, strip_link_metadata, strip_link_preview_requests, FallbackRegion,
-        LinkMetadata, NS_DELAY, NS_REPLY,
+        LinkMetadata, Reference, NS_DELAY, NS_REPLY,
     },
     Stanza,
 };
 use waddle_xmpp_core::first_eligible_https_url_text;
+#[cfg(test)]
+use waddle_xmpp_core::PreviewImageMediaType;
 
 use super::super::{
     interpret_loop::build_interpret_deps, replay::drive_interpret_loop, WebSocketState,
@@ -74,6 +76,7 @@ pub async fn handle_message(
         &bound_jid,
         state.deps.occupant_id_secret.key(),
         chrono::Utc::now().timestamp(),
+        state.deps.auth_state.base_url.as_str(),
     );
 
     if incoming.type_ != xmpp_parsers::message::MessageType::Groupchat
@@ -115,6 +118,7 @@ fn consume_link_preview_request(
     sender_jid: &jid::FullJid,
     secret: &[u8],
     now_unix: i64,
+    trusted_media_base_url: &str,
 ) {
     let expected_sender = sender_jid.to_bare();
     let expected_scope = message.to.as_ref().map(|to| to.to_bare());
@@ -136,6 +140,20 @@ fn consume_link_preview_request(
             if let Some(description) = preview.description {
                 metadata = metadata.with_description(description);
             }
+            if let Some(image) = preview.image.filter(|image| {
+                is_trusted_cached_preview_image_url(&image.url, trusted_media_base_url)
+            }) {
+                add_reference(message, &Reference::data(image.url.as_str()));
+                let mut preview_image = waddle_xmpp::xep::LinkPreviewImage::new(image.url)
+                    .with_media_type(image.media_type);
+                if let (Some(width), Some(height)) = (image.width, image.height) {
+                    preview_image = preview_image.with_dimensions(width, height);
+                }
+                if let Some(alt) = image.alt {
+                    preview_image = preview_image.with_alt(alt);
+                }
+                metadata = metadata.with_image(preview_image);
+            }
             metadata
         });
     strip_link_preview_requests(message);
@@ -145,6 +163,55 @@ fn consume_link_preview_request(
             .payloads
             .push(build_link_metadata_element(&metadata));
     }
+}
+
+fn is_trusted_cached_preview_image_url(url: &url::Url, trusted_media_base_url: &str) -> bool {
+    let Ok(trusted) = url::Url::parse(trusted_media_base_url) else {
+        return false;
+    };
+    trusted_preview_schemes_match(url, &trusted)
+        && url.host_str() == trusted.host_str()
+        && url.port_or_known_default() == trusted.port_or_known_default()
+        && is_link_preview_xep0363_file_path(url.path())
+}
+
+fn trusted_preview_schemes_match(url: &url::Url, trusted: &url::Url) -> bool {
+    if url.scheme() == "https" && trusted.scheme() == "https" {
+        return true;
+    }
+    url.scheme() == "http" && trusted.scheme() == "http" && is_loopback_host(url.host_str())
+}
+
+fn is_loopback_host(host: Option<&str>) -> bool {
+    matches!(host, Some("localhost"))
+        || host
+            .and_then(|host| host.parse::<std::net::IpAddr>().ok())
+            .is_some_and(|ip| ip.is_loopback())
+}
+
+fn is_link_preview_xep0363_file_path(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("/api/files/") else {
+        return false;
+    };
+    let mut parts = rest.split('/');
+    let Some(slot_id) = parts.next() else {
+        return false;
+    };
+    let Some(filename) = parts.next() else {
+        return false;
+    };
+    if parts.next().is_some() || uuid::Uuid::parse_str(slot_id).is_err() {
+        return false;
+    }
+    let Some(name) = filename.strip_prefix("link-preview-") else {
+        return false;
+    };
+    let Some((hash, extension)) = name.rsplit_once('.') else {
+        return false;
+    };
+    matches!(extension, "png" | "jpg" | "gif" | "webp")
+        && hash.len() == 64
+        && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn first_eligible_https_url(message: &xmpp_parsers::message::Message) -> Option<url::Url> {
@@ -216,6 +283,48 @@ mod tests {
     }
 
     #[test]
+    fn cached_preview_image_url_trust_allows_loopback_http_only_for_matching_origin() {
+        let loopback = url::Url::parse(
+            "http://localhost:3000/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png",
+        )
+        .expect("url");
+        let non_loopback = url::Url::parse(
+            "http://waddle.example/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png",
+        )
+        .expect("url");
+
+        assert!(is_trusted_cached_preview_image_url(
+            &loopback,
+            "http://localhost:3000"
+        ));
+        assert!(!is_trusted_cached_preview_image_url(
+            &non_loopback,
+            "http://waddle.example"
+        ));
+    }
+
+    #[test]
+    fn trusts_cached_preview_image_urls_with_explicit_default_ports() {
+        let https_with_default_port = url::Url::parse(
+            "https://waddle.example:443/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png",
+        )
+        .expect("url");
+        let loopback_with_default_port = url::Url::parse(
+            "http://localhost:80/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png",
+        )
+        .expect("url");
+
+        assert!(is_trusted_cached_preview_image_url(
+            &https_with_default_port,
+            "https://waddle.example"
+        ));
+        assert!(is_trusted_cached_preview_image_url(
+            &loopback_with_default_port,
+            "http://localhost"
+        ));
+    }
+
+    #[test]
     fn consumes_link_preview_request_and_stamps_xep0511_metadata() {
         let preview = waddle_xmpp::xep::LinkPreviewTokenData {
             sender_jid: "alice@example.com".parse().expect("jid"),
@@ -228,6 +337,16 @@ mod tests {
             .expect("url"),
             title: Some("The Best Webpage".to_string()),
             description: Some("This is a great webpage and you will really like it".to_string()),
+            image: Some(waddle_xmpp::xep::LinkPreviewTokenImage {
+                url: url::Url::parse(
+                    "https://waddle.example/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png",
+                )
+                .expect("url"),
+                media_type: PreviewImageMediaType::Png,
+                width: Some(640),
+                height: Some(360),
+                alt: Some("Article screenshot".to_string()),
+            }),
             expires_at_unix: 1_900_000_000,
         };
         let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
@@ -241,7 +360,13 @@ mod tests {
             .payloads
             .push(waddle_xmpp::xep::build_link_preview_request_element(&token));
 
-        consume_link_preview_request(&mut message, &sender(), SECRET, 1_800_000_000);
+        consume_link_preview_request(
+            &mut message,
+            &sender(),
+            SECRET,
+            1_800_000_000,
+            "https://waddle.example",
+        );
 
         assert!(message
             .payloads
@@ -252,6 +377,76 @@ mod tests {
         assert_eq!(parsed[0].about, preview.original_url);
         assert_eq!(parsed[0].canonical_url, Some(preview.normalized_url));
         assert_eq!(parsed[0].title.as_deref(), Some("The Best Webpage"));
+        assert_eq!(parsed[0].images.len(), 1);
+        assert_eq!(
+            parsed[0].images[0].url.as_str(),
+            "https://waddle.example/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png"
+        );
+        assert_eq!(
+            parsed[0].images[0].media_type,
+            Some(PreviewImageMediaType::Png)
+        );
+        let references = waddle_xmpp::xep::extract_references_from_message(&message);
+        assert_eq!(references.len(), 1);
+        assert_eq!(
+            references[0].uri,
+            "https://waddle.example/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png"
+        );
+        assert_eq!(
+            references[0].ref_type,
+            waddle_xmpp::xep::ReferenceType::Data
+        );
+    }
+
+    #[test]
+    fn link_preview_request_with_foreign_cached_image_origin_stamps_text_metadata_only() {
+        let preview = waddle_xmpp::xep::LinkPreviewTokenData {
+            sender_jid: "alice@example.com".parse().expect("jid"),
+            scope_jid: "room@muc.example.com".parse().expect("jid"),
+            original_url: url::Url::parse("https://the.link.example.com/what-was-linked-to")
+                .expect("url"),
+            normalized_url: url::Url::parse(
+                "https://example.com/canonical-url/for/what-was-linked-to",
+            )
+            .expect("url"),
+            title: Some("The Best Webpage".to_string()),
+            description: Some("This is a great webpage and you will really like it".to_string()),
+            image: Some(waddle_xmpp::xep::LinkPreviewTokenImage {
+                url: url::Url::parse(
+                    "https://attacker.example/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png",
+                )
+                .expect("url"),
+                media_type: PreviewImageMediaType::Png,
+                width: Some(640),
+                height: Some(360),
+                alt: Some("Article screenshot".to_string()),
+            }),
+            expires_at_unix: 1_900_000_000,
+        };
+        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
+        let mut message = Message::new(None::<jid::Jid>);
+        message.to = Some("room@muc.example.com".parse().expect("jid"));
+        message.bodies.insert(
+            xmpp_parsers::message::Lang::new(),
+            "read https://the.link.example.com/what-was-linked-to".to_string(),
+        );
+        message
+            .payloads
+            .push(waddle_xmpp::xep::build_link_preview_request_element(&token));
+
+        consume_link_preview_request(
+            &mut message,
+            &sender(),
+            SECRET,
+            1_800_000_000,
+            "https://waddle.example",
+        );
+
+        let parsed = waddle_xmpp::xep::extract_link_metadata_from_message(&message);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].title.as_deref(), Some("The Best Webpage"));
+        assert!(parsed[0].images.is_empty());
+        assert!(waddle_xmpp::xep::extract_references_from_message(&message).is_empty());
     }
 
     #[test]
@@ -263,6 +458,7 @@ mod tests {
             normalized_url: url::Url::parse("https://example.com/").expect("url"),
             title: Some("Example".to_string()),
             description: None,
+            image: None,
             expires_at_unix: 10,
         };
         let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
@@ -276,7 +472,13 @@ mod tests {
             .payloads
             .push(waddle_xmpp::xep::build_link_preview_request_element(&token));
 
-        consume_link_preview_request(&mut message, &sender(), SECRET, 11);
+        consume_link_preview_request(
+            &mut message,
+            &sender(),
+            SECRET,
+            11,
+            "https://waddle.example",
+        );
 
         assert!(message.payloads.is_empty());
     }
@@ -295,7 +497,13 @@ mod tests {
             .payloads
             .push(waddle_xmpp::xep::build_link_preview_request_element(&token));
 
-        consume_link_preview_request(&mut message, &sender(), SECRET, 1_800_000_000);
+        consume_link_preview_request(
+            &mut message,
+            &sender(),
+            SECRET,
+            1_800_000_000,
+            "https://waddle.example",
+        );
 
         assert!(message.payloads.is_empty());
     }
@@ -320,7 +528,13 @@ mod tests {
             .build(),
         );
 
-        consume_link_preview_request(&mut message, &sender(), SECRET, 1_800_000_000);
+        consume_link_preview_request(
+            &mut message,
+            &sender(),
+            SECRET,
+            1_800_000_000,
+            "https://waddle.example",
+        );
 
         assert!(message.payloads.is_empty());
     }
@@ -334,6 +548,7 @@ mod tests {
             normalized_url: url::Url::parse("https://example.com/").expect("url"),
             title: Some("Example".to_string()),
             description: None,
+            image: None,
             expires_at_unix: 1_900_000_000,
         };
         let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
@@ -347,7 +562,13 @@ mod tests {
             .payloads
             .push(waddle_xmpp::xep::build_link_preview_request_element(&token));
 
-        consume_link_preview_request(&mut message, &sender(), SECRET, 1_800_000_000);
+        consume_link_preview_request(
+            &mut message,
+            &sender(),
+            SECRET,
+            1_800_000_000,
+            "https://waddle.example",
+        );
 
         assert!(message.payloads.is_empty());
     }
@@ -361,6 +582,7 @@ mod tests {
             normalized_url: url::Url::parse("https://example.com/").expect("url"),
             title: Some("Example".to_string()),
             description: None,
+            image: None,
             expires_at_unix: 1_900_000_000,
         };
         let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
@@ -374,7 +596,13 @@ mod tests {
             .payloads
             .push(waddle_xmpp::xep::build_link_preview_request_element(&token));
 
-        consume_link_preview_request(&mut message, &sender(), SECRET, 1_800_000_000);
+        consume_link_preview_request(
+            &mut message,
+            &sender(),
+            SECRET,
+            1_800_000_000,
+            "https://waddle.example",
+        );
 
         assert!(message.payloads.is_empty());
     }
@@ -388,6 +616,7 @@ mod tests {
             normalized_url: url::Url::parse("https://second.example.com/").expect("url"),
             title: Some("Second".to_string()),
             description: None,
+            image: None,
             expires_at_unix: 1_900_000_000,
         };
         let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
@@ -401,7 +630,13 @@ mod tests {
             .payloads
             .push(waddle_xmpp::xep::build_link_preview_request_element(&token));
 
-        consume_link_preview_request(&mut message, &sender(), SECRET, 1_800_000_000);
+        consume_link_preview_request(
+            &mut message,
+            &sender(),
+            SECRET,
+            1_800_000_000,
+            "https://waddle.example",
+        );
 
         assert!(message.payloads.is_empty());
     }
@@ -415,6 +650,7 @@ mod tests {
             normalized_url: url::Url::parse("https://example.com/a").expect("url"),
             title: Some("Example".to_string()),
             description: None,
+            image: None,
             expires_at_unix: 1_900_000_000,
         };
         let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
@@ -428,7 +664,13 @@ mod tests {
             .payloads
             .push(waddle_xmpp::xep::build_link_preview_request_element(&token));
 
-        consume_link_preview_request(&mut message, &sender(), SECRET, 1_800_000_000);
+        consume_link_preview_request(
+            &mut message,
+            &sender(),
+            SECRET,
+            1_800_000_000,
+            "https://waddle.example",
+        );
 
         assert_eq!(
             waddle_xmpp::xep::extract_link_metadata_from_message(&message).len(),
@@ -445,6 +687,7 @@ mod tests {
             normalized_url: url::Url::parse("https://example.com/a").expect("url"),
             title: Some("Example".to_string()),
             description: None,
+            image: None,
             expires_at_unix: 1_900_000_000,
         };
         let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
@@ -458,7 +701,13 @@ mod tests {
             .payloads
             .push(waddle_xmpp::xep::build_link_preview_request_element(&token));
 
-        consume_link_preview_request(&mut message, &sender(), SECRET, 1_800_000_000);
+        consume_link_preview_request(
+            &mut message,
+            &sender(),
+            SECRET,
+            1_800_000_000,
+            "https://waddle.example",
+        );
 
         assert_eq!(
             waddle_xmpp::xep::extract_link_metadata_from_message(&message).len(),
@@ -475,6 +724,7 @@ mod tests {
             normalized_url: url::Url::parse("https://example.com/").expect("url"),
             title: Some("Example".to_string()),
             description: None,
+            image: None,
             expires_at_unix: 1_900_000_000,
         };
         let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
@@ -488,7 +738,13 @@ mod tests {
             .payloads
             .push(waddle_xmpp::xep::build_link_preview_request_element(&token));
 
-        consume_link_preview_request(&mut message, &sender(), SECRET, 1_800_000_000);
+        consume_link_preview_request(
+            &mut message,
+            &sender(),
+            SECRET,
+            1_800_000_000,
+            "https://waddle.example",
+        );
 
         assert_eq!(
             waddle_xmpp::xep::extract_link_metadata_from_message(&message).len(),
@@ -505,6 +761,7 @@ mod tests {
             normalized_url: url::Url::parse("https://current.example.com/").expect("url"),
             title: Some("Current".to_string()),
             description: None,
+            image: None,
             expires_at_unix: 1_900_000_000,
         };
         let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
@@ -528,7 +785,13 @@ mod tests {
             .payloads
             .push(waddle_xmpp::xep::build_link_preview_request_element(&token));
 
-        consume_link_preview_request(&mut message, &sender(), SECRET, 1_800_000_000);
+        consume_link_preview_request(
+            &mut message,
+            &sender(),
+            SECRET,
+            1_800_000_000,
+            "https://waddle.example",
+        );
 
         let parsed = waddle_xmpp::xep::extract_link_metadata_from_message(&message);
         assert_eq!(parsed.len(), 1);
@@ -551,7 +814,13 @@ mod tests {
             .payloads
             .push(waddle_xmpp::xep::build_link_metadata_element(&forged));
 
-        consume_link_preview_request(&mut message, &sender(), SECRET, 1_800_000_000);
+        consume_link_preview_request(
+            &mut message,
+            &sender(),
+            SECRET,
+            1_800_000_000,
+            "https://waddle.example",
+        );
 
         assert!(message.payloads.is_empty());
     }

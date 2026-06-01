@@ -99,6 +99,26 @@ async fn create_expired_slot(state: &UploadState, slot_id: &str) {
         .unwrap();
 }
 
+#[tokio::test]
+async fn link_preview_media_has_no_dedicated_http_route() {
+    let (state, upload_dir) = create_test_upload_state().await;
+    let app = router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/link-preview-media/sha256/86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    std::fs::remove_dir_all(upload_dir).ok();
+}
+
 #[test]
 fn upload_size_to_i64_rejects_values_outside_database_range() {
     assert_eq!(upload_size_to_i64(i64::MAX as u64), Some(i64::MAX));

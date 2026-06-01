@@ -46,6 +46,15 @@ export interface LinkPreview {
   normalizedUrl?: string;
   title?: string;
   description?: string;
+  image?: LinkPreviewImage;
+}
+
+export interface LinkPreviewImage {
+  url: string;
+  mediaType: string;
+  width?: number;
+  height?: number;
+  alt?: string;
 }
 
 export type ExtensionSurfaceKind =

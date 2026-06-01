@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
   firstEligibleHttpsUrl,
+  isTrustedCachedPreviewImageUrl,
+  linkPreviewMediaOriginFromWebSocketUrl,
   requestPlaintextLinkPreviewLookup,
 } from "../src/lib/xmpp/link-preview";
 import { withFakeDomParser, withFakeXmlDocument } from "./helpers/disco-xml";
@@ -48,6 +50,102 @@ describe("link preview lookup", () => {
       title: "Example",
       description: "Plain text",
     });
+  });
+
+  test("accepts cached Waddle preview image metadata from ready lookup responses", async () => {
+    const send_raw_iq = async () =>
+      `<iq type="result" id="lookup-1"><lookup xmlns="urn:waddle:link-preview:0" status="ready"><preview token="signed-token" original-url="https://example.com/a" normalized-url="https://example.com/a" expires-at="2999-01-01T00:00:00.000Z"><title>Example</title><description>Plain text</description><image url="https://waddle.example/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png" media-type="image/png" width="640" height="360" alt="Article screenshot"/></preview></lookup></iq>`;
+
+    let result: Awaited<ReturnType<typeof requestPlaintextLinkPreviewLookup>> = null;
+    await withFakeXmlDocument(async () => {
+      await withFakeDomParser(async () => {
+        result = await requestPlaintextLinkPreviewLookup(
+          { send_raw_iq },
+          "read https://example.com/a",
+          "room@muc.example.com",
+          "https://waddle.example",
+        );
+      });
+    });
+
+    expect(result).toMatchObject({
+      status: "ready",
+      image: {
+        url: "https://waddle.example/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png",
+        mediaType: "image/png",
+        width: 640,
+        height: 360,
+        alt: "Article screenshot",
+      },
+    });
+  });
+
+  test("accepts cached preview images for trusted loopback HTTP development sessions", () => {
+    const origin = linkPreviewMediaOriginFromWebSocketUrl("ws://localhost:4321/xmpp");
+
+    expect(origin).toBe("http://localhost:4321");
+    expect(isTrustedCachedPreviewImageUrl(
+      "http://localhost:4321/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png",
+      origin,
+    )).toBe(true);
+  });
+
+  test("accepts trusted cached preview image origins with explicit default ports", () => {
+    expect(isTrustedCachedPreviewImageUrl(
+      "https://waddle.example:443/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png",
+      "https://waddle.example",
+    )).toBe(true);
+    expect(isTrustedCachedPreviewImageUrl(
+      "http://localhost:80/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png",
+      "http://localhost",
+    )).toBe(true);
+  });
+
+  test("rejects non-loopback HTTP cached preview image origins", () => {
+    expect(isTrustedCachedPreviewImageUrl(
+      "http://waddle.example/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png",
+      "http://waddle.example",
+    )).toBe(false);
+  });
+
+  test("drops lookup preview images from a foreign cached-media origin", async () => {
+    const send_raw_iq = async () =>
+      `<iq type="result" id="lookup-1"><lookup xmlns="urn:waddle:link-preview:0" status="ready"><preview token="signed-token" original-url="https://example.com/a" normalized-url="https://example.com/a" expires-at="2999-01-01T00:00:00.000Z"><title>Example</title><image url="https://attacker.example/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png" media-type="image/png"/></preview></lookup></iq>`;
+
+    let result: Awaited<ReturnType<typeof requestPlaintextLinkPreviewLookup>> = null;
+    await withFakeXmlDocument(async () => {
+      await withFakeDomParser(async () => {
+        result = await requestPlaintextLinkPreviewLookup(
+          { send_raw_iq },
+          "read https://example.com/a",
+          "room@muc.example.com",
+          "https://waddle.example",
+        );
+      });
+    });
+
+    expect(result).toMatchObject({ status: "ready" });
+    expect(result && "image" in result ? result.image : undefined).toBeUndefined();
+  });
+
+  test("drops lookup preview images with unsafe media types", async () => {
+    const send_raw_iq = async () =>
+      `<iq type="result" id="lookup-1"><lookup xmlns="urn:waddle:link-preview:0" status="ready"><preview token="signed-token" original-url="https://example.com/a" normalized-url="https://example.com/a" expires-at="2999-01-01T00:00:00.000Z"><title>Example</title><image url="https://waddle.example/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png" media-type="image/svg+xml"/></preview></lookup></iq>`;
+
+    let result: Awaited<ReturnType<typeof requestPlaintextLinkPreviewLookup>> = null;
+    await withFakeXmlDocument(async () => {
+      await withFakeDomParser(async () => {
+        result = await requestPlaintextLinkPreviewLookup(
+          { send_raw_iq },
+          "read https://example.com/a",
+          "room@muc.example.com",
+          "https://waddle.example",
+        );
+      });
+    });
+
+    expect(result).toMatchObject({ status: "ready" });
+    expect(result && "image" in result ? result.image : undefined).toBeUndefined();
   });
 
   test("rejects lookup responses with non-HTTPS preview URLs", async () => {

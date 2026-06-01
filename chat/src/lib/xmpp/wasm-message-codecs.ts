@@ -5,6 +5,7 @@ import type { RichInlineStyle } from "@/lib/rich-message/types";
 import type { WaddleEncryptedFile } from "./extensions/encrypted-file";
 import { barePeerJid } from "./jid";
 import type { InboxEntry } from "./inbox-types";
+import { isTrustedCachedPreviewImageUrl } from "./link-preview";
 import {
   buildReplyFallbackPrefix,
   shiftMarkupSpans,
@@ -148,12 +149,30 @@ function sharedFileFromWasm(file: WasmSharedFile): SharedFileInfo {
   };
 }
 
-function linkPreviewFromWasm(preview: WasmLinkPreview): LinkPreview {
+interface LinkPreviewDecodeOptions {
+  trustedMediaOrigin?: string | null;
+}
+
+function linkPreviewFromWasm(preview: WasmLinkPreview, options: LinkPreviewDecodeOptions = {}): LinkPreview {
+  const image = preview.image && isTrustedCachedPreviewImageUrl(preview.image.url, options.trustedMediaOrigin)
+    ? preview.image
+    : undefined;
   return {
     originalUrl: preview.original_url,
     ...(preview.normalized_url ? { normalizedUrl: preview.normalized_url } : {}),
     ...(preview.title ? { title: preview.title } : {}),
     ...(preview.description ? { description: preview.description } : {}),
+    ...(image
+      ? {
+          image: {
+            url: image.url,
+            mediaType: image.media_type,
+            ...(typeof image.width === "number" ? { width: image.width } : {}),
+            ...(typeof image.height === "number" ? { height: image.height } : {}),
+            ...(image.alt ? { alt: image.alt } : {}),
+          },
+        }
+      : {}),
   };
 }
 
@@ -325,8 +344,11 @@ function roomAssignedStanzaId(message: WasmArchivedMessage, roomJid: string): st
 
 export function roomMessageFromArchived(
   message: WasmArchivedMessage,
-  source: CodecSource = "archive",
+  sourceOrOptions: CodecSource | LinkPreviewDecodeOptions = "archive",
+  maybeOptions: LinkPreviewDecodeOptions = {},
 ): LiveRoomMessage | null {
+  const source = typeof sourceOrOptions === "string" ? sourceOrOptions : "archive";
+  const decodeOptions = typeof sourceOrOptions === "string" ? maybeOptions : sourceOrOptions;
   const fromJid = message.from ?? "";
   const roomJid = barePeerJid(fromJid || message.to || "");
   const nick = fromJid.split("/")[1] ?? "unknown";
@@ -437,7 +459,7 @@ export function roomMessageFromArchived(
       : {}),
     ...(references.length ? { references: references.map(referenceFromWasm) } : {}),
     ...(sharedFiles.length ? { sharedFiles: sharedFiles.map(sharedFileFromWasm) } : {}),
-    ...(linkPreviews.length ? { linkPreviews: linkPreviews.map(linkPreviewFromWasm) } : {}),
+    ...(linkPreviews.length ? { linkPreviews: linkPreviews.map((preview) => linkPreviewFromWasm(preview, decodeOptions)) } : {}),
     ...(extensionAnnotations.length ? { extensionAnnotations } : {}),
     ...(message.extension_body_fallback && extensionAnnotations.length ? { extensionBodyFallback: true } : {}),
     ...(message.is_sticker ? { isSticker: true } : {}),
@@ -457,8 +479,11 @@ export function roomMessageFromArchived(
 export function dmMessageFromArchived(
   message: WasmArchivedMessage,
   selfBareJid: string,
-  source: CodecSource = "archive",
+  sourceOrOptions: CodecSource | LinkPreviewDecodeOptions = "archive",
+  maybeOptions: LinkPreviewDecodeOptions = {},
 ): LiveDmMessage | null {
+  const source = typeof sourceOrOptions === "string" ? sourceOrOptions : "archive";
+  const decodeOptions = typeof sourceOrOptions === "string" ? maybeOptions : sourceOrOptions;
   const fromBare = barePeerJid(message.from ?? "");
   const toBare = barePeerJid(message.to ?? "");
   const isSelf = fromBare === selfBareJid;
@@ -536,7 +561,7 @@ export function dmMessageFromArchived(
       : {}),
     ...(references.length ? { references: references.map(referenceFromWasm) } : {}),
     ...(sharedFiles.length ? { sharedFiles: sharedFiles.map(sharedFileFromWasm) } : {}),
-    ...(linkPreviews.length ? { linkPreviews: linkPreviews.map(linkPreviewFromWasm) } : {}),
+    ...(linkPreviews.length ? { linkPreviews: linkPreviews.map((preview) => linkPreviewFromWasm(preview, decodeOptions)) } : {}),
     ...(extensionAnnotations.length ? { extensionAnnotations } : {}),
     ...(message.extension_body_fallback && extensionAnnotations.length ? { extensionBodyFallback: true } : {}),
     ...(message.is_sticker ? { isSticker: true } : {}),

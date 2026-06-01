@@ -226,6 +226,16 @@ watch(
         <ExternalLink aria-hidden="true" class="h-3.5 w-3.5" />
         {{ linkPreviewHost(preview.originalUrl) }}
       </span>
+      <img
+        v-if="preview.image"
+        :src="preview.image.url"
+        :alt="preview.image.alt ?? preview.title ?? 'Link preview image'"
+        :width="preview.image.width"
+        :height="preview.image.height"
+        loading="lazy"
+        decoding="async"
+        class="max-h-48 w-full rounded border border-border object-cover"
+      />
       <span v-if="preview.title" class="type-field text-foreground">{{ preview.title }}</span>
       <span v-if="preview.description" class="type-caption line-clamp-2 text-muted-foreground">{{ preview.description }}</span>
     </a>
