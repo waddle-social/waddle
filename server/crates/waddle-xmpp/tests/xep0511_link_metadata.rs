@@ -58,7 +58,7 @@ fn xep0511_builds_rdf_description_with_namespaced_about_and_opengraph_children()
 #[test]
 fn xep0511_builds_cached_image_metadata_with_opengraph_structured_properties() {
     let image = LinkPreviewImage::new(
-        Url::parse("https://waddle.example/api/link-preview-media/sha256/86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16").expect("url"),
+        Url::parse("https://waddle.example/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png").expect("url"),
     )
     .with_media_type("image/png")
     .with_dimensions(640, 360)
@@ -74,7 +74,7 @@ fn xep0511_builds_cached_image_metadata_with_opengraph_structured_properties() {
             .get_child("image", NS_OPENGRAPH)
             .map(Element::text)
             .as_deref(),
-        Some("https://waddle.example/api/link-preview-media/sha256/86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16")
+        Some("https://waddle.example/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png")
     );
     assert_eq!(
         payload

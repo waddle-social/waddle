@@ -24,7 +24,7 @@ struct LinkPreviewLookupDeps<'a> {
     response_from: Option<&'a str>,
     response_to: Option<&'a str>,
     secret: &'a [u8],
-    resolver_policy: &'a LinkPreviewResolverPolicy,
+    resolver_policy: Option<&'a LinkPreviewResolverPolicy>,
 }
 
 pub(super) fn is_link_preview_lookup_iq(iq: &Iq) -> bool {
@@ -43,13 +43,6 @@ pub(super) async fn handle_link_preview_lookup_iq(
     response_to: Option<&str>,
     secret: &[u8],
 ) -> Vec<String> {
-    let resolver_policy = LinkPreviewResolverPolicy {
-        media_cache: Some(LinkPreviewMediaCache::new(
-            state.deps.app_state.blob_storage.clone(),
-            state.deps.auth_state.base_url.as_str(),
-        )),
-        ..Default::default()
-    };
     handle_link_preview_lookup_iq_with_policy(
         iq,
         sender_jid,
@@ -59,7 +52,7 @@ pub(super) async fn handle_link_preview_lookup_iq(
             response_from,
             response_to,
             secret,
-            resolver_policy: &resolver_policy,
+            resolver_policy: None,
         },
     )
     .await
@@ -78,6 +71,22 @@ async fn handle_link_preview_lookup_iq_with_policy(
             deps.response_to,
             not_authorized_iq_error("Authentication required."),
         )];
+    };
+    let owned_resolver_policy;
+    let resolver_policy = match deps.resolver_policy {
+        Some(policy) => policy,
+        None => {
+            owned_resolver_policy = LinkPreviewResolverPolicy {
+                media_cache: Some(LinkPreviewMediaCache::new(
+                    state.deps.app_state.blob_storage.clone(),
+                    state.deps.auth_state.base_url.as_str(),
+                    state.deps.app_state.db_pool.global_actor().clone(),
+                    sender_jid.to_bare(),
+                )),
+                ..Default::default()
+            };
+            &owned_resolver_policy
+        }
     };
     let Iq::Get { payload, .. } = iq else {
         return vec![build_iq_error_xml_typed(
@@ -124,7 +133,7 @@ async fn handle_link_preview_lookup_iq_with_policy(
             None,
         )];
     };
-    let outcome = resolve_link_preview(&original_url, deps.resolver_policy).await;
+    let outcome = resolve_link_preview(&original_url, resolver_policy).await;
     let LinkPreviewResolverOutcome::Ready(metadata) = outcome else {
         return vec![build_link_preview_lookup_result(
             iq,
@@ -349,11 +358,14 @@ mod tests {
             std::env::temp_dir().join(format!("waddle-link-preview-{}", uuid::Uuid::new_v4()));
         let storage: std::sync::Arc<dyn crate::storage::BlobStorage> =
             std::sync::Arc::new(crate::storage::LocalStorage::new(storage_dir));
+        let state = create_test_websocket_state().await;
         let resolver_policy = LinkPreviewResolverPolicy {
             allow_http_loopback_for_tests: true,
             media_cache: Some(LinkPreviewMediaCache::new(
                 storage,
                 "https://waddle.example",
+                state.deps.app_state.db_pool.global_actor().clone(),
+                "alice@example.com".parse().expect("jid"),
             )),
             ..Default::default()
         };
@@ -372,7 +384,6 @@ mod tests {
             .build();
         let iq = iq_get_with_payload(payload);
 
-        let state = create_test_websocket_state().await;
         let response = handle_link_preview_lookup_iq_with_policy(
             &iq,
             Some(&sender()),
@@ -382,7 +393,7 @@ mod tests {
                 response_from: None,
                 response_to: None,
                 secret: secret(),
-                resolver_policy: &resolver_policy,
+                resolver_policy: Some(&resolver_policy),
             },
         )
         .await;
@@ -407,7 +418,9 @@ mod tests {
         assert_eq!(image.attr("height"), Some("360"));
         assert_eq!(image.attr("alt"), Some("Article screenshot"));
         assert!(image.attr("url").is_some_and(|url| {
-            url.starts_with("https://waddle.example/api/link-preview-media/sha256/")
+            url.starts_with("https://waddle.example/api/files/")
+                && url.ends_with(".png")
+                && url.contains("/link-preview-")
         }));
         let token = waddle_xmpp::xep::LinkPreviewToken::new(
             preview.attr("token").expect("token").to_string(),
@@ -425,7 +438,7 @@ mod tests {
         assert!(decoded_image
             .url
             .as_str()
-            .starts_with("https://waddle.example/api/link-preview-media/sha256/"));
+            .starts_with("https://waddle.example/api/files/"));
         assert_eq!(
             preview
                 .get_child("title", NS_WADDLE_LINK_PREVIEW)
@@ -478,7 +491,7 @@ mod tests {
                 response_from: None,
                 response_to: None,
                 secret: secret(),
-                resolver_policy: &resolver_policy,
+                resolver_policy: Some(&resolver_policy),
             },
         )
         .await;

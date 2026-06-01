@@ -240,10 +240,14 @@ export function isTrustedCachedPreviewImageUrl(value: string, trustedMediaOrigin
     const trusted = new URL(trustedMediaOrigin);
     return trustedPreviewProtocolsMatch(url, trusted)
       && url.origin === trusted.origin
-      && /^\/api\/link-preview-media\/sha256\/[a-f0-9]{64}$/i.test(url.pathname);
+      && isLinkPreviewXep0363FilePath(url.pathname);
   } catch {
     return false;
   }
+}
+
+function isLinkPreviewXep0363FilePath(pathname: string): boolean {
+  return /^\/api\/files\/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/link-preview-[a-f0-9]{64}\.(png|jpg|gif|webp)$/i.test(pathname);
 }
 
 function trustedPreviewProtocolsMatch(url: URL, trusted: URL): boolean {

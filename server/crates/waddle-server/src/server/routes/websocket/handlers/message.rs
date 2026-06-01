@@ -171,7 +171,7 @@ fn is_trusted_cached_preview_image_url(url: &url::Url, trusted_media_base_url: &
         && url.host_str() == trusted.host_str()
         && url.port_or_known_default() == trusted.port_or_known_default()
         && trusted.port() == url.port()
-        && is_link_preview_media_hash_path(url.path())
+        && is_link_preview_xep0363_file_path(url.path())
 }
 
 fn trusted_preview_schemes_match(url: &url::Url, trusted: &url::Url) -> bool {
@@ -188,11 +188,29 @@ fn is_loopback_host(host: Option<&str>) -> bool {
             .is_some_and(|ip| ip.is_loopback())
 }
 
-fn is_link_preview_media_hash_path(path: &str) -> bool {
-    let Some(hash) = path.strip_prefix("/api/link-preview-media/sha256/") else {
+fn is_link_preview_xep0363_file_path(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("/api/files/") else {
         return false;
     };
-    hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+    let mut parts = rest.split('/');
+    let Some(slot_id) = parts.next() else {
+        return false;
+    };
+    let Some(filename) = parts.next() else {
+        return false;
+    };
+    if parts.next().is_some() || uuid::Uuid::parse_str(slot_id).is_err() {
+        return false;
+    }
+    let Some(name) = filename.strip_prefix("link-preview-") else {
+        return false;
+    };
+    let Some((hash, extension)) = name.rsplit_once('.') else {
+        return false;
+    };
+    matches!(extension, "png" | "jpg" | "gif" | "webp")
+        && hash.len() == 64
+        && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn first_eligible_https_url(message: &xmpp_parsers::message::Message) -> Option<url::Url> {
@@ -266,11 +284,11 @@ mod tests {
     #[test]
     fn cached_preview_image_url_trust_allows_loopback_http_only_for_matching_origin() {
         let loopback = url::Url::parse(
-            "http://localhost:3000/api/link-preview-media/sha256/86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16",
+            "http://localhost:3000/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png",
         )
         .expect("url");
         let non_loopback = url::Url::parse(
-            "http://waddle.example/api/link-preview-media/sha256/86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16",
+            "http://waddle.example/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png",
         )
         .expect("url");
 
@@ -299,7 +317,7 @@ mod tests {
             description: Some("This is a great webpage and you will really like it".to_string()),
             image: Some(waddle_xmpp::xep::LinkPreviewTokenImage {
                 url: url::Url::parse(
-                    "https://waddle.example/api/link-preview-media/sha256/86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16",
+                    "https://waddle.example/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png",
                 )
                 .expect("url"),
                 media_type: "image/png".to_string(),
@@ -340,14 +358,14 @@ mod tests {
         assert_eq!(parsed[0].images.len(), 1);
         assert_eq!(
             parsed[0].images[0].url.as_str(),
-            "https://waddle.example/api/link-preview-media/sha256/86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16"
+            "https://waddle.example/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png"
         );
         assert_eq!(parsed[0].images[0].media_type.as_deref(), Some("image/png"));
         let references = waddle_xmpp::xep::extract_references_from_message(&message);
         assert_eq!(references.len(), 1);
         assert_eq!(
             references[0].uri,
-            "https://waddle.example/api/link-preview-media/sha256/86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16"
+            "https://waddle.example/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png"
         );
         assert_eq!(
             references[0].ref_type,
@@ -370,7 +388,7 @@ mod tests {
             description: Some("This is a great webpage and you will really like it".to_string()),
             image: Some(waddle_xmpp::xep::LinkPreviewTokenImage {
                 url: url::Url::parse(
-                    "https://attacker.example/api/link-preview-media/sha256/86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16",
+                    "https://attacker.example/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png",
                 )
                 .expect("url"),
                 media_type: "image/png".to_string(),

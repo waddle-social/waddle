@@ -465,7 +465,7 @@ fn parse_message_extracts_xep0511_link_preview() {
              <og:title>The Best Webpage</og:title>\
              <og:description>This is a great webpage and you will really like it</og:description>\
              <og:url>https://example.com/canonical-url/for/what-was-linked-to</og:url>\
-             <og:image>https://waddle.example/api/link-preview-media/sha256/86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16</og:image>\
+             <og:image>https://waddle.example/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png</og:image>\
              <ogi:type>image/png</ogi:type>\
              <ogi:width>640</ogi:width>\
              <ogi:height>360</ogi:height>\
@@ -495,7 +495,7 @@ fn parse_message_extracts_xep0511_link_preview() {
     let image = msg.link_previews[0].image.as_ref().expect("cached image");
     assert_eq!(
         image.url.as_str(),
-        "https://waddle.example/api/link-preview-media/sha256/86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16"
+        "https://waddle.example/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png"
     );
     assert_eq!(image.media_type, "image/png");
     assert_eq!(image.width, Some(640));
@@ -510,7 +510,7 @@ fn parse_message_ignores_xep0511_link_preview_image_with_unsafe_media_type() {
            <body>see https://the.link.example.com/what-was-linked-to</body>\
            <rdf:Description xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#' xmlns:og='https://ogp.me/ns#' xmlns:ogi='https://ogp.me/ns#image:' rdf:about='https://the.link.example.com/what-was-linked-to'>\
              <og:title>The Best Webpage</og:title>\
-             <og:image>https://waddle.example/api/link-preview-media/sha256/86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16</og:image>\
+             <og:image>https://waddle.example/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png</og:image>\
              <ogi:type>image/svg+xml</ogi:type>\
            </rdf:Description>\
          </message>",

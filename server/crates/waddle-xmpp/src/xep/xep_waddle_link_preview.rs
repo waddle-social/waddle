@@ -270,7 +270,7 @@ mod tests {
             title: Some("Example".to_string()),
             description: Some("Plain text preview".to_string()),
             image: Some(LinkPreviewTokenImage {
-                url: Url::parse("https://waddle.example/api/link-preview-media/sha256/86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16")
+                url: Url::parse("https://waddle.example/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png")
                     .expect("url"),
                 media_type: "image/png".to_string(),
                 width: Some(640),

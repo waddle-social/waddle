@@ -828,7 +828,7 @@ mod inbound_to_js_tests {
                        <og:title>The Best Webpage</og:title>\
                        <og:description>Plain text preview</og:description>\
                        <og:url>https://the.link.example/what-was-linked</og:url>\
-                       <og:image>https://waddle.example/api/link-preview-media/sha256/86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16</og:image>\
+                       <og:image>https://waddle.example/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png</og:image>\
                        <ogi:type>image/png</ogi:type>\
                        <ogi:width>640</ogi:width>\
                        <ogi:height>360</ogi:height>\
@@ -857,7 +857,7 @@ mod inbound_to_js_tests {
         let image = preview.image.as_ref().expect("cached image");
         assert_eq!(
             image.url,
-            "https://waddle.example/api/link-preview-media/sha256/86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16"
+            "https://waddle.example/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png"
         );
         assert_eq!(image.media_type, "image/png");
         assert_eq!(image.width, Some(640));

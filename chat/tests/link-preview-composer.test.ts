@@ -47,7 +47,7 @@ describe("composer link preview state", () => {
       expiresAt: "2999-01-01T00:00:00.000Z",
       title: "Example",
       image: {
-        url: "https://waddle.example/api/link-preview-media/sha256/86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16",
+        url: "https://waddle.example/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png",
         mediaType: "image/png",
         width: 640,
         height: 360,
@@ -56,7 +56,7 @@ describe("composer link preview state", () => {
     });
 
     expect(payload?.preview.image).toEqual({
-      url: "https://waddle.example/api/link-preview-media/sha256/86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16",
+      url: "https://waddle.example/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png",
       mediaType: "image/png",
       width: 640,
       height: 360,

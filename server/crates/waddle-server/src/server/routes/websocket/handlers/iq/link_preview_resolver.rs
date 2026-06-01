@@ -3,12 +3,17 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use chrono::Utc;
+use jid::BareJid;
+use kameo::actor::ActorRef;
 use reqwest::header::{CONTENT_TYPE, LOCATION};
 use reqwest::{redirect, Client, StatusCode};
 use sha2::{Digest, Sha256};
 use tracing::warn;
 use url::{Host, Url};
 
+use crate::db::actor::{DbActor, DbExecute};
+use crate::db::Value;
 use crate::storage::BlobStorage;
 
 const DEFAULT_MAX_BYTES: usize = 256 * 1024;
@@ -40,13 +45,22 @@ pub(super) struct ResolvedLinkPreviewImage {
 pub(super) struct LinkPreviewMediaCache {
     storage: Arc<dyn BlobStorage>,
     public_base_url: String,
+    global_db_actor: ActorRef<DbActor>,
+    requester_jid: BareJid,
 }
 
 impl LinkPreviewMediaCache {
-    pub(super) fn new(storage: Arc<dyn BlobStorage>, public_base_url: impl Into<String>) -> Self {
+    pub(super) fn new(
+        storage: Arc<dyn BlobStorage>,
+        public_base_url: impl Into<String>,
+        global_db_actor: ActorRef<DbActor>,
+        requester_jid: BareJid,
+    ) -> Self {
         Self {
             storage,
             public_base_url: public_base_url.into().trim_end_matches('/').to_string(),
+            global_db_actor,
+            requester_jid,
         }
     }
 }
@@ -188,21 +202,14 @@ async fn fetch_cached_preview_image(
                     .iter()
                     .map(|byte| format!("{byte:02x}"))
                     .collect::<String>();
-                let key = format!("link-previews/sha256/{hash}");
-                cache
-                    .storage
-                    .put(&key, bytes, &media_type)
-                    .await
-                    .map_err(|error| {
-                        warn!(%error, key = %key, "failed to cache link preview image");
-                        LinkPreviewResolverStatus::Unsupported
-                    })?;
+                let (slot_id, filename) =
+                    publish_cached_preview_image_slot(cache, &hash, bytes, &media_type).await?;
                 let url = Url::parse(&format!(
-                    "{}/api/link-preview-media/sha256/{hash}",
-                    cache.public_base_url
+                    "{}/api/files/{}/{}",
+                    cache.public_base_url, slot_id, filename
                 ))
                 .map_err(|error| {
-                    warn!(%error, "failed to build cached link preview image URL");
+                    warn!(%error, "failed to build XEP-0363 cached link preview image URL");
                     LinkPreviewResolverStatus::Unsupported
                 })?;
                 return Ok(ResolvedLinkPreviewImage {
@@ -222,6 +229,61 @@ async fn fetch_cached_preview_image(
         }
     }
     Err(LinkPreviewResolverStatus::Failed)
+}
+
+async fn publish_cached_preview_image_slot(
+    cache: &LinkPreviewMediaCache,
+    hash: &str,
+    bytes: Bytes,
+    media_type: &str,
+) -> Result<(String, String), LinkPreviewResolverStatus> {
+    let key = format!("link-previews/sha256/{hash}");
+    cache
+        .storage
+        .put(&key, bytes.clone(), media_type)
+        .await
+        .map_err(|error| {
+            warn!(%error, key = %key, "failed to cache link preview image");
+            LinkPreviewResolverStatus::Unsupported
+        })?;
+
+    let slot_id = uuid::Uuid::new_v4().to_string();
+    let filename = format!(
+        "link-preview-{hash}.{}",
+        preview_image_extension(media_type)
+    );
+    let now = Utc::now();
+    let size_bytes = i64::try_from(bytes.len()).map_err(|_| LinkPreviewResolverStatus::Failed)?;
+    cache
+        .global_db_actor
+        .ask(DbExecute {
+            sql: "INSERT INTO upload_slots (id, requester_jid, filename, size_bytes, content_type, status, storage_key, expires_at, uploaded_at) VALUES (?, ?, ?, ?, ?, 'uploaded', ?, ?, ?)".to_string(),
+            params: vec![
+                Value::from(slot_id.clone()),
+                Value::from(cache.requester_jid.to_string()),
+                Value::from(filename.clone()),
+                Value::from(size_bytes),
+                Value::from(media_type.to_string()),
+                Value::from(key),
+                Value::from((now + chrono::Duration::minutes(15)).to_rfc3339()),
+                Value::from(now.to_rfc3339()),
+            ],
+        })
+        .await
+        .map_err(|error| {
+            warn!(%error, "failed to record XEP-0363 link preview upload slot");
+            LinkPreviewResolverStatus::Unsupported
+        })?;
+    Ok((slot_id, filename))
+}
+
+fn preview_image_extension(media_type: &str) -> &'static str {
+    match media_type {
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        _ => "png",
+    }
 }
 
 enum FetchImageOnceResult {
@@ -819,6 +881,7 @@ fn find_ascii_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig};
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::Arc;
@@ -859,6 +922,33 @@ mod tests {
             let key = key.to_string();
             Box::pin(async { Err(crate::storage::StorageError::NotFound(key)) })
         }
+    }
+
+    async fn test_media_cache(
+        storage: Arc<dyn crate::storage::BlobStorage>,
+    ) -> LinkPreviewMediaCache {
+        let (cache, _) = test_media_cache_with_base_url(storage, "https://waddle.example").await;
+        cache
+    }
+
+    async fn test_media_cache_with_base_url(
+        storage: Arc<dyn crate::storage::BlobStorage>,
+        base_url: &str,
+    ) -> (LinkPreviewMediaCache, DatabasePool) {
+        let db_pool = DatabasePool::new(DatabaseConfig::default(), PoolConfig)
+            .await
+            .expect("db pool");
+        MigrationRunner::global()
+            .run(db_pool.global())
+            .await
+            .expect("migrations");
+        let cache = LinkPreviewMediaCache::new(
+            storage,
+            base_url,
+            db_pool.global_actor().clone(),
+            "alice@example.com".parse().expect("jid"),
+        );
+        (cache, db_pool)
     }
 
     #[test]
@@ -1161,12 +1251,11 @@ mod tests {
             std::env::temp_dir().join(format!("waddle-link-preview-{}", uuid::Uuid::new_v4()));
         let storage: Arc<dyn crate::storage::BlobStorage> =
             Arc::new(crate::storage::LocalStorage::new(storage_dir));
+        let (media_cache, db_pool) =
+            test_media_cache_with_base_url(storage.clone(), "https://waddle.example").await;
         let policy = LinkPreviewResolverPolicy {
             allow_http_loopback_for_tests: true,
-            media_cache: Some(LinkPreviewMediaCache::new(
-                storage.clone(),
-                "https://waddle.example",
-            )),
+            media_cache: Some(media_cache),
             ..Default::default()
         };
         let url = Url::parse(&format!("{}/article", server.uri())).expect("url");
@@ -1181,14 +1270,43 @@ mod tests {
         let image = metadata.image.expect("cached image metadata");
         assert_eq!(image.url.scheme(), "https");
         assert_eq!(image.url.domain(), Some("waddle.example"));
-        assert_eq!(
-            image.url.path(),
-            format!("/api/link-preview-media/sha256/{expected_hash}")
-        );
+        assert!(image.url.path().starts_with("/api/files/"));
+        assert!(image
+            .url
+            .path()
+            .ends_with(&format!("/link-preview-{expected_hash}.png")));
         assert_eq!(image.media_type, "image/png");
         assert_eq!(image.width, Some(640));
         assert_eq!(image.height, Some(360));
         assert_eq!(image.alt.as_deref(), Some("Article screenshot"));
+        let slot_id = image
+            .url
+            .path_segments()
+            .and_then(|mut segments| segments.nth(2))
+            .expect("slot id");
+        let db = db_pool.global().guard().await.expect("db");
+        let mut rows = db
+            .query(
+                "SELECT filename, status, storage_key FROM upload_slots WHERE id = ?",
+                crate::db_params![slot_id],
+            )
+            .await
+            .expect("slot row");
+        let row = rows
+            .next()
+            .await
+            .expect("next row")
+            .expect("slot row exists");
+        assert_eq!(
+            row.get::<String>(0).expect("filename"),
+            format!("link-preview-{expected_hash}.png")
+        );
+        assert_eq!(row.get::<String>(1).expect("status"), "uploaded");
+        assert_eq!(
+            row.get::<Option<String>>(2).expect("storage_key"),
+            Some(expected_key.clone())
+        );
+        assert!(rows.next().await.expect("next row").is_none());
         let (stored, meta) = storage.get(&expected_key).await.expect("cached bytes");
         assert_eq!(stored, image_bytes);
         assert_eq!(meta.content_type, "image/png");
@@ -1226,10 +1344,7 @@ mod tests {
             Arc::new(crate::storage::LocalStorage::new(storage_dir));
         let policy = LinkPreviewResolverPolicy {
             allow_http_loopback_for_tests: true,
-            media_cache: Some(LinkPreviewMediaCache::new(
-                storage.clone(),
-                "https://waddle.example",
-            )),
+            media_cache: Some(test_media_cache(storage.clone()).await),
             ..Default::default()
         };
         let url = Url::parse(&format!("{}/article", server.uri())).expect("url");
@@ -1288,10 +1403,7 @@ mod tests {
             Arc::new(crate::storage::LocalStorage::new(storage_dir));
         let policy = LinkPreviewResolverPolicy {
             allow_http_loopback_for_tests: true,
-            media_cache: Some(LinkPreviewMediaCache::new(
-                storage.clone(),
-                "https://waddle.example",
-            )),
+            media_cache: Some(test_media_cache(storage.clone()).await),
             ..Default::default()
         };
         let url = Url::parse(&format!("{}/article", server.uri())).expect("url");
@@ -1302,10 +1414,12 @@ mod tests {
             panic!("expected ready outcome, got {outcome:?}");
         };
         let expected_hash = hex::encode(Sha256::digest(image_bytes.as_ref()));
-        assert_eq!(
-            metadata.image.expect("cached image").url.path(),
-            format!("/api/link-preview-media/sha256/{expected_hash}")
-        );
+        let image = metadata.image.expect("cached image");
+        assert!(image.url.path().starts_with("/api/files/"));
+        assert!(image
+            .url
+            .path()
+            .ends_with(&format!("/link-preview-{expected_hash}.png")));
     }
 
     #[tokio::test]
@@ -1336,10 +1450,7 @@ mod tests {
             Arc::new(crate::storage::LocalStorage::new(storage_dir));
         let policy = LinkPreviewResolverPolicy {
             allow_http_loopback_for_tests: true,
-            media_cache: Some(LinkPreviewMediaCache::new(
-                storage,
-                "https://waddle.example",
-            )),
+            media_cache: Some(test_media_cache(storage).await),
             ..Default::default()
         };
         let url = Url::parse(&format!("{}/article", server.uri())).expect("url");
@@ -1385,10 +1496,7 @@ mod tests {
             Arc::new(crate::storage::LocalStorage::new(storage_dir));
         let policy = LinkPreviewResolverPolicy {
             allow_http_loopback_for_tests: true,
-            media_cache: Some(LinkPreviewMediaCache::new(
-                storage,
-                "https://waddle.example",
-            )),
+            media_cache: Some(test_media_cache(storage).await),
             ..Default::default()
         };
         let url = Url::parse(&format!("{}/article", server.uri())).expect("url");
@@ -1435,7 +1543,7 @@ mod tests {
             Arc::new(crate::storage::LocalStorage::new(storage_dir));
         let policy = LinkPreviewResolverPolicy {
             allow_http_loopback_for_tests: true,
-            media_cache: Some(LinkPreviewMediaCache::new(storage, "not a url")),
+            media_cache: Some(test_media_cache_with_base_url(storage, "not a url").await.0),
             ..Default::default()
         };
         let url = Url::parse(&format!("{}/article", server.uri())).expect("url");
@@ -1478,10 +1586,7 @@ mod tests {
             .await;
         let policy = LinkPreviewResolverPolicy {
             allow_http_loopback_for_tests: true,
-            media_cache: Some(LinkPreviewMediaCache::new(
-                Arc::new(FailingPutStorage),
-                "https://waddle.example",
-            )),
+            media_cache: Some(test_media_cache(Arc::new(FailingPutStorage)).await),
             ..Default::default()
         };
         let url = Url::parse(&format!("{}/article", server.uri())).expect("url");
@@ -1525,10 +1630,7 @@ mod tests {
             Arc::new(crate::storage::LocalStorage::new(storage_dir));
         let policy = LinkPreviewResolverPolicy {
             allow_http_loopback_for_tests: true,
-            media_cache: Some(LinkPreviewMediaCache::new(
-                storage,
-                "https://waddle.example",
-            )),
+            media_cache: Some(test_media_cache(storage).await),
             ..Default::default()
         };
         let url = Url::parse(&format!("{}/article", server.uri())).expect("url");
@@ -1570,10 +1672,7 @@ mod tests {
             Arc::new(crate::storage::LocalStorage::new(storage_dir));
         let policy = LinkPreviewResolverPolicy {
             allow_http_loopback_for_tests: true,
-            media_cache: Some(LinkPreviewMediaCache::new(
-                storage,
-                "https://waddle.example",
-            )),
+            media_cache: Some(test_media_cache(storage).await),
             ..Default::default()
         };
         let url = Url::parse(&format!("{}/article", server.uri())).expect("url");
@@ -1621,10 +1720,7 @@ mod tests {
         let policy = LinkPreviewResolverPolicy {
             timeout: Duration::from_millis(20),
             allow_http_loopback_for_tests: true,
-            media_cache: Some(LinkPreviewMediaCache::new(
-                storage,
-                "https://waddle.example",
-            )),
+            media_cache: Some(test_media_cache(storage).await),
             ..Default::default()
         };
         let url = Url::parse(&format!("{}/article", server.uri())).expect("url");

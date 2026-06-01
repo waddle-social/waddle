@@ -400,8 +400,32 @@ fn parse_link_preview_image(el: &Element) -> Option<LinkPreviewImageData> {
 fn parse_cached_preview_image_url(value: &str) -> Option<Url> {
     let url = parse_web_url(value)?;
     let path = url.path();
-    let hash = path.strip_prefix("/api/link-preview-media/sha256/")?;
-    (hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(url)
+    is_link_preview_xep0363_file_path(path).then_some(url)
+}
+
+fn is_link_preview_xep0363_file_path(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("/api/files/") else {
+        return false;
+    };
+    let mut parts = rest.split('/');
+    let Some(slot_id) = parts.next() else {
+        return false;
+    };
+    let Some(filename) = parts.next() else {
+        return false;
+    };
+    if parts.next().is_some() || uuid::Uuid::parse_str(slot_id).is_err() {
+        return false;
+    }
+    let Some(name) = filename.strip_prefix("link-preview-") else {
+        return false;
+    };
+    let Some((hash, extension)) = name.rsplit_once('.') else {
+        return false;
+    };
+    matches!(extension, "png" | "jpg" | "gif" | "webp")
+        && hash.len() == 64
+        && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn parse_web_url(value: &str) -> Option<Url> {
