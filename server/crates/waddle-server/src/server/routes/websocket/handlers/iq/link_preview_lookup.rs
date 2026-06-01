@@ -1,8 +1,7 @@
 //! Waddle plaintext link-preview composer lookup.
 //!
-//! This first tracer bullet deliberately returns text-only metadata derived
-//! from the submitted HTTPS URL. Later resolver slices can replace the lookup
-//! internals without changing the send-time token request or XEP-0511 payload.
+//! The lookup resolves OpenGraph metadata through the bounded HTTPS resolver,
+//! then mints a scoped private token for the send-time XEP-0511 payload.
 
 use super::*;
 use chrono::{Duration, SecondsFormat, Utc};
@@ -11,6 +10,19 @@ use url::Url;
 use waddle_xmpp::xep::{encode_link_preview_token, LinkPreviewTokenData, NS_WADDLE_LINK_PREVIEW};
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::minidom::Element;
+
+use super::link_preview_resolver::{
+    resolve_link_preview, LinkPreviewResolverOutcome, LinkPreviewResolverPolicy,
+    LinkPreviewResolverStatus,
+};
+
+struct LinkPreviewLookupDeps<'a> {
+    muc_domain: &'a str,
+    response_from: Option<&'a str>,
+    response_to: Option<&'a str>,
+    secret: &'a [u8],
+    resolver_policy: &'a LinkPreviewResolverPolicy,
+}
 
 pub(super) fn is_link_preview_lookup_iq(iq: &Iq) -> bool {
     let Iq::Get { payload, .. } = iq else {
@@ -28,19 +40,41 @@ pub(super) async fn handle_link_preview_lookup_iq(
     response_to: Option<&str>,
     secret: &[u8],
 ) -> Vec<String> {
+    let resolver_policy = LinkPreviewResolverPolicy::default();
+    handle_link_preview_lookup_iq_with_policy(
+        iq,
+        sender_jid,
+        state,
+        LinkPreviewLookupDeps {
+            muc_domain,
+            response_from,
+            response_to,
+            secret,
+            resolver_policy: &resolver_policy,
+        },
+    )
+    .await
+}
+
+async fn handle_link_preview_lookup_iq_with_policy(
+    iq: &Iq,
+    sender_jid: Option<&FullJid>,
+    state: &WebSocketState,
+    deps: LinkPreviewLookupDeps<'_>,
+) -> Vec<String> {
     let Some(sender_jid) = sender_jid else {
         return vec![build_iq_error_xml_typed(
             iq.id(),
-            response_from,
-            response_to,
+            deps.response_from,
+            deps.response_to,
             not_authorized_iq_error("Authentication required."),
         )];
     };
     let Iq::Get { payload, .. } = iq else {
         return vec![build_iq_error_xml_typed(
             iq.id(),
-            response_from,
-            response_to,
+            deps.response_from,
+            deps.response_to,
             bad_request_iq_error("Link preview lookup must be an IQ get."),
         )];
     };
@@ -48,26 +82,26 @@ pub(super) async fn handle_link_preview_lookup_iq(
     let Some(original_url) = lookup_url(payload) else {
         return vec![build_iq_error_xml_typed(
             iq.id(),
-            response_from,
-            response_to,
+            deps.response_from,
+            deps.response_to,
             bad_request_iq_error("Link preview lookup requires a URL."),
         )];
     };
     let Some(scope_jid) = lookup_scope(payload).and_then(|scope| scope.parse().ok()) else {
         return vec![build_iq_error_xml_typed(
             iq.id(),
-            response_from,
-            response_to,
+            deps.response_from,
+            deps.response_to,
             bad_request_iq_error("Link preview lookup requires a conversation scope JID."),
         )];
     };
     if let Some(error) =
-        authorize_link_preview_scope(state, sender_jid, &scope_jid, muc_domain).await
+        authorize_link_preview_scope(state, sender_jid, &scope_jid, deps.muc_domain).await
     {
         return vec![build_iq_error_xml_typed(
             iq.id(),
-            response_from,
-            response_to,
+            deps.response_from,
+            deps.response_to,
             error,
         )];
     }
@@ -75,45 +109,39 @@ pub(super) async fn handle_link_preview_lookup_iq(
     let Ok(original_url) = Url::parse(&original_url) else {
         return vec![build_link_preview_lookup_result(
             iq,
-            response_from,
-            response_to,
+            deps.response_from,
+            deps.response_to,
+            LinkPreviewResolverStatus::Unsupported,
             None,
         )];
     };
-    if original_url.scheme() != "https"
-        || !original_url
-            .host_str()
-            .is_some_and(|host| host.contains('.'))
-    {
+    let outcome = resolve_link_preview(&original_url, deps.resolver_policy).await;
+    let LinkPreviewResolverOutcome::Ready(metadata) = outcome else {
         return vec![build_link_preview_lookup_result(
             iq,
-            response_from,
-            response_to,
+            deps.response_from,
+            deps.response_to,
+            outcome.status(),
             None,
         )];
-    }
-
+    };
     let expires_at = Utc::now() + Duration::minutes(5);
-    let host = original_url
-        .host_str()
-        .unwrap_or_default()
-        .trim_start_matches("www.")
-        .to_string();
     let data = LinkPreviewTokenData {
         sender_jid: sender_jid.to_bare(),
         scope_jid,
-        original_url: original_url.clone(),
-        normalized_url: original_url.clone(),
-        title: Some(host),
-        description: Some(original_url.as_str().to_string()),
+        original_url: metadata.original_url,
+        normalized_url: metadata.normalized_url,
+        title: metadata.title,
+        description: metadata.description,
         expires_at_unix: expires_at.timestamp(),
     };
-    let token = encode_link_preview_token(&data, secret);
+    let token = encode_link_preview_token(&data, deps.secret);
 
     vec![build_link_preview_lookup_result(
         iq,
-        response_from,
-        response_to,
+        deps.response_from,
+        deps.response_to,
+        LinkPreviewResolverStatus::Ready,
         Some((
             data,
             token.as_str(),
@@ -178,6 +206,7 @@ fn build_link_preview_lookup_result(
     iq: &Iq,
     response_from: Option<&str>,
     response_to: Option<&str>,
+    status: LinkPreviewResolverStatus,
     preview: Option<(LinkPreviewTokenData, &str, String)>,
 ) -> String {
     let mut lookup = Element::builder("lookup", NS_WADDLE_LINK_PREVIEW).attr(
@@ -185,7 +214,7 @@ fn build_link_preview_lookup_result(
         if preview.is_some() {
             "ready"
         } else {
-            "not_found"
+            status.as_lookup_status()
         },
     );
     if let Some((data, token, expires_at)) = preview {
@@ -223,6 +252,8 @@ fn append_text(parent: &mut Element, name: &str, value: Option<&str>) {
 mod tests {
     use super::*;
     use crate::server::routes::websocket::tests::create_test_websocket_state;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn iq_get_with_payload(payload: Element) -> Iq {
         Iq::Get {
@@ -243,10 +274,27 @@ mod tests {
 
     #[tokio::test]
     async fn handles_https_lookup_with_scoped_token_and_text_metadata() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/a"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                r#"<html><head>
+                    <meta property="og:title" content="Example Article">
+                    <meta property="og:description" content="Plain text summary">
+                  </head></html>"#,
+                "text/html",
+            ))
+            .mount(&server)
+            .await;
+        let resolver_policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let lookup_url = format!("{}/a", server.uri());
         let payload = Element::builder("lookup", NS_WADDLE_LINK_PREVIEW)
             .append(
                 Element::builder("url", NS_WADDLE_LINK_PREVIEW)
-                    .append("https://www.example.com/a")
+                    .append(lookup_url.as_str())
                     .build(),
             )
             .append(
@@ -258,14 +306,17 @@ mod tests {
         let iq = iq_get_with_payload(payload);
 
         let state = create_test_websocket_state().await;
-        let response = handle_link_preview_lookup_iq(
+        let response = handle_link_preview_lookup_iq_with_policy(
             &iq,
             Some(&sender()),
             state.as_ref(),
-            "muc.example.com",
-            None,
-            None,
-            secret(),
+            LinkPreviewLookupDeps {
+                muc_domain: "muc.example.com",
+                response_from: None,
+                response_to: None,
+                secret: secret(),
+                resolver_policy: &resolver_policy,
+            },
         )
         .await;
 
@@ -277,14 +328,8 @@ mod tests {
         let preview = lookup
             .get_child("preview", NS_WADDLE_LINK_PREVIEW)
             .expect("preview");
-        assert_eq!(
-            preview.attr("original-url"),
-            Some("https://www.example.com/a")
-        );
-        assert_eq!(
-            preview.attr("normalized-url"),
-            Some("https://www.example.com/a")
-        );
+        assert_eq!(preview.attr("original-url"), Some(lookup_url.as_str()));
+        assert_eq!(preview.attr("normalized-url"), Some(lookup_url.as_str()));
         assert!(preview.attr("token").is_some_and(|token| !token.is_empty()));
         assert!(preview.attr("expires-at").is_some());
         let token = waddle_xmpp::xep::LinkPreviewToken::new(
@@ -300,12 +345,12 @@ mod tests {
                 .get_child("title", NS_WADDLE_LINK_PREVIEW)
                 .map(Element::text)
                 .as_deref(),
-            Some("example.com")
+            Some("Example Article")
         );
     }
 
     #[tokio::test]
-    async fn non_https_lookup_returns_not_found_without_token() {
+    async fn non_https_lookup_returns_unsupported_without_token() {
         let payload = Element::builder("lookup", NS_WADDLE_LINK_PREVIEW)
             .append(
                 Element::builder("url", NS_WADDLE_LINK_PREVIEW)
@@ -336,7 +381,7 @@ mod tests {
         let lookup = elem
             .get_child("lookup", NS_WADDLE_LINK_PREVIEW)
             .expect("lookup result");
-        assert_eq!(lookup.attr("status"), Some("not_found"));
+        assert_eq!(lookup.attr("status"), Some("unsupported"));
         assert!(lookup
             .get_child("preview", NS_WADDLE_LINK_PREVIEW)
             .is_none());

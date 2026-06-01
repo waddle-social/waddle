@@ -153,6 +153,29 @@ describe("link preview lookup", () => {
     });
   });
 
+  test("returns typed normal lookup states for resolver blocked, failed, and unsupported responses", async () => {
+    for (const status of ["blocked", "failed", "unsupported"] as const) {
+      const send_raw_iq = async () =>
+        `<iq type="result" id="lookup-1"><lookup xmlns="urn:waddle:link-preview:0" status="${status}"/></iq>`;
+
+      let result: Awaited<ReturnType<typeof requestPlaintextLinkPreviewLookup>> = null;
+      await withFakeXmlDocument(async () => {
+        await withFakeDomParser(async () => {
+          result = await requestPlaintextLinkPreviewLookup(
+            { send_raw_iq },
+            "read https://unsupported.example/a",
+            "room@muc.example.com",
+          );
+        });
+      });
+
+      expect(result).toEqual({
+        status,
+        originalUrl: "https://unsupported.example/a",
+      });
+    }
+  });
+
   test("lookup failure is a metadata miss instead of a send blocker", async () => {
     const result = await requestPlaintextLinkPreviewLookup(
       { send_raw_iq: async () => { throw new Error("lookup failed"); } },

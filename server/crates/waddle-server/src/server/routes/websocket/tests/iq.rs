@@ -100,7 +100,7 @@ async fn link_preview_lookup_for_test(
 }
 
 #[tokio::test]
-async fn link_preview_lookup_dispatch_returns_scoped_text_metadata() {
+async fn link_preview_lookup_dispatch_returns_typed_unsupported_metadata_outcome() {
     let state = create_test_websocket_state().await;
     let session = create_test_session(state.as_ref(), "alice").await;
     let bound_jid: FullJid = "alice@example.com/desktop".parse().expect("jid");
@@ -125,16 +125,12 @@ async fn link_preview_lookup_dispatch_returns_scoped_text_metadata() {
         "stamps result addressing from request envelope: {response}"
     );
     assert!(
-        response.contains("status='ready'"),
-        "ready lookup: {response}"
+        response.contains("status='unsupported'") || response.contains("status='failed'"),
+        "normal resolver miss/failure is typed in the lookup result: {response}"
     );
     assert!(
-        response.contains("original-url='https://example.com/article'"),
-        "text preview includes original URL: {response}"
-    );
-    assert!(
-        response.contains("token='"),
-        "ready lookup mints scoped token: {response}"
+        !response.contains("type='error'") && !response.contains("token='"),
+        "normal resolver miss/failure is not an IQ transport error and does not mint token: {response}"
     );
 }
 
@@ -173,7 +169,7 @@ async fn link_preview_lookup_for_muc_scope_requires_current_occupant() {
 }
 
 #[tokio::test]
-async fn link_preview_lookup_for_muc_scope_allows_current_occupant_with_room_scoped_token() {
+async fn link_preview_lookup_for_muc_scope_allows_current_occupant_before_resolver_outcome() {
     let state = create_test_websocket_state().await;
     let session = create_test_session(state.as_ref(), "alice").await;
     let bound_jid: FullJid = "alice@example.com/desktop".parse().expect("jid");
@@ -211,21 +207,13 @@ async fn link_preview_lookup_for_muc_scope_allows_current_occupant_with_room_sco
     let lookup = elem
         .get_child("lookup", waddle_xmpp::xep::NS_WADDLE_LINK_PREVIEW)
         .expect("lookup result");
-    assert_eq!(lookup.attr("status"), Some("ready"));
-    let preview = lookup
+    assert!(
+        matches!(lookup.attr("status"), Some("unsupported" | "failed")),
+        "authorized room lookup should reach typed resolver outcome: {response}"
+    );
+    assert!(lookup
         .get_child("preview", waddle_xmpp::xep::NS_WADDLE_LINK_PREVIEW)
-        .expect("preview");
-    let token =
-        waddle_xmpp::xep::LinkPreviewToken::new(preview.attr("token").expect("token").to_string())
-            .expect("token");
-    let decoded = waddle_xmpp::xep::decode_link_preview_token(
-        &token,
-        state.deps.occupant_id_secret.key(),
-        i64::MIN,
-    )
-    .expect("token payload");
-    assert_eq!(decoded.sender_jid.to_string(), "alice@example.com");
-    assert_eq!(decoded.scope_jid, room_jid);
+        .is_none());
 }
 
 /// Build a `<command/>` payload Element addressed at a XEP-0050
