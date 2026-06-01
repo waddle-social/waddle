@@ -8,6 +8,8 @@ use url::{Host, Url};
 const DEFAULT_MAX_BYTES: usize = 256 * 1024;
 const DEFAULT_MAX_REDIRECTS: usize = 3;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(3);
+const LINK_PREVIEW_TITLE_MAX_BYTES: usize = 256;
+const LINK_PREVIEW_DESCRIPTION_MAX_BYTES: usize = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ResolvedLinkMetadata {
@@ -349,9 +351,9 @@ pub(super) fn extract_metadata_from_html(
     requested_url: &Url,
     html: &str,
 ) -> Option<ResolvedLinkMetadata> {
-    let title = meta_content(html, "og:title");
-    let description = meta_content(html, "og:description");
-    let normalized_url = meta_content(html, "og:url")
+    let title = meta_content(html, "og:title", LINK_PREVIEW_TITLE_MAX_BYTES);
+    let description = meta_content(html, "og:description", LINK_PREVIEW_DESCRIPTION_MAX_BYTES);
+    let normalized_url = meta_content(html, "og:url", usize::MAX)
         .and_then(|url| Url::parse(&url).ok())
         .unwrap_or_else(|| requested_url.clone());
     if title.is_none() && description.is_none() && normalized_url == *requested_url {
@@ -366,7 +368,7 @@ pub(super) fn extract_metadata_from_html(
     })
 }
 
-fn meta_content(html: &str, property: &str) -> Option<String> {
+fn meta_content(html: &str, property: &str, max_bytes: usize) -> Option<String> {
     let mut remaining = html;
     while let Some(start) = find_ascii_case_insensitive(remaining, "<meta") {
         remaining = &remaining[start + "<meta".len()..];
@@ -390,11 +392,22 @@ fn meta_content(html: &str, property: &str) -> Option<String> {
                 .trim()
                 .to_string();
             if !content.is_empty() {
-                return Some(content);
+                return Some(truncate_utf8_to_bytes(&content, max_bytes));
             }
         }
     }
     None
+}
+
+fn truncate_utf8_to_bytes(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_string()
 }
 
 fn parse_tag_attrs(tag: &str) -> Vec<(String, String)> {
@@ -503,6 +516,41 @@ mod tests {
         let requested_url = Url::parse("https://example.com/articles").expect("url");
 
         assert!(extract_metadata_from_html(&requested_url, "<html><head></head></html>").is_none());
+    }
+
+    #[test]
+    fn truncates_decoded_text_metadata_to_field_byte_limits() {
+        let requested_url = Url::parse("https://example.com/articles").expect("url");
+        let title = "t".repeat(LINK_PREVIEW_TITLE_MAX_BYTES + 64);
+        let description = "d".repeat(LINK_PREVIEW_DESCRIPTION_MAX_BYTES + 64);
+        let html = format!(
+            r#"<html><head>
+                <meta property="og:title" content="{title}">
+                <meta property="og:description" content="{description}">
+              </head></html>"#
+        );
+
+        let metadata = extract_metadata_from_html(&requested_url, &html).expect("metadata");
+
+        assert_eq!(
+            metadata.title.as_deref().map(str::len),
+            Some(LINK_PREVIEW_TITLE_MAX_BYTES)
+        );
+        assert_eq!(
+            metadata.description.as_deref().map(str::len),
+            Some(LINK_PREVIEW_DESCRIPTION_MAX_BYTES)
+        );
+    }
+
+    #[test]
+    fn text_metadata_truncation_preserves_utf8_boundaries() {
+        let requested_url = Url::parse("https://example.com/articles").expect("url");
+        let title = "é".repeat(LINK_PREVIEW_TITLE_MAX_BYTES);
+        let html = format!(r#"<meta property="og:title" content="{title}">"#);
+
+        let metadata = extract_metadata_from_html(&requested_url, &html).expect("metadata");
+
+        assert!(metadata.title.expect("title").len() <= LINK_PREVIEW_TITLE_MAX_BYTES);
     }
 
     #[test]

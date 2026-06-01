@@ -7,7 +7,9 @@ use super::*;
 use chrono::{Duration, SecondsFormat, Utc};
 use minidom::rxml::xml_ncname;
 use url::Url;
-use waddle_xmpp::xep::{encode_link_preview_token, LinkPreviewTokenData, NS_WADDLE_LINK_PREVIEW};
+use waddle_xmpp::xep::{
+    encode_link_preview_token_checked, LinkPreviewTokenData, NS_WADDLE_LINK_PREVIEW,
+};
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::minidom::Element;
 
@@ -135,7 +137,15 @@ async fn handle_link_preview_lookup_iq_with_policy(
         description: metadata.description,
         expires_at_unix: expires_at.timestamp(),
     };
-    let token = encode_link_preview_token(&data, deps.secret);
+    let Some(token) = encode_link_preview_token_checked(&data, deps.secret) else {
+        return vec![build_link_preview_lookup_result(
+            iq,
+            deps.response_from,
+            deps.response_to,
+            LinkPreviewResolverStatus::Failed,
+            None,
+        )];
+    };
 
     vec![build_link_preview_lookup_result(
         iq,
@@ -347,6 +357,64 @@ mod tests {
                 .as_deref(),
             Some("Example Article")
         );
+    }
+
+    #[tokio::test]
+    async fn oversized_encoded_token_returns_failed_without_preview() {
+        let server = MockServer::start().await;
+        let huge_path = format!("/{}", "a".repeat(8 * 1024));
+        Mock::given(method("GET"))
+            .and(path(huge_path.as_str()))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                r#"<html><head>
+                    <meta property="og:title" content="Example Article">
+                  </head></html>"#,
+                "text/html",
+            ))
+            .mount(&server)
+            .await;
+        let resolver_policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let lookup_url = format!("{}{}", server.uri(), huge_path);
+        let payload = Element::builder("lookup", NS_WADDLE_LINK_PREVIEW)
+            .append(
+                Element::builder("url", NS_WADDLE_LINK_PREVIEW)
+                    .append(lookup_url.as_str())
+                    .build(),
+            )
+            .append(
+                Element::builder("scope", NS_WADDLE_LINK_PREVIEW)
+                    .append("alice@example.com")
+                    .build(),
+            )
+            .build();
+        let iq = iq_get_with_payload(payload);
+
+        let state = create_test_websocket_state().await;
+        let response = handle_link_preview_lookup_iq_with_policy(
+            &iq,
+            Some(&sender()),
+            state.as_ref(),
+            LinkPreviewLookupDeps {
+                muc_domain: "muc.example.com",
+                response_from: None,
+                response_to: None,
+                secret: secret(),
+                resolver_policy: &resolver_policy,
+            },
+        )
+        .await;
+
+        let elem: Element = response[0].parse().expect("iq result");
+        let lookup = elem
+            .get_child("lookup", NS_WADDLE_LINK_PREVIEW)
+            .expect("lookup result");
+        assert_eq!(lookup.attr("status"), Some("failed"));
+        assert!(lookup
+            .get_child("preview", NS_WADDLE_LINK_PREVIEW)
+            .is_none());
     }
 
     #[tokio::test]
