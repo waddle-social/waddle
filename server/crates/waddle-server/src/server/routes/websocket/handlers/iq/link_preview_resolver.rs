@@ -266,11 +266,16 @@ fn classify_url_with_policy(
         return LinkPreviewResolverStatus::Blocked;
     }
     if let Some(Host::Domain(host)) = url.host() {
-        if host.trim_end_matches('.').ends_with(".local") {
+        if is_dot_local_domain(host) {
             return LinkPreviewResolverStatus::Blocked;
         }
     }
     LinkPreviewResolverStatus::Ready
+}
+
+fn is_dot_local_domain(host: &str) -> bool {
+    let host = host.trim_end_matches('.');
+    host.eq_ignore_ascii_case("local") || host.to_ascii_lowercase().ends_with(".local")
 }
 
 fn host_is_loopback(host: Host<&str>) -> bool {
@@ -532,12 +537,21 @@ mod tests {
 
     #[test]
     fn blocks_dot_local_domains_before_fetch() {
-        let url = Url::parse("https://printer.local/article").expect("url");
+        for raw in [
+            "https://printer.local/article",
+            "https://Printer.Local/article",
+            "https://printer.local./article",
+        ] {
+            let url = Url::parse(raw).expect("url");
 
-        assert_eq!(
-            classify_url_with_policy(&url, &LinkPreviewResolverPolicy::default()),
-            LinkPreviewResolverStatus::Blocked
-        );
+            assert_eq!(
+                classify_url_with_policy(&url, &LinkPreviewResolverPolicy::default()),
+                LinkPreviewResolverStatus::Blocked,
+                "{raw}"
+            );
+        }
+        assert!(is_dot_local_domain("Printer.Local"));
+        assert!(is_dot_local_domain("Printer.Local."));
     }
 
     #[tokio::test]
