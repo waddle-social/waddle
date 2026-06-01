@@ -39,7 +39,7 @@ export function linkPreviewStateFromLookup(
 ): ComposerLinkPreviewState {
   const payload = linkPreviewPayloadFromLookup(result);
   if (payload) return { kind: "ready", url, payload };
-  return result?.status === "not_found" || result?.status === "unsupported" || result?.status === "blocked"
+  return result?.status === "unsupported" || result?.status === "blocked"
     ? { kind: "unsupported", url }
     : { kind: "failed", url };
 }

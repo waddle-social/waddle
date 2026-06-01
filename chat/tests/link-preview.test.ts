@@ -151,7 +151,7 @@ describe("link preview lookup", () => {
     });
   });
 
-  test("returns unsupported lookup state for not_found responses", async () => {
+  test("rejects legacy not_found lookup responses", async () => {
     const send_raw_iq = async () =>
       `<iq type="result" id="lookup-1"><lookup xmlns="urn:waddle:link-preview:0" status="not_found"/></iq>`;
 
@@ -166,10 +166,7 @@ describe("link preview lookup", () => {
       });
     });
 
-    expect(result).toEqual({
-      status: "not_found",
-      originalUrl: "https://unsupported.example/a",
-    });
+    expect(result).toBeNull();
   });
 
   test("returns typed normal lookup states for resolver blocked, failed, and unsupported responses", async () => {

@@ -12,7 +12,7 @@ export interface LinkPreviewLookupReadyResult {
 
 export interface LinkPreviewLookupUnsupportedResult {
   originalUrl: string;
-  status: "not_found" | "unsupported" | "blocked" | "failed";
+  status: "unsupported" | "blocked" | "failed";
 }
 
 const HTTPS_URL_RE = /https:\/\/[^\s<>"']+/gi;
@@ -68,7 +68,7 @@ function parseLookupResponse(xml: string, requestedUrl: string): LinkPreviewLook
   const lookup = doc.getElementsByTagNameNS(NS_WADDLE_LINK_PREVIEW, "lookup")[0];
   if (!lookup) return null;
   const status = lookup.getAttribute("status");
-  if (status === "not_found" || status === "unsupported" || status === "blocked" || status === "failed") {
+  if (status === "unsupported" || status === "blocked" || status === "failed") {
     return { status, originalUrl: requestedUrl };
   }
   if (status !== "ready") return null;

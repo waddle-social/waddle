@@ -39,7 +39,7 @@ describe("composer link preview state", () => {
   });
 
   test("normal unsupported resolver states fail open with no send payload", () => {
-    for (const status of ["not_found", "unsupported", "blocked"] as const) {
+    for (const status of ["unsupported", "blocked"] as const) {
       const unsupported = linkPreviewStateFromLookup("https://example.com/a", {
         status,
         originalUrl: "https://example.com/a",
@@ -94,7 +94,7 @@ describe("composer link preview state", () => {
   });
 
   test("unsupported and failed composer lookup states emit no send payload", async () => {
-    for (const status of ["not_found", "unsupported", "blocked"] as const) {
+    for (const status of ["unsupported", "blocked"] as const) {
       const unsupported = setupComposerPreviewHarness(async () => ({
         status,
         originalUrl: "https://example.com/a",

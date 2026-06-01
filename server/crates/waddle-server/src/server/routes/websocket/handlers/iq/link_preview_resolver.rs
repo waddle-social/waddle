@@ -7,7 +7,7 @@ use url::{Host, Url};
 
 const DEFAULT_MAX_BYTES: usize = 256 * 1024;
 const DEFAULT_MAX_REDIRECTS: usize = 3;
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(3);
+const DEFAULT_TIMEOUT: Duration = Duration::from_millis(1_500);
 const LINK_PREVIEW_TITLE_MAX_BYTES: usize = 256;
 const LINK_PREVIEW_DESCRIPTION_MAX_BYTES: usize = 1024;
 
@@ -123,6 +123,8 @@ async fn fetch_html_once(
     timeout: Duration,
 ) -> Result<FetchOnceResult, LinkPreviewResolverStatus> {
     let target = prepare_target(url, policy).await?;
+    // The client is per-hop because each redirect target needs a fresh DNS pin;
+    // max_redirects keeps the extra TLS/client setup cost bounded.
     let mut builder = Client::builder()
         .timeout(timeout)
         .connect_timeout(timeout)
@@ -407,12 +409,12 @@ fn extract_metadata_from_html_with_normalized_fallback(
 
 fn meta_content(html: &str, property: &str, max_bytes: usize) -> Option<String> {
     let mut remaining = html;
-    while let Some(start) = find_ascii_case_insensitive(remaining, "<meta") {
+    while let Some(start) = find_meta_tag_start(remaining) {
         remaining = &remaining[start + "<meta".len()..];
         let Some(end) = find_meta_tag_end(remaining) else {
             break;
         };
-        if let Some(next_start) = find_ascii_case_insensitive(remaining, "<meta") {
+        if let Some(next_start) = find_meta_tag_start(remaining) {
             if next_start < end {
                 remaining = &remaining[next_start..];
                 continue;
@@ -451,6 +453,20 @@ fn same_domain_host(left: &Url, right: &Url) -> bool {
             .eq_ignore_ascii_case(right.trim_end_matches('.')),
         _ => false,
     }
+}
+
+fn find_meta_tag_start(html: &str) -> Option<usize> {
+    let mut offset = 0;
+    while let Some(start) = find_ascii_case_insensitive(&html[offset..], "<meta") {
+        let absolute_start = offset + start;
+        let after_name = absolute_start + "<meta".len();
+        match html.as_bytes().get(after_name) {
+            None | Some(b'>') | Some(b'/') => return Some(absolute_start),
+            Some(byte) if byte.is_ascii_whitespace() => return Some(absolute_start),
+            _ => offset = after_name,
+        }
+    }
+    None
 }
 
 fn find_meta_tag_end(tag_tail: &str) -> Option<usize> {
@@ -611,6 +627,17 @@ mod tests {
         let metadata = extract_metadata_from_html(&requested_url, html).expect("metadata");
 
         assert_eq!(metadata.title.as_deref(), Some("A>B"));
+    }
+
+    #[test]
+    fn scanner_ignores_non_meta_tag_names_with_meta_prefix() {
+        let requested_url = Url::parse("https://example.com/articles").expect("url");
+        let html = r#"<metadata property="og:title" content="Wrong">
+            <meta property="og:title" content="Right">"#;
+
+        let metadata = extract_metadata_from_html(&requested_url, html).expect("metadata");
+
+        assert_eq!(metadata.title.as_deref(), Some("Right"));
     }
 
     #[test]
