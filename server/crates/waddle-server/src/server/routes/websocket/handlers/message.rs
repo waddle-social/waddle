@@ -1,11 +1,19 @@
+use std::borrow::Cow;
+
 use tracing::warn;
 use waddle_xmpp::{
     parser::stanza_to_string,
     protocol::handlers::errors::bad_request_reply,
     protocol::{frame::InboundFrame, InboundEvent, XmppStateMachine},
-    xep::NS_DELAY,
+    xep::{
+        build_link_metadata_element, decode_link_preview_token,
+        extract_link_preview_request_from_message, parse_fallbacks_from_message,
+        strip_fallback_ranges, strip_link_metadata, strip_link_preview_requests, FallbackRegion,
+        LinkMetadata, NS_DELAY, NS_REPLY,
+    },
     Stanza,
 };
+use waddle_xmpp_core::first_eligible_https_url_text;
 
 use super::super::{
     interpret_loop::build_interpret_deps, replay::drive_interpret_loop, WebSocketState,
@@ -61,6 +69,12 @@ pub async fn handle_message(
     };
 
     strip_client_authored_delay(&mut incoming);
+    consume_link_preview_request(
+        &mut incoming,
+        &bound_jid,
+        state.deps.occupant_id_secret.key(),
+        chrono::Utc::now().timestamp(),
+    );
 
     if incoming.type_ != xmpp_parsers::message::MessageType::Groupchat
         && incoming.type_ != xmpp_parsers::message::MessageType::Error
@@ -96,6 +110,71 @@ fn strip_client_authored_delay(message: &mut xmpp_parsers::message::Message) {
         .retain(|payload| !(payload.name() == "delay" && payload.ns() == NS_DELAY));
 }
 
+fn consume_link_preview_request(
+    message: &mut xmpp_parsers::message::Message,
+    sender_jid: &jid::FullJid,
+    secret: &[u8],
+    now_unix: i64,
+) {
+    let expected_sender = sender_jid.to_bare();
+    let expected_scope = message.to.as_ref().map(|to| to.to_bare());
+    let metadata = extract_link_preview_request_from_message(message)
+        .and_then(|token| decode_link_preview_token(&token, secret, now_unix).ok())
+        .filter(|preview| {
+            Some(&preview.scope_jid) == expected_scope.as_ref()
+                && preview.sender_jid == expected_sender
+                && preview.original_url.scheme() == "https"
+                && preview.normalized_url.scheme() == "https"
+                && first_eligible_https_url(message).as_ref() == Some(&preview.original_url)
+        })
+        .map(|preview| {
+            let mut metadata =
+                LinkMetadata::new(preview.original_url).with_canonical_url(preview.normalized_url);
+            if let Some(title) = preview.title {
+                metadata = metadata.with_title(title);
+            }
+            if let Some(description) = preview.description {
+                metadata = metadata.with_description(description);
+            }
+            metadata
+        });
+    strip_link_preview_requests(message);
+    strip_link_metadata(message);
+    if let Some(metadata) = metadata {
+        message
+            .payloads
+            .push(build_link_metadata_element(&metadata));
+    }
+}
+
+fn first_eligible_https_url(message: &xmpp_parsers::message::Message) -> Option<url::Url> {
+    let body = message.bodies.get("")?;
+    let body = body_without_reply_fallback(message, body);
+    first_eligible_https_url_text(&body).and_then(|candidate| url::Url::parse(candidate).ok())
+}
+
+fn body_without_reply_fallback<'a>(
+    message: &xmpp_parsers::message::Message,
+    body: &'a str,
+) -> Cow<'a, str> {
+    let mut ranges = Vec::new();
+    for fallback in parse_fallbacks_from_message(message) {
+        if fallback.for_ns.as_deref() != Some(NS_REPLY) {
+            continue;
+        }
+        match fallback.body {
+            Some(FallbackRegion::Whole) => return Cow::Borrowed(""),
+            Some(FallbackRegion::Ranges(body_ranges)) => ranges.extend(body_ranges),
+            None => {}
+        }
+    }
+    if ranges.is_empty() {
+        Cow::Borrowed(body)
+    } else {
+        Cow::Owned(strip_fallback_ranges(body, &ranges))
+    }
+}
+
 fn remove_framework_envelopes(message: &mut xmpp_parsers::message::Message) {
     message
         .payloads
@@ -105,6 +184,11 @@ fn remove_framework_envelopes(message: &mut xmpp_parsers::message::Message) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    const SECRET: &[u8] = b"test-link-preview-secret";
+
+    fn sender() -> jid::FullJid {
+        "alice@example.com/desktop".parse().expect("jid")
+    }
     use xmpp_parsers::message::Message;
     use xmpp_parsers::minidom::Element;
 
@@ -128,5 +212,275 @@ mod tests {
             .payloads
             .iter()
             .any(|payload| payload.ns().starts_with("urn:waddle:")));
+    }
+
+    #[test]
+    fn consumes_link_preview_request_and_stamps_xep0511_metadata() {
+        let preview = waddle_xmpp::xep::LinkPreviewTokenData {
+            sender_jid: "alice@example.com".parse().expect("jid"),
+            scope_jid: "room@muc.example.com".parse().expect("jid"),
+            original_url: url::Url::parse("https://the.link.example.com/what-was-linked-to")
+                .expect("url"),
+            normalized_url: url::Url::parse(
+                "https://example.com/canonical-url/for/what-was-linked-to",
+            )
+            .expect("url"),
+            title: Some("The Best Webpage".to_string()),
+            description: Some("This is a great webpage and you will really like it".to_string()),
+            expires_at_unix: 1_900_000_000,
+        };
+        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
+        let mut message = Message::new(None::<jid::Jid>);
+        message.to = Some("room@muc.example.com".parse().expect("jid"));
+        message.bodies.insert(
+            xmpp_parsers::message::Lang::new(),
+            "read https://the.link.example.com/what-was-linked-to".to_string(),
+        );
+        message
+            .payloads
+            .push(waddle_xmpp::xep::build_link_preview_request_element(&token));
+
+        consume_link_preview_request(&mut message, &sender(), SECRET, 1_800_000_000);
+
+        assert!(message
+            .payloads
+            .iter()
+            .all(|payload| payload.ns() != waddle_xmpp::xep::NS_WADDLE_LINK_PREVIEW));
+        let parsed = waddle_xmpp::xep::extract_link_metadata_from_message(&message);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].about, preview.original_url);
+        assert_eq!(parsed[0].canonical_url, Some(preview.normalized_url));
+        assert_eq!(parsed[0].title.as_deref(), Some("The Best Webpage"));
+    }
+
+    #[test]
+    fn expired_link_preview_request_is_stripped_without_metadata() {
+        let preview = waddle_xmpp::xep::LinkPreviewTokenData {
+            sender_jid: "alice@example.com".parse().expect("jid"),
+            scope_jid: "room@muc.example.com".parse().expect("jid"),
+            original_url: url::Url::parse("https://example.com/").expect("url"),
+            normalized_url: url::Url::parse("https://example.com/").expect("url"),
+            title: Some("Example".to_string()),
+            description: None,
+            expires_at_unix: 10,
+        };
+        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
+        let mut message = Message::new(None::<jid::Jid>);
+        message.to = Some("room@muc.example.com".parse().expect("jid"));
+        message.bodies.insert(
+            xmpp_parsers::message::Lang::new(),
+            "read https://example.com/".to_string(),
+        );
+        message
+            .payloads
+            .push(waddle_xmpp::xep::build_link_preview_request_element(&token));
+
+        consume_link_preview_request(&mut message, &sender(), SECRET, 11);
+
+        assert!(message.payloads.is_empty());
+    }
+
+    #[test]
+    fn wrong_scope_link_preview_request_is_stripped_without_metadata() {
+        let preview = waddle_xmpp::xep::LinkPreviewTokenData {
+            sender_jid: "alice@example.com".parse().expect("jid"),
+            scope_jid: "other@muc.example.com".parse().expect("jid"),
+            original_url: url::Url::parse("https://example.com/").expect("url"),
+            normalized_url: url::Url::parse("https://example.com/").expect("url"),
+            title: Some("Example".to_string()),
+            description: None,
+            expires_at_unix: 1_900_000_000,
+        };
+        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
+        let mut message = Message::new(None::<jid::Jid>);
+        message.to = Some("room@muc.example.com".parse().expect("jid"));
+        message.bodies.insert(
+            xmpp_parsers::message::Lang::new(),
+            "read https://example.com/".to_string(),
+        );
+        message
+            .payloads
+            .push(waddle_xmpp::xep::build_link_preview_request_element(&token));
+
+        consume_link_preview_request(&mut message, &sender(), SECRET, 1_800_000_000);
+
+        assert!(message.payloads.is_empty());
+    }
+
+    #[test]
+    fn request_for_non_first_body_url_is_stripped_without_metadata() {
+        let preview = waddle_xmpp::xep::LinkPreviewTokenData {
+            sender_jid: "alice@example.com".parse().expect("jid"),
+            scope_jid: "room@muc.example.com".parse().expect("jid"),
+            original_url: url::Url::parse("https://second.example.com/").expect("url"),
+            normalized_url: url::Url::parse("https://second.example.com/").expect("url"),
+            title: Some("Second".to_string()),
+            description: None,
+            expires_at_unix: 1_900_000_000,
+        };
+        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
+        let mut message = Message::new(None::<jid::Jid>);
+        message.to = Some("room@muc.example.com".parse().expect("jid"));
+        message.bodies.insert(
+            xmpp_parsers::message::Lang::new(),
+            "first https://first.example.com/ then https://second.example.com/".to_string(),
+        );
+        message
+            .payloads
+            .push(waddle_xmpp::xep::build_link_preview_request_element(&token));
+
+        consume_link_preview_request(&mut message, &sender(), SECRET, 1_800_000_000);
+
+        assert!(message.payloads.is_empty());
+    }
+
+    #[test]
+    fn wrapped_first_body_url_is_eligible_for_preview_stamp() {
+        let preview = waddle_xmpp::xep::LinkPreviewTokenData {
+            sender_jid: "alice@example.com".parse().expect("jid"),
+            scope_jid: "room@muc.example.com".parse().expect("jid"),
+            original_url: url::Url::parse("https://example.com/a").expect("url"),
+            normalized_url: url::Url::parse("https://example.com/a").expect("url"),
+            title: Some("Example".to_string()),
+            description: None,
+            expires_at_unix: 1_900_000_000,
+        };
+        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
+        let mut message = Message::new(None::<jid::Jid>);
+        message.to = Some("room@muc.example.com".parse().expect("jid"));
+        message.bodies.insert(
+            xmpp_parsers::message::Lang::new(),
+            "read (https://example.com/a).".to_string(),
+        );
+        message
+            .payloads
+            .push(waddle_xmpp::xep::build_link_preview_request_element(&token));
+
+        consume_link_preview_request(&mut message, &sender(), SECRET, 1_800_000_000);
+
+        assert_eq!(
+            waddle_xmpp::xep::extract_link_metadata_from_message(&message).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn inline_punctuation_prefixed_body_url_is_eligible_for_preview_stamp() {
+        let preview = waddle_xmpp::xep::LinkPreviewTokenData {
+            sender_jid: "alice@example.com".parse().expect("jid"),
+            scope_jid: "room@muc.example.com".parse().expect("jid"),
+            original_url: url::Url::parse("https://example.com/a").expect("url"),
+            normalized_url: url::Url::parse("https://example.com/a").expect("url"),
+            title: Some("Example".to_string()),
+            description: None,
+            expires_at_unix: 1_900_000_000,
+        };
+        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
+        let mut message = Message::new(None::<jid::Jid>);
+        message.to = Some("room@muc.example.com".parse().expect("jid"));
+        message.bodies.insert(
+            xmpp_parsers::message::Lang::new(),
+            "read:https://example.com/a".to_string(),
+        );
+        message
+            .payloads
+            .push(waddle_xmpp::xep::build_link_preview_request_element(&token));
+
+        consume_link_preview_request(&mut message, &sender(), SECRET, 1_800_000_000);
+
+        assert_eq!(
+            waddle_xmpp::xep::extract_link_metadata_from_message(&message).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn quoted_host_only_body_url_is_eligible_for_preview_stamp() {
+        let preview = waddle_xmpp::xep::LinkPreviewTokenData {
+            sender_jid: "alice@example.com".parse().expect("jid"),
+            scope_jid: "room@muc.example.com".parse().expect("jid"),
+            original_url: url::Url::parse("https://example.com/").expect("url"),
+            normalized_url: url::Url::parse("https://example.com/").expect("url"),
+            title: Some("Example".to_string()),
+            description: None,
+            expires_at_unix: 1_900_000_000,
+        };
+        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
+        let mut message = Message::new(None::<jid::Jid>);
+        message.to = Some("room@muc.example.com".parse().expect("jid"));
+        message.bodies.insert(
+            xmpp_parsers::message::Lang::new(),
+            "read \"https://example.com\"".to_string(),
+        );
+        message
+            .payloads
+            .push(waddle_xmpp::xep::build_link_preview_request_element(&token));
+
+        consume_link_preview_request(&mut message, &sender(), SECRET, 1_800_000_000);
+
+        assert_eq!(
+            waddle_xmpp::xep::extract_link_metadata_from_message(&message).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn reply_fallback_url_is_ignored_when_validating_preview_stamp() {
+        let preview = waddle_xmpp::xep::LinkPreviewTokenData {
+            sender_jid: "alice@example.com".parse().expect("jid"),
+            scope_jid: "room@muc.example.com".parse().expect("jid"),
+            original_url: url::Url::parse("https://current.example.com/").expect("url"),
+            normalized_url: url::Url::parse("https://current.example.com/").expect("url"),
+            title: Some("Current".to_string()),
+            description: None,
+            expires_at_unix: 1_900_000_000,
+        };
+        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
+        let fallback_prefix = "> earlier https://quoted.example.com/\n";
+        let mut message = Message::new(None::<jid::Jid>);
+        message.to = Some("room@muc.example.com".parse().expect("jid"));
+        message.bodies.insert(
+            xmpp_parsers::message::Lang::new(),
+            format!("{fallback_prefix}see https://current.example.com/"),
+        );
+        message
+            .payloads
+            .push(waddle_xmpp::xep::build_fallback_element(
+                &waddle_xmpp::xep::FallbackIndication::for_range(
+                    waddle_xmpp::xep::NS_REPLY,
+                    0,
+                    fallback_prefix.encode_utf16().count(),
+                ),
+            ));
+        message
+            .payloads
+            .push(waddle_xmpp::xep::build_link_preview_request_element(&token));
+
+        consume_link_preview_request(&mut message, &sender(), SECRET, 1_800_000_000);
+
+        let parsed = waddle_xmpp::xep::extract_link_metadata_from_message(&message);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].about, preview.original_url);
+    }
+
+    #[test]
+    fn client_authored_xep0511_metadata_is_stripped_before_stamp() {
+        let mut message = Message::new(None::<jid::Jid>);
+        message.to = Some("room@muc.example.com".parse().expect("jid"));
+        message.bodies.insert(
+            xmpp_parsers::message::Lang::new(),
+            "read https://example.com/".to_string(),
+        );
+        let forged = waddle_xmpp::xep::LinkMetadata::new(
+            url::Url::parse("https://evil.example/").expect("url"),
+        )
+        .with_title("Forged");
+        message
+            .payloads
+            .push(waddle_xmpp::xep::build_link_metadata_element(&forged));
+
+        consume_link_preview_request(&mut message, &sender(), SECRET, 1_800_000_000);
+
+        assert!(message.payloads.is_empty());
     }
 }

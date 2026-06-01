@@ -206,6 +206,7 @@ pub(crate) fn inbound_to_js(message: InboundMessage) -> WaddleMessage {
             .into_iter()
             .map(shared_file_to_js)
             .collect(),
+        link_previews: link_previews_to_js(message.link_previews),
         pin_event: message.pin_event.map(pin_event_to_js),
         extension_envelope: message.extension_envelope.map(extension_envelope_to_js),
         extension_body_fallback: message.extension_body_fallback,
@@ -362,6 +363,10 @@ pub(crate) fn archived_to_js(archived: ArchivedMessage) -> Option<WaddleArchived
                     .collect()
             })
             .unwrap_or_default(),
+        link_previews: parsed
+            .as_ref()
+            .map(|message| link_previews_to_js(message.link_previews.clone()))
+            .unwrap_or_default(),
         extension_envelope: parsed
             .as_ref()
             .and_then(|message| message.extension_envelope.clone())
@@ -425,6 +430,18 @@ pub(crate) fn shared_file_to_js(file: messaging::SharedFile) -> WaddleSharedFile
         disposition: file.disposition.as_str().to_string(),
         encrypted: file.encrypted.map(encrypted_file_to_js),
     }
+}
+
+fn link_previews_to_js(previews: Vec<messaging::LinkPreviewData>) -> Vec<WaddleLinkPreview> {
+    previews
+        .into_iter()
+        .map(|preview| WaddleLinkPreview {
+            original_url: preview.original_url.to_string(),
+            normalized_url: preview.normalized_url.map(|url| url.to_string()),
+            title: preview.title,
+            description: preview.description,
+        })
+        .collect()
 }
 
 pub(crate) fn call_event_to_js(event: InboundCallEvent) -> WaddleCallEvent {
@@ -788,6 +805,75 @@ mod inbound_to_js_tests {
         assert_eq!(reference.begin, 4);
         assert_eq!(reference.end, 23);
         assert!(reference.anchor.is_none());
+    }
+
+    #[test]
+    fn archived_to_js_propagates_xep0511_link_previews_for_reload_rendering() {
+        let archived = parse_mam_archived(
+            "<message xmlns='jabber:client'>\
+               <result xmlns='urn:xmpp:mam:2' id='mam-link' queryid='q1'>\
+                 <forwarded xmlns='urn:xmpp:forward:0'>\
+                   <delay xmlns='urn:xmpp:delay' stamp='2026-05-06T12:00:00Z'/>\
+                   <message xmlns='jabber:client' type='groupchat' id='m-link' \
+                            from='room@conf.example/alice'>\
+                     <body>see https://the.link.example/what-was-linked</body>\
+                     <rdf:Description xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#' xmlns:og='https://ogp.me/ns#' rdf:about='https://the.link.example/what-was-linked'>\
+                       <og:title>The Best Webpage</og:title>\
+                       <og:description>Plain text preview</og:description>\
+                       <og:url>https://the.link.example/what-was-linked</og:url>\
+                     </rdf:Description>\
+                   </message>\
+                 </forwarded>\
+               </result>\
+             </message>",
+        );
+
+        let js = archived_to_js(archived).expect("valid archived message should convert");
+
+        assert_eq!(js.link_previews.len(), 1);
+        let preview = &js.link_previews[0];
+        assert_eq!(
+            preview.original_url,
+            "https://the.link.example/what-was-linked"
+        );
+        assert_eq!(
+            preview.normalized_url.as_deref(),
+            Some("https://the.link.example/what-was-linked")
+        );
+        assert_eq!(preview.title.as_deref(), Some("The Best Webpage"));
+        assert_eq!(preview.description.as_deref(), Some("Plain text preview"));
+    }
+
+    #[test]
+    fn archived_to_js_keeps_bodyless_xep0511_link_preview_rows() {
+        let archived = parse_mam_archived(
+            "<message xmlns='jabber:client'>\
+               <result xmlns='urn:xmpp:mam:2' id='mam-link-bodyless' queryid='q1'>\
+                 <forwarded xmlns='urn:xmpp:forward:0'>\
+                   <delay xmlns='urn:xmpp:delay' stamp='2026-05-06T12:00:00Z'/>\
+                   <message xmlns='jabber:client' type='groupchat' id='m-link' \
+                            from='room@conf.example/alice'>\
+                     <rdf:Description xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#' xmlns:og='https://ogp.me/ns#' rdf:about='https://example.com/article'>\
+                       <og:title>Example Article</og:title>\
+                     </rdf:Description>\
+                   </message>\
+                 </forwarded>\
+               </result>\
+             </message>",
+        );
+
+        let js = archived_to_js(archived).expect("bodyless archived preview should convert");
+
+        assert_eq!(js.body, None);
+        assert_eq!(js.link_previews.len(), 1);
+        assert_eq!(
+            js.link_previews[0].original_url,
+            "https://example.com/article"
+        );
+        assert_eq!(
+            js.link_previews[0].title.as_deref(),
+            Some("Example Article")
+        );
     }
 
     #[test]

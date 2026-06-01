@@ -3710,6 +3710,138 @@ async fn groupchat_messages_are_archived_and_returned_via_mam() {
 }
 
 #[tokio::test]
+async fn groupchat_preview_request_is_stamped_and_archived_without_private_payload() {
+    let state = create_test_websocket_state().await;
+    let session = create_test_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "preview-pipeline@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let sender_jid: FullJid = format!("{}@example.com/web", session.xmpp_localpart)
+        .parse()
+        .expect("sender jid");
+    let (sender_tx, mut sender_rx) = mpsc::channel(8);
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .register(sender_jid.clone(), sender_tx);
+    let room_actor = get_or_create_room_actor(
+        state.as_ref(),
+        &room_jid,
+        RoomConfig::default(),
+        "waddle-alpha".to_string(),
+        "preview-pipeline".to_string(),
+    )
+    .await
+    .expect("create room");
+    room_actor
+        .ask(JoinWithAffiliation {
+            sender_jid: sender_jid.clone(),
+            nick: "alice".to_string(),
+            effective_affiliation: Affiliation::Member,
+            local_domain: "example.com".to_string(),
+        })
+        .await
+        .expect("join room");
+
+    let preview = waddle_xmpp::xep::LinkPreviewTokenData {
+        sender_jid: "alice@example.com".parse().expect("sender bare jid"),
+        scope_jid: room_jid.clone(),
+        original_url: url::Url::parse("https://the.link.example/what-was-linked").expect("url"),
+        normalized_url: url::Url::parse("https://the.link.example/what-was-linked").expect("url"),
+        title: Some("The Best Webpage".to_string()),
+        description: Some("Plain text preview".to_string()),
+        expires_at_unix: chrono::Utc::now().timestamp() + 300,
+    };
+    let token =
+        waddle_xmpp::xep::encode_link_preview_token(&preview, state.deps.occupant_id_secret.key());
+    let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(room_jid.clone())));
+    message.id = Some(xmpp_parsers::message::Id(
+        "preview-pipeline-msg".to_string(),
+    ));
+    message.type_ = XmppMessageType::Groupchat;
+    message.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        "read https://the.link.example/what-was-linked".to_string(),
+    );
+    message
+        .payloads
+        .push(waddle_xmpp::xep::build_link_preview_request_element(&token));
+
+    let responses =
+        handle_message_for_test(state.as_ref(), &sender_jid, Some(&session), message).await;
+    assert!(
+        responses.is_empty(),
+        "valid preview request should not produce direct errors: {responses:?}"
+    );
+    let echo_stanza = sender_rx
+        .try_recv()
+        .expect("sender echo queued on outbound channel");
+    let echo_xml = stanza_to_xml(&echo_stanza.stanza);
+    assert!(
+        echo_xml.contains(waddle_xmpp::xep::NS_RDF_SYNTAX) && echo_xml.contains("The Best Webpage"),
+        "echo should include stamped XEP-0511 metadata: {echo_xml}"
+    );
+    assert!(
+        !echo_xml.contains(waddle_xmpp::xep::NS_WADDLE_LINK_PREVIEW),
+        "private preview request must be stripped from echo: {echo_xml}"
+    );
+
+    let form = Element::builder("x", "jabber:x:data")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
+        .append(
+            Element::builder("field", "jabber:x:data")
+                .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "hidden")
+                .append(
+                    Element::builder("value", "jabber:x:data")
+                        .append("urn:xmpp:mam:2")
+                        .build(),
+                )
+                .build(),
+        )
+        .build();
+    let rsm = Element::builder("set", "http://jabber.org/protocol/rsm")
+        .append(
+            Element::builder("max", "http://jabber.org/protocol/rsm")
+                .append("50")
+                .build(),
+        )
+        .build();
+    let query = Element::builder("query", "urn:xmpp:mam:2")
+        .attr(
+            minidom::rxml::xml_ncname!("queryid").to_owned(),
+            "q-preview",
+        )
+        .append(form)
+        .append(rsm)
+        .build();
+    let mam_query = iq_set_frame("mam-preview", room_jid.as_str(), query);
+    let mam_responses = handle_iq(
+        mam_query.as_str(),
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(session),
+        &ready_phase(&sender_jid),
+    )
+    .await;
+
+    let archived_preview = mam_responses
+        .iter()
+        .find(|stanza| stanza.contains("The Best Webpage"))
+        .unwrap_or_else(|| panic!("expected archived preview in MAM result: {mam_responses:?}"));
+    assert!(
+        archived_preview.contains(waddle_xmpp::xep::NS_RDF_SYNTAX),
+        "MAM result should include stamped XEP-0511 metadata: {archived_preview}"
+    );
+    assert!(
+        !archived_preview.contains(waddle_xmpp::xep::NS_WADDLE_LINK_PREVIEW),
+        "private preview request must not be archived: {archived_preview}"
+    );
+}
+
+#[tokio::test]
 async fn personal_mam_query_uses_ready_phase_when_sidecar_session_is_missing() {
     let state = create_test_websocket_state().await;
     let alice_session = create_test_session(state.as_ref(), "alice").await;

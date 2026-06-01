@@ -73,6 +73,34 @@ describe("useChatSend.sendMessage — happy path", () => {
     expect(h.send.isSending.value).toBe(false);
     expect(h.onSendComplete).toHaveBeenCalledTimes(1);
   });
+
+  test("looks up first eligible HTTPS URL and sends scoped preview token", async () => {
+    const sendDirectMessage = mock(async () => ({ id: "dm-link", state: "sending" }));
+    const lookupLinkPreview = mock(async () => ({
+      token: "preview-token-1",
+      originalUrl: "https://example.com/article",
+      normalizedUrl: "https://example.com/article",
+      status: "ready" as const,
+      expiresAt: "2026-06-01T12:05:00.000Z",
+      title: "Example Article",
+      description: "Plain text summary",
+    }));
+    const client = makeClient({ sendDirectMessage, lookupLinkPreview } as Partial<BrowserXmppClient>);
+    const h = harness({ client, draft: "read https://example.com/article" });
+
+    await h.send.sendMessage(undefined, []);
+
+    expect(lookupLinkPreview).toHaveBeenCalledWith("read https://example.com/article", "bob@example.com");
+    const call = (sendDirectMessage as unknown as ReturnType<typeof mock>).mock.calls[0]!;
+    expect(call[2].linkPreviewToken).toBe("preview-token-1");
+    expect(call[2].linkPreviewExpiresAt).toBe("2026-06-01T12:05:00.000Z");
+    expect(h.messages.value[0]?.linkPreviews).toEqual([{
+      originalUrl: "https://example.com/article",
+      normalizedUrl: "https://example.com/article",
+      title: "Example Article",
+      description: "Plain text summary",
+    }]);
+  });
 });
 
 describe("useChatSend.sendMessage — guards", () => {

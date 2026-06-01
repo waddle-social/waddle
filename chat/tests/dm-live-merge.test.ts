@@ -272,4 +272,32 @@ describe("mergeLiveMessage self-echo reconciliation", () => {
     expect(h.messages.value[0]?.body).toBe("canonical body");
     expect(h.messages.value[0]?.extensionAnnotations?.[0]?.annotationId).toBe("a1");
   });
+
+  test("clears optimistic link preview when authoritative self-echo has none", () => {
+    const h = harness();
+    h.messages.value = [
+      {
+        id: "client-id",
+        wireIds: ["server-id"],
+        body: "read https://example.com",
+        nick: "alice",
+        isSelf: true,
+        deliveryStatus: "sending",
+        linkPreviews: [{ originalUrl: "https://example.com", title: "Example" }],
+        createdAt: "2026-05-14T10:36:55.000Z",
+      } as TimelineMessage,
+    ];
+
+    h.liveMerge.mergeLiveMessage({
+      id: "server-id",
+      body: "read https://example.com",
+      nick: "alice",
+      isSelf: true,
+      createdAt: "2026-05-14T10:36:56.000Z",
+    } as TimelineMessage);
+
+    expect(h.messages.value).toHaveLength(1);
+    expect(h.messages.value[0]?.deliveryStatus).toBe("delivered");
+    expect(h.messages.value[0]?.linkPreviews).toBeUndefined();
+  });
 });

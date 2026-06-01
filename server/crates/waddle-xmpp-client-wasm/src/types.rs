@@ -54,11 +54,20 @@ pub struct WaddleMessage {
     pub forum_thread_title: Option<String>,
     pub is_sticker: bool,
     pub shared_files: Vec<WaddleSharedFile>,
+    pub link_previews: Vec<WaddleLinkPreview>,
     /// urn:waddle:pin:0 pin/unpin event surfaced from a system message
     /// (#414). `None` when the message carries no `<pin-event/>`.
     pub pin_event: Option<WaddlePinEvent>,
     pub extension_envelope: Option<WaddleExtensionEnvelope>,
     pub extension_body_fallback: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WaddleLinkPreview {
+    pub original_url: String,
+    pub normalized_url: Option<String>,
+    pub title: Option<String>,
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -205,6 +214,7 @@ pub struct WaddleArchivedMessage {
     pub is_sticker: bool,
     pub author_real_jid: Option<String>,
     pub shared_files: Vec<WaddleSharedFile>,
+    pub link_previews: Vec<WaddleLinkPreview>,
     pub extension_envelope: Option<WaddleExtensionEnvelope>,
     pub extension_body_fallback: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -741,6 +751,7 @@ pub struct WaddleSendOptions {
     pub reply: Option<WaddleReplyTarget>,
     pub fallback: Option<WaddleFallbackRange>,
     pub thread: Option<WaddleThreadTarget>,
+    pub link_preview_token: Option<String>,
     pub shared_files: Vec<WaddleSharedFile>,
     pub markup_spans: Vec<WaddleMarkupSpanInput>,
     pub references: Vec<WaddleReference>,

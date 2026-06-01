@@ -2,12 +2,15 @@ mod files;
 mod markup;
 pub(super) mod payloads;
 
+use std::borrow::Cow;
+
 use chrono::{DateTime, Utc};
 use minidom::Element;
 
 use crate::xep::encrypted_file::{self as xep_encrypted_file, NS_ESFS as NS_ENCRYPTED_FILE};
+use crate::xep::fallback::{body_fallbacks_for, strip_fallback_ranges, BodyFallback};
 use crate::xep::{reply as xep_reply, thread as xep_thread};
-use waddle_xmpp_core::xep0359::StanzaId as StableStanzaId;
+use waddle_xmpp_core::{first_eligible_https_url_text, xep0359::StanzaId as StableStanzaId};
 
 use self::files::{parse_file_sharing_element, parse_shared_file};
 use self::markup::parse_markup_spans;
@@ -19,6 +22,7 @@ pub use self::payloads::{
 use super::namespaces::*;
 use super::presence::parse_presence;
 use super::types::*;
+use url::Url;
 
 /// Parse an XMPP element into a [`MessagingEvent`], or return `None` if the
 /// element is not a `<message>` or `<presence>`.
@@ -215,6 +219,10 @@ fn parse_message(el: &Element) -> Option<InboundMessage> {
             shared_files.push(file);
         }
     }
+    let link_preview_body = body
+        .as_deref()
+        .map(|body| body_without_reply_fallback(el, body));
+    let link_previews = parse_link_previews(el, link_preview_body.as_deref());
 
     // XEP-0447 / XEP-0363: also check <sims> children for file sharing
     for sims_el in el.children().filter(|c| c.ns() == NS_SIMS) {
@@ -331,6 +339,7 @@ fn parse_message(el: &Element) -> Option<InboundMessage> {
         chat_state,
         displayed_marker_id,
         shared_files,
+        link_previews,
         broadcast_mention,
         mention_uris,
         references,
@@ -344,6 +353,64 @@ fn parse_message(el: &Element) -> Option<InboundMessage> {
         extension_body_fallback,
         mds_displayed,
     })
+}
+
+fn parse_link_previews(el: &Element, body: Option<&str>) -> Vec<LinkPreviewData> {
+    let first_url = body.and_then(first_eligible_https_url);
+    if body.is_some() && first_url.is_none() {
+        return Vec::new();
+    }
+    el.children()
+        .filter(|child| child.name() == "Description" && child.ns() == NS_RDF_SYNTAX)
+        .filter_map(|child| parse_link_preview(child, first_url.as_ref()))
+        .collect()
+}
+
+fn parse_link_preview(el: &Element, first_url: Option<&Url>) -> Option<LinkPreviewData> {
+    let original_url =
+        parse_web_url(el.attr_ns(&minidom::rxml::Namespace::from(NS_RDF_SYNTAX), "about")?)?;
+    if first_url.is_some() && first_url != Some(&original_url) {
+        return None;
+    }
+    Some(LinkPreviewData {
+        original_url,
+        normalized_url: og_text(el, "url").and_then(|value| parse_web_url(&value)),
+        title: og_text(el, "title"),
+        description: og_text(el, "description"),
+    })
+}
+
+fn parse_web_url(value: &str) -> Option<Url> {
+    let url = Url::parse(value).ok()?;
+    (url.scheme() == "https" && url.host_str().is_some_and(|host| host.contains('.')))
+        .then_some(url)
+}
+
+fn first_eligible_https_url(body: &str) -> Option<Url> {
+    first_eligible_https_url_text(body).and_then(|candidate| Url::parse(candidate).ok())
+}
+
+fn body_without_reply_fallback<'a>(message: &Element, body: &'a str) -> Cow<'a, str> {
+    let mut ranges = Vec::new();
+    for fallback in body_fallbacks_for(message, xep_reply::NS_REPLY) {
+        match fallback {
+            BodyFallback::Whole => return Cow::Borrowed(""),
+            BodyFallback::Ranges(body_ranges) => ranges.extend(body_ranges),
+        }
+    }
+    if ranges.is_empty() {
+        Cow::Borrowed(body)
+    } else {
+        Cow::Owned(strip_fallback_ranges(body, &ranges))
+    }
+}
+
+fn og_text(el: &Element, name: &str) -> Option<String> {
+    el.children()
+        .find(|child| child.name() == name && child.ns() == NS_OPENGRAPH)
+        .map(Element::text)
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
 }
 
 fn has_moderation_retract(element: &Element) -> bool {

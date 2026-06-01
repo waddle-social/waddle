@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import type { JSONContent } from "@tiptap/core";
 import { mapLiveRoomMessageToTimeline } from "@/channels/timeline";
+import { buildChannelTimelineFromMamResults } from "@/channels/message-timeline-state";
+import { buildDmTimelineFromMamResults, fromLiveDmMessage } from "@/dms/message-timeline-state";
 import { renderStyledBody } from "@/lib/chat-ui";
 import { tiptapToRichMessage } from "@/lib/rich-message";
 import {
@@ -135,6 +137,81 @@ describe("roomMessageFromArchived", () => {
         anchor: "https://example.com",
       },
     ]);
+  });
+
+  test("maps archived LinkPreview payloads into room timeline messages", () => {
+    const result = roomMessageFromArchived({
+      ...baseArchivedRoom,
+      link_previews: [{
+        original_url: "https://example.com/article",
+        normalized_url: "https://example.com/article",
+        title: "Example Article",
+        description: "Plain text summary",
+      }],
+    });
+
+    expect(result).not.toBeNull();
+    const timeline = mapLiveRoomMessageToTimeline(session, result!);
+    expect(timeline.linkPreviews).toEqual([{
+      originalUrl: "https://example.com/article",
+      normalizedUrl: "https://example.com/article",
+      title: "Example Article",
+      description: "Plain text summary",
+    }]);
+  });
+
+  test("maps bodyless archived LinkPreview payloads into room timeline messages", () => {
+    const result = roomMessageFromArchived({
+      ...baseArchivedRoom,
+      body: undefined,
+      link_previews: [{
+        original_url: "https://example.com/article",
+        normalized_url: "https://example.com/article",
+        title: "Example Article",
+        description: "Plain text summary",
+      }],
+    });
+
+    expect(result).not.toBeNull();
+    const timeline = mapLiveRoomMessageToTimeline(session, result!);
+    expect(timeline.body).toBe("");
+    expect(timeline.linkPreviews).toEqual([{
+      originalUrl: "https://example.com/article",
+      normalizedUrl: "https://example.com/article",
+      title: "Example Article",
+      description: "Plain text summary",
+    }]);
+  });
+
+  test("archive replay clears an optimistic room LinkPreview when payload has none", () => {
+    const archived = roomMessageFromArchived({
+      ...baseArchivedRoom,
+      mam_id: "mam-reload-1",
+      id: "server-1",
+      stanza_id: "room-stanza-1",
+      stanza_id_by: "room@conf.example.com",
+      from: "room@conf.example.com/alice",
+      body: "read https://example.com",
+      link_previews: [],
+    });
+
+    expect(archived).not.toBeNull();
+    const timeline = buildChannelTimelineFromMamResults({
+      session,
+      mamResults: [archived!],
+      existing: [{
+        id: "client-1",
+        wireIds: ["room-stanza-1"],
+        body: "read https://example.com",
+        nick: "alice",
+        isSelf: true,
+        createdAt: "2026-06-01T12:00:00.000Z",
+        linkPreviews: [{ originalUrl: "https://example.com", title: "Example" }],
+      }],
+    });
+
+    expect(timeline).toHaveLength(1);
+    expect(timeline[0]?.linkPreviews).toBeUndefined();
   });
 
   test("omits anchor when absent", () => {
@@ -393,5 +470,80 @@ describe("dmMessageFromArchived", () => {
         end: 23,
       },
     ]);
+  });
+
+  test("maps archived LinkPreview payloads into DM timeline messages", () => {
+    const result = dmMessageFromArchived({
+      ...baseArchivedDm,
+      link_previews: [{
+        original_url: "https://example.com/article",
+        normalized_url: "https://example.com/article",
+        title: "Example Article",
+        description: "Plain text summary",
+      }],
+    }, "bob@example.com");
+
+    expect(result).not.toBeNull();
+    const timeline = fromLiveDmMessage(session, result!);
+    expect(timeline.linkPreviews).toEqual([{
+      originalUrl: "https://example.com/article",
+      normalizedUrl: "https://example.com/article",
+      title: "Example Article",
+      description: "Plain text summary",
+    }]);
+  });
+
+  test("maps bodyless archived LinkPreview payloads into DM timeline messages", () => {
+    const result = dmMessageFromArchived({
+      ...baseArchivedDm,
+      body: undefined,
+      link_previews: [{
+        original_url: "https://example.com/article",
+        normalized_url: "https://example.com/article",
+        title: "Example Article",
+        description: "Plain text summary",
+      }],
+    }, "bob@example.com");
+
+    expect(result).not.toBeNull();
+    const timeline = fromLiveDmMessage(session, result!);
+    expect(timeline.body).toBe("");
+    expect(timeline.linkPreviews).toEqual([{
+      originalUrl: "https://example.com/article",
+      normalizedUrl: "https://example.com/article",
+      title: "Example Article",
+      description: "Plain text summary",
+    }]);
+  });
+
+  test("archive replay clears an optimistic DM LinkPreview when payload has none", () => {
+    const archived = dmMessageFromArchived({
+      ...baseArchivedDm,
+      mam_id: "mam-dm-reload-1",
+      id: "server-1",
+      stanza_id: "dm-stanza-1",
+      from: "alice@example.com/web",
+      to: "bob@example.com",
+      body: "read https://example.com",
+      link_previews: [],
+    }, "bob@example.com");
+
+    expect(archived).not.toBeNull();
+    const timeline = buildDmTimelineFromMamResults({
+      session,
+      mamResults: [archived!],
+      existing: [{
+        id: "client-1",
+        wireIds: ["server-1", "dm-stanza-1", "mam-dm-reload-1"],
+        body: "read https://example.com",
+        nick: "alice",
+        isSelf: true,
+        createdAt: "2026-06-01T12:00:00.000Z",
+        linkPreviews: [{ originalUrl: "https://example.com", title: "Example" }],
+      }],
+    });
+
+    expect(timeline).toHaveLength(1);
+    expect(timeline[0]?.linkPreviews).toBeUndefined();
   });
 });

@@ -47,6 +47,8 @@ export interface SendGroupMessageOptions {
   references?: MessageReference[];
   mentionJidsByNick?: Readonly<Record<string, string>>;
   files?: OutboundFileAttachment[];
+  linkPreviewToken?: string;
+  linkPreviewExpiresAt?: string;
   replyTo?: ReplyTarget;
   threadId?: string;
   parentThreadId?: string;
@@ -59,6 +61,8 @@ export interface SendDirectMessageOptions {
   markup?: MarkupSpan[];
   references?: MessageReference[];
   files?: OutboundFileAttachment[];
+  linkPreviewToken?: string;
+  linkPreviewExpiresAt?: string;
   replyTo?: ReplyTarget;
   threadId?: string;
   parentThreadId?: string;

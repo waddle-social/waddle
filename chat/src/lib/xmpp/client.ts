@@ -112,6 +112,7 @@ import {
   type SendDirectMessageOptions,
   type SendGroupMessageOptions,
 } from "./send-types";
+import { requestPlaintextLinkPreviewLookup, type LinkPreviewLookupResult } from "./link-preview";
 import {
   avatarDataUrl,
   buildWasmSendOptions,
@@ -1335,6 +1336,16 @@ export class BrowserXmppClient {
     throw new Error("XMPP session is not ready");
   }
 
+  private async queuedLinkPreviewOptions(body: string, scopeJid: string): Promise<Pick<SendDirectMessageOptions, "linkPreviewToken" | "linkPreviewExpiresAt">> {
+    const preview = await this.lookupLinkPreview(body, scopeJid);
+    return preview?.token
+      ? {
+          linkPreviewToken: preview.token,
+          ...(preview.expiresAt ? { linkPreviewExpiresAt: preview.expiresAt } : {}),
+        }
+      : {};
+  }
+
   // XEP-0201 §3: chat-states, displayed markers, reactions, retractions, and
   // corrections that relate to a threaded message SHOULD repeat the original
   // `<thread/>`. The wasm bindings accept thread id + optional parent so the
@@ -1393,7 +1404,8 @@ export class BrowserXmppClient {
         if (!this.canUseConnectedSession() || !this.xmpp) break;
         if (this.inflightQueuedIds.has(entry.id)) continue;
         this.queuedMessageStatusHandler?.(entry.id, "sending");
-        const messageId = await this.compatSendDirectMessage(this.xmpp, barePeerJid(entry.peerJid), entry.body, { ...(entry.markup?.length ? { markup: entry.markup } : {}), ...(entry.references?.length ? { references: entry.references } : {}), ...(entry.files?.length ? { files: entry.files } : {}), ...(entry.replyTo ? { replyTo: entry.replyTo } : {}), ...(entry.threadId ? { threadId: entry.threadId } : {}), ...(entry.parentThreadId ? { parentThreadId: entry.parentThreadId } : {}), id: entry.id });
+        const linkPreviewOptions = await this.queuedLinkPreviewOptions(entry.body, barePeerJid(entry.peerJid));
+        const messageId = await this.compatSendDirectMessage(this.xmpp, barePeerJid(entry.peerJid), entry.body, { ...(entry.markup?.length ? { markup: entry.markup } : {}), ...(entry.references?.length ? { references: entry.references } : {}), ...(entry.files?.length ? { files: entry.files } : {}), ...linkPreviewOptions, ...(entry.replyTo ? { replyTo: entry.replyTo } : {}), ...(entry.threadId ? { threadId: entry.threadId } : {}), ...(entry.parentThreadId ? { parentThreadId: entry.parentThreadId } : {}), id: entry.id });
         if (messageId) { this.inflightQueuedIds.add(entry.id); this.recordPendingSend(entry.id, "dm"); }
       }
     })();
@@ -1411,7 +1423,8 @@ export class BrowserXmppClient {
         if (!this.roomIsReady(roomJid) || !this.xmpp) break;
         if (this.inflightQueuedIds.has(entry.id)) continue;
         this.queuedMessageStatusHandler?.(entry.id, "sending");
-        const messageId = await this.compatSendGroupMessage(this.xmpp, roomJid, entry.body, { ...(entry.markup?.length ? { markup: entry.markup } : {}), ...(entry.references?.length ? { references: entry.references } : {}), mentionJidsByNick: { ...(entry.mentionJidsByNick ?? {}), ...this.memberJidsFor(roomJid) }, ...(entry.files?.length ? { files: entry.files } : {}), ...(entry.replyTo ? { replyTo: entry.replyTo } : {}), ...(entry.threadId ? { threadId: entry.threadId } : {}), ...(entry.parentThreadId ? { parentThreadId: entry.parentThreadId } : {}), ...(entry.threadCreate ? { threadCreate: entry.threadCreate } : {}), ...(entry.threadReply ? { threadReply: entry.threadReply } : {}), id: entry.id });
+        const linkPreviewOptions = await this.queuedLinkPreviewOptions(entry.body, roomJid);
+        const messageId = await this.compatSendGroupMessage(this.xmpp, roomJid, entry.body, { ...(entry.markup?.length ? { markup: entry.markup } : {}), ...(entry.references?.length ? { references: entry.references } : {}), mentionJidsByNick: { ...(entry.mentionJidsByNick ?? {}), ...this.memberJidsFor(roomJid) }, ...(entry.files?.length ? { files: entry.files } : {}), ...linkPreviewOptions, ...(entry.replyTo ? { replyTo: entry.replyTo } : {}), ...(entry.threadId ? { threadId: entry.threadId } : {}), ...(entry.parentThreadId ? { parentThreadId: entry.parentThreadId } : {}), ...(entry.threadCreate ? { threadCreate: entry.threadCreate } : {}), ...(entry.threadReply ? { threadReply: entry.threadReply } : {}), id: entry.id });
         if (messageId) { this.inflightQueuedIds.add(entry.id); this.recordPendingSend(entry.id, "room"); }
       }
     })();
@@ -1437,6 +1450,10 @@ export class BrowserXmppClient {
     const queued = this.queueRoomMessage(roomJid, body, opts);
     void this.connect().then(() => this.switchRoom(spaceId, channelId)).then(() => this.flushQueuedRoomMessages(roomJid)).catch(() => undefined);
     return queued;
+  }
+
+  async lookupLinkPreview(body: string, scopeJid: string): Promise<LinkPreviewLookupResult | null> {
+    return requestPlaintextLinkPreviewLookup(this.xmpp, body, scopeJid);
   }
 
   async sendDirectMessage(peerJid: string, body: string, opts: SendDirectMessageOptions = {}): Promise<OutboundSendResult | null> {

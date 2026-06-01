@@ -8,6 +8,7 @@ import type { OutboundFileAttachment } from "@/lib/xmpp";
 import {
   inferredFileDisposition,
   type DeliveryStatus,
+  type LinkPreview,
   type MarkupSpan,
   type MessageReference,
   type TimelineMessage,
@@ -161,10 +162,23 @@ export function useMucSend(deps: UseMucSendDeps) {
       const threadReply = channelIsForum && replyTo && threadId
         ? { threadId }
         : undefined;
+      const linkPreview = typeof client.lookupLinkPreview === "function"
+        ? await client.lookupLinkPreview(bodyText, currentRoomJid.value ?? channelId)
+        : null;
+      const linkPreviews: LinkPreview[] = linkPreview && linkPreview.status === "ready"
+        ? [{
+            originalUrl: linkPreview.originalUrl,
+            normalizedUrl: linkPreview.normalizedUrl,
+            ...(linkPreview.title ? { title: linkPreview.title } : {}),
+            ...(linkPreview.description ? { description: linkPreview.description } : {}),
+          }]
+        : [];
       const result = await client.sendGroupMessage(spaceId, channelId, bodyText, {
         markup,
         references,
         files: attachments,
+        ...(linkPreview?.token ? { linkPreviewToken: linkPreview.token } : {}),
+        ...(linkPreview?.expiresAt ? { linkPreviewExpiresAt: linkPreview.expiresAt } : {}),
         ...(wireReplyTo ? { replyTo: wireReplyTo } : {}),
         ...(threadId ? { threadId } : {}),
         ...(parentThreadId ? { parentThreadId } : {}),
@@ -192,6 +206,7 @@ export function useMucSend(deps: UseMucSendDeps) {
           deliveryStatus: (result?.state ?? "sending") as DeliveryStatus,
           ...(markup && markup.length > 0 ? { markup } : {}),
           ...(references && references.length > 0 ? { references } : {}),
+          ...(linkPreviews.length > 0 ? { linkPreviews } : {}),
         };
         if (replyTo && parent && parent.replyableId) {
           // Mirror the wire reply id on the optimistic insert so the local

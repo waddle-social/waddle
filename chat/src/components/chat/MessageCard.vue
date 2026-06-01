@@ -794,7 +794,7 @@ onBeforeUnmount(() => {
           v-if="card.presentation.primaryUrl"
           :href="card.presentation.primaryUrl"
           target="_blank"
-          rel="noreferrer"
+          rel="noopener noreferrer"
           class="chat-system-band__title-link"
           @click.stop
         >

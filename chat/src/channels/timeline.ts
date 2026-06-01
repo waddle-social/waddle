@@ -29,6 +29,7 @@ export function mapLiveRoomMessageToTimeline(
   if (msg.wireIds && msg.wireIds.length > 0) tm.wireIds = msg.wireIds;
   if (msg.mentions && msg.mentions.length > 0) tm.mentions = msg.mentions;
   if (msg.sharedFiles && msg.sharedFiles.length > 0) tm.sharedFiles = msg.sharedFiles;
+  if (msg.linkPreviews && msg.linkPreviews.length > 0) tm.linkPreviews = msg.linkPreviews;
   if (msg.extensionAnnotations && msg.extensionAnnotations.length > 0) {
     tm.extensionAnnotations = msg.extensionAnnotations;
   }

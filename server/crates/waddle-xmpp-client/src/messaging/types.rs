@@ -1,4 +1,6 @@
 use chrono::{DateTime, Utc};
+use std::fmt;
+use url::Url;
 use waddle_xmpp_core::xep0359::StanzaId as StableStanzaId;
 
 use crate::request::StanzaId;
@@ -146,6 +148,7 @@ pub struct InboundMessage {
     pub chat_state: Option<String>,
     pub displayed_marker_id: Option<String>,
     pub shared_files: Vec<SharedFile>,
+    pub link_previews: Vec<LinkPreviewData>,
     pub broadcast_mention: Option<String>,
     pub mention_uris: Vec<String>,
     /// XEP-0372 references attached to this message. Populated for *every*
@@ -188,6 +191,14 @@ pub struct MdsDisplayedEntry {
     /// JID that injected the stanza-id (the MUC room for group
     /// chats; the user's own server for 1:1 chats).
     pub stanza_id_by: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkPreviewData {
+    pub original_url: Url,
+    pub normalized_url: Option<Url>,
+    pub title: Option<String>,
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -577,7 +588,38 @@ pub struct SendMessageOptions {
     pub references: Vec<ReferenceData>,
     /// XEP-0446 / XEP-0447 shared files attached to the message.
     pub shared_files: Vec<SharedFile>,
+    /// Waddle-private link-preview token request consumed server-side before
+    /// fanout/archive and replaced by conformant XEP-0511 metadata.
+    pub link_preview_token: Option<LinkPreviewToken>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkPreviewToken(String);
+
+impl LinkPreviewToken {
+    pub fn new(value: impl Into<String>) -> Result<Self, InvalidLinkPreviewToken> {
+        let value = value.into();
+        if value.trim().is_empty() {
+            return Err(InvalidLinkPreviewToken);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidLinkPreviewToken;
+
+impl fmt::Display for InvalidLinkPreviewToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("link preview token must not be empty")
+    }
+}
+
+impl std::error::Error for InvalidLinkPreviewToken {}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MarkupSpanData {

@@ -127,6 +127,8 @@ export interface LiveRoomMessage {
   references?: import("@/lib/chat-ui").MessageReference[];
   /** XEP-0446/0447 — zero or more attachments. */
   sharedFiles?: SharedFileInfo[];
+  /** XEP-0511 */
+  linkPreviews?: import("@/lib/chat-ui").LinkPreview[];
   /** Waddle unified extension framework annotations. */
   extensionAnnotations?: ExtensionAnnotation[];
   /** XEP-0428: message body is fallback text for the Waddle extension payload. */
@@ -190,6 +192,8 @@ export interface LiveDmMessage {
   /** XEP-0372 */
   references?: import("@/lib/chat-ui").MessageReference[];
   sharedFiles?: SharedFileInfo[];
+  /** XEP-0511 */
+  linkPreviews?: import("@/lib/chat-ui").LinkPreview[];
   extensionAnnotations?: ExtensionAnnotation[];
   extensionBodyFallback?: boolean;
   isSticker?: boolean;

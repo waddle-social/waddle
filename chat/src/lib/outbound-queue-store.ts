@@ -95,7 +95,14 @@ function readQueue(accountKey: string): PersistedQueuedMessage[] {
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    const all = sortQueue(parsed.filter(isPersistedQueuedMessage));
+    const persisted = parsed.filter(isPersistedQueuedMessage);
+    const strippedLegacyPreviewTokens = persisted.some(
+      (entry) =>
+        "linkPreviewToken" in (entry as unknown as Record<string, unknown>)
+        || "linkPreviewExpiresAt" in (entry as unknown as Record<string, unknown>),
+    );
+    const all = sortQueue(persisted.map(stripLegacyPreviewToken));
+    if (strippedLegacyPreviewTokens) writeQueue(accountKey, all);
     return pruneStaleEntries(s, accountKey, all);
   } catch (err) {
     // Storage read failure usually means corrupt JSON or privacy-mode
@@ -108,6 +115,15 @@ function readQueue(accountKey: string): PersistedQueuedMessage[] {
     });
     return [];
   }
+}
+
+function stripLegacyPreviewToken(message: PersistedQueuedMessage): PersistedQueuedMessage {
+  const { linkPreviewToken: _token, linkPreviewExpiresAt: _expiresAt, ...rest } =
+    message as PersistedQueuedMessage & {
+      linkPreviewToken?: unknown;
+      linkPreviewExpiresAt?: unknown;
+    };
+  return rest;
 }
 
 /**

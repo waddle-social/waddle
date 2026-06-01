@@ -518,6 +518,11 @@ pub(super) fn send_options_from_ffi(opts: WaddleSendOptions) -> Result<SendMessa
         subject: None,
         markup_spans: vec![],
         references: vec![],
+        link_preview_token: opts
+            .link_preview_token
+            .map(messaging::LinkPreviewToken::new)
+            .transpose()
+            .map_err(|err| err.to_string())?,
     })
 }
 
