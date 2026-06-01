@@ -398,9 +398,24 @@ fn parse_link_preview_image(el: &Element) -> Option<LinkPreviewImageData> {
 }
 
 fn parse_cached_preview_image_url(value: &str) -> Option<Url> {
-    let url = parse_web_url(value)?;
+    let url = Url::parse(value).ok()?;
+    if !cached_preview_media_origin_allowed(&url) {
+        return None;
+    }
     let path = url.path();
     is_link_preview_xep0363_file_path(path).then_some(url)
+}
+
+fn cached_preview_media_origin_allowed(url: &Url) -> bool {
+    match url.scheme() {
+        "https" => url.host().is_some(),
+        "http" => url.host().is_some_and(|host| match host {
+            url::Host::Domain(domain) => domain == "localhost",
+            url::Host::Ipv4(addr) => addr.is_loopback(),
+            url::Host::Ipv6(addr) => addr.is_loopback(),
+        }),
+        _ => false,
+    }
 }
 
 fn is_link_preview_xep0363_file_path(path: &str) -> bool {

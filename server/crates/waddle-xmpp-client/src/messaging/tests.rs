@@ -504,6 +504,55 @@ fn parse_message_extracts_xep0511_link_preview() {
 }
 
 #[test]
+fn parse_message_accepts_loopback_http_xep0511_link_preview_image() {
+    for cached_url in [
+        "http://localhost:3000/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png",
+        "http://127.0.0.1:3000/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png",
+    ] {
+        let e = el(&format!(
+            "<message xmlns='jabber:client' type='groupchat' id='m-link'>\
+               <body>see https://the.link.example.com/what-was-linked-to</body>\
+               <rdf:Description xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#' xmlns:og='https://ogp.me/ns#' xmlns:ogi='https://ogp.me/ns#image:' rdf:about='https://the.link.example.com/what-was-linked-to'>\
+                 <og:title>The Best Webpage</og:title>\
+                 <og:image>{cached_url}</og:image>\
+                 <ogi:type>image/png</ogi:type>\
+               </rdf:Description>\
+             </message>"
+        ));
+        let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+            panic!("expected Message");
+        };
+        assert_eq!(msg.link_previews.len(), 1);
+        assert_eq!(
+            msg.link_previews[0]
+                .image
+                .as_ref()
+                .map(|image| image.url.as_str()),
+            Some(cached_url)
+        );
+    }
+}
+
+#[test]
+fn parse_message_rejects_non_loopback_http_xep0511_link_preview_image() {
+    let e = el(
+        "<message xmlns='jabber:client' type='groupchat' id='m-link'>\
+           <body>see https://the.link.example.com/what-was-linked-to</body>\
+           <rdf:Description xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#' xmlns:og='https://ogp.me/ns#' xmlns:ogi='https://ogp.me/ns#image:' rdf:about='https://the.link.example.com/what-was-linked-to'>\
+             <og:title>The Best Webpage</og:title>\
+             <og:image>http://waddle.example/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png</og:image>\
+             <ogi:type>image/png</ogi:type>\
+           </rdf:Description>\
+         </message>",
+    );
+    let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+        panic!("expected Message");
+    };
+    assert_eq!(msg.link_previews.len(), 1);
+    assert!(msg.link_previews[0].image.is_none());
+}
+
+#[test]
 fn parse_message_ignores_xep0511_link_preview_image_with_unsafe_media_type() {
     let e = el(
         "<message xmlns='jabber:client' type='groupchat' id='m-link'>\
