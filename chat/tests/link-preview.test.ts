@@ -68,6 +68,25 @@ describe("link preview lookup", () => {
     expect(result).toBeNull();
   });
 
+  test("rejects lookup responses with oversized preview tokens", async () => {
+    const oversizedToken = "x".repeat(4097);
+    const send_raw_iq = async () =>
+      `<iq type="result" id="lookup-1"><lookup xmlns="urn:waddle:link-preview:0" status="ready"><preview token="${oversizedToken}" original-url="https://example.com/a" normalized-url="https://example.com/a" expires-at="2999-01-01T00:00:00.000Z"><title>Example</title></preview></lookup></iq>`;
+
+    let result: Awaited<ReturnType<typeof requestPlaintextLinkPreviewLookup>> = null;
+    await withFakeXmlDocument(async () => {
+      await withFakeDomParser(async () => {
+        result = await requestPlaintextLinkPreviewLookup(
+          { send_raw_iq },
+          "read https://example.com/a",
+          "room@muc.example.com",
+        );
+      });
+    });
+
+    expect(result).toBeNull();
+  });
+
   test("rejects ready lookup responses for a different original URL than requested", async () => {
     const send_raw_iq = async () =>
       `<iq type="result" id="lookup-1"><lookup xmlns="urn:waddle:link-preview:0" status="ready"><preview token="signed-token" original-url="https://other.example/a" normalized-url="https://other.example/a" expires-at="2999-01-01T00:00:00.000Z"><title>Other</title></preview></lookup></iq>`;
@@ -132,7 +151,7 @@ describe("link preview lookup", () => {
     });
   });
 
-  test("returns unsupported lookup state for not_found responses", async () => {
+  test("rejects legacy not_found lookup responses", async () => {
     const send_raw_iq = async () =>
       `<iq type="result" id="lookup-1"><lookup xmlns="urn:waddle:link-preview:0" status="not_found"/></iq>`;
 
@@ -147,10 +166,30 @@ describe("link preview lookup", () => {
       });
     });
 
-    expect(result).toEqual({
-      status: "not_found",
-      originalUrl: "https://unsupported.example/a",
-    });
+    expect(result).toBeNull();
+  });
+
+  test("returns typed normal lookup states for resolver blocked, failed, and unsupported responses", async () => {
+    for (const status of ["blocked", "failed", "unsupported"] as const) {
+      const send_raw_iq = async () =>
+        `<iq type="result" id="lookup-1"><lookup xmlns="urn:waddle:link-preview:0" status="${status}"/></iq>`;
+
+      let result: Awaited<ReturnType<typeof requestPlaintextLinkPreviewLookup>> = null;
+      await withFakeXmlDocument(async () => {
+        await withFakeDomParser(async () => {
+          result = await requestPlaintextLinkPreviewLookup(
+            { send_raw_iq },
+            "read https://unsupported.example/a",
+            "room@muc.example.com",
+          );
+        });
+      });
+
+      expect(result).toEqual({
+        status,
+        originalUrl: "https://unsupported.example/a",
+      });
+    }
   });
 
   test("lookup failure is a metadata miss instead of a send blocker", async () => {

@@ -190,6 +190,7 @@ mod tests {
         "alice@example.com/desktop".parse().expect("jid")
     }
     use xmpp_parsers::message::Message;
+    use xmpp_parsers::minidom::rxml::xml_ncname;
     use xmpp_parsers::minidom::Element;
 
     #[test]
@@ -293,6 +294,31 @@ mod tests {
         message
             .payloads
             .push(waddle_xmpp::xep::build_link_preview_request_element(&token));
+
+        consume_link_preview_request(&mut message, &sender(), SECRET, 1_800_000_000);
+
+        assert!(message.payloads.is_empty());
+    }
+
+    #[test]
+    fn oversized_link_preview_request_is_stripped_without_metadata() {
+        let mut message = Message::new(None::<jid::Jid>);
+        message.to = Some("room@muc.example.com".parse().expect("jid"));
+        message.bodies.insert(
+            xmpp_parsers::message::Lang::new(),
+            "read https://example.com/".to_string(),
+        );
+        message.payloads.push(
+            Element::builder(
+                waddle_xmpp::xep::ELEMENT_PREVIEW_REQUEST,
+                waddle_xmpp::xep::NS_WADDLE_LINK_PREVIEW,
+            )
+            .attr(
+                xml_ncname!("token").to_owned(),
+                "x".repeat(waddle_xmpp::xep::MAX_LINK_PREVIEW_TOKEN_BYTES + 1),
+            )
+            .build(),
+        );
 
         consume_link_preview_request(&mut message, &sender(), SECRET, 1_800_000_000);
 

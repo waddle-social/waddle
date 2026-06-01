@@ -84,6 +84,7 @@ mod extension_forms;
 mod jingle_muji_gate;
 mod last_activity;
 mod link_preview_lookup;
+mod link_preview_resolver;
 mod mentions_permissions;
 mod misc;
 mod muc_admin;

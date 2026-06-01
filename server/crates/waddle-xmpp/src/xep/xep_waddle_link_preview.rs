@@ -16,6 +16,8 @@ use xmpp_parsers::message::Message;
 
 /// Waddle-private link preview namespace.
 pub const NS_WADDLE_LINK_PREVIEW: &str = "urn:waddle:link-preview:0";
+/// Maximum encoded preview token size accepted for composer lookup responses.
+pub const MAX_LINK_PREVIEW_TOKEN_BYTES: usize = 4096;
 
 /// Root element for a send-time preview token request.
 pub const ELEMENT_PREVIEW_REQUEST: &str = "preview-request";
@@ -30,7 +32,8 @@ impl LinkPreviewToken {
     /// Wrap an already encoded token.
     pub fn new(token: impl Into<String>) -> Option<Self> {
         let token = token.into();
-        (!token.trim().is_empty()).then_some(Self(token))
+        (!token.trim().is_empty() && token.len() <= MAX_LINK_PREVIEW_TOKEN_BYTES)
+            .then_some(Self(token))
     }
 
     /// Borrow the encoded token text.
@@ -143,12 +146,24 @@ pub fn encode_link_preview_token(data: &LinkPreviewTokenData, secret: &[u8]) -> 
     ))
 }
 
+/// Encode preview data only when the resulting token remains bounded.
+pub fn encode_link_preview_token_checked(
+    data: &LinkPreviewTokenData,
+    secret: &[u8],
+) -> Option<LinkPreviewToken> {
+    let token = encode_link_preview_token(data, secret);
+    (token.as_str().len() <= MAX_LINK_PREVIEW_TOKEN_BYTES).then_some(token)
+}
+
 /// Decode and validate an opaque preview token.
 pub fn decode_link_preview_token(
     token: &LinkPreviewToken,
     secret: &[u8],
     now_unix: i64,
 ) -> Result<LinkPreviewTokenData, WaddleLinkPreviewError> {
+    if token.as_str().len() > MAX_LINK_PREVIEW_TOKEN_BYTES {
+        return Err(WaddleLinkPreviewError::InvalidTokenEncoding);
+    }
     let (payload, signature) = token
         .as_str()
         .split_once('.')
@@ -262,6 +277,33 @@ mod tests {
         assert_eq!(
             decode_link_preview_token(&token, SECRET, 11),
             Err(WaddleLinkPreviewError::Expired)
+        );
+    }
+
+    #[test]
+    fn checked_token_encoding_rejects_oversized_tokens() {
+        let data = LinkPreviewTokenData {
+            sender_jid: "alice@example.com".parse().expect("jid"),
+            scope_jid: "room@muc.example.com".parse().expect("jid"),
+            original_url: Url::parse("https://example.com/").expect("url"),
+            normalized_url: Url::parse("https://example.com/").expect("url"),
+            title: Some("t".repeat(MAX_LINK_PREVIEW_TOKEN_BYTES)),
+            description: Some("d".repeat(MAX_LINK_PREVIEW_TOKEN_BYTES)),
+            expires_at_unix: 1_900_000_000,
+        };
+
+        assert!(encode_link_preview_token_checked(&data, SECRET).is_none());
+    }
+
+    #[test]
+    fn oversized_tokens_are_rejected_before_decode_work() {
+        assert!(LinkPreviewToken::new("x".repeat(MAX_LINK_PREVIEW_TOKEN_BYTES + 1)).is_none());
+
+        let token = LinkPreviewToken("x".repeat(MAX_LINK_PREVIEW_TOKEN_BYTES + 1));
+
+        assert_eq!(
+            decode_link_preview_token(&token, SECRET, 1_800_000_000),
+            Err(WaddleLinkPreviewError::InvalidTokenEncoding)
         );
     }
 }
