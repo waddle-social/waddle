@@ -32,7 +32,8 @@ impl LinkPreviewToken {
     /// Wrap an already encoded token.
     pub fn new(token: impl Into<String>) -> Option<Self> {
         let token = token.into();
-        (!token.trim().is_empty()).then_some(Self(token))
+        (!token.trim().is_empty() && token.len() <= MAX_LINK_PREVIEW_TOKEN_BYTES)
+            .then_some(Self(token))
     }
 
     /// Borrow the encoded token text.
@@ -160,6 +161,9 @@ pub fn decode_link_preview_token(
     secret: &[u8],
     now_unix: i64,
 ) -> Result<LinkPreviewTokenData, WaddleLinkPreviewError> {
+    if token.as_str().len() > MAX_LINK_PREVIEW_TOKEN_BYTES {
+        return Err(WaddleLinkPreviewError::InvalidTokenEncoding);
+    }
     let (payload, signature) = token
         .as_str()
         .split_once('.')
@@ -289,5 +293,17 @@ mod tests {
         };
 
         assert!(encode_link_preview_token_checked(&data, SECRET).is_none());
+    }
+
+    #[test]
+    fn oversized_tokens_are_rejected_before_decode_work() {
+        assert!(LinkPreviewToken::new("x".repeat(MAX_LINK_PREVIEW_TOKEN_BYTES + 1)).is_none());
+
+        let token = LinkPreviewToken("x".repeat(MAX_LINK_PREVIEW_TOKEN_BYTES + 1));
+
+        assert_eq!(
+            decode_link_preview_token(&token, SECRET, 1_800_000_000),
+            Err(WaddleLinkPreviewError::InvalidTokenEncoding)
+        );
     }
 }

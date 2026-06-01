@@ -88,11 +88,8 @@ pub(super) async fn resolve_link_preview(
         };
         match fetch {
             FetchOnceResult::Html { final_url, html } => {
-                return extract_metadata_from_html(url, &html)
-                    .map(|mut metadata| {
-                        metadata.normalized_url = final_url;
-                        LinkPreviewResolverOutcome::Ready(Box::new(metadata))
-                    })
+                return extract_metadata_from_html_with_normalized_fallback(url, &html, &final_url)
+                    .map(|metadata| LinkPreviewResolverOutcome::Ready(Box::new(metadata)))
                     .unwrap_or(LinkPreviewResolverOutcome::Unsupported);
             }
             FetchOnceResult::Redirect(next) => {
@@ -347,16 +344,32 @@ fn is_global_ipv6(ip: Ipv6Addr) -> bool {
     true
 }
 
-pub(super) fn extract_metadata_from_html(
+#[cfg(test)]
+fn extract_metadata_from_html(requested_url: &Url, html: &str) -> Option<ResolvedLinkMetadata> {
+    extract_metadata_from_html_with_normalized_fallback(requested_url, html, requested_url)
+}
+
+fn extract_metadata_from_html_with_normalized_fallback(
     requested_url: &Url,
     html: &str,
+    normalized_fallback_url: &Url,
 ) -> Option<ResolvedLinkMetadata> {
     let title = meta_content(html, "og:title", LINK_PREVIEW_TITLE_MAX_BYTES);
     let description = meta_content(html, "og:description", LINK_PREVIEW_DESCRIPTION_MAX_BYTES);
-    let normalized_url = meta_content(html, "og:url", usize::MAX)
+    let canonical_url = meta_content(html, "og:url", usize::MAX)
         .and_then(|url| Url::parse(&url).ok())
-        .unwrap_or_else(|| requested_url.clone());
-    if title.is_none() && description.is_none() && normalized_url == *requested_url {
+        .filter(|url| {
+            classify_url_with_policy(url, &LinkPreviewResolverPolicy::default())
+                == LinkPreviewResolverStatus::Ready
+        });
+    let normalized_url = canonical_url
+        .clone()
+        .unwrap_or_else(|| normalized_fallback_url.clone());
+    if title.is_none()
+        && description.is_none()
+        && canonical_url.is_none()
+        && normalized_url == *requested_url
+    {
         return None;
     }
 
@@ -372,7 +385,15 @@ fn meta_content(html: &str, property: &str, max_bytes: usize) -> Option<String> 
     let mut remaining = html;
     while let Some(start) = find_ascii_case_insensitive(remaining, "<meta") {
         remaining = &remaining[start + "<meta".len()..];
-        let end = remaining.find('>')?;
+        let Some(end) = remaining.find('>') else {
+            break;
+        };
+        if let Some(next_start) = find_ascii_case_insensitive(remaining, "<meta") {
+            if next_start < end {
+                remaining = &remaining[next_start..];
+                continue;
+            }
+        }
         let tag = &remaining[..end];
         remaining = &remaining[end + 1..];
 
@@ -519,10 +540,76 @@ mod tests {
     }
 
     #[test]
+    fn malformed_meta_tag_does_not_abort_later_metadata_extraction() {
+        let requested_url = Url::parse("https://example.com/articles").expect("url");
+        let html = r#"<html><head>
+                <meta property="og:title" content="Broken"
+                <meta property="og:title" content="Recovered title">
+                <meta property="og:description" content="Recovered description">
+              </head></html>"#;
+
+        let metadata = extract_metadata_from_html(&requested_url, html).expect("metadata");
+
+        assert_eq!(metadata.title.as_deref(), Some("Recovered title"));
+        assert_eq!(
+            metadata.description.as_deref(),
+            Some("Recovered description")
+        );
+    }
+
+    #[test]
+    fn ignores_blocked_open_graph_canonical_urls() {
+        let requested_url = Url::parse("https://example.com/articles").expect("url");
+        let html = r#"<html><head>
+                <meta property="og:title" content="Safe title">
+                <meta property="og:url" content="https://Printer.Local/admin">
+              </head></html>"#;
+
+        let metadata = extract_metadata_from_html(&requested_url, html).expect("metadata");
+
+        assert_eq!(metadata.normalized_url, requested_url);
+    }
+
+    #[test]
+    fn preserves_safe_open_graph_canonical_url_over_fetch_url() {
+        let requested_url = Url::parse("https://example.com/articles?utm=keep").expect("url");
+        let final_url = Url::parse("https://example.com/redirected?utm=keep").expect("url");
+        let canonical_url = Url::parse("https://example.com/articles").expect("url");
+        let html = r#"<html><head>
+                <meta property="og:title" content="Safe title">
+                <meta property="og:url" content="https://example.com/articles">
+              </head></html>"#;
+
+        let metadata =
+            extract_metadata_from_html_with_normalized_fallback(&requested_url, html, &final_url)
+                .expect("metadata");
+
+        assert_eq!(metadata.normalized_url, canonical_url);
+    }
+
+    #[test]
+    fn falls_back_to_fetch_url_when_open_graph_canonical_url_is_absent() {
+        let requested_url = Url::parse("https://example.com/articles?utm=keep").expect("url");
+        let final_url = Url::parse("https://example.com/redirected").expect("url");
+        let html = r#"<html><head>
+                <meta property="og:title" content="Safe title">
+              </head></html>"#;
+
+        let metadata =
+            extract_metadata_from_html_with_normalized_fallback(&requested_url, html, &final_url)
+                .expect("metadata");
+
+        assert_eq!(metadata.normalized_url, final_url);
+    }
+
+    #[test]
     fn truncates_decoded_text_metadata_to_field_byte_limits() {
         let requested_url = Url::parse("https://example.com/articles").expect("url");
-        let title = "t".repeat(LINK_PREVIEW_TITLE_MAX_BYTES + 64);
-        let description = "d".repeat(LINK_PREVIEW_DESCRIPTION_MAX_BYTES + 64);
+        let title = format!("{}&eacute;", "t".repeat(LINK_PREVIEW_TITLE_MAX_BYTES - 1));
+        let description = format!(
+            "{}&eacute;",
+            "d".repeat(LINK_PREVIEW_DESCRIPTION_MAX_BYTES - 1)
+        );
         let html = format!(
             r#"<html><head>
                 <meta property="og:title" content="{title}">
@@ -534,11 +621,19 @@ mod tests {
 
         assert_eq!(
             metadata.title.as_deref().map(str::len),
-            Some(LINK_PREVIEW_TITLE_MAX_BYTES)
+            Some(LINK_PREVIEW_TITLE_MAX_BYTES - 1)
         );
         assert_eq!(
             metadata.description.as_deref().map(str::len),
-            Some(LINK_PREVIEW_DESCRIPTION_MAX_BYTES)
+            Some(LINK_PREVIEW_DESCRIPTION_MAX_BYTES - 1)
+        );
+        assert_eq!(
+            metadata.title.as_deref(),
+            Some("t".repeat(LINK_PREVIEW_TITLE_MAX_BYTES - 1).as_str())
+        );
+        assert_eq!(
+            metadata.description.as_deref(),
+            Some("d".repeat(LINK_PREVIEW_DESCRIPTION_MAX_BYTES - 1).as_str())
         );
     }
 

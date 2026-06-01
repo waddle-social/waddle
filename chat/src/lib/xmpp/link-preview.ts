@@ -18,6 +18,7 @@ export interface LinkPreviewLookupUnsupportedResult {
 const HTTPS_URL_RE = /https:\/\/[^\s<>"']+/gi;
 const NS_WADDLE_LINK_PREVIEW = "urn:waddle:link-preview:0";
 const LOOKUP_TIMEOUT_MS = 2_000;
+const MAX_LINK_PREVIEW_TOKEN_BYTES = 4096;
 
 type LinkPreviewIqClient = {
   send_raw_iq?: (xml: string) => Promise<string>;
@@ -80,6 +81,7 @@ function parseLookupResponse(xml: string, requestedUrl: string): LinkPreviewLook
   const normalizedUrl = preview.getAttribute("normalized-url")?.trim();
   const expiresAt = preview.getAttribute("expires-at")?.trim();
   if (!token || !originalUrl || !normalizedUrl || !expiresAt) return null;
+  if (token.length > MAX_LINK_PREVIEW_TOKEN_BYTES) return null;
   if (!urlsMatchSemantically(originalUrl, requestedUrl)) return null;
   if (!isEligiblePreviewUrl(originalUrl) || !isEligiblePreviewUrl(normalizedUrl)) return null;
   return {
