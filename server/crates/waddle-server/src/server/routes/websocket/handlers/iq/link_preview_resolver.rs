@@ -11,6 +11,7 @@ use reqwest::{redirect, Client, StatusCode};
 use sha2::{Digest, Sha256};
 use tracing::warn;
 use url::{Host, Url};
+use waddle_xmpp_core::PreviewImageMediaType;
 
 use crate::db::actor::{DbActor, DbExecute};
 use crate::db::Value;
@@ -35,7 +36,7 @@ pub(super) struct ResolvedLinkMetadata {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ResolvedLinkPreviewImage {
     pub url: Url,
-    pub media_type: String,
+    pub media_type: PreviewImageMediaType,
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub alt: Option<String>,
@@ -197,13 +198,10 @@ async fn fetch_cached_preview_image(
         };
         match fetch_image_once(&current, policy, timeout).await? {
             FetchImageOnceResult::Image { bytes, media_type } => {
-                let digest = Sha256::digest(bytes.as_ref());
-                let hash = digest
-                    .iter()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect::<String>();
+                let hash = hex::encode(Sha256::digest(bytes.as_ref()));
                 let (slot_id, filename) =
-                    publish_cached_preview_image_slot(cache, &hash, bytes, &media_type).await?;
+                    publish_cached_preview_image_slot(cache, &hash, bytes, media_type.as_str())
+                        .await?;
                 let url = Url::parse(&format!(
                     "{}/api/files/{}/{}",
                     cache.public_base_url, slot_id, filename
@@ -287,7 +285,10 @@ fn preview_image_extension(media_type: &str) -> &'static str {
 }
 
 enum FetchImageOnceResult {
-    Image { bytes: Bytes, media_type: String },
+    Image {
+        bytes: Bytes,
+        media_type: PreviewImageMediaType,
+    },
     Redirect(Url),
 }
 
@@ -699,32 +700,29 @@ fn extract_metadata_parts_from_html(
     ))
 }
 
-fn safe_preview_image_media_type(value: &str) -> Option<String> {
+fn safe_preview_image_media_type(value: &str) -> Option<PreviewImageMediaType> {
     let media_type = value
         .split(';')
         .next()
         .unwrap_or(value)
         .trim()
-        .to_ascii_lowercase();
-    matches!(
-        media_type.as_str(),
-        "image/png" | "image/jpeg" | "image/gif" | "image/webp"
-    )
-    .then_some(media_type)
+        .parse()
+        .ok()?;
+    Some(media_type)
 }
 
-fn sniff_safe_preview_image_media_type(bytes: &[u8]) -> Option<String> {
+fn sniff_safe_preview_image_media_type(bytes: &[u8]) -> Option<PreviewImageMediaType> {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        return Some("image/png".to_string());
+        return Some(PreviewImageMediaType::Png);
     }
     if bytes.starts_with(b"\xff\xd8\xff") {
-        return Some("image/jpeg".to_string());
+        return Some(PreviewImageMediaType::Jpeg);
     }
     if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        return Some("image/gif".to_string());
+        return Some(PreviewImageMediaType::Gif);
     }
     if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        return Some("image/webp".to_string());
+        return Some(PreviewImageMediaType::Webp);
     }
     None
 }
@@ -1275,7 +1273,7 @@ mod tests {
             .url
             .path()
             .ends_with(&format!("/link-preview-{expected_hash}.png")));
-        assert_eq!(image.media_type, "image/png");
+        assert_eq!(image.media_type, PreviewImageMediaType::Png);
         assert_eq!(image.width, Some(640));
         assert_eq!(image.height, Some(360));
         assert_eq!(image.alt.as_deref(), Some("Article screenshot"));

@@ -90,6 +90,17 @@ describe("link preview lookup", () => {
     )).toBe(true);
   });
 
+  test("accepts trusted cached preview image origins with explicit default ports", () => {
+    expect(isTrustedCachedPreviewImageUrl(
+      "https://waddle.example:443/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png",
+      "https://waddle.example",
+    )).toBe(true);
+    expect(isTrustedCachedPreviewImageUrl(
+      "http://localhost:80/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png",
+      "http://localhost",
+    )).toBe(true);
+  });
+
   test("rejects non-loopback HTTP cached preview image origins", () => {
     expect(isTrustedCachedPreviewImageUrl(
       "http://waddle.example/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png",

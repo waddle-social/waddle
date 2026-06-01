@@ -11,6 +11,8 @@ use waddle_xmpp::xep::{
     encode_link_preview_token_checked, LinkPreviewTokenData, LinkPreviewTokenImage,
     NS_WADDLE_LINK_PREVIEW,
 };
+#[cfg(test)]
+use waddle_xmpp_core::PreviewImageMediaType;
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::minidom::Element;
 
@@ -431,7 +433,7 @@ mod tests {
         assert_eq!(decoded.sender_jid.to_string(), "alice@example.com");
         assert_eq!(decoded.scope_jid.to_string(), "alice@example.com");
         let decoded_image = decoded.image.expect("token image");
-        assert_eq!(decoded_image.media_type, "image/png");
+        assert_eq!(decoded_image.media_type, PreviewImageMediaType::Png);
         assert_eq!(decoded_image.width, Some(640));
         assert_eq!(decoded_image.height, Some(360));
         assert_eq!(decoded_image.alt.as_deref(), Some("Article screenshot"));

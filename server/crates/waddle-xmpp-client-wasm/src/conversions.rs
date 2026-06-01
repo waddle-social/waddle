@@ -442,7 +442,7 @@ fn link_previews_to_js(previews: Vec<messaging::LinkPreviewData>) -> Vec<WaddleL
             description: preview.description,
             image: preview.image.map(|image| WaddleLinkPreviewImage {
                 url: image.url.to_string(),
-                media_type: image.media_type,
+                media_type: image.media_type.as_str().to_string(),
                 width: image.width,
                 height: image.height,
                 alt: image.alt,

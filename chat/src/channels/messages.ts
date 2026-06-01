@@ -14,6 +14,7 @@ import {
 import { $xmppStatus } from "@/stores/xmpp-status";
 import { applyPinEvent } from "@/stores/pinned-messages";
 import { hydrateSinglePinnedBody } from "@/services/pinned-message-bodies";
+import { linkPreviewMediaOriginFromWebSocketUrl } from "@/lib/xmpp/link-preview";
 import { roomMessageFromArchived } from "@/lib/xmpp/wasm-message-codecs";
 import {
   type TimelineMessage,
@@ -267,7 +268,11 @@ export function useChannelMessages(
             const spaceId = activeSpaceId.value ?? "";
             const channelId = activeChannelId.value ?? "";
             const convertForTimeline = (a: Parameters<typeof roomMessageFromArchived>[0]) => {
-              const live = roomMessageFromArchived(a);
+              const live = roomMessageFromArchived(a, {
+                trustedMediaOrigin: session.value
+                  ? linkPreviewMediaOriginFromWebSocketUrl(session.value.xmpp_websocket_url)
+                  : null,
+              });
               return live && session.value
                 ? mapLiveRoomMessageToTimeline(session.value, live)
                 : null;

@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use std::fmt;
 use url::Url;
 use waddle_xmpp_core::xep0359::StanzaId as StableStanzaId;
+use waddle_xmpp_core::PreviewImageMediaType;
 
 use crate::request::StanzaId;
 use crate::xep::encrypted_file::EncryptedFile;
@@ -205,7 +206,7 @@ pub struct LinkPreviewData {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkPreviewImageData {
     pub url: Url,
-    pub media_type: String,
+    pub media_type: PreviewImageMediaType,
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub alt: Option<String>,

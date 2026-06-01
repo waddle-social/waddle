@@ -10,6 +10,7 @@ use minidom::{
 };
 use thiserror::Error;
 use url::Url;
+use waddle_xmpp_core::PreviewImageMediaType;
 use xmpp_parsers::message::Message;
 
 /// RDF syntax namespace used by XEP-0511's `<rdf:Description/>` payload.
@@ -47,7 +48,7 @@ pub struct LinkPreviewImage {
     /// Waddle-controlled image URL clients may dereference.
     pub url: Url,
     /// Safe MIME type observed when Waddle cached the image.
-    pub media_type: Option<String>,
+    pub media_type: Option<PreviewImageMediaType>,
     /// Image width in pixels, when available from metadata.
     pub width: Option<u32>,
     /// Image height in pixels, when available from metadata.
@@ -69,8 +70,8 @@ impl LinkPreviewImage {
     }
 
     /// Set the safe MIME type.
-    pub fn with_media_type(mut self, media_type: impl Into<String>) -> Self {
-        self.media_type = Some(media_type.into());
+    pub fn with_media_type(mut self, media_type: PreviewImageMediaType) -> Self {
+        self.media_type = Some(media_type);
         self
     }
 
@@ -226,7 +227,11 @@ pub fn build_link_metadata_element(metadata: &LinkMetadata) -> Element {
     append_og_text(&mut description, "site_name", metadata.site_name.as_deref());
     for image in &metadata.images {
         append_og_text(&mut description, "image", Some(image.url.as_str()));
-        append_og_image_text(&mut description, "type", image.media_type.as_deref());
+        append_og_image_text(
+            &mut description,
+            "type",
+            image.media_type.map(PreviewImageMediaType::as_str),
+        );
         append_og_number(&mut description, "width", image.width);
         append_og_number(&mut description, "height", image.height);
         append_og_image_text(&mut description, "alt", image.alt.as_deref());
@@ -297,7 +302,11 @@ fn parse_og_images(elem: &Element) -> Vec<LinkPreviewImage> {
             continue;
         }
         match child.name() {
-            "type" => image.media_type = Some(value),
+            "type" => {
+                if let Ok(media_type) = value.parse() {
+                    image.media_type = Some(media_type);
+                }
+            }
             "width" => image.width = value.parse().ok(),
             "height" => image.height = value.parse().ok(),
             "alt" => image.alt = Some(value),

@@ -10,6 +10,7 @@ use waddle_xmpp::xep::{
     set_link_metadata, strip_link_metadata, LinkMetadata, LinkMetadataError, LinkPreviewImage,
     NS_OPENGRAPH, NS_OPENGRAPH_IMAGE, NS_RDF_SYNTAX,
 };
+use waddle_xmpp_core::PreviewImageMediaType;
 use xmpp_parsers::message::Message;
 
 fn element(xml: &str) -> Element {
@@ -60,7 +61,7 @@ fn xep0511_builds_cached_image_metadata_with_opengraph_structured_properties() {
     let image = LinkPreviewImage::new(
         Url::parse("https://waddle.example/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png").expect("url"),
     )
-    .with_media_type("image/png")
+    .with_media_type(PreviewImageMediaType::Png)
     .with_dimensions(640, 360)
     .with_alt("Screenshot of the article");
     let metadata = LinkMetadata::new(Url::parse("https://the.link.example/article").expect("url"))

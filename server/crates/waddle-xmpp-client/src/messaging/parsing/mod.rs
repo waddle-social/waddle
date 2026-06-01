@@ -10,7 +10,9 @@ use minidom::Element;
 use crate::xep::encrypted_file::{self as xep_encrypted_file, NS_ESFS as NS_ENCRYPTED_FILE};
 use crate::xep::fallback::{body_fallbacks_for, strip_fallback_ranges, BodyFallback};
 use crate::xep::{reply as xep_reply, thread as xep_thread};
-use waddle_xmpp_core::{first_eligible_https_url_text, xep0359::StanzaId as StableStanzaId};
+use waddle_xmpp_core::{
+    first_eligible_https_url_text, xep0359::StanzaId as StableStanzaId, PreviewImageMediaType,
+};
 
 use self::files::{parse_file_sharing_element, parse_shared_file};
 use self::markup::parse_markup_spans;
@@ -387,7 +389,7 @@ fn parse_link_preview_image(el: &Element) -> Option<LinkPreviewImageData> {
         .find(|child| child.name() == "image" && child.ns() == NS_OPENGRAPH)
         .and_then(|child| parse_cached_preview_image_url(child.text().trim()))?;
     let media_type =
-        og_image_text(el, "type").filter(|value| safe_preview_image_media_type(value))?;
+        og_image_text(el, "type").and_then(|value| value.parse::<PreviewImageMediaType>().ok())?;
     Some(LinkPreviewImageData {
         url,
         media_type,
@@ -482,13 +484,6 @@ fn og_image_text(el: &Element, name: &str) -> Option<String> {
         .map(Element::text)
         .map(|text| text.trim().to_string())
         .filter(|text| !text.is_empty())
-}
-
-fn safe_preview_image_media_type(value: &str) -> bool {
-    matches!(
-        value.to_ascii_lowercase().as_str(),
-        "image/png" | "image/jpeg" | "image/gif" | "image/webp"
-    )
 }
 
 fn has_moderation_retract(element: &Element) -> bool {

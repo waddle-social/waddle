@@ -14,6 +14,8 @@ use waddle_xmpp::{
     Stanza,
 };
 use waddle_xmpp_core::first_eligible_https_url_text;
+#[cfg(test)]
+use waddle_xmpp_core::PreviewImageMediaType;
 
 use super::super::{
     interpret_loop::build_interpret_deps, replay::drive_interpret_loop, WebSocketState,
@@ -170,7 +172,6 @@ fn is_trusted_cached_preview_image_url(url: &url::Url, trusted_media_base_url: &
     trusted_preview_schemes_match(url, &trusted)
         && url.host_str() == trusted.host_str()
         && url.port_or_known_default() == trusted.port_or_known_default()
-        && trusted.port() == url.port()
         && is_link_preview_xep0363_file_path(url.path())
 }
 
@@ -303,6 +304,27 @@ mod tests {
     }
 
     #[test]
+    fn trusts_cached_preview_image_urls_with_explicit_default_ports() {
+        let https_with_default_port = url::Url::parse(
+            "https://waddle.example:443/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png",
+        )
+        .expect("url");
+        let loopback_with_default_port = url::Url::parse(
+            "http://localhost:80/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png",
+        )
+        .expect("url");
+
+        assert!(is_trusted_cached_preview_image_url(
+            &https_with_default_port,
+            "https://waddle.example"
+        ));
+        assert!(is_trusted_cached_preview_image_url(
+            &loopback_with_default_port,
+            "http://localhost"
+        ));
+    }
+
+    #[test]
     fn consumes_link_preview_request_and_stamps_xep0511_metadata() {
         let preview = waddle_xmpp::xep::LinkPreviewTokenData {
             sender_jid: "alice@example.com".parse().expect("jid"),
@@ -320,7 +342,7 @@ mod tests {
                     "https://waddle.example/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png",
                 )
                 .expect("url"),
-                media_type: "image/png".to_string(),
+                media_type: PreviewImageMediaType::Png,
                 width: Some(640),
                 height: Some(360),
                 alt: Some("Article screenshot".to_string()),
@@ -360,7 +382,10 @@ mod tests {
             parsed[0].images[0].url.as_str(),
             "https://waddle.example/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png"
         );
-        assert_eq!(parsed[0].images[0].media_type.as_deref(), Some("image/png"));
+        assert_eq!(
+            parsed[0].images[0].media_type,
+            Some(PreviewImageMediaType::Png)
+        );
         let references = waddle_xmpp::xep::extract_references_from_message(&message);
         assert_eq!(references.len(), 1);
         assert_eq!(
@@ -391,7 +416,7 @@ mod tests {
                     "https://attacker.example/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png",
                 )
                 .expect("url"),
-                media_type: "image/png".to_string(),
+                media_type: PreviewImageMediaType::Png,
                 width: Some(640),
                 height: Some(360),
                 alt: Some("Article screenshot".to_string()),

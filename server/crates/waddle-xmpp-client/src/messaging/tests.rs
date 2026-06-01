@@ -497,7 +497,10 @@ fn parse_message_extracts_xep0511_link_preview() {
         image.url.as_str(),
         "https://waddle.example/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png"
     );
-    assert_eq!(image.media_type, "image/png");
+    assert_eq!(
+        image.media_type,
+        waddle_xmpp_core::PreviewImageMediaType::Png
+    );
     assert_eq!(image.width, Some(640));
     assert_eq!(image.height, Some(360));
     assert_eq!(image.alt.as_deref(), Some("Article screenshot"));

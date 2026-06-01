@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use thiserror::Error;
 use url::Url;
+use waddle_xmpp_core::PreviewImageMediaType;
 use xmpp_parsers::message::Message;
 
 /// Waddle-private link preview namespace.
@@ -59,7 +60,7 @@ pub struct LinkPreviewTokenData {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkPreviewTokenImage {
     pub url: Url,
-    pub media_type: String,
+    pub media_type: PreviewImageMediaType,
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub alt: Option<String>,
@@ -103,6 +104,8 @@ pub enum WaddleLinkPreviewError {
     InvalidTokenJid,
     #[error("invalid preview token URL")]
     InvalidTokenUrl,
+    #[error("invalid preview image MIME type")]
+    InvalidTokenMediaType,
     #[error("preview token expired")]
     Expired,
 }
@@ -156,7 +159,7 @@ pub fn encode_link_preview_token(data: &LinkPreviewTokenData, secret: &[u8]) -> 
         description: data.description.clone(),
         image: data.image.as_ref().map(|image| LinkPreviewTokenImageWire {
             url: image.url.as_str().to_string(),
-            media_type: image.media_type.clone(),
+            media_type: image.media_type.as_str().to_string(),
             width: image.width,
             height: image.height,
             alt: image.alt.clone(),
@@ -232,7 +235,10 @@ pub fn decode_link_preview_token(
                 Ok(LinkPreviewTokenImage {
                     url: Url::parse(&image.url)
                         .map_err(|_| WaddleLinkPreviewError::InvalidTokenUrl)?,
-                    media_type: image.media_type,
+                    media_type: image
+                        .media_type
+                        .parse()
+                        .map_err(|_| WaddleLinkPreviewError::InvalidTokenMediaType)?,
                     width: image.width,
                     height: image.height,
                     alt: image.alt,
@@ -272,7 +278,7 @@ mod tests {
             image: Some(LinkPreviewTokenImage {
                 url: Url::parse("https://waddle.example/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png")
                     .expect("url"),
-                media_type: "image/png".to_string(),
+                media_type: PreviewImageMediaType::Png,
                 width: Some(640),
                 height: Some(360),
                 alt: Some("Article screenshot".to_string()),

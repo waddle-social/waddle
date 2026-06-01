@@ -239,11 +239,19 @@ export function isTrustedCachedPreviewImageUrl(value: string, trustedMediaOrigin
     const url = new URL(value);
     const trusted = new URL(trustedMediaOrigin);
     return trustedPreviewProtocolsMatch(url, trusted)
-      && url.origin === trusted.origin
+      && url.hostname === trusted.hostname
+      && effectivePort(url) === effectivePort(trusted)
       && isLinkPreviewXep0363FilePath(url.pathname);
   } catch {
     return false;
   }
+}
+
+function effectivePort(url: URL): string {
+  if (url.port) return url.port;
+  if (url.protocol === "https:") return "443";
+  if (url.protocol === "http:") return "80";
+  return "";
 }
 
 function isLinkPreviewXep0363FilePath(pathname: string): boolean {
