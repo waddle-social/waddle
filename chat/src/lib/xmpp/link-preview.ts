@@ -78,7 +78,7 @@ function parseLookupResponse(xml: string, requestedUrl: string): LinkPreviewLook
   const normalizedUrl = preview.getAttribute("normalized-url")?.trim();
   const expiresAt = preview.getAttribute("expires-at")?.trim();
   if (!token || !originalUrl || !normalizedUrl || !expiresAt) return null;
-  if (originalUrl !== requestedUrl) return null;
+  if (!urlsMatchSemantically(originalUrl, requestedUrl)) return null;
   if (!isEligiblePreviewUrl(originalUrl) || !isEligiblePreviewUrl(normalizedUrl)) return null;
   return {
     token,
@@ -97,6 +97,22 @@ function isEligiblePreviewUrl(value: string): boolean {
     return url.protocol === "https:" && url.hostname.includes(".");
   } catch {
     return false;
+  }
+}
+
+function urlsMatchSemantically(a: string, b: string): boolean {
+  const canonicalA = canonicalUrl(a);
+  const canonicalB = canonicalUrl(b);
+  return canonicalA && canonicalB
+    ? canonicalA === canonicalB
+    : a === b;
+}
+
+function canonicalUrl(value: string): string | null {
+  try {
+    return new URL(value).href;
+  } catch {
+    return null;
   }
 }
 
