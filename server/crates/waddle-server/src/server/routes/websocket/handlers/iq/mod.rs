@@ -23,7 +23,10 @@ use waddle_xmpp::{
             is_role_change_query, parse_admin_query,
         },
         owner::build_config_form,
-        room_actor::{ApplyAdminItems, GetAdminContext, GetSnapshot, PingSelfCheck, UpdateConfig},
+        room_actor::{
+            ApplyAdminItems, GetAdminContext, GetOccupantByJid, GetSnapshot, PingSelfCheck,
+            UpdateConfig,
+        },
         DATA_FORMS_NS,
     },
     presence::subscription::{
@@ -80,6 +83,7 @@ pub(crate) mod errors;
 mod extension_forms;
 mod jingle_muji_gate;
 mod last_activity;
+mod link_preview_lookup;
 mod mentions_permissions;
 mod misc;
 mod muc_admin;
@@ -112,6 +116,7 @@ use extension_forms::{
     CommandBoundary, EXTENSION_COMMAND_FORM_TYPE, EXTENSION_ROUTE_FORM_TYPE,
 };
 use last_activity::handle_last_activity_iq;
+use link_preview_lookup::{handle_link_preview_lookup_iq, is_link_preview_lookup_iq};
 use mentions_permissions::{handle_mentions_permissions_iq, is_mentions_permissions_iq};
 use muc_owner_config::apply_muc_owner_config;
 use muc_owner_moderation::handle_muc_owner_and_moderation_iq;
@@ -274,6 +279,19 @@ pub async fn handle_iq_with_conn_state(
     if is_isr_token_request(&iq) {
         return handle_isr_token_request_iq(&iq, state, authenticated_session, phase.bound_jid())
             .await;
+    }
+
+    if is_link_preview_lookup_iq(&iq) {
+        return handle_link_preview_lookup_iq(
+            &iq,
+            phase.bound_jid(),
+            state,
+            muc_domain,
+            response_from,
+            response_to,
+            state.deps.occupant_id_secret.key(),
+        )
+        .await;
     }
 
     if payload_ns == ROSTER_NS {

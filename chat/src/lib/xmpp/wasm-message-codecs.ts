@@ -1,4 +1,4 @@
-import type { ExtensionAnnotation, ExtensionLaunchDescriptor, ExtensionPayloadElement } from "@/lib/chat-ui";
+import type { ExtensionAnnotation, ExtensionLaunchDescriptor, ExtensionPayloadElement, LinkPreview } from "@/lib/chat-ui";
 import type { MarkupSpan, MessageReference } from "@/lib/rich-message";
 import type { RichInlineStyle } from "@/lib/rich-message/types";
 
@@ -24,6 +24,7 @@ import type {
   WasmPresence,
   WasmReference,
   WasmSendOptions,
+  WasmLinkPreview,
   WasmSharedFile,
 } from "./wasm-types";
 
@@ -144,6 +145,15 @@ function sharedFileFromWasm(file: WasmSharedFile): SharedFileInfo {
     ...(typeof file.width === "number" ? { width: file.width } : {}),
     ...(typeof file.height === "number" ? { height: file.height } : {}),
     ...(file.encrypted ? { encrypted: encryptedFromWasm(file.encrypted) } : {}),
+  };
+}
+
+function linkPreviewFromWasm(preview: WasmLinkPreview): LinkPreview {
+  return {
+    originalUrl: preview.original_url,
+    ...(preview.normalized_url ? { normalizedUrl: preview.normalized_url } : {}),
+    ...(preview.title ? { title: preview.title } : {}),
+    ...(preview.description ? { description: preview.description } : {}),
   };
 }
 
@@ -380,19 +390,20 @@ export function roomMessageFromArchived(
     };
   }
   const sharedFiles = message.shared_files ?? [];
+  const linkPreviews = message.link_previews ?? [];
   const mentionUris = message.mention_uris ?? [];
   const markupSpans = message.markup_spans ?? [];
   const references = message.references ?? [];
   const extensionAnnotations = extensionAnnotationsFromWasm(message.extension_envelope);
   // XEP-0201 `<thread/>` is scope metadata, not content. A stanza that
   // carries only a thread reference (no body, no subject, no attachments,
-  // no extension annotations, no forum-post payload, not a retraction)
+  // no link preview, no extension annotations, no forum-post payload, not a retraction)
   // is a chat-state / displayed-marker / etc. echoed inside a thread per
   // XEP-0201 §3 — it MUST drop here so it never materialises as an empty
   // row inside the thread panel. The server-side `is_archivable` already
   // refuses to persist these; this is the defence-in-depth pass for
   // foreign servers and legacy archive rows.
-  if (!message.body && !message.subject && !sharedFiles.length && !extensionAnnotations.length && !message.forum_post_kind && !message.is_retracted) {
+  if (!message.body && !message.subject && !sharedFiles.length && !linkPreviews.length && !extensionAnnotations.length && !message.forum_post_kind && !message.is_retracted) {
     return null;
   }
   const base: LiveRoomMessage = {
@@ -426,6 +437,7 @@ export function roomMessageFromArchived(
       : {}),
     ...(references.length ? { references: references.map(referenceFromWasm) } : {}),
     ...(sharedFiles.length ? { sharedFiles: sharedFiles.map(sharedFileFromWasm) } : {}),
+    ...(linkPreviews.length ? { linkPreviews: linkPreviews.map(linkPreviewFromWasm) } : {}),
     ...(extensionAnnotations.length ? { extensionAnnotations } : {}),
     ...(message.extension_body_fallback && extensionAnnotations.length ? { extensionBodyFallback: true } : {}),
     ...(message.is_sticker ? { isSticker: true } : {}),
@@ -487,6 +499,7 @@ export function dmMessageFromArchived(
     };
   }
   const sharedFiles = message.shared_files ?? [];
+  const linkPreviews = message.link_previews ?? [];
   const mentionUris = message.mention_uris ?? [];
   const markupSpans = message.markup_spans ?? [];
   const references = message.references ?? [];
@@ -497,7 +510,7 @@ export function dmMessageFromArchived(
   // metadata, not content. DMs don't currently surface threads in the UI
   // anyway, but the codec stays symmetric with the room path so a stray
   // foreign-server archive row can't manifest a bodyless DM ghost either.
-  if (!message.body && !message.subject && !sharedFiles.length && !extensionAnnotations.length && !message.is_retracted) return null;
+  if (!message.body && !message.subject && !sharedFiles.length && !linkPreviews.length && !extensionAnnotations.length && !message.is_retracted) return null;
   const base: LiveDmMessage = {
     id: dmPrimaryId,
     archiveId: message.mam_id,
@@ -523,6 +536,7 @@ export function dmMessageFromArchived(
       : {}),
     ...(references.length ? { references: references.map(referenceFromWasm) } : {}),
     ...(sharedFiles.length ? { sharedFiles: sharedFiles.map(sharedFileFromWasm) } : {}),
+    ...(linkPreviews.length ? { linkPreviews: linkPreviews.map(linkPreviewFromWasm) } : {}),
     ...(extensionAnnotations.length ? { extensionAnnotations } : {}),
     ...(message.extension_body_fallback && extensionAnnotations.length ? { extensionBodyFallback: true } : {}),
     ...(message.is_sticker ? { isSticker: true } : {}),
@@ -576,6 +590,9 @@ export function buildWasmSendOptions(
     wasmOpts.thread = { id: maybeGroupOpts.threadReply.threadId, parent: maybeGroupOpts.parentThreadId };
   } else if (opts.threadId) {
     wasmOpts.thread = { id: opts.threadId, ...(opts.parentThreadId ? { parent: opts.parentThreadId } : {}) };
+  }
+  if (opts.linkPreviewToken?.trim()) {
+    wasmOpts.link_preview_token = opts.linkPreviewToken.trim();
   }
   if (opts.files?.length) {
     wasmOpts.shared_files = opts.files.map((file) => ({

@@ -72,6 +72,162 @@ fn data_form_value_for_test(frame: &str, var: &str) -> Option<String> {
     Some(value[..close].to_string())
 }
 
+async fn link_preview_lookup_for_test(
+    state: &WebSocketState,
+    session: Session,
+    bound_jid: &FullJid,
+    frame: &str,
+) -> Vec<String> {
+    let mut carbons_enabled = false;
+    let mut roster_interested = false;
+    let mut blocklist_interested = false;
+    let mut conn_state = IqConnState {
+        carbons_enabled: &mut carbons_enabled,
+        roster_interested: &mut roster_interested,
+        blocklist_interested: &mut blocklist_interested,
+        state_machine: None,
+    };
+    handle_iq_with_conn_state(
+        parse_iq_for_test(frame),
+        "example.com",
+        "muc.example.com",
+        state,
+        &Some(session),
+        &ready_phase(bound_jid),
+        &mut conn_state,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn link_preview_lookup_dispatch_returns_scoped_text_metadata() {
+    let state = create_test_websocket_state().await;
+    let session = create_test_session(state.as_ref(), "alice").await;
+    let bound_jid: FullJid = "alice@example.com/desktop".parse().expect("jid");
+    let frame = "\
+        <iq xmlns='jabber:client' type='get' id='preview-1' from='alice@example.com/desktop' to='example.com'>\
+          <lookup xmlns='urn:waddle:link-preview:0'>\
+            <url>https://example.com/article</url>\
+            <scope>bob@example.com</scope>\
+          </lookup>\
+        </iq>";
+
+    let responses = link_preview_lookup_for_test(state.as_ref(), session, &bound_jid, frame).await;
+
+    let response = responses.first().expect("lookup result");
+    assert!(
+        response.contains("id='preview-1'"),
+        "preserves iq id: {response}"
+    );
+    assert!(
+        response.contains("from='example.com'")
+            && response.contains("to='alice@example.com/desktop'"),
+        "stamps result addressing from request envelope: {response}"
+    );
+    assert!(
+        response.contains("status='ready'"),
+        "ready lookup: {response}"
+    );
+    assert!(
+        response.contains("original-url='https://example.com/article'"),
+        "text preview includes original URL: {response}"
+    );
+    assert!(
+        response.contains("token='"),
+        "ready lookup mints scoped token: {response}"
+    );
+}
+
+#[tokio::test]
+async fn link_preview_lookup_for_muc_scope_requires_current_occupant() {
+    let state = create_test_websocket_state().await;
+    let session = create_test_session(state.as_ref(), "alice").await;
+    let bound_jid: FullJid = "alice@example.com/desktop".parse().expect("jid");
+    let frame = "\
+        <iq xmlns='jabber:client' type='get' id='preview-denied-1' from='alice@example.com/desktop' to='example.com'>\
+          <lookup xmlns='urn:waddle:link-preview:0'>\
+            <url>https://example.com/article</url>\
+            <scope>private@muc.example.com</scope>\
+          </lookup>\
+        </iq>";
+
+    let responses = link_preview_lookup_for_test(state.as_ref(), session, &bound_jid, frame).await;
+
+    let response = responses.first().expect("lookup error");
+    assert!(
+        response.contains("id='preview-denied-1'"),
+        "preserves iq id: {response}"
+    );
+    assert!(
+        response.contains("type='error'"),
+        "returns iq error: {response}"
+    );
+    assert!(
+        response.contains("<forbidden"),
+        "non-occupant MUC scope is forbidden: {response}"
+    );
+    assert!(
+        !response.contains("token='"),
+        "forbidden lookup must not mint token: {response}"
+    );
+}
+
+#[tokio::test]
+async fn link_preview_lookup_for_muc_scope_allows_current_occupant_with_room_scoped_token() {
+    let state = create_test_websocket_state().await;
+    let session = create_test_session(state.as_ref(), "alice").await;
+    let bound_jid: FullJid = "alice@example.com/desktop".parse().expect("jid");
+    let room_jid: jid::BareJid = "private@muc.example.com".parse().expect("room jid");
+    let room_actor = get_or_create_room_actor(
+        state.as_ref(),
+        &room_jid,
+        waddle_xmpp::muc::RoomConfig::default(),
+        "space".to_string(),
+        "private".to_string(),
+    )
+    .await
+    .expect("create room");
+    room_actor
+        .ask(JoinWithAffiliation {
+            sender_jid: bound_jid.clone(),
+            nick: "alice".to_string(),
+            effective_affiliation: Affiliation::Member,
+            local_domain: "example.com".to_string(),
+        })
+        .await
+        .expect("join room");
+    let frame = "\
+        <iq xmlns='jabber:client' type='get' id='preview-muc-1' from='alice@example.com/desktop' to='example.com'>\
+          <lookup xmlns='urn:waddle:link-preview:0'>\
+            <url>https://example.com/article</url>\
+            <scope>private@muc.example.com</scope>\
+          </lookup>\
+        </iq>";
+
+    let responses = link_preview_lookup_for_test(state.as_ref(), session, &bound_jid, frame).await;
+
+    let response = responses.first().expect("lookup result");
+    let elem: Element = response.parse().expect("lookup xml");
+    let lookup = elem
+        .get_child("lookup", waddle_xmpp::xep::NS_WADDLE_LINK_PREVIEW)
+        .expect("lookup result");
+    assert_eq!(lookup.attr("status"), Some("ready"));
+    let preview = lookup
+        .get_child("preview", waddle_xmpp::xep::NS_WADDLE_LINK_PREVIEW)
+        .expect("preview");
+    let token =
+        waddle_xmpp::xep::LinkPreviewToken::new(preview.attr("token").expect("token").to_string())
+            .expect("token");
+    let decoded = waddle_xmpp::xep::decode_link_preview_token(
+        &token,
+        state.deps.occupant_id_secret.key(),
+        i64::MIN,
+    )
+    .expect("token payload");
+    assert_eq!(decoded.sender_jid.to_string(), "alice@example.com");
+    assert_eq!(decoded.scope_jid, room_jid);
+}
+
 /// Build a `<command/>` payload Element addressed at a XEP-0050
 /// component. Wraps it in a `<x type='submit'>` data form when one is
 /// provided so the call sites stay declarative.

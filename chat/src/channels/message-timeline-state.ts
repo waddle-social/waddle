@@ -65,6 +65,19 @@ function mergeMissingThreadMetadata(
   return next;
 }
 
+function mergeAuthoritativeLinkPreviews(
+  existing: TimelineMessage,
+  incoming: TimelineMessage,
+): TimelineMessage {
+  if (Object.prototype.hasOwnProperty.call(incoming, "linkPreviews")) {
+    return { ...existing, linkPreviews: incoming.linkPreviews };
+  }
+  if (!existing.linkPreviews) return existing;
+  const next = { ...existing };
+  delete next.linkPreviews;
+  return next;
+}
+
 export function retractChannelTimelineMessage(
   existing: TimelineMessage,
   retractionId?: string,
@@ -78,6 +91,7 @@ export function retractChannelTimelineMessage(
   delete next.markup;
   delete next.references;
   delete next.sharedFiles;
+  delete next.linkPreviews;
   delete next.extensionAnnotations;
   delete next.extensionBodyFallback;
   delete next.isSticker;
@@ -112,7 +126,7 @@ function mergeRetractionTombstone(
       createdAtSource: authoritativeTimestamp.createdAtSource,
     };
   }
-  return result;
+  return incoming.isRetracted ? result : mergeAuthoritativeLinkPreviews(result, incoming);
 }
 
 export interface TimelineBuildOptions {
@@ -313,6 +327,7 @@ export function buildChannelTimelineFromMamResults(params: {
       || msg.isRetracted
       || (msg.sharedFiles && msg.sharedFiles.length > 0)
       || msg.isSticker
+      || (msg.linkPreviews && msg.linkPreviews.length > 0)
       || msg.replyTo
       || msg.forumPostKind
       || (msg.extensionAnnotations && msg.extensionAnnotations.length > 0)

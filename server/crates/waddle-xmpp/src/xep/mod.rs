@@ -197,10 +197,12 @@ pub mod xep0492;
 pub mod xep0500;
 pub mod xep0502;
 pub mod xep0503;
+pub mod xep0511;
 pub mod xep0513;
 pub mod xep_waddle_dm_bookmarks;
 pub mod xep_waddle_dnd;
 pub mod xep_waddle_forums;
+pub mod xep_waddle_link_preview;
 pub mod xep_waddle_livekit_transport;
 pub mod xep_waddle_pin;
 

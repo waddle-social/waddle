@@ -422,6 +422,16 @@ pub fn build_outbound_message(
             }
         }
     }
+    if let Some(token) = options.link_preview_token.as_ref() {
+        builder = builder.append(
+            Element::builder("preview-request", NS_WADDLE_LINK_PREVIEW)
+                .attr(
+                    minidom::rxml::xml_ncname!("token").to_owned(),
+                    token.as_str(),
+                )
+                .build(),
+        );
+    }
     Ok((stanza_id, builder.build()))
 }
 

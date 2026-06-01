@@ -36,6 +36,7 @@ export function fromLiveDmMessage(
   if (msg.markup?.length) tm.markup = msg.markup;
   if (msg.references?.length) tm.references = msg.references;
   if (msg.sharedFiles && msg.sharedFiles.length > 0) tm.sharedFiles = msg.sharedFiles;
+  if (msg.linkPreviews && msg.linkPreviews.length > 0) tm.linkPreviews = msg.linkPreviews;
   if (msg.extensionAnnotations && msg.extensionAnnotations.length > 0) tm.extensionAnnotations = msg.extensionAnnotations;
   if (msg.extensionBodyFallback) tm.extensionBodyFallback = true;
   if (msg.isSticker) tm.isSticker = true;
@@ -110,6 +111,7 @@ export function retractDmTimelineMessage(
   delete next.markup;
   delete next.references;
   delete next.sharedFiles;
+  delete next.linkPreviews;
   delete next.extensionAnnotations;
   delete next.extensionBodyFallback;
   delete next.isSticker;
@@ -146,7 +148,16 @@ function mergeDmRetractionTombstone(
       createdAtSource: authoritativeTimestamp.createdAtSource,
     };
   }
-  return result;
+  if (incoming.isRetracted) return result;
+  if (Object.prototype.hasOwnProperty.call(incoming, "linkPreviews")) {
+    return { ...result, linkPreviews: incoming.linkPreviews };
+  }
+  if (!result.linkPreviews) {
+    return result;
+  }
+  const next = { ...result };
+  delete next.linkPreviews;
+  return next;
 }
 
 export function buildDmTimelineFromMamResults(params: {
@@ -187,6 +198,7 @@ export function buildDmTimelineFromMamResults(params: {
       || msg.isRetracted
       || (msg.sharedFiles && msg.sharedFiles.length > 0)
       || msg.isSticker
+      || (msg.linkPreviews && msg.linkPreviews.length > 0)
       || (msg.extensionAnnotations && msg.extensionAnnotations.length > 0)
     ) {
       regular.push(msg);

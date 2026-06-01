@@ -67,6 +67,7 @@ const {
 } = useMessageAttachments(messageRef);
 
 const extensionAnnotations = computed(() => props.message.extensionAnnotations ?? []);
+const linkPreviews = computed(() => props.message.linkPreviews ?? []);
 const extensionCards = computed(() =>
   extensionAnnotations.value.map((annotation) => ({
     annotation,
@@ -95,6 +96,23 @@ const toolActionChips = computed<ToolActionChip[]>(() => {
   }
   return chips;
 });
+
+function linkPreviewHost(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return url;
+  }
+}
+
+function linkPreviewHref(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "https:" ? parsed.toString() : null;
+  } catch {
+    return null;
+  }
+}
 
 const {
   actionState: extensionActionState,
@@ -195,6 +213,23 @@ watch(
          Tool-intent annotations from ANY number of extensions collapse
          into a single horizontal action-chip strip beneath this block.
          No fat boxes fanning out below the message. -->
+    <a
+      v-for="preview in linkPreviews"
+      :key="`${preview.originalUrl}:${preview.normalizedUrl ?? ''}`"
+      :href="linkPreviewHref(preview.originalUrl) ?? undefined"
+      target="_blank"
+      rel="noopener noreferrer"
+      class="flex max-w-xl flex-col gap-1 rounded-md border border-border bg-muted/40 p-3 text-left transition-colors hover:border-primary/50 hover:bg-muted/60"
+      @click.stop
+    >
+      <span class="type-meta flex items-center gap-1 text-muted-foreground">
+        <ExternalLink aria-hidden="true" class="h-3.5 w-3.5" />
+        {{ linkPreviewHost(preview.originalUrl) }}
+      </span>
+      <span v-if="preview.title" class="type-field text-foreground">{{ preview.title }}</span>
+      <span v-if="preview.description" class="type-caption line-clamp-2 text-muted-foreground">{{ preview.description }}</span>
+    </a>
+
     <section
       v-for="card in eventCards"
       :key="`${card.annotation.extensionId}:${card.annotation.annotationId}`"
@@ -220,7 +255,7 @@ watch(
           v-if="card.presentation.primaryUrl && !compact"
           :href="card.presentation.primaryUrl"
           target="_blank"
-          rel="noreferrer"
+          rel="noopener noreferrer"
           class="chat-system-band__title-link"
           @click.stop
         >

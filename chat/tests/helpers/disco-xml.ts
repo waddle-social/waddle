@@ -42,6 +42,23 @@ export async function withFakeDomParser(run: () => Promise<void>): Promise<void>
   }
 }
 
+export async function withFakeXmlDocument(run: () => Promise<void>): Promise<void> {
+  const originalDocument = globalThis.document;
+  const originalXmlSerializer = globalThis.XMLSerializer;
+  globalThis.document = {
+    implementation: {
+      createDocument: (_namespace: string, rootName: string) => new FakeStructuredXmlDocument(rootName),
+    },
+  } as unknown as Document;
+  globalThis.XMLSerializer = FakeXmlSerializer as typeof XMLSerializer;
+  try {
+    await run();
+  } finally {
+    globalThis.document = originalDocument;
+    globalThis.XMLSerializer = originalXmlSerializer;
+  }
+}
+
 class FakeDOMParser {
   parseFromString(xml: string): Document {
     return parseTestXml(xml) as unknown as Document;
@@ -120,4 +137,75 @@ function attributesFromTag(tagBody: string): Record<string, string> {
     attrs[match[1]] = match[2];
   }
   return attrs;
+}
+
+class FakeStructuredXmlDocument {
+  readonly documentElement: FakeStructuredXmlElement;
+
+  constructor(rootName: string) {
+    this.documentElement = new FakeStructuredXmlElement(rootName, null);
+  }
+
+  createElementNS(namespaceURI: string, name: string): FakeStructuredXmlElement {
+    return new FakeStructuredXmlElement(name, namespaceURI);
+  }
+
+  createTextNode(value: string): FakeStructuredXmlText {
+    return new FakeStructuredXmlText(value);
+  }
+}
+
+class FakeStructuredXmlElement {
+  readonly attrs: Record<string, string> = {};
+  readonly children: Array<FakeStructuredXmlElement | FakeStructuredXmlText> = [];
+
+  constructor(
+    readonly localName: string,
+    readonly namespaceURI: string | null,
+  ) {}
+
+  setAttribute(name: string, value: string): void {
+    this.attrs[name] = value;
+  }
+
+  appendChild(
+    child: FakeStructuredXmlElement | FakeStructuredXmlText,
+  ): FakeStructuredXmlElement | FakeStructuredXmlText {
+    this.children.push(child);
+    return child;
+  }
+}
+
+class FakeStructuredXmlText {
+  constructor(readonly textContent: string) {}
+}
+
+class FakeXmlSerializer {
+  serializeToString(node: FakeStructuredXmlElement): string {
+    return serializeFakeXmlElement(node, null);
+  }
+}
+
+function serializeFakeXmlElement(node: FakeStructuredXmlElement, parentNamespace: string | null): string {
+  const namespaceAttr = node.namespaceURI && node.namespaceURI !== parentNamespace
+    ? ` xmlns="${escapeTestXml(node.namespaceURI)}"`
+    : "";
+  const attrs = Object.entries(node.attrs)
+    .map(([name, value]) => ` ${name}="${escapeTestXml(value)}"`)
+    .join("");
+  const children = node.children.map((child) =>
+    child instanceof FakeStructuredXmlText
+      ? escapeTestXml(child.textContent)
+      : serializeFakeXmlElement(child, node.namespaceURI),
+  ).join("");
+  return `<${node.localName}${namespaceAttr}${attrs}>${children}</${node.localName}>`;
+}
+
+function escapeTestXml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&apos;");
 }

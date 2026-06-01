@@ -88,6 +88,37 @@ describe("useMucSend.sendMessage — happy path", () => {
     expect(h.send.isSending.value).toBe(false);
     expect(h.onSendComplete).toHaveBeenCalledTimes(1);
   });
+
+  test("looks up first eligible HTTPS URL and sends scoped preview token", async () => {
+    const sendGroupMessage = mock(async () => ({ id: "sid-link", state: "sending" }));
+    const lookupLinkPreview = mock(async () => ({
+      token: "preview-token-1",
+      originalUrl: "https://example.com/article",
+      normalizedUrl: "https://example.com/article",
+      status: "ready" as const,
+      expiresAt: "2026-06-01T12:05:00.000Z",
+      title: "Example Article",
+      description: "Plain text summary",
+    }));
+    const client = makeClient({ sendGroupMessage, lookupLinkPreview } as Partial<BrowserXmppClient>);
+    const h = harness({ client, draft: "read https://example.com/article and https://later.example/path" });
+
+    await h.send.sendMessage(undefined, []);
+
+    expect(lookupLinkPreview).toHaveBeenCalledWith(
+      "read https://example.com/article and https://later.example/path",
+      "general@muc.example.com",
+    );
+    const call = (sendGroupMessage as unknown as ReturnType<typeof mock>).mock.calls[0]!;
+    expect(call[3].linkPreviewToken).toBe("preview-token-1");
+    expect(call[3].linkPreviewExpiresAt).toBe("2026-06-01T12:05:00.000Z");
+    expect(h.messages.value[0]?.linkPreviews).toEqual([{
+      originalUrl: "https://example.com/article",
+      normalizedUrl: "https://example.com/article",
+      title: "Example Article",
+      description: "Plain text summary",
+    }]);
+  });
 });
 
 describe("useMucSend.sendMessage — guards", () => {

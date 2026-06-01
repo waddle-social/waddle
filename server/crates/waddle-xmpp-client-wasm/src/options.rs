@@ -52,6 +52,11 @@ pub(crate) fn send_options_from_js(options: JsValue) -> Result<SendMessageOption
             id: thread.id,
             parent: thread.parent,
         }),
+        link_preview_token: options
+            .link_preview_token
+            .map(LinkPreviewToken::new)
+            .transpose()
+            .map_err(|err| js_error(err.to_string()))?,
         markup_spans: options
             .markup_spans
             .into_iter()

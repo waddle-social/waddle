@@ -457,6 +457,280 @@ fn parse_message_extracts_references_for_data_type() {
 }
 
 #[test]
+fn parse_message_extracts_xep0511_link_preview() {
+    let e = el(
+        "<message xmlns='jabber:client' type='groupchat' id='m-link'>\
+           <body>see https://the.link.example.com/what-was-linked-to</body>\
+           <rdf:Description xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#' xmlns:og='https://ogp.me/ns#' rdf:about='https://the.link.example.com/what-was-linked-to'>\
+             <og:title>The Best Webpage</og:title>\
+             <og:description>This is a great webpage and you will really like it</og:description>\
+             <og:url>https://example.com/canonical-url/for/what-was-linked-to</og:url>\
+           </rdf:Description>\
+         </message>",
+    );
+    let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+        panic!("expected Message");
+    };
+    assert_eq!(msg.link_previews.len(), 1);
+    assert_eq!(
+        msg.link_previews[0].original_url.as_str(),
+        "https://the.link.example.com/what-was-linked-to"
+    );
+    assert_eq!(
+        msg.link_previews[0]
+            .normalized_url
+            .as_ref()
+            .map(url::Url::as_str),
+        Some("https://example.com/canonical-url/for/what-was-linked-to")
+    );
+    assert_eq!(
+        msg.link_previews[0].title.as_deref(),
+        Some("The Best Webpage")
+    );
+}
+
+#[test]
+fn parse_message_rejects_xep0511_link_preview_with_unsafe_scheme() {
+    let e = el(
+        "<message xmlns='jabber:client' type='groupchat' id='m-link'>\
+           <body>see this</body>\
+           <rdf:Description xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#' xmlns:og='https://ogp.me/ns#' rdf:about='javascript:alert(1)'>\
+             <og:title>Bad</og:title>\
+           </rdf:Description>\
+         </message>",
+    );
+    let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+        panic!("expected Message");
+    };
+    assert!(msg.link_previews.is_empty());
+}
+
+#[test]
+fn parse_message_rejects_xep0511_link_preview_for_non_first_body_url() {
+    let e = el(
+        "<message xmlns='jabber:client' type='groupchat' id='m-link'>\
+           <body>first https://first.example.com/ then https://second.example.com/</body>\
+           <rdf:Description xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#' xmlns:og='https://ogp.me/ns#' rdf:about='https://second.example.com/'>\
+             <og:title>Second</og:title>\
+           </rdf:Description>\
+         </message>",
+    );
+    let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+        panic!("expected Message");
+    };
+    assert!(msg.link_previews.is_empty());
+}
+
+#[test]
+fn parse_message_ignores_reply_fallback_url_when_matching_xep0511_preview() {
+    let fallback_prefix = "&gt; quoted \u{1f642} https://quoted.example.com/\n";
+    let fallback_text = "> quoted \u{1f642} https://quoted.example.com/\n";
+    let e = el(&format!(
+        "<message xmlns='jabber:client' type='groupchat' id='m-link'>\
+           <body>{fallback_prefix}see https://current.example.com/</body>\
+           <reply xmlns='urn:xmpp:reply:0' id='orig-id' to='alice@example.com'/>\
+           <fallback xmlns='urn:xmpp:fallback:0' for='urn:xmpp:reply:0'>\
+             <body start='0' end='{}'/>\
+           </fallback>\
+           <rdf:Description xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#' xmlns:og='https://ogp.me/ns#' rdf:about='https://current.example.com/'>\
+             <og:title>Current</og:title>\
+           </rdf:Description>\
+         </message>",
+        fallback_text.encode_utf16().count()
+    ));
+    let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+        panic!("expected Message");
+    };
+    assert_eq!(msg.link_previews.len(), 1);
+    assert_eq!(
+        msg.link_previews[0].original_url.as_str(),
+        "https://current.example.com/"
+    );
+}
+
+#[test]
+fn parse_message_strips_multiple_reply_fallback_ranges_before_matching_xep0511_preview() {
+    let fallback_prefix = "&gt; quoted https://quoted.example.com/\n";
+    let visible_body = "see https://current.example.com/";
+    let fallback_suffix = "\n&gt; more https://later.example.com/";
+    let body = format!("{fallback_prefix}{visible_body}{fallback_suffix}");
+    let first_end = "> quoted https://quoted.example.com/\n"
+        .encode_utf16()
+        .count();
+    let second_start = first_end + visible_body.encode_utf16().count();
+    let second_end = second_start + "\n> more https://later.example.com/".encode_utf16().count();
+    let e = el(&format!(
+        "<message xmlns='jabber:client' type='groupchat' id='m-link'>\
+           <body>{body}</body>\
+           <reply xmlns='urn:xmpp:reply:0' id='orig-id' to='alice@example.com'/>\
+           <fallback xmlns='urn:xmpp:fallback:0' for='urn:xmpp:reply:0'>\
+             <body start='0' end='{first_end}'/>\
+             <body start='{second_start}' end='{second_end}'/>\
+           </fallback>\
+           <rdf:Description xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#' xmlns:og='https://ogp.me/ns#' rdf:about='https://current.example.com/'>\
+             <og:title>Current</og:title>\
+           </rdf:Description>\
+         </message>"
+    ));
+    let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+        panic!("expected Message");
+    };
+
+    assert_eq!(msg.link_previews.len(), 1);
+    assert_eq!(
+        msg.link_previews[0].original_url.as_str(),
+        "https://current.example.com/"
+    );
+}
+
+#[test]
+fn parse_message_rejects_xep0511_preview_when_only_body_url_is_reply_fallback() {
+    let e = el(
+        "<message xmlns='jabber:client' type='groupchat' id='m-link'>\
+           <body>https://quoted.example.com/</body>\
+           <reply xmlns='urn:xmpp:reply:0' id='orig-id' to='alice@example.com'/>\
+           <fallback xmlns='urn:xmpp:fallback:0' for='urn:xmpp:reply:0'>\
+             <body/>\
+           </fallback>\
+           <rdf:Description xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#' xmlns:og='https://ogp.me/ns#' rdf:about='https://quoted.example.com/'>\
+             <og:title>Quoted</og:title>\
+           </rdf:Description>\
+         </message>",
+    );
+    let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+        panic!("expected Message");
+    };
+
+    assert!(msg.link_previews.is_empty());
+}
+
+#[test]
+fn parse_message_extracts_xep0511_link_preview_for_wrapped_first_body_url() {
+    let e = el(
+        "<message xmlns='jabber:client' type='groupchat' id='m-link'>\
+           <body>see (https://the.link.example.com/what-was-linked-to).</body>\
+           <rdf:Description xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#' xmlns:og='https://ogp.me/ns#' rdf:about='https://the.link.example.com/what-was-linked-to'>\
+             <og:title>The Best Webpage</og:title>\
+           </rdf:Description>\
+         </message>",
+    );
+    let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+        panic!("expected Message");
+    };
+    assert_eq!(msg.link_previews.len(), 1);
+    assert_eq!(
+        msg.link_previews[0].original_url.as_str(),
+        "https://the.link.example.com/what-was-linked-to"
+    );
+}
+
+#[test]
+fn parse_message_extracts_xep0511_link_preview_for_inline_punctuation_prefixed_body_url() {
+    let e = el(
+        "<message xmlns='jabber:client' type='groupchat' id='m-link'>\
+           <body>see:https://the.link.example.com/what-was-linked-to</body>\
+           <rdf:Description xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#' xmlns:og='https://ogp.me/ns#' rdf:about='https://the.link.example.com/what-was-linked-to'>\
+             <og:title>The Best Webpage</og:title>\
+           </rdf:Description>\
+         </message>",
+    );
+    let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+        panic!("expected Message");
+    };
+    assert_eq!(msg.link_previews.len(), 1);
+    assert_eq!(
+        msg.link_previews[0].original_url.as_str(),
+        "https://the.link.example.com/what-was-linked-to"
+    );
+}
+
+#[test]
+fn parse_message_extracts_xep0511_link_preview_for_quoted_first_body_url() {
+    let e = el(
+        "<message xmlns='jabber:client' type='groupchat' id='m-link'>\
+           <body>see &quot;https://example.com&quot;</body>\
+           <rdf:Description xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#' xmlns:og='https://ogp.me/ns#' rdf:about='https://example.com/'>\
+             <og:title>Example</og:title>\
+           </rdf:Description>\
+         </message>",
+    );
+    let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+        panic!("expected Message");
+    };
+    assert_eq!(msg.link_previews.len(), 1);
+    assert_eq!(
+        msg.link_previews[0].original_url.as_str(),
+        "https://example.com/"
+    );
+}
+
+#[test]
+fn parse_message_extracts_bodyless_xep0511_link_preview() {
+    let e = el(
+        "<message xmlns='jabber:client' type='groupchat' id='m-link'>\
+           <rdf:Description xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#' xmlns:og='https://ogp.me/ns#' rdf:about='https://example.com/article'>\
+             <og:title>Example</og:title>\
+           </rdf:Description>\
+         </message>",
+    );
+    let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+        panic!("expected Message");
+    };
+    assert_eq!(msg.link_previews.len(), 1);
+    assert_eq!(
+        msg.link_previews[0].original_url.as_str(),
+        "https://example.com/article"
+    );
+}
+
+#[test]
+fn parse_message_rejects_bodyless_xep0511_link_preview_for_host_without_dot() {
+    let e = el(
+        "<message xmlns='jabber:client' type='groupchat' id='m-link'>\
+           <rdf:Description xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#' xmlns:og='https://ogp.me/ns#' rdf:about='https://localhost/article'>\
+             <og:title>Localhost</og:title>\
+           </rdf:Description>\
+         </message>",
+    );
+    let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+        panic!("expected Message");
+    };
+    assert!(msg.link_previews.is_empty());
+}
+
+#[test]
+fn parse_message_rejects_xep0511_link_preview_with_bare_about_attribute() {
+    let e = el(
+        "<message xmlns='jabber:client' type='groupchat' id='m-link'>\
+           <body>see https://example.com/</body>\
+           <rdf:Description xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#' xmlns:og='https://ogp.me/ns#' about='https://example.com/'>\
+             <og:title>Example</og:title>\
+           </rdf:Description>\
+         </message>",
+    );
+    let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+        panic!("expected Message");
+    };
+    assert!(msg.link_previews.is_empty());
+}
+
+#[test]
+fn parse_message_rejects_xep0511_link_preview_without_rdf_about_attribute() {
+    let e = el(
+        "<message xmlns='jabber:client' type='groupchat' id='m-link'>\
+           <body>see https://example.com/</body>\
+           <rdf:Description xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#' xmlns:og='https://ogp.me/ns#'>\
+             <og:title>Example</og:title>\
+           </rdf:Description>\
+         </message>",
+    );
+    let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+        panic!("expected Message");
+    };
+    assert!(msg.link_previews.is_empty());
+}
+
+#[test]
 fn parse_message_extracts_references_for_mention_type() {
     let e = el(
         "<message xmlns='jabber:client' type='groupchat' id='m-mention'>\
@@ -774,6 +1048,27 @@ fn build_outbound_message_with_shared_files() {
             .and_then(|url_data| url_data.attr("target")),
         Some("https://files.example.com/song.ogg")
     );
+}
+
+#[test]
+fn build_outbound_message_with_link_preview_token_request() {
+    let options = SendMessageOptions {
+        link_preview_token: Some(LinkPreviewToken::new("preview-token-1").expect("token")),
+        ..Default::default()
+    };
+
+    let (_stanza_id, stanza) = build_outbound_message(
+        "room@muc.example",
+        "groupchat",
+        "see https://example.com",
+        &options,
+    )
+    .unwrap();
+
+    let request = stanza
+        .get_child("preview-request", NS_WADDLE_LINK_PREVIEW)
+        .expect("preview request");
+    assert_eq!(request.attr("token"), Some("preview-token-1"));
 }
 
 #[test]

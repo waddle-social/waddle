@@ -137,11 +137,19 @@ export interface WasmMessage {
   forum_thread_title?: string;
   is_sticker: boolean;
   shared_files: WasmSharedFile[];
+  link_previews: WasmLinkPreview[];
   call_event?: CallEvent;
   extension_envelope?: WasmExtensionEnvelope;
   extension_body_fallback?: boolean;
   /** urn:waddle:pin:0 pin/unpin event surfaced by the room (#414). */
   pin_event?: WasmPinEvent;
+}
+
+export interface WasmLinkPreview {
+  original_url: string;
+  normalized_url?: string | null;
+  title?: string | null;
+  description?: string | null;
 }
 
 /** Pin/unpin event from a room system message (#414). */
@@ -355,6 +363,7 @@ export interface WasmSendOptions {
   reply?: { author_jid: string; message_id: string };
   fallback?: { start: number; end: number };
   thread?: { id: string; parent?: string };
+  link_preview_token?: string;
   shared_files?: Array<{
     url: string;
     name?: string;

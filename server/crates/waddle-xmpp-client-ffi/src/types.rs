@@ -279,6 +279,7 @@ pub struct WaddleSendOptions {
     pub fallback: Option<WaddleFallbackRange>,
     pub thread: Option<WaddleThreadTarget>,
     pub shared_files: Vec<WaddleSharedFile>,
+    pub link_preview_token: Option<String>,
 }
 
 // ── A/V calls (XEP-0353 JMI + XEP-0166 Jingle) ──────────────────────────────

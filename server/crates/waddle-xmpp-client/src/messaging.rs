@@ -45,10 +45,10 @@ pub use types::{
     ExtensionLaunchContextData, ExtensionLaunchData, ExtensionNamespace,
     ExtensionPayloadAttributeData, ExtensionPayloadElementData, ExtensionPluginId,
     ExtensionRoomJid, ExtensionSourceData, ExtensionTextId, ExtensionTimestamp, ExtensionXmlName,
-    InboundMessage, InboundPresence, MarkupSpan, MarkupSpanData, MarkupSpanType, MdsDisplayedEntry,
-    MessagingEvent, ModerationPayload, MucAffiliation, MucRole, MujiPresence, PresenceHat,
-    ReactionPayload, ReferenceData, RetractionPayload, SendMessageOptions, SharedFile,
-    SharedFileDisposition,
+    InboundMessage, InboundPresence, InvalidLinkPreviewToken, LinkPreviewData, LinkPreviewToken,
+    MarkupSpan, MarkupSpanData, MarkupSpanType, MdsDisplayedEntry, MessagingEvent,
+    ModerationPayload, MucAffiliation, MucRole, MujiPresence, PresenceHat, ReactionPayload,
+    ReferenceData, RetractionPayload, SendMessageOptions, SharedFile, SharedFileDisposition,
 };
 /// Re-export the xmpp-parsers Jingle types Waddle's call surface
 /// owns so downstream crates (notably the wasm bindings, which

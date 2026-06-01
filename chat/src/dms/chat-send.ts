@@ -6,6 +6,7 @@ import type { OutboundFileAttachment } from "@/lib/xmpp";
 import {
   inferredFileDisposition,
   type DeliveryStatus,
+  type LinkPreview,
   type MarkupSpan,
   type MessageReference,
   type TimelineMessage,
@@ -107,10 +108,23 @@ export function useChatSend(deps: UseChatSendDeps) {
           }
         : undefined;
       const threadId = parent ? (parent.threadId ?? parent.id) : undefined;
+      const linkPreview = typeof client.lookupLinkPreview === "function"
+        ? await client.lookupLinkPreview(bodyText, peerJid)
+        : null;
+      const linkPreviews: LinkPreview[] = linkPreview && linkPreview.status === "ready"
+        ? [{
+            originalUrl: linkPreview.originalUrl,
+            normalizedUrl: linkPreview.normalizedUrl,
+            ...(linkPreview.title ? { title: linkPreview.title } : {}),
+            ...(linkPreview.description ? { description: linkPreview.description } : {}),
+          }]
+        : [];
       const result = await client.sendDirectMessage(peerJid, bodyText, {
         markup,
         references,
         files: attachments,
+        ...(linkPreview?.token ? { linkPreviewToken: linkPreview.token } : {}),
+        ...(linkPreview?.expiresAt ? { linkPreviewExpiresAt: linkPreview.expiresAt } : {}),
         ...(wireReplyTo ? { replyTo: wireReplyTo } : {}),
         ...(threadId ? { threadId } : {}),
       });
@@ -131,6 +145,7 @@ export function useChatSend(deps: UseChatSendDeps) {
             deliveryStatus: (result?.state ?? "sending") as DeliveryStatus,
             ...(markup && markup.length > 0 ? { markup } : {}),
             ...(references && references.length > 0 ? { references } : {}),
+            ...(linkPreviews.length > 0 ? { linkPreviews } : {}),
           };
           if (replyTo && parent) {
             optimistic.replyTo = {

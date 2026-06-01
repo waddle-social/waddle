@@ -224,6 +224,9 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
           createdAt: authoritativeTimestamp.createdAt,
           createdAtSource: authoritativeTimestamp.createdAtSource,
         };
+        if (!Object.prototype.hasOwnProperty.call(msg, "linkPreviews")) {
+          delete updated.linkPreviews;
+        }
         if (mergedIds.wireIds?.length) updated.wireIds = mergedIds.wireIds;
         else delete updated.wireIds;
         if (m.isSelf && msg.isSelf) {

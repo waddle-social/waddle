@@ -41,6 +41,13 @@ export interface TimelineSharedFile {
   encrypted?: WaddleEncryptedFile;
 }
 
+export interface LinkPreview {
+  originalUrl: string;
+  normalizedUrl?: string;
+  title?: string;
+  description?: string;
+}
+
 export type ExtensionSurfaceKind =
   | "message-card"
   | "board"
@@ -184,6 +191,8 @@ export interface TimelineMessage {
   isSticker?: boolean;
   /** XEP-0446/0447: Shared files (zero or more attachments). */
   sharedFiles?: TimelineSharedFile[];
+  /** XEP-0511: Link preview metadata stamped into the message payload. */
+  linkPreviews?: LinkPreview[];
   /** Waddle unified extension framework annotations. */
   extensionAnnotations?: ExtensionAnnotation[];
   /** XEP-0428: message body is fallback text for the Waddle extension payload. */
