@@ -8,6 +8,7 @@ import MessageComposer from "@/components/chat/MessageComposer.vue";
 import VirtualTimeline from "@/components/chat/VirtualTimeline.vue";
 import type { ExtensionAnnotationAction, TimelineMessage, MarkupSpan, MessageReference } from "@/lib/chat-ui";
 import type { MentionCandidate } from "@/lib/mentions";
+import type { ComposerLinkPreviewLookup, ComposerLinkPreviewSendPayload } from "@/lib/link-preview-composer";
 import type { OccupantAuthority, OccupantHat, OccupantPresence, RoomAuthority, RoomHats, RoomPresence } from "@/lib/xmpp-client";
 import type { MessageThreadEntry, MessageThreadIndex } from "@/channels/threads";
 import { useScrollDirectionPreference } from "@/preferences/scroll-direction";
@@ -53,6 +54,8 @@ const props = defineProps<{
    */
   hideComposer?: boolean;
   invokeExtensionAction?: (action: ExtensionAnnotationAction) => Promise<unknown>;
+  linkPreviewLookup?: ComposerLinkPreviewLookup | null;
+  linkPreviewScope?: string | null;
 }>();
 
 const emit = defineEmits<{
@@ -66,6 +69,7 @@ const emit = defineEmits<{
     files: Array<File | Blob> | undefined,
     replyTo: { id: string; author: string; body?: string } | undefined,
     threadOverride: { threadId: string; parentThreadId?: string },
+    linkPreview?: ComposerLinkPreviewSendPayload,
   ];
   editMessage: [messageId: string, newBody: string, markup?: MarkupSpan[], references?: MessageReference[]];
   retractMessage: [messageId: string];
@@ -514,7 +518,13 @@ function cancelReplyInThread() {
   replyingTo.value = null;
 }
 
-function onSend(body: string, markup: MarkupSpan[], references: MessageReference[], files?: Array<File | Blob>) {
+function onSend(
+  body: string,
+  markup: MarkupSpan[],
+  references: MessageReference[],
+  files?: Array<File | Blob>,
+  linkPreview?: ComposerLinkPreviewSendPayload,
+) {
   const threadId = activeThreadId.value;
   if (!threadId) return;
   const entry = activeEntry.value;
@@ -529,7 +539,7 @@ function onSend(body: string, markup: MarkupSpan[], references: MessageReference
       : undefined;
   const override: { threadId: string; parentThreadId?: string } = { threadId };
   if (parentThreadId.value) override.parentThreadId = parentThreadId.value;
-  emit("send", body, markup, references, files, effectiveReply, override);
+  emit("send", body, markup, references, files, effectiveReply, override, linkPreview);
   replyingTo.value = null;
   draft.value = "";
 }
@@ -677,6 +687,8 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
         :upload-progress="uploadProgress"
         :replying-to="replyingTo"
         :is-top-pinned="true"
+        :link-preview-lookup="linkPreviewLookup"
+        :link-preview-scope="linkPreviewScope"
         @send="onSend"
         @cancel-reply="cancelReplyInThread"
         @typing="onTyping"
@@ -859,6 +871,8 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
         :upload-progress="uploadProgress"
         :replying-to="replyingTo"
         :is-top-pinned="false"
+        :link-preview-lookup="linkPreviewLookup"
+        :link-preview-scope="linkPreviewScope"
         @send="onSend"
         @cancel-reply="cancelReplyInThread"
         @typing="onTyping"

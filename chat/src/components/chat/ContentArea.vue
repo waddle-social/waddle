@@ -24,6 +24,7 @@ import type { MentionCandidate } from "@/lib/mentions";
 import type { BrowserXmppClient, MessageSearchResult, XmppStatusSnapshot, RoomAuthority, RoomHats, RoomPresence } from "@/lib/xmpp-client";
 import type { MemberLoadState } from "@/waddles/directory";
 import type { DiscoveredExtensionCommand, ExtensionCommandAction, ExtensionCommandResult } from "@/lib/xmpp/extension-commands";
+import type { ComposerLinkPreviewLookup, ComposerLinkPreviewSendPayload } from "@/lib/link-preview-composer";
 import { useScrollDirectionPreference } from "@/preferences/scroll-direction";
 import type { MessageThreadIndex } from "@/channels/threads";
 import { formatTimelineStamp, formatTimelineDayDivider, isSameTimelineDay } from "@/channels/timeline";
@@ -116,6 +117,7 @@ const emit = defineEmits<{
     files?: Array<File | Blob>,
     replyTo?: { id: string; author: string; body?: string },
     forumTitle?: string,
+    linkPreview?: ComposerLinkPreviewSendPayload,
   ];
   typing: [];
   editMessage: [messageId: string, newBody: string, markup?: MarkupSpan[], references?: MessageReference[]];
@@ -309,7 +311,13 @@ async function openSearchResult(result: MessageSearchResult) {
   await scrollToMessage(result.id);
 }
 
-function onSend(body: string, markup: MarkupSpan[], references: MessageReference[], files?: Array<File | Blob>) {
+function onSend(
+  body: string,
+  markup: MarkupSpan[],
+  references: MessageReference[],
+  files?: Array<File | Blob>,
+  linkPreview?: ComposerLinkPreviewSendPayload,
+) {
   const pending = replyingTo.value;
   emit(
     "send",
@@ -319,6 +327,7 @@ function onSend(body: string, markup: MarkupSpan[], references: MessageReference
     files,
     pending ? { id: pending.id, author: pending.author, ...(pending.body ? { body: pending.body } : {}) } : undefined,
     !pending && detectForumChannel(props.channel) ? forumTitle.value : undefined,
+    linkPreview,
   );
   // Don't clear replyingTo here — wait for send to complete (success or failure)
 }
@@ -393,6 +402,13 @@ const updateExtensionCommandField = extensionLauncher.updateField;
 const resetExtensionLauncherState = extensionLauncher.reset;
 const submitExtensionCommandForm = extensionLauncher.submitForm;
 const invokeCommandResultAction = extensionLauncher.invokeResultAction;
+const linkPreviewScope = computed(() => props.dmPeer?.peerJid ?? props.roomJid ?? null);
+const linkPreviewLookup = computed<ComposerLinkPreviewLookup | null>(() => {
+  const client = props.xmppClient;
+  const scopeJid = linkPreviewScope.value;
+  if (!client || !scopeJid) return null;
+  return (body: string) => client.lookupLinkPreview(body, scopeJid);
+});
 async function dispatchSlashCommand(
   invocation: Parameters<typeof extensionLauncher.dispatchSlashInvocation>[0],
 ): Promise<boolean> {
@@ -1126,6 +1142,8 @@ function dayDividerLabel(createdAt: string): string {
       :slash-commands="allDiscoveredCommands"
       :in-muc="inMucContext"
       :dispatch-slash-command="dispatchSlashCommand"
+      :link-preview-lookup="linkPreviewLookup"
+      :link-preview-scope="linkPreviewScope"
       @send="onSend"
       @cancel-reply="cancelReply"
       @typing="emit('typing')"
@@ -1453,6 +1471,8 @@ function dayDividerLabel(createdAt: string): string {
       :slash-commands="allDiscoveredCommands"
       :in-muc="inMucContext"
       :dispatch-slash-command="dispatchSlashCommand"
+      :link-preview-lookup="linkPreviewLookup"
+      :link-preview-scope="linkPreviewScope"
       @send="onSend"
       @cancel-reply="cancelReply"
       @typing="emit('typing')"

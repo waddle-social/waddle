@@ -89,35 +89,71 @@ describe("useMucSend.sendMessage — happy path", () => {
     expect(h.onSendComplete).toHaveBeenCalledTimes(1);
   });
 
-  test("looks up first eligible HTTPS URL and sends scoped preview token", async () => {
+  test("sends immediately without preview metadata while composer lookup is still loading", async () => {
     const sendGroupMessage = mock(async () => ({ id: "sid-link", state: "sending" }));
-    const lookupLinkPreview = mock(async () => ({
-      token: "preview-token-1",
-      originalUrl: "https://example.com/article",
-      normalizedUrl: "https://example.com/article",
-      status: "ready" as const,
-      expiresAt: "2026-06-01T12:05:00.000Z",
-      title: "Example Article",
-      description: "Plain text summary",
-    }));
+    const lookupLinkPreview = mock(() => new Promise<never>(() => {}));
     const client = makeClient({ sendGroupMessage, lookupLinkPreview } as Partial<BrowserXmppClient>);
     const h = harness({ client, draft: "read https://example.com/article and https://later.example/path" });
 
-    await h.send.sendMessage(undefined, []);
+    const sendPromise = h.send.sendMessage(undefined, []);
+    await Promise.resolve();
 
-    expect(lookupLinkPreview).toHaveBeenCalledWith(
-      "read https://example.com/article and https://later.example/path",
-      "general@muc.example.com",
-    );
+    expect(sendGroupMessage).toHaveBeenCalledTimes(1);
+    expect(lookupLinkPreview).not.toHaveBeenCalled();
+    await sendPromise;
+
+    const call = (sendGroupMessage as unknown as ReturnType<typeof mock>).mock.calls[0]!;
+    expect(call[3].linkPreviewToken).toBeUndefined();
+    expect(call[3].linkPreviewExpiresAt).toBeUndefined();
+    expect(h.messages.value[0]?.linkPreviews).toBeUndefined();
+  });
+
+  test("uses an already-ready composer preview token when sending", async () => {
+    const sendGroupMessage = mock(async () => ({ id: "sid-link", state: "sending" }));
+    const client = makeClient({ sendGroupMessage } as Partial<BrowserXmppClient>);
+    const h = harness({ client, draft: "read https://example.com/article and https://later.example/path" });
+
+    await h.send.sendMessage(undefined, [], undefined, undefined, undefined, undefined, {
+      token: "preview-token-1",
+      expiresAt: "2999-01-01T00:00:00.000Z",
+      preview: {
+        originalUrl: "https://example.com/article",
+        normalizedUrl: "https://example.com/article",
+        title: "Example Article",
+        description: "Plain text summary",
+      },
+    });
+
     const call = (sendGroupMessage as unknown as ReturnType<typeof mock>).mock.calls[0]!;
     expect(call[3].linkPreviewToken).toBe("preview-token-1");
-    expect(call[3].linkPreviewExpiresAt).toBe("2026-06-01T12:05:00.000Z");
+    expect(call[3].linkPreviewExpiresAt).toBe("2999-01-01T00:00:00.000Z");
     expect(h.messages.value[0]?.linkPreviews).toEqual([{
       originalUrl: "https://example.com/article",
       normalizedUrl: "https://example.com/article",
       title: "Example Article",
       description: "Plain text summary",
     }]);
+  });
+
+  test("expired composer preview payload sends normally without preview metadata", async () => {
+    const sendGroupMessage = mock(async () => ({ id: "sid-link", state: "sending" }));
+    const client = makeClient({ sendGroupMessage } as Partial<BrowserXmppClient>);
+    const h = harness({ client, draft: "read https://example.com/article" });
+
+    await h.send.sendMessage(undefined, [], undefined, undefined, undefined, undefined, {
+      token: "expired-token",
+      expiresAt: "2000-01-01T00:00:00.000Z",
+      preview: {
+        originalUrl: "https://example.com/article",
+        normalizedUrl: "https://example.com/article",
+        title: "Example Article",
+      },
+    });
+
+    const call = (sendGroupMessage as unknown as ReturnType<typeof mock>).mock.calls[0]!;
+    expect(call[3].linkPreviewToken).toBeUndefined();
+    expect(call[3].linkPreviewExpiresAt).toBeUndefined();
+    expect(h.messages.value[0]?.linkPreviews).toBeUndefined();
   });
 });
 
