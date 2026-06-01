@@ -5,10 +5,10 @@ import type { WaddleSession } from "@/lib/server-auth";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import { MAX_FILE_UPLOAD_BYTES } from "@/lib/xmpp/file-upload";
 import type { OutboundFileAttachment } from "@/lib/xmpp";
+import { composerLinkPreviewPayloadIsFresh, type ComposerLinkPreviewSendPayload } from "@/lib/link-preview-composer";
 import {
   inferredFileDisposition,
   type DeliveryStatus,
-  type LinkPreview,
   type MarkupSpan,
   type MessageReference,
   type TimelineMessage,
@@ -83,6 +83,7 @@ export function useMucSend(deps: UseMucSendDeps) {
     files?: Array<File | Blob>,
     replyTo?: { id: string; author: string; body?: string },
     forumTitleOrThreadOverride?: string | { threadId: string; parentThreadId?: string },
+    linkPreview?: ComposerLinkPreviewSendPayload,
   ) {
     const bodyText = body ?? draft.value;
     // markup !== undefined means this came from the rich editor (composer send)
@@ -162,23 +163,14 @@ export function useMucSend(deps: UseMucSendDeps) {
       const threadReply = channelIsForum && replyTo && threadId
         ? { threadId }
         : undefined;
-      const linkPreview = typeof client.lookupLinkPreview === "function"
-        ? await client.lookupLinkPreview(bodyText, currentRoomJid.value ?? channelId)
-        : null;
-      const linkPreviews: LinkPreview[] = linkPreview && linkPreview.status === "ready"
-        ? [{
-            originalUrl: linkPreview.originalUrl,
-            normalizedUrl: linkPreview.normalizedUrl,
-            ...(linkPreview.title ? { title: linkPreview.title } : {}),
-            ...(linkPreview.description ? { description: linkPreview.description } : {}),
-          }]
-        : [];
+      const freshLinkPreview = composerLinkPreviewPayloadIsFresh(linkPreview) ? linkPreview : undefined;
+      const linkPreviews = freshLinkPreview ? [freshLinkPreview.preview] : [];
       const result = await client.sendGroupMessage(spaceId, channelId, bodyText, {
         markup,
         references,
         files: attachments,
-        ...(linkPreview?.token ? { linkPreviewToken: linkPreview.token } : {}),
-        ...(linkPreview?.expiresAt ? { linkPreviewExpiresAt: linkPreview.expiresAt } : {}),
+        ...(freshLinkPreview ? { linkPreviewToken: freshLinkPreview.token } : {}),
+        ...(freshLinkPreview ? { linkPreviewExpiresAt: freshLinkPreview.expiresAt } : {}),
         ...(wireReplyTo ? { replyTo: wireReplyTo } : {}),
         ...(threadId ? { threadId } : {}),
         ...(parentThreadId ? { parentThreadId } : {}),

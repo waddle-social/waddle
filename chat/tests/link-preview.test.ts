@@ -25,7 +25,7 @@ describe("link preview lookup", () => {
     const send_raw_iq = async (xml: string) => {
       expect(xml).toContain("<url>https://example.com/a?x=1&amp;y=2</url>");
       expect(xml).toContain("<scope>room@muc.example.com</scope>");
-      return `<iq type="result" id="lookup-1"><lookup xmlns="urn:waddle:link-preview:0" status="ready"><preview token="signed-token" original-url="https://example.com/a" normalized-url="https://example.com/a" expires-at="2026-06-01T12:05:00.000Z"><title>Example</title><description>Plain text</description></preview></lookup></iq>`;
+      return `<iq type="result" id="lookup-1"><lookup xmlns="urn:waddle:link-preview:0" status="ready"><preview token="signed-token" original-url="https://example.com/a?x=1&amp;y=2" normalized-url="https://example.com/a" expires-at="2999-01-01T00:00:00.000Z"><title>Example</title><description>Plain text</description></preview></lookup></iq>`;
     };
 
     let result: Awaited<ReturnType<typeof requestPlaintextLinkPreviewLookup>> = null;
@@ -41,10 +41,10 @@ describe("link preview lookup", () => {
 
     expect(result).toEqual({
       token: "signed-token",
-      originalUrl: "https://example.com/a",
+      originalUrl: "https://example.com/a?x=1&y=2",
       normalizedUrl: "https://example.com/a",
       status: "ready",
-      expiresAt: "2026-06-01T12:05:00.000Z",
+      expiresAt: "2999-01-01T00:00:00.000Z",
       title: "Example",
       description: "Plain text",
     });
@@ -52,7 +52,7 @@ describe("link preview lookup", () => {
 
   test("rejects lookup responses with non-HTTPS preview URLs", async () => {
     const send_raw_iq = async () =>
-      `<iq type="result" id="lookup-1"><lookup xmlns="urn:waddle:link-preview:0" status="ready"><preview token="signed-token" original-url="http://example.com/a" normalized-url="http://example.com/a" expires-at="2026-06-01T12:05:00.000Z"><title>Example</title></preview></lookup></iq>`;
+      `<iq type="result" id="lookup-1"><lookup xmlns="urn:waddle:link-preview:0" status="ready"><preview token="signed-token" original-url="http://example.com/a" normalized-url="http://example.com/a" expires-at="2999-01-01T00:00:00.000Z"><title>Example</title></preview></lookup></iq>`;
 
     let result: Awaited<ReturnType<typeof requestPlaintextLinkPreviewLookup>> = null;
     await withFakeXmlDocument(async () => {
@@ -66,6 +66,45 @@ describe("link preview lookup", () => {
     });
 
     expect(result).toBeNull();
+  });
+
+  test("rejects ready lookup responses for a different original URL than requested", async () => {
+    const send_raw_iq = async () =>
+      `<iq type="result" id="lookup-1"><lookup xmlns="urn:waddle:link-preview:0" status="ready"><preview token="signed-token" original-url="https://other.example/a" normalized-url="https://other.example/a" expires-at="2999-01-01T00:00:00.000Z"><title>Other</title></preview></lookup></iq>`;
+
+    let result: Awaited<ReturnType<typeof requestPlaintextLinkPreviewLookup>> = null;
+    await withFakeXmlDocument(async () => {
+      await withFakeDomParser(async () => {
+        result = await requestPlaintextLinkPreviewLookup(
+          { send_raw_iq },
+          "read https://example.com/a",
+          "room@muc.example.com",
+        );
+      });
+    });
+
+    expect(result).toBeNull();
+  });
+
+  test("returns unsupported lookup state for not_found responses", async () => {
+    const send_raw_iq = async () =>
+      `<iq type="result" id="lookup-1"><lookup xmlns="urn:waddle:link-preview:0" status="not_found"/></iq>`;
+
+    let result: Awaited<ReturnType<typeof requestPlaintextLinkPreviewLookup>> = null;
+    await withFakeXmlDocument(async () => {
+      await withFakeDomParser(async () => {
+        result = await requestPlaintextLinkPreviewLookup(
+          { send_raw_iq },
+          "read https://unsupported.example/a",
+          "room@muc.example.com",
+        );
+      });
+    });
+
+    expect(result).toEqual({
+      status: "not_found",
+      originalUrl: "https://unsupported.example/a",
+    });
   });
 
   test("lookup failure is a metadata miss instead of a send blocker", async () => {

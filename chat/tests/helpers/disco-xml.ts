@@ -134,9 +134,18 @@ function parseTestXml(xml: string): FakeXmlElement {
 function attributesFromTag(tagBody: string): Record<string, string> {
   const attrs: Record<string, string> = {};
   for (const match of tagBody.matchAll(/([A-Za-z0-9:_-]+)="([^"]*)"/g)) {
-    attrs[match[1]] = match[2];
+    attrs[match[1]] = decodeXmlAttribute(match[2]);
   }
   return attrs;
+}
+
+function decodeXmlAttribute(value: string): string {
+  return value
+    .replaceAll("&quot;", "\"")
+    .replaceAll("&apos;", "'")
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&amp;", "&");
 }
 
 class FakeStructuredXmlDocument {

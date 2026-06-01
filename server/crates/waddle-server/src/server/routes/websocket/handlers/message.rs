@@ -281,10 +281,56 @@ mod tests {
     }
 
     #[test]
+    fn invalid_link_preview_request_is_stripped_without_metadata() {
+        let token =
+            waddle_xmpp::xep::LinkPreviewToken::new("not-a-signed-preview-token").expect("token");
+        let mut message = Message::new(None::<jid::Jid>);
+        message.to = Some("room@muc.example.com".parse().expect("jid"));
+        message.bodies.insert(
+            xmpp_parsers::message::Lang::new(),
+            "read https://example.com/".to_string(),
+        );
+        message
+            .payloads
+            .push(waddle_xmpp::xep::build_link_preview_request_element(&token));
+
+        consume_link_preview_request(&mut message, &sender(), SECRET, 1_800_000_000);
+
+        assert!(message.payloads.is_empty());
+    }
+
+    #[test]
     fn wrong_scope_link_preview_request_is_stripped_without_metadata() {
         let preview = waddle_xmpp::xep::LinkPreviewTokenData {
             sender_jid: "alice@example.com".parse().expect("jid"),
             scope_jid: "other@muc.example.com".parse().expect("jid"),
+            original_url: url::Url::parse("https://example.com/").expect("url"),
+            normalized_url: url::Url::parse("https://example.com/").expect("url"),
+            title: Some("Example".to_string()),
+            description: None,
+            expires_at_unix: 1_900_000_000,
+        };
+        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
+        let mut message = Message::new(None::<jid::Jid>);
+        message.to = Some("room@muc.example.com".parse().expect("jid"));
+        message.bodies.insert(
+            xmpp_parsers::message::Lang::new(),
+            "read https://example.com/".to_string(),
+        );
+        message
+            .payloads
+            .push(waddle_xmpp::xep::build_link_preview_request_element(&token));
+
+        consume_link_preview_request(&mut message, &sender(), SECRET, 1_800_000_000);
+
+        assert!(message.payloads.is_empty());
+    }
+
+    #[test]
+    fn wrong_sender_link_preview_request_is_stripped_without_metadata() {
+        let preview = waddle_xmpp::xep::LinkPreviewTokenData {
+            sender_jid: "mallory@example.com".parse().expect("jid"),
+            scope_jid: "room@muc.example.com".parse().expect("jid"),
             original_url: url::Url::parse("https://example.com/").expect("url"),
             normalized_url: url::Url::parse("https://example.com/").expect("url"),
             title: Some("Example".to_string()),

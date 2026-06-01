@@ -282,6 +282,13 @@ function onSelectChannelFromSidebar(id: string | null, roomJid?: string) {
   if (roomJid) selectChannelByRoomJid(roomJid);
 }
 
+async function lookupActiveChannelLinkPreview(body: string) {
+  const client = xmppClient.value;
+  const roomJid = activeChannelRoomJid.value;
+  if (!client || !roomJid) return null;
+  return client.lookupLinkPreview(body, roomJid);
+}
+
 function getCallSender(): CallWireSender | null {
   const client = connectionStore.client as unknown as { xmpp?: unknown } | null;
   return (client?.xmpp as CallWireSender | undefined) ?? null;
@@ -887,6 +894,8 @@ onUnmounted(() => {
               :channel-name="waddles.currentChannel.value?.name ?? ''"
               :reaction-mode="reactionModeTarget === 'thread' ? reactionModeState : null"
               :target-message-id="activeThreadTargetMessageId"
+              :link-preview-lookup="lookupActiveChannelLinkPreview"
+              :link-preview-scope="activeChannelRoomJid"
               @close="closeThreadPanel"
               @pop-to="popThreadTo"
               @push-thread="pushThread"

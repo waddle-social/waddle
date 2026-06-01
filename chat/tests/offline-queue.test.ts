@@ -9,7 +9,6 @@ import {
   listQueuedDmMessages,
   listQueuedRoomMessages,
 } from "../src/lib/outbound-queue-store";
-import { withFakeDomParser, withFakeXmlDocument } from "./helpers/disco-xml";
 
 function session(partial: Partial<WaddleSession> = {}): WaddleSession {
   return {
@@ -76,7 +75,7 @@ describe("offline outbound queue replay", () => {
     await client.sendDirectMessage("bob@example.com", "read https://example.com", {
       id: "dm-preview-queued",
       linkPreviewToken: "plaintext-token",
-      linkPreviewExpiresAt: "2026-06-01T12:05:00.000Z",
+      linkPreviewExpiresAt: "2999-01-01T00:00:00.000Z",
     });
 
     const raw = localStorage.getItem("waddle.chat.outbound-queue.alice@example.com");
@@ -86,7 +85,7 @@ describe("offline outbound queue replay", () => {
     expect(raw).not.toContain("linkPreviewExpiresAt");
   });
 
-  test("reacquires a fresh link preview token when replaying queued URL sends", async () => {
+  test("does not reacquire link preview metadata when replaying queued URL sends", async () => {
     const client = new BrowserXmppClient(session());
     enqueueQueuedMessage("alice@example.com", {
       kind: "dm",
@@ -97,23 +96,20 @@ describe("offline outbound queue replay", () => {
     });
 
     const xmpp = {
-      send_raw_iq: mock(async () =>
-        `<iq type="result" id="lookup-1"><lookup xmlns="urn:waddle:link-preview:0" status="ready"><preview token="fresh-token" original-url="https://example.com/article" normalized-url="https://example.com/article" expires-at="2026-06-01T12:05:00.000Z"><title>Example</title></preview></lookup></iq>`),
+      send_raw_iq: mock(async () => {
+        throw new Error("queued replay must not perform composer preview lookup");
+      }),
       send_chat_message: mock(async (_peer: string, _body: string, opts: { stanza_id?: string }) => opts.stanza_id),
       on() {},
     };
     (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
     (client as unknown as { xmpp: typeof xmpp; connected: boolean }).connected = true;
 
-    await withFakeXmlDocument(async () => {
-      await withFakeDomParser(async () => {
-        await (client as unknown as { flushQueuedDirectMessages: () => Promise<void> }).flushQueuedDirectMessages();
-      });
-    });
+    await (client as unknown as { flushQueuedDirectMessages: () => Promise<void> }).flushQueuedDirectMessages();
 
-    expect(xmpp.send_raw_iq).toHaveBeenCalled();
+    expect(xmpp.send_raw_iq).not.toHaveBeenCalled();
     expect((xmpp.send_chat_message.mock.calls[0]?.[2] as { link_preview_token?: string }).link_preview_token)
-      .toBe("fresh-token");
+      .toBeUndefined();
   });
 
   test("replays queued DM messages in order when the session returns", async () => {
@@ -210,10 +206,8 @@ describe("offline outbound queue replay", () => {
 
     const handlers = new Map<string, Array<(payload: unknown) => void>>();
     const xmpp = {
-      send_raw_iq: mock(async (xml: string) => {
-        expect(xml).toContain("<url>https://example.com/room</url>");
-        expect(xml).toContain(`<scope>${roomJid}</scope>`);
-        return `<iq type="result" id="lookup-room-1"><lookup xmlns="urn:waddle:link-preview:0" status="ready"><preview token="fresh-room-token" original-url="https://example.com/room" normalized-url="https://example.com/room" expires-at="2026-06-01T12:05:00.000Z"><title>Example</title></preview></lookup></iq>`;
+      send_raw_iq: mock(async () => {
+        throw new Error("queued replay must not perform composer preview lookup");
       }),
       send_groupchat_message: mock(async (_room: string, _body: string, opts: { stanza_id?: string }) => opts.stanza_id),
       on(event: string, handler: (payload: unknown) => void) {
@@ -234,19 +228,15 @@ describe("offline outbound queue replay", () => {
     (client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.add(roomJid);
     (client as unknown as { wireEvents: (x: typeof xmpp) => void }).wireEvents(xmpp);
 
-    await withFakeXmlDocument(async () => {
-      await withFakeDomParser(async () => {
-        await (client as unknown as { flushQueuedRoomMessages: (roomJid: string) => Promise<void> }).flushQueuedRoomMessages(roomJid);
-      });
-    });
+    await (client as unknown as { flushQueuedRoomMessages: (roomJid: string) => Promise<void> }).flushQueuedRoomMessages(roomJid);
 
-    expect(xmpp.send_raw_iq).toHaveBeenCalledTimes(1);
+    expect(xmpp.send_raw_iq).not.toHaveBeenCalled();
     expect(xmpp.send_groupchat_message.mock.calls.map((call) => (call[2] as { stanza_id?: string }).stanza_id)).toEqual([
       "room-1",
       "room-2",
     ]);
     expect((xmpp.send_groupchat_message.mock.calls[0]?.[2] as { link_preview_token?: string }).link_preview_token)
-      .toBe("fresh-room-token");
+      .toBeUndefined();
     expect((xmpp.send_groupchat_message.mock.calls[1]?.[2] as { link_preview_token?: string }).link_preview_token)
       .toBeUndefined();
     // Persisted entries stay until ack, same as the DM path.

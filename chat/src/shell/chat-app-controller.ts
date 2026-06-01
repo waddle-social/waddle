@@ -36,6 +36,7 @@ import { orderTimelineForScrollDirection, type ScrollDirectionMode } from "@/lib
 import { useScrollDirectionPreference } from "@/preferences/scroll-direction";
 import type { MemberSummary } from "@/lib/chat-types";
 import type { ExtensionAnnotationAction, MarkupSpan, MessageReference, TimelineMessage } from "@/lib/chat-ui";
+import type { ComposerLinkPreviewSendPayload } from "@/lib/link-preview-composer";
 import type { DiscoveredExtensionRoute } from "@/lib/xmpp/extension-commands";
 import { avatarLookupCandidatesAcrossContexts, mentionAutocompleteCandidates, mentionMatchesBareJid, mergeMentionMembers } from "@/lib/mentions";
 import {
@@ -892,12 +893,13 @@ export function useChatAppController(giphyApiKey: string) {
     files?: Array<File | Blob>,
     replyTo?: { id: string; author: string; body?: string },
     forumTitle?: string,
+    linkPreview?: ComposerLinkPreviewSendPayload,
   ) {
     if (ui.sidebarMode.value === "dms") {
-      await dmMessaging.sendMessage(body, markup, references, files, replyTo);
+      await dmMessaging.sendMessage(body, markup, references, files, replyTo, linkPreview);
       return;
     }
-    await messaging.sendMessage(body, markup, references, files, replyTo, forumTitle);
+    await messaging.sendMessage(body, markup, references, files, replyTo, forumTitle, linkPreview);
   }
 
   async function sendPublicChannelMessage(body: string) {
@@ -918,8 +920,9 @@ export function useChatAppController(giphyApiKey: string) {
     files: Array<File | Blob> | undefined,
     replyTo: { id: string; author: string; body?: string } | undefined,
     threadOverride: { threadId: string; parentThreadId?: string },
+    linkPreview?: ComposerLinkPreviewSendPayload,
   ) {
-    await messaging.sendMessage(body, markup, references, files, replyTo, threadOverride);
+    await messaging.sendMessage(body, markup, references, files, replyTo, threadOverride, linkPreview);
   }
 
   function sendGif(

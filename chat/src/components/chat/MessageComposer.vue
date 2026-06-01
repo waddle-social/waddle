@@ -15,6 +15,8 @@ import { parseSlashTrigger } from "@/lib/slash-trigger";
 import { filterSlashCandidates, resolveSlashCommand } from "@/lib/slash-match";
 import { buildSlashInvocation, type SlashInvocation } from "@/lib/slash-dispatch";
 import type { DiscoveredExtensionCommand } from "@/lib/xmpp/extension-commands";
+import { useComposerLinkPreview } from "@/lib/use-composer-link-preview";
+import type { ComposerLinkPreviewLookup, ComposerLinkPreviewSendPayload } from "@/lib/link-preview-composer";
 import {
   isAudioFile,
   isImageFile,
@@ -54,10 +56,18 @@ const props = defineProps<{
   slashCommands?: DiscoveredExtensionCommand[];
   inMuc?: boolean;
   dispatchSlashCommand?: (invocation: SlashInvocation) => Promise<boolean>;
+  linkPreviewLookup?: ComposerLinkPreviewLookup | null;
+  linkPreviewScope?: string | null;
 }>();
 
 const emit = defineEmits<{
-  send: [body: string, markup: MarkupSpan[], references: MessageReference[], files?: Array<File | Blob>];
+  send: [
+    body: string,
+    markup: MarkupSpan[],
+    references: MessageReference[],
+    files?: Array<File | Blob>,
+    linkPreview?: ComposerLinkPreviewSendPayload,
+  ];
   typing: [];
   selectGif: [url: string];
   cancelReply: [];
@@ -99,6 +109,11 @@ const tiptapEditor = computed(() => {
 });
 
 const pendingAttachments = ref<PendingAttachment[]>([]);
+const linkPreview = useComposerLinkPreview(
+  draft,
+  computed(() => props.linkPreviewLookup),
+  computed(() => props.linkPreviewScope),
+);
 
 function attachmentName(file: File | Blob): string {
   return file instanceof File && file.name
@@ -455,6 +470,7 @@ function onSend(doc: JSONContent) {
     serialized.markup,
     serialized.references,
     files.length > 0 ? files : undefined,
+    linkPreview.sendPayload.value,
   );
 }
 
@@ -556,6 +572,7 @@ watch(
     }
   },
 );
+
 </script>
 
 <template>
@@ -565,7 +582,7 @@ watch(
     @keydown.capture="onKeydown"
   >
     <div
-      v-if="replyingTo || showForumTitleInput || pendingAttachments.length > 0 || uploadProgress.uploading"
+      v-if="replyingTo || showForumTitleInput || linkPreview.showCard.value || pendingAttachments.length > 0 || uploadProgress.uploading"
       class="chat-composer-aux-stack"
     >
       <!-- Reply context chip — appears above the composer when the
@@ -594,6 +611,34 @@ watch(
           @click="emit('cancelReply')"
         >
           <X class="w-3.5 h-3.5" />
+        </button>
+      </div>
+
+      <div
+        v-if="linkPreview.showCard.value"
+        class="type-caption flex min-w-0 items-center gap-3 rounded-lg border border-border bg-card/70 px-3 py-2 animate-fade-in"
+        :aria-busy="linkPreview.state.value.kind === 'loading'"
+      >
+        <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
+          <Loader2
+            v-if="linkPreview.state.value.kind === 'loading'"
+            class="h-4 w-4 motion-safe:animate-spin"
+            aria-hidden="true"
+          />
+          <FileText v-else class="h-4 w-4" aria-hidden="true" />
+        </div>
+        <div class="min-w-0 flex-1">
+          <div class="type-emphasis truncate text-foreground">{{ linkPreview.title.value }}</div>
+          <div class="truncate text-muted-foreground">{{ linkPreview.description.value }}</div>
+        </div>
+        <button
+          type="button"
+          class="h-8 w-8 flex items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+          title="Remove preview"
+          aria-label="Remove preview"
+          @click="linkPreview.dismiss"
+        >
+          <X class="h-3.5 w-3.5" aria-hidden="true" />
         </button>
       </div>
 

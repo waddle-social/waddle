@@ -1,13 +1,18 @@
-export type LinkPreviewLookupStatus = "ready" | "not_found";
+export type LinkPreviewLookupResult = LinkPreviewLookupReadyResult | LinkPreviewLookupUnsupportedResult;
 
-export interface LinkPreviewLookupResult {
+export interface LinkPreviewLookupReadyResult {
   token: string;
   originalUrl: string;
   normalizedUrl: string;
-  status: LinkPreviewLookupStatus;
+  status: "ready";
   expiresAt: string;
   title?: string;
   description?: string;
+}
+
+export interface LinkPreviewLookupUnsupportedResult {
+  originalUrl: string;
+  status: "not_found";
 }
 
 const HTTPS_URL_RE = /https:\/\/[^\s<>"']+/gi;
@@ -54,14 +59,15 @@ export async function requestPlaintextLinkPreviewLookup(
   } catch {
     return null;
   }
-  return parseLookupResponse(response);
+  return parseLookupResponse(response, originalUrl);
 }
 
-function parseLookupResponse(xml: string): LinkPreviewLookupResult | null {
+function parseLookupResponse(xml: string, requestedUrl: string): LinkPreviewLookupResult | null {
   const doc = new DOMParser().parseFromString(xml, "text/xml");
   const lookup = doc.getElementsByTagNameNS(NS_WADDLE_LINK_PREVIEW, "lookup")[0];
   if (!lookup) return null;
   const status = lookup.getAttribute("status");
+  if (status === "not_found") return { status: "not_found", originalUrl: requestedUrl };
   if (status !== "ready") return null;
   const preview = Array.from(lookup.children).find(
     (child) => child.localName === "preview" && child.namespaceURI === NS_WADDLE_LINK_PREVIEW,
@@ -72,6 +78,7 @@ function parseLookupResponse(xml: string): LinkPreviewLookupResult | null {
   const normalizedUrl = preview.getAttribute("normalized-url")?.trim();
   const expiresAt = preview.getAttribute("expires-at")?.trim();
   if (!token || !originalUrl || !normalizedUrl || !expiresAt) return null;
+  if (originalUrl !== requestedUrl) return null;
   if (!isEligiblePreviewUrl(originalUrl) || !isEligiblePreviewUrl(normalizedUrl)) return null;
   return {
     token,
