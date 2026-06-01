@@ -38,14 +38,19 @@ describe("composer link preview state", () => {
     });
   });
 
-  test("unsupported and dismissed states fail open with no send payload", () => {
-    const unsupported = linkPreviewStateFromLookup("https://example.com/a", {
-      status: "not_found",
-      originalUrl: "https://example.com/a",
-    });
+  test("normal unsupported resolver states fail open with no send payload", () => {
+    for (const status of ["not_found", "unsupported", "blocked"] as const) {
+      const unsupported = linkPreviewStateFromLookup("https://example.com/a", {
+        status,
+        originalUrl: "https://example.com/a",
+      });
 
-    expect(unsupported).toEqual({ kind: "unsupported", url: "https://example.com/a" });
-    expect(sendPayloadFromState(unsupported)).toBeUndefined();
+      expect(unsupported).toEqual({ kind: "unsupported", url: "https://example.com/a" });
+      expect(sendPayloadFromState(unsupported)).toBeUndefined();
+    }
+  });
+
+  test("dismissed states fail open with no send payload", () => {
     expect(sendPayloadFromState({ kind: "dismissed", url: "https://example.com/a" })).toBeUndefined();
   });
 
@@ -89,16 +94,18 @@ describe("composer link preview state", () => {
   });
 
   test("unsupported and failed composer lookup states emit no send payload", async () => {
-    const unsupported = setupComposerPreviewHarness(async () => ({
-      status: "not_found",
-      originalUrl: "https://example.com/a",
-    }));
+    for (const status of ["not_found", "unsupported", "blocked"] as const) {
+      const unsupported = setupComposerPreviewHarness(async () => ({
+        status,
+        originalUrl: "https://example.com/a",
+      }));
 
-    await flushComposerPreview();
+      await flushComposerPreview();
 
-    expect(unsupported.preview.state.value).toEqual({ kind: "unsupported", url: "https://example.com/a" });
-    expect(unsupported.preview.sendPayload.value).toBeUndefined();
-    unsupported.stop();
+      expect(unsupported.preview.state.value).toEqual({ kind: "unsupported", url: "https://example.com/a" });
+      expect(unsupported.preview.sendPayload.value).toBeUndefined();
+      unsupported.stop();
+    }
 
     const failed = setupComposerPreviewHarness(async () => {
       throw new Error("lookup failed");
