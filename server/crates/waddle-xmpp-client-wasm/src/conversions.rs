@@ -440,6 +440,7 @@ fn link_previews_to_js(previews: Vec<messaging::LinkPreviewData>) -> Vec<WaddleL
             normalized_url: preview.normalized_url.map(|url| url.to_string()),
             title: preview.title,
             description: preview.description,
+            remote_media_unavailable: preview.remote_media_unavailable,
             image: preview.image.map(|image| WaddleLinkPreviewImage {
                 url: image.url.to_string(),
                 media_type: image.media_type.as_str().to_string(),
@@ -863,6 +864,37 @@ mod inbound_to_js_tests {
         assert_eq!(image.width, Some(640));
         assert_eq!(image.height, Some(360));
         assert_eq!(image.alt.as_deref(), Some("Article screenshot"));
+        assert!(!preview.remote_media_unavailable);
+    }
+
+    #[test]
+    fn archived_to_js_marks_remote_xep0511_media_unavailable() {
+        let archived = parse_mam_archived(
+            "<message xmlns='jabber:client'>\
+               <result xmlns='urn:xmpp:mam:2' id='mam-link-remote-media' queryid='q1'>\
+                 <forwarded xmlns='urn:xmpp:forward:0'>\
+                   <delay xmlns='urn:xmpp:delay' stamp='2026-05-06T12:00:00Z'/>\
+                   <message xmlns='jabber:client' type='groupchat' id='m-link' \
+                            from='room@conf.example/alice'>\
+                     <body>see https://the.link.example/what-was-linked</body>\
+                     <rdf:Description xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#' xmlns:og='https://ogp.me/ns#' xmlns:ogi='https://ogp.me/ns#image:' rdf:about='https://the.link.example/what-was-linked'>\
+                       <og:title>The Best Webpage</og:title>\
+                       <og:image>https://remote.example/preview.png</og:image>\
+                       <ogi:type>image/png</ogi:type>\
+                     </rdf:Description>\
+                   </message>\
+                 </forwarded>\
+               </result>\
+             </message>",
+        );
+
+        let js = archived_to_js(archived).expect("valid archived message should convert");
+
+        assert_eq!(js.link_previews.len(), 1);
+        let preview = &js.link_previews[0];
+        assert_eq!(preview.title.as_deref(), Some("The Best Webpage"));
+        assert!(preview.image.is_none());
+        assert!(preview.remote_media_unavailable);
     }
 
     #[test]

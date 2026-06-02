@@ -14,7 +14,7 @@ import {
 import { $xmppStatus } from "@/stores/xmpp-status";
 import { applyPinEvent } from "@/stores/pinned-messages";
 import { hydrateSinglePinnedBody } from "@/services/pinned-message-bodies";
-import { linkPreviewMediaOriginFromWebSocketUrl } from "@/lib/xmpp/link-preview";
+import { trustedLinkPreviewMediaOrigin } from "@/lib/xmpp/link-preview";
 import { roomMessageFromArchived } from "@/lib/xmpp/wasm-message-codecs";
 import {
   type TimelineMessage,
@@ -270,7 +270,7 @@ export function useChannelMessages(
             const convertForTimeline = (a: Parameters<typeof roomMessageFromArchived>[0]) => {
               const live = roomMessageFromArchived(a, {
                 trustedMediaOrigin: session.value
-                  ? linkPreviewMediaOriginFromWebSocketUrl(session.value.xmpp_websocket_url)
+                  ? trustedLinkPreviewMediaOrigin(session.value)
                   : null,
               });
               return live && session.value

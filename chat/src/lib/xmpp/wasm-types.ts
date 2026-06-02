@@ -151,6 +151,7 @@ export interface WasmLinkPreview {
   title?: string | null;
   description?: string | null;
   image?: WasmLinkPreviewImage | null;
+  remote_media_unavailable?: boolean;
 }
 
 export interface WasmLinkPreviewImage {

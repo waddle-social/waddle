@@ -374,20 +374,20 @@ fn parse_link_preview(el: &Element, first_url: Option<&Url>) -> Option<LinkPrevi
     if first_url.is_some() && first_url != Some(&original_url) {
         return None;
     }
+    let has_preview_image = link_preview_image_url(el).is_some();
+    let image = parse_link_preview_image(el);
     Some(LinkPreviewData {
         original_url,
         normalized_url: og_text(el, "url").and_then(|value| parse_web_url(&value)),
         title: og_text(el, "title"),
         description: og_text(el, "description"),
-        image: parse_link_preview_image(el),
+        remote_media_unavailable: has_preview_image && image.is_none(),
+        image,
     })
 }
 
 fn parse_link_preview_image(el: &Element) -> Option<LinkPreviewImageData> {
-    let url = el
-        .children()
-        .find(|child| child.name() == "image" && child.ns() == NS_OPENGRAPH)
-        .and_then(|child| parse_cached_preview_image_url(child.text().trim()))?;
+    let url = link_preview_image_url(el).and_then(|url| parse_cached_preview_image_url(&url))?;
     let media_type =
         og_image_text(el, "type").and_then(|value| value.parse::<PreviewImageMediaType>().ok())?;
     Some(LinkPreviewImageData {
@@ -397,6 +397,13 @@ fn parse_link_preview_image(el: &Element) -> Option<LinkPreviewImageData> {
         height: og_image_text(el, "height").and_then(|value| value.parse().ok()),
         alt: og_image_text(el, "alt"),
     })
+}
+
+fn link_preview_image_url(el: &Element) -> Option<String> {
+    el.children()
+        .find(|child| child.name() == "image" && child.ns() == NS_OPENGRAPH)
+        .map(|child| child.text().trim().to_string())
+        .filter(|url| !url.is_empty())
 }
 
 fn parse_cached_preview_image_url(value: &str) -> Option<Url> {

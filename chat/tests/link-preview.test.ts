@@ -4,6 +4,7 @@ import {
   isTrustedCachedPreviewImageUrl,
   linkPreviewMediaOriginFromWebSocketUrl,
   requestPlaintextLinkPreviewLookup,
+  trustedLinkPreviewMediaOrigin,
 } from "../src/lib/xmpp/link-preview";
 import { withFakeDomParser, withFakeXmlDocument } from "./helpers/disco-xml";
 
@@ -88,6 +89,13 @@ describe("link preview lookup", () => {
       "http://localhost:4321/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png",
       origin,
     )).toBe(true);
+  });
+
+  test("prefers explicit session media origin over websocket origin", () => {
+    expect(trustedLinkPreviewMediaOrigin({
+      xmpp_websocket_url: "wss://xmpp.example/ws",
+      link_preview_media_origin: "https://cdn.example",
+    })).toBe("https://cdn.example");
   });
 
   test("accepts trusted cached preview image origins with explicit default ports", () => {

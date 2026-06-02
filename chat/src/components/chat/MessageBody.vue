@@ -20,6 +20,7 @@ import {
 import {
   extensionPresentation,
   extensionSurfaceLabel,
+  linkPreviewMediaState,
   renderStyledBody,
   type TimelineMessage,
   type ExtensionAnnotation,
@@ -112,6 +113,15 @@ function linkPreviewHref(url: string): string | null {
   } catch {
     return null;
   }
+}
+
+function linkPreviewImage(preview: NonNullable<TimelineMessage["linkPreviews"]>[number]) {
+  const state = linkPreviewMediaState(preview);
+  return state.kind === "image" ? state.image : null;
+}
+
+function linkPreviewRemoteMediaUnavailable(preview: NonNullable<TimelineMessage["linkPreviews"]>[number]): boolean {
+  return linkPreviewMediaState(preview).kind === "remote-unavailable";
 }
 
 const {
@@ -227,15 +237,22 @@ watch(
         {{ linkPreviewHost(preview.originalUrl) }}
       </span>
       <img
-        v-if="preview.image"
-        :src="preview.image.url"
-        :alt="preview.image.alt ?? preview.title ?? 'Link preview image'"
-        :width="preview.image.width"
-        :height="preview.image.height"
+        v-if="linkPreviewImage(preview)"
+        :src="linkPreviewImage(preview)!.url"
+        :alt="linkPreviewImage(preview)!.alt ?? preview.title ?? 'Link preview image'"
+        :width="linkPreviewImage(preview)!.width"
+        :height="linkPreviewImage(preview)!.height"
         loading="lazy"
         decoding="async"
         class="max-h-48 w-full rounded border border-border object-cover"
       />
+      <span
+        v-else-if="linkPreviewRemoteMediaUnavailable(preview)"
+        class="type-caption flex items-center gap-1 rounded border border-dashed border-border bg-background/70 px-2 py-1 text-muted-foreground"
+      >
+        <AlertCircle aria-hidden="true" class="h-3.5 w-3.5" />
+        Remote preview media unavailable
+      </span>
       <span v-if="preview.title" class="type-field text-foreground">{{ preview.title }}</span>
       <span v-if="preview.description" class="type-caption line-clamp-2 text-muted-foreground">{{ preview.description }}</span>
     </a>

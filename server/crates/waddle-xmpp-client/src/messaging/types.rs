@@ -201,6 +201,7 @@ pub struct LinkPreviewData {
     pub title: Option<String>,
     pub description: Option<String>,
     pub image: Option<LinkPreviewImageData>,
+    pub remote_media_unavailable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

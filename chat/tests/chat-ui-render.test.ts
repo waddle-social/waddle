@@ -7,8 +7,10 @@ import {
   isImageFile,
   isPdfFile,
   isVideoFile,
+  linkPreviewMediaState,
   renderStyledBody,
   type ExtensionAnnotation,
+  type LinkPreview,
   type MarkupSpan,
   type MessageReference,
 } from "../src/lib/chat-ui";
@@ -111,6 +113,35 @@ describe("renderStyledBody", () => {
     expect(isPdfFile(undefined, "notes.pdf")).toBe(true);
     expect(inferredFileDisposition("text/plain", "notes.txt")).toBe("attachment");
     expect(inferredFileDisposition("video/mp4", "clip.mp4")).toBe("inline");
+  });
+
+  test("marks remote link-preview media unavailable without exposing an image URL", () => {
+    const preview: LinkPreview = {
+      originalUrl: "https://example.com/article",
+      title: "Example",
+      remoteMediaUnavailable: true,
+    };
+
+    expect(linkPreviewMediaState(preview)).toEqual({ kind: "remote-unavailable" });
+  });
+
+  test("renders trusted cached link-preview media when an image is present", () => {
+    const preview: LinkPreview = {
+      originalUrl: "https://example.com/article",
+      image: {
+        url: "https://waddle.example/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png",
+        mediaType: "image/png",
+        width: 640,
+        height: 360,
+        alt: "Article screenshot",
+      },
+      remoteMediaUnavailable: true,
+    };
+
+    expect(linkPreviewMediaState(preview)).toEqual({
+      kind: "image",
+      image: preview.image,
+    });
   });
 
   test("summarizes generic extension payload cards without sample-specific types", () => {

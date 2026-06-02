@@ -572,6 +572,7 @@ fn parse_message_ignores_xep0511_link_preview_image_with_unsafe_media_type() {
     };
     assert_eq!(msg.link_previews.len(), 1);
     assert!(msg.link_previews[0].image.is_none());
+    assert!(msg.link_previews[0].remote_media_unavailable);
 }
 
 #[test]
@@ -591,6 +592,27 @@ fn parse_message_ignores_xep0511_link_preview_image_without_cached_media_path() 
     };
     assert_eq!(msg.link_previews.len(), 1);
     assert!(msg.link_previews[0].image.is_none());
+    assert!(msg.link_previews[0].remote_media_unavailable);
+}
+
+#[test]
+fn parse_message_marks_remote_xep0511_link_preview_image_unavailable() {
+    let e = el(
+        "<message xmlns='jabber:client' type='groupchat' id='m-link'>\
+           <body>see https://the.link.example.com/what-was-linked-to</body>\
+           <rdf:Description xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#' xmlns:og='https://ogp.me/ns#' xmlns:ogi='https://ogp.me/ns#image:' rdf:about='https://the.link.example.com/what-was-linked-to'>\
+             <og:title>The Best Webpage</og:title>\
+             <og:image>https://remote.example/preview.png</og:image>\
+             <ogi:type>image/png</ogi:type>\
+           </rdf:Description>\
+         </message>",
+    );
+    let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+        panic!("expected Message");
+    };
+    assert_eq!(msg.link_previews.len(), 1);
+    assert!(msg.link_previews[0].image.is_none());
+    assert!(msg.link_previews[0].remote_media_unavailable);
 }
 
 #[test]
