@@ -14,7 +14,9 @@
     "preview": "bun run wasm:build && bun run generate-service-worker && astro preview",
     "astro": "astro",
     "generate-types": "wrangler types",
-    "deploy": "bun run wasm:build && bun run generate-service-worker && wrangler deploy",
+    "sourcemaps:upload": "bun run scripts/upload-faro-sourcemaps.mjs",
+    "sourcemaps:strip": "bun run scripts/strip-sourcemaps.mjs",
+    "deploy": "bun run wasm:build && bun run generate-service-worker && bun run sourcemaps:strip && wrangler deploy",
     "lint": "bun run wasm:build && knip",
     "lint:fix": "bun run wasm:build && knip --fix --allow-remove-files"
   },
@@ -57,6 +59,8 @@
     "@cloudflare/workers-types": "^4.20260420.1",
     "@types/node": "^25.6.0",
     "knip": "^6.5.0",
+    "magic-string": "^0.30.21",
+    "tar": "^7.5.16",
     "typescript": "^6.0.3"
   }
 }
