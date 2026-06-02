@@ -53,8 +53,9 @@ pub(super) async fn archive_direct(
             let rewrite = ArchiveIdRewrite::from_store_result(
                 jid::Jid::from(archive_jid.clone()),
                 requested_archive_id,
-                archive_id,
+                archive_id.clone(),
             );
+            update_direct_link_preview_refs(deps, &archive_jid, &from, &archive_id, &message).await;
             apply_direct_retraction_tombstone(deps, &archive_jid, &message).await;
             rewrite
         }
@@ -73,6 +74,70 @@ pub(super) async fn archive_direct(
             None
         }
     }
+}
+
+async fn update_direct_link_preview_refs(
+    deps: &Deps<'_>,
+    archive_jid: &BareJid,
+    sender: &BareJid,
+    archive_id: &str,
+    message: &Message,
+) {
+    let Some(state) = deps.web_socket_state else {
+        return;
+    };
+    let global_db_actor = state.deps.app_state.db_pool.global_actor();
+    let correction_target_message_id =
+        if let Some(correction) = waddle_xmpp::xep::extract_correction_from_message(message) {
+            Some(
+                resolve_direct_correction_target_message_id(
+                    deps,
+                    archive_jid,
+                    sender,
+                    &correction.replaces_id,
+                )
+                .await
+                .unwrap_or_else(|| correction.replaces_id.clone()),
+            )
+        } else {
+            None
+        };
+    let message_id = correction_target_message_id
+        .as_deref()
+        .or_else(|| message.id.as_ref().map(|id| id.0.as_str()));
+    let Some(message_id) = message_id else { return };
+    crate::server::routes::websocket::link_preview_refs::record_current_message_preview_refs(
+        global_db_actor,
+        state.deps.auth_state.base_url.as_str(),
+        archive_jid,
+        message_id,
+        archive_id,
+        message,
+    )
+    .await;
+}
+
+pub(super) async fn resolve_direct_correction_target_message_id(
+    deps: &Deps<'_>,
+    archive_jid: &BareJid,
+    sender: &BareJid,
+    replaces_id: &str,
+) -> Option<String> {
+    let mam_storage = deps.mam_storage?;
+    let query = waddle_xmpp::mam::MamQuery {
+        with: Some(jid::Jid::from(sender.clone())),
+        ..Default::default()
+    };
+    let result = mam_storage.query_messages(archive_jid, &query).await.ok()?;
+    result.messages.into_iter().find_map(|row| {
+        if super::archive_lookup::row_matches_origin_id(&row, sender, replaces_id)
+            || super::archive_lookup::row_matches_wire_id(&row, sender, replaces_id)
+        {
+            row.stanza_id.map(|stanza_id| stanza_id.id)
+        } else {
+            None
+        }
+    })
 }
 
 async fn apply_direct_retraction_tombstone(
@@ -96,7 +161,7 @@ async fn apply_direct_retraction_tombstone(
         waddle_xmpp::xep::xep0424::extract_retraction_from_message(message)
     {
         if let Some(mam_storage) = deps.mam_storage {
-            apply_retraction_tombstone(
+            let tombstoned = apply_retraction_tombstone(
                 mam_storage,
                 deps.sm_session_registry,
                 archive_jid,
@@ -104,6 +169,16 @@ async fn apply_direct_retraction_tombstone(
                 message,
             )
             .await;
+            if tombstoned {
+                if let Some(state) = deps.web_socket_state {
+                    crate::server::routes::websocket::link_preview_refs::clear_current_message_preview_refs(
+                        state.deps.app_state.db_pool.global_actor(),
+                        archive_jid,
+                        &retraction.retracts_id,
+                    )
+                    .await;
+                }
+            }
         }
     }
 }

@@ -328,6 +328,87 @@ async fn xep_0313_archive_direct_persists_to_mam_storage() {
 }
 
 #[tokio::test]
+async fn direct_correction_preview_ref_target_resolves_to_wire_message_id() {
+    use waddle_xmpp::mam::{ArchivedMessage, InMemoryMamStorage};
+    use waddle_xmpp_core::xep0359::{OriginId, StanzaId};
+
+    let registry = ConnectionRegistry::new();
+    let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
+    let inbox: Arc<dyn InboxStorage> =
+        Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new());
+    let deps = Deps::test_with_storage(&registry, &mam, &inbox);
+
+    let archive_jid: jid::BareJid = "alice@example.com".parse().expect("bare");
+    let sender: jid::BareJid = "alice@example.com".parse().expect("bare");
+    mam.store_message(
+        &archive_jid,
+        &ArchivedMessage {
+            id: "canonical-archive-id".to_string(),
+            body: Some("message with preview".to_string()),
+            stanza_id: Some(StanzaId::new(
+                "wire-msg-id",
+                jid::Jid::from(archive_jid.clone()),
+            )),
+            message_type: xmpp_parsers::message::MessageType::Chat,
+            ..ArchivedMessage::for_test(
+                "alice@example.com/web".parse().expect("jid"),
+                "bob@example.com".parse().expect("jid"),
+            )
+        },
+    )
+    .await
+    .expect("seed direct archive row");
+
+    let target = super::direct_archive::resolve_direct_correction_target_message_id(
+        &deps,
+        &archive_jid,
+        &sender,
+        "wire-msg-id",
+    )
+    .await;
+
+    assert_eq!(
+        target.as_deref(),
+        Some("wire-msg-id"),
+        "link preview refs are keyed by original direct message wire ids, not canonical MAM ids"
+    );
+
+    mam.store_message(
+        &archive_jid,
+        &ArchivedMessage {
+            id: "origin-canonical-archive-id".to_string(),
+            body: Some("message with origin id".to_string()),
+            origin_id: Some(OriginId::new("client-origin-id")),
+            stanza_id: Some(StanzaId::new(
+                "origin-wire-msg-id",
+                jid::Jid::from(archive_jid.clone()),
+            )),
+            message_type: xmpp_parsers::message::MessageType::Chat,
+            ..ArchivedMessage::for_test(
+                "alice@example.com/phone".parse().expect("jid"),
+                "bob@example.com".parse().expect("jid"),
+            )
+        },
+    )
+    .await
+    .expect("seed origin-id direct archive row");
+
+    let target = super::direct_archive::resolve_direct_correction_target_message_id(
+        &deps,
+        &archive_jid,
+        &sender,
+        "client-origin-id",
+    )
+    .await;
+
+    assert_eq!(
+        target.as_deref(),
+        Some("origin-wire-msg-id"),
+        "origin-id corrections must still clear refs by the original direct wire message id"
+    );
+}
+
+#[tokio::test]
 async fn xep_0359_archive_ref_pivots_inbox_row_to_mam_row_via_archive_or_stanza_id() {
     // End-to-end of the bug Qodo + Codex flagged: inbox writes
     // `archive_ref` from the canonical XEP-0359 `<stanza-id>`

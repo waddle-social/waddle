@@ -145,7 +145,7 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
     room: &BareJid,
     target_message_id: &str,
     retraction_message: &Message,
-) {
+) -> bool {
     // XEP-0424 §3.1: the retraction names the target by its wire
     // message id within the room's archive, not by the archive's
     // primary key. Use the same accessor as the XEP-0308 correction
@@ -162,7 +162,7 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
                 target = target_message_id,
                 "ApplyGroupchatRetractionTombstone: target not found in room archive; skipping"
             );
-            return;
+            return false;
         }
         Err(error) => {
             warn!(
@@ -171,7 +171,7 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
                 %error,
                 "ApplyGroupchatRetractionTombstone: archive lookup failed; skipping"
             );
-            return;
+            return false;
         }
     };
     let Some(retraction_id) = retraction_message
@@ -185,7 +185,7 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
             target = target_message_id,
             "ApplyGroupchatRetractionTombstone: retraction stanza missing valid message id; skipping"
         );
-        return;
+        return false;
     };
     let tombstone = ArchivedTombstone {
         retraction_id: Some(retraction_id),
@@ -203,17 +203,37 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
                 "ApplyGroupchatRetractionTombstone: replaced with tombstone"
             );
         }
-        Ok(false) => warn!(
-            archive = %room,
-            original_id = %original.id,
-            "ApplyGroupchatRetractionTombstone: target row not found at replace time"
-        ),
-        Err(error) => warn!(
-            archive = %room,
-            original_id = %original.id,
-            %error,
-            "ApplyGroupchatRetractionTombstone: replace_with_tombstone failed"
-        ),
+        Ok(false) => {
+            warn!(
+                archive = %room,
+                original_id = %original.id,
+                "ApplyGroupchatRetractionTombstone: target row not found at replace time"
+            );
+            scrub_unacked_for_tombstone(
+                sm_session_registry,
+                target_message_id,
+                &room.to_string(),
+                "ApplyGroupchatRetractionTombstone",
+            )
+            .await;
+            return false;
+        }
+        Err(error) => {
+            warn!(
+                archive = %room,
+                original_id = %original.id,
+                %error,
+                "ApplyGroupchatRetractionTombstone: replace_with_tombstone failed"
+            );
+            scrub_unacked_for_tombstone(
+                sm_session_registry,
+                target_message_id,
+                &room.to_string(),
+                "ApplyGroupchatRetractionTombstone",
+            )
+            .await;
+            return false;
+        }
     }
     // Drop matching unacked groupchat reflections from detached
     // XEP-0198 session queues. The reflection is what occupants see;
@@ -230,6 +250,7 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
         "ApplyGroupchatRetractionTombstone",
     )
     .await;
+    true
 }
 
 /// Walk the SM session registry and drop every unacked outbound
