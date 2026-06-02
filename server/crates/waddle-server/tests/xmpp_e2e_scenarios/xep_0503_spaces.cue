@@ -53,6 +53,7 @@ scenario: #Scenario & {
 				"http://jabber.org/protocol/pubsub#delete-items",
 				"http://jabber.org/protocol/pubsub#retract-items",
 				"http://jabber.org/protocol/pubsub#item-ids",
+				"http://jabber.org/protocol/pubsub#multi-items",
 			]
 		},
 		#SendIq & {

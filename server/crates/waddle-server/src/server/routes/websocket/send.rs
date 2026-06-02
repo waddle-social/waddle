@@ -37,3 +37,17 @@ where
         }
     }
 }
+
+pub(super) async fn close_ws_connection<S, E>(sender: &mut S, failure_message: &'static str) -> bool
+where
+    S: Sink<Message, Error = E> + Unpin,
+    E: std::fmt::Display,
+{
+    match sender.close().await {
+        Ok(()) => true,
+        Err(error) => {
+            error!(error = %error, "{failure_message}");
+            false
+        }
+    }
+}

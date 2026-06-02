@@ -140,6 +140,7 @@ fn test_spaces_service_features_include_xep0503_required_features() {
         "http://jabber.org/protocol/pubsub#delete-items",
         "http://jabber.org/protocol/pubsub#retract-items",
         "http://jabber.org/protocol/pubsub#item-ids",
+        "http://jabber.org/protocol/pubsub#multi-items",
         "http://jabber.org/protocol/pubsub#manage-subscriptions",
         "http://jabber.org/protocol/pubsub#retrieve-items",
         "http://jabber.org/protocol/pubsub#modify-affiliations",

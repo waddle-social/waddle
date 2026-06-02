@@ -82,6 +82,9 @@ pub fn decode_message(frame: &str) -> ClientResult<TransportMessage> {
             max: MAX_FRAME_SIZE,
         });
     }
+    if !has_single_top_level_element(trimmed) {
+        return Err(ClientError::InvalidTransportFrame);
+    }
 
     match peek_root_name(trimmed) {
         Some("open") => parse_stream_open(trimmed),
@@ -144,6 +147,88 @@ fn parse_element_frame(frame: &str) -> ClientResult<TransportMessage> {
     Element::from_str(frame)
         .map(TransportMessage::Element)
         .map_err(|_| ClientError::InvalidTransportFrame)
+}
+
+fn has_single_top_level_element(xml: &str) -> bool {
+    let Some(end) = top_level_element_end(xml) else {
+        return false;
+    };
+    xml[end..].trim().is_empty()
+}
+
+fn top_level_element_end(xml: &str) -> Option<usize> {
+    let bytes = xml.as_bytes();
+    if bytes.first().copied()? != b'<' || matches!(bytes.get(1), Some(b'/' | b'!' | b'?')) {
+        return None;
+    }
+
+    let mut idx = 0;
+    let mut depth = 0usize;
+    while idx < bytes.len() {
+        if bytes[idx] != b'<' {
+            idx += 1;
+            continue;
+        }
+
+        if xml[idx..].starts_with("<!--") {
+            idx += xml[idx..].find("-->")? + "-->".len();
+            continue;
+        }
+        if xml[idx..].starts_with("<![CDATA[") {
+            idx += xml[idx..].find("]]>")? + "]]>".len();
+            continue;
+        }
+        if xml[idx..].starts_with("<?") {
+            idx += xml[idx..].find("?>")? + "?>".len();
+            continue;
+        }
+
+        let end = find_tag_end(xml, idx)?;
+        if xml[idx..].starts_with("</") {
+            depth = depth.checked_sub(1)?;
+            idx = end + 1;
+            if depth == 0 {
+                return Some(idx);
+            }
+            continue;
+        }
+
+        depth += 1;
+        let mut before_end = end;
+        while before_end > idx && bytes[before_end - 1].is_ascii_whitespace() {
+            before_end -= 1;
+        }
+        if before_end > idx && bytes[before_end - 1] == b'/' {
+            depth = depth.checked_sub(1)?;
+            idx = end + 1;
+            if depth == 0 {
+                return Some(idx);
+            }
+            continue;
+        }
+
+        idx = end + 1;
+    }
+
+    None
+}
+
+fn find_tag_end(xml: &str, start: usize) -> Option<usize> {
+    let bytes = xml.as_bytes();
+    let mut quote = None;
+    let mut idx = start + 1;
+    while idx < bytes.len() {
+        let byte = bytes[idx];
+        match quote {
+            Some(q) if byte == q => quote = None,
+            Some(_) => {}
+            None if byte == b'"' || byte == b'\'' => quote = Some(byte),
+            None if byte == b'>' => return Some(idx),
+            None => {}
+        }
+        idx += 1;
+    }
+    None
 }
 
 fn peek_root_name(xml: &str) -> Option<&str> {

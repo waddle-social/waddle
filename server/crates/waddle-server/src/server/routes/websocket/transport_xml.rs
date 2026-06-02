@@ -55,6 +55,27 @@ pub(crate) fn element_to_xml(element: xmpp_parsers::minidom::Element) -> String 
     String::from_utf8(buf).expect("xmpp_parsers serializes valid UTF-8")
 }
 
+pub(super) fn websocket_stream_open_xml(domain: &str) -> String {
+    let open = Element::builder("open", "urn:ietf:params:xml:ns:xmpp-framing")
+        .attr(minidom::rxml::xml_ncname!("from").to_owned(), domain)
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            uuid::Uuid::new_v4().to_string(),
+        )
+        .attr(minidom::rxml::xml_ncname!("version").to_owned(), "1.0")
+        .attr_ns(
+            minidom::rxml::Namespace::XML,
+            minidom::rxml::xml_ncname!("lang").to_owned(),
+            "en",
+        )
+        .build();
+    element_to_xml(open)
+}
+
+pub(super) fn websocket_stream_close_xml() -> String {
+    element_to_xml(Element::builder("close", "urn:ietf:params:xml:ns:xmpp-framing").build())
+}
+
 pub(crate) fn iq_to_xml(iq: xmpp_parsers::iq::Iq) -> String {
     stanza_to_xml(&Stanza::Iq(Box::new(iq)))
 }
@@ -160,9 +181,6 @@ pub(super) fn build_handled_count_too_high_stream_error(
     writer
         .write_event(Event::End(BytesEnd::new("stream:error")))
         .expect("serializing stream error end should not fail");
-    writer
-        .write_event(Event::End(BytesEnd::new("stream:stream")))
-        .expect("serializing stream close should not fail");
     String::from_utf8(writer.into_inner()).expect("quick-xml serializes valid UTF-8")
 }
 

@@ -1,4 +1,4 @@
-use super::transport_xml::build_handled_count_too_high_stream_error;
+use super::transport_xml::{build_handled_count_too_high_stream_error, websocket_stream_close_xml};
 use super::*;
 
 mod registration;
@@ -282,10 +282,16 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
             warn!(stream_id = %resume.previd, error = %error, "Failed to release invalid SM resume claim");
         }
         *phase = ConnectionPhase::closing(None);
-        return vec![build_handled_count_too_high_stream_error(
-            resume.h,
-            detached.outbound_count,
-        )];
+        info!(
+            stream_id = %resume.previd,
+            client_h = resume.h,
+            send_count = detached.outbound_count,
+            "SM resume rejected: handled count too high"
+        );
+        return vec![
+            build_handled_count_too_high_stream_error(resume.h, detached.outbound_count),
+            websocket_stream_close_xml(),
+        ];
     }
 
     if !detached.can_resume_from(resume.h) {

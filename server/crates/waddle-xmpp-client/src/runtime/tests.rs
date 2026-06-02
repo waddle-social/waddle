@@ -543,9 +543,9 @@ fn runtime_releases_send_barrier_when_fresh_sm_enable_fails() {
 #[test]
 fn runtime_replays_unhandled_stanzas_after_resume_without_recounting_them() {
     let resume_state = resume_state_with_sent_messages(["handled", "unhandled"]);
-    let mut config = config();
-    config.session.stream_management.resume_state = Some(resume_state);
-    let mut runtime = XmppRuntime::new(config).unwrap();
+    let mut resume_config = config();
+    resume_config.session.stream_management.resume_state = Some(resume_state);
+    let mut runtime = XmppRuntime::new(resume_config).unwrap();
     drive_to_authenticated_stream(&mut runtime);
     runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
@@ -807,6 +807,176 @@ fn runtime_preserves_failed_resume_snapshot_until_fallback_retry_is_sent() {
             .expect("fallback snapshot should survive fresh enable attempt"),
         "retry-after-drop",
     );
+}
+
+#[test]
+fn runtime_discards_resume_state_after_prebind_stream_error_close() {
+    let resume_state = resume_state_with_sent_messages(["retry-after-stream-error"]);
+    let mut resume_config = config();
+    resume_config.session.stream_management.resume_state = Some(resume_state);
+    let mut runtime = XmppRuntime::new(resume_config).unwrap();
+
+    drive_to_authenticated_stream(&mut runtime);
+    let feature_events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            post_auth_features_with_sm(),
+        )))
+        .unwrap();
+
+    assert!(feature_events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+            TransportMessage::Element(element)
+        )) if element.name() == "resume"
+    )));
+
+    let error_events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            handled_count_too_high_stream_error(3, 2),
+        )))
+        .unwrap();
+
+    assert!(error_events.iter().any(|event| matches!(
+        event,
+        ClientEvent::MessageDelivery(crate::MessageDeliveryEvent::Failed { stanza_id })
+            if stanza_id.as_str() == "retry-after-stream-error"
+    )));
+    assert!(error_events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::Failed
+        ))
+    )));
+    assert!(runtime.resume_state().is_none());
+
+    runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Close(
+            StreamClose,
+        )))
+        .unwrap();
+    assert!(runtime.resume_state().is_none());
+
+    let mut next_runtime = XmppRuntime::new(config()).unwrap();
+    drive_to_authenticated_stream(&mut next_runtime);
+    let next_events = next_runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            post_auth_features_with_sm(),
+        )))
+        .unwrap();
+
+    assert!(next_events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::ResourceBindingRequested(_))
+    )));
+    assert!(!next_events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+            TransportMessage::Element(element)
+        )) if element.name() == "resume"
+    )));
+}
+
+#[test]
+fn runtime_discards_resume_state_after_generic_prebind_stream_error() {
+    let resume_state = resume_state_with_sent_messages(["retry-after-generic-stream-error"]);
+    let mut resume_config = config();
+    resume_config.session.stream_management.resume_state = Some(resume_state);
+    let mut runtime = XmppRuntime::new(resume_config).unwrap();
+
+    drive_to_authenticated_stream(&mut runtime);
+    runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            post_auth_features_with_sm(),
+        )))
+        .unwrap();
+
+    let error_events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            internal_server_error_stream_error(),
+        )))
+        .unwrap();
+
+    assert!(error_events.iter().any(|event| matches!(
+        event,
+        ClientEvent::MessageDelivery(crate::MessageDeliveryEvent::Failed { stanza_id })
+            if stanza_id.as_str() == "retry-after-generic-stream-error"
+    )));
+    assert!(error_events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::Failed
+        ))
+    )));
+    assert!(runtime.resume_state().is_none());
+}
+
+#[test]
+fn runtime_discards_fallback_resume_state_after_prebind_stream_error() {
+    let resume_state = resume_state_with_sent_messages(["retry-after-fallback-error"]);
+    let mut resume_config = config();
+    resume_config.session.stream_management.resume_state = Some(resume_state);
+    let mut runtime = XmppRuntime::new(resume_config).unwrap();
+
+    drive_to_authenticated_stream(&mut runtime);
+    runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            post_auth_features_with_sm(),
+        )))
+        .unwrap();
+    runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            Element::builder("failed", crate::stream_management::NS_SM)
+                .attr(minidom::rxml::xml_ncname!("h").to_owned(), "0")
+                .build(),
+        )))
+        .unwrap();
+
+    assert!(
+        runtime.resume_state().is_some(),
+        "failed resume should keep fallback retry state until the fresh stream can bind"
+    );
+
+    runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            internal_server_error_stream_error(),
+        )))
+        .unwrap();
+    assert!(runtime.resume_state().is_none());
+
+    runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Close(
+            StreamClose,
+        )))
+        .unwrap();
+    assert!(runtime.resume_state().is_none());
+}
+
+#[test]
+fn runtime_keeps_resume_state_when_transport_fails_during_resume_without_stream_error() {
+    let resume_state = resume_state_with_sent_messages(["retry-after-transport-fail"]);
+    let expected_resume_state = resume_state.clone();
+    let mut resume_config = config();
+    resume_config.session.stream_management.resume_state = Some(resume_state);
+    let mut runtime = XmppRuntime::new(resume_config).unwrap();
+
+    drive_to_authenticated_stream(&mut runtime);
+    runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            post_auth_features_with_sm(),
+        )))
+        .unwrap();
+
+    let events = runtime
+        .apply_transport_event(TransportEvent::StateChanged(TransportState::Failed))
+        .unwrap();
+
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::Failed
+        ))
+    )));
+    assert_eq!(runtime.resume_state(), Some(expected_resume_state));
 }
 
 #[test]
@@ -1143,6 +1313,35 @@ fn resume_state_with_sent_messages<const N: usize>(ids: [&str; N]) -> SmResumeSt
             .unwrap();
     }
     runtime.resume_state().expect("resume state")
+}
+
+fn handled_count_too_high_stream_error(h: u32, send_count: u32) -> Element {
+    Element::builder("error", NS_STREAMS)
+        .append(
+            Element::builder("undefined-condition", "urn:ietf:params:xml:ns:xmpp-streams").build(),
+        )
+        .append(
+            Element::builder("handled-count-too-high", crate::stream_management::NS_SM)
+                .attr(minidom::rxml::xml_ncname!("h").to_owned(), h.to_string())
+                .attr(
+                    minidom::rxml::xml_ncname!("send-count").to_owned(),
+                    send_count.to_string(),
+                )
+                .build(),
+        )
+        .build()
+}
+
+fn internal_server_error_stream_error() -> Element {
+    Element::builder("error", NS_STREAMS)
+        .append(
+            Element::builder(
+                "internal-server-error",
+                "urn:ietf:params:xml:ns:xmpp-streams",
+            )
+            .build(),
+        )
+        .build()
 }
 
 fn assert_resume_state_replays_id(resume_state: SmResumeState, expected_id: &str) {

@@ -3,8 +3,11 @@ use super::{
     frame::handle_xmpp_frame,
     interpret_loop::build_interpret_deps,
     replay::drive_interpret_loop,
+    session_init::build_internal_server_error_stream_error,
     state::WsConnState,
-    transport_xml::{build_stream_features_xml, sasl_failure_xml, sasl_success_xml},
+    transport_xml::{
+        build_stream_features_xml, sasl_failure_xml, sasl_success_xml, websocket_stream_close_xml,
+    },
 };
 use crate::config::ServerConfig;
 use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig};

@@ -1,5 +1,6 @@
 use super::*;
 use crate::bootstrap::NS_CLIENT;
+use crate::ClientError;
 use std::str::FromStr;
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
@@ -95,6 +96,59 @@ fn decode_injects_client_namespace_for_stanzas() {
 
     assert_eq!(element.name(), "iq");
     assert_eq!(element.ns(), NS_CLIENT);
+}
+
+#[test]
+fn decode_accepts_stream_error_as_single_websocket_frame() {
+    let message = decode_message(
+        r#"<stream:error xmlns:stream="http://etherx.jabber.org/streams"><undefined-condition xmlns="urn:ietf:params:xml:ns:xmpp-streams"/><handled-count-too-high xmlns="urn:xmpp:sm:3" h="3" send-count="2"/></stream:error>"#,
+    )
+    .unwrap();
+
+    let TransportMessage::Element(element) = message else {
+        panic!("expected stream error element");
+    };
+
+    assert_eq!(element.name(), "error");
+    assert_eq!(element.ns(), "http://etherx.jabber.org/streams");
+    assert!(element
+        .get_child("handled-count-too-high", "urn:xmpp:sm:3")
+        .is_some());
+}
+
+#[test]
+fn decode_rejects_tcp_style_stream_close_in_websocket_frame() {
+    let error = decode_message(
+        r#"<stream:error xmlns:stream="http://etherx.jabber.org/streams"><undefined-condition xmlns="urn:ietf:params:xml:ns:xmpp-streams"/><handled-count-too-high xmlns="urn:xmpp:sm:3" h="3" send-count="2"/></stream:error></stream:stream>"#,
+    )
+    .unwrap_err();
+
+    assert!(matches!(error, ClientError::InvalidTransportFrame));
+}
+
+#[test]
+fn decode_allows_stream_close_literal_inside_message_cdata() {
+    let message = decode_message(
+        r#"<message xmlns="jabber:client"><body><![CDATA[</stream:stream>]]></body></message>"#,
+    )
+    .unwrap();
+
+    let TransportMessage::Element(element) = message else {
+        panic!("expected message element");
+    };
+
+    assert_eq!(element.name(), "message");
+    let body = element.get_child("body", NS_CLIENT).expect("message body");
+    assert_eq!(body.text(), "</stream:stream>");
+}
+
+#[test]
+fn decode_rejects_multiple_top_level_websocket_elements() {
+    let error =
+        decode_message(r#"<message xmlns="jabber:client"/><presence xmlns="jabber:client"/>"#)
+            .unwrap_err();
+
+    assert!(matches!(error, ClientError::InvalidTransportFrame));
 }
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]

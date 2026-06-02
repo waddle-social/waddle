@@ -82,6 +82,7 @@ async fn spaces_service_disco_info_advertises_xep0503_features() {
     for feature in [
         "urn:xmpp:spaces:0",
         "http://jabber.org/protocol/pubsub#retrieve-items",
+        "http://jabber.org/protocol/pubsub#multi-items",
         "http://jabber.org/protocol/pubsub#manage-subscriptions",
         "http://jabber.org/protocol/pubsub#modify-affiliations",
         "http://jabber.org/protocol/pubsub#retrieve-affiliations",

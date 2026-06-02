@@ -11,6 +11,55 @@ use super::{BootstrapState, XmppRuntime};
 const NS_STREAM_ERRORS: &str = "urn:ietf:params:xml:ns:xmpp-streams";
 
 impl XmppRuntime {
+    pub(super) fn handle_stream_error_element(
+        &mut self,
+        element: &minidom::Element,
+        events: &mut Vec<ClientEvent>,
+    ) {
+        debug_assert_eq!(element.name(), "error");
+        debug_assert_eq!(element.ns(), NS_STREAMS);
+
+        // RFC 6120 defines stream errors as terminal for the current XML
+        // stream. During XEP-0198 resume bootstrap, recoverable resume-specific
+        // failures are represented by `<failed/>`; if the server instead ends
+        // the stream, keeping `previd` would replay the same failed pre-bind
+        // resume on the next WebSocket connection.
+        if matches!(self.bootstrap, BootstrapState::AwaitingResume) {
+            self.discard_failed_prebind_resume(events);
+        }
+
+        if !matches!(self.bootstrap, BootstrapState::Ready | BootstrapState::Idle) {
+            self.discard_fallback_resume_state();
+        }
+    }
+
+    pub(super) fn discard_failed_prebind_resume(&mut self, events: &mut Vec<ClientEvent>) {
+        if !matches!(self.bootstrap, BootstrapState::AwaitingResume) {
+            return;
+        }
+        if self.sm_state.previd.is_none() {
+            return;
+        }
+
+        let failed = self.sm_state.unhandled_message_stanza_ids();
+        self.sm_state.previd = None;
+        self.fallback_resume_state = None;
+        self.pending_fallback_retries.clear();
+        self.fallback_retry_writes_in_flight.clear();
+        events.extend(failed.into_iter().map(|stanza_id| {
+            ClientEvent::MessageDelivery(MessageDeliveryEvent::Failed { stanza_id })
+        }));
+        events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::Failed,
+        )));
+    }
+
+    fn discard_fallback_resume_state(&mut self) {
+        self.fallback_resume_state = None;
+        self.pending_fallback_retries.clear();
+        self.fallback_retry_writes_in_flight.clear();
+    }
+
     pub(super) fn handle_sm_element(
         &mut self,
         element: &minidom::Element,
