@@ -234,6 +234,13 @@ function shouldSkipRawCatchupMessage(
 const DM_CALL_ACTIVITY_PAGE_SIZE = 100;
 const DM_CALL_ACTIVITY_MAX_PAGES = 50;
 
+// Safety-net ceiling for a MUC join. XEP-0045 §7.2.2 has the service
+// send the self-presence (status 110) only AFTER every existing
+// occupant's presence, so a busy room or a slow link can legitimately
+// take several seconds to deliver the roster. 110 is the definitive
+// resolve signal; this timeout only bounds genuinely stuck joins.
+const ROOM_SELF_PRESENCE_TIMEOUT_MS = 15_000;
+
 type CatchupRunStats = { pages: number; messages: number };
 type CatchupOutcome = "completed" | "aborted" | "failed";
 type DmCallActivityHydrationOptions = { since?: string; pageSize?: number; maxPages?: number };
@@ -679,16 +686,52 @@ export class BrowserXmppClient {
     ]);
   }
 
-  private isOwnMucSelfPresence(presence: { muc_jid?: string | null }): boolean {
+  private isOwnMucSelfPresence(presence: {
+    muc_jid?: string | null;
+    muc_status_codes?: number[] | null;
+  }): boolean {
+    // XEP-0045 §7.2.2: status code 110 is the canonical self-presence
+    // marker. It is the only signal that works regardless of room
+    // anonymity (no real JID disclosed) or a service-modified nick.
+    if (presence.muc_status_codes?.includes(110)) return true;
+    // Fallback for any path that doesn't surface status codes: match
+    // the disclosed real JID (non-anonymous rooms only).
     const mucJid = fullJidIdentityKey(presence.muc_jid);
     return !!mucJid && this.ownFullJidCandidates().has(mucJid);
   }
 
   private isOwnAvailableMucSelfPresence(presence: {
     muc_jid?: string | null;
+    muc_status_codes?: number[] | null;
     presence_type?: string;
   }): boolean {
     return this.isOwnMucSelfPresence(presence) && presence.presence_type !== "unavailable";
+  }
+
+  /**
+   * Normalized key under which a room's join waiter is registered.
+   * Keying on the bare room JID (case-folded) — not the full
+   * `room/nick` occupant JID — makes join resolution independent of
+   * the nick the service echoes back and of localpart case.
+   */
+  private roomJoinKey(roomJid: string): string {
+    return roomJid.split("/")[0]?.trim().toLowerCase() ?? "";
+  }
+
+  /**
+   * True when a presence carries an `http://jabber.org/protocol/muc#user`
+   * payload. Every MUC occupant presence includes an affiliation/role
+   * (and self-presence a status code), so we no longer rely on a
+   * disclosed real JID — anonymous rooms omit `muc_jid` yet must still
+   * be routed through MUC handling.
+   */
+  private isMucPresence(presence: WasmPresence): boolean {
+    return (
+      presence.muc_jid !== undefined ||
+      presence.muc_affiliation !== undefined ||
+      presence.muc_role !== undefined ||
+      (presence.muc_status_codes?.length ?? 0) > 0
+    );
   }
 
   private revokeMucReadiness(roomJid: string, options: { keepPendingJoin?: boolean } = {}): void {
@@ -1000,24 +1043,24 @@ export class BrowserXmppClient {
     this.discoveredRoomJids.set(channelId, normalizedRoomJid);
   }
 
-  private waitForRoomSelfPresence(roomJid: string, nick: string): Promise<void> {
-    const fullJid = `${roomJid}/${nick}`;
+  private waitForRoomSelfPresence(roomJid: string): Promise<void> {
+    const key = this.roomJoinKey(roomJid);
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
-        this.roomJoinWaiters.delete(fullJid);
+        this.roomJoinWaiters.delete(key);
         const detail = `Timed out waiting for self-presence in ${roomJid}`;
         this.emitError({ kind: "connect-timeout", recoverable: true, detail });
         reject(new Error("Channel presence did not finish syncing. Try again in a moment."));
-      }, 4000);
-      this.roomJoinWaiters.set(fullJid, {
+      }, ROOM_SELF_PRESENCE_TIMEOUT_MS);
+      this.roomJoinWaiters.set(key, {
         resolve: () => {
           clearTimeout(timeout);
-          this.roomJoinWaiters.delete(fullJid);
+          this.roomJoinWaiters.delete(key);
           resolve();
         },
         reject: (error) => {
           clearTimeout(timeout);
-          this.roomJoinWaiters.delete(fullJid);
+          this.roomJoinWaiters.delete(key);
           reject(error);
         },
       });
@@ -1136,7 +1179,7 @@ export class BrowserXmppClient {
     if (!xmpp.join_room && !xmpp.joinRoom) {
       throw new Error("XMPP client missing join_room binding");
     }
-    const ready = this.waitForRoomSelfPresence(roomJid, this.session.username);
+    const ready = this.waitForRoomSelfPresence(roomJid);
     if (xmpp.join_room) {
       await Promise.allSettled([xmpp.join_room(roomJid, this.session.username)]);
     } else if (xmpp.joinRoom) {
@@ -2787,10 +2830,16 @@ export class BrowserXmppClient {
   }
   private handlePresence(presence: WasmPresence) {
     const from = presence.from ?? "";
-    if ((presence as any).muc_jid !== undefined) {
+    if (this.isMucPresence(presence)) {
       const [room, nick = ""] = from.split("/");
-      const waiter = this.roomJoinWaiters.get(from);
-      if (waiter && this.isOwnAvailableMucSelfPresence(presence)) waiter.resolve();
+      // XEP-0045 §7.2.2: our own available self-presence (status 110,
+      // or, as a fallback, our disclosed real JID) completes the join.
+      // Resolve by room — not the exact occupant JID — so a
+      // service-modified nick or localpart-case difference still
+      // matches the waiter.
+      if (this.isOwnAvailableMucSelfPresence(presence)) {
+        this.roomJoinWaiters.get(this.roomJoinKey(room))?.resolve();
+      }
       if (!room) return;
       if (!nick && presence.vcard_avatar) this.roomAvatarHandler?.(room, presence.vcard_avatar);
       if (!nick) return;
@@ -2801,7 +2850,9 @@ export class BrowserXmppClient {
       const isFocusedRoom = room === this.currentRoom;
       if (presence.presence_type === "unavailable") {
         if (this.isOwnMucSelfPresence(presence)) {
-          this.revokeMucReadiness(room, { keepPendingJoin: this.roomJoinWaiters.has(from) });
+          this.revokeMucReadiness(room, {
+            keepPendingJoin: this.roomJoinWaiters.has(this.roomJoinKey(room)),
+          });
         }
         delete roomHats[nick];
         delete roomAuthority[nick];

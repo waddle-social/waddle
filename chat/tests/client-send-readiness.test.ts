@@ -414,6 +414,74 @@ describe("client send readiness", () => {
     expect((client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.has(roomJid)).toBe(true);
   });
 
+  test("room join resolves on XEP-0045 status code 110 in an anonymous room (no real JID disclosed)", async () => {
+    // Semi-/anonymous rooms don't disclose the occupant's real JID, so
+    // self-presence can only be recognised by `<status code='110'/>`
+    // (XEP-0045 §7.2.2). The join must still complete.
+    const client = new BrowserXmppClient(session());
+    const roomJid = roomBareJidFor(session(), "c1");
+    let onPresence: ((presence: {
+      from?: string;
+      presence_type?: string;
+      muc_jid?: string;
+      muc_status_codes?: number[];
+    }) => void) | null = null;
+    const xmpp = {
+      join_room: mock(async () => undefined),
+      set_on_presence(cb: NonNullable<typeof onPresence>) {
+        onPresence = cb;
+      },
+    };
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { wireEvents: (xmpp: typeof xmpp) => void }).wireEvents(xmpp);
+
+    const joined = (client as unknown as { ensureJoined: (roomJid: string) => Promise<void> }).ensureJoined(roomJid);
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "available",
+      muc_status_codes: [110],
+    });
+
+    await joined;
+    expect((client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.has(roomJid)).toBe(true);
+  });
+
+  test("room join resolves when the room assigns a different nick than requested", async () => {
+    // XEP-0045 lockdown can hand the joiner a service-modified nick
+    // (status 210). Self-presence (110) identifies us regardless of the
+    // echoed occupant nick, so keying the join waiter on the exact
+    // requested `room/nick` would wrongly time out.
+    const client = new BrowserXmppClient(session());
+    const roomJid = roomBareJidFor(session(), "c1");
+    let onPresence: ((presence: {
+      from?: string;
+      presence_type?: string;
+      muc_jid?: string;
+      muc_status_codes?: number[];
+    }) => void) | null = null;
+    const xmpp = {
+      join_room: mock(async () => undefined),
+      set_on_presence(cb: NonNullable<typeof onPresence>) {
+        onPresence = cb;
+      },
+    };
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { wireEvents: (xmpp: typeof xmpp) => void }).wireEvents(xmpp);
+
+    const joined = (client as unknown as { ensureJoined: (roomJid: string) => Promise<void> }).ensureJoined(roomJid);
+    onPresence?.({
+      from: `${roomJid}/alice-2`,
+      presence_type: "available",
+      muc_status_codes: [210, 110],
+      muc_jid: (client as unknown as { fullJid: string }).fullJid,
+    });
+
+    await joined;
+    expect((client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.has(roomJid)).toBe(true);
+  });
+
   test("own unavailable self-presence revokes room readiness and forces a fresh join", async () => {
     const client = new BrowserXmppClient(session());
     const roomJid = roomBareJidFor(session(), "c1");
