@@ -79,7 +79,7 @@ pub(crate) async fn clear_current_message_preview_refs(
         .await
     {
         Ok(rows_affected) => {
-            if rows_affected > 0 {
+            for _ in 0..rows_affected {
                 record_link_preview_event(LinkPreviewTelemetryEvent::CleanupReference);
             }
         }
@@ -194,14 +194,18 @@ mod tests {
     fn message_with_preview_ref(slot_id: &str) -> Message {
         let to: BareJid = "bob@example.com".parse().expect("jid");
         let mut message = Message::new(Some(jid::Jid::from(to)));
+        add_preview_ref(&mut message, slot_id);
+        message
+    }
+
+    fn add_preview_ref(message: &mut Message, slot_id: &str) {
         let hash = "86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16";
         waddle_xmpp::xep::add_reference(
-            &mut message,
+            message,
             &waddle_xmpp::xep::Reference::data(format!(
                 "https://waddle.example/api/files/{slot_id}/link-preview-{hash}.png"
             )),
         );
-        message
     }
 
     async fn ref_state(pool: &DatabasePool, slot_id: &str) -> Option<String> {
@@ -296,6 +300,45 @@ mod tests {
         assert!(
             recorded_events::take().contains(&LinkPreviewTelemetryEvent::CleanupReference),
             "cleanup of an existing current ref must emit cleanup_reference telemetry"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cleanup_telemetry_emits_once_per_cleared_ref() {
+        let _events_guard = recorded_events::async_lock().await;
+        recorded_events::clear();
+        let pool = db_pool().await;
+        let first_slot_id = uuid::Uuid::new_v4().to_string();
+        let second_slot_id = uuid::Uuid::new_v4().to_string();
+        seed_uploaded_slot(&pool, &first_slot_id).await;
+        seed_uploaded_slot(&pool, &second_slot_id).await;
+        let archive: BareJid = "alice@example.com".parse().expect("archive");
+        let to: BareJid = "bob@example.com".parse().expect("jid");
+        let mut message = Message::new(Some(jid::Jid::from(to)));
+        add_preview_ref(&mut message, &first_slot_id);
+        add_preview_ref(&mut message, &second_slot_id);
+
+        record_current_message_preview_refs(
+            pool.global_actor(),
+            "https://waddle.example",
+            &archive,
+            "msg-telemetry-count",
+            "archive-telemetry-count",
+            &message,
+        )
+        .await;
+        recorded_events::clear();
+
+        clear_current_message_preview_refs(pool.global_actor(), &archive, "msg-telemetry-count")
+            .await;
+
+        assert_eq!(
+            recorded_events::take()
+                .into_iter()
+                .filter(|event| *event == LinkPreviewTelemetryEvent::CleanupReference)
+                .count(),
+            2,
+            "cleanup_reference telemetry must count every cleared current ref"
         );
     }
 

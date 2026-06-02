@@ -173,6 +173,8 @@ impl Default for LinkPreviewConfig {
 }
 
 impl LinkPreviewConfig {
+    const MAX_FETCH_TIMEOUT: Duration = Duration::from_secs(60);
+
     pub fn from_env() -> Result<Self, String> {
         Self::from_vars(std::env::vars())
     }
@@ -187,6 +189,18 @@ impl LinkPreviewConfig {
             .into_iter()
             .map(|(key, value)| (key.as_ref().to_string(), value.as_ref().to_string()))
             .collect::<std::collections::HashMap<_, _>>();
+        let fetch_timeout = Duration::from_millis(parse_u64_var(
+            &vars,
+            "WADDLE_LINK_PREVIEW_FETCH_TIMEOUT_MS",
+            1_500,
+        )?);
+        if fetch_timeout > Self::MAX_FETCH_TIMEOUT {
+            return Err(format!(
+                "WADDLE_LINK_PREVIEW_FETCH_TIMEOUT_MS must be at most {}ms",
+                Self::MAX_FETCH_TIMEOUT.as_millis()
+            ));
+        }
+
         Ok(Self {
             enabled: parse_bool_var(&vars, "WADDLE_LINK_PREVIEW_ENABLED", true)?,
             allowed_hosts: parse_host_patterns_var(&vars, "WADDLE_LINK_PREVIEW_ALLOWED_HOSTS")?,
@@ -202,11 +216,7 @@ impl LinkPreviewConfig {
                 2 * 1024 * 1024,
             )?,
             max_redirects: parse_usize_var(&vars, "WADDLE_LINK_PREVIEW_MAX_REDIRECTS", 3)?,
-            fetch_timeout: Duration::from_millis(parse_u64_var(
-                &vars,
-                "WADDLE_LINK_PREVIEW_FETCH_TIMEOUT_MS",
-                1_500,
-            )?),
+            fetch_timeout,
             video_enabled: parse_bool_var(&vars, "WADDLE_LINK_PREVIEW_VIDEO_ENABLED", true)?,
         })
     }
@@ -252,6 +262,7 @@ impl FromStr for LinkPreviewHostPattern {
         if normalized.is_empty()
             || normalized.contains('/')
             || normalized.contains(':')
+            || normalized.contains('*')
             || normalized.contains(char::is_whitespace)
         {
             return Err(format!("invalid host pattern '{raw}'"));
@@ -564,6 +575,12 @@ mod tests {
             .expect_err("URL must not parse as host pattern");
 
         assert!(error.contains("invalid host pattern"));
+
+        let error = "ads.*.example"
+            .parse::<LinkPreviewHostPattern>()
+            .expect_err("unsupported wildcard position must not parse");
+
+        assert!(error.contains("invalid host pattern"));
     }
 
     #[test]
@@ -573,6 +590,16 @@ mod tests {
 
         assert!(error.contains("WADDLE_LINK_PREVIEW_ENABLED"));
         assert!(error.contains("must be a boolean"));
+    }
+
+    #[test]
+    fn link_preview_config_rejects_fetch_timeouts_above_startup_cap() {
+        let error =
+            LinkPreviewConfig::from_vars([("WADDLE_LINK_PREVIEW_FETCH_TIMEOUT_MS", "61000")])
+                .expect_err("oversized timeout must fail startup");
+
+        assert!(error.contains("WADDLE_LINK_PREVIEW_FETCH_TIMEOUT_MS"));
+        assert!(error.contains("at most"));
     }
 
     #[test]

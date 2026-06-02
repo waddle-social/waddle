@@ -42,15 +42,31 @@ pub(crate) mod recorded_events {
     use std::sync::{Mutex, MutexGuard};
 
     static EVENTS: Mutex<Vec<LinkPreviewTelemetryEvent>> = Mutex::new(Vec::new());
+    static ACTIVE_RECORDERS: Mutex<usize> = Mutex::new(0);
     static TEST_LOCK: Mutex<()> = Mutex::new(());
-    static ASYNC_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-    pub(crate) fn lock() -> MutexGuard<'static, ()> {
-        TEST_LOCK.lock().expect("link preview event test lock")
+    pub(crate) struct RecordingGuard {
+        _guard: MutexGuard<'static, ()>,
     }
 
-    pub(crate) async fn async_lock() -> tokio::sync::MutexGuard<'static, ()> {
-        ASYNC_TEST_LOCK.lock().await
+    impl Drop for RecordingGuard {
+        fn drop(&mut self) {
+            *ACTIVE_RECORDERS
+                .lock()
+                .expect("link preview event recorder active count") -= 1;
+        }
+    }
+
+    pub(crate) fn lock() -> RecordingGuard {
+        let guard = TEST_LOCK.lock().expect("link preview event test lock");
+        *ACTIVE_RECORDERS
+            .lock()
+            .expect("link preview event recorder active count") += 1;
+        RecordingGuard { _guard: guard }
+    }
+
+    pub(crate) async fn async_lock() -> RecordingGuard {
+        lock()
     }
 
     pub(crate) fn clear() {
@@ -58,6 +74,13 @@ pub(crate) mod recorded_events {
     }
 
     pub(super) fn push(event: LinkPreviewTelemetryEvent) {
+        if *ACTIVE_RECORDERS
+            .lock()
+            .expect("link preview event recorder active count")
+            == 0
+        {
+            return;
+        }
         EVENTS
             .lock()
             .expect("link preview event recorder")
