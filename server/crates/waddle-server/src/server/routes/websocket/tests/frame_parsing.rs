@@ -166,10 +166,7 @@ async fn websocket_close_moves_connection_into_closing_phase() {
     )
     .await;
 
-    assert_eq!(
-        responses,
-        vec![r#"<close xmlns="urn:ietf:params:xml:ns:xmpp-framing"/>"#.to_string()]
-    );
+    assert_single_websocket_close_frame(&responses);
     assert!(matches!(conn.phase, ConnectionPhase::Closing { .. }));
 }
 
@@ -188,10 +185,7 @@ async fn websocket_close_keeps_bound_connection_in_closing_phase() {
     )
     .await;
 
-    assert_eq!(
-        responses,
-        vec![r#"<close xmlns="urn:ietf:params:xml:ns:xmpp-framing"/>"#.to_string()]
-    );
+    assert_single_websocket_close_frame(&responses);
     assert!(matches!(conn.phase, ConnectionPhase::Closing { .. }));
 
     let _ = handle_xmpp_frame(
@@ -202,6 +196,13 @@ async fn websocket_close_keeps_bound_connection_in_closing_phase() {
     )
     .await;
     assert!(matches!(conn.phase, ConnectionPhase::Closing { .. }));
+}
+
+fn assert_single_websocket_close_frame(responses: &[String]) {
+    assert_eq!(responses.len(), 1);
+    let close = Element::from_str(&responses[0]).expect("close frame xml");
+    assert_eq!(close.name(), "close");
+    assert_eq!(close.ns(), "urn:ietf:params:xml:ns:xmpp-framing");
 }
 
 #[tokio::test]

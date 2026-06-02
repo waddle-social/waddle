@@ -4,10 +4,11 @@ use super::{
     frame::handle_xmpp_frame,
     outbound::handle_outbound_stanza,
     registration::{register_bound_connection_after_frame, RegistrationAfterFrame},
-    send::{send_ws_message, send_ws_text_frames},
+    send::{close_ws_connection, send_ws_message, send_ws_text_frames},
     session_init::build_internal_server_error_stream_error,
     state::WsConnState,
     stream_management::{is_countable_stanza, SmRegistrationFinalization},
+    transport_xml::websocket_stream_close_xml,
 };
 use waddle_xmpp::stream_management::SmRequest;
 
@@ -103,10 +104,15 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                                 let stream_error = build_internal_server_error_stream_error(
                                     "Session initialization failed; please reconnect.",
                                 );
-                                let _ = send_ws_message(
+                                let _ = send_ws_text_frames(
                                     &mut ws_sender,
-                                    Message::Text(stream_error.into()),
-                                    "Failed to send blocklist-load stream error",
+                                    [stream_error, websocket_stream_close_xml()],
+                                    "Failed to send session-init stream error",
+                                )
+                                .await;
+                                let _ = close_ws_connection(
+                                    &mut ws_sender,
+                                    "Failed to send WebSocket close frame after session-init error",
                                 )
                                 .await;
                                 break;
@@ -129,6 +135,8 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                                 }
                             }
                         }
+
+                        ensure_websocket_stream_close_for_closing_phase(&conn, &mut responses);
 
                         // Record outbound stanzas for XEP-0198 replay BEFORE
                         // writing them to the socket. If SM is enabled and
@@ -183,6 +191,11 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                         }
 
                         if matches!(conn.phase, ConnectionPhase::Closing { .. }) {
+                            let _ = close_ws_connection(
+                                &mut ws_sender,
+                                "Failed to send WebSocket close frame after XMPP stream close",
+                            )
+                            .await;
                             break;
                         }
                     }
@@ -265,4 +278,57 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
     cleanup_connection_shutdown(state.as_ref(), &mut outbound_rx, &mut conn, superseded).await;
 
     info!("XMPP WebSocket connection closed");
+}
+
+fn ensure_websocket_stream_close_for_closing_phase(
+    conn: &WsConnState,
+    responses: &mut Vec<String>,
+) {
+    if !matches!(conn.phase, ConnectionPhase::Closing { .. })
+        || response_batch_ends_with_websocket_stream_close(responses)
+    {
+        return;
+    }
+
+    responses.push(websocket_stream_close_xml());
+}
+
+fn response_batch_ends_with_websocket_stream_close(responses: &[String]) -> bool {
+    let websocket_close = websocket_stream_close_xml();
+    responses
+        .last()
+        .is_some_and(|frame| frame == &websocket_close)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn closing_phase_appends_websocket_stream_close_frame() {
+        let mut conn = WsConnState::new();
+        conn.phase = ConnectionPhase::closing(None);
+        let mut responses = vec![element_to_xml(
+            Element::builder("failed", waddle_xmpp::stream_management::SM_NS).build(),
+        )];
+
+        ensure_websocket_stream_close_for_closing_phase(&conn, &mut responses);
+
+        assert_eq!(responses.len(), 2);
+        let close = Element::from_str(&responses[1]).expect("close frame xml");
+        assert_eq!(close.name(), "close");
+        assert_eq!(close.ns(), "urn:ietf:params:xml:ns:xmpp-framing");
+    }
+
+    #[test]
+    fn closing_phase_does_not_duplicate_websocket_stream_close_frame() {
+        let mut conn = WsConnState::new();
+        conn.phase = ConnectionPhase::closing(None);
+        let mut responses = vec![websocket_stream_close_xml()];
+
+        ensure_websocket_stream_close_for_closing_phase(&conn, &mut responses);
+
+        assert_eq!(responses.len(), 1);
+    }
 }

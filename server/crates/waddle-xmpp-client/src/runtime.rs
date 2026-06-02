@@ -271,6 +271,11 @@ impl XmppRuntime {
             return Ok(());
         }
 
+        if element.name() == "error" && element.ns() == crate::bootstrap::NS_STREAMS {
+            self.handle_stream_error_element(&element, events);
+            return Ok(());
+        }
+
         // Track inbound stanzas for SM once enabled.
         if self.sm_state.enabled && matches!(element.name(), "iq" | "message" | "presence") {
             self.sm_state.record_received(1);

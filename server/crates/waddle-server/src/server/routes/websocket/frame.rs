@@ -6,7 +6,10 @@ use super::{
     sasl::{handle_sasl_oauthbearer, handle_sasl_scram_client_first, handle_sasl_scram_response},
     state::WsConnState,
     stream_management::{handle_sm_stanza, SmCtx},
-    transport_xml::{build_stream_features_for_phase, sasl_failure_xml},
+    transport_xml::{
+        build_stream_features_for_phase, sasl_failure_xml, websocket_stream_close_xml,
+        websocket_stream_open_xml,
+    },
 };
 
 /// Handle an XMPP frame per RFC 7395
@@ -87,11 +90,7 @@ pub(super) async fn handle_xmpp_frame(
     match inbound {
         InboundFrame::Open => {
             info!("XMPP stream open requested");
-            let open_element = format!(
-                r#"<open xmlns="urn:ietf:params:xml:ns:xmpp-framing" from="{}" id="{}" version="1.0" xml:lang="en"/>"#,
-                domain,
-                uuid::Uuid::new_v4()
-            );
+            let open_element = websocket_stream_open_xml(domain);
             let features_element = build_stream_features_for_phase(phase);
             vec![open_element, features_element]
         }
@@ -99,7 +98,7 @@ pub(super) async fn handle_xmpp_frame(
         InboundFrame::Close => {
             info!("XMPP stream close requested");
             *phase = ConnectionPhase::closing(phase.bound_jid().cloned());
-            vec![r#"<close xmlns="urn:ietf:params:xml:ns:xmpp-framing"/>"#.to_string()]
+            vec![websocket_stream_close_xml()]
         }
 
         InboundFrame::Auth { mechanism, data } => {

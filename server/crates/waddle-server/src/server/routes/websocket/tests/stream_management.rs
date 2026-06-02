@@ -741,7 +741,14 @@ async fn sm_resume_rejects_impossible_client_handled_count() {
     let responses =
         handle_xmpp_frame(&resume_frame, "example.com", state.as_ref(), &mut conn).await;
 
-    assert_eq!(responses.len(), 1);
+    assert_eq!(responses.len(), 2);
+    let stream_error = Element::from_str(&responses[0]).expect("stream error xml");
+    assert_eq!(stream_error.name(), "error");
+    assert_eq!(stream_error.ns(), waddle_xmpp::ns::STREAM);
+    assert!(
+        !responses[0].contains("</stream:stream>"),
+        "RFC 7395 WebSocket stream close must be a separate close frame"
+    );
     assert!(
         responses[0].contains("stream:error")
             && responses[0].contains("undefined-condition")
@@ -751,6 +758,9 @@ async fn sm_resume_rejects_impossible_client_handled_count() {
                 || responses[0].contains("send-count=\"2\"")),
         "invalid resume count should be a handled-count-too-high stream error: {responses:?}"
     );
+    let close = Element::from_str(&responses[1]).expect("close frame xml");
+    assert_eq!(close.name(), "close");
+    assert_eq!(close.ns(), "urn:ietf:params:xml:ns:xmpp-framing");
     assert!(
         !conn.sm_state.enabled,
         "rejected resume must not pollute the fresh stream SM state"

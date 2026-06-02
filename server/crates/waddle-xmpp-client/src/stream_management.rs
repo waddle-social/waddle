@@ -87,6 +87,13 @@ impl SmResumeState {
     pub fn unhandled_outbound_stanzas(&self) -> impl Iterator<Item = &Element> {
         self.outbound_queue.iter().map(|queued| &queued.element)
     }
+
+    pub fn unhandled_message_stanza_ids(&self) -> Vec<StanzaId> {
+        self.outbound_queue
+            .iter()
+            .filter_map(|queued| queued.message_stanza_id.clone())
+            .collect()
+    }
 }
 
 /// XEP-0198 client-side stream management state.

@@ -451,6 +451,7 @@ pub fn spaces_service_features() -> Vec<Feature> {
         Feature::new("http://jabber.org/protocol/pubsub#delete-items"),
         Feature::new("http://jabber.org/protocol/pubsub#retract-items"),
         Feature::new("http://jabber.org/protocol/pubsub#item-ids"),
+        Feature::new("http://jabber.org/protocol/pubsub#multi-items"),
         Feature::new("http://jabber.org/protocol/pubsub#manage-subscriptions"),
         Feature::new("http://jabber.org/protocol/pubsub#modify-affiliations"),
         Feature::new("http://jabber.org/protocol/pubsub#retrieve-affiliations"),
