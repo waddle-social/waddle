@@ -9,7 +9,7 @@ use minidom::rxml::xml_ncname;
 use url::Url;
 use waddle_xmpp::xep::{
     encode_link_preview_token_checked, LinkPreviewTokenData, LinkPreviewTokenImage,
-    NS_WADDLE_LINK_PREVIEW,
+    LinkPreviewTokenVideo, NS_WADDLE_LINK_PREVIEW,
 };
 #[cfg(test)]
 use waddle_xmpp_core::PreviewImageMediaType;
@@ -174,6 +174,11 @@ async fn handle_link_preview_lookup_iq_with_policy(
             height: image.height,
             alt: image.alt,
         }),
+        video: metadata.video.map(|video| LinkPreviewTokenVideo {
+            url: video.url,
+            media_type: video.media_type,
+            size: video.size,
+        }),
         expires_at_unix: expires_at.timestamp(),
     };
     let Some(token) = encode_link_preview_token_checked(&data, deps.secret) else {
@@ -309,6 +314,18 @@ fn build_link_preview_lookup_result(
                 image_elem = image_elem.attr(xml_ncname!("alt").to_owned(), alt.trim());
             }
             preview.append_child(image_elem.build());
+        }
+        if let Some(video) = &data.video {
+            let mut video_elem = Element::builder("video", NS_WADDLE_LINK_PREVIEW)
+                .attr(xml_ncname!("url").to_owned(), video.url.as_str())
+                .attr(
+                    xml_ncname!("media-type").to_owned(),
+                    video.media_type.as_str(),
+                );
+            if let Some(size) = video.size {
+                video_elem = video_elem.attr(xml_ncname!("size").to_owned(), size.to_string());
+            }
+            preview.append_child(video_elem.build());
         }
         lookup = lookup.append(preview);
     }
@@ -480,6 +497,84 @@ mod tests {
             recorded_events::take().contains(&LinkPreviewTelemetryEvent::ResolverReady),
             "ready lookup path must emit ready telemetry"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn direct_video_lookup_mints_token_and_advertises_video() {
+        let _events_guard = recorded_events::async_lock().await;
+        recorded_events::clear();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/clip.mp4"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(vec![0u8; 4096], "video/mp4"))
+            .mount(&server)
+            .await;
+        let state = create_test_websocket_state().await;
+        let resolver_policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let lookup_url = format!("{}/clip.mp4", server.uri());
+        let payload = Element::builder("lookup", NS_WADDLE_LINK_PREVIEW)
+            .append(
+                Element::builder("url", NS_WADDLE_LINK_PREVIEW)
+                    .append(lookup_url.as_str())
+                    .build(),
+            )
+            .append(
+                Element::builder("scope", NS_WADDLE_LINK_PREVIEW)
+                    .append("alice@example.com")
+                    .build(),
+            )
+            .build();
+        let iq = iq_get_with_payload(payload);
+
+        let response = handle_link_preview_lookup_iq_with_policy(
+            &iq,
+            Some(&sender()),
+            state.as_ref(),
+            LinkPreviewLookupDeps {
+                muc_domain: "muc.example.com",
+                response_from: None,
+                response_to: None,
+                secret: secret(),
+                resolver_policy: Some(&resolver_policy),
+            },
+        )
+        .await;
+
+        let elem: Element = response[0].parse().expect("iq result");
+        let lookup = elem
+            .get_child("lookup", NS_WADDLE_LINK_PREVIEW)
+            .expect("lookup result");
+        assert_eq!(lookup.attr("status"), Some("ready"));
+        let preview = lookup
+            .get_child("preview", NS_WADDLE_LINK_PREVIEW)
+            .expect("preview");
+        let video = preview
+            .get_child("video", NS_WADDLE_LINK_PREVIEW)
+            .expect("video element");
+        assert_eq!(video.attr("media-type"), Some("video/mp4"));
+        assert_eq!(video.attr("url"), Some(lookup_url.as_str()));
+        assert_eq!(video.attr("size"), Some("4096"));
+        assert!(
+            preview.get_child("image", NS_WADDLE_LINK_PREVIEW).is_none(),
+            "direct video preview has no cached image"
+        );
+
+        let token = waddle_xmpp::xep::LinkPreviewToken::new(
+            preview.attr("token").expect("token").to_string(),
+        )
+        .expect("token");
+        let decoded =
+            waddle_xmpp::xep::decode_link_preview_token(&token, secret(), i64::MIN).expect("token");
+        let decoded_video = decoded.video.expect("token video");
+        assert_eq!(
+            decoded_video.media_type,
+            waddle_xmpp_core::DirectVideoMediaType::Mp4
+        );
+        assert_eq!(decoded_video.url.as_str(), lookup_url.as_str());
+        assert_eq!(decoded_video.size, Some(4096));
     }
 
     #[tokio::test(flavor = "current_thread")]

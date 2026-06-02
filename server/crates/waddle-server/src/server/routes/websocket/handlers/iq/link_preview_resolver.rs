@@ -1783,7 +1783,10 @@ mod tests {
         assert_eq!(video.media_type, DirectVideoMediaType::Mp4);
         assert_eq!(video.url.as_str(), url.as_str());
         assert_eq!(video.size, Some(4096));
-        assert!(metadata.image.is_none(), "direct video has no preview image");
+        assert!(
+            metadata.image.is_none(),
+            "direct video has no preview image"
+        );
         assert!(metadata.title.is_none());
     }
 

@@ -425,6 +425,7 @@ mod tests {
                 height: Some(360),
                 alt: Some("Article screenshot".to_string()),
             }),
+            video: None,
             expires_at_unix: 1_900_000_000,
         };
         let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
@@ -487,6 +488,7 @@ mod tests {
             title: Some("Example".to_string()),
             description: None,
             image: None,
+            video: None,
             expires_at_unix: 1_900_000_000,
         };
         let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
@@ -529,6 +531,7 @@ mod tests {
             title: Some("Blocked".to_string()),
             description: None,
             image: None,
+            video: None,
             expires_at_unix: 1_900_000_000,
         };
         let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
@@ -577,6 +580,7 @@ mod tests {
                 title: Some("Blocked".to_string()),
                 description: None,
                 image: None,
+                video: None,
                 expires_at_unix: 1_900_000_000,
             };
             let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
@@ -616,6 +620,7 @@ mod tests {
             title: Some("Blocked canonical".to_string()),
             description: None,
             image: None,
+            video: None,
             expires_at_unix: 1_900_000_000,
         };
         let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
@@ -657,6 +662,7 @@ mod tests {
             title: Some("Video".to_string()),
             description: None,
             image: None,
+            video: None,
             expires_at_unix: 1_900_000_000,
         };
         let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
@@ -707,6 +713,7 @@ mod tests {
                 height: Some(360),
                 alt: None,
             }),
+            video: None,
             expires_at_unix: 1_900_000_000,
         };
         let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
@@ -773,6 +780,7 @@ mod tests {
                 height: Some(360),
                 alt: Some("Article screenshot".to_string()),
             }),
+            video: None,
             expires_at_unix: 1_900_000_000,
         };
         let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
@@ -814,6 +822,7 @@ mod tests {
             title: Some("Example".to_string()),
             description: None,
             image: None,
+            video: None,
             expires_at_unix: 10,
         };
         let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
@@ -917,6 +926,7 @@ mod tests {
             title: Some("Example".to_string()),
             description: None,
             image: None,
+            video: None,
             expires_at_unix: 1_900_000_000,
         };
         let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
@@ -952,6 +962,7 @@ mod tests {
             title: Some("Example".to_string()),
             description: None,
             image: None,
+            video: None,
             expires_at_unix: 1_900_000_000,
         };
         let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
@@ -987,6 +998,7 @@ mod tests {
             title: Some("Second".to_string()),
             description: None,
             image: None,
+            video: None,
             expires_at_unix: 1_900_000_000,
         };
         let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
@@ -1022,6 +1034,7 @@ mod tests {
             title: Some("Example".to_string()),
             description: None,
             image: None,
+            video: None,
             expires_at_unix: 1_900_000_000,
         };
         let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
@@ -1060,6 +1073,7 @@ mod tests {
             title: Some("Example".to_string()),
             description: None,
             image: None,
+            video: None,
             expires_at_unix: 1_900_000_000,
         };
         let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
@@ -1098,6 +1112,7 @@ mod tests {
             title: Some("Example".to_string()),
             description: None,
             image: None,
+            video: None,
             expires_at_unix: 1_900_000_000,
         };
         let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
@@ -1136,6 +1151,7 @@ mod tests {
             title: Some("Current".to_string()),
             description: None,
             image: None,
+            video: None,
             expires_at_unix: 1_900_000_000,
         };
         let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
