@@ -40,7 +40,17 @@ schema.#Base & {
 			// to reach `astro build`. Scoped to production so previews, PR, and
 			// local builds ship telemetry off.
 			PUBLIC_FARO_URL:         "https://faro-collector-prod-eu-west-6.grafana.net/collect/0eab89b00ec9f7cfd5c97e96636a3d20"
+			PUBLIC_FARO_APP_NAME:    "waddle-chat"
 			PUBLIC_FARO_ENVIRONMENT: "production"
+
+			FARO_SOURCEMAP_ENDPOINT: "https://faro-api-prod-eu-west-6.grafana.net/faro/api/v1"
+			FARO_SOURCEMAP_APP_ID:   "92"
+			FARO_SOURCEMAP_APP_NAME: "waddle-chat"
+			FARO_SOURCEMAP_ENABLED:  "true"
+			FARO_SOURCEMAP_STACK_ID: "1602000"
+			FARO_SOURCEMAP_API_KEY: schema.#OnePasswordRef & {
+				ref: "op://waddle-infra/server-runtime-production/grafana-faro-source-maps"
+			}
 		}
 	}
 }

@@ -201,10 +201,42 @@ schema.#Project & {
 			]
 		}
 
+		uploadFaroSourcemaps: schema.#Task & {
+			command: "bun"
+			args: ["run", "sourcemaps:upload"]
+			dependsOn: [build]
+			inputs: [
+				"../package.json",
+				"../bun.lock",
+				"package.json",
+				"scripts/upload-faro-sourcemaps.mjs",
+				"scripts/strip-sourcemaps.mjs",
+				"scripts/resolve-commit-sha.mjs",
+				"dist/**",
+			]
+			outputs: [
+				"dist/**",
+			]
+		}
+
+		stripSourcemaps: schema.#Task & {
+			command: "bun"
+			args: ["run", "sourcemaps:strip"]
+			dependsOn: [build]
+			inputs: [
+				"package.json",
+				"scripts/strip-sourcemaps.mjs",
+				"dist/**",
+			]
+			outputs: [
+				"dist/**",
+			]
+		}
+
 		preview: schema.#Task & {
 			command: "bun"
 			args: ["x", "wrangler", "versions", "upload"]
-			dependsOn: [build]
+			dependsOn: [stripSourcemaps]
 			captures: previewUrl: {
 				pattern: "Version Preview URL: (.+)"
 			}
@@ -216,7 +248,7 @@ schema.#Project & {
 		deploy: schema.#Task & {
 			command: "bun"
 			args: ["x", "wrangler", "deploy"]
-			dependsOn: [build]
+			dependsOn: [uploadFaroSourcemaps]
 			inputs: [
 				"wrangler.jsonc",
 				"dist/**",

@@ -1,6 +1,7 @@
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "astro/config";
 import cloudflare from "@astrojs/cloudflare";
+import MagicString from "magic-string";
 import tailwindcss from "@tailwindcss/vite";
 import vue from "@astrojs/vue";
 import { resolveCommitSha } from "./scripts/resolve-commit-sha.mjs";
@@ -14,6 +15,35 @@ const FARO_URL = process.env.PUBLIC_FARO_URL ?? "";
 const FARO_APP_NAME = process.env.PUBLIC_FARO_APP_NAME ?? "waddle-chat";
 const FARO_APP_VERSION = process.env.PUBLIC_FARO_APP_VERSION ?? "1.0.0";
 const FARO_ENVIRONMENT = process.env.PUBLIC_FARO_ENVIRONMENT ?? "";
+const FARO_SOURCEMAP_ENABLED = process.env.FARO_SOURCEMAP_ENABLED === "true";
+const FARO_BUNDLE_ID = process.env.FARO_BUNDLE_ID ?? `${FARO_APP_NAME}-${COMMIT_SHA}`;
+
+function faroBundleIdPlugin() {
+  return {
+    name: "waddle-faro-bundle-id",
+    apply: "build",
+    renderChunk(code, chunk, outputOptions) {
+      const outputDir = outputOptions.dir?.replaceAll("\\", "/") ?? "";
+      if (
+        !FARO_SOURCEMAP_ENABLED
+        || !outputDir.endsWith("/dist/client")
+        || !/\.(?:js|mjs|cjs)$/.test(chunk.fileName)
+        || code.includes(`__faroBundleId_${FARO_APP_NAME}`)
+      ) {
+        return null;
+      }
+
+      const snippet =
+        `(function(){try{var g=typeof window!=="undefined"?window:typeof global!=="undefined"?global:typeof self!=="undefined"?self:{};g[${JSON.stringify(`__faroBundleId_${FARO_APP_NAME}`)}]=${JSON.stringify(FARO_BUNDLE_ID)}}catch(l){}})();\n`;
+      const source = new MagicString(code);
+      source.prepend(snippet);
+      return {
+        code: source.toString(),
+        map: source.generateMap({ hires: true }),
+      };
+    },
+  };
+}
 
 export default defineConfig({
   output: "server",
@@ -24,8 +54,16 @@ export default defineConfig({
   },
 
   vite: {
+    environments: {
+      client: {
+        build: {
+          sourcemap: FARO_SOURCEMAP_ENABLED,
+        },
+      },
+    },
     plugins: [
       tailwindcss(),
+      faroBundleIdPlugin(),
       // Force `Cache-Control: no-store` on every URL containing the WASM
       // package name. Vite's `?v=<optimizer-hash>` URL convention sends
       // `Cache-Control: max-age=31536000, immutable` to the browser, and the
