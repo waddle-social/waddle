@@ -479,13 +479,14 @@ async fn fetch_html_once(
         if body.len() + chunk.len() > policy.max_bytes {
             let remaining = policy.max_bytes.saturating_sub(body.len());
             body.extend_from_slice(&chunk[..remaining]);
-            if allow_head_cutoff && found_head_end.is_none() {
+            if allow_head_cutoff
+                && found_head_end.is_none()
+                && response.status() != StatusCode::PARTIAL_CONTENT
+            {
                 found_head_end = head_end_scanner.scan(&body);
-                if response.status() != StatusCode::PARTIAL_CONTENT {
-                    if let Some(head_end) = found_head_end {
-                        body.truncate(head_end);
-                        break;
-                    }
+                if let Some(head_end) = found_head_end {
+                    body.truncate(head_end);
+                    break;
                 }
             }
             return Err(LinkPreviewResolverStatus::Failed);
@@ -575,7 +576,7 @@ fn parse_content_range(value: &str) -> ContentRangeState {
     if start != 0 || end < start {
         return ContentRangeState::Unknown;
     }
-    let expected_len = next - start;
+    let expected_len = next;
     if total == "*" {
         return ContentRangeState::UnknownTotal { expected_len };
     }
