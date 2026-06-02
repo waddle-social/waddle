@@ -6,7 +6,7 @@ use bytes::Bytes;
 use chrono::Utc;
 use jid::BareJid;
 use kameo::actor::ActorRef;
-use reqwest::header::{CONTENT_TYPE, LOCATION, RANGE};
+use reqwest::header::{CONTENT_RANGE, CONTENT_TYPE, LOCATION, RANGE};
 use reqwest::{redirect, Client, StatusCode};
 use sha2::{Digest, Sha256};
 use tracing::warn;
@@ -455,8 +455,22 @@ async fn fetch_html_once(
             return Err(LinkPreviewResolverStatus::Failed);
         }
     }
+    let partial_content_state = if response.status() == StatusCode::PARTIAL_CONTENT {
+        response
+            .headers()
+            .get(CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok())
+            .map(parse_content_range)
+            .unwrap_or(ContentRangeState::Unknown)
+    } else {
+        ContentRangeState::NotPartial
+    };
+    if partial_content_state == ContentRangeState::Unknown {
+        return Err(LinkPreviewResolverStatus::Failed);
+    }
     let mut body = Vec::with_capacity(policy.max_bytes.min(64 * 1024));
     let mut head_end_scanner = HtmlHeadEndScanner::default();
+    let mut found_head_end = None;
     while let Some(chunk) = response
         .chunk()
         .await
@@ -465,27 +479,117 @@ async fn fetch_html_once(
         if body.len() + chunk.len() > policy.max_bytes {
             let remaining = policy.max_bytes.saturating_sub(body.len());
             body.extend_from_slice(&chunk[..remaining]);
-            if allow_head_cutoff {
-                if let Some(head_end) = head_end_scanner.scan(&body) {
-                    body.truncate(head_end);
-                    break;
+            if allow_head_cutoff && found_head_end.is_none() {
+                found_head_end = head_end_scanner.scan(&body);
+                if response.status() != StatusCode::PARTIAL_CONTENT {
+                    if let Some(head_end) = found_head_end {
+                        body.truncate(head_end);
+                        break;
+                    }
                 }
             }
             return Err(LinkPreviewResolverStatus::Failed);
         }
         body.extend_from_slice(&chunk);
-        if allow_head_cutoff {
-            if let Some(head_end) = head_end_scanner.scan(&body) {
-                body.truncate(head_end);
-                break;
+        if allow_head_cutoff && found_head_end.is_none() {
+            found_head_end = head_end_scanner.scan(&body);
+            if response.status() != StatusCode::PARTIAL_CONTENT {
+                if let Some(head_end) = found_head_end {
+                    body.truncate(head_end);
+                    break;
+                }
             }
         }
+    }
+    if let Some(expected_len) = partial_content_state.expected_len() {
+        let received_len = u64::try_from(body.len()).unwrap_or(u64::MAX);
+        if received_len != expected_len {
+            return Err(LinkPreviewResolverStatus::Failed);
+        }
+    }
+    if allow_head_cutoff
+        && found_head_end.is_none()
+        && matches!(
+            partial_content_state,
+            ContentRangeState::HasUnreturnedTail { .. } | ContentRangeState::UnknownTotal { .. }
+        )
+    {
+        return Err(LinkPreviewResolverStatus::Failed);
+    }
+    if let Some(head_end) = found_head_end {
+        body.truncate(head_end);
     }
     let html = String::from_utf8_lossy(&body).into_owned();
     Ok(FetchOnceResult::Html {
         final_url: url.clone(),
         html,
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContentRangeState {
+    NotPartial,
+    Complete { expected_len: u64 },
+    HasUnreturnedTail { expected_len: u64 },
+    UnknownTotal { expected_len: u64 },
+    Unknown,
+}
+
+impl ContentRangeState {
+    fn expected_len(self) -> Option<u64> {
+        match self {
+            ContentRangeState::Complete { expected_len }
+            | ContentRangeState::HasUnreturnedTail { expected_len }
+            | ContentRangeState::UnknownTotal { expected_len } => Some(expected_len),
+            ContentRangeState::NotPartial | ContentRangeState::Unknown => None,
+        }
+    }
+}
+
+fn parse_content_range(value: &str) -> ContentRangeState {
+    let mut parts = value.split_whitespace();
+    let Some(unit) = parts.next() else {
+        return ContentRangeState::Unknown;
+    };
+    let Some(range_and_total) = parts.next() else {
+        return ContentRangeState::Unknown;
+    };
+    if parts.next().is_some() || !unit.eq_ignore_ascii_case("bytes") {
+        return ContentRangeState::Unknown;
+    }
+    let Some((range, total)) = range_and_total.split_once('/') else {
+        return ContentRangeState::Unknown;
+    };
+    let Some((start, end)) = range.split_once('-') else {
+        return ContentRangeState::Unknown;
+    };
+    let Ok(start) = start.parse::<u64>() else {
+        return ContentRangeState::Unknown;
+    };
+    let Ok(end) = end.parse::<u64>() else {
+        return ContentRangeState::Unknown;
+    };
+    let Some(next) = end.checked_add(1) else {
+        return ContentRangeState::Unknown;
+    };
+    if start != 0 || end < start {
+        return ContentRangeState::Unknown;
+    }
+    let expected_len = next - start;
+    if total == "*" {
+        return ContentRangeState::UnknownTotal { expected_len };
+    }
+    let Ok(total) = total.parse::<u64>() else {
+        return ContentRangeState::Unknown;
+    };
+    if next > total {
+        return ContentRangeState::Unknown;
+    }
+    if next < total {
+        ContentRangeState::HasUnreturnedTail { expected_len }
+    } else {
+        ContentRangeState::Complete { expected_len }
+    }
 }
 
 struct PreparedTarget<'a> {
@@ -1031,7 +1135,7 @@ impl HtmlTagScanner {
             self.name.push(byte);
             return;
         }
-        if byte.is_ascii_alphanumeric() {
+        if !byte.is_ascii_whitespace() && byte != b'/' {
             self.name.push(byte.to_ascii_lowercase());
             return;
         }
@@ -1472,6 +1576,36 @@ mod tests {
         );
     }
 
+    async fn assert_invalid_partial_html_response_fails(content_range: Option<&str>) {
+        let server = MockServer::start().await;
+        let body = r#"<html><head>
+                  <meta property="og:title" content="Invalid partial metadata">
+                </head><body></body></html>"#;
+        let mut response = ResponseTemplate::new(206)
+            .insert_header("content-type", "text/html; charset=utf-8")
+            .insert_header("content-length", body.len().to_string())
+            .set_body_raw(body, "text/html; charset=utf-8");
+        if let Some(content_range) = content_range {
+            response = response.insert_header("content-range", content_range);
+        }
+        Mock::given(method("GET"))
+            .and(path("/invalid-partial"))
+            .respond_with(response)
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            max_bytes: 256,
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/invalid-partial", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        assert_eq!(outcome.status(), LinkPreviewResolverStatus::Failed);
+        assert_single_range_request(&server, "bytes=0-255").await;
+    }
+
     #[test]
     fn head_end_scanner_ignores_split_false_markers_in_comment_and_script() {
         let html = r#"<html><head><!-- </head> --><script>const marker = "</head>";</script><meta property="og:title" content="Recovered"></head><body></body></html>"#;
@@ -1484,6 +1618,22 @@ mod tests {
     fn head_end_scanner_accepts_split_whitespace_before_close_bracket() {
         let html = "<html><head><title>not </head></title></head \t><body></body></html>";
         let expected = html.find("</head \t>").expect("head end") + "</head \t>".len();
+
+        assert_eq!(scan_head_end_one_byte_at_a_time(html), Some(expected));
+    }
+
+    #[test]
+    fn head_end_scanner_does_not_treat_custom_tags_as_head_or_raw_text() {
+        let html = "<html><head-section></head><head profile=\"https://example.test\"><script-widget></script-widget><meta property=\"og:title\" content=\"Recovered\"></head><body></body></html>";
+        let expected = html.rfind("</head>").expect("head end") + "</head>".len();
+
+        assert_eq!(scan_head_end_one_byte_at_a_time(html), Some(expected));
+    }
+
+    #[test]
+    fn head_end_scanner_treats_slash_after_raw_text_tag_name_as_raw_text() {
+        let html = r#"<html><head><script/type>const marker = "</head>";</script><meta property="og:title" content="Recovered"></head><body></body></html>"#;
+        let expected = html.rfind("</head>").expect("head end") + "</head>".len();
 
         assert_eq!(scan_head_end_one_byte_at_a_time(html), Some(expected));
     }
@@ -1597,6 +1747,363 @@ mod tests {
             panic!("expected ready outcome, got {outcome:?}");
         };
         assert_eq!(metadata.title.as_deref(), Some("Whitespace head close"));
+        assert_single_range_request(&server, "bytes=0-255").await;
+    }
+
+    #[tokio::test]
+    async fn exact_size_partial_html_without_completed_head_returns_failed() {
+        let server = MockServer::start().await;
+        let mut ranged_body = r#"<html><head>
+                  <meta property="og:title" content="Incomplete head metadata">
+                "#
+        .to_string();
+        ranged_body.push_str(&"x".repeat(256 - ranged_body.len()));
+        Mock::given(method("GET"))
+            .and(path("/partial"))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("content-type", "text/html; charset=utf-8")
+                    .insert_header("content-length", ranged_body.len().to_string())
+                    .insert_header("content-range", "bytes 0-255/1024")
+                    .set_body_raw(ranged_body, "text/html; charset=utf-8"),
+            )
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            max_bytes: 256,
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/partial", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        assert_eq!(outcome.status(), LinkPreviewResolverStatus::Failed);
+        assert_single_range_request(&server, "bytes=0-255").await;
+    }
+
+    #[tokio::test]
+    async fn partial_html_without_content_range_and_without_completed_head_returns_failed() {
+        let server = MockServer::start().await;
+        let mut ranged_body = r#"<html><head>
+                  <meta property="og:title" content="Missing content range metadata">
+                "#
+        .to_string();
+        ranged_body.push_str(&"x".repeat(256 - ranged_body.len()));
+        Mock::given(method("GET"))
+            .and(path("/partial-missing-content-range"))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("content-type", "text/html; charset=utf-8")
+                    .insert_header("content-length", ranged_body.len().to_string())
+                    .set_body_raw(ranged_body, "text/html; charset=utf-8"),
+            )
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            max_bytes: 256,
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let url =
+            Url::parse(&format!("{}/partial-missing-content-range", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        assert_eq!(outcome.status(), LinkPreviewResolverStatus::Failed);
+        assert_single_range_request(&server, "bytes=0-255").await;
+    }
+
+    #[tokio::test]
+    async fn partial_html_with_malformed_content_range_and_without_completed_head_returns_failed() {
+        let server = MockServer::start().await;
+        let mut ranged_body = r#"<html><head>
+                  <meta property="og:title" content="Malformed content range metadata">
+                "#
+        .to_string();
+        ranged_body.push_str(&"x".repeat(256 - ranged_body.len()));
+        Mock::given(method("GET"))
+            .and(path("/partial-malformed-content-range"))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("content-type", "text/html; charset=utf-8")
+                    .insert_header("content-length", ranged_body.len().to_string())
+                    .insert_header("content-range", "bytes invalid")
+                    .set_body_raw(ranged_body, "text/html; charset=utf-8"),
+            )
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            max_bytes: 256,
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let url =
+            Url::parse(&format!("{}/partial-malformed-content-range", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        assert_eq!(outcome.status(), LinkPreviewResolverStatus::Failed);
+        assert_single_range_request(&server, "bytes=0-255").await;
+    }
+
+    #[tokio::test]
+    async fn partial_html_with_non_leading_content_range_and_without_completed_head_returns_failed()
+    {
+        let server = MockServer::start().await;
+        let mut ranged_body = r#"<html><head>
+                  <meta property="og:title" content="Non-leading content range metadata">
+                "#
+        .to_string();
+        ranged_body.push_str(&"x".repeat(256 - ranged_body.len()));
+        Mock::given(method("GET"))
+            .and(path("/partial-non-leading-content-range"))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("content-type", "text/html; charset=utf-8")
+                    .insert_header("content-length", ranged_body.len().to_string())
+                    .insert_header("content-range", "bytes 100-355/356")
+                    .set_body_raw(ranged_body, "text/html; charset=utf-8"),
+            )
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            max_bytes: 256,
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let url = Url::parse(&format!(
+            "{}/partial-non-leading-content-range",
+            server.uri()
+        ))
+        .expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        assert_eq!(outcome.status(), LinkPreviewResolverStatus::Failed);
+        assert_single_range_request(&server, "bytes=0-255").await;
+    }
+
+    #[tokio::test]
+    async fn partial_html_with_impossible_content_range_and_without_completed_head_returns_failed()
+    {
+        let server = MockServer::start().await;
+        let mut ranged_body = r#"<html><head>
+                  <meta property="og:title" content="Impossible content range metadata">
+                "#
+        .to_string();
+        ranged_body.push_str(&"x".repeat(256 - ranged_body.len()));
+        Mock::given(method("GET"))
+            .and(path("/partial-impossible-content-range"))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("content-type", "text/html; charset=utf-8")
+                    .insert_header("content-length", ranged_body.len().to_string())
+                    .insert_header("content-range", "bytes 0-255/42")
+                    .set_body_raw(ranged_body, "text/html; charset=utf-8"),
+            )
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            max_bytes: 256,
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let url = Url::parse(&format!(
+            "{}/partial-impossible-content-range",
+            server.uri()
+        ))
+        .expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        assert_eq!(outcome.status(), LinkPreviewResolverStatus::Failed);
+        assert_single_range_request(&server, "bytes=0-255").await;
+    }
+
+    #[tokio::test]
+    async fn partial_html_without_content_range_and_completed_head_returns_failed() {
+        assert_invalid_partial_html_response_fails(None).await;
+    }
+
+    #[tokio::test]
+    async fn partial_html_with_malformed_content_range_and_completed_head_returns_failed() {
+        assert_invalid_partial_html_response_fails(Some("bytes invalid")).await;
+    }
+
+    #[tokio::test]
+    async fn partial_html_with_non_leading_content_range_and_completed_head_returns_failed() {
+        assert_invalid_partial_html_response_fails(Some("bytes 100-355/356")).await;
+    }
+
+    #[tokio::test]
+    async fn partial_html_with_impossible_content_range_and_completed_head_returns_failed() {
+        assert_invalid_partial_html_response_fails(Some("bytes 0-255/42")).await;
+    }
+
+    #[tokio::test]
+    async fn complete_exact_size_partial_html_without_completed_head_uses_metadata() {
+        let server = MockServer::start().await;
+        let mut ranged_body = r#"<html><head>
+                  <meta property="og:title" content="Complete partial metadata">
+                "#
+        .to_string();
+        ranged_body.push_str(&"x".repeat(256 - ranged_body.len()));
+        Mock::given(method("GET"))
+            .and(path("/complete-partial"))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("content-type", "text/html; charset=utf-8")
+                    .insert_header("content-length", ranged_body.len().to_string())
+                    .insert_header("content-range", "bytes 0-255/256")
+                    .set_body_raw(ranged_body, "text/html; charset=utf-8"),
+            )
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            max_bytes: 256,
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/complete-partial", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        let LinkPreviewResolverOutcome::Ready(metadata) = outcome else {
+            panic!("expected ready outcome, got {outcome:?}");
+        };
+        assert_eq!(metadata.title.as_deref(), Some("Complete partial metadata"));
+        assert_single_range_request(&server, "bytes=0-255").await;
+    }
+
+    #[tokio::test]
+    async fn complete_exact_size_partial_html_with_short_body_returns_failed() {
+        let server = MockServer::start().await;
+        let body = r#"<html><head>
+                  <meta property="og:title" content="Short forged complete metadata">
+                "#;
+        Mock::given(method("GET"))
+            .and(path("/short-complete-partial"))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("content-type", "text/html; charset=utf-8")
+                    .insert_header("content-length", body.len().to_string())
+                    .insert_header("content-range", "bytes 0-255/256")
+                    .set_body_raw(body, "text/html; charset=utf-8"),
+            )
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            max_bytes: 256,
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/short-complete-partial", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        assert_eq!(outcome.status(), LinkPreviewResolverStatus::Failed);
+        assert_single_range_request(&server, "bytes=0-255").await;
+    }
+
+    #[tokio::test]
+    async fn complete_exact_size_partial_html_with_long_body_returns_failed() {
+        let server = MockServer::start().await;
+        let mut body = r#"<html><head>
+                  <meta property="og:title" content="Long forged complete metadata">
+                </head>"#
+            .to_string();
+        body.push_str(&"x".repeat(300 - body.len()));
+        Mock::given(method("GET"))
+            .and(path("/long-complete-partial"))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("content-type", "text/html; charset=utf-8")
+                    .insert_header("content-length", body.len().to_string())
+                    .insert_header("content-range", "bytes 0-255/256")
+                    .set_body_raw(body, "text/html; charset=utf-8"),
+            )
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            max_bytes: 512,
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/long-complete-partial", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        assert_eq!(outcome.status(), LinkPreviewResolverStatus::Failed);
+        assert_single_range_request(&server, "bytes=0-511").await;
+    }
+
+    #[tokio::test]
+    async fn unknown_total_partial_html_with_completed_head_uses_metadata() {
+        let server = MockServer::start().await;
+        let mut ranged_body = r#"<html><head>
+                  <meta property="og:title" content="Unknown total metadata">
+                </head>"#
+            .to_string();
+        ranged_body.push_str(&"x".repeat(256 - ranged_body.len()));
+        Mock::given(method("GET"))
+            .and(path("/unknown-total-complete-head"))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("content-type", "text/html; charset=utf-8")
+                    .insert_header("content-length", ranged_body.len().to_string())
+                    .insert_header("content-range", "bytes 0-255/*")
+                    .set_body_raw(ranged_body, "text/html; charset=utf-8"),
+            )
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            max_bytes: 256,
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let url =
+            Url::parse(&format!("{}/unknown-total-complete-head", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        let LinkPreviewResolverOutcome::Ready(metadata) = outcome else {
+            panic!("expected ready outcome, got {outcome:?}");
+        };
+        assert_eq!(metadata.title.as_deref(), Some("Unknown total metadata"));
+        assert_single_range_request(&server, "bytes=0-255").await;
+    }
+
+    #[tokio::test]
+    async fn unknown_total_partial_html_without_completed_head_returns_failed() {
+        let server = MockServer::start().await;
+        let mut ranged_body = r#"<html><head>
+                  <meta property="og:title" content="Unknown total incomplete metadata">
+                "#
+        .to_string();
+        ranged_body.push_str(&"x".repeat(256 - ranged_body.len()));
+        Mock::given(method("GET"))
+            .and(path("/unknown-total-incomplete-head"))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("content-type", "text/html; charset=utf-8")
+                    .insert_header("content-length", ranged_body.len().to_string())
+                    .insert_header("content-range", "bytes 0-255/*")
+                    .set_body_raw(ranged_body, "text/html; charset=utf-8"),
+            )
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            max_bytes: 256,
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let url =
+            Url::parse(&format!("{}/unknown-total-incomplete-head", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        assert_eq!(outcome.status(), LinkPreviewResolverStatus::Failed);
         assert_single_range_request(&server, "bytes=0-255").await;
     }
 
@@ -2176,7 +2683,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oversized_html_without_completed_head_returns_failed() {
+    async fn oversized_content_length_returns_failed_when_range_is_ignored() {
         let server = MockServer::start().await;
         let body = "x".repeat(65);
         Mock::given(method("GET"))
