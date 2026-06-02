@@ -52,6 +52,8 @@ pub struct WebSocketDeps {
     /// inner `Arc<[u8]>`; shared with `RoomRegistryActor` so every
     /// stamping site uses the same key.
     pub occupant_id_secret: OccupantIdSecret,
+    /// Operator controls for server-side link preview enrichment.
+    pub link_preview: crate::config::LinkPreviewConfig,
     /// Snapshot of `WADDLE_PROVIDER_*_WEBHOOK_*` env vars, built once at
     /// startup; the extension webhook handler reads from this instead of
     /// re-parsing env on every request.

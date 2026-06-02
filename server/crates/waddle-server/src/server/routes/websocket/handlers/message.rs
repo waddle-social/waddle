@@ -9,7 +9,7 @@ use waddle_xmpp::{
         add_reference, build_link_metadata_element, decode_link_preview_token,
         extract_link_preview_request_from_message, parse_fallbacks_from_message,
         strip_fallback_ranges, strip_link_metadata, strip_link_preview_requests, FallbackRegion,
-        LinkMetadata, Reference, NS_DELAY, NS_REPLY,
+        LinkMetadata, Reference, WaddleLinkPreviewError, NS_DELAY, NS_REPLY,
     },
     Stanza,
 };
@@ -21,6 +21,9 @@ use super::super::{
     interpret_loop::build_interpret_deps, replay::drive_interpret_loop, WebSocketState,
 };
 use crate::auth::Session;
+use crate::server::routes::websocket::link_preview_telemetry::{
+    record_link_preview_event, LinkPreviewTelemetryEvent,
+};
 use waddle_xmpp::protocol::ConnectionPhase;
 
 /// Thin transport adapter that drives the sans-I/O dispatcher
@@ -77,6 +80,7 @@ pub async fn handle_message(
         state.deps.occupant_id_secret.key(),
         chrono::Utc::now().timestamp(),
         state.deps.auth_state.base_url.as_str(),
+        state.deps.link_preview.enabled,
     );
 
     if incoming.type_ != xmpp_parsers::message::MessageType::Groupchat
@@ -119,11 +123,29 @@ fn consume_link_preview_request(
     secret: &[u8],
     now_unix: i64,
     trusted_media_base_url: &str,
+    link_preview_enabled: bool,
 ) {
+    if !link_preview_enabled {
+        strip_link_preview_requests(message);
+        strip_link_metadata(message);
+        return;
+    }
     let expected_sender = sender_jid.to_bare();
     let expected_scope = message.to.as_ref().map(|to| to.to_bare());
-    let metadata = extract_link_preview_request_from_message(message)
-        .and_then(|token| decode_link_preview_token(&token, secret, now_unix).ok())
+    let decoded = extract_link_preview_request_from_message(message).and_then(|token| {
+        match decode_link_preview_token(&token, secret, now_unix) {
+            Ok(preview) => Some(preview),
+            Err(WaddleLinkPreviewError::Expired) => {
+                record_link_preview_event(LinkPreviewTelemetryEvent::TokenExpired);
+                None
+            }
+            Err(_) => {
+                record_link_preview_event(LinkPreviewTelemetryEvent::TokenInvalid);
+                None
+            }
+        }
+    });
+    let metadata = decoded
         .filter(|preview| {
             Some(&preview.scope_jid) == expected_scope.as_ref()
                 && preview.sender_jid == expected_sender
@@ -251,6 +273,7 @@ fn remove_framework_envelopes(message: &mut xmpp_parsers::message::Message) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::routes::websocket::link_preview_telemetry::recorded_events;
     const SECRET: &[u8] = b"test-link-preview-secret";
 
     fn sender() -> jid::FullJid {
@@ -366,6 +389,7 @@ mod tests {
             SECRET,
             1_800_000_000,
             "https://waddle.example",
+            true,
         );
 
         assert!(message
@@ -396,6 +420,45 @@ mod tests {
             references[0].ref_type,
             waddle_xmpp::xep::ReferenceType::Data
         );
+    }
+
+    #[test]
+    fn disabled_policy_strips_link_preview_request_without_metadata() {
+        let preview = waddle_xmpp::xep::LinkPreviewTokenData {
+            sender_jid: "alice@example.com".parse().expect("jid"),
+            scope_jid: "room@muc.example.com".parse().expect("jid"),
+            original_url: url::Url::parse("https://example.com/").expect("url"),
+            normalized_url: url::Url::parse("https://example.com/").expect("url"),
+            title: Some("Example".to_string()),
+            description: None,
+            image: None,
+            expires_at_unix: 1_900_000_000,
+        };
+        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
+        let mut message = Message::new(None::<jid::Jid>);
+        message.to = Some("room@muc.example.com".parse().expect("jid"));
+        message.bodies.insert(
+            xmpp_parsers::message::Lang::new(),
+            "read https://example.com/".to_string(),
+        );
+        message
+            .payloads
+            .push(waddle_xmpp::xep::build_link_preview_request_element(&token));
+
+        consume_link_preview_request(
+            &mut message,
+            &sender(),
+            SECRET,
+            1_800_000_000,
+            "https://waddle.example",
+            false,
+        );
+
+        assert!(message
+            .payloads
+            .iter()
+            .all(|payload| payload.ns() != waddle_xmpp::xep::NS_WADDLE_LINK_PREVIEW));
+        assert!(waddle_xmpp::xep::extract_link_metadata_from_message(&message).is_empty());
     }
 
     #[test]
@@ -441,6 +504,7 @@ mod tests {
             SECRET,
             1_800_000_000,
             "https://waddle.example",
+            true,
         );
 
         assert_eq!(
@@ -501,6 +565,7 @@ mod tests {
             SECRET,
             1_800_000_000,
             "https://waddle.example",
+            true,
         );
 
         let parsed = waddle_xmpp::xep::extract_link_metadata_from_message(&message);
@@ -512,6 +577,8 @@ mod tests {
 
     #[test]
     fn expired_link_preview_request_is_stripped_without_metadata() {
+        let _events_guard = recorded_events::lock();
+        recorded_events::clear();
         let preview = waddle_xmpp::xep::LinkPreviewTokenData {
             sender_jid: "alice@example.com".parse().expect("jid"),
             scope_jid: "room@muc.example.com".parse().expect("jid"),
@@ -539,13 +606,20 @@ mod tests {
             SECRET,
             11,
             "https://waddle.example",
+            true,
         );
 
         assert!(message.payloads.is_empty());
+        assert!(
+            recorded_events::take().contains(&LinkPreviewTelemetryEvent::TokenExpired),
+            "expired send-time token path must emit token_expired telemetry"
+        );
     }
 
     #[test]
     fn invalid_link_preview_request_is_stripped_without_metadata() {
+        let _events_guard = recorded_events::lock();
+        recorded_events::clear();
         let token =
             waddle_xmpp::xep::LinkPreviewToken::new("not-a-signed-preview-token").expect("token");
         let mut message = Message::new(None::<jid::Jid>);
@@ -564,9 +638,14 @@ mod tests {
             SECRET,
             1_800_000_000,
             "https://waddle.example",
+            true,
         );
 
         assert!(message.payloads.is_empty());
+        assert!(
+            recorded_events::take().contains(&LinkPreviewTelemetryEvent::TokenInvalid),
+            "invalid send-time token path must emit token_invalid telemetry"
+        );
     }
 
     #[test]
@@ -595,6 +674,7 @@ mod tests {
             SECRET,
             1_800_000_000,
             "https://waddle.example",
+            true,
         );
 
         assert!(message.payloads.is_empty());
@@ -629,6 +709,7 @@ mod tests {
             SECRET,
             1_800_000_000,
             "https://waddle.example",
+            true,
         );
 
         assert!(message.payloads.is_empty());
@@ -663,6 +744,7 @@ mod tests {
             SECRET,
             1_800_000_000,
             "https://waddle.example",
+            true,
         );
 
         assert!(message.payloads.is_empty());
@@ -697,6 +779,7 @@ mod tests {
             SECRET,
             1_800_000_000,
             "https://waddle.example",
+            true,
         );
 
         assert!(message.payloads.is_empty());
@@ -731,6 +814,7 @@ mod tests {
             SECRET,
             1_800_000_000,
             "https://waddle.example",
+            true,
         );
 
         assert_eq!(
@@ -768,6 +852,7 @@ mod tests {
             SECRET,
             1_800_000_000,
             "https://waddle.example",
+            true,
         );
 
         assert_eq!(
@@ -805,6 +890,7 @@ mod tests {
             SECRET,
             1_800_000_000,
             "https://waddle.example",
+            true,
         );
 
         assert_eq!(
@@ -852,6 +938,7 @@ mod tests {
             SECRET,
             1_800_000_000,
             "https://waddle.example",
+            true,
         );
 
         let parsed = waddle_xmpp::xep::extract_link_metadata_from_message(&message);
@@ -881,6 +968,7 @@ mod tests {
             SECRET,
             1_800_000_000,
             "https://waddle.example",
+            true,
         );
 
         assert!(message.payloads.is_empty());

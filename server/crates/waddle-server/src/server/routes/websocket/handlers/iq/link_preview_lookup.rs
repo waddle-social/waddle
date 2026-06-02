@@ -20,6 +20,9 @@ use super::link_preview_resolver::{
     resolve_link_preview, LinkPreviewMediaCache, LinkPreviewResolverOutcome,
     LinkPreviewResolverPolicy, LinkPreviewResolverStatus,
 };
+use crate::server::routes::websocket::link_preview_telemetry::{
+    record_link_preview_event, LinkPreviewTelemetryEvent,
+};
 
 struct LinkPreviewLookupDeps<'a> {
     muc_domain: &'a str,
@@ -78,15 +81,15 @@ async fn handle_link_preview_lookup_iq_with_policy(
     let resolver_policy = match deps.resolver_policy {
         Some(policy) => policy,
         None => {
-            owned_resolver_policy = LinkPreviewResolverPolicy {
-                media_cache: Some(LinkPreviewMediaCache::new(
+            owned_resolver_policy = LinkPreviewResolverPolicy::from_config(
+                &state.deps.link_preview,
+                Some(LinkPreviewMediaCache::new(
                     state.deps.app_state.blob_storage.clone(),
                     state.deps.auth_state.base_url.as_str(),
                     state.deps.app_state.db_pool.global_actor().clone(),
                     sender_jid.to_bare(),
                 )),
-                ..Default::default()
-            };
+            );
             &owned_resolver_policy
         }
     };
@@ -135,8 +138,19 @@ async fn handle_link_preview_lookup_iq_with_policy(
             None,
         )];
     };
+    if !resolver_policy.enabled {
+        record_link_preview_event(LinkPreviewTelemetryEvent::ResolverBlocked);
+        return vec![build_link_preview_lookup_result(
+            iq,
+            deps.response_from,
+            deps.response_to,
+            LinkPreviewResolverStatus::Blocked,
+            None,
+        )];
+    }
     let outcome = resolve_link_preview(&original_url, resolver_policy).await;
     let LinkPreviewResolverOutcome::Ready(metadata) = outcome else {
+        record_link_preview_event(telemetry_event_for_status(outcome.status()));
         return vec![build_link_preview_lookup_result(
             iq,
             deps.response_from,
@@ -163,6 +177,7 @@ async fn handle_link_preview_lookup_iq_with_policy(
         expires_at_unix: expires_at.timestamp(),
     };
     let Some(token) = encode_link_preview_token_checked(&data, deps.secret) else {
+        record_link_preview_event(LinkPreviewTelemetryEvent::ResolverFailed);
         return vec![build_link_preview_lookup_result(
             iq,
             deps.response_from,
@@ -172,6 +187,7 @@ async fn handle_link_preview_lookup_iq_with_policy(
         )];
     };
 
+    record_link_preview_event(LinkPreviewTelemetryEvent::ResolverReady);
     vec![build_link_preview_lookup_result(
         iq,
         deps.response_from,
@@ -183,6 +199,15 @@ async fn handle_link_preview_lookup_iq_with_policy(
             expires_at.to_rfc3339_opts(SecondsFormat::Millis, true),
         )),
     )]
+}
+
+fn telemetry_event_for_status(status: LinkPreviewResolverStatus) -> LinkPreviewTelemetryEvent {
+    match status {
+        LinkPreviewResolverStatus::Ready => LinkPreviewTelemetryEvent::ResolverReady,
+        LinkPreviewResolverStatus::Blocked => LinkPreviewTelemetryEvent::ResolverBlocked,
+        LinkPreviewResolverStatus::Failed => LinkPreviewTelemetryEvent::ResolverFailed,
+        LinkPreviewResolverStatus::Unsupported => LinkPreviewTelemetryEvent::ResolverUnsupported,
+    }
 }
 
 async fn authorize_link_preview_scope(
@@ -304,6 +329,7 @@ fn append_text(parent: &mut Element, name: &str, value: Option<&str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::routes::websocket::link_preview_telemetry::recorded_events;
     use crate::server::routes::websocket::tests::create_test_websocket_state;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -325,8 +351,10 @@ mod tests {
         b"test-link-preview-secret"
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn handles_https_lookup_with_scoped_token_text_and_cached_image_metadata() {
+        let _events_guard = recorded_events::async_lock().await;
+        recorded_events::clear();
         let server = MockServer::start().await;
         let image_bytes = bytes::Bytes::from_static(b"\x89PNG\r\n\x1a\nlookup preview");
         Mock::given(method("GET"))
@@ -448,10 +476,16 @@ mod tests {
                 .as_deref(),
             Some("Example Article")
         );
+        assert!(
+            recorded_events::take().contains(&LinkPreviewTelemetryEvent::ResolverReady),
+            "ready lookup path must emit ready telemetry"
+        );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn oversized_encoded_token_returns_failed_without_preview() {
+        let _events_guard = recorded_events::async_lock().await;
+        recorded_events::clear();
         let server = MockServer::start().await;
         let huge_path = format!("/{}", "a".repeat(8 * 1024));
         Mock::given(method("GET"))
@@ -506,10 +540,16 @@ mod tests {
         assert!(lookup
             .get_child("preview", NS_WADDLE_LINK_PREVIEW)
             .is_none());
+        assert!(
+            recorded_events::take().contains(&LinkPreviewTelemetryEvent::ResolverFailed),
+            "token mint failure path must emit failed telemetry"
+        );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn non_https_lookup_returns_unsupported_without_token() {
+        let _events_guard = recorded_events::async_lock().await;
+        recorded_events::clear();
         let payload = Element::builder("lookup", NS_WADDLE_LINK_PREVIEW)
             .append(
                 Element::builder("url", NS_WADDLE_LINK_PREVIEW)
@@ -541,6 +581,104 @@ mod tests {
             .get_child("lookup", NS_WADDLE_LINK_PREVIEW)
             .expect("lookup result");
         assert_eq!(lookup.attr("status"), Some("unsupported"));
+        assert!(lookup
+            .get_child("preview", NS_WADDLE_LINK_PREVIEW)
+            .is_none());
+        assert!(
+            recorded_events::take().contains(&LinkPreviewTelemetryEvent::ResolverUnsupported),
+            "unsupported lookup path must emit unsupported telemetry"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn disabled_policy_returns_blocked_without_token() {
+        let _events_guard = recorded_events::async_lock().await;
+        recorded_events::clear();
+        let payload = Element::builder("lookup", NS_WADDLE_LINK_PREVIEW)
+            .append(
+                Element::builder("url", NS_WADDLE_LINK_PREVIEW)
+                    .append("https://example.com/a")
+                    .build(),
+            )
+            .append(
+                Element::builder("scope", NS_WADDLE_LINK_PREVIEW)
+                    .append("alice@example.com")
+                    .build(),
+            )
+            .build();
+        let iq = iq_get_with_payload(payload);
+
+        let state = create_test_websocket_state().await;
+        let response = handle_link_preview_lookup_iq_with_policy(
+            &iq,
+            Some(&sender()),
+            state.as_ref(),
+            LinkPreviewLookupDeps {
+                muc_domain: "muc.example.com",
+                response_from: None,
+                response_to: None,
+                secret: secret(),
+                resolver_policy: Some(&LinkPreviewResolverPolicy {
+                    enabled: false,
+                    ..Default::default()
+                }),
+            },
+        )
+        .await;
+
+        let elem: Element = response[0].parse().expect("iq result");
+        let lookup = elem
+            .get_child("lookup", NS_WADDLE_LINK_PREVIEW)
+            .expect("lookup result");
+        assert_eq!(lookup.attr("status"), Some("blocked"));
+        assert!(lookup
+            .get_child("preview", NS_WADDLE_LINK_PREVIEW)
+            .is_none());
+        assert!(
+            recorded_events::take().contains(&LinkPreviewTelemetryEvent::ResolverBlocked),
+            "disabled lookup path must emit blocked telemetry"
+        );
+    }
+
+    #[tokio::test]
+    async fn blocked_host_policy_returns_blocked_lookup_without_token() {
+        let payload = Element::builder("lookup", NS_WADDLE_LINK_PREVIEW)
+            .append(
+                Element::builder("url", NS_WADDLE_LINK_PREVIEW)
+                    .append("https://blocked.example/a")
+                    .build(),
+            )
+            .append(
+                Element::builder("scope", NS_WADDLE_LINK_PREVIEW)
+                    .append("alice@example.com")
+                    .build(),
+            )
+            .build();
+        let iq = iq_get_with_payload(payload);
+
+        let state = create_test_websocket_state().await;
+        let response = handle_link_preview_lookup_iq_with_policy(
+            &iq,
+            Some(&sender()),
+            state.as_ref(),
+            LinkPreviewLookupDeps {
+                muc_domain: "muc.example.com",
+                response_from: None,
+                response_to: None,
+                secret: secret(),
+                resolver_policy: Some(&LinkPreviewResolverPolicy {
+                    blocked_hosts: vec!["blocked.example".parse().expect("pattern")],
+                    ..Default::default()
+                }),
+            },
+        )
+        .await;
+
+        let elem: Element = response[0].parse().expect("iq result");
+        let lookup = elem
+            .get_child("lookup", NS_WADDLE_LINK_PREVIEW)
+            .expect("lookup result");
+        assert_eq!(lookup.attr("status"), Some("blocked"));
         assert!(lookup
             .get_child("preview", NS_WADDLE_LINK_PREVIEW)
             .is_none());

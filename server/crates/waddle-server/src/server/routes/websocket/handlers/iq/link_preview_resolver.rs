@@ -13,9 +13,14 @@ use tracing::warn;
 use url::{Host, Url};
 use waddle_xmpp_core::PreviewImageMediaType;
 
+use crate::config::{LinkPreviewConfig, LinkPreviewHostPattern};
 use crate::db::actor::{DbActor, DbExecute};
 use crate::db::Value;
+use crate::server::routes::websocket::link_preview_telemetry::{
+    record_link_preview_event, LinkPreviewTelemetryEvent,
+};
 use crate::storage::BlobStorage;
+use crate::storage::{BlobMeta, StorageError};
 
 const DEFAULT_MAX_BYTES: usize = 256 * 1024;
 const DEFAULT_MAX_IMAGE_BYTES: usize = 2 * 1024 * 1024;
@@ -68,23 +73,51 @@ impl LinkPreviewMediaCache {
 
 #[derive(Clone)]
 pub(super) struct LinkPreviewResolverPolicy {
+    pub enabled: bool,
+    pub allowed_hosts: Vec<LinkPreviewHostPattern>,
+    pub blocked_hosts: Vec<LinkPreviewHostPattern>,
     pub max_bytes: usize,
     pub max_image_bytes: usize,
     pub max_redirects: usize,
     pub timeout: Duration,
     pub allow_http_loopback_for_tests: bool,
     pub media_cache: Option<LinkPreviewMediaCache>,
+    pub video_enabled: bool,
 }
 
 impl Default for LinkPreviewResolverPolicy {
     fn default() -> Self {
         Self {
+            enabled: true,
+            allowed_hosts: Vec::new(),
+            blocked_hosts: Vec::new(),
             max_bytes: DEFAULT_MAX_BYTES,
             max_image_bytes: DEFAULT_MAX_IMAGE_BYTES,
             max_redirects: DEFAULT_MAX_REDIRECTS,
             timeout: DEFAULT_TIMEOUT,
             allow_http_loopback_for_tests: false,
             media_cache: None,
+            video_enabled: true,
+        }
+    }
+}
+
+impl LinkPreviewResolverPolicy {
+    pub(super) fn from_config(
+        config: &LinkPreviewConfig,
+        media_cache: Option<LinkPreviewMediaCache>,
+    ) -> Self {
+        Self {
+            enabled: config.enabled,
+            allowed_hosts: config.allowed_hosts.clone(),
+            blocked_hosts: config.blocked_hosts.clone(),
+            max_bytes: config.max_fetch_bytes,
+            max_image_bytes: config.max_cached_image_bytes,
+            max_redirects: config.max_redirects,
+            timeout: config.fetch_timeout,
+            allow_http_loopback_for_tests: false,
+            media_cache,
+            video_enabled: config.video_enabled,
         }
     }
 }
@@ -185,6 +218,19 @@ pub(super) async fn resolve_link_preview(
     LinkPreviewResolverOutcome::Failed
 }
 
+fn looks_like_direct_video_url(url: &Url) -> bool {
+    let path = url.path().to_ascii_lowercase();
+    matches!(
+        path.rsplit('/').next(),
+        Some(filename)
+            if filename.ends_with(".mp4")
+                || filename.ends_with(".webm")
+                || filename.ends_with(".mov")
+                || filename.ends_with(".m4v")
+                || filename.ends_with(".ogv")
+    )
+}
+
 async fn fetch_cached_preview_image(
     remote: &RemotePreviewImage,
     policy: &LinkPreviewResolverPolicy,
@@ -236,6 +282,29 @@ async fn publish_cached_preview_image_slot(
     media_type: &str,
 ) -> Result<(String, String), LinkPreviewResolverStatus> {
     let key = format!("link-previews/sha256/{hash}");
+    match cache.storage.get(&key).await {
+        Ok((cached_bytes, meta)) => {
+            record_link_preview_event(LinkPreviewTelemetryEvent::CacheHit);
+            let filename = format!(
+                "link-preview-{hash}.{}",
+                preview_image_extension(meta.content_type.as_str())
+            );
+            return record_cached_preview_image_slot(
+                cache,
+                &key,
+                &filename,
+                cached_bytes.len(),
+                &meta,
+            )
+            .await;
+        }
+        Err(StorageError::NotFound(_)) => {
+            record_link_preview_event(LinkPreviewTelemetryEvent::CacheMiss)
+        }
+        Err(StorageError::Internal(_)) => {
+            return Err(LinkPreviewResolverStatus::Failed);
+        }
+    }
     cache
         .storage
         .put(&key, bytes.clone(), media_type)
@@ -245,13 +314,32 @@ async fn publish_cached_preview_image_slot(
             LinkPreviewResolverStatus::Unsupported
         })?;
 
-    let slot_id = uuid::Uuid::new_v4().to_string();
     let filename = format!(
         "link-preview-{hash}.{}",
         preview_image_extension(media_type)
     );
+    record_cached_preview_image_slot(
+        cache,
+        &key,
+        &filename,
+        bytes.len(),
+        &BlobMeta {
+            content_type: media_type.to_string(),
+        },
+    )
+    .await
+}
+
+async fn record_cached_preview_image_slot(
+    cache: &LinkPreviewMediaCache,
+    key: &str,
+    filename: &str,
+    size: usize,
+    meta: &BlobMeta,
+) -> Result<(String, String), LinkPreviewResolverStatus> {
+    let slot_id = uuid::Uuid::new_v4().to_string();
     let now = Utc::now();
-    let size_bytes = i64::try_from(bytes.len()).map_err(|_| LinkPreviewResolverStatus::Failed)?;
+    let size_bytes = i64::try_from(size).map_err(|_| LinkPreviewResolverStatus::Failed)?;
     cache
         .global_db_actor
         .ask(DbExecute {
@@ -259,10 +347,10 @@ async fn publish_cached_preview_image_slot(
             params: vec![
                 Value::from(slot_id.clone()),
                 Value::from(cache.requester_jid.to_string()),
-                Value::from(filename.clone()),
+                Value::from(filename.to_string()),
                 Value::from(size_bytes),
-                Value::from(media_type.to_string()),
-                Value::from(key),
+                Value::from(meta.content_type.clone()),
+                Value::from(key.to_string()),
                 Value::from((now + chrono::Duration::minutes(15)).to_rfc3339()),
                 Value::from(now.to_rfc3339()),
             ],
@@ -272,7 +360,7 @@ async fn publish_cached_preview_image_slot(
             warn!(%error, "failed to record XEP-0363 link preview upload slot");
             LinkPreviewResolverStatus::Unsupported
         })?;
-    Ok((slot_id, filename))
+    Ok((slot_id, filename.to_string()))
 }
 
 fn preview_image_extension(media_type: &str) -> &'static str {
@@ -638,6 +726,9 @@ fn classify_url_with_policy(
     url: &Url,
     policy: &LinkPreviewResolverPolicy,
 ) -> LinkPreviewResolverStatus {
+    if !policy.video_enabled && looks_like_direct_video_url(url) {
+        return LinkPreviewResolverStatus::Unsupported;
+    }
     if url.scheme() != "https" {
         if policy.allow_http_loopback_for_tests
             && url.scheme() == "http"
@@ -652,6 +743,21 @@ fn classify_url_with_policy(
     }
     if let Some(Host::Domain(host)) = url.host() {
         if is_dot_local_domain(host) {
+            return LinkPreviewResolverStatus::Blocked;
+        }
+        if policy
+            .blocked_hosts
+            .iter()
+            .any(|pattern| pattern.matches(host))
+        {
+            return LinkPreviewResolverStatus::Blocked;
+        }
+        if !policy.allowed_hosts.is_empty()
+            && !policy
+                .allowed_hosts
+                .iter()
+                .any(|pattern| pattern.matches(host))
+        {
             return LinkPreviewResolverStatus::Blocked;
         }
     }
@@ -1215,6 +1321,7 @@ fn end_tag_end_index_at(html: &[u8], start: usize, name: &[u8]) -> EndTagMatch {
 mod tests {
     use super::*;
     use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig};
+    use crate::server::routes::websocket::link_preview_telemetry::recorded_events;
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::Arc;
@@ -1518,6 +1625,65 @@ mod tests {
         }
         assert!(is_dot_local_domain("Printer.Local"));
         assert!(is_dot_local_domain("Printer.Local."));
+    }
+
+    #[test]
+    fn host_block_patterns_override_allowed_https_targets() {
+        let policy = LinkPreviewResolverPolicy {
+            blocked_hosts: vec!["*.example.com".parse().expect("pattern")],
+            ..Default::default()
+        };
+        let blocked = Url::parse("https://news.example.com/article").expect("url");
+        let allowed = Url::parse("https://example.net/article").expect("url");
+
+        assert_eq!(
+            classify_url_with_policy(&blocked, &policy),
+            LinkPreviewResolverStatus::Blocked
+        );
+        assert_eq!(
+            classify_url_with_policy(&allowed, &policy),
+            LinkPreviewResolverStatus::Ready
+        );
+    }
+
+    #[test]
+    fn non_empty_host_allow_patterns_block_unlisted_hosts() {
+        let policy = LinkPreviewResolverPolicy {
+            allowed_hosts: vec!["example.com".parse().expect("pattern")],
+            ..Default::default()
+        };
+        let allowed = Url::parse("https://example.com/article").expect("url");
+        let blocked = Url::parse("https://elsewhere.example/article").expect("url");
+
+        assert_eq!(
+            classify_url_with_policy(&allowed, &policy),
+            LinkPreviewResolverStatus::Ready
+        );
+        assert_eq!(
+            classify_url_with_policy(&blocked, &policy),
+            LinkPreviewResolverStatus::Blocked
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_video_policy_rejects_direct_video_urls_before_fetch() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/clip.mp4"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw("not fetched", "video/mp4"))
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
+            video_enabled: false,
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/clip.mp4", server.uri())).expect("url");
+
+        assert_eq!(
+            resolve_link_preview(&url, &policy).await,
+            LinkPreviewResolverOutcome::Unsupported
+        );
     }
 
     #[tokio::test]
@@ -2146,8 +2312,10 @@ mod tests {
         assert_single_range_request(&server, "bytes=0-255").await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn fetches_safe_preview_image_into_content_addressed_waddle_storage() {
+        let _events_guard = recorded_events::async_lock().await;
+        recorded_events::clear();
         let server = MockServer::start().await;
         let image_bytes = bytes::Bytes::from_static(b"\x89PNG\r\n\x1a\nfake png bytes");
         Mock::given(method("GET"))
@@ -2184,7 +2352,7 @@ mod tests {
             test_media_cache_with_base_url(storage.clone(), "https://waddle.example").await;
         let policy = LinkPreviewResolverPolicy {
             allow_http_loopback_for_tests: true,
-            media_cache: Some(media_cache),
+            media_cache: Some(media_cache.clone()),
             ..Default::default()
         };
         let url = Url::parse(&format!("{}/article", server.uri())).expect("url");
@@ -2239,6 +2407,21 @@ mod tests {
         let (stored, meta) = storage.get(&expected_key).await.expect("cached bytes");
         assert_eq!(stored, image_bytes);
         assert_eq!(meta.content_type, "image/png");
+        assert!(
+            recorded_events::take().contains(&LinkPreviewTelemetryEvent::CacheMiss),
+            "first content-addressed image store must emit cache_miss telemetry"
+        );
+
+        recorded_events::clear();
+        let second_outcome = resolve_link_preview(&url, &policy).await;
+        let LinkPreviewResolverOutcome::Ready(second_metadata) = second_outcome else {
+            panic!("expected ready outcome, got {second_outcome:?}");
+        };
+        assert!(second_metadata.image.is_some());
+        assert!(
+            recorded_events::take().contains(&LinkPreviewTelemetryEvent::CacheHit),
+            "reusing an existing content-addressed image must emit cache_hit telemetry"
+        );
     }
 
     #[tokio::test]
@@ -2289,6 +2472,104 @@ mod tests {
             .get("link-previews/sha256/d4dc56669143034f31aa309635d4113d9ad76a02b1739da22c965ed2049be9e6")
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn oversized_preview_image_content_length_degrades_to_text_metadata() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/article"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    r#"<html><head>
+                          <meta property="og:title" content="Fetched title">
+                          <meta property="og:image" content="{}/preview.png">
+                        </head></html>"#,
+                    server.uri()
+                ),
+                "text/html; charset=utf-8",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/preview.png"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/png")
+                    .set_body_bytes({
+                        let mut bytes = vec![b'x'; 1024];
+                        bytes[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+                        bytes
+                    }),
+            )
+            .mount(&server)
+            .await;
+        let storage_dir =
+            std::env::temp_dir().join(format!("waddle-link-preview-{}", uuid::Uuid::new_v4()));
+        let storage: Arc<dyn crate::storage::BlobStorage> =
+            Arc::new(crate::storage::LocalStorage::new(storage_dir));
+        let policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
+            media_cache: Some(test_media_cache(storage.clone()).await),
+            max_image_bytes: 16,
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/article", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        let LinkPreviewResolverOutcome::Ready(metadata) = outcome else {
+            panic!("expected ready outcome, got {outcome:?}");
+        };
+        assert_eq!(metadata.title.as_deref(), Some("Fetched title"));
+        assert_eq!(metadata.image, None);
+    }
+
+    #[tokio::test]
+    async fn oversized_preview_image_stream_degrades_to_text_metadata() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/article"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    r#"<html><head>
+                          <meta property="og:title" content="Fetched title">
+                          <meta property="og:image" content="{}/preview.png">
+                        </head></html>"#,
+                    server.uri()
+                ),
+                "text/html; charset=utf-8",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/preview.png"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/png")
+                    .set_body_bytes(bytes::Bytes::from_static(b"\x89PNG\r\n\x1a\nbody-over-cap")),
+            )
+            .mount(&server)
+            .await;
+        let storage_dir =
+            std::env::temp_dir().join(format!("waddle-link-preview-{}", uuid::Uuid::new_v4()));
+        let storage: Arc<dyn crate::storage::BlobStorage> =
+            Arc::new(crate::storage::LocalStorage::new(storage_dir));
+        let policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
+            media_cache: Some(test_media_cache(storage.clone()).await),
+            max_image_bytes: 8,
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/article", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        let LinkPreviewResolverOutcome::Ready(metadata) = outcome else {
+            panic!("expected ready outcome, got {outcome:?}");
+        };
+        assert_eq!(metadata.title.as_deref(), Some("Fetched title"));
+        assert_eq!(metadata.image, None);
     }
 
     #[tokio::test]
@@ -2728,6 +3009,77 @@ mod tests {
         let outcome = resolve_link_preview(&url, &policy).await;
 
         assert_eq!(outcome.status(), LinkPreviewResolverStatus::Blocked);
+    }
+
+    #[tokio::test]
+    async fn redirect_into_admin_blocked_host_returns_blocked_without_following() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/redirect"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", "https://blocked.example/final"),
+            )
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
+            blocked_hosts: vec!["blocked.example".parse().expect("pattern")],
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/redirect", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        assert_eq!(outcome.status(), LinkPreviewResolverStatus::Blocked);
+    }
+
+    #[tokio::test]
+    async fn redirect_outside_admin_allowlist_returns_blocked_without_following() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/redirect"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", "https://elsewhere.example/final"),
+            )
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
+            allowed_hosts: vec!["allowed.example".parse().expect("pattern")],
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/redirect", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        assert_eq!(outcome.status(), LinkPreviewResolverStatus::Blocked);
+    }
+
+    #[tokio::test]
+    async fn disabled_video_policy_rejects_redirected_video_url_before_fetch() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/article"))
+            .respond_with(ResponseTemplate::new(302).insert_header("location", "/clip.mp4"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/clip.mp4"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw("not fetched", "video/mp4"))
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
+            video_enabled: false,
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/article", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        assert_eq!(outcome.status(), LinkPreviewResolverStatus::Unsupported);
     }
 
     #[tokio::test]

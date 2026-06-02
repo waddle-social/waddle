@@ -594,6 +594,7 @@ async fn create_websocket_state(
                 sfu: sfu_service,
             },
             occupant_id_secret: server_config.occupant_id_secret.clone(),
+            link_preview: server_config.link_preview.clone(),
             provider_ingress,
             provider_dispatch_tasks,
         },

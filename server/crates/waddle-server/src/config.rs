@@ -3,6 +3,7 @@
 use crate::auth::providers::AuthProviderConfig;
 use crate::db::DatabaseDriver;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use std::{fmt, str::FromStr};
 use tracing::info;
 use waddle_extensions::ExtensionConfig;
@@ -131,6 +132,8 @@ pub struct ServerConfig {
     pub auth: AuthConfig,
     /// Runtime extension configuration.
     pub extensions: ExtensionConfig,
+    /// Operator controls for server-side link-preview enrichment.
+    pub link_preview: LinkPreviewConfig,
     /// SpiceDB backend configuration.
     /// Runtime startup requires this to be set.
     pub spicedb: Option<SpiceDbConfig>,
@@ -140,6 +143,129 @@ pub struct ServerConfig {
     /// every stamping site reads the same key. Required at startup;
     /// see [`parse_occupant_id_secret`] for the validation rules.
     pub occupant_id_secret: OccupantIdSecret,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkPreviewConfig {
+    pub enabled: bool,
+    pub allowed_hosts: Vec<LinkPreviewHostPattern>,
+    pub blocked_hosts: Vec<LinkPreviewHostPattern>,
+    pub max_fetch_bytes: usize,
+    pub max_cached_image_bytes: usize,
+    pub max_redirects: usize,
+    pub fetch_timeout: Duration,
+    pub video_enabled: bool,
+}
+
+impl Default for LinkPreviewConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            allowed_hosts: Vec::new(),
+            blocked_hosts: Vec::new(),
+            max_fetch_bytes: 256 * 1024,
+            max_cached_image_bytes: 2 * 1024 * 1024,
+            max_redirects: 3,
+            fetch_timeout: Duration::from_millis(1_500),
+            video_enabled: true,
+        }
+    }
+}
+
+impl LinkPreviewConfig {
+    pub fn from_env() -> Result<Self, String> {
+        Self::from_vars(std::env::vars())
+    }
+
+    pub fn from_vars<I, K, V>(vars: I) -> Result<Self, String>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        let vars = vars
+            .into_iter()
+            .map(|(key, value)| (key.as_ref().to_string(), value.as_ref().to_string()))
+            .collect::<std::collections::HashMap<_, _>>();
+        Ok(Self {
+            enabled: parse_bool_var(&vars, "WADDLE_LINK_PREVIEW_ENABLED", true)?,
+            allowed_hosts: parse_host_patterns_var(&vars, "WADDLE_LINK_PREVIEW_ALLOWED_HOSTS")?,
+            blocked_hosts: parse_host_patterns_var(&vars, "WADDLE_LINK_PREVIEW_BLOCKED_HOSTS")?,
+            max_fetch_bytes: parse_usize_var(
+                &vars,
+                "WADDLE_LINK_PREVIEW_MAX_FETCH_BYTES",
+                256 * 1024,
+            )?,
+            max_cached_image_bytes: parse_usize_var(
+                &vars,
+                "WADDLE_LINK_PREVIEW_MAX_CACHED_IMAGE_BYTES",
+                2 * 1024 * 1024,
+            )?,
+            max_redirects: parse_usize_var(&vars, "WADDLE_LINK_PREVIEW_MAX_REDIRECTS", 3)?,
+            fetch_timeout: Duration::from_millis(parse_u64_var(
+                &vars,
+                "WADDLE_LINK_PREVIEW_FETCH_TIMEOUT_MS",
+                1_500,
+            )?),
+            video_enabled: parse_bool_var(&vars, "WADDLE_LINK_PREVIEW_VIDEO_ENABLED", true)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkPreviewHostPattern {
+    Exact(String),
+    DomainSuffix(String),
+}
+
+impl LinkPreviewHostPattern {
+    pub fn matches(&self, host: &str) -> bool {
+        let host = normalize_host_pattern_value(host);
+        match self {
+            Self::Exact(pattern) => host == *pattern,
+            Self::DomainSuffix(suffix) => {
+                host == *suffix
+                    || host
+                        .strip_suffix(suffix)
+                        .is_some_and(|prefix| prefix.ends_with('.'))
+            }
+        }
+    }
+}
+
+impl FromStr for LinkPreviewHostPattern {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err("host pattern must not be empty".to_string());
+        }
+        let suffix = trimmed
+            .strip_prefix("*.")
+            .or_else(|| trimmed.strip_prefix('.'));
+        let (suffix_match, value) = match suffix {
+            Some(value) => (true, value),
+            None => (false, trimmed),
+        };
+        let normalized = normalize_host_pattern_value(value);
+        if normalized.is_empty()
+            || normalized.contains('/')
+            || normalized.contains(':')
+            || normalized.contains(char::is_whitespace)
+        {
+            return Err(format!("invalid host pattern '{raw}'"));
+        }
+        if suffix_match {
+            Ok(Self::DomainSuffix(normalized))
+        } else {
+            Ok(Self::Exact(normalized))
+        }
+    }
+}
+
+fn normalize_host_pattern_value(value: &str) -> String {
+    value.trim().trim_end_matches('.').to_ascii_lowercase()
 }
 
 /// Validate the `WADDLE_OCCUPANT_ID_SECRET` env var into a typed secret.
@@ -177,6 +303,77 @@ fn parse_session_key(raw: Option<&str>) -> Result<String, String> {
     Ok(value.to_string())
 }
 
+fn parse_bool_var(
+    vars: &std::collections::HashMap<String, String>,
+    key: &str,
+    default: bool,
+) -> Result<bool, String> {
+    let Some(value) = vars.get(key).map(|value| value.trim().to_ascii_lowercase()) else {
+        return Ok(default);
+    };
+    match value.as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => Err(format!(
+            "{key}='{value}' must be a boolean: true/false, yes/no, on/off, or 1/0"
+        )),
+    }
+}
+
+fn parse_usize_var(
+    vars: &std::collections::HashMap<String, String>,
+    key: &str,
+    default: usize,
+) -> Result<usize, String> {
+    vars.get(key)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .map_err(|error| format!("{key}='{value}' must be a positive integer: {error}"))
+        })
+        .unwrap_or(Ok(default))
+}
+
+fn parse_u64_var(
+    vars: &std::collections::HashMap<String, String>,
+    key: &str,
+    default: u64,
+) -> Result<u64, String> {
+    vars.get(key)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .map_err(|error| format!("{key}='{value}' must be a positive integer: {error}"))
+        })
+        .unwrap_or(Ok(default))
+}
+
+fn parse_host_patterns_var(
+    vars: &std::collections::HashMap<String, String>,
+    key: &str,
+) -> Result<Vec<LinkPreviewHostPattern>, String> {
+    let Some(raw) = vars
+        .get(key)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(Vec::new());
+    };
+    raw.split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            entry
+                .parse::<LinkPreviewHostPattern>()
+                .map_err(|error| format!("{key}: {error}"))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 const TEST_OCCUPANT_ID_SECRET: &str = "test-occupant-id-secret-32-bytes-long";
 
@@ -201,6 +398,7 @@ impl Default for ServerConfig {
             session_key: "test-session-key-32-bytes-minimum".to_string(),
             auth: AuthConfig::default(),
             extensions: ExtensionConfig::default(),
+            link_preview: LinkPreviewConfig::default(),
             spicedb: None,
             occupant_id_secret: test_occupant_id_secret(),
         }
@@ -220,6 +418,7 @@ impl ServerConfig {
 
         let extensions =
             ExtensionConfig::from_env().map_err(|e| format!("invalid extension config: {e}"))?;
+        let link_preview = LinkPreviewConfig::from_env()?;
         let spicedb = SpiceDbConfig::from_env()?;
 
         let occupant_id_secret =
@@ -231,6 +430,7 @@ impl ServerConfig {
             session_key,
             auth,
             extensions,
+            link_preview,
             spicedb,
             occupant_id_secret,
         })
@@ -262,6 +462,7 @@ impl ServerConfig {
             session_key: "test-key-32-bytes-long-for-aes!".to_string(),
             auth: AuthConfig::default(),
             extensions: ExtensionConfig::default(),
+            link_preview: LinkPreviewConfig::default(),
             spicedb: None,
             occupant_id_secret: test_occupant_id_secret(),
         }
@@ -275,6 +476,7 @@ impl ServerConfig {
             session_key: "test-key-32-bytes-long-for-aes!".to_string(),
             auth: AuthConfig::default(),
             extensions: ExtensionConfig::default(),
+            link_preview: LinkPreviewConfig::default(),
             spicedb: None,
             occupant_id_secret: test_occupant_id_secret(),
         }
@@ -324,6 +526,53 @@ mod tests {
             err.contains("openssl rand"),
             "error must include the generation recipe; got: {err}"
         );
+    }
+
+    #[test]
+    fn link_preview_config_parses_operator_policy_vars() {
+        let config = LinkPreviewConfig::from_vars([
+            ("WADDLE_LINK_PREVIEW_ENABLED", "false"),
+            (
+                "WADDLE_LINK_PREVIEW_ALLOWED_HOSTS",
+                "example.com,*.trusted.example",
+            ),
+            ("WADDLE_LINK_PREVIEW_BLOCKED_HOSTS", "ads.example"),
+            ("WADDLE_LINK_PREVIEW_MAX_FETCH_BYTES", "4096"),
+            ("WADDLE_LINK_PREVIEW_MAX_CACHED_IMAGE_BYTES", "8192"),
+            ("WADDLE_LINK_PREVIEW_MAX_REDIRECTS", "2"),
+            ("WADDLE_LINK_PREVIEW_FETCH_TIMEOUT_MS", "250"),
+            ("WADDLE_LINK_PREVIEW_VIDEO_ENABLED", "0"),
+        ])
+        .expect("config");
+
+        assert!(!config.enabled);
+        assert_eq!(config.allowed_hosts.len(), 2);
+        assert!(config.allowed_hosts[0].matches("example.com"));
+        assert!(config.allowed_hosts[1].matches("cdn.trusted.example"));
+        assert!(config.blocked_hosts[0].matches("ads.example"));
+        assert_eq!(config.max_fetch_bytes, 4096);
+        assert_eq!(config.max_cached_image_bytes, 8192);
+        assert_eq!(config.max_redirects, 2);
+        assert_eq!(config.fetch_timeout, Duration::from_millis(250));
+        assert!(!config.video_enabled);
+    }
+
+    #[test]
+    fn link_preview_host_patterns_reject_non_host_shapes() {
+        let error = "https://example.com"
+            .parse::<LinkPreviewHostPattern>()
+            .expect_err("URL must not parse as host pattern");
+
+        assert!(error.contains("invalid host pattern"));
+    }
+
+    #[test]
+    fn link_preview_config_rejects_invalid_boolean_vars() {
+        let error = LinkPreviewConfig::from_vars([("WADDLE_LINK_PREVIEW_ENABLED", "ture")])
+            .expect_err("typo must fail startup");
+
+        assert!(error.contains("WADDLE_LINK_PREVIEW_ENABLED"));
+        assert!(error.contains("must be a boolean"));
     }
 
     #[test]
