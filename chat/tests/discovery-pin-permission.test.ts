@@ -130,12 +130,15 @@ describe("discoverTopology spaces service discovery", () => {
     });
   });
 
-  test("does not render root service disco items as empty Spaces groups", async () => {
+  test("does not accept a non-pubsub root entity as the Spaces service", async () => {
     await withFakeDomParser(async () => {
-      const topology = await discoverTopology(topologyClient({ rootAdvertisesSpacesService: true }), "alice@example.test");
+      const topology = await discoverTopology(
+        topologyClient({ rootAdvertisesSpacesService: true, omitSpacesServiceItem: true }),
+        "alice@example.test",
+      );
 
-      expect(topology.services.spaces).toBe("example.test");
-      expect(topology.spaces).toEqual([]);
+      expect(topology.services.spaces).toBe("spaces.example.test");
+      expect(topology.spaces.map((space) => space.id)).toEqual(["space-polls", "space-engineering"]);
     });
   });
 });
@@ -185,11 +188,22 @@ function topologyClient(options: TopologyClientOptions = {}) {
           return discoInfoXml({
             identities: [{ category: "pubsub", type: "service", name: "Spaces" }],
             features: [
+              "urn:xmpp:spaces:0",
               "http://jabber.org/protocol/pubsub",
               "http://jabber.org/protocol/pubsub#create-nodes",
               "http://jabber.org/protocol/pubsub#meta-data",
               "http://jabber.org/protocol/pubsub#retrieve-items",
             ],
+          });
+        }
+        if (xml.includes('to="spaces.example.test"') && xml.includes(' node=')) {
+          return discoInfoXml({
+            identities: [{ category: "pubsub", type: "leaf", name: "Space" }],
+            features: ["http://jabber.org/protocol/pubsub", "urn:xmpp:spaces:0"],
+            fields: {
+              FORM_TYPE: "http://jabber.org/protocol/pubsub#meta-data",
+              "pubsub#type": "urn:xmpp:spaces:0",
+            },
           });
         }
         if (xml.includes('to="extensions.example.test"')) {
@@ -214,4 +228,3 @@ function topologyClient(options: TopologyClientOptions = {}) {
     },
   };
 }
-

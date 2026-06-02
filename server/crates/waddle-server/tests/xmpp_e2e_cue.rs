@@ -85,6 +85,18 @@ const ADVERTISED_FEATURE_XEPS: &[(&str, &str)] = &[
     ("http://jabber.org/protocol/pubsub#create-nodes", "XEP-0060"),
     ("http://jabber.org/protocol/pubsub#config-node", "XEP-0060"),
     ("http://jabber.org/protocol/pubsub#meta-data", "XEP-0060"),
+    (
+        "http://jabber.org/protocol/pubsub#manage-subscriptions",
+        "XEP-0060",
+    ),
+    (
+        "http://jabber.org/protocol/pubsub#modify-affiliations",
+        "XEP-0060",
+    ),
+    (
+        "http://jabber.org/protocol/pubsub#retrieve-affiliations",
+        "XEP-0060",
+    ),
     ("http://jabber.org/protocol/pubsub#delete-nodes", "XEP-0060"),
     ("http://jabber.org/protocol/pubsub#delete-items", "XEP-0060"),
     (
@@ -126,6 +138,7 @@ const ADVERTISED_FEATURE_XEPS: &[(&str, &str)] = &[
     ("urn:xmpp:jingle:muji:0", "XEP-0272"),
     ("urn:xmpp:pubsub-social-feed:0", "XEP-0472"),
     ("urn:xmpp:stories:0", "XEP-0501"),
+    ("urn:xmpp:spaces:0", "XEP-0503"),
     ("urn:xmpp:inbox:0", "XEP-0430"),
     // xCal calendar — XSF ProtoXEP "Calendaring Extensions to
     // Publish-Subscribe", no assigned XEP number. Mapped to

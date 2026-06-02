@@ -442,6 +442,180 @@ pub(super) async fn handle_pubsub_admin_request(
             vec![iq_to_xml(build_pubsub_success(iq))]
         }
 
+        PubSubRequest::OwnerSubscriptionsGet { node } => {
+            let is_pep = is_pep_self_or_to(iq, target_jid, user_jid);
+            if state
+                .deps
+                .protocol
+                .pubsub_storage
+                .get_node(target_jid, &node)
+                .await
+                .ok()
+                .flatten()
+                .is_none()
+            {
+                return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))];
+            }
+            if !crate::pubsub_authz::can_administer(
+                &state.deps.protocol.pubsub_storage,
+                target_jid,
+                &node,
+                user_jid,
+                is_pep,
+            )
+            .await
+            .unwrap_or(false)
+            {
+                return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
+            }
+            let rows = state
+                .deps
+                .protocol
+                .pubsub_storage
+                .list_node_subscriptions(target_jid, &node)
+                .await
+                .unwrap_or_default();
+            let response = build_pubsub_owner_subscriptions_result(iq, &node, &rows);
+            vec![iq_to_xml(response)]
+        }
+
+        PubSubRequest::OwnerSubscriptionsSet { node, changes } => {
+            let is_pep = is_pep_self_or_to(iq, target_jid, user_jid);
+            if state
+                .deps
+                .protocol
+                .pubsub_storage
+                .get_node(target_jid, &node)
+                .await
+                .ok()
+                .flatten()
+                .is_none()
+            {
+                return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))];
+            }
+            if !crate::pubsub_authz::can_administer(
+                &state.deps.protocol.pubsub_storage,
+                target_jid,
+                &node,
+                user_jid,
+                is_pep,
+            )
+            .await
+            .unwrap_or(false)
+            {
+                return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
+            }
+            for (subscriber, state_value, subid) in changes {
+                match state_value {
+                    SubscriptionState::Subscribed => {
+                        let already_subscribed = state
+                            .deps
+                            .protocol
+                            .pubsub_storage
+                            .list_node_subscriptions(target_jid, &node)
+                            .await
+                            .map(|rows| {
+                                rows.iter()
+                                    .any(|row| row.subscriber.to_bare() == subscriber.to_bare())
+                            })
+                            .unwrap_or(false);
+                        if already_subscribed {
+                            continue;
+                        }
+                        if let Err(error) = state
+                            .deps
+                            .protocol
+                            .pubsub_storage
+                            .subscribe(target_jid, &node, &subscriber)
+                            .await
+                        {
+                            warn!("PubSub owner subscription add failed: {error}");
+                            return vec![iq_to_xml(build_pubsub_error(
+                                iq,
+                                PubSubError::InternalServerError,
+                            ))];
+                        }
+                    }
+                    SubscriptionState::None => {
+                        let typed_subid = subid.as_deref().map(SubId::from_raw);
+                        if let Some(typed_subid) = typed_subid.as_ref() {
+                            match state
+                                .deps
+                                .protocol
+                                .pubsub_storage
+                                .unsubscribe(target_jid, &node, &subscriber, Some(typed_subid))
+                                .await
+                            {
+                                Ok(true) => {}
+                                Ok(false) => {
+                                    return vec![iq_to_xml(build_pubsub_error(
+                                        iq,
+                                        PubSubError::NotSubscribed,
+                                    ))];
+                                }
+                                Err(error) => {
+                                    warn!("PubSub owner subscription remove failed: {error}");
+                                    return vec![iq_to_xml(build_pubsub_error(
+                                        iq,
+                                        PubSubError::InternalServerError,
+                                    ))];
+                                }
+                            }
+                            continue;
+                        }
+
+                        let rows = match state
+                            .deps
+                            .protocol
+                            .pubsub_storage
+                            .list_node_subscriptions(target_jid, &node)
+                            .await
+                        {
+                            Ok(rows) => rows,
+                            Err(error) => {
+                                warn!("PubSub owner subscription lookup failed: {error}");
+                                return vec![iq_to_xml(build_pubsub_error(
+                                    iq,
+                                    PubSubError::InternalServerError,
+                                ))];
+                            }
+                        };
+                        let subscriber_bare = subscriber.to_bare();
+                        let matching_subids: Vec<_> = rows
+                            .into_iter()
+                            .filter(|row| row.subscriber.to_bare() == subscriber_bare)
+                            .map(|row| row.subid)
+                            .collect();
+                        if matching_subids.is_empty() {
+                            return vec![iq_to_xml(build_pubsub_error(
+                                iq,
+                                PubSubError::NotSubscribed,
+                            ))];
+                        }
+                        for matching_subid in matching_subids {
+                            if let Err(error) = state
+                                .deps
+                                .protocol
+                                .pubsub_storage
+                                .unsubscribe(target_jid, &node, &subscriber, Some(&matching_subid))
+                                .await
+                            {
+                                warn!("PubSub owner subscription remove failed: {error}");
+                                return vec![iq_to_xml(build_pubsub_error(
+                                    iq,
+                                    PubSubError::InternalServerError,
+                                ))];
+                            }
+                        }
+                    }
+                    SubscriptionState::Pending | SubscriptionState::Unconfigured => {
+                        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::BadRequest))];
+                    }
+                }
+            }
+            vec![iq_to_xml(build_pubsub_success(iq))]
+        }
+
         PubSubRequest::Unsupported { feature } => {
             vec![iq_to_xml(build_pubsub_error(
                 iq,

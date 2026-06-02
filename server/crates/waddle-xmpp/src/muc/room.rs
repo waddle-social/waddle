@@ -33,6 +33,8 @@ pub struct RoomConfig {
     pub persistent: bool,
     /// Whether the room is members-only
     pub members_only: bool,
+    /// Whether the room is discoverable through the MUC service.
+    pub public_room: bool,
     /// Whether the room is moderated
     pub moderated: bool,
     /// Maximum number of occupants (0 = unlimited)
@@ -64,6 +66,7 @@ impl Default for RoomConfig {
             description: None,
             persistent: true,
             members_only: true,
+            public_room: true,
             moderated: false,
             max_occupants: 0,
             enable_logging: true,

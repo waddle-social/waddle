@@ -6,8 +6,8 @@
 //!   with occupant + per-tier affiliation counts.
 //! - `create` — create a new MUC room (defaults: public, persistent, not
 //!   members-only).
-//! - `update` — patch name / topic / is_public on an existing room's
-//!   `RoomConfig`.
+//! - `update` — patch name / topic / XEP-0045 visibility policy on an
+//!   existing room's `RoomConfig`.
 //! - `delete` — destroy a MUC room via the room registry.
 //! - `occupants` — list live occupants (nick, real_jid, role, affiliation).
 //! - `affiliations` — list every persistent affiliation, optionally
@@ -44,6 +44,10 @@ use crate::channel_space_links::{ChannelSpaceLink, ChannelSpaceLinkError};
 use crate::permissions::{
     DeleteTuple, Object, ObjectType, PermissionError, Relation, Subject, SubjectType, Tuple,
     WriteTuple,
+};
+use crate::server::xmpp_state::{
+    delete_xmpp_channel, get_xmpp_channel, upsert_xmpp_channel, XmppChannelRecord,
+    XmppChannelUpsert,
 };
 use crate::server::AppState;
 
@@ -169,8 +173,11 @@ pub struct ChannelsCreateArgs {
     pub space_jid: Option<BareJid>,
     pub name: String,
     pub topic: Option<String>,
-    /// Spec: default `true` (public).
+    /// XEP-0045 `muc#roomconfig_publicroom`; default `true`.
     pub is_public: bool,
+    /// XEP-0045 `muc#roomconfig_membersonly`. When omitted during create,
+    /// hidden rooms default to members-only and public rooms default to open.
+    pub members_only: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,6 +186,7 @@ pub struct ChannelRef {
     pub name: String,
     pub topic: Option<String>,
     pub is_public: bool,
+    pub members_only: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -187,6 +195,7 @@ pub struct ChannelsUpdateArgs {
     pub name: Option<String>,
     pub topic: Option<String>,
     pub is_public: Option<bool>,
+    pub members_only: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -647,13 +656,15 @@ pub fn parse_create_args(form: Option<&DataForm>) -> Result<ChannelsCreateArgs, 
         ),
         _ => None,
     };
-    // Spec: default true.
+    // XEP-0045 public-room discovery visibility defaults true.
     let is_public = parse_optional_bool(form, "is_public")?.unwrap_or(true);
+    let members_only = parse_optional_bool(form, "members_only")?;
     Ok(ChannelsCreateArgs {
         space_jid,
         name,
         topic,
         is_public,
+        members_only,
     })
 }
 
@@ -666,11 +677,13 @@ pub fn parse_update_args(form: Option<&DataForm>) -> Result<ChannelsUpdateArgs, 
     }
     let topic = parse_optional_text(form, "topic");
     let is_public = parse_optional_bool(form, "is_public")?;
+    let members_only = parse_optional_bool(form, "members_only")?;
     Ok(ChannelsUpdateArgs {
         channel_jid,
         name,
         topic,
         is_public,
+        members_only,
     })
 }
 
@@ -834,7 +847,7 @@ async fn run_list(
             channel_jid: room_jid.clone(),
             name: config.name,
             topic: config.description,
-            is_public: !config.members_only,
+            is_public: config.public_room,
             members_only: config.members_only,
             occupant_count: u32::try_from(occupant_count).unwrap_or(u32::MAX),
             affiliation_owner_count: owner_n,
@@ -1154,6 +1167,81 @@ fn channel_type_from_config(config: &RoomConfig) -> &'static str {
     }
 }
 
+fn channel_type_for_catalog(config: &RoomConfig, existing: Option<&XmppChannelRecord>) -> String {
+    if config.forum {
+        return "forum".to_string();
+    }
+    if existing.is_some_and(|row| row.channel_type == "announcement") {
+        return "announcement".to_string();
+    }
+    channel_type_from_config(config).to_string()
+}
+
+async fn upsert_channel_catalog(
+    state: &AppState,
+    channel_id: &str,
+    config: &RoomConfig,
+) -> Result<(), AdminErr> {
+    let db_actor = state.db_pool.global_actor().clone();
+    let existing = get_xmpp_channel(db_actor.clone(), channel_id)
+        .await
+        .map_err(|error| internal_err(format!("channel catalog lookup failed: {error}")))?;
+    let record = XmppChannelUpsert {
+        id: channel_id.to_string(),
+        name: config.name.clone(),
+        description: config.description.clone(),
+        channel_type: channel_type_for_catalog(config, existing.as_ref()),
+        position: existing.as_ref().map(|row| row.position).unwrap_or(0),
+        is_default: existing.as_ref().map(|row| row.is_default).unwrap_or(false),
+        pin_permission: config.pin_permission,
+        members_only: config.members_only,
+        public_room: config.public_room,
+    };
+    upsert_xmpp_channel(db_actor, &record)
+        .await
+        .map_err(|error| internal_err(format!("channel catalog upsert failed: {error}")))
+}
+
+async fn restore_channel_catalog_record(state: &AppState, record: &XmppChannelRecord) {
+    let db_actor = state.db_pool.global_actor().clone();
+    let upsert = XmppChannelUpsert {
+        id: record.id.clone(),
+        name: record.name.clone(),
+        description: record.description.clone(),
+        channel_type: record.channel_type.clone(),
+        position: record.position,
+        is_default: record.is_default,
+        pin_permission: record.pin_permission,
+        members_only: record.members_only,
+        public_room: record.public_room,
+    };
+    if let Err(error) = upsert_xmpp_channel(db_actor, &upsert).await {
+        tracing::warn!(
+            channel = %record.id,
+            error = %error,
+            "failed to restore channel catalog row during rollback",
+        );
+    }
+}
+
+async fn restore_channel_catalog_snapshot(
+    state: &AppState,
+    channel_id: &str,
+    snapshot: Option<&XmppChannelRecord>,
+) {
+    if let Some(record) = snapshot {
+        restore_channel_catalog_record(state, record).await;
+    } else if let Err(error) =
+        delete_xmpp_channel(state.db_pool.global_actor().clone(), channel_id).await
+    {
+        tracing::warn!(
+            channel = %channel_id,
+            error = %error,
+            "failed to delete operation-created channel catalog row during rollback",
+        );
+    }
+}
+
 async fn rollback_channel_bookmark_item(
     state: &AppState,
     room_jid: &BareJid,
@@ -1218,12 +1306,13 @@ async fn run_create(state: &AppState, args: &ChannelsCreateArgs) -> Result<Chann
         None => None,
     };
 
-    // Spec: public, persistent, not members-only.
+    let members_only = args.members_only.unwrap_or(!args.is_public);
     let mut config = RoomConfig {
         name: args.name.clone(),
         description: args.topic.clone(),
         persistent: true,
-        members_only: !args.is_public,
+        members_only,
+        public_room: args.is_public,
         ..RoomConfig::default()
     };
     // Spec: forum/announcement etc default off; only name/topic/visibility
@@ -1243,6 +1332,16 @@ async fn run_create(state: &AppState, args: &ChannelsCreateArgs) -> Result<Chann
         .await
         .map_err(send_err("room_registry ask CreateRoom"))?;
 
+    if let Err(error) = upsert_channel_catalog(state, &localpart, &config).await {
+        let _ = state
+            .room_registry
+            .ask(DestroyRoom {
+                room_jid: channel_jid.clone(),
+            })
+            .await;
+        return Err(error);
+    }
+
     // Persist the channel↔space link when the caller supplied a
     // `space_jid`. The link drives `channels:list` filtering and
     // `spaces:delete` cascade behavior; the room itself lives in the
@@ -1260,6 +1359,7 @@ async fn run_create(state: &AppState, args: &ChannelsCreateArgs) -> Result<Chann
         {
             Ok(created) => created,
             Err(error) => {
+                let _ = delete_xmpp_channel(state.db_pool.global_actor().clone(), &localpart).await;
                 let _ = state
                     .room_registry
                     .ask(DestroyRoom {
@@ -1300,6 +1400,9 @@ async fn run_create(state: &AppState, args: &ChannelsCreateArgs) -> Result<Chann
                     .await
                 {
                     Ok(_) => {
+                        let _ =
+                            delete_xmpp_channel(state.db_pool.global_actor().clone(), &localpart)
+                                .await;
                         let _ = state
                             .room_registry
                             .ask(DestroyRoom {
@@ -1329,6 +1432,7 @@ async fn run_create(state: &AppState, args: &ChannelsCreateArgs) -> Result<Chann
         name: args.name.clone(),
         topic: args.topic.clone(),
         is_public: args.is_public,
+        members_only,
     })
 }
 
@@ -1353,15 +1457,19 @@ async fn run_update(state: &AppState, args: &ChannelsUpdateArgs) -> Result<Chann
 
     let new_name = args.name.clone().unwrap_or_else(|| existing.name.clone());
     let new_topic = args.topic.clone().or(existing.description.clone());
-    let new_members_only = args
-        .is_public
-        .map(|public| !public)
-        .unwrap_or(existing.members_only);
+    let new_members_only = args.members_only.unwrap_or(existing.members_only);
+    let new_public_room = args.is_public.unwrap_or(existing.public_room);
+    let channel_id = waddle_xmpp::parse_managed_room_jid(&args.channel_jid)
+        .ok_or_else(|| bad_request("channel_jid must be a managed MUC room JID"))?;
+    let catalog_snapshot = get_xmpp_channel(state.db_pool.global_actor().clone(), &channel_id)
+        .await
+        .map_err(|error| internal_err(format!("channel catalog lookup failed: {error}")))?;
 
     let updated = RoomConfig {
         name: new_name.clone(),
         description: new_topic.clone(),
         members_only: new_members_only,
+        public_room: new_public_room,
         ..existing.clone()
     };
     let linked_bookmark = if let Some(link) = state
@@ -1393,13 +1501,23 @@ async fn run_update(state: &AppState, args: &ChannelsUpdateArgs) -> Result<Chann
         .await
         .map_err(send_err("room actor UpdateConfig"))?;
 
+    if let Err(error) = upsert_channel_catalog(state, &channel_id, &updated).await {
+        let _ = actor
+            .ask(UpdateConfig {
+                config: existing.clone(),
+            })
+            .await;
+        return Err(error);
+    }
+
     if let Some((node, channel_id, item_id, previous_bookmark)) = linked_bookmark {
+        let bookmark_channel_type = channel_type_for_catalog(&updated, catalog_snapshot.as_ref());
         let parent_tuple_created = match publish_channel_space_bookmark(
             state,
             &node,
             &channel_id,
             &new_name,
-            channel_type_from_config(&updated),
+            &bookmark_channel_type,
         )
         .await
         {
@@ -1409,6 +1527,8 @@ async fn run_update(state: &AppState, args: &ChannelsUpdateArgs) -> Result<Chann
                     .ask(UpdateConfig {
                         config: existing.clone(),
                     })
+                    .await;
+                restore_channel_catalog_snapshot(state, &channel_id, catalog_snapshot.as_ref())
                     .await;
                 return Err(error);
             }
@@ -1421,6 +1541,7 @@ async fn run_update(state: &AppState, args: &ChannelsUpdateArgs) -> Result<Chann
                     config: existing.clone(),
                 })
                 .await;
+            restore_channel_catalog_snapshot(state, &channel_id, catalog_snapshot.as_ref()).await;
             restore_channel_space_bookmark(
                 state,
                 &node,
@@ -1438,7 +1559,8 @@ async fn run_update(state: &AppState, args: &ChannelsUpdateArgs) -> Result<Chann
         channel_jid: args.channel_jid.clone(),
         name: new_name,
         topic: new_topic,
-        is_public: !new_members_only,
+        is_public: new_public_room,
+        members_only: new_members_only,
     })
 }
 
@@ -1453,6 +1575,14 @@ async fn run_delete(state: &AppState, args: &ChannelsDeleteArgs) -> Result<(), A
         .and_then(|link| space_node_name(&link.space_jid));
     let item_id = args.channel_jid.to_string();
     let channel_id = waddle_xmpp::parse_managed_room_jid(&args.channel_jid);
+    let catalog_snapshot = match channel_id.as_deref() {
+        Some(channel_id) => Some(
+            get_xmpp_channel(state.db_pool.global_actor().clone(), channel_id)
+                .await
+                .map_err(|error| internal_err(format!("channel catalog lookup failed: {error}")))?,
+        ),
+        None => None,
+    };
     let mut bookmark_nodes: std::collections::BTreeSet<String> = state
         .pubsub_storage
         .list_node_names_for_item(&state.spaces_jid, &item_id)
@@ -1613,6 +1743,33 @@ async fn run_delete(state: &AppState, args: &ChannelsDeleteArgs) -> Result<(), A
         }
     }
 
+    if let Some(channel_id) = channel_id.as_deref() {
+        if let Err(error) =
+            delete_xmpp_channel(state.db_pool.global_actor().clone(), channel_id).await
+        {
+            if let Some(link) = link.as_ref() {
+                if let Err(rollback_error) = state.channel_space_link_store.set(link).await {
+                    tracing::warn!(
+                        error = %rollback_error,
+                        channel = %args.channel_jid,
+                        space = %link.space_jid,
+                        "channels:delete rollback failed to restore channel-space link",
+                    );
+                }
+            }
+            restore_removed_channel_bookmarks(
+                state,
+                &removed_bookmarks,
+                &item_id,
+                Some(channel_id),
+            )
+            .await;
+            return Err(internal_err(format!(
+                "channel catalog delete failed: {error}"
+            )));
+        }
+    }
+
     match state
         .room_registry
         .ask(DestroyRoom {
@@ -1629,6 +1786,11 @@ async fn run_delete(state: &AppState, args: &ChannelsDeleteArgs) -> Result<(), A
                 channel_id.as_deref(),
             )
             .await;
+            if let (Some(channel_id), Some(snapshot)) =
+                (channel_id.as_deref(), catalog_snapshot.as_ref())
+            {
+                restore_channel_catalog_snapshot(state, channel_id, snapshot.as_ref()).await;
+            }
             if let Some(link) = link.as_ref() {
                 if let Err(rollback_error) = state.channel_space_link_store.set(link).await {
                     tracing::warn!(
@@ -2042,7 +2204,11 @@ pub fn build_channel_form(channel: &ChannelRef) -> DataForm {
                 .with_value(channel.channel_jid.to_string()),
         )
         .add_field(Field::text_single("name", channel.name.clone()))
-        .add_field(Field::text_single("is_public", bool_str(channel.is_public)));
+        .add_field(Field::text_single("is_public", bool_str(channel.is_public)))
+        .add_field(Field::text_single(
+            "members_only",
+            bool_str(channel.members_only),
+        ));
     if let Some(topic) = channel.topic.as_ref() {
         form = form.add_field(Field::text_single("topic", topic));
     }
@@ -2227,6 +2393,20 @@ mod tests {
         assert!(matches!(form.form_type, FormType::Result));
         assert_eq!(form.reported.len(), 10);
         assert_eq!(form.items.len(), 1);
+    }
+
+    #[test]
+    fn build_channel_form_reports_visibility_policy() {
+        let channel = ChannelRef {
+            channel_jid: "general@muc.localhost".parse().expect("jid"),
+            name: "General".to_string(),
+            topic: None,
+            is_public: true,
+            members_only: true,
+        };
+        let form = build_channel_form(&channel);
+        assert_eq!(form.get_value("is_public"), Some("1"));
+        assert_eq!(form.get_value("members_only"), Some("1"));
     }
 
     #[test]

@@ -728,6 +728,8 @@ async fn handle_iq_disco_info_advertises_replies() {
     )
     .await;
     let muc_response = muc_responses.first().expect("muc disco response");
+    assert!(muc_response.contains("http://jabber.org/protocol/disco#info"));
+    assert!(muc_response.contains("http://jabber.org/protocol/disco#items"));
     assert!(muc_response.contains("urn:xmpp:reply:0"));
     assert!(!muc_response.contains("urn:waddle:test-extension:1"));
 

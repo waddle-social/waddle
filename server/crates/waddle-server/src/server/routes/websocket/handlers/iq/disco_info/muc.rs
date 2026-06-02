@@ -51,11 +51,9 @@ pub(super) async fn handle_muc_disco_info<'a>(
     let room_jid = match classify_muc_disco_target(req.target_to, req.muc_domain) {
         MucDiscoTarget::Service => {
             let identities = vec![Identity::muc_service(Some("Waddle Chatrooms"))];
-            let mut features = vec![
-                Feature::muc(),
-                Feature::replies(),
-                Feature::new(NS_CHANNEL_SEARCH),
-            ];
+            let mut features = muc_service_features();
+            features.push(Feature::replies());
+            features.push(Feature::new(NS_CHANNEL_SEARCH));
             features.extend(extension_features_for_disco(state));
             let response = build_disco_info_response(req.request_iq, &identities, &features, None);
             return Some(DiscoInfoResponse::iq(response));
@@ -132,7 +130,7 @@ pub(super) async fn handle_muc_disco_info<'a>(
         let identities = vec![Identity::muc_room(Some(&channel.name))];
         let mut features = muc_room_features(
             true,
-            true,
+            channel.members_only,
             channel.channel_type == "announcement",
             channel.channel_type == "forum",
         );

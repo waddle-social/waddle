@@ -434,26 +434,26 @@ pub fn push_service_features() -> Vec<Feature> {
 }
 
 /// Get features for the PubSub-backed Spaces service component.
-///
-/// This intentionally advertises only the PubSub features implemented by the
-/// service. Full XEP-0503 service conformance additionally requires owner
-/// subscription management, so the service does not advertise
-/// `urn:xmpp:spaces:0` until that behavior exists.
 pub fn spaces_service_features() -> Vec<Feature> {
     vec![
         Feature::disco_info(),
         Feature::disco_items(),
+        Feature::spaces(),
         Feature::pubsub(),
         Feature::pubsub_retrieve_items(),
         Feature::new("http://jabber.org/protocol/pubsub#subscribe"),
+        Feature::new("http://jabber.org/protocol/pubsub#publish"),
+        Feature::new("http://jabber.org/protocol/pubsub#persistent-items"),
         Feature::new("http://jabber.org/protocol/pubsub#create-nodes"),
         Feature::new("http://jabber.org/protocol/pubsub#config-node"),
         Feature::new("http://jabber.org/protocol/pubsub#meta-data"),
         Feature::new("http://jabber.org/protocol/pubsub#delete-nodes"),
         Feature::new("http://jabber.org/protocol/pubsub#delete-items"),
         Feature::new("http://jabber.org/protocol/pubsub#retract-items"),
-        Feature::new("http://jabber.org/protocol/pubsub#multi-items"),
         Feature::new("http://jabber.org/protocol/pubsub#item-ids"),
+        Feature::new("http://jabber.org/protocol/pubsub#manage-subscriptions"),
+        Feature::new("http://jabber.org/protocol/pubsub#modify-affiliations"),
+        Feature::new("http://jabber.org/protocol/pubsub#retrieve-affiliations"),
     ]
 }
 

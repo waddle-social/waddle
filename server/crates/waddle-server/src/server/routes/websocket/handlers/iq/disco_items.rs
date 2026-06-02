@@ -36,7 +36,17 @@ pub(super) async fn handle_disco_items_iq(
 
         if target_to == Some(muc_domain) {
             debug!("Disco items query on MUC service");
-            let items = canonical_channel_disco_items(state, muc_domain, 500).await;
+            let items = match canonical_channel_disco_items(state, muc_domain, 500).await {
+                Ok(items) => items,
+                Err(_) => {
+                    return vec![build_iq_error_xml_typed(
+                        id,
+                        None,
+                        None,
+                        internal_server_error_iq_error("Failed to list MUC rooms."),
+                    )];
+                }
+            };
 
             let response = build_disco_items_response(request_iq, &items, None);
             return vec![iq_to_xml(response)];
@@ -142,13 +152,47 @@ pub(super) async fn handle_disco_items_iq(
                         .list_nodes(&spaces_jid)
                         .await
                     {
-                        Ok(nodes) => nodes
-                            .into_iter()
-                            .map(|node| {
-                                let name = if node == "general" { "General" } else { &node };
-                                DiscoItem::spaces_node(spaces_domain, &node, Some(name))
-                            })
-                            .collect(),
+                        Ok(nodes) => {
+                            let requester = phase.bound_jid().map(|jid| jid.to_bare());
+                            let mut items = Vec::new();
+                            for node in nodes {
+                                let Ok(Some(space_node)) = state
+                                    .deps
+                                    .protocol
+                                    .pubsub_storage
+                                    .get_node(&spaces_jid, &node)
+                                    .await
+                                else {
+                                    continue;
+                                };
+                                let Some(space) = space_details_from_node(&space_node) else {
+                                    continue;
+                                };
+                                let visible = match requester.as_ref() {
+                                    Some(requester) => crate::pubsub_authz::can_subscribe(
+                                        &state.deps.protocol.pubsub_storage,
+                                        &spaces_jid,
+                                        &node,
+                                        requester,
+                                        false,
+                                    )
+                                    .await
+                                    .unwrap_or(false),
+                                    None => matches!(
+                                        space_node.config.access_model,
+                                        waddle_xmpp::pubsub::AccessModel::Open
+                                    ),
+                                };
+                                if visible {
+                                    items.push(DiscoItem::spaces_node(
+                                        spaces_domain,
+                                        &node,
+                                        Some(&space.name),
+                                    ));
+                                }
+                            }
+                            items
+                        }
                         Err(error) => {
                             warn!(error = %error, "Failed to list Spaces nodes");
                             vec![]

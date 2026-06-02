@@ -111,6 +111,7 @@ pub(super) fn space_details_from_node(
 fn channels_to_disco_items(channels: Vec<XmppChannelRecord>, muc_domain: &str) -> Vec<DiscoItem> {
     channels
         .into_iter()
+        .filter(|channel| channel.public_room)
         .filter_map(|channel| {
             waddle_xmpp::managed_room_jid(&channel.id, muc_domain)
                 .ok()
@@ -163,7 +164,7 @@ pub(super) async fn canonical_channel_disco_items(
     state: &WebSocketState,
     muc_domain: &str,
     limit: usize,
-) -> Vec<DiscoItem> {
+) -> Result<Vec<DiscoItem>, String> {
     match list_xmpp_channels(
         state.deps.app_state.db_pool.global_actor().clone(),
         limit,
@@ -171,10 +172,10 @@ pub(super) async fn canonical_channel_disco_items(
     )
     .await
     {
-        Ok(channels) => channels_to_disco_items(channels, muc_domain),
+        Ok(channels) => Ok(channels_to_disco_items(channels, muc_domain)),
         Err(error) => {
             warn!(error = %error, "Failed to list canonical channels for MUC discovery");
-            Vec::new()
+            Err(error)
         }
     }
 }

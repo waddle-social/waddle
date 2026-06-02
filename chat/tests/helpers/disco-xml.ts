@@ -16,19 +16,22 @@ export function discoItemsXml(items: Array<{ name?: string; node?: string; jid?:
   ).join("")}</query></iq>`;
 }
 
-export function discoInfoXml(info: { features?: string[]; identities?: DiscoIdentity[] } = {}): string {
+export function discoInfoXml(info: { features?: string[]; identities?: DiscoIdentity[]; fields?: Record<string, string> } = {}): string {
   return `<iq type="result"><query xmlns="http://jabber.org/protocol/disco#info">${
     (info.identities ?? []).map((identity) =>
       `<identity category="${identity.category}" type="${identity.type}"${identity.name ? ` name="${identity.name}"` : ""}/>`
     ).join("")
   }${
     (info.features ?? []).map((feature) => `<feature var="${feature}"/>`).join("")
+  }${info.fields ? `<x xmlns="jabber:x:data" type="result">${Object.entries(info.fields).map(([name, value]) =>
+    `<field var="${name}"><value>${value}</value></field>`
+  ).join("")}</x>` : ""
   }</query></iq>`;
 }
 
-export function pubsubItemsXml(items: Array<{ id?: string; jid?: string; name?: string; autojoin?: boolean }>): string {
+export function pubsubItemsXml(items: Array<{ id?: string; name?: string; autojoin?: boolean; payloadXml?: string }>): string {
   return `<iq type="result"><pubsub xmlns="http://jabber.org/protocol/pubsub"><items>${items.map((item) =>
-    `<item${item.id ? ` id="${item.id}"` : ""}>${item.jid || item.name ? `<conference xmlns="urn:xmpp:bookmarks:1"${item.jid ? ` jid="${item.jid}"` : ""}${item.name ? ` name="${item.name}"` : ""}${item.autojoin === undefined ? "" : ` autojoin="${item.autojoin ? "true" : "false"}"`}/>` : ""}</item>`
+    `<item${item.id ? ` id="${item.id}"` : ""}>${item.payloadXml ?? `<conference xmlns="urn:xmpp:bookmarks:1"${item.name ? ` name="${item.name}"` : ""}${item.autojoin === undefined ? "" : ` autojoin="${item.autojoin ? "true" : "false"}"`}/>`}</item>`
   ).join("")}</items></pubsub></iq>`;
 }
 

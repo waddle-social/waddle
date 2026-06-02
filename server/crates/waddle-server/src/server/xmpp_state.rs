@@ -12,7 +12,10 @@ use waddle_xmpp::{Session as XmppSession, XmppError};
 #[cfg(test)]
 pub use super::xmpp_app_state::XmppAppState;
 
-pub(crate) use super::xmpp_channels::{get_xmpp_channel, list_xmpp_channels, XmppChannelRecord};
+pub(crate) use super::xmpp_channels::{
+    delete_xmpp_channel, get_xmpp_channel, list_xmpp_channels, upsert_xmpp_channel,
+    XmppChannelRecord, XmppChannelUpsert,
+};
 
 #[cfg(test)]
 impl waddle_xmpp::AppState for XmppAppState {

@@ -125,29 +125,31 @@ fn test_muc_service_features_exclude_xep_0410_feature() {
 }
 
 #[test]
-fn test_spaces_service_features_include_only_supported_pubsub_features() {
+fn test_spaces_service_features_include_xep0503_required_features() {
     let features = spaces_service_features();
     for feature in [
+        "urn:xmpp:spaces:0",
+        "http://jabber.org/protocol/pubsub",
         "http://jabber.org/protocol/pubsub#subscribe",
+        "http://jabber.org/protocol/pubsub#publish",
+        "http://jabber.org/protocol/pubsub#persistent-items",
         "http://jabber.org/protocol/pubsub#create-nodes",
         "http://jabber.org/protocol/pubsub#config-node",
         "http://jabber.org/protocol/pubsub#meta-data",
         "http://jabber.org/protocol/pubsub#delete-nodes",
         "http://jabber.org/protocol/pubsub#delete-items",
         "http://jabber.org/protocol/pubsub#retract-items",
-        "http://jabber.org/protocol/pubsub#multi-items",
         "http://jabber.org/protocol/pubsub#item-ids",
+        "http://jabber.org/protocol/pubsub#manage-subscriptions",
         "http://jabber.org/protocol/pubsub#retrieve-items",
+        "http://jabber.org/protocol/pubsub#modify-affiliations",
+        "http://jabber.org/protocol/pubsub#retrieve-affiliations",
     ] {
         assert!(
             features.contains(&Feature::new(feature)),
             "spaces service missing {feature}"
         );
     }
-    assert!(!features.contains(&Feature::spaces()));
-    assert!(!features.contains(&Feature::new(
-        "http://jabber.org/protocol/pubsub#manage-subscriptions"
-    )));
     // Feed + stories live on the community service, not spaces — the
     // spaces service MUST NOT advertise these or clients enumerate
     // them as space members.
