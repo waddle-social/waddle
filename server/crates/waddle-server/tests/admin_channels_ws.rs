@@ -41,6 +41,10 @@ const NODE_CHANNELS_KICK: &str = "urn:waddle:admin:channels:kick:0";
 
 static TEST_SERIAL: Mutex<()> = Mutex::const_new(());
 
+fn frame_has_iq_id(frame: &str, id: &str) -> bool {
+    frame.contains(&format!(r#"id='{id}'"#)) || frame.contains(&format!(r#"id="{id}""#))
+}
+
 async fn admin_client(server: &TestServer, resource: &str) -> WsXmppClient {
     let password = server.fixed_account_password().to_string();
     WsXmppClient::connect_and_auth(&server.ws_url(), DOMAIN, ADMIN, &password, resource)
@@ -65,13 +69,64 @@ async fn send_command(client: &mut WsXmppClient, node: &str, id: &str, form_xml:
         .await
         .expect("send iq");
     client
-        .recv_matching(|frame| {
-            frame.contains("<iq")
-                && (frame.contains(&format!(r#"id='{id}'"#))
-                    || frame.contains(&format!(r#"id='{id}'"#)))
-        })
+        .recv_matching(|frame| frame.contains("<iq") && frame_has_iq_id(frame, id))
         .await
         .expect("iq response")
+}
+
+async fn disco_items(client: &mut WsXmppClient, to: &str, id: &str) -> String {
+    client
+        .send(&format!(
+            r#"<iq type="get" id="{id}" to="{to}"><query xmlns="http://jabber.org/protocol/disco#items"/></iq>"#
+        ))
+        .await
+        .expect("send disco items");
+    client
+        .recv_matching(|frame| frame.contains("<iq") && frame_has_iq_id(frame, id))
+        .await
+        .expect("disco items response")
+}
+
+async fn join_muc(client: &mut WsXmppClient, room_jid: &str, nick: &str) -> String {
+    client
+        .send(&format!(
+            r#"<presence to="{room_jid}/{nick}"><x xmlns="http://jabber.org/protocol/muc"/></presence>"#
+        ))
+        .await
+        .expect("send muc join presence");
+    client
+        .recv_matching(|frame| {
+            frame.contains("<presence") && frame.contains(&format!("{room_jid}/{nick}"))
+        })
+        .await
+        .expect("muc self-presence")
+}
+
+async fn submit_muc_owner_config(
+    client: &mut WsXmppClient,
+    room_jid: &str,
+    id: &str,
+    fields_xml: &str,
+) -> String {
+    client
+        .send(&format!(
+            r#"<iq type="set" id="{id}" to="{room_jid}">
+                <query xmlns="http://jabber.org/protocol/muc#owner">
+                    <x xmlns="{NS_DATA}" type="submit">
+                        <field var="FORM_TYPE" type="hidden">
+                            <value>http://jabber.org/protocol/muc#roomconfig</value>
+                        </field>
+                        {fields_xml}
+                    </x>
+                </query>
+            </iq>"#
+        ))
+        .await
+        .expect("send owner config iq");
+    client
+        .recv_matching(|frame| frame.contains("<iq") && frame_has_iq_id(frame, id))
+        .await
+        .expect("owner config response")
 }
 
 fn submit_form(node: &str, extra: &str) -> String {
@@ -84,12 +139,17 @@ fn text_field(var: &str, value: &str) -> String {
     format!(r#"<field var="{var}" type="text-single"><value>{value}</value></field>"#)
 }
 
+fn bool_field(var: &str, value: bool) -> String {
+    let value = if value { "1" } else { "0" };
+    format!(r#"<field var="{var}" type="boolean"><value>{value}</value></field>"#)
+}
+
 fn is_result(frame: &str) -> bool {
-    frame.contains(r#"type='result'"#) || frame.contains(r#"type='result'"#)
+    frame.contains(r#"type='result'"#) || frame.contains(r#"type="result""#)
 }
 
 fn is_error(frame: &str) -> bool {
-    frame.contains(r#"type='error'"#) || frame.contains(r#"type='error'"#)
+    frame.contains(r#"type='error'"#) || frame.contains(r#"type="error""#)
 }
 
 fn extract_field(frame: &str, var: &str) -> Option<String> {
@@ -181,6 +241,8 @@ async fn channels_create_defaults_to_public() {
     // is_public field should be 1 (true)
     let is_public = extract_field(&resp, "is_public").expect("is_public");
     assert_eq!(is_public, "1", "default is_public must be true");
+    let members_only = extract_field(&resp, "members_only").expect("members_only");
+    assert_eq!(members_only, "0", "default members_only must be false");
 
     // List should reflect the new channel.
     let list_resp = send_command(
@@ -217,6 +279,207 @@ async fn channels_create_honours_explicit_private() {
     assert!(is_result(&resp), "expected result, got: {resp}");
     let is_public = extract_field(&resp, "is_public").expect("is_public");
     assert_eq!(is_public, "0", "is_public=false honoured");
+    let _ = admin.close().await;
+}
+
+#[tokio::test]
+async fn channels_create_public_room_appears_in_muc_disco_items() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut admin = admin_client(&server, "admin-channels-create-disco").await;
+    let resp = send_command(
+        &mut admin,
+        NODE_CHANNELS_CREATE,
+        "channels-create-disco",
+        &submit_form(NODE_CHANNELS_CREATE, &text_field("name", "native-visible")),
+    )
+    .await;
+    assert!(is_result(&resp), "expected result, got: {resp}");
+    let channel_jid = extract_field(&resp, "channel_jid").expect("channel_jid");
+
+    let disco = disco_items(&mut admin, "muc.localhost", "channels-create-muc-disco").await;
+    assert!(
+        disco.contains(&channel_jid),
+        "admin-created public channel must be discoverable via MUC disco#items, got: {disco}"
+    );
+    assert!(
+        disco.contains("native-visible"),
+        "MUC disco item should carry the channel name, got: {disco}"
+    );
+    let _ = admin.close().await;
+}
+
+#[tokio::test]
+async fn channels_open_managed_room_join_keeps_unaffiliated_user_none() {
+    let _serial = TEST_SERIAL.lock().await;
+    let alice_pass = format!("alice-pass-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[("alice", &alice_pass)]);
+    let mut admin = admin_client(&server, "admin-channels-open-join-admin").await;
+    let mut alice = alice_client(&server, &alice_pass, "alice-channels-open-join").await;
+    let resp = send_command(
+        &mut admin,
+        NODE_CHANNELS_CREATE,
+        "channels-open-join-create",
+        &submit_form(
+            NODE_CHANNELS_CREATE,
+            &format!(
+                "{}{}",
+                text_field("name", "open-join"),
+                bool_field("members_only", false)
+            ),
+        ),
+    )
+    .await;
+    assert!(is_result(&resp), "expected result, got: {resp}");
+    let channel_jid = extract_field(&resp, "channel_jid").expect("channel_jid");
+
+    let join = join_muc(&mut alice, &channel_jid, "alice").await;
+    assert!(
+        join.contains("affiliation='none'") || join.contains(r#"affiliation="none""#),
+        "unaffiliated open managed-room join must not persist member affiliation, got: {join}"
+    );
+
+    let list = send_command(
+        &mut admin,
+        NODE_CHANNELS_AFFILIATIONS,
+        "channels-open-join-affiliations",
+        &submit_form(
+            NODE_CHANNELS_AFFILIATIONS,
+            &text_field("channel_jid", &channel_jid),
+        ),
+    )
+    .await;
+    assert!(
+        is_result(&list),
+        "expected affiliations result, got: {list}"
+    );
+    assert!(
+        !list.contains("alice@localhost"),
+        "joining an open managed room must not add alice to the managed affiliation list, got: {list}"
+    );
+
+    let _ = alice.close().await;
+    let _ = admin.close().await;
+}
+
+#[tokio::test]
+async fn channels_create_private_room_is_hidden_from_muc_disco_items() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut admin = admin_client(&server, "admin-channels-create-private-disco").await;
+    let extra = format!(
+        "{}{}",
+        text_field("name", "private-native"),
+        text_field("is_public", "false")
+    );
+    let resp = send_command(
+        &mut admin,
+        NODE_CHANNELS_CREATE,
+        "channels-create-private-disco",
+        &submit_form(NODE_CHANNELS_CREATE, &extra),
+    )
+    .await;
+    assert!(is_result(&resp), "expected result, got: {resp}");
+    let channel_jid = extract_field(&resp, "channel_jid").expect("channel_jid");
+
+    let disco = disco_items(
+        &mut admin,
+        "muc.localhost",
+        "channels-create-private-muc-disco",
+    )
+    .await;
+    assert!(
+        !disco.contains(&channel_jid),
+        "admin-created private channel must not be public in MUC disco#items, got: {disco}"
+    );
+    let _ = admin.close().await;
+}
+
+#[tokio::test]
+async fn channels_create_public_members_only_room_appears_in_muc_disco_items() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut admin = admin_client(&server, "admin-channels-create-public-members-disco").await;
+    let extra = format!(
+        "{}{}{}",
+        text_field("name", "public-members"),
+        bool_field("is_public", true),
+        bool_field("members_only", true)
+    );
+    let resp = send_command(
+        &mut admin,
+        NODE_CHANNELS_CREATE,
+        "channels-create-public-members-disco",
+        &submit_form(NODE_CHANNELS_CREATE, &extra),
+    )
+    .await;
+    assert!(is_result(&resp), "expected result, got: {resp}");
+    assert_eq!(
+        extract_field(&resp, "is_public").as_deref(),
+        Some("1"),
+        "public_room=true should be reported independently"
+    );
+    assert_eq!(
+        extract_field(&resp, "members_only").as_deref(),
+        Some("1"),
+        "members_only=true should be reported independently"
+    );
+    let channel_jid = extract_field(&resp, "channel_jid").expect("channel_jid");
+
+    let disco = disco_items(
+        &mut admin,
+        "muc.localhost",
+        "channels-create-public-members-muc-disco",
+    )
+    .await;
+    assert!(
+        disco.contains(&channel_jid),
+        "XEP-0045 publicroom=true must be discoverable even when members_only=true, got: {disco}"
+    );
+    let _ = admin.close().await;
+}
+
+#[tokio::test]
+async fn channels_create_hidden_open_room_is_hidden_from_muc_disco_items() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut admin = admin_client(&server, "admin-channels-create-hidden-open-disco").await;
+    let extra = format!(
+        "{}{}{}",
+        text_field("name", "hidden-open"),
+        bool_field("is_public", false),
+        bool_field("members_only", false)
+    );
+    let resp = send_command(
+        &mut admin,
+        NODE_CHANNELS_CREATE,
+        "channels-create-hidden-open-disco",
+        &submit_form(NODE_CHANNELS_CREATE, &extra),
+    )
+    .await;
+    assert!(is_result(&resp), "expected result, got: {resp}");
+    assert_eq!(
+        extract_field(&resp, "is_public").as_deref(),
+        Some("0"),
+        "public_room=false should be reported independently"
+    );
+    assert_eq!(
+        extract_field(&resp, "members_only").as_deref(),
+        Some("0"),
+        "members_only=false should be reported independently"
+    );
+    let channel_jid = extract_field(&resp, "channel_jid").expect("channel_jid");
+
+    let disco = disco_items(
+        &mut admin,
+        "muc.localhost",
+        "channels-create-hidden-open-muc-disco",
+    )
+    .await;
+    assert!(
+        !disco.contains(&channel_jid),
+        "XEP-0045 publicroom=false must be hidden even when members_only=false, got: {disco}"
+    );
     let _ = admin.close().await;
 }
 
@@ -295,6 +558,75 @@ async fn channels_update_renames() {
     assert!(
         resp.contains("newname"),
         "renamed channel should reflect new name, got: {resp}"
+    );
+    let disco = disco_items(&mut admin, "muc.localhost", "channels-upd-disco").await;
+    assert!(
+        disco.contains(&channel_jid) && disco.contains("newname"),
+        "MUC disco#items should reflect updated channel name, got: {disco}"
+    );
+    let _ = admin.close().await;
+}
+
+#[tokio::test]
+async fn standard_muc_owner_config_publicroom_false_hides_room_from_muc_disco_items() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut admin = admin_client(&server, "admin-channels-owner-publicroom").await;
+    let channel_jid = "owner-hidden@muc.localhost";
+    let join = join_muc(&mut admin, channel_jid, "admin").await;
+    assert!(
+        join.contains("affiliation='owner'") || join.contains(r#"affiliation="owner""#),
+        "first occupant should become MUC owner before config SET, got: {join}"
+    );
+
+    let owner_visible_resp = submit_muc_owner_config(
+        &mut admin,
+        channel_jid,
+        "channels-owner-publicroom-visible-set",
+        &format!(
+            "{}{}{}",
+            text_field("muc#roomconfig_roomname", "Owner Hidden"),
+            bool_field("muc#roomconfig_publicroom", true),
+            bool_field("muc#roomconfig_membersonly", false)
+        ),
+    )
+    .await;
+    assert!(
+        is_result(&owner_visible_resp),
+        "expected owner config result, got: {owner_visible_resp}"
+    );
+    let visible = disco_items(
+        &mut admin,
+        "muc.localhost",
+        "channels-owner-publicroom-before-disco",
+    )
+    .await;
+    assert!(
+        visible.contains(channel_jid),
+        "precondition: newly created public room should be visible, got: {visible}"
+    );
+
+    let owner_resp = submit_muc_owner_config(
+        &mut admin,
+        channel_jid,
+        "channels-owner-publicroom-set",
+        &bool_field("muc#roomconfig_publicroom", false),
+    )
+    .await;
+    assert!(
+        is_result(&owner_resp),
+        "expected owner config result, got: {owner_resp}"
+    );
+
+    let hidden = disco_items(
+        &mut admin,
+        "muc.localhost",
+        "channels-owner-publicroom-after-disco",
+    )
+    .await;
+    assert!(
+        !hidden.contains(channel_jid),
+        "standard XEP-0045 muc#roomconfig_publicroom=0 must hide room from MUC disco#items, got: {hidden}"
     );
     let _ = admin.close().await;
 }
@@ -390,6 +722,11 @@ async fn channels_delete_round_trips() {
     assert!(
         !list_resp.contains(&channel_jid),
         "deleted channel should be gone from list, got: {list_resp}"
+    );
+    let disco = disco_items(&mut admin, "muc.localhost", "channels-del2-disco").await;
+    assert!(
+        !disco.contains(&channel_jid),
+        "deleted channel should be gone from MUC disco#items, got: {disco}"
     );
     let _ = admin.close().await;
 }

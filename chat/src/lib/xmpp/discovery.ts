@@ -8,7 +8,9 @@ const NS_FORUMS_0 = "urn:xmpp:forums:0";
 const NS_MUC = "http://jabber.org/protocol/muc";
 const NS_SPACES_0 = "urn:xmpp:spaces:0";
 const NS_PUBSUB = "http://jabber.org/protocol/pubsub";
+const NS_PUBSUB_METADATA = "http://jabber.org/protocol/pubsub#meta-data";
 const NS_BOOKMARKS_1 = "urn:xmpp:bookmarks:1";
+const NS_MUC_ROOMINFO = "http://jabber.org/protocol/muc#roominfo";
 const DISCO_INFO_NS = "http://jabber.org/protocol/disco#info";
 const DISCO_ITEMS_NS = "http://jabber.org/protocol/disco#items";
 const DATAFORM_NS = "jabber:x:data";
@@ -25,6 +27,7 @@ export type DiscoInfoData = {
   features: string[];
   identities: Array<{ category?: string; type?: string; name?: string }>;
   fields: Map<string, string>;
+  forms?: Array<{ formType: string | null; fields: Map<string, string> }>;
 };
 
 // RFC 6120 §8.2.3 requires IQ stanzas to be answered, but the requirement
@@ -115,6 +118,14 @@ function parseXml(xml: string): Document {
   return new DOMParser().parseFromString(xml, "text/xml");
 }
 
+function xmlAttr(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("\"", "&quot;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
 function elementChildren(element: Element, localName: string, namespace: string): Element[] {
   return Array.from(element.children).filter((child) => child.localName === localName && child.namespaceURI === namespace);
 }
@@ -164,9 +175,31 @@ function hasDiscoFeature(info: DiscoInfoData | null | undefined, feature: string
   return info?.features.some((candidate) => candidate === feature) ?? false;
 }
 
+function hasDiscoIdentity(info: DiscoInfoData | null | undefined, category: string, type: string): boolean {
+  return info?.identities.some((identity) => identity.category === category && identity.type === type) ?? false;
+}
+
+function formField(info: DiscoInfoData, formType: string, fieldName: string): string | null {
+  return info.forms?.find((form) => form.formType === formType)?.fields.get(fieldName) ?? null;
+}
+
+function isSpacesServiceInfo(info: DiscoInfoData | null | undefined): boolean {
+  return hasDiscoFeature(info, NS_SPACES_0)
+    && hasDiscoFeature(info, NS_PUBSUB)
+    && hasDiscoIdentity(info, "pubsub", "service");
+}
+
+function isSpacesNodeInfo(info: DiscoInfoData | null | undefined): boolean {
+  return !!info
+    && hasDiscoFeature(info, NS_SPACES_0)
+    && hasDiscoFeature(info, NS_PUBSUB)
+    && hasDiscoIdentity(info, "pubsub", "leaf")
+    && formField(info, NS_PUBSUB_METADATA, "pubsub#type") === NS_SPACES_0;
+}
+
 function roomParentSpaceId(info: DiscoInfoData): string | null {
-  return parseSpaceNodeIri(info.fields.get("parent") ?? null)
-    ?? parseSpaceNodeIri(info.fields.get("muc#roominfo_pubsub") ?? null);
+  return parseSpaceNodeIri(formField(info, NS_SPACES_0, "parent"))
+    ?? parseSpaceNodeIri(formField(info, NS_MUC_ROOMINFO, "muc#roomconfig_pubsub"));
 }
 
 function logDiscoFailure(kind: "info" | "items" | "pubsub", to: string, node: string | undefined, err: unknown): void {
@@ -183,11 +216,12 @@ function logDiscoFailure(kind: "info" | "items" | "pubsub", to: string, node: st
 async function sendDiscoInfo(xmpp: HybridClient, to: string, node?: string): Promise<DiscoInfoData | null> {
   if (!xmpp.send_raw_iq) return null;
   const id = crypto.randomUUID();
-  const nodeAttr = node ? ` node="${node}"` : "";
+  const nodeAttr = node ? ` node="${xmlAttr(node)}"` : "";
+  const toAttr = xmlAttr(to);
   let responseXml: string;
   try {
     responseXml = await withIqTimeout(
-      xmpp.send_raw_iq(`<iq type="get" id="${id}" to="${to}"><query xmlns="${DISCO_INFO_NS}"${nodeAttr}/></iq>`),
+      xmpp.send_raw_iq(`<iq type="get" id="${id}" to="${toAttr}"><query xmlns="${DISCO_INFO_NS}"${nodeAttr}/></iq>`),
       to,
       node,
       undefined,
@@ -200,26 +234,31 @@ async function sendDiscoInfo(xmpp: HybridClient, to: string, node?: string): Pro
   const query = parseXml(responseXml).getElementsByTagNameNS(DISCO_INFO_NS, "query")[0];
   if (!query) return null;
   const fields = new Map<string, string>();
+  const forms: DiscoInfoData["forms"] = [];
   for (const form of elementChildren(query, "x", DATAFORM_NS)) {
+    const formFields = new Map<string, string>();
     for (const field of elementChildren(form, "field", DATAFORM_NS)) {
       const name = field.getAttribute("var");
       if (!name) continue;
-      const value = textContent(field.querySelector("value"));
+      const value = textContent(elementChildren(field, "value", DATAFORM_NS)[0] ?? field.querySelector("value"));
       if (value) fields.set(name, value);
+      if (value) formFields.set(name, value);
     }
+    forms.push({ formType: formFields.get("FORM_TYPE") ?? null, fields: formFields });
   }
   return {
     features: elementChildren(query, "feature", DISCO_INFO_NS).map((feature) => feature.getAttribute("var") ?? "").filter(Boolean),
     identities: elementChildren(query, "identity", DISCO_INFO_NS).map((identity) => ({ category: identity.getAttribute("category") ?? undefined, type: identity.getAttribute("type") ?? undefined, name: identity.getAttribute("name") ?? undefined })),
     fields,
+    forms,
   };
 }
 
 async function sendDiscoItems(xmpp: HybridClient, to: string, node?: string): Promise<Array<{ jid?: string; name?: string; node?: string }>> {
   if (!xmpp.send_raw_iq) return [];
   const id = crypto.randomUUID();
-  const nodeAttr = node ? ` node="${node}"` : "";
-  const xml = `<iq type="get" id="${id}" to="${to}"><query xmlns="${DISCO_ITEMS_NS}"${nodeAttr}/></iq>`;
+  const nodeAttr = node ? ` node="${xmlAttr(node)}"` : "";
+  const xml = `<iq type="get" id="${id}" to="${xmlAttr(to)}"><query xmlns="${DISCO_ITEMS_NS}"${nodeAttr}/></iq>`;
   let responseXml: string;
   try {
     responseXml = await withIqTimeout(xmpp.send_raw_iq(xml), to, node, undefined, cancelRawIqOnTimeout(xmpp, id));
@@ -245,10 +284,12 @@ type PubsubBookmarkItem = {
 async function sendPubsubItems(xmpp: HybridClient, to: string, node: string): Promise<PubsubBookmarkItem[]> {
   if (!xmpp.send_raw_iq) return [];
   const id = crypto.randomUUID();
+  const toAttr = xmlAttr(to);
+  const nodeAttr = xmlAttr(node);
   let responseXml: string;
   try {
     responseXml = await withIqTimeout(
-      xmpp.send_raw_iq(`<iq type="get" id="${id}" to="${to}"><pubsub xmlns="${NS_PUBSUB}"><items node="${node}"/></pubsub></iq>`),
+      xmpp.send_raw_iq(`<iq type="get" id="${id}" to="${toAttr}"><pubsub xmlns="${NS_PUBSUB}"><items node="${nodeAttr}"/></pubsub></iq>`),
       to,
       node,
       undefined,
@@ -263,15 +304,14 @@ async function sendPubsubItems(xmpp: HybridClient, to: string, node: string): Pr
   if (!items) return [];
   return Array.from(items.getElementsByTagNameNS(NS_PUBSUB, "item"))
     .filter((item) => item.parentNode === items)
-    .map((item) => {
-      const conference = Array.from(item.getElementsByTagName("conference"))
-        .find((candidate) => !candidate.namespaceURI || candidate.namespaceURI === NS_BOOKMARKS_1);
+    .flatMap((item) => {
+      const conference = elementChildren(item, "conference", NS_BOOKMARKS_1)[0];
+      const roomJid = item.getAttribute("id") ?? undefined;
+      if (!conference || !roomJid) return [];
       return {
-        jid: item.getAttribute("id") ?? conference?.getAttribute("jid") ?? undefined,
-        name: conference?.getAttribute("name") ?? undefined,
-        ...(conference
-          ? { autojoin: parseBooleanValue(conference.getAttribute("autojoin")) ?? false }
-          : {}),
+        jid: roomJid,
+        name: conference.getAttribute("name") ?? undefined,
+        autojoin: parseBooleanValue(conference.getAttribute("autojoin")) ?? false,
       };
     });
 }
@@ -310,7 +350,7 @@ async function discoverComponentServices(xmpp: HybridClient, domain: string, jid
     // A generic pubsub identity is not enough: the extensions component is
     // also pubsub. Keep the conventional Spaces fallback unless a component
     // explicitly advertises the XEP-0503 namespace.
-    const spaces = serviceInfo.find(({ info }) => hasDiscoFeature(info, NS_SPACES_0))?.serviceJid ?? fallback.spaces;
+    const spaces = serviceInfo.find(({ info }) => isSpacesServiceInfo(info))?.serviceJid ?? fallback.spaces;
     return { muc, spaces };
   } catch {
     return fallback;
@@ -361,10 +401,13 @@ async function hydrateRoomInfo(xmpp: HybridClient, room: DiscoveredChannel): Pro
 }
 
 export async function discoverChannels(xmpp: HybridClient, jid: string): Promise<DiscoveredChannel[]> {
-  const spaces = await sendDiscoItems(xmpp, spacesServiceDomain(jid));
+  const spacesService = spacesServiceDomain(jid);
+  const spaces = await sendDiscoItems(xmpp, spacesService);
   const spaceNode = spaces[0]?.node;
   if (!spaceNode) return [];
-  const items = await sendPubsubItems(xmpp, spacesServiceDomain(jid), spaceNode);
+  const info = await sendDiscoInfo(xmpp, spacesService, spaceNode);
+  if (!isSpacesNodeInfo(info)) return [];
+  const items = await sendPubsubItems(xmpp, spacesService, spaceNode);
   const settled = await Promise.allSettled(
     items.map((item, position) =>
       hydrateRoomInfo(xmpp, channelFromRoom({ jid: item.jid ?? "", name: item.name }, position)),
@@ -382,7 +425,7 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
   const domain = jidDomain(jid);
   const services = await discoverComponentServices(xmpp, domain, jid);
   let rooms: DiscoveredChannel[] = [];
-  const bookmarkedRooms = new Map<string, { spaceId: string; autojoin: boolean }>();
+  const bookmarkedRooms = new Map<string, { spaceId: string; autojoin: boolean; name?: string }>();
   const spaces: DiscoveredSpace[] = [];
   let serverRole: DiscoveryRole = null;
 
@@ -399,8 +442,11 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
       let role = serverRole;
       try {
         const info = await sendDiscoInfo(xmpp, services.spaces, item.node);
+        if (!isSpacesNodeInfo(info)) continue;
         if (info) role = parseDiscoveryRole(info.fields.get("pubsub#affiliation") ?? null) ?? serverRole;
-      } catch {}
+      } catch {
+        continue;
+      }
       try {
         const bookmarks = await sendPubsubItems(xmpp, services.spaces, item.node);
         for (const bookmark of bookmarks) {
@@ -408,6 +454,7 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
             bookmarkedRooms.set(barePeerJid(bookmark.jid), {
               spaceId,
               autojoin: bookmark.autojoin ?? false,
+              name: bookmark.name,
             });
           }
         }
@@ -435,23 +482,39 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
     // console for diagnostics.
     void err;
   }
+  const roomItems = [...mucRooms];
+  const discoveredRoomJids = new Set(
+    roomItems
+      .map((room) => room.jid ? barePeerJid(room.jid) : null)
+      .filter((roomJid): roomJid is string => roomJid !== null),
+  );
+  for (const [roomJid, bookmark] of bookmarkedRooms.entries()) {
+    if (!discoveredRoomJids.has(roomJid)) {
+      roomItems.push({ jid: roomJid, name: bookmark.name });
+    }
+  }
   const hydratedSettled = await Promise.allSettled(
-    mucRooms.map((room, position) =>
+    roomItems.map((room, position) =>
       hydrateRoomInfo(xmpp, channelFromRoom({ jid: room.jid ?? "", name: room.name }, position)),
     ),
   );
   const hydrated = hydratedSettled.map((entry, index) =>
     entry.status === "fulfilled"
       ? entry.value
-      : channelFromRoom({ jid: mucRooms[index]!.jid ?? "", name: mucRooms[index]!.name }, index),
+      : channelFromRoom({ jid: roomItems[index]!.jid ?? "", name: roomItems[index]!.name }, index),
   );
+  const validSpaceIds = new Set(spaces.map((space) => space.id));
   rooms = hydrated.map((room, position) => {
     const bookmark = room.jid ? bookmarkedRooms.get(barePeerJid(room.jid)) : undefined;
+    const parentSpaceId = room.spaceId && validSpaceIds.has(room.spaceId) ? room.spaceId : undefined;
+    const { spaceId: _discardUnverifiedSpaceId, standalone: _discardUnverifiedStandalone, ...roomWithoutSpace } = room;
     return {
-      ...room,
+      ...roomWithoutSpace,
       position,
       ...(bookmark
         ? { spaceId: bookmark.spaceId, standalone: false, autojoin: bookmark.autojoin }
+        : parentSpaceId
+          ? { spaceId: parentSpaceId, standalone: false, autojoin: true }
         : { autojoin: true }),
     };
   });

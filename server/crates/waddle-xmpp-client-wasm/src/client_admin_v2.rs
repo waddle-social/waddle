@@ -13,8 +13,8 @@
 //!
 //! Channels (8):
 //! - `admin_channels_list` — paginated read with optional space filter.
-//! - `admin_channels_create` — name + optional topic / space / is_public.
-//! - `admin_channels_update` — patch name / topic / is_public.
+//! - `admin_channels_create` — name + optional topic / space / XEP-0045 visibility policy.
+//! - `admin_channels_update` — patch name / topic / XEP-0045 visibility policy.
 //! - `admin_channels_delete` — destroy a MUC room.
 //! - `admin_channels_occupants` — live occupancy snapshot.
 //! - `admin_channels_affiliations` — persistent affiliation list,
@@ -178,6 +178,9 @@ pub struct WaddleAdminChannelsCreateArgs {
     /// this through verbatim. The server enforces the same default
     /// when the field is absent.
     pub is_public: Option<bool>,
+    /// Optional XEP-0045 `muc#roomconfig_membersonly`; omitted lets the
+    /// server derive the default from `is_public`.
+    pub members_only: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -186,6 +189,7 @@ pub struct WaddleAdminChannelRef {
     pub name: String,
     pub topic: Option<String>,
     pub is_public: bool,
+    pub members_only: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -194,6 +198,7 @@ pub struct WaddleAdminChannelsUpdateArgs {
     pub name: Option<String>,
     pub topic: Option<String>,
     pub is_public: Option<bool>,
+    pub members_only: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -626,6 +631,9 @@ fn build_channels_create_iq(server_domain: &str, args: &WaddleAdminChannelsCreat
     if let Some(is_public) = args.is_public {
         form = form.append(boolean_field("is_public", is_public));
     }
+    if let Some(members_only) = args.members_only {
+        form = form.append(boolean_field("members_only", members_only));
+    }
     wrap_command_iq(server_domain, NS_ADMIN_CHANNELS_CREATE, form.build())
 }
 
@@ -640,6 +648,9 @@ fn build_channels_update_iq(server_domain: &str, args: &WaddleAdminChannelsUpdat
     }
     if let Some(is_public) = args.is_public {
         form = form.append(boolean_field("is_public", is_public));
+    }
+    if let Some(members_only) = args.members_only {
+        form = form.append(boolean_field("members_only", members_only));
     }
     wrap_command_iq(server_domain, NS_ADMIN_CHANNELS_UPDATE, form.build())
 }
@@ -868,6 +879,10 @@ fn parse_channel_ref_result(iq: &Element) -> Result<WaddleAdminChannelRef, JsVal
             top_level_field_text(form, "is_public").as_str(),
             "1" | "true"
         ),
+        members_only: matches!(
+            top_level_field_text(form, "members_only").as_str(),
+            "1" | "true"
+        ),
     })
 }
 
@@ -1071,6 +1086,7 @@ mod tests {
             topic: Some("All things".to_string()),
             space_jid: Some("eng@spaces.localhost".to_string()),
             is_public: Some(true),
+            members_only: Some(true),
         };
         let iq = build_channels_create_iq("localhost", &args);
         let form = iq
@@ -1086,6 +1102,7 @@ mod tests {
         assert!(var_names.contains(&"topic"));
         assert!(var_names.contains(&"space_jid"));
         assert!(var_names.contains(&"is_public"));
+        assert!(var_names.contains(&"members_only"));
     }
 
     #[test]

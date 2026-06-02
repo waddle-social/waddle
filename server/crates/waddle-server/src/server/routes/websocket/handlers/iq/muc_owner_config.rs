@@ -50,6 +50,9 @@ pub(super) async fn apply_muc_owner_config(
             if let Some(members_only) = data_form_bool(form, "muc#roomconfig_membersonly") {
                 config.members_only = members_only;
             }
+            if let Some(public_room) = data_form_bool(form, "muc#roomconfig_publicroom") {
+                config.public_room = public_room;
+            }
             if let Some(moderated) = data_form_bool(form, "muc#roomconfig_moderatedroom") {
                 config.moderated = moderated;
             }
@@ -87,16 +90,29 @@ pub(super) async fn apply_muc_owner_config(
     };
     let now = chrono::Utc::now().to_rfc3339();
     let actor = state.deps.app_state.db_pool.global_actor().clone();
+    let existing_channel_type = get_xmpp_channel(actor.clone(), &channel_id)
+        .await
+        .map_err(|error| format!("channel lookup failed: {error}"))?
+        .map(|channel| channel.channel_type);
+    let channel_type = if config.forum {
+        "forum".to_string()
+    } else if existing_channel_type.as_deref() == Some("announcement") {
+        "announcement".to_string()
+    } else {
+        "text".to_string()
+    };
     actor
         .ask(DbExecute {
             sql: r#"
-                INSERT INTO channels (id, name, description, channel_type, position, is_default, pin_permission, created_at, updated_at)
-                VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?)
+                INSERT INTO channels (id, name, description, channel_type, position, is_default, pin_permission, members_only, public_room, created_at, updated_at)
+                VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     name = excluded.name,
                     description = excluded.description,
                     channel_type = excluded.channel_type,
                     pin_permission = excluded.pin_permission,
+                    members_only = excluded.members_only,
+                    public_room = excluded.public_room,
                     updated_at = excluded.updated_at
             "#
             .to_string(),
@@ -104,8 +120,10 @@ pub(super) async fn apply_muc_owner_config(
                 channel_id.clone().into(),
                 config.name.into(),
                 config.description.into(),
-                (if config.forum { "forum" } else { "text" }).into(),
+                channel_type.into(),
                 config.pin_permission.as_form_value().into(),
+                config.members_only.into(),
+                config.public_room.into(),
                 now.clone().into(),
                 now.into(),
             ],

@@ -166,6 +166,33 @@ ALTER TABLE attachments
 ALTER COLUMN size_bytes TYPE BIGINT;
 "#;
 
+/// Persist the XEP-0045 members-only room policy used by admin-created
+/// channels. The room registry is a runtime materialization; restart recovery
+/// rebuilds rooms from the channel catalog and needs this field to preserve
+/// membership policy.
+pub const V1004_ADD_CHANNEL_MEMBERS_ONLY: &str = r#"
+ALTER TABLE channels
+ADD COLUMN members_only INTEGER NOT NULL DEFAULT 1;
+"#;
+
+pub const V1004_ADD_CHANNEL_MEMBERS_ONLY_POSTGRES: &str = r#"
+ALTER TABLE channels
+ADD COLUMN IF NOT EXISTS members_only INTEGER NOT NULL DEFAULT 1;
+"#;
+
+/// Persist the independent XEP-0045 public-room discovery visibility bit.
+/// Public visibility is not the same as membership policy: a room can be
+/// visible in MUC disco while still requiring membership to enter.
+pub const V1005_ADD_CHANNEL_PUBLIC_ROOM: &str = r#"
+ALTER TABLE channels
+ADD COLUMN public_room INTEGER NOT NULL DEFAULT 1;
+"#;
+
+pub const V1005_ADD_CHANNEL_PUBLIC_ROOM_POSTGRES: &str = r#"
+ALTER TABLE channels
+ADD COLUMN IF NOT EXISTS public_room INTEGER NOT NULL DEFAULT 1;
+"#;
+
 /// Get all waddle schema migrations in order.
 ///
 /// Versions are intentionally offset from global migrations so a single
@@ -189,6 +216,18 @@ pub fn all() -> Vec<Migration> {
             description: "Widen attachment sizes to bigint on Postgres".to_string(),
             sql_sqlite: V1003_ATTACHMENT_SIZES_BIGINT,
             sql_postgres: V1003_ATTACHMENT_SIZES_BIGINT_POSTGRES,
+        },
+        Migration {
+            version: 1004,
+            description: "Persist channel members-only policy".to_string(),
+            sql_sqlite: V1004_ADD_CHANNEL_MEMBERS_ONLY,
+            sql_postgres: V1004_ADD_CHANNEL_MEMBERS_ONLY_POSTGRES,
+        },
+        Migration {
+            version: 1005,
+            description: "Persist channel public-room discovery visibility".to_string(),
+            sql_sqlite: V1005_ADD_CHANNEL_PUBLIC_ROOM,
+            sql_postgres: V1005_ADD_CHANNEL_PUBLIC_ROOM_POSTGRES,
         },
     ]
 }

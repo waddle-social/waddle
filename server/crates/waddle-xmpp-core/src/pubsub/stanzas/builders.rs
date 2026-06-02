@@ -3,7 +3,7 @@ use minidom::Element;
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::{Message, MessageType};
 
-use crate::pubsub::{Affiliation, NodeConfig, SubId};
+use crate::pubsub::{Affiliation, NodeConfig, SubId, Subscription, SubscriptionState};
 
 use super::{
     PubSubError, PubSubEvent, PubSubItem, NS_PUBSUB, NS_PUBSUB_ERRORS, NS_PUBSUB_EVENT,
@@ -202,6 +202,48 @@ pub fn build_pubsub_affiliations_result(
     }
     let pubsub = Element::builder("pubsub", NS_PUBSUB_OWNER)
         .append(affs.build())
+        .build();
+    Iq::Result {
+        from: original_iq.to().cloned(),
+        to: original_iq.from().cloned(),
+        id: original_iq.id().to_string(),
+        payload: Some(pubsub),
+    }
+}
+
+/// Build a `<subscriptions/>` owner result for XEP-0060 §8.8.
+pub fn build_pubsub_owner_subscriptions_result(
+    original_iq: &Iq,
+    node: &str,
+    rows: &[Subscription],
+) -> Iq {
+    let mut subscriptions = Element::builder("subscriptions", NS_PUBSUB_OWNER)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node);
+    for row in rows.iter().filter(|row| {
+        matches!(
+            row.state,
+            SubscriptionState::Subscribed | SubscriptionState::Unconfigured
+        )
+    }) {
+        subscriptions = subscriptions.append(
+            Element::builder("subscription", NS_PUBSUB_OWNER)
+                .attr(
+                    minidom::rxml::xml_ncname!("jid").to_owned(),
+                    row.subscriber.to_string(),
+                )
+                .attr(
+                    minidom::rxml::xml_ncname!("subscription").to_owned(),
+                    row.state.to_string(),
+                )
+                .attr(
+                    minidom::rxml::xml_ncname!("subid").to_owned(),
+                    row.subid.to_string(),
+                )
+                .build(),
+        );
+    }
+    let pubsub = Element::builder("pubsub", NS_PUBSUB_OWNER)
+        .append(subscriptions.build())
         .build();
     Iq::Result {
         from: original_iq.to().cloned(),

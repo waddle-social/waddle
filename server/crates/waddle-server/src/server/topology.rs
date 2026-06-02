@@ -3,7 +3,7 @@ use crate::permissions::{
     Object, ObjectType, PermissionError, Relation, Subject, SubjectType, Tuple, WriteTuple,
 };
 use crate::server::routes::websocket::XmppServiceDomains;
-use crate::server::xmpp_channels::get_xmpp_channel;
+use crate::server::xmpp_channels::{get_xmpp_channel, list_xmpp_channels};
 use crate::server::AppState;
 use anyhow::Result;
 use jid::BareJid;
@@ -110,7 +110,6 @@ async fn seed_initial_xmpp_topology(
             })
             .await
             .map_err(|error| anyhow::anyhow!("failed to seed channel {}: {error}", channel.id))?;
-        write_channel_parent_tuple(state, channel.id, "general").await?;
     }
 
     pubsub_storage
@@ -199,12 +198,11 @@ async fn seed_initial_xmpp_topology(
             })?;
     }
 
-    for channel in INITIAL_MANAGED_CHANNELS {
-        let channel_record = get_xmpp_channel(actor.clone(), channel.id)
-            .await
-            .map_err(|error| anyhow::anyhow!("failed to load channel {}: {error}", channel.id))?
-            .ok_or_else(|| anyhow::anyhow!("seeded channel {} is missing", channel.id))?;
-        let room_jid = waddle_xmpp::managed_room_jid(channel.id, &services.muc)
+    let persisted_channels = list_xmpp_channels(actor.clone(), 10_000, 0)
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to load persisted channels: {error}"))?;
+    for channel_record in &persisted_channels {
+        let room_jid = waddle_xmpp::managed_room_jid(&channel_record.id, &services.muc)
             .map_err(|error| anyhow::anyhow!("invalid seeded room JID: {error}"))?;
         room_registry
             .ask(GetOrCreateRoom {
@@ -214,7 +212,8 @@ async fn seed_initial_xmpp_topology(
                 config: RoomConfig {
                     name: channel_record.name.clone(),
                     description: channel_record.description.clone(),
-                    members_only: true,
+                    members_only: channel_record.members_only,
+                    public_room: channel_record.public_room,
                     moderated: channel_record.channel_type == "announcement",
                     forum: channel_record.channel_type == "forum",
                     pin_permission: channel_record.pin_permission,
@@ -225,9 +224,18 @@ async fn seed_initial_xmpp_topology(
             .map_err(|error| {
                 anyhow::anyhow!(
                     "failed to create managed room actor for {}: {error}",
-                    channel.id
+                    channel_record.id
                 )
             })?;
+    }
+
+    for channel in INITIAL_MANAGED_CHANNELS {
+        let channel_record = get_xmpp_channel(actor.clone(), channel.id)
+            .await
+            .map_err(|error| anyhow::anyhow!("failed to load channel {}: {error}", channel.id))?
+            .ok_or_else(|| anyhow::anyhow!("seeded channel {} is missing", channel.id))?;
+        let room_jid = waddle_xmpp::managed_room_jid(channel.id, &services.muc)
+            .map_err(|error| anyhow::anyhow!("invalid seeded room JID: {error}"))?;
         let item_id = room_jid.to_string();
         // XEP-0503 single-space-membership: only seed the channel
         // into General if it's not already pinned to ANY space.
@@ -261,6 +269,7 @@ async fn seed_initial_xmpp_topology(
                 .map_err(|error| {
                     anyhow::anyhow!("failed to publish {} bookmark: {error}", channel.name)
                 })?;
+            write_channel_parent_tuple(state, channel.id, "general").await?;
         }
     }
 

@@ -70,17 +70,20 @@ pub async fn handle_muc_join(
             }
             Ok(Some(affiliation)) => Some(affiliation),
             Ok(None) => {
-                return vec![build_muc_presence_error_xml(
-                    room_jid,
-                    nick,
-                    sender_jid,
-                    StanzaError::new(
-                        ErrorType::Auth,
-                        DefinedCondition::RegistrationRequired,
-                        "en",
-                        "Membership required to join managed channel.",
-                    ),
-                )];
+                if channel.members_only {
+                    return vec![build_muc_presence_error_xml(
+                        room_jid,
+                        nick,
+                        sender_jid,
+                        StanzaError::new(
+                            ErrorType::Auth,
+                            DefinedCondition::RegistrationRequired,
+                            "en",
+                            "Membership required to join managed channel.",
+                        ),
+                    )];
+                }
+                Some(Affiliation::None)
             }
             Err(()) => {
                 return vec![build_muc_presence_error_xml(
@@ -131,7 +134,8 @@ pub async fn handle_muc_join(
                 .map(|channel| RoomConfig {
                     name: channel.name.clone(),
                     description: channel.description.clone(),
-                    members_only: true,
+                    members_only: channel.members_only,
+                    public_room: channel.public_room,
                     moderated: channel.channel_type == "announcement",
                     forum: channel.channel_type == "forum",
                     // #422: load persisted pin policy so the actor's

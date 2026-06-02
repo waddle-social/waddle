@@ -14,6 +14,10 @@ import { useSocialFeed } from "@/services/social-feed";
 import { useStories } from "@/services/stories";
 import { useCommunityEvents } from "@/services/community-events";
 import { useChatReadActivity } from "@/shell/read-activity";
+import {
+  shouldPreserveActiveChannelDuringStructureRetry,
+  shouldRetryMissingStructureLoad,
+} from "@/shell/structure-retry";
 import { useDeploymentVersionInfo } from "@/shell/version";
 import { useXmppRosterContacts } from "@/contacts/roster";
 import { matchLocation, navigate, type RouteMatch } from "@/router";
@@ -1503,6 +1507,7 @@ export function useChatAppController(giphyApiKey: string) {
     // is just to invoke it with the new URL and manage the
     // `isApplyingRoute` lifecycle.
     const match = matchLocation(window.location.pathname, window.location.search);
+    pendingChannelRouteMatch = null;
     const requestId = ++routeRequestId;
     isApplyingRoute.value = true;
     void applyRouteTarget(match, requestId).finally(() => {
@@ -1617,10 +1622,93 @@ export function useChatAppController(giphyApiKey: string) {
 
   // --- Bootstrap (watches connection store) ---
 
+  let initialStructureLoadFinished = false;
+  let missingStructureOnlineEpoch = messaging.xmppStatus.value.state === "online" ? 1 : 0;
+  let lastMissingStructureRefreshEpoch = 0;
+  let missingStructureRefreshPromise: Promise<void> | null = null;
+  let pendingChannelRouteMatch: RouteMatch | null = null;
+
+  function routeNeedsDiscoveredChannel(match: RouteMatch): boolean {
+    return match.id === "channel" || match.id === "channelExtension";
+  }
+
+  function channelRouteTargetMissing(match: RouteMatch): boolean {
+    if (match.id !== "channel" && match.id !== "channelExtension") return false;
+    return resolveChannelBySlug(match.params.channelId, waddles.channels.value) === null;
+  }
+
+  async function applyPendingChannelRouteAfterStructure() {
+    if (!pendingChannelRouteMatch || waddles.channels.value.length === 0) return;
+    const match = matchLocation(window.location.pathname, window.location.search);
+    if (!routeNeedsDiscoveredChannel(match)) {
+      pendingChannelRouteMatch = null;
+      return;
+    }
+    if (channelRouteTargetMissing(match)) return;
+    pendingChannelRouteMatch = null;
+    const requestId = ++routeRequestId;
+    isApplyingRoute.value = true;
+    try {
+      await refreshExtensionRoutes();
+      if (requestId === routeRequestId) {
+        await applyRouteTarget(match, requestId);
+      }
+    } finally {
+      if (requestId === routeRequestId) {
+        isApplyingRoute.value = false;
+        updateUrl();
+      }
+    }
+  }
+
+  async function refreshMissingStructureAfterReconnect() {
+    const retryEpoch = missingStructureOnlineEpoch;
+    const currentMatch = matchLocation(window.location.pathname, window.location.search);
+    const routeTargetMissing = channelRouteTargetMissing(currentMatch);
+    pendingChannelRouteMatch = routeTargetMissing ? currentMatch : null;
+    if (!shouldRetryMissingStructureLoad({
+      appReady: connectionStore.appState === "ready",
+      hasClient: xmppClient.value !== null,
+      initialLoadFinished: initialStructureLoadFinished,
+      inFlight: missingStructureRefreshPromise !== null,
+      isLoadingStructure: waddles.isLoadingStructure.value,
+      spaceCount: waddles.waddles.value.length,
+      channelCount: waddles.channels.value.length,
+      routeTargetMissing,
+      xmppStatus: messaging.xmppStatus.value.state,
+      onlineEpoch: retryEpoch,
+      lastAttemptedOnlineEpoch: lastMissingStructureRefreshEpoch,
+    })) {
+      return;
+    }
+
+    lastMissingStructureRefreshEpoch = retryEpoch;
+    const activeChannelId = waddles.activeChannelId.value;
+    const preserveActiveChannel = shouldPreserveActiveChannelDuringStructureRetry({
+      activeChannelListed: activeChannelId !== null && waddles.channels.value.some((channel) => channel.id === activeChannelId),
+      routeTargetMissing,
+    });
+    const promise = (
+      preserveActiveChannel
+        ? waddles.loadStructure(activeChannelId)
+        : waddles.loadStructure(null, { noChannelSelect: true })
+    ).then(() => undefined);
+    missingStructureRefreshPromise = promise;
+    try {
+      await promise;
+      await applyPendingChannelRouteAfterStructure();
+    } finally {
+      if (missingStructureRefreshPromise === promise) {
+        missingStructureRefreshPromise = null;
+      }
+    }
+  }
+
   async function onConnectionReady() {
     const match = matchLocation(window.location.pathname, window.location.search);
     const requestId = ++routeRequestId;
     isApplyingRoute.value = true;
+    let preserveCurrentUrl = false;
 
     try {
       // Always pass noChannelSelect — channel-targeting routes
@@ -1630,18 +1718,33 @@ export function useChatAppController(giphyApiKey: string) {
       // would briefly highlight an arbitrary channel before
       // applyRouteTarget cleared it (visible flicker on /events, /feed,
       // /stories, /threads, …).
-      if (waddles.channels.value.length === 0) {
-        await waddles.loadStructure(null, { noChannelSelect: true });
+      try {
+        if (waddles.channels.value.length === 0) {
+          await waddles.loadStructure(null, { noChannelSelect: true });
+        }
+      } finally {
+        initialStructureLoadFinished = true;
       }
-      await refreshExtensionRoutes();
-      if (requestId === routeRequestId) {
+      if (channelRouteTargetMissing(match)) {
+        pendingChannelRouteMatch = match;
+      }
+      await refreshMissingStructureAfterReconnect();
+      if (channelRouteTargetMissing(match)) {
+        pendingChannelRouteMatch = match;
+        preserveCurrentUrl = true;
+      } else {
+        await refreshExtensionRoutes();
+      }
+      if (!preserveCurrentUrl && requestId === routeRequestId) {
         await applyRouteTarget(match, requestId);
       }
       showFirstRunSetupIfNeeded();
     } finally {
       if (requestId === routeRequestId) {
         isApplyingRoute.value = false;
-        updateUrl();
+        if (!preserveCurrentUrl) {
+          updateUrl();
+        }
       }
     }
 
@@ -1908,6 +2011,16 @@ export function useChatAppController(giphyApiKey: string) {
       }
     },
     { immediate: true },
+  );
+
+  watch(
+    () => messaging.xmppStatus.value.state,
+    (state, previousState) => {
+      if (state === "online" && previousState !== "online") {
+        missingStructureOnlineEpoch += 1;
+        void refreshMissingStructureAfterReconnect();
+      }
+    },
   );
 
   onMounted(() => {

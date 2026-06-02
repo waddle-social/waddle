@@ -221,7 +221,7 @@ fn parse_configure_set_keeps_partial_fields_partial() {
 }
 
 #[test]
-fn parse_owner_subscriptions_as_unsupported_manage_subscriptions() {
+fn parse_owner_subscriptions_get() {
     let subscriptions = Element::builder("subscriptions", NS_PUBSUB_OWNER)
         .attr(minidom::rxml::xml_ncname!("node").to_owned(), "space")
         .build();
@@ -234,10 +234,60 @@ fn parse_owner_subscriptions_as_unsupported_manage_subscriptions() {
     let request = parse_pubsub_iq(&iq).expect("should parse unsupported feature");
 
     match request {
-        PubSubRequest::Unsupported { feature } => {
-            assert_eq!(feature, PubSubUnsupportedFeature::ManageSubscriptions);
+        PubSubRequest::OwnerSubscriptionsGet { node } => {
+            assert_eq!(node, "space");
         }
-        other => panic!("Expected unsupported feature request, got {other:?}"),
+        other => panic!("Expected owner subscriptions get request, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_owner_subscriptions_set() {
+    let subscriptions = Element::builder("subscriptions", NS_PUBSUB_OWNER)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), "space")
+        .append(
+            Element::builder("subscription", NS_PUBSUB_OWNER)
+                .attr(
+                    minidom::rxml::xml_ncname!("jid").to_owned(),
+                    "alice@example.com",
+                )
+                .attr(
+                    minidom::rxml::xml_ncname!("subscription").to_owned(),
+                    "subscribed",
+                )
+                .build(),
+        )
+        .append(
+            Element::builder("subscription", NS_PUBSUB_OWNER)
+                .attr(
+                    minidom::rxml::xml_ncname!("jid").to_owned(),
+                    "bob@example.com",
+                )
+                .attr(
+                    minidom::rxml::xml_ncname!("subscription").to_owned(),
+                    "none",
+                )
+                .attr(minidom::rxml::xml_ncname!("subid").to_owned(), "sub-1")
+                .build(),
+        )
+        .build();
+    let iq = iq_with_payload(
+        "subs-set",
+        Some("owner@example.com"),
+        None,
+        TestIqPayload::Set(pubsub_payload(NS_PUBSUB_OWNER, [subscriptions])),
+    );
+    let request = parse_pubsub_iq(&iq).expect("should parse owner subscriptions set");
+
+    match request {
+        PubSubRequest::OwnerSubscriptionsSet { node, changes } => {
+            assert_eq!(node, "space");
+            assert_eq!(changes.len(), 2);
+            assert_eq!(changes[0].1, SubscriptionState::Subscribed);
+            assert_eq!(changes[1].1, SubscriptionState::None);
+            assert_eq!(changes[1].2.as_deref(), Some("sub-1"));
+        }
+        other => panic!("Expected owner subscriptions set request, got {other:?}"),
     }
 }
 
