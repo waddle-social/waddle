@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { effectScope, nextTick, ref } from "vue";
 import {
   composerLinkPreviewUrl,
@@ -6,7 +7,8 @@ import {
   linkPreviewStateFromLookup,
   sendPayloadFromState,
 } from "../src/lib/link-preview-composer";
-import { useComposerLinkPreview } from "../src/lib/use-composer-link-preview";
+import { prepareComposerSendEvent } from "../src/lib/composer-send-preparation";
+import { SEND_LOOKUP_GRACE_MS, useComposerLinkPreview } from "../src/lib/use-composer-link-preview";
 import type { LinkPreviewLookupResult } from "../src/lib/xmpp/link-preview";
 
 describe("composer link preview state", () => {
@@ -238,6 +240,53 @@ describe("composer link preview state", () => {
     h.stop();
   });
 
+  test("sendPayloadFor keeps the send-time preview when the draft changes while waiting", async () => {
+    const resolvers: Array<(result: LinkPreviewLookupResult) => void> = [];
+    const h = setupComposerPreviewHarness(() => (
+      new Promise<LinkPreviewLookupResult>((resolve) => resolvers.push(resolve))
+    ));
+
+    await nextTick();
+    expect(h.preview.state.value).toEqual({ kind: "loading", url: "https://example.com/a" });
+
+    const payloadPromise = h.preview.sendPayloadFor("read https://example.com/a");
+    h.draft.value = "read https://other.example/a";
+    await nextTick();
+    expect(resolvers).toHaveLength(2);
+    expect(h.preview.state.value).toEqual({ kind: "loading", url: "https://other.example/a" });
+
+    resolvers[0]?.(readyLookup("token-a"));
+    await flushComposerPreview();
+    expect(h.preview.state.value).toEqual({ kind: "loading", url: "https://other.example/a" });
+
+    expect(await payloadPromise).toEqual({
+      token: "token-a",
+      expiresAt: "2999-01-01T00:00:00.000Z",
+      preview: {
+        originalUrl: "https://example.com/a",
+        normalizedUrl: "https://example.com/a",
+        title: "Example",
+      },
+    });
+
+    resolvers[1]?.(readyLookup("token-b", "https://other.example/a"));
+    await flushComposerPreview();
+    expect(h.preview.state.value).toEqual({
+      kind: "ready",
+      url: "https://other.example/a",
+      payload: {
+        token: "token-b",
+        expiresAt: "2999-01-01T00:00:00.000Z",
+        preview: {
+          originalUrl: "https://other.example/a",
+          normalizedUrl: "https://other.example/a",
+          title: "Example",
+        },
+      },
+    });
+    h.stop();
+  });
+
   test("sendPayloadFor ignores in-flight metadata for a different body URL", async () => {
     const resolvers: Array<(result: LinkPreviewLookupResult) => void> = [];
     const h = setupComposerPreviewHarness(() => (
@@ -251,6 +300,93 @@ describe("composer link preview state", () => {
     resolvers[0]?.(readyLookup("token-a"));
     await flushComposerPreview();
     h.stop();
+  });
+
+  test("sendPayloadFor fails open when the active lookup never settles", async () => {
+    const h = setupComposerPreviewHarness(() => new Promise<never>(() => {}));
+
+    await nextTick();
+    const timers = installFakeTimeouts();
+
+    try {
+      let settled = false;
+      const payloadPromise = h.preview.sendPayloadFor("read https://example.com/a").then((payload) => {
+        settled = true;
+        return payload;
+      });
+
+      await Promise.resolve();
+      expect(timers.delays).toEqual([SEND_LOOKUP_GRACE_MS]);
+      expect(settled).toBe(false);
+
+      timers.runNext();
+      expect(await payloadPromise).toBeUndefined();
+      expect(settled).toBe(true);
+    } finally {
+      timers.restore();
+      h.stop();
+    }
+  });
+
+  test("prepareComposerSendEvent forwards the awaited preview payload with the send body", async () => {
+    let resolvePreview: (payload: LinkPreviewLookupResult) => void = () => {};
+    const bodies: string[] = [];
+    const file = new Blob(["hello"], { type: "text/plain" });
+    const serialized = {
+      body: "read https://example.com/a",
+      markup: [{ type: "span" as const, start: 0, end: 4, styles: ["strong" as const] }],
+      references: [{ type: "data", uri: "https://example.com/a", begin: 5, end: 26 }],
+    };
+
+    const preparedPromise = prepareComposerSendEvent({
+      serialized,
+      files: [file],
+      linkPreviewForBody: async (body) => {
+        bodies.push(body);
+        const lookup = await new Promise<LinkPreviewLookupResult>((resolve) => {
+          resolvePreview = resolve;
+        });
+        return linkPreviewPayloadFromLookup(lookup) ?? undefined;
+      },
+    });
+
+    await Promise.resolve();
+    expect(bodies).toEqual(["read https://example.com/a"]);
+
+    resolvePreview(readyLookup("token-a"));
+
+    expect(await preparedPromise).toEqual({
+      ...serialized,
+      files: [file],
+      linkPreview: {
+        token: "token-a",
+        expiresAt: "2999-01-01T00:00:00.000Z",
+        preview: {
+          originalUrl: "https://example.com/a",
+          normalizedUrl: "https://example.com/a",
+          title: "Example",
+        },
+      },
+    });
+  });
+
+  test("MessageComposer disables mutable controls while preparing a send", () => {
+    const source = readFileSync(
+      new URL("../src/components/chat/MessageComposer.vue", import.meta.url),
+      "utf8",
+    );
+
+    expect(source).toContain(":disabled=\"disabled || isSendBusy\"");
+    expect(source).toContain(":disabled=\"disabled || slowModeCooldown > 0 || isPreparingSend\"");
+    expect(source).toContain("prepareComposerSendEvent({");
+    expect(source).toContain("linkPreviewForBody: linkPreview.sendPayloadFor");
+    expect(source).toContain("prepared.linkPreview");
+    expect(source).toContain("if (action === \"cancel-reply\" && !isPreparingSend.value)");
+    expect(source).toContain("function addAttachments(files: Array<File | Blob>) {\n  if (isPreparingSend.value) return;");
+    expect(source).toContain("function onGifSelected(url: string) {\n  if (isPreparingSend.value) return;");
+    expect(source).toContain("watch(isPreparingSend, (preparing) => {\n  if (preparing) showGifPicker.value = false;");
+    expect(source.match(/:disabled="disabled \|\| isPreparingSend"/g)?.length ?? 0).toBeGreaterThanOrEqual(4);
+    expect(source.match(/:disabled="isPreparingSend"/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
   });
 });
 
@@ -274,12 +410,12 @@ function setupComposerPreviewHarness(
   };
 }
 
-function readyLookup(token: string): LinkPreviewLookupResult {
+function readyLookup(token: string, url = "https://example.com/a"): LinkPreviewLookupResult {
   return {
     status: "ready",
     token,
-    originalUrl: "https://example.com/a",
-    normalizedUrl: "https://example.com/a",
+    originalUrl: url,
+    normalizedUrl: url,
     expiresAt: "2999-01-01T00:00:00.000Z",
     title: "Example",
   };
@@ -288,4 +424,38 @@ function readyLookup(token: string): LinkPreviewLookupResult {
 async function flushComposerPreview() {
   await Promise.resolve();
   await nextTick();
+}
+
+function installFakeTimeouts() {
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  const delays: number[] = [];
+  const pending = new Map<number, () => void>();
+  let nextId = 1;
+
+  globalThis.setTimeout = ((handler: (...args: unknown[]) => void, timeout?: number, ...args: unknown[]) => {
+    const id = nextId++;
+    delays.push(timeout ?? 0);
+    pending.set(id, () => handler(...args));
+    return id as unknown as ReturnType<typeof setTimeout>;
+  }) as typeof setTimeout;
+
+  globalThis.clearTimeout = ((id?: Parameters<typeof clearTimeout>[0]) => {
+    pending.delete(id as unknown as number);
+  }) as typeof clearTimeout;
+
+  return {
+    delays,
+    runNext() {
+      const id = pending.keys().next().value as number | undefined;
+      if (id === undefined) return;
+      const callback = pending.get(id);
+      pending.delete(id);
+      callback?.();
+    },
+    restore() {
+      globalThis.setTimeout = originalSetTimeout;
+      globalThis.clearTimeout = originalClearTimeout;
+    },
+  };
 }

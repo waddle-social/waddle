@@ -16,6 +16,7 @@ import { filterSlashCandidates, resolveSlashCommand } from "@/lib/slash-match";
 import { buildSlashInvocation, type SlashInvocation } from "@/lib/slash-dispatch";
 import type { DiscoveredExtensionCommand } from "@/lib/xmpp/extension-commands";
 import { useComposerLinkPreview } from "@/lib/use-composer-link-preview";
+import { prepareComposerSendEvent } from "@/lib/composer-send-preparation";
 import type { ComposerLinkPreviewLookup, ComposerLinkPreviewSendPayload } from "@/lib/link-preview-composer";
 import {
   isAudioFile,
@@ -138,6 +139,7 @@ function formatFileSize(bytes: number): string {
 }
 
 function addAttachments(files: Array<File | Blob>) {
+  if (isPreparingSend.value) return;
   const next = pendingAttachments.value.slice();
   for (const file of files) {
     const name = attachmentName(file);
@@ -468,15 +470,19 @@ async function onSend(doc: JSONContent) {
       pendingAttachments.value = [];
       for (const a of attachments) URL.revokeObjectURL(a.previewUrl);
     }
-    const previewPayload = await linkPreview.sendPayloadFor(serialized.body);
+    const prepared = await prepareComposerSendEvent({
+      serialized,
+      files,
+      linkPreviewForBody: linkPreview.sendPayloadFor,
+    });
 
     emit(
       "send",
-      serialized.body,
-      serialized.markup,
-      serialized.references,
-      files.length > 0 ? files : undefined,
-      previewPayload,
+      prepared.body,
+      prepared.markup,
+      prepared.references,
+      prepared.files,
+      prepared.linkPreview,
     );
   } finally {
     isPreparingSend.value = false;
@@ -499,6 +505,10 @@ function openFilePicker() {
 
 function onFileInputChange(e: Event) {
   const input = e.target as HTMLInputElement | null;
+  if (isPreparingSend.value) {
+    if (input) input.value = "";
+    return;
+  }
   if (!input?.files?.length) return;
   addAttachments(Array.from(input.files));
   input.value = "";
@@ -523,7 +533,7 @@ function onEditorCancel() {
     return;
   }
 
-  if (action === "cancel-reply") {
+  if (action === "cancel-reply" && !isPreparingSend.value) {
     emit("cancelReply");
   }
 }
@@ -559,6 +569,7 @@ function onKeydown(e: KeyboardEvent) {
 }
 
 function onGifSelected(url: string) {
+  if (isPreparingSend.value) return;
   showGifPicker.value = false;
   emit("selectGif", url);
 }
@@ -581,6 +592,10 @@ watch(
     }
   },
 );
+
+watch(isPreparingSend, (preparing) => {
+  if (preparing) showGifPicker.value = false;
+});
 
 </script>
 
@@ -617,6 +632,7 @@ watch(
           class="ml-auto h-8 w-8 flex items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
           title="Cancel reply"
           aria-label="Cancel reply"
+          :disabled="isPreparingSend"
           @click="emit('cancelReply')"
         >
           <X class="w-3.5 h-3.5" />
@@ -646,6 +662,7 @@ watch(
           class="h-8 w-8 flex items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
           title="Remove preview"
           aria-label="Remove preview"
+          :disabled="isPreparingSend"
           @click="linkPreview.dismiss"
         >
           <X class="h-3.5 w-3.5" aria-hidden="true" />
@@ -663,7 +680,7 @@ watch(
           v-model="forumTitle"
           type="text"
           class="type-card-title w-full bg-transparent placeholder:text-muted-foreground/45 focus:outline-none"
-          :disabled="disabled || isSending"
+          :disabled="disabled || isSendBusy"
           placeholder="Add a clear title"
           aria-label="Topic title"
         />
@@ -871,6 +888,7 @@ watch(
         type="file"
         multiple
         class="hidden"
+        :disabled="disabled || isPreparingSend"
         @change="onFileInputChange"
       />
       <!-- LEFT cluster: content-add actions (attach, GIF). The picker
@@ -882,7 +900,7 @@ watch(
         class="chat-composer-input-action h-9 w-9 shrink-0 flex items-center justify-center transition-all duration-200 text-muted-foreground hover:bg-background/70 hover:text-primary active:scale-[0.94] disabled:opacity-40 disabled:active:scale-100 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
         title="Attach files"
         aria-label="Attach files"
-        :disabled="disabled"
+        :disabled="disabled || isPreparingSend"
         @click="openFilePicker"
       >
         <Paperclip class="w-4 h-4" aria-hidden="true" />
@@ -894,7 +912,7 @@ watch(
         title="Search GIFs"
         aria-label="Search GIFs"
         :aria-expanded="showGifPicker"
-        :disabled="disabled"
+        :disabled="disabled || isPreparingSend"
         @click="showGifPicker = !showGifPicker"
       >
         <span class="chat-composer-gif-badge" aria-hidden="true">GIF</span>
@@ -904,7 +922,7 @@ watch(
         class="min-w-0"
         embedded
         :placeholder="editorPlaceholder"
-        :disabled="disabled || slowModeCooldown > 0"
+        :disabled="disabled || slowModeCooldown > 0 || isPreparingSend"
         @send="onSend"
         @update="onEditorUpdate"
         @selection-update="checkAutocompleteFromEditor"
@@ -922,7 +940,7 @@ watch(
         title="Extensions"
         aria-label="Extensions"
         :aria-expanded="extensionsOpen"
-        :disabled="disabled"
+        :disabled="disabled || isPreparingSend"
         @click="emit('openExtensions')"
       >
         <Puzzle class="w-4 h-4" aria-hidden="true" />
