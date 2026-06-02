@@ -6,9 +6,10 @@ use waddle_xmpp::{
     protocol::handlers::errors::bad_request_reply,
     protocol::{frame::InboundFrame, InboundEvent, XmppStateMachine},
     xep::{
-        add_reference, build_link_metadata_element, decode_link_preview_token,
-        extract_link_preview_request_from_message, parse_fallbacks_from_message,
-        strip_fallback_ranges, strip_link_metadata, strip_link_preview_requests, FallbackRegion,
+        add_reference, build_file_sharing_element, build_link_metadata_element,
+        decode_link_preview_token, extract_link_preview_request_from_message,
+        parse_fallbacks_from_message, strip_fallback_ranges, strip_link_metadata,
+        strip_link_preview_requests, Disposition, FallbackRegion, FileMetadata, FileSharing,
         LinkMetadata, Reference, WaddleLinkPreviewError, NS_DELAY, NS_REPLY,
     },
     Stanza,
@@ -156,6 +157,24 @@ fn consume_link_preview_request(
                 && first_eligible_https_url(message).as_ref() == Some(&preview.original_url)
         })
         .map(|preview| {
+            // Direct-video preview source is a remote URL already validated by
+            // the token/host policy above. It is stamped as a conformant
+            // XEP-0447 inline file-share; the client plays it on user action.
+            let video_sharing = preview
+                .video
+                .filter(|video| {
+                    link_preview_url_allowed_by_current_policy(&video.url, link_preview)
+                })
+                .map(|video| {
+                    let mut file = FileMetadata::new().with_media_type(video.media_type.as_str());
+                    if let Some(size) = video.size {
+                        file = file.with_size(size);
+                    }
+                    FileSharing::new(file)
+                        .with_url(video.url.as_str())
+                        .with_disposition(Disposition::Inline)
+                });
+
             let mut metadata =
                 LinkMetadata::new(preview.original_url).with_canonical_url(preview.normalized_url);
             if let Some(title) = preview.title {
@@ -178,14 +197,19 @@ fn consume_link_preview_request(
                 }
                 metadata = metadata.with_image(preview_image);
             }
-            metadata
+            (metadata, video_sharing)
         });
     strip_link_preview_requests(message);
     strip_link_metadata(message);
-    if let Some(metadata) = metadata {
+    if let Some((metadata, video_sharing)) = metadata {
         message
             .payloads
             .push(build_link_metadata_element(&metadata));
+        if let Some(video_sharing) = video_sharing {
+            message
+                .payloads
+                .push(build_file_sharing_element(&video_sharing));
+        }
     }
 }
 
@@ -475,6 +499,101 @@ mod tests {
         assert_eq!(
             references[0].ref_type,
             waddle_xmpp::xep::ReferenceType::Data
+        );
+    }
+
+    fn direct_video_preview_token() -> waddle_xmpp::xep::LinkPreviewTokenData {
+        waddle_xmpp::xep::LinkPreviewTokenData {
+            sender_jid: "alice@example.com".parse().expect("jid"),
+            scope_jid: "room@muc.example.com".parse().expect("jid"),
+            original_url: url::Url::parse("https://cdn.example.com/clip.mp4").expect("url"),
+            normalized_url: url::Url::parse("https://cdn.example.com/clip.mp4").expect("url"),
+            title: None,
+            description: None,
+            image: None,
+            video: Some(waddle_xmpp::xep::LinkPreviewTokenVideo {
+                url: url::Url::parse("https://cdn.example.com/clip.mp4").expect("url"),
+                media_type: waddle_xmpp_core::DirectVideoMediaType::Mp4,
+                size: Some(4096),
+            }),
+            expires_at_unix: 1_900_000_000,
+        }
+    }
+
+    fn message_with_direct_video_request(
+        preview: &waddle_xmpp::xep::LinkPreviewTokenData,
+    ) -> Message {
+        let token = waddle_xmpp::xep::encode_link_preview_token(preview, SECRET);
+        let mut message = Message::new(None::<jid::Jid>);
+        message.to = Some("room@muc.example.com".parse().expect("jid"));
+        message.bodies.insert(
+            xmpp_parsers::message::Lang::new(),
+            "watch https://cdn.example.com/clip.mp4".to_string(),
+        );
+        message
+            .payloads
+            .push(waddle_xmpp::xep::build_link_preview_request_element(&token));
+        message
+    }
+
+    #[test]
+    fn consumes_direct_video_request_and_stamps_xep0447_inline_file_sharing() {
+        let preview = direct_video_preview_token();
+        let mut message = message_with_direct_video_request(&preview);
+
+        consume_link_preview_request(
+            &mut message,
+            &sender(),
+            SECRET,
+            1_800_000_000,
+            "https://waddle.example",
+            &LinkPreviewConfig::default(),
+        );
+
+        let sharing = waddle_xmpp::xep::extract_file_sharing_from_message(&message)
+            .expect("XEP-0447 file-sharing stamped for trusted direct video");
+        assert!(sharing.is_inline(), "direct video preview is inline");
+        assert_eq!(sharing.metadata.media_type.as_deref(), Some("video/mp4"));
+        assert_eq!(sharing.metadata.size, Some(4096));
+        assert_eq!(
+            sharing.first_url(),
+            Some("https://cdn.example.com/clip.mp4")
+        );
+
+        // XEP-0511 link metadata is stamped alongside the direct-media element.
+        let parsed = waddle_xmpp::xep::extract_link_metadata_from_message(&message);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].about, preview.original_url);
+    }
+
+    #[test]
+    fn disabled_video_policy_suppresses_file_sharing_but_strips_request() {
+        let preview = direct_video_preview_token();
+        let mut message = message_with_direct_video_request(&preview);
+        let config = LinkPreviewConfig {
+            video_enabled: false,
+            ..LinkPreviewConfig::default()
+        };
+
+        consume_link_preview_request(
+            &mut message,
+            &sender(),
+            SECRET,
+            1_800_000_000,
+            "https://waddle.example",
+            &config,
+        );
+
+        assert!(
+            waddle_xmpp::xep::extract_file_sharing_from_message(&message).is_none(),
+            "disable-video policy must not stamp direct-video file sharing"
+        );
+        assert!(
+            message
+                .payloads
+                .iter()
+                .all(|payload| payload.ns() != waddle_xmpp::xep::NS_WADDLE_LINK_PREVIEW),
+            "private preview request is always stripped"
         );
     }
 
