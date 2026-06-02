@@ -432,19 +432,36 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                             reason: request.reason.as_deref().and_then(RichText::new),
                         }),
                     };
-                    if let Err(error) = state
+                    match state
                         .deps
                         .protocol
                         .mam_storage
                         .replace_with_tombstone(&original.id, tombstone)
                         .await
                     {
-                        warn!(
+                        Ok(true) => {
+                            if let Some(stanza_id) = original.stanza_id.as_ref() {
+                                crate::server::routes::websocket::link_preview_refs::clear_current_message_preview_refs(
+                                    state.deps.app_state.db_pool.global_actor(),
+                                    &room_jid,
+                                    &stanza_id.id,
+                                )
+                                .await;
+                            }
+                        }
+                        Ok(false) => warn!(
                             room = %room_jid,
                             target = %request.target_id,
-                            error = %error,
-                            "Failed to replace original with moderation tombstone"
-                        );
+                            "Moderation tombstone target disappeared before replacement"
+                        ),
+                        Err(error) => {
+                            warn!(
+                                room = %room_jid,
+                                target = %request.target_id,
+                                error = %error,
+                                "Failed to replace original with moderation tombstone"
+                            );
+                        }
                     }
                     // XEP-0425 §Tombstones / XEP-0198: scrub the
                     // pre-tombstone groupchat reflection from any

@@ -474,7 +474,7 @@ async fn interpret_with_depth(
                     );
                     continue;
                 };
-                apply_groupchat_retraction_tombstone(
+                let tombstoned = apply_groupchat_retraction_tombstone(
                     mam_storage,
                     deps.sm_session_registry,
                     &room,
@@ -482,6 +482,16 @@ async fn interpret_with_depth(
                     &retraction_message,
                 )
                 .await;
+                if tombstoned {
+                    if let Some(state) = deps.web_socket_state {
+                        crate::server::routes::websocket::link_preview_refs::clear_current_message_preview_refs(
+                            state.deps.app_state.db_pool.global_actor(),
+                            &room,
+                            &target_message_id,
+                        )
+                        .await;
+                    }
+                }
                 // #414: cascade XEP-0424 retraction to the room's pin
                 // list. If the retracted stanza-id is currently pinned,
                 // remove it from the projection and broadcast a

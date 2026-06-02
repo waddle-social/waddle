@@ -7,7 +7,7 @@ pub(super) async fn apply_retraction_tombstone(
     archive: &jid::BareJid,
     target_wire_id: &str,
     retraction_message: &Message,
-) {
+) -> bool {
     let original = match mam_storage
         .get_message_by_message_id(archive, target_wire_id)
         .await
@@ -19,7 +19,7 @@ pub(super) async fn apply_retraction_tombstone(
                 target = target_wire_id,
                 "ApplyRetractionTombstone: target not found in archive; skipping"
             );
-            return;
+            return false;
         }
         Err(error) => {
             warn!(
@@ -28,7 +28,7 @@ pub(super) async fn apply_retraction_tombstone(
                 %error,
                 "ApplyRetractionTombstone: archive lookup failed; skipping"
             );
-            return;
+            return false;
         }
     };
     let Some(retraction_id) = retraction_message
@@ -41,7 +41,7 @@ pub(super) async fn apply_retraction_tombstone(
             target = target_wire_id,
             "ApplyRetractionTombstone: retraction stanza missing valid message id; skipping"
         );
-        return;
+        return false;
     };
     let tombstone = waddle_xmpp::mam::ArchivedTombstone {
         retraction_id: Some(retraction_id),
@@ -65,6 +65,7 @@ pub(super) async fn apply_retraction_tombstone(
                 original_id = %original.id,
                 "ApplyRetractionTombstone: target row not found at replace time"
             );
+            return false;
         }
         Err(error) => {
             warn!(
@@ -73,6 +74,7 @@ pub(super) async fn apply_retraction_tombstone(
                 %error,
                 "ApplyRetractionTombstone: replace_with_tombstone failed"
             );
+            return false;
         }
     }
     // Drop matching unacked outbound copies from any detached XEP-0198
@@ -88,4 +90,5 @@ pub(super) async fn apply_retraction_tombstone(
         "ApplyRetractionTombstone",
     )
     .await;
+    true
 }

@@ -216,7 +216,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
     // that reorders or renumbers can't silently shift it.
     let runner = MigrationRunner::global();
     let applied = runner.run(&db).await.unwrap();
-    assert_eq!(applied, vec![4, 5, 6, 1001, 1002, 1003]);
+    assert_eq!(applied, vec![4, 5, 6, 7, 1001, 1002, 1003]);
 
     // Column exists.
     let conn = db.guard().await.unwrap();
@@ -327,7 +327,7 @@ async fn test_incompatible_history_forces_hard_cut_reapply() {
 
     let runner = MigrationRunner::global();
     let applied = runner.run(&db).await.unwrap();
-    assert_eq!(applied, vec![1, 2, 3, 4, 5, 6, 1001, 1002, 1003]);
+    assert_eq!(applied, vec![1, 2, 3, 4, 5, 6, 7, 1001, 1002, 1003]);
 
     let applied_again = runner.run(&db).await.unwrap();
     assert!(applied_again.is_empty());
@@ -378,7 +378,7 @@ async fn test_incompatible_history_recreates_existing_owned_tables() {
 
     let runner = MigrationRunner::global();
     let applied = runner.run(&db).await.unwrap();
-    assert_eq!(applied, vec![1, 2, 3, 4, 5, 6, 1001, 1002, 1003]);
+    assert_eq!(applied, vec![1, 2, 3, 4, 5, 6, 7, 1001, 1002, 1003]);
 
     let conn = db.guard().await.unwrap();
     let mut rows = conn
@@ -588,7 +588,7 @@ async fn postgres_v0006_widens_existing_upload_slot_size_bytes() {
         .run(&db)
         .await
         .expect("run global migration");
-    assert_eq!(applied, vec![6, 1001, 1002, 1003]);
+    assert_eq!(applied, vec![6, 7, 1001, 1002, 1003]);
     assert_postgres_column_type(&db, "upload_slots", "size_bytes", "bigint").await;
 
     let oversized_int4 = i64::from(i32::MAX) + 1;
@@ -618,6 +618,118 @@ async fn postgres_v0006_widens_existing_upload_slot_size_bytes() {
     drop(conn);
 
     drop_postgres_schema(&admin, &schema).await;
+}
+
+#[tokio::test]
+async fn sqlite_v0007_tracks_link_preview_media_refs() {
+    let db = Database::in_memory("test-global-v0007-link-preview-refs")
+        .await
+        .unwrap();
+    let conn = db.guard().await.unwrap();
+    conn.execute(sql::migrations_table_sql(DatabaseDriver::Sqlite), ())
+        .await
+        .unwrap();
+    seed_applied_migrations(&conn, global::all().into_iter().filter(|m| m.version < 7)).await;
+    conn.execute(
+        r#"
+        CREATE TABLE upload_slots (
+            id TEXT PRIMARY KEY,
+            requester_jid TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            content_type TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            storage_key TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            expires_at TEXT NOT NULL,
+            uploaded_at TEXT
+        )
+        "#,
+        (),
+    )
+    .await
+    .unwrap();
+    conn.execute("PRAGMA foreign_keys = ON", ()).await.unwrap();
+    drop(conn);
+
+    let applied = MigrationRunner::global().run(&db).await.unwrap();
+    assert_eq!(applied, vec![7, 1001, 1002, 1003]);
+
+    let conn = db.guard().await.unwrap();
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'link_preview_media_refs'",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    let table_count: i64 = row.get(0).unwrap();
+    assert_eq!(table_count, 1);
+
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name IN ('idx_link_preview_media_refs_current', 'idx_link_preview_media_refs_message')",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    let index_count: i64 = row.get(0).unwrap();
+    assert_eq!(index_count, 2);
+
+    conn.execute(
+        "INSERT INTO upload_slots (id, requester_jid, filename, size_bytes, content_type, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+        crate::db_params![
+            "slot-1",
+            "alice@example.com",
+            "link-preview-test.png",
+            12_i64,
+            "image/png",
+            "2030-01-01T00:00:00Z"
+        ],
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO link_preview_media_refs (upload_slot_id, archive_jid, message_id, current_archive_id, state) VALUES (?, ?, ?, ?, ?)",
+        crate::db_params![
+            "slot-1",
+            "alice@example.com",
+            "msg-1",
+            "archive-1",
+            "current"
+        ],
+    )
+    .await
+    .unwrap();
+    let invalid_state = conn
+        .execute(
+            "INSERT INTO link_preview_media_refs (upload_slot_id, archive_jid, message_id, current_archive_id, state) VALUES (?, ?, ?, ?, ?)",
+            crate::db_params![
+                "slot-1",
+                "alice@example.com",
+                "msg-2",
+                "archive-2",
+                "expired"
+            ],
+        )
+        .await;
+    assert!(invalid_state.is_err());
+
+    conn.execute(
+        "DELETE FROM upload_slots WHERE id = ?",
+        crate::db_params!["slot-1"],
+    )
+    .await
+    .unwrap();
+    let mut rows = conn
+        .query("SELECT COUNT(*) FROM link_preview_media_refs", ())
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    let ref_count: i64 = row.get(0).unwrap();
+    assert_eq!(ref_count, 0);
 }
 
 #[tokio::test]

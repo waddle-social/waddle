@@ -11,6 +11,7 @@ DROP TABLE IF EXISTS users;
 DROP TABLE IF EXISTS native_users;
 DROP TABLE IF EXISTS vcard_storage;
 DROP TABLE IF EXISTS upload_slots;
+DROP TABLE IF EXISTS link_preview_media_refs;
 DROP TABLE IF EXISTS roster_items;
 DROP TABLE IF EXISTS roster_versions;
 DROP TABLE IF EXISTS blocking_list;
@@ -180,6 +181,7 @@ DROP TABLE IF EXISTS users CASCADE;
 DROP TABLE IF EXISTS native_users CASCADE;
 DROP TABLE IF EXISTS vcard_storage CASCADE;
 DROP TABLE IF EXISTS upload_slots CASCADE;
+DROP TABLE IF EXISTS link_preview_media_refs CASCADE;
 DROP TABLE IF EXISTS roster_items CASCADE;
 DROP TABLE IF EXISTS roster_versions CASCADE;
 DROP TABLE IF EXISTS blocking_list CASCADE;
@@ -472,6 +474,46 @@ ALTER TABLE upload_slots
 ALTER COLUMN size_bytes TYPE BIGINT;
 "#;
 
+pub const V0007_LINK_PREVIEW_MEDIA_REFS: &str = r#"
+CREATE TABLE link_preview_media_refs (
+    upload_slot_id TEXT NOT NULL,
+    archive_jid TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    current_archive_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('current', 'unreferenced')),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (upload_slot_id, archive_jid, message_id),
+    FOREIGN KEY (upload_slot_id) REFERENCES upload_slots(id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_link_preview_media_refs_current
+    ON link_preview_media_refs(upload_slot_id, state)
+    WHERE state = 'current';
+CREATE INDEX idx_link_preview_media_refs_message
+    ON link_preview_media_refs(archive_jid, message_id);
+"#;
+
+pub const V0007_LINK_PREVIEW_MEDIA_REFS_POSTGRES: &str = r#"
+CREATE TABLE link_preview_media_refs (
+    upload_slot_id TEXT NOT NULL,
+    archive_jid TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    current_archive_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('current', 'unreferenced')),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP::TEXT,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP::TEXT,
+    PRIMARY KEY (upload_slot_id, archive_jid, message_id),
+    FOREIGN KEY (upload_slot_id) REFERENCES upload_slots(id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_link_preview_media_refs_current
+    ON link_preview_media_refs(upload_slot_id, state)
+    WHERE state = 'current';
+CREATE INDEX idx_link_preview_media_refs_message
+    ON link_preview_media_refs(archive_jid, message_id);
+"#;
+
 /// Get all global migrations in order
 pub fn all() -> Vec<Migration> {
     vec![
@@ -513,6 +555,12 @@ pub fn all() -> Vec<Migration> {
             description: "Widen upload slot sizes to bigint on Postgres".to_string(),
             sql_sqlite: V0006_UPLOAD_SIZES_BIGINT,
             sql_postgres: V0006_UPLOAD_SIZES_BIGINT_POSTGRES,
+        },
+        Migration {
+            version: 7,
+            description: "Track current link preview media references".to_string(),
+            sql_sqlite: V0007_LINK_PREVIEW_MEDIA_REFS,
+            sql_postgres: V0007_LINK_PREVIEW_MEDIA_REFS_POSTGRES,
         },
     ]
 }

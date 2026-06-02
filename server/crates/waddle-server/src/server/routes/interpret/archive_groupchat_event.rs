@@ -37,6 +37,7 @@ pub(super) async fn archive_groupchat_event(
         archive_id = %archive_id.stored_id,
         "ArchiveGroupchat: persisted"
     );
+    update_groupchat_link_preview_refs(deps, &room, &archive_id.stored_id, &message).await;
     // Notification activity ingest (slice 2b): committing the sender's
     // groupchat message into the room archive is the strongest
     // "currently active" signal we have for `(sender, room)`. Unlike
@@ -51,4 +52,41 @@ pub(super) async fn archive_groupchat_event(
     )
     .await;
     archive_id.rewrite
+}
+
+async fn update_groupchat_link_preview_refs(
+    deps: &Deps<'_>,
+    room: &BareJid,
+    archive_id: &str,
+    message: &Message,
+) {
+    let Some(state) = deps.web_socket_state else {
+        return;
+    };
+    let global_db_actor = state.deps.app_state.db_pool.global_actor();
+    let correction_target_message_id =
+        if let Some(correction) = waddle_xmpp::xep::extract_correction_from_message(message) {
+            crate::server::routes::websocket::link_preview_refs::clear_current_message_preview_refs(
+            global_db_actor,
+            room,
+            &correction.replaces_id,
+        )
+        .await;
+            Some(correction.replaces_id)
+        } else {
+            None
+        };
+    let message_id = correction_target_message_id
+        .as_deref()
+        .or_else(|| message.id.as_ref().map(|id| id.0.as_str()));
+    let Some(message_id) = message_id else { return };
+    crate::server::routes::websocket::link_preview_refs::record_current_message_preview_refs(
+        global_db_actor,
+        state.deps.auth_state.base_url.as_str(),
+        room,
+        message_id,
+        archive_id,
+        message,
+    )
+    .await;
 }
