@@ -6,21 +6,14 @@ import vue from "@astrojs/vue";
 import { resolveCommitSha } from "./scripts/resolve-commit-sha.mjs";
 
 const COMMIT_SHA = resolveCommitSha();
-// Faro Web SDK config is baked at build time via Vite `define` so the
-// bundled script knows where to POST beacons. The collector URL below
-// is the Grafana Cloud Frontend Observability "Send data" endpoint for
-// waddle-chat. It is enabled automatically for production deploys and
-// can be overridden explicitly for other environments.
-const DEFAULT_FARO_URL =
-  "https://faro-collector-prod-eu-west-6.grafana.net/collect/0eab89b00ec9f7cfd5c97e96636a3d20";
-const isProductionDeploy = process.env.CUENV_ENVIRONMENT === "production";
-const FARO_URL =
-  process.env.PUBLIC_FARO_URL ??
-  (isProductionDeploy ? DEFAULT_FARO_URL : "");
+// Faro Web SDK config is baked at build time via Vite `define`. The
+// PUBLIC_FARO_* values are injected only for production deploys (see
+// env.environment.production in the repo-root env.cue); every other
+// build leaves them empty, which initTelemetry() treats as "off".
+const FARO_URL = process.env.PUBLIC_FARO_URL ?? "";
 const FARO_APP_NAME = process.env.PUBLIC_FARO_APP_NAME ?? "waddle-chat";
 const FARO_APP_VERSION = process.env.PUBLIC_FARO_APP_VERSION ?? "1.0.0";
-const FARO_ENVIRONMENT =
-  process.env.PUBLIC_FARO_ENVIRONMENT ?? (isProductionDeploy ? "production" : "");
+const FARO_ENVIRONMENT = process.env.PUBLIC_FARO_ENVIRONMENT ?? "";
 
 export default defineConfig({
   output: "server",

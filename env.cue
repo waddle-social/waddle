@@ -34,6 +34,13 @@ schema.#Base & {
 			CLOUDFLARE_API_TOKEN: schema.#OnePasswordRef & {
 				ref: "op://waddle-production/Cloudflare/password"
 			}
+
+			// Public Grafana Cloud Faro collector for chat RUM. cuenv scrubs
+			// ambient env, so build-time PUBLIC_* values must be declared here
+			// to reach `astro build`. Scoped to production so previews, PR, and
+			// local builds ship telemetry off.
+			PUBLIC_FARO_URL:         "https://faro-collector-prod-eu-west-6.grafana.net/collect/0eab89b00ec9f7cfd5c97e96636a3d20"
+			PUBLIC_FARO_ENVIRONMENT: "production"
 		}
 	}
 }
