@@ -6,7 +6,7 @@ use bytes::Bytes;
 use chrono::Utc;
 use jid::BareJid;
 use kameo::actor::ActorRef;
-use reqwest::header::{CONTENT_TYPE, LOCATION};
+use reqwest::header::{CONTENT_TYPE, LOCATION, RANGE};
 use reqwest::{redirect, Client, StatusCode};
 use sha2::{Digest, Sha256};
 use tracing::warn;
@@ -398,8 +398,11 @@ async fn fetch_html_once(
     let client = builder
         .build()
         .map_err(|_| LinkPreviewResolverStatus::Failed)?;
-    let mut response = client
-        .get(url.clone())
+    let mut request = client.get(url.clone());
+    if policy.max_bytes > 0 {
+        request = request.header(RANGE, format!("bytes=0-{}", policy.max_bytes - 1));
+    }
+    let mut response = request
         .send()
         .await
         .map_err(|_| LinkPreviewResolverStatus::Failed)?;
@@ -446,22 +449,37 @@ async fn fetch_html_once(
     ) {
         return Err(LinkPreviewResolverStatus::Unsupported);
     }
+    let allow_head_cutoff = matches!(content_type.as_deref(), Some("text/html"));
     if let Some(len) = response.content_length() {
-        if len > policy.max_bytes as u64 {
+        if len > policy.max_bytes as u64 && response.status() != StatusCode::PARTIAL_CONTENT {
             return Err(LinkPreviewResolverStatus::Failed);
         }
     }
-
     let mut body = Vec::with_capacity(policy.max_bytes.min(64 * 1024));
+    let mut head_end_scanner = HtmlHeadEndScanner::default();
     while let Some(chunk) = response
         .chunk()
         .await
         .map_err(|_| LinkPreviewResolverStatus::Failed)?
     {
         if body.len() + chunk.len() > policy.max_bytes {
+            let remaining = policy.max_bytes.saturating_sub(body.len());
+            body.extend_from_slice(&chunk[..remaining]);
+            if allow_head_cutoff {
+                if let Some(head_end) = head_end_scanner.scan(&body) {
+                    body.truncate(head_end);
+                    break;
+                }
+            }
             return Err(LinkPreviewResolverStatus::Failed);
         }
         body.extend_from_slice(&chunk);
+        if allow_head_cutoff {
+            if let Some(head_end) = head_end_scanner.scan(&body) {
+                body.truncate(head_end);
+                break;
+            }
+        }
     }
     let html = String::from_utf8_lossy(&body).into_owned();
     Ok(FetchOnceResult::Html {
@@ -876,6 +894,218 @@ fn find_ascii_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
         .position(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
+#[derive(Default)]
+struct HtmlHeadEndScanner {
+    cursor: usize,
+    seen_head_start: bool,
+    state: HtmlHeadScanState,
+}
+
+impl HtmlHeadEndScanner {
+    fn scan(&mut self, html: &[u8]) -> Option<usize> {
+        while self.cursor < html.len() {
+            let state = std::mem::take(&mut self.state);
+            match state {
+                HtmlHeadScanState::Data => {
+                    if html[self.cursor] != b'<' {
+                        self.cursor += 1;
+                        self.state = HtmlHeadScanState::Data;
+                        continue;
+                    }
+                    if comment_start_is_pending(html, self.cursor) {
+                        self.state = HtmlHeadScanState::Data;
+                        break;
+                    }
+                    if html[self.cursor..].starts_with(b"<!--") {
+                        self.cursor += b"<!--".len();
+                        self.state = HtmlHeadScanState::Comment { dash_count: 0 };
+                        continue;
+                    }
+                    self.cursor += 1;
+                    self.state = HtmlHeadScanState::Tag(HtmlTagScanner::default());
+                }
+                HtmlHeadScanState::Tag(mut tag) => {
+                    let byte = html[self.cursor];
+                    self.cursor += 1;
+                    if let Some(quote) = tag.quote {
+                        if byte == quote {
+                            tag.quote = None;
+                        }
+                        self.state = HtmlHeadScanState::Tag(tag);
+                        continue;
+                    }
+                    match byte {
+                        b'\'' | b'"' => {
+                            tag.quote = Some(byte);
+                            self.state = HtmlHeadScanState::Tag(tag);
+                        }
+                        b'>' => {
+                            if tag.is_valid_head_end_tag() && self.seen_head_start {
+                                self.state = HtmlHeadScanState::Data;
+                                return Some(self.cursor);
+                            }
+                            if tag.is_head_start_tag() {
+                                self.seen_head_start = true;
+                            }
+                            self.state = tag
+                                .raw_text_closing_name()
+                                .map(|closing_name| HtmlHeadScanState::RawText { closing_name })
+                                .unwrap_or(HtmlHeadScanState::Data);
+                        }
+                        _ => {
+                            tag.consume_unquoted(byte);
+                            self.state = HtmlHeadScanState::Tag(tag);
+                        }
+                    }
+                }
+                HtmlHeadScanState::Comment { mut dash_count } => {
+                    let byte = html[self.cursor];
+                    self.cursor += 1;
+                    match byte {
+                        b'-' => dash_count += 1,
+                        b'>' if dash_count >= 2 => {
+                            self.state = HtmlHeadScanState::Data;
+                            continue;
+                        }
+                        _ => dash_count = 0,
+                    }
+                    self.state = HtmlHeadScanState::Comment { dash_count };
+                }
+                HtmlHeadScanState::RawText { closing_name } => {
+                    if html[self.cursor] != b'<' {
+                        self.cursor += 1;
+                        self.state = HtmlHeadScanState::RawText { closing_name };
+                        continue;
+                    }
+                    match end_tag_end_index_at(html, self.cursor, closing_name) {
+                        EndTagMatch::Complete(end) => {
+                            self.cursor = end;
+                            self.state = HtmlHeadScanState::Data;
+                        }
+                        EndTagMatch::Incomplete => {
+                            self.state = HtmlHeadScanState::RawText { closing_name };
+                            break;
+                        }
+                        EndTagMatch::NotMatch => {
+                            self.cursor += 1;
+                            self.state = HtmlHeadScanState::RawText { closing_name };
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+}
+
+#[derive(Default)]
+enum HtmlHeadScanState {
+    #[default]
+    Data,
+    Tag(HtmlTagScanner),
+    Comment {
+        dash_count: usize,
+    },
+    RawText {
+        closing_name: &'static [u8],
+    },
+}
+
+#[derive(Default)]
+struct HtmlTagScanner {
+    name: Vec<u8>,
+    name_done: bool,
+    invalid_end_tag_tail: bool,
+    quote: Option<u8>,
+}
+
+impl HtmlTagScanner {
+    fn consume_unquoted(&mut self, byte: u8) {
+        if self.name_done {
+            if !byte.is_ascii_whitespace() {
+                self.invalid_end_tag_tail = true;
+            }
+            return;
+        }
+        if self.name.is_empty() && byte == b'/' {
+            self.name.push(byte);
+            return;
+        }
+        if byte.is_ascii_alphanumeric() {
+            self.name.push(byte.to_ascii_lowercase());
+            return;
+        }
+        self.name_done = true;
+        if !byte.is_ascii_whitespace() {
+            self.invalid_end_tag_tail = true;
+        }
+    }
+
+    fn is_valid_head_end_tag(&self) -> bool {
+        self.name == b"/head" && !self.invalid_end_tag_tail
+    }
+
+    fn is_head_start_tag(&self) -> bool {
+        self.name == b"head"
+    }
+
+    fn raw_text_closing_name(&self) -> Option<&'static [u8]> {
+        match self.name.as_slice() {
+            b"script" => Some(b"script"),
+            b"style" => Some(b"style"),
+            b"title" => Some(b"title"),
+            b"textarea" => Some(b"textarea"),
+            _ => None,
+        }
+    }
+}
+
+fn comment_start_is_pending(html: &[u8], start: usize) -> bool {
+    const COMMENT_START: &[u8] = b"<!--";
+    let remaining = &html[start..];
+    remaining.len() < COMMENT_START.len() && COMMENT_START.starts_with(remaining)
+}
+
+enum EndTagMatch {
+    Complete(usize),
+    Incomplete,
+    NotMatch,
+}
+
+fn end_tag_end_index_at(html: &[u8], start: usize, name: &[u8]) -> EndTagMatch {
+    if html.get(start) != Some(&b'<') {
+        return EndTagMatch::NotMatch;
+    }
+    let mut index = start + 1;
+    if index >= html.len() {
+        return EndTagMatch::Incomplete;
+    }
+    if html[index] != b'/' {
+        return EndTagMatch::NotMatch;
+    }
+    index += 1;
+    for expected in name {
+        if index >= html.len() {
+            return EndTagMatch::Incomplete;
+        }
+        if !html[index].eq_ignore_ascii_case(expected) {
+            return EndTagMatch::NotMatch;
+        }
+        index += 1;
+    }
+    while index < html.len() && html[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    if index >= html.len() {
+        return EndTagMatch::Incomplete;
+    }
+    if html[index] == b'>' {
+        EndTagMatch::Complete(index + 1)
+    } else {
+        EndTagMatch::NotMatch
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1213,6 +1443,199 @@ mod tests {
         };
         assert_eq!(metadata.title.as_deref(), Some("Fetched title"));
         assert_eq!(metadata.description.as_deref(), Some("Fetched description"));
+    }
+
+    fn scan_head_end_one_byte_at_a_time(html: &str) -> Option<usize> {
+        let mut scanner = HtmlHeadEndScanner::default();
+        let mut buffer = Vec::with_capacity(html.len());
+        for byte in html.as_bytes() {
+            buffer.push(*byte);
+            if let Some(end) = scanner.scan(&buffer) {
+                return Some(end);
+            }
+        }
+        scanner.scan(&buffer)
+    }
+
+    async fn assert_single_range_request(server: &MockServer, expected: &str) {
+        let requests = server
+            .received_requests()
+            .await
+            .expect("received requests should be available");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0]
+                .headers
+                .get("range")
+                .and_then(|value| value.to_str().ok()),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn head_end_scanner_ignores_split_false_markers_in_comment_and_script() {
+        let html = r#"<html><head><!-- </head> --><script>const marker = "</head>";</script><meta property="og:title" content="Recovered"></head><body></body></html>"#;
+        let expected = html.rfind("</head>").expect("head end") + "</head>".len();
+
+        assert_eq!(scan_head_end_one_byte_at_a_time(html), Some(expected));
+    }
+
+    #[test]
+    fn head_end_scanner_accepts_split_whitespace_before_close_bracket() {
+        let html = "<html><head><title>not </head></title></head \t><body></body></html>";
+        let expected = html.find("</head \t>").expect("head end") + "</head \t>".len();
+
+        assert_eq!(scan_head_end_one_byte_at_a_time(html), Some(expected));
+    }
+
+    #[tokio::test]
+    async fn extracts_head_metadata_when_full_html_exceeds_byte_cap() {
+        let server = MockServer::start().await;
+        let full_body = format!(
+            r#"<html><head>
+                  <meta property="og:title" content="GitHub PR">
+                  <meta property="og:description" content="Large page with early metadata">
+                </head><body>{}</body></html>"#,
+            "x".repeat(1024)
+        );
+        let ranged_body = &full_body[..256];
+        Mock::given(method("GET"))
+            .and(path("/pull/838"))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("content-type", "text/html; charset=utf-8")
+                    .insert_header("content-length", ranged_body.len().to_string())
+                    .insert_header("content-range", format!("bytes 0-255/{}", full_body.len()))
+                    .set_body_raw(ranged_body, "text/html; charset=utf-8"),
+            )
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            max_bytes: 256,
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/pull/838", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        let LinkPreviewResolverOutcome::Ready(metadata) = outcome else {
+            panic!("expected ready outcome, got {outcome:?}");
+        };
+        assert_eq!(metadata.title.as_deref(), Some("GitHub PR"));
+        assert_eq!(
+            metadata.description.as_deref(),
+            Some("Large page with early metadata")
+        );
+        assert_single_range_request(&server, "bytes=0-255").await;
+    }
+
+    #[tokio::test]
+    async fn ignores_false_head_end_markers_before_later_metadata() {
+        let server = MockServer::start().await;
+        let body = r#"<html><head>
+                  <meta name="test" content="</head>">
+                  <!-- </head> -->
+                  <script>const marker = "</head>";</script>
+                  <meta property="og:title" content="Recovered metadata">
+                  <meta property="og:description" content="After fake head markers">
+                </head><body></body></html>"#;
+        Mock::given(method("GET"))
+            .and(path("/article"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/html; charset=utf-8"))
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/article", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        let LinkPreviewResolverOutcome::Ready(metadata) = outcome else {
+            panic!("expected ready outcome, got {outcome:?}");
+        };
+        assert_eq!(metadata.title.as_deref(), Some("Recovered metadata"));
+        assert_eq!(
+            metadata.description.as_deref(),
+            Some("After fake head markers")
+        );
+    }
+
+    #[tokio::test]
+    async fn accepts_head_end_tag_with_whitespace_before_close_bracket() {
+        let server = MockServer::start().await;
+        let full_body = format!(
+            r#"<html><head>
+                  <meta property="og:title" content="Whitespace head close">
+                </head 	><body>{}</body></html>"#,
+            "x".repeat(1024)
+        );
+        let ranged_body = &full_body[..256];
+        Mock::given(method("GET"))
+            .and(path("/article"))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("content-type", "text/html; charset=utf-8")
+                    .insert_header("content-length", ranged_body.len().to_string())
+                    .insert_header("content-range", format!("bytes 0-255/{}", full_body.len()))
+                    .set_body_raw(ranged_body, "text/html; charset=utf-8"),
+            )
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            max_bytes: 256,
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/article", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        let LinkPreviewResolverOutcome::Ready(metadata) = outcome else {
+            panic!("expected ready outcome, got {outcome:?}");
+        };
+        assert_eq!(metadata.title.as_deref(), Some("Whitespace head close"));
+        assert_single_range_request(&server, "bytes=0-255").await;
+    }
+
+    #[tokio::test]
+    async fn xhtml_false_head_marker_in_cdata_does_not_truncate_later_metadata() {
+        let server = MockServer::start().await;
+        let full_body = format!(
+            r#"<html><head>
+                  <script><![CDATA["</script></head>"]]></script>
+                  <meta property="og:title" content="XHTML metadata">
+                </head><body>{}</body></html>"#,
+            "x".repeat(1024)
+        );
+        let ranged_body = &full_body[..256];
+        Mock::given(method("GET"))
+            .and(path("/article.xhtml"))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("content-type", "application/xhtml+xml; charset=utf-8")
+                    .insert_header("content-length", ranged_body.len().to_string())
+                    .insert_header("content-range", format!("bytes 0-255/{}", full_body.len()))
+                    .set_body_raw(ranged_body, "application/xhtml+xml; charset=utf-8"),
+            )
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            max_bytes: 256,
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/article.xhtml", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        let LinkPreviewResolverOutcome::Ready(metadata) = outcome else {
+            panic!("expected ready outcome, got {outcome:?}");
+        };
+        assert_eq!(metadata.title.as_deref(), Some("XHTML metadata"));
+        assert_single_range_request(&server, "bytes=0-255").await;
     }
 
     #[tokio::test]
@@ -1753,7 +2176,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oversized_content_length_returns_failed_before_streaming() {
+    async fn oversized_html_without_completed_head_returns_failed() {
         let server = MockServer::start().await;
         let body = "x".repeat(65);
         Mock::given(method("GET"))
