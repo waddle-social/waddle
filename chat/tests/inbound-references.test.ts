@@ -197,6 +197,53 @@ describe("roomMessageFromArchived", () => {
     }]);
   });
 
+  test("maps remote-media-unavailable LinkPreview payloads into room timeline messages", () => {
+    const result = roomMessageFromArchived({
+      ...baseArchivedRoom,
+      link_previews: [{
+        original_url: "https://example.com/article",
+        normalized_url: "https://example.com/article",
+        title: "Example Article",
+        description: "Plain text summary",
+        remote_media_unavailable: true,
+      }],
+    });
+
+    expect(result).not.toBeNull();
+    const timeline = mapLiveRoomMessageToTimeline(session, result!);
+    expect(timeline.linkPreviews).toEqual([{
+      originalUrl: "https://example.com/article",
+      normalizedUrl: "https://example.com/article",
+      title: "Example Article",
+      description: "Plain text summary",
+      remoteMediaUnavailable: true,
+    }]);
+  });
+
+  test("marks attacker-host cached-path LinkPreview images unavailable after trusted-origin stripping", () => {
+    const result = roomMessageFromArchived({
+      ...baseArchivedRoom,
+      link_previews: [{
+        original_url: "https://example.com/article",
+        normalized_url: "https://example.com/article",
+        title: "Example Article",
+        image: {
+          url: "https://attacker.example/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png",
+          media_type: "image/png",
+        },
+      }],
+    }, { trustedMediaOrigin: "https://waddle.example" });
+
+    expect(result).not.toBeNull();
+    const timeline = mapLiveRoomMessageToTimeline(session, result!);
+    expect(timeline.linkPreviews).toEqual([{
+      originalUrl: "https://example.com/article",
+      normalizedUrl: "https://example.com/article",
+      title: "Example Article",
+      remoteMediaUnavailable: true,
+    }]);
+  });
+
   test("archive replay clears an optimistic room LinkPreview when payload has none", () => {
     const archived = roomMessageFromArchived({
       ...baseArchivedRoom,

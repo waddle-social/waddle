@@ -204,6 +204,7 @@ pub struct SessionResponse {
     pub xmpp_localpart: String,
     pub jid: String,
     pub xmpp_websocket_url: String,
+    pub link_preview_media_origin: String,
     pub is_expired: bool,
     pub expires_at: Option<String>,
 }
@@ -427,6 +428,7 @@ pub async fn session_handler(
                     xmpp_localpart: session.xmpp_localpart,
                     jid,
                     xmpp_websocket_url: state.websocket_url(),
+                    link_preview_media_origin: state.base_url.clone(),
                     is_expired,
                     expires_at,
                 }),

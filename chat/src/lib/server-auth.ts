@@ -8,6 +8,7 @@ export interface WaddleSession {
   xmpp_localpart: string;
   jid: string;
   xmpp_websocket_url: string;
+  link_preview_media_origin?: string;
   is_expired: boolean;
   expires_at: string | null;
 }

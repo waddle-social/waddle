@@ -28,7 +28,7 @@ async fn create_test_auth_state(
 }
 
 #[tokio::test]
-async fn session_response_includes_jid_and_websocket_url() {
+async fn session_response_includes_jid_websocket_url_and_link_preview_media_origin() {
     let server_config = ServerConfig::test_homeserver();
     let (auth_state, actor) = create_test_auth_state(&server_config).await;
     let session = Session::new("user-1", "alice", "alice");
@@ -74,6 +74,10 @@ async fn session_response_includes_jid_and_websocket_url() {
     assert_eq!(
         json["xmpp_websocket_url"].as_str(),
         Some("ws://localhost:3000/ws")
+    );
+    assert_eq!(
+        json["link_preview_media_origin"].as_str(),
+        Some("http://localhost:3000")
     );
 }
 

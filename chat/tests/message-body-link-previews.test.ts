@@ -1,0 +1,134 @@
+import { describe, expect, test } from "bun:test";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { createSSRApp, h } from "vue";
+import { parse, compileScript } from "vue/compiler-sfc";
+import { renderToString } from "vue/server-renderer";
+import ts from "typescript";
+import type { TimelineMessage } from "../src/lib/chat-ui";
+
+describe("MessageBody link previews", () => {
+  test("renders cached preview images and unavailable remote media states", async () => {
+    const html = await renderMessageBody({
+      message: messageWithPreviews([
+        {
+          originalUrl: "https://example.com/article",
+          title: "Cached article",
+          description: "A preview with trusted cached media",
+          image: {
+            url: "https://waddle.example/api/files/11111111-1111-4111-8111-111111111111/link-preview.png",
+            mediaType: "image/png",
+            width: 640,
+            height: 360,
+            alt: "Article preview",
+          },
+          remoteMediaUnavailable: true,
+        },
+        {
+          originalUrl: "https://remote.example/post",
+          title: "Remote article",
+          remoteMediaUnavailable: true,
+        },
+      ]),
+    });
+
+    expect(html).toContain('src="https://waddle.example/api/files/11111111-1111-4111-8111-111111111111/link-preview.png"');
+    expect(html).toContain('alt="Article preview"');
+    expect(html).toContain('width="640"');
+    expect(html).toContain('height="360"');
+    expect(html).toContain("Cached article");
+    expect(html).toContain("Remote preview media unavailable");
+    expect(html).toContain("Remote article");
+  });
+});
+
+function messageWithPreviews(linkPreviews: TimelineMessage["linkPreviews"]): TimelineMessage {
+  return {
+    id: "m1",
+    author: "Alice",
+    body: "",
+    createdAt: "2026-06-02T12:00:00.000Z",
+    createdAtSource: "fallback",
+    isSelf: false,
+    linkPreviews,
+  };
+}
+
+async function renderMessageBody(props: { message: TimelineMessage; compact?: boolean }) {
+  const component = await loadMessageBodyComponent();
+  return renderToString(createSSRApp({ render: () => h(component, props) }));
+}
+
+async function loadMessageBodyComponent() {
+  const filename = new URL("../src/components/chat/MessageBody.vue", import.meta.url);
+  const source = readFileSync(filename, "utf8");
+  const { descriptor } = parse(source, { filename: filename.pathname });
+  const script = compileScript(descriptor, {
+    id: "message-body-link-previews-test",
+    inlineTemplate: true,
+  });
+
+  const tempDir = mkdtempSync(join(tmpdir(), "waddle-message-body-"));
+  try {
+    const compiled = [
+      rewriteImports(script.content.replace("export default", "const __sfc__ ="), filename, tempDir),
+      "export default __sfc__;",
+    ].join("\n");
+    const js = ts.transpileModule(compiled, {
+      compilerOptions: {
+        module: ts.ModuleKind.ESNext,
+        target: ts.ScriptTarget.ES2022,
+        verbatimModuleSyntax: false,
+      },
+    }).outputText;
+    const modulePath = join(tempDir, "MessageBody.mjs");
+    writeFileSync(modulePath, js);
+    const component = await import(pathToFileURL(modulePath).href);
+    return component.default;
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
+function rewriteImports(code: string, importer: URL, tempDir: string): string {
+  return code.replace(/from\s+["']([^"']+)["']/g, (_match, specifier: string) =>
+    `from ${JSON.stringify(resolveModuleSpecifier(specifier, importer, tempDir))}`);
+}
+
+function resolveModuleSpecifier(specifier: string, importer: URL, tempDir: string): string {
+  if (specifier.startsWith("@/")) {
+    return moduleUrlForPath(resolveSourcePath(new URL(`../src/${specifier.slice(2)}`, import.meta.url).pathname), tempDir);
+  }
+  if (specifier.startsWith(".")) {
+    return moduleUrlForPath(resolveSourcePath(new URL(specifier, importer).pathname), tempDir);
+  }
+  return import.meta.resolve(specifier);
+}
+
+function resolveSourcePath(basePath: string): string {
+  const candidates = [
+    basePath,
+    `${basePath}.ts`,
+    `${basePath}.tsx`,
+    `${basePath}.js`,
+    `${basePath}.mjs`,
+    `${basePath}.vue`,
+    `${basePath}.json`,
+    `${basePath}/index.ts`,
+  ];
+  const resolved = candidates.find((candidate) => existsSync(candidate));
+  if (!resolved) throw new Error(`Unable to resolve test SFC import: ${basePath}`);
+  return resolved;
+}
+
+function moduleUrlForPath(resolvedPath: string, tempDir: string): string {
+  if (!resolvedPath.endsWith(".vue")) return pathToFileURL(resolvedPath).href;
+  const stubPath = join(tempDir, `${resolvedPath.replace(/[^a-z0-9]/gi, "_")}.mjs`);
+  writeFileSync(stubPath, [
+    `import { h } from ${JSON.stringify(import.meta.resolve("vue"))};`,
+    "export default { name: 'MessageBodyChildStub', setup(_, { slots }) { return () => h('span', { 'data-vue-stub': 'true' }, slots.default?.()); } };",
+  ].join("\n"));
+  return pathToFileURL(stubPath).href;
+}

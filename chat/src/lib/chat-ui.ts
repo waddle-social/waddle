@@ -47,6 +47,7 @@ export interface LinkPreview {
   title?: string;
   description?: string;
   image?: LinkPreviewImage;
+  remoteMediaUnavailable?: boolean;
 }
 
 export interface LinkPreviewImage {
@@ -55,6 +56,17 @@ export interface LinkPreviewImage {
   width?: number;
   height?: number;
   alt?: string;
+}
+
+export type LinkPreviewMediaState =
+  | { kind: "none" }
+  | { kind: "image"; image: LinkPreviewImage }
+  | { kind: "remote-unavailable" };
+
+export function linkPreviewMediaState(preview: LinkPreview): LinkPreviewMediaState {
+  if (preview.image) return { kind: "image", image: preview.image };
+  if (preview.remoteMediaUnavailable) return { kind: "remote-unavailable" };
+  return { kind: "none" };
 }
 
 export type ExtensionSurfaceKind =

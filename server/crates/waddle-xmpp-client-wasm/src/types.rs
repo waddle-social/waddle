@@ -69,6 +69,7 @@ pub struct WaddleLinkPreview {
     pub title: Option<String>,
     pub description: Option<String>,
     pub image: Option<WaddleLinkPreviewImage>,
+    pub remote_media_unavailable: bool,
 }
 
 #[derive(Debug, Serialize)]

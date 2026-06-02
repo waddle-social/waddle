@@ -112,7 +112,7 @@ import {
   type SendDirectMessageOptions,
   type SendGroupMessageOptions,
 } from "./send-types";
-import { linkPreviewMediaOriginFromWebSocketUrl, requestPlaintextLinkPreviewLookup, type LinkPreviewLookupResult } from "./link-preview";
+import { requestPlaintextLinkPreviewLookup, trustedLinkPreviewMediaOrigin, type LinkPreviewLookupResult } from "./link-preview";
 import {
   avatarDataUrl,
   buildWasmSendOptions,
@@ -648,6 +648,10 @@ export class BrowserXmppClient {
     this.resource = this.resumeState?.resource || createXmppResource();
     this.seedNativeReplayQueueIds(this.resumeState);
     this.retainedJoinedRoomJids = new Set(this.resumePersistence.loadJoinedRooms());
+  }
+
+  private trustedLinkPreviewMediaOrigin(): string | null {
+    return trustedLinkPreviewMediaOrigin(this.session);
   }
 
   /** Full JID (`bare/resource`) for this session. Needed by the
@@ -1445,7 +1449,7 @@ export class BrowserXmppClient {
       this.xmpp,
       body,
       scopeJid,
-      linkPreviewMediaOriginFromWebSocketUrl(this.session.xmpp_websocket_url),
+      this.trustedLinkPreviewMediaOrigin(),
     );
   }
 
@@ -2260,7 +2264,7 @@ export class BrowserXmppClient {
   }
 
   private roomMamPageToMessages(page: WasmMamPage): MamHistoryPage<LiveRoomMessage> {
-    return { messages: page.messages.map((message) => roomMessageFromArchived(message, { trustedMediaOrigin: linkPreviewMediaOriginFromWebSocketUrl(this.session.xmpp_websocket_url) })).filter((message): message is LiveRoomMessage => !!message), ...(page.first_id ? { firstArchiveId: page.first_id } : {}), ...(page.last_id ? { lastArchiveId: page.last_id } : {}), complete: page.is_complete };
+    return { messages: page.messages.map((message) => roomMessageFromArchived(message, { trustedMediaOrigin: this.trustedLinkPreviewMediaOrigin() })).filter((message): message is LiveRoomMessage => !!message), ...(page.first_id ? { firstArchiveId: page.first_id } : {}), ...(page.last_id ? { lastArchiveId: page.last_id } : {}), complete: page.is_complete };
   }
   private dmMamPageToMessages(
     page: WasmMamPage,
@@ -2270,7 +2274,7 @@ export class BrowserXmppClient {
     if (options.applyCallEvents !== false) {
       this.applyDmCallEventsFromMamPage(page, selfBare);
     }
-    return { messages: page.messages.map((message) => dmMessageFromArchived(message, selfBare, { trustedMediaOrigin: linkPreviewMediaOriginFromWebSocketUrl(this.session.xmpp_websocket_url) })).filter((message): message is LiveDmMessage => !!message), ...(page.first_id ? { firstArchiveId: page.first_id } : {}), ...(page.last_id ? { lastArchiveId: page.last_id } : {}), complete: page.is_complete };
+    return { messages: page.messages.map((message) => dmMessageFromArchived(message, selfBare, { trustedMediaOrigin: this.trustedLinkPreviewMediaOrigin() })).filter((message): message is LiveDmMessage => !!message), ...(page.first_id ? { firstArchiveId: page.first_id } : {}), ...(page.last_id ? { lastArchiveId: page.last_id } : {}), complete: page.is_complete };
   }
   private applyDmCallEventsFromMamPage(
     page: WasmMamPage | null | undefined,
@@ -2883,13 +2887,13 @@ export class BrowserXmppClient {
 
   private dispatchLiveBodyMessage(message: WasmMessage & { carbon?: { sent?: boolean; received?: boolean }; inboxPush?: InboxEntry; _fromCarbon?: boolean }) {
     if (message.is_muc) {
-      const converted = roomMessageFromArchived({ ...message, mam_id: message.id ?? crypto.randomUUID() } as WasmArchivedMessage, "live", { trustedMediaOrigin: linkPreviewMediaOriginFromWebSocketUrl(this.session.xmpp_websocket_url) });
+      const converted = roomMessageFromArchived({ ...message, mam_id: message.id ?? crypto.randomUUID() } as WasmArchivedMessage, "live", { trustedMediaOrigin: this.trustedLinkPreviewMediaOrigin() });
       if (!converted) return;
       this.catchup.recordRoomSeen(converted.roomJid, converted.createdAt, undefined, rawMessageSeenIds(message));
       if (converted.roomJid !== this.currentRoom && isRoomActivityMessage(converted)) { this.activityHandler?.(roomActivityEventFromMessage(converted)); return; }
       this.messageHandler?.(converted); return;
     }
-    const converted = dmMessageFromArchived({ ...message, mam_id: message.id ?? crypto.randomUUID() } as WasmArchivedMessage, barePeerJid(this.session.jid), "live", { trustedMediaOrigin: linkPreviewMediaOriginFromWebSocketUrl(this.session.xmpp_websocket_url) });
+    const converted = dmMessageFromArchived({ ...message, mam_id: message.id ?? crypto.randomUUID() } as WasmArchivedMessage, barePeerJid(this.session.jid), "live", { trustedMediaOrigin: this.trustedLinkPreviewMediaOrigin() });
     if (converted) {
       this.catchup.recordDmSeen(converted.peerJid, converted.createdAt, undefined, rawMessageSeenIds(message));
       this.directMessageHandler?.(converted);
@@ -3093,7 +3097,7 @@ export class BrowserXmppClient {
       this.applyDmCallEventsFromMamPage(page, selfBare, { since, seenIds });
     }
     for (const message of page?.messages ?? []) {
-      const converted = dmMessageFromArchived(message, selfBare, { trustedMediaOrigin: linkPreviewMediaOriginFromWebSocketUrl(this.session.xmpp_websocket_url) });
+      const converted = dmMessageFromArchived(message, selfBare, { trustedMediaOrigin: this.trustedLinkPreviewMediaOrigin() });
       if (!converted || shouldSkipCatchupMessage(converted, since, seenIds)) continue;
       this.catchup.recordDmSeen(converted.peerJid, converted.createdAt, converted.archiveId, messageSeenIds(converted));
       this.directMessageHandler?.(converted);
@@ -3106,7 +3110,7 @@ export class BrowserXmppClient {
     let lastArchiveId = pageLastArchiveId(page);
     if (stats) stats.pages += 1;
     for (const message of page?.messages ?? []) {
-      const converted = roomMessageFromArchived(message, { trustedMediaOrigin: linkPreviewMediaOriginFromWebSocketUrl(this.session.xmpp_websocket_url) });
+      const converted = roomMessageFromArchived(message, { trustedMediaOrigin: this.trustedLinkPreviewMediaOrigin() });
       if (!converted || shouldSkipCatchupMessage(converted, since, seenIds)) continue;
       this.catchup.recordRoomSeen(converted.roomJid, converted.createdAt, converted.archiveId, messageSeenIds(converted));
       if (converted.roomJid !== this.currentRoom && isRoomActivityMessage(converted)) {

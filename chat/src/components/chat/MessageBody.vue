@@ -20,7 +20,9 @@ import {
 import {
   extensionPresentation,
   extensionSurfaceLabel,
+  linkPreviewMediaState,
   renderStyledBody,
+  type LinkPreviewMediaState,
   type TimelineMessage,
   type ExtensionAnnotation,
   type ExtensionAnnotationAction,
@@ -68,6 +70,17 @@ const {
 
 const extensionAnnotations = computed(() => props.message.extensionAnnotations ?? []);
 const linkPreviews = computed(() => props.message.linkPreviews ?? []);
+type MessageLinkPreview = NonNullable<TimelineMessage["linkPreviews"]>[number];
+interface LinkPreviewCard {
+  preview: MessageLinkPreview;
+  mediaState: LinkPreviewMediaState;
+}
+const linkPreviewCards = computed<LinkPreviewCard[]>(() =>
+  linkPreviews.value.map((preview) => ({
+    preview,
+    mediaState: linkPreviewMediaState(preview),
+  })),
+);
 const extensionCards = computed(() =>
   extensionAnnotations.value.map((annotation) => ({
     annotation,
@@ -214,7 +227,7 @@ watch(
          into a single horizontal action-chip strip beneath this block.
          No fat boxes fanning out below the message. -->
     <a
-      v-for="preview in linkPreviews"
+      v-for="{ preview, mediaState } in linkPreviewCards"
       :key="`${preview.originalUrl}:${preview.normalizedUrl ?? ''}`"
       :href="linkPreviewHref(preview.originalUrl) ?? undefined"
       target="_blank"
@@ -227,15 +240,22 @@ watch(
         {{ linkPreviewHost(preview.originalUrl) }}
       </span>
       <img
-        v-if="preview.image"
-        :src="preview.image.url"
-        :alt="preview.image.alt ?? preview.title ?? 'Link preview image'"
-        :width="preview.image.width"
-        :height="preview.image.height"
+        v-if="mediaState.kind === 'image'"
+        :src="mediaState.image.url"
+        :alt="mediaState.image.alt ?? preview.title ?? 'Link preview image'"
+        :width="mediaState.image.width"
+        :height="mediaState.image.height"
         loading="lazy"
         decoding="async"
         class="max-h-48 w-full rounded border border-border object-cover"
       />
+      <span
+        v-else-if="mediaState.kind === 'remote-unavailable'"
+        class="type-caption flex items-center gap-1 rounded border border-dashed border-border bg-background/70 px-2 py-1 text-muted-foreground"
+      >
+        <AlertCircle aria-hidden="true" class="h-3.5 w-3.5" />
+        Remote preview media unavailable
+      </span>
       <span v-if="preview.title" class="type-field text-foreground">{{ preview.title }}</span>
       <span v-if="preview.description" class="type-caption line-clamp-2 text-muted-foreground">{{ preview.description }}</span>
     </a>

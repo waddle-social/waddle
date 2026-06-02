@@ -154,22 +154,24 @@ interface LinkPreviewDecodeOptions {
 }
 
 function linkPreviewFromWasm(preview: WasmLinkPreview, options: LinkPreviewDecodeOptions = {}): LinkPreview {
-  const image = preview.image && isTrustedCachedPreviewImageUrl(preview.image.url, options.trustedMediaOrigin)
+  const trustedImage = preview.image && isTrustedCachedPreviewImageUrl(preview.image.url, options.trustedMediaOrigin)
     ? preview.image
     : undefined;
+  const remoteMediaUnavailable = !!preview.remote_media_unavailable || (!!preview.image && !trustedImage);
   return {
     originalUrl: preview.original_url,
     ...(preview.normalized_url ? { normalizedUrl: preview.normalized_url } : {}),
     ...(preview.title ? { title: preview.title } : {}),
     ...(preview.description ? { description: preview.description } : {}),
-    ...(image
+    ...(remoteMediaUnavailable ? { remoteMediaUnavailable: true } : {}),
+    ...(trustedImage
       ? {
           image: {
-            url: image.url,
-            mediaType: image.media_type,
-            ...(typeof image.width === "number" ? { width: image.width } : {}),
-            ...(typeof image.height === "number" ? { height: image.height } : {}),
-            ...(image.alt ? { alt: image.alt } : {}),
+            url: trustedImage.url,
+            mediaType: trustedImage.media_type,
+            ...(typeof trustedImage.width === "number" ? { width: trustedImage.width } : {}),
+            ...(typeof trustedImage.height === "number" ? { height: trustedImage.height } : {}),
+            ...(trustedImage.alt ? { alt: trustedImage.alt } : {}),
           },
         }
       : {}),

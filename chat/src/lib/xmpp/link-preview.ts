@@ -233,6 +233,11 @@ export function linkPreviewMediaOriginFromWebSocketUrl(websocketUrl: string): st
   }
 }
 
+export function trustedLinkPreviewMediaOrigin(session: { link_preview_media_origin?: string | null; xmpp_websocket_url: string }): string | null {
+  const explicit = session.link_preview_media_origin?.trim();
+  return explicit || linkPreviewMediaOriginFromWebSocketUrl(session.xmpp_websocket_url);
+}
+
 export function isTrustedCachedPreviewImageUrl(value: string, trustedMediaOrigin?: string | null): boolean {
   if (!trustedMediaOrigin) return false;
   try {
