@@ -1,5 +1,6 @@
 use jid::BareJid;
 use kameo::actor::ActorRef;
+use std::collections::HashSet;
 use tracing::warn;
 use xmpp_parsers::message::Message;
 
@@ -79,6 +80,7 @@ pub(crate) async fn clear_current_message_preview_refs(
 }
 
 fn cached_preview_upload_slot_ids(message: &Message, trusted_media_base_url: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
     message
         .payloads
         .iter()
@@ -89,13 +91,14 @@ fn cached_preview_upload_slot_ids(message: &Message, trusted_media_base_url: &st
         })
         .filter_map(|payload| payload.attr("uri"))
         .filter_map(|uri| cached_preview_upload_slot_id(uri, trusted_media_base_url))
+        .filter(|slot_id| seen.insert(slot_id.clone()))
         .collect()
 }
 
 fn cached_preview_upload_slot_id(uri: &str, trusted_media_base_url: &str) -> Option<String> {
     let url = url::Url::parse(uri).ok()?;
     let trusted = url::Url::parse(trusted_media_base_url).ok()?;
-    if url.scheme() != trusted.scheme()
+    if !trusted_cached_preview_schemes_match(&url, &trusted)
         || url.host_str() != trusted.host_str()
         || url.port_or_known_default() != trusted.port_or_known_default()
     {
@@ -111,6 +114,20 @@ fn cached_preview_upload_slot_id(uri: &str, trusted_media_base_url: &str) -> Opt
         return None;
     }
     Some(slot_id.to_string())
+}
+
+fn trusted_cached_preview_schemes_match(url: &url::Url, trusted: &url::Url) -> bool {
+    if url.scheme() == "https" && trusted.scheme() == "https" {
+        return true;
+    }
+    url.scheme() == "http" && trusted.scheme() == "http" && is_loopback_host(url.host_str())
+}
+
+fn is_loopback_host(host: Option<&str>) -> bool {
+    matches!(host, Some("localhost"))
+        || host
+            .and_then(|host| host.parse::<std::net::IpAddr>().ok())
+            .is_some_and(|ip| ip.is_loopback())
 }
 
 fn is_cached_preview_filename(filename: &str) -> bool {
@@ -381,6 +398,42 @@ mod tests {
         assert_eq!(
             cached_preview_upload_slot_id(&bad_extension, "https://waddle.example"),
             None
+        );
+    }
+
+    #[test]
+    fn cached_preview_upload_slot_id_trusts_http_only_for_loopback() {
+        let slot_id = uuid::Uuid::new_v4().to_string();
+        let hash = "86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16";
+        let loopback = format!("http://localhost:3000/api/files/{slot_id}/link-preview-{hash}.png");
+        assert_eq!(
+            cached_preview_upload_slot_id(&loopback, "http://localhost:3000").as_deref(),
+            Some(slot_id.as_str())
+        );
+
+        let non_loopback =
+            format!("http://waddle.example/api/files/{slot_id}/link-preview-{hash}.png");
+        assert_eq!(
+            cached_preview_upload_slot_id(&non_loopback, "http://waddle.example"),
+            None
+        );
+    }
+
+    #[test]
+    fn cached_preview_upload_slot_ids_deduplicates_repeated_refs() {
+        let slot_id = uuid::Uuid::new_v4().to_string();
+        let hash = "86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16";
+        let uri = format!("https://waddle.example/api/files/{slot_id}/link-preview-{hash}.png");
+        let mut message = Message::new(None);
+        waddle_xmpp::xep::add_reference(
+            &mut message,
+            &waddle_xmpp::xep::Reference::data(uri.clone()),
+        );
+        waddle_xmpp::xep::add_reference(&mut message, &waddle_xmpp::xep::Reference::data(uri));
+
+        assert_eq!(
+            cached_preview_upload_slot_ids(&message, "https://waddle.example"),
+            vec![slot_id]
         );
     }
 }

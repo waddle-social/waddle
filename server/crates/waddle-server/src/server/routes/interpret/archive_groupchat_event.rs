@@ -66,12 +66,6 @@ async fn update_groupchat_link_preview_refs(
     let global_db_actor = state.deps.app_state.db_pool.global_actor();
     let correction_target_message_id =
         if let Some(correction) = waddle_xmpp::xep::extract_correction_from_message(message) {
-            crate::server::routes::websocket::link_preview_refs::clear_current_message_preview_refs(
-            global_db_actor,
-            room,
-            &correction.replaces_id,
-        )
-        .await;
             Some(correction.replaces_id)
         } else {
             None

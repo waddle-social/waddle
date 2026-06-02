@@ -65,6 +65,13 @@ pub(super) async fn apply_retraction_tombstone(
                 original_id = %original.id,
                 "ApplyRetractionTombstone: target row not found at replace time"
             );
+            scrub_unacked_for_tombstone(
+                sm_session_registry,
+                target_wire_id,
+                &archive.to_string(),
+                "ApplyRetractionTombstone",
+            )
+            .await;
             return false;
         }
         Err(error) => {
@@ -74,6 +81,13 @@ pub(super) async fn apply_retraction_tombstone(
                 %error,
                 "ApplyRetractionTombstone: replace_with_tombstone failed"
             );
+            scrub_unacked_for_tombstone(
+                sm_session_registry,
+                target_wire_id,
+                &archive.to_string(),
+                "ApplyRetractionTombstone",
+            )
+            .await;
             return false;
         }
     }

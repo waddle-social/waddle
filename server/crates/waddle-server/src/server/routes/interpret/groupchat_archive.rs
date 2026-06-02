@@ -209,6 +209,13 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
                 original_id = %original.id,
                 "ApplyGroupchatRetractionTombstone: target row not found at replace time"
             );
+            scrub_unacked_for_tombstone(
+                sm_session_registry,
+                target_message_id,
+                &room.to_string(),
+                "ApplyGroupchatRetractionTombstone",
+            )
+            .await;
             return false;
         }
         Err(error) => {
@@ -218,6 +225,13 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
                 %error,
                 "ApplyGroupchatRetractionTombstone: replace_with_tombstone failed"
             );
+            scrub_unacked_for_tombstone(
+                sm_session_registry,
+                target_message_id,
+                &room.to_string(),
+                "ApplyGroupchatRetractionTombstone",
+            )
+            .await;
             return false;
         }
     }
