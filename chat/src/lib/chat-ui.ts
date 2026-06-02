@@ -58,7 +58,7 @@ export interface LinkPreviewImage {
   alt?: string;
 }
 
-type LinkPreviewMediaState =
+export type LinkPreviewMediaState =
   | { kind: "none" }
   | { kind: "image"; image: LinkPreviewImage }
   | { kind: "remote-unavailable" };

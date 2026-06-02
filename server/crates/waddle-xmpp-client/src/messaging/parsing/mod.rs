@@ -374,8 +374,9 @@ fn parse_link_preview(el: &Element, first_url: Option<&Url>) -> Option<LinkPrevi
     if first_url.is_some() && first_url != Some(&original_url) {
         return None;
     }
-    let has_preview_image = link_preview_image_url(el).is_some();
-    let image = parse_link_preview_image(el);
+    let preview_image_url = link_preview_image_url(el);
+    let has_preview_image = preview_image_url.is_some();
+    let image = parse_link_preview_image(el, preview_image_url.as_deref());
     Some(LinkPreviewData {
         original_url,
         normalized_url: og_text(el, "url").and_then(|value| parse_web_url(&value)),
@@ -386,8 +387,8 @@ fn parse_link_preview(el: &Element, first_url: Option<&Url>) -> Option<LinkPrevi
     })
 }
 
-fn parse_link_preview_image(el: &Element) -> Option<LinkPreviewImageData> {
-    let url = link_preview_image_url(el).and_then(|url| parse_cached_preview_image_url(&url))?;
+fn parse_link_preview_image(el: &Element, image_url: Option<&str>) -> Option<LinkPreviewImageData> {
+    let url = image_url.and_then(parse_cached_preview_image_url)?;
     let media_type =
         og_image_text(el, "type").and_then(|value| value.parse::<PreviewImageMediaType>().ok())?;
     Some(LinkPreviewImageData {
