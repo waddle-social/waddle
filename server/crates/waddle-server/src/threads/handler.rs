@@ -7,8 +7,8 @@ use jid::BareJid;
 use minidom::Element;
 use xmpp_parsers::iq::Iq;
 
-use super::query::{ThreadsError, DEFAULT_PAGE_SIZE, NS_THREADS};
-use super::storage::ThreadsStorage;
+use super::query::{ThreadsError, NS_THREADS};
+use super::storage::{ThreadsStorage, ThreadsStorageError};
 use super::wire::{build_threads_response, parse_threads_query};
 
 /// Discriminator: does this IQ carry the `urn:waddle:threads:0` query?
@@ -58,14 +58,12 @@ pub async fn handle_threads_iq(
         Err(err) => return ThreadsIqOutcome::BadRequest(err),
     };
 
-    let page_size = query.page_size.unwrap_or(DEFAULT_PAGE_SIZE);
-
-    match storage
-        .page(requester, page_size, query.after_cursor.as_deref())
-        .await
-    {
+    match storage.page(requester, &query).await {
         Ok(page) => ThreadsIqOutcome::Result(build_threads_response(&page)),
-        Err(error) => ThreadsIqOutcome::InternalError(error.to_string()),
+        Err(ThreadsStorageError::BadRequest(error)) => ThreadsIqOutcome::BadRequest(error),
+        Err(ThreadsStorageError::Inbox(error)) => {
+            ThreadsIqOutcome::InternalError(error.to_string())
+        }
     }
 }
 

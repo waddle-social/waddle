@@ -1,5 +1,6 @@
 import { withSpan } from "@/lib/telemetry";
 import { inferredFileDisposition } from "@/lib/chat-ui";
+import type { ThreadsSort, ThreadsStatusFilter } from "@/lib/threads-view-filters";
 import type { MemberSummary, UserSearchResult } from "../chat-types";
 import type { WaddleSession } from "../server-auth";
 import {
@@ -2040,11 +2041,24 @@ export class BrowserXmppClient {
    * Returns an empty page when the wasm client lacks the method or the
    * server doesn't respond — callers can render the empty state.
    */
-  async fetchThreads(opts: { pageSize?: number; afterCursor?: string } = {}): Promise<WasmThreadsPage> {
+  async fetchThreads(opts: {
+    pageSize?: number;
+    afterCursor?: string;
+    status?: ThreadsStatusFilter;
+    activeSince?: string;
+    channel?: string;
+    search?: string;
+    sort?: ThreadsSort;
+  } = {}): Promise<WasmThreadsPage> {
     const xmpp = await this.requireConnectedXmpp();
     const payload: WasmFetchThreadsOptions = {
       ...(typeof opts.pageSize === "number" ? { page_size: opts.pageSize } : {}),
       ...(opts.afterCursor ? { after_cursor: opts.afterCursor } : {}),
+      ...(opts.status ? { status: opts.status } : {}),
+      ...(opts.activeSince ? { active_since: opts.activeSince } : {}),
+      ...(opts.channel ? { channel: opts.channel } : {}),
+      ...(opts.search ? { search: opts.search } : {}),
+      ...(opts.sort ? { sort: opts.sort } : {}),
     };
     const raw = await xmpp.fetch_threads?.(payload) as WasmThreadsPage | undefined;
     return raw ?? { total: 0, unread_threads: 0, entries: [] };

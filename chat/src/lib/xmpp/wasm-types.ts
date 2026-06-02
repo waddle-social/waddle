@@ -357,6 +357,11 @@ export interface WasmThreadsPage {
 export interface WasmFetchThreadsOptions {
   page_size?: number;
   after_cursor?: string;
+  status?: "all" | "unread" | "following";
+  active_since?: string;
+  channel?: string;
+  search?: string;
+  sort?: "recent" | "unread" | "replies";
 }
 
 /** XEP-0490 §3 displayed entry surfaced from the wasm boundary. */
