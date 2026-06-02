@@ -205,6 +205,12 @@ export interface WasmPresence {
   muc_affiliation?: string;
   muc_role?: string;
   muc_jid?: string;
+  /**
+   * XEP-0045 MUC `<status code='…'/>` markers as raw numbers (e.g.
+   * `110` self-presence, `100` non-anonymous). Absent when the
+   * presence carries no status codes.
+   */
+  muc_status_codes?: number[];
   vcard_avatar?: string;
   muji?: WasmMujiPresence;
 }

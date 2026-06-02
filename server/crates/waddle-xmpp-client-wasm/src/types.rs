@@ -300,6 +300,11 @@ pub struct WaddlePresence {
     pub muc_affiliation: Option<String>,
     pub muc_role: Option<String>,
     pub muc_jid: Option<String>,
+    /// XEP-0045 MUC `<status code='…'/>` markers as raw numbers (e.g.
+    /// `110` self-presence, `100` non-anonymous). Omitted when the
+    /// presence carries none, so the chat side sees `undefined`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub muc_status_codes: Vec<u16>,
     pub vcard_avatar: Option<String>,
     /// XEP-0272 Muji `<muji xmlns='urn:xmpp:jingle:muji:0'/>`
     /// extension on a MUC occupant's presence, surfaced as

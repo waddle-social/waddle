@@ -25,9 +25,8 @@ pub(super) fn parse_presence(el: &Element) -> InboundPresence {
                 .collect()
         })
         .unwrap_or_default();
-    let muc_item = el
-        .get_child("x", NS_MUC_USER)
-        .and_then(|x| x.get_child("item", NS_MUC_USER));
+    let muc_x = el.get_child("x", NS_MUC_USER);
+    let muc_item = muc_x.and_then(|x| x.get_child("item", NS_MUC_USER));
     let muc_affiliation = muc_item
         .and_then(|item| item.attr("affiliation"))
         .and_then(MucAffiliation::from_attr);
@@ -37,6 +36,19 @@ pub(super) fn parse_presence(el: &Element) -> InboundPresence {
     let muc_jid = muc_item
         .and_then(|item| item.attr("jid"))
         .map(str::to_string);
+    // XEP-0045 §7.2.2 self-presence (110) and the other muc#user
+    // status codes. Unparseable / unknown codes are preserved via
+    // `MucStatus::Other` rather than dropped.
+    let muc_status = muc_x
+        .map(|x| {
+            x.children()
+                .filter(|child| child.name() == "status" && child.ns() == NS_MUC_USER)
+                .filter_map(|status| status.attr("code"))
+                .filter_map(|code| code.parse::<u16>().ok())
+                .map(MucStatus::from_code)
+                .collect()
+        })
+        .unwrap_or_default();
     let vcard_avatar = el
         .get_child("x", NS_VCARD_UPDATE)
         .and_then(|x| x.get_child("photo", NS_VCARD_UPDATE))
@@ -85,6 +97,7 @@ pub(super) fn parse_presence(el: &Element) -> InboundPresence {
         muc_affiliation,
         muc_role,
         muc_jid,
+        muc_status,
         vcard_avatar,
         muji,
     }
@@ -190,5 +203,81 @@ mod tests {
         </presence>"#;
         let elem: Element = xml.parse().unwrap();
         assert!(parse_presence(&elem).muji.is_none());
+    }
+
+    #[test]
+    fn parses_self_presence_status_code_110() {
+        // XEP-0045 §7.2.2: the room's self-presence to the joining user
+        // MUST carry `<status code='110'/>` so the client knows the
+        // presence refers to itself and the roster is complete.
+        let xml = r#"<presence xmlns="jabber:client" from="room@muc.test/alice">
+            <x xmlns="http://jabber.org/protocol/muc#user">
+                <item affiliation="member" role="participant" jid="alice@test/desktop"/>
+                <status code="110"/>
+            </x>
+        </presence>"#;
+        let elem: Element = xml.parse().unwrap();
+        let p = parse_presence(&elem);
+        assert!(p.muc_status.contains(&MucStatus::SelfPresence));
+    }
+
+    #[test]
+    fn parses_multiple_muc_status_codes() {
+        // Non-anonymous room self-presence carries both 100 and 110.
+        let xml = r#"<presence xmlns="jabber:client" from="room@muc.test/alice">
+            <x xmlns="http://jabber.org/protocol/muc#user">
+                <item affiliation="owner" role="moderator" jid="alice@test/desktop"/>
+                <status code="100"/>
+                <status code="110"/>
+            </x>
+        </presence>"#;
+        let elem: Element = xml.parse().unwrap();
+        let p = parse_presence(&elem);
+        assert_eq!(
+            p.muc_status,
+            vec![MucStatus::NonAnonymous, MucStatus::SelfPresence]
+        );
+    }
+
+    #[test]
+    fn presence_without_status_codes_has_empty_muc_status() {
+        let xml = r#"<presence xmlns="jabber:client" from="room@muc.test/bob">
+            <x xmlns="http://jabber.org/protocol/muc#user">
+                <item affiliation="member" role="participant"/>
+            </x>
+        </presence>"#;
+        let elem: Element = xml.parse().unwrap();
+        assert!(parse_presence(&elem).muc_status.is_empty());
+    }
+
+    #[test]
+    fn unknown_status_code_is_preserved_as_other() {
+        let xml = r#"<presence xmlns="jabber:client" from="room@muc.test/alice">
+            <x xmlns="http://jabber.org/protocol/muc#user">
+                <item affiliation="member" role="participant"/>
+                <status code="999"/>
+            </x>
+        </presence>"#;
+        let elem: Element = xml.parse().unwrap();
+        let p = parse_presence(&elem);
+        assert_eq!(p.muc_status, vec![MucStatus::Other(999)]);
+    }
+
+    #[test]
+    fn status_outside_muc_user_x_is_not_collected() {
+        // The top-level <status> is XEP-0045-unrelated presence status
+        // text (jabber:client). Only `<status code>` children of the
+        // muc#user <x> are MUC status codes.
+        let xml = r#"<presence xmlns="jabber:client" from="room@muc.test/alice">
+            <status>Away from keyboard</status>
+            <x xmlns="http://jabber.org/protocol/muc#user">
+                <item affiliation="member" role="participant"/>
+                <status code="110"/>
+            </x>
+        </presence>"#;
+        let elem: Element = xml.parse().unwrap();
+        let p = parse_presence(&elem);
+        assert_eq!(p.muc_status, vec![MucStatus::SelfPresence]);
+        assert_eq!(p.status.as_deref(), Some("Away from keyboard"));
     }
 }

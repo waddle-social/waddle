@@ -527,6 +527,41 @@ impl MucRole {
     }
 }
 
+/// XEP-0045 MUC status codes carried as `<status code='…'/>` children
+/// of the `http://jabber.org/protocol/muc#user` payload. Only the codes
+/// Waddle's client acts on are named; every other registered code is
+/// preserved losslessly as `Other(u16)` so the typed value never drops
+/// information.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MucStatus {
+    /// 100 — the room is non-anonymous (occupants' real JIDs exposed).
+    NonAnonymous,
+    /// 110 — self-presence: this presence refers to the recipient. On
+    /// join it is sent last and marks the end of the room roster
+    /// (XEP-0045 §7.2.2).
+    SelfPresence,
+    /// Any other registered status code, preserved verbatim.
+    Other(u16),
+}
+
+impl MucStatus {
+    pub fn from_code(code: u16) -> Self {
+        match code {
+            100 => Self::NonAnonymous,
+            110 => Self::SelfPresence,
+            other => Self::Other(other),
+        }
+    }
+
+    pub fn code(self) -> u16 {
+        match self {
+            Self::NonAnonymous => 100,
+            Self::SelfPresence => 110,
+            Self::Other(code) => code,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct InboundPresence {
     pub from: Option<String>,
@@ -538,6 +573,11 @@ pub struct InboundPresence {
     pub muc_affiliation: Option<MucAffiliation>,
     pub muc_role: Option<MucRole>,
     pub muc_jid: Option<String>,
+    /// XEP-0045 `<status code='…'/>` markers from the `muc#user`
+    /// payload. Empty when the presence carries none. `110`
+    /// (`MucStatus::SelfPresence`) identifies the recipient's own
+    /// presence regardless of room anonymity or nick.
+    pub muc_status: Vec<MucStatus>,
     pub vcard_avatar: Option<String>,
     /// XEP-0272 (Muji) presence advertisement —
     /// `<muji xmlns='urn:xmpp:jingle:muji:0'>…</muji>` — carried on

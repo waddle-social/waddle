@@ -603,6 +603,11 @@ pub(crate) fn presence_to_js(presence: InboundPresence) -> WaddlePresence {
         muc_affiliation: presence.muc_affiliation.map(muc_affiliation_to_string),
         muc_role: presence.muc_role.map(muc_role_to_string),
         muc_jid: presence.muc_jid,
+        muc_status_codes: presence
+            .muc_status
+            .iter()
+            .map(|status| status.code())
+            .collect(),
         vcard_avatar: presence.vcard_avatar,
         muji: presence.muji.map(|m| WaddleMujiPresence {
             preparing: m.preparing,
@@ -719,6 +724,31 @@ mod inbound_to_js_tests {
 
         assert_eq!(propose.kind, "propose");
         assert_eq!(propose.to.as_deref(), Some("bob@waddle.test/phone"));
+    }
+
+    #[test]
+    fn presence_to_js_maps_muc_status_codes_to_numbers() {
+        use waddle_xmpp_client::messaging::MucStatus;
+        let presence = InboundPresence {
+            from: Some("room@muc.test/alice".to_string()),
+            to: None,
+            presence_type: None,
+            status: None,
+            show: None,
+            hats: vec![],
+            muc_affiliation: None,
+            muc_role: None,
+            muc_jid: None,
+            muc_status: vec![
+                MucStatus::NonAnonymous,
+                MucStatus::SelfPresence,
+                MucStatus::Other(210),
+            ],
+            vcard_avatar: None,
+            muji: None,
+        };
+        let js = presence_to_js(presence);
+        assert_eq!(js.muc_status_codes, vec![100, 110, 210]);
     }
 
     #[test]
