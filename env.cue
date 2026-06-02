@@ -49,7 +49,7 @@ schema.#Base & {
 			FARO_SOURCEMAP_ENABLED:  "true"
 			FARO_SOURCEMAP_STACK_ID: "1602000"
 			FARO_SOURCEMAP_API_KEY: schema.#OnePasswordRef & {
-				ref: "op://waddle-infra/server-runtime-production/grafana-faro-source-maps"
+				ref: "op://waddle-production/Grafana-Faro/source-maps"
 			}
 		}
 	}

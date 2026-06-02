@@ -187,6 +187,7 @@ schema.#Project & {
 			args: ["run", "build"]
 			dependsOn: [buildWasm, generateTypes]
 			inputs: [
+				"../env.cue",
 				"../package.json",
 				"../bun.lock",
 				"package.json",
@@ -206,6 +207,7 @@ schema.#Project & {
 			args: ["run", "sourcemaps:upload"]
 			dependsOn: [build]
 			inputs: [
+				"../env.cue",
 				"../package.json",
 				"../bun.lock",
 				"package.json",
@@ -250,6 +252,7 @@ schema.#Project & {
 			args: ["x", "wrangler", "deploy"]
 			dependsOn: [uploadFaroSourcemaps]
 			inputs: [
+				"../env.cue",
 				"wrangler.jsonc",
 				"dist/**",
 			]
