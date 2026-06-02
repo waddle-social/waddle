@@ -401,6 +401,7 @@ const isEditing = ref(false);
 const editInitialContent = ref<JSONContent | undefined>(undefined);
 const editEditorRef = ref<InstanceType<typeof ChatEditor> | null>(null);
 const editDraft = ref("");
+const isSubmittingEdit = ref(false);
 const setEditEditorRef = (instance: InstanceType<typeof ChatEditor> | null) => {
   editEditorRef.value = instance;
 };
@@ -438,6 +439,7 @@ function startEdit() {
 
 function cancelEdit() {
   isEditing.value = false;
+  isSubmittingEdit.value = false;
   editInitialContent.value = undefined;
   editDraft.value = "";
 }
@@ -447,28 +449,48 @@ function updateEditDraft(doc: JSONContent) {
 }
 
 async function submitEditFromEditor(doc: JSONContent) {
+  if (isSubmittingEdit.value) return;
   const { body, markup, references } = tiptapToRichMessage(doc);
+  const draftAtSubmit = editDraft.value;
   const trimmed = body.trim();
-  const linkPreview = await editLinkPreview.sendPayloadFor(body);
   const originalPreviewUrl = editOriginalPreviewUrl.value;
-  const previewChanged = editOriginalHasPreview.value
-    ? editLinkPreview.state.value.kind === "dismissed"
-      || !editDraft.value.includes(originalPreviewUrl ?? "\0")
+  const originalHasPreview = editOriginalHasPreview.value;
+  const previewDismissed = editLinkPreview.state.value.kind === "dismissed";
+  const originalPreviewUrlRemoved = originalPreviewUrl !== null && !body.includes(originalPreviewUrl);
+  const contentChanged = trimmed !== editOriginalBody.value
+    || JSON.stringify(markup) !== JSON.stringify(editOriginalRich.value.markup)
+    || JSON.stringify(references) !== JSON.stringify(editOriginalRich.value.references);
+  const shouldResolvePreview = contentChanged
+    || previewDismissed
+    || originalPreviewUrlRemoved
+    || editLinkPreview.state.value.kind === "ready";
+  let linkPreview: Awaited<ReturnType<typeof editLinkPreview.sendPayloadFor>> | undefined;
+  if (trimmed && shouldResolvePreview) {
+    isSubmittingEdit.value = true;
+    try {
+      linkPreview = await editLinkPreview.sendPayloadFor(body);
+    } finally {
+      isSubmittingEdit.value = false;
+    }
+    if (!isEditing.value || editDraft.value !== draftAtSubmit) return;
+  }
+  const previewChanged = originalHasPreview
+    ? previewDismissed
+      || originalPreviewUrlRemoved
       || (!!linkPreview && linkPreview.preview.originalUrl !== originalPreviewUrl)
     : !!linkPreview;
-  const changed = trimmed !== editOriginalBody.value
-    || JSON.stringify(markup) !== JSON.stringify(editOriginalRich.value.markup)
-    || JSON.stringify(references) !== JSON.stringify(editOriginalRich.value.references)
-    || previewChanged;
+  const changed = contentChanged || previewChanged;
   if (trimmed && changed) {
     emit("edit", props.message.id, body, markup, references, linkPreview);
   }
   isEditing.value = false;
+  isSubmittingEdit.value = false;
   editInitialContent.value = undefined;
   editDraft.value = "";
 }
 
 function submitEditFromLink() {
+  if (isSubmittingEdit.value) return;
   const doc = editEditorRef.value?.getJSON();
   if (!doc) return;
   void submitEditFromEditor(doc);
