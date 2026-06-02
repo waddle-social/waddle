@@ -11,7 +11,7 @@ use reqwest::{redirect, Client, StatusCode};
 use sha2::{Digest, Sha256};
 use tracing::warn;
 use url::{Host, Url};
-use waddle_xmpp_core::PreviewImageMediaType;
+use waddle_xmpp_core::{DirectVideoMediaType, PreviewImageMediaType};
 
 use crate::config::{LinkPreviewConfig, LinkPreviewHostPattern};
 use crate::db::actor::{DbActor, DbExecute};
@@ -36,6 +36,18 @@ pub(super) struct ResolvedLinkMetadata {
     pub title: Option<String>,
     pub description: Option<String>,
     pub image: Option<ResolvedLinkPreviewImage>,
+    /// Direct playable video discovered when the link itself is a trusted
+    /// direct-media file. Mutually exclusive with HTML-derived previews.
+    pub video: Option<ResolvedDirectVideo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ResolvedDirectVideo {
+    /// Policy-validated remote URL the client plays from on user action.
+    pub url: Url,
+    pub media_type: DirectVideoMediaType,
+    /// Total byte size when advertised by the origin.
+    pub size: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,6 +219,24 @@ pub(super) async fn resolve_link_preview(
                 }
                 return LinkPreviewResolverOutcome::Ready(Box::new(metadata));
             }
+            FetchOnceResult::DirectVideo {
+                final_url,
+                media_type,
+                size,
+            } => {
+                return LinkPreviewResolverOutcome::Ready(Box::new(ResolvedLinkMetadata {
+                    original_url: url.clone(),
+                    normalized_url: final_url.clone(),
+                    title: None,
+                    description: None,
+                    image: None,
+                    video: Some(ResolvedDirectVideo {
+                        url: final_url,
+                        media_type,
+                        size,
+                    }),
+                }));
+            }
             FetchOnceResult::Redirect(next) => {
                 if redirect_count == policy.max_redirects {
                     return LinkPreviewResolverOutcome::Failed;
@@ -229,6 +259,24 @@ fn looks_like_direct_video_url(url: &Url) -> bool {
                 || filename.ends_with(".m4v")
                 || filename.ends_with(".ogv")
     )
+}
+
+/// Best-effort total byte size of a direct-media response.
+///
+/// A `Range` request can yield `206 Partial Content`, whose `Content-Length`
+/// is only the returned slice; the authoritative total lives in the
+/// `Content-Range` `…/<total>` suffix. Returns `None` when unknown.
+fn direct_video_total_size(response: &reqwest::Response) -> Option<u64> {
+    if response.status() == StatusCode::PARTIAL_CONTENT {
+        response
+            .headers()
+            .get(CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.rsplit('/').next())
+            .and_then(|total| total.trim().parse::<u64>().ok())
+    } else {
+        response.content_length()
+    }
 }
 
 async fn fetch_cached_preview_image(
@@ -461,7 +509,15 @@ async fn fetch_image_once(
 }
 
 enum FetchOnceResult {
-    Html { final_url: Url, html: String },
+    Html {
+        final_url: Url,
+        html: String,
+    },
+    DirectVideo {
+        final_url: Url,
+        media_type: DirectVideoMediaType,
+        size: Option<u64>,
+    },
     Redirect(Url),
 }
 
@@ -531,6 +587,23 @@ async fn fetch_html_once(
                 .trim()
                 .to_ascii_lowercase()
         });
+    if let Some(media_type) = content_type
+        .as_deref()
+        .and_then(|value| value.parse::<DirectVideoMediaType>().ok())
+    {
+        // Direct video is accepted only when policy allows it AND the URL itself
+        // names a direct playable file. This blocks provider endpoints that
+        // return a video content-type for non-file (embed/watch) URLs, and is
+        // defense-in-depth on top of the classify-time `video_enabled` gate.
+        if policy.video_enabled && looks_like_direct_video_url(url) {
+            return Ok(FetchOnceResult::DirectVideo {
+                final_url: url.clone(),
+                media_type,
+                size: direct_video_total_size(&response),
+            });
+        }
+        return Err(LinkPreviewResolverStatus::Unsupported);
+    }
     if !matches!(
         content_type.as_deref(),
         Some("text/html") | Some("application/xhtml+xml")
@@ -924,6 +997,7 @@ fn extract_metadata_parts_from_html(
             title,
             description,
             image: None,
+            video: None,
         },
         image,
     ))
@@ -1679,6 +1753,55 @@ mod tests {
             ..Default::default()
         };
         let url = Url::parse(&format!("{}/clip.mp4", server.uri())).expect("url");
+
+        assert_eq!(
+            resolve_link_preview(&url, &policy).await,
+            LinkPreviewResolverOutcome::Unsupported
+        );
+    }
+
+    #[tokio::test]
+    async fn detects_direct_video_file_and_returns_typed_video_metadata() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/clip.mp4"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(vec![0u8; 4096], "video/mp4"))
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/clip.mp4", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        let LinkPreviewResolverOutcome::Ready(metadata) = outcome else {
+            panic!("expected ready outcome, got {outcome:?}");
+        };
+        let video = metadata.video.expect("direct video metadata");
+        assert_eq!(video.media_type, DirectVideoMediaType::Mp4);
+        assert_eq!(video.url.as_str(), url.as_str());
+        assert_eq!(video.size, Some(4096));
+        assert!(metadata.image.is_none(), "direct video has no preview image");
+        assert!(metadata.title.is_none());
+    }
+
+    #[tokio::test]
+    async fn rejects_video_content_type_at_non_video_path_without_fetching_body() {
+        // A provider endpoint that returns a video content-type for a non-file
+        // URL (e.g. an embed/watch page) must not be treated as a direct video.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/watch"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw("not a file", "video/mp4"))
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/watch", server.uri())).expect("url");
 
         assert_eq!(
             resolve_link_preview(&url, &policy).await,

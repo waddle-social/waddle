@@ -55,6 +55,63 @@ impl fmt::Display for InvalidPreviewImageMediaType {
 
 impl std::error::Error for InvalidPreviewImageMediaType {}
 
+/// Safe direct-video MIME types Waddle accepts for trusted inline previews.
+///
+/// Only single, directly playable container files are listed. Adaptive
+/// streaming manifests (HLS `application/x-mpegurl`, DASH) and provider embed
+/// pages are intentionally excluded — they are not direct playable files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DirectVideoMediaType {
+    Mp4,
+    Webm,
+    Ogg,
+    QuickTime,
+}
+
+impl DirectVideoMediaType {
+    /// Borrow the canonical MIME text used on the wire.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Mp4 => "video/mp4",
+            Self::Webm => "video/webm",
+            Self::Ogg => "video/ogg",
+            Self::QuickTime => "video/quicktime",
+        }
+    }
+}
+
+impl fmt::Display for DirectVideoMediaType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for DirectVideoMediaType {
+    type Err = InvalidDirectVideoMediaType;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_ascii_lowercase().as_str() {
+            "video/mp4" => Ok(Self::Mp4),
+            "video/webm" => Ok(Self::Webm),
+            "video/ogg" => Ok(Self::Ogg),
+            "video/quicktime" => Ok(Self::QuickTime),
+            _ => Err(InvalidDirectVideoMediaType),
+        }
+    }
+}
+
+/// Error returned for unsupported direct-video MIME text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidDirectVideoMediaType;
+
+impl fmt::Display for InvalidDirectVideoMediaType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("unsupported direct video MIME type")
+    }
+}
+
+impl std::error::Error for InvalidDirectVideoMediaType {}
+
 /// Return the first HTTPS URL-like token whose host looks web-addressable.
 ///
 /// This intentionally stays string-based so crates that already parse into
@@ -122,5 +179,38 @@ mod tests {
     #[test]
     fn rejects_unsupported_preview_image_media_type() {
         assert!("image/svg+xml".parse::<PreviewImageMediaType>().is_err());
+    }
+
+    #[test]
+    fn parses_supported_direct_video_media_types_case_insensitively() {
+        assert_eq!(
+            "VIDEO/MP4".parse::<DirectVideoMediaType>(),
+            Ok(DirectVideoMediaType::Mp4)
+        );
+        assert_eq!(
+            "video/webm".parse::<DirectVideoMediaType>(),
+            Ok(DirectVideoMediaType::Webm)
+        );
+        assert_eq!(
+            "video/ogg".parse::<DirectVideoMediaType>(),
+            Ok(DirectVideoMediaType::Ogg)
+        );
+        assert_eq!(
+            "video/quicktime".parse::<DirectVideoMediaType>(),
+            Ok(DirectVideoMediaType::QuickTime)
+        );
+        assert_eq!(DirectVideoMediaType::Mp4.as_str(), "video/mp4");
+    }
+
+    #[test]
+    fn rejects_non_direct_video_media_types() {
+        assert!("text/html".parse::<DirectVideoMediaType>().is_err());
+        // HLS/DASH playlists are not single direct playable files.
+        assert!("application/x-mpegurl"
+            .parse::<DirectVideoMediaType>()
+            .is_err());
+        assert!("application/vnd.apple.mpegurl"
+            .parse::<DirectVideoMediaType>()
+            .is_err());
     }
 }
