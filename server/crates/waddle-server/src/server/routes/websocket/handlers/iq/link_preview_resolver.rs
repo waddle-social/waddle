@@ -1791,6 +1791,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn direct_video_total_size_uses_content_range_total_on_partial_response() {
+        // A Range request can return 206 Partial Content whose Content-Length is
+        // only the slice; the authoritative total is the Content-Range suffix.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/clip.mp4"))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("content-range", "bytes 0-255/1048576")
+                    .set_body_raw(vec![0u8; 256], "video/mp4"),
+            )
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/clip.mp4", server.uri())).expect("url");
+
+        let LinkPreviewResolverOutcome::Ready(metadata) = resolve_link_preview(&url, &policy).await
+        else {
+            panic!("expected ready outcome");
+        };
+        let video = metadata.video.expect("direct video metadata");
+        assert_eq!(video.size, Some(1_048_576));
+    }
+
+    #[tokio::test]
     async fn rejects_video_content_type_at_non_video_path_without_fetching_body() {
         // A provider endpoint that returns a video content-type for a non-file
         // URL (e.g. an embed/watch page) must not be treated as a direct video.

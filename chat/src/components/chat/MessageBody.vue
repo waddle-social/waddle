@@ -91,11 +91,19 @@ const linkInfoCards = computed(() =>
 const videoPreviewCards = computed(() =>
   linkPreviews.value.flatMap((preview) => {
     const state = linkPreviewMediaState(preview);
-    return state.kind === "video"
-      ? [{ preview, video: state.video, ...(state.poster ? { poster: state.poster } : {}) }]
-      : [];
+    // Defensive: only ever play from an https source, independent of the
+    // upstream host policy that already enforces it server-side.
+    if (state.kind !== "video" || !isHttpsUrl(state.video.url)) return [];
+    return [{ preview, video: state.video, ...(state.poster ? { poster: state.poster } : {}) }];
   }),
 );
+function isHttpsUrl(value: string): boolean {
+  try {
+    return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
 function videoCardKey(preview: MessageLinkPreview): string {
   return `${preview.originalUrl}:${preview.normalizedUrl ?? ""}`;
 }
