@@ -145,6 +145,35 @@ describe("handleRoomMessage typed dispatch", () => {
     expect(h.messages.value[0]?.isEdited).toBe(true);
   });
 
+  test("correction replaces stale link preview state", () => {
+    const h = harness();
+    h.messages.value = [
+      {
+        id: "m1",
+        body: "old https://old.example",
+        nick: "bob",
+        authorJid: "room@muc.example.com/bob",
+        timestamp: 0,
+        linkPreviews: [{ originalUrl: "https://old.example", title: "Old" }],
+      } as TimelineMessage,
+    ];
+
+    h.liveMerge.handleRoomMessage(makeLive({
+      replacesId: "m1",
+      body: "edited https://new.example",
+      linkPreviews: [{ originalUrl: "https://new.example", title: "New" }],
+    }));
+
+    expect(h.messages.value[0]?.linkPreviews).toEqual([{ originalUrl: "https://new.example", title: "New" }]);
+
+    h.liveMerge.handleRoomMessage(makeLive({
+      replacesId: "m1",
+      body: "edited without preview",
+    }));
+
+    expect(h.messages.value[0]?.linkPreviews).toBeUndefined();
+  });
+
   test("plain message routes to mergeLiveMessage (append)", () => {
     const h = harness();
     const before = h.messages.value.length;

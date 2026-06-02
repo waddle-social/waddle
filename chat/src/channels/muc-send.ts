@@ -264,6 +264,7 @@ export function useMucSend(deps: UseMucSendDeps) {
     newBody: string,
     markup?: MarkupSpan[],
     references?: MessageReference[],
+    linkPreview?: ComposerLinkPreviewSendPayload,
   ) {
     if (!xmppClient.value || !activeChannelId.value || !newBody.trim()) return;
     const message = findMessageById(messages.value, messageId);
@@ -279,6 +280,7 @@ export function useMucSend(deps: UseMucSendDeps) {
         ? { id: message.threadId, parent: message.parentThreadId }
         : { id: message.threadId }
       : undefined;
+    const freshLinkPreview = composerLinkPreviewPayloadIsFresh(linkPreview) ? linkPreview : undefined;
 
     try {
       await xmppClient.value.sendCorrection(
@@ -289,6 +291,10 @@ export function useMucSend(deps: UseMucSendDeps) {
         markup,
         references,
         thread,
+        freshLinkPreview ? {
+          linkPreviewToken: freshLinkPreview.token,
+          linkPreviewExpiresAt: freshLinkPreview.expiresAt,
+        } : undefined,
       );
     } catch (e) {
       actionError.value = normalizeError(e);

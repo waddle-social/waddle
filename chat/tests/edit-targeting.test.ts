@@ -68,6 +68,8 @@ describe("edit targeting", () => {
       undefined,
       // XEP-0201 thread arg — absent for a non-threaded target message.
       undefined,
+      // Link preview token payload — absent when an edit has no eligible preview.
+      undefined,
     );
   });
 
@@ -308,6 +310,7 @@ describe("edit targeting", () => {
       "bob@example.com",
       "hello",
       "original-message-id",
+      undefined,
       undefined,
       undefined,
     );

@@ -119,6 +119,7 @@ export function useDmLiveMerge(deps: UseDmLiveMergeDeps) {
     references?: LiveDmMessage["references"],
     extensionAnnotations?: LiveDmMessage["extensionAnnotations"],
     extensionBodyFallback?: boolean,
+    linkPreviews?: LiveDmMessage["linkPreviews"],
   ) {
     const candidateIndex = findMessageIndexById(messages.value, replacesId);
     if (candidateIndex < 0) return;
@@ -130,6 +131,8 @@ export function useDmLiveMerge(deps: UseDmLiveMergeDeps) {
     else delete updated.markup;
     if (references && references.length > 0) updated.references = references;
     else delete updated.references;
+    if (linkPreviews && linkPreviews.length > 0) updated.linkPreviews = linkPreviews;
+    else delete updated.linkPreviews;
     if (extensionAnnotations && extensionAnnotations.length > 0) {
       updated.extensionAnnotations = extensionAnnotations;
       if (extensionBodyFallback) updated.extensionBodyFallback = true;
@@ -235,6 +238,7 @@ export function useDmLiveMerge(deps: UseDmLiveMergeDeps) {
         msg.references,
         msg.extensionAnnotations,
         msg.extensionBodyFallback,
+        msg.linkPreviews,
       );
       return;
     }

@@ -185,13 +185,25 @@ export function useChatSend(deps: UseChatSendDeps) {
     newBody: string,
     markup?: MarkupSpan[],
     references?: MessageReference[],
+    linkPreview?: ComposerLinkPreviewSendPayload,
   ) {
     if (!xmppClient.value || !activePeerJid.value || !newBody.trim()) return;
     const message = findMessageById(messages.value, messageId);
     const targetId = message?.correctionTargetId ?? messageId;
+    const freshLinkPreview = composerLinkPreviewPayloadIsFresh(linkPreview) ? linkPreview : undefined;
     clearActionError();
     try {
-      await xmppClient.value.sendDmCorrection(activePeerJid.value, newBody, targetId, markup, references);
+      await xmppClient.value.sendDmCorrection(
+        activePeerJid.value,
+        newBody,
+        targetId,
+        markup,
+        references,
+        freshLinkPreview ? {
+          linkPreviewToken: freshLinkPreview.token,
+          linkPreviewExpiresAt: freshLinkPreview.expiresAt,
+        } : undefined,
+      );
     } catch (e) {
       actionError.value = normalizeError(e);
     }

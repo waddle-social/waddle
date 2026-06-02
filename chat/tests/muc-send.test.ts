@@ -328,6 +328,55 @@ describe("useMucSend.editMessage", () => {
     expect(call[3]).toBe("original-server-id");
   });
 
+  test("passes a fresh composer preview token on corrections", async () => {
+    const sendCorrection = mock(async () => undefined);
+    const client = makeClient({ sendCorrection } as Partial<BrowserXmppClient>);
+    const h = harness({ client });
+    h.messages.value = [
+      {
+        id: "msg-1",
+        correctionTargetId: "original-server-id",
+        body: "old text",
+        nick: "alice",
+        timestamp: 0,
+        isSelf: true,
+      } as TimelineMessage,
+    ];
+
+    await h.send.editMessage("msg-1", "read https://example.com/article", [], undefined, {
+      token: "edit-preview-token",
+      expiresAt: "2999-01-01T00:00:00.000Z",
+      preview: {
+        originalUrl: "https://example.com/article",
+        normalizedUrl: "https://example.com/article",
+        title: "Example Article",
+      },
+    });
+
+    const call = (sendCorrection as unknown as ReturnType<typeof mock>).mock.calls[0]!;
+    expect(call[7].linkPreviewToken).toBe("edit-preview-token");
+    expect(call[7].linkPreviewExpiresAt).toBe("2999-01-01T00:00:00.000Z");
+  });
+
+  test("omits expired composer preview tokens on corrections", async () => {
+    const sendCorrection = mock(async () => undefined);
+    const client = makeClient({ sendCorrection } as Partial<BrowserXmppClient>);
+    const h = harness({ client });
+
+    await h.send.editMessage("msg-1", "read https://example.com/article", [], undefined, {
+      token: "expired-edit-preview-token",
+      expiresAt: "2000-01-01T00:00:00.000Z",
+      preview: {
+        originalUrl: "https://example.com/article",
+        normalizedUrl: "https://example.com/article",
+        title: "Example Article",
+      },
+    });
+
+    const call = (sendCorrection as unknown as ReturnType<typeof mock>).mock.calls[0]!;
+    expect(call[7]).toBeUndefined();
+  });
+
   test("empty body: no send, no error", async () => {
     const sendCorrection = mock(async () => undefined);
     const client = makeClient({ sendCorrection } as Partial<BrowserXmppClient>);

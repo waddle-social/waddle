@@ -223,6 +223,55 @@ describe("useChatSend.editMessage", () => {
     expect(call[2]).toBe("original-server-id");
   });
 
+  test("passes a fresh composer preview token on corrections", async () => {
+    const sendDmCorrection = mock(async () => undefined);
+    const client = makeClient({ sendDmCorrection } as Partial<BrowserXmppClient>);
+    const h = harness({ client });
+    h.messages.value = [
+      {
+        id: "dm-msg-1",
+        correctionTargetId: "original-server-id",
+        body: "old text",
+        nick: "alice",
+        timestamp: 0,
+        isSelf: true,
+      } as TimelineMessage,
+    ];
+
+    await h.send.editMessage("dm-msg-1", "read https://example.com/article", [], undefined, {
+      token: "dm-edit-preview-token",
+      expiresAt: "2999-01-01T00:00:00.000Z",
+      preview: {
+        originalUrl: "https://example.com/article",
+        normalizedUrl: "https://example.com/article",
+        title: "Example Article",
+      },
+    });
+
+    const call = (sendDmCorrection as unknown as ReturnType<typeof mock>).mock.calls[0]!;
+    expect(call[5].linkPreviewToken).toBe("dm-edit-preview-token");
+    expect(call[5].linkPreviewExpiresAt).toBe("2999-01-01T00:00:00.000Z");
+  });
+
+  test("omits expired composer preview tokens on corrections", async () => {
+    const sendDmCorrection = mock(async () => undefined);
+    const client = makeClient({ sendDmCorrection } as Partial<BrowserXmppClient>);
+    const h = harness({ client });
+
+    await h.send.editMessage("dm-msg-1", "read https://example.com/article", [], undefined, {
+      token: "expired-dm-edit-preview-token",
+      expiresAt: "2000-01-01T00:00:00.000Z",
+      preview: {
+        originalUrl: "https://example.com/article",
+        normalizedUrl: "https://example.com/article",
+        title: "Example Article",
+      },
+    });
+
+    const call = (sendDmCorrection as unknown as ReturnType<typeof mock>).mock.calls[0]!;
+    expect(call[5]).toBeUndefined();
+  });
+
   test("empty body: no send", async () => {
     const sendDmCorrection = mock(async () => undefined);
     const client = makeClient({ sendDmCorrection } as Partial<BrowserXmppClient>);

@@ -120,7 +120,7 @@ const emit = defineEmits<{
     linkPreview?: ComposerLinkPreviewSendPayload,
   ];
   typing: [];
-  editMessage: [messageId: string, newBody: string, markup?: MarkupSpan[], references?: MessageReference[]];
+  editMessage: [messageId: string, newBody: string, markup?: MarkupSpan[], references?: MessageReference[], linkPreview?: ComposerLinkPreviewSendPayload];
   retractMessage: [messageId: string];
   reactMessage: [messageId: string, emoji: string];
   editChannel: [];
@@ -1376,7 +1376,9 @@ function dayDividerLabel(createdAt: string): string {
             :invoke-extension-action="props.invokeExtensionAction"
             :is-pinned="isPinnedMessage(msg)"
             :can-pin-messages="currentUserCanPin"
-            @edit="(id, body, m, r) => emit('editMessage', id, body, m, r)"
+            :link-preview-lookup="linkPreviewLookup"
+            :link-preview-scope="linkPreviewScope"
+            @edit="(id, body, m, r, lp) => emit('editMessage', id, body, m, r, lp)"
             @retract="(id) => emit('retractMessage', id)"
             @react="(id, emoji) => emit('reactMessage', id, emoji)"
             @reply="beginReply"

@@ -149,6 +149,7 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
     references?: LiveRoomMessage["references"],
     extensionAnnotations?: LiveRoomMessage["extensionAnnotations"],
     extensionBodyFallback?: boolean,
+    linkPreviews?: LiveRoomMessage["linkPreviews"],
   ) {
     const candidateIndex = findMessageIndexById(messages.value, replacesId);
     if (candidateIndex < 0) return;
@@ -160,6 +161,8 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
     else delete updated.markup;
     if (references && references.length > 0) updated.references = references;
     else delete updated.references;
+    if (linkPreviews && linkPreviews.length > 0) updated.linkPreviews = linkPreviews;
+    else delete updated.linkPreviews;
     if (extensionAnnotations && extensionAnnotations.length > 0) {
       updated.extensionAnnotations = extensionAnnotations;
       if (extensionBodyFallback) updated.extensionBodyFallback = true;
@@ -274,6 +277,7 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
           classified.references,
           classified.extensionAnnotations,
           classified.extensionBodyFallback,
+          classified.linkPreviews,
         );
         break;
       case "live":

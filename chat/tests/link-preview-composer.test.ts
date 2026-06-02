@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
 import { effectScope, nextTick, ref } from "vue";
 import {
   composerLinkPreviewUrl,
@@ -370,11 +369,10 @@ describe("composer link preview state", () => {
     });
   });
 
-  test("MessageComposer disables mutable controls while preparing a send", () => {
-    const source = readFileSync(
+  test("MessageComposer disables mutable controls while preparing a send", async () => {
+    const source = await Bun.file(
       new URL("../src/components/chat/MessageComposer.vue", import.meta.url),
-      "utf8",
-    );
+    ).text();
 
     expect(source).toContain(":disabled=\"disabled || isSendBusy\"");
     expect(source).toContain(":disabled=\"disabled || slowModeCooldown > 0 || isPreparingSend\"");
@@ -387,6 +385,21 @@ describe("composer link preview state", () => {
     expect(source).toContain("watch(isPreparingSend, (preparing) => {\n  if (preparing) showGifPicker.value = false;");
     expect(source.match(/:disabled="disabled \|\| isPreparingSend"/g)?.length ?? 0).toBeGreaterThanOrEqual(4);
     expect(source.match(/:disabled="isPreparingSend"/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
+  });
+
+  test("MessageCard inline edits reuse composer preview lookup and emit payloads", async () => {
+    const source = await Bun.file(
+      new URL("../src/components/chat/MessageCard.vue", import.meta.url),
+    ).text();
+
+    expect(source).toContain("useComposerLinkPreview(");
+    expect(source).toContain("@update=\"updateEditDraft\"");
+    expect(source).toContain("editLinkPreview.sendPayloadFor(body)");
+    expect(source).toContain("if (!isEditing.value || editDraft.value !== draftAtSubmit) return;");
+    expect(source).toContain("originalPreviewUrl !== null && !body.includes(originalPreviewUrl)");
+    expect(source).not.toContain("originalPreviewUrl ?? \"\\0\"");
+    expect(source).toContain("emit(\"edit\", props.message.id, body, markup, references, linkPreview)");
+    expect(source).toContain("@click=\"editLinkPreview.dismiss\"");
   });
 });
 

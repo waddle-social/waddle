@@ -55,6 +55,7 @@ type ClassifiedRoomMessage =
       sender: { authorJid: string; authorRealJid?: string };
       markup?: MarkupSpan[];
       references?: MessageReference[];
+      linkPreviews?: LiveRoomMessage["linkPreviews"];
       extensionAnnotations?: LiveRoomMessage["extensionAnnotations"];
       extensionBodyFallback?: boolean;
     }
@@ -89,6 +90,7 @@ export function classifyRoomMessage(msg: LiveRoomMessage): ClassifiedRoomMessage
     };
     if (msg.markup && msg.markup.length > 0) out.markup = msg.markup;
     if (msg.references && msg.references.length > 0) out.references = msg.references;
+    if (msg.linkPreviews && msg.linkPreviews.length > 0) out.linkPreviews = msg.linkPreviews;
     if (msg.extensionAnnotations && msg.extensionAnnotations.length > 0) {
       out.extensionAnnotations = msg.extensionAnnotations;
     }

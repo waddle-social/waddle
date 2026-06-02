@@ -293,6 +293,7 @@ export function buildChannelTimelineFromMamResults(params: {
     body: string;
     markup?: MarkupSpan[];
     references?: MessageReference[];
+    linkPreviews?: LiveRoomMessage["linkPreviews"];
     extensionAnnotations?: LiveRoomMessage["extensionAnnotations"];
     extensionBodyFallback?: boolean;
   }[] = [];
@@ -319,6 +320,7 @@ export function buildChannelTimelineFromMamResults(params: {
         body: msg.body,
         markup: msg.markup,
         references: msg.references,
+        linkPreviews: msg.linkPreviews,
         extensionAnnotations: msg.extensionAnnotations,
         extensionBodyFallback: msg.extensionBodyFallback,
       });
@@ -384,6 +386,8 @@ export function buildChannelTimelineFromMamResults(params: {
     else delete target.markup;
     if (update.references && update.references.length > 0) target.references = update.references;
     else delete target.references;
+    if (update.linkPreviews && update.linkPreviews.length > 0) target.linkPreviews = update.linkPreviews;
+    else delete target.linkPreviews;
     if (update.extensionAnnotations && update.extensionAnnotations.length > 0) {
       target.extensionAnnotations = update.extensionAnnotations;
       if (update.extensionBodyFallback) target.extensionBodyFallback = true;

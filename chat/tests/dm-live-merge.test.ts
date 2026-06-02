@@ -120,6 +120,37 @@ describe("handleIncomingMessage typed dispatch", () => {
     expect(h.messages.value[0]?.isEdited).toBe(true);
   });
 
+  test("correction replaces stale link preview state", () => {
+    const h = harness();
+    h.messages.value = [
+      {
+        id: "m1",
+        body: "old https://old.example",
+        nick: "bob",
+        authorJid: "bob@example.com",
+        timestamp: 0,
+        linkPreviews: [{ originalUrl: "https://old.example", title: "Old" }],
+      } as TimelineMessage,
+    ];
+
+    h.liveMerge.handleIncomingMessage(makeLive({
+      replacesId: "m1",
+      body: "edited https://new.example",
+      fromJid: "bob@example.com",
+      linkPreviews: [{ originalUrl: "https://new.example", title: "New" }],
+    }));
+
+    expect(h.messages.value[0]?.linkPreviews).toEqual([{ originalUrl: "https://new.example", title: "New" }]);
+
+    h.liveMerge.handleIncomingMessage(makeLive({
+      replacesId: "m1",
+      body: "edited without preview",
+      fromJid: "bob@example.com",
+    }));
+
+    expect(h.messages.value[0]?.linkPreviews).toBeUndefined();
+  });
+
   test("plain message routes to mergeLiveMessage and appends", () => {
     const h = harness();
     const before = h.messages.value.length;

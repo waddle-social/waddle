@@ -280,6 +280,51 @@ describe("XEP-0424 tombstone replay", () => {
     expect(timeline[0]?.extensionBodyFallback).toBeUndefined();
   });
 
+  test("MAM channel corrections replace and clear link preview state", () => {
+    const existing: TimelineMessage = {
+      id: "original-message",
+      wireIds: ["room-stanza-1"],
+      author: "bob",
+      authorJid: "room@muc.example.com/bob",
+      body: "old https://old.example",
+      createdAt: "2026-05-08T13:00:00Z",
+      isSelf: false,
+      linkPreviews: [{ originalUrl: "https://old.example", title: "Old" }],
+    };
+    const correctionWithPreview: LiveRoomMessage = {
+      id: "edit-message",
+      roomJid: "room@muc.example.com",
+      nick: "bob",
+      body: "new https://new.example",
+      createdAt: "2026-05-08T13:01:00Z",
+      type: "message",
+      replacesId: "room-stanza-1",
+      linkPreviews: [{ originalUrl: "https://new.example", title: "New" }],
+    };
+    const correctionWithoutPreview: LiveRoomMessage = {
+      ...correctionWithPreview,
+      id: "edit-message-2",
+      body: "new without preview",
+      linkPreviews: undefined,
+    };
+
+    const withPreview = buildChannelTimelineFromMamResults({
+      session,
+      channelIsForum: false,
+      mamResults: [correctionWithPreview],
+      existing: [existing],
+    });
+    expect(withPreview[0]?.linkPreviews).toEqual([{ originalUrl: "https://new.example", title: "New" }]);
+
+    const withoutPreview = buildChannelTimelineFromMamResults({
+      session,
+      channelIsForum: false,
+      mamResults: [correctionWithoutPreview],
+      existing: [withPreview[0]!],
+    });
+    expect(withoutPreview[0]?.linkPreviews).toBeUndefined();
+  });
+
   test("updates an already-loaded direct message from a MAM tombstone", () => {
     const existing: TimelineMessage = {
       id: "dm-origin",
@@ -356,6 +401,49 @@ describe("XEP-0424 tombstone replay", () => {
     expect(timeline[0]?.isEdited).toBe(true);
     expect(timeline[0]?.extensionAnnotations).toEqual([extensionAnnotation]);
     expect(timeline[0]?.extensionBodyFallback).toBe(true);
+  });
+
+  test("MAM direct-message corrections replace and clear link preview state", () => {
+    const existing: TimelineMessage = {
+      id: "dm-origin",
+      author: "bob",
+      authorJid: "bob@example.com/mobile",
+      body: "old https://old.example",
+      createdAt: "2026-05-08T13:00:00Z",
+      isSelf: false,
+      linkPreviews: [{ originalUrl: "https://old.example", title: "Old" }],
+    };
+    const correctionWithPreview: LiveDmMessage = {
+      id: "dm-edit",
+      peerJid: "bob@example.com",
+      fromJid: "bob@example.com/mobile",
+      nick: "bob",
+      body: "new https://new.example",
+      createdAt: "2026-05-08T13:01:00Z",
+      type: "message",
+      replacesId: "dm-origin",
+      linkPreviews: [{ originalUrl: "https://new.example", title: "New" }],
+    };
+    const correctionWithoutPreview: LiveDmMessage = {
+      ...correctionWithPreview,
+      id: "dm-edit-2",
+      body: "new without preview",
+      linkPreviews: undefined,
+    };
+
+    const withPreview = buildDmTimelineFromMamResults({
+      session,
+      mamResults: [correctionWithPreview],
+      existing: [existing],
+    });
+    expect(withPreview[0]?.linkPreviews).toEqual([{ originalUrl: "https://new.example", title: "New" }]);
+
+    const withoutPreview = buildDmTimelineFromMamResults({
+      session,
+      mamResults: [correctionWithoutPreview],
+      existing: [withPreview[0]!],
+    });
+    expect(withoutPreview[0]?.linkPreviews).toBeUndefined();
   });
 
   test("scrubs a fresh direct-message tombstone before insertion", () => {
