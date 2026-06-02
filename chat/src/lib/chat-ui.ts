@@ -47,6 +47,7 @@ export interface LinkPreview {
   title?: string;
   description?: string;
   image?: LinkPreviewImage;
+  video?: LinkPreviewVideo;
   remoteMediaUnavailable?: boolean;
 }
 
@@ -58,12 +59,23 @@ export interface LinkPreviewImage {
   alt?: string;
 }
 
+/// Trusted direct playable video the client may inline-play on user action.
+export interface LinkPreviewVideo {
+  url: string;
+  mediaType: string;
+  size?: number;
+}
+
 export type LinkPreviewMediaState =
   | { kind: "none" }
   | { kind: "image"; image: LinkPreviewImage }
+  | { kind: "video"; video: LinkPreviewVideo; poster?: LinkPreviewImage }
   | { kind: "remote-unavailable" };
 
 export function linkPreviewMediaState(preview: LinkPreview): LinkPreviewMediaState {
+  if (preview.video) {
+    return { kind: "video", video: preview.video, ...(preview.image ? { poster: preview.image } : {}) };
+  }
   if (preview.image) return { kind: "image", image: preview.image };
   if (preview.remoteMediaUnavailable) return { kind: "remote-unavailable" };
   return { kind: "none" };

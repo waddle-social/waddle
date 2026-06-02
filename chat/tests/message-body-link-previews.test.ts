@@ -42,6 +42,64 @@ describe("MessageBody link previews", () => {
     expect(html).toContain("Remote preview media unavailable");
     expect(html).toContain("Remote article");
   });
+
+  test("renders a direct-video preview as an accessible play control without preloading the video", async () => {
+    const html = await renderMessageBody({
+      message: messageWithPreviews([
+        {
+          originalUrl: "https://cdn.example.com/clip.mp4",
+          normalizedUrl: "https://cdn.example.com/clip.mp4",
+          title: "A short clip",
+          video: { url: "https://cdn.example.com/clip.mp4", mediaType: "video/mp4", size: 4096 },
+        },
+      ]),
+    });
+
+    // Accessible play control exists.
+    expect(html).toContain("aria-label=\"Play video: A short clip\"");
+    // Playback starts only after user action: the <video> element (and its
+    // network-triggering src) MUST NOT be present in the initial render.
+    expect(html).not.toContain("<video");
+    expect(html).not.toContain("src=\"https://cdn.example.com/clip.mp4\"");
+    expect(html).toContain("A short clip");
+  });
+
+  test("renders the cached poster image for a direct-video preview when available", async () => {
+    const html = await renderMessageBody({
+      message: messageWithPreviews([
+        {
+          originalUrl: "https://cdn.example.com/clip.mp4",
+          normalizedUrl: "https://cdn.example.com/clip.mp4",
+          title: "Clip with poster",
+          video: { url: "https://cdn.example.com/clip.mp4", mediaType: "video/mp4" },
+          image: {
+            url: "https://waddle.example/api/files/11111111-1111-4111-8111-111111111111/link-preview.png",
+            mediaType: "image/png",
+            alt: "Poster frame",
+          },
+        },
+      ]),
+    });
+
+    expect(html).toContain('src="https://waddle.example/api/files/11111111-1111-4111-8111-111111111111/link-preview.png"');
+    expect(html).toContain("aria-label=\"Play video: Clip with poster\"");
+  });
+
+  test("escapes markup in a direct-video preview title — no arbitrary HTML/JS execution", async () => {
+    const html = await renderMessageBody({
+      message: messageWithPreviews([
+        {
+          originalUrl: "https://cdn.example.com/clip.mp4",
+          normalizedUrl: "https://cdn.example.com/clip.mp4",
+          title: "<script>alert('x')</script>",
+          video: { url: "https://cdn.example.com/clip.mp4", mediaType: "video/mp4" },
+        },
+      ]),
+    });
+
+    expect(html).not.toContain("<script>alert('x')</script>");
+    expect(html).toContain("&lt;script&gt;");
+  });
 });
 
 function messageWithPreviews(linkPreviews: TimelineMessage["linkPreviews"]): TimelineMessage {

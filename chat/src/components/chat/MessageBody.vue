@@ -5,7 +5,7 @@
 // suppresses interactive affordances that belong on the timeline only
 // (extension action buttons).
 //
-import { computed, ref, nextTick, watch } from "vue";
+import { computed, reactive, ref, nextTick, watch } from "vue";
 import {
   Lock,
   AlertCircle,
@@ -16,6 +16,7 @@ import {
   FileDown,
   Github,
   ExternalLink,
+  Play,
 } from "lucide-vue-next";
 import {
   extensionPresentation,
@@ -81,6 +82,29 @@ const linkPreviewCards = computed<LinkPreviewCard[]>(() =>
     mediaState: linkPreviewMediaState(preview),
   })),
 );
+// Info cards (text/image/unavailable) keep the whole-card anchor; video cards
+// render separately because they carry an interactive play control that must
+// not also navigate the link.
+const linkInfoCards = computed(() =>
+  linkPreviewCards.value.filter((card) => card.mediaState.kind !== "video"),
+);
+const videoPreviewCards = computed(() =>
+  linkPreviews.value.flatMap((preview) => {
+    const state = linkPreviewMediaState(preview);
+    return state.kind === "video"
+      ? [{ preview, video: state.video, ...(state.poster ? { poster: state.poster } : {}) }]
+      : [];
+  }),
+);
+function videoCardKey(preview: MessageLinkPreview): string {
+  return `${preview.originalUrl}:${preview.normalizedUrl ?? ""}`;
+}
+// Playback is local UI state only — never synchronized over XMPP. Until the
+// user clicks play, no <video> element (and no network fetch) is emitted.
+const playingVideos = reactive(new Set<string>());
+function startVideoPlayback(preview: MessageLinkPreview): void {
+  playingVideos.add(videoCardKey(preview));
+}
 const extensionCards = computed(() =>
   extensionAnnotations.value.map((annotation) => ({
     annotation,
@@ -227,7 +251,7 @@ watch(
          into a single horizontal action-chip strip beneath this block.
          No fat boxes fanning out below the message. -->
     <a
-      v-for="{ preview, mediaState } in linkPreviewCards"
+      v-for="{ preview, mediaState } in linkInfoCards"
       :key="`${preview.originalUrl}:${preview.normalizedUrl ?? ''}`"
       :href="linkPreviewHref(preview.originalUrl) ?? undefined"
       target="_blank"
@@ -259,6 +283,54 @@ watch(
       <span v-if="preview.title" class="type-field text-foreground">{{ preview.title }}</span>
       <span v-if="preview.description" class="type-caption line-clamp-2 text-muted-foreground">{{ preview.description }}</span>
     </a>
+
+    <!-- Trusted direct-video preview cards. Playback is local-only and starts
+         inline only after the user clicks play; the player element (and its
+         network fetch) is emitted only after that action. -->
+    <div
+      v-for="card in videoPreviewCards"
+      :key="`video:${videoCardKey(card.preview)}`"
+      class="flex max-w-xl flex-col gap-1 rounded-md border border-border bg-muted/40 p-3 text-left"
+    >
+      <span class="type-meta flex items-center gap-1 text-muted-foreground">
+        <ExternalLink aria-hidden="true" class="h-3.5 w-3.5" />
+        {{ linkPreviewHost(card.preview.originalUrl) }}
+      </span>
+      <video
+        v-if="playingVideos.has(videoCardKey(card.preview))"
+        :src="card.video.url"
+        class="max-h-72 w-full rounded border border-border bg-black"
+        controls
+        autoplay
+        playsinline
+        @click.stop
+      />
+      <button
+        v-else
+        type="button"
+        class="relative flex aspect-video w-full items-center justify-center overflow-hidden rounded border border-border bg-black/80 text-white transition-colors hover:bg-black"
+        :aria-label="`Play video${card.preview.title ? ': ' + card.preview.title : ''}`"
+        @click.stop.prevent="startVideoPlayback(card.preview)"
+      >
+        <img
+          v-if="card.poster"
+          :src="card.poster.url"
+          :alt="card.poster.alt ?? ''"
+          loading="lazy"
+          decoding="async"
+          class="absolute inset-0 h-full w-full object-cover"
+        />
+        <Play aria-hidden="true" class="relative h-10 w-10 drop-shadow" />
+      </button>
+      <a
+        :href="linkPreviewHref(card.preview.originalUrl) ?? undefined"
+        target="_blank"
+        rel="noopener noreferrer"
+        class="type-field text-foreground hover:underline"
+        @click.stop
+      >{{ card.preview.title ?? card.preview.originalUrl }}</a>
+      <span v-if="card.preview.description" class="type-caption line-clamp-2 text-muted-foreground">{{ card.preview.description }}</span>
+    </div>
 
     <section
       v-for="card in eventCards"

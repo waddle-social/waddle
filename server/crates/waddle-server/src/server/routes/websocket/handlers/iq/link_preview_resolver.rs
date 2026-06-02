@@ -1813,6 +1813,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn html_embed_page_at_video_extension_is_never_treated_as_direct_video() {
+        // A provider embed/iframe page (text/html) served at a video-looking URL
+        // must follow the HTML metadata path, never the direct-video path —
+        // content-type is authoritative, so no file-sharing stamping can result.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/clip.mp4"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                r#"<html><head>
+                      <meta property="og:title" content="Embedded player">
+                    </head><body><iframe src="https://provider.example/embed"></iframe></body></html>"#,
+                "text/html; charset=utf-8",
+            ))
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/clip.mp4", server.uri())).expect("url");
+
+        let LinkPreviewResolverOutcome::Ready(metadata) = resolve_link_preview(&url, &policy).await
+        else {
+            panic!("expected html metadata outcome");
+        };
+        assert!(
+            metadata.video.is_none(),
+            "html embed pages must never produce direct-video metadata"
+        );
+        assert_eq!(metadata.title.as_deref(), Some("Embedded player"));
+    }
+
+    #[tokio::test]
     async fn fetches_html_metadata_with_bounded_test_policy() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
