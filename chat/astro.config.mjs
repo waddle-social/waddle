@@ -6,17 +6,21 @@ import vue from "@astrojs/vue";
 import { resolveCommitSha } from "./scripts/resolve-commit-sha.mjs";
 
 const COMMIT_SHA = resolveCommitSha();
-
 // Faro Web SDK config is baked at build time via Vite `define` so the
-// bundled script knows where to POST beacons. Missing env vars degrade
-// to an empty string, which `initTelemetry()` treats as "telemetry
-// off" — no beacons leave the page. Set these in the Cloudflare Pages
-// build environment (or via `wrangler pages deploy --var ...`). The
-// URL is the "Send data" URL from the Grafana Cloud Frontend
-// Observability app, e.g.
-//   https://faro-collector-prod-eu-west-6.grafana.net/collect/<app-id>
-const FARO_URL = process.env.PUBLIC_FARO_URL ?? "";
+// bundled script knows where to POST beacons. The collector URL below
+// is the Grafana Cloud Frontend Observability "Send data" endpoint for
+// waddle-chat. It is enabled automatically for production deploys and
+// can be overridden explicitly for other environments.
+const DEFAULT_FARO_URL =
+  "https://faro-collector-prod-eu-west-6.grafana.net/collect/0eab89b00ec9f7cfd5c97e96636a3d20";
+const isProductionDeploy = process.env.CUENV_ENVIRONMENT === "production";
+const FARO_URL =
+  process.env.PUBLIC_FARO_URL ??
+  (isProductionDeploy ? DEFAULT_FARO_URL : "");
 const FARO_APP_NAME = process.env.PUBLIC_FARO_APP_NAME ?? "waddle-chat";
+const FARO_APP_VERSION = process.env.PUBLIC_FARO_APP_VERSION ?? "1.0.0";
+const FARO_ENVIRONMENT =
+  process.env.PUBLIC_FARO_ENVIRONMENT ?? (isProductionDeploy ? "production" : "");
 
 export default defineConfig({
   output: "server",
@@ -63,6 +67,8 @@ export default defineConfig({
       "import.meta.env.PUBLIC_COMMIT_SHA": JSON.stringify(COMMIT_SHA),
       "import.meta.env.PUBLIC_FARO_URL": JSON.stringify(FARO_URL),
       "import.meta.env.PUBLIC_FARO_APP_NAME": JSON.stringify(FARO_APP_NAME),
+      "import.meta.env.PUBLIC_FARO_APP_VERSION": JSON.stringify(FARO_APP_VERSION),
+      "import.meta.env.PUBLIC_FARO_ENVIRONMENT": JSON.stringify(FARO_ENVIRONMENT),
     },
     resolve: {
       alias: {

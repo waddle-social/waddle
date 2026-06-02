@@ -925,7 +925,7 @@ export class BrowserXmppClient {
     this.clearReconnectTimer();
     this.connectPromise = withSpan(
       "xmpp.connect",
-      { "waddle.xmpp.jid": this.session.jid, "waddle.xmpp.transport": "websocket" },
+      { "waddle.xmpp.transport": "websocket" },
       () => new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(() => {
           this.connectPromise = null;

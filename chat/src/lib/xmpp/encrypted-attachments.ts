@@ -1,3 +1,4 @@
+import { markSensitiveUrlForTelemetry } from "@/lib/telemetry";
 import type { WaddleEncryptedFile } from "./extensions/encrypted-file";
 
 const AES_GCM_NAME = "AES-GCM";
@@ -172,9 +173,10 @@ export async function decryptEncryptedAttachment(
     let lastError: unknown;
     for (const url of sourceUrls(attachment)) {
       try {
+        markSensitiveUrlForTelemetry(url);
         const response = await fetch(url);
         if (!response.ok) {
-          throw new Error(`Failed to fetch encrypted attachment: ${response.status} ${response.statusText}`);
+          throw new Error(`Failed to fetch encrypted attachment with HTTP ${response.status}`);
         }
         const ciphertext = await response.arrayBuffer();
         const plaintext = await decryptCiphertext(ciphertext, attachment.encrypted);

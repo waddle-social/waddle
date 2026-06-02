@@ -29,6 +29,36 @@ const ERROR_KIND_MAP: Record<XmppErrorKind, ErrorKind> = {
   "history": "xmpp.stream",
   "member-query": "xmpp.stream",
 };
+const XMPP_ERROR_CONDITIONS = new Set([
+  "bad-format",
+  "bad-namespace-prefix",
+  "conflict",
+  "connection-timeout",
+  "forbidden",
+  "host-gone",
+  "host-unknown",
+  "improper-addressing",
+  "internal-server-error",
+  "invalid-from",
+  "invalid-namespace",
+  "invalid-xml",
+  "item-not-found",
+  "not-authorized",
+  "not-well-formed",
+  "policy-violation",
+  "remote-connection-failed",
+  "reset",
+  "resource-constraint",
+  "restricted-xml",
+  "see-other-host",
+  "service-unavailable",
+  "system-shutdown",
+  "undefined-condition",
+  "unsupported-encoding",
+  "unsupported-feature",
+  "unsupported-stanza-type",
+  "unsupported-version",
+]);
 
 export function installInstrumentation(client: BrowserXmppClient): void {
   client.onMessageAcked((id, meta) => {
@@ -43,7 +73,6 @@ export function installInstrumentation(client: BrowserXmppClient): void {
   client.onStatus((status, meta) => {
     reportStatusChange({
       state: status.state,
-      detail: status.detail,
       reconnectDurationMs: meta.reconnectDurationMs,
     });
   });
@@ -55,11 +84,13 @@ export function installInstrumentation(client: BrowserXmppClient): void {
   });
   client.onError((event) => {
     const kind = ERROR_KIND_MAP[event.kind];
-    const cause = event.cause ?? new Error(event.detail);
+    const condition = telemetryCondition(event.condition);
+    const detail = telemetryErrorDetail(event, condition);
+    const cause = new Error(detail);
     reportError(kind, cause, {
       recoverable: event.recoverable,
-      detail: event.detail,
-      ...(event.condition ? { condition: event.condition } : {}),
+      detail,
+      ...(condition ? { condition } : {}),
     });
   });
   // Background-tab RESULT_CODE_HUNG investigation (observe-only). These
@@ -68,4 +99,33 @@ export function installInstrumentation(client: BrowserXmppClient): void {
   client.onReconnectScheduled((info) => reportReconnectScheduled(info));
   client.onCatchup((info) => reportCatchup(info));
   client.onResumeDrain((info) => reportResumeDrain(info));
+}
+
+function telemetryErrorDetail(event: {
+  kind: XmppErrorKind;
+  detail: string;
+  condition?: string;
+}, condition: string | undefined): string {
+  switch (event.kind) {
+    case "auth":
+      return "auth-error";
+    case "connect-timeout":
+      return event.detail.includes("self-presence")
+        ? "room-self-presence-timeout"
+        : "connect-timeout";
+    case "history":
+      return "reconnect-catchup-failed";
+    case "member-query":
+      if (event.detail === "missing list_room_members") return "missing-list-room-members";
+      return condition ? `member-query-${condition}` : "member-query-failed";
+    case "stream":
+      return condition ? `stream-${condition}` : "stream-error";
+  }
+}
+
+function telemetryCondition(condition: string | undefined): string | undefined {
+  if (!condition) return undefined;
+  const normalized = condition.trim().toLowerCase();
+  if (!normalized) return undefined;
+  return XMPP_ERROR_CONDITIONS.has(normalized) ? normalized : "unknown";
 }

@@ -138,7 +138,7 @@ function readEntries(selfBareJid: string): CachedDmCallJoin[] {
     reportError("storage.read", err, {
       recoverable: true,
       detail: "dm call join cache read failed",
-      key,
+      storage_area: "dm-call-join-cache",
     });
     return [];
   }
@@ -158,7 +158,7 @@ function writeEntries(selfBareJid: string, entries: CachedDmCallJoin[]): void {
     reportError("storage.write", err, {
       recoverable: true,
       detail: "dm call join cache write failed",
-      key,
+      storage_area: "dm-call-join-cache",
     });
   }
 }
@@ -172,7 +172,7 @@ function removeKey(key: string): void {
     reportError("storage.write", err, {
       recoverable: true,
       detail: "dm call join cache clear failed",
-      key,
+      storage_area: "dm-call-join-cache",
     });
   }
 }

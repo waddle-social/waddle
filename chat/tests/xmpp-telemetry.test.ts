@@ -2,9 +2,16 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import type { WaddleSession } from "../src/lib/server-auth";
 import { BrowserXmppClient } from "../src/lib/xmpp-client";
 import {
+  __clearSensitiveUrlsForTesting,
+  __scrubMissingFetchSpanUrlForTesting,
+  __scrubSpanUrlForTesting,
+  __scrubXhrSpanUrlForTesting,
+  __sanitizeFaroTransportItemForTesting,
   __setFaroForTesting,
   initTelemetry,
+  markSensitiveUrlForTelemetry,
   reportCatchup,
+  reportError,
   reportMessageAcked,
   reportMessageFailed,
   reportQueueDepthChange,
@@ -97,11 +104,13 @@ beforeEach(() => {
   } as Window & { localStorage: typeof storage };
   localStorage.clear();
   __setFaroForTesting(null);
+  __clearSensitiveUrlsForTesting();
 });
 
 afterEach(() => {
   localStorage.clear();
   __setFaroForTesting(null);
+  __clearSensitiveUrlsForTesting();
   if (originalLocalStorage === undefined) {
     Reflect.deleteProperty(globalThis, "localStorage");
   } else {
@@ -146,7 +155,7 @@ describe("telemetry module no-op behaviour", () => {
     reportSendEnqueued({ kind: "dm", reason: "offline" });
     reportQueueDepthChange({ persisted: 2, inflight: 1 });
     reportSessionLifecycle({ type: "resumed" });
-    reportStatusChange({ state: "reconnecting", detail: "lost" });
+    reportStatusChange({ state: "reconnecting" });
     reportStatusChange({ state: "online", reconnectDurationMs: 4_321 });
     reportReconnectScheduled({ attempt: 3, delayMs: 8_000 });
     reportCatchup({
@@ -169,6 +178,10 @@ describe("telemetry module no-op behaviour", () => {
       "chat.xmpp.status",
       "chat.xmpp.reconnect.scheduled",
     ]);
+    expect(stub.events[0].attributes).toEqual({ kind: "room" });
+    expect(stub.events[1].attributes).toEqual({ kind: "dm" });
+    expect(stub.events[4].attributes).toEqual({ state: "reconnecting" });
+    expect(stub.events[6].attributes).toEqual({ visibility: "visible", hidden_bucket: "visible" });
 
     const measurementTypes = stub.measurements.map((m) => m.type);
     expect(measurementTypes).toEqual([
@@ -217,6 +230,232 @@ describe("telemetry module no-op behaviour", () => {
     const resumeDrain = stub.measurements[5];
     expect(resumeDrain.values).toEqual({ buffered: 5, duration_ms: 12, hidden_ms: 0 });
     expect(resumeDrain.context).toEqual({ visibility: "visible", hidden_bucket: "visible" });
+  });
+
+  test("reportError drops identifier-bearing context fields", () => {
+    const stub = createFaroStub();
+    __setFaroForTesting(stub as never);
+
+    reportError("storage.read", new Error("boom"), {
+      recoverable: true,
+      detail: "storage failed",
+      accountKey: "alice@example.com",
+      api_key: "secret",
+      jid: "alice@example.com/desktop",
+      key: "waddle.chat.sm-resume.alice@example.com",
+      note: "download /api/files/slot-1/file.png?waddle_session_id=tok",
+      queueSize: 2,
+      storage_area: "outbound-queue",
+      storageKey: "waddle.chat.outbound.alice@example.com",
+    });
+
+    expect(stub.errors).toHaveLength(1);
+    expect(stub.errors[0].options?.context).toEqual({
+      kind: "storage.read",
+      recoverable: "true",
+      detail: "storage failed",
+      note: "download /api/files/:slot/:file?waddle_session_id=:redacted",
+      queueSize: "2",
+      storage_area: "outbound-queue",
+    });
+  });
+
+  test("transport sanitizer replaces Faro page URLs with route templates", () => {
+    let currentUrl = new URL("https://chat.example/dm/alice?thread=secret-thread#waddle_session_id=tok");
+    const location = {
+      get href() { return currentUrl.href; },
+      get origin() { return currentUrl.origin; },
+      get pathname() { return currentUrl.pathname; },
+      get search() { return currentUrl.search; },
+      get hash() { return currentUrl.hash; },
+    } as Location;
+    (globalThis as typeof globalThis & { window: Window }).window = {
+      ...(originalWindow ?? {}),
+      location,
+    } as Window;
+
+    const sanitized = __sanitizeFaroTransportItemForTesting({
+      type: "event",
+      payload: {},
+      meta: {
+        page: {
+          id: currentUrl.href,
+          url: currentUrl.href,
+          attributes: {
+            referrer: "https://chat.example/api/files/slot-1/file.png?waddle_session_id=tok",
+          },
+        },
+      },
+    } as never);
+
+    expect(sanitized.meta.page).toEqual({
+      id: "/dm/:user",
+      url: "https://chat.example/dm/:user",
+      attributes: {
+        referrer: "https://chat.example/api/files/:slot/:file?waddle_session_id=:redacted",
+      },
+    });
+
+    currentUrl = new URL("https://chat.example/r/general/x/polls/results?pinned=1&thread=reply");
+    expect(__sanitizeFaroTransportItemForTesting({ payload: {}, meta: {} } as never).meta.page).toEqual({
+      id: "/r/:room/x/:plugin/:route",
+      url: "https://chat.example/r/:room/x/:plugin/:route",
+      attributes: undefined,
+    });
+  });
+
+  test("span URL scrubber redacts untrusted XEP file-transfer URLs", () => {
+    expect(__scrubSpanUrlForTesting(
+      "https://uploads.example/signed/slot-secret/file.png?token=secret#fragment",
+      ["https://chat.example", "https://xmpp.example"],
+    )).toBe("external:unknown");
+
+    expect(__scrubSpanUrlForTesting(
+      "https://xmpp.example/api/messages?session_id=tok#fragment",
+      ["https://xmpp.example"],
+    )).toBe("https://xmpp.example/api/:endpoint");
+
+    expect(__scrubSpanUrlForTesting(
+      "https://chat.example/api/files/slot-1/file.png?download=1",
+      ["https://chat.example"],
+    )).toBe("https://chat.example/api/files/:slot/:file");
+
+    expect(__scrubSpanUrlForTesting(
+      "https://chat.example/dm/alice?thread=secret-thread",
+      ["https://chat.example"],
+    )).toBe("https://chat.example/dm/:user");
+
+    expect(__scrubSpanUrlForTesting(
+      "https://chat.example/r/general/x/polls/results?pinned=1&thread=reply",
+      ["https://chat.example"],
+    )).toBe("https://chat.example/r/:room/x/:plugin/:route");
+
+    markSensitiveUrlForTelemetry("https://chat.example/signed-upload/slot-secret/file.png?token=secret");
+    expect(__scrubSpanUrlForTesting(
+      "https://chat.example/signed-upload/slot-secret/file.png?token=secret",
+      ["https://chat.example"],
+    )).toBe("file-transfer:unknown");
+
+    expect(__scrubXhrSpanUrlForTesting("", ["https://chat.example"])).toEqual({
+      "http.host": ":redacted",
+      "http.target": ":unknown",
+      "http.url": "xhr:unknown",
+      "server.address": ":redacted",
+      "server.port": 0,
+      "url.full": "xhr:unknown",
+      "url.path": ":unknown",
+    });
+
+    expect(__scrubMissingFetchSpanUrlForTesting()).toEqual({
+      "http.host": ":redacted",
+      "http.target": ":unknown",
+      "http.url": "fetch:unknown",
+      "server.address": ":redacted",
+      "server.port": 0,
+      "url.full": "fetch:unknown",
+      "url.path": ":unknown",
+    });
+  });
+
+  test("transport sanitizer redacts finalized trace span URL attributes", () => {
+    const currentUrl = new URL("https://chat.example/r/general");
+    (globalThis as typeof globalThis & { window: Window }).window = {
+      ...(originalWindow ?? {}),
+      location: {
+        get href() { return currentUrl.href; },
+        get origin() { return currentUrl.origin; },
+        get pathname() { return currentUrl.pathname; },
+      } as Location,
+    } as Window;
+
+    const sanitized = __sanitizeFaroTransportItemForTesting({
+      type: "trace",
+      payload: {
+        resourceSpans: [{
+          scopeSpans: [{
+            spans: [{
+              attributes: [
+                { key: "http.url", value: { stringValue: "https://uploads.example/signed/slot-secret/file.png?token=secret" } },
+                { key: "url.full", value: { stringValue: "https://uploads.example/signed/slot-secret/file.png?token=secret" } },
+                { key: "http.host", value: { stringValue: "uploads.example" } },
+                { key: "http.target", value: { stringValue: "/signed/slot-secret/file.png?token=secret" } },
+                { key: "http.status_text", value: { stringValue: "Signed URL expired for slot-secret" } },
+                { key: "server.address", value: { stringValue: "uploads.example" } },
+                { key: "server.port", value: { intValue: 443 } },
+                { key: "url.path", value: { stringValue: "/signed/slot-secret/file.png" } },
+                { key: "url.query", value: { stringValue: "token=secret" } },
+              ],
+            }],
+          }],
+        }],
+      },
+      meta: {},
+    } as never) as unknown as {
+      payload: {
+        resourceSpans: Array<{
+          scopeSpans: Array<{
+            spans: Array<{
+              attributes: Array<{ key: string; value: { stringValue?: string; intValue?: number } }>;
+            }>;
+          }>;
+        }>;
+      };
+    };
+
+    const attributes = Object.fromEntries(
+      sanitized.payload.resourceSpans[0].scopeSpans[0].spans[0].attributes.map((attr) => [
+        attr.key,
+        attr.value.stringValue ?? attr.value.intValue,
+      ]),
+    );
+    expect(attributes).toEqual({
+      "http.host": ":redacted",
+      "http.status_text": ":redacted",
+      "http.target": ":unknown",
+      "http.url": "external:unknown",
+      "server.address": ":redacted",
+      "server.port": 0,
+      "url.full": "external:unknown",
+      "url.path": ":unknown",
+      "url.query": ":redacted",
+    });
+  });
+
+  test("transport sanitizer redacts synthetic Faro trace event attributes", () => {
+    const sanitized = __sanitizeFaroTransportItemForTesting({
+      type: "event",
+      payload: {
+        name: "faro.tracing.fetch",
+        attributes: {
+          "http.host": "uploads.example",
+          "http.status_text": "Signed URL expired for slot-secret",
+          "http.target": "/signed/slot-secret/file.png?token=secret",
+          "http.url": "https://uploads.example/signed/slot-secret/file.png?token=secret",
+          "server.address": "uploads.example",
+          "server.port": "443",
+          "url.full": "https://uploads.example/signed/slot-secret/file.png?token=secret",
+          "url.path": "/signed/slot-secret/file.png",
+          "url.query": "token=secret",
+          peer: "bob@example.com/phone",
+        },
+      },
+      meta: {},
+    } as never) as unknown as {
+      payload: { attributes: Record<string, string> };
+    };
+
+    expect(sanitized.payload.attributes).toEqual({
+      "http.host": ":redacted",
+      "http.status_text": ":redacted",
+      "http.target": ":unknown",
+      "http.url": "external:unknown",
+      "server.address": ":redacted",
+      "server.port": "0",
+      "url.full": "external:unknown",
+      "url.path": ":unknown",
+      "url.query": ":redacted",
+      peer: ":jid",
+    });
   });
 });
 
@@ -409,7 +648,7 @@ describe("BrowserXmppClient telemetry hooks", () => {
 
     const internal = client as unknown as {
       emitError: (event: {
-        kind: "stream" | "auth" | "connect-timeout";
+        kind: "stream" | "auth" | "connect-timeout" | "member-query";
         recoverable: boolean;
         detail: string;
         cause?: unknown;
@@ -441,23 +680,38 @@ describe("BrowserXmppClient telemetry hooks", () => {
       recoverable: true,
       detail: "Rust client reconnect stalled past 15s; discarding agent",
     });
+    internal.emitError({
+      kind: "member-query",
+      recoverable: true,
+      detail: "affiliation query failed for owner",
+      condition: "room@example.com",
+    });
 
-    expect(stub.errors).toHaveLength(3);
+    expect(stub.errors).toHaveLength(4);
 
     const streamErr = stub.errors[0];
-    expect(streamErr.error).toBe(streamCause);
+    expect(streamErr.error).not.toBe(streamCause);
+    expect(streamErr.error.message).toBe("stream-not-authorized");
     expect(streamErr.options?.type).toBe("xmpp.stream");
     expect(streamErr.options?.context?.kind).toBe("xmpp.stream");
     expect(streamErr.options?.context?.recoverable).toBe("false");
+    expect(streamErr.options?.context?.detail).toBe("stream-not-authorized");
     expect(streamErr.options?.context?.condition).toBe("not-authorized");
 
     const authErr = stub.errors[1];
     expect(authErr.options?.type).toBe("xmpp.auth");
     expect(authErr.options?.context?.recoverable).toBe("false");
+    expect(authErr.options?.context?.detail).toBe("auth-error");
 
     const timeoutErr = stub.errors[2];
     expect(timeoutErr.options?.type).toBe("xmpp.disconnect");
     expect(timeoutErr.options?.context?.recoverable).toBe("true");
+    expect(timeoutErr.options?.context?.detail).toBe("connect-timeout");
+
+    const memberErr = stub.errors[3];
+    expect(memberErr.options?.type).toBe("xmpp.stream");
+    expect(memberErr.options?.context?.condition).toBe("unknown");
+    expect(memberErr.options?.context?.detail).toBe("member-query-unknown");
   });
 
   test("enqueuing a send fires onSendEnqueued + onQueueDepthChange", async () => {
