@@ -17,7 +17,7 @@
 
 use minidom::Element;
 
-use super::xep0004::{DataForm, Field, FormType, IntoElement};
+use super::xep0004::{DataForm, Field, FieldType, FormType, IntoElement};
 use crate::pubsub::stanzas::PubSubItem;
 use crate::xep::xep0402;
 use crate::{managed_room_jid, ChannelInfo, ChannelType, SpaceDetails, XmppError};
@@ -98,6 +98,19 @@ pub fn build_spaces_metadata_form_for_requester(
     space: &SpaceDetails,
     requester_affiliation: Option<SpaceAffiliation>,
 ) -> Element {
+    build_spaces_metadata_form_for_requester_with_owners(
+        space,
+        requester_affiliation,
+        std::slice::from_ref(&space.owner_id),
+    )
+}
+
+/// Build a rich `pubsub#meta-data` form with explicit owner JIDs.
+pub fn build_spaces_metadata_form_for_requester_with_owners(
+    space: &SpaceDetails,
+    requester_affiliation: Option<SpaceAffiliation>,
+    owner_jids: &[String],
+) -> Element {
     let mut form = DataForm::new(FormType::Result)
         .add_field(Field::form_type(
             "http://jabber.org/protocol/pubsub#meta-data",
@@ -109,8 +122,23 @@ pub fn build_spaces_metadata_form_for_requester(
         form = form.add_field(Field::text_single("pubsub#description", desc));
     }
 
+    let owners = if owner_jids.is_empty() {
+        vec![space.owner_id.clone()]
+    } else {
+        owner_jids.to_vec()
+    };
+    let creator = owners
+        .first()
+        .cloned()
+        .unwrap_or_else(|| space.owner_id.clone());
+    let mut owner_field = Field::new("pubsub#owner", FieldType::JidMulti);
+    for owner in &owners {
+        owner_field = owner_field.add_value(owner);
+    }
+
     form = form
-        .add_field(Field::text_single("pubsub#owner", &space.owner_id))
+        .add_field(Field::new("pubsub#creator", FieldType::JidSingle).with_value(&creator))
+        .add_field(owner_field)
         .add_field(Field::text_single(
             "pubsub#creation_date",
             &space.created_at,
@@ -239,7 +267,7 @@ mod tests {
             id: "space-1".to_string(),
             name: "My Space".to_string(),
             description: Some("A test space".to_string()),
-            owner_id: "alice".to_string(),
+            owner_id: "alice@example.com".to_string(),
             icon_url: None,
             is_public: true,
             access_model: crate::SpaceAccessModel::Open,
@@ -419,9 +447,10 @@ mod tests {
         assert_eq!(form.attr("type"), Some("result"));
 
         let fields: Vec<&Element> = form.children().collect();
-        // FORM_TYPE, pubsub#type, pubsub#title, pubsub#description, pubsub#owner,
-        // pubsub#creation_date, pubsub#access_model
-        assert_eq!(fields.len(), 7);
+        // FORM_TYPE, pubsub#type, pubsub#title, pubsub#description,
+        // pubsub#creator, pubsub#owner, pubsub#creation_date,
+        // pubsub#access_model.
+        assert_eq!(fields.len(), 8);
 
         // FORM_TYPE
         assert_eq!(fields[0].attr("var"), Some("FORM_TYPE"));
@@ -442,19 +471,26 @@ mod tests {
         let desc_val: String = fields[3].children().next().unwrap().texts().collect();
         assert_eq!(desc_val, "A test space");
 
+        // pubsub#creator
+        assert_eq!(fields[4].attr("var"), Some("pubsub#creator"));
+        assert_eq!(fields[4].attr("type"), Some("jid-single"));
+        let creator_val: String = fields[4].children().next().unwrap().texts().collect();
+        assert_eq!(creator_val, "alice@example.com");
+
         // pubsub#owner
-        assert_eq!(fields[4].attr("var"), Some("pubsub#owner"));
-        let owner_val: String = fields[4].children().next().unwrap().texts().collect();
-        assert_eq!(owner_val, "alice");
+        assert_eq!(fields[5].attr("var"), Some("pubsub#owner"));
+        assert_eq!(fields[5].attr("type"), Some("jid-multi"));
+        let owner_val: String = fields[5].children().next().unwrap().texts().collect();
+        assert_eq!(owner_val, "alice@example.com");
 
         // pubsub#creation_date
-        assert_eq!(fields[5].attr("var"), Some("pubsub#creation_date"));
-        let date_val: String = fields[5].children().next().unwrap().texts().collect();
+        assert_eq!(fields[6].attr("var"), Some("pubsub#creation_date"));
+        let date_val: String = fields[6].children().next().unwrap().texts().collect();
         assert_eq!(date_val, "2026-01-15T10:00:00Z");
 
         // pubsub#access_model = open (public space)
-        assert_eq!(fields[6].attr("var"), Some("pubsub#access_model"));
-        let access_val: String = fields[6].children().next().unwrap().texts().collect();
+        assert_eq!(fields[7].attr("var"), Some("pubsub#access_model"));
+        let access_val: String = fields[7].children().next().unwrap().texts().collect();
         assert_eq!(access_val, "open");
     }
 
@@ -468,8 +504,9 @@ mod tests {
         let form = build_spaces_metadata_form(&space);
         let fields: Vec<&Element> = form.children().collect();
 
-        // Without description: FORM_TYPE, type, title, owner, creation_date, access_model
-        assert_eq!(fields.len(), 6);
+        // Without description: FORM_TYPE, type, title, creator, owner,
+        // creation_date, access_model.
+        assert_eq!(fields.len(), 7);
 
         // Last field: pubsub#access_model = whitelist (private space)
         let last = fields.last().unwrap();

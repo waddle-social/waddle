@@ -127,7 +127,7 @@ pub(crate) fn get_space_details(domain: &str) -> SpaceDetails {
         id: "space".to_string(),
         name: domain.to_string(),
         description: None,
-        owner_id: "server".to_string(),
+        owner_id: format!("spaces.{domain}"),
         icon_url: None,
         is_public: true,
         access_model: SpaceAccessModel::Open,

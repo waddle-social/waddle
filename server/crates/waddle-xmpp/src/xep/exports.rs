@@ -434,7 +434,8 @@ pub use super::xep0503::{
     build_room_metadata_form, build_room_space_metadata_forms,
     build_room_space_metadata_forms_with_description, build_server_role_form, build_space_node_iri,
     build_space_parent_form, build_spaces_metadata_form, build_spaces_metadata_form_for_requester,
-    build_spaces_type_form, SpaceAffiliation, NS_SPACES, NS_WADDLE_ROOM_METADATA,
+    build_spaces_metadata_form_for_requester_with_owners, build_spaces_type_form, SpaceAffiliation,
+    NS_SPACES, NS_WADDLE_ROOM_METADATA,
 };
 
 pub use super::xep0511::{

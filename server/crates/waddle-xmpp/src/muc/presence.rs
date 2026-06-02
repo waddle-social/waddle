@@ -5,9 +5,6 @@
 
 use jid::{BareJid, FullJid, Jid};
 use minidom::Element;
-use xmpp_parsers::muc::user::{
-    Affiliation as MucAffiliation, Item, MucUser, Role as MucRole, Status,
-};
 use xmpp_parsers::presence::{Presence, Type as PresenceType};
 
 use crate::types::{Affiliation, Role};
@@ -27,6 +24,26 @@ fn affiliation_token(aff: Affiliation) -> &'static str {
         Affiliation::Outcast => "outcast",
         Affiliation::None => "none",
     }
+}
+
+fn role_token(role: Role) -> &'static str {
+    match role {
+        Role::Moderator => "moderator",
+        Role::Participant => "participant",
+        Role::Visitor => "visitor",
+        Role::None => "none",
+    }
+}
+
+fn muc_status_codes(occupant_real_jid: Option<&FullJid>, is_self: bool) -> Vec<&'static str> {
+    let mut statuses = Vec::new();
+    if occupant_real_jid.is_some() {
+        statuses.push("100");
+    }
+    if is_self {
+        statuses.push("110");
+    }
+    statuses
 }
 
 /// Build the `<item>` child of an `<x xmlns='muc#user'>` payload with
@@ -158,40 +175,11 @@ fn add_muc_user_payload(
     is_self: bool,
     occupant_real_jid: Option<&FullJid>,
 ) {
-    // Build the MUC user element
-    let mut statuses = Vec::new();
-
-    if occupant_real_jid.is_some() {
-        // Status code 100: occupants can see real JIDs in this non-anonymous room.
-        statuses.push(Status::NonAnonymousRoom);
-    }
-
-    if is_self {
-        // Status code 110: self-presence (tells client this is about themselves)
-        statuses.push(Status::SelfPresence);
-    }
-
-    // Build the item element
-    let item = Item {
-        affiliation: affiliation_to_muc(affiliation),
-        role: role_to_muc(role),
-        jid: occupant_real_jid.cloned(),
-        nick: None,
-        actor: None,
-        continue_: None,
-        reason: None,
-    };
-
-    let muc_user = MucUser {
-        status: statuses,
-        items: vec![item],
-        invite: None,
-        decline: None,
-    };
-
-    // Convert MucUser to Element and add to payloads
-    let muc_element: Element = muc_user.into();
-    presence.payloads.push(muc_element);
+    let item = build_muc_user_item(affiliation, role_token(role), occupant_real_jid, None, None);
+    presence.payloads.push(build_muc_user_x_element(
+        item,
+        &muc_status_codes(occupant_real_jid, is_self),
+    ));
 }
 
 fn strip_server_controlled_presence_payloads(presence: &mut Presence) {
@@ -264,27 +252,6 @@ fn add_presence_identity_payloads(
         identity.secret,
     );
     crate::xep::xep0421::set_occupant_id_on_presence(presence, &occupant_id);
-}
-
-/// Convert internal Affiliation to xmpp_parsers MUC Affiliation.
-fn affiliation_to_muc(aff: Affiliation) -> MucAffiliation {
-    match aff {
-        Affiliation::Owner => MucAffiliation::Owner,
-        Affiliation::Admin => MucAffiliation::Admin,
-        Affiliation::Member => MucAffiliation::Member,
-        Affiliation::None => MucAffiliation::None,
-        Affiliation::Outcast => MucAffiliation::Outcast,
-    }
-}
-
-/// Convert internal Role to xmpp_parsers MUC Role.
-fn role_to_muc(role: Role) -> MucRole {
-    match role {
-        Role::Moderator => MucRole::Moderator,
-        Role::Participant => MucRole::Participant,
-        Role::Visitor => MucRole::Visitor,
-        Role::None => MucRole::None,
-    }
 }
 
 /// Build a kick presence notification (role changed to none).
@@ -425,33 +392,17 @@ pub fn build_affiliation_change_presence(
     presence.from = Some(Jid::from(from_room_jid.clone()));
     presence.to = Some(Jid::from(to_jid.clone()));
 
-    let mut statuses = Vec::new();
-    if identity.real_jid.is_some() {
-        statuses.push(Status::NonAnonymousRoom);
-    }
-    if is_self {
-        statuses.push(Status::SelfPresence);
-    }
-
-    let item = Item {
-        affiliation: affiliation_to_muc(new_affiliation),
-        role: role_to_muc(role),
-        jid: identity.real_jid.cloned(),
-        nick: None,
-        actor: None,
-        continue_: None,
-        reason: None,
-    };
-
-    let muc_user = MucUser {
-        status: statuses,
-        items: vec![item],
-        invite: None,
-        decline: None,
-    };
-
-    let muc_element: Element = muc_user.into();
-    presence.payloads.push(muc_element);
+    let item = build_muc_user_item(
+        new_affiliation,
+        role_token(role),
+        identity.real_jid,
+        None,
+        None,
+    );
+    presence.payloads.push(build_muc_user_x_element(
+        item,
+        &muc_status_codes(identity.real_jid, is_self),
+    ));
     add_presence_identity_payloads(&mut presence, from_room_jid, identity);
 
     presence
@@ -481,33 +432,17 @@ pub fn build_role_change_presence(
     presence.from = Some(Jid::from(from_room_jid.clone()));
     presence.to = Some(Jid::from(to_jid.clone()));
 
-    let mut statuses = Vec::new();
-    if identity.real_jid.is_some() {
-        statuses.push(Status::NonAnonymousRoom);
-    }
-    if is_self {
-        statuses.push(Status::SelfPresence);
-    }
-
-    let item = Item {
-        affiliation: affiliation_to_muc(affiliation),
-        role: role_to_muc(new_role),
-        jid: identity.real_jid.cloned(),
-        nick: None,
-        actor: None,
-        continue_: None,
-        reason: None,
-    };
-
-    let muc_user = MucUser {
-        status: statuses,
-        items: vec![item],
-        invite: None,
-        decline: None,
-    };
-
-    let muc_element: Element = muc_user.into();
-    presence.payloads.push(muc_element);
+    let item = build_muc_user_item(
+        affiliation,
+        role_token(new_role),
+        identity.real_jid,
+        None,
+        None,
+    );
+    presence.payloads.push(build_muc_user_x_element(
+        item,
+        &muc_status_codes(identity.real_jid, is_self),
+    ));
     add_presence_identity_payloads(&mut presence, from_room_jid, identity);
 
     presence

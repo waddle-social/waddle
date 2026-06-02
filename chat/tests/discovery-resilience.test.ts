@@ -332,6 +332,16 @@ function resilientClient(options: ResilientClientOptions = {}) {
             ],
           });
         }
+        if (xml.includes('to="spaces.example.test"') && xml.includes(' node=')) {
+          return discoInfoXml({
+            identities: [{ category: "pubsub", type: "leaf", name: "Engineering" }],
+            features: ["http://jabber.org/protocol/pubsub", "urn:xmpp:spaces:0"],
+            fields: {
+              FORM_TYPE: "http://jabber.org/protocol/pubsub#meta-data",
+              "pubsub#type": "urn:xmpp:spaces:0",
+            },
+          });
+        }
         if (xml.includes('to="general@muc.example.test"') || xml.includes('to="broken@muc.example.test"')) {
           return discoInfoXml({
             identities: [{ category: "conference", type: "text", name: "Room" }],

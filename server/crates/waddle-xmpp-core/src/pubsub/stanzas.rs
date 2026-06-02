@@ -5,7 +5,7 @@ use minidom::Element;
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::Message;
 
-use crate::pubsub::{Affiliation, NodeConfigPatch};
+use crate::pubsub::{Affiliation, NodeConfigPatch, SubscriptionState};
 use crate::{CoreError, CoreResult};
 
 mod builders;
@@ -14,8 +14,8 @@ mod tests;
 
 pub use builders::{
     build_pubsub_affiliations_result, build_pubsub_configure_form_result, build_pubsub_error,
-    build_pubsub_event, build_pubsub_items_result, build_pubsub_publish_result,
-    build_pubsub_subscribe_result, build_pubsub_success,
+    build_pubsub_event, build_pubsub_items_result, build_pubsub_owner_subscriptions_result,
+    build_pubsub_publish_result, build_pubsub_subscribe_result, build_pubsub_success,
 };
 
 /// Main PubSub namespace.
@@ -159,6 +159,15 @@ pub enum PubSubRequest {
     AffiliationsSet {
         node: String,
         changes: Vec<(jid::BareJid, Affiliation)>,
+    },
+    /// XEP-0060 §8.8 `<subscriptions node='...'/>` get on owner namespace.
+    OwnerSubscriptionsGet {
+        node: String,
+    },
+    /// XEP-0060 §8.8 owner subscription delta update.
+    OwnerSubscriptionsSet {
+        node: String,
+        changes: Vec<(jid::Jid, SubscriptionState, Option<String>)>,
     },
     Unsupported {
         feature: PubSubUnsupportedFeature,
@@ -366,13 +375,27 @@ pub fn parse_pubsub_iq(iq: &Iq) -> CoreResult<PubSubRequest> {
         return Ok(PubSubRequest::AffiliationsSet { node, changes });
     }
 
-    if pubsub_elem
-        .get_child("subscriptions", NS_PUBSUB_OWNER)
-        .is_some()
-    {
-        return Ok(PubSubRequest::Unsupported {
-            feature: PubSubUnsupportedFeature::ManageSubscriptions,
-        });
+    if let Some(subscriptions) = pubsub_elem.get_child("subscriptions", NS_PUBSUB_OWNER) {
+        let node = required_attr(subscriptions, "node")?;
+        let mut changes = Vec::new();
+        for child in subscriptions
+            .children()
+            .filter(|c| c.is("subscription", NS_PUBSUB_OWNER))
+        {
+            let jid_raw = required_attr(child, "jid")?;
+            let jid: jid::Jid = jid_raw
+                .parse()
+                .map_err(|e: jid::Error| CoreError::bad_request(Some(e.to_string())))?;
+            let state_raw = required_attr(child, "subscription")?;
+            let state: SubscriptionState = state_raw.parse().map_err(|_| {
+                CoreError::bad_request(Some(format!("invalid subscription: {state_raw}")))
+            })?;
+            changes.push((jid, state, child.attr("subid").map(str::to_owned)));
+        }
+        if changes.is_empty() {
+            return Ok(PubSubRequest::OwnerSubscriptionsGet { node });
+        }
+        return Ok(PubSubRequest::OwnerSubscriptionsSet { node, changes });
     }
 
     // Some clients send <configure/> under NS_PUBSUB; XEP-0060 puts it under NS_PUBSUB_OWNER.

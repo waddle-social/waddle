@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -33,6 +34,14 @@ function newestSourceMtime(paths) {
   }
   for (const path of paths) visit(path);
   return newest;
+}
+
+function artifactBuildId(paths) {
+  const hash = createHash("sha256");
+  for (const path of paths) {
+    hash.update(readFileSync(path));
+  }
+  return hash.digest("hex").slice(0, 12);
 }
 
 if (process.env.REBUILD_WASM !== "1") {
@@ -87,15 +96,15 @@ writeFileSync(pkgJsonPath, `${JSON.stringify(pkg, null, 2)}\n`);
 // In production the ?url resolves to a content-hashed filename so the browser
 // cache is correctly busted without needing no-store.
 //
-// We also embed a per-build query string (?b=<timestamp>) into the imports of
-// _bg.js and the .wasm URL.  Vite treats different query strings as different
-// module IDs, which produces a brand-new URL on every REBUILD_WASM=1 run.  That
-// guarantees both the dev server's transform cache and the browser's HTTP
-// cache miss on the next page load — defense in depth on top of the chokidar
-// watch override in astro.config.mjs (which un-ignores this package so file
-// changes are detected at all).  Without this, a stale browser cache of the
-// entry file would keep referencing _bg.js?v=<old hash> even after a restart.
-const buildId = Date.now().toString(36);
+// We also embed a content-derived query string into the imports of _bg.js and
+// the .wasm URL. Vite treats different query strings as different module IDs,
+// which busts the dev server transform cache and the browser HTTP cache when
+// the generated artifact actually changes. The ID is deterministic so linting
+// or rebuilding unchanged Rust sources does not dirty the checked-in package.
+const buildId = artifactBuildId([
+  resolve(outDir, "waddle_xmpp_client_wasm_bg.js"),
+  resolve(outDir, "waddle_xmpp_client_wasm_bg.wasm"),
+]);
 const jsPath = resolve(outDir, "waddle_xmpp_client_wasm.js");
 writeFileSync(
   jsPath,

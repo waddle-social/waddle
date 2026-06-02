@@ -54,6 +54,10 @@ pub fn build_config_form(room: &MucRoom) -> Element {
                 .with_label("Make Room Members-Only"),
         )
         .add_field(
+            Field::boolean("muc#roomconfig_publicroom", room.config.public_room)
+                .with_label("List Room in Directory"),
+        )
+        .add_field(
             Field::boolean("muc#roomconfig_moderatedroom", room.config.moderated)
                 .with_label("Make Room Moderated"),
         )

@@ -13,7 +13,7 @@ describe("discoverTopology XEP-0402 bookmark autojoin", () => {
       const topology = await discoverTopology(
         topologyClient({
           bookmarks: [
-            { id: "general@muc.example.test", jid: "general@muc.example.test", name: "General", autojoin: true },
+            { id: "general@muc.example.test", name: "General", autojoin: true },
           ],
           rooms: [{ jid: "general@muc.example.test", name: "General" }],
         }),
@@ -29,7 +29,7 @@ describe("discoverTopology XEP-0402 bookmark autojoin", () => {
       const topology = await discoverTopology(
         topologyClient({
           bookmarks: [
-            { id: "muted@muc.example.test", jid: "muted@muc.example.test", name: "Muted", autojoin: false },
+            { id: "muted@muc.example.test", name: "Muted", autojoin: false },
           ],
           rooms: [{ jid: "muted@muc.example.test", name: "Muted" }],
         }),
@@ -45,7 +45,7 @@ describe("discoverTopology XEP-0402 bookmark autojoin", () => {
       const topology = await discoverTopology(
         topologyClient({
           bookmarks: [
-            { id: "foreign@muc.example.test", jid: "foreign@muc.example.test", name: "Foreign" },
+            { id: "foreign@muc.example.test", name: "Foreign" },
           ],
           rooms: [{ jid: "foreign@muc.example.test", name: "Foreign" }],
         }),
@@ -69,13 +69,49 @@ describe("discoverTopology XEP-0402 bookmark autojoin", () => {
       expect(topology.rooms.find((room) => room.jid === "orphan@muc.example.test")?.autojoin).toBe(true);
     });
   });
+
+  test("surfaces XEP-0503 bookmarked rooms even when MUC disco is empty", async () => {
+    await withFakeDomParser(async () => {
+      const topology = await discoverTopology(
+        topologyClient({
+          bookmarks: [
+            { id: "bookmarked@muc.example.test", name: "Bookmarked", autojoin: true },
+          ],
+          rooms: [],
+        }),
+        "alice@example.test",
+      );
+
+      const room = topology.rooms.find((candidate) => candidate.jid === "bookmarked@muc.example.test");
+      expect(room?.name).toBe("Bookmarked");
+      expect(room?.spaceId).toBe("space-engineering");
+      expect(room?.standalone).toBe(false);
+      expect(room?.autojoin).toBe(true);
+    });
+  });
+
+  test("ignores non-bookmark XEP-0503 space items when MUC disco is empty", async () => {
+    await withFakeDomParser(async () => {
+      const topology = await discoverTopology(
+        topologyClient({
+          bookmarks: [
+            { id: "https://example.test/spec", payloadXml: '<x xmlns="jabber:x:oob"><url>https://example.test/spec</url></x>' },
+          ],
+          rooms: [],
+        }),
+        "alice@example.test",
+      );
+
+      expect(topology.rooms).toEqual([]);
+    });
+  });
 });
 
 type Bookmark = {
   id?: string;
-  jid?: string;
   name?: string;
   autojoin?: boolean;
+  payloadXml?: string;
 };
 
 function topologyClient(options: {
@@ -107,10 +143,20 @@ function topologyClient(options: {
             features: ["http://jabber.org/protocol/muc"],
           });
         }
+        if (xml.includes('to="spaces.example.test"') && xml.includes(' node=')) {
+          return discoInfoXml({
+            identities: [{ category: "pubsub", type: "leaf", name: "Engineering" }],
+            features: ["http://jabber.org/protocol/pubsub", "urn:xmpp:spaces:0"],
+            fields: {
+              FORM_TYPE: "http://jabber.org/protocol/pubsub#meta-data",
+              "pubsub#type": "urn:xmpp:spaces:0",
+            },
+          });
+        }
         if (xml.includes('to="spaces.example.test"')) {
           return discoInfoXml({
             identities: [{ category: "pubsub", type: "service", name: "Spaces" }],
-            features: ["urn:xmpp:spaces:0"],
+            features: ["http://jabber.org/protocol/pubsub", "urn:xmpp:spaces:0"],
           });
         }
         return discoInfoXml({

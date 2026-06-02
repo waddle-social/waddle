@@ -2,10 +2,10 @@ use kameo::actor::ActorRef;
 use serde::Serialize;
 use waddle_xmpp::muc::PinPermission;
 
-use crate::db::actor::{DbActor, DbQuery, DbQueryOne};
+use crate::db::actor::{DbActor, DbExecute, DbQuery, DbQueryOne};
 use crate::db::{row_value, ValueExt};
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct XmppChannelRecord {
     pub id: String,
     pub name: String,
@@ -16,8 +16,25 @@ pub(crate) struct XmppChannelRecord {
     /// #422: persisted pin permission so disco-info on a dormant
     /// room reflects the configured policy.
     pub pin_permission: PinPermission,
+    /// Whether the room is members-only. This is the durable XMPP catalog bit
+    /// used to rebuild room actors after restart.
+    pub members_only: bool,
+    /// Whether the room is public in MUC service discovery.
+    pub public_room: bool,
     pub created_at: String,
     pub updated_at: Option<String>,
+}
+
+pub(crate) struct XmppChannelUpsert {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub channel_type: String,
+    pub position: i32,
+    pub is_default: bool,
+    pub pin_permission: PinPermission,
+    pub members_only: bool,
+    pub public_room: bool,
 }
 
 fn db_string(
@@ -67,6 +84,8 @@ fn parse_channel_record(row: &crate::db::actor::RowValues) -> Result<XmppChannel
         position: db_i32(row, 4, "position")?,
         is_default: db_bool(row, 5, "is_default")?,
         pin_permission,
+        members_only: db_bool(row, 9, "members_only")?,
+        public_room: db_bool(row, 10, "public_room")?,
         created_at: db_string(row, 7, "created_at")?,
         updated_at: db_optional_string(row, 8, "updated_at")?,
     })
@@ -79,7 +98,7 @@ pub(crate) async fn get_xmpp_channel(
     let row = actor
         .ask(DbQueryOne {
             sql: r#"
-                SELECT id, name, description, channel_type, position, is_default, pin_permission, created_at, updated_at
+                SELECT id, name, description, channel_type, position, is_default, pin_permission, created_at, updated_at, members_only, public_room
                 FROM channels
                 WHERE id = ?
             "#
@@ -100,7 +119,7 @@ pub(crate) async fn list_xmpp_channels(
     let rows = actor
         .ask(DbQuery {
             sql: r#"
-                SELECT id, name, description, channel_type, position, is_default, pin_permission, created_at, updated_at
+                SELECT id, name, description, channel_type, position, is_default, pin_permission, created_at, updated_at, members_only, public_room
                 FROM channels
                 ORDER BY position ASC, created_at ASC
                 LIMIT ? OFFSET ?
@@ -112,4 +131,62 @@ pub(crate) async fn list_xmpp_channels(
         .map_err(|e| format!("Failed to query channels: {e}"))?;
 
     rows.iter().map(parse_channel_record).collect()
+}
+
+pub(crate) async fn upsert_xmpp_channel(
+    actor: ActorRef<DbActor>,
+    channel: &XmppChannelUpsert,
+) -> Result<(), String> {
+    let now = chrono::Utc::now().to_rfc3339();
+    actor
+        .ask(DbExecute {
+            sql: r#"
+                INSERT INTO channels (
+                    id, name, description, channel_type, position, is_default,
+                    pin_permission, members_only, public_room, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    description = excluded.description,
+                    channel_type = excluded.channel_type,
+                    position = excluded.position,
+                    is_default = excluded.is_default,
+                    pin_permission = excluded.pin_permission,
+                    members_only = excluded.members_only,
+                    public_room = excluded.public_room,
+                    updated_at = excluded.updated_at
+            "#
+            .to_string(),
+            params: vec![
+                channel.id.clone().into(),
+                channel.name.clone().into(),
+                channel.description.clone().into(),
+                channel.channel_type.clone().into(),
+                (channel.position as i64).into(),
+                channel.is_default.into(),
+                channel.pin_permission.as_form_value().into(),
+                channel.members_only.into(),
+                channel.public_room.into(),
+                now.clone().into(),
+                now.into(),
+            ],
+        })
+        .await
+        .map_err(|e| format!("Failed to upsert channel: {e}"))?;
+    Ok(())
+}
+
+pub(crate) async fn delete_xmpp_channel(
+    actor: ActorRef<DbActor>,
+    channel_id: &str,
+) -> Result<(), String> {
+    actor
+        .ask(DbExecute {
+            sql: "DELETE FROM channels WHERE id = ?".to_string(),
+            params: vec![channel_id.into()],
+        })
+        .await
+        .map_err(|e| format!("Failed to delete channel: {e}"))?;
+    Ok(())
 }

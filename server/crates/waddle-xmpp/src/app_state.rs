@@ -39,7 +39,7 @@ pub struct SpaceDetails {
     pub name: String,
     /// Optional space description.
     pub description: Option<String>,
-    /// Owner user ID.
+    /// Owner JID advertised in XEP-0060 metadata forms.
     pub owner_id: String,
     /// Optional icon URL.
     pub icon_url: Option<String>,

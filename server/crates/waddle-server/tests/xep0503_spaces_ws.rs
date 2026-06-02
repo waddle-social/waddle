@@ -39,9 +39,115 @@ async fn iq_get_to(client: &mut WsXmppClient, id: &str, to: &str, payload: Eleme
         .await
         .expect("send iq get");
     client
-        .recv_matching(|frame| frame.contains(&format!(r#"id='{id}'"#)) && frame.contains("<iq"))
+        .recv_matching(|frame| frame_has_iq_id(frame, id) && frame.contains("<iq"))
         .await
         .expect("iq get response")
+}
+
+async fn iq_set_to(client: &mut WsXmppClient, id: &str, to: &str, payload: Element) -> String {
+    let iq = Iq::Set {
+        from: None,
+        to: Some(to.parse().expect("valid iq destination")),
+        id: id.to_string(),
+        payload,
+    };
+    client
+        .send(&stanza_to_xml(&Stanza::Iq(Box::new(iq))))
+        .await
+        .expect("send iq set");
+    client
+        .recv_matching(|frame| frame_has_iq_id(frame, id) && frame.contains("<iq"))
+        .await
+        .expect("iq set response")
+}
+
+fn frame_has_iq_id(frame: &str, id: &str) -> bool {
+    frame.contains(&format!(r#"id='{id}'"#)) || frame.contains(&format!(r#"id="{id}""#))
+}
+
+#[tokio::test]
+async fn spaces_service_disco_info_advertises_xep0503_features() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut admin = admin_client(&server, "xep0503-service-info").await;
+
+    let info = iq_get_to(
+        &mut admin,
+        "spaces-info",
+        "spaces.localhost",
+        Element::builder("query", "http://jabber.org/protocol/disco#info").build(),
+    )
+    .await;
+
+    for feature in [
+        "urn:xmpp:spaces:0",
+        "http://jabber.org/protocol/pubsub#retrieve-items",
+        "http://jabber.org/protocol/pubsub#manage-subscriptions",
+        "http://jabber.org/protocol/pubsub#modify-affiliations",
+        "http://jabber.org/protocol/pubsub#retrieve-affiliations",
+    ] {
+        assert!(
+            info.contains(feature),
+            "Spaces service disco#info missing {feature}: {info}"
+        );
+    }
+    let _ = admin.close().await;
+}
+
+#[tokio::test]
+async fn spaces_owner_subscriptions_round_trip() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut admin = admin_client(&server, "xep0503-owner-subs").await;
+
+    let set = iq_set_to(
+        &mut admin,
+        "spaces-subs-set",
+        "spaces.localhost",
+        Element::builder("pubsub", "http://jabber.org/protocol/pubsub#owner")
+            .append(
+                Element::builder("subscriptions", "http://jabber.org/protocol/pubsub#owner")
+                    .attr(minidom::rxml::xml_ncname!("node").to_owned(), "general")
+                    .append(
+                        Element::builder("subscription", "http://jabber.org/protocol/pubsub#owner")
+                            .attr(
+                                minidom::rxml::xml_ncname!("jid").to_owned(),
+                                "alice@localhost",
+                            )
+                            .attr(
+                                minidom::rxml::xml_ncname!("subscription").to_owned(),
+                                "subscribed",
+                            )
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build(),
+    )
+    .await;
+    assert!(
+        set.contains("type='result'") || set.contains("type=\"result\""),
+        "owner subscriptions set should succeed: {set}"
+    );
+
+    let get = iq_get_to(
+        &mut admin,
+        "spaces-subs-get",
+        "spaces.localhost",
+        Element::builder("pubsub", "http://jabber.org/protocol/pubsub#owner")
+            .append(
+                Element::builder("subscriptions", "http://jabber.org/protocol/pubsub#owner")
+                    .attr(minidom::rxml::xml_ncname!("node").to_owned(), "general")
+                    .build(),
+            )
+            .build(),
+    )
+    .await;
+    assert!(
+        get.contains("alice@localhost") && get.contains("subscription='subscribed'"),
+        "owner subscriptions get should include added subscriber: {get}"
+    );
+    let _ = admin.close().await;
 }
 
 #[tokio::test]
