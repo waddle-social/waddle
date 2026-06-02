@@ -89,16 +89,13 @@ async fn update_direct_link_preview_refs(
     let global_db_actor = state.deps.app_state.db_pool.global_actor();
     let correction_target_message_id =
         if let Some(correction) = waddle_xmpp::xep::extract_correction_from_message(message) {
-            let target_message_id = super::archive_lookup::lookup_archived_message(
+            let target_message_id = resolve_direct_correction_target_message_id(
                 deps,
                 archive_jid,
-                &waddle_xmpp::protocol::event::MessageRef::OriginId {
-                    sender: sender.clone(),
-                    origin_id: waddle_xmpp_core::xep0359::OriginId::new(&correction.replaces_id),
-                },
+                sender,
+                &correction.replaces_id,
             )
             .await
-            .map(|archived| archived.stanza_id.id)
             .unwrap_or(correction.replaces_id);
             crate::server::routes::websocket::link_preview_refs::clear_current_message_preview_refs(
                 global_db_actor,
@@ -123,6 +120,29 @@ async fn update_direct_link_preview_refs(
         message,
     )
     .await;
+}
+
+pub(super) async fn resolve_direct_correction_target_message_id(
+    deps: &Deps<'_>,
+    archive_jid: &BareJid,
+    sender: &BareJid,
+    replaces_id: &str,
+) -> Option<String> {
+    let mam_storage = deps.mam_storage?;
+    let query = waddle_xmpp::mam::MamQuery {
+        with: Some(jid::Jid::from(sender.clone())),
+        ..Default::default()
+    };
+    let result = mam_storage.query_messages(archive_jid, &query).await.ok()?;
+    result.messages.into_iter().find_map(|row| {
+        if super::archive_lookup::row_matches_origin_id(&row, sender, replaces_id)
+            || super::archive_lookup::row_matches_wire_id(&row, sender, replaces_id)
+        {
+            row.stanza_id.map(|stanza_id| stanza_id.id)
+        } else {
+            None
+        }
+    })
 }
 
 async fn apply_direct_retraction_tombstone(

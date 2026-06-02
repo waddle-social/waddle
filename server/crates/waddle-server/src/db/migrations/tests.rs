@@ -559,6 +559,14 @@ fn postgres_upload_and_attachment_sizes_are_bigint() {
     );
 }
 
+#[test]
+fn postgres_link_preview_refs_current_index_is_partial() {
+    assert!(
+        global::V0007_LINK_PREVIEW_MEDIA_REFS_POSTGRES.contains("WHERE state = 'current'"),
+        "Postgres v0007 current-ref index must stay partial so only live preview refs are indexed"
+    );
+}
+
 #[tokio::test]
 async fn postgres_v0006_widens_existing_upload_slot_size_bytes() {
     let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
@@ -758,6 +766,142 @@ async fn sqlite_v0007_tracks_link_preview_media_refs() {
     let row = rows.next().await.unwrap().unwrap();
     let ref_count: i64 = row.get(0).unwrap();
     assert_eq!(ref_count, 0);
+}
+
+#[tokio::test]
+async fn postgres_v0007_tracks_link_preview_media_refs() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!(
+            "skipping: WADDLE_TEST_POSTGRES_URL not set \
+             (postgres-backed migration regression for link_preview_media_refs)"
+        );
+        return;
+    };
+
+    let schema = unique_postgres_schema_name("link_preview_refs");
+    let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
+    let conn = db.guard().await.expect("postgres guard");
+    conn.execute(sql::migrations_table_sql(DatabaseDriver::Postgres), ())
+        .await
+        .expect("create migration table");
+    seed_applied_migrations(&conn, global::all().into_iter().filter(|m| m.version < 7)).await;
+    conn.execute(
+        r#"
+        CREATE TABLE upload_slots (
+            id TEXT PRIMARY KEY,
+            requester_jid TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            size_bytes BIGINT NOT NULL,
+            content_type TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            storage_key TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP::TEXT,
+            expires_at TEXT NOT NULL,
+            uploaded_at TEXT
+        )
+        "#,
+        (),
+    )
+    .await
+    .expect("create upload_slots");
+    drop(conn);
+
+    let applied = MigrationRunner::global()
+        .run(&db)
+        .await
+        .expect("run global migration");
+    assert_eq!(applied, vec![7, 1001, 1002, 1003, 1004, 1005]);
+
+    let conn = db.guard().await.expect("postgres guard");
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM information_schema.tables \
+             WHERE table_schema = current_schema() \
+               AND table_name = 'link_preview_media_refs'",
+            (),
+        )
+        .await
+        .expect("query link_preview_media_refs table");
+    let row = rows
+        .next()
+        .await
+        .expect("read table row")
+        .expect("table row");
+    let table_count: i64 = row.get(0).expect("decode table count");
+    assert_eq!(table_count, 1);
+
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM pg_indexes \
+             WHERE schemaname = current_schema() \
+               AND indexname IN ('idx_link_preview_media_refs_current', 'idx_link_preview_media_refs_message')",
+            (),
+        )
+        .await
+        .expect("query link preview indexes");
+    let row = rows
+        .next()
+        .await
+        .expect("read index row")
+        .expect("index row");
+    let index_count: i64 = row.get(0).expect("decode index count");
+    assert_eq!(index_count, 2);
+
+    conn.execute(
+        "INSERT INTO upload_slots (id, requester_jid, filename, size_bytes, content_type, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+        crate::db_params![
+            "slot-1",
+            "alice@example.com",
+            "link-preview-test.png",
+            12_i64,
+            "image/png",
+            "2030-01-01T00:00:00Z"
+        ],
+    )
+    .await
+    .expect("seed upload slot");
+    conn.execute(
+        "INSERT INTO link_preview_media_refs (upload_slot_id, archive_jid, message_id, current_archive_id, state) VALUES (?, ?, ?, ?, ?)",
+        crate::db_params![
+            "slot-1",
+            "alice@example.com",
+            "msg-1",
+            "archive-1",
+            "current"
+        ],
+    )
+    .await
+    .expect("insert valid preview ref");
+    let invalid_state = conn
+        .execute(
+            "INSERT INTO link_preview_media_refs (upload_slot_id, archive_jid, message_id, current_archive_id, state) VALUES (?, ?, ?, ?, ?)",
+            crate::db_params![
+                "slot-1",
+                "alice@example.com",
+                "msg-2",
+                "archive-2",
+                "expired"
+            ],
+        )
+        .await;
+    assert!(invalid_state.is_err());
+
+    conn.execute(
+        "DELETE FROM upload_slots WHERE id = ?",
+        crate::db_params!["slot-1"],
+    )
+    .await
+    .expect("delete upload slot");
+    let mut rows = conn
+        .query("SELECT COUNT(*) FROM link_preview_media_refs", ())
+        .await
+        .expect("query refs after cascade");
+    let row = rows.next().await.expect("read refs row").expect("refs row");
+    let ref_count: i64 = row.get(0).expect("decode ref count");
+    assert_eq!(ref_count, 0);
+    drop(conn);
+
+    drop_postgres_schema(&admin, &schema).await;
 }
 
 #[tokio::test]
