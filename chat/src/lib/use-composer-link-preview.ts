@@ -4,8 +4,13 @@ import {
   linkPreviewStateFromLookup,
   sendPayloadFromState,
   type ComposerLinkPreviewLookup,
+  type ComposerLinkPreviewSendPayload,
   type ComposerLinkPreviewState,
 } from "@/lib/link-preview-composer";
+
+// The production lookup has its own 2s timeout; keep send fail-open if a
+// replacement lookup implementation ever forgets to bound its promise.
+const SEND_LOOKUP_GRACE_MS = 2_250;
 
 export function useComposerLinkPreview(
   draft: Ref<string>,
@@ -16,6 +21,7 @@ export function useComposerLinkPreview(
   let lookupEpoch = 0;
   let activeKey: string | null = null;
   let activeLookup: ComposerLinkPreviewLookup | null = null;
+  let activeLookupSettled: Promise<void> | null = null;
 
   const showCard = computed(() => state.value.kind !== "idle");
   const host = computed(() => {
@@ -49,7 +55,20 @@ export function useComposerLinkPreview(
     lookupEpoch++;
     activeKey = stateKey(scopeKey.value, state.value.url);
     activeLookup = null;
+    activeLookupSettled = null;
     state.value = { kind: "dismissed", url: state.value.url };
+  }
+
+  async function sendPayloadFor(body: string): Promise<ComposerLinkPreviewSendPayload | undefined> {
+    const url = composerLinkPreviewUrl(body);
+    const key = stateKey(scopeKey.value, url);
+    if (!key) return undefined;
+
+    if (key === activeKey && state.value.kind === "loading" && activeLookupSettled) {
+      await settleWithGrace(activeLookupSettled);
+    }
+
+    return key === activeKey ? sendPayloadFromState(state.value) : undefined;
   }
 
   watch(
@@ -61,6 +80,7 @@ export function useComposerLinkPreview(
         lookupEpoch++;
         activeKey = null;
         activeLookup = null;
+        activeLookupSettled = null;
         state.value = { kind: "idle" };
         return;
       }
@@ -76,15 +96,25 @@ export function useComposerLinkPreview(
       activeKey = key;
       activeLookup = lookupFn;
       state.value = { kind: "loading", url };
-      void lookupFn(body)
-        .then((result) => {
-          if (epoch !== lookupEpoch) return;
-          state.value = linkPreviewStateFromLookup(url, result);
-        })
-        .catch(() => {
-          if (epoch !== lookupEpoch) return;
-          state.value = { kind: "failed", url };
-        });
+      let rawLookup: ReturnType<ComposerLinkPreviewLookup>;
+      try {
+        rawLookup = lookupFn(body);
+      } catch {
+        rawLookup = Promise.reject();
+      }
+      const lookupSettled = rawLookup.then((result) => {
+        if (epoch !== lookupEpoch) return;
+        state.value = linkPreviewStateFromLookup(url, result);
+      }).catch(() => {
+        if (epoch !== lookupEpoch) return;
+        state.value = { kind: "failed", url };
+      });
+      activeLookupSettled = lookupSettled;
+      void lookupSettled.finally(() => {
+        if (epoch === lookupEpoch && activeLookupSettled === lookupSettled) {
+          activeLookupSettled = null;
+        }
+      });
     },
     { immediate: true },
   );
@@ -98,7 +128,19 @@ export function useComposerLinkPreview(
     description,
     dismiss,
     sendPayload: computed(() => sendPayloadFromState(state.value)),
+    sendPayloadFor,
   };
+}
+
+async function settleWithGrace(pending: Promise<void>): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    pending,
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, SEND_LOOKUP_GRACE_MS);
+    }),
+  ]);
+  if (timer !== undefined) clearTimeout(timer);
 }
 
 function stateKey(scope: string | null | undefined, url: string | null): string | null {
