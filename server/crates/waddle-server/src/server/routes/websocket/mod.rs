@@ -73,6 +73,7 @@ mod frame;
 mod frame_backstop;
 mod interpret_loop;
 pub(crate) mod link_preview_refs;
+pub(crate) mod link_preview_telemetry;
 mod muc_call_sfu;
 mod outbound;
 mod parse_errors;

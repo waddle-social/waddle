@@ -8,6 +8,9 @@ use crate::db::{
     actor::{DbActor, DbExecute},
     Value,
 };
+use crate::server::routes::websocket::link_preview_telemetry::{
+    record_link_preview_event, LinkPreviewTelemetryEvent,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LinkPreviewMediaRefState {
@@ -62,7 +65,7 @@ pub(crate) async fn clear_current_message_preview_refs(
     message_id: &str,
 ) {
     let now = chrono::Utc::now().to_rfc3339();
-    if let Err(error) = global_db_actor
+    match global_db_actor
         .ask(DbExecute {
             sql: "UPDATE link_preview_media_refs SET state = ?, updated_at = ? WHERE archive_jid = ? AND message_id = ? AND state = ?".to_string(),
             params: vec![
@@ -75,7 +78,14 @@ pub(crate) async fn clear_current_message_preview_refs(
         })
         .await
     {
-        warn!(%error, archive = %archive_jid, message_id, "failed to clear link preview media refs");
+        Ok(rows_affected) => {
+            for _ in 0..rows_affected {
+                record_link_preview_event(LinkPreviewTelemetryEvent::CleanupReference);
+            }
+        }
+        Err(error) => {
+            warn!(%error, archive = %archive_jid, message_id, "failed to clear link preview media refs");
+        }
     }
 }
 
@@ -149,6 +159,7 @@ mod tests {
         actor::{DbExecute, DbQueryOne},
         DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig, ValueExt,
     };
+    use crate::server::routes::websocket::link_preview_telemetry::recorded_events;
 
     async fn db_pool() -> DatabasePool {
         let pool = DatabasePool::new(DatabaseConfig::default(), PoolConfig)
@@ -183,14 +194,18 @@ mod tests {
     fn message_with_preview_ref(slot_id: &str) -> Message {
         let to: BareJid = "bob@example.com".parse().expect("jid");
         let mut message = Message::new(Some(jid::Jid::from(to)));
+        add_preview_ref(&mut message, slot_id);
+        message
+    }
+
+    fn add_preview_ref(message: &mut Message, slot_id: &str) {
         let hash = "86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16";
         waddle_xmpp::xep::add_reference(
-            &mut message,
+            message,
             &waddle_xmpp::xep::Reference::data(format!(
                 "https://waddle.example/api/files/{slot_id}/link-preview-{hash}.png"
             )),
         );
-        message
     }
 
     async fn ref_state(pool: &DatabasePool, slot_id: &str) -> Option<String> {
@@ -252,6 +267,78 @@ mod tests {
         assert_eq!(
             ref_state(&pool, &slot_id).await.as_deref(),
             Some("unreferenced")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cleanup_telemetry_only_emits_when_current_ref_is_cleared() {
+        let _events_guard = recorded_events::async_lock().await;
+        recorded_events::clear();
+        let pool = db_pool().await;
+        let slot_id = uuid::Uuid::new_v4().to_string();
+        seed_uploaded_slot(&pool, &slot_id).await;
+        let archive: BareJid = "alice@example.com".parse().expect("archive");
+
+        clear_current_message_preview_refs(pool.global_actor(), &archive, "msg-telemetry").await;
+        assert!(
+            !recorded_events::take().contains(&LinkPreviewTelemetryEvent::CleanupReference),
+            "empty cleanup must not emit cleanup_reference telemetry"
+        );
+
+        recorded_events::clear();
+        record_current_message_preview_refs(
+            pool.global_actor(),
+            "https://waddle.example",
+            &archive,
+            "msg-telemetry",
+            "archive-telemetry",
+            &message_with_preview_ref(&slot_id),
+        )
+        .await;
+        clear_current_message_preview_refs(pool.global_actor(), &archive, "msg-telemetry").await;
+
+        assert!(
+            recorded_events::take().contains(&LinkPreviewTelemetryEvent::CleanupReference),
+            "cleanup of an existing current ref must emit cleanup_reference telemetry"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cleanup_telemetry_emits_once_per_cleared_ref() {
+        let _events_guard = recorded_events::async_lock().await;
+        recorded_events::clear();
+        let pool = db_pool().await;
+        let first_slot_id = uuid::Uuid::new_v4().to_string();
+        let second_slot_id = uuid::Uuid::new_v4().to_string();
+        seed_uploaded_slot(&pool, &first_slot_id).await;
+        seed_uploaded_slot(&pool, &second_slot_id).await;
+        let archive: BareJid = "alice@example.com".parse().expect("archive");
+        let to: BareJid = "bob@example.com".parse().expect("jid");
+        let mut message = Message::new(Some(jid::Jid::from(to)));
+        add_preview_ref(&mut message, &first_slot_id);
+        add_preview_ref(&mut message, &second_slot_id);
+
+        record_current_message_preview_refs(
+            pool.global_actor(),
+            "https://waddle.example",
+            &archive,
+            "msg-telemetry-count",
+            "archive-telemetry-count",
+            &message,
+        )
+        .await;
+        recorded_events::clear();
+
+        clear_current_message_preview_refs(pool.global_actor(), &archive, "msg-telemetry-count")
+            .await;
+
+        assert_eq!(
+            recorded_events::take()
+                .into_iter()
+                .filter(|event| *event == LinkPreviewTelemetryEvent::CleanupReference)
+                .count(),
+            2,
+            "cleanup_reference telemetry must count every cleared current ref"
         );
     }
 

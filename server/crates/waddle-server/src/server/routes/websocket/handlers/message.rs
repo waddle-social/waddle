@@ -9,7 +9,7 @@ use waddle_xmpp::{
         add_reference, build_link_metadata_element, decode_link_preview_token,
         extract_link_preview_request_from_message, parse_fallbacks_from_message,
         strip_fallback_ranges, strip_link_metadata, strip_link_preview_requests, FallbackRegion,
-        LinkMetadata, Reference, NS_DELAY, NS_REPLY,
+        LinkMetadata, Reference, WaddleLinkPreviewError, NS_DELAY, NS_REPLY,
     },
     Stanza,
 };
@@ -21,6 +21,10 @@ use super::super::{
     interpret_loop::build_interpret_deps, replay::drive_interpret_loop, WebSocketState,
 };
 use crate::auth::Session;
+use crate::config::LinkPreviewConfig;
+use crate::server::routes::websocket::link_preview_telemetry::{
+    record_link_preview_event, LinkPreviewTelemetryEvent,
+};
 use waddle_xmpp::protocol::ConnectionPhase;
 
 /// Thin transport adapter that drives the sans-I/O dispatcher
@@ -77,6 +81,7 @@ pub async fn handle_message(
         state.deps.occupant_id_secret.key(),
         chrono::Utc::now().timestamp(),
         state.deps.auth_state.base_url.as_str(),
+        &state.deps.link_preview,
     );
 
     if incoming.type_ != xmpp_parsers::message::MessageType::Groupchat
@@ -119,16 +124,35 @@ fn consume_link_preview_request(
     secret: &[u8],
     now_unix: i64,
     trusted_media_base_url: &str,
+    link_preview: &LinkPreviewConfig,
 ) {
+    if !link_preview.enabled {
+        strip_link_preview_requests(message);
+        strip_link_metadata(message);
+        return;
+    }
     let expected_sender = sender_jid.to_bare();
     let expected_scope = message.to.as_ref().map(|to| to.to_bare());
-    let metadata = extract_link_preview_request_from_message(message)
-        .and_then(|token| decode_link_preview_token(&token, secret, now_unix).ok())
+    let decoded = extract_link_preview_request_from_message(message).and_then(|token| {
+        match decode_link_preview_token(&token, secret, now_unix) {
+            Ok(preview) => Some(preview),
+            Err(WaddleLinkPreviewError::Expired) => {
+                record_link_preview_event(LinkPreviewTelemetryEvent::TokenExpired);
+                None
+            }
+            Err(_) => {
+                record_link_preview_event(LinkPreviewTelemetryEvent::TokenInvalid);
+                None
+            }
+        }
+    });
+    let metadata = decoded
         .filter(|preview| {
             Some(&preview.scope_jid) == expected_scope.as_ref()
                 && preview.sender_jid == expected_sender
                 && preview.original_url.scheme() == "https"
                 && preview.normalized_url.scheme() == "https"
+                && link_preview_token_urls_allowed_by_current_policy(preview, link_preview)
                 && first_eligible_https_url(message).as_ref() == Some(&preview.original_url)
         })
         .map(|preview| {
@@ -163,6 +187,59 @@ fn consume_link_preview_request(
             .payloads
             .push(build_link_metadata_element(&metadata));
     }
+}
+
+fn link_preview_token_urls_allowed_by_current_policy(
+    preview: &waddle_xmpp::xep::LinkPreviewTokenData,
+    link_preview: &LinkPreviewConfig,
+) -> bool {
+    link_preview_url_allowed_by_current_policy(&preview.original_url, link_preview)
+        && link_preview_url_allowed_by_current_policy(&preview.normalized_url, link_preview)
+}
+
+fn link_preview_url_allowed_by_current_policy(
+    url: &url::Url,
+    link_preview: &LinkPreviewConfig,
+) -> bool {
+    if !link_preview.video_enabled && looks_like_direct_video_url(url) {
+        return false;
+    }
+    let host = match url.host() {
+        Some(url::Host::Domain(host)) if !is_dot_local_domain(host) => host,
+        Some(url::Host::Domain(_)) | Some(url::Host::Ipv4(_)) | Some(url::Host::Ipv6(_)) | None => {
+            return false;
+        }
+    };
+    if link_preview
+        .blocked_hosts
+        .iter()
+        .any(|pattern| pattern.matches(host))
+    {
+        return false;
+    }
+    link_preview.allowed_hosts.is_empty()
+        || link_preview
+            .allowed_hosts
+            .iter()
+            .any(|pattern| pattern.matches(host))
+}
+
+fn looks_like_direct_video_url(url: &url::Url) -> bool {
+    let path = url.path().to_ascii_lowercase();
+    matches!(
+        path.rsplit('/').next(),
+        Some(filename)
+            if filename.ends_with(".mp4")
+                || filename.ends_with(".webm")
+                || filename.ends_with(".mov")
+                || filename.ends_with(".m4v")
+                || filename.ends_with(".ogv")
+    )
+}
+
+fn is_dot_local_domain(host: &str) -> bool {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    host == "local" || host.ends_with(".local")
 }
 
 fn is_trusted_cached_preview_image_url(url: &url::Url, trusted_media_base_url: &str) -> bool {
@@ -251,6 +328,7 @@ fn remove_framework_envelopes(message: &mut xmpp_parsers::message::Message) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::routes::websocket::link_preview_telemetry::recorded_events;
     const SECRET: &[u8] = b"test-link-preview-secret";
 
     fn sender() -> jid::FullJid {
@@ -366,6 +444,7 @@ mod tests {
             SECRET,
             1_800_000_000,
             "https://waddle.example",
+            &LinkPreviewConfig::default(),
         );
 
         assert!(message
@@ -395,6 +474,217 @@ mod tests {
         assert_eq!(
             references[0].ref_type,
             waddle_xmpp::xep::ReferenceType::Data
+        );
+    }
+
+    #[test]
+    fn disabled_policy_strips_link_preview_request_without_metadata() {
+        let preview = waddle_xmpp::xep::LinkPreviewTokenData {
+            sender_jid: "alice@example.com".parse().expect("jid"),
+            scope_jid: "room@muc.example.com".parse().expect("jid"),
+            original_url: url::Url::parse("https://example.com/").expect("url"),
+            normalized_url: url::Url::parse("https://example.com/").expect("url"),
+            title: Some("Example".to_string()),
+            description: None,
+            image: None,
+            expires_at_unix: 1_900_000_000,
+        };
+        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
+        let mut message = Message::new(None::<jid::Jid>);
+        message.to = Some("room@muc.example.com".parse().expect("jid"));
+        message.bodies.insert(
+            xmpp_parsers::message::Lang::new(),
+            "read https://example.com/".to_string(),
+        );
+        message
+            .payloads
+            .push(waddle_xmpp::xep::build_link_preview_request_element(&token));
+
+        consume_link_preview_request(
+            &mut message,
+            &sender(),
+            SECRET,
+            1_800_000_000,
+            "https://waddle.example",
+            &LinkPreviewConfig {
+                enabled: false,
+                ..LinkPreviewConfig::default()
+            },
+        );
+
+        assert!(message
+            .payloads
+            .iter()
+            .all(|payload| payload.ns() != waddle_xmpp::xep::NS_WADDLE_LINK_PREVIEW));
+        assert!(waddle_xmpp::xep::extract_link_metadata_from_message(&message).is_empty());
+    }
+
+    #[test]
+    fn tightened_policy_rechecks_token_urls_before_stamping_metadata() {
+        let preview = waddle_xmpp::xep::LinkPreviewTokenData {
+            sender_jid: "alice@example.com".parse().expect("jid"),
+            scope_jid: "room@muc.example.com".parse().expect("jid"),
+            original_url: url::Url::parse("https://blocked.example/article").expect("url"),
+            normalized_url: url::Url::parse("https://blocked.example/article").expect("url"),
+            title: Some("Blocked".to_string()),
+            description: None,
+            image: None,
+            expires_at_unix: 1_900_000_000,
+        };
+        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
+        let mut message = Message::new(None::<jid::Jid>);
+        message.to = Some("room@muc.example.com".parse().expect("jid"));
+        message.bodies.insert(
+            xmpp_parsers::message::Lang::new(),
+            "read https://blocked.example/article".to_string(),
+        );
+        message
+            .payloads
+            .push(waddle_xmpp::xep::build_link_preview_request_element(&token));
+
+        consume_link_preview_request(
+            &mut message,
+            &sender(),
+            SECRET,
+            1_800_000_000,
+            "https://waddle.example",
+            &LinkPreviewConfig {
+                blocked_hosts: vec!["blocked.example".parse().expect("pattern")],
+                ..LinkPreviewConfig::default()
+            },
+        );
+
+        assert!(
+            waddle_xmpp::xep::extract_link_metadata_from_message(&message).is_empty(),
+            "send-time validation must reject tokens that no longer satisfy current host policy"
+        );
+    }
+
+    #[test]
+    fn send_time_policy_rejects_unconditional_resolver_host_bans() {
+        for blocked_url in [
+            "https://127.0.0.1/article",
+            "https://[::1]/article",
+            "https://internal.local/article",
+            "https://printer.local./article",
+            "https://Mixed.Local/article",
+        ] {
+            let preview = waddle_xmpp::xep::LinkPreviewTokenData {
+                sender_jid: "alice@example.com".parse().expect("jid"),
+                scope_jid: "room@muc.example.com".parse().expect("jid"),
+                original_url: url::Url::parse(blocked_url).expect("url"),
+                normalized_url: url::Url::parse(blocked_url).expect("url"),
+                title: Some("Blocked".to_string()),
+                description: None,
+                image: None,
+                expires_at_unix: 1_900_000_000,
+            };
+            let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
+            let mut message = Message::new(None::<jid::Jid>);
+            message.to = Some("room@muc.example.com".parse().expect("jid"));
+            message.bodies.insert(
+                xmpp_parsers::message::Lang::new(),
+                format!("read {blocked_url}"),
+            );
+            message
+                .payloads
+                .push(waddle_xmpp::xep::build_link_preview_request_element(&token));
+
+            consume_link_preview_request(
+                &mut message,
+                &sender(),
+                SECRET,
+                1_800_000_000,
+                "https://waddle.example",
+                &LinkPreviewConfig::default(),
+            );
+
+            assert!(
+                waddle_xmpp::xep::extract_link_metadata_from_message(&message).is_empty(),
+                "send-time validation must reject resolver-blocked host {blocked_url}"
+            );
+        }
+    }
+
+    #[test]
+    fn send_time_policy_rechecks_normalized_url_before_stamping_metadata() {
+        let preview = waddle_xmpp::xep::LinkPreviewTokenData {
+            sender_jid: "alice@example.com".parse().expect("jid"),
+            scope_jid: "room@muc.example.com".parse().expect("jid"),
+            original_url: url::Url::parse("https://allowed.example/article").expect("url"),
+            normalized_url: url::Url::parse("https://blocked.example/canonical").expect("url"),
+            title: Some("Blocked canonical".to_string()),
+            description: None,
+            image: None,
+            expires_at_unix: 1_900_000_000,
+        };
+        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
+        let mut message = Message::new(None::<jid::Jid>);
+        message.to = Some("room@muc.example.com".parse().expect("jid"));
+        message.bodies.insert(
+            xmpp_parsers::message::Lang::new(),
+            "read https://allowed.example/article".to_string(),
+        );
+        message
+            .payloads
+            .push(waddle_xmpp::xep::build_link_preview_request_element(&token));
+
+        consume_link_preview_request(
+            &mut message,
+            &sender(),
+            SECRET,
+            1_800_000_000,
+            "https://waddle.example",
+            &LinkPreviewConfig {
+                blocked_hosts: vec!["blocked.example".parse().expect("pattern")],
+                ..LinkPreviewConfig::default()
+            },
+        );
+
+        assert!(
+            waddle_xmpp::xep::extract_link_metadata_from_message(&message).is_empty(),
+            "send-time validation must reject a token with a now-blocked canonical URL"
+        );
+    }
+
+    #[test]
+    fn send_time_policy_rejects_direct_video_tokens_when_video_is_disabled() {
+        let preview = waddle_xmpp::xep::LinkPreviewTokenData {
+            sender_jid: "alice@example.com".parse().expect("jid"),
+            scope_jid: "room@muc.example.com".parse().expect("jid"),
+            original_url: url::Url::parse("https://video.example/clip.mp4").expect("url"),
+            normalized_url: url::Url::parse("https://video.example/clip.mp4").expect("url"),
+            title: Some("Video".to_string()),
+            description: None,
+            image: None,
+            expires_at_unix: 1_900_000_000,
+        };
+        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
+        let mut message = Message::new(None::<jid::Jid>);
+        message.to = Some("room@muc.example.com".parse().expect("jid"));
+        message.bodies.insert(
+            xmpp_parsers::message::Lang::new(),
+            "watch https://video.example/clip.mp4".to_string(),
+        );
+        message
+            .payloads
+            .push(waddle_xmpp::xep::build_link_preview_request_element(&token));
+
+        consume_link_preview_request(
+            &mut message,
+            &sender(),
+            SECRET,
+            1_800_000_000,
+            "https://waddle.example",
+            &LinkPreviewConfig {
+                video_enabled: false,
+                ..LinkPreviewConfig::default()
+            },
+        );
+
+        assert!(
+            waddle_xmpp::xep::extract_link_metadata_from_message(&message).is_empty(),
+            "send-time validation must reject direct video tokens while video previews are disabled"
         );
     }
 
@@ -441,6 +731,7 @@ mod tests {
             SECRET,
             1_800_000_000,
             "https://waddle.example",
+            &LinkPreviewConfig::default(),
         );
 
         assert_eq!(
@@ -501,6 +792,7 @@ mod tests {
             SECRET,
             1_800_000_000,
             "https://waddle.example",
+            &LinkPreviewConfig::default(),
         );
 
         let parsed = waddle_xmpp::xep::extract_link_metadata_from_message(&message);
@@ -512,6 +804,8 @@ mod tests {
 
     #[test]
     fn expired_link_preview_request_is_stripped_without_metadata() {
+        let _events_guard = recorded_events::lock();
+        recorded_events::clear();
         let preview = waddle_xmpp::xep::LinkPreviewTokenData {
             sender_jid: "alice@example.com".parse().expect("jid"),
             scope_jid: "room@muc.example.com".parse().expect("jid"),
@@ -539,13 +833,20 @@ mod tests {
             SECRET,
             11,
             "https://waddle.example",
+            &LinkPreviewConfig::default(),
         );
 
         assert!(message.payloads.is_empty());
+        assert!(
+            recorded_events::take().contains(&LinkPreviewTelemetryEvent::TokenExpired),
+            "expired send-time token path must emit token_expired telemetry"
+        );
     }
 
     #[test]
     fn invalid_link_preview_request_is_stripped_without_metadata() {
+        let _events_guard = recorded_events::lock();
+        recorded_events::clear();
         let token =
             waddle_xmpp::xep::LinkPreviewToken::new("not-a-signed-preview-token").expect("token");
         let mut message = Message::new(None::<jid::Jid>);
@@ -564,9 +865,14 @@ mod tests {
             SECRET,
             1_800_000_000,
             "https://waddle.example",
+            &LinkPreviewConfig::default(),
         );
 
         assert!(message.payloads.is_empty());
+        assert!(
+            recorded_events::take().contains(&LinkPreviewTelemetryEvent::TokenInvalid),
+            "invalid send-time token path must emit token_invalid telemetry"
+        );
     }
 
     #[test]
@@ -595,6 +901,7 @@ mod tests {
             SECRET,
             1_800_000_000,
             "https://waddle.example",
+            &LinkPreviewConfig::default(),
         );
 
         assert!(message.payloads.is_empty());
@@ -629,6 +936,7 @@ mod tests {
             SECRET,
             1_800_000_000,
             "https://waddle.example",
+            &LinkPreviewConfig::default(),
         );
 
         assert!(message.payloads.is_empty());
@@ -663,6 +971,7 @@ mod tests {
             SECRET,
             1_800_000_000,
             "https://waddle.example",
+            &LinkPreviewConfig::default(),
         );
 
         assert!(message.payloads.is_empty());
@@ -697,6 +1006,7 @@ mod tests {
             SECRET,
             1_800_000_000,
             "https://waddle.example",
+            &LinkPreviewConfig::default(),
         );
 
         assert!(message.payloads.is_empty());
@@ -731,6 +1041,7 @@ mod tests {
             SECRET,
             1_800_000_000,
             "https://waddle.example",
+            &LinkPreviewConfig::default(),
         );
 
         assert_eq!(
@@ -768,6 +1079,7 @@ mod tests {
             SECRET,
             1_800_000_000,
             "https://waddle.example",
+            &LinkPreviewConfig::default(),
         );
 
         assert_eq!(
@@ -805,6 +1117,7 @@ mod tests {
             SECRET,
             1_800_000_000,
             "https://waddle.example",
+            &LinkPreviewConfig::default(),
         );
 
         assert_eq!(
@@ -852,6 +1165,7 @@ mod tests {
             SECRET,
             1_800_000_000,
             "https://waddle.example",
+            &LinkPreviewConfig::default(),
         );
 
         let parsed = waddle_xmpp::xep::extract_link_metadata_from_message(&message);
@@ -881,6 +1195,7 @@ mod tests {
             SECRET,
             1_800_000_000,
             "https://waddle.example",
+            &LinkPreviewConfig::default(),
         );
 
         assert!(message.payloads.is_empty());
