@@ -1016,12 +1016,12 @@ export function useChatAppController(giphyApiKey: string) {
     activeTarget.value.notifyComposing(thread);
   }
 
-  function editActiveMessage(messageId: string, newBody: string, markup?: MarkupSpan[], references?: MessageReference[]) {
+  function editActiveMessage(messageId: string, newBody: string, markup?: MarkupSpan[], references?: MessageReference[], linkPreview?: ComposerLinkPreviewSendPayload) {
     if (ui.sidebarMode.value === "dms") {
-      void dmMessaging.editMessage(messageId, newBody, markup, references);
+      void dmMessaging.editMessage(messageId, newBody, markup, references, linkPreview);
       return;
     }
-    void messaging.editMessage(messageId, newBody, markup, references);
+    void messaging.editMessage(messageId, newBody, markup, references, linkPreview);
   }
 
   function retractActiveMessage(messageId: string) {

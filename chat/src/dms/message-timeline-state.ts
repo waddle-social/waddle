@@ -175,6 +175,7 @@ export function buildDmTimelineFromMamResults(params: {
     body: string;
     markup?: LiveDmMessage["markup"];
     references?: LiveDmMessage["references"];
+    linkPreviews?: LiveDmMessage["linkPreviews"];
     extensionAnnotations?: LiveDmMessage["extensionAnnotations"];
     extensionBodyFallback?: boolean;
   }[] = [];
@@ -190,6 +191,7 @@ export function buildDmTimelineFromMamResults(params: {
         body: msg.body,
         markup: msg.markup,
         references: msg.references,
+        linkPreviews: msg.linkPreviews,
         extensionAnnotations: msg.extensionAnnotations,
         extensionBodyFallback: msg.extensionBodyFallback,
       });
@@ -239,6 +241,8 @@ export function buildDmTimelineFromMamResults(params: {
     else delete target.markup;
     if (update.references && update.references.length > 0) target.references = update.references;
     else delete target.references;
+    if (update.linkPreviews && update.linkPreviews.length > 0) target.linkPreviews = update.linkPreviews;
+    else delete target.linkPreviews;
     if (update.extensionAnnotations && update.extensionAnnotations.length > 0) {
       target.extensionAnnotations = update.extensionAnnotations;
       if (update.extensionBodyFallback) target.extensionBodyFallback = true;

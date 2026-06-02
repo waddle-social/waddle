@@ -71,7 +71,7 @@ const emit = defineEmits<{
     threadOverride: { threadId: string; parentThreadId?: string },
     linkPreview?: ComposerLinkPreviewSendPayload,
   ];
-  editMessage: [messageId: string, newBody: string, markup?: MarkupSpan[], references?: MessageReference[]];
+  editMessage: [messageId: string, newBody: string, markup?: MarkupSpan[], references?: MessageReference[], linkPreview?: ComposerLinkPreviewSendPayload];
   retractMessage: [messageId: string];
   reactMessage: [messageId: string, emoji: string];
   displayed: [messageId: string];
@@ -762,7 +762,9 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
             hide-reply-chip
             :reaction-mode-selected="reactionMode?.selectedMessageId === message.id"
             :invoke-extension-action="props.invokeExtensionAction"
-            @edit="(id, body, m, r) => emit('editMessage', id, body, m, r)"
+            :link-preview-lookup="props.linkPreviewLookup"
+            :link-preview-scope="props.linkPreviewScope"
+            @edit="(id, body, m, r, lp) => emit('editMessage', id, body, m, r, lp)"
             @retract="(id) => emit('retractMessage', id)"
             @react="(id, emoji) => emit('reactMessage', id, emoji)"
             @reply="beginReplyInThread"
@@ -804,7 +806,9 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
               hide-reply-chip
               :reaction-mode-selected="reactionMode?.selectedMessageId === message.id"
               :invoke-extension-action="props.invokeExtensionAction"
-              @edit="(id, body, m, r) => emit('editMessage', id, body, m, r)"
+              :link-preview-lookup="props.linkPreviewLookup"
+              :link-preview-scope="props.linkPreviewScope"
+              @edit="(id, body, m, r, lp) => emit('editMessage', id, body, m, r, lp)"
               @retract="(id) => emit('retractMessage', id)"
               @react="(id, emoji) => emit('reactMessage', id, emoji)"
               @reply="beginReplyInThread"

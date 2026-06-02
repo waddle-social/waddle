@@ -18,6 +18,7 @@ import {
   MessagesSquare,
   Pin,
   PinOff,
+  X,
 } from "lucide-vue-next";
 import type { JSONContent } from "@tiptap/core";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
@@ -36,6 +37,8 @@ import {
 import { useExtensionAnnotationActions } from "@/channels/extension-annotation-actions";
 import { messageMentionsBareJid } from "@/lib/mentions";
 import { richMessageToTiptap, tiptapToRichMessage } from "@/lib/rich-message";
+import { useComposerLinkPreview } from "@/lib/use-composer-link-preview";
+import type { ComposerLinkPreviewLookup, ComposerLinkPreviewSendPayload } from "@/lib/link-preview-composer";
 import type { MucAffiliation, MucRole, OccupantAuthority, OccupantHat, OccupantPresence } from "@/lib/xmpp-client";
 import { formatTimelineTimeOfDay } from "@/channels/timeline";
 import { useLongPress } from "@/ui/gestures/long-press";
@@ -162,10 +165,12 @@ const props = defineProps<{
   /** #414: current user is room Owner or Admin (controls pin/unpin
    * action-sheet entry visibility). */
   canPinMessages?: boolean;
+  linkPreviewLookup?: ComposerLinkPreviewLookup | null;
+  linkPreviewScope?: string | null;
 }>();
 
 const emit = defineEmits<{
-  edit: [messageId: string, newBody: string, markup?: MarkupSpan[], references?: MessageReference[]];
+  edit: [messageId: string, newBody: string, markup?: MarkupSpan[], references?: MessageReference[], linkPreview?: ComposerLinkPreviewSendPayload];
   retract: [messageId: string];
   react: [messageId: string, emoji: string];
   reply: [message: TimelineMessage];
@@ -395,6 +400,7 @@ const forumThreadLabel = computed(() =>
 const isEditing = ref(false);
 const editInitialContent = ref<JSONContent | undefined>(undefined);
 const editEditorRef = ref<InstanceType<typeof ChatEditor> | null>(null);
+const editDraft = ref("");
 const setEditEditorRef = (instance: InstanceType<typeof ChatEditor> | null) => {
   editEditorRef.value = instance;
 };
@@ -410,6 +416,13 @@ const editOriginalRich = computed(() =>
   })),
 );
 const editOriginalBody = computed(() => editOriginalRich.value.body.trim());
+const editOriginalHasPreview = computed(() => (props.message.linkPreviews?.length ?? 0) > 0);
+const editOriginalPreviewUrl = computed(() => props.message.linkPreviews?.[0]?.originalUrl ?? null);
+const editLinkPreview = useComposerLinkPreview(
+  editDraft,
+  computed(() => isEditing.value ? props.linkPreviewLookup : null),
+  computed(() => props.linkPreviewScope),
+);
 
 function startEdit() {
   const content = richMessageToTiptap({
@@ -418,6 +431,7 @@ function startEdit() {
     references: props.message.references,
   });
   editInitialContent.value = content;
+  editDraft.value = props.message.body;
   isEditing.value = true;
   void nextTick(() => editEditorRef.value?.focus());
 }
@@ -425,25 +439,39 @@ function startEdit() {
 function cancelEdit() {
   isEditing.value = false;
   editInitialContent.value = undefined;
+  editDraft.value = "";
 }
 
-function submitEditFromEditor(doc: JSONContent) {
+function updateEditDraft(doc: JSONContent) {
+  editDraft.value = tiptapToRichMessage(doc).body;
+}
+
+async function submitEditFromEditor(doc: JSONContent) {
   const { body, markup, references } = tiptapToRichMessage(doc);
   const trimmed = body.trim();
+  const linkPreview = await editLinkPreview.sendPayloadFor(body);
+  const originalPreviewUrl = editOriginalPreviewUrl.value;
+  const previewChanged = editOriginalHasPreview.value
+    ? editLinkPreview.state.value.kind === "dismissed"
+      || !editDraft.value.includes(originalPreviewUrl ?? "\0")
+      || (!!linkPreview && linkPreview.preview.originalUrl !== originalPreviewUrl)
+    : !!linkPreview;
   const changed = trimmed !== editOriginalBody.value
     || JSON.stringify(markup) !== JSON.stringify(editOriginalRich.value.markup)
-    || JSON.stringify(references) !== JSON.stringify(editOriginalRich.value.references);
+    || JSON.stringify(references) !== JSON.stringify(editOriginalRich.value.references)
+    || previewChanged;
   if (trimmed && changed) {
-    emit("edit", props.message.id, body, markup, references);
+    emit("edit", props.message.id, body, markup, references, linkPreview);
   }
   isEditing.value = false;
   editInitialContent.value = undefined;
+  editDraft.value = "";
 }
 
 function submitEditFromLink() {
   const doc = editEditorRef.value?.getJSON();
   if (!doc) return;
-  submitEditFromEditor(doc);
+  void submitEditFromEditor(doc);
 }
 
 function emitAvatarClick() {
@@ -1049,8 +1077,33 @@ onBeforeUnmount(() => {
           :initial-content="editInitialContent"
           placeholder="Edit message…"
           @send="submitEditFromEditor"
+          @update="updateEditDraft"
           @cancel="cancelEdit"
         />
+        <div
+          v-if="editLinkPreview.showCard.value"
+          class="flex min-w-0 items-center gap-2 rounded-md border border-border bg-muted/45 px-2 py-1.5"
+          :aria-busy="editLinkPreview.state.value.kind === 'loading'"
+        >
+          <Loader2
+            v-if="editLinkPreview.state.value.kind === 'loading'"
+            class="h-4 w-4 shrink-0 animate-spin text-primary"
+            aria-hidden="true"
+          />
+          <div class="min-w-0 flex-1">
+            <div class="type-emphasis truncate text-foreground">{{ editLinkPreview.title.value }}</div>
+            <div class="type-caption truncate text-muted-foreground">{{ editLinkPreview.description.value }}</div>
+          </div>
+          <button
+            v-if="editLinkPreview.canDismiss.value"
+            type="button"
+            class="chat-composer-input-action h-7 w-7 shrink-0 flex items-center justify-center text-muted-foreground transition-colors hover:bg-background/70 hover:text-foreground"
+            aria-label="Remove preview"
+            @click="editLinkPreview.dismiss"
+          >
+            <X class="h-4 w-4" aria-hidden="true" />
+          </button>
+        </div>
         <p class="type-caption text-muted-foreground/70">
           escape to
           <button

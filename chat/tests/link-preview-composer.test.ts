@@ -388,6 +388,19 @@ describe("composer link preview state", () => {
     expect(source.match(/:disabled="disabled \|\| isPreparingSend"/g)?.length ?? 0).toBeGreaterThanOrEqual(4);
     expect(source.match(/:disabled="isPreparingSend"/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
   });
+
+  test("MessageCard inline edits reuse composer preview lookup and emit payloads", () => {
+    const source = readFileSync(
+      new URL("../src/components/chat/MessageCard.vue", import.meta.url),
+      "utf8",
+    );
+
+    expect(source).toContain("useComposerLinkPreview(");
+    expect(source).toContain("@update=\"updateEditDraft\"");
+    expect(source).toContain("editLinkPreview.sendPayloadFor(body)");
+    expect(source).toContain("emit(\"edit\", props.message.id, body, markup, references, linkPreview)");
+    expect(source).toContain("@click=\"editLinkPreview.dismiss\"");
+  });
 });
 
 function setupComposerPreviewHarness(

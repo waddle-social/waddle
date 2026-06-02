@@ -399,6 +399,65 @@ mod tests {
     }
 
     #[test]
+    fn correction_link_preview_request_stamps_xep0511_metadata() {
+        let preview = waddle_xmpp::xep::LinkPreviewTokenData {
+            sender_jid: "alice@example.com".parse().expect("jid"),
+            scope_jid: "room@muc.example.com".parse().expect("jid"),
+            original_url: url::Url::parse("https://example.com/edited").expect("url"),
+            normalized_url: url::Url::parse("https://example.com/edited").expect("url"),
+            title: Some("Edited Link".to_string()),
+            description: None,
+            image: Some(waddle_xmpp::xep::LinkPreviewTokenImage {
+                url: url::Url::parse(
+                    "https://waddle.example/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png",
+                )
+                .expect("url"),
+                media_type: PreviewImageMediaType::Png,
+                width: Some(640),
+                height: Some(360),
+                alt: None,
+            }),
+            expires_at_unix: 1_900_000_000,
+        };
+        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
+        let mut message = Message::new(None::<jid::Jid>);
+        message.to = Some("room@muc.example.com".parse().expect("jid"));
+        message.bodies.insert(
+            xmpp_parsers::message::Lang::new(),
+            "edited to https://example.com/edited".to_string(),
+        );
+        message
+            .payloads
+            .push(waddle_xmpp::xep::build_replace_element("original-message-id"));
+        message
+            .payloads
+            .push(waddle_xmpp::xep::build_link_preview_request_element(&token));
+
+        consume_link_preview_request(
+            &mut message,
+            &sender(),
+            SECRET,
+            1_800_000_000,
+            "https://waddle.example",
+        );
+
+        assert_eq!(
+            waddle_xmpp::xep::extract_replaces_id(&message),
+            Some("original-message-id".to_string())
+        );
+        let parsed = waddle_xmpp::xep::extract_link_metadata_from_message(&message);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].about, preview.original_url);
+        assert_eq!(parsed[0].title.as_deref(), Some("Edited Link"));
+        let references = waddle_xmpp::xep::extract_references_from_message(&message);
+        assert_eq!(references.len(), 1);
+        assert_eq!(
+            references[0].uri,
+            "https://waddle.example/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png"
+        );
+    }
+
+    #[test]
     fn link_preview_request_with_foreign_cached_image_origin_stamps_text_metadata_only() {
         let preview = waddle_xmpp::xep::LinkPreviewTokenData {
             sender_jid: "alice@example.com".parse().expect("jid"),
