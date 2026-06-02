@@ -10,7 +10,7 @@ import {
 
 // The production lookup has its own 2s timeout; keep send fail-open if a
 // replacement lookup implementation ever forgets to bound its promise.
-const SEND_LOOKUP_GRACE_MS = 2_250;
+export const SEND_LOOKUP_GRACE_MS = 2_250;
 
 export function useComposerLinkPreview(
   draft: Ref<string>,
@@ -21,7 +21,7 @@ export function useComposerLinkPreview(
   let lookupEpoch = 0;
   let activeKey: string | null = null;
   let activeLookup: ComposerLinkPreviewLookup | null = null;
-  let activeLookupSettled: Promise<void> | null = null;
+  let activeLookupSettled: Promise<ComposerLinkPreviewState> | null = null;
 
   const showCard = computed(() => state.value.kind !== "idle");
   const host = computed(() => {
@@ -64,11 +64,15 @@ export function useComposerLinkPreview(
     const key = stateKey(scopeKey.value, url);
     if (!key) return undefined;
 
-    if (key === activeKey && state.value.kind === "loading" && activeLookupSettled) {
-      await settleWithGrace(activeLookupSettled);
+    if (key !== activeKey) return undefined;
+
+    const pending = state.value.kind === "loading" ? activeLookupSettled : null;
+    if (pending) {
+      const settledState = await settleWithGrace(pending);
+      return settledState ? sendPayloadFromState(settledState) : undefined;
     }
 
-    return key === activeKey ? sendPayloadFromState(state.value) : undefined;
+    return sendPayloadFromState(state.value);
   }
 
   watch(
@@ -103,11 +107,17 @@ export function useComposerLinkPreview(
         rawLookup = Promise.reject();
       }
       const lookupSettled = rawLookup.then((result) => {
-        if (epoch !== lookupEpoch) return;
-        state.value = linkPreviewStateFromLookup(url, result);
+        const nextState = linkPreviewStateFromLookup(url, result);
+        if (epoch === lookupEpoch) {
+          state.value = nextState;
+        }
+        return nextState;
       }).catch(() => {
-        if (epoch !== lookupEpoch) return;
-        state.value = { kind: "failed", url };
+        const nextState: ComposerLinkPreviewState = { kind: "failed", url };
+        if (epoch === lookupEpoch) {
+          state.value = nextState;
+        }
+        return nextState;
       });
       activeLookupSettled = lookupSettled;
       void lookupSettled.finally(() => {
@@ -132,15 +142,16 @@ export function useComposerLinkPreview(
   };
 }
 
-async function settleWithGrace(pending: Promise<void>): Promise<void> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  await Promise.race([
+async function settleWithGrace<T>(pending: Promise<T>): Promise<T | undefined> {
+  let timer: Parameters<typeof clearTimeout>[0] | undefined;
+  const result = await Promise.race<T | undefined>([
     pending,
-    new Promise<void>((resolve) => {
+    new Promise<undefined>((resolve) => {
       timer = setTimeout(resolve, SEND_LOOKUP_GRACE_MS);
     }),
   ]);
   if (timer !== undefined) clearTimeout(timer);
+  return result;
 }
 
 function stateKey(scope: string | null | undefined, url: string | null): string | null {
