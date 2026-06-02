@@ -28,7 +28,7 @@ use waddle_xmpp_client::messaging::{
     build_moderation_message, build_outbound_message, build_pinned_message, build_reaction_message,
     build_retraction_message, build_unpinned_message, InboundCallEvent, InboundMessage,
     InboundPresence, LinkPreviewToken, MarkupSpanData, MarkupSpanType, MucAffiliation, MucRole,
-    MucStatus, ReferenceData, SendMessageOptions, SharedFileDisposition,
+    ReferenceData, SendMessageOptions, SharedFileDisposition,
 };
 use waddle_xmpp_client::pep::{
     build_pep_items_iq, build_publish_activity_iq, build_publish_mood_iq, build_publish_tune_iq,

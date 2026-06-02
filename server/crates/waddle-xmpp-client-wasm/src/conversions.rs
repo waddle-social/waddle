@@ -727,6 +727,7 @@ mod inbound_to_js_tests {
 
     #[test]
     fn presence_to_js_maps_muc_status_codes_to_numbers() {
+        use waddle_xmpp_client::messaging::MucStatus;
         let presence = InboundPresence {
             from: Some("room@muc.test/alice".to_string()),
             to: None,
