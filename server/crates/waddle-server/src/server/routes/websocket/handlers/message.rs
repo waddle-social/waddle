@@ -428,7 +428,9 @@ mod tests {
         );
         message
             .payloads
-            .push(waddle_xmpp::xep::build_replace_element("original-message-id"));
+            .push(waddle_xmpp::xep::build_replace_element(
+                "original-message-id",
+            ));
         message
             .payloads
             .push(waddle_xmpp::xep::build_link_preview_request_element(&token));
