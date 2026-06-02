@@ -49,18 +49,20 @@ const giphyApiKey = env.GIPHY_API_KEY ?? "";
     </script>
     <title>Waddle</title>
     <script>
-      // Faro RUM bootstrap. `initTelemetry` is a no-op unless
-      // `PUBLIC_FARO_URL` is set, so this ships on every build but
-      // stays silent locally and in tests. Vite inlines
-      // `import.meta.env.PUBLIC_*` at build time. The configured
-      // server origin arrives via the `waddle:server-base-url` meta tag.
+      // Faro RUM bootstrap. Vite inlines `import.meta.env.PUBLIC_*` at
+      // build time, while the configured server origin arrives via the
+      // `waddle:server-base-url` meta tag.
+      import { consumeRedirectSession } from "@/auth/redirect-session";
       import { initTelemetry } from "@/lib/telemetry";
+      consumeRedirectSession();
       const serverBaseUrl = document
         .querySelector('meta[name="waddle:server-base-url"]')
         ?.getAttribute("content") ?? "";
       initTelemetry({
         url: import.meta.env.PUBLIC_FARO_URL,
         appName: import.meta.env.PUBLIC_FARO_APP_NAME,
+        appVersion: import.meta.env.PUBLIC_FARO_APP_VERSION,
+        environment: import.meta.env.PUBLIC_FARO_ENVIRONMENT,
         release: import.meta.env.PUBLIC_COMMIT_SHA,
         propagateTraceHeadersTo: serverBaseUrl ? [serverBaseUrl] : [],
       });

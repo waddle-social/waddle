@@ -247,7 +247,7 @@ function consumeSmEnvelope(key: string, ownerId: string): PersistedSmResumeState
     reportError("storage.read", err, {
       recoverable: true,
       detail: "resume-persistence consume failed (sm)",
-      key,
+      storage_area: "sm-resume",
     });
     return null;
   }
@@ -388,7 +388,7 @@ function readJson<T>(key: string, validate: (value: unknown) => value is T, kind
     reportError("storage.read", err, {
       recoverable: true,
       detail: `resume-persistence read failed (${kind})`,
-      key,
+      storage_area: kind,
     });
     return null;
   }
@@ -405,7 +405,7 @@ function writeJson(key: string, value: unknown, kind: string): void {
     reportError(errorKind, err, {
       recoverable: true,
       detail: `resume-persistence write failed (${kind})`,
-      key,
+      storage_area: kind,
     });
   }
 }
@@ -419,7 +419,7 @@ function removeKey(key: string, kind: string): void {
     reportError("storage.write", err, {
       recoverable: true,
       detail: `resume-persistence clear failed (${kind})`,
-      key,
+      storage_area: kind,
     });
   }
 }

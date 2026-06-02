@@ -219,7 +219,7 @@ function readEntries(selfBareJid: string): CachedMucCallSession[] {
     reportError("storage.read", err, {
       recoverable: true,
       detail: "muc call session cache read failed",
-      key,
+      storage_area: "muc-call-session-cache",
     });
     return [];
   }
@@ -239,7 +239,7 @@ function writeEntries(selfBareJid: string, entries: CachedMucCallSession[]): voi
     reportError("storage.write", err, {
       recoverable: true,
       detail: "muc call session cache write failed",
-      key,
+      storage_area: "muc-call-session-cache",
     });
   }
 }

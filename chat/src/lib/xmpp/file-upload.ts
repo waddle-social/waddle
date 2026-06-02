@@ -1,6 +1,6 @@
 /** XEP-0363: HTTP File Upload for sharing images and files in chat. */
 import type { WaddleClient } from "@waddle/xmpp-client-wasm";
-import { reportError } from "@/lib/telemetry";
+import { markSensitiveUrlForTelemetry, reportError } from "@/lib/telemetry";
 import type { WasmUploadSlot } from "./wasm-types";
 
 export const MAX_FILE_UPLOAD_BYTES = 10 * 1024 * 1024;
@@ -86,6 +86,7 @@ async function uploadToSlot(
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
+    markSensitiveUrlForTelemetry(putUrl);
     xhr.open("PUT", putUrl);
     xhr.setRequestHeader("Content-Type", contentType);
     for (const [name, value] of headers) xhr.setRequestHeader(name, value);
@@ -99,13 +100,20 @@ async function uploadToSlot(
         resolve();
         return;
       }
-      const error = new Error(`Upload failed: ${xhr.status} ${xhr.statusText}`);
-      reportError("upload", error, { recoverable: false, detail: "XEP-0363 PUT failed", status: xhr.status });
+      const error = new Error(`Upload failed with HTTP ${xhr.status}`);
+      reportError("upload", new Error("Upload failed with HTTP status"), {
+        recoverable: false,
+        detail: "xep-0363-put-failed",
+        status: xhr.status,
+      });
       reject(error);
     };
     xhr.onerror = () => {
       const error = new Error("Upload failed: network error");
-      reportError("upload", error, { recoverable: false, detail: "XEP-0363 PUT network error" });
+      reportError("upload", new Error("Upload failed with network error"), {
+        recoverable: false,
+        detail: "xep-0363-put-network-error",
+      });
       reject(error);
     };
     xhr.send(file);

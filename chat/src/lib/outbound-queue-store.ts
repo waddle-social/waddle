@@ -111,7 +111,7 @@ function readQueue(accountKey: string): PersistedQueuedMessage[] {
     reportError("storage.read", err, {
       recoverable: true,
       detail: "outbound-queue read failed",
-      accountKey,
+      storage_area: "outbound-queue",
     });
     return [];
   }
@@ -163,7 +163,7 @@ function pruneStaleEntries(
     reportError("storage.write", err, {
       recoverable: true,
       detail: "outbound-queue prune failed",
-      accountKey,
+      storage_area: "outbound-queue",
       dropped,
     });
     return fresh;
@@ -176,7 +176,7 @@ function pruneStaleEntries(
   reportError("storage.write", new Error("queue ttl prune"), {
     recoverable: true,
     detail: `pruned ${dropped} stale queued message(s)`,
-    accountKey,
+    storage_area: "outbound-queue",
     dropped,
   });
   return fresh;
@@ -209,7 +209,7 @@ function writeQueue(accountKey: string, messages: PersistedQueuedMessage[]): voi
     reportError(kind, err, {
       recoverable: true,
       detail: "outbound-queue write failed",
-      accountKey,
+      storage_area: "outbound-queue",
       queueSize: messages.length,
     });
   }

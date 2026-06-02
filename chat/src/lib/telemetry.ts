@@ -1,11 +1,10 @@
 /**
  * Grafana Faro RUM wrapper.
  *
- * All reporting functions are no-ops when Faro isn't initialized, which
- * is the default in local dev and in tests. Initialization is gated on
- * the runtime presence of `PUBLIC_FARO_URL` — there is no "disabled"
- * mode in the SDK itself; we just skip `initializeFaro()` entirely so
- * no beacons leave the page.
+ * All reporting functions are no-ops when Faro isn't initialized.
+ * Initialization is gated on the runtime presence of a Faro collector
+ * URL — there is no "disabled" mode in the SDK itself; we just skip
+ * `initializeFaro()` entirely so no beacons leave the page.
  *
  * Drop-detection signals emitted here all live under the
  * `chat.xmpp.*` event namespace so they're easy to filter in Grafana.
@@ -31,8 +30,15 @@
  * `withSpan` callback IS propagated (via the active context set by
  * `context.with`) and will cross-link into backend spans correctly.
  */
-import { initializeFaro, getWebInstrumentations, type Faro } from "@grafana/faro-web-sdk";
-import { TracingInstrumentation } from "@grafana/faro-web-tracing";
+import {
+  initializeFaro,
+  getWebInstrumentations,
+  type Faro,
+  type MetaAttributes,
+  type MetaPage,
+  type TransportItem,
+} from "@grafana/faro-web-sdk";
+import { getDefaultOTELInstrumentations, TracingInstrumentation } from "@grafana/faro-web-tracing";
 import { context, SpanStatusCode, trace, type Span } from "@opentelemetry/api";
 
 type MessageKind = "room" | "dm";
@@ -55,7 +61,11 @@ interface InitTelemetryOptions {
   url: string;
   /** App name, typically the env-specific identifier e.g. `waddle-chat`. */
   appName: string;
-  /** Commit SHA used as the app version, for Faro release correlation. */
+  /** Semantic application version shown in Faro application metadata. */
+  appVersion?: string;
+  /** Deployment environment shown in Faro application metadata. */
+  environment?: string;
+  /** Commit SHA used as the Faro release, for source/deploy correlation. */
   release?: string;
   /**
    * Cross-origin URLs where the browser should inject W3C trace
@@ -67,8 +77,84 @@ interface InitTelemetryOptions {
 }
 
 let faro: Faro | null = null;
+let configuredTrustedSpanOrigins = new Set<string>();
+const sensitiveSpanUrls = new Set<string>();
 
 const TRACER_NAME = "waddle-chat";
+const UNKNOWN_EXTERNAL_URL = "external:unknown";
+const UNKNOWN_FETCH_URL = "fetch:unknown";
+const UNKNOWN_FILE_TRANSFER_URL = "file-transfer:unknown";
+const UNKNOWN_XHR_URL = "xhr:unknown";
+const REDACTED_SPAN_HOST = ":redacted";
+const REDACTED_SPAN_PATH = ":unknown";
+const REDACTED_SPAN_PORT = 0;
+const FARO_CSP_INSTRUMENTATION = "@grafana/faro-web-sdk:instrumentation-csp";
+const FARO_GLOBAL_ERROR_INSTRUMENTATION = "@grafana/faro-web-sdk:instrumentation-errors";
+const FARO_NAVIGATION_INSTRUMENTATION = "@grafana/faro-web-sdk:instrumentation-navigation";
+const FARO_TRACE_EVENT_PREFIX = "faro.tracing.";
+const SPAN_URL_ATTRIBUTE_KEYS = ["http.url", "url.full"] as const;
+const SPAN_ENDPOINT_ATTRIBUTE_KEYS = [
+  "http.host",
+  "http.target",
+  "server.address",
+  "server.port",
+  "url.path",
+] as const;
+const SPAN_QUERY_ATTRIBUTE_KEYS = ["url.fragment", "url.query"] as const;
+const SPAN_REDACTED_ATTRIBUTE_KEYS = ["http.response.status_text", "http.status_text"] as const;
+const SENSITIVE_TRACE_URL_PATTERNS = [
+  /[?&]session_id=/,
+  /[?&]api_key=/,
+  /\/api\/upload(?:[/?#]|$)/,
+  /\/api\/files(?:[/?#]|$)/,
+  /^https:\/\/api\.giphy\.com\//,
+];
+const SENSITIVE_ERROR_CONTEXT_KEYS = new Set([
+  "accountkey",
+  "barejid",
+  "fulljid",
+  "jid",
+  "key",
+  "storagekey",
+]);
+
+type SpanAttributeValue = string | number;
+type FaroEventPayload = {
+  attributes?: Record<string, string>;
+  name?: string;
+};
+type OtelAnyValue = {
+  stringValue?: string | null;
+  boolValue?: boolean | null;
+  intValue?: number | null;
+  doubleValue?: number | null;
+};
+type OtelKeyValue = {
+  key: string;
+  value: OtelAnyValue;
+};
+type OtelSpan = {
+  attributes?: OtelKeyValue[];
+  events?: Array<{
+    attributes?: OtelKeyValue[];
+  }>;
+  links?: Array<{
+    attributes?: OtelKeyValue[];
+  }>;
+};
+type FaroTracePayload = {
+  resourceSpans?: Array<{
+    resource?: {
+      attributes?: OtelKeyValue[];
+    };
+    scopeSpans?: Array<{
+      scope?: {
+        attributes?: OtelKeyValue[];
+      };
+      spans?: OtelSpan[];
+    }>;
+  }>;
+};
 
 /**
  * Initialize Faro exactly once per page lifetime. Re-invocation is a
@@ -85,28 +171,51 @@ export function initTelemetry(options: InitTelemetryOptions): void {
   try {
     const propagateUrls = (options.propagateTraceHeadersTo ?? [])
       .filter((entry) => entry && entry.trim().length > 0)
-      .map((entry) => normalizePropagationEntry(entry));
+      .map((entry) => normalizeUrlPrefixEntry(entry));
+    const ignoredTraceUrls = [
+      ...SENSITIVE_TRACE_URL_PATTERNS,
+      normalizeUrlPrefixEntry(options.url),
+    ];
+    const trustedSpanOrigins = trustedSpanUrlOrigins(options.propagateTraceHeadersTo ?? []);
+    configuredTrustedSpanOrigins = trustedSpanOrigins;
 
     faro = initializeFaro({
       url: options.url,
       app: {
         name: options.appName || "waddle-chat",
-        version: options.release,
+        version: options.appVersion || "unknown",
+        environment: options.environment || undefined,
+        release: options.release,
       },
+      pageTracking: {
+        page: sanitizedPageMeta(),
+        generatePageId: sanitizePagePathForTelemetry,
+      },
+      beforeSend: sanitizeFaroTransportItem,
       instrumentations: [
-        // Default browser instrumentations: uncaught errors, unhandled
-        // promise rejections, console errors, web vitals, session
-        // tracking, view/route changes.
-        ...getWebInstrumentations(),
+        // Default browser instrumentations, minus global error capture:
+        // explicit app errors go through `reportError()` so messages and
+        // context are sanitized before leaving the page. Console and
+        // resource performance capture stay disabled for the same reason.
+        ...getPrivacySafeWebInstrumentations(),
         // Wraps fetch + XMLHttpRequest in OTel spans and injects
         // traceparent/tracestate on requests whose URL matches one of
         // `propagateTraceHeaderCorsUrls`. Without a matching entry the
         // browser does NOT send those headers cross-origin, so the
         // backend can't join the trace.
         new TracingInstrumentation({
-          instrumentationOptions: {
+          instrumentations: getDefaultOTELInstrumentations({
+            ignoreUrls: ignoredTraceUrls,
             propagateTraceHeaderCorsUrls: propagateUrls,
-          },
+            fetchInstrumentationOptions: {
+              applyCustomAttributesOnSpan: (span, request, result) =>
+                scrubFetchSpanUrl(span, request, result, trustedSpanOrigins),
+            },
+            xhrInstrumentationOptions: {
+              applyCustomAttributesOnSpan: (span, xhr) =>
+                scrubXhrSpanUrl(span, xhr, trustedSpanOrigins),
+            },
+          }),
         }),
       ],
     });
@@ -120,20 +229,529 @@ export function initTelemetry(options: InitTelemetryOptions): void {
   installClientHealthTelemetry();
 }
 
+function sanitizeFaroTransportItem(item: TransportItem): TransportItem {
+  const sanitized = {
+    ...item,
+    meta: {
+      ...item.meta,
+      page: sanitizedPageMeta(item.meta.page),
+    },
+  };
+  sanitizeTransportPayload(sanitized);
+  return sanitized;
+}
+
+function sanitizeTransportPayload(item: TransportItem): void {
+  if (item.type === "trace") {
+    sanitizeTracePayload(item.payload, trustedSpanOriginsForTransport());
+    return;
+  }
+
+  if (item.type === "event") {
+    sanitizeEventPayload(item.payload, trustedSpanOriginsForTransport());
+  }
+}
+
+function sanitizeEventPayload(payload: unknown, trustedOrigins: Set<string>): void {
+  if (!isRecord(payload)) return;
+  const event = payload as FaroEventPayload;
+  const attributes = event.attributes;
+  if (!isStringRecord(attributes)) return;
+
+  if (event.name?.startsWith(FARO_TRACE_EVENT_PREFIX)) {
+    sanitizeFlatSpanAttributes(attributes, trustedOrigins);
+  }
+
+  for (const [key, value] of Object.entries(attributes)) {
+    attributes[key] = sanitizeTelemetryText(value);
+  }
+}
+
+function sanitizeTracePayload(payload: unknown, trustedOrigins: Set<string>): void {
+  if (!isRecord(payload)) return;
+  const tracePayload = payload as FaroTracePayload;
+  for (const resourceSpan of tracePayload.resourceSpans ?? []) {
+    sanitizeOtelAttributeStrings(resourceSpan.resource?.attributes);
+    for (const scopeSpan of resourceSpan.scopeSpans ?? []) {
+      sanitizeOtelAttributeStrings(scopeSpan.scope?.attributes);
+      for (const span of scopeSpan.spans ?? []) {
+        sanitizeOtelSpanAttributes(span.attributes, trustedOrigins);
+        for (const event of span.events ?? []) {
+          sanitizeOtelAttributeStrings(event.attributes);
+        }
+        for (const link of span.links ?? []) {
+          sanitizeOtelAttributeStrings(link.attributes);
+        }
+      }
+    }
+  }
+}
+
+function sanitizeOtelSpanAttributes(attributes: OtelKeyValue[] | undefined, trustedOrigins: Set<string>): void {
+  if (!attributes) return;
+  const url = firstOtelSpanUrl(attributes);
+
+  if (url) {
+    const scrubbed = scrubUrl(url, trustedOrigins);
+    if (scrubbed) setOtelSpanUrlAttributes(attributes, scrubbed);
+  } else {
+    redactOtelEndpointAttributes(attributes);
+  }
+
+  for (const key of SPAN_QUERY_ATTRIBUTE_KEYS) {
+    const attribute = findOtelAttribute(attributes, key);
+    if (attribute) setOtelAttributeValue(attribute, ":redacted");
+  }
+  for (const key of SPAN_REDACTED_ATTRIBUTE_KEYS) {
+    const attribute = findOtelAttribute(attributes, key);
+    if (attribute) setOtelAttributeValue(attribute, ":redacted");
+  }
+
+  for (const attribute of attributes) {
+    if (typeof attribute.value?.stringValue === "string") {
+      setOtelAttributeValue(attribute, sanitizeTelemetryText(attribute.value.stringValue));
+    }
+  }
+}
+
+function sanitizeOtelAttributeStrings(attributes: OtelKeyValue[] | undefined): void {
+  if (!attributes) return;
+  for (const attribute of attributes) {
+    if (typeof attribute.value?.stringValue === "string") {
+      setOtelAttributeValue(attribute, sanitizeTelemetryText(attribute.value.stringValue));
+    }
+  }
+}
+
+function firstOtelSpanUrl(attributes: OtelKeyValue[]): string | undefined {
+  for (const key of SPAN_URL_ATTRIBUTE_KEYS) {
+    const value = readOtelStringAttribute(attributes, key);
+    if (value) return value;
+  }
+  return undefined;
+}
+
+function setOtelSpanUrlAttributes(attributes: OtelKeyValue[], value: string): void {
+  const endpoint = safeSpanEndpoint(value);
+  upsertOtelAttribute(attributes, "http.url", value);
+  upsertOtelAttribute(attributes, "url.full", value);
+  upsertOtelAttribute(attributes, "http.host", endpoint.host);
+  upsertOtelAttribute(attributes, "http.target", endpoint.path);
+  upsertOtelAttribute(attributes, "server.address", endpoint.address);
+  upsertOtelAttribute(attributes, "server.port", endpoint.port);
+  upsertOtelAttribute(attributes, "url.path", endpoint.path);
+}
+
+function redactOtelEndpointAttributes(attributes: OtelKeyValue[]): void {
+  const endpoint = redactedSpanEndpoint();
+  const replacements: Record<typeof SPAN_ENDPOINT_ATTRIBUTE_KEYS[number], SpanAttributeValue> = {
+    "http.host": endpoint.host,
+    "http.target": endpoint.path,
+    "server.address": endpoint.address,
+    "server.port": endpoint.port,
+    "url.path": endpoint.path,
+  };
+
+  for (const key of SPAN_ENDPOINT_ATTRIBUTE_KEYS) {
+    const attribute = findOtelAttribute(attributes, key);
+    if (attribute) setOtelAttributeValue(attribute, replacements[key]);
+  }
+}
+
+function readOtelStringAttribute(attributes: OtelKeyValue[], key: string): string | undefined {
+  const value = findOtelAttribute(attributes, key)?.value?.stringValue;
+  return typeof value === "string" ? value : undefined;
+}
+
+function findOtelAttribute(attributes: OtelKeyValue[], key: string): OtelKeyValue | undefined {
+  return attributes.find((attribute) => attribute.key === key);
+}
+
+function upsertOtelAttribute(attributes: OtelKeyValue[], key: string, value: SpanAttributeValue): void {
+  const existing = findOtelAttribute(attributes, key);
+  if (existing) {
+    setOtelAttributeValue(existing, value);
+    return;
+  }
+  attributes.push({
+    key,
+    value: otelAttributeValue(value),
+  });
+}
+
+function setOtelAttributeValue(attribute: OtelKeyValue, value: SpanAttributeValue): void {
+  attribute.value = otelAttributeValue(value);
+}
+
+function otelAttributeValue(value: SpanAttributeValue): OtelAnyValue {
+  return typeof value === "number" ? { intValue: value } : { stringValue: value };
+}
+
+function sanitizeFlatSpanAttributes(attributes: Record<string, string>, trustedOrigins: Set<string>): void {
+  const url = firstFlatSpanUrl(attributes);
+
+  if (url) {
+    const scrubbed = scrubUrl(url, trustedOrigins);
+    if (scrubbed) setFlatSpanUrlAttributes(attributes, scrubbed);
+  } else {
+    redactFlatEndpointAttributes(attributes);
+  }
+
+  for (const key of SPAN_QUERY_ATTRIBUTE_KEYS) {
+    if (key in attributes) attributes[key] = ":redacted";
+  }
+  for (const key of SPAN_REDACTED_ATTRIBUTE_KEYS) {
+    if (key in attributes) attributes[key] = ":redacted";
+  }
+}
+
+function firstFlatSpanUrl(attributes: Record<string, string>): string | undefined {
+  for (const key of SPAN_URL_ATTRIBUTE_KEYS) {
+    const value = attributes[key];
+    if (value) return value;
+  }
+  return undefined;
+}
+
+function setFlatSpanUrlAttributes(attributes: Record<string, string>, value: string): void {
+  const endpoint = safeSpanEndpoint(value);
+  attributes["http.url"] = value;
+  attributes["url.full"] = value;
+  attributes["http.host"] = endpoint.host;
+  attributes["http.target"] = endpoint.path;
+  attributes["server.address"] = endpoint.address;
+  attributes["server.port"] = String(endpoint.port);
+  attributes["url.path"] = endpoint.path;
+}
+
+function redactFlatEndpointAttributes(attributes: Record<string, string>): void {
+  const endpoint = redactedSpanEndpoint();
+  const replacements: Record<typeof SPAN_ENDPOINT_ATTRIBUTE_KEYS[number], string> = {
+    "http.host": endpoint.host,
+    "http.target": endpoint.path,
+    "server.address": endpoint.address,
+    "server.port": String(endpoint.port),
+    "url.path": endpoint.path,
+  };
+
+  for (const key of SPAN_ENDPOINT_ATTRIBUTE_KEYS) {
+    if (key in attributes) attributes[key] = replacements[key];
+  }
+}
+
+function trustedSpanOriginsForTransport(): Set<string> {
+  const origins = new Set(configuredTrustedSpanOrigins);
+  const pageOrigin = currentPageOrigin();
+  if (pageOrigin) origins.add(pageOrigin);
+  return origins;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isStringRecord(value: unknown): value is Record<string, string> {
+  return isRecord(value) && Object.values(value).every((entry) => typeof entry === "string");
+}
+
+function sanitizedPageMeta(page?: MetaPage): MetaPage {
+  const route = sanitizePagePathForTelemetry();
+  return {
+    ...page,
+    attributes: sanitizeMetaAttributes(page?.attributes),
+    id: route,
+    url: `${currentPageOrigin()}${route}`,
+  };
+}
+
+function sanitizeMetaAttributes(attributes: MetaAttributes | undefined): MetaAttributes | undefined {
+  if (!attributes) return undefined;
+  return Object.fromEntries(
+    Object.entries(attributes).map(([key, value]) => [key, sanitizeTelemetryText(value)]),
+  );
+}
+
+function sanitizePagePathForTelemetry(locationOverride?: Location): string {
+  return sanitizeRoutePath(currentPagePath(locationOverride));
+}
+
+function sanitizeRoutePath(path: string): string {
+  const segments = path.split("/").filter(Boolean);
+  if (segments.length === 0) return "/";
+
+  switch (segments[0]) {
+    case "admin":
+      return segments.length > 1 ? "/admin/:panel" : "/admin";
+    case "dm":
+      return segments.length > 1 ? "/dm/:user" : "/dm";
+    case "events":
+    case "feed":
+    case "settings":
+    case "stories":
+    case "threads":
+      return `/${segments[0]}`;
+    case "r":
+      if (segments[2] === "x") return "/r/:room/x/:plugin/:route";
+      return segments.length > 1 ? "/r/:room" : "/r";
+    default:
+      return "/:route";
+  }
+}
+
+function currentPagePath(locationOverride?: Location): string {
+  const pageLocation = locationOverride ?? (typeof window !== "undefined" ? window.location : undefined);
+  const pathname = pageLocation?.pathname || "/";
+  return pathname.startsWith("/") ? pathname : `/${pathname}`;
+}
+
+function currentPageOrigin(): string {
+  if (typeof window === "undefined") return "";
+  if (window.location?.origin) return window.location.origin;
+  try {
+    return new URL(window.location?.href ?? "").origin;
+  } catch {
+    return "";
+  }
+}
+
+function getPrivacySafeWebInstrumentations() {
+  return getWebInstrumentations({
+    captureConsole: false,
+    enableContentSecurityPolicyInstrumentation: false,
+    enablePerformanceInstrumentation: false,
+  }).filter((instrumentation) =>
+    instrumentation.name !== FARO_CSP_INSTRUMENTATION
+    && instrumentation.name !== FARO_GLOBAL_ERROR_INSTRUMENTATION
+    && instrumentation.name !== FARO_NAVIGATION_INSTRUMENTATION
+  );
+}
+
 /**
- * Turn a string into the RegExp or URL-prefix shape
- * `TracingInstrumentation` expects. A plain URL like
- * `https://xmpp.waddle.social` matches as a prefix, which is what we
- * want — every `/api/...` call under that origin joins the trace.
+ * Turn a string into the URL-prefix RegExp `TracingInstrumentation`
+ * expects. A plain string match is exact, so `https://xmpp.waddle.social`
+ * would not match `/api/...`; the escaped prefix regex does.
  */
-function normalizePropagationEntry(entry: string): string | RegExp {
+function normalizeUrlPrefixEntry(entry: string): RegExp {
   const trimmed = entry.trim();
-  return trimmed.endsWith("/") ? trimmed.slice(0, -1) : trimmed;
+  const prefix = trimmed.endsWith("/") ? trimmed.slice(0, -1) : trimmed;
+  return new RegExp(`^${escapeRegExp(prefix)}(?:[/?#]|$)`);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function trustedSpanUrlOrigins(entries: string[]): Set<string> {
+  const origins = new Set<string>();
+  const pageOrigin = currentPageOrigin();
+  if (pageOrigin) origins.add(pageOrigin);
+
+  for (const entry of entries) {
+    try {
+      origins.add(new URL(entry, currentPageHref()).origin);
+    } catch {
+      // Invalid config entry: leave it out rather than widening trust.
+    }
+  }
+  return origins;
+}
+
+function scrubFetchSpanUrl(
+  span: Span,
+  request: unknown,
+  result: unknown,
+  trustedOrigins: Set<string>,
+): void {
+  const url = readResultUrl(result) ?? readRequestUrl(request);
+  if (!url) {
+    setSpanUrlAttributes(span, UNKNOWN_FETCH_URL);
+    return;
+  }
+  scrubSpanUrlAttributes(span, url, trustedOrigins);
+}
+
+function scrubXhrSpanUrl(span: Span, xhr: XMLHttpRequest, trustedOrigins: Set<string>): void {
+  if (!xhr.responseURL) {
+    setSpanUrlAttributes(span, UNKNOWN_XHR_URL);
+    return;
+  }
+  scrubSpanUrlAttributes(span, xhr.responseURL, trustedOrigins);
+}
+
+function readResultUrl(result: unknown): string | undefined {
+  if (result && typeof result === "object" && "url" in result) {
+    const url = (result as { url?: unknown }).url;
+    return typeof url === "string" ? url : undefined;
+  }
+  return undefined;
+}
+
+function readRequestUrl(request: unknown): string | undefined {
+  if (typeof Request !== "undefined" && request instanceof Request) {
+    return request.url;
+  }
+  if (typeof request === "string") return request;
+  if (typeof URL !== "undefined" && request instanceof URL) return request.toString();
+  return undefined;
+}
+
+function scrubSpanUrlAttributes(span: Span, url: string | undefined, trustedOrigins: Set<string>): void {
+  const scrubbed = scrubUrl(url, trustedOrigins);
+  if (!scrubbed) return;
+  setSpanUrlAttributes(span, scrubbed);
+}
+
+function setSpanUrlAttributes(span: Span, value: string): void {
+  const endpoint = safeSpanEndpoint(value);
+  span.setAttribute("http.url", value);
+  span.setAttribute("url.full", value);
+  span.setAttribute("http.host", endpoint.host);
+  span.setAttribute("http.target", endpoint.path);
+  span.setAttribute("server.address", endpoint.address);
+  span.setAttribute("server.port", endpoint.port);
+  span.setAttribute("url.path", endpoint.path);
+}
+
+function safeSpanEndpoint(value: string): {
+  address: string;
+  host: string;
+  path: string;
+  port: number;
+} {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return redactedSpanEndpoint();
+    return {
+      address: url.hostname,
+      host: url.host,
+      path: url.pathname || "/",
+      port: url.port ? Number(url.port) : (url.protocol === "https:" ? 443 : 80),
+    };
+  } catch {
+    return redactedSpanEndpoint();
+  }
+}
+
+function redactedSpanEndpoint(): {
+  address: string;
+  host: string;
+  path: string;
+  port: number;
+} {
+  return {
+    address: REDACTED_SPAN_HOST,
+    host: REDACTED_SPAN_HOST,
+    path: REDACTED_SPAN_PATH,
+    port: REDACTED_SPAN_PORT,
+  };
+}
+
+function scrubUrl(value: string | undefined, trustedOrigins: Set<string>): string | undefined {
+  if (!value) return undefined;
+  try {
+    const url = new URL(value, currentPageHref());
+    if (isSensitiveSpanUrl(url)) return UNKNOWN_FILE_TRANSFER_URL;
+    if (!trustedOrigins.has(url.origin)) return scrubExternalUrl();
+    url.pathname = scrubUrlPath(url.pathname);
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return scrubUrlPath(value.split(/[?#]/, 1)[0] ?? "");
+  }
+}
+
+function currentPageHref(): string {
+  if (typeof window === "undefined") return "http://localhost";
+  return window.location?.href || "http://localhost";
+}
+
+function scrubExternalUrl(): string {
+  return UNKNOWN_EXTERNAL_URL;
+}
+
+function scrubUrlPath(path: string): string {
+  if (path.startsWith("/api/upload/")) return "/api/upload/:slot";
+  if (path === "/api/upload") return path;
+  if (path.startsWith("/api/files/")) return "/api/files/:slot/:file";
+  if (path === "/api/files") return path;
+  if (path.startsWith("/api/")) return "/api/:endpoint";
+  if (isStaticAssetPath(path)) return path;
+  return sanitizeRoutePath(path);
+}
+
+function isStaticAssetPath(path: string): boolean {
+  return path.startsWith("/_astro/")
+    || path === "/favicon.ico"
+    || path === "/manifest.webmanifest"
+    || path === "/waddle-logo.svg"
+    || /^\/(?:apple-touch-icon|favicon-\d+x\d+)\.png$/.test(path);
+}
+
+function isSensitiveSpanUrl(url: URL): boolean {
+  return sensitiveSpanUrls.has(normalizeSensitiveSpanUrl(url));
+}
+
+function normalizeSensitiveSpanUrl(url: URL): string {
+  const copy = new URL(url);
+  copy.search = "";
+  copy.hash = "";
+  return copy.toString();
+}
+
+export function markSensitiveUrlForTelemetry(value: string): void {
+  try {
+    sensitiveSpanUrls.add(normalizeSensitiveSpanUrl(new URL(value, currentPageHref())));
+  } catch {
+    // Invalid URLs never make it to fetch/XHR either; ignore.
+  }
+}
+
+/** For tests only — clear dynamically marked sensitive URLs. */
+export function __clearSensitiveUrlsForTesting(): void {
+  sensitiveSpanUrls.clear();
 }
 
 /** For tests only — inject a stub or clear state between test cases. */
 export function __setFaroForTesting(instance: Faro | null): void {
   faro = instance;
+  if (!instance) configuredTrustedSpanOrigins = new Set();
+}
+
+/** For tests only — exercise the final transport guard without calling Grafana. */
+export function __sanitizeFaroTransportItemForTesting(item: TransportItem): TransportItem {
+  return sanitizeFaroTransportItem(item);
+}
+
+/** For tests only — exercise span URL redaction without real OTel spans. */
+export function __scrubSpanUrlForTesting(value: string, trustedOrigins: string[]): string | undefined {
+  return scrubUrl(value, new Set(trustedOrigins));
+}
+
+/** For tests only — exercise XHR span URL redaction without real XHR instrumentation. */
+export function __scrubXhrSpanUrlForTesting(responseURL: string, trustedOrigins: string[]): Record<string, string | number> {
+  const attributes: Record<string, string | number> = {};
+  const span = {
+    setAttribute: (key: string, value: string | number) => {
+      attributes[key] = value;
+      return span;
+    },
+  } as unknown as Span;
+  scrubXhrSpanUrl(span, { responseURL } as XMLHttpRequest, new Set(trustedOrigins));
+  return attributes;
+}
+
+/** For tests only — exercise fetch span URL fallback without real fetch instrumentation. */
+export function __scrubMissingFetchSpanUrlForTesting(): Record<string, string | number> {
+  const attributes: Record<string, string | number> = {};
+  const span = {
+    setAttribute: (key: string, value: string | number) => {
+      attributes[key] = value;
+      return span;
+    },
+  } as unknown as Span;
+  scrubFetchSpanUrl(span, undefined, undefined, new Set());
+  return attributes;
 }
 
 /**
@@ -150,7 +768,7 @@ export function __setFaroForTesting(instance: Faro | null): void {
  * not an orphaned sibling.
  *
  * The returned span is exposed to the callback so callers can attach
- * domain attributes ("room.jid", "message.kind", etc.) without
+ * low-cardinality domain attributes ("message.kind", etc.) without
  * needing their own tracer handle.
  */
 export async function withSpan<T>(
@@ -168,11 +786,12 @@ export async function withSpan<T>(
       span.setStatus({ code: SpanStatusCode.OK });
       return result;
     } catch (err) {
+      const sanitizedError = sanitizeErrorForTelemetry(err, `${name}.error`);
       span.setStatus({
         code: SpanStatusCode.ERROR,
-        message: err instanceof Error ? err.message : String(err),
+        message: sanitizedError.message,
       });
-      if (err instanceof Error) span.recordException(err);
+      span.recordException(sanitizedError);
       throw err;
     } finally {
       span.end();
@@ -199,14 +818,37 @@ export function reportError(
   },
 ): void {
   if (!faro) return;
-  const err = error instanceof Error ? error : new Error(String(error));
+  const err = sanitizeErrorForTelemetry(error, kind);
   const contextStrings: Record<string, string> = { kind, recoverable: String(context.recoverable) };
   for (const [k, v] of Object.entries(context)) {
     if (k === "recoverable") continue;
+    if (isSensitiveContextKey(k)) continue;
     if (v === undefined || v === null) continue;
-    contextStrings[k] = typeof v === "string" ? v : JSON.stringify(v);
+    const serialized = typeof v === "string" ? v : JSON.stringify(v);
+    contextStrings[k] = sanitizeTelemetryText(serialized);
   }
   faro.api.pushError(err, { type: kind, context: contextStrings });
+}
+
+function sanitizeErrorForTelemetry(error: unknown, fallbackMessage: string): Error {
+  const source = error instanceof Error ? error : new Error(String(error));
+  const sanitized = new Error(sanitizeTelemetryText(source.message || fallbackMessage));
+  sanitized.name = source.name || "Error";
+  if (source.stack) sanitized.stack = sanitizeTelemetryText(source.stack);
+  return sanitized;
+}
+
+function sanitizeTelemetryText(value: string): string {
+  return value
+    .replace(/([#?&](?:waddle_session_id|session_id|api_key)=)[^\s&#)]+/gi, "$1:redacted")
+    .replace(/\/api\/upload\/[^\s?#)]+/g, "/api/upload/:slot")
+    .replace(/\/api\/files\/[^\s?#)]+(?:\/[^\s?#)]+)?/g, "/api/files/:slot/:file")
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+(?:\/[^\s,;)]*)?/gi, ":jid");
+}
+
+function isSensitiveContextKey(key: string): boolean {
+  const normalized = key.replace(/[-_]/g, "").toLowerCase();
+  return SENSITIVE_ERROR_CONTEXT_KEYS.has(normalized) || normalized.endsWith("key");
 }
 
 export function reportMessageFailed(payload: {
@@ -214,7 +856,6 @@ export function reportMessageFailed(payload: {
   kind: MessageKind;
 }): void {
   faro?.api.pushEvent("chat.xmpp.message.failed", {
-    id: payload.id,
     kind: payload.kind,
   });
 }
@@ -226,9 +867,7 @@ export function reportMessageAcked(payload: {
 }): void {
   if (!faro) return;
   faro.api.pushEvent("chat.xmpp.message.acked", {
-    id: payload.id,
     kind: payload.kind,
-    latency_ms: String(Math.round(payload.latencyMs)),
   });
   faro.api.pushMeasurement({
     type: "chat.xmpp.message.acked.latency_ms",
@@ -268,13 +907,11 @@ export function reportSessionLifecycle(payload: {
 
 export function reportStatusChange(payload: {
   state: string;
-  detail?: string;
   reconnectDurationMs?: number;
 }): void {
   if (!faro) return;
   faro.api.pushEvent("chat.xmpp.status", {
     state: payload.state,
-    detail: payload.detail ?? "",
   });
   if (typeof payload.reconnectDurationMs === "number") {
     faro.api.pushMeasurement({
@@ -377,11 +1014,7 @@ export function reportReconnectScheduled(payload: { attempt: number; delayMs: nu
   if (!faro) return;
   const tags = visibilityTags();
   const metric = visibilityMetric();
-  faro.api.pushEvent("chat.xmpp.reconnect.scheduled", {
-    attempt: String(payload.attempt),
-    delay_ms: String(Math.round(payload.delayMs)),
-    ...tags,
-  });
+  faro.api.pushEvent("chat.xmpp.reconnect.scheduled", tags);
   faro.api.pushMeasurement({
     type: "chat.xmpp.reconnect.attempt",
     values: {

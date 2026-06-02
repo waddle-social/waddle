@@ -5,6 +5,8 @@ interface ImportMetaEnv {
   readonly PUBLIC_COMMIT_SHA: string;
   readonly PUBLIC_FARO_URL: string;
   readonly PUBLIC_FARO_APP_NAME: string;
+  readonly PUBLIC_FARO_APP_VERSION: string;
+  readonly PUBLIC_FARO_ENVIRONMENT: string;
 }
 
 interface ImportMeta {

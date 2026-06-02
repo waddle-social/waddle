@@ -66,7 +66,7 @@ export interface XmppErrorEvent {
   kind: XmppErrorKind;
   /** Whether the client expects to recover on its own without UI intervention. */
   recoverable: boolean;
-  /** Short, human-readable reason. Safe to log in cleartext. */
+  /** Short, human-readable reason for local UI/debugging; sanitize before telemetry. */
   detail: string;
   /** Original error object if one was caught. */
   cause?: unknown;
