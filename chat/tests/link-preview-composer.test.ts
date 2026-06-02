@@ -202,6 +202,56 @@ describe("composer link preview state", () => {
     expect(h.preview.sendPayload.value).toBeUndefined();
     h.stop();
   });
+
+  test("sendPayloadFor waits for the active lookup before quick sends", async () => {
+    const resolvers: Array<(result: LinkPreviewLookupResult) => void> = [];
+    const h = setupComposerPreviewHarness(() => (
+      new Promise<LinkPreviewLookupResult>((resolve) => resolvers.push(resolve))
+    ));
+
+    await nextTick();
+    expect(h.preview.state.value).toEqual({ kind: "loading", url: "https://example.com/a" });
+
+    let settled = false;
+    const payloadPromise = h.preview
+      .sendPayloadFor("read https://example.com/a")
+      .then((payload) => {
+        settled = true;
+        return payload;
+      });
+
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    resolvers[0]?.(readyLookup("token-a"));
+    await flushComposerPreview();
+
+    expect(await payloadPromise).toEqual({
+      token: "token-a",
+      expiresAt: "2999-01-01T00:00:00.000Z",
+      preview: {
+        originalUrl: "https://example.com/a",
+        normalizedUrl: "https://example.com/a",
+        title: "Example",
+      },
+    });
+    h.stop();
+  });
+
+  test("sendPayloadFor ignores in-flight metadata for a different body URL", async () => {
+    const resolvers: Array<(result: LinkPreviewLookupResult) => void> = [];
+    const h = setupComposerPreviewHarness(() => (
+      new Promise<LinkPreviewLookupResult>((resolve) => resolvers.push(resolve))
+    ));
+
+    await nextTick();
+
+    expect(await h.preview.sendPayloadFor("read https://other.example/a")).toBeUndefined();
+
+    resolvers[0]?.(readyLookup("token-a"));
+    await flushComposerPreview();
+    h.stop();
+  });
 });
 
 function setupComposerPreviewHarness(

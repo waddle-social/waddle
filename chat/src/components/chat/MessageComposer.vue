@@ -109,6 +109,7 @@ const tiptapEditor = computed(() => {
 });
 
 const pendingAttachments = ref<PendingAttachment[]>([]);
+const isPreparingSend = ref(false);
 const linkPreview = useComposerLinkPreview(
   draft,
   computed(() => props.linkPreviewLookup),
@@ -223,8 +224,9 @@ const autocompleteAction = computed(() =>
 
 /** Whether the composer has nothing sendable (no text and no pending attachments). */
 const isEmpty = computed(() => !draft.value.trim() && pendingAttachments.value.length === 0);
+const isSendBusy = computed(() => props.isSending || isPreparingSend.value);
 const canSend = computed(() =>
-  !props.isSending &&
+  !isSendBusy.value &&
   !props.disabled &&
   props.slowModeCooldown <= 0 &&
   !isEmpty.value &&
@@ -442,7 +444,8 @@ function selectAutocompleteResult(action = autocompleteAction.value): boolean {
   return false;
 }
 
-function onSend(doc: JSONContent) {
+async function onSend(doc: JSONContent) {
+  if (isPreparingSend.value) return;
   const action = autocompleteAction.value;
   if (selectAutocompleteResult(action)) {
     return;
@@ -456,22 +459,28 @@ function onSend(doc: JSONContent) {
   if (showForumTitleInput.value && !forumTitle.value.trim()) return;
   if (!text && attachments.length === 0) return;
 
-  // Detach attachments before emitting so re-entry (e.g. Enter burst) cannot
-  // double-send them. Revoke preview URLs once ownership transfers to the parent.
-  const files = attachments.map((a) => a.file);
-  if (attachments.length > 0) {
-    pendingAttachments.value = [];
-    for (const a of attachments) URL.revokeObjectURL(a.previewUrl);
-  }
+  isPreparingSend.value = true;
+  try {
+    // Detach attachments before emitting so re-entry (e.g. Enter burst) cannot
+    // double-send them. Revoke preview URLs once ownership transfers to the parent.
+    const files = attachments.map((a) => a.file);
+    if (attachments.length > 0) {
+      pendingAttachments.value = [];
+      for (const a of attachments) URL.revokeObjectURL(a.previewUrl);
+    }
+    const previewPayload = await linkPreview.sendPayloadFor(serialized.body);
 
-  emit(
-    "send",
-    serialized.body,
-    serialized.markup,
-    serialized.references,
-    files.length > 0 ? files : undefined,
-    linkPreview.sendPayload.value,
-  );
+    emit(
+      "send",
+      serialized.body,
+      serialized.markup,
+      serialized.references,
+      files.length > 0 ? files : undefined,
+      previewPayload,
+    );
+  } finally {
+    isPreparingSend.value = false;
+  }
 }
 
 function focus() {
@@ -923,12 +932,12 @@ watch(
         class="chat-composer-send chat-composer-input-action h-9 w-9 shrink-0 flex items-center justify-center bg-primary text-primary-foreground transition-all duration-200 disabled:opacity-20 active:scale-[0.94] motion-safe:hover:scale-[1.04] [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
         :class="canSend ? 'chat-composer-send--armed shadow-[0_0_18px_var(--glow-strong)]' : ''"
         :disabled="!canSend"
-        :aria-label="isSending ? 'Sending message' : 'Send message'"
-        :aria-busy="isSending"
+        :aria-label="isSendBusy ? 'Sending message' : 'Send message'"
+        :aria-busy="isSendBusy"
         @click="onSend(editorRef?.getJSON?.() ?? { type: 'doc', content: [] })"
       >
         <span v-if="slowModeCooldown > 0" class="type-meta type-numeric type-strong">{{ slowModeCooldown }}</span>
-        <Loader2 v-else-if="isSending" class="w-4 h-4 motion-safe:animate-spin" aria-hidden="true" />
+        <Loader2 v-else-if="isSendBusy" class="w-4 h-4 motion-safe:animate-spin" aria-hidden="true" />
         <Send v-else class="w-4 h-4" aria-hidden="true" />
       </button>
     </div>
