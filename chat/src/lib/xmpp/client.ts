@@ -600,7 +600,10 @@ export class BrowserXmppClient {
     outcome: CatchupOutcome;
   }) => void> = [];
   private readonly resumeDrainHooks: Array<(info: { buffered: number; durationMs: number }) => void> = [];
-  private readonly roomJoinWaiters = new Map<string, { resolve: () => void; reject: (error: Error) => void }>();
+  private readonly roomJoinWaiters = new Map<
+    string,
+    { promise: Promise<void>; resolve: () => void; reject: (error: Error) => void }
+  >();
   private readonly carbonDedupIds = new Set<string>();
   readonly catchup: ReconnectCatchup;
   private readonly resumePersistence: ResumePersistence;
@@ -1045,26 +1048,38 @@ export class BrowserXmppClient {
 
   private waitForRoomSelfPresence(roomJid: string): Promise<void> {
     const key = this.roomJoinKey(roomJid);
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        this.roomJoinWaiters.delete(key);
-        const detail = `Timed out waiting for self-presence in ${roomJid}`;
-        this.emitError({ kind: "connect-timeout", recoverable: true, detail });
-        reject(new Error("Channel presence did not finish syncing. Try again in a moment."));
-      }, ROOM_SELF_PRESENCE_TIMEOUT_MS);
-      this.roomJoinWaiters.set(key, {
-        resolve: () => {
-          clearTimeout(timeout);
-          this.roomJoinWaiters.delete(key);
-          resolve();
-        },
-        reject: (error) => {
-          clearTimeout(timeout);
-          this.roomJoinWaiters.delete(key);
-          reject(error);
-        },
-      });
+    // Concurrent joins for JIDs that normalize to the same room key
+    // (e.g. case variants from topology vs. retained-room replay) must
+    // share one waiter — a second `set` would orphan the first promise,
+    // hanging that join until its timeout.
+    const existing = this.roomJoinWaiters.get(key);
+    if (existing) return existing.promise;
+    let resolveJoin!: () => void;
+    let rejectJoin!: (error: Error) => void;
+    const promise = new Promise<void>((resolve, reject) => {
+      resolveJoin = resolve;
+      rejectJoin = reject;
     });
+    const timeout = setTimeout(() => {
+      this.roomJoinWaiters.delete(key);
+      const detail = `Timed out waiting for self-presence in ${roomJid}`;
+      this.emitError({ kind: "connect-timeout", recoverable: true, detail });
+      rejectJoin(new Error("Channel presence did not finish syncing. Try again in a moment."));
+    }, ROOM_SELF_PRESENCE_TIMEOUT_MS);
+    this.roomJoinWaiters.set(key, {
+      promise,
+      resolve: () => {
+        clearTimeout(timeout);
+        this.roomJoinWaiters.delete(key);
+        resolveJoin();
+      },
+      reject: (error) => {
+        clearTimeout(timeout);
+        this.roomJoinWaiters.delete(key);
+        rejectJoin(error);
+      },
+    });
+    return promise;
   }
 
   private clearRoomPresenceCaches(): void {
@@ -2849,7 +2864,12 @@ export class BrowserXmppClient {
       const roomMemberJids = this.memberJidsFor(room);
       const isFocusedRoom = room === this.currentRoom;
       if (presence.presence_type === "unavailable") {
-        if (this.isOwnMucSelfPresence(presence)) {
+        // XEP-0045 §7.6: a nick change sends an unavailable presence for
+        // the old nick carrying our own status 110 *and* 303. That is not
+        // a departure — the available presence for the new nick follows —
+        // so it must NOT revoke room readiness.
+        const isNickChange = presence.muc_status_codes?.includes(303) ?? false;
+        if (this.isOwnMucSelfPresence(presence) && !isNickChange) {
           this.revokeMucReadiness(room, {
             keepPendingJoin: this.roomJoinWaiters.has(this.roomJoinKey(room)),
           });

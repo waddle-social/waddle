@@ -262,4 +262,22 @@ mod tests {
         let p = parse_presence(&elem);
         assert_eq!(p.muc_status, vec![MucStatus::Other(999)]);
     }
+
+    #[test]
+    fn status_outside_muc_user_x_is_not_collected() {
+        // The top-level <status> is XEP-0045-unrelated presence status
+        // text (jabber:client). Only `<status code>` children of the
+        // muc#user <x> are MUC status codes.
+        let xml = r#"<presence xmlns="jabber:client" from="room@muc.test/alice">
+            <status>Away from keyboard</status>
+            <x xmlns="http://jabber.org/protocol/muc#user">
+                <item affiliation="member" role="participant"/>
+                <status code="110"/>
+            </x>
+        </presence>"#;
+        let elem: Element = xml.parse().unwrap();
+        let p = parse_presence(&elem);
+        assert_eq!(p.muc_status, vec![MucStatus::SelfPresence]);
+        assert_eq!(p.status.as_deref(), Some("Away from keyboard"));
+    }
 }
