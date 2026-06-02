@@ -28,6 +28,8 @@ on:
     - chat/wrangler.jsonc
     - chat/wrangler.jsonc/**
     - cue.mod/**
+    - env.cue
+    - env.cue/**
     - package.json
     - package.json/**
     - server/Cargo.lock
