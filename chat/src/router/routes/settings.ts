@@ -1,4 +1,4 @@
-export type SettingsOrigin = "app" | "direct";
+type SettingsOrigin = "app" | "direct";
 
 export interface SettingsMatch {
   readonly id: "settings";

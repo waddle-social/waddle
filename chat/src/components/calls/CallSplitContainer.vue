@@ -23,6 +23,7 @@ import { barePeerJid } from "@/lib/xmpp/jid";
 import CallTileGrid from "./CallTileGrid.vue";
 import CallControls from "./CallControls.vue";
 import CallSettingsDialog from "./CallSettingsDialog.vue";
+import CallMediaNotice from "./CallMediaNotice.vue";
 import SplitDragHandle from "./SplitDragHandle.vue";
 
 /**
@@ -169,6 +170,7 @@ async function onHangup(): Promise<void> {
       >
         {{ lastError }}
       </div>
+      <CallMediaNotice />
       <div class="call-split__grid">
         <CallTileGrid
           :remote-tracks="remoteTracks"

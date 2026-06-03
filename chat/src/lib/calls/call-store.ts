@@ -17,6 +17,7 @@ import {
   rememberMucCallSession,
 } from "./muc-call-session-cache";
 import { clearLiveCallParticipants } from "./muc-call-live-participants";
+import { mediaErrorMessage } from "./call-media-issues";
 import { barePeerJid } from "../xmpp/jid";
 
 /**
@@ -514,7 +515,14 @@ const AUTO_CLEAR_MS = 8000;
 let clearTimer: ReturnType<typeof setTimeout> | null = null;
 
 export function reportCallError(err: unknown): void {
-  const message = err instanceof Error ? err.message : String(err);
+  // Map known camera/mic capture failures to friendly copy; fall back
+  // to the raw message for everything else. Routine device-less /
+  // permission-denied joins surface via the non-blocking media notice,
+  // not here — this mapping only matters if a recognizable media
+  // DOMException reaches the generic error surface through some other
+  // path (e.g. a mid-call device switch in the settings dialog).
+  const message =
+    mediaErrorMessage(err) ?? (err instanceof Error ? err.message : String(err));
   $lastCallError.set(message);
   if (clearTimer) clearTimeout(clearTimer);
   clearTimer = setTimeout(() => $lastCallError.set(null), AUTO_CLEAR_MS);

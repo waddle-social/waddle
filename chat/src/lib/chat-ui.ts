@@ -51,7 +51,7 @@ export interface LinkPreview {
   remoteMediaUnavailable?: boolean;
 }
 
-export interface LinkPreviewImage {
+interface LinkPreviewImage {
   url: string;
   mediaType: string;
   width?: number;
@@ -89,7 +89,7 @@ export type ExtensionSurfaceKind =
   | "dynamic-canvas"
   | "utility-panel";
 
-export interface ExtensionEnvelopeSource {
+interface ExtensionEnvelopeSource {
   stanzaId: string;
   by?: string;
   bodyStart?: number;
@@ -104,9 +104,9 @@ export interface ExtensionPayloadElement {
   children: ExtensionPayloadElement[];
 }
 
-export type ExtensionUiBlockKind = "text" | "image" | "action" | "form" | "list" | "unknown";
+type ExtensionUiBlockKind = "text" | "image" | "action" | "form" | "list" | "unknown";
 
-export interface ExtensionUiBlock {
+interface ExtensionUiBlock {
   kind: ExtensionUiBlockKind;
   id?: string;
   title?: string;
@@ -119,13 +119,13 @@ export interface ExtensionUiBlock {
   children: ExtensionUiBlock[];
 }
 
-export interface ExtensionUiView {
+interface ExtensionUiView {
   id: string;
   title?: string;
   blocks: ExtensionUiBlock[];
 }
 
-export interface ExtensionLaunchContext {
+interface ExtensionLaunchContext {
   waddleId?: string;
   roomJid?: string;
   stanzaId?: string;

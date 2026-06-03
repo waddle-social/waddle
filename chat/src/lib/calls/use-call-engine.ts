@@ -8,6 +8,7 @@ import {
   removeLiveCallParticipant,
   setLiveCallParticipants,
 } from "./muc-call-live-participants";
+import { clearAllMediaIssues, recordMediaIssue } from "./call-media-issues";
 
 /**
  * Process-wide singleton: only one call engine should ever exist
@@ -60,6 +61,14 @@ export function useCallEngine(): {
       if (!roomJid) return;
       setLiveCallParticipants(roomJid, [localIdentity, ...remoteIdentities]);
     });
+    singletonEngine.on("mediaDevicesError", ({ source, error }) => {
+      // A best-effort mic/cam capture failed (no device / denied
+      // permission). The call stays connected as receive-only; record
+      // the issue so the non-blocking notice can explain it and offer
+      // a retry. NOT routed through reportCallError — the persistent
+      // notice is the single channel, avoiding a double-surfaced error.
+      recordMediaIssue(source === "audio" ? "mic" : "cam", error);
+    });
     singletonEngine.on("participantConnected", (identity) => {
       const roomJid = activeMucRoomJid();
       if (!roomJid) return;
@@ -73,6 +82,9 @@ export function useCallEngine(): {
     singletonEngine.on("disconnected", () => {
       remoteTracks.value = [];
       localTracks.value = [];
+      // Drop any "joined without mic/camera" notice — it belongs to the
+      // call that just ended, not the next one.
+      clearAllMediaIssues();
       // The active call's room — if any — is no longer in our LK
       // view. Drop the LK snapshot so the room's UI reverts to the
       // Muji-derived (server-bridged) view, which the LK webhook

@@ -1,21 +1,5 @@
 import type { MarkupSpan, MessageReference } from "@/lib/chat-ui";
-
-export type EncryptedFileCipher =
-  | "urn:xmpp:ciphers:aes-128-gcm-nopadding:0"
-  | "urn:xmpp:ciphers:aes-256-gcm-nopadding:0";
-
-export interface EncryptedFileHash {
-  algo: string;
-  valueB64: string;
-}
-
-export interface WaddleEncryptedFile {
-  cipher: EncryptedFileCipher;
-  keyB64: string;
-  ivB64: string;
-  hashes?: EncryptedFileHash[];
-  sources?: string[];
-}
+import type { WaddleEncryptedFile } from "./extensions/encrypted-file";
 
 export interface OutboundFileAttachment {
   url: string;
@@ -34,11 +18,11 @@ export interface ReplyTarget {
   body?: string;
 }
 
-export interface WaddleThreadCreate {
+interface WaddleThreadCreate {
   title: string;
 }
 
-export interface WaddleThreadReply {
+interface WaddleThreadReply {
   threadId: string;
 }
 

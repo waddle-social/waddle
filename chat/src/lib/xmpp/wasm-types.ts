@@ -4,19 +4,19 @@ import type { CallEvent } from "@/lib/calls/types";
  * All fields are snake_case (serde serialization convention).
  */
 
-export interface WasmMarkupSpan {
+interface WasmMarkupSpan {
   span_type: string;
   start: number;
   end: number;
   uri?: string;
 }
 
-export interface WasmEncryptedFileHash {
+interface WasmEncryptedFileHash {
   algo: string;
   value_b64: string;
 }
 
-export interface WasmEncryptedFile {
+interface WasmEncryptedFile {
   cipher: string;
   key_b64: string;
   iv_b64: string;
@@ -43,7 +43,7 @@ export interface WasmReference {
   anchor?: string;
 }
 
-export interface WasmStanzaId {
+interface WasmStanzaId {
   id: string;
   by: string;
 }
@@ -53,7 +53,7 @@ export interface WasmExtensionEnvelope {
   enrichments: WasmExtensionEnrichment[];
 }
 
-export interface WasmExtensionEnrichment {
+interface WasmExtensionEnrichment {
   id: string;
   plugin: string;
   capability: string;
@@ -66,13 +66,13 @@ export interface WasmExtensionEnrichment {
   launches: WasmExtensionLaunch[];
 }
 
-export interface WasmExtensionSource {
+interface WasmExtensionSource {
   stanza_id: string;
   body_start?: number;
   body_end?: number;
 }
 
-export interface WasmExtensionLaunch {
+interface WasmExtensionLaunch {
   id: string;
   plugin: string;
   action: string;
@@ -84,7 +84,7 @@ export interface WasmExtensionLaunch {
   token?: string;
 }
 
-export interface WasmExtensionLaunchContext {
+interface WasmExtensionLaunchContext {
   waddle_id: string;
   room?: string;
   source_stanza_id?: string;
@@ -154,7 +154,7 @@ export interface WasmLinkPreview {
   remote_media_unavailable?: boolean;
 }
 
-export interface WasmLinkPreviewImage {
+interface WasmLinkPreviewImage {
   url: string;
   media_type: string;
   width?: number | null;
@@ -173,7 +173,7 @@ export interface WasmPinEvent {
 }
 
 /** Frozen preview snapshot of a pinned message (#414). */
-export interface WasmPinPreview {
+interface WasmPinPreview {
   author_jid: string;
   author_nick?: string;
   text: string;
@@ -190,7 +190,7 @@ export interface WasmPinEntry {
   preview: WasmPinPreview;
 }
 
-export interface WasmPresenceHat {
+interface WasmPresenceHat {
   uri: string;
   title: string;
 }
@@ -224,7 +224,7 @@ export interface WasmPresence {
  * Absence of the field (`muji` undefined) means the occupant is NOT
  * in the call — XEP-0272 §Leaving "absence is the leave marker."
  */
-export interface WasmMujiPresence {
+interface WasmMujiPresence {
   preparing: boolean;
   active: boolean;
   audio: boolean;

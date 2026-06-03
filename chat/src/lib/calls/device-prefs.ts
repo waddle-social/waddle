@@ -71,7 +71,7 @@ export function setSpeakerDevice(id: string | null): void {
  * granted permission; the picker falls back to a synthetic label
  * in that case.
  */
-export type EnumeratedDevice = {
+type EnumeratedDevice = {
   deviceId: string;
   kind: "audioinput" | "videoinput" | "audiooutput";
   label: string;

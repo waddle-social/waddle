@@ -1,4 +1,4 @@
-export type InboxConversationKind = "direct" | "muc";
+type InboxConversationKind = "direct" | "muc";
 
 export interface InboxEntry {
   partner: string;

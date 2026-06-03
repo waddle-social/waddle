@@ -73,6 +73,16 @@ export type CallEngineEvents = {
    */
   connected: (snapshot: { localIdentity: string; remoteIdentities: string[] }) => void;
   disconnected: (reason?: string) => void;
+  /**
+   * Fires when a best-effort capture (mic / cam enable) fails —
+   * typically a missing device (`NotFoundError`) or a denied
+   * permission (`NotAllowedError`). NON-FATAL: the room stays
+   * connected and the user remains a receive-only participant, so the
+   * UI uses this to show a "joined without microphone/camera" notice
+   * rather than ending the call. Mirrors LiveKit's
+   * `RoomEvent.MediaDevicesError` but carries which capture failed.
+   */
+  mediaDevicesError: (info: { source: "audio" | "video"; error: unknown }) => void;
 };
 
 /**
@@ -95,6 +105,7 @@ export class CallEngine {
     participantDisconnected: new Set(),
     connected: new Set(),
     disconnected: new Set(),
+    mediaDevicesError: new Set(),
   };
 
   /** LiveKit identity of the local participant, populated once
@@ -102,6 +113,21 @@ export class CallEngine {
    *  self-preview tile with the same label as remote tiles use. */
   get localIdentity(): string | null {
     return this.room?.localParticipant.identity ?? null;
+  }
+
+  /**
+   * Whether the local mic / camera track is ACTUALLY published right
+   * now, read from LiveKit's own source of truth. Used to seed the
+   * mic/cam toggle UI to reality after the best-effort initial capture
+   * (which may have silently failed — no device / denied permission);
+   * the UI must never assume the requested media actually published.
+   */
+  get micEnabled(): boolean {
+    return this.room?.localParticipant.isMicrophoneEnabled ?? false;
+  }
+
+  get cameraEnabled(): boolean {
+    return this.room?.localParticipant.isCameraEnabled ?? false;
   }
 
   async connect(join: LiveKitJoin, opts: { audio: boolean; video: boolean }): Promise<void> {
@@ -155,26 +181,25 @@ export class CallEngine {
       localIdentity: room.localParticipant.identity,
       remoteIdentities: Array.from(room.remoteParticipants.values()).map((p) => p.identity),
     });
-    // Post-connect setup must be atomic from the caller's POV: if a
-    // permission prompt is denied for the mic or cam, throwing without
-    // first tearing down the half-initialized room would leave
-    // `this.room` set against a connected LiveKit session that nothing
-    // will ever close. Subsequent `connect()` calls would then fail on
-    // the "already connected" guard for a session the user never sees.
-    try {
-      if (opts.audio) await room.localParticipant.setMicrophoneEnabled(true);
-      if (opts.video) await room.localParticipant.setCameraEnabled(true);
-      // Re-apply the speaker preference now that the room has remote
-      // audio elements to retarget; the engine ignores it on connect
-      // because no `<audio>` exists yet, but every subsequent
-      // RoomEvent.TrackSubscribed wires through this.applySpeaker.
-      if (prefs.speaker) {
-        await this.applySpeakerDevice(prefs.speaker).catch(() => undefined);
-      }
-    } catch (err) {
-      this.room = null;
-      await room.disconnect().catch(() => undefined);
-      throw err;
+    // Publishing is BEST-EFFORT and decoupled from joining. `room.connect`
+    // above already succeeded, so the user is a fully working receive-only
+    // (listen/watch) participant — a missing device or a denied
+    // `getUserMedia` permission MUST NOT eject them from the call. Each
+    // track is enabled independently (a broken camera can't suppress a
+    // working mic) and failures are surfaced via `mediaDevicesError` so the
+    // UI can show a non-blocking "joined without mic/camera" notice and
+    // offer a retry, instead of tearing the half-joined call down.
+    await enableRequestedCapture(
+      room.localParticipant,
+      { audio: opts.audio, video: opts.video },
+      (source, error) => this.emit("mediaDevicesError", { source, error }),
+    );
+    // Re-apply the speaker preference now that the room has remote
+    // audio elements to retarget; the engine ignores it on connect
+    // because no `<audio>` exists yet, but every subsequent
+    // RoomEvent.TrackSubscribed wires through this.applySpeaker.
+    if (prefs.speaker) {
+      await this.applySpeakerDevice(prefs.speaker).catch(() => undefined);
     }
   }
 
@@ -339,4 +364,46 @@ function mapKind(kind: Track.Kind): "audio" | "video" | null {
   if (kind === Track.Kind.Audio) return "audio";
   if (kind === Track.Kind.Video) return "video";
   return null;
+}
+
+/**
+ * The capability-providing subset of LiveKit's `LocalParticipant` that
+ * [`enableRequestedCapture`] touches. Narrowed to a structural type so
+ * the best-effort capture logic is unit-testable without a real
+ * `Room` (which reaches for browser-only globals at construction).
+ */
+type CapturableParticipant = {
+  setMicrophoneEnabled(enabled: boolean): Promise<unknown>;
+  setCameraEnabled(enabled: boolean): Promise<unknown>;
+};
+
+/**
+ * Enable the locally-requested tracks as a BEST-EFFORT step after the
+ * room has already connected. A missing device or a denied permission
+ * MUST NOT throw: the participant has already joined and is a fully
+ * functional receive-only member, so only publishing failed. Mic and
+ * camera are attempted independently — a broken camera never suppresses
+ * a working mic, and neither failure aborts the join. Each failure is
+ * reported through `onError` (the engine forwards it as
+ * `mediaDevicesError`) so the UI can surface a non-blocking notice.
+ */
+export async function enableRequestedCapture(
+  participant: CapturableParticipant,
+  opts: { audio: boolean; video: boolean },
+  onError: (source: "audio" | "video", error: unknown) => void,
+): Promise<void> {
+  if (opts.audio) {
+    try {
+      await participant.setMicrophoneEnabled(true);
+    } catch (error) {
+      onError("audio", error);
+    }
+  }
+  if (opts.video) {
+    try {
+      await participant.setCameraEnabled(true);
+    } catch (error) {
+      onError("video", error);
+    }
+  }
 }

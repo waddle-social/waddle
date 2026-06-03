@@ -22,7 +22,7 @@ export interface WasmStoryReads {
   entries: WasmStoryRead[];
 }
 
-export interface WasmStoryRead {
+interface WasmStoryRead {
   id: string;
   /** RFC 3339 timestamp string. */
   at: string;
