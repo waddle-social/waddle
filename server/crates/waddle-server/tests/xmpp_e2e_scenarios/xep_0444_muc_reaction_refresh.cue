@@ -64,7 +64,7 @@ scenario: #Scenario & {
 		},
 		#ExpectFrame & {
 			target:   bobPhone
-			contains: ["urn:xmpp:inbox:0", "cue-muc-react-original"]
+			contains: ["urn:xmpp:inbox:1", "cue-muc-react-original"]
 		},
 		#SendMessage & {
 			from:  bobPhone
@@ -105,7 +105,7 @@ scenario: #Scenario & {
 		},
 		#DrainFrames & {
 			target:   alicePhone
-			contains: ["urn:xmpp:inbox:0", "cue-muc-reaction-1"]
+			contains: ["urn:xmpp:inbox:1", "cue-muc-reaction-1"]
 			millis:   1000
 		},
 		#DisconnectActor & {actor: alicePhone},

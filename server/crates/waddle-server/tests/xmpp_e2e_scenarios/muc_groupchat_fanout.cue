@@ -98,7 +98,7 @@ scenario: #Scenario & {
 		},
 		#ExpectFrame & {
 			target:   bobPhone
-			contains: ["urn:xmpp:inbox:0", "cue-muc-fanout"]
+			contains: ["urn:xmpp:inbox:1", "cue-muc-fanout"]
 		},
 	]
 }

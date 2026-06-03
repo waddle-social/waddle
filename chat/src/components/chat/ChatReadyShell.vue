@@ -657,6 +657,7 @@ onUnmounted(() => {
         :inbox-state="channelUnread.inboxState.value"
         :on-select-channel="(id: string) => selectChannel(id)"
         :on-select-thread="onSelectThread"
+        :on-refresh-inbox="channelUnread.hydrateFromInbox"
         @open-nav="ui.showMobileNav.value = true"
       />
       <UserSettingsPage

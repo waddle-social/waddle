@@ -143,6 +143,7 @@ export interface WasmMessage {
   extension_body_fallback?: boolean;
   /** urn:waddle:pin:0 pin/unpin event surfaced by the room (#414). */
   pin_event?: WasmPinEvent;
+  inbox_push?: WasmInboxConversation;
 }
 
 export interface WasmLinkPreview {

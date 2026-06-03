@@ -1,22 +1,33 @@
 //! Client-side parser for XEP-0430 inbox streamed entries.
 //!
-//! The server emits one `<message><entry xmlns='urn:xmpp:inbox:0'/></message>`
+//! The server emits one `<message><entry xmlns='urn:xmpp:inbox:1'/></message>`
 //! per matched conversation (optionally with an embedded
 //! `<result xmlns='urn:xmpp:mam:2'>` carrying the forwarded last
 //! archived stanza), followed by a closing `<iq type='result'><fin/></iq>`.
-//! The driver uses this parser to recognise streamed entries by their
-//! `queryid` and accumulate them against the matching pending query.
+//! Waddle-specific metadata and live push markers use
+//! `urn:waddle:inbox:0`, keeping the official XEP-0430 `<entry/>`
+//! shape exact.
 
 use minidom::Element;
 
 /// Namespace constant — kept local to the client so the wasm bindings
 /// don't need a transitive dep on `waddle-xmpp`.
-pub const NS_INBOX: &str = "urn:xmpp:inbox:0";
+pub const NS_INBOX: &str = "urn:xmpp:inbox:1";
+pub const NS_WADDLE_INBOX: &str = "urn:waddle:inbox:0";
+const NS_MAM: &str = "urn:xmpp:mam:2";
+
+/// Source surface for one streamed XEP-0430 inbox `<entry/>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InboxStreamEntrySource {
+    QueryResponse,
+    Push,
+}
 
 /// Typed projection of one streamed `<entry/>` element.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InboxStreamEntry {
-    pub query_id: String,
+    pub source: InboxStreamEntrySource,
+    pub query_id: Option<String>,
     pub partner: String,
     pub kind: Option<String>,
     pub last_stanza_id: String,
@@ -48,43 +59,91 @@ pub struct InboxFin {
 
 /// Parse one streamed inbox `<message/>` into a typed entry.
 ///
-/// Returns `None` for messages that don't carry an
-/// `<entry xmlns='urn:xmpp:inbox:0'/>` child — those flow through the
-/// other typed handlers (MAM/PEP/messaging) unchanged.
+/// Returns `None` for messages that carry neither a direct
+/// `<entry xmlns='urn:xmpp:inbox:1'/>` query response nor a Waddle
+/// `<push xmlns='urn:waddle:inbox:0'/>` wrapper — those flow through
+/// the other typed handlers (MAM/PEP/messaging) unchanged.
 pub fn parse_inbox_stream_message(message: &Element) -> Option<InboxStreamEntry> {
     if message.name() != "message" {
         return None;
     }
-    let entry = message.children().find(|c| c.is("entry", NS_INBOX))?;
-    let query_id = entry.attr("queryid")?.to_string();
+    let message_type = message.attr("type").unwrap_or("normal");
+    let (source, entry, metadata) = if message_type == "headline" {
+        if message.attr("from").is_some() {
+            return None;
+        }
+        let push = message.children().find(|c| c.is("push", NS_WADDLE_INBOX))?;
+        let metadata = push
+            .children()
+            .find(|c| c.is("metadata", NS_WADDLE_INBOX))?;
+        (
+            InboxStreamEntrySource::Push,
+            push.children().find(|c| c.is("entry", NS_INBOX))?,
+            Some(metadata),
+        )
+    } else {
+        if message.attr("from").is_some() {
+            return None;
+        }
+        (
+            InboxStreamEntrySource::QueryResponse,
+            message.children().find(|c| c.is("entry", NS_INBOX))?,
+            message
+                .children()
+                .find(|c| c.is("metadata", NS_WADDLE_INBOX)),
+        )
+    };
+    let mam_query_id = if source == InboxStreamEntrySource::QueryResponse {
+        message
+            .children()
+            .find(|c| c.is("result", NS_MAM))
+            .and_then(|result| result.attr("queryid"))
+    } else {
+        None
+    };
     let partner = entry.attr("jid")?.to_string();
     let last_stanza_id = entry.attr("id")?.to_string();
-    let unread = entry
-        .attr("unread")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
+    let unread = entry.attr("unread")?.parse().ok()?;
+    let kind = metadata.and_then(|metadata| metadata.attr("kind"));
+    if let Some(kind) = kind {
+        if kind != "direct" && kind != "muc" {
+            return None;
+        }
+    } else if source == InboxStreamEntrySource::Push {
+        return None;
+    }
+    let last_updated = match metadata.and_then(|metadata| metadata.attr("last-updated")) {
+        Some(raw) => Some(raw.parse().ok()?),
+        None if source == InboxStreamEntrySource::Push => return None,
+        None => None,
+    };
+    let reply_count = match metadata.and_then(|metadata| metadata.attr("reply-count")) {
+        Some(raw) => Some(raw.parse().ok()?),
+        None => None,
+    };
     Some(InboxStreamEntry {
-        query_id,
+        source,
+        query_id: mam_query_id.map(str::to_string),
         partner,
-        kind: entry.attr("kind").map(str::to_string),
+        kind: kind.map(str::to_string),
         last_stanza_id,
-        last_updated: entry.attr("last-updated").and_then(|v| v.parse().ok()),
+        last_updated,
         unread,
-        preview: entry
-            .attr("preview")
+        preview: metadata
+            .and_then(|metadata| metadata.attr("preview"))
             .filter(|v| !v.is_empty())
             .map(str::to_string),
-        thread_id: entry
-            .attr("thread")
+        thread_id: metadata
+            .and_then(|metadata| metadata.attr("thread"))
             .filter(|v| !v.is_empty())
             .map(str::to_string),
-        thread_title: entry
-            .attr("thread-title")
+        thread_title: metadata
+            .and_then(|metadata| metadata.attr("thread-title"))
             .filter(|v| !v.is_empty())
             .map(str::to_string),
-        reply_count: entry.attr("reply-count").and_then(|v| v.parse().ok()),
-        author: entry
-            .attr("author")
+        reply_count,
+        author: metadata
+            .and_then(|metadata| metadata.attr("author"))
             .filter(|v| !v.is_empty())
             .map(str::to_string),
     })
@@ -125,7 +184,7 @@ pub fn parse_inbox_fin(iq: &Element) -> Option<InboxFin> {
     })
 }
 
-/// Build the canonical `<inbox xmlns='urn:xmpp:inbox:0'/>` IQ-get
+/// Build the canonical `<inbox xmlns='urn:xmpp:inbox:1'/>` IQ-get
 /// request. The default attribute values match XEP-0430 defaults
 /// (`unread-only='false'`, `messages='true'`) and the helper writes
 /// them explicitly so the wire form is unambiguous on the receiver.
@@ -154,11 +213,14 @@ mod tests {
     #[test]
     fn parse_inbox_entry_from_streamed_message() {
         let xml = r#"<message xmlns='jabber:client'>
-                <entry xmlns='urn:xmpp:inbox:0' queryid='q1' jid='alice@example.com' id='mam-1' unread='3' kind='direct' last-updated='1700000000' preview='hi'/>
+                <entry xmlns='urn:xmpp:inbox:1' jid='alice@example.com' id='mam-1' unread='3'/>
+                <result xmlns='urn:xmpp:mam:2' queryid='q1' id='mam-1'/>
+                <metadata xmlns='urn:waddle:inbox:0' kind='direct' last-updated='1700000000' preview='hi'/>
             </message>"#;
         let element: Element = xml.parse().unwrap();
         let entry = parse_inbox_stream_message(&element).expect("entry");
-        assert_eq!(entry.query_id, "q1");
+        assert_eq!(entry.source, InboxStreamEntrySource::QueryResponse);
+        assert_eq!(entry.query_id.as_deref(), Some("q1"));
         assert_eq!(entry.partner, "alice@example.com");
         assert_eq!(entry.unread, 3);
         assert_eq!(entry.last_stanza_id, "mam-1");
@@ -168,7 +230,7 @@ mod tests {
     #[test]
     fn parse_inbox_fin_with_rsm() {
         let xml = r#"<iq xmlns='jabber:client' type='result' id='q1'>
-                <fin xmlns='urn:xmpp:inbox:0' total='3' unread='2' all-unread='7'>
+                <fin xmlns='urn:xmpp:inbox:1' total='3' unread='2' all-unread='7'>
                     <set xmlns='http://jabber.org/protocol/rsm'>
                         <first>a</first><last>b</last><count>3</count>
                     </set>
@@ -189,5 +251,143 @@ mod tests {
         let xml = r#"<message xmlns='jabber:client'><body>hi</body></message>"#;
         let element: Element = xml.parse().unwrap();
         assert!(parse_inbox_stream_message(&element).is_none());
+    }
+
+    #[test]
+    fn parse_unsolicited_inbox_push_without_queryid() {
+        let xml = r#"<message xmlns='jabber:client' type='headline'>
+                <push xmlns='urn:waddle:inbox:0'>
+                    <entry xmlns='urn:xmpp:inbox:1' jid='room@muc.example.com' id='sid-1' unread='2'/>
+                    <metadata xmlns='urn:waddle:inbox:0' kind='muc' last-updated='1700000001' preview='new message'/>
+                </push>
+            </message>"#;
+        let element: Element = xml.parse().unwrap();
+        let entry = parse_inbox_stream_message(&element).expect("entry");
+        assert_eq!(entry.source, InboxStreamEntrySource::Push);
+        assert_eq!(entry.query_id, None);
+        assert_eq!(entry.partner, "room@muc.example.com");
+        assert_eq!(entry.kind.as_deref(), Some("muc"));
+        assert_eq!(entry.unread, 2);
+        assert_eq!(entry.last_stanza_id, "sid-1");
+        assert_eq!(entry.preview.as_deref(), Some("new message"));
+    }
+
+    #[test]
+    fn parse_ignores_waddle_push_on_non_headline_message() {
+        let xml = r#"<message xmlns='jabber:client' type='groupchat'>
+                <push xmlns='urn:waddle:inbox:0'>
+                    <entry xmlns='urn:xmpp:inbox:1' jid='room@muc.example.com' id='sid-1' unread='2'/>
+                    <metadata xmlns='urn:waddle:inbox:0' kind='muc' last-updated='1700000001'/>
+                </push>
+            </message>"#;
+        let element: Element = xml.parse().unwrap();
+
+        assert_eq!(parse_inbox_stream_message(&element), None);
+    }
+
+    #[test]
+    fn parse_ignores_waddle_push_with_sender_provenance() {
+        let xml = r#"<message xmlns='jabber:client' from='mallory@example.com/web' type='headline'>
+                <push xmlns='urn:waddle:inbox:0'>
+                    <entry xmlns='urn:xmpp:inbox:1' jid='room@muc.example.com' id='sid-1' unread='2'/>
+                    <metadata xmlns='urn:waddle:inbox:0' kind='muc' last-updated='1700000001'/>
+                </push>
+            </message>"#;
+        let element: Element = xml.parse().unwrap();
+
+        assert_eq!(parse_inbox_stream_message(&element), None);
+    }
+
+    #[test]
+    fn parse_ignores_direct_inbox_entry_with_sender_provenance() {
+        let xml = r#"<message xmlns='jabber:client' from='mallory@example.com/web'>
+                <entry xmlns='urn:xmpp:inbox:1' jid='alice@example.com' id='mam-1' unread='1'/>
+            </message>"#;
+        let element: Element = xml.parse().unwrap();
+
+        assert_eq!(parse_inbox_stream_message(&element), None);
+    }
+
+    #[test]
+    fn parse_rejects_inbox_entry_without_unread() {
+        let xml = r#"<message xmlns='jabber:client'>
+                <entry xmlns='urn:xmpp:inbox:1' jid='alice@example.com' id='mam-1'/>
+            </message>"#;
+        let element: Element = xml.parse().unwrap();
+
+        assert_eq!(parse_inbox_stream_message(&element), None);
+    }
+
+    #[test]
+    fn parse_rejects_inbox_entry_with_invalid_unread() {
+        let xml = r#"<message xmlns='jabber:client'>
+                <entry xmlns='urn:xmpp:inbox:1' jid='alice@example.com' id='mam-1' unread='nope'/>
+            </message>"#;
+        let element: Element = xml.parse().unwrap();
+
+        assert_eq!(parse_inbox_stream_message(&element), None);
+    }
+
+    #[test]
+    fn parse_rejects_waddle_push_without_metadata() {
+        let xml = r#"<message xmlns='jabber:client' type='headline'>
+                <push xmlns='urn:waddle:inbox:0'>
+                    <entry xmlns='urn:xmpp:inbox:1' jid='room@muc.example.com' id='sid-1' unread='2'/>
+                </push>
+            </message>"#;
+        let element: Element = xml.parse().unwrap();
+
+        assert_eq!(parse_inbox_stream_message(&element), None);
+    }
+
+    #[test]
+    fn parse_rejects_waddle_push_with_invalid_metadata() {
+        let invalid_kind = r#"<message xmlns='jabber:client' type='headline'>
+                <push xmlns='urn:waddle:inbox:0'>
+                    <entry xmlns='urn:xmpp:inbox:1' jid='room@muc.example.com' id='sid-1' unread='2'/>
+                    <metadata xmlns='urn:waddle:inbox:0' kind='bogus' last-updated='1700000001'/>
+                </push>
+            </message>"#;
+        let invalid_updated = r#"<message xmlns='jabber:client' type='headline'>
+                <push xmlns='urn:waddle:inbox:0'>
+                    <entry xmlns='urn:xmpp:inbox:1' jid='room@muc.example.com' id='sid-1' unread='2'/>
+                    <metadata xmlns='urn:waddle:inbox:0' kind='muc' last-updated='soon'/>
+                </push>
+            </message>"#;
+        let invalid_reply_count = r#"<message xmlns='jabber:client' type='headline'>
+                <push xmlns='urn:waddle:inbox:0'>
+                    <entry xmlns='urn:xmpp:inbox:1' jid='room@muc.example.com' id='sid-1' unread='2'/>
+                    <metadata xmlns='urn:waddle:inbox:0' kind='muc' last-updated='1700000001' reply-count='many'/>
+                </push>
+            </message>"#;
+
+        for xml in [invalid_kind, invalid_updated, invalid_reply_count] {
+            let element: Element = xml.parse().unwrap();
+            assert_eq!(parse_inbox_stream_message(&element), None);
+        }
+    }
+
+    #[test]
+    fn parse_query_response_uses_embedded_mam_queryid() {
+        let xml = r#"<message xmlns='jabber:client'>
+                <entry xmlns='urn:xmpp:inbox:1' jid='alice@example.com' id='mam-1' unread='1'/>
+                <result xmlns='urn:xmpp:mam:2' queryid='q-mam' id='mam-1'/>
+            </message>"#;
+        let element: Element = xml.parse().unwrap();
+        let entry = parse_inbox_stream_message(&element).expect("entry");
+        assert_eq!(entry.source, InboxStreamEntrySource::QueryResponse);
+        assert_eq!(entry.query_id.as_deref(), Some("q-mam"));
+        assert_eq!(entry.partner, "alice@example.com");
+    }
+
+    #[test]
+    fn parse_query_response_without_queryid_is_not_a_push() {
+        let xml = r#"<message xmlns='jabber:client'>
+                <entry xmlns='urn:xmpp:inbox:1' jid='alice@example.com' id='mam-1' unread='1'/>
+            </message>"#;
+        let element: Element = xml.parse().unwrap();
+        let entry = parse_inbox_stream_message(&element).expect("entry");
+        assert_eq!(entry.source, InboxStreamEntrySource::QueryResponse);
+        assert_eq!(entry.query_id, None);
     }
 }

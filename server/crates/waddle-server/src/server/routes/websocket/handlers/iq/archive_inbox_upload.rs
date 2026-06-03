@@ -310,7 +310,7 @@ pub(super) async fn handle_archive_inbox_upload_iq(
     Vec::new()
 }
 
-/// Handle the XEP-0430 `<inbox xmlns='urn:xmpp:inbox:0'/>` IQ-get
+/// Handle the XEP-0430 `<inbox xmlns='urn:xmpp:inbox:1'/>` IQ-get
 /// streaming response. Emits one `<message/>` per matched conversation
 /// (with an optional embedded MAM `<result>/<forwarded>` body when
 /// `messages='true'`) followed by the final `<iq type='result'><fin/></iq>`.

@@ -7,7 +7,7 @@
 //!
 //! ```xml
 //! <iq type='get' id='ib-1'>
-//!   <inbox xmlns='urn:xmpp:inbox:0' unread-only='false' messages='true'>
+//!   <inbox xmlns='urn:xmpp:inbox:1' unread-only='false' messages='true'>
 //!     <set xmlns='http://jabber.org/protocol/rsm'>
 //!       <max>20</max>
 //!     </set>
@@ -21,7 +21,7 @@
 //!
 //! ```xml
 //! <message>
-//!   <entry xmlns='urn:xmpp:inbox:0' unread='5' jid='alice@example.net' id='mam-uuid'/>
+//!   <entry xmlns='urn:xmpp:inbox:1' unread='5' jid='alice@example.net' id='mam-uuid'/>
 //!   <result xmlns='urn:xmpp:mam:2' queryid='ib-1' id='mam-uuid'>
 //!     <forwarded xmlns='urn:xmpp:forward:0'>
 //!       <message xmlns='jabber:client' from='alice@example.net' to='me@example.org' type='chat'>
@@ -36,7 +36,7 @@
 //!
 //! ```xml
 //! <iq type='result' id='ib-1'>
-//!   <fin xmlns='urn:xmpp:inbox:0' total='3' unread='2' all-unread='6'>
+//!   <fin xmlns='urn:xmpp:inbox:1' total='3' unread='2' all-unread='6'>
 //!     <set xmlns='http://jabber.org/protocol/rsm'/>
 //!   </fin>
 //! </iq>
@@ -50,12 +50,10 @@
 //! ## Mark-read
 //!
 //! XEP-0430 itself defers read-state semantics to XEP-0333 chat markers.
-//! Waddle keeps a Waddle-private `<mark-read/>` IQ-set under
-//! `urn:waddle:inbox:0` (see [`NS_INBOX_MARK_READ`]) so 1:1 conversations
-//! — where the displayed-marker → MAM-lookup path does not apply — can
-//! still clear unread directly. This is the only behaviour still served
-//! under the legacy Waddle namespace; the canonical query surface is the
-//! standards-track `urn:xmpp:inbox:0` shape above.
+//! Waddle uses a Waddle-private `urn:waddle:inbox:0` namespace for
+//! implementation-specific metadata, live push markers, and the
+//! `<mark-read/>` IQ-set. The canonical query surface remains the
+//! standards-track `urn:xmpp:inbox:1` shape above.
 
 use jid::BareJid;
 use minidom::Element;
@@ -69,7 +67,7 @@ use crate::xep::xep0059::{
 };
 
 /// XEP-0430 inbox query/response namespace.
-pub const NS_INBOX: &str = "urn:xmpp:inbox:0";
+pub const NS_INBOX: &str = "urn:xmpp:inbox:1";
 
 /// MAM result namespace used for the embedded `<result/>` element in
 /// streamed inbox messages (XEP-0313 §4.2). Re-exported here so callers
@@ -82,12 +80,14 @@ pub const NS_CLIENT: &str = "jabber:client";
 
 use crate::xep::xep0297::NS_FORWARD;
 
-/// Waddle-private namespace retained only for the `<mark-read/>` IQ-set.
+/// Waddle-private namespace for inbox metadata, live push markers, and
+/// the `<mark-read/>` IQ-set.
 ///
 /// The canonical query path lives at [`NS_INBOX`]. See module docs for
 /// the rationale: XEP-0430 leaves read-state up to XEP-0333 chat
 /// markers, which does not cover the 1:1 DM case in Waddle today.
-pub const NS_INBOX_MARK_READ: &str = "urn:waddle:inbox:0";
+pub const NS_WADDLE_INBOX: &str = "urn:waddle:inbox:0";
+pub const NS_INBOX_MARK_READ: &str = NS_WADDLE_INBOX;
 
 /// Errors returned by inbox stanza parsing.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -114,7 +114,7 @@ impl From<RsmError> for InboxError {
     }
 }
 
-/// Parsed `<inbox xmlns='urn:xmpp:inbox:0'/>` request.
+/// Parsed `<inbox xmlns='urn:xmpp:inbox:1'/>` request.
 ///
 /// Defaults match XEP-0430: `unread_only = false`, `messages = true`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,7 +167,7 @@ fn parse_bool_attr(elem: &Element, attr: &str, default: bool) -> bool {
     }
 }
 
-/// Parse a XEP-0430 `<inbox xmlns='urn:xmpp:inbox:0'/>` IQ-get request.
+/// Parse a XEP-0430 `<inbox xmlns='urn:xmpp:inbox:1'/>` IQ-get request.
 pub fn parse_inbox_query(iq: &Iq) -> Result<InboxQuery, InboxError> {
     let elem = iq_payload(iq, false)?;
     if !elem.is("inbox", NS_INBOX) {
@@ -220,7 +220,7 @@ fn parse_kind_str(raw: &str) -> Result<ConversationKind, InboxError> {
     })
 }
 
-/// Build the bare `<entry xmlns='urn:xmpp:inbox:0' …/>` element that
+/// Build the bare `<entry xmlns='urn:xmpp:inbox:1' …/>` element that
 /// goes inside each streamed inbox `<message/>`.
 ///
 /// Required attributes per XEP-0430:
@@ -229,15 +229,8 @@ fn parse_kind_str(raw: &str) -> Result<ConversationKind, InboxError> {
 /// - `jid` — bare JID of the conversation partner (or MUC room).
 /// - `id` — XEP-0359 stanza-id of the last archived message.
 ///
-/// Waddle adds optional `kind`, `thread`, `thread-title`, `reply-count`,
-/// and `author` attributes for thread-level entries; these are
-/// `urn:xmpp:inbox:0`-namespaced extensions of the same `<entry/>`
-/// element rather than a separate vocabulary, matching the way other
-/// XEPs carry implementation-specific extras alongside the canonical
-/// attributes (see XEP-0430 §"Inbox Extensibility" — the entry element
-/// is explicitly extensible).
 pub fn build_inbox_entry_element(entry: &InboxEntry) -> Element {
-    let mut builder = Element::builder("entry", NS_INBOX)
+    Element::builder("entry", NS_INBOX)
         .attr(
             minidom::rxml::xml_ncname!("unread").to_owned(),
             entry.unread.to_string(),
@@ -250,6 +243,16 @@ pub fn build_inbox_entry_element(entry: &InboxEntry) -> Element {
             minidom::rxml::xml_ncname!("id").to_owned(),
             entry.last_stanza_id.as_str(),
         )
+        .build()
+}
+
+/// Build Waddle-private metadata for an inbox entry.
+///
+/// This keeps Waddle-specific fields out of the official
+/// `urn:xmpp:inbox:1` `<entry/>` shape while preserving the data the
+/// chat UI needs for MUC/thread unread state.
+pub fn build_inbox_metadata_element(entry: &InboxEntry) -> Element {
+    let mut builder = Element::builder("metadata", NS_WADDLE_INBOX)
         .attr(
             minidom::rxml::xml_ncname!("kind").to_owned(),
             kind_str(entry.kind),
@@ -293,8 +296,19 @@ pub fn build_inbox_entry_element(entry: &InboxEntry) -> Element {
 
 /// Parse an `<entry/>` element back into a typed [`InboxEntry`].
 ///
-/// Used by the wasm client to decode streamed inbox messages.
+/// This parses only the official XEP-0430 fields. Use
+/// [`parse_inbox_entry_with_metadata`] when a sibling Waddle metadata
+/// element is available.
 pub fn parse_inbox_entry_element(elem: &Element) -> Result<InboxEntry, InboxError> {
+    parse_inbox_entry_with_metadata(elem, None)
+}
+
+/// Parse an official XEP-0430 `<entry/>` plus optional Waddle metadata
+/// into a typed [`InboxEntry`].
+pub fn parse_inbox_entry_with_metadata(
+    elem: &Element,
+    metadata: Option<&Element>,
+) -> Result<InboxEntry, InboxError> {
     if !elem.is("entry", NS_INBOX) {
         return Err(InboxError::ExpectedElement("entry"));
     }
@@ -314,36 +328,49 @@ pub fn parse_inbox_entry_element(elem: &Element) -> Result<InboxEntry, InboxErro
     let unread: u32 = unread_raw
         .parse()
         .map_err(|_| InboxError::InvalidInteger(unread_raw.to_string()))?;
-    let kind = match elem.attr("kind") {
-        Some(raw) => parse_kind_str(raw)?,
-        None => ConversationKind::Direct,
-    };
-    let last_updated: i64 = match elem.attr("last-updated") {
-        Some(raw) => raw
-            .parse()
-            .map_err(|_| InboxError::InvalidInteger(raw.to_string()))?,
-        None => 0,
-    };
-    let thread_id = elem
-        .attr("thread")
-        .filter(|v| !v.is_empty())
-        .map(ToOwned::to_owned);
-    let thread_title = elem
-        .attr("thread-title")
-        .filter(|v| !v.is_empty())
-        .map(ToOwned::to_owned);
-    let reply_count: u32 = elem
-        .attr("reply-count")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
-    let author = elem
-        .attr("author")
-        .filter(|v| !v.is_empty())
-        .map(ToOwned::to_owned);
-    let preview = elem
-        .attr("preview")
-        .filter(|v| !v.is_empty())
-        .map(ToOwned::to_owned);
+    let mut kind = ConversationKind::Direct;
+    let mut last_updated: i64 = 0;
+    let mut thread_id = None;
+    let mut thread_title = None;
+    let mut reply_count: u32 = 0;
+    let mut author = None;
+    let mut preview = None;
+
+    if let Some(metadata) = metadata {
+        if !metadata.is("metadata", NS_WADDLE_INBOX) {
+            return Err(InboxError::ExpectedElement("metadata"));
+        }
+        if let Some(raw) = metadata.attr("kind") {
+            kind = parse_kind_str(raw)?;
+        }
+        last_updated = match metadata.attr("last-updated") {
+            Some(raw) => raw
+                .parse()
+                .map_err(|_| InboxError::InvalidInteger(raw.to_string()))?,
+            None => 0,
+        };
+        thread_id = metadata
+            .attr("thread")
+            .filter(|v| !v.is_empty())
+            .map(ToOwned::to_owned);
+        thread_title = metadata
+            .attr("thread-title")
+            .filter(|v| !v.is_empty())
+            .map(ToOwned::to_owned);
+        reply_count = metadata
+            .attr("reply-count")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        author = metadata
+            .attr("author")
+            .filter(|v| !v.is_empty())
+            .map(ToOwned::to_owned);
+        preview = metadata
+            .attr("preview")
+            .filter(|v| !v.is_empty())
+            .map(ToOwned::to_owned);
+    }
+
     Ok(InboxEntry {
         partner,
         kind,
@@ -374,13 +401,11 @@ pub struct InboxLastMessage<'a> {
 
 /// Build one streamed `<message/>` stanza for an inbox entry.
 ///
-/// The `<message/>` always carries an `<entry/>` element stamped with
-/// `queryid` so clients can disambiguate streamed query responses from
-/// unsolicited inbox pushes (XEP-0430 reuses `<entry/>` for both
-/// surfaces). When `last_message` is `Some(_)`, the message also
-/// carries a `<result xmlns='urn:xmpp:mam:2' queryid='…' id='…'>`
-/// payload pinning the conversation's most recent archived message —
-/// the embedded MAM payload is omitted under `messages='false'`.
+/// The `<message/>` always carries an `<entry/>` element. When
+/// `last_message` is `Some(_)`, the message also carries a
+/// `<result xmlns='urn:xmpp:mam:2' queryid='…' id='…'>` payload pinning
+/// the conversation's most recent archived message — the embedded MAM
+/// payload is omitted under `messages='false'`.
 ///
 /// `to` is the recipient's full JID (the requesting client); `query_id`
 /// is the IQ id correlating with the eventual `<fin/>` response.
@@ -392,13 +417,7 @@ pub fn build_inbox_entry_message(
 ) -> Message {
     let mut msg = Message::new(Some(to));
     msg.type_ = MessageType::Normal;
-    let mut entry_elem = build_inbox_entry_element(entry);
-    entry_elem.set_attr(
-        minidom::rxml::Namespace::NONE,
-        minidom::rxml::xml_ncname!("queryid").to_owned(),
-        query_id,
-    );
-    msg.payloads.push(entry_elem);
+    msg.payloads.push(build_inbox_entry_element(entry));
     if let Some(last) = last_message {
         let mut forwarded = Element::builder("forwarded", NS_FORWARD);
         if let Some(stamp) = last.delay_stamp {
@@ -416,6 +435,7 @@ pub fn build_inbox_entry_message(
             .build();
         msg.payloads.push(result);
     }
+    msg.payloads.push(build_inbox_metadata_element(entry));
     msg
 }
 
@@ -430,7 +450,7 @@ pub struct InboxFinCounts {
     pub all_unread: u32,
 }
 
-/// Build the final `<iq type='result'><fin xmlns='urn:xmpp:inbox:0'/></iq>`
+/// Build the final `<iq type='result'><fin xmlns='urn:xmpp:inbox:1'/></iq>`
 /// closing the streamed inbox response.
 pub fn build_inbox_fin_iq(original: &Iq, counts: InboxFinCounts, rsm: Option<RsmResponse>) -> Iq {
     let mut fin = Element::builder("fin", NS_INBOX)
@@ -503,12 +523,17 @@ pub fn build_mark_read_result(original: &Iq) -> Iq {
 
 /// Build a headline message that pushes an updated inbox entry to a
 /// user's resource (cross-device sync after a mark-read or a new
-/// message). The stanza carries a single `<entry/>` child in the inbox
-/// namespace — same shape as the streamed query response.
+/// message). The stanza carries a Waddle-private `<push/>` marker with
+/// a conformant XEP-0430 `<entry/>` child plus Waddle metadata.
 pub fn build_inbox_push(to: jid::Jid, entry: &InboxEntry) -> Message {
     let mut msg = Message::new(Some(to));
     msg.type_ = MessageType::Headline;
-    msg.payloads.push(build_inbox_entry_element(entry));
+    msg.payloads.push(
+        Element::builder("push", NS_WADDLE_INBOX)
+            .append(build_inbox_entry_element(entry))
+            .append(build_inbox_metadata_element(entry))
+            .build(),
+    );
     msg
 }
 
@@ -671,8 +696,16 @@ mod tests {
         assert_eq!(elem.attr("jid"), Some("alice@example.com"));
         assert_eq!(elem.attr("id"), Some("sid-42"));
         assert_eq!(elem.attr("unread"), Some("3"));
-        assert_eq!(elem.attr("kind"), Some("direct"));
-        let parsed = parse_inbox_entry_element(&elem).expect("entry parses");
+        assert_eq!(elem.attr("kind"), None);
+        assert_eq!(elem.attr("last-updated"), None);
+        assert_eq!(elem.attr("preview"), None);
+        let metadata = build_inbox_metadata_element(&entry);
+        assert_eq!(metadata.name(), "metadata");
+        assert_eq!(metadata.ns(), NS_WADDLE_INBOX);
+        assert_eq!(metadata.attr("kind"), Some("direct"));
+        assert_eq!(metadata.attr("last-updated"), Some("1700000"));
+        assert_eq!(metadata.attr("preview"), Some("hi there"));
+        let parsed = parse_inbox_entry_with_metadata(&elem, Some(&metadata)).expect("entry parses");
         assert_eq!(parsed, entry);
     }
 
@@ -690,7 +723,17 @@ mod tests {
         .with_reply_count(7)
         .with_author("alice");
         let elem = build_inbox_entry_element(&entry);
-        let parsed = parse_inbox_entry_element(&elem).expect("entry parses");
+        assert_eq!(elem.attr("thread"), None);
+        assert_eq!(elem.attr("thread-title"), None);
+        assert_eq!(elem.attr("reply-count"), None);
+        assert_eq!(elem.attr("author"), None);
+        let metadata = build_inbox_metadata_element(&entry);
+        assert_eq!(metadata.attr("kind"), Some("muc"));
+        assert_eq!(metadata.attr("thread"), Some("t-99"));
+        assert_eq!(metadata.attr("thread-title"), Some("Getting Started"));
+        assert_eq!(metadata.attr("reply-count"), Some("7"));
+        assert_eq!(metadata.attr("author"), Some("alice"));
+        let parsed = parse_inbox_entry_with_metadata(&elem, Some(&metadata)).expect("entry parses");
         assert_eq!(parsed, entry);
     }
 
@@ -706,8 +749,10 @@ mod tests {
         let msg =
             build_inbox_entry_message("me@example.com/res".parse().unwrap(), "q-1", &entry, None);
         assert_eq!(msg.type_, MessageType::Normal);
-        assert_eq!(msg.payloads.len(), 1);
+        assert_eq!(msg.payloads.len(), 2);
         assert!(msg.payloads[0].is("entry", NS_INBOX));
+        assert_eq!(msg.payloads[0].attr("queryid"), None);
+        assert!(msg.payloads[1].is("metadata", NS_WADDLE_INBOX));
     }
 
     #[test]
@@ -741,7 +786,9 @@ mod tests {
                 delay_stamp: Some("2026-05-17T00:00:00Z"),
             }),
         );
-        assert_eq!(msg.payloads.len(), 2);
+        assert_eq!(msg.payloads.len(), 3);
+        assert!(msg.payloads[0].is("entry", NS_INBOX));
+        assert!(msg.payloads[2].is("metadata", NS_WADDLE_INBOX));
         let result = msg
             .payloads
             .iter()

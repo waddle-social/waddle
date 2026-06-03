@@ -30,11 +30,11 @@ impl XmppRuntime {
         }
 
         if element.name() == "message" {
-            // XEP-0430 streamed entries take priority over the MAM
-            // parser: an inbox `<message/>` may embed a MAM `<result/>`
-            // (when `messages='true'`), and routing it to `MamResult`
-            // would drop the `<entry/>` that the inbox driver actually
-            // needs to accumulate.
+            // XEP-0430 entries take priority over the MAM parser: query
+            // responses may embed a MAM `<result/>` (when
+            // `messages='true'`), while Waddle live pushes wrap the entry
+            // in a private `<push/>` marker. Either way, the inbox entry
+            // is the state transition the driver must see first.
             if let Some(entry) = inbox::parse_inbox_stream_message(element) {
                 return vec![ClientEvent::InboxStreamEntry(entry)];
             }

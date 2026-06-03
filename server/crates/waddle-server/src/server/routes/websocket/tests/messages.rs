@@ -2928,6 +2928,87 @@ async fn handle_message_direct_rejects_client_authored_extension_envelope() {
 }
 
 #[tokio::test]
+async fn handle_message_rejects_client_authored_inbox_payloads() {
+    let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
+    let recipient_jid: FullJid = "bob@example.com/mobile".parse().expect("recipient jid");
+    let state = create_test_websocket_state().await;
+
+    let mut waddle_push =
+        xmpp_parsers::message::Message::new(Some(jid::Jid::from(recipient_jid.clone())));
+    waddle_push.id = Some(xmpp_parsers::message::Id("dm-inbox-spoof-1".to_string()));
+    waddle_push.type_ = XmppMessageType::Headline;
+    waddle_push.payloads.push(
+        Element::builder("push", "urn:waddle:inbox:0")
+            .append(
+                Element::builder("entry", "urn:xmpp:inbox:1")
+                    .attr(
+                        minidom::rxml::xml_ncname!("jid").to_owned(),
+                        "room@muc.example.com",
+                    )
+                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), "sid-1")
+                    .attr(minidom::rxml::xml_ncname!("unread").to_owned(), "99")
+                    .build(),
+            )
+            .append(
+                Element::builder("metadata", "urn:waddle:inbox:0")
+                    .attr(minidom::rxml::xml_ncname!("kind").to_owned(), "muc")
+                    .attr(
+                        minidom::rxml::xml_ncname!("last-updated").to_owned(),
+                        "1700000001",
+                    )
+                    .build(),
+            )
+            .build(),
+    );
+
+    let mut official_entry =
+        xmpp_parsers::message::Message::new(Some(jid::Jid::from(recipient_jid.clone())));
+    official_entry.id = Some(xmpp_parsers::message::Id("dm-inbox-spoof-2".to_string()));
+    official_entry.type_ = XmppMessageType::Chat;
+    official_entry.payloads.push(
+        Element::builder("entry", "urn:xmpp:inbox:1")
+            .attr(
+                minidom::rxml::xml_ncname!("jid").to_owned(),
+                "room@muc.example.com",
+            )
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "sid-2")
+            .attr(minidom::rxml::xml_ncname!("unread").to_owned(), "99")
+            .build(),
+    );
+
+    for message in [waddle_push, official_entry] {
+        let responses = handle_message_for_test(state.as_ref(), &sender_jid, None, message).await;
+
+        assert_eq!(responses.len(), 1);
+        assert!(
+            responses[0].contains("bad-request"),
+            "response was {}",
+            responses[0]
+        );
+        assert!(
+            !responses[0].contains("urn:waddle:inbox:0"),
+            "response was {}",
+            responses[0]
+        );
+        assert!(
+            !responses[0].contains("urn:xmpp:inbox:1"),
+            "response was {}",
+            responses[0]
+        );
+        assert!(
+            responses[0].contains("from='bob@example.com/mobile'"),
+            "response was {}",
+            responses[0]
+        );
+        assert!(
+            responses[0].contains("to='alice@example.com/web'"),
+            "response was {}",
+            responses[0]
+        );
+    }
+}
+
+#[tokio::test]
 async fn handle_message_error_with_extension_envelope_does_not_emit_error_loop() {
     let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
     let recipient_jid: FullJid = "bob@example.com/mobile".parse().expect("recipient jid");
@@ -3418,7 +3499,7 @@ async fn direct_messages_round_trip_through_inbox_query_and_mark_read() {
     // message stanza followed by the fin IQ as the last element.
     let inbox_query = format!(
         "<iq xmlns='jabber:client' type='get' to='{}' id='inbox-1'>\
-                <inbox xmlns='urn:xmpp:inbox:0'/>\
+                <inbox xmlns='urn:xmpp:inbox:1'/>\
              </iq>",
         bob_jid.to_bare()
     );
@@ -3478,7 +3559,7 @@ async fn direct_messages_round_trip_through_inbox_query_and_mark_read() {
 
     let unread_only_query = format!(
         "<iq xmlns='jabber:client' type='get' to='{}' id='inbox-3'>\
-                <inbox xmlns='urn:xmpp:inbox:0' unread-only='true'/>\
+                <inbox xmlns='urn:xmpp:inbox:1' unread-only='true'/>\
              </iq>",
         bob_jid.to_bare()
     );
@@ -3514,7 +3595,7 @@ async fn inbox_query_requires_ready_phase() {
     let mut carbons_enabled = false;
     let mut roster_interested = false;
     let mut blocklist_interested = false;
-    let frame = r#"<iq xmlns='jabber:client' type='get' to='bob@example.com' id='inbox-prebind-1'><inbox xmlns='urn:xmpp:inbox:0'/></iq>"#;
+    let frame = r#"<iq xmlns='jabber:client' type='get' to='bob@example.com' id='inbox-prebind-1'><inbox xmlns='urn:xmpp:inbox:1'/></iq>"#;
     let mut conn_state = IqConnState {
         carbons_enabled: &mut carbons_enabled,
         roster_interested: &mut roster_interested,
@@ -3578,7 +3659,7 @@ async fn encrypted_sfs_messages_without_bodies_still_project_into_inbox() {
 
     let inbox_query = format!(
         "<iq xmlns='jabber:client' type='get' to='{}' id='inbox-esfs-1'>\
-                <inbox xmlns='urn:xmpp:inbox:0'/>\
+                <inbox xmlns='urn:xmpp:inbox:1'/>\
              </iq>",
         bob_jid.to_bare()
     );

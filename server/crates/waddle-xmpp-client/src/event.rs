@@ -30,9 +30,10 @@ pub enum ClientEvent {
     /// xmpp-parsers 0.22 `Iq`/payload restructuring, which would
     /// otherwise drag the whole `ClientEvent` enum size up.
     MamResult(Box<ArchivedMessage>),
-    /// Typed streamed XEP-0430 inbox `<entry/>` from an active inbox
-    /// query. Correlated to the pending inbox request via
-    /// [`InboxStreamEntry::query_id`].
+    /// Typed XEP-0430 inbox `<entry/>`. Query response entries are
+    /// correlated to pending inbox requests by query id when available;
+    /// unsolicited headline pushes are source-marked and surfaced to
+    /// application callbacks.
     InboxStreamEntry(InboxStreamEntry),
     /// Typed PEP user-state event (mood, activity, tune).
     PepEvent(PepItem),

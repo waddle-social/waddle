@@ -39,11 +39,15 @@ pub(crate) fn record_link_preview_event(event: LinkPreviewTelemetryEvent) {
 #[cfg(test)]
 pub(crate) mod recorded_events {
     use super::LinkPreviewTelemetryEvent;
+    use std::cell::Cell;
     use std::sync::{Mutex, MutexGuard};
 
     static EVENTS: Mutex<Vec<LinkPreviewTelemetryEvent>> = Mutex::new(Vec::new());
-    static ACTIVE_RECORDERS: Mutex<usize> = Mutex::new(0);
     static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    thread_local! {
+        static RECORDING: Cell<bool> = const { Cell::new(false) };
+    }
 
     pub(crate) struct RecordingGuard {
         _guard: MutexGuard<'static, ()>,
@@ -51,17 +55,13 @@ pub(crate) mod recorded_events {
 
     impl Drop for RecordingGuard {
         fn drop(&mut self) {
-            *ACTIVE_RECORDERS
-                .lock()
-                .expect("link preview event recorder active count") -= 1;
+            RECORDING.with(|recording| recording.set(false));
         }
     }
 
     pub(crate) fn lock() -> RecordingGuard {
         let guard = TEST_LOCK.lock().expect("link preview event test lock");
-        *ACTIVE_RECORDERS
-            .lock()
-            .expect("link preview event recorder active count") += 1;
+        RECORDING.with(|recording| recording.set(true));
         RecordingGuard { _guard: guard }
     }
 
@@ -74,11 +74,7 @@ pub(crate) mod recorded_events {
     }
 
     pub(super) fn push(event: LinkPreviewTelemetryEvent) {
-        if *ACTIVE_RECORDERS
-            .lock()
-            .expect("link preview event recorder active count")
-            == 0
-        {
+        if !RECORDING.with(Cell::get) {
             return;
         }
         EVENTS
@@ -175,6 +171,24 @@ mod tests {
         assert!(
             !logs.contains("message body"),
             "telemetry must not include message bodies. Captured logs:\n{logs}"
+        );
+    }
+
+    #[test]
+    fn recorded_events_ignore_threads_without_recorder_guard() {
+        let _events_guard = recorded_events::lock();
+        recorded_events::clear();
+
+        std::thread::spawn(|| {
+            record_link_preview_event(LinkPreviewTelemetryEvent::CleanupReference);
+        })
+        .join()
+        .expect("worker thread should finish");
+
+        assert_eq!(
+            recorded_events::take(),
+            Vec::<LinkPreviewTelemetryEvent>::new(),
+            "a recorder must not capture events from unrelated concurrent tests"
         );
     }
 }

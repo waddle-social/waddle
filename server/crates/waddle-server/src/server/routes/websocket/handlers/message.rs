@@ -10,7 +10,8 @@ use waddle_xmpp::{
         decode_link_preview_token, extract_link_preview_request_from_message,
         parse_fallbacks_from_message, strip_fallback_ranges, strip_link_metadata,
         strip_link_preview_requests, Disposition, FallbackRegion, FileMetadata, FileSharing,
-        LinkMetadata, Reference, WaddleLinkPreviewError, NS_DELAY, NS_REPLY,
+        LinkMetadata, Reference, WaddleLinkPreviewError, NS_DELAY, NS_INBOX, NS_REPLY,
+        NS_WADDLE_INBOX,
     },
     Stanza,
 };
@@ -85,6 +86,22 @@ pub async fn handle_message(
         &state.deps.link_preview,
     );
 
+    if incoming.type_ != xmpp_parsers::message::MessageType::Error
+        && message_has_inbox_payload(&incoming)
+    {
+        let mut stamped = incoming.clone();
+        stamped.from = Some(jid::Jid::from(bound_jid));
+        strip_inbox_payloads(&mut stamped);
+        let reply = bad_request_reply(&stamped, "Client-authored inbox payloads are not allowed.");
+        return match stanza_to_string(reply) {
+            Ok(frame) => vec![frame],
+            Err(error) => {
+                warn!(error = ?error, "failed to serialize inbox rejection");
+                vec![]
+            }
+        };
+    }
+
     if incoming.type_ != xmpp_parsers::message::MessageType::Groupchat
         && incoming.type_ != xmpp_parsers::message::MessageType::Error
         && waddle_extensions::message_has_framework_envelope(&incoming)
@@ -117,6 +134,19 @@ fn strip_client_authored_delay(message: &mut xmpp_parsers::message::Message) {
     message
         .payloads
         .retain(|payload| !(payload.name() == "delay" && payload.ns() == NS_DELAY));
+}
+
+fn message_has_inbox_payload(message: &xmpp_parsers::message::Message) -> bool {
+    message
+        .payloads
+        .iter()
+        .any(|payload| payload.ns() == NS_INBOX || payload.ns() == NS_WADDLE_INBOX)
+}
+
+fn strip_inbox_payloads(message: &mut xmpp_parsers::message::Message) {
+    message
+        .payloads
+        .retain(|payload| payload.ns() != NS_INBOX && payload.ns() != NS_WADDLE_INBOX);
 }
 
 fn consume_link_preview_request(
