@@ -22,7 +22,7 @@ use crate::server::routes::websocket::link_preview_telemetry::{
 use crate::storage::BlobStorage;
 use crate::storage::{BlobMeta, StorageError};
 
-const DEFAULT_MAX_BYTES: usize = 256 * 1024;
+const DEFAULT_MAX_HTML_HEAD_BYTES: usize = 1024 * 1024;
 const DEFAULT_MAX_IMAGE_BYTES: usize = 2 * 1024 * 1024;
 const DEFAULT_MAX_REDIRECTS: usize = 3;
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(1_500);
@@ -88,7 +88,7 @@ pub(super) struct LinkPreviewResolverPolicy {
     pub enabled: bool,
     pub allowed_hosts: Vec<LinkPreviewHostPattern>,
     pub blocked_hosts: Vec<LinkPreviewHostPattern>,
-    pub max_bytes: usize,
+    pub max_html_head_bytes: usize,
     pub max_image_bytes: usize,
     pub max_redirects: usize,
     pub timeout: Duration,
@@ -103,7 +103,7 @@ impl Default for LinkPreviewResolverPolicy {
             enabled: true,
             allowed_hosts: Vec::new(),
             blocked_hosts: Vec::new(),
-            max_bytes: DEFAULT_MAX_BYTES,
+            max_html_head_bytes: DEFAULT_MAX_HTML_HEAD_BYTES,
             max_image_bytes: DEFAULT_MAX_IMAGE_BYTES,
             max_redirects: DEFAULT_MAX_REDIRECTS,
             timeout: DEFAULT_TIMEOUT,
@@ -123,7 +123,7 @@ impl LinkPreviewResolverPolicy {
             enabled: config.enabled,
             allowed_hosts: config.allowed_hosts.clone(),
             blocked_hosts: config.blocked_hosts.clone(),
-            max_bytes: config.max_fetch_bytes,
+            max_html_head_bytes: config.max_html_head_bytes,
             max_image_bytes: config.max_cached_image_bytes,
             max_redirects: config.max_redirects,
             timeout: config.fetch_timeout,
@@ -543,8 +543,8 @@ async fn fetch_html_once(
         .build()
         .map_err(|_| LinkPreviewResolverStatus::Failed)?;
     let mut request = client.get(url.clone());
-    if policy.max_bytes > 0 {
-        request = request.header(RANGE, format!("bytes=0-{}", policy.max_bytes - 1));
+    if policy.max_html_head_bytes > 0 {
+        request = request.header(RANGE, format!("bytes=0-{}", policy.max_html_head_bytes - 1));
     }
     let mut response = request
         .send()
@@ -612,7 +612,9 @@ async fn fetch_html_once(
     }
     let allow_head_cutoff = matches!(content_type.as_deref(), Some("text/html"));
     if let Some(len) = response.content_length() {
-        if len > policy.max_bytes as u64 && response.status() != StatusCode::PARTIAL_CONTENT {
+        if len > policy.max_html_head_bytes as u64
+            && response.status() != StatusCode::PARTIAL_CONTENT
+        {
             return Err(LinkPreviewResolverStatus::Failed);
         }
     }
@@ -629,7 +631,7 @@ async fn fetch_html_once(
     if partial_content_state == ContentRangeState::Unknown {
         return Err(LinkPreviewResolverStatus::Failed);
     }
-    let mut body = Vec::with_capacity(policy.max_bytes.min(64 * 1024));
+    let mut body = Vec::with_capacity(policy.max_html_head_bytes.min(64 * 1024));
     let mut head_end_scanner = HtmlHeadEndScanner::default();
     let mut found_head_end = None;
     while let Some(chunk) = response
@@ -637,8 +639,8 @@ async fn fetch_html_once(
         .await
         .map_err(|_| LinkPreviewResolverStatus::Failed)?
     {
-        if body.len() + chunk.len() > policy.max_bytes {
-            let remaining = policy.max_bytes.saturating_sub(body.len());
+        if body.len() + chunk.len() > policy.max_html_head_bytes {
+            let remaining = policy.max_html_head_bytes.saturating_sub(body.len());
             body.extend_from_slice(&chunk[..remaining]);
             if allow_head_cutoff
                 && found_head_end.is_none()
@@ -1874,6 +1876,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolves_metadata_when_head_is_deeper_than_legacy_256kb_budget() {
+        // Regression: large pages (e.g. YouTube) place their OpenGraph metadata
+        // and </head> ~640 KB deep. With the legacy 256 KB budget the resolver
+        // read past neither, returning Failed. The default budget must reach a
+        // head this deep. Filler sits inside <head> so og:title lands well past
+        // 256 KB but within the 1 MiB head budget.
+        let server = MockServer::start().await;
+        let filler = format!("<!-- {} -->", "x".repeat(300 * 1024));
+        let html = format!(
+            "<html><head>{filler}<meta property=\"og:title\" content=\"Deep Title\"></head><body></body></html>"
+        );
+        assert!(
+            html.find("og:title").expect("og present") > 256 * 1024,
+            "test must place og metadata beyond the legacy budget"
+        );
+        Mock::given(method("GET"))
+            .and(path("/deep"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(html, "text/html; charset=utf-8"))
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/deep", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        let LinkPreviewResolverOutcome::Ready(metadata) = outcome else {
+            panic!("expected ready outcome for deep head, got {outcome:?}");
+        };
+        assert_eq!(metadata.title.as_deref(), Some("Deep Title"));
+    }
+
+    #[tokio::test]
     async fn fetches_html_metadata_with_bounded_test_policy() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -1948,7 +1985,7 @@ mod tests {
             .mount(&server)
             .await;
         let policy = LinkPreviewResolverPolicy {
-            max_bytes: 256,
+            max_html_head_bytes: 256,
             allow_http_loopback_for_tests: true,
             ..Default::default()
         };
@@ -2015,7 +2052,7 @@ mod tests {
             .mount(&server)
             .await;
         let policy = LinkPreviewResolverPolicy {
-            max_bytes: 256,
+            max_html_head_bytes: 256,
             allow_http_loopback_for_tests: true,
             ..Default::default()
         };
@@ -2089,7 +2126,7 @@ mod tests {
             .mount(&server)
             .await;
         let policy = LinkPreviewResolverPolicy {
-            max_bytes: 256,
+            max_html_head_bytes: 256,
             allow_http_loopback_for_tests: true,
             ..Default::default()
         };
@@ -2124,7 +2161,7 @@ mod tests {
             .mount(&server)
             .await;
         let policy = LinkPreviewResolverPolicy {
-            max_bytes: 256,
+            max_html_head_bytes: 256,
             allow_http_loopback_for_tests: true,
             ..Default::default()
         };
@@ -2155,7 +2192,7 @@ mod tests {
             .mount(&server)
             .await;
         let policy = LinkPreviewResolverPolicy {
-            max_bytes: 256,
+            max_html_head_bytes: 256,
             allow_http_loopback_for_tests: true,
             ..Default::default()
         };
@@ -2188,7 +2225,7 @@ mod tests {
             .mount(&server)
             .await;
         let policy = LinkPreviewResolverPolicy {
-            max_bytes: 256,
+            max_html_head_bytes: 256,
             allow_http_loopback_for_tests: true,
             ..Default::default()
         };
@@ -2222,7 +2259,7 @@ mod tests {
             .mount(&server)
             .await;
         let policy = LinkPreviewResolverPolicy {
-            max_bytes: 256,
+            max_html_head_bytes: 256,
             allow_http_loopback_for_tests: true,
             ..Default::default()
         };
@@ -2259,7 +2296,7 @@ mod tests {
             .mount(&server)
             .await;
         let policy = LinkPreviewResolverPolicy {
-            max_bytes: 256,
+            max_html_head_bytes: 256,
             allow_http_loopback_for_tests: true,
             ..Default::default()
         };
@@ -2315,7 +2352,7 @@ mod tests {
             .mount(&server)
             .await;
         let policy = LinkPreviewResolverPolicy {
-            max_bytes: 256,
+            max_html_head_bytes: 256,
             allow_http_loopback_for_tests: true,
             ..Default::default()
         };
@@ -2348,7 +2385,7 @@ mod tests {
             .mount(&server)
             .await;
         let policy = LinkPreviewResolverPolicy {
-            max_bytes: 256,
+            max_html_head_bytes: 256,
             allow_http_loopback_for_tests: true,
             ..Default::default()
         };
@@ -2380,7 +2417,7 @@ mod tests {
             .mount(&server)
             .await;
         let policy = LinkPreviewResolverPolicy {
-            max_bytes: 512,
+            max_html_head_bytes: 512,
             allow_http_loopback_for_tests: true,
             ..Default::default()
         };
@@ -2412,7 +2449,7 @@ mod tests {
             .mount(&server)
             .await;
         let policy = LinkPreviewResolverPolicy {
-            max_bytes: 256,
+            max_html_head_bytes: 256,
             allow_http_loopback_for_tests: true,
             ..Default::default()
         };
@@ -2448,7 +2485,7 @@ mod tests {
             .mount(&server)
             .await;
         let policy = LinkPreviewResolverPolicy {
-            max_bytes: 256,
+            max_html_head_bytes: 256,
             allow_http_loopback_for_tests: true,
             ..Default::default()
         };
@@ -2484,7 +2521,7 @@ mod tests {
             .mount(&server)
             .await;
         let policy = LinkPreviewResolverPolicy {
-            max_bytes: 256,
+            max_html_head_bytes: 256,
             allow_http_loopback_for_tests: true,
             ..Default::default()
         };
@@ -3140,7 +3177,7 @@ mod tests {
             .mount(&server)
             .await;
         let policy = LinkPreviewResolverPolicy {
-            max_bytes: 64,
+            max_html_head_bytes: 64,
             allow_http_loopback_for_tests: true,
             ..Default::default()
         };
@@ -3166,7 +3203,7 @@ mod tests {
             .mount(&server)
             .await;
         let policy = LinkPreviewResolverPolicy {
-            max_bytes: 64,
+            max_html_head_bytes: 64,
             allow_http_loopback_for_tests: true,
             ..Default::default()
         };
