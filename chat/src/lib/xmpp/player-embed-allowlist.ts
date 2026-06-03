@@ -16,5 +16,6 @@ export function isAllowedPlayerEmbedOrigin(url: string): boolean {
     return false;
   }
   if (parsed.protocol !== "https:") return false;
+  if (parsed.username || parsed.password) return false;
   return ALLOWED_PLAYER_EMBED_ORIGINS.includes(parsed.origin);
 }

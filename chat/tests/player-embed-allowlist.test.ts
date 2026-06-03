@@ -13,4 +13,9 @@ describe("isAllowedPlayerEmbedOrigin", () => {
     expect(isAllowedPlayerEmbedOrigin("http://www.youtube-nocookie.com/embed/x")).toBe(false);
     expect(isAllowedPlayerEmbedOrigin("not a url")).toBe(false);
   });
+
+  test("rejects embed URLs with userinfo", () => {
+    expect(isAllowedPlayerEmbedOrigin("https://user@www.youtube-nocookie.com/embed/x")).toBe(false);
+    expect(isAllowedPlayerEmbedOrigin("https://user:pass@player.vimeo.com/video/1")).toBe(false);
+  });
 });
