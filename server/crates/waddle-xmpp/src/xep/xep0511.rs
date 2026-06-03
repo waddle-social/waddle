@@ -22,6 +22,18 @@ pub const NS_OPENGRAPH: &str = "https://ogp.me/ns#";
 /// OpenGraph image structured-property namespace.
 pub const NS_OPENGRAPH_IMAGE: &str = "https://ogp.me/ns#image:";
 
+/// OpenGraph video structured-property namespace.
+pub const NS_OPENGRAPH_VIDEO: &str = "https://ogp.me/ns#video:";
+
+/// Embeddable `og:video` player (an iframe URL with `og:video:type=text/html`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkMetadataVideo {
+    /// Allowlisted embed URL clients render in an iframe on user action.
+    pub url: Url,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+}
+
 /// Errors that can occur while parsing XEP-0511 link metadata.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum LinkMetadataError {
@@ -105,6 +117,8 @@ pub struct LinkMetadata {
     pub site_name: Option<String>,
     /// Cached preview images referenced through Waddle-controlled media URLs.
     pub images: Vec<LinkPreviewImage>,
+    /// Embeddable player iframe (`og:video`), when present.
+    pub video: Option<LinkMetadataVideo>,
 }
 
 impl LinkMetadata {
@@ -117,6 +131,7 @@ impl LinkMetadata {
             canonical_url: None,
             site_name: None,
             images: Vec::new(),
+            video: None,
         }
     }
 
@@ -149,6 +164,12 @@ impl LinkMetadata {
         self.images.push(image);
         self
     }
+
+    /// Attach an embeddable player iframe.
+    pub fn with_video(mut self, video: LinkMetadataVideo) -> Self {
+        self.video = Some(video);
+        self
+    }
 }
 
 /// Check if an element is an XEP-0511 `<rdf:Description/>` payload.
@@ -179,6 +200,7 @@ pub fn parse_link_metadata_element(elem: &Element) -> Result<LinkMetadata, LinkM
         None => None,
     };
     metadata.images = parse_og_images(elem);
+    metadata.video = parse_og_video(elem);
 
     Ok(metadata)
 }
@@ -206,6 +228,8 @@ pub fn build_link_metadata_element(metadata: &LinkMetadata) -> Element {
         .expect("static OpenGraph prefix is unique")
         .prefix(Some("ogi".to_string()), NS_OPENGRAPH_IMAGE)
         .expect("static OpenGraph image prefix is unique")
+        .prefix(Some("ogv".to_string()), NS_OPENGRAPH_VIDEO)
+        .expect("static OpenGraph video prefix is unique")
         .attr_ns(
             Namespace::from(NS_RDF_SYNTAX),
             xml_ncname!("about").to_owned(),
@@ -235,6 +259,14 @@ pub fn build_link_metadata_element(metadata: &LinkMetadata) -> Element {
         append_og_number(&mut description, "width", image.width);
         append_og_number(&mut description, "height", image.height);
         append_og_image_text(&mut description, "alt", image.alt.as_deref());
+    }
+
+    if let Some(video) = &metadata.video {
+        append_og_text(&mut description, "video", Some(video.url.as_str()));
+        append_og_video_text(&mut description, "secure_url", Some(video.url.as_str()));
+        append_og_video_text(&mut description, "type", Some("text/html"));
+        append_og_video_number(&mut description, "width", video.width);
+        append_og_video_number(&mut description, "height", video.height);
     }
 
     description
@@ -341,6 +373,50 @@ fn append_og_image_text(parent: &mut Element, name: &str, value: Option<&str>) {
     );
 }
 
+fn append_og_video_text(parent: &mut Element, name: &str, value: Option<&str>) {
+    let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
+        return;
+    };
+    parent.append_child(
+        Element::builder(name, NS_OPENGRAPH_VIDEO)
+            .append(value.trim())
+            .build(),
+    );
+}
+
+fn append_og_video_number(parent: &mut Element, name: &str, value: Option<u32>) {
+    if let Some(value) = value {
+        append_og_video_text(parent, name, Some(&value.to_string()));
+    }
+}
+
+fn parse_og_video(elem: &Element) -> Option<LinkMetadataVideo> {
+    let mut url = None;
+    let mut secure_url = None;
+    let mut is_html = false;
+    let mut width = None;
+    let mut height = None;
+    for child in elem.children() {
+        if child.ns() == NS_OPENGRAPH && child.name() == "video" {
+            url = Url::parse(child.text().trim()).ok();
+            continue;
+        }
+        if child.ns() != NS_OPENGRAPH_VIDEO {
+            continue;
+        }
+        let value = child.text().trim().to_string();
+        match child.name() {
+            "secure_url" => secure_url = Url::parse(&value).ok(),
+            "type" => is_html = value.eq_ignore_ascii_case("text/html"),
+            "width" => width = value.parse().ok(),
+            "height" => height = value.parse().ok(),
+            _ => {}
+        }
+    }
+    let url = secure_url.or(url)?;
+    is_html.then_some(LinkMetadataVideo { url, width, height })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -389,6 +465,29 @@ mod tests {
         let err = parse_link_metadata_element(&payload).expect_err("bare about must be rejected");
 
         assert_eq!(err, LinkMetadataError::BareAbout);
+    }
+
+    #[test]
+    fn builds_and_parses_og_video_player_embed() {
+        let mut metadata = LinkMetadata::new(
+            Url::parse("https://www.youtube.com/watch?v=429A_VugWW0").expect("url"),
+        );
+        metadata.video = Some(LinkMetadataVideo {
+            url: Url::parse("https://www.youtube-nocookie.com/embed/429A_VugWW0").expect("url"),
+            width: Some(1280),
+            height: Some(720),
+        });
+
+        let element = build_link_metadata_element(&metadata);
+        let parsed = parse_link_metadata_element(&element).expect("round-trips");
+
+        let video = parsed.video.expect("video embed parsed");
+        assert_eq!(
+            video.url.as_str(),
+            "https://www.youtube-nocookie.com/embed/429A_VugWW0"
+        );
+        assert_eq!(video.width, Some(1280));
+        assert_eq!(video.height, Some(720));
     }
 
     #[test]

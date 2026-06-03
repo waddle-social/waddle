@@ -441,7 +441,8 @@ pub use super::xep0503::{
 pub use super::xep0511::{
     build_link_metadata_element, extract_link_metadata_from_message, is_link_metadata_element,
     parse_link_metadata_element, set_link_metadata, strip_link_metadata, LinkMetadata,
-    LinkMetadataError, LinkPreviewImage, NS_OPENGRAPH, NS_OPENGRAPH_IMAGE, NS_RDF_SYNTAX,
+    LinkMetadataError, LinkMetadataVideo, LinkPreviewImage, NS_OPENGRAPH, NS_OPENGRAPH_IMAGE,
+    NS_OPENGRAPH_VIDEO, NS_RDF_SYNTAX,
 };
 
 // Re-export commonly used items at the xep module level
