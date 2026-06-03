@@ -616,11 +616,18 @@ async fn fetch_html_once(
         return Err(LinkPreviewResolverStatus::Unsupported);
     }
     let allow_head_cutoff = matches!(content_type.as_deref(), Some("text/html"));
-    if let Some(len) = response.content_length() {
-        if len > policy.max_html_head_bytes as u64
-            && response.status() != StatusCode::PARTIAL_CONTENT
-        {
-            return Err(LinkPreviewResolverStatus::Failed);
+    // For `text/html` we stream and stop at `</head>` (+ the bounded meta
+    // window), so a large advertised `Content-Length` is fine as long as the
+    // head fits the budget — common for origins that ignore `Range` and return
+    // a full 200 (e.g. YouTube over HTTP/1.1). Only fast-fail the non-cuttable
+    // case (xhtml), where the whole body would otherwise be buffered.
+    if !allow_head_cutoff {
+        if let Some(len) = response.content_length() {
+            if len > policy.max_html_head_bytes as u64
+                && response.status() != StatusCode::PARTIAL_CONTENT
+            {
+                return Err(LinkPreviewResolverStatus::Failed);
+            }
         }
     }
     let partial_content_state = if response.status() == StatusCode::PARTIAL_CONTENT {
@@ -673,8 +680,9 @@ async fn fetch_html_once(
         }
         if allow_head_cutoff && response.status() != StatusCode::PARTIAL_CONTENT {
             if let Some(head_end) = found_head_end {
-                if body.len() >= meta_window_end(head_end) {
-                    body.truncate(meta_window_end(head_end));
+                let window_end = meta_window_end(head_end);
+                if body.len() >= window_end {
+                    body.truncate(window_end);
                     break;
                 }
             }
@@ -1888,6 +1896,39 @@ mod tests {
             "html embed pages must never produce direct-video metadata"
         );
         assert_eq!(metadata.title.as_deref(), Some("Embedded player"));
+    }
+
+    #[tokio::test]
+    async fn resolves_metadata_when_content_length_exceeds_budget_but_head_fits() {
+        // Origins that ignore Range return HTTP 200 with a Content-Length for the
+        // full (large) document. As long as </head> (+ og tags) fits within the
+        // budget, the resolver must stream and head-cutoff rather than hard-fail
+        // on Content-Length. (PR #856 review: the YouTube case over HTTP/1.1.)
+        let server = MockServer::start().await;
+        let html = format!(
+            "<html><head><meta property=\"og:title\" content=\"CL Title\"/></head><body>{}</body></html>",
+            "a".repeat(4096)
+        );
+        Mock::given(method("GET"))
+            .and(path("/cl"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(html, "text/html; charset=utf-8"))
+            .mount(&server)
+            .await;
+        // Budget smaller than the body but larger than the head, with Range honored
+        // or not — wiremock advertises Content-Length for the full body.
+        let policy = LinkPreviewResolverPolicy {
+            max_html_head_bytes: 512,
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/cl", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        let LinkPreviewResolverOutcome::Ready(metadata) = outcome else {
+            panic!("expected ready outcome when head fits under the budget, got {outcome:?}");
+        };
+        assert_eq!(metadata.title.as_deref(), Some("CL Title"));
     }
 
     #[tokio::test]

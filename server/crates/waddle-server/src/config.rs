@@ -150,11 +150,13 @@ pub struct LinkPreviewConfig {
     pub enabled: bool,
     pub allowed_hosts: Vec<LinkPreviewHostPattern>,
     pub blocked_hosts: Vec<LinkPreviewHostPattern>,
-    /// Maximum bytes fetched while scanning an HTML document for its
-    /// OpenGraph `<head>` metadata. The resolver stops as soon as it locates
-    /// the head, so well-formed pages read only a few KB; the cap exists for
-    /// large pages (e.g. YouTube emits its og tags ~640 KB deep) and as a
-    /// DoS bound. Does not affect cached-image fetch limits.
+    /// Maximum bytes fetched while scanning an HTML document for OpenGraph
+    /// metadata. The resolver stops shortly after locating `</head>` — it reads
+    /// a bounded window past the head (so streaming-SSR frameworks that emit og
+    /// tags into the `<body>` are still captured), then stops; well-formed pages
+    /// typically read only the head plus that small window. The cap bounds large
+    /// pages (e.g. YouTube emits its og tags ~640 KB deep) and acts as a DoS
+    /// limit. Does not affect cached-image fetch limits.
     pub max_html_head_bytes: usize,
     pub max_cached_image_bytes: usize,
     pub max_redirects: usize,
