@@ -5,11 +5,11 @@
  */
 
 /** Closed set of ciphers Waddle understands end-to-end. */
-export type EncryptedFileCipher =
+type EncryptedFileCipher =
   | "urn:xmpp:ciphers:aes-128-gcm-nopadding:0"
   | "urn:xmpp:ciphers:aes-256-gcm-nopadding:0";
 
-export interface EncryptedFileHash {
+interface EncryptedFileHash {
   algo: string;
   valueB64: string;
 }

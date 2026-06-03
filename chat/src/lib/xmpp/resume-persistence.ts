@@ -36,7 +36,7 @@ const JOINED_ROOMS_PREFIX = "waddle.chat.joined-rooms";
 const OWNER_LEASE_PREFIX = `${SM_PREFIX}.owner-lease`;
 const OWNER_HANDOFF_PREFIX = `${SM_PREFIX}.owner-handoff`;
 
-export type PersistedSeenCursor = {
+type PersistedSeenCursor = {
   timestamp: string;
   archiveId?: string;
   archiveTimestamp?: string;

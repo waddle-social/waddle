@@ -143,6 +143,7 @@ import type {
   WasmMdsDisplayedEntry,
   WasmMessage,
   WasmPepProfile,
+  WasmPinEvent,
   WasmPresence,
   WasmRoomMember,
   WasmRosterContact,
@@ -527,7 +528,7 @@ export class BrowserXmppClient {
   private get queueScope() { return barePeerJid(this.session.jid); }
   private readonly resource: string;
   private messageHandler: ((message: LiveRoomMessage) => void) | null = null;
-  private pinEventHandler: ((event: { roomJid: string; event: import("./wasm-types").WasmPinEvent }) => void) | null = null;
+  private pinEventHandler: ((event: { roomJid: string; event: WasmPinEvent }) => void) | null = null;
   private directMessageHandler: ((message: LiveDmMessage) => void) | null = null;
   private statusHandler: ((status: XmppStatusSnapshot) => void) | null = null;
   private reactionHandler: ((event: ReactionEvent) => void) | null = null;
@@ -760,7 +761,7 @@ export class BrowserXmppClient {
 
   setMessageHandler(h: (message: LiveRoomMessage) => void) { this.messageHandler = h; }
   /** #414: receive `<pin-event/>` system messages from a room. */
-  setPinEventHandler(h: (event: { roomJid: string; event: import("./wasm-types").WasmPinEvent }) => void) { this.pinEventHandler = h; }
+  setPinEventHandler(h: (event: { roomJid: string; event: WasmPinEvent }) => void) { this.pinEventHandler = h; }
   setDirectMessageHandler(h: (message: LiveDmMessage) => void) { this.directMessageHandler = h; }
   setStatusHandler(h: (status: XmppStatusSnapshot) => void) { this.statusHandler = h; }
   setChatStateHandler(h: (event: ChatStateEvent) => void) { this.chatStateHandler = h; }

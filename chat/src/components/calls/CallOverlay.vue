@@ -13,6 +13,7 @@ import {
   $callConnecting,
   installCallPagehideSuspension,
   resetCallControls,
+  seedCallControlsFromEngine,
 } from "@/lib/calls/call-controls";
 import { $callUiMode } from "@/lib/calls/ui-mode";
 
@@ -55,15 +56,25 @@ watch(
     const active = state.value;
     if (active.phase !== "active" || active.sid !== sid) return;
     $callConnecting.set(true);
+    // Optimistic baseline shown while connecting; also clears any media
+    // notice left over from the previous call.
+    resetCallControls(active.media.audio, active.media.video);
     try {
       await engine.connect(active.join, active.media);
-      resetCallControls(active.media.audio, active.media.video);
+      // Capture is best-effort inside connect(): a missing device or a
+      // denied mic/cam permission no longer throws — the user joins as a
+      // receive-only participant and the engine emits `mediaDevicesError`
+      // (surfaced as a non-blocking notice). Reconcile the toggle UI to
+      // what ACTUALLY published rather than the requested media.
+      seedCallControlsFromEngine(engine);
     } catch (err) {
-      // The server already verified the JWT before forwarding the
-      // transport, so the most common failure here is the browser
-      // denying mic/cam permissions. Run the full hangup path so
-      // SFU/session/Muji presence state rolls back before the local
-      // slot disappears.
+      // Only GENUINE join failures reach here now — failures that happen
+      // BEFORE or DURING room.connect(): an invalid LiveKit grant, or a
+      // dead/rejected transport. Capture (mic/cam) runs AFTER connect and
+      // is best-effort, so "no device / permission denied" is no longer
+      // fatal — it surfaces as the non-blocking media notice instead and
+      // never reaches this catch. Run the full hangup path so
+      // SFU/session/Muji presence state rolls back before the slot goes.
       await tearDownActiveCall(getSender(), "gone");
       await engine.disconnect();
       reportCallError(err);

@@ -67,8 +67,8 @@ export interface DiscoveredExtensionCommand {
   inlineField?: string;
 }
 
-export type ExtensionRouteScope = "channel";
-export type ExtensionRouteSurface = "gallery" | "list";
+type ExtensionRouteScope = "channel";
+type ExtensionRouteSurface = "gallery" | "list";
 
 export interface DiscoveredExtensionRoute {
   serviceJid: string;
@@ -81,18 +81,18 @@ export interface DiscoveredExtensionRoute {
   payloadNamespace: string;
 }
 
-export interface ExtensionItemField {
+interface ExtensionItemField {
   name: string;
   label?: string;
   value: string;
 }
 
-export interface ExtensionItemOption {
+interface ExtensionItemOption {
   id: string;
   label: string;
 }
 
-export interface ExtensionItemAction {
+interface ExtensionItemAction {
   launchId: string;
   label: string;
   launch?: ExtensionLaunchDescriptor;
@@ -109,7 +109,7 @@ export interface ExtensionRouteItem {
   actions: ExtensionItemAction[];
 }
 
-export type ExtensionCommandOutcomeState = "success" | "warning" | "error";
+type ExtensionCommandOutcomeState = "success" | "warning" | "error";
 
 export interface ExtensionCommandOutcome {
   state: ExtensionCommandOutcomeState;

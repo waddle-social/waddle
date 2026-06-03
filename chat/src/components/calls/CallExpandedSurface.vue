@@ -22,6 +22,7 @@ import { barePeerJid } from "@/lib/xmpp/jid";
 import CallTileGrid from "./CallTileGrid.vue";
 import CallControls from "./CallControls.vue";
 import CallSettingsDialog from "./CallSettingsDialog.vue";
+import CallMediaNotice from "./CallMediaNotice.vue";
 
 /**
  * "Expanded" call surface — fills the chat content pane while the
@@ -167,6 +168,7 @@ onBeforeUnmount(() => {
     >
       {{ lastError }}
     </div>
+    <CallMediaNotice />
     <main class="call-expanded__grid">
       <CallTileGrid
         :remote-tracks="remoteTracks"
