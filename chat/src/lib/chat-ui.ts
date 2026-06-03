@@ -48,6 +48,7 @@ export interface LinkPreview {
   description?: string;
   image?: LinkPreviewImage;
   video?: LinkPreviewVideo;
+  playerEmbed?: LinkPreviewPlayer;
   remoteMediaUnavailable?: boolean;
 }
 
@@ -66,15 +67,26 @@ export interface LinkPreviewVideo {
   size?: number;
 }
 
+/** Embeddable player iframe (allowlisted og:video) the client renders on click. */
+export interface LinkPreviewPlayer {
+  url: string;
+  width?: number;
+  height?: number;
+}
+
 export type LinkPreviewMediaState =
   | { kind: "none" }
   | { kind: "image"; image: LinkPreviewImage }
   | { kind: "video"; video: LinkPreviewVideo; poster?: LinkPreviewImage }
+  | { kind: "player"; player: LinkPreviewPlayer; poster?: LinkPreviewImage }
   | { kind: "remote-unavailable" };
 
 export function linkPreviewMediaState(preview: LinkPreview): LinkPreviewMediaState {
   if (preview.video) {
     return { kind: "video", video: preview.video, ...(preview.image ? { poster: preview.image } : {}) };
+  }
+  if (preview.playerEmbed) {
+    return { kind: "player", player: preview.playerEmbed, ...(preview.image ? { poster: preview.image } : {}) };
   }
   if (preview.image) return { kind: "image", image: preview.image };
   if (preview.remoteMediaUnavailable) return { kind: "remote-unavailable" };
