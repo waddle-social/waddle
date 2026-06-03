@@ -448,6 +448,11 @@ fn link_previews_to_js(previews: Vec<messaging::LinkPreviewData>) -> Vec<WaddleL
                 height: image.height,
                 alt: image.alt,
             }),
+            player_embed: preview.player_embed.map(|player| WaddleLinkPreviewPlayer {
+                url: player.url.to_string(),
+                width: player.width,
+                height: player.height,
+            }),
         })
         .collect()
 }

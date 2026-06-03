@@ -151,6 +151,7 @@ export interface WasmLinkPreview {
   title?: string | null;
   description?: string | null;
   image?: WasmLinkPreviewImage | null;
+  player_embed?: WasmLinkPreviewPlayer | null;
   remote_media_unavailable?: boolean;
 }
 
@@ -160,6 +161,12 @@ interface WasmLinkPreviewImage {
   width?: number | null;
   height?: number | null;
   alt?: string | null;
+}
+
+interface WasmLinkPreviewPlayer {
+  url: string;
+  width?: number | null;
+  height?: number | null;
 }
 
 /** Pin/unpin event from a room system message (#414). */

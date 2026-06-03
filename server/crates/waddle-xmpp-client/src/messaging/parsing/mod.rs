@@ -377,6 +377,7 @@ fn parse_link_preview(el: &Element, first_url: Option<&Url>) -> Option<LinkPrevi
     let preview_image_url = link_preview_image_url(el);
     let has_preview_image = preview_image_url.is_some();
     let image = parse_link_preview_image(el, preview_image_url.as_deref());
+    let player_embed = parse_link_preview_player(el);
     Some(LinkPreviewData {
         original_url,
         normalized_url: og_text(el, "url").and_then(|value| parse_web_url(&value)),
@@ -384,7 +385,35 @@ fn parse_link_preview(el: &Element, first_url: Option<&Url>) -> Option<LinkPrevi
         description: og_text(el, "description"),
         remote_media_unavailable: has_preview_image && image.is_none(),
         image,
+        player_embed,
     })
+}
+
+fn parse_link_preview_player(el: &Element) -> Option<LinkPreviewPlayer> {
+    let mut url = None;
+    let mut secure_url = None;
+    let mut is_html = false;
+    let mut width = None;
+    let mut height = None;
+    for child in el.children() {
+        if child.ns() == NS_OPENGRAPH && child.name() == "video" {
+            url = parse_web_url(child.text().trim());
+            continue;
+        }
+        if child.ns() != NS_OPENGRAPH_VIDEO {
+            continue;
+        }
+        let value = child.text().trim().to_string();
+        match child.name() {
+            "secure_url" => secure_url = parse_web_url(&value),
+            "type" => is_html = value.eq_ignore_ascii_case("text/html"),
+            "width" => width = value.parse().ok(),
+            "height" => height = value.parse().ok(),
+            _ => {}
+        }
+    }
+    let url = secure_url.or(url)?;
+    is_html.then_some(LinkPreviewPlayer { url, width, height })
 }
 
 fn parse_link_preview_image(el: &Element, image_url: Option<&str>) -> Option<LinkPreviewImageData> {

@@ -27,6 +27,7 @@ pub(crate) const NS_WADDLE_LINK_PREVIEW: &str = "urn:waddle:link-preview:0";
 pub(crate) const NS_RDF_SYNTAX: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
 pub(crate) const NS_OPENGRAPH: &str = "https://ogp.me/ns#";
 pub(crate) const NS_OPENGRAPH_IMAGE: &str = "https://ogp.me/ns#image:";
+pub(crate) const NS_OPENGRAPH_VIDEO: &str = "https://ogp.me/ns#video:";
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub(crate) const NS_MUC: &str = "http://jabber.org/protocol/muc";
 pub(crate) const NS_MUC_USER: &str = "http://jabber.org/protocol/muc#user";

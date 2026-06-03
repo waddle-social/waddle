@@ -30,6 +30,7 @@ import {
 } from "@/lib/chat-ui";
 import { formatFileSize, useMessageAttachments } from "@/channels/message-attachments";
 import { applyShikiToCodeBlocks } from "@/lib/shiki";
+import { isAllowedPlayerEmbedOrigin } from "@/lib/xmpp/player-embed-allowlist";
 import { useExtensionAnnotationActions } from "@/channels/extension-annotation-actions";
 import type { ExtensionCommandResult } from "@/lib/xmpp/extension-commands";
 import ImageLightbox from "@/components/ui/ImageLightbox.vue";
@@ -86,7 +87,9 @@ const linkPreviewCards = computed<LinkPreviewCard[]>(() =>
 // render separately because they carry an interactive play control that must
 // not also navigate the link.
 const linkInfoCards = computed(() =>
-  linkPreviewCards.value.filter((card) => card.mediaState.kind !== "video"),
+  linkPreviewCards.value.filter(
+    (card) => card.mediaState.kind !== "video" && card.mediaState.kind !== "player",
+  ),
 );
 const videoPreviewCards = computed(() =>
   linkPreviews.value.flatMap((preview) => {
@@ -112,6 +115,18 @@ function videoCardKey(preview: MessageLinkPreview): string {
 const playingVideos = reactive(new Set<string>());
 function startVideoPlayback(preview: MessageLinkPreview): void {
   playingVideos.add(videoCardKey(preview));
+}
+const playerPreviewCards = computed(() =>
+  linkPreviews.value.flatMap((preview) => {
+    const state = linkPreviewMediaState(preview);
+    // Defense in depth: only ever iframe an allowlisted embed origin.
+    if (state.kind !== "player" || !isAllowedPlayerEmbedOrigin(state.player.url)) return [];
+    return [{ preview, player: state.player, ...(state.poster ? { poster: state.poster } : {}) }];
+  }),
+);
+const playingEmbeds = reactive(new Set<string>());
+function startEmbedPlayback(preview: MessageLinkPreview): void {
+  playingEmbeds.add(videoCardKey(preview));
 }
 const extensionCards = computed(() =>
   extensionAnnotations.value.map((annotation) => ({
@@ -319,6 +334,56 @@ watch(
         class="relative flex aspect-video w-full items-center justify-center overflow-hidden rounded border border-border bg-black/80 text-white transition-colors hover:bg-black"
         :aria-label="`Play video${card.preview.title ? ': ' + card.preview.title : ''}`"
         @click.stop.prevent="startVideoPlayback(card.preview)"
+      >
+        <img
+          v-if="card.poster"
+          :src="card.poster.url"
+          :alt="card.poster.alt ?? ''"
+          loading="lazy"
+          decoding="async"
+          class="absolute inset-0 h-full w-full object-cover"
+        />
+        <Play aria-hidden="true" class="relative h-10 w-10 drop-shadow" />
+      </button>
+      <a
+        :href="linkPreviewHref(card.preview.originalUrl) ?? undefined"
+        target="_blank"
+        rel="noopener noreferrer"
+        class="type-field text-foreground hover:underline"
+        @click.stop
+      >{{ card.preview.title ?? card.preview.originalUrl }}</a>
+      <span v-if="card.preview.description" class="type-caption line-clamp-2 text-muted-foreground">{{ card.preview.description }}</span>
+    </div>
+
+    <!-- Embeddable player previews (allowlisted og:video). Loads the third-party
+         iframe only after the user clicks play; the facade shows the
+         Waddle-proxied thumbnail and nothing contacts the provider until then. -->
+    <div
+      v-for="card in playerPreviewCards"
+      :key="`player:${videoCardKey(card.preview)}`"
+      class="flex max-w-xl flex-col gap-1 rounded-md border border-border bg-muted/40 p-3 text-left"
+    >
+      <span class="type-meta flex items-center gap-1 text-muted-foreground">
+        <ExternalLink aria-hidden="true" class="h-3.5 w-3.5" />
+        {{ linkPreviewHost(card.preview.originalUrl) }}
+      </span>
+      <iframe
+        v-if="playingEmbeds.has(videoCardKey(card.preview))"
+        :src="card.player.url"
+        :title="card.preview.title ?? 'Embedded player'"
+        :class="['w-full rounded border border-border bg-black', (card.player.width && card.player.height) ? '' : 'aspect-video']"
+        :style="card.player.width && card.player.height ? { aspectRatio: `${card.player.width} / ${card.player.height}` } : undefined"
+        loading="lazy"
+        allow="encrypted-media; picture-in-picture; fullscreen"
+        allowfullscreen
+        referrerpolicy="strict-origin-when-cross-origin"
+      />
+      <button
+        v-else
+        type="button"
+        class="relative flex aspect-video w-full items-center justify-center overflow-hidden rounded border border-border bg-black/80 text-white transition-colors hover:bg-black"
+        :aria-label="`Play video${card.preview.title ? ': ' + card.preview.title : ''}`"
+        @click.stop.prevent="startEmbedPlayback(card.preview)"
       >
         <img
           v-if="card.poster"

@@ -6,6 +6,7 @@ import type { WaddleEncryptedFile } from "./extensions/encrypted-file";
 import { barePeerJid } from "./jid";
 import type { InboxEntry } from "./inbox-types";
 import { isTrustedCachedPreviewImageUrl } from "./link-preview";
+import { isAllowedPlayerEmbedOrigin } from "@/lib/xmpp/player-embed-allowlist";
 import { associateDirectVideoPreviews } from "./link-preview-video";
 import {
   buildReplyFallbackPrefix,
@@ -154,11 +155,14 @@ interface LinkPreviewDecodeOptions {
   trustedMediaOrigin?: string | null;
 }
 
-function linkPreviewFromWasm(preview: WasmLinkPreview, options: LinkPreviewDecodeOptions = {}): LinkPreview {
+export function linkPreviewFromWasm(preview: WasmLinkPreview, options: LinkPreviewDecodeOptions = {}): LinkPreview {
   const trustedImage = preview.image && isTrustedCachedPreviewImageUrl(preview.image.url, options.trustedMediaOrigin)
     ? preview.image
     : undefined;
   const remoteMediaUnavailable = !!preview.remote_media_unavailable || (!!preview.image && !trustedImage);
+  const playerEmbed = preview.player_embed && isAllowedPlayerEmbedOrigin(preview.player_embed.url)
+    ? preview.player_embed
+    : undefined;
   return {
     originalUrl: preview.original_url,
     ...(preview.normalized_url ? { normalizedUrl: preview.normalized_url } : {}),
@@ -173,6 +177,15 @@ function linkPreviewFromWasm(preview: WasmLinkPreview, options: LinkPreviewDecod
             ...(typeof trustedImage.width === "number" ? { width: trustedImage.width } : {}),
             ...(typeof trustedImage.height === "number" ? { height: trustedImage.height } : {}),
             ...(trustedImage.alt ? { alt: trustedImage.alt } : {}),
+          },
+        }
+      : {}),
+    ...(playerEmbed
+      ? {
+          playerEmbed: {
+            url: playerEmbed.url,
+            ...(typeof playerEmbed.width === "number" ? { width: playerEmbed.width } : {}),
+            ...(typeof playerEmbed.height === "number" ? { height: playerEmbed.height } : {}),
           },
         }
       : {}),

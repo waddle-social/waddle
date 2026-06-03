@@ -298,6 +298,50 @@ describe("link preview lookup", () => {
     }
   });
 
+  test("parses player embed from ready lookup responses", async () => {
+    const send_raw_iq = async () =>
+      `<iq type="result" id="lookup-1"><lookup xmlns="urn:waddle:link-preview:0" status="ready"><preview token="signed-token" original-url="https://example.com/a" normalized-url="https://example.com/a" expires-at="2999-01-01T00:00:00.000Z"><title>Example</title><player xmlns="urn:waddle:link-preview:0" url="https://www.youtube-nocookie.com/embed/429A_VugWW0" width="1280" height="720"/></preview></lookup></iq>`;
+
+    let result: Awaited<ReturnType<typeof requestPlaintextLinkPreviewLookup>> = null;
+    await withFakeXmlDocument(async () => {
+      await withFakeDomParser(async () => {
+        result = await requestPlaintextLinkPreviewLookup(
+          { send_raw_iq },
+          "read https://example.com/a",
+          "room@muc.example.com",
+        );
+      });
+    });
+
+    expect(result).toMatchObject({
+      status: "ready",
+      playerEmbed: {
+        url: "https://www.youtube-nocookie.com/embed/429A_VugWW0",
+        width: 1280,
+        height: 720,
+      },
+    });
+  });
+
+  test("rejects player embed from a non-allowlisted origin in lookup responses", async () => {
+    const send_raw_iq = async () =>
+      `<iq type="result" id="lookup-1"><lookup xmlns="urn:waddle:link-preview:0" status="ready"><preview token="signed-token" original-url="https://example.com/a" normalized-url="https://example.com/a" expires-at="2999-01-01T00:00:00.000Z"><title>Example</title><player xmlns="urn:waddle:link-preview:0" url="https://attacker.example/embed/xss" width="1280" height="720"/></preview></lookup></iq>`;
+
+    let result: Awaited<ReturnType<typeof requestPlaintextLinkPreviewLookup>> = null;
+    await withFakeXmlDocument(async () => {
+      await withFakeDomParser(async () => {
+        result = await requestPlaintextLinkPreviewLookup(
+          { send_raw_iq },
+          "read https://example.com/a",
+          "room@muc.example.com",
+        );
+      });
+    });
+
+    expect(result).toMatchObject({ status: "ready" });
+    expect(result && "playerEmbed" in result ? result.playerEmbed : undefined).toBeUndefined();
+  });
+
   test("lookup failure is a metadata miss instead of a send blocker", async () => {
     const result = await requestPlaintextLinkPreviewLookup(
       { send_raw_iq: async () => { throw new Error("lookup failed"); } },

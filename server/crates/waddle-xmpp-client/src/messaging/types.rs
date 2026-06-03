@@ -201,7 +201,15 @@ pub struct LinkPreviewData {
     pub title: Option<String>,
     pub description: Option<String>,
     pub image: Option<LinkPreviewImageData>,
+    pub player_embed: Option<LinkPreviewPlayer>,
     pub remote_media_unavailable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkPreviewPlayer {
+    pub url: Url,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
