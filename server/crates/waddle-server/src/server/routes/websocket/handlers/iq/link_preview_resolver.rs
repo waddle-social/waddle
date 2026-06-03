@@ -1891,6 +1891,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn oversized_headless_html_is_bounded_and_not_ready() {
+        // DoS bound: a page that exceeds the head budget without ever emitting
+        // </head> must not yield a preview and must not be read past the budget.
+        // (Per-request bound that keeps the raised 1 MiB default safe.)
+        let server = MockServer::start().await;
+        let html = format!("<html><head>{}", "x".repeat(4096)); // no </head>, no og
+        Mock::given(method("GET"))
+            .and(path("/headless"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(html, "text/html; charset=utf-8"))
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            max_html_head_bytes: 512,
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/headless", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        assert!(
+            !matches!(outcome, LinkPreviewResolverOutcome::Ready(_)),
+            "oversized headless HTML must not produce a preview, got {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn resolves_metadata_emitted_into_body_after_head_by_streaming_ssr() {
         // Next.js / React 18 streaming SSR hoists og: <meta> into the <body>
         // stream — they appear AFTER </head> in the raw HTML (the browser
