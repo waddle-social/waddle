@@ -3594,4 +3594,165 @@ mod tests {
         };
         assert!(metadata.player_embed.is_none());
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn extracts_player_embed_from_og_video_url_fallback() {
+        // Covers the `.or_else(og:video:url)` fallback branch: page provides ONLY
+        // og:video:url (no secure_url) with type text/html.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/watch"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                r#"<html><head>
+                      <meta property="og:title" content="A video">
+                      <meta property="og:video:url" content="https://www.youtube.com/embed/429A_VugWW0">
+                      <meta property="og:video:type" content="text/html">
+                    </head></html>"#,
+                "text/html; charset=utf-8",
+            ))
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/watch", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        let LinkPreviewResolverOutcome::Ready(metadata) = outcome else {
+            panic!("expected ready outcome, got {outcome:?}");
+        };
+        let player = metadata
+            .player_embed
+            .expect("player embed from og:video:url fallback");
+        assert_eq!(
+            player.url.as_str(),
+            "https://www.youtube-nocookie.com/embed/429A_VugWW0"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ignores_og_video_url_fallback_when_type_not_html() {
+        // Covers the type gate on the fallback path: og:video:url present and
+        // allowlisted, but og:video:type is video/mp4, so player_embed must be None.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/watch"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                r#"<html><head>
+                      <meta property="og:title" content="A video">
+                      <meta property="og:video:url" content="https://www.youtube.com/embed/429A_VugWW0">
+                      <meta property="og:video:type" content="video/mp4">
+                    </head></html>"#,
+                "text/html; charset=utf-8",
+            ))
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/watch", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        let LinkPreviewResolverOutcome::Ready(metadata) = outcome else {
+            panic!("expected ready outcome, got {outcome:?}");
+        };
+        assert!(metadata.player_embed.is_none());
+        assert_eq!(metadata.title.as_deref(), Some("A video"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn drops_malformed_og_video_url() {
+        // Graceful degradation: malformed secure_url cannot be parsed as a URL —
+        // player_embed is None but the text card (title) still resolves without panic.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/watch"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                r#"<html><head>
+                      <meta property="og:title" content="A video">
+                      <meta property="og:video:secure_url" content="not a valid url ::::">
+                      <meta property="og:video:type" content="text/html">
+                    </head></html>"#,
+                "text/html; charset=utf-8",
+            ))
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/watch", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        let LinkPreviewResolverOutcome::Ready(metadata) = outcome else {
+            panic!("expected ready outcome, got {outcome:?}");
+        };
+        assert!(metadata.player_embed.is_none());
+        assert_eq!(metadata.title.as_deref(), Some("A video"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn og_video_and_direct_video_are_mutually_exclusive() {
+        // Invariant: a resolved metadata must never carry both `video` (direct
+        // XEP-0447) and `player_embed`. Verify both halves:
+        //   1. allowlisted og:video page → player_embed Some, video None.
+        //   2. direct video file → video Some, player_embed None.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/watch"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                r#"<html><head>
+                      <meta property="og:title" content="A video">
+                      <meta property="og:video:secure_url" content="https://www.youtube.com/embed/429A_VugWW0">
+                      <meta property="og:video:type" content="text/html">
+                    </head></html>"#,
+                "text/html; charset=utf-8",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/clip.mp4"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(vec![0u8; 256], "video/mp4"))
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+
+        // Half 1: og:video embed page must not produce a direct video.
+        let embed_url = Url::parse(&format!("{}/watch", server.uri())).expect("url");
+        let embed_outcome = resolve_link_preview(&embed_url, &policy).await;
+        let LinkPreviewResolverOutcome::Ready(embed_metadata) = embed_outcome else {
+            panic!("expected ready outcome for embed page, got {embed_outcome:?}");
+        };
+        assert!(
+            embed_metadata.player_embed.is_some(),
+            "embed page must have player_embed"
+        );
+        assert!(
+            embed_metadata.video.is_none(),
+            "embed page must not have direct video"
+        );
+
+        // Half 2: direct video file must not produce a player embed.
+        let video_url = Url::parse(&format!("{}/clip.mp4", server.uri())).expect("url");
+        let video_outcome = resolve_link_preview(&video_url, &policy).await;
+        let LinkPreviewResolverOutcome::Ready(video_metadata) = video_outcome else {
+            panic!("expected ready outcome for direct video, got {video_outcome:?}");
+        };
+        assert!(
+            video_metadata.video.is_some(),
+            "direct video must have video field"
+        );
+        assert!(
+            video_metadata.player_embed.is_none(),
+            "direct video must not have player_embed"
+        );
+    }
 }
