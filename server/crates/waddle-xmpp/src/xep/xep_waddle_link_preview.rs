@@ -56,6 +56,10 @@ pub struct LinkPreviewTokenData {
     /// Trusted direct playable video sealed inside the token, when the link is
     /// a direct-media file the client may inline-play on user action.
     pub video: Option<LinkPreviewTokenVideo>,
+    /// Embeddable player iframe sealed inside the token, when the page
+    /// advertises an allowlisted `og:video` player. Mutually exclusive with
+    /// `video`.
+    pub player: Option<LinkPreviewTokenPlayer>,
     pub expires_at_unix: i64,
 }
 
@@ -77,6 +81,16 @@ pub struct LinkPreviewTokenVideo {
     pub size: Option<u64>,
 }
 
+/// Trusted embeddable player iframe sealed inside the token. The URL is an
+/// allowlisted, host-rewritten embed origin the client renders in an `<iframe>`
+/// on user action. Mutually exclusive with [`LinkPreviewTokenVideo`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkPreviewTokenPlayer {
+    pub url: Url,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LinkPreviewTokenWire {
     sender_jid: String,
@@ -88,6 +102,8 @@ struct LinkPreviewTokenWire {
     image: Option<LinkPreviewTokenImageWire>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     video: Option<LinkPreviewTokenVideoWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    player: Option<LinkPreviewTokenPlayerWire>,
     expires_at_unix: i64,
 }
 
@@ -97,6 +113,15 @@ struct LinkPreviewTokenVideoWire {
     media_type: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     size: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LinkPreviewTokenPlayerWire {
+    url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    height: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -190,6 +215,14 @@ pub fn encode_link_preview_token(data: &LinkPreviewTokenData, secret: &[u8]) -> 
             media_type: video.media_type.as_str().to_string(),
             size: video.size,
         }),
+        player: data
+            .player
+            .as_ref()
+            .map(|player| LinkPreviewTokenPlayerWire {
+                url: player.url.as_str().to_string(),
+                width: player.width,
+                height: player.height,
+            }),
         expires_at_unix: data.expires_at_unix,
     };
     let json = serde_json::to_vec(&wire).expect("wire token is serializable");
@@ -285,6 +318,17 @@ pub fn decode_link_preview_token(
                 })
             })
             .transpose()?,
+        player: wire
+            .player
+            .map(|player| {
+                Ok(LinkPreviewTokenPlayer {
+                    url: Url::parse(&player.url)
+                        .map_err(|_| WaddleLinkPreviewError::InvalidTokenUrl)?,
+                    width: player.width,
+                    height: player.height,
+                })
+            })
+            .transpose()?,
         expires_at_unix: wire.expires_at_unix,
     })
 }
@@ -324,6 +368,7 @@ mod tests {
                 alt: Some("Article screenshot".to_string()),
             }),
             video: None,
+            player: None,
             expires_at_unix: 1_900_000_000,
         };
 
@@ -350,6 +395,7 @@ mod tests {
                 media_type: DirectVideoMediaType::Mp4,
                 size: Some(4_823_344),
             }),
+            player: None,
             expires_at_unix: 1_900_000_000,
         };
 
@@ -372,6 +418,7 @@ mod tests {
             description: Some("Plain text preview".to_string()),
             image: None,
             video: None,
+            player: None,
             expires_at_unix: 1_900_000_000,
         };
 
@@ -395,6 +442,7 @@ mod tests {
             description: None,
             image: None,
             video: None,
+            player: None,
             expires_at_unix: 10,
         };
 
@@ -417,6 +465,7 @@ mod tests {
             description: Some("d".repeat(MAX_LINK_PREVIEW_TOKEN_BYTES)),
             image: None,
             video: None,
+            player: None,
             expires_at_unix: 1_900_000_000,
         };
 
@@ -433,5 +482,29 @@ mod tests {
             decode_link_preview_token(&token, SECRET, 1_800_000_000),
             Err(WaddleLinkPreviewError::InvalidTokenEncoding)
         );
+    }
+
+    #[test]
+    fn round_trips_player_embed_in_token() {
+        let secret = b"test-secret";
+        let data = LinkPreviewTokenData {
+            sender_jid: "alice@example.com".parse().expect("jid"),
+            scope_jid: "room@muc.example.com".parse().expect("jid"),
+            original_url: Url::parse("https://www.youtube.com/watch?v=429A_VugWW0").expect("url"),
+            normalized_url: Url::parse("https://www.youtube.com/watch?v=429A_VugWW0").expect("url"),
+            title: Some("A video".to_string()),
+            description: None,
+            image: None,
+            video: None,
+            player: Some(LinkPreviewTokenPlayer {
+                url: Url::parse("https://www.youtube-nocookie.com/embed/429A_VugWW0").expect("url"),
+                width: Some(1280),
+                height: Some(720),
+            }),
+            expires_at_unix: 4_102_444_800,
+        };
+        let token = encode_link_preview_token(&data, secret);
+        let decoded = decode_link_preview_token(&token, secret, 0).expect("decode");
+        assert_eq!(decoded.player, data.player);
     }
 }
