@@ -26,6 +26,11 @@ const DEFAULT_MAX_HTML_HEAD_BYTES: usize = 1024 * 1024;
 const DEFAULT_MAX_IMAGE_BYTES: usize = 2 * 1024 * 1024;
 const DEFAULT_MAX_REDIRECTS: usize = 3;
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(1_500);
+/// Extra bytes scanned past `</head>` for OpenGraph `<meta>` tags that
+/// streaming-SSR frameworks (Next.js, React 18, Remix) emit into the `<body>`
+/// stream rather than the head. Bounded so the resolver still stops well
+/// before reading a full large document.
+const HTML_META_BODY_WINDOW: usize = 64 * 1024;
 const LINK_PREVIEW_TITLE_MAX_BYTES: usize = 256;
 const LINK_PREVIEW_DESCRIPTION_MAX_BYTES: usize = 1024;
 
@@ -634,6 +639,14 @@ async fn fetch_html_once(
     let mut body = Vec::with_capacity(policy.max_html_head_bytes.min(64 * 1024));
     let mut head_end_scanner = HtmlHeadEndScanner::default();
     let mut found_head_end = None;
+    // Once `</head>` is located, keep reading a bounded window into the body so
+    // streaming-SSR frameworks that emit og: `<meta>` after `</head>` are still
+    // captured, then stop. Capped at the head budget.
+    let meta_window_end = |head_end: usize| {
+        head_end
+            .saturating_add(HTML_META_BODY_WINDOW)
+            .min(policy.max_html_head_bytes)
+    };
     while let Some(chunk) = response
         .chunk()
         .await
@@ -642,13 +655,13 @@ async fn fetch_html_once(
         if body.len() + chunk.len() > policy.max_html_head_bytes {
             let remaining = policy.max_html_head_bytes.saturating_sub(body.len());
             body.extend_from_slice(&chunk[..remaining]);
-            if allow_head_cutoff
-                && found_head_end.is_none()
-                && response.status() != StatusCode::PARTIAL_CONTENT
-            {
-                found_head_end = head_end_scanner.scan(&body);
-                if let Some(head_end) = found_head_end {
-                    body.truncate(head_end);
+            if allow_head_cutoff && response.status() != StatusCode::PARTIAL_CONTENT {
+                if found_head_end.is_none() {
+                    found_head_end = head_end_scanner.scan(&body);
+                }
+                if found_head_end.is_some() {
+                    // Hit the byte budget with a head located; keep the
+                    // budget-capped body (head + as much window as fit).
                     break;
                 }
             }
@@ -657,9 +670,11 @@ async fn fetch_html_once(
         body.extend_from_slice(&chunk);
         if allow_head_cutoff && found_head_end.is_none() {
             found_head_end = head_end_scanner.scan(&body);
-            if response.status() != StatusCode::PARTIAL_CONTENT {
-                if let Some(head_end) = found_head_end {
-                    body.truncate(head_end);
+        }
+        if allow_head_cutoff && response.status() != StatusCode::PARTIAL_CONTENT {
+            if let Some(head_end) = found_head_end {
+                if body.len() >= meta_window_end(head_end) {
+                    body.truncate(meta_window_end(head_end));
                     break;
                 }
             }
@@ -681,7 +696,7 @@ async fn fetch_html_once(
         return Err(LinkPreviewResolverStatus::Failed);
     }
     if let Some(head_end) = found_head_end {
-        body.truncate(head_end);
+        body.truncate(meta_window_end(head_end));
     }
     let html = String::from_utf8_lossy(&body).into_owned();
     Ok(FetchOnceResult::Html {
@@ -1873,6 +1888,40 @@ mod tests {
             "html embed pages must never produce direct-video metadata"
         );
         assert_eq!(metadata.title.as_deref(), Some("Embedded player"));
+    }
+
+    #[tokio::test]
+    async fn resolves_metadata_emitted_into_body_after_head_by_streaming_ssr() {
+        // Next.js / React 18 streaming SSR hoists og: <meta> into the <body>
+        // stream — they appear AFTER </head> in the raw HTML (the browser
+        // re-hoists them at parse time). The resolver must capture them instead
+        // of truncating at </head> and losing the metadata (cloudnativedays.no).
+        let server = MockServer::start().await;
+        let html = format!(
+            "<html><head><title>t</title></head><body>{}<meta property=\"og:title\" content=\"Streamed Title\"/><div>page</div></body></html>",
+            "<!-- pad -->".repeat(80)
+        );
+        assert!(
+            html.find("og:title").expect("og") > html.find("</head>").expect("head end"),
+            "test must place og metadata after </head>"
+        );
+        Mock::given(method("GET"))
+            .and(path("/ssr"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(html, "text/html; charset=utf-8"))
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/ssr", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        let LinkPreviewResolverOutcome::Ready(metadata) = outcome else {
+            panic!("expected ready outcome for body-emitted metadata, got {outcome:?}");
+        };
+        assert_eq!(metadata.title.as_deref(), Some("Streamed Title"));
     }
 
     #[tokio::test]
