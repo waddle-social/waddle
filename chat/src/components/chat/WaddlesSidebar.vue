@@ -22,7 +22,7 @@ defineProps<{
   serverVersion?: XmppServerVersion | null;
   /** Current top-level page so the Home/logo button can render an
    * "active" treatment when we're already on the dashboard. */
-  activePage?: "dashboard" | "chat" | "settings" | "admin" | "threads";
+  activePage?: "dashboard" | "chat" | "settings" | "admin" | "threads" | "unread";
 }>();
 
 const emit = defineEmits<{

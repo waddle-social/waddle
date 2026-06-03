@@ -9,6 +9,7 @@ import { homeRoute } from "./routes/home";
 import { settingsRoute } from "./routes/settings";
 import { storiesRoute } from "./routes/stories";
 import { threadsRoute } from "./routes/threads";
+import { unreadRoute } from "./routes/unread";
 import type { RouteMatch } from "./registry";
 
 // Order matters: longer-prefix routes must be tried before their
@@ -25,6 +26,7 @@ const ORDER = [
   storiesRoute,
   eventsRoute,
   threadsRoute,
+  unreadRoute,
   settingsRoute,
   adminRoute,
   homeRoute,

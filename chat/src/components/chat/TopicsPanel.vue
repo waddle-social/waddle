@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, watch } from "vue";
 import { useStore } from "@nanostores/vue";
-import { CalendarDays, Camera, Hash, ListTree, MessageSquareText, MessagesSquare, Phone, PhoneOff, Plus, Settings, Users, ChevronDown, ChevronRight, MessageCircle, Video } from "lucide-vue-next";
+import { CalendarDays, Camera, Hash, Inbox, ListTree, MessageSquareText, MessagesSquare, Phone, PhoneOff, Plus, Settings, Users, ChevronDown, ChevronRight, MessageCircle, Video } from "lucide-vue-next";
 import { isForumChannel as detectForumChannel } from "@/lib/channel-types";
 import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
 import type { ChannelThreadInboxEntry } from "@/channels/inbox";
@@ -48,6 +48,10 @@ const props = defineProps<{
   isThreadsActive?: boolean;
   /** Unread-thread count for the global Threads view badge. */
   threadsUnreadCount?: number;
+  /** True when the global Unread view is currently active. */
+  isUnreadActive?: boolean;
+  /** Total unread count for the global Unread view badge. */
+  unreadTotalCount?: number;
   /**
    * Per-room count of occupants currently advertising an active
    * XEP-0272 Muji presence (i.e. in the room's group call). Keyed
@@ -351,6 +355,7 @@ const emit = defineEmits<{
   selectThread: [channelId: string, threadId: string];
   selectCommunitySurface: [surface: "feed" | "stories" | "events"];
   selectThreadsView: [];
+  selectUnreadView: [];
   createChannel: [];
   createChannelInSpace: [spaceId: string | null];
   openSettings: [];
@@ -561,6 +566,20 @@ watch(
                are NOT real channels. Selecting one swaps the
                content area for that surface's content pane. -->
           <section class="grid gap-1" aria-label="Community surfaces">
+            <button
+              type="button"
+              class="chat-list-row flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-sidebar-accent/35"
+              :class="isUnreadActive ? 'bg-sidebar-accent/60 text-sidebar-foreground' : 'text-sidebar-foreground/85'"
+              @click="emit('selectUnreadView')"
+            >
+              <Inbox class="h-3.5 w-3.5 flex-shrink-0 text-primary" aria-hidden="true" />
+              <span class="flex-1 truncate type-control">Unread</span>
+              <span
+                v-if="(unreadTotalCount ?? 0) > 0"
+                class="type-count-badge inline-flex min-w-[18px] h-[18px] items-center justify-center rounded-full bg-primary px-1 text-primary-foreground"
+                aria-hidden="true"
+              >{{ unreadTotalCount }}</span>
+            </button>
             <button
               type="button"
               class="chat-list-row flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-sidebar-accent/35"

@@ -9,6 +9,7 @@ import { homeRoute } from "./routes/home";
 import { settingsRoute } from "./routes/settings";
 import { storiesRoute } from "./routes/stories";
 import { threadsRoute } from "./routes/threads";
+import { unreadRoute } from "./routes/unread";
 import { currentMatch } from "./use-route-match";
 import type { RouteMatch } from "./registry";
 
@@ -32,6 +33,8 @@ export function buildHref(match: RouteMatch): string {
       return eventsRoute.href();
     case "threads":
       return threadsRoute.href();
+    case "unread":
+      return unreadRoute.href();
     case "settings":
       return settingsRoute.href();
     case "admin":

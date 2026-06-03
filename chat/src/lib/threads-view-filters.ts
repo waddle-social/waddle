@@ -15,8 +15,8 @@ const VALID_ACTIVE = new Set<ThreadsActiveWindow>(["7d", "14d", "30d", "all"]);
 const VALID_SORT = new Set<ThreadsSort>(["recent", "unread", "replies"]);
 
 const DEFAULT_THREADS_FILTERS: ThreadsFilterState = {
-  status: "all",
-  active: "all",
+  status: "unread",
+  active: "7d",
   channel: "all",
   query: "",
   sort: "recent",
