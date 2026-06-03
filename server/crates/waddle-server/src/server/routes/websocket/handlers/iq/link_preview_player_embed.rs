@@ -68,6 +68,21 @@ pub(crate) fn normalize_allowed_player_embed(url: &Url) -> Option<Url> {
     }
 }
 
+/// Re-validate an already-sealed embed URL (post-rewrite) at send time. True
+/// only when the URL's origin is a final allowlisted embed origin.
+pub(crate) fn is_sealed_player_embed_allowed(url: &Url) -> bool {
+    let Some(origin) = origin_text(url) else {
+        return false;
+    };
+    PLAYER_EMBED_RULES.iter().any(|rule| {
+        let final_origin = match rule.host_rewrite {
+            Some(host) => format!("https://{host}"),
+            None => rule.match_origin.to_string(),
+        };
+        final_origin == origin
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,5 +120,18 @@ mod tests {
     fn rejects_userinfo_in_embed_url() {
         let url = Url::parse("https://user@www.youtube.com/embed/x").expect("url");
         assert!(normalize_allowed_player_embed(&url).is_none());
+    }
+
+    #[test]
+    fn sealed_check_accepts_final_origins_only() {
+        assert!(is_sealed_player_embed_allowed(
+            &Url::parse("https://www.youtube-nocookie.com/embed/x").expect("url")
+        ));
+        assert!(!is_sealed_player_embed_allowed(
+            &Url::parse("https://www.youtube.com/embed/x").expect("url")
+        ));
+        assert!(!is_sealed_player_embed_allowed(
+            &Url::parse("https://evil.example.com/embed/x").expect("url")
+        ));
     }
 }
