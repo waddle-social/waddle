@@ -12,13 +12,14 @@
 //! the fan-out for no-op requests.
 //!
 //! They also pin the wire shape of the resulting headline push so
-//! clients can parse the unread=0 flip with the same `<entry/>`
-//! decoder they use for streamed XEP-0430 query results.
+//! clients can parse the unread=0 flip from a Waddle-private push
+//! marker without putting Waddle semantics in the official XEP-0430
+//! namespace.
 
 use jid::{BareJid, Jid};
 use waddle_xmpp::inbox::storage::{InMemoryInboxStorage, InboxStorage};
 use waddle_xmpp::inbox::{ConversationKind, InboxEntry};
-use waddle_xmpp::xep::xep0430::{build_inbox_push, NS_INBOX};
+use waddle_xmpp::xep::xep0430::{build_inbox_push, NS_INBOX, NS_WADDLE_INBOX};
 use xmpp_parsers::message::MessageType;
 
 fn jid(s: &str) -> BareJid {
@@ -120,7 +121,7 @@ async fn mark_read_returns_none_when_no_row_matches() {
 }
 
 #[test]
-fn build_inbox_push_emits_headline_with_inbox_namespace_payload() {
+fn build_inbox_push_emits_headline_with_waddle_push_payload() {
     // The fan-out path is `mark_read` → `Option<InboxEntry>` →
     // `build_inbox_push` → routed to every resource. This test pins
     // the resulting Message shape so any change to the push wire
@@ -141,17 +142,23 @@ fn build_inbox_push_emits_headline_with_inbox_namespace_payload() {
     assert_eq!(
         msg.type_,
         MessageType::Headline,
-        "XEP-0430 unsolicited inbox updates are headlines so they bypass offline storage"
+        "Waddle inbox push updates are headlines so they bypass offline storage"
     );
 
-    let payload = msg
+    let push = msg
         .payloads
         .iter()
-        .find(|p| p.ns() == NS_INBOX)
-        .expect("inbox-namespaced payload present");
-    assert_eq!(
-        payload.name(),
-        "entry",
-        "the headline carries an <entry/> element — same shape as XEP-0430 streamed query results"
-    );
+        .find(|p| p.is("push", NS_WADDLE_INBOX))
+        .expect("waddle inbox push payload present");
+    let entry = push
+        .get_child("entry", NS_INBOX)
+        .expect("push carries a conformant XEP-0430 entry");
+    assert_eq!(entry.attr("jid"), Some("alice@example.com"));
+    assert_eq!(entry.attr("id"), Some("sid-1"));
+    assert_eq!(entry.attr("unread"), Some("0"));
+    assert_eq!(entry.attr("preview"), None);
+    let metadata = push
+        .get_child("metadata", NS_WADDLE_INBOX)
+        .expect("push carries Waddle metadata separately");
+    assert_eq!(metadata.attr("preview"), Some("hi"));
 }

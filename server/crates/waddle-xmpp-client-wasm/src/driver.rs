@@ -166,7 +166,7 @@ impl WasmDriverTask {
                 query_id,
                 responder,
             }) => {
-                if !self.runtime.can_send_app_stanza() {
+                if !self.runtime.can_send_app_stanza() || !self.pending_inbox_queries.is_empty() {
                     self.deferred_commands
                         .push_back(DeferredWasmCommand::InboxQuery {
                             stanza,
@@ -322,11 +322,12 @@ impl WasmDriverTask {
     }
 
     async fn flush_deferred_commands(&mut self) -> bool {
-        while self.runtime.can_send_app_stanza() {
-            let Some(command) = self.deferred_commands.pop_front() else {
-                return true;
-            };
+        if !self.runtime.can_send_app_stanza() {
+            return true;
+        }
 
+        let mut blocked_inbox_queries = VecDeque::new();
+        while let Some(command) = self.deferred_commands.pop_front() {
             let keep_running = match command {
                 DeferredWasmCommand::Stanza { stanza, responder } => {
                     self.send_stanza_command(stanza, responder).await
@@ -347,14 +348,27 @@ impl WasmDriverTask {
                     query_id,
                     responder,
                 } => {
-                    self.send_inbox_query_command(stanza, query_id, responder)
-                        .await
+                    if !self.pending_inbox_queries.is_empty() {
+                        blocked_inbox_queries.push_back(DeferredWasmCommand::InboxQuery {
+                            stanza,
+                            query_id,
+                            responder,
+                        });
+                        true
+                    } else {
+                        self.send_inbox_query_command(stanza, query_id, responder)
+                            .await
+                    }
                 }
             };
 
             if !keep_running {
                 return false;
             }
+        }
+
+        while let Some(command) = blocked_inbox_queries.pop_back() {
+            self.deferred_commands.push_front(command);
         }
 
         true
@@ -515,12 +529,24 @@ impl WasmDriverTask {
                 None
             }
             ClientEvent::InboxStreamEntry(entry) => {
-                if let Some((_, pending)) = self
-                    .pending_inbox_queries
-                    .iter_mut()
-                    .find(|(_, pending)| pending.query_id == entry.query_id)
-                {
-                    pending.entries.push(entry);
+                if let Some(query_id) = entry.query_id.as_deref() {
+                    if let Some((_, pending)) = self
+                        .pending_inbox_queries
+                        .iter_mut()
+                        .find(|(_, pending)| pending.query_id == query_id)
+                    {
+                        pending.entries.push(entry);
+                    }
+                } else if entry.source == waddle_xmpp_client::inbox::InboxStreamEntrySource::Push {
+                    let _ = self
+                        .event_tx
+                        .clone()
+                        .send(client_driver_event(ClientEvent::InboxStreamEntry(entry)))
+                        .await;
+                } else if self.pending_inbox_queries.len() == 1 {
+                    if let Some(pending) = self.pending_inbox_queries.values_mut().next() {
+                        pending.entries.push(entry);
+                    }
                 }
                 None
             }

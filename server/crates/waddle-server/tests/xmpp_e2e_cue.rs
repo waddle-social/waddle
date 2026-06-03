@@ -139,7 +139,7 @@ const ADVERTISED_FEATURE_XEPS: &[(&str, &str)] = &[
     ("urn:xmpp:pubsub-social-feed:0", "XEP-0472"),
     ("urn:xmpp:stories:0", "XEP-0501"),
     ("urn:xmpp:spaces:0", "XEP-0503"),
-    ("urn:xmpp:inbox:0", "XEP-0430"),
+    ("urn:xmpp:inbox:1", "XEP-0430"),
     // xCal calendar — XSF ProtoXEP "Calendaring Extensions to
     // Publish-Subscribe", no assigned XEP number. Mapped to
     // "PROTO-CALENDAR" so the coverage check accepts it without
@@ -1330,7 +1330,7 @@ fn add_text_xep_evidence(text: &str, evidence: &mut BTreeSet<&'static str>) {
         ("urn:xmpp:message-retract:1", "XEP-0424"),
         ("urn:xmpp:message-moderate:1", "XEP-0425"),
         ("urn:xmpp:fallback:0", "XEP-0428"),
-        ("urn:xmpp:inbox:0", "XEP-0430"),
+        ("urn:xmpp:inbox:1", "XEP-0430"),
         ("urn:xmpp:fulltext:0", "XEP-0431"),
         ("urn:xmpp:channel-search:0", "XEP-0433"),
         ("urn:xmpp:reactions:0", "XEP-0444"),

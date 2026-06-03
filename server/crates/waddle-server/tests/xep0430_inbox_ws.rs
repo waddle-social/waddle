@@ -1,7 +1,7 @@
 //! XEP-0430 Inbox conformance tests over the WebSocket transport.
 //!
 //! These tests pin the standards-track wire shape Waddle now serves
-//! under `urn:xmpp:inbox:0`:
+//! under `urn:xmpp:inbox:1`:
 //!
 //! 1. Empty inbox: a single `<iq type='result'><fin total='0'/></iq>`
 //!    with no streamed entry messages.
@@ -28,7 +28,7 @@ const PRIMARY_USER: &str = "admin";
 const PEER_USER: &str = "peer";
 const PEER_PASSWORD: &str = "peer-password-1";
 const CLIENT_NS: &str = "jabber:client";
-const NS_INBOX: &str = "urn:xmpp:inbox:0";
+const NS_INBOX: &str = "urn:xmpp:inbox:1";
 const NS_MAM: &str = "urn:xmpp:mam:2";
 const NS_FORWARD: &str = "urn:xmpp:forward:0";
 const NS_RSM: &str = "http://jabber.org/protocol/rsm";
@@ -95,10 +95,10 @@ fn inbox_query_iq(
 
 /// Read every frame from the inbox query response. The stream
 /// terminates with the `<iq type='result'>` containing `<fin/>`. We
-/// filter frames by the IQ id (or by `queryid='<id>'` carried on the
-/// streamed `<entry/>` elements) so unsolicited inbox-push headlines
-/// emitted by parallel mark-read fan-out can't bleed into the
-/// collection.
+/// filter frames by the IQ id, by `queryid='<id>'` on embedded MAM
+/// results, or by the query response's direct official `<entry/>`.
+/// Unsolicited push headlines use the private `<push/>` wrapper, so
+/// direct non-headline entries are safe to keep here.
 async fn collect_inbox_response(client: &mut WsXmppClient, id: &str) -> Vec<String> {
     let queryid_marker = format!("queryid='{id}'");
     let mut frames = Vec::new();
@@ -106,8 +106,9 @@ async fn collect_inbox_response(client: &mut WsXmppClient, id: &str) -> Vec<Stri
         let frame = client
             .recv_matching(|candidate| {
                 let matches_fin = candidate.contains("<iq") && candidate.contains(id);
-                let matches_entry =
-                    candidate.contains("<message") && candidate.contains(queryid_marker.as_str());
+                let matches_entry = (candidate.contains("<message")
+                    && candidate.contains(queryid_marker.as_str()))
+                    || is_inbox_query_entry_frame(candidate);
                 matches_fin || matches_entry
             })
             .await
@@ -118,6 +119,17 @@ async fn collect_inbox_response(client: &mut WsXmppClient, id: &str) -> Vec<Stri
             return frames;
         }
     }
+}
+
+fn is_inbox_query_entry_frame(candidate: &str) -> bool {
+    let Ok(element) = Element::from_str(candidate) else {
+        return false;
+    };
+    element.name() == "message"
+        && element.attr("type") != Some("headline")
+        && element
+            .children()
+            .any(|child| child.name() == "entry" && child.ns() == NS_INBOX)
 }
 
 fn parse_fin(xml: &str) -> Element {

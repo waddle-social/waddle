@@ -138,6 +138,7 @@ import type {
   WasmArchivedMessage,
   WasmAvatar,
   WasmFetchThreadsOptions,
+  WasmInboxConversation,
   WasmInboxResult,
   WasmMamPage,
   WasmMdsDisplayedEntry,
@@ -207,6 +208,13 @@ function rawMessageSeenIds(message: WasmMessage): string[] {
     ...(message.stanza_ids?.map((stanzaId) => stanzaId.id) ?? []),
   ].filter((value): value is string => !!value)));
 }
+
+type InboundWasmMessage = WasmMessage & {
+  carbon?: { sent?: boolean; received?: boolean };
+  inboxPush?: InboxEntry;
+  inbox_push?: WasmInboxConversation;
+  _fromCarbon?: boolean;
+};
 
 function shouldSkipCatchupMessage(
   message: Pick<LiveDmMessage | LiveRoomMessage, "createdAt" | "id" | "wireIds">,
@@ -641,7 +649,7 @@ export class BrowserXmppClient {
   // re-entrant `handleSessionReady` (synchronous WASM callback re-
   // entry) cannot observe one set without the other.
   private resumeBarrier: { xmpp: XmppClientInstance; promise: Promise<void> } | null = null;
-  private pendingDuringResume: Array<WasmMessage & { carbon?: { sent?: boolean; received?: boolean }; inboxPush?: InboxEntry; _fromCarbon?: boolean }> | null = null;
+  private pendingDuringResume: InboundWasmMessage[] | null = null;
 
   constructor(session: WaddleSession, persistence?: ResumePersistence) {
     this.session = session;
@@ -2933,8 +2941,9 @@ export class BrowserXmppClient {
     }
     const bare = barePeerJid(from); if (!bare) return; if (presence.presence_type === "subscribe") return; this.presenceUpdateHandler?.({ bareJid: bare, show: mapPresenceShow(presence), ...(presence.status ? { status: presence.status } : {}) });
   }
-  private handleMessage(message: WasmMessage & { carbon?: { sent?: boolean; received?: boolean }; inboxPush?: InboxEntry; _fromCarbon?: boolean }) {
-    if (message.inboxPush) { this.inboxPushHandler?.(message.inboxPush); return; }
+  private handleMessage(message: InboundWasmMessage) {
+    const inboxPush = message.inboxPush ?? (message.inbox_push ? inboxEntryFromWasm(message.inbox_push) : undefined);
+    if (inboxPush) { this.inboxPushHandler?.(inboxPush); return; }
     if (message.id && this.carbonDedupIds.has(message.id) && !message._fromCarbon) {
       this.carbonDedupIds.delete(message.id);
       return;
@@ -2971,7 +2980,7 @@ export class BrowserXmppClient {
     this.dispatchLiveBodyMessage(message);
   }
 
-  private dispatchLiveBodyMessage(message: WasmMessage & { carbon?: { sent?: boolean; received?: boolean }; inboxPush?: InboxEntry; _fromCarbon?: boolean }) {
+  private dispatchLiveBodyMessage(message: InboundWasmMessage) {
     if (message.is_muc) {
       const converted = roomMessageFromArchived({ ...message, mam_id: message.id ?? crypto.randomUUID() } as WasmArchivedMessage, "live", { trustedMediaOrigin: this.trustedLinkPreviewMediaOrigin() });
       if (!converted) return;

@@ -210,6 +210,74 @@ pub(crate) fn inbound_to_js(message: InboundMessage) -> WaddleMessage {
         pin_event: message.pin_event.map(pin_event_to_js),
         extension_envelope: message.extension_envelope.map(extension_envelope_to_js),
         extension_body_fallback: message.extension_body_fallback,
+        inbox_push: None,
+    }
+}
+
+fn inbox_entry_to_js(
+    entry: waddle_xmpp_client::inbox::InboxStreamEntry,
+) -> WaddleInboxConversation {
+    WaddleInboxConversation {
+        partner: entry.partner,
+        kind: entry.kind.unwrap_or_else(|| "direct".to_string()),
+        last_stanza_id: entry.last_stanza_id,
+        last_updated: entry.last_updated.unwrap_or(0),
+        unread: entry.unread,
+        preview: entry.preview,
+        thread: entry.thread_id,
+        thread_title: entry.thread_title,
+        reply_count: entry.reply_count,
+        author: entry.author,
+    }
+}
+
+pub(crate) fn inbox_push_to_js(
+    entry: waddle_xmpp_client::inbox::InboxStreamEntry,
+) -> WaddleMessage {
+    WaddleMessage {
+        id: None,
+        from: None,
+        to: None,
+        body: None,
+        subject: None,
+        message_type: "headline".to_string(),
+        timestamp: None,
+        stanza_id: None,
+        stanza_id_by: None,
+        stanza_ids: Vec::new(),
+        origin_id: None,
+        replaces_id: None,
+        retracts_id: None,
+        retraction_id: None,
+        is_retracted: false,
+        moderation_target_id: None,
+        moderated_by: None,
+        moderation_reason: None,
+        chat_state: None,
+        displayed_marker_id: None,
+        reaction_target_id: None,
+        reaction_emojis: Vec::new(),
+        is_muc: false,
+        thread: None,
+        parent_thread_id: None,
+        reply_to_id: None,
+        reply_to_sender: None,
+        reply_fallback_start: None,
+        reply_fallback_end: None,
+        markup_spans: Vec::new(),
+        broadcast_mention: None,
+        mention_uris: Vec::new(),
+        references: Vec::new(),
+        forum_post_kind: None,
+        forum_title: None,
+        forum_thread_title: None,
+        is_sticker: false,
+        shared_files: Vec::new(),
+        link_previews: Vec::new(),
+        pin_event: None,
+        extension_envelope: None,
+        extension_body_fallback: false,
+        inbox_push: Some(inbox_entry_to_js(entry)),
     }
 }
 
@@ -392,22 +460,7 @@ pub(crate) fn mam_page_to_js(page: waddle_xmpp_client::MamPage) -> WaddleMamPage
 }
 
 pub(crate) fn inbox_page_to_js(page: crate::state::InboxPage) -> WaddleInboxResult {
-    let conversations = page
-        .entries
-        .into_iter()
-        .map(|entry| WaddleInboxConversation {
-            partner: entry.partner,
-            kind: entry.kind.unwrap_or_else(|| "direct".to_string()),
-            last_stanza_id: entry.last_stanza_id,
-            last_updated: entry.last_updated.unwrap_or(0),
-            unread: entry.unread,
-            preview: entry.preview,
-            thread: entry.thread_id,
-            thread_title: entry.thread_title,
-            reply_count: entry.reply_count,
-            author: entry.author,
-        })
-        .collect();
+    let conversations = page.entries.into_iter().map(inbox_entry_to_js).collect();
     WaddleInboxResult {
         // `all-unread` is the XEP-0430 server-wide unread sum; mirror it
         // under the legacy `total_unread` field the chat layer reads so
@@ -656,6 +709,7 @@ pub(crate) fn muc_role_to_string(value: MucRole) -> String {
 mod inbound_to_js_tests {
     use super::*;
     use minidom::Element;
+    use waddle_xmpp_client::inbox::{InboxStreamEntry, InboxStreamEntrySource};
 
     fn sid(value: &str) -> messaging::SessionId {
         messaging::SessionId(value.to_string())
@@ -670,6 +724,57 @@ mod inbound_to_js_tests {
             .append(jmi)
             .build();
         messaging::parse_call_event(&stanza).expect("JMI event parses")
+    }
+
+    #[test]
+    fn inbox_push_to_js_serializes_inbox_push_payload() {
+        let js = inbox_push_to_js(InboxStreamEntry {
+            source: InboxStreamEntrySource::Push,
+            query_id: None,
+            partner: "room@muc.example.com".to_string(),
+            kind: Some("muc".to_string()),
+            last_stanza_id: "sid-1".to_string(),
+            last_updated: Some(1_700_000_001),
+            unread: 2,
+            preview: Some("new message".to_string()),
+            thread_id: Some("thread-1".to_string()),
+            thread_title: Some("Planning".to_string()),
+            reply_count: Some(5),
+            author: Some("bob".to_string()),
+        });
+        let value = serde_json::to_value(js).expect("serializes");
+        let push = value
+            .get("inbox_push")
+            .and_then(serde_json::Value::as_object)
+            .expect("inbox push payload");
+
+        assert_eq!(
+            value
+                .get("message_type")
+                .and_then(serde_json::Value::as_str),
+            Some("headline")
+        );
+        assert_eq!(
+            push.get("partner").and_then(serde_json::Value::as_str),
+            Some("room@muc.example.com")
+        );
+        assert_eq!(
+            push.get("kind").and_then(serde_json::Value::as_str),
+            Some("muc")
+        );
+        assert_eq!(
+            push.get("last_stanza_id")
+                .and_then(serde_json::Value::as_str),
+            Some("sid-1")
+        );
+        assert_eq!(
+            push.get("unread").and_then(serde_json::Value::as_u64),
+            Some(2)
+        );
+        assert_eq!(
+            push.get("thread").and_then(serde_json::Value::as_str),
+            Some("thread-1")
+        );
     }
 
     fn parse_jmi_to(jmi: Element, to: &str) -> messaging::InboundCallEvent {
