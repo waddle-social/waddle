@@ -1035,6 +1035,11 @@ fn extract_metadata_parts_from_html(
         .filter(|_| og_video_is_html)
         .and_then(|raw| Url::parse(&raw).ok())
         .and_then(|url| normalize_allowed_player_embed(&url))
+        // The fixed player allowlist is necessary but not sufficient: the final
+        // embed origin must also satisfy the operator's host policy, exactly as
+        // canonical/image URLs do, so a deployment that blocks YouTube/Vimeo
+        // cannot have an iframe sealed to it.
+        .filter(|url| classify_url_with_policy(url, policy) == LinkPreviewResolverStatus::Ready)
         .map(|url| ResolvedPlayerEmbed {
             url,
             width: meta_content(html, "og:video:width", 16).and_then(|raw| raw.parse().ok()),
@@ -3593,6 +3598,40 @@ mod tests {
             panic!("expected ready outcome, got {outcome:?}");
         };
         assert!(metadata.player_embed.is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn drops_player_embed_when_operator_policy_blocks_final_host() {
+        // The fixed player allowlist accepts youtube-nocookie, but an operator
+        // that blocks that host via policy must not get an iframe sealed to it —
+        // the player URL is subject to the same host policy as image/canonical.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/watch"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                r#"<html><head>
+                      <meta property="og:title" content="A video">
+                      <meta property="og:video:secure_url" content="https://www.youtube.com/embed/429A_VugWW0">
+                      <meta property="og:video:type" content="text/html">
+                    </head></html>"#,
+                "text/html; charset=utf-8",
+            ))
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
+            blocked_hosts: vec!["www.youtube-nocookie.com".parse().expect("pattern")],
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/watch", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        let LinkPreviewResolverOutcome::Ready(metadata) = outcome else {
+            panic!("expected ready outcome, got {outcome:?}");
+        };
+        assert!(metadata.player_embed.is_none());
+        assert_eq!(metadata.title.as_deref(), Some("A video"));
     }
 
     #[tokio::test(flavor = "current_thread")]

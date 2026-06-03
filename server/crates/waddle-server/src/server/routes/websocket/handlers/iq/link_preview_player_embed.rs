@@ -58,19 +58,45 @@ pub(crate) fn normalize_allowed_player_embed(url: &Url) -> Option<Url> {
     let rule = PLAYER_EMBED_RULES
         .iter()
         .find(|rule| rule.match_origin == origin)?;
-    match rule.host_rewrite {
-        Some(host) => {
-            let mut rewritten = url.clone();
-            rewritten.set_host(Some(host)).ok()?;
-            Some(rewritten)
+    let mut sealed = url.clone();
+    if let Some(host) = rule.host_rewrite {
+        sealed.set_host(Some(host)).ok()?;
+    }
+    strip_playlist_param(&mut sealed);
+    Some(sealed)
+}
+
+/// Drop the `list` query parameter so a YouTube `…/embed/<id>?list=<playlist>`
+/// player renders the single intended video rather than auto-advancing a
+/// playlist. Other query params (e.g. Vimeo's `?h=` privacy hash) are kept.
+fn strip_playlist_param(url: &mut Url) {
+    if url.query().is_none() {
+        return;
+    }
+    let kept: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(key, _)| key != "list")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    if kept.is_empty() {
+        url.set_query(None);
+    } else {
+        let mut pairs = url.query_pairs_mut();
+        pairs.clear();
+        for (key, value) in kept {
+            pairs.append_pair(&key, &value);
         }
-        None => Some(url.clone()),
     }
 }
 
 /// Re-validate an already-sealed embed URL (post-rewrite) at send time. True
-/// only when the URL's origin is a final allowlisted embed origin.
+/// only when the URL is a final allowlisted embed origin. Re-applies the same
+/// scheme/userinfo constraints as [`normalize_allowed_player_embed`] so the
+/// defense-in-depth check cannot be weaker than the seal-time gate.
 pub(crate) fn is_sealed_player_embed_allowed(url: &Url) -> bool {
+    if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
+        return false;
+    }
     let Some(origin) = origin_text(url) else {
         return false;
     };
@@ -133,5 +159,51 @@ mod tests {
         assert!(!is_sealed_player_embed_allowed(
             &Url::parse("https://evil.example.com/embed/x").expect("url")
         ));
+    }
+
+    #[test]
+    fn sealed_check_rejects_userinfo_and_non_https() {
+        assert!(!is_sealed_player_embed_allowed(
+            &Url::parse("https://user@www.youtube-nocookie.com/embed/x").expect("url")
+        ));
+        assert!(!is_sealed_player_embed_allowed(
+            &Url::parse("https://user:pass@player.vimeo.com/video/1").expect("url")
+        ));
+    }
+
+    #[test]
+    fn strips_youtube_playlist_param_keeps_others() {
+        let sealed = normalize_allowed_player_embed(
+            &Url::parse("https://www.youtube.com/embed/VID?list=PL123&start=5").expect("url"),
+        )
+        .expect("allowlisted");
+        assert_eq!(
+            sealed.as_str(),
+            "https://www.youtube-nocookie.com/embed/VID?start=5"
+        );
+    }
+
+    #[test]
+    fn strips_query_entirely_when_only_playlist_param() {
+        let sealed = normalize_allowed_player_embed(
+            &Url::parse("https://www.youtube.com/embed/VID?list=PL123").expect("url"),
+        )
+        .expect("allowlisted");
+        assert_eq!(
+            sealed.as_str(),
+            "https://www.youtube-nocookie.com/embed/VID"
+        );
+    }
+
+    #[test]
+    fn preserves_vimeo_privacy_hash_param() {
+        let sealed = normalize_allowed_player_embed(
+            &Url::parse("https://player.vimeo.com/video/12345?h=abc123").expect("url"),
+        )
+        .expect("allowlisted");
+        assert_eq!(
+            sealed.as_str(),
+            "https://player.vimeo.com/video/12345?h=abc123"
+        );
     }
 }
