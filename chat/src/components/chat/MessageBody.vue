@@ -371,7 +371,8 @@ watch(
         v-if="playingEmbeds.has(videoCardKey(card.preview))"
         :src="card.player.url"
         :title="card.preview.title ?? 'Embedded player'"
-        class="aspect-video w-full rounded border border-border bg-black"
+        :class="['w-full rounded border border-border bg-black', (card.player.width && card.player.height) ? '' : 'aspect-video']"
+        :style="card.player.width && card.player.height ? { aspectRatio: `${card.player.width} / ${card.player.height}` } : undefined"
         loading="lazy"
         allow="encrypted-media; picture-in-picture; fullscreen"
         allowfullscreen
