@@ -3,7 +3,7 @@ import type { LinkPreviewPlayer } from "@/lib/chat-ui";
 
 export type LinkPreviewLookupResult = LinkPreviewLookupReadyResult | LinkPreviewLookupUnsupportedResult;
 
-export interface LinkPreviewLookupReadyResult {
+interface LinkPreviewLookupReadyResult {
   token: string;
   originalUrl: string;
   normalizedUrl: string;
@@ -15,7 +15,7 @@ export interface LinkPreviewLookupReadyResult {
   playerEmbed?: LinkPreviewPlayer;
 }
 
-export interface LinkPreviewLookupImage {
+interface LinkPreviewLookupImage {
   url: string;
   mediaType: string;
   width?: number;
@@ -23,7 +23,7 @@ export interface LinkPreviewLookupImage {
   alt?: string;
 }
 
-export interface LinkPreviewLookupUnsupportedResult {
+interface LinkPreviewLookupUnsupportedResult {
   originalUrl: string;
   status: "unsupported" | "blocked" | "failed";
 }

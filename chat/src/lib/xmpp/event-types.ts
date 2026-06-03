@@ -97,7 +97,7 @@ export interface WasmRrule {
   until?: string | null;
 }
 
-export interface WasmAttendee {
+interface WasmAttendee {
   uri: string;
   partstat: string;
   role?: string | null;

@@ -82,7 +82,7 @@ export interface ListRoomMembersOptions {
   roomJid?: string;
 }
 
-export interface ReplyPreview {
+interface ReplyPreview {
   /** Stanza id of the parent message being replied to. */
   id: string;
   /** Author JID/occupant of the parent message, if known. */

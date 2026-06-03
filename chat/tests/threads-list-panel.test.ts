@@ -69,9 +69,11 @@ describe("ThreadsListPanel state", () => {
     await panel.fetchThreadsPage(false);
 
     expect(client.fetchThreads).toHaveBeenCalledTimes(1);
+    // Default view is now Unread over the last 7 days.
     expect(client.fetchThreads.mock.calls[0]?.[0]).toEqual({
       pageSize: 50,
-      status: "all",
+      status: "unread",
+      activeSince: "2026-05-26T00:00:00.000Z",
       sort: "recent",
     });
     expect(panel.hasEntries.value).toBe(false);
@@ -111,8 +113,10 @@ describe("ThreadsListPanel state", () => {
       search: "notifications",
       sort: "replies",
     });
+    // `unread` is the default status now, so it drops out of the URL;
+    // the non-default 14d window and the rest still round-trip.
     expect(replacedSearch.at(-1)).toBe(
-      "status=unread&active=14d&channel=chat&q=notifications&sort=replies",
+      "active=14d&channel=chat&q=notifications&sort=replies",
     );
     scope.stop();
   });
@@ -180,6 +184,9 @@ describe("ThreadsListPanel state", () => {
     };
     const { panel, scope } = createPanel({ client });
 
+    // Default view is Unread now; this case exercises the All view, so
+    // widen the status filter explicitly before fetching.
+    panel.status.value = "all";
     await panel.fetchThreadsPage(false);
     expect(panel.sections.value).toHaveLength(1);
     expect(panel.sections.value[0]?.label).toBe("All");
@@ -217,7 +224,8 @@ describe("ThreadsListPanel state", () => {
     expect(client.fetchThreads).toHaveBeenCalledTimes(2);
     expect(client.fetchThreads.mock.calls[1]?.[0]).toEqual({
       pageSize: 50,
-      status: "all",
+      status: "unread",
+      activeSince: "2026-05-26T00:00:00.000Z",
       sort: "recent",
     });
     scope.stop();

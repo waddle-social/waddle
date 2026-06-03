@@ -1204,6 +1204,12 @@ export function useChatAppController(giphyApiKey: string) {
       navigate({ id: "threads" });
       return;
     }
+    if (ui.activePage.value === "unread") {
+      // Mirror the threads branch: keep the URL pinned to /unread while
+      // watchers fire, instead of falling through to the home route.
+      navigate({ id: "unread" });
+      return;
+    }
     if (ui.activePage.value === "admin") {
       // Admin owns the entire workspace and is mounted out of
       // ChatReadyShell's own popstate-driven adminPanelRef, but
@@ -1373,6 +1379,26 @@ export function useChatAppController(giphyApiKey: string) {
   }
 
   /**
+   * Navigate to the global Unread view. Mirrors `openThreads()`: clears
+   * any channel/DM selection and local thread-panel state, clears the
+   * active community surface so the `unread` v-else-if branch in
+   * ChatReadyShell wins, and syncs the URL so a refresh lands on /unread.
+   */
+  function openUnread() {
+    clearPendingChannelRoomJidSelection();
+    ui.showMobileNav.value = false;
+    ui.showMobileDetails.value = false;
+    ui.activePage.value = "unread";
+    ui.activeCommunitySurface.value = null;
+    waddles.activeChannelId.value = null;
+    dmConversations.closeDm();
+    activeRightPanel.value = null;
+    activeThreadStack.value = [];
+    activeExtensionRouteKey.value = null;
+    navigate({ id: "unread" });
+  }
+
+  /**
    * Navigate to a community surface — Feed / Stories / Events. These
    * are first-class routes (`/feed`, `/stories`, `/events`) but they
    * also need the in-page state set immediately so the v-else-if
@@ -1485,6 +1511,9 @@ export function useChatAppController(giphyApiKey: string) {
       case "threads":
         ui.activePage.value = "threads";
         break;
+      case "unread":
+        ui.activePage.value = "unread";
+        break;
     }
     ui.activeCommunitySurface.value =
       match.id === "feed" || match.id === "stories" || match.id === "events"
@@ -1539,7 +1568,12 @@ export function useChatAppController(giphyApiKey: string) {
       if (match.id === "home") messaging.clearMessages();
       return;
     }
-    if (match.id === "admin" || match.id === "settings" || match.id === "threads") {
+    if (
+      match.id === "admin"
+      || match.id === "settings"
+      || match.id === "threads"
+      || match.id === "unread"
+    ) {
       activeThreadTargetMessageId.value = null;
       activeThreadStack.value = [];
       activeExtensionRouteKey.value = null;
@@ -2107,6 +2141,7 @@ export function useChatAppController(giphyApiKey: string) {
       openHome,
       openDmList,
       openThreads,
+      openUnread,
       openCommunitySurface,
       closeUserSettings,
       handleLogout,

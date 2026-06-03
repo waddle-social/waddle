@@ -59,6 +59,18 @@ export default defineConfig({
         build: {
           sourcemap: FARO_SOURCEMAP_ENABLED,
         },
+        // The `events` polyfill (npm package, see `resolve.alias`
+        // below) is only meaningful in the browser bundle, so its
+        // pre-bundling is scoped to the client environment. The
+        // Cloudflare worker (SSR) environment marks Node's `events`
+        // as external because workerd provides `node:events` natively;
+        // esbuild 0.27+ now hard-errors when an `optimizeDeps` entry
+        // point is also externalized, which is exactly what happened
+        // when this `include` lived at the top level and leaked into
+        // the worker environment.
+        optimizeDeps: {
+          include: ["events"],
+        },
       },
     },
     plugins: [
@@ -108,7 +120,6 @@ export default defineConfig({
       },
     },
     optimizeDeps: {
-      include: ["events"],
       // Exclude the local WASM package from esbuild pre-bundling. Pre-bundling
       // produces a stable v= cache-buster hash derived from the lock file rather
       // than file mtime, so the browser never re-fetches after a WASM rebuild.

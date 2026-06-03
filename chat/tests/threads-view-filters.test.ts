@@ -16,8 +16,8 @@ describe("threads view filters", () => {
       sort: "replies",
     });
     expect(decodeThreadsFilterState("?status=stale&active=99d&sort=hot")).toEqual({
-      status: "all",
-      active: "all",
+      status: "unread",
+      active: "7d",
       channel: "all",
       query: "",
       sort: "recent",
@@ -34,6 +34,18 @@ describe("threads view filters", () => {
         sort: "unread",
       }),
     ).toBe("status=following&active=30d&channel=chat&q=notifications&sort=unread");
+    // The default view (unread / 7d) encodes to an empty query string.
+    expect(
+      encodeThreadsFilterState({
+        status: "unread",
+        active: "7d",
+        channel: "all",
+        query: "",
+        sort: "recent",
+      }),
+    ).toBe("");
+    // Widening back to all-statuses / all-time is now non-default, so it
+    // round-trips through the URL.
     expect(
       encodeThreadsFilterState({
         status: "all",
@@ -42,7 +54,7 @@ describe("threads view filters", () => {
         query: "",
         sort: "recent",
       }),
-    ).toBe("");
+    ).toBe("status=all&active=all");
   });
 
   test("computes active-since timestamps from fixed windows", () => {

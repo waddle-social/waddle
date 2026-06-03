@@ -5,5 +5,8 @@
     "chat",
     "colony",
     "website"
-  ]
+  ],
+  "overrides": {
+    "prosemirror-model": "1.25.7"
+  }
 }

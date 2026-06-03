@@ -1,7 +1,7 @@
 import type { ChannelSummary } from "@/lib/chat-types";
 import type { DmConversation } from "@/lib/xmpp-client";
 
-export interface ChannelUnreadState {
+interface ChannelUnreadState {
   unread: number;
   mentions: number;
   threadUnread?: number;

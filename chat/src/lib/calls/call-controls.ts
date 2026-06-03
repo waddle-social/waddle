@@ -8,6 +8,11 @@ import {
 import type { CallWireSender } from "./outbound";
 import { connectionStore } from "@/lib/connection-store";
 import { useCallEngine } from "./use-call-engine";
+import {
+  clearAllMediaIssues,
+  clearMediaIssue,
+  recordMediaIssue,
+} from "./call-media-issues";
 
 /**
  * Shared mic / cam / connecting state for the in-call surfaces.
@@ -30,29 +35,40 @@ function getSender(): CallWireSender | null {
   return (client?.xmpp as CallWireSender | undefined) ?? null;
 }
 
-/** Toggle the local microphone, with optimistic UI + rollback. */
+/**
+ * Toggle the local microphone, with optimistic UI + rollback. Doubles
+ * as the recovery path: a device-less / permission-denied participant
+ * who later plugs in a mic or grants access can click "unmute" to
+ * retry capture. On success the recorded media issue is cleared; on
+ * failure the atom rolls back and the issue is (re)recorded so the
+ * non-blocking notice updates instead of a transient error toast.
+ */
 export async function toggleMic(): Promise<void> {
   const next = !$callMicEnabled.get();
   $callMicEnabled.set(next);
   try {
     const { engine } = useCallEngine();
     await engine.setMicEnabled(next);
+    clearMediaIssue("mic");
   } catch (err) {
     $callMicEnabled.set(!next);
-    reportCallError(err);
+    recordMediaIssue("mic", err);
   }
 }
 
-/** Toggle the local camera, with optimistic UI + rollback. */
+/** Toggle the local camera, with optimistic UI + rollback. Mirrors
+ *  [`toggleMic`] — also the retry path for a device-less / denied
+ *  camera once a device is attached or access is granted. */
 export async function toggleCam(): Promise<void> {
   const next = !$callCamEnabled.get();
   $callCamEnabled.set(next);
   try {
     const { engine } = useCallEngine();
     await engine.setCameraEnabled(next);
+    clearMediaIssue("cam");
   } catch (err) {
     $callCamEnabled.set(!next);
-    reportCallError(err);
+    recordMediaIssue("cam", err);
   }
 }
 
@@ -105,13 +121,33 @@ export function installCallPagehideSuspension(windowTarget: PagehideTarget = win
 
 /**
  * Reset mic/cam to a known-good baseline when a fresh call begins.
- * The engine snapshot is the source of truth — pass the values the
- * call started with so an unanswered mute or camera-off from a
- * previous call doesn't leak across.
+ * Pass the values the call started with so an unanswered mute or
+ * camera-off from a previous call doesn't leak across, and drop any
+ * media issues left over from the previous call.
+ *
+ * This is the OPTIMISTIC baseline shown while connecting;
+ * [`seedCallControlsFromEngine`] reconciles to the actual published
+ * state once the engine has connected.
  */
 export function resetCallControls(micEnabled: boolean, camEnabled: boolean): void {
   $callMicEnabled.set(micEnabled);
   $callCamEnabled.set(camEnabled);
+  clearAllMediaIssues();
+}
+
+/**
+ * Reconcile the mic/cam toggle atoms to the engine's ACTUAL published
+ * state after a connect. The initial capture is best-effort, so the
+ * requested media booleans can lie (no device / denied permission);
+ * LiveKit's local participant is the source of truth. Without this the
+ * toggle could show "mic on" while nothing is actually publishing.
+ */
+export function seedCallControlsFromEngine(engine: {
+  micEnabled: boolean;
+  cameraEnabled: boolean;
+}): void {
+  $callMicEnabled.set(engine.micEnabled);
+  $callCamEnabled.set(engine.cameraEnabled);
 }
 
 /** Read the live call's peer label (`#room` for MUC, localpart for DM). */

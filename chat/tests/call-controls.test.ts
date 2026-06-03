@@ -2,9 +2,20 @@ import { afterEach, describe, expect, mock, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { $callState, clearCallState } from "../src/lib/calls/call-store";
 import {
+  $callCamEnabled,
+  $callMicEnabled,
   installCallPagehideSuspension,
+  resetCallControls,
+  seedCallControlsFromEngine,
   suspendCallForPageHide,
+  toggleMic,
 } from "../src/lib/calls/call-controls";
+import {
+  $callMediaIssues,
+  clearAllMediaIssues,
+  recordMediaIssue,
+} from "../src/lib/calls/call-media-issues";
+import { useCallEngine } from "../src/lib/calls/use-call-engine";
 import {
   $dmCallActivities,
   clearDmCallActivities,
@@ -45,11 +56,21 @@ class PagehideHarness {
   }
 }
 
+function deviceError(name: string): Error {
+  const err = new Error(`${name} message`);
+  err.name = name;
+  return err;
+}
+
 afterEach(() => {
   clearCallState();
   clearDmCallActivities();
   $mucCallLiveParticipants.set({});
   connectionStore.client = null;
+  clearAllMediaIssues();
+  // The engine is a process-wide singleton; drop any injected room
+  // stub so it doesn't leak into the next test.
+  (useCallEngine().engine as unknown as { room: unknown }).room = null;
 });
 
 describe("call page lifecycle controls", () => {
@@ -226,5 +247,58 @@ describe("call page lifecycle controls", () => {
     expect(source).toContain("installCallPagehideSuspension(window)");
     expect(unmountBlock).toContain("void engine.disconnect();");
     expect(unmountBlock).not.toContain("tearDownActiveCall(");
+  });
+});
+
+describe("device-less call controls", () => {
+  test("seedCallControlsFromEngine reflects ACTUAL published state, not the request", () => {
+    // Optimistic baseline says both on; the engine reports the camera
+    // never published (no device / denied). Seeding must trust the engine.
+    $callMicEnabled.set(true);
+    $callCamEnabled.set(true);
+    seedCallControlsFromEngine({ micEnabled: true, cameraEnabled: false });
+    expect($callMicEnabled.get()).toBe(true);
+    expect($callCamEnabled.get()).toBe(false);
+  });
+
+  test("resetCallControls clears media issues left over from a prior call", () => {
+    recordMediaIssue("mic", deviceError("NotFoundError"));
+    recordMediaIssue("cam", deviceError("NotAllowedError"));
+    resetCallControls(true, true);
+    expect($callMediaIssues.get()).toEqual({ mic: null, cam: null });
+    expect($callMicEnabled.get()).toBe(true);
+    expect($callCamEnabled.get()).toBe(true);
+  });
+
+  test("toggleMic retry that is still denied rolls back AND records a classified issue", async () => {
+    const { engine } = useCallEngine();
+    (engine as unknown as { room: unknown }).room = {
+      localParticipant: {
+        setMicrophoneEnabled: async () => {
+          throw deviceError("NotAllowedError");
+        },
+      },
+    };
+    // User is muted (device-less) and clicks "enable mic"; permission
+    // is still blocked, so the atom must roll back to muted and the
+    // notice must update — not a transient error toast.
+    $callMicEnabled.set(false);
+    await toggleMic();
+    expect($callMicEnabled.get()).toBe(false);
+    expect($callMediaIssues.get().mic).toBe("denied");
+  });
+
+  test("toggleMic retry that succeeds clears the recorded issue", async () => {
+    const { engine } = useCallEngine();
+    (engine as unknown as { room: unknown }).room = {
+      localParticipant: {
+        setMicrophoneEnabled: async () => undefined,
+      },
+    };
+    recordMediaIssue("mic", deviceError("NotFoundError"));
+    $callMicEnabled.set(false);
+    await toggleMic();
+    expect($callMicEnabled.get()).toBe(true);
+    expect($callMediaIssues.get().mic).toBeNull();
   });
 });

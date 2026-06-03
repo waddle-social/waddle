@@ -1,9 +1,35 @@
 import { describe, expect, test } from "bun:test";
-import type {
-  CallEngineEvents,
-  LocalMediaTrack,
-  RemoteMediaTrack,
+import {
+  enableRequestedCapture,
+  type CallEngineEvents,
+  type LocalMediaTrack,
+  type RemoteMediaTrack,
 } from "../src/lib/calls/engine";
+
+function deviceError(name: string): Error {
+  const err = new Error(`${name} message`);
+  err.name = name;
+  return err;
+}
+
+/**
+ * Stub for LiveKit's LocalParticipant capture surface. Each enable can
+ * be told to reject, mirroring a denied permission / missing device.
+ */
+function captureStub(opts: { micThrows?: Error; camThrows?: Error } = {}) {
+  const calls: string[] = [];
+  return {
+    calls,
+    async setMicrophoneEnabled(enabled: boolean) {
+      calls.push(`mic:${enabled}`);
+      if (opts.micThrows) throw opts.micThrows;
+    },
+    async setCameraEnabled(enabled: boolean) {
+      calls.push(`cam:${enabled}`);
+      if (opts.camThrows) throw opts.camThrows;
+    },
+  };
+}
 
 // `livekit-client` reaches for browser-only globals (RTCPeerConnection,
 // MediaStream, navigator.mediaDevices) at construction time. Tests run
@@ -119,5 +145,55 @@ describe("call-engine module", () => {
     };
     expect(classify("audio")).toBe("a");
     expect(classify("video")).toBe("v");
+  });
+});
+
+describe("enableRequestedCapture — best-effort, never ejects", () => {
+  test("enables both tracks when capture succeeds", async () => {
+    const stub = captureStub();
+    const errors: string[] = [];
+    await enableRequestedCapture(stub, { audio: true, video: true }, (s) => errors.push(s));
+    expect(stub.calls).toEqual(["mic:true", "cam:true"]);
+    expect(errors).toEqual([]);
+  });
+
+  test("a denied mic does NOT throw and still attempts the camera", async () => {
+    // The headline guarantee: a capture failure must not reject, or the
+    // CallOverlay watcher would tear the joined call down ("ejected").
+    const stub = captureStub({ micThrows: deviceError("NotAllowedError") });
+    const seen: Array<{ source: string; name: string }> = [];
+    await enableRequestedCapture(stub, { audio: true, video: true }, (source, error) => {
+      seen.push({ source, name: (error as Error).name });
+    });
+    expect(stub.calls).toEqual(["mic:true", "cam:true"]); // camera still attempted
+    expect(seen).toEqual([{ source: "audio", name: "NotAllowedError" }]);
+  });
+
+  test("a missing camera reports only video and leaves the mic untouched", async () => {
+    const stub = captureStub({ camThrows: deviceError("NotFoundError") });
+    const seen: string[] = [];
+    await enableRequestedCapture(stub, { audio: true, video: true }, (source) => seen.push(source));
+    expect(seen).toEqual(["video"]);
+  });
+
+  test("NO working device at all (both denied) resolves without throwing", async () => {
+    // The literal "join without any working device" case.
+    const stub = captureStub({
+      micThrows: deviceError("NotAllowedError"),
+      camThrows: deviceError("NotFoundError"),
+    });
+    const seen: string[] = [];
+    await expect(
+      enableRequestedCapture(stub, { audio: true, video: true }, (source) => seen.push(source)),
+    ).resolves.toBeUndefined();
+    expect(seen).toEqual(["audio", "video"]);
+  });
+
+  test("audio-only call never touches the camera", async () => {
+    const stub = captureStub({ camThrows: deviceError("NotFoundError") });
+    const seen: string[] = [];
+    await enableRequestedCapture(stub, { audio: true, video: false }, (source) => seen.push(source));
+    expect(stub.calls).toEqual(["mic:true"]);
+    expect(seen).toEqual([]);
   });
 });
