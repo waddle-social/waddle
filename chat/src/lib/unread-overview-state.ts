@@ -1,11 +1,25 @@
-import { ref, watch, type Ref } from "vue";
+import { onScopeDispose, ref, watch, type Ref } from "vue";
 import type { BrowserXmppClient, LiveRoomMessage } from "@/lib/xmpp-client";
 import { barePeerJid } from "@/lib/xmpp-client";
 import type { ChannelSummary } from "@/lib/chat-types";
+import { isForumChannel } from "@/lib/channel-types";
 import type { WaddleSession } from "@/lib/server-auth";
 import type { TimelineMessage } from "@/lib/chat-ui";
+import type { WasmArchivedMessage } from "@/lib/xmpp/wasm-types";
+import { roomMessageFromArchived } from "@/lib/xmpp/wasm-message-codecs";
+import { trustedLinkPreviewMediaOrigin } from "@/lib/xmpp/link-preview";
+import { findMessageById } from "@/lib/message-ids";
 import { type InboxState, threadsForRoom } from "@/services/inbox";
-import { isFeedTimelineMessage, mapLiveRoomMessageToTimeline } from "@/channels/timeline";
+import { isFeedTimelineMessage } from "@/channels/timeline";
+import {
+  buildChannelTimelineFromMamResults,
+  isMucServiceModeration,
+  isSameMucCorrectionSender,
+  isSameMucRetractionSender,
+  isValidMucModerationTarget,
+  isValidMucRetractionTarget,
+  mucCorrectionSender,
+} from "@/channels/message-timeline-state";
 import { resolveChannelIdForRoomJid } from "@/lib/threads-channel-resolve";
 import { threadDisplayTitle } from "@/lib/threads-view-filters";
 
@@ -13,6 +27,9 @@ import { threadDisplayTitle } from "@/lib/threads-view-filters";
 // MAM page plus one page per unread thread; a flat `Promise.all` over every
 // unread room would blast dozens of IQs at once, so we cap the fan-out.
 const ROOM_FETCH_CONCURRENCY = 4;
+// Thread pages are MAM IQs too. Cap them per room so one busy room cannot
+// fan out an unbounded burst while room-level concurrency is already maxed.
+const THREAD_FETCH_CONCURRENCY = ROOM_FETCH_CONCURRENCY;
 // Headroom above the unread count so the channel page still has enough
 // feed-visible (non-threaded) messages left after filtering, capped at the
 // MAM page ceiling.
@@ -102,6 +119,68 @@ export function lastThreadUnread(
   return messages.slice(Math.max(0, messages.length - unread));
 }
 
+function findTimelineMessageByProtocolId(
+  timeline: readonly TimelineMessage[],
+  id: string | undefined,
+): TimelineMessage | undefined {
+  const normalized = id?.trim();
+  if (!normalized) return undefined;
+  return findMessageById(timeline, normalized)
+    ?? timeline.find((message) =>
+      message.replyableId === normalized
+      || message.reactionTargetId === normalized
+      || message.stanzaId === normalized
+    );
+}
+
+function timelineMessageForMamHit(
+  timeline: readonly TimelineMessage[],
+  msg: LiveRoomMessage,
+): TimelineMessage | undefined {
+  if (msg._reactionTarget) {
+    if (!msg._reactionEmojis) return undefined;
+    return timeline.find((message) => message.reactionTargetId === msg._reactionTarget);
+  }
+  if (msg.retractsId) {
+    const target = findMessageById(timeline, msg.retractsId);
+    if (!target) return undefined;
+    if (msg.moderationTargetId) {
+      return isMucServiceModeration(msg) && isValidMucModerationTarget(target, msg.retractsId)
+        ? target
+        : undefined;
+    }
+    return isValidMucRetractionTarget(target, msg.retractsId)
+      && isSameMucRetractionSender(target, mucCorrectionSender(msg))
+      ? target
+      : undefined;
+  }
+  if (msg.replacesId) {
+    const target = findMessageById(timeline, msg.replacesId);
+    return target && isSameMucCorrectionSender(target, mucCorrectionSender(msg))
+      ? target
+      : undefined;
+  }
+  return findTimelineMessageByProtocolId(timeline, msg.id);
+}
+
+function lastUnreadFromMamHits(
+  timeline: readonly TimelineMessage[],
+  mamResults: readonly LiveRoomMessage[],
+  unread: number,
+  isVisible: (message: TimelineMessage) => boolean,
+): TimelineMessage[] {
+  if (unread <= 0) return [];
+  const selected: TimelineMessage[] = [];
+  const seen = new Set<string>();
+  for (let index = mamResults.length - 1; index >= 0 && selected.length < unread; index -= 1) {
+    const message = timelineMessageForMamHit(timeline, mamResults[index]!);
+    if (!message || !isVisible(message) || seen.has(message.id)) continue;
+    seen.add(message.id);
+    selected.push(message);
+  }
+  return selected.reverse();
+}
+
 /** Resolve the topology channel that hosts a room JID, or null if unknown. */
 export function findChannelForRoomJid(
   roomJid: string,
@@ -111,6 +190,52 @@ export function findChannelForRoomJid(
   if (matched) return matched;
   const slug = resolveChannelIdForRoomJid(roomJid, channels);
   return slug ? channels.find((channel) => channel.id === slug) ?? null : null;
+}
+
+function missingMamUpdateTargets(
+  mamResults: readonly LiveRoomMessage[],
+  timeline: readonly TimelineMessage[],
+): string[] {
+  const targets: string[] = [];
+  const seen = new Set<string>();
+  const add = (targetId: string | undefined, isPresent: (id: string) => boolean) => {
+    const normalized = targetId?.trim();
+    if (!normalized || seen.has(normalized) || isPresent(normalized)) return;
+    seen.add(normalized);
+    targets.push(normalized);
+  };
+
+  for (const msg of mamResults) {
+    add(msg.retractsId, (id) => !!findMessageById(timeline, id));
+    add(msg._reactionTarget, (id) => timeline.some((message) => message.reactionTargetId === id));
+    if (targets.length >= MAX_PAGE) break;
+  }
+  return targets;
+}
+
+function matchesRequestedRoomStanzaId(
+  archived: WasmArchivedMessage,
+  roomJid: string,
+  requested: ReadonlySet<string>,
+): boolean {
+  const roomStamped = archived.stanza_ids?.find((stanzaId) => stanzaId.by === roomJid)?.id;
+  if (roomStamped && requested.has(roomStamped)) return true;
+  return !!archived.stanza_id && archived.stanza_id_by === roomJid && requested.has(archived.stanza_id);
+}
+
+function liveRoomMessagesFromArchived(
+  session: WaddleSession,
+  roomJid: string,
+  requestedStanzaIds: readonly string[],
+  archived: readonly WasmArchivedMessage[],
+): LiveRoomMessage[] {
+  const trustedMediaOrigin = trustedLinkPreviewMediaOrigin(session);
+  const requested = new Set(requestedStanzaIds);
+  return archived.flatMap((message) => {
+    if (!matchesRequestedRoomStanzaId(message, roomJid, requested)) return [];
+    const live = roomMessageFromArchived(message, { trustedMediaOrigin });
+    return live ? [live] : [];
+  });
 }
 
 /** Run `worker` over `items` with at most `limit` in flight at a time. */
@@ -156,6 +281,7 @@ interface UnreadChannelGroup {
 interface UnreadOverviewClient {
   queryMamPage: BrowserXmppClient["queryMamPage"];
   queryMamThreadPage: BrowserXmppClient["queryMamThreadPage"];
+  fetchRoomMessagesByStanzaIds?: BrowserXmppClient["fetchRoomMessagesByStanzaIds"];
 }
 
 export function useUnreadOverview(deps: {
@@ -168,6 +294,7 @@ export function useUnreadOverview(deps: {
   const isLoading = ref(false);
   const error = ref<string | null>(null);
   let requestSerial = 0;
+  let disposed = false;
 
   function fetchSize(unread: number): number {
     return Math.min(MAX_PAGE, unread + FETCH_HEADROOM);
@@ -177,23 +304,79 @@ export function useUnreadOverview(deps: {
     client: UnreadOverviewClient,
     session: WaddleSession,
     candidate: UnreadRoomCandidate,
+    serial: number,
   ): Promise<UnreadChannelGroup | null> {
     const channel = findChannelForRoomJid(candidate.roomJid, deps.channels.value);
     if (!channel) return null;
+    if (serial !== requestSerial) return null;
     const spaceId = channel.spaceId ?? "";
     const channelId = channel.id;
+    const timelineFromMam = async (mamResults: LiveRoomMessage[]): Promise<TimelineMessage[]> => {
+      const timeline = buildChannelTimelineFromMamResults({
+        session,
+        channelIsForum: isForumChannel(channel),
+        mamResults,
+      });
+      const missingTargets = missingMamUpdateTargets(mamResults, timeline);
+      if (
+        missingTargets.length === 0
+        || serial !== requestSerial
+        || !client.fetchRoomMessagesByStanzaIds
+      ) {
+        return timeline;
+      }
 
-    const channelMessages = candidate.channelUnread > 0
-      ? lastFeedVisibleUnread(
-        (await client.queryMamPage(spaceId, channelId, fetchSize(candidate.channelUnread), {
-          type: "latest",
-        })).messages.map((msg: LiveRoomMessage) => mapLiveRoomMessageToTimeline(session, msg)),
+      try {
+        const archivedTargets = await client.fetchRoomMessagesByStanzaIds(
+          spaceId,
+          channelId,
+          missingTargets,
+        );
+        if (serial !== requestSerial) return timeline;
+        const targetMessages = liveRoomMessagesFromArchived(
+          session,
+          candidate.roomJid,
+          missingTargets,
+          archivedTargets,
+        );
+        if (targetMessages.length === 0) return timeline;
+        return buildChannelTimelineFromMamResults({
+          session,
+          channelIsForum: isForumChannel(channel),
+          mamResults: [...targetMessages, ...mamResults],
+        });
+      } catch {
+        return timeline;
+      }
+    };
+
+    let channelMessages: TimelineMessage[] = [];
+    if (candidate.channelUnread > 0) {
+      const page = await client.queryMamPage(spaceId, channelId, fetchSize(candidate.channelUnread), {
+        type: "latest",
+      });
+      channelMessages = lastUnreadFromMamHits(
+        await timelineFromMam(page.messages),
+        page.messages,
         candidate.channelUnread,
-      )
-      : [];
+        isFeedTimelineMessage,
+      );
+    }
 
-    const threads = await Promise.all(
-      candidate.threads.map(async (thread): Promise<UnreadThreadGroup> => {
+    if (serial !== requestSerial) return null;
+
+    const threads = await runWithConcurrency(
+      candidate.threads,
+      THREAD_FETCH_CONCURRENCY,
+      async (thread): Promise<UnreadThreadGroup> => {
+        if (serial !== requestSerial) {
+          return {
+            threadId: thread.threadId,
+            title: thread.title,
+            unreadCount: thread.unread,
+            messages: [],
+          };
+        }
         const page = await client.queryMamThreadPage(
           spaceId,
           channelId,
@@ -205,12 +388,14 @@ export function useUnreadOverview(deps: {
           threadId: thread.threadId,
           title: thread.title,
           unreadCount: thread.unread,
-          messages: lastThreadUnread(
-            page.messages.map((msg: LiveRoomMessage) => mapLiveRoomMessageToTimeline(session, msg)),
+          messages: lastUnreadFromMamHits(
+            await timelineFromMam(page.messages),
+            page.messages,
             thread.unread,
+            () => true,
           ),
         };
-      }),
+      },
     );
 
     if (channelMessages.length === 0 && threads.every((thread) => thread.messages.length === 0)) {
@@ -229,6 +414,7 @@ export function useUnreadOverview(deps: {
   }
 
   async function refresh(): Promise<void> {
+    if (disposed) return;
     const client = deps.xmppClient.value;
     const session = deps.session.value;
     const serial = ++requestSerial;
@@ -243,7 +429,7 @@ export function useUnreadOverview(deps: {
     error.value = null;
     try {
       const built = await runWithConcurrency(candidates, ROOM_FETCH_CONCURRENCY, (candidate) =>
-        buildGroup(client, session, candidate),
+        buildGroup(client, session, candidate, serial),
       );
       if (serial !== requestSerial) return;
       groups.value = built.filter((group): group is UnreadChannelGroup => group !== null);
@@ -256,12 +442,18 @@ export function useUnreadOverview(deps: {
   }
 
   watch(
-    [deps.inboxState, deps.xmppClient, deps.session],
+    [deps.inboxState, deps.xmppClient, deps.session, deps.channels],
     () => {
       void refresh();
     },
     { immediate: true },
   );
+
+  onScopeDispose(() => {
+    disposed = true;
+    requestSerial += 1;
+    isLoading.value = false;
+  });
 
   return { groups, isLoading, error, refresh };
 }
