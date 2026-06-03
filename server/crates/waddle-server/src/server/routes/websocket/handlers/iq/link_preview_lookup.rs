@@ -332,6 +332,18 @@ fn build_link_preview_lookup_result(
             }
             preview.append_child(video_elem.build());
         }
+        if let Some(player) = &data.player {
+            let mut player_elem = Element::builder("player", NS_WADDLE_LINK_PREVIEW)
+                .attr(xml_ncname!("url").to_owned(), player.url.as_str());
+            if let Some(width) = player.width {
+                player_elem = player_elem.attr(xml_ncname!("width").to_owned(), width.to_string());
+            }
+            if let Some(height) = player.height {
+                player_elem =
+                    player_elem.attr(xml_ncname!("height").to_owned(), height.to_string());
+            }
+            preview.append_child(player_elem.build());
+        }
         lookup = lookup.append(preview);
     }
     build_iq_result_xml(iq.id(), response_from, response_to, Some(lookup.build()))
@@ -782,5 +794,50 @@ mod tests {
         assert!(lookup
             .get_child("preview", NS_WADDLE_LINK_PREVIEW)
             .is_none());
+    }
+
+    #[test]
+    fn lookup_preview_includes_player_element() {
+        let player_url =
+            Url::parse("https://www.youtube-nocookie.com/embed/429A_VugWW0").expect("player url");
+        let data = LinkPreviewTokenData {
+            sender_jid: "alice@example.com".parse().expect("jid"),
+            scope_jid: "alice@example.com".parse().expect("jid"),
+            original_url: Url::parse("https://example.com/video").expect("url"),
+            normalized_url: Url::parse("https://example.com/video").expect("url"),
+            title: None,
+            description: None,
+            image: None,
+            video: None,
+            player: Some(LinkPreviewTokenPlayer {
+                url: player_url.clone(),
+                width: Some(1280),
+                height: Some(720),
+            }),
+            expires_at_unix: 0,
+        };
+        let token =
+            waddle_xmpp::xep::encode_link_preview_token_checked(&data, secret()).expect("token");
+        let iq = iq_get_with_payload(Element::builder("lookup", NS_WADDLE_LINK_PREVIEW).build());
+        let xml = build_link_preview_lookup_result(
+            &iq,
+            None,
+            None,
+            LinkPreviewResolverStatus::Ready,
+            Some((data, token.as_str(), "2099-01-01T00:00:00.000Z".into())),
+        );
+        let elem: Element = xml.parse().expect("iq result");
+        let lookup = elem
+            .get_child("lookup", NS_WADDLE_LINK_PREVIEW)
+            .expect("lookup result");
+        let preview = lookup
+            .get_child("preview", NS_WADDLE_LINK_PREVIEW)
+            .expect("preview");
+        let player = preview
+            .get_child("player", NS_WADDLE_LINK_PREVIEW)
+            .expect("player element");
+        assert_eq!(player.attr("url"), Some(player_url.as_str()));
+        assert_eq!(player.attr("width"), Some("1280"));
+        assert_eq!(player.attr("height"), Some("720"));
     }
 }
