@@ -1,3 +1,6 @@
+import { isAllowedPlayerEmbedOrigin } from "@/lib/xmpp/player-embed-allowlist";
+import type { LinkPreviewPlayer } from "@/lib/chat-ui";
+
 export type LinkPreviewLookupResult = LinkPreviewLookupReadyResult | LinkPreviewLookupUnsupportedResult;
 
 export interface LinkPreviewLookupReadyResult {
@@ -9,6 +12,7 @@ export interface LinkPreviewLookupReadyResult {
   title?: string;
   description?: string;
   image?: LinkPreviewLookupImage;
+  playerEmbed?: LinkPreviewPlayer;
 }
 
 export interface LinkPreviewLookupImage {
@@ -103,6 +107,7 @@ function parseLookupResponse(xml: string, requestedUrl: string, trustedMediaOrig
     ...childText(preview, "title"),
     ...childText(preview, "description"),
     ...previewImage(preview, trustedMediaOrigin),
+    ...previewPlayer(preview),
   };
 }
 
@@ -213,6 +218,24 @@ function previewImage(parent: Element, trustedMediaOrigin?: string | null): Part
       ...(width ? { width } : {}),
       ...(height ? { height } : {}),
       ...(alt ? { alt } : {}),
+    },
+  };
+}
+
+function previewPlayer(parent: Element): Partial<LinkPreviewLookupReadyResult> {
+  const player = Array.from(parent.children).find(
+    (child) => child.localName === "player" && child.namespaceURI === NS_WADDLE_LINK_PREVIEW,
+  );
+  if (!player) return {};
+  const url = player.getAttribute("url")?.trim();
+  if (!url || !isAllowedPlayerEmbedOrigin(url)) return {};
+  const width = optionalPositiveInteger(player.getAttribute("width"));
+  const height = optionalPositiveInteger(player.getAttribute("height"));
+  return {
+    playerEmbed: {
+      url,
+      ...(width ? { width } : {}),
+      ...(height ? { height } : {}),
     },
   };
 }
