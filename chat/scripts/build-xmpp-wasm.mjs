@@ -12,15 +12,8 @@ const coreCrateDir = resolve(repoRoot, "server/crates/waddle-xmpp-core");
 const outDir = resolve(repoRoot, "server/wasm-pkg/waddle-xmpp-client-wasm");
 const nodeModulesDir = resolve(scriptDir, "..", "node_modules/@waddle/xmpp-client-wasm");
 
-// Content hash of all Rust sources feeding the wasm build. Used instead of
-// file mtimes for staleness: a fresh `git checkout` rewrites every file's mtime
-// to checkout time in a non-deterministic order, so an mtime comparison would
-// randomly decide the stale checked-in artifact is "newer" than the sources and
-// skip the rebuild. In CI that means linting/building against stale generated
-// `.d.ts`, which flips knip's unused-export analysis pass↔fail. A content hash
-// is stable across checkouts and only changes when the Rust source changes.
-function rustSourceHash(paths) {
-  const files = [];
+function newestSourceMtime(paths) {
+  let newest = 0;
   function visit(path) {
     const stat = statSync(path);
     if (stat.isDirectory()) {
@@ -30,23 +23,18 @@ function rustSourceHash(paths) {
       }
       return;
     }
-    if (path.endsWith(".rs") || path.endsWith(".toml") || path.endsWith(".lock")) {
-      files.push(path);
+    if (
+      path.endsWith(".rs") ||
+      path.endsWith(".toml") ||
+      path.endsWith(".lock") ||
+      path.endsWith("build.rs")
+    ) {
+      newest = Math.max(newest, stat.mtimeMs);
     }
   }
   for (const path of paths) visit(path);
-  files.sort();
-  const hash = createHash("sha256");
-  for (const file of files) {
-    hash.update(file);
-    hash.update("\0");
-    hash.update(readFileSync(file));
-  }
-  return hash.digest("hex").slice(0, 16);
+  return newest;
 }
-
-const SOURCE_HASH_FILE = "waddle_xmpp_client_wasm.srchash";
-const rustSourcePaths = [crateDir, clientCrateDir, coreCrateDir];
 
 function artifactBuildId(paths) {
   const hash = createHash("sha256");
@@ -57,25 +45,26 @@ function artifactBuildId(paths) {
 }
 
 if (process.env.REBUILD_WASM !== "1") {
-  // Rebuild when the installed artifact is missing/incomplete (fresh checkout or
-  // a `bun install` that pulled the checked-in package), OR when the Rust source
-  // content hash differs from the one recorded next to the installed artifact.
-  // The hash sidecar lives only in node_modules (gitignored), so a fresh install
-  // always has no sidecar and rebuilds once from current source — guaranteeing CI
-  // never lints/builds against a stale generated `.d.ts`.
-  const realDir = existsSync(nodeModulesDir) ? realpathSync(nodeModulesDir) : nodeModulesDir;
-  const realBgJsPath = resolve(realDir, "waddle_xmpp_client_wasm_bg.js");
-  const sidecarPath = resolve(realDir, SOURCE_HASH_FILE);
-  const currentHash = rustSourceHash(rustSourcePaths);
+  // If _bg.js doesn't exist in node_modules, the package is incomplete (fresh checkout or
+  // bun install after the artifact was removed). Also rebuild when the Rust sources are
+  // newer than the installed artifact; otherwise an existing node_modules can keep exposing
+  // stale wasm-bindgen methods after a branch checkout.
+  const bgJsPath = resolve(nodeModulesDir, "waddle_xmpp_client_wasm_bg.js");
+  const realBgJsPath = existsSync(nodeModulesDir)
+    ? resolve(realpathSync(nodeModulesDir), "waddle_xmpp_client_wasm_bg.js")
+    : bgJsPath;
   if (!existsSync(realBgJsPath)) {
     console.log("[wasm] WASM artifacts missing — auto-rebuilding from Rust source...");
     console.log("[wasm] (Set REBUILD_WASM=1 explicitly to force a rebuild when artifacts exist.)");
     // Fall through to the rebuild path below.
-  } else if (!existsSync(sidecarPath) || readFileSync(sidecarPath, "utf8").trim() !== currentHash) {
-    console.log("[wasm] Rust wasm sources changed (content hash mismatch) — rebuilding @waddle/xmpp-client-wasm...");
+  } else if (
+    newestSourceMtime([crateDir, clientCrateDir, coreCrateDir]) >
+    statSync(realBgJsPath).mtimeMs
+  ) {
+    console.log("[wasm] Rust wasm sources changed — rebuilding @waddle/xmpp-client-wasm...");
   } else {
-    // Artifacts present and built from the current Rust source.
-    console.log("[wasm] WASM artifacts up to date (source hash match) — skipping rebuild. Set REBUILD_WASM=1 to force.");
+    // Artifacts present; rely on the local build or published registry version.
+    console.log("[wasm] WASM artifacts found — skipping rebuild. Set REBUILD_WASM=1 to force recompile.");
     process.exit(0);
   }
 } else {
@@ -187,12 +176,6 @@ function copyDirInPlace(src, dest) {
   }
 }
 copyDirInPlace(outDir, realNodeModulesDir);
-
-// Record the Rust source hash this artifact was built from so subsequent runs
-// can skip an unchanged rebuild deterministically (mtime-free). Written only to
-// node_modules (gitignored) — never to the checked-in package — so a fresh
-// install always rebuilds once rather than trusting a stale recorded hash.
-writeFileSync(resolve(realNodeModulesDir, SOURCE_HASH_FILE), `${rustSourceHash(rustSourcePaths)}\n`);
 
 // Clear Vite's module transform cache so it doesn't serve stale _bg.js from a previous build.
 // Without this, a mismatch between the cached glue JS and the newly compiled .wasm causes

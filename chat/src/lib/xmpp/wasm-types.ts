@@ -163,7 +163,7 @@ interface WasmLinkPreviewImage {
   alt?: string | null;
 }
 
-export interface WasmLinkPreviewPlayer {
+interface WasmLinkPreviewPlayer {
   url: string;
   width?: number | null;
   height?: number | null;
