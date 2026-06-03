@@ -8,10 +8,9 @@ use waddle_xmpp::{
     xep::{
         add_reference, build_file_sharing_element, build_link_metadata_element,
         decode_link_preview_token, extract_link_preview_request_from_message,
-        is_file_sharing_element, parse_fallbacks_from_message, parse_file_sharing_element,
-        strip_fallback_ranges, strip_link_metadata, strip_link_preview_requests, Disposition,
-        FallbackRegion, FileMetadata, FileSharing, LinkMetadata, Reference, WaddleLinkPreviewError,
-        NS_DELAY, NS_REPLY,
+        parse_fallbacks_from_message, strip_fallback_ranges, strip_link_metadata,
+        strip_link_preview_requests, Disposition, FallbackRegion, FileMetadata, FileSharing,
+        LinkMetadata, Reference, WaddleLinkPreviewError, NS_DELAY, NS_REPLY,
     },
     Stanza,
 };
@@ -133,14 +132,14 @@ fn consume_link_preview_request(
         strip_link_metadata(message);
         return;
     }
-    // Trust-anchor guard: the server is the sole authority for direct-video
-    // previews. A client must not pre-author an XEP-0447 file-share whose
-    // source is the previewed link and have it promoted to a "trusted" video
-    // card by recipients. Drop any client-authored file-share that targets the
-    // message's first eligible link before the server stamps its own. Genuine
-    // XEP-0363 uploads point at the Waddle media origin, never the external
-    // body link, so this never strips a real attachment.
-    strip_client_file_sharing_for_previewed_link(message);
+    // Trust anchor for direct-video preview cards: a recipient client only
+    // promotes an inline-video file-share to a video card when its URL matches a
+    // server-stamped XEP-0511 link card, and client-authored XEP-0511 metadata is
+    // unconditionally stripped below before the server stamps its own. A client
+    // therefore cannot forge the card. We deliberately do NOT strip client
+    // file-shares whose source equals the body link here — that is the canonical
+    // XEP-0447 shape (body = URL + <file-sharing>) for legitimately sharing a
+    // file whose URL also appears in the body.
     let expected_sender = sender_jid.to_bare();
     let expected_scope = message.to.as_ref().map(|to| to.to_bare());
     let decoded = extract_link_preview_request_from_message(message).and_then(|token| {
@@ -228,24 +227,6 @@ fn link_preview_token_urls_allowed_by_current_policy(
 ) -> bool {
     link_preview_url_allowed_by_current_policy(&preview.original_url, link_preview)
         && link_preview_url_allowed_by_current_policy(&preview.normalized_url, link_preview)
-}
-
-/// Remove client-authored XEP-0447 file-shares whose source is the link this
-/// message previews. See the call site for the trust rationale.
-fn strip_client_file_sharing_for_previewed_link(message: &mut xmpp_parsers::message::Message) {
-    let Some(body_url) = first_eligible_https_url(message) else {
-        return;
-    };
-    message.payloads.retain(|payload| {
-        if !is_file_sharing_element(payload) {
-            return true;
-        }
-        let targets_previewed_link = parse_file_sharing_element(payload)
-            .and_then(|sharing| sharing.first_url().map(str::to_string))
-            .and_then(|raw| url::Url::parse(&raw).ok())
-            .is_some_and(|source| source == body_url);
-        !targets_previewed_link
-    });
 }
 
 fn link_preview_url_allowed_by_current_policy(
@@ -597,59 +578,26 @@ mod tests {
     }
 
     #[test]
-    fn client_authored_file_sharing_for_previewed_link_is_stripped() {
-        // A sender hand-crafts an inline-video file-share whose source is the
-        // very link they posted, hoping recipients promote it to a trusted
-        // direct-video card. The server must drop it; only server-stamped
-        // direct-video file-shares may reach recipients.
+    fn client_authored_inline_video_for_body_link_survives_when_no_server_video_preview() {
+        // The canonical XEP-0447 shape is body = URL plus a <file-sharing> for
+        // that same URL. This is a legitimate file share and MUST survive link
+        // preview consumption. The recipient never promotes it to a trusted
+        // video card unless a server-stamped XEP-0511 card exists for the URL,
+        // which clients cannot forge (client-authored metadata is stripped).
         let mut message = Message::new(None::<jid::Jid>);
         message.to = Some("room@muc.example.com".parse().expect("jid"));
         message.bodies.insert(
             xmpp_parsers::message::Lang::new(),
-            "look https://attacker.example.com/article".to_string(),
+            "https://files.example.com/clip.mp4".to_string(),
         );
-        let forged = FileSharing::new(
-            FileMetadata::new()
-                .with_media_type("video/mp4")
-                .with_size(9000),
-        )
-        .with_url("https://attacker.example.com/article")
-        .with_disposition(Disposition::Inline);
-        message.payloads.push(build_file_sharing_element(&forged));
-
-        consume_link_preview_request(
-            &mut message,
-            &sender(),
-            SECRET,
-            1_800_000_000,
-            "https://waddle.example",
-            &LinkPreviewConfig::default(),
-        );
-
-        assert!(
-            waddle_xmpp::xep::extract_file_sharing_from_message(&message).is_none(),
-            "client-authored file-share targeting the previewed link must be stripped"
-        );
-    }
-
-    #[test]
-    fn genuine_upload_file_sharing_survives_link_preview_consumption() {
-        // A real XEP-0363 upload points at the Waddle media origin, not the
-        // external body link, so it must NOT be stripped.
-        let mut message = Message::new(None::<jid::Jid>);
-        message.to = Some("room@muc.example.com".parse().expect("jid"));
-        message.bodies.insert(
-            xmpp_parsers::message::Lang::new(),
-            "see https://example.com/article and my clip".to_string(),
-        );
-        let upload = FileSharing::new(
+        let shared = FileSharing::new(
             FileMetadata::new()
                 .with_media_type("video/mp4")
                 .with_size(1234),
         )
-        .with_url("https://waddle.example/api/files/abc/clip.mp4")
+        .with_url("https://files.example.com/clip.mp4")
         .with_disposition(Disposition::Inline);
-        message.payloads.push(build_file_sharing_element(&upload));
+        message.payloads.push(build_file_sharing_element(&shared));
 
         consume_link_preview_request(
             &mut message,
@@ -661,10 +609,10 @@ mod tests {
         );
 
         let sharing = waddle_xmpp::xep::extract_file_sharing_from_message(&message)
-            .expect("genuine upload file-share survives");
+            .expect("legitimate XEP-0447 file-share with URL-in-body must survive");
         assert_eq!(
             sharing.first_url(),
-            Some("https://waddle.example/api/files/abc/clip.mp4")
+            Some("https://files.example.com/clip.mp4")
         );
     }
 
