@@ -150,7 +150,14 @@ pub struct LinkPreviewConfig {
     pub enabled: bool,
     pub allowed_hosts: Vec<LinkPreviewHostPattern>,
     pub blocked_hosts: Vec<LinkPreviewHostPattern>,
-    pub max_fetch_bytes: usize,
+    /// Maximum bytes fetched while scanning an HTML document for OpenGraph
+    /// metadata. The resolver stops shortly after locating `</head>` — it reads
+    /// a bounded window past the head (so streaming-SSR frameworks that emit og
+    /// tags into the `<body>` are still captured), then stops; well-formed pages
+    /// typically read only the head plus that small window. The cap bounds large
+    /// pages (e.g. YouTube emits its og tags ~640 KB deep) and acts as a DoS
+    /// limit. Does not affect cached-image fetch limits.
+    pub max_html_head_bytes: usize,
     pub max_cached_image_bytes: usize,
     pub max_redirects: usize,
     pub fetch_timeout: Duration,
@@ -163,7 +170,7 @@ impl Default for LinkPreviewConfig {
             enabled: true,
             allowed_hosts: Vec::new(),
             blocked_hosts: Vec::new(),
-            max_fetch_bytes: 256 * 1024,
+            max_html_head_bytes: 1024 * 1024,
             max_cached_image_bytes: 2 * 1024 * 1024,
             max_redirects: 3,
             fetch_timeout: Duration::from_millis(1_500),
@@ -205,10 +212,10 @@ impl LinkPreviewConfig {
             enabled: parse_bool_var(&vars, "WADDLE_LINK_PREVIEW_ENABLED", true)?,
             allowed_hosts: parse_host_patterns_var(&vars, "WADDLE_LINK_PREVIEW_ALLOWED_HOSTS")?,
             blocked_hosts: parse_host_patterns_var(&vars, "WADDLE_LINK_PREVIEW_BLOCKED_HOSTS")?,
-            max_fetch_bytes: parse_usize_var(
+            max_html_head_bytes: parse_usize_var(
                 &vars,
-                "WADDLE_LINK_PREVIEW_MAX_FETCH_BYTES",
-                256 * 1024,
+                "WADDLE_LINK_PREVIEW_MAX_HTML_HEAD_BYTES",
+                1024 * 1024,
             )?,
             max_cached_image_bytes: parse_usize_var(
                 &vars,
@@ -548,7 +555,7 @@ mod tests {
                 "example.com,*.trusted.example",
             ),
             ("WADDLE_LINK_PREVIEW_BLOCKED_HOSTS", "ads.example"),
-            ("WADDLE_LINK_PREVIEW_MAX_FETCH_BYTES", "4096"),
+            ("WADDLE_LINK_PREVIEW_MAX_HTML_HEAD_BYTES", "4096"),
             ("WADDLE_LINK_PREVIEW_MAX_CACHED_IMAGE_BYTES", "8192"),
             ("WADDLE_LINK_PREVIEW_MAX_REDIRECTS", "2"),
             ("WADDLE_LINK_PREVIEW_FETCH_TIMEOUT_MS", "250"),
@@ -561,7 +568,7 @@ mod tests {
         assert!(config.allowed_hosts[0].matches("example.com"));
         assert!(config.allowed_hosts[1].matches("cdn.trusted.example"));
         assert!(config.blocked_hosts[0].matches("ads.example"));
-        assert_eq!(config.max_fetch_bytes, 4096);
+        assert_eq!(config.max_html_head_bytes, 4096);
         assert_eq!(config.max_cached_image_bytes, 8192);
         assert_eq!(config.max_redirects, 2);
         assert_eq!(config.fetch_timeout, Duration::from_millis(250));

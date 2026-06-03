@@ -22,10 +22,15 @@ use crate::server::routes::websocket::link_preview_telemetry::{
 use crate::storage::BlobStorage;
 use crate::storage::{BlobMeta, StorageError};
 
-const DEFAULT_MAX_BYTES: usize = 256 * 1024;
+const DEFAULT_MAX_HTML_HEAD_BYTES: usize = 1024 * 1024;
 const DEFAULT_MAX_IMAGE_BYTES: usize = 2 * 1024 * 1024;
 const DEFAULT_MAX_REDIRECTS: usize = 3;
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(1_500);
+/// Extra bytes scanned past `</head>` for OpenGraph `<meta>` tags that
+/// streaming-SSR frameworks (Next.js, React 18, Remix) emit into the `<body>`
+/// stream rather than the head. Bounded so the resolver still stops well
+/// before reading a full large document.
+const HTML_META_BODY_WINDOW: usize = 64 * 1024;
 const LINK_PREVIEW_TITLE_MAX_BYTES: usize = 256;
 const LINK_PREVIEW_DESCRIPTION_MAX_BYTES: usize = 1024;
 
@@ -88,7 +93,7 @@ pub(super) struct LinkPreviewResolverPolicy {
     pub enabled: bool,
     pub allowed_hosts: Vec<LinkPreviewHostPattern>,
     pub blocked_hosts: Vec<LinkPreviewHostPattern>,
-    pub max_bytes: usize,
+    pub max_html_head_bytes: usize,
     pub max_image_bytes: usize,
     pub max_redirects: usize,
     pub timeout: Duration,
@@ -103,7 +108,7 @@ impl Default for LinkPreviewResolverPolicy {
             enabled: true,
             allowed_hosts: Vec::new(),
             blocked_hosts: Vec::new(),
-            max_bytes: DEFAULT_MAX_BYTES,
+            max_html_head_bytes: DEFAULT_MAX_HTML_HEAD_BYTES,
             max_image_bytes: DEFAULT_MAX_IMAGE_BYTES,
             max_redirects: DEFAULT_MAX_REDIRECTS,
             timeout: DEFAULT_TIMEOUT,
@@ -123,7 +128,7 @@ impl LinkPreviewResolverPolicy {
             enabled: config.enabled,
             allowed_hosts: config.allowed_hosts.clone(),
             blocked_hosts: config.blocked_hosts.clone(),
-            max_bytes: config.max_fetch_bytes,
+            max_html_head_bytes: config.max_html_head_bytes,
             max_image_bytes: config.max_cached_image_bytes,
             max_redirects: config.max_redirects,
             timeout: config.fetch_timeout,
@@ -543,8 +548,8 @@ async fn fetch_html_once(
         .build()
         .map_err(|_| LinkPreviewResolverStatus::Failed)?;
     let mut request = client.get(url.clone());
-    if policy.max_bytes > 0 {
-        request = request.header(RANGE, format!("bytes=0-{}", policy.max_bytes - 1));
+    if policy.max_html_head_bytes > 0 {
+        request = request.header(RANGE, format!("bytes=0-{}", policy.max_html_head_bytes - 1));
     }
     let mut response = request
         .send()
@@ -611,9 +616,18 @@ async fn fetch_html_once(
         return Err(LinkPreviewResolverStatus::Unsupported);
     }
     let allow_head_cutoff = matches!(content_type.as_deref(), Some("text/html"));
-    if let Some(len) = response.content_length() {
-        if len > policy.max_bytes as u64 && response.status() != StatusCode::PARTIAL_CONTENT {
-            return Err(LinkPreviewResolverStatus::Failed);
+    // For `text/html` we stream and stop at `</head>` (+ the bounded meta
+    // window), so a large advertised `Content-Length` is fine as long as the
+    // head fits the budget — common for origins that ignore `Range` and return
+    // a full 200 (e.g. YouTube over HTTP/1.1). Only fast-fail the non-cuttable
+    // case (xhtml), where the whole body would otherwise be buffered.
+    if !allow_head_cutoff {
+        if let Some(len) = response.content_length() {
+            if len > policy.max_html_head_bytes as u64
+                && response.status() != StatusCode::PARTIAL_CONTENT
+            {
+                return Err(LinkPreviewResolverStatus::Failed);
+            }
         }
     }
     let partial_content_state = if response.status() == StatusCode::PARTIAL_CONTENT {
@@ -629,24 +643,32 @@ async fn fetch_html_once(
     if partial_content_state == ContentRangeState::Unknown {
         return Err(LinkPreviewResolverStatus::Failed);
     }
-    let mut body = Vec::with_capacity(policy.max_bytes.min(64 * 1024));
+    let mut body = Vec::with_capacity(policy.max_html_head_bytes.min(64 * 1024));
     let mut head_end_scanner = HtmlHeadEndScanner::default();
     let mut found_head_end = None;
+    // Once `</head>` is located, keep reading a bounded window into the body so
+    // streaming-SSR frameworks that emit og: `<meta>` after `</head>` are still
+    // captured, then stop. Capped at the head budget.
+    let meta_window_end = |head_end: usize| {
+        head_end
+            .saturating_add(HTML_META_BODY_WINDOW)
+            .min(policy.max_html_head_bytes)
+    };
     while let Some(chunk) = response
         .chunk()
         .await
         .map_err(|_| LinkPreviewResolverStatus::Failed)?
     {
-        if body.len() + chunk.len() > policy.max_bytes {
-            let remaining = policy.max_bytes.saturating_sub(body.len());
+        if body.len() + chunk.len() > policy.max_html_head_bytes {
+            let remaining = policy.max_html_head_bytes.saturating_sub(body.len());
             body.extend_from_slice(&chunk[..remaining]);
-            if allow_head_cutoff
-                && found_head_end.is_none()
-                && response.status() != StatusCode::PARTIAL_CONTENT
-            {
-                found_head_end = head_end_scanner.scan(&body);
-                if let Some(head_end) = found_head_end {
-                    body.truncate(head_end);
+            if allow_head_cutoff && response.status() != StatusCode::PARTIAL_CONTENT {
+                if found_head_end.is_none() {
+                    found_head_end = head_end_scanner.scan(&body);
+                }
+                if found_head_end.is_some() {
+                    // Hit the byte budget with a head located; keep the
+                    // budget-capped body (head + as much window as fit).
                     break;
                 }
             }
@@ -655,9 +677,12 @@ async fn fetch_html_once(
         body.extend_from_slice(&chunk);
         if allow_head_cutoff && found_head_end.is_none() {
             found_head_end = head_end_scanner.scan(&body);
-            if response.status() != StatusCode::PARTIAL_CONTENT {
-                if let Some(head_end) = found_head_end {
-                    body.truncate(head_end);
+        }
+        if allow_head_cutoff && response.status() != StatusCode::PARTIAL_CONTENT {
+            if let Some(head_end) = found_head_end {
+                let window_end = meta_window_end(head_end);
+                if body.len() >= window_end {
+                    body.truncate(window_end);
                     break;
                 }
             }
@@ -679,7 +704,7 @@ async fn fetch_html_once(
         return Err(LinkPreviewResolverStatus::Failed);
     }
     if let Some(head_end) = found_head_end {
-        body.truncate(head_end);
+        body.truncate(meta_window_end(head_end));
     }
     let html = String::from_utf8_lossy(&body).into_owned();
     Ok(FetchOnceResult::Html {
@@ -1874,6 +1899,135 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolves_metadata_when_content_length_exceeds_budget_but_head_fits() {
+        // Origins that ignore Range return HTTP 200 with a Content-Length for the
+        // full (large) document. As long as </head> (+ og tags) fits within the
+        // budget, the resolver must stream and head-cutoff rather than hard-fail
+        // on Content-Length. (PR #856 review: the YouTube case over HTTP/1.1.)
+        let server = MockServer::start().await;
+        let html = format!(
+            "<html><head><meta property=\"og:title\" content=\"CL Title\"/></head><body>{}</body></html>",
+            "a".repeat(4096)
+        );
+        Mock::given(method("GET"))
+            .and(path("/cl"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(html, "text/html; charset=utf-8"))
+            .mount(&server)
+            .await;
+        // Budget smaller than the body but larger than the head, with Range honored
+        // or not — wiremock advertises Content-Length for the full body.
+        let policy = LinkPreviewResolverPolicy {
+            max_html_head_bytes: 512,
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/cl", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        let LinkPreviewResolverOutcome::Ready(metadata) = outcome else {
+            panic!("expected ready outcome when head fits under the budget, got {outcome:?}");
+        };
+        assert_eq!(metadata.title.as_deref(), Some("CL Title"));
+    }
+
+    #[tokio::test]
+    async fn oversized_headless_html_is_bounded_and_not_ready() {
+        // DoS bound: a page that exceeds the head budget without ever emitting
+        // </head> must not yield a preview and must not be read past the budget.
+        // (Per-request bound that keeps the raised 1 MiB default safe.)
+        let server = MockServer::start().await;
+        let html = format!("<html><head>{}", "x".repeat(4096)); // no </head>, no og
+        Mock::given(method("GET"))
+            .and(path("/headless"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(html, "text/html; charset=utf-8"))
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            max_html_head_bytes: 512,
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/headless", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        assert!(
+            !matches!(outcome, LinkPreviewResolverOutcome::Ready(_)),
+            "oversized headless HTML must not produce a preview, got {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolves_metadata_emitted_into_body_after_head_by_streaming_ssr() {
+        // Next.js / React 18 streaming SSR hoists og: <meta> into the <body>
+        // stream — they appear AFTER </head> in the raw HTML (the browser
+        // re-hoists them at parse time). The resolver must capture them instead
+        // of truncating at </head> and losing the metadata (cloudnativedays.no).
+        let server = MockServer::start().await;
+        let html = format!(
+            "<html><head><title>t</title></head><body>{}<meta property=\"og:title\" content=\"Streamed Title\"/><div>page</div></body></html>",
+            "<!-- pad -->".repeat(80)
+        );
+        assert!(
+            html.find("og:title").expect("og") > html.find("</head>").expect("head end"),
+            "test must place og metadata after </head>"
+        );
+        Mock::given(method("GET"))
+            .and(path("/ssr"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(html, "text/html; charset=utf-8"))
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/ssr", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        let LinkPreviewResolverOutcome::Ready(metadata) = outcome else {
+            panic!("expected ready outcome for body-emitted metadata, got {outcome:?}");
+        };
+        assert_eq!(metadata.title.as_deref(), Some("Streamed Title"));
+    }
+
+    #[tokio::test]
+    async fn resolves_metadata_when_head_is_deeper_than_legacy_256kb_budget() {
+        // Regression: large pages (e.g. YouTube) place their OpenGraph metadata
+        // and </head> ~640 KB deep. With the legacy 256 KB budget the resolver
+        // read past neither, returning Failed. The default budget must reach a
+        // head this deep. Filler sits inside <head> so og:title lands well past
+        // 256 KB but within the 1 MiB head budget.
+        let server = MockServer::start().await;
+        let filler = format!("<!-- {} -->", "x".repeat(300 * 1024));
+        let html = format!(
+            "<html><head>{filler}<meta property=\"og:title\" content=\"Deep Title\"></head><body></body></html>"
+        );
+        assert!(
+            html.find("og:title").expect("og present") > 256 * 1024,
+            "test must place og metadata beyond the legacy budget"
+        );
+        Mock::given(method("GET"))
+            .and(path("/deep"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(html, "text/html; charset=utf-8"))
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/deep", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        let LinkPreviewResolverOutcome::Ready(metadata) = outcome else {
+            panic!("expected ready outcome for deep head, got {outcome:?}");
+        };
+        assert_eq!(metadata.title.as_deref(), Some("Deep Title"));
+    }
+
+    #[tokio::test]
     async fn fetches_html_metadata_with_bounded_test_policy() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -1948,7 +2102,7 @@ mod tests {
             .mount(&server)
             .await;
         let policy = LinkPreviewResolverPolicy {
-            max_bytes: 256,
+            max_html_head_bytes: 256,
             allow_http_loopback_for_tests: true,
             ..Default::default()
         };
@@ -2015,7 +2169,7 @@ mod tests {
             .mount(&server)
             .await;
         let policy = LinkPreviewResolverPolicy {
-            max_bytes: 256,
+            max_html_head_bytes: 256,
             allow_http_loopback_for_tests: true,
             ..Default::default()
         };
@@ -2089,7 +2243,7 @@ mod tests {
             .mount(&server)
             .await;
         let policy = LinkPreviewResolverPolicy {
-            max_bytes: 256,
+            max_html_head_bytes: 256,
             allow_http_loopback_for_tests: true,
             ..Default::default()
         };
@@ -2124,7 +2278,7 @@ mod tests {
             .mount(&server)
             .await;
         let policy = LinkPreviewResolverPolicy {
-            max_bytes: 256,
+            max_html_head_bytes: 256,
             allow_http_loopback_for_tests: true,
             ..Default::default()
         };
@@ -2155,7 +2309,7 @@ mod tests {
             .mount(&server)
             .await;
         let policy = LinkPreviewResolverPolicy {
-            max_bytes: 256,
+            max_html_head_bytes: 256,
             allow_http_loopback_for_tests: true,
             ..Default::default()
         };
@@ -2188,7 +2342,7 @@ mod tests {
             .mount(&server)
             .await;
         let policy = LinkPreviewResolverPolicy {
-            max_bytes: 256,
+            max_html_head_bytes: 256,
             allow_http_loopback_for_tests: true,
             ..Default::default()
         };
@@ -2222,7 +2376,7 @@ mod tests {
             .mount(&server)
             .await;
         let policy = LinkPreviewResolverPolicy {
-            max_bytes: 256,
+            max_html_head_bytes: 256,
             allow_http_loopback_for_tests: true,
             ..Default::default()
         };
@@ -2259,7 +2413,7 @@ mod tests {
             .mount(&server)
             .await;
         let policy = LinkPreviewResolverPolicy {
-            max_bytes: 256,
+            max_html_head_bytes: 256,
             allow_http_loopback_for_tests: true,
             ..Default::default()
         };
@@ -2315,7 +2469,7 @@ mod tests {
             .mount(&server)
             .await;
         let policy = LinkPreviewResolverPolicy {
-            max_bytes: 256,
+            max_html_head_bytes: 256,
             allow_http_loopback_for_tests: true,
             ..Default::default()
         };
@@ -2348,7 +2502,7 @@ mod tests {
             .mount(&server)
             .await;
         let policy = LinkPreviewResolverPolicy {
-            max_bytes: 256,
+            max_html_head_bytes: 256,
             allow_http_loopback_for_tests: true,
             ..Default::default()
         };
@@ -2380,7 +2534,7 @@ mod tests {
             .mount(&server)
             .await;
         let policy = LinkPreviewResolverPolicy {
-            max_bytes: 512,
+            max_html_head_bytes: 512,
             allow_http_loopback_for_tests: true,
             ..Default::default()
         };
@@ -2412,7 +2566,7 @@ mod tests {
             .mount(&server)
             .await;
         let policy = LinkPreviewResolverPolicy {
-            max_bytes: 256,
+            max_html_head_bytes: 256,
             allow_http_loopback_for_tests: true,
             ..Default::default()
         };
@@ -2448,7 +2602,7 @@ mod tests {
             .mount(&server)
             .await;
         let policy = LinkPreviewResolverPolicy {
-            max_bytes: 256,
+            max_html_head_bytes: 256,
             allow_http_loopback_for_tests: true,
             ..Default::default()
         };
@@ -2484,7 +2638,7 @@ mod tests {
             .mount(&server)
             .await;
         let policy = LinkPreviewResolverPolicy {
-            max_bytes: 256,
+            max_html_head_bytes: 256,
             allow_http_loopback_for_tests: true,
             ..Default::default()
         };
@@ -3140,7 +3294,7 @@ mod tests {
             .mount(&server)
             .await;
         let policy = LinkPreviewResolverPolicy {
-            max_bytes: 64,
+            max_html_head_bytes: 64,
             allow_http_loopback_for_tests: true,
             ..Default::default()
         };
@@ -3166,7 +3320,7 @@ mod tests {
             .mount(&server)
             .await;
         let policy = LinkPreviewResolverPolicy {
-            max_bytes: 64,
+            max_html_head_bytes: 64,
             allow_http_loopback_for_tests: true,
             ..Default::default()
         };
