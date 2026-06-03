@@ -47,6 +47,6 @@ async function openThread(entry: WasmThreadEntry) {
       </span>
       <h1 class="type-pane-title text-foreground leading-tight">Threads</h1>
     </header>
-    <ThreadsListPanel :xmpp-client="xmppClient" @open-thread="openThread" />
+    <ThreadsListPanel :xmpp-client="xmppClient" :channels="channels" @open-thread="openThread" />
   </div>
 </template>

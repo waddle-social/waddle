@@ -577,8 +577,8 @@ impl WaddleClient {
                 serde_wasm_bindgen::from_value(opts).map_err(|err| js_error(err.to_string()))?
             };
             let request_id = uuid::Uuid::new_v4().to_string();
-            let iq =
-                build_fetch_threads_iq(&request_id, opts.page_size, opts.after_cursor.as_deref());
+            let query = fetch_threads_query_from_options(&opts).map_err(js_error)?;
+            let iq = build_fetch_threads_iq(&request_id, &query);
             let page = match send_iq_command(inner, iq).await {
                 Ok(result) => parse_threads_response(&result).unwrap_or_default(),
                 Err(_) => Default::default(),
@@ -910,6 +910,46 @@ fn parse_dm_bookmarks_response(iq: &Element) -> Vec<WaddleDmBookmarkItem> {
         .collect()
 }
 
+fn fetch_threads_query_from_options(
+    opts: &WaddleFetchThreadsOptions,
+) -> Result<FetchThreadsQuery<'_>, String> {
+    let status = match opts.status {
+        Some(WaddleThreadStatusFilter::All) | None => ThreadStatusFilter::All,
+        Some(WaddleThreadStatusFilter::Unread) => ThreadStatusFilter::Unread,
+        Some(WaddleThreadStatusFilter::Following) => ThreadStatusFilter::Following,
+    };
+    let sort = match opts.sort {
+        Some(WaddleThreadSort::Recent) | None => ThreadSort::Recent,
+        Some(WaddleThreadSort::Unread) => ThreadSort::Unread,
+        Some(WaddleThreadSort::Replies) => ThreadSort::Replies,
+    };
+    let active_since = match opts.active_since.as_deref() {
+        Some(raw) => Some(
+            chrono::DateTime::parse_from_rfc3339(raw)
+                .map_err(|err| format!("invalid active_since: {err}"))?
+                .with_timezone(&chrono::Utc),
+        ),
+        None => None,
+    };
+    let channel = match opts.channel.as_deref() {
+        Some(raw) if !raw.trim().is_empty() => Some(
+            raw.parse::<BareJid>()
+                .map_err(|err| format!("invalid channel: {err}"))?,
+        ),
+        _ => None,
+    };
+
+    Ok(FetchThreadsQuery {
+        page_size: opts.page_size,
+        after_cursor: opts.after_cursor.as_deref(),
+        status,
+        active_since,
+        channel,
+        search: opts.search.as_deref(),
+        sort,
+    })
+}
+
 /// Surface one DM-bookmark `<notify/>` into the JS-facing
 /// [`WaddleDmBookmarkItem`] (issue #720). Used by both
 /// `fetch_dm_bookmarks` (per-item map) and `set_dm_notification_mode`
@@ -999,6 +1039,45 @@ fn verify_iq_from_matches_query(from_attr: Option<&str>, service_jid: &str) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fetch_threads_options_build_filtered_iq() {
+        let opts = WaddleFetchThreadsOptions {
+            page_size: Some(50),
+            after_cursor: Some("CUR".to_string()),
+            status: Some(WaddleThreadStatusFilter::Unread),
+            active_since: Some("2026-05-19T00:00:00Z".to_string()),
+            channel: Some("chat@muc.waddle.chat".to_string()),
+            search: Some(" notifications ".to_string()),
+            sort: Some(WaddleThreadSort::Replies),
+        };
+
+        let query = fetch_threads_query_from_options(&opts).expect("valid threads query");
+        let iq = build_fetch_threads_iq("threads-test", &query);
+        let query_el = iq
+            .get_child("query", waddle_xmpp_client::xep::threads::NS_THREADS)
+            .expect("threads query");
+
+        assert_eq!(query_el.attr("status"), Some("unread"));
+        assert_eq!(query_el.attr("active-since"), Some("2026-05-19T00:00:00Z"));
+        assert_eq!(query_el.attr("channel"), Some("chat@muc.waddle.chat"));
+        assert_eq!(query_el.attr("search"), Some("notifications"));
+        assert_eq!(query_el.attr("sort"), Some("replies"));
+
+        let set = query_el
+            .get_child("set", "http://jabber.org/protocol/rsm")
+            .expect("rsm set");
+        assert_eq!(
+            set.get_child("max", "http://jabber.org/protocol/rsm")
+                .map(|el| el.text()),
+            Some("50".to_string())
+        );
+        assert_eq!(
+            set.get_child("after", "http://jabber.org/protocol/rsm")
+                .map(|el| el.text()),
+            Some("CUR".to_string())
+        );
+    }
 
     #[test]
     fn verify_iq_from_accepts_exact_match() {

@@ -803,12 +803,33 @@ pub struct WaddleThreadsPage {
     pub next_cursor: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaddleThreadStatusFilter {
+    All,
+    Unread,
+    Following,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaddleThreadSort {
+    Recent,
+    Unread,
+    Replies,
+}
+
 /// Options bag for `fetch_threads`. All fields optional.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct WaddleFetchThreadsOptions {
     pub page_size: Option<u32>,
     pub after_cursor: Option<String>,
+    pub status: Option<WaddleThreadStatusFilter>,
+    pub active_since: Option<String>,
+    pub channel: Option<String>,
+    pub search: Option<String>,
+    pub sort: Option<WaddleThreadSort>,
 }
 
 /// JS-facing shape for one XEP-0402 bookmark item exposed via

@@ -20,6 +20,15 @@ const STANZA_ERROR_NS: &str = "urn:ietf:params:xml:ns:xmpp-stanzas";
 
 static TEST_SERIAL: Mutex<()> = Mutex::const_new(());
 
+#[derive(Default)]
+struct ThreadsQueryAttrs<'a> {
+    status: Option<&'a str>,
+    active_since: Option<&'a str>,
+    channel: Option<&'a str>,
+    search: Option<&'a str>,
+    sort: Option<&'a str>,
+}
+
 async fn admin_client(server: &TestServer, resource: &str) -> WsXmppClient {
     let password = server.fixed_account_password().to_string();
     WsXmppClient::connect_and_auth(&server.ws_url(), DOMAIN, USERNAME, &password, resource)
@@ -39,7 +48,36 @@ async fn extra_client(
 }
 
 fn threads_query_iq(id: &str, page_size: Option<u32>, after: Option<&str>) -> String {
-    let mut query = Element::builder("query", NS_THREADS).build();
+    threads_query_iq_with_attrs(id, page_size, after, ThreadsQueryAttrs::default())
+}
+
+fn threads_query_iq_with_attrs(
+    id: &str,
+    page_size: Option<u32>,
+    after: Option<&str>,
+    attrs: ThreadsQueryAttrs<'_>,
+) -> String {
+    let mut query_builder = Element::builder("query", NS_THREADS);
+    if let Some(status) = attrs.status {
+        query_builder = query_builder.attr(minidom::rxml::xml_ncname!("status").to_owned(), status);
+    }
+    if let Some(active_since) = attrs.active_since {
+        query_builder = query_builder.attr(
+            minidom::rxml::xml_ncname!("active-since").to_owned(),
+            active_since,
+        );
+    }
+    if let Some(channel) = attrs.channel {
+        query_builder =
+            query_builder.attr(minidom::rxml::xml_ncname!("channel").to_owned(), channel);
+    }
+    if let Some(search) = attrs.search {
+        query_builder = query_builder.attr(minidom::rxml::xml_ncname!("search").to_owned(), search);
+    }
+    if let Some(sort) = attrs.sort {
+        query_builder = query_builder.attr(minidom::rxml::xml_ncname!("sort").to_owned(), sort);
+    }
+    let mut query = query_builder.build();
     if page_size.is_some() || after.is_some() {
         let mut set = Element::builder("set", NS_RSM).build();
         if let Some(max) = page_size {
@@ -243,6 +281,111 @@ async fn populated_inbox_returns_thread_entries() {
 }
 
 #[tokio::test]
+async fn filtered_query_attrs_are_applied_over_websocket() {
+    let _guard = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut client = admin_client(&server, "th-filter").await;
+    let room = format!("threads-filter-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    join_room(&mut client, &room).await;
+
+    send_threaded_message(
+        &mut client,
+        &room,
+        "t-filter",
+        "needle notifications",
+        "tm-filter-1",
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    let resp = send_iq(
+        &mut client,
+        threads_query_iq_with_attrs(
+            "th-filter-1",
+            Some(50),
+            None,
+            ThreadsQueryAttrs {
+                status: Some("all"),
+                active_since: Some("1970-01-01T00:00:00Z"),
+                channel: Some(&room),
+                search: Some("NOTIFICATIONS"),
+                sort: Some("recent"),
+            },
+        ),
+        "th-filter-1",
+    )
+    .await;
+    let iq = parse_iq_element(&resp, "th-filter-1", "result");
+    let threads = iq
+        .children()
+        .find(|child| child.name() == "threads" && child.ns() == NS_THREADS)
+        .expect("threads element");
+    assert_eq!(threads.attr("total"), Some("1"), "unexpected total: {iq:?}");
+    let entries = thread_children(&iq);
+    assert_eq!(entries.len(), 1, "expected one filtered thread: {iq:?}");
+    assert_eq!(entries[0].attr("thread-id"), Some("t-filter"));
+
+    let _ = client.close().await;
+}
+
+#[tokio::test]
+async fn invalid_filter_attrs_are_bad_request() {
+    let _guard = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut client = admin_client(&server, "th-bad-filter").await;
+
+    for (idx, attrs) in [
+        (
+            0,
+            ThreadsQueryAttrs {
+                status: Some("stale"),
+                ..Default::default()
+            },
+        ),
+        (
+            1,
+            ThreadsQueryAttrs {
+                sort: Some("hot"),
+                ..Default::default()
+            },
+        ),
+        (
+            2,
+            ThreadsQueryAttrs {
+                active_since: Some("not-a-date"),
+                ..Default::default()
+            },
+        ),
+        (
+            3,
+            ThreadsQueryAttrs {
+                channel: Some("not a jid"),
+                ..Default::default()
+            },
+        ),
+    ] {
+        let id = format!("th-bad-filter-{idx}");
+        let resp = send_iq(
+            &mut client,
+            threads_query_iq_with_attrs(&id, None, None, attrs),
+            &id,
+        )
+        .await;
+        assert_error_condition(&resp, "bad-request");
+    }
+
+    let resp = send_iq(
+        &mut client,
+        threads_query_iq("th-bad-filter-cursor", None, Some("not-a-cursor")),
+        "th-bad-filter-cursor",
+    )
+    .await;
+    assert_error_condition(&resp, "bad-request");
+
+    let _ = client.close().await;
+}
+
+#[tokio::test]
 async fn pagination_round_trips_cursor() {
     let _guard = TEST_SERIAL.lock().await;
     let server = TestServer::start();
@@ -304,6 +447,22 @@ async fn pagination_round_trips_cursor() {
         1,
         "second page should return 1 entry: {second_iq:?}"
     );
+
+    let mismatched_sort = send_iq(
+        &mut client,
+        threads_query_iq_with_attrs(
+            "th-page-cross-sort",
+            Some(2),
+            Some(&last_cursor),
+            ThreadsQueryAttrs {
+                sort: Some("unread"),
+                ..Default::default()
+            },
+        ),
+        "th-page-cross-sort",
+    )
+    .await;
+    assert_error_condition(&mismatched_sort, "bad-request");
 
     let _ = client.close().await;
 }
@@ -420,6 +579,37 @@ async fn response_includes_rsm_set_with_count() {
         .map(|el| el.text())
         .expect("rsm count");
     assert_eq!(count, "0");
+
+    let _ = client.close().await;
+}
+
+#[tokio::test]
+async fn max_zero_returns_count_without_thread_entries() {
+    let _guard = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut client = admin_client(&server, "th-count").await;
+    let room = format!("threads-count-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    join_room(&mut client, &room).await;
+
+    send_threaded_message(&mut client, &room, "t-count", "count me", "tm-count").await;
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    let resp = send_iq(
+        &mut client,
+        threads_query_iq("th-count-1", Some(0), None),
+        "th-count-1",
+    )
+    .await;
+    let iq = parse_iq_element(&resp, "th-count-1", "result");
+    let threads = iq
+        .children()
+        .find(|c| c.name() == "threads" && c.ns() == NS_THREADS)
+        .expect("threads element");
+    assert_eq!(threads.attr("total"), Some("1"));
+    assert!(
+        thread_children(&iq).is_empty(),
+        "RSM max=0 must return only the count: {iq:?}"
+    );
 
     let _ = client.close().await;
 }

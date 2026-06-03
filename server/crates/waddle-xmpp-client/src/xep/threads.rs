@@ -4,6 +4,8 @@
 //! `waddle-server/src/threads/wire.rs`. The chat client uses the IQ
 //! builder/parser to drive the global Threads view.
 
+use chrono::{DateTime, SecondsFormat, Utc};
+use jid::BareJid;
 use minidom::Element;
 
 /// Namespace for the threads-view query and response.
@@ -42,21 +44,94 @@ pub struct ThreadsPage {
     pub next_cursor: Option<String>,
 }
 
+/// Status filter for a threads query.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ThreadStatusFilter {
+    #[default]
+    All,
+    Unread,
+    Following,
+}
+
+impl ThreadStatusFilter {
+    fn as_attr(self) -> Option<&'static str> {
+        match self {
+            Self::All => None,
+            Self::Unread => Some("unread"),
+            Self::Following => Some("following"),
+        }
+    }
+}
+
+/// Sort order for a threads query.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ThreadSort {
+    #[default]
+    Recent,
+    Unread,
+    Replies,
+}
+
+impl ThreadSort {
+    fn as_attr(self) -> Option<&'static str> {
+        match self {
+            Self::Recent => None,
+            Self::Unread => Some("unread"),
+            Self::Replies => Some("replies"),
+        }
+    }
+}
+
+/// Request options for `urn:waddle:threads:0`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FetchThreadsQuery<'a> {
+    pub page_size: Option<u32>,
+    pub after_cursor: Option<&'a str>,
+    pub status: ThreadStatusFilter,
+    pub active_since: Option<DateTime<Utc>>,
+    pub channel: Option<BareJid>,
+    pub search: Option<&'a str>,
+    pub sort: ThreadSort,
+}
+
 /// Build a `<iq type='get'>` requesting the user's threads.
-pub fn build_fetch_threads_iq(
-    request_id: &str,
-    page_size: Option<u32>,
-    after_cursor: Option<&str>,
-) -> Element {
-    let mut query = Element::builder("query", NS_THREADS).build();
-    if page_size.is_some() || after_cursor.is_some() {
+pub fn build_fetch_threads_iq(request_id: &str, opts: &FetchThreadsQuery<'_>) -> Element {
+    let mut query_builder = Element::builder("query", NS_THREADS);
+    if let Some(status) = opts.status.as_attr() {
+        query_builder = query_builder.attr(minidom::rxml::xml_ncname!("status").to_owned(), status);
+    }
+    if let Some(active_since) = opts.active_since {
+        query_builder = query_builder.attr(
+            minidom::rxml::xml_ncname!("active-since").to_owned(),
+            active_since.to_rfc3339_opts(SecondsFormat::Secs, true),
+        );
+    }
+    if let Some(ref channel) = opts.channel {
+        query_builder = query_builder.attr(
+            minidom::rxml::xml_ncname!("channel").to_owned(),
+            channel.to_string(),
+        );
+    }
+    if let Some(search) = opts.search {
+        let trimmed = search.trim();
+        if !trimmed.is_empty() {
+            query_builder =
+                query_builder.attr(minidom::rxml::xml_ncname!("search").to_owned(), trimmed);
+        }
+    }
+    if let Some(sort) = opts.sort.as_attr() {
+        query_builder = query_builder.attr(minidom::rxml::xml_ncname!("sort").to_owned(), sort);
+    }
+
+    let mut query = query_builder.build();
+    if opts.page_size.is_some() || opts.after_cursor.is_some() {
         let mut set = Element::builder("set", NS_RSM).build();
-        if let Some(max) = page_size {
+        if let Some(max) = opts.page_size {
             let mut max_el = Element::builder("max", NS_RSM).build();
             max_el.append_text_node(max.to_string());
             set.append_child(max_el);
         }
-        if let Some(after) = after_cursor {
+        if let Some(after) = opts.after_cursor {
             let mut after_el = Element::builder("after", NS_RSM).build();
             after_el.append_text_node(after);
             set.append_child(after_el);
@@ -133,7 +208,14 @@ mod tests {
 
     #[test]
     fn fetch_iq_has_correct_namespace_and_type() {
-        let iq = build_fetch_threads_iq("r-1", Some(25), Some("CUR"));
+        let iq = build_fetch_threads_iq(
+            "r-1",
+            &FetchThreadsQuery {
+                page_size: Some(25),
+                after_cursor: Some("CUR"),
+                ..Default::default()
+            },
+        );
         assert_eq!(iq.attr("type"), Some("get"));
         assert_eq!(iq.attr("id"), Some("r-1"));
         let query = iq.get_child("query", NS_THREADS).expect("query");
@@ -150,9 +232,38 @@ mod tests {
 
     #[test]
     fn fetch_iq_without_pagination_omits_set() {
-        let iq = build_fetch_threads_iq("r-2", None, None);
+        let iq = build_fetch_threads_iq("r-2", &FetchThreadsQuery::default());
         let query = iq.get_child("query", NS_THREADS).expect("query");
         assert!(query.get_child("set", NS_RSM).is_none());
+        assert_eq!(query.attr("status"), None);
+        assert_eq!(query.attr("sort"), None);
+    }
+
+    #[test]
+    fn fetch_iq_includes_selected_filters() {
+        let iq = build_fetch_threads_iq(
+            "r-3",
+            &FetchThreadsQuery {
+                page_size: Some(50),
+                status: ThreadStatusFilter::Unread,
+                active_since: Some(
+                    "2026-05-19T00:00:00Z"
+                        .parse::<DateTime<Utc>>()
+                        .expect("valid timestamp"),
+                ),
+                channel: Some("chat@muc.waddle.chat".parse().expect("valid JID")),
+                search: Some(" notifications "),
+                sort: ThreadSort::Replies,
+                ..Default::default()
+            },
+        );
+        let query = iq.get_child("query", NS_THREADS).expect("query");
+        assert_eq!(query.attr("status"), Some("unread"));
+        assert_eq!(query.attr("active-since"), Some("2026-05-19T00:00:00Z"));
+        assert_eq!(query.attr("channel"), Some("chat@muc.waddle.chat"));
+        assert_eq!(query.attr("search"), Some("notifications"));
+        assert_eq!(query.attr("sort"), Some("replies"));
+        assert!(query.get_child("set", NS_RSM).is_some());
     }
 
     #[test]

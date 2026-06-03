@@ -4,7 +4,10 @@
 use minidom::Element;
 use xmpp_parsers::iq::Iq;
 
-use super::query::{ThreadEntry, ThreadsError, ThreadsPage, ThreadsQuery, NS_THREADS};
+use super::query::{
+    ThreadEntry, ThreadSort, ThreadStatusFilter, ThreadsError, ThreadsPage, ThreadsQuery,
+    NS_THREADS,
+};
 
 /// XEP-0059 Result Set Management namespace.
 const NS_RSM: &str = "http://jabber.org/protocol/rsm";
@@ -21,6 +24,30 @@ pub fn parse_threads_query(iq: &Iq) -> Result<ThreadsQuery, ThreadsError> {
     }
 
     let mut q = ThreadsQuery::default();
+    if let Some(status) = payload.attr("status") {
+        q.status = ThreadStatusFilter::parse(status)?;
+    }
+    if let Some(sort) = payload.attr("sort") {
+        q.sort = ThreadSort::parse(sort)?;
+    }
+    if let Some(active_since) = payload.attr("active-since") {
+        let parsed = chrono::DateTime::parse_from_rfc3339(active_since)
+            .map_err(|_| ThreadsError::InvalidTimestamp(active_since.to_string()))?;
+        q.active_since_secs = Some(parsed.timestamp());
+    }
+    if let Some(channel) = payload.attr("channel") {
+        q.channel = Some(
+            channel
+                .parse()
+                .map_err(|_| ThreadsError::InvalidChannel(channel.to_string()))?,
+        );
+    }
+    if let Some(search) = payload.attr("search") {
+        let trimmed = search.trim();
+        if !trimmed.is_empty() {
+            q.search = Some(trimmed.to_string());
+        }
+    }
     if let Some(rsm) = payload.get_child("set", NS_RSM) {
         if let Some(max_el) = rsm.get_child("max", NS_RSM) {
             let text = max_el.text();
@@ -134,6 +161,7 @@ fn build_thread_entry(entry: &ThreadEntry) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::threads::query::ThreadRootAuthor;
     use xmpp_parsers::iq::Iq;
 
     fn make_get_iq(payload: Element) -> Iq {
@@ -152,6 +180,11 @@ mod tests {
         let q = parse_threads_query(&iq).expect("parses");
         assert_eq!(q.page_size, None);
         assert_eq!(q.after_cursor, None);
+        assert_eq!(q.status, ThreadStatusFilter::All);
+        assert_eq!(q.sort, ThreadSort::Recent);
+        assert_eq!(q.active_since_secs, None);
+        assert_eq!(q.channel, None);
+        assert_eq!(q.search, None);
     }
 
     #[test]
@@ -167,6 +200,75 @@ mod tests {
         let q = parse_threads_query(&iq).expect("parses");
         assert_eq!(q.page_size, Some(25));
         assert_eq!(q.after_cursor.as_deref(), Some("CURSOR-1"));
+    }
+
+    #[test]
+    fn parse_query_with_filters() {
+        let xml = "<query xmlns='urn:waddle:threads:0' \
+                          status='unread' \
+                          active-since='2026-05-19T00:00:00Z' \
+                          channel='chat@muc.waddle.chat' \
+                          search=' notifications ' \
+                          sort='replies'/>";
+        let payload: Element = xml.parse().expect("valid XML");
+        let iq = make_get_iq(payload);
+        let q = parse_threads_query(&iq).expect("parses");
+        assert_eq!(q.status, ThreadStatusFilter::Unread);
+        assert_eq!(q.active_since_secs, Some(1_779_148_800));
+        assert_eq!(
+            q.channel.as_ref().map(ToString::to_string).as_deref(),
+            Some("chat@muc.waddle.chat")
+        );
+        assert_eq!(q.search.as_deref(), Some("notifications"));
+        assert_eq!(q.sort, ThreadSort::Replies);
+    }
+
+    #[test]
+    fn parse_rejects_invalid_status() {
+        let payload: Element = "<query xmlns='urn:waddle:threads:0' status='stale'/>"
+            .parse()
+            .expect("valid XML");
+        let iq = make_get_iq(payload);
+        assert!(matches!(
+            parse_threads_query(&iq),
+            Err(ThreadsError::InvalidStatus(value)) if value == "stale"
+        ));
+    }
+
+    #[test]
+    fn parse_rejects_invalid_sort() {
+        let payload: Element = "<query xmlns='urn:waddle:threads:0' sort='hot'/>"
+            .parse()
+            .expect("valid XML");
+        let iq = make_get_iq(payload);
+        assert!(matches!(
+            parse_threads_query(&iq),
+            Err(ThreadsError::InvalidSort(value)) if value == "hot"
+        ));
+    }
+
+    #[test]
+    fn parse_rejects_invalid_active_since() {
+        let payload: Element = "<query xmlns='urn:waddle:threads:0' active-since='not-a-date'/>"
+            .parse()
+            .expect("valid XML");
+        let iq = make_get_iq(payload);
+        assert!(matches!(
+            parse_threads_query(&iq),
+            Err(ThreadsError::InvalidTimestamp(value)) if value == "not-a-date"
+        ));
+    }
+
+    #[test]
+    fn parse_rejects_invalid_channel() {
+        let payload: Element = "<query xmlns='urn:waddle:threads:0' channel='not a jid'/>"
+            .parse()
+            .expect("valid XML");
+        let iq = make_get_iq(payload);
+        assert!(matches!(
+            parse_threads_query(&iq),
+            Err(ThreadsError::InvalidChannel(value)) if value == "not a jid"
+        ));
     }
 
     #[test]
@@ -206,7 +308,7 @@ mod tests {
             last_activity_secs: 1_700_000_000,
             unread: 2,
             reply_count: 5,
-            root_author: Some("juliet@example.com".parse().expect("valid bare JID")),
+            root_author: ThreadRootAuthor::parse("juliet"),
             preview: Some("Anyone reviewed the doc?".into()),
             thread_title: Some("Q3 planning".into()),
         };
@@ -231,7 +333,7 @@ mod tests {
             thread_el
                 .get_child("root-author", NS_THREADS)
                 .map(|e| e.text()),
-            Some("juliet@example.com".into())
+            Some("juliet".into())
         );
     }
 
