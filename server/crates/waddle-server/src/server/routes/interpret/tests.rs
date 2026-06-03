@@ -2422,84 +2422,132 @@ async fn seed_groupchat_archive_row(
 }
 
 #[tokio::test]
-async fn xep_0424_groupchat_retraction_target_looked_up_by_message_id_not_archive_pk() {
-    // Regression for #281: the groupchat retraction lookup must
-    // match the wire `<retract id='...'/>` against the archive
-    // row's stored wire message id (i.e. `stanza_id` column),
-    // never against the storage primary key. The bug returned
-    // `<item-not-found/>` to legitimate retractions because the
-    // PK-based lookup only happened to match when the storage
-    // backend coincidentally collided `id` with `stanza_id`.
+async fn xep_0424_groupchat_retraction_target_resolved_by_room_stanza_id() {
+    // XEP-0424 §3 (xep-0424.xml lines 158, 230-232): a groupchat
+    // `<retract id='...'/>` cites the room-assigned XEP-0359 stanza-id
+    // (the `<stanza-id by='room'/>` value), NOT the original wire `id`
+    // attribute. That stanza-id is persisted as the archive primary key
+    // (see `finish_archive_groupchat_message`). waddle's own chat client
+    // is conformant — it sends `replyableId = stampedByRoom` (the room
+    // stanza-id). The retraction target lookup MUST resolve that id.
+    //
+    // Regression for the channel-delete failure: the lookup keyed off the
+    // `stanza_id` column (which stores the wire `id` attribute), so a
+    // conformant retraction citing the room stanza-id returned
+    // `<item-not-found/>` and channel deletes silently did nothing.
     use waddle_xmpp::mam::storage::InMemoryMamStorage;
 
     let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
-    let room: jid::BareJid = "retract-l1@muc.example.com".parse().expect("room");
+    let room: jid::BareJid = "retract-by-stanza-id@muc.example.com"
+        .parse()
+        .expect("room");
+    let room_stanza_id = "room-stamp-uuid-CCC";
+    let wire_id = "alice-orig-3";
+    seed_groupchat_archive_row(&mam, &room, room_stanza_id, wire_id).await;
+
+    let resolved = lookup_groupchat_retraction_target(&mam, &room, room_stanza_id)
+        .await
+        .expect("lookup must not error")
+        .expect("retraction citing the room stanza-id must resolve the seeded archive row");
+    assert_eq!(
+        resolved.id, room_stanza_id,
+        "lookup_groupchat_retraction_target resolves the row by its room XEP-0359 stanza-id (archive PK)"
+    );
+}
+
+#[tokio::test]
+async fn xep_0424_groupchat_retraction_target_rejects_wire_id_and_origin_id() {
+    // Strict XEP-0424 §3 (xep-0424.xml lines 158, 230-232): a groupchat
+    // retraction resolves ONLY by the room-assigned XEP-0359 stanza-id
+    // (the archive primary key). A citation of the original wire `id`
+    // attribute (the `stanza_id` column) or the client origin-id MUST
+    // NOT resolve — the server replies `<item-not-found/>`, matching the
+    // XEP-0425 moderation target semantics.
+    use waddle_xmpp::mam::storage::InMemoryMamStorage;
+
+    let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
+    let room: jid::BareJid = "retract-strict@muc.example.com".parse().expect("room");
     let archive_pk = "room-stamp-uuid-AAA";
     let wire_id = "alice-orig-1";
-    seed_groupchat_archive_row(&mam, &room, archive_pk, wire_id).await;
+    let origin_id = "alice-origin-1";
+    // One row carrying three distinct ids: PK (room stanza-id), the wire
+    // `id` attribute (`stanza_id` column), and a client origin-id.
+    let row = MamArchivedMessage {
+        id: archive_pk.to_string(),
+        timestamp: chrono::Utc::now(),
+        from: format!("{room}/alice").parse().expect("room/nick jid"),
+        to: jid::Jid::from(room.clone()),
+        body: Some("remove me".to_string()),
+        stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
+            wire_id,
+            jid::Jid::from(room.clone()),
+        )),
+        thread: None,
+        reply: None,
+        origin_id: Some(waddle_xmpp_core::xep0359::OriginId::new(origin_id)),
+        message_type: XmppMessageType::Groupchat,
+        stanza_xml: None,
+        rich: None,
+        nickname_generation: Some(0),
+    };
+    mam.store_message(&room, &row).await.expect("seed mam row");
 
-    // Lookup by the wire id resolves the row.
-    let resolved = lookup_groupchat_retraction_target(&mam, &room, wire_id)
-        .await
-        .expect("lookup must not error");
-    let resolved =
-        resolved.expect("wire-id retraction target must resolve to the seeded archive row");
-    assert_eq!(
-        resolved.id, archive_pk,
-        "lookup_groupchat_retraction_target returned the seeded row keyed by wire id"
-    );
-    assert_eq!(
-        resolved
-            .stanza_id
-            .as_ref()
-            .map(|s| s.id.as_str())
-            .unwrap_or_default(),
-        wire_id,
-        "resolved row's wire stanza_id matches the retraction target"
-    );
-
-    // Lookup by the archive PK must NOT match — that was the
-    // pre-fix behavior the issue called out.
-    let pk_lookup = lookup_groupchat_retraction_target(&mam, &room, archive_pk)
-        .await
-        .expect("lookup must not error");
+    // Conformant id (room stanza-id = archive PK) resolves.
     assert!(
-        pk_lookup.is_none(),
-        "PK lookup must not satisfy a retraction whose target id is a wire id"
+        lookup_groupchat_retraction_target(&mam, &room, archive_pk)
+            .await
+            .expect("lookup must not error")
+            .is_some(),
+        "retraction citing the room stanza-id must resolve"
+    );
+    // Wire `id` attribute (the `stanza_id` column) must NOT resolve.
+    assert!(
+        lookup_groupchat_retraction_target(&mam, &room, wire_id)
+            .await
+            .expect("lookup must not error")
+            .is_none(),
+        "retraction citing the wire id must not resolve — XEP-0424 §3 uses the room stanza-id"
+    );
+    // Client origin-id must NOT resolve.
+    assert!(
+        lookup_groupchat_retraction_target(&mam, &room, origin_id)
+            .await
+            .expect("lookup must not error")
+            .is_none(),
+        "retraction citing the client origin-id must not resolve"
     );
 }
 
 #[tokio::test]
 async fn xep_0424_groupchat_retraction_lookup_is_room_scoped() {
-    // The accessor must scope the lookup to the room archive so
-    // a colliding wire id in another room does not satisfy the
-    // retraction. (The pre-fix global `get_message` PK lookup
-    // performed the room scope via a manual `to.to_bare()`
-    // post-filter; the new accessor scopes via the SQL/in-memory
-    // archive_jid predicate. Either path must reject cross-room
-    // matches.)
+    // Resolution is scoped to the room: the room stanza-id (archive PK)
+    // of a message in room A must not satisfy a retraction addressed to
+    // room B. `lookup_groupchat_retraction_target` resolves by PK via
+    // `get_message` and rejects any row whose archived `to` is a
+    // different room.
     use waddle_xmpp::mam::storage::InMemoryMamStorage;
 
     let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
     let room_a: jid::BareJid = "room-a@muc.example.com".parse().expect("room a");
     let room_b: jid::BareJid = "room-b@muc.example.com".parse().expect("room b");
-    let wire_id = "shared-wire-id-1";
-    seed_groupchat_archive_row(&mam, &room_a, "pk-A", wire_id).await;
+    let archive_pk = "pk-A";
+    seed_groupchat_archive_row(&mam, &room_a, archive_pk, "alice-orig-1").await;
 
-    // Same wire id queried under room B — must not resolve.
-    let cross = lookup_groupchat_retraction_target(&mam, &room_b, wire_id)
+    // Room A's room stanza-id queried under room B — must not resolve.
+    let cross = lookup_groupchat_retraction_target(&mam, &room_b, archive_pk)
         .await
         .expect("lookup must not error");
     assert!(
         cross.is_none(),
-        "groupchat retraction lookup must not return rows from a different room archive"
+        "groupchat retraction lookup must not return a row from a different room's archive"
     );
 }
 
 #[tokio::test]
-async fn xep_0424_apply_groupchat_retraction_tombstone_keys_off_wire_id() {
-    // Regression for #281's second defective site: the tombstone
-    // application must also key off the wire id. Drives the
+async fn xep_0424_apply_groupchat_retraction_tombstone_keys_off_room_stanza_id() {
+    // The tombstone-application site must resolve the target by the
+    // room-assigned XEP-0359 stanza-id (the archive primary key) — the
+    // id a conformant XEP-0424 client cites. Drives the
     // `OutboundEvent::ApplyGroupchatRetractionTombstone` arm of
     // `interpret` and asserts the seeded row gets its body
     // scrubbed and a `<retracted/>` tombstone written in its
@@ -2524,21 +2572,21 @@ async fn xep_0424_apply_groupchat_retraction_tombstone_keys_off_wire_id() {
     retraction.type_ = XmppMessageType::Groupchat;
     retraction
         .payloads
-        .push(waddle_xmpp::xep::xep0424::build_retract_element(wire_id));
+        .push(waddle_xmpp::xep::xep0424::build_retract_element(archive_pk));
 
     let events = vec![OutboundEvent::ApplyGroupchatRetractionTombstone {
         room: room.clone(),
-        target_message_id: wire_id.to_string(),
+        target_message_id: archive_pk.to_string(),
         retraction_message: Box::new(retraction),
     }];
     let _outcome = interpret(events, &deps).await;
 
     // The seeded row's body must now be scrubbed and a
     // `<retracted/>` payload must replace it (XEP-0424 §"prevent
-    // further distribution"). Reading the row back via the same
-    // wire-id accessor proves both sites agree on the lookup key.
+    // further distribution"). Read the row back by its room stanza-id
+    // (archive primary key) — the same id the retraction cited.
     let row = mam
-        .get_message_by_message_id(&room, wire_id)
+        .get_message(archive_pk)
         .await
         .expect("post-tombstone lookup")
         .expect("row still present after tombstone replace");

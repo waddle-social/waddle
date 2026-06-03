@@ -3,7 +3,7 @@
 mod ws_common;
 
 use tokio::sync::Mutex;
-use ws_common::{TestServer, WsXmppClient};
+use ws_common::{extract_attr_after, TestServer, WsXmppClient};
 
 const DOMAIN: &str = "localhost";
 const USERNAME: &str = "admin";
@@ -35,21 +35,20 @@ async fn join_room(client: &mut WsXmppClient, room: &str) {
 
 #[tokio::test]
 async fn xep_0424_groupchat_retraction_round_trip_succeeds() {
-    // L4 wire-trace coverage for #281: alice sends a groupchat
-    // message, the room reflects, alice retracts citing the
-    // **wire `id`** of the original (matching the XEP-0308 correction
-    // path's accessor — see `validate_groupchat_rich_targets` in
-    // `interpret.rs`). The retraction MUST be reflected (proving the
-    // validator resolved the target instead of returning
-    // `<item-not-found/>`), and a `<retracted/>` tombstone MUST
-    // replace the original row in MAM (XEP-0424 §"prevent further
-    // distribution").
+    // L4 wire-trace coverage: alice sends a groupchat message, the room
+    // reflects it with a `<stanza-id by='room'/>`, and alice retracts
+    // citing that **room-assigned XEP-0359 stanza-id** — exactly what a
+    // conformant XEP-0424 client does (xep-0424.xml lines 158, 230-232),
+    // including waddle's own chat frontend (`replyableId = stampedByRoom`).
+    // The retraction MUST be reflected (proving the validator resolved
+    // the target instead of returning `<item-not-found/>`), and a
+    // `<retracted/>` tombstone MUST replace the original row in MAM
+    // (XEP-0424 §"prevent further distribution").
     //
-    // Pre-fix this assertion failed because the interpreter's
-    // groupchat retraction lookup keyed off the storage primary key
-    // instead of the wire id, so any client retraction citing the
-    // wire id (the only id XEP-0308 corrections accept in this
-    // codebase) returned `<item-not-found/>` to the sender.
+    // Regression: the groupchat retraction lookup keyed off the wire `id`
+    // attribute (the `stanza_id` column), so a conformant retraction
+    // citing the room stanza-id returned `<item-not-found/>` and channel
+    // deletes silently did nothing.
     let _guard = TEST_SERIAL.lock().await;
     let (_server, mut client) = setup().await;
     let room = format!("retract-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
@@ -62,15 +61,22 @@ async fn xep_0424_groupchat_retraction_round_trip_succeeds() {
         ))
         .await
         .expect("send original");
-    let _echo = client
+    let original_echo = client
         .recv_matching(|frame| frame.contains("remove me"))
         .await
         .expect("original echo");
+    // The id a conformant client retracts by: the room's XEP-0359 stamp.
+    let room_stanza_id = extract_attr_after(&original_echo, "stanza-id", "id")
+        .expect("room reflection must carry a <stanza-id by='room'/>");
+    assert_ne!(
+        room_stanza_id, original_id,
+        "room stanza-id must be distinct from the wire id so the test exercises the real path"
+    );
 
     client
         .send(&format!(
             r#"<message type="groupchat" to="{room}" id="retract-1">
-                <retract xmlns="urn:xmpp:message-retract:1" id="{original_id}"/>
+                <retract xmlns="urn:xmpp:message-retract:1" id="{room_stanza_id}"/>
                 <body>/me retracted a previous message</body>
             </message>"#
         ))
@@ -81,8 +87,8 @@ async fn xep_0424_groupchat_retraction_round_trip_succeeds() {
         .await
         .expect("retraction echo");
     assert!(
-        echo.contains(&format!("id='{original_id}'")),
-        "retraction echo must cite the original wire id: {echo}"
+        echo.contains(&format!("id='{room_stanza_id}'")),
+        "retraction echo must cite the room stanza-id: {echo}"
     );
     assert!(
         !echo.contains("<error"),
@@ -104,11 +110,9 @@ async fn xep_0424_groupchat_retraction_round_trip_succeeds() {
     // live `<retract>` payload — that's the "I retracted X" timeline
     // entry clients render.
     assert!(
-        frames
-            .iter()
-            .any(|frame| frame.contains("<retract ")
-                && frame.contains(&format!("id='{original_id}'"))),
-        "MAM did not replay retraction event citing the original wire id: {frames:?}"
+        frames.iter().any(|frame| frame.contains("<retract ")
+            && frame.contains(&format!("id='{room_stanza_id}'"))),
+        "MAM did not replay retraction event citing the room stanza-id: {frames:?}"
     );
 
     // XEP-0424 §"prevent further distribution… by replacing the

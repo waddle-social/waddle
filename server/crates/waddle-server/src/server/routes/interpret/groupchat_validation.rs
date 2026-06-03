@@ -87,23 +87,35 @@ pub(super) async fn validate_groupchat_rich_targets(
     Ok(())
 }
 
-/// XEP-0424 §3.1 retraction target resolution for groupchat. The
-/// retract stanza cites the target by its wire `id` (mirrors the
-/// XEP-0308 correction path at `validate_groupchat_rich_targets` —
-/// both XEPs name the same room-archive row by the same accessor).
+/// XEP-0424 §3 retraction target resolution for groupchat. Per
+/// xep-0424.xml lines 158 & 230-232, a `<retract/>` in a group chat
+/// cites the target by the **room-assigned XEP-0359 stanza-id** (the
+/// `<stanza-id by='room'/>` value), which waddle persists as the archive
+/// primary key (see `finish_archive_groupchat_message`). Resolve
+/// strictly by that id via [`MamStorage::get_message`] (a primary-key
+/// lookup) and confirm the row belongs to this room — never by the
+/// original wire `id` attribute (the `stanza_id` column) or the client
+/// origin-id. This mirrors the XEP-0425 moderation target lookup, which
+/// also keys off the room stanza-id (the PK) plus a room-membership
+/// check.
 ///
-/// Looks the row up by **wire message id scoped to the room archive**
-/// via [`MamStorage::get_message_by_message_id`]; never by archive
-/// primary key. The PK happens to coincide with the room's XEP-0359
-/// stamp UUID, so a PK lookup against the wire id can only match when
-/// the storage backend collides them — which is not a guarantee waddle
-/// makes (and SQL backends never do).
+/// A `get_message_by_message_id` lookup keyed off the `stanza_id` column
+/// can never resolve the room stanza-id on a SQL backend (PK and
+/// `stanza_id` are distinct values), which silently dropped every
+/// conformant channel retraction — including waddle's own client, which
+/// sends `replyableId = stampedByRoom` — as `<item-not-found/>`.
 pub(super) async fn lookup_groupchat_retraction_target(
     mam_storage: &Arc<dyn MamStorage>,
     room: &BareJid,
     target_id: &str,
 ) -> Result<Option<MamArchivedMessage>, waddle_xmpp::mam::MamStorageError> {
-    mam_storage.get_message_by_message_id(room, target_id).await
+    // The room stanza-id is a globally-unique server UUID stamped as the
+    // archive PK; scope to this room's archive (the archived `to` is the
+    // room JID) so a retraction can only target a row in the same room.
+    Ok(mam_storage
+        .get_message(target_id)
+        .await?
+        .filter(|row| row.to.to_bare() == *room))
 }
 
 /// Compare a XEP-0045 sender (the in-room full JID `room/nick`) against
