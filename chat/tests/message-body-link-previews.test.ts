@@ -85,6 +85,38 @@ describe("MessageBody link previews", () => {
     expect(html).toContain("aria-label=\"Play video: Clip with poster\"");
   });
 
+  test("renders a player embed as a play control without loading the iframe", async () => {
+    const html = await renderMessageBody({
+      message: messageWithPreviews([
+        {
+          originalUrl: "https://www.youtube.com/watch?v=429A_VugWW0",
+          normalizedUrl: "https://www.youtube.com/watch?v=429A_VugWW0",
+          title: "A video",
+          image: { url: "https://waddle.example/api/files/x.png", mediaType: "image/png" },
+          playerEmbed: { url: "https://www.youtube-nocookie.com/embed/429A_VugWW0", width: 1280, height: 720 },
+        },
+      ]),
+    });
+    expect(html).toContain('aria-label="Play video: A video"');
+    expect(html).not.toContain("<iframe");
+    expect(html).not.toContain("youtube-nocookie.com/embed/429A_VugWW0");
+    expect(html).toContain("A video");
+  });
+
+  test("does not render a player card for a non-allowlisted embed", async () => {
+    const html = await renderMessageBody({
+      message: messageWithPreviews([
+        {
+          originalUrl: "https://example.com/x",
+          title: "Bad",
+          playerEmbed: { url: "https://evil.example.com/embed/x" },
+        },
+      ]),
+    });
+    expect(html).not.toContain('aria-label="Play video');
+    expect(html).not.toContain("<iframe");
+  });
+
   test("escapes markup in a direct-video preview title — no arbitrary HTML/JS execution", async () => {
     const html = await renderMessageBody({
       message: messageWithPreviews([
