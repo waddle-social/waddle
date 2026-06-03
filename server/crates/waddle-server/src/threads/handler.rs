@@ -177,7 +177,7 @@ mod tests {
             from: None,
             to: None,
             id: "x".into(),
-            payload: Element::builder("query", "urn:xmpp:inbox:0").build(),
+            payload: Element::builder("query", "urn:xmpp:inbox:1").build(),
         };
         assert!(!is_threads_iq(&iq));
     }

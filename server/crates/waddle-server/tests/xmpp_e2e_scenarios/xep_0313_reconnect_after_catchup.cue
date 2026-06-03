@@ -180,7 +180,7 @@ scenario: #Scenario & {
 			},
 			#ExpectFrame & {
 				target:   bobPhone
-				contains: ["urn:xmpp:inbox:0", "cue-room-before-gap"]
+				contains: ["urn:xmpp:inbox:1", "cue-room-before-gap"]
 			},
 			#QueryMam & {
 				actor:   bobPhone

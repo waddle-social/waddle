@@ -2491,6 +2491,42 @@ describe("inbox push adapter", () => {
       },
     ]);
   });
+
+  test("accepts snake_case inbox pushes from the WASM message callback", () => {
+    const client = new BrowserXmppClient(session());
+    const inboxEntries: InboxEntry[] = [];
+    client.setInboxPushHandler((entry) => {
+      inboxEntries.push(entry);
+    });
+    const xmpp = Object.assign(new EventEmitter(), {}) as unknown as Agent;
+    (client as unknown as { xmpp: Agent }).xmpp = xmpp;
+    (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
+
+    xmpp.emit("message", {
+      type: "headline",
+      from: "example.com",
+      to: "alice@example.com/desktop",
+      inbox_push: {
+        partner: "space_channel@muc.example.com",
+        kind: "muc",
+        last_stanza_id: "sid-live",
+        last_updated: 1_700_001,
+        unread: 1,
+        preview: "live unread",
+      },
+    });
+
+    expect(inboxEntries).toEqual([
+      {
+        partner: "space_channel@muc.example.com",
+        kind: "muc",
+        lastStanzaId: "sid-live",
+        lastUpdated: 1_700_001,
+        unread: 1,
+        preview: "live unread",
+      },
+    ]);
+  });
 });
 
 describe("optimistic UI waits for successful sends", () => {

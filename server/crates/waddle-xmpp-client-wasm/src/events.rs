@@ -92,6 +92,14 @@ pub(crate) fn dispatch_client_event(inner: &Rc<RefCell<WaddleClientInner>>, even
                 }
             }
         }
+        ClientEvent::InboxStreamEntry(entry) => {
+            let callback = inner.borrow().on_message.clone();
+            if let Some(callback) = callback {
+                if let Ok(value) = to_js_value(&inbox_push_to_js(entry)) {
+                    let _ = callback.call1(&JsValue::NULL, &value);
+                }
+            }
+        }
         ClientEvent::MessageDelivery(MessageDeliveryEvent::Acked { stanza_id }) => {
             let callback = inner.borrow().on_message_delivery_acked.clone();
             if let Some(callback) = callback {

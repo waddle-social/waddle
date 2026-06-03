@@ -529,7 +529,7 @@ impl WaddleClient {
         })
     }
 
-    /// Fetch the user's inbox via XEP-0430 (`urn:xmpp:inbox:0`).
+    /// Fetch the user's inbox via XEP-0430 (`urn:xmpp:inbox:1`).
     ///
     /// Wire-shape: IQ-get with `<inbox/>`, server streams
     /// `<message><entry/></message>` per conversation, terminating
@@ -548,7 +548,8 @@ impl WaddleClient {
             let request_id = uuid::Uuid::new_v4().to_string();
             // XEP-0430: the `<inbox/>` IQ is addressed to the user's
             // bare JID (the inbox is per-user state). The wire-id is
-            // also the `queryid` correlation for streamed entries.
+            // reused as the embedded MAM `queryid` when responses
+            // include forwarded last-message payloads.
             let iq = waddle_xmpp_client::inbox::build_inbox_query_iq_element(
                 request_id.as_str(),
                 opts.only_unread,

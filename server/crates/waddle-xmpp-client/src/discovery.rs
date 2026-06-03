@@ -41,7 +41,7 @@ pub const DISCO_ITEMS_NS: &str = "http://jabber.org/protocol/disco#items";
 pub const UPLOAD_NS: &str = "urn:xmpp:http:upload:0";
 /// Waddle-private namespace retained for the legacy `<mark-read/>` IQ.
 ///
-/// XEP-0430's conformant `urn:xmpp:inbox:0` surface lives in
+/// XEP-0430's conformant `urn:xmpp:inbox:1` surface lives in
 /// [`waddle_xmpp::xep::xep0430`] — the server-side wire types live in
 /// that crate. The native discovery client doesn't consume the stream
 /// today; the WASM browser client does, via the inbox-streaming flow.

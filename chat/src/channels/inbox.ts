@@ -30,11 +30,100 @@ interface ChannelUnreadSummary {
   lastUpdated?: number;
 }
 
+interface ReadClearBarrier {
+  roomJid: string;
+  threadId?: string;
+  lastStanzaId: string;
+}
+
 export function useChannelInbox(
   xmppClient: Ref<BrowserXmppClient | null>,
 ) {
   const inboxState = ref<InboxState>(createInboxState());
   let hydrateRequestId = 0;
+  let localMutationRevision = 0;
+  let localMutations: Array<{
+    revision: number;
+    apply: (state: InboxState) => InboxState;
+  }> = [];
+  const readClearBarriers = new Map<string, ReadClearBarrier>();
+
+  function inboxKey(roomJid: string, threadId?: string): string {
+    return threadId ? `${roomJid}::${threadId}` : roomJid;
+  }
+
+  function barrierKey(roomJid: string, threadId?: string): string {
+    return JSON.stringify([roomJid, threadId ?? null]);
+  }
+
+  function entryForKey(state: InboxState, roomJid: string, threadId?: string): InboxEntry | undefined {
+    return threadId
+      ? state.threads.get(inboxKey(roomJid, threadId))
+      : state.channels.get(roomJid);
+  }
+
+  function currentEntryForIncoming(state: InboxState, entry: InboxEntry): InboxEntry | undefined {
+    return entryForKey(state, entry.partner, entry.thread);
+  }
+
+  function applyFreshEntry(state: InboxState, entry: InboxEntry): InboxState {
+    const existing = currentEntryForIncoming(state, entry);
+    if (existing && entry.lastUpdated < existing.lastUpdated) return state;
+    if (
+      existing
+      && entry.lastUpdated === existing.lastUpdated
+      && entry.lastStanzaId !== existing.lastStanzaId
+      && entry.unread <= existing.unread
+    ) {
+      return state;
+    }
+    return applyEntry(state, entry);
+  }
+
+  function applyReadClearBarrier(state: InboxState, barrier: ReadClearBarrier): InboxState {
+    const entry = entryForKey(state, barrier.roomJid, barrier.threadId);
+    if (!entry) return state;
+    if (entry.lastStanzaId !== barrier.lastStanzaId) {
+      readClearBarriers.delete(barrierKey(barrier.roomJid, barrier.threadId));
+      return state;
+    }
+
+    return markReadInState(state, barrier.roomJid, barrier.threadId);
+  }
+
+  function applyReadClearBarrierFor(state: InboxState, roomJid: string, threadId?: string): InboxState {
+    const barrier = readClearBarriers.get(barrierKey(roomJid, threadId));
+    return barrier ? applyReadClearBarrier(state, barrier) : state;
+  }
+
+  function applyReadClearBarriers(state: InboxState): InboxState {
+    let next = state;
+    for (const barrier of readClearBarriers.values()) {
+      next = applyReadClearBarrier(next, barrier);
+    }
+    return next;
+  }
+
+  function rememberReadClear(roomJid: string, threadId?: string) {
+    const entry = entryForKey(inboxState.value, roomJid, threadId);
+    if (entry) {
+      readClearBarriers.set(barrierKey(roomJid, threadId), {
+        roomJid,
+        ...(threadId ? { threadId } : {}),
+        lastStanzaId: entry.lastStanzaId,
+      });
+    }
+  }
+
+  function forgetReadClear(roomJid: string, threadId?: string) {
+    readClearBarriers.delete(barrierKey(roomJid, threadId));
+  }
+
+  function applyLocalMutation(apply: (state: InboxState) => InboxState) {
+    const revision = ++localMutationRevision;
+    localMutations.push({ revision, apply });
+    inboxState.value = apply(inboxState.value);
+  }
 
   const totalChannelUnreadCount = computed(() => {
     let total = 0;
@@ -65,16 +154,27 @@ export function useChannelInbox(
   async function hydrateFromInbox(): Promise<boolean> {
     const client = xmppClient.value;
     if (!client) {
-      inboxState.value = createInboxState();
+      hydrateRequestId += 1;
+      readClearBarriers.clear();
+      applyLocalMutation(() => createInboxState());
       return false;
     }
 
     const requestId = ++hydrateRequestId;
+    const startRevision = localMutationRevision;
     try {
       const inbox = await client.fetchInbox();
       if (requestId !== hydrateRequestId || client !== xmppClient.value) return false;
 
-      inboxState.value = applyEntries(createInboxState(), inbox.conversations);
+      let next = applyEntries(createInboxState(), inbox.conversations);
+      next = applyReadClearBarriers(next);
+      for (const mutation of localMutations) {
+        if (mutation.revision > startRevision) {
+          next = mutation.apply(next);
+        }
+      }
+      inboxState.value = next;
+      localMutations = [];
       return true;
     } catch {
       // best-effort
@@ -85,31 +185,42 @@ export function useChannelInbox(
   /** Handle a server-pushed inbox entry (headline message with absolute unread count). */
   function onInboxPush(entry: InboxEntry) {
     if (entry.kind !== "muc") return;
-    inboxState.value = applyEntry(inboxState.value, entry);
+    applyLocalMutation((state) =>
+      applyReadClearBarrierFor(applyFreshEntry(state, entry), entry.partner, entry.thread),
+    );
   }
 
   function clearUnread(roomJid: string) {
-    inboxState.value = markReadInState(inboxState.value, roomJid);
+    rememberReadClear(roomJid);
+    applyLocalMutation((state) => applyReadClearBarrierFor(state, roomJid));
   }
 
   function clearAll() {
     hydrateRequestId += 1;
-    inboxState.value = createInboxState();
+    readClearBarriers.clear();
+    applyLocalMutation(() => createInboxState());
   }
 
   function markRead(roomJid: string) {
     clearUnread(roomJid);
     const client = xmppClient.value;
     if (client) {
-      void client.markInboxRead(roomJid).catch(() => {});
+      void client.markInboxRead(roomJid).catch(() => {
+        forgetReadClear(roomJid);
+        void hydrateFromInbox();
+      });
     }
   }
 
   function markThreadRead(roomJid: string, threadId: string) {
-    inboxState.value = markReadInState(inboxState.value, roomJid, threadId);
+    rememberReadClear(roomJid, threadId);
+    applyLocalMutation((state) => applyReadClearBarrierFor(state, roomJid, threadId));
     const client = xmppClient.value;
     if (client) {
-      void client.markInboxRead(roomJid, threadId).catch(() => {});
+      void client.markInboxRead(roomJid, threadId).catch(() => {
+        forgetReadClear(roomJid, threadId);
+        void hydrateFromInbox();
+      });
     }
   }
 

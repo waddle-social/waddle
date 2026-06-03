@@ -93,6 +93,278 @@ describe("useChannelInbox", () => {
     expect(composable.totalUnreadCount.value).toBe(2);
   });
 
+  test("merges in-flight hydrate results with newer live inbox pushes", async () => {
+    let resolveHydrate!: (value: { totalUnread: number; conversations: InboxEntry[] }) => void;
+    const client = {
+      fetchInbox: mock(() => new Promise<{ totalUnread: number; conversations: InboxEntry[] }>((resolve) => {
+        resolveHydrate = resolve;
+      })),
+      markInboxRead: mock(() => Promise.resolve()),
+    } as unknown as MockClient;
+    const composable = useChannelInbox(ref<BrowserXmppClient | null>(client));
+
+    const hydrated = composable.hydrateFromInbox();
+    composable.onInboxPush({
+      ...channelEntry,
+      lastStanzaId: "sid-live",
+      lastUpdated: 300,
+      unread: 5,
+      preview: "live unread",
+    });
+
+    resolveHydrate({
+      totalUnread: 4,
+      conversations: [{
+        ...channelEntry,
+        lastStanzaId: "sid-stale",
+        lastUpdated: 100,
+        unread: 0,
+      }, {
+        partner: "other@conference.example.com",
+        kind: "muc",
+        lastStanzaId: "sid-other",
+        lastUpdated: 250,
+        unread: 4,
+        preview: "other unread",
+      }],
+    });
+
+    expect(await hydrated).toBe(true);
+    expect(composable.totalChannelUnreadCount.value).toBe(9);
+    expect(composable.unreadForRoomJid("space_channel@conference.example.com")).toBe(5);
+    expect(composable.unreadForRoomJid("other@conference.example.com")).toBe(4);
+    expect(composable.channelUnreadMap([
+      { id: "space_channel", jid: "space_channel@conference.example.com" },
+      { id: "other", jid: "other@conference.example.com" },
+    ])).toMatchObject({
+      space_channel: {
+        unread: 5,
+        preview: "live unread",
+        lastUpdated: 300,
+      },
+      other: {
+        unread: 4,
+        preview: "other unread",
+        lastUpdated: 250,
+      },
+    });
+  });
+
+  test("ignores stale inbox pushes after a newer hydrate row", async () => {
+    const client = makeClient([{
+      ...channelEntry,
+      lastStanzaId: "sid-newer",
+      lastUpdated: 500,
+      unread: 6,
+      preview: "newer hydrate",
+    }]);
+    const composable = useChannelInbox(ref<BrowserXmppClient | null>(client));
+
+    await composable.hydrateFromInbox();
+    composable.onInboxPush({
+      ...channelEntry,
+      lastStanzaId: "sid-older",
+      lastUpdated: 250,
+      unread: 0,
+      preview: "older push",
+    });
+
+    expect(composable.unreadForRoomJid("space_channel@conference.example.com")).toBe(6);
+    expect(composable.channelUnreadMap([
+      { id: "space_channel", jid: "space_channel@conference.example.com" },
+    ])).toMatchObject({
+      space_channel: {
+        unread: 6,
+        preview: "newer hydrate",
+        lastUpdated: 500,
+      },
+    });
+  });
+
+  test("ignores stale inbox pushes after a newer live push", () => {
+    const composable = useChannelInbox(ref<BrowserXmppClient | null>(null));
+
+    composable.onInboxPush({
+      ...channelEntry,
+      lastStanzaId: "sid-newer-live",
+      lastUpdated: 500,
+      unread: 8,
+      preview: "newer live",
+    });
+    composable.onInboxPush({
+      ...channelEntry,
+      lastStanzaId: "sid-older-live",
+      lastUpdated: 300,
+      unread: 0,
+      preview: "older live",
+    });
+
+    expect(composable.unreadForRoomJid("space_channel@conference.example.com")).toBe(8);
+    expect(composable.channelUnreadMap([
+      { id: "space_channel", jid: "space_channel@conference.example.com" },
+    ])).toMatchObject({
+      space_channel: {
+        unread: 8,
+        preview: "newer live",
+        lastUpdated: 500,
+      },
+    });
+  });
+
+  test("ignores equal-timestamp stale inbox pushes that would lower unread", () => {
+    const composable = useChannelInbox(ref<BrowserXmppClient | null>(null));
+
+    composable.onInboxPush({
+      ...channelEntry,
+      lastStanzaId: "sid-newer-same-second",
+      lastUpdated: 500,
+      unread: 5,
+      preview: "newer same second",
+    });
+    composable.onInboxPush({
+      ...channelEntry,
+      lastStanzaId: "sid-older-same-second",
+      lastUpdated: 500,
+      unread: 0,
+      preview: "older same second",
+    });
+
+    expect(composable.unreadForRoomJid("space_channel@conference.example.com")).toBe(5);
+    expect(composable.channelUnreadMap([
+      { id: "space_channel", jid: "space_channel@conference.example.com" },
+    ])).toMatchObject({
+      space_channel: {
+        unread: 5,
+        preview: "newer same second",
+        lastUpdated: 500,
+      },
+    });
+  });
+
+  test("keeps a local mark-read across stale hydrate rows for the cleared stanza", async () => {
+    const responses = [
+      {
+        totalUnread: 2,
+        conversations: [channelEntry],
+      },
+      {
+        totalUnread: 1,
+        conversations: [{
+          ...channelEntry,
+          lastStanzaId: "sid-new",
+          lastUpdated: 400,
+          unread: 1,
+          preview: "new unread",
+        }],
+      },
+    ];
+    const client = {
+      fetchInbox: mock(() => Promise.resolve(responses.shift()!)),
+      markInboxRead: mock(() => Promise.resolve()),
+    } as unknown as MockClient;
+    const composable = useChannelInbox(ref<BrowserXmppClient | null>(client));
+
+    composable.onInboxPush(channelEntry);
+    composable.markRead("space_channel@conference.example.com");
+    expect(composable.unreadForRoomJid("space_channel@conference.example.com")).toBe(0);
+
+    await composable.hydrateFromInbox();
+    expect(composable.totalChannelUnreadCount.value).toBe(0);
+    expect(composable.unreadForRoomJid("space_channel@conference.example.com")).toBe(0);
+
+    await composable.hydrateFromInbox();
+    expect(composable.unreadForRoomJid("space_channel@conference.example.com")).toBe(1);
+  });
+
+  test("does not replay channel mark-read onto newer hydrate rows", async () => {
+    let resolveHydrate!: (value: { totalUnread: number; conversations: InboxEntry[] }) => void;
+    const client = {
+      fetchInbox: mock(() => new Promise<{ totalUnread: number; conversations: InboxEntry[] }>((resolve) => {
+        resolveHydrate = resolve;
+      })),
+      markInboxRead: mock(() => Promise.resolve()),
+    } as unknown as MockClient;
+    const composable = useChannelInbox(ref<BrowserXmppClient | null>(client));
+
+    composable.onInboxPush(channelEntry);
+    const hydrated = composable.hydrateFromInbox();
+    composable.markRead("space_channel@conference.example.com");
+
+    resolveHydrate({
+      totalUnread: 1,
+      conversations: [{
+        ...channelEntry,
+        lastStanzaId: "sid-new",
+        lastUpdated: 400,
+        unread: 1,
+        preview: "new unread",
+      }],
+    });
+
+    expect(await hydrated).toBe(true);
+    expect(composable.unreadForRoomJid("space_channel@conference.example.com")).toBe(1);
+    expect(composable.totalChannelUnreadCount.value).toBe(1);
+  });
+
+  test("does not replay thread mark-read onto newer hydrate rows", async () => {
+    let resolveHydrate!: (value: { totalUnread: number; conversations: InboxEntry[] }) => void;
+    const client = {
+      fetchInbox: mock(() => new Promise<{ totalUnread: number; conversations: InboxEntry[] }>((resolve) => {
+        resolveHydrate = resolve;
+      })),
+      markInboxRead: mock(() => Promise.resolve()),
+    } as unknown as MockClient;
+    const composable = useChannelInbox(ref<BrowserXmppClient | null>(client));
+
+    composable.onInboxPush(threadEntry);
+    const hydrated = composable.hydrateFromInbox();
+    composable.markThreadRead("space_channel@conference.example.com", "thread-1");
+
+    resolveHydrate({
+      totalUnread: 2,
+      conversations: [{
+        ...threadEntry,
+        lastStanzaId: "sid-thread-new",
+        lastUpdated: 450,
+        unread: 2,
+        preview: "new thread unread",
+      }],
+    });
+
+    expect(await hydrated).toBe(true);
+    expect(composable.totalThreadUnreadCount.value).toBe(2);
+    expect(composable.threadEntries("space_channel@conference.example.com")[0]?.unread).toBe(2);
+  });
+
+  test("keeps thread mark-read barriers for thread ids containing separators", async () => {
+    const specialThread = {
+      ...threadEntry,
+      thread: "parent::child",
+      lastStanzaId: "sid-special-thread",
+      unread: 4,
+    };
+    const responses = [
+      {
+        totalUnread: 4,
+        conversations: [specialThread],
+      },
+    ];
+    const client = {
+      fetchInbox: mock(() => Promise.resolve(responses.shift()!)),
+      markInboxRead: mock(() => Promise.resolve()),
+    } as unknown as MockClient;
+    const composable = useChannelInbox(ref<BrowserXmppClient | null>(client));
+
+    composable.onInboxPush(specialThread);
+    composable.markThreadRead("space_channel@conference.example.com", "parent::child");
+    await composable.hydrateFromInbox();
+
+    expect(composable.totalThreadUnreadCount.value).toBe(0);
+    expect(composable.threadEntries("space_channel@conference.example.com")[0]?.threadId).toBe("parent::child");
+    expect(composable.threadEntries("space_channel@conference.example.com")[0]?.unread).toBe(0);
+    expect(client.markInboxRead).toHaveBeenCalledWith("space_channel@conference.example.com", "parent::child");
+  });
+
   test("markRead and markThreadRead clear their own totals", () => {
     const client = makeClient();
     const composable = useChannelInbox(ref<BrowserXmppClient | null>(client));

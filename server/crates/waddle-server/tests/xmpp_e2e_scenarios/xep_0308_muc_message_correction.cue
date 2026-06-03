@@ -62,7 +62,7 @@ scenario: #Scenario & {
 		},
 		#ExpectFrame & {
 			target:   bobPhone
-			contains: ["urn:xmpp:inbox:0", "cue-muc-edit-original"]
+			contains: ["urn:xmpp:inbox:1", "cue-muc-edit-original"]
 		},
 		#SendMessage & {
 			from: alicePhone
@@ -90,7 +90,7 @@ scenario: #Scenario & {
 		},
 		#ExpectFrame & {
 			target:   bobPhone
-			contains: ["urn:xmpp:inbox:0", "cue-muc-edit-correction"]
+			contains: ["urn:xmpp:inbox:1", "cue-muc-edit-correction"]
 		},
 	]
 }

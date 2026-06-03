@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import { Hash, Inbox, ListTree, Menu, RefreshCw } from "lucide-vue-next";
 import { connectionStore } from "@/lib/connection-store";
 import type { ChannelSummary } from "@/lib/chat-types";
@@ -12,6 +12,7 @@ const props = defineProps<{
   inboxState: InboxState;
   onSelectChannel: (channelId: string) => void | Promise<void>;
   onSelectThread: (channelId: string, threadId: string) => void | Promise<void>;
+  onRefreshInbox?: () => void | Promise<unknown>;
 }>();
 
 const emit = defineEmits<{
@@ -26,6 +27,19 @@ const { groups, isLoading, error, refresh } = useUnreadOverview({
 });
 
 const hasGroups = computed(() => groups.value.length > 0);
+const isRefreshingInbox = ref(false);
+const isRefreshBusy = computed(() => isLoading.value || isRefreshingInbox.value);
+
+async function refreshUnread() {
+  if (isRefreshBusy.value) return;
+  isRefreshingInbox.value = true;
+  try {
+    await props.onRefreshInbox?.();
+    await refresh();
+  } finally {
+    isRefreshingInbox.value = false;
+  }
+}
 </script>
 
 <template>
@@ -56,11 +70,11 @@ const hasGroups = computed(() => groups.value.length > 0);
         <button
           type="button"
           class="type-caption inline-flex h-8 items-center gap-1.5 rounded-md border border-border px-2.5 text-muted-foreground hover:bg-muted/50 hover:text-foreground disabled:opacity-60"
-          :disabled="isLoading"
+          :disabled="isRefreshBusy"
           aria-label="Refresh unread"
-          @click="refresh()"
+          @click="refreshUnread()"
         >
-          <RefreshCw class="h-3.5 w-3.5" :class="isLoading ? 'animate-spin' : ''" aria-hidden="true" />
+          <RefreshCw class="h-3.5 w-3.5" :class="isRefreshBusy ? 'animate-spin' : ''" aria-hidden="true" />
           Refresh
         </button>
       </div>

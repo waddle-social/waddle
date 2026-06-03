@@ -107,7 +107,7 @@ scenario: #Scenario & {
 		},
 		#DrainFrames & {
 			target:   bobPhone
-			contains: ["urn:xmpp:inbox:0", "cue-pin-fb-target"]
+			contains: ["urn:xmpp:inbox:1", "cue-pin-fb-target"]
 		},
 	]
 }
