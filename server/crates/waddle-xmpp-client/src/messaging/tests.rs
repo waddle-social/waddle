@@ -507,6 +507,34 @@ fn parse_message_extracts_xep0511_link_preview() {
 }
 
 #[test]
+fn parses_og_video_player_embed_from_xep0511() {
+    let e = el(
+        "<message xmlns='jabber:client' type='groupchat' id='m-link'>\
+           <body>see https://www.youtube.com/watch?v=429A_VugWW0</body>\
+           <rdf:Description xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#' xmlns:og='https://ogp.me/ns#' xmlns:ogv='https://ogp.me/ns#video:' rdf:about='https://www.youtube.com/watch?v=429A_VugWW0'>\
+             <og:title>A video</og:title>\
+             <og:video>https://www.youtube-nocookie.com/embed/429A_VugWW0</og:video>\
+             <ogv:type>text/html</ogv:type>\
+             <ogv:width>1280</ogv:width>\
+             <ogv:height>720</ogv:height>\
+           </rdf:Description>\
+         </message>",
+    );
+    let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+        panic!("expected Message");
+    };
+    assert_eq!(msg.link_previews.len(), 1);
+    let preview = &msg.link_previews[0];
+    let player = preview.player_embed.as_ref().expect("player embed");
+    assert_eq!(
+        player.url.as_str(),
+        "https://www.youtube-nocookie.com/embed/429A_VugWW0"
+    );
+    assert_eq!(player.width, Some(1280));
+    assert_eq!(player.height, Some(720));
+}
+
+#[test]
 fn parse_message_accepts_loopback_http_xep0511_link_preview_image() {
     for cached_url in [
         "http://localhost:3000/api/files/11111111-1111-4111-8111-111111111111/link-preview-86610c40efe63f0a46c58c4b605c164b4ffa3a3ad3f1dcf13e6ba4c59cb3ce16.png",

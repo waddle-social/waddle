@@ -45,10 +45,10 @@ pub use types::{
     ExtensionLaunchContextData, ExtensionLaunchData, ExtensionNamespace,
     ExtensionPayloadAttributeData, ExtensionPayloadElementData, ExtensionPluginId,
     ExtensionRoomJid, ExtensionSourceData, ExtensionTextId, ExtensionTimestamp, ExtensionXmlName,
-    InboundMessage, InboundPresence, InvalidLinkPreviewToken, LinkPreviewData, LinkPreviewToken,
-    MarkupSpan, MarkupSpanData, MarkupSpanType, MdsDisplayedEntry, MessagingEvent,
-    ModerationPayload, MucAffiliation, MucRole, MucStatus, MujiPresence, PresenceHat,
-    ReactionPayload, ReferenceData, RetractionPayload, SendMessageOptions, SharedFile,
+    InboundMessage, InboundPresence, InvalidLinkPreviewToken, LinkPreviewData, LinkPreviewPlayer,
+    LinkPreviewToken, MarkupSpan, MarkupSpanData, MarkupSpanType, MdsDisplayedEntry,
+    MessagingEvent, ModerationPayload, MucAffiliation, MucRole, MucStatus, MujiPresence,
+    PresenceHat, ReactionPayload, ReferenceData, RetractionPayload, SendMessageOptions, SharedFile,
     SharedFileDisposition,
 };
 /// Re-export the xmpp-parsers Jingle types Waddle's call surface
