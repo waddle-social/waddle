@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use thiserror::Error;
 use url::Url;
-use waddle_xmpp_core::PreviewImageMediaType;
+use waddle_xmpp_core::{DirectVideoMediaType, PreviewImageMediaType};
 use xmpp_parsers::message::Message;
 
 /// Waddle-private link preview namespace.
@@ -53,6 +53,9 @@ pub struct LinkPreviewTokenData {
     pub title: Option<String>,
     pub description: Option<String>,
     pub image: Option<LinkPreviewTokenImage>,
+    /// Trusted direct playable video sealed inside the token, when the link is
+    /// a direct-media file the client may inline-play on user action.
+    pub video: Option<LinkPreviewTokenVideo>,
     pub expires_at_unix: i64,
 }
 
@@ -66,6 +69,14 @@ pub struct LinkPreviewTokenImage {
     pub alt: Option<String>,
 }
 
+/// Cached direct-video metadata sealed inside a composer preview token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkPreviewTokenVideo {
+    pub url: Url,
+    pub media_type: DirectVideoMediaType,
+    pub size: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LinkPreviewTokenWire {
     sender_jid: String,
@@ -75,7 +86,17 @@ struct LinkPreviewTokenWire {
     title: Option<String>,
     description: Option<String>,
     image: Option<LinkPreviewTokenImageWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    video: Option<LinkPreviewTokenVideoWire>,
     expires_at_unix: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LinkPreviewTokenVideoWire {
+    url: String,
+    media_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    size: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -164,6 +185,11 @@ pub fn encode_link_preview_token(data: &LinkPreviewTokenData, secret: &[u8]) -> 
             height: image.height,
             alt: image.alt.clone(),
         }),
+        video: data.video.as_ref().map(|video| LinkPreviewTokenVideoWire {
+            url: video.url.as_str().to_string(),
+            media_type: video.media_type.as_str().to_string(),
+            size: video.size,
+        }),
         expires_at_unix: data.expires_at_unix,
     };
     let json = serde_json::to_vec(&wire).expect("wire token is serializable");
@@ -245,6 +271,20 @@ pub fn decode_link_preview_token(
                 })
             })
             .transpose()?,
+        video: wire
+            .video
+            .map(|video| {
+                Ok(LinkPreviewTokenVideo {
+                    url: Url::parse(&video.url)
+                        .map_err(|_| WaddleLinkPreviewError::InvalidTokenUrl)?,
+                    media_type: video
+                        .media_type
+                        .parse()
+                        .map_err(|_| WaddleLinkPreviewError::InvalidTokenMediaType)?,
+                    size: video.size,
+                })
+            })
+            .transpose()?,
         expires_at_unix: wire.expires_at_unix,
     })
 }
@@ -283,6 +323,33 @@ mod tests {
                 height: Some(360),
                 alt: Some("Article screenshot".to_string()),
             }),
+            video: None,
+            expires_at_unix: 1_900_000_000,
+        };
+
+        let token = encode_link_preview_token(&data, SECRET);
+
+        assert_eq!(
+            decode_link_preview_token(&token, SECRET, 1_800_000_000),
+            Ok(data)
+        );
+    }
+
+    #[test]
+    fn token_round_trips_typed_direct_video_data() {
+        let data = LinkPreviewTokenData {
+            sender_jid: "alice@example.com".parse().expect("jid"),
+            scope_jid: "room@muc.example.com".parse().expect("jid"),
+            original_url: Url::parse("https://cdn.example/clip.mp4").expect("url"),
+            normalized_url: Url::parse("https://cdn.example/clip.mp4").expect("url"),
+            title: None,
+            description: None,
+            image: None,
+            video: Some(LinkPreviewTokenVideo {
+                url: Url::parse("https://cdn.example/clip.mp4").expect("url"),
+                media_type: DirectVideoMediaType::Mp4,
+                size: Some(4_823_344),
+            }),
             expires_at_unix: 1_900_000_000,
         };
 
@@ -304,6 +371,7 @@ mod tests {
             title: Some("Example".to_string()),
             description: Some("Plain text preview".to_string()),
             image: None,
+            video: None,
             expires_at_unix: 1_900_000_000,
         };
 
@@ -326,6 +394,7 @@ mod tests {
             title: None,
             description: None,
             image: None,
+            video: None,
             expires_at_unix: 10,
         };
 
@@ -347,6 +416,7 @@ mod tests {
             title: Some("t".repeat(MAX_LINK_PREVIEW_TOKEN_BYTES)),
             description: Some("d".repeat(MAX_LINK_PREVIEW_TOKEN_BYTES)),
             image: None,
+            video: None,
             expires_at_unix: 1_900_000_000,
         };
 

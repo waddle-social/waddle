@@ -6,6 +6,7 @@ import type { WaddleEncryptedFile } from "./extensions/encrypted-file";
 import { barePeerJid } from "./jid";
 import type { InboxEntry } from "./inbox-types";
 import { isTrustedCachedPreviewImageUrl } from "./link-preview";
+import { associateDirectVideoPreviews } from "./link-preview-video";
 import {
   buildReplyFallbackPrefix,
   shiftMarkupSpans,
@@ -430,6 +431,11 @@ export function roomMessageFromArchived(
   if (!message.body && !message.subject && !sharedFiles.length && !linkPreviews.length && !extensionAnnotations.length && !message.forum_post_kind && !message.is_retracted) {
     return null;
   }
+  const { linkPreviews: associatedLinkPreviews, sharedFiles: associatedSharedFiles } =
+    associateDirectVideoPreviews(
+      linkPreviews.map((preview) => linkPreviewFromWasm(preview, decodeOptions)),
+      sharedFiles.map(sharedFileFromWasm),
+    );
   const base: LiveRoomMessage = {
     id: roomPrimaryId,
     archiveId: message.mam_id,
@@ -460,8 +466,8 @@ export function roomMessageFromArchived(
       ? { markup: markupSpans.flatMap((s) => { const m = wasmSpanToMarkupSpan(s); return m ? [m] : []; }) }
       : {}),
     ...(references.length ? { references: references.map(referenceFromWasm) } : {}),
-    ...(sharedFiles.length ? { sharedFiles: sharedFiles.map(sharedFileFromWasm) } : {}),
-    ...(linkPreviews.length ? { linkPreviews: linkPreviews.map((preview) => linkPreviewFromWasm(preview, decodeOptions)) } : {}),
+    ...(associatedSharedFiles.length ? { sharedFiles: associatedSharedFiles } : {}),
+    ...(associatedLinkPreviews.length ? { linkPreviews: associatedLinkPreviews } : {}),
     ...(extensionAnnotations.length ? { extensionAnnotations } : {}),
     ...(message.extension_body_fallback && extensionAnnotations.length ? { extensionBodyFallback: true } : {}),
     ...(message.is_sticker ? { isSticker: true } : {}),
@@ -538,6 +544,11 @@ export function dmMessageFromArchived(
   // anyway, but the codec stays symmetric with the room path so a stray
   // foreign-server archive row can't manifest a bodyless DM ghost either.
   if (!message.body && !message.subject && !sharedFiles.length && !linkPreviews.length && !extensionAnnotations.length && !message.is_retracted) return null;
+  const { linkPreviews: associatedLinkPreviews, sharedFiles: associatedSharedFiles } =
+    associateDirectVideoPreviews(
+      linkPreviews.map((preview) => linkPreviewFromWasm(preview, decodeOptions)),
+      sharedFiles.map(sharedFileFromWasm),
+    );
   const base: LiveDmMessage = {
     id: dmPrimaryId,
     archiveId: message.mam_id,
@@ -562,8 +573,8 @@ export function dmMessageFromArchived(
       ? { markup: markupSpans.flatMap((s) => { const m = wasmSpanToMarkupSpan(s); return m ? [m] : []; }) }
       : {}),
     ...(references.length ? { references: references.map(referenceFromWasm) } : {}),
-    ...(sharedFiles.length ? { sharedFiles: sharedFiles.map(sharedFileFromWasm) } : {}),
-    ...(linkPreviews.length ? { linkPreviews: linkPreviews.map((preview) => linkPreviewFromWasm(preview, decodeOptions)) } : {}),
+    ...(associatedSharedFiles.length ? { sharedFiles: associatedSharedFiles } : {}),
+    ...(associatedLinkPreviews.length ? { linkPreviews: associatedLinkPreviews } : {}),
     ...(extensionAnnotations.length ? { extensionAnnotations } : {}),
     ...(message.extension_body_fallback && extensionAnnotations.length ? { extensionBodyFallback: true } : {}),
     ...(message.is_sticker ? { isSticker: true } : {}),
