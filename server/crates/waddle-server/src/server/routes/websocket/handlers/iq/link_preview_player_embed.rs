@@ -49,6 +49,11 @@ pub(crate) fn normalize_allowed_player_embed(url: &Url) -> Option<Url> {
     if url.scheme() != "https" {
         return None;
     }
+    // Credentials in an https iframe src are never legitimate for an embed and
+    // would survive the host rewrite — reject them at the allowlist boundary.
+    if !url.username().is_empty() || url.password().is_some() {
+        return None;
+    }
     let origin = origin_text(url)?;
     let rule = PLAYER_EMBED_RULES
         .iter()
@@ -93,6 +98,12 @@ mod tests {
     #[test]
     fn rejects_non_https_embed() {
         let url = Url::parse("http://www.youtube.com/embed/x").expect("url");
+        assert!(normalize_allowed_player_embed(&url).is_none());
+    }
+
+    #[test]
+    fn rejects_userinfo_in_embed_url() {
+        let url = Url::parse("https://user@www.youtube.com/embed/x").expect("url");
         assert!(normalize_allowed_player_embed(&url).is_none());
     }
 }

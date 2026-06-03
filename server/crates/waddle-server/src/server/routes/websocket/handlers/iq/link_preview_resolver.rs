@@ -1028,12 +1028,11 @@ fn extract_metadata_parts_from_html(
             alt: meta_content(html, "og:image:alt", LINK_PREVIEW_DESCRIPTION_MAX_BYTES),
         });
 
+    let og_video_is_html = meta_content(html, "og:video:type", 64)
+        .is_some_and(|ty| ty.eq_ignore_ascii_case("text/html"));
     let player_embed = meta_content(html, "og:video:secure_url", usize::MAX)
         .or_else(|| meta_content(html, "og:video:url", usize::MAX))
-        .filter(|_| {
-            meta_content(html, "og:video:type", 64)
-                .is_some_and(|ty| ty.eq_ignore_ascii_case("text/html"))
-        })
+        .filter(|_| og_video_is_html)
         .and_then(|raw| Url::parse(&raw).ok())
         .and_then(|url| normalize_allowed_player_embed(&url))
         .map(|url| ResolvedPlayerEmbed {
@@ -3565,5 +3564,34 @@ mod tests {
         };
         assert!(metadata.player_embed.is_none());
         assert_eq!(metadata.title.as_deref(), Some("A video"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ignores_non_html_og_video_type() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/watch"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                r#"<html><head>
+                      <meta property="og:title" content="A video">
+                      <meta property="og:video:secure_url" content="https://www.youtube.com/embed/429A_VugWW0">
+                      <meta property="og:video:type" content="video/mp4">
+                    </head></html>"#,
+                "text/html; charset=utf-8",
+            ))
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/watch", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        let LinkPreviewResolverOutcome::Ready(metadata) = outcome else {
+            panic!("expected ready outcome, got {outcome:?}");
+        };
+        assert!(metadata.player_embed.is_none());
     }
 }
