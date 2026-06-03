@@ -28,6 +28,8 @@ import type {
   WasmReference,
   WasmSendOptions,
   WasmLinkPreview,
+  WasmLinkPreviewImage,
+  WasmLinkPreviewPlayer,
   WasmSharedFile,
 } from "./wasm-types";
 
@@ -156,13 +158,15 @@ interface LinkPreviewDecodeOptions {
 }
 
 export function linkPreviewFromWasm(preview: WasmLinkPreview, options: LinkPreviewDecodeOptions = {}): LinkPreview {
-  const trustedImage = preview.image && isTrustedCachedPreviewImageUrl(preview.image.url, options.trustedMediaOrigin)
-    ? preview.image
-    : undefined;
+  const trustedImage: WasmLinkPreviewImage | undefined =
+    preview.image && isTrustedCachedPreviewImageUrl(preview.image.url, options.trustedMediaOrigin)
+      ? preview.image
+      : undefined;
   const remoteMediaUnavailable = !!preview.remote_media_unavailable || (!!preview.image && !trustedImage);
-  const playerEmbed = preview.player_embed && isAllowedPlayerEmbedOrigin(preview.player_embed.url)
-    ? preview.player_embed
-    : undefined;
+  const playerEmbed: WasmLinkPreviewPlayer | undefined =
+    preview.player_embed && isAllowedPlayerEmbedOrigin(preview.player_embed.url)
+      ? preview.player_embed
+      : undefined;
   return {
     originalUrl: preview.original_url,
     ...(preview.normalized_url ? { normalizedUrl: preview.normalized_url } : {}),
