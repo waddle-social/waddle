@@ -13,6 +13,7 @@ use tracing::warn;
 use url::{Host, Url};
 use waddle_xmpp_core::{DirectVideoMediaType, PreviewImageMediaType};
 
+use super::link_preview_player_embed::normalize_allowed_player_embed;
 use crate::config::{LinkPreviewConfig, LinkPreviewHostPattern};
 use crate::db::actor::{DbActor, DbExecute};
 use crate::db::Value;
@@ -44,6 +45,9 @@ pub(super) struct ResolvedLinkMetadata {
     /// Direct playable video discovered when the link itself is a trusted
     /// direct-media file. Mutually exclusive with HTML-derived previews.
     pub video: Option<ResolvedDirectVideo>,
+    /// Allowlisted embeddable player iframe discovered from `og:video`. Coexists
+    /// with image/title/description; mutually exclusive with `video`.
+    pub player_embed: Option<ResolvedPlayerEmbed>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +57,14 @@ pub(super) struct ResolvedDirectVideo {
     pub media_type: DirectVideoMediaType,
     /// Total byte size when advertised by the origin.
     pub size: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ResolvedPlayerEmbed {
+    /// Allowlisted, host-rewritten embed URL the client renders in an iframe.
+    pub url: Url,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -240,6 +252,7 @@ pub(super) async fn resolve_link_preview(
                         media_type,
                         size,
                     }),
+                    player_embed: None,
                 }));
             }
             FetchOnceResult::Redirect(next) => {
@@ -1015,6 +1028,20 @@ fn extract_metadata_parts_from_html(
             alt: meta_content(html, "og:image:alt", LINK_PREVIEW_DESCRIPTION_MAX_BYTES),
         });
 
+    let player_embed = meta_content(html, "og:video:secure_url", usize::MAX)
+        .or_else(|| meta_content(html, "og:video:url", usize::MAX))
+        .filter(|_| {
+            meta_content(html, "og:video:type", 64)
+                .is_some_and(|ty| ty.eq_ignore_ascii_case("text/html"))
+        })
+        .and_then(|raw| Url::parse(&raw).ok())
+        .and_then(|url| normalize_allowed_player_embed(&url))
+        .map(|url| ResolvedPlayerEmbed {
+            url,
+            width: meta_content(html, "og:video:width", 16).and_then(|raw| raw.parse().ok()),
+            height: meta_content(html, "og:video:height", 16).and_then(|raw| raw.parse().ok()),
+        });
+
     Some((
         ResolvedLinkMetadata {
             original_url: requested_url.clone(),
@@ -1023,6 +1050,7 @@ fn extract_metadata_parts_from_html(
             description,
             image: None,
             video: None,
+            player_embed,
         },
         image,
     ))
@@ -3470,5 +3498,72 @@ mod tests {
         let outcome = resolve_link_preview(&url, &policy).await;
 
         assert_eq!(outcome.status(), LinkPreviewResolverStatus::Failed);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn extracts_allowlisted_player_embed_from_og_video() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/watch"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                r#"<html><head>
+                      <meta property="og:title" content="A video">
+                      <meta property="og:video:secure_url" content="https://www.youtube.com/embed/429A_VugWW0">
+                      <meta property="og:video:type" content="text/html">
+                      <meta property="og:video:width" content="1280">
+                      <meta property="og:video:height" content="720">
+                    </head></html>"#,
+                "text/html; charset=utf-8",
+            ))
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/watch", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        let LinkPreviewResolverOutcome::Ready(metadata) = outcome else {
+            panic!("expected ready outcome, got {outcome:?}");
+        };
+        let player = metadata.player_embed.expect("player embed");
+        assert_eq!(
+            player.url.as_str(),
+            "https://www.youtube-nocookie.com/embed/429A_VugWW0"
+        );
+        assert_eq!(player.width, Some(1280));
+        assert_eq!(player.height, Some(720));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn drops_non_allowlisted_player_embed_but_keeps_card() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/watch"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                r#"<html><head>
+                      <meta property="og:title" content="A video">
+                      <meta property="og:video:secure_url" content="https://evil.example.com/embed/x">
+                      <meta property="og:video:type" content="text/html">
+                    </head></html>"#,
+                "text/html; charset=utf-8",
+            ))
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/watch", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        let LinkPreviewResolverOutcome::Ready(metadata) = outcome else {
+            panic!("expected ready outcome, got {outcome:?}");
+        };
+        assert!(metadata.player_embed.is_none());
+        assert_eq!(metadata.title.as_deref(), Some("A video"));
     }
 }

@@ -425,7 +425,7 @@ pub use super::xep_waddle_link_preview::{
     encode_link_preview_token_checked, extract_link_preview_request_from_message,
     is_link_preview_request_element, parse_link_preview_request_element,
     strip_link_preview_requests, LinkPreviewToken, LinkPreviewTokenData, LinkPreviewTokenImage,
-    LinkPreviewTokenVideo, WaddleLinkPreviewError, ELEMENT_PREVIEW_REQUEST,
+    LinkPreviewTokenPlayer, LinkPreviewTokenVideo, WaddleLinkPreviewError, ELEMENT_PREVIEW_REQUEST,
     MAX_LINK_PREVIEW_TOKEN_BYTES, NS_WADDLE_LINK_PREVIEW,
 };
 
