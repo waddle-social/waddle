@@ -218,7 +218,17 @@ pub(super) async fn resolve_link_preview(
                 if let (Some(cache), Some(remote_image)) =
                     (policy.media_cache.as_ref(), remote_image)
                 {
-                    match fetch_cached_preview_image(&remote_image, policy, cache, deadline).await {
+                    // Give the image fetch its OWN budget rather than the page
+                    // fetch's leftover. A slow page (e.g. heavy SSR) must not be
+                    // able to starve caching of a slow, dynamically-generated
+                    // `og:image` (e.g. Next.js /opengraph-image), which would
+                    // otherwise time out and drop the picture from the preview.
+                    // `policy.timeout` thus bounds each phase independently, so
+                    // a worst-case resolve is ~2x `policy.timeout` (page + image).
+                    let image_deadline = Instant::now() + policy.timeout;
+                    match fetch_cached_preview_image(&remote_image, policy, cache, image_deadline)
+                        .await
+                    {
                         Ok(image) => metadata.image = Some(image),
                         Err(LinkPreviewResolverStatus::Blocked) => warn!(
                             url = %remote_image.url,
@@ -3502,6 +3512,80 @@ mod tests {
         let outcome = resolve_link_preview(&url, &policy).await;
 
         assert_eq!(outcome.status(), LinkPreviewResolverStatus::Failed);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn slow_page_does_not_starve_image_fetch_budget() {
+        // Regression: the page fetch and the image fetch must NOT share one
+        // deadline. A site whose og:image is a slow, dynamically-generated image
+        // (e.g. Next.js /opengraph-image rendered via satori) lost its picture
+        // because a heavy page fetch consumed most of `policy.timeout`, leaving
+        // too little for the image — it timed out and was dropped
+        // (cloudnativedays.no in production). The image fetch must get its own
+        // budget so a slow page can't starve it.
+        let _events_guard = recorded_events::async_lock().await;
+        recorded_events::clear();
+        let server = MockServer::start().await;
+        let image_bytes = bytes::Bytes::from_static(b"\x89PNG\r\n\x1a\nfake png bytes");
+        Mock::given(method("GET"))
+            .and(path("/article"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    // Eat most of the per-fetch budget on the page response.
+                    .set_delay(Duration::from_millis(600))
+                    .set_body_raw(
+                        format!(
+                            r#"<html><head>
+                                  <meta property="og:title" content="Slow SSR page">
+                                  <meta property="og:image" content="{}/opengraph-image">
+                                </head></html>"#,
+                            server.uri()
+                        ),
+                        "text/html; charset=utf-8",
+                    ),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/opengraph-image"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/png")
+                    // Simulates a dynamically-generated OG image: would exceed
+                    // the residual budget under the old shared deadline.
+                    .set_delay(Duration::from_millis(500))
+                    .set_body_bytes(image_bytes.clone()),
+            )
+            .mount(&server)
+            .await;
+        let storage_dir =
+            std::env::temp_dir().join(format!("waddle-link-preview-{}", uuid::Uuid::new_v4()));
+        let storage: Arc<dyn crate::storage::BlobStorage> =
+            Arc::new(crate::storage::LocalStorage::new(storage_dir));
+        let (media_cache, _db_pool) =
+            test_media_cache_with_base_url(storage.clone(), "https://waddle.example").await;
+        // 1000ms budget: under the old shared deadline the 600ms page leaves
+        // ~400ms residual, less than the 500ms image -> image dropped. With a
+        // per-fetch budget each phase gets the full 1000ms (comfortable headroom
+        // over its 600ms/500ms delay), so the image survives on slow runners too.
+        let policy = LinkPreviewResolverPolicy {
+            timeout: Duration::from_millis(1000),
+            allow_http_loopback_for_tests: true,
+            media_cache: Some(media_cache.clone()),
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/article", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        let LinkPreviewResolverOutcome::Ready(metadata) = outcome else {
+            panic!("expected ready outcome, got {outcome:?}");
+        };
+        assert_eq!(metadata.title.as_deref(), Some("Slow SSR page"));
+        assert!(
+            metadata.image.is_some(),
+            "slow og:image was starved by the page fetch and dropped",
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
