@@ -30,6 +30,7 @@ import type { CallWireSender } from "@/lib/calls/outbound";
 import type { CallMedia } from "@/lib/calls/types";
 import HomeDashboard from "@/components/chat/HomeDashboard.vue";
 import ThreadsView from "@/components/chat/ThreadsView.vue";
+import UnreadView from "@/components/chat/UnreadView.vue";
 import FeedPane from "@/components/community/FeedPane.vue";
 import StoriesPane from "@/components/community/StoriesPane.vue";
 import EventsPane from "@/components/community/EventsPane.vue";
@@ -120,6 +121,7 @@ const {
   openHome,
   openDmList,
   openThreads,
+  openUnread,
   openCommunitySurface,
   closeUserSettings,
   handleLogout,
@@ -526,12 +528,15 @@ onUnmounted(() => {
           :stories-active-count="stories.activeStories.value.length"
           :upcoming-event-count="communityEvents.events.value.filter((e: { dtstartMs?: number }) => typeof e.dtstartMs === 'number' && e.dtstartMs > Date.now()).length"
           :is-threads-active="ui.activePage.value === 'threads'"
+          :is-unread-active="ui.activePage.value === 'unread'"
+          :unread-total-count="channelUnread.totalUnreadCount.value + channelUnread.totalThreadUnreadCount.value"
           @select-channel="onSelectChannelFromSidebar"
           @join-channel-call="joinChannelCallFromActivity"
           @leave-channel-call="leaveRetainedChannelCall"
           @select-thread="onSelectThread"
           @select-community-surface="onSelectCommunitySurface"
           @select-threads-view="openThreads"
+          @select-unread-view="openUnread"
           @create-channel="openCreateChannelDialog()"
           @create-channel-in-space="openCreateChannelDialog"
           @open-settings="ui.showWaddleSettings.value = true"
@@ -643,6 +648,14 @@ onUnmounted(() => {
       <ThreadsView
         v-else-if="ui.activePage.value === 'threads'"
         :channels="waddles.sortedChannels.value"
+        :on-select-thread="onSelectThread"
+        @open-nav="ui.showMobileNav.value = true"
+      />
+      <UnreadView
+        v-else-if="ui.activePage.value === 'unread'"
+        :channels="waddles.sortedChannels.value"
+        :inbox-state="channelUnread.inboxState.value"
+        :on-select-channel="(id: string) => selectChannel(id)"
         :on-select-thread="onSelectThread"
         @open-nav="ui.showMobileNav.value = true"
       />

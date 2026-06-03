@@ -9,6 +9,7 @@ import type { HomeMatch } from "./routes/home";
 import type { SettingsMatch } from "./routes/settings";
 import type { StoriesMatch } from "./routes/stories";
 import type { ThreadsMatch } from "./routes/threads";
+import type { UnreadMatch } from "./routes/unread";
 
 export type RouteMatch =
   | HomeMatch
@@ -20,6 +21,7 @@ export type RouteMatch =
   | StoriesMatch
   | EventsMatch
   | ThreadsMatch
+  | UnreadMatch
   | SettingsMatch
   | AdminMatch;
 

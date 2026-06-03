@@ -14,7 +14,7 @@
 
 import { describe, expect, test } from "bun:test";
 
-type ActivePage = "dashboard" | "chat" | "settings" | "admin" | "threads";
+type ActivePage = "dashboard" | "chat" | "settings" | "admin" | "threads" | "unread";
 type SidebarMode = "channels" | "dms";
 type RightPanel = "thread" | "extension" | "pinned" | null;
 
@@ -29,6 +29,7 @@ interface UpdateUrlInputs {
 type Action =
   | { kind: "settings" }
   | { kind: "threads" }
+  | { kind: "unread" }
   | { kind: "admin" }
   | { kind: "dashboard" }
   | { kind: "extension" }
@@ -42,6 +43,7 @@ type Action =
 function decideUpdateUrlAction(inputs: UpdateUrlInputs): Action {
   if (inputs.activePage === "settings") return { kind: "settings" };
   if (inputs.activePage === "threads") return { kind: "threads" };
+  if (inputs.activePage === "unread") return { kind: "unread" };
   if (inputs.activePage === "admin") return { kind: "admin" };
   if (inputs.activePage === "dashboard") return { kind: "dashboard" };
   if (inputs.activePage === "chat" && inputs.activeRightPanel === "extension") {
@@ -88,6 +90,24 @@ describe("updateUrl branching for the global Threads view", () => {
       hasCurrentChannel: true,
     });
     expect(action).toEqual({ kind: "threads" });
+  });
+
+  test("activePage=unread always routes to /unread, mirroring the threads branch", () => {
+    expect(decideUpdateUrlAction({
+      activePage: "unread",
+      activeRightPanel: null,
+      sidebarMode: "channels",
+      hasDmPeer: false,
+      hasCurrentChannel: true,
+    })).toEqual({ kind: "unread" });
+
+    expect(decideUpdateUrlAction({
+      activePage: "unread",
+      activeRightPanel: null,
+      sidebarMode: "dms",
+      hasDmPeer: true,
+      hasCurrentChannel: false,
+    })).toEqual({ kind: "unread" });
   });
 
   test("activePage=admin does not bounce through pushChannelRoute(null)", () => {

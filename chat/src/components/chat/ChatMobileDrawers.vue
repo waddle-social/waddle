@@ -59,6 +59,7 @@ const {
   selfDomain,
   openUserSettings,
   openHome,
+  openUnread,
   openDmList,
   openCommunitySurface,
   handleLogout,
@@ -214,6 +215,8 @@ function openExtensionRoute(route: DiscoveredExtensionRoute) {
           :stories-active-count="stories.activeStories.value.length"
           :upcoming-event-count="communityEvents.events.value.filter((e: { dtstartMs?: number }) => typeof e.dtstartMs === 'number' && e.dtstartMs > Date.now()).length"
           :is-threads-active="ui.activePage.value === 'threads'"
+          :is-unread-active="ui.activePage.value === 'unread'"
+          :unread-total-count="channelUnread.totalUnreadCount.value + channelUnread.totalThreadUnreadCount.value"
           class="!w-full !border-r-0 !flex-1"
           @select-channel="selectChannelFromMobile"
           @join-channel-call="joinChannelCallFromMobile"
@@ -221,6 +224,7 @@ function openExtensionRoute(route: DiscoveredExtensionRoute) {
           @select-thread="onSelectThread"
           @select-community-surface="selectCommunitySurface"
           @select-threads-view="openThreads"
+          @select-unread-view="openUnread"
           @create-channel="openCreateChannelDialog()"
           @create-channel-in-space="openCreateChannelDialog"
           @open-settings="ui.showWaddleSettings.value = true"
