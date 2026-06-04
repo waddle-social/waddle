@@ -71,8 +71,15 @@ pub struct WaddleLinkPreview {
     pub title: Option<String>,
     pub description: Option<String>,
     pub image: Option<WaddleLinkPreviewImage>,
+    pub video: Option<WaddleLinkPreviewVideo>,
     pub player_embed: Option<WaddleLinkPreviewPlayer>,
     pub remote_media_unavailable: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WaddleLinkPreviewVideo {
+    pub url: String,
+    pub media_type: String,
 }
 
 #[derive(Debug, Serialize)]

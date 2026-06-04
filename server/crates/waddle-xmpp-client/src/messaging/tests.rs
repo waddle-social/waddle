@@ -535,6 +535,55 @@ fn parses_og_video_player_embed_from_xep0511() {
 }
 
 #[test]
+fn parses_og_video_native_media_from_xep0511() {
+    let e = el(
+        "<message xmlns='jabber:client' type='groupchat' id='m-link'>\
+           <body>watch https://rawkode.academy/watch/yoke</body>\
+           <rdf:Description xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#' xmlns:og='https://ogp.me/ns#' xmlns:ogv='https://ogp.me/ns#video:' rdf:about='https://rawkode.academy/watch/yoke'>\
+             <og:title>Hands-on Yoke</og:title>\
+             <og:video>https://content.rawkode.academy/v/clip.mp4</og:video>\
+             <ogv:secure_url>https://content.rawkode.academy/v/clip.mp4</ogv:secure_url>\
+             <ogv:type>video/mp4</ogv:type>\
+           </rdf:Description>\
+         </message>",
+    );
+    let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+        panic!("expected Message");
+    };
+    assert_eq!(msg.link_previews.len(), 1);
+    let preview = &msg.link_previews[0];
+    let video = preview.video.as_ref().expect("native video");
+    assert_eq!(
+        video.url.as_str(),
+        "https://content.rawkode.academy/v/clip.mp4"
+    );
+    assert_eq!(
+        video.media_type,
+        waddle_xmpp_core::DirectVideoMediaType::Mp4
+    );
+    assert!(preview.player_embed.is_none());
+}
+
+#[test]
+fn ignores_native_video_with_text_html_type() {
+    // text/html stays a player embed, never a native video.
+    let e = el(
+        "<message xmlns='jabber:client' type='groupchat' id='m-link'>\
+           <body>see https://www.youtube.com/watch?v=429A_VugWW0</body>\
+           <rdf:Description xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#' xmlns:og='https://ogp.me/ns#' xmlns:ogv='https://ogp.me/ns#video:' rdf:about='https://www.youtube.com/watch?v=429A_VugWW0'>\
+             <og:video>https://www.youtube-nocookie.com/embed/429A_VugWW0</og:video>\
+             <ogv:type>text/html</ogv:type>\
+           </rdf:Description>\
+         </message>",
+    );
+    let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+        panic!("expected Message");
+    };
+    assert!(msg.link_previews[0].video.is_none());
+    assert!(msg.link_previews[0].player_embed.is_some());
+}
+
+#[test]
 fn parses_og_video_player_embed_prefers_secure_url() {
     // The server's `build_link_metadata_element` always emits BOTH `og:video`
     // and `ogv:secure_url`. This covers that primary path and proves the parser

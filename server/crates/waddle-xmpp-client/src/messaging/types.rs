@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use std::fmt;
 use url::Url;
 use waddle_xmpp_core::xep0359::StanzaId as StableStanzaId;
-use waddle_xmpp_core::PreviewImageMediaType;
+use waddle_xmpp_core::{DirectVideoMediaType, PreviewImageMediaType};
 
 use crate::request::StanzaId;
 use crate::xep::encrypted_file::EncryptedFile;
@@ -201,6 +201,9 @@ pub struct LinkPreviewData {
     pub title: Option<String>,
     pub description: Option<String>,
     pub image: Option<LinkPreviewImageData>,
+    /// Native-playable media advertised by the page's `og:video` with a direct
+    /// (non-iframe) media type. Rendered in a native `<video>` on user action.
+    pub video: Option<LinkPreviewVideoData>,
     pub player_embed: Option<LinkPreviewPlayer>,
     pub remote_media_unavailable: bool,
 }
@@ -210,6 +213,13 @@ pub struct LinkPreviewPlayer {
     pub url: Url,
     pub width: Option<u32>,
     pub height: Option<u32>,
+}
+
+/// Native-playable `og:video` media surfaced from an XEP-0511 link card.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkPreviewVideoData {
+    pub url: Url,
+    pub media_type: DirectVideoMediaType,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
