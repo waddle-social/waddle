@@ -565,6 +565,30 @@ fn parses_og_video_native_media_from_xep0511() {
 }
 
 #[test]
+fn parses_native_video_prefers_secure_url() {
+    // The server emits both og:video and ogv:secure_url; the parser must prefer
+    // secure_url (distinct URL here so the preference is observable).
+    let e = el(
+        "<message xmlns='jabber:client' type='groupchat' id='m-link'>\
+           <body>watch https://rawkode.academy/watch/yoke</body>\
+           <rdf:Description xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#' xmlns:og='https://ogp.me/ns#' xmlns:ogv='https://ogp.me/ns#video:' rdf:about='https://rawkode.academy/watch/yoke'>\
+             <og:video>https://content.rawkode.academy/v/BASE.mp4</og:video>\
+             <ogv:secure_url>https://content.rawkode.academy/v/SECURE.mp4</ogv:secure_url>\
+             <ogv:type>video/mp4</ogv:type>\
+           </rdf:Description>\
+         </message>",
+    );
+    let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+        panic!("expected Message");
+    };
+    let video = msg.link_previews[0].video.as_ref().expect("native video");
+    assert_eq!(
+        video.url.as_str(),
+        "https://content.rawkode.academy/v/SECURE.mp4"
+    );
+}
+
+#[test]
 fn ignores_native_video_with_text_html_type() {
     // text/html stays a player embed, never a native video.
     let e = el(

@@ -1076,7 +1076,14 @@ fn extract_metadata_parts_from_html(
     let native_video = policy
         .video_enabled
         .then(|| {
+            // `og:video:type` may carry media-type parameters
+            // (`video/mp4; codecs="…"`); match on the essence only, like the
+            // image path does for `og:image:type`.
             let media_type = meta_content(html, "og:video:type", 64)?
+                .split(';')
+                .next()
+                .unwrap_or_default()
+                .trim()
                 .parse::<DirectVideoMediaType>()
                 .ok()?;
             let url = meta_content(html, "og:video:secure_url", usize::MAX)
@@ -1762,6 +1769,46 @@ mod tests {
         );
         assert!(metadata.player_embed.is_none());
         assert!(metadata.video.is_none());
+    }
+
+    #[test]
+    fn parses_native_video_with_media_type_parameters() {
+        // `og:video:type` legally carries codec parameters, e.g.
+        // `video/mp4; codecs="avc1.42E01E"`. The MIME must be matched on its
+        // essence, mirroring how the image path strips parameters.
+        let requested_url = Url::parse("https://rawkode.academy/watch/yoke").expect("url");
+        let html = r#"<html><head>
+                <meta property="og:title" content="Hands-on Yoke">
+                <meta property="og:video" content="https://content.rawkode.academy/v/clip.mp4">
+                <meta property="og:video:type" content="video/mp4; codecs=&quot;avc1.42E01E&quot;">
+              </head></html>"#;
+
+        let metadata = extract_metadata_from_html(&requested_url, html).expect("metadata");
+
+        assert_eq!(
+            metadata.native_video.map(|video| video.media_type),
+            Some(DirectVideoMediaType::Mp4)
+        );
+    }
+
+    #[test]
+    fn video_disabled_drops_native_video() {
+        let policy = LinkPreviewResolverPolicy {
+            video_enabled: false,
+            ..Default::default()
+        };
+        let url = Url::parse("https://rawkode.academy/watch/yoke").expect("url");
+        let html = r#"<html><head>
+                <meta property="og:title" content="Hands-on Yoke">
+                <meta property="og:video" content="https://content.rawkode.academy/v/clip.mp4">
+                <meta property="og:video:type" content="video/mp4">
+              </head></html>"#;
+
+        let (metadata, _) =
+            extract_metadata_parts_from_html(&url, html, &url, &policy).expect("metadata");
+
+        assert!(metadata.native_video.is_none());
+        assert_eq!(metadata.title.as_deref(), Some("Hands-on Yoke"));
     }
 
     #[test]

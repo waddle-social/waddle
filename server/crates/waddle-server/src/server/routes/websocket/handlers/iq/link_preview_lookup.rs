@@ -340,9 +340,11 @@ fn build_link_preview_lookup_result(
             preview.append_child(video_elem.build());
         }
         if let Some(native) = &data.native_video {
-            // Composer parity: a page-advertised native stream surfaces as the
-            // same `<video>` element a direct-media file uses (no size), so the
-            // composer renders an identical native-video card pre-send.
+            // A page-advertised native stream surfaces as the same `<video>`
+            // element a direct-media file uses (no size), keeping the lookup
+            // result shape uniform for both native-video kinds. (The composer
+            // preview currently renders only the image/text card — see
+            // link-preview.ts; wiring a video card there is a follow-up.)
             preview.append_child(
                 Element::builder("video", NS_WADDLE_LINK_PREVIEW)
                     .attr(xml_ncname!("url").to_owned(), native.url.as_str())

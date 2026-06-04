@@ -236,6 +236,9 @@ fn consume_link_preview_request(
                 }
                 metadata = metadata.with_image(preview_image);
             }
+            // A card's og:video is either an iframe player or native media,
+            // never both (the resolver seals at most one); the `else if` keeps
+            // that exclusivity explicit at the send boundary too.
             if let Some(player) = preview
                 .player
                 .filter(|player| is_sealed_player_embed_allowed(&player.url))
@@ -245,14 +248,13 @@ fn consume_link_preview_request(
                     width: player.width,
                     height: player.height,
                 });
-            }
-            // Native page-advertised media is stamped as conformant XEP-0511
-            // og:video with its real media type (not a file-share). Re-validate
-            // the media URL against current host policy — there is no provider
-            // allowlist for native playback (it runs no third-party JS), so the
-            // operator host policy + https are the boundary, exactly as for the
-            // direct-video and image URLs.
-            if let Some(native) = preview.native_video.filter(|native| {
+            } else if let Some(native) = preview.native_video.filter(|native| {
+                // Native page-advertised media is stamped as conformant XEP-0511
+                // og:video with its real media type (not a file-share). Re-validate
+                // the media URL against current host policy — there is no provider
+                // allowlist for native playback (it runs no third-party JS), so the
+                // operator host policy + https are the boundary, exactly as for the
+                // direct-video and image URLs.
                 link_preview_url_allowed_by_current_policy(&native.url, link_preview)
             }) {
                 metadata = metadata.with_video(waddle_xmpp::xep::LinkMetadataVideo::Native {
