@@ -114,6 +114,7 @@ impl MessagingExt for ClientHandle {
         if let Some(s) = show {
             builder = builder.append(Element::builder("show", NS_CLIENT).append(s).build());
         }
+        builder = builder.append(crate::caps::build_client_caps_element());
         self.send_stanza(builder.build()).await
     }
 

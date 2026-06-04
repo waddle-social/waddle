@@ -161,6 +161,8 @@ export interface LiveRoomMessage {
   stanzaId?: string;
   /** Bare JID that injected `stanzaId` (the room for MUC). */
   stanzaIdBy?: string;
+  /** XEP-0333 `<markable/>` request on the inbound stanza. */
+  displayedMarkerRequested?: boolean;
   _reactionTarget?: string;
   _reactionEmojis?: string[];
   _reactionSenderId?: string;
@@ -212,6 +214,8 @@ export interface LiveDmMessage {
   stanzaId?: string;
   /** Bare JID that injected `stanzaId` (the user's own server for DMs). */
   stanzaIdBy?: string;
+  /** XEP-0333 `<markable/>` request on the inbound stanza. */
+  displayedMarkerRequested?: boolean;
   _reactionTarget?: string;
   _reactionEmojis?: string[];
 }

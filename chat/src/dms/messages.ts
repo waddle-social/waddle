@@ -10,6 +10,11 @@ import type {
 } from "@/lib/xmpp-client";
 import { barePeerJid } from "@/lib/xmpp-client";
 import type { WaddleSession } from "@/lib/server-auth";
+import {
+  displayedStateCanAdvance,
+  firstUnseenIdAfterDisplayedState,
+} from "@/lib/displayed-state";
+import { getMdsDisplayed, mdsChatKey, type MdsDisplayedState } from "@/lib/last-seen-store";
 import { findMessageById } from "@/lib/message-ids";
 import { mergeQueuedIntoTimeline } from "@/lib/timeline-queue-merge";
 import { findMessageElementById } from "@/lib/message-targeting";
@@ -286,6 +291,20 @@ export function useDirectMessages(
     clearTypingState();
   }
 
+  function applyMdsDisplayed(chatId: string, displayed: MdsDisplayedState): boolean {
+    const peerJid = activePeerJid.value;
+    if (!peerJid || barePeerJid(chatId) !== barePeerJid(peerJid)) return false;
+    const feedTimeline = messages.value.filter(isFeedVisible);
+    const key = mdsChatKey(barePeerJid(peerJid));
+    if (!displayedStateCanAdvance(feedTimeline, getMdsDisplayed(key), displayed)) return false;
+    firstUnseenId.value = firstUnseenIdAfterDisplayedState(
+      feedTimeline,
+      firstUnseenId.value,
+      displayed,
+    );
+    return true;
+  }
+
   function onIncomingMessage(msg: LiveDmMessage) {
     if (!session.value || !activePeerJid.value || msg.peerJid !== activePeerJid.value) return;
     removeTypingUser(msg.nick);
@@ -379,6 +398,7 @@ export function useDirectMessages(
     searchMessages,
     clearSearch,
     clearMessages,
+    applyMdsDisplayed,
     disconnect,
     onIncomingMessage,
     onChatState,

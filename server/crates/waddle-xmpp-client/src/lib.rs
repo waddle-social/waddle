@@ -2,6 +2,7 @@
 
 pub mod avatar;
 pub mod bootstrap;
+pub mod caps;
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub mod client;
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]

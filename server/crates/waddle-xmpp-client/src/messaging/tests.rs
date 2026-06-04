@@ -257,6 +257,31 @@ fn parse_message_with_displayed_marker() {
 }
 
 #[test]
+fn parse_message_with_markable_marker_request() {
+    let e = el("<message xmlns='jabber:client' type='chat' id='msg-1'>\
+         <body>hello</body>\
+         <markable xmlns='urn:xmpp:chat-markers:0'/>\
+         </message>");
+    let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+        panic!("expected Message");
+    };
+    assert!(msg.displayed_marker_requested);
+    assert_eq!(msg.displayed_marker_id, None);
+}
+
+#[test]
+fn parse_markable_marker_without_message_id_is_ignored() {
+    let e = el("<message xmlns='jabber:client' type='chat'>\
+         <body>hello</body>\
+         <markable xmlns='urn:xmpp:chat-markers:0'/>\
+         </message>");
+    let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+        panic!("expected Message");
+    };
+    assert!(!msg.displayed_marker_requested);
+}
+
+#[test]
 fn parse_message_with_reply() {
     let e = el("<message xmlns='jabber:client' type='groupchat'>\
          <body>&gt; [quoted]\nresponse</body>\
@@ -1097,6 +1122,61 @@ fn build_outbound_message_emits_anchor_attribute_when_present() {
 }
 
 #[test]
+fn build_outbound_chat_message_can_request_displayed_markers() {
+    let options = SendMessageOptions {
+        request_displayed_marker: true,
+        ..Default::default()
+    };
+
+    let (_, stanza) =
+        build_outbound_message("peer@example.com", "chat", "hello", &options).unwrap();
+
+    assert!(stanza.attr("id").is_some());
+    assert_origin_id_matches_message_id(&stanza);
+    assert_eq!(
+        stanza
+            .children()
+            .filter(|child| child.name() == "markable" && child.ns() == NS_CHAT_MARKERS)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn build_outbound_groupchat_message_can_request_displayed_markers() {
+    let options = SendMessageOptions {
+        request_displayed_marker: true,
+        ..Default::default()
+    };
+
+    let (_, stanza) =
+        build_outbound_message("room@muc.example", "groupchat", "hello", &options).unwrap();
+
+    assert!(stanza.attr("id").is_some());
+    assert_origin_id_matches_message_id(&stanza);
+    assert_eq!(
+        stanza
+            .children()
+            .filter(|child| child.name() == "markable" && child.ns() == NS_CHAT_MARKERS)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn build_outbound_message_omits_markable_without_request() {
+    let (_, stanza) = build_outbound_message(
+        "peer@example.com",
+        "chat",
+        "hello",
+        &SendMessageOptions::default(),
+    )
+    .unwrap();
+
+    assert!(stanza.get_child("markable", NS_CHAT_MARKERS).is_none());
+}
+
+#[test]
 fn parse_message_with_direct_file_sharing() {
     let e = el("<message xmlns='jabber:client' type='chat'>\
            <body>https://files.example.com/report.pdf</body>\
@@ -1773,6 +1853,8 @@ fn build_displayed_message_has_expected_shape() {
             .and_then(|child| child.attr("id")),
         Some("msg-1")
     );
+    assert!(stanza.get_child("no-store", NS_HINTS).is_some());
+    assert!(stanza.get_child("no-permanent-store", NS_HINTS).is_some());
     assert!(stanza.get_child("thread", "jabber:client").is_none());
 }
 

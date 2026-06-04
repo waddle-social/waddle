@@ -50,7 +50,9 @@ pub fn build_displayed_message(
             Element::builder("displayed", NS_CHAT_MARKERS)
                 .attr(minidom::rxml::xml_ncname!("id").to_owned(), message_id)
                 .build(),
-        );
+        )
+        .append(Element::builder("no-store", NS_HINTS).build())
+        .append(Element::builder("no-permanent-store", NS_HINTS).build());
     if let Some(thread) = thread {
         builder = builder.append(xep_thread::build_thread_element(thread));
     }
@@ -248,6 +250,10 @@ pub fn build_outbound_message(
 
     if matches!(message_type, "chat" | "groupchat") {
         builder = builder.append(build_origin_id(stanza_id.as_str()));
+    }
+
+    if options.request_displayed_marker && matches!(message_type, "chat" | "groupchat") {
+        builder = builder.append(Element::builder("markable", NS_CHAT_MARKERS).build());
     }
 
     if let Some(subject) = options.subject.as_deref() {

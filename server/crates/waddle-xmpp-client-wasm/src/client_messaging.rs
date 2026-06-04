@@ -82,9 +82,34 @@ impl WaddleClient {
         let inner = self.inner.clone();
         future_to_promise(async move {
             let iq_id = uuid::Uuid::new_v4().to_string();
+            let chat_id: BareJid = chat_id
+                .parse()
+                .map_err(|err| js_error(format!("invalid MDS chat id: {err}")))?;
+            let stanza_id = StanzaId::new(stanza_id)
+                .map_err(|err| js_error(format!("invalid MDS stanza id: {err}")))?;
+            let stanza_id_by: BareJid = stanza_id_by
+                .parse()
+                .map_err(|err| js_error(format!("invalid MDS stanza-id by JID: {err}")))?;
             let iq = build_mds_publish_iq(&iq_id, &chat_id, &stanza_id, &stanza_id_by);
             let _ = send_iq_command(inner, iq).await?;
             Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    pub fn supports_mds_publish_options(&self) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let domain = {
+                let stored = inner.borrow().config.clone();
+                jid_domain(&stored.jid)
+            };
+            let iq = build_disco_info_iq(&domain, None);
+            let result = send_iq_command(inner, iq).await?;
+            let info = parse_disco_info_result(&result, &domain)
+                .ok_or_else(|| js_error("invalid disco#info response"))?;
+            Ok(JsValue::from_bool(info.features.iter().any(|feature| {
+                feature == NS_PUBSUB_PUBLISH_OPTIONS_FEATURE
+            })))
         })
     }
 

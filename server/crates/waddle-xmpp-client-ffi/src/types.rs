@@ -22,6 +22,8 @@ pub struct WaddleMessage {
     pub retracts_id: Option<String>,
     pub reaction_target_id: Option<String>,
     pub reaction_emojis: Vec<String>,
+    /// XEP-0333 `<markable/>` request attached to this inbound message.
+    pub displayed_marker_requested: bool,
     pub is_muc: bool,
     pub thread: Option<String>,
     pub parent_thread_id: Option<String>,
@@ -280,6 +282,7 @@ pub struct WaddleSendOptions {
     pub thread: Option<WaddleThreadTarget>,
     pub shared_files: Vec<WaddleSharedFile>,
     pub link_preview_token: Option<String>,
+    pub request_displayed_marker: bool,
 }
 
 // ── A/V calls (XEP-0353 JMI + XEP-0166 Jingle) ──────────────────────────────
