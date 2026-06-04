@@ -380,6 +380,7 @@ fn parse_link_preview(el: &Element, first_url: Option<&Url>) -> Option<LinkPrevi
     let has_preview_image = preview_image_url.is_some();
     let image = parse_link_preview_image(el, preview_image_url.as_deref());
     let player_embed = parse_link_preview_player(el);
+    let video = parse_link_preview_native_video(el);
     Some(LinkPreviewData {
         original_url,
         normalized_url: og_text(el, "url").and_then(|value| parse_web_url(&value)),
@@ -387,8 +388,16 @@ fn parse_link_preview(el: &Element, first_url: Option<&Url>) -> Option<LinkPrevi
         description: og_text(el, "description"),
         remote_media_unavailable: has_preview_image && image.is_none(),
         image,
+        video,
         player_embed,
     })
+}
+
+/// The MIME essence of an `og:video:type`, stripping any media-type parameters
+/// (`video/mp4; codecs="…"`, `text/html; charset=utf-8`) so a parameterised type
+/// from a conformant (e.g. federated) sender is matched, mirroring the resolver.
+fn og_video_type_essence(value: &str) -> &str {
+    value.split(';').next().unwrap_or_default().trim()
 }
 
 fn parse_link_preview_player(el: &Element) -> Option<LinkPreviewPlayer> {
@@ -408,7 +417,7 @@ fn parse_link_preview_player(el: &Element) -> Option<LinkPreviewPlayer> {
         let value = child.text().trim().to_string();
         match child.name() {
             "secure_url" => secure_url = parse_web_url(&value),
-            "type" => is_html = value.eq_ignore_ascii_case("text/html"),
+            "type" => is_html = og_video_type_essence(&value).eq_ignore_ascii_case("text/html"),
             "width" => width = value.parse().ok(),
             "height" => height = value.parse().ok(),
             _ => {}
@@ -416,6 +425,37 @@ fn parse_link_preview_player(el: &Element) -> Option<LinkPreviewPlayer> {
     }
     let url = secure_url.or(url)?;
     is_html.then_some(LinkPreviewPlayer { url, width, height })
+}
+
+fn parse_link_preview_native_video(el: &Element) -> Option<LinkPreviewVideoData> {
+    let mut url = None;
+    let mut secure_url = None;
+    let mut media_type = None;
+    for child in el.children() {
+        if child.ns() == NS_OPENGRAPH && child.name() == "video" {
+            url = parse_web_url(child.text().trim());
+            continue;
+        }
+        if child.ns() != NS_OPENGRAPH_VIDEO {
+            continue;
+        }
+        let value = child.text().trim().to_string();
+        match child.name() {
+            "secure_url" => secure_url = parse_web_url(&value),
+            // A supported direct (non-iframe) media type marks this as a native
+            // `<video>` stream; `text/html` (the iframe player) parses to `Err`
+            // and is handled by `parse_link_preview_player` instead.
+            "type" => {
+                media_type = og_video_type_essence(&value)
+                    .parse::<waddle_xmpp_core::DirectVideoMediaType>()
+                    .ok()
+            }
+            _ => {}
+        }
+    }
+    let url = secure_url.or(url)?;
+    let media_type = media_type?;
+    Some(LinkPreviewVideoData { url, media_type })
 }
 
 fn parse_link_preview_image(el: &Element, image_url: Option<&str>) -> Option<LinkPreviewImageData> {

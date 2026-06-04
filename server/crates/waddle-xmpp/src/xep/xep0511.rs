@@ -10,7 +10,7 @@ use minidom::{
 };
 use thiserror::Error;
 use url::Url;
-use waddle_xmpp_core::PreviewImageMediaType;
+use waddle_xmpp_core::{DirectVideoMediaType, PreviewImageMediaType};
 use xmpp_parsers::message::Message;
 
 /// RDF syntax namespace used by XEP-0511's `<rdf:Description/>` payload.
@@ -25,13 +25,25 @@ pub const NS_OPENGRAPH_IMAGE: &str = "https://ogp.me/ns#image:";
 /// OpenGraph video structured-property namespace.
 pub const NS_OPENGRAPH_VIDEO: &str = "https://ogp.me/ns#video:";
 
-/// Embeddable `og:video` player (an iframe URL with `og:video:type=text/html`).
+/// The `og:video` carried by a link card. A single `og:video` block is *either*
+/// an embeddable iframe player (`og:video:type=text/html`) *or* a directly
+/// playable native media stream (`og:video:type` in the supported direct set) —
+/// never both — so the two kinds are modelled as one mutually-exclusive enum.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LinkMetadataVideo {
-    /// Allowlisted embed URL clients render in an iframe on user action.
-    pub url: Url,
-    pub width: Option<u32>,
-    pub height: Option<u32>,
+pub enum LinkMetadataVideo {
+    /// Embeddable iframe player (`og:video:type=text/html`). The URL is an
+    /// allowlisted embed origin clients render in an `<iframe>` on user action.
+    Player {
+        url: Url,
+        width: Option<u32>,
+        height: Option<u32>,
+    },
+    /// Directly playable native media (`og:video:type` is a supported direct
+    /// video MIME). Clients render it in a native `<video>` on user action.
+    Native {
+        url: Url,
+        media_type: DirectVideoMediaType,
+    },
 }
 
 /// Errors that can occur while parsing XEP-0511 link metadata.
@@ -117,7 +129,7 @@ pub struct LinkMetadata {
     pub site_name: Option<String>,
     /// Cached preview images referenced through Waddle-controlled media URLs.
     pub images: Vec<LinkPreviewImage>,
-    /// Embeddable player iframe (`og:video`), when present.
+    /// The card's `og:video` — an iframe player or native media stream — when present.
     pub video: Option<LinkMetadataVideo>,
 }
 
@@ -165,7 +177,7 @@ impl LinkMetadata {
         self
     }
 
-    /// Attach an embeddable player iframe.
+    /// Attach the card's `og:video` (an iframe player or native media stream).
     pub fn with_video(mut self, video: LinkMetadataVideo) -> Self {
         self.video = Some(video);
         self
@@ -261,12 +273,20 @@ pub fn build_link_metadata_element(metadata: &LinkMetadata) -> Element {
         append_og_image_text(&mut description, "alt", image.alt.as_deref());
     }
 
-    if let Some(video) = &metadata.video {
-        append_og_text(&mut description, "video", Some(video.url.as_str()));
-        append_og_video_text(&mut description, "secure_url", Some(video.url.as_str()));
-        append_og_video_text(&mut description, "type", Some("text/html"));
-        append_og_video_number(&mut description, "width", video.width);
-        append_og_video_number(&mut description, "height", video.height);
+    match &metadata.video {
+        Some(LinkMetadataVideo::Player { url, width, height }) => {
+            append_og_text(&mut description, "video", Some(url.as_str()));
+            append_og_video_text(&mut description, "secure_url", Some(url.as_str()));
+            append_og_video_text(&mut description, "type", Some("text/html"));
+            append_og_video_number(&mut description, "width", *width);
+            append_og_video_number(&mut description, "height", *height);
+        }
+        Some(LinkMetadataVideo::Native { url, media_type }) => {
+            append_og_text(&mut description, "video", Some(url.as_str()));
+            append_og_video_text(&mut description, "secure_url", Some(url.as_str()));
+            append_og_video_text(&mut description, "type", Some(media_type.as_str()));
+        }
+        None => {}
     }
 
     description
@@ -393,7 +413,7 @@ fn append_og_video_number(parent: &mut Element, name: &str, value: Option<u32>) 
 fn parse_og_video(elem: &Element) -> Option<LinkMetadataVideo> {
     let mut url = None;
     let mut secure_url = None;
-    let mut is_html = false;
+    let mut media_type_text: Option<String> = None;
     let mut width = None;
     let mut height = None;
     for child in elem.children() {
@@ -407,14 +427,29 @@ fn parse_og_video(elem: &Element) -> Option<LinkMetadataVideo> {
         let value = child.text().trim().to_string();
         match child.name() {
             "secure_url" => secure_url = Url::parse(&value).ok(),
-            "type" => is_html = value.eq_ignore_ascii_case("text/html"),
+            "type" => media_type_text = Some(value),
             "width" => width = value.parse().ok(),
             "height" => height = value.parse().ok(),
             _ => {}
         }
     }
     let url = secure_url.or(url)?;
-    is_html.then_some(LinkMetadataVideo { url, width, height })
+    let media_type_text = media_type_text?;
+    // Match on the MIME essence, stripping any media-type parameters
+    // (`video/mp4; codecs="…"`, `text/html; charset=utf-8`), mirroring the
+    // resolver's `.split(';').next()` treatment so a parameterised type from a
+    // conformant (e.g. federated) sender is not silently dropped.
+    let media_type_essence = media_type_text.split(';').next().unwrap_or_default().trim();
+    if media_type_essence.eq_ignore_ascii_case("text/html") {
+        return Some(LinkMetadataVideo::Player { url, width, height });
+    }
+    // A non-`text/html` `og:video:type` is a directly playable native stream when
+    // the MIME is one Waddle supports; anything else is ignored (not a preview we
+    // can render).
+    media_type_essence
+        .parse::<DirectVideoMediaType>()
+        .ok()
+        .map(|media_type| LinkMetadataVideo::Native { url, media_type })
 }
 
 #[cfg(test)]
@@ -472,7 +507,7 @@ mod tests {
         let mut metadata = LinkMetadata::new(
             Url::parse("https://www.youtube.com/watch?v=429A_VugWW0").expect("url"),
         );
-        metadata.video = Some(LinkMetadataVideo {
+        metadata.video = Some(LinkMetadataVideo::Player {
             url: Url::parse("https://www.youtube-nocookie.com/embed/429A_VugWW0").expect("url"),
             width: Some(1280),
             height: Some(720),
@@ -481,13 +516,77 @@ mod tests {
         let element = build_link_metadata_element(&metadata);
         let parsed = parse_link_metadata_element(&element).expect("round-trips");
 
-        let video = parsed.video.expect("video embed parsed");
         assert_eq!(
-            video.url.as_str(),
-            "https://www.youtube-nocookie.com/embed/429A_VugWW0"
+            parsed.video,
+            Some(LinkMetadataVideo::Player {
+                url: Url::parse("https://www.youtube-nocookie.com/embed/429A_VugWW0").expect("url"),
+                width: Some(1280),
+                height: Some(720),
+            })
         );
-        assert_eq!(video.width, Some(1280));
-        assert_eq!(video.height, Some(720));
+    }
+
+    #[test]
+    fn builds_and_parses_og_video_native_media() {
+        let mut metadata =
+            LinkMetadata::new(Url::parse("https://rawkode.academy/watch/yoke").expect("url"));
+        metadata.video = Some(LinkMetadataVideo::Native {
+            url: Url::parse("https://content.rawkode.academy/videos/x/clip.mp4").expect("url"),
+            media_type: DirectVideoMediaType::Mp4,
+        });
+
+        let element = build_link_metadata_element(&metadata);
+
+        // The wire carries the real media type, never text/html.
+        let video_type = element
+            .children()
+            .find(|child| child.ns() == NS_OPENGRAPH_VIDEO && child.name() == "type")
+            .map(minidom::Element::text);
+        assert_eq!(video_type.as_deref(), Some("video/mp4"));
+
+        let parsed = parse_link_metadata_element(&element).expect("round-trips");
+        assert_eq!(
+            parsed.video,
+            Some(LinkMetadataVideo::Native {
+                url: Url::parse("https://content.rawkode.academy/videos/x/clip.mp4").expect("url"),
+                media_type: DirectVideoMediaType::Mp4,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_native_og_video_type_with_codec_parameters() {
+        // A conformant sender may include codec parameters in og:video:type.
+        // Match on the MIME essence, like the resolver does.
+        let payload = element(
+            r#"<rdf:Description xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:og="https://ogp.me/ns#" xmlns:ogv="https://ogp.me/ns#video:" rdf:about="https://rawkode.academy/watch/yoke">
+                <og:video>https://content.rawkode.academy/v/clip.mp4</og:video>
+                <ogv:type>video/mp4; codecs="avc1.42E01E"</ogv:type>
+              </rdf:Description>"#,
+        );
+        let parsed = parse_link_metadata_element(&payload).expect("parses");
+        assert_eq!(
+            parsed.video,
+            Some(LinkMetadataVideo::Native {
+                url: Url::parse("https://content.rawkode.academy/v/clip.mp4").expect("url"),
+                media_type: DirectVideoMediaType::Mp4,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_player_og_video_type_with_charset_parameter() {
+        let payload = element(
+            r#"<rdf:Description xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:og="https://ogp.me/ns#" xmlns:ogv="https://ogp.me/ns#video:" rdf:about="https://www.youtube.com/watch?v=x">
+                <og:video>https://www.youtube-nocookie.com/embed/x</og:video>
+                <ogv:type>text/html; charset=utf-8</ogv:type>
+              </rdf:Description>"#,
+        );
+        let parsed = parse_link_metadata_element(&payload).expect("parses");
+        assert!(matches!(
+            parsed.video,
+            Some(LinkMetadataVideo::Player { .. })
+        ));
     }
 
     #[test]
