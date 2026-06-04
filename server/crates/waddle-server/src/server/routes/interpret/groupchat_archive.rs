@@ -146,17 +146,17 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
     target_message_id: &str,
     retraction_message: &Message,
 ) -> bool {
-    // XEP-0424 §3.1: the retraction names the target by its wire
-    // message id within the room's archive, not by the archive's
-    // primary key. Use the same accessor as the XEP-0308 correction
-    // path (`validate_groupchat_rich_targets`) so reflection-time
-    // validation and tombstone application agree on the lookup key.
-    let original = match mam_storage
-        .get_message_by_message_id(room, target_message_id)
-        .await
-    {
-        Ok(Some(row)) => row,
-        Ok(None) => {
+    // XEP-0424 §3 (xep-0424.xml lines 158, 230-232): a groupchat
+    // retraction names the target by the room-assigned XEP-0359
+    // stanza-id, which is persisted as the archive primary key. Resolve
+    // strictly by that id via `get_message` (a PK lookup), scoped to the
+    // room (the archived `to` is the room JID) — never by the wire `id`
+    // attribute or the origin-id. Keyed identically to the
+    // validation-time `lookup_groupchat_retraction_target` so both sites
+    // agree.
+    let original = match mam_storage.get_message(target_message_id).await {
+        Ok(Some(row)) if row.to.to_bare() == *room => row,
+        Ok(_) => {
             debug!(
                 archive = %room,
                 target = target_message_id,
