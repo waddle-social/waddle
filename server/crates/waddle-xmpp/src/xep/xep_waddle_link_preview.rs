@@ -56,6 +56,10 @@ pub struct LinkPreviewTokenData {
     /// Trusted direct playable video sealed inside the token, when the link is
     /// a direct-media file the client may inline-play on user action.
     pub video: Option<LinkPreviewTokenVideo>,
+    /// Native-playable media advertised by the page's `og:video`, when the link
+    /// is an HTML page exposing a playable stream (media URL ≠ page URL).
+    /// Mutually exclusive with `video` and `player`.
+    pub native_video: Option<LinkPreviewTokenNativeVideo>,
     /// Embeddable player iframe sealed inside the token, when the page
     /// advertises an allowlisted `og:video` player. Mutually exclusive with
     /// `video`.
@@ -73,12 +77,25 @@ pub struct LinkPreviewTokenImage {
     pub alt: Option<String>,
 }
 
-/// Cached direct-video metadata sealed inside a composer preview token.
+/// Cached direct-video metadata sealed inside a composer preview token. This is
+/// the *raw direct-media-file* case (the pasted link is itself a playable file),
+/// stamped on the wire as an XEP-0447 inline file-share.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkPreviewTokenVideo {
     pub url: Url,
     pub media_type: DirectVideoMediaType,
     pub size: Option<u64>,
+}
+
+/// Native-playable media advertised by an HTML page's OpenGraph `og:video`,
+/// sealed inside a composer preview token. Distinct from [`LinkPreviewTokenVideo`]
+/// because its provenance is page metadata (media URL ≠ page URL) and it is
+/// stamped on the wire as conformant XEP-0511 `og:video` with the real
+/// `og:video:type`, not as a file-share. Mutually exclusive with `video`/`player`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkPreviewTokenNativeVideo {
+    pub url: Url,
+    pub media_type: DirectVideoMediaType,
 }
 
 /// Trusted embeddable player iframe sealed inside the token. The URL is an
@@ -103,6 +120,8 @@ struct LinkPreviewTokenWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     video: Option<LinkPreviewTokenVideoWire>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_video: Option<LinkPreviewTokenNativeVideoWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     player: Option<LinkPreviewTokenPlayerWire>,
     expires_at_unix: i64,
 }
@@ -113,6 +132,12 @@ struct LinkPreviewTokenVideoWire {
     media_type: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     size: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LinkPreviewTokenNativeVideoWire {
+    url: String,
+    media_type: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -215,6 +240,13 @@ pub fn encode_link_preview_token(data: &LinkPreviewTokenData, secret: &[u8]) -> 
             media_type: video.media_type.as_str().to_string(),
             size: video.size,
         }),
+        native_video: data
+            .native_video
+            .as_ref()
+            .map(|native| LinkPreviewTokenNativeVideoWire {
+                url: native.url.as_str().to_string(),
+                media_type: native.media_type.as_str().to_string(),
+            }),
         player: data
             .player
             .as_ref()
@@ -318,6 +350,19 @@ pub fn decode_link_preview_token(
                 })
             })
             .transpose()?,
+        native_video: wire
+            .native_video
+            .map(|native| {
+                Ok(LinkPreviewTokenNativeVideo {
+                    url: Url::parse(&native.url)
+                        .map_err(|_| WaddleLinkPreviewError::InvalidTokenUrl)?,
+                    media_type: native
+                        .media_type
+                        .parse()
+                        .map_err(|_| WaddleLinkPreviewError::InvalidTokenMediaType)?,
+                })
+            })
+            .transpose()?,
         player: wire
             .player
             .map(|player| {
@@ -369,6 +414,7 @@ mod tests {
             }),
             video: None,
             player: None,
+            native_video: None,
             expires_at_unix: 1_900_000_000,
         };
 
@@ -396,6 +442,34 @@ mod tests {
                 size: Some(4_823_344),
             }),
             player: None,
+            native_video: None,
+            expires_at_unix: 1_900_000_000,
+        };
+
+        let token = encode_link_preview_token(&data, SECRET);
+
+        assert_eq!(
+            decode_link_preview_token(&token, SECRET, 1_800_000_000),
+            Ok(data)
+        );
+    }
+
+    #[test]
+    fn token_round_trips_native_og_video_data() {
+        let data = LinkPreviewTokenData {
+            sender_jid: "alice@example.com".parse().expect("jid"),
+            scope_jid: "room@muc.example.com".parse().expect("jid"),
+            original_url: Url::parse("https://rawkode.academy/watch/yoke").expect("url"),
+            normalized_url: Url::parse("https://rawkode.academy/watch/yoke").expect("url"),
+            title: Some("Hands-on Yoke".to_string()),
+            description: None,
+            image: None,
+            video: None,
+            native_video: Some(LinkPreviewTokenNativeVideo {
+                url: Url::parse("https://content.rawkode.academy/videos/x/clip.mp4").expect("url"),
+                media_type: DirectVideoMediaType::Mp4,
+            }),
+            player: None,
             expires_at_unix: 1_900_000_000,
         };
 
@@ -419,6 +493,7 @@ mod tests {
             image: None,
             video: None,
             player: None,
+            native_video: None,
             expires_at_unix: 1_900_000_000,
         };
 
@@ -443,6 +518,7 @@ mod tests {
             image: None,
             video: None,
             player: None,
+            native_video: None,
             expires_at_unix: 10,
         };
 
@@ -466,6 +542,7 @@ mod tests {
             image: None,
             video: None,
             player: None,
+            native_video: None,
             expires_at_unix: 1_900_000_000,
         };
 
@@ -501,6 +578,7 @@ mod tests {
                 width: Some(1280),
                 height: Some(720),
             }),
+            native_video: None,
             expires_at_unix: 4_102_444_800,
         };
         let token = encode_link_preview_token(&data, secret);

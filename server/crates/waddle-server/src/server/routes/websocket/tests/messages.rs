@@ -3834,6 +3834,7 @@ async fn groupchat_preview_request_is_stamped_and_archived_without_private_paylo
         description: Some("Plain text preview".to_string()),
         image: None,
         video: None,
+        native_video: None,
         player: None,
         expires_at_unix: chrono::Utc::now().timestamp() + 300,
     };

@@ -9,7 +9,8 @@ use minidom::rxml::xml_ncname;
 use url::Url;
 use waddle_xmpp::xep::{
     encode_link_preview_token_checked, LinkPreviewTokenData, LinkPreviewTokenImage,
-    LinkPreviewTokenPlayer, LinkPreviewTokenVideo, NS_WADDLE_LINK_PREVIEW,
+    LinkPreviewTokenNativeVideo, LinkPreviewTokenPlayer, LinkPreviewTokenVideo,
+    NS_WADDLE_LINK_PREVIEW,
 };
 #[cfg(test)]
 use waddle_xmpp_core::PreviewImageMediaType;
@@ -179,6 +180,12 @@ async fn handle_link_preview_lookup_iq_with_policy(
             media_type: video.media_type,
             size: video.size,
         }),
+        native_video: metadata
+            .native_video
+            .map(|native| LinkPreviewTokenNativeVideo {
+                url: native.url,
+                media_type: native.media_type,
+            }),
         player: metadata.player_embed.map(|player| LinkPreviewTokenPlayer {
             url: player.url,
             width: player.width,
@@ -814,6 +821,7 @@ mod tests {
                 width: Some(1280),
                 height: Some(720),
             }),
+            native_video: None,
             expires_at_unix: 0,
         };
         let token =

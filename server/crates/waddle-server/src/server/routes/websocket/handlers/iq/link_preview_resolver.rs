@@ -45,9 +45,20 @@ pub(super) struct ResolvedLinkMetadata {
     /// Direct playable video discovered when the link itself is a trusted
     /// direct-media file. Mutually exclusive with HTML-derived previews.
     pub video: Option<ResolvedDirectVideo>,
+    /// Native-playable media advertised by an HTML page's `og:video` (media URL
+    /// typically on a different host than the page). Coexists with
+    /// image/title/description; mutually exclusive with `video` and `player_embed`.
+    pub native_video: Option<ResolvedNativeVideo>,
     /// Allowlisted embeddable player iframe discovered from `og:video`. Coexists
     /// with image/title/description; mutually exclusive with `video`.
     pub player_embed: Option<ResolvedPlayerEmbed>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ResolvedNativeVideo {
+    /// Policy-validated remote media URL the client plays from on user action.
+    pub url: Url,
+    pub media_type: DirectVideoMediaType,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -262,6 +273,7 @@ pub(super) async fn resolve_link_preview(
                         media_type,
                         size,
                     }),
+                    native_video: None,
                     player_embed: None,
                 }));
             }
@@ -1056,6 +1068,29 @@ fn extract_metadata_parts_from_html(
             height: meta_content(html, "og:video:height", 16).and_then(|raw| raw.parse().ok()),
         });
 
+    // Native-playable media advertised by the page's `og:video` (e.g. a CDN
+    // `.mp4`/HLS stream). Discriminated from the iframe player by `og:video:type`:
+    // a supported direct video MIME → native `<video>`; `text/html` → player
+    // (handled above). The media URL is subject to https + the operator host
+    // policy exactly like `og:image`, and gated on `video_enabled`.
+    let native_video = policy
+        .video_enabled
+        .then(|| {
+            let media_type = meta_content(html, "og:video:type", 64)?
+                .parse::<DirectVideoMediaType>()
+                .ok()?;
+            let url = meta_content(html, "og:video:secure_url", usize::MAX)
+                .or_else(|| meta_content(html, "og:video:url", usize::MAX))
+                .or_else(|| meta_content(html, "og:video", usize::MAX))
+                .and_then(|raw| Url::parse(&raw).ok())
+                .filter(|url| url.scheme() == "https")
+                .filter(|url| {
+                    classify_url_with_policy(url, policy) == LinkPreviewResolverStatus::Ready
+                })?;
+            Some(ResolvedNativeVideo { url, media_type })
+        })
+        .flatten();
+
     Some((
         ResolvedLinkMetadata {
             original_url: requested_url.clone(),
@@ -1064,6 +1099,7 @@ fn extract_metadata_parts_from_html(
             description,
             image: None,
             video: None,
+            native_video,
             player_embed,
         },
         image,
@@ -1704,6 +1740,43 @@ mod tests {
             metadata.description.as_deref(),
             Some("d".repeat(LINK_PREVIEW_DESCRIPTION_MAX_BYTES - 1).as_str())
         );
+    }
+
+    #[test]
+    fn parses_native_video_from_progressive_og_video() {
+        let requested_url = Url::parse("https://rawkode.academy/watch/yoke").expect("url");
+        let html = r#"<html><head>
+                <meta property="og:title" content="Hands-on Yoke">
+                <meta property="og:video" content="https://content.rawkode.academy/v/clip.mp4">
+                <meta property="og:video:type" content="video/mp4">
+              </head></html>"#;
+
+        let metadata = extract_metadata_from_html(&requested_url, html).expect("metadata");
+
+        assert_eq!(
+            metadata.native_video,
+            Some(ResolvedNativeVideo {
+                url: Url::parse("https://content.rawkode.academy/v/clip.mp4").expect("url"),
+                media_type: DirectVideoMediaType::Mp4,
+            })
+        );
+        assert!(metadata.player_embed.is_none());
+        assert!(metadata.video.is_none());
+    }
+
+    #[test]
+    fn ignores_native_video_with_unsupported_og_video_type() {
+        let requested_url = Url::parse("https://example.com/watch").expect("url");
+        let html = r#"<html><head>
+                <meta property="og:title" content="A page">
+                <meta property="og:video" content="https://cdn.example.com/stream.flv">
+                <meta property="og:video:type" content="video/x-flv">
+              </head></html>"#;
+
+        let metadata = extract_metadata_from_html(&requested_url, html).expect("metadata");
+
+        assert!(metadata.native_video.is_none());
+        assert_eq!(metadata.title.as_deref(), Some("A page"));
     }
 
     #[test]

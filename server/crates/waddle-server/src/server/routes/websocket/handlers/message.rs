@@ -240,7 +240,7 @@ fn consume_link_preview_request(
                 .player
                 .filter(|player| is_sealed_player_embed_allowed(&player.url))
             {
-                metadata = metadata.with_video(waddle_xmpp::xep::LinkMetadataVideo {
+                metadata = metadata.with_video(waddle_xmpp::xep::LinkMetadataVideo::Player {
                     url: player.url,
                     width: player.width,
                     height: player.height,
@@ -503,6 +503,7 @@ mod tests {
             }),
             video: None,
             player: None,
+            native_video: None,
             expires_at_unix: 1_900_000_000,
         };
         let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
@@ -576,6 +577,7 @@ mod tests {
                 width: Some(1280),
                 height: Some(720),
             }),
+            native_video: None,
             expires_at_unix: 1_900_000_000,
         };
         let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
@@ -600,16 +602,15 @@ mod tests {
 
         let parsed = waddle_xmpp::xep::extract_link_metadata_from_message(&message);
         assert_eq!(parsed.len(), 1);
-        let video = parsed[0]
-            .video
-            .as_ref()
-            .expect("og:video stamped for allowlisted player");
         assert_eq!(
-            video.url.as_str(),
-            "https://www.youtube-nocookie.com/embed/429A_VugWW0"
+            parsed[0].video,
+            Some(waddle_xmpp::xep::LinkMetadataVideo::Player {
+                url: url::Url::parse("https://www.youtube-nocookie.com/embed/429A_VugWW0")
+                    .expect("url"),
+                width: Some(1280),
+                height: Some(720),
+            })
         );
-        assert_eq!(video.width, Some(1280));
-        assert_eq!(video.height, Some(720));
     }
 
     fn direct_video_preview_token() -> waddle_xmpp::xep::LinkPreviewTokenData {
@@ -627,6 +628,7 @@ mod tests {
                 size: Some(4096),
             }),
             player: None,
+            native_video: None,
             expires_at_unix: 1_900_000_000,
         }
     }
@@ -759,6 +761,7 @@ mod tests {
             image: None,
             video: None,
             player: None,
+            native_video: None,
             expires_at_unix: 1_900_000_000,
         };
         let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
@@ -803,6 +806,7 @@ mod tests {
             image: None,
             video: None,
             player: None,
+            native_video: None,
             expires_at_unix: 1_900_000_000,
         };
         let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
@@ -853,6 +857,7 @@ mod tests {
                 image: None,
                 video: None,
                 player: None,
+                native_video: None,
                 expires_at_unix: 1_900_000_000,
             };
             let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
@@ -894,6 +899,7 @@ mod tests {
             image: None,
             video: None,
             player: None,
+            native_video: None,
             expires_at_unix: 1_900_000_000,
         };
         let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
@@ -937,6 +943,7 @@ mod tests {
             image: None,
             video: None,
             player: None,
+            native_video: None,
             expires_at_unix: 1_900_000_000,
         };
         let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
@@ -989,6 +996,7 @@ mod tests {
             }),
             video: None,
             player: None,
+            native_video: None,
             expires_at_unix: 1_900_000_000,
         };
         let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
@@ -1057,6 +1065,7 @@ mod tests {
             }),
             video: None,
             player: None,
+            native_video: None,
             expires_at_unix: 1_900_000_000,
         };
         let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
@@ -1100,6 +1109,7 @@ mod tests {
             image: None,
             video: None,
             player: None,
+            native_video: None,
             expires_at_unix: 10,
         };
         let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
@@ -1205,6 +1215,7 @@ mod tests {
             image: None,
             video: None,
             player: None,
+            native_video: None,
             expires_at_unix: 1_900_000_000,
         };
         let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
@@ -1242,6 +1253,7 @@ mod tests {
             image: None,
             video: None,
             player: None,
+            native_video: None,
             expires_at_unix: 1_900_000_000,
         };
         let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
@@ -1279,6 +1291,7 @@ mod tests {
             image: None,
             video: None,
             player: None,
+            native_video: None,
             expires_at_unix: 1_900_000_000,
         };
         let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
@@ -1316,6 +1329,7 @@ mod tests {
             image: None,
             video: None,
             player: None,
+            native_video: None,
             expires_at_unix: 1_900_000_000,
         };
         let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
@@ -1356,6 +1370,7 @@ mod tests {
             image: None,
             video: None,
             player: None,
+            native_video: None,
             expires_at_unix: 1_900_000_000,
         };
         let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
@@ -1396,6 +1411,7 @@ mod tests {
             image: None,
             video: None,
             player: None,
+            native_video: None,
             expires_at_unix: 1_900_000_000,
         };
         let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
@@ -1436,6 +1452,7 @@ mod tests {
             image: None,
             video: None,
             player: None,
+            native_video: None,
             expires_at_unix: 1_900_000_000,
         };
         let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
