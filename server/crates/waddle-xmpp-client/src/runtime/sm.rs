@@ -1,7 +1,9 @@
 use crate::bootstrap::NS_STREAMS;
 
 use crate::error::{ClientError, ClientResult};
-use crate::event::{ClientEvent, ConnectionEvent, MessageDeliveryEvent, StreamManagementEvent};
+use crate::event::{
+    ClientEvent, ConnectionEvent, MessageDeliveryEvent, StreamErrorCondition, StreamManagementEvent,
+};
 use crate::state::{SessionBinding, StreamId};
 use crate::transport::{StreamClose, TransportMessage};
 use minidom::Element;
@@ -18,6 +20,10 @@ impl XmppRuntime {
     ) {
         debug_assert_eq!(element.name(), "error");
         debug_assert_eq!(element.ns(), NS_STREAMS);
+
+        events.push(ClientEvent::Connection(ConnectionEvent::StreamError {
+            condition: stream_error_condition(element),
+        }));
 
         // RFC 6120 defines stream errors as terminal for the current XML
         // stream. During XEP-0198 resume bootstrap, recoverable resume-specific
@@ -222,4 +228,12 @@ impl XmppRuntime {
             resumable: self.sm_state.previd.is_some(),
         })
     }
+}
+
+fn stream_error_condition(element: &Element) -> StreamErrorCondition {
+    element
+        .children()
+        .filter(|child| child.ns() == NS_STREAM_ERRORS && child.name() != "text")
+        .find_map(|child| StreamErrorCondition::from_name(child.name()))
+        .unwrap_or(StreamErrorCondition::UndefinedCondition)
 }

@@ -56,6 +56,9 @@ pub(crate) fn dispatch_client_event(inner: &Rc<RefCell<WaddleClientInner>>, even
                 let _ = callback.call1(&JsValue::NULL, &JsValue::from_str("resumed"));
             }
         }
+        ClientEvent::Connection(ConnectionEvent::StreamError { condition }) => {
+            emit_stream_error_callback(inner, condition);
+        }
         ClientEvent::Messaging(waddle_xmpp_client::MessagingEvent::Message(message)) => {
             let mut message = *message;
             let account_bare_jid = {
@@ -141,5 +144,28 @@ pub(crate) fn emit_error_callback(inner: &Rc<RefCell<WaddleClientInner>>, descri
     let callback = inner.borrow().on_error.clone();
     if let Some(callback) = callback {
         let _ = callback.call1(&JsValue::NULL, &JsValue::from_str(description));
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JsStreamError<'a> {
+    detail: &'a str,
+    condition: &'a str,
+}
+
+fn emit_stream_error_callback(
+    inner: &Rc<RefCell<WaddleClientInner>>,
+    condition: StreamErrorCondition,
+) {
+    let callback = inner.borrow().on_error.clone();
+    if let Some(callback) = callback {
+        let condition = condition.as_str();
+        let payload = JsStreamError {
+            detail: "stream error",
+            condition,
+        };
+        let value = to_js_value(&payload).unwrap_or_else(|_| JsValue::from_str(condition));
+        let _ = callback.call1(&JsValue::NULL, &value);
     }
 }

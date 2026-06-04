@@ -714,6 +714,91 @@ describe("BrowserXmppClient telemetry hooks", () => {
     expect(memberErr.options?.context?.detail).toBe("member-query-unknown");
   });
 
+  test("self-presence join timeout reports a stable room timeout detail", () => {
+    const stub = createFaroStub();
+    __setFaroForTesting(stub as never);
+
+    const client = new BrowserXmppClient(session());
+    installInstrumentation(client);
+
+    const internal = client as unknown as {
+      emitError: (event: {
+        kind: "connect-timeout";
+        recoverable: boolean;
+        detail: string;
+      }) => void;
+    };
+
+    internal.emitError({
+      kind: "connect-timeout",
+      recoverable: true,
+      detail: "Timed out waiting for self-presence in c1@muc.example.com",
+    });
+
+    expect(stub.errors).toHaveLength(1);
+    expect(stub.errors[0].options?.type).toBe("xmpp.disconnect");
+    expect(stub.errors[0].options?.context?.recoverable).toBe("true");
+    expect(stub.errors[0].options?.context?.detail).toBe("room-self-presence-timeout");
+  });
+
+  test("set_on_error bridge preserves stream error conditions for telemetry", () => {
+    const stub = createFaroStub();
+    __setFaroForTesting(stub as never);
+
+    const client = new BrowserXmppClient(session());
+    installInstrumentation(client);
+
+    let onError: ((detail: string | { detail?: string; condition?: string }) => void) | null = null;
+    const xmpp = {
+      set_on_error(cb: NonNullable<typeof onError>) {
+        onError = cb;
+      },
+    };
+    const internal = client as unknown as {
+      xmpp: typeof xmpp;
+      wireEvents: (xmpp: typeof xmpp) => void;
+    };
+    internal.xmpp = xmpp;
+    internal.wireEvents(xmpp);
+
+    onError?.({ detail: "stream error", condition: "not-authorized" });
+
+    expect(stub.errors).toHaveLength(1);
+    expect(stub.errors[0].error.message).toBe("stream-not-authorized");
+    expect(stub.errors[0].options?.type).toBe("xmpp.stream");
+    expect(stub.errors[0].options?.context?.condition).toBe("not-authorized");
+    expect(stub.errors[0].options?.context?.detail).toBe("stream-not-authorized");
+  });
+
+  test("set_on_error bridge keeps stanza-only conditions out of stream telemetry", () => {
+    const stub = createFaroStub();
+    __setFaroForTesting(stub as never);
+
+    const client = new BrowserXmppClient(session());
+    installInstrumentation(client);
+
+    let onError: ((detail: string | { detail?: string; condition?: string }) => void) | null = null;
+    const xmpp = {
+      set_on_error(cb: NonNullable<typeof onError>) {
+        onError = cb;
+      },
+    };
+    const internal = client as unknown as {
+      xmpp: typeof xmpp;
+      wireEvents: (xmpp: typeof xmpp) => void;
+    };
+    internal.xmpp = xmpp;
+    internal.wireEvents(xmpp);
+
+    onError?.("forbidden");
+
+    expect(stub.errors).toHaveLength(1);
+    expect(stub.errors[0].error.message).toBe("stream-error");
+    expect(stub.errors[0].options?.type).toBe("xmpp.stream");
+    expect(stub.errors[0].options?.context?.condition).toBeUndefined();
+    expect(stub.errors[0].options?.context?.detail).toBe("stream-error");
+  });
+
   test("enqueuing a send fires onSendEnqueued + onQueueDepthChange", async () => {
     const client = new BrowserXmppClient(session());
     // Force the slow path: make connect throw so we stay in "no-client" reason.

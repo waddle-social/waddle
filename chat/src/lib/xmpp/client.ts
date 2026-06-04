@@ -52,7 +52,7 @@ import type {
   XmppErrorEvent,
   XmppStatusSnapshot,
 } from "./types";
-import { parseMucAffiliation, parseMucRole } from "./types";
+import { parseMucAffiliation, parseMucRole, XMPP_STREAM_ERROR_CONDITIONS } from "./types";
 import { prepareEncryptedAttachmentUpload } from "./encrypted-attachments";
 
 import { discoverChannels, discoverTopology } from "./discovery";
@@ -254,6 +254,39 @@ const ROOM_SELF_PRESENCE_TIMEOUT_MS = 15_000;
 type CatchupRunStats = { pages: number; messages: number };
 type CatchupOutcome = "completed" | "aborted" | "failed";
 type DmCallActivityHydrationOptions = { since?: string; pageSize?: number; maxPages?: number };
+type XmppStreamErrorPayload = string | { detail?: string | null; condition?: string | null };
+
+function streamErrorConditionFromText(text: string | null | undefined): string | undefined {
+  const normalized = text?.trim().toLowerCase();
+  if (!normalized) return undefined;
+  if (XMPP_STREAM_ERROR_CONDITIONS.has(normalized)) return normalized;
+  for (const condition of XMPP_STREAM_ERROR_CONDITIONS) {
+    const escaped = condition.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (new RegExp(`(^|[^a-z0-9])${escaped}([^a-z0-9]|$)`).test(normalized)) {
+      return condition;
+    }
+  }
+  return undefined;
+}
+
+function normalizeXmppStreamErrorPayload(payload: XmppStreamErrorPayload): {
+  detail: string;
+  condition?: string;
+} {
+  if (typeof payload === "string") {
+    const condition = streamErrorConditionFromText(payload);
+    return {
+      detail: payload,
+      ...(condition ? { condition } : {}),
+    };
+  }
+  const detail = payload.detail?.trim() || payload.condition?.trim() || "stream error";
+  const condition = payload.condition?.trim() || streamErrorConditionFromText(detail);
+  return {
+    detail,
+    ...(condition ? { condition } : {}),
+  };
+}
 
 async function collectRecentMamPages(
   fetchPage: (max: number, pageParam: MamPageParam) => Promise<WasmMamPage | null | undefined>,
@@ -408,7 +441,7 @@ type XmppClientInstance = Partial<WasmClient> & CompatEmitter & {
   leaveRoom?: (roomJid: string, nick: string) => Promise<void>;
   set_on_connected?: (cb: () => void) => void;
   set_on_disconnected?: (cb: () => void) => void;
-  set_on_error?: (cb: (error: string) => void) => void;
+  set_on_error?: (cb: (error: XmppStreamErrorPayload) => void) => void;
   set_on_message?: (cb: (message: WasmMessage) => void) => void;
   set_on_presence?: (cb: (presence: WasmPresence) => void) => void;
   set_on_message_delivery_acked?: (cb: (id: string) => void) => void;
@@ -735,6 +768,41 @@ export class BrowserXmppClient {
    */
   private roomJoinKey(roomJid: string): string {
     return roomJid.split("/")[0]?.trim().toLowerCase() ?? "";
+  }
+
+  private canonicalJoinedRoomJid(roomJid: string): string {
+    const key = this.roomJoinKey(roomJid);
+    if (!key) return roomJid;
+    if (this.currentRoom && this.roomJoinKey(this.currentRoom) === key) {
+      return this.currentRoom;
+    }
+    for (const joinedRoom of this.joinedMucs.keys()) {
+      if (this.roomJoinKey(joinedRoom) === key) return joinedRoom;
+    }
+    return roomJid;
+  }
+
+  private markMucReadyFromSelfPresence(roomJid: string): void {
+    const room = this.canonicalJoinedRoomJid(roomJid);
+    if (!this.joinedMucs.has(room)) {
+      this.joinedMucs.set(room, Promise.resolve());
+    }
+    this.joinedMucReady.add(room);
+    this.rememberJoinedRoom(room);
+  }
+
+  private handleMucPresenceError(presence: WasmPresence): boolean {
+    if (presence.presence_type !== "error") return false;
+    const room = presence.from?.split("/")[0]?.trim() ?? "";
+    const key = this.roomJoinKey(room);
+    if (!room || !key) return false;
+
+    const waiter = this.roomJoinWaiters.get(key);
+    if (!waiter) return false;
+
+    waiter?.reject(new Error("Channel presence was rejected. Try again in a moment."));
+    this.revokeMucReadiness(this.canonicalJoinedRoomJid(room), { keepPendingJoin: true });
+    return true;
   }
 
   /**
@@ -1211,10 +1279,23 @@ export class BrowserXmppClient {
       throw new Error("XMPP client missing join_room binding");
     }
     const ready = this.waitForRoomSelfPresence(roomJid);
-    if (xmpp.join_room) {
-      await Promise.allSettled([xmpp.join_room(roomJid, this.session.username)]);
-    } else if (xmpp.joinRoom) {
-      await xmpp.joinRoom(roomJid, this.session.username);
+    const joinKey = this.roomJoinKey(roomJid);
+    const joinWaiter = this.roomJoinWaiters.get(joinKey);
+    try {
+      if (xmpp.join_room) {
+        await xmpp.join_room(roomJid, this.session.username);
+      } else if (xmpp.joinRoom) {
+        await xmpp.joinRoom(roomJid, this.session.username);
+      }
+    } catch (error) {
+      const joinError = error instanceof Error
+        ? error
+        : new Error("XMPP room join failed before presence could sync");
+      if (this.isCurrentXmpp(xmpp) && this.roomJoinWaiters.get(joinKey) === joinWaiter) {
+        joinWaiter?.reject(joinError);
+      }
+      await ready.catch(() => undefined);
+      throw joinError;
     }
     if (!this.isCurrentXmpp(xmpp)) {
       await ready.catch(() => undefined);
@@ -2866,6 +2947,7 @@ export class BrowserXmppClient {
     ]);
     this.persistRetainedJoinedRooms();
     this.joinedMucs.clear();
+    this.joinedMucJoinTokens.clear();
     this.joinedMucReady.clear();
     this.clearRoomPresenceCaches();
     if (this.destroying) { this.clearResumeState(); this.emitStatus({ state: "offline", detail: error?.message ?? "Disconnected" }); return; }
@@ -2884,8 +2966,10 @@ export class BrowserXmppClient {
   }
   private handlePresence(presence: WasmPresence) {
     const from = presence.from ?? "";
+    if (this.handleMucPresenceError(presence)) return;
     if (this.isMucPresence(presence)) {
       const [room, nick = ""] = from.split("/");
+      if (!room) return;
       // XEP-0045 §7.2.2: our own available self-presence (status 110,
       // or, as a fallback, our disclosed real JID) completes the join.
       // Resolve by room — not the exact occupant JID — so a
@@ -2893,8 +2977,8 @@ export class BrowserXmppClient {
       // matches the waiter.
       if (this.isOwnAvailableMucSelfPresence(presence)) {
         this.roomJoinWaiters.get(this.roomJoinKey(room))?.resolve();
+        this.markMucReadyFromSelfPresence(room);
       }
-      if (!room) return;
       if (!nick && presence.vcard_avatar) this.roomAvatarHandler?.(room, presence.vcard_avatar);
       if (!nick) return;
       const roomHats = this.hatsFor(room);
@@ -3238,9 +3322,15 @@ export class BrowserXmppClient {
       if (event === "resumed") this.handleSessionReady(xmpp, { type: "resumed" }); else this.handleSessionReady(xmpp, { type: "fresh" });
     });
     xmpp.set_on_disconnected?.(() => this.handleDisconnected(xmpp));
-    xmpp.set_on_error?.((detail: string) => {
+    xmpp.set_on_error?.((payload: XmppStreamErrorPayload) => {
       if (this.xmpp !== xmpp) return;
-      this.emitError({ kind: "stream", recoverable: !this.destroying, detail });
+      const streamError = normalizeXmppStreamErrorPayload(payload);
+      this.emitError({
+        kind: "stream",
+        recoverable: !this.destroying,
+        detail: streamError.detail,
+        ...(streamError.condition ? { condition: streamError.condition } : {}),
+      });
     });
     xmpp.set_on_message?.((message: WasmMessage) => {
       if (!this.isCurrentXmpp(xmpp)) return;
