@@ -635,7 +635,13 @@ async fn fetch_html_once(
         // names a direct playable file. This blocks provider endpoints that
         // return a video content-type for non-file (embed/watch) URLs, and is
         // defense-in-depth on top of the classify-time `video_enabled` gate.
-        if policy.video_enabled && looks_like_direct_video_url(url) {
+        // HLS is excluded here: an adaptive-streaming manifest is not a single
+        // downloadable file and only enters via the page-advertised og:video
+        // native path, never as a raw-file (XEP-0447) share.
+        if policy.video_enabled
+            && media_type != DirectVideoMediaType::Hls
+            && looks_like_direct_video_url(url)
+        {
             return Ok(FetchOnceResult::DirectVideo {
                 final_url: url.clone(),
                 media_type,
@@ -1959,6 +1965,32 @@ mod tests {
         let policy = LinkPreviewResolverPolicy {
             allow_http_loopback_for_tests: true,
             video_enabled: false,
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/clip.mp4", server.uri())).expect("url");
+
+        assert_eq!(
+            resolve_link_preview(&url, &policy).await,
+            LinkPreviewResolverOutcome::Unsupported
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_hls_content_type_on_direct_file_url() {
+        // An HLS manifest is not a single downloadable file. Even when a
+        // direct-file URL serves an mpegurl content-type, it must not be
+        // promoted to a raw-file (XEP-0447) video share — HLS only enters via
+        // the page-advertised og:video native path.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/clip.mp4"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw("#EXTM3U", "application/x-mpegurl"),
+            )
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
             ..Default::default()
         };
         let url = Url::parse(&format!("{}/clip.mp4", server.uri())).expect("url");

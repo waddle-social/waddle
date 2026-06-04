@@ -5,7 +5,7 @@
 // suppresses interactive affordances that belong on the timeline only
 // (extension action buttons).
 //
-import { computed, reactive, ref, nextTick, watch, type ComponentPublicInstance } from "vue";
+import { computed, reactive, ref, nextTick, watch } from "vue";
 import {
   Lock,
   AlertCircle,
@@ -31,10 +31,10 @@ import {
 import { formatFileSize, useMessageAttachments } from "@/channels/message-attachments";
 import { applyShikiToCodeBlocks } from "@/lib/shiki";
 import { isAllowedPlayerEmbedOrigin } from "@/lib/xmpp/player-embed-allowlist";
-import { attachNativeVideo, type VideoAttachment } from "@/lib/xmpp/hls-player";
 import { useExtensionAnnotationActions } from "@/channels/extension-annotation-actions";
 import type { ExtensionCommandResult } from "@/lib/xmpp/extension-commands";
 import ImageLightbox from "@/components/ui/ImageLightbox.vue";
+import HlsVideoPlayer from "@/components/chat/HlsVideoPlayer.vue";
 
 const props = withDefaults(
   defineProps<{
@@ -112,38 +112,13 @@ function videoCardKey(preview: MessageLinkPreview): string {
   return `${preview.originalUrl}:${preview.normalizedUrl ?? ""}`;
 }
 // Native-video playback is local UI state only — never synchronized over XMPP.
-// Until the user clicks play, no <video> element (and no network fetch) is
-// emitted. On click we attach a progressive/native-HLS src or a lazily-loaded
-// hls.js (see hls-player); a fatal playback error falls back to a link.
+// Until the user clicks play, the <video> (owned by HlsVideoPlayer, mounted only
+// while playing) and its network fetch are not emitted; a fatal playback error
+// flips the card to a link fallback.
 const playingVideos = reactive(new Set<string>());
 const failedVideos = reactive(new Set<string>());
-const videoPlaybackHandles = new Map<string, VideoAttachment>();
 function startVideoPlayback(preview: MessageLinkPreview): void {
   playingVideos.add(videoCardKey(preview));
-}
-function onVideoElement(
-  el: Element | ComponentPublicInstance | null,
-  card: { preview: MessageLinkPreview; video: { url: string; mediaType: string } },
-): void {
-  const key = videoCardKey(card.preview);
-  // Vue invokes the function ref with the element on mount and `null` on
-  // unmount; tear down the attachment in the latter case.
-  if (!(el instanceof HTMLVideoElement)) {
-    videoPlaybackHandles.get(key)?.destroy();
-    videoPlaybackHandles.delete(key);
-    return;
-  }
-  if (videoPlaybackHandles.has(key)) return;
-  void attachNativeVideo(el, card.video.url, card.video.mediaType, () => {
-    failedVideos.add(key);
-  }).then((attachment) => {
-    // The card may have been torn down (or failed) while hls.js loaded.
-    if (playingVideos.has(key) && !failedVideos.has(key)) {
-      videoPlaybackHandles.set(key, attachment);
-    } else {
-      attachment.destroy();
-    }
-  });
 }
 const playerPreviewCards = computed(() =>
   linkPreviews.value.flatMap((preview) => {
@@ -348,14 +323,11 @@ watch(
         <ExternalLink aria-hidden="true" class="h-3.5 w-3.5" />
         {{ linkPreviewHost(card.preview.originalUrl) }}
       </span>
-      <video
+      <HlsVideoPlayer
         v-if="playingVideos.has(videoCardKey(card.preview)) && !failedVideos.has(videoCardKey(card.preview))"
-        :ref="(el) => onVideoElement(el, card)"
-        class="max-h-72 w-full rounded border border-border bg-black"
-        controls
-        autoplay
-        playsinline
-        @click.stop
+        :url="card.video.url"
+        :media-type="card.video.mediaType"
+        @failed="failedVideos.add(videoCardKey(card.preview))"
       />
       <a
         v-else-if="failedVideos.has(videoCardKey(card.preview))"

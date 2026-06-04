@@ -33,9 +33,14 @@ export async function attachNativeVideo(
 ): Promise<VideoAttachment> {
   const canPlayNativeHls = video.canPlayType("application/vnd.apple.mpegurl") !== "";
   if (videoPlaybackStrategy(mediaType, canPlayNativeHls) === "native-src") {
+    // Progressive media and Safari/iOS native HLS. A media error (404 manifest,
+    // unsupported codec) has no recovery path, so surface it as fatal.
+    const onError = () => onFatalError();
+    video.addEventListener("error", onError);
     video.src = url;
     return {
       destroy() {
+        video.removeEventListener("error", onError);
         video.removeAttribute("src");
         try {
           video.load();
