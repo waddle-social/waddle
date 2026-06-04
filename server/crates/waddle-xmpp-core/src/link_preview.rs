@@ -83,13 +83,6 @@ impl DirectVideoMediaType {
             Self::Hls => "application/vnd.apple.mpegurl",
         }
     }
-
-    /// Whether this media type is an adaptive-streaming manifest (HLS) rather
-    /// than a single progressive file. Drives the client's `hls.js`/native-HLS
-    /// playback path.
-    pub const fn is_adaptive_stream(self) -> bool {
-        matches!(self, Self::Hls)
-    }
 }
 
 impl fmt::Display for DirectVideoMediaType {

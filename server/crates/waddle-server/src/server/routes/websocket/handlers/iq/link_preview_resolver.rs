@@ -1772,6 +1772,28 @@ mod tests {
     }
 
     #[test]
+    fn parses_native_video_from_hls_og_video() {
+        // The Rawkode Academy shape: an HLS stream advertised via og:video with
+        // the `application/x-mpegURL` type (one of several mpegurl aliases).
+        let requested_url = Url::parse("https://rawkode.academy/watch/yoke").expect("url");
+        let html = r#"<html><head>
+                <meta property="og:title" content="Hands-on Yoke">
+                <meta property="og:video" content="https://content.rawkode.academy/v/stream.m3u8">
+                <meta property="og:video:type" content="application/x-mpegURL">
+              </head></html>"#;
+
+        let metadata = extract_metadata_from_html(&requested_url, html).expect("metadata");
+
+        assert_eq!(
+            metadata.native_video,
+            Some(ResolvedNativeVideo {
+                url: Url::parse("https://content.rawkode.academy/v/stream.m3u8").expect("url"),
+                media_type: DirectVideoMediaType::Hls,
+            })
+        );
+    }
+
+    #[test]
     fn parses_native_video_with_media_type_parameters() {
         // `og:video:type` legally carries codec parameters, e.g.
         // `video/mp4; codecs="avc1.42E01E"`. The MIME must be matched on its

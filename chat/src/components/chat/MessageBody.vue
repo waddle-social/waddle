@@ -5,7 +5,7 @@
 // suppresses interactive affordances that belong on the timeline only
 // (extension action buttons).
 //
-import { computed, reactive, ref, nextTick, watch } from "vue";
+import { computed, reactive, ref, nextTick, watch, type ComponentPublicInstance } from "vue";
 import {
   Lock,
   AlertCircle,
@@ -31,6 +31,7 @@ import {
 import { formatFileSize, useMessageAttachments } from "@/channels/message-attachments";
 import { applyShikiToCodeBlocks } from "@/lib/shiki";
 import { isAllowedPlayerEmbedOrigin } from "@/lib/xmpp/player-embed-allowlist";
+import { attachNativeVideo, type VideoAttachment } from "@/lib/xmpp/hls-player";
 import { useExtensionAnnotationActions } from "@/channels/extension-annotation-actions";
 import type { ExtensionCommandResult } from "@/lib/xmpp/extension-commands";
 import ImageLightbox from "@/components/ui/ImageLightbox.vue";
@@ -110,11 +111,39 @@ function isHttpsUrl(value: string): boolean {
 function videoCardKey(preview: MessageLinkPreview): string {
   return `${preview.originalUrl}:${preview.normalizedUrl ?? ""}`;
 }
-// Playback is local UI state only — never synchronized over XMPP. Until the
-// user clicks play, no <video> element (and no network fetch) is emitted.
+// Native-video playback is local UI state only — never synchronized over XMPP.
+// Until the user clicks play, no <video> element (and no network fetch) is
+// emitted. On click we attach a progressive/native-HLS src or a lazily-loaded
+// hls.js (see hls-player); a fatal playback error falls back to a link.
 const playingVideos = reactive(new Set<string>());
+const failedVideos = reactive(new Set<string>());
+const videoPlaybackHandles = new Map<string, VideoAttachment>();
 function startVideoPlayback(preview: MessageLinkPreview): void {
   playingVideos.add(videoCardKey(preview));
+}
+function onVideoElement(
+  el: Element | ComponentPublicInstance | null,
+  card: { preview: MessageLinkPreview; video: { url: string; mediaType: string } },
+): void {
+  const key = videoCardKey(card.preview);
+  // Vue invokes the function ref with the element on mount and `null` on
+  // unmount; tear down the attachment in the latter case.
+  if (!(el instanceof HTMLVideoElement)) {
+    videoPlaybackHandles.get(key)?.destroy();
+    videoPlaybackHandles.delete(key);
+    return;
+  }
+  if (videoPlaybackHandles.has(key)) return;
+  void attachNativeVideo(el, card.video.url, card.video.mediaType, () => {
+    failedVideos.add(key);
+  }).then((attachment) => {
+    // The card may have been torn down (or failed) while hls.js loaded.
+    if (playingVideos.has(key) && !failedVideos.has(key)) {
+      videoPlaybackHandles.set(key, attachment);
+    } else {
+      attachment.destroy();
+    }
+  });
 }
 const playerPreviewCards = computed(() =>
   linkPreviews.value.flatMap((preview) => {
@@ -320,14 +349,25 @@ watch(
         {{ linkPreviewHost(card.preview.originalUrl) }}
       </span>
       <video
-        v-if="playingVideos.has(videoCardKey(card.preview))"
-        :src="card.video.url"
+        v-if="playingVideos.has(videoCardKey(card.preview)) && !failedVideos.has(videoCardKey(card.preview))"
+        :ref="(el) => onVideoElement(el, card)"
         class="max-h-72 w-full rounded border border-border bg-black"
         controls
         autoplay
         playsinline
         @click.stop
       />
+      <a
+        v-else-if="failedVideos.has(videoCardKey(card.preview))"
+        :href="linkPreviewHref(card.preview.originalUrl) ?? undefined"
+        target="_blank"
+        rel="noopener noreferrer"
+        class="relative flex aspect-video w-full items-center justify-center gap-2 overflow-hidden rounded border border-border bg-black/80 text-sm text-white hover:bg-black"
+        @click.stop
+      >
+        <AlertCircle aria-hidden="true" class="h-5 w-5" />
+        Couldn't play here — watch on site
+      </a>
       <button
         v-else
         type="button"
