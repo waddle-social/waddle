@@ -4,7 +4,7 @@
 // HLS play. Video bytes are never proxied — playback streams from the origin.
 import { isHlsMediaType } from "./native-video";
 
-export type VideoPlaybackStrategy = "native-src" | "hls-js";
+type VideoPlaybackStrategy = "native-src" | "hls-js";
 
 /// Pure decision: an HLS manifest needs hls.js unless the browser plays HLS
 /// natively; everything else (progressive containers) uses the <video> src.

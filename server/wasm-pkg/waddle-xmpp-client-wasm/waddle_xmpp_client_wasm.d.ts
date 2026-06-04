@@ -461,6 +461,7 @@ export class WaddleClient {
      */
     subscribe_mds_displayed(): Promise<any>;
     subscribe_to_presence(peer_jid: string): Promise<any>;
+    supports_mds_publish_options(): Promise<any>;
     /**
      * Publish an unpin request (#414). Same authorization rules as
      * [`Self::pin_message`].

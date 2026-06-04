@@ -65,6 +65,7 @@ pub enum ConnectionEvent {
     OutboundMessage(TransportMessage),
     StreamOpening(StreamOpen),
     StreamOpened(StreamOpen),
+    StreamError { condition: StreamErrorCondition },
     FeaturesAdvertised(StreamFeatures),
     AuthenticationRequested(AuthenticationRequest),
     AuthenticationSucceeded,
@@ -83,6 +84,99 @@ pub enum StreamManagementEvent {
     AckRequested,
     Resumed { h: u32 },
     Failed,
+}
+
+/// RFC 6120 stream-error conditions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamErrorCondition {
+    BadFormat,
+    BadNamespacePrefix,
+    Conflict,
+    ConnectionTimeout,
+    HostGone,
+    HostUnknown,
+    ImproperAddressing,
+    InternalServerError,
+    InvalidFrom,
+    InvalidNamespace,
+    InvalidXml,
+    NotAuthorized,
+    NotWellFormed,
+    PolicyViolation,
+    RemoteConnectionFailed,
+    Reset,
+    ResourceConstraint,
+    RestrictedXml,
+    SeeOtherHost,
+    SystemShutdown,
+    UndefinedCondition,
+    UnsupportedEncoding,
+    UnsupportedFeature,
+    UnsupportedStanzaType,
+    UnsupportedVersion,
+}
+
+impl StreamErrorCondition {
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "bad-format" => Some(Self::BadFormat),
+            "bad-namespace-prefix" => Some(Self::BadNamespacePrefix),
+            "conflict" => Some(Self::Conflict),
+            "connection-timeout" => Some(Self::ConnectionTimeout),
+            "host-gone" => Some(Self::HostGone),
+            "host-unknown" => Some(Self::HostUnknown),
+            "improper-addressing" => Some(Self::ImproperAddressing),
+            "internal-server-error" => Some(Self::InternalServerError),
+            "invalid-from" => Some(Self::InvalidFrom),
+            "invalid-namespace" => Some(Self::InvalidNamespace),
+            "invalid-xml" => Some(Self::InvalidXml),
+            "not-authorized" => Some(Self::NotAuthorized),
+            "not-well-formed" => Some(Self::NotWellFormed),
+            "policy-violation" => Some(Self::PolicyViolation),
+            "remote-connection-failed" => Some(Self::RemoteConnectionFailed),
+            "reset" => Some(Self::Reset),
+            "resource-constraint" => Some(Self::ResourceConstraint),
+            "restricted-xml" => Some(Self::RestrictedXml),
+            "see-other-host" => Some(Self::SeeOtherHost),
+            "system-shutdown" => Some(Self::SystemShutdown),
+            "undefined-condition" => Some(Self::UndefinedCondition),
+            "unsupported-encoding" => Some(Self::UnsupportedEncoding),
+            "unsupported-feature" => Some(Self::UnsupportedFeature),
+            "unsupported-stanza-type" => Some(Self::UnsupportedStanzaType),
+            "unsupported-version" => Some(Self::UnsupportedVersion),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::BadFormat => "bad-format",
+            Self::BadNamespacePrefix => "bad-namespace-prefix",
+            Self::Conflict => "conflict",
+            Self::ConnectionTimeout => "connection-timeout",
+            Self::HostGone => "host-gone",
+            Self::HostUnknown => "host-unknown",
+            Self::ImproperAddressing => "improper-addressing",
+            Self::InternalServerError => "internal-server-error",
+            Self::InvalidFrom => "invalid-from",
+            Self::InvalidNamespace => "invalid-namespace",
+            Self::InvalidXml => "invalid-xml",
+            Self::NotAuthorized => "not-authorized",
+            Self::NotWellFormed => "not-well-formed",
+            Self::PolicyViolation => "policy-violation",
+            Self::RemoteConnectionFailed => "remote-connection-failed",
+            Self::Reset => "reset",
+            Self::ResourceConstraint => "resource-constraint",
+            Self::RestrictedXml => "restricted-xml",
+            Self::SeeOtherHost => "see-other-host",
+            Self::SystemShutdown => "system-shutdown",
+            Self::UndefinedCondition => "undefined-condition",
+            Self::UnsupportedEncoding => "unsupported-encoding",
+            Self::UnsupportedFeature => "unsupported-feature",
+            Self::UnsupportedStanzaType => "unsupported-stanza-type",
+            Self::UnsupportedVersion => "unsupported-version",
+        }
+    }
 }
 
 /// Delivery status for outbound `<message/>` stanzas tracked through

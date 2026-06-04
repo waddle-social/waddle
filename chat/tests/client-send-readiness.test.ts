@@ -414,6 +414,179 @@ describe("client send readiness", () => {
     expect((client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.has(roomJid)).toBe(true);
   });
 
+  test("room join rejects immediately when the join stanza cannot be sent", async () => {
+    const client = new BrowserXmppClient(session());
+    const roomJid = roomBareJidFor(session(), "c1");
+    const joinError = new Error("websocket transport error");
+    const xmpp = {
+      join_room: mock(async () => {
+        throw joinError;
+      }),
+    };
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+
+    await expect(
+      (client as unknown as { ensureJoined: (roomJid: string) => Promise<void> }).ensureJoined(roomJid),
+    ).rejects.toThrow("websocket transport error");
+
+    expect(xmpp.join_room).toHaveBeenCalledWith(roomJid, "alice");
+    expect((client as unknown as { joinedMucs: Map<string, Promise<void>> }).joinedMucs.has(roomJid)).toBe(false);
+    expect((client as unknown as { joinedMucJoinTokens: Map<string, symbol> }).joinedMucJoinTokens.has(roomJid)).toBe(false);
+    expect((client as unknown as { roomJoinWaiters: Map<string, unknown> }).roomJoinWaiters.size).toBe(0);
+  });
+
+  test("room join rejects on XEP-0045 MUC error presence instead of timing out", async () => {
+    const client = new BrowserXmppClient(session());
+    const roomJid = roomBareJidFor(session(), "c1");
+    let onPresence: ((presence: {
+      from?: string;
+      presence_type: string;
+    }) => void) | null = null;
+    const xmpp = {
+      join_room: mock(async () => undefined),
+      set_on_presence(cb: NonNullable<typeof onPresence>) {
+        onPresence = cb;
+      },
+    };
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { wireEvents: (xmpp: typeof xmpp) => void }).wireEvents(xmpp);
+
+    const joined = (client as unknown as { ensureJoined: (roomJid: string) => Promise<void> }).ensureJoined(roomJid);
+    await Promise.resolve();
+    expect((client as unknown as { roomJoinWaiters: Map<string, unknown> }).roomJoinWaiters.size).toBe(1);
+
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "error",
+    });
+
+    await expect(joined).rejects.toThrow("Channel presence was rejected");
+    expect((client as unknown as { joinedMucs: Map<string, Promise<void>> }).joinedMucs.has(roomJid)).toBe(false);
+    expect((client as unknown as { joinedMucJoinTokens: Map<string, symbol> }).joinedMucJoinTokens.has(roomJid)).toBe(false);
+    expect((client as unknown as { roomJoinWaiters: Map<string, unknown> }).roomJoinWaiters.size).toBe(0);
+  });
+
+  test("MUC error presence after a completed join does not revoke readiness", async () => {
+    const client = new BrowserXmppClient(session());
+    const roomJid = roomBareJidFor(session(), "c1");
+    let onPresence: ((presence: {
+      from?: string;
+      presence_type: string;
+      muc_status_codes?: number[];
+    }) => void) | null = null;
+    const xmpp = {
+      join_room: mock(async () => undefined),
+      set_on_presence(cb: NonNullable<typeof onPresence>) {
+        onPresence = cb;
+      },
+    };
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { wireEvents: (xmpp: typeof xmpp) => void }).wireEvents(xmpp);
+
+    const joined = (client as unknown as { ensureJoined: (roomJid: string) => Promise<void> }).ensureJoined(roomJid);
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "available",
+      muc_status_codes: [110],
+    });
+    await joined;
+
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "error",
+    });
+
+    expect((client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.has(roomJid)).toBe(true);
+    expect((client as unknown as { joinedMucs: Map<string, Promise<void>> }).joinedMucs.has(roomJid)).toBe(true);
+  });
+
+  test("stale room join rejection after reconnect does not reject the fresh join waiter", async () => {
+    const client = new BrowserXmppClient(session());
+    const roomJid = roomBareJidFor(session(), "c1");
+    let rejectOldJoin!: (error: Error) => void;
+    const oldXmpp = {
+      join_room: mock(() => new Promise<void>((_resolve, reject) => {
+        rejectOldJoin = reject;
+      })),
+      get_resume_state: () => null,
+      get_resume_state_handle: () => null,
+    };
+    (client as unknown as { xmpp: typeof oldXmpp; connected: boolean }).xmpp = oldXmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+
+    const oldJoin = (client as unknown as { ensureJoined: (roomJid: string) => Promise<void> })
+      .ensureJoined(roomJid)
+      .then(() => "resolved" as const)
+      .catch((error) => error);
+    await Promise.resolve();
+
+    (client as unknown as { handleDisconnected: (xmpp: typeof oldXmpp) => void }).handleDisconnected(oldXmpp);
+    (client as unknown as { clearReconnectTimer: () => void }).clearReconnectTimer();
+
+    let onPresence: ((presence: {
+      from?: string;
+      presence_type: string;
+      muc_status_codes?: number[];
+    }) => void) | null = null;
+    const newXmpp = {
+      join_room: mock(async () => undefined),
+      set_on_presence(cb: NonNullable<typeof onPresence>) {
+        onPresence = cb;
+      },
+    };
+    (client as unknown as { xmpp: typeof newXmpp; connected: boolean }).xmpp = newXmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { wireEvents: (xmpp: typeof newXmpp) => void }).wireEvents(newXmpp);
+
+    const freshJoin = (client as unknown as { ensureJoined: (roomJid: string) => Promise<void> }).ensureJoined(roomJid);
+    await Promise.resolve();
+    rejectOldJoin(new Error("old transport closed"));
+    await Promise.resolve();
+
+    expect((client as unknown as { roomJoinWaiters: Map<string, unknown> }).roomJoinWaiters.size).toBe(1);
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "available",
+      muc_status_codes: [110],
+    });
+
+    await expect(freshJoin).resolves.toBeUndefined();
+    expect(normalizeError(await oldJoin)).toBe("old transport closed");
+    expect((client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.has(roomJid)).toBe(true);
+  });
+
+  test("disconnect clears room join tokens so stale join resolution cannot mark ready", async () => {
+    const client = new BrowserXmppClient(session());
+    const roomJid = roomBareJidFor(session(), "c1");
+    let resolveOldJoin!: () => void;
+    const oldXmpp = {
+      join_room: mock(() => new Promise<void>((resolve) => {
+        resolveOldJoin = resolve;
+      })),
+      get_resume_state: () => null,
+      get_resume_state_handle: () => null,
+    };
+    (client as unknown as { xmpp: typeof oldXmpp; connected: boolean }).xmpp = oldXmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+
+    const oldJoin = (client as unknown as { ensureJoined: (roomJid: string) => Promise<void> }).ensureJoined(roomJid);
+    await Promise.resolve();
+    expect((client as unknown as { joinedMucJoinTokens: Map<string, symbol> }).joinedMucJoinTokens.has(roomJid)).toBe(true);
+
+    (client as unknown as { handleDisconnected: (xmpp: typeof oldXmpp) => void }).handleDisconnected(oldXmpp);
+    (client as unknown as { clearReconnectTimer: () => void }).clearReconnectTimer();
+    expect((client as unknown as { joinedMucJoinTokens: Map<string, symbol> }).joinedMucJoinTokens.size).toBe(0);
+
+    resolveOldJoin();
+    await oldJoin;
+
+    expect((client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.has(roomJid)).toBe(false);
+    expect((client as unknown as { joinedMucs: Map<string, Promise<void>> }).joinedMucs.has(roomJid)).toBe(false);
+  });
+
   test("room join resolves on XEP-0045 status code 110 in an anonymous room (no real JID disclosed)", async () => {
     // Semi-/anonymous rooms don't disclose the occupant's real JID, so
     // self-presence can only be recognised by `<status code='110'/>`

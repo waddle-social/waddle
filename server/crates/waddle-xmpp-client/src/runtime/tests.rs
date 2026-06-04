@@ -7,7 +7,9 @@ use url::Url;
 use super::*;
 use crate::bootstrap::{NS_BIND, NS_SASL, NS_STREAMS};
 use crate::config::{AccessToken, ClientResource, OAuthBearerConfig, WebSocketConfig};
-use crate::{ConnectionConfig, SmResumeState, StreamId, StreamManagementEvent};
+use crate::{
+    ConnectionConfig, SmResumeState, StreamErrorCondition, StreamId, StreamManagementEvent,
+};
 
 fn config() -> ClientConfig {
     ClientConfig::new(
@@ -944,6 +946,12 @@ fn runtime_discards_resume_state_after_generic_prebind_stream_error() {
 
     assert!(error_events.iter().any(|event| matches!(
         event,
+        ClientEvent::Connection(ConnectionEvent::StreamError {
+            condition: StreamErrorCondition::InternalServerError
+        })
+    )));
+    assert!(error_events.iter().any(|event| matches!(
+        event,
         ClientEvent::MessageDelivery(crate::MessageDeliveryEvent::Failed { stanza_id })
             if stanza_id.as_str() == "retry-after-generic-stream-error"
     )));
@@ -954,6 +962,44 @@ fn runtime_discards_resume_state_after_generic_prebind_stream_error() {
         ))
     )));
     assert!(runtime.resume_state().is_none());
+}
+
+#[test]
+fn runtime_emits_stream_error_condition_for_browser_telemetry() {
+    let mut runtime = XmppRuntime::new(config()).unwrap();
+    drive_to_authenticated_stream(&mut runtime);
+
+    let events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            not_authorized_stream_error(),
+        )))
+        .unwrap();
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::StreamError {
+            condition: StreamErrorCondition::NotAuthorized
+        })
+    )));
+}
+
+#[test]
+fn runtime_rejects_stanza_only_conditions_in_stream_error_namespace() {
+    let mut runtime = XmppRuntime::new(config()).unwrap();
+    drive_to_authenticated_stream(&mut runtime);
+
+    let events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            invalid_forbidden_stream_error(),
+        )))
+        .unwrap();
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::StreamError {
+            condition: StreamErrorCondition::UndefinedCondition
+        })
+    )));
 }
 
 #[test]
@@ -1387,6 +1433,23 @@ fn internal_server_error_stream_error() -> Element {
             )
             .build(),
         )
+        .build()
+}
+
+fn not_authorized_stream_error() -> Element {
+    Element::builder("error", NS_STREAMS)
+        .append(
+            Element::builder("text", "urn:ietf:params:xml:ns:xmpp-streams")
+                .append("authentication expired")
+                .build(),
+        )
+        .append(Element::builder("not-authorized", "urn:ietf:params:xml:ns:xmpp-streams").build())
+        .build()
+}
+
+fn invalid_forbidden_stream_error() -> Element {
+    Element::builder("error", NS_STREAMS)
+        .append(Element::builder("forbidden", "urn:ietf:params:xml:ns:xmpp-streams").build())
         .build()
 }
 
