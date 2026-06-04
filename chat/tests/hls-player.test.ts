@@ -2,9 +2,17 @@ import { describe, expect, test } from "bun:test";
 import { videoPlaybackStrategy } from "@/lib/xmpp/hls-player";
 
 describe("videoPlaybackStrategy", () => {
-  test("HLS without native support uses hls.js", () => {
-    expect(videoPlaybackStrategy("application/vnd.apple.mpegurl", false)).toBe("hls-js");
-    expect(videoPlaybackStrategy("application/x-mpegURL", false)).toBe("hls-js");
+  test("every HLS alias without native support uses hls.js", () => {
+    for (const alias of [
+      "application/vnd.apple.mpegurl",
+      "application/x-mpegURL",
+      "application/x-mpegurl",
+      "audio/x-mpegurl",
+      "audio/mpegurl",
+      "application/mpegurl",
+    ]) {
+      expect(videoPlaybackStrategy(alias, false)).toBe("hls-js");
+    }
   });
 
   test("HLS with native support (Safari) uses the native <video> src", () => {
