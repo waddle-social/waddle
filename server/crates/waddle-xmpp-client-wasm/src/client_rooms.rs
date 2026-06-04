@@ -106,6 +106,7 @@ impl WaddleClient {
                 );
                 builder = builder.append(muji);
             }
+            builder = builder.append(waddle_xmpp_client::caps::build_client_caps_element());
             send_stanza_command(inner, builder.build()).await?;
             Ok(JsValue::UNDEFINED)
         })
@@ -122,6 +123,7 @@ impl WaddleClient {
             if let Some(show) = show.as_deref() {
                 builder = builder.append(Element::builder("show", NS_CLIENT).append(show).build());
             }
+            builder = builder.append(waddle_xmpp_client::caps::build_client_caps_element());
             send_stanza_command(inner, builder.build()).await?;
             Ok(JsValue::UNDEFINED)
         })

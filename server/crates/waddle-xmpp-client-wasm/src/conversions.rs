@@ -183,6 +183,7 @@ pub(crate) fn inbound_to_js(message: InboundMessage) -> WaddleMessage {
         moderated_by: message.moderated_by.map(|jid| jid.to_string()),
         moderation_reason: message.moderation_reason,
         chat_state: message.chat_state,
+        displayed_marker_requested: message.displayed_marker_requested,
         displayed_marker_id: message.displayed_marker_id,
         reaction_target_id: message.reaction_target_id,
         reaction_emojis: message.reaction_emojis,
@@ -254,6 +255,7 @@ pub(crate) fn inbox_push_to_js(
         moderated_by: None,
         moderation_reason: None,
         chat_state: None,
+        displayed_marker_requested: false,
         displayed_marker_id: None,
         reaction_target_id: None,
         reaction_emojis: Vec::new(),
@@ -678,9 +680,9 @@ pub(crate) fn presence_to_js(presence: InboundPresence) -> WaddlePresence {
 
 pub(crate) fn mds_entry_to_js(entry: MdsCatchupEntry) -> WaddleMdsDisplayedEntry {
     WaddleMdsDisplayedEntry {
-        chat_id: entry.chat_id,
-        stanza_id: entry.stanza_id,
-        stanza_id_by: entry.stanza_id_by,
+        chat_id: entry.chat_id.to_string(),
+        stanza_id: entry.stanza_id.as_str().to_string(),
+        stanza_id_by: entry.stanza_id_by.to_string(),
     }
 }
 

@@ -18,8 +18,8 @@ use self::files::{parse_file_sharing_element, parse_shared_file};
 use self::markup::parse_markup_spans;
 pub use self::payloads::{
     parse_chat_state_payload, parse_correction_payload, parse_displayed_marker_payload,
-    parse_extension_envelope, parse_moderation_payload, parse_reaction_payload,
-    parse_retraction_payload, parse_retraction_tombstone_payload,
+    parse_extension_envelope, parse_markable_marker_payload, parse_moderation_payload,
+    parse_reaction_payload, parse_retraction_payload, parse_retraction_tombstone_payload,
 };
 use super::namespaces::*;
 use super::presence::parse_presence;
@@ -139,6 +139,7 @@ fn parse_message(el: &Element) -> Option<InboundMessage> {
         .unwrap_or_default();
 
     let chat_state = parse_chat_state_payload(el).map(|payload| payload.state);
+    let displayed_marker_requested = parse_markable_marker_payload(el, id.as_deref()).is_some();
     let displayed_marker_id = parse_displayed_marker_payload(el).map(|payload| payload.id);
 
     // XEP-0372: References (mentions and data)
@@ -339,6 +340,7 @@ fn parse_message(el: &Element) -> Option<InboundMessage> {
         reply_fallback,
         markup_spans,
         chat_state,
+        displayed_marker_requested,
         displayed_marker_id,
         shared_files,
         link_previews,

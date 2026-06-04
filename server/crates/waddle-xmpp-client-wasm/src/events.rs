@@ -57,6 +57,19 @@ pub(crate) fn dispatch_client_event(inner: &Rc<RefCell<WaddleClientInner>>, even
             }
         }
         ClientEvent::Messaging(waddle_xmpp_client::MessagingEvent::Message(message)) => {
+            let mut message = *message;
+            let account_bare_jid = {
+                let borrowed = inner.borrow();
+                bare_jid(&borrowed.config.jid)
+            };
+            if message.mds_displayed.is_some()
+                && !waddle_xmpp_client::mds::mds_event_from_matches_account(
+                    message.from.as_deref(),
+                    &account_bare_jid,
+                )
+            {
+                message.mds_displayed = None;
+            }
             // XEP-0490 §3.2: surface MDS PEP events through the
             // dedicated `on_mds_displayed` callback as well as the
             // generic on_message stream. Either path is safe; the
@@ -67,9 +80,9 @@ pub(crate) fn dispatch_client_event(inner: &Rc<RefCell<WaddleClientInner>>, even
                 if let Some(callback) = callback {
                     for entry in entries {
                         let js_entry = WaddleMdsDisplayedEntry {
-                            chat_id: entry.chat_id.clone(),
-                            stanza_id: entry.stanza_id.clone(),
-                            stanza_id_by: entry.stanza_id_by.clone(),
+                            chat_id: entry.chat_id.to_string(),
+                            stanza_id: entry.stanza_id.as_str().to_string(),
+                            stanza_id_by: entry.stanza_id_by.to_string(),
                         };
                         if let Ok(value) = to_js_value(&js_entry) {
                             let _ = callback.call1(&JsValue::NULL, &value);
@@ -79,7 +92,7 @@ pub(crate) fn dispatch_client_event(inner: &Rc<RefCell<WaddleClientInner>>, even
             }
             let callback = inner.borrow().on_message.clone();
             if let Some(callback) = callback {
-                if let Ok(value) = to_js_value(&inbound_to_js(*message)) {
+                if let Ok(value) = to_js_value(&inbound_to_js(message)) {
                     let _ = callback.call1(&JsValue::NULL, &value);
                 }
             }

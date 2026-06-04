@@ -3,7 +3,7 @@ import type { MarkupSpan, MessageReference } from "@/lib/rich-message";
 import type { RichInlineStyle } from "@/lib/rich-message/types";
 
 import type { WaddleEncryptedFile } from "./extensions/encrypted-file";
-import { barePeerJid } from "./jid";
+import { barePeerJid, jidDomain } from "./jid";
 import type { InboxEntry } from "./inbox-types";
 import { isTrustedCachedPreviewImageUrl } from "./link-preview";
 import { isAllowedPlayerEmbedOrigin } from "@/lib/xmpp/player-embed-allowlist";
@@ -358,6 +358,27 @@ function roomAssignedStanzaId(message: WasmArchivedMessage, roomJid: string): st
     : undefined;
 }
 
+function assignedStanzaIdBy(
+  message: WasmArchivedMessage,
+  authorities: readonly string[],
+): { id: string; by: string } | null {
+  const normalizedAuthorities = authorities.map(barePeerJid).filter(Boolean);
+  for (const authority of normalizedAuthorities) {
+    const byScoped = message.stanza_ids?.find(
+      (stanzaId) => stanzaId.id && barePeerJid(stanzaId.by) === authority,
+    );
+    if (byScoped?.id) return { id: byScoped.id, by: barePeerJid(byScoped.by) };
+    if (
+      message.stanza_id &&
+      message.stanza_id_by &&
+      barePeerJid(message.stanza_id_by) === authority
+    ) {
+      return { id: message.stanza_id, by: barePeerJid(message.stanza_id_by) };
+    }
+  }
+  return null;
+}
+
 export function roomMessageFromArchived(
   message: WasmArchivedMessage,
   sourceOrOptions: CodecSource | LinkPreviewDecodeOptions = "archive",
@@ -493,6 +514,7 @@ export function roomMessageFromArchived(
     // XEP-0490 needs the room-injected stanza-id (by=room) so the
     // MDS publish carries the spec-correct stanza-id for group chats.
     ...(stampedByRoom ? { stanzaId: stampedByRoom, stanzaIdBy: roomJid } : {}),
+    ...(message.displayed_marker_requested ? { displayedMarkerRequested: true } : {}),
   };
   return stripReplyFallback(base, message.reply_fallback_start, message.reply_fallback_end);
 }
@@ -510,6 +532,7 @@ export function dmMessageFromArchived(
   const isSelf = fromBare === selfBareJid;
   const peerJid = isSelf ? toBare : fromBare;
   if (!peerJid) return null;
+  const ownStanzaId = assignedStanzaIdBy(message, [jidDomain(selfBareJid), selfBareJid]);
   const fromJid = message.from ?? fromBare;
   const nick = barePeerJid(fromJid).split("@")[0] ?? "unknown";
   const { createdAt, createdAtSource } = deriveCreatedAt(message.timestamp, source);
@@ -598,8 +621,8 @@ export function dmMessageFromArchived(
     // XEP-0490 needs the user-server-injected stanza-id for DM
     // displayed-sync. `message.stanza_id` plus its `by` JID round-
     // trip from the wasm parser.
-    ...(message.stanza_id ? { stanzaId: message.stanza_id } : {}),
-    ...(message.stanza_id_by ? { stanzaIdBy: message.stanza_id_by } : {}),
+    ...(ownStanzaId ? { stanzaId: ownStanzaId.id, stanzaIdBy: ownStanzaId.by } : {}),
+    ...(message.displayed_marker_requested ? { displayedMarkerRequested: true } : {}),
     ...(dmWireIds.length > 0
       ? { wireIds: dmWireIds }
       : {}),
@@ -644,6 +667,9 @@ export function buildWasmSendOptions(
   }
   if (opts.linkPreviewToken?.trim()) {
     wasmOpts.link_preview_token = opts.linkPreviewToken.trim();
+  }
+  if (opts.requestDisplayedMarker) {
+    wasmOpts.request_displayed_marker = true;
   }
   if (opts.files?.length) {
     wasmOpts.shared_files = opts.files.map((file) => ({

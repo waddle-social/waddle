@@ -1,5 +1,6 @@
 import { nextTick, ref, type Ref } from "vue";
 import type { BrowserXmppClient, LiveDmMessage } from "@/lib/xmpp-client";
+import { barePeerJid } from "@/lib/xmpp-client";
 import type { WaddleSession } from "@/lib/server-auth";
 import type { TimelineMessage } from "@/lib/chat-ui";
 import { findMessageById } from "@/lib/message-ids";
@@ -8,6 +9,12 @@ import {
   type ScrollDirectionMode,
 } from "@/lib/scroll-direction";
 import { buildDmTimelineFromMamResults } from "@/dms/message-timeline-state";
+import {
+  firstUnseenIdAfterDisplayedState,
+  firstUnseenIdFromUnreadCount,
+  latestDisplayedStateOnTimeline,
+} from "@/lib/displayed-state";
+import { getMdsDisplayedCandidates, mdsChatKey, setMdsDisplayed } from "@/lib/last-seen-store";
 import {
   advanceCursorWithBeforePage,
   classifyMamError,
@@ -122,9 +129,17 @@ export function useDmMamPaging(deps: UseDmMamPagingDeps) {
       if (requestId === messageRequestId) isLoadingMessages.value = false;
 
       const feedTimeline = timelineWithQueue.filter(isFeedVisible);
-      firstUnseenId.value = unreadAtLoad > 0 && feedTimeline.length >= unreadAtLoad
-        ? feedTimeline[feedTimeline.length - unreadAtLoad]?.id ?? null
-        : null;
+      const mdsKey = mdsChatKey(barePeerJid(peerJid));
+      const displayed = latestDisplayedStateOnTimeline(
+        feedTimeline,
+        getMdsDisplayedCandidates(mdsKey),
+      );
+      firstUnseenId.value = firstUnseenIdAfterDisplayedState(
+        feedTimeline,
+        firstUnseenIdFromUnreadCount(feedTimeline, unreadAtLoad),
+        displayed,
+      );
+      if (displayed) setMdsDisplayed(mdsKey, displayed);
       const pinned = await scrollToPinnedEdgeAndPin();
       if (!pinned || requestId !== messageRequestId || activePeerJid.value !== peerJid) return;
       initialLatestPagePinned = true;

@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use jid::BareJid;
 use std::fmt;
 use url::Url;
 use waddle_xmpp_core::xep0359::StanzaId as StableStanzaId;
@@ -89,6 +90,9 @@ pub struct DisplayedMarkerPayload {
     pub id: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MarkableMarkerPayload;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReactionPayload {
     pub target_id: String,
@@ -147,6 +151,7 @@ pub struct InboundMessage {
     pub reply_fallback: Option<(u32, u32)>,
     pub markup_spans: Vec<MarkupSpan>,
     pub chat_state: Option<String>,
+    pub displayed_marker_requested: bool,
     pub displayed_marker_id: Option<String>,
     pub shared_files: Vec<SharedFile>,
     pub link_previews: Vec<LinkPreviewData>,
@@ -186,12 +191,12 @@ pub struct InboundMessage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MdsDisplayedEntry {
     /// PEP item id = bare JID of the chat (DM contact or MUC room).
-    pub chat_id: String,
+    pub chat_id: BareJid,
     /// XEP-0359 id of the displayed message.
-    pub stanza_id: String,
+    pub stanza_id: StanzaId,
     /// JID that injected the stanza-id (the MUC room for group
     /// chats; the user's own server for 1:1 chats).
-    pub stanza_id_by: String,
+    pub stanza_id_by: BareJid,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -651,6 +656,9 @@ pub struct SendMessageOptions {
     /// Waddle-private link-preview token request consumed server-side before
     /// fanout/archive and replaced by conformant XEP-0511 metadata.
     pub link_preview_token: Option<LinkPreviewToken>,
+    /// XEP-0333 `<markable/>` request for displayed markers on this
+    /// outbound chat/groupchat message.
+    pub request_displayed_marker: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

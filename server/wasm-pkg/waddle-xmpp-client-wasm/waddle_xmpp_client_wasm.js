@@ -1,7 +1,7 @@
 /* @ts-self-types="./waddle_xmpp_client_wasm.d.ts" */
-import wasmUrl from "./waddle_xmpp_client_wasm_bg.wasm?url&b=5d35948aabf6";
-import * as bgModule from "./waddle_xmpp_client_wasm_bg.js?b=5d35948aabf6";
-import { __wbg_set_wasm } from "./waddle_xmpp_client_wasm_bg.js?b=5d35948aabf6";
+import wasmUrl from "./waddle_xmpp_client_wasm_bg.wasm?url&b=a9c8857a3c19";
+import * as bgModule from "./waddle_xmpp_client_wasm_bg.js?b=a9c8857a3c19";
+import { __wbg_set_wasm } from "./waddle_xmpp_client_wasm_bg.js?b=a9c8857a3c19";
 
 let initPromise;
 
@@ -30,4 +30,4 @@ export default async function init() {
 // WaddleConfig, …) AND Rust free functions (xep0392_consistent_hue,
 // xep0392_consistent_color, …). A hand-curated list silently drops new
 // #[wasm_bindgen] free functions until somebody notices the chat crashing.
-export * from "./waddle_xmpp_client_wasm_bg.js?b=5d35948aabf6";
+export * from "./waddle_xmpp_client_wasm_bg.js?b=a9c8857a3c19";

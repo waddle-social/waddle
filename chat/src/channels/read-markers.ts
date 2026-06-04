@@ -1,9 +1,13 @@
 import { computed, ref, type ComputedRef, type Ref } from "vue";
-import type { BrowserXmppClient } from "@/lib/xmpp-client";
+import { barePeerJid, type BrowserXmppClient } from "@/lib/xmpp-client";
+import type { ChannelSummary } from "@/lib/chat-types";
 import type { TimelineMessage } from "@/lib/chat-ui";
 import { findMessageById } from "@/lib/message-ids";
 import { roomKey, setLastSeen } from "@/lib/last-seen-store";
 import { latestRemoteMessageIdFor } from "@/lib/timeline-state";
+import { useReadReceiptPreference } from "@/preferences/read-receipts";
+
+const NS_STANZA_ID = "urn:xmpp:sid:0";
 
 // XEP-0333 chat-marker outbound state for the channel side. Owns:
 //   - firstUnseenId: the "new messages" divider anchor, populated by
@@ -21,13 +25,15 @@ type UseChannelReadMarkersDeps = {
   xmppClient: Ref<BrowserXmppClient | null>;
   activeSpaceId: Ref<string | null>;
   activeChannelId: Ref<string | null>;
+  currentChannel: Ref<ChannelSummary | null>;
   messages: Ref<TimelineMessage[]>;
 };
 
 export function useChannelReadMarkers(deps: UseChannelReadMarkersDeps) {
-  const { xmppClient, activeSpaceId, activeChannelId, messages } = deps;
+  const { xmppClient, activeSpaceId, activeChannelId, currentChannel, messages } = deps;
 
   const firstUnseenId = ref<string | null>(null);
+  const { sendDisplayedMarkers } = useReadReceiptPreference();
   const latestRemoteMessageId: ComputedRef<string | null> = computed(() =>
     latestRemoteMessageIdFor(messages.value),
   );
@@ -41,7 +47,19 @@ export function useChannelReadMarkers(deps: UseChannelReadMarkersDeps) {
   function markDisplayed(messageId: string) {
     if (!xmppClient.value || !activeChannelId.value) return;
     const target = findMessageById(messages.value, messageId);
-    const targetId = target?.id ?? messageId;
+    const stanzaId = target?.stanzaId;
+    const stanzaIdBy = target?.stanzaIdBy;
+    const roomJid = currentChannel.value?.jid;
+    const hasStanzaIdSupport = currentChannel.value?.features?.includes(NS_STANZA_ID) === true;
+    if (
+      !stanzaId ||
+      !stanzaIdBy ||
+      !roomJid ||
+      !hasStanzaIdSupport ||
+      barePeerJid(stanzaIdBy) !== barePeerJid(roomJid)
+    ) {
+      return;
+    }
     const client = xmppClient.value;
     const spaceId = activeSpaceId.value ?? "";
     const channelId = activeChannelId.value;
@@ -53,20 +71,18 @@ export function useChannelReadMarkers(deps: UseChannelReadMarkersDeps) {
         ? { id: target.threadId, parent: target.parentThreadId }
         : { id: target.threadId }
       : undefined;
-    void client
-      .sendDisplayed(spaceId, channelId, targetId, thread)
-      .catch(() => undefined);
+    if (sendDisplayedMarkers.value) {
+      void client
+        .sendDisplayed(spaceId, channelId, stanzaId, thread)
+        .catch(() => undefined);
+    }
     // XEP-0490 §3 publish — MUC stanza-id by= room JID. Only fires
     // when the room actually stamped the message (XEP-0359 §3.4
     // makes this conditional on room support). The chat id for
     // MUC is the room bare JID, which is also the `by` JID.
-    const stanzaId = target?.stanzaId;
-    const stanzaIdBy = target?.stanzaIdBy;
-    if (stanzaId && stanzaIdBy) {
-      void client
-        .publishMdsDisplayed(stanzaIdBy, stanzaId, stanzaIdBy)
-        .catch(() => undefined);
-    }
+    void client
+      .publishMdsDisplayed(barePeerJid(stanzaIdBy), stanzaId, barePeerJid(stanzaIdBy))
+      .catch(() => undefined);
   }
 
   function persistLastSeen(channelId: string, messageId: string) {

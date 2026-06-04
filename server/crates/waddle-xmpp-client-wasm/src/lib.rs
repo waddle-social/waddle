@@ -21,7 +21,7 @@ use waddle_xmpp_client::error::parse_stanza_error;
 use waddle_xmpp_client::mam::{self, build_mam_iq, MamIqBuilder};
 use waddle_xmpp_client::mds::{
     build_mds_catchup_iq, build_mds_publish_iq, build_mds_subscribe_iq, parse_mds_catchup_result,
-    MdsCatchupEntry,
+    MdsCatchupEntry, NS_PUBSUB_PUBLISH_OPTIONS_FEATURE,
 };
 use waddle_xmpp_client::messaging::{
     self, build_chat_state_message, build_correction_message, build_displayed_message,

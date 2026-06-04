@@ -73,6 +73,52 @@ fn app_stanza_routes_jmi_message_to_typed_call_event() {
 }
 
 #[test]
+fn app_stanza_answers_client_caps_disco_info() {
+    let mut runtime = XmppRuntime::new(config()).unwrap();
+    runtime.snapshot.phase = SessionPhase::Established;
+    runtime.snapshot.binding = Some(SessionBinding {
+        jid: FullJid::from_str("alice@example.com/macbook").unwrap(),
+        stream_id: None,
+        resumable: false,
+    });
+    let stanza = Element::builder("iq", crate::bootstrap::NS_CLIENT)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "caps-1")
+        .attr(
+            minidom::rxml::xml_ncname!("from").to_owned(),
+            "bob@example.com/phone",
+        )
+        .append(
+            Element::builder("query", crate::discovery::DISCO_INFO_NS)
+                .attr(
+                    minidom::rxml::xml_ncname!("node").to_owned(),
+                    crate::caps::client_caps_node_ver(),
+                )
+                .build(),
+        )
+        .build();
+
+    let events = runtime.handle_app_stanza(&stanza);
+
+    assert_eq!(events.len(), 1);
+    let ClientEvent::Connection(ConnectionEvent::OutboundMessage(TransportMessage::Element(
+        response,
+    ))) = &events[0]
+    else {
+        panic!("expected outbound disco response, got {:?}", events[0]);
+    };
+    assert_eq!(response.attr("type"), Some("result"));
+    assert_eq!(response.attr("id"), Some("caps-1"));
+    assert_eq!(response.attr("from"), Some("alice@example.com/macbook"));
+    let query = response
+        .get_child("query", crate::discovery::DISCO_INFO_NS)
+        .expect("disco query present");
+    assert!(query.children().any(|child| {
+        child.name() == "feature" && child.attr("var") == Some(crate::mds::NS_MDS_NOTIFY)
+    }));
+}
+
+#[test]
 fn app_stanza_routes_carbon_wrapped_jmi_to_typed_call_event() {
     let mut runtime = XmppRuntime::new(config()).unwrap();
     let stanza: Element =

@@ -23,11 +23,15 @@ use crate::{
 
 // ── Event dispatch ───────────────────────────────────────────────────────────
 
-pub(super) fn dispatch_event(event: ClientEvent, listener: &dyn WaddleEventListener) {
+pub(super) fn dispatch_event(
+    event: ClientEvent,
+    account_bare_jid: &str,
+    listener: &dyn WaddleEventListener,
+) {
     match event {
         ClientEvent::Lifecycle(LifecycleEvent::SessionReady(_)) => listener.on_connected(),
         ClientEvent::Messaging(MessagingEvent::Message(msg)) => {
-            listener.on_message(inbound_to_ffi(*msg));
+            listener.on_message(inbound_to_ffi(trusted_mds_message(*msg, account_bare_jid)));
         }
         ClientEvent::Messaging(MessagingEvent::Presence(pres)) => {
             let pres = *pres;
@@ -59,6 +63,18 @@ pub(super) fn dispatch_event(event: ClientEvent, listener: &dyn WaddleEventListe
         }
         _ => {}
     }
+}
+
+fn trusted_mds_message(mut msg: InboundMessage, account_bare_jid: &str) -> InboundMessage {
+    if msg.mds_displayed.is_some()
+        && !waddle_xmpp_client::mds::mds_event_from_matches_account(
+            msg.from.as_deref(),
+            account_bare_jid,
+        )
+    {
+        msg.mds_displayed = None;
+    }
+    msg
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -233,9 +249,9 @@ fn muji_presence_to_ffi(muji: MujiPresence) -> WaddleMujiPresence {
 
 fn mds_entry_to_ffi(entry: MdsDisplayedEntry) -> WaddleMdsDisplayedEntry {
     WaddleMdsDisplayedEntry {
-        chat_id: entry.chat_id,
-        stanza_id: entry.stanza_id,
-        stanza_id_by: entry.stanza_id_by,
+        chat_id: entry.chat_id.to_string(),
+        stanza_id: entry.stanza_id.as_str().to_string(),
+        stanza_id_by: entry.stanza_id_by.to_string(),
     }
 }
 
@@ -367,6 +383,7 @@ fn inbound_to_ffi(msg: InboundMessage) -> WaddleMessage {
         retracts_id: msg.retracts_id,
         reaction_target_id: msg.reaction_target_id,
         reaction_emojis: msg.reaction_emojis,
+        displayed_marker_requested: msg.displayed_marker_requested,
         is_muc,
         thread: msg.thread_id.or(msg.thread),
         parent_thread_id: msg.parent_thread_id,
@@ -518,6 +535,7 @@ pub(super) fn send_options_from_ffi(opts: WaddleSendOptions) -> Result<SendMessa
         subject: None,
         markup_spans: vec![],
         references: vec![],
+        request_displayed_marker: opts.request_displayed_marker,
         link_preview_token: opts
             .link_preview_token
             .map(messaging::LinkPreviewToken::new)
@@ -797,6 +815,23 @@ mod tests {
         assert!(inbound_to_ffi(parse_message(xml)).mds_displayed.is_none());
     }
 
+    #[test]
+    fn mds_displayed_entries_are_stripped_for_foreign_event_origin() {
+        let xml = r#"<message xmlns='jabber:client' from='mallory@waddle.test' to='alice@waddle.test/desktop'>
+            <event xmlns='http://jabber.org/protocol/pubsub#event'>
+                <items node='urn:xmpp:mds:displayed:0'>
+                    <item id='bob@waddle.test'>
+                        <displayed xmlns='urn:xmpp:mds:displayed:0'>
+                            <stanza-id xmlns='urn:xmpp:sid:0' id='s-42' by='waddle.test'/>
+                        </displayed>
+                    </item>
+                </items>
+            </event>
+        </message>"#;
+        let trusted = trusted_mds_message(parse_message(xml), "alice@waddle.test");
+        assert!(inbound_to_ffi(trusted).mds_displayed.is_none());
+    }
+
     /// In-test listener that captures every callback invocation in
     /// order. Used to verify the `dispatch_event` routing without
     /// spinning up the tokio broadcast bus.
@@ -860,7 +895,11 @@ mod tests {
         let stanza: Element = xml.parse().expect("fixture parses");
         let call = messaging::parse_call_event(&stanza).expect("fixture is a call");
         let listener = CapturingListener::default();
-        dispatch_event(ClientEvent::Call(Box::new(call)), &listener);
+        dispatch_event(
+            ClientEvent::Call(Box::new(call)),
+            "alice@waddle.test",
+            &listener,
+        );
         assert_eq!(
             &*listener.events.lock().expect("test capture mutex poisoned"),
             &["call"]
@@ -880,7 +919,11 @@ mod tests {
             "<message xmlns='jabber:client' from='alice@waddle.test'><body>hi</body></message>";
         let stanza: Element = xml.parse().expect("fixture parses");
         let listener = CapturingListener::default();
-        dispatch_event(ClientEvent::UnhandledStanza(stanza), &listener);
+        dispatch_event(
+            ClientEvent::UnhandledStanza(stanza),
+            "alice@waddle.test",
+            &listener,
+        );
         assert!(listener
             .events
             .lock()
