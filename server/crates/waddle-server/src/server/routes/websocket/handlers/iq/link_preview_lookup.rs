@@ -900,8 +900,10 @@ mod tests {
             .get_child("lookup", NS_WADDLE_LINK_PREVIEW)
             .and_then(|lookup| lookup.get_child("preview", NS_WADDLE_LINK_PREVIEW))
             .expect("preview");
-        // Composer parity: native og:video surfaces as the same <video> element a
-        // direct-video file uses, so the composer renders an identical card.
+        // Native og:video surfaces as the same <video> element a direct-video
+        // file uses, keeping the lookup result shape uniform. (The composer
+        // preview currently renders only the image/text card; a composer video
+        // card is a follow-up.)
         let video = preview
             .get_child("video", NS_WADDLE_LINK_PREVIEW)
             .expect("video element");

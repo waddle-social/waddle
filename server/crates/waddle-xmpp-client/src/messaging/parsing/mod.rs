@@ -393,6 +393,13 @@ fn parse_link_preview(el: &Element, first_url: Option<&Url>) -> Option<LinkPrevi
     })
 }
 
+/// The MIME essence of an `og:video:type`, stripping any media-type parameters
+/// (`video/mp4; codecs="…"`, `text/html; charset=utf-8`) so a parameterised type
+/// from a conformant (e.g. federated) sender is matched, mirroring the resolver.
+fn og_video_type_essence(value: &str) -> &str {
+    value.split(';').next().unwrap_or_default().trim()
+}
+
 fn parse_link_preview_player(el: &Element) -> Option<LinkPreviewPlayer> {
     let mut url = None;
     let mut secure_url = None;
@@ -410,7 +417,7 @@ fn parse_link_preview_player(el: &Element) -> Option<LinkPreviewPlayer> {
         let value = child.text().trim().to_string();
         match child.name() {
             "secure_url" => secure_url = parse_web_url(&value),
-            "type" => is_html = value.eq_ignore_ascii_case("text/html"),
+            "type" => is_html = og_video_type_essence(&value).eq_ignore_ascii_case("text/html"),
             "width" => width = value.parse().ok(),
             "height" => height = value.parse().ok(),
             _ => {}
@@ -438,7 +445,11 @@ fn parse_link_preview_native_video(el: &Element) -> Option<LinkPreviewVideoData>
             // A supported direct (non-iframe) media type marks this as a native
             // `<video>` stream; `text/html` (the iframe player) parses to `Err`
             // and is handled by `parse_link_preview_player` instead.
-            "type" => media_type = value.parse::<waddle_xmpp_core::DirectVideoMediaType>().ok(),
+            "type" => {
+                media_type = og_video_type_essence(&value)
+                    .parse::<waddle_xmpp_core::DirectVideoMediaType>()
+                    .ok()
+            }
             _ => {}
         }
     }

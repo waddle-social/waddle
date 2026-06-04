@@ -590,6 +590,29 @@ fn parses_og_video_native_media_from_xep0511() {
 }
 
 #[test]
+fn parses_native_video_type_with_codec_parameters() {
+    // A conformant (e.g. federated) sender may carry codec parameters in
+    // og:video:type; the parser must match on the MIME essence.
+    let e = el(
+        "<message xmlns='jabber:client' type='groupchat' id='m-link'>\
+           <body>watch https://rawkode.academy/watch/yoke</body>\
+           <rdf:Description xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#' xmlns:og='https://ogp.me/ns#' xmlns:ogv='https://ogp.me/ns#video:' rdf:about='https://rawkode.academy/watch/yoke'>\
+             <og:video>https://content.rawkode.academy/v/clip.mp4</og:video>\
+             <ogv:type>video/mp4; codecs=\"avc1.42E01E\"</ogv:type>\
+           </rdf:Description>\
+         </message>",
+    );
+    let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+        panic!("expected Message");
+    };
+    let video = msg.link_previews[0].video.as_ref().expect("native video");
+    assert_eq!(
+        video.media_type,
+        waddle_xmpp_core::DirectVideoMediaType::Mp4
+    );
+}
+
+#[test]
 fn parses_native_video_prefers_secure_url() {
     // The server emits both og:video and ogv:secure_url; the parser must prefer
     // secure_url (distinct URL here so the preference is observable).

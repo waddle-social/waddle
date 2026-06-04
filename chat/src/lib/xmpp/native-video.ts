@@ -16,7 +16,11 @@ const PLAYABLE_NATIVE_VIDEO_TYPES: ReadonlySet<string> = new Set([
 ]);
 
 function isPlayableNativeVideoMediaType(mediaType: string): boolean {
-  return PLAYABLE_NATIVE_VIDEO_TYPES.has(mediaType.trim().toLowerCase());
+  // Match on the MIME essence, stripping media-type parameters
+  // (`video/mp4; codecs="…"`), mirroring the server resolver's
+  // `.split(';').next()` treatment.
+  const essence = mediaType.split(";")[0]!.trim().toLowerCase();
+  return PLAYABLE_NATIVE_VIDEO_TYPES.has(essence);
 }
 
 export function isPlayableNativeVideo(url: string, mediaType: string): boolean {

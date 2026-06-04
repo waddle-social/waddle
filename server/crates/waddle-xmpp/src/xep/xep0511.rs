@@ -129,7 +129,7 @@ pub struct LinkMetadata {
     pub site_name: Option<String>,
     /// Cached preview images referenced through Waddle-controlled media URLs.
     pub images: Vec<LinkPreviewImage>,
-    /// Embeddable player iframe (`og:video`), when present.
+    /// The card's `og:video` — an iframe player or native media stream — when present.
     pub video: Option<LinkMetadataVideo>,
 }
 
@@ -177,7 +177,7 @@ impl LinkMetadata {
         self
     }
 
-    /// Attach an embeddable player iframe.
+    /// Attach the card's `og:video` (an iframe player or native media stream).
     pub fn with_video(mut self, video: LinkMetadataVideo) -> Self {
         self.video = Some(video);
         self
@@ -435,13 +435,18 @@ fn parse_og_video(elem: &Element) -> Option<LinkMetadataVideo> {
     }
     let url = secure_url.or(url)?;
     let media_type_text = media_type_text?;
-    if media_type_text.eq_ignore_ascii_case("text/html") {
+    // Match on the MIME essence, stripping any media-type parameters
+    // (`video/mp4; codecs="…"`, `text/html; charset=utf-8`), mirroring the
+    // resolver's `.split(';').next()` treatment so a parameterised type from a
+    // conformant (e.g. federated) sender is not silently dropped.
+    let media_type_essence = media_type_text.split(';').next().unwrap_or_default().trim();
+    if media_type_essence.eq_ignore_ascii_case("text/html") {
         return Some(LinkMetadataVideo::Player { url, width, height });
     }
     // A non-`text/html` `og:video:type` is a directly playable native stream when
     // the MIME is one Waddle supports; anything else is ignored (not a preview we
     // can render).
-    media_type_text
+    media_type_essence
         .parse::<DirectVideoMediaType>()
         .ok()
         .map(|media_type| LinkMetadataVideo::Native { url, media_type })
@@ -547,6 +552,41 @@ mod tests {
                 media_type: DirectVideoMediaType::Mp4,
             })
         );
+    }
+
+    #[test]
+    fn parses_native_og_video_type_with_codec_parameters() {
+        // A conformant sender may include codec parameters in og:video:type.
+        // Match on the MIME essence, like the resolver does.
+        let payload = element(
+            r#"<rdf:Description xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:og="https://ogp.me/ns#" xmlns:ogv="https://ogp.me/ns#video:" rdf:about="https://rawkode.academy/watch/yoke">
+                <og:video>https://content.rawkode.academy/v/clip.mp4</og:video>
+                <ogv:type>video/mp4; codecs="avc1.42E01E"</ogv:type>
+              </rdf:Description>"#,
+        );
+        let parsed = parse_link_metadata_element(&payload).expect("parses");
+        assert_eq!(
+            parsed.video,
+            Some(LinkMetadataVideo::Native {
+                url: Url::parse("https://content.rawkode.academy/v/clip.mp4").expect("url"),
+                media_type: DirectVideoMediaType::Mp4,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_player_og_video_type_with_charset_parameter() {
+        let payload = element(
+            r#"<rdf:Description xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:og="https://ogp.me/ns#" xmlns:ogv="https://ogp.me/ns#video:" rdf:about="https://www.youtube.com/watch?v=x">
+                <og:video>https://www.youtube-nocookie.com/embed/x</og:video>
+                <ogv:type>text/html; charset=utf-8</ogv:type>
+              </rdf:Description>"#,
+        );
+        let parsed = parse_link_metadata_element(&payload).expect("parses");
+        assert!(matches!(
+            parsed.video,
+            Some(LinkMetadataVideo::Player { .. })
+        ));
     }
 
     #[test]

@@ -15,6 +15,17 @@ describe("linkPreviewFromWasm native video", () => {
     expect(preview.playerEmbed).toBeUndefined();
   });
 
+  test("accepts a media type carrying codec parameters", () => {
+    const preview = linkPreviewFromWasm({
+      original_url: "https://rawkode.academy/watch/yoke",
+      video: { url: "https://content.rawkode.academy/v/clip.mp4", media_type: 'video/mp4; codecs="avc1.42E01E"' },
+    });
+    expect(preview.video).toEqual({
+      url: "https://content.rawkode.academy/v/clip.mp4",
+      mediaType: 'video/mp4; codecs="avc1.42E01E"',
+    });
+  });
+
   test("drops a non-https native video", () => {
     const preview = linkPreviewFromWasm({
       original_url: "https://example.com/watch",

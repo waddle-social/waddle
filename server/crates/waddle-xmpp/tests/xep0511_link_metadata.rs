@@ -7,10 +7,10 @@ use minidom::Element;
 use url::Url;
 use waddle_xmpp::xep::{
     build_link_metadata_element, extract_link_metadata_from_message, parse_link_metadata_element,
-    set_link_metadata, strip_link_metadata, LinkMetadata, LinkMetadataError, LinkPreviewImage,
-    NS_OPENGRAPH, NS_OPENGRAPH_IMAGE, NS_RDF_SYNTAX,
+    set_link_metadata, strip_link_metadata, LinkMetadata, LinkMetadataError, LinkMetadataVideo,
+    LinkPreviewImage, NS_OPENGRAPH, NS_OPENGRAPH_IMAGE, NS_OPENGRAPH_VIDEO, NS_RDF_SYNTAX,
 };
-use waddle_xmpp_core::PreviewImageMediaType;
+use waddle_xmpp_core::{DirectVideoMediaType, PreviewImageMediaType};
 use xmpp_parsers::message::Message;
 
 fn element(xml: &str) -> Element {
@@ -111,6 +111,106 @@ fn xep0511_builds_cached_image_metadata_with_opengraph_structured_properties() {
             .images,
         vec![image]
     );
+}
+
+#[test]
+fn xep0511_builds_native_og_video_with_real_media_type() {
+    let metadata =
+        LinkMetadata::new(Url::parse("https://rawkode.academy/watch/yoke").expect("url"))
+            .with_title("Hands-on Yoke")
+            .with_video(LinkMetadataVideo::Native {
+                url: Url::parse("https://content.rawkode.academy/v/clip.mp4").expect("url"),
+                media_type: DirectVideoMediaType::Mp4,
+            });
+
+    let payload = build_link_metadata_element(&metadata);
+
+    // Conformant OpenGraph: og:video URL + ogv:secure_url + the real ogv:type.
+    assert_eq!(
+        payload
+            .get_child("video", NS_OPENGRAPH)
+            .map(Element::text)
+            .as_deref(),
+        Some("https://content.rawkode.academy/v/clip.mp4")
+    );
+    assert_eq!(
+        payload
+            .get_child("secure_url", NS_OPENGRAPH_VIDEO)
+            .map(Element::text)
+            .as_deref(),
+        Some("https://content.rawkode.academy/v/clip.mp4")
+    );
+    assert_eq!(
+        payload
+            .get_child("type", NS_OPENGRAPH_VIDEO)
+            .map(Element::text)
+            .as_deref(),
+        Some("video/mp4")
+    );
+
+    assert_eq!(
+        parse_link_metadata_element(&payload)
+            .expect("native video round-trips")
+            .video,
+        metadata.video
+    );
+}
+
+#[test]
+fn xep0511_builds_player_og_video_with_text_html_type() {
+    let metadata = LinkMetadata::new(Url::parse("https://www.youtube.com/watch?v=x").expect("url"))
+        .with_video(LinkMetadataVideo::Player {
+            url: Url::parse("https://www.youtube-nocookie.com/embed/x").expect("url"),
+            width: Some(1280),
+            height: Some(720),
+        });
+
+    let payload = build_link_metadata_element(&metadata);
+
+    assert_eq!(
+        payload
+            .get_child("type", NS_OPENGRAPH_VIDEO)
+            .map(Element::text)
+            .as_deref(),
+        Some("text/html")
+    );
+    assert_eq!(
+        parse_link_metadata_element(&payload)
+            .expect("player round-trips")
+            .video,
+        metadata.video
+    );
+}
+
+#[test]
+fn xep0511_parses_og_video_type_essence_ignoring_parameters() {
+    // A conformant (e.g. federated) sender may parameterise og:video:type; the
+    // wire parser must match on the MIME essence for both the native and player
+    // discriminations.
+    let native = element(
+        "<rdf:Description xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#' xmlns:og='https://ogp.me/ns#' xmlns:ogv='https://ogp.me/ns#video:' rdf:about='https://rawkode.academy/watch/yoke'>\
+           <og:video>https://content.rawkode.academy/v/clip.mp4</og:video>\
+           <ogv:type>video/mp4; codecs=\"avc1.42E01E\"</ogv:type>\
+         </rdf:Description>",
+    );
+    assert_eq!(
+        parse_link_metadata_element(&native).expect("parses").video,
+        Some(LinkMetadataVideo::Native {
+            url: Url::parse("https://content.rawkode.academy/v/clip.mp4").expect("url"),
+            media_type: DirectVideoMediaType::Mp4,
+        })
+    );
+
+    let player = element(
+        "<rdf:Description xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#' xmlns:og='https://ogp.me/ns#' xmlns:ogv='https://ogp.me/ns#video:' rdf:about='https://www.youtube.com/watch?v=x'>\
+           <og:video>https://www.youtube-nocookie.com/embed/x</og:video>\
+           <ogv:type>text/html; charset=utf-8</ogv:type>\
+         </rdf:Description>",
+    );
+    assert!(matches!(
+        parse_link_metadata_element(&player).expect("parses").video,
+        Some(LinkMetadataVideo::Player { .. })
+    ));
 }
 
 #[test]
