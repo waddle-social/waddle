@@ -37,6 +37,7 @@ export interface SendGroupMessageOptions {
   threadId?: string;
   parentThreadId?: string;
   id?: string;
+  requestDisplayedMarker?: boolean;
   threadCreate?: WaddleThreadCreate;
   threadReply?: WaddleThreadReply;
 }
@@ -51,6 +52,7 @@ export interface SendDirectMessageOptions {
   threadId?: string;
   parentThreadId?: string;
   id?: string;
+  requestDisplayedMarker?: boolean;
 }
 
 export function buildReplyFallbackPrefix(parentBody: string | undefined): { prefix: string; length: number } {

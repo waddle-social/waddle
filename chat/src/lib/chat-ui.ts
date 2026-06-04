@@ -228,6 +228,8 @@ export interface TimelineMessage {
   reactionSenders?: Record<string, Record<string, string>>;
   /** Users who have seen this message (XEP-0333). */
   readBy?: string[];
+  /** Whether this received message requested XEP-0333 displayed markers. */
+  displayedMarkerRequested?: boolean;
   /** Mentioned JIDs/nicks in this message (XEP-0372). */
   mentions?: string[];
   /** XEP-0317: Hat badges for the message author. */

@@ -419,6 +419,7 @@ type XmppClientInstance = Partial<WasmClient> & CompatEmitter & {
   get_resume_state?: () => XmppResumeState | null;
   get_resume_state_handle?: () => XmppResumeStateHandle | undefined;
   publish_mds_displayed?: (chatId: string, stanzaId: string, stanzaIdBy: string) => Promise<void>;
+  supports_mds_publish_options?: () => Promise<boolean>;
   fetch_mds_displayed?: () => Promise<ReadonlyArray<WasmMdsDisplayedEntry>>;
   subscribe_mds_displayed?: () => Promise<void>;
   ensure_push_node?: (
@@ -562,6 +563,7 @@ export class BrowserXmppClient {
   private queuedMessageStatusHandler: ((messageId: string, status: "queued" | "sending") => void) | null = null;
   private sessionLifecycleHandler: ((event: SessionLifecycleEvent) => void) | null = null;
   private xmpp: XmppClientInstance | null = null;
+  private mdsPublishOptionsSupport: Promise<boolean> | null = null;
   private connectPromise: Promise<void> | null = null;
   private connected = false;
   private destroying = false;
@@ -1396,14 +1398,14 @@ export class BrowserXmppClient {
 
   private async compatSendGroupMessage(xmpp: XmppClientInstance, roomJid: string, body: string, opts: SendGroupMessageOptions): Promise<string | null> {
     const { effectiveBody, replyFallbackLength, rebasedMarkup, rebasedReferences } = encodeBodyForSend(body, opts.replyTo, opts.markup, opts.references);
-    const wasmOpts = buildWasmSendOptions({ ...opts, markup: rebasedMarkup, references: rebasedReferences }, replyFallbackLength);
+    const wasmOpts = buildWasmSendOptions({ ...opts, markup: rebasedMarkup, references: rebasedReferences, requestDisplayedMarker: opts.requestDisplayedMarker ?? true }, replyFallbackLength);
     if (xmpp.send_groupchat_message) return await xmpp.send_groupchat_message(roomJid, effectiveBody, wasmOpts) as string;
     throw new Error("XMPP session is not ready");
   }
 
   private async compatSendDirectMessage(xmpp: XmppClientInstance, peerJid: string, body: string, opts: SendDirectMessageOptions): Promise<string | null> {
     const { effectiveBody, replyFallbackLength, rebasedMarkup, rebasedReferences } = encodeBodyForSend(body, opts.replyTo, opts.markup, opts.references);
-    const wasmOpts = buildWasmSendOptions({ ...opts, markup: rebasedMarkup, references: rebasedReferences }, replyFallbackLength);
+    const wasmOpts = buildWasmSendOptions({ ...opts, markup: rebasedMarkup, references: rebasedReferences, requestDisplayedMarker: opts.requestDisplayedMarker ?? true }, replyFallbackLength);
     if (xmpp.send_chat_message) return await xmpp.send_chat_message(peerJid, effectiveBody, wasmOpts) as string;
     throw new Error("XMPP session is not ready");
   }
@@ -1604,7 +1606,17 @@ export class BrowserXmppClient {
   async publishMdsDisplayed(chatId: string, stanzaId: string, stanzaIdBy: string): Promise<void> {
     const xmpp = await this.requireConnectedXmpp();
     if (typeof xmpp.publish_mds_displayed !== "function") return;
+    if (!(await this.supportsMdsPublishOptions(xmpp))) return;
     try { await xmpp.publish_mds_displayed(chatId, stanzaId, stanzaIdBy); } catch { /* best-effort */ }
+  }
+
+  private supportsMdsPublishOptions(xmpp: XmppClientInstance): Promise<boolean> {
+    if (typeof xmpp.supports_mds_publish_options !== "function") return Promise.resolve(false);
+    this.mdsPublishOptionsSupport ??= xmpp
+      .supports_mds_publish_options()
+      .then(Boolean)
+      .catch(() => false);
+    return this.mdsPublishOptionsSupport;
   }
 
   /**

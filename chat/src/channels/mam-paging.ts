@@ -18,6 +18,12 @@ import {
 } from "@/channels/message-timeline-state";
 import { isFeedTimelineMessage } from "@/channels/timeline";
 import {
+  firstUnseenIdAfterDisplayedState,
+  firstUnseenIdFromUnreadCount,
+  latestDisplayedStateOnTimeline,
+} from "@/lib/displayed-state";
+import { getMdsDisplayedCandidates, mdsChatKey, setMdsDisplayed } from "@/lib/last-seen-store";
+import {
   advanceCursorWithBeforePage,
   advanceThreadCursor,
   classifyMamError,
@@ -186,9 +192,17 @@ export function useChannelMamPaging(deps: UseChannelMamPagingDeps) {
       }
 
       const feedTimeline = timelineWithQueue.filter(isFeedVisible);
-      firstUnseenId.value = unreadAtLoad > 0 && feedTimeline.length >= unreadAtLoad
-        ? feedTimeline[feedTimeline.length - unreadAtLoad]?.id ?? null
-        : null;
+      const mdsKey = mdsChatKey(roomJid);
+      const displayed = latestDisplayedStateOnTimeline(
+        feedTimeline,
+        getMdsDisplayedCandidates(mdsKey),
+      );
+      firstUnseenId.value = firstUnseenIdAfterDisplayedState(
+        feedTimeline,
+        firstUnseenIdFromUnreadCount(feedTimeline, unreadAtLoad),
+        displayed,
+      );
+      if (displayed) setMdsDisplayed(mdsKey, displayed);
       const pinned = await scrollToPinnedEdgeAndPin();
       if (
         !pinned ||

@@ -112,10 +112,14 @@ pub enum MdsDisplayedError {
     MissingStanzaId,
     #[error("missing id attribute on <stanza-id/>")]
     MissingStanzaIdId,
+    #[error("empty id attribute on <stanza-id/>")]
+    EmptyStanzaIdId,
     #[error("missing by attribute on <stanza-id/>")]
     MissingStanzaIdBy,
     #[error("invalid 'by' JID on <stanza-id/>: {0}")]
     InvalidByJid(String),
+    #[error("expected exactly one <stanza-id/> child in '{NS_STANZA_ID}'")]
+    MultipleStanzaIds,
 }
 
 /// Build a `<displayed/>` element from a typed value.
@@ -146,12 +150,21 @@ pub fn parse_displayed_element(elem: &Element) -> Result<MdsDisplayed, MdsDispla
     if !is_displayed_element(elem) {
         return Err(MdsDisplayedError::WrongElement);
     }
-    let stanza_id_elem = elem
-        .get_child("stanza-id", NS_STANZA_ID)
+    let mut stanza_id_elems = elem
+        .children()
+        .filter(|child| child.is("stanza-id", NS_STANZA_ID));
+    let stanza_id_elem = stanza_id_elems
+        .next()
         .ok_or(MdsDisplayedError::MissingStanzaId)?;
+    if stanza_id_elems.next().is_some() {
+        return Err(MdsDisplayedError::MultipleStanzaIds);
+    }
     let id = stanza_id_elem
         .attr("id")
         .ok_or(MdsDisplayedError::MissingStanzaIdId)?;
+    if id.is_empty() {
+        return Err(MdsDisplayedError::EmptyStanzaIdId);
+    }
     let by_raw = stanza_id_elem
         .attr("by")
         .ok_or(MdsDisplayedError::MissingStanzaIdBy)?;
@@ -231,6 +244,25 @@ mod tests {
     }
 
     #[test]
+    fn stanza_id_empty_id_rejected() {
+        let elem = Element::builder("displayed", NS_MDS_DISPLAYED)
+            .append(
+                Element::builder("stanza-id", NS_STANZA_ID)
+                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), "")
+                    .attr(
+                        minidom::rxml::xml_ncname!("by").to_owned(),
+                        "juliet@capulet.lit",
+                    )
+                    .build(),
+            )
+            .build();
+        assert_eq!(
+            parse_displayed_element(&elem).unwrap_err(),
+            MdsDisplayedError::EmptyStanzaIdId
+        );
+    }
+
+    #[test]
     fn stanza_id_missing_by_rejected() {
         let elem = Element::builder("displayed", NS_MDS_DISPLAYED)
             .append(
@@ -262,6 +294,34 @@ mod tests {
             MdsDisplayedError::InvalidByJid(_) => {}
             other => panic!("expected InvalidByJid, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn multiple_stanza_ids_rejected() {
+        let elem = Element::builder("displayed", NS_MDS_DISPLAYED)
+            .append(
+                Element::builder("stanza-id", NS_STANZA_ID)
+                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), "first")
+                    .attr(
+                        minidom::rxml::xml_ncname!("by").to_owned(),
+                        "juliet@capulet.lit",
+                    )
+                    .build(),
+            )
+            .append(
+                Element::builder("stanza-id", NS_STANZA_ID)
+                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), "second")
+                    .attr(
+                        minidom::rxml::xml_ncname!("by").to_owned(),
+                        "juliet@capulet.lit",
+                    )
+                    .build(),
+            )
+            .build();
+        assert_eq!(
+            parse_displayed_element(&elem).unwrap_err(),
+            MdsDisplayedError::MultipleStanzaIds
+        );
     }
 
     #[test]

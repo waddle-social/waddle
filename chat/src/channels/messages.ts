@@ -19,6 +19,11 @@ import { roomMessageFromArchived } from "@/lib/xmpp/wasm-message-codecs";
 import {
   type TimelineMessage,
 } from "@/lib/chat-ui";
+import {
+  displayedStateCanAdvance,
+  firstUnseenIdAfterDisplayedState,
+} from "@/lib/displayed-state";
+import { getMdsDisplayed, mdsChatKey, type MdsDisplayedState } from "@/lib/last-seen-store";
 import { findMessageById } from "@/lib/message-ids";
 import { mergeQueuedIntoTimeline } from "@/lib/timeline-queue-merge";
 import { findMessageElementById } from "@/lib/message-targeting";
@@ -104,6 +109,7 @@ export function useChannelMessages(
     xmppClient,
     activeSpaceId,
     activeChannelId,
+    currentChannel,
     messages,
   });
   const {
@@ -552,6 +558,20 @@ export function useChannelMessages(
     firstUnseenId.value = null;
   }
 
+  function applyMdsDisplayed(chatId: string, displayed: MdsDisplayedState): boolean {
+    const roomJid = currentRoomJid.value;
+    if (!roomJid || barePeerJid(chatId) !== barePeerJid(roomJid)) return false;
+    const feedTimeline = messages.value.filter(isFeedVisible);
+    const key = mdsChatKey(barePeerJid(roomJid));
+    if (!displayedStateCanAdvance(feedTimeline, getMdsDisplayed(key), displayed)) return false;
+    firstUnseenId.value = firstUnseenIdAfterDisplayedState(
+      feedTimeline,
+      firstUnseenId.value,
+      displayed,
+    );
+    return true;
+  }
+
   function clearChannelActivity(roomJid: string) {
     const bareRoomJid = barePeerJid(roomJid);
     const next = new Set(activeChannels.value);
@@ -671,6 +691,7 @@ export function useChannelMessages(
     toggleReaction,
     markDisplayed,
     notifyComposing,
+    applyMdsDisplayed,
     disconnect,
     clearMessages,
     activeChannels,

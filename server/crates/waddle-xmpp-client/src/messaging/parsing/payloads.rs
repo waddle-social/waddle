@@ -32,6 +32,19 @@ pub fn parse_displayed_marker_payload(element: &Element) -> Option<DisplayedMark
         .map(|id| DisplayedMarkerPayload { id: id.to_string() })
 }
 
+pub fn parse_markable_marker_payload(
+    element: &Element,
+    message_id: Option<&str>,
+) -> Option<MarkableMarkerPayload> {
+    let message_id = message_id?.trim();
+    if message_id.is_empty() {
+        return None;
+    }
+    element
+        .get_child("markable", NS_CHAT_MARKERS)
+        .map(|_| MarkableMarkerPayload)
+}
+
 pub fn parse_extension_envelope(element: &Element) -> Option<ExtensionEnvelopeData> {
     let envelope = element.get_child("extensions", NS_WADDLE_EXTENSION)?;
     let version = envelope

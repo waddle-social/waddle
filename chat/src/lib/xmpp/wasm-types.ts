@@ -118,6 +118,7 @@ export interface WasmMessage {
   moderated_by?: string;
   moderation_reason?: string;
   chat_state?: string;
+  displayed_marker_requested?: boolean;
   displayed_marker_id?: string;
   reaction_target_id?: string;
   reaction_emojis: string[];
@@ -399,6 +400,7 @@ export interface WasmSendOptions {
   fallback?: { start: number; end: number };
   thread?: { id: string; parent?: string };
   link_preview_token?: string;
+  request_displayed_marker?: boolean;
   shared_files?: Array<{
     url: string;
     name?: string;

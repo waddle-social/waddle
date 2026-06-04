@@ -37,7 +37,8 @@ pub use namespaces::{
 pub use native::MessagingExt;
 pub use parsing::{
     parse, parse_chat_state_payload, parse_correction_payload, parse_displayed_marker_payload,
-    parse_moderation_payload, parse_reaction_payload, parse_retraction_payload,
+    parse_markable_marker_payload, parse_moderation_payload, parse_reaction_payload,
+    parse_retraction_payload,
 };
 pub use types::{
     ChatStatePayload, CorrectionPayload, DisplayedMarkerPayload, ExtensionCapabilityData,
@@ -46,10 +47,10 @@ pub use types::{
     ExtensionPayloadAttributeData, ExtensionPayloadElementData, ExtensionPluginId,
     ExtensionRoomJid, ExtensionSourceData, ExtensionTextId, ExtensionTimestamp, ExtensionXmlName,
     InboundMessage, InboundPresence, InvalidLinkPreviewToken, LinkPreviewData, LinkPreviewPlayer,
-    LinkPreviewToken, MarkupSpan, MarkupSpanData, MarkupSpanType, MdsDisplayedEntry,
-    MessagingEvent, ModerationPayload, MucAffiliation, MucRole, MucStatus, MujiPresence,
-    PresenceHat, ReactionPayload, ReferenceData, RetractionPayload, SendMessageOptions, SharedFile,
-    SharedFileDisposition,
+    LinkPreviewToken, MarkableMarkerPayload, MarkupSpan, MarkupSpanData, MarkupSpanType,
+    MdsDisplayedEntry, MessagingEvent, ModerationPayload, MucAffiliation, MucRole, MucStatus,
+    MujiPresence, PresenceHat, ReactionPayload, ReferenceData, RetractionPayload,
+    SendMessageOptions, SharedFile, SharedFileDisposition,
 };
 /// Re-export the xmpp-parsers Jingle types Waddle's call surface
 /// owns so downstream crates (notably the wasm bindings, which

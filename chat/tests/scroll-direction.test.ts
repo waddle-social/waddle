@@ -9,7 +9,14 @@ import {
   orderTimelineForScrollDirection,
   readStoredScrollDirection,
 } from "../src/lib/scroll-direction";
-import { dmKey, roomKey, setLastSeen } from "../src/lib/last-seen-store";
+import {
+  dmKey,
+  mdsChatKey,
+  queueMdsDisplayed,
+  roomKey,
+  setLastSeen,
+  setMdsDisplayed,
+} from "../src/lib/last-seen-store";
 import type { WaddleSession } from "../src/lib/server-auth";
 import type { LiveRoomMessage } from "../src/lib/xmpp-client";
 
@@ -47,6 +54,7 @@ function makeTimelineEl() {
     scrollTop: 240,
     children: [],
     querySelector: mock(() => null),
+    querySelectorAll: mock(() => []),
   } as unknown as HTMLDivElement;
 }
 
@@ -316,6 +324,54 @@ describe("scroll direction preference", () => {
     expect(messaging.firstUnseenId.value).toBeNull();
     expect(timelineEl.scrollTop).toBe(480);
     expect(localStorage.getItem(roomKey("c1"))).toBe("room-2");
+  });
+
+  test("room initial load advances first unseen from stored MDS displayed state", async () => {
+    setMdsDisplayed(mdsChatKey("w1-c1@rooms.example.com"), {
+      stanzaId: "room-stanza-1",
+      stanzaIdBy: "w1-c1@rooms.example.com",
+    });
+    const queryMam = mock(async () => [
+      {
+        id: "room-1",
+        stanzaId: "room-stanza-1",
+        stanzaIdBy: "w1-c1@rooms.example.com",
+        roomJid: "w1-c1@rooms.example.com",
+        nick: "bob",
+        body: "earlier",
+        createdAt: "2024-01-01T00:00:00Z",
+        type: "message" as const,
+      },
+      {
+        id: "room-2",
+        stanzaId: "room-stanza-2",
+        stanzaIdBy: "w1-c1@rooms.example.com",
+        roomJid: "w1-c1@rooms.example.com",
+        nick: "bob",
+        body: "later",
+        createdAt: "2024-01-01T00:00:10Z",
+        type: "message" as const,
+      },
+    ]);
+    const actionError = ref("");
+    const messaging = useChannelMessages(
+      ref(session()),
+      ref(null),
+      ref({ ...handlerStubs(), queryMam } as never) as never,
+      ref("w1"),
+      ref("c1"),
+      ref({ id: "c1", name: "general", jid: "w1-c1@rooms.example.com", channel_type: "text" }),
+      String,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+    );
+    messaging.timelineEl.value = makeTimelineEl();
+
+    await messaging.loadMessages("w1", "c1", 2);
+
+    expect(messaging.firstUnseenId.value).toBe("room-2");
   });
 
   test("room initial load re-pins when the virtual timeline ref appears after messages", async () => {
@@ -668,6 +724,105 @@ describe("scroll direction preference", () => {
     expect(dm.firstUnseenId.value).toBeNull();
     expect(timelineEl.scrollTop).toBe(480);
     expect(localStorage.getItem(dmKey("bob@example.com"))).toBe("dm-2");
+  });
+
+  test("DM initial load advances first unseen from stored MDS displayed state", async () => {
+    setMdsDisplayed(mdsChatKey("bob@example.com"), {
+      stanzaId: "dm-stanza-1",
+      stanzaIdBy: "example.com",
+    });
+    const queryPersonalMam = mock(async () => [
+      {
+        id: "dm-1",
+        stanzaId: "dm-stanza-1",
+        stanzaIdBy: "example.com",
+        peerJid: "bob@example.com",
+        fromJid: "bob@example.com/phone",
+        nick: "bob",
+        body: "earlier",
+        createdAt: "2024-01-01T00:00:00Z",
+        type: "message" as const,
+      },
+      {
+        id: "dm-2",
+        stanzaId: "dm-stanza-2",
+        stanzaIdBy: "example.com",
+        peerJid: "bob@example.com",
+        fromJid: "bob@example.com/laptop",
+        nick: "bob",
+        body: "later",
+        createdAt: "2024-01-01T00:00:10Z",
+        type: "message" as const,
+      },
+    ]);
+    const actionError = ref("");
+    const dm = useDirectMessages(
+      ref(session()),
+      ref({ queryPersonalMam } as never) as never,
+      ref("bob@example.com"),
+      String,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+    );
+    dm.timelineEl.value = makeTimelineEl();
+
+    await dm.loadMessages("bob@example.com", 2);
+
+    expect(dm.firstUnseenId.value).toBe("dm-2");
+  });
+
+  test("DM initial load reconciles queued inactive MDS candidates without moving backward", async () => {
+    const key = mdsChatKey("bob@example.com");
+    setMdsDisplayed(key, {
+      stanzaId: "dm-stanza-1",
+      stanzaIdBy: "example.com",
+    });
+    queueMdsDisplayed(key, {
+      stanzaId: "dm-stanza-2",
+      stanzaIdBy: "example.com",
+    });
+    const queryPersonalMam = mock(async () => [
+      {
+        id: "dm-1",
+        stanzaId: "dm-stanza-1",
+        stanzaIdBy: "example.com",
+        peerJid: "bob@example.com",
+        fromJid: "bob@example.com/phone",
+        nick: "bob",
+        body: "earlier",
+        createdAt: "2024-01-01T00:00:00Z",
+        type: "message" as const,
+      },
+      {
+        id: "dm-2",
+        stanzaId: "dm-stanza-2",
+        stanzaIdBy: "example.com",
+        peerJid: "bob@example.com",
+        fromJid: "bob@example.com/laptop",
+        nick: "bob",
+        body: "later",
+        createdAt: "2024-01-01T00:00:10Z",
+        type: "message" as const,
+      },
+    ]);
+    const actionError = ref("");
+    const dm = useDirectMessages(
+      ref(session()),
+      ref({ queryPersonalMam } as never) as never,
+      ref("bob@example.com"),
+      String,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+    );
+    dm.timelineEl.value = makeTimelineEl();
+
+    await dm.loadMessages("bob@example.com", 2);
+
+    expect(dm.firstUnseenId.value).toBeNull();
   });
 
   test("DM initial load re-pins when the virtual timeline ref appears after messages", async () => {

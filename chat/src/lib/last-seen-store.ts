@@ -25,6 +25,16 @@ export function mdsChatKey(chatBareJid: string): string {
   return `${PREFIX}.mds.${chatBareJid}`;
 }
 
+export type MdsDisplayedState = {
+  stanzaId: string;
+  stanzaIdBy: string;
+};
+
+type MdsDisplayedStore = {
+  current: MdsDisplayedState | null;
+  pending: MdsDisplayedState[];
+};
+
 function storage(): Storage | null {
   if (typeof window === "undefined") return null;
   try {
@@ -43,4 +53,95 @@ export function setLastSeen(key: string, messageId: string): void {
     // Quota exceeded or storage disabled; silently drop — the worst outcome is
     // that the divider shows up on the next visit instead of not at all.
   }
+}
+
+function getLastSeen(key: string): string | null {
+  const s = storage();
+  if (!s) return null;
+  try {
+    return s.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+export function setMdsDisplayed(key: string, state: MdsDisplayedState): void {
+  const normalized = normalizeMdsDisplayedState(state);
+  if (!normalized) return;
+  const s = storage();
+  if (!s) return;
+  try {
+    s.setItem(key, JSON.stringify({ current: normalized, pending: [] }));
+  } catch {
+    // Quota exceeded or storage disabled; the XMPP state remains authoritative.
+  }
+}
+
+export function getMdsDisplayed(key: string): MdsDisplayedState | null {
+  return readMdsStore(key).current;
+}
+
+export function queueMdsDisplayed(key: string, state: MdsDisplayedState): void {
+  const normalized = normalizeMdsDisplayedState(state);
+  if (!normalized) return;
+  const s = storage();
+  if (!s) return;
+  const store = readMdsStore(key);
+  if (
+    (store.current && sameMdsDisplayedState(store.current, normalized)) ||
+    store.pending.some((candidate) => sameMdsDisplayedState(candidate, normalized))
+  ) {
+    return;
+  }
+  const pending = [...store.pending, normalized].slice(-10);
+  try {
+    s.setItem(key, JSON.stringify({ current: store.current, pending }));
+  } catch {
+    // Quota exceeded or storage disabled; the XMPP state remains authoritative.
+  }
+}
+
+export function getMdsDisplayedCandidates(key: string): MdsDisplayedState[] {
+  const store = readMdsStore(key);
+  const candidates = store.current ? [store.current, ...store.pending] : store.pending;
+  return candidates.filter((candidate, index) =>
+    candidates.findIndex((other) => sameMdsDisplayedState(other, candidate)) === index
+  );
+}
+
+function readMdsStore(key: string): MdsDisplayedStore {
+  const raw = getLastSeen(key);
+  if (!raw) return { current: null, pending: [] };
+  try {
+    const parsed = JSON.parse(raw) as
+      | Partial<MdsDisplayedState>
+      | Partial<MdsDisplayedStore>
+      | null;
+    const direct = normalizeMdsDisplayedState(parsed as Partial<MdsDisplayedState>);
+    if (direct) return { current: direct, pending: [] };
+    const current = normalizeMdsDisplayedState(
+      (parsed as Partial<MdsDisplayedStore> | null)?.current ?? null,
+    );
+    const pending = Array.isArray((parsed as Partial<MdsDisplayedStore> | null)?.pending)
+      ? ((parsed as Partial<MdsDisplayedStore>).pending ?? []).flatMap((state) => {
+          const normalized = normalizeMdsDisplayedState(state);
+          return normalized ? [normalized] : [];
+        })
+      : [];
+    return { current, pending };
+  } catch {
+    return { current: null, pending: [] };
+  }
+}
+
+function normalizeMdsDisplayedState(
+  state: Partial<MdsDisplayedState> | null | undefined,
+): MdsDisplayedState | null {
+  const stanzaId = typeof state?.stanzaId === "string" ? state.stanzaId.trim() : "";
+  const stanzaIdBy = typeof state?.stanzaIdBy === "string" ? state.stanzaIdBy.trim() : "";
+  return stanzaId && stanzaIdBy ? { stanzaId, stanzaIdBy } : null;
+}
+
+function sameMdsDisplayedState(a: MdsDisplayedState, b: MdsDisplayedState): boolean {
+  return a.stanzaId === b.stanzaId && a.stanzaIdBy === b.stanzaIdBy;
 }

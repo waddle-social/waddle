@@ -24,7 +24,7 @@ import { matchLocation, navigate, type RouteMatch } from "@/router";
 import { resolveChannelBySlug } from "@/shell/route-helpers";
 import { barePeerJid, jidDomain, parseManagedRoomBareJid } from "@/lib/xmpp-client";
 import { createNotifySettingsStore } from "@/lib/notify-settings";
-import { mdsChatKey, setLastSeen } from "@/lib/last-seen-store";
+import { mdsChatKey, queueMdsDisplayed, setMdsDisplayed } from "@/lib/last-seen-store";
 import {
   isTrustedManagedRoomJid,
   knownChannelIdForRoomJid,
@@ -735,7 +735,17 @@ export function useChatAppController(giphyApiKey: string) {
     // it up alongside their own divider state. The chat-id is the
     // bare JID of either the MUC room or the DM peer.
     client.setMdsDisplayedHandler((entry) => {
-      setLastSeen(mdsChatKey(entry.chatId), entry.stanzaId);
+      const chatId = barePeerJid(entry.chatId);
+      const displayed = {
+        stanzaId: entry.stanzaId,
+        stanzaIdBy: barePeerJid(entry.stanzaIdBy),
+      };
+      const accepted = ui.sidebarMode.value === "dms"
+        ? dmMessaging.applyMdsDisplayed(chatId, displayed)
+        : messaging.applyMdsDisplayed(chatId, displayed);
+      const key = mdsChatKey(chatId);
+      if (accepted) setMdsDisplayed(key, displayed);
+      else queueMdsDisplayed(key, displayed);
     });
     client.setPresenceUpdateHandler((event) => {
       dmConversations.updatePresence(event);

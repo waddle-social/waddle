@@ -2,6 +2,7 @@
 import { computed, reactive, ref } from "vue";
 import { ChevronLeft, MessageCircle, ScanText, UserRound } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
+import ReadReceiptSwitcher from "@/components/chat/ReadReceiptSwitcher.vue";
 import ScrollDirectionSwitcher from "@/components/chat/ScrollDirectionSwitcher.vue";
 import VCardEditor from "@/components/chat/VCardEditor.vue";
 import VersionFooter from "@/components/chat/VersionFooter.vue";
@@ -688,7 +689,10 @@ async function clearTuneStatus() {
             </p>
           </div>
         </div>
-        <ScrollDirectionSwitcher />
+        <div class="grid gap-3">
+          <ScrollDirectionSwitcher />
+          <ReadReceiptSwitcher />
+        </div>
       </section>
 
       <section class="chat-section-card glass-panel">

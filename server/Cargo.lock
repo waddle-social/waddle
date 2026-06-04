@@ -6658,6 +6658,7 @@ dependencies = [
  "minidom",
  "reqwest 0.13.3",
  "serde",
+ "sha1 0.11.0",
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite",

@@ -143,11 +143,12 @@ impl WaddleClient {
         };
 
         let mut events = client_handle.events();
+        let account_bare_jid = self.config.jid.split('/').next().unwrap_or("").to_string();
         let listener = Arc::clone(&self.listener);
         tokio::spawn(async move {
             loop {
                 match events.recv().await {
-                    Ok(event) => dispatch_event(event, &**listener),
+                    Ok(event) => dispatch_event(event, &account_bare_jid, &**listener),
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         listener.on_disconnected();
                         break;

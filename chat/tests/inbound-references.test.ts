@@ -507,6 +507,34 @@ describe("roomMessageFromArchived with reply-fallback", () => {
 });
 
 describe("dmMessageFromArchived", () => {
+  test("uses the account server stanza-id for DM MDS state", () => {
+    const result = dmMessageFromArchived({
+      ...baseArchivedDm,
+      stanza_id: "foreign-single-id",
+      stanza_id_by: "foreign.example.com",
+      stanza_ids: [
+        { id: "foreign-list-id", by: "foreign.example.com" },
+        { id: "own-server-id", by: "example.com" },
+      ],
+    }, "bob@example.com");
+
+    expect(result).not.toBeNull();
+    expect(result?.stanzaId).toBe("own-server-id");
+    expect(result?.stanzaIdBy).toBe("example.com");
+  });
+
+  test("does not expose a DM MDS stanza-id assigned only by a foreign domain", () => {
+    const result = dmMessageFromArchived({
+      ...baseArchivedDm,
+      stanza_id: "foreign-single-id",
+      stanza_id_by: "foreign.example.com",
+    }, "bob@example.com");
+
+    expect(result).not.toBeNull();
+    expect(result?.stanzaId).toBeUndefined();
+    expect(result?.stanzaIdBy).toBeUndefined();
+  });
+
   test("maps XEP-0372 references onto LiveDmMessage.references", () => {
     const archived: WasmArchivedMessage = {
       ...baseArchivedDm,

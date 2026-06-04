@@ -16,7 +16,7 @@ impl XmppRuntime {
     /// messaging. Unrecognised stanzas fall through to
     /// [`ClientEvent::UnhandledStanza`].
     pub fn handle_app_stanza(&mut self, element: &minidom::Element) -> Vec<ClientEvent> {
-        use crate::{inbox, mam, messaging, pep};
+        use crate::{caps, inbox, mam, messaging, pep};
 
         let type_attr = element.attr("type").unwrap_or("");
 
@@ -27,6 +27,15 @@ impl XmppRuntime {
                     element: element.clone(),
                 }];
             }
+        }
+
+        if let Some(response) = caps::build_client_caps_disco_info_response(
+            element,
+            self.snapshot.binding.as_ref().map(|binding| &binding.jid),
+        ) {
+            return vec![ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                TransportMessage::Element(response),
+            ))];
         }
 
         if element.name() == "message" {
