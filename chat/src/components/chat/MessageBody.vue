@@ -34,6 +34,7 @@ import { isAllowedPlayerEmbedOrigin } from "@/lib/xmpp/player-embed-allowlist";
 import { useExtensionAnnotationActions } from "@/channels/extension-annotation-actions";
 import type { ExtensionCommandResult } from "@/lib/xmpp/extension-commands";
 import ImageLightbox from "@/components/ui/ImageLightbox.vue";
+import HlsVideoPlayer from "@/components/chat/HlsVideoPlayer.vue";
 
 const props = withDefaults(
   defineProps<{
@@ -110,9 +111,12 @@ function isHttpsUrl(value: string): boolean {
 function videoCardKey(preview: MessageLinkPreview): string {
   return `${preview.originalUrl}:${preview.normalizedUrl ?? ""}`;
 }
-// Playback is local UI state only — never synchronized over XMPP. Until the
-// user clicks play, no <video> element (and no network fetch) is emitted.
+// Native-video playback is local UI state only — never synchronized over XMPP.
+// Until the user clicks play, the <video> (owned by HlsVideoPlayer, mounted only
+// while playing) and its network fetch are not emitted; a fatal playback error
+// flips the card to a link fallback.
 const playingVideos = reactive(new Set<string>());
+const failedVideos = reactive(new Set<string>());
 function startVideoPlayback(preview: MessageLinkPreview): void {
   playingVideos.add(videoCardKey(preview));
 }
@@ -319,15 +323,23 @@ watch(
         <ExternalLink aria-hidden="true" class="h-3.5 w-3.5" />
         {{ linkPreviewHost(card.preview.originalUrl) }}
       </span>
-      <video
-        v-if="playingVideos.has(videoCardKey(card.preview))"
-        :src="card.video.url"
-        class="max-h-72 w-full rounded border border-border bg-black"
-        controls
-        autoplay
-        playsinline
-        @click.stop
+      <HlsVideoPlayer
+        v-if="playingVideos.has(videoCardKey(card.preview)) && !failedVideos.has(videoCardKey(card.preview))"
+        :url="card.video.url"
+        :media-type="card.video.mediaType"
+        @failed="failedVideos.add(videoCardKey(card.preview))"
       />
+      <a
+        v-else-if="failedVideos.has(videoCardKey(card.preview))"
+        :href="linkPreviewHref(card.preview.originalUrl) ?? undefined"
+        target="_blank"
+        rel="noopener noreferrer"
+        class="relative flex aspect-video w-full items-center justify-center gap-2 overflow-hidden rounded border border-border bg-black/80 text-sm text-white hover:bg-black"
+        @click.stop
+      >
+        <AlertCircle aria-hidden="true" class="h-5 w-5" />
+        Couldn't play here — watch on site
+      </a>
       <button
         v-else
         type="button"

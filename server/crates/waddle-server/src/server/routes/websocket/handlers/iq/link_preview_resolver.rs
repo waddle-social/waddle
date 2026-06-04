@@ -635,7 +635,13 @@ async fn fetch_html_once(
         // names a direct playable file. This blocks provider endpoints that
         // return a video content-type for non-file (embed/watch) URLs, and is
         // defense-in-depth on top of the classify-time `video_enabled` gate.
-        if policy.video_enabled && looks_like_direct_video_url(url) {
+        // HLS is excluded here: an adaptive-streaming manifest is not a single
+        // downloadable file and only enters via the page-advertised og:video
+        // native path, never as a raw-file (XEP-0447) share.
+        if policy.video_enabled
+            && media_type != DirectVideoMediaType::Hls
+            && looks_like_direct_video_url(url)
+        {
             return Ok(FetchOnceResult::DirectVideo {
                 final_url: url.clone(),
                 media_type,
@@ -1772,6 +1778,28 @@ mod tests {
     }
 
     #[test]
+    fn parses_native_video_from_hls_og_video() {
+        // The Rawkode Academy shape: an HLS stream advertised via og:video with
+        // the `application/x-mpegURL` type (one of several mpegurl aliases).
+        let requested_url = Url::parse("https://rawkode.academy/watch/yoke").expect("url");
+        let html = r#"<html><head>
+                <meta property="og:title" content="Hands-on Yoke">
+                <meta property="og:video" content="https://content.rawkode.academy/v/stream.m3u8">
+                <meta property="og:video:type" content="application/x-mpegURL">
+              </head></html>"#;
+
+        let metadata = extract_metadata_from_html(&requested_url, html).expect("metadata");
+
+        assert_eq!(
+            metadata.native_video,
+            Some(ResolvedNativeVideo {
+                url: Url::parse("https://content.rawkode.academy/v/stream.m3u8").expect("url"),
+                media_type: DirectVideoMediaType::Hls,
+            })
+        );
+    }
+
+    #[test]
     fn parses_native_video_with_media_type_parameters() {
         // `og:video:type` legally carries codec parameters, e.g.
         // `video/mp4; codecs="avc1.42E01E"`. The MIME must be matched on its
@@ -1937,6 +1965,32 @@ mod tests {
         let policy = LinkPreviewResolverPolicy {
             allow_http_loopback_for_tests: true,
             video_enabled: false,
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/clip.mp4", server.uri())).expect("url");
+
+        assert_eq!(
+            resolve_link_preview(&url, &policy).await,
+            LinkPreviewResolverOutcome::Unsupported
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_hls_content_type_on_direct_file_url() {
+        // An HLS manifest is not a single downloadable file. Even when a
+        // direct-file URL serves an mpegurl content-type, it must not be
+        // promoted to a raw-file (XEP-0447) video share — HLS only enters via
+        // the page-advertised og:video native path.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/clip.mp4"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw("#EXTM3U", "application/x-mpegurl"),
+            )
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            allow_http_loopback_for_tests: true,
             ..Default::default()
         };
         let url = Url::parse(&format!("{}/clip.mp4", server.uri())).expect("url");

@@ -5,22 +5,37 @@
 // <video src>. There is no provider allowlist for native playback (it runs no
 // third-party JS); the boundary is https + a supported direct media type.
 //
-// Mirror of the server-supported direct video MIME set. HLS
-// (application/vnd.apple.mpegurl) plays via a lazily-loaded hls.js player in a
-// follow-up; until then only progressive containers are accepted.
+// Mirror of the server-supported direct video MIME set. Progressive containers
+// play natively in <video>; HLS (application/vnd.apple.mpegurl + aliases) plays
+// natively on Safari and via a lazily-loaded hls.js player elsewhere.
+const HLS_MEDIA_TYPES: ReadonlySet<string> = new Set([
+  "application/vnd.apple.mpegurl",
+  "application/x-mpegurl",
+  "audio/x-mpegurl",
+  "audio/mpegurl",
+  "application/mpegurl",
+]);
 const PLAYABLE_NATIVE_VIDEO_TYPES: ReadonlySet<string> = new Set([
   "video/mp4",
   "video/webm",
   "video/ogg",
   "video/quicktime",
+  ...HLS_MEDIA_TYPES,
 ]);
 
+/// The MIME essence of an og:video:type, stripping media-type parameters
+/// (`video/mp4; codecs="…"`), mirroring the server resolver's `.split(';')`.
+function mediaTypeEssence(mediaType: string): string {
+  return mediaType.split(";")[0]!.trim().toLowerCase();
+}
+
 function isPlayableNativeVideoMediaType(mediaType: string): boolean {
-  // Match on the MIME essence, stripping media-type parameters
-  // (`video/mp4; codecs="…"`), mirroring the server resolver's
-  // `.split(';').next()` treatment.
-  const essence = mediaType.split(";")[0]!.trim().toLowerCase();
-  return PLAYABLE_NATIVE_VIDEO_TYPES.has(essence);
+  return PLAYABLE_NATIVE_VIDEO_TYPES.has(mediaTypeEssence(mediaType));
+}
+
+/** Whether a media type is an HLS manifest (needs native-HLS or hls.js). */
+export function isHlsMediaType(mediaType: string): boolean {
+  return HLS_MEDIA_TYPES.has(mediaTypeEssence(mediaType));
 }
 
 export function isPlayableNativeVideo(url: string, mediaType: string): boolean {

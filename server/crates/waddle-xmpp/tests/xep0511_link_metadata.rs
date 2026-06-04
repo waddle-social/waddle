@@ -157,6 +157,61 @@ fn xep0511_builds_native_og_video_with_real_media_type() {
 }
 
 #[test]
+fn xep0511_round_trips_hls_native_og_video() {
+    // An HLS stream (e.g. Rawkode Academy) serializes with the canonical mpegurl
+    // `og:video:type` on the wire and round-trips to a native video.
+    let metadata =
+        LinkMetadata::new(Url::parse("https://rawkode.academy/watch/yoke").expect("url"))
+            .with_title("Hands-on Yoke")
+            .with_video(LinkMetadataVideo::Native {
+                url: Url::parse("https://content.rawkode.academy/v/stream.m3u8").expect("url"),
+                media_type: DirectVideoMediaType::Hls,
+            });
+
+    let payload = build_link_metadata_element(&metadata);
+
+    assert_eq!(
+        payload
+            .get_child("type", NS_OPENGRAPH_VIDEO)
+            .map(Element::text)
+            .as_deref(),
+        Some("application/vnd.apple.mpegurl")
+    );
+    assert_eq!(
+        parse_link_metadata_element(&payload)
+            .expect("hls native video round-trips")
+            .video,
+        metadata.video
+    );
+}
+
+#[test]
+fn xep0511_parses_hls_og_video_type_aliases() {
+    // A conformant (e.g. federated) sender may use any of the historical mpegurl
+    // aliases for `og:video:type`; all map to a native HLS video.
+    for alias in [
+        "application/vnd.apple.mpegurl",
+        "application/x-mpegURL",
+        "audio/x-mpegurl",
+    ] {
+        let payload = element(&format!(
+            "<rdf:Description xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#' xmlns:og='https://ogp.me/ns#' xmlns:ogv='https://ogp.me/ns#video:' rdf:about='https://rawkode.academy/watch/yoke'>\
+               <og:video>https://content.rawkode.academy/v/stream.m3u8</og:video>\
+               <ogv:type>{alias}</ogv:type>\
+             </rdf:Description>"
+        ));
+        assert_eq!(
+            parse_link_metadata_element(&payload).expect("parses").video,
+            Some(LinkMetadataVideo::Native {
+                url: Url::parse("https://content.rawkode.academy/v/stream.m3u8").expect("url"),
+                media_type: DirectVideoMediaType::Hls,
+            }),
+            "alias {alias} must parse to native HLS"
+        );
+    }
+}
+
+#[test]
 fn xep0511_builds_player_og_video_with_text_html_type() {
     let metadata = LinkMetadata::new(Url::parse("https://www.youtube.com/watch?v=x").expect("url"))
         .with_video(LinkMetadataVideo::Player {

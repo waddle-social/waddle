@@ -55,17 +55,21 @@ impl fmt::Display for InvalidPreviewImageMediaType {
 
 impl std::error::Error for InvalidPreviewImageMediaType {}
 
-/// Safe direct-video MIME types Waddle accepts for trusted inline previews.
+/// Media types Waddle accepts for trusted inline video previews.
 ///
-/// Only single, directly playable container files are listed. Adaptive
-/// streaming manifests (HLS `application/x-mpegurl`, DASH) and provider embed
-/// pages are intentionally excluded — they are not direct playable files.
+/// Progressive container files (`Mp4`/`Webm`/`Ogg`/`QuickTime`) play natively in
+/// a `<video>` element. `Hls` is an adaptive-streaming manifest
+/// (`application/vnd.apple.mpegurl`) which plays natively on Safari and via a
+/// lazily-loaded `hls.js` player elsewhere; it is accepted for the page-advertised
+/// `og:video` native path (clients fall back gracefully when it cannot play).
+/// DASH and provider embed pages remain excluded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DirectVideoMediaType {
     Mp4,
     Webm,
     Ogg,
     QuickTime,
+    Hls,
 }
 
 impl DirectVideoMediaType {
@@ -76,6 +80,7 @@ impl DirectVideoMediaType {
             Self::Webm => "video/webm",
             Self::Ogg => "video/ogg",
             Self::QuickTime => "video/quicktime",
+            Self::Hls => "application/vnd.apple.mpegurl",
         }
     }
 }
@@ -95,6 +100,12 @@ impl FromStr for DirectVideoMediaType {
             "video/webm" => Ok(Self::Webm),
             "video/ogg" => Ok(Self::Ogg),
             "video/quicktime" => Ok(Self::QuickTime),
+            // HLS manifests appear under several historical aliases in the wild.
+            "application/vnd.apple.mpegurl"
+            | "application/x-mpegurl"
+            | "audio/x-mpegurl"
+            | "audio/mpegurl"
+            | "application/mpegurl" => Ok(Self::Hls),
             _ => Err(InvalidDirectVideoMediaType),
         }
     }
@@ -203,13 +214,32 @@ mod tests {
     }
 
     #[test]
+    fn parses_hls_media_type_aliases_to_canonical() {
+        for alias in [
+            "application/vnd.apple.mpegurl",
+            "application/x-mpegURL",
+            "application/x-mpegurl",
+            "audio/x-mpegurl",
+            "audio/mpegurl",
+            "application/mpegurl",
+        ] {
+            assert_eq!(
+                alias.parse::<DirectVideoMediaType>(),
+                Ok(DirectVideoMediaType::Hls),
+                "alias {alias} must map to HLS"
+            );
+        }
+        assert_eq!(
+            DirectVideoMediaType::Hls.as_str(),
+            "application/vnd.apple.mpegurl"
+        );
+    }
+
+    #[test]
     fn rejects_non_direct_video_media_types() {
         assert!("text/html".parse::<DirectVideoMediaType>().is_err());
-        // HLS/DASH playlists are not single direct playable files.
-        assert!("application/x-mpegurl"
-            .parse::<DirectVideoMediaType>()
-            .is_err());
-        assert!("application/vnd.apple.mpegurl"
+        // DASH manifests need a separate player and are not supported.
+        assert!("application/dash+xml"
             .parse::<DirectVideoMediaType>()
             .is_err());
     }

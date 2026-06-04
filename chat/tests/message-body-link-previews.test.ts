@@ -64,6 +64,33 @@ describe("MessageBody link previews", () => {
     expect(html).toContain("A short clip");
   });
 
+  test("renders an HLS og:video preview as a click-to-load control without loading hls.js or a player", async () => {
+    const html = await renderMessageBody({
+      message: messageWithPreviews([
+        {
+          originalUrl: "https://rawkode.academy/watch/yoke",
+          normalizedUrl: "https://rawkode.academy/watch/yoke",
+          title: "Hands-on Yoke",
+          video: {
+            url: "https://content.rawkode.academy/v/stream.m3u8",
+            mediaType: "application/vnd.apple.mpegurl",
+          },
+          image: {
+            url: "https://waddle.example/api/files/22222222-2222-4222-8222-222222222222/poster.png",
+            mediaType: "image/png",
+          },
+        },
+      ]),
+    });
+
+    // Click-to-load: poster + play control, but no <video> and no stream URL
+    // until the user acts — nothing contacts the CDN on render.
+    expect(html).toContain("aria-label=\"Play video: Hands-on Yoke\"");
+    expect(html).toContain("poster.png");
+    expect(html).not.toContain("<video");
+    expect(html).not.toContain("stream.m3u8");
+  });
+
   test("renders the cached poster image for a direct-video preview when available", async () => {
     const html = await renderMessageBody({
       message: messageWithPreviews([
