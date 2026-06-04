@@ -339,6 +339,20 @@ fn build_link_preview_lookup_result(
             }
             preview.append_child(video_elem.build());
         }
+        if let Some(native) = &data.native_video {
+            // Composer parity: a page-advertised native stream surfaces as the
+            // same `<video>` element a direct-media file uses (no size), so the
+            // composer renders an identical native-video card pre-send.
+            preview.append_child(
+                Element::builder("video", NS_WADDLE_LINK_PREVIEW)
+                    .attr(xml_ncname!("url").to_owned(), native.url.as_str())
+                    .attr(
+                        xml_ncname!("media-type").to_owned(),
+                        native.media_type.as_str(),
+                    )
+                    .build(),
+            );
+        }
         if let Some(player) = &data.player {
             let mut player_elem = Element::builder("player", NS_WADDLE_LINK_PREVIEW)
                 .attr(xml_ncname!("url").to_owned(), player.url.as_str());
@@ -847,5 +861,49 @@ mod tests {
         assert_eq!(player.attr("url"), Some(player_url.as_str()));
         assert_eq!(player.attr("width"), Some("1280"));
         assert_eq!(player.attr("height"), Some("720"));
+    }
+
+    #[test]
+    fn lookup_preview_includes_native_video_element() {
+        let media_url =
+            Url::parse("https://content.rawkode.academy/v/clip.mp4").expect("media url");
+        let data = LinkPreviewTokenData {
+            sender_jid: "alice@example.com".parse().expect("jid"),
+            scope_jid: "alice@example.com".parse().expect("jid"),
+            original_url: Url::parse("https://rawkode.academy/watch/yoke").expect("url"),
+            normalized_url: Url::parse("https://rawkode.academy/watch/yoke").expect("url"),
+            title: Some("Hands-on Yoke".to_string()),
+            description: None,
+            image: None,
+            video: None,
+            native_video: Some(LinkPreviewTokenNativeVideo {
+                url: media_url.clone(),
+                media_type: waddle_xmpp_core::DirectVideoMediaType::Mp4,
+            }),
+            player: None,
+            expires_at_unix: 0,
+        };
+        let token =
+            waddle_xmpp::xep::encode_link_preview_token_checked(&data, secret()).expect("token");
+        let iq = iq_get_with_payload(Element::builder("lookup", NS_WADDLE_LINK_PREVIEW).build());
+        let xml = build_link_preview_lookup_result(
+            &iq,
+            None,
+            None,
+            LinkPreviewResolverStatus::Ready,
+            Some((data, token.as_str(), "2099-01-01T00:00:00.000Z".into())),
+        );
+        let elem: Element = xml.parse().expect("iq result");
+        let preview = elem
+            .get_child("lookup", NS_WADDLE_LINK_PREVIEW)
+            .and_then(|lookup| lookup.get_child("preview", NS_WADDLE_LINK_PREVIEW))
+            .expect("preview");
+        // Composer parity: native og:video surfaces as the same <video> element a
+        // direct-video file uses, so the composer renders an identical card.
+        let video = preview
+            .get_child("video", NS_WADDLE_LINK_PREVIEW)
+            .expect("video element");
+        assert_eq!(video.attr("url"), Some(media_url.as_str()));
+        assert_eq!(video.attr("media-type"), Some("video/mp4"));
     }
 }

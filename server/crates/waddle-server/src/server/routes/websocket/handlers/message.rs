@@ -246,6 +246,20 @@ fn consume_link_preview_request(
                     height: player.height,
                 });
             }
+            // Native page-advertised media is stamped as conformant XEP-0511
+            // og:video with its real media type (not a file-share). Re-validate
+            // the media URL against current host policy — there is no provider
+            // allowlist for native playback (it runs no third-party JS), so the
+            // operator host policy + https are the boundary, exactly as for the
+            // direct-video and image URLs.
+            if let Some(native) = preview.native_video.filter(|native| {
+                link_preview_url_allowed_by_current_policy(&native.url, link_preview)
+            }) {
+                metadata = metadata.with_video(waddle_xmpp::xep::LinkMetadataVideo::Native {
+                    url: native.url,
+                    media_type: native.media_type,
+                });
+            }
             (metadata, video_sharing)
         });
     strip_link_preview_requests(message);
@@ -610,6 +624,61 @@ mod tests {
                 width: Some(1280),
                 height: Some(720),
             })
+        );
+    }
+
+    #[test]
+    fn stamps_og_video_native_for_native_video_token() {
+        let preview = waddle_xmpp::xep::LinkPreviewTokenData {
+            sender_jid: "alice@example.com".parse().expect("jid"),
+            scope_jid: "room@muc.example.com".parse().expect("jid"),
+            original_url: url::Url::parse("https://rawkode.academy/watch/yoke").expect("url"),
+            normalized_url: url::Url::parse("https://rawkode.academy/watch/yoke").expect("url"),
+            title: Some("Hands-on Yoke".to_string()),
+            description: None,
+            image: None,
+            video: None,
+            native_video: Some(waddle_xmpp::xep::LinkPreviewTokenNativeVideo {
+                url: url::Url::parse("https://content.rawkode.academy/v/clip.mp4").expect("url"),
+                media_type: waddle_xmpp_core::DirectVideoMediaType::Mp4,
+            }),
+            player: None,
+            expires_at_unix: 1_900_000_000,
+        };
+        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
+        let mut message = Message::new(None::<jid::Jid>);
+        message.to = Some("room@muc.example.com".parse().expect("jid"));
+        message.bodies.insert(
+            xmpp_parsers::message::Lang::new(),
+            "watch https://rawkode.academy/watch/yoke".to_string(),
+        );
+        message
+            .payloads
+            .push(waddle_xmpp::xep::build_link_preview_request_element(&token));
+
+        consume_link_preview_request(
+            &mut message,
+            &sender(),
+            SECRET,
+            1_800_000_000,
+            "https://waddle.example",
+            &LinkPreviewConfig::default(),
+        );
+
+        let parsed = waddle_xmpp::xep::extract_link_metadata_from_message(&message);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(
+            parsed[0].video,
+            Some(waddle_xmpp::xep::LinkMetadataVideo::Native {
+                url: url::Url::parse("https://content.rawkode.academy/v/clip.mp4").expect("url"),
+                media_type: waddle_xmpp_core::DirectVideoMediaType::Mp4,
+            })
+        );
+        // Native video is page metadata (og:video), not a shared file: no
+        // XEP-0447 file-share is stamped for it.
+        assert!(
+            waddle_xmpp::xep::extract_file_sharing_from_message(&message).is_none(),
+            "native og:video must not stamp a file-share"
         );
     }
 
