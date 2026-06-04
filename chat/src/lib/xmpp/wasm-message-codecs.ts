@@ -8,6 +8,7 @@ import type { InboxEntry } from "./inbox-types";
 import { isTrustedCachedPreviewImageUrl } from "./link-preview";
 import { isAllowedPlayerEmbedOrigin } from "@/lib/xmpp/player-embed-allowlist";
 import { associateDirectVideoPreviews } from "./link-preview-video";
+import { isPlayableNativeVideo } from "./native-video";
 import {
   buildReplyFallbackPrefix,
   shiftMarkupSpans,
@@ -163,6 +164,9 @@ export function linkPreviewFromWasm(preview: WasmLinkPreview, options: LinkPrevi
   const playerEmbed = preview.player_embed && isAllowedPlayerEmbedOrigin(preview.player_embed.url)
     ? preview.player_embed
     : undefined;
+  const nativeVideo = preview.video && isPlayableNativeVideo(preview.video.url, preview.video.media_type)
+    ? preview.video
+    : undefined;
   return {
     originalUrl: preview.original_url,
     ...(preview.normalized_url ? { normalizedUrl: preview.normalized_url } : {}),
@@ -177,6 +181,14 @@ export function linkPreviewFromWasm(preview: WasmLinkPreview, options: LinkPrevi
             ...(typeof trustedImage.width === "number" ? { width: trustedImage.width } : {}),
             ...(typeof trustedImage.height === "number" ? { height: trustedImage.height } : {}),
             ...(trustedImage.alt ? { alt: trustedImage.alt } : {}),
+          },
+        }
+      : {}),
+    ...(nativeVideo
+      ? {
+          video: {
+            url: nativeVideo.url,
+            mediaType: nativeVideo.media_type,
           },
         }
       : {}),

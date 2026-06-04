@@ -152,8 +152,14 @@ export interface WasmLinkPreview {
   title?: string | null;
   description?: string | null;
   image?: WasmLinkPreviewImage | null;
+  video?: WasmLinkPreviewVideo | null;
   player_embed?: WasmLinkPreviewPlayer | null;
   remote_media_unavailable?: boolean;
+}
+
+interface WasmLinkPreviewVideo {
+  url: string;
+  media_type: string;
 }
 
 interface WasmLinkPreviewImage {
