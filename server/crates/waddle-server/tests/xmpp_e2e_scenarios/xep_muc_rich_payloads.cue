@@ -399,9 +399,14 @@ scenario: #Scenario & {
 			payloads: [
 				#XmlPayload & {
 					element: #XmlElement & {
-						name:  "retract"
-						ns:    "urn:xmpp:message-retract:1"
-						attrs: id: "cue-rich-original"
+						name: "retract"
+						ns:   "urn:xmpp:message-retract:1"
+						// XEP-0424 §3 (xep-0424.xml lines 158, 230-232): a
+						// groupchat retraction cites the room-assigned
+						// XEP-0359 stanza-id (the `<stanza-id by='room'/>`
+						// captured above as moderationTarget), never the
+						// wire `id` attribute.
+						attrsFrom: id: "moderationTarget"
 					}
 				},
 			]
@@ -409,7 +414,12 @@ scenario: #Scenario & {
 		#ExpectMessage & {
 			target:   adminPhone
 			body:     "/me retracted a previous message"
-			contains: ["urn:xmpp:message-retract:1", "cue-rich-original"]
+			contains: ["urn:xmpp:message-retract:1"]
+			elements: [#XmlElement & {
+				name:      "retract"
+				ns:        "urn:xmpp:message-retract:1"
+				attrsFrom: id: "moderationTarget"
+			}]
 		},
 		#QueryMam & {
 			actor:   adminPhone
