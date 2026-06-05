@@ -86,7 +86,7 @@ final class RustXmppClient: ObservableObject {
     // MARK: - Messaging
 
     @discardableResult
-    func sendChatMessage(peerJID: String, body: String, options: WaddleSendOptions? = nil) async -> String {
+    func sendChatMessage(peerJID: String, body: String, options: WaddleSendOptions? = nil) async -> WaddleSendMessageOutcome {
         await waddleClient.sendChatMessage(peerJid: peerJID, body: body, options: options)
     }
 
@@ -95,7 +95,7 @@ final class RustXmppClient: ObservableObject {
         roomJID: String,
         body: String,
         options: WaddleSendOptions? = nil
-    ) async -> String {
+    ) async -> WaddleSendMessageOutcome {
         await waddleClient.sendGroupchatMessage(roomJid: roomJID, body: body, options: options)
     }
 
@@ -110,7 +110,9 @@ final class RustXmppClient: ObservableObject {
             reply: nil,
             fallback: nil,
             thread: WaddleThreadTarget(id: threadID, parent: nil),
-            sharedFiles: []
+            sharedFiles: [],
+            linkPreviewToken: nil,
+            requestDisplayedMarker: false
         )
         _ = await waddleClient.sendGroupchatMessage(roomJid: roomJID, body: body, options: options)
     }
@@ -155,7 +157,7 @@ final class RustXmppClient: ObservableObject {
     // MARK: - Direct messages
 
     @discardableResult
-    func sendDirectMessage(peerJID: String, body: String, options: WaddleSendOptions? = nil) async -> String {
+    func sendDirectMessage(peerJID: String, body: String, options: WaddleSendOptions? = nil) async -> WaddleSendMessageOutcome {
         await waddleClient.sendChatMessage(peerJid: peerJID, body: body, options: options)
     }
 
@@ -269,7 +271,9 @@ final class RustXmppClient: ObservableObject {
             reply: nil,
             fallback: nil,
             thread: nil,
-            sharedFiles: [sharedFile]
+            sharedFiles: [sharedFile],
+            linkPreviewToken: nil,
+            requestDisplayedMarker: false
         )
         _ = await waddleClient.sendGroupchatMessage(roomJid: roomJID, body: fileURL, options: options)
     }

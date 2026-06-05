@@ -407,7 +407,9 @@ final class AppModel: ObservableObject {
                 reply: nil,
                 fallback: nil,
                 thread: nil,
-                sharedFiles: sharedFiles
+                sharedFiles: sharedFiles,
+                linkPreviewToken: nil,
+                requestDisplayedMarker: false
             )
         await rustClient.sendDirectMessage(peerJID: targetPeerJID, body: wireBody, options: options)
         updateDmConversation(
@@ -1299,7 +1301,9 @@ final class AppModel: ObservableObject {
                 reply: replyTarget,
                 fallback: fallbackOpt,
                 thread: threadTarget,
-                sharedFiles: sharedFiles
+                sharedFiles: sharedFiles,
+                linkPreviewToken: nil,
+                requestDisplayedMarker: false
             )
             : nil
 
