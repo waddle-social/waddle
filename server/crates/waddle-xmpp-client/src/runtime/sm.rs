@@ -96,7 +96,9 @@ impl XmppRuntime {
             }));
         } else if element.name() == "enabled" {
             let previd = crate::stream_management::SmState::parse_enabled(element);
+            let max_resume_seconds = crate::stream_management::SmState::parse_enabled_max(element);
             self.sm_state.previd = previd.clone();
+            self.sm_state.max_resume_seconds = max_resume_seconds;
             self.sm_state.enabled = true;
             events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
                 StreamManagementEvent::Enabled { previd },

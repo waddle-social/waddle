@@ -708,6 +708,7 @@ mod tests {
             resource: "web".to_string(),
             resume_state: Some(
                 waddle_xmpp_client::SmResumeState::new("previous-stream", 4, 9)
+                    .map(|state| state.with_max_resume_seconds(Some(300)))
                     .expect("resume state"),
             ),
         };
@@ -721,6 +722,7 @@ mod tests {
         assert_eq!(snapshot.previd(), "previous-stream");
         assert_eq!(snapshot.inbound_h(), 4);
         assert_eq!(snapshot.outbound_h(), 9);
+        assert_eq!(snapshot.max_resume_seconds(), Some(300));
     }
 
     #[test]
@@ -748,6 +750,7 @@ mod tests {
                 Element::builder("enabled", waddle_xmpp_client::stream_management::NS_SM)
                     .attr(minidom::rxml::xml_ncname!("id").to_owned(), "live-stream")
                     .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "true")
+                    .attr(minidom::rxml::xml_ncname!("max").to_owned(), "300")
                     .build(),
             )))
             .expect("enabled");
@@ -764,6 +767,15 @@ mod tests {
             .as_ref()
             .expect("snapshot")
             .has_unhandled_outbound_stanzas());
+        assert_eq!(
+            inner
+                .borrow()
+                .resume_state
+                .as_ref()
+                .expect("snapshot")
+                .max_resume_seconds(),
+            Some(300),
+        );
 
         let ack = Element::builder("a", waddle_xmpp_client::stream_management::NS_SM)
             .attr(minidom::rxml::xml_ncname!("h").to_owned(), "1")

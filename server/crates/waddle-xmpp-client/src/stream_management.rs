@@ -22,6 +22,7 @@ pub struct SmResumeState {
     previd: String,
     inbound_h: u32,
     outbound_h: u32,
+    max_resume_seconds: Option<u32>,
     outbound_queue: VecDeque<QueuedOutboundStanza>,
 }
 
@@ -36,8 +37,14 @@ impl SmResumeState {
             previd,
             inbound_h,
             outbound_h,
+            max_resume_seconds: None,
             outbound_queue: VecDeque::new(),
         })
+    }
+
+    pub fn with_max_resume_seconds(mut self, max_resume_seconds: Option<u32>) -> Self {
+        self.max_resume_seconds = max_resume_seconds;
+        self
     }
 
     fn from_outbound_queue(
@@ -80,6 +87,10 @@ impl SmResumeState {
         self.outbound_h
     }
 
+    pub fn max_resume_seconds(&self) -> Option<u32> {
+        self.max_resume_seconds
+    }
+
     pub fn has_unhandled_outbound_stanzas(&self) -> bool {
         !self.outbound_queue.is_empty()
     }
@@ -113,6 +124,8 @@ pub struct SmState {
     pub server_h: u32,
     /// Resumption token (`previd`) set after `<enabled/>` or `<resumed/>`.
     pub previd: Option<String>,
+    /// Advertised server resumption window in seconds, when the server supplied one.
+    pub max_resume_seconds: Option<u32>,
     /// Whether the outbound stanza counter has started for this session.
     ///
     /// XEP-0198 starts the sender's own counter immediately after sending
@@ -138,6 +151,7 @@ impl SmState {
             inbound_count: resume_state.inbound_h(),
             server_h: resume_state.outbound_h().wrapping_sub(queue_len),
             previd: Some(resume_state.previd().to_string()),
+            max_resume_seconds: resume_state.max_resume_seconds(),
             outbound_queue: resume_state.outbound_queue.clone(),
             ..Self::default()
         }
@@ -151,6 +165,7 @@ impl SmState {
                 self.outbound_count,
                 self.outbound_queue.clone(),
             )
+            .map(|state| state.with_max_resume_seconds(self.max_resume_seconds))
             .ok()
         })
     }
@@ -178,6 +193,7 @@ impl SmState {
     pub fn start_outbound(&mut self) {
         self.outbound_count = 0;
         self.server_h = 0;
+        self.max_resume_seconds = None;
         self.outbound_enabled = true;
         self.outbound_queue.clear();
         self.replay_in_flight.clear();
@@ -305,6 +321,15 @@ impl SmState {
         }
     }
 
+    /// Extract the advertised resumption window from a resumable `<enabled/>`.
+    pub fn parse_enabled_max(element: &Element) -> Option<u32> {
+        if Self::parse_enabled(element).is_some() {
+            element.attr("max")?.parse().ok()
+        } else {
+            None
+        }
+    }
+
     /// Extract the `h` value from an `<a h='...'/>` ack element.
     pub fn parse_ack_h(element: &Element) -> Option<u32> {
         if element.name() == "a" && element.ns() == NS_SM {
@@ -406,16 +431,20 @@ mod tests {
         let el = Element::builder("enabled", NS_SM)
             .attr(minidom::rxml::xml_ncname!("id").to_owned(), "abc123")
             .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "true")
+            .attr(minidom::rxml::xml_ncname!("max").to_owned(), "300")
             .build();
         assert_eq!(SmState::parse_enabled(&el), Some("abc123".to_string()));
+        assert_eq!(SmState::parse_enabled_max(&el), Some(300));
     }
 
     #[test]
     fn parse_enabled_requires_resumable_response() {
         let el = Element::builder("enabled", NS_SM)
             .attr(minidom::rxml::xml_ncname!("id").to_owned(), "abc123")
+            .attr(minidom::rxml::xml_ncname!("max").to_owned(), "300")
             .build();
         assert_eq!(SmState::parse_enabled(&el), None);
+        assert_eq!(SmState::parse_enabled_max(&el), None);
 
         let el = Element::builder("enabled", NS_SM)
             .attr(minidom::rxml::xml_ncname!("id").to_owned(), "abc123")
@@ -618,6 +647,19 @@ mod tests {
         state.process_ack(1);
         let resume_state = state.resume_state().expect("resume state");
         assert!(!resume_state.has_unhandled_outbound_stanzas());
+    }
+
+    #[test]
+    fn resume_state_carries_advertised_max_resume_window() {
+        let mut state = SmState::new();
+        state.previd = Some("previous-stream".to_string());
+        state.max_resume_seconds = Some(300);
+
+        let resume_state = state.resume_state().expect("resume state");
+        assert_eq!(resume_state.max_resume_seconds(), Some(300));
+
+        let restored = SmState::from_resume_state(&resume_state);
+        assert_eq!(restored.max_resume_seconds, Some(300));
     }
 
     #[test]

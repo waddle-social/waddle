@@ -272,6 +272,24 @@ impl InMemorySmSessionRegistry {
             return Ok(None);
         };
         if let Some(client_h) = client_h {
+            if !session.is_expired() && client_h > session.outbound_count {
+                let restored = {
+                    let mut claimed = self
+                        .claimed_sessions
+                        .write()
+                        .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+                    claimed.remove(stream_id)
+                };
+                if let Some(restored) = restored {
+                    let mut sessions = self
+                        .sessions
+                        .write()
+                        .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+                    sessions.insert(stream_id.to_string(), restored.clone());
+                    return Ok(Some(SmClaimCompletion::HandledCountTooHigh(restored)));
+                }
+                return Ok(None);
+            }
             if !session.is_expired() && !session.can_resume_from(client_h) {
                 let restored = {
                     let mut claimed = self

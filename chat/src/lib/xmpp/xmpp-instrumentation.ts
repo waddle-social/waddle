@@ -60,11 +60,19 @@ export function installInstrumentation(client: BrowserXmppClient): void {
     const kind = ERROR_KIND_MAP[event.kind];
     const condition = telemetryCondition(event.kind, event.condition);
     const detail = telemetryErrorDetail(event, condition);
+    const streamDetail = event.kind === "stream"
+      ? telemetryStreamSourceDetail(event.detail, detail)
+      : undefined;
+    const smCounts = event.kind === "stream"
+      ? telemetryStreamManagementCounts(event)
+      : undefined;
     const cause = new Error(detail);
     reportError(kind, cause, {
       recoverable: event.recoverable,
       detail,
       ...(condition ? { condition } : {}),
+      ...(streamDetail ? { streamDetail } : {}),
+      ...(smCounts ?? {}),
     });
   });
   // Background-tab RESULT_CODE_HUNG investigation (observe-only). These
@@ -95,8 +103,48 @@ function telemetryErrorDetail(event: XmppErrorEvent, condition: string | undefin
       ) {
         return "stream-handled-count-too-high";
       }
-      return condition ? `stream-${condition}` : "stream-error";
+      return condition ? `stream-${condition}` : telemetryStreamFallbackDetail(event.detail);
   }
+}
+
+function telemetryStreamFallbackDetail(detail: string): string {
+  const normalized = detail.trim().toLowerCase();
+  if (!normalized || normalized === "stream error") return "stream-error";
+  if (normalized === "handled-count-too-high") return "stream-handled-count-too-high";
+  if (
+    normalized.includes("websocket transport error") ||
+    normalized.includes("websocket transport failed") ||
+    normalized.includes("websocket transport is already closed") ||
+    normalized.includes("transport closed")
+  ) {
+    return "stream-transport-error";
+  }
+  if (
+    normalized.includes("malformed xmpp framing") ||
+    normalized.includes("invalid transport frame")
+  ) {
+    return "stream-invalid-transport-frame";
+  }
+  if (normalized.includes("empty xmpp frame")) return "stream-empty-transport-frame";
+  if (normalized.includes("unsupported message type")) return "stream-unsupported-websocket-message";
+  if (normalized.includes("disconnected")) return "stream-disconnected";
+  return "stream-error";
+}
+
+function telemetryStreamSourceDetail(detail: string, telemetryDetail: string): string | undefined {
+  const trimmed = detail.trim();
+  if (!trimmed || trimmed.toLowerCase() === "stream error" || trimmed === telemetryDetail) {
+    return undefined;
+  }
+  return trimmed;
+}
+
+function telemetryStreamManagementCounts(event: XmppErrorEvent): Record<string, string> | undefined {
+  if (event.streamManagementError?.kind !== "handled-count-too-high") return undefined;
+  return {
+    smH: String(event.streamManagementError.h),
+    smSendCount: String(event.streamManagementError.sendCount),
+  };
 }
 
 function telemetryCondition(kind: XmppErrorKind, condition: string | undefined): string | undefined {
