@@ -251,28 +251,21 @@ impl WaddleClient {
                 return WaddleSendMessageOutcome::InvalidOptions;
             }
         };
-        let guard = self.handle.lock().await;
-        match guard.as_ref() {
-            None => {
-                drop(guard);
-                self.listener.on_error("Not connected".to_string());
-                WaddleSendMessageOutcome::NotConnected
-            }
-            Some(h) => {
-                let result = h
-                    .send_groupchat_message(room_jid.as_str(), &body, &opts)
-                    .await;
-                drop(guard);
-                match result {
-                    Ok(stanza_id) => WaddleSendMessageOutcome::Sent {
-                        stanza_id: stanza_id.to_string(),
-                    },
-                    Err(e) => {
-                        self.listener
-                            .on_error(format!("send_groupchat_message failed: {e}"));
-                        send_failure_outcome(&e)
-                    }
-                }
+        let Some(handle) = self.clone_handle().await else {
+            return WaddleSendMessageOutcome::NotConnected;
+        };
+
+        match handle
+            .send_groupchat_message(room_jid.as_str(), &body, &opts)
+            .await
+        {
+            Ok(stanza_id) => WaddleSendMessageOutcome::Sent {
+                stanza_id: stanza_id.to_string(),
+            },
+            Err(e) => {
+                self.listener
+                    .on_error(format!("send_groupchat_message failed: {e}"));
+                send_failure_outcome(&e)
             }
         }
     }
@@ -299,26 +292,21 @@ impl WaddleClient {
                 return WaddleSendMessageOutcome::InvalidOptions;
             }
         };
-        let guard = self.handle.lock().await;
-        match guard.as_ref() {
-            None => {
-                drop(guard);
-                self.listener.on_error("Not connected".to_string());
-                WaddleSendMessageOutcome::NotConnected
-            }
-            Some(h) => {
-                let result = h.send_chat_message(peer_jid.as_str(), &body, &opts).await;
-                drop(guard);
-                match result {
-                    Ok(stanza_id) => WaddleSendMessageOutcome::Sent {
-                        stanza_id: stanza_id.to_string(),
-                    },
-                    Err(e) => {
-                        self.listener
-                            .on_error(format!("send_chat_message failed: {e}"));
-                        send_failure_outcome(&e)
-                    }
-                }
+        let Some(handle) = self.clone_handle().await else {
+            return WaddleSendMessageOutcome::NotConnected;
+        };
+
+        match handle
+            .send_chat_message(peer_jid.as_str(), &body, &opts)
+            .await
+        {
+            Ok(stanza_id) => WaddleSendMessageOutcome::Sent {
+                stanza_id: stanza_id.to_string(),
+            },
+            Err(e) => {
+                self.listener
+                    .on_error(format!("send_chat_message failed: {e}"));
+                send_failure_outcome(&e)
             }
         }
     }
@@ -966,13 +954,16 @@ fn iq_set(to: &Jid, payload: Element) -> Element {
 fn send_failure_outcome(error: &ClientError) -> WaddleSendMessageOutcome {
     match error {
         ClientError::Disconnected => WaddleSendMessageOutcome::NotConnected,
-        ClientError::EmptyStanzaId => WaddleSendMessageOutcome::InvalidOptions,
         ClientError::StanzaError(_) => WaddleSendMessageOutcome::StanzaError,
-        ClientError::TransportClosed
+        ClientError::WebSocketConnectTimeout { .. }
+        | ClientError::TransportClosed
         | ClientError::EmptyTransportFrame
         | ClientError::TransportFrameTooLarge { .. }
         | ClientError::InvalidTransportFrame
         | ClientError::UnsupportedWebSocketMessage => WaddleSendMessageOutcome::TransportError,
+        ClientError::InvalidWebSocketRequest(_) | ClientError::WebSocket(_) => {
+            WaddleSendMessageOutcome::TransportError
+        }
         _ => WaddleSendMessageOutcome::Error,
     }
 }
@@ -1072,6 +1063,29 @@ mod tests {
         let outcome = client
             .send_groupchat_message(
                 "room@muc.waddle.test".to_string(),
+                "hello".to_string(),
+                Some(invalid_send_options()),
+            )
+            .await;
+
+        assert_eq!(outcome, WaddleSendMessageOutcome::InvalidOptions);
+        assert!(
+            listener
+                .errors()
+                .first()
+                .is_some_and(|error| error.contains("unknown cipher")),
+            "expected invalid cipher diagnostic"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_chat_message_reports_invalid_options_as_typed_outcome() {
+        let listener = Arc::new(RecordingListener::default());
+        let client = test_client((*listener).clone());
+
+        let outcome = client
+            .send_chat_message(
+                "bob@waddle.test".to_string(),
                 "hello".to_string(),
                 Some(invalid_send_options()),
             )
