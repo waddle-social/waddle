@@ -4,7 +4,8 @@ import { Camera, ChevronLeft, ChevronRight, Menu, Plus, RefreshCw, X } from "luc
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import StoryComposer from "@/components/community/StoryComposer.vue";
 import { connectionStore } from "@/lib/connection-store";
-import type { Story, StoryPostInput } from "@/lib/xmpp-client";
+import type { Story, StoryPostInput, StoryReactionSummary } from "@/lib/xmpp-client";
+import { QUICK_REACTION_EMOJIS } from "@/lib/reaction-mode";
 
 interface StoriesPaneProps {
   stories: readonly Story[];
@@ -14,16 +15,19 @@ interface StoriesPaneProps {
   canPost: boolean;
   selfJid: string | null;
   isStoryRead?: (id: string) => boolean;
+  reactionSummary?: (id: string) => StoryReactionSummary;
 }
 
 const props = withDefaults(defineProps<StoriesPaneProps>(), {
   isStoryRead: () => () => false,
+  reactionSummary: () => () => ({ counts: {}, reactors: {}, mine: [] }),
 });
 
 const emit = defineEmits<{
   refresh: [];
   post: [input: StoryPostInput];
   storySelected: [id: string];
+  react: [id: string, emoji: string];
   openNav: [];
 }>();
 
@@ -49,6 +53,14 @@ function timeRemaining(story: Story, nowMs: number = Date.now()): string {
 const activeStory = computed<Story | null>(() => {
   if (activeIndex.value === null) return null;
   return props.stories[activeIndex.value] ?? null;
+});
+const activeReactionSummary = computed(() => activeStory.value ? props.reactionSummary(activeStory.value.id) : null);
+const activeReactionEntries = computed(() => {
+  const summary = activeReactionSummary.value;
+  if (!summary) return [];
+  return Object.entries(summary.counts)
+    .map(([emoji, count]) => ({ emoji, count, reactors: summary.reactors[emoji] ?? [] }))
+    .sort((a, b) => b.count - a.count || a.emoji.localeCompare(b.emoji));
 });
 
 watch(
@@ -112,6 +124,12 @@ async function handleComposerSubmit(payload: { body?: string; file: Blob; mediaK
 function handleComposerCancel() {
   composerOpen.value = false;
   composerError.value = null;
+}
+
+function toggleReaction(emoji: string) {
+  const story = activeStory.value;
+  if (!story) return;
+  emit("react", story.id, emoji);
 }
 </script>
 
@@ -240,6 +258,33 @@ function handleComposerCancel() {
         <p v-if="activeStory.body" class="whitespace-pre-wrap break-words text-sm text-foreground">
           {{ activeStory.body }}
         </p>
+
+        <div class="grid gap-2 border-t border-border pt-3">
+          <div class="flex flex-wrap items-center gap-1.5">
+            <button
+              v-for="emoji in QUICK_REACTION_EMOJIS"
+              :key="emoji"
+              type="button"
+              class="inline-flex h-8 min-w-8 items-center justify-center rounded-md border px-2 text-sm hover:bg-muted/60"
+              :class="activeReactionSummary?.mine.includes(emoji) ? 'border-primary bg-primary/10 text-primary' : 'border-input text-foreground'"
+              :aria-label="`React with ${emoji}`"
+              @click="toggleReaction(emoji)"
+            >
+              {{ emoji }}
+            </button>
+          </div>
+          <div v-if="activeReactionEntries.length > 0" class="flex flex-wrap gap-1.5">
+            <span
+              v-for="entry in activeReactionEntries"
+              :key="entry.emoji"
+              class="inline-flex items-center gap-1 rounded-md border border-border bg-muted/40 px-2 py-1 text-xs text-foreground"
+              :title="entry.reactors.join(', ')"
+            >
+              <span>{{ entry.emoji }}</span>
+              <span class="text-muted-foreground">{{ entry.count }}</span>
+            </span>
+          </div>
+        </div>
 
         <div class="flex items-center justify-between gap-2 border-t border-border pt-3">
           <button

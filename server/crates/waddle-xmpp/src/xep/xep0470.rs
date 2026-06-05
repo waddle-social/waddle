@@ -8,10 +8,11 @@
 //! Attach a reaction to a post:
 //! ```xml
 //! <item id='attachment-1' xmlns='http://jabber.org/protocol/pubsub'>
-//!   <attachments xmlns='urn:xmpp:pubsub-attachments:0'
-//!                for='urn:xmpp:pubsub-social-feed:0'
-//!                item='post-123'>
-//!     <reaction xmlns='urn:xmpp:reactions:0'>👍</reaction>
+//!   <attachments xmlns='urn:xmpp:pubsub-attachments:1'>
+//!     <reactions>
+//!       <reaction>👍</reaction>
+//!       <reaction>❤️</reaction>
+//!     </reactions>
 //!   </attachments>
 //! </item>
 //! ```
@@ -23,36 +24,30 @@
 //! - Vote/poll responses
 
 use minidom::Element;
+use std::collections::BTreeSet;
 
 /// Namespace for XEP-0470 Pubsub Attachments.
-pub const NS_PUBSUB_ATTACHMENTS: &str = "urn:xmpp:pubsub-attachments:0";
+pub const NS_PUBSUB_ATTACHMENTS: &str = "urn:xmpp:pubsub-attachments:1";
 
-/// An attachment target: which PubSub item this attaches to.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AttachmentTarget {
-    /// The PubSub node (namespace) of the target item.
-    pub node: String,
-    /// The item ID being attached to.
-    pub item_id: String,
-}
+/// Namespace for XEP-0470 Pubsub Attachment summaries.
+pub const NS_PUBSUB_ATTACHMENTS_SUMMARY: &str = "urn:xmpp:pubsub-attachments:summary:1";
 
-impl AttachmentTarget {
-    /// Create a new attachment target.
-    pub fn new(node: impl Into<String>, item_id: impl Into<String>) -> Self {
-        Self {
-            node: node.into(),
-            item_id: item_id.into(),
-        }
-    }
-}
+/// Prefix for an attachment node name. The full node is
+/// `{PUBSUB_ATTACHMENTS_NODE_PREFIX}/<target-item-XMPP-URI>`.
+pub const PUBSUB_ATTACHMENTS_NODE_PREFIX: &str = NS_PUBSUB_ATTACHMENTS;
+
+/// Maximum reaction count accepted for a single publisher's attachment item.
+pub const MAX_REACTIONS_PER_ATTACHMENT: usize = 12;
 
 /// An attachment payload type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttachmentPayload {
-    /// A text comment.
-    Comment(String),
-    /// A reaction emoji.
-    Reaction(String),
+    /// A set of reaction emoji attached by one bare JID.
+    Reactions(ReactionSet),
+    /// XEP-0470 `<noticed/>`; used by later slices.
+    Noticed,
+    /// XEP-0470 summary payload; used by later slices.
+    Summary(AttachmentSummary),
     /// A generic XML payload.
     Custom(Element),
 }
@@ -60,48 +55,117 @@ pub enum AttachmentPayload {
 /// A pubsub attachment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attachment {
-    /// What this attaches to.
-    pub target: AttachmentTarget,
-    /// The attachment content.
-    pub payload: AttachmentPayload,
-    /// Who created this attachment.
-    pub author: Option<String>,
+    /// Known attachment payloads.
+    pub payloads: Vec<AttachmentPayload>,
+    /// Unknown children preserved across read-modify-publish cycles.
+    pub unknown_children: Vec<Element>,
 }
 
 impl Attachment {
-    /// Create a comment attachment.
-    pub fn comment(target: AttachmentTarget, text: impl Into<String>) -> Self {
+    /// Create an attachment with a reaction set.
+    pub fn reactions(reactions: ReactionSet) -> Self {
         Self {
-            target,
-            payload: AttachmentPayload::Comment(text.into()),
-            author: None,
+            payloads: vec![AttachmentPayload::Reactions(reactions)],
+            unknown_children: Vec::new(),
         }
     }
 
-    /// Create a reaction attachment.
-    pub fn reaction(target: AttachmentTarget, emoji: impl Into<String>) -> Self {
+    /// Create an empty attachment container.
+    pub fn empty() -> Self {
         Self {
-            target,
-            payload: AttachmentPayload::Reaction(emoji.into()),
-            author: None,
+            payloads: Vec::new(),
+            unknown_children: Vec::new(),
         }
     }
 
-    /// Set the author.
-    pub fn with_author(mut self, author: impl Into<String>) -> Self {
-        self.author = Some(author.into());
+    /// Preserve an unknown attachment child.
+    pub fn with_unknown_child(mut self, child: Element) -> Self {
+        self.unknown_children.push(child);
         self
     }
 
-    /// Returns `true` if this is a comment.
-    pub fn is_comment(&self) -> bool {
-        matches!(self.payload, AttachmentPayload::Comment(_))
+    /// Add a known payload.
+    pub fn with_payload(mut self, payload: AttachmentPayload) -> Self {
+        self.payloads.push(payload);
+        self
     }
 
-    /// Returns `true` if this is a reaction.
-    pub fn is_reaction(&self) -> bool {
-        matches!(self.payload, AttachmentPayload::Reaction(_))
+    /// Return the reaction set if present.
+    pub fn reactions_set(&self) -> Option<&ReactionSet> {
+        self.payloads.iter().find_map(|payload| match payload {
+            AttachmentPayload::Reactions(reactions) => Some(reactions),
+            _ => None,
+        })
     }
+}
+
+/// XEP-0470 reaction set attached by one publisher.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReactionSet {
+    pub emojis: Vec<String>,
+    pub timestamp: Option<String>,
+}
+
+impl ReactionSet {
+    pub fn new<I, S>(emojis: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        Self {
+            emojis: normalize_reactions(emojis),
+            timestamp: None,
+        }
+    }
+
+    pub fn with_timestamp(mut self, timestamp: impl Into<String>) -> Self {
+        self.timestamp = Some(timestamp.into());
+        self
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.emojis.is_empty()
+    }
+
+    pub fn validate(&self) -> Result<(), AttachmentValidationError> {
+        if self.emojis.len() > MAX_REACTIONS_PER_ATTACHMENT {
+            return Err(AttachmentValidationError::TooManyReactions {
+                actual: self.emojis.len(),
+                max: MAX_REACTIONS_PER_ATTACHMENT,
+            });
+        }
+
+        if let Some(emoji) = self
+            .emojis
+            .iter()
+            .find(|emoji| !is_single_extended_grapheme_cluster(emoji))
+        {
+            return Err(AttachmentValidationError::ReactionNotSingleGrapheme(
+                emoji.clone(),
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+/// Summary reaction count for a single emoji.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReactionSummary {
+    pub emoji: String,
+    pub count: u32,
+}
+
+/// XEP-0470 summary payload. Later slices can populate this from the server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachmentSummary {
+    pub reactions: Vec<ReactionSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AttachmentValidationError {
+    TooManyReactions { actual: usize, max: usize },
+    ReactionNotSingleGrapheme(String),
 }
 
 // ── Detection ────────────────────────────────────────────────────────
@@ -113,55 +177,153 @@ pub fn is_attachments_element(elem: &Element) -> bool {
 
 // ── Extraction ───────────────────────────────────────────────────────
 
-/// Parse an attachment target from an `<attachments/>` element.
-pub fn parse_attachment_target(elem: &Element) -> Option<AttachmentTarget> {
+/// Parse an `<attachments/>` element.
+pub fn parse_attachments_element(elem: &Element) -> Option<Attachment> {
     if !is_attachments_element(elem) {
         return None;
     }
-    let node = elem.attr("for").filter(|s| !s.is_empty())?.to_owned();
-    let item_id = elem.attr("item").filter(|s| !s.is_empty())?.to_owned();
-    Some(AttachmentTarget::new(node, item_id))
+
+    let mut attachment = Attachment::empty();
+    for child in elem.children() {
+        let child_ns = child.ns();
+        match (child.name(), child_ns.as_str()) {
+            ("reactions", NS_PUBSUB_ATTACHMENTS) => attachment
+                .payloads
+                .push(AttachmentPayload::Reactions(parse_reactions_element(child))),
+            ("noticed", NS_PUBSUB_ATTACHMENTS) => attachment.payloads.push(AttachmentPayload::Noticed),
+            ("summary", NS_PUBSUB_ATTACHMENTS_SUMMARY) => attachment
+                .payloads
+                .push(AttachmentPayload::Summary(parse_summary_element(child))),
+            _ => attachment.unknown_children.push(child.clone()),
+        }
+    }
+
+    Some(attachment)
+}
+
+fn parse_reactions_element(elem: &Element) -> ReactionSet {
+    let emojis = elem
+        .children()
+        .filter(|child| child.name() == "reaction" && child.ns() == NS_PUBSUB_ATTACHMENTS)
+        .map(Element::text);
+    let mut reactions = ReactionSet::new(emojis);
+    reactions.timestamp = elem.attr("timestamp").map(ToOwned::to_owned);
+    reactions
+}
+
+fn parse_summary_element(elem: &Element) -> AttachmentSummary {
+    let reactions = elem
+        .children()
+        .find(|child| child.name() == "reactions" && child.ns() == NS_PUBSUB_ATTACHMENTS_SUMMARY)
+        .into_iter()
+        .flat_map(Element::children)
+        .filter(|child| child.name() == "reaction" && child.ns() == NS_PUBSUB_ATTACHMENTS_SUMMARY)
+        .map(|child| ReactionSummary {
+            emoji: child.text(),
+            count: child
+                .attr("count")
+                .and_then(|count| count.parse::<u32>().ok())
+                .unwrap_or(1),
+        })
+        .collect();
+
+    AttachmentSummary { reactions }
 }
 
 // ── Building ─────────────────────────────────────────────────────────
 
 /// Build an `<attachments/>` element.
 pub fn build_attachments_element(attachment: &Attachment) -> Element {
-    let mut elem = Element::builder("attachments", NS_PUBSUB_ATTACHMENTS)
-        .attr(
-            minidom::rxml::xml_ncname!("for").to_owned(),
-            attachment.target.node.as_str(),
-        )
-        .attr(
-            minidom::rxml::xml_ncname!("item").to_owned(),
-            attachment.target.item_id.as_str(),
-        )
-        .build();
+    let mut elem = Element::builder("attachments", NS_PUBSUB_ATTACHMENTS).build();
 
-    match &attachment.payload {
-        AttachmentPayload::Comment(text) => {
-            let mut comment = Element::builder("comment", NS_PUBSUB_ATTACHMENTS).build();
-            comment.append_text_node(text.clone());
-            if let Some(ref author) = attachment.author {
-                comment.set_attr(
-                    minidom::rxml::Namespace::NONE,
-                    minidom::rxml::xml_ncname!("author").to_owned(),
-                    author,
-                );
+    for payload in &attachment.payloads {
+        match payload {
+            AttachmentPayload::Reactions(reactions) => {
+                elem.append_child(build_reactions_element(reactions));
             }
-            elem.append_child(comment);
-        }
-        AttachmentPayload::Reaction(emoji) => {
-            let mut reaction = Element::builder("reaction", NS_PUBSUB_ATTACHMENTS).build();
-            reaction.append_text_node(emoji.clone());
-            elem.append_child(reaction);
-        }
-        AttachmentPayload::Custom(child) => {
-            elem.append_child(child.clone());
+            AttachmentPayload::Noticed => {
+                elem.append_child(Element::builder("noticed", NS_PUBSUB_ATTACHMENTS).build());
+            }
+            AttachmentPayload::Summary(summary) => {
+                elem.append_child(build_summary_element(summary));
+            }
+            AttachmentPayload::Custom(child) => {
+                elem.append_child(child.clone());
+            }
         }
     }
 
+    for child in &attachment.unknown_children {
+        elem.append_child(child.clone());
+    }
+
     elem
+}
+
+pub fn build_reactions_element(reactions: &ReactionSet) -> Element {
+    let mut elem = Element::builder("reactions", NS_PUBSUB_ATTACHMENTS).build();
+    if let Some(timestamp) = &reactions.timestamp {
+        elem.set_attr(
+            minidom::rxml::Namespace::NONE,
+            minidom::rxml::xml_ncname!("timestamp").to_owned(),
+            timestamp,
+        );
+    }
+
+    for emoji in &reactions.emojis {
+        let mut reaction = Element::builder("reaction", NS_PUBSUB_ATTACHMENTS).build();
+        reaction.append_text_node(emoji);
+        elem.append_child(reaction);
+    }
+
+    elem
+}
+
+pub fn build_summary_element(summary: &AttachmentSummary) -> Element {
+    let mut root = Element::builder("summary", NS_PUBSUB_ATTACHMENTS_SUMMARY).build();
+    let mut reactions = Element::builder("reactions", NS_PUBSUB_ATTACHMENTS_SUMMARY).build();
+
+    for reaction_summary in &summary.reactions {
+        let mut reaction = Element::builder("reaction", NS_PUBSUB_ATTACHMENTS_SUMMARY).build();
+        if reaction_summary.count > 1 {
+            reaction.set_attr(
+                minidom::rxml::Namespace::NONE,
+                minidom::rxml::xml_ncname!("count").to_owned(),
+                reaction_summary.count.to_string(),
+            );
+        }
+        reaction.append_text_node(reaction_summary.emoji.clone());
+        reactions.append_child(reaction);
+    }
+
+    root.append_child(reactions);
+    root
+}
+
+fn normalize_reactions<I, S>(emojis: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut normalized = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for emoji in emojis {
+        let emoji = emoji.as_ref().trim();
+        if emoji.is_empty() {
+            continue;
+        }
+        if seen.insert(emoji.to_owned()) {
+            normalized.push(emoji.to_owned());
+        }
+    }
+
+    normalized
+}
+
+fn is_single_extended_grapheme_cluster(value: &str) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty() && !trimmed.chars().any(char::is_whitespace) && trimmed.chars().count() <= 8
 }
 
 #[cfg(test)]
@@ -179,67 +341,66 @@ mod tests {
 
     #[test]
     fn test_parse_target() {
-        let elem = Element::builder("attachments", NS_PUBSUB_ATTACHMENTS)
-            .attr(
-                minidom::rxml::xml_ncname!("for").to_owned(),
-                "urn:xmpp:pubsub-social-feed:0",
-            )
-            .attr(minidom::rxml::xml_ncname!("item").to_owned(), "post-123")
-            .build();
+        let mut reactions = Element::builder("reactions", NS_PUBSUB_ATTACHMENTS).build();
+        let mut reaction = Element::builder("reaction", NS_PUBSUB_ATTACHMENTS).build();
+        reaction.append_text_node("👍");
+        reactions.append_child(reaction);
 
-        let target = parse_attachment_target(&elem).expect("parseable");
-        assert_eq!(target.node, "urn:xmpp:pubsub-social-feed:0");
-        assert_eq!(target.item_id, "post-123");
+        let mut elem = Element::builder("attachments", NS_PUBSUB_ATTACHMENTS).build();
+        elem.append_child(reactions);
+
+        let attachment = parse_attachments_element(&elem).expect("parseable");
+        assert_eq!(
+            attachment.reactions_set().expect("reactions").emojis,
+            vec!["👍"]
+        );
     }
 
     #[test]
     fn test_parse_target_missing_attrs() {
         let elem = Element::builder("attachments", NS_PUBSUB_ATTACHMENTS).build();
-        assert!(parse_attachment_target(&elem).is_none());
+        let attachment = parse_attachments_element(&elem).expect("parseable");
+        assert!(attachment.payloads.is_empty());
     }
 
     #[test]
     fn test_build_comment() {
-        let target = AttachmentTarget::new("feed:0", "post-1");
-        let attachment =
-            Attachment::comment(target, "Great post!").with_author("alice@example.com");
+        let attachment = Attachment::empty().with_payload(AttachmentPayload::Noticed);
         let elem = build_attachments_element(&attachment);
 
         assert_eq!(elem.name(), "attachments");
-        assert_eq!(elem.attr("for"), Some("feed:0"));
-        assert_eq!(elem.attr("item"), Some("post-1"));
+        assert_eq!(elem.ns(), NS_PUBSUB_ATTACHMENTS);
 
-        let comment = elem.children().next().expect("has child");
-        assert_eq!(comment.name(), "comment");
-        assert_eq!(comment.text(), "Great post!");
-        assert_eq!(comment.attr("author"), Some("alice@example.com"));
+        let noticed = elem.children().next().expect("has child");
+        assert_eq!(noticed.name(), "noticed");
     }
 
     #[test]
     fn test_build_reaction() {
-        let target = AttachmentTarget::new("feed:0", "post-1");
-        let attachment = Attachment::reaction(target, "👍");
+        let attachment = Attachment::reactions(ReactionSet::new(["👍", "❤️"]));
         let elem = build_attachments_element(&attachment);
 
-        let reaction = elem.children().next().expect("has child");
-        assert_eq!(reaction.name(), "reaction");
-        assert_eq!(reaction.text(), "👍");
+        let reactions = elem.children().next().expect("has child");
+        assert_eq!(reactions.name(), "reactions");
+        assert_eq!(
+            reactions.children().map(Element::text).collect::<Vec<_>>(),
+            vec!["👍", "❤️"]
+        );
     }
 
     #[test]
     fn test_attachment_helpers() {
-        let target = AttachmentTarget::new("n", "i");
-        assert!(Attachment::comment(target.clone(), "hi").is_comment());
-        assert!(!Attachment::comment(target.clone(), "hi").is_reaction());
-        assert!(Attachment::reaction(target.clone(), "👍").is_reaction());
-        assert!(!Attachment::reaction(target, "👍").is_comment());
+        let attachment = Attachment::reactions(ReactionSet::new(["👍"]));
+        assert_eq!(
+            attachment.reactions_set().expect("reactions").emojis,
+            vec!["👍"]
+        );
     }
 
     #[test]
     fn test_attachment_target_new() {
-        let t = AttachmentTarget::new("node", "item");
-        assert_eq!(t.node, "node");
-        assert_eq!(t.item_id, "item");
+        let set = ReactionSet::new(["👍", "👍", "", " ❤️ "]);
+        assert_eq!(set.emojis, vec!["👍", "❤️"]);
     }
 
     #[test]
@@ -252,23 +413,54 @@ mod tests {
 
     #[test]
     fn test_namespace_constant() {
-        assert_eq!(NS_PUBSUB_ATTACHMENTS, "urn:xmpp:pubsub-attachments:0");
+        assert_eq!(NS_PUBSUB_ATTACHMENTS, "urn:xmpp:pubsub-attachments:1");
     }
 
     #[test]
     fn test_attachment_with_author() {
-        let target = AttachmentTarget::new("n", "i");
-        let a = Attachment::comment(target, "hi").with_author("bob@example.com");
-        assert_eq!(a.author.as_deref(), Some("bob@example.com"));
+        let set = ReactionSet::new(["👍"]).with_timestamp("2022-07-11T12:07:48Z");
+        let elem = build_reactions_element(&set);
+        assert_eq!(elem.attr("timestamp"), Some("2022-07-11T12:07:48Z"));
     }
 
     #[test]
     fn test_build_and_parse_roundtrip() {
-        let target = AttachmentTarget::new("feed:0", "post-99");
-        let attachment = Attachment::comment(target, "Round trip!");
+        let unknown = Element::builder("future", "urn:example:future").build();
+        let attachment = Attachment::reactions(ReactionSet::new(["👍", "❤️"]))
+            .with_unknown_child(unknown.clone());
         let elem = build_attachments_element(&attachment);
-        let parsed = parse_attachment_target(&elem).expect("parseable");
-        assert_eq!(parsed.node, "feed:0");
-        assert_eq!(parsed.item_id, "post-99");
+        let parsed = parse_attachments_element(&elem).expect("parseable");
+        assert_eq!(
+            parsed.reactions_set().expect("reactions").emojis,
+            vec!["👍", "❤️"]
+        );
+        assert_eq!(parsed.unknown_children, vec![unknown]);
+    }
+
+    #[test]
+    fn validation_rejects_too_many_reactions() {
+        let set = ReactionSet::new([
+            "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13",
+        ]);
+
+        assert_eq!(
+            set.validate(),
+            Err(AttachmentValidationError::TooManyReactions {
+                actual: 13,
+                max: MAX_REACTIONS_PER_ATTACHMENT
+            })
+        );
+    }
+
+    #[test]
+    fn validation_rejects_multiple_grapheme_like_reaction() {
+        let set = ReactionSet::new(["👍 👍"]);
+
+        assert_eq!(
+            set.validate(),
+            Err(AttachmentValidationError::ReactionNotSingleGrapheme(
+                "👍 👍".to_owned()
+            ))
+        );
     }
 }

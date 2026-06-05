@@ -12,10 +12,15 @@
  */
 import { computed, onScopeDispose, ref, type Ref } from "vue";
 import {
+  aggregateStoryReactions,
   isStoryActive,
+  normalizeStoryReactions,
+  STORY_REACTIONS_MAX,
   type BrowserXmppClient,
   type Story,
   type StoryPostInput,
+  type StoryReactionItem,
+  type StoryReactionSummary,
 } from "@/lib/xmpp-client";
 import {
   createStoryReadStore,
@@ -35,6 +40,7 @@ export function useStories(
   const isLoading = ref(false);
   const isPosting = ref(false);
   const error = ref<string | null>(null);
+  const reactionsByStory = ref<Record<string, StoryReactionItem[]>>({});
   const pageSize = options.pageSize ?? 50;
   let fetchRequestId = 0;
   const nowMs = ref(Date.now());
@@ -84,6 +90,7 @@ export function useStories(
       const fetched = await client.fetchStories(jid, pageSize);
       if (requestId !== fetchRequestId || client !== xmppClient.value) return false;
       stories.value = fetched;
+      await refreshReactionsFor(fetched, client, jid);
       if (!readStore.loaded()) {
         // Hydrate after the first stories fetch so the rail doesn't
         // pop unread→read on first paint.
@@ -126,9 +133,68 @@ export function useStories(
     }
   }
 
+  async function refreshReactionsFor(
+    fetched: readonly Story[],
+    client: BrowserXmppClient,
+    communityJid: string,
+  ): Promise<void> {
+    const entries = await Promise.all(
+      fetched.map(async (story) => {
+        try {
+          return [story.id, await client.fetchStoryReactions(communityJid, story.id)] as const;
+        } catch {
+          return [story.id, []] as const;
+        }
+      }),
+    );
+    reactionsByStory.value = Object.fromEntries(entries);
+  }
+
+  function reactionSummary(storyId: string): StoryReactionSummary {
+    return aggregateStoryReactions(
+      reactionsByStory.value[storyId] ?? [],
+      xmppClient.value?.bareJid ?? null,
+    );
+  }
+
+  async function toggleReaction(storyId: string, emoji: string): Promise<boolean> {
+    const client = xmppClient.value;
+    const jid = options.communityJid.value;
+    const self = client?.bareJid;
+    if (!client || !jid || !self || !storyId || !emoji.trim()) return false;
+    const previousItems = reactionsByStory.value[storyId] ?? [];
+    const existing = previousItems.find((item) => item.jid.toLowerCase() === self.toLowerCase());
+    const current = normalizeStoryReactions(existing?.emojis ?? []);
+    const next = current.includes(emoji)
+      ? current.filter((candidate) => candidate !== emoji)
+      : normalizeStoryReactions([...current, emoji]);
+    if (next.length > STORY_REACTIONS_MAX) return false;
+    const nextItems = next.length > 0
+      ? [
+          ...previousItems.filter((item) => item.jid.toLowerCase() !== self.toLowerCase()),
+          { jid: self, emojis: next, unknownChildrenXml: existing?.unknownChildrenXml ?? [] },
+        ]
+      : previousItems.filter((item) => item.jid.toLowerCase() !== self.toLowerCase());
+
+    reactionsByStory.value = { ...reactionsByStory.value, [storyId]: nextItems };
+    try {
+      if (next.length > 0) {
+        await client.publishStoryReactions(jid, storyId, next, existing?.unknownChildrenXml ?? []);
+      } else {
+        await client.retractStoryReactions(jid, storyId);
+      }
+      return true;
+    } catch (err) {
+      reactionsByStory.value = { ...reactionsByStory.value, [storyId]: previousItems };
+      error.value = err instanceof Error ? err.message : String(err);
+      return false;
+    }
+  }
+
   function clear() {
     fetchRequestId += 1;
     stories.value = [];
+    reactionsByStory.value = {};
     error.value = null;
     isLoading.value = false;
     isPosting.value = false;
@@ -147,5 +213,7 @@ export function useStories(
     nowMs,
     isStoryRead,
     markStoryRead,
+    reactionSummary,
+    toggleReaction,
   };
 }

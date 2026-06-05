@@ -87,9 +87,13 @@ import {
   type WasmFeedEntry,
 } from "./feed-types";
 import {
+  NS_PUBSUB_ATTACHMENTS,
+  normalizeStoryReactions,
+  storyAttachmentNode,
   storyFromWasm,
   type Story,
   type StoryPostInput,
+  type StoryReactionItem,
   type WasmStory,
 } from "./story-types";
 import {
@@ -154,6 +158,7 @@ import type {
   WasmVCard4,
 } from "./wasm-types";
 import type { VCard4Profile } from "./vcard4-types";
+import { escapeXml } from "./extension-commands/xml";
 
 export { dmMessageFromArchived, roomMessageFromArchived } from "./wasm-message-codecs";
 
@@ -239,6 +244,39 @@ function shouldSkipRawCatchupMessage(
   if (seen.size > 0 && rawMessageSeenIds(message).some((id) => seen.has(id))) return true;
   if (!since || !message.timestamp) return false;
   return compareTimestamps(message.timestamp, since) < 0;
+}
+
+function parseStoryReactionItems(xml: string): StoryReactionItem[] {
+  if (typeof DOMParser === "undefined") return [];
+  const doc = new DOMParser().parseFromString(xml, "text/xml");
+  const serializer = typeof XMLSerializer !== "undefined" ? new XMLSerializer() : null;
+  return Array.from(doc.getElementsByTagName("item"))
+    .map((item): StoryReactionItem | null => {
+      const jid = item.getAttribute("id")?.trim();
+      if (!jid) return null;
+      const attachments = Array.from(item.children).find(
+        (child) => child.localName === "attachments" && child.namespaceURI === NS_PUBSUB_ATTACHMENTS,
+      );
+      if (!attachments) return null;
+      const reactions = Array.from(attachments.children).find(
+        (child) => child.localName === "reactions" && child.namespaceURI === NS_PUBSUB_ATTACHMENTS,
+      );
+      const emojis = reactions
+        ? Array.from(reactions.children)
+            .filter((child) => child.localName === "reaction" && child.namespaceURI === NS_PUBSUB_ATTACHMENTS)
+            .map((child) => child.textContent?.trim() ?? "")
+        : [];
+      const unknownChildrenXml = Array.from(attachments.children)
+        .filter((child) => !(child.localName === "reactions" && child.namespaceURI === NS_PUBSUB_ATTACHMENTS))
+        .map((child) => serializer?.serializeToString(child) ?? "")
+        .filter(Boolean);
+      return {
+        jid,
+        emojis: normalizeStoryReactions(emojis),
+        unknownChildrenXml,
+      };
+    })
+    .filter((item): item is StoryReactionItem => item !== null);
 }
 
 const DM_CALL_ACTIVITY_PAGE_SIZE = 100;
@@ -2369,6 +2407,46 @@ export class BrowserXmppClient {
       throw new Error("stories_publish returned no story");
     }
     return storyFromWasm(result);
+  }
+
+  async fetchStoryReactions(communityJid: string, storyId: string): Promise<StoryReactionItem[]> {
+    const xmpp = await this.requireConnectedXmpp();
+    if (typeof xmpp.send_raw_iq !== "function") return [];
+    const node = storyAttachmentNode(communityJid, storyId);
+    const responseXml = await xmpp.send_raw_iq(
+      `<iq type="get" id="${crypto.randomUUID()}" to="${escapeXml(communityJid)}"><pubsub xmlns="http://jabber.org/protocol/pubsub"><items node="${escapeXml(node)}"/></pubsub></iq>`,
+    ) as string;
+    return parseStoryReactionItems(responseXml);
+  }
+
+  async publishStoryReactions(
+    communityJid: string,
+    storyId: string,
+    emojis: readonly string[],
+    unknownChildrenXml: readonly string[] = [],
+  ): Promise<void> {
+    const xmpp = await this.requireConnectedXmpp();
+    if (typeof xmpp.send_raw_iq !== "function") throw new Error("XMPP session is not ready");
+    const node = storyAttachmentNode(communityJid, storyId);
+    const normalized = normalizeStoryReactions(emojis);
+    if (normalized.length === 0) {
+      await this.retractStoryReactions(communityJid, storyId);
+      return;
+    }
+    const reactionsXml = `<reactions>${normalized.map((emoji) => `<reaction>${escapeXml(emoji)}</reaction>`).join("")}</reactions>`;
+    const preservedXml = unknownChildrenXml.join("");
+    await xmpp.send_raw_iq(
+      `<iq type="set" id="${crypto.randomUUID()}" to="${escapeXml(communityJid)}"><pubsub xmlns="http://jabber.org/protocol/pubsub"><publish node="${escapeXml(node)}"><item id="${escapeXml(barePeerJid(this.session.jid))}"><attachments xmlns="${NS_PUBSUB_ATTACHMENTS}">${reactionsXml}${preservedXml}</attachments></item></publish></pubsub></iq>`,
+    );
+  }
+
+  async retractStoryReactions(communityJid: string, storyId: string): Promise<void> {
+    const xmpp = await this.requireConnectedXmpp();
+    if (typeof xmpp.send_raw_iq !== "function") throw new Error("XMPP session is not ready");
+    const node = storyAttachmentNode(communityJid, storyId);
+    await xmpp.send_raw_iq(
+      `<iq type="set" id="${crypto.randomUUID()}" to="${escapeXml(communityJid)}"><pubsub xmlns="http://jabber.org/protocol/pubsub"><retract node="${escapeXml(node)}"><item id="${escapeXml(barePeerJid(this.session.jid))}"/></retract></pubsub></iq>`,
+    );
   }
 
   /**

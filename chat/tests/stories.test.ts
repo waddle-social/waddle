@@ -8,11 +8,24 @@ const COMMUNITY = "community.example.com";
 type MockClient = BrowserXmppClient & {
   fetchStories: ReturnType<typeof mock>;
   publishStory: ReturnType<typeof mock>;
+  fetchStoryReactions: ReturnType<typeof mock>;
+  publishStoryReactions: ReturnType<typeof mock>;
+  retractStoryReactions: ReturnType<typeof mock>;
+  bareJid: string;
 };
 
 function makeClient(stories: Story[] = []): MockClient {
   return {
+    bareJid: "alice@example.com",
     fetchStories: mock(() => Promise.resolve(stories)),
+    fetchStoryReactions: mock((_: string, storyId: string) =>
+      Promise.resolve(storyId === "s1" ? [
+        { jid: "bob@example.com", emojis: ["👍"], unknownChildrenXml: [] },
+        { jid: "alice@example.com", emojis: ["❤️"], unknownChildrenXml: ["<future xmlns=\"urn:test\"/>"] },
+      ] : []),
+    ),
+    publishStoryReactions: mock(() => Promise.resolve()),
+    retractStoryReactions: mock(() => Promise.resolve()),
     publishStory: mock((_jid: string, input: { body?: string; mediaUrl?: string; author?: string }) =>
       Promise.resolve({
         id: "new-story",
@@ -81,5 +94,35 @@ describe("useStories", () => {
     expect(story.activeStories.value.length).toBe(2);
     story.nowMs.value = t0 + 2 * 60_000;
     expect(story.activeStories.value.map((s) => s.id)).toEqual(["later"]);
+  });
+
+  test("reactions aggregate, toggle optimistically, preserve unknown children, and roll back", async () => {
+    const client = makeClient([{ id: "s1", body: "story", postedMs: 1 }]);
+    const story = withScope(() =>
+      useStories(ref<BrowserXmppClient | null>(client), { communityJid: ref<string | null>(COMMUNITY) }),
+    );
+    await story.refresh();
+
+    expect(story.reactionSummary("s1").counts).toEqual({ "👍": 1, "❤️": 1 });
+    expect(story.reactionSummary("s1").mine).toEqual(["❤️"]);
+
+    await story.toggleReaction("s1", "👍");
+    expect(story.reactionSummary("s1").counts).toEqual({ "👍": 2, "❤️": 1 });
+    expect(client.publishStoryReactions).toHaveBeenLastCalledWith(
+      COMMUNITY,
+      "s1",
+      ["❤️", "👍"],
+      ["<future xmlns=\"urn:test\"/>"],
+    );
+
+    client.publishStoryReactions = mock(() => Promise.reject(new Error("forbidden"))) as unknown as MockClient["publishStoryReactions"];
+    const ok = await story.toggleReaction("s1", "🎉");
+    expect(ok).toBe(false);
+    expect(story.reactionSummary("s1").counts).toEqual({ "👍": 2, "❤️": 1 });
+
+    client.publishStoryReactions = mock(() => Promise.resolve()) as unknown as MockClient["publishStoryReactions"];
+    await story.toggleReaction("s1", "❤️");
+    await story.toggleReaction("s1", "👍");
+    expect(client.retractStoryReactions).toHaveBeenCalledWith(COMMUNITY, "s1");
   });
 });
