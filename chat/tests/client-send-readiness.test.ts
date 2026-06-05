@@ -290,6 +290,19 @@ describe("client send readiness", () => {
     expect(listQueuedRoomMessages("alice@example.com", roomJid)).toEqual([]);
   });
 
+  test("room send rejects typed WASM failures instead of returning a null sending id", async () => {
+    const xmpp = { send_groupchat_message: mock(async () => ({ kind: "not-connected" })) };
+    const client = new BrowserXmppClient(session());
+    const roomJid = roomBareJidFor(session(), "c1");
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { currentRoom: string | null }).currentRoom = roomJid;
+    (client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.add(roomJid);
+
+    await expect(client.sendGroupMessage("w1", "c1", "hello room", { id: "room-send-1" })).rejects.toThrow("XMPP send failed: not-connected");
+    expect(listQueuedRoomMessages("alice@example.com", roomJid).map((message) => message.id)).toEqual(["room-send-1"]);
+  });
+
   test("XEP-0201: BrowserXmppClient.sendGroupMessage accepts bodyless thread metadata sends", async () => {
     // XEP-0201 thread create / thread reply payloads are bodyless. The
     // browser client wrapper must not short-circuit them; otherwise standard
@@ -338,6 +351,29 @@ describe("client send readiness", () => {
     await expect(client.sendDisplayed("w1", "c1", "msg-1")).rejects.toThrow("Reconnection timed out");
     await expect(client.sendChatState("w1", "c1", "composing")).rejects.toThrow("Reconnection timed out");
     expect(xmpp.sendMessage).toHaveBeenCalledTimes(0);
+  });
+
+  test("room queue replay rejects typed WASM failures so queued sends stay retryable", async () => {
+    const xmpp = { send_groupchat_message: mock(async () => ({ kind: "transport-error" })) };
+    const client = new BrowserXmppClient(session());
+    const roomJid = roomBareJidFor(session(), "c1");
+    const statuses: Array<[string, "queued" | "sending"]> = [];
+    client.setQueuedMessageStatusHandler((id, status) => statuses.push([id, status]));
+    enqueueQueuedMessage("alice@example.com", {
+      kind: "room",
+      id: "room-replay-1",
+      createdAt: "2026-06-05T10:00:00Z",
+      roomJid,
+      body: "queued room",
+    });
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { currentRoom: string | null }).currentRoom = roomJid;
+    (client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.add(roomJid);
+
+    await expect((client as unknown as { flushQueuedRoomMessages: (roomJid: string) => Promise<void> }).flushQueuedRoomMessages(roomJid)).rejects.toThrow("XMPP send failed: transport-error");
+    expect(listQueuedRoomMessages("alice@example.com", roomJid).map((message) => message.id)).toEqual(["room-replay-1"]);
+    expect(statuses).toEqual([["room-replay-1", "sending"]]);
   });
 
   test("room join readiness waits for this resource's MUC self-presence", async () => {
