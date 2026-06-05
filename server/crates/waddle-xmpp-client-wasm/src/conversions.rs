@@ -324,20 +324,20 @@ pub(crate) fn archived_to_js(archived: ArchivedMessage) -> Option<WaddleArchived
             by: stanza_id.by.to_string(),
         })
         .collect();
-    let parsed = match messaging::parse(&archived.inner) {
-        Some(waddle_xmpp_client::MessagingEvent::Message(message)) => Some(message),
-        _ => None,
-    };
-    let call_event = messaging::parse_call_event(&archived.inner).map(call_event_to_js);
+    let parsed = archived.payload.message.as_deref();
+    let call_event = archived
+        .payload
+        .call
+        .as_ref()
+        .map(|call| call_event_to_js((**call).clone()));
     if parsed.is_none() && call_event.is_none() {
         return None;
     }
     let (reply_fallback_start, reply_fallback_end) = parsed
-        .as_ref()
         .and_then(|message| message.reply_fallback)
         .map(|(start, end)| (Some(start), Some(end)))
         .unwrap_or((None, None));
-    let forum_thread_title = parsed.as_ref().and_then(|message| {
+    let forum_thread_title = parsed.and_then(|message| {
         if message.forum_post_kind.as_deref() == Some("topic") {
             message
                 .forum_title
@@ -361,69 +361,41 @@ pub(crate) fn archived_to_js(archived: ArchivedMessage) -> Option<WaddleArchived
         to: archived.to,
         message_type: archived.message_type,
         body: archived.body,
-        subject: parsed.as_ref().and_then(|message| message.subject.clone()),
-        replaces_id: parsed
-            .as_ref()
-            .and_then(|message| message.replaces_id.clone()),
-        retracts_id: parsed
-            .as_ref()
-            .and_then(|message| message.retracts_id.clone()),
-        retraction_id: parsed
-            .as_ref()
-            .and_then(|message| message.retraction_id.clone()),
-        is_retracted: parsed.as_ref().is_some_and(|message| message.is_retracted),
-        moderation_target_id: parsed
-            .as_ref()
-            .and_then(|message| message.moderation_target_id.clone()),
+        subject: parsed.and_then(|message| message.subject.clone()),
+        replaces_id: parsed.and_then(|message| message.replaces_id.clone()),
+        retracts_id: parsed.and_then(|message| message.retracts_id.clone()),
+        retraction_id: parsed.and_then(|message| message.retraction_id.clone()),
+        is_retracted: parsed.is_some_and(|message| message.is_retracted),
+        moderation_target_id: parsed.and_then(|message| message.moderation_target_id.clone()),
         moderated_by: parsed
-            .as_ref()
             .and_then(|message| message.moderated_by.as_ref().map(|jid| jid.to_string())),
-        moderation_reason: parsed
-            .as_ref()
-            .and_then(|message| message.moderation_reason.clone()),
-        reaction_target_id: parsed
-            .as_ref()
-            .and_then(|message| message.reaction_target_id.clone()),
+        moderation_reason: parsed.and_then(|message| message.moderation_reason.clone()),
+        reaction_target_id: parsed.and_then(|message| message.reaction_target_id.clone()),
         reaction_emojis: parsed
-            .as_ref()
             .map(|message| message.reaction_emojis.clone())
             .unwrap_or_default(),
         thread: archived.thread,
         parent_thread_id: archived.parent_thread_id,
-        reply_to_id: parsed
-            .as_ref()
-            .and_then(|message| message.reply_to_id.clone()),
-        reply_to_sender: parsed
-            .as_ref()
-            .and_then(|message| message.reply_to_sender.clone()),
+        reply_to_id: parsed.and_then(|message| message.reply_to_id.clone()),
+        reply_to_sender: parsed.and_then(|message| message.reply_to_sender.clone()),
         reply_fallback_start,
         reply_fallback_end,
         markup_spans: parsed
-            .as_ref()
             .map(|message| markup_spans_to_js(message.markup_spans.clone()))
             .unwrap_or_default(),
-        broadcast_mention: parsed
-            .as_ref()
-            .and_then(|message| message.broadcast_mention.clone()),
+        broadcast_mention: parsed.and_then(|message| message.broadcast_mention.clone()),
         mention_uris: parsed
-            .as_ref()
             .map(|message| message.mention_uris.clone())
             .unwrap_or_default(),
         references: parsed
-            .as_ref()
             .map(|message| references_to_js(message.references.clone()))
             .unwrap_or_default(),
-        forum_post_kind: parsed
-            .as_ref()
-            .and_then(|message| message.forum_post_kind.clone()),
-        forum_title: parsed
-            .as_ref()
-            .and_then(|message| message.forum_title.clone()),
+        forum_post_kind: parsed.and_then(|message| message.forum_post_kind.clone()),
+        forum_title: parsed.and_then(|message| message.forum_title.clone()),
         forum_thread_title,
-        is_sticker: parsed.as_ref().is_some_and(|message| message.is_sticker),
+        is_sticker: parsed.is_some_and(|message| message.is_sticker),
         author_real_jid: archived.author_real_jid,
         shared_files: parsed
-            .as_ref()
             .map(|message| {
                 message
                     .shared_files
@@ -434,16 +406,12 @@ pub(crate) fn archived_to_js(archived: ArchivedMessage) -> Option<WaddleArchived
             })
             .unwrap_or_default(),
         link_previews: parsed
-            .as_ref()
             .map(|message| link_previews_to_js(message.link_previews.clone()))
             .unwrap_or_default(),
         extension_envelope: parsed
-            .as_ref()
             .and_then(|message| message.extension_envelope.clone())
             .map(extension_envelope_to_js),
-        extension_body_fallback: parsed
-            .as_ref()
-            .is_some_and(|message| message.extension_body_fallback),
+        extension_body_fallback: parsed.is_some_and(|message| message.extension_body_fallback),
         call_event,
     })
 }

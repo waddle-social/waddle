@@ -650,7 +650,7 @@ mod query {
     use tokio::sync::{broadcast, mpsc};
     use tokio::time::timeout;
 
-    use super::super::{ArchivedMessage, MamExt, CLIENT_NS};
+    use super::super::{ArchivedMessage, ArchivedPayload, MamExt, CLIENT_NS};
     use crate::client::ClientHandle;
     use crate::command::XmppCommand;
     use crate::event::ClientEvent;
@@ -690,6 +690,7 @@ mod query {
             thread: None,
             author_real_jid: None,
             inner: Element::builder("message", CLIENT_NS).build(),
+            payload: ArchivedPayload::default(),
         }
     }
 

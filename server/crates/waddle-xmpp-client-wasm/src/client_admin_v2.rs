@@ -291,7 +291,7 @@ impl WaddleClient {
             let domain = caller_domain(&inner);
             let iq = build_spaces_list_iq(&domain, &parsed);
             let result = send_iq_command(inner, iq).await?;
-            let page = parse_spaces_list_result(&result)?;
+            let page = parse_spaces_list_result(&result).map_err(js_error)?;
             to_js_value(&page)
         })
     }
@@ -304,7 +304,7 @@ impl WaddleClient {
             let domain = caller_domain(&inner);
             let iq = build_spaces_create_iq(&domain, &parsed);
             let result = send_iq_command(inner, iq).await?;
-            let space = parse_space_ref_result(&result)?;
+            let space = parse_space_ref_result(&result).map_err(js_error)?;
             to_js_value(&space)
         })
     }
@@ -317,7 +317,7 @@ impl WaddleClient {
             let domain = caller_domain(&inner);
             let iq = build_spaces_update_iq(&domain, &parsed);
             let result = send_iq_command(inner, iq).await?;
-            let space = parse_space_ref_result(&result)?;
+            let space = parse_space_ref_result(&result).map_err(js_error)?;
             to_js_value(&space)
         })
     }
@@ -342,7 +342,7 @@ impl WaddleClient {
             let domain = caller_domain(&inner);
             let iq = build_spaces_members_iq(&domain, &parsed);
             let result = send_iq_command(inner, iq).await?;
-            let page = parse_spaces_members_result(&result)?;
+            let page = parse_spaces_members_result(&result).map_err(js_error)?;
             to_js_value(&page)
         })
     }
@@ -355,7 +355,7 @@ impl WaddleClient {
             let domain = caller_domain(&inner);
             let iq = build_spaces_set_role_iq(&domain, &parsed);
             let result = send_iq_command(inner, iq).await?;
-            let payload = parse_spaces_set_role_result(&result)?;
+            let payload = parse_spaces_set_role_result(&result).map_err(js_error)?;
             to_js_value(&payload)
         })
     }
@@ -368,7 +368,7 @@ impl WaddleClient {
             let domain = caller_domain(&inner);
             let iq = build_channels_list_iq(&domain, &parsed);
             let result = send_iq_command(inner, iq).await?;
-            let page = parse_channels_list_result(&result)?;
+            let page = parse_channels_list_result(&result).map_err(js_error)?;
             to_js_value(&page)
         })
     }
@@ -381,7 +381,7 @@ impl WaddleClient {
             let domain = caller_domain(&inner);
             let iq = build_channels_create_iq(&domain, &parsed);
             let result = send_iq_command(inner, iq).await?;
-            let channel = parse_channel_ref_result(&result)?;
+            let channel = parse_channel_ref_result(&result).map_err(js_error)?;
             to_js_value(&channel)
         })
     }
@@ -394,7 +394,7 @@ impl WaddleClient {
             let domain = caller_domain(&inner);
             let iq = build_channels_update_iq(&domain, &parsed);
             let result = send_iq_command(inner, iq).await?;
-            let channel = parse_channel_ref_result(&result)?;
+            let channel = parse_channel_ref_result(&result).map_err(js_error)?;
             to_js_value(&channel)
         })
     }
@@ -419,7 +419,7 @@ impl WaddleClient {
             let domain = caller_domain(&inner);
             let iq = build_channels_occupants_iq(&domain, &parsed);
             let result = send_iq_command(inner, iq).await?;
-            let page = parse_channels_occupants_result(&result)?;
+            let page = parse_channels_occupants_result(&result).map_err(js_error)?;
             to_js_value(&page)
         })
     }
@@ -432,7 +432,7 @@ impl WaddleClient {
             let domain = caller_domain(&inner);
             let iq = build_channels_affiliations_iq(&domain, &parsed);
             let result = send_iq_command(inner, iq).await?;
-            let page = parse_channels_affiliations_result(&result)?;
+            let page = parse_channels_affiliations_result(&result).map_err(js_error)?;
             to_js_value(&page)
         })
     }
@@ -445,7 +445,7 @@ impl WaddleClient {
             let domain = caller_domain(&inner);
             let iq = build_channels_set_affiliation_iq(&domain, &parsed);
             let result = send_iq_command(inner, iq).await?;
-            let payload = parse_channels_set_affiliation_result(&result)?;
+            let payload = parse_channels_set_affiliation_result(&result).map_err(js_error)?;
             to_js_value(&payload)
         })
     }
@@ -458,7 +458,7 @@ impl WaddleClient {
             let domain = caller_domain(&inner);
             let iq = build_channels_kick_iq(&domain, &parsed);
             let result = send_iq_command(inner, iq).await?;
-            let payload = parse_channels_kick_result(&result)?;
+            let payload = parse_channels_kick_result(&result).map_err(js_error)?;
             to_js_value(&payload)
         })
     }
@@ -725,13 +725,15 @@ fn build_channels_kick_iq(server_domain: &str, args: &WaddleAdminChannelsKickArg
 
 // ─── Response parsers ─────────────────────────────────────────────────
 
-fn command_form(iq: &Element) -> Result<&Element, JsValue> {
+type AdminParseResult<T> = Result<T, String>;
+
+fn command_form(iq: &Element) -> AdminParseResult<&Element> {
     let command = iq
         .get_child("command", NS_ADHOC_COMMANDS)
-        .ok_or_else(|| js_error("admin response missing <command/>"))?;
+        .ok_or_else(|| "admin response missing <command/>".to_string())?;
     command
         .get_child("x", NS_XDATA)
-        .ok_or_else(|| js_error("admin response missing <x xmlns='jabber:x:data'/>"))
+        .ok_or_else(|| "admin response missing <x xmlns='jabber:x:data'/>".to_string())
 }
 
 fn maybe_command_form(iq: &Element) -> Option<&Element> {
@@ -745,20 +747,29 @@ fn field_text(item: &Element, var: &str) -> Option<String> {
         .find_map(|field| field.get_child("value", NS_XDATA).map(|value| value.text()))
 }
 
-fn field_text_required(item: &Element, var: &str) -> String {
-    field_text(item, var).unwrap_or_default()
+fn field_text_required(item: &Element, var: &str) -> AdminParseResult<String> {
+    field_text(item, var)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("admin response item missing required field `{var}`"))
 }
 
-fn field_bool(item: &Element, var: &str) -> bool {
-    field_text(item, var)
-        .map(|raw| matches!(raw.as_str(), "1" | "true"))
-        .unwrap_or(false)
+fn parse_bool_field(raw: &str, var: &str) -> AdminParseResult<bool> {
+    match raw {
+        "1" | "true" => Ok(true),
+        "0" | "false" => Ok(false),
+        _ => Err(format!("admin response field `{var}` is not a boolean")),
+    }
 }
 
-fn field_u32(item: &Element, var: &str) -> u32 {
-    field_text(item, var)
-        .and_then(|raw| raw.parse::<u32>().ok())
-        .unwrap_or(0)
+fn field_bool(item: &Element, var: &str) -> AdminParseResult<bool> {
+    let raw = field_text_required(item, var)?;
+    parse_bool_field(raw.as_str(), var)
+}
+
+fn field_u32(item: &Element, var: &str) -> AdminParseResult<u32> {
+    let raw = field_text_required(item, var)?;
+    raw.parse::<u32>()
+        .map_err(|err| format!("admin response field `{var}` is not a u32: {err}"))
 }
 
 fn top_level_next_cursor(form: &Element) -> Option<String> {
@@ -772,19 +783,19 @@ fn top_level_next_cursor(form: &Element) -> Option<String> {
         })
 }
 
-fn parse_spaces_list_result(iq: &Element) -> Result<WaddleAdminSpacesListResult, JsValue> {
+fn parse_spaces_list_result(iq: &Element) -> AdminParseResult<WaddleAdminSpacesListResult> {
     let Some(form) = maybe_command_form(iq) else {
         return Ok(WaddleAdminSpacesListResult::default());
     };
     let mut entries = Vec::new();
     for item in form.children().filter(|c| c.name() == "item") {
         entries.push(WaddleAdminSpaceListEntry {
-            space_jid: field_text_required(item, "space_jid"),
-            name: field_text_required(item, "name"),
+            space_jid: field_text_required(item, "space_jid")?,
+            name: field_text_required(item, "name")?,
             description: field_text(item, "description").filter(|s| !s.is_empty()),
             icon_url: field_text(item, "icon_url").filter(|s| !s.is_empty()),
-            channel_count: field_u32(item, "channel_count"),
-            member_count: field_u32(item, "member_count"),
+            channel_count: field_u32(item, "channel_count")?,
+            member_count: field_u32(item, "member_count")?,
         });
     }
     Ok(WaddleAdminSpacesListResult {
@@ -793,11 +804,11 @@ fn parse_spaces_list_result(iq: &Element) -> Result<WaddleAdminSpacesListResult,
     })
 }
 
-fn parse_space_ref_result(iq: &Element) -> Result<WaddleAdminSpaceRef, JsValue> {
+fn parse_space_ref_result(iq: &Element) -> AdminParseResult<WaddleAdminSpaceRef> {
     let form = command_form(iq)?;
     Ok(WaddleAdminSpaceRef {
-        space_jid: top_level_field_text(form, "space_jid"),
-        name: top_level_field_text(form, "name"),
+        space_jid: top_level_field_text_required(form, "space_jid")?,
+        name: top_level_field_text_required(form, "name")?,
         description: top_level_field_text_opt(form, "description"),
         icon_url: top_level_field_text_opt(form, "icon_url"),
     })
@@ -810,6 +821,17 @@ fn top_level_field_text(form: &Element, var: &str) -> String {
         .unwrap_or_default()
 }
 
+fn top_level_field_text_required(form: &Element, var: &str) -> AdminParseResult<String> {
+    let value = top_level_field_text(form, var);
+    if value.is_empty() {
+        Err(format!(
+            "admin response missing required top-level field `{var}`"
+        ))
+    } else {
+        Ok(value)
+    }
+}
+
 fn top_level_field_text_opt(form: &Element, var: &str) -> Option<String> {
     let text = top_level_field_text(form, var);
     if text.is_empty() {
@@ -819,15 +841,20 @@ fn top_level_field_text_opt(form: &Element, var: &str) -> Option<String> {
     }
 }
 
-fn parse_spaces_members_result(iq: &Element) -> Result<WaddleAdminSpacesMembersResult, JsValue> {
+fn top_level_field_bool(form: &Element, var: &str) -> AdminParseResult<bool> {
+    let raw = top_level_field_text_required(form, var)?;
+    parse_bool_field(raw.as_str(), var)
+}
+
+fn parse_spaces_members_result(iq: &Element) -> AdminParseResult<WaddleAdminSpacesMembersResult> {
     let Some(form) = maybe_command_form(iq) else {
         return Ok(WaddleAdminSpacesMembersResult::default());
     };
     let mut entries = Vec::new();
     for item in form.children().filter(|c| c.name() == "item") {
         entries.push(WaddleAdminSpaceMemberEntry {
-            jid: field_text_required(item, "jid"),
-            role: field_text_required(item, "role"),
+            jid: field_text_required(item, "jid")?,
+            role: field_text_required(item, "role")?,
         });
     }
     Ok(WaddleAdminSpacesMembersResult {
@@ -836,31 +863,31 @@ fn parse_spaces_members_result(iq: &Element) -> Result<WaddleAdminSpacesMembersR
     })
 }
 
-fn parse_spaces_set_role_result(iq: &Element) -> Result<WaddleAdminSpacesSetRoleResult, JsValue> {
+fn parse_spaces_set_role_result(iq: &Element) -> AdminParseResult<WaddleAdminSpacesSetRoleResult> {
     let form = command_form(iq)?;
     Ok(WaddleAdminSpacesSetRoleResult {
-        member_jid: top_level_field_text(form, "member_jid"),
-        role: top_level_field_text(form, "role"),
+        member_jid: top_level_field_text_required(form, "member_jid")?,
+        role: top_level_field_text_required(form, "role")?,
     })
 }
 
-fn parse_channels_list_result(iq: &Element) -> Result<WaddleAdminChannelsListResult, JsValue> {
+fn parse_channels_list_result(iq: &Element) -> AdminParseResult<WaddleAdminChannelsListResult> {
     let Some(form) = maybe_command_form(iq) else {
         return Ok(WaddleAdminChannelsListResult::default());
     };
     let mut entries = Vec::new();
     for item in form.children().filter(|c| c.name() == "item") {
         entries.push(WaddleAdminChannelListEntry {
-            channel_jid: field_text_required(item, "channel_jid"),
-            name: field_text_required(item, "name"),
+            channel_jid: field_text_required(item, "channel_jid")?,
+            name: field_text_required(item, "name")?,
             topic: field_text(item, "topic").filter(|s| !s.is_empty()),
-            is_public: field_bool(item, "is_public"),
-            members_only: field_bool(item, "members_only"),
-            occupant_count: field_u32(item, "occupant_count"),
-            owner_count: field_u32(item, "owner_count"),
-            admin_count: field_u32(item, "admin_count"),
-            member_count: field_u32(item, "member_count"),
-            outcast_count: field_u32(item, "outcast_count"),
+            is_public: field_bool(item, "is_public")?,
+            members_only: field_bool(item, "members_only")?,
+            occupant_count: field_u32(item, "occupant_count")?,
+            owner_count: field_u32(item, "owner_count")?,
+            admin_count: field_u32(item, "admin_count")?,
+            member_count: field_u32(item, "member_count")?,
+            outcast_count: field_u32(item, "outcast_count")?,
         });
     }
     Ok(WaddleAdminChannelsListResult {
@@ -869,36 +896,30 @@ fn parse_channels_list_result(iq: &Element) -> Result<WaddleAdminChannelsListRes
     })
 }
 
-fn parse_channel_ref_result(iq: &Element) -> Result<WaddleAdminChannelRef, JsValue> {
+fn parse_channel_ref_result(iq: &Element) -> AdminParseResult<WaddleAdminChannelRef> {
     let form = command_form(iq)?;
     Ok(WaddleAdminChannelRef {
-        channel_jid: top_level_field_text(form, "channel_jid"),
-        name: top_level_field_text(form, "name"),
+        channel_jid: top_level_field_text_required(form, "channel_jid")?,
+        name: top_level_field_text_required(form, "name")?,
         topic: top_level_field_text_opt(form, "topic"),
-        is_public: matches!(
-            top_level_field_text(form, "is_public").as_str(),
-            "1" | "true"
-        ),
-        members_only: matches!(
-            top_level_field_text(form, "members_only").as_str(),
-            "1" | "true"
-        ),
+        is_public: top_level_field_bool(form, "is_public")?,
+        members_only: top_level_field_bool(form, "members_only")?,
     })
 }
 
 fn parse_channels_occupants_result(
     iq: &Element,
-) -> Result<WaddleAdminChannelsOccupantsResult, JsValue> {
+) -> AdminParseResult<WaddleAdminChannelsOccupantsResult> {
     let Some(form) = maybe_command_form(iq) else {
         return Ok(WaddleAdminChannelsOccupantsResult::default());
     };
     let mut entries = Vec::new();
     for item in form.children().filter(|c| c.name() == "item") {
         entries.push(WaddleAdminChannelOccupantEntry {
-            nick: field_text_required(item, "nick"),
-            real_jid: field_text_required(item, "real_jid"),
-            role: field_text_required(item, "role"),
-            affiliation: field_text_required(item, "affiliation"),
+            nick: field_text_required(item, "nick")?,
+            real_jid: field_text_required(item, "real_jid")?,
+            role: field_text_required(item, "role")?,
+            affiliation: field_text_required(item, "affiliation")?,
         });
     }
     Ok(WaddleAdminChannelsOccupantsResult {
@@ -909,15 +930,15 @@ fn parse_channels_occupants_result(
 
 fn parse_channels_affiliations_result(
     iq: &Element,
-) -> Result<WaddleAdminChannelsAffiliationsResult, JsValue> {
+) -> AdminParseResult<WaddleAdminChannelsAffiliationsResult> {
     let Some(form) = maybe_command_form(iq) else {
         return Ok(WaddleAdminChannelsAffiliationsResult::default());
     };
     let mut entries = Vec::new();
     for item in form.children().filter(|c| c.name() == "item") {
         entries.push(WaddleAdminChannelAffiliationEntry {
-            jid: field_text_required(item, "jid"),
-            affiliation: field_text_required(item, "affiliation"),
+            jid: field_text_required(item, "jid")?,
+            affiliation: field_text_required(item, "affiliation")?,
             reason: field_text(item, "reason").filter(|s| !s.is_empty()),
         });
     }
@@ -929,198 +950,23 @@ fn parse_channels_affiliations_result(
 
 fn parse_channels_set_affiliation_result(
     iq: &Element,
-) -> Result<WaddleAdminChannelsSetAffiliationResult, JsValue> {
+) -> AdminParseResult<WaddleAdminChannelsSetAffiliationResult> {
     let form = command_form(iq)?;
     Ok(WaddleAdminChannelsSetAffiliationResult {
-        member_jid: top_level_field_text(form, "member_jid"),
-        affiliation: top_level_field_text(form, "affiliation"),
+        member_jid: top_level_field_text_required(form, "member_jid")?,
+        affiliation: top_level_field_text_required(form, "affiliation")?,
     })
 }
 
-fn parse_channels_kick_result(iq: &Element) -> Result<WaddleAdminChannelsKickResult, JsValue> {
+fn parse_channels_kick_result(iq: &Element) -> AdminParseResult<WaddleAdminChannelsKickResult> {
     let form = command_form(iq)?;
     Ok(WaddleAdminChannelsKickResult {
-        occupant_jid: top_level_field_text(form, "occupant_jid"),
+        occupant_jid: top_level_field_text_required(form, "occupant_jid")?,
     })
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn wrap_response(node: &str, form_inner: &str) -> Element {
-        let raw = format!(
-            r#"<iq xmlns='jabber:client' type='result' id='test'><command xmlns='http://jabber.org/protocol/commands' node='{node}' status='completed'><x xmlns='jabber:x:data' type='result'><field type="hidden" var="FORM_TYPE"><value>{node}</value></field>{form_inner}</x></command></iq>"#
-        );
-        raw.parse().expect("parse iq")
-    }
-
-    #[test]
-    fn parse_spaces_list_handles_empty_form() {
-        let iq = wrap_response(NS_ADMIN_SPACES_LIST, "");
-        let result = parse_spaces_list_result(&iq).expect("ok");
-        assert!(result.entries.is_empty());
-        assert!(result.next_cursor.is_none());
-    }
-
-    #[test]
-    fn parse_spaces_list_extracts_counts_and_cursor() {
-        let item = r#"<item>
-            <field var="space_jid"><value>eng@spaces.localhost</value></field>
-            <field var="name"><value>Engineering</value></field>
-            <field var="description"><value>Hack stuff</value></field>
-            <field var="icon_url"><value></value></field>
-            <field var="channel_count"><value>3</value></field>
-            <field var="member_count"><value>5</value></field>
-        </item>"#;
-        let cursor = r#"<field var="next_cursor" type="text-single"><value>eng@spaces.localhost</value></field>"#;
-        let iq = wrap_response(NS_ADMIN_SPACES_LIST, &format!("{item}{cursor}"));
-        let result = parse_spaces_list_result(&iq).expect("ok");
-        assert_eq!(result.entries.len(), 1);
-        let entry = &result.entries[0];
-        assert_eq!(entry.space_jid, "eng@spaces.localhost");
-        assert_eq!(entry.name, "Engineering");
-        assert_eq!(entry.description.as_deref(), Some("Hack stuff"));
-        assert!(entry.icon_url.is_none());
-        assert_eq!(entry.channel_count, 3);
-        assert_eq!(entry.member_count, 5);
-        assert_eq!(result.next_cursor.as_deref(), Some("eng@spaces.localhost"));
-    }
-
-    #[test]
-    fn parse_space_ref_round_trip() {
-        let inner = r#"<field var="space_jid"><value>eng@spaces.localhost</value></field>
-            <field var="name"><value>Engineering</value></field>
-            <field var="description"><value>Hack stuff</value></field>"#;
-        let iq = wrap_response(NS_ADMIN_SPACES_CREATE, inner);
-        let space = parse_space_ref_result(&iq).expect("ok");
-        assert_eq!(space.space_jid, "eng@spaces.localhost");
-        assert_eq!(space.name, "Engineering");
-        assert_eq!(space.description.as_deref(), Some("Hack stuff"));
-        assert!(space.icon_url.is_none());
-    }
-
-    #[test]
-    fn parse_spaces_members_extracts_roles() {
-        let inner = r#"<item>
-            <field var="jid"><value>alice@localhost</value></field>
-            <field var="role"><value>owner</value></field>
-        </item>
-        <item>
-            <field var="jid"><value>bob@localhost</value></field>
-            <field var="role"><value>member</value></field>
-        </item>"#;
-        let iq = wrap_response(NS_ADMIN_SPACES_MEMBERS, inner);
-        let result = parse_spaces_members_result(&iq).expect("ok");
-        assert_eq!(result.entries.len(), 2);
-        assert_eq!(result.entries[0].role, "owner");
-        assert_eq!(result.entries[1].jid, "bob@localhost");
-    }
-
-    #[test]
-    fn parse_channels_list_extracts_booleans_and_counts() {
-        let item = r#"<item>
-            <field var="channel_jid"><value>general@muc.localhost</value></field>
-            <field var="name"><value>General</value></field>
-            <field var="topic"><value>All things</value></field>
-            <field var="is_public" type="boolean"><value>1</value></field>
-            <field var="members_only" type="boolean"><value>0</value></field>
-            <field var="occupant_count"><value>7</value></field>
-            <field var="owner_count"><value>1</value></field>
-            <field var="admin_count"><value>2</value></field>
-            <field var="member_count"><value>3</value></field>
-            <field var="outcast_count"><value>0</value></field>
-        </item>"#;
-        let iq = wrap_response(NS_ADMIN_CHANNELS_LIST, item);
-        let result = parse_channels_list_result(&iq).expect("ok");
-        assert_eq!(result.entries.len(), 1);
-        let entry = &result.entries[0];
-        assert!(entry.is_public);
-        assert!(!entry.members_only);
-        assert_eq!(entry.occupant_count, 7);
-        assert_eq!(entry.owner_count, 1);
-        assert_eq!(entry.admin_count, 2);
-        assert_eq!(entry.member_count, 3);
-    }
-
-    #[test]
-    fn parse_channels_occupants_extracts_role_and_affiliation() {
-        let inner = r#"<item>
-            <field var="nick"><value>alice</value></field>
-            <field var="real_jid"><value>alice@localhost/web</value></field>
-            <field var="role"><value>moderator</value></field>
-            <field var="affiliation"><value>owner</value></field>
-        </item>"#;
-        let iq = wrap_response(NS_ADMIN_CHANNELS_OCCUPANTS, inner);
-        let result = parse_channels_occupants_result(&iq).expect("ok");
-        assert_eq!(result.entries.len(), 1);
-        let entry = &result.entries[0];
-        assert_eq!(entry.nick, "alice");
-        assert_eq!(entry.role, "moderator");
-        assert_eq!(entry.affiliation, "owner");
-    }
-
-    #[test]
-    fn build_spaces_list_iq_omits_unset_fields() {
-        let args = WaddleAdminSpacesListArgs::default();
-        let iq = build_spaces_list_iq("localhost", &args);
-        assert_eq!(iq.name(), "iq");
-        assert_eq!(iq.attr("to"), Some("localhost"));
-        let cmd = iq.get_child("command", NS_ADHOC_COMMANDS).expect("command");
-        assert_eq!(cmd.attr("node"), Some(NS_ADMIN_SPACES_LIST));
-        let form = cmd.get_child("x", NS_XDATA).expect("form");
-        let var_names: Vec<&str> = form
-            .children()
-            .filter(|c| c.name() == "field")
-            .filter_map(|f| f.attr("var"))
-            .collect();
-        assert_eq!(var_names, vec!["FORM_TYPE"]);
-    }
-
-    #[test]
-    fn build_channels_create_iq_includes_all_optional_fields() {
-        let args = WaddleAdminChannelsCreateArgs {
-            name: "general".to_string(),
-            topic: Some("All things".to_string()),
-            space_jid: Some("eng@spaces.localhost".to_string()),
-            is_public: Some(true),
-            members_only: Some(true),
-        };
-        let iq = build_channels_create_iq("localhost", &args);
-        let form = iq
-            .get_child("command", NS_ADHOC_COMMANDS)
-            .and_then(|c| c.get_child("x", NS_XDATA))
-            .expect("form");
-        let var_names: Vec<&str> = form
-            .children()
-            .filter(|c| c.name() == "field")
-            .filter_map(|f| f.attr("var"))
-            .collect();
-        assert!(var_names.contains(&"name"));
-        assert!(var_names.contains(&"topic"));
-        assert!(var_names.contains(&"space_jid"));
-        assert!(var_names.contains(&"is_public"));
-        assert!(var_names.contains(&"members_only"));
-    }
-
-    #[test]
-    fn build_spaces_delete_iq_carries_confirm() {
-        let args = WaddleAdminSpacesDeleteArgs {
-            space_jid: "eng@spaces.localhost".to_string(),
-            confirm: "yes".to_string(),
-        };
-        let iq = build_spaces_delete_iq("localhost", &args);
-        let form = iq
-            .get_child("command", NS_ADHOC_COMMANDS)
-            .and_then(|c| c.get_child("x", NS_XDATA))
-            .expect("form");
-        let confirm_value = form
-            .children()
-            .filter(|c| c.name() == "field" && c.attr("var") == Some("confirm"))
-            .find_map(|f| f.get_child("value", NS_XDATA).map(|v| v.text()))
-            .expect("confirm field");
-        assert_eq!(confirm_value, "yes");
-    }
-}
+#[path = "client_admin_v2_tests.rs"]
+mod tests;

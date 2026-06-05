@@ -410,13 +410,13 @@ fn inbound_to_ffi(msg: InboundMessage) -> WaddleMessage {
 /// instead of being recovered from the re-parse - closes the parent-leak
 /// path when `inner` is unparseable downstream.
 fn archived_to_ffi(archived: waddle_xmpp_client::ArchivedMessage) -> WaddleArchivedMessage {
-    let parsed = match messaging::parse(&archived.inner) {
-        Some(MessagingEvent::Message(m)) => Some(m),
-        _ => None,
-    };
-    let call_event = messaging::parse_call_event(&archived.inner).map(call_event_to_ffi);
-    let (fb_start, fb_end) = parsed
+    let parsed = archived.payload.message.as_deref();
+    let call_event = archived
+        .payload
+        .call
         .as_ref()
+        .map(|call| call_event_to_ffi((**call).clone()));
+    let (fb_start, fb_end) = parsed
         .and_then(|m| m.reply_fallback)
         .map(|(s, e)| (Some(s), Some(e)))
         .unwrap_or((None, None));
@@ -431,19 +431,17 @@ fn archived_to_ffi(archived: waddle_xmpp_client::ArchivedMessage) -> WaddleArchi
         to: archived.to,
         message_type: archived.message_type,
         body: archived.body,
-        reaction_target_id: parsed.as_ref().and_then(|m| m.reaction_target_id.clone()),
+        reaction_target_id: parsed.and_then(|m| m.reaction_target_id.clone()),
         reaction_emojis: parsed
-            .as_ref()
             .map(|m| m.reaction_emojis.clone())
             .unwrap_or_default(),
         thread: archived.thread,
         parent_thread_id: archived.parent_thread_id,
-        reply_to_id: parsed.as_ref().and_then(|m| m.reply_to_id.clone()),
-        reply_to_sender: parsed.as_ref().and_then(|m| m.reply_to_sender.clone()),
+        reply_to_id: parsed.and_then(|m| m.reply_to_id.clone()),
+        reply_to_sender: parsed.and_then(|m| m.reply_to_sender.clone()),
         reply_fallback_start: fb_start,
         reply_fallback_end: fb_end,
         shared_files: parsed
-            .as_ref()
             .map(|m| {
                 m.shared_files
                     .clone()

@@ -15,6 +15,7 @@ pub mod inbox;
 pub mod mam;
 pub mod mds;
 pub mod messaging;
+pub mod notification_settings;
 pub mod pep;
 pub mod pin;
 pub mod push;
@@ -63,8 +64,8 @@ pub use event::{
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub use mam::MamExt;
 pub use mam::{
-    build_mam_iq, ArchivedMessage, MamIqBuilder, MamPage, RsmPageInfo, MAM_END_FIELD,
-    MAM_START_FIELD,
+    build_mam_iq, ArchivedMessage, ArchivedPayload, MamIqBuilder, MamPage, RsmPageInfo,
+    MAM_END_FIELD, MAM_START_FIELD,
 };
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub use messaging::MessagingExt;
