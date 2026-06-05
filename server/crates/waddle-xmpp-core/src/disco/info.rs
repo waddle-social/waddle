@@ -480,6 +480,9 @@ pub fn community_service_features() -> Vec<Feature> {
         // XEP-0501 Pubsub Stories — community stories node lives
         // here at `urn:xmpp:stories:0`.
         Feature::stories(),
+        // XEP-0470 Pubsub Attachments — supported for story reaction
+        // attachments with a server-maintained summary node.
+        Feature::new("urn:xmpp:pubsub-attachments:1"),
         // xCal community events node — payload is iCalendar in XML
         // (`urn:ietf:params:xml:ns:xcal`) per the XSF ProtoXEP
         // "Calendaring Extensions to Publish-Subscribe".

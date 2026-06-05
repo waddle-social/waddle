@@ -33,9 +33,12 @@ export interface StoryReactionSummary {
   counts: Record<string, number>;
   reactors: Record<string, string[]>;
   mine: readonly string[];
+  noticedCount?: number;
 }
 
 export const NS_PUBSUB_ATTACHMENTS = "urn:xmpp:pubsub-attachments:1";
+export const NS_PUBSUB_ATTACHMENTS_SUMMARY = "urn:xmpp:pubsub-attachments:summary:1";
+export const STORY_REACTIONS_SUMMARY_NODE = `${NS_PUBSUB_ATTACHMENTS_SUMMARY}/urn:xmpp:stories:0`;
 export const STORY_REACTIONS_MAX = 12;
 
 export interface StoryPostInput {
@@ -89,24 +92,4 @@ export function normalizeStoryReactions(emojis: Iterable<string>): string[] {
     normalized.push(emoji);
   }
   return normalized;
-}
-
-export function aggregateStoryReactions(
-  items: readonly StoryReactionItem[],
-  selfBareJid: string | null | undefined,
-): StoryReactionSummary {
-  const counts: Record<string, number> = {};
-  const reactors: Record<string, string[]> = {};
-  const mine = selfBareJid
-    ? (items.find((item) => item.jid.toLowerCase() === selfBareJid.toLowerCase())?.emojis ?? [])
-    : [];
-
-  for (const item of items) {
-    for (const emoji of normalizeStoryReactions(item.emojis)) {
-      counts[emoji] = (counts[emoji] ?? 0) + 1;
-      (reactors[emoji] ??= []).push(item.jid);
-    }
-  }
-
-  return { counts, reactors, mine };
 }

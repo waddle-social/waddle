@@ -23,8 +23,9 @@
 //! - Comment threads on announcements
 //! - Vote/poll responses
 
+use jid::BareJid;
 use minidom::Element;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use unicode_segmentation::UnicodeSegmentation;
 
 /// Namespace for XEP-0470 Pubsub Attachments.
@@ -161,6 +162,7 @@ pub struct ReactionSummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttachmentSummary {
     pub reactions: Vec<ReactionSummary>,
+    pub noticed_count: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -230,7 +232,16 @@ fn parse_summary_element(elem: &Element) -> AttachmentSummary {
         })
         .collect();
 
-    AttachmentSummary { reactions }
+    let noticed_count = elem
+        .children()
+        .find(|child| child.name() == "noticed" && child.ns() == NS_PUBSUB_ATTACHMENTS_SUMMARY)
+        .and_then(|child| child.attr("count"))
+        .and_then(|count| count.parse::<u32>().ok());
+
+    AttachmentSummary {
+        reactions,
+        noticed_count,
+    }
 }
 
 // ── Building ─────────────────────────────────────────────────────────
@@ -288,19 +299,64 @@ pub fn build_summary_element(summary: &AttachmentSummary) -> Element {
 
     for reaction_summary in &summary.reactions {
         let mut reaction = Element::builder("reaction", NS_PUBSUB_ATTACHMENTS_SUMMARY).build();
-        if reaction_summary.count > 1 {
-            reaction.set_attr(
-                minidom::rxml::Namespace::NONE,
-                minidom::rxml::xml_ncname!("count").to_owned(),
-                reaction_summary.count.to_string(),
-            );
-        }
+        reaction.set_attr(
+            minidom::rxml::Namespace::NONE,
+            minidom::rxml::xml_ncname!("count").to_owned(),
+            reaction_summary.count.to_string(),
+        );
         reaction.append_text_node(reaction_summary.emoji.clone());
         reactions.append_child(reaction);
     }
 
     root.append_child(reactions);
+    if let Some(count) = summary.noticed_count {
+        let noticed = Element::builder("noticed", NS_PUBSUB_ATTACHMENTS_SUMMARY)
+            .attr(
+                minidom::rxml::xml_ncname!("count").to_owned(),
+                count.to_string(),
+            )
+            .build();
+        root.append_child(noticed);
+    }
     root
+}
+
+pub fn summarize_attachments<I>(attachments: I) -> AttachmentSummary
+where
+    I: IntoIterator<Item = (BareJid, Attachment)>,
+{
+    let mut reactions_by_emoji: BTreeMap<String, BTreeSet<BareJid>> = BTreeMap::new();
+    let mut noticed_publishers = BTreeSet::new();
+
+    for (publisher, attachment) in attachments {
+        for payload in attachment.payloads {
+            match payload {
+                AttachmentPayload::Reactions(reactions) => {
+                    for emoji in reactions.emojis {
+                        reactions_by_emoji
+                            .entry(emoji)
+                            .or_default()
+                            .insert(publisher.clone());
+                    }
+                }
+                AttachmentPayload::Noticed => {
+                    noticed_publishers.insert(publisher.clone());
+                }
+                AttachmentPayload::Summary(_) | AttachmentPayload::Custom(_) => {}
+            }
+        }
+    }
+
+    AttachmentSummary {
+        reactions: reactions_by_emoji
+            .into_iter()
+            .map(|(emoji, publishers)| ReactionSummary {
+                emoji,
+                count: publishers.len() as u32,
+            })
+            .collect(),
+        noticed_count: (!noticed_publishers.is_empty()).then_some(noticed_publishers.len() as u32),
+    }
 }
 
 fn normalize_reactions<I, S>(emojis: I) -> Vec<String>
@@ -391,6 +447,73 @@ mod tests {
             reactions.children().map(Element::text).collect::<Vec<_>>(),
             vec!["👍", "❤️"]
         );
+    }
+
+    #[test]
+    fn summarizes_reactions_and_noticed_by_distinct_publisher() {
+        let alice = "alice@example.test".parse::<BareJid>().expect("alice jid");
+        let bob = "bob@example.test".parse::<BareJid>().expect("bob jid");
+        let summary = summarize_attachments([
+            (
+                alice.clone(),
+                Attachment::reactions(ReactionSet::new(["👍", "❤️", "👍"]))
+                    .with_payload(AttachmentPayload::Noticed),
+            ),
+            (
+                bob,
+                Attachment::reactions(ReactionSet::new(["👍"]))
+                    .with_payload(AttachmentPayload::Noticed),
+            ),
+            (
+                alice,
+                Attachment::empty()
+                    .with_unknown_child(Element::builder("future", "urn:example:future").build()),
+            ),
+        ]);
+
+        assert_eq!(
+            summary,
+            AttachmentSummary {
+                reactions: vec![
+                    ReactionSummary {
+                        emoji: "❤️".to_owned(),
+                        count: 1,
+                    },
+                    ReactionSummary {
+                        emoji: "👍".to_owned(),
+                        count: 2,
+                    },
+                ],
+                noticed_count: Some(2),
+            }
+        );
+    }
+
+    #[test]
+    fn builds_summary_payload_with_counts() {
+        let summary = AttachmentSummary {
+            reactions: vec![ReactionSummary {
+                emoji: "👍".to_owned(),
+                count: 1,
+            }],
+            noticed_count: Some(2),
+        };
+        let elem = build_summary_element(&summary);
+        let reactions = elem
+            .children()
+            .find(|child| child.name() == "reactions")
+            .expect("reactions child");
+        let reaction = reactions.children().next().expect("reaction child");
+        let noticed = elem
+            .children()
+            .find(|child| child.name() == "noticed")
+            .expect("noticed child");
+
+        assert_eq!(elem.name(), "summary");
+        assert_eq!(elem.ns(), NS_PUBSUB_ATTACHMENTS_SUMMARY);
+        assert_eq!(reaction.attr("count"), Some("1"));
+        assert_eq!(reaction.text(), "👍");
+        assert_eq!(noticed.attr("count"), Some("2"));
     }
 
     #[test]

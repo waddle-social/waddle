@@ -954,6 +954,9 @@ pub(super) async fn handle_community_publish(
         return handle_story_attachment_publish(iq, state, community_domain, node, item, session)
             .await;
     }
+    if is_story_attachment_summary_node(node) {
+        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
+    }
     if node != waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED
         && node != waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES
         && node != waddle_xmpp_core::xcal::PUBSUB_NODE_EVENTS
@@ -983,6 +986,18 @@ struct StoryAttachmentTarget {
 
 fn is_story_attachment_node(node: &str, community_domain: &str) -> bool {
     parse_story_attachment_target(node, community_domain).is_some()
+}
+
+fn story_attachment_summary_node() -> String {
+    format!(
+        "{}/{}",
+        waddle_xmpp::xep::xep0470::NS_PUBSUB_ATTACHMENTS_SUMMARY,
+        waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES
+    )
+}
+
+fn is_story_attachment_summary_node(node: &str) -> bool {
+    node == story_attachment_summary_node()
 }
 
 fn parse_story_attachment_target(
@@ -1107,15 +1122,103 @@ async fn ensure_story_attachment_node(
     if created
         || node.config.access_model != stories_node.config.access_model
         || node.config.publish_model != stories_node.config.publish_model
+        || node.config.max_items != 10_000
     {
         let mut config = node.config;
         config.access_model = stories_node.config.access_model;
         config.publish_model = stories_node.config.publish_model;
+        config.max_items = 10_000;
         storage
             .update_node_config(community_jid, attachment_node, &config)
             .await
             .map_err(|_| PubSubError::InternalServerError)?;
     }
+    Ok(())
+}
+
+async fn ensure_story_attachment_summary_node(
+    state: &WebSocketState,
+    community_jid: &BareJid,
+) -> Result<(), PubSubError> {
+    let storage = &state.deps.protocol.pubsub_storage;
+    let stories_node = storage
+        .get_node(
+            community_jid,
+            waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES,
+        )
+        .await
+        .map_err(|_| PubSubError::NodeNotFound)?
+        .ok_or(PubSubError::NodeNotFound)?;
+    let summary_node = story_attachment_summary_node();
+    let (node, created) = storage
+        .get_or_create_node(community_jid, &summary_node)
+        .await
+        .map_err(|_| PubSubError::InternalServerError)?;
+    if created
+        || node.config.access_model != stories_node.config.access_model
+        || node.config.publish_model != stories_node.config.publish_model
+        || node.config.max_items != 10_000
+    {
+        let mut config = node.config;
+        config.access_model = stories_node.config.access_model;
+        config.publish_model = stories_node.config.publish_model;
+        config.max_items = 10_000;
+        storage
+            .update_node_config(community_jid, &summary_node, &config)
+            .await
+            .map_err(|_| PubSubError::InternalServerError)?;
+    }
+    Ok(())
+}
+
+async fn update_story_attachment_summary(
+    state: &WebSocketState,
+    community_jid: &BareJid,
+    community_domain: &str,
+    attachment_node: &str,
+) -> Result<(), PubSubError> {
+    let Some(target) = parse_story_attachment_target(attachment_node, community_domain) else {
+        return Err(PubSubError::BadRequest);
+    };
+    ensure_story_attachment_summary_node(state, community_jid).await?;
+
+    let storage = &state.deps.protocol.pubsub_storage;
+    let attachment_items = storage
+        .get_items(community_jid, attachment_node, None, &[])
+        .await
+        .map_err(|_| PubSubError::InternalServerError)?;
+
+    let mut attachments = Vec::new();
+    for item in attachment_items {
+        let pubsub_item = item.to_pubsub_item();
+        let Some(publisher) = pubsub_item.publisher else {
+            continue;
+        };
+        let Some(payload) = pubsub_item.payload.as_ref() else {
+            continue;
+        };
+        let Some(attachment) = waddle_xmpp::xep::xep0470::parse_attachments_element(payload) else {
+            continue;
+        };
+        attachments.push((publisher, attachment));
+    }
+
+    let summary = waddle_xmpp::xep::xep0470::summarize_attachments(attachments);
+    let summary_item = PubSubItem::new(
+        Some(target.item_id),
+        Some(waddle_xmpp::xep::xep0470::build_summary_element(&summary)),
+    );
+    let summary_node = story_attachment_summary_node();
+    storage
+        .publish_item(
+            community_jid,
+            &summary_node,
+            &summary_item,
+            Some(community_jid),
+            false,
+        )
+        .await
+        .map_err(|_| PubSubError::InternalServerError)?;
     Ok(())
 }
 
@@ -1148,6 +1251,15 @@ async fn handle_story_attachment_publish(
         .await
     {
         Ok(result) => {
+            if let Err(error) =
+                update_story_attachment_summary(state, &community_jid, community_domain, node).await
+            {
+                warn!(
+                    node,
+                    error = ?error,
+                    "Failed to update story attachment summary after accepted publish"
+                );
+            }
             pubsub_fanout::fan_out_publish(
                 state,
                 pubsub_fanout::FanOutRequest {
@@ -1383,6 +1495,7 @@ pub(super) async fn handle_community_items(
     item_ids: &[String],
 ) -> Vec<String> {
     if !is_story_attachment_node(node, community_domain)
+        && !is_story_attachment_summary_node(node)
         && node != waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED
         && node != waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES
         && node != waddle_xmpp_core::xcal::PUBSUB_NODE_EVENTS
@@ -1521,7 +1634,18 @@ async fn handle_story_attachment_retract(
         .retract_item(&community_jid, node, publisher.as_str())
         .await
     {
-        Ok(true) => vec![iq_to_xml(build_pubsub_success(iq))],
+        Ok(true) => {
+            if let Err(error) =
+                update_story_attachment_summary(state, &community_jid, community_domain, node).await
+            {
+                warn!(
+                    node,
+                    error = ?error,
+                    "Failed to update story attachment summary after accepted retract"
+                );
+            }
+            vec![iq_to_xml(build_pubsub_success(iq))]
+        }
         Ok(false) => vec![iq_to_xml(build_pubsub_error(iq, PubSubError::ItemNotFound))],
         Err(error) => {
             warn!(node, item_id, error = %error, "Failed to retract story attachment item");

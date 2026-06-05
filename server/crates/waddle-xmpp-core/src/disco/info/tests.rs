@@ -163,6 +163,7 @@ fn test_community_service_features_advertise_feed_and_stories() {
     let features = community_service_features();
     assert!(features.contains(&Feature::social_feed()));
     assert!(features.contains(&Feature::stories()));
+    assert!(features.contains(&Feature::new("urn:xmpp:pubsub-attachments:1")));
     assert!(features.contains(&Feature::pubsub()));
     assert!(features.contains(&Feature::disco_info()));
 }
