@@ -285,6 +285,21 @@ pub struct WaddleSendOptions {
     pub request_displayed_marker: bool,
 }
 
+/// Typed outcome for outbound message sends. The old FFI surface
+/// returned an empty string for not-connected, invalid options, and
+/// transport/protocol failures; this keeps Swift-side control flow
+/// explicit without moving human diagnostics out of `on_error`.
+#[derive(uniffi::Enum, Clone, Debug, PartialEq, Eq)]
+pub enum WaddleSendMessageOutcome {
+    Sent { stanza_id: String },
+    NotConnected,
+    InvalidRecipient,
+    InvalidOptions,
+    StanzaError,
+    TransportError,
+    Error,
+}
+
 // ── A/V calls (XEP-0353 JMI + XEP-0166 Jingle) ──────────────────────────────
 
 /// Media kinds offered or accepted on a call. Mirrors

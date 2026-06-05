@@ -560,11 +560,34 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
 
     func connect() async
 
+    /**
+     * XEP-0050 `disable-device` ad-hoc command on `push.<domain>`.
+     * Per-device scope — `device_id` is the value returned by the
+     * preceding [`register_push_device`] call. Sibling devices on
+     * the same node keep receiving fan-out. Returns `true` when the
+     * command completes (including the idempotent already-disabled
+     * case).
+     */
+    func disablePushDevice(pushServiceJid: String, node: String, deviceId: String) async  -> Bool
+
+    /**
+     * XEP-0357 §6.1 `<disable/>` IQ. A `None`/missing `node` disables
+     * ALL push nodes at the service for this user.
+     */
+    func disablePushNotifications(pushServiceJid: String, node: String?) async  -> Bool
+
     func disconnect() async
 
     func discoverTopology() async  -> WaddleTopology
 
     func discoverUploadService() async  -> String?
+
+    /**
+     * XEP-0357 §5 `<enable/>` IQ against the user's XMPP server.
+     * Never carries provider credentials — those flow through
+     * `register_push_device` (XEP-0050) at `push.<domain>`.
+     */
+    func enablePushNotifications(pushServiceJid: String, node: String) async  -> Bool
 
     func fetchDmHistory(peerJid: String, maxMessages: UInt32, beforeId: String?) async  -> WaddleMamPage
 
@@ -573,6 +596,17 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     func joinRoom(roomJid: String, nick: String) async
 
     func leaveRoom(roomJid: String, nick: String) async
+
+    /**
+     * XEP-0050 `register-device` ad-hoc command on `push.<domain>`.
+     * Drives the multi-step dance and returns the assigned
+     * [`WaddleRegisterDeviceResult`] (node id + device id) on
+     * success. Returns `None` on failure with the diagnostic on the
+     * listener. The caller MUST persist both fields — node feeds
+     * the user-server XEP-0357 `<enable/>` IQ, device id scopes the
+     * per-device `disable_push_device` opt-out.
+     */
+    func registerPushDevice(pushServiceJid: String, appId: String, environment: WaddlePushEnvironment, credentials: WaddlePushDeviceCredentials) async  -> WaddleRegisterDeviceResult?
 
     /**
      * Request the XEP-0084 avatar for a user. Returns `None` when the target
@@ -664,9 +698,9 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
      */
     func sendCallSessionTerminate(peerFullJid: String, sid: String, reason: WaddleJingleReason?) async  -> Bool
 
-    func sendChatMessage(peerJid: String, body: String, options: WaddleSendOptions?) async  -> String
+    func sendChatMessage(peerJid: String, body: String, options: WaddleSendOptions?) async  -> WaddleSendMessageOutcome
 
-    func sendGroupchatMessage(roomJid: String, body: String, options: WaddleSendOptions?) async  -> String
+    func sendGroupchatMessage(roomJid: String, body: String, options: WaddleSendOptions?) async  -> WaddleSendMessageOutcome
 
     func sendPresence(status: String?, show: String?) async
 
@@ -751,6 +785,54 @@ open func connect()async   {
         )
 }
 
+    /**
+     * XEP-0050 `disable-device` ad-hoc command on `push.<domain>`.
+     * Per-device scope — `device_id` is the value returned by the
+     * preceding [`register_push_device`] call. Sibling devices on
+     * the same node keep receiving fan-out. Returns `true` when the
+     * command completes (including the idempotent already-disabled
+     * case).
+     */
+open func disablePushDevice(pushServiceJid: String, node: String, deviceId: String)async  -> Bool  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_disable_push_device(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(pushServiceJid),FfiConverterString.lower(node),FfiConverterString.lower(deviceId)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_i8,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_i8,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_i8,
+            liftFunc: FfiConverterBool.lift,
+            errorHandler: nil
+
+        )
+}
+
+    /**
+     * XEP-0357 §6.1 `<disable/>` IQ. A `None`/missing `node` disables
+     * ALL push nodes at the service for this user.
+     */
+open func disablePushNotifications(pushServiceJid: String, node: String?)async  -> Bool  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_disable_push_notifications(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(pushServiceJid),FfiConverterOptionString.lower(node)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_i8,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_i8,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_i8,
+            liftFunc: FfiConverterBool.lift,
+            errorHandler: nil
+
+        )
+}
+
 open func disconnect()async   {
     return
         try!  await uniffiRustCallAsync(
@@ -800,6 +882,29 @@ open func discoverUploadService()async  -> String?  {
             completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
             freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
             liftFunc: FfiConverterOptionString.lift,
+            errorHandler: nil
+
+        )
+}
+
+    /**
+     * XEP-0357 §5 `<enable/>` IQ against the user's XMPP server.
+     * Never carries provider credentials — those flow through
+     * `register_push_device` (XEP-0050) at `push.<domain>`.
+     */
+open func enablePushNotifications(pushServiceJid: String, node: String)async  -> Bool  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_enable_push_notifications(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(pushServiceJid),FfiConverterString.lower(node)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_i8,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_i8,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_i8,
+            liftFunc: FfiConverterBool.lift,
             errorHandler: nil
 
         )
@@ -872,6 +977,33 @@ open func leaveRoom(roomJid: String, nick: String)async   {
             completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
             freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
             liftFunc: { $0 },
+            errorHandler: nil
+
+        )
+}
+
+    /**
+     * XEP-0050 `register-device` ad-hoc command on `push.<domain>`.
+     * Drives the multi-step dance and returns the assigned
+     * [`WaddleRegisterDeviceResult`] (node id + device id) on
+     * success. Returns `None` on failure with the diagnostic on the
+     * listener. The caller MUST persist both fields — node feeds
+     * the user-server XEP-0357 `<enable/>` IQ, device id scopes the
+     * per-device `disable_push_device` opt-out.
+     */
+open func registerPushDevice(pushServiceJid: String, appId: String, environment: WaddlePushEnvironment, credentials: WaddlePushDeviceCredentials)async  -> WaddleRegisterDeviceResult?  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_register_push_device(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(pushServiceJid),FfiConverterString.lower(appId),FfiConverterTypeWaddlePushEnvironment_lower(environment),FfiConverterTypeWaddlePushDeviceCredentials_lower(credentials)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterOptionTypeWaddleRegisterDeviceResult.lift,
             errorHandler: nil
 
         )
@@ -1175,7 +1307,7 @@ open func sendCallSessionTerminate(peerFullJid: String, sid: String, reason: Wad
         )
 }
 
-open func sendChatMessage(peerJid: String, body: String, options: WaddleSendOptions?)async  -> String  {
+open func sendChatMessage(peerJid: String, body: String, options: WaddleSendOptions?)async  -> WaddleSendMessageOutcome  {
     return
         try!  await uniffiRustCallAsync(
             rustFutureFunc: {
@@ -1187,13 +1319,13 @@ open func sendChatMessage(peerJid: String, body: String, options: WaddleSendOpti
             pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
             completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
             freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterString.lift,
+            liftFunc: FfiConverterTypeWaddleSendMessageOutcome_lift,
             errorHandler: nil
 
         )
 }
 
-open func sendGroupchatMessage(roomJid: String, body: String, options: WaddleSendOptions?)async  -> String  {
+open func sendGroupchatMessage(roomJid: String, body: String, options: WaddleSendOptions?)async  -> WaddleSendMessageOutcome  {
     return
         try!  await uniffiRustCallAsync(
             rustFutureFunc: {
@@ -1205,7 +1337,7 @@ open func sendGroupchatMessage(roomJid: String, body: String, options: WaddleSen
             pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
             completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
             freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterString.lift,
+            liftFunc: FfiConverterTypeWaddleSendMessageOutcome_lift,
             errorHandler: nil
 
         )
@@ -2207,6 +2339,10 @@ public struct WaddleMessage: Equatable, Hashable {
     public var retractsId: String?
     public var reactionTargetId: String?
     public var reactionEmojis: [String]
+    /**
+     * XEP-0333 `<markable/>` request attached to this inbound message.
+     */
+    public var displayedMarkerRequested: Bool
     public var isMuc: Bool
     public var thread: String?
     public var parentThreadId: String?
@@ -2240,7 +2376,10 @@ public struct WaddleMessage: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(id: String?, from: String?, to: String?, body: String?, messageType: String, timestamp: String?, stanzaId: String?, originId: String?, replacesId: String?, retractsId: String?, reactionTargetId: String?, reactionEmojis: [String], isMuc: Bool, thread: String?, parentThreadId: String?,
+    public init(id: String?, from: String?, to: String?, body: String?, messageType: String, timestamp: String?, stanzaId: String?, originId: String?, replacesId: String?, retractsId: String?, reactionTargetId: String?, reactionEmojis: [String],
+        /**
+         * XEP-0333 `<markable/>` request attached to this inbound message.
+         */displayedMarkerRequested: Bool, isMuc: Bool, thread: String?, parentThreadId: String?,
         /**
          * XEP-0461 reply target message id.
          */replyToId: String?,
@@ -2274,6 +2413,7 @@ public struct WaddleMessage: Equatable, Hashable {
         self.retractsId = retractsId
         self.reactionTargetId = reactionTargetId
         self.reactionEmojis = reactionEmojis
+        self.displayedMarkerRequested = displayedMarkerRequested
         self.isMuc = isMuc
         self.thread = thread
         self.parentThreadId = parentThreadId
@@ -2313,6 +2453,7 @@ public struct FfiConverterTypeWaddleMessage: FfiConverterRustBuffer {
                 retractsId: FfiConverterOptionString.read(from: &buf),
                 reactionTargetId: FfiConverterOptionString.read(from: &buf),
                 reactionEmojis: FfiConverterSequenceString.read(from: &buf),
+                displayedMarkerRequested: FfiConverterBool.read(from: &buf),
                 isMuc: FfiConverterBool.read(from: &buf),
                 thread: FfiConverterOptionString.read(from: &buf),
                 parentThreadId: FfiConverterOptionString.read(from: &buf),
@@ -2338,6 +2479,7 @@ public struct FfiConverterTypeWaddleMessage: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.retractsId, into: &buf)
         FfiConverterOptionString.write(value.reactionTargetId, into: &buf)
         FfiConverterSequenceString.write(value.reactionEmojis, into: &buf)
+        FfiConverterBool.write(value.displayedMarkerRequested, into: &buf)
         FfiConverterBool.write(value.isMuc, into: &buf)
         FfiConverterOptionString.write(value.thread, into: &buf)
         FfiConverterOptionString.write(value.parentThreadId, into: &buf)
@@ -2382,6 +2524,14 @@ public struct WaddleMujiPresence: Equatable, Hashable {
      * child — the occupant is actively participating in the call.
      */
     public var active: Bool
+    /**
+     * True when at least one content description advertises audio.
+     */
+    public var audio: Bool
+    /**
+     * True when at least one content description advertises video.
+     */
+    public var video: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -2394,9 +2544,17 @@ public struct WaddleMujiPresence: Equatable, Hashable {
         /**
          * True when the presence advertised at least one `<content/>`
          * child — the occupant is actively participating in the call.
-         */active: Bool) {
+         */active: Bool,
+        /**
+         * True when at least one content description advertises audio.
+         */audio: Bool,
+        /**
+         * True when at least one content description advertises video.
+         */video: Bool) {
         self.preparing = preparing
         self.active = active
+        self.audio = audio
+        self.video = video
     }
 
 
@@ -2416,13 +2574,17 @@ public struct FfiConverterTypeWaddleMujiPresence: FfiConverterRustBuffer {
         return
             try WaddleMujiPresence(
                 preparing: FfiConverterBool.read(from: &buf),
-                active: FfiConverterBool.read(from: &buf)
+                active: FfiConverterBool.read(from: &buf),
+                audio: FfiConverterBool.read(from: &buf),
+                video: FfiConverterBool.read(from: &buf)
         )
     }
 
     public static func write(_ value: WaddleMujiPresence, into buf: inout [UInt8]) {
         FfiConverterBool.write(value.preparing, into: &buf)
         FfiConverterBool.write(value.active, into: &buf)
+        FfiConverterBool.write(value.audio, into: &buf)
+        FfiConverterBool.write(value.video, into: &buf)
     }
 }
 
@@ -2595,6 +2757,68 @@ public func FfiConverterTypeWaddlePresenceHat_lower(_ value: WaddlePresenceHat) 
 
 
 /**
+ * Outcome of a successful `register_push_device` UniFFI call.
+ * Carries the assigned XEP-0357 node id AND the Push Service-assigned
+ * device row id. The Apple client persists both: node feeds the
+ * user-server XEP-0357 `<enable/>` IQ; device id scopes the
+ * matching `disable_push_device` opt-out so a per-device unsubscribe
+ * doesn't take down push for sibling devices on the same node.
+ */
+public struct WaddleRegisterDeviceResult: Equatable, Hashable {
+    public var node: String
+    public var deviceId: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(node: String, deviceId: String) {
+        self.node = node
+        self.deviceId = deviceId
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleRegisterDeviceResult: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleRegisterDeviceResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleRegisterDeviceResult {
+        return
+            try WaddleRegisterDeviceResult(
+                node: FfiConverterString.read(from: &buf),
+                deviceId: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleRegisterDeviceResult, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.node, into: &buf)
+        FfiConverterString.write(value.deviceId, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleRegisterDeviceResult_lift(_ buf: RustBuffer) throws -> WaddleRegisterDeviceResult {
+    return try FfiConverterTypeWaddleRegisterDeviceResult.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleRegisterDeviceResult_lower(_ value: WaddleRegisterDeviceResult) -> RustBuffer {
+    return FfiConverterTypeWaddleRegisterDeviceResult.lower(value)
+}
+
+
+/**
  * XEP-0461 reply target attached to an outbound message.
  */
 public struct WaddleReplyTarget: Equatable, Hashable {
@@ -2674,15 +2898,19 @@ public struct WaddleSendOptions: Equatable, Hashable {
     public var fallback: WaddleFallbackRange?
     public var thread: WaddleThreadTarget?
     public var sharedFiles: [WaddleSharedFile]
+    public var linkPreviewToken: String?
+    public var requestDisplayedMarker: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(stanzaId: String?, reply: WaddleReplyTarget?, fallback: WaddleFallbackRange?, thread: WaddleThreadTarget?, sharedFiles: [WaddleSharedFile]) {
+    public init(stanzaId: String?, reply: WaddleReplyTarget?, fallback: WaddleFallbackRange?, thread: WaddleThreadTarget?, sharedFiles: [WaddleSharedFile], linkPreviewToken: String?, requestDisplayedMarker: Bool) {
         self.stanzaId = stanzaId
         self.reply = reply
         self.fallback = fallback
         self.thread = thread
         self.sharedFiles = sharedFiles
+        self.linkPreviewToken = linkPreviewToken
+        self.requestDisplayedMarker = requestDisplayedMarker
     }
 
 
@@ -2705,7 +2933,9 @@ public struct FfiConverterTypeWaddleSendOptions: FfiConverterRustBuffer {
                 reply: FfiConverterOptionTypeWaddleReplyTarget.read(from: &buf),
                 fallback: FfiConverterOptionTypeWaddleFallbackRange.read(from: &buf),
                 thread: FfiConverterOptionTypeWaddleThreadTarget.read(from: &buf),
-                sharedFiles: FfiConverterSequenceTypeWaddleSharedFile.read(from: &buf)
+                sharedFiles: FfiConverterSequenceTypeWaddleSharedFile.read(from: &buf),
+                linkPreviewToken: FfiConverterOptionString.read(from: &buf),
+                requestDisplayedMarker: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -2715,6 +2945,8 @@ public struct FfiConverterTypeWaddleSendOptions: FfiConverterRustBuffer {
         FfiConverterOptionTypeWaddleFallbackRange.write(value.fallback, into: &buf)
         FfiConverterOptionTypeWaddleThreadTarget.write(value.thread, into: &buf)
         FfiConverterSequenceTypeWaddleSharedFile.write(value.sharedFiles, into: &buf)
+        FfiConverterOptionString.write(value.linkPreviewToken, into: &buf)
+        FfiConverterBool.write(value.requestDisplayedMarker, into: &buf)
     }
 }
 
@@ -3636,6 +3868,280 @@ public func FfiConverterTypeWaddleMucRole_lower(_ value: WaddleMucRole) -> RustB
 }
 
 
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Platform-discriminated provider credentials. Mirrors the upstream
+ * `PushDeviceCredentials` enum exactly; UniFFI generates a Swift
+ * associated-value enum that the Apple client populates per
+ * platform.
+ */
+
+public enum WaddlePushDeviceCredentials: Equatable, Hashable {
+
+    case webPush(endpoint: String, p256dh: String, auth: String
+    )
+    case apns(deviceToken: String
+    )
+    case fcm(registrationToken: String
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddlePushDeviceCredentials: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddlePushDeviceCredentials: FfiConverterRustBuffer {
+    typealias SwiftType = WaddlePushDeviceCredentials
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddlePushDeviceCredentials {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .webPush(endpoint: try FfiConverterString.read(from: &buf), p256dh: try FfiConverterString.read(from: &buf), auth: try FfiConverterString.read(from: &buf)
+        )
+
+        case 2: return .apns(deviceToken: try FfiConverterString.read(from: &buf)
+        )
+
+        case 3: return .fcm(registrationToken: try FfiConverterString.read(from: &buf)
+        )
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddlePushDeviceCredentials, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case let .webPush(endpoint,p256dh,auth):
+            writeInt(&buf, Int32(1))
+            FfiConverterString.write(endpoint, into: &buf)
+            FfiConverterString.write(p256dh, into: &buf)
+            FfiConverterString.write(auth, into: &buf)
+
+
+        case let .apns(deviceToken):
+            writeInt(&buf, Int32(2))
+            FfiConverterString.write(deviceToken, into: &buf)
+
+
+        case let .fcm(registrationToken):
+            writeInt(&buf, Int32(3))
+            FfiConverterString.write(registrationToken, into: &buf)
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddlePushDeviceCredentials_lift(_ buf: RustBuffer) throws -> WaddlePushDeviceCredentials {
+    return try FfiConverterTypeWaddlePushDeviceCredentials.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddlePushDeviceCredentials_lower(_ value: WaddlePushDeviceCredentials) -> RustBuffer {
+    return FfiConverterTypeWaddlePushDeviceCredentials.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Provider deployment environment. `Sandbox` distinguishes the APNs
+ * `apns_development` endpoint from `apns_production`; Web Push and
+ * FCM accept only `Production` today.
+ */
+
+public enum WaddlePushEnvironment: Equatable, Hashable {
+
+    case production
+    case sandbox
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddlePushEnvironment: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddlePushEnvironment: FfiConverterRustBuffer {
+    typealias SwiftType = WaddlePushEnvironment
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddlePushEnvironment {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .production
+
+        case 2: return .sandbox
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddlePushEnvironment, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .production:
+            writeInt(&buf, Int32(1))
+
+
+        case .sandbox:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddlePushEnvironment_lift(_ buf: RustBuffer) throws -> WaddlePushEnvironment {
+    return try FfiConverterTypeWaddlePushEnvironment.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddlePushEnvironment_lower(_ value: WaddlePushEnvironment) -> RustBuffer {
+    return FfiConverterTypeWaddlePushEnvironment.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Typed outcome for outbound message sends. The old FFI surface
+ * returned an empty string for not-connected, invalid options, and
+ * transport/protocol failures; this keeps Swift-side control flow
+ * explicit without moving human diagnostics out of `on_error`.
+ */
+
+public enum WaddleSendMessageOutcome: Equatable, Hashable {
+
+    case sent(stanzaId: String
+    )
+    case notConnected
+    case invalidRecipient
+    case invalidOptions
+    case stanzaError
+    case transportError
+    case error
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleSendMessageOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleSendMessageOutcome: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleSendMessageOutcome
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleSendMessageOutcome {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .sent(stanzaId: try FfiConverterString.read(from: &buf)
+        )
+
+        case 2: return .notConnected
+
+        case 3: return .invalidRecipient
+
+        case 4: return .invalidOptions
+
+        case 5: return .stanzaError
+
+        case 6: return .transportError
+
+        case 7: return .error
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleSendMessageOutcome, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case let .sent(stanzaId):
+            writeInt(&buf, Int32(1))
+            FfiConverterString.write(stanzaId, into: &buf)
+
+
+        case .notConnected:
+            writeInt(&buf, Int32(2))
+
+
+        case .invalidRecipient:
+            writeInt(&buf, Int32(3))
+
+
+        case .invalidOptions:
+            writeInt(&buf, Int32(4))
+
+
+        case .stanzaError:
+            writeInt(&buf, Int32(5))
+
+
+        case .transportError:
+            writeInt(&buf, Int32(6))
+
+
+        case .error:
+            writeInt(&buf, Int32(7))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleSendMessageOutcome_lift(_ buf: RustBuffer) throws -> WaddleSendMessageOutcome {
+    return try FfiConverterTypeWaddleSendMessageOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleSendMessageOutcome_lower(_ value: WaddleSendMessageOutcome) -> RustBuffer {
+    return FfiConverterTypeWaddleSendMessageOutcome.lower(value)
+}
+
+
 
 
 
@@ -4172,6 +4678,30 @@ fileprivate struct FfiConverterOptionTypeWaddleMujiPresence: FfiConverterRustBuf
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeWaddleRegisterDeviceResult: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleRegisterDeviceResult?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddleRegisterDeviceResult.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddleRegisterDeviceResult.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeWaddleReplyTarget: FfiConverterRustBuffer {
     typealias SwiftType = WaddleReplyTarget?
 
@@ -4652,6 +5182,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_connect() != 32392) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disable_push_device() != 60415) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disable_push_notifications() != 26989) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disconnect() != 16481) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -4659,6 +5195,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_discover_upload_service() != 12511) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_enable_push_notifications() != 33803) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_dm_history() != 19552) {
@@ -4671,6 +5210,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_leave_room() != 31045) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_register_push_device() != 3340) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_avatar() != 34151) {
@@ -4712,10 +5254,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_terminate() != 39597) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_chat_message() != 21298) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_chat_message() != 363) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_groupchat_message() != 52171) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_groupchat_message() != 38838) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_presence() != 28282) {
