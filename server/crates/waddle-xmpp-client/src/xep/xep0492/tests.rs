@@ -280,6 +280,45 @@ fn merge_emits_children_in_xsd_sequence_order() {
 }
 
 #[test]
+fn merge_preserves_duplicate_foreign_notify_children_verbatim() {
+    // XEP-0492 §3 ¶3 de-duplicates setting elements, not arbitrary
+    // foreign extension children. Same-name foreign children with
+    // different attrs/content must survive exactly as written.
+    let extensions_xml = "<extensions xmlns='urn:xmpp:bookmarks:1'>\
+                    <notify xmlns='urn:xmpp:notification-settings:1'>\
+                        <always />\
+                        <rule xmlns='custom:notify:rules:1' id='a'><value xmlns='custom:notify:rules:1'>one</value></rule>\
+                        <rule xmlns='custom:notify:rules:1' id='b'><value xmlns='custom:notify:rules:1'>two</value></rule>\
+                    </notify>\
+                    </extensions>";
+    let extensions: Element = extensions_xml.parse().expect("valid xml");
+    let merged = merge_notify_into_extensions(Some(&extensions), NotifyMode::Never, false);
+    let notify = find_notify_in_extensions(&merged).expect("notify present");
+    let rules: Vec<&Element> = notify
+        .children()
+        .filter(|child| child.is("rule", "custom:notify:rules:1"))
+        .collect();
+
+    assert_eq!(rules.len(), 2);
+    assert_eq!(rules[0].attr("id"), Some("a"));
+    assert_eq!(
+        rules[0]
+            .get_child("value", "custom:notify:rules:1")
+            .map(|value| value.text())
+            .as_deref(),
+        Some("one")
+    );
+    assert_eq!(rules[1].attr("id"), Some("b"));
+    assert_eq!(
+        rules[1]
+            .get_child("value", "custom:notify:rules:1")
+            .map(|value| value.text())
+            .as_deref(),
+        Some("two")
+    );
+}
+
+#[test]
 fn merge_collapses_multiple_notify_siblings() {
     // Two `<notify/>` wrappers (a malformed but possible state):
     // dedupe and fold into a single output `<notify/>` per §3 ¶3.

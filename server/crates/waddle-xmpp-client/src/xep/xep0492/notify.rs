@@ -220,14 +220,17 @@ pub fn merge_notify_into_extensions(
         .build()
 }
 
-/// Gather the setting children of one `<notify/>` element into `out`,
-/// de-duplicating identical `(name, ns, identity-*)` elements per
-/// XEP-0492 v0.2.0 §3 ¶3. Folds multiple `<notify/>` siblings into one
-/// pool when called repeatedly with the same `out` vector (the
-/// malformed-but-possible multi-`<notify/>` case the merge collapses).
+/// Gather the children of one `<notify/>` element into `out`,
+/// de-duplicating only XEP-0492 setting elements with identical
+/// `(name, ns, identity-*)` per §3 ¶3. Foreign direct children are
+/// preserved verbatim, including same-name siblings with different
+/// attributes or contents, because the XEP de-dupe rule does not
+/// apply to non-setting extension elements.
 fn gather_notify_settings(notify: &Element, out: &mut Vec<Element>) {
     for setting in notify.children() {
-        if out.iter().any(|prior| settings_equivalent(prior, setting)) {
+        let is_xep_setting = setting.ns() == NS_NOTIFICATION_SETTINGS
+            && NotifyMode::from_wire_name(setting.name()).is_some();
+        if is_xep_setting && out.iter().any(|prior| settings_equivalent(prior, setting)) {
             continue;
         }
         out.push(setting.clone());

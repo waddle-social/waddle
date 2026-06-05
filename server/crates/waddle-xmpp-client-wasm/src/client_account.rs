@@ -358,9 +358,10 @@ impl WaddleClient {
             let outcome = match outcome {
                 waddle_xmpp_client::notification_settings::SetDmNotificationModeOutcome::Ok {
                     jid,
-                    notify,
+                    mode,
+                    rich_payload_opt_in,
                 } => WaddleSetDmNotificationModeOutcome::Ok {
-                    item: surface_dm_bookmark(&jid, &notify),
+                    item: surface_dm_bookmark_values(&jid, Some(mode), rich_payload_opt_in),
                 },
                 waddle_xmpp_client::notification_settings::SetDmNotificationModeOutcome::Removed {
                     jid,
@@ -837,13 +838,24 @@ fn fetch_threads_query_from_options(
 
 /// Surface one DM-bookmark `<notify/>` into the JS-facing
 /// [`WaddleDmBookmarkItem`] (issue #720). Used by both
-/// `fetch_dm_bookmarks` (per-item map) and `set_dm_notification_mode`
-/// (response shaping of the merged `<notify/>`).
+/// `fetch_dm_bookmarks` per-item parsing.
 fn surface_dm_bookmark(jid: &jid::BareJid, notify: &Element) -> WaddleDmBookmarkItem {
+    surface_dm_bookmark_values(
+        jid,
+        read_fallback_mode(notify),
+        read_rich_payload_opt_in(notify),
+    )
+}
+
+fn surface_dm_bookmark_values(
+    jid: &jid::BareJid,
+    notify_mode: Option<waddle_xmpp_client::xep::xep0492::NotifyMode>,
+    rich_payload_opt_in: bool,
+) -> WaddleDmBookmarkItem {
     WaddleDmBookmarkItem {
         jid: jid.to_string(),
-        notify_mode: read_fallback_mode(notify),
-        rich_payload_opt_in: read_rich_payload_opt_in(notify),
+        notify_mode,
+        rich_payload_opt_in,
     }
 }
 
@@ -872,15 +884,8 @@ impl waddle_xmpp_client::push::CommandDriver for WasmCommandDriver {
     }
 }
 
-fn js_value_to_client_error(js: JsValue) -> waddle_xmpp_client::error::ClientError {
-    let text = js
-        .as_string()
-        .unwrap_or_else(|| "WASM send_iq failed".to_string());
-    waddle_xmpp_client::error::ClientError::StanzaError(waddle_xmpp_client::error::StanzaError {
-        error_type: waddle_xmpp_client::error::StanzaErrorType::Cancel,
-        condition: "internal-server-error".to_string(),
-        text: Some(text),
-    })
+fn js_value_to_client_error(_js: JsValue) -> waddle_xmpp_client::error::ClientError {
+    waddle_xmpp_client::error::ClientError::Disconnected
 }
 
 /// Defense-in-depth check for `fetch_vapid_public_key`: refuse to accept

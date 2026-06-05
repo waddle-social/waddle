@@ -9,6 +9,11 @@ use crate::state::{ClientState, SessionPhase};
 
 pub type ClientResult<T> = Result<T, ClientError>;
 
+/// RFC 6120 §8.3 stanza-error condition names used by higher-level
+/// protocol flows.
+pub const STANZA_CONDITION_ITEM_NOT_FOUND: &str = "item-not-found";
+pub const STANZA_CONDITION_PRECONDITION_NOT_MET: &str = "precondition-not-met";
+
 #[derive(Debug, Error)]
 pub enum ClientError {
     #[error(transparent)]

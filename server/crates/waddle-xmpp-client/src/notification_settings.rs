@@ -7,7 +7,9 @@ use jid::BareJid;
 use minidom::Element;
 use uuid::Uuid;
 
-use crate::error::ClientResult;
+use crate::error::{
+    ClientResult, STANZA_CONDITION_ITEM_NOT_FOUND, STANZA_CONDITION_PRECONDITION_NOT_MET,
+};
 use crate::push::CommandDriver;
 use crate::xep::xep0402::{
     build_fetch_bookmarks_iq, build_publish_bookmark_iq, parse_bookmarks_response, BookmarkItem,
@@ -42,8 +44,14 @@ pub struct SetDmNotificationMode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SetDmNotificationModeOutcome {
-    Ok { jid: BareJid, notify: Element },
-    Removed { jid: BareJid },
+    Ok {
+        jid: BareJid,
+        mode: NotifyMode,
+        rich_payload_opt_in: bool,
+    },
+    Removed {
+        jid: BareJid,
+    },
     NodeConfigMismatch,
     Error,
 }
@@ -55,7 +63,7 @@ pub async fn set_room_notification_mode<D: CommandDriver>(
     let fetch_iq = build_fetch_bookmarks_iq(&Uuid::new_v4().to_string());
     let items = match driver.send_iq(fetch_iq).await {
         Ok(elem) => parse_bookmarks_response(&elem),
-        Err(err) if is_stanza_condition(&err, "item-not-found") => Vec::new(),
+        Err(err) if is_stanza_condition(&err, STANZA_CONDITION_ITEM_NOT_FOUND) => Vec::new(),
         Err(err) => return Err(err),
     };
 
@@ -80,10 +88,12 @@ pub async fn set_room_notification_mode<D: CommandDriver>(
     let publish_iq = build_publish_bookmark_iq(&merged_item, &Uuid::new_v4().to_string());
     match driver.send_iq(publish_iq).await {
         Ok(_) => Ok(SetRoomNotificationModeOutcome::Ok { item: merged_item }),
-        Err(err) if is_stanza_condition(&err, "precondition-not-met") => {
+        Err(err) if is_stanza_condition(&err, STANZA_CONDITION_PRECONDITION_NOT_MET) => {
             Ok(SetRoomNotificationModeOutcome::NodeConfigMismatch)
         }
-        Err(err) if is_stanza_error(&err) => Ok(SetRoomNotificationModeOutcome::Error),
+        Err(err) if warn_stanza_error(&err, "set_room_notification_mode.publish") => {
+            Ok(SetRoomNotificationModeOutcome::Error)
+        }
         Err(err) => Err(err),
     }
 }
@@ -95,7 +105,7 @@ pub async fn set_dm_notification_mode<D: CommandDriver>(
     let fetch_iq = build_fetch_dm_bookmarks_iq(&Uuid::new_v4().to_string());
     let items = match driver.send_iq(fetch_iq).await {
         Ok(elem) => parse_dm_bookmark_payloads(&elem),
-        Err(err) if is_stanza_condition(&err, "item-not-found") => Vec::new(),
+        Err(err) if is_stanza_condition(&err, STANZA_CONDITION_ITEM_NOT_FOUND) => Vec::new(),
         Err(err) => return Err(err),
     };
 
@@ -116,12 +126,14 @@ pub async fn set_dm_notification_mode<D: CommandDriver>(
             Ok(_) => Ok(SetDmNotificationModeOutcome::Removed {
                 jid: options.dm_jid,
             }),
-            Err(err) if is_stanza_condition(&err, "item-not-found") => {
+            Err(err) if is_stanza_condition(&err, STANZA_CONDITION_ITEM_NOT_FOUND) => {
                 Ok(SetDmNotificationModeOutcome::Removed {
                     jid: options.dm_jid,
                 })
             }
-            Err(err) if is_stanza_error(&err) => Ok(SetDmNotificationModeOutcome::Error),
+            Err(err) if warn_stanza_error(&err, "set_dm_notification_mode.retract") => {
+                Ok(SetDmNotificationModeOutcome::Error)
+            }
             Err(err) => Err(err),
         };
     }
@@ -131,12 +143,15 @@ pub async fn set_dm_notification_mode<D: CommandDriver>(
     match driver.send_iq(publish_iq).await {
         Ok(_) => Ok(SetDmNotificationModeOutcome::Ok {
             jid: options.dm_jid,
-            notify: merged,
+            mode: options.mode,
+            rich_payload_opt_in: options.rich_payload_opt_in,
         }),
-        Err(err) if is_stanza_condition(&err, "precondition-not-met") => {
+        Err(err) if is_stanza_condition(&err, STANZA_CONDITION_PRECONDITION_NOT_MET) => {
             Ok(SetDmNotificationModeOutcome::NodeConfigMismatch)
         }
-        Err(err) if is_stanza_error(&err) => Ok(SetDmNotificationModeOutcome::Error),
+        Err(err) if warn_stanza_error(&err, "set_dm_notification_mode.publish") => {
+            Ok(SetDmNotificationModeOutcome::Error)
+        }
         Err(err) => Err(err),
     }
 }
@@ -173,8 +188,18 @@ fn is_stanza_condition(err: &crate::error::ClientError, condition: &str) -> bool
     matches!(err, crate::error::ClientError::StanzaError(stanza_err) if stanza_err.condition == condition)
 }
 
-fn is_stanza_error(err: &crate::error::ClientError) -> bool {
-    matches!(err, crate::error::ClientError::StanzaError(_))
+fn warn_stanza_error(err: &crate::error::ClientError, operation: &'static str) -> bool {
+    let crate::error::ClientError::StanzaError(stanza_err) = err else {
+        return false;
+    };
+    tracing::warn!(
+        operation,
+        condition = %stanza_err.condition,
+        error_type = ?stanza_err.error_type,
+        text = stanza_err.text.as_deref(),
+        "unexpected stanza error while updating notification settings"
+    );
+    true
 }
 
 #[cfg(test)]
@@ -317,7 +342,7 @@ mod tests {
         let room_jid: BareJid = "room@muc.waddle.test".parse().unwrap();
         let driver = MockDriver::new(vec![
             Ok(bookmarks_response(Vec::new())),
-            Err(stanza_error("precondition-not-met")),
+            Err(stanza_error(STANZA_CONDITION_PRECONDITION_NOT_MET)),
         ]);
 
         let outcome = block_on(set_room_notification_mode(
@@ -367,7 +392,7 @@ mod tests {
         let dm_jid: BareJid = "bob@waddle.test".parse().unwrap();
         let driver = MockDriver::new(vec![
             Ok(dm_bookmarks_response(Vec::new())),
-            Err(stanza_error("precondition-not-met")),
+            Err(stanza_error(STANZA_CONDITION_PRECONDITION_NOT_MET)),
         ]);
 
         let outcome = block_on(set_dm_notification_mode(
@@ -386,7 +411,10 @@ mod tests {
     #[test]
     fn dm_fetch_item_not_found_is_treated_as_empty_bookmark_set() {
         let dm_jid: BareJid = "bob@waddle.test".parse().unwrap();
-        let driver = MockDriver::new(vec![Err(stanza_error("item-not-found")), Ok(ok_iq())]);
+        let driver = MockDriver::new(vec![
+            Err(stanza_error(STANZA_CONDITION_ITEM_NOT_FOUND)),
+            Ok(ok_iq()),
+        ]);
 
         let outcome = block_on(set_dm_notification_mode(
             &driver,
@@ -401,6 +429,31 @@ mod tests {
         assert_eq!(
             outcome,
             SetDmNotificationModeOutcome::Removed { jid: dm_jid }
+        );
+    }
+
+    #[test]
+    fn dm_publish_outcome_carries_typed_notify_values() {
+        let dm_jid: BareJid = "bob@waddle.test".parse().unwrap();
+        let driver = MockDriver::new(vec![Ok(dm_bookmarks_response(Vec::new())), Ok(ok_iq())]);
+
+        let outcome = block_on(set_dm_notification_mode(
+            &driver,
+            SetDmNotificationMode {
+                dm_jid: dm_jid.clone(),
+                mode: NotifyMode::Never,
+                rich_payload_opt_in: true,
+            },
+        ))
+        .unwrap();
+
+        assert_eq!(
+            outcome,
+            SetDmNotificationModeOutcome::Ok {
+                jid: dm_jid,
+                mode: NotifyMode::Never,
+                rich_payload_opt_in: true,
+            }
         );
     }
 }
