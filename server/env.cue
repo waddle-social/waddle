@@ -14,6 +14,7 @@ let _rustInputs = [
 	"rust-toolchain.toml",
 	"crates/**",
 	"extensions/**",
+	"scripts/**",
 	"wit/**",
 ]
 
@@ -149,6 +150,7 @@ schema.#Project & {
 				_t.fmt,
 				_t.clippy,
 				_t.test,
+				_t.checkXmppClientFfiBindings,
 				_t.renderDeployment,
 				_t.buildExtensionModules,
 				_t.publishContainerImage,
@@ -183,7 +185,7 @@ schema.#Project & {
 				packages:        "read"
 				"pull-requests": "none"
 			}
-			tasks: [_t.checkRootSyncDrift, _t.checkCiDrift, _t.nixFmt, _t.nixClippy, _t.nixTest, _t.renderDeployment, _t.nixBuildExtensionModules, _t.nixBuildCi]
+			tasks: [_t.checkRootSyncDrift, _t.checkCiDrift, _t.nixFmt, _t.nixClippy, _t.nixTest, _t.checkXmppClientFfiBindings, _t.renderDeployment, _t.nixBuildExtensionModules, _t.nixBuildCi]
 		}
 		xmppCompliance: {
 			mode: "expanded"
@@ -277,6 +279,17 @@ schema.#Project & {
 		test: xRust.#Test & {
 			args: ["test", "--workspace", "--all-targets", "--locked"]
 			inputs: _rustInputs
+		}
+
+		checkXmppClientFfiBindings: schema.#Task & {
+			command: "bash"
+			args: ["scripts/check-xmpp-client-ffi-bindings.sh"]
+			inputs: list.Concat([
+				_rustInputs,
+				[
+					"../apps/apple/Waddle/RustClient/Generated/**",
+				],
+			])
 		}
 
 		buildCi: xRust.#Build & {

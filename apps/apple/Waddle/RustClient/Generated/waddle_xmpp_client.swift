@@ -560,63 +560,7 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
 
     func connect() async
 
-    /**
-     * XEP-0050 `disable-device` ad-hoc command on `push.<domain>`.
-     * Per-device scope — `device_id` is the value returned by the
-     * preceding [`register_push_device`] call. Sibling devices on
-     * the same node keep receiving fan-out. Returns `true` when the
-     * command completes (including the idempotent already-disabled
-     * case).
-     */
-    func disablePushDevice(pushServiceJid: String, node: String, deviceId: String) async  -> Bool
-
-    /**
-     * XEP-0357 §6.1 `<disable/>` IQ. A `None`/missing `node` disables
-     * ALL push nodes at the service for this user.
-     */
-    func disablePushNotifications(pushServiceJid: String, node: String?) async  -> Bool
-
     func disconnect() async
-
-    func discoverTopology() async  -> WaddleTopology
-
-    func discoverUploadService() async  -> String?
-
-    /**
-     * XEP-0357 §5 `<enable/>` IQ against the user's XMPP server.
-     * Never carries provider credentials — those flow through
-     * `register_push_device` (XEP-0050) at `push.<domain>`.
-     */
-    func enablePushNotifications(pushServiceJid: String, node: String) async  -> Bool
-
-    func fetchDmHistory(peerJid: String, maxMessages: UInt32, beforeId: String?) async  -> WaddleMamPage
-
-    func fetchRoomHistory(roomJid: String, maxMessages: UInt32, beforeId: String?) async  -> WaddleMamPage
-
-    func joinRoom(roomJid: String, nick: String) async
-
-    func leaveRoom(roomJid: String, nick: String) async
-
-    /**
-     * XEP-0050 `register-device` ad-hoc command on `push.<domain>`.
-     * Drives the multi-step dance and returns the assigned
-     * [`WaddleRegisterDeviceResult`] (node id + device id) on
-     * success. Returns `None` on failure with the diagnostic on the
-     * listener. The caller MUST persist both fields — node feeds
-     * the user-server XEP-0357 `<enable/>` IQ, device id scopes the
-     * per-device `disable_push_device` opt-out.
-     */
-    func registerPushDevice(pushServiceJid: String, appId: String, environment: WaddlePushEnvironment, credentials: WaddlePushDeviceCredentials) async  -> WaddleRegisterDeviceResult?
-
-    /**
-     * Request the XEP-0084 avatar for a user. Returns `None` when the target
-     * JID hasn't published an avatar or the fetch failed; errors are
-     * reported on the event listener so the caller can treat `None` as
-     * "fall back to initials".
-     */
-    func requestAvatar(jid: String) async  -> WaddleAvatar?
-
-    func requestUploadSlot(serviceJid: String, filename: String, size: UInt64, contentType: String) async  -> WaddleUploadSlot?
 
     /**
      * Send a `<finish/>` Waddle JMI extension signaling clean
@@ -672,37 +616,82 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     func sendCallRetractTieBreak(peerFullJid: String, sid: String) async  -> Bool
 
     /**
-     * Send a XEP-0166 §7.2 `session-accept` IQ. `responder` is
-     * validated as a full JID at the FFI
-     * boundary so a malformed JID surfaces as an error before the
-     * stanza hits the wire.
+     * Send a XEP-0166 §7.2 `session-accept` IQ.
      */
     func sendCallSessionAccept(peerFullJid: String, responderFullJid: String, sid: String, audio: Bool, video: Bool) async  -> Bool
 
     /**
      * Send a XEP-0166 §6.4 `session-initiate` IQ to the peer's full
-     * JID. `initiator_full_jid` names the call originator per §7.1;
-     * the server's Jingle handler additionally validates that the
-     * authenticated session matches. Validating both JIDs as
-     * `FullJid` at the FFI boundary surfaces a clear error rather
-     * than letting a malformed stanza hit the wire.
+     * JID. `initiator_full_jid` names the call originator per §7.1.
      */
     func sendCallSessionInitiate(peerFullJid: String, initiatorFullJid: String, sid: String, audio: Bool, video: Bool) async  -> Bool
 
     /**
-     * Send a XEP-0166 §7.4 `session-terminate` IQ. `reason` is the
-     * typed XEP-0166 condition (the FFI rejects unknown values at
-     * the Swift boundary by virtue of `reason` being a UniFFI enum
-     * — there is no way to express an unsupported condition in
-     * Swift, so the wire can't carry one either).
+     * Send a XEP-0166 §7.4 `session-terminate` IQ.
      */
     func sendCallSessionTerminate(peerFullJid: String, sid: String, reason: WaddleJingleReason?) async  -> Bool
+
+    func discoverTopology() async  -> WaddleTopology
+
+    func discoverUploadService() async  -> String?
+
+    func fetchDmHistory(peerJid: String, maxMessages: UInt32, beforeId: String?) async  -> WaddleMamPage
+
+    func fetchRoomHistory(roomJid: String, maxMessages: UInt32, beforeId: String?) async  -> WaddleMamPage
+
+    func joinRoom(roomJid: String, nick: String) async
+
+    func leaveRoom(roomJid: String, nick: String) async
+
+    /**
+     * Request the XEP-0084 avatar for a user. Returns `None` when the target
+     * JID hasn't published an avatar or the fetch failed; errors are
+     * reported on the event listener so the caller can treat `None` as
+     * "fall back to initials".
+     */
+    func requestAvatar(jid: String) async  -> WaddleAvatar?
+
+    func requestUploadSlot(serviceJid: String, filename: String, size: UInt64, contentType: String) async  -> WaddleUploadSlot?
 
     func sendChatMessage(peerJid: String, body: String, options: WaddleSendOptions?) async  -> WaddleSendMessageOutcome
 
     func sendGroupchatMessage(roomJid: String, body: String, options: WaddleSendOptions?) async  -> WaddleSendMessageOutcome
 
     func sendPresence(status: String?, show: String?) async
+
+    /**
+     * XEP-0050 `disable-device` ad-hoc command on `push.<domain>`.
+     * Per-device scope — `device_id` is the value returned by the
+     * preceding [`register_push_device`] call. Sibling devices on
+     * the same node keep receiving fan-out. Returns `true` when the
+     * command completes (including the idempotent already-disabled
+     * case).
+     */
+    func disablePushDevice(pushServiceJid: String, node: String, deviceId: String) async  -> Bool
+
+    /**
+     * XEP-0357 §6.1 `<disable/>` IQ. A `None`/missing `node` disables
+     * ALL push nodes at the service for this user.
+     */
+    func disablePushNotifications(pushServiceJid: String, node: String?) async  -> Bool
+
+    /**
+     * XEP-0357 §5 `<enable/>` IQ against the user's XMPP server.
+     * Never carries provider credentials — those flow through
+     * `register_push_device` (XEP-0050) at `push.<domain>`.
+     */
+    func enablePushNotifications(pushServiceJid: String, node: String) async  -> Bool
+
+    /**
+     * XEP-0050 `register-device` ad-hoc command on `push.<domain>`.
+     * Drives the multi-step dance and returns the assigned
+     * [`WaddleRegisterDeviceResult`] (node id + device id) on
+     * success. Returns `None` on failure with the diagnostic on the
+     * listener. The caller MUST persist both fields — node feeds
+     * the user-server XEP-0357 `<enable/>` IQ, device id scopes the
+     * per-device `disable_push_device` opt-out.
+     */
+    func registerPushDevice(pushServiceJid: String, appId: String, environment: WaddlePushEnvironment, credentials: WaddlePushDeviceCredentials) async  -> WaddleRegisterDeviceResult?
 
 }
 open class WaddleClient: WaddleClientProtocol, @unchecked Sendable {
@@ -785,54 +774,6 @@ open func connect()async   {
         )
 }
 
-    /**
-     * XEP-0050 `disable-device` ad-hoc command on `push.<domain>`.
-     * Per-device scope — `device_id` is the value returned by the
-     * preceding [`register_push_device`] call. Sibling devices on
-     * the same node keep receiving fan-out. Returns `true` when the
-     * command completes (including the idempotent already-disabled
-     * case).
-     */
-open func disablePushDevice(pushServiceJid: String, node: String, deviceId: String)async  -> Bool  {
-    return
-        try!  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_disable_push_device(
-                    self.uniffiCloneHandle(),
-                    FfiConverterString.lower(pushServiceJid),FfiConverterString.lower(node),FfiConverterString.lower(deviceId)
-                )
-            },
-            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_i8,
-            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_i8,
-            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_i8,
-            liftFunc: FfiConverterBool.lift,
-            errorHandler: nil
-
-        )
-}
-
-    /**
-     * XEP-0357 §6.1 `<disable/>` IQ. A `None`/missing `node` disables
-     * ALL push nodes at the service for this user.
-     */
-open func disablePushNotifications(pushServiceJid: String, node: String?)async  -> Bool  {
-    return
-        try!  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_disable_push_notifications(
-                    self.uniffiCloneHandle(),
-                    FfiConverterString.lower(pushServiceJid),FfiConverterOptionString.lower(node)
-                )
-            },
-            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_i8,
-            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_i8,
-            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_i8,
-            liftFunc: FfiConverterBool.lift,
-            errorHandler: nil
-
-        )
-}
-
 open func disconnect()async   {
     return
         try!  await uniffiRustCallAsync(
@@ -846,206 +787,6 @@ open func disconnect()async   {
             completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
             freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
             liftFunc: { $0 },
-            errorHandler: nil
-
-        )
-}
-
-open func discoverTopology()async  -> WaddleTopology  {
-    return
-        try!  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_discover_topology(
-                    self.uniffiCloneHandle()
-
-                )
-            },
-            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
-            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
-            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterTypeWaddleTopology_lift,
-            errorHandler: nil
-
-        )
-}
-
-open func discoverUploadService()async  -> String?  {
-    return
-        try!  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_discover_upload_service(
-                    self.uniffiCloneHandle()
-
-                )
-            },
-            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
-            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
-            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterOptionString.lift,
-            errorHandler: nil
-
-        )
-}
-
-    /**
-     * XEP-0357 §5 `<enable/>` IQ against the user's XMPP server.
-     * Never carries provider credentials — those flow through
-     * `register_push_device` (XEP-0050) at `push.<domain>`.
-     */
-open func enablePushNotifications(pushServiceJid: String, node: String)async  -> Bool  {
-    return
-        try!  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_enable_push_notifications(
-                    self.uniffiCloneHandle(),
-                    FfiConverterString.lower(pushServiceJid),FfiConverterString.lower(node)
-                )
-            },
-            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_i8,
-            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_i8,
-            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_i8,
-            liftFunc: FfiConverterBool.lift,
-            errorHandler: nil
-
-        )
-}
-
-open func fetchDmHistory(peerJid: String, maxMessages: UInt32, beforeId: String?)async  -> WaddleMamPage  {
-    return
-        try!  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_dm_history(
-                    self.uniffiCloneHandle(),
-                    FfiConverterString.lower(peerJid),FfiConverterUInt32.lower(maxMessages),FfiConverterOptionString.lower(beforeId)
-                )
-            },
-            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
-            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
-            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterTypeWaddleMamPage_lift,
-            errorHandler: nil
-
-        )
-}
-
-open func fetchRoomHistory(roomJid: String, maxMessages: UInt32, beforeId: String?)async  -> WaddleMamPage  {
-    return
-        try!  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_room_history(
-                    self.uniffiCloneHandle(),
-                    FfiConverterString.lower(roomJid),FfiConverterUInt32.lower(maxMessages),FfiConverterOptionString.lower(beforeId)
-                )
-            },
-            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
-            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
-            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterTypeWaddleMamPage_lift,
-            errorHandler: nil
-
-        )
-}
-
-open func joinRoom(roomJid: String, nick: String)async   {
-    return
-        try!  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_join_room(
-                    self.uniffiCloneHandle(),
-                    FfiConverterString.lower(roomJid),FfiConverterString.lower(nick)
-                )
-            },
-            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
-            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
-            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
-            liftFunc: { $0 },
-            errorHandler: nil
-
-        )
-}
-
-open func leaveRoom(roomJid: String, nick: String)async   {
-    return
-        try!  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_leave_room(
-                    self.uniffiCloneHandle(),
-                    FfiConverterString.lower(roomJid),FfiConverterString.lower(nick)
-                )
-            },
-            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
-            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
-            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
-            liftFunc: { $0 },
-            errorHandler: nil
-
-        )
-}
-
-    /**
-     * XEP-0050 `register-device` ad-hoc command on `push.<domain>`.
-     * Drives the multi-step dance and returns the assigned
-     * [`WaddleRegisterDeviceResult`] (node id + device id) on
-     * success. Returns `None` on failure with the diagnostic on the
-     * listener. The caller MUST persist both fields — node feeds
-     * the user-server XEP-0357 `<enable/>` IQ, device id scopes the
-     * per-device `disable_push_device` opt-out.
-     */
-open func registerPushDevice(pushServiceJid: String, appId: String, environment: WaddlePushEnvironment, credentials: WaddlePushDeviceCredentials)async  -> WaddleRegisterDeviceResult?  {
-    return
-        try!  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_register_push_device(
-                    self.uniffiCloneHandle(),
-                    FfiConverterString.lower(pushServiceJid),FfiConverterString.lower(appId),FfiConverterTypeWaddlePushEnvironment_lower(environment),FfiConverterTypeWaddlePushDeviceCredentials_lower(credentials)
-                )
-            },
-            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
-            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
-            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterOptionTypeWaddleRegisterDeviceResult.lift,
-            errorHandler: nil
-
-        )
-}
-
-    /**
-     * Request the XEP-0084 avatar for a user. Returns `None` when the target
-     * JID hasn't published an avatar or the fetch failed; errors are
-     * reported on the event listener so the caller can treat `None` as
-     * "fall back to initials".
-     */
-open func requestAvatar(jid: String)async  -> WaddleAvatar?  {
-    return
-        try!  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_request_avatar(
-                    self.uniffiCloneHandle(),
-                    FfiConverterString.lower(jid)
-                )
-            },
-            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
-            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
-            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterOptionTypeWaddleAvatar.lift,
-            errorHandler: nil
-
-        )
-}
-
-open func requestUploadSlot(serviceJid: String, filename: String, size: UInt64, contentType: String)async  -> WaddleUploadSlot?  {
-    return
-        try!  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_request_upload_slot(
-                    self.uniffiCloneHandle(),
-                    FfiConverterString.lower(serviceJid),FfiConverterString.lower(filename),FfiConverterUInt64.lower(size),FfiConverterString.lower(contentType)
-                )
-            },
-            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
-            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
-            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterOptionTypeWaddleUploadSlot.lift,
             errorHandler: nil
 
         )
@@ -1233,10 +974,7 @@ open func sendCallRetractTieBreak(peerFullJid: String, sid: String)async  -> Boo
 }
 
     /**
-     * Send a XEP-0166 §7.2 `session-accept` IQ. `responder` is
-     * validated as a full JID at the FFI
-     * boundary so a malformed JID surfaces as an error before the
-     * stanza hits the wire.
+     * Send a XEP-0166 §7.2 `session-accept` IQ.
      */
 open func sendCallSessionAccept(peerFullJid: String, responderFullJid: String, sid: String, audio: Bool, video: Bool)async  -> Bool  {
     return
@@ -1258,11 +996,7 @@ open func sendCallSessionAccept(peerFullJid: String, responderFullJid: String, s
 
     /**
      * Send a XEP-0166 §6.4 `session-initiate` IQ to the peer's full
-     * JID. `initiator_full_jid` names the call originator per §7.1;
-     * the server's Jingle handler additionally validates that the
-     * authenticated session matches. Validating both JIDs as
-     * `FullJid` at the FFI boundary surfaces a clear error rather
-     * than letting a malformed stanza hit the wire.
+     * JID. `initiator_full_jid` names the call originator per §7.1.
      */
 open func sendCallSessionInitiate(peerFullJid: String, initiatorFullJid: String, sid: String, audio: Bool, video: Bool)async  -> Bool  {
     return
@@ -1283,11 +1017,7 @@ open func sendCallSessionInitiate(peerFullJid: String, initiatorFullJid: String,
 }
 
     /**
-     * Send a XEP-0166 §7.4 `session-terminate` IQ. `reason` is the
-     * typed XEP-0166 condition (the FFI rejects unknown values at
-     * the Swift boundary by virtue of `reason` being a UniFFI enum
-     * — there is no way to express an unsupported condition in
-     * Swift, so the wire can't carry one either).
+     * Send a XEP-0166 §7.4 `session-terminate` IQ.
      */
 open func sendCallSessionTerminate(peerFullJid: String, sid: String, reason: WaddleJingleReason?)async  -> Bool  {
     return
@@ -1302,6 +1032,156 @@ open func sendCallSessionTerminate(peerFullJid: String, sid: String, reason: Wad
             completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_i8,
             freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_i8,
             liftFunc: FfiConverterBool.lift,
+            errorHandler: nil
+
+        )
+}
+
+open func discoverTopology()async  -> WaddleTopology  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_discover_topology(
+                    self.uniffiCloneHandle()
+
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWaddleTopology_lift,
+            errorHandler: nil
+
+        )
+}
+
+open func discoverUploadService()async  -> String?  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_discover_upload_service(
+                    self.uniffiCloneHandle()
+
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterOptionString.lift,
+            errorHandler: nil
+
+        )
+}
+
+open func fetchDmHistory(peerJid: String, maxMessages: UInt32, beforeId: String?)async  -> WaddleMamPage  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_dm_history(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(peerJid),FfiConverterUInt32.lower(maxMessages),FfiConverterOptionString.lower(beforeId)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWaddleMamPage_lift,
+            errorHandler: nil
+
+        )
+}
+
+open func fetchRoomHistory(roomJid: String, maxMessages: UInt32, beforeId: String?)async  -> WaddleMamPage  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_room_history(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(roomJid),FfiConverterUInt32.lower(maxMessages),FfiConverterOptionString.lower(beforeId)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWaddleMamPage_lift,
+            errorHandler: nil
+
+        )
+}
+
+open func joinRoom(roomJid: String, nick: String)async   {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_join_room(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(roomJid),FfiConverterString.lower(nick)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: nil
+
+        )
+}
+
+open func leaveRoom(roomJid: String, nick: String)async   {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_leave_room(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(roomJid),FfiConverterString.lower(nick)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: nil
+
+        )
+}
+
+    /**
+     * Request the XEP-0084 avatar for a user. Returns `None` when the target
+     * JID hasn't published an avatar or the fetch failed; errors are
+     * reported on the event listener so the caller can treat `None` as
+     * "fall back to initials".
+     */
+open func requestAvatar(jid: String)async  -> WaddleAvatar?  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_request_avatar(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(jid)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterOptionTypeWaddleAvatar.lift,
+            errorHandler: nil
+
+        )
+}
+
+open func requestUploadSlot(serviceJid: String, filename: String, size: UInt64, contentType: String)async  -> WaddleUploadSlot?  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_request_upload_slot(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(serviceJid),FfiConverterString.lower(filename),FfiConverterUInt64.lower(size),FfiConverterString.lower(contentType)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterOptionTypeWaddleUploadSlot.lift,
             errorHandler: nil
 
         )
@@ -1356,6 +1236,104 @@ open func sendPresence(status: String?, show: String?)async   {
             completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
             freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
             liftFunc: { $0 },
+            errorHandler: nil
+
+        )
+}
+
+    /**
+     * XEP-0050 `disable-device` ad-hoc command on `push.<domain>`.
+     * Per-device scope — `device_id` is the value returned by the
+     * preceding [`register_push_device`] call. Sibling devices on
+     * the same node keep receiving fan-out. Returns `true` when the
+     * command completes (including the idempotent already-disabled
+     * case).
+     */
+open func disablePushDevice(pushServiceJid: String, node: String, deviceId: String)async  -> Bool  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_disable_push_device(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(pushServiceJid),FfiConverterString.lower(node),FfiConverterString.lower(deviceId)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_i8,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_i8,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_i8,
+            liftFunc: FfiConverterBool.lift,
+            errorHandler: nil
+
+        )
+}
+
+    /**
+     * XEP-0357 §6.1 `<disable/>` IQ. A `None`/missing `node` disables
+     * ALL push nodes at the service for this user.
+     */
+open func disablePushNotifications(pushServiceJid: String, node: String?)async  -> Bool  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_disable_push_notifications(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(pushServiceJid),FfiConverterOptionString.lower(node)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_i8,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_i8,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_i8,
+            liftFunc: FfiConverterBool.lift,
+            errorHandler: nil
+
+        )
+}
+
+    /**
+     * XEP-0357 §5 `<enable/>` IQ against the user's XMPP server.
+     * Never carries provider credentials — those flow through
+     * `register_push_device` (XEP-0050) at `push.<domain>`.
+     */
+open func enablePushNotifications(pushServiceJid: String, node: String)async  -> Bool  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_enable_push_notifications(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(pushServiceJid),FfiConverterString.lower(node)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_i8,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_i8,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_i8,
+            liftFunc: FfiConverterBool.lift,
+            errorHandler: nil
+
+        )
+}
+
+    /**
+     * XEP-0050 `register-device` ad-hoc command on `push.<domain>`.
+     * Drives the multi-step dance and returns the assigned
+     * [`WaddleRegisterDeviceResult`] (node id + device id) on
+     * success. Returns `None` on failure with the diagnostic on the
+     * listener. The caller MUST persist both fields — node feeds
+     * the user-server XEP-0357 `<enable/>` IQ, device id scopes the
+     * per-device `disable_push_device` opt-out.
+     */
+open func registerPushDevice(pushServiceJid: String, appId: String, environment: WaddlePushEnvironment, credentials: WaddlePushDeviceCredentials)async  -> WaddleRegisterDeviceResult?  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_register_push_device(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(pushServiceJid),FfiConverterString.lower(appId),FfiConverterTypeWaddlePushEnvironment_lower(environment),FfiConverterTypeWaddlePushDeviceCredentials_lower(credentials)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterOptionTypeWaddleRegisterDeviceResult.lift,
             errorHandler: nil
 
         )
@@ -5182,85 +5160,85 @@ private let initializationResult: InitializationResult = {
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_connect() != 32392) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disable_push_device() != 60415) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disable_push_notifications() != 26989) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disconnect() != 16481) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_discover_topology() != 22309) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_finish() != 12330) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_discover_upload_service() != 12511) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_finish_migrated() != 16619) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_enable_push_notifications() != 33803) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_proceed() != 33747) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_dm_history() != 19552) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_propose() != 41099) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_room_history() != 62477) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_reject() != 24717) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_join_room() != 24964) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_reject_tie_break() != 15302) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_leave_room() != 31045) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_retract() != 44376) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_register_push_device() != 3340) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_retract_tie_break() != 11649) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_avatar() != 34151) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_accept() != 53644) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_upload_slot() != 56697) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_initiate() != 54516) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_finish() != 27984) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_terminate() != 27703) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_finish_migrated() != 29693) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_discover_topology() != 33559) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_proceed() != 57398) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_discover_upload_service() != 54763) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_propose() != 12140) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_dm_history() != 46557) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_reject() != 7320) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_room_history() != 15759) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_reject_tie_break() != 25295) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_join_room() != 29937) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_retract() != 31803) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_leave_room() != 15630) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_retract_tie_break() != 43213) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_avatar() != 34606) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_accept() != 35161) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_upload_slot() != 21902) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_initiate() != 55037) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_chat_message() != 16287) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_terminate() != 39597) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_groupchat_message() != 8770) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_chat_message() != 363) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_presence() != 8574) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_groupchat_message() != 38838) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disable_push_device() != 48200) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_presence() != 28282) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disable_push_notifications() != 47015) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_enable_push_notifications() != 61395) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_register_push_device() != 54628) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_constructor_waddleclient_new() != 16174) {

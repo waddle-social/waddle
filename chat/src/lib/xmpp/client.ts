@@ -156,6 +156,7 @@ import type {
   WasmPubsubEvent,
   WasmRoomMember,
   WasmRosterContact,
+  WasmSendMessageOutcome,
   WasmServerVersion,
   WasmThreadsPage,
   WasmUserSearchResult,
@@ -167,6 +168,36 @@ import { escapeXml } from "./extension-commands/xml";
 export { dmMessageFromArchived, roomMessageFromArchived } from "./wasm-message-codecs";
 
 const NS_PUBSUB = "http://jabber.org/protocol/pubsub";
+
+function sentStanzaIdFromWasmOutcome(result: string | WasmSendMessageOutcome | null | undefined): string | null {
+  if (typeof result === "string") return result;
+  if (!result || result.kind !== "sent") return null;
+  const stanzaId = result.stanza_id ?? result.stanzaId ?? null;
+  if (!stanzaId) throw new Error("XMPP send did not return a stanza id");
+  return stanzaId;
+}
+
+class WasmSendFailureError extends Error {
+  constructor(readonly kind: Exclude<WasmSendMessageOutcome["kind"], "sent">) {
+    super(`XMPP send failed: ${kind}`);
+  }
+}
+
+function isNonRetryableWasmSendFailure(error: unknown): error is WasmSendFailureError {
+  return error instanceof WasmSendFailureError
+    && (error.kind === "invalid-recipient" || error.kind === "invalid-options");
+}
+
+function sentStanzaIdOrThrowFromWasmOutcome(result: string | WasmSendMessageOutcome | null | undefined): string | null {
+  if (typeof result === "string" || !result || result.kind === "sent") {
+    return sentStanzaIdFromWasmOutcome(result);
+  }
+  throw new WasmSendFailureError(result.kind);
+}
+
+function compatWasmSendResult(result: string | WasmSendMessageOutcome): string | null {
+  return sentStanzaIdOrThrowFromWasmOutcome(result);
+}
 
 function isRoomActivityMessage(message: LiveRoomMessage): boolean {
   return !!message.body && !message.replacesId && !message.retractsId;
@@ -664,7 +695,7 @@ interface MdsDisplayedEntry {
 
 export type PubsubEvent = WasmPubsubEvent;
 
-export type XmppResumeState = {
+type XmppResumeState = {
   previd: string;
   inboundH: number;
   outboundH: number;
@@ -1629,14 +1660,18 @@ export class BrowserXmppClient {
   private async compatSendGroupMessage(xmpp: XmppClientInstance, roomJid: string, body: string, opts: SendGroupMessageOptions): Promise<string | null> {
     const { effectiveBody, replyFallbackLength, rebasedMarkup, rebasedReferences } = encodeBodyForSend(body, opts.replyTo, opts.markup, opts.references);
     const wasmOpts = buildWasmSendOptions({ ...opts, markup: rebasedMarkup, references: rebasedReferences, requestDisplayedMarker: opts.requestDisplayedMarker ?? true }, replyFallbackLength);
-    if (xmpp.send_groupchat_message) return await xmpp.send_groupchat_message(roomJid, effectiveBody, wasmOpts) as string;
+    if (xmpp.send_groupchat_message) {
+      return compatWasmSendResult(await xmpp.send_groupchat_message(roomJid, effectiveBody, wasmOpts) as string | WasmSendMessageOutcome);
+    }
     throw new Error("XMPP session is not ready");
   }
 
   private async compatSendDirectMessage(xmpp: XmppClientInstance, peerJid: string, body: string, opts: SendDirectMessageOptions): Promise<string | null> {
     const { effectiveBody, replyFallbackLength, rebasedMarkup, rebasedReferences } = encodeBodyForSend(body, opts.replyTo, opts.markup, opts.references);
     const wasmOpts = buildWasmSendOptions({ ...opts, markup: rebasedMarkup, references: rebasedReferences, requestDisplayedMarker: opts.requestDisplayedMarker ?? true }, replyFallbackLength);
-    if (xmpp.send_chat_message) return await xmpp.send_chat_message(peerJid, effectiveBody, wasmOpts) as string;
+    if (xmpp.send_chat_message) {
+      return compatWasmSendResult(await xmpp.send_chat_message(peerJid, effectiveBody, wasmOpts) as string | WasmSendMessageOutcome);
+    }
     throw new Error("XMPP session is not ready");
   }
 
@@ -1698,7 +1733,16 @@ export class BrowserXmppClient {
         if (!this.canUseConnectedSession() || !this.xmpp) break;
         if (this.inflightQueuedIds.has(entry.id)) continue;
         this.queuedMessageStatusHandler?.(entry.id, "sending");
-        const messageId = await this.compatSendDirectMessage(this.xmpp, barePeerJid(entry.peerJid), entry.body, { ...(entry.markup?.length ? { markup: entry.markup } : {}), ...(entry.references?.length ? { references: entry.references } : {}), ...(entry.files?.length ? { files: entry.files } : {}), ...(entry.replyTo ? { replyTo: entry.replyTo } : {}), ...(entry.threadId ? { threadId: entry.threadId } : {}), ...(entry.parentThreadId ? { parentThreadId: entry.parentThreadId } : {}), id: entry.id });
+        let messageId: string | null;
+        try {
+          messageId = await this.compatSendDirectMessage(this.xmpp, barePeerJid(entry.peerJid), entry.body, { ...(entry.markup?.length ? { markup: entry.markup } : {}), ...(entry.references?.length ? { references: entry.references } : {}), ...(entry.files?.length ? { files: entry.files } : {}), ...(entry.replyTo ? { replyTo: entry.replyTo } : {}), ...(entry.threadId ? { threadId: entry.threadId } : {}), ...(entry.parentThreadId ? { parentThreadId: entry.parentThreadId } : {}), id: entry.id });
+        } catch (error) {
+          if (isNonRetryableWasmSendFailure(error)) {
+            this.discardNonRetryableQueuedSend(entry.id);
+            continue;
+          }
+          throw error;
+        }
         if (messageId) { this.inflightQueuedIds.add(entry.id); this.recordPendingSend(entry.id, "dm"); }
       }
     })();
@@ -1716,12 +1760,34 @@ export class BrowserXmppClient {
         if (!this.roomIsReady(roomJid) || !this.xmpp) break;
         if (this.inflightQueuedIds.has(entry.id)) continue;
         this.queuedMessageStatusHandler?.(entry.id, "sending");
-        const messageId = await this.compatSendGroupMessage(this.xmpp, roomJid, entry.body, { ...(entry.markup?.length ? { markup: entry.markup } : {}), ...(entry.references?.length ? { references: entry.references } : {}), mentionJidsByNick: { ...(entry.mentionJidsByNick ?? {}), ...this.memberJidsFor(roomJid) }, ...(entry.files?.length ? { files: entry.files } : {}), ...(entry.replyTo ? { replyTo: entry.replyTo } : {}), ...(entry.threadId ? { threadId: entry.threadId } : {}), ...(entry.parentThreadId ? { parentThreadId: entry.parentThreadId } : {}), ...(entry.threadCreate ? { threadCreate: entry.threadCreate } : {}), ...(entry.threadReply ? { threadReply: entry.threadReply } : {}), id: entry.id });
+        let messageId: string | null;
+        try {
+          messageId = await this.compatSendGroupMessage(this.xmpp, roomJid, entry.body, { ...(entry.markup?.length ? { markup: entry.markup } : {}), ...(entry.references?.length ? { references: entry.references } : {}), mentionJidsByNick: { ...(entry.mentionJidsByNick ?? {}), ...this.memberJidsFor(roomJid) }, ...(entry.files?.length ? { files: entry.files } : {}), ...(entry.replyTo ? { replyTo: entry.replyTo } : {}), ...(entry.threadId ? { threadId: entry.threadId } : {}), ...(entry.parentThreadId ? { parentThreadId: entry.parentThreadId } : {}), ...(entry.threadCreate ? { threadCreate: entry.threadCreate } : {}), ...(entry.threadReply ? { threadReply: entry.threadReply } : {}), id: entry.id });
+        } catch (error) {
+          if (isNonRetryableWasmSendFailure(error)) {
+            this.discardNonRetryableQueuedSend(entry.id);
+            continue;
+          }
+          throw error;
+        }
         if (messageId) { this.inflightQueuedIds.add(entry.id); this.recordPendingSend(entry.id, "room"); }
       }
     })();
     this.roomQueueFlushes.set(roomJid, promise.finally(() => { if (this.roomQueueFlushes.get(roomJid) === promise) this.roomQueueFlushes.delete(roomJid); }));
     return this.roomQueueFlushes.get(roomJid);
+  }
+
+  private discardNonRetryableQueuedSend(id: string) {
+    this.inflightQueuedIds.delete(id);
+    this.resumeReplayQueuedIds.delete(id);
+    removeQueuedMessage(this.queueScope, id);
+    this.messageDeliveryFailureHandler?.(id);
+    const pending = this.pendingSendAt.get(id);
+    if (pending) {
+      this.pendingSendAt.delete(id);
+      this.fireHook(this.messageFailHooks, id, { kind: pending.kind });
+    }
+    this.emitQueueDepth();
   }
 
   async sendGroupMessage(spaceId: string, channelId: string, body: string, opts: SendGroupMessageOptions = {}): Promise<OutboundSendResult | null> {
@@ -1734,7 +1800,13 @@ export class BrowserXmppClient {
       const outboundId = opts.id ?? crypto.randomUUID();
       const sendOpts = { ...opts, id: outboundId, mentionJidsByNick: { ...(opts.mentionJidsByNick ?? {}), ...this.memberJidsFor(roomJid) } };
       this.persistPendingRoomSend(roomJid, body, sendOpts);
-      const id = await this.compatSendGroupMessage(this.xmpp, roomJid, body, sendOpts);
+      let id: string | null;
+      try {
+        id = await this.compatSendGroupMessage(this.xmpp, roomJid, body, sendOpts);
+      } catch (error) {
+        if (isNonRetryableWasmSendFailure(error)) this.discardNonRetryableQueuedSend(outboundId);
+        throw error;
+      }
       if (id) this.inflightQueuedIds.add(id);
       this.recordPendingSend(id, "room");
       return { id, state: "sending" };
@@ -1760,7 +1832,13 @@ export class BrowserXmppClient {
       const outboundId = opts.id ?? crypto.randomUUID();
       const sendOpts = { ...opts, id: outboundId };
       this.persistPendingDirectSend(normalizedPeerJid, body, sendOpts);
-      const id = await this.compatSendDirectMessage(this.xmpp, normalizedPeerJid, body, sendOpts);
+      let id: string | null;
+      try {
+        id = await this.compatSendDirectMessage(this.xmpp, normalizedPeerJid, body, sendOpts);
+      } catch (error) {
+        if (isNonRetryableWasmSendFailure(error)) this.discardNonRetryableQueuedSend(outboundId);
+        throw error;
+      }
       if (id) this.inflightQueuedIds.add(id);
       this.recordPendingSend(id, "dm");
       return { id, state: "sending" };
