@@ -65,7 +65,10 @@ pub enum ConnectionEvent {
     OutboundMessage(TransportMessage),
     StreamOpening(StreamOpen),
     StreamOpened(StreamOpen),
-    StreamError { condition: StreamErrorCondition },
+    StreamError {
+        condition: StreamErrorCondition,
+        detail: Option<StreamErrorDetail>,
+    },
     FeaturesAdvertised(StreamFeatures),
     AuthenticationRequested(AuthenticationRequest),
     AuthenticationSucceeded,
@@ -84,6 +87,15 @@ pub enum StreamManagementEvent {
     AckRequested,
     Resumed { h: u32 },
     Failed,
+}
+
+/// Typed stream-error extension detail carried alongside the RFC 6120
+/// condition. Some XMPP extensions, including XEP-0198, intentionally use
+/// `<undefined-condition/>` with an extension child that names the concrete
+/// failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamErrorDetail {
+    HandledCountTooHigh { h: u32, send_count: u32 },
 }
 
 /// RFC 6120 stream-error conditions.

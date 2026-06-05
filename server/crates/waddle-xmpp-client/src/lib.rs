@@ -58,7 +58,7 @@ pub use discovery::{
 pub use error::{ClientError, ClientResult, StanzaError, StanzaErrorType};
 pub use event::{
     ClientEvent, ConnectionEvent, LifecycleEvent, MessageDeliveryEvent, StreamErrorCondition,
-    StreamManagementEvent,
+    StreamErrorDetail, StreamManagementEvent,
 };
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub use mam::MamExt;

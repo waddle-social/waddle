@@ -1,7 +1,8 @@
 import { fileURLToPath } from "node:url";
+import { format } from "node:util";
 import { defineConfig } from "astro/config";
 import cloudflare from "@astrojs/cloudflare";
-import MagicString from "magic-string";
+import faroUploader from "@grafana/faro-rollup-plugin";
 import tailwindcss from "@tailwindcss/vite";
 import vue from "@astrojs/vue";
 import { resolveCommitSha } from "./scripts/resolve-commit-sha.mjs";
@@ -17,32 +18,112 @@ const FARO_APP_VERSION = process.env.PUBLIC_FARO_APP_VERSION ?? "1.0.0";
 const FARO_ENVIRONMENT = process.env.PUBLIC_FARO_ENVIRONMENT ?? "";
 const FARO_SOURCEMAP_ENABLED = process.env.FARO_SOURCEMAP_ENABLED === "true";
 const FARO_BUNDLE_ID = process.env.FARO_BUNDLE_ID ?? `${FARO_APP_NAME}-${COMMIT_SHA}`;
+const FARO_SOURCEMAP_ENDPOINT = process.env.FARO_SOURCEMAP_ENDPOINT ?? "";
+const FARO_SOURCEMAP_APP_ID = process.env.FARO_SOURCEMAP_APP_ID ?? "";
+const FARO_SOURCEMAP_STACK_ID = process.env.FARO_SOURCEMAP_STACK_ID ?? "";
+const FARO_SOURCEMAP_API_KEY = process.env.FARO_SOURCEMAP_API_KEY ?? "";
+const FARO_SOURCEMAP_VERBOSE = process.env.FARO_SOURCEMAP_VERBOSE !== "false";
+const FARO_GIT_HASH = process.env.WADDLE_GIT_SHA ?? process.env.GITHUB_SHA ?? process.env.CF_PAGES_COMMIT_SHA;
+const CLIENT_OUTPUT_SUFFIX = "/dist/client";
+const FARO_CLIENT_SOURCE_MAP = /^_astro\/.*\.(?:js|mjs|cjs)\.map$/;
+const FARO_UPLOAD_FAILURES = [/failed with status/i, /no sourcemaps uploaded/i];
+const ANSI_PATTERN = /\u001b\[[0-9;]*m/g;
 
-function faroBundleIdPlugin() {
+function faroSourcemapPlugins() {
+  if (!FARO_SOURCEMAP_ENABLED) return [];
+
+  const missing = [
+    ["FARO_SOURCEMAP_ENDPOINT", FARO_SOURCEMAP_ENDPOINT],
+    ["FARO_SOURCEMAP_APP_ID", FARO_SOURCEMAP_APP_ID],
+    ["FARO_SOURCEMAP_STACK_ID", FARO_SOURCEMAP_STACK_ID],
+    ["FARO_SOURCEMAP_API_KEY", FARO_SOURCEMAP_API_KEY],
+  ].flatMap(([name, value]) => value ? [] : [name]);
+  if (missing.length > 0) {
+    throw new Error(`Faro source-map upload is enabled but missing ${missing.join(", ")}`);
+  }
+
+  const plugin = faroUploader({
+    appName: FARO_APP_NAME,
+    endpoint: FARO_SOURCEMAP_ENDPOINT,
+    apiKey: FARO_SOURCEMAP_API_KEY,
+    appId: FARO_SOURCEMAP_APP_ID,
+    stackId: FARO_SOURCEMAP_STACK_ID,
+    bundleId: FARO_BUNDLE_ID,
+    gitHash: FARO_GIT_HASH,
+    gzipContents: true,
+    keepSourcemaps: false,
+    outputFiles: FARO_CLIENT_SOURCE_MAP,
+    prefixPath: "_astro/",
+    prefixPathBasenameOnly: true,
+    verbose: FARO_SOURCEMAP_VERBOSE,
+  });
+
+  return [clientOutputOnly(failOnFaroUploadFailure(plugin))];
+}
+
+function failOnFaroUploadFailure(plugin) {
   return {
-    name: "waddle-faro-bundle-id",
-    apply: "build",
-    renderChunk(code, chunk, outputOptions) {
-      const outputDir = outputOptions.dir?.replaceAll("\\", "/") ?? "";
-      if (
-        !FARO_SOURCEMAP_ENABLED
-        || !outputDir.endsWith("/dist/client")
-        || !/\.(?:js|mjs|cjs)$/.test(chunk.fileName)
-        || code.includes(`__faroBundleId_${FARO_APP_NAME}`)
-      ) {
-        return null;
+    ...plugin,
+    async writeBundle(outputOptions, bundle) {
+      const sourceMaps = Object.keys(bundle).filter((fileName) => FARO_CLIENT_SOURCE_MAP.test(fileName));
+      if (sourceMaps.length === 0) {
+        throw new Error("Faro source-map upload is enabled but no client JavaScript source maps were generated");
       }
 
-      const snippet =
-        `(function(){try{var g=typeof window!=="undefined"?window:typeof global!=="undefined"?global:typeof self!=="undefined"?self:{};g[${JSON.stringify(`__faroBundleId_${FARO_APP_NAME}`)}]=${JSON.stringify(FARO_BUNDLE_ID)}}catch(l){}})();\n`;
-      const source = new MagicString(code);
-      source.prepend(snippet);
-      return {
-        code: source.toString(),
-        map: source.generateMap({ hires: true }),
-      };
+      const captured = captureFaroConsole();
+      try {
+        await plugin.writeBundle?.call(this, outputOptions, bundle);
+      } finally {
+        captured.restore();
+      }
+
+      const failure = captured.messages.find(({ level, message }) =>
+        level === "error" || FARO_UPLOAD_FAILURES.some((pattern) => pattern.test(message)));
+      if (failure) {
+        throw new Error(`Faro source-map upload failed: ${failure.message}`);
+      }
     },
   };
+}
+
+function captureFaroConsole() {
+  const originalInfo = console.info;
+  const originalError = console.error;
+  const messages = [];
+  const capture = (level, original) => (...args) => {
+    messages.push({ level, message: format(...args).replace(ANSI_PATTERN, "") });
+    return original.apply(console, args);
+  };
+
+  console.info = capture("info", originalInfo);
+  console.error = capture("error", originalError);
+
+  return {
+    messages,
+    restore() {
+      console.info = originalInfo;
+      console.error = originalError;
+    },
+  };
+}
+
+function clientOutputOnly(plugin) {
+  return {
+    ...plugin,
+    renderChunk(code, chunk, outputOptions) {
+      if (!isClientOutput(outputOptions)) return null;
+      return plugin.renderChunk?.call(this, code, chunk, outputOptions) ?? null;
+    },
+    writeBundle(outputOptions, bundle) {
+      if (!isClientOutput(outputOptions)) return undefined;
+      return plugin.writeBundle?.call(this, outputOptions, bundle);
+    },
+  };
+}
+
+function isClientOutput(outputOptions) {
+  const outputDir = outputOptions.dir?.replaceAll("\\", "/") ?? "";
+  return outputDir.endsWith(CLIENT_OUTPUT_SUFFIX);
 }
 
 export default defineConfig({
@@ -75,7 +156,7 @@ export default defineConfig({
     },
     plugins: [
       tailwindcss(),
-      faroBundleIdPlugin(),
+      ...faroSourcemapPlugins(),
       // Force `Cache-Control: no-store` on every URL containing the WASM
       // package name. Vite's `?v=<optimizer-hash>` URL convention sends
       // `Cache-Control: max-age=31536000, immutable` to the browser, and the

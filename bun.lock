@@ -43,10 +43,9 @@
       "devDependencies": {
         "@astrojs/check": "^0.9.9",
         "@cloudflare/workers-types": "^4.20260603.1",
+        "@grafana/faro-rollup-plugin": "^0.11.0",
         "@types/node": "^25.9.1",
         "knip": "^6.15.0",
-        "magic-string": "^0.30.21",
-        "tar": "^7.5.16",
         "typescript": "^6.0.3",
       },
       "optionalDependencies": {
@@ -313,7 +312,11 @@
 
     "@fontsource-variable/outfit": ["@fontsource-variable/outfit@5.2.8", "", {}, "sha512-4oUDCZx/Tcz6HZP423w/niqEH31Gks5IsqHV2ZZz1qKHaVIZdj2f0/S1IK2n8jl6Xo0o3N+3RjNHlV9R73ozQA=="],
 
+    "@grafana/faro-bundlers-shared": ["@grafana/faro-bundlers-shared@0.11.0", "", { "dependencies": { "ansis": "^4.0.0", "tar": "^7.1.0", "undici": "^8.1.0" } }, "sha512-hwu3dzQS+Rbkl6YKucFwXdg1s/9NAJqHaPU9xnXeSDwHqvsOrlXrKIhf7Mezjf77ium+QHccCSlRhx5RqcFytg=="],
+
     "@grafana/faro-core": ["@grafana/faro-core@2.7.0", "", { "dependencies": { "@opentelemetry/api": "^1.9.0", "@opentelemetry/otlp-transformer": "^0.218.0" } }, "sha512-fNOfWEouoHhZ4dw+oLO+UGoMBLgiLLQU56dp9+NgO3mGNwCYsFTQuKgKQfOe5DDmAbwpRISEyLbiMkEyY7mIJQ=="],
+
+    "@grafana/faro-rollup-plugin": ["@grafana/faro-rollup-plugin@0.11.0", "", { "dependencies": { "@grafana/faro-bundlers-shared": "^0.11.0", "magic-string": "^0.30.5", "rollup": "^4.22.4" } }, "sha512-bIWTckqtzEDsDuVG5us1V7M17medp+H5qQgLgtpam965NrBKsfIpiFsAnf9+OqrOxrRfj1l5A+lRYKWbK+Y2dw=="],
 
     "@grafana/faro-web-sdk": ["@grafana/faro-web-sdk@2.7.0", "", { "dependencies": { "@grafana/faro-core": "^2.7.0", "ua-parser-js": "1.0.41", "web-vitals": "^5.1.0" } }, "sha512-NIbFK2g634/KOcq6ej1LseZrbbRejBiIrO8beQpYX6CkyXVGrcdoWRfJdqkQ3Ys60h4aTH+xoAh2Oh0HebhOZg=="],
 
@@ -1570,6 +1573,8 @@
     "@esbuild-kit/core-utils/esbuild": ["esbuild@0.18.20", "", { "optionalDependencies": { "@esbuild/android-arm": "0.18.20", "@esbuild/android-arm64": "0.18.20", "@esbuild/android-x64": "0.18.20", "@esbuild/darwin-arm64": "0.18.20", "@esbuild/darwin-x64": "0.18.20", "@esbuild/freebsd-arm64": "0.18.20", "@esbuild/freebsd-x64": "0.18.20", "@esbuild/linux-arm": "0.18.20", "@esbuild/linux-arm64": "0.18.20", "@esbuild/linux-ia32": "0.18.20", "@esbuild/linux-loong64": "0.18.20", "@esbuild/linux-mips64el": "0.18.20", "@esbuild/linux-ppc64": "0.18.20", "@esbuild/linux-riscv64": "0.18.20", "@esbuild/linux-s390x": "0.18.20", "@esbuild/linux-x64": "0.18.20", "@esbuild/netbsd-x64": "0.18.20", "@esbuild/openbsd-x64": "0.18.20", "@esbuild/sunos-x64": "0.18.20", "@esbuild/win32-arm64": "0.18.20", "@esbuild/win32-ia32": "0.18.20", "@esbuild/win32-x64": "0.18.20" }, "bin": { "esbuild": "bin/esbuild" } }, "sha512-ceqxoedUrcayh7Y7ZX6NdbbDzGROiyVBgC4PriJThBKSVPWnnFHZAkfI1lJT8QFkOwH4qOS2SJkS4wvpGl8BpA=="],
 
     "@esbuild-kit/esm-loader/get-tsconfig": ["get-tsconfig@4.14.0", "", { "dependencies": { "resolve-pkg-maps": "^1.0.0" } }, "sha512-yTb+8DXzDREzgvYmh6s9vHsSVCHeC0G3PI5bEXNBHtmshPnO+S5O7qgLEOn0I5QvMy6kpZN8K1NKGyilLb93wA=="],
+
+    "@grafana/faro-bundlers-shared/undici": ["undici@8.3.0", "", {}, "sha512-TkUDgb6tl7KOGZ+7e8E3d2FYgUQgF6z5YypqjWmixVQSQERFcVrVg0ySADm2LVLRh5ljAaHTCR5Fmz3Q34rB7Q=="],
 
     "@jridgewell/gen-mapping/@jridgewell/trace-mapping": ["@jridgewell/trace-mapping@0.3.31", "", { "dependencies": { "@jridgewell/resolve-uri": "^3.1.0", "@jridgewell/sourcemap-codec": "^1.4.14" } }, "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw=="],
 

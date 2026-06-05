@@ -7,6 +7,7 @@
  * Usage: bun run scripts/build-and-publish-wasm.mjs
  */
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,6 +16,14 @@ const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, "..", "..");
 const crateDir = resolve(repoRoot, "server/crates/waddle-xmpp-client-wasm");
 const outDir = resolve(repoRoot, "server/wasm-pkg/waddle-xmpp-client-wasm");
+
+function artifactBuildId(paths) {
+  const hash = createHash("sha256");
+  for (const path of paths) {
+    hash.update(readFileSync(path));
+  }
+  return hash.digest("hex").slice(0, 12);
+}
 
 if (!process.env.NODE_AUTH_TOKEN) {
   console.error("[wasm] NODE_AUTH_TOKEN is required to publish to GitHub Packages.");
@@ -39,21 +48,31 @@ writeFileSync(pkgJsonPath, `${JSON.stringify(pkg, null, 2)}\n`);
 // Replace the wasm-pack bundler entry point with a Vite-compatible one that
 // passes the correct import object so WebAssembly.instantiate() receives the
 // JS glue functions the WASM binary imports from "./waddle_xmpp_client_wasm_bg.js".
+const buildId = artifactBuildId([
+  resolve(outDir, "waddle_xmpp_client_wasm_bg.js"),
+  resolve(outDir, "waddle_xmpp_client_wasm_bg.wasm"),
+]);
 const jsPath = resolve(outDir, "waddle_xmpp_client_wasm.js");
 writeFileSync(
   jsPath,
   `/* @ts-self-types="./waddle_xmpp_client_wasm.d.ts" */
-import initWasm from "./waddle_xmpp_client_wasm_bg.wasm?init";
-import * as bgModule from "./waddle_xmpp_client_wasm_bg.js";
-import { __wbg_set_wasm } from "./waddle_xmpp_client_wasm_bg.js";
+import wasmUrl from "./waddle_xmpp_client_wasm_bg.wasm?url&b=${buildId}";
+import * as bgModule from "./waddle_xmpp_client_wasm_bg.js?b=${buildId}";
+import { __wbg_set_wasm } from "./waddle_xmpp_client_wasm_bg.js?b=${buildId}";
 
 let initPromise;
 
 export default async function init() {
   if (!initPromise) {
-    initPromise = initWasm({ "./waddle_xmpp_client_wasm_bg.js": bgModule }).then((instance) => {
+    initPromise = (async () => {
+      const cache = import.meta.env.DEV ? "no-store" : "default";
+      const response = await fetch(wasmUrl, { cache });
+      const bytes = await response.arrayBuffer();
+      const { instance } = await WebAssembly.instantiate(bytes, {
+        "./waddle_xmpp_client_wasm_bg.js": bgModule,
+      });
       __wbg_set_wasm(instance.exports);
-    });
+    })();
   }
   return initPromise;
 }
@@ -62,7 +81,7 @@ export default async function init() {
 // WaddleConfig, …) AND Rust free functions (xep0392_consistent_hue,
 // xep0392_consistent_color, …). A hand-curated list silently drops new
 // #[wasm_bindgen] free functions until somebody notices the chat crashing.
-export * from "./waddle_xmpp_client_wasm_bg.js";
+export * from "./waddle_xmpp_client_wasm_bg.js?b=${buildId}";
 `,
 );
 

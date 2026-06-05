@@ -14,7 +14,6 @@
     "preview": "bun run wasm:build && bun run generate-service-worker && astro preview",
     "astro": "astro",
     "generate-types": "wrangler types",
-    "sourcemaps:upload": "bun run scripts/upload-faro-sourcemaps.mjs",
     "sourcemaps:strip": "bun run scripts/strip-sourcemaps.mjs",
     "deploy": "bun run wasm:build && bun run generate-service-worker && bun run sourcemaps:strip && wrangler deploy",
     "lint": "bun run wasm:build && knip",
@@ -58,10 +57,9 @@
   "devDependencies": {
     "@astrojs/check": "^0.9.9",
     "@cloudflare/workers-types": "^4.20260603.1",
+    "@grafana/faro-rollup-plugin": "^0.11.0",
     "@types/node": "^25.9.1",
     "knip": "^6.15.0",
-    "magic-string": "^0.30.21",
-    "tar": "^7.5.16",
     "typescript": "^6.0.3"
   }
 }

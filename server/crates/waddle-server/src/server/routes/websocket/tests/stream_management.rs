@@ -60,6 +60,15 @@ fn is_countable_stanza_matches_element_name_not_prefix() {
     ));
     assert!(is_countable_stanza("<message xmlns='jabber:client'/>"));
     assert!(is_countable_stanza("<presence xmlns='jabber:client'/>"));
+    assert!(is_countable_stanza(
+        "<jc:message xmlns:jc='jabber:client'/>"
+    ));
+    assert!(is_countable_stanza(
+        "<jc:presence xmlns:jc='jabber:client'/>"
+    ));
+    assert!(is_countable_stanza(
+        "<jc:iq xmlns:jc='jabber:client' id='1'/>"
+    ));
     // Leading whitespace is tolerated (matches the pre-existing
     // trim behaviour — frames are always serialized with a
     // namespace by minidom, so callers never produce bare `<iq/>`).
@@ -82,6 +91,9 @@ fn is_countable_stanza_matches_element_name_not_prefix() {
     assert!(!is_countable_stanza("<messages xmlns='urn:example'/>"));
     assert!(!is_countable_stanza("<presences xmlns='urn:example'/>"));
     assert!(!is_countable_stanza("<iqsomething/>"));
+    assert!(!is_countable_stanza(
+        "<jc:messages xmlns:jc='urn:example'/>"
+    ));
 
     // Malformed XML just doesn't count — no panic, no false positive.
     assert!(!is_countable_stanza("not-xml-at-all"));

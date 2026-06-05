@@ -21,6 +21,10 @@ on:
     - chat/scripts/**
     - chat/scripts/build-xmpp-wasm.mjs
     - chat/scripts/build-xmpp-wasm.mjs/**
+    - chat/scripts/generate-service-worker.mjs
+    - chat/scripts/generate-service-worker.mjs/**
+    - chat/scripts/resolve-commit-sha.mjs
+    - chat/scripts/resolve-commit-sha.mjs/**
     - chat/src/**
     - chat/tests/**
     - chat/tsconfig.json
