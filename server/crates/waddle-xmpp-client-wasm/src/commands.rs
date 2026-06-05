@@ -15,6 +15,40 @@ pub(crate) async fn send_stanza_command(
         .map_err(|err| js_error(err.to_string()))
 }
 
+pub(crate) async fn send_message_stanza_command(
+    inner: Rc<RefCell<WaddleClientInner>>,
+    stanza: Element,
+) -> Result<(), WaddleSendMessageOutcome> {
+    let mut cmd_tx = command_sender(&inner).map_err(|_| WaddleSendMessageOutcome::NotConnected)?;
+    let (responder, rx) = oneshot::channel();
+    cmd_tx
+        .send(WasmCommand::SendStanza { stanza, responder })
+        .await
+        .map_err(|_| WaddleSendMessageOutcome::NotConnected)?;
+    rx.await
+        .map_err(|_| WaddleSendMessageOutcome::NotConnected)?
+        .map_err(|err| send_failure_outcome(&err))
+}
+
+pub(crate) fn send_failure_outcome(error: &ClientError) -> WaddleSendMessageOutcome {
+    match error {
+        ClientError::Disconnected => WaddleSendMessageOutcome::NotConnected,
+        ClientError::StanzaError(_) => WaddleSendMessageOutcome::StanzaError,
+        ClientError::InvalidTransportScheme { .. }
+        | ClientError::MissingWebSocketHost
+        | ClientError::WebSocketConnectTimeout { .. }
+        | ClientError::TransportClosed
+        | ClientError::EmptyTransportFrame
+        | ClientError::TransportFrameTooLarge { .. }
+        | ClientError::InvalidTransportFrame
+        | ClientError::InvalidStreamOpenTo
+        | ClientError::InvalidStreamOpenFrom
+        | ClientError::UnsupportedStreamVersion { .. }
+        | ClientError::UnsupportedWebSocketMessage => WaddleSendMessageOutcome::TransportError,
+        _ => WaddleSendMessageOutcome::Error,
+    }
+}
+
 pub(crate) async fn send_iq_command(
     inner: Rc<RefCell<WaddleClientInner>>,
     stanza: Element,

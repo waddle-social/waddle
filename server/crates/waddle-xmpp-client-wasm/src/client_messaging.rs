@@ -5,11 +5,24 @@ impl WaddleClient {
     pub fn send_chat_message(&self, peer_jid: String, body: String, options: JsValue) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            let opts = send_options_from_js(options)?;
-            let (stanza_id, stanza) = build_outbound_message(&peer_jid, "chat", &body, &opts)
-                .map_err(|err| js_error(err.to_string()))?;
-            send_stanza_command(inner, stanza).await?;
-            Ok(JsValue::from_str(stanza_id.as_str()))
+            if peer_jid.parse::<Jid>().is_err() {
+                return to_js_value(&WaddleSendMessageOutcome::InvalidRecipient);
+            }
+            let opts = match send_options_from_js(options) {
+                Ok(opts) => opts,
+                Err(_) => return to_js_value(&WaddleSendMessageOutcome::InvalidOptions),
+            };
+            let (stanza_id, stanza) = match build_outbound_message(&peer_jid, "chat", &body, &opts)
+            {
+                Ok(message) => message,
+                Err(_) => return to_js_value(&WaddleSendMessageOutcome::Error),
+            };
+            match send_message_stanza_command(inner, stanza).await {
+                Ok(()) => to_js_value(&WaddleSendMessageOutcome::Sent {
+                    stanza_id: stanza_id.as_str().to_string(),
+                }),
+                Err(outcome) => to_js_value(&outcome),
+            }
         })
     }
 
@@ -21,11 +34,24 @@ impl WaddleClient {
     ) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            let opts = send_options_from_js(options)?;
-            let (stanza_id, stanza) = build_outbound_message(&room_jid, "groupchat", &body, &opts)
-                .map_err(|err| js_error(err.to_string()))?;
-            send_stanza_command(inner, stanza).await?;
-            Ok(JsValue::from_str(stanza_id.as_str()))
+            if room_jid.parse::<BareJid>().is_err() {
+                return to_js_value(&WaddleSendMessageOutcome::InvalidRecipient);
+            }
+            let opts = match send_options_from_js(options) {
+                Ok(opts) => opts,
+                Err(_) => return to_js_value(&WaddleSendMessageOutcome::InvalidOptions),
+            };
+            let (stanza_id, stanza) =
+                match build_outbound_message(&room_jid, "groupchat", &body, &opts) {
+                    Ok(message) => message,
+                    Err(_) => return to_js_value(&WaddleSendMessageOutcome::Error),
+                };
+            match send_message_stanza_command(inner, stanza).await {
+                Ok(()) => to_js_value(&WaddleSendMessageOutcome::Sent {
+                    stanza_id: stanza_id.as_str().to_string(),
+                }),
+                Err(outcome) => to_js_value(&outcome),
+            }
         })
     }
 

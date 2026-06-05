@@ -914,6 +914,24 @@ pub struct WaddleBookmarkItem {
     pub rich_payload_opt_in: bool,
 }
 
+/// JS-facing typed outcome for outbound chat/groupchat sends.
+///
+/// Mirrors the UniFFI `WaddleSendMessageOutcome`: expected validation and
+/// stanza/transport failures resolve to this tagged shape instead of forcing
+/// callers to parse rejected Promise strings. Serialization failures at the
+/// wasm boundary can still reject.
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum WaddleSendMessageOutcome {
+    Sent { stanza_id: String },
+    NotConnected,
+    InvalidRecipient,
+    InvalidOptions,
+    StanzaError,
+    TransportError,
+    Error,
+}
+
 /// JS-facing tagged outcome of `WaddleClient::set_room_notification_mode`.
 ///
 /// Returned by always-resolving the Promise (never rejecting on

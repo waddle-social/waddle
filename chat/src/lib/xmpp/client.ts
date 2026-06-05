@@ -156,6 +156,7 @@ import type {
   WasmPubsubEvent,
   WasmRoomMember,
   WasmRosterContact,
+  WasmSendMessageOutcome,
   WasmServerVersion,
   WasmThreadsPage,
   WasmUserSearchResult,
@@ -167,6 +168,12 @@ import { escapeXml } from "./extension-commands/xml";
 export { dmMessageFromArchived, roomMessageFromArchived } from "./wasm-message-codecs";
 
 const NS_PUBSUB = "http://jabber.org/protocol/pubsub";
+
+function sentStanzaIdFromWasmOutcome(result: string | WasmSendMessageOutcome | null | undefined): string | null {
+  if (typeof result === "string") return result;
+  if (!result || result.kind !== "sent") return null;
+  return result.stanza_id ?? result.stanzaId ?? null;
+}
 
 function isRoomActivityMessage(message: LiveRoomMessage): boolean {
   return !!message.body && !message.replacesId && !message.retractsId;
@@ -1629,14 +1636,18 @@ export class BrowserXmppClient {
   private async compatSendGroupMessage(xmpp: XmppClientInstance, roomJid: string, body: string, opts: SendGroupMessageOptions): Promise<string | null> {
     const { effectiveBody, replyFallbackLength, rebasedMarkup, rebasedReferences } = encodeBodyForSend(body, opts.replyTo, opts.markup, opts.references);
     const wasmOpts = buildWasmSendOptions({ ...opts, markup: rebasedMarkup, references: rebasedReferences, requestDisplayedMarker: opts.requestDisplayedMarker ?? true }, replyFallbackLength);
-    if (xmpp.send_groupchat_message) return await xmpp.send_groupchat_message(roomJid, effectiveBody, wasmOpts) as string;
+    if (xmpp.send_groupchat_message) {
+      return sentStanzaIdFromWasmOutcome(await xmpp.send_groupchat_message(roomJid, effectiveBody, wasmOpts) as string | WasmSendMessageOutcome);
+    }
     throw new Error("XMPP session is not ready");
   }
 
   private async compatSendDirectMessage(xmpp: XmppClientInstance, peerJid: string, body: string, opts: SendDirectMessageOptions): Promise<string | null> {
     const { effectiveBody, replyFallbackLength, rebasedMarkup, rebasedReferences } = encodeBodyForSend(body, opts.replyTo, opts.markup, opts.references);
     const wasmOpts = buildWasmSendOptions({ ...opts, markup: rebasedMarkup, references: rebasedReferences, requestDisplayedMarker: opts.requestDisplayedMarker ?? true }, replyFallbackLength);
-    if (xmpp.send_chat_message) return await xmpp.send_chat_message(peerJid, effectiveBody, wasmOpts) as string;
+    if (xmpp.send_chat_message) {
+      return sentStanzaIdFromWasmOutcome(await xmpp.send_chat_message(peerJid, effectiveBody, wasmOpts) as string | WasmSendMessageOutcome);
+    }
     throw new Error("XMPP session is not ready");
   }
 

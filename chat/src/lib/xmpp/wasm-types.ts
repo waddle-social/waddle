@@ -435,6 +435,15 @@ export interface WasmSendOptions {
   references?: WasmReference[];
 }
 
+export type WasmSendMessageOutcome =
+  | { kind: "sent"; stanza_id?: string; stanzaId?: string }
+  | { kind: "not-connected" }
+  | { kind: "invalid-recipient" }
+  | { kind: "invalid-options" }
+  | { kind: "stanza-error" }
+  | { kind: "transport-error" }
+  | { kind: "error" };
+
 // ─── Admin V2 — Spaces ────────────────────────────────────────────────
 //
 // TypeScript mirrors of the typed Result structs in
