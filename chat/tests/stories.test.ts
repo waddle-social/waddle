@@ -192,7 +192,7 @@ describe("useStories", () => {
         id: "s1",
         payload: {
           kind: "attachmentSummary",
-          reactions: [{ emoji: "🎉", count: 4, reactors: ["bob@example.com"] }],
+          reactions: [{ emoji: "🎉", count: 4, reactors: ["alice@example.com", "bob@example.com"] }],
           noticedCount: 3,
         },
       }],
@@ -200,8 +200,8 @@ describe("useStories", () => {
 
     expect(story.reactionSummary("s1")).toEqual({
       counts: { "🎉": 4 },
-      reactors: { "🎉": ["bob@example.com"] },
-      mine: ["❤️"],
+      reactors: { "🎉": ["alice@example.com", "bob@example.com"] },
+      mine: ["🎉"],
       noticedCount: 3,
     });
 
@@ -269,7 +269,39 @@ describe("useStories", () => {
     });
 
     expect(story.reactionSummary("s1").counts).toEqual({ "🔥": 1 });
-    expect(story.reactionSummary("s1").mine).toEqual(["❤️", "👍"]);
+    expect(story.reactionSummary("s1").mine).toEqual([]);
+  });
+
+  test("live summary pubsub event is not clobbered by in-flight refresh results", async () => {
+    let resolveSummary!: (summary: StoryReactionSummary) => void;
+    const pendingSummary = new Promise<StoryReactionSummary>((resolve) => {
+      resolveSummary = resolve;
+    });
+    const client = makeClient([{ id: "s1", body: "story", postedMs: 1 }]);
+    client.fetchStoryReactionSummary = mock(() => pendingSummary) as unknown as MockClient["fetchStoryReactionSummary"];
+    client.fetchMyStoryReactions = mock(() => Promise.resolve(null)) as unknown as MockClient["fetchMyStoryReactions"];
+    const story = withScope(() =>
+      useStories(ref<BrowserXmppClient | null>(client), { communityJid: ref<string | null>(COMMUNITY) }),
+    );
+
+    const refresh = story.refresh();
+    await Promise.resolve();
+    client.emitPubsubEvent({
+      from: COMMUNITY,
+      node: "urn:xmpp:pubsub-attachments:summary:1/urn:xmpp:stories:0",
+      items: [{
+        id: "s1",
+        payload: {
+          kind: "attachmentSummary",
+          reactions: [{ emoji: "🔥", count: 2, reactors: ["bob@example.com"] }],
+        },
+      }],
+    });
+    resolveSummary({ counts: { "👍": 1 }, reactors: {}, mine: [] });
+    await refresh;
+
+    expect(story.reactionSummary("s1").counts).toEqual({ "🔥": 2 });
+    expect(story.reactionSummary("s1").mine).toEqual([]);
   });
 
   test("pubsub event handlers are additive and scope cleanup removes only its handler", async () => {

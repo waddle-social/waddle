@@ -49,6 +49,7 @@ export function useStories(
   let removePubsubEventHandler: (() => void) | null = null;
   const reactionMutationVersionsByStory = new Map<string, number>();
   const pendingReactionMutationVersionsByStory = new Map<string, number>();
+  const liveSummaryVersionsByStory = new Map<string, number>();
   const nowMs = ref(Date.now());
   const tickHandle = setInterval(() => {
     nowMs.value = Date.now();
@@ -105,8 +106,9 @@ export function useStories(
       if (requestId !== fetchRequestId || client !== xmppClient.value) return false;
       stories.value = fetched;
       const mutationVersions = new Map(reactionMutationVersionsByStory);
+      const liveSummaryVersions = new Map(liveSummaryVersionsByStory);
       await client.subscribeStoryReactionSummaries?.(jid);
-      await refreshReactionSummariesFor(fetched, client, jid, requestId, mutationVersions);
+      await refreshReactionSummariesFor(fetched, client, jid, requestId, mutationVersions, liveSummaryVersions);
       if (!readStore.loaded()) {
         // Hydrate after the first stories fetch so the rail doesn't
         // pop unread→read on first paint.
@@ -155,6 +157,7 @@ export function useStories(
     communityJid: string,
     requestId: number,
     mutationVersions: ReadonlyMap<string, number>,
+    liveSummaryVersions: ReadonlyMap<string, number>,
   ): Promise<void> {
     const entries: Array<readonly [string, StoryReactionSummary, StoryReactionItem | null]> = [];
     for (let offset = 0; offset < fetched.length; offset += REACTION_FETCH_BATCH_SIZE) {
@@ -177,7 +180,7 @@ export function useStories(
       ));
     }
     if (requestId !== fetchRequestId || client !== xmppClient.value) return;
-    const { summaries, selfItems } = mergedReactionSummaryEntries(entries, mutationVersions, client.bareJid);
+    const { summaries, selfItems } = mergedReactionSummaryEntries(entries, mutationVersions, liveSummaryVersions, client.bareJid);
     reactionSummariesByStory.value = summaries;
     reactionsByStory.value = selfItems;
   }
@@ -185,16 +188,29 @@ export function useStories(
   function mergedReactionSummaryEntries(
     entries: Array<readonly [string, StoryReactionSummary, StoryReactionItem | null]>,
     mutationVersions: ReadonlyMap<string, number>,
+    liveSummaryVersions: ReadonlyMap<string, number>,
     self: string | null | undefined,
   ): { summaries: Record<string, StoryReactionSummary>; selfItems: Record<string, StoryReactionItem[]> } {
     if (!self) {
       return {
-        summaries: Object.fromEntries(entries.map(([storyId, fetchedSummary]) => [storyId, fetchedSummary])),
+        summaries: Object.fromEntries(entries.map(([storyId, fetchedSummary]) => [
+          storyId,
+          hasNewerLiveSummary(storyId, liveSummaryVersions)
+            ? reactionSummariesByStory.value[storyId] ?? fetchedSummary
+            : fetchedSummary,
+        ])),
         selfItems: {},
       };
     }
     const selfKey = self.toLowerCase();
     const pairs = entries.map(([storyId, fetchedSummary, fetchedSelf]) => {
+        if (hasNewerLiveSummary(storyId, liveSummaryVersions)) {
+          return [
+            storyId,
+            reactionSummariesByStory.value[storyId] ?? fetchedSummary,
+            reactionsByStory.value[storyId] ?? [],
+          ] satisfies [string, StoryReactionSummary, StoryReactionItem[]];
+        }
         if (mutationVersions.get(storyId) === reactionMutationVersionsByStory.get(storyId)) {
           const selfItems = fetchedSelf ? [fetchedSelf] : [];
           return [storyId, { ...fetchedSummary, mine: fetchedSelf?.emojis ?? [] }, selfItems] satisfies [string, StoryReactionSummary, StoryReactionItem[]];
@@ -212,6 +228,10 @@ export function useStories(
       summaries: Object.fromEntries(pairs.map(([storyId, summary]) => [storyId, summary])),
       selfItems: Object.fromEntries(pairs.map(([storyId, , selfItems]) => [storyId, selfItems])),
     };
+  }
+
+  function hasNewerLiveSummary(storyId: string, liveSummaryVersions: ReadonlyMap<string, number>): boolean {
+    return (liveSummaryVersionsByStory.get(storyId) ?? 0) !== (liveSummaryVersions.get(storyId) ?? 0);
   }
 
   function applySelfReactionDelta(
@@ -260,7 +280,7 @@ export function useStories(
       const currentSelfEmojis = selfKey && hasKnownSelfState && hasLocalMutation
         ? reactionsByStory.value[item.id]?.find((reaction) => reaction.jid.toLowerCase() === selfKey)?.emojis ?? []
         : undefined;
-      const mine = currentSelfEmojis ?? reactionSummariesByStory.value[item.id]?.mine ?? [];
+      const mine = currentSelfEmojis ?? serverSelfEmojis;
       updates[item.id] = {
         counts: currentSelfEmojis !== undefined
           ? applySelfReactionDelta(serverCounts, serverSelfEmojis, currentSelfEmojis)
@@ -269,6 +289,16 @@ export function useStories(
         mine,
         ...(typeof item.payload.noticedCount === "number" ? { noticedCount: item.payload.noticedCount } : {}),
       };
+      liveSummaryVersionsByStory.set(item.id, (liveSummaryVersionsByStory.get(item.id) ?? 0) + 1);
+      if (selfKey && !hasLocalMutation) {
+        const others = (reactionsByStory.value[item.id] ?? []).filter((reaction) => reaction.jid.toLowerCase() !== selfKey);
+        reactionsByStory.value = {
+          ...reactionsByStory.value,
+          [item.id]: mine.length > 0
+            ? [...others, { jid: xmppClient.value?.bareJid ?? selfKey, emojis: mine, unknownChildrenXml: [] }]
+            : others,
+        };
+      }
     }
     if (Object.keys(updates).length === 0) return;
     reactionSummariesByStory.value = { ...reactionSummariesByStory.value, ...updates };
@@ -335,6 +365,7 @@ export function useStories(
     reactionSummariesByStory.value = {};
     reactionMutationVersionsByStory.clear();
     pendingReactionMutationVersionsByStory.clear();
+    liveSummaryVersionsByStory.clear();
     error.value = null;
     isLoading.value = false;
     isPosting.value = false;

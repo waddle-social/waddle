@@ -88,7 +88,10 @@ fn parse_payload(payload: &Element) -> PubsubEventPayload {
 }
 
 fn parse_attachment_summary(summary: &Element) -> AttachmentSummaryEvent {
-    let reactions = summary
+    let reactions_parent = summary
+        .get_child("reactions", NS_PUBSUB_ATTACHMENTS_SUMMARY)
+        .unwrap_or(summary);
+    let reactions = reactions_parent
         .children()
         .filter(|child| child.is("reaction", NS_PUBSUB_ATTACHMENTS_SUMMARY))
         .map(|reaction| ReactionSummaryEvent {
@@ -149,17 +152,21 @@ mod tests {
             "story-1",
             Element::builder("summary", NS_PUBSUB_ATTACHMENTS_SUMMARY)
                 .append(
-                    Element::builder("reaction", NS_PUBSUB_ATTACHMENTS_SUMMARY)
-                        .attr(minidom::rxml::xml_ncname!("count").to_owned(), "2")
+                    Element::builder("reactions", NS_PUBSUB_ATTACHMENTS_SUMMARY)
                         .append(
-                            Element::builder("reactor", NS_PUBSUB_ATTACHMENTS_SUMMARY)
-                                .attr(
-                                    minidom::rxml::xml_ncname!("jid").to_owned(),
-                                    "alice@example.com",
+                            Element::builder("reaction", NS_PUBSUB_ATTACHMENTS_SUMMARY)
+                                .attr(minidom::rxml::xml_ncname!("count").to_owned(), "2")
+                                .append(
+                                    Element::builder("reactor", NS_PUBSUB_ATTACHMENTS_SUMMARY)
+                                        .attr(
+                                            minidom::rxml::xml_ncname!("jid").to_owned(),
+                                            "alice@example.com",
+                                        )
+                                        .build(),
                                 )
+                                .append("👍")
                                 .build(),
                         )
-                        .append("👍")
                         .build(),
                 )
                 .append(

@@ -61,6 +61,7 @@ pub struct WaddleMessage {
     pub pin_event: Option<WaddlePinEvent>,
     pub extension_envelope: Option<WaddleExtensionEnvelope>,
     pub extension_body_fallback: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub pubsub_events: Vec<WaddlePubsubEvent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inbox_push: Option<WaddleInboxConversation>,
