@@ -303,6 +303,19 @@ describe("client send readiness", () => {
     expect(listQueuedRoomMessages("alice@example.com", roomJid).map((message) => message.id)).toEqual(["room-send-1"]);
   });
 
+  test("room send drops deterministic typed WASM failures from the retry queue", async () => {
+    const xmpp = { send_groupchat_message: mock(async () => ({ kind: "invalid-options" })) };
+    const client = new BrowserXmppClient(session());
+    const roomJid = roomBareJidFor(session(), "c1");
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { currentRoom: string | null }).currentRoom = roomJid;
+    (client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.add(roomJid);
+
+    await expect(client.sendGroupMessage("w1", "c1", "hello room", { id: "room-send-invalid" })).rejects.toThrow("XMPP send failed: invalid-options");
+    expect(listQueuedRoomMessages("alice@example.com", roomJid)).toEqual([]);
+  });
+
   test("XEP-0201: BrowserXmppClient.sendGroupMessage accepts bodyless thread metadata sends", async () => {
     // XEP-0201 thread create / thread reply payloads are bodyless. The
     // browser client wrapper must not short-circuit them; otherwise standard
@@ -959,6 +972,16 @@ describe("client send readiness", () => {
       "Reconnection timed out",
     );
     expect(xmpp.sendMessage).toHaveBeenCalledTimes(0);
+  });
+
+  test("DM send drops deterministic typed WASM failures from the retry queue", async () => {
+    const xmpp = { send_chat_message: mock(async () => ({ kind: "invalid-recipient" })) };
+    const client = new BrowserXmppClient(session());
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+
+    await expect(client.sendDirectMessage("bob@example.com/mobile", "hello", { id: "dm-send-invalid" })).rejects.toThrow("XMPP send failed: invalid-recipient");
+    expect(listQueuedDmMessages("alice@example.com", "bob@example.com")).toEqual([]);
   });
 
   test("DM sends are durable until XEP-0198 ack confirms server handling", async () => {
