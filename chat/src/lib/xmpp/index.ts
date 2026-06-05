@@ -7,6 +7,7 @@ export type {
   AdminUsersPage,
   DmBookmarkItem,
   NotifyMode,
+  PubsubEvent,
   SetDmNotificationModeResult,
   SetRoomNotificationModeOutcome,
   UserBookmarkItem,
@@ -40,6 +41,7 @@ export {
   isStoryActive,
   normalizeStoryReactions,
   STORY_REACTIONS_MAX,
+  STORY_REACTIONS_SUMMARY_NODE,
 } from "./story-types";
 export type { StoryRead, StoryReads } from "./story-reads-types";
 export {

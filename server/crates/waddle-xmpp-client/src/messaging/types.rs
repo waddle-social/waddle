@@ -185,6 +185,9 @@ pub struct InboundMessage {
     /// a shape XEP-0490 currently defines but cheap to surface
     /// faithfully).
     pub mds_displayed: Option<Vec<MdsDisplayedEntry>>,
+    /// Generic typed XEP-0060 PubSub event notifications carried by
+    /// `<event xmlns='http://jabber.org/protocol/pubsub#event'/>`.
+    pub pubsub_events: Vec<crate::pubsub_event::PubsubEvent>,
 }
 
 /// XEP-0490 §3 displayed entry as surfaced from a PEP event.

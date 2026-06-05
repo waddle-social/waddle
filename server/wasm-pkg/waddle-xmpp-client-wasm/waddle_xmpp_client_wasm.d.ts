@@ -398,6 +398,12 @@ export class WaddleClient {
     set_on_message_delivery_acked(cb: Function): void;
     set_on_message_delivery_failed(cb: Function): void;
     set_on_presence(cb: Function): void;
+    /**
+     * Generic XEP-0060 pubsub event handler. Invoked once per
+     * inbound `<items/>` event with a `WaddlePubsubEvent`-shaped JS
+     * value.
+     */
+    set_on_pubsub_event(cb: Function): void;
     set_on_session_lifecycle(cb: Function): void;
     set_room_affiliation(room_jid: string, jid: string, affiliation: string): Promise<any>;
     /**

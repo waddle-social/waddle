@@ -17,6 +17,7 @@ pub mod mds;
 pub mod messaging;
 pub mod pep;
 pub mod pin;
+pub mod pubsub_event;
 pub mod push;
 pub mod request;
 pub mod runtime;
@@ -86,6 +87,9 @@ pub use pep::{
     build_retract_activity_iq, build_retract_mood_iq, build_retract_tune_iq, parse_pep_activity,
     parse_pep_mood, parse_pep_tune, PepItem, UserActivity, UserMood, UserTune, NS_ACTIVITY,
     NS_MOOD, NS_TUNE,
+};
+pub use pubsub_event::{
+    AttachmentSummaryEvent, PubsubEvent, PubsubEventItem, PubsubEventPayload, ReactionSummaryEvent,
 };
 pub use request::{
     ClientRequest, PendingRequest, RequestCorrelation, RequestId, RequestKind, RequestTracker,

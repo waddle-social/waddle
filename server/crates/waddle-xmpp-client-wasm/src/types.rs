@@ -61,8 +61,46 @@ pub struct WaddleMessage {
     pub pin_event: Option<WaddlePinEvent>,
     pub extension_envelope: Option<WaddleExtensionEnvelope>,
     pub extension_body_fallback: bool,
+    pub pubsub_events: Vec<WaddlePubsubEvent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inbox_push: Option<WaddleInboxConversation>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WaddlePubsubEvent {
+    pub from: Option<String>,
+    pub node: String,
+    pub items: Vec<WaddlePubsubEventItem>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WaddlePubsubEventItem {
+    pub id: Option<String>,
+    pub payload: WaddlePubsubEventPayload,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
+pub enum WaddlePubsubEventPayload {
+    AttachmentSummary {
+        reactions: Vec<WaddlePubsubReactionSummary>,
+        noticed_count: Option<u32>,
+    },
+    Opaque {
+        xml: String,
+    },
+    Empty,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WaddlePubsubReactionSummary {
+    pub emoji: String,
+    pub count: u32,
+    pub reactors: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]

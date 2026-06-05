@@ -392,6 +392,26 @@ export interface WasmMdsDisplayedEntry {
   stanza_id_by: string;
 }
 
+export interface WasmPubsubEvent {
+  from?: string;
+  node: string;
+  items: WasmPubsubEventItem[];
+}
+
+interface WasmPubsubEventItem {
+  id?: string;
+  payload: WasmPubsubEventPayload;
+}
+
+type WasmPubsubEventPayload =
+  | {
+      kind: "attachmentSummary";
+      reactions: Array<{ emoji: string; count: number; reactors: string[] }>;
+      noticedCount?: number;
+    }
+  | { kind: "opaque"; xml: string }
+  | { kind: "empty" };
+
 /** Options for send_groupchat_message / send_chat_message. */
 export interface WasmSendOptions {
   stanza_id?: string;

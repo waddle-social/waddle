@@ -10,12 +10,14 @@
  * forget; publishing your own story auto-marks it so other devices
  * don't show it as unread.
  */
-import { computed, onScopeDispose, ref, type Ref } from "vue";
+import { computed, onScopeDispose, ref, watch, type Ref } from "vue";
 import {
   isStoryActive,
   normalizeStoryReactions,
   STORY_REACTIONS_MAX,
+  STORY_REACTIONS_SUMMARY_NODE,
   type BrowserXmppClient,
+  type PubsubEvent,
   type Story,
   type StoryPostInput,
   type StoryReactionItem,
@@ -44,7 +46,9 @@ export function useStories(
   const reactionSummariesByStory = ref<Record<string, StoryReactionSummary>>({});
   const pageSize = options.pageSize ?? 50;
   let fetchRequestId = 0;
+  let removePubsubEventHandler: (() => void) | null = null;
   const reactionMutationVersionsByStory = new Map<string, number>();
+  const pendingReactionMutationVersionsByStory = new Map<string, number>();
   const nowMs = ref(Date.now());
   const tickHandle = setInterval(() => {
     nowMs.value = Date.now();
@@ -58,8 +62,16 @@ export function useStories(
 
   onScopeDispose(() => {
     clearInterval(tickHandle);
+    removePubsubEventHandler?.();
     readStore.dispose();
   });
+
+  watch([xmppClient, options.communityJid], ([client, communityJid]) => {
+    removePubsubEventHandler?.();
+    removePubsubEventHandler = null;
+    if (!client || !communityJid) return;
+    removePubsubEventHandler = client.addPubsubEventHandler?.((event) => applyPubsubEvent(event)) ?? null;
+  }, { immediate: true });
 
   const activeStories = computed(() => {
     const live = stories.value.filter((s) => isStoryActive(s, nowMs.value));
@@ -92,7 +104,9 @@ export function useStories(
       const fetched = await client.fetchStories(jid, pageSize);
       if (requestId !== fetchRequestId || client !== xmppClient.value) return false;
       stories.value = fetched;
-      await refreshReactionSummariesFor(fetched, client, jid, requestId);
+      const mutationVersions = new Map(reactionMutationVersionsByStory);
+      await client.subscribeStoryReactionSummaries?.(jid);
+      await refreshReactionSummariesFor(fetched, client, jid, requestId, mutationVersions);
       if (!readStore.loaded()) {
         // Hydrate after the first stories fetch so the rail doesn't
         // pop unread→read on first paint.
@@ -140,8 +154,8 @@ export function useStories(
     client: BrowserXmppClient,
     communityJid: string,
     requestId: number,
+    mutationVersions: ReadonlyMap<string, number>,
   ): Promise<void> {
-    const mutationVersions = new Map(reactionMutationVersionsByStory);
     const entries: Array<readonly [string, StoryReactionSummary, StoryReactionItem | null]> = [];
     for (let offset = 0; offset < fetched.length; offset += REACTION_FETCH_BATCH_SIZE) {
       if (requestId !== fetchRequestId || client !== xmppClient.value) return;
@@ -221,6 +235,45 @@ export function useStories(
     return reactionSummariesByStory.value[storyId] ?? { counts: {}, reactors: {}, mine: [] };
   }
 
+  function applyPubsubEvent(event: PubsubEvent): void {
+    if (event.node !== STORY_REACTIONS_SUMMARY_NODE) return;
+    const communityJid = options.communityJid.value?.toLowerCase();
+    const eventFrom = event.from?.split("/", 1)[0]?.toLowerCase();
+    if (!communityJid || eventFrom !== communityJid) return;
+    const updates: Record<string, StoryReactionSummary> = {};
+    for (const item of event.items) {
+      if (!item.id || item.payload.kind !== "attachmentSummary") continue;
+      const serverCounts: Record<string, number> = {};
+      const reactors: Record<string, string[]> = {};
+      const serverSelfEmojis: string[] = [];
+      const selfKey = xmppClient.value?.bareJid?.toLowerCase();
+      for (const reaction of item.payload.reactions) {
+        if (!reaction.emoji || reaction.count <= 0) continue;
+        serverCounts[reaction.emoji] = reaction.count;
+        reactors[reaction.emoji] = reaction.reactors;
+        if (selfKey && reaction.reactors.some((reactor) => reactor.toLowerCase() === selfKey)) {
+          serverSelfEmojis.push(reaction.emoji);
+        }
+      }
+      const hasKnownSelfState = Object.prototype.hasOwnProperty.call(reactionsByStory.value, item.id);
+      const hasLocalMutation = pendingReactionMutationVersionsByStory.has(item.id);
+      const currentSelfEmojis = selfKey && hasKnownSelfState && hasLocalMutation
+        ? reactionsByStory.value[item.id]?.find((reaction) => reaction.jid.toLowerCase() === selfKey)?.emojis ?? []
+        : undefined;
+      const mine = currentSelfEmojis ?? reactionSummariesByStory.value[item.id]?.mine ?? [];
+      updates[item.id] = {
+        counts: currentSelfEmojis !== undefined
+          ? applySelfReactionDelta(serverCounts, serverSelfEmojis, currentSelfEmojis)
+          : serverCounts,
+        reactors,
+        mine,
+        ...(typeof item.payload.noticedCount === "number" ? { noticedCount: item.payload.noticedCount } : {}),
+      };
+    }
+    if (Object.keys(updates).length === 0) return;
+    reactionSummariesByStory.value = { ...reactionSummariesByStory.value, ...updates };
+  }
+
   async function toggleReaction(storyId: string, emoji: string): Promise<boolean> {
     const client = xmppClient.value;
     const jid = options.communityJid.value;
@@ -242,6 +295,7 @@ export function useStories(
 
     const mutationVersion = (reactionMutationVersionsByStory.get(storyId) ?? 0) + 1;
     reactionMutationVersionsByStory.set(storyId, mutationVersion);
+    pendingReactionMutationVersionsByStory.set(storyId, mutationVersion);
     const previousSummary = reactionSummariesByStory.value[storyId] ?? { counts: {}, reactors: {}, mine: [] };
     reactionSummariesByStory.value = {
       ...reactionSummariesByStory.value,
@@ -254,8 +308,14 @@ export function useStories(
       } else {
         await client.retractStoryReactions(jid, storyId);
       }
+      if (pendingReactionMutationVersionsByStory.get(storyId) === mutationVersion) {
+        pendingReactionMutationVersionsByStory.delete(storyId);
+      }
       return true;
     } catch (err) {
+      if (pendingReactionMutationVersionsByStory.get(storyId) === mutationVersion) {
+        pendingReactionMutationVersionsByStory.delete(storyId);
+      }
       if (reactionMutationVersionsByStory.get(storyId) === mutationVersion) {
         reactionsByStory.value = { ...reactionsByStory.value, [storyId]: previousItems };
         reactionSummariesByStory.value = {
@@ -274,6 +334,7 @@ export function useStories(
     reactionsByStory.value = {};
     reactionSummariesByStory.value = {};
     reactionMutationVersionsByStory.clear();
+    pendingReactionMutationVersionsByStory.clear();
     error.value = null;
     isLoading.value = false;
     isPosting.value = false;

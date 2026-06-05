@@ -693,6 +693,7 @@ mod tests {
             on_message_delivery_acked: None,
             on_message_delivery_failed: None,
             on_mds_displayed: None,
+            on_pubsub_event: None,
             on_call: None,
             resume_state: None,
         }))
