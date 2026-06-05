@@ -12,7 +12,6 @@
  */
 import { computed, onScopeDispose, ref, type Ref } from "vue";
 import {
-  aggregateStoryReactions,
   isStoryActive,
   normalizeStoryReactions,
   STORY_REACTIONS_MAX,
@@ -42,6 +41,7 @@ export function useStories(
   const isPosting = ref(false);
   const error = ref<string | null>(null);
   const reactionsByStory = ref<Record<string, StoryReactionItem[]>>({});
+  const reactionSummariesByStory = ref<Record<string, StoryReactionSummary>>({});
   const pageSize = options.pageSize ?? 50;
   let fetchRequestId = 0;
   const reactionMutationVersionsByStory = new Map<string, number>();
@@ -92,7 +92,7 @@ export function useStories(
       const fetched = await client.fetchStories(jid, pageSize);
       if (requestId !== fetchRequestId || client !== xmppClient.value) return false;
       stories.value = fetched;
-      await refreshReactionsFor(fetched, client, jid, requestId);
+      await refreshReactionSummariesFor(fetched, client, jid, requestId);
       if (!readStore.loaded()) {
         // Hydrate after the first stories fetch so the rail doesn't
         // pop unread→read on first paint.
@@ -135,59 +135,90 @@ export function useStories(
     }
   }
 
-  async function refreshReactionsFor(
+  async function refreshReactionSummariesFor(
     fetched: readonly Story[],
     client: BrowserXmppClient,
     communityJid: string,
     requestId: number,
   ): Promise<void> {
     const mutationVersions = new Map(reactionMutationVersionsByStory);
-    const entries: Array<readonly [string, StoryReactionItem[]]> = [];
+    const entries: Array<readonly [string, StoryReactionSummary, StoryReactionItem | null]> = [];
     for (let offset = 0; offset < fetched.length; offset += REACTION_FETCH_BATCH_SIZE) {
       if (requestId !== fetchRequestId || client !== xmppClient.value) return;
       const batch = fetched.slice(offset, offset + REACTION_FETCH_BATCH_SIZE);
       entries.push(...await Promise.all(
-        batch.map(async (story): Promise<readonly [string, StoryReactionItem[]]> => {
-          try {
-            return [story.id, await client.fetchStoryReactions(communityJid, story.id)] as const;
-          } catch {
-            return [story.id, []] as const;
-          }
+        batch.map(async (story): Promise<readonly [string, StoryReactionSummary, StoryReactionItem | null]> => {
+          let summary: StoryReactionSummary = { counts: {}, reactors: {}, mine: [] };
+          let selfItem: StoryReactionItem | null = null;
+          const [fetchedSummary, fetchedSelf] = await Promise.all([
+            client.fetchStoryReactionSummary(communityJid, story.id).catch(() => null),
+            client.bareJid
+              ? client.fetchMyStoryReactions(communityJid, story.id).catch(() => null)
+              : Promise.resolve(null),
+          ]);
+          if (fetchedSummary) summary = fetchedSummary;
+          selfItem = fetchedSelf;
+          return [story.id, summary, selfItem] as const;
         }),
       ));
     }
     if (requestId !== fetchRequestId || client !== xmppClient.value) return;
-    reactionsByStory.value = mergedReactionEntries(entries, mutationVersions, client.bareJid);
+    const { summaries, selfItems } = mergedReactionSummaryEntries(entries, mutationVersions, client.bareJid);
+    reactionSummariesByStory.value = summaries;
+    reactionsByStory.value = selfItems;
   }
 
-  function mergedReactionEntries(
-    entries: Array<readonly [string, StoryReactionItem[]]>,
+  function mergedReactionSummaryEntries(
+    entries: Array<readonly [string, StoryReactionSummary, StoryReactionItem | null]>,
     mutationVersions: ReadonlyMap<string, number>,
     self: string | null | undefined,
-  ): Record<string, StoryReactionItem[]> {
+  ): { summaries: Record<string, StoryReactionSummary>; selfItems: Record<string, StoryReactionItem[]> } {
     if (!self) {
-      return Object.fromEntries(entries);
+      return {
+        summaries: Object.fromEntries(entries.map(([storyId, fetchedSummary]) => [storyId, fetchedSummary])),
+        selfItems: {},
+      };
     }
     const selfKey = self.toLowerCase();
-    return Object.fromEntries(
-      entries.map(([storyId, fetchedItems]) => {
+    const pairs = entries.map(([storyId, fetchedSummary, fetchedSelf]) => {
         if (mutationVersions.get(storyId) === reactionMutationVersionsByStory.get(storyId)) {
-          return [storyId, fetchedItems];
+          const selfItems = fetchedSelf ? [fetchedSelf] : [];
+          return [storyId, { ...fetchedSummary, mine: fetchedSelf?.emojis ?? [] }, selfItems] satisfies [string, StoryReactionSummary, StoryReactionItem[]];
         }
         const currentSelf = (reactionsByStory.value[storyId] ?? [])
           .find((item) => item.jid.toLowerCase() === selfKey);
-        const fetchedWithoutSelf = fetchedItems
-          .filter((item) => item.jid.toLowerCase() !== selfKey);
-        return [storyId, currentSelf ? [...fetchedWithoutSelf, currentSelf] : fetchedWithoutSelf];
-      }),
-    );
+        if (!currentSelf) {
+          const counts = applySelfReactionDelta(fetchedSummary.counts, fetchedSelf?.emojis ?? [], []);
+          return [storyId, { ...fetchedSummary, counts, mine: [] }, []] satisfies [string, StoryReactionSummary, StoryReactionItem[]];
+        }
+        const counts = applySelfReactionDelta(fetchedSummary.counts, fetchedSelf?.emojis ?? [], currentSelf.emojis);
+        return [storyId, { ...fetchedSummary, counts, mine: currentSelf.emojis }, [currentSelf]] satisfies [string, StoryReactionSummary, StoryReactionItem[]];
+      });
+    return {
+      summaries: Object.fromEntries(pairs.map(([storyId, summary]) => [storyId, summary])),
+      selfItems: Object.fromEntries(pairs.map(([storyId, , selfItems]) => [storyId, selfItems])),
+    };
+  }
+
+  function applySelfReactionDelta(
+    fetchedCounts: StoryReactionSummary["counts"],
+    fetchedSelfEmojis: readonly string[],
+    currentSelfEmojis: readonly string[],
+  ): StoryReactionSummary["counts"] {
+    const counts = { ...fetchedCounts };
+    for (const emoji of normalizeStoryReactions(fetchedSelfEmojis)) {
+      const next = (counts[emoji] ?? 0) - 1;
+      if (next > 0) counts[emoji] = next;
+      else delete counts[emoji];
+    }
+    for (const emoji of normalizeStoryReactions(currentSelfEmojis)) {
+      counts[emoji] = (counts[emoji] ?? 0) + 1;
+    }
+    return counts;
   }
 
   function reactionSummary(storyId: string): StoryReactionSummary {
-    return aggregateStoryReactions(
-      reactionsByStory.value[storyId] ?? [],
-      xmppClient.value?.bareJid ?? null,
-    );
+    return reactionSummariesByStory.value[storyId] ?? { counts: {}, reactors: {}, mine: [] };
   }
 
   async function toggleReaction(storyId: string, emoji: string): Promise<boolean> {
@@ -211,6 +242,11 @@ export function useStories(
 
     const mutationVersion = (reactionMutationVersionsByStory.get(storyId) ?? 0) + 1;
     reactionMutationVersionsByStory.set(storyId, mutationVersion);
+    const previousSummary = reactionSummariesByStory.value[storyId] ?? { counts: {}, reactors: {}, mine: [] };
+    reactionSummariesByStory.value = {
+      ...reactionSummariesByStory.value,
+      [storyId]: optimisticSummary(previousSummary, current, next),
+    };
     reactionsByStory.value = { ...reactionsByStory.value, [storyId]: nextItems };
     try {
       if (next.length > 0) {
@@ -222,6 +258,10 @@ export function useStories(
     } catch (err) {
       if (reactionMutationVersionsByStory.get(storyId) === mutationVersion) {
         reactionsByStory.value = { ...reactionsByStory.value, [storyId]: previousItems };
+        reactionSummariesByStory.value = {
+          ...reactionSummariesByStory.value,
+          [storyId]: previousSummary,
+        };
       }
       error.value = err instanceof Error ? err.message : String(err);
       return false;
@@ -232,6 +272,7 @@ export function useStories(
     fetchRequestId += 1;
     stories.value = [];
     reactionsByStory.value = {};
+    reactionSummariesByStory.value = {};
     reactionMutationVersionsByStory.clear();
     error.value = null;
     isLoading.value = false;
@@ -254,4 +295,20 @@ export function useStories(
     reactionSummary,
     toggleReaction,
   };
+}
+
+function optimisticSummary(
+  previous: StoryReactionSummary,
+  currentMine: readonly string[],
+  nextMine: readonly string[],
+): StoryReactionSummary {
+  const counts = { ...previous.counts };
+  for (const emoji of normalizeStoryReactions(currentMine)) {
+    counts[emoji] = Math.max(0, (counts[emoji] ?? 0) - 1);
+    if (counts[emoji] === 0) delete counts[emoji];
+  }
+  for (const emoji of normalizeStoryReactions(nextMine)) {
+    counts[emoji] = (counts[emoji] ?? 0) + 1;
+  }
+  return { ...previous, counts, mine: nextMine };
 }

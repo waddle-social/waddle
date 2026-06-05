@@ -4,6 +4,16 @@ use super::permissions::{
 use super::pubsub_helpers::{is_pep_self_or_to, spaces_service_bare_jid};
 use super::*;
 
+fn is_pubsub_attachment_or_summary_node(node: &str) -> bool {
+    node.starts_with(&format!(
+        "{}/",
+        waddle_xmpp::xep::xep0470::PUBSUB_ATTACHMENTS_NODE_PREFIX
+    )) || node.starts_with(&format!(
+        "{}/",
+        waddle_xmpp::xep::xep0470::NS_PUBSUB_ATTACHMENTS_SUMMARY
+    ))
+}
+
 pub(super) async fn handle_pubsub_admin_request(
     iq: &xmpp_parsers::iq::Iq,
     state: &WebSocketState,
@@ -15,6 +25,9 @@ pub(super) async fn handle_pubsub_admin_request(
 ) -> Vec<String> {
     match request {
         PubSubRequest::CreateNode { node } => {
+            if is_pubsub_attachment_or_summary_node(&node) {
+                return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
+            }
             if target_jid.to_string() == spaces_domain {
                 if server_permission_allowed(
                     state,

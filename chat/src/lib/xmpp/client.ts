@@ -88,12 +88,15 @@ import {
 } from "./feed-types";
 import {
   NS_PUBSUB_ATTACHMENTS,
+  NS_PUBSUB_ATTACHMENTS_SUMMARY,
+  STORY_REACTIONS_SUMMARY_NODE,
   normalizeStoryReactions,
   storyAttachmentNode,
   storyFromWasm,
   type Story,
   type StoryPostInput,
   type StoryReactionItem,
+  type StoryReactionSummary,
   type WasmStory,
 } from "./story-types";
 import {
@@ -280,6 +283,42 @@ function parseStoryReactionItems(xml: string): StoryReactionItem[] {
       };
     })
     .filter((item): item is StoryReactionItem => item !== null);
+}
+
+function parseStoryReactionSummary(xml: string): StoryReactionSummary {
+  const empty: StoryReactionSummary = { counts: {}, reactors: {}, mine: [] };
+  if (typeof DOMParser === "undefined") return empty;
+  const doc = new DOMParser().parseFromString(xml, "text/xml");
+  const summary = Array.from(doc.getElementsByTagName("summary"))
+    .find((element) => element.namespaceURI === NS_PUBSUB_ATTACHMENTS_SUMMARY);
+  if (!summary) return empty;
+  const reactions = Array.from(summary.children)
+    .find((child) => child.localName === "reactions" && child.namespaceURI === NS_PUBSUB_ATTACHMENTS_SUMMARY);
+  const counts: Record<string, number> = {};
+  if (reactions) {
+    for (const reaction of Array.from(reactions.children)) {
+      if (reaction.localName !== "reaction" || reaction.namespaceURI !== NS_PUBSUB_ATTACHMENTS_SUMMARY) continue;
+      const emoji = reaction.textContent?.trim() ?? "";
+      if (!emoji) continue;
+      const count = parsePositiveIntegerAttribute(reaction.getAttribute("count")) ?? 1;
+      counts[emoji] = count;
+    }
+  }
+  const noticed = Array.from(summary.children)
+    .find((child) => child.localName === "noticed" && child.namespaceURI === NS_PUBSUB_ATTACHMENTS_SUMMARY);
+  const noticedCount = noticed ? parsePositiveIntegerAttribute(noticed.getAttribute("count")) : undefined;
+  return {
+    counts,
+    reactors: {},
+    mine: [],
+    ...(typeof noticedCount === "number" && Number.isFinite(noticedCount) ? { noticedCount } : {}),
+  };
+}
+
+function parsePositiveIntegerAttribute(value: string | null): number | undefined {
+  if (!value || !/^[1-9]\d*$/.test(value)) return undefined;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
 }
 
 const DM_CALL_ACTIVITY_PAGE_SIZE = 100;
@@ -2420,6 +2459,27 @@ export class BrowserXmppClient {
       `<iq type="get" id="${crypto.randomUUID()}" to="${escapeXml(communityJid)}"><pubsub xmlns="${NS_PUBSUB}"><items node="${escapeXml(node)}"/></pubsub></iq>`,
     ) as string;
     return parseStoryReactionItems(responseXml);
+  }
+
+  async fetchMyStoryReactions(communityJid: string, storyId: string): Promise<StoryReactionItem | null> {
+    const xmpp = await this.requireConnectedXmpp();
+    if (typeof xmpp.send_raw_iq !== "function") return null;
+    const node = storyAttachmentNode(communityJid, storyId);
+    const self = barePeerJid(this.session.jid);
+    const responseXml = await xmpp.send_raw_iq(
+      `<iq type="get" id="${crypto.randomUUID()}" to="${escapeXml(communityJid)}"><pubsub xmlns="${NS_PUBSUB}"><items node="${escapeXml(node)}"><item id="${escapeXml(self)}"/></items></pubsub></iq>`,
+    ) as string;
+    return parseStoryReactionItems(responseXml)
+      .find((item) => item.jid.toLowerCase() === self.toLowerCase()) ?? null;
+  }
+
+  async fetchStoryReactionSummary(communityJid: string, storyId: string): Promise<StoryReactionSummary> {
+    const xmpp = await this.requireConnectedXmpp();
+    if (typeof xmpp.send_raw_iq !== "function") return { counts: {}, reactors: {}, mine: [] };
+    const responseXml = await xmpp.send_raw_iq(
+      `<iq type="get" id="${crypto.randomUUID()}" to="${escapeXml(communityJid)}"><pubsub xmlns="${NS_PUBSUB}"><items node="${escapeXml(STORY_REACTIONS_SUMMARY_NODE)}"><item id="${escapeXml(storyId)}"/></items></pubsub></iq>`,
+    ) as string;
+    return parseStoryReactionSummary(responseXml);
   }
 
   async publishStoryReactions(

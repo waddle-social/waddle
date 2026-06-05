@@ -15,6 +15,8 @@ const STORIES_NODE: &str = "urn:xmpp:stories:0";
 const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
 const NS_STORIES: &str = "urn:xmpp:stories:0";
 const NS_ATTACHMENTS: &str = "urn:xmpp:pubsub-attachments:1";
+const NS_ATTACHMENTS_SUMMARY: &str = "urn:xmpp:pubsub-attachments:summary:1";
+const STORY_SUMMARY_NODE: &str = "urn:xmpp:pubsub-attachments:summary:1/urn:xmpp:stories:0";
 
 static TEST_SERIAL: Mutex<()> = Mutex::const_new(());
 
@@ -151,6 +153,111 @@ async fn member_can_publish_read_and_retract_story_reaction_attachment() {
     assert!(
         reaction_publish.contains("type='result'"),
         "member reaction publish should succeed via story carve-out: {reaction_publish}"
+    );
+
+    let summary = iq_get_to(
+        &mut alice,
+        "reaction-summary",
+        COMMUNITY_JID,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}"><items node="{STORY_SUMMARY_NODE}"><item id="{story_id}"/></items></pubsub>"#
+        ),
+    )
+    .await;
+    assert!(
+        summary.contains("type='result'")
+            && summary.contains(NS_ATTACHMENTS_SUMMARY)
+            && summary.contains(&format!("id='{story_id}'"))
+            && summary.contains("<reaction count='1'>👍</reaction>")
+            && summary.contains("<reaction count='1'>❤️</reaction>"),
+        "reaction summary should contain per-emoji counts for the story: {summary}"
+    );
+
+    let noticed_publish = iq_set_to(
+        &mut admin,
+        "noticed-publish",
+        COMMUNITY_JID,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}">
+              <publish node="{attachment_node}">
+                <item id="admin@localhost">
+                  <attachments xmlns="{NS_ATTACHMENTS}">
+                    <noticed/>
+                  </attachments>
+                </item>
+              </publish>
+            </pubsub>"#
+        ),
+    )
+    .await;
+    assert!(
+        noticed_publish.contains("type='result'"),
+        "noticed attachment publish should succeed: {noticed_publish}"
+    );
+
+    let noticed_summary = iq_get_to(
+        &mut alice,
+        "noticed-summary",
+        COMMUNITY_JID,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}"><items node="{STORY_SUMMARY_NODE}"><item id="{story_id}"/></items></pubsub>"#
+        ),
+    )
+    .await;
+    assert!(
+        noticed_summary.contains("<noticed count='1'/>")
+            && noticed_summary.contains("<reaction count='1'>👍</reaction>")
+            && noticed_summary.contains("<reaction count='1'>❤️</reaction>"),
+        "summary should include noticed and preserve reaction counts: {noticed_summary}"
+    );
+
+    let direct_summary_publish = iq_set_to(
+        &mut alice,
+        "direct-summary-publish",
+        COMMUNITY_JID,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}">
+              <publish node="{STORY_SUMMARY_NODE}">
+                <item id="{story_id}">
+                  <summary xmlns="{NS_ATTACHMENTS_SUMMARY}">
+                    <noticed count="99"/>
+                  </summary>
+                </item>
+              </publish>
+            </pubsub>"#
+        ),
+    )
+    .await;
+    assert!(
+        direct_summary_publish.contains("type='error'")
+            && direct_summary_publish.contains("forbidden"),
+        "summary node must be server-maintained only: {direct_summary_publish}"
+    );
+
+    let manual_attachment_create = iq_set_to(
+        &mut alice,
+        "manual-attachment-create",
+        "alice@localhost",
+        &format!(r#"<pubsub xmlns="{NS_PUBSUB}"><create node="{attachment_node}"/></pubsub>"#),
+    )
+    .await;
+    assert!(
+        manual_attachment_create.contains("type='error'")
+            && manual_attachment_create.contains("forbidden"),
+        "manual attachment node creation must be rejected: {manual_attachment_create}"
+    );
+
+    let manual_summary_create = iq_set_to(
+        &mut alice,
+        "manual-summary-create",
+        "alice@localhost",
+        &format!(r#"<pubsub xmlns="{NS_PUBSUB}"><create node="{STORY_SUMMARY_NODE}"/></pubsub>"#),
+    )
+    .await;
+    assert!(
+        manual_summary_create.contains("type='error'")
+            && manual_summary_create.contains("forbidden"),
+        "manual summary node creation must be rejected: {manual_summary_create}"
     );
 
     let missing_node = story_attachment_node("missing-story");
