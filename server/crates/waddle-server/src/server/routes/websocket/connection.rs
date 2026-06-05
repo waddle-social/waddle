@@ -8,7 +8,7 @@ use super::{
     session_init::build_internal_server_error_stream_error,
     state::WsConnState,
     stream_management::{is_countable_stanza, SmRegistrationFinalization},
-    transport_xml::websocket_stream_close_xml,
+    transport_xml::{build_handled_count_too_high_stream_error, websocket_stream_close_xml},
 };
 use waddle_xmpp::stream_management::SmRequest;
 
@@ -131,6 +131,18 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                                     }
                                     SmRegistrationFinalization::ReplaceWithFailed(failed) => {
                                         responses = vec![failed.to_xml()];
+                                    }
+                                    SmRegistrationFinalization::ReplaceWithHandledCountTooHigh {
+                                        acknowledged,
+                                        send_count,
+                                    } => {
+                                        responses = vec![
+                                            build_handled_count_too_high_stream_error(
+                                                acknowledged,
+                                                send_count,
+                                            ),
+                                            websocket_stream_close_xml(),
+                                        ];
                                     }
                                 }
                             }

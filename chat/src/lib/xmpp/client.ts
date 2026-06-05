@@ -296,6 +296,74 @@ function normalizeXmppStreamErrorPayload(payload: XmppStreamErrorPayload): {
   };
 }
 
+function validResumeMaxSeconds(value: number | undefined): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 && value <= 0xFFFF_FFFF
+    ? value
+    : undefined;
+}
+
+export function applyResumeStateToWasmConfig(config: unknown, resumeState: XmppResumeState): void {
+  const wasmConfig = config as {
+    with_resume_state_stanzas_with_max?: (
+      previd: string,
+      inboundH: number,
+      outboundH: number,
+      stanzas: string[],
+      maxResumeSeconds: number,
+    ) => void;
+    with_resume_state_stanzas?: (
+      previd: string,
+      inboundH: number,
+      outboundH: number,
+      stanzas: string[],
+    ) => void;
+    with_resume_state_with_max?: (
+      previd: string,
+      inboundH: number,
+      outboundH: number,
+      maxResumeSeconds: number,
+    ) => void;
+    with_resume_state?: (previd: string, inboundH: number, outboundH: number) => void;
+  };
+  const maxResumeSeconds = validResumeMaxSeconds(resumeState.maxResumeSeconds);
+  if (
+    resumeState.unhandledOutboundStanzas?.length
+    && maxResumeSeconds !== undefined
+    && typeof wasmConfig.with_resume_state_stanzas_with_max === "function"
+  ) {
+    wasmConfig.with_resume_state_stanzas_with_max(
+      resumeState.previd,
+      resumeState.inboundH,
+      resumeState.outboundH,
+      resumeState.unhandledOutboundStanzas,
+      maxResumeSeconds,
+    );
+    return;
+  }
+  if (
+    resumeState.unhandledOutboundStanzas?.length
+    && typeof wasmConfig.with_resume_state_stanzas === "function"
+  ) {
+    wasmConfig.with_resume_state_stanzas(
+      resumeState.previd,
+      resumeState.inboundH,
+      resumeState.outboundH,
+      resumeState.unhandledOutboundStanzas,
+    );
+    return;
+  }
+  if (maxResumeSeconds !== undefined && typeof wasmConfig.with_resume_state_with_max === "function") {
+    wasmConfig.with_resume_state_with_max(
+      resumeState.previd,
+      resumeState.inboundH,
+      resumeState.outboundH,
+      maxResumeSeconds,
+    );
+    return;
+  }
+  wasmConfig.with_resume_state?.(resumeState.previd, resumeState.inboundH, resumeState.outboundH);
+}
+
 async function collectRecentMamPages(
   fetchPage: (max: number, pageParam: MamPageParam) => Promise<WasmMamPage | null | undefined>,
   options: DmCallActivityHydrationOptions,
@@ -512,10 +580,11 @@ interface MdsDisplayedEntry {
   stanzaIdBy: string;
 }
 
-type XmppResumeState = {
+export type XmppResumeState = {
   previd: string;
   inboundH: number;
   outboundH: number;
+  maxResumeSeconds?: number;
   hasUnackedOutbound?: boolean;
   unhandledOutboundStanzas?: string[];
   resource?: string;
@@ -1030,20 +1099,7 @@ export class BrowserXmppClient {
       (config as any).with_resume_state_handle(handle);
       this.clearResumeState();
     } else if (this.resumeState) {
-      if (this.resumeState.unhandledOutboundStanzas?.length && typeof (config as any).with_resume_state_stanzas === "function") {
-        (config as any).with_resume_state_stanzas(
-          this.resumeState.previd,
-          this.resumeState.inboundH,
-          this.resumeState.outboundH,
-          this.resumeState.unhandledOutboundStanzas,
-        );
-      } else {
-        (config as any).with_resume_state?.(
-          this.resumeState.previd,
-          this.resumeState.inboundH,
-          this.resumeState.outboundH,
-        );
-      }
+      applyResumeStateToWasmConfig(config, this.resumeState);
       this.resumePersistence.clearSm();
       this.resumeState = null;
     }

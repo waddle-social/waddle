@@ -509,6 +509,9 @@ async fn test_claimed_session_remains_writable_for_handoff_fanout() {
         SmClaimCompletion::ReplayWindowTruncated(_) => {
             panic!("claim should still have a complete replay window")
         }
+        SmClaimCompletion::HandledCountTooHigh(_) => {
+            panic!("claim should not complete with a too-high client count")
+        }
     }
 }
 
@@ -577,6 +580,9 @@ async fn blocklist_interested_detached_resources_include_claimed_sessions_and_re
         SmClaimCompletion::ReplayWindowTruncated(_) => {
             panic!("claim should still have a complete replay window")
         }
+        SmClaimCompletion::HandledCountTooHigh(_) => {
+            panic!("claim should not complete with a too-high client count")
+        }
     }
 }
 
@@ -629,6 +635,41 @@ async fn complete_claim_releases_when_handoff_creates_replay_gap() {
         !restored.can_resume_from(0),
         "restored session must continue rejecting the stale h value"
     );
+}
+
+#[tokio::test]
+async fn complete_claim_releases_when_client_handled_count_is_too_high() {
+    let registry = InMemorySmSessionRegistry::new();
+    let mut session = make_test_session_with_unacked("stream-h-too-high", Vec::new());
+    session.outbound_count = 2;
+    session.last_acked = 0;
+
+    registry
+        .store_session(session)
+        .await
+        .expect("store session");
+    registry
+        .claim_session("stream-h-too-high")
+        .await
+        .expect("claim")
+        .expect("session exists");
+
+    let completed = registry
+        .complete_claim_if_resumable("stream-h-too-high", 3)
+        .await
+        .expect("complete checked claim")
+        .expect("claim still exists");
+    let SmClaimCompletion::HandledCountTooHigh(restored) = completed else {
+        panic!("client h higher than send-count must fail resume completion")
+    };
+    assert_eq!(restored.outbound_count, 2);
+
+    let restored = registry
+        .peek_session("stream-h-too-high")
+        .await
+        .expect("peek restored session")
+        .expect("invalid claim is restored to detached pool");
+    assert_eq!(restored.outbound_count, 2);
 }
 
 #[tokio::test]

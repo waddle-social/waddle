@@ -12,7 +12,7 @@
  */
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { ReconnectCatchup } from "../src/lib/xmpp/reconnect-catchup";
-import { BrowserXmppClient } from "../src/lib/xmpp/client";
+import { BrowserXmppClient, applyResumeStateToWasmConfig } from "../src/lib/xmpp/client";
 import { enqueueQueuedMessage, listQueuedDmMessages } from "../src/lib/outbound-queue-store";
 import type { WaddleSession } from "../src/lib/server-auth";
 import {
@@ -230,6 +230,96 @@ describe("ReconnectCatchup persistence — writes back on advance", () => {
   });
 });
 
+describe("applyResumeStateToWasmConfig", () => {
+  function configWith(methods: string[]) {
+    const calls: Array<{ method: string; args: unknown[] }> = [];
+    const config: Record<string, (...args: unknown[]) => void> = {};
+    for (const method of methods) {
+      config[method] = (...args: unknown[]) => calls.push({ method, args });
+    }
+    return { config, calls };
+  }
+
+  test("uses max-aware stanza resume when both unhandled stanzas and max are available", () => {
+    const { config, calls } = configWith([
+      "with_resume_state_stanzas_with_max",
+      "with_resume_state_stanzas",
+      "with_resume_state_with_max",
+      "with_resume_state",
+    ]);
+
+    applyResumeStateToWasmConfig(config, {
+      previd: "prev-1",
+      inboundH: 7,
+      outboundH: 11,
+      maxResumeSeconds: 300,
+      unhandledOutboundStanzas: ["<message/>"],
+    });
+
+    expect(calls).toEqual([
+      {
+        method: "with_resume_state_stanzas_with_max",
+        args: ["prev-1", 7, 11, ["<message/>"], 300],
+      },
+    ]);
+  });
+
+  test("uses max-aware resume when no unhandled stanzas need replay", () => {
+    const { config, calls } = configWith(["with_resume_state_with_max", "with_resume_state"]);
+
+    applyResumeStateToWasmConfig(config, {
+      previd: "prev-2",
+      inboundH: 3,
+      outboundH: 5,
+      maxResumeSeconds: 120,
+    });
+
+    expect(calls).toEqual([
+      {
+        method: "with_resume_state_with_max",
+        args: ["prev-2", 3, 5, 120],
+      },
+    ]);
+  });
+
+  test("falls back to old stanza resume when generated WASM lacks max-aware stanza support", () => {
+    const { config, calls } = configWith(["with_resume_state_stanzas", "with_resume_state"]);
+
+    applyResumeStateToWasmConfig(config, {
+      previd: "prev-3",
+      inboundH: 1,
+      outboundH: 2,
+      maxResumeSeconds: 300,
+      unhandledOutboundStanzas: ["<presence/>"],
+    });
+
+    expect(calls).toEqual([
+      {
+        method: "with_resume_state_stanzas",
+        args: ["prev-3", 1, 2, ["<presence/>"]],
+      },
+    ]);
+  });
+
+  test("falls back to old plain resume when generated WASM has only the legacy method", () => {
+    const { config, calls } = configWith(["with_resume_state"]);
+
+    applyResumeStateToWasmConfig(config, {
+      previd: "prev-4",
+      inboundH: 13,
+      outboundH: 21,
+      maxResumeSeconds: 300,
+    });
+
+    expect(calls).toEqual([
+      {
+        method: "with_resume_state",
+        args: ["prev-4", 13, 21],
+      },
+    ]);
+  });
+});
+
 describe("createLocalStorageResumePersistence — localStorage adapter", () => {
   test("round-trips a catchup snapshot through localStorage", () => {
     const persistence = createLocalStorageResumePersistence("alice@example.com");
@@ -417,12 +507,13 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       persistence,
     );
     (client as unknown as {
-      xmpp: { get_resume_state: () => { previd: string; inboundH: number; outboundH: number; hasUnackedOutbound: boolean } };
+      xmpp: { get_resume_state: () => { previd: string; inboundH: number; outboundH: number; maxResumeSeconds: number; hasUnackedOutbound: boolean } };
     }).xmpp = {
       get_resume_state: () => ({
         previd: "live-sm-id",
         inboundH: 4,
         outboundH: 9,
+        maxResumeSeconds: 300,
         hasUnackedOutbound: true,
       }),
     };
@@ -446,6 +537,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
           previd: string;
           inboundH: number;
           outboundH: number;
+          maxResumeSeconds: number;
           hasUnackedOutbound: boolean;
           unhandledOutboundStanzas: string[];
         };
@@ -455,6 +547,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
         previd: "live-sm-id",
         inboundH: 4,
         outboundH: 9,
+        maxResumeSeconds: 300,
         hasUnackedOutbound: true,
         unhandledOutboundStanzas: ["<message xmlns='jabber:client' id='unacked'/>"],
       }),
@@ -466,6 +559,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       previd: "live-sm-id",
       inboundH: 4,
       outboundH: 9,
+      maxResumeSeconds: 300,
       unhandledOutboundStanzas: ["<message xmlns='jabber:client' id='unacked'/>"],
     });
   });
@@ -529,12 +623,13 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       persistence,
     );
     (client as unknown as {
-      xmpp: { get_resume_state: () => { previd: string; inboundH: number; outboundH: number; hasUnackedOutbound: boolean } };
+      xmpp: { get_resume_state: () => { previd: string; inboundH: number; outboundH: number; maxResumeSeconds: number; hasUnackedOutbound: boolean } };
     }).xmpp = {
       get_resume_state: () => ({
         previd: "live-sm-id",
         inboundH: 4,
         outboundH: 9,
+        maxResumeSeconds: 300,
         hasUnackedOutbound: false,
       }),
     };
@@ -545,6 +640,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       previd: "live-sm-id",
       inboundH: 4,
       outboundH: 9,
+      maxResumeSeconds: 300,
     });
   });
 
@@ -574,6 +670,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       previd: "abc-123",
       inboundH: 42,
       outboundH: 7,
+      maxResumeSeconds: 300,
       resource: "web-existing-resource",
     };
     first.saveSm(state);
@@ -606,19 +703,68 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     }
   });
 
-  test("SM TTL: a stale envelope is rejected and cleared", () => {
+  test("SM TTL: an old envelope without advertised max uses the default resume window", () => {
     const persistence = createLocalStorageResumePersistence("alice@example.com");
-    // Inject a 30-day-old envelope directly (bypassing saveSm so we
-    // control the timestamp). 30d > the 24h TTL.
-    const thirtyDaysAgo = Date.now() - (30 * 24 * 60 * 60 * 1000);
+    const justOverDefaultResumeWindow = Date.now() - 301_000;
     window.localStorage.setItem(
       "waddle.chat.sm-resume.alice@example.com",
-      JSON.stringify({ previd: "stale", inboundH: 1, outboundH: 1, savedAt: thirtyDaysAgo }),
+      JSON.stringify({ previd: "stale", inboundH: 1, outboundH: 1, savedAt: justOverDefaultResumeWindow }),
     );
     expect(persistence.loadSm()).toBeNull();
     // Stale entries are pruned on read so the next load doesn't
     // pay the validation cost again.
     expect(window.localStorage.getItem("waddle.chat.sm-resume.alice@example.com")).toBeNull();
+  });
+
+  test("SM TTL: advertised maxResumeSeconds controls persisted resume expiry", () => {
+    const persistence = createLocalStorageResumePersistence("alice@example.com");
+    const twoSecondsAgo = Date.now() - 2_000;
+    window.localStorage.setItem(
+      "waddle.chat.sm-resume.alice@example.com",
+      JSON.stringify({
+        previd: "stale",
+        inboundH: 1,
+        outboundH: 1,
+        maxResumeSeconds: 1,
+        savedAt: twoSecondsAgo,
+      }),
+    );
+
+    expect(persistence.consumeSm()).toBeNull();
+    expect(window.localStorage.getItem("waddle.chat.sm-resume.alice@example.com")).toBeNull();
+  });
+
+  test("SM TTL: future-dated envelopes fail closed and are pruned", () => {
+    const persistence = createLocalStorageResumePersistence("alice@example.com");
+    const farFuture = Date.now() + 120_000;
+    window.localStorage.setItem(
+      "waddle.chat.sm-resume.alice@example.com",
+      JSON.stringify({
+        previd: "from-the-future",
+        inboundH: 1,
+        outboundH: 1,
+        maxResumeSeconds: 300,
+        savedAt: farFuture,
+      }),
+    );
+
+    expect(persistence.loadSm()).toBeNull();
+    expect(window.localStorage.getItem("waddle.chat.sm-resume.alice@example.com")).toBeNull();
+  });
+
+  test("SM state rejects non-u32 stanza counters", () => {
+    const persistence = createLocalStorageResumePersistence("alice@example.com");
+    window.localStorage.setItem(
+      "waddle.chat.sm-resume.alice@example.com",
+      JSON.stringify({
+        previd: "bad-counter",
+        inboundH: 1.5,
+        outboundH: 1,
+        savedAt: Date.now(),
+      }),
+    );
+
+    expect(persistence.loadSm()).toBeNull();
   });
 
   test("loadCatchup returns null for malformed JSON", () => {

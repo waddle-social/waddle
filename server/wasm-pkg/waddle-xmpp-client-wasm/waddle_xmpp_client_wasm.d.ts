@@ -525,6 +525,8 @@ export class WaddleConfig {
     with_resume_state(previd: string, inbound_h: number, outbound_h: number): void;
     with_resume_state_handle(state: WaddleResumeState): void;
     with_resume_state_stanzas(previd: string, inbound_h: number, outbound_h: number, stanzas: string[]): void;
+    with_resume_state_stanzas_with_max(previd: string, inbound_h: number, outbound_h: number, stanzas: string[], max_resume_seconds: number): void;
+    with_resume_state_with_max(previd: string, inbound_h: number, outbound_h: number, max_resume_seconds: number): void;
 }
 
 export class WaddleResumeState {

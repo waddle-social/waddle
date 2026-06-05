@@ -171,8 +171,9 @@ fn emit_stream_error_callback(
     if let Some(callback) = callback {
         let condition = condition.as_str();
         let stream_management_error = stream_management_error_to_js(detail);
+        let detail = stream_error_detail_label(condition, stream_management_error.as_ref());
         let payload = JsStreamError {
-            detail: "stream error",
+            detail,
             condition,
             stream_management_error,
         };
@@ -187,4 +188,14 @@ fn stream_management_error_to_js(
     detail.map(|StreamErrorDetail::HandledCountTooHigh { h, send_count }| {
         JsStreamManagementError::HandledCountTooHigh { h, send_count }
     })
+}
+
+fn stream_error_detail_label(
+    condition: &'static str,
+    stream_management_error: Option<&JsStreamManagementError>,
+) -> &'static str {
+    match stream_management_error {
+        Some(JsStreamManagementError::HandledCountTooHigh { .. }) => "handled-count-too-high",
+        None => condition,
+    }
 }

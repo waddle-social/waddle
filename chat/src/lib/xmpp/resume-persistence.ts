@@ -14,10 +14,10 @@
  *
  *   * XEP-0198 Stream Management resume state
  *     (`PersistedSmResumeState`) — the `previd` plus inbound /
- *     outbound stanza counts. The richer "handle" form from the
- *     WASM client is a live JS object that cannot be serialized;
- *     the POD `{previd, inboundH, outboundH}` triple can be. When
- *     the native XEP-0198 queue still has unhandled outbound stanzas,
+ *     outbound stanza counts and advertised resume window. The richer
+ *     "handle" form from the WASM client is a live JS object that cannot
+ *     be serialized; the POD `{previd, inboundH, outboundH}` triple can be.
+ *     When the native XEP-0198 queue still has unhandled outbound stanzas,
  *     their XML is serialized too so `doConnect` can restore sender
  *     responsibility after a full reload instead of creating a false
  *     resume state with an empty replay queue.
@@ -59,6 +59,7 @@ export type PersistedSmResumeState = {
   previd: string;
   inboundH: number;
   outboundH: number;
+  maxResumeSeconds?: number;
   unhandledOutboundStanzas?: string[];
   resource?: string;
 };
@@ -88,12 +89,12 @@ type OwnerHandoff = {
 };
 
 /**
- * Reject a persisted SM POD older than this window. Servers usually
- * GC the corresponding session much sooner (XEP-0198 §5); 24h is
- * generous but bounds the cost of a guaranteed `<failed/>` on every
- * cold start with a weeks-old POD.
+ * Fallback resumption window for older persisted PODs that predate
+ * `maxResumeSeconds`. This mirrors Waddle server's default XEP-0198
+ * max, so old snapshots fail closed instead of lingering for hours.
  */
-const SM_TTL_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_SM_MAX_RESUME_SECONDS = 300;
+const SM_SAVED_AT_FUTURE_SKEW_MS = 60_000;
 const OWNER_LEASE_TTL_MS = 45_000;
 const OWNER_HEARTBEAT_MS = 15_000;
 const OWNER_HANDOFF_TTL_MS = OWNER_LEASE_TTL_MS;
@@ -148,21 +149,22 @@ export function createLocalStorageResumePersistence(accountKey: string, ownerId?
     loadSm() {
       const envelope = readJson<PersistedSmEnvelope>(smKey, isPersistedSmEnvelope, "sm");
       if (!envelope) return null;
-      // Drop entries past the TTL — the server has GC'd the
+      // Drop entries past the advertised resume window — the server has GC'd the
       // corresponding session, so feeding the POD back to
       // `with_resume_state` is a guaranteed `<failed/>`. Returning
       // null lets `doConnect` fall through to a fresh bind.
-      if (Date.now() - envelope.savedAt > SM_TTL_MS) {
+      if (smEnvelopeExpired(envelope)) {
         removeKey(smKey, "sm");
         return null;
       }
       if (envelope.ownerId !== owner.ownerId) return null;
       if (envelope.claimId) return null;
-      const { previd, inboundH, outboundH, resource, unhandledOutboundStanzas } = envelope;
+      const { previd, inboundH, outboundH, maxResumeSeconds, resource, unhandledOutboundStanzas } = envelope;
       return {
         previd,
         inboundH,
         outboundH,
+        ...(maxResumeSeconds ? { maxResumeSeconds } : {}),
         ...(unhandledOutboundStanzas?.length ? { unhandledOutboundStanzas: [...unhandledOutboundStanzas] } : {}),
         ...(resource ? { resource } : {}),
       };
@@ -209,7 +211,7 @@ function consumeSmEnvelope(key: string, ownerId: string): PersistedSmResumeState
     const parsed: unknown = JSON.parse(raw);
     if (!isPersistedSmEnvelope(parsed)) return null;
     const consumedMarker = smEnvelopeMarker(raw);
-    if (Date.now() - parsed.savedAt > SM_TTL_MS) {
+    if (smEnvelopeExpired(parsed)) {
       s.removeItem(key);
       return null;
     }
@@ -235,11 +237,12 @@ function consumeSmEnvelope(key: string, ownerId: string): PersistedSmResumeState
 
     s.setItem(consumedKey, consumedMarker);
     s.removeItem(key);
-    const { previd, inboundH, outboundH, resource, unhandledOutboundStanzas } = claimed;
+    const { previd, inboundH, outboundH, maxResumeSeconds, resource, unhandledOutboundStanzas } = claimed;
     return {
       previd,
       inboundH,
       outboundH,
+      ...(maxResumeSeconds ? { maxResumeSeconds } : {}),
       ...(unhandledOutboundStanzas?.length ? { unhandledOutboundStanzas: [...unhandledOutboundStanzas] } : {}),
       ...(resource ? { resource } : {}),
     };
@@ -255,6 +258,13 @@ function consumeSmEnvelope(key: string, ownerId: string): PersistedSmResumeState
 
 function randomClaimId(): string {
   return globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2);
+}
+
+function smEnvelopeExpired(envelope: PersistedSmEnvelope): boolean {
+  const maxResumeSeconds = envelope.maxResumeSeconds ?? DEFAULT_SM_MAX_RESUME_SECONDS;
+  const ageMs = Date.now() - envelope.savedAt;
+  if (ageMs < -SM_SAVED_AT_FUTURE_SKEW_MS) return true;
+  return ageMs > maxResumeSeconds * 1000;
 }
 
 function explicitResumeOwner(ownerId: string): ResumeOwner {
@@ -481,6 +491,14 @@ function isOwnerHandoff(value: unknown): value is OwnerHandoff {
   );
 }
 
+function isU32(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 0xFFFF_FFFF;
+}
+
+function isPositiveU32(value: unknown): value is number {
+  return isU32(value) && value > 0;
+}
+
 function normalizeRoomJid(roomJid: string): string {
   return roomJid.split("/")[0]?.trim().toLowerCase() ?? "";
 }
@@ -490,12 +508,13 @@ function isPersistedSmEnvelope(value: unknown): value is PersistedSmEnvelope {
   const candidate = value as Record<string, unknown>;
   return (
     typeof candidate.previd === "string"
-    && typeof candidate.inboundH === "number"
-    && typeof candidate.outboundH === "number"
+    && isU32(candidate.inboundH)
+    && isU32(candidate.outboundH)
+    && (candidate.maxResumeSeconds === undefined || isPositiveU32(candidate.maxResumeSeconds))
     && (candidate.unhandledOutboundStanzas === undefined || isStringArray(candidate.unhandledOutboundStanzas))
     && (candidate.resource === undefined || typeof candidate.resource === "string")
     && (candidate.ownerId === undefined || typeof candidate.ownerId === "string")
     && (candidate.claimId === undefined || typeof candidate.claimId === "string")
-    && typeof candidate.savedAt === "number"
+    && Number.isFinite(candidate.savedAt)
   );
 }

@@ -776,6 +776,36 @@ describe("BrowserXmppClient telemetry hooks", () => {
     expect(stub.errors[0].options?.context?.detail).toBe("stream-not-authorized");
   });
 
+  test("set_on_error bridge recovers stream condition from object detail", () => {
+    const stub = createFaroStub();
+    __setFaroForTesting(stub as never);
+
+    const client = new BrowserXmppClient(session());
+    installInstrumentation(client);
+
+    let onError: ((detail: TestXmppStreamErrorPayload) => void) | null = null;
+    const xmpp = {
+      set_on_error(cb: NonNullable<typeof onError>) {
+        onError = cb;
+      },
+    };
+    const internal = client as unknown as {
+      xmpp: typeof xmpp;
+      wireEvents: (xmpp: typeof xmpp) => void;
+    };
+    internal.xmpp = xmpp;
+    internal.wireEvents(xmpp);
+
+    onError?.({ detail: "not-authorized" });
+
+    expect(stub.errors).toHaveLength(1);
+    expect(stub.errors[0].error.message).toBe("stream-not-authorized");
+    expect(stub.errors[0].options?.type).toBe("xmpp.stream");
+    expect(stub.errors[0].options?.context?.condition).toBe("not-authorized");
+    expect(stub.errors[0].options?.context?.detail).toBe("stream-not-authorized");
+    expect(stub.errors[0].options?.context?.streamDetail).toBe("not-authorized");
+  });
+
   test("set_on_error bridge keeps stanza-only conditions out of stream telemetry", () => {
     const stub = createFaroStub();
     __setFaroForTesting(stub as never);
@@ -803,6 +833,66 @@ describe("BrowserXmppClient telemetry hooks", () => {
     expect(stub.errors[0].options?.type).toBe("xmpp.stream");
     expect(stub.errors[0].options?.context?.condition).toBeUndefined();
     expect(stub.errors[0].options?.context?.detail).toBe("stream-error");
+  });
+
+  test("set_on_error bridge classifies driver errors without losing stream detail", () => {
+    const stub = createFaroStub();
+    __setFaroForTesting(stub as never);
+
+    const client = new BrowserXmppClient(session());
+    installInstrumentation(client);
+
+    let onError: ((detail: TestXmppStreamErrorPayload) => void) | null = null;
+    const xmpp = {
+      set_on_error(cb: NonNullable<typeof onError>) {
+        onError = cb;
+      },
+    };
+    const internal = client as unknown as {
+      xmpp: typeof xmpp;
+      wireEvents: (xmpp: typeof xmpp) => void;
+    };
+    internal.xmpp = xmpp;
+    internal.wireEvents(xmpp);
+
+    onError?.("websocket transport error");
+
+    expect(stub.errors).toHaveLength(1);
+    expect(stub.errors[0].error.message).toBe("stream-transport-error");
+    expect(stub.errors[0].options?.type).toBe("xmpp.stream");
+    expect(stub.errors[0].options?.context?.condition).toBeUndefined();
+    expect(stub.errors[0].options?.context?.detail).toBe("stream-transport-error");
+    expect(stub.errors[0].options?.context?.streamDetail).toBe("websocket transport error");
+  });
+
+  test("set_on_error bridge names handled-count detail when SM metadata is absent", () => {
+    const stub = createFaroStub();
+    __setFaroForTesting(stub as never);
+
+    const client = new BrowserXmppClient(session());
+    installInstrumentation(client);
+
+    let onError: ((detail: TestXmppStreamErrorPayload) => void) | null = null;
+    const xmpp = {
+      set_on_error(cb: NonNullable<typeof onError>) {
+        onError = cb;
+      },
+    };
+    const internal = client as unknown as {
+      xmpp: typeof xmpp;
+      wireEvents: (xmpp: typeof xmpp) => void;
+    };
+    internal.xmpp = xmpp;
+    internal.wireEvents(xmpp);
+
+    onError?.({ detail: "handled-count-too-high" });
+
+    expect(stub.errors).toHaveLength(1);
+    expect(stub.errors[0].error.message).toBe("stream-handled-count-too-high");
+    expect(stub.errors[0].options?.type).toBe("xmpp.stream");
+    expect(stub.errors[0].options?.context?.condition).toBeUndefined();
+    expect(stub.errors[0].options?.context?.detail).toBe("stream-handled-count-too-high");
+    expect(stub.errors[0].options?.context?.streamDetail).toBe("handled-count-too-high");
   });
 
   test("set_on_error bridge names XEP-0198 handled-count stream failures", () => {
@@ -840,6 +930,8 @@ describe("BrowserXmppClient telemetry hooks", () => {
     expect(stub.errors[0].options?.type).toBe("xmpp.stream");
     expect(stub.errors[0].options?.context?.condition).toBe("undefined-condition");
     expect(stub.errors[0].options?.context?.detail).toBe("stream-handled-count-too-high");
+    expect(stub.errors[0].options?.context?.smH).toBe("3");
+    expect(stub.errors[0].options?.context?.smSendCount).toBe("2");
   });
 
   test("enqueuing a send fires onSendEnqueued + onQueueDepthChange", async () => {

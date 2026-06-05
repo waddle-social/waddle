@@ -91,4 +91,5 @@ pub enum SmClaimCompletion {
     Resumed(DetachedSession),
     Expired(DetachedSession),
     ReplayWindowTruncated(DetachedSession),
+    HandledCountTooHigh(DetachedSession),
 }

@@ -47,6 +47,21 @@ impl WaddleConfig {
         Ok(())
     }
 
+    pub fn with_resume_state_with_max(
+        &mut self,
+        previd: String,
+        inbound_h: u32,
+        outbound_h: u32,
+        max_resume_seconds: u32,
+    ) -> Result<(), JsValue> {
+        self.resume_state = Some(
+            waddle_xmpp_client::SmResumeState::new(previd, inbound_h, outbound_h)
+                .map(|state| state.with_max_resume_seconds(Some(max_resume_seconds)))
+                .map_err(|err| js_error(err.to_string()))?,
+        );
+        Ok(())
+    }
+
     pub fn with_resume_state_stanzas(
         &mut self,
         previd: String,
@@ -65,6 +80,31 @@ impl WaddleConfig {
             waddle_xmpp_client::SmResumeState::from_unhandled_outbound_stanzas(
                 previd, inbound_h, outbound_h, stanzas,
             )
+            .map_err(|err| js_error(err.to_string()))?,
+        );
+        Ok(())
+    }
+
+    pub fn with_resume_state_stanzas_with_max(
+        &mut self,
+        previd: String,
+        inbound_h: u32,
+        outbound_h: u32,
+        stanzas: Vec<String>,
+        max_resume_seconds: u32,
+    ) -> Result<(), JsValue> {
+        let stanzas = stanzas
+            .into_iter()
+            .map(|xml| {
+                xml.parse::<Element>()
+                    .map_err(|err| js_error(format!("invalid resume stanza XML: {err}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.resume_state = Some(
+            waddle_xmpp_client::SmResumeState::from_unhandled_outbound_stanzas(
+                previd, inbound_h, outbound_h, stanzas,
+            )
+            .map(|state| state.with_max_resume_seconds(Some(max_resume_seconds)))
             .map_err(|err| js_error(err.to_string()))?,
         );
         Ok(())
@@ -104,6 +144,7 @@ pub(crate) struct JsResumeState {
     pub(crate) outbound_h: u32,
     pub(crate) has_unacked_outbound: bool,
     pub(crate) unhandled_outbound_stanzas: Vec<String>,
+    pub(crate) max_resume_seconds: Option<u32>,
 }
 
 impl From<waddle_xmpp_client::SmResumeState> for JsResumeState {
@@ -118,6 +159,7 @@ impl From<waddle_xmpp_client::SmResumeState> for JsResumeState {
             outbound_h: value.outbound_h(),
             has_unacked_outbound: value.has_unhandled_outbound_stanzas(),
             unhandled_outbound_stanzas,
+            max_resume_seconds: value.max_resume_seconds(),
         }
     }
 }

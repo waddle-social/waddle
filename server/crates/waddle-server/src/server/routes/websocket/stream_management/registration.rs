@@ -43,6 +43,10 @@ pub(in crate::server::routes::websocket) enum SmRegistrationFinalization {
         replay_after_h: u32,
     },
     ReplaceWithFailed(SmFailed),
+    ReplaceWithHandledCountTooHigh {
+        acknowledged: u32,
+        send_count: u32,
+    },
 }
 
 async fn complete_pending_resume_claim(
@@ -98,6 +102,22 @@ async fn complete_pending_resume_claim(
                 "resource-constraint",
                 detached.inbound_count,
             ))
+        }
+        Ok(Some(SmClaimCompletion::HandledCountTooHigh(detached))) => {
+            let acknowledged = resume_h.unwrap_or_default();
+            warn!(
+                stream_id = %stream_id,
+                jid = %jid,
+                client_h = acknowledged,
+                send_count = detached.outbound_count,
+                "SM resume claim completed with handled count too high"
+            );
+            close_registered_resume_attempt(state, conn, jid, owner);
+            remove_resumable_sidecar = false;
+            SmRegistrationFinalization::ReplaceWithHandledCountTooHigh {
+                acknowledged,
+                send_count: detached.outbound_count,
+            }
         }
         Ok(Some(SmClaimCompletion::Expired(detached))) => {
             warn!(stream_id = %stream_id, jid = %jid, "SM resume claim expired before completion");
