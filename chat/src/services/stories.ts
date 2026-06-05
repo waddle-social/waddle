@@ -150,14 +150,14 @@ export function useStories(
         batch.map(async (story): Promise<readonly [string, StoryReactionSummary, StoryReactionItem | null]> => {
           let summary: StoryReactionSummary = { counts: {}, reactors: {}, mine: [] };
           let selfItem: StoryReactionItem | null = null;
-          try {
-            summary = await client.fetchStoryReactionSummary(communityJid, story.id);
-          } catch {}
-          if (client.bareJid) {
-            try {
-              selfItem = await client.fetchMyStoryReactions(communityJid, story.id);
-            } catch {}
-          }
+          const [fetchedSummary, fetchedSelf] = await Promise.all([
+            client.fetchStoryReactionSummary(communityJid, story.id).catch(() => null),
+            client.bareJid
+              ? client.fetchMyStoryReactions(communityJid, story.id).catch(() => null)
+              : Promise.resolve(null),
+          ]);
+          if (fetchedSummary) summary = fetchedSummary;
+          selfItem = fetchedSelf;
           return [story.id, summary, selfItem] as const;
         }),
       ));
@@ -188,19 +188,33 @@ export function useStories(
         const currentSelf = (reactionsByStory.value[storyId] ?? [])
           .find((item) => item.jid.toLowerCase() === selfKey);
         if (!currentSelf) {
-          const selfItems = fetchedSelf ? [fetchedSelf] : [];
-          return [storyId, { ...fetchedSummary, mine: fetchedSelf?.emojis ?? [] }, selfItems] satisfies [string, StoryReactionSummary, StoryReactionItem[]];
+          const counts = applySelfReactionDelta(fetchedSummary.counts, fetchedSelf?.emojis ?? [], []);
+          return [storyId, { ...fetchedSummary, counts, mine: [] }, []] satisfies [string, StoryReactionSummary, StoryReactionItem[]];
         }
-        const counts = { ...fetchedSummary.counts };
-        for (const emoji of normalizeStoryReactions(currentSelf.emojis)) {
-          counts[emoji] = (counts[emoji] ?? 0) + 1;
-        }
+        const counts = applySelfReactionDelta(fetchedSummary.counts, fetchedSelf?.emojis ?? [], currentSelf.emojis);
         return [storyId, { ...fetchedSummary, counts, mine: currentSelf.emojis }, [currentSelf]] satisfies [string, StoryReactionSummary, StoryReactionItem[]];
       });
     return {
       summaries: Object.fromEntries(pairs.map(([storyId, summary]) => [storyId, summary])),
       selfItems: Object.fromEntries(pairs.map(([storyId, , selfItems]) => [storyId, selfItems])),
     };
+  }
+
+  function applySelfReactionDelta(
+    fetchedCounts: StoryReactionSummary["counts"],
+    fetchedSelfEmojis: readonly string[],
+    currentSelfEmojis: readonly string[],
+  ): StoryReactionSummary["counts"] {
+    const counts = { ...fetchedCounts };
+    for (const emoji of normalizeStoryReactions(fetchedSelfEmojis)) {
+      const next = (counts[emoji] ?? 0) - 1;
+      if (next > 0) counts[emoji] = next;
+      else delete counts[emoji];
+    }
+    for (const emoji of normalizeStoryReactions(currentSelfEmojis)) {
+      counts[emoji] = (counts[emoji] ?? 0) + 1;
+    }
+    return counts;
   }
 
   function reactionSummary(storyId: string): StoryReactionSummary {

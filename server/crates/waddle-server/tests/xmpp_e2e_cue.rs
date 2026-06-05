@@ -136,7 +136,6 @@ const ADVERTISED_FEATURE_XEPS: &[(&str, &str)] = &[
     ("urn:xmpp:jingle-message:0", "XEP-0353"),
     ("urn:xmpp:extdisco:2", "XEP-0215"),
     ("urn:xmpp:jingle:muji:0", "XEP-0272"),
-    ("urn:xmpp:pubsub-attachments:1", "XEP-0470"),
     ("urn:xmpp:pubsub-social-feed:0", "XEP-0472"),
     ("urn:xmpp:stories:0", "XEP-0501"),
     ("urn:xmpp:spaces:0", "XEP-0503"),

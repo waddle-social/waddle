@@ -212,6 +212,73 @@ describe("useStories", () => {
     expect(story.reactionSummary("s1").mine).toEqual(["🎉"]);
   });
 
+  test("reaction refresh does not resurrect a locally removed self item", async () => {
+    let resolveSummary!: (summary: StoryReactionSummary) => void;
+    const pendingSummary = new Promise<StoryReactionSummary>((resolve) => {
+      resolveSummary = resolve;
+    });
+    const staleSelf = { jid: "alice@example.com", emojis: ["❤️"], unknownChildrenXml: [] };
+    let fetchCount = 0;
+    const client = makeClient([{ id: "s1", body: "story", postedMs: 1 }]);
+    client.fetchStoryReactionSummary = mock(() => {
+      fetchCount += 1;
+      return fetchCount === 1
+        ? Promise.resolve({ counts: { "❤️": 1 }, reactors: {}, mine: [] })
+        : pendingSummary;
+    }) as unknown as MockClient["fetchStoryReactionSummary"];
+    client.fetchMyStoryReactions = mock(() => Promise.resolve(staleSelf)) as unknown as MockClient["fetchMyStoryReactions"];
+
+    const story = withScope(() =>
+      useStories(ref<BrowserXmppClient | null>(client), { communityJid: ref<string | null>(COMMUNITY) }),
+    );
+    await story.refresh();
+    expect(story.reactionSummary("s1").mine).toEqual(["❤️"]);
+
+    const refresh = story.refresh();
+    await Promise.resolve();
+    await story.toggleReaction("s1", "❤️");
+    expect(story.reactionSummary("s1").mine).toEqual([]);
+
+    resolveSummary({ counts: { "❤️": 1 }, reactors: {}, mine: [] });
+    await refresh;
+
+    expect(story.reactionSummary("s1").counts).toEqual({});
+    expect(story.reactionSummary("s1").mine).toEqual([]);
+  });
+
+  test("reaction refresh applies self delta instead of double-counting old self reactions", async () => {
+    let resolveSummary!: (summary: StoryReactionSummary) => void;
+    const pendingSummary = new Promise<StoryReactionSummary>((resolve) => {
+      resolveSummary = resolve;
+    });
+    const staleSelf = { jid: "alice@example.com", emojis: ["❤️"], unknownChildrenXml: [] };
+    let fetchCount = 0;
+    const client = makeClient([{ id: "s1", body: "story", postedMs: 1 }]);
+    client.fetchStoryReactionSummary = mock(() => {
+      fetchCount += 1;
+      return fetchCount === 1
+        ? Promise.resolve({ counts: { "❤️": 1 }, reactors: {}, mine: [] })
+        : pendingSummary;
+    }) as unknown as MockClient["fetchStoryReactionSummary"];
+    client.fetchMyStoryReactions = mock(() => Promise.resolve(staleSelf)) as unknown as MockClient["fetchMyStoryReactions"];
+
+    const story = withScope(() =>
+      useStories(ref<BrowserXmppClient | null>(client), { communityJid: ref<string | null>(COMMUNITY) }),
+    );
+    await story.refresh();
+    expect(story.reactionSummary("s1").mine).toEqual(["❤️"]);
+
+    const refresh = story.refresh();
+    await Promise.resolve();
+    await story.toggleReaction("s1", "👍");
+
+    resolveSummary({ counts: { "❤️": 1, "🔥": 1 }, reactors: {}, mine: [] });
+    await refresh;
+
+    expect(story.reactionSummary("s1").counts).toEqual({ "❤️": 1, "🔥": 1, "👍": 1 });
+    expect(story.reactionSummary("s1").mine).toEqual(["❤️", "👍"]);
+  });
+
   test("failed older reaction publish does not roll back a newer toggle", async () => {
     let rejectFirst!: (error: Error) => void;
     const firstPublish = new Promise<void>((_, reject) => {

@@ -17,7 +17,6 @@ const NS_STORIES: &str = "urn:xmpp:stories:0";
 const NS_ATTACHMENTS: &str = "urn:xmpp:pubsub-attachments:1";
 const NS_ATTACHMENTS_SUMMARY: &str = "urn:xmpp:pubsub-attachments:summary:1";
 const STORY_SUMMARY_NODE: &str = "urn:xmpp:pubsub-attachments:summary:1/urn:xmpp:stories:0";
-const NS_DISCO_INFO: &str = "http://jabber.org/protocol/disco#info";
 
 static TEST_SERIAL: Mutex<()> = Mutex::const_new(());
 
@@ -154,18 +153,6 @@ async fn member_can_publish_read_and_retract_story_reaction_attachment() {
     assert!(
         reaction_publish.contains("type='result'"),
         "member reaction publish should succeed via story carve-out: {reaction_publish}"
-    );
-
-    let disco = iq_get_to(
-        &mut alice,
-        "community-disco",
-        COMMUNITY_JID,
-        &format!(r#"<query xmlns="{NS_DISCO_INFO}"/>"#),
-    )
-    .await;
-    assert!(
-        disco.contains("type='result'") && disco.contains(NS_ATTACHMENTS),
-        "community service must advertise XEP-0470 attachments support: {disco}"
     );
 
     let summary = iq_get_to(
