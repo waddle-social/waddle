@@ -72,6 +72,14 @@ pub struct ArchivedMessage {
     pub author_real_jid: Option<String>,
     /// Raw inner `<message>` element for full parsing by the messaging module.
     pub inner: Element,
+    /// Typed payload parsed once at the MAM boundary.
+    pub payload: ArchivedPayload,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ArchivedPayload {
+    pub message: Option<Box<crate::messaging::InboundMessage>>,
+    pub call: Option<Box<crate::messaging::InboundCallEvent>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -517,6 +525,8 @@ pub fn parse_mam_result(element: &Element) -> Option<ArchivedMessage> {
         .map(OriginId::new);
     let author_real_jid = parse_archived_author_real_jid(&inner);
 
+    let payload = parse_archived_payload(&inner);
+
     Some(ArchivedMessage {
         mam_id,
         query_id,
@@ -533,7 +543,17 @@ pub fn parse_mam_result(element: &Element) -> Option<ArchivedMessage> {
         parent_thread_id,
         author_real_jid,
         inner,
+        payload,
     })
+}
+
+fn parse_archived_payload(inner: &Element) -> ArchivedPayload {
+    let message = match crate::messaging::parse(inner) {
+        Some(crate::messaging::MessagingEvent::Message(message)) => Some(message),
+        _ => None,
+    };
+    let call = crate::messaging::parse_call_event(inner).map(Box::new);
+    ArchivedPayload { message, call }
 }
 
 fn parse_archived_stanza_id(element: &Element) -> Option<StableStanzaId> {

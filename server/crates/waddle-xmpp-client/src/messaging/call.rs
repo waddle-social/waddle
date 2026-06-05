@@ -126,6 +126,7 @@ pub struct InboundCallEvent {
 const NS_JINGLE: &str = "urn:xmpp:jingle:1";
 const NS_JINGLE_MESSAGE: &str = "urn:xmpp:jingle-message:0";
 const NS_JINGLE_RTP: &str = "urn:xmpp:jingle:apps:rtp:1";
+const NS_MUJI: &str = "urn:xmpp:jingle:muji:0";
 const NS_WADDLE_LIVEKIT_TRANSPORT: &str = "urn:waddle:transports:livekit:0";
 /// XEP-0334 Message Processing Hints namespace. The `<store/>` hint
 /// is mandatory on every JMI envelope per XEP-0353 §3 so MAM
@@ -602,6 +603,95 @@ fn content_element(media: &str) -> Element {
         .build()
 }
 
+/// Build the typed Muji `<content/>` advertised inside a Jingle
+/// session-initiate to the SFU mixer. This mirrors the MUC presence
+/// Muji content shape, but the Jingle content lives in the
+/// `urn:xmpp:jingle:1` namespace and includes the empty Waddle LiveKit
+/// transport placeholder the server rewrites with join credentials.
+pub fn build_muji_jingle_content(media: &str) -> Element {
+    let mut description = Element::builder("description", NS_JINGLE_RTP)
+        .attr(minidom::rxml::xml_ncname!("media").to_owned(), media);
+    match media {
+        "audio" => {
+            description = description.append(
+                Element::builder("payload-type", NS_JINGLE_RTP)
+                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), "111")
+                    .attr(minidom::rxml::xml_ncname!("name").to_owned(), "opus")
+                    .attr(minidom::rxml::xml_ncname!("clockrate").to_owned(), "48000")
+                    .attr(minidom::rxml::xml_ncname!("channels").to_owned(), "2")
+                    .build(),
+            );
+        }
+        "video" => {
+            description = description.append(
+                Element::builder("payload-type", NS_JINGLE_RTP)
+                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), "96")
+                    .attr(minidom::rxml::xml_ncname!("name").to_owned(), "VP8")
+                    .attr(minidom::rxml::xml_ncname!("clockrate").to_owned(), "90000")
+                    .build(),
+            );
+        }
+        _ => {}
+    }
+    description = description.append(Element::builder("rtcp-mux", NS_JINGLE_RTP).build());
+
+    Element::builder("content", NS_JINGLE)
+        .attr(
+            minidom::rxml::xml_ncname!("creator").to_owned(),
+            "initiator",
+        )
+        .attr(minidom::rxml::xml_ncname!("name").to_owned(), media)
+        .attr(minidom::rxml::xml_ncname!("senders").to_owned(), "both")
+        .append(description.build())
+        .append(Element::builder("transport", NS_WADDLE_LIVEKIT_TRANSPORT).build())
+        .build()
+}
+
+pub fn build_muji_session_initiate(
+    sid: &SessionId,
+    initiator: &FullJid,
+    room_jid: &str,
+    video: bool,
+) -> Element {
+    let muji = Element::builder("muji", NS_MUJI)
+        .attr(minidom::rxml::xml_ncname!("room").to_owned(), room_jid)
+        .build();
+    let mut jingle = Element::builder("jingle", NS_JINGLE)
+        .attr(
+            minidom::rxml::xml_ncname!("action").to_owned(),
+            "session-initiate",
+        )
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), sid.0.as_str())
+        .attr(
+            minidom::rxml::xml_ncname!("initiator").to_owned(),
+            initiator.to_string(),
+        )
+        .append(muji)
+        .append(build_muji_jingle_content("audio"));
+    if video {
+        jingle = jingle.append(build_muji_jingle_content("video"));
+    }
+    jingle.build()
+}
+
+pub fn build_muji_session_terminate(room_jid: &str, sid: &SessionId) -> Element {
+    let muji = Element::builder("muji", NS_MUJI)
+        .attr(minidom::rxml::xml_ncname!("room").to_owned(), room_jid)
+        .build();
+    let reason = Element::builder("reason", NS_JINGLE)
+        .append(Element::builder("success", NS_JINGLE).build())
+        .build();
+    Element::builder("jingle", NS_JINGLE)
+        .attr(
+            minidom::rxml::xml_ncname!("action").to_owned(),
+            "session-terminate",
+        )
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), sid.0.as_str())
+        .append(muji)
+        .append(reason)
+        .build()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -898,6 +988,27 @@ mod tests {
     }
 
     #[test]
+    fn build_muji_session_initiate_descriptions_include_rtcp_mux() {
+        let elem = build_muji_session_initiate(
+            &sid("muji-1"),
+            &full("alice@waddle.test/desktop"),
+            "room@muc.waddle.test",
+            true,
+        );
+        for content in elem.children().filter(|c| c.name() == "content") {
+            let desc = content
+                .children()
+                .find(|c| c.name() == "description" && c.ns() == NS_JINGLE_RTP)
+                .expect("each Muji content carries an RTP description");
+            assert!(
+                desc.children()
+                    .any(|c| c.name() == "rtcp-mux" && c.ns() == NS_JINGLE_RTP),
+                "XEP-0167 §3.3 conformance on Muji session-initiate"
+            );
+        }
+    }
+
+    #[test]
     fn build_session_accept_descriptions_include_rtcp_mux() {
         let responder: FullJid = "bob@waddle.test/desktop".parse().unwrap();
         let elem = build_session_accept(&sid("c1"), &responder, CallMedia::audio_video());
@@ -1067,6 +1178,68 @@ mod tests {
             assert!(transport.attr("identity").is_none());
             assert!(transport.children().next().is_none());
         }
+    }
+
+    #[test]
+    fn build_muji_session_initiate_carries_muji_room_and_requested_media() {
+        let jingle = build_muji_session_initiate(
+            &sid("muji-1"),
+            &full("alice@waddle.test/desktop"),
+            "room@muc.waddle.test",
+            false,
+        );
+        assert_eq!(jingle.name(), "jingle");
+        assert_eq!(jingle.ns(), NS_JINGLE);
+        assert_eq!(jingle.attr("action"), Some("session-initiate"));
+        assert_eq!(jingle.attr("sid"), Some("muji-1"));
+        assert_eq!(jingle.attr("initiator"), Some("alice@waddle.test/desktop"));
+
+        let muji = jingle
+            .get_child("muji", NS_MUJI)
+            .expect("Muji metadata is present");
+        assert_eq!(muji.attr("room"), Some("room@muc.waddle.test"));
+
+        let contents: Vec<_> = jingle
+            .children()
+            .filter(|c| c.name() == "content" && c.ns() == NS_JINGLE)
+            .collect();
+        assert_eq!(contents.len(), 1);
+        assert_eq!(contents[0].attr("name"), Some("audio"));
+        assert_eq!(contents[0].attr("senders"), Some("both"));
+
+        let desc = contents[0]
+            .get_child("description", NS_JINGLE_RTP)
+            .expect("RTP description");
+        assert_eq!(desc.attr("media"), Some("audio"));
+        assert!(desc
+            .children()
+            .any(|c| c.name() == "payload-type" && c.attr("name") == Some("opus")));
+        assert_eq!(
+            contents[0]
+                .get_child("transport", NS_WADDLE_LIVEKIT_TRANSPORT)
+                .map(|t| t.name()),
+            Some("transport")
+        );
+    }
+
+    #[test]
+    fn build_muji_session_initiate_adds_video_when_requested() {
+        let jingle = build_muji_session_initiate(
+            &sid("muji-1"),
+            &full("alice@waddle.test/desktop"),
+            "room@muc.waddle.test",
+            true,
+        );
+        let media: Vec<_> = jingle
+            .children()
+            .filter(|c| c.name() == "content" && c.ns() == NS_JINGLE)
+            .filter_map(|content| {
+                content
+                    .get_child("description", NS_JINGLE_RTP)
+                    .and_then(|desc| desc.attr("media"))
+            })
+            .collect();
+        assert_eq!(media, vec!["audio", "video"]);
     }
 
     #[test]

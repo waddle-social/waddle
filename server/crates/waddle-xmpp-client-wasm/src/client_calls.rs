@@ -1,18 +1,18 @@
 use super::*;
 use waddle_xmpp_client::messaging::{
-    build_finish, build_finish_migrated, build_proceed, build_propose, build_reject,
-    build_reject_with_options, build_retract, build_retract_with_options, build_session_accept,
-    build_session_initiate, build_session_terminate, jingle_reason_from_wire_name,
-    wrap_jmi_message, CallMedia, JingleReason, SessionId,
+    build_finish, build_finish_migrated, build_muji_session_initiate, build_muji_session_terminate,
+    build_proceed, build_propose, build_reject, build_reject_with_options, build_retract,
+    build_retract_with_options, build_session_accept, build_session_initiate,
+    build_session_terminate, jingle_reason_from_wire_name, wrap_jmi_message, CallMedia,
+    JingleReason, SessionId,
 };
 
+#[cfg(test)]
 const NS_JINGLE: &str = "urn:xmpp:jingle:1";
 #[cfg(test)]
 const NS_JINGLE_MESSAGE: &str = "urn:xmpp:jingle-message:0";
+#[cfg(test)]
 const NS_MUJI: &str = "urn:xmpp:jingle:muji:0";
-const NS_JINGLE_RTP: &str = "urn:xmpp:jingle:apps:rtp:1";
-const NS_WADDLE_LIVEKIT_TRANSPORT: &str = "urn:waddle:transports:livekit:0";
-
 const NS_JABBER_CLIENT: &str = "jabber:client";
 
 /// Compute the SFU mixer JID for a server domain. Matches the
@@ -28,71 +28,6 @@ fn calls_mixer_jid(server_domain: &str) -> String {
 // surfaced to the chat-side as a typed `CallEventKind::SessionAccept`.
 // There is no per-wasm Muji-specific accept parser; the LiveKit join
 // extraction is centralised in `waddle-xmpp-client/src/messaging/call.rs`.
-
-/// Build the typed Muji `<content>` advertised inside both the MUC
-/// presence and the Jingle session-initiate. Minimal XEP-0167
-/// `<description>` (no payload-types — LiveKit dictates codecs)
-/// plus an empty `<transport xmlns='urn:waddle:transports:livekit:0'/>`
-/// placeholder that the server rewrites with the issued credentials.
-fn build_muji_jingle_content(media: &str) -> Element {
-    // XEP-0167 §3.1 example convention + XEP-0272's own examples
-    // include `<payload-type/>` children. Emit canonical
-    // LiveKit-supported codecs (Opus / VP8) so a strict Muji peer
-    // parsing our session-initiate sees a valid codec offer.
-    let mut description_builder = Element::builder("description", NS_JINGLE_RTP)
-        .attr(minidom::rxml::xml_ncname!("media").to_owned(), media);
-    match media {
-        "audio" => {
-            description_builder = description_builder.append(
-                Element::builder("payload-type", NS_JINGLE_RTP)
-                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), "111")
-                    .attr(minidom::rxml::xml_ncname!("name").to_owned(), "opus")
-                    .attr(minidom::rxml::xml_ncname!("clockrate").to_owned(), "48000")
-                    .attr(minidom::rxml::xml_ncname!("channels").to_owned(), "2")
-                    .build(),
-            );
-        }
-        "video" => {
-            description_builder = description_builder.append(
-                Element::builder("payload-type", NS_JINGLE_RTP)
-                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), "96")
-                    .attr(minidom::rxml::xml_ncname!("name").to_owned(), "VP8")
-                    .attr(minidom::rxml::xml_ncname!("clockrate").to_owned(), "90000")
-                    .build(),
-            );
-        }
-        _ => {}
-    }
-    let transport = Element::builder("transport", NS_WADDLE_LIVEKIT_TRANSPORT).build();
-    Element::builder("content", NS_JINGLE)
-        .attr(
-            minidom::rxml::xml_ncname!("creator").to_owned(),
-            "initiator",
-        )
-        .attr(minidom::rxml::xml_ncname!("name").to_owned(), media)
-        .attr(minidom::rxml::xml_ncname!("senders").to_owned(), "both")
-        .append(description_builder.build())
-        .append(transport)
-        .build()
-}
-
-fn build_muji_session_terminate_jingle(room_jid: &str, sid_str: &str) -> Element {
-    let muji = Element::builder("muji", NS_MUJI)
-        .attr(minidom::rxml::xml_ncname!("room").to_owned(), room_jid)
-        .build();
-    let reason = Element::builder("reason", NS_JINGLE)
-        .append(Element::builder("success", NS_JINGLE).build())
-        .build();
-    Element::builder("jingle", NS_JINGLE)
-        .attr(
-            minidom::rxml::xml_ncname!("action").to_owned(),
-            "session-terminate",
-        )
-        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), sid_str)
-        .append(muji)
-        .append(reason)
-        .build()
-}
 
 /// Wrap a JMI body in the XEP-0353 §3-conformant `<message type='chat'>`
 /// envelope with a XEP-0334 `<store/>` hint. Routes through
@@ -370,30 +305,8 @@ impl WaddleClient {
                 .ok_or_else(|| js_error("authenticated JID has no domain"))?;
             let mixer = calls_mixer_jid(&server_domain);
 
-            let muji = Element::builder("muji", NS_MUJI)
-                .attr(
-                    minidom::rxml::xml_ncname!("room").to_owned(),
-                    room_jid.as_str(),
-                )
-                .build();
-            let mut jingle = Element::builder("jingle", NS_JINGLE)
-                .attr(
-                    minidom::rxml::xml_ncname!("action").to_owned(),
-                    "session-initiate",
-                )
-                .attr(
-                    minidom::rxml::xml_ncname!("sid").to_owned(),
-                    sid_str.as_str(),
-                )
-                .attr(
-                    minidom::rxml::xml_ncname!("initiator").to_owned(),
-                    initiator.to_string(),
-                )
-                .append(muji)
-                .append(build_muji_jingle_content("audio"));
-            if video {
-                jingle = jingle.append(build_muji_jingle_content("video"));
-            }
+            let sid = sid(sid_str);
+            let jingle = build_muji_session_initiate(&sid, &initiator, &room_jid, video);
             let stanza = Element::builder("iq", NS_JABBER_CLIENT)
                 .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
                 .attr(
@@ -401,7 +314,7 @@ impl WaddleClient {
                     uuid::Uuid::new_v4().to_string(),
                 )
                 .attr(minidom::rxml::xml_ncname!("to").to_owned(), mixer.as_str())
-                .append(jingle.build())
+                .append(jingle)
                 .build();
             // XEP-0166 §6.3 conformance: the server replies with an
             // EMPTY IQ-result ack. The actual session-accept
@@ -444,7 +357,7 @@ impl WaddleClient {
                 .ok_or_else(|| js_error("authenticated JID has no domain"))?;
             let mixer = calls_mixer_jid(&server_domain);
 
-            let jingle = build_muji_session_terminate_jingle(&room_jid, &sid_str);
+            let jingle = build_muji_session_terminate(&room_jid, &sid(sid_str));
             let stanza = Element::builder("iq", NS_JABBER_CLIENT)
                 .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
                 .attr(
@@ -630,8 +543,10 @@ mod tests {
 
     #[test]
     fn muji_session_terminate_uses_session_sid_and_keeps_room_metadata() {
-        let jingle =
-            super::build_muji_session_terminate_jingle("chan@muc.waddle.test", "attempt-123");
+        let jingle = super::build_muji_session_terminate(
+            "chan@muc.waddle.test",
+            &SessionId("attempt-123".to_string()),
+        );
 
         assert_eq!(jingle.name(), "jingle");
         assert_eq!(jingle.ns(), NS_JINGLE);

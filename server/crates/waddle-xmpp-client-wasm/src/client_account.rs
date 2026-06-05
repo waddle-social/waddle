@@ -239,65 +239,29 @@ impl WaddleClient {
                 .filter(|trimmed| !trimmed.is_empty())
                 .map(str::to_string);
 
-            // Fetch existing bookmarks so we can preserve the rest of
-            // the bookmark item plus any foreign extension children
-            // when we merge in the new <notify/> setting. Treat
-            // first-publish item-not-found as empty.
-            let fetch_iq = build_fetch_bookmarks_iq(&uuid::Uuid::new_v4().to_string());
-            let items = match send_iq_command_stanza_aware(inner.clone(), fetch_iq).await? {
-                Ok(elem) => parse_bookmarks_response(&elem),
-                Err(stanza_err) if stanza_err.condition == "item-not-found" => Vec::new(),
-                Err(stanza_err) => return Err(js_error(stanza_err.to_string())),
+            let driver = WasmCommandDriver { inner };
+            let core_options = waddle_xmpp_client::notification_settings::SetRoomNotificationMode {
+                room_jid,
+                name: name_override,
+                mode: opts.mode,
+                rich_payload_opt_in: opts.rich_payload_opt_in,
             };
-
-            let existing = items.iter().find(|item| item.jid == room_jid);
-            let existing_extensions =
-                existing.map(|item| build_extensions_wrapper(&item.extensions));
-            let merged_extensions = merge_notify_into_extensions(
-                existing_extensions.as_ref(),
-                opts.mode,
-                opts.rich_payload_opt_in,
-            );
-            let extensions_children: Vec<Element> = merged_extensions.children().cloned().collect();
-
-            let merged_item = BookmarkItem {
-                jid: room_jid,
-                name: existing
-                    .and_then(|item| item.name.clone())
-                    .or(name_override),
-                autojoin: existing.map(|item| item.autojoin).unwrap_or(false),
-                nick: existing.and_then(|item| item.nick.clone()),
-                password: existing.and_then(|item| item.password.clone()),
-                extensions: extensions_children,
-            };
-
-            let publish_iq =
-                build_publish_bookmark_iq(&merged_item, &uuid::Uuid::new_v4().to_string());
-            // Use the stanza-aware send so the chat layer can
-            // distinguish recoverable XEP-0060 conditions (notably
-            // `precondition-not-met` on an older XEP-0223-style node
-            // configured with `access_model=open`) from transport
-            // errors. Round-9 reviewer P2 — we resolve the Promise
-            // with a typed JS-object outcome instead of throwing a
-            // stringly-typed payload across the boundary. The chat
-            // wrapper switches on `outcome.kind` directly.
-            let outcome = match send_iq_command_stanza_aware(inner, publish_iq).await? {
-                Ok(_) => WaddleSetRoomNotificationModeOutcome::Ok {
-                    item: surface_bookmark(merged_item),
+            let outcome = waddle_xmpp_client::notification_settings::set_room_notification_mode(
+                &driver,
+                core_options,
+            )
+            .await
+            .map_err(|err| js_error(err.to_string()))?;
+            let outcome = match outcome {
+                waddle_xmpp_client::notification_settings::SetRoomNotificationModeOutcome::Ok {
+                    item,
+                } => WaddleSetRoomNotificationModeOutcome::Ok {
+                    item: surface_bookmark(item),
                 },
-                Err(stanza_err) if stanza_err.condition == "precondition-not-met" => {
+                waddle_xmpp_client::notification_settings::SetRoomNotificationModeOutcome::NodeConfigMismatch => {
                     WaddleSetRoomNotificationModeOutcome::NodeConfigMismatch
                 }
-                Err(stanza_err) => {
-                    // Keep the specific RFC 6120 §8.3 condition on
-                    // the Rust side as a diagnostic log; do not leak
-                    // it across the JS boundary as a stringly-typed
-                    // payload. Round-13 PR compliance — typed
-                    // payloads beyond the I/O boundary.
-                    tracing::warn!(
-                        condition = %stanza_err.condition,
-                        "bookmark publish rejected with stanza error",
-                    );
+                waddle_xmpp_client::notification_settings::SetRoomNotificationModeOutcome::Error => {
                     WaddleSetRoomNotificationModeOutcome::Error
                 }
             };
@@ -379,71 +343,35 @@ impl WaddleClient {
                 ));
             }
 
-            // Fetch existing DM items so we merge into the contact's
-            // current `<notify/>` (preserving foreign `<advanced/>` +
-            // identity-scoped siblings). First-publish item-not-found is
-            // empty, not an error.
-            let fetch_iq = build_fetch_dm_bookmarks_iq(&uuid::Uuid::new_v4().to_string());
-            let items = match send_iq_command_stanza_aware(inner.clone(), fetch_iq).await? {
-                Ok(elem) => parse_dm_bookmark_payloads(&elem),
-                Err(stanza_err) if stanza_err.condition == "item-not-found" => Vec::new(),
-                Err(stanza_err) => return Err(js_error(stanza_err.to_string())),
+            let driver = WasmCommandDriver { inner };
+            let core_options = waddle_xmpp_client::notification_settings::SetDmNotificationMode {
+                dm_jid,
+                mode: opts.mode,
+                rich_payload_opt_in: opts.rich_payload_opt_in,
             };
-
-            let existing_notify = items
-                .iter()
-                .find(|(jid, _)| *jid == dm_jid)
-                .and_then(|(_, payload)| read_dm_bookmark_notify(payload))
-                .cloned();
-            let merged = merge_notify(
-                existing_notify.as_ref(),
-                opts.mode,
-                opts.rich_payload_opt_in,
-            );
-
-            // Sparse / override-only: a DM returned to the XEP-0492 §3
-            // direct-chat default (`always`, no opt-in, no foreign
-            // `<advanced/>`) has no item — retract it. Absence == default.
-            if dm_notify_is_default(&merged, NotifyMode::Always) {
-                let retract_iq =
-                    build_retract_dm_bookmark_iq(&dm_jid, &uuid::Uuid::new_v4().to_string());
-                let outcome = match send_iq_command_stanza_aware(inner, retract_iq).await? {
-                    Ok(_) => WaddleSetDmNotificationModeOutcome::Removed {
-                        jid: dm_jid.to_string(),
-                    },
-                    // A retract of an already-absent item returns
-                    // `item-not-found`; that's the desired end-state
-                    // (no override), so treat it as success.
-                    Err(stanza_err) if stanza_err.condition == "item-not-found" => {
-                        WaddleSetDmNotificationModeOutcome::Removed {
-                            jid: dm_jid.to_string(),
-                        }
-                    }
-                    Err(stanza_err) => {
-                        tracing::warn!(
-                            condition = %stanza_err.condition,
-                            "DM-bookmark retract rejected with stanza error",
-                        );
-                        WaddleSetDmNotificationModeOutcome::Error
-                    }
-                };
-                return to_js_value(&outcome);
-            }
-
-            let publish_iq =
-                build_publish_dm_bookmark_iq(&dm_jid, &merged, &uuid::Uuid::new_v4().to_string());
-            let outcome = match send_iq_command_stanza_aware(inner, publish_iq).await? {
-                Ok(_) => WaddleSetDmNotificationModeOutcome::Ok {
-                    item: surface_dm_bookmark(&dm_jid, &merged),
+            let outcome = waddle_xmpp_client::notification_settings::set_dm_notification_mode(
+                &driver,
+                core_options,
+            )
+            .await
+            .map_err(|err| js_error(err.to_string()))?;
+            let outcome = match outcome {
+                waddle_xmpp_client::notification_settings::SetDmNotificationModeOutcome::Ok {
+                    jid,
+                    mode,
+                    rich_payload_opt_in,
+                } => WaddleSetDmNotificationModeOutcome::Ok {
+                    item: surface_dm_bookmark_values(&jid, Some(mode), rich_payload_opt_in),
                 },
-                Err(stanza_err) if stanza_err.condition == "precondition-not-met" => {
+                waddle_xmpp_client::notification_settings::SetDmNotificationModeOutcome::Removed {
+                    jid,
+                } => WaddleSetDmNotificationModeOutcome::Removed {
+                    jid: jid.to_string(),
+                },
+                waddle_xmpp_client::notification_settings::SetDmNotificationModeOutcome::NodeConfigMismatch => {
                     WaddleSetDmNotificationModeOutcome::NodeConfigMismatch
                 }
-                Err(stanza_err) => {
-                    tracing::warn!(
-                        condition = %stanza_err.condition,
-                        "DM-bookmark publish rejected with stanza error",
-                    );
+                waddle_xmpp_client::notification_settings::SetDmNotificationModeOutcome::Error => {
                     WaddleSetDmNotificationModeOutcome::Error
                 }
             };
@@ -816,14 +744,6 @@ impl WaddleClient {
 /// Build the `<extensions xmlns='urn:xmpp:bookmarks:1'>…</extensions>`
 /// wrapper around the typed bookmark's foreign children so the merge
 /// helper has a single `Element` to walk. Pure / side-effect free.
-fn build_extensions_wrapper(children: &[Element]) -> Element {
-    let mut builder = Element::builder("extensions", waddle_xmpp_client::pep::NS_BOOKMARKS);
-    for child in children {
-        builder = builder.append(child.clone());
-    }
-    builder.build()
-}
-
 /// Surface one parsed [`BookmarkItem`] into the JS-facing
 /// [`WaddleBookmarkItem`]. Pulls the XEP-0492 fallback `<notify/>`
 /// child out of the extensions list and returns it as the typed
@@ -857,48 +777,13 @@ fn surface_bookmark(item: BookmarkItem) -> WaddleBookmarkItem {
     }
 }
 
-/// Extract each `(contact bare JID, <dm-bookmark> payload)` pair from a
-/// XEP-0060 items response targeting the Waddle DM-bookmark node
-/// (issue #720). Items with an unparseable id or a missing/malformed
-/// `<dm-bookmark>` payload are skipped. The id is the contact's bare
-/// JID (the PEP item id); the payload is the carrier element directly
-/// hosting one XEP-0492 `<notify/>`.
-///
-/// Returns the typed payloads so callers can read the hosted `<notify/>`
-/// (`set_dm_notification_mode` merges into it;
-/// `parse_dm_bookmarks_response` surfaces it).
-fn parse_dm_bookmark_payloads(iq: &Element) -> Vec<(jid::BareJid, Element)> {
-    let Some(items) = iq
-        .get_child("pubsub", waddle_xmpp_client::pep::NS_PUBSUB)
-        .and_then(|pubsub| pubsub.get_child("items", waddle_xmpp_client::pep::NS_PUBSUB))
-        .filter(|items| items.attr("node") == Some(NS_WADDLE_DM_BOOKMARKS))
-    else {
-        return Vec::new();
-    };
-    items
-        .children()
-        .filter(|child| child.name() == "item" && child.ns() == waddle_xmpp_client::pep::NS_PUBSUB)
-        .filter_map(|item| {
-            let jid: jid::BareJid = item.attr("id")?.parse().ok()?;
-            // The DM carrier contract requires the item id to be a
-            // contact bare JID WITH a localpart (`localpart@domain`).
-            // Skip a domain-only id so the chat never surfaces an
-            // impossible DM entry — mirrors the server-side
-            // `parse_dm_bookmark` localpart requirement (Copilot review).
-            jid.node()?;
-            let payload = item.get_child("dm-bookmark", NS_WADDLE_DM_BOOKMARKS)?;
-            Some((jid, payload.clone()))
-        })
-        .collect()
-}
-
 /// Parse a DM-bookmark items response into the JS-facing surface
 /// (issue #720). Reads each payload's hosted `<notify/>` for the
 /// XEP-0492 fallback mode + rich-payload opt-in (#719). A payload
 /// missing its `<notify/>` yields `notify_mode = None` (the chat
 /// resolves it against the §3 direct-chat default).
 fn parse_dm_bookmarks_response(iq: &Element) -> Vec<WaddleDmBookmarkItem> {
-    parse_dm_bookmark_payloads(iq)
+    waddle_xmpp_client::notification_settings::parse_dm_bookmark_payloads(iq)
         .into_iter()
         .map(|(jid, payload)| match read_dm_bookmark_notify(&payload) {
             Some(notify) => surface_dm_bookmark(&jid, notify),
@@ -953,21 +838,31 @@ fn fetch_threads_query_from_options(
 
 /// Surface one DM-bookmark `<notify/>` into the JS-facing
 /// [`WaddleDmBookmarkItem`] (issue #720). Used by both
-/// `fetch_dm_bookmarks` (per-item map) and `set_dm_notification_mode`
-/// (response shaping of the merged `<notify/>`).
+/// `fetch_dm_bookmarks` per-item parsing.
 fn surface_dm_bookmark(jid: &jid::BareJid, notify: &Element) -> WaddleDmBookmarkItem {
+    surface_dm_bookmark_values(
+        jid,
+        read_fallback_mode(notify),
+        read_rich_payload_opt_in(notify),
+    )
+}
+
+fn surface_dm_bookmark_values(
+    jid: &jid::BareJid,
+    notify_mode: Option<waddle_xmpp_client::xep::xep0492::NotifyMode>,
+    rich_payload_opt_in: bool,
+) -> WaddleDmBookmarkItem {
     WaddleDmBookmarkItem {
         jid: jid.to_string(),
-        notify_mode: read_fallback_mode(notify),
-        rich_payload_opt_in: read_rich_payload_opt_in(notify),
+        notify_mode,
+        rich_payload_opt_in,
     }
 }
 
 /// `CommandDriver` impl that forwards through the WASM client's
-/// `send_iq_command` pipeline. The composer's typed `ClientResult`
-/// surface meets the JS boundary's stringly-typed `JsValue` errors
-/// here — any error from the WASM driver is wrapped as a typed
-/// `StanzaError` so the composer's diagnostic chain stays consistent.
+/// stanza-aware IQ pipeline. RFC 6120 stanza errors must reach the
+/// core notification composer unchanged so it can classify conditions
+/// such as `item-not-found` and `precondition-not-met`.
 pub(crate) struct WasmCommandDriver {
     pub(crate) inner: Rc<RefCell<WaddleClientInner>>,
 }
@@ -977,19 +872,20 @@ impl waddle_xmpp_client::push::CommandDriver for WasmCommandDriver {
         &self,
         iq: Element,
     ) -> Result<Element, waddle_xmpp_client::error::ClientError> {
-        send_iq_command(self.inner.clone(), iq).await.map_err(|js| {
-            let text = js
-                .as_string()
-                .unwrap_or_else(|| "WASM send_iq failed".to_string());
-            waddle_xmpp_client::error::ClientError::StanzaError(
-                waddle_xmpp_client::error::StanzaError {
-                    error_type: waddle_xmpp_client::error::StanzaErrorType::Cancel,
-                    condition: "internal-server-error".to_string(),
-                    text: Some(text),
-                },
-            )
-        })
+        match send_iq_command_stanza_aware(self.inner.clone(), iq)
+            .await
+            .map_err(js_value_to_client_error)?
+        {
+            Ok(element) => Ok(element),
+            Err(stanza_error) => Err(waddle_xmpp_client::error::ClientError::StanzaError(
+                stanza_error,
+            )),
+        }
     }
+}
+
+fn js_value_to_client_error(_js: JsValue) -> waddle_xmpp_client::error::ClientError {
+    waddle_xmpp_client::error::ClientError::Disconnected
 }
 
 /// Defense-in-depth check for `fetch_vapid_public_key`: refuse to accept
@@ -1038,220 +934,5 @@ fn verify_iq_from_matches_query(from_attr: Option<&str>, service_jid: &str) -> R
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fetch_threads_options_build_filtered_iq() {
-        let opts = WaddleFetchThreadsOptions {
-            page_size: Some(50),
-            after_cursor: Some("CUR".to_string()),
-            status: Some(WaddleThreadStatusFilter::Unread),
-            active_since: Some("2026-05-19T00:00:00Z".to_string()),
-            channel: Some("chat@muc.waddle.chat".to_string()),
-            search: Some(" notifications ".to_string()),
-            sort: Some(WaddleThreadSort::Replies),
-        };
-
-        let query = fetch_threads_query_from_options(&opts).expect("valid threads query");
-        let iq = build_fetch_threads_iq("threads-test", &query);
-        let query_el = iq
-            .get_child("query", waddle_xmpp_client::xep::threads::NS_THREADS)
-            .expect("threads query");
-
-        assert_eq!(query_el.attr("status"), Some("unread"));
-        assert_eq!(query_el.attr("active-since"), Some("2026-05-19T00:00:00Z"));
-        assert_eq!(query_el.attr("channel"), Some("chat@muc.waddle.chat"));
-        assert_eq!(query_el.attr("search"), Some("notifications"));
-        assert_eq!(query_el.attr("sort"), Some("replies"));
-
-        let set = query_el
-            .get_child("set", "http://jabber.org/protocol/rsm")
-            .expect("rsm set");
-        assert_eq!(
-            set.get_child("max", "http://jabber.org/protocol/rsm")
-                .map(|el| el.text()),
-            Some("50".to_string())
-        );
-        assert_eq!(
-            set.get_child("after", "http://jabber.org/protocol/rsm")
-                .map(|el| el.text()),
-            Some("CUR".to_string())
-        );
-    }
-
-    #[test]
-    fn verify_iq_from_accepts_exact_match() {
-        assert!(verify_iq_from_matches_query(Some("push.example.com"), "push.example.com").is_ok());
-    }
-
-    #[test]
-    fn verify_iq_from_rejects_absent_attr() {
-        // RFC 6120 §8.1.2.1's absent-from permission only applies to
-        // replies from the bound user's own server. The Push Service is
-        // a separate XEP-0114 component, so absent-from is a server
-        // violation we MUST NOT silently accept — a compromised C2S
-        // could strip `from` instead of spoofing it.
-        let err = verify_iq_from_matches_query(None, "push.example.com").unwrap_err();
-        assert!(err.contains("push.example.com"));
-        assert!(err.contains("no `from`"));
-    }
-
-    #[test]
-    fn parse_dm_bookmark_payloads_skips_domain_only_item_id() {
-        // A domain-only id (no localpart) is not a valid DM contact JID
-        // — it must be skipped so the chat never surfaces an impossible
-        // DM entry (Copilot review). A well-formed sibling still parses.
-        let iq: Element = "<iq xmlns='jabber:client'>\
-                <pubsub xmlns='http://jabber.org/protocol/pubsub'>\
-                    <items node='urn:waddle:dm-bookmarks:0'>\
-                        <item id='bob@example.com'>\
-                            <dm-bookmark xmlns='urn:waddle:dm-bookmarks:0'>\
-                                <notify xmlns='urn:xmpp:notification-settings:1'><never/></notify>\
-                            </dm-bookmark>\
-                        </item>\
-                        <item id='example.com'>\
-                            <dm-bookmark xmlns='urn:waddle:dm-bookmarks:0'>\
-                                <notify xmlns='urn:xmpp:notification-settings:1'><never/></notify>\
-                            </dm-bookmark>\
-                        </item>\
-                    </items>\
-                </pubsub>\
-            </iq>"
-            .parse()
-            .expect("valid iq");
-        let parsed = parse_dm_bookmark_payloads(&iq);
-        assert_eq!(parsed.len(), 1, "domain-only id must be skipped");
-        assert_eq!(parsed[0].0.to_string(), "bob@example.com");
-    }
-
-    #[test]
-    fn verify_iq_from_rejects_service_jid_with_resource() {
-        // Push Service components don't carry resources (XEP-0114).
-        // Accepting `push.example.com/anything` would be needlessly
-        // permissive and wouldn't help any real-world deployment.
-        let err =
-            verify_iq_from_matches_query(Some("push.example.com/resource"), "push.example.com")
-                .unwrap_err();
-        assert!(err.contains("push.example.com/resource"));
-    }
-
-    #[test]
-    fn verify_iq_from_accepts_case_variation_on_domain() {
-        // RFC 6122 §2.4: domainpart comparison is case-insensitive.
-        assert!(verify_iq_from_matches_query(Some("Push.Example.COM"), "push.example.com").is_ok());
-    }
-
-    #[test]
-    fn verify_iq_from_rejects_unrelated_jid() {
-        let err =
-            verify_iq_from_matches_query(Some("attacker.tld"), "push.example.com").unwrap_err();
-        assert!(err.contains("attacker.tld"));
-        assert!(err.contains("push.example.com"));
-    }
-
-    #[test]
-    fn verify_iq_from_rejects_prefix_substring_collision() {
-        // `push.example.com` MUST NOT match `push.example.com.attacker.tld`
-        // even via case-insensitive equality.
-        assert!(verify_iq_from_matches_query(
-            Some("push.example.com.attacker.tld"),
-            "push.example.com",
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn verify_iq_from_rejects_empty_from() {
-        let err = verify_iq_from_matches_query(Some(""), "push.example.com").unwrap_err();
-        assert!(err.contains("push.example.com"));
-    }
-
-    #[test]
-    fn surface_bookmark_reads_rich_payload_opt_in() {
-        // #719 — the JS-facing item exposes the XEP-0492 §2.3
-        // `<advanced><rich-payload xmlns='urn:waddle:push:rich:0'/>`
-        // opt-in alongside the fallback notify mode.
-        let extensions: Element = "<extensions xmlns='urn:xmpp:bookmarks:1'>\
-                <notify xmlns='urn:xmpp:notification-settings:1'>\
-                    <always>\
-                        <advanced xmlns='urn:xmpp:notification-settings:1'>\
-                            <rich-payload xmlns='urn:waddle:push:rich:0'/>\
-                        </advanced>\
-                    </always>\
-                </notify>\
-            </extensions>"
-            .parse()
-            .expect("valid extensions");
-        let item = BookmarkItem {
-            jid: "room@muc.example.com".parse().expect("valid jid"),
-            name: None,
-            autojoin: false,
-            nick: None,
-            password: None,
-            extensions: extensions.children().cloned().collect(),
-        };
-        let surfaced = surface_bookmark(item);
-        assert!(surfaced.rich_payload_opt_in);
-        assert_eq!(
-            surfaced.notify_mode,
-            Some(waddle_xmpp_client::xep::xep0492::NotifyMode::Always)
-        );
-    }
-
-    #[test]
-    fn surface_bookmark_opt_in_defaults_off_without_advanced() {
-        let extensions: Element = "<extensions xmlns='urn:xmpp:bookmarks:1'>\
-                <notify xmlns='urn:xmpp:notification-settings:1'><never /></notify>\
-            </extensions>"
-            .parse()
-            .expect("valid extensions");
-        let item = BookmarkItem {
-            jid: "room@muc.example.com".parse().expect("valid jid"),
-            name: None,
-            autojoin: false,
-            nick: None,
-            password: None,
-            extensions: extensions.children().cloned().collect(),
-        };
-        let surfaced = surface_bookmark(item);
-        assert!(!surfaced.rich_payload_opt_in);
-    }
-
-    #[test]
-    fn surface_bookmark_scans_past_fallbackless_notify_sibling() {
-        // Malformed-but-possible state the merge code explicitly folds:
-        // multiple <notify/> siblings. The first carries only an
-        // identity-scoped setting (no fallback, no rich marker); the
-        // user's real fallback + rich opt-in live in the second. We
-        // must scan ALL notify siblings, not stop at the first.
-        let extensions: Element = "<extensions xmlns='urn:xmpp:bookmarks:1'>\
-                <notify xmlns='urn:xmpp:notification-settings:1'>\
-                    <never identity-category='client' identity-type='pc' />\
-                </notify>\
-                <notify xmlns='urn:xmpp:notification-settings:1'>\
-                    <always>\
-                        <advanced xmlns='urn:xmpp:notification-settings:1'>\
-                            <rich-payload xmlns='urn:waddle:push:rich:0'/>\
-                        </advanced>\
-                    </always>\
-                </notify>\
-            </extensions>"
-            .parse()
-            .expect("valid extensions");
-        let item = BookmarkItem {
-            jid: "room@muc.example.com".parse().expect("valid jid"),
-            name: None,
-            autojoin: false,
-            nick: None,
-            password: None,
-            extensions: extensions.children().cloned().collect(),
-        };
-        let surfaced = surface_bookmark(item);
-        assert_eq!(
-            surfaced.notify_mode,
-            Some(waddle_xmpp_client::xep::xep0492::NotifyMode::Always)
-        );
-        assert!(surfaced.rich_payload_opt_in);
-    }
-}
+#[path = "client_account_tests.rs"]
+mod tests;
