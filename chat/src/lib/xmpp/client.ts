@@ -162,6 +162,8 @@ import { escapeXml } from "./extension-commands/xml";
 
 export { dmMessageFromArchived, roomMessageFromArchived } from "./wasm-message-codecs";
 
+const NS_PUBSUB = "http://jabber.org/protocol/pubsub";
+
 function isRoomActivityMessage(message: LiveRoomMessage): boolean {
   return !!message.body && !message.replacesId && !message.retractsId;
 }
@@ -251,6 +253,7 @@ function parseStoryReactionItems(xml: string): StoryReactionItem[] {
   const doc = new DOMParser().parseFromString(xml, "text/xml");
   const serializer = typeof XMLSerializer !== "undefined" ? new XMLSerializer() : null;
   return Array.from(doc.getElementsByTagName("item"))
+    .filter((item) => item.namespaceURI === NS_PUBSUB)
     .map((item): StoryReactionItem | null => {
       const jid = item.getAttribute("id")?.trim();
       if (!jid) return null;
@@ -2414,7 +2417,7 @@ export class BrowserXmppClient {
     if (typeof xmpp.send_raw_iq !== "function") return [];
     const node = storyAttachmentNode(communityJid, storyId);
     const responseXml = await xmpp.send_raw_iq(
-      `<iq type="get" id="${crypto.randomUUID()}" to="${escapeXml(communityJid)}"><pubsub xmlns="http://jabber.org/protocol/pubsub"><items node="${escapeXml(node)}"/></pubsub></iq>`,
+      `<iq type="get" id="${crypto.randomUUID()}" to="${escapeXml(communityJid)}"><pubsub xmlns="${NS_PUBSUB}"><items node="${escapeXml(node)}"/></pubsub></iq>`,
     ) as string;
     return parseStoryReactionItems(responseXml);
   }
@@ -2436,7 +2439,7 @@ export class BrowserXmppClient {
     const reactionsXml = `<reactions>${normalized.map((emoji) => `<reaction>${escapeXml(emoji)}</reaction>`).join("")}</reactions>`;
     const preservedXml = unknownChildrenXml.join("");
     await xmpp.send_raw_iq(
-      `<iq type="set" id="${crypto.randomUUID()}" to="${escapeXml(communityJid)}"><pubsub xmlns="http://jabber.org/protocol/pubsub"><publish node="${escapeXml(node)}"><item id="${escapeXml(barePeerJid(this.session.jid))}"><attachments xmlns="${NS_PUBSUB_ATTACHMENTS}">${reactionsXml}${preservedXml}</attachments></item></publish></pubsub></iq>`,
+      `<iq type="set" id="${crypto.randomUUID()}" to="${escapeXml(communityJid)}"><pubsub xmlns="${NS_PUBSUB}"><publish node="${escapeXml(node)}"><item id="${escapeXml(barePeerJid(this.session.jid))}"><attachments xmlns="${NS_PUBSUB_ATTACHMENTS}">${reactionsXml}${preservedXml}</attachments></item></publish></pubsub></iq>`,
     );
   }
 
@@ -2445,7 +2448,7 @@ export class BrowserXmppClient {
     if (typeof xmpp.send_raw_iq !== "function") throw new Error("XMPP session is not ready");
     const node = storyAttachmentNode(communityJid, storyId);
     await xmpp.send_raw_iq(
-      `<iq type="set" id="${crypto.randomUUID()}" to="${escapeXml(communityJid)}"><pubsub xmlns="http://jabber.org/protocol/pubsub"><retract node="${escapeXml(node)}"><item id="${escapeXml(barePeerJid(this.session.jid))}"/></retract></pubsub></iq>`,
+      `<iq type="set" id="${crypto.randomUUID()}" to="${escapeXml(communityJid)}"><pubsub xmlns="${NS_PUBSUB}"><retract node="${escapeXml(node)}"><item id="${escapeXml(barePeerJid(this.session.jid))}"/></retract></pubsub></iq>`,
     );
   }
 

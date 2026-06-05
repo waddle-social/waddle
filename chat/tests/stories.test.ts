@@ -125,4 +125,53 @@ describe("useStories", () => {
     await story.toggleReaction("s1", "👍");
     expect(client.retractStoryReactions).toHaveBeenCalledWith(COMMUNITY, "s1");
   });
+
+  test("stale reaction refresh results do not overwrite newer refresh state", async () => {
+    let resolveFirst!: (items: Array<{ jid: string; emojis: string[]; unknownChildrenXml: string[] }>) => void;
+    const firstReactionFetch = new Promise<Array<{ jid: string; emojis: string[]; unknownChildrenXml: string[] }>>((resolve) => {
+      resolveFirst = resolve;
+    });
+    let reactionFetchCount = 0;
+    const client = makeClient([{ id: "s1", body: "story", postedMs: 1 }]);
+    client.fetchStoryReactions = mock(() => {
+      reactionFetchCount += 1;
+      if (reactionFetchCount === 1) return firstReactionFetch;
+      return Promise.resolve([{ jid: "carol@example.com", emojis: ["🎉"], unknownChildrenXml: [] }]);
+    }) as unknown as MockClient["fetchStoryReactions"];
+
+    const story = withScope(() =>
+      useStories(ref<BrowserXmppClient | null>(client), { communityJid: ref<string | null>(COMMUNITY) }),
+    );
+    const first = story.refresh();
+    await Promise.resolve();
+    const second = story.refresh();
+    await second;
+    expect(story.reactionSummary("s1").counts).toEqual({ "🎉": 1 });
+
+    resolveFirst([{ jid: "bob@example.com", emojis: ["👍"], unknownChildrenXml: [] }]);
+    await first;
+    expect(story.reactionSummary("s1").counts).toEqual({ "🎉": 1 });
+  });
+
+  test("reaction refresh bounds concurrent IQ fetches", async () => {
+    let active = 0;
+    let maxActive = 0;
+    const client = makeClient(
+      Array.from({ length: 20 }, (_, index) => ({ id: `s${index}`, body: "story", postedMs: index })),
+    );
+    client.fetchStoryReactions = mock(async () => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await Promise.resolve();
+      active -= 1;
+      return [];
+    }) as unknown as MockClient["fetchStoryReactions"];
+
+    const story = withScope(() =>
+      useStories(ref<BrowserXmppClient | null>(client), { communityJid: ref<string | null>(COMMUNITY) }),
+    );
+    await story.refresh();
+
+    expect(maxActive).toBeLessThanOrEqual(8);
+  });
 });

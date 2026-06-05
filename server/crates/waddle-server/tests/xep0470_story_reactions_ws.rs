@@ -56,14 +56,24 @@ async fn member_can_publish_read_and_retract_story_reaction_attachment() {
     let alice_password = format!("alice-pass-{}", uuid::Uuid::new_v4());
     let server = TestServer::start_with_extra_accounts(&[("alice", &alice_password)]);
     let admin_password = server.fixed_account_password().to_string();
-    let mut admin =
-        WsXmppClient::connect_and_auth(&server.ws_url(), DOMAIN, "admin", &admin_password, "story-owner")
-            .await
-            .expect("admin connect");
-    let mut alice =
-        WsXmppClient::connect_and_auth(&server.ws_url(), DOMAIN, "alice", &alice_password, "story-member")
-            .await
-            .expect("alice connect");
+    let mut admin = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "admin",
+        &admin_password,
+        "story-owner",
+    )
+    .await
+    .expect("admin connect");
+    let mut alice = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "alice",
+        &alice_password,
+        "story-member",
+    )
+    .await
+    .expect("alice connect");
 
     let story_id = format!("story-{}", uuid::Uuid::new_v4());
     let owner_story = iq_set_to(
@@ -160,6 +170,31 @@ async fn member_can_publish_read_and_retract_story_reaction_attachment() {
         missing_story_publish.contains("type='error'")
             && missing_story_publish.contains("item-not-found"),
         "reaction attachment for a missing story must fail: {missing_story_publish}"
+    );
+
+    let crafted_node = format!(
+        "{NS_ATTACHMENTS}/xmpp:community.localhost?;node=urn%3Axmpp%3Astories%3A0evil;item={story_id}"
+    );
+    let crafted_publish = iq_set_to(
+        &mut alice,
+        "reaction-crafted-node",
+        COMMUNITY_JID,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}">
+              <publish node="{crafted_node}">
+                <item id="alice@localhost">
+                  <attachments xmlns="{NS_ATTACHMENTS}">
+                    <reactions><reaction>👀</reaction></reactions>
+                  </attachments>
+                </item>
+              </publish>
+            </pubsub>"#
+        ),
+    )
+    .await;
+    assert!(
+        crafted_publish.contains("type='error'") && crafted_publish.contains("item-not-found"),
+        "crafted non-story attachment node must not use story carve-out: {crafted_publish}"
     );
 
     let spoof_publish = iq_set_to(

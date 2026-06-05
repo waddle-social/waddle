@@ -25,6 +25,7 @@
 
 use minidom::Element;
 use std::collections::BTreeSet;
+use unicode_segmentation::UnicodeSegmentation;
 
 /// Namespace for XEP-0470 Pubsub Attachments.
 pub const NS_PUBSUB_ATTACHMENTS: &str = "urn:xmpp:pubsub-attachments:1";
@@ -190,7 +191,9 @@ pub fn parse_attachments_element(elem: &Element) -> Option<Attachment> {
             ("reactions", NS_PUBSUB_ATTACHMENTS) => attachment
                 .payloads
                 .push(AttachmentPayload::Reactions(parse_reactions_element(child))),
-            ("noticed", NS_PUBSUB_ATTACHMENTS) => attachment.payloads.push(AttachmentPayload::Noticed),
+            ("noticed", NS_PUBSUB_ATTACHMENTS) => {
+                attachment.payloads.push(AttachmentPayload::Noticed)
+            }
             ("summary", NS_PUBSUB_ATTACHMENTS_SUMMARY) => attachment
                 .payloads
                 .push(AttachmentPayload::Summary(parse_summary_element(child))),
@@ -323,7 +326,9 @@ where
 
 fn is_single_extended_grapheme_cluster(value: &str) -> bool {
     let trimmed = value.trim();
-    !trimmed.is_empty() && !trimmed.chars().any(char::is_whitespace) && trimmed.chars().count() <= 8
+    !trimmed.is_empty()
+        && !trimmed.chars().any(char::is_whitespace)
+        && trimmed.graphemes(true).count() == 1
 }
 
 #[cfg(test)]
@@ -454,12 +459,31 @@ mod tests {
 
     #[test]
     fn validation_rejects_multiple_grapheme_like_reaction() {
-        let set = ReactionSet::new(["👍 👍"]);
+        let set = ReactionSet::new(["👍👍"]);
 
         assert_eq!(
             set.validate(),
             Err(AttachmentValidationError::ReactionNotSingleGrapheme(
-                "👍 👍".to_owned()
+                "👍👍".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn validation_accepts_zwj_emoji_as_single_grapheme() {
+        let set = ReactionSet::new(["👩🏾‍❤️‍👩🏼"]);
+
+        assert_eq!(set.validate(), Ok(()));
+    }
+
+    #[test]
+    fn validation_rejects_ascii_word_as_multiple_graphemes() {
+        let set = ReactionSet::new(["abc"]);
+
+        assert_eq!(
+            set.validate(),
+            Err(AttachmentValidationError::ReactionNotSingleGrapheme(
+                "abc".to_owned()
             ))
         );
     }

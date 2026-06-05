@@ -977,17 +977,24 @@ pub(super) async fn handle_community_publish(
 }
 
 fn is_story_attachment_node(node: &str) -> bool {
-    let prefix = format!("{}/", waddle_xmpp::xep::xep0470::PUBSUB_ATTACHMENTS_NODE_PREFIX);
+    let prefix = format!(
+        "{}/",
+        waddle_xmpp::xep::xep0470::PUBSUB_ATTACHMENTS_NODE_PREFIX
+    );
     node.starts_with(&prefix)
-        && (node.contains("node=urn%3Axmpp%3Astories%3A0")
-            || node.contains("node=urn:xmpp:stories:0"))
+        && story_attachment_target_param(node, "node").as_deref()
+            == Some(waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES)
 }
 
 fn story_attachment_target_item(node: &str) -> Option<String> {
+    story_attachment_target_param(node, "item")
+}
+
+fn story_attachment_target_param(node: &str, name: &str) -> Option<String> {
     let target = node.split_once("?;")?.1;
     target.split(';').find_map(|part| {
         let (key, value) = part.split_once('=')?;
-        if key != "item" {
+        if key != name {
             return None;
         }
         urlencoding::decode(value)
@@ -1060,7 +1067,8 @@ async fn ensure_story_attachment_node(
         .get_or_create_node(community_jid, attachment_node)
         .await
         .map_err(|_| PubSubError::InternalServerError)?;
-    if created || node.config.access_model != stories_node.config.access_model
+    if created
+        || node.config.access_model != stories_node.config.access_model
         || node.config.publish_model != stories_node.config.publish_model
     {
         let mut config = node.config;
@@ -1395,8 +1403,15 @@ pub(super) async fn handle_community_retract(
     session: Option<&Session>,
 ) -> Vec<String> {
     if is_story_attachment_node(node) {
-        return handle_story_attachment_retract(iq, state, community_domain, node, item_id, session)
-            .await;
+        return handle_story_attachment_retract(
+            iq,
+            state,
+            community_domain,
+            node,
+            item_id,
+            session,
+        )
+        .await;
     }
     if node != waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED
         && node != waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES

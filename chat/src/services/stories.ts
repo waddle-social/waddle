@@ -28,6 +28,7 @@ import {
 } from "@/services/story-read-store";
 
 const TICK_INTERVAL_MS = 60_000;
+const REACTION_FETCH_BATCH_SIZE = 8;
 
 export function useStories(
   xmppClient: Ref<BrowserXmppClient | null>,
@@ -90,7 +91,7 @@ export function useStories(
       const fetched = await client.fetchStories(jid, pageSize);
       if (requestId !== fetchRequestId || client !== xmppClient.value) return false;
       stories.value = fetched;
-      await refreshReactionsFor(fetched, client, jid);
+      await refreshReactionsFor(fetched, client, jid, requestId);
       if (!readStore.loaded()) {
         // Hydrate after the first stories fetch so the rail doesn't
         // pop unread→read on first paint.
@@ -137,16 +138,23 @@ export function useStories(
     fetched: readonly Story[],
     client: BrowserXmppClient,
     communityJid: string,
+    requestId: number,
   ): Promise<void> {
-    const entries = await Promise.all(
-      fetched.map(async (story) => {
-        try {
-          return [story.id, await client.fetchStoryReactions(communityJid, story.id)] as const;
-        } catch {
-          return [story.id, []] as const;
-        }
-      }),
-    );
+    const entries: Array<readonly [string, StoryReactionItem[]]> = [];
+    for (let offset = 0; offset < fetched.length; offset += REACTION_FETCH_BATCH_SIZE) {
+      if (requestId !== fetchRequestId || client !== xmppClient.value) return;
+      const batch = fetched.slice(offset, offset + REACTION_FETCH_BATCH_SIZE);
+      entries.push(...await Promise.all(
+        batch.map(async (story): Promise<readonly [string, StoryReactionItem[]]> => {
+          try {
+            return [story.id, await client.fetchStoryReactions(communityJid, story.id)] as const;
+          } catch {
+            return [story.id, []] as const;
+          }
+        }),
+      ));
+    }
+    if (requestId !== fetchRequestId || client !== xmppClient.value) return;
     reactionsByStory.value = Object.fromEntries(entries);
   }
 
