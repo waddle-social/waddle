@@ -18,6 +18,11 @@ const NS_ATTACHMENTS: &str = "urn:xmpp:pubsub-attachments:1";
 
 static TEST_SERIAL: Mutex<()> = Mutex::const_new(());
 
+fn frame_has_iq_id(frame: &str, id: &str) -> bool {
+    frame.contains("<iq")
+        && (frame.contains(&format!("id='{id}'")) || frame.contains(&format!("id=\"{id}\"")))
+}
+
 async fn iq_set_to(client: &mut WsXmppClient, id: &str, to: &str, body: &str) -> String {
     client
         .send(&format!(
@@ -26,7 +31,7 @@ async fn iq_set_to(client: &mut WsXmppClient, id: &str, to: &str, body: &str) ->
         .await
         .expect("send iq set");
     client
-        .recv_matching(|frame| frame.contains(&format!("id='{id}'")) && frame.contains("<iq"))
+        .recv_matching(|frame| frame_has_iq_id(frame, id))
         .await
         .expect("iq set response")
 }
@@ -39,7 +44,7 @@ async fn iq_get_to(client: &mut WsXmppClient, id: &str, to: &str, body: &str) ->
         .await
         .expect("send iq get");
     client
-        .recv_matching(|frame| frame.contains(&format!("id='{id}'")) && frame.contains("<iq"))
+        .recv_matching(|frame| frame_has_iq_id(frame, id))
         .await
         .expect("iq get response")
 }
@@ -197,6 +202,57 @@ async fn member_can_publish_read_and_retract_story_reaction_attachment() {
         "crafted non-story attachment node must not use story carve-out: {crafted_publish}"
     );
 
+    let wrong_host_node = format!(
+        "{NS_ATTACHMENTS}/xmpp:other.localhost?;node=urn%3Axmpp%3Astories%3A0;item={story_id}"
+    );
+    let wrong_host_publish = iq_set_to(
+        &mut alice,
+        "reaction-wrong-host",
+        COMMUNITY_JID,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}">
+              <publish node="{wrong_host_node}">
+                <item id="alice@localhost">
+                  <attachments xmlns="{NS_ATTACHMENTS}">
+                    <reactions><reaction>👀</reaction></reactions>
+                  </attachments>
+                </item>
+              </publish>
+            </pubsub>"#
+        ),
+    )
+    .await;
+    assert!(
+        wrong_host_publish.contains("type='error'") && wrong_host_publish.contains("item-not-found"),
+        "attachment node with non-canonical target host must not use story carve-out: {wrong_host_publish}"
+    );
+
+    let extra_param_node = format!(
+        "{NS_ATTACHMENTS}/xmpp:community.localhost?;node=urn%3Axmpp%3Astories%3A0;item={story_id};foo=bar"
+    );
+    let extra_param_publish = iq_set_to(
+        &mut alice,
+        "reaction-extra-param",
+        COMMUNITY_JID,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}">
+              <publish node="{extra_param_node}">
+                <item id="alice@localhost">
+                  <attachments xmlns="{NS_ATTACHMENTS}">
+                    <reactions><reaction>👀</reaction></reactions>
+                  </attachments>
+                </item>
+              </publish>
+            </pubsub>"#
+        ),
+    )
+    .await;
+    assert!(
+        extra_param_publish.contains("type='error'")
+            && extra_param_publish.contains("item-not-found"),
+        "attachment node with extra target params must not use story carve-out: {extra_param_publish}"
+    );
+
     let spoof_publish = iq_set_to(
         &mut alice,
         "reaction-spoof",
@@ -217,6 +273,28 @@ async fn member_can_publish_read_and_retract_story_reaction_attachment() {
     assert!(
         spoof_publish.contains("type='error'") && spoof_publish.contains("bad-request"),
         "spoofed attachment item id must be rejected as bad-request: {spoof_publish}"
+    );
+
+    let invalid_jid_publish = iq_set_to(
+        &mut alice,
+        "reaction-invalid-jid",
+        COMMUNITY_JID,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}">
+              <publish node="{attachment_node}">
+                <item id="not a jid">
+                  <attachments xmlns="{NS_ATTACHMENTS}">
+                    <reactions><reaction>🔥</reaction></reactions>
+                  </attachments>
+                </item>
+              </publish>
+            </pubsub>"#
+        ),
+    )
+    .await;
+    assert!(
+        invalid_jid_publish.contains("type='error'") && invalid_jid_publish.contains("bad-request"),
+        "invalid attachment item id must be rejected as bad-request: {invalid_jid_publish}"
     );
 
     let bad_payload = iq_set_to(
@@ -252,6 +330,20 @@ async fn member_can_publish_read_and_retract_story_reaction_attachment() {
             && readback.contains("❤️")
             && readback.contains(NS_ATTACHMENTS),
         "reaction attachment should read back from auto-created node: {readback}"
+    );
+
+    let invalid_jid_retract = iq_set_to(
+        &mut alice,
+        "reaction-retract-invalid-jid",
+        COMMUNITY_JID,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}"><retract node="{attachment_node}"><item id="not a jid"/></retract></pubsub>"#
+        ),
+    )
+    .await;
+    assert!(
+        invalid_jid_retract.contains("type='error'") && invalid_jid_retract.contains("bad-request"),
+        "invalid retract item id must be rejected as bad-request: {invalid_jid_retract}"
     );
 
     let retract = iq_set_to(

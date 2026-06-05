@@ -44,6 +44,7 @@ export function useStories(
   const reactionsByStory = ref<Record<string, StoryReactionItem[]>>({});
   const pageSize = options.pageSize ?? 50;
   let fetchRequestId = 0;
+  const reactionMutationVersionsByStory = new Map<string, number>();
   const nowMs = ref(Date.now());
   const tickHandle = setInterval(() => {
     nowMs.value = Date.now();
@@ -140,6 +141,7 @@ export function useStories(
     communityJid: string,
     requestId: number,
   ): Promise<void> {
+    const mutationVersions = new Map(reactionMutationVersionsByStory);
     const entries: Array<readonly [string, StoryReactionItem[]]> = [];
     for (let offset = 0; offset < fetched.length; offset += REACTION_FETCH_BATCH_SIZE) {
       if (requestId !== fetchRequestId || client !== xmppClient.value) return;
@@ -155,7 +157,30 @@ export function useStories(
       ));
     }
     if (requestId !== fetchRequestId || client !== xmppClient.value) return;
-    reactionsByStory.value = Object.fromEntries(entries);
+    reactionsByStory.value = mergedReactionEntries(entries, mutationVersions, client.bareJid);
+  }
+
+  function mergedReactionEntries(
+    entries: Array<readonly [string, StoryReactionItem[]]>,
+    mutationVersions: ReadonlyMap<string, number>,
+    self: string | null | undefined,
+  ): Record<string, StoryReactionItem[]> {
+    if (!self) {
+      return Object.fromEntries(entries);
+    }
+    const selfKey = self.toLowerCase();
+    return Object.fromEntries(
+      entries.map(([storyId, fetchedItems]) => {
+        if (mutationVersions.get(storyId) === reactionMutationVersionsByStory.get(storyId)) {
+          return [storyId, fetchedItems];
+        }
+        const currentSelf = (reactionsByStory.value[storyId] ?? [])
+          .find((item) => item.jid.toLowerCase() === selfKey);
+        const fetchedWithoutSelf = fetchedItems
+          .filter((item) => item.jid.toLowerCase() !== selfKey);
+        return [storyId, currentSelf ? [...fetchedWithoutSelf, currentSelf] : fetchedWithoutSelf];
+      }),
+    );
   }
 
   function reactionSummary(storyId: string): StoryReactionSummary {
@@ -184,6 +209,8 @@ export function useStories(
         ]
       : previousItems.filter((item) => item.jid.toLowerCase() !== self.toLowerCase());
 
+    const mutationVersion = (reactionMutationVersionsByStory.get(storyId) ?? 0) + 1;
+    reactionMutationVersionsByStory.set(storyId, mutationVersion);
     reactionsByStory.value = { ...reactionsByStory.value, [storyId]: nextItems };
     try {
       if (next.length > 0) {
@@ -193,7 +220,9 @@ export function useStories(
       }
       return true;
     } catch (err) {
-      reactionsByStory.value = { ...reactionsByStory.value, [storyId]: previousItems };
+      if (reactionMutationVersionsByStory.get(storyId) === mutationVersion) {
+        reactionsByStory.value = { ...reactionsByStory.value, [storyId]: previousItems };
+      }
       error.value = err instanceof Error ? err.message : String(err);
       return false;
     }
@@ -203,6 +232,7 @@ export function useStories(
     fetchRequestId += 1;
     stories.value = [];
     reactionsByStory.value = {};
+    reactionMutationVersionsByStory.clear();
     error.value = null;
     isLoading.value = false;
     isPosting.value = false;

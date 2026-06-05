@@ -268,6 +268,7 @@ function toggleReaction(emoji: string) {
               class="inline-flex h-8 min-w-8 items-center justify-center rounded-md border px-2 text-sm hover:bg-muted/60"
               :class="activeReactionSummary?.mine.includes(emoji) ? 'border-primary bg-primary/10 text-primary' : 'border-input text-foreground'"
               :aria-label="`React with ${emoji}`"
+              :aria-pressed="activeReactionSummary?.mine.includes(emoji) ? 'true' : 'false'"
               @click="toggleReaction(emoji)"
             >
               {{ emoji }}
