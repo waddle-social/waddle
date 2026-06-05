@@ -14,11 +14,10 @@ use waddle_xmpp_client::{
 };
 
 use crate::{
-    WaddleArchivedMessage, WaddleCallEvent, WaddleCallEventKind, WaddleCallMedia, WaddleChannel,
+    WaddleArchivedMessage, WaddleCallEvent, WaddleCallEventKind, WaddleCallMedia,
     WaddleEncryptedFile, WaddleEncryptedFileHash, WaddleEventListener, WaddleJingleReason,
-    WaddleLiveKitJoin, WaddleMamPage, WaddleMdsDisplayedEntry, WaddleMessage, WaddleMucAffiliation,
-    WaddleMucRole, WaddleMujiPresence, WaddlePresence, WaddlePresenceHat, WaddleSendOptions,
-    WaddleSharedFile, WaddleSpace, WaddleTopology, WaddleUploadHeader, WaddleUploadSlot,
+    WaddleLiveKitJoin, WaddleMdsDisplayedEntry, WaddleMessage, WaddleMucAffiliation, WaddleMucRole,
+    WaddleMujiPresence, WaddlePresence, WaddlePresenceHat, WaddleSendOptions, WaddleSharedFile,
 };
 
 // ── Event dispatch ───────────────────────────────────────────────────────────
@@ -75,59 +74,6 @@ fn trusted_mds_message(mut msg: InboundMessage, account_bare_jid: &str) -> Inbou
         msg.mds_displayed = None;
     }
     msg
-}
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-/// Extract the domain part from a JID like `user@domain` or `domain`.
-pub(super) fn jid_domain(jid: &str) -> &str {
-    jid.split('@').next_back().unwrap_or(jid)
-}
-
-pub(super) fn empty_topology() -> WaddleTopology {
-    WaddleTopology {
-        spaces: Vec::new(),
-        channels: Vec::new(),
-    }
-}
-
-pub(super) fn topology_to_ffi(
-    topology: waddle_xmpp_client::discovery::DiscoveredTopology,
-) -> WaddleTopology {
-    WaddleTopology {
-        spaces: topology
-            .spaces
-            .into_iter()
-            .map(|space| WaddleSpace {
-                id: space.id.as_str().to_string(),
-                service_jid: space.service_jid.to_string(),
-                name: space.name,
-                description: space.description,
-            })
-            .collect(),
-        channels: topology
-            .channels
-            .into_iter()
-            .map(|channel| WaddleChannel {
-                id: channel.id,
-                room_jid: channel.room_jid.to_string(),
-                name: channel.name,
-                description: channel.description,
-                channel_type: channel.channel_type.as_str().to_string(),
-                position: channel.position,
-                space_id: channel.space_id.as_str().to_string(),
-            })
-            .collect(),
-    }
-}
-
-pub(super) fn mam_page_to_ffi(page: waddle_xmpp_client::mam::MamPage) -> WaddleMamPage {
-    WaddleMamPage {
-        messages: page.messages.into_iter().map(archived_to_ffi).collect(),
-        first_id: page.rsm.first,
-        last_id: page.rsm.last,
-        is_complete: page.is_complete,
-    }
 }
 
 fn shared_file_to_ffi(file: waddle_xmpp_client::messaging::SharedFile) -> WaddleSharedFile {
@@ -192,20 +138,6 @@ fn encrypted_file_from_ffi(
             .collect(),
         sources: enc.sources,
     })
-}
-
-pub(super) fn upload_slot_to_ffi(
-    slot: waddle_xmpp_client::discovery::UploadSlot,
-) -> WaddleUploadSlot {
-    WaddleUploadSlot {
-        put_url: slot.put_url,
-        get_url: slot.get_url,
-        put_headers: slot
-            .put_headers
-            .into_iter()
-            .map(|(name, value)| WaddleUploadHeader { name, value })
-            .collect(),
-    }
 }
 
 fn presence_hat_to_ffi(hat: waddle_xmpp_client::messaging::PresenceHat) -> WaddlePresenceHat {
@@ -409,7 +341,9 @@ fn inbound_to_ffi(msg: InboundMessage) -> WaddleMessage {
 /// (the client parser extracts it via `crate::xep::thread::parse_thread`)
 /// instead of being recovered from the re-parse - closes the parent-leak
 /// path when `inner` is unparseable downstream.
-fn archived_to_ffi(archived: waddle_xmpp_client::ArchivedMessage) -> WaddleArchivedMessage {
+pub(crate) fn archived_to_ffi(
+    archived: waddle_xmpp_client::ArchivedMessage,
+) -> WaddleArchivedMessage {
     let parsed = archived.payload.message.as_deref();
     let call_event = archived
         .payload
@@ -451,15 +385,6 @@ fn archived_to_ffi(archived: waddle_xmpp_client::ArchivedMessage) -> WaddleArchi
             })
             .unwrap_or_default(),
         call_event,
-    }
-}
-
-pub(super) fn empty_mam_page() -> WaddleMamPage {
-    WaddleMamPage {
-        messages: vec![],
-        first_id: None,
-        last_id: None,
-        is_complete: false,
     }
 }
 
