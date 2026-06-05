@@ -17,6 +17,7 @@ impl WaddleClient {
                 on_message_delivery_acked: None,
                 on_message_delivery_failed: None,
                 on_mds_displayed: None,
+                on_pubsub_event: None,
                 on_call: None,
                 resume_state: None,
             })),
@@ -77,6 +78,13 @@ impl WaddleClient {
     /// event, with a `WaddleMdsDisplayedEntry`-shaped JS value.
     pub fn set_on_mds_displayed(&mut self, cb: Function) {
         self.inner.borrow_mut().on_mds_displayed = Some(cb);
+    }
+
+    /// Generic XEP-0060 pubsub event handler. Invoked once per
+    /// inbound `<items/>` event with a `WaddlePubsubEvent`-shaped JS
+    /// value.
+    pub fn set_on_pubsub_event(&mut self, cb: Function) {
+        self.inner.borrow_mut().on_pubsub_event = Some(cb);
     }
 
     /// Register a callback for inbound XMPP-native call events

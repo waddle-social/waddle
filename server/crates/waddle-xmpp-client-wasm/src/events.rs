@@ -93,6 +93,16 @@ pub(crate) fn dispatch_client_event(inner: &Rc<RefCell<WaddleClientInner>>, even
                     }
                 }
             }
+            if !message.pubsub_events.is_empty() {
+                let callback = inner.borrow().on_pubsub_event.clone();
+                if let Some(callback) = callback {
+                    for event in message.pubsub_events.iter().cloned() {
+                        if let Ok(value) = to_js_value(&pubsub_event_to_js(event)) {
+                            let _ = callback.call1(&JsValue::NULL, &value);
+                        }
+                    }
+                }
+            }
             let callback = inner.borrow().on_message.clone();
             if let Some(callback) = callback {
                 if let Ok(value) = to_js_value(&inbound_to_js(message)) {

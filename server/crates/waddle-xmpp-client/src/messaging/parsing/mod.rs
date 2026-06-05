@@ -127,6 +127,7 @@ fn parse_message(el: &Element) -> Option<InboundMessage> {
             })
             .collect::<Vec<_>>()
     });
+    let pubsub_events = crate::pubsub_event::parse_pubsub_events(el);
 
     let reply_marker = xep_reply::parse_reply(el);
     let reply_to_id = reply_marker.as_ref().map(|m| m.id.clone());
@@ -356,6 +357,7 @@ fn parse_message(el: &Element) -> Option<InboundMessage> {
         extension_envelope,
         extension_body_fallback,
         mds_displayed,
+        pubsub_events,
     })
 }
 

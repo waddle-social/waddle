@@ -153,6 +153,7 @@ import type {
   WasmPepProfile,
   WasmPinEvent,
   WasmPresence,
+  WasmPubsubEvent,
   WasmRoomMember,
   WasmRosterContact,
   WasmServerVersion,
@@ -605,6 +606,7 @@ type XmppClientInstance = Partial<WasmClient> & CompatEmitter & {
   set_on_call?: (cb: (event: CallEvent) => void) => void;
   set_on_session_lifecycle?: (cb: (event: string) => void) => void;
   set_on_mds_displayed?: (cb: (entry: WasmMdsDisplayedEntry) => void) => void;
+  set_on_pubsub_event?: (cb: (event: WasmPubsubEvent) => void) => void;
   get_resume_state?: () => XmppResumeState | null;
   get_resume_state_handle?: () => XmppResumeStateHandle | undefined;
   publish_mds_displayed?: (chatId: string, stanzaId: string, stanzaIdBy: string) => Promise<void>;
@@ -659,6 +661,8 @@ interface MdsDisplayedEntry {
   /** JID that injected the stanza-id (room for MUC, user's server for DM). */
   stanzaIdBy: string;
 }
+
+export type PubsubEvent = WasmPubsubEvent;
 
 export type XmppResumeState = {
   previd: string;
@@ -733,6 +737,7 @@ export class BrowserXmppClient {
   private reactionHandler: ((event: ReactionEvent) => void) | null = null;
   private displayedHandler: ((event: { roomJid: string; nick: string; messageId: string }) => void) | null = null;
   private mdsDisplayedHandler: ((entry: MdsDisplayedEntry) => void) | null = null;
+  private pubsubEventHandlers = new Set<(event: PubsubEvent) => void>();
   private chatStateHandler: ((event: ChatStateEvent) => void) | null = null;
   private dmChatStateHandler: ((event: DmChatStateEvent) => void) | null = null;
   private dmReactionHandler: ((event: DmReactionEvent) => void) | null = null;
@@ -1876,6 +1881,28 @@ export class BrowserXmppClient {
   }
 
   setMdsDisplayedHandler(handler: ((entry: MdsDisplayedEntry) => void) | null) { this.mdsDisplayedHandler = handler; }
+
+  async subscribeStoryReactionSummaries(communityJid: string): Promise<void> {
+    const xmpp = await this.requireConnectedXmpp();
+    if (typeof xmpp.send_raw_iq !== "function") return;
+    try {
+      await xmpp.send_raw_iq(
+        `<iq type="set" id="${crypto.randomUUID()}" to="${escapeXml(communityJid)}"><pubsub xmlns="${NS_PUBSUB}"><subscribe node="${escapeXml(STORY_REACTIONS_SUMMARY_NODE)}" jid="${escapeXml(barePeerJid(this.session.jid))}"/></pubsub></iq>`,
+      );
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  addPubsubEventHandler(handler: (event: PubsubEvent) => void): () => void {
+    this.pubsubEventHandlers.add(handler);
+    return () => this.pubsubEventHandlers.delete(handler);
+  }
+
+  setPubsubEventHandler(handler: ((event: PubsubEvent) => void) | null) {
+    this.pubsubEventHandlers.clear();
+    if (handler) this.pubsubEventHandlers.add(handler);
+  }
 
   private async resolveUploadService(): Promise<string> {
     if (this.uploadServiceJid) return this.uploadServiceJid;
@@ -3564,6 +3591,10 @@ export class BrowserXmppClient {
     xmpp.set_on_mds_displayed?.((entry: WasmMdsDisplayedEntry) => {
       if (!this.isCurrentXmpp(xmpp)) return;
       this.mdsDisplayedHandler?.({ chatId: entry.chat_id, stanzaId: entry.stanza_id, stanzaIdBy: entry.stanza_id_by });
+    });
+    xmpp.set_on_pubsub_event?.((event: WasmPubsubEvent) => {
+      if (!this.isCurrentXmpp(xmpp)) return;
+      for (const handler of this.pubsubEventHandlers) handler(event);
     });
     xmpp.set_on_call?.((event: CallEvent) => {
       if (!this.isCurrentXmpp(xmpp)) return;

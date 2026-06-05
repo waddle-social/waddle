@@ -1209,7 +1209,7 @@ async fn update_story_attachment_summary(
         Some(waddle_xmpp::xep::xep0470::build_summary_element(&summary)),
     );
     let summary_node = story_attachment_summary_node();
-    storage
+    let result = storage
         .publish_item(
             community_jid,
             &summary_node,
@@ -1219,6 +1219,19 @@ async fn update_story_attachment_summary(
         )
         .await
         .map_err(|_| PubSubError::InternalServerError)?;
+    pubsub_fanout::fan_out_publish(
+        state,
+        pubsub_fanout::FanOutRequest {
+            owner: community_jid,
+            node: &summary_node,
+            published_item: &summary_item,
+            item_id: &result.item_id,
+            publisher: Some(community_jid),
+            publisher_full: None,
+            is_pep: false,
+        },
+    )
+    .await;
     Ok(())
 }
 
@@ -1704,6 +1717,17 @@ async fn handle_community_non_bookmark_publish(
         .await
     {
         Ok(result) => {
+            if node == waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES {
+                if let Err(error) =
+                    ensure_story_attachment_summary_node(state, &community_jid).await
+                {
+                    warn!(
+                        node,
+                        error = ?error,
+                        "Failed to ensure story attachment summary node after story publish"
+                    );
+                }
+            }
             pubsub_fanout::fan_out_publish(
                 state,
                 pubsub_fanout::FanOutRequest {

@@ -13,6 +13,7 @@ const DOMAIN: &str = "localhost";
 const COMMUNITY_JID: &str = "community.localhost";
 const STORIES_NODE: &str = "urn:xmpp:stories:0";
 const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
+const NS_PUBSUB_EVENT: &str = "http://jabber.org/protocol/pubsub#event";
 const NS_STORIES: &str = "urn:xmpp:stories:0";
 const NS_ATTACHMENTS: &str = "urn:xmpp:pubsub-attachments:1";
 const NS_ATTACHMENTS_SUMMARY: &str = "urn:xmpp:pubsub-attachments:summary:1";
@@ -55,6 +56,32 @@ fn story_attachment_node(story_id: &str) -> String {
     format!(
         "{NS_ATTACHMENTS}/xmpp:community.localhost?;node=urn%3Axmpp%3Astories%3A0;item={story_id}"
     )
+}
+
+async fn wait_for_event_message(
+    client: &mut WsXmppClient,
+    node: &str,
+    dur: std::time::Duration,
+) -> Option<String> {
+    let deadline = std::time::Instant::now() + dur;
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        match client.recv_timeout(remaining).await {
+            Ok(frame) => {
+                let is_event_msg = frame.contains("<message")
+                    && frame.contains(NS_PUBSUB_EVENT)
+                    && (frame.contains(&format!(r#"node='{node}'"#))
+                        || frame.contains(&format!(r#"node="{node}""#)));
+                if is_event_msg {
+                    return Some(frame);
+                }
+            }
+            Err(_) => return None,
+        }
+    }
 }
 
 #[tokio::test]
@@ -106,6 +133,20 @@ async fn member_can_publish_read_and_retract_story_reaction_attachment() {
         "owner story publish should succeed: {owner_story}"
     );
 
+    let subscribe_summary = iq_set_to(
+        &mut alice,
+        "summary-subscribe",
+        COMMUNITY_JID,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}"><subscribe node="{STORY_SUMMARY_NODE}" jid="alice@localhost"/></pubsub>"#
+        ),
+    )
+    .await;
+    assert!(
+        subscribe_summary.contains("type='result'"),
+        "summary node subscription should succeed for a community member: {subscribe_summary}"
+    );
+
     let member_story = iq_set_to(
         &mut alice,
         "member-story",
@@ -153,6 +194,21 @@ async fn member_can_publish_read_and_retract_story_reaction_attachment() {
     assert!(
         reaction_publish.contains("type='result'"),
         "member reaction publish should succeed via story carve-out: {reaction_publish}"
+    );
+
+    let pushed_summary = wait_for_event_message(
+        &mut alice,
+        STORY_SUMMARY_NODE,
+        std::time::Duration::from_secs(2),
+    )
+    .await
+    .expect("subscriber should receive summary fan-out after a story reaction changes");
+    assert!(
+        pushed_summary.contains(NS_ATTACHMENTS_SUMMARY)
+            && pushed_summary.contains(&format!("id='{story_id}'"))
+            && pushed_summary.contains("<reaction count='1'>👍</reaction>")
+            && pushed_summary.contains("<reaction count='1'>❤️</reaction>"),
+        "pushed summary event should contain per-emoji counts for the story: {pushed_summary}"
     );
 
     let summary = iq_get_to(
@@ -465,6 +521,22 @@ async fn member_can_publish_read_and_retract_story_reaction_attachment() {
     assert!(
         retract.contains("type='result'"),
         "member should retract own story reaction item: {retract}"
+    );
+
+    let pushed_retract_summary = wait_for_event_message(
+        &mut alice,
+        STORY_SUMMARY_NODE,
+        std::time::Duration::from_secs(2),
+    )
+    .await
+    .expect("subscriber should receive summary fan-out after a story reaction retracts");
+    assert!(
+        pushed_retract_summary.contains(NS_ATTACHMENTS_SUMMARY)
+            && pushed_retract_summary.contains(&format!("id='{story_id}'"))
+            && !pushed_retract_summary.contains("<reaction count='1'>👍</reaction>")
+            && !pushed_retract_summary.contains("<reaction count='1'>❤️</reaction>")
+            && pushed_retract_summary.contains("<noticed count='1'/>"),
+        "pushed retract summary should remove Alice's reactions and preserve noticed counts: {pushed_retract_summary}"
     );
 
     let _ = alice.close().await;

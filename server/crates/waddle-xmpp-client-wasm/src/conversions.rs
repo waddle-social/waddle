@@ -211,7 +211,58 @@ pub(crate) fn inbound_to_js(message: InboundMessage) -> WaddleMessage {
         pin_event: message.pin_event.map(pin_event_to_js),
         extension_envelope: message.extension_envelope.map(extension_envelope_to_js),
         extension_body_fallback: message.extension_body_fallback,
+        pubsub_events: message
+            .pubsub_events
+            .into_iter()
+            .map(pubsub_event_to_js)
+            .collect(),
         inbox_push: None,
+    }
+}
+
+pub(crate) fn pubsub_event_to_js(event: waddle_xmpp_client::PubsubEvent) -> WaddlePubsubEvent {
+    WaddlePubsubEvent {
+        from: event.from.map(|jid| jid.to_string()),
+        node: event.node,
+        items: event
+            .items
+            .into_iter()
+            .map(|item| WaddlePubsubEventItem {
+                id: item.id,
+                payload: pubsub_payload_to_js(item.payload),
+            })
+            .collect(),
+    }
+}
+
+fn pubsub_payload_to_js(
+    payload: waddle_xmpp_client::PubsubEventPayload,
+) -> WaddlePubsubEventPayload {
+    match payload {
+        waddle_xmpp_client::PubsubEventPayload::AttachmentSummary(summary) => {
+            WaddlePubsubEventPayload::AttachmentSummary {
+                reactions: summary
+                    .reactions
+                    .into_iter()
+                    .map(|reaction| WaddlePubsubReactionSummary {
+                        emoji: reaction.emoji,
+                        count: reaction.count,
+                        reactors: reaction
+                            .reactors
+                            .into_iter()
+                            .map(|reactor| reactor.to_string())
+                            .collect(),
+                    })
+                    .collect(),
+                noticed_count: summary.noticed_count,
+            }
+        }
+        waddle_xmpp_client::PubsubEventPayload::Opaque { element } => {
+            WaddlePubsubEventPayload::Opaque {
+                xml: String::from(&element),
+            }
+        }
+        waddle_xmpp_client::PubsubEventPayload::Empty => WaddlePubsubEventPayload::Empty,
     }
 }
 
@@ -279,6 +330,7 @@ pub(crate) fn inbox_push_to_js(
         pin_event: None,
         extension_envelope: None,
         extension_body_fallback: false,
+        pubsub_events: Vec::new(),
         inbox_push: Some(inbox_entry_to_js(entry)),
     }
 }
@@ -748,6 +800,92 @@ mod inbound_to_js_tests {
         assert_eq!(
             push.get("thread").and_then(serde_json::Value::as_str),
             Some("thread-1")
+        );
+    }
+
+    #[test]
+    fn pubsub_event_to_js_serializes_typed_and_opaque_payloads() {
+        let event = waddle_xmpp_client::PubsubEvent {
+            from: Some("community.example.com".parse().expect("valid event jid")),
+            node: "urn:xmpp:pubsub-attachments:summary:1/urn:xmpp:stories:0".to_string(),
+            items: vec![
+                waddle_xmpp_client::PubsubEventItem {
+                    id: Some("story-1".to_string()),
+                    payload: waddle_xmpp_client::PubsubEventPayload::AttachmentSummary(
+                        waddle_xmpp_client::AttachmentSummaryEvent {
+                            reactions: vec![waddle_xmpp_client::ReactionSummaryEvent {
+                                emoji: "👍".to_string(),
+                                count: 2,
+                                reactors: vec!["alice@example.com"
+                                    .parse()
+                                    .expect("valid reactor jid")],
+                            }],
+                            noticed_count: Some(1),
+                        },
+                    ),
+                },
+                waddle_xmpp_client::PubsubEventItem {
+                    id: Some("future".to_string()),
+                    payload: waddle_xmpp_client::PubsubEventPayload::Opaque {
+                        element: Element::builder("future", "urn:example:future")
+                            .append("payload")
+                            .build(),
+                    },
+                },
+                waddle_xmpp_client::PubsubEventItem {
+                    id: Some("empty".to_string()),
+                    payload: waddle_xmpp_client::PubsubEventPayload::Empty,
+                },
+            ],
+        };
+
+        let value = serde_json::to_value(pubsub_event_to_js(event)).expect("serializes");
+        let items = value
+            .get("items")
+            .and_then(serde_json::Value::as_array)
+            .expect("items array");
+        assert_eq!(
+            value.get("from").and_then(serde_json::Value::as_str),
+            Some("community.example.com")
+        );
+        assert_eq!(
+            items[0]
+                .get("payload")
+                .and_then(|payload| payload.get("kind"))
+                .and_then(serde_json::Value::as_str),
+            Some("attachmentSummary")
+        );
+        assert_eq!(
+            items[0]
+                .get("payload")
+                .and_then(|payload| payload.get("noticedCount"))
+                .and_then(serde_json::Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            items[0]
+                .get("payload")
+                .and_then(|payload| payload.get("reactions"))
+                .and_then(serde_json::Value::as_array)
+                .and_then(|reactions| reactions.first())
+                .and_then(|reaction| reaction.get("reactors"))
+                .and_then(serde_json::Value::as_array)
+                .and_then(|reactors| reactors.first())
+                .and_then(serde_json::Value::as_str),
+            Some("alice@example.com")
+        );
+        let opaque_xml = items[1]
+            .get("payload")
+            .and_then(|payload| payload.get("xml"))
+            .and_then(serde_json::Value::as_str)
+            .expect("opaque xml");
+        assert!(opaque_xml.contains("urn:example:future"), "{opaque_xml}");
+        assert_eq!(
+            items[2]
+                .get("payload")
+                .and_then(|payload| payload.get("kind"))
+                .and_then(serde_json::Value::as_str),
+            Some("empty")
         );
     }
 
