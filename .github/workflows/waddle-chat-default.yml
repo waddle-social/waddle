@@ -20,12 +20,12 @@ on:
     - chat/schema/**
     - chat/scripts/build-xmpp-wasm.mjs
     - chat/scripts/build-xmpp-wasm.mjs/**
+    - chat/scripts/generate-service-worker.mjs
+    - chat/scripts/generate-service-worker.mjs/**
     - chat/scripts/resolve-commit-sha.mjs
     - chat/scripts/resolve-commit-sha.mjs/**
     - chat/scripts/strip-sourcemaps.mjs
     - chat/scripts/strip-sourcemaps.mjs/**
-    - chat/scripts/upload-faro-sourcemaps.mjs
-    - chat/scripts/upload-faro-sourcemaps.mjs/**
     - chat/src/**
     - chat/tsconfig.json
     - chat/tsconfig.json/**

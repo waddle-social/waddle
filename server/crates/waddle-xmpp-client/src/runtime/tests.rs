@@ -947,7 +947,8 @@ fn runtime_discards_resume_state_after_generic_prebind_stream_error() {
     assert!(error_events.iter().any(|event| matches!(
         event,
         ClientEvent::Connection(ConnectionEvent::StreamError {
-            condition: StreamErrorCondition::InternalServerError
+            condition: StreamErrorCondition::InternalServerError,
+            ..
         })
     )));
     assert!(error_events.iter().any(|event| matches!(
@@ -978,7 +979,31 @@ fn runtime_emits_stream_error_condition_for_browser_telemetry() {
     assert!(events.iter().any(|event| matches!(
         event,
         ClientEvent::Connection(ConnectionEvent::StreamError {
-            condition: StreamErrorCondition::NotAuthorized
+            condition: StreamErrorCondition::NotAuthorized,
+            ..
+        })
+    )));
+}
+
+#[test]
+fn runtime_emits_stream_error_detail_for_handled_count_too_high() {
+    let mut runtime = XmppRuntime::new(config()).unwrap();
+    drive_to_authenticated_stream(&mut runtime);
+
+    let events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            handled_count_too_high_stream_error(3, 2),
+        )))
+        .unwrap();
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::StreamError {
+            condition: StreamErrorCondition::UndefinedCondition,
+            detail: Some(crate::StreamErrorDetail::HandledCountTooHigh {
+                h: 3,
+                send_count: 2
+            })
         })
     )));
 }
@@ -997,7 +1022,8 @@ fn runtime_rejects_stanza_only_conditions_in_stream_error_namespace() {
     assert!(events.iter().any(|event| matches!(
         event,
         ClientEvent::Connection(ConnectionEvent::StreamError {
-            condition: StreamErrorCondition::UndefinedCondition
+            condition: StreamErrorCondition::UndefinedCondition,
+            ..
         })
     )));
 }

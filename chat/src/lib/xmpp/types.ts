@@ -107,6 +107,12 @@ export interface XmppErrorEvent {
   cause?: unknown;
   /** XMPP stream-error condition when `kind === "stream"`. */
   condition?: string;
+  /** XEP-0198 stream-management extension detail when a stream error carries one. */
+  streamManagementError?: {
+    kind: "handled-count-too-high";
+    h: number;
+    sendCount: number;
+  };
 }
 
 export interface ListRoomMembersOptions {

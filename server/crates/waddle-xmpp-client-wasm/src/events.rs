@@ -56,8 +56,8 @@ pub(crate) fn dispatch_client_event(inner: &Rc<RefCell<WaddleClientInner>>, even
                 let _ = callback.call1(&JsValue::NULL, &JsValue::from_str("resumed"));
             }
         }
-        ClientEvent::Connection(ConnectionEvent::StreamError { condition }) => {
-            emit_stream_error_callback(inner, condition);
+        ClientEvent::Connection(ConnectionEvent::StreamError { condition, detail }) => {
+            emit_stream_error_callback(inner, condition, detail);
         }
         ClientEvent::Messaging(waddle_xmpp_client::MessagingEvent::Message(message)) => {
             let mut message = *message;
@@ -152,20 +152,39 @@ pub(crate) fn emit_error_callback(inner: &Rc<RefCell<WaddleClientInner>>, descri
 struct JsStreamError<'a> {
     detail: &'a str,
     condition: &'a str,
+    stream_management_error: Option<JsStreamManagementError>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+enum JsStreamManagementError {
+    #[serde(rename = "handled-count-too-high")]
+    HandledCountTooHigh { h: u32, send_count: u32 },
 }
 
 fn emit_stream_error_callback(
     inner: &Rc<RefCell<WaddleClientInner>>,
     condition: StreamErrorCondition,
+    detail: Option<StreamErrorDetail>,
 ) {
     let callback = inner.borrow().on_error.clone();
     if let Some(callback) = callback {
         let condition = condition.as_str();
+        let stream_management_error = stream_management_error_to_js(detail);
         let payload = JsStreamError {
             detail: "stream error",
             condition,
+            stream_management_error,
         };
         let value = to_js_value(&payload).unwrap_or_else(|_| JsValue::from_str(condition));
         let _ = callback.call1(&JsValue::NULL, &value);
     }
+}
+
+fn stream_management_error_to_js(
+    detail: Option<StreamErrorDetail>,
+) -> Option<JsStreamManagementError> {
+    detail.map(|StreamErrorDetail::HandledCountTooHigh { h, send_count }| {
+        JsStreamManagementError::HandledCountTooHigh { h, send_count }
+    })
 }

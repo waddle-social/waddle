@@ -192,29 +192,12 @@ schema.#Project & {
 				"../bun.lock",
 				"package.json",
 				"astro.config.mjs",
+				"scripts/generate-service-worker.mjs",
+				"scripts/resolve-commit-sha.mjs",
 				"tsconfig.json",
 				"wrangler.jsonc",
 				"src/**",
 				"public/**",
-			]
-			outputs: [
-				"dist/**",
-			]
-		}
-
-		uploadFaroSourcemaps: schema.#Task & {
-			command: "bun"
-			args: ["run", "sourcemaps:upload"]
-			dependsOn: [build]
-			inputs: [
-				"../env.cue",
-				"../package.json",
-				"../bun.lock",
-				"package.json",
-				"scripts/upload-faro-sourcemaps.mjs",
-				"scripts/strip-sourcemaps.mjs",
-				"scripts/resolve-commit-sha.mjs",
-				"dist/**",
 			]
 			outputs: [
 				"dist/**",
@@ -250,7 +233,7 @@ schema.#Project & {
 		deploy: schema.#Task & {
 			command: "bun"
 			args: ["x", "wrangler", "deploy"]
-			dependsOn: [uploadFaroSourcemaps]
+			dependsOn: [stripSourcemaps]
 			inputs: [
 				"../env.cue",
 				"wrangler.jsonc",

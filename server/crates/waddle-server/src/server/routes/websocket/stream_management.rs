@@ -22,7 +22,11 @@ pub(super) fn is_countable_stanza(frame: &str) -> bool {
     let name_end = after_lt
         .find(|c: char| c.is_whitespace() || c == '>' || c == '/')
         .unwrap_or(after_lt.len());
-    matches!(&after_lt[..name_end], "iq" | "message" | "presence")
+    let element_name = &after_lt[..name_end];
+    let local_name = element_name
+        .rsplit_once(':')
+        .map_or(element_name, |(_, local)| local);
+    matches!(local_name, "iq" | "message" | "presence")
 }
 
 pub(super) fn sm_show_from_name(value: &str) -> Option<xmpp_parsers::presence::Show> {

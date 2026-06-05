@@ -33,6 +33,12 @@ function session(partial: Partial<WaddleSession> = {}): WaddleSession {
   } as WaddleSession;
 }
 
+type TestXmppStreamErrorPayload = string | {
+  detail?: string;
+  condition?: string;
+  streamManagementError?: { kind: "handled-count-too-high"; h: number; sendCount: number };
+};
+
 function createStorageMock() {
   const values = new Map<string, string>();
   return {
@@ -748,7 +754,7 @@ describe("BrowserXmppClient telemetry hooks", () => {
     const client = new BrowserXmppClient(session());
     installInstrumentation(client);
 
-    let onError: ((detail: string | { detail?: string; condition?: string }) => void) | null = null;
+    let onError: ((detail: TestXmppStreamErrorPayload) => void) | null = null;
     const xmpp = {
       set_on_error(cb: NonNullable<typeof onError>) {
         onError = cb;
@@ -777,7 +783,7 @@ describe("BrowserXmppClient telemetry hooks", () => {
     const client = new BrowserXmppClient(session());
     installInstrumentation(client);
 
-    let onError: ((detail: string | { detail?: string; condition?: string }) => void) | null = null;
+    let onError: ((detail: TestXmppStreamErrorPayload) => void) | null = null;
     const xmpp = {
       set_on_error(cb: NonNullable<typeof onError>) {
         onError = cb;
@@ -797,6 +803,43 @@ describe("BrowserXmppClient telemetry hooks", () => {
     expect(stub.errors[0].options?.type).toBe("xmpp.stream");
     expect(stub.errors[0].options?.context?.condition).toBeUndefined();
     expect(stub.errors[0].options?.context?.detail).toBe("stream-error");
+  });
+
+  test("set_on_error bridge names XEP-0198 handled-count stream failures", () => {
+    const stub = createFaroStub();
+    __setFaroForTesting(stub as never);
+
+    const client = new BrowserXmppClient(session());
+    installInstrumentation(client);
+
+    let onError: ((detail: TestXmppStreamErrorPayload) => void) | null = null;
+    const xmpp = {
+      set_on_error(cb: NonNullable<typeof onError>) {
+        onError = cb;
+      },
+    };
+    const internal = client as unknown as {
+      xmpp: typeof xmpp;
+      wireEvents: (xmpp: typeof xmpp) => void;
+    };
+    internal.xmpp = xmpp;
+    internal.wireEvents(xmpp);
+
+    onError?.({
+      detail: "stream error",
+      condition: "undefined-condition",
+      streamManagementError: {
+        kind: "handled-count-too-high",
+        h: 3,
+        sendCount: 2,
+      },
+    });
+
+    expect(stub.errors).toHaveLength(1);
+    expect(stub.errors[0].error.message).toBe("stream-handled-count-too-high");
+    expect(stub.errors[0].options?.type).toBe("xmpp.stream");
+    expect(stub.errors[0].options?.context?.condition).toBe("undefined-condition");
+    expect(stub.errors[0].options?.context?.detail).toBe("stream-handled-count-too-high");
   });
 
   test("enqueuing a send fires onSendEnqueued + onQueueDepthChange", async () => {

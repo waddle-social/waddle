@@ -2,7 +2,8 @@ use crate::bootstrap::NS_STREAMS;
 
 use crate::error::{ClientError, ClientResult};
 use crate::event::{
-    ClientEvent, ConnectionEvent, MessageDeliveryEvent, StreamErrorCondition, StreamManagementEvent,
+    ClientEvent, ConnectionEvent, MessageDeliveryEvent, StreamErrorCondition, StreamErrorDetail,
+    StreamManagementEvent,
 };
 use crate::state::{SessionBinding, StreamId};
 use crate::transport::{StreamClose, TransportMessage};
@@ -23,6 +24,7 @@ impl XmppRuntime {
 
         events.push(ClientEvent::Connection(ConnectionEvent::StreamError {
             condition: stream_error_condition(element),
+            detail: stream_error_detail(element),
         }));
 
         // RFC 6120 defines stream errors as terminal for the current XML
@@ -236,4 +238,12 @@ fn stream_error_condition(element: &Element) -> StreamErrorCondition {
         .filter(|child| child.ns() == NS_STREAM_ERRORS && child.name() != "text")
         .find_map(|child| StreamErrorCondition::from_name(child.name()))
         .unwrap_or(StreamErrorCondition::UndefinedCondition)
+}
+
+fn stream_error_detail(element: &Element) -> Option<StreamErrorDetail> {
+    let handled_count =
+        element.get_child("handled-count-too-high", crate::stream_management::NS_SM)?;
+    let h = handled_count.attr("h")?.parse().ok()?;
+    let send_count = handled_count.attr("send-count")?.parse().ok()?;
+    Some(StreamErrorDetail::HandledCountTooHigh { h, send_count })
 }

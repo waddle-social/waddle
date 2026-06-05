@@ -254,7 +254,11 @@ const ROOM_SELF_PRESENCE_TIMEOUT_MS = 15_000;
 type CatchupRunStats = { pages: number; messages: number };
 type CatchupOutcome = "completed" | "aborted" | "failed";
 type DmCallActivityHydrationOptions = { since?: string; pageSize?: number; maxPages?: number };
-type XmppStreamErrorPayload = string | { detail?: string | null; condition?: string | null };
+type XmppStreamErrorPayload = string | {
+  detail?: string | null;
+  condition?: string | null;
+  streamManagementError?: XmppErrorEvent["streamManagementError"] | null;
+};
 
 function streamErrorConditionFromText(text: string | null | undefined): string | undefined {
   const normalized = text?.trim().toLowerCase();
@@ -272,6 +276,7 @@ function streamErrorConditionFromText(text: string | null | undefined): string |
 function normalizeXmppStreamErrorPayload(payload: XmppStreamErrorPayload): {
   detail: string;
   condition?: string;
+  streamManagementError?: XmppErrorEvent["streamManagementError"];
 } {
   if (typeof payload === "string") {
     const condition = streamErrorConditionFromText(payload);
@@ -285,6 +290,9 @@ function normalizeXmppStreamErrorPayload(payload: XmppStreamErrorPayload): {
   return {
     detail,
     ...(condition ? { condition } : {}),
+    ...(payload.streamManagementError
+      ? { streamManagementError: payload.streamManagementError }
+      : {}),
   };
 }
 
@@ -3330,6 +3338,9 @@ export class BrowserXmppClient {
         recoverable: !this.destroying,
         detail: streamError.detail,
         ...(streamError.condition ? { condition: streamError.condition } : {}),
+        ...(streamError.streamManagementError
+          ? { streamManagementError: streamError.streamManagementError }
+          : {}),
       });
     });
     xmpp.set_on_message?.((message: WasmMessage) => {

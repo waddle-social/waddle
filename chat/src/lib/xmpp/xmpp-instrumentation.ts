@@ -12,6 +12,7 @@ import {
   XMPP_ERROR_CONDITIONS,
   XMPP_STREAM_ERROR_CONDITIONS,
   type XmppErrorKind,
+  type XmppErrorEvent,
 } from "@/lib/xmpp/types";
 import {
   reportCatchup,
@@ -74,11 +75,7 @@ export function installInstrumentation(client: BrowserXmppClient): void {
   client.onResumeDrain((info) => reportResumeDrain(info));
 }
 
-function telemetryErrorDetail(event: {
-  kind: XmppErrorKind;
-  detail: string;
-  condition?: string;
-}, condition: string | undefined): string {
+function telemetryErrorDetail(event: XmppErrorEvent, condition: string | undefined): string {
   switch (event.kind) {
     case "auth":
       return "auth-error";
@@ -92,6 +89,12 @@ function telemetryErrorDetail(event: {
       if (event.detail === "missing list_room_members") return "missing-list-room-members";
       return condition ? `member-query-${condition}` : "member-query-failed";
     case "stream":
+      if (
+        condition === "undefined-condition" &&
+        event.streamManagementError?.kind === "handled-count-too-high"
+      ) {
+        return "stream-handled-count-too-high";
+      }
       return condition ? `stream-${condition}` : "stream-error";
   }
 }

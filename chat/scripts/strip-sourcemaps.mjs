@@ -12,27 +12,31 @@ try {
   process.exit(0);
 }
 
-for (const sourceMap of findSourceMaps(sourceMapRoot)) {
+for (const sourceMap of findPrivateSourceMapArtifacts(sourceMapRoot)) {
   rmSync(sourceMap, { force: true });
   removed += 1;
 }
 
 if (removed > 0) {
-  console.log(`[faro] removed ${removed} source maps from dist/client`);
+  console.log(`[faro] removed ${removed} source-map artifacts from dist/client`);
 }
 
-function findSourceMaps(root) {
+function findPrivateSourceMapArtifacts(root) {
   const files = [];
   const visit = (directory) => {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       const path = resolve(directory, entry.name);
       if (entry.isDirectory()) {
         visit(path);
-      } else if (entry.isFile() && entry.name.endsWith(".map")) {
+      } else if (entry.isFile() && isPrivateSourceMapArtifact(entry.name)) {
         files.push(path);
       }
     }
   };
   visit(root);
   return files;
+}
+
+function isPrivateSourceMapArtifact(name) {
+  return name.endsWith(".map") || name.endsWith(".tar.gz");
 }
