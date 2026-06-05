@@ -339,8 +339,12 @@ pub use waddle_xmpp_core::xcal::{
 };
 
 pub use super::xep0470::{
-    build_attachments_element, is_attachments_element, parse_attachment_target, Attachment,
-    AttachmentPayload, AttachmentTarget, NS_PUBSUB_ATTACHMENTS,
+    build_attachments_element, build_reactions_element as build_attachment_reactions_element,
+    build_summary_element as build_attachment_summary_element, is_attachments_element,
+    parse_attachments_element, Attachment, AttachmentPayload, AttachmentSummary,
+    AttachmentValidationError, ReactionSet as AttachmentReactionSet, ReactionSummary,
+    MAX_REACTIONS_PER_ATTACHMENT, NS_PUBSUB_ATTACHMENTS, NS_PUBSUB_ATTACHMENTS_SUMMARY,
+    PUBSUB_ATTACHMENTS_NODE_PREFIX,
 };
 
 pub use super::xep_waddle_pin::{

@@ -52,6 +52,7 @@ minidom = "0.18"
 rxml = "0.14"
 quick-xml = "0.40.1"
 dashmap = "6.2"
+unicode-segmentation = "1.13"
 
 tokio-tungstenite = { version = "0.29", features = ["native-tls"] }
 

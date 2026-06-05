@@ -35,8 +35,8 @@ export {
 export type { OutboundFileAttachment } from "./send-types";
 export type { InboxEntry } from "./inbox-types";
 export type { FeedEntry, FeedPostInput, FeedSourceKind } from "./feed-types";
-export type { Story, StoryPostInput } from "./story-types";
-export { isStoryActive } from "./story-types";
+export type { Story, StoryPostInput, StoryReactionItem, StoryReactionSummary } from "./story-types";
+export { aggregateStoryReactions, isStoryActive, normalizeStoryReactions, STORY_REACTIONS_MAX } from "./story-types";
 export type { StoryRead, StoryReads } from "./story-reads-types";
 export {
   pruneStoryReads,

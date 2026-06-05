@@ -950,6 +950,10 @@ pub(super) async fn handle_community_publish(
     item: PubSubItem,
     session: Option<&Session>,
 ) -> Vec<String> {
+    if is_story_attachment_node(node, community_domain) {
+        return handle_story_attachment_publish(iq, state, community_domain, node, item, session)
+            .await;
+    }
     if node != waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED
         && node != waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES
         && node != waddle_xmpp_core::xcal::PUBSUB_NODE_EVENTS
@@ -970,6 +974,207 @@ pub(super) async fn handle_community_publish(
         }
     }
     handle_community_non_bookmark_publish(iq, state, community_domain, node, item, session).await
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StoryAttachmentTarget {
+    item_id: String,
+}
+
+fn is_story_attachment_node(node: &str, community_domain: &str) -> bool {
+    parse_story_attachment_target(node, community_domain).is_some()
+}
+
+fn parse_story_attachment_target(
+    node: &str,
+    community_domain: &str,
+) -> Option<StoryAttachmentTarget> {
+    let prefix = format!(
+        "{}/",
+        waddle_xmpp::xep::xep0470::PUBSUB_ATTACHMENTS_NODE_PREFIX
+    );
+    let target_uri = node.strip_prefix(&prefix)?;
+    let target_uri = target_uri.strip_prefix("xmpp:")?;
+    let (target_domain, query) = target_uri.split_once("?;")?;
+    if target_domain != community_domain {
+        return None;
+    }
+    let mut parts = query.split(';');
+    let node_param = parts.next()?;
+    let item_param = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    let ("node", encoded_node) = node_param.split_once('=')? else {
+        return None;
+    };
+    let ("item", encoded_item) = item_param.split_once('=')? else {
+        return None;
+    };
+    let target_node = urlencoding::decode(encoded_node).ok()?.into_owned();
+    if target_node != waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES {
+        return None;
+    }
+    let item_id = urlencoding::decode(encoded_item).ok()?.into_owned();
+    if item_id.is_empty() {
+        return None;
+    }
+    let canonical = format!(
+        "{prefix}xmpp:{community_domain}?;node={};item={}",
+        urlencoding::encode(waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES),
+        urlencoding::encode(&item_id)
+    );
+    if node != canonical {
+        return None;
+    }
+    Some(StoryAttachmentTarget { item_id })
+}
+
+fn session_bare_jid(session: &Session, user_domain: &str) -> Result<BareJid, PubSubError> {
+    format!(
+        "{}@{}",
+        session.xmpp_localpart.to_ascii_lowercase(),
+        user_domain.to_ascii_lowercase()
+    )
+    .parse::<BareJid>()
+    .map_err(|_| PubSubError::InvalidJid)
+}
+
+fn validated_story_attachment_item(
+    session: Option<&Session>,
+    user_domain: &str,
+    item: &PubSubItem,
+) -> Result<BareJid, PubSubError> {
+    let Some(session) = session else {
+        return Err(PubSubError::Forbidden);
+    };
+    let publisher = session_bare_jid(session, user_domain)?;
+    let Some(item_id) = item.id.as_deref() else {
+        return Err(PubSubError::BadRequest);
+    };
+    let requested_publisher = item_id
+        .parse::<BareJid>()
+        .map_err(|_| PubSubError::BadRequest)?;
+    if requested_publisher != publisher {
+        return Err(PubSubError::BadRequest);
+    }
+    let Some(payload) = item.payload.as_ref() else {
+        return Err(PubSubError::BadRequest);
+    };
+    let Some(attachments) = waddle_xmpp::xep::xep0470::parse_attachments_element(payload) else {
+        return Err(PubSubError::BadRequest);
+    };
+    if let Some(reactions) = attachments.reactions_set() {
+        reactions.validate().map_err(|_| PubSubError::BadRequest)?;
+    }
+    Ok(publisher)
+}
+
+async fn ensure_story_attachment_node(
+    state: &WebSocketState,
+    community_jid: &BareJid,
+    community_domain: &str,
+    attachment_node: &str,
+) -> Result<(), PubSubError> {
+    let storage = &state.deps.protocol.pubsub_storage;
+    let Some(target) = parse_story_attachment_target(attachment_node, community_domain) else {
+        return Err(PubSubError::BadRequest);
+    };
+    let stories_node = storage
+        .get_node(
+            community_jid,
+            waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES,
+        )
+        .await
+        .map_err(|_| PubSubError::NodeNotFound)?
+        .ok_or(PubSubError::NodeNotFound)?;
+    let story_items = storage
+        .get_items(
+            community_jid,
+            waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES,
+            None,
+            &[target.item_id],
+        )
+        .await
+        .map_err(|_| PubSubError::NodeNotFound)?;
+    if story_items.is_empty() {
+        return Err(PubSubError::ItemNotFound);
+    }
+    let (node, created) = storage
+        .get_or_create_node(community_jid, attachment_node)
+        .await
+        .map_err(|_| PubSubError::InternalServerError)?;
+    if created
+        || node.config.access_model != stories_node.config.access_model
+        || node.config.publish_model != stories_node.config.publish_model
+    {
+        let mut config = node.config;
+        config.access_model = stories_node.config.access_model;
+        config.publish_model = stories_node.config.publish_model;
+        storage
+            .update_node_config(community_jid, attachment_node, &config)
+            .await
+            .map_err(|_| PubSubError::InternalServerError)?;
+    }
+    Ok(())
+}
+
+async fn handle_story_attachment_publish(
+    iq: &xmpp_parsers::iq::Iq,
+    state: &WebSocketState,
+    community_domain: &str,
+    node: &str,
+    item: PubSubItem,
+    session: Option<&Session>,
+) -> Vec<String> {
+    let user_domain = state.deps.auth_state.xmpp_domain.as_str();
+    let publisher = match validated_story_attachment_item(session, user_domain, &item) {
+        Ok(publisher) => publisher,
+        Err(error) => return vec![iq_to_xml(build_pubsub_error(iq, error))],
+    };
+    let Ok(community_jid) = community_domain.parse::<BareJid>() else {
+        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
+    };
+    if let Err(error) =
+        ensure_story_attachment_node(state, &community_jid, community_domain, node).await
+    {
+        return vec![iq_to_xml(build_pubsub_error(iq, error))];
+    }
+    match state
+        .deps
+        .protocol
+        .pubsub_storage
+        .publish_item(&community_jid, node, &item, Some(&publisher), false)
+        .await
+    {
+        Ok(result) => {
+            pubsub_fanout::fan_out_publish(
+                state,
+                pubsub_fanout::FanOutRequest {
+                    owner: &community_jid,
+                    node,
+                    published_item: &item,
+                    item_id: &result.item_id,
+                    publisher: Some(&publisher),
+                    publisher_full: None,
+                    is_pep: false,
+                },
+            )
+            .await;
+            vec![iq_to_xml(build_pubsub_publish_result(
+                iq,
+                node,
+                &result.item_id,
+            ))]
+        }
+        Err(error) => {
+            warn!(node, error = %error, "Failed to publish story attachment item");
+            vec![iq_to_xml(build_pubsub_error(
+                iq,
+                PubSubError::InternalServerError,
+            ))]
+        }
+    }
 }
 
 /// `true` when `item` is a well-formed RSVP for the publishing
@@ -1177,7 +1382,8 @@ pub(super) async fn handle_community_items(
     max_items: Option<u32>,
     item_ids: &[String],
 ) -> Vec<String> {
-    if node != waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED
+    if !is_story_attachment_node(node, community_domain)
+        && node != waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED
         && node != waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES
         && node != waddle_xmpp_core::xcal::PUBSUB_NODE_EVENTS
     {
@@ -1235,6 +1441,17 @@ pub(super) async fn handle_community_retract(
     item_id: &str,
     session: Option<&Session>,
 ) -> Vec<String> {
+    if is_story_attachment_node(node, community_domain) {
+        return handle_story_attachment_retract(
+            iq,
+            state,
+            community_domain,
+            node,
+            item_id,
+            session,
+        )
+        .await;
+    }
     if node != waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED
         && node != waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES
         && node != waddle_xmpp_core::xcal::PUBSUB_NODE_EVENTS
@@ -1263,6 +1480,51 @@ pub(super) async fn handle_community_retract(
         Ok(false) => vec![iq_to_xml(build_pubsub_error(iq, PubSubError::ItemNotFound))],
         Err(error) => {
             warn!(node, item_id, error = %error, "Failed to retract community item");
+            vec![iq_to_xml(build_pubsub_error(
+                iq,
+                PubSubError::InternalServerError,
+            ))]
+        }
+    }
+}
+
+async fn handle_story_attachment_retract(
+    iq: &xmpp_parsers::iq::Iq,
+    state: &WebSocketState,
+    community_domain: &str,
+    node: &str,
+    item_id: &str,
+    session: Option<&Session>,
+) -> Vec<String> {
+    let user_domain = state.deps.auth_state.xmpp_domain.as_str();
+    let Some(session) = session else {
+        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
+    };
+    let publisher = match session_bare_jid(session, user_domain) {
+        Ok(publisher) => publisher,
+        Err(error) => return vec![iq_to_xml(build_pubsub_error(iq, error))],
+    };
+    let requested_publisher = match item_id.parse::<BareJid>() {
+        Ok(requested_publisher) => requested_publisher,
+        Err(_) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::BadRequest))],
+    };
+    if requested_publisher != publisher {
+        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::BadRequest))];
+    }
+    let Ok(community_jid) = community_domain.parse::<BareJid>() else {
+        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
+    };
+    match state
+        .deps
+        .protocol
+        .pubsub_storage
+        .retract_item(&community_jid, node, publisher.as_str())
+        .await
+    {
+        Ok(true) => vec![iq_to_xml(build_pubsub_success(iq))],
+        Ok(false) => vec![iq_to_xml(build_pubsub_error(iq, PubSubError::ItemNotFound))],
+        Err(error) => {
+            warn!(node, item_id, error = %error, "Failed to retract story attachment item");
             vec![iq_to_xml(build_pubsub_error(
                 iq,
                 PubSubError::InternalServerError,
@@ -1728,5 +1990,44 @@ pub(super) async fn room_space_metadata_extensions(
             warn!(room = %room_jid, error = %error, "Failed to find Space node for room");
             vec![]
         }
+    }
+}
+
+#[cfg(test)]
+mod story_attachment_target_tests {
+    use super::*;
+
+    const COMMUNITY: &str = "community.localhost";
+    const PREFIX: &str = waddle_xmpp::xep::xep0470::PUBSUB_ATTACHMENTS_NODE_PREFIX;
+
+    #[test]
+    fn parses_only_canonical_story_attachment_target() {
+        let node = format!("{PREFIX}/xmpp:{COMMUNITY}?;node=urn%3Axmpp%3Astories%3A0;item=story-1");
+
+        assert_eq!(
+            parse_story_attachment_target(&node, COMMUNITY),
+            Some(StoryAttachmentTarget {
+                item_id: "story-1".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_lookalike_story_node_target() {
+        let node =
+            format!("{PREFIX}/xmpp:{COMMUNITY}?;node=urn%3Axmpp%3Astories%3A0evil;item=story-1");
+
+        assert_eq!(parse_story_attachment_target(&node, COMMUNITY), None);
+    }
+
+    #[test]
+    fn rejects_non_canonical_story_attachment_target() {
+        let wrong_host =
+            format!("{PREFIX}/xmpp:other.localhost?;node=urn%3Axmpp%3Astories%3A0;item=story-1");
+        let extra_param =
+            format!("{PREFIX}/xmpp:{COMMUNITY}?;node=urn%3Axmpp%3Astories%3A0;item=story-1;x=1");
+
+        assert_eq!(parse_story_attachment_target(&wrong_host, COMMUNITY), None);
+        assert_eq!(parse_story_attachment_target(&extra_param, COMMUNITY), None);
     }
 }

@@ -12,10 +12,15 @@
  */
 import { computed, onScopeDispose, ref, type Ref } from "vue";
 import {
+  aggregateStoryReactions,
   isStoryActive,
+  normalizeStoryReactions,
+  STORY_REACTIONS_MAX,
   type BrowserXmppClient,
   type Story,
   type StoryPostInput,
+  type StoryReactionItem,
+  type StoryReactionSummary,
 } from "@/lib/xmpp-client";
 import {
   createStoryReadStore,
@@ -23,6 +28,7 @@ import {
 } from "@/services/story-read-store";
 
 const TICK_INTERVAL_MS = 60_000;
+const REACTION_FETCH_BATCH_SIZE = 8;
 
 export function useStories(
   xmppClient: Ref<BrowserXmppClient | null>,
@@ -35,8 +41,10 @@ export function useStories(
   const isLoading = ref(false);
   const isPosting = ref(false);
   const error = ref<string | null>(null);
+  const reactionsByStory = ref<Record<string, StoryReactionItem[]>>({});
   const pageSize = options.pageSize ?? 50;
   let fetchRequestId = 0;
+  const reactionMutationVersionsByStory = new Map<string, number>();
   const nowMs = ref(Date.now());
   const tickHandle = setInterval(() => {
     nowMs.value = Date.now();
@@ -84,6 +92,7 @@ export function useStories(
       const fetched = await client.fetchStories(jid, pageSize);
       if (requestId !== fetchRequestId || client !== xmppClient.value) return false;
       stories.value = fetched;
+      await refreshReactionsFor(fetched, client, jid, requestId);
       if (!readStore.loaded()) {
         // Hydrate after the first stories fetch so the rail doesn't
         // pop unread→read on first paint.
@@ -126,9 +135,104 @@ export function useStories(
     }
   }
 
+  async function refreshReactionsFor(
+    fetched: readonly Story[],
+    client: BrowserXmppClient,
+    communityJid: string,
+    requestId: number,
+  ): Promise<void> {
+    const mutationVersions = new Map(reactionMutationVersionsByStory);
+    const entries: Array<readonly [string, StoryReactionItem[]]> = [];
+    for (let offset = 0; offset < fetched.length; offset += REACTION_FETCH_BATCH_SIZE) {
+      if (requestId !== fetchRequestId || client !== xmppClient.value) return;
+      const batch = fetched.slice(offset, offset + REACTION_FETCH_BATCH_SIZE);
+      entries.push(...await Promise.all(
+        batch.map(async (story): Promise<readonly [string, StoryReactionItem[]]> => {
+          try {
+            return [story.id, await client.fetchStoryReactions(communityJid, story.id)] as const;
+          } catch {
+            return [story.id, []] as const;
+          }
+        }),
+      ));
+    }
+    if (requestId !== fetchRequestId || client !== xmppClient.value) return;
+    reactionsByStory.value = mergedReactionEntries(entries, mutationVersions, client.bareJid);
+  }
+
+  function mergedReactionEntries(
+    entries: Array<readonly [string, StoryReactionItem[]]>,
+    mutationVersions: ReadonlyMap<string, number>,
+    self: string | null | undefined,
+  ): Record<string, StoryReactionItem[]> {
+    if (!self) {
+      return Object.fromEntries(entries);
+    }
+    const selfKey = self.toLowerCase();
+    return Object.fromEntries(
+      entries.map(([storyId, fetchedItems]) => {
+        if (mutationVersions.get(storyId) === reactionMutationVersionsByStory.get(storyId)) {
+          return [storyId, fetchedItems];
+        }
+        const currentSelf = (reactionsByStory.value[storyId] ?? [])
+          .find((item) => item.jid.toLowerCase() === selfKey);
+        const fetchedWithoutSelf = fetchedItems
+          .filter((item) => item.jid.toLowerCase() !== selfKey);
+        return [storyId, currentSelf ? [...fetchedWithoutSelf, currentSelf] : fetchedWithoutSelf];
+      }),
+    );
+  }
+
+  function reactionSummary(storyId: string): StoryReactionSummary {
+    return aggregateStoryReactions(
+      reactionsByStory.value[storyId] ?? [],
+      xmppClient.value?.bareJid ?? null,
+    );
+  }
+
+  async function toggleReaction(storyId: string, emoji: string): Promise<boolean> {
+    const client = xmppClient.value;
+    const jid = options.communityJid.value;
+    const self = client?.bareJid;
+    if (!client || !jid || !self || !storyId || !emoji.trim()) return false;
+    const previousItems = reactionsByStory.value[storyId] ?? [];
+    const existing = previousItems.find((item) => item.jid.toLowerCase() === self.toLowerCase());
+    const current = normalizeStoryReactions(existing?.emojis ?? []);
+    const next = current.includes(emoji)
+      ? current.filter((candidate) => candidate !== emoji)
+      : normalizeStoryReactions([...current, emoji]);
+    if (next.length > STORY_REACTIONS_MAX) return false;
+    const nextItems = next.length > 0
+      ? [
+          ...previousItems.filter((item) => item.jid.toLowerCase() !== self.toLowerCase()),
+          { jid: self, emojis: next, unknownChildrenXml: existing?.unknownChildrenXml ?? [] },
+        ]
+      : previousItems.filter((item) => item.jid.toLowerCase() !== self.toLowerCase());
+
+    const mutationVersion = (reactionMutationVersionsByStory.get(storyId) ?? 0) + 1;
+    reactionMutationVersionsByStory.set(storyId, mutationVersion);
+    reactionsByStory.value = { ...reactionsByStory.value, [storyId]: nextItems };
+    try {
+      if (next.length > 0) {
+        await client.publishStoryReactions(jid, storyId, next, existing?.unknownChildrenXml ?? []);
+      } else {
+        await client.retractStoryReactions(jid, storyId);
+      }
+      return true;
+    } catch (err) {
+      if (reactionMutationVersionsByStory.get(storyId) === mutationVersion) {
+        reactionsByStory.value = { ...reactionsByStory.value, [storyId]: previousItems };
+      }
+      error.value = err instanceof Error ? err.message : String(err);
+      return false;
+    }
+  }
+
   function clear() {
     fetchRequestId += 1;
     stories.value = [];
+    reactionsByStory.value = {};
+    reactionMutationVersionsByStory.clear();
     error.value = null;
     isLoading.value = false;
     isPosting.value = false;
@@ -147,5 +251,7 @@ export function useStories(
     nowMs,
     isStoryRead,
     markStoryRead,
+    reactionSummary,
+    toggleReaction,
   };
 }

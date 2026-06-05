@@ -6636,6 +6636,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "unicode-segmentation",
  "url",
  "uuid",
  "waddle-extensions",

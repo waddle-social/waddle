@@ -21,6 +21,23 @@ export interface Story {
   expiresMs?: number;
 }
 
+export interface StoryReactionItem {
+  /** Bare JID of the reacting member; also the XEP-0060 item id. */
+  jid: string;
+  emojis: readonly string[];
+  /** XML children inside `<attachments/>` that this client does not understand. */
+  unknownChildrenXml: readonly string[];
+}
+
+export interface StoryReactionSummary {
+  counts: Record<string, number>;
+  reactors: Record<string, string[]>;
+  mine: readonly string[];
+}
+
+export const NS_PUBSUB_ATTACHMENTS = "urn:xmpp:pubsub-attachments:1";
+export const STORY_REACTIONS_MAX = 12;
+
 export interface StoryPostInput {
   body?: string;
   mediaUrl?: string;
@@ -56,4 +73,40 @@ export function storyFromWasm(story: WasmStory): Story {
 export function isStoryActive(story: Story, nowMs: number = Date.now()): boolean {
   if (typeof story.expiresMs !== "number") return true;
   return story.expiresMs > nowMs;
+}
+
+export function storyAttachmentNode(communityJid: string, storyId: string): string {
+  return `${NS_PUBSUB_ATTACHMENTS}/xmpp:${communityJid}?;node=${encodeURIComponent("urn:xmpp:stories:0")};item=${encodeURIComponent(storyId)}`;
+}
+
+export function normalizeStoryReactions(emojis: Iterable<string>): string[] {
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const raw of emojis) {
+    const emoji = raw.trim();
+    if (!emoji || seen.has(emoji)) continue;
+    seen.add(emoji);
+    normalized.push(emoji);
+  }
+  return normalized;
+}
+
+export function aggregateStoryReactions(
+  items: readonly StoryReactionItem[],
+  selfBareJid: string | null | undefined,
+): StoryReactionSummary {
+  const counts: Record<string, number> = {};
+  const reactors: Record<string, string[]> = {};
+  const mine = selfBareJid
+    ? (items.find((item) => item.jid.toLowerCase() === selfBareJid.toLowerCase())?.emojis ?? [])
+    : [];
+
+  for (const item of items) {
+    for (const emoji of normalizeStoryReactions(item.emojis)) {
+      counts[emoji] = (counts[emoji] ?? 0) + 1;
+      (reactors[emoji] ??= []).push(item.jid);
+    }
+  }
+
+  return { counts, reactors, mine };
 }

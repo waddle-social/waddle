@@ -8,11 +8,24 @@ const COMMUNITY = "community.example.com";
 type MockClient = BrowserXmppClient & {
   fetchStories: ReturnType<typeof mock>;
   publishStory: ReturnType<typeof mock>;
+  fetchStoryReactions: ReturnType<typeof mock>;
+  publishStoryReactions: ReturnType<typeof mock>;
+  retractStoryReactions: ReturnType<typeof mock>;
+  bareJid: string;
 };
 
 function makeClient(stories: Story[] = []): MockClient {
   return {
+    bareJid: "alice@example.com",
     fetchStories: mock(() => Promise.resolve(stories)),
+    fetchStoryReactions: mock((_: string, storyId: string) =>
+      Promise.resolve(storyId === "s1" ? [
+        { jid: "bob@example.com", emojis: ["👍"], unknownChildrenXml: [] },
+        { jid: "alice@example.com", emojis: ["❤️"], unknownChildrenXml: ["<future xmlns=\"urn:test\"/>"] },
+      ] : []),
+    ),
+    publishStoryReactions: mock(() => Promise.resolve()),
+    retractStoryReactions: mock(() => Promise.resolve()),
     publishStory: mock((_jid: string, input: { body?: string; mediaUrl?: string; author?: string }) =>
       Promise.resolve({
         id: "new-story",
@@ -81,5 +94,179 @@ describe("useStories", () => {
     expect(story.activeStories.value.length).toBe(2);
     story.nowMs.value = t0 + 2 * 60_000;
     expect(story.activeStories.value.map((s) => s.id)).toEqual(["later"]);
+  });
+
+  test("reactions aggregate, toggle optimistically, preserve unknown children, and roll back", async () => {
+    const client = makeClient([{ id: "s1", body: "story", postedMs: 1 }]);
+    const story = withScope(() =>
+      useStories(ref<BrowserXmppClient | null>(client), { communityJid: ref<string | null>(COMMUNITY) }),
+    );
+    await story.refresh();
+
+    expect(story.reactionSummary("s1").counts).toEqual({ "👍": 1, "❤️": 1 });
+    expect(story.reactionSummary("s1").mine).toEqual(["❤️"]);
+
+    await story.toggleReaction("s1", "👍");
+    expect(story.reactionSummary("s1").counts).toEqual({ "👍": 2, "❤️": 1 });
+    expect(client.publishStoryReactions).toHaveBeenLastCalledWith(
+      COMMUNITY,
+      "s1",
+      ["❤️", "👍"],
+      ["<future xmlns=\"urn:test\"/>"],
+    );
+
+    client.publishStoryReactions = mock(() => Promise.reject(new Error("forbidden"))) as unknown as MockClient["publishStoryReactions"];
+    const ok = await story.toggleReaction("s1", "🎉");
+    expect(ok).toBe(false);
+    expect(story.reactionSummary("s1").counts).toEqual({ "👍": 2, "❤️": 1 });
+
+    client.publishStoryReactions = mock(() => Promise.resolve()) as unknown as MockClient["publishStoryReactions"];
+    await story.toggleReaction("s1", "❤️");
+    await story.toggleReaction("s1", "👍");
+    expect(client.retractStoryReactions).toHaveBeenCalledWith(COMMUNITY, "s1");
+  });
+
+  test("stale reaction refresh results do not overwrite newer refresh state", async () => {
+    let resolveFirst!: (items: Array<{ jid: string; emojis: string[]; unknownChildrenXml: string[] }>) => void;
+    const firstReactionFetch = new Promise<Array<{ jid: string; emojis: string[]; unknownChildrenXml: string[] }>>((resolve) => {
+      resolveFirst = resolve;
+    });
+    let reactionFetchCount = 0;
+    const client = makeClient([{ id: "s1", body: "story", postedMs: 1 }]);
+    client.fetchStoryReactions = mock(() => {
+      reactionFetchCount += 1;
+      if (reactionFetchCount === 1) return firstReactionFetch;
+      return Promise.resolve([{ jid: "carol@example.com", emojis: ["🎉"], unknownChildrenXml: [] }]);
+    }) as unknown as MockClient["fetchStoryReactions"];
+
+    const story = withScope(() =>
+      useStories(ref<BrowserXmppClient | null>(client), { communityJid: ref<string | null>(COMMUNITY) }),
+    );
+    const first = story.refresh();
+    await Promise.resolve();
+    const second = story.refresh();
+    await second;
+    expect(story.reactionSummary("s1").counts).toEqual({ "🎉": 1 });
+
+    resolveFirst([{ jid: "bob@example.com", emojis: ["👍"], unknownChildrenXml: [] }]);
+    await first;
+    expect(story.reactionSummary("s1").counts).toEqual({ "🎉": 1 });
+  });
+
+  test("reaction refresh preserves optimistic toggle made while batches are pending", async () => {
+    let resolveReactions!: (items: Array<{ jid: string; emojis: string[]; unknownChildrenXml: string[] }>) => void;
+    const pendingReactions = new Promise<Array<{ jid: string; emojis: string[]; unknownChildrenXml: string[] }>>((resolve) => {
+      resolveReactions = resolve;
+    });
+    const client = makeClient([{ id: "s1", body: "story", postedMs: 1 }]);
+    client.fetchStoryReactions = mock(() => pendingReactions) as unknown as MockClient["fetchStoryReactions"];
+
+    const story = withScope(() =>
+      useStories(ref<BrowserXmppClient | null>(client), { communityJid: ref<string | null>(COMMUNITY) }),
+    );
+    const refresh = story.refresh();
+    await Promise.resolve();
+    await story.toggleReaction("s1", "🎉");
+    expect(story.reactionSummary("s1").counts).toEqual({ "🎉": 1 });
+
+    resolveReactions([{ jid: "bob@example.com", emojis: ["👍"], unknownChildrenXml: [] }]);
+    await refresh;
+
+    expect(story.reactionSummary("s1").counts).toEqual({ "👍": 1, "🎉": 1 });
+    expect(story.reactionSummary("s1").mine).toEqual(["🎉"]);
+  });
+
+  test("failed older reaction publish does not roll back a newer toggle", async () => {
+    let rejectFirst!: (error: Error) => void;
+    const firstPublish = new Promise<void>((_, reject) => {
+      rejectFirst = reject;
+    });
+    let publishCount = 0;
+    const client = makeClient([{ id: "s1", body: "story", postedMs: 1 }]);
+    client.fetchStoryReactions = mock(() => Promise.resolve([])) as unknown as MockClient["fetchStoryReactions"];
+    client.publishStoryReactions = mock(() => {
+      publishCount += 1;
+      return publishCount === 1 ? firstPublish : Promise.resolve();
+    }) as unknown as MockClient["publishStoryReactions"];
+
+    const story = withScope(() =>
+      useStories(ref<BrowserXmppClient | null>(client), { communityJid: ref<string | null>(COMMUNITY) }),
+    );
+    await story.refresh();
+
+    const firstToggle = story.toggleReaction("s1", "🎉");
+    await Promise.resolve();
+    const secondToggle = await story.toggleReaction("s1", "👍");
+    expect(secondToggle).toBe(true);
+    expect(story.reactionSummary("s1").mine).toEqual(["🎉", "👍"]);
+
+    rejectFirst(new Error("older publish failed"));
+    expect(await firstToggle).toBe(false);
+    expect(story.reactionSummary("s1").mine).toEqual(["🎉", "👍"]);
+  });
+
+  test("reaction refresh only preserves locally mutated story reactions", async () => {
+    let phase: "initial" | "pending" = "initial";
+    let resolveS1!: (items: Array<{ jid: string; emojis: string[]; unknownChildrenXml: string[] }>) => void;
+    let resolveS2!: (items: Array<{ jid: string; emojis: string[]; unknownChildrenXml: string[] }>) => void;
+    const pendingByStory = new Map<string, Promise<Array<{ jid: string; emojis: string[]; unknownChildrenXml: string[] }>>>();
+    pendingByStory.set("s1", new Promise((resolve) => {
+      resolveS1 = resolve;
+    }));
+    pendingByStory.set("s2", new Promise((resolve) => {
+      resolveS2 = resolve;
+    }));
+    const client = makeClient([
+      { id: "s1", body: "story 1", postedMs: 2 },
+      { id: "s2", body: "story 2", postedMs: 1 },
+    ]);
+    client.fetchStoryReactions = mock((_: string, storyId: string) => {
+      if (phase === "initial") {
+        return Promise.resolve(storyId === "s2"
+          ? [{ jid: "alice@example.com", emojis: ["❤️"], unknownChildrenXml: [] }]
+          : []);
+      }
+      return pendingByStory.get(storyId) ?? Promise.resolve([]);
+    }) as unknown as MockClient["fetchStoryReactions"];
+
+    const story = withScope(() =>
+      useStories(ref<BrowserXmppClient | null>(client), { communityJid: ref<string | null>(COMMUNITY) }),
+    );
+    await story.refresh();
+    expect(story.reactionSummary("s2").mine).toEqual(["❤️"]);
+
+    phase = "pending";
+    const refresh = story.refresh();
+    await Promise.resolve();
+    await story.toggleReaction("s1", "🎉");
+    resolveS1([{ jid: "bob@example.com", emojis: ["👍"], unknownChildrenXml: [] }]);
+    resolveS2([{ jid: "alice@example.com", emojis: ["🔥"], unknownChildrenXml: [] }]);
+    await refresh;
+
+    expect(story.reactionSummary("s1").mine).toEqual(["🎉"]);
+    expect(story.reactionSummary("s1").counts).toEqual({ "👍": 1, "🎉": 1 });
+    expect(story.reactionSummary("s2").mine).toEqual(["🔥"]);
+  });
+
+  test("reaction refresh bounds concurrent IQ fetches", async () => {
+    let active = 0;
+    let maxActive = 0;
+    const client = makeClient(
+      Array.from({ length: 20 }, (_, index) => ({ id: `s${index}`, body: "story", postedMs: index })),
+    );
+    client.fetchStoryReactions = mock(async () => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await Promise.resolve();
+      active -= 1;
+      return [];
+    }) as unknown as MockClient["fetchStoryReactions"];
+
+    const story = withScope(() =>
+      useStories(ref<BrowserXmppClient | null>(client), { communityJid: ref<string | null>(COMMUNITY) }),
+    );
+    await story.refresh();
+
+    expect(maxActive).toBeLessThanOrEqual(8);
   });
 });
