@@ -17,15 +17,21 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 
 cargo build \
   --manifest-path "$SERVER_ROOT/Cargo.toml" \
+  --locked \
   -p waddle-xmpp-client-ffi
 
 (cd "$SERVER_ROOT" && cargo run -p waddle-xmpp-client-ffi \
+  --locked \
   --bin uniffi-bindgen \
   --features waddle-xmpp-client-ffi/uniffi-bindgen-bin \
   -- generate \
   --library "target/debug/libwaddle_xmpp_client_ffi.${LIB_EXT}" \
   --language swift \
   --out-dir "$TMP_DIR")
+
+perl -pi -e 's/[ \t]+$//' \
+  "$TMP_DIR/waddle_xmpp_client.swift" \
+  "$TMP_DIR/waddle_xmpp_clientFFI.h"
 
 for file in waddle_xmpp_client.swift waddle_xmpp_clientFFI.h waddle_xmpp_clientFFI.modulemap; do
   if ! diff -u "$GENERATED_DIR/$file" "$TMP_DIR/$file"; then

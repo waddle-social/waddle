@@ -29,22 +29,27 @@ fi
 
 echo "==> Building Rust targets (profile: $PROFILE)"
 cargo build -p waddle-xmpp-client-ffi $CARGO_FLAG \
+  --locked \
   --target aarch64-apple-darwin \
   --manifest-path "$SERVER/Cargo.toml"
 
 cargo build -p waddle-xmpp-client-ffi $CARGO_FLAG \
+  --locked \
   --target x86_64-apple-darwin \
   --manifest-path "$SERVER/Cargo.toml"
 
 cargo build -p waddle-xmpp-client-ffi $CARGO_FLAG \
+  --locked \
   --target aarch64-apple-ios \
   --manifest-path "$SERVER/Cargo.toml"
 
 cargo build -p waddle-xmpp-client-ffi $CARGO_FLAG \
+  --locked \
   --target aarch64-apple-ios-sim \
   --manifest-path "$SERVER/Cargo.toml"
 
 cargo build -p waddle-xmpp-client-ffi $CARGO_FLAG \
+  --locked \
   --target x86_64-apple-ios \
   --manifest-path "$SERVER/Cargo.toml"
 
@@ -69,12 +74,17 @@ lipo -create \
 echo "==> Generating Swift bindings"
 mkdir -p "$BINDINGS_DIR"
 (cd "$SERVER" && cargo run -p waddle-xmpp-client-ffi \
+  --locked \
   --bin uniffi-bindgen \
   --features waddle-xmpp-client-ffi/uniffi-bindgen-bin \
   -- generate \
   --library "target/aarch64-apple-darwin/$PROFILE/libwaddle_xmpp_client_ffi.dylib" \
   --language swift \
   --out-dir "$BINDINGS_DIR")
+
+perl -pi -e 's/[ \t]+$//' \
+  "$BINDINGS_DIR/waddle_xmpp_client.swift" \
+  "$BINDINGS_DIR/waddle_xmpp_clientFFI.h"
 
 echo "==> Assembling XCFramework"
 rm -rf "$XCFW"
