@@ -4,6 +4,7 @@ import {
   Mic,
   MicOff,
   Minimize2,
+  MonitorUp,
   PhoneOff,
   Settings,
   Video,
@@ -21,6 +22,8 @@ import {
 defineProps<{
   micEnabled: boolean;
   camEnabled: boolean;
+  screenShareEnabled: boolean;
+  screenShareSupported: boolean;
   /** True when the parent surface is the expanded variant — flips
    *  the toggle button between "expand" and "collapse". */
   isExpanded: boolean;
@@ -29,6 +32,7 @@ defineProps<{
 const emit = defineEmits<{
   toggleMic: [];
   toggleCam: [];
+  toggleScreenShare: [];
   toggleExpanded: [];
   openSettings: [];
   hangup: [];
@@ -58,6 +62,18 @@ const emit = defineEmits<{
     >
       <component :is="camEnabled ? Video : VideoOff" class="w-4 h-4" />
       <span class="type-control sr-only sm:not-sr-only">{{ camEnabled ? "Off" : "On" }}</span>
+    </button>
+    <button
+      v-if="screenShareSupported"
+      type="button"
+      class="chat-action-button"
+      :class="screenShareEnabled ? 'chat-action-button--primary' : 'chat-action-button--secondary'"
+      :aria-pressed="screenShareEnabled"
+      :title="screenShareEnabled ? 'Stop sharing' : 'Share screen'"
+      @click="emit('toggleScreenShare')"
+    >
+      <MonitorUp class="w-4 h-4" />
+      <span class="type-control sr-only sm:not-sr-only">{{ screenShareEnabled ? "Stop" : "Share" }}</span>
     </button>
 
     <span class="call-controls__divider" aria-hidden="true" />

@@ -3,11 +3,13 @@ import { readFileSync } from "node:fs";
 import { $callState, clearCallState } from "../src/lib/calls/call-store";
 import {
   $callCamEnabled,
+  $callScreenShareEnabled,
   $callMicEnabled,
   installCallPagehideSuspension,
   resetCallControls,
   seedCallControlsFromEngine,
   suspendCallForPageHide,
+  toggleScreenShare,
   toggleMic,
 } from "../src/lib/calls/call-controls";
 import {
@@ -26,6 +28,7 @@ import {
 } from "../src/lib/calls/muc-call-live-participants";
 import { connectionStore } from "../src/lib/connection-store";
 import type { LiveKitJoin } from "../src/lib/calls/types";
+import { Track } from "livekit-client";
 
 const join: LiveKitJoin = {
   url: "wss://livekit.test",
@@ -68,6 +71,7 @@ afterEach(() => {
   $mucCallLiveParticipants.set({});
   connectionStore.client = null;
   clearAllMediaIssues();
+  $callScreenShareEnabled.set(false);
   // The engine is a process-wide singleton; drop any injected room
   // stub so it doesn't leak into the next test.
   (useCallEngine().engine as unknown as { room: unknown }).room = null;
@@ -259,15 +263,18 @@ describe("device-less call controls", () => {
     seedCallControlsFromEngine({ micEnabled: true, cameraEnabled: false });
     expect($callMicEnabled.get()).toBe(true);
     expect($callCamEnabled.get()).toBe(false);
+    expect($callScreenShareEnabled.get()).toBe(false);
   });
 
   test("resetCallControls clears media issues left over from a prior call", () => {
     recordMediaIssue("mic", deviceError("NotFoundError"));
     recordMediaIssue("cam", deviceError("NotAllowedError"));
+    recordMediaIssue("screen", deviceError("AbortError"));
     resetCallControls(true, true);
-    expect($callMediaIssues.get()).toEqual({ mic: null, cam: null });
+    expect($callMediaIssues.get()).toEqual({ mic: null, cam: null, screen: null });
     expect($callMicEnabled.get()).toBe(true);
     expect($callCamEnabled.get()).toBe(true);
+    expect($callScreenShareEnabled.get()).toBe(false);
   });
 
   test("toggleMic retry that is still denied rolls back AND records a classified issue", async () => {
@@ -300,5 +307,73 @@ describe("device-less call controls", () => {
     await toggleMic();
     expect($callMicEnabled.get()).toBe(true);
     expect($callMediaIssues.get().mic).toBeNull();
+  });
+
+  test("toggleScreenShare publishes screen video with optimistic state", async () => {
+    const { engine } = useCallEngine();
+    const calls: Array<{ enabled: boolean; audio: boolean }> = [];
+    (engine as unknown as { room: unknown }).room = {
+      localParticipant: {
+        setScreenShareEnabled: async (enabled: boolean, options?: { audio?: boolean }) => {
+          calls.push({ enabled, audio: options?.audio ?? false });
+        },
+      },
+    };
+    $callScreenShareEnabled.set(false);
+    await toggleScreenShare();
+    expect(calls).toEqual([{ enabled: true, audio: false }]);
+    expect($callScreenShareEnabled.get()).toBe(true);
+    expect($callMediaIssues.get().screen).toBeNull();
+  });
+
+  test("toggleScreenShare picker cancellation rolls back silently", async () => {
+    const { engine } = useCallEngine();
+    (engine as unknown as { room: unknown }).room = {
+      localParticipant: {
+        setScreenShareEnabled: async () => {
+          throw deviceError("NotAllowedError");
+        },
+      },
+    };
+    $callScreenShareEnabled.set(false);
+    await toggleScreenShare();
+    expect($callScreenShareEnabled.get()).toBe(false);
+    expect($callMediaIssues.get().screen).toBeNull();
+  });
+
+  test("toggleScreenShare genuine capture failure rolls back and records a notice", async () => {
+    const { engine } = useCallEngine();
+    (engine as unknown as { room: unknown }).room = {
+      localParticipant: {
+        setScreenShareEnabled: async () => {
+          throw deviceError("NotReadableError");
+        },
+      },
+    };
+    $callScreenShareEnabled.set(false);
+    await toggleScreenShare();
+    expect($callScreenShareEnabled.get()).toBe(false);
+    expect($callMediaIssues.get().screen).toBe("in-use");
+  });
+
+  test("native browser stop syncs the screenshare toggle off through local track unpublish", () => {
+    const { engine } = useCallEngine();
+    $callScreenShareEnabled.set(true);
+    recordMediaIssue("screen", deviceError("NotReadableError"));
+    (
+      engine as unknown as {
+        handleLocalTrackUnpublished: (publication: unknown, participant: unknown) => void;
+      }
+    ).handleLocalTrackUnpublished(
+      {
+        track: {} as unknown,
+        kind: Track.Kind.Video,
+        source: Track.Source.ScreenShare,
+        trackSid: "screen-pub",
+      },
+      { identity: "alice@waddle.test/web" },
+    );
+    expect($callScreenShareEnabled.get()).toBe(false);
+    expect($callMediaIssues.get().screen).toBeNull();
   });
 });

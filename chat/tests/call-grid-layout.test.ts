@@ -1,5 +1,33 @@
 import { describe, expect, test } from "bun:test";
+import { buildCallTiles } from "../src/lib/calls/call-tiles";
+import type { RemoteMediaTrack } from "../src/lib/calls/engine";
 import { selectGridLayout } from "../src/lib/calls/grid-layout";
+
+function remoteVideo(
+  publicationSid: string,
+  source: RemoteMediaTrack["source"],
+): RemoteMediaTrack {
+  return {
+    participantIdentity: "bob@waddle.test/laptop",
+    publicationSid,
+    kind: "video",
+    source,
+    track: {} as RemoteMediaTrack["track"],
+  };
+}
+
+function remoteAudio(
+  publicationSid: string,
+  source: RemoteMediaTrack["source"],
+): RemoteMediaTrack {
+  return {
+    participantIdentity: "bob@waddle.test/laptop",
+    publicationSid,
+    kind: "audio",
+    source,
+    track: {} as RemoteMediaTrack["track"],
+  };
+}
 
 describe("selectGridLayout", () => {
   test("1 tile in any container fits a 1x1 layout", () => {
@@ -72,5 +100,47 @@ describe("selectGridLayout", () => {
     // Tall fits a 3x2 or 3x3; short can no longer fit 3-row layouts,
     // so it must pick something with fewer rows.
     expect(short.rows).toBeLessThanOrEqual(tall.rows);
+  });
+});
+
+describe("buildCallTiles", () => {
+  test("keys one participant's camera and screen share as distinct tiles", () => {
+    const tiles = buildCallTiles({
+      remoteTracks: [
+        remoteVideo("cam-pub", "camera"),
+        remoteVideo("screen-pub", "screen_share"),
+      ],
+      localTracks: [],
+      localIdentity: "alice@waddle.test/web",
+      micEnabled: true,
+    });
+
+    expect(tiles.map((tile) => tile.key)).toEqual([
+      "self:alice@waddle.test/web:camera",
+      "remote:bob@waddle.test/laptop:camera",
+      "remote:bob@waddle.test/laptop:screen_share",
+    ]);
+    expect(tiles.filter((tile) => tile.identity === "bob@waddle.test/laptop")).toHaveLength(2);
+  });
+
+  test("groups microphone audio with camera and screen-share audio with screen", () => {
+    const tiles = buildCallTiles({
+      remoteTracks: [
+        remoteVideo("cam-pub", "camera"),
+        remoteAudio("mic-pub", "microphone"),
+        remoteVideo("screen-pub", "screen_share"),
+        remoteAudio("screen-audio-pub", "screen_share_audio"),
+      ],
+      localTracks: [],
+      localIdentity: null,
+      micEnabled: true,
+    }).filter((tile) => !tile.isSelf);
+
+    expect(tiles.map((tile) => tile.key)).toEqual([
+      "remote:bob@waddle.test/laptop:camera",
+      "remote:bob@waddle.test/laptop:screen_share",
+    ]);
+    expect(tiles[0]?.audioTrack).not.toBeNull();
+    expect(tiles[1]?.audioTrack).not.toBeNull();
   });
 });

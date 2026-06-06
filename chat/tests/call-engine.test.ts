@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
   enableRequestedCapture,
+  mapTrackSource,
   type CallEngineEvents,
   type LocalMediaTrack,
   type RemoteMediaTrack,
 } from "../src/lib/calls/engine";
+import { Track } from "livekit-client";
 
 function deviceError(name: string): Error {
   const err = new Error(`${name} message`);
@@ -31,6 +33,19 @@ function captureStub(opts: { micThrows?: Error; camThrows?: Error } = {}) {
   };
 }
 
+function screenShareStub() {
+  const calls: Array<{ enabled: boolean; audio: boolean }> = [];
+  return {
+    calls,
+    get isScreenShareEnabled() {
+      return calls.at(-1)?.enabled ?? false;
+    },
+    async setScreenShareEnabled(enabled: boolean, options?: { audio?: boolean }) {
+      calls.push({ enabled, audio: options?.audio ?? false });
+    },
+  };
+}
+
 // `livekit-client` reaches for browser-only globals (RTCPeerConnection,
 // MediaStream, navigator.mediaDevices) at construction time. Tests run
 // in bun's node-like env, so we stop at static import + structural
@@ -45,11 +60,13 @@ describe("call-engine module", () => {
     expect(typeof engine.disconnect).toBe("function");
     expect(typeof engine.setMicEnabled).toBe("function");
     expect(typeof engine.setCameraEnabled).toBe("function");
+    expect(typeof engine.setScreenShareEnabled).toBe("function");
     expect(typeof engine.on).toBe("function");
     // `localIdentity` is a getter, so it appears as a value when the
     // class isn't connected (returns null pre-connect). Just check
     // it doesn't throw — anything more requires a live Room.
     expect(engine.localIdentity).toBeNull();
+    expect(engine.screenShareEnabled).toBe(false);
   });
 
   test("on() returns an unsubscribe handle that detaches the listener", async () => {
@@ -145,6 +162,38 @@ describe("call-engine module", () => {
     };
     expect(classify("audio")).toBe("a");
     expect(classify("video")).toBe("v");
+  });
+
+  test("maps every LiveKit publication source into the typed call source union", () => {
+    expect(mapTrackSource(Track.Source.Camera)).toBe("camera");
+    expect(mapTrackSource(Track.Source.Microphone)).toBe("microphone");
+    expect(mapTrackSource(Track.Source.ScreenShare)).toBe("screen_share");
+    expect(mapTrackSource(Track.Source.ScreenShareAudio)).toBe("screen_share_audio");
+    expect(mapTrackSource(Track.Source.Unknown, "video")).toBe("camera");
+    expect(mapTrackSource(Track.Source.Unknown, "audio")).toBe("microphone");
+  });
+
+  test("media track descriptors carry a typed source separate from kind", () => {
+    const remote: Pick<RemoteMediaTrack, "kind" | "source"> = {
+      kind: "video",
+      source: "screen_share",
+    };
+    const local: Pick<LocalMediaTrack, "kind" | "source"> = {
+      kind: "audio",
+      source: "screen_share_audio",
+    };
+    expect(remote.source).toBe("screen_share");
+    expect(local.source).toBe("screen_share_audio");
+  });
+
+  test("setScreenShareEnabled delegates to LiveKit with audio disabled for this slice", async () => {
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine();
+    const participant = screenShareStub();
+    (engine as unknown as { room: unknown }).room = { localParticipant: participant };
+    await engine.setScreenShareEnabled(true, { audio: false });
+    expect(participant.calls).toEqual([{ enabled: true, audio: false }]);
+    expect(engine.screenShareEnabled).toBe(true);
   });
 });
 

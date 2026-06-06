@@ -13,6 +13,10 @@ import {
   clearMediaIssue,
   recordMediaIssue,
 } from "./call-media-issues";
+import {
+  $callScreenShareEnabled,
+  $callScreenShareSupported,
+} from "./screen-share-state";
 
 /**
  * Shared mic / cam / connecting state for the in-call surfaces.
@@ -29,6 +33,14 @@ import {
 export const $callConnecting = atom<boolean>(false);
 export const $callMicEnabled = atom<boolean>(true);
 export const $callCamEnabled = atom<boolean>(true);
+export { $callScreenShareEnabled, $callScreenShareSupported };
+
+function isScreenSharePickerCancel(error: unknown): boolean {
+  return !!error &&
+    typeof error === "object" &&
+    "name" in error &&
+    (error as { name?: unknown }).name === "NotAllowedError";
+}
 
 function getSender(): CallWireSender | null {
   const client = connectionStore.client as unknown as { xmpp?: unknown } | null;
@@ -69,6 +81,20 @@ export async function toggleCam(): Promise<void> {
   } catch (err) {
     $callCamEnabled.set(!next);
     recordMediaIssue("cam", err);
+  }
+}
+
+export async function toggleScreenShare(): Promise<void> {
+  const next = !$callScreenShareEnabled.get();
+  $callScreenShareEnabled.set(next);
+  try {
+    const { engine } = useCallEngine();
+    await engine.setScreenShareEnabled(next, { audio: false });
+    if (!next) clearMediaIssue("screen");
+  } catch (err) {
+    $callScreenShareEnabled.set(!next);
+    if (next && isScreenSharePickerCancel(err)) return;
+    recordMediaIssue("screen", err);
   }
 }
 
@@ -132,6 +158,7 @@ export function installCallPagehideSuspension(windowTarget: PagehideTarget = win
 export function resetCallControls(micEnabled: boolean, camEnabled: boolean): void {
   $callMicEnabled.set(micEnabled);
   $callCamEnabled.set(camEnabled);
+  $callScreenShareEnabled.set(false);
   clearAllMediaIssues();
 }
 
@@ -145,9 +172,11 @@ export function resetCallControls(micEnabled: boolean, camEnabled: boolean): voi
 export function seedCallControlsFromEngine(engine: {
   micEnabled: boolean;
   cameraEnabled: boolean;
+  screenShareEnabled?: boolean;
 }): void {
   $callMicEnabled.set(engine.micEnabled);
   $callCamEnabled.set(engine.cameraEnabled);
+  $callScreenShareEnabled.set(engine.screenShareEnabled ?? false);
 }
 
 /** Read the live call's peer label (`#room` for MUC, localpart for DM). */

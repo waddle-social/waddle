@@ -9,6 +9,7 @@ import {
   setLiveCallParticipants,
 } from "./muc-call-live-participants";
 import { clearAllMediaIssues, recordMediaIssue } from "./call-media-issues";
+import { syncScreenShareEnabled } from "./screen-share-state";
 
 /**
  * Process-wide singleton: only one call engine should ever exist
@@ -45,11 +46,13 @@ export function useCallEngine(): {
     });
     singletonEngine.on("localTrackPublished", (track) => {
       localTracks.value = [...localTracks.value, track];
+      if (track.source === "screen_share") syncScreenShareEnabled(true);
     });
     singletonEngine.on("localTrackUnpublished", (track) => {
       localTracks.value = localTracks.value.filter(
         (existing) => existing.publicationSid !== track.publicationSid,
       );
+      if (track.source === "screen_share") syncScreenShareEnabled(false);
     });
     singletonEngine.on("connected", ({ localIdentity, remoteIdentities }) => {
       // Seed the LK-truth projection for the active MUC room with
@@ -82,6 +85,7 @@ export function useCallEngine(): {
     singletonEngine.on("disconnected", () => {
       remoteTracks.value = [];
       localTracks.value = [];
+      syncScreenShareEnabled(false);
       // Drop any "joined without mic/camera" notice — it belongs to the
       // call that just ended, not the next one.
       clearAllMediaIssues();

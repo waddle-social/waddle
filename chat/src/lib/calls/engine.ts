@@ -22,6 +22,7 @@ export type RemoteMediaTrack = {
   participantIdentity: string;
   publicationSid: string;
   kind: "audio" | "video";
+  source: CallTrackSource;
   track: RemoteTrack;
 };
 
@@ -39,8 +40,15 @@ export type LocalMediaTrack = {
   participantIdentity: string;
   publicationSid: string;
   kind: "audio" | "video";
+  source: CallTrackSource;
   track: LocalTrack;
 };
+
+export type CallTrackSource =
+  | "camera"
+  | "microphone"
+  | "screen_share"
+  | "screen_share_audio";
 
 export type CallEngineEvents = {
   trackSubscribed: (track: RemoteMediaTrack) => void;
@@ -130,6 +138,10 @@ export class CallEngine {
     return this.room?.localParticipant.isCameraEnabled ?? false;
   }
 
+  get screenShareEnabled(): boolean {
+    return this.room?.localParticipant.isScreenShareEnabled ?? false;
+  }
+
   async connect(join: LiveKitJoin, opts: { audio: boolean; video: boolean }): Promise<void> {
     if (this.room) throw new Error("CallEngine already connected");
     // Defensive pre-flight: confirm the JWT actually carries a usable
@@ -211,6 +223,16 @@ export class CallEngine {
   async setCameraEnabled(enabled: boolean): Promise<void> {
     if (!this.room) return;
     await this.room.localParticipant.setCameraEnabled(enabled);
+  }
+
+  async setScreenShareEnabled(
+    enabled: boolean,
+    opts: { audio: boolean },
+  ): Promise<void> {
+    if (!this.room) return;
+    await this.room.localParticipant.setScreenShareEnabled(enabled, {
+      audio: opts.audio,
+    });
   }
 
   /**
@@ -298,6 +320,7 @@ export class CallEngine {
       participantIdentity: participant.identity,
       publicationSid: publication.trackSid,
       kind,
+      source: mapTrackSource(publication.source, kind),
       track,
     });
   };
@@ -313,6 +336,7 @@ export class CallEngine {
       participantIdentity: participant.identity,
       publicationSid: publication.trackSid,
       kind,
+      source: mapTrackSource(publication.source, kind),
       track,
     });
   };
@@ -328,6 +352,7 @@ export class CallEngine {
       participantIdentity: participant.identity,
       publicationSid: publication.trackSid,
       kind,
+      source: mapTrackSource(publication.source, kind),
       track,
     });
   };
@@ -343,6 +368,7 @@ export class CallEngine {
       participantIdentity: participant.identity,
       publicationSid: publication.trackSid,
       kind,
+      source: mapTrackSource(publication.source, kind),
       track,
     });
   };
@@ -364,6 +390,16 @@ function mapKind(kind: Track.Kind): "audio" | "video" | null {
   if (kind === Track.Kind.Audio) return "audio";
   if (kind === Track.Kind.Video) return "video";
   return null;
+}
+
+export function mapTrackSource(
+  source: Track.Source,
+  fallbackKind: "audio" | "video" = "video",
+): CallTrackSource {
+  if (source === Track.Source.Microphone) return "microphone";
+  if (source === Track.Source.ScreenShare) return "screen_share";
+  if (source === Track.Source.ScreenShareAudio) return "screen_share_audio";
+  return fallbackKind === "audio" ? "microphone" : "camera";
 }
 
 /**

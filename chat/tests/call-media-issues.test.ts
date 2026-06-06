@@ -62,6 +62,7 @@ describe("mediaIssueMessage (notice copy)", () => {
   test("is kind-specific", () => {
     expect(mediaIssueMessage("mic", "missing")).toContain("microphone");
     expect(mediaIssueMessage("cam", "missing")).toContain("camera");
+    expect(mediaIssueMessage("screen", "failed")).toContain("screen sharing");
     expect(mediaIssueMessage("mic", "denied")).toContain("listener");
   });
 });
@@ -69,19 +70,27 @@ describe("mediaIssueMessage (notice copy)", () => {
 describe("$callMediaIssues store", () => {
   test("record/clear a single kind without touching the other", () => {
     recordMediaIssue("mic", domError("NotFoundError"));
-    expect($callMediaIssues.get()).toEqual({ mic: "missing", cam: null });
+    expect($callMediaIssues.get()).toEqual({ mic: "missing", cam: null, screen: null });
 
     recordMediaIssue("cam", domError("NotAllowedError"));
-    expect($callMediaIssues.get()).toEqual({ mic: "missing", cam: "denied" });
+    expect($callMediaIssues.get()).toEqual({ mic: "missing", cam: "denied", screen: null });
+
+    recordMediaIssue("screen", domError("NotReadableError"));
+    expect($callMediaIssues.get()).toEqual({
+      mic: "missing",
+      cam: "denied",
+      screen: "in-use",
+    });
 
     clearMediaIssue("mic");
-    expect($callMediaIssues.get()).toEqual({ mic: null, cam: "denied" });
+    expect($callMediaIssues.get()).toEqual({ mic: null, cam: "denied", screen: "in-use" });
   });
 
-  test("clearAllMediaIssues resets both kinds", () => {
+  test("clearAllMediaIssues resets every kind", () => {
     recordMediaIssue("mic", domError("NotReadableError"));
     recordMediaIssue("cam", domError("NotFoundError"));
+    recordMediaIssue("screen", domError("AbortError"));
     clearAllMediaIssues();
-    expect($callMediaIssues.get()).toEqual({ mic: null, cam: null });
+    expect($callMediaIssues.get()).toEqual({ mic: null, cam: null, screen: null });
   });
 });
