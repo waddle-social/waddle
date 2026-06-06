@@ -40,6 +40,7 @@ export type { Story, StoryPostInput, StoryReactionItem, StoryReactionSummary } f
 export {
   isStoryActive,
   normalizeStoryReactions,
+  STORIES_NODE,
   STORY_REACTIONS_MAX,
   STORY_REACTIONS_SUMMARY_NODE,
 } from "./story-types";

@@ -14,6 +14,7 @@ import { computed, onScopeDispose, ref, watch, type Ref } from "vue";
 import {
   isStoryActive,
   normalizeStoryReactions,
+  STORIES_NODE,
   STORY_REACTIONS_MAX,
   STORY_REACTIONS_SUMMARY_NODE,
   type BrowserXmppClient,
@@ -107,6 +108,7 @@ export function useStories(
       stories.value = fetched;
       const mutationVersions = new Map(reactionMutationVersionsByStory);
       const liveSummaryVersions = new Map(liveSummaryVersionsByStory);
+      await client.subscribeStories?.(jid);
       await client.subscribeStoryReactionSummaries?.(jid);
       await refreshReactionSummariesFor(fetched, client, jid, requestId, mutationVersions, liveSummaryVersions);
       if (!readStore.loaded()) {
@@ -256,10 +258,15 @@ export function useStories(
   }
 
   function applyPubsubEvent(event: PubsubEvent): void {
-    if (event.node !== STORY_REACTIONS_SUMMARY_NODE) return;
     const communityJid = options.communityJid.value?.toLowerCase();
     const eventFrom = event.from?.split("/", 1)[0]?.toLowerCase();
     if (!communityJid || eventFrom !== communityJid) return;
+    if (event.node === STORIES_NODE) {
+      applyStoryRetracts(event);
+      return;
+    }
+    if (event.node !== STORY_REACTIONS_SUMMARY_NODE) return;
+    applySummaryRetracts(event);
     const updates: Record<string, StoryReactionSummary> = {};
     for (const item of event.items) {
       if (!item.id || item.payload.kind !== "attachmentSummary") continue;
@@ -302,6 +309,33 @@ export function useStories(
     }
     if (Object.keys(updates).length === 0) return;
     reactionSummariesByStory.value = { ...reactionSummariesByStory.value, ...updates };
+  }
+
+  function applyStoryRetracts(event: PubsubEvent): void {
+    const retractedStoryIds = new Set(event.items
+      .filter((item) => item.retracted && item.id)
+      .map((item) => item.id as string));
+    if (retractedStoryIds.size === 0) return;
+    stories.value = stories.value.filter((story) => !retractedStoryIds.has(story.id));
+    clearReactionStateForStories(retractedStoryIds);
+  }
+
+  function applySummaryRetracts(event: PubsubEvent): void {
+    const retractedStoryIds = new Set(event.items
+      .filter((item) => item.retracted && item.id)
+      .map((item) => item.id as string));
+    if (retractedStoryIds.size === 0) return;
+    clearReactionStateForStories(retractedStoryIds);
+  }
+
+  function clearReactionStateForStories(storyIds: ReadonlySet<string>): void {
+    reactionsByStory.value = omitStoryIds(reactionsByStory.value, storyIds);
+    reactionSummariesByStory.value = omitStoryIds(reactionSummariesByStory.value, storyIds);
+    for (const storyId of storyIds) {
+      reactionMutationVersionsByStory.delete(storyId);
+      pendingReactionMutationVersionsByStory.delete(storyId);
+      liveSummaryVersionsByStory.delete(storyId);
+    }
   }
 
   async function toggleReaction(storyId: string, emoji: string): Promise<boolean> {
@@ -403,4 +437,17 @@ function optimisticSummary(
     counts[emoji] = (counts[emoji] ?? 0) + 1;
   }
   return { ...previous, counts, mine: nextMine };
+}
+
+function omitStoryIds<T>(records: Record<string, T>, storyIds: ReadonlySet<string>): Record<string, T> {
+  let changed = false;
+  const next: Record<string, T> = {};
+  for (const [storyId, value] of Object.entries(records)) {
+    if (storyIds.has(storyId)) {
+      changed = true;
+      continue;
+    }
+    next[storyId] = value;
+  }
+  return changed ? next : records;
 }

@@ -89,6 +89,7 @@ import {
 import {
   NS_PUBSUB_ATTACHMENTS,
   NS_PUBSUB_ATTACHMENTS_SUMMARY,
+  STORIES_NODE,
   STORY_REACTIONS_SUMMARY_NODE,
   normalizeStoryReactions,
   storyAttachmentNode,
@@ -1966,6 +1967,18 @@ export class BrowserXmppClient {
     try {
       await xmpp.send_raw_iq(
         `<iq type="set" id="${crypto.randomUUID()}" to="${escapeXml(communityJid)}"><pubsub xmlns="${NS_PUBSUB}"><subscribe node="${escapeXml(STORY_REACTIONS_SUMMARY_NODE)}" jid="${escapeXml(barePeerJid(this.session.jid))}"/></pubsub></iq>`,
+      );
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  async subscribeStories(communityJid: string): Promise<void> {
+    const xmpp = await this.requireConnectedXmpp();
+    if (typeof xmpp.send_raw_iq !== "function") return;
+    try {
+      await xmpp.send_raw_iq(
+        `<iq type="set" id="${crypto.randomUUID()}" to="${escapeXml(communityJid)}"><pubsub xmlns="${NS_PUBSUB}"><subscribe node="${escapeXml(STORIES_NODE)}" jid="${escapeXml(barePeerJid(this.session.jid))}"/></pubsub></iq>`,
       );
     } catch {
       /* best-effort */

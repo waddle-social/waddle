@@ -38,6 +38,7 @@ export interface StoryReactionSummary {
 
 export const NS_PUBSUB_ATTACHMENTS = "urn:xmpp:pubsub-attachments:1";
 export const NS_PUBSUB_ATTACHMENTS_SUMMARY = "urn:xmpp:pubsub-attachments:summary:1";
+export const STORIES_NODE = "urn:xmpp:stories:0";
 export const STORY_REACTIONS_SUMMARY_NODE = `${NS_PUBSUB_ATTACHMENTS_SUMMARY}/urn:xmpp:stories:0`;
 export const STORY_REACTIONS_MAX = 12;
 
@@ -79,7 +80,7 @@ export function isStoryActive(story: Story, nowMs: number = Date.now()): boolean
 }
 
 export function storyAttachmentNode(communityJid: string, storyId: string): string {
-  return `${NS_PUBSUB_ATTACHMENTS}/xmpp:${communityJid}?;node=${encodeURIComponent("urn:xmpp:stories:0")};item=${encodeURIComponent(storyId)}`;
+  return `${NS_PUBSUB_ATTACHMENTS}/xmpp:${communityJid}?;node=${encodeURIComponent(STORIES_NODE)};item=${encodeURIComponent(storyId)}`;
 }
 
 export function normalizeStoryReactions(emojis: Iterable<string>): string[] {

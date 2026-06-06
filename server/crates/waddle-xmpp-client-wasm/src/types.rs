@@ -77,7 +77,13 @@ pub struct WaddlePubsubEvent {
 #[derive(Debug, Serialize)]
 pub struct WaddlePubsubEventItem {
     pub id: Option<String>,
+    #[serde(skip_serializing_if = "is_false")]
+    pub retracted: bool,
     pub payload: WaddlePubsubEventPayload,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Serialize)]

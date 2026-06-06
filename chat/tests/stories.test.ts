@@ -13,6 +13,7 @@ type MockClient = BrowserXmppClient & {
   fetchStoryReactionSummary: ReturnType<typeof mock>;
   publishStoryReactions: ReturnType<typeof mock>;
   retractStoryReactions: ReturnType<typeof mock>;
+  subscribeStories: ReturnType<typeof mock>;
   subscribeStoryReactionSummaries: ReturnType<typeof mock>;
   setPubsubEventHandler: ReturnType<typeof mock>;
   addPubsubEventHandler: ReturnType<typeof mock>;
@@ -38,6 +39,7 @@ function makeClient(stories: Story[] = []): MockClient {
     ),
     publishStoryReactions: mock(() => Promise.resolve()),
     retractStoryReactions: mock(() => Promise.resolve()),
+    subscribeStories: mock(() => Promise.resolve()),
     subscribeStoryReactionSummaries: mock(() => Promise.resolve()),
     setPubsubEventHandler: mock((handler: ((event: PubsubEvent) => void) | null) => {
       pubsubEventHandlers.clear();
@@ -168,6 +170,7 @@ describe("useStories", () => {
     await story.refresh();
 
     expect(client.fetchStoryReactionSummary).toHaveBeenCalledWith(COMMUNITY, "s1");
+    expect(client.subscribeStories).toHaveBeenCalledWith(COMMUNITY);
     expect(client.subscribeStoryReactionSummaries).toHaveBeenCalledWith(COMMUNITY);
     expect(client.fetchStoryReactions).not.toHaveBeenCalled();
     expect(story.reactionSummary("s1")).toEqual({
@@ -211,6 +214,52 @@ describe("useStories", () => {
       items: [{ id: "s1", payload: { kind: "opaque", xml: "<future/>" } }],
     });
     expect(story.reactionSummary("s1").counts).toEqual({ "🎉": 4 });
+  });
+
+  test("typed story retract pubsub event removes the story and its reactions", async () => {
+    const client = makeClient([{ id: "s1", body: "story", postedMs: 1 }]);
+    const story = withScope(() =>
+      useStories(ref<BrowserXmppClient | null>(client), { communityJid: ref<string | null>(COMMUNITY) }),
+    );
+    await story.refresh();
+    expect(story.activeStories.value.map((item) => item.id)).toEqual(["s1"]);
+    expect(story.reactionSummary("s1").counts).toEqual({ "👍": 1, "❤️": 1 });
+
+    client.emitPubsubEvent({
+      from: COMMUNITY,
+      node: "urn:xmpp:stories:0",
+      items: [{
+        id: "s1",
+        retracted: true,
+        payload: { kind: "empty" },
+      }],
+    });
+
+    expect(story.activeStories.value).toEqual([]);
+    expect(story.reactionSummary("s1")).toEqual({ counts: {}, reactors: {}, mine: [] });
+  });
+
+  test("typed summary retract pubsub event removes reaction state", async () => {
+    const client = makeClient([{ id: "s1", body: "story", postedMs: 1 }]);
+    const story = withScope(() =>
+      useStories(ref<BrowserXmppClient | null>(client), { communityJid: ref<string | null>(COMMUNITY) }),
+    );
+    await story.refresh();
+    expect(story.activeStories.value.map((item) => item.id)).toEqual(["s1"]);
+    expect(story.reactionSummary("s1").counts).toEqual({ "👍": 1, "❤️": 1 });
+
+    client.emitPubsubEvent({
+      from: COMMUNITY,
+      node: "urn:xmpp:pubsub-attachments:summary:1/urn:xmpp:stories:0",
+      items: [{
+        id: "s1",
+        retracted: true,
+        payload: { kind: "empty" },
+      }],
+    });
+
+    expect(story.activeStories.value.map((item) => item.id)).toEqual(["s1"]);
+    expect(story.reactionSummary("s1")).toEqual({ counts: {}, reactors: {}, mine: [] });
   });
 
   test("typed summary pubsub event preserves pending optimistic self reactions", async () => {
