@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, reactive } from "vue";
 import { useStore } from "@nanostores/vue";
-import { MicOff, VideoOff, X } from "lucide-vue-next";
+import { MonitorUp, MicOff, VideoOff, X } from "lucide-vue-next";
 import {
   $callMediaIssues,
   clearMediaIssue,
@@ -9,7 +9,7 @@ import {
   type MediaIssueReason,
   type MediaKind,
 } from "@/lib/calls/call-media-issues";
-import { toggleCam, toggleMic } from "@/lib/calls/call-controls";
+import { toggleCam, toggleMic, toggleScreenShare } from "@/lib/calls/call-controls";
 
 /**
  * Non-blocking, info-toned notice shown inside the call surfaces when
@@ -28,7 +28,11 @@ const issues = useStore($callMediaIssues);
 // feedback — without it a retry that fails again (e.g. a denied
 // permission the browser won't re-prompt) re-records the SAME reason,
 // the message text is byte-identical, and the button looks inert.
-const retrying = reactive<Record<MediaKind, boolean>>({ mic: false, cam: false });
+const retrying = reactive<Record<MediaKind, boolean>>({
+  mic: false,
+  cam: false,
+  screen: false,
+});
 
 type NoticeRow = {
   kind: MediaKind;
@@ -46,6 +50,14 @@ const rows = computed<NoticeRow[]>(() => {
   if (cam) {
     out.push({ kind: "cam", reason: cam, message: mediaIssueMessage("cam", cam), actionLabel: "Turn on camera" });
   }
+  if (issues.value.screen) {
+    out.push({
+      kind: "screen",
+      reason: issues.value.screen,
+      message: mediaIssueMessage("screen", issues.value.screen),
+      actionLabel: "Share screen",
+    });
+  }
   return out;
 });
 
@@ -56,7 +68,9 @@ async function retry(kind: MediaKind): Promise<void> {
     // toggleMic/toggleCam double as the capture-retry path: from the
     // muted state they attempt to publish again, clearing the issue on
     // success or re-recording it on failure.
-    await (kind === "mic" ? toggleMic() : toggleCam());
+    if (kind === "mic") await toggleMic();
+    else if (kind === "cam") await toggleCam();
+    else await toggleScreenShare();
   } finally {
     retrying[kind] = false;
   }
@@ -71,7 +85,7 @@ function dismiss(kind: MediaKind): void {
   <div v-if="rows.length" class="call-media-notice" role="status" aria-live="polite">
     <div v-for="row in rows" :key="row.kind" class="call-media-notice__row">
       <component
-        :is="row.kind === 'mic' ? MicOff : VideoOff"
+        :is="row.kind === 'mic' ? MicOff : row.kind === 'cam' ? VideoOff : MonitorUp"
         class="call-media-notice__icon"
         aria-hidden="true"
       />
@@ -87,7 +101,7 @@ function dismiss(kind: MediaKind): void {
       <button
         type="button"
         class="call-media-notice__dismiss"
-        :aria-label="`Dismiss ${row.kind === 'mic' ? 'microphone' : 'camera'} notice`"
+        :aria-label="`Dismiss ${row.kind === 'mic' ? 'microphone' : row.kind === 'cam' ? 'camera' : 'screen sharing'} notice`"
         @click="dismiss(row.kind)"
       >
         <X class="h-3.5 w-3.5" aria-hidden="true" />

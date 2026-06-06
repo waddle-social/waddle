@@ -10,10 +10,14 @@ import {
   $callConnecting,
   $callMicEnabled,
   $callCamEnabled,
+  $callScreenShareEnabled,
+  $callScreenShareSupported,
   hangupActiveCall,
   peerLabelFromState,
+  refreshScreenShareSupported,
   toggleCam,
   toggleMic,
+  toggleScreenShare,
 } from "@/lib/calls/call-controls";
 import { useCallEngine } from "@/lib/calls/use-call-engine";
 import { useActiveMucCall } from "@/lib/calls/use-active-muc-call";
@@ -51,6 +55,8 @@ const lastError = useStore($lastCallError);
 const connecting = useStore($callConnecting);
 const micEnabled = useStore($callMicEnabled);
 const camEnabled = useStore($callCamEnabled);
+const screenShareEnabled = useStore($callScreenShareEnabled);
+const screenShareSupported = useStore($callScreenShareSupported);
 const { remoteTracks, localTracks, engine } = useCallEngine();
 const { activeRoomJid, selfInCall } = useActiveMucCall();
 
@@ -136,6 +142,7 @@ function onKeydown(event: KeyboardEvent): void {
 }
 
 onMounted(() => {
+  refreshScreenShareSupported();
   if (typeof window !== "undefined") {
     window.addEventListener("keydown", onKeydown);
   }
@@ -181,9 +188,12 @@ onBeforeUnmount(() => {
       <CallControls
         :mic-enabled="micEnabled"
         :cam-enabled="camEnabled"
+        :screen-share-enabled="screenShareEnabled"
+        :screen-share-supported="screenShareSupported"
         :is-expanded="true"
         @toggle-mic="toggleMic"
         @toggle-cam="toggleCam"
+        @toggle-screen-share="toggleScreenShare"
         @toggle-expanded="collapseToSplit"
         @open-settings="settingsOpen = true"
         @hangup="onHangup"

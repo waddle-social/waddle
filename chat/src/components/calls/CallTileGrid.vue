@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, ref, watch } from "vue";
 import type { LocalMediaTrack, RemoteMediaTrack } from "@/lib/calls/engine";
 import { TileAttachments, type TileAttachable } from "@/lib/calls/tile-attach";
 import { selectGridLayout } from "@/lib/calls/grid-layout";
+import { buildCallTiles, type CallTileModel } from "@/lib/calls/call-tiles";
 import CallTile from "./CallTile.vue";
 
 /**
@@ -31,15 +32,7 @@ import CallTile from "./CallTile.vue";
  * as a separate branch inside this template — same algorithm doesn't
  * apply, since the layout is "1 big + N small", not "N equal".
  */
-type Tile = {
-  key: string;
-  identity: string;
-  label: string;
-  isSelf: boolean;
-  micEnabledHint: boolean;
-  videoTrack: TileAttachable | null;
-  audioTrack: TileAttachable | null;
-};
+type Tile = CallTileModel;
 
 const props = defineProps<{
   remoteTracks: RemoteMediaTrack[];
@@ -50,60 +43,13 @@ const props = defineProps<{
   micEnabled: boolean;
 }>();
 
-function displayNameForIdentity(identity: string): string {
-  const at = identity.indexOf("@");
-  if (at <= 0) return identity;
-  return identity.slice(0, at);
-}
-
 const tiles = computed<Tile[]>(() => {
-  const byIdentity = new Map<string, Tile>();
-  // Local participant always anchors the grid so the user sees a
-  // self-preview pre-publish ("yes, the call is alive"). Prefer the
-  // first local track's identity over `props.localIdentity` because
-  // the parent reads the latter from a non-reactive getter that may
-  // be null on the first render — without this fallback the local
-  // user would briefly appear under a generic "you" key and then
-  // duplicate when the real identity arrives.
-  const selfId =
-    props.localTracks[0]?.participantIdentity ?? props.localIdentity ?? "you";
-  byIdentity.set(selfId, {
-    key: `self:${selfId}`,
-    identity: selfId,
-    label: "You",
-    isSelf: true,
-    micEnabledHint: props.micEnabled,
-    videoTrack: null,
-    audioTrack: null,
+  return buildCallTiles({
+    remoteTracks: props.remoteTracks,
+    localTracks: props.localTracks,
+    localIdentity: props.localIdentity,
+    micEnabled: props.micEnabled,
   });
-  for (const local of props.localTracks) {
-    const existing = byIdentity.get(local.participantIdentity) ?? {
-      key: `self:${local.participantIdentity}`,
-      identity: local.participantIdentity,
-      label: "You",
-      isSelf: true,
-      micEnabledHint: props.micEnabled,
-      videoTrack: null,
-      audioTrack: null,
-    };
-    if (local.kind === "video") existing.videoTrack = local.track;
-    byIdentity.set(local.participantIdentity, existing);
-  }
-  for (const remote of props.remoteTracks) {
-    const existing = byIdentity.get(remote.participantIdentity) ?? {
-      key: `remote:${remote.participantIdentity}`,
-      identity: remote.participantIdentity,
-      label: displayNameForIdentity(remote.participantIdentity),
-      isSelf: false,
-      micEnabledHint: true,
-      videoTrack: null,
-      audioTrack: null,
-    };
-    if (remote.kind === "video") existing.videoTrack = remote.track;
-    if (remote.kind === "audio") existing.audioTrack = remote.track;
-    byIdentity.set(remote.participantIdentity, existing);
-  }
-  return Array.from(byIdentity.values());
 });
 
 const focusedKey = ref<string | null>(null);
@@ -201,6 +147,7 @@ const gridStyle = computed(() => ({
           :label="focusedTile.label"
           :attach-key="focusedTile.key"
           :is-self="focusedTile.isSelf"
+          :mirror-video="focusedTile.mirrorVideo"
           :mic-enabled="focusedTile.micEnabledHint"
           :video-track="focusedTile.videoTrack"
           :audio-track="focusedTile.audioTrack"
@@ -216,6 +163,7 @@ const gridStyle = computed(() => ({
           :label="tile.label"
           :attach-key="tile.key"
           :is-self="tile.isSelf"
+          :mirror-video="tile.mirrorVideo"
           :mic-enabled="tile.micEnabledHint"
           :video-track="tile.videoTrack"
           :audio-track="tile.audioTrack"
@@ -242,6 +190,7 @@ const gridStyle = computed(() => ({
         :label="tile.label"
         :attach-key="tile.key"
         :is-self="tile.isSelf"
+        :mirror-video="tile.mirrorVideo"
         :mic-enabled="tile.micEnabledHint"
         :video-track="tile.videoTrack"
         :audio-track="tile.audioTrack"

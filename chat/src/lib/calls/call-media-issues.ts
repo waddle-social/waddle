@@ -15,11 +15,12 @@ import { atom } from "nanostores";
  */
 export type MediaIssueReason = "denied" | "missing" | "in-use" | "failed";
 
-export type MediaKind = "mic" | "cam";
+export type MediaKind = "mic" | "cam" | "screen";
 
 type CallMediaIssues = {
   mic: MediaIssueReason | null;
   cam: MediaIssueReason | null;
+  screen: MediaIssueReason | null;
 };
 
 /**
@@ -29,7 +30,11 @@ type CallMediaIssues = {
  * toggle) fails; cleared when the kind successfully (re)publishes or
  * when the call ends.
  */
-export const $callMediaIssues = atom<CallMediaIssues>({ mic: null, cam: null });
+export const $callMediaIssues = atom<CallMediaIssues>({
+  mic: null,
+  cam: null,
+  screen: null,
+});
 
 /**
  * Read the `name` of a `getUserMedia` / LiveKit capture rejection.
@@ -97,9 +102,18 @@ const CAM_COPY: Record<MediaIssueReason, string> = {
   failed: "Couldn't start your camera — you joined without video.",
 };
 
+const SCREEN_COPY: Record<MediaIssueReason, string> = {
+  denied: "Screen sharing was blocked. Allow access in your browser, then share again.",
+  missing: "No screen capture source was available.",
+  "in-use": "Couldn't start screen sharing. Try a different window or tab.",
+  failed: "Couldn't start screen sharing.",
+};
+
 /** Human-facing copy for a recorded issue, shown in the notice banner. */
 export function mediaIssueMessage(kind: MediaKind, reason: MediaIssueReason): string {
-  return (kind === "mic" ? MIC_COPY : CAM_COPY)[reason];
+  if (kind === "mic") return MIC_COPY[reason];
+  if (kind === "cam") return CAM_COPY[reason];
+  return SCREEN_COPY[reason];
 }
 
 const GENERIC_MEDIA_COPY: Readonly<Record<MediaIssueReason, string>> = {
@@ -137,6 +151,6 @@ export function clearMediaIssue(kind: MediaKind): void {
 /** Drop all recorded issues — used at call start and on disconnect. */
 export function clearAllMediaIssues(): void {
   const current = $callMediaIssues.get();
-  if (current.mic === null && current.cam === null) return;
-  $callMediaIssues.set({ mic: null, cam: null });
+  if (current.mic === null && current.cam === null && current.screen === null) return;
+  $callMediaIssues.set({ mic: null, cam: null, screen: null });
 }
