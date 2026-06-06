@@ -3,7 +3,8 @@ import { computed, onBeforeUnmount, ref, watch } from "vue";
 import type { LocalMediaTrack, RemoteMediaTrack } from "@/lib/calls/engine";
 import { TileAttachments, type TileAttachable } from "@/lib/calls/tile-attach";
 import { selectGridLayout } from "@/lib/calls/grid-layout";
-import { buildCallTiles, type CallTileModel } from "@/lib/calls/call-tiles";
+import type { CallTileModel } from "@/lib/calls/call-tiles";
+import { projectCallTiles, reconcileCallTileProjectionState } from "@/lib/calls/call-tile-projection";
 import CallTile from "./CallTile.vue";
 
 /**
@@ -43,19 +44,40 @@ const props = defineProps<{
   micEnabled: boolean;
 }>();
 
-const tiles = computed<Tile[]>(() => {
-  return buildCallTiles({
+const seenRemoteScreenTrackKeys = ref<ReadonlySet<string>>(new Set());
+const manualFocusKey = ref<string | null>(null);
+
+const projection = computed(() => {
+  return projectCallTiles({
     remoteTracks: props.remoteTracks,
     localTracks: props.localTracks,
     localIdentity: props.localIdentity,
     micEnabled: props.micEnabled,
+    seenRemoteScreenTrackKeys: seenRemoteScreenTrackKeys.value,
+    manualFocusKey: manualFocusKey.value,
   });
 });
 
-const focusedKey = ref<string | null>(null);
+watch(projection, (next) => {
+  const reconciled = reconcileCallTileProjectionState({
+    tiles: next.tiles,
+    manualFocusKey: manualFocusKey.value,
+    currentSeenRemoteScreenTrackKeys: seenRemoteScreenTrackKeys.value,
+    nextSeenRemoteScreenTrackKeys: next.seenRemoteScreenTrackKeys,
+  });
+  if (seenRemoteScreenTrackKeys.value !== reconciled.seenRemoteScreenTrackKeys) {
+    seenRemoteScreenTrackKeys.value = reconciled.seenRemoteScreenTrackKeys;
+  }
+  if (manualFocusKey.value !== reconciled.manualFocusKey) {
+    manualFocusKey.value = reconciled.manualFocusKey;
+  }
+}, { immediate: true });
+
+const tiles = computed<Tile[]>(() => projection.value.tiles);
 const focusedTile = computed<Tile | null>(() => {
-  if (!focusedKey.value) return null;
-  return tiles.value.find((t) => t.key === focusedKey.value) ?? null;
+  const spotlightKey = projection.value.spotlightKey;
+  if (!spotlightKey) return null;
+  return tiles.value.find((t) => t.key === spotlightKey) ?? null;
 });
 const otherTiles = computed<Tile[]>(() => {
   if (!focusedTile.value) return [];
@@ -63,7 +85,7 @@ const otherTiles = computed<Tile[]>(() => {
 });
 
 function toggleFocus(tile: Tile): void {
-  focusedKey.value = focusedKey.value === tile.key ? null : tile.key;
+  manualFocusKey.value = manualFocusKey.value === tile.key ? null : tile.key;
 }
 
 // One `TileAttachments` per grid instance — reconciles (element,

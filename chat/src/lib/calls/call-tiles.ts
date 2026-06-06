@@ -8,6 +8,7 @@ export type CallTileModel = {
   identity: string;
   label: string;
   source: TileSource;
+  screenTrackKey: string | null;
   isSelf: boolean;
   mirrorVideo: boolean;
   showsPresentingGlyph: boolean;
@@ -56,6 +57,7 @@ function newTile(
     identity,
     label: labelFor(identity, isSelf, source),
     source,
+    screenTrackKey: null,
     isSelf,
     mirrorVideo: isSelf && source === "camera",
     showsPresentingGlyph: source === "screen_share",
@@ -74,7 +76,10 @@ export function buildCallTiles(input: BuildCallTilesInput): CallTileModel[] {
     const source = tileSourceForTrack(local.source);
     const key = callTileKey("self", local.participantIdentity, source);
     const existing = byKey.get(key) ?? newTile("self", local.participantIdentity, source, input.micEnabled);
-    if (local.kind === "video") existing.videoTrack = local.track;
+    if (local.kind === "video") {
+      existing.videoTrack = local.track;
+      if (source === "screen_share") existing.screenTrackKey = local.publicationSid;
+    }
     if (local.kind === "audio") existing.audioTrack = local.track;
     byKey.set(key, existing);
   }
@@ -83,7 +88,10 @@ export function buildCallTiles(input: BuildCallTilesInput): CallTileModel[] {
     const source = tileSourceForTrack(remote.source);
     const key = callTileKey("remote", remote.participantIdentity, source);
     const existing = byKey.get(key) ?? newTile("remote", remote.participantIdentity, source, input.micEnabled);
-    if (remote.kind === "video") existing.videoTrack = remote.track;
+    if (remote.kind === "video") {
+      existing.videoTrack = remote.track;
+      if (source === "screen_share") existing.screenTrackKey = remote.publicationSid;
+    }
     if (remote.kind === "audio") existing.audioTrack = remote.track;
     byKey.set(key, existing);
   }
