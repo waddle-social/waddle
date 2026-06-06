@@ -229,6 +229,7 @@ pub(crate) fn pubsub_event_to_js(event: waddle_xmpp_client::PubsubEvent) -> Wadd
             .into_iter()
             .map(|item| WaddlePubsubEventItem {
                 id: item.id,
+                retracted: item.retracted,
                 payload: pubsub_payload_to_js(item.payload),
             })
             .collect(),
@@ -811,6 +812,7 @@ mod inbound_to_js_tests {
             items: vec![
                 waddle_xmpp_client::PubsubEventItem {
                     id: Some("story-1".to_string()),
+                    retracted: false,
                     payload: waddle_xmpp_client::PubsubEventPayload::AttachmentSummary(
                         waddle_xmpp_client::AttachmentSummaryEvent {
                             reactions: vec![waddle_xmpp_client::ReactionSummaryEvent {
@@ -826,6 +828,7 @@ mod inbound_to_js_tests {
                 },
                 waddle_xmpp_client::PubsubEventItem {
                     id: Some("future".to_string()),
+                    retracted: false,
                     payload: waddle_xmpp_client::PubsubEventPayload::Opaque {
                         element: Element::builder("future", "urn:example:future")
                             .append("payload")
@@ -834,6 +837,7 @@ mod inbound_to_js_tests {
                 },
                 waddle_xmpp_client::PubsubEventItem {
                     id: Some("empty".to_string()),
+                    retracted: true,
                     payload: waddle_xmpp_client::PubsubEventPayload::Empty,
                 },
             ],
@@ -880,6 +884,12 @@ mod inbound_to_js_tests {
             .and_then(serde_json::Value::as_str)
             .expect("opaque xml");
         assert!(opaque_xml.contains("urn:example:future"), "{opaque_xml}");
+        assert_eq!(
+            items[2]
+                .get("retracted")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
         assert_eq!(
             items[2]
                 .get("payload")

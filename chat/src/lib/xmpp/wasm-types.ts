@@ -400,6 +400,7 @@ export interface WasmPubsubEvent {
 
 interface WasmPubsubEventItem {
   id?: string;
+  retracted?: boolean;
   payload: WasmPubsubEventPayload;
 }
 

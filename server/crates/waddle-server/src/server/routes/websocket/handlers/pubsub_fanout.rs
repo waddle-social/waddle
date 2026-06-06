@@ -35,6 +35,7 @@ use tracing::{info, warn};
 use waddle_xmpp::pubsub::{build_pubsub_event, PubSubEvent, PubSubItem};
 use waddle_xmpp::registry::BroadcastOutcome;
 use waddle_xmpp::Stanza;
+use waddle_xmpp_core::build_pubsub_retract_event;
 
 use super::super::WebSocketState;
 
@@ -58,6 +59,12 @@ pub struct FanOutRequest<'a> {
     /// JID); `false` for generic PubSub / Spaces publishes where the
     /// §3 roster + owner-self passes would be a leak.
     pub is_pep: bool,
+}
+
+pub struct FanOutRetractRequest<'a> {
+    pub owner: &'a BareJid,
+    pub node: &'a str,
+    pub item_id: &'a str,
 }
 
 /// Dispatch a §7.1 event notification to every deliverable subscriber.
@@ -344,6 +351,123 @@ pub async fn fan_out_publish(state: &WebSocketState, req: FanOutRequest<'_>) {
         self_caps_delivered = self_metrics.delivered,
         "PubSub publish fan-out complete"
     );
+}
+
+pub async fn fan_out_retract(state: &WebSocketState, req: FanOutRetractRequest<'_>) {
+    let storage = &state.deps.protocol.pubsub_storage;
+    let node_cfg = match storage.get_node(req.owner, req.node).await {
+        Ok(Some(record)) => record.config,
+        Ok(None) => {
+            warn!(
+                owner = %req.owner,
+                node = req.node,
+                "Retract fan-out skipped: node disappeared between retract and config fetch"
+            );
+            return;
+        }
+        Err(error) => {
+            warn!(
+                owner = %req.owner,
+                node = req.node,
+                error = %error,
+                "Retract fan-out skipped: node config fetch failed"
+            );
+            return;
+        }
+    };
+    if !node_cfg.notify_retract {
+        return;
+    }
+
+    let subscribers = match storage
+        .list_deliverable_subscribers(req.owner, req.node)
+        .await
+    {
+        Ok(subs) => subs,
+        Err(error) => {
+            warn!(
+                owner = %req.owner,
+                node = req.node,
+                error = %error,
+                "Retract fan-out skipped: subscriber list fetch failed"
+            );
+            return;
+        }
+    };
+
+    let from = Jid::from(req.owner.clone());
+    for sub in subscribers {
+        let target_resources: Vec<FullJid> = match sub.subscriber.try_as_full() {
+            Ok(full) => vec![full.clone()],
+            Err(bare) => {
+                let mut all = state
+                    .deps
+                    .protocol
+                    .connection_registry
+                    .get_resources_for_user(bare);
+                match state
+                    .deps
+                    .protocol
+                    .sm_session_registry
+                    .detached_resources_for_user(bare)
+                    .await
+                {
+                    Ok(detached) => all.extend(detached),
+                    Err(error) => warn!(
+                        bare = %bare,
+                        error = %error,
+                        "Failed to enumerate detached resources for bare-JID retract fan-out"
+                    ),
+                }
+                all
+            }
+        };
+
+        for resource in target_resources {
+            let message = build_pubsub_retract_event(
+                &from,
+                &Jid::from(resource.clone()),
+                req.node,
+                req.item_id,
+            );
+            let stanza = Stanza::Message(message);
+            match state
+                .deps
+                .protocol
+                .connection_registry
+                .try_send_to(&resource, stanza.clone())
+            {
+                BroadcastOutcome::Delivered => {}
+                BroadcastOutcome::DroppedClosed | BroadcastOutcome::NotConnected => {
+                    if let Err(error) = state
+                        .deps
+                        .protocol
+                        .sm_session_registry
+                        .record_stanza_for_detached_bound_resource(
+                            &resource,
+                            &stanza,
+                            chrono::Utc::now(),
+                        )
+                        .await
+                    {
+                        warn!(
+                            resource = %resource,
+                            error = %error,
+                            "Failed to record retract fan-out stanza for detached resource"
+                        );
+                    }
+                }
+                BroadcastOutcome::DroppedFull => {
+                    warn!(
+                        resource = %resource,
+                        node = req.node,
+                        item_id = req.item_id,
+                        "Retract fan-out dropped: subscriber channel full"
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[derive(Default)]

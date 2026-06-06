@@ -7,6 +7,7 @@ const NS_PUBSUB_ATTACHMENTS_SUMMARY: &str = "urn:xmpp:pubsub-attachments:summary
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PubsubEventItem {
     pub id: Option<String>,
+    pub retracted: bool,
     pub payload: PubsubEventPayload,
 }
 
@@ -56,8 +57,15 @@ fn parse_items(items: &Element, from: Option<Jid>) -> Option<PubsubEvent> {
     let node = items.attr("node")?.to_owned();
     let event_items = items
         .children()
-        .filter(|child| child.is("item", NS_PUBSUB_EVENT))
-        .map(parse_item)
+        .filter_map(|child| {
+            if child.is("item", NS_PUBSUB_EVENT) {
+                return Some(parse_item(child));
+            }
+            if child.is("retract", NS_PUBSUB_EVENT) {
+                return Some(parse_retract(child));
+            }
+            None
+        })
         .collect::<Vec<_>>();
     Some(PubsubEvent {
         from,
@@ -74,7 +82,16 @@ fn parse_item(item: &Element) -> PubsubEventItem {
         .unwrap_or(PubsubEventPayload::Empty);
     PubsubEventItem {
         id: item.attr("id").map(ToOwned::to_owned),
+        retracted: false,
         payload,
+    }
+}
+
+fn parse_retract(retract: &Element) -> PubsubEventItem {
+    PubsubEventItem {
+        id: retract.attr("id").map(ToOwned::to_owned),
+        retracted: true,
+        payload: PubsubEventPayload::Empty,
     }
 }
 
@@ -233,5 +250,39 @@ mod tests {
             events[0].from,
             Some("community.example.com".parse::<Jid>().expect("valid jid"))
         );
+    }
+
+    #[test]
+    fn parses_pubsub_retract_event_as_typed_item() {
+        let message = Element::builder("message", NS_CLIENT)
+            .attr(
+                minidom::rxml::xml_ncname!("from").to_owned(),
+                "community.example.com",
+            )
+            .append(
+                Element::builder("event", NS_PUBSUB_EVENT)
+                    .append(
+                        Element::builder("items", NS_PUBSUB_EVENT)
+                            .attr(
+                                minidom::rxml::xml_ncname!("node").to_owned(),
+                                "urn:xmpp:stories:0",
+                            )
+                            .append(
+                                Element::builder("retract", NS_PUBSUB_EVENT)
+                                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), "story-1")
+                                    .build(),
+                            )
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build();
+
+        let events = parse_pubsub_events(&message);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].node, "urn:xmpp:stories:0");
+        assert_eq!(events[0].items[0].id.as_deref(), Some("story-1"));
+        assert!(events[0].items[0].retracted);
+        assert_eq!(events[0].items[0].payload, PubsubEventPayload::Empty);
     }
 }

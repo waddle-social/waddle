@@ -1045,6 +1045,15 @@ fn parse_story_attachment_target(
     Some(StoryAttachmentTarget { item_id })
 }
 
+fn story_attachment_node_for_item(community_domain: &str, item_id: &str) -> String {
+    format!(
+        "{}/xmpp:{community_domain}?;node={};item={}",
+        waddle_xmpp::xep::xep0470::PUBSUB_ATTACHMENTS_NODE_PREFIX,
+        urlencoding::encode(waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES),
+        urlencoding::encode(item_id)
+    )
+}
+
 fn session_bare_jid(session: &Session, user_domain: &str) -> Result<BareJid, PubSubError> {
     format!(
         "{}@{}",
@@ -1602,7 +1611,31 @@ pub(super) async fn handle_community_retract(
         .retract_item(&community_jid, node, item_id)
         .await
     {
-        Ok(true) => vec![iq_to_xml(build_pubsub_success(iq))],
+        Ok(true) => {
+            if node == waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES {
+                pubsub_fanout::fan_out_retract(
+                    state,
+                    pubsub_fanout::FanOutRetractRequest {
+                        owner: &community_jid,
+                        node,
+                        item_id,
+                    },
+                )
+                .await;
+                if let Err(error) =
+                    cleanup_story_attachment_state(state, &community_jid, community_domain, item_id)
+                        .await
+                {
+                    warn!(
+                        node,
+                        item_id,
+                        error = ?error,
+                        "Failed to clean story attachment state after accepted story retract"
+                    );
+                }
+            }
+            vec![iq_to_xml(build_pubsub_success(iq))]
+        }
         Ok(false) => vec![iq_to_xml(build_pubsub_error(iq, PubSubError::ItemNotFound))],
         Err(error) => {
             warn!(node, item_id, error = %error, "Failed to retract community item");
@@ -1612,6 +1645,38 @@ pub(super) async fn handle_community_retract(
             ))]
         }
     }
+}
+
+async fn cleanup_story_attachment_state(
+    state: &WebSocketState,
+    community_jid: &BareJid,
+    community_domain: &str,
+    story_id: &str,
+) -> Result<(), PubSubError> {
+    let storage = &state.deps.protocol.pubsub_storage;
+    let attachment_node = story_attachment_node_for_item(community_domain, story_id);
+    storage
+        .delete_node(community_jid, &attachment_node)
+        .await
+        .map_err(|_| PubSubError::InternalServerError)?;
+
+    let summary_node = story_attachment_summary_node();
+    let summary_removed = storage
+        .retract_item(community_jid, &summary_node, story_id)
+        .await
+        .map_err(|_| PubSubError::InternalServerError)?;
+    if summary_removed {
+        pubsub_fanout::fan_out_retract(
+            state,
+            pubsub_fanout::FanOutRetractRequest {
+                owner: community_jid,
+                node: &summary_node,
+                item_id: story_id,
+            },
+        )
+        .await;
+    }
+    Ok(())
 }
 
 async fn handle_story_attachment_retract(

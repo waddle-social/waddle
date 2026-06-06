@@ -34,6 +34,25 @@ pub fn build_pubsub_event(from: &Jid, to: &Jid, event: &PubSubEvent) -> Message 
     message
 }
 
+/// Build a PubSub item retraction event notification.
+pub fn build_pubsub_retract_event(from: &Jid, to: &Jid, node: &str, item_id: &str) -> Message {
+    let retract_elem = Element::builder("retract", NS_PUBSUB_EVENT)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), item_id)
+        .build();
+    let items_elem = Element::builder("items", NS_PUBSUB_EVENT)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+        .append(retract_elem)
+        .build();
+    let event_elem = Element::builder("event", NS_PUBSUB_EVENT)
+        .append(items_elem)
+        .build();
+
+    let mut message = Message::new_with_type(MessageType::Headline, Some(to.clone()));
+    message.from = Some(from.clone());
+    message.payloads.push(event_elem);
+    message
+}
+
 /// Build a PubSub items result IQ.
 pub fn build_pubsub_items_result(original_iq: &Iq, node: &str, items: &[PubSubItem]) -> Iq {
     let mut items_elem = Element::builder("items", NS_PUBSUB)

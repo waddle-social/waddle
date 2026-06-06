@@ -55,10 +55,11 @@ pub use presence::{
 };
 pub use pubsub::{
     build_pep_identity, build_pubsub_error, build_pubsub_event, build_pubsub_items_result,
-    build_pubsub_publish_result, build_pubsub_success, is_pep_request, is_pep_request_to,
-    is_pubsub_event, is_pubsub_iq, parse_pubsub_event, parse_pubsub_iq, pep_features, AccessModel,
-    NodeConfig, PepHandler, PubSubError, PubSubEvent, PubSubItem, PubSubRequest, PublishModel,
-    SendLastPublishedItem, NS_PUBSUB, NS_PUBSUB_ERRORS, NS_PUBSUB_EVENT, NS_PUBSUB_OWNER,
+    build_pubsub_publish_result, build_pubsub_retract_event, build_pubsub_success, is_pep_request,
+    is_pep_request_to, is_pubsub_event, is_pubsub_iq, parse_pubsub_event, parse_pubsub_iq,
+    pep_features, AccessModel, NodeConfig, PepHandler, PubSubError, PubSubEvent, PubSubItem,
+    PubSubRequest, PublishModel, SendLastPublishedItem, NS_PUBSUB, NS_PUBSUB_ERRORS,
+    NS_PUBSUB_EVENT, NS_PUBSUB_OWNER,
 };
 pub use stanza::Stanza;
 pub use types::{Affiliation, ConnectionState, Role, StanzaType, Transport};
