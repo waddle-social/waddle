@@ -3,7 +3,8 @@ import { computed, onBeforeUnmount, ref, watch } from "vue";
 import type { LocalMediaTrack, RemoteMediaTrack } from "@/lib/calls/engine";
 import { TileAttachments, type TileAttachable } from "@/lib/calls/tile-attach";
 import { selectGridLayout } from "@/lib/calls/grid-layout";
-import { buildCallTiles, type CallTileModel } from "@/lib/calls/call-tiles";
+import type { CallTileModel } from "@/lib/calls/call-tiles";
+import { projectCallTiles } from "@/lib/calls/call-tile-projection";
 import CallTile from "./CallTile.vue";
 
 /**
@@ -43,19 +44,31 @@ const props = defineProps<{
   micEnabled: boolean;
 }>();
 
-const tiles = computed<Tile[]>(() => {
-  return buildCallTiles({
+const seenRemoteScreenTrackKeys = ref<ReadonlySet<string>>(new Set());
+const manualFocusKey = ref<string | null>(null);
+
+const projection = computed(() => {
+  return projectCallTiles({
     remoteTracks: props.remoteTracks,
     localTracks: props.localTracks,
     localIdentity: props.localIdentity,
     micEnabled: props.micEnabled,
+    seenRemoteScreenTrackKeys: seenRemoteScreenTrackKeys.value,
+    manualFocusKey: manualFocusKey.value,
   });
 });
 
-const focusedKey = ref<string | null>(null);
+watch(projection, (next) => {
+  if (!sameSet(seenRemoteScreenTrackKeys.value, next.seenRemoteScreenTrackKeys)) {
+    seenRemoteScreenTrackKeys.value = next.seenRemoteScreenTrackKeys;
+  }
+}, { immediate: true });
+
+const tiles = computed<Tile[]>(() => projection.value.tiles);
 const focusedTile = computed<Tile | null>(() => {
-  if (!focusedKey.value) return null;
-  return tiles.value.find((t) => t.key === focusedKey.value) ?? null;
+  const spotlightKey = projection.value.spotlightKey;
+  if (!spotlightKey) return null;
+  return tiles.value.find((t) => t.key === spotlightKey) ?? null;
 });
 const otherTiles = computed<Tile[]>(() => {
   if (!focusedTile.value) return [];
@@ -63,7 +76,15 @@ const otherTiles = computed<Tile[]>(() => {
 });
 
 function toggleFocus(tile: Tile): void {
-  focusedKey.value = focusedKey.value === tile.key ? null : tile.key;
+  manualFocusKey.value = manualFocusKey.value === tile.key ? null : tile.key;
+}
+
+function sameSet(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
+  if (left.size !== right.size) return false;
+  for (const value of left) {
+    if (!right.has(value)) return false;
+  }
+  return true;
 }
 
 // One `TileAttachments` per grid instance — reconciles (element,
