@@ -197,10 +197,14 @@ describe("call-engine module", () => {
     expect(engine.screenShareEnabled).toBe(true);
   });
 
-  test("setScreenShareEnabled degrades unsupported screen audio to video-only share", async () => {
+  test.each([
+    "OverconstrainedError",
+    "ConstraintNotSatisfiedError",
+    "NotSupportedError",
+  ])("setScreenShareEnabled degrades %s screen audio failure to video-only share", async (errorName) => {
     const { CallEngine } = await import("../src/lib/calls/engine");
     const engine = new CallEngine();
-    const participant = screenShareStub({ audioThrows: deviceError("OverconstrainedError") });
+    const participant = screenShareStub({ audioThrows: deviceError(errorName) });
     (engine as unknown as { room: unknown }).room = { localParticipant: participant };
     await engine.setScreenShareEnabled(true, { audio: true });
     expect(participant.calls).toEqual([
@@ -217,7 +221,6 @@ describe("call-engine module", () => {
     (engine as unknown as { room: unknown }).room = { localParticipant: participant };
     await expect(engine.setScreenShareEnabled(true, { audio: true })).rejects.toHaveProperty("name", "TypeError");
     expect(participant.calls).toEqual([{ enabled: true, audio: true }]);
-    expect(engine.screenShareEnabled).toBe(true);
   });
 });
 

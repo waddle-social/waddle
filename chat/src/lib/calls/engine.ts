@@ -410,7 +410,9 @@ export function mapTrackSource(
 function isUnsupportedScreenAudioError(error: unknown): boolean {
   if (!error || typeof error !== "object" || !("name" in error)) return false;
   const name = (error as { name?: unknown }).name;
-  return name === "OverconstrainedError";
+  return name === "OverconstrainedError" ||
+    name === "ConstraintNotSatisfiedError" ||
+    name === "NotSupportedError";
 }
 
 /**
