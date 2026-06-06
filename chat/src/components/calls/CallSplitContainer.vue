@@ -22,12 +22,14 @@ import {
 import { useCallEngine } from "@/lib/calls/use-call-engine";
 import { useActiveMucCall } from "@/lib/calls/use-active-muc-call";
 import { useSplitResize } from "@/lib/calls/use-split-resize";
+import { localScreenSharePresentation } from "@/lib/calls/call-self-share";
 import { normalizeMucCallRoomJid } from "@/lib/calls/muc-call-presence";
 import { barePeerJid } from "@/lib/xmpp/jid";
 import CallTileGrid from "./CallTileGrid.vue";
 import CallControls from "./CallControls.vue";
 import CallSettingsDialog from "./CallSettingsDialog.vue";
 import CallMediaNotice from "./CallMediaNotice.vue";
+import CallSelfShareNotice from "./CallSelfShareNotice.vue";
 import SplitDragHandle from "./SplitDragHandle.vue";
 
 /**
@@ -147,6 +149,15 @@ const callLabel = computed(() => {
 });
 
 const localIdentity = computed(() => engine.localIdentity);
+const selfSharePresentation = computed(() =>
+  localScreenSharePresentation({
+    screenShareEnabled: screenShareEnabled.value,
+    localTracks: localTracks.value,
+  }),
+);
+const stageLocalTracks = computed(() =>
+  selfSharePresentation.value?.stageLocalTracks ?? localTracks.value,
+);
 
 onMounted(() => {
   refreshScreenShareSupported();
@@ -181,10 +192,15 @@ async function onHangup(): Promise<void> {
         {{ lastError }}
       </div>
       <CallMediaNotice />
+      <CallSelfShareNotice
+        v-if="selfSharePresentation"
+        :presentation="selfSharePresentation"
+        compact
+      />
       <div class="call-split__grid">
         <CallTileGrid
           :remote-tracks="remoteTracks"
-          :local-tracks="localTracks"
+          :local-tracks="stageLocalTracks"
           :local-identity="localIdentity"
           :mic-enabled="micEnabled"
         />

@@ -81,4 +81,16 @@ export class TileAttachments {
   size(): number {
     return this.records.size;
   }
+
+  detachAll(): void {
+    for (const record of this.records.values()) {
+      try {
+        record.track.detach(record.el);
+      } catch {
+        // detach is idempotent in normal flow; swallow.
+      }
+      record.el.srcObject = null;
+    }
+    this.records.clear();
+  }
 }
