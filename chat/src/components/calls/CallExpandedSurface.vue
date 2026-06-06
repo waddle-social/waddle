@@ -23,12 +23,20 @@ import { useCallEngine } from "@/lib/calls/use-call-engine";
 import { useActiveMucCall } from "@/lib/calls/use-active-muc-call";
 import { localScreenSharePresentation } from "@/lib/calls/call-self-share";
 import { normalizeMucCallRoomJid } from "@/lib/calls/muc-call-presence";
+import { $mucCallLiveParticipants } from "@/lib/calls/muc-call-live-participants";
+import {
+  buildCallVolumeMixerRows,
+  resetCallVolumeMixerLevels,
+  type CallVolumeLevelStore,
+  type CallVolumeMixerRow,
+} from "@/lib/calls/call-volume-mixer";
 import { barePeerJid } from "@/lib/xmpp/jid";
 import CallTileGrid from "./CallTileGrid.vue";
 import CallControls from "./CallControls.vue";
 import CallSettingsDialog from "./CallSettingsDialog.vue";
 import CallMediaNotice from "./CallMediaNotice.vue";
 import CallSelfShareNotice from "./CallSelfShareNotice.vue";
+import CallVolumeMixerPanel from "./CallVolumeMixerPanel.vue";
 
 /**
  * "Expanded" call surface — fills the chat content pane while the
@@ -59,10 +67,12 @@ const micEnabled = useStore($callMicEnabled);
 const camEnabled = useStore($callCamEnabled);
 const screenShareEnabled = useStore($callScreenShareEnabled);
 const screenShareSupported = useStore($callScreenShareSupported);
+const liveParticipants = useStore($mucCallLiveParticipants);
 const { remoteTracks, localTracks, engine } = useCallEngine();
 const { activeRoomJid, selfInCall } = useActiveMucCall();
 
 const settingsOpen = ref(false);
+const participantAudioLevels = ref<CallVolumeLevelStore>({});
 
 const normalizedRoomJid = computed(() =>
   normalizeMucCallRoomJid(props.roomJid ?? ""),
@@ -132,6 +142,50 @@ const stageLocalTracks = computed(() =>
   selfSharePresentation.value?.stageLocalTracks ?? localTracks.value,
 );
 
+const remoteParticipantIdentities = computed(() => {
+  if (state.value.phase === "active" && state.value.kind === "muc") {
+    return liveParticipants.value[normalizedRoomJid.value] ?? [];
+  }
+  const identities = new Set<string>();
+  if (state.value.phase === "active" && state.value.kind === "dm") {
+    identities.add(state.value.peer);
+  }
+  for (const track of remoteTracks.value) identities.add(track.participantIdentity);
+  return Array.from(identities);
+});
+
+const volumeRows = computed(() =>
+  buildCallVolumeMixerRows({
+    remoteParticipantIdentities: remoteParticipantIdentities.value,
+    remoteTracks: remoteTracks.value,
+    localIdentity: localIdentity.value,
+    levels: participantAudioLevels.value,
+  }),
+);
+
+function setParticipantVolume(row: CallVolumeMixerRow, level: number): void {
+  participantAudioLevels.value = {
+    ...participantAudioLevels.value,
+    [row.key]: level,
+  };
+  engine.setParticipantAudioVolume({
+    participantIdentity: row.participantIdentity,
+    source: row.source,
+    volume: level,
+  });
+}
+
+function resetParticipantVolumes(): void {
+  participantAudioLevels.value = resetCallVolumeMixerLevels(participantAudioLevels.value);
+  for (const row of volumeRows.value) {
+    engine.setParticipantAudioVolume({
+      participantIdentity: row.participantIdentity,
+      source: row.source,
+      volume: 1,
+    });
+  }
+}
+
 function collapseToSplit(): void {
   $callUiMode.set("split");
 }
@@ -191,12 +245,19 @@ onBeforeUnmount(() => {
       v-if="selfSharePresentation"
       :presentation="selfSharePresentation"
     />
-    <main class="call-expanded__grid">
-      <CallTileGrid
-        :remote-tracks="remoteTracks"
-        :local-tracks="stageLocalTracks"
-        :local-identity="localIdentity"
-        :mic-enabled="micEnabled"
+    <main class="call-expanded__main">
+      <div class="call-expanded__grid">
+        <CallTileGrid
+          :remote-tracks="remoteTracks"
+          :local-tracks="stageLocalTracks"
+          :local-identity="localIdentity"
+          :mic-enabled="micEnabled"
+        />
+      </div>
+      <CallVolumeMixerPanel
+        :rows="volumeRows"
+        @set-volume="setParticipantVolume"
+        @reset-all="resetParticipantVolumes"
       />
     </main>
     <footer class="call-expanded__footer">
@@ -247,8 +308,16 @@ onBeforeUnmount(() => {
   color: var(--destructive);
 }
 
+.call-expanded__main {
+  flex: 1 1 0%;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+}
+
 .call-expanded__grid {
   flex: 1 1 0%;
+  min-width: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
@@ -261,5 +330,11 @@ onBeforeUnmount(() => {
   justify-content: center;
   border-top: 1px solid var(--border);
   padding: 0.75rem 1rem;
+}
+
+@media (max-width: 760px) {
+  .call-expanded__main {
+    flex-direction: column;
+  }
 }
 </style>

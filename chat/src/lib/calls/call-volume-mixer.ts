@@ -1,6 +1,7 @@
 import type { RemoteMediaTrack } from "./engine";
+import { fullJidIdentityKey } from "@/lib/xmpp/jid";
 
-export type CallVolumeMixerSource = "microphone" | "screen_share_audio";
+type CallVolumeMixerSource = "microphone" | "screen_share_audio";
 
 export type CallVolumeLevelStore = Record<string, number>;
 
@@ -24,7 +25,7 @@ export type BuildCallVolumeMixerRowsInput = {
   levels: CallVolumeLevelStore;
 };
 
-export function callVolumeMixerKey(
+function callVolumeMixerKey(
   participantIdentity: string,
   source: CallVolumeMixerSource,
 ): string {
@@ -34,31 +35,39 @@ export function callVolumeMixerKey(
 export function buildCallVolumeMixerRows(
   input: BuildCallVolumeMixerRowsInput,
 ): CallVolumeMixerRow[] {
-  const localIdentity = input.localIdentity?.toLowerCase() ?? null;
-  const remoteIdentities = new Set<string>();
+  const localIdentity = normalizedIdentityKey(input.localIdentity);
+  const remoteParticipants = new Map<string, string>();
+  const liveAudioIdentities = new Map<string, string>();
   const liveAudioSources = new Set<string>();
 
   for (const identity of input.remoteParticipantIdentities) {
-    if (isSelfIdentity(identity, localIdentity)) continue;
-    remoteIdentities.add(identity);
+    const participantKey = normalizedIdentityKey(identity);
+    if (!participantKey || participantKey === localIdentity) continue;
+    remoteParticipants.set(participantKey, identity);
   }
 
   for (const track of input.remoteTracks) {
-    if (isSelfIdentity(track.participantIdentity, localIdentity)) continue;
+    const participantKey = normalizedIdentityKey(track.participantIdentity);
+    if (!participantKey || participantKey === localIdentity) continue;
     if (!isMixerAudioSource(track.source)) continue;
-    remoteIdentities.add(track.participantIdentity);
-    liveAudioSources.add(callVolumeMixerKey(track.participantIdentity, track.source));
+    if (!remoteParticipants.has(participantKey)) {
+      remoteParticipants.set(participantKey, track.participantIdentity);
+    }
+    liveAudioIdentities.set(callVolumeMixerKey(participantKey, track.source), track.participantIdentity);
+    liveAudioSources.add(callVolumeMixerKey(participantKey, track.source));
   }
 
   const rows: CallVolumeMixerRow[] = [];
-  for (const participantIdentity of remoteIdentities) {
-    const voiceKey = callVolumeMixerKey(participantIdentity, "microphone");
+  for (const [participantKey, fallbackIdentity] of remoteParticipants) {
+    const voiceIdentity = liveAudioIdentities.get(callVolumeMixerKey(participantKey, "microphone"))
+      ?? fallbackIdentity;
+    const voiceKey = callVolumeMixerKey(voiceIdentity, "microphone");
     const voiceLevel = input.levels[voiceKey] ?? 1;
-    const voiceLabel = displayNameForIdentity(participantIdentity);
-    const voiceDisabled = !liveAudioSources.has(voiceKey);
+    const voiceLabel = displayNameForIdentity(voiceIdentity);
+    const voiceDisabled = !liveAudioSources.has(callVolumeMixerKey(participantKey, "microphone"));
     rows.push({
       key: voiceKey,
-      participantIdentity,
+      participantIdentity: voiceIdentity,
       source: "microphone",
       label: voiceLabel,
       level: voiceLevel,
@@ -69,13 +78,15 @@ export function buildCallVolumeMixerRows(
       ariaValueText: `${Math.round(voiceLevel * 100)}%`,
     });
 
-    const screenKey = callVolumeMixerKey(participantIdentity, "screen_share_audio");
-    if (!liveAudioSources.has(screenKey)) continue;
+    const screenSourceKey = callVolumeMixerKey(participantKey, "screen_share_audio");
+    if (!liveAudioSources.has(screenSourceKey)) continue;
+    const screenIdentity = liveAudioIdentities.get(screenSourceKey) ?? fallbackIdentity;
+    const screenKey = callVolumeMixerKey(screenIdentity, "screen_share_audio");
     const screenLevel = input.levels[screenKey] ?? 1;
     const screenLabel = `${voiceLabel}'s screen`;
     rows.push({
       key: screenKey,
-      participantIdentity,
+      participantIdentity: screenIdentity,
       source: "screen_share_audio",
       label: screenLabel,
       level: screenLevel,
@@ -102,8 +113,8 @@ function displayNameForIdentity(identity: string): string {
   return identity.slice(0, at);
 }
 
-function isSelfIdentity(identity: string, localIdentity: string | null): boolean {
-  return localIdentity !== null && identity.toLowerCase() === localIdentity;
+function normalizedIdentityKey(identity: string | null | undefined): string {
+  return fullJidIdentityKey(identity);
 }
 
 function isMixerAudioSource(source: string): source is CallVolumeMixerSource {
