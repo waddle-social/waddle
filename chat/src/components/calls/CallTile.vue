@@ -86,10 +86,8 @@ function refAudio(el: Element | null): void {
   );
 }
 
-const isInteractive = computed(() => props.interactive);
-
 function activate(): void {
-  if (isInteractive.value) emit("activate");
+  if (props.interactive) emit("activate");
 }
 
 const emit = defineEmits<{
@@ -103,11 +101,11 @@ const emit = defineEmits<{
     class="call-tile"
     :class="{
       'call-tile--has-video': videoTrack !== null,
-      'call-tile--interactive': isInteractive,
+      'call-tile--interactive': interactive,
     }"
-    :role="isInteractive ? 'button' : 'img'"
-    :tabindex="isInteractive ? 0 : undefined"
-    :aria-label="isInteractive ? `Open ${label} tile` : label"
+    :role="interactive ? 'button' : 'img'"
+    :tabindex="interactive ? 0 : undefined"
+    :aria-label="interactive ? `Open ${label} tile` : label"
     @click="activate"
     @keydown.enter="activate"
   >

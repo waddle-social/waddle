@@ -40,6 +40,13 @@ describe("local screen-share presentation", () => {
     })).toBeNull();
   });
 
+  test("stays absent while screen sharing is enabled before the screen track publishes", () => {
+    expect(localScreenSharePresentation({
+      screenShareEnabled: true,
+      localTracks: [],
+    })).toBeNull();
+  });
+
   test("shows a presenter banner and self-thumbnail while keeping that track out of the stage", () => {
     const camera = localVideo("camera-pub", "camera");
     const screen = localVideo("screen-pub", "screen_share");

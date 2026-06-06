@@ -83,14 +83,14 @@ export class TileAttachments {
   }
 
   detachAll(): void {
-    for (const [key, record] of this.records) {
+    for (const record of this.records.values()) {
       try {
         record.track.detach(record.el);
       } catch {
         // detach is idempotent in normal flow; swallow.
       }
       record.el.srcObject = null;
-      this.records.delete(key);
     }
+    this.records.clear();
   }
 }
