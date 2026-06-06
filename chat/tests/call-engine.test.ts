@@ -118,6 +118,43 @@ describe("call-engine module", () => {
     expect(typeof engine.on("localTrackUnpublished", () => {})).toBe("function");
   });
 
+  test("audio playback status exposes blocked state and resume calls LiveKit startAudio", async () => {
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine();
+    const statuses: boolean[] = [];
+    let startAudioCalls = 0;
+    engine.on("audioPlaybackStatusChanged", (canPlaybackAudio) => {
+      statuses.push(canPlaybackAudio);
+    });
+    const stub = {
+      get canPlaybackAudio() {
+        return statuses.at(-1) ?? true;
+      },
+      async startAudio() {
+        startAudioCalls += 1;
+      },
+    };
+    (engine as unknown as { room: typeof stub }).room = stub;
+
+    (
+      engine as unknown as {
+        handleAudioPlaybackStatusChanged: (canPlaybackAudio: boolean) => void;
+      }
+    ).handleAudioPlaybackStatusChanged(false);
+    expect(engine.canPlaybackAudio).toBe(false);
+
+    await engine.startAudio();
+    (
+      engine as unknown as {
+        handleAudioPlaybackStatusChanged: (canPlaybackAudio: boolean) => void;
+      }
+    ).handleAudioPlaybackStatusChanged(true);
+
+    expect(startAudioCalls).toBe(1);
+    expect(statuses).toEqual([false, true]);
+    expect(engine.canPlaybackAudio).toBe(true);
+  });
+
   test("RemoteMediaTrack discriminates audio vs video by `kind`", () => {
     // Pure type-level assertion: the field is a "audio" | "video"
     // literal union, so a switch covers both arms exhaustively.

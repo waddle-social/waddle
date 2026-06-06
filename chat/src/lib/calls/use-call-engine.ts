@@ -10,6 +10,7 @@ import {
 } from "./muc-call-live-participants";
 import { clearAllMediaIssues, recordMediaIssue } from "./call-media-issues";
 import { syncScreenShareEnabled } from "./screen-share-state";
+import { setCallAudioPlaybackBlocked } from "./call-audio-playback";
 
 /**
  * Process-wide singleton: only one call engine should ever exist
@@ -72,6 +73,9 @@ export function useCallEngine(): {
       // notice is the single channel, avoiding a double-surfaced error.
       recordMediaIssue(source === "audio" ? "mic" : "cam", error);
     });
+    singletonEngine.on("audioPlaybackStatusChanged", (canPlaybackAudio) => {
+      setCallAudioPlaybackBlocked(!canPlaybackAudio);
+    });
     singletonEngine.on("participantConnected", (identity) => {
       const roomJid = activeMucRoomJid();
       if (!roomJid) return;
@@ -89,6 +93,7 @@ export function useCallEngine(): {
       // Drop any "joined without mic/camera" notice — it belongs to the
       // call that just ended, not the next one.
       clearAllMediaIssues();
+      setCallAudioPlaybackBlocked(false);
       // The active call's room — if any — is no longer in our LK
       // view. Drop the LK snapshot so the room's UI reverts to the
       // Muji-derived (server-bridged) view, which the LK webhook

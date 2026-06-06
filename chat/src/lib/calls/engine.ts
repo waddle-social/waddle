@@ -108,6 +108,12 @@ export type CallEngineEvents = {
   connected: (snapshot: { localIdentity: string; remoteIdentities: string[] }) => void;
   disconnected: (reason?: string) => void;
   /**
+   * Fires when LiveKit reports whether remote audio can currently
+   * play. Browser autoplay policy can suspend Web Audio playback until
+   * a user gesture calls `startAudio()`.
+   */
+  audioPlaybackStatusChanged: (canPlaybackAudio: boolean) => void;
+  /**
    * Fires when a best-effort capture (mic / cam enable) fails —
    * typically a missing device (`NotFoundError`) or a denied
    * permission (`NotAllowedError`). NON-FATAL: the room stays
@@ -141,6 +147,7 @@ export class CallEngine {
     participantDisconnected: new Set(),
     connected: new Set(),
     disconnected: new Set(),
+    audioPlaybackStatusChanged: new Set(),
     mediaDevicesError: new Set(),
   };
 
@@ -170,6 +177,10 @@ export class CallEngine {
     return this.room?.localParticipant.isScreenShareEnabled ?? false;
   }
 
+  get canPlaybackAudio(): boolean {
+    return this.room?.canPlaybackAudio ?? true;
+  }
+
   async connect(join: LiveKitJoin, opts: { audio: boolean; video: boolean }): Promise<void> {
     if (this.room) throw new Error("CallEngine already connected");
     // Defensive pre-flight: confirm the JWT actually carries a usable
@@ -185,6 +196,7 @@ export class CallEngine {
     const room = new Room({
       adaptiveStream: true,
       dynacast: true,
+      webAudioMix: true,
       audioCaptureDefaults: {
         autoGainControl: true,
         echoCancellation: true,
@@ -202,6 +214,7 @@ export class CallEngine {
     room.on(RoomEvent.ParticipantConnected, this.handleParticipantConnected);
     room.on(RoomEvent.ParticipantDisconnected, this.handleParticipantDisconnected);
     room.on(RoomEvent.Disconnected, this.handleDisconnected);
+    room.on(RoomEvent.AudioPlaybackStatusChanged, this.handleAudioPlaybackStatusChanged);
     try {
       await room.connect(join.url, join.token);
     } catch (err) {
@@ -297,6 +310,10 @@ export class CallEngine {
     await this.applySpeakerDevice(deviceId);
   }
 
+  async startAudio(): Promise<void> {
+    await this.room?.startAudio();
+  }
+
   setParticipantAudioVolume(
     identity: ParticipantAudioVolumeIdentity & { volume: number },
   ): void {
@@ -338,6 +355,7 @@ export class CallEngine {
     room.off(RoomEvent.ParticipantConnected, this.handleParticipantConnected);
     room.off(RoomEvent.ParticipantDisconnected, this.handleParticipantDisconnected);
     room.off(RoomEvent.Disconnected, this.handleDisconnected);
+    room.off(RoomEvent.AudioPlaybackStatusChanged, this.handleAudioPlaybackStatusChanged);
     await room.disconnect();
   }
 
@@ -446,6 +464,10 @@ export class CallEngine {
   private handleDisconnected = (reason?: unknown) => {
     this.clearParticipantAudioVolumes();
     this.emit("disconnected", typeof reason === "string" ? reason : undefined);
+  };
+
+  private handleAudioPlaybackStatusChanged = (canPlaybackAudio: boolean) => {
+    this.emit("audioPlaybackStatusChanged", canPlaybackAudio);
   };
 
   private clearParticipantAudioVolumes(): void {
