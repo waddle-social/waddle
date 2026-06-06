@@ -664,6 +664,7 @@ impl WaddleClient {
                     pronouns: vcard.pronouns,
                     note: vcard.note,
                     url: vcard.url,
+                    photo_uri: vcard.photo_uri,
                 }),
                 None => Ok(JsValue::NULL),
             }
@@ -681,6 +682,7 @@ impl WaddleClient {
                 pronouns: payload.pronouns,
                 note: payload.note,
                 url: payload.url,
+                photo_uri: payload.photo_uri,
             };
             let request_id = uuid::Uuid::new_v4().to_string();
             let iq = build_publish_vcard4_iq(&vcard, &request_id);

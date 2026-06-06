@@ -5,6 +5,8 @@ import type { AdminTab } from "@/lib/chat-ui";
  * Each renders its own content pane when active, rather than the
  * channel timeline. */
 export type CommunitySurface = "feed" | "events";
+export type FeedSurfaceFilter = "all" | "pep" | "stories" | "posts";
+export type FeedSurfaceComposerMode = "post" | "story";
 
 export function useChatShellState() {
   const activePage = ref<"dashboard" | "chat" | "settings" | "admin" | "threads" | "unread">("dashboard");
@@ -14,6 +16,8 @@ export function useChatShellState() {
    * When non-null the content area renders the corresponding
    * surface in place of the channel timeline. */
   const activeCommunitySurface = ref<CommunitySurface | null>(null);
+  const feedDefaultFilter = ref<FeedSurfaceFilter>("all");
+  const feedDefaultComposerMode = ref<FeedSurfaceComposerMode>("post");
   const collapsedSpaceGroupIds = ref<Set<string>>(new Set());
   const createChannelContextSpaceId = ref<string | null>(null);
   const showMobileNav = ref(false);
@@ -43,6 +47,8 @@ export function useChatShellState() {
     adminTab,
     sidebarMode,
     activeCommunitySurface,
+    feedDefaultFilter,
+    feedDefaultComposerMode,
     collapsedSpaceGroupIds,
     createChannelContextSpaceId,
     showMobileNav,

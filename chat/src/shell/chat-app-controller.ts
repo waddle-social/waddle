@@ -1423,6 +1423,10 @@ export function useChatAppController(giphyApiKey: string) {
     ui.showMobileDetails.value = false;
     ui.activePage.value = "chat";
     ui.activeCommunitySurface.value = surface;
+    if (surface === "feed") {
+      ui.feedDefaultFilter.value = "all";
+      ui.feedDefaultComposerMode.value = "post";
+    }
     ui.sidebarMode.value = "channels";
     dmConversations.closeDm();
     waddles.activeChannelId.value = null;
@@ -1529,6 +1533,13 @@ export function useChatAppController(giphyApiKey: string) {
       match.id === "feed" || match.id === "stories" || match.id === "events"
         ? match.id === "stories" ? "feed" : match.id
         : null;
+    if (match.id === "stories") {
+      ui.feedDefaultFilter.value = "stories";
+      ui.feedDefaultComposerMode.value = "story";
+    } else if (match.id === "feed") {
+      ui.feedDefaultFilter.value = "all";
+      ui.feedDefaultComposerMode.value = "post";
+    }
     ui.sidebarMode.value =
       match.id === "dm" || match.id === "dmList" ? "dms" : "channels";
     // #414: only channel-context routes carry the pinned-panel flag;

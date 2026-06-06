@@ -19,6 +19,10 @@ import {
   type VCard4Profile,
 } from "../src/lib/xmpp/vcard4-types";
 
+const vcardEditorSource = await Bun.file(
+  new URL("../src/components/chat/VCardEditor.vue", import.meta.url),
+).text();
+
 // ---------------------------------------------------------------------------
 // vcard4-types unit tests
 // ---------------------------------------------------------------------------
@@ -41,6 +45,7 @@ describe("vcard4-types helpers", () => {
       pronouns: "he/him",
       note: "Star-crossed",
       url: "https://romeo.example.com",
+      photoUri: "cid:avatar-sha1@example.com",
     };
     expect(draftFromProfile(profile)).toEqual({
       fullName: "Romeo Montague",
@@ -48,6 +53,7 @@ describe("vcard4-types helpers", () => {
       pronouns: "he/him",
       note: "Star-crossed",
       url: "https://romeo.example.com",
+      photoUri: "cid:avatar-sha1@example.com",
     });
   });
 
@@ -58,11 +64,13 @@ describe("vcard4-types helpers", () => {
       pronouns: "she/her",
       note: "   ",
       url: " https://juliet.example.com ",
+      photoUri: "cid:juliet-avatar@example.com",
     };
     expect(profileFromDraft(draft)).toEqual({
       fullName: "Juliet",
       pronouns: "she/her",
       url: "https://juliet.example.com",
+      photoUri: "cid:juliet-avatar@example.com",
     });
   });
 
@@ -85,6 +93,21 @@ describe("vcard4-types helpers", () => {
     expect(
       profilesEqual({ pronouns: "they/them" }, { pronouns: "she/they" }),
     ).toBe(false);
+    expect(
+      profilesEqual(
+        { photoUri: "cid:avatar-a@example.com" },
+        { photoUri: "cid:avatar-b@example.com" },
+      ),
+    ).toBe(false);
+  });
+
+  test("photo URI survives a draft round-trip without becoming editable text", () => {
+    const profile: VCard4Profile = {
+      fullName: "Benvolio",
+      photoUri: "cid:sha256-avatar@example.com",
+    };
+
+    expect(profileFromDraft(draftFromProfile(profile))).toEqual(profile);
   });
 });
 
@@ -100,6 +123,7 @@ interface EditorClient {
 interface EditorState {
   draft: VCard4Draft;
   lastPersisted: VCard4Profile;
+  profileLoaded: boolean;
   feedbackTone: "muted" | "success" | "error";
   feedbackMessage: string;
 }
@@ -108,20 +132,33 @@ function createEditor(client: EditorClient, selfJid: string) {
   const state: EditorState = {
     draft: draftFromProfile(null),
     lastPersisted: {},
+    profileLoaded: false,
     feedbackTone: "muted",
     feedbackMessage: "",
   };
 
   async function load() {
-    const profile = await client.fetchVCard4(selfJid);
-    const next = profile ?? {};
-    state.lastPersisted = next;
-    state.draft = draftFromProfile(next);
-    state.feedbackTone = "muted";
-    state.feedbackMessage = profile ? "loaded" : "empty";
+    try {
+      const profile = await client.fetchVCard4(selfJid);
+      const next = profile ?? {};
+      state.lastPersisted = next;
+      state.draft = draftFromProfile(next);
+      state.profileLoaded = true;
+      state.feedbackTone = "muted";
+      state.feedbackMessage = profile ? "loaded" : "empty";
+    } catch (error) {
+      state.profileLoaded = false;
+      state.feedbackTone = "error";
+      state.feedbackMessage = error instanceof Error ? error.message : "failed";
+    }
   }
 
   async function save() {
+    if (!state.profileLoaded) {
+      state.feedbackTone = "error";
+      state.feedbackMessage = "load before publish";
+      return;
+    }
     const next = profileFromDraft(state.draft);
     if (profilesEqual(next, state.lastPersisted)) {
       state.feedbackTone = "muted";
@@ -147,6 +184,16 @@ function createEditor(client: EditorClient, selfJid: string) {
 }
 
 describe("VCardEditor flow", () => {
+  test("invalidates stale profile loads across client or JID changes", () => {
+    expect(vcardEditorSource).toContain("let profileLoadRequestId = 0");
+    expect(vcardEditorSource).toContain("requestId !== profileLoadRequestId");
+    expect(vcardEditorSource).toContain("client !== props.xmppClient");
+    expect(vcardEditorSource).toContain("selfJid !== props.selfJid");
+    expect(vcardEditorSource).toContain("profileLoadRequestId += 1");
+    expect(vcardEditorSource).toContain("lastPersisted.value = {}");
+    expect(vcardEditorSource).toContain("applyDraft({})");
+  });
+
   test("empty PEP node hydrates draft with empty fields", async () => {
     const fetchVCard4 = mock(async () => null);
     const publishVCard4 = mock(async () => undefined);
@@ -164,6 +211,7 @@ describe("VCardEditor flow", () => {
     });
     expect(editor.state.lastPersisted).toEqual({});
     expect(editor.state.feedbackMessage).toBe("empty");
+    expect(editor.state.profileLoaded).toBe(true);
   });
 
   test("existing PEP node round-trips through the editor without data loss", async () => {
@@ -173,6 +221,7 @@ describe("VCardEditor flow", () => {
       pronouns: "he/him",
       note: "Star-crossed",
       url: "https://romeo.example.com",
+      photoUri: "cid:romeo-avatar@example.com",
     };
     const fetchVCard4 = mock(async () => stored);
     const publishVCard4 = mock(async (_profile: VCard4Profile) => undefined);
@@ -195,6 +244,7 @@ describe("VCardEditor flow", () => {
       pronouns: "he/him",
       note: "Updated bio",
       url: "https://romeo.example.com",
+      photoUri: "cid:romeo-avatar@example.com",
     });
     expect(editor.state.feedbackTone).toBe("success");
   });
@@ -235,5 +285,21 @@ describe("VCardEditor flow", () => {
     // Both the persisted snapshot and the draft are reverted.
     expect(editor.state.lastPersisted).toEqual(stored);
     expect(editor.state.draft).toEqual(draftFromProfile(stored));
+  });
+
+  test("does not publish a partial profile after the initial load fails", async () => {
+    const fetchVCard4 = mock(async () => {
+      throw new Error("load failed");
+    });
+    const publishVCard4 = mock(async (_profile: VCard4Profile) => undefined);
+    const editor = createEditor({ fetchVCard4, publishVCard4 }, "benvolio@example.com");
+
+    await editor.load();
+    editor.state.draft.fullName = "Benvolio";
+    await editor.save();
+
+    expect(publishVCard4).not.toHaveBeenCalled();
+    expect(editor.state.feedbackTone).toBe("error");
+    expect(editor.state.feedbackMessage).toBe("load before publish");
   });
 });

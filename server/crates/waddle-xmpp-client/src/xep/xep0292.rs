@@ -43,6 +43,8 @@ pub struct VCard4 {
     pub note: Option<String>,
     /// `URL` — website / social link, transmitted as `<uri>`.
     pub url: Option<String>,
+    /// `PHOTO` — URI reference to the avatar image.
+    pub photo_uri: Option<String>,
 }
 
 impl VCard4 {
@@ -58,6 +60,7 @@ impl VCard4 {
             && self.pronouns.is_none()
             && self.note.is_none()
             && self.url.is_none()
+            && self.photo_uri.is_none()
     }
 }
 
@@ -92,6 +95,7 @@ pub fn parse_vcard4_element(elem: &Element) -> VCard4 {
         pronouns: text_prop(elem, "pronouns"),
         note: text_prop(elem, "note"),
         url: uri_or_text_prop(elem, "url"),
+        photo_uri: uri_or_text_prop(elem, "photo"),
     }
 }
 
@@ -129,6 +133,9 @@ pub fn build_vcard4_element(vcard: &VCard4) -> Element {
     }
     if let Some(ref v) = vcard.url {
         append_uri_prop(&mut elem, "url", v);
+    }
+    if let Some(ref v) = vcard.photo_uri {
+        append_uri_prop(&mut elem, "photo", v);
     }
     elem
 }
@@ -208,6 +215,7 @@ mod tests {
                     <pronouns><text>he/him</text></pronouns>\
                     <note><text>Star-crossed lover</text></note>\
                     <url><uri>https://romeo.example.com</uri></url>\
+                    <photo><uri>cid:romeo-avatar@example.com</uri></photo>\
                     </vcard>";
         let elem: Element = xml.parse().expect("valid xml");
         let vcard = parse_vcard4_element(&elem);
@@ -217,6 +225,10 @@ mod tests {
         assert_eq!(vcard.pronouns.as_deref(), Some("he/him"));
         assert_eq!(vcard.note.as_deref(), Some("Star-crossed lover"));
         assert_eq!(vcard.url.as_deref(), Some("https://romeo.example.com"));
+        assert_eq!(
+            vcard.photo_uri.as_deref(),
+            Some("cid:romeo-avatar@example.com")
+        );
         assert!(!vcard.is_empty());
     }
 
@@ -236,6 +248,7 @@ mod tests {
             pronouns: Some("she/her".into()),
             note: Some("Also star-crossed".into()),
             url: Some("https://juliet.example.com".into()),
+            photo_uri: Some("cid:juliet-avatar@example.com".into()),
         };
         let elem = build_vcard4_element(&original);
         let parsed = parse_vcard4_element(&elem);

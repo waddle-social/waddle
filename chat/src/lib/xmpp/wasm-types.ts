@@ -349,6 +349,7 @@ export interface WasmVCard4 {
   pronouns?: string;
   note?: string;
   url?: string;
+  photo_uri?: string;
 }
 
 /** One entry in a urn:waddle:threads:0 response. */
