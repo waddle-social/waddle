@@ -95,7 +95,7 @@ function refAudio(el: Element | null): void {
     :class="{ 'call-tile--has-video': videoTrack !== null }"
     role="button"
     tabindex="0"
-    :aria-label="`Focus ${label} tile`"
+    :aria-label="`Open ${label} tile`"
     @click="$emit('activate')"
     @keydown.enter="$emit('activate')"
   >
