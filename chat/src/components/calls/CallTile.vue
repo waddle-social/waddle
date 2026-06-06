@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { MicOff } from "lucide-vue-next";
+import { MicOff, ScreenShare } from "lucide-vue-next";
 import { consistentColor } from "@/lib/chat-ui";
 import type { TileAttachable } from "@/lib/calls/tile-attach";
 
@@ -34,6 +34,8 @@ const props = defineProps<{
   /** Whether the video should be mirrored. Used for local camera only,
    *  not local screen-share previews. */
   mirrorVideo: boolean;
+  /** Whether to show the presenting affordance for screen tiles. */
+  showsPresentingGlyph: boolean;
   /** Whether the local mic is currently un-muted. Drives the
    *  destructive `MicOff` badge on the self-tile. Ignored on remotes. */
   micEnabled: boolean;
@@ -93,7 +95,7 @@ function refAudio(el: Element | null): void {
     :class="{ 'call-tile--has-video': videoTrack !== null }"
     role="button"
     tabindex="0"
-    :aria-label="`${label}'s tile`"
+    :aria-label="`Focus ${label} tile`"
     @click="$emit('activate')"
     @keydown.enter="$emit('activate')"
   >
@@ -129,7 +131,14 @@ function refAudio(el: Element | null): void {
          or the placeholder is showing, so the tile reads identically
          across states. -->
     <div class="call-tile__nameplate">
-      <span class="call-tile__name">{{ label }}</span>
+      <span class="call-tile__name">
+        <ScreenShare
+          v-if="showsPresentingGlyph"
+          class="call-tile__presenting-icon"
+          aria-hidden="true"
+        />
+        {{ label }}
+      </span>
       <span
         v-if="isSelf && !micEnabled"
         class="call-tile__mic-off"
@@ -246,8 +255,8 @@ function refAudio(el: Element | null): void {
 
 .call-tile__video--mirrored {
   /* Local front-facing camera is always mirrored for natural feel.
-   * (We don't ship back-camera or screen-share through this tile yet,
-   * so no need for a flag.) */
+   * Screen-share readability is decided by the tile projection before
+   * this renderer sees the track. */
   transform: scaleX(-1);
 }
 
@@ -266,6 +275,10 @@ function refAudio(el: Element | null): void {
 }
 
 .call-tile__name {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  min-width: 0;
   font-size: 0.8125rem;
   line-height: 1;
   font-weight: 500;
@@ -273,6 +286,13 @@ function refAudio(el: Element | null): void {
   text-overflow: ellipsis;
   white-space: nowrap;
   text-shadow: 0 1px 2px color-mix(in oklab, black 60%, transparent);
+}
+
+.call-tile__presenting-icon {
+  width: 0.875rem;
+  height: 0.875rem;
+  flex: 0 0 auto;
+  filter: drop-shadow(0 1px 1px color-mix(in oklab, black 55%, transparent));
 }
 
 .call-tile__mic-off {
