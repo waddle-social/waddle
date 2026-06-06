@@ -90,7 +90,7 @@ export async function toggleScreenShare(): Promise<void> {
   try {
     const { engine } = useCallEngine();
     await engine.setScreenShareEnabled(next, { audio: false });
-    if (!next) clearMediaIssue("screen");
+    clearMediaIssue("screen");
   } catch (err) {
     $callScreenShareEnabled.set(!next);
     if (next && isScreenSharePickerCancel(err)) return;

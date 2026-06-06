@@ -6,6 +6,7 @@ export type CallTileModel = {
   identity: string;
   label: string;
   isSelf: boolean;
+  mirrorVideo: boolean;
   micEnabledHint: boolean;
   videoTrack: TileAttachable | null;
   audioTrack: TileAttachable | null;
@@ -49,6 +50,7 @@ export function buildCallTiles(options: {
     identity: selfId,
     label: "You",
     isSelf: true,
+    mirrorVideo: true,
     micEnabledHint: options.micEnabled,
     videoTrack: null,
     audioTrack: null,
@@ -61,6 +63,7 @@ export function buildCallTiles(options: {
       identity: local.participantIdentity,
       label: "You",
       isSelf: true,
+      mirrorVideo: tileSourceForTrack(local.source) === "camera",
       micEnabledHint: options.micEnabled,
       videoTrack: null,
       audioTrack: null,
@@ -77,6 +80,7 @@ export function buildCallTiles(options: {
       identity: remote.participantIdentity,
       label: displayNameForIdentity(remote.participantIdentity),
       isSelf: false,
+      mirrorVideo: false,
       micEnabledHint: true,
       videoTrack: null,
       audioTrack: null,

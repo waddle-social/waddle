@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { buildCallTiles } from "../src/lib/calls/call-tiles";
-import type { RemoteMediaTrack } from "../src/lib/calls/engine";
+import type { LocalMediaTrack, RemoteMediaTrack } from "../src/lib/calls/engine";
 import { selectGridLayout } from "../src/lib/calls/grid-layout";
 
 function remoteVideo(
@@ -26,6 +26,19 @@ function remoteAudio(
     kind: "audio",
     source,
     track: {} as RemoteMediaTrack["track"],
+  };
+}
+
+function localVideo(
+  publicationSid: string,
+  source: LocalMediaTrack["source"],
+): LocalMediaTrack {
+  return {
+    participantIdentity: "alice@waddle.test/web",
+    publicationSid,
+    kind: "video",
+    source,
+    track: {} as LocalMediaTrack["track"],
   };
 }
 
@@ -142,5 +155,22 @@ describe("buildCallTiles", () => {
     ]);
     expect(tiles[0]?.audioTrack).not.toBeNull();
     expect(tiles[1]?.audioTrack).not.toBeNull();
+  });
+
+  test("mirrors local camera previews but not local screen-share previews", () => {
+    const tiles = buildCallTiles({
+      remoteTracks: [],
+      localTracks: [
+        localVideo("cam-pub", "camera"),
+        localVideo("screen-pub", "screen_share"),
+      ],
+      localIdentity: null,
+      micEnabled: true,
+    });
+
+    expect(tiles.map((tile) => [tile.key, tile.mirrorVideo])).toEqual([
+      ["self:alice@waddle.test/web:camera", true],
+      ["self:alice@waddle.test/web:screen_share", false],
+    ]);
   });
 });

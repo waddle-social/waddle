@@ -29,9 +29,11 @@ const props = defineProps<{
    *  one attachments map can host video and audio for the same
    *  participant without collision. */
   attachKey: string;
-  /** Whether this tile represents the local participant. Drives the
-   *  `transform: scaleX(-1)` mirror for the self-preview camera. */
+  /** Whether this tile represents the local participant. */
   isSelf: boolean;
+  /** Whether the video should be mirrored. Used for local camera only,
+   *  not local screen-share previews. */
+  mirrorVideo: boolean;
   /** Whether the local mic is currently un-muted. Drives the
    *  destructive `MicOff` badge on the self-tile. Ignored on remotes. */
   micEnabled: boolean;
@@ -111,7 +113,7 @@ function refAudio(el: Element | null): void {
       v-if="videoTrack"
       :ref="refVideo"
       class="call-tile__video"
-      :class="{ 'call-tile__video--mirrored': isSelf }"
+      :class="{ 'call-tile__video--mirrored': mirrorVideo }"
       autoplay
       playsinline
       :muted="isSelf"

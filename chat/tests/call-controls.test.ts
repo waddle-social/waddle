@@ -326,6 +326,34 @@ describe("device-less call controls", () => {
     expect($callMediaIssues.get().screen).toBeNull();
   });
 
+  test("toggleScreenShare successful retry clears a prior screen notice", async () => {
+    const { engine } = useCallEngine();
+    (engine as unknown as { room: unknown }).room = {
+      localParticipant: {
+        setScreenShareEnabled: async () => undefined,
+      },
+    };
+    recordMediaIssue("screen", deviceError("NotReadableError"));
+    $callScreenShareEnabled.set(false);
+    await toggleScreenShare();
+    expect($callScreenShareEnabled.get()).toBe(true);
+    expect($callMediaIssues.get().screen).toBeNull();
+  });
+
+  test("toggleScreenShare stop clears a prior screen notice", async () => {
+    const { engine } = useCallEngine();
+    (engine as unknown as { room: unknown }).room = {
+      localParticipant: {
+        setScreenShareEnabled: async () => undefined,
+      },
+    };
+    recordMediaIssue("screen", deviceError("NotReadableError"));
+    $callScreenShareEnabled.set(true);
+    await toggleScreenShare();
+    expect($callScreenShareEnabled.get()).toBe(false);
+    expect($callMediaIssues.get().screen).toBeNull();
+  });
+
   test("toggleScreenShare picker cancellation rolls back silently", async () => {
     const { engine } = useCallEngine();
     (engine as unknown as { room: unknown }).room = {
