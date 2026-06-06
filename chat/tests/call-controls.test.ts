@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join as joinPath } from "node:path";
+import { pathToFileURL } from "node:url";
+import { createRequire } from "node:module";
+import { createSSRApp, h } from "vue";
+import { renderToString } from "vue/server-renderer";
+import { parse, compileScript } from "vue/compiler-sfc";
+import ts from "typescript";
 import { $callState, clearCallState } from "../src/lib/calls/call-store";
 import {
   $callCamEnabled,
@@ -19,6 +27,10 @@ import {
   clearAllMediaIssues,
   recordMediaIssue,
 } from "../src/lib/calls/call-media-issues";
+import {
+  $callAudioPlaybackBlocked,
+  resumeCallAudioPlayback,
+} from "../src/lib/calls/call-audio-playback";
 import { useCallEngine } from "../src/lib/calls/use-call-engine";
 import {
   $dmCallActivities,
@@ -31,6 +43,8 @@ import {
 import { connectionStore } from "../src/lib/connection-store";
 import type { LiveKitJoin } from "../src/lib/calls/types";
 import { Track } from "livekit-client";
+
+const require = createRequire(import.meta.url);
 
 const join: LiveKitJoin = {
   url: "wss://livekit.test",
@@ -73,6 +87,7 @@ afterEach(() => {
   $mucCallLiveParticipants.set({});
   connectionStore.client = null;
   clearAllMediaIssues();
+  $callAudioPlaybackBlocked.set(false);
   $callScreenShareEnabled.set(false);
   $callScreenShareSupported.set(false);
   // The engine is a process-wide singleton; drop any injected room
@@ -433,4 +448,123 @@ describe("device-less call controls", () => {
     expect($callScreenShareEnabled.get()).toBe(false);
     expect($callMediaIssues.get().screen).toBeNull();
   });
+
+  test("LiveKit audio playback status drives the tap-to-enable prompt state", () => {
+    const { engine } = useCallEngine();
+    (
+      engine as unknown as {
+        handleAudioPlaybackStatusChanged: (canPlaybackAudio: boolean) => void;
+      }
+    ).handleAudioPlaybackStatusChanged(false);
+    expect($callAudioPlaybackBlocked.get()).toBe(true);
+
+    (
+      engine as unknown as {
+        handleAudioPlaybackStatusChanged: (canPlaybackAudio: boolean) => void;
+      }
+    ).handleAudioPlaybackStatusChanged(true);
+    expect($callAudioPlaybackBlocked.get()).toBe(false);
+  });
+
+  test("call audio playback prompt renders only while playback is blocked", async () => {
+    const component = await loadVueComponent("../src/components/calls/CallAudioPlaybackPrompt.vue");
+
+    $callAudioPlaybackBlocked.set(false);
+    expect(await renderVueComponent(component)).not.toContain("Tap to enable audio");
+
+    $callAudioPlaybackBlocked.set(true);
+    const html = await renderVueComponent(component);
+    expect(html).toContain("Audio is paused by your browser.");
+    expect(html).toContain("Tap to enable audio");
+  });
+
+  test("call audio resume helper reports failed browser resume without throwing", async () => {
+    const failures: string[] = [];
+    const target = {
+      async startAudio() {
+        throw new Error("blocked");
+      },
+    };
+
+    await resumeCallAudioPlayback(target, () => {
+      failures.push("failed");
+    });
+
+    expect(failures).toEqual(["failed"]);
+  });
+
+  test("call surfaces mount the tap-to-enable audio affordance", () => {
+    const splitSource = readFileSync(
+      new URL("../src/components/calls/CallSplitContainer.vue", import.meta.url),
+      "utf8",
+    );
+    const expandedSource = readFileSync(
+      new URL("../src/components/calls/CallExpandedSurface.vue", import.meta.url),
+      "utf8",
+    );
+
+    expect(splitSource).toContain("<CallAudioPlaybackPrompt />");
+    expect(expandedSource).toContain("<CallAudioPlaybackPrompt />");
+  });
 });
+
+async function renderVueComponent(component: unknown): Promise<string> {
+  return renderToString(createSSRApp({ render: () => h(component as never) }));
+}
+
+async function loadVueComponent(path: string) {
+  const filename = new URL(path, import.meta.url);
+  const source = readFileSync(filename, "utf8");
+  const { descriptor } = parse(source, { filename: filename.pathname });
+  const script = compileScript(descriptor, {
+    id: filename.pathname,
+    inlineTemplate: true,
+  });
+
+  const tempDir = mkdtempSync(joinPath(tmpdir(), "waddle-call-audio-playback-"));
+  try {
+    const compiled = [
+      rewriteImports(script.content.replace("export default", "const __sfc__ ="), filename),
+      "export default __sfc__;",
+    ].join("\n");
+    const js = ts.transpileModule(compiled, {
+      compilerOptions: {
+        module: ts.ModuleKind.ESNext,
+        target: ts.ScriptTarget.ES2022,
+        verbatimModuleSyntax: false,
+      },
+    }).outputText;
+    const modulePath = joinPath(tempDir, "Component.mjs");
+    writeFileSync(modulePath, js);
+    const component = await import(pathToFileURL(modulePath).href);
+    return component.default;
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
+function rewriteImports(code: string, importer: URL): string {
+  return code.replace(/from\s+["']([^"']+)["']/g, (_match, specifier: string) =>
+    `from ${JSON.stringify(resolveModuleSpecifier(specifier, importer))}`);
+}
+
+function resolveModuleSpecifier(specifier: string, importer: URL): string {
+  if (specifier.startsWith("@/")) {
+    return moduleUrlForPath(resolveSourcePath(new URL(`../src/${specifier.slice(2)}`, import.meta.url).pathname));
+  }
+  if (specifier.startsWith(".")) {
+    return moduleUrlForPath(resolveSourcePath(new URL(specifier, importer).pathname));
+  }
+  return moduleUrlForPath(require.resolve(specifier));
+}
+
+function resolveSourcePath(path: string): string {
+  if (existsSync(path)) return path;
+  if (existsSync(`${path}.ts`)) return `${path}.ts`;
+  if (existsSync(`${path}.vue`)) return `${path}.vue`;
+  return path;
+}
+
+function moduleUrlForPath(path: string): string {
+  return pathToFileURL(path).href;
+}

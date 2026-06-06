@@ -30,6 +30,7 @@ import CallControls from "./CallControls.vue";
 import CallSettingsDialog from "./CallSettingsDialog.vue";
 import CallMediaNotice from "./CallMediaNotice.vue";
 import CallSelfShareNotice from "./CallSelfShareNotice.vue";
+import CallAudioPlaybackPrompt from "./CallAudioPlaybackPrompt.vue";
 import SplitDragHandle from "./SplitDragHandle.vue";
 
 /**
@@ -192,6 +193,7 @@ async function onHangup(): Promise<void> {
         {{ lastError }}
       </div>
       <CallMediaNotice />
+      <CallAudioPlaybackPrompt />
       <CallSelfShareNotice
         v-if="selfSharePresentation"
         :presentation="selfSharePresentation"

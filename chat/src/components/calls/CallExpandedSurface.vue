@@ -37,6 +37,7 @@ import CallSettingsDialog from "./CallSettingsDialog.vue";
 import CallMediaNotice from "./CallMediaNotice.vue";
 import CallSelfShareNotice from "./CallSelfShareNotice.vue";
 import CallVolumeMixerPanel from "./CallVolumeMixerPanel.vue";
+import CallAudioPlaybackPrompt from "./CallAudioPlaybackPrompt.vue";
 
 /**
  * "Expanded" call surface — fills the chat content pane while the
@@ -268,6 +269,7 @@ onBeforeUnmount(() => {
       {{ lastError }}
     </div>
     <CallMediaNotice />
+    <CallAudioPlaybackPrompt />
     <CallSelfShareNotice
       v-if="selfSharePresentation"
       :presentation="selfSharePresentation"
