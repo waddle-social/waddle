@@ -1,18 +1,27 @@
-import type { LocalMediaTrack, RemoteMediaTrack } from "./engine";
+import type { CallTrackSource, LocalMediaTrack, RemoteMediaTrack } from "./engine";
 import type { TileAttachable } from "./tile-attach";
+
+type TileSource = "camera" | "screen_share";
 
 export type CallTileModel = {
   key: string;
   identity: string;
   label: string;
+  source: TileSource;
   isSelf: boolean;
   mirrorVideo: boolean;
+  showsPresentingGlyph: boolean;
   micEnabledHint: boolean;
   videoTrack: TileAttachable | null;
   audioTrack: TileAttachable | null;
 };
 
-type TileSource = "camera" | "screen_share";
+export type BuildCallTilesInput = {
+  remoteTracks: RemoteMediaTrack[];
+  localTracks: LocalMediaTrack[];
+  localIdentity: string | null;
+  micEnabled: boolean;
+};
 
 function displayNameForIdentity(identity: string): string {
   const at = identity.indexOf("@");
@@ -20,71 +29,60 @@ function displayNameForIdentity(identity: string): string {
   return identity.slice(0, at);
 }
 
-function callTileKey(
-  side: "self" | "remote",
-  identity: string,
-  source: TileSource,
-): string {
-  return `${side}:${identity}:${source}`;
-}
-
-function tileSourceForTrack(
-  source: LocalMediaTrack["source"] | RemoteMediaTrack["source"],
-): TileSource {
+function tileSourceForTrack(source: CallTrackSource): TileSource {
   return source === "screen_share" || source === "screen_share_audio"
     ? "screen_share"
     : "camera";
 }
 
-export function buildCallTiles(options: {
-  remoteTracks: RemoteMediaTrack[];
-  localTracks: LocalMediaTrack[];
-  localIdentity: string | null;
-  micEnabled: boolean;
-}): CallTileModel[] {
-  const byKey = new Map<string, CallTileModel>();
-  const selfId =
-    options.localTracks[0]?.participantIdentity ?? options.localIdentity ?? "you";
-  byKey.set(callTileKey("self", selfId, "camera"), {
-    key: callTileKey("self", selfId, "camera"),
-    identity: selfId,
-    label: "You",
-    isSelf: true,
-    mirrorVideo: true,
-    micEnabledHint: options.micEnabled,
+function labelFor(identity: string, isSelf: boolean, source: TileSource): string {
+  if (source === "screen_share") return isSelf ? "Your screen" : `${displayNameForIdentity(identity)}'s screen`;
+  return isSelf ? "You" : displayNameForIdentity(identity);
+}
+
+function callTileKey(side: "self" | "remote", identity: string, source: TileSource): string {
+  return `${side}:${identity}:${source}`;
+}
+
+function newTile(
+  side: "self" | "remote",
+  identity: string,
+  source: TileSource,
+  micEnabled: boolean,
+): CallTileModel {
+  const isSelf = side === "self";
+  return {
+    key: callTileKey(side, identity, source),
+    identity,
+    label: labelFor(identity, isSelf, source),
+    source,
+    isSelf,
+    mirrorVideo: isSelf && source === "camera",
+    showsPresentingGlyph: source === "screen_share",
+    micEnabledHint: isSelf ? micEnabled : true,
     videoTrack: null,
     audioTrack: null,
-  });
+  };
+}
 
-  for (const local of options.localTracks) {
-    const key = callTileKey("self", local.participantIdentity, tileSourceForTrack(local.source));
-    const existing = byKey.get(key) ?? {
-      key,
-      identity: local.participantIdentity,
-      label: "You",
-      isSelf: true,
-      mirrorVideo: tileSourceForTrack(local.source) === "camera",
-      micEnabledHint: options.micEnabled,
-      videoTrack: null,
-      audioTrack: null,
-    };
+export function buildCallTiles(input: BuildCallTilesInput): CallTileModel[] {
+  const byKey = new Map<string, CallTileModel>();
+  const selfId = input.localTracks[0]?.participantIdentity ?? input.localIdentity ?? "you";
+  byKey.set(callTileKey("self", selfId, "camera"), newTile("self", selfId, "camera", input.micEnabled));
+
+  for (const local of input.localTracks) {
+    const source = tileSourceForTrack(local.source);
+    const key = callTileKey("self", local.participantIdentity, source);
+    const existing = byKey.get(key) ?? newTile("self", local.participantIdentity, source, input.micEnabled);
     if (local.kind === "video") existing.videoTrack = local.track;
     if (local.kind === "audio") existing.audioTrack = local.track;
     byKey.set(key, existing);
   }
 
-  for (const remote of options.remoteTracks) {
-    const key = callTileKey("remote", remote.participantIdentity, tileSourceForTrack(remote.source));
-    const existing = byKey.get(key) ?? {
-      key,
-      identity: remote.participantIdentity,
-      label: displayNameForIdentity(remote.participantIdentity),
-      isSelf: false,
-      mirrorVideo: false,
-      micEnabledHint: true,
-      videoTrack: null,
-      audioTrack: null,
-    };
+  for (const remote of input.remoteTracks) {
+    const source = tileSourceForTrack(remote.source);
+    const key = callTileKey("remote", remote.participantIdentity, source);
+    const existing = byKey.get(key) ?? newTile("remote", remote.participantIdentity, source, input.micEnabled);
     if (remote.kind === "video") existing.videoTrack = remote.track;
     if (remote.kind === "audio") existing.audioTrack = remote.track;
     byKey.set(key, existing);
