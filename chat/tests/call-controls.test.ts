@@ -494,6 +494,10 @@ describe("device-less call controls", () => {
   });
 
   test("call surfaces mount the tap-to-enable audio affordance", () => {
+    const promptSource = readFileSync(
+      new URL("../src/components/calls/CallAudioPlaybackPrompt.vue", import.meta.url),
+      "utf8",
+    );
     const splitSource = readFileSync(
       new URL("../src/components/calls/CallSplitContainer.vue", import.meta.url),
       "utf8",
@@ -503,6 +507,7 @@ describe("device-less call controls", () => {
       "utf8",
     );
 
+    expect(promptSource).toContain(":disabled=\"resuming\"");
     expect(splitSource).toContain("<CallAudioPlaybackPrompt />");
     expect(expandedSource).toContain("<CallAudioPlaybackPrompt />");
   });
@@ -544,6 +549,10 @@ async function loadVueComponent(path: string) {
 }
 
 function rewriteImports(code: string, importer: URL): string {
+  // This SFC test helper only supports the static import shapes emitted by
+  // vue/compiler-sfc for these components today. If compiler output starts
+  // using dynamic/template-literal imports, prefer a shared component-test
+  // harness over broadening this regex.
   return code.replace(/from\s+["']([^"']+)["']/g, (_match, specifier: string) =>
     `from ${JSON.stringify(resolveModuleSpecifier(specifier, importer))}`);
 }

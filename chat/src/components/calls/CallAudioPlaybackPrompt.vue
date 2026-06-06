@@ -10,12 +10,19 @@ import { useCallEngine } from "@/lib/calls/use-call-engine";
 const blocked = useStore($callAudioPlaybackBlocked);
 const { engine } = useCallEngine();
 const resumeFailed = ref(false);
+const resuming = ref(false);
 
 async function enableAudio(): Promise<void> {
+  if (resuming.value) return;
   resumeFailed.value = false;
-  await resumeCallAudioPlayback(engine, () => {
-    resumeFailed.value = true;
-  });
+  resuming.value = true;
+  try {
+    await resumeCallAudioPlayback(engine, () => {
+      resumeFailed.value = true;
+    });
+  } finally {
+    resuming.value = false;
+  }
 }
 </script>
 
@@ -32,9 +39,10 @@ async function enableAudio(): Promise<void> {
     <button
       class="call-audio-playback-prompt__button"
       type="button"
+      :disabled="resuming"
       @click="enableAudio"
     >
-      Tap to enable audio
+      {{ resuming ? "Enabling audio…" : "Tap to enable audio" }}
     </button>
   </div>
 </template>
@@ -68,5 +76,10 @@ async function enableAudio(): Promise<void> {
 
 .call-audio-playback-prompt__button:hover {
   background: var(--muted);
+}
+
+.call-audio-playback-prompt__button:disabled {
+  cursor: wait;
+  opacity: 0.72;
 }
 </style>
