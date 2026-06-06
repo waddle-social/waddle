@@ -105,8 +105,8 @@ describe("call volume mixer projection", () => {
       ],
       localIdentity: "me@waddle.test/browser",
       levels: {
-        "Bob@Waddle.Test/Desktop:microphone": 0.25,
-        "Bob@Waddle.Test/Desktop:screen_share_audio": 0.5,
+        "bob@waddle.test/Desktop:microphone": 0.25,
+        "bob@waddle.test/Desktop:screen_share_audio": 0.5,
       },
     });
 
@@ -119,7 +119,7 @@ describe("call volume mixer projection", () => {
       disabled: row.disabled,
     }))).toEqual([
       {
-        key: "Bob@Waddle.Test/Desktop:microphone",
+        key: "bob@waddle.test/Desktop:microphone",
         participantIdentity: "Bob@Waddle.Test/Desktop",
         label: "Bob",
         source: "microphone",
@@ -127,12 +127,39 @@ describe("call volume mixer projection", () => {
         disabled: false,
       },
       {
-        key: "Bob@Waddle.Test/Desktop:screen_share_audio",
+        key: "bob@waddle.test/Desktop:screen_share_audio",
         participantIdentity: "Bob@Waddle.Test/Desktop",
         label: "Bob's screen",
         source: "screen_share_audio",
         level: 0.5,
         disabled: false,
+      },
+    ]);
+  });
+
+  test("keeps remembered mic level visible while a differently-cased LiveKit identity is muted", () => {
+    const rows = buildCallVolumeMixerRows({
+      remoteParticipantIdentities: ["bob@waddle.test/Desktop"],
+      remoteTracks: [],
+      localIdentity: "me@waddle.test/browser",
+      levels: {
+        "bob@waddle.test/Desktop:microphone": 0.25,
+      },
+    });
+
+    expect(rows.map((row) => ({
+      key: row.key,
+      level: row.level,
+      disabled: row.disabled,
+      hint: row.hint,
+      ariaValueText: row.ariaValueText,
+    }))).toEqual([
+      {
+        key: "bob@waddle.test/Desktop:microphone",
+        level: 0.25,
+        disabled: true,
+        hint: "mic off",
+        ariaValueText: "25%",
       },
     ]);
   });
@@ -184,6 +211,20 @@ describe("call volume mixer panel", () => {
     expect(html).toContain('aria-label="Muted"');
     expect(html).toContain('class="call-volume-mixer__tick"');
     expect(html).toContain("Reset all");
+  });
+});
+
+describe("expanded call mixer wiring", () => {
+  test("clears remembered levels on call changes and resets absent engine targets", () => {
+    const source = readFileSync(
+      new URL("../src/components/calls/CallExpandedSurface.vue", import.meta.url),
+      "utf8",
+    );
+
+    expect(source).toContain("const activeCallSid = computed");
+    expect(source).toContain("watch(activeCallSid");
+    expect(source).toContain("participantAudioTargets.value = {}");
+    expect(source).toContain("for (const target of Object.values(participantAudioTargets.value))");
   });
 });
 

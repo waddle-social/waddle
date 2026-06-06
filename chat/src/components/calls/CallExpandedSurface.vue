@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useStore } from "@nanostores/vue";
 import {
   $callState,
@@ -73,6 +73,10 @@ const { activeRoomJid, selfInCall } = useActiveMucCall();
 
 const settingsOpen = ref(false);
 const participantAudioLevels = ref<CallVolumeLevelStore>({});
+const participantAudioTargets = ref<Record<string, {
+  participantIdentity: string;
+  source: CallVolumeMixerRow["source"];
+}>>({});
 
 const normalizedRoomJid = computed(() =>
   normalizeMucCallRoomJid(props.roomJid ?? ""),
@@ -163,10 +167,21 @@ const volumeRows = computed(() =>
   }),
 );
 
+const activeCallSid = computed(() =>
+  state.value.phase === "active" ? state.value.sid : null,
+);
+
 function setParticipantVolume(row: CallVolumeMixerRow, level: number): void {
   participantAudioLevels.value = {
     ...participantAudioLevels.value,
     [row.key]: level,
+  };
+  participantAudioTargets.value = {
+    ...participantAudioTargets.value,
+    [row.key]: {
+      participantIdentity: row.participantIdentity,
+      source: row.source,
+    },
   };
   engine.setParticipantAudioVolume({
     participantIdentity: row.participantIdentity,
@@ -176,7 +191,13 @@ function setParticipantVolume(row: CallVolumeMixerRow, level: number): void {
 }
 
 function resetParticipantVolumes(): void {
-  participantAudioLevels.value = resetCallVolumeMixerLevels(participantAudioLevels.value);
+  for (const target of Object.values(participantAudioTargets.value)) {
+    engine.setParticipantAudioVolume({
+      participantIdentity: target.participantIdentity,
+      source: target.source,
+      volume: 1,
+    });
+  }
   for (const row of volumeRows.value) {
     engine.setParticipantAudioVolume({
       participantIdentity: row.participantIdentity,
@@ -184,6 +205,7 @@ function resetParticipantVolumes(): void {
       volume: 1,
     });
   }
+  participantAudioLevels.value = resetCallVolumeMixerLevels(participantAudioLevels.value);
 }
 
 function collapseToSplit(): void {
@@ -211,6 +233,11 @@ onMounted(() => {
   if (typeof window !== "undefined") {
     window.addEventListener("keydown", onKeydown);
   }
+});
+
+watch(activeCallSid, () => {
+  participantAudioLevels.value = {};
+  participantAudioTargets.value = {};
 });
 
 onBeforeUnmount(() => {

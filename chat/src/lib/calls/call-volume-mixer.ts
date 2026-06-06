@@ -61,7 +61,7 @@ export function buildCallVolumeMixerRows(
   for (const [participantKey, fallbackIdentity] of remoteParticipants) {
     const voiceIdentity = liveAudioIdentities.get(callVolumeMixerKey(participantKey, "microphone"))
       ?? fallbackIdentity;
-    const voiceKey = callVolumeMixerKey(voiceIdentity, "microphone");
+    const voiceKey = callVolumeMixerKey(participantKey, "microphone");
     const voiceLevel = input.levels[voiceKey] ?? 1;
     const voiceLabel = displayNameForIdentity(voiceIdentity);
     const voiceDisabled = !liveAudioSources.has(callVolumeMixerKey(participantKey, "microphone"));
@@ -81,7 +81,7 @@ export function buildCallVolumeMixerRows(
     const screenSourceKey = callVolumeMixerKey(participantKey, "screen_share_audio");
     if (!liveAudioSources.has(screenSourceKey)) continue;
     const screenIdentity = liveAudioIdentities.get(screenSourceKey) ?? fallbackIdentity;
-    const screenKey = callVolumeMixerKey(screenIdentity, "screen_share_audio");
+    const screenKey = screenSourceKey;
     const screenLevel = input.levels[screenKey] ?? 1;
     const screenLabel = `${voiceLabel}'s screen`;
     rows.push({
