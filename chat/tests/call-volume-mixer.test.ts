@@ -272,8 +272,8 @@ describe("call volume mixer panel", () => {
   test("emits directional snap-detent gains from slider input", async () => {
     const originalHTMLInputElement = globalThis.HTMLInputElement;
     globalThis.HTMLInputElement = TestInputElement as typeof HTMLInputElement;
-    const setup = await loadCallVolumeMixerPanelSetup();
     try {
+      const setup = await loadCallVolumeMixerPanelSetup();
       const emitted: Array<[string, CallVolumeMixerRow, number]> = [];
       const bindings = setup({ rows: [] }, {
         expose: () => undefined,
