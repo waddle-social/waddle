@@ -50,6 +50,32 @@ export type CallTrackSource =
   | "screen_share"
   | "screen_share_audio";
 
+type CallAudioTrackSource = Extract<CallTrackSource, "microphone" | "screen_share_audio">;
+
+export type ParticipantAudioVolumeStore = Record<string, number>;
+
+export type ParticipantAudioVolumeIdentity = {
+  participantIdentity: string;
+  source: CallAudioTrackSource;
+};
+
+type VolumeAdjustableTrack = {
+  setVolume(volume: number): unknown;
+};
+
+function participantAudioVolumeKey(
+  identity: ParticipantAudioVolumeIdentity,
+): string {
+  return `${identity.participantIdentity}:${identity.source}`;
+}
+
+export function resolveParticipantAudioVolume(
+  store: ParticipantAudioVolumeStore,
+  identity: ParticipantAudioVolumeIdentity,
+): number {
+  return store[participantAudioVolumeKey(identity)] ?? 1;
+}
+
 export type CallEngineEvents = {
   trackSubscribed: (track: RemoteMediaTrack) => void;
   trackUnsubscribed: (track: RemoteMediaTrack) => void;
@@ -104,6 +130,8 @@ export type CallEngineEvents = {
  */
 export class CallEngine {
   private room: Room | null = null;
+  private participantAudioVolumes: ParticipantAudioVolumeStore = {};
+  private subscribedAudioTracks = new Map<string, Set<VolumeAdjustableTrack>>();
   private listeners: { [K in keyof CallEngineEvents]: Set<CallEngineEvents[K]> } = {
     trackSubscribed: new Set(),
     trackUnsubscribed: new Set(),
@@ -269,6 +297,17 @@ export class CallEngine {
     await this.applySpeakerDevice(deviceId);
   }
 
+  setParticipantAudioVolume(
+    identity: ParticipantAudioVolumeIdentity & { volume: number },
+  ): void {
+    const key = participantAudioVolumeKey(identity);
+    const volume = normalizeParticipantAudioVolume(identity.volume);
+    this.participantAudioVolumes[key] = volume;
+    for (const track of this.subscribedAudioTracks.get(key) ?? []) {
+      track.setVolume(volume);
+    }
+  }
+
   private async applySpeakerDevice(deviceId: string): Promise<void> {
     if (!this.room) return;
     if (typeof this.room.switchActiveDevice !== "function") return;
@@ -284,6 +323,7 @@ export class CallEngine {
     const room = this.room;
     this.room = null;
     if (!room) return;
+    this.clearParticipantAudioVolumes();
     // Drop subscribers' track caches synchronously. The LiveKit
     // `Disconnected` event is the natural trigger, but we unregister
     // `handleDisconnected` immediately below so the event never reaches
@@ -321,11 +361,19 @@ export class CallEngine {
   ) => {
     const kind = mapKind(track.kind);
     if (!kind) return;
+    const source = mapTrackSource(publication.source, kind);
+    if (isCallAudioTrackSource(source)) {
+      this.rememberSubscribedAudioTrack({
+        participantIdentity: participant.identity,
+        source,
+        track,
+      });
+    }
     this.emit("trackSubscribed", {
       participantIdentity: participant.identity,
       publicationSid: publication.trackSid,
       kind,
-      source: mapTrackSource(publication.source, kind),
+      source,
       track,
     });
   };
@@ -337,11 +385,19 @@ export class CallEngine {
   ) => {
     const kind = mapKind(track.kind);
     if (!kind) return;
+    const source = mapTrackSource(publication.source, kind);
+    if (isCallAudioTrackSource(source)) {
+      this.forgetSubscribedAudioTrack({
+        participantIdentity: participant.identity,
+        source,
+        track,
+      });
+    }
     this.emit("trackUnsubscribed", {
       participantIdentity: participant.identity,
       publicationSid: publication.trackSid,
       kind,
-      source: mapTrackSource(publication.source, kind),
+      source,
       track,
     });
   };
@@ -383,12 +439,63 @@ export class CallEngine {
   };
 
   private handleParticipantDisconnected = (participant: RemoteParticipant) => {
+    this.forgetParticipantSubscribedAudioTracks(participant.identity);
     this.emit("participantDisconnected", participant.identity);
   };
 
   private handleDisconnected = (reason?: unknown) => {
+    this.clearParticipantAudioVolumes();
     this.emit("disconnected", typeof reason === "string" ? reason : undefined);
   };
+
+  private clearParticipantAudioVolumes(): void {
+    this.participantAudioVolumes = {};
+    this.subscribedAudioTracks.clear();
+  }
+
+  private rememberSubscribedAudioTrack(
+    identity: ParticipantAudioVolumeIdentity & { track: RemoteTrack },
+  ): void {
+    if (!isVolumeAdjustableTrack(identity.track)) return;
+    const key = participantAudioVolumeKey(identity);
+    const tracks = this.subscribedAudioTracks.get(key) ?? new Set<VolumeAdjustableTrack>();
+    tracks.add(identity.track);
+    this.subscribedAudioTracks.set(key, tracks);
+    identity.track.setVolume(resolveParticipantAudioVolume(this.participantAudioVolumes, identity));
+  }
+
+  private forgetSubscribedAudioTrack(
+    identity: ParticipantAudioVolumeIdentity & { track: RemoteTrack },
+  ): void {
+    if (!isVolumeAdjustableTrack(identity.track)) return;
+    const key = participantAudioVolumeKey(identity);
+    const tracks = this.subscribedAudioTracks.get(key);
+    if (!tracks) return;
+    tracks.delete(identity.track);
+    if (tracks.size === 0) this.subscribedAudioTracks.delete(key);
+  }
+
+  private forgetParticipantSubscribedAudioTracks(participantIdentity: string): void {
+    const sources: CallAudioTrackSource[] = ["microphone", "screen_share_audio"];
+    for (const source of sources) {
+      this.subscribedAudioTracks.delete(participantAudioVolumeKey({ participantIdentity, source }));
+    }
+  }
+}
+
+function isVolumeAdjustableTrack(track: RemoteTrack): track is RemoteTrack & VolumeAdjustableTrack {
+  return "setVolume" in track && typeof track.setVolume === "function";
+}
+
+function isCallAudioTrackSource(source: CallTrackSource): source is CallAudioTrackSource {
+  return source === "microphone" || source === "screen_share_audio";
+}
+
+function normalizeParticipantAudioVolume(volume: number): number {
+  if (!Number.isFinite(volume)) return 1;
+  if (volume < 0) return 0;
+  if (volume > 1) return 1;
+  return volume;
 }
 
 function mapKind(kind: Track.Kind): "audio" | "video" | null {

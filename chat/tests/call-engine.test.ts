@@ -1,8 +1,10 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, mock, test } from "bun:test";
 import {
   enableRequestedCapture,
   mapTrackSource,
+  resolveParticipantAudioVolume,
   type CallEngineEvents,
+  type ParticipantAudioVolumeStore,
   type LocalMediaTrack,
   type RemoteMediaTrack,
 } from "../src/lib/calls/engine";
@@ -54,6 +56,26 @@ function screenShareStub(opts: { audioThrows?: Error } = {}) {
 // is exercised by manual smoke tests in the browser per the call PR
 // plan, and by the planned `calls_e2e` integration test on the server.
 describe("call-engine module", () => {
+  test("resolves participant audio volume by identity and source with default full volume", () => {
+    const store: ParticipantAudioVolumeStore = {
+      "bob@waddle.test/desktop:microphone": 0.3,
+      "bob@waddle.test/desktop:screen_share_audio": 0.6,
+    };
+
+    expect(resolveParticipantAudioVolume(store, {
+      participantIdentity: "bob@waddle.test/desktop",
+      source: "microphone",
+    })).toBe(0.3);
+    expect(resolveParticipantAudioVolume(store, {
+      participantIdentity: "bob@waddle.test/desktop",
+      source: "screen_share_audio",
+    })).toBe(0.6);
+    expect(resolveParticipantAudioVolume(store, {
+      participantIdentity: "alice@waddle.test/web",
+      source: "microphone",
+    })).toBe(1);
+  });
+
   test("exports CallEngine class with the expected surface", async () => {
     const mod = await import("../src/lib/calls/engine");
     const engine = new mod.CallEngine();
@@ -221,6 +243,297 @@ describe("call-engine module", () => {
     (engine as unknown as { room: unknown }).room = { localParticipant: participant };
     await expect(engine.setScreenShareEnabled(true, { audio: true })).rejects.toHaveProperty("name", "TypeError");
     expect(participant.calls).toEqual([{ enabled: true, audio: true }]);
+  });
+
+  test("track subscription re-applies the stored participant audio volume", async () => {
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine();
+    const setVolume = mock(() => undefined);
+    engine.setParticipantAudioVolume({
+      participantIdentity: "bob@waddle.test/desktop",
+      source: "microphone",
+      volume: 0.3,
+    });
+
+    (
+      engine as unknown as {
+        handleTrackSubscribed: (track: unknown, publication: unknown, participant: unknown) => void;
+      }
+    ).handleTrackSubscribed(
+      {
+        kind: Track.Kind.Audio,
+        setVolume,
+      },
+      {
+        trackSid: "bob-mic-2",
+        source: Track.Source.Microphone,
+      },
+      { identity: "bob@waddle.test/desktop" },
+    );
+
+    expect(setVolume).toHaveBeenCalledWith(0.3);
+  });
+
+  test("track subscription keeps microphone and screen-share audio volumes independent", async () => {
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine();
+    const setMicVolume = mock(() => undefined);
+    const setShareVolume = mock(() => undefined);
+    engine.setParticipantAudioVolume({
+      participantIdentity: "bob@waddle.test/desktop",
+      source: "microphone",
+      volume: 0.3,
+    });
+    engine.setParticipantAudioVolume({
+      participantIdentity: "bob@waddle.test/desktop",
+      source: "screen_share_audio",
+      volume: 0.6,
+    });
+    const { handleTrackSubscribed } = engine as unknown as {
+      handleTrackSubscribed: (track: unknown, publication: unknown, participant: unknown) => void;
+    };
+
+    handleTrackSubscribed(
+      {
+        kind: Track.Kind.Audio,
+        setVolume: setMicVolume,
+      },
+      {
+        trackSid: "bob-mic",
+        source: Track.Source.Microphone,
+      },
+      { identity: "bob@waddle.test/desktop" },
+    );
+    handleTrackSubscribed(
+      {
+        kind: Track.Kind.Audio,
+        setVolume: setShareVolume,
+      },
+      {
+        trackSid: "bob-share-audio",
+        source: Track.Source.ScreenShareAudio,
+      },
+      { identity: "bob@waddle.test/desktop" },
+    );
+
+    expect(setMicVolume).toHaveBeenCalledWith(0.3);
+    expect(setShareVolume).toHaveBeenCalledWith(0.6);
+  });
+
+  test("setting participant audio volume updates currently subscribed tracks", async () => {
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine();
+    const setVolume = mock(() => undefined);
+    (
+      engine as unknown as {
+        handleTrackSubscribed: (track: unknown, publication: unknown, participant: unknown) => void;
+      }
+    ).handleTrackSubscribed(
+      {
+        kind: Track.Kind.Audio,
+        setVolume,
+      },
+      {
+        trackSid: "bob-mic",
+        source: Track.Source.Microphone,
+      },
+      { identity: "bob@waddle.test/desktop" },
+    );
+
+    engine.setParticipantAudioVolume({
+      participantIdentity: "bob@waddle.test/desktop",
+      source: "microphone",
+      volume: 0.25,
+    });
+
+    expect(setVolume).toHaveBeenLastCalledWith(0.25);
+  });
+
+  test("participant audio volume is clamped before storing and applying", async () => {
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine();
+    const setVolume = mock(() => undefined);
+    engine.setParticipantAudioVolume({
+      participantIdentity: "bob@waddle.test/desktop",
+      source: "microphone",
+      volume: 30,
+    });
+    (
+      engine as unknown as {
+        handleTrackSubscribed: (track: unknown, publication: unknown, participant: unknown) => void;
+      }
+    ).handleTrackSubscribed(
+      {
+        kind: Track.Kind.Audio,
+        setVolume,
+      },
+      {
+        trackSid: "bob-mic",
+        source: Track.Source.Microphone,
+      },
+      { identity: "bob@waddle.test/desktop" },
+    );
+
+    expect(setVolume).toHaveBeenCalledWith(1);
+    engine.setParticipantAudioVolume({
+      participantIdentity: "bob@waddle.test/desktop",
+      source: "microphone",
+      volume: -1,
+    });
+    expect(setVolume).toHaveBeenLastCalledWith(0);
+    engine.setParticipantAudioVolume({
+      participantIdentity: "bob@waddle.test/desktop",
+      source: "microphone",
+      volume: Number.NaN,
+    });
+    expect(setVolume).toHaveBeenLastCalledWith(1);
+  });
+
+  test("participant disconnect drops stale subscribed audio track references", async () => {
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine();
+    const setVolume = mock(() => undefined);
+    (
+      engine as unknown as {
+        handleTrackSubscribed: (track: unknown, publication: unknown, participant: unknown) => void;
+      }
+    ).handleTrackSubscribed(
+      {
+        kind: Track.Kind.Audio,
+        setVolume,
+      },
+      {
+        trackSid: "bob-mic",
+        source: Track.Source.Microphone,
+      },
+      { identity: "bob@waddle.test/desktop" },
+    );
+    (
+      engine as unknown as {
+        handleParticipantDisconnected: (participant: unknown) => void;
+      }
+    ).handleParticipantDisconnected({ identity: "bob@waddle.test/desktop" });
+
+    engine.setParticipantAudioVolume({
+      participantIdentity: "bob@waddle.test/desktop",
+      source: "microphone",
+      volume: 0.25,
+    });
+
+    expect(setVolume).not.toHaveBeenLastCalledWith(0.25);
+  });
+
+  test("participant disconnect only drops exact identity audio track references", async () => {
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine();
+    const disconnectedSetVolume = mock(() => undefined);
+    const activeSetVolume = mock(() => undefined);
+    const { handleTrackSubscribed, handleParticipantDisconnected } = engine as unknown as {
+      handleTrackSubscribed: (track: unknown, publication: unknown, participant: unknown) => void;
+      handleParticipantDisconnected: (participant: unknown) => void;
+    };
+    handleTrackSubscribed(
+      {
+        kind: Track.Kind.Audio,
+        setVolume: disconnectedSetVolume,
+      },
+      {
+        trackSid: "alice-app-mic",
+        source: Track.Source.Microphone,
+      },
+      { identity: "alice@waddle.test/app" },
+    );
+    handleTrackSubscribed(
+      {
+        kind: Track.Kind.Audio,
+        setVolume: activeSetVolume,
+      },
+      {
+        trackSid: "alice-app-phone-mic",
+        source: Track.Source.Microphone,
+      },
+      { identity: "alice@waddle.test/app:phone" },
+    );
+
+    handleParticipantDisconnected({ identity: "alice@waddle.test/app" });
+    engine.setParticipantAudioVolume({
+      participantIdentity: "alice@waddle.test/app:phone",
+      source: "microphone",
+      volume: 0.25,
+    });
+    engine.setParticipantAudioVolume({
+      participantIdentity: "alice@waddle.test/app",
+      source: "microphone",
+      volume: 0.4,
+    });
+
+    expect(activeSetVolume).toHaveBeenLastCalledWith(0.25);
+    expect(disconnectedSetVolume).not.toHaveBeenLastCalledWith(0.4);
+  });
+
+  test("disconnect clears stored participant audio volumes for the next call", async () => {
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine();
+    const stubRoom = {
+      off: () => stubRoom,
+      disconnect: async () => undefined,
+    };
+    const setVolume = mock(() => undefined);
+    engine.setParticipantAudioVolume({
+      participantIdentity: "bob@waddle.test/desktop",
+      source: "microphone",
+      volume: 0.3,
+    });
+    (engine as unknown as { room: typeof stubRoom }).room = stubRoom;
+
+    await engine.disconnect();
+    (
+      engine as unknown as {
+        handleTrackSubscribed: (track: unknown, publication: unknown, participant: unknown) => void;
+      }
+    ).handleTrackSubscribed(
+      {
+        kind: Track.Kind.Audio,
+        setVolume,
+      },
+      {
+        trackSid: "bob-mic-next-call",
+        source: Track.Source.Microphone,
+      },
+      { identity: "bob@waddle.test/desktop" },
+    );
+
+    expect(setVolume).toHaveBeenCalledWith(1);
+  });
+
+  test("disconnect without a room does not clear pre-connected participant audio volumes", async () => {
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine();
+    const setVolume = mock(() => undefined);
+    engine.setParticipantAudioVolume({
+      participantIdentity: "bob@waddle.test/desktop",
+      source: "microphone",
+      volume: 0.3,
+    });
+
+    await engine.disconnect();
+    (
+      engine as unknown as {
+        handleTrackSubscribed: (track: unknown, publication: unknown, participant: unknown) => void;
+      }
+    ).handleTrackSubscribed(
+      {
+        kind: Track.Kind.Audio,
+        setVolume,
+      },
+      {
+        trackSid: "bob-mic",
+        source: Track.Source.Microphone,
+      },
+      { identity: "bob@waddle.test/desktop" },
+    );
+
+    expect(setVolume).toHaveBeenCalledWith(0.3);
   });
 });
 
