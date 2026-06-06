@@ -77,7 +77,7 @@ const {
   communityEvents,
 } = props.controller;
 
-function selectCommunitySurface(surface: "feed" | "stories" | "events") {
+function selectCommunitySurface(surface: "feed" | "events") {
   openCommunitySurface(surface);
 }
 

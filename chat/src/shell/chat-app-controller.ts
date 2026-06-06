@@ -1197,7 +1197,7 @@ export function useChatAppController(giphyApiKey: string) {
     // watcher firing while activeCommunitySurface is set must not
     // bounce the URL back to channel/home before the surface clears.
     const surface = ui.activeCommunitySurface.value;
-    if (surface === "feed" || surface === "stories" || surface === "events") {
+    if (surface === "feed" || surface === "events") {
       navigate({ id: surface });
       return;
     }
@@ -1374,7 +1374,7 @@ export function useChatAppController(giphyApiKey: string) {
     ui.showMobileNav.value = false;
     ui.showMobileDetails.value = false;
     ui.activePage.value = "threads";
-    // ChatReadyShell renders FeedPane / StoriesPane / EventsPane on
+    // ChatReadyShell renders FeedPane / EventsPane on
     // `activeCommunitySurface` v-else-if branches BEFORE the threads
     // branch — leaving the surface non-null would let one of those win
     // and ThreadsView would silently not render even though the URL
@@ -1409,15 +1409,15 @@ export function useChatAppController(giphyApiKey: string) {
   }
 
   /**
-   * Navigate to a community surface — Feed / Stories / Events. These
-   * are first-class routes (`/feed`, `/stories`, `/events`) but they
+   * Navigate to a community surface — Feed / Events. These
+   * are first-class routes (`/feed`, `/events`) but they
    * also need the in-page state set immediately so the v-else-if
    * branches in ChatReadyShell re-render this tick. `pushState` (via
    * `navigate()`) doesn't fire `popstate`, so the controller's
    * popstate-driven state sync only covers back/forward; in-app
    * clicks need to mirror what `applyRouteTarget` would do.
    */
-  function openCommunitySurface(surface: "feed" | "stories" | "events") {
+  function openCommunitySurface(surface: "feed" | "events") {
     clearPendingChannelRoomJidSelection();
     ui.showMobileNav.value = false;
     ui.showMobileDetails.value = false;
@@ -1527,7 +1527,7 @@ export function useChatAppController(giphyApiKey: string) {
     }
     ui.activeCommunitySurface.value =
       match.id === "feed" || match.id === "stories" || match.id === "events"
-        ? match.id
+        ? match.id === "stories" ? "feed" : match.id
         : null;
     ui.sidebarMode.value =
       match.id === "dm" || match.id === "dmList" ? "dms" : "channels";
@@ -1559,6 +1559,9 @@ export function useChatAppController(giphyApiKey: string) {
   async function applyRouteTarget(match: RouteMatch, requestId: number) {
     clearPendingChannelRoomJidSelection();
     applyMatchToShellState(match);
+    if (match.id === "stories") {
+      navigate({ id: "feed" }, { replace: true });
+    }
     // Routes that don't reference a specific channel/DM target also
     // drop the chat-context state. (Channel/extension/dm routes set
     // their own context further down.)

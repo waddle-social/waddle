@@ -2874,15 +2874,15 @@ describe("CallActivityDock rendering", () => {
       },
     });
 
-    setupBindingFunction(bindings, "selectCommunitySurface")("stories");
+    setupBindingFunction(bindings, "selectCommunitySurface")("feed");
 
-    expect(selected).toEqual([["stories"]]);
+    expect(selected).toEqual([["feed"]]);
   });
 
   test("mobile drawer preserves room JID when channel call rows open or return", async () => {
     const selected: unknown[][] = [];
     const ui = {
-      activeCommunitySurface: { value: "stories" },
+      activeCommunitySurface: { value: "feed" },
     };
     const bindings = await setupVueComponent("../src/components/chat/ChatMobileDrawers.vue", {
       controller: {
@@ -2907,7 +2907,7 @@ describe("CallActivityDock rendering", () => {
   test("mobile drawer opens refreshed group call rows by room JID", async () => {
     const selected: unknown[][] = [];
     const ui = {
-      activeCommunitySurface: { value: "stories" },
+      activeCommunitySurface: { value: "feed" },
     };
     const bindings = await setupVueComponent("../src/components/chat/ChatMobileDrawers.vue", {
       controller: {
