@@ -31,8 +31,10 @@ const secondaryButtonClass = "chat-action-button chat-action-button--secondary t
 const draft = reactive<VCard4Draft>(draftFromProfile(null));
 const loading = ref(false);
 const saving = ref(false);
+const profileLoaded = ref(false);
 /** Last value seen from the server — the rollback target on save failure. */
 const lastPersisted = ref<VCard4Profile>({});
+let profileLoadRequestId = 0;
 const feedback = ref<VCardFeedback>({
   tone: "muted",
   message: "Add your name, nickname, pronouns, bio, and a link — publish to share over XMPP.",
@@ -45,10 +47,15 @@ function applyDraft(profile: VCard4Profile) {
   draft.pronouns = next.pronouns;
   draft.note = next.note;
   draft.url = next.url;
+  draft.photoUri = next.photoUri;
 }
 
 async function loadProfile() {
-  if (!props.xmppClient) {
+  const requestId = ++profileLoadRequestId;
+  const client = props.xmppClient;
+  const selfJid = props.selfJid;
+  if (!client) {
+    profileLoaded.value = false;
     feedback.value = {
       tone: "muted",
       message: "Reconnect to load your profile.",
@@ -57,10 +64,18 @@ async function loadProfile() {
   }
   loading.value = true;
   try {
-    const profile = await props.xmppClient.fetchVCard4(props.selfJid);
+    const profile = await client.fetchVCard4(selfJid);
+    if (
+      requestId !== profileLoadRequestId ||
+      client !== props.xmppClient ||
+      selfJid !== props.selfJid
+    ) {
+      return;
+    }
     const next = profile ?? {};
     lastPersisted.value = next;
     applyDraft(next);
+    profileLoaded.value = true;
     feedback.value = profile
       ? {
           tone: "muted",
@@ -71,6 +86,14 @@ async function loadProfile() {
           message: "No profile saved yet — fill in what you want to share.",
         };
   } catch (error) {
+    if (
+      requestId !== profileLoadRequestId ||
+      client !== props.xmppClient ||
+      selfJid !== props.selfJid
+    ) {
+      return;
+    }
+    profileLoaded.value = false;
     feedback.value = {
       tone: "error",
       message: error instanceof Error
@@ -78,7 +101,13 @@ async function loadProfile() {
         : "Couldn't load your profile.",
     };
   } finally {
-    loading.value = false;
+    if (
+      requestId === profileLoadRequestId &&
+      client === props.xmppClient &&
+      selfJid === props.selfJid
+    ) {
+      loading.value = false;
+    }
   }
 }
 
@@ -87,11 +116,24 @@ onMounted(() => {
 });
 
 watch(
-  () => props.xmppClient,
-  (client, previous) => {
-    if (client && client !== previous) {
-      void loadProfile();
+  () => [props.xmppClient, props.selfJid] as const,
+  ([client, selfJid], [previousClient, previousSelfJid]) => {
+    if (client === previousClient && selfJid === previousSelfJid) {
+      return;
     }
+    profileLoaded.value = false;
+    lastPersisted.value = {};
+    applyDraft({});
+    if (!client) {
+      profileLoadRequestId += 1;
+      loading.value = false;
+      feedback.value = {
+        tone: "muted",
+        message: "Reconnect to load your profile.",
+      };
+      return;
+    }
+    void loadProfile();
   },
 );
 
@@ -100,6 +142,13 @@ async function saveProfile() {
     feedback.value = {
       tone: "error",
       message: "Reconnect before publishing your profile.",
+    };
+    return;
+  }
+  if (!profileLoaded.value) {
+    feedback.value = {
+      tone: "error",
+      message: "Load your saved profile before publishing changes.",
     };
     return;
   }
@@ -252,7 +301,7 @@ function feedbackClass(tone: FeedbackTone): string {
         <button
           type="submit"
           :class="primaryButtonClass"
-          :disabled="loading || saving || !xmppClient"
+          :disabled="loading || saving || !xmppClient || !profileLoaded"
           data-testid="vcard4-save"
         >
           {{ saving ? "Publishing…" : "Save profile" }}

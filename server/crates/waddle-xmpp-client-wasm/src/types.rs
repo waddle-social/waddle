@@ -760,6 +760,8 @@ pub struct WaddleVCard4 {
     pub note: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub photo_uri: Option<String>,
 }
 
 /// One XEP-0490 §3 displayed entry surfaced to the chat client.

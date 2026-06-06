@@ -4,26 +4,23 @@ import {
   Briefcase,
   CalendarCheck,
   Camera,
-  ChevronLeft,
-  ChevronRight,
   Film,
   IdCard,
   Inbox,
   Menu,
   MessageSquareText,
   Music,
-  Plus,
   RefreshCw,
-  Send,
   Smile,
   User,
-  X,
 } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import Skeleton from "@/components/ui/Skeleton.vue";
-import StoryComposer from "@/components/community/StoryComposer.vue";
-import { connectionStore } from "@/lib/connection-store";
-import { QUICK_REACTION_EMOJIS } from "@/lib/reaction-mode";
+import FeedUpdateComposer from "@/components/community/FeedUpdateComposer.vue";
+import StoryReaderDialog from "@/components/community/StoryReaderDialog.vue";
+import type { FeedSurfaceComposerMode, FeedSurfaceFilter } from "@/shell/state";
+import type { ActivityPublication, MoodPublication, TunePublication } from "@/lib/xmpp/pep-types";
+import type { VCard4Profile } from "@/lib/xmpp/vcard4-types";
 import type { FeedEntry, FeedPostInput, FeedSourceKind, Story, StoryPostInput, StoryReactionSummary } from "@/lib/xmpp-client";
 
 const SOURCE_ICONS = {
@@ -105,33 +102,47 @@ interface FeedPaneProps {
   selfJid: string | null;
   isStoryRead?: (id: string) => boolean;
   reactionSummary?: (id: string) => StoryReactionSummary;
+  initialFilter?: FeedSurfaceFilter;
+  initialComposerMode?: FeedSurfaceComposerMode;
+  publishPost?: (input: FeedPostInput) => Promise<unknown>;
+  publishStory?: (input: StoryPostInput) => Promise<unknown>;
+  publishMood?: (input: MoodPublication) => Promise<void>;
+  publishActivity?: (input: ActivityPublication) => Promise<void>;
+  publishTune?: (input: TunePublication) => Promise<void>;
+  fetchProfile?: () => Promise<VCard4Profile | null>;
+  publishProfile?: (input: VCard4Profile) => Promise<void>;
 }
 
 const props = withDefaults(defineProps<FeedPaneProps>(), {
   isStoryRead: () => () => false,
   reactionSummary: () => () => ({ counts: {}, reactors: {}, mine: [] }),
+  initialFilter: "all",
+  initialComposerMode: "post",
 });
 const emit = defineEmits<{
   refresh: [];
-  post: [input: FeedPostInput];
-  postStory: [input: StoryPostInput];
   storySelected: [id: string];
   react: [id: string, emoji: string];
   openNav: [];
 }>();
 
-const composerBody = ref("");
-const storyComposerOpen = ref(false);
-const storyComposerError = ref<string | null>(null);
-const storyComposerBusy = ref(false);
-const activeStoryIndex = ref<number | null>(null);
-const activeFilter = ref<"all" | "pep" | "stories" | "posts">("all");
-const COMPOSER_MAX = 500;
+const activeStoryId = ref<string | null>(null);
+const activeFilter = ref<FeedSurfaceFilter>(props.initialFilter);
 
 watch(activeFilter, (filter) => {
   if (filter === "pep" || filter === "posts") {
-    activeStoryIndex.value = null;
-    storyComposerOpen.value = false;
+    activeStoryId.value = null;
+  }
+});
+
+watch(() => props.initialFilter, (filter) => {
+  activeFilter.value = filter;
+});
+
+watch(() => props.stories, (stories) => {
+  const id = activeStoryId.value;
+  if (id && !stories.some((story) => story.id === id)) {
+    activeStoryId.value = null;
   }
 });
 
@@ -164,19 +175,6 @@ function listedAgo(story: Story): string {
 function authorLabel(author: string | undefined): string {
   if (!author) return "Anonymous";
   return author.split("@")[0] ?? author;
-}
-
-const canSubmit = computed(() => {
-  return props.canPost && !props.isPosting && composerBody.value.trim().length > 0;
-});
-
-const composerOver = computed(() => composerBody.value.length > COMPOSER_MAX);
-
-function submit() {
-  const body = composerBody.value.trim();
-  if (!body || composerOver.value) return;
-  emit("post", { body, ...(props.selfJid ? { author: props.selfJid.split("/")[0] } : {}) });
-  composerBody.value = "";
 }
 
 type FeedItem =
@@ -216,9 +214,16 @@ const filters = computed(() => [
   { id: "posts" as const, label: "Posts", count: props.entries.filter((entry) => !entry.source).length },
 ]);
 
+const activeStoryIndex = computed<number | null>(() => {
+  const id = activeStoryId.value;
+  if (!id) return null;
+  const index = props.stories.findIndex((story) => story.id === id);
+  return index >= 0 ? index : null;
+});
+
 const activeStory = computed<Story | null>(() => {
-  if (activeStoryIndex.value === null) return null;
-  return props.stories[activeStoryIndex.value] ?? null;
+  const index = activeStoryIndex.value;
+  return index === null ? null : props.stories[index] ?? null;
 });
 
 const activeReactionSummary = computed(() => activeStory.value ? props.reactionSummary(activeStory.value.id) : null);
@@ -243,46 +248,26 @@ function isVideoStory(story: Story): boolean {
 }
 
 function selectStory(index: number) {
-  activeStoryIndex.value = index;
   const story = props.stories[index];
-  if (story?.id) emit("storySelected", story.id);
+  if (!story?.id) return;
+  activeStoryId.value = story.id;
+  emit("storySelected", story.id);
 }
 
 function closeReader() {
-  activeStoryIndex.value = null;
+  activeStoryId.value = null;
 }
 
 function prevStory() {
-  if (activeStoryIndex.value === null || activeStoryIndex.value <= 0) return;
-  selectStory(activeStoryIndex.value - 1);
+  const index = activeStoryIndex.value;
+  if (index === null || index <= 0) return;
+  selectStory(index - 1);
 }
 
 function nextStory() {
-  if (activeStoryIndex.value === null || activeStoryIndex.value >= props.stories.length - 1) return;
-  selectStory(activeStoryIndex.value + 1);
-}
-
-async function handleStorySubmit(payload: { body?: string; file: Blob; mediaKind: "image" | "video" }) {
-  const client = connectionStore.client;
-  if (!client) {
-    storyComposerError.value = "Not connected.";
-    return;
-  }
-  storyComposerError.value = null;
-  storyComposerBusy.value = true;
-  try {
-    const uploaded = await client.uploadStoryMedia(payload.file);
-    emit("postStory", {
-      ...(payload.body ? { body: payload.body } : {}),
-      mediaUrl: uploaded.url,
-      ...(props.selfJid ? { author: props.selfJid.split("/")[0] } : {}),
-    });
-    storyComposerOpen.value = false;
-  } catch (err) {
-    storyComposerError.value = err instanceof Error ? err.message : "Couldn't upload — please try again.";
-  } finally {
-    storyComposerBusy.value = false;
-  }
+  const index = activeStoryIndex.value;
+  if (index === null || index >= props.stories.length - 1) return;
+  selectStory(index + 1);
 }
 
 function toggleReaction(emoji: string) {
@@ -338,56 +323,19 @@ function toggleReaction(emoji: string) {
         </button>
       </div>
 
-      <form
-        v-if="canPost && activeFilter !== 'stories' && activeFilter !== 'pep'"
-        class="grid gap-3 rounded-xl border border-border bg-card p-4 shadow-sm focus-within:ring-1 focus-within:ring-ring/40"
-        @submit.prevent="submit"
-      >
-        <div class="flex items-start gap-3">
-          <AppAvatar :name="authorLabel(selfJid ?? '')" :src="null" size="md" />
-          <textarea
-            v-model="composerBody"
-            class="min-h-[4rem] w-full resize-y rounded-lg border border-input bg-background px-3 py-2.5 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-            placeholder="Share something with the community…"
-            :disabled="isPosting"
-            aria-label="Feed post body"
-          />
-        </div>
-        <div class="flex items-center justify-between gap-2 pl-[3.25rem]">
-          <span
-            class="type-caption"
-            :class="composerOver ? 'text-destructive' : 'text-muted-foreground'"
-          >
-            {{ composerBody.length }} / {{ COMPOSER_MAX }}
-          </span>
-          <button
-            type="submit"
-            class="inline-flex items-center gap-1.5 rounded-md bg-primary px-3.5 py-1.5 text-xs font-medium text-primary-foreground shadow-sm transition-opacity hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-60"
-            :disabled="!canSubmit || composerOver"
-          >
-            <Send class="h-3.5 w-3.5" aria-hidden="true" />
-            {{ isPosting ? "Posting…" : "Post" }}
-          </button>
-        </div>
-      </form>
-
-      <div v-if="canPost && activeFilter !== 'pep' && activeFilter !== 'posts'" class="rounded-xl border border-dashed border-border bg-card/70 p-3">
-        <button
-          type="button"
-          class="inline-flex items-center gap-2 rounded-md border border-input px-3 py-2 text-sm text-foreground hover:border-primary/60 hover:bg-muted/50 hover:text-primary"
-          :disabled="isStoryPosting"
-          @click="storyComposerOpen = !storyComposerOpen"
-        >
-          <Plus class="h-4 w-4" aria-hidden="true" />
-          {{ storyComposerOpen ? "Close story composer" : "Add story" }}
-        </button>
-      </div>
-
-      <StoryComposer
-        v-if="storyComposerOpen && activeFilter !== 'pep' && activeFilter !== 'posts'"
-        :busy="storyComposerBusy || isStoryPosting"
-        @submit="handleStorySubmit"
-        @cancel="storyComposerOpen = false; storyComposerError = null"
+      <FeedUpdateComposer
+        v-if="canPost"
+        :self-jid="selfJid"
+        :is-posting="isPosting"
+        :is-story-posting="isStoryPosting"
+        :publish-post="publishPost"
+        :publish-story="publishStory"
+        :initial-mode="initialComposerMode"
+        :publish-mood="publishMood"
+        :publish-activity="publishActivity"
+        :publish-tune="publishTune"
+        :fetch-profile="fetchProfile"
+        :publish-profile="publishProfile"
       />
 
       <div
@@ -402,10 +350,6 @@ function toggleReaction(emoji: string) {
       >
         Couldn't load stories: {{ storiesError }}
       </div>
-      <div v-if="storyComposerError" class="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-        {{ storyComposerError }}
-      </div>
-
       <div class="grid gap-3">
         <article
           v-for="item in feedItems"
@@ -556,99 +500,18 @@ function toggleReaction(emoji: string) {
         </div>
       </div>
 
-      <article
-        v-if="activeStory && activeFilter !== 'pep' && activeFilter !== 'posts'"
-        class="grid gap-3 rounded-xl border border-border bg-card p-4"
-      >
-        <header class="flex items-center gap-3">
-          <AppAvatar :name="authorLabel(activeStory.author)" :src="null" size="sm" />
-          <div class="min-w-0 flex-1">
-            <p class="type-control truncate text-foreground">{{ authorLabel(activeStory.author) }}</p>
-            <p v-if="listedAgo(activeStory)" class="type-caption text-muted-foreground">
-              {{ listedAgo(activeStory) }}
-            </p>
-          </div>
-          <button
-            type="button"
-            class="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted/70 hover:text-foreground"
-            aria-label="Close story"
-            @click="closeReader"
-          >
-            <X class="h-4 w-4" aria-hidden="true" />
-          </button>
-        </header>
-
-        <video
-          v-if="activeStory.mediaUrl && isVideoStory(activeStory)"
-          :src="activeStory.mediaUrl"
-          class="max-h-[60vh] w-full rounded-md"
-          controls
-          playsinline
-          referrerpolicy="no-referrer"
-        ></video>
-        <img
-          v-else-if="activeStory.mediaUrl"
-          :src="activeStory.mediaUrl"
-          :alt="`Story media from ${authorLabel(activeStory.author)}`"
-          class="max-h-[60vh] w-full rounded-md object-contain"
-          referrerpolicy="no-referrer"
-        />
-        <p v-if="activeStory.body" class="whitespace-pre-wrap break-words text-sm text-foreground">
-          {{ activeStory.body }}
-        </p>
-
-        <div class="grid gap-2 border-t border-border pt-3">
-          <div class="flex flex-wrap items-center gap-1.5">
-            <button
-              v-for="emoji in QUICK_REACTION_EMOJIS"
-              :key="emoji"
-              type="button"
-              class="inline-flex h-8 min-w-8 items-center justify-center rounded-md border px-2 text-sm hover:bg-muted/60"
-              :class="activeReactionSummary?.mine.includes(emoji) ? 'border-primary bg-primary/10 text-primary' : 'border-input text-foreground'"
-              :aria-label="`React with ${emoji}`"
-              :aria-pressed="activeReactionSummary?.mine.includes(emoji) ? 'true' : 'false'"
-              @click="toggleReaction(emoji)"
-            >
-              {{ emoji }}
-            </button>
-          </div>
-          <div v-if="activeReactionEntries.length > 0" class="flex flex-wrap gap-1.5">
-            <span
-              v-for="entry in activeReactionEntries"
-              :key="entry.emoji"
-              class="inline-flex items-center gap-1 rounded-md border border-border bg-muted/40 px-2 py-1 text-xs text-foreground"
-              :title="entry.reactors.join(', ')"
-            >
-              <span>{{ entry.emoji }}</span>
-              <span class="text-muted-foreground">{{ entry.count }}</span>
-            </span>
-          </div>
-        </div>
-
-        <div class="flex items-center justify-between gap-2 border-t border-border pt-3">
-          <button
-            type="button"
-            class="inline-flex items-center gap-1 rounded-md border border-input px-3 py-1.5 text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
-            :disabled="activeStoryIndex === null || activeStoryIndex <= 0"
-            @click="prevStory"
-          >
-            <ChevronLeft class="h-3.5 w-3.5" aria-hidden="true" />
-            Prev
-          </button>
-          <span class="type-caption text-muted-foreground" v-if="activeStoryIndex !== null">
-            {{ activeStoryIndex + 1 }} / {{ stories.length }}
-          </span>
-          <button
-            type="button"
-            class="inline-flex items-center gap-1 rounded-md border border-input px-3 py-1.5 text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
-            :disabled="activeStoryIndex === null || activeStoryIndex >= stories.length - 1"
-            @click="nextStory"
-          >
-            Next
-            <ChevronRight class="h-3.5 w-3.5" aria-hidden="true" />
-          </button>
-        </div>
-      </article>
     </div>
   </div>
+
+  <StoryReaderDialog
+    :story="activeStory"
+    :story-index="activeStoryIndex"
+    :story-count="stories.length"
+    :reaction-summary="activeReactionSummary"
+    :reaction-entries="activeReactionEntries"
+    @close="closeReader"
+    @previous="prevStory"
+    @next="nextStory"
+    @react="toggleReaction"
+  />
 </template>

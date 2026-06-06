@@ -2747,6 +2747,7 @@ export class BrowserXmppClient {
     if (payload.pronouns) profile.pronouns = payload.pronouns;
     if (payload.note) profile.note = payload.note;
     if (payload.url) profile.url = payload.url;
+    if (payload.photo_uri) profile.photoUri = payload.photo_uri;
     return profile;
   }
   async publishVCard4(profile: VCard4Profile): Promise<void> {
@@ -2757,6 +2758,7 @@ export class BrowserXmppClient {
     if (profile.pronouns) payload.pronouns = profile.pronouns;
     if (profile.note) payload.note = profile.note;
     if (profile.url) payload.url = profile.url;
+    if (profile.photoUri) payload.photo_uri = profile.photoUri;
     await xmpp.publish_vcard4?.(payload);
   }
 

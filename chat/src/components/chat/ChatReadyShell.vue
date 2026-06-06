@@ -52,6 +52,9 @@ import { buildHomeDashboardProps } from "@/home/dashboard-props";
 import { jidDomain } from "@/lib/xmpp/jid";
 import type { ChatAppController } from "@/shell/chat-app-controller";
 import type { DiscoveredExtensionRoute } from "@/lib/xmpp/extension-commands";
+import type { FeedPostInput, StoryPostInput } from "@/lib/xmpp-client";
+import type { ActivityPublication, MoodPublication, TunePublication } from "@/lib/xmpp/pep-types";
+import type { VCard4Profile } from "@/lib/xmpp/vcard4-types";
 import { installMessageToolbarLifecycleSuppression } from "@/stores/message-toolbar";
 
 const props = defineProps<{
@@ -288,6 +291,60 @@ async function lookupActiveChannelLinkPreview(body: string) {
   const roomJid = activeChannelRoomJid.value;
   if (!client || !roomJid) return null;
   return client.lookupLinkPreview(body, roomJid);
+}
+
+function requireFeedPepClient() {
+  const client = xmppClient.value;
+  if (!client) {
+    throw new Error("Reconnect before publishing this update.");
+  }
+  return client;
+}
+
+async function refreshFeedAfterPepPublish(): Promise<void> {
+  await socialFeed.refresh();
+}
+
+async function publishFeedPost(input: FeedPostInput): Promise<void> {
+  const entry = await socialFeed.post(input);
+  if (!entry) {
+    throw new Error(socialFeed.error.value ?? "Couldn't publish post.");
+  }
+}
+
+async function publishFeedStory(input: StoryPostInput): Promise<void> {
+  const story = await stories.post(input);
+  if (!story) {
+    throw new Error(stories.error.value ?? "Couldn't publish story.");
+  }
+}
+
+async function publishFeedMood(input: MoodPublication): Promise<void> {
+  await requireFeedPepClient().publishMood(input);
+  await refreshFeedAfterPepPublish();
+}
+
+async function publishFeedActivity(input: ActivityPublication): Promise<void> {
+  await requireFeedPepClient().publishActivity(input);
+  await refreshFeedAfterPepPublish();
+}
+
+async function publishFeedTune(input: TunePublication): Promise<void> {
+  await requireFeedPepClient().publishTune(input);
+  await refreshFeedAfterPepPublish();
+}
+
+async function fetchFeedProfile(): Promise<VCard4Profile | null> {
+  const selfJid = connectionStore.session?.jid;
+  if (!selfJid) {
+    throw new Error("Reconnect before loading your profile.");
+  }
+  return requireFeedPepClient().fetchVCard4(selfJid);
+}
+
+async function publishFeedProfile(input: VCard4Profile): Promise<void> {
+  await requireFeedPepClient().publishVCard4(input);
+  await refreshFeedAfterPepPublish();
 }
 
 function getCallSender(): CallWireSender | null {
@@ -615,9 +672,16 @@ onUnmounted(() => {
         :self-jid="connectionStore.session?.jid ?? null"
         :is-story-read="stories.isStoryRead"
         :reaction-summary="stories.reactionSummary"
+        :initial-filter="ui.feedDefaultFilter.value"
+        :initial-composer-mode="ui.feedDefaultComposerMode.value"
+        :publish-post="publishFeedPost"
+        :publish-story="publishFeedStory"
+        :publish-mood="publishFeedMood"
+        :publish-activity="publishFeedActivity"
+        :publish-tune="publishFeedTune"
+        :fetch-profile="fetchFeedProfile"
+        :publish-profile="publishFeedProfile"
         @refresh="socialFeed.refresh(); stories.refresh()"
-        @post="(input) => socialFeed.post(input)"
-        @post-story="(input) => stories.post(input)"
         @story-selected="(id) => stories.markStoryRead(id)"
         @react="(id, emoji) => stories.toggleReaction(id, emoji)"
         @open-nav="ui.showMobileNav.value = true"

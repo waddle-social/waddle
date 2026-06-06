@@ -10,11 +10,14 @@ interface StoryComposerProps {
   busy?: boolean;
   /** Hard size cap from XEP-0363 service. */
   maxBytes?: number;
+  /** Removes the outer card chrome when nested inside a parent composer. */
+  embedded?: boolean;
 }
 
 const props = withDefaults(defineProps<StoryComposerProps>(), {
   busy: false,
   maxBytes: 10 * 1024 * 1024,
+  embedded: false,
 });
 
 const emit = defineEmits<{
@@ -349,7 +352,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="grid gap-3 rounded-lg border border-border bg-card p-3">
+  <section :class="embedded ? 'grid gap-3' : 'grid gap-3 rounded-lg border border-border bg-card p-3'">
     <div role="tablist" aria-label="Composer mode" class="flex gap-1 rounded-md bg-muted/40 p-1">
       <button
         type="button"

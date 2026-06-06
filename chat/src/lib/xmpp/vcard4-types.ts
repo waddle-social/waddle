@@ -18,6 +18,8 @@ export interface VCard4Profile {
   pronouns?: string;
   note?: string;
   url?: string;
+  /** Preserved vCard4 PHOTO URI, usually mirrored from XEP-0084 avatar publishing. */
+  photoUri?: string;
 }
 
 /** Mutable draft used by the editor while the user is typing. */
@@ -27,17 +29,20 @@ export interface VCard4Draft {
   pronouns: string;
   note: string;
   url: string;
+  photoUri?: string;
 }
 
 /** Returns a fresh draft seeded from `profile`, defaulting absent fields to "". */
 export function draftFromProfile(profile: VCard4Profile | null): VCard4Draft {
-  return {
+  const draft: VCard4Draft = {
     fullName: profile?.fullName ?? "",
     nickname: profile?.nickname ?? "",
     pronouns: profile?.pronouns ?? "",
     note: profile?.note ?? "",
     url: profile?.url ?? "",
   };
+  if (profile?.photoUri) draft.photoUri = profile.photoUri;
+  return draft;
 }
 
 /** Snapshots a draft as a profile, trimming whitespace and dropping empties. */
@@ -52,6 +57,7 @@ export function profileFromDraft(draft: VCard4Draft): VCard4Profile {
   apply("pronouns", draft.pronouns);
   apply("note", draft.note);
   apply("url", draft.url);
+  if (draft.photoUri) profile.photoUri = draft.photoUri;
   return profile;
 }
 
@@ -62,6 +68,7 @@ export function profilesEqual(a: VCard4Profile, b: VCard4Profile): boolean {
     (a.nickname ?? "") === (b.nickname ?? "") &&
     (a.pronouns ?? "") === (b.pronouns ?? "") &&
     (a.note ?? "") === (b.note ?? "") &&
-    (a.url ?? "") === (b.url ?? "")
+    (a.url ?? "") === (b.url ?? "") &&
+    (a.photoUri ?? "") === (b.photoUri ?? "")
   );
 }
