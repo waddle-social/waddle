@@ -1661,6 +1661,10 @@ async fn cleanup_story_attachment_state(
         .map_err(|_| PubSubError::InternalServerError)?;
 
     let summary_node = story_attachment_summary_node();
+    storage
+        .retract_item(community_jid, &summary_node, story_id)
+        .await
+        .map_err(|_| PubSubError::InternalServerError)?;
     pubsub_fanout::fan_out_retract(
         state,
         pubsub_fanout::FanOutRetractRequest {
@@ -1670,10 +1674,6 @@ async fn cleanup_story_attachment_state(
         },
     )
     .await;
-    storage
-        .retract_item(community_jid, &summary_node, story_id)
-        .await
-        .map_err(|_| PubSubError::InternalServerError)?;
     Ok(())
 }
 

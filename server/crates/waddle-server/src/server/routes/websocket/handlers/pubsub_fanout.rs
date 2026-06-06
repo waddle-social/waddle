@@ -457,7 +457,14 @@ pub async fn fan_out_retract(state: &WebSocketState, req: FanOutRetractRequest<'
                         );
                     }
                 }
-                BroadcastOutcome::DroppedFull => {}
+                BroadcastOutcome::DroppedFull => {
+                    warn!(
+                        resource = %resource,
+                        node = req.node,
+                        item_id = req.item_id,
+                        "Retract fan-out dropped: subscriber channel full"
+                    );
+                }
             }
         }
     }
