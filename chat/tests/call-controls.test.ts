@@ -4,8 +4,10 @@ import { $callState, clearCallState } from "../src/lib/calls/call-store";
 import {
   $callCamEnabled,
   $callScreenShareEnabled,
+  $callScreenShareSupported,
   $callMicEnabled,
   installCallPagehideSuspension,
+  refreshScreenShareSupported,
   resetCallControls,
   seedCallControlsFromEngine,
   suspendCallForPageHide,
@@ -72,9 +74,32 @@ afterEach(() => {
   connectionStore.client = null;
   clearAllMediaIssues();
   $callScreenShareEnabled.set(false);
+  $callScreenShareSupported.set(false);
   // The engine is a process-wide singleton; drop any injected room
   // stub so it doesn't leak into the next test.
   (useCallEngine().engine as unknown as { room: unknown }).room = null;
+});
+
+describe("screenshare support detection", () => {
+  test("starts disabled for SSR-safe hydration and refreshes from browser capability", () => {
+    expect($callScreenShareSupported.get()).toBe(false);
+    const original = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: {
+        mediaDevices: {
+          getDisplayMedia: () => undefined,
+        },
+      },
+    });
+    try {
+      refreshScreenShareSupported();
+      expect($callScreenShareSupported.get()).toBe(true);
+    } finally {
+      if (original) Object.defineProperty(globalThis, "navigator", original);
+      else Reflect.deleteProperty(globalThis, "navigator");
+    }
+  });
 });
 
 describe("call page lifecycle controls", () => {

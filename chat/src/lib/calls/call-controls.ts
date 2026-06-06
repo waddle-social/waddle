@@ -16,6 +16,7 @@ import {
 import {
   $callScreenShareEnabled,
   $callScreenShareSupported,
+  refreshScreenShareSupported,
 } from "./screen-share-state";
 
 /**
@@ -33,7 +34,7 @@ import {
 export const $callConnecting = atom<boolean>(false);
 export const $callMicEnabled = atom<boolean>(true);
 export const $callCamEnabled = atom<boolean>(true);
-export { $callScreenShareEnabled, $callScreenShareSupported };
+export { $callScreenShareEnabled, $callScreenShareSupported, refreshScreenShareSupported };
 
 function isScreenSharePickerCancel(error: unknown): boolean {
   return !!error &&

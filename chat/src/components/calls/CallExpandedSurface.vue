@@ -14,6 +14,7 @@ import {
   $callScreenShareSupported,
   hangupActiveCall,
   peerLabelFromState,
+  refreshScreenShareSupported,
   toggleCam,
   toggleMic,
   toggleScreenShare,
@@ -141,6 +142,7 @@ function onKeydown(event: KeyboardEvent): void {
 }
 
 onMounted(() => {
+  refreshScreenShareSupported();
   if (typeof window !== "undefined") {
     window.addEventListener("keydown", onKeydown);
   }
