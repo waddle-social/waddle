@@ -3,7 +3,7 @@
  * (XEP-0223 `urn:waddle:story:reads:0`). The store exposes a small,
  * UI-facing surface (is/mark/loaded) and hides the wasm/IQ details
  * behind it; the same interface is what the spec uses to keep
- * `StoriesPane.vue` free of XMPP concerns.
+ * the Feed pane free of XMPP concerns.
  *
  * Publish strategy: marks are added to the in-memory set immediately,
  * and a debounced publish coalesces bursts so opening N stories in a

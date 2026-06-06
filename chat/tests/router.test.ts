@@ -125,7 +125,7 @@ describe("buildHref", () => {
     expect(buildHref({ id: "threads" })).toBe("/threads");
   });
 
-  test("feed / stories / events", () => {
+  test("feed / stories alias / events", () => {
     expect(buildHref({ id: "feed" })).toBe("/feed");
     expect(buildHref({ id: "stories" })).toBe("/stories");
     expect(buildHref({ id: "events" })).toBe("/events");
@@ -324,5 +324,15 @@ describe("navigate", () => {
     navigate({ id: "threads" }, { replace: true });
     expect(pushed).toHaveLength(0);
     expect(replaced).toHaveLength(1);
+  });
+
+  test("stories compatibility route can canonicalize to feed with replaceState", () => {
+    const w = (globalThis as unknown as { window: { location: { pathname: string } } }).window;
+    w.location.pathname = "/stories";
+
+    navigate({ id: "feed" }, { replace: true });
+
+    expect(pushed).toHaveLength(0);
+    expect(replaced).toEqual([{ state: { waddleRouteId: "feed" }, url: "/feed" }]);
   });
 });

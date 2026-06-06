@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, watch } from "vue";
 import { useStore } from "@nanostores/vue";
-import { CalendarDays, Camera, Hash, Inbox, ListTree, MessageSquareText, MessagesSquare, Phone, PhoneOff, Plus, Settings, Users, ChevronDown, ChevronRight, MessageCircle, Video } from "lucide-vue-next";
+import { CalendarDays, Hash, Inbox, ListTree, MessageSquareText, MessagesSquare, Phone, PhoneOff, Plus, Settings, Users, ChevronDown, ChevronRight, MessageCircle, Video } from "lucide-vue-next";
 import { isForumChannel as detectForumChannel } from "@/lib/channel-types";
 import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
 import type { ChannelThreadInboxEntry } from "@/channels/inbox";
@@ -36,10 +36,10 @@ const props = defineProps<{
   channelUnreadMap?: Record<string, { unread: number; mentions: number }>;
   threadEntriesFn?: (roomJid: string) => ChannelThreadInboxEntry[];
   roomAvatarHashes?: Record<string, string>;
-  /** Currently-active community pseudo-channel (feed / stories /
-   * events), or null when a real channel is active. Drives the
+  /** Currently-active community pseudo-channel (feed / events),
+   * or null when a real channel is active. Drives the
    * highlight state on the top-of-sidebar rows. */
-  activeCommunitySurface?: "feed" | "stories" | "events" | null;
+  activeCommunitySurface?: "feed" | "events" | null;
   /** Counts surfaced as dot/badge on the pseudo-channel rows. */
   feedNewCount?: number;
   storiesActiveCount?: number;
@@ -353,7 +353,7 @@ const emit = defineEmits<{
   joinChannelCall: [channelId: string | null, roomJid: string, media: CallMedia];
   leaveChannelCall: [roomJid: string];
   selectThread: [channelId: string, threadId: string];
-  selectCommunitySurface: [surface: "feed" | "stories" | "events"];
+  selectCommunitySurface: [surface: "feed" | "events"];
   selectThreadsView: [];
   selectUnreadView: [];
   createChannel: [];
@@ -562,7 +562,7 @@ watch(
 
         <div v-else class="chat-list-stack">
           <!-- Community pseudo-channels — top-of-sidebar rows for
-               community-wide surfaces (Feed, Stories, Events) that
+               community-wide surfaces (Feed, Events) that
                are NOT real channels. Selecting one swaps the
                content area for that surface's content pane. -->
           <section class="grid gap-1" aria-label="Community surfaces">
@@ -603,24 +603,10 @@ watch(
               <MessageSquareText class="h-3.5 w-3.5 flex-shrink-0 text-primary" aria-hidden="true" />
               <span class="flex-1 truncate type-control">Feed</span>
               <span
-                v-if="(feedNewCount ?? 0) > 0"
+                v-if="((feedNewCount ?? 0) + (storiesActiveCount ?? 0)) > 0"
                 class="type-count-badge inline-flex min-w-[18px] h-[18px] items-center justify-center rounded-full bg-primary px-1 text-primary-foreground"
                 aria-hidden="true"
-              >{{ feedNewCount }}</span>
-            </button>
-            <button
-              type="button"
-              class="chat-list-row flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-sidebar-accent/35"
-              :class="activeCommunitySurface === 'stories' ? 'bg-sidebar-accent/60 text-sidebar-foreground' : 'text-sidebar-foreground/85'"
-              @click="emit('selectCommunitySurface', 'stories')"
-            >
-              <Camera class="h-3.5 w-3.5 flex-shrink-0 text-primary" aria-hidden="true" />
-              <span class="flex-1 truncate type-control">Stories</span>
-              <span
-                v-if="(storiesActiveCount ?? 0) > 0"
-                class="type-count-badge inline-flex min-w-[18px] h-[18px] items-center justify-center rounded-full bg-primary px-1 text-primary-foreground"
-                aria-hidden="true"
-              >{{ storiesActiveCount }}</span>
+              >{{ (feedNewCount ?? 0) + (storiesActiveCount ?? 0) }}</span>
             </button>
             <button
               type="button"

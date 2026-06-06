@@ -32,7 +32,6 @@ import HomeDashboard from "@/components/chat/HomeDashboard.vue";
 import ThreadsView from "@/components/chat/ThreadsView.vue";
 import UnreadView from "@/components/chat/UnreadView.vue";
 import FeedPane from "@/components/community/FeedPane.vue";
-import StoriesPane from "@/components/community/StoriesPane.vue";
 import EventsPane from "@/components/community/EventsPane.vue";
 import ChatAppModals from "@/components/chat/ChatAppModals.vue";
 import ChatMobileDrawers from "@/components/chat/ChatMobileDrawers.vue";
@@ -271,7 +270,7 @@ function setPinnedPanelOpen(isOpen: boolean) {
   activateRightPanel("pinned");
 }
 
-function onSelectCommunitySurface(surface: "feed" | "stories" | "events") {
+function onSelectCommunitySurface(surface: "feed" | "events") {
   openCommunitySurface(surface);
 }
 
@@ -605,27 +604,20 @@ onUnmounted(() => {
       <FeedPane
         v-else-if="ui.activeCommunitySurface.value === 'feed'"
         :entries="socialFeed.entries.value"
-        :is-loading="socialFeed.isLoading.value"
-        :is-posting="socialFeed.isPosting.value"
-        :error="socialFeed.error.value"
-        :can-post="!!connectionStore.session"
-        :self-jid="connectionStore.session?.jid ?? null"
-        @refresh="socialFeed.refresh()"
-        @post="(input) => socialFeed.post(input)"
-        @open-nav="ui.showMobileNav.value = true"
-      />
-      <StoriesPane
-        v-else-if="ui.activeCommunitySurface.value === 'stories'"
         :stories="stories.activeStories.value"
-        :is-loading="stories.isLoading.value"
-        :is-posting="stories.isPosting.value"
-        :error="stories.error.value"
+        :is-loading="socialFeed.isLoading.value"
+        :is-stories-loading="stories.isLoading.value"
+        :is-posting="socialFeed.isPosting.value"
+        :is-story-posting="stories.isPosting.value"
+        :error="socialFeed.error.value"
+        :stories-error="stories.error.value"
         :can-post="!!connectionStore.session"
         :self-jid="connectionStore.session?.jid ?? null"
         :is-story-read="stories.isStoryRead"
         :reaction-summary="stories.reactionSummary"
-        @refresh="stories.refresh()"
-        @post="(input) => stories.post(input)"
+        @refresh="socialFeed.refresh(); stories.refresh()"
+        @post="(input) => socialFeed.post(input)"
+        @post-story="(input) => stories.post(input)"
         @story-selected="(id) => stories.markStoryRead(id)"
         @react="(id, emoji) => stories.toggleReaction(id, emoji)"
         @open-nav="ui.showMobileNav.value = true"

@@ -4,7 +4,7 @@ import type { AdminTab } from "@/lib/chat-ui";
 /** Community pseudo-channels surfaced at the top of the sidebar.
  * Each renders its own content pane when active, rather than the
  * channel timeline. */
-export type CommunitySurface = "feed" | "stories" | "events";
+export type CommunitySurface = "feed" | "events";
 
 export function useChatShellState() {
   const activePage = ref<"dashboard" | "chat" | "settings" | "admin" | "threads" | "unread">("dashboard");
