@@ -21,7 +21,7 @@ import type { TileAttachable } from "@/lib/calls/tile-attach";
  * callbacks: the parent owns the single `TileAttachments` instance
  * so LiveKit's `attachedElements` array stays consistent.
  */
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   /** Human label rendered in the nameplate and derived into initials. */
   label: string;
   /** Stable identity-derived key namespace for `TileAttachments.sync`.
@@ -47,12 +47,10 @@ const props = defineProps<{
   /** Parent's attach reconciler — see `tile-attach.ts`. The tile
    *  invokes this from its `<video>` / `<audio>` ref callbacks. */
   attach: (key: string, el: HTMLMediaElement | null, track: TileAttachable | null) => void;
-}>();
-
-defineEmits<{
-  /** Click on the tile. Used by the parent to enter / exit speaker focus. */
-  activate: [];
-}>();
+  interactive?: boolean;
+}>(), {
+  interactive: true,
+});
 
 const initials = computed<string>(() => {
   return props.label
@@ -87,17 +85,31 @@ function refAudio(el: Element | null): void {
     props.audioTrack,
   );
 }
+
+const isInteractive = computed(() => props.interactive);
+
+function activate(): void {
+  if (isInteractive.value) emit("activate");
+}
+
+const emit = defineEmits<{
+  /** Click on the tile. Used by the parent to enter / exit speaker focus. */
+  activate: [];
+}>();
 </script>
 
 <template>
   <div
     class="call-tile"
-    :class="{ 'call-tile--has-video': videoTrack !== null }"
-    role="button"
-    tabindex="0"
-    :aria-label="`Open ${label} tile`"
-    @click="$emit('activate')"
-    @keydown.enter="$emit('activate')"
+    :class="{
+      'call-tile--has-video': videoTrack !== null,
+      'call-tile--interactive': isInteractive,
+    }"
+    :role="isInteractive ? 'button' : 'img'"
+    :tabindex="isInteractive ? 0 : undefined"
+    :aria-label="isInteractive ? `Open ${label} tile` : label"
+    @click="activate"
+    @keydown.enter="activate"
   >
     <!-- Placeholder layer — always mounted so the tile never shows a
          bare cell while LiveKit is still subscribing to the track.
@@ -166,7 +178,6 @@ function refAudio(el: Element | null): void {
   border-radius: var(--radius-md);
   border: 1px solid var(--border);
   background: var(--muted);
-  cursor: pointer;
   width: 100%;
   height: 100%;
   min-width: 0;
@@ -186,11 +197,15 @@ function refAudio(el: Element | null): void {
   flex: 0 0 auto;
 }
 
-.call-tile:hover {
+.call-tile--interactive {
+  cursor: pointer;
+}
+
+.call-tile--interactive:hover {
   box-shadow: 0 0 18px var(--glow);
 }
 
-.call-tile:focus-visible {
+.call-tile--interactive:focus-visible {
   outline: 2px solid var(--primary);
   outline-offset: 2px;
 }

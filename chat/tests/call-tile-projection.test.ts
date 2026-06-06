@@ -148,6 +148,26 @@ describe("call tile projection", () => {
     expect(html).toContain("Open alice&#39;s screen tile");
   });
 
+  test("renders non-interactive thumbnails without a dead button affordance", async () => {
+    const html = await renderCallTile({
+      label: "Your screen",
+      attachKey: "self:alice@example.com/web:screen_share",
+      isSelf: true,
+      mirrorVideo: false,
+      showsPresentingGlyph: true,
+      micEnabled: true,
+      videoTrack: null,
+      audioTrack: null,
+      attach: () => undefined,
+      interactive: false,
+    });
+
+    expect(html).toContain('role="img"');
+    expect(html).toContain('aria-label="Your screen"');
+    expect(html).not.toContain("Open Your screen tile");
+    expect(html).not.toContain("tabindex");
+  });
+
   test("forwards the presenting glyph flag in every grid branch", () => {
     const source = readFileSync(new URL("../src/components/calls/CallTileGrid.vue", import.meta.url), "utf8");
     expect(source.match(/:shows-presenting-glyph=/g)?.length).toBe(3);

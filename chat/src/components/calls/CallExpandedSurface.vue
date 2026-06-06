@@ -21,12 +21,14 @@ import {
 } from "@/lib/calls/call-controls";
 import { useCallEngine } from "@/lib/calls/use-call-engine";
 import { useActiveMucCall } from "@/lib/calls/use-active-muc-call";
+import { localScreenSharePresentation } from "@/lib/calls/call-self-share";
 import { normalizeMucCallRoomJid } from "@/lib/calls/muc-call-presence";
 import { barePeerJid } from "@/lib/xmpp/jid";
 import CallTileGrid from "./CallTileGrid.vue";
 import CallControls from "./CallControls.vue";
 import CallSettingsDialog from "./CallSettingsDialog.vue";
 import CallMediaNotice from "./CallMediaNotice.vue";
+import CallSelfShareNotice from "./CallSelfShareNotice.vue";
 
 /**
  * "Expanded" call surface — fills the chat content pane while the
@@ -120,6 +122,15 @@ const subline = computed(() => {
 });
 
 const localIdentity = computed(() => engine.localIdentity);
+const selfSharePresentation = computed(() =>
+  localScreenSharePresentation({
+    screenShareEnabled: screenShareEnabled.value,
+    localTracks: localTracks.value,
+  }),
+);
+const stageLocalTracks = computed(() =>
+  selfSharePresentation.value?.stageLocalTracks ?? localTracks.value,
+);
 
 function collapseToSplit(): void {
   $callUiMode.set("split");
@@ -176,10 +187,14 @@ onBeforeUnmount(() => {
       {{ lastError }}
     </div>
     <CallMediaNotice />
+    <CallSelfShareNotice
+      v-if="selfSharePresentation"
+      :presentation="selfSharePresentation"
+    />
     <main class="call-expanded__grid">
       <CallTileGrid
         :remote-tracks="remoteTracks"
-        :local-tracks="localTracks"
+        :local-tracks="stageLocalTracks"
         :local-identity="localIdentity"
         :mic-enabled="micEnabled"
       />
