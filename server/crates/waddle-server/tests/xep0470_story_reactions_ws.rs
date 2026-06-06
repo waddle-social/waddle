@@ -766,3 +766,141 @@ async fn retracting_story_removes_attachment_node_and_summary_item() {
     let _ = alice.close().await;
     let _ = admin.close().await;
 }
+
+#[tokio::test]
+async fn retracting_story_without_summary_item_does_not_fan_out_summary_retract() {
+    let _guard = TEST_SERIAL.lock().await;
+    let alice_password = format!("alice-pass-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[("alice", &alice_password)]);
+    let admin_password = server.fixed_account_password().to_string();
+    let mut admin = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "admin",
+        &admin_password,
+        "story-owner-no-summary-retract",
+    )
+    .await
+    .expect("admin connect");
+    let mut alice = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "alice",
+        &alice_password,
+        "story-member-no-summary-retract",
+    )
+    .await
+    .expect("alice connect");
+
+    let seeded_story_id = format!("story-{}", uuid::Uuid::new_v4());
+    let seeded_story = iq_set_to(
+        &mut admin,
+        "no-summary-seed-story",
+        COMMUNITY_JID,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}">
+              <publish node="{STORIES_NODE}">
+                <item id="{seeded_story_id}">
+                  <story xmlns="{NS_STORIES}" expires="2030-01-01T12:00:00Z">
+                    <body>story that seeds summary node</body>
+                    <author>admin@localhost</author>
+                  </story>
+                </item>
+              </publish>
+            </pubsub>"#
+        ),
+    )
+    .await;
+    assert!(
+        seeded_story.contains("type='result'"),
+        "seed story publish should succeed: {seeded_story}"
+    );
+    let seeded_attachment_node = story_attachment_node(&seeded_story_id);
+    let seed_reaction = iq_set_to(
+        &mut alice,
+        "no-summary-seed-reaction",
+        COMMUNITY_JID,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}">
+              <publish node="{seeded_attachment_node}">
+                <item id="alice@localhost">
+                  <attachments xmlns="{NS_ATTACHMENTS}">
+                    <reactions><reaction>👍</reaction></reactions>
+                  </attachments>
+                </item>
+              </publish>
+            </pubsub>"#
+        ),
+    )
+    .await;
+    assert!(
+        seed_reaction.contains("type='result'"),
+        "seed reaction publish should create the summary node: {seed_reaction}"
+    );
+
+    let subscribe_summaries = iq_set_to(
+        &mut alice,
+        "no-summary-subscribe",
+        COMMUNITY_JID,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}"><subscribe node="{STORY_SUMMARY_NODE}" jid="alice@localhost"/></pubsub>"#
+        ),
+    )
+    .await;
+    assert!(
+        subscribe_summaries.contains("type='result'"),
+        "summary node subscription should succeed after node creation: {subscribe_summaries}"
+    );
+
+    let story_id = format!("story-{}", uuid::Uuid::new_v4());
+    let owner_story = iq_set_to(
+        &mut admin,
+        "no-summary-story",
+        COMMUNITY_JID,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}">
+              <publish node="{STORIES_NODE}">
+                <item id="{story_id}">
+                  <story xmlns="{NS_STORIES}" expires="2030-01-01T12:00:00Z">
+                    <body>story with no reactions</body>
+                    <author>admin@localhost</author>
+                  </story>
+                </item>
+              </publish>
+            </pubsub>"#
+        ),
+    )
+    .await;
+    assert!(
+        owner_story.contains("type='result'"),
+        "story publish without reactions should succeed: {owner_story}"
+    );
+
+    let story_retract = iq_set_to(
+        &mut admin,
+        "no-summary-story-retract",
+        COMMUNITY_JID,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}"><retract node="{STORIES_NODE}"><item id="{story_id}"/></retract></pubsub>"#
+        ),
+    )
+    .await;
+    assert!(
+        story_retract.contains("type='result'"),
+        "owner story retract should succeed: {story_retract}"
+    );
+
+    let pushed_summary_retract = wait_for_event_message(
+        &mut alice,
+        STORY_SUMMARY_NODE,
+        std::time::Duration::from_millis(300),
+    )
+    .await;
+    assert!(
+        pushed_summary_retract.is_none(),
+        "summary subscribers must not receive a retract for a story without a summary item: {pushed_summary_retract:?}"
+    );
+
+    let _ = alice.close().await;
+    let _ = admin.close().await;
+}
