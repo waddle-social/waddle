@@ -33,7 +33,7 @@ function captureStub(opts: { micThrows?: Error; camThrows?: Error } = {}) {
   };
 }
 
-function screenShareStub() {
+function screenShareStub(opts: { audioThrows?: Error } = {}) {
   const calls: Array<{ enabled: boolean; audio: boolean }> = [];
   return {
     calls,
@@ -42,6 +42,7 @@ function screenShareStub() {
     },
     async setScreenShareEnabled(enabled: boolean, options?: { audio?: boolean }) {
       calls.push({ enabled, audio: options?.audio ?? false });
+      if (enabled && options?.audio && opts.audioThrows) throw opts.audioThrows;
     },
   };
 }
@@ -186,7 +187,7 @@ describe("call-engine module", () => {
     expect(local.source).toBe("screen_share_audio");
   });
 
-  test("setScreenShareEnabled delegates to LiveKit with audio disabled for this slice", async () => {
+  test("setScreenShareEnabled delegates video-only requests to LiveKit", async () => {
     const { CallEngine } = await import("../src/lib/calls/engine");
     const engine = new CallEngine();
     const participant = screenShareStub();
@@ -194,6 +195,32 @@ describe("call-engine module", () => {
     await engine.setScreenShareEnabled(true, { audio: false });
     expect(participant.calls).toEqual([{ enabled: true, audio: false }]);
     expect(engine.screenShareEnabled).toBe(true);
+  });
+
+  test.each([
+    "OverconstrainedError",
+    "ConstraintNotSatisfiedError",
+    "NotSupportedError",
+  ])("setScreenShareEnabled degrades %s screen audio failure to video-only share", async (errorName) => {
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine();
+    const participant = screenShareStub({ audioThrows: deviceError(errorName) });
+    (engine as unknown as { room: unknown }).room = { localParticipant: participant };
+    await engine.setScreenShareEnabled(true, { audio: true });
+    expect(participant.calls).toEqual([
+      { enabled: true, audio: true },
+      { enabled: true, audio: false },
+    ]);
+    expect(engine.screenShareEnabled).toBe(true);
+  });
+
+  test("setScreenShareEnabled does not mask unrelated LiveKit failures as screen-audio fallback", async () => {
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine();
+    const participant = screenShareStub({ audioThrows: deviceError("TypeError") });
+    (engine as unknown as { room: unknown }).room = { localParticipant: participant };
+    await expect(engine.setScreenShareEnabled(true, { audio: true })).rejects.toHaveProperty("name", "TypeError");
+    expect(participant.calls).toEqual([{ enabled: true, audio: true }]);
   });
 });
 
