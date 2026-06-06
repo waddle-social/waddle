@@ -50,6 +50,26 @@ export type CallTrackSource =
   | "screen_share"
   | "screen_share_audio";
 
+export type ParticipantAudioVolumeStore = Record<string, number>;
+
+export type ParticipantAudioVolumeIdentity = {
+  participantIdentity: string;
+  source: CallTrackSource;
+};
+
+export function participantAudioVolumeKey(
+  identity: ParticipantAudioVolumeIdentity,
+): string {
+  return `${identity.participantIdentity}:${identity.source}`;
+}
+
+export function resolveParticipantAudioVolume(
+  store: ParticipantAudioVolumeStore,
+  identity: ParticipantAudioVolumeIdentity,
+): number {
+  return store[participantAudioVolumeKey(identity)] ?? 1;
+}
+
 export type CallEngineEvents = {
   trackSubscribed: (track: RemoteMediaTrack) => void;
   trackUnsubscribed: (track: RemoteMediaTrack) => void;

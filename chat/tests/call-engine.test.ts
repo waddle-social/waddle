@@ -2,7 +2,9 @@ import { describe, expect, test } from "bun:test";
 import {
   enableRequestedCapture,
   mapTrackSource,
+  resolveParticipantAudioVolume,
   type CallEngineEvents,
+  type ParticipantAudioVolumeStore,
   type LocalMediaTrack,
   type RemoteMediaTrack,
 } from "../src/lib/calls/engine";
@@ -54,6 +56,26 @@ function screenShareStub(opts: { audioThrows?: Error } = {}) {
 // is exercised by manual smoke tests in the browser per the call PR
 // plan, and by the planned `calls_e2e` integration test on the server.
 describe("call-engine module", () => {
+  test("resolves participant audio volume by identity and source with default full volume", () => {
+    const store: ParticipantAudioVolumeStore = {
+      "bob@waddle.test/desktop:microphone": 0.3,
+      "bob@waddle.test/desktop:screen_share_audio": 0.6,
+    };
+
+    expect(resolveParticipantAudioVolume(store, {
+      participantIdentity: "bob@waddle.test/desktop",
+      source: "microphone",
+    })).toBe(0.3);
+    expect(resolveParticipantAudioVolume(store, {
+      participantIdentity: "bob@waddle.test/desktop",
+      source: "screen_share_audio",
+    })).toBe(0.6);
+    expect(resolveParticipantAudioVolume(store, {
+      participantIdentity: "alice@waddle.test/web",
+      source: "microphone",
+    })).toBe(1);
+  });
+
   test("exports CallEngine class with the expected surface", async () => {
     const mod = await import("../src/lib/calls/engine");
     const engine = new mod.CallEngine();
