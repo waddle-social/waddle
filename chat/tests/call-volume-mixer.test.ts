@@ -10,6 +10,7 @@ import { parse, compileScript } from "vue/compiler-sfc";
 import ts from "typescript";
 import {
   buildCallVolumeMixerRows,
+  callVolumePercentToGain,
   resetCallVolumeMixerLevels,
   type CallVolumeLevelStore,
 } from "../src/lib/calls/call-volume-mixer";
@@ -163,9 +164,61 @@ describe("call volume mixer projection", () => {
       },
     ]);
   });
+
+  test("normalizes remembered levels to the 0-200 percent gain range", () => {
+    const rows = buildCallVolumeMixerRows({
+      remoteParticipantIdentities: ["alice@waddle.test/web", "bob@waddle.test/desktop"],
+      remoteTracks: [
+        remoteAudio("alice-mic", "alice@waddle.test/web", "microphone"),
+        remoteAudio("bob-mic", "bob@waddle.test/desktop", "microphone"),
+        remoteAudio("bob-screen", "bob@waddle.test/desktop", "screen_share_audio"),
+      ],
+      localIdentity: "me@waddle.test/browser",
+      levels: {
+        "alice@waddle.test/web:microphone": 3,
+        "bob@waddle.test/desktop:microphone": Number.NaN,
+        "bob@waddle.test/desktop:screen_share_audio": -0.5,
+      },
+    });
+
+    expect(rows.map((row) => ({
+      key: row.key,
+      level: row.level,
+      ariaValueText: row.ariaValueText,
+    }))).toEqual([
+      {
+        key: "alice@waddle.test/web:microphone",
+        level: 2,
+        ariaValueText: "200%",
+      },
+      {
+        key: "bob@waddle.test/desktop:microphone",
+        level: 1,
+        ariaValueText: "100%",
+      },
+      {
+        key: "bob@waddle.test/desktop:screen_share_audio",
+        level: 0,
+        ariaValueText: "0%",
+      },
+    ]);
+  });
 });
 
 describe("call volume mixer reducer", () => {
+  test("maps slider percentages to gain with a 100 percent snap detent", () => {
+    expect(callVolumePercentToGain(0)).toBe(0);
+    expect(callVolumePercentToGain(88)).toBe(0.88);
+    expect(callVolumePercentToGain(99, 0.98)).toBe(1);
+    expect(callVolumePercentToGain(99, 1)).toBe(0.99);
+    expect(callVolumePercentToGain(100, 0.99)).toBe(1);
+    expect(callVolumePercentToGain(101, 1)).toBe(1.01);
+    expect(callVolumePercentToGain(101, 1.02)).toBe(1);
+    expect(callVolumePercentToGain(150)).toBe(1.5);
+    expect(callVolumePercentToGain(250)).toBe(2);
+    expect(callVolumePercentToGain(Number.NaN)).toBe(1);
+  });
+
   test("reset all returns every stored participant audio entry to full volume", () => {
     const levels: CallVolumeLevelStore = {
       "alice@waddle.test/web:microphone": 0.2,
@@ -193,6 +246,7 @@ describe("call volume mixer panel", () => {
       localIdentity: "me@waddle.test/browser",
       levels: {
         "alice@waddle.test/web:screen_share_audio": 0,
+        "alice@waddle.test/web:microphone": 1.5,
         "bob@waddle.test/desktop:microphone": 0.35,
       },
     });
@@ -205,12 +259,41 @@ describe("call volume mixer panel", () => {
     expect(html).toContain("bob&#39;s screen");
     expect(html).toContain("mic off");
     expect(html).toContain('aria-label="Volume for alice"');
-    expect(html).toContain('aria-valuetext="100%"');
+    expect(html).toContain('max="200"');
+    expect(html).toContain('aria-valuetext="150%"');
     expect(html).toContain('aria-label="Volume for alice&#39;s screen"');
     expect(html).toContain('aria-valuetext="0%"');
     expect(html).toContain('aria-label="Muted"');
     expect(html).toContain('class="call-volume-mixer__tick"');
+    expect(html).toContain('style="left:50%;"');
     expect(html).toContain("Reset all");
+  });
+
+  test("emits directional snap-detent gains from slider input", async () => {
+    const originalHTMLInputElement = globalThis.HTMLInputElement;
+    globalThis.HTMLInputElement = TestInputElement as typeof HTMLInputElement;
+    const setup = await loadCallVolumeMixerPanelSetup();
+    try {
+      const emitted: Array<[string, CallVolumeMixerRow, number]> = [];
+      const bindings = setup({ rows: [] }, {
+        expose: () => undefined,
+        emit: (event: string, row: CallVolumeMixerRow, level: number) => {
+          emitted.push([event, row, level]);
+        },
+      });
+
+      const rowBelow = mixerRow({ level: 0.98 });
+      const rowNeutral = mixerRow({ level: 1 });
+      const rowAbove = mixerRow({ level: 1.02 });
+      bindings.onInput(rowBelow, inputEvent("99"));
+      bindings.onInput(rowNeutral, inputEvent("99"));
+      bindings.onInput(rowNeutral, inputEvent("101"));
+      bindings.onInput(rowAbove, inputEvent("101"));
+
+      expect(emitted.map(([, , level]) => level)).toEqual([1, 0.99, 1.01, 1]);
+    } finally {
+      globalThis.HTMLInputElement = originalHTMLInputElement;
+    }
   });
 });
 
@@ -276,6 +359,74 @@ async function loadVueComponent(path: string) {
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
   }
+}
+
+async function loadCallVolumeMixerPanelSetup(): Promise<(
+  props: { rows: readonly CallVolumeMixerRow[] },
+  context: {
+    expose: () => void;
+    emit: (event: string, row: CallVolumeMixerRow, level: number) => void;
+  },
+) => { onInput: (row: CallVolumeMixerRow, event: Event) => void }> {
+  const component = await loadVueComponentScript("../src/components/calls/CallVolumeMixerPanel.vue");
+  return component.setup;
+}
+
+async function loadVueComponentScript(path: string) {
+  const filename = new URL(path, import.meta.url);
+  const source = readFileSync(filename, "utf8");
+  const { descriptor } = parse(source, { filename: filename.pathname });
+  const script = compileScript(descriptor, {
+    id: filename.pathname,
+    inlineTemplate: false,
+  });
+
+  const tempDir = mkdtempSync(join(tmpdir(), "waddle-call-volume-mixer-script-"));
+  try {
+    const compiled = [
+      rewriteImports(script.content.replace("export default", "const __sfc__ ="), filename),
+      "export default __sfc__;",
+    ].join("\n");
+    const js = ts.transpileModule(compiled, {
+      compilerOptions: {
+        module: ts.ModuleKind.ESNext,
+        target: ts.ScriptTarget.ES2022,
+        verbatimModuleSyntax: false,
+      },
+    }).outputText;
+    const modulePath = join(tempDir, "Component.mjs");
+    writeFileSync(modulePath, js);
+    const component = await import(pathToFileURL(modulePath).href);
+    return component.default;
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
+function mixerRow(overrides: Partial<CallVolumeMixerRow>): CallVolumeMixerRow {
+  return {
+    key: "alice@waddle.test/web:microphone",
+    participantIdentity: "alice@waddle.test/web",
+    source: "microphone",
+    label: "alice",
+    level: 1,
+    disabled: false,
+    hint: null,
+    muted: false,
+    ariaLabel: "Volume for alice",
+    ariaValueText: "100%",
+    ...overrides,
+  };
+}
+
+function inputEvent(value: string): Event {
+  return {
+    target: new TestInputElement(value),
+  } as unknown as Event;
+}
+
+class TestInputElement {
+  constructor(readonly value: string) {}
 }
 
 function rewriteImports(code: string, importer: URL): string {

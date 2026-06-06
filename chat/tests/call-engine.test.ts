@@ -76,6 +76,27 @@ describe("call-engine module", () => {
     })).toBe(1);
   });
 
+  test("resolves stored participant audio volume inside the 0-200 percent gain range", () => {
+    const store: ParticipantAudioVolumeStore = {
+      "alice@waddle.test/web:microphone": 3,
+      "bob@waddle.test/desktop:microphone": Number.NaN,
+      "carol@waddle.test/laptop:microphone": -0.5,
+    };
+
+    expect(resolveParticipantAudioVolume(store, {
+      participantIdentity: "alice@waddle.test/web",
+      source: "microphone",
+    })).toBe(2);
+    expect(resolveParticipantAudioVolume(store, {
+      participantIdentity: "bob@waddle.test/desktop",
+      source: "microphone",
+    })).toBe(1);
+    expect(resolveParticipantAudioVolume(store, {
+      participantIdentity: "carol@waddle.test/laptop",
+      source: "microphone",
+    })).toBe(0);
+  });
+
   test("exports CallEngine class with the expected surface", async () => {
     const mod = await import("../src/lib/calls/engine");
     const engine = new mod.CallEngine();
@@ -411,7 +432,7 @@ describe("call-engine module", () => {
       { identity: "bob@waddle.test/desktop" },
     );
 
-    expect(setVolume).toHaveBeenCalledWith(1);
+    expect(setVolume).toHaveBeenCalledWith(2);
     engine.setParticipantAudioVolume({
       participantIdentity: "bob@waddle.test/desktop",
       source: "microphone",
