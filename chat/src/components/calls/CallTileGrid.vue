@@ -4,7 +4,7 @@ import type { LocalMediaTrack, RemoteMediaTrack } from "@/lib/calls/engine";
 import { TileAttachments, type TileAttachable } from "@/lib/calls/tile-attach";
 import { selectGridLayout } from "@/lib/calls/grid-layout";
 import type { CallTileModel } from "@/lib/calls/call-tiles";
-import { projectCallTiles } from "@/lib/calls/call-tile-projection";
+import { projectCallTiles, reconcileCallTileProjectionState } from "@/lib/calls/call-tile-projection";
 import CallTile from "./CallTile.vue";
 
 /**
@@ -59,8 +59,17 @@ const projection = computed(() => {
 });
 
 watch(projection, (next) => {
-  if (!sameSet(seenRemoteScreenTrackKeys.value, next.seenRemoteScreenTrackKeys)) {
-    seenRemoteScreenTrackKeys.value = next.seenRemoteScreenTrackKeys;
+  const reconciled = reconcileCallTileProjectionState({
+    tiles: next.tiles,
+    manualFocusKey: manualFocusKey.value,
+    currentSeenRemoteScreenTrackKeys: seenRemoteScreenTrackKeys.value,
+    nextSeenRemoteScreenTrackKeys: next.seenRemoteScreenTrackKeys,
+  });
+  if (seenRemoteScreenTrackKeys.value !== reconciled.seenRemoteScreenTrackKeys) {
+    seenRemoteScreenTrackKeys.value = reconciled.seenRemoteScreenTrackKeys;
+  }
+  if (manualFocusKey.value !== reconciled.manualFocusKey) {
+    manualFocusKey.value = reconciled.manualFocusKey;
   }
 }, { immediate: true });
 
@@ -77,14 +86,6 @@ const otherTiles = computed<Tile[]>(() => {
 
 function toggleFocus(tile: Tile): void {
   manualFocusKey.value = manualFocusKey.value === tile.key ? null : tile.key;
-}
-
-function sameSet(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
-  if (left.size !== right.size) return false;
-  for (const value of left) {
-    if (!right.has(value)) return false;
-  }
-  return true;
 }
 
 // One `TileAttachments` per grid instance — reconciles (element,

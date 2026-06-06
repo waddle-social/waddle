@@ -11,6 +11,40 @@ export type CallTileProjection = {
   seenRemoteScreenTrackKeys: ReadonlySet<string>;
 };
 
+export type ReconcileCallTileProjectionStateInput = {
+  tiles: readonly CallTileModel[];
+  manualFocusKey: string | null;
+  currentSeenRemoteScreenTrackKeys: ReadonlySet<string>;
+  nextSeenRemoteScreenTrackKeys: ReadonlySet<string>;
+};
+
+export type ReconciledCallTileProjectionState = {
+  manualFocusKey: string | null;
+  seenRemoteScreenTrackKeys: ReadonlySet<string>;
+};
+
+export function reconcileCallTileProjectionState(
+  input: ReconcileCallTileProjectionStateInput,
+): ReconciledCallTileProjectionState {
+  return {
+    manualFocusKey: retainManualFocusKey(input.tiles, input.manualFocusKey),
+    seenRemoteScreenTrackKeys: sameSet(
+      input.currentSeenRemoteScreenTrackKeys,
+      input.nextSeenRemoteScreenTrackKeys,
+    )
+      ? input.currentSeenRemoteScreenTrackKeys
+      : input.nextSeenRemoteScreenTrackKeys,
+  };
+}
+
+export function retainManualFocusKey(
+  tiles: readonly CallTileModel[],
+  manualFocusKey: string | null,
+): string | null {
+  if (manualFocusKey === null) return null;
+  return tiles.some((tile) => tile.key === manualFocusKey) ? manualFocusKey : null;
+}
+
 export function projectCallTiles(input: ProjectCallTilesInput): CallTileProjection {
   const tiles = buildCallTiles(input);
   const remoteScreens = tiles.filter((tile) =>
@@ -30,7 +64,7 @@ export function projectCallTiles(input: ProjectCallTilesInput): CallTileProjecti
     : null;
   const spotlightKey = manualTile?.key
     ?? newlyAppearedScreen?.key
-    ?? remoteScreens[0]?.key
+    ?? newestSeenRemoteScreen(remoteScreens, nextSeenRemoteScreenTrackKeys)?.key
     ?? null;
 
   return {
@@ -38,4 +72,27 @@ export function projectCallTiles(input: ProjectCallTilesInput): CallTileProjecti
     spotlightKey,
     seenRemoteScreenTrackKeys: nextSeenRemoteScreenTrackKeys,
   };
+}
+
+function newestSeenRemoteScreen(
+  remoteScreens: readonly CallTileModel[],
+  seenRemoteScreenTrackKeys: ReadonlySet<string>,
+): CallTileModel | null {
+  const activeScreensByTrackKey = new Map(
+    remoteScreens.flatMap((tile) => tile.screenTrackKey === null ? [] : [[tile.screenTrackKey, tile]]),
+  );
+  const newestSeenTrackKeys = Array.from(seenRemoteScreenTrackKeys).reverse();
+  for (const screenTrackKey of newestSeenTrackKeys) {
+    const tile = activeScreensByTrackKey.get(screenTrackKey);
+    if (tile) return tile;
+  }
+  return remoteScreens[0] ?? null;
+}
+
+function sameSet(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
+  if (left.size !== right.size) return false;
+  for (const value of left) {
+    if (!right.has(value)) return false;
+  }
+  return true;
 }

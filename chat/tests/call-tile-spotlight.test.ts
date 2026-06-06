@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { projectCallTiles } from "../src/lib/calls/call-tile-projection";
+import {
+  projectCallTiles,
+  reconcileCallTileProjectionState,
+  retainManualFocusKey,
+} from "../src/lib/calls/call-tile-projection";
 import type { LocalMediaTrack, RemoteMediaTrack } from "../src/lib/calls/engine";
 
 const fakeTrack = {} as never;
@@ -39,6 +43,22 @@ describe("call tile spotlight projection", () => {
     expect(projection.spotlightKey).toBe("remote:bob@example.com/web:screen_share");
     expect(projection.seenRemoteScreenTrackKeys).not.toBe(seenRemoteScreenTrackKeys);
     expect(Array.from(projection.seenRemoteScreenTrackKeys)).toEqual(["screen-pub"]);
+  });
+
+  test("keeps the newest seen active remote screen on stage after recording its appear edge", () => {
+    const projection = projectCallTiles({
+      remoteTracks: [
+        remoteVideo("carol@example.com/web", "carol-screen-pub", "screen_share"),
+        remoteVideo("bob@example.com/web", "bob-screen-pub", "screen_share"),
+      ],
+      localTracks: [],
+      localIdentity: "alice@example.com/web",
+      micEnabled: true,
+      seenRemoteScreenTrackKeys: new Set(["carol-screen-pub", "bob-screen-pub"]),
+      manualFocusKey: null,
+    });
+
+    expect(projection.spotlightKey).toBe("remote:bob@example.com/web:screen_share");
   });
 
   test("lets manual tile focus override a remote screen spotlight", () => {
@@ -121,6 +141,72 @@ describe("call tile spotlight projection", () => {
       "carol-screen-pub",
       "bob-screen-pub-2",
     ]);
+  });
+
+  test("clears stale manual focus before a departed tile key can reapply on reconnect", () => {
+    const focused = projectCallTiles({
+      remoteTracks: [
+        remoteVideo("bob@example.com/web", "camera-pub", "camera"),
+        remoteVideo("carol@example.com/web", "carol-screen-pub", "screen_share"),
+      ],
+      localTracks: [],
+      localIdentity: "alice@example.com/web",
+      micEnabled: true,
+      seenRemoteScreenTrackKeys: new Set(["carol-screen-pub"]),
+      manualFocusKey: "remote:bob@example.com/web:camera",
+    });
+    expect(focused.spotlightKey).toBe("remote:bob@example.com/web:camera");
+
+    const afterBobLeaves = projectCallTiles({
+      remoteTracks: [
+        remoteVideo("carol@example.com/web", "carol-screen-pub", "screen_share"),
+      ],
+      localTracks: [],
+      localIdentity: "alice@example.com/web",
+      micEnabled: true,
+      seenRemoteScreenTrackKeys: new Set(["carol-screen-pub"]),
+      manualFocusKey: "remote:bob@example.com/web:camera",
+    });
+    const reconciled = reconcileCallTileProjectionState({
+      tiles: afterBobLeaves.tiles,
+      manualFocusKey: "remote:bob@example.com/web:camera",
+      currentSeenRemoteScreenTrackKeys: new Set(["carol-screen-pub"]),
+      nextSeenRemoteScreenTrackKeys: afterBobLeaves.seenRemoteScreenTrackKeys,
+    });
+
+    expect(afterBobLeaves.spotlightKey).toBe("remote:carol@example.com/web:screen_share");
+    expect(reconciled.manualFocusKey).toBeNull();
+
+    const afterBobRejoins = projectCallTiles({
+      remoteTracks: [
+        remoteVideo("carol@example.com/web", "carol-screen-pub", "screen_share"),
+        remoteVideo("bob@example.com/web", "camera-pub-2", "camera"),
+      ],
+      localTracks: [],
+      localIdentity: "alice@example.com/web",
+      micEnabled: true,
+      seenRemoteScreenTrackKeys: reconciled.seenRemoteScreenTrackKeys,
+      manualFocusKey: reconciled.manualFocusKey,
+    });
+    expect(afterBobRejoins.spotlightKey).toBe("remote:carol@example.com/web:screen_share");
+  });
+
+  test("retains manual focus while its target tile is still present", () => {
+    const projection = projectCallTiles({
+      remoteTracks: [
+        remoteVideo("bob@example.com/web", "camera-pub", "camera"),
+        remoteVideo("carol@example.com/web", "carol-screen-pub", "screen_share"),
+      ],
+      localTracks: [],
+      localIdentity: "alice@example.com/web",
+      micEnabled: true,
+      seenRemoteScreenTrackKeys: new Set(["carol-screen-pub"]),
+      manualFocusKey: "remote:bob@example.com/web:camera",
+    });
+
+    expect(projection.spotlightKey).toBe("remote:bob@example.com/web:camera");
+    expect(retainManualFocusKey(projection.tiles, "remote:bob@example.com/web:camera"))
+      .toBe("remote:bob@example.com/web:camera");
   });
 });
 
