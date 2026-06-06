@@ -334,7 +334,7 @@ describe("device-less call controls", () => {
     expect($callMediaIssues.get().mic).toBeNull();
   });
 
-  test("toggleScreenShare publishes screen video with optimistic state", async () => {
+  test("toggleScreenShare requests screen audio with optimistic state", async () => {
     const { engine } = useCallEngine();
     const calls: Array<{ enabled: boolean; audio: boolean }> = [];
     (engine as unknown as { room: unknown }).room = {
@@ -346,7 +346,7 @@ describe("device-less call controls", () => {
     };
     $callScreenShareEnabled.set(false);
     await toggleScreenShare();
-    expect(calls).toEqual([{ enabled: true, audio: false }]);
+    expect(calls).toEqual([{ enabled: true, audio: true }]);
     expect($callScreenShareEnabled.get()).toBe(true);
     expect($callMediaIssues.get().screen).toBeNull();
   });
@@ -367,14 +367,18 @@ describe("device-less call controls", () => {
 
   test("toggleScreenShare stop clears a prior screen notice", async () => {
     const { engine } = useCallEngine();
+    const calls: Array<{ enabled: boolean; audio: boolean }> = [];
     (engine as unknown as { room: unknown }).room = {
       localParticipant: {
-        setScreenShareEnabled: async () => undefined,
+        setScreenShareEnabled: async (enabled: boolean, options?: { audio?: boolean }) => {
+          calls.push({ enabled, audio: options?.audio ?? false });
+        },
       },
     };
     recordMediaIssue("screen", deviceError("NotReadableError"));
     $callScreenShareEnabled.set(true);
     await toggleScreenShare();
+    expect(calls).toEqual([{ enabled: false, audio: false }]);
     expect($callScreenShareEnabled.get()).toBe(false);
     expect($callMediaIssues.get().screen).toBeNull();
   });

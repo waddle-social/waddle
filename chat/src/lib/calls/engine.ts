@@ -230,9 +230,14 @@ export class CallEngine {
     opts: { audio: boolean },
   ): Promise<void> {
     if (!this.room) return;
-    await this.room.localParticipant.setScreenShareEnabled(enabled, {
-      audio: opts.audio,
-    });
+    try {
+      await this.room.localParticipant.setScreenShareEnabled(enabled, {
+        audio: opts.audio,
+      });
+    } catch (error) {
+      if (!enabled || !opts.audio || !isUnsupportedScreenAudioError(error)) throw error;
+      await this.room.localParticipant.setScreenShareEnabled(true, { audio: false });
+    }
   }
 
   /**
@@ -400,6 +405,12 @@ export function mapTrackSource(
   if (source === Track.Source.ScreenShare) return "screen_share";
   if (source === Track.Source.ScreenShareAudio) return "screen_share_audio";
   return fallbackKind === "audio" ? "microphone" : "camera";
+}
+
+function isUnsupportedScreenAudioError(error: unknown): boolean {
+  if (!error || typeof error !== "object" || !("name" in error)) return false;
+  const name = (error as { name?: unknown }).name;
+  return name === "OverconstrainedError";
 }
 
 /**
