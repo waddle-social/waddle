@@ -423,6 +423,54 @@ describe("call-engine module", () => {
     expect(setVolume).not.toHaveBeenLastCalledWith(0.25);
   });
 
+  test("participant disconnect only drops exact identity audio track references", async () => {
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine();
+    const disconnectedSetVolume = mock(() => undefined);
+    const activeSetVolume = mock(() => undefined);
+    const { handleTrackSubscribed, handleParticipantDisconnected } = engine as unknown as {
+      handleTrackSubscribed: (track: unknown, publication: unknown, participant: unknown) => void;
+      handleParticipantDisconnected: (participant: unknown) => void;
+    };
+    handleTrackSubscribed(
+      {
+        kind: Track.Kind.Audio,
+        setVolume: disconnectedSetVolume,
+      },
+      {
+        trackSid: "alice-app-mic",
+        source: Track.Source.Microphone,
+      },
+      { identity: "alice@waddle.test/app" },
+    );
+    handleTrackSubscribed(
+      {
+        kind: Track.Kind.Audio,
+        setVolume: activeSetVolume,
+      },
+      {
+        trackSid: "alice-app-phone-mic",
+        source: Track.Source.Microphone,
+      },
+      { identity: "alice@waddle.test/app:phone" },
+    );
+
+    handleParticipantDisconnected({ identity: "alice@waddle.test/app" });
+    engine.setParticipantAudioVolume({
+      participantIdentity: "alice@waddle.test/app:phone",
+      source: "microphone",
+      volume: 0.25,
+    });
+    engine.setParticipantAudioVolume({
+      participantIdentity: "alice@waddle.test/app",
+      source: "microphone",
+      volume: 0.4,
+    });
+
+    expect(activeSetVolume).toHaveBeenLastCalledWith(0.25);
+    expect(disconnectedSetVolume).not.toHaveBeenLastCalledWith(0.4);
+  });
+
   test("disconnect clears stored participant audio volumes for the next call", async () => {
     const { CallEngine } = await import("../src/lib/calls/engine");
     const engine = new CallEngine();
@@ -456,6 +504,36 @@ describe("call-engine module", () => {
     );
 
     expect(setVolume).toHaveBeenCalledWith(1);
+  });
+
+  test("disconnect without a room does not clear pre-connected participant audio volumes", async () => {
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine();
+    const setVolume = mock(() => undefined);
+    engine.setParticipantAudioVolume({
+      participantIdentity: "bob@waddle.test/desktop",
+      source: "microphone",
+      volume: 0.3,
+    });
+
+    await engine.disconnect();
+    (
+      engine as unknown as {
+        handleTrackSubscribed: (track: unknown, publication: unknown, participant: unknown) => void;
+      }
+    ).handleTrackSubscribed(
+      {
+        kind: Track.Kind.Audio,
+        setVolume,
+      },
+      {
+        trackSid: "bob-mic",
+        source: Track.Source.Microphone,
+      },
+      { identity: "bob@waddle.test/desktop" },
+    );
+
+    expect(setVolume).toHaveBeenCalledWith(0.3);
   });
 });
 

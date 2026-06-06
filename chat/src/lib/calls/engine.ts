@@ -302,10 +302,7 @@ export class CallEngine {
   ): void {
     const key = participantAudioVolumeKey(identity);
     const volume = normalizeParticipantAudioVolume(identity.volume);
-    this.participantAudioVolumes = {
-      ...this.participantAudioVolumes,
-      [key]: volume,
-    };
+    this.participantAudioVolumes[key] = volume;
     for (const track of this.subscribedAudioTracks.get(key) ?? []) {
       track.setVolume(volume);
     }
@@ -325,8 +322,8 @@ export class CallEngine {
   async disconnect(): Promise<void> {
     const room = this.room;
     this.room = null;
-    this.clearParticipantAudioVolumes();
     if (!room) return;
+    this.clearParticipantAudioVolumes();
     // Drop subscribers' track caches synchronously. The LiveKit
     // `Disconnected` event is the natural trigger, but we unregister
     // `handleDisconnected` immediately below so the event never reaches
@@ -479,8 +476,9 @@ export class CallEngine {
   }
 
   private forgetParticipantSubscribedAudioTracks(participantIdentity: string): void {
-    for (const key of this.subscribedAudioTracks.keys()) {
-      if (key.startsWith(`${participantIdentity}:`)) this.subscribedAudioTracks.delete(key);
+    const sources: CallAudioTrackSource[] = ["microphone", "screen_share_audio"];
+    for (const source of sources) {
+      this.subscribedAudioTracks.delete(participantAudioVolumeKey({ participantIdentity, source }));
     }
   }
 }
