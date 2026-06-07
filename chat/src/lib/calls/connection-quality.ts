@@ -42,8 +42,8 @@ export type ConnectionChip = {
 /**
  * Live inputs for the self-quality indicator. Set by the engine
  * subscription in `use-call-engine`; read by `CallConnectionIndicator`.
- * Defaults describe "no call / nothing known yet" so the indicator stays
- * hidden until the first real quality sample arrives.
+ * Defaults describe "no call / nothing known yet" so the indicator shows
+ * quiet measuring bars until the first real quality sample arrives.
  */
 export const $callConnectionQuality = atom<CallConnectionQuality>("unknown");
 export const $callConnectionPhase = atom<CallConnectionPhase>("disconnected");
@@ -67,15 +67,22 @@ export function resetCallConnectionQuality(): void {
 }
 
 /**
- * Pure mapping from (quality, phase) to the chip rendering model, or
- * `null` when the indicator should be hidden entirely (nothing known
- * yet, or no active call). A reconnecting transport overrides the last
- * quality sample — the bars are meaningless while the path is down.
+ * Pure mapping from (quality, phase) to the chip rendering model. Always
+ * returns a chip so the indicator holds a stable footprint in the call
+ * bar — `unknown` renders quiet, empty "measuring" bars rather than
+ * vanishing, which would reflow the centered control row when the first
+ * sample lands.
+ *
+ * A reconnecting transport overrides the last quality sample with
+ * "Reconnecting…" — the bars are meaningless while the path is down.
+ * `lost` is a per-participant quality score independent of the transport
+ * phase, so it gets its own "Connection lost" label rather than falsely
+ * claiming a reconnection is underway.
  */
 export function qualityToChip(
   quality: CallConnectionQuality,
   phase: CallConnectionPhase,
-): ConnectionChip | null {
+): ConnectionChip {
   if (phase === "reconnecting") {
     return { bars: 0, tone: "danger", label: "Reconnecting…" };
   }
@@ -87,8 +94,8 @@ export function qualityToChip(
     case "poor":
       return { bars: 1, tone: "warn", label: "Poor connection" };
     case "lost":
-      return { bars: 0, tone: "danger", label: "Reconnecting…" };
+      return { bars: 0, tone: "danger", label: "Connection lost" };
     case "unknown":
-      return null;
+      return { bars: 0, tone: "neutral", label: null };
   }
 }

@@ -91,6 +91,10 @@ const { engine, remoteTracks, localTracks } = useCallEngine();
 const statRows = ref<CallStatRow[]>([]);
 const statSamples = new Map<string, CallStatSample>();
 let statsTimer: ReturnType<typeof setInterval> | null = null;
+// Guards against overlapping ticks: a slow `getStats()` must not let the
+// next interval fire a second concurrent pass (which would diff against a
+// half-updated sample map and could write rows out of order).
+let statsSampling = false;
 
 const statDisplayRows = computed(() =>
   statRows.value.map((row) => ({
@@ -104,57 +108,73 @@ const statDisplayRows = computed(() =>
 function participantShortLabel(identity: string): string {
   const at = identity.indexOf("@");
   const local = at > 0 ? identity.slice(0, at) : identity;
-  return local || identity;
+  return local || identity || "Participant";
 }
 
 function sourceLabel(source: string): string {
   return source === "screen_share" ? "Screen" : "Camera";
 }
 
+/**
+ * Read and summarize one video track's stats into a row, or `null` when
+ * the report is unavailable. `getRTCStatsReport()` rejects when a
+ * sender/receiver is mid-teardown (track unpublished, ICE restart, peer
+ * leaving) — common exactly while a poll is running — so a failure drops
+ * that single row rather than rejecting the whole tick.
+ */
+async function rowForTrack(
+  track: { track: { getRTCStatsReport(): Promise<RTCStatsReport | undefined> } },
+  key: string,
+  direction: "send" | "recv",
+  label: string,
+  source: string,
+): Promise<CallStatRow | null> {
+  try {
+    const report = await track.track.getRTCStatsReport();
+    if (!report) return null;
+    const { summary, sample } = summarizeVideoStats(report, direction, statSamples.get(key));
+    if (sample) statSamples.set(key, sample);
+    return { ...summary, key, label, sourceLabel: sourceLabel(source), direction };
+  } catch {
+    return null;
+  }
+}
+
 async function sampleStats(): Promise<void> {
-  const local = localTracks.value.filter((track) => track.kind === "video");
-  const remote = remoteTracks.value.filter((track) => track.kind === "video");
-  const rows: CallStatRow[] = [];
-  await Promise.all([
-    ...local.map(async (track) => {
-      const key = `local:${track.source}:${track.publicationSid}`;
-      const report = await track.track.getRTCStatsReport();
-      if (!report) return;
-      const { summary, sample } = summarizeVideoStats(report, "send", statSamples.get(key));
-      if (sample) statSamples.set(key, sample);
-      rows.push({
-        ...summary,
-        key,
-        label: "You",
-        sourceLabel: sourceLabel(track.source),
-        direction: "send",
-      });
-    }),
-    ...remote.map(async (track) => {
-      const key = `remote:${track.participantIdentity}:${track.source}:${track.publicationSid}`;
-      const report = await track.track.getRTCStatsReport();
-      if (!report) return;
-      const { summary, sample } = summarizeVideoStats(report, "recv", statSamples.get(key));
-      if (sample) statSamples.set(key, sample);
-      rows.push({
-        ...summary,
-        key,
-        label: participantShortLabel(track.participantIdentity),
-        sourceLabel: sourceLabel(track.source),
-        direction: "recv",
-      });
-    }),
-  ]);
-  // Stable order: self first, then remotes alphabetically, so rows don't
-  // jump between polls.
-  rows.sort((a, b) =>
-    a.direction === b.direction
-      ? a.label.localeCompare(b.label)
-      : a.direction === "send"
-        ? -1
-        : 1,
-  );
-  statRows.value = rows;
+  if (statsSampling) return;
+  statsSampling = true;
+  try {
+    const local = localTracks.value.filter((track) => track.kind === "video");
+    const remote = remoteTracks.value.filter((track) => track.kind === "video");
+    const rows = (
+      await Promise.all([
+        ...local.map((track) =>
+          rowForTrack(track, `local:${track.source}:${track.publicationSid}`, "send", "You", track.source),
+        ),
+        ...remote.map((track) =>
+          rowForTrack(
+            track,
+            `remote:${track.participantIdentity}:${track.source}:${track.publicationSid}`,
+            "recv",
+            participantShortLabel(track.participantIdentity),
+            track.source,
+          ),
+        ),
+      ])
+    ).filter((row): row is CallStatRow => row !== null);
+    // Stable order: self first, then remotes alphabetically, so rows don't
+    // jump between polls.
+    rows.sort((a, b) =>
+      a.direction === b.direction
+        ? a.label.localeCompare(b.label)
+        : a.direction === "send"
+          ? -1
+          : 1,
+    );
+    statRows.value = rows;
+  } finally {
+    statsSampling = false;
+  }
 }
 
 function startStatsPolling(): void {
@@ -168,6 +188,7 @@ function stopStatsPolling(): void {
     clearInterval(statsTimer);
     statsTimer = null;
   }
+  statsSampling = false;
   statSamples.clear();
   statRows.value = [];
 }
@@ -238,6 +259,11 @@ watch(open, async (isOpen) => {
     return;
   }
   await refresh();
+  // `refresh()` awaited device enumeration; if the dialog was closed in
+  // the meantime, bail before wiring up listeners/polling — otherwise a
+  // closed dialog would keep a 1s `getStats()` interval (and the
+  // devicechange listener) running until the next open→close cycle.
+  if (!open.value) return;
   // Begin the 1s diagnostics poll now that the dialog is visible; it
   // tears down again on close / unmount.
   startStatsPolling();

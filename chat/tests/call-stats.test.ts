@@ -53,6 +53,30 @@ describe("summarizeVideoStats — outbound (send) video", () => {
     expect(summary.bitrateKbps).toBe(3000);
     expect(describeVideoStats(summary).bitrate).toBe("3.0 Mbps");
   });
+
+  test("aggregates simulcast layers: summed bitrate/loss, top-layer resolution", () => {
+    // A 1080p simulcast publish reports one outbound-rtp PER layer; the
+    // summary must sum byte/packet counters and show the TOP layer's size,
+    // not whichever entry happens to be iterated last.
+    const layers = [
+      { type: "outbound-rtp", kind: "video", frameWidth: 480, frameHeight: 270, framesPerSecond: 30, bytesSent: 100_000, packetsSent: 100, timestamp: 11_000 },
+      { type: "outbound-rtp", kind: "video", frameWidth: 960, frameHeight: 540, framesPerSecond: 30, bytesSent: 300_000, packetsSent: 300, timestamp: 11_000 },
+      { type: "outbound-rtp", kind: "video", frameWidth: 1920, frameHeight: 1080, framesPerSecond: 30, bytesSent: 800_000, packetsSent: 800, timestamp: 11_000 },
+    ];
+    const remoteInbounds = [
+      { type: "remote-inbound-rtp", kind: "video", packetsLost: 10 },
+      { type: "remote-inbound-rtp", kind: "video", packetsLost: 5 },
+    ];
+    // Summed bytes = 1,200,000; prev summed = 1,050,000 → +150,000 bytes =
+    // 1,200,000 bits over 1.0s = 1200 kbps. Loss = 15 / 1200 sent = 1.25%,
+    // rounded to 1 decimal → 1.3%.
+    const prev: CallStatSample = { bytes: 1_050_000, timestampMs: 10_000 };
+    const { summary, sample } = summarizeVideoStats(report([...layers, ...remoteInbounds]), "send", prev);
+    expect(summary.resolution).toBe("1920×1080");
+    expect(summary.bitrateKbps).toBe(1200);
+    expect(summary.packetLossPct).toBe(1.3);
+    expect(sample).toEqual({ bytes: 1_200_000, timestampMs: 11_000 });
+  });
 });
 
 describe("summarizeVideoStats — inbound (recv) video", () => {

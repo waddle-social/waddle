@@ -11,12 +11,19 @@ import {
  * Ambient self-connection indicator for the call bar. Reads the
  * engine-fed quality + transport-phase atoms and renders a three-bar
  * signal glyph that stays quiet when healthy (bars only, no text) and
- * escalates to an amber "Poor connection" / red "Reconnecting…" label as
- * the local connection degrades. Self-contained and store-connected so
- * the stateless `CallControls` bar can embed it without threading props.
+ * escalates to an amber "Poor connection" / red "Connection lost" /
+ * "Reconnecting…" label as the local connection degrades. Self-contained
+ * and store-connected so the stateless `CallControls` bar can embed it
+ * without threading props.
  *
- * Hidden entirely (`v-if`) until the first real quality sample arrives,
- * so a fresh call doesn't flash an empty "no signal" glyph.
+ * Always rendered during a call (a quiet, empty "measuring" glyph at the
+ * `unknown` start state) so the centered control row keeps a stable
+ * footprint instead of reflowing when the first sample lands.
+ *
+ * Accessibility: the visual glyph is `aria-hidden`; a separate
+ * visually-hidden live region announces ONLY the degraded label, so
+ * healthy↔healthy transitions (Excellent↔Good) stay silent for screen
+ * readers and don't spam announcements.
  */
 const quality = useStore($callConnectionQuality);
 const phase = useStore($callConnectionPhase);
@@ -26,23 +33,22 @@ const chip = computed(() => qualityToChip(quality.value, phase.value));
 /** Three ascending bars; each is "filled" up to `chip.bars`. */
 const bars = [1, 2, 3] as const;
 
-const ariaLabel = computed(() => {
+/** Full status, for the sighted hover tooltip (covers the no-label states). */
+const statusText = computed(() => {
   const c = chip.value;
-  if (!c) return "";
-  if (c.label) return `Connection: ${c.label}`;
-  return c.bars === 3 ? "Connection: excellent" : "Connection: good";
+  if (c.label) return c.label;
+  return c.bars === 3 ? "Excellent connection" : "Good connection";
 });
+
+/** Spoken text: only the degraded label, empty (silent) when healthy. */
+const announcement = computed(() => chip.value.label ?? "");
 </script>
 
 <template>
   <div
-    v-if="chip"
     class="call-connection"
     :class="`call-connection--${chip.tone}`"
-    role="status"
-    aria-live="polite"
-    :aria-label="ariaLabel"
-    :title="ariaLabel"
+    :title="statusText"
   >
     <span class="call-connection__bars" aria-hidden="true">
       <span
@@ -54,6 +60,7 @@ const ariaLabel = computed(() => {
       />
     </span>
     <span v-if="chip.label" class="type-control call-connection__label">{{ chip.label }}</span>
+    <span class="sr-only" role="status" aria-live="polite">{{ announcement }}</span>
   </div>
 </template>
 

@@ -83,8 +83,8 @@ const emit = defineEmits<{
     </button>
 
     <!-- Ambient self-connection quality. Self-contained/store-connected,
-         so it adds no props to this otherwise stateless bar. Hides itself
-         until the first quality sample arrives. -->
+         so it adds no props to this otherwise stateless bar. Shows quiet
+         measuring bars until the first quality sample arrives. -->
     <CallConnectionIndicator />
 
     <span class="call-controls__divider" aria-hidden="true" />

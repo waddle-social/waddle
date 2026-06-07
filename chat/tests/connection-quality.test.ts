@@ -34,17 +34,29 @@ describe("qualityToChip — ambient self-quality rendering model", () => {
     });
   });
 
-  test("lost shows empty red bars labelled Reconnecting…", () => {
+  test("lost gets its own 'Connection lost' label — NOT 'Reconnecting…', which it isn't", () => {
+    // `lost` is a per-participant quality score, independent of the
+    // transport phase; only an actual reconnecting transport says so.
     expect(qualityToChip("lost", "connected")).toEqual({
       bars: 0,
       tone: "danger",
-      label: "Reconnecting…",
+      label: "Connection lost",
     });
   });
 
-  test("unknown hides the indicator entirely (null), so a fresh call never flashes empty bars", () => {
-    expect(qualityToChip("unknown", "connected")).toBeNull();
-    expect(qualityToChip("unknown", "disconnected")).toBeNull();
+  test("unknown renders quiet empty bars (stable footprint), no label", () => {
+    // Always-present so the call bar doesn't reflow when the first
+    // quality sample lands mid-call.
+    expect(qualityToChip("unknown", "connected")).toEqual({
+      bars: 0,
+      tone: "neutral",
+      label: null,
+    });
+    expect(qualityToChip("unknown", "disconnected")).toEqual({
+      bars: 0,
+      tone: "neutral",
+      label: null,
+    });
   });
 
   test("a reconnecting transport overrides the last quality sample", () => {
@@ -73,7 +85,12 @@ describe("connection-quality atoms", () => {
     resetCallConnectionQuality();
     expect($callConnectionQuality.get()).toBe("unknown");
     expect($callConnectionPhase.get()).toBe("disconnected");
-    // …and the chip is hidden again, so nothing bleeds into the next call.
-    expect(qualityToChip($callConnectionQuality.get(), $callConnectionPhase.get())).toBeNull();
+    // …and the chip is back to quiet measuring bars (no degraded label),
+    // so nothing bleeds into the next call.
+    expect(qualityToChip($callConnectionQuality.get(), $callConnectionPhase.get())).toEqual({
+      bars: 0,
+      tone: "neutral",
+      label: null,
+    });
   });
 });
