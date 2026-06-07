@@ -401,6 +401,9 @@ pub(crate) fn archived_to_ffi(
         reply_to_sender: parsed.and_then(|m| m.reply_to_sender.clone()),
         reply_fallback_start: fb_start,
         reply_fallback_end: fb_end,
+        call_thread: parsed
+            .and_then(|m| m.call_thread.clone())
+            .map(call_thread_to_ffi),
         shared_files: parsed
             .map(|m| {
                 m.shared_files
@@ -727,6 +730,44 @@ mod tests {
             WaddleCallEventKind::Propose { media } => assert!(media.audio),
             other => panic!("expected Propose, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn archived_to_ffi_preserves_call_thread_anchor_for_room_reload() {
+        let archived = parse_mam_archived(
+            "<message xmlns='jabber:client'>\
+               <result xmlns='urn:xmpp:mam:2' id='mam-anchor' queryid='q1'>\
+                 <forwarded xmlns='urn:xmpp:forward:0'>\
+                   <delay xmlns='urn:xmpp:delay' stamp='2026-06-07T14:30:00Z'/>\
+                   <message xmlns='jabber:client' type='groupchat' id='anchor-1' \
+                            from='general@muc.waddle.test' to='alice@waddle.test/web'>\
+                     <body>Alice started a call</body>\
+                     <thread>call-thread-uuid</thread>\
+                     <call-thread xmlns='urn:waddle:call-thread:0' \
+                                  kind='muc' \
+                                  sid='session-uuid' \
+                                  media='audio video' \
+                                  initiator='alice@waddle.test' \
+                                  started='2026-06-07T14:30:00Z'/>\
+                     <store xmlns='urn:xmpp:hints'/>\
+                   </message>\
+                 </forwarded>\
+               </result>\
+             </message>",
+        );
+
+        let ffi = archived_to_ffi(archived);
+        let anchor = ffi
+            .call_thread
+            .expect("call-thread should survive archive conversion");
+
+        assert_eq!(ffi.mam_id, "mam-anchor");
+        assert_eq!(ffi.thread.as_deref(), Some("call-thread-uuid"));
+        assert_eq!(anchor.kind, "muc");
+        assert_eq!(anchor.sid, "session-uuid");
+        assert_eq!(anchor.media, vec!["audio".to_owned(), "video".to_owned()]);
+        assert_eq!(anchor.initiator, "alice@waddle.test");
+        assert_eq!(anchor.started, "2026-06-07T14:30:00+00:00");
     }
 
     #[test]

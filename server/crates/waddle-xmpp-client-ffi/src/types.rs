@@ -91,6 +91,8 @@ pub struct WaddleArchivedMessage {
     pub reply_to_sender: Option<String>,
     pub reply_fallback_start: Option<u32>,
     pub reply_fallback_end: Option<u32>,
+    /// urn:waddle:call-thread:0 call-thread anchor marker, if present.
+    pub call_thread: Option<WaddleCallThreadAnchor>,
     pub shared_files: Vec<WaddleSharedFile>,
     pub call_event: Option<WaddleCallEvent>,
 }

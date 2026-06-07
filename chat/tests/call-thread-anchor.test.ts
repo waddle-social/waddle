@@ -132,4 +132,32 @@ describe("call-thread anchor timeline mapping", () => {
 
     expect(live).toBeNull();
   });
+
+  test("room archive codec drops bodyless call-thread anchors", () => {
+    const live = roomMessageFromArchived({
+      mam_id: "mam-anchor-3",
+      id: "anchor-3",
+      from: "general@muc.example.com",
+      to: "alice@example.com/web",
+      message_type: "groupchat",
+      reaction_emojis: [],
+      is_muc: true,
+      thread: "call-thread-uuid",
+      markup_spans: [],
+      mention_uris: [],
+      references: [],
+      is_sticker: false,
+      shared_files: [],
+      link_previews: [],
+      call_thread: {
+        kind: "muc",
+        sid: "session-uuid",
+        media: ["audio"],
+        initiator: "alice@example",
+        started: "2026-06-07T14:30:00Z",
+      },
+    });
+
+    expect(live).toBeNull();
+  });
 });

@@ -299,6 +299,9 @@ pub struct WaddleArchivedMessage {
     pub forum_thread_title: Option<String>,
     pub is_sticker: bool,
     pub author_real_jid: Option<String>,
+    /// urn:waddle:call-thread:0 room call-thread anchor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_thread: Option<WaddleCallThreadAnchor>,
     pub shared_files: Vec<WaddleSharedFile>,
     pub link_previews: Vec<WaddleLinkPreview>,
     pub extension_envelope: Option<WaddleExtensionEnvelope>,

@@ -62,15 +62,7 @@ pub fn build_call_thread_anchor(anchor: &CallThreadAnchor) -> Element {
         CallThreadKind::Dm => "dm",
         CallThreadKind::Muc => "muc",
     };
-    let media = if anchor.media.audio && anchor.media.video {
-        "audio video"
-    } else if anchor.media.audio {
-        "audio"
-    } else if anchor.media.video {
-        "video"
-    } else {
-        ""
-    };
+    let media = media_attr(anchor.media).expect("call-thread marker requires audio or video media");
 
     Element::builder("call-thread", NS_WADDLE_CALL_THREAD)
         .attr(minidom::rxml::xml_ncname!("kind").to_owned(), kind)
@@ -129,6 +121,15 @@ pub fn parse_call_thread_anchor_child(message: &Element) -> Option<CallThreadAnc
         .and_then(|child| parse_call_thread_anchor(child).ok())
 }
 
+fn media_attr(media: CallThreadMedia) -> Result<&'static str, CallThreadParseError> {
+    match (media.audio, media.video) {
+        (true, true) => Ok("audio video"),
+        (true, false) => Ok("audio"),
+        (false, true) => Ok("video"),
+        (false, false) => Err(CallThreadParseError::InvalidMedia),
+    }
+}
+
 fn required_attr<'a>(
     element: &'a Element,
     name: &'static str,
@@ -185,6 +186,18 @@ mod tests {
 
         let parsed = parse_call_thread_anchor(&element).expect("marker parses");
         assert_eq!(parsed, original);
+    }
+
+    #[test]
+    #[should_panic(expected = "call-thread marker requires audio or video media")]
+    fn builder_rejects_empty_media() {
+        let mut anchor = anchor();
+        anchor.media = CallThreadMedia {
+            audio: false,
+            video: false,
+        };
+
+        let _ = build_call_thread_anchor(&anchor);
     }
 
     #[test]

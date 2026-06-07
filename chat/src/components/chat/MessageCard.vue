@@ -905,7 +905,7 @@ onBeforeUnmount(() => {
     v-else-if="message.callThread"
     :data-message-id="message.id"
     :data-message-created-at="message.createdAt"
-    class="chat-message-grid animate-message-in"
+    class="chat-message-grid relative animate-message-in"
   >
     <div class="chat-message-avatar-cell flex items-center justify-center text-muted-foreground/60">
       <PhoneCall class="w-4 h-4" aria-hidden="true" />

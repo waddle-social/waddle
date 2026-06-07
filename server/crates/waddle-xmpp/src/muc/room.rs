@@ -158,8 +158,8 @@ pub struct MujiPresenceState {
     /// state, so callers that need to preserve XEP-0272 joining
     /// semantics should prefer this list over the aggregate snapshot.
     pub session_mujis: Vec<(FullJid, Muji)>,
-    /// True when this update changed the nick from no active call to an
-    /// active call advertisement.
+    /// True when this update changed the room from no active Muji call
+    /// to at least one active call advertisement.
     pub active_call_started: bool,
 }
 

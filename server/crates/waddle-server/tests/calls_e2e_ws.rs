@@ -395,22 +395,27 @@ fn call_thread_child(message: &Element) -> Option<&Element> {
 
 async fn recv_until_muji_and_anchor(client: &mut WsXmppClient) -> Vec<String> {
     let mut frames = Vec::new();
-    loop {
-        let frame = client
-            .recv()
-            .await
-            .expect("receive frame while waiting for muji reflection and call-thread anchor");
-        frames.push(frame);
-        let has_muji = frames.iter().any(|frame| {
-            frame.contains("<presence") && (frame.contains("<muji ") || frame.contains("<muji>"))
-        });
-        let has_anchor = frames
-            .iter()
-            .any(|frame| frame.contains("<call-thread") && frame.contains(NS_CALL_THREAD));
-        if has_muji && has_anchor {
-            return frames;
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let frame = client
+                .recv()
+                .await
+                .expect("receive frame while waiting for muji reflection and call-thread anchor");
+            frames.push(frame);
+            let has_muji = frames.iter().any(|frame| {
+                frame.contains("<presence")
+                    && (frame.contains("<muji ") || frame.contains("<muji>"))
+            });
+            let has_anchor = frames
+                .iter()
+                .any(|frame| frame.contains("<call-thread") && frame.contains(NS_CALL_THREAD));
+            if has_muji && has_anchor {
+                return frames;
+            }
         }
-    }
+    })
+    .await
+    .expect("muji reflection and call-thread anchor arrive before timeout")
 }
 
 async fn query_room_mam(client: &mut WsXmppClient, room: &str, id: &str) -> Vec<String> {
@@ -504,6 +509,20 @@ async fn muji_presence_reflects_to_senders_sibling_resource() {
     // which could collide with the room JID. Both open-tag forms
     // (with attributes / namespace) are accepted.
     let active_frames = recv_until_muji_and_anchor(&mut mobile).await;
+    let muji_frame_index = active_frames
+        .iter()
+        .position(|frame| {
+            frame.contains("<presence") && (frame.contains("<muji ") || frame.contains("<muji>"))
+        })
+        .expect("muji frame index");
+    let anchor_frame_index = active_frames
+        .iter()
+        .position(|frame| frame.contains("<call-thread") && frame.contains(NS_CALL_THREAD))
+        .expect("anchor frame index");
+    assert!(
+        muji_frame_index < anchor_frame_index,
+        "active Muji presence should be queued before the call-thread anchor: {active_frames:?}"
+    );
     let mobile_active = active_frames
         .iter()
         .find(|frame| {

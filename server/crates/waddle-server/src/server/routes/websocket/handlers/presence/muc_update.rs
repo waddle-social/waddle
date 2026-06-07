@@ -232,21 +232,16 @@ pub(super) async fn try_handle_muc_presence_update(
         outcome.sender_muji.as_ref(),
         &outcome.session_mujis,
     );
-    if outcome.active_call_started {
-        let anchor = build_call_thread_anchor_message(
+    let call_thread_anchor = if outcome.active_call_started {
+        Some(build_call_thread_anchor_message(
             room_jid,
             &sender_jid.to_bare(),
             outcome.active_muji.as_ref(),
             &outcome.update.sender_nick,
-        );
-        let deps = build_interpret_deps(state, None);
-        crate::server::routes::interpret::broadcast_room_system_message(
-            &deps,
-            room_jid.clone(),
-            Box::new(anchor),
-        )
-        .await;
-    }
+        ))
+    } else {
+        None
+    };
 
     // Author the canonical presence the server will reflect. Built
     // ONCE here, cloned per recipient for the self vs other status
@@ -302,6 +297,16 @@ pub(super) async fn try_handle_muc_presence_update(
                     .try_send_to(recipient, stanza);
             }
         }
+    }
+
+    if let Some(anchor) = call_thread_anchor {
+        let deps = build_interpret_deps(state, None);
+        crate::server::routes::interpret::broadcast_room_system_message(
+            &deps,
+            room_jid.clone(),
+            Box::new(anchor),
+        )
+        .await;
     }
 
     // Silence unused-import warning when feature flags trim the path.

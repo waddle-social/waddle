@@ -473,7 +473,10 @@ export function roomMessageFromArchived(
   const markupSpans = message.markup_spans ?? [];
   const references = message.references ?? [];
   const extensionAnnotations = extensionAnnotationsFromWasm(message.extension_envelope);
-  const callThread = isSupportedRoomCallThread(message.call_thread) ? message.call_thread : undefined;
+  const callThread =
+    message.body && isSupportedRoomCallThread(message.call_thread)
+      ? message.call_thread
+      : undefined;
   // XEP-0201 `<thread/>` is scope metadata, not content. A stanza that
   // carries only a thread reference (no body, no subject, no attachments,
   // no link preview, no extension annotations, no forum-post payload, not a retraction)

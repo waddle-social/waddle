@@ -1406,12 +1406,19 @@ public struct WaddleArchivedMessage: Equatable, Hashable {
     public var replyToSender: String?
     public var replyFallbackStart: UInt32?
     public var replyFallbackEnd: UInt32?
+    /**
+     * urn:waddle:call-thread:0 call-thread anchor marker, if present.
+     */
+    public var callThread: WaddleCallThreadAnchor?
     public var sharedFiles: [WaddleSharedFile]
     public var callEvent: WaddleCallEvent?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(mamId: String, queryId: String?, id: String?, stanzaId: String?, originId: String?, timestamp: String?, from: String?, to: String?, messageType: String, body: String?, reactionTargetId: String?, reactionEmojis: [String], thread: String?, parentThreadId: String?, replyToId: String?, replyToSender: String?, replyFallbackStart: UInt32?, replyFallbackEnd: UInt32?, sharedFiles: [WaddleSharedFile], callEvent: WaddleCallEvent?) {
+    public init(mamId: String, queryId: String?, id: String?, stanzaId: String?, originId: String?, timestamp: String?, from: String?, to: String?, messageType: String, body: String?, reactionTargetId: String?, reactionEmojis: [String], thread: String?, parentThreadId: String?, replyToId: String?, replyToSender: String?, replyFallbackStart: UInt32?, replyFallbackEnd: UInt32?,
+        /**
+         * urn:waddle:call-thread:0 call-thread anchor marker, if present.
+         */callThread: WaddleCallThreadAnchor?, sharedFiles: [WaddleSharedFile], callEvent: WaddleCallEvent?) {
         self.mamId = mamId
         self.queryId = queryId
         self.id = id
@@ -1430,6 +1437,7 @@ public struct WaddleArchivedMessage: Equatable, Hashable {
         self.replyToSender = replyToSender
         self.replyFallbackStart = replyFallbackStart
         self.replyFallbackEnd = replyFallbackEnd
+        self.callThread = callThread
         self.sharedFiles = sharedFiles
         self.callEvent = callEvent
     }
@@ -1468,6 +1476,7 @@ public struct FfiConverterTypeWaddleArchivedMessage: FfiConverterRustBuffer {
                 replyToSender: FfiConverterOptionString.read(from: &buf),
                 replyFallbackStart: FfiConverterOptionUInt32.read(from: &buf),
                 replyFallbackEnd: FfiConverterOptionUInt32.read(from: &buf),
+                callThread: FfiConverterOptionTypeWaddleCallThreadAnchor.read(from: &buf),
                 sharedFiles: FfiConverterSequenceTypeWaddleSharedFile.read(from: &buf),
                 callEvent: FfiConverterOptionTypeWaddleCallEvent.read(from: &buf)
         )
@@ -1492,6 +1501,7 @@ public struct FfiConverterTypeWaddleArchivedMessage: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.replyToSender, into: &buf)
         FfiConverterOptionUInt32.write(value.replyFallbackStart, into: &buf)
         FfiConverterOptionUInt32.write(value.replyFallbackEnd, into: &buf)
+        FfiConverterOptionTypeWaddleCallThreadAnchor.write(value.callThread, into: &buf)
         FfiConverterSequenceTypeWaddleSharedFile.write(value.sharedFiles, into: &buf)
         FfiConverterOptionTypeWaddleCallEvent.write(value.callEvent, into: &buf)
     }

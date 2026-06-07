@@ -1,6 +1,6 @@
 import type { TimelineMessage } from "@/lib/chat-ui";
 
-export function callThreadAnchorLabel(message: Pick<TimelineMessage, "body" | "author" | "callThread">): string {
+export function callThreadAnchorLabel(message: Pick<TimelineMessage, "body" | "author">): string {
   return message.body || `${message.author} started a call`;
 }
 

@@ -129,7 +129,9 @@ fn media_attr(media: CallThreadMedia) -> &'static str {
         (true, true) => "audio video",
         (true, false) => "audio",
         (false, true) => "video",
-        (false, false) => "",
+        (false, false) => {
+            panic!("call-thread marker requires audio or video media")
+        }
     }
 }
 
@@ -189,5 +191,17 @@ mod tests {
 
         let parsed = parse_call_thread_anchor(&element).expect("marker parses");
         assert_eq!(parsed, original);
+    }
+
+    #[test]
+    #[should_panic(expected = "call-thread marker requires audio or video media")]
+    fn builder_rejects_empty_media() {
+        let mut anchor = anchor();
+        anchor.media = CallThreadMedia {
+            audio: false,
+            video: false,
+        };
+
+        let _ = build_call_thread_anchor(&anchor);
     }
 }
