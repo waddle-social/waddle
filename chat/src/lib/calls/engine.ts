@@ -739,7 +739,8 @@ export function mapLiveKitConnectionQuality(
  * Distil LiveKit's `ConnectionState` into the transport phase the
  * indicator cares about. Both ICE (`Reconnecting`) and signal
  * (`SignalReconnecting`) recovery collapse to `reconnecting`; everything
- * pre-`Connected` is `disconnected` (the chip hides).
+ * pre-`Connected` is `disconnected`, which pairs with the `unknown`
+ * quality to render the chip's quiet "measuring" bars.
  */
 export function mapLiveKitConnectionState(
   state: ConnectionState,

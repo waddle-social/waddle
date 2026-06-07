@@ -1,7 +1,8 @@
 /**
  * Pure WebRTC-stats parsing for the call diagnostics section.
  *
- * LiveKit exposes `publication.getRTCStatsReport()` per track; this
+ * LiveKit exposes `getRTCStatsReport()` on each `LocalTrack` /
+ * `RemoteTrack` (the diagnostics poller calls it on the track); this
  * module turns one such `RTCStatsReport` into a small, display-ready
  * summary. Bitrate is a rate, so it needs two samples — the caller keeps
  * the previous `CallStatSample` per track and passes it back in.

@@ -37,7 +37,11 @@ const bars = [1, 2, 3] as const;
 const statusText = computed(() => {
   const c = chip.value;
   if (c.label) return c.label;
-  return c.bars === 3 ? "Excellent connection" : "Good connection";
+  if (c.bars === 3) return "Excellent connection";
+  if (c.bars === 2) return "Good connection";
+  // 0 bars, no label → the quiet `unknown` start state before the first
+  // quality sample. Don't claim "Good" — say what it's actually doing.
+  return "Measuring…";
 });
 
 /** Spoken text: only the degraded label, empty (silent) when healthy. */

@@ -82,8 +82,8 @@ async function refresh(): Promise<void> {
 const { engine, remoteTracks, localTracks } = useCallEngine();
 
 /**
- * Live call diagnostics. Polls `getRTCStatsReport()` for every published
- * (send) and subscribed (recv) video track once per second — but ONLY
+ * Live call diagnostics. Polls each published (send) and subscribed
+ * (recv) video track's `getRTCStatsReport()` once per second — but ONLY
  * while this dialog is open (started/stopped in the `open` watcher), so a
  * normal call pays zero stats cost. `statSamples` carries the previous
  * byte/timestamp pair per track so bitrate can be derived as a rate.
@@ -95,6 +95,11 @@ let statsTimer: ReturnType<typeof setInterval> | null = null;
 // next interval fire a second concurrent pass (which would diff against a
 // half-updated sample map and could write rows out of order).
 let statsSampling = false;
+// Bumped every start/stop. A tick captures the generation at launch and
+// re-checks it after its awaits before committing any sample or row, so an
+// in-flight pass that outlives a close/reopen (or a switch to another call)
+// can never repopulate state for a session that has already torn down.
+let statsGeneration = 0;
 
 const statDisplayRows = computed(() =>
   statRows.value.map((row) => ({
@@ -115,44 +120,50 @@ function sourceLabel(source: string): string {
   return source === "screen_share" ? "Screen" : "Camera";
 }
 
+/** One track's sampled row plus the fresh byte/timestamp sample to retain. */
+type TrackSample = { row: CallStatRow; key: string; sample: CallStatSample | null };
+
 /**
- * Read and summarize one video track's stats into a row, or `null` when
- * the report is unavailable. `getRTCStatsReport()` rejects when a
- * sender/receiver is mid-teardown (track unpublished, ICE restart, peer
- * leaving) — common exactly while a poll is running — so a failure drops
- * that single row rather than rejecting the whole tick.
+ * Read and summarize one video track's stats, or `null` when the report
+ * is unavailable. `getRTCStatsReport()` rejects when a sender/receiver is
+ * mid-teardown (track unpublished, ICE restart, peer leaving) — common
+ * exactly while a poll is running — so a failure drops that single row
+ * rather than rejecting the whole tick.
+ *
+ * Pure read: the fresh `sample` is RETURNED, not written to `statSamples`
+ * here, so the caller can commit it atomically only after re-checking the
+ * polling generation (a stale in-flight pass must not mutate the map).
  */
-async function rowForTrack(
+async function sampleTrack(
   track: { track: { getRTCStatsReport(): Promise<RTCStatsReport | undefined> } },
   key: string,
   direction: "send" | "recv",
   label: string,
   source: string,
-): Promise<CallStatRow | null> {
+): Promise<TrackSample | null> {
   try {
     const report = await track.track.getRTCStatsReport();
     if (!report) return null;
     const { summary, sample } = summarizeVideoStats(report, direction, statSamples.get(key));
-    if (sample) statSamples.set(key, sample);
-    return { ...summary, key, label, sourceLabel: sourceLabel(source), direction };
+    return { row: { ...summary, key, label, sourceLabel: sourceLabel(source), direction }, key, sample };
   } catch {
     return null;
   }
 }
 
-async function sampleStats(): Promise<void> {
+async function sampleStats(generation: number): Promise<void> {
   if (statsSampling) return;
   statsSampling = true;
   try {
     const local = localTracks.value.filter((track) => track.kind === "video");
     const remote = remoteTracks.value.filter((track) => track.kind === "video");
-    const rows = (
+    const results = (
       await Promise.all([
         ...local.map((track) =>
-          rowForTrack(track, `local:${track.source}:${track.publicationSid}`, "send", "You", track.source),
+          sampleTrack(track, `local:${track.source}:${track.publicationSid}`, "send", "You", track.source),
         ),
         ...remote.map((track) =>
-          rowForTrack(
+          sampleTrack(
             track,
             `remote:${track.participantIdentity}:${track.source}:${track.publicationSid}`,
             "recv",
@@ -161,7 +172,15 @@ async function sampleStats(): Promise<void> {
           ),
         ),
       ])
-    ).filter((row): row is CallStatRow => row !== null);
+    ).filter((result): result is TrackSample => result !== null);
+    // Bail if polling was stopped/restarted while we awaited: this pass
+    // belongs to a torn-down session and must not touch live state.
+    if (generation !== statsGeneration) return;
+    // Commit samples + rows together, now that the generation is confirmed.
+    for (const result of results) {
+      if (result.sample) statSamples.set(result.key, result.sample);
+    }
+    const rows = results.map((result) => result.row);
     // Stable order: self first, then remotes alphabetically, so rows don't
     // jump between polls.
     rows.sort((a, b) =>
@@ -179,16 +198,18 @@ async function sampleStats(): Promise<void> {
 
 function startStatsPolling(): void {
   stopStatsPolling();
-  void sampleStats();
-  statsTimer = setInterval(() => void sampleStats(), 1000);
+  const generation = ++statsGeneration;
+  statsTimer = setInterval(() => void sampleStats(generation), 1000);
+  void sampleStats(generation);
 }
 
 function stopStatsPolling(): void {
+  // Invalidate any in-flight tick so its post-await commit no-ops.
+  statsGeneration += 1;
   if (statsTimer) {
     clearInterval(statsTimer);
     statsTimer = null;
   }
-  statsSampling = false;
   statSamples.clear();
   statRows.value = [];
 }
