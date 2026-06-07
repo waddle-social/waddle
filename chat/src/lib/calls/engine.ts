@@ -192,17 +192,6 @@ export class CallEngine {
     return this.room?.canPlaybackAudio ?? true;
   }
 
-  /**
-   * The *applied* browser-native audio processing of the local mic right
-   * now, read from the live capture track. `no-mic` when no mic is
-   * publishing (listener / muted-and-stopped / pre-connect). Lets a
-   * late subscriber seed its view without waiting for the next
-   * `micAudioProcessingChanged` emit.
-   */
-  get micAudioProcessing(): MicAudioProcessing {
-    return this.computeMicAudioProcessing();
-  }
-
   async connect(join: LiveKitJoin, opts: { audio: boolean; video: boolean }): Promise<void> {
     if (this.room) throw new Error("CallEngine already connected");
     // Defensive pre-flight: confirm the JWT actually carries a usable

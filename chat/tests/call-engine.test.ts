@@ -765,11 +765,16 @@ describe("call-engine — verifies applied mic audio processing", () => {
   test("an ended capture track reads as no-mic (mic stopped on mute)", async () => {
     const { CallEngine } = await import("../src/lib/calls/engine");
     const engine = new CallEngine();
+    const events: MicAudioProcessing[] = [];
+    engine.on("micAudioProcessingChanged", (state) => events.push(state));
     (engine as unknown as { room: unknown }).room = micRoomStub(
       { noiseSuppression: true } as MediaTrackSettings,
       "ended",
     );
-    expect(engine.micAudioProcessing).toEqual({ kind: "no-mic" });
+    (engine as unknown as {
+      handleActiveDeviceChanged: (kind: MediaDeviceKind) => void;
+    }).handleActiveDeviceChanged("audioinput");
+    expect(events.at(-1)).toEqual({ kind: "no-mic" });
   });
 
   test("a mid-call mic device switch recomputes; a camera/speaker switch does not", async () => {
@@ -799,10 +804,15 @@ describe("call-engine — verifies applied mic audio processing", () => {
     ]);
   });
 
-  test("micAudioProcessing getter is no-mic before any room is connected", async () => {
+  test("a device change with no connected room emits no-mic, not a crash", async () => {
     const { CallEngine } = await import("../src/lib/calls/engine");
     const engine = new CallEngine();
-    expect(engine.micAudioProcessing).toEqual({ kind: "no-mic" });
+    const events: MicAudioProcessing[] = [];
+    engine.on("micAudioProcessingChanged", (state) => events.push(state));
+    (engine as unknown as {
+      handleActiveDeviceChanged: (kind: MediaDeviceKind) => void;
+    }).handleActiveDeviceChanged("audioinput");
+    expect(events).toEqual([{ kind: "no-mic" }]);
   });
 
   test("on() exposes micAudioProcessingChanged as a first-class engine event", async () => {
