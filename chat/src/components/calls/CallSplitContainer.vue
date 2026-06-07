@@ -24,12 +24,14 @@ import { useActiveMucCall } from "@/lib/calls/use-active-muc-call";
 import { useSplitResize } from "@/lib/calls/use-split-resize";
 import { localScreenSharePresentation } from "@/lib/calls/call-self-share";
 import { normalizeMucCallRoomJid } from "@/lib/calls/muc-call-presence";
+import { useCallVolumeMixer } from "@/lib/calls/use-call-volume-mixer";
 import { barePeerJid } from "@/lib/xmpp/jid";
 import CallTileGrid from "./CallTileGrid.vue";
 import CallControls from "./CallControls.vue";
 import CallSettingsDialog from "./CallSettingsDialog.vue";
 import CallMediaNotice from "./CallMediaNotice.vue";
 import CallSelfShareNotice from "./CallSelfShareNotice.vue";
+import CallVolumeMixerDialog from "./CallVolumeMixerDialog.vue";
 import CallAudioPlaybackPrompt from "./CallAudioPlaybackPrompt.vue";
 import SplitDragHandle from "./SplitDragHandle.vue";
 
@@ -65,11 +67,18 @@ const { remoteTracks, localTracks, engine } = useCallEngine();
 const { activeRoomJid, selfInCall } = useActiveMucCall();
 
 const settingsOpen = ref(false);
+const volumeOpen = ref(false);
 const containerRef = ref<HTMLElement | null>(null);
 
 const normalizedRoomJid = computed(() =>
   normalizeMucCallRoomJid(props.roomJid ?? ""),
 );
+
+const {
+  rows: volumeRows,
+  setVolume: setParticipantVolume,
+  resetAll: resetParticipantVolumes,
+} = useCallVolumeMixer(normalizedRoomJid);
 
 const normalizedDmPeerJid = computed(() =>
   barePeerJid(props.dmPeerJid ?? "").toLowerCase(),
@@ -214,10 +223,12 @@ async function onHangup(): Promise<void> {
           :screen-share-enabled="screenShareEnabled"
           :screen-share-supported="screenShareSupported"
           :is-expanded="false"
+          :volume-open="volumeOpen"
           @toggle-mic="toggleMic"
           @toggle-cam="toggleCam"
           @toggle-screen-share="toggleScreenShare"
           @toggle-expanded="enterExpanded"
+          @toggle-volume="volumeOpen = !volumeOpen"
           @open-settings="settingsOpen = true"
           @hangup="onHangup"
         />
@@ -229,6 +240,12 @@ async function onHangup(): Promise<void> {
       @press="onHandlePress"
     />
     <CallSettingsDialog v-model:open="settingsOpen" />
+    <CallVolumeMixerDialog
+      v-model:open="volumeOpen"
+      :rows="volumeRows"
+      @set-volume="setParticipantVolume"
+      @reset-all="resetParticipantVolumes"
+    />
   </template>
 </template>
 
