@@ -341,7 +341,7 @@ describe("call volume mixer panel", () => {
 });
 
 describe("call volume mixer controller apply path", () => {
-  const join = {
+  const callJoin = {
     url: "wss://livekit.test",
     room: "bob@waddle.test::c1",
     identity: "me@waddle.test/browser",
@@ -380,11 +380,15 @@ describe("call volume mixer controller apply path", () => {
 
       captured.calls.length = 0;
       controller.resetAll();
-      expect(captured.calls).toContainEqual({
-        participantIdentity: "bob@waddle.test/desktop",
-        source: "microphone",
-        volume: 1,
-      });
+      // bob is both a remembered target and a projected DM row, but
+      // reset-all must touch the engine once per participant, not twice.
+      expect(captured.calls).toEqual([
+        {
+          participantIdentity: "bob@waddle.test/desktop",
+          source: "microphone",
+          volume: 1,
+        },
+      ]);
     } finally {
       scope.stop();
       captured.restore();
@@ -446,7 +450,7 @@ describe("call volume mixer controller apply path", () => {
       peer: "bob@waddle.test/desktop",
       sid,
       media: { audio: true, video: false },
-      join,
+      join: callJoin,
       kind: "dm",
     });
   }
@@ -457,7 +461,7 @@ describe("call volume mixer controller apply path", () => {
       peer: "room@muc.waddle.test",
       sid,
       media: { audio: true, video: false },
-      join: { ...join, room: "room@muc.waddle.test" },
+      join: { ...callJoin, room: "room@muc.waddle.test" },
       kind: "muc",
       selfNick: "me",
       selfFullJid: "me@waddle.test/browser",
@@ -518,6 +522,9 @@ describe("call volume mixer controller wiring", () => {
     const guard = expanded.slice(start, expanded.indexOf("collapseToSplit()", start));
     expect(guard).toContain("settingsOpen.value");
     expect(guard).toContain("volumeOpen.value");
+    // Capture phase so the guard sees the still-open flag before
+    // AppDialog's bubble-phase Escape flips the v-model to false.
+    expect(expanded).toContain('window.addEventListener("keydown", onKeydown, true)');
   });
 });
 

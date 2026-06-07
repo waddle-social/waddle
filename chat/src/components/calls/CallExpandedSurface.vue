@@ -159,7 +159,10 @@ function onKeydown(event: KeyboardEvent): void {
   if (event.key !== "Escape") return;
   // A modal (settings or the volume mixer) owns Escape while it is
   // open: dismiss the dialog rather than collapsing the whole expanded
-  // call out from under it.
+  // call out from under it. This listener runs in the CAPTURE phase so
+  // it sees the still-open flag before AppDialog's own bubble-phase
+  // Escape handler flips the v-model to false — otherwise a dialog
+  // dismiss from inside the dialog would fall through to collapse.
   if (settingsOpen.value || volumeOpen.value) {
     event.preventDefault();
     settingsOpen.value = false;
@@ -173,13 +176,13 @@ function onKeydown(event: KeyboardEvent): void {
 onMounted(() => {
   refreshScreenShareSupported();
   if (typeof window !== "undefined") {
-    window.addEventListener("keydown", onKeydown);
+    window.addEventListener("keydown", onKeydown, true);
   }
 });
 
 onBeforeUnmount(() => {
   if (typeof window !== "undefined") {
-    window.removeEventListener("keydown", onKeydown);
+    window.removeEventListener("keydown", onKeydown, true);
   }
 });
 </script>

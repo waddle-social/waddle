@@ -104,8 +104,10 @@ export function useCallVolumeMixer(
     // currently-projected rows: a participant can be a remembered
     // target without a live row (muted) or a live row without a
     // remembered target (default volume), and "Reset all" must land
-    // every audible participant at unity gain.
-    for (const target of Object.values($rememberedTargets.get())) {
+    // every audible participant at unity gain. Rows already covered by
+    // a remembered target are skipped so each participant is reset once.
+    const touched = $rememberedTargets.get();
+    for (const target of Object.values(touched)) {
       engine.setParticipantAudioVolume({
         participantIdentity: target.participantIdentity,
         source: target.source,
@@ -113,6 +115,7 @@ export function useCallVolumeMixer(
       });
     }
     for (const row of rows.value) {
+      if (touched[row.key]) continue;
       engine.setParticipantAudioVolume({
         participantIdentity: row.participantIdentity,
         source: row.source,
