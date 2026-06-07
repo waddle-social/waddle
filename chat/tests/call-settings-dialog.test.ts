@@ -75,10 +75,32 @@ function rewriteImports(
   cache: Map<string, string>,
 ): string {
   return code
-    .replace(/from\s+["']([^"']+)["']/g, (_match, specifier: string) =>
-      `from ${JSON.stringify(resolveModuleSpecifier(specifier, importer, tempDir, cache))}`)
-    .replace(/import\s*\(\s*["']([^"']+)["']\s*\)/g, (_match, specifier: string) =>
-      `import(${JSON.stringify(resolveModuleSpecifier(specifier, importer, tempDir, cache))})`);
+    .replace(/^(\s*import\b(?:(?!;)[\s\S])*?\s+from\s+)["']([^"']+)["']/gm, (
+      _match,
+      prefix: string,
+      specifier: string,
+    ) =>
+      `${prefix}${JSON.stringify(resolveModuleSpecifier(specifier, importer, tempDir, cache))}`)
+    .replace(/^(\s*export\b(?:(?!;)[\s\S])*?\s+from\s+)["']([^"']+)["']/gm, (
+      _match,
+      prefix: string,
+      specifier: string,
+    ) =>
+      `${prefix}${JSON.stringify(resolveModuleSpecifier(specifier, importer, tempDir, cache))}`)
+    .replace(/^(\s*import\s*\(\s*)["']([^"']+)["'](\s*\))/gm, (
+      _match,
+      prefix: string,
+      specifier: string,
+      suffix: string,
+    ) =>
+      `${prefix}${JSON.stringify(resolveModuleSpecifier(specifier, importer, tempDir, cache))}${suffix}`)
+    .replace(/^(\s*const\s+\w+\s*=\s*await\s+import\s*\(\s*)["']([^"']+)["'](\s*\))/gm, (
+      _match,
+      prefix: string,
+      specifier: string,
+      suffix: string,
+    ) =>
+      `${prefix}${JSON.stringify(resolveModuleSpecifier(specifier, importer, tempDir, cache))}${suffix}`);
 }
 
 function resolveModuleSpecifier(

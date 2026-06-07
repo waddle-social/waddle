@@ -124,7 +124,6 @@ watch(open, async (isOpen) => {
     teardownDeviceChange();
     return;
   }
-  speakerSupported.value = isSpeakerOutputSelectionSupported();
   await refresh();
   // Mount the devicechange listener after the first refresh so the
   // initial enumeration isn't fighting a hot-plug event arriving in
