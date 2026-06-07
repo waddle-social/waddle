@@ -79,6 +79,25 @@ export function activeMicAudioProcessing(
 }
 
 /**
+ * Structural equality of two states. Lets the store skip a redundant
+ * notification when a recompute yields an unchanged value — e.g. the
+ * initial mic publish emits via both `LocalTrackPublished` and the
+ * follow-on `ActiveDeviceChanged`, producing two equal-by-value states.
+ */
+export function sameMicAudioProcessing(
+  a: MicAudioProcessing,
+  b: MicAudioProcessing,
+): boolean {
+  if (a.kind !== b.kind) return false;
+  if (a.kind !== "active" || b.kind !== "active") return true; // both no-mic
+  return (
+    a.noiseSuppression === b.noiseSuppression &&
+    a.echoCancellation === b.echoCancellation &&
+    a.autoGainControl === b.autoGainControl
+  );
+}
+
+/**
  * Visual weight for a constraint state, matching meaning to prominence:
  *  - `on`   — calm positive; the requested processing is confirmed.
  *  - `warn` — the browser told us it is `off`; a real degradation.

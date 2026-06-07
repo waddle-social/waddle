@@ -49,4 +49,26 @@ describe("$micAudioProcessing store", () => {
     unsubscribe();
     expect(notifications).toBe(0);
   });
+
+  test("setting an unchanged value does not notify (the publish double-emit)", () => {
+    setMicAudioProcessing({
+      kind: "active",
+      noiseSuppression: "on",
+      echoCancellation: "on",
+      autoGainControl: "on",
+    });
+    let notifications = 0;
+    const unsubscribe = $micAudioProcessing.listen(() => {
+      notifications += 1;
+    });
+    // Same value again — e.g. LocalTrackPublished then ActiveDeviceChanged.
+    setMicAudioProcessing({
+      kind: "active",
+      noiseSuppression: "on",
+      echoCancellation: "on",
+      autoGainControl: "on",
+    });
+    unsubscribe();
+    expect(notifications).toBe(0);
+  });
 });

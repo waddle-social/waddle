@@ -3,6 +3,7 @@ import {
   activeMicAudioProcessing,
   audioProcessingRows,
   constraintState,
+  sameMicAudioProcessing,
   type MicAudioProcessing,
 } from "../src/lib/calls/mic-audio-processing";
 
@@ -108,5 +109,32 @@ describe("MicAudioProcessing — discriminated union keeps no-mic distinct", () 
     // constraint. Runtime guard that the union stays a 2-arm shape.
     expect(state.kind).toBe("no-mic");
     expect("noiseSuppression" in state).toBe(false);
+  });
+});
+
+describe("sameMicAudioProcessing — structural equality for dedup", () => {
+  const active: MicAudioProcessing = {
+    kind: "active",
+    noiseSuppression: "on",
+    echoCancellation: "off",
+    autoGainControl: "unknown",
+  };
+
+  test("two no-mic values are equal", () => {
+    expect(sameMicAudioProcessing({ kind: "no-mic" }, { kind: "no-mic" })).toBe(true);
+  });
+
+  test("no-mic and active differ", () => {
+    expect(sameMicAudioProcessing({ kind: "no-mic" }, active)).toBe(false);
+  });
+
+  test("active values with the same trio are equal", () => {
+    expect(sameMicAudioProcessing(active, { ...active })).toBe(true);
+  });
+
+  test("a single differing constraint makes them unequal", () => {
+    expect(
+      sameMicAudioProcessing(active, { ...active, autoGainControl: "on" }),
+    ).toBe(false);
   });
 });

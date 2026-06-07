@@ -1,5 +1,5 @@
 import { atom } from "nanostores";
-import type { MicAudioProcessing } from "./mic-audio-processing";
+import { sameMicAudioProcessing, type MicAudioProcessing } from "./mic-audio-processing";
 
 /**
  * Applied audio-processing state of the local microphone for the active
@@ -12,11 +12,13 @@ import type { MicAudioProcessing } from "./mic-audio-processing";
 export const $micAudioProcessing = atom<MicAudioProcessing>({ kind: "no-mic" });
 
 export function setMicAudioProcessing(state: MicAudioProcessing): void {
+  // Skip redundant notifications: a recompute often yields an unchanged
+  // value (the initial publish emits twice — see sameMicAudioProcessing).
+  if (sameMicAudioProcessing($micAudioProcessing.get(), state)) return;
   $micAudioProcessing.set(state);
 }
 
 /** Reset to `no-mic` — used when a call disconnects. */
 export function resetMicAudioProcessing(): void {
-  if ($micAudioProcessing.get().kind === "no-mic") return;
-  $micAudioProcessing.set({ kind: "no-mic" });
+  setMicAudioProcessing({ kind: "no-mic" });
 }
