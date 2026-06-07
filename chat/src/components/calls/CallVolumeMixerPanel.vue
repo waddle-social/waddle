@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { ref } from "vue";
 import { Volume2, VolumeX } from "lucide-vue-next";
 import {
   callVolumePercentToGain,
@@ -14,10 +15,18 @@ const emit = defineEmits<{
   resetAll: [];
 }>();
 
+const lastEmittedLevels = ref<Record<string, number>>({});
+
 function onInput(row: CallVolumeMixerRow, event: Event): void {
   const target = event.target;
   if (!(target instanceof HTMLInputElement)) return;
-  emit("setVolume", row, callVolumePercentToGain(Number(target.value), row.level));
+  const currentGain = lastEmittedLevels.value[row.key] ?? row.level;
+  const nextGain = callVolumePercentToGain(Number(target.value), currentGain);
+  lastEmittedLevels.value = {
+    ...lastEmittedLevels.value,
+    [row.key]: nextGain,
+  };
+  emit("setVolume", row, nextGain);
 }
 </script>
 

@@ -209,11 +209,13 @@ describe("call volume mixer reducer", () => {
   test("maps slider percentages to gain with a 100 percent snap detent", () => {
     expect(callVolumePercentToGain(0)).toBe(0);
     expect(callVolumePercentToGain(88)).toBe(0.88);
+    expect(callVolumePercentToGain(99, 0.5)).toBe(0.99);
     expect(callVolumePercentToGain(99, 0.98)).toBe(1);
     expect(callVolumePercentToGain(99, 1)).toBe(0.99);
     expect(callVolumePercentToGain(100, 0.99)).toBe(1);
     expect(callVolumePercentToGain(101, 1)).toBe(1.01);
     expect(callVolumePercentToGain(101, 1.02)).toBe(1);
+    expect(callVolumePercentToGain(101, 1.5)).toBe(1.01);
     expect(callVolumePercentToGain(150)).toBe(1.5);
     expect(callVolumePercentToGain(250)).toBe(2);
     expect(callVolumePercentToGain(Number.NaN)).toBe(1);
@@ -282,15 +284,30 @@ describe("call volume mixer panel", () => {
         },
       });
 
-      const rowBelow = mixerRow({ level: 0.98 });
-      const rowNeutral = mixerRow({ level: 1 });
-      const rowAbove = mixerRow({ level: 1.02 });
+      const rowBelow = mixerRow({ key: "below", level: 0.98 });
+      const rowNeutral = mixerRow({ key: "neutral", level: 1 });
+      const rowAbove = mixerRow({ key: "above", level: 1.02 });
+      const staleRowBelow = mixerRow({ key: "stale-low", level: 0.5 });
+      const staleRowAbove = mixerRow({ key: "stale-high", level: 1.5 });
       bindings.onInput(rowBelow, inputEvent("99"));
       bindings.onInput(rowNeutral, inputEvent("99"));
       bindings.onInput(rowNeutral, inputEvent("101"));
       bindings.onInput(rowAbove, inputEvent("101"));
+      bindings.onInput(staleRowBelow, inputEvent("102"));
+      bindings.onInput(staleRowBelow, inputEvent("101"));
+      bindings.onInput(staleRowAbove, inputEvent("98"));
+      bindings.onInput(staleRowAbove, inputEvent("99"));
 
-      expect(emitted.map(([, , level]) => level)).toEqual([1, 0.99, 1.01, 1]);
+      expect(emitted.map(([, , level]) => level)).toEqual([
+        1,
+        0.99,
+        1.01,
+        1,
+        1.02,
+        1,
+        0.98,
+        1,
+      ]);
     } finally {
       globalThis.HTMLInputElement = originalHTMLInputElement;
     }

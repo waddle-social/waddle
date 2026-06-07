@@ -110,8 +110,8 @@ export function resetCallVolumeMixerLevels(
 export function callVolumePercentToGain(percent: number, currentGain = 1): number {
   if (!Number.isFinite(percent)) return 1;
   if (percent === 100) return 1;
-  if (percent === 99 && currentGain < 0.99) return 1;
-  if (percent === 101 && currentGain > 1.01) return 1;
+  if (percent === 99 && currentGain >= 0.98 && currentGain < 0.99) return 1;
+  if (percent === 101 && currentGain > 1.01 && currentGain <= 1.02) return 1;
   return normalizeCallVolumeLevel(percent / 100);
 }
 
