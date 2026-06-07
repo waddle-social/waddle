@@ -92,7 +92,7 @@ type AudioProcessingRowKey =
   | "autoGainControl";
 
 /** One presentational row for the call-settings indicator. */
-export type AudioProcessingRow = {
+type AudioProcessingRow = {
   key: AudioProcessingRowKey;
   label: string;
   state: ConstraintState;

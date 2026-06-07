@@ -654,12 +654,17 @@ describe("enableRequestedCapture — best-effort, never ejects", () => {
  */
 function micRoomStub(
   settings: MediaTrackSettings | null,
-  readyState: MediaStreamTrackState = "live",
+  opts: { readyState?: MediaStreamTrackState; isMuted?: boolean } = {},
 ) {
+  const { readyState = "live", isMuted = false } = opts;
   const publication =
     settings === null
       ? undefined
-      : { track: { mediaStreamTrack: { readyState, getSettings: () => settings } } };
+      : {
+          isMuted,
+          source: Track.Source.Microphone,
+          track: { mediaStreamTrack: { readyState, getSettings: () => settings } },
+        };
   return {
     localParticipant: {
       getTrackPublication: (source: Track.Source) =>
@@ -762,19 +767,73 @@ describe("call-engine — verifies applied mic audio processing", () => {
     expect(events.at(-1)).toEqual({ kind: "no-mic" });
   });
 
-  test("an ended capture track reads as no-mic (mic stopped on mute)", async () => {
+  test("a track that has ended (e.g. device unplugged) reads as no-mic", async () => {
     const { CallEngine } = await import("../src/lib/calls/engine");
     const engine = new CallEngine();
     const events: MicAudioProcessing[] = [];
     engine.on("micAudioProcessingChanged", (state) => events.push(state));
     (engine as unknown as { room: unknown }).room = micRoomStub(
       { noiseSuppression: true } as MediaTrackSettings,
-      "ended",
+      { readyState: "ended" },
     );
     (engine as unknown as {
       handleActiveDeviceChanged: (kind: MediaDeviceKind) => void;
     }).handleActiveDeviceChanged("audioinput");
     expect(events.at(-1)).toEqual({ kind: "no-mic" });
+  });
+
+  test("muting the local mic falls back to no-mic; unmuting restores the trio", async () => {
+    // The common case: LiveKit's default `stopMicTrackOnMute: false`
+    // leaves the muted track `live` and published, so without the mute
+    // listener + `isMuted` guard the indicator would show a stale trio
+    // for a mic that isn't capturing.
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine();
+    const events: MicAudioProcessing[] = [];
+    engine.on("micAudioProcessingChanged", (state) => events.push(state));
+    const handle = (
+      engine as unknown as {
+        handleTrackMuteChanged: (publication: unknown, participant: unknown) => void;
+      }
+    ).handleTrackMuteChanged;
+
+    (engine as unknown as { room: unknown }).room = micRoomStub(
+      { noiseSuppression: true } as MediaTrackSettings,
+      { isMuted: true },
+    );
+    handle({ source: Track.Source.Microphone }, { isLocal: true });
+    expect(events.at(-1)).toEqual({ kind: "no-mic" });
+
+    (engine as unknown as { room: unknown }).room = micRoomStub(
+      { noiseSuppression: true } as MediaTrackSettings,
+      { isMuted: false },
+    );
+    handle({ source: Track.Source.Microphone }, { isLocal: true });
+    expect(events.at(-1)).toEqual({
+      kind: "active",
+      noiseSuppression: "on",
+      echoCancellation: "unknown",
+      autoGainControl: "unknown",
+    });
+  });
+
+  test("a remote participant's mute (or a local non-mic mute) is ignored", async () => {
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine();
+    const events: MicAudioProcessing[] = [];
+    engine.on("micAudioProcessingChanged", (state) => events.push(state));
+    (engine as unknown as { room: unknown }).room = micRoomStub({
+      noiseSuppression: true,
+    } as MediaTrackSettings);
+    const handle = (
+      engine as unknown as {
+        handleTrackMuteChanged: (publication: unknown, participant: unknown) => void;
+      }
+    ).handleTrackMuteChanged;
+
+    handle({ source: Track.Source.Microphone }, { isLocal: false });
+    handle({ source: Track.Source.ScreenShareAudio }, { isLocal: true });
+    expect(events).toEqual([]);
   });
 
   test("a mid-call mic device switch recomputes; a camera/speaker switch does not", async () => {

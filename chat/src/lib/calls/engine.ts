@@ -5,9 +5,11 @@ import {
   type LocalParticipant,
   type LocalTrack,
   type LocalTrackPublication,
+  type Participant,
   type RemoteParticipant,
   type RemoteTrack,
   type RemoteTrackPublication,
+  type TrackPublication,
 } from "livekit-client";
 import type { LiveKitJoin } from "./types";
 import { $devicePrefs } from "./device-prefs";
@@ -227,6 +229,8 @@ export class CallEngine {
     room.on(RoomEvent.Disconnected, this.handleDisconnected);
     room.on(RoomEvent.AudioPlaybackStatusChanged, this.handleAudioPlaybackStatusChanged);
     room.on(RoomEvent.ActiveDeviceChanged, this.handleActiveDeviceChanged);
+    room.on(RoomEvent.TrackMuted, this.handleTrackMuteChanged);
+    room.on(RoomEvent.TrackUnmuted, this.handleTrackMuteChanged);
     try {
       await room.connect(join.url, join.token);
     } catch (err) {
@@ -369,6 +373,8 @@ export class CallEngine {
     room.off(RoomEvent.Disconnected, this.handleDisconnected);
     room.off(RoomEvent.AudioPlaybackStatusChanged, this.handleAudioPlaybackStatusChanged);
     room.off(RoomEvent.ActiveDeviceChanged, this.handleActiveDeviceChanged);
+    room.off(RoomEvent.TrackMuted, this.handleTrackMuteChanged);
+    room.off(RoomEvent.TrackUnmuted, this.handleTrackMuteChanged);
     await room.disconnect();
   }
 
@@ -507,16 +513,37 @@ export class CallEngine {
   };
 
   /**
+   * Recompute when the local mic is muted or unmuted. Muting is the most
+   * common mic transition, and with LiveKit's default
+   * `stopMicTrackOnMute: false` it neither unpublishes nor ends the
+   * capture track — so without this listener the indicator would keep
+   * showing a stale trio for a mic that isn't capturing. Fires for
+   * remote tracks too, hence the local-mic filter.
+   */
+  private handleTrackMuteChanged = (
+    publication: TrackPublication,
+    participant: Participant,
+  ) => {
+    if (!participant.isLocal) return;
+    if (publication.source !== Track.Source.Microphone) return;
+    this.emitMicAudioProcessing();
+  };
+
+  /**
    * Read the *applied* audio processing of the local mic from its live
-   * capture track. `no-mic` when nothing is publishing or the track has
-   * already ended (e.g. the mic was stopped on mute), so the indicator
-   * never reports a trio for a track that isn't actually capturing.
+   * capture track. `no-mic` when nothing is publishing, the mic is muted,
+   * or the track has ended (e.g. the device was unplugged) — so the
+   * indicator never reports a trio for a mic that isn't actually
+   * capturing. A muted mic must be checked explicitly: LiveKit's default
+   * `stopMicTrackOnMute: false` leaves the underlying track `live` while
+   * muted, so the `readyState` guard alone would miss it.
    */
   private computeMicAudioProcessing(): MicAudioProcessing {
     const room = this.room;
     if (!room) return { kind: "no-mic" };
     const publication = room.localParticipant.getTrackPublication(Track.Source.Microphone);
-    const mediaStreamTrack = publication?.track?.mediaStreamTrack;
+    if (!publication || publication.isMuted) return { kind: "no-mic" };
+    const mediaStreamTrack = publication.track?.mediaStreamTrack;
     if (!mediaStreamTrack || mediaStreamTrack.readyState !== "live") {
       return { kind: "no-mic" };
     }
