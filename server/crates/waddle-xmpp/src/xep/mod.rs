@@ -199,6 +199,7 @@ pub mod xep0502;
 pub mod xep0503;
 pub mod xep0511;
 pub mod xep0513;
+pub mod xep_waddle_call_thread;
 pub mod xep_waddle_dm_bookmarks;
 pub mod xep_waddle_dnd;
 pub mod xep_waddle_forums;

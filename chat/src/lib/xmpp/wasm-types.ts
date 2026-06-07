@@ -48,6 +48,14 @@ interface WasmStanzaId {
   by: string;
 }
 
+export interface WasmCallThreadAnchor {
+  kind: "muc" | "dm";
+  sid: string;
+  media: Array<"audio" | "video">;
+  initiator: string;
+  started: string;
+}
+
 export interface WasmExtensionEnvelope {
   version: number;
   enrichments: WasmExtensionEnrichment[];
@@ -137,6 +145,7 @@ export interface WasmMessage {
   forum_title?: string;
   forum_thread_title?: string;
   is_sticker: boolean;
+  call_thread?: WasmCallThreadAnchor;
   shared_files: WasmSharedFile[];
   link_previews: WasmLinkPreview[];
   call_event?: CallEvent;

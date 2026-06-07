@@ -35,6 +35,8 @@ pub struct WaddleMessage {
     pub reply_fallback_start: Option<u32>,
     /// XEP-0428 fallback range end (char offset, exclusive).
     pub reply_fallback_end: Option<u32>,
+    /// urn:waddle:call-thread:0 call-thread anchor marker, if present.
+    pub call_thread: Option<WaddleCallThreadAnchor>,
     /// XEP-0446 / XEP-0447 shared files attached to the message.
     pub shared_files: Vec<WaddleSharedFile>,
     /// XEP-0490 Message Displayed Synchronization PEP event payload.
@@ -42,6 +44,15 @@ pub struct WaddleMessage {
     /// when it is — including `Some(vec![])` for an MDS event with
     /// zero items (rare but distinct from "not an MDS event").
     pub mds_displayed: Option<Vec<WaddleMdsDisplayedEntry>>,
+}
+
+#[derive(uniffi::Record, Clone)]
+pub struct WaddleCallThreadAnchor {
+    pub kind: String,
+    pub sid: String,
+    pub media: Vec<String>,
+    pub initiator: String,
+    pub started: String,
 }
 
 /// XEP-0490 §3 displayed-marker entry surfaced to Swift. Mirrors
@@ -80,6 +91,8 @@ pub struct WaddleArchivedMessage {
     pub reply_to_sender: Option<String>,
     pub reply_fallback_start: Option<u32>,
     pub reply_fallback_end: Option<u32>,
+    /// urn:waddle:call-thread:0 call-thread anchor marker, if present.
+    pub call_thread: Option<WaddleCallThreadAnchor>,
     pub shared_files: Vec<WaddleSharedFile>,
     pub call_event: Option<WaddleCallEvent>,
 }

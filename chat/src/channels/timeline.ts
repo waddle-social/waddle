@@ -49,6 +49,7 @@ export function mapLiveRoomMessageToTimeline(
   }
   if (msg.threadId) tm.threadId = msg.threadId;
   if (msg.parentThreadId) tm.parentThreadId = msg.parentThreadId;
+  if (msg.callThread) tm.callThread = msg.callThread;
   if (msg.forumPostKind) tm.forumPostKind = msg.forumPostKind;
   if (msg.forumTitle) tm.forumTitle = msg.forumTitle;
   if (msg.forumThreadTitle) tm.forumThreadTitle = msg.forumThreadTitle;
@@ -102,7 +103,7 @@ export function applyForumContext(list: TimelineMessage[], inferForumReplies = t
 }
 
 export function isFeedTimelineMessage(message: TimelineMessage): boolean {
-  return !message.threadId || message.id === message.threadId;
+  return !message.threadId || message.id === message.threadId || !!message.callThread;
 }
 
 const TIMELINE_STAMP_FORMATTER = new Intl.DateTimeFormat("en", {

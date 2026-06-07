@@ -21,6 +21,7 @@ import type { TimestampSource } from "@/lib/timeline-timestamps";
 import type { LiveDmMessage, LiveRoomMessage, OccupantPresence, PresenceUpdateEvent, SharedFileInfo } from "./types";
 import type {
   WasmArchivedMessage,
+  WasmCallThreadAnchor,
   WasmInboxConversation,
   WasmExtensionEnvelope,
   WasmExtensionPayloadElement,
@@ -81,6 +82,12 @@ function wasmSpanToMarkupSpan(span: WasmMessage["markup_spans"][number]): Markup
   if (span.span_type === "code_block") return { type: "bcode", start: span.start, end: span.end } satisfies MarkupSpan;
   if (span.span_type === "blockquote") return { type: "bquote", start: span.start, end: span.end } satisfies MarkupSpan;
   return null;
+}
+
+function isSupportedRoomCallThread(
+  anchor: WasmCallThreadAnchor | undefined,
+): anchor is WasmCallThreadAnchor & { kind: "muc" } {
+  return anchor?.kind === "muc";
 }
 
 function rebaseOffsetAfterRemoval(offset: number, start: number, end: number): number {
@@ -466,6 +473,10 @@ export function roomMessageFromArchived(
   const markupSpans = message.markup_spans ?? [];
   const references = message.references ?? [];
   const extensionAnnotations = extensionAnnotationsFromWasm(message.extension_envelope);
+  const callThread =
+    message.body && isSupportedRoomCallThread(message.call_thread)
+      ? message.call_thread
+      : undefined;
   // XEP-0201 `<thread/>` is scope metadata, not content. A stanza that
   // carries only a thread reference (no body, no subject, no attachments,
   // no link preview, no extension annotations, no forum-post payload, not a retraction)
@@ -474,7 +485,7 @@ export function roomMessageFromArchived(
   // row inside the thread panel. The server-side `is_archivable` already
   // refuses to persist these; this is the defence-in-depth pass for
   // foreign servers and legacy archive rows.
-  if (!message.body && !message.subject && !sharedFiles.length && !linkPreviews.length && !extensionAnnotations.length && !message.forum_post_kind && !message.is_retracted) {
+  if (!message.body && !message.subject && !callThread && !sharedFiles.length && !linkPreviews.length && !extensionAnnotations.length && !message.forum_post_kind && !message.is_retracted) {
     return null;
   }
   const { linkPreviews: associatedLinkPreviews, sharedFiles: associatedSharedFiles } =
@@ -504,6 +515,17 @@ export function roomMessageFromArchived(
     ...(message.forum_post_kind === "topic" || message.forum_post_kind === "reply" ? { forumPostKind: message.forum_post_kind } : {}),
     ...(message.forum_title ? { forumTitle: message.forum_title } : {}),
     ...(message.forum_thread_title ? { forumThreadTitle: message.forum_thread_title } : {}),
+    ...(callThread
+      ? {
+          callThread: {
+            kind: "muc",
+            sid: callThread.sid,
+            media: callThread.media,
+            initiator: callThread.initiator,
+            started: callThread.started,
+          },
+        }
+      : {}),
     ...(message.author_real_jid ? { authorRealJid: message.author_real_jid } : {}),
     ...(stampedByRoom ? { reactionTargetId: stampedByRoom } : {}),
     ...(mentionUris.length ? { mentions: mentionUris.map((uri) => uri.replace(/^xmpp:/, "")) } : {}),

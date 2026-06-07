@@ -50,6 +50,30 @@ pub(crate) fn references_to_js(references: Vec<messaging::ReferenceData>) -> Vec
         .collect()
 }
 
+pub(crate) fn call_thread_to_js(
+    anchor: waddle_xmpp_client::xep::call_thread::CallThreadAnchor,
+) -> WaddleCallThreadAnchor {
+    let kind = match anchor.kind {
+        waddle_xmpp_client::xep::call_thread::CallThreadKind::Dm => "dm",
+        waddle_xmpp_client::xep::call_thread::CallThreadKind::Muc => "muc",
+    };
+    let mut media = Vec::new();
+    if anchor.media.audio {
+        media.push("audio".to_string());
+    }
+    if anchor.media.video {
+        media.push("video".to_string());
+    }
+
+    WaddleCallThreadAnchor {
+        kind: kind.to_string(),
+        sid: anchor.sid.0,
+        media,
+        initiator: anchor.initiator.to_string(),
+        started: anchor.started.to_rfc3339(),
+    }
+}
+
 pub(crate) fn extension_envelope_to_js(
     envelope: messaging::ExtensionEnvelopeData,
 ) -> WaddleExtensionEnvelope {
@@ -202,6 +226,7 @@ pub(crate) fn inbound_to_js(message: InboundMessage) -> WaddleMessage {
         forum_title: message.forum_title,
         forum_thread_title,
         is_sticker: message.is_sticker,
+        call_thread: message.call_thread.map(call_thread_to_js),
         shared_files: message
             .shared_files
             .into_iter()
@@ -326,6 +351,7 @@ pub(crate) fn inbox_push_to_js(
         forum_title: None,
         forum_thread_title: None,
         is_sticker: false,
+        call_thread: None,
         shared_files: Vec::new(),
         link_previews: Vec::new(),
         pin_event: None,
@@ -448,6 +474,9 @@ pub(crate) fn archived_to_js(archived: ArchivedMessage) -> Option<WaddleArchived
         forum_thread_title,
         is_sticker: parsed.is_some_and(|message| message.is_sticker),
         author_real_jid: archived.author_real_jid,
+        call_thread: parsed
+            .and_then(|message| message.call_thread.clone())
+            .map(call_thread_to_js),
         shared_files: parsed
             .map(|message| {
                 message
@@ -1024,6 +1053,44 @@ mod inbound_to_js_tests {
         assert_eq!(call_event.sid, "call-1");
         assert_eq!(call_event.from, "bob@waddle.test/phone");
         assert!(call_event.media.expect("media").audio);
+    }
+
+    #[test]
+    fn archived_to_js_preserves_call_thread_anchor_for_room_reload() {
+        let archived = parse_mam_archived(
+            "<message xmlns='jabber:client'>\
+               <result xmlns='urn:xmpp:mam:2' id='mam-anchor' queryid='q1'>\
+                 <forwarded xmlns='urn:xmpp:forward:0'>\
+                   <delay xmlns='urn:xmpp:delay' stamp='2026-06-07T14:30:00Z'/>\
+                   <message xmlns='jabber:client' type='groupchat' id='anchor-1' \
+                            from='general@muc.waddle.test' to='alice@waddle.test/web'>\
+                     <body>Alice started a call</body>\
+                     <thread>call-thread-uuid</thread>\
+                     <call-thread xmlns='urn:waddle:call-thread:0' \
+                                  kind='muc' \
+                                  sid='session-uuid' \
+                                  media='audio video' \
+                                  initiator='alice@waddle.test' \
+                                  started='2026-06-07T14:30:00Z'/>\
+                     <store xmlns='urn:xmpp:hints'/>\
+                   </message>\
+                 </forwarded>\
+               </result>\
+             </message>",
+        );
+
+        let js = archived_to_js(archived).expect("call-thread MAM row should convert");
+        let anchor = js
+            .call_thread
+            .expect("call-thread should survive archive conversion");
+
+        assert_eq!(js.mam_id, "mam-anchor");
+        assert_eq!(js.thread.as_deref(), Some("call-thread-uuid"));
+        assert_eq!(anchor.kind, "muc");
+        assert_eq!(anchor.sid, "session-uuid");
+        assert_eq!(anchor.media, vec!["audio".to_owned(), "video".to_owned()]);
+        assert_eq!(anchor.initiator, "alice@waddle.test");
+        assert_eq!(anchor.started, "2026-06-07T14:30:00+00:00");
     }
 
     #[test]

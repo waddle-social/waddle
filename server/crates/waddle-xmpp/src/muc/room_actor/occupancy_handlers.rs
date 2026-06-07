@@ -255,6 +255,8 @@ pub struct MujiPresenceUpdateOutcome {
     /// Exact per-session Muji payloads still advertised for this nick
     /// after the update.
     pub session_mujis: Vec<(FullJid, crate::xep::xep0272::Muji)>,
+    /// True when this update starts the room's active call state.
+    pub active_call_started: bool,
 }
 
 impl kameo::message::Message<UpsertMujiPresence> for RoomActor {
@@ -298,6 +300,7 @@ impl kameo::message::Message<UpsertMujiPresence> for RoomActor {
             sender_muji: muji_state.sender_muji,
             active_muji: muji_state.room_muji,
             session_mujis: muji_state.session_mujis,
+            active_call_started: muji_state.active_call_started,
         }))
     }
 }
@@ -337,6 +340,7 @@ impl kameo::message::Message<ClearMujiPresence> for RoomActor {
             sender_muji: muji_state.sender_muji,
             active_muji: muji_state.room_muji,
             session_mujis: muji_state.session_mujis,
+            active_call_started: muji_state.active_call_started,
         }))
     }
 }

@@ -166,6 +166,9 @@ pub struct InboundMessage {
     pub forum_title: Option<String>,
     pub thread_id: Option<String>,
     pub parent_thread_id: Option<String>,
+    /// urn:waddle:call-thread:0 call anchor authored by the room.
+    /// `None` when the message carries no `<call-thread/>` payload.
+    pub call_thread: Option<crate::xep::call_thread::CallThreadAnchor>,
     pub is_sticker: bool,
     /// urn:waddle:pin:0 pin/unpin system event surfaced by the room.
     /// `None` when the message carries no `<pin-event/>` payload.

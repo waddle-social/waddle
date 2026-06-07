@@ -191,6 +191,21 @@ pub(crate) use notification_activity_ingest::{
     record_presence_available_activity_on_state, record_presence_unavailable_activity_on_state,
 };
 
+pub(crate) async fn broadcast_room_system_message(
+    deps: &Deps<'_>,
+    room: BareJid,
+    message: Box<Message>,
+) {
+    room_system_message::broadcast_room_system_message_event(
+        deps.connection_registry,
+        deps,
+        room,
+        message,
+        0,
+    )
+    .await;
+}
+
 /// Execute the side effects described by `events`.
 ///
 /// The function is `async` because future migration steps add variants

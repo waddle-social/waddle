@@ -9,7 +9,7 @@ use minidom::Element;
 
 use crate::xep::encrypted_file::{self as xep_encrypted_file, NS_ESFS as NS_ENCRYPTED_FILE};
 use crate::xep::fallback::{body_fallbacks_for, strip_fallback_ranges, BodyFallback};
-use crate::xep::{reply as xep_reply, thread as xep_thread};
+use crate::xep::{call_thread as xep_call_thread, reply as xep_reply, thread as xep_thread};
 use waddle_xmpp_core::{
     first_eligible_https_url_text, xep0359::StanzaId as StableStanzaId, PreviewImageMediaType,
 };
@@ -128,6 +128,7 @@ fn parse_message(el: &Element) -> Option<InboundMessage> {
             .collect::<Vec<_>>()
     });
     let pubsub_events = crate::pubsub_event::parse_pubsub_events(el);
+    let call_thread = xep_call_thread::parse_call_thread_anchor_child(el);
 
     let reply_marker = xep_reply::parse_reply(el);
     let reply_to_id = reply_marker.as_ref().map(|m| m.id.clone());
@@ -352,6 +353,7 @@ fn parse_message(el: &Element) -> Option<InboundMessage> {
         forum_title,
         thread_id,
         parent_thread_id,
+        call_thread,
         is_sticker,
         pin_event,
         extension_envelope,

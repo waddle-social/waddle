@@ -1201,6 +1201,25 @@ fn same_nick_active_resources_are_aggregated_for_other_occupants() {
     );
 }
 
+#[test]
+fn active_call_started_is_room_wide_not_per_nick() {
+    let mut room = test_room();
+    let alice: FullJid = "alice@example.com/desktop".parse().expect("alice");
+    let bob: FullJid = "bob@example.com/desktop".parse().expect("bob");
+
+    let alice_start = room.upsert_muji_presence("alice", alice, audio_muji());
+    let bob_join = room.upsert_muji_presence("bob", bob, video_muji());
+
+    assert!(
+        alice_start.active_call_started,
+        "first active Muji in the room starts the call session"
+    );
+    assert!(
+        !bob_join.active_call_started,
+        "another occupant joining the existing active call must not emit a second anchor"
+    );
+}
+
 #[tokio::test]
 async fn upsert_muji_presence_empty_clears_state_and_returns_none() {
     let actor = spawn_room_actor().await;
