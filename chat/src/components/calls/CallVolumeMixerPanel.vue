@@ -21,7 +21,7 @@ function syncLastEmittedLevels(rows: readonly CallVolumeMixerRow[]): void {
   lastEmittedLevels.value = Object.fromEntries(rows.map((row) => [row.key, row.level]));
 }
 
-watch(() => props.rows, syncLastEmittedLevels, { deep: true });
+watch(() => props.rows, syncLastEmittedLevels);
 
 function onInput(row: CallVolumeMixerRow, event: Event): void {
   const target = event.target;
