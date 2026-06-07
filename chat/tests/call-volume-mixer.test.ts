@@ -299,6 +299,9 @@ describe("call volume mixer panel", () => {
       bindings.onInput(staleRowAbove, inputEvent("99"));
       bindings.onResetAll();
       bindings.onInput(staleRowBelow, inputEvent("99"));
+      bindings.onInput(staleRowBelow, inputEvent("102"));
+      bindings.syncLastEmittedLevels([mixerRow({ key: "stale-low", level: 1 })]);
+      bindings.onInput(staleRowBelow, inputEvent("99"));
 
       expect(emitted.map(([event, , level]) => [event, level])).toEqual([
         ["setVolume", 1],
@@ -311,6 +314,8 @@ describe("call volume mixer panel", () => {
         ["setVolume", 1],
         ["resetAll", undefined],
         ["setVolume", 0.99],
+        ["setVolume", 1.02],
+        ["setVolume", 0.99],
       ]);
       expect(emitted.map(([, , level]) => level)).toEqual([
         1,
@@ -322,6 +327,8 @@ describe("call volume mixer panel", () => {
         0.98,
         1,
         undefined,
+        0.99,
+        1.02,
         0.99,
       ]);
     } finally {
@@ -403,6 +410,7 @@ async function loadCallVolumeMixerPanelSetup(): Promise<(
 ) => {
   onInput: (row: CallVolumeMixerRow, event: Event) => void;
   onResetAll: () => void;
+  syncLastEmittedLevels: (rows: readonly CallVolumeMixerRow[]) => void;
 }> {
   const component = await loadVueComponentScript("../src/components/calls/CallVolumeMixerPanel.vue");
   return component.setup;

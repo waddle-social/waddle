@@ -1,12 +1,12 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { ref, watch } from "vue";
 import { Volume2, VolumeX } from "lucide-vue-next";
 import {
   callVolumePercentToGain,
   type CallVolumeMixerRow,
 } from "@/lib/calls/call-volume-mixer";
 
-defineProps<{
+const props = defineProps<{
   rows: readonly CallVolumeMixerRow[];
 }>();
 
@@ -16,6 +16,12 @@ const emit = defineEmits<{
 }>();
 
 const lastEmittedLevels = ref<Record<string, number>>({});
+
+function syncLastEmittedLevels(rows: readonly CallVolumeMixerRow[]): void {
+  lastEmittedLevels.value = Object.fromEntries(rows.map((row) => [row.key, row.level]));
+}
+
+watch(() => props.rows, syncLastEmittedLevels, { deep: true });
 
 function onInput(row: CallVolumeMixerRow, event: Event): void {
   const target = event.target;
