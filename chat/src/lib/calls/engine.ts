@@ -1,7 +1,9 @@
 import {
   Room,
   RoomEvent,
+  ScreenSharePresets,
   Track,
+  VideoPresets,
   type LocalParticipant,
   type LocalTrack,
   type LocalTrackPublication,
@@ -10,11 +12,43 @@ import {
   type RemoteTrack,
   type RemoteTrackPublication,
   type TrackPublication,
+  type TrackPublishOptions,
+  type VideoCaptureOptions,
 } from "livekit-client";
 import type { LiveKitJoin } from "./types";
 import { $devicePrefs } from "./device-prefs";
 import { validateLiveKitGrant } from "./dm-call-activity";
 import { activeMicAudioProcessing, type MicAudioProcessing } from "./mic-audio-processing";
+
+/**
+ * Camera capture ceiling. AdaptiveStream (`adaptiveStream: true`) and
+ * simulcast still scale each subscriber DOWN to the layer matching its
+ * rendered tile, so this only governs the maximum a large/expanded tile
+ * can pull — it is not the bandwidth every viewer pays. h1080 lifts the
+ * per-publisher upstream ceiling to ~3 Mbps (vs. 720p's 1.7 Mbps).
+ */
+const CAMERA_CAPTURE_RESOLUTION = VideoPresets.h1080.resolution;
+
+/**
+ * Screen-share encoding. 1080p@15fps keeps shared code/text crisp at a
+ * modest 2.5 Mbps; 15fps is plenty for slides, docs, and scrolling.
+ */
+const SCREEN_SHARE_ENCODING = ScreenSharePresets.h1080fps15.encoding;
+
+/**
+ * Per-source degradation under CPU / bandwidth pressure. A camera is a
+ * talking head: keep motion smooth and shed resolution
+ * (`maintain-framerate`). A screen share is usually text: keep it
+ * readable and shed frames (`maintain-resolution`). Passed per-publish
+ * because the two sources want opposite tradeoffs and `publishDefaults`
+ * is a single global value.
+ */
+const CAMERA_PUBLISH_OPTIONS: TrackPublishOptions = {
+  degradationPreference: "maintain-framerate",
+};
+const SCREEN_SHARE_PUBLISH_OPTIONS: TrackPublishOptions = {
+  degradationPreference: "maintain-resolution",
+};
 
 /**
  * Identifies a remote media track surfaced to the UI. The `kind`
@@ -218,6 +252,10 @@ export class CallEngine {
       },
       videoCaptureDefaults: {
         deviceId: prefs.cam ?? undefined,
+        resolution: CAMERA_CAPTURE_RESOLUTION,
+      },
+      publishDefaults: {
+        screenShareEncoding: SCREEN_SHARE_ENCODING,
       },
     });
     room.on(RoomEvent.TrackSubscribed, this.handleTrackSubscribed);
@@ -279,7 +317,11 @@ export class CallEngine {
 
   async setCameraEnabled(enabled: boolean): Promise<void> {
     if (!this.room) return;
-    await this.room.localParticipant.setCameraEnabled(enabled);
+    await this.room.localParticipant.setCameraEnabled(
+      enabled,
+      undefined,
+      CAMERA_PUBLISH_OPTIONS,
+    );
   }
 
   async setScreenShareEnabled(
@@ -288,12 +330,18 @@ export class CallEngine {
   ): Promise<void> {
     if (!this.room) return;
     try {
-      await this.room.localParticipant.setScreenShareEnabled(enabled, {
-        audio: opts.audio,
-      });
+      await this.room.localParticipant.setScreenShareEnabled(
+        enabled,
+        { audio: opts.audio },
+        SCREEN_SHARE_PUBLISH_OPTIONS,
+      );
     } catch (error) {
       if (!enabled || !opts.audio || !isUnsupportedScreenAudioError(error)) throw error;
-      await this.room.localParticipant.setScreenShareEnabled(true, { audio: false });
+      await this.room.localParticipant.setScreenShareEnabled(
+        true,
+        { audio: false },
+        SCREEN_SHARE_PUBLISH_OPTIONS,
+      );
     }
   }
 
@@ -641,7 +689,11 @@ function isUnsupportedScreenAudioError(error: unknown): boolean {
  */
 type CapturableParticipant = {
   setMicrophoneEnabled(enabled: boolean): Promise<unknown>;
-  setCameraEnabled(enabled: boolean): Promise<unknown>;
+  setCameraEnabled(
+    enabled: boolean,
+    options?: VideoCaptureOptions,
+    publishOptions?: TrackPublishOptions,
+  ): Promise<unknown>;
 };
 
 /**
@@ -668,7 +720,7 @@ export async function enableRequestedCapture(
   }
   if (opts.video) {
     try {
-      await participant.setCameraEnabled(true);
+      await participant.setCameraEnabled(true, undefined, CAMERA_PUBLISH_OPTIONS);
     } catch (error) {
       onError("video", error);
     }
