@@ -11,6 +11,7 @@ import {
 import { clearAllMediaIssues, recordMediaIssue } from "./call-media-issues";
 import { syncScreenShareEnabled } from "./screen-share-state";
 import { setCallAudioPlaybackBlocked } from "./call-audio-playback";
+import { resetMicAudioProcessing, setMicAudioProcessing } from "./mic-audio-processing-state";
 
 /**
  * Process-wide singleton: only one call engine should ever exist
@@ -76,6 +77,11 @@ export function useCallEngine(): {
     singletonEngine.on("audioPlaybackStatusChanged", (canPlaybackAudio) => {
       setCallAudioPlaybackBlocked(!canPlaybackAudio);
     });
+    singletonEngine.on("micAudioProcessingChanged", (state) => {
+      // Verified (applied) browser-native audio processing of the local
+      // mic — drives the read-only indicator in the call-settings dialog.
+      setMicAudioProcessing(state);
+    });
     singletonEngine.on("participantConnected", (identity) => {
       const roomJid = activeMucRoomJid();
       if (!roomJid) return;
@@ -94,6 +100,9 @@ export function useCallEngine(): {
       // call that just ended, not the next one.
       clearAllMediaIssues();
       setCallAudioPlaybackBlocked(false);
+      // The mic-processing readout belonged to the call that just
+      // ended; reset so the next call's dialog starts from `no-mic`.
+      resetMicAudioProcessing();
       // The active call's room — if any — is no longer in our LK
       // view. Drop the LK snapshot so the room's UI reverts to the
       // Muji-derived (server-bridged) view, which the LK webhook

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import { useStore } from "@nanostores/vue";
 import { Check, Mic, Speaker, Video, X } from "lucide-vue-next";
 import AppDialog from "@/components/ui/AppDialog.vue";
@@ -12,6 +12,8 @@ import {
   setSpeakerDevice,
   type EnumeratedDevices,
 } from "@/lib/calls/device-prefs";
+import { $micAudioProcessing } from "@/lib/calls/mic-audio-processing-state";
+import { audioProcessingRows } from "@/lib/calls/mic-audio-processing";
 import { useCallEngine } from "@/lib/calls/use-call-engine";
 import { reportCallError } from "@/lib/calls/call-store";
 
@@ -35,6 +37,16 @@ const open = defineModel<boolean>("open", { required: true });
 const prefs = useStore($devicePrefs);
 const devices = ref<EnumeratedDevices>({ mics: [], cams: [], speakers: [] });
 const speakerSupported = ref(isSpeakerOutputSelectionSupported());
+
+/**
+ * Verified (applied) browser-native audio processing of the local mic.
+ * `no-mic` renders a single neutral line; an active mic renders the
+ * tiered noise-cancellation / echo / auto-gain readout.
+ */
+const micProcessing = useStore($micAudioProcessing);
+const processingRows = computed(() =>
+  micProcessing.value.kind === "active" ? audioProcessingRows(micProcessing.value) : [],
+);
 
 /**
  * Epoch counter incremented on every dialog close. `refresh()` reads
@@ -203,6 +215,42 @@ function close(): void {
             </button>
           </li>
         </ul>
+
+        <!-- Read-only verification of the audio processing the browser
+             actually applied to the live mic (not what we requested). -->
+        <div class="call-processing">
+          <h4 class="type-caption call-processing__title">Audio processing</h4>
+          <p
+            v-if="micProcessing.kind === 'no-mic'"
+            class="type-caption text-muted-foreground"
+          >
+            No microphone active — enable your mic to verify audio
+            processing.
+          </p>
+          <ul v-else class="call-processing__list">
+            <li
+              v-for="row in processingRows"
+              :key="row.key"
+              class="call-processing__row"
+            >
+              <div class="call-processing__head">
+                <span class="type-caption">{{ row.label }}</span>
+                <span
+                  class="call-processing__badge"
+                  :class="`call-processing__badge--${row.tone}`"
+                >
+                  {{ row.stateLabel }}
+                </span>
+              </div>
+              <p
+                v-if="row.detail"
+                class="type-caption text-muted-foreground call-processing__detail"
+              >
+                {{ row.detail }}
+              </p>
+            </li>
+          </ul>
+        </div>
       </section>
 
       <!-- Camera -->
@@ -327,5 +375,66 @@ function close(): void {
 .call-device-row--active {
   background: color-mix(in oklab, var(--primary) 12%, transparent);
   color: var(--foreground);
+}
+
+.call-processing {
+  margin-top: var(--space-sm);
+  padding-top: var(--space-sm);
+  border-top: 1px solid var(--muted);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.call-processing__title {
+  color: var(--muted-foreground);
+}
+
+.call-processing__list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.call-processing__row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+}
+
+.call-processing__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+}
+
+.call-processing__badge {
+  border-radius: var(--radius-sm);
+  padding: 0.0625rem 0.5rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* On — calm positive: the requested processing is confirmed applied. */
+.call-processing__badge--on {
+  background: color-mix(in oklab, var(--success) 16%, transparent);
+  color: var(--success-foreground);
+}
+
+/* Off — a genuine degradation the browser reported; worth noticing. */
+.call-processing__badge--warn {
+  background: color-mix(in oklab, var(--warning) 20%, transparent);
+  color: var(--warning-foreground);
+}
+
+/* Unknown — browser doesn't report it; muted, neither pass nor fail. */
+.call-processing__badge--muted {
+  background: var(--muted);
+  color: var(--muted-foreground);
+}
+
+.call-processing__detail {
+  line-height: 1.3;
 }
 </style>

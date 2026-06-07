@@ -5,13 +5,16 @@ import {
   type LocalParticipant,
   type LocalTrack,
   type LocalTrackPublication,
+  type Participant,
   type RemoteParticipant,
   type RemoteTrack,
   type RemoteTrackPublication,
+  type TrackPublication,
 } from "livekit-client";
 import type { LiveKitJoin } from "./types";
 import { $devicePrefs } from "./device-prefs";
 import { validateLiveKitGrant } from "./dm-call-activity";
+import { activeMicAudioProcessing, type MicAudioProcessing } from "./mic-audio-processing";
 
 /**
  * Identifies a remote media track surfaced to the UI. The `kind`
@@ -123,6 +126,15 @@ export type CallEngineEvents = {
    * `RoomEvent.MediaDevicesError` but carries which capture failed.
    */
   mediaDevicesError: (info: { source: "audio" | "video"; error: unknown }) => void;
+  /**
+   * Fires when the *applied* browser-native audio processing of the
+   * local mic changes — on mic publish, unpublish, or a mid-call mic
+   * device switch. Carries the verified state (read from the live
+   * track's `getSettings()`), NOT the requested constraints, so the UI
+   * can show whether noise suppression / echo cancellation / auto gain
+   * were actually honored. See `mic-audio-processing.ts`.
+   */
+  micAudioProcessingChanged: (state: MicAudioProcessing) => void;
 };
 
 /**
@@ -149,6 +161,7 @@ export class CallEngine {
     disconnected: new Set(),
     audioPlaybackStatusChanged: new Set(),
     mediaDevicesError: new Set(),
+    micAudioProcessingChanged: new Set(),
   };
 
   /** LiveKit identity of the local participant, populated once
@@ -215,6 +228,9 @@ export class CallEngine {
     room.on(RoomEvent.ParticipantDisconnected, this.handleParticipantDisconnected);
     room.on(RoomEvent.Disconnected, this.handleDisconnected);
     room.on(RoomEvent.AudioPlaybackStatusChanged, this.handleAudioPlaybackStatusChanged);
+    room.on(RoomEvent.ActiveDeviceChanged, this.handleActiveDeviceChanged);
+    room.on(RoomEvent.TrackMuted, this.handleTrackMuteChanged);
+    room.on(RoomEvent.TrackUnmuted, this.handleTrackMuteChanged);
     try {
       await room.connect(join.url, join.token);
     } catch (err) {
@@ -356,6 +372,9 @@ export class CallEngine {
     room.off(RoomEvent.ParticipantDisconnected, this.handleParticipantDisconnected);
     room.off(RoomEvent.Disconnected, this.handleDisconnected);
     room.off(RoomEvent.AudioPlaybackStatusChanged, this.handleAudioPlaybackStatusChanged);
+    room.off(RoomEvent.ActiveDeviceChanged, this.handleActiveDeviceChanged);
+    room.off(RoomEvent.TrackMuted, this.handleTrackMuteChanged);
+    room.off(RoomEvent.TrackUnmuted, this.handleTrackMuteChanged);
     await room.disconnect();
   }
 
@@ -427,19 +446,34 @@ export class CallEngine {
     const track = publication.track;
     const kind = mapKind(publication.kind);
     if (!track || !kind) return;
+    const source = mapTrackSource(publication.source, kind);
     this.emit("localTrackPublished", {
       participantIdentity: participant.identity,
       publicationSid: publication.trackSid,
       kind,
-      source: mapTrackSource(publication.source, kind),
+      source,
       track,
     });
+    // The local mic just started capturing: surface its *applied*
+    // audio processing now that `getSettings()` reflects the real
+    // constraints the browser honored (which can differ from what we
+    // requested in `audioCaptureDefaults`).
+    if (source === "microphone") this.emitMicAudioProcessing();
   };
 
   private handleLocalTrackUnpublished = (
     publication: LocalTrackPublication,
     participant: LocalParticipant,
   ) => {
+    // Recompute the mic-processing readout FIRST, decoupled from the
+    // track-dependent event below. LiveKit can deliver an unpublish whose
+    // `publication.track` is already detached (the underlying
+    // MediaStreamTrack ended before the event fired); the `!track` guard
+    // would then skip the reset and leave the indicator on a stale trio
+    // for a mic that is gone. `computeMicAudioProcessing` reads the
+    // participant's current mic publication, not this argument, so it is
+    // safe without `track` and correctly falls back to `no-mic`.
+    if (publication.source === Track.Source.Microphone) this.emitMicAudioProcessing();
     const track = publication.track;
     const kind = mapKind(publication.kind);
     if (!track || !kind) return;
@@ -469,6 +503,61 @@ export class CallEngine {
   private handleAudioPlaybackStatusChanged = (canPlaybackAudio: boolean) => {
     this.emit("audioPlaybackStatusChanged", canPlaybackAudio);
   };
+
+  /**
+   * A mid-call device switch swaps the underlying capture track in
+   * place via `switchActiveDevice` — it does NOT re-fire
+   * `LocalTrackPublished`, so this is the only signal that the applied
+   * audio processing may have changed (a new mic can support a
+   * different set of constraints). Only `audioinput` matters; speaker /
+   * camera changes can't alter mic processing.
+   */
+  private handleActiveDeviceChanged = (kind: MediaDeviceKind) => {
+    if (kind !== "audioinput") return;
+    this.emitMicAudioProcessing();
+  };
+
+  /**
+   * Recompute when the local mic is muted or unmuted. Muting is the most
+   * common mic transition, and with LiveKit's default
+   * `stopMicTrackOnMute: false` it neither unpublishes nor ends the
+   * capture track — so without this listener the indicator would keep
+   * showing a stale trio for a mic that isn't capturing. Fires for
+   * remote tracks too, hence the local-mic filter.
+   */
+  private handleTrackMuteChanged = (
+    publication: TrackPublication,
+    participant: Participant,
+  ) => {
+    if (!participant.isLocal) return;
+    if (publication.source !== Track.Source.Microphone) return;
+    this.emitMicAudioProcessing();
+  };
+
+  /**
+   * Read the *applied* audio processing of the local mic from its live
+   * capture track. `no-mic` when nothing is publishing, the mic is muted,
+   * or the track has ended (e.g. the device was unplugged) — so the
+   * indicator never reports a trio for a mic that isn't actually
+   * capturing. A muted mic must be checked explicitly: LiveKit's default
+   * `stopMicTrackOnMute: false` leaves the underlying track `live` while
+   * muted, so the `readyState` guard alone would miss it.
+   */
+  private computeMicAudioProcessing(): MicAudioProcessing {
+    const room = this.room;
+    if (!room) return { kind: "no-mic" };
+    const publication = room.localParticipant.getTrackPublication(Track.Source.Microphone);
+    if (!publication || publication.isMuted) return { kind: "no-mic" };
+    const mediaStreamTrack = publication.track?.mediaStreamTrack;
+    if (!mediaStreamTrack || mediaStreamTrack.readyState !== "live") {
+      return { kind: "no-mic" };
+    }
+    return activeMicAudioProcessing(mediaStreamTrack.getSettings());
+  }
+
+  private emitMicAudioProcessing(): void {
+    this.emit("micAudioProcessingChanged", this.computeMicAudioProcessing());
+  }
 
   private clearParticipantAudioVolumes(): void {
     this.participantAudioVolumes = {};

@@ -9,6 +9,7 @@ import {
   type RemoteMediaTrack,
 } from "../src/lib/calls/engine";
 import { Track } from "livekit-client";
+import type { MicAudioProcessing } from "../src/lib/calls/mic-audio-processing";
 
 function deviceError(name: string): Error {
   const err = new Error(`${name} message`);
@@ -642,5 +643,274 @@ describe("enableRequestedCapture — best-effort, never ejects", () => {
     await enableRequestedCapture(stub, { audio: true, video: false }, (source) => seen.push(source));
     expect(stub.calls).toEqual(["mic:true"]);
     expect(seen).toEqual([]);
+  });
+});
+
+/**
+ * Inject a minimal Room stub whose local mic publication reports the
+ * given `getSettings()` (or no publication at all, for the no-mic
+ * path). Mirrors how the other engine tests stub `room` to avoid
+ * `livekit-client`'s browser-only `Room`.
+ */
+function micRoomStub(
+  settings: MediaTrackSettings | null,
+  opts: { readyState?: MediaStreamTrackState; isMuted?: boolean } = {},
+) {
+  const { readyState = "live", isMuted = false } = opts;
+  const publication =
+    settings === null
+      ? undefined
+      : {
+          isMuted,
+          source: Track.Source.Microphone,
+          track: { mediaStreamTrack: { readyState, getSettings: () => settings } },
+        };
+  return {
+    localParticipant: {
+      getTrackPublication: (source: Track.Source) =>
+        source === Track.Source.Microphone ? publication : undefined,
+    },
+  };
+}
+
+function publishMic(engine: unknown): void {
+  (
+    engine as {
+      handleLocalTrackPublished: (publication: unknown, participant: unknown) => void;
+    }
+  ).handleLocalTrackPublished(
+    { track: {}, kind: Track.Kind.Audio, trackSid: "self-mic", source: Track.Source.Microphone },
+    { identity: "me@waddle.test/web" },
+  );
+}
+
+describe("call-engine — verifies applied mic audio processing", () => {
+  test("mic publish emits the applied noise/echo/gain trio read from getSettings", async () => {
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine();
+    const events: MicAudioProcessing[] = [];
+    engine.on("micAudioProcessingChanged", (state) => events.push(state));
+    (engine as unknown as { room: unknown }).room = micRoomStub({
+      noiseSuppression: true,
+      echoCancellation: true,
+      autoGainControl: false,
+    } as MediaTrackSettings);
+
+    publishMic(engine);
+
+    expect(events).toEqual([
+      {
+        kind: "active",
+        noiseSuppression: "on",
+        echoCancellation: "on",
+        autoGainControl: "off",
+      },
+    ]);
+  });
+
+  test("a browser that omits a constraint reports it as unknown, not off", async () => {
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine();
+    const events: MicAudioProcessing[] = [];
+    engine.on("micAudioProcessingChanged", (state) => events.push(state));
+    (engine as unknown as { room: unknown }).room = micRoomStub({
+      noiseSuppression: true,
+      // echoCancellation + autoGainControl absent → unknown
+    } as MediaTrackSettings);
+
+    publishMic(engine);
+
+    expect(events.at(-1)).toEqual({
+      kind: "active",
+      noiseSuppression: "on",
+      echoCancellation: "unknown",
+      autoGainControl: "unknown",
+    });
+  });
+
+  test("publishing a non-mic track (camera) does not emit a mic-processing change", async () => {
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine();
+    const events: MicAudioProcessing[] = [];
+    engine.on("micAudioProcessingChanged", (state) => events.push(state));
+    (engine as unknown as { room: unknown }).room = micRoomStub(null);
+
+    (
+      engine as unknown as {
+        handleLocalTrackPublished: (publication: unknown, participant: unknown) => void;
+      }
+    ).handleLocalTrackPublished(
+      { track: {}, kind: Track.Kind.Video, trackSid: "self-cam", source: Track.Source.Camera },
+      { identity: "me@waddle.test/web" },
+    );
+
+    expect(events).toEqual([]);
+  });
+
+  test("mic unpublish falls back to no-mic instead of a stale trio", async () => {
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine();
+    const events: MicAudioProcessing[] = [];
+    engine.on("micAudioProcessingChanged", (state) => events.push(state));
+    // No mic publication present once unpublished.
+    (engine as unknown as { room: unknown }).room = micRoomStub(null);
+
+    (
+      engine as unknown as {
+        handleLocalTrackUnpublished: (publication: unknown, participant: unknown) => void;
+      }
+    ).handleLocalTrackUnpublished(
+      { track: {}, kind: Track.Kind.Audio, trackSid: "self-mic", source: Track.Source.Microphone },
+      { identity: "me@waddle.test/web" },
+    );
+
+    expect(events.at(-1)).toEqual({ kind: "no-mic" });
+  });
+
+  test("mic unpublish with an already-detached track still falls back to no-mic", async () => {
+    // Regression: LiveKit can fire LocalTrackUnpublished with
+    // `publication.track` already cleared (underlying MediaStreamTrack
+    // ended first). The mic-processing reset must NOT be gated behind the
+    // track-dependent guard, or the indicator holds a stale active trio.
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine();
+    const processing: MicAudioProcessing[] = [];
+    const unpublished: unknown[] = [];
+    engine.on("micAudioProcessingChanged", (state) => processing.push(state));
+    engine.on("localTrackUnpublished", (track) => unpublished.push(track));
+    // getTrackPublication no longer returns a mic publication.
+    (engine as unknown as { room: unknown }).room = micRoomStub(null);
+
+    (
+      engine as unknown as {
+        handleLocalTrackUnpublished: (publication: unknown, participant: unknown) => void;
+      }
+    ).handleLocalTrackUnpublished(
+      {
+        track: undefined,
+        kind: Track.Kind.Audio,
+        trackSid: "self-mic",
+        source: Track.Source.Microphone,
+      },
+      { identity: "me@waddle.test/web" },
+    );
+
+    // The mic-processing reset fired despite the missing track…
+    expect(processing.at(-1)).toEqual({ kind: "no-mic" });
+    // …while the track-dependent localTrackUnpublished event did not.
+    expect(unpublished).toEqual([]);
+  });
+
+  test("a track that has ended (e.g. device unplugged) reads as no-mic", async () => {
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine();
+    const events: MicAudioProcessing[] = [];
+    engine.on("micAudioProcessingChanged", (state) => events.push(state));
+    (engine as unknown as { room: unknown }).room = micRoomStub(
+      { noiseSuppression: true } as MediaTrackSettings,
+      { readyState: "ended" },
+    );
+    (engine as unknown as {
+      handleActiveDeviceChanged: (kind: MediaDeviceKind) => void;
+    }).handleActiveDeviceChanged("audioinput");
+    expect(events.at(-1)).toEqual({ kind: "no-mic" });
+  });
+
+  test("muting the local mic falls back to no-mic; unmuting restores the trio", async () => {
+    // The common case: LiveKit's default `stopMicTrackOnMute: false`
+    // leaves the muted track `live` and published, so without the mute
+    // listener + `isMuted` guard the indicator would show a stale trio
+    // for a mic that isn't capturing.
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine();
+    const events: MicAudioProcessing[] = [];
+    engine.on("micAudioProcessingChanged", (state) => events.push(state));
+    const handle = (
+      engine as unknown as {
+        handleTrackMuteChanged: (publication: unknown, participant: unknown) => void;
+      }
+    ).handleTrackMuteChanged;
+
+    (engine as unknown as { room: unknown }).room = micRoomStub(
+      { noiseSuppression: true } as MediaTrackSettings,
+      { isMuted: true },
+    );
+    handle({ source: Track.Source.Microphone }, { isLocal: true });
+    expect(events.at(-1)).toEqual({ kind: "no-mic" });
+
+    (engine as unknown as { room: unknown }).room = micRoomStub(
+      { noiseSuppression: true } as MediaTrackSettings,
+      { isMuted: false },
+    );
+    handle({ source: Track.Source.Microphone }, { isLocal: true });
+    expect(events.at(-1)).toEqual({
+      kind: "active",
+      noiseSuppression: "on",
+      echoCancellation: "unknown",
+      autoGainControl: "unknown",
+    });
+  });
+
+  test("a remote participant's mute (or a local non-mic mute) is ignored", async () => {
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine();
+    const events: MicAudioProcessing[] = [];
+    engine.on("micAudioProcessingChanged", (state) => events.push(state));
+    (engine as unknown as { room: unknown }).room = micRoomStub({
+      noiseSuppression: true,
+    } as MediaTrackSettings);
+    const handle = (
+      engine as unknown as {
+        handleTrackMuteChanged: (publication: unknown, participant: unknown) => void;
+      }
+    ).handleTrackMuteChanged;
+
+    handle({ source: Track.Source.Microphone }, { isLocal: false });
+    handle({ source: Track.Source.ScreenShareAudio }, { isLocal: true });
+    expect(events).toEqual([]);
+  });
+
+  test("a mid-call mic device switch recomputes; a camera/speaker switch does not", async () => {
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine();
+    const events: MicAudioProcessing[] = [];
+    engine.on("micAudioProcessingChanged", (state) => events.push(state));
+    (engine as unknown as { room: unknown }).room = micRoomStub({
+      noiseSuppression: false,
+    } as MediaTrackSettings);
+    const handle = (engine as unknown as {
+      handleActiveDeviceChanged: (kind: MediaDeviceKind) => void;
+    }).handleActiveDeviceChanged;
+
+    handle("videoinput");
+    handle("audiooutput");
+    expect(events).toEqual([]);
+
+    handle("audioinput");
+    expect(events).toEqual([
+      {
+        kind: "active",
+        noiseSuppression: "off",
+        echoCancellation: "unknown",
+        autoGainControl: "unknown",
+      },
+    ]);
+  });
+
+  test("a device change with no connected room emits no-mic, not a crash", async () => {
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine();
+    const events: MicAudioProcessing[] = [];
+    engine.on("micAudioProcessingChanged", (state) => events.push(state));
+    (engine as unknown as {
+      handleActiveDeviceChanged: (kind: MediaDeviceKind) => void;
+    }).handleActiveDeviceChanged("audioinput");
+    expect(events).toEqual([{ kind: "no-mic" }]);
+  });
+
+  test("on() exposes micAudioProcessingChanged as a first-class engine event", async () => {
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine();
+    expect(typeof engine.on("micAudioProcessingChanged", () => {})).toBe("function");
   });
 });
