@@ -12,6 +12,7 @@ import {
 import type { LiveKitJoin } from "./types";
 import { $devicePrefs } from "./device-prefs";
 import { validateLiveKitGrant } from "./dm-call-activity";
+import { activeMicAudioProcessing, type MicAudioProcessing } from "./mic-audio-processing";
 
 /**
  * Identifies a remote media track surfaced to the UI. The `kind`
@@ -123,6 +124,15 @@ export type CallEngineEvents = {
    * `RoomEvent.MediaDevicesError` but carries which capture failed.
    */
   mediaDevicesError: (info: { source: "audio" | "video"; error: unknown }) => void;
+  /**
+   * Fires when the *applied* browser-native audio processing of the
+   * local mic changes — on mic publish, unpublish, or a mid-call mic
+   * device switch. Carries the verified state (read from the live
+   * track's `getSettings()`), NOT the requested constraints, so the UI
+   * can show whether noise suppression / echo cancellation / auto gain
+   * were actually honored. See `mic-audio-processing.ts`.
+   */
+  micAudioProcessingChanged: (state: MicAudioProcessing) => void;
 };
 
 /**
@@ -149,6 +159,7 @@ export class CallEngine {
     disconnected: new Set(),
     audioPlaybackStatusChanged: new Set(),
     mediaDevicesError: new Set(),
+    micAudioProcessingChanged: new Set(),
   };
 
   /** LiveKit identity of the local participant, populated once
@@ -179,6 +190,17 @@ export class CallEngine {
 
   get canPlaybackAudio(): boolean {
     return this.room?.canPlaybackAudio ?? true;
+  }
+
+  /**
+   * The *applied* browser-native audio processing of the local mic right
+   * now, read from the live capture track. `no-mic` when no mic is
+   * publishing (listener / muted-and-stopped / pre-connect). Lets a
+   * late subscriber seed its view without waiting for the next
+   * `micAudioProcessingChanged` emit.
+   */
+  get micAudioProcessing(): MicAudioProcessing {
+    return this.computeMicAudioProcessing();
   }
 
   async connect(join: LiveKitJoin, opts: { audio: boolean; video: boolean }): Promise<void> {
@@ -215,6 +237,7 @@ export class CallEngine {
     room.on(RoomEvent.ParticipantDisconnected, this.handleParticipantDisconnected);
     room.on(RoomEvent.Disconnected, this.handleDisconnected);
     room.on(RoomEvent.AudioPlaybackStatusChanged, this.handleAudioPlaybackStatusChanged);
+    room.on(RoomEvent.ActiveDeviceChanged, this.handleActiveDeviceChanged);
     try {
       await room.connect(join.url, join.token);
     } catch (err) {
@@ -356,6 +379,7 @@ export class CallEngine {
     room.off(RoomEvent.ParticipantDisconnected, this.handleParticipantDisconnected);
     room.off(RoomEvent.Disconnected, this.handleDisconnected);
     room.off(RoomEvent.AudioPlaybackStatusChanged, this.handleAudioPlaybackStatusChanged);
+    room.off(RoomEvent.ActiveDeviceChanged, this.handleActiveDeviceChanged);
     await room.disconnect();
   }
 
@@ -427,13 +451,19 @@ export class CallEngine {
     const track = publication.track;
     const kind = mapKind(publication.kind);
     if (!track || !kind) return;
+    const source = mapTrackSource(publication.source, kind);
     this.emit("localTrackPublished", {
       participantIdentity: participant.identity,
       publicationSid: publication.trackSid,
       kind,
-      source: mapTrackSource(publication.source, kind),
+      source,
       track,
     });
+    // The local mic just started capturing: surface its *applied*
+    // audio processing now that `getSettings()` reflects the real
+    // constraints the browser honored (which can differ from what we
+    // requested in `audioCaptureDefaults`).
+    if (source === "microphone") this.emitMicAudioProcessing();
   };
 
   private handleLocalTrackUnpublished = (
@@ -443,13 +473,17 @@ export class CallEngine {
     const track = publication.track;
     const kind = mapKind(publication.kind);
     if (!track || !kind) return;
+    const source = mapTrackSource(publication.source, kind);
     this.emit("localTrackUnpublished", {
       participantIdentity: participant.identity,
       publicationSid: publication.trackSid,
       kind,
-      source: mapTrackSource(publication.source, kind),
+      source,
       track,
     });
+    // The mic is gone (unpublished / stopped): recompute so the
+    // indicator falls back to `no-mic` instead of holding a stale trio.
+    if (source === "microphone") this.emitMicAudioProcessing();
   };
 
   private handleParticipantConnected = (participant: RemoteParticipant) => {
@@ -469,6 +503,40 @@ export class CallEngine {
   private handleAudioPlaybackStatusChanged = (canPlaybackAudio: boolean) => {
     this.emit("audioPlaybackStatusChanged", canPlaybackAudio);
   };
+
+  /**
+   * A mid-call device switch swaps the underlying capture track in
+   * place via `switchActiveDevice` — it does NOT re-fire
+   * `LocalTrackPublished`, so this is the only signal that the applied
+   * audio processing may have changed (a new mic can support a
+   * different set of constraints). Only `audioinput` matters; speaker /
+   * camera changes can't alter mic processing.
+   */
+  private handleActiveDeviceChanged = (kind: MediaDeviceKind) => {
+    if (kind !== "audioinput") return;
+    this.emitMicAudioProcessing();
+  };
+
+  /**
+   * Read the *applied* audio processing of the local mic from its live
+   * capture track. `no-mic` when nothing is publishing or the track has
+   * already ended (e.g. the mic was stopped on mute), so the indicator
+   * never reports a trio for a track that isn't actually capturing.
+   */
+  private computeMicAudioProcessing(): MicAudioProcessing {
+    const room = this.room;
+    if (!room) return { kind: "no-mic" };
+    const publication = room.localParticipant.getTrackPublication(Track.Source.Microphone);
+    const mediaStreamTrack = publication?.track?.mediaStreamTrack;
+    if (!mediaStreamTrack || mediaStreamTrack.readyState !== "live") {
+      return { kind: "no-mic" };
+    }
+    return activeMicAudioProcessing(mediaStreamTrack.getSettings());
+  }
+
+  private emitMicAudioProcessing(): void {
+    this.emit("micAudioProcessingChanged", this.computeMicAudioProcessing());
+  }
 
   private clearParticipantAudioVolumes(): void {
     this.participantAudioVolumes = {};
