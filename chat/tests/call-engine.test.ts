@@ -767,6 +767,40 @@ describe("call-engine — verifies applied mic audio processing", () => {
     expect(events.at(-1)).toEqual({ kind: "no-mic" });
   });
 
+  test("mic unpublish with an already-detached track still falls back to no-mic", async () => {
+    // Regression: LiveKit can fire LocalTrackUnpublished with
+    // `publication.track` already cleared (underlying MediaStreamTrack
+    // ended first). The mic-processing reset must NOT be gated behind the
+    // track-dependent guard, or the indicator holds a stale active trio.
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine();
+    const processing: MicAudioProcessing[] = [];
+    const unpublished: unknown[] = [];
+    engine.on("micAudioProcessingChanged", (state) => processing.push(state));
+    engine.on("localTrackUnpublished", (track) => unpublished.push(track));
+    // getTrackPublication no longer returns a mic publication.
+    (engine as unknown as { room: unknown }).room = micRoomStub(null);
+
+    (
+      engine as unknown as {
+        handleLocalTrackUnpublished: (publication: unknown, participant: unknown) => void;
+      }
+    ).handleLocalTrackUnpublished(
+      {
+        track: undefined,
+        kind: Track.Kind.Audio,
+        trackSid: "self-mic",
+        source: Track.Source.Microphone,
+      },
+      { identity: "me@waddle.test/web" },
+    );
+
+    // The mic-processing reset fired despite the missing track…
+    expect(processing.at(-1)).toEqual({ kind: "no-mic" });
+    // …while the track-dependent localTrackUnpublished event did not.
+    expect(unpublished).toEqual([]);
+  });
+
   test("a track that has ended (e.g. device unplugged) reads as no-mic", async () => {
     const { CallEngine } = await import("../src/lib/calls/engine");
     const engine = new CallEngine();

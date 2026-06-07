@@ -465,20 +465,25 @@ export class CallEngine {
     publication: LocalTrackPublication,
     participant: LocalParticipant,
   ) => {
+    // Recompute the mic-processing readout FIRST, decoupled from the
+    // track-dependent event below. LiveKit can deliver an unpublish whose
+    // `publication.track` is already detached (the underlying
+    // MediaStreamTrack ended before the event fired); the `!track` guard
+    // would then skip the reset and leave the indicator on a stale trio
+    // for a mic that is gone. `computeMicAudioProcessing` reads the
+    // participant's current mic publication, not this argument, so it is
+    // safe without `track` and correctly falls back to `no-mic`.
+    if (publication.source === Track.Source.Microphone) this.emitMicAudioProcessing();
     const track = publication.track;
     const kind = mapKind(publication.kind);
     if (!track || !kind) return;
-    const source = mapTrackSource(publication.source, kind);
     this.emit("localTrackUnpublished", {
       participantIdentity: participant.identity,
       publicationSid: publication.trackSid,
       kind,
-      source,
+      source: mapTrackSource(publication.source, kind),
       track,
     });
-    // The mic is gone (unpublished / stopped): recompute so the
-    // indicator falls back to `no-mic` instead of holding a stale trio.
-    if (source === "microphone") this.emitMicAudioProcessing();
   };
 
   private handleParticipantConnected = (participant: RemoteParticipant) => {

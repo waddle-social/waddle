@@ -224,8 +224,8 @@ function close(): void {
             v-if="micProcessing.kind === 'no-mic'"
             class="type-caption text-muted-foreground"
           >
-            No microphone active — enable your mic to verify noise
-            cancellation.
+            No microphone active — enable your mic to verify audio
+            processing.
           </p>
           <ul v-else class="call-processing__list">
             <li
