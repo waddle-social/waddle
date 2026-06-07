@@ -64,6 +64,33 @@ export function setSpeakerDevice(id: string | null): void {
   $devicePrefs.set({ ...$devicePrefs.get(), speaker: id });
 }
 
+type SpeakerOutputSelectionEnvironment = {
+  document?: Pick<Document, "createElement">;
+  AudioContext?: { prototype?: { setSinkId?: unknown } } | undefined;
+};
+
+type AudioContextSinkConstructor = NonNullable<
+  SpeakerOutputSelectionEnvironment["AudioContext"]
+>;
+
+export function isSpeakerOutputSelectionSupported(
+  env: SpeakerOutputSelectionEnvironment = {
+    document: typeof document === "undefined" ? undefined : document,
+    AudioContext:
+      typeof AudioContext === "undefined"
+        ? undefined
+        : (AudioContext as unknown as AudioContextSinkConstructor),
+  },
+): boolean {
+  if (!env.document) return false;
+  const audio = env.document.createElement("audio") as HTMLAudioElement &
+    Partial<{ setSinkId: (id: string) => Promise<void> }>;
+  return (
+    typeof audio.setSinkId === "function" &&
+    typeof env.AudioContext?.prototype?.setSinkId === "function"
+  );
+}
+
 /**
  * One enumerated media device — narrower than the browser's
  * `MediaDeviceInfo` because we only need `deviceId` + a label to

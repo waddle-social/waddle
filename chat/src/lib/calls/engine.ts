@@ -302,9 +302,9 @@ export class CallEngine {
 
   /**
    * Route the room's remote audio through a specific output device.
-   * Uses LiveKit's built-in `audiooutput` switch for browsers that
-   * implement `HTMLMediaElement.setSinkId`; falls back to a no-op on
-   * browsers that don't (Firefox today).
+   * Uses LiveKit's built-in `audiooutput` switch for browsers that can
+   * route Web Audio output sinks; falls back to a no-op on unsupported
+   * browsers.
    */
   async setSpeakerDevice(deviceId: string): Promise<void> {
     await this.applySpeakerDevice(deviceId);
