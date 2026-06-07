@@ -9,6 +9,7 @@ import {
   Settings,
   Video,
   VideoOff,
+  Volume2,
 } from "lucide-vue-next";
 
 /**
@@ -27,6 +28,9 @@ defineProps<{
   /** True when the parent surface is the expanded variant — flips
    *  the toggle button between "expand" and "collapse". */
   isExpanded: boolean;
+  /** True while the volume mixer dialog is open — drives the speaker
+   *  button's pressed/expanded state. The parent owns the dialog. */
+  volumeOpen: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -34,6 +38,7 @@ const emit = defineEmits<{
   toggleCam: [];
   toggleScreenShare: [];
   toggleExpanded: [];
+  toggleVolume: [];
   openSettings: [];
   hangup: [];
 }>();
@@ -87,6 +92,19 @@ const emit = defineEmits<{
       @click="emit('toggleExpanded')"
     >
       <component :is="isExpanded ? Minimize2 : Maximize2" class="w-4 h-4" />
+    </button>
+    <button
+      type="button"
+      class="chat-icon-button chat-icon-button--md hover:bg-muted"
+      :class="{ 'bg-muted text-foreground': volumeOpen }"
+      :title="volumeOpen ? 'Close volume mixer' : 'Open volume mixer'"
+      :aria-label="volumeOpen ? 'Close volume mixer' : 'Open volume mixer'"
+      :aria-pressed="volumeOpen"
+      :aria-expanded="volumeOpen"
+      aria-haspopup="dialog"
+      @click="emit('toggleVolume')"
+    >
+      <Volume2 class="w-4 h-4" />
     </button>
     <button
       type="button"

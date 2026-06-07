@@ -337,10 +337,10 @@ describe("call volume mixer panel", () => {
   });
 });
 
-describe("expanded call mixer wiring", () => {
+describe("call volume mixer controller wiring", () => {
   test("clears remembered levels on call changes and resets absent engine targets", () => {
     const source = readFileSync(
-      new URL("../src/components/calls/CallExpandedSurface.vue", import.meta.url),
+      new URL("../src/lib/calls/use-call-volume-mixer.ts", import.meta.url),
       "utf8",
     );
 
@@ -348,6 +348,60 @@ describe("expanded call mixer wiring", () => {
     expect(source).toContain("watch(activeCallSid");
     expect(source).toContain("participantAudioTargets.value = {}");
     expect(source).toContain("for (const target of Object.values(participantAudioTargets.value))");
+  });
+
+  test("shares one mixer controller across both call surfaces", () => {
+    const split = readFileSync(
+      new URL("../src/components/calls/CallSplitContainer.vue", import.meta.url),
+      "utf8",
+    );
+    const expanded = readFileSync(
+      new URL("../src/components/calls/CallExpandedSurface.vue", import.meta.url),
+      "utf8",
+    );
+
+    for (const source of [split, expanded]) {
+      expect(source).toContain("useCallVolumeMixer");
+    }
+  });
+
+  test("both surfaces toggle the mixer dialog from the control bar speaker button", () => {
+    const split = readFileSync(
+      new URL("../src/components/calls/CallSplitContainer.vue", import.meta.url),
+      "utf8",
+    );
+    const expanded = readFileSync(
+      new URL("../src/components/calls/CallExpandedSurface.vue", import.meta.url),
+      "utf8",
+    );
+
+    for (const source of [split, expanded]) {
+      expect(source).toContain("CallVolumeMixerDialog");
+      expect(source).toContain(":volume-open=\"volumeOpen\"");
+      expect(source).toContain("@toggle-volume=\"volumeOpen = !volumeOpen\"");
+      expect(source).toContain("v-model:open=\"volumeOpen\"");
+    }
+  });
+
+  test("expanded surface drops the always-on sidebar in favour of the toggle dialog", () => {
+    const expanded = readFileSync(
+      new URL("../src/components/calls/CallExpandedSurface.vue", import.meta.url),
+      "utf8",
+    );
+
+    expect(expanded).not.toContain("CallVolumeMixerPanel");
+  });
+
+  test("expanded Escape stays on the dialog instead of collapsing the call", () => {
+    const expanded = readFileSync(
+      new URL("../src/components/calls/CallExpandedSurface.vue", import.meta.url),
+      "utf8",
+    );
+
+    const start = expanded.indexOf("function onKeydown");
+    const guard = expanded.slice(start, expanded.indexOf("collapseToSplit()", start));
+    expect(guard).toContain("settingsOpen.value");
+    expect(guard).toContain("volumeOpen.value");
   });
 });
 

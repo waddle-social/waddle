@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useStore } from "@nanostores/vue";
 import {
   $callState,
@@ -23,20 +23,14 @@ import { useCallEngine } from "@/lib/calls/use-call-engine";
 import { useActiveMucCall } from "@/lib/calls/use-active-muc-call";
 import { localScreenSharePresentation } from "@/lib/calls/call-self-share";
 import { normalizeMucCallRoomJid } from "@/lib/calls/muc-call-presence";
-import { $mucCallLiveParticipants } from "@/lib/calls/muc-call-live-participants";
-import {
-  buildCallVolumeMixerRows,
-  resetCallVolumeMixerLevels,
-  type CallVolumeLevelStore,
-  type CallVolumeMixerRow,
-} from "@/lib/calls/call-volume-mixer";
+import { useCallVolumeMixer } from "@/lib/calls/use-call-volume-mixer";
 import { barePeerJid } from "@/lib/xmpp/jid";
 import CallTileGrid from "./CallTileGrid.vue";
 import CallControls from "./CallControls.vue";
 import CallSettingsDialog from "./CallSettingsDialog.vue";
 import CallMediaNotice from "./CallMediaNotice.vue";
 import CallSelfShareNotice from "./CallSelfShareNotice.vue";
-import CallVolumeMixerPanel from "./CallVolumeMixerPanel.vue";
+import CallVolumeMixerDialog from "./CallVolumeMixerDialog.vue";
 import CallAudioPlaybackPrompt from "./CallAudioPlaybackPrompt.vue";
 
 /**
@@ -68,16 +62,11 @@ const micEnabled = useStore($callMicEnabled);
 const camEnabled = useStore($callCamEnabled);
 const screenShareEnabled = useStore($callScreenShareEnabled);
 const screenShareSupported = useStore($callScreenShareSupported);
-const liveParticipants = useStore($mucCallLiveParticipants);
 const { remoteTracks, localTracks, engine } = useCallEngine();
 const { activeRoomJid, selfInCall } = useActiveMucCall();
 
 const settingsOpen = ref(false);
-const participantAudioLevels = ref<CallVolumeLevelStore>({});
-const participantAudioTargets = ref<Record<string, {
-  participantIdentity: string;
-  source: CallVolumeMixerRow["source"];
-}>>({});
+const volumeOpen = ref(false);
 
 const normalizedRoomJid = computed(() =>
   normalizeMucCallRoomJid(props.roomJid ?? ""),
@@ -147,67 +136,11 @@ const stageLocalTracks = computed(() =>
   selfSharePresentation.value?.stageLocalTracks ?? localTracks.value,
 );
 
-const remoteParticipantIdentities = computed(() => {
-  if (state.value.phase === "active" && state.value.kind === "muc") {
-    return liveParticipants.value[normalizedRoomJid.value] ?? [];
-  }
-  const identities = new Set<string>();
-  if (state.value.phase === "active" && state.value.kind === "dm") {
-    identities.add(state.value.peer);
-  }
-  for (const track of remoteTracks.value) identities.add(track.participantIdentity);
-  return Array.from(identities);
-});
-
-const volumeRows = computed(() =>
-  buildCallVolumeMixerRows({
-    remoteParticipantIdentities: remoteParticipantIdentities.value,
-    remoteTracks: remoteTracks.value,
-    localIdentity: localIdentity.value,
-    levels: participantAudioLevels.value,
-  }),
-);
-
-const activeCallSid = computed(() =>
-  state.value.phase === "active" ? state.value.sid : null,
-);
-
-function setParticipantVolume(row: CallVolumeMixerRow, level: number): void {
-  participantAudioLevels.value = {
-    ...participantAudioLevels.value,
-    [row.key]: level,
-  };
-  participantAudioTargets.value = {
-    ...participantAudioTargets.value,
-    [row.key]: {
-      participantIdentity: row.participantIdentity,
-      source: row.source,
-    },
-  };
-  engine.setParticipantAudioVolume({
-    participantIdentity: row.participantIdentity,
-    source: row.source,
-    volume: level,
-  });
-}
-
-function resetParticipantVolumes(): void {
-  for (const target of Object.values(participantAudioTargets.value)) {
-    engine.setParticipantAudioVolume({
-      participantIdentity: target.participantIdentity,
-      source: target.source,
-      volume: 1,
-    });
-  }
-  for (const row of volumeRows.value) {
-    engine.setParticipantAudioVolume({
-      participantIdentity: row.participantIdentity,
-      source: row.source,
-      volume: 1,
-    });
-  }
-  participantAudioLevels.value = resetCallVolumeMixerLevels(participantAudioLevels.value);
-}
+const {
+  rows: volumeRows,
+  setVolume: setParticipantVolume,
+  resetAll: resetParticipantVolumes,
+} = useCallVolumeMixer(normalizedRoomJid);
 
 function collapseToSplit(): void {
   $callUiMode.set("split");
@@ -223,10 +156,18 @@ async function onHangup(): Promise<void> {
 
 function onKeydown(event: KeyboardEvent): void {
   if (!isOpen.value) return;
-  if (event.key === "Escape") {
+  if (event.key !== "Escape") return;
+  // A modal (settings or the volume mixer) owns Escape while it is
+  // open: dismiss the dialog rather than collapsing the whole expanded
+  // call out from under it.
+  if (settingsOpen.value || volumeOpen.value) {
     event.preventDefault();
-    collapseToSplit();
+    settingsOpen.value = false;
+    volumeOpen.value = false;
+    return;
   }
+  event.preventDefault();
+  collapseToSplit();
 }
 
 onMounted(() => {
@@ -234,11 +175,6 @@ onMounted(() => {
   if (typeof window !== "undefined") {
     window.addEventListener("keydown", onKeydown);
   }
-});
-
-watch(activeCallSid, () => {
-  participantAudioLevels.value = {};
-  participantAudioTargets.value = {};
 });
 
 onBeforeUnmount(() => {
@@ -283,11 +219,6 @@ onBeforeUnmount(() => {
           :mic-enabled="micEnabled"
         />
       </div>
-      <CallVolumeMixerPanel
-        :rows="volumeRows"
-        @set-volume="setParticipantVolume"
-        @reset-all="resetParticipantVolumes"
-      />
     </main>
     <footer class="call-expanded__footer">
       <CallControls
@@ -296,15 +227,23 @@ onBeforeUnmount(() => {
         :screen-share-enabled="screenShareEnabled"
         :screen-share-supported="screenShareSupported"
         :is-expanded="true"
+        :volume-open="volumeOpen"
         @toggle-mic="toggleMic"
         @toggle-cam="toggleCam"
         @toggle-screen-share="toggleScreenShare"
         @toggle-expanded="collapseToSplit"
+        @toggle-volume="volumeOpen = !volumeOpen"
         @open-settings="settingsOpen = true"
         @hangup="onHangup"
       />
     </footer>
     <CallSettingsDialog v-model:open="settingsOpen" />
+    <CallVolumeMixerDialog
+      v-model:open="volumeOpen"
+      :rows="volumeRows"
+      @set-volume="setParticipantVolume"
+      @reset-all="resetParticipantVolumes"
+    />
   </div>
 </template>
 
@@ -359,11 +298,5 @@ onBeforeUnmount(() => {
   justify-content: center;
   border-top: 1px solid var(--border);
   padding: 0.75rem 1rem;
-}
-
-@media (max-width: 760px) {
-  .call-expanded__main {
-    flex-direction: column;
-  }
 }
 </style>
