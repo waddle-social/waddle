@@ -6,6 +6,7 @@ import AppDialog from "@/components/ui/AppDialog.vue";
 import {
   $devicePrefs,
   enumerateCallDevices,
+  isSpeakerOutputSelectionSupported,
   setCamDevice,
   setMicDevice,
   setSpeakerDevice,
@@ -25,22 +26,15 @@ import { reportCallError } from "@/lib/calls/call-store";
  * through `$devicePrefs`; switching device while a call is active
  * is applied via the LiveKit engine without disconnecting.
  *
- * Speaker selection requires `HTMLMediaElement.setSinkId`, which
- * is unavailable on Firefox today; we surface that as a disabled
- * picker row with explanatory copy rather than hiding the section.
+ * Speaker selection requires sink routing for both the media element
+ * and the Web Audio context. Browsers without that full path keep the
+ * picker disabled rather than surfacing a broken output switch.
  */
 const open = defineModel<boolean>("open", { required: true });
 
 const prefs = useStore($devicePrefs);
 const devices = ref<EnumeratedDevices>({ mics: [], cams: [], speakers: [] });
-const speakerSupported = ref(true);
-
-function detectSpeakerSupport(): boolean {
-  if (typeof window === "undefined") return false;
-  const audio = document.createElement("audio") as HTMLAudioElement &
-    Partial<{ setSinkId: (id: string) => Promise<void> }>;
-  return typeof audio.setSinkId === "function";
-}
+const speakerSupported = ref(isSpeakerOutputSelectionSupported());
 
 /**
  * Epoch counter incremented on every dialog close. `refresh()` reads
@@ -130,7 +124,7 @@ watch(open, async (isOpen) => {
     teardownDeviceChange();
     return;
   }
-  speakerSupported.value = detectSpeakerSupport();
+  speakerSupported.value = isSpeakerOutputSelectionSupported();
   await refresh();
   // Mount the devicechange listener after the first refresh so the
   // initial enumeration isn't fighting a hot-plug event arriving in
