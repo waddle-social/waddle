@@ -1,6 +1,6 @@
 import type { WaddleChannelType } from "@/lib/channel-types";
 import type { PinPermission } from "@/lib/chat-types";
-import type { ExtensionAnnotation } from "@/lib/chat-ui";
+import type { CallThreadAnchor, ExtensionAnnotation } from "@/lib/chat-ui";
 import type { TimestampSource } from "@/lib/timeline-timestamps";
 import type { WaddleEncryptedFile } from "./extensions/encrypted-file";
 
@@ -183,6 +183,8 @@ export interface LiveRoomMessage {
   /** RFC 6121 / XEP-0201 */
   threadId?: string;
   parentThreadId?: string;
+  /** Waddle call-thread anchor marker (`urn:waddle:call-thread:0`). */
+  callThread?: CallThreadAnchor;
   /** Waddle thread metadata */
   forumPostKind?: "topic" | "reply";
   forumTitle?: string;

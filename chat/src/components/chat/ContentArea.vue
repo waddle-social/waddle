@@ -27,7 +27,7 @@ import type { DiscoveredExtensionCommand, ExtensionCommandAction, ExtensionComma
 import type { ComposerLinkPreviewLookup, ComposerLinkPreviewSendPayload } from "@/lib/link-preview-composer";
 import { useScrollDirectionPreference } from "@/preferences/scroll-direction";
 import type { MessageThreadIndex } from "@/channels/threads";
-import { formatTimelineStamp, formatTimelineDayDivider, isSameTimelineDay } from "@/channels/timeline";
+import { formatTimelineStamp, formatTimelineDayDivider, isFeedTimelineMessage, isSameTimelineDay } from "@/channels/timeline";
 import { useExtensionLauncher } from "@/channels/extension-launcher";
 import { useJumpToLiveEdge } from "@/ui/use-jump-to-live-edge";
 import { ArrowDown, ArrowUp } from "lucide-vue-next";
@@ -143,10 +143,7 @@ const emit = defineEmits<{
 }>();
 
 // Hide thread members from the main feed — they live inside the thread panel.
-// Keep thread roots (id === threadId) and any message with no threadId.
-const feedMessages = computed(() =>
-  props.messages.filter((m) => !m.threadId || m.id === m.threadId),
-);
+const feedMessages = computed(() => props.messages.filter(isFeedTimelineMessage));
 const { mode: scrollDirection, isTopPinned } = useScrollDirectionPreference();
 const orderedFeedMessages = computed(() =>
   orderTimelineForScrollDirection(feedMessages.value, scrollDirection.value),

@@ -11,7 +11,7 @@ use super::*;
 /// owners only). Without it the dispatcher path's owner override
 /// would always fail. The recipient-pass path the main loop drives
 /// passes the connection's own session here.
-pub(super) fn build_interpret_deps<'a>(
+pub(crate) fn build_interpret_deps<'a>(
     state: &'a WebSocketState,
     authenticated_session: Option<&'a crate::auth::Session>,
 ) -> crate::server::routes::interpret::Deps<'a> {

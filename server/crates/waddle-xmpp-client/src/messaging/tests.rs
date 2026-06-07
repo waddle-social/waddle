@@ -326,6 +326,33 @@ fn parse_message_with_nested_thread() {
 }
 
 #[test]
+fn parse_message_with_call_thread_anchor() {
+    let e = el("<message xmlns='jabber:client' from='room@muc.example' type='groupchat'>\
+         <body>Alice started a call</body>\
+         <thread>call-thread-uuid</thread>\
+         <call-thread xmlns='urn:waddle:call-thread:0' kind='muc' sid='session-uuid' media='audio video' initiator='alice@example.com' started='2026-06-07T14:30:00Z'/>\
+         </message>");
+    let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+        panic!("expected Message");
+    };
+    let call_thread = msg.call_thread.expect("call-thread marker");
+
+    assert_eq!(msg.thread_id.as_deref(), Some("call-thread-uuid"));
+    assert_eq!(
+        call_thread.kind,
+        crate::xep::call_thread::CallThreadKind::Muc
+    );
+    assert_eq!(call_thread.sid.0, "session-uuid");
+    assert!(call_thread.media.audio);
+    assert!(call_thread.media.video);
+    assert_eq!(call_thread.initiator.to_string(), "alice@example.com");
+    assert_eq!(
+        call_thread.started.to_rfc3339(),
+        "2026-06-07T14:30:00+00:00"
+    );
+}
+
+#[test]
 fn parse_message_with_retract() {
     let e = el("<message xmlns='jabber:client' type='groupchat'>\
          <retract xmlns='urn:xmpp:message-retract:1' id='old-msg-id'/>\

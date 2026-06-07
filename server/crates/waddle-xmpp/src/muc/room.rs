@@ -158,6 +158,9 @@ pub struct MujiPresenceState {
     /// state, so callers that need to preserve XEP-0272 joining
     /// semantics should prefer this list over the aggregate snapshot.
     pub session_mujis: Vec<(FullJid, Muji)>,
+    /// True when this update changed the nick from no active call to an
+    /// active call advertisement.
+    pub active_call_started: bool,
 }
 
 impl MucRoom {
@@ -203,6 +206,7 @@ impl MucRoom {
         originator: FullJid,
         muji: Muji,
     ) -> MujiPresenceState {
+        let had_active_call = self.room_has_active_muji();
         if muji.is_empty() {
             if let Some(entries) = self.muji_state.get_mut(nick) {
                 entries.remove(&originator);
@@ -210,20 +214,28 @@ impl MucRoom {
                     self.muji_state.remove(nick);
                 }
             }
+            let room_muji = self.muji_for_nick(nick);
+            let active_call_started =
+                !had_active_call && room_muji.as_ref().is_some_and(Muji::is_active);
             MujiPresenceState {
                 sender_muji: None,
-                room_muji: self.muji_for_nick(nick),
+                room_muji,
                 session_mujis: self.muji_sessions_for_nick(nick),
+                active_call_started,
             }
         } else {
             self.muji_state
                 .entry(nick.to_owned())
                 .or_default()
                 .insert(originator, muji.clone());
+            let room_muji = self.muji_for_nick(nick);
+            let active_call_started =
+                !had_active_call && room_muji.as_ref().is_some_and(Muji::is_active);
             MujiPresenceState {
                 sender_muji: Some(muji),
-                room_muji: self.muji_for_nick(nick),
+                room_muji,
                 session_mujis: self.muji_sessions_for_nick(nick),
+                active_call_started,
             }
         }
     }
@@ -253,6 +265,13 @@ impl MucRoom {
             preparing,
             contents,
         })
+    }
+
+    fn room_has_active_muji(&self) -> bool {
+        self.muji_state
+            .values()
+            .flat_map(|entries| entries.values())
+            .any(Muji::is_active)
     }
 
     /// Currently-advertised Muji payload for one exact session.
@@ -298,6 +317,7 @@ impl MucRoom {
             sender_muji: None,
             room_muji: self.muji_for_nick(nick),
             session_mujis: self.muji_sessions_for_nick(nick),
+            active_call_started: false,
         }
     }
 

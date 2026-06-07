@@ -39,13 +39,22 @@ use waddle_xmpp::muc::{
     presence::NS_MUC,
     room_actor::{ClearMujiPresence, UpsertMujiPresence},
 };
+use waddle_xmpp::xep::xep0167::MediaKind;
 use waddle_xmpp::xep::xep0272::{find_muji, Muji, NS_MUJI};
 use waddle_xmpp::xep::xep0421::OccupantIdentity;
+use waddle_xmpp::xep::{
+    build_call_thread_anchor, build_hint_element, CallThreadAnchor, CallThreadKind,
+    CallThreadMedia, Hint,
+};
 use waddle_xmpp::Stanza;
+use waddle_xmpp_core::mam::ThreadId;
+use waddle_xmpp_core::xep0201::{build_thread_element, ThreadInfo, CLIENT_STANZA_NS};
+use xmpp_parsers::jingle::SessionId;
+use xmpp_parsers::message::{Lang, Message, MessageType};
 use xmpp_parsers::presence::Presence;
 
 use super::super::super::{get_room_actor, stanza_to_xml};
-use crate::server::routes::websocket::WebSocketState;
+use crate::server::routes::websocket::{interpret_loop::build_interpret_deps, WebSocketState};
 
 /// Pull out the typed [`Muji`] element from an inbound presence's
 /// payloads if it carries one. Returns `None` when the namespace
@@ -223,6 +232,21 @@ pub(super) async fn try_handle_muc_presence_update(
         outcome.sender_muji.as_ref(),
         &outcome.session_mujis,
     );
+    if outcome.active_call_started {
+        let anchor = build_call_thread_anchor_message(
+            room_jid,
+            &sender_jid.to_bare(),
+            outcome.active_muji.as_ref(),
+            &outcome.update.sender_nick,
+        );
+        let deps = build_interpret_deps(state, None);
+        crate::server::routes::interpret::broadcast_room_system_message(
+            &deps,
+            room_jid.clone(),
+            Box::new(anchor),
+        )
+        .await;
+    }
 
     // Author the canonical presence the server will reflect. Built
     // ONCE here, cloned per recipient for the self vs other status
@@ -285,6 +309,56 @@ pub(super) async fn try_handle_muc_presence_update(
     Some(responses)
 }
 
+fn build_call_thread_anchor_message(
+    room_jid: &BareJid,
+    initiator: &BareJid,
+    active_muji: Option<&Muji>,
+    initiator_nick: &str,
+) -> Message {
+    let thread_id = uuid::Uuid::new_v4().to_string();
+    let sid = SessionId(uuid::Uuid::new_v4().to_string());
+    let media = media_from_muji(active_muji);
+    let body = format!("{initiator_nick} started a call");
+    let mut message = Message::new(Some(jid::Jid::from(room_jid.clone())));
+    message.from = Some(jid::Jid::from(room_jid.clone()));
+    message.type_ = MessageType::Groupchat;
+    message.bodies.insert(Lang(String::new()), body);
+    let thread = ThreadInfo::root(ThreadId::new(thread_id).expect("uuid thread id is non-empty"));
+    message
+        .payloads
+        .push(build_thread_element(&thread, CLIENT_STANZA_NS));
+    message
+        .payloads
+        .push(build_call_thread_anchor(&CallThreadAnchor {
+            kind: CallThreadKind::Muc,
+            sid,
+            media,
+            initiator: initiator.clone(),
+            started: chrono::Utc::now(),
+        }));
+    message.payloads.push(build_hint_element(Hint::Store));
+    message
+}
+
+fn media_from_muji(active_muji: Option<&Muji>) -> CallThreadMedia {
+    let mut media = CallThreadMedia {
+        audio: false,
+        video: false,
+    };
+    if let Some(muji) = active_muji {
+        for content in &muji.contents {
+            match content.media {
+                MediaKind::Audio => media.audio = true,
+                MediaKind::Video => media.video = true,
+            }
+        }
+    }
+    if !media.audio && !media.video {
+        media.audio = true;
+    }
+    media
+}
+
 #[cfg(test)]
 mod tests {
     //! XEP-conformance tests for the `<muji xmlns='urn:xmpp:jingle:muji:0'/>`
@@ -325,6 +399,21 @@ mod tests {
         assert!(muji.is_active());
         assert_eq!(muji.contents.len(), 1);
         assert_eq!(muji.contents[0].name.0, "audio");
+    }
+
+    #[test]
+    fn media_from_muji_uses_typed_rtp_media_not_content_name() {
+        let xml = "<muji xmlns='urn:xmpp:jingle:muji:0'>\
+                     <content creator='initiator' name='0'>\
+                       <description xmlns='urn:xmpp:jingle:apps:rtp:1' media='video'/>\
+                     </content>\
+                   </muji>";
+        let element: Element = xml.parse().expect("muji XML parses");
+        let muji = Muji::try_from(&element).expect("typed video Muji parses");
+        let media = media_from_muji(Some(&muji));
+
+        assert!(!media.audio);
+        assert!(media.video);
     }
 
     #[test]

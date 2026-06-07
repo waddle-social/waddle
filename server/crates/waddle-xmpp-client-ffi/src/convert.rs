@@ -15,9 +15,10 @@ use waddle_xmpp_client::{
 
 use crate::{
     WaddleArchivedMessage, WaddleCallEvent, WaddleCallEventKind, WaddleCallMedia,
-    WaddleEncryptedFile, WaddleEncryptedFileHash, WaddleEventListener, WaddleJingleReason,
-    WaddleLiveKitJoin, WaddleMdsDisplayedEntry, WaddleMessage, WaddleMucAffiliation, WaddleMucRole,
-    WaddleMujiPresence, WaddlePresence, WaddlePresenceHat, WaddleSendOptions, WaddleSharedFile,
+    WaddleCallThreadAnchor, WaddleEncryptedFile, WaddleEncryptedFileHash, WaddleEventListener,
+    WaddleJingleReason, WaddleLiveKitJoin, WaddleMdsDisplayedEntry, WaddleMessage,
+    WaddleMucAffiliation, WaddleMucRole, WaddleMujiPresence, WaddlePresence, WaddlePresenceHat,
+    WaddleSendOptions, WaddleSharedFile,
 };
 
 // ── Event dispatch ───────────────────────────────────────────────────────────
@@ -323,6 +324,7 @@ fn inbound_to_ffi(msg: InboundMessage) -> WaddleMessage {
         reply_to_sender: msg.reply_to_sender,
         reply_fallback_start: fb_start,
         reply_fallback_end: fb_end,
+        call_thread: msg.call_thread.map(call_thread_to_ffi),
         shared_files: msg
             .shared_files
             .into_iter()
@@ -331,6 +333,30 @@ fn inbound_to_ffi(msg: InboundMessage) -> WaddleMessage {
         mds_displayed: msg
             .mds_displayed
             .map(|entries| entries.into_iter().map(mds_entry_to_ffi).collect()),
+    }
+}
+
+fn call_thread_to_ffi(
+    anchor: waddle_xmpp_client::xep::call_thread::CallThreadAnchor,
+) -> WaddleCallThreadAnchor {
+    let kind = match anchor.kind {
+        waddle_xmpp_client::xep::call_thread::CallThreadKind::Dm => "dm",
+        waddle_xmpp_client::xep::call_thread::CallThreadKind::Muc => "muc",
+    };
+    let mut media = Vec::new();
+    if anchor.media.audio {
+        media.push("audio".to_string());
+    }
+    if anchor.media.video {
+        media.push("video".to_string());
+    }
+
+    WaddleCallThreadAnchor {
+        kind: kind.to_string(),
+        sid: anchor.sid.0,
+        media,
+        initiator: anchor.initiator.to_string(),
+        started: anchor.started.to_rfc3339(),
     }
 }
 

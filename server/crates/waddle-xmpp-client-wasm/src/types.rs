@@ -15,6 +15,15 @@ pub struct WaddleStanzaId {
 }
 
 #[derive(Debug, Serialize)]
+pub struct WaddleCallThreadAnchor {
+    pub kind: String,
+    pub sid: String,
+    pub media: Vec<String>,
+    pub initiator: String,
+    pub started: String,
+}
+
+#[derive(Debug, Serialize)]
 pub struct WaddleMessage {
     pub id: Option<String>,
     pub from: Option<String>,
@@ -54,6 +63,9 @@ pub struct WaddleMessage {
     pub forum_title: Option<String>,
     pub forum_thread_title: Option<String>,
     pub is_sticker: bool,
+    /// urn:waddle:call-thread:0 room call-thread anchor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_thread: Option<WaddleCallThreadAnchor>,
     pub shared_files: Vec<WaddleSharedFile>,
     pub link_previews: Vec<WaddleLinkPreview>,
     /// urn:waddle:pin:0 pin/unpin event surfaced from a system message

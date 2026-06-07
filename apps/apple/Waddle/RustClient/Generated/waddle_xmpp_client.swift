@@ -1744,6 +1744,72 @@ public func FfiConverterTypeWaddleCallMedia_lower(_ value: WaddleCallMedia) -> R
 }
 
 
+public struct WaddleCallThreadAnchor: Equatable, Hashable {
+    public var kind: String
+    public var sid: String
+    public var media: [String]
+    public var initiator: String
+    public var started: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(kind: String, sid: String, media: [String], initiator: String, started: String) {
+        self.kind = kind
+        self.sid = sid
+        self.media = media
+        self.initiator = initiator
+        self.started = started
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleCallThreadAnchor: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleCallThreadAnchor: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleCallThreadAnchor {
+        return
+            try WaddleCallThreadAnchor(
+                kind: FfiConverterString.read(from: &buf),
+                sid: FfiConverterString.read(from: &buf),
+                media: FfiConverterSequenceString.read(from: &buf),
+                initiator: FfiConverterString.read(from: &buf),
+                started: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleCallThreadAnchor, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.kind, into: &buf)
+        FfiConverterString.write(value.sid, into: &buf)
+        FfiConverterSequenceString.write(value.media, into: &buf)
+        FfiConverterString.write(value.initiator, into: &buf)
+        FfiConverterString.write(value.started, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleCallThreadAnchor_lift(_ buf: RustBuffer) throws -> WaddleCallThreadAnchor {
+    return try FfiConverterTypeWaddleCallThreadAnchor.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleCallThreadAnchor_lower(_ value: WaddleCallThreadAnchor) -> RustBuffer {
+    return FfiConverterTypeWaddleCallThreadAnchor.lower(value)
+}
+
+
 public struct WaddleChannel: Equatable, Hashable {
     public var id: String
     public var roomJid: String
@@ -2341,6 +2407,10 @@ public struct WaddleMessage: Equatable, Hashable {
      */
     public var replyFallbackEnd: UInt32?
     /**
+     * urn:waddle:call-thread:0 call-thread anchor marker, if present.
+     */
+    public var callThread: WaddleCallThreadAnchor?
+    /**
      * XEP-0446 / XEP-0447 shared files attached to the message.
      */
     public var sharedFiles: [WaddleSharedFile]
@@ -2371,6 +2441,9 @@ public struct WaddleMessage: Equatable, Hashable {
          * XEP-0428 fallback range end (char offset, exclusive).
          */replyFallbackEnd: UInt32?,
         /**
+         * urn:waddle:call-thread:0 call-thread anchor marker, if present.
+         */callThread: WaddleCallThreadAnchor?,
+        /**
          * XEP-0446 / XEP-0447 shared files attached to the message.
          */sharedFiles: [WaddleSharedFile],
         /**
@@ -2399,6 +2472,7 @@ public struct WaddleMessage: Equatable, Hashable {
         self.replyToSender = replyToSender
         self.replyFallbackStart = replyFallbackStart
         self.replyFallbackEnd = replyFallbackEnd
+        self.callThread = callThread
         self.sharedFiles = sharedFiles
         self.mdsDisplayed = mdsDisplayed
     }
@@ -2439,6 +2513,7 @@ public struct FfiConverterTypeWaddleMessage: FfiConverterRustBuffer {
                 replyToSender: FfiConverterOptionString.read(from: &buf),
                 replyFallbackStart: FfiConverterOptionUInt32.read(from: &buf),
                 replyFallbackEnd: FfiConverterOptionUInt32.read(from: &buf),
+                callThread: FfiConverterOptionTypeWaddleCallThreadAnchor.read(from: &buf),
                 sharedFiles: FfiConverterSequenceTypeWaddleSharedFile.read(from: &buf),
                 mdsDisplayed: FfiConverterOptionSequenceTypeWaddleMdsDisplayedEntry.read(from: &buf)
         )
@@ -2465,6 +2540,7 @@ public struct FfiConverterTypeWaddleMessage: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.replyToSender, into: &buf)
         FfiConverterOptionUInt32.write(value.replyFallbackStart, into: &buf)
         FfiConverterOptionUInt32.write(value.replyFallbackEnd, into: &buf)
+        FfiConverterOptionTypeWaddleCallThreadAnchor.write(value.callThread, into: &buf)
         FfiConverterSequenceTypeWaddleSharedFile.write(value.sharedFiles, into: &buf)
         FfiConverterOptionSequenceTypeWaddleMdsDisplayedEntry.write(value.mdsDisplayed, into: &buf)
     }
@@ -4576,6 +4652,30 @@ fileprivate struct FfiConverterOptionTypeWaddleCallEvent: FfiConverterRustBuffer
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeWaddleCallEvent.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeWaddleCallThreadAnchor: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleCallThreadAnchor?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddleCallThreadAnchor.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddleCallThreadAnchor.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }

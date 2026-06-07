@@ -16,6 +16,7 @@ import {
   LayoutDashboard,
   MessageSquare,
   MessagesSquare,
+  PhoneCall,
   Pin,
   PinOff,
   X,
@@ -51,6 +52,7 @@ import {
   clearDesktopToolbarOwner,
 } from "@/stores/message-toolbar";
 import { QUICK_REACTION_EMOJIS } from "@/lib/reaction-mode";
+import { callThreadAnchorLabel, callThreadAnchorThreadId } from "@/lib/call-thread-anchor";
 
 // Two separate badge layers:
 //
@@ -362,6 +364,13 @@ function formatThreadRecency(iso: string | undefined): string {
 }
 
 const threadChipRecency = computed(() => formatThreadRecency(props.threadLastReplyAt));
+const callThreadLabel = computed(() => callThreadAnchorLabel(props.message));
+const callThreadId = computed(() => callThreadAnchorThreadId(props.message));
+
+function openCallThreadAnchor() {
+  if (!callThreadId.value) return;
+  emit("openThread", callThreadId.value);
+}
 
 function togglePinFromMenu() {
   if (!props.message.id) return;
@@ -891,6 +900,28 @@ onBeforeUnmount(() => {
       </div>
     </section>
   </template>
+
+  <div
+    v-else-if="message.callThread"
+    :data-message-id="message.id"
+    :data-message-created-at="message.createdAt"
+    class="chat-message-grid animate-message-in"
+  >
+    <div class="chat-message-avatar-cell flex items-center justify-center text-muted-foreground/60">
+      <PhoneCall class="w-4 h-4" aria-hidden="true" />
+    </div>
+    <div class="chat-message-body-stack">
+      <button
+        type="button"
+        class="type-field-sm inline-flex items-center gap-1.5 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        :disabled="!callThreadId"
+        @click="openCallThreadAnchor"
+      >
+        <span>{{ callThreadLabel }}</span>
+        <span class="type-meta type-numeric">{{ formatTimelineTimeOfDay(message.createdAt) }}</span>
+      </button>
+    </div>
+  </div>
 
   <!-- Retracted tombstone — body is gone but author/time/avatar
        stay for context. Lift the row opacity from 35 % → 55 % so

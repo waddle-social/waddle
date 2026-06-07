@@ -17,6 +17,7 @@ use xmpp_parsers::minidom::Element;
 const NS_MUC: &str = "http://jabber.org/protocol/muc";
 const NS_MUC_USER: &str = "http://jabber.org/protocol/muc#user";
 const NS_MUJI: &str = "urn:xmpp:jingle:muji:0";
+const NS_CALL_THREAD: &str = "urn:waddle:call-thread:0";
 
 const DOMAIN: &str = "localhost";
 const ALICE: &str = "alice";
@@ -386,6 +387,49 @@ fn muji_child(presence: &Element) -> Option<&Element> {
         .find(|c| c.name() == "muji" && c.ns() == NS_MUJI)
 }
 
+fn call_thread_child(message: &Element) -> Option<&Element> {
+    message
+        .children()
+        .find(|c| c.name() == "call-thread" && c.ns() == NS_CALL_THREAD)
+}
+
+async fn recv_until_muji_and_anchor(client: &mut WsXmppClient) -> Vec<String> {
+    let mut frames = Vec::new();
+    loop {
+        let frame = client
+            .recv()
+            .await
+            .expect("receive frame while waiting for muji reflection and call-thread anchor");
+        frames.push(frame);
+        let has_muji = frames.iter().any(|frame| {
+            frame.contains("<presence") && (frame.contains("<muji ") || frame.contains("<muji>"))
+        });
+        let has_anchor = frames
+            .iter()
+            .any(|frame| frame.contains("<call-thread") && frame.contains(NS_CALL_THREAD));
+        if has_muji && has_anchor {
+            return frames;
+        }
+    }
+}
+
+async fn query_room_mam(client: &mut WsXmppClient, room: &str, id: &str) -> Vec<String> {
+    client
+        .send(&format!(
+            r#"<iq type="set" id="{id}" to="{room}">
+                 <query xmlns="urn:xmpp:mam:2">
+                   <set xmlns="http://jabber.org/protocol/rsm"><max>50</max></set>
+                 </query>
+               </iq>"#
+        ))
+        .await
+        .expect("send room MAM query");
+    client
+        .recv_until(|frame| frame.contains("urn:xmpp:mam:2") && frame.contains("<fin"))
+        .await
+        .expect("MAM query completes")
+}
+
 /// XEP-0272 §Joining + XEP-0045 §7.1: when a multi-session occupant
 /// (the user's own bare JID joined twice with two resources) updates
 /// presence with a `<muji/>` content advertisement, the reflection
@@ -459,12 +503,17 @@ async fn muji_presence_reflects_to_senders_sibling_resource() {
     // Match on the `<muji` element start tag, NOT the substring "muji"
     // which could collide with the room JID. Both open-tag forms
     // (with attributes / namespace) are accepted.
-    let mobile_active = mobile
-        .recv_matching(|frame| {
+    let active_frames = recv_until_muji_and_anchor(&mut mobile).await;
+    let mobile_active = active_frames
+        .iter()
+        .find(|frame| {
             frame.contains("<presence") && (frame.contains("<muji ") || frame.contains("<muji>"))
         })
-        .await
-        .expect("mobile receives reflected muji presence on its own WebSocket");
+        .unwrap_or_else(|| {
+            panic!(
+                "mobile must receive reflected muji presence on its own WebSocket: {active_frames:?}"
+            )
+        });
     let element = parse_presence(&mobile_active);
     assert_eq!(
         element.name(),
@@ -485,6 +534,86 @@ async fn muji_presence_reflects_to_senders_sibling_resource() {
     assert!(
         muc_user_has_status_110(&element),
         "XEP-0045 §7.1: sibling session of the sender must receive <status code='110'/>: {mobile_active}"
+    );
+
+    let anchor = active_frames
+        .iter()
+        .find(|frame| frame.contains("<call-thread") && frame.contains(NS_CALL_THREAD))
+        .expect("mobile receives call-thread anchor");
+    let anchor_element: Element = anchor
+        .parse()
+        .unwrap_or_else(|err| panic!("anchor must parse as XML: {err}; frame={anchor}"));
+    assert_eq!(
+        anchor_element.name(),
+        "message",
+        "expected message: {anchor}"
+    );
+    assert_eq!(
+        anchor_element.attr("type"),
+        Some("groupchat"),
+        "anchor must be groupchat: {anchor}"
+    );
+    assert_eq!(
+        anchor_element.attr("from"),
+        Some(room.as_str()),
+        "anchor must be authored by the room bare JID: {anchor}"
+    );
+    assert!(
+        anchor_element
+            .get_child("thread", "jabber:client")
+            .is_some()
+            || anchor_element.get_child("thread", "").is_some(),
+        "anchor must carry XEP-0201 <thread/>: {anchor}"
+    );
+    let marker = call_thread_child(&anchor_element)
+        .unwrap_or_else(|| panic!("anchor must carry typed call-thread marker: {anchor}"));
+    assert_eq!(marker.attr("kind"), Some("muc"));
+    assert_eq!(marker.attr("media"), Some("audio"));
+    assert_eq!(marker.attr("initiator"), Some("admin@localhost"));
+    assert!(
+        marker.attr("sid").is_some(),
+        "marker must carry session id: {anchor}"
+    );
+    assert!(
+        marker.attr("started").is_some(),
+        "marker must carry RFC3339 started timestamp: {anchor}"
+    );
+    assert!(
+        anchor_element
+            .get_child("store", "urn:xmpp:hints")
+            .is_some(),
+        "anchor must carry XEP-0334 <store/> hint: {anchor}"
+    );
+
+    web.send(&muji_active)
+        .await
+        .expect("web repeats active muji presence");
+    mobile
+        .recv_matching(|frame| {
+            frame.contains("<presence") && (frame.contains("<muji ") || frame.contains("<muji>"))
+        })
+        .await
+        .expect("mobile receives repeated active muji reflection");
+
+    let mam_frames = query_room_mam(&mut mobile, &room, "call-thread-mam-1").await;
+    let archived_anchors: Vec<&String> = mam_frames
+        .iter()
+        .filter(|frame| frame.contains("<forwarded") && frame.contains("<call-thread"))
+        .collect();
+    assert_eq!(
+        archived_anchors.len(),
+        1,
+        "MAM must archive exactly one anchor per active call session: {mam_frames:?}"
+    );
+    let archived_anchor = archived_anchors[0];
+    assert!(
+        archived_anchor.contains("<thread>") && archived_anchor.contains("</thread>"),
+        "MAM anchor must round-trip XEP-0201 <thread/>: {archived_anchor}"
+    );
+    assert!(
+        archived_anchor.contains("<store xmlns='urn:xmpp:hints'/>")
+            || archived_anchor.contains("<store xmlns=\"urn:xmpp:hints\"/>"),
+        "MAM anchor must round-trip <store/> hint: {archived_anchor}"
     );
 
     // Web emits the XEP-0272 §Leaving marker — an empty `<muji/>`

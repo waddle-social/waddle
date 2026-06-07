@@ -41,6 +41,14 @@ export interface TimelineSharedFile {
   encrypted?: WaddleEncryptedFile;
 }
 
+export interface CallThreadAnchor {
+  kind: "muc";
+  sid: string;
+  media: readonly ("audio" | "video")[];
+  initiator: string;
+  started: string;
+}
+
 export interface LinkPreview {
   originalUrl: string;
   normalizedUrl?: string;
@@ -255,6 +263,8 @@ export interface TimelineMessage {
   /** RFC 6121 / XEP-0201: Thread identifier + optional parent thread. */
   threadId?: string;
   parentThreadId?: string;
+  /** Waddle call-thread anchor marker (`urn:waddle:call-thread:0`). */
+  callThread?: CallThreadAnchor;
   /** Waddle thread metadata when present. */
   forumPostKind?: "topic" | "reply";
   forumTitle?: string;

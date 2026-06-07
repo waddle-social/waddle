@@ -50,6 +50,30 @@ pub(crate) fn references_to_js(references: Vec<messaging::ReferenceData>) -> Vec
         .collect()
 }
 
+pub(crate) fn call_thread_to_js(
+    anchor: waddle_xmpp_client::xep::call_thread::CallThreadAnchor,
+) -> WaddleCallThreadAnchor {
+    let kind = match anchor.kind {
+        waddle_xmpp_client::xep::call_thread::CallThreadKind::Dm => "dm",
+        waddle_xmpp_client::xep::call_thread::CallThreadKind::Muc => "muc",
+    };
+    let mut media = Vec::new();
+    if anchor.media.audio {
+        media.push("audio".to_string());
+    }
+    if anchor.media.video {
+        media.push("video".to_string());
+    }
+
+    WaddleCallThreadAnchor {
+        kind: kind.to_string(),
+        sid: anchor.sid.0,
+        media,
+        initiator: anchor.initiator.to_string(),
+        started: anchor.started.to_rfc3339(),
+    }
+}
+
 pub(crate) fn extension_envelope_to_js(
     envelope: messaging::ExtensionEnvelopeData,
 ) -> WaddleExtensionEnvelope {
@@ -202,6 +226,7 @@ pub(crate) fn inbound_to_js(message: InboundMessage) -> WaddleMessage {
         forum_title: message.forum_title,
         forum_thread_title,
         is_sticker: message.is_sticker,
+        call_thread: message.call_thread.map(call_thread_to_js),
         shared_files: message
             .shared_files
             .into_iter()
@@ -326,6 +351,7 @@ pub(crate) fn inbox_push_to_js(
         forum_title: None,
         forum_thread_title: None,
         is_sticker: false,
+        call_thread: None,
         shared_files: Vec::new(),
         link_previews: Vec::new(),
         pin_event: None,
