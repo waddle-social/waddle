@@ -11,6 +11,7 @@ import {
   VideoOff,
   Volume2,
 } from "lucide-vue-next";
+import CallConnectionIndicator from "./CallConnectionIndicator.vue";
 
 /**
  * Shared control bar for the in-call surfaces (split + expanded).
@@ -80,6 +81,11 @@ const emit = defineEmits<{
       <MonitorUp class="w-4 h-4" />
       <span class="type-control sr-only sm:not-sr-only">{{ screenShareEnabled ? "Stop" : "Share" }}</span>
     </button>
+
+    <!-- Ambient self-connection quality. Self-contained/store-connected,
+         so it adds no props to this otherwise stateless bar. Shows quiet
+         measuring bars until the first quality sample arrives. -->
+    <CallConnectionIndicator />
 
     <span class="call-controls__divider" aria-hidden="true" />
 

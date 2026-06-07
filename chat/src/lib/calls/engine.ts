@@ -1,7 +1,11 @@
 import {
+  ConnectionQuality,
+  ConnectionState,
   Room,
   RoomEvent,
+  ScreenSharePresets,
   Track,
+  VideoPresets,
   type LocalParticipant,
   type LocalTrack,
   type LocalTrackPublication,
@@ -10,11 +14,44 @@ import {
   type RemoteTrack,
   type RemoteTrackPublication,
   type TrackPublication,
+  type TrackPublishOptions,
+  type VideoCaptureOptions,
 } from "livekit-client";
 import type { LiveKitJoin } from "./types";
+import type { CallConnectionPhase, CallConnectionQuality } from "./connection-quality";
 import { $devicePrefs } from "./device-prefs";
 import { validateLiveKitGrant } from "./dm-call-activity";
 import { activeMicAudioProcessing, type MicAudioProcessing } from "./mic-audio-processing";
+
+/**
+ * Camera capture ceiling. AdaptiveStream (`adaptiveStream: true`) and
+ * simulcast still scale each subscriber DOWN to the layer matching its
+ * rendered tile, so this only governs the maximum a large/expanded tile
+ * can pull — it is not the bandwidth every viewer pays. h1080 lifts the
+ * per-publisher upstream ceiling to ~3 Mbps (vs. 720p's 1.7 Mbps).
+ */
+const CAMERA_CAPTURE_RESOLUTION = VideoPresets.h1080.resolution;
+
+/**
+ * Screen-share encoding. 1080p@15fps keeps shared code/text crisp at a
+ * modest 2.5 Mbps; 15fps is plenty for slides, docs, and scrolling.
+ */
+const SCREEN_SHARE_ENCODING = ScreenSharePresets.h1080fps15.encoding;
+
+/**
+ * Per-source degradation under CPU / bandwidth pressure. A camera is a
+ * talking head: keep motion smooth and shed resolution
+ * (`maintain-framerate`). A screen share is usually text: keep it
+ * readable and shed frames (`maintain-resolution`). Passed per-publish
+ * because the two sources want opposite tradeoffs and `publishDefaults`
+ * is a single global value.
+ */
+const CAMERA_PUBLISH_OPTIONS: TrackPublishOptions = {
+  degradationPreference: "maintain-framerate",
+};
+const SCREEN_SHARE_PUBLISH_OPTIONS: TrackPublishOptions = {
+  degradationPreference: "maintain-resolution",
+};
 
 /**
  * Identifies a remote media track surfaced to the UI. The `kind`
@@ -135,6 +172,19 @@ export type CallEngineEvents = {
    * were actually honored. See `mic-audio-processing.ts`.
    */
   micAudioProcessingChanged: (state: MicAudioProcessing) => void;
+  /**
+   * Fires when LiveKit re-scores the LOCAL participant's connection
+   * quality (`excellent` → `lost`). Remote participants' quality is
+   * intentionally not surfaced — the indicator is self-only. Push-based:
+   * no polling, no `getStats`.
+   */
+  connectionQualityChanged: (quality: CallConnectionQuality) => void;
+  /**
+   * Fires when the room transport phase changes (connected ↔
+   * reconnecting ↔ disconnected). Drives the "Reconnecting…" label,
+   * which must override the last quality sample while the path is down.
+   */
+  connectionPhaseChanged: (phase: CallConnectionPhase) => void;
 };
 
 /**
@@ -162,6 +212,8 @@ export class CallEngine {
     audioPlaybackStatusChanged: new Set(),
     mediaDevicesError: new Set(),
     micAudioProcessingChanged: new Set(),
+    connectionQualityChanged: new Set(),
+    connectionPhaseChanged: new Set(),
   };
 
   /** LiveKit identity of the local participant, populated once
@@ -218,6 +270,10 @@ export class CallEngine {
       },
       videoCaptureDefaults: {
         deviceId: prefs.cam ?? undefined,
+        resolution: CAMERA_CAPTURE_RESOLUTION,
+      },
+      publishDefaults: {
+        screenShareEncoding: SCREEN_SHARE_ENCODING,
       },
     });
     room.on(RoomEvent.TrackSubscribed, this.handleTrackSubscribed);
@@ -231,6 +287,8 @@ export class CallEngine {
     room.on(RoomEvent.ActiveDeviceChanged, this.handleActiveDeviceChanged);
     room.on(RoomEvent.TrackMuted, this.handleTrackMuteChanged);
     room.on(RoomEvent.TrackUnmuted, this.handleTrackMuteChanged);
+    room.on(RoomEvent.ConnectionQualityChanged, this.handleConnectionQualityChanged);
+    room.on(RoomEvent.ConnectionStateChanged, this.handleConnectionStateChanged);
     try {
       await room.connect(join.url, join.token);
     } catch (err) {
@@ -279,7 +337,11 @@ export class CallEngine {
 
   async setCameraEnabled(enabled: boolean): Promise<void> {
     if (!this.room) return;
-    await this.room.localParticipant.setCameraEnabled(enabled);
+    await this.room.localParticipant.setCameraEnabled(
+      enabled,
+      undefined,
+      CAMERA_PUBLISH_OPTIONS,
+    );
   }
 
   async setScreenShareEnabled(
@@ -288,12 +350,18 @@ export class CallEngine {
   ): Promise<void> {
     if (!this.room) return;
     try {
-      await this.room.localParticipant.setScreenShareEnabled(enabled, {
-        audio: opts.audio,
-      });
+      await this.room.localParticipant.setScreenShareEnabled(
+        enabled,
+        { audio: opts.audio },
+        SCREEN_SHARE_PUBLISH_OPTIONS,
+      );
     } catch (error) {
       if (!enabled || !opts.audio || !isUnsupportedScreenAudioError(error)) throw error;
-      await this.room.localParticipant.setScreenShareEnabled(true, { audio: false });
+      await this.room.localParticipant.setScreenShareEnabled(
+        true,
+        { audio: false },
+        SCREEN_SHARE_PUBLISH_OPTIONS,
+      );
     }
   }
 
@@ -375,6 +443,8 @@ export class CallEngine {
     room.off(RoomEvent.ActiveDeviceChanged, this.handleActiveDeviceChanged);
     room.off(RoomEvent.TrackMuted, this.handleTrackMuteChanged);
     room.off(RoomEvent.TrackUnmuted, this.handleTrackMuteChanged);
+    room.off(RoomEvent.ConnectionQualityChanged, this.handleConnectionQualityChanged);
+    room.off(RoomEvent.ConnectionStateChanged, this.handleConnectionStateChanged);
     await room.disconnect();
   }
 
@@ -559,6 +629,24 @@ export class CallEngine {
     this.emit("micAudioProcessingChanged", this.computeMicAudioProcessing());
   }
 
+  /**
+   * LiveKit re-scores connection quality for every participant; the
+   * self-only indicator cares about the local one. Remote participants'
+   * scores are dropped here rather than filtered downstream so the engine
+   * surface stays self-scoped.
+   */
+  private handleConnectionQualityChanged = (
+    quality: ConnectionQuality,
+    participant: Participant,
+  ) => {
+    if (!participant.isLocal) return;
+    this.emit("connectionQualityChanged", mapLiveKitConnectionQuality(quality));
+  };
+
+  private handleConnectionStateChanged = (state: ConnectionState) => {
+    this.emit("connectionPhaseChanged", mapLiveKitConnectionState(state));
+  };
+
   private clearParticipantAudioVolumes(): void {
     this.participantAudioVolumes = {};
     this.subscribedAudioTracks.clear();
@@ -625,6 +713,49 @@ export function mapTrackSource(
   return fallbackKind === "audio" ? "microphone" : "camera";
 }
 
+/**
+ * Translate LiveKit's `ConnectionQuality` enum into the SDK-free domain
+ * union the UI consumes. The boundary lives here (the engine wraps the
+ * `Room`), so `connection-quality.ts` stays free of `livekit-client`.
+ */
+export function mapLiveKitConnectionQuality(
+  quality: ConnectionQuality,
+): CallConnectionQuality {
+  switch (quality) {
+    case ConnectionQuality.Excellent:
+      return "excellent";
+    case ConnectionQuality.Good:
+      return "good";
+    case ConnectionQuality.Poor:
+      return "poor";
+    case ConnectionQuality.Lost:
+      return "lost";
+    default:
+      return "unknown";
+  }
+}
+
+/**
+ * Distil LiveKit's `ConnectionState` into the transport phase the
+ * indicator cares about. Both ICE (`Reconnecting`) and signal
+ * (`SignalReconnecting`) recovery collapse to `reconnecting`; everything
+ * pre-`Connected` is `disconnected`, which pairs with the `unknown`
+ * quality to render the chip's quiet "measuring" bars.
+ */
+export function mapLiveKitConnectionState(
+  state: ConnectionState,
+): CallConnectionPhase {
+  switch (state) {
+    case ConnectionState.Connected:
+      return "connected";
+    case ConnectionState.Reconnecting:
+    case ConnectionState.SignalReconnecting:
+      return "reconnecting";
+    default:
+      return "disconnected";
+  }
+}
+
 function isUnsupportedScreenAudioError(error: unknown): boolean {
   if (!error || typeof error !== "object" || !("name" in error)) return false;
   const name = (error as { name?: unknown }).name;
@@ -641,7 +772,11 @@ function isUnsupportedScreenAudioError(error: unknown): boolean {
  */
 type CapturableParticipant = {
   setMicrophoneEnabled(enabled: boolean): Promise<unknown>;
-  setCameraEnabled(enabled: boolean): Promise<unknown>;
+  setCameraEnabled(
+    enabled: boolean,
+    options?: VideoCaptureOptions,
+    publishOptions?: TrackPublishOptions,
+  ): Promise<unknown>;
 };
 
 /**
@@ -668,7 +803,7 @@ export async function enableRequestedCapture(
   }
   if (opts.video) {
     try {
-      await participant.setCameraEnabled(true);
+      await participant.setCameraEnabled(true, undefined, CAMERA_PUBLISH_OPTIONS);
     } catch (error) {
       onError("video", error);
     }

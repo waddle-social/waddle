@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onScopeDispose, ref, watch } from "vue";
 import { useStore } from "@nanostores/vue";
-import { Check, Mic, Speaker, Video, X } from "lucide-vue-next";
+import { Activity, Check, Mic, Speaker, Video, X } from "lucide-vue-next";
 import AppDialog from "@/components/ui/AppDialog.vue";
 import {
   $devicePrefs,
@@ -16,6 +16,12 @@ import { $micAudioProcessing } from "@/lib/calls/mic-audio-processing-state";
 import { audioProcessingRows } from "@/lib/calls/mic-audio-processing";
 import { useCallEngine } from "@/lib/calls/use-call-engine";
 import { reportCallError } from "@/lib/calls/call-store";
+import {
+  describeVideoStats,
+  summarizeVideoStats,
+  type CallStatRow,
+  type CallStatSample,
+} from "@/lib/calls/call-stats";
 
 /**
  * Settings dialog the call surface opens for mic/camera/output
@@ -73,7 +79,143 @@ async function refresh(): Promise<void> {
   devices.value = next;
 }
 
-const { engine } = useCallEngine();
+const { engine, remoteTracks, localTracks } = useCallEngine();
+
+/**
+ * Live call diagnostics. Polls each published (send) and subscribed
+ * (recv) video track's `getRTCStatsReport()` once per second — but ONLY
+ * while this dialog is open (started/stopped in the `open` watcher), so a
+ * normal call pays zero stats cost. `statSamples` carries the previous
+ * byte/timestamp pair per track so bitrate can be derived as a rate.
+ */
+const statRows = ref<CallStatRow[]>([]);
+const statSamples = new Map<string, CallStatSample>();
+let statsTimer: ReturnType<typeof setInterval> | null = null;
+// Guards against overlapping ticks: a slow `getStats()` must not let the
+// next interval fire a second concurrent pass (which would diff against a
+// half-updated sample map and could write rows out of order).
+let statsSampling = false;
+// Bumped every start/stop. A tick captures the generation at launch and
+// re-checks it after its awaits before committing any sample or row, so an
+// in-flight pass that outlives a close/reopen (or a switch to another call)
+// can never repopulate state for a session that has already torn down.
+let statsGeneration = 0;
+
+const statDisplayRows = computed(() =>
+  statRows.value.map((row) => ({
+    key: row.key,
+    label: row.label,
+    sourceLabel: row.sourceLabel,
+    ...describeVideoStats(row),
+  })),
+);
+
+function participantShortLabel(identity: string): string {
+  const at = identity.indexOf("@");
+  const local = at > 0 ? identity.slice(0, at) : identity;
+  return local || identity || "Participant";
+}
+
+function sourceLabel(source: string): string {
+  return source === "screen_share" ? "Screen" : "Camera";
+}
+
+/** One track's sampled row plus the fresh byte/timestamp sample to retain. */
+type TrackSample = { row: CallStatRow; key: string; sample: CallStatSample | null };
+
+/**
+ * Read and summarize one video track's stats, or `null` when the report
+ * is unavailable. `getRTCStatsReport()` rejects when a sender/receiver is
+ * mid-teardown (track unpublished, ICE restart, peer leaving) — common
+ * exactly while a poll is running — so a failure drops that single row
+ * rather than rejecting the whole tick.
+ *
+ * Pure read: the fresh `sample` is RETURNED, not written to `statSamples`
+ * here, so the caller can commit it atomically only after re-checking the
+ * polling generation (a stale in-flight pass must not mutate the map).
+ */
+async function sampleTrack(
+  track: { track: { getRTCStatsReport(): Promise<RTCStatsReport | undefined> } },
+  key: string,
+  direction: "send" | "recv",
+  label: string,
+  source: string,
+): Promise<TrackSample | null> {
+  try {
+    const report = await track.track.getRTCStatsReport();
+    if (!report) return null;
+    const { summary, sample } = summarizeVideoStats(report, direction, statSamples.get(key));
+    return { row: { ...summary, key, label, sourceLabel: sourceLabel(source), direction }, key, sample };
+  } catch {
+    return null;
+  }
+}
+
+async function sampleStats(generation: number): Promise<void> {
+  if (statsSampling) return;
+  statsSampling = true;
+  try {
+    const local = localTracks.value.filter((track) => track.kind === "video");
+    const remote = remoteTracks.value.filter((track) => track.kind === "video");
+    const results = (
+      await Promise.all([
+        ...local.map((track) =>
+          sampleTrack(track, `local:${track.source}:${track.publicationSid}`, "send", "You", track.source),
+        ),
+        ...remote.map((track) =>
+          sampleTrack(
+            track,
+            `remote:${track.participantIdentity}:${track.source}:${track.publicationSid}`,
+            "recv",
+            participantShortLabel(track.participantIdentity),
+            track.source,
+          ),
+        ),
+      ])
+    ).filter((result): result is TrackSample => result !== null);
+    // Bail if polling was stopped/restarted while we awaited: this pass
+    // belongs to a torn-down session and must not touch live state.
+    if (generation !== statsGeneration) return;
+    // Commit samples + rows together, now that the generation is confirmed.
+    for (const result of results) {
+      if (result.sample) statSamples.set(result.key, result.sample);
+    }
+    const rows = results.map((result) => result.row);
+    // Stable order: self first, then remotes alphabetically, so rows don't
+    // jump between polls.
+    rows.sort((a, b) =>
+      a.direction === b.direction
+        ? a.label.localeCompare(b.label)
+        : a.direction === "send"
+          ? -1
+          : 1,
+    );
+    statRows.value = rows;
+  } finally {
+    statsSampling = false;
+  }
+}
+
+function startStatsPolling(): void {
+  stopStatsPolling();
+  const generation = ++statsGeneration;
+  statsTimer = setInterval(() => void sampleStats(generation), 1000);
+  void sampleStats(generation);
+}
+
+function stopStatsPolling(): void {
+  // Invalidate any in-flight tick so its post-await commit no-ops.
+  statsGeneration += 1;
+  if (statsTimer) {
+    clearInterval(statsTimer);
+    statsTimer = null;
+  }
+  statSamples.clear();
+  statRows.value = [];
+}
+
+// A dialog unmounted while still open must not leak its interval.
+onScopeDispose(stopStatsPolling);
 
 async function selectMic(id: string | null): Promise<void> {
   setMicDevice(id);
@@ -134,9 +276,18 @@ watch(open, async (isOpen) => {
     // gets dropped on resolve, and detach the devicechange listener.
     enumerateEpoch += 1;
     teardownDeviceChange();
+    stopStatsPolling();
     return;
   }
   await refresh();
+  // `refresh()` awaited device enumeration; if the dialog was closed in
+  // the meantime, bail before wiring up listeners/polling — otherwise a
+  // closed dialog would keep a 1s `getStats()` interval (and the
+  // devicechange listener) running until the next open→close cycle.
+  if (!open.value) return;
+  // Begin the 1s diagnostics poll now that the dialog is visible; it
+  // tears down again on close / unmount.
+  startStatsPolling();
   // Mount the devicechange listener after the first refresh so the
   // initial enumeration isn't fighting a hot-plug event arriving in
   // the same tick. Debounced 200ms because hot-plugs commonly fire
@@ -345,6 +496,39 @@ function close(): void {
           </li>
         </ul>
       </section>
+
+      <!-- Diagnostics: live per-track WebRTC stats. Polled only while
+           this dialog is open (see the `open` watcher). -->
+      <section class="chat-section-card">
+        <div class="flex items-center gap-2 mb-2">
+          <Activity class="w-4 h-4 text-muted-foreground" />
+          <h3 class="type-control">Diagnostics</h3>
+        </div>
+        <p
+          v-if="statDisplayRows.length === 0"
+          class="type-caption text-muted-foreground"
+        >
+          No active video. Start your camera or screen share to see live
+          resolution, bitrate, and packet-loss stats.
+        </p>
+        <ul v-else class="call-stats">
+          <li v-for="row in statDisplayRows" :key="row.key" class="call-stats__row">
+            <div class="call-stats__head">
+              <span class="type-caption call-stats__peer">
+                {{ row.label }} · {{ row.sourceLabel }}
+              </span>
+              <span class="type-caption text-muted-foreground call-stats__res">
+                {{ row.resolution }} · {{ row.fps }}
+              </span>
+            </div>
+            <div class="call-stats__metrics type-caption text-muted-foreground">
+              <span>{{ row.bitrate }}</span>
+              <span>loss {{ row.loss }}</span>
+              <span>{{ row.rtt }}</span>
+            </div>
+          </li>
+        </ul>
+      </section>
     </div>
 
     <footer class="chat-dialog-footer">
@@ -436,5 +620,39 @@ function close(): void {
 
 .call-processing__detail {
   line-height: 1.3;
+}
+
+.call-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.call-stats__row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+}
+
+.call-stats__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-sm);
+}
+
+.call-stats__peer {
+  color: var(--foreground);
+}
+
+.call-stats__res {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.call-stats__metrics {
+  display: flex;
+  gap: var(--space-sm);
+  font-variant-numeric: tabular-nums;
 }
 </style>

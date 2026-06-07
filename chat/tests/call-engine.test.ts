@@ -1,6 +1,8 @@
 import { describe, expect, mock, test } from "bun:test";
 import {
   enableRequestedCapture,
+  mapLiveKitConnectionQuality,
+  mapLiveKitConnectionState,
   mapTrackSource,
   resolveParticipantAudioVolume,
   type CallEngineEvents,
@@ -8,7 +10,7 @@ import {
   type LocalMediaTrack,
   type RemoteMediaTrack,
 } from "../src/lib/calls/engine";
-import { Track } from "livekit-client";
+import { ConnectionQuality, ConnectionState, Track } from "livekit-client";
 import type { MicAudioProcessing } from "../src/lib/calls/mic-audio-processing";
 
 function deviceError(name: string): Error {
@@ -912,5 +914,117 @@ describe("call-engine — verifies applied mic audio processing", () => {
     const { CallEngine } = await import("../src/lib/calls/engine");
     const engine = new CallEngine();
     expect(typeof engine.on("micAudioProcessingChanged", () => {})).toBe("function");
+  });
+});
+
+describe("call-engine — 1080p capture ceiling + per-source degradation", () => {
+  function videoRoomStub() {
+    const camera: Array<{ enabled: boolean; options: unknown; publishOptions: unknown }> = [];
+    const screen: Array<{ enabled: boolean; options: unknown; publishOptions: unknown }> = [];
+    return {
+      camera,
+      screen,
+      room: {
+        localParticipant: {
+          async setCameraEnabled(enabled: boolean, options?: unknown, publishOptions?: unknown) {
+            camera.push({ enabled, options, publishOptions });
+          },
+          async setScreenShareEnabled(enabled: boolean, options?: unknown, publishOptions?: unknown) {
+            screen.push({ enabled, options, publishOptions });
+          },
+        },
+      },
+    };
+  }
+
+  test("setCameraEnabled publishes the camera with maintain-framerate degradation", async () => {
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine();
+    const stub = videoRoomStub();
+    (engine as unknown as { room: unknown }).room = stub.room;
+    await engine.setCameraEnabled(true);
+    expect(stub.camera).toEqual([
+      {
+        enabled: true,
+        options: undefined,
+        publishOptions: { degradationPreference: "maintain-framerate" },
+      },
+    ]);
+  });
+
+  test("setScreenShareEnabled publishes the share with maintain-resolution degradation", async () => {
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine();
+    const stub = videoRoomStub();
+    (engine as unknown as { room: unknown }).room = stub.room;
+    await engine.setScreenShareEnabled(true, { audio: false });
+    expect(stub.screen).toEqual([
+      {
+        enabled: true,
+        options: { audio: false },
+        publishOptions: { degradationPreference: "maintain-resolution" },
+      },
+    ]);
+  });
+
+  test("enableRequestedCapture publishes the camera with maintain-framerate degradation", async () => {
+    const camera: Array<{ enabled: boolean; publishOptions: unknown }> = [];
+    const stub = {
+      async setMicrophoneEnabled() {},
+      async setCameraEnabled(enabled: boolean, _options?: unknown, publishOptions?: unknown) {
+        camera.push({ enabled, publishOptions });
+      },
+    };
+    await enableRequestedCapture(stub, { audio: false, video: true }, () => {});
+    expect(camera).toEqual([
+      { enabled: true, publishOptions: { degradationPreference: "maintain-framerate" } },
+    ]);
+  });
+});
+
+describe("call-engine — self connection quality", () => {
+  test("maps every LiveKit ConnectionQuality into the domain union", () => {
+    expect(mapLiveKitConnectionQuality(ConnectionQuality.Excellent)).toBe("excellent");
+    expect(mapLiveKitConnectionQuality(ConnectionQuality.Good)).toBe("good");
+    expect(mapLiveKitConnectionQuality(ConnectionQuality.Poor)).toBe("poor");
+    expect(mapLiveKitConnectionQuality(ConnectionQuality.Lost)).toBe("lost");
+    expect(mapLiveKitConnectionQuality(ConnectionQuality.Unknown)).toBe("unknown");
+  });
+
+  test("collapses ICE and signal reconnection into a single reconnecting phase", () => {
+    expect(mapLiveKitConnectionState(ConnectionState.Connected)).toBe("connected");
+    expect(mapLiveKitConnectionState(ConnectionState.Reconnecting)).toBe("reconnecting");
+    expect(mapLiveKitConnectionState(ConnectionState.SignalReconnecting)).toBe("reconnecting");
+    expect(mapLiveKitConnectionState(ConnectionState.Connecting)).toBe("disconnected");
+    expect(mapLiveKitConnectionState(ConnectionState.Disconnected)).toBe("disconnected");
+  });
+
+  test("only the LOCAL participant's quality drives the self indicator", async () => {
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine();
+    const events: string[] = [];
+    engine.on("connectionQualityChanged", (q) => events.push(q));
+    const handle = (
+      engine as unknown as {
+        handleConnectionQualityChanged: (q: ConnectionQuality, p: { isLocal: boolean }) => void;
+      }
+    ).handleConnectionQualityChanged;
+
+    handle(ConnectionQuality.Excellent, { isLocal: true });
+    handle(ConnectionQuality.Poor, { isLocal: false }); // remote — ignored
+    expect(events).toEqual(["excellent"]);
+  });
+
+  test("connection state changes emit the mapped transport phase", async () => {
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine();
+    const phases: string[] = [];
+    engine.on("connectionPhaseChanged", (p) => phases.push(p));
+    (
+      engine as unknown as {
+        handleConnectionStateChanged: (s: ConnectionState) => void;
+      }
+    ).handleConnectionStateChanged(ConnectionState.Reconnecting);
+    expect(phases).toEqual(["reconnecting"]);
   });
 });
