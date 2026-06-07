@@ -1,4 +1,6 @@
 import {
+  ConnectionQuality,
+  ConnectionState,
   Room,
   RoomEvent,
   ScreenSharePresets,
@@ -16,6 +18,7 @@ import {
   type VideoCaptureOptions,
 } from "livekit-client";
 import type { LiveKitJoin } from "./types";
+import type { CallConnectionPhase, CallConnectionQuality } from "./connection-quality";
 import { $devicePrefs } from "./device-prefs";
 import { validateLiveKitGrant } from "./dm-call-activity";
 import { activeMicAudioProcessing, type MicAudioProcessing } from "./mic-audio-processing";
@@ -169,6 +172,19 @@ export type CallEngineEvents = {
    * were actually honored. See `mic-audio-processing.ts`.
    */
   micAudioProcessingChanged: (state: MicAudioProcessing) => void;
+  /**
+   * Fires when LiveKit re-scores the LOCAL participant's connection
+   * quality (`excellent` → `lost`). Remote participants' quality is
+   * intentionally not surfaced — the indicator is self-only. Push-based:
+   * no polling, no `getStats`.
+   */
+  connectionQualityChanged: (quality: CallConnectionQuality) => void;
+  /**
+   * Fires when the room transport phase changes (connected ↔
+   * reconnecting ↔ disconnected). Drives the "Reconnecting…" label,
+   * which must override the last quality sample while the path is down.
+   */
+  connectionPhaseChanged: (phase: CallConnectionPhase) => void;
 };
 
 /**
@@ -196,6 +212,8 @@ export class CallEngine {
     audioPlaybackStatusChanged: new Set(),
     mediaDevicesError: new Set(),
     micAudioProcessingChanged: new Set(),
+    connectionQualityChanged: new Set(),
+    connectionPhaseChanged: new Set(),
   };
 
   /** LiveKit identity of the local participant, populated once
@@ -269,6 +287,8 @@ export class CallEngine {
     room.on(RoomEvent.ActiveDeviceChanged, this.handleActiveDeviceChanged);
     room.on(RoomEvent.TrackMuted, this.handleTrackMuteChanged);
     room.on(RoomEvent.TrackUnmuted, this.handleTrackMuteChanged);
+    room.on(RoomEvent.ConnectionQualityChanged, this.handleConnectionQualityChanged);
+    room.on(RoomEvent.ConnectionStateChanged, this.handleConnectionStateChanged);
     try {
       await room.connect(join.url, join.token);
     } catch (err) {
@@ -423,6 +443,8 @@ export class CallEngine {
     room.off(RoomEvent.ActiveDeviceChanged, this.handleActiveDeviceChanged);
     room.off(RoomEvent.TrackMuted, this.handleTrackMuteChanged);
     room.off(RoomEvent.TrackUnmuted, this.handleTrackMuteChanged);
+    room.off(RoomEvent.ConnectionQualityChanged, this.handleConnectionQualityChanged);
+    room.off(RoomEvent.ConnectionStateChanged, this.handleConnectionStateChanged);
     await room.disconnect();
   }
 
@@ -607,6 +629,24 @@ export class CallEngine {
     this.emit("micAudioProcessingChanged", this.computeMicAudioProcessing());
   }
 
+  /**
+   * LiveKit re-scores connection quality for every participant; the
+   * self-only indicator cares about the local one. Remote participants'
+   * scores are dropped here rather than filtered downstream so the engine
+   * surface stays self-scoped.
+   */
+  private handleConnectionQualityChanged = (
+    quality: ConnectionQuality,
+    participant: Participant,
+  ) => {
+    if (!participant.isLocal) return;
+    this.emit("connectionQualityChanged", mapLiveKitConnectionQuality(quality));
+  };
+
+  private handleConnectionStateChanged = (state: ConnectionState) => {
+    this.emit("connectionPhaseChanged", mapLiveKitConnectionState(state));
+  };
+
   private clearParticipantAudioVolumes(): void {
     this.participantAudioVolumes = {};
     this.subscribedAudioTracks.clear();
@@ -671,6 +711,48 @@ export function mapTrackSource(
   if (source === Track.Source.ScreenShare) return "screen_share";
   if (source === Track.Source.ScreenShareAudio) return "screen_share_audio";
   return fallbackKind === "audio" ? "microphone" : "camera";
+}
+
+/**
+ * Translate LiveKit's `ConnectionQuality` enum into the SDK-free domain
+ * union the UI consumes. The boundary lives here (the engine wraps the
+ * `Room`), so `connection-quality.ts` stays free of `livekit-client`.
+ */
+export function mapLiveKitConnectionQuality(
+  quality: ConnectionQuality,
+): CallConnectionQuality {
+  switch (quality) {
+    case ConnectionQuality.Excellent:
+      return "excellent";
+    case ConnectionQuality.Good:
+      return "good";
+    case ConnectionQuality.Poor:
+      return "poor";
+    case ConnectionQuality.Lost:
+      return "lost";
+    default:
+      return "unknown";
+  }
+}
+
+/**
+ * Distil LiveKit's `ConnectionState` into the transport phase the
+ * indicator cares about. Both ICE (`Reconnecting`) and signal
+ * (`SignalReconnecting`) recovery collapse to `reconnecting`; everything
+ * pre-`Connected` is `disconnected` (the chip hides).
+ */
+export function mapLiveKitConnectionState(
+  state: ConnectionState,
+): CallConnectionPhase {
+  switch (state) {
+    case ConnectionState.Connected:
+      return "connected";
+    case ConnectionState.Reconnecting:
+    case ConnectionState.SignalReconnecting:
+      return "reconnecting";
+    default:
+      return "disconnected";
+  }
 }
 
 function isUnsupportedScreenAudioError(error: unknown): boolean {

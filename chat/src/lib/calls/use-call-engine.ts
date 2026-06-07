@@ -12,6 +12,11 @@ import { clearAllMediaIssues, recordMediaIssue } from "./call-media-issues";
 import { syncScreenShareEnabled } from "./screen-share-state";
 import { setCallAudioPlaybackBlocked } from "./call-audio-playback";
 import { resetMicAudioProcessing, setMicAudioProcessing } from "./mic-audio-processing-state";
+import {
+  resetCallConnectionQuality,
+  setCallConnectionPhase,
+  setCallConnectionQuality,
+} from "./connection-quality";
 
 /**
  * Process-wide singleton: only one call engine should ever exist
@@ -82,6 +87,16 @@ export function useCallEngine(): {
       // mic — drives the read-only indicator in the call-settings dialog.
       setMicAudioProcessing(state);
     });
+    singletonEngine.on("connectionQualityChanged", (quality) => {
+      // LiveKit re-scored the local participant's connection — drives the
+      // ambient signal-bars chip on the call bar.
+      setCallConnectionQuality(quality);
+    });
+    singletonEngine.on("connectionPhaseChanged", (phase) => {
+      // Transport phase (connected ↔ reconnecting) — overrides the quality
+      // bars with a "Reconnecting…" label while the path is re-establishing.
+      setCallConnectionPhase(phase);
+    });
     singletonEngine.on("participantConnected", (identity) => {
       const roomJid = activeMucRoomJid();
       if (!roomJid) return;
@@ -103,6 +118,9 @@ export function useCallEngine(): {
       // The mic-processing readout belonged to the call that just
       // ended; reset so the next call's dialog starts from `no-mic`.
       resetMicAudioProcessing();
+      // Drop the connection-quality chip so a stale `poor`/`reconnecting`
+      // from the call that just ended can't bleed into the next call.
+      resetCallConnectionQuality();
       // The active call's room — if any — is no longer in our LK
       // view. Drop the LK snapshot so the room's UI reverts to the
       // Muji-derived (server-bridged) view, which the LK webhook
