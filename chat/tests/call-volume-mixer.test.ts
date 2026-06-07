@@ -1,10 +1,10 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
-import { createSSRApp, h } from "vue";
+import { computed, createSSRApp, effectScope, h } from "vue";
 import { renderToString } from "vue/server-renderer";
 import { parse, compileScript } from "vue/compiler-sfc";
 import ts from "typescript";
@@ -14,6 +14,9 @@ import {
   resetCallVolumeMixerLevels,
   type CallVolumeLevelStore,
 } from "../src/lib/calls/call-volume-mixer";
+import { useCallVolumeMixer } from "../src/lib/calls/use-call-volume-mixer";
+import { useCallEngine } from "../src/lib/calls/use-call-engine";
+import { $callState, clearCallState } from "../src/lib/calls/call-store";
 
 const fakeTrack = {} as never;
 const require = createRequire(import.meta.url);
@@ -337,19 +340,132 @@ describe("call volume mixer panel", () => {
   });
 });
 
-describe("call volume mixer controller wiring", () => {
-  test("clears remembered levels on call changes and resets absent engine targets", () => {
-    const source = readFileSync(
-      new URL("../src/lib/calls/use-call-volume-mixer.ts", import.meta.url),
-      "utf8",
-    );
+describe("call volume mixer controller apply path", () => {
+  const join = {
+    url: "wss://livekit.test",
+    room: "bob@waddle.test::c1",
+    identity: "me@waddle.test/browser",
+    token: "jwt",
+  };
 
-    expect(source).toContain("const activeCallSid = computed");
-    expect(source).toContain("watch(activeCallSid");
-    expect(source).toContain("participantAudioTargets.value = {}");
-    expect(source).toContain("for (const target of Object.values(participantAudioTargets.value))");
+  afterEach(() => {
+    // Idle resets the module-scoped remembered levels via the
+    // controller's own SID-change subscription, isolating each test.
+    clearCallState();
   });
 
+  test("setVolume applies the chosen gain to the engine and resetAll returns it to unity", () => {
+    const captured = captureEngineVolumeCalls();
+    const scope = effectScope();
+    try {
+      activateDmCall("c1");
+      let controller!: ReturnType<typeof useCallVolumeMixer>;
+      scope.run(() => {
+        controller = useCallVolumeMixer(computed(() => ""));
+      });
+
+      controller.setVolume(
+        mixerRow({
+          key: "bob@waddle.test/desktop:microphone",
+          participantIdentity: "bob@waddle.test/desktop",
+          source: "microphone",
+        }),
+        0.5,
+      );
+      expect(captured.calls).toContainEqual({
+        participantIdentity: "bob@waddle.test/desktop",
+        source: "microphone",
+        volume: 0.5,
+      });
+
+      captured.calls.length = 0;
+      controller.resetAll();
+      expect(captured.calls).toContainEqual({
+        participantIdentity: "bob@waddle.test/desktop",
+        source: "microphone",
+        volume: 1,
+      });
+    } finally {
+      scope.stop();
+      captured.restore();
+    }
+  });
+
+  test("remembered gain is shared across surfaces and wiped when the call SID changes", () => {
+    const captured = captureEngineVolumeCalls();
+    const splitScope = effectScope();
+    const expandedScope = effectScope();
+    const bob = mixerRow({
+      key: "bob@waddle.test/desktop:microphone",
+      participantIdentity: "bob@waddle.test/desktop",
+      source: "microphone",
+    });
+    try {
+      // A MUC call with no live participants projects no rows, so
+      // reset-all touches the engine only via the remembered targets —
+      // isolating the shared cross-surface state from row projection.
+      activateMucCall("c1");
+      let split!: ReturnType<typeof useCallVolumeMixer>;
+      let expanded!: ReturnType<typeof useCallVolumeMixer>;
+      splitScope.run(() => {
+        split = useCallVolumeMixer(computed(() => "room@muc.waddle.test"));
+      });
+      expandedScope.run(() => {
+        expanded = useCallVolumeMixer(computed(() => "room@muc.waddle.test"));
+      });
+
+      // A gain set from the split surface is remembered in shared state,
+      // so reset-all from the EXPANDED surface returns that same target
+      // to unity — one source of truth across both surfaces.
+      split.setVolume(bob, 0.5);
+      captured.calls.length = 0;
+      expanded.resetAll();
+      expect(captured.calls).toContainEqual({
+        participantIdentity: "bob@waddle.test/desktop",
+        source: "microphone",
+        volume: 1,
+      });
+
+      // Switching to a different call forgets the remembered target:
+      // reset-all from either surface now touches nothing.
+      split.setVolume(bob, 0.5);
+      activateMucCall("c2");
+      captured.calls.length = 0;
+      expanded.resetAll();
+      expect(captured.calls).toEqual([]);
+    } finally {
+      splitScope.stop();
+      expandedScope.stop();
+      captured.restore();
+    }
+  });
+
+  function activateDmCall(sid: string): void {
+    $callState.set({
+      phase: "active",
+      peer: "bob@waddle.test/desktop",
+      sid,
+      media: { audio: true, video: false },
+      join,
+      kind: "dm",
+    });
+  }
+
+  function activateMucCall(sid: string): void {
+    $callState.set({
+      phase: "active",
+      peer: "room@muc.waddle.test",
+      sid,
+      media: { audio: true, video: false },
+      join: { ...join, room: "room@muc.waddle.test" },
+      kind: "muc",
+      selfNick: "me",
+      selfFullJid: "me@waddle.test/browser",
+    });
+  }
+});
+
+describe("call volume mixer controller wiring", () => {
   test("shares one mixer controller across both call surfaces", () => {
     const split = readFileSync(
       new URL("../src/components/calls/CallSplitContainer.vue", import.meta.url),
@@ -499,6 +615,28 @@ async function loadVueComponentScript(path: string) {
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
   }
+}
+
+function captureEngineVolumeCalls() {
+  const { engine } = useCallEngine();
+  const calls: Array<{ participantIdentity: string; source: string; volume: number }> = [];
+  const target = engine as unknown as {
+    setParticipantAudioVolume: (input: {
+      participantIdentity: string;
+      source: string;
+      volume: number;
+    }) => void;
+  };
+  const original = target.setParticipantAudioVolume;
+  target.setParticipantAudioVolume = (input) => {
+    calls.push(input);
+  };
+  return {
+    calls,
+    restore() {
+      target.setParticipantAudioVolume = original;
+    },
+  };
 }
 
 function mixerRow(overrides: Partial<CallVolumeMixerRow>): CallVolumeMixerRow {

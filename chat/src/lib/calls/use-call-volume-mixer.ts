@@ -1,4 +1,5 @@
-import { computed, ref, watch, type ComputedRef, type Ref } from "vue";
+import { computed, type ComputedRef, type Ref } from "vue";
+import { atom } from "nanostores";
 import { useStore } from "@nanostores/vue";
 import { $callState } from "./call-store";
 import { $mucCallLiveParticipants } from "./muc-call-live-participants";
@@ -10,19 +11,41 @@ import {
   type CallVolumeMixerRow,
 } from "./call-volume-mixer";
 
+type CallVolumeMixerTarget = {
+  participantIdentity: string;
+  source: CallVolumeMixerRow["source"];
+};
+
 /**
  * Shared "Who you hear" mixer controller for the in-call surfaces
  * (split + expanded). Both surfaces reach the mixer from the control
- * bar's speaker button (#909), so the row projection, remembered
- * levels, and the LiveKit `setParticipantAudioVolume` apply path live
- * here once instead of being duplicated per surface.
+ * bar's speaker button (#909), so the row projection and the LiveKit
+ * `setParticipantAudioVolume` apply path live here once instead of
+ * being duplicated per surface.
  *
- * `remembered levels` are kept per LiveKit participant+source key so a
- * participant who mutes (dropping their audio track) keeps the volume
- * the user last set, ready to re-apply when they unmute. The remembered
- * state is wiped whenever the active call's SID changes so one call's
- * preferences never bleed into the next.
+ * The remembered levels are module-scoped, not per-component: split
+ * and expanded are two views of ONE call, so a gain set in one must
+ * read back identically in the other. Holding the state in shared
+ * nanostores keeps that single source of truth (and stays resettable
+ * in tests). Levels are keyed per LiveKit participant+source so a
+ * participant who mutes — dropping their audio track — keeps the
+ * volume the user last chose, ready to re-apply when they unmute.
  */
+const $rememberedLevels = atom<CallVolumeLevelStore>({});
+const $rememberedTargets = atom<Record<string, CallVolumeMixerTarget>>({});
+
+// Wipe remembered state whenever the active call's SID changes so one
+// call's preferences never bleed into the next. Subscribed once at
+// module load, independent of how many surfaces are mounted.
+let lastActiveSid: string | null = null;
+$callState.subscribe((state) => {
+  const sid = state.phase === "active" ? state.sid : null;
+  if (sid === lastActiveSid) return;
+  lastActiveSid = sid;
+  $rememberedLevels.set({});
+  $rememberedTargets.set({});
+});
+
 export interface CallVolumeMixerController {
   rows: ComputedRef<CallVolumeMixerRow[]>;
   setVolume: (row: CallVolumeMixerRow, level: number) => void;
@@ -34,13 +57,8 @@ export function useCallVolumeMixer(
 ): CallVolumeMixerController {
   const state = useStore($callState);
   const liveParticipants = useStore($mucCallLiveParticipants);
+  const rememberedLevels = useStore($rememberedLevels);
   const { remoteTracks, engine } = useCallEngine();
-
-  const participantAudioLevels = ref<CallVolumeLevelStore>({});
-  const participantAudioTargets = ref<Record<string, {
-    participantIdentity: string;
-    source: CallVolumeMixerRow["source"];
-  }>>({});
 
   const localIdentity = computed(() => engine.localIdentity);
 
@@ -61,26 +79,19 @@ export function useCallVolumeMixer(
       remoteParticipantIdentities: remoteParticipantIdentities.value,
       remoteTracks: remoteTracks.value,
       localIdentity: localIdentity.value,
-      levels: participantAudioLevels.value,
+      levels: rememberedLevels.value,
     }),
   );
 
-  const activeCallSid = computed(() =>
-    state.value.phase === "active" ? state.value.sid : null,
-  );
-
   function setVolume(row: CallVolumeMixerRow, level: number): void {
-    participantAudioLevels.value = {
-      ...participantAudioLevels.value,
-      [row.key]: level,
-    };
-    participantAudioTargets.value = {
-      ...participantAudioTargets.value,
+    $rememberedLevels.set({ ...$rememberedLevels.get(), [row.key]: level });
+    $rememberedTargets.set({
+      ...$rememberedTargets.get(),
       [row.key]: {
         participantIdentity: row.participantIdentity,
         source: row.source,
       },
-    };
+    });
     engine.setParticipantAudioVolume({
       participantIdentity: row.participantIdentity,
       source: row.source,
@@ -94,7 +105,7 @@ export function useCallVolumeMixer(
     // target without a live row (muted) or a live row without a
     // remembered target (default volume), and "Reset all" must land
     // every audible participant at unity gain.
-    for (const target of Object.values(participantAudioTargets.value)) {
+    for (const target of Object.values($rememberedTargets.get())) {
       engine.setParticipantAudioVolume({
         participantIdentity: target.participantIdentity,
         source: target.source,
@@ -108,13 +119,8 @@ export function useCallVolumeMixer(
         volume: 1,
       });
     }
-    participantAudioLevels.value = resetCallVolumeMixerLevels(participantAudioLevels.value);
+    $rememberedLevels.set(resetCallVolumeMixerLevels($rememberedLevels.get()));
   }
-
-  watch(activeCallSid, () => {
-    participantAudioLevels.value = {};
-    participantAudioTargets.value = {};
-  });
 
   return { rows, setVolume, resetAll };
 }
