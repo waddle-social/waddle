@@ -514,7 +514,7 @@ async fn muji_presence_reflects_to_senders_sibling_resource() {
                 "mobile must receive reflected muji presence on its own WebSocket: {active_frames:?}"
             )
         });
-    let element = parse_presence(&mobile_active);
+    let element = parse_presence(mobile_active);
     assert_eq!(
         element.name(),
         "presence",
