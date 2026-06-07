@@ -276,10 +276,10 @@ describe("call volume mixer panel", () => {
     globalThis.HTMLInputElement = TestInputElement as typeof HTMLInputElement;
     try {
       const setup = await loadCallVolumeMixerPanelSetup();
-      const emitted: Array<[string, CallVolumeMixerRow, number]> = [];
+      const emitted: Array<[string, CallVolumeMixerRow | undefined, number | undefined]> = [];
       const bindings = setup({ rows: [] }, {
         expose: () => undefined,
-        emit: (event: string, row: CallVolumeMixerRow, level: number) => {
+        emit: (event: string, row?: CallVolumeMixerRow, level?: number) => {
           emitted.push([event, row, level]);
         },
       });
@@ -297,7 +297,21 @@ describe("call volume mixer panel", () => {
       bindings.onInput(staleRowBelow, inputEvent("101"));
       bindings.onInput(staleRowAbove, inputEvent("98"));
       bindings.onInput(staleRowAbove, inputEvent("99"));
+      bindings.onResetAll();
+      bindings.onInput(staleRowBelow, inputEvent("99"));
 
+      expect(emitted.map(([event, , level]) => [event, level])).toEqual([
+        ["setVolume", 1],
+        ["setVolume", 0.99],
+        ["setVolume", 1.01],
+        ["setVolume", 1],
+        ["setVolume", 1.02],
+        ["setVolume", 1],
+        ["setVolume", 0.98],
+        ["setVolume", 1],
+        ["resetAll", undefined],
+        ["setVolume", 0.99],
+      ]);
       expect(emitted.map(([, , level]) => level)).toEqual([
         1,
         0.99,
@@ -307,6 +321,8 @@ describe("call volume mixer panel", () => {
         1,
         0.98,
         1,
+        undefined,
+        0.99,
       ]);
     } finally {
       globalThis.HTMLInputElement = originalHTMLInputElement;
@@ -382,9 +398,12 @@ async function loadCallVolumeMixerPanelSetup(): Promise<(
   props: { rows: readonly CallVolumeMixerRow[] },
   context: {
     expose: () => void;
-    emit: (event: string, row: CallVolumeMixerRow, level: number) => void;
+    emit: (event: string, row?: CallVolumeMixerRow, level?: number) => void;
   },
-) => { onInput: (row: CallVolumeMixerRow, event: Event) => void }> {
+) => {
+  onInput: (row: CallVolumeMixerRow, event: Event) => void;
+  onResetAll: () => void;
+}> {
   const component = await loadVueComponentScript("../src/components/calls/CallVolumeMixerPanel.vue");
   return component.setup;
 }

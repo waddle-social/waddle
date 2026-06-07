@@ -28,6 +28,11 @@ function onInput(row: CallVolumeMixerRow, event: Event): void {
   };
   emit("setVolume", row, nextGain);
 }
+
+function onResetAll(): void {
+  lastEmittedLevels.value = {};
+  emit("resetAll");
+}
 </script>
 
 <template>
@@ -85,7 +90,7 @@ function onInput(row: CallVolumeMixerRow, event: Event): void {
       <button
         type="button"
         class="chat-action-button chat-action-button--secondary"
-        @click="emit('resetAll')"
+        @click="onResetAll"
       >
         Reset all
       </button>
