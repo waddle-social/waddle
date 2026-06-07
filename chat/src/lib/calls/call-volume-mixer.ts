@@ -62,7 +62,7 @@ export function buildCallVolumeMixerRows(
     const voiceIdentity = liveAudioIdentities.get(callVolumeMixerKey(participantKey, "microphone"))
       ?? fallbackIdentity;
     const voiceKey = callVolumeMixerKey(participantKey, "microphone");
-    const voiceLevel = input.levels[voiceKey] ?? 1;
+    const voiceLevel = normalizeCallVolumeLevel(input.levels[voiceKey]);
     const voiceLabel = displayNameForIdentity(voiceIdentity);
     const voiceDisabled = !liveAudioSources.has(callVolumeMixerKey(participantKey, "microphone"));
     rows.push({
@@ -82,7 +82,7 @@ export function buildCallVolumeMixerRows(
     if (!liveAudioSources.has(screenSourceKey)) continue;
     const screenIdentity = liveAudioIdentities.get(screenSourceKey) ?? fallbackIdentity;
     const screenKey = screenSourceKey;
-    const screenLevel = input.levels[screenKey] ?? 1;
+    const screenLevel = normalizeCallVolumeLevel(input.levels[screenKey]);
     const screenLabel = `${voiceLabel}'s screen`;
     rows.push({
       key: screenKey,
@@ -105,6 +105,21 @@ export function resetCallVolumeMixerLevels(
   levels: CallVolumeLevelStore,
 ): CallVolumeLevelStore {
   return Object.fromEntries(Object.keys(levels).map((key) => [key, 1]));
+}
+
+export function callVolumePercentToGain(percent: number, currentGain = 1): number {
+  if (!Number.isFinite(percent)) return 1;
+  if (percent === 100) return 1;
+  if (percent === 99 && currentGain >= 0.98 && currentGain < 0.99) return 1;
+  if (percent === 101 && currentGain > 1.01 && currentGain <= 1.02) return 1;
+  return normalizeCallVolumeLevel(percent / 100);
+}
+
+function normalizeCallVolumeLevel(level: number | undefined): number {
+  if (level === undefined || !Number.isFinite(level)) return 1;
+  if (level < 0) return 0;
+  if (level > 2) return 2;
+  return level;
 }
 
 function displayNameForIdentity(identity: string): string {

@@ -73,7 +73,7 @@ export function resolveParticipantAudioVolume(
   store: ParticipantAudioVolumeStore,
   identity: ParticipantAudioVolumeIdentity,
 ): number {
-  return store[participantAudioVolumeKey(identity)] ?? 1;
+  return normalizeParticipantAudioVolume(store[participantAudioVolumeKey(identity)]);
 }
 
 export type CallEngineEvents = {
@@ -513,10 +513,10 @@ function isCallAudioTrackSource(source: CallTrackSource): source is CallAudioTra
   return source === "microphone" || source === "screen_share_audio";
 }
 
-function normalizeParticipantAudioVolume(volume: number): number {
-  if (!Number.isFinite(volume)) return 1;
+function normalizeParticipantAudioVolume(volume: number | undefined): number {
+  if (volume === undefined || !Number.isFinite(volume)) return 1;
   if (volume < 0) return 0;
-  if (volume > 1) return 1;
+  if (volume > 2) return 2;
   return volume;
 }
 

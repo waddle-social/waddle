@@ -1,8 +1,12 @@
 <script setup lang="ts">
+import { ref, watch } from "vue";
 import { Volume2, VolumeX } from "lucide-vue-next";
-import type { CallVolumeMixerRow } from "@/lib/calls/call-volume-mixer";
+import {
+  callVolumePercentToGain,
+  type CallVolumeMixerRow,
+} from "@/lib/calls/call-volume-mixer";
 
-defineProps<{
+const props = defineProps<{
   rows: readonly CallVolumeMixerRow[];
 }>();
 
@@ -11,10 +15,29 @@ const emit = defineEmits<{
   resetAll: [];
 }>();
 
+const lastEmittedLevels = ref<Record<string, number>>({});
+
+function syncLastEmittedLevels(rows: readonly CallVolumeMixerRow[]): void {
+  lastEmittedLevels.value = Object.fromEntries(rows.map((row) => [row.key, row.level]));
+}
+
+watch(() => props.rows, syncLastEmittedLevels);
+
 function onInput(row: CallVolumeMixerRow, event: Event): void {
   const target = event.target;
   if (!(target instanceof HTMLInputElement)) return;
-  emit("setVolume", row, Number(target.value) / 100);
+  const currentGain = lastEmittedLevels.value[row.key] ?? row.level;
+  const nextGain = callVolumePercentToGain(Number(target.value), currentGain);
+  lastEmittedLevels.value = {
+    ...lastEmittedLevels.value,
+    [row.key]: nextGain,
+  };
+  emit("setVolume", row, nextGain);
+}
+
+function onResetAll(): void {
+  lastEmittedLevels.value = {};
+  emit("resetAll");
 }
 </script>
 
@@ -51,7 +74,7 @@ function onInput(row: CallVolumeMixerRow, event: Event): void {
               class="call-volume-mixer__slider"
               type="range"
               min="0"
-              max="100"
+              max="200"
               step="1"
               :value="Math.round(row.level * 100)"
               :disabled="row.disabled"
@@ -59,7 +82,7 @@ function onInput(row: CallVolumeMixerRow, event: Event): void {
               :aria-valuetext="row.ariaValueText"
               @input="onInput(row, $event)"
             >
-            <span class="call-volume-mixer__tick" aria-hidden="true" />
+            <span class="call-volume-mixer__tick" aria-hidden="true" style="left:50%;" />
           </div>
           <span class="call-volume-mixer__percent">{{ Math.round(row.level * 100) }}%</span>
         </div>
@@ -73,7 +96,7 @@ function onInput(row: CallVolumeMixerRow, event: Event): void {
       <button
         type="button"
         class="chat-action-button chat-action-button--secondary"
-        @click="emit('resetAll')"
+        @click="onResetAll"
       >
         Reset all
       </button>
@@ -158,7 +181,6 @@ function onInput(row: CallVolumeMixerRow, event: Event): void {
 
 .call-volume-mixer__tick {
   position: absolute;
-  right: 0.3125rem;
   top: 50%;
   width: 1px;
   height: 0.875rem;
