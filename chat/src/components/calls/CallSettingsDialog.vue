@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onScopeDispose, ref, watch } from "vue";
 import { useStore } from "@nanostores/vue";
-import { Check, Mic, Speaker, Video, X } from "lucide-vue-next";
+import { Activity, Check, Mic, Speaker, Video, X } from "lucide-vue-next";
 import AppDialog from "@/components/ui/AppDialog.vue";
 import {
   $devicePrefs,
@@ -16,6 +16,12 @@ import { $micAudioProcessing } from "@/lib/calls/mic-audio-processing-state";
 import { audioProcessingRows } from "@/lib/calls/mic-audio-processing";
 import { useCallEngine } from "@/lib/calls/use-call-engine";
 import { reportCallError } from "@/lib/calls/call-store";
+import {
+  describeVideoStats,
+  summarizeVideoStats,
+  type CallStatRow,
+  type CallStatSample,
+} from "@/lib/calls/call-stats";
 
 /**
  * Settings dialog the call surface opens for mic/camera/output
@@ -73,7 +79,101 @@ async function refresh(): Promise<void> {
   devices.value = next;
 }
 
-const { engine } = useCallEngine();
+const { engine, remoteTracks, localTracks } = useCallEngine();
+
+/**
+ * Live call diagnostics. Polls `getRTCStatsReport()` for every published
+ * (send) and subscribed (recv) video track once per second — but ONLY
+ * while this dialog is open (started/stopped in the `open` watcher), so a
+ * normal call pays zero stats cost. `statSamples` carries the previous
+ * byte/timestamp pair per track so bitrate can be derived as a rate.
+ */
+const statRows = ref<CallStatRow[]>([]);
+const statSamples = new Map<string, CallStatSample>();
+let statsTimer: ReturnType<typeof setInterval> | null = null;
+
+const statDisplayRows = computed(() =>
+  statRows.value.map((row) => ({
+    key: row.key,
+    label: row.label,
+    sourceLabel: row.sourceLabel,
+    ...describeVideoStats(row),
+  })),
+);
+
+function participantShortLabel(identity: string): string {
+  const at = identity.indexOf("@");
+  const local = at > 0 ? identity.slice(0, at) : identity;
+  return local || identity;
+}
+
+function sourceLabel(source: string): string {
+  return source === "screen_share" ? "Screen" : "Camera";
+}
+
+async function sampleStats(): Promise<void> {
+  const local = localTracks.value.filter((track) => track.kind === "video");
+  const remote = remoteTracks.value.filter((track) => track.kind === "video");
+  const rows: CallStatRow[] = [];
+  await Promise.all([
+    ...local.map(async (track) => {
+      const key = `local:${track.source}:${track.publicationSid}`;
+      const report = await track.track.getRTCStatsReport();
+      if (!report) return;
+      const { summary, sample } = summarizeVideoStats(report, "send", statSamples.get(key));
+      if (sample) statSamples.set(key, sample);
+      rows.push({
+        ...summary,
+        key,
+        label: "You",
+        sourceLabel: sourceLabel(track.source),
+        direction: "send",
+      });
+    }),
+    ...remote.map(async (track) => {
+      const key = `remote:${track.participantIdentity}:${track.source}:${track.publicationSid}`;
+      const report = await track.track.getRTCStatsReport();
+      if (!report) return;
+      const { summary, sample } = summarizeVideoStats(report, "recv", statSamples.get(key));
+      if (sample) statSamples.set(key, sample);
+      rows.push({
+        ...summary,
+        key,
+        label: participantShortLabel(track.participantIdentity),
+        sourceLabel: sourceLabel(track.source),
+        direction: "recv",
+      });
+    }),
+  ]);
+  // Stable order: self first, then remotes alphabetically, so rows don't
+  // jump between polls.
+  rows.sort((a, b) =>
+    a.direction === b.direction
+      ? a.label.localeCompare(b.label)
+      : a.direction === "send"
+        ? -1
+        : 1,
+  );
+  statRows.value = rows;
+}
+
+function startStatsPolling(): void {
+  stopStatsPolling();
+  void sampleStats();
+  statsTimer = setInterval(() => void sampleStats(), 1000);
+}
+
+function stopStatsPolling(): void {
+  if (statsTimer) {
+    clearInterval(statsTimer);
+    statsTimer = null;
+  }
+  statSamples.clear();
+  statRows.value = [];
+}
+
+// A dialog unmounted while still open must not leak its interval.
+onScopeDispose(stopStatsPolling);
 
 async function selectMic(id: string | null): Promise<void> {
   setMicDevice(id);
@@ -134,9 +234,13 @@ watch(open, async (isOpen) => {
     // gets dropped on resolve, and detach the devicechange listener.
     enumerateEpoch += 1;
     teardownDeviceChange();
+    stopStatsPolling();
     return;
   }
   await refresh();
+  // Begin the 1s diagnostics poll now that the dialog is visible; it
+  // tears down again on close / unmount.
+  startStatsPolling();
   // Mount the devicechange listener after the first refresh so the
   // initial enumeration isn't fighting a hot-plug event arriving in
   // the same tick. Debounced 200ms because hot-plugs commonly fire
@@ -345,6 +449,39 @@ function close(): void {
           </li>
         </ul>
       </section>
+
+      <!-- Diagnostics: live per-track WebRTC stats. Polled only while
+           this dialog is open (see the `open` watcher). -->
+      <section class="chat-section-card">
+        <div class="flex items-center gap-2 mb-2">
+          <Activity class="w-4 h-4 text-muted-foreground" />
+          <h3 class="type-control">Diagnostics</h3>
+        </div>
+        <p
+          v-if="statDisplayRows.length === 0"
+          class="type-caption text-muted-foreground"
+        >
+          No active video. Start your camera or screen share to see live
+          resolution, bitrate, and packet-loss stats.
+        </p>
+        <ul v-else class="call-stats">
+          <li v-for="row in statDisplayRows" :key="row.key" class="call-stats__row">
+            <div class="call-stats__head">
+              <span class="type-caption call-stats__peer">
+                {{ row.label }} · {{ row.sourceLabel }}
+              </span>
+              <span class="type-caption text-muted-foreground call-stats__res">
+                {{ row.resolution }} · {{ row.fps }}
+              </span>
+            </div>
+            <div class="call-stats__metrics type-caption text-muted-foreground">
+              <span>{{ row.bitrate }}</span>
+              <span>loss {{ row.loss }}</span>
+              <span>{{ row.rtt }}</span>
+            </div>
+          </li>
+        </ul>
+      </section>
     </div>
 
     <footer class="chat-dialog-footer">
@@ -436,5 +573,39 @@ function close(): void {
 
 .call-processing__detail {
   line-height: 1.3;
+}
+
+.call-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.call-stats__row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+}
+
+.call-stats__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-sm);
+}
+
+.call-stats__peer {
+  color: var(--foreground);
+}
+
+.call-stats__res {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.call-stats__metrics {
+  display: flex;
+  gap: var(--space-sm);
+  font-variant-numeric: tabular-nums;
 }
 </style>
