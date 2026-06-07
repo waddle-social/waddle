@@ -591,7 +591,10 @@ describe("XEP-0198 delivery status (DM)", () => {
     await nextTick();
     await dm.toggleReaction(messageId, "👍");
 
-    expect(sendDmReaction).toHaveBeenCalledWith("bob@example.com", originId, ["👍"]);
+    expect(sendDmReaction).toHaveBeenCalledTimes(1);
+    expect(sendDmReaction.mock.calls[0]?.[0]).toBe("bob@example.com");
+    expect(sendDmReaction.mock.calls[0]?.[1]).toBe(originId);
+    expect(sendDmReaction.mock.calls[0]?.[2]).toEqual(["👍"]);
     const original = dm.messages.value.find((m) => m.body === "react to origin-id");
     expect(original?.reactions).toEqual({ "👍": ["alice"] });
   });

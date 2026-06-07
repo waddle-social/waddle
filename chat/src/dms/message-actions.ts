@@ -23,6 +23,15 @@ type UseDmMessageActionsDeps = {
   applyReaction: (messageId: string, nick: string, emojis: string[]) => void;
 };
 
+function threadRefFromMessage(
+  message: TimelineMessage | null | undefined,
+): { id: string; parent?: string } | undefined {
+  if (!message?.threadId) return undefined;
+  return message.parentThreadId
+    ? { id: message.threadId, parent: message.parentThreadId }
+    : { id: message.threadId };
+}
+
 export function useDmMessageActions(deps: UseDmMessageActionsDeps) {
   const {
     session,
@@ -59,7 +68,7 @@ export function useDmMessageActions(deps: UseDmMessageActionsDeps) {
     applyReaction(targetId, myNick, nextEmojis);
 
     try {
-      await xmppClient.value.sendDmReaction(activePeerJid.value, targetId, nextEmojis);
+      await xmppClient.value.sendDmReaction(activePeerJid.value, targetId, nextEmojis, threadRefFromMessage(msg));
     } catch (e) {
       applyReaction(targetId, myNick, previousEmojis);
       actionError.value = normalizeError(e);
@@ -80,7 +89,7 @@ export function useDmMessageActions(deps: UseDmMessageActionsDeps) {
     const targetId = target?.replyableId ?? target?.id ?? messageId;
     clearActionError();
     try {
-      await xmppClient.value.sendDmRetraction(activePeerJid.value, targetId);
+      await xmppClient.value.sendDmRetraction(activePeerJid.value, targetId, threadRefFromMessage(target));
     } catch (e) {
       actionError.value = normalizeError(e);
     }

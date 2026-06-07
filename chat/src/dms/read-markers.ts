@@ -17,6 +17,15 @@ type UseDmReadMarkersDeps = {
   messages: Ref<TimelineMessage[]>;
 };
 
+function threadRefFromMessage(
+  message: TimelineMessage | null | undefined,
+): { id: string; parent?: string } | undefined {
+  if (!message?.threadId) return undefined;
+  return message.parentThreadId
+    ? { id: message.threadId, parent: message.parentThreadId }
+    : { id: message.threadId };
+}
+
 export function useDmReadMarkers(deps: UseDmReadMarkersDeps) {
   const { xmppClient, activePeerJid, messages } = deps;
 
@@ -34,7 +43,7 @@ export function useDmReadMarkers(deps: UseDmReadMarkersDeps) {
     const peerJid = activePeerJid.value;
     if (sendDisplayedMarkers.value && target?.displayedMarkerRequested) {
       void client
-        .sendDmDisplayed(peerJid, targetId)
+        .sendDmDisplayed(peerJid, targetId, threadRefFromMessage(target))
         .catch(() => undefined);
     }
     // XEP-0490 §3 publish for the DM. The chat id is the peer bare

@@ -63,23 +63,19 @@ export function useDmChatStates(deps: UseDmChatStatesDeps) {
     onScopeDispose(() => clearTypingState());
   }
 
-  // DMs have no thread surface — the optional `thread` arg keeps a uniform
-  // signature with the channel-side notifyComposing so the shell controller
-  // can call `activeTarget.value.notifyComposing(thread)` against either
-  // target without branching on sidebar mode.
-  function notifyComposing(_thread?: { id: string; parent?: string }) {
+  function notifyComposing(thread?: { id: string; parent?: string }) {
     const client = xmppClient.value;
     const peerJid = activePeerJid.value;
     if (!client || !peerJid) return;
     if (lastChatState !== "composing") {
       lastChatState = "composing";
-      void client.sendDmChatState(peerJid, "composing").catch(() => undefined);
+      void client.sendDmChatState(peerJid, "composing", thread).catch(() => undefined);
     }
     if (composingTimeout) clearTimeout(composingTimeout);
     composingTimeout = setTimeout(() => {
       if (xmppClient.value !== client || activePeerJid.value !== peerJid) return;
       lastChatState = "paused";
-      void client.sendDmChatState(peerJid, "paused").catch(() => undefined);
+      void client.sendDmChatState(peerJid, "paused", thread).catch(() => undefined);
     }, COMPOSING_PAUSE_MS);
   }
 

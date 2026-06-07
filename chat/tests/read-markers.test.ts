@@ -212,6 +212,29 @@ describe("useDmReadMarkers", () => {
     expect(sendDmDisplayed.mock.calls[0]![1]).toBe("dm1");
   });
 
+  test("markDisplayed echoes XEP-0201 thread metadata for threaded DMs", () => {
+    const sendDmDisplayed = mock(async () => undefined);
+    const messages = ref<TimelineMessage[]>([
+      {
+        id: "dm1",
+        body: "",
+        nick: "",
+        timestamp: 0,
+        threadId: "dm-child-thread",
+        parentThreadId: "dm-root-thread",
+        displayedMarkerRequested: true,
+      } as TimelineMessage,
+    ]);
+    const r = useDmReadMarkers({
+      xmppClient: ref<BrowserXmppClient | null>(makeDmClient(sendDmDisplayed)),
+      activePeerJid: ref("bob@example.com"),
+      messages,
+    });
+    r.markDisplayed("dm1");
+    expect(sendDmDisplayed).toHaveBeenCalledTimes(1);
+    expect(sendDmDisplayed.mock.calls[0]![2]).toEqual({ id: "dm-child-thread", parent: "dm-root-thread" });
+  });
+
   test("markDisplayed does not send opportunistic 1:1 XEP-0333 markers", () => {
     const sendDmDisplayed = mock(async () => undefined);
     const publishMdsDisplayed = mock(async () => undefined);

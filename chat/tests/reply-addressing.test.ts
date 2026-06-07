@@ -300,6 +300,65 @@ describe("reply addressing", () => {
     expect(messaging.messages.value.at(-1)?.replyTo).toBeUndefined();
     expect(messaging.messages.value.at(-1)?.threadId).toBeUndefined();
   });
+
+  test("DM thread sends serialize the active XEP-0201 thread id", async () => {
+    const sendDirectMessage = mock(async () => ({ id: "reply-1", state: "sending" as const }));
+    const sendDmChatState = mock(async () => undefined);
+    const actionError = ref("");
+    const messaging = useDirectMessages(
+      ref(session()),
+      ref({ sendDirectMessage, sendDmChatState } as never),
+      ref("bob@example.com"),
+      String,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+    );
+
+    await messaging.sendMessage("thread reply", [], [], undefined, undefined, undefined, {
+      threadId: "dm-root-1",
+    });
+
+    expect(sendDirectMessage).toHaveBeenCalledWith(
+      "bob@example.com",
+      "thread reply",
+      expect.objectContaining({ threadId: "dm-root-1" }),
+    );
+    expect(messaging.messages.value.at(-1)?.threadId).toBe("dm-root-1");
+  });
+
+  test("DM nested thread sends serialize the XEP-0201 parent thread id", async () => {
+    const sendDirectMessage = mock(async () => ({ id: "nested-reply-1", state: "sending" as const }));
+    const sendDmChatState = mock(async () => undefined);
+    const actionError = ref("");
+    const messaging = useDirectMessages(
+      ref(session()),
+      ref({ sendDirectMessage, sendDmChatState } as never),
+      ref("bob@example.com"),
+      String,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+    );
+
+    await messaging.sendMessage("nested thread reply", [], [], undefined, undefined, undefined, {
+      threadId: "dm-child-thread",
+      parentThreadId: "dm-root-thread",
+    });
+
+    expect(sendDirectMessage).toHaveBeenCalledWith(
+      "bob@example.com",
+      "nested thread reply",
+      expect.objectContaining({
+        threadId: "dm-child-thread",
+        parentThreadId: "dm-root-thread",
+      }),
+    );
+    expect(messaging.messages.value.at(-1)?.threadId).toBe("dm-child-thread");
+    expect(messaging.messages.value.at(-1)?.parentThreadId).toBe("dm-root-thread");
+  });
 });
 
 describe("room stanza-id targeting", () => {

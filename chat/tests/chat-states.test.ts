@@ -132,6 +132,17 @@ describe("useDmChatStates", () => {
     expect(sendDmChatState.mock.calls[0]![1]).toBe("composing");
   });
 
+  test("notifyComposing echoes XEP-0201 thread metadata for threaded DMs", () => {
+    const sendDmChatState = mock(async () => undefined);
+    const states = withScope(() => useDmChatStates({
+      xmppClient: ref<BrowserXmppClient | null>(makeDmClient(sendDmChatState)),
+      activePeerJid: ref("bob@example.com"),
+    }));
+    states.notifyComposing({ id: "dm-child-thread", parent: "dm-root-thread" });
+    expect(sendDmChatState).toHaveBeenCalledTimes(1);
+    expect(sendDmChatState.mock.calls[0]![2]).toEqual({ id: "dm-child-thread", parent: "dm-root-thread" });
+  });
+
   test("addTypingUser + clearTypingState surfaces and clears typingUsers", () => {
     const states = withScope(() => useDmChatStates({
       xmppClient: ref<BrowserXmppClient | null>(makeDmClient()),

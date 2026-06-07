@@ -223,6 +223,29 @@ describe("useChatSend.editMessage", () => {
     expect(call[2]).toBe("original-server-id");
   });
 
+  test("DM corrections echo the target message's XEP-0201 thread", async () => {
+    const sendDmCorrection = mock(async () => undefined);
+    const client = makeClient({ sendDmCorrection } as Partial<BrowserXmppClient>);
+    const h = harness({ client });
+    h.messages.value = [
+      {
+        id: "dm-msg-1",
+        correctionTargetId: "original-server-id",
+        threadId: "dm-child-thread",
+        parentThreadId: "dm-root-thread",
+        body: "old text",
+        nick: "alice",
+        timestamp: 0,
+        isSelf: true,
+      } as TimelineMessage,
+    ];
+
+    await h.send.editMessage("dm-msg-1", "new text");
+
+    const call = (sendDmCorrection as unknown as ReturnType<typeof mock>).mock.calls[0]!;
+    expect(call[6]).toEqual({ id: "dm-child-thread", parent: "dm-root-thread" });
+  });
+
   test("passes a fresh composer preview token on corrections", async () => {
     const sendDmCorrection = mock(async () => undefined);
     const client = makeClient({ sendDmCorrection } as Partial<BrowserXmppClient>);

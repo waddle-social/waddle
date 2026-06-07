@@ -145,4 +145,34 @@ describe("useMessageThreads", () => {
     expect(entry!.count).toBe(1);
     expect(rootOf(messages.value[1])?.id).toBe("msg-1");
   });
+
+  test("DM timeline messages produce thread entries from XEP-0201 ids", () => {
+    const messages = ref<TimelineMessage[]>([
+      makeMessage({
+        id: "dm-root-1",
+        author: "Bob",
+        authorJid: "bob@example.com/phone",
+        createdAt: "2026-01-01T00:00:00Z",
+        body: "want to split this out?",
+      }),
+      makeMessage({
+        id: "dm-reply-1",
+        author: "alice",
+        authorJid: "alice@example.com/desktop",
+        threadId: "dm-root-1",
+        replyTo: { id: "dm-root-1", author: "Bob", preview: "want to split this out?" },
+        createdAt: "2026-01-01T00:01:00Z",
+        body: "yes",
+        isSelf: true,
+      }),
+    ]);
+
+    const { index, resolveEntry } = useMessageThreads(messages);
+    const entry = index.value.get("dm-root-1");
+
+    expect(entry).toBeTruthy();
+    expect(resolveEntry("dm-root-1")?.root?.authorJid).toBe("bob@example.com/phone");
+    expect(entry!.directChildren.map((message) => message.id)).toEqual(["dm-reply-1"]);
+    expect(entry!.count).toBe(1);
+  });
 });
