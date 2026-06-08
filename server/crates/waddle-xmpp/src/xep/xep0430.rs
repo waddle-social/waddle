@@ -382,6 +382,12 @@ pub fn parse_inbox_entry_with_metadata(
         thread_title,
         reply_count,
         author,
+        // Call-thread anchor/ended metadata is not yet projected onto the
+        // wire; later tasks populate these from the stanza.
+        call_thread_kind: None,
+        call_thread_media: None,
+        call_ended_at: None,
+        call_duration: None,
     })
 }
 

@@ -6,19 +6,20 @@
 use chrono::{DateTime, Utc};
 use jid::BareJid;
 use minidom::Element;
+use serde::{Deserialize, Serialize};
 use xmpp_parsers::jingle::SessionId;
 use xmpp_parsers::message::Message;
 
 pub const NS_WADDLE_CALL_THREAD: &str = "urn:waddle:call-thread:0";
 pub const NS_FASTEN: &str = "urn:xmpp:fasten:0";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CallThreadKind {
     Dm,
     Muc,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallThreadMedia {
     pub audio: bool,
     pub video: bool,
@@ -49,7 +50,7 @@ pub struct CallThreadAnchor {
     pub started: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallThreadDuration(String);
 
 impl CallThreadDuration {
