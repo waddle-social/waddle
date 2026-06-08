@@ -321,6 +321,28 @@ impl InboxView {
         v
     }
 
+    /// Mark the call anchored to `(room, thread_id)` as ended on this view.
+    /// Returns `true` when a matching thread entry was updated. The
+    /// call-end summary is room-wide; callers fan this across every user's
+    /// view of the thread.
+    pub fn mark_call_thread_ended(
+        &mut self,
+        room: &BareJid,
+        thread_id: &str,
+        ended: DateTime<Utc>,
+        duration: CallThreadDuration,
+    ) -> bool {
+        let key = InboxKey::thread(room.clone(), thread_id);
+        match self.entries.get_mut(&key) {
+            Some(entry) => {
+                entry.call_ended_at = Some(ended);
+                entry.call_duration = Some(duration);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Total unread across channel-level conversations (excludes thread entries).
     pub fn total_unread(&self) -> u64 {
         self.entries

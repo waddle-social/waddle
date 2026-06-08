@@ -64,6 +64,86 @@ async fn sqlx_inbox_storage_round_trips_entries() {
 }
 
 #[tokio::test]
+async fn upsert_persists_call_thread_metadata_and_mark_ended_updates_all_users() {
+    use waddle_xmpp::xep::{CallThreadDuration, CallThreadKind, CallThreadMedia};
+    let storage = DatabaseInboxStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("storage");
+    let room: BareJid = "general@conference.example.com".parse().expect("room jid");
+    let alice: BareJid = "alice@example.com".parse().expect("alice jid");
+    let bob: BareJid = "bob@example.com".parse().expect("bob jid");
+    let anchor = || {
+        InboxEntry::new(
+            room.clone(),
+            ConversationKind::MucRoom,
+            "anchor-stanza",
+            1_700_000_000,
+        )
+        .with_thread("call-thread-uuid")
+        .with_call_thread(
+            CallThreadKind::Muc,
+            CallThreadMedia {
+                audio: true,
+                video: false,
+            },
+        )
+    };
+
+    storage.upsert(&alice, anchor(), true).await.expect("alice");
+    storage.upsert(&bob, anchor(), true).await.expect("bob");
+
+    let entry = storage
+        .list_all_threads(&alice)
+        .await
+        .expect("list_all_threads")
+        .into_iter()
+        .find(|e| e.thread_id.as_deref() == Some("call-thread-uuid"))
+        .expect("anchor thread");
+    assert_eq!(entry.call_thread_kind, Some(CallThreadKind::Muc));
+    assert_eq!(
+        entry.call_thread_media,
+        Some(CallThreadMedia {
+            audio: true,
+            video: false,
+        })
+    );
+    assert!(entry.call_ended_at.is_none());
+
+    let ended = chrono::DateTime::parse_from_rfc3339("2026-06-07T14:35:00Z")
+        .expect("ended")
+        .with_timezone(&chrono::Utc);
+    storage
+        .mark_call_thread_ended(
+            &room,
+            "call-thread-uuid",
+            ended,
+            &CallThreadDuration::parse("PT5M").expect("duration"),
+        )
+        .await
+        .expect("mark ended");
+
+    for who in [&alice, &bob] {
+        let e = storage
+            .list_all_threads(who)
+            .await
+            .expect("list_all_threads")
+            .into_iter()
+            .find(|e| e.thread_id.as_deref() == Some("call-thread-uuid"))
+            .expect("anchor thread");
+        assert_eq!(e.call_ended_at, Some(ended), "ended marked for {who}");
+        assert_eq!(
+            e.call_duration,
+            Some(CallThreadDuration::parse("PT5M").expect("duration"))
+        );
+        assert_eq!(
+            e.call_thread_kind,
+            Some(CallThreadKind::Muc),
+            "anchor kind survived ended UPDATE for {who}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn sqlx_inbox_storage_mark_read_returns_none_for_missing_row() {
     let storage = DatabaseInboxStorage::open(Some("sqlite::memory:"))
         .await
@@ -474,5 +554,110 @@ async fn migration_adds_sender_can_broadcast_channel_mention_to_legacy_recovery_
     );
 
     // Cleanup
+    std::fs::remove_file(&path).ok();
+}
+
+/// Issue #919 migration regression: an existing `inbox_entries` table
+/// created BEFORE the four `call_*` columns landed must be migrated
+/// forward. Without the targeted ALTERs, every `list*` SELECT errors
+/// with "no such column". Simulates the pre-#919 shape, re-opens to
+/// trigger the migration, then asserts a call-anchor upsert round-trips
+/// through the migrated columns.
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_adds_call_thread_columns_to_legacy_inbox_table() {
+    use waddle_xmpp::xep::{CallThreadKind, CallThreadMedia};
+    let artifacts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-artifacts");
+    std::fs::create_dir_all(&artifacts).expect("artifacts dir");
+    let path = artifacts.join(format!("inbox-call-migration-{}.db", uuid::Uuid::new_v4()));
+    let url = format!("sqlite://{}", path.display());
+
+    // Build a DB whose inbox table predates the call-thread columns:
+    // open fresh, drop, recreate without the four `call_*` columns.
+    {
+        let storage = DatabaseInboxStorage::open(Some(&url))
+            .await
+            .expect("open fresh storage");
+        storage
+            .execute("DROP TABLE inbox_entries", ())
+            .await
+            .expect("drop fresh inbox table");
+        storage
+            .execute(
+                r#"
+                CREATE TABLE inbox_entries (
+                    user_jid TEXT NOT NULL,
+                    partner_jid TEXT NOT NULL,
+                    thread_id TEXT NOT NULL DEFAULT '',
+                    kind TEXT NOT NULL,
+                    last_stanza_id TEXT NOT NULL,
+                    last_updated INTEGER NOT NULL,
+                    unread INTEGER NOT NULL DEFAULT 0,
+                    preview TEXT,
+                    thread_title TEXT,
+                    reply_count INTEGER NOT NULL DEFAULT 0,
+                    author TEXT,
+                    PRIMARY KEY (user_jid, partner_jid, thread_id)
+                )
+                "#,
+                (),
+            )
+            .await
+            .expect("create legacy inbox table");
+    }
+
+    // Re-open. The init path detects the missing columns and runs the
+    // ALTERs; a call-anchor upsert then round-trips through them (it
+    // would fail with "no such column" if the migration didn't run).
+    let storage = DatabaseInboxStorage::open(Some(&url))
+        .await
+        .expect("re-open storage triggers migration");
+
+    for column in [
+        "call_thread_kind",
+        "call_thread_media",
+        "call_ended_at",
+        "call_duration",
+    ] {
+        let mut cols = storage
+            .query("PRAGMA table_info(inbox_entries)", ())
+            .await
+            .expect("PRAGMA table_info");
+        let mut present = false;
+        while let Some(row) = cols.next().await.expect("advance pragma row") {
+            let name: String = row.get(1).expect("col name");
+            if name == column {
+                present = true;
+                break;
+            }
+        }
+        assert!(
+            present,
+            "migration must add `{column}` to legacy inbox_entries"
+        );
+    }
+
+    let user = jid("me@example.com");
+    let room = jid("room@muc.example.com");
+    storage
+        .upsert(
+            &user,
+            InboxEntry::new(room.clone(), ConversationKind::MucRoom, "anchor", 100)
+                .with_thread("t1")
+                .with_call_thread(CallThreadKind::Muc, CallThreadMedia::audio_video()),
+            true,
+        )
+        .await
+        .expect("upsert after migration must succeed");
+    let threads = storage
+        .list_threads(&user, &room)
+        .await
+        .expect("list_threads after migration must succeed");
+    assert_eq!(threads.len(), 1);
+    assert_eq!(threads[0].call_thread_kind, Some(CallThreadKind::Muc));
+    assert_eq!(
+        threads[0].call_thread_media,
+        Some(CallThreadMedia::audio_video())
+    );
+
     std::fs::remove_file(&path).ok();
 }
