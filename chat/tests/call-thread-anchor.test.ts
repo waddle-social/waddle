@@ -1,6 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { isFeedTimelineMessage, mapLiveRoomMessageToTimeline } from "../src/channels/timeline";
 import { callThreadAnchorLabel, callThreadAnchorThreadId, readCallAnchorCardState } from "../src/lib/call-thread-anchor";
+import { $callState } from "../src/lib/calls/call-store";
 import { $mucCallMedia, $mucCallParticipants, clearMucCallParticipants } from "../src/lib/calls/muc-call-presence";
 import type { WaddleSession } from "../src/lib/server-auth";
 import { roomMessageFromArchived } from "../src/lib/xmpp/wasm-message-codecs";
@@ -40,6 +41,12 @@ function callAnchor(overrides: Partial<LiveRoomMessage> = {}): LiveRoomMessage {
 }
 
 describe("call-thread anchor timeline mapping", () => {
+  afterEach(() => {
+    $callState.set({ phase: "idle" });
+    clearMucCallParticipants();
+    $mucCallMedia.set({});
+  });
+
   test("maps inbound channel call-thread marker onto the unified timeline message", () => {
     const timelineMessage = mapLiveRoomMessageToTimeline(session, callAnchor());
 
@@ -87,6 +94,7 @@ describe("call-thread anchor timeline mapping", () => {
       threadId: "call-thread-uuid",
       title: "Live video call",
       actionLabel: "Join",
+      actionDisabled: false,
       ariaLabel: "Join live video call, 2 people: alice, bob",
     });
 
@@ -98,6 +106,37 @@ describe("call-thread anchor timeline mapping", () => {
       participantLabels: [],
       title: "Call ended",
       actionLabel: null,
+      actionDisabled: false,
+    });
+  });
+
+  test("uses the banner's busy semantics for live anchor join actions", () => {
+    const timelineMessage = mapLiveRoomMessageToTimeline(session, callAnchor({
+      roomJid: "general@conference.example.com",
+    }));
+    $mucCallParticipants.set({
+      "general@conference.example.com": ["alice", "bob"],
+    });
+    $callState.set({
+      phase: "active",
+      kind: "muc",
+      peer: "other@conference.example.com",
+      sid: "other-call",
+      media: { audio: true, video: false },
+      join: {
+        url: "wss://livekit.test",
+        room: "other",
+        identity: "alice@example.com/web",
+        token: "tok",
+      },
+      selfNick: "alice",
+    });
+
+    expect(readCallAnchorCardState(timelineMessage, "general@conference.example.com")).toMatchObject({
+      status: "live",
+      actionLabel: "In another call",
+      actionDisabled: true,
+      ariaLabel: "Live call, 2 people: alice, bob; already in another call",
     });
   });
 

@@ -23,9 +23,10 @@ const participantSummary = computed(() => {
 const messageCountLabel = computed(() =>
   `${props.state.messageCount} ${props.state.messageCount === 1 ? "message" : "messages"} in call chat`
 );
+const showAction = computed(() => props.state.actionLabel !== null);
 
 function joinCall() {
-  if (!isLive.value) return;
+  if (!isLive.value || props.state.actionDisabled) return;
   emit("join");
 }
 
@@ -63,10 +64,12 @@ function openThread() {
         <p class="type-caption truncate text-muted-foreground">{{ participantSummary }}</p>
       </div>
       <button
-        v-if="isLive"
+        v-if="showAction"
         type="button"
         class="inline-flex h-8 flex-shrink-0 items-center gap-1.5 rounded-md bg-primary px-3 type-control text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        :class="{ 'cursor-not-allowed opacity-60': state.actionDisabled }"
         :aria-label="state.ariaLabel"
+        :disabled="state.actionDisabled"
         @click.stop="joinCall"
       >
         <component :is="MediaIcon" class="h-3.5 w-3.5" aria-hidden="true" />

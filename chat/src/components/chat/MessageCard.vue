@@ -173,6 +173,7 @@ const props = defineProps<{
   linkPreviewScope?: string | null;
   callRoomJid?: string | null;
   callChannelId?: string | null;
+  hideCallAnchorCard?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -919,7 +920,7 @@ onBeforeUnmount(() => {
   </template>
 
   <div
-    v-else-if="message.callThread"
+    v-else-if="message.callThread && !hideCallAnchorCard"
     :data-message-id="message.id"
     :data-message-created-at="message.createdAt"
     class="chat-message-grid relative animate-message-in"

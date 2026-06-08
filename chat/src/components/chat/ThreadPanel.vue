@@ -791,6 +791,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
             :link-preview-scope="props.linkPreviewScope"
             :call-room-jid="props.roomJid ?? null"
             :call-channel-id="props.channelId ?? null"
+            :hide-call-anchor-card="!!threadCallAnchorState"
             @edit="(id, body, m, r, lp) => emit('editMessage', id, body, m, r, lp)"
             @retract="(id) => emit('retractMessage', id)"
             @react="(id, emoji) => emit('reactMessage', id, emoji)"

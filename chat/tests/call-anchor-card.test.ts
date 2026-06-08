@@ -18,6 +18,7 @@ const liveState: CallAnchorCardState = {
   threadId: "call-thread-uuid",
   title: "Live video call",
   actionLabel: "Join",
+  actionDisabled: false,
   ariaLabel: "Join live video call, 2 people: alice, bob",
 };
 
@@ -45,6 +46,7 @@ describe("CallAnchorCard", () => {
         participantLabels: [],
         title: "Call ended",
         actionLabel: null,
+        actionDisabled: false,
         ariaLabel: "Call ended · 5m",
       } satisfies CallAnchorCardState,
     });

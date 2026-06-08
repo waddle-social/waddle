@@ -1,6 +1,8 @@
 import { computed, type ComputedRef } from "vue";
 import { useStore } from "@nanostores/vue";
 import type { TimelineMessage } from "@/lib/chat-ui";
+import { $callState } from "@/lib/calls/call-store";
+import { isBusy } from "@/lib/calls/call-activity-dock";
 import { $mucCallParticipants, normalizeMucCallRoomJid } from "@/lib/calls/muc-call-presence";
 import { readRoomHasActiveCall, useRoomHasActiveCall } from "@/lib/calls/use-active-muc-call";
 import type { CallMedia } from "@/lib/calls/types";
@@ -13,7 +15,8 @@ export interface CallAnchorCardState {
   messageCount: number;
   threadId: string | null;
   title: string;
-  actionLabel: "Join" | null;
+  actionLabel: "Join" | "Rejoin" | "In another call" | null;
+  actionDisabled: boolean;
   ariaLabel: string;
 }
 
@@ -36,10 +39,14 @@ export function readCallAnchorCardState(
   if (!message.callThread) return null;
   const room = normalizeMucCallRoomJid(roomJid);
   const roomState = readRoomHasActiveCall(room);
+  const callState = $callState.get();
   const participantLabels = room ? [...($mucCallParticipants.get()[room] ?? [])] : [];
   return buildCallAnchorCardState({
     message,
+    roomJid: room,
     hasActiveCall: roomState.hasActiveCall,
+    localResourceInCall: roomState.localResourceInCall,
+    callState,
     media: roomState.media,
     participantCount: roomState.participantCount,
     participantLabels,
@@ -53,6 +60,7 @@ export function useCallAnchorCardState(
   messageCount: () => number = () => 0,
 ): ComputedRef<CallAnchorCardState | null> {
   const participants = useStore($mucCallParticipants);
+  const callState = useStore($callState);
   const roomCall = useRoomHasActiveCall(() => roomJid() ?? "");
   return computed(() => {
     const current = message();
@@ -60,7 +68,10 @@ export function useCallAnchorCardState(
     const participantLabels = room ? [...(participants.value[room] ?? [])] : [];
     return buildCallAnchorCardState({
       message: current,
+      roomJid: room,
       hasActiveCall: roomCall.hasActiveCall.value,
+      localResourceInCall: roomCall.localResourceInCall.value,
+      callState: callState.value,
       media: roomCall.media.value,
       participantCount: roomCall.participantCount.value,
       participantLabels,
@@ -71,7 +82,10 @@ export function useCallAnchorCardState(
 
 function buildCallAnchorCardState(options: {
   message: Pick<TimelineMessage, "body" | "author" | "callThread" | "threadId">;
+  roomJid: string;
   hasActiveCall: boolean;
+  localResourceInCall: boolean;
+  callState: ReturnType<typeof $callState.get>;
   media: CallMedia;
   participantCount: number;
   participantLabels: string[];
@@ -81,6 +95,10 @@ function buildCallAnchorCardState(options: {
   if (!callThread) return null;
   const { message, media, participantCount, participantLabels, messageCount } = options;
   const live = !callThread.ended && options.hasActiveCall;
+  const localGroupCallInThisRoom = isLocalGroupCallInRoom(options.callState, options.roomJid);
+  const busy = live && isBusy(options.callState) && !localGroupCallInThisRoom;
+  const retainedLocalResource = live && options.localResourceInCall && !localGroupCallInThisRoom;
+  const joinAvailable = live && !busy && !localGroupCallInThisRoom;
   const mediaLabel = media.video ? "video call" : "call";
   const peopleLabel = `${participantCount} ${participantCount === 1 ? "person" : "people"}`;
   const participants = participantLabels.length > 0 ? `: ${participantLabels.join(", ")}` : "";
@@ -93,9 +111,26 @@ function buildCallAnchorCardState(options: {
     messageCount,
     threadId: callThreadAnchorThreadId(message),
     title: live ? `Live ${mediaLabel}` : "Call ended",
-    actionLabel: live ? "Join" : null,
-    ariaLabel: live ? `Join live ${mediaLabel}, ${peopleLabel}${participants}` : callThreadAnchorLabel(message),
+    actionLabel: joinAvailable ? (retainedLocalResource ? "Rejoin" : "Join") : busy ? "In another call" : null,
+    actionDisabled: busy,
+    ariaLabel: live
+      ? busy
+        ? `Live ${mediaLabel}, ${peopleLabel}${participants}; already in another call`
+        : retainedLocalResource
+          ? `Rejoin live ${mediaLabel}, ${peopleLabel}${participants}`
+          : `Join live ${mediaLabel}, ${peopleLabel}${participants}`
+      : callThreadAnchorLabel(message),
   };
+}
+
+function isLocalGroupCallInRoom(
+  state: ReturnType<typeof $callState.get>,
+  roomJid: string,
+): boolean {
+  if (!roomJid) return false;
+  if (state.phase !== "active" && state.phase !== "muc-pending") return false;
+  if (state.kind !== "muc") return false;
+  return normalizeMucCallRoomJid(state.peer) === roomJid;
 }
 
 function formatCallThreadDuration(value: string): string {
