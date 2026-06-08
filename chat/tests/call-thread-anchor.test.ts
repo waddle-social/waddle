@@ -163,6 +163,28 @@ describe("call-thread anchor timeline mapping", () => {
     expect(callThreadAnchorThreadId(timelineMessage)).toBe("call-thread-uuid");
   });
 
+  test("derives ended card media from the anchor, not the cleared live detector", () => {
+    const timelineMessage = mapLiveRoomMessageToTimeline(session, callAnchor({
+      roomJid: "general@conference.example.com",
+      callThread: {
+        kind: "muc",
+        sid: "session-uuid",
+        media: ["audio", "video"],
+        initiator: "alice@example",
+        started: "2026-06-07T14:30:00Z",
+        ended: "2026-06-07T14:35:00Z",
+        duration: "PT5M",
+      },
+    }));
+
+    // No active call seeded: the live detector falls back to audio-only default.
+    expect(readCallAnchorCardState(timelineMessage, "general@conference.example.com")).toMatchObject({
+      status: "ended",
+      media: { audio: true, video: true },
+      title: "Call ended · 5m",
+    });
+  });
+
   test("shows the formatted duration in the ended anchor card title", () => {
     const timelineMessage = mapLiveRoomMessageToTimeline(session, callAnchor({
       roomJid: "general@conference.example.com",

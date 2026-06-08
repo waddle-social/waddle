@@ -120,8 +120,15 @@ function buildCallAnchorCardState(options: {
 }): CallAnchorCardState | null {
   const callThread = options.message.callThread;
   if (!callThread) return null;
-  const { message, media, participantCount, participantLabels, messageCount } = options;
+  const { message, participantCount, participantLabels, messageCount } = options;
   const live = !callThread.ended && options.hasActiveCall;
+  // Live calls prefer the live detector (current media can differ from the
+  // anchor's initial media). Ended calls must use the wire-authoritative anchor
+  // media: the live detector is cleared when the call ends and falls back to an
+  // audio-only default, which would mislabel an ended video call as audio.
+  const media: CallMedia = live
+    ? options.media
+    : { audio: callThread.media.includes("audio"), video: callThread.media.includes("video") };
   const localGroupCallInThisRoom = isLocalGroupCallInRoom(options.callState, options.roomJid);
   const busy = live && isBusy(options.callState) && !localGroupCallInThisRoom;
   const retainedLocalResource = live && options.localResourceInCall && !localGroupCallInThisRoom;
