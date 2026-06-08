@@ -56,6 +56,12 @@ export interface WasmCallThreadAnchor {
   started: string;
 }
 
+interface WasmCallThreadEnded {
+  anchor_id: string;
+  ended: string;
+  duration: string;
+}
+
 export interface WasmExtensionEnvelope {
   version: number;
   enrichments: WasmExtensionEnrichment[];
@@ -146,6 +152,7 @@ export interface WasmMessage {
   forum_thread_title?: string;
   is_sticker: boolean;
   call_thread?: WasmCallThreadAnchor;
+  call_thread_ended?: WasmCallThreadEnded;
   shared_files: WasmSharedFile[];
   link_previews: WasmLinkPreview[];
   call_event?: CallEvent;

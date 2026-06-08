@@ -355,8 +355,10 @@ pub use super::xep_waddle_pin::{
 };
 
 pub use super::xep_waddle_call_thread::{
-    build_call_thread_anchor, parse_call_thread_anchor, parse_call_thread_anchor_child,
-    CallThreadAnchor, CallThreadKind, CallThreadMedia, CallThreadParseError, NS_WADDLE_CALL_THREAD,
+    build_call_thread_anchor, build_call_thread_ended, parse_call_thread_anchor,
+    parse_call_thread_anchor_child, parse_call_thread_ended, parse_call_thread_ended_child,
+    CallThreadAnchor, CallThreadDuration, CallThreadEnded, CallThreadKind, CallThreadMedia,
+    CallThreadParseError, NS_FASTEN, NS_WADDLE_CALL_THREAD,
 };
 
 pub use waddle_xmpp_core::xep0472::{

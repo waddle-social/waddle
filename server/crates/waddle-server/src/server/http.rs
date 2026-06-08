@@ -591,6 +591,7 @@ async fn create_websocket_state(
                 avatar_source_locks: Arc::new(crate::profile::AvatarLockMap::new()),
                 profile_publish_tracker: tokio_util::task::TaskTracker::new(),
                 pep_feed_bridge: Arc::new(crate::pep_feed_bridge::PepFeedBridge::new()),
+                call_threads: Arc::new(dashmap::DashMap::new()),
                 sfu: sfu_service,
             },
             occupant_id_secret: server_config.occupant_id_secret.clone(),

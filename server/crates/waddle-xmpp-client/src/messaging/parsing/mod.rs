@@ -129,6 +129,7 @@ fn parse_message(el: &Element) -> Option<InboundMessage> {
     });
     let pubsub_events = crate::pubsub_event::parse_pubsub_events(el);
     let call_thread = xep_call_thread::parse_call_thread_anchor_child(el);
+    let call_thread_ended = xep_call_thread::parse_call_thread_ended_child(el);
 
     let reply_marker = xep_reply::parse_reply(el);
     let reply_to_id = reply_marker.as_ref().map(|m| m.id.clone());
@@ -354,6 +355,7 @@ fn parse_message(el: &Element) -> Option<InboundMessage> {
         thread_id,
         parent_thread_id,
         call_thread,
+        call_thread_ended,
         is_sticker,
         pin_event,
         extension_envelope,

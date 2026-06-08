@@ -22,13 +22,13 @@ pub(super) async fn broadcast_room_system_message_event(
     room: BareJid,
     mut message: Box<Message>,
     recursion_depth: u8,
-) {
+) -> Option<String> {
     let Some(room_registry) = deps.room_registry else {
         debug!(
             room = %room,
             "BroadcastRoomSystemMessage: no room_registry in Deps; skipping"
         );
-        return;
+        return None;
     };
     let room_actor = match room_registry
         .ask(GetRoom {
@@ -42,7 +42,7 @@ pub(super) async fn broadcast_room_system_message_event(
                 room = %room,
                 "BroadcastRoomSystemMessage: room not registered; dropping"
             );
-            return;
+            return None;
         }
         Err(error) => {
             warn!(
@@ -50,7 +50,7 @@ pub(super) async fn broadcast_room_system_message_event(
                 error = ?error,
                 "BroadcastRoomSystemMessage: room registry lookup failed; dropping"
             );
-            return;
+            return None;
         }
     };
 
@@ -67,7 +67,7 @@ pub(super) async fn broadcast_room_system_message_event(
                 ?error,
                 "BroadcastRoomSystemMessage: failed to build synthetic sender; dropping"
             );
-            return;
+            return None;
         }
     };
     let snapshot = match room_actor
@@ -83,7 +83,7 @@ pub(super) async fn broadcast_room_system_message_event(
                 error = ?error,
                 "BroadcastRoomSystemMessage: GetRoomSnapshot failed; dropping"
             );
-            return;
+            return None;
         }
     };
 
@@ -130,4 +130,5 @@ pub(super) async fn broadcast_room_system_message_event(
         )
         .await;
     }
+    Some(stanza_id)
 }

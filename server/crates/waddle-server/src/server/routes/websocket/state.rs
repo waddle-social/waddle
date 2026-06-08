@@ -1,6 +1,12 @@
 use super::*;
 
 #[derive(Debug, Clone)]
+pub struct ActiveCallThread {
+    pub anchor_origin_id: String,
+    pub started: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone)]
 pub struct XmppServiceDomains {
     pub muc: String,
     pub spaces: String,
@@ -167,6 +173,11 @@ pub struct ProtocolServices {
     /// Feed pane surfaces user activity automatically. Holds per-
     /// (user, kind) throttle state.
     pub pep_feed_bridge: Arc<crate::pep_feed_bridge::PepFeedBridge>,
+    /// Active MUC call-thread anchors keyed by room bare JID. The room
+    /// anchor message records a XEP-0359 origin-id so the SFU webhook path
+    /// can later fasten a historical `<call-thread-ended/>` record to that
+    /// exact anchor with XEP-0422 `<apply-to/>`.
+    pub call_threads: Arc<dashmap::DashMap<BareJid, ActiveCallThread>>,
     /// LiveKit SFU bridge — `Some` iff `LIVEKIT_*` env vars are set
     /// and `register_call_handlers` was invoked at startup. The
     /// WebSocket cleanup paths call

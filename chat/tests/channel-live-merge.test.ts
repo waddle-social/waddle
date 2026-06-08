@@ -182,6 +182,52 @@ describe("handleRoomMessage typed dispatch", () => {
     expect(h.messages.value.length).toBe(before + 1);
   });
 
+  test("call-thread-ended fastening updates the existing anchor instead of appending", () => {
+    const h = harness();
+    h.messages.value = [
+      {
+        id: "anchor-local",
+        replyableId: "anchor-stanza-id",
+        body: "alice started a call",
+        author: "alice",
+        authorJid: "room@muc.example.com/alice",
+        createdAt: "2026-06-07T14:30:00Z",
+        createdAtSource: "archive",
+        isSelf: false,
+        threadId: "call-thread-uuid",
+        callThread: {
+          kind: "muc",
+          sid: "session-uuid",
+          media: ["audio"],
+          initiator: "alice@example.com",
+          started: "2026-06-07T14:30:00Z",
+        },
+      } as TimelineMessage,
+    ];
+
+    const out = h.liveMerge.handleRoomMessage(makeLive({
+      id: "ended-event",
+      body: "",
+      callThreadEnded: {
+        anchorId: "anchor-stanza-id",
+        ended: "2026-06-07T14:35:00Z",
+        duration: "PT5M",
+      },
+    }));
+
+    expect(out.kind).toBe("ignore");
+    expect(h.messages.value).toHaveLength(1);
+    expect(h.messages.value[0]?.callThread).toEqual({
+      kind: "muc",
+      sid: "session-uuid",
+      media: ["audio"],
+      initiator: "alice@example.com",
+      started: "2026-06-07T14:30:00Z",
+      ended: "2026-06-07T14:35:00Z",
+      duration: "PT5M",
+    });
+  });
+
   test("ignore: non-message stanza doesn't touch the timeline", () => {
     const h = harness();
     const before = h.messages.value.length;

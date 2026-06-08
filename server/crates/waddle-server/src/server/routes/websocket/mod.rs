@@ -71,7 +71,7 @@ mod cleanup;
 mod connection;
 mod frame;
 mod frame_backstop;
-mod interpret_loop;
+pub(crate) mod interpret_loop;
 pub(crate) mod link_preview_refs;
 pub(crate) mod link_preview_telemetry;
 mod muc_call_sfu;
@@ -91,7 +91,9 @@ pub mod handlers;
 
 pub use cleanup::cleanup_muc_presence_for_jid;
 pub use connection::router;
-pub use state::{ProtocolServices, WebSocketDeps, WebSocketState, XmppServiceDomains};
+pub use state::{
+    ActiveCallThread, ProtocolServices, WebSocketDeps, WebSocketState, XmppServiceDomains,
+};
 
 pub(crate) use cleanup::{
     destroy_room_actor, get_or_create_room_actor, get_room_actor, is_muc_room_jid,

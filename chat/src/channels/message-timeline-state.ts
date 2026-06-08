@@ -297,6 +297,7 @@ export function buildChannelTimelineFromMamResults(params: {
     extensionAnnotations?: LiveRoomMessage["extensionAnnotations"];
     extensionBodyFallback?: boolean;
   }[] = [];
+  const callThreadEndedUpdates: NonNullable<LiveRoomMessage["callThreadEnded"]>[] = [];
 
   for (const msg of mamResults) {
     if (msg._reactionTarget && msg._reactionEmojis) {
@@ -324,6 +325,8 @@ export function buildChannelTimelineFromMamResults(params: {
         extensionAnnotations: msg.extensionAnnotations,
         extensionBodyFallback: msg.extensionBodyFallback,
       });
+    } else if (msg.callThreadEnded) {
+      callThreadEndedUpdates.push(msg.callThreadEnded);
     } else if (
       msg.body
       || msg.isRetracted
@@ -375,6 +378,24 @@ export function buildChannelTimelineFromMamResults(params: {
     }
     byId.add(tm);
     timeline.push(tm);
+  }
+
+  for (const update of callThreadEndedUpdates) {
+    const target = timeline.find((message) =>
+      !!message.callThread
+      && (
+        message.replyableId === update.anchorId
+        || message.stanzaId === update.anchorId
+        || message.id === update.anchorId
+        || message.wireIds?.includes(update.anchorId)
+      )
+    );
+    if (!target?.callThread) continue;
+    target.callThread = {
+      ...target.callThread,
+      ended: update.ended,
+      duration: update.duration,
+    };
   }
 
   for (const update of correctionUpdates) {

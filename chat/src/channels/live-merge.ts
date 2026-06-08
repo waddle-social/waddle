@@ -176,6 +176,31 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
     messages.value = next;
   }
 
+  function applyCallThreadEnded(ended: NonNullable<LiveRoomMessage["callThreadEnded"]>) {
+    const index = messages.value.findIndex((message) =>
+      !!message.callThread
+      && (
+        message.replyableId === ended.anchorId
+        || message.stanzaId === ended.anchorId
+        || message.id === ended.anchorId
+        || message.wireIds?.includes(ended.anchorId)
+      )
+    );
+    if (index < 0) return;
+    const current = messages.value[index]!;
+    if (!current.callThread) return;
+    const next = messages.value.slice();
+    next[index] = {
+      ...current,
+      callThread: {
+        ...current.callThread,
+        ended: ended.ended,
+        duration: ended.duration,
+      },
+    };
+    messages.value = next;
+  }
+
   /**
    * Merges a regular incoming message (no retract, no correction). If the
    * message reconciles a still-pending self-echo we promote the existing
@@ -263,6 +288,10 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
    * inspect the kind without re-classifying.
    */
   function handleRoomMessage(msg: LiveRoomMessage) {
+    if (msg.callThreadEnded) {
+      applyCallThreadEnded(msg.callThreadEnded);
+      return { kind: "ignore" as const };
+    }
     const classified = classifyRoomMessage(msg);
     switch (classified.kind) {
       case "retraction":
@@ -298,6 +327,7 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
     applyReaction,
     applyRetraction,
     applyCorrection,
+    applyCallThreadEnded,
     mergeLiveMessage,
     handleRoomMessage,
   };

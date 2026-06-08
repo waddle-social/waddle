@@ -11,6 +11,10 @@
 
 mod ws_common;
 
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
+use jsonwebtoken::{encode, EncodingKey, Header};
+use serde_json::json;
+use sha2::{Digest, Sha256};
 use ws_common::{disco_info_query, TestServer, WsXmppClient};
 use xmpp_parsers::minidom::Element;
 
@@ -18,12 +22,15 @@ const NS_MUC: &str = "http://jabber.org/protocol/muc";
 const NS_MUC_USER: &str = "http://jabber.org/protocol/muc#user";
 const NS_MUJI: &str = "urn:xmpp:jingle:muji:0";
 const NS_CALL_THREAD: &str = "urn:waddle:call-thread:0";
+const NS_FASTEN: &str = "urn:xmpp:fasten:0";
+const NS_SID: &str = "urn:xmpp:sid:0";
 
 const DOMAIN: &str = "localhost";
 const ALICE: &str = "alice";
 const BOB: &str = "bob";
 const ALICE_PW: &str = "alice-pw-12345";
 const BOB_PW: &str = "bob-pw-12345";
+const LIVEKIT_WEBHOOK_SECRET: &str = "test-webhook-secret-with-at-least-32-bytes";
 
 // The harness rejects api-secrets shorter than 32 bytes; this one is
 // exactly 32 ASCII characters. The other LIVEKIT_* values are
@@ -42,6 +49,7 @@ fn livekit_test_envs() -> Vec<(&'static str, &'static str)> {
             "LIVEKIT_TURN_SHARED_SECRET",
             "turn-shared-secret-value-also-long-enough",
         ),
+        ("LIVEKIT_WEBHOOK_SECRET", LIVEKIT_WEBHOOK_SECRET),
     ]
 }
 
@@ -393,6 +401,109 @@ fn call_thread_child(message: &Element) -> Option<&Element> {
         .find(|c| c.name() == "call-thread" && c.ns() == NS_CALL_THREAD)
 }
 
+fn apply_to_child(message: &Element) -> Option<&Element> {
+    message
+        .children()
+        .find(|c| c.name() == "apply-to" && c.ns() == NS_FASTEN)
+}
+
+fn call_thread_ended_child(apply_to: &Element) -> Option<&Element> {
+    apply_to
+        .children()
+        .find(|c| c.name() == "call-thread-ended" && c.ns() == NS_CALL_THREAD)
+}
+
+fn room_stanza_id(message: &Element, room: &str) -> Option<String> {
+    message
+        .children()
+        .find(|c| c.name() == "stanza-id" && c.ns() == NS_SID && c.attr("by") == Some(room))
+        .and_then(|c| c.attr("id"))
+        .map(ToOwned::to_owned)
+}
+
+fn origin_id(message: &Element) -> Option<String> {
+    message
+        .children()
+        .find(|c| c.name() == "origin-id" && c.ns() == NS_SID)
+        .and_then(|c| c.attr("id"))
+        .map(ToOwned::to_owned)
+}
+
+fn livekit_webhook_auth(body: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(body);
+    let digest = hasher.finalize();
+    let claims = json!({
+        "sha256": BASE64_STANDARD.encode(digest),
+        "exp": (chrono::Utc::now() + chrono::Duration::seconds(60)).timestamp(),
+        "iat": chrono::Utc::now().timestamp(),
+    });
+    let token = encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(LIVEKIT_WEBHOOK_SECRET.as_bytes()),
+    )
+    .expect("sign LiveKit webhook");
+    format!("Bearer {token}")
+}
+
+async fn post_participant_left_webhook(server: &TestServer, room: &str, identity: &str) {
+    let body = serde_json::to_vec(&json!({
+        "id": format!("EV_{}", uuid::Uuid::new_v4()),
+        "event": "participant_left",
+        "room": { "name": room },
+        "participant": { "identity": identity },
+    }))
+    .expect("webhook body");
+    let response = reqwest::Client::new()
+        .post(format!("{}/api/v1/livekit/webhook", server.http_base_url()))
+        .header("Authorization", livekit_webhook_auth(&body))
+        .body(body)
+        .send()
+        .await
+        .expect("post LiveKit webhook");
+    assert!(
+        response.status().is_success(),
+        "LiveKit webhook failed: {}",
+        response.status()
+    );
+}
+
+async fn send_muji_session_initiate(client: &mut WsXmppClient, room: &str, sid: &str) {
+    let full_jid = client.full_jid.clone().expect("client bound");
+    client
+        .send(&format!(
+            r#"<iq xmlns="jabber:client" type="set" id="muji-join-{sid}" to="calls.{DOMAIN}">
+                 <jingle xmlns="urn:xmpp:jingle:1" action="session-initiate"
+                         initiator="{full_jid}" sid="{sid}">
+                   <muji xmlns="{NS_MUJI}" room="{room}"/>
+                   <content creator="initiator" name="audio">
+                     <description xmlns="urn:xmpp:jingle:apps:rtp:1" media="audio">
+                       <payload-type id="111" name="opus" clockrate="48000" channels="2"/>
+                     </description>
+                     <transport xmlns="urn:waddle:transports:livekit:0"/>
+                   </content>
+                 </jingle>
+               </iq>"#
+        ))
+        .await
+        .expect("send Muji session-initiate");
+    client
+        .recv_matching(|frame| {
+            (frame.contains("type='result'") && frame.contains(&format!("id='muji-join-{sid}'")))
+                || (frame.contains("type=\"result\"")
+                    && frame.contains(&format!("id=\"muji-join-{sid}\"")))
+        })
+        .await
+        .expect("Muji session-initiate ack");
+    client
+        .recv_matching(|frame| {
+            frame.contains("session-accept") && frame.contains(&format!("sid='{sid}'"))
+        })
+        .await
+        .expect("Muji session-accept");
+}
+
 async fn recv_until_muji_and_anchor(client: &mut WsXmppClient) -> Vec<String> {
     let mut frames = Vec::new();
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
@@ -678,5 +789,129 @@ async fn muji_presence_reflects_to_senders_sibling_resource() {
     assert!(
         muc_user_has_status_110(&leave_element),
         "XEP-0045 §7.1: sibling session still gets <status code='110'/> on a self-driven update: {mobile_leave}"
+    );
+}
+
+#[tokio::test]
+async fn livekit_last_participant_left_fastens_ended_summary_to_call_thread_anchor() {
+    let server = TestServer::start_with_extra_envs(&[], &livekit_test_envs());
+    let admin_pass = server.fixed_account_password().to_string();
+    let mut web =
+        WsXmppClient::connect_and_auth(&server.ws_url(), DOMAIN, "admin", &admin_pass, "end-web")
+            .await
+            .expect("admin/web connects");
+    let mut mobile = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "admin",
+        &admin_pass,
+        "end-mobile",
+    )
+    .await
+    .expect("admin/mobile connects");
+
+    let room = format!("ended-call-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    let nick = "admin";
+    muji_join_room(&mut web, &room, nick).await;
+    muji_join_room(&mut mobile, &room, nick).await;
+
+    let active = format!(
+        r#"<presence to="{room}/{nick}">
+             <x xmlns="{NS_MUC}"/>
+             <muji xmlns="{NS_MUJI}">
+               <content creator="initiator" name="audio">
+                 <description xmlns="urn:xmpp:jingle:apps:rtp:1" media="audio"/>
+               </content>
+             </muji>
+           </presence>"#
+    );
+    web.send(&active).await.expect("web sends active muji");
+
+    let active_frames = recv_until_muji_and_anchor(&mut mobile).await;
+    let anchor = active_frames
+        .iter()
+        .find(|frame| frame.contains("<call-thread") && frame.contains(NS_CALL_THREAD))
+        .expect("mobile receives call-thread anchor");
+    let anchor_element: Element = anchor
+        .parse()
+        .unwrap_or_else(|err| panic!("anchor must parse as XML: {err}; frame={anchor}"));
+    let anchor_stanza_id = room_stanza_id(&anchor_element, &room)
+        .unwrap_or_else(|| panic!("anchor must carry room-assigned XEP-0359 stanza-id: {anchor}"));
+    assert!(!anchor_stanza_id.is_empty());
+    let anchor_origin_id = origin_id(&anchor_element)
+        .unwrap_or_else(|| panic!("anchor must carry origin-id: {anchor}"));
+
+    mobile
+        .send(&active)
+        .await
+        .expect("mobile also sends active muji");
+    web.recv_matching(|frame| {
+        frame.contains("<presence") && (frame.contains("<muji ") || frame.contains("<muji>"))
+    })
+    .await
+    .expect("web receives mobile active muji reflection");
+    send_muji_session_initiate(&mut web, &room, "web-ended").await;
+    send_muji_session_initiate(&mut mobile, &room, "mobile-ended").await;
+
+    let web_full_jid = web.full_jid.clone().expect("web has full jid");
+    post_participant_left_webhook(&server, &room, &web_full_jid).await;
+    let no_early_ended = tokio::time::timeout(std::time::Duration::from_millis(750), async {
+        mobile
+            .recv_matching(|frame| {
+                frame.contains("<call-thread-ended") && frame.contains("<apply-to")
+            })
+            .await
+    })
+    .await;
+    assert!(
+        no_early_ended.is_err(),
+        "first participant leaving must not emit call-thread-ended while another SFU participant remains"
+    );
+
+    let mobile_full_jid = mobile.full_jid.clone().expect("mobile has full jid");
+    post_participant_left_webhook(&server, &room, &mobile_full_jid).await;
+
+    let ended_frame = web
+        .recv_matching(|frame| frame.contains("<call-thread-ended") && frame.contains("<apply-to"))
+        .await
+        .expect("remaining room occupant receives call-thread-ended fastening");
+    let ended_message: Element = ended_frame
+        .parse()
+        .unwrap_or_else(|err| panic!("ended frame must parse as XML: {err}; frame={ended_frame}"));
+    assert_eq!(ended_message.name(), "message");
+    assert_eq!(ended_message.attr("type"), Some("groupchat"));
+    assert_eq!(ended_message.attr("from"), Some(room.as_str()));
+    let apply_to = apply_to_child(&ended_message)
+        .unwrap_or_else(|| panic!("ended message must carry apply-to: {ended_frame}"));
+    assert_eq!(apply_to.attr("id"), Some(anchor_origin_id.as_str()));
+    let ended = call_thread_ended_child(apply_to)
+        .unwrap_or_else(|| panic!("apply-to must carry call-thread-ended: {ended_frame}"));
+    assert!(
+        ended.attr("ended").is_some(),
+        "ended marker must carry RFC3339 ended timestamp: {ended_frame}"
+    );
+    assert!(ended
+        .attr("duration")
+        .is_some_and(|value| value.starts_with("PT")));
+    assert!(
+        ended_message.get_child("store", "urn:xmpp:hints").is_some(),
+        "ended fastening must carry XEP-0334 <store/> hint: {ended_frame}"
+    );
+
+    let mam_frames = query_room_mam(&mut mobile, &room, "call-thread-ended-mam-1").await;
+    let archived_ended: Vec<&String> = mam_frames
+        .iter()
+        .filter(|frame| frame.contains("<forwarded") && frame.contains("<call-thread-ended"))
+        .collect();
+    assert_eq!(
+        archived_ended.len(),
+        1,
+        "MAM must archive exactly one ended fastening: {mam_frames:?}"
+    );
+    assert!(
+        archived_ended[0].contains(&format!("id='{anchor_origin_id}'"))
+            || archived_ended[0].contains(&format!("id=\"{anchor_origin_id}\"")),
+        "archived ended fastening must target the anchor origin id: {}",
+        archived_ended[0]
     );
 }

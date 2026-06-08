@@ -226,6 +226,7 @@ mod tests {
                     avatar_source_locks: Arc::clone(&deps.protocol.avatar_source_locks),
                     profile_publish_tracker: deps.protocol.profile_publish_tracker.clone(),
                     pep_feed_bridge: Arc::clone(&deps.protocol.pep_feed_bridge),
+                    call_threads: Arc::clone(&deps.protocol.call_threads),
                     sfu: Some(sfu),
                 },
                 occupant_id_secret: deps.occupant_id_secret.clone(),
