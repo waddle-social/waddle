@@ -65,6 +65,15 @@ const props = defineProps<{
   uploadProgress?: { uploading: boolean; progress: number; filename: string };
   linkPreviewLookup?: ComposerLinkPreviewLookup | null;
   linkPreviewScope?: string | null;
+  sendCallChatMessage?: (
+    body: string,
+    markup: MarkupSpan[],
+    references: MessageReference[],
+    files: Array<File | Blob> | undefined,
+    replyTo: undefined,
+    threadOverride: { threadId: string },
+    linkPreview?: ComposerLinkPreviewSendPayload,
+  ) => Promise<void> | void;
 }>();
 
 const emit = defineEmits<{
@@ -151,16 +160,16 @@ const subline = computed(() => {
   return state.value.media.video ? "Video call" : "Audio call";
 });
 
-const canShowCallChatComposer = computed(() =>
-  state.value.phase === "active" &&
-  state.value.kind === "muc" &&
-  !!props.callThreadId,
-);
-
 const callThreadOverride = computed(() => {
   const threadId = props.callThreadId?.trim();
   return threadId ? { threadId } : null;
 });
+
+const canShowCallChatComposer = computed(() =>
+  state.value.phase === "active" &&
+  state.value.kind === "muc" &&
+  !!callThreadOverride.value,
+);
 
 const localIdentity = computed(() => engine.localIdentity);
 const selfSharePresentation = computed(() =>
@@ -191,16 +200,20 @@ async function onHangup(): Promise<void> {
   $callUiMode.set("split");
 }
 
-function onSendCallChat(
+async function onSendCallChat(
   body: string,
   markup: MarkupSpan[],
   references: MessageReference[],
   files?: Array<File | Blob>,
   linkPreview?: ComposerLinkPreviewSendPayload,
-): void {
+): Promise<void> {
   const override = callThreadOverride.value;
   if (!override) return;
-  emit("sendCallChat", body, markup, references, files, undefined, override, linkPreview);
+  if (props.sendCallChatMessage) {
+    await props.sendCallChatMessage(body, markup, references, files, undefined, override, linkPreview);
+  } else {
+    emit("sendCallChat", body, markup, references, files, undefined, override, linkPreview);
+  }
   callChatDraft.value = "";
 }
 

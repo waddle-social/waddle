@@ -1,20 +1,32 @@
-import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { afterEach, describe, expect, test } from "bun:test";
+import { $callState } from "../src/lib/calls/call-store";
+import { $callUiMode } from "../src/lib/calls/ui-mode";
+import { $mucCallParticipants } from "../src/lib/calls/muc-call-presence";
+import { connectionStore } from "../src/lib/connection-store";
 import { resolveActiveMucCallThreadId } from "../src/lib/calls/call-chat-composer";
 import type { TimelineMessage } from "../src/lib/chat-ui";
+import { renderVueComponent } from "./helpers/render-vue-sfc";
+
+const ROOM = "lobby@muc.waddle.test";
 
 describe("call-chat composer", () => {
-  test("resolves the active MUC call thread from the call anchor", () => {
+  afterEach(() => {
+    $callState.set({ phase: "idle" });
+    $callUiMode.set("split");
+    $mucCallParticipants.set({});
+    connectionStore.session = null;
+  });
+
+  test("resolves the active MUC call thread from the current conversation timeline", () => {
     const messages: TimelineMessage[] = [
       message({ id: "ordinary", body: "hello" }),
       message({
         id: "call-anchor",
         threadId: "call-thread-123",
-        roomJid: "lobby@muc.waddle.test",
         callThread: {
           kind: "muc",
           sid: "sid-active",
-          media: "audio",
+          media: ["audio"],
           initiator: "alice@waddle.test/web",
           started: "2026-06-09T12:00:00Z",
         },
@@ -22,66 +34,95 @@ describe("call-chat composer", () => {
       message({
         id: "other-call-anchor",
         threadId: "call-thread-older",
-        roomJid: "lobby@muc.waddle.test",
         callThread: {
           kind: "muc",
           sid: "sid-old",
-          media: "audio",
+          media: ["audio"],
           initiator: "alice@waddle.test/web",
           started: "2026-06-09T11:00:00Z",
         },
       }),
     ];
 
-    expect(resolveActiveMucCallThreadId(messages, "lobby@muc.waddle.test/alice", "sid-active")).toBe("call-thread-123");
+    expect(resolveActiveMucCallThreadId(messages, `${ROOM}/alice`, "sid-active")).toBe("call-thread-123");
   });
 
-  test("expanded channel calls render a labelled composer bound to the call thread", () => {
-    const source = readFileSync(
-      new URL("../src/components/calls/CallExpandedSurface.vue", import.meta.url),
-      "utf8",
-    );
+  test("does not resolve when the active room or sid is unusable", () => {
+    const messages = [
+      message({
+        id: "call-anchor",
+        threadId: "call-thread-123",
+        callThread: { kind: "muc", sid: "sid-active", media: ["audio"] },
+      }),
+    ];
 
-    expect(source).toContain("Call chat");
-    expect(source).toContain("MessageComposer");
-    expect(source).toContain("callThreadOverride");
-    expect(source).toContain(":show-extensions=\"false\"");
-    expect(source).toContain("emit(\"sendCallChat\"");
+    expect(resolveActiveMucCallThreadId(messages, "", "sid-active")).toBeNull();
+    expect(resolveActiveMucCallThreadId(messages, ROOM, " ")).toBeNull();
   });
 
-  test("composer labels the editable control and can hide unsupported extension actions", () => {
-    const composer = readFileSync(
-      new URL("../src/components/chat/MessageComposer.vue", import.meta.url),
-      "utf8",
-    );
-    const editor = readFileSync(
-      new URL("../src/components/chat/ChatEditor.vue", import.meta.url),
-      "utf8",
+  test("expanded channel calls render a labelled call-chat composer when a call thread is available", async () => {
+    seedExpandedMucCall();
+
+    const html = await renderVueComponent(
+      "../src/components/calls/CallExpandedSurface.vue",
+      {
+        roomJid: ROOM,
+        callThreadId: "call-thread-123",
+        isSending: false,
+        disabled: false,
+        giphyApiKey: "",
+        mentionCandidates: [],
+        slowModeCooldown: 0,
+        uploadProgress: { uploading: false, progress: 0, filename: "" },
+      },
+      import.meta.url,
     );
 
-    expect(composer).toContain("showExtensions");
-    expect(composer).toContain("v-if=\"showExtensions\"");
-    expect(composer).toContain(":editor-label=\"composerLabel ?? `${channelName} composer`\"");
-    expect(editor).toContain("editorLabel");
-    expect(editor).toContain("\"aria-label\": props.editorLabel");
+    expect(html).toContain("Call chat");
+    expect(html).toContain('aria-label="Call chat composer"');
+    expect(html).not.toContain('aria-label="Extensions"');
   });
 
-  test("call-chat sends use the thread handler while the main composer keeps the channel handler", () => {
-    const contentArea = readFileSync(
-      new URL("../src/components/chat/ContentArea.vue", import.meta.url),
-      "utf8",
-    );
-    const readyShell = readFileSync(
-      new URL("../src/components/chat/ChatReadyShell.vue", import.meta.url),
-      "utf8",
+  test("expanded channel calls hide the call-chat composer without a usable thread id", async () => {
+    seedExpandedMucCall();
+
+    const html = await renderVueComponent(
+      "../src/components/calls/CallExpandedSurface.vue",
+      {
+        roomJid: ROOM,
+        callThreadId: "   ",
+        uploadProgress: { uploading: false, progress: 0, filename: "" },
+      },
+      import.meta.url,
     );
 
-    expect(contentArea).toContain("@send=\"onSend\"");
-    expect(contentArea).toContain("@send-call-chat=\"(...args) => emit('sendCallChat', ...args)\"");
-    expect(readyShell).toContain("@send=\"sendActiveMessage\"");
-    expect(readyShell).toContain("@send-call-chat=\"sendThreadMessage\"");
+    expect(html).not.toContain("Call chat composer");
   });
 });
+
+function seedExpandedMucCall(): void {
+  connectionStore.session = {
+    username: "alice",
+    jid: "alice@waddle.test/browser",
+  } as typeof connectionStore.session;
+  $mucCallParticipants.set({ [ROOM]: ["alice"] });
+  $callUiMode.set("expanded");
+  $callState.set({
+    phase: "active",
+    kind: "muc",
+    peer: ROOM,
+    sid: "sid-active",
+    media: { audio: true, video: false },
+    join: {
+      url: "wss://livekit.waddle.test",
+      room: ROOM,
+      identity: "alice",
+      token: "token",
+    },
+    selfNick: "alice",
+    selfFullJid: "alice@waddle.test/browser",
+  });
+}
 
 function message(overrides: Partial<TimelineMessage>): TimelineMessage {
   return {
@@ -89,7 +130,7 @@ function message(overrides: Partial<TimelineMessage>): TimelineMessage {
     body: "",
     author: "alice",
     createdAt: "2026-06-09T12:00:00Z",
-    timestamp: Date.parse("2026-06-09T12:00:00Z"),
+    createdAtSource: "archive",
     isSelf: false,
     ...overrides,
   };

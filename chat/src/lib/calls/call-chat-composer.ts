@@ -3,10 +3,14 @@ import { normalizeMucCallRoomJid } from "./muc-call-presence";
 
 type CallThreadCandidate = {
   threadId?: string;
-  roomJid?: string;
   callThread?: CallThreadAnchor;
 };
 
+/**
+ * Resolve the active call's XEP-0201 thread from the current conversation's
+ * loaded timeline. The message list is intentionally conversation-scoped by
+ * `ContentArea`; timeline messages do not carry a room JID themselves.
+ */
 export function resolveActiveMucCallThreadId(
   messages: readonly CallThreadCandidate[],
   roomJid: string | null | undefined,
@@ -21,7 +25,6 @@ export function resolveActiveMucCallThreadId(
     if (!message?.threadId || !message.callThread) continue;
     if (message.callThread.kind !== "muc") continue;
     if (message.callThread.sid !== activeSid) continue;
-    if (message.roomJid && normalizeMucCallRoomJid(message.roomJid) !== room) continue;
     return message.threadId;
   }
 

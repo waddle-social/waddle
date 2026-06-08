@@ -141,6 +141,7 @@ const {
   sendActiveMessage,
   sendPublicChannelMessage,
   sendThreadMessage,
+  sendCallChatMessage,
   sendGif,
   openThread,
   pushThread,
@@ -819,6 +820,7 @@ onUnmounted(() => {
               :reaction-mode="reactionModeTarget === 'main' ? reactionModeState : null"
               :ensure-message-loaded="ensureActiveMessageLoaded"
               :send-public-channel-message="sendPublicChannelMessage"
+              :send-call-chat-message="sendCallChatMessage"
               @send="sendActiveMessage"
               @send-call-chat="sendThreadMessage"
               @typing="notifyActiveComposing"

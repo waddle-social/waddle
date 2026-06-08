@@ -109,6 +109,15 @@ const props = defineProps<{
   ensureMessageLoaded?: (messageId: string) => Promise<boolean>;
   invokeExtensionAction?: (action: ExtensionAnnotationAction) => Promise<ExtensionCommandResult>;
   sendPublicChannelMessage?: (body: string) => Promise<void>;
+  sendCallChatMessage?: (
+    body: string,
+    markup: MarkupSpan[],
+    references: MessageReference[],
+    files: Array<File | Blob> | undefined,
+    replyTo: { id: string; author: string; body?: string } | undefined,
+    threadOverride: { threadId: string; parentThreadId?: string },
+    linkPreview?: ComposerLinkPreviewSendPayload,
+  ) => Promise<void>;
 }>();
 
 const emit = defineEmits<{
@@ -1544,6 +1553,7 @@ function dayDividerLabel(createdAt: string): string {
       :upload-progress="uploadProgress"
       :link-preview-lookup="linkPreviewLookup"
       :link-preview-scope="linkPreviewScope"
+      :send-call-chat-message="sendCallChatMessage"
       @send-call-chat="(...args) => emit('sendCallChat', ...args)"
     />
   </div>
