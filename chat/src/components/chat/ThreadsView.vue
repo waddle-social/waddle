@@ -4,12 +4,11 @@ import { Menu, MessagesSquare } from "lucide-vue-next";
 import { connectionStore } from "@/lib/connection-store";
 import type { ChannelSummary } from "@/lib/chat-types";
 import type { WasmThreadEntry } from "@/lib/xmpp/wasm-types";
-import { resolveChannelIdForRoomJid } from "@/lib/threads-channel-resolve";
 import ThreadsListPanel from "@/components/chat/ThreadsListPanel.vue";
 
 const props = defineProps<{
   channels: readonly ChannelSummary[];
-  onSelectThread: (channelId: string, threadId: string) => void | Promise<void>;
+  onSelectThreadEntry: (channelJid: string, threadId: string) => void | Promise<void>;
 }>();
 
 const xmppClient = computed(() => connectionStore.client);
@@ -18,16 +17,13 @@ const emit = defineEmits<{
   openNav: [];
 }>();
 
-// Clicking a row hands off to the controller's `onSelectThread`, which
-// (a) selects the channel that hosts the thread — switching the URL
-// from `/threads` to `/r/<channel>?thread=<rootId>` via the existing
-// watchers — and (b) opens the ThreadPanel reader. The user lands
-// directly inside the thread; a hard refresh of the resulting URL
-// restores the same view.
+// Clicking a row hands off the entry's bare JID to the controller's
+// `onSelectThreadEntry`, which (a) routes to the hosting surface — a
+// channel selection for MUC rooms, or a DM open for partner JIDs — and
+// (b) opens the ThreadPanel reader. The user lands directly inside the
+// thread; a hard refresh of the resulting URL restores the same view.
 async function openThread(entry: WasmThreadEntry) {
-  const channelId = resolveChannelIdForRoomJid(entry.channel, props.channels);
-  if (!channelId) return;
-  await props.onSelectThread(channelId, entry.thread_id);
+  await props.onSelectThreadEntry(entry.channel, entry.thread_id);
 }
 </script>
 
