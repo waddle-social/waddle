@@ -16,6 +16,7 @@
 //! machine.
 
 use super::frame::InboundFrame;
+use crate::xep::{CallThreadKind, CallThreadMedia};
 use crate::Stanza;
 use jid::{BareJid, FullJid};
 use waddle_xmpp_core::xep0359::{OriginId, StanzaId};
@@ -198,6 +199,13 @@ pub struct GroupchatThreadProjection {
     pub title: Option<String>,
     /// Thread author nickname (the resource component of `from`).
     pub author_nick: Option<String>,
+    /// Call-thread anchor kind — `Some(...)` only when this projection
+    /// is a thread root carrying a `urn:waddle:call-thread:0` anchor
+    /// marker (a DM or MUC call session). Replies never carry it.
+    pub call_thread_kind: Option<CallThreadKind>,
+    /// Call-thread media flags from the anchor marker — present iff
+    /// `call_thread_kind` is present.
+    pub call_thread_media: Option<CallThreadMedia>,
 }
 
 /// Read-only context supplied to every stanza handler
