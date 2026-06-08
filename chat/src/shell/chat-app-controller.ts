@@ -963,11 +963,24 @@ export function useChatAppController(giphyApiKey: string) {
       activeThreadStack.value.length > 0 &&
       activeThreadStack.value[activeThreadStack.value.length - 1] === threadId
     ) {
-      if (targetMessageId && ui.sidebarMode.value === "channels") void messaging.backfillThread(threadId);
+      if (targetMessageId) backfillActiveThread(threadId);
       return;
     }
     activeThreadStack.value = [threadId];
-    if (ui.sidebarMode.value === "channels") void messaging.backfillThread(threadId);
+    backfillActiveThread(threadId);
+  }
+
+  // Backfill a thread's replies from the archive for the active surface. DMs
+  // query the personal archive (`with=peer` + thread); channels query the
+  // room archive. Without this a thread opened from the global Threads view
+  // or a deep link shows only the replies that happen to be in the loaded
+  // conversation window.
+  function backfillActiveThread(threadId: string) {
+    if (ui.sidebarMode.value === "dms") {
+      void dmMessaging.backfillThread(threadId);
+    } else if (ui.sidebarMode.value === "channels") {
+      void messaging.backfillThread(threadId);
+    }
   }
 
   function roomJidForChannelId(channelId: string): string | null {
@@ -1019,7 +1032,7 @@ export function useChatAppController(giphyApiKey: string) {
       return;
     }
     activeThreadStack.value = [...activeThreadStack.value, threadId];
-    if (ui.sidebarMode.value === "channels") void messaging.backfillThread(threadId);
+    backfillActiveThread(threadId);
   }
 
   function popThreadTo(index: number) {
@@ -1158,7 +1171,10 @@ export function useChatAppController(giphyApiKey: string) {
   }
 
   function loadOlderThreadMessages(threadId: string) {
-    if (ui.sidebarMode.value === "dms") return;
+    if (ui.sidebarMode.value === "dms") {
+      void dmMessaging.loadOlderThreadMessages(threadId);
+      return;
+    }
     void messaging.loadOlderThreadMessages(threadId);
   }
 
@@ -1639,6 +1655,9 @@ export function useChatAppController(giphyApiKey: string) {
       activeThreadTargetMessageId.value = null;
       activeThreadStack.value = match.search.thread;
       activeRightPanel.value = match.search.thread.length > 0 ? "thread" : null;
+      for (const threadId of match.search.thread) {
+        void dmMessaging.backfillThread(threadId);
+      }
       return;
     }
 

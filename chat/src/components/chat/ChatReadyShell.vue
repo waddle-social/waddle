@@ -70,6 +70,7 @@ const {
   ui,
   waddles,
   messaging,
+  dmMessaging,
   dmConversations,
   channelUnread,
   rosterContacts,
@@ -938,8 +939,8 @@ onUnmounted(() => {
               :mention-candidates="mentionCandidates"
               :slow-mode-cooldown="threadPanelIsDm ? 0 : messaging.slowModeCooldown.value"
               :is-sending="false"
-              :is-loading-older-replies="threadPanelIsDm ? false : messaging.loadingOlderThreadIds.value.has(activeThreadStack[activeThreadStack.length - 2] ?? '')"
-              :has-older-replies="threadPanelIsDm ? false : (messaging.threadHasOlder.value[activeThreadStack[activeThreadStack.length - 2] ?? ''] ?? false)"
+              :is-loading-older-replies="(threadPanelIsDm ? dmMessaging.loadingOlderThreadIds.value : messaging.loadingOlderThreadIds.value).has(activeThreadStack[activeThreadStack.length - 2] ?? '')"
+              :has-older-replies="(threadPanelIsDm ? dmMessaging.threadHasOlder.value : messaging.threadHasOlder.value)[activeThreadStack[activeThreadStack.length - 2] ?? ''] ?? false"
               :upload-progress="{ uploading: false, progress: 0, filename: '' }"
               :channel-name="threadPanelIsDm ? (activeDmPeer?.peerUsername ?? '') : (waddles.currentChannel.value?.name ?? '')"
               :hide-composer="true"
@@ -980,8 +981,8 @@ onUnmounted(() => {
               :mention-candidates="mentionCandidates"
               :slow-mode-cooldown="threadPanelIsDm ? 0 : messaging.slowModeCooldown.value"
               :is-sending="activeIsSending"
-              :is-loading-older-replies="threadPanelIsDm ? false : messaging.loadingOlderThreadIds.value.has(activeThreadStack[activeThreadStack.length - 1] ?? '')"
-              :has-older-replies="threadPanelIsDm ? false : (messaging.threadHasOlder.value[activeThreadStack[activeThreadStack.length - 1] ?? ''] ?? false)"
+              :is-loading-older-replies="(threadPanelIsDm ? dmMessaging.loadingOlderThreadIds.value : messaging.loadingOlderThreadIds.value).has(activeThreadStack[activeThreadStack.length - 1] ?? '')"
+              :has-older-replies="(threadPanelIsDm ? dmMessaging.threadHasOlder.value : messaging.threadHasOlder.value)[activeThreadStack[activeThreadStack.length - 1] ?? ''] ?? false"
               :upload-progress="activeUploadProgress"
               :channel-name="threadPanelIsDm ? (activeDmPeer?.peerUsername ?? '') : (waddles.currentChannel.value?.name ?? '')"
               :reaction-mode="reactionModeTarget === 'thread' ? reactionModeState : null"

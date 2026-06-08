@@ -2847,6 +2847,15 @@ export class BrowserXmppClient {
     this.recordDmMamWatermarks(result.messages);
     return result;
   }
+  async queryPersonalMamByThread(peerJid: string, threadId: string, max = 100): Promise<LiveDmMessage[]> { const page = await this.queryPersonalMamThreadPage(peerJid, threadId, max, { type: "latest" }); return page.messages; }
+  async queryPersonalMamThreadPage(peerJid: string, threadId: string, max = 100, pageParam: MamThreadPageParam = { type: "latest" }): Promise<MamHistoryPage<LiveDmMessage>> {
+    if (!threadId) return { messages: [], complete: true };
+    const xmpp = await this.requireConnectedXmpp(); const page = await xmpp.fetch_dm_history_by_thread?.(barePeerJid(peerJid), threadId, max, pageParam.type === "before" ? pageParam.before : null) as WasmMamPage;
+    if (!page) return { messages: [], complete: true };
+    const result = this.dmMamPageToMessages(page, { applyCallEvents: false });
+    this.recordDmMamWatermarks(result.messages);
+    return result;
+  }
   async hydrateRecentDmCallActivity(
     peerJid: string,
     options: DmCallActivityHydrationOptions = {},

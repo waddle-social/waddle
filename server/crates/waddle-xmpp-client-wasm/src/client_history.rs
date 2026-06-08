@@ -25,6 +25,39 @@ impl WaddleClient {
         })
     }
 
+    /// Fetch a DM thread's archived replies from the account archive,
+    /// filtered by `with=peer` and the Waddle MAM thread field. Mirrors
+    /// `fetch_room_history_by_thread`, but targets the personal archive
+    /// (`to=account` + `with=peer`) instead of a room. `before_id` pages
+    /// older replies via RSM (XEP-0059).
+    pub fn fetch_dm_history_by_thread(
+        &self,
+        peer_jid: String,
+        thread_id: String,
+        max: u32,
+        before_id: Option<String>,
+    ) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let query_id = uuid::Uuid::new_v4().to_string();
+            let iq_id = uuid::Uuid::new_v4().to_string();
+            let account_jid = {
+                let stored = inner.borrow().config.clone();
+                bare_jid(&stored.jid)
+            };
+            let mut builder = MamIqBuilder::new(&iq_id, &query_id, max)
+                .to_jid(&account_jid)
+                .with_jid(&peer_jid)
+                .thread_id(&thread_id);
+            if let Some(before) = before_id.as_deref() {
+                builder = builder.before(before);
+            }
+            let iq = builder.build();
+            let page = send_mam_query_command(inner, iq, query_id).await?;
+            to_js_value(&mam_page_to_js(page))
+        })
+    }
+
     pub fn search_room_history(&self, room_jid: String, query: String, max: u32) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -413,6 +446,72 @@ mod client_history_tests {
         assert_eq!(iq.attr("to"), Some("alice@example.com"));
         let with_value = mam_form_value(&iq, "with");
         assert_eq!(with_value.as_deref(), Some("bob@example.com"));
+    }
+
+    fn build_dm_history_by_thread_iq(
+        iq_id: &str,
+        query_id: &str,
+        max: u32,
+        account_jid: &str,
+        peer_jid: &str,
+        thread_id: &str,
+        before_id: Option<&str>,
+    ) -> Element {
+        let mut builder = MamIqBuilder::new(iq_id, query_id, max)
+            .to_jid(account_jid)
+            .with_jid(peer_jid)
+            .thread_id(thread_id);
+        if let Some(before) = before_id {
+            builder = builder.before(before);
+        }
+        builder.build()
+    }
+
+    #[test]
+    fn dm_history_by_thread_targets_account_filters_peer_and_thread() {
+        let iq = build_dm_history_by_thread_iq(
+            "iq-1",
+            "query-1",
+            10,
+            "alice@example.com",
+            "bob@example.com",
+            "thread-42",
+            None,
+        );
+
+        assert_eq!(iq.attr("to"), Some("alice@example.com"));
+        assert_eq!(
+            mam_form_value(&iq, "with").as_deref(),
+            Some("bob@example.com")
+        );
+        assert_eq!(
+            mam_form_value(&iq, "{urn:waddle:mam-thread:0}thread").as_deref(),
+            Some("thread-42")
+        );
+    }
+
+    #[test]
+    fn dm_history_by_thread_pages_older_with_rsm_before() {
+        let iq = build_dm_history_by_thread_iq(
+            "iq-1",
+            "query-1",
+            10,
+            "alice@example.com",
+            "bob@example.com",
+            "thread-42",
+            Some("cursor-7"),
+        );
+
+        let before = iq
+            .get_child("query", TEST_MAM_NS)
+            .and_then(|query| query.get_child("set", TEST_RSM_NS))
+            .and_then(|set| set.get_child("before", TEST_RSM_NS))
+            .map(|element| element.text());
+        assert_eq!(before.as_deref(), Some("cursor-7"));
+        assert_eq!(
+            mam_form_value(&iq, "{urn:waddle:mam-thread:0}thread").as_deref(),
+            Some("thread-42")
+        );
     }
 
     #[test]

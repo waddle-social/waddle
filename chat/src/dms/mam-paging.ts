@@ -17,10 +17,12 @@ import {
 import { getMdsDisplayedCandidates, mdsChatKey, setMdsDisplayed } from "@/lib/last-seen-store";
 import {
   advanceCursorWithBeforePage,
+  advanceThreadCursor,
   classifyMamError,
   cursorFromLatestPage,
   isMamCursorNotFound,
   stripQueuedSelfMessages,
+  threadCursorFromLatestPage,
 } from "@/lib/xmpp/mam";
 
 const PAGE_SIZE = 100;
@@ -71,10 +73,13 @@ export function useDmMamPaging(deps: UseDmMamPagingDeps) {
   const isLoadingMessages = ref(false);
   const isLoadingOlderMessages = ref(false);
   const hasOlderMessages = ref(true);
+  const loadingOlderThreadIds = ref<Set<string>>(new Set());
+  const threadHasOlder = ref<Record<string, boolean>>({});
 
   let messageRequestId = 0;
   let oldestArchiveId: string | null = null;
   let initialLatestPagePinned = false;
+  const oldestThreadArchiveIds = new Map<string, string>();
 
   function buildTimelineFromMamResults(
     mamResults: LiveDmMessage[],
@@ -279,6 +284,95 @@ export function useDmMamPaging(deps: UseDmMamPagingDeps) {
     return !!findMessageById(messages.value, messageId);
   }
 
+  // Backfill a DM thread via XEP-0313 MAM filtered by thread id against the
+  // account archive (`with=peer` + thread field). Mirrors the channel
+  // `backfillThread`: the thread root carries no `<thread>` (threads start on
+  // the first reply), so MAM-by-thread never returns it — the panel resolves
+  // the root from the loaded DM window separately.
+  async function backfillThread(threadId: string): Promise<void> {
+    const client = xmppClient.value;
+    const peerJid = activePeerJid.value;
+    if (!client || !peerJid || !threadId || !session.value) return;
+    if (!("queryPersonalMamThreadPage" in client) && !("queryPersonalMamByThread" in client)) return;
+    const requestId = messageRequestId;
+    const isCurrentRequest = () =>
+      requestId === messageRequestId &&
+      xmppClient.value === client &&
+      activePeerJid.value === peerJid;
+    let page: { messages: LiveDmMessage[]; firstArchiveId?: string; complete?: boolean } | null = null;
+    let results: LiveDmMessage[] = [];
+    try {
+      page = "queryPersonalMamThreadPage" in client
+        ? await client.queryPersonalMamThreadPage(peerJid, threadId, PAGE_SIZE, { type: "latest" })
+        : null;
+      results = page ? page.messages : await client.queryPersonalMamByThread(peerJid, threadId, PAGE_SIZE);
+    } catch (e) {
+      if (isCurrentRequest()) {
+        threadHasOlder.value = { ...threadHasOlder.value, [threadId]: false };
+        actionError.value = dmLoadErrorMessage(peerJid);
+        console.warn("Could not backfill DM thread", e);
+      }
+      return;
+    }
+    if (!isCurrentRequest()) return;
+    const cursor = threadCursorFromLatestPage({
+      page,
+      pageSize: PAGE_SIZE,
+      fallbackMessages: page ? undefined : results,
+    });
+    if (cursor.oldestId !== undefined) oldestThreadArchiveIds.set(threadId, cursor.oldestId);
+    threadHasOlder.value = { ...threadHasOlder.value, [threadId]: cursor.hasOlder };
+    const next = buildTimelineFromMamResults(results, messages.value);
+    if (
+      next.length === messages.value.length &&
+      next.every((message, index) => message === messages.value[index])
+    ) {
+      return;
+    }
+    messages.value = next;
+  }
+
+  async function loadOlderThreadMessages(threadId: string): Promise<void> {
+    const client = xmppClient.value;
+    const peerJid = activePeerJid.value;
+    const before = oldestThreadArchiveIds.get(threadId);
+    if (!client || !peerJid || !threadId || !before || loadingOlderThreadIds.value.has(threadId)) return;
+    if (!("queryPersonalMamThreadPage" in client)) return;
+    const requestId = messageRequestId;
+    const isCurrentRequest = () =>
+      requestId === messageRequestId &&
+      xmppClient.value === client &&
+      activePeerJid.value === peerJid;
+    loadingOlderThreadIds.value = new Set([...loadingOlderThreadIds.value, threadId]);
+    try {
+      const page = await client.queryPersonalMamThreadPage(peerJid, threadId, PAGE_SIZE, { type: "before", before });
+      if (!isCurrentRequest()) return;
+      const advanced = advanceThreadCursor({ prior: { oldestId: before }, page });
+      if (advanced.oldestId !== undefined) oldestThreadArchiveIds.set(threadId, advanced.oldestId);
+      threadHasOlder.value = { ...threadHasOlder.value, [threadId]: advanced.hasOlder };
+      messages.value = buildTimelineFromMamResults(page.messages, messages.value);
+    } catch (e) {
+      const classified = classifyMamError(e);
+      if (isMamCursorNotFound(classified)) {
+        // §4.3.4 — drop the stale thread cursor; the next backfill restarts
+        // from the latest page. Guarded so a stale completion after a peer
+        // switch can't corrupt the new conversation's thread state.
+        if (isCurrentRequest()) {
+          oldestThreadArchiveIds.delete(threadId);
+          threadHasOlder.value = { ...threadHasOlder.value, [threadId]: false };
+        }
+      } else if (isCurrentRequest()) {
+        actionError.value = dmLoadErrorMessage(peerJid);
+      }
+    } finally {
+      if (isCurrentRequest()) {
+        const next = new Set(loadingOlderThreadIds.value);
+        next.delete(threadId);
+        loadingOlderThreadIds.value = next;
+      }
+    }
+  }
+
   function reset() {
     messageRequestId++;
     initialLatestPagePinned = false;
@@ -286,6 +380,9 @@ export function useDmMamPaging(deps: UseDmMamPagingDeps) {
     hasOlderMessages.value = true;
     isLoadingOlderMessages.value = false;
     isLoadingMessages.value = false;
+    loadingOlderThreadIds.value = new Set();
+    threadHasOlder.value = {};
+    oldestThreadArchiveIds.clear();
   }
 
   function currentRequestId(): number {
@@ -300,9 +397,13 @@ export function useDmMamPaging(deps: UseDmMamPagingDeps) {
     isLoadingMessages,
     isLoadingOlderMessages,
     hasOlderMessages,
+    loadingOlderThreadIds,
+    threadHasOlder,
     loadMessages,
     loadOlderMessages,
     ensureMessageLoaded,
+    backfillThread,
+    loadOlderThreadMessages,
     reset,
     currentRequestId,
     markInitialLatestPagePinned,
