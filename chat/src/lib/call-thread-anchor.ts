@@ -77,9 +77,10 @@ function buildCallAnchorCardState(options: {
   participantLabels: string[];
   messageCount: number;
 }): CallAnchorCardState | null {
-  if (!options.message.callThread) return null;
+  const callThread = options.message.callThread;
+  if (!callThread) return null;
   const { message, media, participantCount, participantLabels, messageCount } = options;
-  const live = !message.callThread.ended && options.hasActiveCall;
+  const live = !callThread.ended && options.hasActiveCall;
   const mediaLabel = media.video ? "video call" : "call";
   const peopleLabel = `${participantCount} ${participantCount === 1 ? "person" : "people"}`;
   const participants = participantLabels.length > 0 ? `: ${participantLabels.join(", ")}` : "";
