@@ -2,6 +2,7 @@
 //! so no XML is ever concatenated as strings (CLAUDE.md hard rule).
 
 use minidom::Element;
+use waddle_xmpp::xep::{CallThreadKind, CallThreadMedia};
 use xmpp_parsers::iq::Iq;
 
 use super::query::{
@@ -155,13 +156,59 @@ fn build_thread_entry(entry: &ThreadEntry) -> Element {
         title_el.append_text_node(title);
         t.append_child(title_el);
     }
+    if let (Some(kind), Some(media)) = (entry.call_thread_kind, entry.call_thread_media) {
+        let call_el = Element::builder("call", NS_THREADS)
+            .attr(
+                minidom::rxml::xml_ncname!("kind").to_owned(),
+                call_kind_token(kind),
+            )
+            .attr(
+                minidom::rxml::xml_ncname!("media").to_owned(),
+                call_media_tokens(media),
+            )
+            .build();
+        t.append_child(call_el);
+    }
+    if let (Some(ended_at), Some(ref duration)) = (entry.call_ended_at, &entry.call_duration) {
+        let call_ended_el = Element::builder("call-ended", NS_THREADS)
+            .attr(
+                minidom::rxml::xml_ncname!("ended").to_owned(),
+                ended_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            )
+            .attr(
+                minidom::rxml::xml_ncname!("duration").to_owned(),
+                duration.as_str(),
+            )
+            .build();
+        t.append_child(call_ended_el);
+    }
     t
+}
+
+/// `kind` attribute token for the `<call>` child.
+fn call_kind_token(kind: CallThreadKind) -> &'static str {
+    match kind {
+        CallThreadKind::Dm => "dm",
+        CallThreadKind::Muc => "muc",
+    }
+}
+
+/// Space-joined `media` tokens, `audio` before `video`, matching the
+/// call-thread anchor marker convention.
+fn call_media_tokens(media: CallThreadMedia) -> &'static str {
+    match (media.audio, media.video) {
+        (true, true) => "audio video",
+        (true, false) => "audio",
+        (false, true) => "video",
+        (false, false) => "",
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::threads::query::ThreadRootAuthor;
+    use waddle_xmpp::xep::{CallThreadDuration, CallThreadKind, CallThreadMedia};
     use xmpp_parsers::iq::Iq;
 
     fn make_get_iq(payload: Element) -> Iq {
@@ -311,6 +358,10 @@ mod tests {
             root_author: ThreadRootAuthor::parse("juliet"),
             preview: Some("Anyone reviewed the doc?".into()),
             thread_title: Some("Q3 planning".into()),
+            call_thread_kind: None,
+            call_thread_media: None,
+            call_ended_at: None,
+            call_duration: None,
         };
         let page = ThreadsPage {
             entries: vec![entry.clone()],
@@ -349,6 +400,10 @@ mod tests {
             root_author: None,
             preview: None,
             thread_title: None,
+            call_thread_kind: None,
+            call_thread_media: None,
+            call_ended_at: None,
+            call_duration: None,
         };
         let page = ThreadsPage {
             entries: vec![entry],
@@ -363,5 +418,102 @@ mod tests {
             .find(|c| c.name() == "thread")
             .expect("has thread");
         assert_eq!(thread_el.attr("has-unread"), Some("false"));
+    }
+
+    fn call_thread_entry() -> ThreadEntry {
+        ThreadEntry {
+            channel: "room@conference.example".parse().expect("valid bare JID"),
+            thread_id: "call-1".into(),
+            last_stanza_id: "S-9".into(),
+            last_activity_secs: 1_700_000_000,
+            unread: 0,
+            reply_count: 0,
+            root_author: None,
+            preview: None,
+            thread_title: None,
+            call_thread_kind: Some(CallThreadKind::Muc),
+            call_thread_media: Some(CallThreadMedia::audio_video()),
+            call_ended_at: None,
+            call_duration: None,
+        }
+    }
+
+    fn thread_child(entry: ThreadEntry) -> Element {
+        let page = ThreadsPage {
+            entries: vec![entry],
+            total: 1,
+            unread_threads: 0,
+            first_cursor: None,
+            last_cursor: None,
+        };
+        let elem = build_threads_response(&page);
+        elem.children()
+            .find(|c| c.name() == "thread")
+            .cloned()
+            .expect("has thread")
+    }
+
+    #[test]
+    fn build_emits_call_child_for_call_thread() {
+        let thread_el = thread_child(call_thread_entry());
+
+        let call = thread_el
+            .get_child("call", NS_THREADS)
+            .expect("has call child");
+        assert_eq!(call.attr("kind"), Some("muc"));
+        assert_eq!(call.attr("media"), Some("audio video"));
+        assert!(
+            thread_el.get_child("call-ended", NS_THREADS).is_none(),
+            "ongoing call must not emit <call-ended>"
+        );
+    }
+
+    #[test]
+    fn build_emits_call_ended_child_when_ended() {
+        let mut entry = call_thread_entry();
+        entry.call_thread_media = Some(CallThreadMedia::audio_only());
+        entry.call_ended_at = Some(
+            "2026-06-07T14:35:00Z"
+                .parse::<chrono::DateTime<chrono::Utc>>()
+                .expect("ended timestamp"),
+        );
+        entry.call_duration = Some(CallThreadDuration::parse("PT5M").expect("duration"));
+
+        let thread_el = thread_child(entry);
+
+        let call = thread_el
+            .get_child("call", NS_THREADS)
+            .expect("has call child");
+        assert_eq!(call.attr("kind"), Some("muc"));
+        assert_eq!(call.attr("media"), Some("audio"));
+
+        let ended = thread_el
+            .get_child("call-ended", NS_THREADS)
+            .expect("has call-ended child");
+        assert_eq!(ended.attr("ended"), Some("2026-06-07T14:35:00Z"));
+        assert_eq!(ended.attr("duration"), Some("PT5M"));
+    }
+
+    #[test]
+    fn build_omits_call_children_for_non_call_thread() {
+        let entry = ThreadEntry {
+            channel: "room@conference.example".parse().expect("valid bare JID"),
+            thread_id: "plain".into(),
+            last_stanza_id: "S-1".into(),
+            last_activity_secs: 1_700_000_000,
+            unread: 0,
+            reply_count: 0,
+            root_author: None,
+            preview: None,
+            thread_title: None,
+            call_thread_kind: None,
+            call_thread_media: None,
+            call_ended_at: None,
+            call_duration: None,
+        };
+        let thread_el = thread_child(entry);
+
+        assert!(thread_el.get_child("call", NS_THREADS).is_none());
+        assert!(thread_el.get_child("call-ended", NS_THREADS).is_none());
     }
 }
