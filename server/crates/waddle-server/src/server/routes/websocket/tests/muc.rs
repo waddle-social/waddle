@@ -1430,6 +1430,89 @@ async fn empty_muji_presence_ends_the_active_call_thread() {
     );
 }
 
+// Per #918: the whole call-thread lifecycle is gated on a configured SFU
+// (`muc_update.rs`: anchor built only when `active_call_started &&
+// sfu.is_some()`). Without an SFU the `active_call_started` flag from
+// client-driven Muji presence must NOT register a call-thread anchor,
+// because the end path that would consume it is itself SFU-gated. These
+// two tests pin both sides of that gate.
+#[tokio::test]
+async fn active_muji_presence_without_sfu_does_not_register_call_thread_anchor() {
+    // `create_test_websocket_state` builds state with `sfu: None`, so the
+    // call-thread gate is closed.
+    let state = create_test_websocket_state().await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "no-sfu-anchor@muc.example.com".parse().expect("room jid");
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        None,
+        &Some(owner_session.clone()),
+    )
+    .await;
+    let alice_phase = waddle_xmpp::protocol::ConnectionPhase::ready(alice.clone(), false);
+
+    let mut active = muc_presence_to(&room_jid, "alice");
+    active.payloads.push(active_muji().to_element());
+    let _ = handlers::presence::handle_presence(
+        active,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &alice_phase,
+        &Some(owner_session),
+    )
+    .await;
+
+    assert!(
+        !state.deps.protocol.call_threads.contains_key(&room_jid),
+        "an active <muji/> must not register a call-thread anchor when no SFU is configured"
+    );
+}
+
+#[tokio::test]
+async fn active_muji_presence_with_sfu_registers_call_thread_anchor() {
+    let recorder = std::sync::Arc::new(RecordingSfu::default());
+    let state = state_with_recording_sfu(std::sync::Arc::clone(&recorder)).await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "with-sfu-anchor@muc.example.com".parse().expect("room jid");
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        None,
+        &Some(owner_session.clone()),
+    )
+    .await;
+    let alice_phase = waddle_xmpp::protocol::ConnectionPhase::ready(alice.clone(), false);
+
+    let mut active = muc_presence_to(&room_jid, "alice");
+    active.payloads.push(active_muji().to_element());
+    let _ = handlers::presence::handle_presence(
+        active,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &alice_phase,
+        &Some(owner_session),
+    )
+    .await;
+
+    assert!(
+        state.deps.protocol.call_threads.contains_key(&room_jid),
+        "an active <muji/> must register a call-thread anchor when an SFU is configured"
+    );
+}
+
 #[tokio::test]
 async fn resumed_muc_join_presence_replays_existing_muji_state() {
     let state = create_test_websocket_state().await;
