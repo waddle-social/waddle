@@ -106,6 +106,20 @@ fn call_thread_ended_child_parses_xep0422_fastening_shape() {
 }
 
 #[test]
+fn call_thread_ended_child_rejects_bare_payload_without_fastening() {
+    let ended = CallThreadEnded {
+        ended: "2026-06-07T14:35:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("ended"),
+        duration: CallThreadDuration::parse("PT5M").expect("duration"),
+    };
+    let mut message = Message::new(None);
+    message.payloads.push(build_call_thread_ended(&ended));
+
+    assert_eq!(parse_call_thread_ended_child(&message), None);
+}
+
+#[test]
 #[should_panic(expected = "call-thread marker requires audio or video media")]
 fn call_thread_marker_builder_rejects_empty_media() {
     let _ = build_call_thread_anchor(&anchor(CallThreadMedia {

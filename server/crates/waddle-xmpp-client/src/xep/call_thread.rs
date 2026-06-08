@@ -51,7 +51,24 @@ pub struct CallThreadAnchor {
 pub struct CallThreadEnded {
     pub anchor_id: String,
     pub ended: DateTime<Utc>,
-    pub duration: String,
+    pub duration: CallThreadDuration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallThreadDuration(String);
+
+impl CallThreadDuration {
+    pub fn parse(value: &str) -> Result<Self, CallThreadParseError> {
+        if is_valid_call_thread_duration(value) {
+            Ok(Self(value.to_owned()))
+        } else {
+            Err(CallThreadParseError::InvalidDuration)
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,14 +166,11 @@ fn parse_call_thread_ended(
     let ended = DateTime::parse_from_rfc3339(required_attr(element, "ended")?)
         .map_err(|_| CallThreadParseError::InvalidEnded)?
         .with_timezone(&Utc);
-    let duration = required_attr(element, "duration")?;
-    if !is_valid_call_thread_duration(duration) {
-        return Err(CallThreadParseError::InvalidDuration);
-    }
+    let duration = CallThreadDuration::parse(required_attr(element, "duration")?)?;
     Ok(CallThreadEnded {
         anchor_id,
         ended,
-        duration: duration.to_string(),
+        duration,
     })
 }
 

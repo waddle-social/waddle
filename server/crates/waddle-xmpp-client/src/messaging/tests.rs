@@ -367,7 +367,7 @@ fn parse_message_with_call_thread_ended_fastening() {
 
     assert_eq!(ended.anchor_id, "anchor-stanza-id");
     assert_eq!(ended.ended.to_rfc3339(), "2026-06-07T14:35:00+00:00");
-    assert_eq!(ended.duration, "PT5M");
+    assert_eq!(ended.duration.as_str(), "PT5M");
 }
 
 #[test]

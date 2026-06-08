@@ -131,7 +131,7 @@ pub(crate) fn broadcast_muji_clear(
     }
 }
 
-async fn maybe_broadcast_call_thread_ended(state: &WebSocketState, room_jid: &BareJid) {
+pub(crate) async fn maybe_broadcast_call_thread_ended(state: &WebSocketState, room_jid: &BareJid) {
     let Some(sfu) = state.deps.protocol.sfu.as_ref() else {
         return;
     };

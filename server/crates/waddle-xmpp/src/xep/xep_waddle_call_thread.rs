@@ -187,9 +187,6 @@ pub fn parse_call_thread_ended_child(message: &Message) -> Option<CallThreadEnde
 }
 
 fn call_thread_ended_payload(payload: &Element) -> Option<&Element> {
-    if payload.name() == "call-thread-ended" && payload.ns() == NS_WADDLE_CALL_THREAD {
-        return Some(payload);
-    }
     if payload.name() != "apply-to" || payload.ns() != NS_FASTEN {
         return None;
     }

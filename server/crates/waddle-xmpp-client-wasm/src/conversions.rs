@@ -80,7 +80,7 @@ pub(crate) fn call_thread_ended_to_js(
     WaddleCallThreadEnded {
         anchor_id: ended.anchor_id,
         ended: ended.ended.to_rfc3339(),
-        duration: ended.duration,
+        duration: ended.duration.as_str().to_owned(),
     }
 }
 
