@@ -529,6 +529,14 @@ impl WaddleClient {
                         root_author: e.root_author,
                         preview: e.preview,
                         thread_title: e.thread_title,
+                        call_thread: e.call_thread.map(|c| WaddleThreadCallAnchor {
+                            kind: c.kind.as_token().to_owned(),
+                            media: c.media.token_list(),
+                        }),
+                        call_thread_ended: e.call_thread_ended.map(|c| WaddleThreadCallEnded {
+                            ended: c.ended,
+                            duration: c.duration,
+                        }),
                     })
                     .collect(),
                 next_cursor: page.next_cursor,

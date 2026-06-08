@@ -883,6 +883,30 @@ pub struct WaddleThreadEntry {
     pub preview: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thread_title: Option<String>,
+    /// Call-thread anchor summary, present when this thread anchors a call.
+    #[serde(rename = "callThread", skip_serializing_if = "Option::is_none")]
+    pub call_thread: Option<WaddleThreadCallAnchor>,
+    /// Ended-call summary, present when the anchored call has ended.
+    #[serde(rename = "callThreadEnded", skip_serializing_if = "Option::is_none")]
+    pub call_thread_ended: Option<WaddleThreadCallEnded>,
+}
+
+/// Call-thread anchor summary on a `urn:waddle:threads:0` entry.
+#[derive(Debug, Clone, Serialize)]
+pub struct WaddleThreadCallAnchor {
+    /// `"muc"` or `"dm"`.
+    pub kind: String,
+    /// Ordered media tokens, e.g. `["audio", "video"]`.
+    pub media: Vec<String>,
+}
+
+/// Ended-call summary on a `urn:waddle:threads:0` entry.
+#[derive(Debug, Clone, Serialize)]
+pub struct WaddleThreadCallEnded {
+    /// RFC 3339 timestamp when the call ended.
+    pub ended: String,
+    /// ISO-8601 duration, e.g. `"PT5M"`.
+    pub duration: String,
 }
 
 /// Paged response to a urn:waddle:threads:0 query, shaped for JS.
@@ -1262,5 +1286,63 @@ mod tests {
             parsed.into_credentials().is_err(),
             "web platform must require all three Web Push fields"
         );
+    }
+
+    /// Pin the JSON shape the chat client consumes for `WasmThreadEntry`
+    /// (see `chat/src/lib/xmpp/wasm-types.ts`): a call-thread entry carries
+    /// the camelCase `callThread` and, once ended, `callThreadEnded` keys.
+    #[test]
+    fn thread_entry_serializes_call_thread_fields() {
+        let entry = super::WaddleThreadEntry {
+            channel: "room@x".into(),
+            thread_id: "call-1".into(),
+            last_stanza_id: "S1".into(),
+            last_activity: "2026-06-07T14:30:00Z".into(),
+            unread: 0,
+            reply_count: 4,
+            has_unread: false,
+            root_author: None,
+            preview: None,
+            thread_title: None,
+            call_thread: Some(super::WaddleThreadCallAnchor {
+                kind: "muc".into(),
+                media: vec!["audio".into(), "video".into()],
+            }),
+            call_thread_ended: Some(super::WaddleThreadCallEnded {
+                ended: "2026-06-07T14:35:00Z".into(),
+                duration: "PT5M".into(),
+            }),
+        };
+        let value = serde_json::to_value(&entry).expect("serializes");
+        assert_eq!(
+            value["callThread"],
+            serde_json::json!({ "kind": "muc", "media": ["audio", "video"] })
+        );
+        assert_eq!(
+            value["callThreadEnded"],
+            serde_json::json!({ "ended": "2026-06-07T14:35:00Z", "duration": "PT5M" })
+        );
+    }
+
+    #[test]
+    fn thread_entry_omits_call_thread_fields_when_absent() {
+        let entry = super::WaddleThreadEntry {
+            channel: "room@x".into(),
+            thread_id: "plain-1".into(),
+            last_stanza_id: "S2".into(),
+            last_activity: "2026-06-07T13:00:00Z".into(),
+            unread: 0,
+            reply_count: 1,
+            has_unread: false,
+            root_author: None,
+            preview: None,
+            thread_title: None,
+            call_thread: None,
+            call_thread_ended: None,
+        };
+        let value = serde_json::to_value(&entry).expect("serializes");
+        let map = value.as_object().expect("object");
+        assert!(!map.contains_key("callThread"));
+        assert!(!map.contains_key("callThreadEnded"));
     }
 }

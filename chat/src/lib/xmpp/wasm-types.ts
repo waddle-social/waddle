@@ -368,6 +368,20 @@ export interface WasmVCard4 {
   photo_uri?: string;
 }
 
+/** Call-thread anchor summary on a thread entry. */
+export interface WasmThreadCallAnchor {
+  kind: "muc" | "dm";
+  media: Array<"audio" | "video">;
+}
+
+/** Ended-call summary on a thread entry. */
+export interface WasmThreadCallEnded {
+  /** RFC 3339 timestamp. */
+  ended: string;
+  /** ISO-8601 duration, e.g. "PT5M". */
+  duration: string;
+}
+
 /** One entry in a urn:waddle:threads:0 response. */
 export interface WasmThreadEntry {
   channel: string;
@@ -381,6 +395,10 @@ export interface WasmThreadEntry {
   root_author?: string;
   preview?: string;
   thread_title?: string;
+  /** Present when this thread anchors a call. */
+  callThread?: WasmThreadCallAnchor;
+  /** Present when the anchored call has ended. */
+  callThreadEnded?: WasmThreadCallEnded;
 }
 
 /** Paged response to a urn:waddle:threads:0 query. */
