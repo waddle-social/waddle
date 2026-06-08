@@ -286,9 +286,11 @@ export function useDmMamPaging(deps: UseDmMamPagingDeps) {
 
   // Backfill a DM thread via XEP-0313 MAM filtered by thread id against the
   // account archive (`with=peer` + thread field). Mirrors the channel
-  // `backfillThread`: the thread root carries no `<thread>` (threads start on
-  // the first reply), so MAM-by-thread never returns it — the panel resolves
-  // the root from the loaded DM window separately.
+  // `backfillThread`. The server thread filter (`matches_thread_filter`)
+  // matches both the replies (which carry `<thread>`) and the root by message
+  // id, so this populates a thread whose messages fall outside the loaded DM
+  // window; the panel still resolves the root from the loaded window when it
+  // is present there.
   async function backfillThread(threadId: string): Promise<void> {
     const client = xmppClient.value;
     const peerJid = activePeerJid.value;
