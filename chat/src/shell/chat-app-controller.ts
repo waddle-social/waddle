@@ -944,6 +944,22 @@ export function useChatAppController(giphyApiKey: string) {
     await messaging.sendMessage(body, markup, references, files, replyTo, threadOverride, linkPreview);
   }
 
+  async function sendCallChatMessage(
+    body: string,
+    markup: MarkupSpan[],
+    references: MessageReference[],
+    files: Array<File | Blob> | undefined,
+    replyTo: { id: string; author: string; body?: string } | undefined,
+    threadOverride: { threadId: string; parentThreadId?: string },
+    linkPreview?: ComposerLinkPreviewSendPayload,
+  ) {
+    ui.clearActionError();
+    await sendThreadMessage(body, markup, references, files, replyTo, threadOverride, linkPreview);
+    if (ui.actionError.value) {
+      throw new Error(ui.actionError.value);
+    }
+  }
+
   function sendGif(
     url: string,
     threadOverride?: { threadId: string; parentThreadId?: string },
@@ -2241,6 +2257,7 @@ export function useChatAppController(giphyApiKey: string) {
       sendActiveMessage,
       sendPublicChannelMessage,
       sendThreadMessage,
+      sendCallChatMessage,
       sendGif,
       openThread,
       pushThread,
