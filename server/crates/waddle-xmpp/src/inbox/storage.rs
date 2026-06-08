@@ -219,6 +219,17 @@ impl InboxStorage for InMemoryInboxStorage {
             .unwrap_or_default())
     }
 
+    async fn list_all_threads(&self, user: &BareJid) -> Result<Vec<InboxEntry>, InboxStorageError> {
+        let guard = self
+            .per_user
+            .lock()
+            .map_err(|e| InboxStorageError::Other(e.to_string()))?;
+        Ok(guard
+            .get(user)
+            .map(InboxView::all_threads)
+            .unwrap_or_default())
+    }
+
     async fn upsert(
         &self,
         user: &BareJid,

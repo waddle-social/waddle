@@ -1070,10 +1070,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn page_carries_call_thread_metadata() {
+    async fn page_carries_call_thread_metadata_for_channel_and_dm_threads() {
         let (inbox, threads) = make_storage_pair().await;
         let user = jid("me@example.com");
         let room = jid("room@muc.example");
+        let peer = jid("bob@example.com");
         let ended = "2026-06-07T14:35:00Z"
             .parse::<DateTime<Utc>>()
             .expect("ended timestamp");
@@ -1090,17 +1091,51 @@ mod tests {
             .await
             .expect("upsert call thread");
 
+        inbox
+            .upsert(
+                &user,
+                InboxEntry::new(peer, ConversationKind::Direct, "s-dm-call", 200)
+                    .with_thread("dm-call-thread")
+                    .with_call_thread(CallThreadKind::Dm, CallThreadMedia::audio_only()),
+                true,
+            )
+            .await
+            .expect("upsert DM call thread");
+
         let page = threads.page(&user, &threads_query(50)).await.expect("page");
-        assert_eq!(page.entries.len(), 1);
-        let entry = &page.entries[0];
-        assert_eq!(entry.call_thread_kind, Some(CallThreadKind::Muc));
+        assert_eq!(page.entries.len(), 2);
+
+        let dm_entry = page
+            .entries
+            .iter()
+            .find(|entry| entry.thread_id == "dm-call-thread")
+            .expect("DM call thread surfaces in global Threads view");
+        assert_eq!(dm_entry.channel, jid("bob@example.com"));
+        assert_eq!(dm_entry.unread, 1);
+        assert_eq!(dm_entry.call_thread_kind, Some(CallThreadKind::Dm));
         assert_eq!(
-            entry.call_thread_media,
+            dm_entry.call_thread_media,
+            Some(CallThreadMedia::audio_only())
+        );
+
+        let channel_entry = page
+            .entries
+            .iter()
+            .find(|entry| entry.thread_id == "call-thread")
+            .expect("channel call thread surfaces in global Threads view");
+        assert_eq!(channel_entry.channel, jid("room@muc.example"));
+        assert_eq!(channel_entry.unread, 1);
+        assert_eq!(channel_entry.call_thread_kind, Some(CallThreadKind::Muc));
+        assert_eq!(
+            channel_entry.call_thread_media,
             Some(CallThreadMedia::audio_video())
         );
-        assert_eq!(entry.call_ended_at, Some(ended));
+        assert_eq!(channel_entry.call_ended_at, Some(ended));
         assert_eq!(
-            entry.call_duration.as_ref().map(CallThreadDuration::as_str),
+            channel_entry
+                .call_duration
+                .as_ref()
+                .map(CallThreadDuration::as_str),
             Some("PT5M")
         );
     }
@@ -1139,10 +1174,39 @@ mod tests {
             )
             .await
             .expect("upsert thread");
+        inbox
+            .upsert(
+                &user,
+                InboxEntry::new(
+                    jid("bob@example.com"),
+                    ConversationKind::Direct,
+                    "s-dm",
+                    120,
+                )
+                .with_thread("dm-call-thread")
+                .with_call_thread(CallThreadKind::Dm, CallThreadMedia::audio_only()),
+                true,
+            )
+            .await
+            .expect("upsert DM call thread without parent row");
 
         let page = threads.page(&user, &threads_query(50)).await.expect("page");
-        assert_eq!(page.entries.len(), 1);
-        assert_eq!(page.total, 1);
-        assert_eq!(page.entries[0].thread_id, "t1");
+        assert_eq!(page.entries.len(), 2);
+        assert_eq!(page.total, 2);
+        assert_eq!(
+            page.entries
+                .iter()
+                .map(|entry| entry.thread_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["dm-call-thread", "t1"]
+        );
+        let dm_entry = page
+            .entries
+            .iter()
+            .find(|entry| entry.thread_id == "dm-call-thread")
+            .expect("DM call thread surfaces from in-memory storage");
+        assert_eq!(dm_entry.channel, jid("bob@example.com"));
+        assert_eq!(dm_entry.unread, 1);
+        assert_eq!(dm_entry.call_thread_kind, Some(CallThreadKind::Dm));
     }
 }
