@@ -369,13 +369,13 @@ export interface WasmVCard4 {
 }
 
 /** Call-thread anchor summary on a thread entry. */
-export interface WasmThreadCallAnchor {
+interface WasmThreadCallAnchor {
   kind: "muc" | "dm";
   media: Array<"audio" | "video">;
 }
 
 /** Ended-call summary on a thread entry. */
-export interface WasmThreadCallEnded {
+interface WasmThreadCallEnded {
   /** RFC 3339 timestamp. */
   ended: string;
   /** ISO-8601 duration, e.g. "PT5M". */

@@ -6,6 +6,7 @@ import { isBusy } from "@/lib/calls/call-activity-dock";
 import { $mucCallParticipants, normalizeMucCallRoomJid } from "@/lib/calls/muc-call-presence";
 import { readRoomHasActiveCall, useRoomHasActiveCall } from "@/lib/calls/use-active-muc-call";
 import type { CallMedia } from "@/lib/calls/types";
+import type { WasmThreadEntry } from "@/lib/xmpp/wasm-types";
 
 export interface CallAnchorCardState {
   status: "live" | "ended";
@@ -29,6 +30,32 @@ export function callThreadAnchorLabel(message: Pick<TimelineMessage, "body" | "a
 
 export function callThreadAnchorThreadId(message: Pick<TimelineMessage, "threadId" | "callThread">): string | null {
   return message.callThread && message.threadId ? message.threadId : null;
+}
+
+/**
+ * Adapts a global Threads-query entry into the message shape the call-anchor
+ * card state builder consumes, so a thread-list row can feed
+ * `readCallAnchorCardState`/`useCallAnchorCardState` without a timeline message.
+ *
+ * Returns `null` for entries that don't anchor a MUC call (DM call anchors and
+ * plain threads), matching the channel feed which only renders MUC anchors.
+ */
+export function wasmThreadEntryToAnchorMessage(
+  entry: WasmThreadEntry,
+): Pick<TimelineMessage, "body" | "author" | "callThread" | "threadId"> | null {
+  if (!entry.callThread || entry.callThread.kind !== "muc") return null;
+  return {
+    body: "",
+    author: "",
+    threadId: entry.thread_id,
+    callThread: {
+      kind: "muc",
+      media: entry.callThread.media,
+      ...(entry.callThreadEnded
+        ? { ended: entry.callThreadEnded.ended, duration: entry.callThreadEnded.duration }
+        : {}),
+    },
+  };
 }
 
 export function readCallAnchorCardState(
