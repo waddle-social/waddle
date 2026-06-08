@@ -16,6 +16,25 @@ pub enum CallThreadKind {
     Muc,
 }
 
+impl CallThreadKind {
+    /// Canonical wire/storage token for the kind: `"dm"` or `"muc"`.
+    pub fn as_token(self) -> &'static str {
+        match self {
+            CallThreadKind::Dm => "dm",
+            CallThreadKind::Muc => "muc",
+        }
+    }
+
+    /// Parse a wire token (`"dm"`/`"muc"`) into a typed kind.
+    pub fn parse_token(token: &str) -> Result<Self, CallThreadParseError> {
+        match token {
+            "dm" => Ok(CallThreadKind::Dm),
+            "muc" => Ok(CallThreadKind::Muc),
+            _ => Err(CallThreadParseError::InvalidKind),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CallThreadMedia {
     pub audio: bool,
@@ -35,6 +54,23 @@ impl CallThreadMedia {
             audio: true,
             video: true,
         }
+    }
+
+    /// Parse a space-separated media token list (e.g. `"audio video"`).
+    pub fn parse_tokens(value: &str) -> Result<Self, CallThreadParseError> {
+        parse_media(value)
+    }
+
+    /// Ordered media tokens (`audio` before `video`) for the wasm boundary.
+    pub fn token_list(self) -> Vec<String> {
+        let mut tokens = Vec::with_capacity(2);
+        if self.audio {
+            tokens.push("audio".to_owned());
+        }
+        if self.video {
+            tokens.push("video".to_owned());
+        }
+        tokens
     }
 }
 
@@ -117,11 +153,7 @@ pub fn parse_call_thread_anchor(
         return Err(CallThreadParseError::NotCallThread);
     }
 
-    let kind = match required_attr(element, "kind")? {
-        "dm" => CallThreadKind::Dm,
-        "muc" => CallThreadKind::Muc,
-        _ => return Err(CallThreadParseError::InvalidKind),
-    };
+    let kind = CallThreadKind::parse_token(required_attr(element, "kind")?)?;
 
     let sid = SessionId(required_attr(element, "sid")?.to_string());
     let media = parse_media(required_attr(element, "media")?)?;

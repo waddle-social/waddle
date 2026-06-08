@@ -1,6 +1,14 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { isFeedTimelineMessage, mapLiveRoomMessageToTimeline } from "../src/channels/timeline";
-import { callThreadAnchorLabel, callThreadAnchorThreadId } from "../src/lib/call-thread-anchor";
+import {
+  callThreadAnchorLabel,
+  callThreadAnchorThreadId,
+  readCallAnchorCardState,
+  wasmThreadEntryToAnchorMessage,
+} from "../src/lib/call-thread-anchor";
+import type { WasmThreadEntry } from "../src/lib/xmpp/wasm-types";
+import { $callState } from "../src/lib/calls/call-store";
+import { $mucCallMedia, $mucCallParticipants, clearMucCallParticipants } from "../src/lib/calls/muc-call-presence";
 import type { WaddleSession } from "../src/lib/server-auth";
 import { roomMessageFromArchived } from "../src/lib/xmpp/wasm-message-codecs";
 import type { LiveRoomMessage } from "../src/lib/xmpp-client";
@@ -39,6 +47,12 @@ function callAnchor(overrides: Partial<LiveRoomMessage> = {}): LiveRoomMessage {
 }
 
 describe("call-thread anchor timeline mapping", () => {
+  afterEach(() => {
+    $callState.set({ phase: "idle" });
+    clearMucCallParticipants();
+    $mucCallMedia.set({});
+  });
+
   test("maps inbound channel call-thread marker onto the unified timeline message", () => {
     const timelineMessage = mapLiveRoomMessageToTimeline(session, callAnchor());
 
@@ -68,6 +82,70 @@ describe("call-thread anchor timeline mapping", () => {
     expect(callThreadAnchorThreadId(timelineMessage)).toBe("call-thread-uuid");
   });
 
+  test("derives rich anchor card state from room live detectors with stale-live override", () => {
+    const timelineMessage = mapLiveRoomMessageToTimeline(session, callAnchor({
+      roomJid: "general@conference.example.com",
+    }));
+    $mucCallParticipants.set({
+      "general@conference.example.com": ["alice", "bob"],
+    });
+    $mucCallMedia.setKey("general@conference.example.com", { audio: true, video: true });
+
+    expect(readCallAnchorCardState(timelineMessage, "general@conference.example.com")).toEqual({
+      status: "live",
+      media: { audio: true, video: true },
+      participantCount: 2,
+      participantLabels: ["alice", "bob"],
+      messageCount: 0,
+      threadId: "call-thread-uuid",
+      title: "Live video call",
+      actionLabel: "Join",
+      actionDisabled: false,
+      ariaLabel: "Join live video call, 2 people: alice, bob",
+    });
+
+    clearMucCallParticipants();
+
+    expect(readCallAnchorCardState(timelineMessage, "general@conference.example.com")).toMatchObject({
+      status: "ended",
+      participantCount: 0,
+      participantLabels: [],
+      title: "Call ended",
+      actionLabel: null,
+      actionDisabled: false,
+    });
+  });
+
+  test("uses the banner's busy semantics for live anchor join actions", () => {
+    const timelineMessage = mapLiveRoomMessageToTimeline(session, callAnchor({
+      roomJid: "general@conference.example.com",
+    }));
+    $mucCallParticipants.set({
+      "general@conference.example.com": ["alice", "bob"],
+    });
+    $callState.set({
+      phase: "active",
+      kind: "muc",
+      peer: "other@conference.example.com",
+      sid: "other-call",
+      media: { audio: true, video: false },
+      join: {
+        url: "wss://livekit.test",
+        room: "other",
+        identity: "alice@example.com/web",
+        token: "tok",
+      },
+      selfNick: "alice",
+    });
+
+    expect(readCallAnchorCardState(timelineMessage, "general@conference.example.com")).toMatchObject({
+      status: "live",
+      actionLabel: "In another call",
+      actionDisabled: true,
+      ariaLabel: "Live call, 2 people: alice, bob; already in another call",
+    });
+  });
+
   test("renders ended call-thread anchors as muted duration summaries", () => {
     const timelineMessage = mapLiveRoomMessageToTimeline(session, callAnchor({
       callThread: {
@@ -83,6 +161,48 @@ describe("call-thread anchor timeline mapping", () => {
 
     expect(callThreadAnchorLabel(timelineMessage)).toBe("Call ended · 5m");
     expect(callThreadAnchorThreadId(timelineMessage)).toBe("call-thread-uuid");
+  });
+
+  test("derives ended card media from the anchor, not the cleared live detector", () => {
+    const timelineMessage = mapLiveRoomMessageToTimeline(session, callAnchor({
+      roomJid: "general@conference.example.com",
+      callThread: {
+        kind: "muc",
+        sid: "session-uuid",
+        media: ["audio", "video"],
+        initiator: "alice@example",
+        started: "2026-06-07T14:30:00Z",
+        ended: "2026-06-07T14:35:00Z",
+        duration: "PT5M",
+      },
+    }));
+
+    // No active call seeded: the live detector falls back to audio-only default.
+    expect(readCallAnchorCardState(timelineMessage, "general@conference.example.com")).toMatchObject({
+      status: "ended",
+      media: { audio: true, video: true },
+      title: "Call ended · 5m",
+    });
+  });
+
+  test("shows the formatted duration in the ended anchor card title", () => {
+    const timelineMessage = mapLiveRoomMessageToTimeline(session, callAnchor({
+      roomJid: "general@conference.example.com",
+      callThread: {
+        kind: "muc",
+        sid: "session-uuid",
+        media: ["audio"],
+        initiator: "alice@example",
+        started: "2026-06-07T14:30:00Z",
+        ended: "2026-06-07T14:35:00Z",
+        duration: "PT5M",
+      },
+    }));
+
+    expect(readCallAnchorCardState(timelineMessage, "general@conference.example.com")).toMatchObject({
+      status: "ended",
+      title: "Call ended · 5m",
+    });
   });
 
   test("room archive codec maps the WASM call-thread marker onto LiveRoomMessage", () => {
@@ -207,5 +327,91 @@ describe("call-thread anchor timeline mapping", () => {
     });
 
     expect(live).toBeNull();
+  });
+});
+
+const baseEntry: WasmThreadEntry = {
+  channel: "general@conference.example.com",
+  thread_id: "call-thread-uuid",
+  last_stanza_id: "s1",
+  last_activity: "2026-06-07T14:30:00Z",
+  unread: 0,
+  reply_count: 7,
+  has_unread: false,
+};
+
+describe("wasmThreadEntryToAnchorMessage", () => {
+  afterEach(() => {
+    $callState.set({ phase: "idle" });
+    clearMucCallParticipants();
+    $mucCallMedia.set({});
+  });
+
+  test("adapts a live MUC call-thread entry into an anchor-shaped message", () => {
+    const msg = wasmThreadEntryToAnchorMessage({
+      ...baseEntry,
+      callThread: { kind: "muc", media: ["audio", "video"] },
+    });
+    expect(msg).not.toBeNull();
+    expect(msg?.threadId).toBe("call-thread-uuid");
+    expect(msg?.callThread?.media).toEqual(["audio", "video"]);
+    expect(msg?.callThread?.ended).toBeUndefined();
+  });
+
+  test("adapts an ended MUC call-thread entry with duration", () => {
+    const msg = wasmThreadEntryToAnchorMessage({
+      ...baseEntry,
+      callThread: { kind: "muc", media: ["audio"] },
+      callThreadEnded: { ended: "2026-06-07T14:35:00Z", duration: "PT5M" },
+    });
+    expect(msg?.callThread).toMatchObject({
+      kind: "muc",
+      media: ["audio"],
+      ended: "2026-06-07T14:35:00Z",
+      duration: "PT5M",
+    });
+  });
+
+  test("returns null for non-call and non-muc entries", () => {
+    expect(wasmThreadEntryToAnchorMessage(baseEntry)).toBeNull();
+    expect(
+      wasmThreadEntryToAnchorMessage({ ...baseEntry, callThread: { kind: "dm", media: ["audio"] } }),
+    ).toBeNull();
+  });
+
+  test("drives the shared composable to a live card when the room call is active", () => {
+    const msg = wasmThreadEntryToAnchorMessage({
+      ...baseEntry,
+      callThread: { kind: "muc", media: ["audio", "video"] },
+    });
+    expect(msg).not.toBeNull();
+    $mucCallParticipants.set({ "general@conference.example.com": ["alice", "bob"] });
+    $mucCallMedia.setKey("general@conference.example.com", { audio: true, video: true });
+
+    expect(readCallAnchorCardState(msg!, "general@conference.example.com")).toMatchObject({
+      status: "live",
+      media: { audio: true, video: true },
+      participantCount: 2,
+      participantLabels: ["alice", "bob"],
+      threadId: "call-thread-uuid",
+      title: "Live video call",
+      actionLabel: "Join",
+    });
+  });
+
+  test("drives the shared composable to an ended card for an ended entry", () => {
+    const msg = wasmThreadEntryToAnchorMessage({
+      ...baseEntry,
+      callThread: { kind: "muc", media: ["audio"] },
+      callThreadEnded: { ended: "2026-06-07T14:35:00Z", duration: "PT5M" },
+    });
+    expect(msg).not.toBeNull();
+
+    expect(readCallAnchorCardState(msg!, "general@conference.example.com")).toMatchObject({
+      status: "ended",
+      title: "Call ended · 5m",
+      actionLabel: null,
+      ariaLabel: "Call ended · 5m",
+    });
   });
 });

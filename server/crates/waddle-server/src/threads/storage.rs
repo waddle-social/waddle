@@ -260,6 +260,10 @@ fn build_thread_entry(row: &InboxEntry) -> Option<ThreadEntry> {
         root_author,
         preview: row.preview.clone(),
         thread_title: row.thread_title.clone(),
+        call_thread_kind: row.call_thread_kind,
+        call_thread_media: row.call_thread_media,
+        call_ended_at: row.call_ended_at,
+        call_duration: row.call_duration.clone(),
     })
 }
 
@@ -352,7 +356,9 @@ impl ThreadsStorage for InboxBackedThreadsStorage {
 mod tests {
     use super::*;
     use crate::inbox::DatabaseInboxStorage;
+    use chrono::{DateTime, Utc};
     use waddle_xmpp::inbox::{ConversationKind, InboxEntry};
+    use waddle_xmpp::xep::{CallThreadDuration, CallThreadKind, CallThreadMedia};
 
     fn jid(value: &str) -> BareJid {
         value.parse().expect("valid JID")
@@ -1060,6 +1066,42 @@ mod tests {
                 .map(|entry| entry.thread_id.as_str())
                 .collect::<Vec<_>>(),
             vec!["few"]
+        );
+    }
+
+    #[tokio::test]
+    async fn page_carries_call_thread_metadata() {
+        let (inbox, threads) = make_storage_pair().await;
+        let user = jid("me@example.com");
+        let room = jid("room@muc.example");
+        let ended = "2026-06-07T14:35:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("ended timestamp");
+
+        inbox
+            .upsert(
+                &user,
+                InboxEntry::new(room, ConversationKind::MucRoom, "s-call", 100)
+                    .with_thread("call-thread")
+                    .with_call_thread(CallThreadKind::Muc, CallThreadMedia::audio_video())
+                    .with_call_ended(ended, CallThreadDuration::parse("PT5M").expect("duration")),
+                true,
+            )
+            .await
+            .expect("upsert call thread");
+
+        let page = threads.page(&user, &threads_query(50)).await.expect("page");
+        assert_eq!(page.entries.len(), 1);
+        let entry = &page.entries[0];
+        assert_eq!(entry.call_thread_kind, Some(CallThreadKind::Muc));
+        assert_eq!(
+            entry.call_thread_media,
+            Some(CallThreadMedia::audio_video())
+        );
+        assert_eq!(entry.call_ended_at, Some(ended));
+        assert_eq!(
+            entry.call_duration.as_ref().map(CallThreadDuration::as_str),
+            Some("PT5M")
         );
     }
 

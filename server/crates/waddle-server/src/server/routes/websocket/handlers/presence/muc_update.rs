@@ -235,13 +235,21 @@ pub(super) async fn try_handle_muc_presence_update(
         outcome.sender_muji.as_ref(),
         &outcome.session_mujis,
     );
-    let call_thread_anchor = if outcome.active_call_started {
-        Some(build_call_thread_anchor_message(
+    // Gate the entire call-thread lifecycle on a configured SFU. The
+    // `active_call_started` flag comes from client-driven Muji presence,
+    // not the SFU; without this gate a no-SFU deployment would build,
+    // broadcast, and persist a call-thread anchor whose end path
+    // (`maybe_broadcast_call_thread_ended` / the `call_threads` registry)
+    // is itself SFU-gated — leaving a permanent call-thread row and a
+    // false Join affordance that can never be ended. Per #918,
+    // call-thread tracking is disabled when no SFU bridge is configured.
+    let call_thread_anchor = if outcome.active_call_started && state.deps.protocol.sfu.is_some() {
+        build_call_thread_anchor_message(
             room_jid,
             &sender_jid.to_bare(),
             outcome.active_muji.as_ref(),
             &outcome.update.sender_nick,
-        ))
+        )
     } else {
         None
     };
@@ -307,7 +315,11 @@ pub(super) async fn try_handle_muc_presence_update(
             .await;
     }
 
-    if let Some(anchor) = call_thread_anchor {
+    if let Some(CallThreadAnchorMessage {
+        message: anchor,
+        thread_id,
+    }) = call_thread_anchor
+    {
         let started = anchor
             .payloads
             .iter()
@@ -329,16 +341,17 @@ pub(super) async fn try_handle_muc_presence_update(
             Box::new(anchor),
         )
         .await;
-        if state.deps.protocol.sfu.is_some() {
-            if let Some((anchor_origin_id, started)) = anchor_origin_id.zip(started) {
-                state.deps.protocol.call_threads.insert(
-                    room_jid.clone(),
-                    ActiveCallThread {
-                        anchor_origin_id,
-                        started,
-                    },
-                );
-            }
+        // The anchor only exists when an SFU is configured (gated at the
+        // build site above), so no inner SFU check is needed here.
+        if let Some((anchor_origin_id, started)) = anchor_origin_id.zip(started) {
+            state.deps.protocol.call_threads.insert(
+                room_jid.clone(),
+                ActiveCallThread {
+                    anchor_origin_id,
+                    started,
+                    thread_id: thread_id.as_str().to_owned(),
+                },
+            );
         }
     }
 
@@ -347,13 +360,28 @@ pub(super) async fn try_handle_muc_presence_update(
     Some(responses)
 }
 
+/// A freshly-built call-thread anchor system message together with the
+/// `urn:waddle:threads:0` thread id it was assigned. The thread id is
+/// surfaced so the caller can register it in
+/// [`ActiveCallThread`](crate::server::routes::websocket::ActiveCallThread),
+/// correlating the later `<call-thread-ended/>` fastening back to the
+/// inbox/threads rows for this exact thread.
+struct CallThreadAnchorMessage {
+    message: Message,
+    thread_id: ThreadId,
+}
+
+/// Build the call-thread anchor system message. Returns `None` only in
+/// the impossible case that a freshly generated UUID is empty — handled
+/// without panicking so the no-`expect` hard rule holds; the caller then
+/// simply skips anchoring this call.
 fn build_call_thread_anchor_message(
     room_jid: &BareJid,
     initiator: &BareJid,
     active_muji: Option<&Muji>,
     initiator_nick: &str,
-) -> Message {
-    let thread_id = uuid::Uuid::new_v4().to_string();
+) -> Option<CallThreadAnchorMessage> {
+    let thread_id = ThreadId::new(uuid::Uuid::new_v4().to_string())?;
     let sid = SessionId(uuid::Uuid::new_v4().to_string());
     let media = media_from_muji(active_muji);
     let body = format!("{initiator_nick} started a call");
@@ -361,7 +389,7 @@ fn build_call_thread_anchor_message(
     message.from = Some(jid::Jid::from(room_jid.clone()));
     message.type_ = MessageType::Groupchat;
     message.bodies.insert(Lang(String::new()), body);
-    let thread = ThreadInfo::root(ThreadId::new(thread_id).expect("uuid thread id is non-empty"));
+    let thread = ThreadInfo::root(thread_id.clone());
     message
         .payloads
         .push(build_thread_element(&thread, CLIENT_STANZA_NS));
@@ -378,7 +406,7 @@ fn build_call_thread_anchor_message(
             started: chrono::Utc::now(),
         }));
     message.payloads.push(build_hint_element(Hint::Store));
-    message
+    Some(CallThreadAnchorMessage { message, thread_id })
 }
 
 fn media_from_muji(active_muji: Option<&Muji>) -> CallThreadMedia {

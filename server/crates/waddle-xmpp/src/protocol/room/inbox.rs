@@ -22,6 +22,7 @@ use super::context::{RoomContext, SyntheticSenderAuthority};
 use super::traits::{RoomHandler, RoomHandlerOutcome};
 use crate::inbox::runtime::{preview_text, should_project_message};
 use crate::types::Role;
+use crate::xep::parse_call_thread_anchor_child;
 use crate::xep::xep_waddle_forums::{extract_forum_action, ForumAction};
 use jid::BareJid;
 use std::collections::HashSet;
@@ -163,10 +164,17 @@ fn thread_projection(message: &Message) -> Option<GroupchatThreadProjection> {
             .as_ref()
             .and_then(|jid| jid.resource().map(|r| r.to_string()))
     });
+    // Capture the `urn:waddle:call-thread:0` anchor metadata when this
+    // message carries the marker. The parser already requires the anchor
+    // namespace, so a plain reply (no marker) yields `None` for both
+    // fields and never overwrites the root's persisted call metadata.
+    let call_anchor = parse_call_thread_anchor_child(message);
     Some(GroupchatThreadProjection {
         thread_id: info.id.as_str().to_owned(),
         title,
         author_nick,
+        call_thread_kind: call_anchor.as_ref().map(|anchor| anchor.kind),
+        call_thread_media: call_anchor.as_ref().map(|anchor| anchor.media),
     })
 }
 
@@ -721,6 +729,54 @@ mod tests {
         assert_eq!(thread.thread_id, "root-stanza");
         assert_eq!(thread.title.as_deref(), Some("Root prompt"));
         assert_eq!(thread.author_nick.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn thread_projection_captures_call_thread_anchor_metadata() {
+        use crate::xep::{
+            build_call_thread_anchor, CallThreadAnchor, CallThreadKind, CallThreadMedia,
+        };
+        use chrono::{DateTime, Utc};
+        use xmpp_parsers::jingle::SessionId;
+
+        let room = bare("team@conf.example.com");
+        let alice = full("team@conf.example.com/alice");
+
+        // Thread-root groupchat message carrying the call-thread anchor.
+        let mut root = groupchat(&room, &alice, "starting a call");
+        root.id = Some(xmpp_parsers::message::Id("call-root".to_string()));
+        set_thread_id(&mut root, "call-root");
+        let anchor = CallThreadAnchor {
+            kind: CallThreadKind::Muc,
+            sid: SessionId("session-abc".to_owned()),
+            media: CallThreadMedia {
+                audio: true,
+                video: true,
+            },
+            initiator: "alice@example.com".parse().expect("initiator"),
+            started: "2026-06-07T14:30:00Z"
+                .parse::<DateTime<Utc>>()
+                .expect("started"),
+        };
+        root.payloads.push(build_call_thread_anchor(&anchor));
+
+        let projection = thread_projection(&root).expect("anchor is a thread root → Some");
+        assert_eq!(projection.call_thread_kind, Some(CallThreadKind::Muc));
+        assert_eq!(
+            projection.call_thread_media,
+            Some(CallThreadMedia {
+                audio: true,
+                video: true,
+            })
+        );
+
+        // A plain thread reply (no anchor marker) carries no call-thread metadata.
+        let mut reply = groupchat(&room, &alice, "follow-up");
+        reply.id = Some(xmpp_parsers::message::Id("reply-stanza".to_string()));
+        set_thread_id(&mut reply, "call-root");
+        let reply_projection = thread_projection(&reply).expect("reply still resolves a thread id");
+        assert_eq!(reply_projection.call_thread_kind, None);
+        assert_eq!(reply_projection.call_thread_media, None);
     }
 
     #[test]

@@ -1343,11 +1343,41 @@ async fn empty_muji_presence_ends_the_active_call_thread() {
         &Some(owner_session.clone()),
     )
     .await;
+    // Anchor the call thread in the inbox under the same thread id the
+    // active-call registration carries, so the ended summary can be
+    // correlated back to this exact thread's row.
+    let thread_id = "call-thread-uuid";
+    state
+        .deps
+        .protocol
+        .inbox_storage
+        .upsert(
+            &alice.to_bare(),
+            waddle_xmpp::inbox::InboxEntry::new(
+                room_jid.clone(),
+                waddle_xmpp::inbox::ConversationKind::MucRoom,
+                "anchor-stanza",
+                1_700_000_000,
+            )
+            .with_thread(thread_id)
+            .with_call_thread(
+                waddle_xmpp::xep::CallThreadKind::Muc,
+                waddle_xmpp::xep::CallThreadMedia {
+                    audio: true,
+                    video: false,
+                },
+            ),
+            true,
+        )
+        .await
+        .expect("seed call-thread anchor inbox row");
+
     state.deps.protocol.call_threads.insert(
         room_jid.clone(),
         crate::server::routes::websocket::ActiveCallThread {
             anchor_origin_id: "anchor-origin-id".to_owned(),
             started: chrono::Utc::now() - chrono::Duration::minutes(5),
+            thread_id: thread_id.to_owned(),
         },
     );
 
@@ -1366,6 +1396,120 @@ async fn empty_muji_presence_ends_the_active_call_thread() {
     assert!(
         !state.deps.protocol.call_threads.contains_key(&room_jid),
         "XMPP-native Muji clear must consume the active call thread when the SFU participant set is empty"
+    );
+
+    // The ended summary must be persisted onto the thread's inbox row so
+    // the durable threads projection reflects the call ending without a
+    // MAM replay.
+    let anchor_row = state
+        .deps
+        .protocol
+        .inbox_storage
+        .list_threads(&alice.to_bare(), &room_jid)
+        .await
+        .expect("list room threads")
+        .into_iter()
+        .find(|entry| entry.thread_id.as_deref() == Some(thread_id))
+        .expect("anchor thread row persists");
+    assert!(
+        anchor_row.call_ended_at.is_some(),
+        "ending the active call must stamp call_ended_at onto the thread inbox row"
+    );
+    assert!(
+        anchor_row
+            .call_duration
+            .as_ref()
+            .is_some_and(|duration| duration.as_str().starts_with("PT")),
+        "ending the active call must stamp an ISO-8601 call_duration onto the thread inbox row: {:?}",
+        anchor_row.call_duration
+    );
+    assert_eq!(
+        anchor_row.call_thread_kind,
+        Some(waddle_xmpp::xep::CallThreadKind::Muc),
+        "the anchor kind must survive the ended UPDATE"
+    );
+}
+
+// Per #918: the whole call-thread lifecycle is gated on a configured SFU
+// (`muc_update.rs`: anchor built only when `active_call_started &&
+// sfu.is_some()`). Without an SFU the `active_call_started` flag from
+// client-driven Muji presence must NOT register a call-thread anchor,
+// because the end path that would consume it is itself SFU-gated. These
+// two tests pin both sides of that gate.
+#[tokio::test]
+async fn active_muji_presence_without_sfu_does_not_register_call_thread_anchor() {
+    // `create_test_websocket_state` builds state with `sfu: None`, so the
+    // call-thread gate is closed.
+    let state = create_test_websocket_state().await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "no-sfu-anchor@muc.example.com".parse().expect("room jid");
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        None,
+        &Some(owner_session.clone()),
+    )
+    .await;
+    let alice_phase = waddle_xmpp::protocol::ConnectionPhase::ready(alice.clone(), false);
+
+    let mut active = muc_presence_to(&room_jid, "alice");
+    active.payloads.push(active_muji().to_element());
+    let _ = handlers::presence::handle_presence(
+        active,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &alice_phase,
+        &Some(owner_session),
+    )
+    .await;
+
+    assert!(
+        !state.deps.protocol.call_threads.contains_key(&room_jid),
+        "an active <muji/> must not register a call-thread anchor when no SFU is configured"
+    );
+}
+
+#[tokio::test]
+async fn active_muji_presence_with_sfu_registers_call_thread_anchor() {
+    let recorder = std::sync::Arc::new(RecordingSfu::default());
+    let state = state_with_recording_sfu(std::sync::Arc::clone(&recorder)).await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "with-sfu-anchor@muc.example.com".parse().expect("room jid");
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        None,
+        &Some(owner_session.clone()),
+    )
+    .await;
+    let alice_phase = waddle_xmpp::protocol::ConnectionPhase::ready(alice.clone(), false);
+
+    let mut active = muc_presence_to(&room_jid, "alice");
+    active.payloads.push(active_muji().to_element());
+    let _ = handlers::presence::handle_presence(
+        active,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &alice_phase,
+        &Some(owner_session),
+    )
+    .await;
+
+    assert!(
+        state.deps.protocol.call_threads.contains_key(&room_jid),
+        "an active <muji/> must register a call-thread anchor when an SFU is configured"
     );
 }
 

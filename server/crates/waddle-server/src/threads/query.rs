@@ -1,6 +1,8 @@
 //! Typed request and response values for the threads query.
 
+use chrono::{DateTime, Utc};
 use jid::BareJid;
+use waddle_xmpp::xep::{CallThreadDuration, CallThreadKind, CallThreadMedia};
 
 /// `urn:waddle:threads:0` namespace.
 pub const NS_THREADS: &str = "urn:waddle:threads:0";
@@ -106,6 +108,17 @@ pub struct ThreadEntry {
     pub root_author: Option<ThreadRootAuthor>,
     pub preview: Option<String>,
     pub thread_title: Option<String>,
+    /// Kind of call anchored to this thread (DM or MUC). `None` for
+    /// non-call threads.
+    pub call_thread_kind: Option<CallThreadKind>,
+    /// Media negotiated for the anchored call (audio and/or video). `None`
+    /// for non-call threads.
+    pub call_thread_media: Option<CallThreadMedia>,
+    /// When the anchored call ended. `Some` only once the call has ended.
+    pub call_ended_at: Option<DateTime<Utc>>,
+    /// Duration of the ended call (ISO 8601 `PT…`). `Some` only once the
+    /// call has ended.
+    pub call_duration: Option<CallThreadDuration>,
 }
 
 impl ThreadEntry {

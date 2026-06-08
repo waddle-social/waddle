@@ -22,6 +22,10 @@ pub(super) async fn initialize(storage: &DatabaseInboxStorage) -> Result<(), Inb
                 thread_title TEXT,
                 reply_count INTEGER NOT NULL DEFAULT 0,
                 author TEXT,
+                call_thread_kind TEXT,
+                call_thread_media TEXT,
+                call_ended_at INTEGER,
+                call_duration TEXT,
                 PRIMARY KEY (user_jid, partner_jid, thread_id)
             );
             INSERT INTO inbox_entries_new (user_jid, partner_jid, thread_id, kind, last_stanza_id, last_updated, unread, preview)
@@ -50,6 +54,10 @@ pub(super) async fn initialize(storage: &DatabaseInboxStorage) -> Result<(), Inb
                 thread_title TEXT,
                 reply_count INTEGER NOT NULL DEFAULT 0,
                 author TEXT,
+                call_thread_kind TEXT,
+                call_thread_media TEXT,
+                call_ended_at {i64_type},
+                call_duration TEXT,
                 PRIMARY KEY (user_jid, partner_jid, thread_id)
             );
             "#,
@@ -73,6 +81,12 @@ pub(super) async fn initialize(storage: &DatabaseInboxStorage) -> Result<(), Inb
         (),
     )
     .await?;
+    // Existing databases that pre-date the call-thread columns (issue
+    // #919) get them added in place; fresh databases already have them
+    // from the CREATE TABLE above. Without this targeted ALTER, the
+    // runtime SELECT against the new columns errors with "no such
+    // column" / "column does not exist" on every list query.
+    migrate_inbox_call_thread_columns(storage).await?;
     // Fresh databases get the full schema via CREATE TABLE IF NOT
     // EXISTS. Existing databases that pre-date the
     // `sender_can_broadcast_channel_mention` column are migrated
@@ -187,10 +201,71 @@ async fn recovery_column_present_sqlite(
     storage: &DatabaseInboxStorage,
     column: &str,
 ) -> Result<bool, InboxStorageError> {
+    column_present_sqlite(storage, "groupchat_notification_recovery", column).await
+}
+
+/// Adds the four call-thread columns (issue #919) to existing
+/// `inbox_entries` tables that pre-date them. Idempotent on both SQLite
+/// and Postgres — re-runs at every startup are no-ops once the columns
+/// exist. All four are nullable: a row that pre-dates a call thread has
+/// no anchor metadata, and a row whose call has not ended has no ended
+/// summary.
+async fn migrate_inbox_call_thread_columns(
+    storage: &DatabaseInboxStorage,
+) -> Result<(), InboxStorageError> {
+    let i64_type = crate::db::i64_sql_type(storage.db.driver());
+    // (column, SQL type) for the four call-thread columns.
+    let columns: [(&str, &str); 4] = [
+        ("call_thread_kind", "TEXT"),
+        ("call_thread_media", "TEXT"),
+        ("call_ended_at", i64_type),
+        ("call_duration", "TEXT"),
+    ];
+    match storage.db.driver() {
+        DatabaseDriver::Sqlite => {
+            for (column, sql_type) in columns {
+                if !column_present_sqlite(storage, "inbox_entries", column).await? {
+                    info!(column, "Adding column to inbox_entries (SQLite)");
+                    storage
+                        .execute(
+                            &format!("ALTER TABLE inbox_entries ADD COLUMN {column} {sql_type}"),
+                            (),
+                        )
+                        .await?;
+                }
+            }
+        }
+        DatabaseDriver::Postgres => {
+            // `ADD COLUMN IF NOT EXISTS` makes this idempotent at the
+            // SQL layer; no PRAGMA-equivalent probe needed.
+            for (column, sql_type) in columns {
+                storage
+                    .execute(
+                        &format!(
+                            "ALTER TABLE inbox_entries ADD COLUMN IF NOT EXISTS {column} {sql_type}"
+                        ),
+                        (),
+                    )
+                    .await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// SQLite-only: returns `true` if `column` exists on `table`. Probes
+/// `PRAGMA table_info(<table>)`. When the table itself does not yet
+/// exist, returns `true` so callers treat the missing-column ALTER as
+/// moot (the CREATE TABLE IF NOT EXISTS path owns that case).
+async fn column_present_sqlite(
+    storage: &DatabaseInboxStorage,
+    table: &str,
+    column: &str,
+) -> Result<bool, InboxStorageError> {
     let mut rows = storage
         .query(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='groupchat_notification_recovery'",
-            (),
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            crate::db_params![table],
         )
         .await
         .map_err(|error| InboxStorageError::Other(error.to_string()))?;
@@ -200,13 +275,20 @@ async fn recovery_column_present_sqlite(
         .map_err(|error| InboxStorageError::Other(error.to_string()))?
         .is_some();
     if !table_exists {
-        // The CREATE TABLE IF NOT EXISTS above ran first; if the
-        // table still doesn't exist, this run is unusual but the
+        // The CREATE TABLE IF NOT EXISTS path ran first; if the table
+        // still doesn't exist, this run is unusual but the
         // missing-column path is moot.
         return Ok(true);
     }
+    // SAFETY: `table` is interpolated directly into the PRAGMA string.
+    // SQLite's `PRAGMA table_info(...)` cannot take a bound parameter for
+    // the table name, so interpolation is unavoidable here. `table` MUST
+    // therefore be a compile-time string literal — all current callers
+    // pass `&'static str` constants ("inbox_entries",
+    // "groupchat_notification_recovery"). NEVER pass user input or any
+    // runtime-derived value to this helper.
     let mut cols = storage
-        .query("PRAGMA table_info(groupchat_notification_recovery)", ())
+        .query(&format!("PRAGMA table_info({table})"), ())
         .await
         .map_err(|error| InboxStorageError::Other(error.to_string()))?;
     while let Some(row) = cols

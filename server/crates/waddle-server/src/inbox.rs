@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use crate::db::{DatabaseConfig, DatabaseDriver, IntoParams};
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use jid::BareJid;
 use tracing::{info, instrument};
 use waddle_xmpp::inbox::storage::{
@@ -12,6 +13,7 @@ use waddle_xmpp::inbox::storage::{
     InboxStorageError,
 };
 use waddle_xmpp::inbox::{ConversationKind, InboxEntry};
+use waddle_xmpp::xep::CallThreadDuration;
 use waddle_xmpp_core::xep0359::StanzaId;
 
 use crate::db::Database;
@@ -20,7 +22,7 @@ mod codec;
 mod open;
 mod schema;
 
-use codec::{decode_row, encode_kind, SELECT_COLS};
+use codec::{decode_row, encode_call_thread_columns, encode_kind, SELECT_COLS};
 pub use open::build_inbox_storage;
 
 const GROUPCHAT_NOTIFICATION_RECOVERY_SELECT_COLS: &str = "recipient_bare_jid, room_jid, thread_id, stanza_id_by, stanza_id, sender_jid, is_live_occupant, room_members_only, sender_can_broadcast_channel_mention, created_at_ms";
@@ -81,6 +83,76 @@ impl DatabaseInboxStorage {
             .map_err(|error| InboxStorageError::Other(error.to_string()))?;
         Ok(())
     }
+}
+
+/// Shared INSERT … ON CONFLICT for the inbox upsert. The two trailing
+/// `?` placeholders carry the unread/reply increment flags; the
+/// `call_*` columns COALESCE `excluded` over the stored value so a later
+/// non-anchor reply upsert (which carries no call metadata) does not
+/// wipe the anchor's kind/media or the ended summary.
+fn upsert_sql() -> String {
+    format!(
+        r#"
+        INSERT INTO inbox_entries (
+            user_jid, partner_jid, thread_id, kind, last_stanza_id, last_updated,
+            unread, preview, thread_title, reply_count, author,
+            call_thread_kind, call_thread_media, call_ended_at, call_duration
+        ) VALUES (?, ?, ?, ?, ?, ?, CASE WHEN ? != 0 THEN 1 ELSE 0 END, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(user_jid, partner_jid, thread_id) DO UPDATE SET
+            kind = excluded.kind,
+            last_stanza_id = excluded.last_stanza_id,
+            last_updated = excluded.last_updated,
+            preview = excluded.preview,
+            unread = CASE
+                WHEN ? != 0 THEN inbox_entries.unread + 1
+                ELSE inbox_entries.unread
+            END,
+            thread_title = COALESCE(excluded.thread_title, inbox_entries.thread_title),
+            reply_count = CASE
+                WHEN ? != 0 THEN inbox_entries.reply_count + 1
+                ELSE inbox_entries.reply_count
+            END,
+            author = COALESCE(excluded.author, inbox_entries.author),
+            call_thread_kind = COALESCE(excluded.call_thread_kind, inbox_entries.call_thread_kind),
+            call_thread_media = COALESCE(excluded.call_thread_media, inbox_entries.call_thread_media),
+            call_ended_at = COALESCE(excluded.call_ended_at, inbox_entries.call_ended_at),
+            call_duration = COALESCE(excluded.call_duration, inbox_entries.call_duration)
+        RETURNING {SELECT_COLS}
+        "#
+    )
+}
+
+/// Binds the inbox upsert parameters in `upsert_sql` placeholder order.
+/// The four `call_*` Values come from the codec encode helper so typed
+/// metadata serializes to TEXT/INTEGER only here at the SQL boundary.
+fn upsert_params(
+    user: &BareJid,
+    entry: &InboxEntry,
+    increment: i64,
+    is_thread: i64,
+) -> Vec<crate::db::Value> {
+    let thread_id = entry.thread_id.as_deref().unwrap_or("");
+    let [call_thread_kind, call_thread_media, call_ended_at, call_duration] =
+        encode_call_thread_columns(entry);
+    vec![
+        crate::db::Value::from(user.to_string()),
+        crate::db::Value::from(entry.partner.to_string()),
+        crate::db::Value::from(thread_id.to_string()),
+        crate::db::Value::from(encode_kind(entry.kind)),
+        crate::db::Value::from(entry.last_stanza_id.clone()),
+        crate::db::Value::from(entry.last_updated),
+        crate::db::Value::from(increment),
+        crate::db::Value::from(entry.preview.clone()),
+        crate::db::Value::from(entry.thread_title.clone()),
+        crate::db::Value::from(entry.reply_count as i64),
+        crate::db::Value::from(entry.author.clone()),
+        call_thread_kind,
+        call_thread_media,
+        call_ended_at,
+        call_duration,
+        crate::db::Value::from(increment),
+        crate::db::Value::from(is_thread),
+    ]
 }
 
 fn insert_groupchat_notification_recovery_sql() -> &'static str {
@@ -261,49 +333,9 @@ impl InboxStorage for DatabaseInboxStorage {
         let increment = i64::from(u8::from(increment_unread));
         let thread_id = entry.thread_id.as_deref().unwrap_or("");
         let is_thread = i64::from(u8::from(!thread_id.is_empty()));
-        let sql = format!(
-            r#"
-            INSERT INTO inbox_entries (
-                user_jid, partner_jid, thread_id, kind, last_stanza_id, last_updated,
-                unread, preview, thread_title, reply_count, author
-            ) VALUES (?, ?, ?, ?, ?, ?, CASE WHEN ? != 0 THEN 1 ELSE 0 END, ?, ?, ?, ?)
-            ON CONFLICT(user_jid, partner_jid, thread_id) DO UPDATE SET
-                kind = excluded.kind,
-                last_stanza_id = excluded.last_stanza_id,
-                last_updated = excluded.last_updated,
-                preview = excluded.preview,
-                unread = CASE
-                    WHEN ? != 0 THEN inbox_entries.unread + 1
-                    ELSE inbox_entries.unread
-                END,
-                thread_title = COALESCE(excluded.thread_title, inbox_entries.thread_title),
-                reply_count = CASE
-                    WHEN ? != 0 THEN inbox_entries.reply_count + 1
-                    ELSE inbox_entries.reply_count
-                END,
-                author = COALESCE(excluded.author, inbox_entries.author)
-            RETURNING {SELECT_COLS}
-            "#
-        );
+        let sql = upsert_sql();
         let mut rows = self
-            .query(
-                &sql,
-                crate::db_params![
-                    user.to_string(),
-                    entry.partner.to_string(),
-                    thread_id.to_string(),
-                    encode_kind(entry.kind),
-                    entry.last_stanza_id,
-                    entry.last_updated,
-                    increment,
-                    entry.preview,
-                    entry.thread_title,
-                    entry.reply_count as i64,
-                    entry.author,
-                    increment,
-                    is_thread,
-                ],
-            )
+            .query(&sql, upsert_params(user, &entry, increment, is_thread))
             .await?;
 
         let row = rows
@@ -326,54 +358,14 @@ impl InboxStorage for DatabaseInboxStorage {
         let increment = i64::from(u8::from(increment_unread));
         let thread_id = entry.thread_id.as_deref().unwrap_or("");
         let is_thread = i64::from(u8::from(!thread_id.is_empty()));
-        let sql = format!(
-            r#"
-            INSERT INTO inbox_entries (
-                user_jid, partner_jid, thread_id, kind, last_stanza_id, last_updated,
-                unread, preview, thread_title, reply_count, author
-            ) VALUES (?, ?, ?, ?, ?, ?, CASE WHEN ? != 0 THEN 1 ELSE 0 END, ?, ?, ?, ?)
-            ON CONFLICT(user_jid, partner_jid, thread_id) DO UPDATE SET
-                kind = excluded.kind,
-                last_stanza_id = excluded.last_stanza_id,
-                last_updated = excluded.last_updated,
-                preview = excluded.preview,
-                unread = CASE
-                    WHEN ? != 0 THEN inbox_entries.unread + 1
-                    ELSE inbox_entries.unread
-                END,
-                thread_title = COALESCE(excluded.thread_title, inbox_entries.thread_title),
-                reply_count = CASE
-                    WHEN ? != 0 THEN inbox_entries.reply_count + 1
-                    ELSE inbox_entries.reply_count
-                END,
-                author = COALESCE(excluded.author, inbox_entries.author)
-            RETURNING {SELECT_COLS}
-            "#
-        );
+        let sql = upsert_sql();
         let mut tx = self
             .db
             .begin()
             .await
             .map_err(|error| InboxStorageError::Other(error.to_string()))?;
         let mut rows = tx
-            .query(
-                &sql,
-                crate::db_params![
-                    user.to_string(),
-                    entry.partner.to_string(),
-                    thread_id.to_string(),
-                    encode_kind(entry.kind),
-                    entry.last_stanza_id,
-                    entry.last_updated,
-                    increment,
-                    entry.preview,
-                    entry.thread_title,
-                    entry.reply_count as i64,
-                    entry.author,
-                    increment,
-                    is_thread,
-                ],
-            )
+            .query(&sql, upsert_params(user, &entry, increment, is_thread))
             .await
             .map_err(|error| InboxStorageError::Other(error.to_string()))?;
         let row = rows
@@ -530,6 +522,37 @@ impl InboxStorage for DatabaseInboxStorage {
             .get(0)
             .map_err(|error| InboxStorageError::Other(error.to_string()))?;
         Ok(total.max(0) as u64)
+    }
+
+    #[instrument(skip(self), fields(room = %room, thread_id))]
+    async fn mark_call_thread_ended(
+        &self,
+        room: &BareJid,
+        thread_id: &str,
+        ended: DateTime<Utc>,
+        duration: &CallThreadDuration,
+    ) -> Result<(), InboxStorageError> {
+        // Only stamp the ended summary onto genuine call-thread rows.
+        // The wire emits `<call>` only when BOTH kind and media are
+        // present, so an ended summary on a row missing either would
+        // serialize as `<call-ended>` WITHOUT `<call>` and be silently
+        // dropped by the frontend. Guard on both columns to match the
+        // wire condition exactly. A reply-only inbox row — a durable
+        // user who received a thread reply but not the anchor-root
+        // projection — has both NULL and is skipped.
+        self.execute(
+            "UPDATE inbox_entries SET call_ended_at = ?, call_duration = ? \
+             WHERE partner_jid = ? AND thread_id = ? \
+             AND call_thread_kind IS NOT NULL AND call_thread_media IS NOT NULL",
+            crate::db_params![
+                ended.timestamp(),
+                duration.as_str().to_owned(),
+                room.to_string(),
+                thread_id.to_string(),
+            ],
+        )
+        .await?;
+        Ok(())
     }
 }
 

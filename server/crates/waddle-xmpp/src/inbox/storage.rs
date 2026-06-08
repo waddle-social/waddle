@@ -8,10 +8,12 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use jid::{BareJid, Jid};
 use waddle_xmpp_core::xep0359::StanzaId;
 
 use super::{InboxEntry, InboxKey, InboxView};
+use crate::xep::CallThreadDuration;
 
 /// Durable key for one groupchat notification recovery item.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -160,6 +162,19 @@ pub trait InboxStorage: Send + Sync {
 
     /// Return the total unread count for the user (channel-level only).
     async fn total_unread(&self, user: &BareJid) -> Result<u64, InboxStorageError>;
+
+    /// Mark the call anchored to `(room, thread_id)` as ended across every
+    /// user's projection of that thread. The call-end summary
+    /// (`urn:waddle:call-thread:0` `<call-thread-ended/>`) is room-wide, so
+    /// the ended timestamp and duration must land on all subscribers' rows,
+    /// not just one user's.
+    async fn mark_call_thread_ended(
+        &self,
+        room: &BareJid,
+        thread_id: &str,
+        ended: DateTime<Utc>,
+        duration: &CallThreadDuration,
+    ) -> Result<(), InboxStorageError>;
 }
 
 /// In-memory implementation used for tests and as the storage fake for
@@ -377,6 +392,23 @@ impl InboxStorage for InMemoryInboxStorage {
             .lock()
             .map_err(|e| InboxStorageError::Other(e.to_string()))?;
         Ok(guard.get(user).map(|v| v.total_unread()).unwrap_or(0))
+    }
+
+    async fn mark_call_thread_ended(
+        &self,
+        room: &BareJid,
+        thread_id: &str,
+        ended: DateTime<Utc>,
+        duration: &CallThreadDuration,
+    ) -> Result<(), InboxStorageError> {
+        let mut guard = self
+            .per_user
+            .lock()
+            .map_err(|e| InboxStorageError::Other(e.to_string()))?;
+        for view in guard.values_mut() {
+            view.mark_call_thread_ended(room, thread_id, ended, duration.clone());
+        }
+        Ok(())
     }
 }
 

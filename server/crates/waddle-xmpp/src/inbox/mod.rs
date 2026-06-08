@@ -18,9 +18,12 @@ pub mod storage;
 
 use std::collections::HashMap;
 
+use chrono::{DateTime, Utc};
 use jid::BareJid;
 use minidom::Element;
 use serde::{Deserialize, Serialize};
+
+use crate::xep::{CallThreadDuration, CallThreadKind, CallThreadMedia};
 
 /// Composite key identifying one inbox conversation.
 ///
@@ -109,6 +112,17 @@ pub struct InboxEntry {
     pub reply_count: u32,
     /// Nick of the thread starter.
     pub author: Option<String>,
+    /// Kind of call anchored to this thread (DM or MUC), when the thread is a
+    /// call thread. `None` for non-call threads.
+    pub call_thread_kind: Option<CallThreadKind>,
+    /// Media negotiated for the anchored call (audio and/or video). `None`
+    /// for non-call threads.
+    pub call_thread_media: Option<CallThreadMedia>,
+    /// When the anchored call ended. `Some` only once the call has ended.
+    pub call_ended_at: Option<DateTime<Utc>>,
+    /// Duration of the ended call (ISO 8601 `PT…`). `Some` only once the call
+    /// has ended.
+    pub call_duration: Option<CallThreadDuration>,
 }
 
 impl InboxEntry {
@@ -129,6 +143,10 @@ impl InboxEntry {
             thread_title: None,
             reply_count: 0,
             author: None,
+            call_thread_kind: None,
+            call_thread_media: None,
+            call_ended_at: None,
+            call_duration: None,
         }
     }
 
@@ -159,6 +177,18 @@ impl InboxEntry {
 
     pub fn with_author(mut self, author: impl Into<String>) -> Self {
         self.author = Some(author.into());
+        self
+    }
+
+    pub fn with_call_thread(mut self, kind: CallThreadKind, media: CallThreadMedia) -> Self {
+        self.call_thread_kind = Some(kind);
+        self.call_thread_media = Some(media);
+        self
+    }
+
+    pub fn with_call_ended(mut self, ended: DateTime<Utc>, duration: CallThreadDuration) -> Self {
+        self.call_ended_at = Some(ended);
+        self.call_duration = Some(duration);
         self
     }
 }
@@ -289,6 +319,36 @@ impl InboxView {
             .collect();
         v.sort_by_key(|b| std::cmp::Reverse(b.last_updated));
         v
+    }
+
+    /// Mark the call anchored to `(room, thread_id)` as ended on this view.
+    /// Returns `true` when a matching thread entry was updated. The
+    /// call-end summary is room-wide; callers fan this across every user's
+    /// view of the thread.
+    pub fn mark_call_thread_ended(
+        &mut self,
+        room: &BareJid,
+        thread_id: &str,
+        ended: DateTime<Utc>,
+        duration: CallThreadDuration,
+    ) -> bool {
+        let key = InboxKey::thread(room.clone(), thread_id);
+        // Only stamp the ended summary onto genuine call-thread rows. The
+        // wire emits `<call>` only when BOTH kind and media are present,
+        // so an ended summary on a row missing either would serialize as
+        // `<call-ended>` WITHOUT `<call>` and be silently dropped by the
+        // frontend. Guard on both fields to match the wire condition. A
+        // reply-only entry has both `None` and is skipped.
+        match self.entries.get_mut(&key) {
+            Some(entry)
+                if entry.call_thread_kind.is_some() && entry.call_thread_media.is_some() =>
+            {
+                entry.call_ended_at = Some(ended);
+                entry.call_duration = Some(duration);
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Total unread across channel-level conversations (excludes thread entries).

@@ -4,6 +4,7 @@
 //! `waddle-server/src/threads/wire.rs`. The chat client uses the IQ
 //! builder/parser to drive the global Threads view.
 
+use crate::xep::call_thread::{CallThreadKind, CallThreadMedia};
 use chrono::{DateTime, SecondsFormat, Utc};
 use jid::BareJid;
 use minidom::Element;
@@ -13,6 +14,28 @@ pub const NS_THREADS: &str = "urn:waddle:threads:0";
 
 const NS_CLIENT: &str = "jabber:client";
 const NS_RSM: &str = "http://jabber.org/protocol/rsm";
+
+/// Call-thread anchor summary carried by a `<thread>` entry.
+///
+/// Present only when the thread is a call-thread anchor (the server
+/// emits a `<call kind=… media=…/>` child).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThreadCallSummary {
+    pub kind: CallThreadKind,
+    pub media: CallThreadMedia,
+}
+
+/// Ended-call summary carried by a `<thread>` entry.
+///
+/// Present only when the anchored call has ended (the server emits a
+/// `<call-ended ended=… duration=…/>` child). Both fields are kept as
+/// wire strings (RFC 3339 timestamp / ISO-8601 duration) so they cross
+/// the wasm boundary unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadCallEndedSummary {
+    pub ended: String,
+    pub duration: String,
+}
 
 /// One entry in a `<threads>` response.
 ///
@@ -31,6 +54,10 @@ pub struct ThreadEntry {
     pub root_author: Option<String>,
     pub preview: Option<String>,
     pub thread_title: Option<String>,
+    /// Call-thread anchor summary, present when this thread anchors a call.
+    pub call_thread: Option<ThreadCallSummary>,
+    /// Ended-call summary, present when the anchored call has ended.
+    pub call_thread_ended: Option<ThreadCallEndedSummary>,
 }
 
 /// Full response payload.
@@ -185,6 +212,8 @@ pub fn parse_threads_response(iq: &Element) -> Option<ThreadsPage> {
                 .get_child("thread-title", NS_THREADS)
                 .map(|e| e.text())
                 .filter(|s| !s.is_empty()),
+            call_thread: parse_call_summary(t),
+            call_thread_ended: parse_call_ended_summary(t),
         })
         .collect();
 
@@ -200,6 +229,27 @@ pub fn parse_threads_response(iq: &Element) -> Option<ThreadsPage> {
         entries,
         next_cursor,
     })
+}
+
+/// Parse the optional `<call kind=… media=…/>` child of a `<thread>`.
+///
+/// Returns `None` when the child is absent or carries an unknown/garbage
+/// `kind`/`media` — a malformed call marker is treated as "not a call
+/// thread" rather than failing the whole page.
+fn parse_call_summary(thread: &Element) -> Option<ThreadCallSummary> {
+    let call = thread.get_child("call", NS_THREADS)?;
+    let kind = CallThreadKind::parse_token(call.attr("kind")?).ok()?;
+    let media = CallThreadMedia::parse_tokens(call.attr("media")?).ok()?;
+    Some(ThreadCallSummary { kind, media })
+}
+
+/// Parse the optional `<call-ended ended=… duration=…/>` child of a
+/// `<thread>`. Returns `None` when the child or either attribute is absent.
+fn parse_call_ended_summary(thread: &Element) -> Option<ThreadCallEndedSummary> {
+    let ended_el = thread.get_child("call-ended", NS_THREADS)?;
+    let ended = ended_el.attr("ended")?.to_owned();
+    let duration = ended_el.attr("duration")?.to_owned();
+    Some(ThreadCallEndedSummary { ended, duration })
 }
 
 #[cfg(test)]
@@ -300,5 +350,76 @@ mod tests {
         let xml = "<iq xmlns='jabber:client' type='result' id='r'/>";
         let iq: Element = xml.parse().expect("valid XML");
         assert!(parse_threads_response(&iq).is_none());
+    }
+
+    #[test]
+    fn parse_extracts_call_thread_children() {
+        let xml = "<iq xmlns='jabber:client' type='result' id='r'>\
+                     <threads xmlns='urn:waddle:threads:0' total='2' unread-threads='0'>\
+                       <thread channel='room@x' thread-id='call-1' \
+                               last-stanza-id='S1' last-activity='2026-06-07T14:30:00Z' \
+                               unread='0' reply-count='4' has-unread='false'>\
+                         <call kind='muc' media='audio video'/>\
+                         <call-ended ended='2026-06-07T14:35:00Z' duration='PT5M'/>\
+                       </thread>\
+                       <thread channel='room@x' thread-id='plain-1' \
+                               last-stanza-id='S2' last-activity='2026-06-07T13:00:00Z' \
+                               unread='0' reply-count='1' has-unread='false'/>\
+                     </threads>\
+                   </iq>";
+        let iq: Element = xml.parse().expect("valid XML");
+        let page = parse_threads_response(&iq).expect("parses");
+        assert_eq!(page.entries.len(), 2);
+
+        let call = &page.entries[0];
+        let summary = call.call_thread.expect("call-thread summary present");
+        assert_eq!(summary.kind, CallThreadKind::Muc);
+        assert_eq!(summary.media, CallThreadMedia::audio_video());
+        let ended = call
+            .call_thread_ended
+            .as_ref()
+            .expect("call-ended summary present");
+        assert_eq!(ended.ended, "2026-06-07T14:35:00Z");
+        assert_eq!(ended.duration, "PT5M");
+
+        let plain = &page.entries[1];
+        assert!(plain.call_thread.is_none());
+        assert!(plain.call_thread_ended.is_none());
+    }
+
+    #[test]
+    fn parse_ongoing_call_thread_has_no_ended_summary() {
+        let xml = "<iq xmlns='jabber:client' type='result' id='r'>\
+                     <threads xmlns='urn:waddle:threads:0' total='1' unread-threads='0'>\
+                       <thread channel='room@x' thread-id='call-2' \
+                               last-stanza-id='S1' last-activity='2026-06-07T14:30:00Z' \
+                               unread='0' reply-count='0' has-unread='false'>\
+                         <call kind='dm' media='audio'/>\
+                       </thread>\
+                     </threads>\
+                   </iq>";
+        let iq: Element = xml.parse().expect("valid XML");
+        let page = parse_threads_response(&iq).expect("parses");
+        let entry = &page.entries[0];
+        let summary = entry.call_thread.expect("call-thread summary present");
+        assert_eq!(summary.kind, CallThreadKind::Dm);
+        assert_eq!(summary.media, CallThreadMedia::audio_only());
+        assert!(entry.call_thread_ended.is_none());
+    }
+
+    #[test]
+    fn parse_ignores_call_marker_with_garbage_kind() {
+        let xml = "<iq xmlns='jabber:client' type='result' id='r'>\
+                     <threads xmlns='urn:waddle:threads:0' total='1' unread-threads='0'>\
+                       <thread channel='room@x' thread-id='call-3' \
+                               last-stanza-id='S1' last-activity='2026-06-07T14:30:00Z' \
+                               unread='0' reply-count='0' has-unread='false'>\
+                         <call kind='bogus' media='audio'/>\
+                       </thread>\
+                     </threads>\
+                   </iq>";
+        let iq: Element = xml.parse().expect("valid XML");
+        let page = parse_threads_response(&iq).expect("parses");
+        assert!(page.entries[0].call_thread.is_none());
     }
 }

@@ -382,6 +382,15 @@ pub fn parse_inbox_entry_with_metadata(
         thread_title,
         reply_count,
         author,
+        // XEP-0430 inbox-entry parsing does not carry the call-thread
+        // fields, so they default to `None` here. The call-thread
+        // metadata is projected separately, from the MUC
+        // `urn:waddle:call-thread:0` anchor marker, via the
+        // `urn:waddle:threads:0` threads path.
+        call_thread_kind: None,
+        call_thread_media: None,
+        call_ended_at: None,
+        call_duration: None,
     })
 }
 

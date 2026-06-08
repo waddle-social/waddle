@@ -64,6 +64,300 @@ async fn sqlx_inbox_storage_round_trips_entries() {
 }
 
 #[tokio::test]
+async fn upsert_persists_call_thread_metadata_and_mark_ended_updates_all_users() {
+    use waddle_xmpp::xep::{CallThreadDuration, CallThreadKind, CallThreadMedia};
+    let storage = DatabaseInboxStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("storage");
+    let room: BareJid = "general@conference.example.com".parse().expect("room jid");
+    let alice: BareJid = "alice@example.com".parse().expect("alice jid");
+    let bob: BareJid = "bob@example.com".parse().expect("bob jid");
+    let anchor = || {
+        InboxEntry::new(
+            room.clone(),
+            ConversationKind::MucRoom,
+            "anchor-stanza",
+            1_700_000_000,
+        )
+        .with_thread("call-thread-uuid")
+        .with_call_thread(
+            CallThreadKind::Muc,
+            CallThreadMedia {
+                audio: true,
+                video: false,
+            },
+        )
+    };
+
+    storage.upsert(&alice, anchor(), true).await.expect("alice");
+    storage.upsert(&bob, anchor(), true).await.expect("bob");
+
+    let entry = storage
+        .list_all_threads(&alice)
+        .await
+        .expect("list_all_threads")
+        .into_iter()
+        .find(|e| e.thread_id.as_deref() == Some("call-thread-uuid"))
+        .expect("anchor thread");
+    assert_eq!(entry.call_thread_kind, Some(CallThreadKind::Muc));
+    assert_eq!(
+        entry.call_thread_media,
+        Some(CallThreadMedia {
+            audio: true,
+            video: false,
+        })
+    );
+    assert!(entry.call_ended_at.is_none());
+
+    let ended = chrono::DateTime::parse_from_rfc3339("2026-06-07T14:35:00Z")
+        .expect("ended")
+        .with_timezone(&chrono::Utc);
+    storage
+        .mark_call_thread_ended(
+            &room,
+            "call-thread-uuid",
+            ended,
+            &CallThreadDuration::parse("PT5M").expect("duration"),
+        )
+        .await
+        .expect("mark ended");
+
+    for who in [&alice, &bob] {
+        let e = storage
+            .list_all_threads(who)
+            .await
+            .expect("list_all_threads")
+            .into_iter()
+            .find(|e| e.thread_id.as_deref() == Some("call-thread-uuid"))
+            .expect("anchor thread");
+        assert_eq!(e.call_ended_at, Some(ended), "ended marked for {who}");
+        assert_eq!(
+            e.call_duration,
+            Some(CallThreadDuration::parse("PT5M").expect("duration"))
+        );
+        assert_eq!(
+            e.call_thread_kind,
+            Some(CallThreadKind::Muc),
+            "anchor kind survived ended UPDATE for {who}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn mark_ended_skips_reply_only_rows_without_call_thread_kind() {
+    use waddle_xmpp::xep::{CallThreadDuration, CallThreadKind, CallThreadMedia};
+    let storage = DatabaseInboxStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("storage");
+    let room: BareJid = "general@conference.example.com".parse().expect("room jid");
+    let alice: BareJid = "alice@example.com".parse().expect("alice jid");
+    let bob: BareJid = "bob@example.com".parse().expect("bob jid");
+
+    // Alice received the anchor-root projection: a genuine call-thread
+    // row with kind + media.
+    let anchor = InboxEntry::new(
+        room.clone(),
+        ConversationKind::MucRoom,
+        "anchor-stanza",
+        1_700_000_000,
+    )
+    .with_thread("call-thread-uuid")
+    .with_call_thread(
+        CallThreadKind::Muc,
+        CallThreadMedia {
+            audio: true,
+            video: false,
+        },
+    );
+    storage.upsert(&alice, anchor, true).await.expect("alice");
+
+    // Bob is a durable user who only received a thread reply, not the
+    // anchor projection — a reply-only row on the SAME (room, thread_id)
+    // with call_thread_kind / call_thread_media NULL.
+    let reply_only = InboxEntry::new(
+        room.clone(),
+        ConversationKind::MucRoom,
+        "reply-stanza",
+        1_700_000_100,
+    )
+    .with_thread("call-thread-uuid");
+    assert!(reply_only.call_thread_kind.is_none());
+    assert!(reply_only.call_thread_media.is_none());
+    storage.upsert(&bob, reply_only, true).await.expect("bob");
+
+    let ended = chrono::DateTime::parse_from_rfc3339("2026-06-07T14:35:00Z")
+        .expect("ended")
+        .with_timezone(&chrono::Utc);
+    storage
+        .mark_call_thread_ended(
+            &room,
+            "call-thread-uuid",
+            ended,
+            &CallThreadDuration::parse("PT5M").expect("duration"),
+        )
+        .await
+        .expect("mark ended");
+
+    // Alice's genuine call-thread row gets the ended summary stamped.
+    let alice_row = storage
+        .list_all_threads(&alice)
+        .await
+        .expect("list_all_threads")
+        .into_iter()
+        .find(|e| e.thread_id.as_deref() == Some("call-thread-uuid"))
+        .expect("alice anchor thread");
+    assert_eq!(alice_row.call_ended_at, Some(ended));
+    assert_eq!(
+        alice_row.call_duration,
+        Some(CallThreadDuration::parse("PT5M").expect("duration"))
+    );
+
+    // Bob's reply-only row is NOT stamped — stamping it would produce an
+    // ended summary without kind/media that the frontend silently drops.
+    let bob_row = storage
+        .list_all_threads(&bob)
+        .await
+        .expect("list_all_threads")
+        .into_iter()
+        .find(|e| e.thread_id.as_deref() == Some("call-thread-uuid"))
+        .expect("bob reply-only thread");
+    assert!(
+        bob_row.call_ended_at.is_none(),
+        "reply-only row (call_thread_kind NULL) must not be stamped with the ended summary"
+    );
+    assert!(
+        bob_row.call_duration.is_none(),
+        "reply-only row must not gain a call_duration"
+    );
+    assert!(bob_row.call_thread_kind.is_none());
+}
+
+#[tokio::test]
+async fn mark_ended_skips_rows_with_kind_but_null_media() {
+    // Defense-in-depth for the wire `<call>` condition: it emits only
+    // when BOTH kind and media are present. After Fix 1+2 the encoder
+    // never persists a kind-without-media row, but a row could exist from
+    // a legacy/corrupt write. Insert one directly via raw SQL (bypassing
+    // the encoder's normalization) and assert mark-ended does NOT stamp
+    // it — stamping would serialize `<call-ended>` without `<call>`.
+    use waddle_xmpp::xep::CallThreadDuration;
+    let storage = DatabaseInboxStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("storage");
+    let room: BareJid = "general@conference.example.com".parse().expect("room jid");
+    let user: BareJid = "carol@example.com".parse().expect("carol jid");
+
+    // Raw insert: call_thread_kind = 'muc' but call_thread_media NULL.
+    storage
+        .execute(
+            "INSERT INTO inbox_entries (user_jid, partner_jid, thread_id, kind, last_stanza_id, \
+             last_updated, unread, reply_count, call_thread_kind, call_thread_media) \
+             VALUES (?, ?, ?, 'muc', 'anchor-stanza', 1700000000, 0, 0, 'muc', NULL)",
+            crate::db_params![
+                user.to_string(),
+                room.to_string(),
+                "call-thread-uuid".to_string(),
+            ],
+        )
+        .await
+        .expect("raw insert kind-without-media row");
+
+    let ended = chrono::DateTime::parse_from_rfc3339("2026-06-07T14:35:00Z")
+        .expect("ended")
+        .with_timezone(&chrono::Utc);
+    storage
+        .mark_call_thread_ended(
+            &room,
+            "call-thread-uuid",
+            ended,
+            &CallThreadDuration::parse("PT5M").expect("duration"),
+        )
+        .await
+        .expect("mark ended");
+
+    let row = storage
+        .list_all_threads(&user)
+        .await
+        .expect("list_all_threads")
+        .into_iter()
+        .find(|e| e.thread_id.as_deref() == Some("call-thread-uuid"))
+        .expect("kind-without-media thread");
+    assert!(
+        row.call_ended_at.is_none(),
+        "row with kind set but media NULL must not be stamped with the ended summary"
+    );
+    assert!(
+        row.call_duration.is_none(),
+        "row with kind set but media NULL must not gain a call_duration"
+    );
+}
+
+#[tokio::test]
+async fn upsert_reply_preserves_anchor_call_thread_metadata() {
+    use waddle_xmpp::xep::{CallThreadKind, CallThreadMedia};
+    let storage = DatabaseInboxStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("storage");
+    let room: BareJid = "general@conference.example.com".parse().expect("room jid");
+    let alice: BareJid = "alice@example.com".parse().expect("alice jid");
+
+    // Anchor the call thread with kind + media.
+    let anchor = InboxEntry::new(
+        room.clone(),
+        ConversationKind::MucRoom,
+        "anchor-stanza",
+        1_700_000_000,
+    )
+    .with_thread("call-thread-uuid")
+    .with_call_thread(
+        CallThreadKind::Muc,
+        CallThreadMedia {
+            audio: true,
+            video: false,
+        },
+    );
+    storage.upsert(&alice, anchor, true).await.expect("anchor");
+
+    // A later PLAIN reply to the same thread carries no call metadata
+    // (its call_* columns are NULL); the COALESCE upsert must not wipe
+    // the anchor's kind/media.
+    let plain_reply = InboxEntry::new(
+        room.clone(),
+        ConversationKind::MucRoom,
+        "reply-stanza",
+        1_700_000_100,
+    )
+    .with_thread("call-thread-uuid");
+    assert!(plain_reply.call_thread_kind.is_none());
+    assert!(plain_reply.call_thread_media.is_none());
+    storage
+        .upsert(&alice, plain_reply, true)
+        .await
+        .expect("plain reply");
+
+    let entry = storage
+        .list_all_threads(&alice)
+        .await
+        .expect("list_all_threads")
+        .into_iter()
+        .find(|e| e.thread_id.as_deref() == Some("call-thread-uuid"))
+        .expect("anchor thread");
+    assert_eq!(
+        entry.call_thread_kind,
+        Some(CallThreadKind::Muc),
+        "anchor kind survived a plain reply upsert"
+    );
+    assert_eq!(
+        entry.call_thread_media,
+        Some(CallThreadMedia {
+            audio: true,
+            video: false,
+        }),
+        "anchor media survived a plain reply upsert"
+    );
+}
+
+#[tokio::test]
 async fn sqlx_inbox_storage_mark_read_returns_none_for_missing_row() {
     let storage = DatabaseInboxStorage::open(Some("sqlite::memory:"))
         .await
@@ -474,5 +768,110 @@ async fn migration_adds_sender_can_broadcast_channel_mention_to_legacy_recovery_
     );
 
     // Cleanup
+    std::fs::remove_file(&path).ok();
+}
+
+/// Issue #919 migration regression: an existing `inbox_entries` table
+/// created BEFORE the four `call_*` columns landed must be migrated
+/// forward. Without the targeted ALTERs, every `list*` SELECT errors
+/// with "no such column". Simulates the pre-#919 shape, re-opens to
+/// trigger the migration, then asserts a call-anchor upsert round-trips
+/// through the migrated columns.
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_adds_call_thread_columns_to_legacy_inbox_table() {
+    use waddle_xmpp::xep::{CallThreadKind, CallThreadMedia};
+    let artifacts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-artifacts");
+    std::fs::create_dir_all(&artifacts).expect("artifacts dir");
+    let path = artifacts.join(format!("inbox-call-migration-{}.db", uuid::Uuid::new_v4()));
+    let url = format!("sqlite://{}", path.display());
+
+    // Build a DB whose inbox table predates the call-thread columns:
+    // open fresh, drop, recreate without the four `call_*` columns.
+    {
+        let storage = DatabaseInboxStorage::open(Some(&url))
+            .await
+            .expect("open fresh storage");
+        storage
+            .execute("DROP TABLE inbox_entries", ())
+            .await
+            .expect("drop fresh inbox table");
+        storage
+            .execute(
+                r#"
+                CREATE TABLE inbox_entries (
+                    user_jid TEXT NOT NULL,
+                    partner_jid TEXT NOT NULL,
+                    thread_id TEXT NOT NULL DEFAULT '',
+                    kind TEXT NOT NULL,
+                    last_stanza_id TEXT NOT NULL,
+                    last_updated INTEGER NOT NULL,
+                    unread INTEGER NOT NULL DEFAULT 0,
+                    preview TEXT,
+                    thread_title TEXT,
+                    reply_count INTEGER NOT NULL DEFAULT 0,
+                    author TEXT,
+                    PRIMARY KEY (user_jid, partner_jid, thread_id)
+                )
+                "#,
+                (),
+            )
+            .await
+            .expect("create legacy inbox table");
+    }
+
+    // Re-open. The init path detects the missing columns and runs the
+    // ALTERs; a call-anchor upsert then round-trips through them (it
+    // would fail with "no such column" if the migration didn't run).
+    let storage = DatabaseInboxStorage::open(Some(&url))
+        .await
+        .expect("re-open storage triggers migration");
+
+    for column in [
+        "call_thread_kind",
+        "call_thread_media",
+        "call_ended_at",
+        "call_duration",
+    ] {
+        let mut cols = storage
+            .query("PRAGMA table_info(inbox_entries)", ())
+            .await
+            .expect("PRAGMA table_info");
+        let mut present = false;
+        while let Some(row) = cols.next().await.expect("advance pragma row") {
+            let name: String = row.get(1).expect("col name");
+            if name == column {
+                present = true;
+                break;
+            }
+        }
+        assert!(
+            present,
+            "migration must add `{column}` to legacy inbox_entries"
+        );
+    }
+
+    let user = jid("me@example.com");
+    let room = jid("room@muc.example.com");
+    storage
+        .upsert(
+            &user,
+            InboxEntry::new(room.clone(), ConversationKind::MucRoom, "anchor", 100)
+                .with_thread("t1")
+                .with_call_thread(CallThreadKind::Muc, CallThreadMedia::audio_video()),
+            true,
+        )
+        .await
+        .expect("upsert after migration must succeed");
+    let threads = storage
+        .list_threads(&user, &room)
+        .await
+        .expect("list_threads after migration must succeed");
+    assert_eq!(threads.len(), 1);
+    assert_eq!(threads[0].call_thread_kind, Some(CallThreadKind::Muc));
+    assert_eq!(
+        threads[0].call_thread_media,
+        Some(CallThreadMedia::audio_video())
+    );
+
     std::fs::remove_file(&path).ok();
 }

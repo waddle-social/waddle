@@ -43,10 +43,16 @@ export interface TimelineSharedFile {
 
 export interface CallThreadAnchor {
   kind: "muc";
-  sid: string;
+  /**
+   * Set on anchors derived from timeline messages (the inbound
+   * `urn:waddle:call-thread:0` marker). Absent on anchors derived from a
+   * global Threads-query entry, which only carries kind/media/ended/duration —
+   * `readCallAnchorCardState` and the card never read these.
+   */
+  sid?: string;
   media: readonly ("audio" | "video")[];
-  initiator: string;
-  started: string;
+  initiator?: string;
+  started?: string;
   ended?: string;
   duration?: string;
 }

@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, ref, watch, type ComponentPublicIn
 import { ArrowDown, ArrowUp, X, CornerDownRight, ChevronRight, ChevronLeft } from "lucide-vue-next";
 import { useJumpToLiveEdge } from "@/ui/use-jump-to-live-edge";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
+import CallAnchorCard from "@/components/calls/CallAnchorCard.vue";
 import MessageCard from "@/components/chat/MessageCard.vue";
 import MessageComposer from "@/components/chat/MessageComposer.vue";
 import VirtualTimeline from "@/components/chat/VirtualTimeline.vue";
@@ -20,6 +21,8 @@ import {
 import { createPinnedEdgeScroller } from "@/lib/pinned-edge-scroll";
 import { useChatWindowVisibility } from "@/shell/window-visibility";
 import { formatTimelineDayDivider, isSameTimelineDay } from "@/channels/timeline";
+import { useCallAnchorCardState } from "@/lib/call-thread-anchor";
+import type { CallMedia } from "@/lib/calls/types";
 
 const props = defineProps<{
   threadStack: string[];
@@ -46,6 +49,8 @@ const props = defineProps<{
   hasOlderReplies?: boolean;
   uploadProgress: { uploading: boolean; progress: number; filename: string };
   channelName: string;
+  channelId?: string | null;
+  roomJid?: string | null;
   reactionMode?: { selectedMessageId: string | null } | null;
   targetMessageId?: string | null;
   /**
@@ -84,6 +89,7 @@ const emit = defineEmits<{
   // and peers can show "typing in thread X" instead of channel-wide.
   typing: [threadOverride?: { threadId: string; parentThreadId?: string }];
   loadOlder: [threadId: string];
+  joinChannelCall: [channelId: string | null, roomJid: string, media: CallMedia];
 }>();
 
 const { mode: scrollDirectionMode } = useScrollDirectionPreference();
@@ -411,6 +417,11 @@ const breadcrumbLabels = computed(() =>
 // "Thread > author" breadcrumb with: who started it, how many replies,
 // who's been participating, and when activity last happened.
 const threadReplyCount = computed(() => activeEntry.value?.count ?? 0);
+const threadCallAnchorState = useCallAnchorCardState(
+  () => activeEntry.value?.root ?? { body: "", author: "" },
+  () => props.roomJid,
+  () => threadReplyCount.value,
+);
 
 const threadRootAuthor = computed(() => activeEntry.value?.root?.author ?? null);
 
@@ -574,6 +585,12 @@ function onOpenThreadFromCard(threadId: string) {
   emit("pushThread", threadId);
 }
 
+function joinThreadCallAnchor() {
+  const state = threadCallAnchorState.value;
+  if (!state || !props.roomJid || state.status !== "live") return;
+  emit("joinChannelCall", props.channelId ?? null, props.roomJid, state.media);
+}
+
 function replyChildHasNestedThread(message: TimelineMessage): boolean {
   const entry = props.threadIndex.get(message.id);
   return !!entry && entry.count > 0;
@@ -634,6 +651,14 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
             <X class="w-4 h-4" />
           </button>
         </div>
+      </div>
+      <div v-if="threadCallAnchorState" class="chat-thread-header__row">
+        <CallAnchorCard
+          :state="threadCallAnchorState"
+          class="w-full"
+          @join="joinThreadCallAnchor"
+          @open-thread="onOpenThreadFromCard"
+        />
       </div>
       <div class="chat-thread-header__row chat-thread-header__row--meta">
         <div class="chat-thread-header__meta type-caption">
@@ -764,11 +789,15 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
             :invoke-extension-action="props.invokeExtensionAction"
             :link-preview-lookup="props.linkPreviewLookup"
             :link-preview-scope="props.linkPreviewScope"
+            :call-room-jid="props.roomJid ?? null"
+            :call-channel-id="props.channelId ?? null"
+            :hide-call-anchor-card="!!threadCallAnchorState"
             @edit="(id, body, m, r, lp) => emit('editMessage', id, body, m, r, lp)"
             @retract="(id) => emit('retractMessage', id)"
             @react="(id, emoji) => emit('reactMessage', id, emoji)"
             @reply="beginReplyInThread"
             @open-thread="onOpenThreadFromCard"
+            @join-channel-call="(channelId, roomJid, media) => emit('joinChannelCall', channelId, roomJid, media)"
           />
           <div
             v-if="orderedChildren.length > 0"
@@ -808,11 +837,14 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
               :invoke-extension-action="props.invokeExtensionAction"
               :link-preview-lookup="props.linkPreviewLookup"
               :link-preview-scope="props.linkPreviewScope"
+              :call-room-jid="props.roomJid ?? null"
+              :call-channel-id="props.channelId ?? null"
               @edit="(id, body, m, r, lp) => emit('editMessage', id, body, m, r, lp)"
               @retract="(id) => emit('retractMessage', id)"
               @react="(id, emoji) => emit('reactMessage', id, emoji)"
               @reply="beginReplyInThread"
               @open-thread="onOpenThreadFromCard"
+              @join-channel-call="(channelId, roomJid, media) => emit('joinChannelCall', channelId, roomJid, media)"
             />
           <div v-if="replyChildHasNestedThread(message)" class="chat-thread-actions">
             <button

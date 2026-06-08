@@ -3,12 +3,15 @@ import { computed } from "vue";
 import { Menu, MessagesSquare } from "lucide-vue-next";
 import { connectionStore } from "@/lib/connection-store";
 import type { ChannelSummary } from "@/lib/chat-types";
+import type { CallMedia } from "@/lib/calls/types";
 import type { WasmThreadEntry } from "@/lib/xmpp/wasm-types";
+import { resolveChannelIdForRoomJid } from "@/lib/threads-channel-resolve";
 import ThreadsListPanel from "@/components/chat/ThreadsListPanel.vue";
 
 const props = defineProps<{
   channels: readonly ChannelSummary[];
   onSelectThreadEntry: (channelJid: string, threadId: string) => void | Promise<void>;
+  onJoinChannelCall: (channelId: string | null, roomJid: string, media: CallMedia) => void;
 }>();
 
 const xmppClient = computed(() => connectionStore.client);
@@ -24,6 +27,14 @@ const emit = defineEmits<{
 // thread; a hard refresh of the resulting URL restores the same view.
 async function openThread(entry: WasmThreadEntry) {
   await props.onSelectThreadEntry(entry.channel, entry.thread_id);
+}
+
+// Join routes through the same shared handler the call banner and the
+// in-channel anchor card use (`joinChannelCallFromActivity` in the shell),
+// resolving the row's channel via the same lookup as `openThread`.
+function joinCall(entry: WasmThreadEntry, media: CallMedia) {
+  const channelId = resolveChannelIdForRoomJid(entry.channel, props.channels);
+  props.onJoinChannelCall(channelId, entry.channel, media);
 }
 </script>
 
@@ -43,6 +54,11 @@ async function openThread(entry: WasmThreadEntry) {
       </span>
       <h1 class="type-pane-title text-foreground leading-tight">Threads</h1>
     </header>
-    <ThreadsListPanel :xmpp-client="xmppClient" :channels="channels" @open-thread="openThread" />
+    <ThreadsListPanel
+      :xmpp-client="xmppClient"
+      :channels="channels"
+      @open-thread="openThread"
+      @join-call="joinCall"
+    />
   </div>
 </template>

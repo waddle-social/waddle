@@ -6,19 +6,30 @@
 use chrono::{DateTime, Utc};
 use jid::BareJid;
 use minidom::Element;
+use serde::{Deserialize, Serialize};
 use xmpp_parsers::jingle::SessionId;
 use xmpp_parsers::message::Message;
 
 pub const NS_WADDLE_CALL_THREAD: &str = "urn:waddle:call-thread:0";
 pub const NS_FASTEN: &str = "urn:xmpp:fasten:0";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CallThreadKind {
     Dm,
     Muc,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+impl CallThreadKind {
+    /// Canonical wire/storage token for the kind: `"dm"` or `"muc"`.
+    pub fn as_token(&self) -> &'static str {
+        match self {
+            CallThreadKind::Dm => "dm",
+            CallThreadKind::Muc => "muc",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallThreadMedia {
     pub audio: bool,
     pub video: bool,
@@ -38,6 +49,20 @@ impl CallThreadMedia {
             video: true,
         }
     }
+
+    /// Canonical space-joined media tokens, `audio` before `video`:
+    /// `(true,true)=>"audio video"`, `(true,false)=>"audio"`,
+    /// `(false,true)=>"video"`, `(false,false)=>""`.
+    pub fn as_tokens(&self) -> String {
+        let mut tokens = Vec::with_capacity(2);
+        if self.audio {
+            tokens.push("audio");
+        }
+        if self.video {
+            tokens.push("video");
+        }
+        tokens.join(" ")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,7 +74,7 @@ pub struct CallThreadAnchor {
     pub started: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallThreadDuration(String);
 
 impl CallThreadDuration {
@@ -85,10 +110,7 @@ pub enum CallThreadParseError {
 }
 
 pub fn build_call_thread_anchor(anchor: &CallThreadAnchor) -> Element {
-    let kind = match anchor.kind {
-        CallThreadKind::Dm => "dm",
-        CallThreadKind::Muc => "muc",
-    };
+    let kind = anchor.kind.as_token();
     let media = media_attr(anchor.media);
 
     Element::builder("call-thread", NS_WADDLE_CALL_THREAD)
@@ -196,13 +218,14 @@ fn call_thread_ended_payload(payload: &Element) -> Option<&Element> {
 }
 
 fn media_attr(media: CallThreadMedia) -> &'static str {
-    match (media.audio, media.video) {
-        (true, true) => "audio video",
-        (true, false) => "audio",
-        (false, true) => "video",
-        (false, false) => {
-            panic!("call-thread marker requires audio or video media")
-        }
+    // Derive tokens via the canonical `as_tokens`, but preserve this
+    // builder's existing contract: a `&'static str` and a panic on the
+    // impossible empty-media state.
+    match media.as_tokens().as_str() {
+        "audio video" => "audio video",
+        "audio" => "audio",
+        "video" => "video",
+        _ => panic!("call-thread marker requires audio or video media"),
     }
 }
 
@@ -286,6 +309,48 @@ mod tests {
 
         let parsed = parse_call_thread_anchor(&element).expect("marker parses");
         assert_eq!(parsed, original);
+    }
+
+    #[test]
+    fn kind_as_token_maps_both_variants() {
+        assert_eq!(CallThreadKind::Dm.as_token(), "dm");
+        assert_eq!(CallThreadKind::Muc.as_token(), "muc");
+    }
+
+    #[test]
+    fn media_as_tokens_maps_all_combos() {
+        assert_eq!(
+            CallThreadMedia {
+                audio: true,
+                video: true,
+            }
+            .as_tokens(),
+            "audio video"
+        );
+        assert_eq!(
+            CallThreadMedia {
+                audio: true,
+                video: false,
+            }
+            .as_tokens(),
+            "audio"
+        );
+        assert_eq!(
+            CallThreadMedia {
+                audio: false,
+                video: true,
+            }
+            .as_tokens(),
+            "video"
+        );
+        assert_eq!(
+            CallThreadMedia {
+                audio: false,
+                video: false,
+            }
+            .as_tokens(),
+            ""
+        );
     }
 
     #[test]

@@ -339,7 +339,7 @@ pub(super) async fn project_groupchat_inbox(
     let Some(thread) = thread else {
         return outcome;
     };
-    let thread_entry = groupchat_thread_entry(
+    let mut thread_entry = groupchat_thread_entry(
         room.clone(),
         message,
         dispatch_timestamp,
@@ -347,6 +347,13 @@ pub(super) async fn project_groupchat_inbox(
         thread.title.as_deref(),
         thread.author_nick.as_deref(),
     );
+    // Persist the call-thread anchor metadata (Task 2 storage supports
+    // it). The MUC call anchor's `kind`/`media` ride along on the
+    // thread-root projection; replies carry neither, so a later reply's
+    // projection leaves the stored anchor metadata untouched.
+    if let (Some(kind), Some(media)) = (thread.call_thread_kind, thread.call_thread_media) {
+        thread_entry = thread_entry.with_call_thread(kind, media);
+    }
     match inbox_storage
         .upsert_with_groupchat_notification_recovery(
             owner,

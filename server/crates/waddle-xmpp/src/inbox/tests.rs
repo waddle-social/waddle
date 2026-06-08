@@ -212,3 +212,42 @@ fn test_inbox_key_equality() {
     assert!(k3.is_thread());
     assert!(!k1.is_thread());
 }
+
+#[test]
+fn inbox_entry_carries_call_thread_anchor_and_ended_metadata() {
+    use crate::xep::{CallThreadDuration, CallThreadKind, CallThreadMedia};
+    let entry = InboxEntry::new(
+        jid("general@conference.example.com"),
+        ConversationKind::MucRoom,
+        "stanza-1",
+        1_700_000_000,
+    )
+    .with_thread("call-thread-uuid")
+    .with_call_thread(
+        CallThreadKind::Muc,
+        CallThreadMedia {
+            audio: true,
+            video: true,
+        },
+    )
+    .with_call_ended(
+        chrono::DateTime::parse_from_rfc3339("2026-06-07T14:35:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc),
+        CallThreadDuration::parse("PT5M").unwrap(),
+    );
+
+    assert_eq!(entry.call_thread_kind, Some(CallThreadKind::Muc));
+    assert_eq!(
+        entry.call_thread_media,
+        Some(CallThreadMedia {
+            audio: true,
+            video: true
+        })
+    );
+    assert_eq!(
+        entry.call_duration,
+        Some(CallThreadDuration::parse("PT5M").unwrap())
+    );
+    assert!(entry.call_ended_at.is_some());
+}
