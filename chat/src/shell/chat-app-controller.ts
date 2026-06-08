@@ -1655,7 +1655,9 @@ export function useChatAppController(giphyApiKey: string) {
       activeThreadTargetMessageId.value = null;
       activeThreadStack.value = match.search.thread;
       activeRightPanel.value = match.search.thread.length > 0 ? "thread" : null;
-      for (const threadId of match.search.thread) {
+      // Dedup: a nested stack can legitimately repeat a thread id (e.g.
+      // `[A,B,A]`), but each thread only needs one backfill.
+      for (const threadId of new Set(match.search.thread)) {
         void dmMessaging.backfillThread(threadId);
       }
       return;
