@@ -140,6 +140,28 @@ describe("useChatSend.sendMessage — happy path", () => {
     expect(call[2].linkPreviewExpiresAt).toBeUndefined();
     expect(h.messages.value[0]?.linkPreviews).toBeUndefined();
   });
+
+  test("ignores parentThreadId when a thread override has no usable threadId", async () => {
+    const sendDirectMessage = mock(async () => ({ id: "dm-thread", state: "sending" }));
+    const client = makeClient({ sendDirectMessage } as Partial<BrowserXmppClient>);
+    const h = harness({ client, draft: "nested reply" });
+
+    await h.send.sendMessage(
+      undefined,
+      [],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { threadId: "   ", parentThreadId: "dm-root-thread" },
+    );
+
+    const call = (sendDirectMessage as unknown as ReturnType<typeof mock>).mock.calls[0]!;
+    expect(call[2].threadId).toBeUndefined();
+    expect(call[2].parentThreadId).toBeUndefined();
+    expect(h.messages.value[0]?.threadId).toBeUndefined();
+    expect(h.messages.value[0]?.parentThreadId).toBeUndefined();
+  });
 });
 
 describe("useChatSend.sendMessage — guards", () => {

@@ -4,6 +4,7 @@ import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import type { ExtensionAnnotationAction, TimelineMessage } from "@/lib/chat-ui";
 import type { ExtensionCommandResult } from "@/lib/xmpp/extension-commands";
 import { findMessageById } from "@/lib/message-ids";
+import { dmThreadRefFromMessage } from "@/dms/threading";
 
 // Outbound message-action handlers for the DM side: reactions (XEP-0444),
 // retractions (XEP-0424), and extension-annotation actions. Mirrors the
@@ -22,15 +23,6 @@ type UseDmMessageActionsDeps = {
   normalizeError: (e: unknown) => string;
   applyReaction: (messageId: string, nick: string, emojis: string[]) => void;
 };
-
-function threadRefFromMessage(
-  message: TimelineMessage | null | undefined,
-): { id: string; parent?: string } | undefined {
-  if (!message?.threadId) return undefined;
-  return message.parentThreadId
-    ? { id: message.threadId, parent: message.parentThreadId }
-    : { id: message.threadId };
-}
 
 export function useDmMessageActions(deps: UseDmMessageActionsDeps) {
   const {
@@ -68,7 +60,7 @@ export function useDmMessageActions(deps: UseDmMessageActionsDeps) {
     applyReaction(targetId, myNick, nextEmojis);
 
     try {
-      await xmppClient.value.sendDmReaction(activePeerJid.value, targetId, nextEmojis, threadRefFromMessage(msg));
+      await xmppClient.value.sendDmReaction(activePeerJid.value, targetId, nextEmojis, dmThreadRefFromMessage(msg));
     } catch (e) {
       applyReaction(targetId, myNick, previousEmojis);
       actionError.value = normalizeError(e);
@@ -89,7 +81,7 @@ export function useDmMessageActions(deps: UseDmMessageActionsDeps) {
     const targetId = target?.replyableId ?? target?.id ?? messageId;
     clearActionError();
     try {
-      await xmppClient.value.sendDmRetraction(activePeerJid.value, targetId, threadRefFromMessage(target));
+      await xmppClient.value.sendDmRetraction(activePeerJid.value, targetId, dmThreadRefFromMessage(target));
     } catch (e) {
       actionError.value = normalizeError(e);
     }

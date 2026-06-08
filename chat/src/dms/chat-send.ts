@@ -13,6 +13,7 @@ import {
 } from "@/lib/chat-ui";
 import { findMessageById } from "@/lib/message-ids";
 import { applyDeliveryEventById } from "@/lib/timeline-state";
+import { dmThreadRefFromMessage, dmThreadRefFromOverride, type DmThreadRef } from "@/dms/threading";
 
 // Derived from the wasm client's return shape; see useMucSend for rationale.
 type ChatSendResult = Awaited<ReturnType<BrowserXmppClient["sendDirectMessage"]>>;
@@ -35,15 +36,6 @@ type UseChatSendDeps = {
     isStillActive: boolean,
   ) => void;
 };
-
-function threadRefFromMessage(
-  message: TimelineMessage | null | undefined,
-): { id: string; parent?: string } | undefined {
-  if (!message?.threadId) return undefined;
-  return message.parentThreadId
-    ? { id: message.threadId, parent: message.parentThreadId }
-    : { id: message.threadId };
-}
 
 export function useChatSend(deps: UseChatSendDeps) {
   const {
@@ -118,7 +110,9 @@ export function useChatSend(deps: UseChatSendDeps) {
             ...(replyTo.body ? { body: replyTo.body } : {}),
           }
         : undefined;
-      const threadId = threadOverride?.threadId ?? (parent ? (parent.threadId ?? parent.id) : undefined);
+      const overrideThread = dmThreadRefFromOverride(threadOverride);
+      const fallbackThreadId = parent ? (parent.threadId?.trim() || parent.id.trim()) : undefined;
+      const thread: DmThreadRef | undefined = overrideThread ?? (fallbackThreadId ? { id: fallbackThreadId } : undefined);
       const freshLinkPreview = composerLinkPreviewPayloadIsFresh(linkPreview) ? linkPreview : undefined;
       const linkPreviews = freshLinkPreview ? [freshLinkPreview.preview] : [];
       const result = await client.sendDirectMessage(peerJid, bodyText, {
@@ -128,8 +122,8 @@ export function useChatSend(deps: UseChatSendDeps) {
         ...(freshLinkPreview ? { linkPreviewToken: freshLinkPreview.token } : {}),
         ...(freshLinkPreview ? { linkPreviewExpiresAt: freshLinkPreview.expiresAt } : {}),
         ...(wireReplyTo ? { replyTo: wireReplyTo } : {}),
-        ...(threadId ? { threadId } : {}),
-        ...(threadOverride?.parentThreadId ? { parentThreadId: threadOverride.parentThreadId } : {}),
+        ...(thread ? { threadId: thread.id } : {}),
+        ...(thread?.parent ? { parentThreadId: thread.parent } : {}),
       });
       const msgId = result?.id ?? null;
       const isStillActive = xmppClient.value === client && activePeerJid.value === peerJid;
@@ -157,9 +151,9 @@ export function useChatSend(deps: UseChatSendDeps) {
               ...(replyTo.body ? { preview: replyTo.body } : {}),
             };
           }
-          if (threadId) {
-            optimistic.threadId = threadId;
-            if (threadOverride?.parentThreadId) optimistic.parentThreadId = threadOverride.parentThreadId;
+          if (thread) {
+            optimistic.threadId = thread.id;
+            if (thread.parent) optimistic.parentThreadId = thread.parent;
           }
           if (attachments && attachments.length > 0) {
             optimistic.sharedFiles = attachments.map((a) => ({
@@ -217,7 +211,7 @@ export function useChatSend(deps: UseChatSendDeps) {
           linkPreviewToken: freshLinkPreview.token,
           linkPreviewExpiresAt: freshLinkPreview.expiresAt,
         } : undefined,
-        threadRefFromMessage(message),
+        dmThreadRefFromMessage(message),
       );
     } catch (e) {
       actionError.value = normalizeError(e);
