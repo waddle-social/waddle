@@ -6,10 +6,13 @@
 use chrono::{DateTime, Utc};
 use minidom::Element;
 use waddle_xmpp::xep::{
-    build_call_thread_anchor, parse_call_thread_anchor, CallThreadAnchor, CallThreadKind,
-    CallThreadMedia, CallThreadParseError, NS_WADDLE_CALL_THREAD,
+    build_call_thread_anchor, build_call_thread_ended, parse_call_thread_anchor,
+    parse_call_thread_ended, parse_call_thread_ended_child, CallThreadAnchor, CallThreadDuration,
+    CallThreadEnded, CallThreadKind, CallThreadMedia, CallThreadParseError, NS_FASTEN,
+    NS_WADDLE_CALL_THREAD,
 };
 use xmpp_parsers::jingle::SessionId;
+use xmpp_parsers::message::Message;
 
 fn anchor(media: CallThreadMedia) -> CallThreadAnchor {
     CallThreadAnchor {
@@ -58,6 +61,62 @@ fn call_thread_marker_round_trips_video_only_media() {
         parse_call_thread_anchor(&element).expect("marker parses"),
         original
     );
+}
+
+#[test]
+fn call_thread_ended_round_trips_duration_summary() {
+    let original = CallThreadEnded {
+        ended: "2026-06-07T14:35:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("ended"),
+        duration: CallThreadDuration::parse("PT5M").expect("duration"),
+    };
+
+    let element = build_call_thread_ended(&original);
+
+    assert_eq!(element.name(), "call-thread-ended");
+    assert_eq!(element.ns(), NS_WADDLE_CALL_THREAD);
+    assert_eq!(element.attr("ended"), Some("2026-06-07T14:35:00Z"));
+    assert_eq!(element.attr("duration"), Some("PT5M"));
+    assert_eq!(
+        parse_call_thread_ended(&element).expect("ended marker parses"),
+        original
+    );
+}
+
+#[test]
+fn call_thread_ended_child_parses_xep0422_fastening_shape() {
+    let expected = CallThreadEnded {
+        ended: "2026-06-07T14:35:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("ended"),
+        duration: CallThreadDuration::parse("PT5M").expect("duration"),
+    };
+    let apply_to = Element::builder("apply-to", NS_FASTEN)
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            "anchor-origin-id",
+        )
+        .append(build_call_thread_ended(&expected))
+        .build();
+    let mut message = Message::new(None);
+    message.payloads.push(apply_to);
+
+    assert_eq!(parse_call_thread_ended_child(&message), Some(expected));
+}
+
+#[test]
+fn call_thread_ended_child_rejects_bare_payload_without_fastening() {
+    let ended = CallThreadEnded {
+        ended: "2026-06-07T14:35:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("ended"),
+        duration: CallThreadDuration::parse("PT5M").expect("duration"),
+    };
+    let mut message = Message::new(None);
+    message.payloads.push(build_call_thread_ended(&ended));
+
+    assert_eq!(parse_call_thread_ended_child(&message), None);
 }
 
 #[test]

@@ -195,7 +195,7 @@ pub(crate) async fn broadcast_room_system_message(
     deps: &Deps<'_>,
     room: BareJid,
     message: Box<Message>,
-) {
+) -> Option<String> {
     room_system_message::broadcast_room_system_message_event(
         deps.connection_registry,
         deps,
@@ -203,7 +203,7 @@ pub(crate) async fn broadcast_room_system_message(
         message,
         0,
     )
-    .await;
+    .await
 }
 
 /// Execute the side effects described by `events`.

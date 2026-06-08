@@ -467,6 +467,25 @@ export function roomMessageFromArchived(
       pinEventAction: message.pin_event.action,
     };
   }
+  if (message.call_thread_ended) {
+    return {
+      id: roomPrimaryId,
+      archiveId: message.mam_id,
+      fromJid,
+      roomJid,
+      nick,
+      body: "",
+      createdAt,
+      createdAtSource,
+      type: "message",
+      callThreadEnded: {
+        anchorId: message.call_thread_ended.anchor_id,
+        ended: message.call_thread_ended.ended,
+        duration: message.call_thread_ended.duration,
+      },
+      ...(stampedByRoom ? { stanzaId: stampedByRoom, stanzaIdBy: roomJid } : {}),
+    };
+  }
   const sharedFiles = message.shared_files ?? [];
   const linkPreviews = message.link_previews ?? [];
   const mentionUris = message.mention_uris ?? [];

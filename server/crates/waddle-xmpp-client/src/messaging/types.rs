@@ -169,6 +169,8 @@ pub struct InboundMessage {
     /// urn:waddle:call-thread:0 call anchor authored by the room.
     /// `None` when the message carries no `<call-thread/>` payload.
     pub call_thread: Option<crate::xep::call_thread::CallThreadAnchor>,
+    /// urn:waddle:call-thread:0 ended fastening targeting a call-thread anchor.
+    pub call_thread_ended: Option<crate::xep::call_thread::CallThreadEnded>,
     pub is_sticker: bool,
     /// urn:waddle:pin:0 pin/unpin system event surfaced by the room.
     /// `None` when the message carries no `<pin-event/>` payload.

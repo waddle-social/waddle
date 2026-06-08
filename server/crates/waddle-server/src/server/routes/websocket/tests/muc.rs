@@ -1311,6 +1311,65 @@ async fn empty_muji_presence_unregisters_the_sfu_participant() {
 }
 
 #[tokio::test]
+async fn empty_muji_presence_ends_the_active_call_thread() {
+    let recorder = std::sync::Arc::new(RecordingSfu::default());
+    let state = state_with_recording_sfu(std::sync::Arc::clone(&recorder)).await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "presence-clear-ended@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        None,
+        &Some(owner_session.clone()),
+    )
+    .await;
+    let alice_phase = waddle_xmpp::protocol::ConnectionPhase::ready(alice.clone(), false);
+
+    let mut active = muc_presence_to(&room_jid, "alice");
+    active.payloads.push(active_muji().to_element());
+    let _ = handlers::presence::handle_presence(
+        active,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &alice_phase,
+        &Some(owner_session.clone()),
+    )
+    .await;
+    state.deps.protocol.call_threads.insert(
+        room_jid.clone(),
+        crate::server::routes::websocket::ActiveCallThread {
+            anchor_origin_id: "anchor-origin-id".to_owned(),
+            started: chrono::Utc::now() - chrono::Duration::minutes(5),
+        },
+    );
+
+    let mut empty = muc_presence_to(&room_jid, "alice");
+    empty.payloads.push(empty_muji().to_element());
+    let _ = handlers::presence::handle_presence(
+        empty,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &alice_phase,
+        &Some(owner_session),
+    )
+    .await;
+
+    assert!(
+        !state.deps.protocol.call_threads.contains_key(&room_jid),
+        "XMPP-native Muji clear must consume the active call thread when the SFU participant set is empty"
+    );
+}
+
+#[tokio::test]
 async fn resumed_muc_join_presence_replays_existing_muji_state() {
     let state = create_test_websocket_state().await;
     let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;

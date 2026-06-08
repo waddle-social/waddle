@@ -44,17 +44,20 @@ use waddle_xmpp::xep::xep0272::{find_muji, Muji, NS_MUJI};
 use waddle_xmpp::xep::xep0421::OccupantIdentity;
 use waddle_xmpp::xep::{
     build_call_thread_anchor, build_hint_element, CallThreadAnchor, CallThreadKind,
-    CallThreadMedia, Hint,
+    CallThreadMedia, Hint, NS_WADDLE_CALL_THREAD,
 };
 use waddle_xmpp::Stanza;
 use waddle_xmpp_core::mam::ThreadId;
 use waddle_xmpp_core::xep0201::{build_thread_element, ThreadInfo, CLIENT_STANZA_NS};
+use waddle_xmpp_core::xep0359::{build_origin_id_element, NS_SID};
 use xmpp_parsers::jingle::SessionId;
 use xmpp_parsers::message::{Lang, Message, MessageType};
 use xmpp_parsers::presence::Presence;
 
 use super::super::super::{get_room_actor, stanza_to_xml};
-use crate::server::routes::websocket::{interpret_loop::build_interpret_deps, WebSocketState};
+use crate::server::routes::websocket::{
+    interpret_loop::build_interpret_deps, ActiveCallThread, WebSocketState,
+};
 
 /// Pull out the typed [`Muji`] element from an inbound presence's
 /// payloads if it carries one. Returns `None` when the namespace
@@ -299,14 +302,44 @@ pub(super) async fn try_handle_muc_presence_update(
         }
     }
 
+    if clears_muji_presence {
+        crate::server::routes::muc_muji_clear::maybe_broadcast_call_thread_ended(state, room_jid)
+            .await;
+    }
+
     if let Some(anchor) = call_thread_anchor {
+        let started = anchor
+            .payloads
+            .iter()
+            .find(|payload| {
+                payload.name() == "call-thread" && payload.ns() == NS_WADDLE_CALL_THREAD
+            })
+            .and_then(|payload| waddle_xmpp::xep::parse_call_thread_anchor(payload).ok())
+            .map(|marker| marker.started);
+        let anchor_origin_id = anchor
+            .payloads
+            .iter()
+            .find(|payload| payload.name() == "origin-id" && payload.ns() == NS_SID)
+            .and_then(|payload| payload.attr("id"))
+            .map(str::to_owned);
         let deps = build_interpret_deps(state, None);
-        crate::server::routes::interpret::broadcast_room_system_message(
+        let _ = crate::server::routes::interpret::broadcast_room_system_message(
             &deps,
             room_jid.clone(),
             Box::new(anchor),
         )
         .await;
+        if state.deps.protocol.sfu.is_some() {
+            if let Some((anchor_origin_id, started)) = anchor_origin_id.zip(started) {
+                state.deps.protocol.call_threads.insert(
+                    room_jid.clone(),
+                    ActiveCallThread {
+                        anchor_origin_id,
+                        started,
+                    },
+                );
+            }
+        }
     }
 
     // Silence unused-import warning when feature flags trim the path.
@@ -332,6 +365,9 @@ fn build_call_thread_anchor_message(
     message
         .payloads
         .push(build_thread_element(&thread, CLIENT_STANZA_NS));
+    message
+        .payloads
+        .push(build_origin_id_element(&uuid::Uuid::new_v4().to_string()));
     message
         .payloads
         .push(build_call_thread_anchor(&CallThreadAnchor {

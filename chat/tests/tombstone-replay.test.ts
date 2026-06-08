@@ -27,6 +27,57 @@ const extensionAnnotation: ExtensionAnnotation = {
 };
 
 describe("XEP-0424 tombstone replay", () => {
+  test("folds archived call-thread-ended fastenings into their call anchors", () => {
+    const anchor: LiveRoomMessage = {
+      id: "anchor-message",
+      wireIds: ["anchor-origin-id"],
+      replyableId: "anchor-origin-id",
+      stanzaId: "anchor-room-stanza-id",
+      roomJid: "room@muc.example.com",
+      nick: "alice",
+      body: "Alice started a call",
+      createdAt: "2026-05-08T13:00:00Z",
+      type: "message",
+      callThread: {
+        kind: "muc",
+        sid: "call-thread-uuid",
+        media: ["audio"],
+        initiator: "room@muc.example.com/alice",
+        started: "2026-05-08T13:00:00Z",
+      },
+    };
+    const ended: LiveRoomMessage = {
+      id: "ended-message",
+      roomJid: "room@muc.example.com",
+      nick: "room",
+      body: "",
+      createdAt: "2026-05-08T13:05:00Z",
+      type: "message",
+      callThreadEnded: {
+        anchorId: "anchor-origin-id",
+        ended: "2026-05-08T13:05:00Z",
+        duration: "PT5M",
+      },
+    };
+
+    const timeline = buildChannelTimelineFromMamResults({
+      session,
+      channelIsForum: false,
+      mamResults: [anchor, ended],
+    });
+
+    expect(timeline).toHaveLength(1);
+    expect(timeline[0]?.callThread).toEqual({
+      kind: "muc",
+      sid: "call-thread-uuid",
+      media: ["audio"],
+      initiator: "room@muc.example.com/alice",
+      started: "2026-05-08T13:00:00Z",
+      ended: "2026-05-08T13:05:00Z",
+      duration: "PT5M",
+    });
+  });
+
   test("updates an already-loaded channel message from a MAM tombstone", () => {
     const existing: TimelineMessage = {
       id: "original-message",

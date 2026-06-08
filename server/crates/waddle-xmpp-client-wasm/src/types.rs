@@ -24,6 +24,13 @@ pub struct WaddleCallThreadAnchor {
 }
 
 #[derive(Debug, Serialize)]
+pub struct WaddleCallThreadEnded {
+    pub anchor_id: String,
+    pub ended: String,
+    pub duration: String,
+}
+
+#[derive(Debug, Serialize)]
 pub struct WaddleMessage {
     pub id: Option<String>,
     pub from: Option<String>,
@@ -66,6 +73,8 @@ pub struct WaddleMessage {
     /// urn:waddle:call-thread:0 room call-thread anchor.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub call_thread: Option<WaddleCallThreadAnchor>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_thread_ended: Option<WaddleCallThreadEnded>,
     pub shared_files: Vec<WaddleSharedFile>,
     pub link_previews: Vec<WaddleLinkPreview>,
     /// urn:waddle:pin:0 pin/unpin event surfaced from a system message
@@ -302,6 +311,8 @@ pub struct WaddleArchivedMessage {
     /// urn:waddle:call-thread:0 room call-thread anchor.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub call_thread: Option<WaddleCallThreadAnchor>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_thread_ended: Option<WaddleCallThreadEnded>,
     pub shared_files: Vec<WaddleSharedFile>,
     pub link_previews: Vec<WaddleLinkPreview>,
     pub extension_envelope: Option<WaddleExtensionEnvelope>,

@@ -353,6 +353,24 @@ fn parse_message_with_call_thread_anchor() {
 }
 
 #[test]
+fn parse_message_with_call_thread_ended_fastening() {
+    let e = el("<message xmlns='jabber:client' from='room@muc.example' type='groupchat'>\
+         <apply-to xmlns='urn:xmpp:fasten:0' id='anchor-stanza-id'>\
+           <call-thread-ended xmlns='urn:waddle:call-thread:0' ended='2026-06-07T14:35:00Z' duration='PT5M'/>\
+         </apply-to>\
+         <store xmlns='urn:xmpp:hints'/>\
+         </message>");
+    let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+        panic!("expected Message");
+    };
+    let ended = msg.call_thread_ended.expect("call-thread-ended marker");
+
+    assert_eq!(ended.anchor_id, "anchor-stanza-id");
+    assert_eq!(ended.ended.to_rfc3339(), "2026-06-07T14:35:00+00:00");
+    assert_eq!(ended.duration.as_str(), "PT5M");
+}
+
+#[test]
 fn parse_message_with_retract() {
     let e = el("<message xmlns='jabber:client' type='groupchat'>\
          <retract xmlns='urn:xmpp:message-retract:1' id='old-msg-id'/>\

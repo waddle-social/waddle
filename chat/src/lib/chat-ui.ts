@@ -47,6 +47,8 @@ export interface CallThreadAnchor {
   media: readonly ("audio" | "video")[];
   initiator: string;
   started: string;
+  ended?: string;
+  duration?: string;
 }
 
 export interface LinkPreview {

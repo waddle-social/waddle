@@ -185,6 +185,12 @@ export interface LiveRoomMessage {
   parentThreadId?: string;
   /** Waddle call-thread anchor marker (`urn:waddle:call-thread:0`). */
   callThread?: CallThreadAnchor;
+  /** Waddle call-thread ended fastening target from XEP-0422 apply-to@id. */
+  callThreadEnded?: {
+    anchorId: string;
+    ended: string;
+    duration: string;
+  };
   /** Waddle thread metadata */
   forumPostKind?: "topic" | "reply";
   forumTitle?: string;

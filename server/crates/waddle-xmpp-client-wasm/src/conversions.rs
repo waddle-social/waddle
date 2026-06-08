@@ -74,6 +74,16 @@ pub(crate) fn call_thread_to_js(
     }
 }
 
+pub(crate) fn call_thread_ended_to_js(
+    ended: waddle_xmpp_client::xep::call_thread::CallThreadEnded,
+) -> WaddleCallThreadEnded {
+    WaddleCallThreadEnded {
+        anchor_id: ended.anchor_id,
+        ended: ended.ended.to_rfc3339(),
+        duration: ended.duration.as_str().to_owned(),
+    }
+}
+
 pub(crate) fn extension_envelope_to_js(
     envelope: messaging::ExtensionEnvelopeData,
 ) -> WaddleExtensionEnvelope {
@@ -227,6 +237,7 @@ pub(crate) fn inbound_to_js(message: InboundMessage) -> WaddleMessage {
         forum_thread_title,
         is_sticker: message.is_sticker,
         call_thread: message.call_thread.map(call_thread_to_js),
+        call_thread_ended: message.call_thread_ended.map(call_thread_ended_to_js),
         shared_files: message
             .shared_files
             .into_iter()
@@ -352,6 +363,7 @@ pub(crate) fn inbox_push_to_js(
         forum_thread_title: None,
         is_sticker: false,
         call_thread: None,
+        call_thread_ended: None,
         shared_files: Vec::new(),
         link_previews: Vec::new(),
         pin_event: None,
@@ -477,6 +489,9 @@ pub(crate) fn archived_to_js(archived: ArchivedMessage) -> Option<WaddleArchived
         call_thread: parsed
             .and_then(|message| message.call_thread.clone())
             .map(call_thread_to_js),
+        call_thread_ended: parsed
+            .and_then(|message| message.call_thread_ended.clone())
+            .map(call_thread_ended_to_js),
         shared_files: parsed
             .map(|message| {
                 message
@@ -1091,6 +1106,38 @@ mod inbound_to_js_tests {
         assert_eq!(anchor.media, vec!["audio".to_owned(), "video".to_owned()]);
         assert_eq!(anchor.initiator, "alice@waddle.test");
         assert_eq!(anchor.started, "2026-06-07T14:30:00+00:00");
+    }
+
+    #[test]
+    fn archived_to_js_preserves_call_thread_ended_for_room_reload() {
+        let archived = parse_mam_archived(
+            "<message xmlns='jabber:client'>\
+               <result xmlns='urn:xmpp:mam:2' id='mam-ended' queryid='q1'>\
+                 <forwarded xmlns='urn:xmpp:forward:0'>\
+                   <delay xmlns='urn:xmpp:delay' stamp='2026-06-07T14:35:00Z'/>\
+                   <message xmlns='jabber:client' type='groupchat' id='ended-1' \
+                            from='general@muc.waddle.test' to='alice@waddle.test/web'>\
+                     <apply-to xmlns='urn:xmpp:fasten:0' id='anchor-stanza-id'>\
+                       <call-thread-ended xmlns='urn:waddle:call-thread:0' \
+                                          ended='2026-06-07T14:35:00Z' \
+                                          duration='PT5M'/>\
+                     </apply-to>\
+                     <store xmlns='urn:xmpp:hints'/>\
+                   </message>\
+                 </forwarded>\
+               </result>\
+             </message>",
+        );
+
+        let js = archived_to_js(archived).expect("call-thread-ended MAM row should convert");
+        let ended = js
+            .call_thread_ended
+            .expect("call-thread-ended should survive archive conversion");
+
+        assert_eq!(js.mam_id, "mam-ended");
+        assert_eq!(ended.anchor_id, "anchor-stanza-id");
+        assert_eq!(ended.ended, "2026-06-07T14:35:00+00:00");
+        assert_eq!(ended.duration, "PT5M");
     }
 
     #[test]

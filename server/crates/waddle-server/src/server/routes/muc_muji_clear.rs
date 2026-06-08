@@ -7,14 +7,23 @@
 //! occupants. Centralising the logic keeps the wire shape identical.
 
 use jid::{BareJid, FullJid};
+use minidom::Element;
 use tracing::{debug, warn};
 use waddle_xmpp::muc::build_occupant_presence;
 use waddle_xmpp::muc::room_actor::{ClearMujiPresence, MujiPresenceUpdateOutcome};
 use waddle_xmpp::xep::xep0272::Muji;
 use waddle_xmpp::xep::xep0421::OccupantIdentity;
+use waddle_xmpp::xep::{
+    build_call_thread_ended, build_hint_element, CallThreadDuration, CallThreadEnded, Hint,
+    NS_FASTEN,
+};
 use waddle_xmpp_core::Stanza;
+use xmpp_parsers::message::{Message, MessageType};
 
-use super::websocket::{get_room_actor, note_participant_left_from_webhook, WebSocketState};
+use super::websocket::{
+    get_room_actor, interpret_loop::build_interpret_deps, note_participant_left_from_webhook,
+    WebSocketState,
+};
 
 /// Clear `full_jid`'s Muji advertisement in `room_jid` and broadcast
 /// the leave marker to remaining occupants. Idempotent: a participant
@@ -65,6 +74,7 @@ pub(crate) async fn clear_muji_presence_for_departure(
 
     broadcast_muji_clear(state, room_jid, full_jid, &outcome);
     note_participant_left_from_webhook(state, room_jid, full_jid);
+    maybe_broadcast_call_thread_ended(state, room_jid).await;
 }
 
 /// Broadcast a server-originated Muji-presence clear to every remaining
@@ -118,5 +128,68 @@ pub(crate) fn broadcast_muji_clear(
                 .connection_registry
                 .try_send_to(recipient, Stanza::Presence(presence));
         }
+    }
+}
+
+pub(crate) async fn maybe_broadcast_call_thread_ended(state: &WebSocketState, room_jid: &BareJid) {
+    let Some(sfu) = state.deps.protocol.sfu.as_ref() else {
+        return;
+    };
+    let Ok(call_id) = waddle_sfu::CallId::new(room_jid.to_string()) else {
+        return;
+    };
+    if !sfu.participants_for_call(&call_id).is_empty() {
+        return;
+    }
+    let Some((_, active)) = state.deps.protocol.call_threads.remove(room_jid) else {
+        return;
+    };
+
+    let ended = chrono::Utc::now();
+    let duration = ended.signed_duration_since(active.started);
+    let duration = CallThreadDuration::parse(&format_call_thread_duration(duration))
+        .expect("formatted call-thread duration is valid");
+    let message = build_call_thread_ended_message(
+        room_jid,
+        &active.anchor_origin_id,
+        &CallThreadEnded { ended, duration },
+    );
+    let deps = build_interpret_deps(state, None);
+    let _ =
+        super::interpret::broadcast_room_system_message(&deps, room_jid.clone(), Box::new(message))
+            .await;
+}
+
+fn build_call_thread_ended_message(
+    room_jid: &BareJid,
+    anchor_origin_id: &str,
+    ended: &CallThreadEnded,
+) -> Message {
+    let apply_to = Element::builder("apply-to", NS_FASTEN)
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            anchor_origin_id,
+        )
+        .append(build_call_thread_ended(ended))
+        .build();
+    let mut message = Message::new(Some(jid::Jid::from(room_jid.clone())));
+    message.from = Some(jid::Jid::from(room_jid.clone()));
+    message.type_ = MessageType::Groupchat;
+    message.payloads.push(apply_to);
+    message.payloads.push(build_hint_element(Hint::Store));
+    message
+}
+
+fn format_call_thread_duration(duration: chrono::Duration) -> String {
+    let seconds = duration.num_seconds().max(0);
+    let hours = seconds / 3600;
+    let minutes = (seconds % 3600) / 60;
+    let seconds = seconds % 60;
+    if hours > 0 {
+        format!("PT{hours}H{minutes}M{seconds}S")
+    } else if minutes > 0 {
+        format!("PT{minutes}M{seconds}S")
+    } else {
+        format!("PT{seconds}S")
     }
 }

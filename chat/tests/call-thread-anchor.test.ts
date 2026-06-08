@@ -68,6 +68,23 @@ describe("call-thread anchor timeline mapping", () => {
     expect(callThreadAnchorThreadId(timelineMessage)).toBe("call-thread-uuid");
   });
 
+  test("renders ended call-thread anchors as muted duration summaries", () => {
+    const timelineMessage = mapLiveRoomMessageToTimeline(session, callAnchor({
+      callThread: {
+        kind: "muc",
+        sid: "session-uuid",
+        media: ["audio"],
+        initiator: "alice@example",
+        started: "2026-06-07T14:30:00Z",
+        ended: "2026-06-07T14:35:00Z",
+        duration: "PT5M",
+      },
+    }));
+
+    expect(callThreadAnchorLabel(timelineMessage)).toBe("Call ended · 5m");
+    expect(callThreadAnchorThreadId(timelineMessage)).toBe("call-thread-uuid");
+  });
+
   test("room archive codec maps the WASM call-thread marker onto LiveRoomMessage", () => {
     const live = roomMessageFromArchived({
       mam_id: "mam-anchor-1",
@@ -102,6 +119,37 @@ describe("call-thread anchor timeline mapping", () => {
       media: ["audio", "video"],
       initiator: "alice@example",
       started: "2026-06-07T14:30:00Z",
+    });
+  });
+
+  test("room archive codec maps call-thread-ended fastening onto a control event", () => {
+    const live = roomMessageFromArchived({
+      mam_id: "mam-ended-1",
+      id: "ended-1",
+      from: "general@muc.example.com",
+      to: "alice@example.com/web",
+      message_type: "groupchat",
+      timestamp: "2026-06-07T14:35:00Z",
+      reaction_emojis: [],
+      is_muc: true,
+      markup_spans: [],
+      mention_uris: [],
+      references: [],
+      is_sticker: false,
+      shared_files: [],
+      link_previews: [],
+      call_thread_ended: {
+        anchor_id: "anchor-stanza-id",
+        ended: "2026-06-07T14:35:00Z",
+        duration: "PT5M",
+      },
+    });
+
+    expect(live?.body).toBe("");
+    expect(live?.callThreadEnded).toEqual({
+      anchorId: "anchor-stanza-id",
+      ended: "2026-06-07T14:35:00Z",
+      duration: "PT5M",
     });
   });
 

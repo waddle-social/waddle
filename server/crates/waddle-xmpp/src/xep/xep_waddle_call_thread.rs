@@ -10,6 +10,7 @@ use xmpp_parsers::jingle::SessionId;
 use xmpp_parsers::message::Message;
 
 pub const NS_WADDLE_CALL_THREAD: &str = "urn:waddle:call-thread:0";
+pub const NS_FASTEN: &str = "urn:xmpp:fasten:0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CallThreadKind {
@@ -49,6 +50,29 @@ pub struct CallThreadAnchor {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallThreadDuration(String);
+
+impl CallThreadDuration {
+    pub fn parse(value: &str) -> Result<Self, CallThreadParseError> {
+        if is_valid_call_thread_duration(value) {
+            Ok(Self(value.to_owned()))
+        } else {
+            Err(CallThreadParseError::InvalidDuration)
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallThreadEnded {
+    pub ended: DateTime<Utc>,
+    pub duration: CallThreadDuration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CallThreadParseError {
     NotCallThread,
     MissingAttribute(&'static str),
@@ -56,6 +80,8 @@ pub enum CallThreadParseError {
     InvalidMedia,
     InvalidInitiator,
     InvalidStarted,
+    InvalidEnded,
+    InvalidDuration,
 }
 
 pub fn build_call_thread_anchor(anchor: &CallThreadAnchor) -> Element {
@@ -116,12 +142,57 @@ pub fn parse_call_thread_anchor(
     })
 }
 
+pub fn build_call_thread_ended(ended: &CallThreadEnded) -> Element {
+    Element::builder("call-thread-ended", NS_WADDLE_CALL_THREAD)
+        .attr(
+            minidom::rxml::xml_ncname!("ended").to_owned(),
+            ended
+                .ended
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("duration").to_owned(),
+            ended.duration.as_str(),
+        )
+        .build()
+}
+
+pub fn parse_call_thread_ended(element: &Element) -> Result<CallThreadEnded, CallThreadParseError> {
+    if element.name() != "call-thread-ended" || element.ns() != NS_WADDLE_CALL_THREAD {
+        return Err(CallThreadParseError::NotCallThread);
+    }
+
+    let ended = DateTime::parse_from_rfc3339(required_attr(element, "ended")?)
+        .map_err(|_| CallThreadParseError::InvalidEnded)?
+        .with_timezone(&Utc);
+    let duration = CallThreadDuration::parse(required_attr(element, "duration")?)?;
+
+    Ok(CallThreadEnded { ended, duration })
+}
+
 pub fn parse_call_thread_anchor_child(message: &Message) -> Option<CallThreadAnchor> {
     message
         .payloads
         .iter()
         .find(|payload| payload.name() == "call-thread" && payload.ns() == NS_WADDLE_CALL_THREAD)
         .and_then(|payload| parse_call_thread_anchor(payload).ok())
+}
+
+pub fn parse_call_thread_ended_child(message: &Message) -> Option<CallThreadEnded> {
+    message
+        .payloads
+        .iter()
+        .find_map(call_thread_ended_payload)
+        .and_then(|payload| parse_call_thread_ended(payload).ok())
+}
+
+fn call_thread_ended_payload(payload: &Element) -> Option<&Element> {
+    if payload.name() != "apply-to" || payload.ns() != NS_FASTEN {
+        return None;
+    }
+    payload
+        .children()
+        .find(|child| child.name() == "call-thread-ended" && child.ns() == NS_WADDLE_CALL_THREAD)
 }
 
 fn media_attr(media: CallThreadMedia) -> &'static str {
@@ -158,6 +229,30 @@ fn parse_media(value: &str) -> Result<CallThreadMedia, CallThreadParseError> {
         return Err(CallThreadParseError::InvalidMedia);
     }
     Ok(CallThreadMedia { audio, video })
+}
+
+fn is_valid_call_thread_duration(value: &str) -> bool {
+    if !value.starts_with("PT") || value.len() <= 2 {
+        return false;
+    }
+
+    let mut chars = value[2..].chars().peekable();
+    let mut saw_component = false;
+    while chars.peek().is_some() {
+        let mut saw_digit = false;
+        while chars.peek().is_some_and(|c| c.is_ascii_digit()) {
+            saw_digit = true;
+            chars.next();
+        }
+        if !saw_digit {
+            return false;
+        }
+        match chars.next() {
+            Some('H' | 'M' | 'S') => saw_component = true,
+            _ => return false,
+        }
+    }
+    saw_component
 }
 
 #[cfg(test)]
