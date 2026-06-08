@@ -94,8 +94,9 @@ export class WaddleClient {
      * Fetch a DM thread's archived replies from the account archive,
      * filtered by `with=peer` and the Waddle MAM thread field. Mirrors
      * `fetch_room_history_by_thread`, but targets the personal archive
-     * (`to=account` + `with=peer`) instead of a room. `before_id` pages
-     * older replies via RSM (XEP-0059).
+     * (`to=account` + `with=peer`) instead of a room. A `None` / empty
+     * `before_id` requests the most-recent page; a cursor pages older
+     * replies via RSM (XEP-0059).
      */
     fetch_dm_history_by_thread(peer_jid: string, thread_id: string, max: number, before_id?: string | null): Promise<any>;
     fetch_dm_history_page(peer_jid: string, max: number, page_param: any): Promise<any>;

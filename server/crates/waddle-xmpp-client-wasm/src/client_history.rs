@@ -13,13 +13,16 @@ impl WaddleClient {
         future_to_promise(async move {
             let query_id = uuid::Uuid::new_v4().to_string();
             let iq_id = uuid::Uuid::new_v4().to_string();
-            let mut builder = MamIqBuilder::new(&iq_id, &query_id, max)
+            // An empty `<before/>` requests the most-recent page (XEP-0059
+            // §2.5 / XEP-0313 §3.4): the server treats any present `<before>`
+            // — including empty — as backward pagination. Omitting it would
+            // page forward and return the *oldest* page instead, so default
+            // the latest fetch to an empty cursor like the non-thread bindings.
+            let iq = MamIqBuilder::new(&iq_id, &query_id, max)
                 .to_jid(&room_jid)
-                .thread_id(&thread_id);
-            if let Some(before) = before_id.as_deref() {
-                builder = builder.before(before);
-            }
-            let iq = builder.build();
+                .thread_id(&thread_id)
+                .before(before_id.as_deref().unwrap_or(""))
+                .build();
             let page = send_mam_query_command(inner, iq, query_id).await?;
             to_js_value(&mam_page_to_js(page))
         })
@@ -28,8 +31,9 @@ impl WaddleClient {
     /// Fetch a DM thread's archived replies from the account archive,
     /// filtered by `with=peer` and the Waddle MAM thread field. Mirrors
     /// `fetch_room_history_by_thread`, but targets the personal archive
-    /// (`to=account` + `with=peer`) instead of a room. `before_id` pages
-    /// older replies via RSM (XEP-0059).
+    /// (`to=account` + `with=peer`) instead of a room. A `None` / empty
+    /// `before_id` requests the most-recent page; a cursor pages older
+    /// replies via RSM (XEP-0059).
     pub fn fetch_dm_history_by_thread(
         &self,
         peer_jid: String,
@@ -45,14 +49,15 @@ impl WaddleClient {
                 let stored = inner.borrow().config.clone();
                 bare_jid(&stored.jid)
             };
-            let mut builder = MamIqBuilder::new(&iq_id, &query_id, max)
+            // Empty `<before/>` = most-recent page (see
+            // `fetch_room_history_by_thread`); omitting it would return the
+            // oldest page and strand the newest replies of a long thread.
+            let iq = MamIqBuilder::new(&iq_id, &query_id, max)
                 .to_jid(&account_jid)
                 .with_jid(&peer_jid)
-                .thread_id(&thread_id);
-            if let Some(before) = before_id.as_deref() {
-                builder = builder.before(before);
-            }
-            let iq = builder.build();
+                .thread_id(&thread_id)
+                .before(before_id.as_deref().unwrap_or(""))
+                .build();
             let page = send_mam_query_command(inner, iq, query_id).await?;
             to_js_value(&mam_page_to_js(page))
         })
@@ -457,14 +462,21 @@ mod client_history_tests {
         thread_id: &str,
         before_id: Option<&str>,
     ) -> Element {
-        let mut builder = MamIqBuilder::new(iq_id, query_id, max)
+        // Mirrors `fetch_dm_history_by_thread`: always emit `<before>` (empty
+        // for the latest page), so the server pages backward (newest-first).
+        MamIqBuilder::new(iq_id, query_id, max)
             .to_jid(account_jid)
             .with_jid(peer_jid)
-            .thread_id(thread_id);
-        if let Some(before) = before_id {
-            builder = builder.before(before);
-        }
-        builder.build()
+            .thread_id(thread_id)
+            .before(before_id.unwrap_or(""))
+            .build()
+    }
+
+    fn rsm_before(iq: &Element) -> Option<String> {
+        iq.get_child("query", TEST_MAM_NS)
+            .and_then(|query| query.get_child("set", TEST_RSM_NS))
+            .and_then(|set| set.get_child("before", TEST_RSM_NS))
+            .map(|element| element.text())
     }
 
     #[test]
@@ -491,6 +503,23 @@ mod client_history_tests {
     }
 
     #[test]
+    fn dm_history_by_thread_latest_requests_newest_page_via_empty_before() {
+        // No cursor → an empty `<before/>` must be present so the server pages
+        // backward and returns the newest replies (not the oldest page).
+        let iq = build_dm_history_by_thread_iq(
+            "iq-1",
+            "query-1",
+            10,
+            "alice@example.com",
+            "bob@example.com",
+            "thread-42",
+            None,
+        );
+
+        assert_eq!(rsm_before(&iq).as_deref(), Some(""));
+    }
+
+    #[test]
     fn dm_history_by_thread_pages_older_with_rsm_before() {
         let iq = build_dm_history_by_thread_iq(
             "iq-1",
@@ -502,12 +531,7 @@ mod client_history_tests {
             Some("cursor-7"),
         );
 
-        let before = iq
-            .get_child("query", TEST_MAM_NS)
-            .and_then(|query| query.get_child("set", TEST_RSM_NS))
-            .and_then(|set| set.get_child("before", TEST_RSM_NS))
-            .map(|element| element.text());
-        assert_eq!(before.as_deref(), Some("cursor-7"));
+        assert_eq!(rsm_before(&iq).as_deref(), Some("cursor-7"));
         assert_eq!(
             mam_form_value(&iq, "{urn:waddle:mam-thread:0}thread").as_deref(),
             Some("thread-42")

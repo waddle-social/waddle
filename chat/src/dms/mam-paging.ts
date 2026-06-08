@@ -295,19 +295,15 @@ export function useDmMamPaging(deps: UseDmMamPagingDeps) {
     const client = xmppClient.value;
     const peerJid = activePeerJid.value;
     if (!client || !peerJid || !threadId || !session.value) return;
-    if (!("queryPersonalMamThreadPage" in client) && !("queryPersonalMamByThread" in client)) return;
+    if (!("queryPersonalMamThreadPage" in client)) return;
     const requestId = messageRequestId;
     const isCurrentRequest = () =>
       requestId === messageRequestId &&
       xmppClient.value === client &&
       activePeerJid.value === peerJid;
-    let page: { messages: LiveDmMessage[]; firstArchiveId?: string; complete?: boolean } | null = null;
-    let results: LiveDmMessage[] = [];
+    let page: Awaited<ReturnType<typeof client.queryPersonalMamThreadPage>>;
     try {
-      page = "queryPersonalMamThreadPage" in client
-        ? await client.queryPersonalMamThreadPage(peerJid, threadId, PAGE_SIZE, { type: "latest" })
-        : null;
-      results = page ? page.messages : await client.queryPersonalMamByThread(peerJid, threadId, PAGE_SIZE);
+      page = await client.queryPersonalMamThreadPage(peerJid, threadId, PAGE_SIZE, { type: "latest" });
     } catch (e) {
       if (isCurrentRequest()) {
         threadHasOlder.value = { ...threadHasOlder.value, [threadId]: false };
@@ -317,14 +313,13 @@ export function useDmMamPaging(deps: UseDmMamPagingDeps) {
       return;
     }
     if (!isCurrentRequest()) return;
-    const cursor = threadCursorFromLatestPage({
-      page,
-      pageSize: PAGE_SIZE,
-      fallbackMessages: page ? undefined : results,
-    });
+    // `page` is always present here, so `hasOlder` is only set when the page
+    // carries a `firstArchiveId` cursor — the UI never advertises paging that
+    // `loadOlderThreadMessages` cannot perform.
+    const cursor = threadCursorFromLatestPage({ page, pageSize: PAGE_SIZE });
     if (cursor.oldestId !== undefined) oldestThreadArchiveIds.set(threadId, cursor.oldestId);
     threadHasOlder.value = { ...threadHasOlder.value, [threadId]: cursor.hasOlder };
-    const next = buildTimelineFromMamResults(results, messages.value);
+    const next = buildTimelineFromMamResults(page.messages, messages.value);
     if (
       next.length === messages.value.length &&
       next.every((message, index) => message === messages.value[index])
