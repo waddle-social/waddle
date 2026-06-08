@@ -236,12 +236,12 @@ pub(super) async fn try_handle_muc_presence_update(
         &outcome.session_mujis,
     );
     let call_thread_anchor = if outcome.active_call_started {
-        Some(build_call_thread_anchor_message(
+        build_call_thread_anchor_message(
             room_jid,
             &sender_jid.to_bare(),
             outcome.active_muji.as_ref(),
             &outcome.update.sender_nick,
-        ))
+        )
     } else {
         None
     };
@@ -307,7 +307,11 @@ pub(super) async fn try_handle_muc_presence_update(
             .await;
     }
 
-    if let Some(anchor) = call_thread_anchor {
+    if let Some(CallThreadAnchorMessage {
+        message: anchor,
+        thread_id,
+    }) = call_thread_anchor
+    {
         let started = anchor
             .payloads
             .iter()
@@ -336,6 +340,7 @@ pub(super) async fn try_handle_muc_presence_update(
                     ActiveCallThread {
                         anchor_origin_id,
                         started,
+                        thread_id: thread_id.as_str().to_owned(),
                     },
                 );
             }
@@ -347,13 +352,28 @@ pub(super) async fn try_handle_muc_presence_update(
     Some(responses)
 }
 
+/// A freshly-built call-thread anchor system message together with the
+/// `urn:waddle:threads:0` thread id it was assigned. The thread id is
+/// surfaced so the caller can register it in
+/// [`ActiveCallThread`](crate::server::routes::websocket::ActiveCallThread),
+/// correlating the later `<call-thread-ended/>` fastening back to the
+/// inbox/threads rows for this exact thread.
+struct CallThreadAnchorMessage {
+    message: Message,
+    thread_id: ThreadId,
+}
+
+/// Build the call-thread anchor system message. Returns `None` only in
+/// the impossible case that a freshly generated UUID is empty — handled
+/// without panicking so the no-`expect` hard rule holds; the caller then
+/// simply skips anchoring this call.
 fn build_call_thread_anchor_message(
     room_jid: &BareJid,
     initiator: &BareJid,
     active_muji: Option<&Muji>,
     initiator_nick: &str,
-) -> Message {
-    let thread_id = uuid::Uuid::new_v4().to_string();
+) -> Option<CallThreadAnchorMessage> {
+    let thread_id = ThreadId::new(uuid::Uuid::new_v4().to_string())?;
     let sid = SessionId(uuid::Uuid::new_v4().to_string());
     let media = media_from_muji(active_muji);
     let body = format!("{initiator_nick} started a call");
@@ -361,7 +381,7 @@ fn build_call_thread_anchor_message(
     message.from = Some(jid::Jid::from(room_jid.clone()));
     message.type_ = MessageType::Groupchat;
     message.bodies.insert(Lang(String::new()), body);
-    let thread = ThreadInfo::root(ThreadId::new(thread_id).expect("uuid thread id is non-empty"));
+    let thread = ThreadInfo::root(thread_id.clone());
     message
         .payloads
         .push(build_thread_element(&thread, CLIENT_STANZA_NS));
@@ -378,7 +398,7 @@ fn build_call_thread_anchor_message(
             started: chrono::Utc::now(),
         }));
     message.payloads.push(build_hint_element(Hint::Store));
-    message
+    Some(CallThreadAnchorMessage { message, thread_id })
 }
 
 fn media_from_muji(active_muji: Option<&Muji>) -> CallThreadMedia {

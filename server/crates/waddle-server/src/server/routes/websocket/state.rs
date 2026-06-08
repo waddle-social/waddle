@@ -4,6 +4,12 @@ use super::*;
 pub struct ActiveCallThread {
     pub anchor_origin_id: String,
     pub started: chrono::DateTime<chrono::Utc>,
+    /// The anchor message's `urn:waddle:threads:0` thread id (the
+    /// `<thread/>` value). Correlates the ended fastening back to the
+    /// inbox/threads rows so [`InboxStorage::mark_call_thread_ended`]
+    /// can stamp the ended timestamp + duration onto every
+    /// subscriber's projection of `(room, thread_id)`.
+    pub thread_id: String,
 }
 
 #[derive(Debug, Clone)]

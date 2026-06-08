@@ -1343,11 +1343,41 @@ async fn empty_muji_presence_ends_the_active_call_thread() {
         &Some(owner_session.clone()),
     )
     .await;
+    // Anchor the call thread in the inbox under the same thread id the
+    // active-call registration carries, so the ended summary can be
+    // correlated back to this exact thread's row.
+    let thread_id = "call-thread-uuid";
+    state
+        .deps
+        .protocol
+        .inbox_storage
+        .upsert(
+            &alice.to_bare(),
+            waddle_xmpp::inbox::InboxEntry::new(
+                room_jid.clone(),
+                waddle_xmpp::inbox::ConversationKind::MucRoom,
+                "anchor-stanza",
+                1_700_000_000,
+            )
+            .with_thread(thread_id)
+            .with_call_thread(
+                waddle_xmpp::xep::CallThreadKind::Muc,
+                waddle_xmpp::xep::CallThreadMedia {
+                    audio: true,
+                    video: false,
+                },
+            ),
+            true,
+        )
+        .await
+        .expect("seed call-thread anchor inbox row");
+
     state.deps.protocol.call_threads.insert(
         room_jid.clone(),
         crate::server::routes::websocket::ActiveCallThread {
             anchor_origin_id: "anchor-origin-id".to_owned(),
             started: chrono::Utc::now() - chrono::Duration::minutes(5),
+            thread_id: thread_id.to_owned(),
         },
     );
 
@@ -1366,6 +1396,37 @@ async fn empty_muji_presence_ends_the_active_call_thread() {
     assert!(
         !state.deps.protocol.call_threads.contains_key(&room_jid),
         "XMPP-native Muji clear must consume the active call thread when the SFU participant set is empty"
+    );
+
+    // The ended summary must be persisted onto the thread's inbox row so
+    // the durable threads projection reflects the call ending without a
+    // MAM replay.
+    let anchor_row = state
+        .deps
+        .protocol
+        .inbox_storage
+        .list_threads(&alice.to_bare(), &room_jid)
+        .await
+        .expect("list room threads")
+        .into_iter()
+        .find(|entry| entry.thread_id.as_deref() == Some(thread_id))
+        .expect("anchor thread row persists");
+    assert!(
+        anchor_row.call_ended_at.is_some(),
+        "ending the active call must stamp call_ended_at onto the thread inbox row"
+    );
+    assert!(
+        anchor_row
+            .call_duration
+            .as_ref()
+            .is_some_and(|duration| duration.as_str().starts_with("PT")),
+        "ending the active call must stamp an ISO-8601 call_duration onto the thread inbox row: {:?}",
+        anchor_row.call_duration
+    );
+    assert_eq!(
+        anchor_row.call_thread_kind,
+        Some(waddle_xmpp::xep::CallThreadKind::Muc),
+        "the anchor kind must survive the ended UPDATE"
     );
 }
 

@@ -152,12 +152,34 @@ pub(crate) async fn maybe_broadcast_call_thread_ended(state: &WebSocketState, ro
     let message = build_call_thread_ended_message(
         room_jid,
         &active.anchor_origin_id,
-        &CallThreadEnded { ended, duration },
+        &CallThreadEnded {
+            ended,
+            duration: duration.clone(),
+        },
     );
     let deps = build_interpret_deps(state, None);
     let _ =
         super::interpret::broadcast_room_system_message(&deps, room_jid.clone(), Box::new(message))
             .await;
+
+    // Stamp the ended summary onto every subscriber's inbox/threads
+    // projection of this thread. The fastening above is the wire record;
+    // this persists the same `ended` + `duration` onto the durable rows
+    // keyed by the anchor's `urn:waddle:threads:0` thread id so the
+    // threads view can surface the ended summary without replaying MAM.
+    if let Err(error) = state
+        .deps
+        .protocol
+        .inbox_storage
+        .mark_call_thread_ended(room_jid, &active.thread_id, ended, &duration)
+        .await
+    {
+        warn!(
+            room = %room_jid,
+            %error,
+            "failed to persist call-thread ended summary to inbox"
+        );
+    }
 }
 
 fn build_call_thread_ended_message(
