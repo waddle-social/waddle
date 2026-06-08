@@ -99,6 +99,24 @@ describe("toggleReaction target-id precedence", () => {
     expect(sendDmReaction).toHaveBeenCalledTimes(1);
     expect(sendDmReaction.mock.calls[0]![1]).toBe("server-stable-id");
   });
+
+  test("echoes XEP-0201 thread metadata for threaded DM reactions", async () => {
+    const h = harness();
+    h.messages.value = [
+      {
+        id: "client-id",
+        replyableId: "server-stable-id",
+        threadId: "dm-child-thread",
+        parentThreadId: "dm-root-thread",
+        reactions: {},
+        body: "", nick: "", timestamp: 0,
+      } as TimelineMessage,
+    ];
+    await h.actions.toggleReaction("client-id", "👀");
+    const sendDmReaction = h.xmppClient.value!.sendDmReaction as unknown as ReturnType<typeof mock>;
+    expect(sendDmReaction).toHaveBeenCalledTimes(1);
+    expect(sendDmReaction.mock.calls[0]![3]).toEqual({ id: "dm-child-thread", parent: "dm-root-thread" });
+  });
 });
 
 describe("retractMessage (XEP-0424)", () => {
@@ -118,6 +136,23 @@ describe("retractMessage (XEP-0424)", () => {
     const sendDmRetraction = h.xmppClient.value!.sendDmRetraction as unknown as ReturnType<typeof mock>;
     expect(sendDmRetraction).toHaveBeenCalledTimes(1);
     expect(sendDmRetraction.mock.calls[0]![1]).toBe("wire-origin-id");
+  });
+
+  test("echoes XEP-0201 thread metadata for threaded DM retractions", async () => {
+    const h = harness();
+    h.messages.value = [
+      {
+        id: "mam-archive-id",
+        replyableId: "wire-origin-id",
+        threadId: "dm-child-thread",
+        parentThreadId: "dm-root-thread",
+        body: "", nick: "", timestamp: 0,
+      } as TimelineMessage,
+    ];
+    await h.actions.retractMessage("mam-archive-id");
+    const sendDmRetraction = h.xmppClient.value!.sendDmRetraction as unknown as ReturnType<typeof mock>;
+    expect(sendDmRetraction).toHaveBeenCalledTimes(1);
+    expect(sendDmRetraction.mock.calls[0]![2]).toEqual({ id: "dm-child-thread", parent: "dm-root-thread" });
   });
 
   test("falls back to message id when replyableId is absent (DMs don't require room stanza-id)", async () => {

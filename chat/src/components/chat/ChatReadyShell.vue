@@ -49,6 +49,7 @@ import CallActivityDock from "@/components/calls/CallActivityDock.vue";
 import CurrentCallPanel from "@/components/calls/CurrentCallPanel.vue";
 import { navigate, useRouteMatch, type AdminMatch, type AdminPanel } from "@/router";
 import { buildHomeDashboardProps } from "@/home/dashboard-props";
+import type { MessageThreadEntry } from "@/channels/threads";
 import { jidDomain } from "@/lib/xmpp/jid";
 import type { ChatAppController } from "@/shell/chat-app-controller";
 import type { DiscoveredExtensionRoute } from "@/lib/xmpp/extension-commands";
@@ -236,15 +237,27 @@ const homeDashboardProps = computed(() => buildHomeDashboardProps({
 }));
 
 const contentPaneClass = computed(() => {
-  if (ui.sidebarMode.value !== "channels") return "";
   if (activeRightPanel.value === "thread") {
     if (activeThreadStack.value.length === 0) return "";
     return activeThreadStack.value.length === 1
       ? "chat-content-pane--desktop-split"
       : "chat-content-pane--hidden";
   }
-  return activeRightPanel.value ? "chat-content-pane--desktop-split" : "";
+  if (ui.sidebarMode.value === "channels") {
+    return activeRightPanel.value ? "chat-content-pane--desktop-split" : "";
+  }
+  return "";
 });
+const activeDmThreadEntries = computed<MessageThreadEntry[]>(() => {
+  if (ui.sidebarMode.value !== "dms" || !activeDmPeer.value) return [];
+  return [...threads.index.value.values()].sort((left, right) => right.lastTs.localeCompare(left.lastTs));
+});
+const threadPanelIsDm = computed(() => ui.sidebarMode.value === "dms");
+const threadPanelConversationActive = computed(() =>
+  (ui.sidebarMode.value === "channels" || ui.sidebarMode.value === "dms") &&
+  activeRightPanel.value === "thread" &&
+  activeThreadStack.value.length >= 1
+);
 
 function onCommunityRsvp(
   event: { uid: string },
@@ -286,11 +299,13 @@ function onSelectChannelFromSidebar(id: string | null, roomJid?: string) {
   if (roomJid) selectChannelByRoomJid(roomJid);
 }
 
-async function lookupActiveChannelLinkPreview(body: string) {
+async function lookupActiveConversationLinkPreview(body: string) {
   const client = xmppClient.value;
-  const roomJid = activeChannelRoomJid.value;
-  if (!client || !roomJid) return null;
-  return client.lookupLinkPreview(body, roomJid);
+  const scope = ui.sidebarMode.value === "dms"
+    ? activeDmPeer.value?.peerJid
+    : activeChannelRoomJid.value;
+  if (!client || !scope) return null;
+  return client.lookupLinkPreview(body, scope);
 }
 
 function requireFeedPepClient() {
@@ -603,10 +618,12 @@ onUnmounted(() => {
           v-else
           :conversations="dmConversations.conversations.value"
           :active-peer-jid="dmConversations.activePeerJid.value"
+          :thread-entries="activeDmThreadEntries"
           :self-full-jid="selfFullJid"
           hide-current-call
           @answer-dm="answerDmFromActivity"
           @select-dm="selectDm"
+          @select-thread="openThread"
           @reconnect-dm="reconnectDmFromDock"
           @end-dm="endRecoveredDmFromActivity"
           @new-dm="ui.showNewDm.value = true"
@@ -828,7 +845,7 @@ onUnmounted(() => {
 
           <!-- Collapsed accordion bars: one per inactive right-side panel. -->
           <button
-            v-if="ui.sidebarMode.value === 'channels'
+            v-if="(ui.sidebarMode.value === 'channels' || ui.sidebarMode.value === 'dms')
               && activeRightPanel !== 'thread'
               && activeThreadStack.length >= 1"
             type="button"
@@ -841,7 +858,7 @@ onUnmounted(() => {
             </span>
           </button>
 
-          <template v-if="ui.sidebarMode.value === 'channels' && activeRightPanel === 'thread' && activeThreadStack.length >= 2">
+          <template v-if="threadPanelConversationActive && activeThreadStack.length >= 2">
             <!-- Channel / main-feed bar -->
             <button
               type="button"
@@ -850,7 +867,7 @@ onUnmounted(() => {
               @click="closeThreadPanel"
             >
               <span class="accordion-bar-label text-muted-foreground/80">
-                {{ waddles.currentChannel.value?.name ?? 'Channel' }}
+                {{ threadPanelIsDm ? (activeDmPeer?.peerUsername ?? 'Direct message') : (waddles.currentChannel.value?.name ?? 'Channel') }}
               </span>
             </button>
             <!-- Ancestor thread bars: levels older than the parent (skip last 2 = parent + active) -->
@@ -901,7 +918,7 @@ onUnmounted(() => {
           <!-- Parent thread pane: desktop-only context when depth >= 2.
                Shows the second-to-last thread in read-only mode (no composer). -->
           <div
-            v-if="ui.sidebarMode.value === 'channels' && activeRightPanel === 'thread' && activeThreadStack.length >= 2"
+            v-if="threadPanelConversationActive && activeThreadStack.length >= 2"
             class="chat-parent-thread-pane"
           >
             <ThreadPanel
@@ -914,20 +931,20 @@ onUnmounted(() => {
               :author-jid-by-nick="authorJidByNick"
               :room-hats="authorHatsByNick"
               :room-authority="authorAuthorityByNick"
-              :room-presence="messaging.roomPresence.value"
-              :room-last-seen="messaging.roomLastSeen.value"
+              :room-presence="threadPanelIsDm ? {} : messaging.roomPresence.value"
+              :room-last-seen="threadPanelIsDm ? {} : messaging.roomLastSeen.value"
               :giphy-api-key="giphyApiKey"
               :mention-candidates="mentionCandidates"
-              :slow-mode-cooldown="messaging.slowModeCooldown.value"
+              :slow-mode-cooldown="threadPanelIsDm ? 0 : messaging.slowModeCooldown.value"
               :is-sending="false"
-              :is-loading-older-replies="messaging.loadingOlderThreadIds.value.has(activeThreadStack[activeThreadStack.length - 2] ?? '')"
-              :has-older-replies="messaging.threadHasOlder.value[activeThreadStack[activeThreadStack.length - 2] ?? ''] ?? false"
+              :is-loading-older-replies="threadPanelIsDm ? false : messaging.loadingOlderThreadIds.value.has(activeThreadStack[activeThreadStack.length - 2] ?? '')"
+              :has-older-replies="threadPanelIsDm ? false : (messaging.threadHasOlder.value[activeThreadStack[activeThreadStack.length - 2] ?? ''] ?? false)"
               :upload-progress="{ uploading: false, progress: 0, filename: '' }"
-              :channel-name="waddles.currentChannel.value?.name ?? ''"
+              :channel-name="threadPanelIsDm ? (activeDmPeer?.peerUsername ?? '') : (waddles.currentChannel.value?.name ?? '')"
               :hide-composer="true"
               :reaction-mode="null"
-              :link-preview-lookup="lookupActiveChannelLinkPreview"
-              :link-preview-scope="activeChannelRoomJid"
+              :link-preview-lookup="lookupActiveConversationLinkPreview"
+              :link-preview-scope="threadPanelIsDm ? activeDmPeer?.peerJid ?? null : activeChannelRoomJid"
               @close="closeThreadPanel"
               @pop-to="popThreadTo"
               @push-thread="pushThread"
@@ -943,7 +960,7 @@ onUnmounted(() => {
           <!-- Active thread pane: shown when any thread is open.
                Full-width on mobile; shares space with parent context on desktop. -->
           <div
-            v-if="ui.sidebarMode.value === 'channels' && activeRightPanel === 'thread' && activeThreadStack.length >= 1"
+            v-if="threadPanelConversationActive"
             class="chat-active-thread-pane"
           >
             <ThreadPanel
@@ -956,20 +973,20 @@ onUnmounted(() => {
               :author-jid-by-nick="authorJidByNick"
               :room-hats="authorHatsByNick"
               :room-authority="authorAuthorityByNick"
-              :room-presence="messaging.roomPresence.value"
-              :room-last-seen="messaging.roomLastSeen.value"
+              :room-presence="threadPanelIsDm ? {} : messaging.roomPresence.value"
+              :room-last-seen="threadPanelIsDm ? {} : messaging.roomLastSeen.value"
               :giphy-api-key="giphyApiKey"
               :mention-candidates="mentionCandidates"
-              :slow-mode-cooldown="messaging.slowModeCooldown.value"
-              :is-sending="messaging.isSending.value"
-              :is-loading-older-replies="messaging.loadingOlderThreadIds.value.has(activeThreadStack[activeThreadStack.length - 1] ?? '')"
-              :has-older-replies="messaging.threadHasOlder.value[activeThreadStack[activeThreadStack.length - 1] ?? ''] ?? false"
-              :upload-progress="messaging.uploadProgress.value"
-              :channel-name="waddles.currentChannel.value?.name ?? ''"
+              :slow-mode-cooldown="threadPanelIsDm ? 0 : messaging.slowModeCooldown.value"
+              :is-sending="activeIsSending"
+              :is-loading-older-replies="threadPanelIsDm ? false : messaging.loadingOlderThreadIds.value.has(activeThreadStack[activeThreadStack.length - 1] ?? '')"
+              :has-older-replies="threadPanelIsDm ? false : (messaging.threadHasOlder.value[activeThreadStack[activeThreadStack.length - 1] ?? ''] ?? false)"
+              :upload-progress="activeUploadProgress"
+              :channel-name="threadPanelIsDm ? (activeDmPeer?.peerUsername ?? '') : (waddles.currentChannel.value?.name ?? '')"
               :reaction-mode="reactionModeTarget === 'thread' ? reactionModeState : null"
               :target-message-id="activeThreadTargetMessageId"
-              :link-preview-lookup="lookupActiveChannelLinkPreview"
-              :link-preview-scope="activeChannelRoomJid"
+              :link-preview-lookup="lookupActiveConversationLinkPreview"
+              :link-preview-scope="threadPanelIsDm ? activeDmPeer?.peerJid ?? null : activeChannelRoomJid"
               @close="closeThreadPanel"
               @pop-to="popThreadTo"
               @push-thread="pushThread"

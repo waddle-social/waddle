@@ -306,14 +306,11 @@ describe("edit targeting", () => {
 
     await messaging.editMessage("server-stanza-id", "hello");
 
-    expect(sendDmCorrection).toHaveBeenCalledWith(
-      "bob@example.com",
-      "hello",
-      "original-message-id",
-      undefined,
-      undefined,
-      undefined,
-    );
+    expect(sendDmCorrection).toHaveBeenCalledTimes(1);
+    const call = sendDmCorrection.mock.calls[0]!;
+    expect(call[0]).toBe("bob@example.com");
+    expect(call[1]).toBe("hello");
+    expect(call[2]).toBe("original-message-id");
   });
 
   test("DM corrections from a different bare JID do not rewrite the target", () => {

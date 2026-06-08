@@ -6,6 +6,7 @@ import { findMessageById } from "@/lib/message-ids";
 import { dmKey, setLastSeen } from "@/lib/last-seen-store";
 import { latestRemoteMessageIdFor } from "@/lib/timeline-state";
 import { useReadReceiptPreference } from "@/preferences/read-receipts";
+import { dmThreadRefFromMessage } from "@/dms/threading";
 
 // XEP-0333 chat-marker outbound state for the DM side. Mirrors
 // useChannelReadMarkers; uses `dmKey(barePeerJid(peerJid))` as the
@@ -34,7 +35,7 @@ export function useDmReadMarkers(deps: UseDmReadMarkersDeps) {
     const peerJid = activePeerJid.value;
     if (sendDisplayedMarkers.value && target?.displayedMarkerRequested) {
       void client
-        .sendDmDisplayed(peerJid, targetId)
+        .sendDmDisplayed(peerJid, targetId, dmThreadRefFromMessage(target))
         .catch(() => undefined);
     }
     // XEP-0490 §3 publish for the DM. The chat id is the peer bare

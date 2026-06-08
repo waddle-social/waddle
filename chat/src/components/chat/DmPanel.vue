@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { useStore } from "@nanostores/vue";
-import { ArrowRight, MessageCircle, Phone, PhoneCall, PhoneIncoming, PhoneOff, PhoneOutgoing, Plus, Video } from "lucide-vue-next";
+import { ArrowRight, MessageCircle, MessagesSquare, Phone, PhoneCall, PhoneIncoming, PhoneOff, PhoneOutgoing, Plus, Video } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import { formatTimelineStamp } from "@/channels/timeline";
+import type { MessageThreadEntry } from "@/channels/threads";
 import { $callState } from "@/lib/calls/call-store";
 import {
   canEndRecoveredDmCallActivity,
@@ -24,15 +25,18 @@ import type { DmConversation } from "@/lib/xmpp-client";
 const props = withDefaults(defineProps<{
   conversations: DmConversation[];
   activePeerJid: string | null;
+  threadEntries?: MessageThreadEntry[];
   selfFullJid?: string | null;
   hideCurrentCall?: boolean;
 }>(), {
+  threadEntries: () => [],
   hideCurrentCall: false,
 });
 
 const emit = defineEmits<{
   answerDm: [peerJid: string, remoteFullJid: string, sid: string, media: CallMedia];
   selectDm: [peerJid: string];
+  selectThread: [threadId: string];
   reconnectDm: [peerJid: string, media: CallMedia];
   endDm: [peerJid: string, sid?: string];
   newDm: [];
@@ -78,6 +82,7 @@ const visibleConversations = computed<DmConversation[]>(() => {
     .filter((conversation) => !activeCallPeers.has(normalizedPeerJid(conversation.peerJid)))
     .sort(compareDmConversations);
 });
+const visibleThreadEntries = computed(() => props.threadEntries.filter((entry) => entry.count > 0));
 
 function normalizedPeerJid(peerJid: string): string {
   return barePeerJid(peerJid).toLowerCase();
@@ -429,6 +434,20 @@ function conversationRowLabel(conversation: DmConversation): string {
   }
   return parts.join(", ");
 }
+
+function threadEntryTitle(entry: MessageThreadEntry): string {
+  const body = entry.root?.body?.trim();
+  return body || entry.threadId;
+}
+
+function threadEntryLabel(entry: MessageThreadEntry): string {
+  const parts = [
+    `Open thread ${threadEntryTitle(entry)}`,
+    `${entry.count} ${entry.count === 1 ? "reply" : "replies"}`,
+  ];
+  if (entry.lastTs) parts.push(formatTimelineStamp(entry.lastTs));
+  return parts.filter(Boolean).join(", ");
+}
 </script>
 
 <template>
@@ -470,6 +489,39 @@ function conversationRowLabel(conversation: DmConversation): string {
       </div>
 
       <div v-else class="chat-list-stack">
+        <section
+          v-if="visibleThreadEntries.length > 0"
+          class="grid gap-1"
+          aria-label="Direct message threads"
+        >
+          <div class="type-section-label flex items-center gap-1.5 px-2 pt-2 pb-1 text-sidebar-muted">
+            <MessagesSquare class="h-3 w-3 text-primary/70" aria-hidden="true" />
+            <span class="flex-1 truncate">Threads</span>
+            <span
+              class="type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-primary/15 text-primary ring-1 ring-primary/25"
+              aria-hidden="true"
+            >
+              {{ visibleThreadEntries.length }}
+            </span>
+          </div>
+          <button
+            v-for="entry in visibleThreadEntries"
+            :key="entry.threadId"
+            class="chat-list-row w-full min-h-12 flex items-center gap-3 px-3 py-2 text-left group text-sidebar-muted hover:bg-sidebar-accent/50 hover:text-sidebar-foreground"
+            type="button"
+            :aria-label="threadEntryLabel(entry)"
+            @click="emit('selectThread', entry.threadId)"
+          >
+            <MessagesSquare class="h-4 w-4 shrink-0 text-primary/70" aria-hidden="true" />
+            <span class="min-w-0 flex-1">
+              <span class="type-control block truncate text-sidebar-foreground">{{ threadEntryTitle(entry) }}</span>
+              <span class="type-caption block truncate text-sidebar-muted">
+                {{ entry.count }} {{ entry.count === 1 ? 'reply' : 'replies' }}<template v-if="entry.lastTs"> · {{ formatTimelineStamp(entry.lastTs) }}</template>
+              </span>
+            </span>
+          </button>
+        </section>
+
         <section
           v-if="activeCallRows.length > 0"
           class="grid gap-1"

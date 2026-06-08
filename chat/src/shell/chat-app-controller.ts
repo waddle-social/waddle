@@ -228,8 +228,7 @@ export function useChatAppController(giphyApiKey: string) {
   );
 
   // Thread panel state - stack = breadcrumb trail into nested sub-threads.
-  // Empty stack = panel closed. Only meaningful for channel messages since DMs
-  // don't use XEP-0201 threads yet.
+  // Empty stack = panel closed. Channels and DMs both use XEP-0201 threads.
   const activeThreadStack = ref<string[]>([]);
   const activeThreadTargetMessageId = ref<string | null>(null);
   const threads = useMessageThreads(activeMessages);
@@ -249,8 +248,9 @@ export function useChatAppController(giphyApiKey: string) {
   }
 
   function isRightPanelAvailable(panel: ActiveRightPanel): boolean {
-    if (ui.sidebarMode.value !== "channels" || ui.activePage.value !== "chat") return false;
+    if (ui.activePage.value !== "chat") return false;
     if (panel === "thread") return activeThreadStack.value.length > 0;
+    if (ui.sidebarMode.value !== "channels") return false;
     if (panel === "pinned") return ui.showPinnedPanel.value && !!waddles.currentChannel.value && !!activeChannelRoomJid.value;
     return !!activeExtensionRouteKey.value && !!waddles.currentChannel.value;
   }
@@ -287,7 +287,6 @@ export function useChatAppController(giphyApiKey: string) {
   );
 
   const activeThreadReactionMessages = computed<TimelineMessage[]>(() => {
-    if (ui.sidebarMode.value !== "channels") return [];
     const threadId = activeThreadStack.value[activeThreadStack.value.length - 1];
     if (!threadId) return [];
     const entry = threads.resolveEntry(threadId);
@@ -937,6 +936,10 @@ export function useChatAppController(giphyApiKey: string) {
     threadOverride: { threadId: string; parentThreadId?: string },
     linkPreview?: ComposerLinkPreviewSendPayload,
   ) {
+    if (ui.sidebarMode.value === "dms") {
+      await dmMessaging.sendMessage(body, markup, references, files, replyTo, linkPreview, threadOverride);
+      return;
+    }
     await messaging.sendMessage(body, markup, references, files, replyTo, threadOverride, linkPreview);
   }
 
@@ -959,11 +962,11 @@ export function useChatAppController(giphyApiKey: string) {
       activeThreadStack.value.length > 0 &&
       activeThreadStack.value[activeThreadStack.value.length - 1] === threadId
     ) {
-      if (targetMessageId) void messaging.backfillThread(threadId);
+      if (targetMessageId && ui.sidebarMode.value === "channels") void messaging.backfillThread(threadId);
       return;
     }
     activeThreadStack.value = [threadId];
-    void messaging.backfillThread(threadId);
+    if (ui.sidebarMode.value === "channels") void messaging.backfillThread(threadId);
   }
 
   function roomJidForChannelId(channelId: string): string | null {
@@ -996,7 +999,7 @@ export function useChatAppController(giphyApiKey: string) {
       return;
     }
     activeThreadStack.value = [...activeThreadStack.value, threadId];
-    void messaging.backfillThread(threadId);
+    if (ui.sidebarMode.value === "channels") void messaging.backfillThread(threadId);
   }
 
   function popThreadTo(index: number) {
@@ -1135,6 +1138,7 @@ export function useChatAppController(giphyApiKey: string) {
   }
 
   function loadOlderThreadMessages(threadId: string) {
+    if (ui.sidebarMode.value === "dms") return;
     void messaging.loadOlderThreadMessages(threadId);
   }
 
@@ -1250,7 +1254,7 @@ export function useChatAppController(giphyApiKey: string) {
         navigate({
           id: "dm",
           params: { username: activeDmPeer.value.peerUsername },
-          search: { thread: [] },
+          search: { thread: activeThreadStack.value },
         });
       } else {
         navigate({ id: "dmList" });
@@ -1610,7 +1614,11 @@ export function useChatAppController(giphyApiKey: string) {
         const domain = session.value ? jidDomain(session.value.jid) : "";
         if (!domain) return;
         await handleOpenDm(`${username}@${domain}`);
+        if (requestId !== routeRequestId) return;
       }
+      activeThreadTargetMessageId.value = null;
+      activeThreadStack.value = match.search.thread;
+      activeRightPanel.value = match.search.thread.length > 0 ? "thread" : null;
       return;
     }
 
