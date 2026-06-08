@@ -1,7 +1,10 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import type { WasmThreadEntry } from "@/lib/xmpp/wasm-types";
+import type { CallMedia } from "@/lib/calls/types";
 import { threadDisplayTitle } from "@/lib/threads-view-filters";
+import { useCallAnchorCardState, wasmThreadEntryToAnchorMessage } from "@/lib/call-thread-anchor";
+import CallAnchorCard from "@/components/calls/CallAnchorCard.vue";
 
 const props = defineProps<{
   entry: WasmThreadEntry;
@@ -11,7 +14,20 @@ const props = defineProps<{
 const emit = defineEmits<{
   open: [entry: WasmThreadEntry];
   markRead: [entry: WasmThreadEntry];
+  joinCall: [entry: WasmThreadEntry, media: CallMedia];
 }>();
+
+// A MUC call-thread row shares the one live-state composable and the one
+// Join path with the in-channel anchor card and the call banner, so the
+// global Threads view reflects the same live/ended call state. Rows that
+// don't anchor a MUC call (DM anchors, plain threads) keep the title row.
+const anchorMessage = computed(() => wasmThreadEntryToAnchorMessage(props.entry));
+const callState = useCallAnchorCardState(
+  () => anchorMessage.value ?? { body: "", author: "", threadId: null, callThread: undefined },
+  () => props.entry.channel,
+  () => props.entry.reply_count,
+);
+const isCallThread = computed(() => callState.value !== null);
 
 const recencyLabel = computed(() => {
   const ts = Date.parse(props.entry.last_activity);
@@ -33,7 +49,15 @@ const title = computed(() => threadDisplayTitle(props.entry));
 
 <template>
   <div class="chat-thread-row glass-panel flex w-full items-stretch gap-2 rounded-md px-3 py-2 hover:bg-sidebar-accent/35">
+    <CallAnchorCard
+      v-if="isCallThread && callState"
+      class="min-w-0 flex-1"
+      :state="callState"
+      @join="callState && emit('joinCall', entry, callState.media)"
+      @open-thread="emit('open', entry)"
+    />
     <button
+      v-else
       type="button"
       class="min-w-0 flex-1 text-left"
       @click="emit('open', entry)"

@@ -724,6 +724,7 @@ onUnmounted(() => {
         v-else-if="ui.activePage.value === 'threads'"
         :channels="waddles.sortedChannels.value"
         :on-select-thread="onSelectThread"
+        :on-join-channel-call="joinChannelCallFromActivity"
         @open-nav="ui.showMobileNav.value = true"
       />
       <UnreadView

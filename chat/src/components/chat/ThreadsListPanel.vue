@@ -2,6 +2,7 @@
 import { computed, onMounted } from "vue";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import type { ChannelSummary } from "@/lib/chat-types";
+import type { CallMedia } from "@/lib/calls/types";
 import type { WasmThreadEntry } from "@/lib/xmpp/wasm-types";
 import {
   type ThreadsActiveWindow,
@@ -37,6 +38,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   openThread: [entry: WasmThreadEntry];
+  joinCall: [entry: WasmThreadEntry, media: CallMedia];
 }>();
 
 const browserUrlState = typeof window === "undefined" ? undefined : {
@@ -190,6 +192,7 @@ onMounted(() => {
           :marking-read="markingReadKey === threadKey(entry)"
           @open="emit('openThread', $event)"
           @mark-read="markThreadRead"
+          @join-call="(joined, media) => emit('joinCall', joined, media)"
         />
       </section>
 
