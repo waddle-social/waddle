@@ -333,8 +333,9 @@ function onReplyChipClick() {
   emit("scrollToMessage", replyTo.id);
 }
 
+const threadReplyCountValue = computed(() => props.threadReplyCount ?? 0);
 const showThreadChip = computed(
-  () => !props.hideThreadChip && (props.threadReplyCount ?? 0) > 0,
+  () => !props.hideThreadChip && threadReplyCountValue.value > 0,
 );
 
 function openThreadFromChip() {
@@ -374,7 +375,7 @@ const callThreadId = computed(() => callThreadAnchorThreadId(props.message));
 const callAnchorCardState = useCallAnchorCardState(
   () => props.message,
   () => props.callRoomJid,
-  () => props.threadReplyCount ?? 0,
+  () => threadReplyCountValue.value,
 );
 
 function openCallThreadAnchor() {
@@ -1221,7 +1222,7 @@ onBeforeUnmount(() => {
       v-if="showThreadChip"
       type="button"
       class="chat-thread-chip type-caption flex w-full items-center rounded-md py-0.5 text-primary/85 transition-colors hover:text-primary"
-      :title="`Open thread (${threadReplyCount} ${threadReplyCount === 1 ? 'reply' : 'replies'})`"
+      :title="`Open thread (${threadReplyCountValue} ${threadReplyCountValue === 1 ? 'reply' : 'replies'})`"
       @click="openThreadFromChip"
     >
       <span
@@ -1246,7 +1247,7 @@ onBeforeUnmount(() => {
           class="chat-thread-chip__overflow"
         >+{{ threadParticipantOverflow }}</span>
       </span>
-      <span class="chat-thread-chip__count min-w-0 truncate">{{ threadReplyCount }} {{ threadReplyCount === 1 ? "reply" : "replies" }}</span>
+      <span class="chat-thread-chip__count min-w-0 truncate">{{ threadReplyCountValue }} {{ threadReplyCountValue === 1 ? "reply" : "replies" }}</span>
       <span v-if="threadChipRecency" class="chat-thread-chip__recency">{{ threadChipRecency }}</span>
     </button>
 
@@ -1338,8 +1339,8 @@ onBeforeUnmount(() => {
       <button
         type="button"
         class="chat-hover-action-toolbar-btn h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted"
-        :title="threadReplyCount > 0 ? 'Open thread' : 'Reply in thread'"
-        :aria-label="threadReplyCount > 0 ? 'Open thread' : 'Reply in thread'"
+        :title="threadReplyCountValue > 0 ? 'Open thread' : 'Reply in thread'"
+        :aria-label="threadReplyCountValue > 0 ? 'Open thread' : 'Reply in thread'"
         @click="startReplyInThreadFromMenu"
       >
         <MessageSquare class="w-4 h-4" aria-hidden="true" />
@@ -1455,7 +1456,7 @@ onBeforeUnmount(() => {
             @click="startReplyInThreadFromMenu"
           >
             <MessageSquare class="w-5 h-5 text-muted-foreground" aria-hidden="true" />
-            <span>{{ (threadReplyCount ?? 0) > 0 ? "Open thread" : "Reply in thread" }}</span>
+            <span>{{ threadReplyCountValue > 0 ? "Open thread" : "Reply in thread" }}</span>
           </button>
           <button
             v-if="canPinMessages && message.id"

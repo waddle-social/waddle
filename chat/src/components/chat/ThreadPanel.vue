@@ -418,7 +418,7 @@ const breadcrumbLabels = computed(() =>
 // who's been participating, and when activity last happened.
 const threadReplyCount = computed(() => activeEntry.value?.count ?? 0);
 const threadCallAnchorState = useCallAnchorCardState(
-  () => activeEntry.value?.root ?? ({ body: "", author: "", threadId: null } as Pick<TimelineMessage, "body" | "author" | "callThread" | "threadId">),
+  () => activeEntry.value?.root ?? { body: "", author: "" },
   () => props.roomJid,
   () => threadReplyCount.value,
 );
