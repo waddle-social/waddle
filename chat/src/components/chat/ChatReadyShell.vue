@@ -131,6 +131,7 @@ const {
   selectChannel,
   selectChannelByRoomJid,
   onSelectThread,
+  onSelectThreadEntry,
   selectExtensionRoute,
   handleOpenDm,
   selectDm,
@@ -723,7 +724,7 @@ onUnmounted(() => {
       <ThreadsView
         v-else-if="ui.activePage.value === 'threads'"
         :channels="waddles.sortedChannels.value"
-        :on-select-thread="onSelectThread"
+        :on-select-thread-entry="onSelectThreadEntry"
         @open-nav="ui.showMobileNav.value = true"
       />
       <UnreadView

@@ -31,6 +31,7 @@ import {
   roomJidForChannelId as resolveRoomJidForChannelId,
 } from "@/lib/channel-room";
 import { normalizeMucServiceDomain } from "@/lib/calls/muc-call-indicators";
+import { resolveThreadEntryTarget } from "@/lib/threads-view-target";
 import { connectionStore } from "@/lib/connection-store";
 import { resetPinnedRooms } from "@/stores/pinned-messages";
 import { hydratePinnedBodiesOnPanelOpen } from "@/services/pinned-message-bodies";
@@ -985,6 +986,25 @@ export function useChatAppController(giphyApiKey: string) {
     if (roomJid) {
       channelUnread.markThreadRead(roomJid, threadId);
     }
+    openThread(threadId);
+  }
+
+  // Global Threads view (`urn:waddle:threads:0`) rows carry a bare JID,
+  // which may be a channel (MUC) room or a DM partner. Route each to its
+  // own surface — channel selection vs DM open — then open the thread
+  // panel. Without this, DM rows fell through `selectChannel(<localpart>)`
+  // and tried to open a nonexistent channel (#917).
+  async function onSelectThreadEntry(channelJid: string, threadId: string) {
+    const target = resolveThreadEntryTarget(channelJid, {
+      channels: waddles.channels.value,
+      managedMucDomain: managedMucDomain.value,
+    });
+    if (!target) return;
+    if (target.kind === "channel") {
+      await onSelectThread(target.channelId, threadId);
+      return;
+    }
+    await handleOpenDm(target.peerJid);
     openThread(threadId);
   }
 
@@ -2180,6 +2200,7 @@ export function useChatAppController(giphyApiKey: string) {
       selectChannel,
       selectChannelByRoomJid,
       onSelectThread,
+      onSelectThreadEntry,
       selectExtensionRoute,
       handleOpenDm,
       selectDm,
