@@ -49,13 +49,17 @@ const title = computed(() => threadDisplayTitle(props.entry));
 
 <template>
   <div class="chat-thread-row glass-panel flex w-full items-stretch gap-2 rounded-md px-3 py-2 hover:bg-sidebar-accent/35">
-    <CallAnchorCard
+    <div
       v-if="isCallThread && callState"
-      class="min-w-0 flex-1"
-      :state="callState"
-      @join="callState && emit('joinCall', entry, callState.media)"
-      @open-thread="emit('open', entry)"
-    />
+      class="call-thread-row__open min-w-0 flex-1"
+      @click="emit('open', entry)"
+    >
+      <CallAnchorCard
+        :state="callState"
+        @join="callState && emit('joinCall', entry, callState.media)"
+        @open-thread="emit('open', entry)"
+      />
+    </div>
     <button
       v-else
       type="button"

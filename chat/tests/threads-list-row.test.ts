@@ -39,6 +39,25 @@ describe("ThreadsListRow call-thread anchors", () => {
     expect(html).toContain("7 messages in call chat");
   });
 
+  test("wraps the call anchor card in a row-body container that opens the thread", async () => {
+    $mucCallParticipants.set({ "general@conference.example.com": ["alice", "bob"] });
+    $mucCallMedia.setKey("general@conference.example.com", { audio: true, video: true });
+
+    const html = await renderRow({
+      ...baseEntry,
+      callThread: { kind: "muc", media: ["audio", "video"] },
+    });
+
+    // The whole call-row body is a clickable wrapper (open the thread), with
+    // the card nested inside it — not a bare, mostly-inert card.
+    const opener = html.match(/<div class="call-thread-row__open[^"]*">([\s\S]*?)<\/section>/);
+    expect(opener).not.toBeNull();
+    expect(opener?.[1]).toContain("call-anchor-card");
+    // The wrapper is a <div>, never a <button>, because the card already
+    // contains the Join / call-chat buttons (nested buttons are invalid HTML).
+    expect(html).not.toContain("<button class=\"call-thread-row__open");
+  });
+
   test("renders the ended call anchor card without a join action", async () => {
     const html = await renderRow({
       ...baseEntry,
