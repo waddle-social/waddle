@@ -2,7 +2,6 @@
 //! so no XML is ever concatenated as strings (CLAUDE.md hard rule).
 
 use minidom::Element;
-use waddle_xmpp::xep::{CallThreadKind, CallThreadMedia};
 use xmpp_parsers::iq::Iq;
 
 use super::query::{
@@ -160,11 +159,11 @@ fn build_thread_entry(entry: &ThreadEntry) -> Element {
         let call_el = Element::builder("call", NS_THREADS)
             .attr(
                 minidom::rxml::xml_ncname!("kind").to_owned(),
-                call_kind_token(kind),
+                kind.as_token(),
             )
             .attr(
                 minidom::rxml::xml_ncname!("media").to_owned(),
-                call_media_tokens(media),
+                media.as_tokens(),
             )
             .build();
         t.append_child(call_el);
@@ -183,25 +182,6 @@ fn build_thread_entry(entry: &ThreadEntry) -> Element {
         t.append_child(call_ended_el);
     }
     t
-}
-
-/// `kind` attribute token for the `<call>` child.
-fn call_kind_token(kind: CallThreadKind) -> &'static str {
-    match kind {
-        CallThreadKind::Dm => "dm",
-        CallThreadKind::Muc => "muc",
-    }
-}
-
-/// Space-joined `media` tokens, `audio` before `video`, matching the
-/// call-thread anchor marker convention.
-fn call_media_tokens(media: CallThreadMedia) -> &'static str {
-    match (media.audio, media.video) {
-        (true, true) => "audio video",
-        (true, false) => "audio",
-        (false, true) => "video",
-        (false, false) => "",
-    }
 }
 
 #[cfg(test)]

@@ -85,8 +85,12 @@ pub(super) fn decode_row(row: &crate::db::Row) -> Result<InboxEntry, InboxStorag
 /// the SQL boundary; `None` becomes a typed NULL.
 pub(super) fn encode_call_thread_columns(entry: &InboxEntry) -> [crate::db::Value; 4] {
     [
-        crate::db::Value::from(entry.call_thread_kind.map(encode_call_thread_kind)),
-        crate::db::Value::from(entry.call_thread_media.map(encode_call_thread_media)),
+        crate::db::Value::from(
+            entry
+                .call_thread_kind
+                .map(|kind| kind.as_token().to_owned()),
+        ),
+        crate::db::Value::from(entry.call_thread_media.map(|media| media.as_tokens())),
         crate::db::Value::from(entry.call_ended_at.map(|ended| ended.timestamp())),
         crate::db::Value::from(
             entry
@@ -97,14 +101,6 @@ pub(super) fn encode_call_thread_columns(entry: &InboxEntry) -> [crate::db::Valu
     ]
 }
 
-fn encode_call_thread_kind(kind: CallThreadKind) -> String {
-    match kind {
-        CallThreadKind::Dm => "dm",
-        CallThreadKind::Muc => "muc",
-    }
-    .to_owned()
-}
-
 fn decode_call_thread_kind(raw: &str) -> Result<CallThreadKind, InboxStorageError> {
     match raw {
         "dm" => Ok(CallThreadKind::Dm),
@@ -113,17 +109,6 @@ fn decode_call_thread_kind(raw: &str) -> Result<CallThreadKind, InboxStorageErro
             "unknown call-thread kind '{other}'"
         ))),
     }
-}
-
-fn encode_call_thread_media(media: CallThreadMedia) -> String {
-    let mut tokens = Vec::with_capacity(2);
-    if media.audio {
-        tokens.push("audio");
-    }
-    if media.video {
-        tokens.push("video");
-    }
-    tokens.join(" ")
 }
 
 fn decode_call_thread_media(raw: &str) -> Result<CallThreadMedia, InboxStorageError> {
