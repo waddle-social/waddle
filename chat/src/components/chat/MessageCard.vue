@@ -23,6 +23,7 @@ import {
 } from "lucide-vue-next";
 import type { JSONContent } from "@tiptap/core";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
+import CallAnchorCard from "@/components/calls/CallAnchorCard.vue";
 import ChatEditor from "@/components/chat/ChatEditor.vue";
 import MessageBody from "@/components/chat/MessageBody.vue";
 import EditorBubbleToolbar from "@/components/chat/EditorBubbleToolbar.vue";
@@ -52,7 +53,8 @@ import {
   clearDesktopToolbarOwner,
 } from "@/stores/message-toolbar";
 import { QUICK_REACTION_EMOJIS } from "@/lib/reaction-mode";
-import { callThreadAnchorLabel, callThreadAnchorThreadId } from "@/lib/call-thread-anchor";
+import { callThreadAnchorLabel, callThreadAnchorThreadId, useCallAnchorCardState } from "@/lib/call-thread-anchor";
+import type { CallMedia } from "@/lib/calls/types";
 
 // Two separate badge layers:
 //
@@ -169,6 +171,8 @@ const props = defineProps<{
   canPinMessages?: boolean;
   linkPreviewLookup?: ComposerLinkPreviewLookup | null;
   linkPreviewScope?: string | null;
+  callRoomJid?: string | null;
+  callChannelId?: string | null;
 }>();
 
 const emit = defineEmits<{
@@ -179,6 +183,7 @@ const emit = defineEmits<{
   scrollToMessage: [messageId: string];
   avatarClick: [author: string];
   openThread: [threadId: string];
+  joinChannelCall: [channelId: string | null, roomJid: string, media: CallMedia];
   pin: [messageId: string];
   unpin: [messageId: string];
 }>();
@@ -366,10 +371,21 @@ function formatThreadRecency(iso: string | undefined): string {
 const threadChipRecency = computed(() => formatThreadRecency(props.threadLastReplyAt));
 const callThreadLabel = computed(() => callThreadAnchorLabel(props.message));
 const callThreadId = computed(() => callThreadAnchorThreadId(props.message));
+const callAnchorCardState = useCallAnchorCardState(
+  () => props.message,
+  () => props.callRoomJid,
+  () => props.threadReplyCount ?? 0,
+);
 
 function openCallThreadAnchor() {
   if (!callThreadId.value) return;
   emit("openThread", callThreadId.value);
+}
+
+function joinCallThreadAnchor() {
+  const state = callAnchorCardState.value;
+  if (!state || !props.callRoomJid || state.status !== "live") return;
+  emit("joinChannelCall", props.callChannelId ?? null, props.callRoomJid, state.media);
 }
 
 function togglePinFromMenu() {
@@ -911,7 +927,14 @@ onBeforeUnmount(() => {
       <PhoneCall class="w-4 h-4" aria-hidden="true" />
     </div>
     <div class="chat-message-body-stack">
+      <CallAnchorCard
+        v-if="callAnchorCardState"
+        :state="callAnchorCardState"
+        @join="joinCallThreadAnchor"
+        @open-thread="openCallThreadAnchor"
+      />
       <button
+        v-else
         type="button"
         class="type-field-sm inline-flex items-center gap-1.5 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         :disabled="!callThreadId"

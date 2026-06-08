@@ -1375,6 +1375,8 @@ function dayDividerLabel(createdAt: string): string {
             :can-pin-messages="currentUserCanPin"
             :link-preview-lookup="linkPreviewLookup"
             :link-preview-scope="linkPreviewScope"
+            :call-room-jid="callRoomJid"
+            :call-channel-id="channel?.id ?? null"
             @edit="(id, body, m, r, lp) => emit('editMessage', id, body, m, r, lp)"
             @retract="(id) => emit('retractMessage', id)"
             @react="(id, emoji) => emit('reactMessage', id, emoji)"
@@ -1382,6 +1384,7 @@ function dayDividerLabel(createdAt: string): string {
             @scroll-to-message="scrollToMessage"
             @avatar-click="onAvatarClick"
             @open-thread="(tid: string) => emit('openThread', tid)"
+            @join-channel-call="(channelId, roomJid, media) => emit('joinChannelCall', channelId, roomJid, media)"
             @pin="(id: string) => emit('pinMessage', id)"
             @unpin="(id: string) => emit('unpinMessage', id)"
           />

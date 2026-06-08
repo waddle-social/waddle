@@ -941,6 +941,8 @@ onUnmounted(() => {
               :has-older-replies="threadPanelIsDm ? false : (messaging.threadHasOlder.value[activeThreadStack[activeThreadStack.length - 2] ?? ''] ?? false)"
               :upload-progress="{ uploading: false, progress: 0, filename: '' }"
               :channel-name="threadPanelIsDm ? (activeDmPeer?.peerUsername ?? '') : (waddles.currentChannel.value?.name ?? '')"
+              :channel-id="threadPanelIsDm ? null : (waddles.currentChannel.value?.id ?? null)"
+              :room-jid="threadPanelIsDm ? null : activeChannelRoomJid"
               :hide-composer="true"
               :reaction-mode="null"
               :link-preview-lookup="lookupActiveConversationLinkPreview"
@@ -954,6 +956,7 @@ onUnmounted(() => {
               :invoke-extension-action="invokeActiveExtensionAction"
               @displayed="markActiveDisplayed"
               @load-older="loadOlderThreadMessages"
+              @join-channel-call="joinChannelCallFromActivity"
             />
           </div>
 
@@ -983,6 +986,8 @@ onUnmounted(() => {
               :has-older-replies="threadPanelIsDm ? false : (messaging.threadHasOlder.value[activeThreadStack[activeThreadStack.length - 1] ?? ''] ?? false)"
               :upload-progress="activeUploadProgress"
               :channel-name="threadPanelIsDm ? (activeDmPeer?.peerUsername ?? '') : (waddles.currentChannel.value?.name ?? '')"
+              :channel-id="threadPanelIsDm ? null : (waddles.currentChannel.value?.id ?? null)"
+              :room-jid="threadPanelIsDm ? null : activeChannelRoomJid"
               :reaction-mode="reactionModeTarget === 'thread' ? reactionModeState : null"
               :target-message-id="activeThreadTargetMessageId"
               :link-preview-lookup="lookupActiveConversationLinkPreview"
@@ -999,6 +1004,7 @@ onUnmounted(() => {
               @select-gif="sendGif"
               @typing="notifyActiveComposing"
               @load-older="loadOlderThreadMessages"
+              @join-channel-call="joinChannelCallFromActivity"
             />
           </div>
 

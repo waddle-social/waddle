@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { isFeedTimelineMessage, mapLiveRoomMessageToTimeline } from "../src/channels/timeline";
-import { callThreadAnchorLabel, callThreadAnchorThreadId } from "../src/lib/call-thread-anchor";
+import { callThreadAnchorLabel, callThreadAnchorThreadId, readCallAnchorCardState } from "../src/lib/call-thread-anchor";
+import { $mucCallMedia, $mucCallParticipants, clearMucCallParticipants } from "../src/lib/calls/muc-call-presence";
 import type { WaddleSession } from "../src/lib/server-auth";
 import { roomMessageFromArchived } from "../src/lib/xmpp/wasm-message-codecs";
 import type { LiveRoomMessage } from "../src/lib/xmpp-client";
@@ -66,6 +67,38 @@ describe("call-thread anchor timeline mapping", () => {
 
     expect(callThreadAnchorLabel(timelineMessage)).toBe("Alice started a call");
     expect(callThreadAnchorThreadId(timelineMessage)).toBe("call-thread-uuid");
+  });
+
+  test("derives rich anchor card state from room live detectors with stale-live override", () => {
+    const timelineMessage = mapLiveRoomMessageToTimeline(session, callAnchor({
+      roomJid: "general@conference.example.com",
+    }));
+    $mucCallParticipants.set({
+      "general@conference.example.com": ["alice", "bob"],
+    });
+    $mucCallMedia.setKey("general@conference.example.com", { audio: true, video: true });
+
+    expect(readCallAnchorCardState(timelineMessage, "general@conference.example.com")).toEqual({
+      status: "live",
+      media: { audio: true, video: true },
+      participantCount: 2,
+      participantLabels: ["alice", "bob"],
+      messageCount: 0,
+      threadId: "call-thread-uuid",
+      title: "Live video call",
+      actionLabel: "Join",
+      ariaLabel: "Join live video call, 2 people: alice, bob",
+    });
+
+    clearMucCallParticipants();
+
+    expect(readCallAnchorCardState(timelineMessage, "general@conference.example.com")).toMatchObject({
+      status: "ended",
+      participantCount: 0,
+      participantLabels: [],
+      title: "Call ended",
+      actionLabel: null,
+    });
   });
 
   test("renders ended call-thread anchors as muted duration summaries", () => {
