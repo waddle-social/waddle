@@ -333,12 +333,16 @@ impl InboxView {
         duration: CallThreadDuration,
     ) -> bool {
         let key = InboxKey::thread(room.clone(), thread_id);
-        // Only stamp the ended summary onto genuine call-thread rows
-        // (those carrying a `call_thread_kind`). A reply-only entry has
-        // `call_thread_kind` NULL; stamping it would produce an ended
-        // summary without kind/media that the frontend silently drops.
+        // Only stamp the ended summary onto genuine call-thread rows. The
+        // wire emits `<call>` only when BOTH kind and media are present,
+        // so an ended summary on a row missing either would serialize as
+        // `<call-ended>` WITHOUT `<call>` and be silently dropped by the
+        // frontend. Guard on both fields to match the wire condition. A
+        // reply-only entry has both `None` and is skipped.
         match self.entries.get_mut(&key) {
-            Some(entry) if entry.call_thread_kind.is_some() => {
+            Some(entry)
+                if entry.call_thread_kind.is_some() && entry.call_thread_media.is_some() =>
+            {
                 entry.call_ended_at = Some(ended);
                 entry.call_duration = Some(duration);
                 true

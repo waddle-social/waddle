@@ -280,6 +280,13 @@ async fn column_present_sqlite(
         // missing-column path is moot.
         return Ok(true);
     }
+    // SAFETY: `table` is interpolated directly into the PRAGMA string.
+    // SQLite's `PRAGMA table_info(...)` cannot take a bound parameter for
+    // the table name, so interpolation is unavoidable here. `table` MUST
+    // therefore be a compile-time string literal — all current callers
+    // pass `&'static str` constants ("inbox_entries",
+    // "groupchat_notification_recovery"). NEVER pass user input or any
+    // runtime-derived value to this helper.
     let mut cols = storage
         .query(&format!("PRAGMA table_info({table})"), ())
         .await

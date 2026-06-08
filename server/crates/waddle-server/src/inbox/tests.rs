@@ -233,6 +233,66 @@ async fn mark_ended_skips_reply_only_rows_without_call_thread_kind() {
 }
 
 #[tokio::test]
+async fn mark_ended_skips_rows_with_kind_but_null_media() {
+    // Defense-in-depth for the wire `<call>` condition: it emits only
+    // when BOTH kind and media are present. After Fix 1+2 the encoder
+    // never persists a kind-without-media row, but a row could exist from
+    // a legacy/corrupt write. Insert one directly via raw SQL (bypassing
+    // the encoder's normalization) and assert mark-ended does NOT stamp
+    // it — stamping would serialize `<call-ended>` without `<call>`.
+    use waddle_xmpp::xep::CallThreadDuration;
+    let storage = DatabaseInboxStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("storage");
+    let room: BareJid = "general@conference.example.com".parse().expect("room jid");
+    let user: BareJid = "carol@example.com".parse().expect("carol jid");
+
+    // Raw insert: call_thread_kind = 'muc' but call_thread_media NULL.
+    storage
+        .execute(
+            "INSERT INTO inbox_entries (user_jid, partner_jid, thread_id, kind, last_stanza_id, \
+             last_updated, unread, reply_count, call_thread_kind, call_thread_media) \
+             VALUES (?, ?, ?, 'muc', 'anchor-stanza', 1700000000, 0, 0, 'muc', NULL)",
+            crate::db_params![
+                user.to_string(),
+                room.to_string(),
+                "call-thread-uuid".to_string(),
+            ],
+        )
+        .await
+        .expect("raw insert kind-without-media row");
+
+    let ended = chrono::DateTime::parse_from_rfc3339("2026-06-07T14:35:00Z")
+        .expect("ended")
+        .with_timezone(&chrono::Utc);
+    storage
+        .mark_call_thread_ended(
+            &room,
+            "call-thread-uuid",
+            ended,
+            &CallThreadDuration::parse("PT5M").expect("duration"),
+        )
+        .await
+        .expect("mark ended");
+
+    let row = storage
+        .list_all_threads(&user)
+        .await
+        .expect("list_all_threads")
+        .into_iter()
+        .find(|e| e.thread_id.as_deref() == Some("call-thread-uuid"))
+        .expect("kind-without-media thread");
+    assert!(
+        row.call_ended_at.is_none(),
+        "row with kind set but media NULL must not be stamped with the ended summary"
+    );
+    assert!(
+        row.call_duration.is_none(),
+        "row with kind set but media NULL must not gain a call_duration"
+    );
+}
+
+#[tokio::test]
 async fn upsert_reply_preserves_anchor_call_thread_metadata() {
     use waddle_xmpp::xep::{CallThreadKind, CallThreadMedia};
     let storage = DatabaseInboxStorage::open(Some("sqlite::memory:"))
