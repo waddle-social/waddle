@@ -333,13 +333,17 @@ impl InboxView {
         duration: CallThreadDuration,
     ) -> bool {
         let key = InboxKey::thread(room.clone(), thread_id);
+        // Only stamp the ended summary onto genuine call-thread rows
+        // (those carrying a `call_thread_kind`). A reply-only entry has
+        // `call_thread_kind` NULL; stamping it would produce an ended
+        // summary without kind/media that the frontend silently drops.
         match self.entries.get_mut(&key) {
-            Some(entry) => {
+            Some(entry) if entry.call_thread_kind.is_some() => {
                 entry.call_ended_at = Some(ended);
                 entry.call_duration = Some(duration);
                 true
             }
-            None => false,
+            _ => false,
         }
     }
 

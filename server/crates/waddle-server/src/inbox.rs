@@ -532,9 +532,16 @@ impl InboxStorage for DatabaseInboxStorage {
         ended: DateTime<Utc>,
         duration: &CallThreadDuration,
     ) -> Result<(), InboxStorageError> {
+        // Only stamp the ended summary onto genuine call-thread rows
+        // (those carrying a `call_thread_kind`). A reply-only inbox row —
+        // a durable user who received a thread reply but not the
+        // anchor-root projection — has `call_thread_kind` NULL; stamping
+        // it would produce an ended summary without kind/media, which
+        // serializes as `<call-ended>` WITHOUT `<call>` and is silently
+        // dropped by the frontend.
         self.execute(
             "UPDATE inbox_entries SET call_ended_at = ?, call_duration = ? \
-             WHERE partner_jid = ? AND thread_id = ?",
+             WHERE partner_jid = ? AND thread_id = ? AND call_thread_kind IS NOT NULL",
             crate::db_params![
                 ended.timestamp(),
                 duration.as_str().to_owned(),

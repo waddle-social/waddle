@@ -144,6 +144,95 @@ async fn upsert_persists_call_thread_metadata_and_mark_ended_updates_all_users()
 }
 
 #[tokio::test]
+async fn mark_ended_skips_reply_only_rows_without_call_thread_kind() {
+    use waddle_xmpp::xep::{CallThreadDuration, CallThreadKind, CallThreadMedia};
+    let storage = DatabaseInboxStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("storage");
+    let room: BareJid = "general@conference.example.com".parse().expect("room jid");
+    let alice: BareJid = "alice@example.com".parse().expect("alice jid");
+    let bob: BareJid = "bob@example.com".parse().expect("bob jid");
+
+    // Alice received the anchor-root projection: a genuine call-thread
+    // row with kind + media.
+    let anchor = InboxEntry::new(
+        room.clone(),
+        ConversationKind::MucRoom,
+        "anchor-stanza",
+        1_700_000_000,
+    )
+    .with_thread("call-thread-uuid")
+    .with_call_thread(
+        CallThreadKind::Muc,
+        CallThreadMedia {
+            audio: true,
+            video: false,
+        },
+    );
+    storage.upsert(&alice, anchor, true).await.expect("alice");
+
+    // Bob is a durable user who only received a thread reply, not the
+    // anchor projection — a reply-only row on the SAME (room, thread_id)
+    // with call_thread_kind / call_thread_media NULL.
+    let reply_only = InboxEntry::new(
+        room.clone(),
+        ConversationKind::MucRoom,
+        "reply-stanza",
+        1_700_000_100,
+    )
+    .with_thread("call-thread-uuid");
+    assert!(reply_only.call_thread_kind.is_none());
+    assert!(reply_only.call_thread_media.is_none());
+    storage.upsert(&bob, reply_only, true).await.expect("bob");
+
+    let ended = chrono::DateTime::parse_from_rfc3339("2026-06-07T14:35:00Z")
+        .expect("ended")
+        .with_timezone(&chrono::Utc);
+    storage
+        .mark_call_thread_ended(
+            &room,
+            "call-thread-uuid",
+            ended,
+            &CallThreadDuration::parse("PT5M").expect("duration"),
+        )
+        .await
+        .expect("mark ended");
+
+    // Alice's genuine call-thread row gets the ended summary stamped.
+    let alice_row = storage
+        .list_all_threads(&alice)
+        .await
+        .expect("list_all_threads")
+        .into_iter()
+        .find(|e| e.thread_id.as_deref() == Some("call-thread-uuid"))
+        .expect("alice anchor thread");
+    assert_eq!(alice_row.call_ended_at, Some(ended));
+    assert_eq!(
+        alice_row.call_duration,
+        Some(CallThreadDuration::parse("PT5M").expect("duration"))
+    );
+
+    // Bob's reply-only row is NOT stamped — stamping it would produce an
+    // ended summary without kind/media that the frontend silently drops.
+    let bob_row = storage
+        .list_all_threads(&bob)
+        .await
+        .expect("list_all_threads")
+        .into_iter()
+        .find(|e| e.thread_id.as_deref() == Some("call-thread-uuid"))
+        .expect("bob reply-only thread");
+    assert!(
+        bob_row.call_ended_at.is_none(),
+        "reply-only row (call_thread_kind NULL) must not be stamped with the ended summary"
+    );
+    assert!(
+        bob_row.call_duration.is_none(),
+        "reply-only row must not gain a call_duration"
+    );
+    assert!(bob_row.call_thread_kind.is_none());
+}
+
+#[tokio::test]
 async fn upsert_reply_preserves_anchor_call_thread_metadata() {
     use waddle_xmpp::xep::{CallThreadKind, CallThreadMedia};
     let storage = DatabaseInboxStorage::open(Some("sqlite::memory:"))

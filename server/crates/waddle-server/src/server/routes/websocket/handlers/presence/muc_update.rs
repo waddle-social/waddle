@@ -235,7 +235,15 @@ pub(super) async fn try_handle_muc_presence_update(
         outcome.sender_muji.as_ref(),
         &outcome.session_mujis,
     );
-    let call_thread_anchor = if outcome.active_call_started {
+    // Gate the entire call-thread lifecycle on a configured SFU. The
+    // `active_call_started` flag comes from client-driven Muji presence,
+    // not the SFU; without this gate a no-SFU deployment would build,
+    // broadcast, and persist a call-thread anchor whose end path
+    // (`maybe_broadcast_call_thread_ended` / the `call_threads` registry)
+    // is itself SFU-gated — leaving a permanent call-thread row and a
+    // false Join affordance that can never be ended. Per #918,
+    // call-thread tracking is disabled when no SFU bridge is configured.
+    let call_thread_anchor = if outcome.active_call_started && state.deps.protocol.sfu.is_some() {
         build_call_thread_anchor_message(
             room_jid,
             &sender_jid.to_bare(),
@@ -333,17 +341,17 @@ pub(super) async fn try_handle_muc_presence_update(
             Box::new(anchor),
         )
         .await;
-        if state.deps.protocol.sfu.is_some() {
-            if let Some((anchor_origin_id, started)) = anchor_origin_id.zip(started) {
-                state.deps.protocol.call_threads.insert(
-                    room_jid.clone(),
-                    ActiveCallThread {
-                        anchor_origin_id,
-                        started,
-                        thread_id: thread_id.as_str().to_owned(),
-                    },
-                );
-            }
+        // The anchor only exists when an SFU is configured (gated at the
+        // build site above), so no inner SFU check is needed here.
+        if let Some((anchor_origin_id, started)) = anchor_origin_id.zip(started) {
+            state.deps.protocol.call_threads.insert(
+                room_jid.clone(),
+                ActiveCallThread {
+                    anchor_origin_id,
+                    started,
+                    thread_id: thread_id.as_str().to_owned(),
+                },
+            );
         }
     }
 
