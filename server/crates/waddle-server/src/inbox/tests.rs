@@ -144,6 +144,71 @@ async fn upsert_persists_call_thread_metadata_and_mark_ended_updates_all_users()
 }
 
 #[tokio::test]
+async fn upsert_reply_preserves_anchor_call_thread_metadata() {
+    use waddle_xmpp::xep::{CallThreadKind, CallThreadMedia};
+    let storage = DatabaseInboxStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("storage");
+    let room: BareJid = "general@conference.example.com".parse().expect("room jid");
+    let alice: BareJid = "alice@example.com".parse().expect("alice jid");
+
+    // Anchor the call thread with kind + media.
+    let anchor = InboxEntry::new(
+        room.clone(),
+        ConversationKind::MucRoom,
+        "anchor-stanza",
+        1_700_000_000,
+    )
+    .with_thread("call-thread-uuid")
+    .with_call_thread(
+        CallThreadKind::Muc,
+        CallThreadMedia {
+            audio: true,
+            video: false,
+        },
+    );
+    storage.upsert(&alice, anchor, true).await.expect("anchor");
+
+    // A later PLAIN reply to the same thread carries no call metadata
+    // (its call_* columns are NULL); the COALESCE upsert must not wipe
+    // the anchor's kind/media.
+    let plain_reply = InboxEntry::new(
+        room.clone(),
+        ConversationKind::MucRoom,
+        "reply-stanza",
+        1_700_000_100,
+    )
+    .with_thread("call-thread-uuid");
+    assert!(plain_reply.call_thread_kind.is_none());
+    assert!(plain_reply.call_thread_media.is_none());
+    storage
+        .upsert(&alice, plain_reply, true)
+        .await
+        .expect("plain reply");
+
+    let entry = storage
+        .list_all_threads(&alice)
+        .await
+        .expect("list_all_threads")
+        .into_iter()
+        .find(|e| e.thread_id.as_deref() == Some("call-thread-uuid"))
+        .expect("anchor thread");
+    assert_eq!(
+        entry.call_thread_kind,
+        Some(CallThreadKind::Muc),
+        "anchor kind survived a plain reply upsert"
+    );
+    assert_eq!(
+        entry.call_thread_media,
+        Some(CallThreadMedia {
+            audio: true,
+            video: false,
+        }),
+        "anchor media survived a plain reply upsert"
+    );
+}
+
+#[tokio::test]
 async fn sqlx_inbox_storage_mark_read_returns_none_for_missing_row() {
     let storage = DatabaseInboxStorage::open(Some("sqlite::memory:"))
         .await

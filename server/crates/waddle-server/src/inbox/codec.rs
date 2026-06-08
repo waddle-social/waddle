@@ -129,7 +129,9 @@ fn encode_call_thread_media(media: CallThreadMedia) -> String {
 fn decode_call_thread_media(raw: &str) -> Result<CallThreadMedia, InboxStorageError> {
     let mut audio = false;
     let mut video = false;
+    let mut saw_token = false;
     for token in raw.split_ascii_whitespace() {
+        saw_token = true;
         match token {
             "audio" => audio = true,
             "video" => video = true,
@@ -139,6 +141,15 @@ fn decode_call_thread_media(raw: &str) -> Result<CallThreadMedia, InboxStorageEr
                 )))
             }
         }
+    }
+    // A non-NULL media value that yields no recognized tokens is the
+    // impossible `audio:false, video:false` state (the XEP `media_attr`
+    // panics on it). Reject it so decode is a true inverse of encode;
+    // NULL (absent) decodes to `None` upstream before this is called.
+    if !saw_token {
+        return Err(InboxStorageError::Other(
+            "empty call-thread media value has no audio/video token".to_owned(),
+        ));
     }
     Ok(CallThreadMedia { audio, video })
 }
@@ -167,3 +178,46 @@ fn decode_kind(raw: &str) -> Result<ConversationKind, InboxStorageError> {
 }
 
 pub(super) const SELECT_COLS: &str = "partner_jid, thread_id, kind, last_stanza_id, last_updated, unread, preview, thread_title, reply_count, author, call_thread_kind, call_thread_media, call_ended_at, call_duration";
+
+#[cfg(test)]
+mod codec_tests {
+    use super::*;
+
+    #[test]
+    fn decode_call_thread_media_parses_both_tokens() {
+        let media = decode_call_thread_media("audio video").expect("both tokens decode");
+        assert_eq!(
+            media,
+            CallThreadMedia {
+                audio: true,
+                video: true,
+            }
+        );
+    }
+
+    #[test]
+    fn decode_call_thread_media_parses_audio_only() {
+        let media = decode_call_thread_media("audio").expect("audio-only decodes");
+        assert_eq!(
+            media,
+            CallThreadMedia {
+                audio: true,
+                video: false,
+            }
+        );
+    }
+
+    #[test]
+    fn decode_call_thread_media_rejects_present_but_token_less_value() {
+        // A present-but-empty media string would otherwise decode to the
+        // impossible `audio:false, video:false` (which `media_attr` panics
+        // on). Decode must reject it instead. NULL stays `None` upstream.
+        assert!(decode_call_thread_media("").is_err());
+        assert!(decode_call_thread_media("   ").is_err());
+    }
+
+    #[test]
+    fn decode_call_thread_media_rejects_unknown_token() {
+        assert!(decode_call_thread_media("audio screenshare").is_err());
+    }
+}
