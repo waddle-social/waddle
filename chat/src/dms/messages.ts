@@ -233,8 +233,12 @@ export function useDirectMessages(
     isLoadingMessages,
     isLoadingOlderMessages,
     hasOlderMessages,
+    loadingOlderThreadIds,
+    threadHasOlder,
     loadOlderMessages,
     ensureMessageLoaded,
+    backfillThread,
+    loadOlderThreadMessages,
   } = paging;
 
   // DM-load entry point. The MAM-paging composable owns paging state; the
@@ -376,6 +380,10 @@ export function useDirectMessages(
     isLoadingMessages,
     isLoadingOlderMessages,
     hasOlderMessages,
+    loadingOlderThreadIds,
+    threadHasOlder,
+    backfillThread,
+    loadOlderThreadMessages,
     isSending,
     typingUsers,
     timelineEl,

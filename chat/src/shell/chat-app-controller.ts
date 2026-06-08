@@ -31,6 +31,7 @@ import {
   roomJidForChannelId as resolveRoomJidForChannelId,
 } from "@/lib/channel-room";
 import { normalizeMucServiceDomain } from "@/lib/calls/muc-call-indicators";
+import { resolveThreadEntryTarget } from "@/lib/threads-view-target";
 import { connectionStore } from "@/lib/connection-store";
 import { resetPinnedRooms } from "@/stores/pinned-messages";
 import { hydratePinnedBodiesOnPanelOpen } from "@/services/pinned-message-bodies";
@@ -962,11 +963,24 @@ export function useChatAppController(giphyApiKey: string) {
       activeThreadStack.value.length > 0 &&
       activeThreadStack.value[activeThreadStack.value.length - 1] === threadId
     ) {
-      if (targetMessageId && ui.sidebarMode.value === "channels") void messaging.backfillThread(threadId);
+      if (targetMessageId) backfillActiveThread(threadId);
       return;
     }
     activeThreadStack.value = [threadId];
-    if (ui.sidebarMode.value === "channels") void messaging.backfillThread(threadId);
+    backfillActiveThread(threadId);
+  }
+
+  // Backfill a thread's replies from the archive for the active surface. DMs
+  // query the personal archive (`with=peer` + thread); channels query the
+  // room archive. Without this a thread opened from the global Threads view
+  // or a deep link shows only the replies that happen to be in the loaded
+  // conversation window.
+  function backfillActiveThread(threadId: string) {
+    if (ui.sidebarMode.value === "dms") {
+      void dmMessaging.backfillThread(threadId);
+    } else if (ui.sidebarMode.value === "channels") {
+      void messaging.backfillThread(threadId);
+    }
   }
 
   function roomJidForChannelId(channelId: string): string | null {
@@ -988,6 +1002,25 @@ export function useChatAppController(giphyApiKey: string) {
     openThread(threadId);
   }
 
+  // Global Threads view (`urn:waddle:threads:0`) rows carry a bare JID,
+  // which may be a channel (MUC) room or a DM partner. Route each to its
+  // own surface — channel selection vs DM open — then open the thread
+  // panel. Without this, DM rows fell through `selectChannel(<localpart>)`
+  // and tried to open a nonexistent channel (#917).
+  async function onSelectThreadEntry(channelJid: string, threadId: string) {
+    const target = resolveThreadEntryTarget(channelJid, {
+      channels: waddles.channels.value,
+      managedMucDomain: managedMucDomain.value,
+    });
+    if (!target) return;
+    if (target.kind === "channel") {
+      await onSelectThread(target.channelId, threadId);
+      return;
+    }
+    await handleOpenDm(target.peerJid);
+    openThread(threadId);
+  }
+
   function pushThread(threadId: string) {
     if (!threadId) return;
     activeRightPanel.value = "thread";
@@ -999,7 +1032,7 @@ export function useChatAppController(giphyApiKey: string) {
       return;
     }
     activeThreadStack.value = [...activeThreadStack.value, threadId];
-    if (ui.sidebarMode.value === "channels") void messaging.backfillThread(threadId);
+    backfillActiveThread(threadId);
   }
 
   function popThreadTo(index: number) {
@@ -1138,7 +1171,10 @@ export function useChatAppController(giphyApiKey: string) {
   }
 
   function loadOlderThreadMessages(threadId: string) {
-    if (ui.sidebarMode.value === "dms") return;
+    if (ui.sidebarMode.value === "dms") {
+      void dmMessaging.loadOlderThreadMessages(threadId);
+      return;
+    }
     void messaging.loadOlderThreadMessages(threadId);
   }
 
@@ -1619,6 +1655,11 @@ export function useChatAppController(giphyApiKey: string) {
       activeThreadTargetMessageId.value = null;
       activeThreadStack.value = match.search.thread;
       activeRightPanel.value = match.search.thread.length > 0 ? "thread" : null;
+      // Dedup: a nested stack can legitimately repeat a thread id (e.g.
+      // `[A,B,A]`), but each thread only needs one backfill.
+      for (const threadId of new Set(match.search.thread)) {
+        void dmMessaging.backfillThread(threadId);
+      }
       return;
     }
 
@@ -2180,6 +2221,7 @@ export function useChatAppController(giphyApiKey: string) {
       selectChannel,
       selectChannelByRoomJid,
       onSelectThread,
+      onSelectThreadEntry,
       selectExtensionRoute,
       handleOpenDm,
       selectDm,

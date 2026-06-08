@@ -1,18 +1,23 @@
 // Tests for the click-thru behaviour of the global Threads view.
 //
 // `ThreadsView.vue` is a thin wrapper: it fetches threads (delegated
-// to `ThreadsListPanel`) and, on click, hands the entry off to the
-// controller's `onSelectThread(channelId, threadId)`. The controller
-// then selects the channel and opens the ThreadPanel reader, and the
-// existing URL watchers push `/r/<channel>?thread=<rootId>`.
+// to `ThreadsListPanel`) and, on click, hands the entry's bare JID off
+// to the controller's `onSelectThreadEntry(channelJid, threadId)`. The
+// controller routes the JID to its hosting surface — a channel
+// selection for MUC rooms, or a DM open for partner JIDs — and opens
+// the ThreadPanel reader.
 //
 // The component itself is too small to be worth mounting under
 // `@vue/test-utils`; we exercise the two pieces of behaviour that
-// matter: the JID→channel-id resolver and the controller-call shape.
+// matter: the room-JID resolver and the channel/DM routing shape that
+// the controller's `onSelectThreadEntry` implements.
 
 import { describe, expect, mock, test } from "bun:test";
 import type { WasmThreadEntry } from "../src/lib/xmpp/wasm-types";
 import { resolveChannelIdForRoomJid } from "../src/lib/threads-channel-resolve";
+import { resolveThreadEntryTarget } from "../src/lib/threads-view-target";
+
+const MUC_DOMAIN = "muc.waddle.example";
 
 function entry(overrides: Partial<WasmThreadEntry> = {}): WasmThreadEntry {
   return {
@@ -27,19 +32,32 @@ function entry(overrides: Partial<WasmThreadEntry> = {}): WasmThreadEntry {
   };
 }
 
+interface ThreadEntryHandlers {
+  onSelectThread: (channelId: string, threadId: string) => void | Promise<void>;
+  onOpenDmThread: (peerJid: string, threadId: string) => void | Promise<void>;
+}
+
 /**
- * Mirrors the click handler inside `ThreadsView.vue`: resolve the
- * entry's room JID to a channel-id slug, then call `onSelectThread`.
- * If the JID is unusable, the handler is a no-op.
+ * Mirrors the controller's `onSelectThreadEntry`, which is what
+ * `ThreadsView.vue` now delegates to: classify the entry's bare JID and
+ * route a channel selection vs a DM open. If the JID is unusable, the
+ * handler is a no-op.
  */
 async function handleOpenThread(
   e: WasmThreadEntry,
   channels: { id: string; jid?: string }[],
-  onSelectThread: (channelId: string, threadId: string) => void | Promise<void>,
+  handlers: ThreadEntryHandlers,
 ): Promise<void> {
-  const channelId = resolveChannelIdForRoomJid(e.channel, channels);
-  if (!channelId) return;
-  await onSelectThread(channelId, e.thread_id);
+  const target = resolveThreadEntryTarget(e.channel, {
+    channels,
+    managedMucDomain: MUC_DOMAIN,
+  });
+  if (!target) return;
+  if (target.kind === "channel") {
+    await handlers.onSelectThread(target.channelId, e.thread_id);
+    return;
+  }
+  await handlers.onOpenDmThread(target.peerJid, e.thread_id);
 }
 
 describe("resolveChannelIdForRoomJid", () => {
@@ -88,45 +106,71 @@ describe("resolveChannelIdForRoomJid", () => {
 });
 
 describe("ThreadsView click handler", () => {
-  test("calls onSelectThread with the resolved channel-id and the thread id", async () => {
-    const onSelectThread = mock(async (_channelId: string, _threadId: string) => {});
+  function handlers() {
+    return {
+      onSelectThread: mock(async (_channelId: string, _threadId: string) => {}),
+      onOpenDmThread: mock(async (_peerJid: string, _threadId: string) => {}),
+    };
+  }
+
+  test("routes a channel thread to onSelectThread with the resolved channel-id", async () => {
+    const h = handlers();
     const channels = [{ id: "general", jid: "general@muc.waddle.example" }];
     await handleOpenThread(
       entry({ channel: "general@muc.waddle.example", thread_id: "root-abc" }),
       channels,
-      onSelectThread,
+      h,
     );
-    expect(onSelectThread).toHaveBeenCalledTimes(1);
-    expect(onSelectThread.mock.calls[0]).toEqual(["general", "root-abc"]);
+    expect(h.onSelectThread.mock.calls).toEqual([["general", "root-abc"]]);
+    expect(h.onOpenDmThread).not.toHaveBeenCalled();
   });
 
   test("falls back to the JID local-part when the channel is unknown", async () => {
     // Threads view can outlive the structure load: a thread can be
     // listed before its channel summary has been wired into
-    // `waddles.channels`. The handler must still route correctly.
-    const onSelectThread = mock(async (_channelId: string, _threadId: string) => {});
+    // `waddles.channels`. A managed-room JID must still route to the
+    // channel surface via its local-part.
+    const h = handlers();
     await handleOpenThread(
       entry({ channel: "history@muc.waddle.example", thread_id: "t-9" }),
       [],
-      onSelectThread,
+      h,
     );
-    expect(onSelectThread).toHaveBeenCalledTimes(1);
-    expect(onSelectThread.mock.calls[0]).toEqual(["history", "t-9"]);
+    expect(h.onSelectThread.mock.calls).toEqual([["history", "t-9"]]);
+    expect(h.onOpenDmThread).not.toHaveBeenCalled();
+  });
+
+  test("routes a DM thread to the DM open, not a channel selection (#917)", async () => {
+    // The regression this PR fixes: a partner-keyed DM thread must open
+    // the direct-message conversation, never `selectChannel(<localpart>)`.
+    const h = handlers();
+    const channels = [{ id: "general", jid: "general@muc.waddle.example" }];
+    await handleOpenThread(
+      entry({ channel: "bob@waddle.example", thread_id: "t-dm" }),
+      channels,
+      h,
+    );
+    expect(h.onOpenDmThread.mock.calls).toEqual([["bob@waddle.example", "t-dm"]]);
+    expect(h.onSelectThread).not.toHaveBeenCalled();
   });
 
   test("is a no-op for entries with an unusable channel JID", async () => {
-    const onSelectThread = mock(async (_channelId: string, _threadId: string) => {});
-    await handleOpenThread(entry({ channel: "" }), [], onSelectThread);
-    expect(onSelectThread).not.toHaveBeenCalled();
+    const h = handlers();
+    await handleOpenThread(entry({ channel: "" }), [], h);
+    expect(h.onSelectThread).not.toHaveBeenCalled();
+    expect(h.onOpenDmThread).not.toHaveBeenCalled();
   });
 
-  test("awaits onSelectThread so async controller work completes before returning", async () => {
+  test("awaits the routed handler so async controller work completes before returning", async () => {
     let resolved = false;
-    const onSelectThread = mock(async () => {
-      await new Promise<void>((r) => setTimeout(r, 1));
-      resolved = true;
-    });
-    await handleOpenThread(entry(), [], onSelectThread);
+    const h = {
+      onSelectThread: mock(async () => {
+        await new Promise<void>((r) => setTimeout(r, 1));
+        resolved = true;
+      }),
+      onOpenDmThread: mock(async () => {}),
+    };
+    await handleOpenThread(entry(), [], h);
     expect(resolved).toBe(true);
   });
 });
