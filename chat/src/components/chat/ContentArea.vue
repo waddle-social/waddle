@@ -10,6 +10,8 @@ import { findMessageElementById } from "@/lib/message-targeting";
 import { findMessageById } from "@/lib/message-ids";
 import { getReplyJumpNotice } from "@/lib/reply-ux";
 import { findThreadToAutoOpen } from "@/lib/thread-auto-open";
+import { resolveActiveMucCallThreadId } from "@/lib/calls/call-chat-composer";
+import { $callState } from "@/lib/calls/call-store";
 import {
   getPinnedScrollTop,
   getNewMessagesDividerPlacement,
@@ -119,6 +121,15 @@ const emit = defineEmits<{
     forumTitle?: string,
     linkPreview?: ComposerLinkPreviewSendPayload,
   ];
+  sendCallChat: [
+    body: string,
+    markup: MarkupSpan[],
+    references: MessageReference[],
+    files: Array<File | Blob> | undefined,
+    replyTo: { id: string; author: string; body?: string } | undefined,
+    threadOverride: { threadId: string; parentThreadId?: string },
+    linkPreview?: ComposerLinkPreviewSendPayload,
+  ];
   typing: [];
   editMessage: [messageId: string, newBody: string, markup?: MarkupSpan[], references?: MessageReference[], linkPreview?: ComposerLinkPreviewSendPayload];
   retractMessage: [messageId: string];
@@ -178,6 +189,7 @@ const newMessagesDividerPlacement = computed(() =>
   getNewMessagesDividerPlacement(scrollDirection.value),
 );
 const olderSentinelPosition = computed(() => scrollDirection.value === "social" ? "end" : "start");
+const callState = useStore($callState);
 
 const replyingTo = ref<{ id: string; author: string; body?: string; preview?: string } | null>(null);
 const autoOpenedThreadIds = new Set<string>();
@@ -418,6 +430,11 @@ async function dispatchSlashCommand(
 }
 const inMucContext = computed(() => !!props.roomJid);
 const callRoomJid = computed(() => props.roomJid ?? props.channel?.jid ?? null);
+const activeCallThreadId = computed(() => {
+  const state = callState.value;
+  if (state.phase !== "active" || state.kind !== "muc") return null;
+  return resolveActiveMucCallThreadId(props.messages, callRoomJid.value, state.sid);
+});
 
 watch(
   () => props.xmppClient,
@@ -1518,6 +1535,16 @@ function dayDividerLabel(createdAt: string): string {
       :room-jid="callRoomJid ?? undefined"
       :dm-peer-jid="dmPeer?.peerJid"
       :dm-peer-name="dmPeer?.peerUsername"
+      :call-thread-id="activeCallThreadId"
+      :is-sending="isSending"
+      :disabled="!canShowComposer"
+      :giphy-api-key="giphyApiKey"
+      :mention-candidates="mentionCandidates"
+      :slow-mode-cooldown="slowModeCooldown"
+      :upload-progress="uploadProgress"
+      :link-preview-lookup="linkPreviewLookup"
+      :link-preview-scope="linkPreviewScope"
+      @send-call-chat="(...args) => emit('sendCallChat', ...args)"
     />
   </div>
 </template>

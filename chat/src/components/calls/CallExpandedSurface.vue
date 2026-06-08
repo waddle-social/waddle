@@ -25,6 +25,9 @@ import { localScreenSharePresentation } from "@/lib/calls/call-self-share";
 import { normalizeMucCallRoomJid } from "@/lib/calls/muc-call-presence";
 import { useCallVolumeMixer } from "@/lib/calls/use-call-volume-mixer";
 import { barePeerJid } from "@/lib/xmpp/jid";
+import type { MentionCandidate } from "@/lib/mentions";
+import type { MarkupSpan, MessageReference } from "@/lib/chat-ui";
+import type { ComposerLinkPreviewLookup, ComposerLinkPreviewSendPayload } from "@/lib/link-preview-composer";
 import CallTileGrid from "./CallTileGrid.vue";
 import CallControls from "./CallControls.vue";
 import CallSettingsDialog from "./CallSettingsDialog.vue";
@@ -32,6 +35,7 @@ import CallMediaNotice from "./CallMediaNotice.vue";
 import CallSelfShareNotice from "./CallSelfShareNotice.vue";
 import CallVolumeMixerDialog from "./CallVolumeMixerDialog.vue";
 import CallAudioPlaybackPrompt from "./CallAudioPlaybackPrompt.vue";
+import MessageComposer from "@/components/chat/MessageComposer.vue";
 
 /**
  * "Expanded" call surface — fills the chat content pane while the
@@ -52,6 +56,27 @@ const props = defineProps<{
   roomJid?: string;
   dmPeerJid?: string;
   dmPeerName?: string;
+  callThreadId?: string | null;
+  isSending?: boolean;
+  disabled?: boolean;
+  giphyApiKey?: string;
+  mentionCandidates?: MentionCandidate[];
+  slowModeCooldown?: number;
+  uploadProgress?: { uploading: boolean; progress: number; filename: string };
+  linkPreviewLookup?: ComposerLinkPreviewLookup | null;
+  linkPreviewScope?: string | null;
+}>();
+
+const emit = defineEmits<{
+  sendCallChat: [
+    body: string,
+    markup: MarkupSpan[],
+    references: MessageReference[],
+    files: Array<File | Blob> | undefined,
+    replyTo: undefined,
+    threadOverride: { threadId: string },
+    linkPreview?: ComposerLinkPreviewSendPayload,
+  ];
 }>();
 
 const state = useStore($callState);
@@ -67,6 +92,7 @@ const { activeRoomJid, selfInCall } = useActiveMucCall();
 
 const settingsOpen = ref(false);
 const volumeOpen = ref(false);
+const callChatDraft = ref("");
 
 const normalizedRoomJid = computed(() =>
   normalizeMucCallRoomJid(props.roomJid ?? ""),
@@ -125,6 +151,17 @@ const subline = computed(() => {
   return state.value.media.video ? "Video call" : "Audio call";
 });
 
+const canShowCallChatComposer = computed(() =>
+  state.value.phase === "active" &&
+  state.value.kind === "muc" &&
+  !!props.callThreadId,
+);
+
+const callThreadOverride = computed(() => {
+  const threadId = props.callThreadId?.trim();
+  return threadId ? { threadId } : null;
+});
+
 const localIdentity = computed(() => engine.localIdentity);
 const selfSharePresentation = computed(() =>
   localScreenSharePresentation({
@@ -152,6 +189,19 @@ async function onHangup(): Promise<void> {
   // "active"); flip the mode back so the next call defaults to split
   // instead of inheriting "expanded".
   $callUiMode.set("split");
+}
+
+function onSendCallChat(
+  body: string,
+  markup: MarkupSpan[],
+  references: MessageReference[],
+  files?: Array<File | Blob>,
+  linkPreview?: ComposerLinkPreviewSendPayload,
+): void {
+  const override = callThreadOverride.value;
+  if (!override) return;
+  emit("sendCallChat", body, markup, references, files, undefined, override, linkPreview);
+  callChatDraft.value = "";
 }
 
 function onKeydown(event: KeyboardEvent): void {
@@ -223,6 +273,32 @@ onBeforeUnmount(() => {
         />
       </div>
     </main>
+    <section
+      v-if="canShowCallChatComposer"
+      class="call-expanded__chat"
+      aria-label="Call chat"
+    >
+      <div class="call-expanded__chat-label type-section-label text-muted-foreground">
+        Call chat
+      </div>
+      <MessageComposer
+        v-model:draft="callChatDraft"
+        channel-name="call chat"
+        composer-label="Call chat composer"
+        :is-forum-channel="false"
+        :is-sending="!!isSending"
+        :disabled="!!disabled || !callThreadOverride"
+        :giphy-api-key="giphyApiKey ?? ''"
+        :mention-candidates="mentionCandidates ?? []"
+        :slow-mode-cooldown="slowModeCooldown ?? 0"
+        :upload-progress="uploadProgress ?? { uploading: false, progress: 0, filename: '' }"
+        :in-muc="true"
+        :link-preview-lookup="linkPreviewLookup ?? null"
+        :link-preview-scope="linkPreviewScope ?? null"
+        :show-extensions="false"
+        @send="onSendCallChat"
+      />
+    </section>
     <footer class="call-expanded__footer">
       <CallControls
         :mic-enabled="micEnabled"
@@ -301,5 +377,14 @@ onBeforeUnmount(() => {
   justify-content: center;
   border-top: 1px solid var(--border);
   padding: 0.75rem 1rem;
+}
+
+.call-expanded__chat {
+  border-top: 1px solid var(--border);
+  background: color-mix(in oklab, var(--background) 88%, transparent);
+}
+
+.call-expanded__chat-label {
+  padding: 0.625rem 1rem 0;
 }
 </style>

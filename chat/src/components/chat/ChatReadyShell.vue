@@ -820,6 +820,7 @@ onUnmounted(() => {
               :ensure-message-loaded="ensureActiveMessageLoaded"
               :send-public-channel-message="sendPublicChannelMessage"
               @send="sendActiveMessage"
+              @send-call-chat="sendThreadMessage"
               @typing="notifyActiveComposing"
               @edit-message="editActiveMessage"
               @retract-message="retractActiveMessage"

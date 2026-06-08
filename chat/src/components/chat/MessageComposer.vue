@@ -59,6 +59,8 @@ const props = defineProps<{
   dispatchSlashCommand?: (invocation: SlashInvocation) => Promise<boolean>;
   linkPreviewLookup?: ComposerLinkPreviewLookup | null;
   linkPreviewScope?: string | null;
+  composerLabel?: string;
+  showExtensions?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -194,6 +196,7 @@ const emojiResults = computed(() => searchEmoji(emojiQuery.value));
 const showForumTitleInput = computed(() => props.isForumChannel && !props.replyingTo);
 
 const slashContext = computed(() => ({ inMuc: !!props.inMuc }));
+const showExtensions = computed(() => props.showExtensions !== false);
 const slashCandidates = computed(() =>
   filterSlashCandidates(slashPrefix.value, props.slashCommands ?? [], slashContext.value),
 );
@@ -923,6 +926,7 @@ watch(isPreparingSend, (preparing) => {
         embedded
         :placeholder="editorPlaceholder"
         :disabled="disabled || slowModeCooldown > 0 || isPreparingSend"
+        :editor-label="composerLabel ?? `${channelName} composer`"
         @send="onSend"
         @update="onEditorUpdate"
         @selection-update="checkAutocompleteFromEditor"
@@ -934,6 +938,7 @@ watch(isPreparingSend, (preparing) => {
            "fire an action"; the left edge is consistently "add to the
            message draft". -->
       <button
+        v-if="showExtensions"
         :ref="setExtensionButtonRef"
         type="button"
         class="chat-composer-input-action h-9 w-9 shrink-0 flex items-center justify-center transition-all duration-200 text-muted-foreground hover:bg-background/70 hover:text-primary active:scale-[0.94] disabled:opacity-40 disabled:active:scale-100 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"

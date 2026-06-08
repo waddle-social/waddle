@@ -11,6 +11,7 @@ const props = withDefaults(
     compact?: boolean;
     embedded?: boolean;
     initialContent?: JSONContent;
+    editorLabel?: string;
   }>(),
   {
     placeholder: "Type a message…",
@@ -56,6 +57,7 @@ const editor = useEditor({
       return false;
     },
     attributes: {
+      ...(props.editorLabel ? { "aria-label": props.editorLabel } : {}),
       class: "outline-none",
     },
   },
