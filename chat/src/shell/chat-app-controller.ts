@@ -1614,6 +1614,7 @@ export function useChatAppController(giphyApiKey: string) {
         const domain = session.value ? jidDomain(session.value.jid) : "";
         if (!domain) return;
         await handleOpenDm(`${username}@${domain}`);
+        if (requestId !== routeRequestId) return;
       }
       activeThreadTargetMessageId.value = null;
       activeThreadStack.value = match.search.thread;
