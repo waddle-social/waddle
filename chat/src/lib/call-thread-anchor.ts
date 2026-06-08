@@ -137,7 +137,11 @@ function buildCallAnchorCardState(options: {
     participantLabels,
     messageCount,
     threadId: callThreadAnchorThreadId(message),
-    title: live ? `Live ${mediaLabel}` : "Call ended",
+    title: live
+      ? `Live ${mediaLabel}`
+      : callThread.ended && callThread.duration
+        ? `Call ended · ${formatCallThreadDuration(callThread.duration)}`
+        : "Call ended",
     actionLabel: joinAvailable ? (retainedLocalResource ? "Rejoin" : "Join") : busy ? "In another call" : null,
     actionDisabled: busy,
     ariaLabel: live

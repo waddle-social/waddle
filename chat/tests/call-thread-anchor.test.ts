@@ -163,6 +163,26 @@ describe("call-thread anchor timeline mapping", () => {
     expect(callThreadAnchorThreadId(timelineMessage)).toBe("call-thread-uuid");
   });
 
+  test("shows the formatted duration in the ended anchor card title", () => {
+    const timelineMessage = mapLiveRoomMessageToTimeline(session, callAnchor({
+      roomJid: "general@conference.example.com",
+      callThread: {
+        kind: "muc",
+        sid: "session-uuid",
+        media: ["audio"],
+        initiator: "alice@example",
+        started: "2026-06-07T14:30:00Z",
+        ended: "2026-06-07T14:35:00Z",
+        duration: "PT5M",
+      },
+    }));
+
+    expect(readCallAnchorCardState(timelineMessage, "general@conference.example.com")).toMatchObject({
+      status: "ended",
+      title: "Call ended · 5m",
+    });
+  });
+
   test("room archive codec maps the WASM call-thread marker onto LiveRoomMessage", () => {
     const live = roomMessageFromArchived({
       mam_id: "mam-anchor-1",
@@ -367,7 +387,7 @@ describe("wasmThreadEntryToAnchorMessage", () => {
 
     expect(readCallAnchorCardState(msg!, "general@conference.example.com")).toMatchObject({
       status: "ended",
-      title: "Call ended",
+      title: "Call ended · 5m",
       actionLabel: null,
       ariaLabel: "Call ended · 5m",
     });
