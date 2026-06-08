@@ -198,8 +198,6 @@ pub(super) async fn try_handle_muc_presence_update(
         super::super::super::muc_call_sfu::unregister_participant_from_room(
             state, room_jid, sender_jid,
         );
-        crate::server::routes::muc_muji_clear::maybe_broadcast_call_thread_ended(state, room_jid)
-            .await;
     }
 
     // XEP-0045 §7.7: a user may change their *own* in-room presence
@@ -302,6 +300,11 @@ pub(super) async fn try_handle_muc_presence_update(
                     .try_send_to(recipient, stanza);
             }
         }
+    }
+
+    if clears_muji_presence {
+        crate::server::routes::muc_muji_clear::maybe_broadcast_call_thread_ended(state, room_jid)
+            .await;
     }
 
     if let Some(anchor) = call_thread_anchor {
