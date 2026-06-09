@@ -33,7 +33,7 @@ import { useDmChatStates } from "@/dms/chat-states";
 import { useDmReadMarkers } from "@/dms/read-markers";
 import { useDmMessageSearch } from "@/dms/message-search";
 import { useChatWindowVisibility } from "@/shell/window-visibility";
-import { $dmCallStartedAnchor, buildDmCallStartedAnchor } from "@/lib/calls/dm-call-anchor";
+import { $dmCallStartedAnchor, resolveDmCallAnchorInjection } from "@/lib/calls/dm-call-anchor";
 
 export function useDirectMessages(
   session: Ref<WaddleSession | null>,
@@ -201,11 +201,12 @@ export function useDirectMessages(
   // only on new publishes, so a stale anchor is never replayed on mount.
   const stopDmCallAnchorListener = $dmCallStartedAnchor.listen((anchor) => {
     if (!anchor) return;
-    const currentSession = session.value;
-    const peerJid = activePeerJid.value;
-    if (!currentSession || !peerJid) return;
-    if (barePeerJid(anchor.peerBareJid) !== barePeerJid(peerJid)) return;
-    liveMerge.mergeLiveMessage(buildDmCallStartedAnchor(anchor, currentSession.jid));
+    const card = resolveDmCallAnchorInjection(
+      anchor,
+      activePeerJid.value,
+      session.value?.jid ?? null,
+    );
+    if (card) liveMerge.mergeLiveMessage(card);
   });
   // `useDirectMessages` runs inside component setup in the app (an effect
   // scope is present); guard so unit instantiation outside a scope neither

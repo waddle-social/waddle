@@ -28,6 +28,13 @@ type ActiveCallChat = {
  * room-scoped timeline (`ContentArea` scopes `messages` to one conversation;
  * timeline messages do not carry a room JID themselves, so `roomJid` only
  * guards that a room is in context).
+ *
+ * Assumption: the most recent non-ended `muc` anchor is the active call. The
+ * server emits exactly one anchor per call start and an XEP-0422 ended
+ * fastening on call end, so this holds in steady state. A prior call whose
+ * ended fastening was missed live (and not yet reconciled from MAM) could
+ * momentarily mis-bind until the new call's anchor arrives; this is a strict
+ * improvement over the previous sid match, which never resolved at all.
  */
 export function resolveActiveMucCallThreadId(
   messages: readonly CallThreadCandidate[],

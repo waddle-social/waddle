@@ -1,7 +1,7 @@
 import { atom } from "nanostores";
 import type { CallThreadAnchor, TimelineMessage } from "@/lib/chat-ui";
 import { barePeerJid } from "../xmpp/jid";
-import type { CallMedia } from "./types";
+import type { CallMedia, CallState } from "./types";
 
 /**
  * A 1:1 (DM) call that has just become active and should surface a "started a
@@ -72,6 +72,45 @@ export function buildDmCallStartedAnchor(
     threadId: anchor.sid,
     callThread,
   };
+}
+
+/**
+ * Producer guard: derive the anchor to publish from a call-state transition,
+ * or `null` when none should be published. Publishes only on the transition
+ * INTO an active 1:1 call — not media renegotiations that keep the same active
+ * call, and not when the initiator is unknown (the card falls back to MAM
+ * replay). Pure so the guard logic is unit-testable without the global store.
+ */
+export function dmCallStartedAnchorFromTransition(
+  before: CallState,
+  next: CallState,
+  startedIso: string,
+): DmCallStartedAnchor | null {
+  if (next.phase !== "active" || next.kind !== "dm") return null;
+  if (before.phase === "active" && before.kind === "dm" && before.sid === next.sid) return null;
+  if (!next.initiator) return null;
+  return {
+    peerBareJid: barePeerJid(next.peer),
+    sid: next.sid,
+    media: next.media,
+    initiator: next.initiator,
+    started: startedIso,
+  };
+}
+
+/**
+ * Consumer guard: build the timeline card for `anchor` only when it belongs to
+ * the open conversation, isolating it from other DMs (a call with Bob must not
+ * inject a card into Carol's open timeline). Returns `null` otherwise.
+ */
+export function resolveDmCallAnchorInjection(
+  anchor: DmCallStartedAnchor,
+  activePeerJid: string | null,
+  selfJid: string | null,
+): TimelineMessage | null {
+  if (!selfJid || !activePeerJid) return null;
+  if (barePeerJid(anchor.peerBareJid) !== barePeerJid(activePeerJid)) return null;
+  return buildDmCallStartedAnchor(anchor, selfJid);
 }
 
 /**

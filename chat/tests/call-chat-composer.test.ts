@@ -51,6 +51,25 @@ describe("call-chat composer", () => {
     expect(resolveActiveMucCallThreadId(messages, `${ROOM}/alice`)).toBe("call-thread-active");
   });
 
+  test("skips a more recent ended muc anchor to find the still-active one", () => {
+    // The ended anchor is the most recent row, so the reverse scan must skip
+    // it (not just stop at the newest) to return the still-active call.
+    const messages: TimelineMessage[] = [
+      message({
+        id: "active-call-anchor",
+        threadId: "call-thread-active",
+        callThread: { kind: "muc", sid: "sid-fresh", media: ["audio"] },
+      }),
+      message({
+        id: "ended-call-anchor",
+        threadId: "call-thread-old",
+        callThread: { kind: "muc", sid: "sid-old", media: ["audio"], ended: "2026-06-09T13:00:00Z" },
+      }),
+    ];
+
+    expect(resolveActiveMucCallThreadId(messages, `${ROOM}/alice`)).toBe("call-thread-active");
+  });
+
   test("does not resolve a MUC call thread without a room or an active anchor", () => {
     const active: TimelineMessage[] = [
       message({
