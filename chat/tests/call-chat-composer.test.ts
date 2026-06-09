@@ -81,6 +81,10 @@ describe("call-chat composer", () => {
       peerJid: "bob@waddle.test",
       sid: "dm-active",
     })).toBe("dm-call-thread-123");
+    expect(resolveActiveCallThreadId(messages, {
+      kind: "dm",
+      sid: "dm-active",
+    })).toBe("dm-call-thread-123");
   });
 
   test("expanded channel calls render a labelled call-chat composer when a call thread is available", async () => {

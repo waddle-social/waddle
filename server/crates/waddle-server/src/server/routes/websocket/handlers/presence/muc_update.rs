@@ -347,6 +347,7 @@ pub(super) async fn try_handle_muc_presence_update(
                 room_jid.clone(),
                 ActiveCallThread {
                     anchor_origin_id,
+                    initiator: marker.initiator,
                     media: marker.media,
                     started: marker.started,
                     thread_id: thread_id.as_str().to_owned(),

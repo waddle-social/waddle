@@ -61,6 +61,28 @@ async fn store_committed_dm_archive_for_notification(
         .expect("store committed MAM row");
 }
 
+async fn archived_dm_call_anchor(
+    state: &WebSocketState,
+    owner: &BareJid,
+    thread_id: &str,
+) -> waddle_xmpp::mam::ArchivedMessage {
+    state
+        .deps
+        .protocol
+        .mam_storage
+        .query_messages(owner, &Default::default())
+        .await
+        .expect("query DM MAM")
+        .messages
+        .into_iter()
+        .find(|row| {
+            row.thread
+                .as_ref()
+                .is_some_and(|thread| thread.id.as_str() == thread_id)
+        })
+        .unwrap_or_else(|| panic!("{owner} should have a MAM call-thread anchor"))
+}
+
 #[tokio::test]
 async fn dm_jmi_proceed_projects_call_thread_anchor_for_both_peers() {
     let state = create_test_websocket_state().await;
@@ -81,6 +103,14 @@ async fn dm_jmi_proceed_projects_call_thread_anchor_for_both_peers() {
     )
     .await;
     assert_eq!(state.deps.protocol.pending_dm_call_offers.len(), 1);
+    let key = crate::server::routes::websocket::DmCallThreadKey::new(
+        alice.clone(),
+        bob.clone(),
+        sid.clone(),
+    );
+    if let Some(mut offer) = state.deps.protocol.pending_dm_call_offers.get_mut(&key) {
+        offer.started = chrono::Utc::now() - chrono::Duration::minutes(10);
+    }
 
     let proceed: Element = waddle_xmpp::xep::xep0353::build_proceed(sid.clone()).into();
     drive_dm_message(
@@ -123,6 +153,34 @@ async fn dm_jmi_proceed_projects_call_thread_anchor_for_both_peers() {
 
     let mut projected_stanza_ids = Vec::new();
     for (owner, peer) in [(&alice, &bob), (&bob, &alice)] {
+        let archived_anchor = archived_dm_call_anchor(state.as_ref(), owner, "dm-call-1").await;
+        let call_thread = archived_anchor
+            .stanza_xml
+            .as_deref()
+            .and_then(|xml| xml.parse::<Element>().ok())
+            .and_then(|message| {
+                message
+                    .children()
+                    .find(|child| {
+                        child.name() == "call-thread"
+                            && child.ns() == waddle_xmpp::xep::NS_WADDLE_CALL_THREAD
+                    })
+                    .and_then(|child| waddle_xmpp::xep::parse_call_thread_anchor(child).ok())
+            })
+            .unwrap_or_else(|| panic!("{owner} MAM anchor should carry a call-thread marker"));
+        assert_eq!(call_thread.kind, waddle_xmpp::xep::CallThreadKind::Dm);
+        assert_eq!(call_thread.sid.0, "dm-call-1");
+        assert_eq!(
+            call_thread.media,
+            waddle_xmpp::xep::CallThreadMedia::audio_video()
+        );
+        assert_eq!(call_thread.initiator, alice);
+        assert!(
+            chrono::Utc::now().signed_duration_since(call_thread.started)
+                < chrono::Duration::seconds(5),
+            "call duration anchor should start at accepted proceed time"
+        );
+
         let anchor = state
             .deps
             .protocol
@@ -150,6 +208,73 @@ async fn dm_jmi_proceed_projects_call_thread_anchor_for_both_peers() {
     assert_eq!(state.deps.protocol.dm_call_threads.len(), 1);
     assert_eq!(state.deps.protocol.pending_dm_call_offers.len(), 0);
     assert_eq!(state.deps.protocol.dm_call_thread_projections.len(), 2);
+
+    let alice_archive_before_self_proceed = state
+        .deps
+        .protocol
+        .mam_storage
+        .query_messages(&alice, &Default::default())
+        .await
+        .expect("query alice MAM before self proceed")
+        .messages
+        .len();
+    state
+        .deps
+        .protocol
+        .dm_call_thread_projections
+        .remove(&(alice.clone(), key.clone()));
+    let self_proceed: Element = waddle_xmpp::xep::xep0353::build_proceed(sid.clone()).into();
+    let _ = crate::server::routes::interpret::interpret(
+        vec![waddle_xmpp::protocol::OutboundEvent::ArchiveDirect {
+            archive_jid: alice.clone(),
+            from: alice.clone(),
+            to: bob.clone(),
+            message: Box::new(dm_call_message(
+                "alice@example.com/web",
+                "bob@example.com/phone",
+                self_proceed,
+            )),
+        }],
+        &deps,
+    )
+    .await;
+    let alice_archive_after_self_proceed = state
+        .deps
+        .protocol
+        .mam_storage
+        .query_messages(&alice, &Default::default())
+        .await
+        .expect("query alice MAM after self proceed")
+        .messages;
+    assert_eq!(
+        alice_archive_after_self_proceed.len(),
+        alice_archive_before_self_proceed + 1,
+        "self-authored proceed is still archived as an ordinary JMI stanza"
+    );
+    assert_eq!(
+        alice_archive_after_self_proceed
+            .iter()
+            .filter(|row| row
+                .thread
+                .as_ref()
+                .is_some_and(|thread| thread.id.as_str() == "dm-call-1"))
+            .count(),
+        1,
+        "self-authored proceed must not be promoted into a second MAM anchor"
+    );
+    assert!(
+        !state
+            .deps
+            .protocol
+            .dm_call_thread_projections
+            .contains(&(alice.clone(), key.clone())),
+        "self-authored proceed must not backfill a missing owner projection"
+    );
+    state
+        .deps
+        .protocol
+        .dm_call_thread_projections
+        .insert((alice.clone(), key.clone()));
 
     let replayed_proceed: Element = waddle_xmpp::xep::xep0353::build_proceed(sid.clone()).into();
     let replayed_proceed = dm_call_message(

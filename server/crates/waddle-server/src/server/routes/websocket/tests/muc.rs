@@ -1376,6 +1376,7 @@ async fn empty_muji_presence_ends_the_active_call_thread() {
         room_jid.clone(),
         crate::server::routes::websocket::ActiveCallThread {
             anchor_origin_id: "anchor-origin-id".to_owned(),
+            initiator: alice.to_bare(),
             media: waddle_xmpp::xep::CallThreadMedia::audio_only(),
             started: chrono::Utc::now() - chrono::Duration::minutes(5),
             thread_id: thread_id.to_owned(),

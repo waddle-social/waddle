@@ -1,5 +1,9 @@
 use super::*;
 
+const DM_CALL_PENDING_TTL_SECS: i64 = 30 * 60;
+const DM_CALL_ACTIVE_TTL_SECS: i64 = 12 * 60 * 60;
+const DM_CALL_STATE_MAX_KEYS: usize = 4096;
+
 pub(super) async fn archive_direct(
     deps: &Deps<'_>,
     archive_jid: BareJid,
@@ -7,6 +11,7 @@ pub(super) async fn archive_direct(
     to: BareJid,
     message: Box<Message>,
 ) -> Option<ArchiveIdRewrite> {
+    let mut message = *message;
     let Some(mam_storage) = deps.mam_storage else {
         debug!(
             archive_jid = %archive_jid,
@@ -16,6 +21,11 @@ pub(super) async fn archive_direct(
         );
         return None;
     };
+    if let Some(active) =
+        prepare_dm_call_thread_archive_message(deps, &archive_jid, &from, &to, &message)
+    {
+        add_dm_call_thread_archive_payloads(&mut message, &active);
+    }
     // Per XEP-0313 §5.1.3, the eligibility check is
     // upstream (ArchiveHandler) — the interpreter just
     // persists. The handler also already canonicalized the
@@ -78,6 +88,103 @@ pub(super) async fn archive_direct(
     }
 }
 
+fn prepare_dm_call_thread_archive_message(
+    deps: &Deps<'_>,
+    archive_jid: &BareJid,
+    from: &BareJid,
+    to: &BareJid,
+    message: &Message,
+) -> Option<crate::server::routes::websocket::ActiveCallThread> {
+    let state = deps.web_socket_state?;
+    if !waddle_xmpp::xep::HintCarrier::has_store(message) {
+        return None;
+    }
+    prune_dm_call_thread_state(state, chrono::Utc::now());
+
+    let sid = jmi_sid(message, "proceed")?;
+    let key = crate::server::routes::websocket::DmCallThreadKey::new(from.clone(), to.clone(), sid);
+    if state
+        .deps
+        .protocol
+        .dm_call_thread_projections
+        .contains(&(archive_jid.clone(), key.clone()))
+    {
+        return None;
+    }
+    if let Some(active) = state
+        .deps
+        .protocol
+        .dm_call_threads
+        .get(&key)
+        .map(|active| active.clone())
+    {
+        if active.initiator == *from {
+            return None;
+        }
+        return Some(active);
+    }
+
+    let offer = state
+        .deps
+        .protocol
+        .pending_dm_call_offers
+        .get(&key)
+        .map(|offer| offer.clone())?;
+    if offer.initiator == *from {
+        return None;
+    }
+    let thread_id = key.sid.0.clone();
+    waddle_xmpp_core::mam::ThreadId::new(thread_id.clone())?;
+    let active = crate::server::routes::websocket::ActiveCallThread {
+        anchor_origin_id: String::new(),
+        initiator: offer.initiator,
+        media: offer.media,
+        started: chrono::Utc::now(),
+        thread_id,
+    };
+    state
+        .deps
+        .protocol
+        .dm_call_threads
+        .insert(key, active.clone());
+    Some(active)
+}
+
+fn add_dm_call_thread_archive_payloads(
+    message: &mut Message,
+    active: &crate::server::routes::websocket::ActiveCallThread,
+) {
+    let Some(thread_id) = waddle_xmpp_core::mam::ThreadId::new(active.thread_id.clone()) else {
+        return;
+    };
+    if !message.payloads.iter().any(|payload| {
+        payload.name() == "thread" && payload.ns() == waddle_xmpp_core::xep0201::CLIENT_STANZA_NS
+    }) {
+        let thread = waddle_xmpp_core::xep0201::ThreadInfo::root(thread_id);
+        message
+            .payloads
+            .push(waddle_xmpp_core::xep0201::build_thread_element(
+                &thread,
+                waddle_xmpp_core::xep0201::CLIENT_STANZA_NS,
+            ));
+    }
+    if !message.payloads.iter().any(|payload| {
+        payload.name() == "call-thread" && payload.ns() == waddle_xmpp::xep::NS_WADDLE_CALL_THREAD
+    }) {
+        message
+            .payloads
+            .push(waddle_xmpp::xep::build_call_thread_anchor(
+                &waddle_xmpp::xep::CallThreadAnchor {
+                    kind: waddle_xmpp::xep::CallThreadKind::Dm,
+                    sid: xmpp_parsers::jingle::SessionId(active.thread_id.clone()),
+                    media: active.media,
+                    initiator: active.initiator.clone(),
+                    started: active.started,
+                },
+            ));
+    }
+}
+
 async fn maybe_project_dm_call_thread(
     deps: &Deps<'_>,
     archive_jid: &BareJid,
@@ -92,14 +199,11 @@ async fn maybe_project_dm_call_thread(
     if !waddle_xmpp::xep::HintCarrier::has_store(message) {
         return;
     }
+    prune_dm_call_thread_state(state, chrono::Utc::now());
 
     if let Some((sid, media)) = jmi_propose(message) {
         state.deps.protocol.pending_dm_call_offers.insert(
-            crate::server::routes::websocket::DmCallThreadKey::new(
-                from.clone(),
-                to.clone(),
-                sid.clone(),
-            ),
+            crate::server::routes::websocket::DmCallThreadKey::new(from.clone(), to.clone(), sid),
             crate::server::routes::websocket::PendingDmCallOffer {
                 media,
                 initiator: from.clone(),
@@ -146,39 +250,24 @@ async fn maybe_project_dm_call_thread(
     let Some(sid) = jmi_sid(message, "proceed") else {
         return;
     };
-    let key = crate::server::routes::websocket::DmCallThreadKey::new(
-        from.clone(),
-        to.clone(),
-        sid.clone(),
-    );
-    let active = if let Some(active) = state.deps.protocol.dm_call_threads.get(&key) {
-        active.clone()
-    } else {
-        let Some(offer) = state
-            .deps
-            .protocol
-            .pending_dm_call_offers
-            .get(&key)
-            .map(|offer| offer.clone())
-        else {
-            return;
-        };
-        if offer.initiator == *from {
-            return;
-        }
-        let active = crate::server::routes::websocket::ActiveCallThread {
-            anchor_origin_id: archive_id.to_owned(),
-            media: offer.media,
-            started: offer.started,
-            thread_id: sid.0.clone(),
-        };
-        state
-            .deps
-            .protocol
-            .dm_call_threads
-            .insert(key.clone(), active.clone());
-        active
+    let key = crate::server::routes::websocket::DmCallThreadKey::new(from.clone(), to.clone(), sid);
+    let Some(active) = state
+        .deps
+        .protocol
+        .dm_call_threads
+        .get(&key)
+        .map(|active| active.clone())
+    else {
+        return;
     };
+    if active.initiator == *from {
+        return;
+    }
+    if let Some(mut active) = state.deps.protocol.dm_call_threads.get_mut(&key) {
+        if active.anchor_origin_id.is_empty() {
+            active.anchor_origin_id = archive_id.to_owned();
+        }
+    }
 
     let projection_key = (archive_jid.clone(), key.clone());
     if !state
@@ -215,6 +304,124 @@ async fn maybe_project_dm_call_thread(
         last_updated,
     )
     .await;
+}
+
+fn prune_dm_call_thread_state(
+    state: &crate::server::routes::websocket::WebSocketState,
+    now: chrono::DateTime<chrono::Utc>,
+) {
+    let expired_pending = state
+        .deps
+        .protocol
+        .pending_dm_call_offers
+        .iter()
+        .filter(|entry| {
+            now.signed_duration_since(entry.value().started)
+                .num_seconds()
+                > DM_CALL_PENDING_TTL_SECS
+        })
+        .map(|entry| entry.key().clone())
+        .collect::<Vec<_>>();
+    for key in expired_pending {
+        state.deps.protocol.pending_dm_call_offers.remove(&key);
+    }
+
+    let expired_active = state
+        .deps
+        .protocol
+        .dm_call_threads
+        .iter()
+        .filter(|entry| {
+            now.signed_duration_since(entry.value().started)
+                .num_seconds()
+                > DM_CALL_ACTIVE_TTL_SECS
+        })
+        .map(|entry| entry.key().clone())
+        .collect::<Vec<_>>();
+    for key in expired_active {
+        remove_dm_call_thread_state_for_key(state, &key);
+    }
+
+    prune_oldest_pending_dm_call_offers(state);
+    prune_oldest_active_dm_call_threads(state);
+    prune_orphan_dm_call_thread_projections(state);
+}
+
+fn prune_oldest_pending_dm_call_offers(state: &crate::server::routes::websocket::WebSocketState) {
+    let len = state.deps.protocol.pending_dm_call_offers.len();
+    if len <= DM_CALL_STATE_MAX_KEYS {
+        return;
+    }
+    let mut offers = state
+        .deps
+        .protocol
+        .pending_dm_call_offers
+        .iter()
+        .map(|entry| (entry.key().clone(), entry.value().started))
+        .collect::<Vec<_>>();
+    offers.sort_by_key(|(_, started)| *started);
+    for (key, _) in offers.into_iter().take(len - DM_CALL_STATE_MAX_KEYS) {
+        state.deps.protocol.pending_dm_call_offers.remove(&key);
+    }
+}
+
+fn prune_oldest_active_dm_call_threads(state: &crate::server::routes::websocket::WebSocketState) {
+    let len = state.deps.protocol.dm_call_threads.len();
+    if len <= DM_CALL_STATE_MAX_KEYS {
+        return;
+    }
+    let mut threads = state
+        .deps
+        .protocol
+        .dm_call_threads
+        .iter()
+        .map(|entry| (entry.key().clone(), entry.value().started))
+        .collect::<Vec<_>>();
+    threads.sort_by_key(|(_, started)| *started);
+    for (key, _) in threads.into_iter().take(len - DM_CALL_STATE_MAX_KEYS) {
+        remove_dm_call_thread_state_for_key(state, &key);
+    }
+}
+
+fn prune_orphan_dm_call_thread_projections(
+    state: &crate::server::routes::websocket::WebSocketState,
+) {
+    let orphaned = state
+        .deps
+        .protocol
+        .dm_call_thread_projections
+        .iter()
+        .filter(|entry| {
+            let (_, key) = entry.key();
+            !state.deps.protocol.dm_call_threads.contains_key(key)
+        })
+        .map(|entry| entry.key().clone())
+        .collect::<Vec<_>>();
+    for projection_key in orphaned {
+        state
+            .deps
+            .protocol
+            .dm_call_thread_projections
+            .remove(&projection_key);
+    }
+}
+
+fn remove_dm_call_thread_state_for_key(
+    state: &crate::server::routes::websocket::WebSocketState,
+    key: &crate::server::routes::websocket::DmCallThreadKey,
+) {
+    state.deps.protocol.pending_dm_call_offers.remove(key);
+    state.deps.protocol.dm_call_threads.remove(key);
+    state
+        .deps
+        .protocol
+        .dm_call_thread_projections
+        .remove(&(key.low_peer.clone(), key.clone()));
+    state
+        .deps
+        .protocol
+        .dm_call_thread_projections
+        .remove(&(key.high_peer.clone(), key.clone()));
 }
 
 fn jmi_propose(

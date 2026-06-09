@@ -3,6 +3,7 @@ use super::*;
 #[derive(Debug, Clone)]
 pub struct ActiveCallThread {
     pub anchor_origin_id: String,
+    pub initiator: BareJid,
     pub media: waddle_xmpp::xep::CallThreadMedia,
     pub started: chrono::DateTime<chrono::Utc>,
     /// The anchor message's `urn:waddle:threads:0` thread id (the

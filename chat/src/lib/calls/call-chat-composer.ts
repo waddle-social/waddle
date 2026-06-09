@@ -44,7 +44,7 @@ export function resolveActiveCallThreadId(
     return resolveActiveMucCallThreadId(messages, active.roomJid, active.sid);
   }
   const activeSid = active.sid?.trim();
-  if (!active.peerJid?.trim() || !activeSid) return null;
+  if (!activeSid) return null;
 
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
