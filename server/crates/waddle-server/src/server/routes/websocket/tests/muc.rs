@@ -1524,7 +1524,9 @@ async fn active_muji_presence_broadcasts_call_thread_anchor_to_caller() {
     let recorder = std::sync::Arc::new(RecordingSfu::default());
     let state = state_with_recording_sfu(std::sync::Arc::clone(&recorder)).await;
     let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
-    let room_jid: BareJid = "anchor-broadcast@muc.example.com".parse().expect("room jid");
+    let room_jid: BareJid = "anchor-broadcast@muc.example.com"
+        .parse()
+        .expect("room jid");
     let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
 
     let (alice_tx, mut alice_rx) = mpsc::channel::<OutboundStanza>(32);
