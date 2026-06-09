@@ -79,9 +79,15 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        curl -fsSL -o /usr/local/bin/cuenv "https://github.com/cuenv/cuenv/releases/download/0.51.0/${cuenv_asset}" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
+        curl -fsSL -o /usr/local/bin/cuenv "https://github.com/cuenv/cuenv/releases/download/0.51.2/${cuenv_asset}" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: Upload cuenv
+      uses: actions/upload-artifact@v4
+      with:
+        name: cuenv-bootstrap-namespace-profile-linux-x86
+        path: result/bin/cuenv
+        if-no-files-found: error
   checkCiDrift:
     name: checkCiDrift
     runs-on: namespace-profile-linux-x86
@@ -102,17 +108,15 @@ jobs:
       uses: cachix/install-nix-action@v31
       with:
         extra_nix_config: accept-flake-config = true
-    - name: Setup cuenv (release)
+    - name: Download cuenv
+      uses: actions/download-artifact@v4
+      with:
+        name: cuenv-bootstrap-namespace-profile-linux-x86
+        path: .cuenv-bootstrap
+    - name: Add cuenv to PATH
       run: |-
-        arch="$(uname -m)"
-        case "$arch" in
-          x86_64|amd64) cuenv_asset="cuenv-linux-x64" ;;
-          aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
-          *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
-        esac
-        curl -fsSL -o /usr/local/bin/cuenv "https://github.com/cuenv/cuenv/releases/download/0.51.0/${cuenv_asset}" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        chmod +x .cuenv-bootstrap/cuenv
+        echo "$PWD/.cuenv-bootstrap" >> "$GITHUB_PATH"
     - name: checkCiDrift
       run: cuenv task checkCiDrift --skip-dependencies
       working-directory: server
@@ -141,17 +145,15 @@ jobs:
       uses: cachix/install-nix-action@v31
       with:
         extra_nix_config: accept-flake-config = true
-    - name: Setup cuenv (release)
+    - name: Download cuenv
+      uses: actions/download-artifact@v4
+      with:
+        name: cuenv-bootstrap-namespace-profile-linux-x86
+        path: .cuenv-bootstrap
+    - name: Add cuenv to PATH
       run: |-
-        arch="$(uname -m)"
-        case "$arch" in
-          x86_64|amd64) cuenv_asset="cuenv-linux-x64" ;;
-          aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
-          *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
-        esac
-        curl -fsSL -o /usr/local/bin/cuenv "https://github.com/cuenv/cuenv/releases/download/0.51.0/${cuenv_asset}" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        chmod +x .cuenv-bootstrap/cuenv
+        echo "$PWD/.cuenv-bootstrap" >> "$GITHUB_PATH"
     - name: checkRootSyncDrift
       run: cuenv task checkRootSyncDrift --skip-dependencies
       working-directory: server
@@ -180,17 +182,15 @@ jobs:
       uses: cachix/install-nix-action@v31
       with:
         extra_nix_config: accept-flake-config = true
-    - name: Setup cuenv (release)
+    - name: Download cuenv
+      uses: actions/download-artifact@v4
+      with:
+        name: cuenv-bootstrap-namespace-profile-linux-x86
+        path: .cuenv-bootstrap
+    - name: Add cuenv to PATH
       run: |-
-        arch="$(uname -m)"
-        case "$arch" in
-          x86_64|amd64) cuenv_asset="cuenv-linux-x64" ;;
-          aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
-          *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
-        esac
-        curl -fsSL -o /usr/local/bin/cuenv "https://github.com/cuenv/cuenv/releases/download/0.51.0/${cuenv_asset}" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        chmod +x .cuenv-bootstrap/cuenv
+        echo "$PWD/.cuenv-bootstrap" >> "$GITHUB_PATH"
     - name: checkXmppClientFfiBindings
       run: cuenv task checkXmppClientFfiBindings --skip-dependencies
       working-directory: server
@@ -202,8 +202,6 @@ jobs:
   nixBuildCi:
     name: nixBuildCi
     runs-on: namespace-profile-linux-x86
-    needs:
-    - build-cuenv
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -230,8 +228,6 @@ jobs:
   nixBuildExtensionModules:
     name: nixBuildExtensionModules
     runs-on: namespace-profile-linux-x86
-    needs:
-    - build-cuenv
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -258,8 +254,6 @@ jobs:
   nixClippy:
     name: nixClippy
     runs-on: namespace-profile-linux-x86
-    needs:
-    - build-cuenv
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -286,8 +280,6 @@ jobs:
   nixFmt:
     name: nixFmt
     runs-on: namespace-profile-linux-x86
-    needs:
-    - build-cuenv
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -314,8 +306,6 @@ jobs:
   nixTest:
     name: nixTest
     runs-on: namespace-profile-linux-x86
-    needs:
-    - build-cuenv
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -359,17 +349,15 @@ jobs:
       uses: cachix/install-nix-action@v31
       with:
         extra_nix_config: accept-flake-config = true
-    - name: Setup cuenv (release)
+    - name: Download cuenv
+      uses: actions/download-artifact@v4
+      with:
+        name: cuenv-bootstrap-namespace-profile-linux-x86
+        path: .cuenv-bootstrap
+    - name: Add cuenv to PATH
       run: |-
-        arch="$(uname -m)"
-        case "$arch" in
-          x86_64|amd64) cuenv_asset="cuenv-linux-x64" ;;
-          aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
-          *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
-        esac
-        curl -fsSL -o /usr/local/bin/cuenv "https://github.com/cuenv/cuenv/releases/download/0.51.0/${cuenv_asset}" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        chmod +x .cuenv-bootstrap/cuenv
+        echo "$PWD/.cuenv-bootstrap" >> "$GITHUB_PATH"
     - name: renderDeployment
       run: cuenv task renderDeployment --skip-dependencies
       working-directory: server
