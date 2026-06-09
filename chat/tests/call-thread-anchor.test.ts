@@ -209,7 +209,11 @@ describe("call-thread anchor timeline mapping", () => {
     });
   });
 
-  test("derives live DM anchor card state from peer and sid activity", () => {
+  test("derives live DM anchor card state from peer and sid activity, with no Join action", () => {
+    // A DM anchor is a 1:1 marker: even live (and even when the local call
+    // state is idle, e.g. a resumable call after reload) it must NOT offer the
+    // MUC "Join" affordance — that would fire a malformed group-call join
+    // against the peer JID. Answer/reconnect live in the call dock/banner.
     $dmCallActivities.set({
       "bob@example.com": {
         peerJid: "bob@example.com",
@@ -237,7 +241,7 @@ describe("call-thread anchor timeline mapping", () => {
       status: "live",
       media: { audio: true, video: true },
       participantCount: 2,
-      actionLabel: "Join",
+      actionLabel: null,
     });
   });
 

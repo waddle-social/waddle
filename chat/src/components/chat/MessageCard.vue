@@ -386,6 +386,11 @@ function openCallThreadAnchor() {
 
 function joinCallThreadAnchor() {
   const state = callAnchorCardState.value;
+  // MUC-only: `joinChannelCall` joins a group call by room JID. DM anchors
+  // never offer Join (their card has no action), but guard anyway so a DM
+  // anchor — whose `callRoomJid` is the peer JID — can't fire a malformed
+  // group-call join.
+  if (props.message.callThread?.kind !== "muc") return;
   if (!state || !props.callRoomJid || state.status !== "live") return;
   emit("joinChannelCall", props.callChannelId ?? null, props.callRoomJid, state.media);
 }
