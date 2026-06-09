@@ -38,3 +38,10 @@ export function readMucCallThread(
   if (!room) return null;
   return snapshot[room] ?? null;
 }
+
+/** Drop all captured call-thread ids — on logout/disconnect, alongside the
+ *  other per-room call stores, so a stale entry can't outlive the session. */
+export function clearMucCallThreads(): void {
+  if (Object.keys($mucCallThreadId.get()).length === 0) return;
+  $mucCallThreadId.set({});
+}

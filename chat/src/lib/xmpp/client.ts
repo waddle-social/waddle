@@ -12,7 +12,7 @@ import {
   type PersistedQueuedDmMessage,
 } from "../outbound-queue-store";
 import { $callState, applyCallEvent, clearCallState, tearDownActiveCall } from "@/lib/calls/call-store";
-import { forgetMucCallThread, rememberMucCallThread } from "@/lib/calls/muc-call-thread";
+import { clearMucCallThreads, forgetMucCallThread, rememberMucCallThread } from "@/lib/calls/muc-call-thread";
 import {
   DM_CALL_ACTIVITY_ACTIVE_WINDOW_MS,
   applyDmCallEvent,
@@ -1284,6 +1284,7 @@ export class BrowserXmppClient {
     clearDmCallJoinCacheForAccount(this.session.jid);
     clearDmCallActivities();
     clearMucCallParticipants();
+    clearMucCallThreads();
     clearAllLiveCallParticipants();
     // Best-effort hangup: if we're in a call when the user logs out
     // we want the peer to see session-terminate before the stream
@@ -3276,6 +3277,7 @@ export class BrowserXmppClient {
     // connected).
     clearCallState();
     clearMucCallParticipants();
+    clearMucCallThreads();
     clearAllLiveCallParticipants();
     void useCallEngine().engine.disconnect();
     this.rejectRoomJoinWaiters(new Error("XMPP disconnected while joining a room"));

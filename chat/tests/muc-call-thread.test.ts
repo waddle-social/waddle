@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   $mucCallThreadId,
+  clearMucCallThreads,
   forgetMucCallThread,
   readMucCallThread,
   rememberMucCallThread,
@@ -29,5 +30,12 @@ describe("muc call-thread store", () => {
   test("reads from a passed-in snapshot for reactive consumers", () => {
     const snapshot = { "lobby@muc.example.com": "thread-9" };
     expect(readMucCallThread("Lobby@MUC.example.com", snapshot)).toBe("thread-9");
+  });
+
+  test("clears all entries on logout/disconnect", () => {
+    rememberMucCallThread("lobby@muc.example.com", "thread-1");
+    rememberMucCallThread("other@muc.example.com", "thread-2");
+    clearMucCallThreads();
+    expect($mucCallThreadId.get()).toEqual({});
   });
 });
