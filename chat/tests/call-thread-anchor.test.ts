@@ -241,6 +241,80 @@ describe("call-thread anchor timeline mapping", () => {
     });
   });
 
+  test("a DM anchor for the call you are in reads live with no busy/join action", () => {
+    // Production path: when the synthesized card appears you are in the call,
+    // so $callState is the active DM call for this peer+sid. The card must read
+    // "Live", not "In another call" (you are not in ANOTHER call) and not offer
+    // Join (you are already in it).
+    $dmCallActivities.set({
+      "bob@example.com": {
+        peerJid: "bob@example.com",
+        sid: "dm-live",
+        media: { audio: true, video: false },
+        state: "accepted",
+        direction: "outgoing",
+        updatedAt: "2026-06-07T14:31:00Z",
+      },
+    });
+    $callState.set({
+      phase: "active",
+      kind: "dm",
+      peer: "bob@example.com/desktop",
+      sid: "dm-live",
+      media: { audio: true, video: false },
+      join: { url: "wss://livekit.example", room: "dm-live", identity: "alice", token: "t" },
+      initiator: "alice@example.com/web",
+    });
+    const message = {
+      body: "",
+      author: "alice",
+      threadId: "dm-live",
+      callThread: {
+        kind: "dm" as const,
+        sid: "dm-live",
+        media: ["audio"] as ("audio" | "video")[],
+        initiator: "alice@example.com/web",
+        started: "2026-06-07T14:30:00Z",
+      },
+    };
+
+    expect(readCallAnchorCardState(message, "bob@example.com")).toMatchObject({
+      status: "live",
+      actionLabel: null,
+    });
+  });
+
+  test("a live DM anchor mislabels as ended without the wired peer JID", () => {
+    // Regression context for the ContentArea wiring fix: the card-state matcher
+    // keys on the conversation (peer) JID. With an empty JID it can't find the
+    // activity, so a live call wrongly renders ended — which is why ContentArea
+    // passes the DM peer JID as the card's `call-room-jid`.
+    $dmCallActivities.set({
+      "bob@example.com": {
+        peerJid: "bob@example.com",
+        sid: "dm-live",
+        media: { audio: true, video: false },
+        state: "accepted",
+        direction: "outgoing",
+        updatedAt: "2026-06-07T14:31:00Z",
+      },
+    });
+    const message = {
+      body: "",
+      author: "alice",
+      threadId: "dm-live",
+      callThread: {
+        kind: "dm" as const,
+        sid: "dm-live",
+        media: ["audio"] as ("audio" | "video")[],
+        initiator: "alice@example.com/web",
+        started: "2026-06-07T14:30:00Z",
+      },
+    };
+
+    expect(readCallAnchorCardState(message, "")).toMatchObject({ status: "ended" });
+  });
+
   test("room archive codec maps the WASM call-thread marker onto LiveRoomMessage", () => {
     const live = roomMessageFromArchived({
       mam_id: "mam-anchor-1",

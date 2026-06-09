@@ -439,6 +439,13 @@ async function dispatchSlashCommand(
 }
 const inMucContext = computed(() => !!props.roomJid);
 const callRoomJid = computed(() => props.roomJid ?? props.channel?.jid ?? null);
+// The call-anchor card keys its live/ended state on the conversation: the room
+// JID for channels, the peer JID for DMs. `callRoomJid` is null for DMs, so a
+// DM anchor would otherwise never match its `$dmCallActivities` entry and would
+// render "Call ended" while the call is live.
+const callAnchorConversationJid = computed(
+  () => callRoomJid.value ?? props.dmPeer?.peerJid ?? null,
+);
 const activeCallThreadId = computed(() =>
   activeCallChatThreadId(callState.value, props.messages, callRoomJid.value),
 );
@@ -1399,7 +1406,7 @@ function dayDividerLabel(createdAt: string): string {
             :can-pin-messages="currentUserCanPin"
             :link-preview-lookup="linkPreviewLookup"
             :link-preview-scope="linkPreviewScope"
-            :call-room-jid="callRoomJid"
+            :call-room-jid="callAnchorConversationJid"
             :call-channel-id="channel?.id ?? null"
             @edit="(id, body, m, r, lp) => emit('editMessage', id, body, m, r, lp)"
             @retract="(id) => emit('retractMessage', id)"

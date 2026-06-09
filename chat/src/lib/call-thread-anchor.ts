@@ -66,6 +66,7 @@ export function readCallAnchorCardState(
   messageCount = 0,
 ): CallAnchorCardState | null {
   if (!message.callThread) return null;
+  const callState = $callState.get();
   if (message.callThread.kind === "dm") {
     const activity = readMatchingDmCallActivity(message, roomJid);
     return buildCallAnchorCardState({
@@ -73,16 +74,16 @@ export function readCallAnchorCardState(
       roomJid: "",
       hasActiveCall: !!activity,
       localResourceInCall: false,
-      callState: $callState.get(),
+      callState,
       media: activity?.media ?? { audio: false, video: false },
       participantCount: activity ? 2 : 0,
       participantLabels: activity ? [barePeerJid(roomJid)] : [],
       messageCount,
+      localCallActive: localCallActiveForAnchor(callState, message.callThread, roomJid),
     });
   }
   const room = normalizeMucCallRoomJid(roomJid);
   const roomState = readRoomHasActiveCall(room);
-  const callState = $callState.get();
   const participantLabels = room ? [...($mucCallParticipants.get()[room] ?? [])] : [];
   return buildCallAnchorCardState({
     message,
@@ -94,6 +95,7 @@ export function readCallAnchorCardState(
     participantCount: roomState.participantCount,
     participantLabels,
     messageCount,
+    localCallActive: localCallActiveForAnchor(callState, message.callThread, room),
   });
 }
 
@@ -108,8 +110,10 @@ export function useCallAnchorCardState(
   const roomCall = useRoomHasActiveCall(() => roomJid() ?? "");
   return computed(() => {
     const current = message();
-    if (current.callThread?.kind === "dm") {
-      const activity = readMatchingDmCallActivity(current, roomJid() ?? "", dmActivities.value);
+    if (!current.callThread) return null;
+    if (current.callThread.kind === "dm") {
+      const peerJid = roomJid() ?? "";
+      const activity = readMatchingDmCallActivity(current, peerJid, dmActivities.value);
       return buildCallAnchorCardState({
         message: current,
         roomJid: "",
@@ -118,8 +122,9 @@ export function useCallAnchorCardState(
         callState: callState.value,
         media: activity?.media ?? { audio: false, video: false },
         participantCount: activity ? 2 : 0,
-        participantLabels: activity ? [barePeerJid(roomJid() ?? "")] : [],
+        participantLabels: activity ? [barePeerJid(peerJid)] : [],
         messageCount: messageCount(),
+        localCallActive: localCallActiveForAnchor(callState.value, current.callThread, peerJid),
       });
     }
     const room = normalizeMucCallRoomJid(roomJid() ?? "");
@@ -134,6 +139,7 @@ export function useCallAnchorCardState(
       participantCount: roomCall.participantCount.value,
       participantLabels,
       messageCount: messageCount(),
+      localCallActive: localCallActiveForAnchor(callState.value, current.callThread, room),
     });
   });
 }
@@ -163,6 +169,12 @@ function buildCallAnchorCardState(options: {
   participantCount: number;
   participantLabels: string[];
   messageCount: number;
+  /**
+   * True when the local user's active call IS this anchor's call (the MUC room
+   * call you joined, or the DM call you are in). Such a card must not read as
+   * "busy / In another call" or offer Join — you are already in it.
+   */
+  localCallActive: boolean;
 }): CallAnchorCardState | null {
   const callThread = options.message.callThread;
   if (!callThread) return null;
@@ -175,10 +187,10 @@ function buildCallAnchorCardState(options: {
   const media: CallMedia = live
     ? options.media
     : { audio: callThread.media.includes("audio"), video: callThread.media.includes("video") };
-  const localGroupCallInThisRoom = isLocalGroupCallInRoom(options.callState, options.roomJid);
-  const busy = live && isBusy(options.callState) && !localGroupCallInThisRoom;
-  const retainedLocalResource = live && options.localResourceInCall && !localGroupCallInThisRoom;
-  const joinAvailable = live && !busy && !localGroupCallInThisRoom;
+  const localCallActive = options.localCallActive;
+  const busy = live && isBusy(options.callState) && !localCallActive;
+  const retainedLocalResource = live && options.localResourceInCall && !localCallActive;
+  const joinAvailable = live && !busy && !localCallActive;
   const mediaLabel = media.video ? "video call" : "call";
   const peopleLabel = `${participantCount} ${participantCount === 1 ? "person" : "people"}`;
   const participants = participantLabels.length > 0 ? `: ${participantLabels.join(", ")}` : "";
@@ -215,6 +227,27 @@ function isLocalGroupCallInRoom(
   if (state.phase !== "active" && state.phase !== "muc-pending") return false;
   if (state.kind !== "muc") return false;
   return normalizeMucCallRoomJid(state.peer) === roomJid;
+}
+
+/**
+ * Whether the local user's active call is exactly this anchor's call. For MUC
+ * that is "the group call in this room"; for DM it is the active 1:1 call with
+ * the same peer and session id. `conversationJid` is the room JID for MUC and
+ * the peer JID for DM (the same value the card-state matcher keys on).
+ */
+function localCallActiveForAnchor(
+  state: ReturnType<typeof $callState.get>,
+  callThread: NonNullable<TimelineMessage["callThread"]>,
+  conversationJid: string,
+): boolean {
+  if (callThread.kind === "muc") {
+    return isLocalGroupCallInRoom(state, normalizeMucCallRoomJid(conversationJid));
+  }
+  if (state.phase !== "active" || state.kind !== "dm") return false;
+  return (
+    barePeerJid(state.peer).toLowerCase() === barePeerJid(conversationJid).toLowerCase()
+    && state.sid === callThread.sid
+  );
 }
 
 function formatCallThreadDuration(value: string): string {
