@@ -11,6 +11,7 @@ import { findMessageById } from "@/lib/message-ids";
 import { getReplyJumpNotice } from "@/lib/reply-ux";
 import { findThreadToAutoOpen } from "@/lib/thread-auto-open";
 import { activeCallChatThreadId } from "@/lib/calls/call-chat-composer";
+import { $mucCallThreadId } from "@/lib/calls/muc-call-thread";
 import { $callState } from "@/lib/calls/call-store";
 import {
   getPinnedScrollTop,
@@ -446,8 +447,14 @@ const callRoomJid = computed(() => props.roomJid ?? props.channel?.jid ?? null);
 const callAnchorConversationJid = computed(
   () => callRoomJid.value ?? props.dmPeer?.peerJid ?? null,
 );
+const mucCallThreadIds = useStore($mucCallThreadId);
 const activeCallThreadId = computed(() =>
-  activeCallChatThreadId(callState.value, props.messages, callRoomJid.value),
+  activeCallChatThreadId(
+    callState.value,
+    props.messages,
+    callRoomJid.value,
+    mucCallThreadIds.value,
+  ),
 );
 
 watch(

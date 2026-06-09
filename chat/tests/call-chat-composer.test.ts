@@ -119,6 +119,38 @@ describe("call-chat composer", () => {
     ).toBeNull();
   });
 
+  test("prefers the MUC call-thread store (keyed by the call's room) over the timeline", () => {
+    // The store is captured off the wire and does not depend on the anchor
+    // being in the loaded timeline, so it wins.
+    expect(
+      activeCallChatThreadId(
+        { phase: "active", kind: "muc", peer: ROOM, sid: "sid-fresh" },
+        [],
+        ROOM,
+        { [ROOM]: "stored-thread" },
+      ),
+    ).toBe("stored-thread");
+  });
+
+  test("falls back to the room timeline when the call-thread store is empty", () => {
+    const messages: TimelineMessage[] = [
+      message({
+        id: "active-call-anchor",
+        threadId: "call-thread-active",
+        callThread: { kind: "muc", sid: "sid-fresh", media: ["audio"] },
+      }),
+    ];
+
+    expect(
+      activeCallChatThreadId(
+        { phase: "active", kind: "muc", peer: ROOM, sid: "sid-fresh" },
+        messages,
+        ROOM,
+        {},
+      ),
+    ).toBe("call-thread-active");
+  });
+
   test("expanded channel calls render a labelled call-chat composer when a call thread is available", async () => {
     seedExpandedMucCall();
 

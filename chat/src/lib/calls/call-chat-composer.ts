@@ -1,5 +1,6 @@
 import type { CallThreadAnchor } from "@/lib/chat-ui";
 import { normalizeMucCallRoomJid } from "./muc-call-presence";
+import { readMucCallThread } from "./muc-call-thread";
 
 type CallThreadCandidate = {
   threadId?: string;
@@ -15,6 +16,8 @@ type ActiveCallChat = {
   phase: string;
   kind?: "dm" | "muc";
   sid?: string | null;
+  /** For MUC calls, the room bare JID (`$callState.peer`). */
+  peer?: string | null;
 };
 
 /**
@@ -68,6 +71,7 @@ export function activeCallChatThreadId(
   call: ActiveCallChat,
   messages: readonly CallThreadCandidate[],
   roomJid: string | null | undefined,
+  mucThreadIds: Record<string, string> = {},
 ): string | null {
   if (call.phase !== "active") return null;
   if (call.kind === "dm") {
@@ -75,7 +79,11 @@ export function activeCallChatThreadId(
     return sid ? sid : null;
   }
   if (call.kind === "muc") {
-    return resolveActiveMucCallThreadId(messages, roomJid);
+    // Prefer the wire-captured store (keyed by the call's room), which does not
+    // depend on the anchor being in the loaded timeline; fall back to the
+    // room-scoped timeline scan.
+    const stored = call.peer ? readMucCallThread(call.peer, mucThreadIds) : null;
+    return stored ?? resolveActiveMucCallThreadId(messages, roomJid);
   }
   return null;
 }

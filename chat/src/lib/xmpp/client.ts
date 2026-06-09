@@ -12,6 +12,7 @@ import {
   type PersistedQueuedDmMessage,
 } from "../outbound-queue-store";
 import { $callState, applyCallEvent, clearCallState, tearDownActiveCall } from "@/lib/calls/call-store";
+import { forgetMucCallThread, rememberMucCallThread } from "@/lib/calls/muc-call-thread";
 import {
   DM_CALL_ACTIVITY_ACTIVE_WINDOW_MS,
   applyDmCallEvent,
@@ -3420,6 +3421,17 @@ export class BrowserXmppClient {
       const converted = roomMessageFromArchived({ ...message, mam_id: message.id ?? crypto.randomUUID() } as WasmArchivedMessage, "live", { trustedMediaOrigin: this.trustedLinkPreviewMediaOrigin() });
       if (!converted) return;
       this.catchup.recordRoomSeen(converted.roomJid, converted.createdAt, undefined, rawMessageSeenIds(message));
+      // Capture the MUC call-thread id off the wire, BEFORE the
+      // timeline-vs-activity routing below — the in-call composer resolves the
+      // call-chat thread from this store so it works even when the anchor is
+      // routed to notifications (room not yet "current") or has scrolled out
+      // of the loaded timeline window.
+      if (converted.callThread?.kind === "muc" && converted.threadId) {
+        rememberMucCallThread(converted.roomJid, converted.threadId);
+      }
+      if (converted.callThreadEnded) {
+        forgetMucCallThread(converted.roomJid);
+      }
       if (converted.roomJid !== this.currentRoom && isRoomActivityMessage(converted)) { this.activityHandler?.(roomActivityEventFromMessage(converted)); return; }
       this.messageHandler?.(converted); return;
     }
@@ -3643,6 +3655,14 @@ export class BrowserXmppClient {
       const converted = roomMessageFromArchived(message, { trustedMediaOrigin: this.trustedLinkPreviewMediaOrigin() });
       if (!converted || shouldSkipCatchupMessage(converted, since, seenIds)) continue;
       this.catchup.recordRoomSeen(converted.roomJid, converted.createdAt, converted.archiveId, messageSeenIds(converted));
+      // Keep the MUC call-thread store fresh on MAM catch-up too (e.g. reload
+      // mid-call), independent of timeline routing — see the live path.
+      if (converted.callThread?.kind === "muc" && converted.threadId) {
+        rememberMucCallThread(converted.roomJid, converted.threadId);
+      }
+      if (converted.callThreadEnded) {
+        forgetMucCallThread(converted.roomJid);
+      }
       if (converted.roomJid !== this.currentRoom && isRoomActivityMessage(converted)) {
         this.activityHandler?.(roomActivityEventFromMessage(converted));
       } else {
