@@ -7,52 +7,68 @@ type CallThreadCandidate = {
 };
 
 /**
- * Resolve the active call's XEP-0201 thread from the current conversation's
- * loaded timeline. The message list is intentionally conversation-scoped by
- * `ContentArea`; timeline messages do not carry a room JID themselves.
+ * The slice of `$callState` the in-call composer needs to locate its
+ * call-chat thread. Kept structural so callers can pass the live store
+ * value (or a test fixture) without importing the full discriminated union.
+ */
+type ActiveCallChat = {
+  phase: string;
+  kind?: "dm" | "muc";
+  sid?: string | null;
+};
+
+/**
+ * Resolve the active MUC call's XEP-0201 thread from the current
+ * conversation's loaded timeline.
+ *
+ * A MUC anchor's `urn:waddle:call-thread:0` marker carries a throwaway
+ * server-side session id that never equals the client's per-attempt call
+ * sid, so we cannot match on sid. There is at most one active call per room,
+ * so the thread is simply the most recent **non-ended** `muc` anchor in the
+ * room-scoped timeline (`ContentArea` scopes `messages` to one conversation;
+ * timeline messages do not carry a room JID themselves, so `roomJid` only
+ * guards that a room is in context).
  */
 export function resolveActiveMucCallThreadId(
   messages: readonly CallThreadCandidate[],
   roomJid: string | null | undefined,
-  sid: string | null | undefined,
 ): string | null {
   const room = normalizeMucCallRoomJid(roomJid ?? "");
-  const activeSid = sid?.trim();
-  if (!room || !activeSid) return null;
+  if (!room) return null;
 
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
     if (!message?.threadId || !message.callThread) continue;
     if (message.callThread.kind !== "muc") continue;
-    if (message.callThread.sid !== activeSid) continue;
+    if (message.callThread.ended) continue;
     return message.threadId;
   }
 
   return null;
 }
 
-export function resolveActiveCallThreadId(
+/**
+ * Resolve the call-chat thread id for the in-call composer of the currently
+ * active call.
+ *
+ * - DM: the thread id equals the JMI session id by server invariant
+ *   (`thread_id == key.sid.0`), which is exactly the client's active call
+ *   sid — so it resolves live without waiting for a timeline anchor.
+ * - MUC: resolved from the room timeline (see
+ *   {@link resolveActiveMucCallThreadId}).
+ */
+export function activeCallChatThreadId(
+  call: ActiveCallChat,
   messages: readonly CallThreadCandidate[],
-  active: {
-    kind: "dm" | "muc";
-    sid: string | null | undefined;
-    roomJid?: string | null;
-    peerJid?: string | null;
-  },
+  roomJid: string | null | undefined,
 ): string | null {
-  if (active.kind === "muc") {
-    return resolveActiveMucCallThreadId(messages, active.roomJid, active.sid);
+  if (call.phase !== "active") return null;
+  if (call.kind === "dm") {
+    const sid = call.sid?.trim();
+    return sid ? sid : null;
   }
-  const activeSid = active.sid?.trim();
-  if (!activeSid) return null;
-
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (!message?.threadId || !message.callThread) continue;
-    if (message.callThread.kind !== "dm") continue;
-    if (message.callThread.sid !== activeSid) continue;
-    return message.threadId;
+  if (call.kind === "muc") {
+    return resolveActiveMucCallThreadId(messages, roomJid);
   }
-
   return null;
 }
