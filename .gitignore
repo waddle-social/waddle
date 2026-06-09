@@ -56,6 +56,7 @@ gateway/schemas/
 gateway/supergraph.graphql
 
 # BEGIN cuenv vcs
+.agents/skills/
 .cuenv/vcs/cache/
 .cuenv/vcs/tmp/
 xeps/

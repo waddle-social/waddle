@@ -3,7 +3,6 @@ package cuenv
 import (
 	"github.com/cuenv/cuenv/schema"
 	c "github.com/cuenv/cuenv/contrib/contributors"
-	wc "github.com/waddle-social/waddle/ci/contributors"
 )
 
 let _NamespaceNix = schema.#Contributor & {
@@ -20,16 +19,16 @@ let _NamespaceNix = schema.#Contributor & {
 			}
 		},
 		{
-			id:        "nix.chown"
-			label:     "Hand /nix to the runner user"
-			priority:  1
+			id:       "nix.chown"
+			label:    "Hand /nix to the runner user"
+			priority: 1
 			dependsOn: ["nix.cache"]
-			script:    "sudo chown -R runner /nix"
+			script: "sudo chown -R runner /nix"
 		},
 		{
-			id:        "nix.install"
-			label:     "Install Nix"
-			priority:  2
+			id:       "nix.install"
+			label:    "Install Nix"
+			priority: 2
 			dependsOn: ["nix.chown"]
 			provider: github: {
 				uses: "cachix/install-nix-action@v31"
@@ -50,7 +49,7 @@ schema.#Project & {
 	ci: providers: ["github"]
 	ci: contributors: [
 		_NamespaceNix,
-		wc.#PinnedCuenvRelease,
+		c.#CuenvRelease,
 		c.#OnePassword,
 		c.#BunWorkspace,
 	]

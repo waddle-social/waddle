@@ -24,6 +24,14 @@ schema.#Base & {
 			vendor:    false
 			path:      "xeps"
 		}
+
+		"cuenv-skills": {
+			url:       "https://github.com/cuenv/cuenv.git"
+			reference: "main"
+			vendor:    false
+			subdir:    ".agents/skills"
+			path:      ".agents/skills"
+		}
 	}
 
 	env: {

@@ -30,6 +30,16 @@ flake = ".."
 digest = "sha256:22c72a3faea22e798923cadadad88c625122228e05204cc052fc74d5f2d8d883"
 lockfile = "website/../flake.lock"
 
+[vcs.cuenv-skills]
+url = "https://github.com/cuenv/cuenv.git"
+reference = "main"
+commit = "ee132442d935c71330202933ba3e2cad81213a12"
+tree = "b805c7e0148486e79a0fd3f521b5ed604022af29"
+vendor = false
+path = ".agents/skills"
+subdir = ".agents/skills"
+subtree = "859bd7cdc9e46011af392bed0346ab6e3c59d815"
+
 [vcs.xeps]
 url = "https://github.com/xsf/xeps.git"
 reference = "master"
