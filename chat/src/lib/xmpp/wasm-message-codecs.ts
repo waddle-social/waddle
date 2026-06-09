@@ -18,6 +18,7 @@ import {
   type SendGroupMessageOptions,
 } from "./send-types";
 import type { TimestampSource } from "@/lib/timeline-timestamps";
+import { dmCallAnchorId } from "../calls/dm-call-anchor";
 import type { LiveDmMessage, LiveRoomMessage, OccupantPresence, PresenceUpdateEvent, SharedFileInfo } from "./types";
 import type {
   WasmArchivedMessage,
@@ -636,6 +637,15 @@ export function dmMessageFromArchived(
   const callThreadEnded = message.call_thread_ended;
   const dmWireIds = [message.id, message.origin_id]
     .filter((value): value is string => !!value && value !== dmPrimaryId);
+  // Alias a DM call-thread anchor by its sid so a same-session MAM backfill
+  // collapses onto the synthesized live anchor (see `dm-call-anchor.ts`)
+  // instead of duplicating the "started a call" card.
+  if (callThread?.sid) {
+    const anchorAlias = dmCallAnchorId(callThread.sid);
+    if (anchorAlias !== dmPrimaryId && !dmWireIds.includes(anchorAlias)) {
+      dmWireIds.push(anchorAlias);
+    }
+  }
   // See `roomMessageFromArchived` for the rationale: `<thread/>` alone is
   // metadata, not content. DMs don't currently surface threads in the UI
   // anyway, but the codec stays symmetric with the room path so a stray

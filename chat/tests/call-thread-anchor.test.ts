@@ -9,6 +9,7 @@ import {
 import type { WasmThreadEntry } from "../src/lib/xmpp/wasm-types";
 import { $callState } from "../src/lib/calls/call-store";
 import { $dmCallActivities, clearDmCallActivities } from "../src/lib/calls/dm-call-activity";
+import { dmCallAnchorId } from "../src/lib/calls/dm-call-anchor";
 import { $mucCallMedia, $mucCallParticipants, clearMucCallParticipants } from "../src/lib/calls/muc-call-presence";
 import type { WaddleSession } from "../src/lib/server-auth";
 import { dmMessageFromArchived, roomMessageFromArchived } from "../src/lib/xmpp/wasm-message-codecs";
@@ -314,6 +315,37 @@ describe("call-thread anchor timeline mapping", () => {
 
     const timeline = fromLiveDmMessage(session, live!);
     expect(timeline.callThread).toEqual(live?.callThread);
+  });
+
+  test("DM archive codec aliases the call-thread anchor by sid for live dedup", () => {
+    const live = dmMessageFromArchived({
+      mam_id: "mam-dm-anchor-1",
+      id: "dm-anchor-1",
+      from: "bob@example.com/phone",
+      to: "alice@example.com/web",
+      message_type: "chat",
+      timestamp: "2026-06-07T14:30:00Z",
+      reaction_emojis: [],
+      is_muc: false,
+      thread: "dm-session-uuid",
+      markup_spans: [],
+      mention_uris: [],
+      references: [],
+      is_sticker: false,
+      shared_files: [],
+      link_previews: [],
+      call_thread: {
+        kind: "dm",
+        sid: "dm-session-uuid",
+        media: ["audio"],
+        initiator: "bob@example.com",
+        started: "2026-06-07T14:30:00Z",
+      },
+    }, "alice@example.com");
+
+    // The deterministic alias lets a same-session MAM backfill collapse onto
+    // the synthesized live anchor (same call sid) instead of duplicating it.
+    expect(live?.wireIds).toContain(dmCallAnchorId("dm-session-uuid"));
   });
 
   test("DM archive codec maps ended metadata and suppresses stale live activity", () => {

@@ -1,4 +1,4 @@
-import { nextTick, ref, watch, type Ref } from "vue";
+import { getCurrentScope, nextTick, onScopeDispose, ref, watch, type Ref } from "vue";
 import type { TimelineMessage } from "@/lib/chat-ui";
 import type {
   BrowserXmppClient,
@@ -33,6 +33,7 @@ import { useDmChatStates } from "@/dms/chat-states";
 import { useDmReadMarkers } from "@/dms/read-markers";
 import { useDmMessageSearch } from "@/dms/message-search";
 import { useChatWindowVisibility } from "@/shell/window-visibility";
+import { $dmCallStartedAnchor, buildDmCallStartedAnchor } from "@/lib/calls/dm-call-anchor";
 
 export function useDirectMessages(
   session: Ref<WaddleSession | null>,
@@ -192,6 +193,24 @@ export function useDirectMessages(
     isFeedVisible,
   });
   const { applyDisplayed, applyReaction } = liveMerge;
+
+  // Surface a "started a call" anchor card the moment a 1:1 call becomes
+  // active. The server only enriches the archived `<proceed/>` row, so this
+  // synthesized card is the live path; the later MAM-replayed archive row
+  // dedups against it by call sid (see `dm-call-anchor.ts`). `.listen` fires
+  // only on new publishes, so a stale anchor is never replayed on mount.
+  const stopDmCallAnchorListener = $dmCallStartedAnchor.listen((anchor) => {
+    if (!anchor) return;
+    const currentSession = session.value;
+    const peerJid = activePeerJid.value;
+    if (!currentSession || !peerJid) return;
+    if (barePeerJid(anchor.peerBareJid) !== barePeerJid(peerJid)) return;
+    liveMerge.mergeLiveMessage(buildDmCallStartedAnchor(anchor, currentSession.jid));
+  });
+  // `useDirectMessages` runs inside component setup in the app (an effect
+  // scope is present); guard so unit instantiation outside a scope neither
+  // warns nor leaks a disposer.
+  if (getCurrentScope()) onScopeDispose(stopDmCallAnchorListener);
 
   const actions = useDmMessageActions({
     session,

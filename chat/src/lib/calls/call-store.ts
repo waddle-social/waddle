@@ -18,6 +18,7 @@ import {
 } from "./muc-call-session-cache";
 import { clearLiveCallParticipants } from "./muc-call-live-participants";
 import { mediaErrorMessage } from "./call-media-issues";
+import { publishDmCallStartedAnchor } from "./dm-call-anchor";
 import { barePeerJid } from "../xmpp/jid";
 
 /**
@@ -322,6 +323,27 @@ export function applyCallEvent(event: CallEvent): void {
     cancelOutgoingTimeout();
   }
   $callState.set(next);
+  maybePublishDmCallStartedAnchor(before, next);
+}
+
+/**
+ * On the transition INTO an active 1:1 call, publish a "started a call" anchor
+ * so the DM messaging composable can surface it live (the server only enriches
+ * the archived `<proceed/>` row, which never reaches the live timeline). Skips
+ * media renegotiations that keep the same active call, and skips when the
+ * initiator is unknown (the card falls back to MAM replay).
+ */
+function maybePublishDmCallStartedAnchor(before: CallState, next: CallState): void {
+  if (next.phase !== "active" || next.kind !== "dm") return;
+  if (before.phase === "active" && before.kind === "dm" && before.sid === next.sid) return;
+  if (!next.initiator) return;
+  publishDmCallStartedAnchor({
+    peerBareJid: barePeerJid(next.peer),
+    sid: next.sid,
+    media: next.media,
+    initiator: next.initiator,
+    started: new Date().toISOString(),
+  });
 }
 
 /**
