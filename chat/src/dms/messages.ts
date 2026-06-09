@@ -199,19 +199,23 @@ export function useDirectMessages(
   // synthesized card is the live path; the later MAM-replayed archive row
   // dedups against it by call sid (see `dm-call-anchor.ts`). `.listen` fires
   // only on new publishes, so a stale anchor is never replayed on mount.
-  const stopDmCallAnchorListener = $dmCallStartedAnchor.listen((anchor) => {
-    if (!anchor) return;
-    const card = resolveDmCallAnchorInjection(
-      anchor,
-      activePeerJid.value,
-      session.value?.jid ?? null,
-    );
-    if (card) liveMerge.mergeLiveMessage(card);
-  });
+  //
   // `useDirectMessages` runs inside component setup in the app (an effect
-  // scope is present); guard so unit instantiation outside a scope neither
-  // warns nor leaks a disposer.
-  if (getCurrentScope()) onScopeDispose(stopDmCallAnchorListener);
+  // scope is present). Subscribe only within a scope so the listener is always
+  // paired with its disposer — never subscribed-and-leaked when the composable
+  // is unit-instantiated outside a scope.
+  if (getCurrentScope()) {
+    const stopDmCallAnchorListener = $dmCallStartedAnchor.listen((anchor) => {
+      if (!anchor) return;
+      const card = resolveDmCallAnchorInjection(
+        anchor,
+        activePeerJid.value,
+        session.value?.jid ?? null,
+      );
+      if (card) liveMerge.mergeLiveMessage(card);
+    });
+    onScopeDispose(stopDmCallAnchorListener);
+  }
 
   const actions = useDmMessageActions({
     session,

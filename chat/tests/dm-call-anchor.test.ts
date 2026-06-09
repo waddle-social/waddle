@@ -176,6 +176,15 @@ describe("dm call-started anchor consumer guard", () => {
     ).toBeNull();
   });
 
+  test("matches the open conversation case-insensitively (JIDs are case-insensitive)", () => {
+    const card = resolveDmCallAnchorInjection(
+      { ...anchor, peerBareJid: "Bob@Waddle.Test" },
+      "bob@waddle.test",
+      "alice@waddle.test/web",
+    );
+    expect(card?.callThread?.sid).toBe("sid-1");
+  });
+
   test("returns null without a session or an open conversation", () => {
     expect(resolveDmCallAnchorInjection(anchor, null, "alice@waddle.test/web")).toBeNull();
     expect(resolveDmCallAnchorInjection(anchor, "bob@waddle.test", null)).toBeNull();

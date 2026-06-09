@@ -109,7 +109,14 @@ export function resolveDmCallAnchorInjection(
   selfJid: string | null,
 ): TimelineMessage | null {
   if (!selfJid || !activePeerJid) return null;
-  if (barePeerJid(anchor.peerBareJid) !== barePeerJid(activePeerJid)) return null;
+  // JID node/domain are case-insensitive (RFC 7622), so normalize before
+  // matching the anchor's peer against the open conversation.
+  if (
+    barePeerJid(anchor.peerBareJid).toLowerCase()
+    !== barePeerJid(activePeerJid).toLowerCase()
+  ) {
+    return null;
+  }
   return buildDmCallStartedAnchor(anchor, selfJid);
 }
 
