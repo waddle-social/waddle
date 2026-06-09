@@ -66,9 +66,11 @@ pub trait InboxStorage: Send + Sync {
     /// newest first. Used by the global `urn:waddle:threads:0` view.
     ///
     /// Default implementation walks `list` over the user's channel
-    /// conversations and aggregates `list_threads` per room — backends
-    /// SHOULD override with a single-query implementation when one is
-    /// available (the SQL backend does).
+    /// conversations and aggregates `list_threads` per room. This is only a
+    /// compatibility fallback: it cannot discover DM thread rows, including DM
+    /// call threads, unless a parent channel-level row already exists. Backends
+    /// SHOULD override with a direct all-threads implementation when one is
+    /// available.
     async fn list_all_threads(&self, user: &BareJid) -> Result<Vec<InboxEntry>, InboxStorageError> {
         let channels = self.list(user).await?;
         let mut all = Vec::new();
@@ -216,6 +218,17 @@ impl InboxStorage for InMemoryInboxStorage {
         Ok(guard
             .get(user)
             .map(|v| v.threads_for_room(room))
+            .unwrap_or_default())
+    }
+
+    async fn list_all_threads(&self, user: &BareJid) -> Result<Vec<InboxEntry>, InboxStorageError> {
+        let guard = self
+            .per_user
+            .lock()
+            .map_err(|e| InboxStorageError::Other(e.to_string()))?;
+        Ok(guard
+            .get(user)
+            .map(InboxView::all_threads)
             .unwrap_or_default())
     }
 

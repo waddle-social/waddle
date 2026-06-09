@@ -79,4 +79,23 @@ describe("ThreadsListRow call-thread anchors", () => {
     expect(html).not.toContain("call-anchor-card");
     expect(html).toContain("Roadmap planning");
   });
+
+  test("renders a call flag for a DM call-thread row without the MUC join card", async () => {
+    const html = await renderRow({
+      ...baseEntry,
+      channel: "bob@example.com",
+      thread_id: "dm-call-thread",
+      thread_title: "Bob",
+      unread: 3,
+      has_unread: true,
+      callThread: { kind: "dm", media: ["audio"] },
+    });
+
+    expect(html).not.toContain("call-anchor-card");
+    expect(html).not.toContain(">Join<");
+    expect(html).toContain("Call thread");
+    expect(html).toContain('role="img"');
+    expect(html).toContain('aria-label="Call thread"');
+    expect(html).toContain('aria-label="3 unread"');
+  });
 });

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
+import { Phone, Video } from "lucide-vue-next";
 import type { WasmThreadEntry } from "@/lib/xmpp/wasm-types";
 import type { CallMedia } from "@/lib/calls/types";
 import { threadDisplayTitle } from "@/lib/threads-view-filters";
@@ -23,7 +24,7 @@ const emit = defineEmits<{
 // don't anchor a MUC call (DM anchors, plain threads) keep the title row.
 const anchorMessage = computed(() => wasmThreadEntryToAnchorMessage(props.entry));
 const callState = useCallAnchorCardState(
-  () => anchorMessage.value ?? { body: "", author: "", threadId: null, callThread: undefined },
+  () => anchorMessage.value ?? { body: "", author: "", threadId: undefined, callThread: undefined },
   () => props.entry.channel,
   () => props.entry.reply_count,
 );
@@ -45,6 +46,16 @@ const channelLabel = computed(() => {
 });
 
 const title = computed(() => threadDisplayTitle(props.entry));
+const isDmCallThread = computed(() => props.entry.callThread?.kind === "dm");
+const dmCallFlagLabel = computed(() => {
+  if (!isDmCallThread.value) return "";
+  const hasVideo = props.entry.callThread?.media.includes("video") ?? false;
+  return hasVideo ? "Video call thread" : "Call thread";
+});
+const DmCallFlagIcon = computed(() => {
+  const hasVideo = props.entry.callThread?.media.includes("video") ?? false;
+  return hasVideo ? Video : Phone;
+});
 </script>
 
 <template>
@@ -68,7 +79,18 @@ const title = computed(() => threadDisplayTitle(props.entry));
     >
       <div class="flex items-center justify-between gap-2">
         <div class="min-w-0 flex-1">
-          <div class="type-card-title truncate">{{ title }}</div>
+          <div class="flex min-w-0 items-center gap-1.5">
+            <span
+              v-if="isDmCallThread"
+              class="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-primary/30 bg-primary/10 text-primary"
+              role="img"
+              :aria-label="dmCallFlagLabel"
+              :title="dmCallFlagLabel"
+            >
+              <component :is="DmCallFlagIcon" class="h-3 w-3" aria-hidden="true" />
+            </span>
+            <div class="type-card-title min-w-0 flex-1 truncate">{{ title }}</div>
+          </div>
           <div class="type-caption text-muted-foreground truncate">
             {{ channelLabel }} · {{ recencyLabel }}
             <span v-if="entry.reply_count > 0"> · {{ entry.reply_count }} replies</span>

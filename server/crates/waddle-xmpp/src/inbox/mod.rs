@@ -321,6 +321,18 @@ impl InboxView {
         v
     }
 
+    /// Returns all thread-level entries across partners, sorted newest-first.
+    pub fn all_threads(&self) -> Vec<InboxEntry> {
+        let mut v: Vec<_> = self
+            .entries
+            .values()
+            .filter(|e| e.thread_id.is_some())
+            .cloned()
+            .collect();
+        v.sort_by_key(|b| std::cmp::Reverse(b.last_updated));
+        v
+    }
+
     /// Mark the call anchored to `(room, thread_id)` as ended on this view.
     /// Returns `true` when a matching thread entry was updated. The
     /// call-end summary is room-wide; callers fan this across every user's
