@@ -1515,6 +1515,83 @@ async fn active_muji_presence_with_sfu_registers_call_thread_anchor() {
     );
 }
 
+// Diagnostic: registering the anchor (above) is not enough — the in-call
+// composer only resolves when the anchor MESSAGE actually reaches occupants'
+// timelines. This asserts the caller who starts the call receives the live
+// call-thread anchor broadcast on their own connection.
+#[tokio::test]
+async fn active_muji_presence_broadcasts_call_thread_anchor_to_caller() {
+    let recorder = std::sync::Arc::new(RecordingSfu::default());
+    let state = state_with_recording_sfu(std::sync::Arc::clone(&recorder)).await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "anchor-broadcast@muc.example.com".parse().expect("room jid");
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+
+    let (alice_tx, mut alice_rx) = mpsc::channel::<OutboundStanza>(32);
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .register(alice.clone(), alice_tx);
+
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        None,
+        &Some(owner_session.clone()),
+    )
+    .await;
+    while alice_rx.try_recv().is_ok() {}
+
+    let alice_phase = waddle_xmpp::protocol::ConnectionPhase::ready(alice.clone(), false);
+    let mut active = muc_presence_to(&room_jid, "alice");
+    active.payloads.push(active_muji().to_element());
+    let _ = handlers::presence::handle_presence(
+        active,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &alice_phase,
+        &Some(owner_session),
+    )
+    .await;
+
+    let mut anchor_seen = false;
+    while let Ok(out) = alice_rx.try_recv() {
+        let xml = stanza_to_xml(&out.stanza);
+        let Ok(element) = Element::from_str(&xml) else {
+            continue;
+        };
+        if element.name() != "message" {
+            continue;
+        }
+        if element
+            .get_child("call-thread", waddle_xmpp::xep::NS_WADDLE_CALL_THREAD)
+            .is_some()
+        {
+            anchor_seen = true;
+            assert_eq!(
+                element.attr("type"),
+                Some("groupchat"),
+                "anchor is a groupchat message"
+            );
+            assert_eq!(
+                element.attr("from"),
+                Some(room_jid.to_string().as_str()),
+                "anchor is from the room bare JID"
+            );
+        }
+    }
+
+    assert!(
+        anchor_seen,
+        "the caller must receive the live call-thread anchor broadcast on call start"
+    );
+}
+
 #[tokio::test]
 async fn resumed_muc_join_presence_replays_existing_muji_state() {
     let state = create_test_websocket_state().await;
