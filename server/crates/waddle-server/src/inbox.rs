@@ -554,6 +554,31 @@ impl InboxStorage for DatabaseInboxStorage {
         .await?;
         Ok(())
     }
+
+    #[instrument(skip(self), fields(user = %user, partner = %partner, thread_id))]
+    async fn mark_direct_call_thread_ended(
+        &self,
+        user: &BareJid,
+        partner: &BareJid,
+        thread_id: &str,
+        ended: DateTime<Utc>,
+        duration: &CallThreadDuration,
+    ) -> Result<(), InboxStorageError> {
+        self.execute(
+            "UPDATE inbox_entries SET call_ended_at = ?, call_duration = ? \
+             WHERE user_jid = ? AND partner_jid = ? AND thread_id = ? \
+             AND kind = 'direct' AND call_thread_kind = 'dm' AND call_thread_media IS NOT NULL",
+            crate::db_params![
+                ended.timestamp(),
+                duration.as_str().to_owned(),
+                user.to_string(),
+                partner.to_string(),
+                thread_id.to_string(),
+            ],
+        )
+        .await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

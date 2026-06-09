@@ -10,7 +10,7 @@ import { findMessageElementById } from "@/lib/message-targeting";
 import { findMessageById } from "@/lib/message-ids";
 import { getReplyJumpNotice } from "@/lib/reply-ux";
 import { findThreadToAutoOpen } from "@/lib/thread-auto-open";
-import { resolveActiveMucCallThreadId } from "@/lib/calls/call-chat-composer";
+import { resolveActiveCallThreadId } from "@/lib/calls/call-chat-composer";
 import { $callState } from "@/lib/calls/call-store";
 import {
   getPinnedScrollTop,
@@ -441,8 +441,22 @@ const inMucContext = computed(() => !!props.roomJid);
 const callRoomJid = computed(() => props.roomJid ?? props.channel?.jid ?? null);
 const activeCallThreadId = computed(() => {
   const state = callState.value;
-  if (state.phase !== "active" || state.kind !== "muc") return null;
-  return resolveActiveMucCallThreadId(props.messages, callRoomJid.value, state.sid);
+  if (state.phase !== "active") return null;
+  if (state.kind === "muc") {
+    return resolveActiveCallThreadId(props.messages, {
+      kind: "muc",
+      roomJid: callRoomJid.value,
+      sid: state.sid,
+    });
+  }
+  if (state.kind === "dm") {
+    return resolveActiveCallThreadId(props.messages, {
+      kind: "dm",
+      peerJid: props.dmPeer?.peerJid,
+      sid: state.sid,
+    });
+  }
+  return null;
 });
 
 watch(

@@ -363,6 +363,30 @@ impl InboxView {
         }
     }
 
+    /// Mark the call anchored to the exact `(partner, thread_id)` row as ended
+    /// on this user's direct-message view.
+    pub fn mark_direct_call_thread_ended(
+        &mut self,
+        partner: &BareJid,
+        thread_id: &str,
+        ended: DateTime<Utc>,
+        duration: CallThreadDuration,
+    ) -> bool {
+        let key = InboxKey::thread(partner.clone(), thread_id);
+        match self.entries.get_mut(&key) {
+            Some(entry)
+                if entry.kind == ConversationKind::Direct
+                    && entry.call_thread_kind == Some(CallThreadKind::Dm)
+                    && entry.call_thread_media.is_some() =>
+            {
+                entry.call_ended_at = Some(ended);
+                entry.call_duration = Some(duration);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Total unread across channel-level conversations (excludes thread entries).
     pub fn total_unread(&self) -> u64 {
         self.entries

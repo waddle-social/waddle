@@ -220,6 +220,9 @@ async fn create_test_websocket_state_with_extension_manager(
                     profile_publish_tracker: tokio_util::task::TaskTracker::new(),
                     pep_feed_bridge: Arc::new(crate::pep_feed_bridge::PepFeedBridge::new()),
                     call_threads: Arc::new(dashmap::DashMap::new()),
+                    dm_call_threads: Arc::new(dashmap::DashMap::new()),
+                    dm_call_thread_projections: Arc::new(dashmap::DashSet::new()),
+                    pending_dm_call_offers: Arc::new(dashmap::DashMap::new()),
                     sfu: None,
                 },
                 occupant_id_secret: OccupantIdSecret::new(

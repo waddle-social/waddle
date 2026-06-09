@@ -3,7 +3,7 @@ import { $callState } from "../src/lib/calls/call-store";
 import { $callUiMode } from "../src/lib/calls/ui-mode";
 import { $mucCallParticipants } from "../src/lib/calls/muc-call-presence";
 import { connectionStore } from "../src/lib/connection-store";
-import { resolveActiveMucCallThreadId } from "../src/lib/calls/call-chat-composer";
+import { resolveActiveCallThreadId, resolveActiveMucCallThreadId } from "../src/lib/calls/call-chat-composer";
 import type { TimelineMessage } from "../src/lib/chat-ui";
 import { renderVueComponent } from "./helpers/render-vue-sfc";
 
@@ -58,6 +58,33 @@ describe("call-chat composer", () => {
 
     expect(resolveActiveMucCallThreadId(messages, "", "sid-active")).toBeNull();
     expect(resolveActiveMucCallThreadId(messages, ROOM, " ")).toBeNull();
+  });
+
+  test("resolves the active DM call thread from the current conversation timeline", () => {
+    const messages: TimelineMessage[] = [
+      message({ id: "ordinary", body: "hello" }),
+      message({
+        id: "dm-call-anchor",
+        threadId: "dm-call-thread-123",
+        callThread: {
+          kind: "dm",
+          sid: "dm-active",
+          media: ["audio"],
+          initiator: "alice@waddle.test",
+          started: "2026-06-09T12:00:00Z",
+        },
+      }),
+    ];
+
+    expect(resolveActiveCallThreadId(messages, {
+      kind: "dm",
+      peerJid: "bob@waddle.test",
+      sid: "dm-active",
+    })).toBe("dm-call-thread-123");
+    expect(resolveActiveCallThreadId(messages, {
+      kind: "dm",
+      sid: "dm-active",
+    })).toBe("dm-call-thread-123");
   });
 
   test("expanded channel calls render a labelled call-chat composer when a call thread is available", async () => {

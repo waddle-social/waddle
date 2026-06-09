@@ -320,14 +320,13 @@ pub(super) async fn try_handle_muc_presence_update(
         thread_id,
     }) = call_thread_anchor
     {
-        let started = anchor
+        let marker = anchor
             .payloads
             .iter()
             .find(|payload| {
                 payload.name() == "call-thread" && payload.ns() == NS_WADDLE_CALL_THREAD
             })
-            .and_then(|payload| waddle_xmpp::xep::parse_call_thread_anchor(payload).ok())
-            .map(|marker| marker.started);
+            .and_then(|payload| waddle_xmpp::xep::parse_call_thread_anchor(payload).ok());
         let anchor_origin_id = anchor
             .payloads
             .iter()
@@ -343,12 +342,14 @@ pub(super) async fn try_handle_muc_presence_update(
         .await;
         // The anchor only exists when an SFU is configured (gated at the
         // build site above), so no inner SFU check is needed here.
-        if let Some((anchor_origin_id, started)) = anchor_origin_id.zip(started) {
+        if let Some((anchor_origin_id, marker)) = anchor_origin_id.zip(marker) {
             state.deps.protocol.call_threads.insert(
                 room_jid.clone(),
                 ActiveCallThread {
                     anchor_origin_id,
-                    started,
+                    initiator: marker.initiator,
+                    media: marker.media,
+                    started: marker.started,
                     thread_id: thread_id.as_str().to_owned(),
                 },
             );

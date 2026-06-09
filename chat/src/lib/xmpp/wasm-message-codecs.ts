@@ -90,6 +90,12 @@ function isSupportedRoomCallThread(
   return anchor?.kind === "muc";
 }
 
+function isSupportedDmCallThread(
+  anchor: WasmCallThreadAnchor | undefined,
+): anchor is WasmCallThreadAnchor & { kind: "dm" } {
+  return anchor?.kind === "dm";
+}
+
 function rebaseOffsetAfterRemoval(offset: number, start: number, end: number): number {
   if (offset <= start) return offset;
   if (offset >= end) return offset - (end - start);
@@ -626,13 +632,15 @@ export function dmMessageFromArchived(
   const markupSpans = message.markup_spans ?? [];
   const references = message.references ?? [];
   const extensionAnnotations = extensionAnnotationsFromWasm(message.extension_envelope);
+  const callThread = isSupportedDmCallThread(message.call_thread) ? message.call_thread : undefined;
+  const callThreadEnded = message.call_thread_ended;
   const dmWireIds = [message.id, message.origin_id]
     .filter((value): value is string => !!value && value !== dmPrimaryId);
   // See `roomMessageFromArchived` for the rationale: `<thread/>` alone is
   // metadata, not content. DMs don't currently surface threads in the UI
   // anyway, but the codec stays symmetric with the room path so a stray
   // foreign-server archive row can't manifest a bodyless DM ghost either.
-  if (!message.body && !message.subject && !sharedFiles.length && !linkPreviews.length && !extensionAnnotations.length && !message.is_retracted) return null;
+  if (!message.body && !message.subject && !callThread && !sharedFiles.length && !linkPreviews.length && !extensionAnnotations.length && !message.is_retracted) return null;
   const { linkPreviews: associatedLinkPreviews, sharedFiles: associatedSharedFiles } =
     associateDirectVideoPreviews(
       linkPreviews.map((preview) => linkPreviewFromWasm(preview, decodeOptions)),
@@ -654,6 +662,23 @@ export function dmMessageFromArchived(
       : {}),
     ...(message.thread ? { threadId: message.thread } : {}),
     ...(message.parent_thread_id ? { parentThreadId: message.parent_thread_id } : {}),
+    ...(callThread
+      ? {
+          callThread: {
+            kind: "dm",
+            sid: callThread.sid,
+            media: callThread.media,
+            initiator: callThread.initiator,
+            started: callThread.started,
+            ...(callThreadEnded
+              ? {
+                  ended: callThreadEnded.ended,
+                  duration: callThreadEnded.duration,
+                }
+              : {}),
+          },
+        }
+      : {}),
     ...(message.forum_post_kind === "topic" || message.forum_post_kind === "reply" ? { forumPostKind: message.forum_post_kind } : {}),
     ...(message.forum_title ? { forumTitle: message.forum_title } : {}),
     ...(message.forum_thread_title ? { forumThreadTitle: message.forum_thread_title } : {}),
