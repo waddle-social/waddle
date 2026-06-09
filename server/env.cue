@@ -266,16 +266,19 @@ schema.#Project & {
 		}
 
 		fmt: xRust.#Fmt & {
+                        dir: from: "caller"
 			args: ["fmt", "--all", "--", "--check"]
 			inputs: _rustInputs
 		}
 
 		clippy: xRust.#Clippy & {
+                        dir: from: "caller"
 			args: ["clippy", "--all-targets", "--all-features", "--", "-D", "warnings"]
 			inputs: _rustInputs
 		}
 
 		test: xRust.#Test & {
+                        dir: from: "caller"
 			args: ["test", "--workspace", "--all-targets", "--locked"]
 			inputs: _rustInputs
 		}
@@ -292,6 +295,7 @@ schema.#Project & {
 		}
 
 		buildCi: xRust.#Build & {
+                        dir: from: "caller"
 			args: ["build", "--profile", "ci", "--locked", "--package", "waddle-server"]
 			inputs: _rustInputs
 			outputs: ["target/ci/waddle-server"]
@@ -299,6 +303,7 @@ schema.#Project & {
 		}
 
 		buildRelease: xRust.#Build & {
+                        dir: from: "caller"
 			args: ["build", "--release", "--locked", "--package", "waddle-server"]
 			inputs: _rustInputs
 			outputs: ["target/release/waddle-server"]
@@ -750,16 +755,19 @@ schema.#Project & {
 		}
 
 		xmppUnitTests: xRust.#Test & {
+                        dir: from: "caller"
 			args: ["test", "--package", "waddle-xmpp", "--lib", "--verbose"]
 			inputs: _rustInputs
 		}
 
 		xmppServerTests: xRust.#Test & {
+                        dir: from: "caller"
 			args: ["test", "--package", "waddle-server", "--verbose"]
 			inputs: _rustInputs
 		}
 
 		xmppXepIntegration: xRust.#Test & {
+                        dir: from: "caller"
 			args: ["test", "--package", "waddle-xmpp", "--tests", "--verbose"]
 			inputs: _rustInputs
 		}
