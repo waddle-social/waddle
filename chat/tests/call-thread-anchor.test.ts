@@ -237,12 +237,15 @@ describe("call-thread anchor timeline mapping", () => {
       },
     };
 
-    expect(readCallAnchorCardState(message, "bob@example.com")).toMatchObject({
+    const card = readCallAnchorCardState(message, "bob@example.com");
+    expect(card).toMatchObject({
       status: "live",
       media: { audio: true, video: true },
       participantCount: 2,
       actionLabel: null,
     });
+    // The aria label must not promise a Join affordance the card doesn't show.
+    expect(card?.ariaLabel).not.toContain("Join");
   });
 
   test("a DM anchor for the call you are in reads live with no busy/join action", () => {

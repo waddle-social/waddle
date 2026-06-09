@@ -205,12 +205,18 @@ function buildCallAnchorCardState(options: {
         : "Call ended",
     actionLabel: joinAvailable ? (retainedLocalResource ? "Rejoin" : "Join") : busy ? "In another call" : null,
     actionDisabled: busy,
+    // Keep the aria label in step with the rendered action: only announce
+    // "Join"/"Rejoin" when that affordance actually exists (a joinable MUC
+    // call). DM cards and a MUC call you are already in have no action, so
+    // they announce a plain live marker.
     ariaLabel: live
       ? busy
         ? `Live ${mediaLabel}, ${peopleLabel}${participants}; already in another call`
-        : retainedLocalResource
-          ? `Rejoin live ${mediaLabel}, ${peopleLabel}${participants}`
-          : `Join live ${mediaLabel}, ${peopleLabel}${participants}`
+        : joinAvailable
+          ? retainedLocalResource
+            ? `Rejoin live ${mediaLabel}, ${peopleLabel}${participants}`
+            : `Join live ${mediaLabel}, ${peopleLabel}${participants}`
+          : `Live ${mediaLabel}, ${peopleLabel}${participants}`
       : callThreadAnchorLabel(message),
   };
 }
