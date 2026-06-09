@@ -89,7 +89,7 @@ const DmCallFlagIcon = computed(() => {
             >
               <component :is="DmCallFlagIcon" class="h-3 w-3" aria-hidden="true" />
             </span>
-            <div class="type-card-title truncate">{{ title }}</div>
+            <div class="type-card-title min-w-0 flex-1 truncate">{{ title }}</div>
           </div>
           <div class="type-caption text-muted-foreground truncate">
             {{ channelLabel }} · {{ recencyLabel }}
