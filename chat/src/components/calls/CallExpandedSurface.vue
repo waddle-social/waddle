@@ -165,10 +165,17 @@ const callThreadOverride = computed(() => {
   return threadId ? { threadId } : null;
 });
 
+// The dedicated call chat is available for both group (MUC) and 1:1 (DM)
+// calls. A resolved `callThreadOverride` already implies an active call with
+// a usable thread (MUC: room timeline; DM: the call sid), so the thread id
+// is the only gate beyond an active call.
 const canShowCallChatComposer = computed(() =>
   state.value.phase === "active" &&
-  state.value.kind === "muc" &&
   !!callThreadOverride.value,
+);
+
+const isMucCall = computed(
+  () => state.value.phase === "active" && state.value.kind === "muc",
 );
 
 const localIdentity = computed(() => engine.localIdentity);
@@ -305,7 +312,7 @@ onBeforeUnmount(() => {
         :mention-candidates="mentionCandidates ?? []"
         :slow-mode-cooldown="slowModeCooldown ?? 0"
         :upload-progress="uploadProgress ?? { uploading: false, progress: 0, filename: '' }"
-        :in-muc="true"
+        :in-muc="isMucCall"
         :link-preview-lookup="linkPreviewLookup ?? null"
         :link-preview-scope="linkPreviewScope ?? null"
         :show-extensions="false"

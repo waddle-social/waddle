@@ -18,6 +18,7 @@ import {
 } from "./muc-call-session-cache";
 import { clearLiveCallParticipants } from "./muc-call-live-participants";
 import { mediaErrorMessage } from "./call-media-issues";
+import { dmCallStartedAnchorFromTransition, publishDmCallStartedAnchor } from "./dm-call-anchor";
 import { barePeerJid } from "../xmpp/jid";
 
 /**
@@ -322,6 +323,10 @@ export function applyCallEvent(event: CallEvent): void {
     cancelOutgoingTimeout();
   }
   $callState.set(next);
+  // Surface the DM "started a call" card live (the server only enriches the
+  // archived `<proceed/>` row, which never reaches the live timeline).
+  const dmCallAnchor = dmCallStartedAnchorFromTransition(before, next, new Date().toISOString());
+  if (dmCallAnchor) publishDmCallStartedAnchor(dmCallAnchor);
 }
 
 /**

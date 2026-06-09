@@ -4,6 +4,7 @@
 import { describe, expect, mock, test } from "bun:test";
 import { ref } from "vue";
 import { useDmLiveMerge } from "../src/dms/live-merge";
+import { buildDmCallStartedAnchor, dmCallAnchorId } from "../src/lib/calls/dm-call-anchor";
 import type { LiveDmMessage } from "../src/lib/xmpp-client";
 import type { WaddleSession } from "../src/lib/server-auth";
 import type { TimelineMessage } from "../src/lib/chat-ui";
@@ -330,5 +331,48 @@ describe("mergeLiveMessage self-echo reconciliation", () => {
     expect(h.messages.value).toHaveLength(1);
     expect(h.messages.value[0]?.deliveryStatus).toBe("delivered");
     expect(h.messages.value[0]?.linkPreviews).toBeUndefined();
+  });
+});
+
+describe("dm call-anchor dedup via the live-merge path", () => {
+  test("a MAM call anchor collapses onto the synthesized live card by sid alias", () => {
+    const h = harness();
+    // The live synthesized "started a call" card is already in the timeline.
+    const synth = buildDmCallStartedAnchor(
+      {
+        peerBareJid: "bob@example.com",
+        sid: "sid-x",
+        media: { audio: true, video: false },
+        initiator: "alice@example.com/desktop",
+        started: "2026-06-09T12:00:00Z",
+      },
+      session.jid,
+    );
+    h.messages.value = [synth];
+
+    // The archived `<proceed/>` row for the same call arrives via the live
+    // merge with a distinct primary id but the `dmcall:<sid>` wire alias.
+    const mamCard: TimelineMessage = {
+      id: "proceed-stanza-id",
+      wireIds: [dmCallAnchorId("sid-x")],
+      author: "bob",
+      authorJid: "bob@example.com/phone",
+      body: "",
+      createdAt: "2026-06-09T12:00:05Z",
+      createdAtSource: "archive",
+      isSelf: false,
+      threadId: "sid-x",
+      callThread: {
+        kind: "dm",
+        sid: "sid-x",
+        media: ["audio"],
+        initiator: "alice@example.com/desktop",
+        started: "2026-06-09T12:00:00Z",
+      },
+    };
+
+    h.liveMerge.mergeLiveMessage(mamCard);
+
+    expect(h.messages.value.filter((m) => m.callThread)).toHaveLength(1);
   });
 });

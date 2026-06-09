@@ -10,7 +10,7 @@ import { findMessageElementById } from "@/lib/message-targeting";
 import { findMessageById } from "@/lib/message-ids";
 import { getReplyJumpNotice } from "@/lib/reply-ux";
 import { findThreadToAutoOpen } from "@/lib/thread-auto-open";
-import { resolveActiveCallThreadId } from "@/lib/calls/call-chat-composer";
+import { activeCallChatThreadId } from "@/lib/calls/call-chat-composer";
 import { $callState } from "@/lib/calls/call-store";
 import {
   getPinnedScrollTop,
@@ -439,25 +439,16 @@ async function dispatchSlashCommand(
 }
 const inMucContext = computed(() => !!props.roomJid);
 const callRoomJid = computed(() => props.roomJid ?? props.channel?.jid ?? null);
-const activeCallThreadId = computed(() => {
-  const state = callState.value;
-  if (state.phase !== "active") return null;
-  if (state.kind === "muc") {
-    return resolveActiveCallThreadId(props.messages, {
-      kind: "muc",
-      roomJid: callRoomJid.value,
-      sid: state.sid,
-    });
-  }
-  if (state.kind === "dm") {
-    return resolveActiveCallThreadId(props.messages, {
-      kind: "dm",
-      peerJid: props.dmPeer?.peerJid,
-      sid: state.sid,
-    });
-  }
-  return null;
-});
+// The call-anchor card keys its live/ended state on the conversation: the room
+// JID for channels, the peer JID for DMs. `callRoomJid` is null for DMs, so a
+// DM anchor would otherwise never match its `$dmCallActivities` entry and would
+// render "Call ended" while the call is live.
+const callAnchorConversationJid = computed(
+  () => callRoomJid.value ?? props.dmPeer?.peerJid ?? null,
+);
+const activeCallThreadId = computed(() =>
+  activeCallChatThreadId(callState.value, props.messages, callRoomJid.value),
+);
 
 watch(
   () => props.xmppClient,
@@ -1415,7 +1406,7 @@ function dayDividerLabel(createdAt: string): string {
             :can-pin-messages="currentUserCanPin"
             :link-preview-lookup="linkPreviewLookup"
             :link-preview-scope="linkPreviewScope"
-            :call-room-jid="callRoomJid"
+            :call-room-jid="callAnchorConversationJid"
             :call-channel-id="channel?.id ?? null"
             @edit="(id, body, m, r, lp) => emit('editMessage', id, body, m, r, lp)"
             @retract="(id) => emit('retractMessage', id)"

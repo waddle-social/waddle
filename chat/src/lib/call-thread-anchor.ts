@@ -66,6 +66,7 @@ export function readCallAnchorCardState(
   messageCount = 0,
 ): CallAnchorCardState | null {
   if (!message.callThread) return null;
+  const callState = $callState.get();
   if (message.callThread.kind === "dm") {
     const activity = readMatchingDmCallActivity(message, roomJid);
     return buildCallAnchorCardState({
@@ -73,7 +74,7 @@ export function readCallAnchorCardState(
       roomJid: "",
       hasActiveCall: !!activity,
       localResourceInCall: false,
-      callState: $callState.get(),
+      callState,
       media: activity?.media ?? { audio: false, video: false },
       participantCount: activity ? 2 : 0,
       participantLabels: activity ? [barePeerJid(roomJid)] : [],
@@ -82,7 +83,6 @@ export function readCallAnchorCardState(
   }
   const room = normalizeMucCallRoomJid(roomJid);
   const roomState = readRoomHasActiveCall(room);
-  const callState = $callState.get();
   const participantLabels = room ? [...($mucCallParticipants.get()[room] ?? [])] : [];
   return buildCallAnchorCardState({
     message,
@@ -108,8 +108,10 @@ export function useCallAnchorCardState(
   const roomCall = useRoomHasActiveCall(() => roomJid() ?? "");
   return computed(() => {
     const current = message();
-    if (current.callThread?.kind === "dm") {
-      const activity = readMatchingDmCallActivity(current, roomJid() ?? "", dmActivities.value);
+    if (!current.callThread) return null;
+    if (current.callThread.kind === "dm") {
+      const peerJid = roomJid() ?? "";
+      const activity = readMatchingDmCallActivity(current, peerJid, dmActivities.value);
       return buildCallAnchorCardState({
         message: current,
         roomJid: "",
@@ -118,7 +120,7 @@ export function useCallAnchorCardState(
         callState: callState.value,
         media: activity?.media ?? { audio: false, video: false },
         participantCount: activity ? 2 : 0,
-        participantLabels: activity ? [barePeerJid(roomJid() ?? "")] : [],
+        participantLabels: activity ? [barePeerJid(peerJid)] : [],
         messageCount: messageCount(),
       });
     }
@@ -175,10 +177,16 @@ function buildCallAnchorCardState(options: {
   const media: CallMedia = live
     ? options.media
     : { audio: callThread.media.includes("audio"), video: callThread.media.includes("video") };
+  // Action affordances are MUC-only: a group call has a room you can Join /
+  // Rejoin and "In another call" busy semantics. A DM call is 1:1 — its
+  // timeline card is a pure live/ended marker (answer/reconnect/return live in
+  // the call dock and banner, never on the card). A DM "Join" would also be
+  // malformed: the card's room JID is the peer JID, not a MUC room.
+  const mucActions = callThread.kind === "muc";
   const localGroupCallInThisRoom = isLocalGroupCallInRoom(options.callState, options.roomJid);
-  const busy = live && isBusy(options.callState) && !localGroupCallInThisRoom;
-  const retainedLocalResource = live && options.localResourceInCall && !localGroupCallInThisRoom;
-  const joinAvailable = live && !busy && !localGroupCallInThisRoom;
+  const busy = mucActions && live && isBusy(options.callState) && !localGroupCallInThisRoom;
+  const retainedLocalResource = mucActions && live && options.localResourceInCall && !localGroupCallInThisRoom;
+  const joinAvailable = mucActions && live && !busy && !localGroupCallInThisRoom;
   const mediaLabel = media.video ? "video call" : "call";
   const peopleLabel = `${participantCount} ${participantCount === 1 ? "person" : "people"}`;
   const participants = participantLabels.length > 0 ? `: ${participantLabels.join(", ")}` : "";
@@ -197,12 +205,18 @@ function buildCallAnchorCardState(options: {
         : "Call ended",
     actionLabel: joinAvailable ? (retainedLocalResource ? "Rejoin" : "Join") : busy ? "In another call" : null,
     actionDisabled: busy,
+    // Keep the aria label in step with the rendered action: only announce
+    // "Join"/"Rejoin" when that affordance actually exists (a joinable MUC
+    // call). DM cards and a MUC call you are already in have no action, so
+    // they announce a plain live marker.
     ariaLabel: live
       ? busy
         ? `Live ${mediaLabel}, ${peopleLabel}${participants}; already in another call`
-        : retainedLocalResource
-          ? `Rejoin live ${mediaLabel}, ${peopleLabel}${participants}`
-          : `Join live ${mediaLabel}, ${peopleLabel}${participants}`
+        : joinAvailable
+          ? retainedLocalResource
+            ? `Rejoin live ${mediaLabel}, ${peopleLabel}${participants}`
+            : `Join live ${mediaLabel}, ${peopleLabel}${participants}`
+          : `Live ${mediaLabel}, ${peopleLabel}${participants}`
       : callThreadAnchorLabel(message),
   };
 }
