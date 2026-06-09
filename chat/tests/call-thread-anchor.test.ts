@@ -8,10 +8,12 @@ import {
 } from "../src/lib/call-thread-anchor";
 import type { WasmThreadEntry } from "../src/lib/xmpp/wasm-types";
 import { $callState } from "../src/lib/calls/call-store";
+import { $dmCallActivities, clearDmCallActivities } from "../src/lib/calls/dm-call-activity";
 import { $mucCallMedia, $mucCallParticipants, clearMucCallParticipants } from "../src/lib/calls/muc-call-presence";
 import type { WaddleSession } from "../src/lib/server-auth";
-import { roomMessageFromArchived } from "../src/lib/xmpp/wasm-message-codecs";
+import { dmMessageFromArchived, roomMessageFromArchived } from "../src/lib/xmpp/wasm-message-codecs";
 import type { LiveRoomMessage } from "../src/lib/xmpp-client";
+import { buildDmTimelineFromMamResults, fromLiveDmMessage } from "../src/dms/message-timeline-state";
 
 const session: WaddleSession = {
   session_id: "session-1",
@@ -50,6 +52,7 @@ describe("call-thread anchor timeline mapping", () => {
   afterEach(() => {
     $callState.set({ phase: "idle" });
     clearMucCallParticipants();
+    clearDmCallActivities();
     $mucCallMedia.set({});
   });
 
@@ -205,6 +208,38 @@ describe("call-thread anchor timeline mapping", () => {
     });
   });
 
+  test("derives live DM anchor card state from peer and sid activity", () => {
+    $dmCallActivities.set({
+      "bob@example.com": {
+        peerJid: "bob@example.com",
+        sid: "dm-live",
+        media: { audio: true, video: true },
+        state: "accepted",
+        direction: "outgoing",
+        updatedAt: "2026-06-07T14:31:00Z",
+      },
+    });
+    const message = {
+      body: "",
+      author: "Bob",
+      threadId: "dm-call-thread",
+      callThread: {
+        kind: "dm" as const,
+        sid: "dm-live",
+        media: ["audio"],
+        initiator: "alice@example.com",
+        started: "2026-06-07T14:30:00Z",
+      },
+    };
+
+    expect(readCallAnchorCardState(message, "bob@example.com")).toMatchObject({
+      status: "live",
+      media: { audio: true, video: true },
+      participantCount: 2,
+      actionLabel: "Join",
+    });
+  });
+
   test("room archive codec maps the WASM call-thread marker onto LiveRoomMessage", () => {
     const live = roomMessageFromArchived({
       mam_id: "mam-anchor-1",
@@ -239,6 +274,161 @@ describe("call-thread anchor timeline mapping", () => {
       media: ["audio", "video"],
       initiator: "alice@example",
       started: "2026-06-07T14:30:00Z",
+    });
+  });
+
+  test("DM archive codec maps the WASM call-thread marker onto TimelineMessage", () => {
+    const live = dmMessageFromArchived({
+      mam_id: "mam-dm-anchor-1",
+      id: "dm-anchor-1",
+      from: "bob@example.com/phone",
+      to: "alice@example.com/web",
+      message_type: "chat",
+      timestamp: "2026-06-07T14:30:00Z",
+      reaction_emojis: [],
+      is_muc: false,
+      thread: "dm-call-thread-uuid",
+      markup_spans: [],
+      mention_uris: [],
+      references: [],
+      is_sticker: false,
+      shared_files: [],
+      link_previews: [],
+      call_thread: {
+        kind: "dm",
+        sid: "dm-session-uuid",
+        media: ["audio", "video"],
+        initiator: "alice@example.com",
+        started: "2026-06-07T14:30:00Z",
+      },
+    }, "alice@example.com");
+
+    expect(live?.threadId).toBe("dm-call-thread-uuid");
+    expect(live?.callThread).toEqual({
+      kind: "dm",
+      sid: "dm-session-uuid",
+      media: ["audio", "video"],
+      initiator: "alice@example.com",
+      started: "2026-06-07T14:30:00Z",
+    });
+
+    const timeline = fromLiveDmMessage(session, live!);
+    expect(timeline.callThread).toEqual(live?.callThread);
+  });
+
+  test("DM archive codec maps ended metadata and suppresses stale live activity", () => {
+    $dmCallActivities.set({
+      "bob@example.com": {
+        peerJid: "bob@example.com",
+        sid: "dm-session-uuid",
+        media: { audio: true, video: true },
+        state: "accepted",
+        direction: "incoming",
+        updatedAt: "2026-06-07T14:31:00Z",
+      },
+    });
+    const live = dmMessageFromArchived({
+      mam_id: "mam-dm-anchor-ended",
+      id: "dm-anchor-ended",
+      from: "bob@example.com/phone",
+      to: "alice@example.com/web",
+      message_type: "chat",
+      timestamp: "2026-06-07T14:35:00Z",
+      reaction_emojis: [],
+      is_muc: false,
+      thread: "dm-call-thread-uuid",
+      markup_spans: [],
+      mention_uris: [],
+      references: [],
+      is_sticker: false,
+      shared_files: [],
+      link_previews: [],
+      call_thread: {
+        kind: "dm",
+        sid: "dm-session-uuid",
+        media: ["audio"],
+        initiator: "alice@example.com",
+        started: "2026-06-07T14:30:00Z",
+      },
+      call_thread_ended: {
+        anchor_id: "dm-anchor-ended",
+        ended: "2026-06-07T14:35:00Z",
+        duration: "PT5M",
+      },
+    }, "alice@example.com");
+
+    const timeline = fromLiveDmMessage(session, live!);
+    expect(timeline.callThread).toMatchObject({
+      kind: "dm",
+      ended: "2026-06-07T14:35:00Z",
+      duration: "PT5M",
+    });
+    expect(readCallAnchorCardState(timeline, "bob@example.com")).toMatchObject({
+      status: "ended",
+      title: "Call ended · 5m",
+      actionLabel: null,
+    });
+  });
+
+  test("DM MAM merge updates an existing call anchor with ended metadata", () => {
+    const existing = fromLiveDmMessage(session, {
+      id: "dm-anchor-ended",
+      peerJid: "bob@example.com",
+      fromJid: "bob@example.com/phone",
+      nick: "Bob",
+      body: "",
+      createdAt: "2026-06-07T14:30:00Z",
+      createdAtSource: "live",
+      type: "message",
+      threadId: "dm-call-thread-uuid",
+      callThread: {
+        kind: "dm",
+        sid: "dm-session-uuid",
+        media: ["audio"],
+        initiator: "alice@example.com",
+        started: "2026-06-07T14:30:00Z",
+      },
+    });
+    const archived = dmMessageFromArchived({
+      mam_id: "mam-dm-anchor-ended",
+      id: "dm-anchor-ended",
+      from: "bob@example.com/phone",
+      to: "alice@example.com/web",
+      message_type: "chat",
+      timestamp: "2026-06-07T14:35:00Z",
+      reaction_emojis: [],
+      is_muc: false,
+      thread: "dm-call-thread-uuid",
+      markup_spans: [],
+      mention_uris: [],
+      references: [],
+      is_sticker: false,
+      shared_files: [],
+      link_previews: [],
+      call_thread: {
+        kind: "dm",
+        sid: "dm-session-uuid",
+        media: ["audio"],
+        initiator: "alice@example.com",
+        started: "2026-06-07T14:30:00Z",
+      },
+      call_thread_ended: {
+        anchor_id: "dm-anchor-ended",
+        ended: "2026-06-07T14:35:00Z",
+        duration: "PT5M",
+      },
+    }, "alice@example.com");
+
+    const timeline = buildDmTimelineFromMamResults({
+      session,
+      existing: [existing],
+      mamResults: [archived!],
+    });
+    expect(timeline).toHaveLength(1);
+    expect(timeline[0]?.callThread).toMatchObject({
+      kind: "dm",
+      ended: "2026-06-07T14:35:00Z",
+      duration: "PT5M",
     });
   });
 

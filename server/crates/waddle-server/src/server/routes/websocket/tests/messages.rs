@@ -1,5 +1,31 @@
 use super::*;
 
+fn dm_call_message(from: &str, to: &str, payload: Element) -> xmpp_parsers::message::Message {
+    let mut message = xmpp_parsers::message::Message::new(Some(to.parse().expect("to jid")));
+    message.from = Some(from.parse().expect("from jid"));
+    message.type_ = XmppMessageType::Chat;
+    message.payloads.push(payload);
+    message.payloads.push(waddle_xmpp::xep::build_hint_element(
+        waddle_xmpp::xep::Hint::Store,
+    ));
+    message
+}
+
+async fn drive_dm_message(
+    state: &WebSocketState,
+    full_jid: FullJid,
+    message: xmpp_parsers::message::Message,
+) {
+    let phase = waddle_xmpp::protocol::ConnectionPhase::ready(full_jid.clone(), false);
+    let mut sm = XmppStateMachine::new(
+        "example.com".to_owned(),
+        (*state.deps.protocol.dispatcher).clone(),
+    );
+    sm.transition_to_ready(full_jid, false);
+    sm.set_blocklist(waddle_xmpp::protocol::session_state::Blocklist::empty());
+    let _ = handlers::message::handle_message(message, state, &phase, Some(&mut sm), None).await;
+}
+
 async fn store_committed_dm_archive_for_notification(
     state: &WebSocketState,
     archive_jid: &BareJid,
@@ -33,6 +59,212 @@ async fn store_committed_dm_archive_for_notification(
         .store_message(archive_jid, &archived)
         .await
         .expect("store committed MAM row");
+}
+
+#[tokio::test]
+async fn dm_jmi_proceed_projects_call_thread_anchor_for_both_peers() {
+    let state = create_test_websocket_state().await;
+    let alice_full: FullJid = "alice@example.com/web".parse().expect("alice full jid");
+    let alice: BareJid = "alice@example.com".parse().expect("alice bare jid");
+    let bob: BareJid = "bob@example.com".parse().expect("bob bare jid");
+    let charlie: BareJid = "charlie@example.com".parse().expect("charlie bare jid");
+    let sid = xmpp_parsers::jingle::SessionId("dm-call-1".to_owned());
+
+    let propose = waddle_xmpp::xep::xep0353::build_propose(
+        sid.clone(),
+        waddle_xmpp::xep::xep0353::CallOffer::audio_video(),
+    );
+    drive_dm_message(
+        state.as_ref(),
+        alice_full,
+        dm_call_message("alice@example.com/web", "bob@example.com/phone", propose),
+    )
+    .await;
+    assert_eq!(state.deps.protocol.pending_dm_call_offers.len(), 1);
+
+    let proceed: Element = waddle_xmpp::xep::xep0353::build_proceed(sid.clone()).into();
+    drive_dm_message(
+        state.as_ref(),
+        "alice@example.com/web".parse().expect("alice full jid"),
+        dm_call_message(
+            "alice@example.com/web",
+            "bob@example.com/phone",
+            proceed.clone(),
+        ),
+    )
+    .await;
+    assert_eq!(
+        state.deps.protocol.dm_call_threads.len(),
+        0,
+        "the proposer must not accept its own JMI offer"
+    );
+
+    let accepted_proceed =
+        dm_call_message("bob@example.com/phone", "alice@example.com/web", proceed);
+    let deps = build_interpret_deps(state.as_ref(), None);
+    let _ = crate::server::routes::interpret::interpret(
+        vec![
+            waddle_xmpp::protocol::OutboundEvent::ArchiveDirect {
+                archive_jid: bob.clone(),
+                from: bob.clone(),
+                to: alice.clone(),
+                message: Box::new(accepted_proceed.clone()),
+            },
+            waddle_xmpp::protocol::OutboundEvent::ArchiveDirect {
+                archive_jid: alice.clone(),
+                from: bob.clone(),
+                to: alice.clone(),
+                message: Box::new(accepted_proceed),
+            },
+        ],
+        &deps,
+    )
+    .await;
+
+    let mut projected_stanza_ids = Vec::new();
+    for (owner, peer) in [(&alice, &bob), (&bob, &alice)] {
+        let anchor = state
+            .deps
+            .protocol
+            .inbox_storage
+            .list_threads(owner, peer)
+            .await
+            .expect("list DM threads")
+            .into_iter()
+            .find(|entry| entry.thread_id.as_deref() == Some("dm-call-1"))
+            .unwrap_or_else(|| panic!("{owner} should have a DM call-thread anchor"));
+        assert_eq!(
+            anchor.call_thread_kind,
+            Some(waddle_xmpp::xep::CallThreadKind::Dm)
+        );
+        assert_eq!(
+            anchor.call_thread_media,
+            Some(waddle_xmpp::xep::CallThreadMedia::audio_video())
+        );
+        projected_stanza_ids.push(anchor.last_stanza_id);
+    }
+    assert_ne!(
+        projected_stanza_ids[0], projected_stanza_ids[1],
+        "each owner should point at their own archived proceed row"
+    );
+    assert_eq!(state.deps.protocol.dm_call_threads.len(), 1);
+    assert_eq!(state.deps.protocol.pending_dm_call_offers.len(), 0);
+    assert_eq!(state.deps.protocol.dm_call_thread_projections.len(), 2);
+
+    let replayed_proceed: Element = waddle_xmpp::xep::xep0353::build_proceed(sid.clone()).into();
+    let replayed_proceed = dm_call_message(
+        "bob@example.com/phone",
+        "alice@example.com/web",
+        replayed_proceed,
+    );
+    let _ = crate::server::routes::interpret::interpret(
+        vec![
+            waddle_xmpp::protocol::OutboundEvent::ArchiveDirect {
+                archive_jid: bob.clone(),
+                from: bob.clone(),
+                to: alice.clone(),
+                message: Box::new(replayed_proceed.clone()),
+            },
+            waddle_xmpp::protocol::OutboundEvent::ArchiveDirect {
+                archive_jid: alice.clone(),
+                from: bob.clone(),
+                to: alice.clone(),
+                message: Box::new(replayed_proceed),
+            },
+        ],
+        &deps,
+    )
+    .await;
+    for ((owner, peer), expected_stanza_id) in [(&alice, &bob), (&bob, &alice)]
+        .into_iter()
+        .zip(projected_stanza_ids)
+    {
+        let anchor = state
+            .deps
+            .protocol
+            .inbox_storage
+            .list_threads(owner, peer)
+            .await
+            .expect("list DM threads after replay")
+            .into_iter()
+            .find(|entry| entry.thread_id.as_deref() == Some("dm-call-1"))
+            .unwrap_or_else(|| panic!("{owner} should keep a DM call-thread anchor"));
+        assert_eq!(
+            anchor.last_stanza_id, expected_stanza_id,
+            "duplicate proceed should not rewrite an existing owner projection"
+        );
+    }
+
+    state
+        .deps
+        .protocol
+        .inbox_storage
+        .upsert(
+            &alice,
+            waddle_xmpp::inbox::InboxEntry::new(
+                charlie.clone(),
+                waddle_xmpp::inbox::ConversationKind::Direct,
+                "charlie-anchor",
+                crate::time::now_ms(),
+            )
+            .with_thread("dm-call-1")
+            .with_call_thread(
+                waddle_xmpp::xep::CallThreadKind::Dm,
+                waddle_xmpp::xep::CallThreadMedia::audio_only(),
+            ),
+            false,
+        )
+        .await
+        .expect("seed same-sid DM anchor for a different peer");
+
+    let finish = waddle_xmpp::xep::xep0353::build_finish(sid, None);
+    drive_dm_message(
+        state.as_ref(),
+        "alice@example.com/web".parse().expect("alice full jid"),
+        dm_call_message("alice@example.com/web", "bob@example.com/phone", finish),
+    )
+    .await;
+    assert_eq!(state.deps.protocol.dm_call_threads.len(), 0);
+    assert_eq!(state.deps.protocol.dm_call_thread_projections.len(), 0);
+
+    for (owner, peer) in [(&alice, &bob), (&bob, &alice)] {
+        let anchor = state
+            .deps
+            .protocol
+            .inbox_storage
+            .list_threads(owner, peer)
+            .await
+            .expect("list ended DM threads")
+            .into_iter()
+            .find(|entry| entry.thread_id.as_deref() == Some("dm-call-1"))
+            .unwrap_or_else(|| panic!("{owner} should keep the DM call-thread anchor"));
+        assert!(
+            anchor.call_ended_at.is_some(),
+            "{owner} should see the DM call-thread ended timestamp"
+        );
+        assert!(
+            anchor
+                .call_duration
+                .as_ref()
+                .is_some_and(|duration| duration.as_str().starts_with("PT")),
+            "{owner} should see an ISO-8601 DM call-thread duration"
+        );
+    }
+
+    let charlie_anchor = state
+        .deps
+        .protocol
+        .inbox_storage
+        .list_threads(&alice, &charlie)
+        .await
+        .expect("list Charlie DM threads")
+        .into_iter()
+        .find(|entry| entry.thread_id.as_deref() == Some("dm-call-1"))
+        .expect("Alice/Charlie same-sid anchor remains");
+    assert!(
+        charlie_anchor.call_ended_at.is_none(),
+        "DM finish should only update the two exact owner/peer projections"
+    );
 }
 
 async fn project_direct_unread_for_notification(

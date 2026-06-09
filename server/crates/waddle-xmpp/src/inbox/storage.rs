@@ -177,6 +177,19 @@ pub trait InboxStorage: Send + Sync {
         ended: DateTime<Utc>,
         duration: &CallThreadDuration,
     ) -> Result<(), InboxStorageError>;
+
+    /// Mark one direct-message user's exact `(partner, thread_id)` call-thread
+    /// projection as ended. Unlike MUC call-thread end summaries, DM end state
+    /// must not fan out by `thread_id` alone because different peers can reuse
+    /// the same JMI sid.
+    async fn mark_direct_call_thread_ended(
+        &self,
+        user: &BareJid,
+        partner: &BareJid,
+        thread_id: &str,
+        ended: DateTime<Utc>,
+        duration: &CallThreadDuration,
+    ) -> Result<(), InboxStorageError>;
 }
 
 /// In-memory implementation used for tests and as the storage fake for
@@ -421,6 +434,25 @@ impl InboxStorage for InMemoryInboxStorage {
         for view in guard.values_mut() {
             view.mark_call_thread_ended(room, thread_id, ended, duration.clone());
         }
+        Ok(())
+    }
+
+    async fn mark_direct_call_thread_ended(
+        &self,
+        user: &BareJid,
+        partner: &BareJid,
+        thread_id: &str,
+        ended: DateTime<Utc>,
+        duration: &CallThreadDuration,
+    ) -> Result<(), InboxStorageError> {
+        let mut guard = self
+            .per_user
+            .lock()
+            .map_err(|e| InboxStorageError::Other(e.to_string()))?;
+        let Some(view) = guard.get_mut(user) else {
+            return Ok(());
+        };
+        view.mark_direct_call_thread_ended(partner, thread_id, ended, duration.clone());
         Ok(())
     }
 }

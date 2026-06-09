@@ -227,6 +227,11 @@ mod tests {
                     profile_publish_tracker: deps.protocol.profile_publish_tracker.clone(),
                     pep_feed_bridge: Arc::clone(&deps.protocol.pep_feed_bridge),
                     call_threads: Arc::clone(&deps.protocol.call_threads),
+                    dm_call_threads: Arc::clone(&deps.protocol.dm_call_threads),
+                    dm_call_thread_projections: Arc::clone(
+                        &deps.protocol.dm_call_thread_projections,
+                    ),
+                    pending_dm_call_offers: Arc::clone(&deps.protocol.pending_dm_call_offers),
                     sfu: Some(sfu),
                 },
                 occupant_id_secret: deps.occupant_id_secret.clone(),

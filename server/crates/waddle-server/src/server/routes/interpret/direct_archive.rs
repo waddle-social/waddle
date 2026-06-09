@@ -55,6 +55,8 @@ pub(super) async fn archive_direct(
                 requested_archive_id,
                 archive_id.clone(),
             );
+            maybe_project_dm_call_thread(deps, &archive_jid, &from, &to, &archive_id, &message)
+                .await;
             update_direct_link_preview_refs(deps, &archive_jid, &from, &archive_id, &message).await;
             apply_direct_retraction_tombstone(deps, &archive_jid, &message).await;
             rewrite
@@ -73,6 +75,199 @@ pub(super) async fn archive_direct(
             apply_direct_retraction_tombstone(deps, &archive_jid, &message).await;
             None
         }
+    }
+}
+
+async fn maybe_project_dm_call_thread(
+    deps: &Deps<'_>,
+    archive_jid: &BareJid,
+    from: &BareJid,
+    to: &BareJid,
+    archive_id: &str,
+    message: &Message,
+) {
+    let Some(state) = deps.web_socket_state else {
+        return;
+    };
+    if !waddle_xmpp::xep::HintCarrier::has_store(message) {
+        return;
+    }
+
+    if let Some((sid, media)) = jmi_propose(message) {
+        state.deps.protocol.pending_dm_call_offers.insert(
+            crate::server::routes::websocket::DmCallThreadKey::new(
+                from.clone(),
+                to.clone(),
+                sid.clone(),
+            ),
+            crate::server::routes::websocket::PendingDmCallOffer {
+                media,
+                initiator: from.clone(),
+                started: chrono::Utc::now(),
+            },
+        );
+        return;
+    }
+
+    if let Some(sid) = jmi_sid(message, "finish") {
+        let key =
+            crate::server::routes::websocket::DmCallThreadKey::new(from.clone(), to.clone(), sid);
+        state.deps.protocol.pending_dm_call_offers.remove(&key);
+        let Some((key, active)) = state.deps.protocol.dm_call_threads.remove(&key) else {
+            return;
+        };
+        state
+            .deps
+            .protocol
+            .dm_call_thread_projections
+            .remove(&(key.low_peer.clone(), key.clone()));
+        state
+            .deps
+            .protocol
+            .dm_call_thread_projections
+            .remove(&(key.high_peer.clone(), key.clone()));
+        let ended = chrono::Utc::now();
+        let duration = ended.signed_duration_since(active.started);
+        let duration =
+            waddle_xmpp::xep::CallThreadDuration::parse(&format_call_thread_duration(duration))
+                .expect("formatted call-thread duration is valid");
+        super::direct_call_thread::mark_direct_call_thread_ended(
+            deps,
+            key.low_peer,
+            key.high_peer,
+            active.thread_id,
+            ended,
+            duration,
+        )
+        .await;
+        return;
+    }
+
+    let Some(sid) = jmi_sid(message, "proceed") else {
+        return;
+    };
+    let key = crate::server::routes::websocket::DmCallThreadKey::new(
+        from.clone(),
+        to.clone(),
+        sid.clone(),
+    );
+    let active = if let Some(active) = state.deps.protocol.dm_call_threads.get(&key) {
+        active.clone()
+    } else {
+        let Some(offer) = state
+            .deps
+            .protocol
+            .pending_dm_call_offers
+            .get(&key)
+            .map(|offer| offer.clone())
+        else {
+            return;
+        };
+        if offer.initiator == *from {
+            return;
+        }
+        let active = crate::server::routes::websocket::ActiveCallThread {
+            anchor_origin_id: archive_id.to_owned(),
+            media: offer.media,
+            started: offer.started,
+            thread_id: sid.0.clone(),
+        };
+        state
+            .deps
+            .protocol
+            .dm_call_threads
+            .insert(key.clone(), active.clone());
+        active
+    };
+
+    let projection_key = (archive_jid.clone(), key.clone());
+    if !state
+        .deps
+        .protocol
+        .dm_call_thread_projections
+        .insert(projection_key)
+    {
+        return;
+    };
+    if state
+        .deps
+        .protocol
+        .dm_call_thread_projections
+        .contains(&(key.low_peer.clone(), key.clone()))
+        && state
+            .deps
+            .protocol
+            .dm_call_thread_projections
+            .contains(&(key.high_peer.clone(), key.clone()))
+    {
+        state.deps.protocol.pending_dm_call_offers.remove(&key);
+    }
+
+    let last_updated = crate::time::now_ms();
+    let peer = if archive_jid == from { to } else { from };
+    super::direct_call_thread::project_direct_call_thread_anchor(
+        deps,
+        archive_jid.clone(),
+        peer.clone(),
+        active.thread_id,
+        archive_id.to_owned(),
+        active.media,
+        last_updated,
+    )
+    .await;
+}
+
+fn jmi_propose(
+    message: &Message,
+) -> Option<(
+    xmpp_parsers::jingle::SessionId,
+    waddle_xmpp::xep::CallThreadMedia,
+)> {
+    let propose = message.payloads.iter().find(|payload| {
+        payload.name() == "propose" && payload.ns() == waddle_xmpp::xep::xep0353::NS_JINGLE_MESSAGE
+    })?;
+    let sid = xmpp_parsers::jingle::SessionId(propose.attr("id")?.to_owned());
+    Some((sid, jmi_media(propose)?))
+}
+
+fn jmi_sid(message: &Message, name: &str) -> Option<xmpp_parsers::jingle::SessionId> {
+    message
+        .payloads
+        .iter()
+        .find(|payload| {
+            payload.name() == name && payload.ns() == waddle_xmpp::xep::xep0353::NS_JINGLE_MESSAGE
+        })
+        .and_then(|payload| payload.attr("id"))
+        .map(|id| xmpp_parsers::jingle::SessionId(id.to_owned()))
+}
+
+fn jmi_media(element: &Element) -> Option<waddle_xmpp::xep::CallThreadMedia> {
+    let mut audio = false;
+    let mut video = false;
+    for child in element.children() {
+        if child.name() != "description" || child.ns() != waddle_xmpp::xep::xep0167::NS_JINGLE_RTP {
+            continue;
+        }
+        match child.attr("media") {
+            Some("audio") => audio = true,
+            Some("video") => video = true,
+            _ => {}
+        }
+    }
+    (audio || video).then_some(waddle_xmpp::xep::CallThreadMedia { audio, video })
+}
+
+fn format_call_thread_duration(duration: chrono::Duration) -> String {
+    let seconds = duration.num_seconds().max(0);
+    let hours = seconds / 3600;
+    let minutes = (seconds % 3600) / 60;
+    let seconds = seconds % 60;
+    if hours > 0 {
+        format!("PT{hours}H{minutes}M{seconds}S")
+    } else if minutes > 0 {
+        format!("PT{minutes}M{seconds}S")
+    } else {
+        format!("PT{seconds}S")
     }
 }
 

@@ -51,6 +51,7 @@ export function fromLiveDmMessage(
   }
   if (msg.threadId) tm.threadId = msg.threadId;
   if (msg.parentThreadId) tm.parentThreadId = msg.parentThreadId;
+  if (msg.callThread) tm.callThread = msg.callThread;
   return tm.isRetracted ? retractDmTimelineMessage(tm, tm.retractionId) : tm;
 }
 
@@ -150,6 +151,9 @@ function mergeDmRetractionTombstone(
     };
   }
   if (incoming.isRetracted) return result;
+  if (incoming.callThread) {
+    result = { ...result, callThread: incoming.callThread };
+  }
   if (Object.prototype.hasOwnProperty.call(incoming, "linkPreviews")) {
     return { ...result, linkPreviews: incoming.linkPreviews };
   }
@@ -203,6 +207,7 @@ export function buildDmTimelineFromMamResults(params: {
       || msg.isSticker
       || (msg.linkPreviews && msg.linkPreviews.length > 0)
       || (msg.extensionAnnotations && msg.extensionAnnotations.length > 0)
+      || msg.callThread
     ) {
       regular.push(msg);
     }

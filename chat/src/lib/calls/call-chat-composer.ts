@@ -30,3 +30,29 @@ export function resolveActiveMucCallThreadId(
 
   return null;
 }
+
+export function resolveActiveCallThreadId(
+  messages: readonly CallThreadCandidate[],
+  active: {
+    kind: "dm" | "muc";
+    sid: string | null | undefined;
+    roomJid?: string | null;
+    peerJid?: string | null;
+  },
+): string | null {
+  if (active.kind === "muc") {
+    return resolveActiveMucCallThreadId(messages, active.roomJid, active.sid);
+  }
+  const activeSid = active.sid?.trim();
+  if (!active.peerJid?.trim() || !activeSid) return null;
+
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!message?.threadId || !message.callThread) continue;
+    if (message.callThread.kind !== "dm") continue;
+    if (message.callThread.sid !== activeSid) continue;
+    return message.threadId;
+  }
+
+  return null;
+}

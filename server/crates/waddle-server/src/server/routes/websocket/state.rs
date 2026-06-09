@@ -3,6 +3,7 @@ use super::*;
 #[derive(Debug, Clone)]
 pub struct ActiveCallThread {
     pub anchor_origin_id: String,
+    pub media: waddle_xmpp::xep::CallThreadMedia,
     pub started: chrono::DateTime<chrono::Utc>,
     /// The anchor message's `urn:waddle:threads:0` thread id (the
     /// `<thread/>` value). Correlates the ended fastening back to the
@@ -10,6 +11,35 @@ pub struct ActiveCallThread {
     /// can stamp the ended timestamp + duration onto every
     /// subscriber's projection of `(room, thread_id)`.
     pub thread_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DmCallThreadKey {
+    pub low_peer: BareJid,
+    pub high_peer: BareJid,
+    pub sid: xmpp_parsers::jingle::SessionId,
+}
+
+impl DmCallThreadKey {
+    pub fn new(a: BareJid, b: BareJid, sid: xmpp_parsers::jingle::SessionId) -> Self {
+        let (low_peer, high_peer) = if a.as_str() <= b.as_str() {
+            (a, b)
+        } else {
+            (b, a)
+        };
+        Self {
+            low_peer,
+            high_peer,
+            sid,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingDmCallOffer {
+    pub media: waddle_xmpp::xep::CallThreadMedia,
+    pub initiator: BareJid,
+    pub started: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Clone)]
@@ -184,6 +214,18 @@ pub struct ProtocolServices {
     /// can later fasten a historical `<call-thread-ended/>` record to that
     /// exact anchor with XEP-0422 `<apply-to/>`.
     pub call_threads: Arc<dashmap::DashMap<BareJid, ActiveCallThread>>,
+    /// Active 1:1 call-thread anchors keyed by the two bare peers plus
+    /// JMI/Jingle sid. `proceed` creates the anchor; `finish` later
+    /// consumes the entry to stamp the ended summary.
+    pub dm_call_threads: Arc<dashmap::DashMap<DmCallThreadKey, ActiveCallThread>>,
+    /// Per-owner projection guard for 1:1 call-thread anchors. `ArchiveDirect`
+    /// runs once per user archive row; this lets each owner receive its own
+    /// MAM id exactly once while duplicate/replayed proceeds remain inert.
+    pub dm_call_thread_projections: Arc<dashmap::DashSet<(BareJid, DmCallThreadKey)>>,
+    /// JMI proposals keyed by the two bare peers plus sid so the later
+    /// bodyless `<proceed/>` can author a typed call-thread anchor with
+    /// the originally offered media.
+    pub pending_dm_call_offers: Arc<dashmap::DashMap<DmCallThreadKey, PendingDmCallOffer>>,
     /// LiveKit SFU bridge — `Some` iff `LIVEKIT_*` env vars are set
     /// and `register_call_handlers` was invoked at startup. The
     /// WebSocket cleanup paths call

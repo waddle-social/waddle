@@ -3,10 +3,12 @@ import { useStore } from "@nanostores/vue";
 import type { TimelineMessage } from "@/lib/chat-ui";
 import { $callState } from "@/lib/calls/call-store";
 import { isBusy } from "@/lib/calls/call-activity-dock";
+import { $dmCallActivities } from "@/lib/calls/dm-call-activity";
 import { $mucCallParticipants, normalizeMucCallRoomJid } from "@/lib/calls/muc-call-presence";
 import { readRoomHasActiveCall, useRoomHasActiveCall } from "@/lib/calls/use-active-muc-call";
 import type { CallMedia } from "@/lib/calls/types";
 import type { WasmThreadEntry } from "@/lib/xmpp/wasm-types";
+import { barePeerJid } from "@/lib/xmpp-client";
 
 export interface CallAnchorCardState {
   status: "live" | "ended";
@@ -64,6 +66,20 @@ export function readCallAnchorCardState(
   messageCount = 0,
 ): CallAnchorCardState | null {
   if (!message.callThread) return null;
+  if (message.callThread.kind === "dm") {
+    const activity = readMatchingDmCallActivity(message, roomJid);
+    return buildCallAnchorCardState({
+      message,
+      roomJid: "",
+      hasActiveCall: !!activity,
+      localResourceInCall: false,
+      callState: $callState.get(),
+      media: activity?.media ?? { audio: false, video: false },
+      participantCount: activity ? 2 : 0,
+      participantLabels: activity ? [barePeerJid(roomJid)] : [],
+      messageCount,
+    });
+  }
   const room = normalizeMucCallRoomJid(roomJid);
   const roomState = readRoomHasActiveCall(room);
   const callState = $callState.get();
@@ -87,10 +103,25 @@ export function useCallAnchorCardState(
   messageCount: () => number = () => 0,
 ): ComputedRef<CallAnchorCardState | null> {
   const participants = useStore($mucCallParticipants);
+  const dmActivities = useStore($dmCallActivities);
   const callState = useStore($callState);
   const roomCall = useRoomHasActiveCall(() => roomJid() ?? "");
   return computed(() => {
     const current = message();
+    if (current.callThread?.kind === "dm") {
+      const activity = readMatchingDmCallActivity(current, roomJid() ?? "", dmActivities.value);
+      return buildCallAnchorCardState({
+        message: current,
+        roomJid: "",
+        hasActiveCall: !!activity,
+        localResourceInCall: false,
+        callState: callState.value,
+        media: activity?.media ?? { audio: false, video: false },
+        participantCount: activity ? 2 : 0,
+        participantLabels: activity ? [barePeerJid(roomJid() ?? "")] : [],
+        messageCount: messageCount(),
+      });
+    }
     const room = normalizeMucCallRoomJid(roomJid() ?? "");
     const participantLabels = room ? [...(participants.value[room] ?? [])] : [];
     return buildCallAnchorCardState({
@@ -105,6 +136,21 @@ export function useCallAnchorCardState(
       messageCount: messageCount(),
     });
   });
+}
+
+function readMatchingDmCallActivity(
+  message: Pick<TimelineMessage, "callThread">,
+  peerJid: string,
+  activities = $dmCallActivities.get(),
+) {
+  const sid = message.callThread?.sid;
+  if (!sid || message.callThread?.ended) return null;
+  const peer = barePeerJid(peerJid).toLowerCase();
+  return Object.values(activities).find((activity) =>
+    barePeerJid(activity.peerJid).toLowerCase() === peer
+    && activity.sid === sid
+    && activity.state === "accepted"
+  ) ?? null;
 }
 
 function buildCallAnchorCardState(options: {

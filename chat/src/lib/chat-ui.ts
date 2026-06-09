@@ -42,7 +42,7 @@ export interface TimelineSharedFile {
 }
 
 export interface CallThreadAnchor {
-  kind: "muc";
+  kind: "muc" | "dm";
   /**
    * Set on anchors derived from timeline messages (the inbound
    * `urn:waddle:call-thread:0` marker). Absent on anchors derived from a
