@@ -78,7 +78,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.52.0"
+        cuenv_version="${CUENV_VERSION}"
         if [ "$cuenv_version" = "latest" ]; then
           cuenv_url="https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}"
         else
