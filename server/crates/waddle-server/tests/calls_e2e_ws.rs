@@ -429,6 +429,12 @@ fn origin_id(message: &Element) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn element_to_xml(element: Element) -> String {
+    let mut bytes = Vec::new();
+    element.write_to(&mut bytes).expect("serialize XML");
+    String::from_utf8(bytes).expect("XML serialization is UTF-8")
+}
+
 fn livekit_webhook_auth(body: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(body);
@@ -469,7 +475,7 @@ async fn post_participant_left_webhook(server: &TestServer, room: &str, identity
     );
 }
 
-async fn send_muji_session_initiate(client: &mut WsXmppClient, room: &str, sid: &str) {
+async fn send_muji_session_initiate_request(client: &mut WsXmppClient, room: &str, sid: &str) {
     let full_jid = client.full_jid.clone().expect("client bound");
     client
         .send(&format!(
@@ -488,6 +494,10 @@ async fn send_muji_session_initiate(client: &mut WsXmppClient, room: &str, sid: 
         ))
         .await
         .expect("send Muji session-initiate");
+}
+
+async fn send_muji_session_initiate(client: &mut WsXmppClient, room: &str, sid: &str) {
+    send_muji_session_initiate_request(client, room, sid).await;
     client
         .recv_matching(|frame| {
             (frame.contains("type='result'") && frame.contains(&format!("id='muji-join-{sid}'")))
@@ -502,6 +512,53 @@ async fn send_muji_session_initiate(client: &mut WsXmppClient, room: &str, sid: 
         })
         .await
         .expect("Muji session-accept");
+}
+
+async fn send_muji_session_initiate_expect_forbidden(
+    client: &mut WsXmppClient,
+    room: &str,
+    sid: &str,
+) {
+    send_muji_session_initiate_request(client, room, sid).await;
+
+    let response = client
+        .recv_matching(|frame| {
+            frame.contains(&format!("id='muji-join-{sid}'"))
+                || frame.contains(&format!("id=\"muji-join-{sid}\""))
+        })
+        .await
+        .expect("Muji session-initiate forbidden response");
+    assert!(
+        response.contains("type='error'") || response.contains("type=\"error\""),
+        "non-occupant Muji join must return an IQ error: {response}"
+    );
+    assert!(
+        response.contains("<forbidden"),
+        "non-occupant Muji join must be forbidden: {response}"
+    );
+    assert!(
+        !response.contains("session-accept")
+            && !response.contains("urn:waddle:transports:livekit:0")
+            && !response.contains("token="),
+        "forbidden Muji join must not mint or return LiveKit credentials: {response}"
+    );
+
+    let late_accept = tokio::time::timeout(std::time::Duration::from_millis(750), async {
+        client
+            .recv_matching(|frame| {
+                frame.contains("session-accept")
+                    && (frame.contains(&format!("sid='{sid}'"))
+                        || frame.contains(&format!("sid=\"{sid}\""))
+                        || frame.contains("urn:waddle:transports:livekit:0")
+                        || frame.contains("token="))
+            })
+            .await
+    })
+    .await;
+    assert!(
+        late_accept.is_err(),
+        "forbidden Muji join must not be followed by a token-bearing session-accept"
+    );
 }
 
 async fn recv_until_muji_and_anchor(client: &mut WsXmppClient) -> Vec<String> {
@@ -790,6 +847,110 @@ async fn muji_presence_reflects_to_senders_sibling_resource() {
         muc_user_has_status_110(&leave_element),
         "XEP-0045 §7.1: sibling session still gets <status code='110'/> on a self-driven update: {mobile_leave}"
     );
+}
+
+#[tokio::test]
+async fn muji_session_initiate_from_non_occupant_is_forbidden() {
+    let server = TestServer::start_with_extra_envs(&[(BOB, BOB_PW)], &livekit_test_envs());
+    let admin_pass = server.fixed_account_password().to_string();
+    let mut admin_web = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "admin",
+        &admin_pass,
+        "gate-admin",
+    )
+    .await
+    .expect("admin connects");
+    let mut bob = WsXmppClient::connect_and_auth(&server.ws_url(), DOMAIN, BOB, BOB_PW, "gate-bob")
+        .await
+        .expect("bob connects");
+    let mut admin_mobile = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "admin",
+        &admin_pass,
+        "gate-observer",
+    )
+    .await
+    .expect("admin observer connects");
+    let room = format!("forbidden-call-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+
+    muji_join_room(&mut admin_web, &room, "admin").await;
+    muji_join_room(&mut admin_mobile, &room, "admin").await;
+
+    let active = Element::builder("presence", "jabber:client")
+        .attr(
+            minidom::rxml::xml_ncname!("to").to_owned(),
+            format!("{room}/admin"),
+        )
+        .append(Element::builder("x", NS_MUC).build())
+        .append(
+            Element::builder("muji", NS_MUJI)
+                .append(
+                    Element::builder("content", NS_MUJI)
+                        .attr(
+                            minidom::rxml::xml_ncname!("creator").to_owned(),
+                            "initiator",
+                        )
+                        .attr(minidom::rxml::xml_ncname!("name").to_owned(), "audio")
+                        .append(
+                            Element::builder("description", "urn:xmpp:jingle:apps:rtp:1")
+                                .attr(minidom::rxml::xml_ncname!("media").to_owned(), "audio")
+                                .build(),
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .build();
+    let active = element_to_xml(active);
+    admin_web
+        .send(&active)
+        .await
+        .expect("admin/web sends active muji");
+    let active_frames = recv_until_muji_and_anchor(&mut admin_mobile).await;
+    assert!(
+        active_frames
+            .iter()
+            .any(|frame| frame.contains("<call-thread") && frame.contains(NS_CALL_THREAD)),
+        "observer must receive a call-thread anchor before participant checks: {active_frames:?}"
+    );
+
+    send_muji_session_initiate_expect_forbidden(&mut bob, &room, "bob-forbidden").await;
+    send_muji_session_initiate(&mut admin_web, &room, "admin-allowed").await;
+
+    let admin_web_full_jid = admin_web.full_jid.clone().expect("admin/web has full jid");
+    post_participant_left_webhook(&server, &room, &admin_web_full_jid).await;
+    admin_mobile
+        .recv_matching(|frame| frame.contains("<call-thread-ended") && frame.contains("<apply-to"))
+        .await
+        .expect("observer receives ended fastening when the only accepted participant leaves");
+}
+
+#[tokio::test]
+async fn muji_session_initiate_is_gated_by_requesting_full_jid() {
+    let server = TestServer::start_with_extra_envs(&[], &livekit_test_envs());
+    let admin_pass = server.fixed_account_password().to_string();
+    let mut web =
+        WsXmppClient::connect_and_auth(&server.ws_url(), DOMAIN, "admin", &admin_pass, "gate-web")
+            .await
+            .expect("admin/web connects");
+    let mut mobile = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "admin",
+        &admin_pass,
+        "gate-mobile",
+    )
+    .await
+    .expect("admin/mobile connects");
+    let room = format!("resource-gated-call-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+
+    muji_join_room(&mut web, &room, "admin").await;
+
+    send_muji_session_initiate_expect_forbidden(&mut mobile, &room, "mobile-forbidden").await;
+    send_muji_session_initiate(&mut web, &room, "web-allowed").await;
 }
 
 #[tokio::test]
