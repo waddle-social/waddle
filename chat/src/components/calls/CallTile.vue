@@ -24,10 +24,7 @@ import type { TileAttachable } from "@/lib/calls/tile-attach";
 const props = withDefaults(defineProps<{
   /** Human label rendered in the nameplate and derived into initials. */
   label: string;
-  /** Stable identity-derived key namespace for `TileAttachments.sync`.
-   *  The tile builds `${attachKey}:video` / `${attachKey}:audio` so
-   *  one attachments map can host video and audio for the same
-   *  participant without collision. */
+  /** Stable identity-derived key namespace for `TileAttachments.sync`. */
   attachKey: string;
   /** Whether this tile represents the local participant. */
   isSelf: boolean;
@@ -42,10 +39,8 @@ const props = withDefaults(defineProps<{
   /** Optional video track to render. When `null`, the placeholder
    *  layer shows through unchanged. */
   videoTrack: TileAttachable | null;
-  /** Optional remote audio track. Self-tiles never play audio (echo). */
-  audioTrack: TileAttachable | null;
   /** Parent's attach reconciler — see `tile-attach.ts`. The tile
-   *  invokes this from its `<video>` / `<audio>` ref callbacks. */
+   *  invokes this from its `<video>` ref callback. */
   attach: (key: string, el: HTMLMediaElement | null, track: TileAttachable | null) => void;
   interactive?: boolean;
 }>(), {
@@ -75,14 +70,6 @@ function refVideo(el: Element | null): void {
     `${props.attachKey}:video`,
     el instanceof HTMLVideoElement ? el : null,
     props.videoTrack,
-  );
-}
-
-function refAudio(el: Element | null): void {
-  props.attach(
-    `${props.attachKey}:audio`,
-    el instanceof HTMLAudioElement ? el : null,
-    props.audioTrack,
   );
 }
 
@@ -129,12 +116,6 @@ const emit = defineEmits<{
       autoplay
       playsinline
       :muted="isSelf"
-    />
-
-    <audio
-      v-if="audioTrack && !isSelf"
-      :ref="refAudio"
-      autoplay
     />
 
     <!-- Persistent nameplate — same look whether a video is playing

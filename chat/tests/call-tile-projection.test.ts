@@ -13,7 +13,6 @@ const fakeTrack = {} as never;
 
 describe("call tile projection", () => {
   test("projects a remote camera and screen share as distinct tiles", () => {
-    const screenAudioTrack = {} as never;
     const tiles = buildCallTiles({
       remoteTracks: [
         {
@@ -35,7 +34,7 @@ describe("call tile projection", () => {
           publicationSid: "screen-audio",
           kind: "audio",
           source: "screen_share_audio",
-          track: screenAudioTrack,
+          track: fakeTrack,
         },
       ],
       localTracks: [],
@@ -76,8 +75,8 @@ describe("call tile projection", () => {
         showsPresentingGlyph: true,
       },
     ]);
-    expect(tiles.find((tile) => tile.key === "remote:alice@example.com/web:screen_share")?.audioTrack)
-      .toBe(screenAudioTrack);
+    const screenTile = tiles.find((tile) => tile.key === "remote:alice@example.com/web:screen_share");
+    expect(screenTile && "audioTrack" in screenTile).toBe(false);
   });
 
   test("projects local camera and screen share with separate mirror decisions", () => {
@@ -139,7 +138,6 @@ describe("call tile projection", () => {
       showsPresentingGlyph: true,
       micEnabled: true,
       videoTrack: null,
-      audioTrack: null,
       attach: () => undefined,
     });
 
@@ -157,7 +155,6 @@ describe("call tile projection", () => {
       showsPresentingGlyph: true,
       micEnabled: true,
       videoTrack: null,
-      audioTrack: null,
       attach: () => undefined,
       interactive: false,
     });
@@ -171,6 +168,12 @@ describe("call tile projection", () => {
   test("forwards the presenting glyph flag in every grid branch", () => {
     const source = readFileSync(new URL("../src/components/calls/CallTileGrid.vue", import.meta.url), "utf8");
     expect(source.match(/:shows-presenting-glyph=/g)?.length).toBe(3);
+  });
+
+  test("call tiles do not render audio elements", () => {
+    const source = readFileSync(new URL("../src/components/calls/CallTile.vue", import.meta.url), "utf8");
+    expect(source).not.toContain("<audio");
+    expect(source).not.toContain("audioTrack");
   });
 });
 

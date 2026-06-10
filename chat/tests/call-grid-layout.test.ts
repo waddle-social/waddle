@@ -136,7 +136,7 @@ describe("buildCallTiles", () => {
     expect(tiles.filter((tile) => tile.identity === "bob@waddle.test/laptop")).toHaveLength(2);
   });
 
-  test("groups microphone audio with camera and screen-share audio with screen", () => {
+  test("keeps microphone and screen-share audio out of tile models", () => {
     const tiles = buildCallTiles({
       remoteTracks: [
         remoteVideo("cam-pub", "camera"),
@@ -153,8 +153,8 @@ describe("buildCallTiles", () => {
       "remote:bob@waddle.test/laptop:camera",
       "remote:bob@waddle.test/laptop:screen_share",
     ]);
-    expect(tiles[0]?.audioTrack).not.toBeNull();
-    expect(tiles[1]?.audioTrack).not.toBeNull();
+    expect("audioTrack" in (tiles[0] ?? {})).toBe(false);
+    expect("audioTrack" in (tiles[1] ?? {})).toBe(false);
   });
 
   test("mirrors local camera previews but not local screen-share previews", () => {
