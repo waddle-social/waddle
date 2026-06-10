@@ -80,13 +80,16 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="${CUENV_VERSION}"
+        cuenv_version="0.53.1"
+        if [ -z "$cuenv_version" ]; then
+          cuenv_version="latest"
+        fi
         if [ "$cuenv_version" = "latest" ]; then
           cuenv_url="https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}"
         else
           cuenv_url="https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}"
         fi
-        curl -sSL -o /usr/local/bin/cuenv "$cuenv_url" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
+        curl -fsSL -o /usr/local/bin/cuenv "$cuenv_url" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     - name: cuenv:contributor:bun.workspace.setup
