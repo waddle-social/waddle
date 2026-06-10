@@ -4,7 +4,7 @@ language: {
 }
 deps: {
 	"github.com/cuenv/cuenv@v0": {
-		v: "v0.51.3"
+		v: "v0.52.0"
 	}
 }
 custom: {
