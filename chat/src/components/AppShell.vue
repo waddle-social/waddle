@@ -2,6 +2,7 @@
 import { onBeforeUnmount } from "vue";
 import LandingState from "@/components/chat/LandingState.vue";
 import LoginScreen from "@/components/chat/LoginScreen.vue";
+import CallAudioSink from "@/components/calls/CallAudioSink.vue";
 import { useChatAppController } from "@/shell/chat-app-controller";
 import { appController } from "@/stores/app-controller";
 
@@ -55,5 +56,8 @@ onBeforeUnmount(() => {
     module-level store to access shared connection / channel / unread
     state without prop drilling across separate Astro islands.
   -->
-  <slot v-else />
+  <template v-else>
+    <CallAudioSink />
+    <slot />
+  </template>
 </template>
