@@ -108,7 +108,7 @@ describe("CallAudioSink", () => {
     el.srcObject = { stream: true };
 
     sink.sync(audio, el);
-    sink.detach(audio);
+    sink.sync(audio, null);
 
     expect(track.attached).toEqual([]);
     expect(el.srcObject).toBeNull();

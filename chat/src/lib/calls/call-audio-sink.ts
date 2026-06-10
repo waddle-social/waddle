@@ -23,10 +23,6 @@ export class CallAudioSinkAttachments {
     this.attachments.sync(callAudioSinkTrackKey(track), el, track.track);
   }
 
-  detach(track: CallAudioSinkTrack): void {
-    this.attachments.sync(callAudioSinkTrackKey(track), null, null);
-  }
-
   detachAll(): void {
     this.attachments.detachAll();
   }
