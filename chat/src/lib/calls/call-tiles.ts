@@ -14,7 +14,6 @@ export type CallTileModel = {
   showsPresentingGlyph: boolean;
   micEnabledHint: boolean;
   videoTrack: TileAttachable | null;
-  audioTrack: TileAttachable | null;
 };
 
 export type BuildCallTilesInput = {
@@ -63,7 +62,6 @@ function newTile(
     showsPresentingGlyph: source === "screen_share",
     micEnabledHint: isSelf ? micEnabled : true,
     videoTrack: null,
-    audioTrack: null,
   };
 }
 
@@ -80,7 +78,6 @@ export function buildCallTiles(input: BuildCallTilesInput): CallTileModel[] {
       existing.videoTrack = local.track;
       if (source === "screen_share") existing.screenTrackKey = local.publicationSid;
     }
-    if (local.kind === "audio") existing.audioTrack = local.track;
     byKey.set(key, existing);
   }
 
@@ -92,7 +89,6 @@ export function buildCallTiles(input: BuildCallTilesInput): CallTileModel[] {
       existing.videoTrack = remote.track;
       if (source === "screen_share") existing.screenTrackKey = remote.publicationSid;
     }
-    if (remote.kind === "audio") existing.audioTrack = remote.track;
     byKey.set(key, existing);
   }
 

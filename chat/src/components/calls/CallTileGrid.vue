@@ -173,7 +173,6 @@ const gridStyle = computed(() => ({
           :shows-presenting-glyph="focusedTile.showsPresentingGlyph"
           :mic-enabled="focusedTile.micEnabledHint"
           :video-track="focusedTile.videoTrack"
-          :audio-track="focusedTile.audioTrack"
           :attach="attach"
           class="call-tile--focused"
           @activate="toggleFocus(focusedTile)"
@@ -190,7 +189,6 @@ const gridStyle = computed(() => ({
           :shows-presenting-glyph="tile.showsPresentingGlyph"
           :mic-enabled="tile.micEnabledHint"
           :video-track="tile.videoTrack"
-          :audio-track="tile.audioTrack"
           :attach="attach"
           class="call-tile--thumb"
           @activate="toggleFocus(tile)"
@@ -218,7 +216,6 @@ const gridStyle = computed(() => ({
         :shows-presenting-glyph="tile.showsPresentingGlyph"
         :mic-enabled="tile.micEnabledHint"
         :video-track="tile.videoTrack"
-        :audio-track="tile.audioTrack"
         :attach="attach"
         @activate="toggleFocus(tile)"
       />
