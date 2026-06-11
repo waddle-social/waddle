@@ -19,15 +19,15 @@ export async function applyCallDeviceSelection(
 ): Promise<void> {
   const activeDeviceId = deviceId ?? "default";
   if (kind === "mic") {
-    setMicDevice(deviceId);
     await engine.setMicDevice(activeDeviceId);
+    setMicDevice(deviceId);
     return;
   }
   if (kind === "cam") {
-    setCamDevice(deviceId);
     await engine.setCameraDevice(activeDeviceId);
+    setCamDevice(deviceId);
     return;
   }
-  setSpeakerDevice(deviceId);
   await engine.setSpeakerDevice(activeDeviceId);
+  setSpeakerDevice(deviceId);
 }

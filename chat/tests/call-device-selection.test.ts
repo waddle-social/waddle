@@ -44,4 +44,20 @@ describe("call device selection", () => {
     expect(engine.setCameraDevice).toHaveBeenCalledWith("default");
     expect(engine.setSpeakerDevice).toHaveBeenCalledWith("default");
   });
+
+  test("does not persist a preference when the active call rejects the device switch", async () => {
+    const engine = {
+      setMicDevice: mock(async (_id: string) => {
+        throw new Error("device unavailable");
+      }),
+      setCameraDevice: mock(async (_id: string) => undefined),
+      setSpeakerDevice: mock(async (_id: string) => undefined),
+    };
+    $devicePrefs.set({ mic: "old-mic", cam: null, speaker: null });
+
+    await expect(applyCallDeviceSelection("mic", null, engine)).rejects.toThrow("device unavailable");
+
+    expect(engine.setMicDevice).toHaveBeenCalledWith("default");
+    expect($devicePrefs.get()).toEqual({ mic: "old-mic", cam: null, speaker: null });
+  });
 });

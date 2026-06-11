@@ -24,7 +24,10 @@ afterEach(() => {
   resetCallControls(true, true);
   $callScreenShareEnabled.set(false);
   $callUiMode.set("split");
-  useCallEngine().localTracks.value = [];
+  const { engine, localTracks, remoteTracks } = useCallEngine();
+  localTracks.value = [];
+  remoteTracks.value = [];
+  (engine as unknown as { room: unknown }).room = null;
 });
 
 function localVideo(
