@@ -2,6 +2,7 @@
 import { onBeforeUnmount } from "vue";
 import LandingState from "@/components/chat/LandingState.vue";
 import LoginScreen from "@/components/chat/LoginScreen.vue";
+import CallAudioPlaybackPrompt from "@/components/calls/CallAudioPlaybackPrompt.vue";
 import CallAudioSink from "@/components/calls/CallAudioSink.vue";
 import { useChatAppController } from "@/shell/chat-app-controller";
 import { appController } from "@/stores/app-controller";
@@ -57,6 +58,7 @@ onBeforeUnmount(() => {
     state without prop drilling across separate Astro islands.
   -->
   <template v-else>
+    <CallAudioPlaybackPrompt />
     <CallAudioSink />
     <slot />
   </template>

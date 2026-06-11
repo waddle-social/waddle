@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
-import { createSSRApp, h } from "vue";
+import { createSSRApp, h, ref } from "vue";
 import { renderToString } from "vue/server-renderer";
-import { parse, compileScript } from "vue/compiler-sfc";
+import { parse, compileScript, compileTemplate } from "vue/compiler-sfc";
 import ts from "typescript";
 import { $callState, clearCallState } from "../src/lib/calls/call-store";
 import {
@@ -31,6 +31,8 @@ import {
   $callAudioPlaybackBlocked,
   resumeCallAudioPlayback,
 } from "../src/lib/calls/call-audio-playback";
+import { CallAudioResumeAttemptGuard } from "../src/lib/calls/call-audio-resume-attempt";
+import { useCallAudioPlaybackPromptController } from "../src/lib/calls/call-audio-playback-prompt-controller";
 import { useCallEngine } from "../src/lib/calls/use-call-engine";
 import {
   $dmCallActivities,
@@ -43,6 +45,8 @@ import {
 import { connectionStore } from "../src/lib/connection-store";
 import type { LiveKitJoin } from "../src/lib/calls/types";
 import { Track } from "livekit-client";
+import { renderVueComponent as renderSfcComponent } from "./helpers/render-vue-sfc";
+import { $callUiMode } from "../src/lib/calls/ui-mode";
 
 const require = createRequire(import.meta.url);
 
@@ -86,10 +90,12 @@ afterEach(() => {
   clearDmCallActivities();
   $mucCallLiveParticipants.set({});
   connectionStore.client = null;
+  connectionStore.appState = "loading";
   clearAllMediaIssues();
   $callAudioPlaybackBlocked.set(false);
   $callScreenShareEnabled.set(false);
   $callScreenShareSupported.set(false);
+  $callUiMode.set("split");
   // The engine is a process-wide singleton; drop any injected room
   // stub so it doesn't leak into the next test.
   (useCallEngine().engine as unknown as { room: unknown }).room = null;
@@ -470,12 +476,91 @@ describe("device-less call controls", () => {
     const component = await loadVueComponent("../src/components/calls/CallAudioPlaybackPrompt.vue");
 
     $callAudioPlaybackBlocked.set(false);
+    setActiveMucCall();
     expect(await renderVueComponent(component)).not.toContain("Tap to enable audio");
 
     $callAudioPlaybackBlocked.set(true);
     const html = await renderVueComponent(component);
     expect(html).toContain("Audio is paused by your browser.");
     expect(html).toContain("Tap to enable audio");
+  });
+
+  test("call audio playback prompt stays hidden outside an active call", async () => {
+    const component = await loadVueComponent("../src/components/calls/CallAudioPlaybackPrompt.vue");
+
+    $callAudioPlaybackBlocked.set(true);
+    expect(await renderVueComponent(component)).not.toContain("Tap to enable audio");
+  });
+
+  test("app-level blocked audio recovery renders while viewing another conversation", async () => {
+    const component = await loadVueComponent("../src/components/calls/CallAudioPlaybackPrompt.vue");
+
+    setActiveMucCall();
+    $callAudioPlaybackBlocked.set(true);
+
+    const html = await renderToString(createSSRApp({
+      render: () =>
+        h("main", [
+          h(component as never),
+          h("section", { "aria-label": "Direct message with Bob" }, "Different conversation"),
+        ]),
+    }));
+
+    expect(html).toContain("Audio is paused by your browser.");
+    expect(html).toContain("Tap to enable audio");
+    expect(html).toContain("Different conversation");
+  });
+
+  test("call audio playback prompt keeps retry affordance after failed browser resume", async () => {
+    const component = await loadVueComponent("../src/components/calls/CallAudioPlaybackPrompt.vue", {
+      inlineTemplate: false,
+    }) as {
+      setup: (
+        props: Record<string, never>,
+        context: { expose: () => void },
+      ) => {
+        enableAudio: () => Promise<void>;
+        visible: { value: boolean };
+        resumeFailed: { value: boolean };
+        resuming: { value: boolean };
+      };
+    };
+    let shouldFail = true;
+    (useCallEngine().engine as unknown as { startAudio: () => Promise<void> }).startAudio = async () => {
+      if (shouldFail) throw new Error("blocked");
+    };
+    const bindings = component.setup({}, { expose: () => undefined });
+
+    await bindings.enableAudio();
+
+    expect(bindings.resumeFailed.value).toBe(true);
+    expect(bindings.resuming.value).toBe(false);
+    const failedRenderBindings = {
+      ...bindings,
+      visible: true,
+      resumeFailed: bindings.resumeFailed.value,
+      resuming: bindings.resuming.value,
+    };
+    expect(await renderVueComponentWithBindings(component, failedRenderBindings)).toContain(
+      "Try again from this button.",
+    );
+    expect(await renderVueComponentWithBindings(component, failedRenderBindings)).toContain(
+      "Tap to enable audio",
+    );
+
+    shouldFail = false;
+    await bindings.enableAudio();
+
+    expect(bindings.resumeFailed.value).toBe(false);
+    const recoveredRenderBindings = {
+      ...bindings,
+      visible: true,
+      resumeFailed: bindings.resumeFailed.value,
+      resuming: bindings.resuming.value,
+    };
+    expect(await renderVueComponentWithBindings(component, recoveredRenderBindings)).not.toContain(
+      "Try again from this button.",
+    );
   });
 
   test("call audio resume helper reports failed browser resume without throwing", async () => {
@@ -493,23 +578,106 @@ describe("device-less call controls", () => {
     expect(failures).toEqual(["failed"]);
   });
 
-  test("call surfaces mount the tap-to-enable audio affordance", () => {
-    const promptSource = readFileSync(
-      new URL("../src/components/calls/CallAudioPlaybackPrompt.vue", import.meta.url),
-      "utf8",
-    );
-    const splitSource = readFileSync(
-      new URL("../src/components/calls/CallSplitContainer.vue", import.meta.url),
-      "utf8",
-    );
-    const expandedSource = readFileSync(
-      new URL("../src/components/calls/CallExpandedSurface.vue", import.meta.url),
-      "utf8",
-    );
+  test("call audio resume attempts ignore settlements after the active call changes", () => {
+    const guard = new CallAudioResumeAttemptGuard();
+    const callA = guard.begin("call-a");
 
-    expect(promptSource).toContain(":disabled=\"resuming\"");
-    expect(splitSource).toContain("<CallAudioPlaybackPrompt />");
-    expect(expandedSource).toContain("<CallAudioPlaybackPrompt />");
+    expect(callA.matches("call-a")).toBe(true);
+    expect(callA.matches("call-b")).toBe(false);
+
+    const callB = guard.begin("call-b");
+
+    expect(callA.matches("call-a")).toBe(false);
+    expect(callA.matches("call-b")).toBe(false);
+    expect(callB.matches("call-b")).toBe(true);
+  });
+
+  test("call audio playback prompt ignores delayed resume failure after call changes", async () => {
+    let rejectResume: ((error: Error) => void) | null = null;
+    const blocked = ref(true);
+    const callState = ref({
+      phase: "active",
+      peer: "bob@waddle.test/web",
+      sid: "call-a",
+      media: { audio: true, video: false },
+      join,
+      kind: "dm",
+    } as const);
+    const controller = useCallAudioPlaybackPromptController(blocked, callState, {
+      startAudio: () =>
+        new Promise((_resolve, reject) => {
+          rejectResume = reject;
+        }),
+    });
+
+    const pending = controller.enableAudio();
+
+    expect(controller.resuming.value).toBe(true);
+
+    callState.value = {
+      phase: "active",
+      peer: "carol@waddle.test/web",
+      sid: "call-b",
+      media: { audio: true, video: false },
+      join,
+      kind: "dm",
+    };
+
+    expect(controller.resuming.value).toBe(false);
+
+    rejectResume?.(new Error("blocked"));
+    await pending;
+
+    expect(controller.activeCallSid.value).toBe("call-b");
+    expect(controller.resumeFailed.value).toBe(false);
+    expect(controller.resuming.value).toBe(false);
+  });
+
+  test("app shell and mounted call surface render exactly one audio recovery banner", async () => {
+    $callState.set({
+      phase: "active",
+      peer: "bob@waddle.test/web",
+      sid: "dm-call",
+      media: { audio: true, video: false },
+      join,
+      kind: "dm",
+    });
+    $callUiMode.set("split");
+    $callAudioPlaybackBlocked.set(true);
+    connectionStore.appState = "ready";
+
+    const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {
+        location: { pathname: "/dm/alice", search: "" },
+        history: {
+          pushState: () => undefined,
+          replaceState: () => undefined,
+        },
+        addEventListener: () => undefined,
+        removeEventListener: () => undefined,
+      },
+    });
+    let appLevelHtml: string;
+    try {
+      appLevelHtml = await renderSfcComponent(
+        "../src/components/AppShell.vue",
+        { giphyApiKey: "" },
+        import.meta.url,
+      );
+    } finally {
+      if (originalWindow) Object.defineProperty(globalThis, "window", originalWindow);
+      else Reflect.deleteProperty(globalThis, "window");
+    }
+    const surfaceHtml = await renderSfcComponent(
+      "../src/components/calls/CallSplitContainer.vue",
+      { dmPeerJid: "bob@waddle.test" },
+      import.meta.url,
+    );
+    const combinedHtml = `${appLevelHtml}${surfaceHtml}`;
+
+    expect(combinedHtml.match(/Tap to enable audio/g)?.length ?? 0).toBe(1);
   });
 });
 
@@ -546,25 +714,66 @@ async function renderCallControls(overrides: Record<string, unknown>): Promise<s
   return renderToString(createSSRApp({ render: () => h(component, props) }));
 }
 
+function setActiveMucCall(): void {
+  $callState.set({
+    phase: "active",
+    peer: "general@conference.example.com",
+    sid: "c1",
+    media: { audio: true, video: false },
+    join,
+    kind: "muc",
+    selfNick: "alice",
+  });
+}
+
 async function renderVueComponent(component: unknown): Promise<string> {
   return renderToString(createSSRApp({ render: () => h(component as never) }));
 }
 
-async function loadVueComponent(path: string) {
+async function renderVueComponentWithBindings(
+  component: { render: unknown },
+  bindings: Record<string, unknown>,
+): Promise<string> {
+  return renderToString(createSSRApp({
+    render: () =>
+      (component.render as (
+        ctx: Record<string, unknown>,
+        cache: unknown[],
+        props: Record<string, unknown>,
+        setup: Record<string, unknown>,
+        data: Record<string, unknown>,
+        options: Record<string, unknown>,
+      ) => unknown)(bindings, [], {}, bindings, {}, {}),
+  }));
+}
+
+async function loadVueComponent(
+  path: string,
+  options: { inlineTemplate?: boolean } = { inlineTemplate: true },
+) {
   const filename = new URL(path, import.meta.url);
   const source = readFileSync(filename, "utf8");
   const { descriptor } = parse(source, { filename: filename.pathname });
   const script = compileScript(descriptor, {
     id: filename.pathname,
-    inlineTemplate: true,
+    inlineTemplate: options.inlineTemplate ?? true,
   });
 
   const tempDir = mkdtempSync(joinPath(tmpdir(), "waddle-call-audio-playback-"));
   try {
-    const compiled = [
+    const parts = [
       rewriteImports(script.content.replace("export default", "const __sfc__ ="), filename),
-      "export default __sfc__;",
-    ].join("\n");
+    ];
+    if (!(options.inlineTemplate ?? true) && descriptor.template) {
+      const template = compileTemplate({
+        id: filename.pathname,
+        filename: filename.pathname,
+        source: descriptor.template.content,
+      }).code.replace("export function render", "function render");
+      parts.push(rewriteImports(template, filename), "__sfc__.render = render;");
+    }
+    parts.push("export default __sfc__;");
+    const compiled = parts.join("\n");
     const js = ts.transpileModule(compiled, {
       compilerOptions: {
         module: ts.ModuleKind.ESNext,
