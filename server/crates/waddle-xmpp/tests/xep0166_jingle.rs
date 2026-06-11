@@ -17,11 +17,28 @@
 //! [`SessionId`]) and [`minidom::Element::builder`] — no `format!`,
 //! no string concatenation (CLAUDE.md XML hard rule).
 
+use std::{
+    sync::{Arc, Barrier},
+    thread,
+};
+
+use chrono::Duration;
+use jid::FullJid;
 use minidom::Element;
+use waddle_sfu::{
+    ApiKey, ApiSecret, Identity, LiveKitSfu, SfuConfig, SfuService, TurnHost, TurnSharedSecret,
+    WebsocketUrl,
+};
+use waddle_xmpp::protocol::{
+    event::OutboundEvent, handlers::jingle::JingleHandler, traits::IqHandler, StanzaContext,
+};
 use waddle_xmpp::xep::xep0166::{
     reason_element, session_terminate, Action, Content, ContentId, Creator, Jingle, Reason,
     SessionId, Transport, NS_JINGLE,
 };
+use waddle_xmpp::Stanza;
+use xmpp_parsers::iq::Iq;
+use xmpp_parsers::stanza_error::DefinedCondition;
 
 const NS_JINGLE_RTP: &str = "urn:xmpp:jingle:apps:rtp:1";
 const NS_WADDLE_LIVEKIT_TRANSPORT: &str = "urn:waddle:transports:livekit:0";
@@ -39,6 +56,125 @@ fn audio_content_with_waddle_transport() -> Content {
     let transport = Element::builder("transport", NS_WADDLE_LIVEKIT_TRANSPORT).build();
     content.transport = Some(Transport::Unknown(transport));
     content
+}
+
+fn audio_content_with_issued_waddle_transport() -> Content {
+    let mut content = audio_content_with_waddle_transport();
+    let transport = Element::builder("transport", NS_WADDLE_LIVEKIT_TRANSPORT)
+        .attr(
+            minidom::rxml::xml_ncname!("url").to_owned(),
+            "wss://evil.test",
+        )
+        .attr(minidom::rxml::xml_ncname!("room").to_owned(), "evil-room")
+        .attr(
+            minidom::rxml::xml_ncname!("identity").to_owned(),
+            "mallory@waddle.test/laptop",
+        )
+        .append(
+            Element::builder("token", NS_WADDLE_LIVEKIT_TRANSPORT)
+                .append("attacker-token")
+                .build(),
+        )
+        .build();
+    content.transport = Some(Transport::Unknown(transport));
+    content
+}
+
+fn fixture_livekit_sfu() -> Arc<LiveKitSfu> {
+    let cfg = SfuConfig {
+        api_key: ApiKey::new("APIxxxxxxxx"),
+        api_secret: ApiSecret::from_text("super-secret-secret-32-bytes-min")
+            .expect("test secret meets min length"),
+        webhook_secret: ApiSecret::from_text("super-secret-secret-32-bytes-min")
+            .expect("test secret meets min length"),
+        ws_url: WebsocketUrl::new("wss://livekit.test/".parse().unwrap()).unwrap(),
+        turn_host: TurnHost::new("turn.test"),
+        turn_tls_port: 443,
+        turn_udp_port: 3478,
+        turn_shared_secret: TurnSharedSecret::from_text("turn-secret"),
+        token_ttl: Duration::seconds(3600),
+        turn_ttl: Duration::seconds(3600),
+    };
+    Arc::new(LiveKitSfu::new(cfg).expect("LiveKitSfu init in test"))
+}
+
+fn ctx<'a>(jid: &'a FullJid) -> StanzaContext<'a> {
+    StanzaContext {
+        domain: "waddle.test",
+        full_jid: jid,
+    }
+}
+
+fn dm_jingle_iq(action: Action, from: &str, to: &str, sid: &str) -> Iq {
+    let mut jingle = Jingle::new(action.clone(), SessionId(sid.into()));
+    match action {
+        Action::SessionInitiate => {
+            jingle.initiator = Some(from.parse().expect("valid initiator JID"));
+        }
+        Action::SessionAccept => {
+            jingle.responder = Some(from.parse().expect("valid responder JID"));
+        }
+        _ => {}
+    }
+    jingle.contents.push(audio_content_with_waddle_transport());
+
+    Iq::Set {
+        from: Some(from.parse().expect("valid from JID")),
+        to: Some(to.parse().expect("valid to JID")),
+        id: format!("jingle-{sid}"),
+        payload: jingle.into(),
+    }
+}
+
+fn dm_jingle_iq_with_content(
+    action: Action,
+    from: &str,
+    to: &str,
+    sid: &str,
+    content: Content,
+) -> Iq {
+    let mut jingle = Jingle::new(action.clone(), SessionId(sid.into()));
+    match action {
+        Action::SessionInitiate => {
+            jingle.initiator = Some(from.parse().expect("valid initiator JID"));
+        }
+        Action::SessionAccept => {
+            jingle.responder = Some(from.parse().expect("valid responder JID"));
+        }
+        _ => {}
+    }
+    jingle.contents.push(content);
+
+    Iq::Set {
+        from: Some(from.parse().expect("valid from JID")),
+        to: Some(to.parse().expect("valid to JID")),
+        id: format!("jingle-{sid}"),
+        payload: jingle.into(),
+    }
+}
+
+fn first_error_condition(events: &[OutboundEvent]) -> Option<DefinedCondition> {
+    events.iter().find_map(|event| {
+        let OutboundEvent::SendStanza(stanza) = event else {
+            return None;
+        };
+        let Stanza::Iq(reply) = stanza.as_ref() else {
+            return None;
+        };
+        let Iq::Error { error, .. } = reply.as_ref() else {
+            return None;
+        };
+        Some(error.defined_condition.clone())
+    })
+}
+
+fn has_route_to(events: &[OutboundEvent], expected_jid: &str) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            event,
+            OutboundEvent::RouteToConnection { jid, .. } if jid.to_string() == expected_jid
+        )
+    })
 }
 
 fn parse_jingle(xml: &str) -> Jingle {
@@ -138,6 +274,730 @@ fn xep_0166_session_accept_carries_responder_attribute() {
         jingle.initiator.as_ref().map(|j| j.to_string()),
         Some("alice@waddle.test/desktop".to_string())
     );
+}
+
+#[test]
+fn xep_0166_dm_session_accept_requires_prior_invite_for_same_full_jid() {
+    // Waddle's XEP-0166 LiveKit transport rewrite is server-mediated:
+    // the initial session-initiate mints the responder's token and
+    // records the invited full JID. A later session-accept may mint
+    // back into the initiator-scoped room only for that same invited
+    // responder, not an arbitrary authenticated local user.
+    let sfu = fixture_livekit_sfu();
+    let handler = JingleHandler::new(sfu);
+    let alice: FullJid = "alice@waddle.test/desktop".parse().expect("valid JID");
+    let bob: FullJid = "bob@waddle.test/phone".parse().expect("valid JID");
+
+    let initiate = dm_jingle_iq(
+        Action::SessionInitiate,
+        "alice@waddle.test/desktop",
+        "bob@waddle.test/phone",
+        "dm-prior-invite",
+    );
+    let initiate_events = handler.handle(&initiate, &ctx(&alice));
+    assert!(
+        has_route_to(&initiate_events, "bob@waddle.test/phone"),
+        "session-initiate should route the token-bearing invite to Bob: {initiate_events:?}",
+    );
+
+    let accept = dm_jingle_iq(
+        Action::SessionAccept,
+        "bob@waddle.test/phone",
+        "alice@waddle.test/desktop",
+        "dm-prior-invite",
+    );
+    let accept_events = handler.handle(&accept, &ctx(&bob));
+
+    assert_eq!(first_error_condition(&accept_events), None);
+    assert!(
+        has_route_to(&accept_events, "alice@waddle.test/desktop"),
+        "invited responder should be allowed to accept and route back to Alice: {accept_events:?}",
+    );
+}
+
+#[test]
+fn xep_0166_dm_session_accept_rejects_fresh_uninvited_third_party() {
+    // Alice invited Bob for this sid. A fresh unrelated authenticated
+    // third party must not be able to mint back into Alice's scoped
+    // call id by sending a session-accept with the same sid.
+    let sfu = fixture_livekit_sfu();
+    let handler = JingleHandler::new(sfu);
+    let alice: FullJid = "alice@waddle.test/desktop".parse().expect("valid JID");
+    let eve: FullJid = "eve@waddle.test/laptop".parse().expect("valid JID");
+
+    let initiate = dm_jingle_iq(
+        Action::SessionInitiate,
+        "alice@waddle.test/desktop",
+        "bob@waddle.test/phone",
+        "dm-fresh-third-party",
+    );
+    let initiate_events = handler.handle(&initiate, &ctx(&alice));
+    assert!(
+        has_route_to(&initiate_events, "bob@waddle.test/phone"),
+        "session-initiate should route the token-bearing invite to Bob: {initiate_events:?}",
+    );
+
+    let eve_accept = dm_jingle_iq(
+        Action::SessionAccept,
+        "eve@waddle.test/laptop",
+        "alice@waddle.test/desktop",
+        "dm-fresh-third-party",
+    );
+    let accept_events = handler.handle(&eve_accept, &ctx(&eve));
+
+    assert_eq!(
+        first_error_condition(&accept_events),
+        Some(DefinedCondition::Forbidden),
+        "fresh third-party accept must not satisfy Bob's invite: {accept_events:?}",
+    );
+    assert!(
+        !has_route_to(&accept_events, "alice@waddle.test/desktop"),
+        "forbidden third-party accept must not be forwarded"
+    );
+}
+
+#[test]
+fn xep_0166_dm_session_accept_rejects_retargeted_initiator_resource() {
+    // Alice's desktop resource initiated the call. Even the invited
+    // responder must not retarget the accept to a different Alice
+    // resource under the same bare JID and obtain a token for that
+    // non-party full JID.
+    let sfu = fixture_livekit_sfu();
+    let handler = JingleHandler::new(sfu);
+    let alice_desktop: FullJid = "alice@waddle.test/desktop".parse().expect("valid JID");
+    let bob: FullJid = "bob@waddle.test/phone".parse().expect("valid JID");
+
+    let initiate = dm_jingle_iq(
+        Action::SessionInitiate,
+        "alice@waddle.test/desktop",
+        "bob@waddle.test/phone",
+        "dm-retargeted-initiator",
+    );
+    let initiate_events = handler.handle(&initiate, &ctx(&alice_desktop));
+    assert!(
+        has_route_to(&initiate_events, "bob@waddle.test/phone"),
+        "session-initiate should route the token-bearing invite to Bob: {initiate_events:?}",
+    );
+
+    let retargeted_accept = dm_jingle_iq(
+        Action::SessionAccept,
+        "bob@waddle.test/phone",
+        "alice@waddle.test/mobile",
+        "dm-retargeted-initiator",
+    );
+    let accept_events = handler.handle(&retargeted_accept, &ctx(&bob));
+
+    assert_eq!(
+        first_error_condition(&accept_events),
+        Some(DefinedCondition::Forbidden),
+        "invited responder must not retarget accept to a different initiator resource: {accept_events:?}",
+    );
+    assert!(
+        !has_route_to(&accept_events, "alice@waddle.test/mobile"),
+        "forbidden retargeted accept must not be forwarded"
+    );
+}
+
+#[test]
+fn xep_0166_dm_rejects_client_supplied_issued_transport_on_session_initiate() {
+    // Clients request LiveKit credentials with an empty Waddle
+    // transport. A pre-populated issued transport is not a proof and
+    // must not be forwarded through the server-mediated minting path.
+    let sfu = fixture_livekit_sfu();
+    let handler = JingleHandler::new(sfu);
+    let alice: FullJid = "alice@waddle.test/desktop".parse().expect("valid JID");
+    let initiate = dm_jingle_iq_with_content(
+        Action::SessionInitiate,
+        "alice@waddle.test/desktop",
+        "bob@waddle.test/phone",
+        "dm-issued-initiate",
+        audio_content_with_issued_waddle_transport(),
+    );
+
+    let events = handler.handle(&initiate, &ctx(&alice));
+
+    assert_eq!(
+        first_error_condition(&events),
+        Some(DefinedCondition::BadRequest)
+    );
+    assert!(
+        !has_route_to(&events, "bob@waddle.test/phone"),
+        "client-supplied issued transport must not be forwarded: {events:?}",
+    );
+}
+
+#[test]
+fn xep_0166_dm_rejects_client_supplied_issued_transport_on_session_accept() {
+    // The responder's session-accept is also a credential request,
+    // not a place where clients may inject already-issued tokens.
+    // The pending invite is restored after this rejection so a
+    // corrected accept can still succeed.
+    let sfu = fixture_livekit_sfu();
+    let handler = JingleHandler::new(sfu);
+    let alice: FullJid = "alice@waddle.test/desktop".parse().expect("valid JID");
+    let bob: FullJid = "bob@waddle.test/phone".parse().expect("valid JID");
+
+    let initiate = dm_jingle_iq(
+        Action::SessionInitiate,
+        "alice@waddle.test/desktop",
+        "bob@waddle.test/phone",
+        "dm-issued-accept",
+    );
+    assert!(has_route_to(
+        &handler.handle(&initiate, &ctx(&alice)),
+        "bob@waddle.test/phone"
+    ));
+
+    let issued_accept = dm_jingle_iq_with_content(
+        Action::SessionAccept,
+        "bob@waddle.test/phone",
+        "alice@waddle.test/desktop",
+        "dm-issued-accept",
+        audio_content_with_issued_waddle_transport(),
+    );
+    let issued_events = handler.handle(&issued_accept, &ctx(&bob));
+    assert_eq!(
+        first_error_condition(&issued_events),
+        Some(DefinedCondition::BadRequest),
+        "client-supplied issued accept must be rejected: {issued_events:?}",
+    );
+    assert!(
+        !has_route_to(&issued_events, "alice@waddle.test/desktop"),
+        "bad issued accept must not be forwarded",
+    );
+
+    let corrected_accept = dm_jingle_iq(
+        Action::SessionAccept,
+        "bob@waddle.test/phone",
+        "alice@waddle.test/desktop",
+        "dm-issued-accept",
+    );
+    let corrected_events = handler.handle(&corrected_accept, &ctx(&bob));
+    assert!(
+        has_route_to(&corrected_events, "alice@waddle.test/desktop"),
+        "rejected issued accept must not burn the pending invite: {corrected_events:?}",
+    );
+}
+
+#[test]
+fn xep_0166_dm_session_accept_consumes_prior_invite() {
+    // A DM responder invite is a one-time authorization to rewrite
+    // the responder's session-accept transport. A second accept with
+    // the same sid must not mint another token without a fresh invite.
+    let sfu = fixture_livekit_sfu();
+    let handler = JingleHandler::new(sfu);
+    let alice: FullJid = "alice@waddle.test/desktop".parse().expect("valid JID");
+    let bob: FullJid = "bob@waddle.test/phone".parse().expect("valid JID");
+
+    let initiate = dm_jingle_iq(
+        Action::SessionInitiate,
+        "alice@waddle.test/desktop",
+        "bob@waddle.test/phone",
+        "dm-one-shot",
+    );
+    let initiate_events = handler.handle(&initiate, &ctx(&alice));
+    assert!(
+        has_route_to(&initiate_events, "bob@waddle.test/phone"),
+        "session-initiate should route the token-bearing invite to Bob: {initiate_events:?}",
+    );
+
+    let accept = dm_jingle_iq(
+        Action::SessionAccept,
+        "bob@waddle.test/phone",
+        "alice@waddle.test/desktop",
+        "dm-one-shot",
+    );
+    let first_accept_events = handler.handle(&accept, &ctx(&bob));
+    assert!(
+        has_route_to(&first_accept_events, "alice@waddle.test/desktop"),
+        "first accept consumes the pending invite and routes to Alice: {first_accept_events:?}",
+    );
+
+    let replay_events = handler.handle(&accept, &ctx(&bob));
+    assert_eq!(
+        first_error_condition(&replay_events),
+        Some(DefinedCondition::Forbidden),
+        "replayed accept must not reuse the consumed invite: {replay_events:?}",
+    );
+}
+
+#[test]
+fn xep_0166_dm_concurrent_session_accept_consumes_invite_once() {
+    // The pending invite is claimed under the mutex before token
+    // minting. Two concurrent accepts for the same invited full JID
+    // must not both mint and route.
+    let sfu = fixture_livekit_sfu();
+    let handler = JingleHandler::new(sfu);
+    let alice: FullJid = "alice@waddle.test/desktop".parse().expect("valid JID");
+    let bob: FullJid = "bob@waddle.test/phone".parse().expect("valid JID");
+
+    let initiate = dm_jingle_iq(
+        Action::SessionInitiate,
+        "alice@waddle.test/desktop",
+        "bob@waddle.test/phone",
+        "dm-concurrent-accept",
+    );
+    assert!(has_route_to(
+        &handler.handle(&initiate, &ctx(&alice)),
+        "bob@waddle.test/phone"
+    ));
+
+    let accept = dm_jingle_iq(
+        Action::SessionAccept,
+        "bob@waddle.test/phone",
+        "alice@waddle.test/desktop",
+        "dm-concurrent-accept",
+    );
+    let barrier = Arc::new(Barrier::new(3));
+    let first_handler = handler.clone();
+    let second_handler = handler.clone();
+    let first_accept = accept.clone();
+    let second_accept = accept;
+    let first_bob = bob.clone();
+    let second_bob = bob;
+    let first_barrier = barrier.clone();
+    let second_barrier = barrier.clone();
+
+    let first = thread::spawn(move || {
+        first_barrier.wait();
+        first_handler.handle(&first_accept, &ctx(&first_bob))
+    });
+    let second = thread::spawn(move || {
+        second_barrier.wait();
+        second_handler.handle(&second_accept, &ctx(&second_bob))
+    });
+    barrier.wait();
+
+    let first_events = first.join().expect("first accept thread joins");
+    let second_events = second.join().expect("second accept thread joins");
+    let routed = usize::from(has_route_to(&first_events, "alice@waddle.test/desktop"))
+        + usize::from(has_route_to(&second_events, "alice@waddle.test/desktop"));
+    let forbidden =
+        usize::from(first_error_condition(&first_events) == Some(DefinedCondition::Forbidden))
+            + usize::from(
+                first_error_condition(&second_events) == Some(DefinedCondition::Forbidden),
+            );
+
+    assert_eq!(routed, 1, "only one concurrent accept may route");
+    assert_eq!(
+        forbidden, 1,
+        "the losing concurrent accept must be forbidden"
+    );
+}
+
+#[test]
+fn xep_0166_dm_failed_session_accept_keeps_invite_retryable() {
+    // The invite is consumed only after the accept transport rewrite
+    // succeeds. A malformed/unsupported accept can be corrected and
+    // retried without requiring a new session-initiate.
+    let sfu = fixture_livekit_sfu();
+    let handler = JingleHandler::new(sfu);
+    let alice: FullJid = "alice@waddle.test/desktop".parse().expect("valid JID");
+    let bob: FullJid = "bob@waddle.test/phone".parse().expect("valid JID");
+
+    let initiate = dm_jingle_iq(
+        Action::SessionInitiate,
+        "alice@waddle.test/desktop",
+        "bob@waddle.test/phone",
+        "dm-retry-accept",
+    );
+    assert!(has_route_to(
+        &handler.handle(&initiate, &ctx(&alice)),
+        "bob@waddle.test/phone"
+    ));
+
+    let mut bad_content = Content::new(Creator::Initiator, ContentId("audio".into()));
+    bad_content.transport = Some(Transport::Unknown(
+        Element::builder("transport", "urn:xmpp:jingle:transports:ice-udp:1").build(),
+    ));
+    let mut bad_jingle = Jingle::new(Action::SessionAccept, SessionId("dm-retry-accept".into()));
+    bad_jingle.responder = Some("bob@waddle.test/phone".parse().expect("valid responder"));
+    bad_jingle.contents.push(bad_content);
+    let bad_accept = Iq::Set {
+        from: Some("bob@waddle.test/phone".parse().expect("valid from")),
+        to: Some("alice@waddle.test/desktop".parse().expect("valid to")),
+        id: "bad-accept".into(),
+        payload: bad_jingle.into(),
+    };
+
+    let bad_events = handler.handle(&bad_accept, &ctx(&bob));
+    assert!(
+        bad_events
+            .iter()
+            .any(|event| matches!(event, OutboundEvent::SendStanza(_))),
+        "unsupported transport should fail before consuming the invite: {bad_events:?}",
+    );
+
+    let corrected_accept = dm_jingle_iq(
+        Action::SessionAccept,
+        "bob@waddle.test/phone",
+        "alice@waddle.test/desktop",
+        "dm-retry-accept",
+    );
+    let corrected_events = handler.handle(&corrected_accept, &ctx(&bob));
+    assert!(
+        has_route_to(&corrected_events, "alice@waddle.test/desktop"),
+        "corrected accept should still be authorized after failed rewrite: {corrected_events:?}",
+    );
+}
+
+#[test]
+fn xep_0166_dm_session_terminate_clears_pending_invite() {
+    // If the initiator hangs up before the responder accepts, the
+    // pending invite must be removed. A later stale accept must not
+    // mint or route into the ended call.
+    let sfu = fixture_livekit_sfu();
+    let handler = JingleHandler::new(sfu);
+    let alice: FullJid = "alice@waddle.test/desktop".parse().expect("valid JID");
+    let bob: FullJid = "bob@waddle.test/phone".parse().expect("valid JID");
+
+    let initiate = dm_jingle_iq(
+        Action::SessionInitiate,
+        "alice@waddle.test/desktop",
+        "bob@waddle.test/phone",
+        "dm-terminated-before-accept",
+    );
+    assert!(has_route_to(
+        &handler.handle(&initiate, &ctx(&alice)),
+        "bob@waddle.test/phone"
+    ));
+
+    let terminate = dm_jingle_iq(
+        Action::SessionTerminate,
+        "alice@waddle.test/desktop",
+        "bob@waddle.test/phone",
+        "dm-terminated-before-accept",
+    );
+    assert!(has_route_to(
+        &handler.handle(&terminate, &ctx(&alice)),
+        "bob@waddle.test/phone"
+    ));
+
+    let stale_accept = dm_jingle_iq(
+        Action::SessionAccept,
+        "bob@waddle.test/phone",
+        "alice@waddle.test/desktop",
+        "dm-terminated-before-accept",
+    );
+    let stale_events = handler.handle(&stale_accept, &ctx(&bob));
+    assert_eq!(
+        first_error_condition(&stale_events),
+        Some(DefinedCondition::Forbidden),
+        "terminate must clear the pending invite: {stale_events:?}",
+    );
+    assert!(
+        !has_route_to(&stale_events, "alice@waddle.test/desktop"),
+        "stale accept after terminate must not be forwarded",
+    );
+}
+
+#[test]
+fn xep_0166_dm_session_accept_rejects_stale_participant_on_reused_sid() {
+    // The LiveKit room id is `initiator-bare::sid`. If Alice reuses
+    // a sid, a stale SFU registry entry must not be enough to mint
+    // a fresh token. Authorization is bound to the current invite's
+    // responder full JID.
+    let sfu = fixture_livekit_sfu();
+    let call_id =
+        waddle_sfu::CallId::new("alice@waddle.test::dm-reused").expect("valid scoped call id");
+    let eve: FullJid = "eve@waddle.test/laptop".parse().expect("valid JID");
+    let eve_identity = Identity::from_jid(eve.clone());
+    sfu.register_call_participant(&call_id, &eve_identity);
+    assert!(
+        sfu.has_call_participant(&call_id, &eve_identity),
+        "fixture starts with Eve as a stale participant in the reused room"
+    );
+    let handler = JingleHandler::new(sfu);
+    let alice: FullJid = "alice@waddle.test/desktop".parse().expect("valid JID");
+
+    let fresh_invite = dm_jingle_iq(
+        Action::SessionInitiate,
+        "alice@waddle.test/desktop",
+        "bob@waddle.test/phone",
+        "dm-reused",
+    );
+    let initiate_events = handler.handle(&fresh_invite, &ctx(&alice));
+    assert!(
+        has_route_to(&initiate_events, "bob@waddle.test/phone"),
+        "fresh invite should route to the current responder: {initiate_events:?}",
+    );
+
+    let stale_accept = dm_jingle_iq(
+        Action::SessionAccept,
+        "eve@waddle.test/laptop",
+        "alice@waddle.test/desktop",
+        "dm-reused",
+    );
+    let accept_events = handler.handle(&stale_accept, &ctx(&eve));
+
+    assert_eq!(
+        first_error_condition(&accept_events),
+        Some(DefinedCondition::Forbidden),
+        "stale participant must not satisfy the current invite proof: {accept_events:?}",
+    );
+}
+
+#[test]
+fn xep_0166_dm_superseded_invite_revokes_previous_responder() {
+    // Reusing the same `sid` for a new responder must supersede the
+    // old 1:1 invite. The old responder's already-minted token state
+    // is revoked by unregistering them from the scoped SFU room.
+    let sfu = fixture_livekit_sfu();
+    let handler = JingleHandler::new(sfu.clone());
+    let alice: FullJid = "alice@waddle.test/desktop".parse().expect("valid JID");
+    let bob: FullJid = "bob@waddle.test/phone".parse().expect("valid JID");
+    let charlie: FullJid = "charlie@waddle.test/tablet".parse().expect("valid JID");
+    let call_id =
+        waddle_sfu::CallId::new("alice@waddle.test::dm-superseded").expect("valid scoped call id");
+    let bob_identity = Identity::from_jid(bob.clone());
+    let charlie_identity = Identity::from_jid(charlie.clone());
+
+    let first_invite = dm_jingle_iq(
+        Action::SessionInitiate,
+        "alice@waddle.test/desktop",
+        "bob@waddle.test/phone",
+        "dm-superseded",
+    );
+    let first_events = handler.handle(&first_invite, &ctx(&alice));
+    assert!(
+        has_route_to(&first_events, "bob@waddle.test/phone"),
+        "first invite should route to Bob: {first_events:?}",
+    );
+    assert!(sfu.has_call_participant(&call_id, &bob_identity));
+
+    let second_invite = dm_jingle_iq(
+        Action::SessionInitiate,
+        "alice@waddle.test/desktop",
+        "charlie@waddle.test/tablet",
+        "dm-superseded",
+    );
+    let second_events = handler.handle(&second_invite, &ctx(&alice));
+    assert!(
+        has_route_to(&second_events, "charlie@waddle.test/tablet"),
+        "superseding invite should route to Charlie: {second_events:?}",
+    );
+
+    assert!(
+        !sfu.has_call_participant(&call_id, &bob_identity),
+        "superseded responder must be removed from the scoped SFU room"
+    );
+    assert!(
+        sfu.has_call_participant(&call_id, &charlie_identity),
+        "current responder remains registered for the scoped SFU room"
+    );
+}
+
+#[test]
+fn xep_0166_dm_superseded_invite_replaces_pending_accept_authorization() {
+    // Reusing the same sid updates the pending accept proof. The
+    // superseded responder can no longer accept, while the current
+    // responder can.
+    let sfu = fixture_livekit_sfu();
+    let handler = JingleHandler::new(sfu);
+    let alice: FullJid = "alice@waddle.test/desktop".parse().expect("valid JID");
+    let bob: FullJid = "bob@waddle.test/phone".parse().expect("valid JID");
+    let charlie: FullJid = "charlie@waddle.test/tablet".parse().expect("valid JID");
+
+    let first_invite = dm_jingle_iq(
+        Action::SessionInitiate,
+        "alice@waddle.test/desktop",
+        "bob@waddle.test/phone",
+        "dm-superseded-accept",
+    );
+    assert!(has_route_to(
+        &handler.handle(&first_invite, &ctx(&alice)),
+        "bob@waddle.test/phone"
+    ));
+
+    let second_invite = dm_jingle_iq(
+        Action::SessionInitiate,
+        "alice@waddle.test/desktop",
+        "charlie@waddle.test/tablet",
+        "dm-superseded-accept",
+    );
+    assert!(has_route_to(
+        &handler.handle(&second_invite, &ctx(&alice)),
+        "charlie@waddle.test/tablet"
+    ));
+
+    let stale_bob_accept = dm_jingle_iq(
+        Action::SessionAccept,
+        "bob@waddle.test/phone",
+        "alice@waddle.test/desktop",
+        "dm-superseded-accept",
+    );
+    let bob_events = handler.handle(&stale_bob_accept, &ctx(&bob));
+    assert_eq!(
+        first_error_condition(&bob_events),
+        Some(DefinedCondition::Forbidden),
+        "superseded responder must not satisfy the current pending invite: {bob_events:?}",
+    );
+
+    let current_charlie_accept = dm_jingle_iq(
+        Action::SessionAccept,
+        "charlie@waddle.test/tablet",
+        "alice@waddle.test/desktop",
+        "dm-superseded-accept",
+    );
+    let charlie_events = handler.handle(&current_charlie_accept, &ctx(&charlie));
+    assert!(
+        has_route_to(&charlie_events, "alice@waddle.test/desktop"),
+        "current responder should satisfy the replacement pending invite: {charlie_events:?}",
+    );
+}
+
+#[test]
+fn xep_0166_dm_accepted_call_reuse_revokes_previous_responder() {
+    // Once Bob has accepted, the pending invite is gone. Reusing the
+    // same sid for Charlie still has to evict Bob from the scoped SFU
+    // room so Bob cannot terminate Charlie's superseding call.
+    let sfu = fixture_livekit_sfu();
+    let handler = JingleHandler::new(sfu.clone());
+    let alice: FullJid = "alice@waddle.test/desktop".parse().expect("valid JID");
+    let bob: FullJid = "bob@waddle.test/phone".parse().expect("valid JID");
+    let call_id = waddle_sfu::CallId::new("alice@waddle.test::dm-accepted-reused")
+        .expect("valid scoped call id");
+    let bob_identity = Identity::from_jid(bob.clone());
+
+    let first_invite = dm_jingle_iq(
+        Action::SessionInitiate,
+        "alice@waddle.test/desktop",
+        "bob@waddle.test/phone",
+        "dm-accepted-reused",
+    );
+    assert!(has_route_to(
+        &handler.handle(&first_invite, &ctx(&alice)),
+        "bob@waddle.test/phone"
+    ));
+    let bob_accept = dm_jingle_iq(
+        Action::SessionAccept,
+        "bob@waddle.test/phone",
+        "alice@waddle.test/desktop",
+        "dm-accepted-reused",
+    );
+    assert!(has_route_to(
+        &handler.handle(&bob_accept, &ctx(&bob)),
+        "alice@waddle.test/desktop"
+    ));
+    assert!(sfu.has_call_participant(&call_id, &bob_identity));
+
+    let second_invite = dm_jingle_iq(
+        Action::SessionInitiate,
+        "alice@waddle.test/desktop",
+        "charlie@waddle.test/tablet",
+        "dm-accepted-reused",
+    );
+    assert!(has_route_to(
+        &handler.handle(&second_invite, &ctx(&alice)),
+        "charlie@waddle.test/tablet"
+    ));
+    assert!(
+        !sfu.has_call_participant(&call_id, &bob_identity),
+        "accepted stale responder must be revoked on same-sid reuse"
+    );
+
+    let stale_terminate = dm_jingle_iq(
+        Action::SessionTerminate,
+        "bob@waddle.test/phone",
+        "alice@waddle.test/desktop",
+        "dm-accepted-reused",
+    );
+    let terminate_events = handler.handle(&stale_terminate, &ctx(&bob));
+    assert_eq!(
+        first_error_condition(&terminate_events),
+        Some(DefinedCondition::Forbidden),
+        "revoked accepted responder must not terminate the replacement call: {terminate_events:?}",
+    );
+}
+
+#[test]
+fn xep_0166_dm_superseded_responder_cannot_terminate_current_call() {
+    // A superseded responder is removed from the SFU room and must
+    // not be able to route a stale session-terminate for the reused
+    // sid to the initiator.
+    let sfu = fixture_livekit_sfu();
+    let handler = JingleHandler::new(sfu);
+    let alice: FullJid = "alice@waddle.test/desktop".parse().expect("valid JID");
+    let bob: FullJid = "bob@waddle.test/phone".parse().expect("valid JID");
+
+    let first_invite = dm_jingle_iq(
+        Action::SessionInitiate,
+        "alice@waddle.test/desktop",
+        "bob@waddle.test/phone",
+        "dm-stale-terminate",
+    );
+    assert!(has_route_to(
+        &handler.handle(&first_invite, &ctx(&alice)),
+        "bob@waddle.test/phone"
+    ));
+
+    let second_invite = dm_jingle_iq(
+        Action::SessionInitiate,
+        "alice@waddle.test/desktop",
+        "charlie@waddle.test/tablet",
+        "dm-stale-terminate",
+    );
+    assert!(has_route_to(
+        &handler.handle(&second_invite, &ctx(&alice)),
+        "charlie@waddle.test/tablet"
+    ));
+
+    let terminate = dm_jingle_iq(
+        Action::SessionTerminate,
+        "bob@waddle.test/phone",
+        "alice@waddle.test/desktop",
+        "dm-stale-terminate",
+    );
+    let terminate_events = handler.handle(&terminate, &ctx(&bob));
+    assert_eq!(
+        first_error_condition(&terminate_events),
+        Some(DefinedCondition::Forbidden),
+        "superseded responder must not route stale terminate: {terminate_events:?}",
+    );
+    assert!(
+        !has_route_to(&terminate_events, "alice@waddle.test/desktop"),
+        "forbidden stale terminate must not be forwarded"
+    );
+}
+
+#[test]
+fn xep_0166_dm_session_terminate_requires_shared_call_membership() {
+    // A caller's own live call with the same sid is not enough to
+    // authorize a terminate to an unrelated peer. The sender and
+    // addressed peer must share one scoped call id.
+    let sfu = fixture_livekit_sfu();
+    let eve_call = waddle_sfu::CallId::new("eve@waddle.test::dm-collision").expect("valid call id");
+    let alice_call =
+        waddle_sfu::CallId::new("alice@waddle.test::dm-collision").expect("valid call id");
+    let eve: FullJid = "eve@waddle.test/laptop".parse().expect("valid JID");
+    let mallory: FullJid = "mallory@waddle.test/phone".parse().expect("valid JID");
+    let alice: FullJid = "alice@waddle.test/desktop".parse().expect("valid JID");
+    let bob: FullJid = "bob@waddle.test/phone".parse().expect("valid JID");
+    let eve_identity = Identity::from_jid(eve.clone());
+    let mallory_identity = Identity::from_jid(mallory);
+    let alice_identity = Identity::from_jid(alice);
+    let bob_identity = Identity::from_jid(bob);
+    sfu.register_call_participant(&eve_call, &eve_identity);
+    sfu.register_call_participant(&eve_call, &mallory_identity);
+    sfu.register_call_participant(&alice_call, &alice_identity);
+    sfu.register_call_participant(&alice_call, &bob_identity);
+
+    let handler = JingleHandler::new(sfu.clone());
+    let terminate = dm_jingle_iq(
+        Action::SessionTerminate,
+        "eve@waddle.test/laptop",
+        "bob@waddle.test/phone",
+        "dm-collision",
+    );
+    let terminate_events = handler.handle(&terminate, &ctx(&eve));
+
+    assert_eq!(
+        first_error_condition(&terminate_events),
+        Some(DefinedCondition::Forbidden),
+        "sender and peer must share one scoped call: {terminate_events:?}",
+    );
+    assert_eq!(sfu.participant_count(&eve_call), 2);
+    assert_eq!(sfu.participant_count(&alice_call), 2);
 }
 
 // ── §6.7 session-terminate ────────────────────────────────────────────
