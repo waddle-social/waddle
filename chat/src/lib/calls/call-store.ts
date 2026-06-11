@@ -375,7 +375,9 @@ function emitRingingOnIncomingPropose(
   if (!sender || event.kind !== "propose") return;
   if (next.phase !== "incoming" || next.sid !== event.sid) return;
   if (before.phase === "incoming" && before.sid === event.sid) return;
-  void outboundCalls.ringing(sender, event.from, event.sid).catch((err) => reportCallError(err));
+  void outboundCalls
+    .ringing(sender, barePeerJid(event.from) || event.from, event.sid)
+    .catch((err) => reportCallError(err));
 }
 
 /**

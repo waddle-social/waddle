@@ -261,7 +261,7 @@ describe("incoming DM call alerting", () => {
     await flushCallSideEffects();
 
     expect(player.startLoop).toHaveBeenCalledWith("c1");
-    expect(sender.send_call_ringing).toHaveBeenCalledWith("bob@waddle.test/phone", "c1");
+    expect(sender.send_call_ringing).toHaveBeenCalledWith("bob@waddle.test", "c1");
 
     await tearDownActiveCall(sender, "gone");
     expect(player.stop).toHaveBeenCalledWith("c1");
