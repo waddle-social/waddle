@@ -167,6 +167,11 @@ const selfSharePresentation = computed(() =>
 const stageLocalTracks = computed(() =>
   selfSharePresentation.value?.stageLocalTracks ?? localTracks.value,
 );
+const expectedRemoteIdentities = computed(() => {
+  if (state.value.phase !== "active" || state.value.kind !== "dm") return [];
+  const peer = state.value.peer.trim();
+  return peer ? [peer] : [];
+});
 
 onMounted(() => {
   refreshScreenShareSupported();
@@ -211,6 +216,7 @@ async function onHangup(): Promise<void> {
           :remote-tracks="remoteTracks"
           :local-tracks="stageLocalTracks"
           :local-identity="localIdentity"
+          :expected-remote-identities="expectedRemoteIdentities"
           :mic-enabled="micEnabled"
         />
       </div>

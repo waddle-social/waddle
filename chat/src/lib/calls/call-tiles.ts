@@ -1,5 +1,6 @@
 import type { CallTrackSource, LocalMediaTrack, RemoteMediaTrack } from "./engine";
 import type { TileAttachable } from "./tile-attach";
+import { barePeerJid } from "../xmpp/jid";
 
 type TileSource = "camera" | "screen_share";
 
@@ -20,6 +21,7 @@ export type BuildCallTilesInput = {
   remoteTracks: RemoteMediaTrack[];
   localTracks: LocalMediaTrack[];
   localIdentity: string | null;
+  expectedRemoteIdentities?: readonly string[];
   micEnabled: boolean;
 };
 
@@ -42,6 +44,12 @@ function labelFor(identity: string, isSelf: boolean, source: TileSource): string
 
 function callTileKey(side: "self" | "remote", identity: string, source: TileSource): string {
   return `${side}:${identity}:${source}`;
+}
+
+function sameBareIdentity(left: string, right: string): boolean {
+  const leftBare = barePeerJid(left).toLowerCase();
+  const rightBare = barePeerJid(right).toLowerCase();
+  return !!leftBare && leftBare === rightBare;
 }
 
 function newTile(
@@ -90,6 +98,20 @@ export function buildCallTiles(input: BuildCallTilesInput): CallTileModel[] {
       if (source === "screen_share") existing.screenTrackKey = remote.publicationSid;
     }
     byKey.set(key, existing);
+  }
+
+  for (const identity of input.expectedRemoteIdentities ?? []) {
+    if (!identity.trim()) continue;
+    const hasRemoteCameraTile = Array.from(byKey.values()).some((tile) =>
+      !tile.isSelf &&
+      tile.source === "camera" &&
+      sameBareIdentity(tile.identity, identity)
+    );
+    if (hasRemoteCameraTile) continue;
+    const key = callTileKey("remote", identity, "camera");
+    if (!byKey.has(key)) {
+      byKey.set(key, newTile("remote", identity, "camera", input.micEnabled));
+    }
   }
 
   return Array.from(byKey.values());

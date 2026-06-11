@@ -79,6 +79,60 @@ describe("call tile projection", () => {
     expect(screenTile && "audioTrack" in screenTile).toBe(false);
   });
 
+  test("projects expected DM peer as a placeholder tile before media tracks arrive", () => {
+    const tiles = buildCallTiles({
+      remoteTracks: [],
+      localTracks: [],
+      localIdentity: "alice@example.com/web",
+      expectedRemoteIdentities: ["bob@example.com/phone"],
+      micEnabled: true,
+    });
+
+    expect(tiles.map((tile) => ({
+      key: tile.key,
+      label: tile.label,
+      isSelf: tile.isSelf,
+      videoTrack: tile.videoTrack,
+    }))).toEqual([
+      {
+        key: "self:alice@example.com/web:camera",
+        label: "You",
+        isSelf: true,
+        videoTrack: null,
+      },
+      {
+        key: "remote:bob@example.com/phone:camera",
+        label: "bob",
+        isSelf: false,
+        videoTrack: null,
+      },
+    ]);
+  });
+
+  test("merges an expected DM peer placeholder into the real remote camera tile by bare JID", () => {
+    const tiles = buildCallTiles({
+      remoteTracks: [
+        {
+          participantIdentity: "BOB@example.com/desktop",
+          publicationSid: "camera",
+          kind: "video",
+          source: "camera",
+          track: fakeTrack,
+        },
+      ],
+      localTracks: [],
+      localIdentity: "alice@example.com/web",
+      expectedRemoteIdentities: ["bob@example.com/phone"],
+      micEnabled: true,
+    });
+
+    expect(tiles.map((tile) => tile.key)).toEqual([
+      "self:alice@example.com/web:camera",
+      "remote:BOB@example.com/desktop:camera",
+    ]);
+    expect(tiles.find((tile) => !tile.isSelf)?.videoTrack).toBe(fakeTrack);
+  });
+
   test("projects local camera and screen share with separate mirror decisions", () => {
     const tiles = buildCallTiles({
       remoteTracks: [],
