@@ -258,6 +258,7 @@ pub(super) fn call_event_to_ffi(event: InboundCallEvent) -> WaddleCallEvent {
         CallEventKind::Propose { media } => WaddleCallEventKind::Propose {
             media: call_media_to_ffi(media),
         },
+        CallEventKind::Ringing => WaddleCallEventKind::Ringing,
         CallEventKind::Proceed => WaddleCallEventKind::Proceed,
         CallEventKind::Reject { reason, tie_break } => WaddleCallEventKind::Reject {
             reason: reason.map(jingle_reason_to_ffi),
@@ -661,6 +662,13 @@ mod tests {
             }
             other => panic!("expected Retract, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn jmi_ringing_round_trips_through_call_event_to_ffi() {
+        let ringing = call_event_to_ffi(parse_jmi(messaging::build_ringing(&sid("c1"))));
+        assert_eq!(ringing.sid, "c1");
+        assert!(matches!(ringing.kind, WaddleCallEventKind::Ringing));
     }
 
     #[test]
