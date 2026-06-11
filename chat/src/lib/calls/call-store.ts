@@ -20,6 +20,7 @@ import { clearLiveCallParticipants } from "./muc-call-live-participants";
 import { mediaErrorMessage } from "./call-media-issues";
 import { dmCallStartedAnchorFromTransition, publishDmCallStartedAnchor } from "./dm-call-anchor";
 import { barePeerJid } from "../xmpp/jid";
+import type { IncomingCallAlertController } from "@/shell/audio-alerts";
 
 /**
  * XEP-0272 §Joining MUST: a client emitting a preparing presence
@@ -171,6 +172,15 @@ export const $callState = atom<CallState>({ phase: "idle" });
  */
 export const $lastCallError = atom<string | null>(null);
 
+let incomingCallAlerts: IncomingCallAlertController | null = null;
+
+export function configureIncomingCallAlerts(
+  controller: IncomingCallAlertController | null,
+): void {
+  incomingCallAlerts?.stopAll();
+  incomingCallAlerts = controller;
+}
+
 /**
  * Pure reducer over the current call state. Exposed for unit
  * testing; the production caller is the `on_call` registration in
@@ -196,6 +206,15 @@ export function reduceCallState(current: CallState, event: CallEvent): CallState
           sid: event.sid,
           media: event.media,
         };
+      }
+      return current;
+    case "ringing":
+      if (
+        current.phase === "outgoing" &&
+        current.sid === event.sid &&
+        barePeerJid(event.from).toLowerCase() === barePeerJid(current.to).toLowerCase()
+      ) {
+        return { ...current, ringing: true };
       }
       return current;
     case "proceed":
@@ -296,7 +315,10 @@ export function reduceCallState(current: CallState, event: CallEvent): CallState
  *    in the reducer, because
  *    `setTimeout`/`clearTimeout` are global-state side-effects.
  */
-export function applyCallEvent(event: CallEvent): void {
+export function applyCallEvent(
+  event: CallEvent,
+  options: { sender?: CallWireSender | null } = {},
+): void {
   // Route inbound Muji session-accept stanzas to the pending
   // `beginMucCall` Promise BEFORE the 1:1 reducer sees them. A
   // Muji accept carries a per-attempt sid and arrives from the SFU
@@ -323,10 +345,39 @@ export function applyCallEvent(event: CallEvent): void {
     cancelOutgoingTimeout();
   }
   $callState.set(next);
+  applyIncomingCallAlerts(before, next);
+  emitRingingOnIncomingPropose(before, next, event, options.sender ?? null);
   // Surface the DM "started a call" card live (the server only enriches the
   // archived `<proceed/>` row, which never reaches the live timeline).
   const dmCallAnchor = dmCallStartedAnchorFromTransition(before, next, new Date().toISOString());
   if (dmCallAnchor) publishDmCallStartedAnchor(dmCallAnchor);
+}
+
+function applyIncomingCallAlerts(before: CallState, next: CallState): void {
+  if (before.phase === "incoming" && (next.phase !== "incoming" || next.sid !== before.sid)) {
+    incomingCallAlerts?.stop(before.sid);
+  }
+  if (next.phase === "incoming" && (before.phase !== "incoming" || before.sid !== next.sid)) {
+    incomingCallAlerts?.start({
+      peerJid: barePeerJid(next.from) || next.from,
+      sid: next.sid,
+      media: next.media,
+    });
+  }
+}
+
+function emitRingingOnIncomingPropose(
+  before: CallState,
+  next: CallState,
+  event: CallEvent,
+  sender: CallWireSender | null,
+): void {
+  if (!sender || event.kind !== "propose") return;
+  if (next.phase !== "incoming" || next.sid !== event.sid) return;
+  if (before.phase === "incoming" && before.sid === event.sid) return;
+  void outboundCalls
+    .ringing(sender, barePeerJid(event.from) || event.from, event.sid)
+    .catch((err) => reportCallError(err));
 }
 
 /**
@@ -339,6 +390,11 @@ export function clearCallState(): void {
     new Error("Muji session-accept wait cancelled while clearing call state"),
   );
   const current = $callState.get();
+  if (current.phase === "incoming") {
+    incomingCallAlerts?.stop(current.sid);
+  } else {
+    incomingCallAlerts?.stopAll();
+  }
   if (current.phase === "muc-pending") {
     cancelMucCallPreparationWaiters(
       current.peer,
@@ -366,6 +422,11 @@ export function acceptIncomingTieBreakPropose(
   $callState.set({
     phase: "incoming",
     from: event.from,
+    sid: event.sid,
+    media: event.media,
+  });
+  incomingCallAlerts?.start({
+    peerJid: barePeerJid(event.from) || event.from,
     sid: event.sid,
     media: event.media,
   });
@@ -635,6 +696,7 @@ export async function tearDownActiveCall(
           try {
             await outboundCalls.reject(sender, s.from, s.sid);
           } finally {
+            incomingCallAlerts?.stop(s.sid);
             clearDmCallActivity(s.from, s.sid);
           }
           break;

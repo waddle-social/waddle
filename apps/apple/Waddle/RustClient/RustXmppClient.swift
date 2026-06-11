@@ -500,6 +500,8 @@ private func makeCallEvent(_ event: WaddleCallEvent) -> XMPPCallEvent {
         switch event.kind {
         case let .propose(media):
             return .propose(media: makeCallMedia(media))
+        case .ringing:
+            return .ringing
         case .proceed:
             return .proceed
         case let .reject(reason, tieBreak):

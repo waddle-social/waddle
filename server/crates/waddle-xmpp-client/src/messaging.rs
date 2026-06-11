@@ -24,7 +24,7 @@ pub use call::{
     build_finish, build_finish_migrated, build_finish_with_options, build_finish_with_reason,
     build_muji_jingle_content, build_muji_session_initiate, build_muji_session_terminate,
     build_proceed, build_propose, build_reject, build_reject_with_options, build_retract,
-    build_retract_with_options, build_session_accept, build_session_initiate,
+    build_retract_with_options, build_ringing, build_session_accept, build_session_initiate,
     build_session_terminate, jingle_reason_from_wire_name, jingle_reason_wire_name,
     parse_call_event, parse_jingle_iq, parse_jmi_message, wrap_jmi_message, CallEventKind,
     CallMedia, InboundCallEvent, LiveKitJoin,

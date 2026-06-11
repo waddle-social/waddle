@@ -344,6 +344,8 @@ pub struct WaddleLiveKitJoin {
 pub enum WaddleCallEventKind {
     /// XEP-0353 §5.1.1 `<propose/>` — the ringing UI start signal.
     Propose { media: WaddleCallMedia },
+    /// XEP-0353 §3.2 `<ringing/>` — responder device is ringing.
+    Ringing,
     /// XEP-0353 §5.1.2 `<proceed/>` — peer is accepting the call.
     Proceed,
     /// XEP-0353 §5.1.3 `<reject/>` — peer declined the call.

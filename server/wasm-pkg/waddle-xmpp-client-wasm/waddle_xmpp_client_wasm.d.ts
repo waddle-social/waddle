@@ -274,6 +274,12 @@ export class WaddleClient {
     send_call_retract(peer_bare_jid: string, sid_str: string): Promise<any>;
     send_call_retract_tie_break(peer_full_jid: string, sid_str: string): Promise<any>;
     /**
+     * Send a JMI `<ringing/>` to the caller's bare JID (XEP-0353
+     * §3.2). The bare JID lets the initiator's server fan out the
+     * responder's device-ring state to every caller resource.
+     */
+    send_call_ringing(peer_bare_jid: string, sid_str: string): Promise<any>;
+    /**
      * Send a Jingle `session-accept` IQ in response to a received
      * session-initiate. `responder` is validated as a full JID at
      * the wasm boundary so a malformed JID surfaces

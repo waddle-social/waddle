@@ -2,7 +2,7 @@ use super::*;
 use waddle_xmpp_client::messaging::{
     build_finish, build_finish_migrated, build_muji_session_initiate, build_muji_session_terminate,
     build_proceed, build_propose, build_reject, build_reject_with_options, build_retract,
-    build_retract_with_options, build_session_accept, build_session_initiate,
+    build_retract_with_options, build_ringing, build_session_accept, build_session_initiate,
     build_session_terminate, jingle_reason_from_wire_name, wrap_jmi_message, CallMedia,
     JingleReason, SessionId,
 };
@@ -116,6 +116,18 @@ impl WaddleClient {
         let inner = self.inner.clone();
         future_to_promise(async move {
             let stanza = message_with_jmi_to_full(&peer_full_jid, build_proceed(&sid(sid_str)))?;
+            send_stanza_command(inner, stanza).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    /// Send a JMI `<ringing/>` to the caller's bare JID (XEP-0353
+    /// §3.2). The bare JID lets the initiator's server fan out the
+    /// responder's device-ring state to every caller resource.
+    pub fn send_call_ringing(&self, peer_bare_jid: String, sid_str: String) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let stanza = message_with_jmi_to_bare(&peer_bare_jid, build_ringing(&sid(sid_str)))?;
             send_stanza_command(inner, stanza).await?;
             Ok(JsValue::UNDEFINED)
         })
@@ -481,6 +493,25 @@ mod tests {
             .expect("full JID accepted");
         assert_eq!(stanza.attr("to"), Some("bob@waddle.test/phone"));
         assert!(FullJid::from_str("bob@waddle.test").is_err());
+    }
+
+    #[test]
+    fn jmi_ringing_targets_bare_jid_and_rejects_full_jid() {
+        use waddle_xmpp_client::messaging::{build_ringing, SessionId};
+
+        let stanza = super::message_with_jmi_to_bare(
+            "bob@waddle.test",
+            build_ringing(&SessionId("c1".into())),
+        )
+        .expect("bare JID accepted for ringing");
+        assert_eq!(stanza.attr("to"), Some("bob@waddle.test"));
+        assert!(
+            stanza
+                .children()
+                .any(|child| child.name() == "ringing" && child.ns() == NS_JINGLE_MESSAGE),
+            "JMI ringing child preserved"
+        );
+        assert!("bob@waddle.test/phone".parse::<jid::BareJid>().is_err());
     }
 
     #[test]

@@ -32,6 +32,22 @@ fn parses_proceed() {
 }
 
 #[test]
+fn parses_ringing() {
+    let xml = "<message xmlns='jabber:client' from='bob@waddle.test/phone' to='alice@waddle.test/desktop'>
+            <ringing xmlns='urn:xmpp:jingle-message:0' id='c1'/>
+        </message>";
+    let elem: Element = xml.parse().unwrap();
+    let ev = parse_call_event(&elem).expect("ringing parses");
+    assert_eq!(ev.from.to_string(), "bob@waddle.test/phone");
+    assert_eq!(
+        ev.to.map(|jid| jid.to_string()).as_deref(),
+        Some("alice@waddle.test/desktop")
+    );
+    assert_eq!(ev.sid.0, "c1");
+    assert!(matches!(ev.kind, CallEventKind::Ringing));
+}
+
+#[test]
 fn parses_finish() {
     let xml = "<message xmlns='jabber:client' from='alice@waddle.test/desktop'>
             <finish xmlns='urn:xmpp:jingle-message:0' id='c1'/>
@@ -341,6 +357,16 @@ fn build_jmi_helpers_roundtrip_through_parser() {
         .build();
     let ev = parse_call_event(&stanza).expect("proceed parses");
     assert!(matches!(ev.kind, CallEventKind::Proceed));
+
+    let stanza = Element::builder("message", "jabber:client")
+        .attr(
+            minidom::rxml::xml_ncname!("from").to_owned(),
+            "bob@waddle.test/desktop",
+        )
+        .append(build_ringing(&sid("c1")))
+        .build();
+    let ev = parse_call_event(&stanza).expect("ringing parses");
+    assert!(matches!(ev.kind, CallEventKind::Ringing));
 
     let stanza = Element::builder("message", "jabber:client")
         .attr(

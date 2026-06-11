@@ -3718,6 +3718,7 @@ export class BrowserXmppClient {
               : undefined;
       if (
         event.kind === "propose" ||
+        event.kind === "ringing" ||
         event.kind === "proceed" ||
         event.kind === "reject" ||
         event.kind === "retract" ||
@@ -3755,7 +3756,7 @@ export class BrowserXmppClient {
           (event.kind === "finish" && prev.phase === "active" && prev.kind === "dm")
         );
       if (!isSelfOriginated || selfOriginatedEventShouldTouchCurrentCall) {
-        applyCallEvent(event);
+        applyCallEvent(event, { sender: xmpp as unknown as CallWireSender });
       }
       if (!isSelfOriginated) {
         void handleCallEventSideEffect(event, prev, xmpp as unknown as CallWireSender, this.fullJid);

@@ -4,6 +4,7 @@ import {
   $lastCallError,
   beginOutgoingCall,
   clearCallState,
+  configureIncomingCallAlerts,
   type RawIqSender,
   scheduleOutgoingTimeout,
   setSessionAcceptTimeoutMsForTests,
@@ -25,6 +26,7 @@ import {
 } from "../src/lib/calls/muc-call-session-cache";
 import type { CallWireSender } from "../src/lib/calls/outbound";
 import type { CallEvent, CallMedia, LiveKitJoin } from "../src/lib/calls/types";
+import { createIncomingCallAlertController } from "../src/shell/audio-alerts";
 import { BrowserXmppClient } from "../src/lib/xmpp-client";
 import type { WaddleSession } from "../src/lib/server-auth";
 
@@ -187,6 +189,7 @@ function mockSender(): CallWireSender {
   return {
     send_call_propose: mock(async () => undefined),
     send_call_proceed: mock(async () => undefined),
+    send_call_ringing: mock(async () => undefined),
     send_call_reject: mock(async () => undefined),
     send_call_retract: mock(async () => undefined),
     send_call_finish: mock(async () => undefined),
@@ -226,6 +229,7 @@ afterAll(() => {
 
 afterEach(() => {
   clearCallState();
+  configureIncomingCallAlerts(null);
   $lastCallError.set(null);
   // The Muji mocks above fire `applyMucCallPresence` to simulate
   // MUC echoes; clearing the participants store between tests
@@ -233,6 +237,236 @@ afterEach(() => {
   // `muc-call-presence.test.ts`) that expect an empty store.
   clearMucCallParticipants();
   clearAllMucCallSessionCacheForTests();
+});
+
+describe("incoming DM call alerting", () => {
+  test("incoming propose starts ringtone, sends ringing, and local decline stops it", async () => {
+    const sender = mockSender();
+    const player = {
+      startLoop: mock(() => undefined),
+      stop: mock(() => undefined),
+    };
+    configureIncomingCallAlerts(createIncomingCallAlertController({
+      player,
+      isTabFocused: () => true,
+    }));
+
+    const { emitCall } = wireClientEvents(sender);
+    emitCall({
+      kind: "propose",
+      from: "bob@waddle.test/phone",
+      sid: "c1",
+      media: audioVideo,
+    });
+    await flushCallSideEffects();
+
+    expect(player.startLoop).toHaveBeenCalledWith("c1");
+    expect(sender.send_call_ringing).toHaveBeenCalledWith("bob@waddle.test", "c1");
+
+    await tearDownActiveCall(sender, "gone");
+    expect(player.stop).toHaveBeenCalledWith("c1");
+  });
+
+  test("answering locally stops the ringtone when session-initiate arrives", () => {
+    const player = {
+      startLoop: mock(() => undefined),
+      stop: mock(() => undefined),
+    };
+    configureIncomingCallAlerts(createIncomingCallAlertController({
+      player,
+      isTabFocused: () => true,
+    }));
+
+    const { emitCall } = wireClientEvents(mockSender());
+    emitCall({
+      kind: "propose",
+      from: "bob@waddle.test/phone",
+      sid: "c1",
+      media: audioVideo,
+    });
+    emitCall({
+      kind: "session-initiate",
+      from: "bob@waddle.test/phone",
+      sid: "c1",
+      media: audioVideo,
+      join,
+    });
+
+    expect(player.stop).toHaveBeenCalledWith("c1");
+    expect($callState.get()).toMatchObject({ phase: "active", sid: "c1", kind: "dm" });
+  });
+
+  test("declining on a sibling resource stops local ringing from carbon events", async () => {
+    const player = {
+      startLoop: mock(() => undefined),
+      stop: mock(() => undefined),
+    };
+    configureIncomingCallAlerts(createIncomingCallAlertController({
+      player,
+      isTabFocused: () => true,
+    }));
+    const { emitCall } = wireClientEvents(mockSender());
+    emitCall({
+      kind: "propose",
+      from: "bob@waddle.test/phone",
+      sid: "c1",
+      media: audioVideo,
+    });
+    emitCall({
+      kind: "reject",
+      from: "alice@waddle.test/tablet",
+      to: "bob@waddle.test/phone",
+      sid: "c1",
+    });
+
+    expect(player.stop).toHaveBeenCalledWith("c1");
+  });
+
+  test("answering on a sibling resource stops local ringing from carbon events", () => {
+    const player = {
+      startLoop: mock(() => undefined),
+      stop: mock(() => undefined),
+    };
+    configureIncomingCallAlerts(createIncomingCallAlertController({
+      player,
+      isTabFocused: () => true,
+    }));
+    const { emitCall } = wireClientEvents(mockSender());
+    emitCall({
+      kind: "propose",
+      from: "bob@waddle.test/phone",
+      sid: "c1",
+      media: audioVideo,
+    });
+    emitCall({
+      kind: "proceed",
+      from: "alice@waddle.test/tablet",
+      to: "bob@waddle.test/phone",
+      sid: "c1",
+    });
+
+    expect(player.stop).toHaveBeenCalledWith("c1");
+  });
+
+  test("caller retract stops ringing and dismisses the incoming call slot", () => {
+    const player = {
+      startLoop: mock(() => undefined),
+      stop: mock(() => undefined),
+    };
+    configureIncomingCallAlerts(createIncomingCallAlertController({
+      player,
+      isTabFocused: () => true,
+    }));
+    const { emitCall } = wireClientEvents(mockSender());
+    emitCall({
+      kind: "propose",
+      from: "bob@waddle.test/phone",
+      sid: "c1",
+      media: audioVideo,
+    });
+    emitCall({
+      kind: "retract",
+      from: "bob@waddle.test/phone",
+      sid: "c1",
+    });
+
+    expect(player.stop).toHaveBeenCalledWith("c1");
+    expect($callState.get()).toEqual({ phase: "ended", sid: "c1", reason: "retract" });
+  });
+
+  test("unfocused tab shows incoming-call notification whose click focuses the DM", () => {
+    const focused: string[] = [];
+    let click: (() => void) | null = null;
+    const notifier = {
+      showIncomingCall: mock((options: { peerJid: string; onClick: () => void }) => {
+        click = options.onClick;
+        return { close: mock(() => undefined) };
+      }),
+    };
+    configureIncomingCallAlerts(createIncomingCallAlertController({
+      player: { startLoop: mock(() => undefined), stop: mock(() => undefined) },
+      notifier,
+      focusTarget: {
+        focusConversation(peerJid) {
+          focused.push(peerJid);
+        },
+      },
+      isTabFocused: () => false,
+    }));
+    const { emitCall } = wireClientEvents(mockSender());
+    emitCall({
+      kind: "propose",
+      from: "bob@waddle.test/phone",
+      sid: "c1",
+      media: audioVideo,
+    });
+
+    expect(notifier.showIncomingCall).toHaveBeenCalledTimes(1);
+    click?.();
+    expect(focused).toEqual(["bob@waddle.test"]);
+  });
+
+  test("ringing event marks the caller's outgoing call as ringing", () => {
+    const { emitCall } = wireClientEvents(mockSender());
+    beginOutgoingCall("bob@waddle.test", "c1", audioVideo, "alice@waddle.test/web");
+    emitCall({
+      kind: "ringing",
+      from: "bob@waddle.test/phone",
+      sid: "c1",
+    });
+
+    expect($callState.get()).toMatchObject({ phase: "outgoing", sid: "c1", ringing: true });
+  });
+
+  test("ringing event from another bare JID does not mark outgoing call as ringing", () => {
+    const { emitCall } = wireClientEvents(mockSender());
+    beginOutgoingCall("bob@waddle.test", "c1", audioVideo, "alice@waddle.test/web");
+    emitCall({
+      kind: "ringing",
+      from: "mallory@waddle.test/phone",
+      sid: "c1",
+    });
+
+    expect($callState.get()).toEqual({
+      phase: "outgoing",
+      to: "bob@waddle.test",
+      sid: "c1",
+      media: audioVideo,
+      initiator: "alice@waddle.test/web",
+    });
+  });
+
+  test("propose during an active call is rejected without audible ringing", async () => {
+    const sender = mockSender();
+    const player = {
+      startLoop: mock(() => undefined),
+      stop: mock(() => undefined),
+    };
+    configureIncomingCallAlerts(createIncomingCallAlertController({
+      player,
+      isTabFocused: () => true,
+    }));
+    $callState.set({
+      phase: "active",
+      peer: "carol@waddle.test/laptop",
+      sid: "active-1",
+      media: audioVideo,
+      join,
+      kind: "dm",
+      initiator: "alice@waddle.test/web",
+    });
+    const { emitCall } = wireClientEvents(sender);
+    emitCall({
+      kind: "propose",
+      from: "bob@waddle.test/phone",
+      sid: "c2",
+      media: audioVideo,
+    });
+    await flushCallSideEffects();
+
+    expect(player.startLoop).not.toHaveBeenCalled();
+    expect(sender.send_call_reject).toHaveBeenCalledWith("bob@waddle.test/phone", "c2");
+  });
 });
 
 describe("tearDownActiveCall", () => {

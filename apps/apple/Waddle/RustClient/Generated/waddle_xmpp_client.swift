@@ -3428,6 +3428,10 @@ public enum WaddleCallEventKind: Equatable, Hashable {
     case propose(media: WaddleCallMedia
     )
     /**
+     * XEP-0353 §3.2 `<ringing/>` — responder device is ringing.
+     */
+    case ringing
+    /**
      * XEP-0353 §5.1.2 `<proceed/>` — peer is accepting the call.
      */
     case proceed
@@ -3493,24 +3497,26 @@ public struct FfiConverterTypeWaddleCallEventKind: FfiConverterRustBuffer {
         case 1: return .propose(media: try FfiConverterTypeWaddleCallMedia.read(from: &buf)
         )
 
-        case 2: return .proceed
+        case 2: return .ringing
 
-        case 3: return .reject(reason: try FfiConverterOptionTypeWaddleJingleReason.read(from: &buf), tieBreak: try FfiConverterBool.read(from: &buf)
+        case 3: return .proceed
+
+        case 4: return .reject(reason: try FfiConverterOptionTypeWaddleJingleReason.read(from: &buf), tieBreak: try FfiConverterBool.read(from: &buf)
         )
 
-        case 4: return .retract(reason: try FfiConverterOptionTypeWaddleJingleReason.read(from: &buf), tieBreak: try FfiConverterBool.read(from: &buf)
+        case 5: return .retract(reason: try FfiConverterOptionTypeWaddleJingleReason.read(from: &buf), tieBreak: try FfiConverterBool.read(from: &buf)
         )
 
-        case 5: return .finish(reason: try FfiConverterOptionTypeWaddleJingleReason.read(from: &buf), migratedTo: try FfiConverterOptionString.read(from: &buf)
+        case 6: return .finish(reason: try FfiConverterOptionTypeWaddleJingleReason.read(from: &buf), migratedTo: try FfiConverterOptionString.read(from: &buf)
         )
 
-        case 6: return .sessionInitiate(join: try FfiConverterTypeWaddleLiveKitJoin.read(from: &buf), media: try FfiConverterTypeWaddleCallMedia.read(from: &buf)
+        case 7: return .sessionInitiate(join: try FfiConverterTypeWaddleLiveKitJoin.read(from: &buf), media: try FfiConverterTypeWaddleCallMedia.read(from: &buf)
         )
 
-        case 7: return .sessionAccept(join: try FfiConverterTypeWaddleLiveKitJoin.read(from: &buf), media: try FfiConverterTypeWaddleCallMedia.read(from: &buf)
+        case 8: return .sessionAccept(join: try FfiConverterTypeWaddleLiveKitJoin.read(from: &buf), media: try FfiConverterTypeWaddleCallMedia.read(from: &buf)
         )
 
-        case 8: return .sessionTerminate(reason: try FfiConverterOptionTypeWaddleJingleReason.read(from: &buf)
+        case 9: return .sessionTerminate(reason: try FfiConverterOptionTypeWaddleJingleReason.read(from: &buf)
         )
 
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -3526,42 +3532,46 @@ public struct FfiConverterTypeWaddleCallEventKind: FfiConverterRustBuffer {
             FfiConverterTypeWaddleCallMedia.write(media, into: &buf)
 
 
-        case .proceed:
+        case .ringing:
             writeInt(&buf, Int32(2))
 
 
-        case let .reject(reason,tieBreak):
+        case .proceed:
             writeInt(&buf, Int32(3))
-            FfiConverterOptionTypeWaddleJingleReason.write(reason, into: &buf)
-            FfiConverterBool.write(tieBreak, into: &buf)
 
 
-        case let .retract(reason,tieBreak):
+        case let .reject(reason,tieBreak):
             writeInt(&buf, Int32(4))
             FfiConverterOptionTypeWaddleJingleReason.write(reason, into: &buf)
             FfiConverterBool.write(tieBreak, into: &buf)
 
 
-        case let .finish(reason,migratedTo):
+        case let .retract(reason,tieBreak):
             writeInt(&buf, Int32(5))
+            FfiConverterOptionTypeWaddleJingleReason.write(reason, into: &buf)
+            FfiConverterBool.write(tieBreak, into: &buf)
+
+
+        case let .finish(reason,migratedTo):
+            writeInt(&buf, Int32(6))
             FfiConverterOptionTypeWaddleJingleReason.write(reason, into: &buf)
             FfiConverterOptionString.write(migratedTo, into: &buf)
 
 
         case let .sessionInitiate(join,media):
-            writeInt(&buf, Int32(6))
-            FfiConverterTypeWaddleLiveKitJoin.write(join, into: &buf)
-            FfiConverterTypeWaddleCallMedia.write(media, into: &buf)
-
-
-        case let .sessionAccept(join,media):
             writeInt(&buf, Int32(7))
             FfiConverterTypeWaddleLiveKitJoin.write(join, into: &buf)
             FfiConverterTypeWaddleCallMedia.write(media, into: &buf)
 
 
-        case let .sessionTerminate(reason):
+        case let .sessionAccept(join,media):
             writeInt(&buf, Int32(8))
+            FfiConverterTypeWaddleLiveKitJoin.write(join, into: &buf)
+            FfiConverterTypeWaddleCallMedia.write(media, into: &buf)
+
+
+        case let .sessionTerminate(reason):
+            writeInt(&buf, Int32(9))
             FfiConverterOptionTypeWaddleJingleReason.write(reason, into: &buf)
 
         }

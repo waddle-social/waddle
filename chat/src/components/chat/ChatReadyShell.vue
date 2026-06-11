@@ -24,6 +24,7 @@ import {
 import { normalizeMucServiceDomain } from "@/lib/calls/muc-call-indicators";
 import {
   $callState,
+  configureIncomingCallAlerts,
   type RawIqSender,
 } from "@/lib/calls/call-store";
 import type { CallWireSender } from "@/lib/calls/outbound";
@@ -58,6 +59,11 @@ import type { FeedPostInput, StoryPostInput } from "@/lib/xmpp-client";
 import type { ActivityPublication, MoodPublication, TunePublication } from "@/lib/xmpp/pep-types";
 import type { VCard4Profile } from "@/lib/xmpp/vcard4-types";
 import { installMessageToolbarLifecycleSuppression } from "@/stores/message-toolbar";
+import {
+  createBrowserIncomingCallNotifier,
+  createBrowserLoopingTonePlayer,
+  createIncomingCallAlertController,
+} from "@/shell/audio-alerts";
 
 const props = defineProps<{
   controller: ChatAppController;
@@ -480,6 +486,16 @@ let disconnectMessageToolbarLifecycle: (() => void) | null = null;
 
 onMounted(() => {
   disconnectMessageToolbarLifecycle = installMessageToolbarLifecycleSuppression();
+  configureIncomingCallAlerts(createIncomingCallAlertController({
+    player: createBrowserLoopingTonePlayer(),
+    notifier: createBrowserIncomingCallNotifier(),
+    focusTarget: {
+      focusConversation(peerJid) {
+        selectDm(peerJid);
+      },
+    },
+    isTabFocused: () => document.visibilityState === "visible" && document.hasFocus(),
+  }));
 });
 
 watch(selfFullJid, (fullJid) => {
@@ -487,6 +503,7 @@ watch(selfFullJid, (fullJid) => {
 }, { immediate: true });
 
 onUnmounted(() => {
+  configureIncomingCallAlerts(null);
   disconnectMessageToolbarLifecycle?.();
   disconnectMessageToolbarLifecycle = null;
 });
