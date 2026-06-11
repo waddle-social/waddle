@@ -508,7 +508,9 @@ async fn send_muji_session_initiate(client: &mut WsXmppClient, room: &str, sid: 
         .expect("Muji session-initiate ack");
     client
         .recv_matching(|frame| {
-            frame.contains("session-accept") && frame.contains(&format!("sid='{sid}'"))
+            frame.contains("session-accept")
+                && (frame.contains(&format!("sid='{sid}'"))
+                    || frame.contains(&format!("sid=\"{sid}\"")))
         })
         .await
         .expect("Muji session-accept");
@@ -543,7 +545,7 @@ async fn send_muji_session_initiate_expect_forbidden(
         "forbidden Muji join must not mint or return LiveKit credentials: {response}"
     );
 
-    let late_accept = tokio::time::timeout(std::time::Duration::from_millis(750), async {
+    let late_accept = tokio::time::timeout(std::time::Duration::from_secs(3), async {
         client
             .recv_matching(|frame| {
                 frame.contains("session-accept")
@@ -555,10 +557,11 @@ async fn send_muji_session_initiate_expect_forbidden(
             .await
     })
     .await;
-    assert!(
-        late_accept.is_err(),
-        "forbidden Muji join must not be followed by a token-bearing session-accept"
-    );
+    if let Ok(Ok(frame)) = late_accept {
+        panic!(
+            "forbidden Muji join must not be followed by a token-bearing session-accept: {frame}"
+        );
+    }
 }
 
 async fn recv_until_muji_and_anchor(client: &mut WsXmppClient) -> Vec<String> {
