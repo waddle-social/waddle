@@ -217,6 +217,79 @@ describe("DM call activity hydration", () => {
     });
   });
 
+  test("hydrates a newer terminal marker as silent stale-call cleanup", async () => {
+    const acceptedAt = "2026-05-26T12:00:00.000Z";
+    const finishedAt = "2026-05-26T12:03:00.000Z";
+    const latestPage = {
+      messages: [
+        {
+          mam_id: "mam-finish",
+          from: "bob@example.com/phone",
+          to: "alice@example.com/web",
+          timestamp: finishedAt,
+          call_event: {
+            kind: "finish",
+            from: "bob@example.com/phone",
+            sid: "ended-while-away",
+          },
+        },
+      ],
+      first_id: "mam-finish",
+      last_id: "mam-finish",
+      is_complete: false,
+    };
+    const olderPage = {
+      messages: [
+        {
+          mam_id: "mam-accepted",
+          from: "bob@example.com/phone",
+          to: "alice@example.com/web",
+          timestamp: acceptedAt,
+          call_event: {
+            kind: "session-accept",
+            from: "bob@example.com/phone",
+            to: "alice@example.com/web",
+            sid: "ended-while-away",
+            media: { audio: true, video: true },
+            join: {
+              url: "wss://livekit.example.test",
+              room: "dm-ended-while-away",
+              identity: "alice@example.com/web",
+              token: "opaque-token",
+            },
+          },
+        },
+      ],
+      first_id: "mam-accepted",
+      last_id: "mam-accepted",
+      is_complete: true,
+    };
+    const fetchPersonalHistoryPage = mock(async (_max: number, pageParam: unknown) => {
+      return (pageParam as { type: string }).type === "latest" ? latestPage : olderPage;
+    });
+    const client = new BrowserXmppClient(session());
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { xmpp: { fetch_personal_history_page: typeof fetchPersonalHistoryPage } }).xmpp = {
+      fetch_personal_history_page: fetchPersonalHistoryPage,
+    };
+
+    await client.hydrateRecentDmCallActivities({
+      since: "2026-05-26T11:00:00.000Z",
+      maxPages: 2,
+    });
+
+    expect(fetchPersonalHistoryPage).toHaveBeenNthCalledWith(1, 100, {
+      type: "latest",
+      start: "2026-05-26T11:00:00.000Z",
+    });
+    expect(fetchPersonalHistoryPage).toHaveBeenNthCalledWith(2, 100, {
+      type: "before",
+      before: "mam-finish",
+      start: "2026-05-26T11:00:00.000Z",
+    });
+    expect(readDmCallActivity("bob@example.com")).toBeNull();
+  });
+
   test("does not apply hydrated pages after the connected XMPP session changes", async () => {
     const now = Date.now();
     const timestamp = new Date(now - 60_000).toISOString();
