@@ -35,7 +35,14 @@ export type CallWireSender = {
     sid: string,
     reason: string | null,
   ) => Promise<unknown>;
+  send_call_session_terminate_with_outcome?: (
+    peer_full_jid: string,
+    sid: string,
+    reason: string | null,
+  ) => Promise<unknown>;
 };
+
+export type CallSessionTerminateOutcome = "ok" | "orphaned" | "error";
 
 /**
  * Generate a fresh Jingle session id. The server namespaces this
@@ -159,4 +166,25 @@ export const outboundCalls = {
       throw new WasmCallApiUnavailable("send_call_session_terminate");
     await client.send_call_session_terminate(peerFullJid, sid, reason);
   },
+
+  async sessionTerminateWithOutcome(
+    client: CallWireSender,
+    peerFullJid: string,
+    sid: string,
+    reason: string | null,
+  ): Promise<CallSessionTerminateOutcome> {
+    if (!client.send_call_session_terminate_with_outcome) {
+      await outboundCalls.sessionTerminate(client, peerFullJid, sid, reason);
+      return "ok";
+    }
+    const result = await client.send_call_session_terminate_with_outcome(peerFullJid, sid, reason);
+    if (isCallSessionTerminateOutcome(result)) return result.kind;
+    return "error";
+  },
 };
+
+function isCallSessionTerminateOutcome(value: unknown): value is { kind: CallSessionTerminateOutcome } {
+  if (!value || typeof value !== "object") return false;
+  const kind = (value as { kind?: unknown }).kind;
+  return kind === "ok" || kind === "orphaned" || kind === "error";
+}

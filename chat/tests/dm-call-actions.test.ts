@@ -495,6 +495,51 @@ describe("startDmCallAction", () => {
     });
   });
 
+  test("ends recovered DM activity when terminate is orphaned but finish sends", async () => {
+    const now = new Date();
+    const tokenExp = new Date(now.getTime() + 60 * 60 * 1000);
+    const sender: CallWireSender = {
+      send_call_session_terminate_with_outcome: mock(async () => ({ kind: "orphaned" })),
+      send_call_finish: mock(async () => undefined),
+    };
+    applyDmCallEvent({
+      event: {
+        kind: "session-accept",
+        from: "bob@waddle.test/phone",
+        to: "alice@waddle.test/web",
+        sid: "finish-recovered-live",
+        media: { audio: true, video: false },
+        join: {
+          url: "wss://livekit.waddle.test",
+          room: "dm-call-retry",
+          identity: "alice@waddle.test/web",
+          token: jwtWithExp(tokenExp.getTime() / 1000),
+        },
+      },
+      selfBareJid: "alice@waddle.test",
+      timestamp: now.toISOString(),
+      now,
+    });
+
+    await expect(endRecoveredDmCallAction({
+      peerBareJid: "bob@waddle.test",
+      getSender: () => sender,
+      getSelfFullJid: () => "alice@waddle.test/web",
+      now,
+    })).resolves.toBe(true);
+
+    expect(sender.send_call_session_terminate_with_outcome).toHaveBeenCalledWith(
+      "bob@waddle.test/phone",
+      "finish-recovered-live",
+      "success",
+    );
+    expect(sender.send_call_finish).toHaveBeenCalledWith(
+      "bob@waddle.test/phone",
+      "finish-recovered-live",
+    );
+    expect(readDmCallActivity("bob@waddle.test", now)).toBeNull();
+  });
+
   test("keeps recovered DM activity retryable when no end marker sends", async () => {
     const now = new Date();
     const tokenExp = new Date(now.getTime() + 60 * 60 * 1000);
@@ -535,6 +580,51 @@ describe("startDmCallAction", () => {
     expect(sender.send_call_finish).not.toHaveBeenCalled();
     expect(readDmCallActivity("bob@waddle.test", now)).toMatchObject({
       sid: "retry-live",
+      state: "accepted",
+    });
+  });
+
+  test("keeps recovered DM activity retryable when typed terminate outcome is error", async () => {
+    const now = new Date();
+    const tokenExp = new Date(now.getTime() + 60 * 60 * 1000);
+    const sender: CallWireSender = {
+      send_call_session_terminate_with_outcome: mock(async () => ({ kind: "error" })),
+      send_call_finish: mock(async () => undefined),
+    };
+    applyDmCallEvent({
+      event: {
+        kind: "session-accept",
+        from: "bob@waddle.test/phone",
+        to: "alice@waddle.test/web",
+        sid: "typed-error-live",
+        media: { audio: true, video: false },
+        join: {
+          url: "wss://livekit.waddle.test",
+          room: "dm-call-typed-error",
+          identity: "alice@waddle.test/web",
+          token: jwtWithExp(tokenExp.getTime() / 1000),
+        },
+      },
+      selfBareJid: "alice@waddle.test",
+      timestamp: now.toISOString(),
+      now,
+    });
+
+    await expect(endRecoveredDmCallAction({
+      peerBareJid: "bob@waddle.test",
+      getSender: () => sender,
+      getSelfFullJid: () => "alice@waddle.test/web",
+      now,
+    })).resolves.toBe(false);
+
+    expect(sender.send_call_session_terminate_with_outcome).toHaveBeenCalledWith(
+      "bob@waddle.test/phone",
+      "typed-error-live",
+      "success",
+    );
+    expect(sender.send_call_finish).not.toHaveBeenCalled();
+    expect(readDmCallActivity("bob@waddle.test", now)).toMatchObject({
+      sid: "typed-error-live",
       state: "accepted",
     });
   });

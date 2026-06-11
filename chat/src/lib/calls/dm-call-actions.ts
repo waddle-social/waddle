@@ -162,23 +162,33 @@ export async function endRecoveredDmCallAction(options: {
   const remoteFullJid = activity.remoteFullJid;
   if (!remoteFullJid) return false;
 
+  let sentEndMarker = false;
+  let terminateAllowsFinish = false;
   try {
-    await outboundCalls.sessionTerminate(
+    const outcome = await outboundCalls.sessionTerminateWithOutcome(
       sender,
       remoteFullJid,
       activity.sid,
       "success",
     );
+    terminateAllowsFinish = outcome === "ok" || outcome === "orphaned";
+    if (outcome === "error") {
+      reportCallError(new Error("call session terminate failed"));
+    }
   } catch (err) {
     reportCallError(err);
-    return false;
   }
 
-  try {
-    await outboundCalls.finish(sender, remoteFullJid, activity.sid);
-  } catch (err) {
-    reportCallError(err);
+  if (terminateAllowsFinish) {
+    try {
+      await outboundCalls.finish(sender, remoteFullJid, activity.sid);
+      sentEndMarker = true;
+    } catch (err) {
+      reportCallError(err);
+    }
   }
+
+  if (!sentEndMarker) return false;
 
   clearDmCallActivity(peer, activity.sid);
   return true;

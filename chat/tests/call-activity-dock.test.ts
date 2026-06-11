@@ -3378,6 +3378,78 @@ describe("CallActivityDock rendering", () => {
     expect($dmCallActivities.get()["bob@example.com"]).toBeUndefined();
   });
 
+  test("shell end action leaves recovered DM visible when teardown fails", async () => {
+    $dmCallActivities.set({
+      "bob@example.com": {
+        peerJid: "bob@example.com",
+        remoteFullJid: "bob@example.com/phone",
+        sid: "dm-recovered-retry",
+        media: { audio: true, video: true },
+        join: liveKitJoinFor(),
+        state: "accepted",
+        direction: "incoming",
+        updatedAt: new Date().toISOString(),
+      },
+    });
+    const selected: unknown[][] = [];
+    const sendCallSessionTerminateWithOutcome = mock(async () => ({ kind: "error" }));
+    const sendCallFinish = mock(async () => undefined);
+    const bindings = await suppressVueLifecycleSetupWarnings(() =>
+      setupVueComponent("../src/components/chat/ChatReadyShell.vue", {
+        controller: {
+          ui: { activeCommunitySurface: { value: null } },
+          connectionStore: {
+            client: {
+              fullJid: "alice@example.com/web",
+              xmpp: {
+                send_call_session_terminate_with_outcome: sendCallSessionTerminateWithOutcome,
+                send_call_finish: sendCallFinish,
+              },
+            },
+            session: null,
+          },
+          waddles: { mucServiceJid: { value: "" } },
+          selfDomain: { value: "" },
+          rosterContacts: {
+            contacts: { value: [] },
+            isLoadingContacts: { value: false },
+          },
+          messaging: {
+            mentionedChannelCounts: { value: {} },
+            activeChannels: { value: new Set<string>() },
+          },
+          dmConversations: { conversations: { value: [] } },
+          computedChannelUnreadMap: { value: {} },
+          activeRightPanel: { value: null },
+          activeThreadStack: { value: [] },
+          communityEvents: { rsvp: () => undefined },
+          closePinnedPanel: () => undefined,
+          activateRightPanel: () => undefined,
+          selectDm: (...args: unknown[]) => {
+            selected.push(args);
+          },
+          selectChannel: () => undefined,
+          selectChannelByRoomJid: () => undefined,
+        },
+      }),
+    );
+
+    setupBindingFunction(bindings, "endRecoveredDmFromActivity")("bob@example.com");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(selected).toEqual([["bob@example.com"]]);
+    expect(sendCallSessionTerminateWithOutcome).toHaveBeenCalledWith(
+      "bob@example.com/phone",
+      "dm-recovered-retry",
+      "success",
+    );
+    expect(sendCallFinish).not.toHaveBeenCalled();
+    expect($dmCallActivities.get()["bob@example.com"]).toMatchObject({
+      sid: "dm-recovered-retry",
+      state: "accepted",
+    });
+  });
+
   test("shell reconnect leaves stale accepted activity open-only instead of sending a new propose", async () => {
     $dmCallActivities.set({
       "bob@example.com": {

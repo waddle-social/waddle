@@ -408,6 +408,42 @@ impl WaddleClient {
             Ok(JsValue::UNDEFINED)
         })
     }
+
+    pub fn send_call_session_terminate_with_outcome(
+        &self,
+        peer_full_jid: String,
+        sid_str: String,
+        reason: Option<String>,
+    ) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let typed_reason = match reason {
+                Some(name) => Some(
+                    jingle_reason_from_wire_name(&name)
+                        .ok_or_else(|| js_error(format!("unknown jingle reason: {name}")))?,
+                ),
+                None => None,
+            };
+            let _ = parse_full_jid(&peer_full_jid)?;
+            let stanza = iq_set(
+                &peer_full_jid,
+                build_session_terminate(&sid(sid_str), typed_reason),
+            );
+            let outcome = match send_iq_command_stanza_aware(inner, stanza).await? {
+                Ok(_) => WaddleCallSessionTerminateOutcome::Ok,
+                Err(err) if is_orphaned_dm_call_terminate(&err) => {
+                    WaddleCallSessionTerminateOutcome::Orphaned
+                }
+                Err(_) => WaddleCallSessionTerminateOutcome::Error,
+            };
+            to_js_value(&outcome)
+        })
+    }
+}
+
+fn is_orphaned_dm_call_terminate(err: &waddle_xmpp_client::StanzaError) -> bool {
+    err.condition == "forbidden"
+        && err.text.as_deref() == Some("Jingle terminator is not a participant in this call")
 }
 
 #[cfg(test)]
@@ -426,6 +462,30 @@ mod tests {
     fn calls_mixer_jid_appends_localpart_to_domain() {
         assert_eq!(calls_mixer_jid("waddle.test"), "calls.waddle.test");
         assert_eq!(calls_mixer_jid("example.com"), "calls.example.com");
+    }
+
+    #[test]
+    fn classifies_only_orphaned_dm_terminate_stanza_error() {
+        let orphaned = waddle_xmpp_client::StanzaError {
+            error_type: waddle_xmpp_client::StanzaErrorType::Auth,
+            condition: "forbidden".to_string(),
+            text: Some("Jingle terminator is not a participant in this call".to_string()),
+        };
+        assert!(is_orphaned_dm_call_terminate(&orphaned));
+
+        let generic_forbidden = waddle_xmpp_client::StanzaError {
+            error_type: waddle_xmpp_client::StanzaErrorType::Auth,
+            condition: "forbidden".to_string(),
+            text: Some("Jingle responder was not invited to this call party".to_string()),
+        };
+        assert!(!is_orphaned_dm_call_terminate(&generic_forbidden));
+
+        let transportish = waddle_xmpp_client::StanzaError {
+            error_type: waddle_xmpp_client::StanzaErrorType::Cancel,
+            condition: "remote-server-timeout".to_string(),
+            text: None,
+        };
+        assert!(!is_orphaned_dm_call_terminate(&transportish));
     }
 
     /// `parse_full_jid` itself returns `Result<FullJid, JsValue>`,

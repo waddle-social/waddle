@@ -7,6 +7,11 @@ import {
   readDmCallJoin,
   rememberDmCallJoin,
 } from "./dm-call-join-cache";
+import {
+  publishDmCallOutcomeAnchor,
+  type DmCallOutcome,
+  type DmCallOutcomeAnchor,
+} from "./dm-call-anchor";
 import type { CallEvent, CallMedia, LiveKitJoin } from "./types";
 
 export const DM_CALL_ACTIVITY_ACTIVE_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -64,6 +69,7 @@ interface DmCallEventEnvelope {
   timestamp?: string | null;
   now?: Date;
   directionHint?: DmCallActivity["direction"];
+  publishOutcome?: boolean;
 }
 
 function normalizedBare(jid?: string | null): string {
@@ -303,6 +309,59 @@ function isTerminalEvent(event: CallEvent): boolean {
     event.kind === "session-terminate";
 }
 
+function outcomeForTerminalEvent(
+  event: CallEvent,
+  previous: DmCallActivity | undefined,
+  direction: DmCallActivity["direction"],
+): DmCallOutcome {
+  if (event.kind === "reject") return "declined";
+  if (event.kind === "session-terminate" && event.reason === "timeout") return "no-answer";
+  if (event.kind === "finish" || event.kind === "session-terminate") return "ended";
+  const callDirection = previous?.direction ?? direction;
+  return callDirection === "outgoing" ? "no-answer" : "missed";
+}
+
+function terminalOutcomeAnchor(params: {
+  peerJid: string;
+  sid: string;
+  timestamp: string;
+  event: CallEvent;
+  previous?: DmCallActivity;
+  direction: DmCallActivity["direction"];
+  selfJid?: string | null;
+}): DmCallOutcomeAnchor {
+  const media = eventMedia(params.event, params.previous);
+  const initiator = terminalOutcomeInitiator(params);
+  return {
+    peerBareJid: params.peerJid,
+    sid: params.sid,
+    media: media.media,
+    outcome: outcomeForTerminalEvent(params.event, params.previous, params.direction),
+    ...(initiator ? { initiator } : {}),
+    ended: params.timestamp,
+  };
+}
+
+function terminalOutcomeInitiator(params: {
+  peerJid: string;
+  event: CallEvent;
+  previous?: DmCallActivity;
+  direction: DmCallActivity["direction"];
+  selfJid?: string | null;
+}): string | undefined {
+  if (params.previous?.direction === "outgoing") return params.selfJid ?? undefined;
+  if (params.previous?.direction === "incoming") return params.previous.remoteFullJid ?? params.event.from;
+  const selfBare = normalizedBare(params.selfJid);
+  const fromBare = normalizedBare(params.event.from);
+  if (params.event.kind === "reject") {
+    return fromBare === selfBare ? params.peerJid : params.selfJid ?? undefined;
+  }
+  if (params.event.kind === "retract") return params.event.from;
+  if (params.direction === "outgoing") return params.selfJid ?? undefined;
+  if (params.direction === "incoming") return params.event.from;
+  return undefined;
+}
+
 function isOlderThanTerminal(peerJid: string, sid: string, timestamp: string): boolean {
   const terminalTimestamp = dmCallTerminalTimestamps.get(terminalKey(peerJid, sid));
   if (!terminalTimestamp) return false;
@@ -310,6 +369,10 @@ function isOlderThanTerminal(peerJid: string, sid: string, timestamp: string): b
   const terminalMs = Date.parse(terminalTimestamp);
   if (!Number.isFinite(nextMs) || !Number.isFinite(terminalMs)) return false;
   return nextMs <= terminalMs;
+}
+
+function hasRecordedTerminal(peerJid: string, sid: string): boolean {
+  return dmCallTerminalTimestamps.has(terminalKey(peerJid, sid));
 }
 
 function pruneTerminalTimestamps(now: Date): void {
@@ -516,24 +579,24 @@ export function clearDmCallActivity(peerJid: string, sid?: string): void {
   $dmCallActivities.set(next);
 }
 
-export function applyDmCallEvent(envelope: DmCallEventEnvelope): void {
+export function applyDmCallEvent(envelope: DmCallEventEnvelope): DmCallOutcomeAnchor | null {
   const peerJid = peerForEnvelope(envelope);
-  if (!peerJid) return;
+  if (!peerJid) return null;
   const timestamp = timestampFromEnvelope(envelope);
   const now = envelope.now ?? new Date();
   if (isStale(timestamp, now)) {
     removeActivity(peerJid, envelope.event.sid);
-    return;
+    return null;
   }
   const previousForSidEntry = findActivityForSid(peerJid, envelope.event.sid);
   const previousForSid = previousForSidEntry?.[1];
-  if (isOlderThanCurrent(timestamp, previousForSid)) return;
-  if (!isTerminalEvent(envelope.event) && isOlderThanTerminal(peerJid, envelope.event.sid, timestamp)) return;
+  if (isOlderThanCurrent(timestamp, previousForSid)) return null;
+  if (!isTerminalEvent(envelope.event) && isOlderThanTerminal(peerJid, envelope.event.sid, timestamp)) return null;
   const direction = directionForEnvelope(envelope);
   const remoteFullJid = remoteFullJidForEnvelope(envelope, peerJid);
   switch (envelope.event.kind) {
     case "ringing":
-      return;
+      return null;
     case "propose":
       setActivity(peerJid, envelope.event.sid, eventSelfFullJid(envelope), {
         peerJid,
@@ -545,7 +608,7 @@ export function applyDmCallEvent(envelope: DmCallEventEnvelope): void {
         updatedAt: timestamp,
       });
       scheduleActivityPrune(now);
-      return;
+      return null;
     case "proceed":
     case "session-initiate":
     case "session-accept":
@@ -597,15 +660,28 @@ export function applyDmCallEvent(envelope: DmCallEventEnvelope): void {
         updatedAt: timestamp,
       });
       scheduleActivityPrune(now);
-      return;
+      return null;
     case "reject":
     case "retract":
     case "finish":
     case "session-terminate":
+      if (hasRecordedTerminal(peerJid, envelope.event.sid)) return null;
+      const outcomeAnchor = terminalOutcomeAnchor({
+        peerJid,
+        sid: envelope.event.sid,
+        timestamp,
+        event: envelope.event,
+        previous: previousForSid,
+        direction,
+        selfJid: envelope.selfFullJid ?? envelope.selfBareJid,
+      });
+      if (envelope.publishOutcome !== false) {
+        publishDmCallOutcomeAnchor(outcomeAnchor);
+      }
       recordTerminal(peerJid, envelope.event.sid, timestamp, now);
       forgetDmCallJoin({ selfBareJid: envelope.selfBareJid, peerJid, sid: envelope.event.sid });
       removeActivity(peerJid, envelope.event.sid);
-      return;
+      return outcomeAnchor;
   }
 }
 

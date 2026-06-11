@@ -18,7 +18,11 @@ import {
 } from "./muc-call-session-cache";
 import { clearLiveCallParticipants } from "./muc-call-live-participants";
 import { mediaErrorMessage } from "./call-media-issues";
-import { dmCallStartedAnchorFromTransition, publishDmCallStartedAnchor } from "./dm-call-anchor";
+import {
+  dmCallStartedAnchorFromTransition,
+  publishDmCallOutcomeAnchor,
+  publishDmCallStartedAnchor,
+} from "./dm-call-anchor";
 import { barePeerJid } from "../xmpp/jid";
 import type { IncomingCallAlertController } from "@/shell/audio-alerts";
 
@@ -479,6 +483,17 @@ let outgoingTimer: ReturnType<typeof setTimeout> | null = null;
 let sessionAcceptTimer: ReturnType<typeof setTimeout> | null = null;
 let sessionAcceptTimeoutMs = SESSION_ACCEPT_TIMEOUT_MS;
 
+function publishNoAnswerOutcome(peerJid: string, sid: string, media: CallMedia, initiator?: string): void {
+  publishDmCallOutcomeAnchor({
+    peerBareJid: barePeerJid(peerJid),
+    sid,
+    media,
+    outcome: "no-answer",
+    ...(initiator ? { initiator } : {}),
+    ended: new Date().toISOString(),
+  });
+}
+
 /**
  * Schedule the auto-retract for the most recent `beginOutgoingCall`.
  * The timer fires `outboundCalls.retract` if the slot is still in
@@ -504,6 +519,7 @@ export function scheduleOutgoingTimeout(
     void outboundCalls
       .retract(sender, s.to, s.sid)
       .catch((err) => reportCallError(err));
+    publishNoAnswerOutcome(s.to, sid, s.media, s.initiator);
     clearDmCallActivity(s.to, sid);
     $callState.set({
       phase: "ended",
@@ -535,6 +551,7 @@ export function scheduleSessionAcceptTimeout(
     void outboundCalls
       .sessionTerminate(sender, peerFullJid, sid, "timeout")
       .catch((err) => reportCallError(err));
+    publishNoAnswerOutcome(peerFullJid, sid, s.media, s.initiator);
     clearDmCallActivity(peerFullJid, sid);
     $callState.set({
       phase: "ended",
@@ -629,22 +646,34 @@ export async function tearDownActiveCall(
       switch (s.phase) {
         case "active":
           if (s.kind === "dm") {
+            let terminateAllowsFinish = false;
             try {
-              await outboundCalls.sessionTerminate(sender, s.peer, s.sid, reason);
-              // XEP-0353 §3.5: both parties SHOULD send `<finish/>` after
-              // the call ends so MAM archives both sides consistently
-              // (the JMI message stack uses the finish marker to bookend
-              // the call record). Best-effort: a wasm bundle that
-              // doesn't expose `send_call_finish` shouldn't keep the
-              // terminate from clearing the local slot.
+              const outcome = await outboundCalls.sessionTerminateWithOutcome(
+                sender,
+                s.peer,
+                s.sid,
+                reason,
+              );
+              terminateAllowsFinish = outcome === "ok" || outcome === "orphaned";
+              if (outcome === "error") {
+                reportCallError(new Error("call session terminate failed"));
+              }
+            } catch (err) {
+              reportCallError(err);
+            }
+            if (terminateAllowsFinish) {
               try {
+                // XEP-0353 §3.5: both parties SHOULD send `<finish/>`
+                // after the call ends so MAM archives both sides
+                // consistently. A classified orphaned Jingle terminate
+                // means the server has already lost the call registry, so
+                // only the message-level bookend can still route.
                 await outboundCalls.finish(sender, s.peer, s.sid);
               } catch (err) {
                 reportCallError(err);
               }
-            } finally {
-              clearDmCallActivity(s.peer, s.sid);
             }
+            clearDmCallActivity(s.peer, s.sid);
           } else {
             // MUC group call: clear our Muji presence AND leave via
             // the IQ surface. Presence-first ordering (XEP-0272

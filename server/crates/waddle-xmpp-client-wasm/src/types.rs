@@ -990,6 +990,22 @@ pub enum WaddleSendMessageOutcome {
     Error,
 }
 
+/// JS-facing outcome for DM Jingle `session-terminate`.
+///
+/// `Orphaned` is deliberately narrow: it means the server rejected the
+/// terminate because its in-memory Jingle participant registry no
+/// longer contains the sender/peer pair, so the chat layer may still
+/// send the XEP-0353 `<finish/>` message-level bookend. Other stanza
+/// errors remain generic `Error` and must not be treated as a completed
+/// Jingle termination.
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum WaddleCallSessionTerminateOutcome {
+    Ok,
+    Orphaned,
+    Error,
+}
+
 /// JS-facing tagged outcome of `WaddleClient::set_room_notification_mode`.
 ///
 /// Returned by always-resolving the Promise (never rejecting on

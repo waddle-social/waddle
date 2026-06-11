@@ -137,6 +137,68 @@ describe("outboundCalls", () => {
     ]);
   });
 
+  test("sessionTerminateWithOutcome uses typed wasm outcome when available", async () => {
+    const calls: unknown[][] = [];
+    const client: CallWireSender = {
+      send_call_session_terminate_with_outcome: async (...args) => {
+        calls.push(args);
+        return { kind: "orphaned" };
+      },
+    };
+    await expect(outboundCalls.sessionTerminateWithOutcome(
+      client,
+      "bob@waddle.test/desktop",
+      "c1",
+      "success",
+    )).resolves.toBe("orphaned");
+    expect(calls).toEqual([["bob@waddle.test/desktop", "c1", "success"]]);
+  });
+
+  test("sessionTerminateWithOutcome falls back to legacy success only", async () => {
+    const { client, calls } = recorder();
+    await expect(outboundCalls.sessionTerminateWithOutcome(
+      client,
+      "bob@waddle.test/desktop",
+      "c1",
+      "success",
+    )).resolves.toBe("ok");
+    expect(calls).toEqual([
+      {
+        method: "send_call_session_terminate",
+        args: ["bob@waddle.test/desktop", "c1", "success"],
+      },
+    ]);
+  });
+
+  test("sessionTerminateWithOutcome legacy fallback is safe when destructured", async () => {
+    const { client, calls } = recorder();
+    const { sessionTerminateWithOutcome } = outboundCalls;
+    await expect(sessionTerminateWithOutcome(
+      client,
+      "bob@waddle.test/desktop",
+      "c1",
+      "success",
+    )).resolves.toBe("ok");
+    expect(calls).toEqual([
+      {
+        method: "send_call_session_terminate",
+        args: ["bob@waddle.test/desktop", "c1", "success"],
+      },
+    ]);
+  });
+
+  test("sessionTerminateWithOutcome treats malformed typed outcome as error", async () => {
+    const client: CallWireSender = {
+      send_call_session_terminate_with_outcome: async () => ({ kind: "forbidden" }),
+    };
+    await expect(outboundCalls.sessionTerminateWithOutcome(
+      client,
+      "bob@waddle.test/desktop",
+      "c1",
+      "success",
+    )).resolves.toBe("error");
+  });
+
   test("throws WasmCallApiUnavailable when the wasm method is missing", async () => {
     const empty: CallWireSender = {};
     await expect(outboundCalls.propose(empty, "x@test", "c1", audioVideo)).rejects.toThrow(
