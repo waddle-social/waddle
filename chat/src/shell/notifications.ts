@@ -1,5 +1,5 @@
 import { ref, watch } from "vue";
-import type { BrowserXmppClient } from "@/lib/xmpp-client";
+import type { BrowserXmppClient, NotifyMode } from "@/lib/xmpp-client";
 import { getOrRegisterServiceWorker, registerServiceWorker as registerChatServiceWorker } from "@/lib/service-worker-registration";
 import { createPushFlowLock } from "./push-flow-lock";
 import {
@@ -34,8 +34,9 @@ const APP_ID_WEB = "web";
 /// pinned here so the server's environment-filter logic is exercised.
 const PUSH_ENVIRONMENT = "prod";
 
-const hasNotificationApi =
-  typeof window !== "undefined" && "Notification" in window;
+function hasNotificationApi(): boolean {
+  return typeof window !== "undefined" && "Notification" in window;
+}
 
 interface MentionNotificationOptions {
   senderNick: string;
@@ -51,6 +52,15 @@ interface MentionNotificationOptions {
   onNavigate?: (roomJid: string) => void;
 }
 
+interface ChannelMessageNotificationOptions {
+  senderNick: string;
+  channelName: string;
+  body: string;
+  roomJid: string;
+  stanzaId?: string;
+  onNavigate?: (roomJid: string) => void;
+}
+
 interface DmNotificationOptions {
   senderUsername: string;
   peerJid: string;
@@ -58,6 +68,20 @@ interface DmNotificationOptions {
   /** XEP-0359 stanza id; see `MentionNotificationOptions.stanzaId`. */
   stanzaId?: string;
   onNavigate?: (peerJid: string) => void;
+}
+
+export function shouldShowChannelForegroundNotification(opts: {
+  mode: NotifyMode;
+  isMention: boolean;
+}): boolean {
+  switch (opts.mode) {
+    case "always":
+      return true;
+    case "on-mention":
+      return opts.isMention;
+    case "never":
+      return false;
+  }
 }
 
 /// Foreground→SW signal: tell the active service worker we just
@@ -82,7 +106,7 @@ function postItemShownToServiceWorker(itemId: string | undefined): void {
 
 export function usePushNotifications() {
   const permissionState = ref<NotificationPermission>(
-    hasNotificationApi ? Notification.permission : "denied",
+    hasNotificationApi() ? Notification.permission : "denied",
   );
   const notificationsEnabled = ref(loadEnabled());
   /// Surfaced to the UI as a non-intrusive banner the first time a
@@ -115,7 +139,7 @@ export function usePushNotifications() {
   });
 
   async function requestPermission(): Promise<NotificationPermission> {
-    if (!hasNotificationApi) return "denied";
+    if (!hasNotificationApi()) return "denied";
     const result = await Notification.requestPermission();
     permissionState.value = result;
     if (result === "granted") {
@@ -125,7 +149,7 @@ export function usePushNotifications() {
   }
 
   function showMentionNotification(opts: MentionNotificationOptions) {
-    if (!hasNotificationApi) return;
+    if (!hasNotificationApi()) return;
     if (permissionState.value !== "granted" || !notificationsEnabled.value) return;
 
     const title = opts.isBroadcast
@@ -154,8 +178,29 @@ export function usePushNotifications() {
     setTimeout(() => notification.close(), 5000);
   }
 
+  function showChannelMessageNotification(opts: ChannelMessageNotificationOptions) {
+    if (!hasNotificationApi()) return;
+    if (permissionState.value !== "granted" || !notificationsEnabled.value) return;
+
+    const body = opts.body.length > 100 ? `${opts.body.slice(0, 100)}…` : opts.body;
+    const notification = new Notification(`@${opts.senderNick} in #${opts.channelName}`, {
+      body,
+      tag: opts.roomJid,
+      icon: NOTIFICATION_ICON_URL,
+    });
+
+    notification.onclick = () => {
+      window.focus();
+      opts.onNavigate?.(opts.roomJid);
+      notification.close();
+    };
+
+    postItemShownToServiceWorker(opts.stanzaId);
+    setTimeout(() => notification.close(), 5000);
+  }
+
   function showDmNotification(opts: DmNotificationOptions) {
-    if (!hasNotificationApi) return;
+    if (!hasNotificationApi()) return;
     if (permissionState.value !== "granted" || !notificationsEnabled.value) return;
     const body = opts.body.length > 100 ? `${opts.body.slice(0, 100)}…` : opts.body;
     const notification = new Notification(`Message from @${opts.senderUsername}`, {
@@ -549,6 +594,7 @@ export function usePushNotifications() {
     dismissRotationBanner,
     requestPermission,
     showMentionNotification,
+    showChannelMessageNotification,
     showDmNotification,
     registerServiceWorker,
     subscribeToPush,

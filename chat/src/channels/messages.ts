@@ -89,6 +89,7 @@ export function useChannelMessages(
   const activeChannels = ref<Set<string>>(new Set());
   const mentionedChannelCounts = ref<Record<string, number>>({});
   const lastMentionActivity = ref<RoomActivityEvent | null>(null);
+  const pendingNotificationActivities = ref<RoomActivityEvent[]>([]);
   const roomAvatarHashes = ref<Record<string, string>>({});
   const roomJidOverrides = ref<Record<string, string>>({});
 
@@ -192,6 +193,7 @@ export function useChannelMessages(
             roomJid: msg.roomJid,
             nick: msg.nick,
             body: msg.body,
+            ...(msg.stanzaId ? { stanzaId: msg.stanzaId } : {}),
             ...(msg.mentions ? { mentions: msg.mentions } : {}),
             ...(msg.broadcastMention ? { broadcastMention: msg.broadcastMention } : {}),
           });
@@ -211,24 +213,24 @@ export function useChannelMessages(
         // applyCorrection / mergeLiveMessage based on the stanza shape.
         const classified = liveMerge.handleRoomMessage(msg);
 
-        // Mention-driven notification routing stays in the orchestrator —
+        // Foreground notification routing stays in the orchestrator —
         // it depends on cross-room session state and the tab-visibility
         // signal, both of which are out of scope for live-merge.
         if (classified.kind !== "live") return;
-        const isTabHidden = typeof document !== "undefined"
-          && (!document.hasFocus() || document.visibilityState === "hidden");
-        if (msg.nick !== session.value?.username && isTabHidden) {
+        if (msg.nick !== session.value?.username && isTabHidden()) {
           const isMentioned =
             !!msg.broadcastMention ||
             msg.mentions?.some(isSessionMention);
+          const activity: RoomActivityEvent = {
+            roomJid: msg.roomJid,
+            nick: msg.nick,
+            body: msg.body,
+          };
+          if (msg.stanzaId) activity.stanzaId = msg.stanzaId;
+          if (msg.mentions) activity.mentions = msg.mentions;
+          if (msg.broadcastMention) activity.broadcastMention = msg.broadcastMention;
+          enqueueNotificationActivity(activity);
           if (isMentioned) {
-            const activity: RoomActivityEvent = {
-              roomJid: msg.roomJid,
-              nick: msg.nick,
-              body: msg.body,
-            };
-            if (msg.mentions) activity.mentions = msg.mentions;
-            if (msg.broadcastMention) activity.broadcastMention = msg.broadcastMention;
             recordMentionActivity(activity);
             lastMentionActivity.value = activity;
           }
@@ -588,6 +590,7 @@ export function useChannelMessages(
     activeChannels.value = new Set();
     mentionedChannelCounts.value = {};
     lastMentionActivity.value = null;
+    pendingNotificationActivities.value = [];
   }
 
   function isOwnMentionActivity(event: RoomActivityEvent): boolean {
@@ -611,10 +614,22 @@ export function useChannelMessages(
   function recordRoomActivity(event: RoomActivityEvent) {
     const roomJid = barePeerJid(event.roomJid);
     activeChannels.value = new Set([...activeChannels.value, roomJid]);
+    if (event.nick !== session.value?.username && isTabHidden()) {
+      enqueueNotificationActivity(event);
+    }
     if (isOwnMentionActivity(event)) {
       recordMentionActivity(event);
       lastMentionActivity.value = event;
     }
+  }
+
+  function isTabHidden(): boolean {
+    return typeof document !== "undefined"
+      && (!document.hasFocus() || document.visibilityState === "hidden");
+  }
+
+  function enqueueNotificationActivity(event: RoomActivityEvent) {
+    pendingNotificationActivities.value = [...pendingNotificationActivities.value, event];
   }
 
   watch(scrollDirection, () => {
@@ -707,6 +722,7 @@ export function useChannelMessages(
     isPinnedAtEdge: pinnedEdgeScroller.isPinnedAtEdge,
     latestRemoteMessageId,
     lastMentionActivity,
+    pendingNotificationActivities,
     onMessageQueueStatus,
     onMessageAck,
     onMessageDeliveryFailure,
