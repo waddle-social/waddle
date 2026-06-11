@@ -316,6 +316,7 @@ enum XMPPJingleReason: Sendable, Equatable {
 /// importing UniFFI types into its own surface.
 enum XMPPCallEventKind: Sendable, Equatable {
     case propose(media: XMPPCallMedia)
+    case ringing
     case proceed
     case reject(reason: XMPPJingleReason?, tieBreak: Bool)
     case retract(reason: XMPPJingleReason?, tieBreak: Bool)
