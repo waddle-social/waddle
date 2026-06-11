@@ -26,6 +26,7 @@ import { localScreenSharePresentation } from "@/lib/calls/call-self-share";
 import { normalizeMucCallRoomJid } from "@/lib/calls/muc-call-presence";
 import { useCallVolumeMixer } from "@/lib/calls/use-call-volume-mixer";
 import { barePeerJid } from "@/lib/xmpp/jid";
+import { expectedRemoteIdentitiesForCallState } from "@/lib/calls/call-tiles";
 import CallTileGrid from "./CallTileGrid.vue";
 import CallControls from "./CallControls.vue";
 import CallSettingsDialog from "./CallSettingsDialog.vue";
@@ -167,11 +168,9 @@ const selfSharePresentation = computed(() =>
 const stageLocalTracks = computed(() =>
   selfSharePresentation.value?.stageLocalTracks ?? localTracks.value,
 );
-const expectedRemoteIdentities = computed(() => {
-  if (state.value.phase !== "active" || state.value.kind !== "dm") return [];
-  const peer = state.value.peer.trim();
-  return peer ? [peer] : [];
-});
+const expectedRemoteIdentities = computed(() =>
+  expectedRemoteIdentitiesForCallState(state.value),
+);
 
 onMounted(() => {
   refreshScreenShareSupported();

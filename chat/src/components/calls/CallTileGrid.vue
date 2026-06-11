@@ -36,8 +36,8 @@ import CallTile from "./CallTile.vue";
 type Tile = CallTileModel;
 
 const props = defineProps<{
-  remoteTracks: RemoteMediaTrack[];
-  localTracks: LocalMediaTrack[];
+  remoteTracks: readonly RemoteMediaTrack[];
+  localTracks: readonly LocalMediaTrack[];
   /** LiveKit identity for the local participant (may be null pre-connect). */
   localIdentity: string | null;
   /** Remote participants known from call state before LiveKit has subscribed to their tracks. */
