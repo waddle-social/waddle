@@ -22,6 +22,7 @@ describe("CallSettingsDialog speaker support", () => {
     expect(html).not.toContain('aria-label="Speaker"');
     expect(html).not.toContain("System default");
   });
+
 });
 
 async function renderVueComponent(path: string, props: Record<string, unknown>): Promise<string> {

@@ -105,6 +105,40 @@ describe("call tile spotlight projection", () => {
     expect(projection.spotlightKey).toBeNull();
   });
 
+  test("uses one remote tile for a DM peer that is publishing only a screen", () => {
+    const sharing = projectCallTiles({
+      remoteTracks: [remoteVideo("bob@example.com/web", "screen-pub", "screen_share")],
+      localTracks: [],
+      localIdentity: "alice@example.com/web",
+      expectedRemoteIdentities: ["bob@example.com/phone"],
+      micEnabled: true,
+      seenRemoteScreenTrackKeys: new Set(),
+      manualFocusKey: null,
+    });
+
+    expect(sharing.spotlightKey).toBe("remote:bob@example.com/web:screen_share");
+    expect(sharing.tiles.map((tile) => tile.key)).toEqual([
+      "self:alice@example.com/web:camera",
+      "remote:bob@example.com/web:screen_share",
+    ]);
+
+    const afterStop = projectCallTiles({
+      remoteTracks: [],
+      localTracks: [],
+      localIdentity: "alice@example.com/web",
+      expectedRemoteIdentities: ["bob@example.com/phone"],
+      micEnabled: true,
+      seenRemoteScreenTrackKeys: sharing.seenRemoteScreenTrackKeys,
+      manualFocusKey: sharing.spotlightKey,
+    });
+
+    expect(afterStop.spotlightKey).toBeNull();
+    expect(afterStop.tiles.map((tile) => tile.key)).toEqual([
+      "self:alice@example.com/web:camera",
+      "remote:bob@example.com/phone:camera",
+    ]);
+  });
+
   test("does not auto-promote the local participant's own screen share", () => {
     const projection = projectCallTiles({
       remoteTracks: [],

@@ -7,11 +7,9 @@ import {
   $devicePrefs,
   enumerateCallDevices,
   isSpeakerOutputSelectionSupported,
-  setCamDevice,
-  setMicDevice,
-  setSpeakerDevice,
   type EnumeratedDevices,
 } from "@/lib/calls/device-prefs";
+import { applyCallDeviceSelection } from "@/lib/calls/call-device-selection";
 import { $micAudioProcessing } from "@/lib/calls/mic-audio-processing-state";
 import { audioProcessingRows } from "@/lib/calls/mic-audio-processing";
 import { useCallEngine } from "@/lib/calls/use-call-engine";
@@ -218,35 +216,26 @@ function stopStatsPolling(): void {
 onScopeDispose(stopStatsPolling);
 
 async function selectMic(id: string | null): Promise<void> {
-  setMicDevice(id);
-  if (id) {
-    try {
-      await engine.setMicDevice(id);
-    } catch (err) {
-      reportCallError(err);
-    }
+  try {
+    await applyCallDeviceSelection("mic", id, engine);
+  } catch (err) {
+    reportCallError(err);
   }
 }
 
 async function selectCam(id: string | null): Promise<void> {
-  setCamDevice(id);
-  if (id) {
-    try {
-      await engine.setCameraDevice(id);
-    } catch (err) {
-      reportCallError(err);
-    }
+  try {
+    await applyCallDeviceSelection("cam", id, engine);
+  } catch (err) {
+    reportCallError(err);
   }
 }
 
 async function selectSpeaker(id: string | null): Promise<void> {
-  setSpeakerDevice(id);
-  if (id) {
-    try {
-      await engine.setSpeakerDevice(id);
-    } catch (err) {
-      reportCallError(err);
-    }
+  try {
+    await applyCallDeviceSelection("speaker", id, engine);
+  } catch (err) {
+    reportCallError(err);
   }
 }
 
