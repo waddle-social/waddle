@@ -719,6 +719,86 @@ describe("tearDownActiveCall", () => {
     expect($callState.get()).toEqual({ phase: "idle" });
   });
 
+  test("active DM call: orphaned terminate still dispatches XEP-0353 finish", async () => {
+    const sender: CallWireSender = {
+      send_call_session_terminate_with_outcome: mock(async () => ({ kind: "orphaned" })),
+      send_call_finish: mock(async () => undefined),
+    };
+    $callState.set({
+      phase: "active",
+      peer: "bob@waddle.test/desktop",
+      sid: "c1",
+      media: audioVideo,
+      join,
+      kind: "dm",
+      initiator: "alice@waddle.test/web",
+    });
+    await tearDownActiveCall(sender, "success");
+    expect(sender.send_call_session_terminate_with_outcome).toHaveBeenCalledWith(
+      "bob@waddle.test/desktop",
+      "c1",
+      "success",
+    );
+    expect(sender.send_call_finish).toHaveBeenCalledWith(
+      "bob@waddle.test/desktop",
+      "c1",
+    );
+    expect($callState.get()).toEqual({ phase: "idle" });
+    expect($lastCallError.get()).toBeNull();
+  });
+
+  test("active DM call: unclassified terminate failure does not send finish", async () => {
+    const sender: CallWireSender = {
+      send_call_session_terminate: mock(async () => {
+        throw new Error("terminate failed");
+      }),
+      send_call_finish: mock(async () => undefined),
+    };
+    $callState.set({
+      phase: "active",
+      peer: "bob@waddle.test/desktop",
+      sid: "c1",
+      media: audioVideo,
+      join,
+      kind: "dm",
+      initiator: "alice@waddle.test/web",
+    });
+    await tearDownActiveCall(sender, "success");
+    expect(sender.send_call_session_terminate).toHaveBeenCalledWith(
+      "bob@waddle.test/desktop",
+      "c1",
+      "success",
+    );
+    expect(sender.send_call_finish).not.toHaveBeenCalled();
+    expect($callState.get()).toEqual({ phase: "idle" });
+    expect($lastCallError.get()).toBe("terminate failed");
+  });
+
+  test("active DM call: typed terminate error does not send finish", async () => {
+    const sender: CallWireSender = {
+      send_call_session_terminate_with_outcome: mock(async () => ({ kind: "error" })),
+      send_call_finish: mock(async () => undefined),
+    };
+    $callState.set({
+      phase: "active",
+      peer: "bob@waddle.test/desktop",
+      sid: "c1",
+      media: audioVideo,
+      join,
+      kind: "dm",
+      initiator: "alice@waddle.test/web",
+    });
+    await tearDownActiveCall(sender, "success");
+    expect(sender.send_call_session_terminate_with_outcome).toHaveBeenCalledWith(
+      "bob@waddle.test/desktop",
+      "c1",
+      "success",
+    );
+    expect(sender.send_call_finish).not.toHaveBeenCalled();
+    expect($callState.get()).toEqual({ phase: "idle" });
+    expect($lastCallError.get()).toBe("call session terminate failed");
+  });
+
   test("active call: success reason for graceful logout", async () => {
     const sender = mockSender();
     $callState.set({

@@ -294,6 +294,7 @@ export class WaddleClient {
      */
     send_call_session_initiate(peer_full_jid: string, initiator_full_jid: string, sid_str: string, audio: boolean, video: boolean): Promise<any>;
     send_call_session_terminate(peer_full_jid: string, sid_str: string, reason?: string | null): Promise<any>;
+    send_call_session_terminate_with_outcome(peer_full_jid: string, sid_str: string, reason?: string | null): Promise<any>;
     send_chat_message(peer_jid: string, body: string, options: any): Promise<any>;
     send_chat_state(to: string, msg_type: string, state: string, thread_id?: string | null, thread_parent?: string | null): Promise<any>;
     send_correction(to: string, msg_type: string, body: string, replaces_id: string, options: any): Promise<any>;

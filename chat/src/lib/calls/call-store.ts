@@ -646,21 +646,34 @@ export async function tearDownActiveCall(
       switch (s.phase) {
         case "active":
           if (s.kind === "dm") {
+            let terminateAllowsFinish = false;
             try {
-              await outboundCalls.sessionTerminate(sender, s.peer, s.sid, reason);
-              // XEP-0353 §3.5: both parties SHOULD send `<finish/>` after
-              // the call ends so MAM archives both sides consistently
-              // (the JMI message stack uses the finish marker to bookend
-              // the call record). Best-effort: a wasm bundle that
-              // doesn't expose `send_call_finish` shouldn't keep the
-              // terminate from clearing the local slot.
+              const outcome = await outboundCalls.sessionTerminateWithOutcome(
+                sender,
+                s.peer,
+                s.sid,
+                reason,
+              );
+              terminateAllowsFinish = outcome === "ok" || outcome === "orphaned";
+              if (outcome === "error") {
+                reportCallError(new Error("call session terminate failed"));
+              }
+            } catch (err) {
+              reportCallError(err);
+            }
+            if (terminateAllowsFinish) {
               try {
+                // XEP-0353 §3.5: both parties SHOULD send `<finish/>`
+                // after the call ends so MAM archives both sides
+                // consistently. A classified orphaned Jingle terminate
+                // means the server has already lost the call registry, so
+                // only the message-level bookend can still route.
                 await outboundCalls.finish(sender, s.peer, s.sid);
               } catch (err) {
                 reportCallError(err);
+              } finally {
+                clearDmCallActivity(s.peer, s.sid);
               }
-            } finally {
-              clearDmCallActivity(s.peer, s.sid);
             }
           } else {
             // MUC group call: clear our Muji presence AND leave via
