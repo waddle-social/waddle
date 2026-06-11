@@ -7,7 +7,11 @@ import {
   readDmCallJoin,
   rememberDmCallJoin,
 } from "./dm-call-join-cache";
-import { publishDmCallOutcomeAnchor, type DmCallOutcome } from "./dm-call-anchor";
+import {
+  publishDmCallOutcomeAnchor,
+  type DmCallOutcome,
+  type DmCallOutcomeAnchor,
+} from "./dm-call-anchor";
 import type { CallEvent, CallMedia, LiveKitJoin } from "./types";
 
 export const DM_CALL_ACTIVITY_ACTIVE_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -311,12 +315,13 @@ function outcomeForTerminalEvent(
   direction: DmCallActivity["direction"],
 ): DmCallOutcome {
   if (event.kind === "reject") return "declined";
+  if (event.kind === "session-terminate" && event.reason === "timeout") return "no-answer";
   if (event.kind === "finish" || event.kind === "session-terminate") return "ended";
   const callDirection = previous?.direction ?? direction;
   return callDirection === "outgoing" ? "no-answer" : "missed";
 }
 
-function publishTerminalOutcome(params: {
+function terminalOutcomeAnchor(params: {
   peerJid: string;
   sid: string;
   timestamp: string;
@@ -324,17 +329,17 @@ function publishTerminalOutcome(params: {
   previous?: DmCallActivity;
   direction: DmCallActivity["direction"];
   selfJid?: string | null;
-}): void {
+}): DmCallOutcomeAnchor {
   const media = eventMedia(params.event, params.previous);
   const initiator = terminalOutcomeInitiator(params);
-  publishDmCallOutcomeAnchor({
+  return {
     peerBareJid: params.peerJid,
     sid: params.sid,
     media: media.media,
     outcome: outcomeForTerminalEvent(params.event, params.previous, params.direction),
     ...(initiator ? { initiator } : {}),
     ended: params.timestamp,
-  });
+  };
 }
 
 function terminalOutcomeInitiator(params: {
@@ -570,24 +575,24 @@ export function clearDmCallActivity(peerJid: string, sid?: string): void {
   $dmCallActivities.set(next);
 }
 
-export function applyDmCallEvent(envelope: DmCallEventEnvelope): void {
+export function applyDmCallEvent(envelope: DmCallEventEnvelope): DmCallOutcomeAnchor | null {
   const peerJid = peerForEnvelope(envelope);
-  if (!peerJid) return;
+  if (!peerJid) return null;
   const timestamp = timestampFromEnvelope(envelope);
   const now = envelope.now ?? new Date();
   if (isStale(timestamp, now)) {
     removeActivity(peerJid, envelope.event.sid);
-    return;
+    return null;
   }
   const previousForSidEntry = findActivityForSid(peerJid, envelope.event.sid);
   const previousForSid = previousForSidEntry?.[1];
-  if (isOlderThanCurrent(timestamp, previousForSid)) return;
-  if (!isTerminalEvent(envelope.event) && isOlderThanTerminal(peerJid, envelope.event.sid, timestamp)) return;
+  if (isOlderThanCurrent(timestamp, previousForSid)) return null;
+  if (!isTerminalEvent(envelope.event) && isOlderThanTerminal(peerJid, envelope.event.sid, timestamp)) return null;
   const direction = directionForEnvelope(envelope);
   const remoteFullJid = remoteFullJidForEnvelope(envelope, peerJid);
   switch (envelope.event.kind) {
     case "ringing":
-      return;
+      return null;
     case "propose":
       setActivity(peerJid, envelope.event.sid, eventSelfFullJid(envelope), {
         peerJid,
@@ -599,7 +604,7 @@ export function applyDmCallEvent(envelope: DmCallEventEnvelope): void {
         updatedAt: timestamp,
       });
       scheduleActivityPrune(now);
-      return;
+      return null;
     case "proceed":
     case "session-initiate":
     case "session-accept":
@@ -651,26 +656,28 @@ export function applyDmCallEvent(envelope: DmCallEventEnvelope): void {
         updatedAt: timestamp,
       });
       scheduleActivityPrune(now);
-      return;
+      return null;
     case "reject":
     case "retract":
     case "finish":
     case "session-terminate":
+      if (isOlderThanTerminal(peerJid, envelope.event.sid, timestamp)) return null;
+      const outcomeAnchor = terminalOutcomeAnchor({
+        peerJid,
+        sid: envelope.event.sid,
+        timestamp,
+        event: envelope.event,
+        previous: previousForSid,
+        direction,
+        selfJid: envelope.selfFullJid ?? envelope.selfBareJid,
+      });
       if (envelope.publishOutcome !== false) {
-        publishTerminalOutcome({
-          peerJid,
-          sid: envelope.event.sid,
-          timestamp,
-          event: envelope.event,
-          previous: previousForSid,
-          direction,
-          selfJid: envelope.selfFullJid ?? envelope.selfBareJid,
-        });
+        publishDmCallOutcomeAnchor(outcomeAnchor);
       }
       recordTerminal(peerJid, envelope.event.sid, timestamp, now);
       forgetDmCallJoin({ selfBareJid: envelope.selfBareJid, peerJid, sid: envelope.event.sid });
       removeActivity(peerJid, envelope.event.sid);
-      return;
+      return outcomeAnchor;
   }
 }
 

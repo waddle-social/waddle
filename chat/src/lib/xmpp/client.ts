@@ -17,6 +17,7 @@ import {
   applyDmCallEvent,
   clearDmCallActivities,
 } from "@/lib/calls/dm-call-activity";
+import { buildDmCallOutcomeAnchor, type DmCallOutcomeAnchor } from "@/lib/calls/dm-call-anchor";
 import { handleCallEventSideEffect } from "@/lib/calls/call-effects";
 import {
   applyMucCallPresence,
@@ -257,6 +258,11 @@ type InboundWasmMessage = WasmMessage & {
   inboxPush?: InboxEntry;
   inbox_push?: WasmInboxConversation;
   _fromCarbon?: boolean;
+};
+
+type ArchivedDmCallOutcome = {
+  anchor: DmCallOutcomeAnchor;
+  terminalMessage: WasmArchivedMessage;
 };
 
 function shouldSkipCatchupMessage(
@@ -2771,25 +2777,53 @@ export class BrowserXmppClient {
   private roomMamPageToMessages(page: WasmMamPage): MamHistoryPage<LiveRoomMessage> {
     return { messages: page.messages.map((message) => roomMessageFromArchived(message, { trustedMediaOrigin: this.trustedLinkPreviewMediaOrigin() })).filter((message): message is LiveRoomMessage => !!message), ...(page.first_id ? { firstArchiveId: page.first_id } : {}), ...(page.last_id ? { lastArchiveId: page.last_id } : {}), complete: page.is_complete };
   }
-  private dmMamPageToMessages(
-    page: WasmMamPage,
-    options: { applyCallEvents?: boolean } = {},
-  ): MamHistoryPage<LiveDmMessage> {
+  private dmMamPageToMessages(page: WasmMamPage): MamHistoryPage<LiveDmMessage> {
     const selfBare = barePeerJid(this.session.jid);
-    if (options.applyCallEvents !== false) {
-      this.applyDmCallEventsFromMamPage(page, selfBare);
-    }
-    return { messages: page.messages.map((message) => dmMessageFromArchived(message, selfBare, { trustedMediaOrigin: this.trustedLinkPreviewMediaOrigin() })).filter((message): message is LiveDmMessage => !!message), ...(page.first_id ? { firstArchiveId: page.first_id } : {}), ...(page.last_id ? { lastArchiveId: page.last_id } : {}), complete: page.is_complete };
+    const outcomeAnchors = this.applyDmCallEventsFromMamPage(page, selfBare, { publishOutcome: false });
+    const messages = page.messages
+      .map((message) => dmMessageFromArchived(message, selfBare, { trustedMediaOrigin: this.trustedLinkPreviewMediaOrigin() }))
+      .filter((message): message is LiveDmMessage => !!message);
+    const outcomeMessages = outcomeAnchors.map((outcome) =>
+      this.dmCallOutcomeAnchorToLiveMessage(outcome),
+    );
+    return {
+      messages: [...messages, ...outcomeMessages],
+      ...(page.first_id ? { firstArchiveId: page.first_id } : {}),
+      ...(page.last_id ? { lastArchiveId: page.last_id } : {}),
+      complete: page.is_complete,
+    };
   }
+
+  private dmCallOutcomeAnchorToLiveMessage(outcome: ArchivedDmCallOutcome): LiveDmMessage {
+    const { anchor, terminalMessage } = outcome;
+    const card = buildDmCallOutcomeAnchor(anchor, this.session.jid);
+    const wireIds = rawMessageSeenIds(terminalMessage);
+    return {
+      id: card.id,
+      ...(terminalMessage.mam_id ? { archiveId: terminalMessage.mam_id } : {}),
+      peerJid: anchor.peerBareJid,
+      fromJid: card.authorJid ?? anchor.peerBareJid,
+      nick: card.author,
+      body: card.body,
+      createdAt: card.createdAt,
+      createdAtSource: "archive",
+      type: "message",
+      ...(wireIds.length > 0 ? { wireIds } : {}),
+      ...(card.threadId ? { threadId: card.threadId } : {}),
+      ...(card.callThread ? { callThread: card.callThread } : {}),
+    };
+  }
+
   private applyDmCallEventsFromMamPage(
     page: WasmMamPage | null | undefined,
     selfBare = barePeerJid(this.session.jid),
     options: { since?: string; seenIds?: ReadonlyArray<string>; publishOutcome?: boolean } = {},
-  ): void {
+  ): ArchivedDmCallOutcome[] {
+    const outcomeAnchors: ArchivedDmCallOutcome[] = [];
     for (const message of page?.messages ?? []) {
       if (!message.call_event) continue;
       if (shouldSkipRawCatchupMessage(message, options.since, options.seenIds)) continue;
-      applyDmCallEvent({
+      const outcomeAnchor = applyDmCallEvent({
         event: message.call_event,
         selfBareJid: selfBare,
         selfFullJid: this.fullJid,
@@ -2797,7 +2831,9 @@ export class BrowserXmppClient {
         timestamp: message.timestamp,
         publishOutcome: options.publishOutcome,
       });
+      if (outcomeAnchor) outcomeAnchors.push({ anchor: outcomeAnchor, terminalMessage: message });
     }
+    return outcomeAnchors;
   }
   private recordRoomMamWatermarks(messages: ReadonlyArray<LiveRoomMessage>) {
     for (const message of messages) {
@@ -2844,7 +2880,7 @@ export class BrowserXmppClient {
   async queryPersonalMamPage(peerJid: string, max = 100, pageParam: MamPageParam = { type: "latest" }): Promise<MamHistoryPage<LiveDmMessage>> {
     const xmpp = await this.requireConnectedXmpp(); const page = await xmpp.fetch_dm_history_page?.(barePeerJid(peerJid), max, pageParam) as WasmMamPage;
     if (!page) return { messages: [], complete: true };
-    const result = this.dmMamPageToMessages(page, { applyCallEvents: pageParam.type !== "before" });
+    const result = this.dmMamPageToMessages(page);
     this.recordDmMamWatermarks(result.messages);
     return result;
   }
@@ -2852,7 +2888,7 @@ export class BrowserXmppClient {
     if (!threadId) return { messages: [], complete: true };
     const xmpp = await this.requireConnectedXmpp(); const page = await xmpp.fetch_dm_history_by_thread?.(barePeerJid(peerJid), threadId, max, pageParam.type === "before" ? pageParam.before : null) as WasmMamPage;
     if (!page) return { messages: [], complete: true };
-    const result = this.dmMamPageToMessages(page, { applyCallEvents: false });
+    const result = this.dmMamPageToMessages(page);
     this.recordDmMamWatermarks(result.messages);
     return result;
   }
@@ -2899,7 +2935,7 @@ export class BrowserXmppClient {
     if (!query.trim()) return [];
     const xmpp = await this.requireConnectedXmpp();
     const page = await xmpp.search_dm_history?.(barePeerJid(peerJid), query, max) as WasmMamPage;
-    const parsed = page ? this.dmMamPageToMessages(page, { applyCallEvents: false }).messages : [];
+    const parsed = page ? this.dmMamPageToMessages(page).messages : [];
     return parsed.filter((message) => !!message.body).map((message, index) => ({ id: message.id, ...(page?.messages[index]?.mam_id ? { archiveId: page.messages[index].mam_id } : {}), nick: message.nick, body: message.body, createdAt: message.createdAt, ...(message.threadId ? { threadId: message.threadId } : {}), ...(message.parentThreadId ? { parentThreadId: message.parentThreadId } : {}), peerJid: message.peerJid }));
   }
   async subscribeToPeerPresence(peerJid: string): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await xmpp.subscribe_to_presence?.(barePeerJid(peerJid)); }

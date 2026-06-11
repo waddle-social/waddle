@@ -32,6 +32,9 @@ export function callThreadAnchorLabel(message: Pick<TimelineMessage, "body" | "a
     case "no-answer":
       return "No answer";
     case "ended":
+      if (message.callThread.duration) {
+        return `Call ended · ${formatCallThreadDuration(message.callThread.duration)}`;
+      }
       return "Call ended";
   }
   if (message.callThread?.ended && message.callThread.duration) {

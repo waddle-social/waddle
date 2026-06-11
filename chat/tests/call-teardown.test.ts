@@ -334,6 +334,28 @@ describe("DM call outcome feed anchors", () => {
     });
   });
 
+  test("timeout session-terminate records no-answer rather than ended", () => {
+    applyDmCallEvent({
+      selfBareJid: "alice@waddle.test",
+      selfFullJid: "alice@waddle.test/web",
+      timestamp: "2026-06-09T12:00:00Z",
+      now: new Date("2026-06-09T12:01:00Z"),
+      event: {
+        kind: "session-terminate",
+        from: "alice@waddle.test/web",
+        to: "bob@waddle.test/phone",
+        sid: "c-timeout-terminate",
+        reason: "timeout",
+      },
+    });
+
+    expect($dmCallOutcomeAnchor.get()).toMatchObject({
+      peerBareJid: "bob@waddle.test",
+      sid: "c-timeout-terminate",
+      outcome: "no-answer",
+    });
+  });
+
   test("archived MAM call events derive a missed entry after reconnect", () => {
     applyDmCallEvent({
       selfBareJid: "alice@waddle.test",
@@ -367,6 +389,52 @@ describe("DM call outcome feed anchors", () => {
       outcome: "missed",
       ended: "2026-06-09T12:00:45Z",
     });
+  });
+
+  test("duplicate terminal replay does not republish with fallback media", () => {
+    applyDmCallEvent({
+      selfBareJid: "alice@waddle.test",
+      selfFullJid: "alice@waddle.test/web",
+      timestamp: "2026-06-09T12:00:00Z",
+      now: new Date("2026-06-09T12:01:00Z"),
+      event: {
+        kind: "propose",
+        from: "bob@waddle.test/phone",
+        to: "alice@waddle.test/web",
+        sid: "c-duplicate",
+        media: audioVideo,
+      },
+    });
+    applyDmCallEvent({
+      selfBareJid: "alice@waddle.test",
+      selfFullJid: "alice@waddle.test/web",
+      timestamp: "2026-06-09T12:00:45Z",
+      now: new Date("2026-06-09T12:01:00Z"),
+      event: {
+        kind: "retract",
+        from: "bob@waddle.test/phone",
+        to: "alice@waddle.test/web",
+        sid: "c-duplicate",
+      },
+    });
+    const firstOutcome = $dmCallOutcomeAnchor.get();
+
+    const duplicateOutcome = applyDmCallEvent({
+      selfBareJid: "alice@waddle.test",
+      selfFullJid: "alice@waddle.test/web",
+      timestamp: "2026-06-09T12:00:45Z",
+      now: new Date("2026-06-09T12:01:00Z"),
+      event: {
+        kind: "retract",
+        from: "bob@waddle.test/phone",
+        to: "alice@waddle.test/web",
+        sid: "c-duplicate",
+      },
+    });
+
+    expect(duplicateOutcome).toBeNull();
+    expect($dmCallOutcomeAnchor.get()).toEqual(firstOutcome);
+    expect($dmCallOutcomeAnchor.get()?.media).toEqual(audioVideo);
   });
 
   test("background MAM call hydration can update activity without publishing feed outcomes", () => {

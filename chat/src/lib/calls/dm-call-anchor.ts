@@ -95,8 +95,12 @@ export function buildDmCallOutcomeAnchor(
   anchor: DmCallOutcomeAnchor,
   selfJid: string,
 ): TimelineMessage {
-  const initiator = anchor.initiator ? barePeerJid(anchor.initiator).toLowerCase() : "";
   const selfBare = barePeerJid(selfJid).toLowerCase();
+  const initiator = anchor.initiator
+    ? barePeerJid(anchor.initiator).toLowerCase()
+    : anchor.outcome === "no-answer"
+      ? selfBare
+      : "";
   const isSelfInitiated = !!initiator && initiator === selfBare;
   return {
     id: dmCallOutcomeAnchorId(anchor.sid, anchor.outcome),

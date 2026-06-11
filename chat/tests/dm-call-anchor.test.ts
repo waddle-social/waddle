@@ -1,6 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { effectScope, ref } from "vue";
 import {
+  $dmCallOutcomeAnchor,
   buildDmCallOutcomeAnchor,
   buildDmCallStartedAnchor,
   dmCallAnchorId,
@@ -36,6 +37,10 @@ const base = {
   initiator: "alice@waddle.test/web",
   started: "2026-06-09T12:00:00Z",
 };
+
+afterEach(() => {
+  $dmCallOutcomeAnchor.set(null);
+});
 
 describe("dm call-started anchor", () => {
   test("builds a feed-visible dm call anchor keyed by the call sid", () => {
@@ -242,6 +247,30 @@ describe("dm call outcome anchor", () => {
       isSelf: false,
     });
     expect(callThreadAnchorLabel(card)).toBe("Missed call");
+  });
+
+  test("renders no-answer outcome cards as self-authored even without an initiator", () => {
+    const { initiator: _initiator, ...outcomeWithoutInitiator } = outcome;
+    const card = buildDmCallOutcomeAnchor(
+      { ...outcomeWithoutInitiator, outcome: "no-answer" },
+      "alice@waddle.test/desktop",
+    );
+
+    expect(card).toMatchObject({
+      author: "alice",
+      authorJid: "alice@waddle.test/desktop",
+      isSelf: true,
+    });
+  });
+
+  test("keeps ended duration in outcome labels", () => {
+    const card = buildDmCallOutcomeAnchor(
+      { ...outcome, outcome: "ended" },
+      "alice@waddle.test/desktop",
+    );
+    card.callThread = { ...card.callThread!, duration: "PT5M" };
+
+    expect(callThreadAnchorLabel(card)).toBe("Call ended · 5m");
   });
 
   test("labels missed, no-answer, and ended outcome cards", () => {

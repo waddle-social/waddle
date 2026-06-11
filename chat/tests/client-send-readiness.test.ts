@@ -7,6 +7,7 @@ import { useChannelMessages } from "../src/channels/messages";
 import { BrowserXmppClient, roomBareJidFor, type InboxEntry, type LiveDmMessage, type RoomActivityEvent } from "../src/lib/xmpp-client";
 import { enqueueQueuedMessage, listQueuedDmMessages, listQueuedRoomMessages } from "../src/lib/outbound-queue-store";
 import { clearDmCallActivities, readDmCallActivity } from "../src/lib/calls/dm-call-activity";
+import { $dmCallOutcomeAnchor } from "../src/lib/calls/dm-call-anchor";
 import type { ResumePersistence } from "../src/lib/xmpp/resume-persistence";
 import { handlerStubs } from "./helpers/xmpp-client-mock";
 
@@ -106,10 +107,12 @@ beforeEach(() => {
   } as Window & { localStorage: typeof storage };
   localStorage.clear();
   clearDmCallActivities();
+  $dmCallOutcomeAnchor.set(null);
 });
 
 afterEach(() => {
   clearDmCallActivities();
+  $dmCallOutcomeAnchor.set(null);
   localStorage.clear();
   if (originalLocalStorage === undefined) {
     Reflect.deleteProperty(globalThis, "localStorage");
@@ -1878,6 +1881,149 @@ describe("client keepalive lifecycle", () => {
     expect((client as unknown as { catchup: { onSessionStarted: () => unknown[] } }).catchup.onSessionStarted()).toEqual([
       { kind: "dm", key: "bob@example.com", after: "mam-loaded-1", since: "2024-01-01T00:00:01.000Z", seenIds: ["dm-loaded-1"] },
     ]);
+  });
+
+  test("queryPersonalMamPage returns archived DM call outcome cards", async () => {
+    const client = new BrowserXmppClient(session());
+    (client as unknown as { connect: () => Promise<void> }).connect = async () => undefined;
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { catchup: { onSessionStarted: () => unknown[] } }).catchup.onSessionStarted();
+    const proposedAt = new Date(Date.now() - 60_000).toISOString();
+    const retractedAt = new Date(Date.now() - 30_000).toISOString();
+    const fetchDmHistoryPage = mock(async () => ({
+      messages: [
+        {
+          mam_id: "mam-propose-video",
+          id: "stanza-propose-video",
+          from: "bob@example.com/phone",
+          to: "alice@example.com/desktop",
+          message_type: "chat",
+          timestamp: proposedAt,
+          reaction_emojis: [],
+          shared_files: [],
+          call_event: {
+            kind: "propose",
+            from: "bob@example.com/phone",
+            to: "alice@example.com/desktop",
+            sid: "call-archive-video",
+            media: { audio: true, video: true },
+          },
+        },
+        {
+          mam_id: "mam-retract-video",
+          id: "stanza-retract-video",
+          from: "bob@example.com/phone",
+          to: "alice@example.com/desktop",
+          message_type: "chat",
+          timestamp: retractedAt,
+          reaction_emojis: [],
+          shared_files: [],
+          call_event: {
+            kind: "retract",
+            from: "bob@example.com/phone",
+            to: "alice@example.com/desktop",
+            sid: "call-archive-video",
+          },
+        },
+      ],
+      last_id: "mam-retract-video",
+      is_complete: true,
+    }));
+    (client as unknown as { xmpp: Agent }).xmpp = Object.assign(new EventEmitter(), {
+      fetch_dm_history_page: fetchDmHistoryPage,
+    }) as unknown as Agent;
+
+    const page = await client.queryPersonalMamPage("bob@example.com", 100, { type: "latest" });
+
+    expect(page.messages).toHaveLength(1);
+    expect(page.messages[0]).toMatchObject({
+      id: "dmcall:call-archive-video:missed",
+      archiveId: "mam-retract-video",
+      wireIds: ["stanza-retract-video"],
+      peerJid: "bob@example.com",
+      threadId: "call-archive-video",
+      callThread: {
+        kind: "dm",
+        sid: "call-archive-video",
+        media: ["audio", "video"],
+        outcome: "missed",
+      },
+    });
+    expect($dmCallOutcomeAnchor.get()).toBeNull();
+    expect((client as unknown as { catchup: { onSessionStarted: () => unknown[] } }).catchup.onSessionStarted()).toEqual([
+      {
+        kind: "dm",
+        key: "bob@example.com",
+        after: "mam-retract-video",
+        since: retractedAt,
+        seenIds: ["dmcall:call-archive-video:missed", "stanza-retract-video"],
+      },
+    ]);
+  });
+
+  test("queryPersonalMamPage returns archived DM call outcome cards on older pages", async () => {
+    const client = new BrowserXmppClient(session());
+    (client as unknown as { connect: () => Promise<void> }).connect = async () => undefined;
+    (client as unknown as { connected: boolean }).connected = true;
+    const proposedAt = new Date(Date.now() - 60_000).toISOString();
+    const retractedAt = new Date(Date.now() - 30_000).toISOString();
+    const fetchDmHistoryPage = mock(async () => ({
+      messages: [
+        {
+          mam_id: "mam-before-propose-video",
+          id: "stanza-before-propose-video",
+          from: "bob@example.com/phone",
+          to: "alice@example.com/desktop",
+          message_type: "chat",
+          timestamp: proposedAt,
+          reaction_emojis: [],
+          shared_files: [],
+          call_event: {
+            kind: "propose",
+            from: "bob@example.com/phone",
+            to: "alice@example.com/desktop",
+            sid: "call-before-video",
+            media: { audio: true, video: true },
+          },
+        },
+        {
+          mam_id: "mam-before-retract-video",
+          id: "stanza-before-retract-video",
+          from: "bob@example.com/phone",
+          to: "alice@example.com/desktop",
+          message_type: "chat",
+          timestamp: retractedAt,
+          reaction_emojis: [],
+          shared_files: [],
+          call_event: {
+            kind: "retract",
+            from: "bob@example.com/phone",
+            to: "alice@example.com/desktop",
+            sid: "call-before-video",
+          },
+        },
+      ],
+      first_id: "mam-before-propose-video",
+      last_id: "mam-before-retract-video",
+      is_complete: false,
+    }));
+    (client as unknown as { xmpp: Agent }).xmpp = Object.assign(new EventEmitter(), {
+      fetch_dm_history_page: fetchDmHistoryPage,
+    }) as unknown as Agent;
+
+    const page = await client.queryPersonalMamPage("bob@example.com", 100, { type: "before", before: "mam-newer" });
+
+    expect(page.messages).toHaveLength(1);
+    expect(page.messages[0]).toMatchObject({
+      id: "dmcall:call-before-video:missed",
+      archiveId: "mam-before-retract-video",
+      wireIds: ["stanza-before-retract-video"],
+      callThread: {
+        sid: "call-before-video",
+        media: ["audio", "video"],
+        outcome: "missed",
+      },
+    });
   });
 
   test("queryMamThreadPage seeds room reconnect catch-up from XEP-0313 archive ids", async () => {
