@@ -10,7 +10,11 @@
 //! directly rather than going through the two-phase AskSfu callback
 //! machinery.
 
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, MutexGuard},
+    time::{Duration, Instant},
+};
 
 use jid::{BareJid, Jid};
 use minidom::Element;
@@ -38,6 +42,7 @@ use crate::Stanza;
 /// rosters, media descriptions per participant, etc.) is NOT
 /// implemented; only this single discriminator is on the wire.
 pub const NS_COIN: &str = "urn:xmpp:coin:1";
+const PENDING_DM_INVITE_TTL: Duration = Duration::from_secs(10 * 60);
 
 /// Mixer-JID prefix. A Muji-bearing Jingle session-initiate MUST
 /// be addressed to `calls.<server-domain>` so the server can
@@ -86,10 +91,36 @@ fn is_local_muji_room(room: &BareJid, ctx: &StanzaContext<'_>) -> bool {
 #[derive(Clone)]
 pub struct JingleHandler {
     sfu: Arc<dyn SfuService>,
+    pending_dm_invites: Arc<Mutex<HashMap<CallId, PendingDmInvite>>>,
     // Per-bare-JID rate limit on `session-initiate` only. Shared via
     // Arc so cloning the handler (the dispatcher clones it on
     // registration) keeps every clone hitting the same bucket map.
     rate_limit: Arc<SessionInitiateRateLimit>,
+}
+
+#[derive(Clone, Debug)]
+struct PendingDmInvite {
+    initiator: Identity,
+    responder: Identity,
+    created_at: Instant,
+}
+
+impl PendingDmInvite {
+    fn new(initiator: Identity, responder: Identity) -> Self {
+        Self {
+            initiator,
+            responder,
+            created_at: Instant::now(),
+        }
+    }
+
+    fn matches_parties(&self, initiator: &Identity, responder: &Identity) -> bool {
+        &self.initiator == initiator && &self.responder == responder
+    }
+
+    fn is_expired(&self, now: Instant) -> bool {
+        now.duration_since(self.created_at) >= PENDING_DM_INVITE_TTL
+    }
 }
 
 impl std::fmt::Debug for JingleHandler {
@@ -102,6 +133,7 @@ impl JingleHandler {
     pub fn new(sfu: Arc<dyn SfuService>) -> Self {
         Self {
             sfu,
+            pending_dm_invites: Arc::new(Mutex::new(HashMap::new())),
             rate_limit: Arc::new(SessionInitiateRateLimit::with_defaults()),
         }
     }
@@ -112,7 +144,11 @@ impl JingleHandler {
         sfu: Arc<dyn SfuService>,
         rate_limit: Arc<SessionInitiateRateLimit>,
     ) -> Self {
-        Self { sfu, rate_limit }
+        Self {
+            sfu,
+            pending_dm_invites: Arc::new(Mutex::new(HashMap::new())),
+            rate_limit,
+        }
     }
 }
 
@@ -285,10 +321,44 @@ impl JingleHandler {
             }
         };
 
+        let self_identity = Identity::from_jid(ctx.full_jid.clone());
+        let claimed_invite = if jingle.action == Action::SessionAccept {
+            let mut pending = self.lock_pending_dm_invites();
+            prune_expired_pending_dm_invites(&mut pending);
+            match pending.remove(&call_id) {
+                Some(invite) if invite.matches_parties(&peer_identity, &self_identity) => {
+                    Some(invite)
+                }
+                Some(invite) => {
+                    if !invite.is_expired(Instant::now()) {
+                        pending.insert(call_id.clone(), invite);
+                    }
+                    return error_reply(
+                        iq,
+                        DefinedCondition::Forbidden,
+                        "Jingle responder was not invited to this call party",
+                    );
+                }
+                None => {
+                    return error_reply(
+                        iq,
+                        DefinedCondition::Forbidden,
+                        "Jingle responder was not invited to this call party",
+                    );
+                }
+            }
+        } else {
+            None
+        };
+
         for content in &mut jingle.contents {
             match rewrite_content_transport(content, &call_id, &peer_identity, &*self.sfu) {
                 Ok(()) => {}
                 Err(reason) => {
+                    if let Some(invite) = claimed_invite.clone() {
+                        let mut pending = self.lock_pending_dm_invites();
+                        pending.entry(call_id.clone()).or_insert(invite);
+                    }
                     // 1:1 P2P path: the requester addressed the
                     // session-initiate to `peer`, so the Jingle-level
                     // rejection must appear from that peer resource,
@@ -298,10 +368,30 @@ impl JingleHandler {
             }
         }
 
-        // Register the authenticated participant (not the peer —
-        // the peer hasn't joined yet, they're being invited).
-        let self_identity = Identity::from_jid(ctx.full_jid.clone());
+        if claimed_invite.is_some() && self.lock_pending_dm_invites().contains_key(&call_id) {
+            return error_reply(
+                iq,
+                DefinedCondition::Forbidden,
+                "Jingle responder was superseded before this accept completed",
+            );
+        }
+
+        // Register the authenticated sender and, for the initial
+        // invite, the addressed responder whose token was just minted.
+        // The pending full-JID invite is the later session-accept
+        // authorization proof; the SFU registry is accounting and
+        // token revocation state only.
         self.sfu.register_call_participant(&call_id, &self_identity);
+        if jingle.action == Action::SessionInitiate {
+            revoke_other_dm_participants(&*self.sfu, &call_id, &self_identity, &peer_identity);
+            self.sfu.register_call_participant(&call_id, &peer_identity);
+            let mut pending = self.lock_pending_dm_invites();
+            prune_expired_pending_dm_invites(&mut pending);
+            pending.insert(
+                call_id.clone(),
+                PendingDmInvite::new(self_identity.clone(), peer_identity.clone()),
+            );
+        }
 
         // Stamp the forwarded stanza's `from` with the authenticated
         // JID — never trust the client-supplied `iq.from`.
@@ -571,20 +661,33 @@ impl JingleHandler {
         let peer_bare = peer.to_bare();
         let sender_identity = Identity::from_jid(ctx.full_jid.clone());
         let peer_identity = Identity::from_jid(peer_full);
+        let mut matched_call_id = None;
         for initiator_bare in [ctx_bare, peer_bare] {
             let Ok(call_id) = scoped_call_id(&initiator_bare, &jingle.sid.0) else {
                 continue;
             };
-            if !self.sfu.has_call_participant(&call_id, &sender_identity) {
+            if !self.sfu.has_call_participant(&call_id, &sender_identity)
+                || !self.sfu.has_call_participant(&call_id, &peer_identity)
+            {
                 continue;
             }
-            let _ = self
-                .sfu
-                .unregister_call_participant(&call_id, &sender_identity);
-            let _ = self
-                .sfu
-                .unregister_call_participant(&call_id, &peer_identity);
+            matched_call_id = Some(call_id);
+            break;
         }
+        let Some(call_id) = matched_call_id else {
+            return error_reply(
+                iq,
+                DefinedCondition::Forbidden,
+                "Jingle terminator is not a participant in this call",
+            );
+        };
+        let _ = self
+            .sfu
+            .unregister_call_participant(&call_id, &sender_identity);
+        let _ = self
+            .sfu
+            .unregister_call_participant(&call_id, &peer_identity);
+        self.lock_pending_dm_invites().remove(&call_id);
         self.route_unchanged(iq, peer, ctx)
     }
 
@@ -606,6 +709,13 @@ impl JingleHandler {
             jid: peer,
             stanza: Box::new(Stanza::Iq(Box::new(forwarded))),
         }]
+    }
+
+    fn lock_pending_dm_invites(&self) -> MutexGuard<'_, HashMap<CallId, PendingDmInvite>> {
+        self.pending_dm_invites.lock().unwrap_or_else(|err| {
+            tracing::warn!("recovering poisoned pending DM invite lock");
+            err.into_inner()
+        })
     }
 }
 
@@ -687,6 +797,7 @@ fn scoped_call_id(initiator_bare: &BareJid, sid: &str) -> Result<CallId, SfuErro
 enum RewriteError {
     UnsupportedTransport,
     InvalidWaddleTransport(TransportParseError),
+    ClientSuppliedIssuedTransport,
     SfuFailed(SfuError),
 }
 
@@ -716,6 +827,11 @@ impl RewriteError {
                     "invalid Waddle LiveKit transport",
                 )
             }
+            Self::ClientSuppliedIssuedTransport => error_reply(
+                iq,
+                DefinedCondition::BadRequest,
+                "Waddle LiveKit transport credentials must be server-issued",
+            ),
             Self::SfuFailed(inner) => {
                 tracing::error!(error = %inner, "SFU operation failed during Jingle handling");
                 error_reply(iq, DefinedCondition::InternalServerError, "internal error")
@@ -779,7 +895,7 @@ fn rewrite_content_transport(
     let parsed = WaddleLiveKitTransport::try_from(transport_elem)
         .map_err(RewriteError::InvalidWaddleTransport)?;
     match parsed {
-        WaddleLiveKitTransport::Issued(_) => Ok(()),
+        WaddleLiveKitTransport::Issued(_) => Err(RewriteError::ClientSuppliedIssuedTransport),
         WaddleLiveKitTransport::Request => {
             let token = sfu
                 .issue_join_token(
@@ -798,6 +914,24 @@ fn rewrite_content_transport(
             Ok(())
         }
     }
+}
+
+fn revoke_other_dm_participants(
+    sfu: &dyn SfuService,
+    call_id: &CallId,
+    initiator: &Identity,
+    responder: &Identity,
+) {
+    for participant in sfu.participants_for_call(call_id) {
+        if &participant != initiator && &participant != responder {
+            let _ = sfu.unregister_call_participant(call_id, &participant);
+        }
+    }
+}
+
+fn prune_expired_pending_dm_invites(pending: &mut HashMap<CallId, PendingDmInvite>) {
+    let now = Instant::now();
+    pending.retain(|_, invite| !invite.is_expired(now));
 }
 
 fn iq_set_jingle(iq: &Iq) -> Option<&Element> {
@@ -1076,6 +1210,8 @@ mod tests {
 
     #[test]
     fn session_accept_without_responder_uses_authenticated_sender() {
+        let initiate =
+            session_initiate_iq("alice@waddle.test/desktop", "bob@waddle.test/phone", "c1");
         let mut iq = session_accept_iq("bob@waddle.test/phone", "alice@waddle.test/desktop", "c1");
         let Iq::Set { payload, .. } = &mut iq else {
             panic!("expected set");
@@ -1083,8 +1219,18 @@ mod tests {
         let mut jingle = Jingle::try_from(payload.clone()).expect("fixture reparses");
         jingle.responder = None;
         *payload = jingle.into();
+        let alice: FullJid = "alice@waddle.test/desktop".parse().unwrap();
         let jid: FullJid = "bob@waddle.test/phone".parse().unwrap();
-        let handler = JingleHandler::new(fixture_sfu());
+        let sfu = fixture_livekit_sfu();
+        let handler = JingleHandler::new(sfu);
+        let initiate_events = handler.handle(&initiate, &ctx(&alice));
+        assert!(
+            initiate_events
+                .iter()
+                .any(|ev| matches!(ev, OutboundEvent::RouteToConnection { .. })),
+            "session-initiate should invite the responder"
+        );
+
         let events = handler.handle(&iq, &ctx(&jid));
 
         assert!(
@@ -1093,6 +1239,60 @@ mod tests {
                 .any(|ev| matches!(ev, OutboundEvent::RouteToConnection { .. })),
             "missing responder should resolve to authenticated sender and route"
         );
+    }
+
+    #[test]
+    fn third_party_session_accept_without_invitation_is_rejected() {
+        let mut iq = session_accept_iq("eve@waddle.test/laptop", "alice@waddle.test/desktop", "c1");
+        let Iq::Set { payload, .. } = &mut iq else {
+            panic!("expected set");
+        };
+        let mut jingle = Jingle::try_from(payload.clone()).expect("fixture reparses");
+        jingle.responder = None;
+        *payload = jingle.into();
+        let eve: FullJid = "eve@waddle.test/laptop".parse().unwrap();
+        let sfu = fixture_livekit_sfu();
+        let call = waddle_sfu::CallId::new("alice@waddle.test::c1").unwrap();
+        let handler = JingleHandler::new(sfu.clone());
+
+        let events = handler.handle(&iq, &ctx(&eve));
+
+        assert_error_condition(&events, DefinedCondition::Forbidden);
+        assert!(
+            !sfu.has_call_participant(&call, &Identity::from_jid(eve)),
+            "third-party accept must not register an uninvited participant"
+        );
+    }
+
+    #[test]
+    fn stale_participant_cannot_accept_reused_sid_without_current_invitation() {
+        let sfu = fixture_livekit_sfu();
+        let call = waddle_sfu::CallId::new("alice@waddle.test::c1").unwrap();
+        let eve: FullJid = "eve@waddle.test/laptop".parse().unwrap();
+        let eve_identity = Identity::from_jid(eve.clone());
+        sfu.register_call_participant(&call, &eve_identity);
+        assert!(
+            sfu.has_call_participant(&call, &eve_identity),
+            "fixture starts with Eve as a stale participant for the reused call id"
+        );
+
+        let handler = JingleHandler::new(sfu.clone());
+        let alice: FullJid = "alice@waddle.test/desktop".parse().unwrap();
+        let fresh_invite =
+            session_initiate_iq("alice@waddle.test/desktop", "bob@waddle.test/phone", "c1");
+        let initiate_events = handler.handle(&fresh_invite, &ctx(&alice));
+        assert!(
+            initiate_events
+                .iter()
+                .any(|ev| matches!(ev, OutboundEvent::RouteToConnection { .. })),
+            "fresh invite should route to Bob"
+        );
+
+        let eve_accept =
+            session_accept_iq("eve@waddle.test/laptop", "alice@waddle.test/desktop", "c1");
+        let events = handler.handle(&eve_accept, &ctx(&eve));
+
+        assert_error_condition(&events, DefinedCondition::Forbidden);
     }
 
     #[test]
@@ -1260,11 +1460,40 @@ mod tests {
         let events = handler.handle(&iq, &ctx(&eve));
 
         assert_eq!(sfu.participant_count(&call), 2);
-        assert_eq!(events.len(), 1);
-        assert!(
-            matches!(events[0], OutboundEvent::RouteToConnection { .. }),
-            "the stanza still routes to the addressed peer; only SFU cleanup is gated"
+        assert_error_condition(&events, DefinedCondition::Forbidden);
+    }
+
+    #[test]
+    fn session_terminate_requires_sender_and_peer_in_same_call() {
+        let jingle = Jingle::new(Action::SessionTerminate, SessionId("c1".into())).set_reason(
+            xep0166::reason_element(xmpp_parsers::jingle::Reason::Success),
         );
+        let iq = Iq::Set {
+            from: Some("eve@waddle.test/laptop".parse().unwrap()),
+            to: Some("bob@waddle.test/desktop".parse().unwrap()),
+            id: "t-cross-call".into(),
+            payload: jingle.into(),
+        };
+
+        let sfu = fixture_livekit_sfu();
+        let eve_call = waddle_sfu::CallId::new("eve@waddle.test::c1").unwrap();
+        let bob_call = waddle_sfu::CallId::new("alice@waddle.test::c1").unwrap();
+        let eve = Identity::from_jid("eve@waddle.test/laptop".parse().unwrap());
+        let mallory = Identity::from_jid("mallory@waddle.test/phone".parse().unwrap());
+        let alice = Identity::from_jid("alice@waddle.test/desktop".parse().unwrap());
+        let bob = Identity::from_jid("bob@waddle.test/desktop".parse().unwrap());
+        sfu.register_call_participant(&eve_call, &eve);
+        sfu.register_call_participant(&eve_call, &mallory);
+        sfu.register_call_participant(&bob_call, &alice);
+        sfu.register_call_participant(&bob_call, &bob);
+
+        let eve_jid: FullJid = "eve@waddle.test/laptop".parse().unwrap();
+        let handler = JingleHandler::new(sfu.clone());
+        let events = handler.handle(&iq, &ctx(&eve_jid));
+
+        assert_error_condition(&events, DefinedCondition::Forbidden);
+        assert_eq!(sfu.participant_count(&eve_call), 2);
+        assert_eq!(sfu.participant_count(&bob_call), 2);
     }
 
     #[test]
