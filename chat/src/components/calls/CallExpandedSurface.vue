@@ -25,6 +25,7 @@ import { localScreenSharePresentation } from "@/lib/calls/call-self-share";
 import { normalizeMucCallRoomJid } from "@/lib/calls/muc-call-presence";
 import { useCallVolumeMixer } from "@/lib/calls/use-call-volume-mixer";
 import { barePeerJid } from "@/lib/xmpp/jid";
+import { expectedRemoteIdentitiesForCallState } from "@/lib/calls/call-tiles";
 import type { MentionCandidate } from "@/lib/mentions";
 import type { MarkupSpan, MessageReference } from "@/lib/chat-ui";
 import type { ComposerLinkPreviewLookup, ComposerLinkPreviewSendPayload } from "@/lib/link-preview-composer";
@@ -187,6 +188,9 @@ const selfSharePresentation = computed(() =>
 const stageLocalTracks = computed(() =>
   selfSharePresentation.value?.stageLocalTracks ?? localTracks.value,
 );
+const expectedRemoteIdentities = computed(() =>
+  expectedRemoteIdentitiesForCallState(state.value),
+);
 
 const {
   rows: volumeRows,
@@ -287,6 +291,7 @@ onBeforeUnmount(() => {
           :remote-tracks="remoteTracks"
           :local-tracks="stageLocalTracks"
           :local-identity="localIdentity"
+          :expected-remote-identities="expectedRemoteIdentities"
           :mic-enabled="micEnabled"
         />
       </div>

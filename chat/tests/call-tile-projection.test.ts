@@ -7,7 +7,10 @@ import { createSSRApp, h } from "vue";
 import { renderToString } from "vue/server-renderer";
 import { parse, compileScript } from "vue/compiler-sfc";
 import ts from "typescript";
-import { buildCallTiles } from "../src/lib/calls/call-tiles";
+import {
+  buildCallTiles,
+  expectedRemoteIdentitiesForCallState,
+} from "../src/lib/calls/call-tiles";
 
 const fakeTrack = {} as never;
 
@@ -77,6 +80,131 @@ describe("call tile projection", () => {
     ]);
     const screenTile = tiles.find((tile) => tile.key === "remote:alice@example.com/web:screen_share");
     expect(screenTile && "audioTrack" in screenTile).toBe(false);
+  });
+
+  test("projects expected DM peer as a placeholder tile before media tracks arrive", () => {
+    const tiles = buildCallTiles({
+      remoteTracks: [],
+      localTracks: [],
+      localIdentity: "alice@example.com/web",
+      expectedRemoteIdentities: ["bob@example.com/phone"],
+      micEnabled: true,
+    });
+
+    expect(tiles.map((tile) => ({
+      key: tile.key,
+      label: tile.label,
+      isSelf: tile.isSelf,
+      videoTrack: tile.videoTrack,
+    }))).toEqual([
+      {
+        key: "self:alice@example.com/web:camera",
+        label: "You",
+        isSelf: true,
+        videoTrack: null,
+      },
+      {
+        key: "remote:bob@example.com/phone:camera",
+        label: "bob",
+        isSelf: false,
+        videoTrack: null,
+      },
+    ]);
+  });
+
+  test("merges an expected DM peer placeholder into the real remote camera tile by bare JID", () => {
+    const tiles = buildCallTiles({
+      remoteTracks: [
+        {
+          participantIdentity: "BOB@example.com/desktop",
+          publicationSid: "camera",
+          kind: "video",
+          source: "camera",
+          track: fakeTrack,
+        },
+      ],
+      localTracks: [],
+      localIdentity: "alice@example.com/web",
+      expectedRemoteIdentities: ["bob@example.com/phone"],
+      micEnabled: true,
+    });
+
+    expect(tiles.map((tile) => tile.key)).toEqual([
+      "self:alice@example.com/web:camera",
+      "remote:BOB@example.com/desktop:camera",
+    ]);
+    expect(tiles.find((tile) => !tile.isSelf)?.videoTrack).toBe(fakeTrack);
+  });
+
+  test("trims expected DM peer identities before placeholder keys and merge checks", () => {
+    const placeholderTiles = buildCallTiles({
+      remoteTracks: [],
+      localTracks: [],
+      localIdentity: "alice@example.com/web",
+      expectedRemoteIdentities: [" bob@example.com/phone "],
+      micEnabled: true,
+    });
+    expect(placeholderTiles.map((tile) => tile.key)).toEqual([
+      "self:alice@example.com/web:camera",
+      "remote:bob@example.com/phone:camera",
+    ]);
+
+    const mergedTiles = buildCallTiles({
+      remoteTracks: [
+        {
+          participantIdentity: " BOB@example.com/desktop ",
+          publicationSid: "camera",
+          kind: "video",
+          source: "camera",
+          track: fakeTrack,
+        },
+      ],
+      localTracks: [],
+      localIdentity: "alice@example.com/web",
+      expectedRemoteIdentities: [" bob@example.com/phone "],
+      micEnabled: true,
+    });
+    expect(mergedTiles.map((tile) => tile.key)).toEqual([
+      "self:alice@example.com/web:camera",
+      "remote:BOB@example.com/desktop:camera",
+    ]);
+  });
+
+  test("derives expected remote identities only for active DM calls", () => {
+    expect(expectedRemoteIdentitiesForCallState({
+      phase: "active",
+      kind: "dm",
+      peer: " bob@example.com/phone ",
+      sid: "dm-call",
+      media: { audio: true, video: false },
+      join: {
+        url: "wss://livekit.example.test",
+        room: "dm-call",
+        identity: "alice@example.com/web",
+        token: "token",
+      },
+    })).toEqual(["bob@example.com/phone"]);
+
+    expect(expectedRemoteIdentitiesForCallState({
+      phase: "active",
+      kind: "muc",
+      peer: "general@conference.example.com",
+      sid: "muc-call",
+      media: { audio: true, video: false },
+      join: {
+        url: "wss://livekit.example.test",
+        room: "general",
+        identity: "alice@example.com/web",
+        token: "token",
+      },
+    })).toEqual([]);
+
+    expect(expectedRemoteIdentitiesForCallState({
+      phase: "incoming",
+      from: "bob@example.com/phone",
+      sid: "dm-call",
+      media: { audio: true, video: false },
+    })).toEqual([]);
   });
 
   test("projects local camera and screen share with separate mirror decisions", () => {

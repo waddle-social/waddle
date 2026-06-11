@@ -1,5 +1,7 @@
 import type { CallTrackSource, LocalMediaTrack, RemoteMediaTrack } from "./engine";
 import type { TileAttachable } from "./tile-attach";
+import type { CallState } from "./types";
+import { barePeerJid } from "../xmpp/jid";
 
 type TileSource = "camera" | "screen_share";
 
@@ -17,9 +19,10 @@ export type CallTileModel = {
 };
 
 export type BuildCallTilesInput = {
-  remoteTracks: RemoteMediaTrack[];
-  localTracks: LocalMediaTrack[];
+  remoteTracks: readonly RemoteMediaTrack[];
+  localTracks: readonly LocalMediaTrack[];
   localIdentity: string | null;
+  expectedRemoteIdentities?: readonly string[];
   micEnabled: boolean;
 };
 
@@ -42,6 +45,16 @@ function labelFor(identity: string, isSelf: boolean, source: TileSource): string
 
 function callTileKey(side: "self" | "remote", identity: string, source: TileSource): string {
   return `${side}:${identity}:${source}`;
+}
+
+function bareIdentityKey(identity: string): string {
+  return barePeerJid(identity.trim()).toLowerCase();
+}
+
+export function expectedRemoteIdentitiesForCallState(state: CallState): string[] {
+  if (state.phase !== "active" || state.kind !== "dm") return [];
+  const peer = state.peer.trim();
+  return bareIdentityKey(peer) ? [peer] : [];
 }
 
 function newTile(
@@ -67,6 +80,7 @@ function newTile(
 
 export function buildCallTiles(input: BuildCallTilesInput): CallTileModel[] {
   const byKey = new Map<string, CallTileModel>();
+  const remoteCameraBareIdentities = new Set<string>();
   const selfId = input.localTracks[0]?.participantIdentity ?? input.localIdentity ?? "you";
   byKey.set(callTileKey("self", selfId, "camera"), newTile("self", selfId, "camera", input.micEnabled));
 
@@ -82,14 +96,30 @@ export function buildCallTiles(input: BuildCallTilesInput): CallTileModel[] {
   }
 
   for (const remote of input.remoteTracks) {
+    const participantIdentity = remote.participantIdentity.trim();
+    if (!participantIdentity) continue;
     const source = tileSourceForTrack(remote.source);
-    const key = callTileKey("remote", remote.participantIdentity, source);
-    const existing = byKey.get(key) ?? newTile("remote", remote.participantIdentity, source, input.micEnabled);
+    const key = callTileKey("remote", participantIdentity, source);
+    const existing = byKey.get(key) ?? newTile("remote", participantIdentity, source, input.micEnabled);
+    if (source === "camera") {
+      const remoteBareIdentity = bareIdentityKey(participantIdentity);
+      if (remoteBareIdentity) remoteCameraBareIdentities.add(remoteBareIdentity);
+    }
     if (remote.kind === "video") {
       existing.videoTrack = remote.track;
       if (source === "screen_share") existing.screenTrackKey = remote.publicationSid;
     }
     byKey.set(key, existing);
+  }
+
+  for (const identity of input.expectedRemoteIdentities ?? []) {
+    const trimmedIdentity = identity.trim();
+    const bareIdentity = bareIdentityKey(trimmedIdentity);
+    if (!bareIdentity || remoteCameraBareIdentities.has(bareIdentity)) continue;
+    byKey.set(
+      callTileKey("remote", trimmedIdentity, "camera"),
+      newTile("remote", trimmedIdentity, "camera", input.micEnabled),
+    );
   }
 
   return Array.from(byKey.values());

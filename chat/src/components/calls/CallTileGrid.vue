@@ -36,10 +36,12 @@ import CallTile from "./CallTile.vue";
 type Tile = CallTileModel;
 
 const props = defineProps<{
-  remoteTracks: RemoteMediaTrack[];
-  localTracks: LocalMediaTrack[];
+  remoteTracks: readonly RemoteMediaTrack[];
+  localTracks: readonly LocalMediaTrack[];
   /** LiveKit identity for the local participant (may be null pre-connect). */
   localIdentity: string | null;
+  /** Remote participants known from call state before LiveKit has subscribed to their tracks. */
+  expectedRemoteIdentities?: readonly string[];
   /** Whether the local mic is currently un-muted. */
   micEnabled: boolean;
 }>();
@@ -52,6 +54,7 @@ const projection = computed(() => {
     remoteTracks: props.remoteTracks,
     localTracks: props.localTracks,
     localIdentity: props.localIdentity,
+    expectedRemoteIdentities: props.expectedRemoteIdentities,
     micEnabled: props.micEnabled,
     seenRemoteScreenTrackKeys: seenRemoteScreenTrackKeys.value,
     manualFocusKey: manualFocusKey.value,
