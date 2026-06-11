@@ -350,7 +350,7 @@ pub struct WaddleLiveKitJoin {
 }
 
 /// JS-facing call event. The `kind` discriminator drives a switch
-/// on the chat side: `propose|proceed|reject|retract|finish|
+/// on the chat side: `propose|ringing|proceed|reject|retract|finish|
 /// session-initiate|session-accept|session-terminate`.
 ///
 /// For `propose`, `session-initiate`, and `session-accept`, the

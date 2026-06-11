@@ -8,7 +8,7 @@
 //!
 //! `<proceed/>`, `<reject/>`, and `<retract/>` continue to ride the
 //! typed [`xmpp_parsers::jingle_message::JingleMI`] enum since they
-//! carry no children. `<propose/>` and `<finish/>` instead build the
+//! carry no children. `<propose/>`, `<ringing/>`, and `<finish/>` instead build the
 //! element directly via [`minidom`]:
 //!
 //! - `JingleMI::Propose` accepts only a single `<description/>` child;
@@ -111,6 +111,12 @@ pub fn build_proceed(sid: SessionId) -> JingleMI {
     JingleMI::Proceed(sid)
 }
 
+pub fn build_ringing(sid: SessionId) -> minidom::Element {
+    minidom::Element::builder("ringing", NS_JINGLE_MESSAGE)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), sid.0)
+        .build()
+}
+
 pub fn build_reject(sid: SessionId) -> JingleMI {
     JingleMI::Reject(sid)
 }
@@ -204,6 +210,15 @@ mod tests {
         assert_eq!(elem.attr("id"), Some("c1"));
         let reparsed = JingleMI::try_from(elem).unwrap();
         assert!(matches!(reparsed, JingleMI::Proceed(_)));
+    }
+
+    #[test]
+    fn ringing_has_expected_shape() {
+        let elem = build_ringing(SessionId("c1".into()));
+        assert_eq!(elem.name(), "ringing");
+        assert_eq!(elem.ns(), NS_JINGLE_MESSAGE);
+        assert_eq!(elem.attr("id"), Some("c1"));
+        assert!(elem.children().next().is_none());
     }
 
     #[test]

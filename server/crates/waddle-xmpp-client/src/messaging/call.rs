@@ -3,8 +3,8 @@
 //! Detects two shapes the client receives during a call:
 //!
 //! 1. **XEP-0353 Jingle Message Initiation** envelopes carried on
-//!    `<message>` stanzas — `<propose>`, `<proceed>`, `<reject>`,
-//!    `<retract>`, `<finish>`. These drive the ringing UI before
+//!    `<message>` stanzas — `<propose>`, `<ringing>`, `<proceed>`,
+//!    `<reject>`, `<retract>`, `<finish>`. These drive the ringing UI before
 //!    media starts.
 //! 2. **XEP-0166 Jingle session control** carried on `<iq type='set'>`
 //!    stanzas — `session-initiate`, `session-accept`,
@@ -74,6 +74,7 @@ pub enum CallEventKind {
     Propose {
         media: CallMedia,
     },
+    Ringing,
     Proceed,
     Reject {
         reason: Option<JingleReason>,
@@ -152,6 +153,7 @@ pub fn parse_jmi_message(stanza: &Element) -> Option<InboundCallEvent> {
             "propose" => CallEventKind::Propose {
                 media: media_from_descriptions(child),
             },
+            "ringing" => CallEventKind::Ringing,
             "proceed" => CallEventKind::Proceed,
             "reject" => CallEventKind::Reject {
                 reason: extract_jmi_reason(child),
@@ -402,6 +404,12 @@ pub fn build_propose(sid: &SessionId, media: CallMedia) -> Element {
 
 pub fn build_proceed(sid: &SessionId) -> Element {
     Element::builder("proceed", NS_JINGLE_MESSAGE)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), sid.0.as_str())
+        .build()
+}
+
+pub fn build_ringing(sid: &SessionId) -> Element {
+    Element::builder("ringing", NS_JINGLE_MESSAGE)
         .attr(minidom::rxml::xml_ncname!("id").to_owned(), sid.0.as_str())
         .build()
 }

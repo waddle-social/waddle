@@ -615,6 +615,17 @@ pub(crate) fn call_event_to_js(event: InboundCallEvent) -> WaddleCallEvent {
             tie_break: None,
             migrated_to: None,
         },
+        CallEventKind::Ringing => WaddleCallEvent {
+            from,
+            to,
+            sid,
+            kind: "ringing",
+            media: None,
+            join: None,
+            reason: None,
+            tie_break: None,
+            migrated_to: None,
+        },
         CallEventKind::Reject { reason, tie_break } => WaddleCallEvent {
             from,
             to,

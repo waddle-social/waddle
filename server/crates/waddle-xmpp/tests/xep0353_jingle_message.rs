@@ -27,8 +27,8 @@
 
 use minidom::Element;
 use waddle_xmpp::xep::xep0353::{
-    build_finish, build_proceed, build_propose, build_reject, build_retract, CallOffer, JingleMI,
-    NS_JINGLE_MESSAGE,
+    build_finish, build_proceed, build_propose, build_reject, build_retract, build_ringing,
+    CallOffer, JingleMI, NS_JINGLE_MESSAGE,
 };
 use xmpp_parsers::jingle::{Reason as JingleReason, SessionId};
 use xmpp_parsers::message::{Message, MessageType};
@@ -121,6 +121,15 @@ fn xep_0353_proceed_round_trips_through_typed_jingle_mi() {
 
     let reparsed = JingleMI::try_from(elem).expect("proceed reparses");
     assert!(matches!(reparsed, JingleMI::Proceed(_)));
+}
+
+#[test]
+fn xep_0353_ringing_reports_device_ring_state() {
+    let elem = build_ringing(SessionId("c1".into()));
+    assert_eq!(elem.name(), "ringing");
+    assert_eq!(elem.ns(), NS_JINGLE_MESSAGE);
+    assert_eq!(elem.attr("id"), Some("c1"));
+    assert!(elem.children().next().is_none());
 }
 
 #[test]
@@ -259,6 +268,11 @@ fn xep_0353_propose_envelope_is_chat_with_store_hint() {
 #[test]
 fn xep_0353_proceed_envelope_is_chat_with_store_hint() {
     assert_jmi_envelope_conformant("proceed", || build_proceed(SessionId("c1".into())).into());
+}
+
+#[test]
+fn xep_0353_ringing_envelope_is_chat_with_store_hint() {
+    assert_jmi_envelope_conformant("ringing", || build_ringing(SessionId("c1".into())));
 }
 
 #[test]

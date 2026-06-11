@@ -26,6 +26,7 @@ export type CallEvent =
   // `from` is the sender's full JID for every inbound event. The
   // only bare-addressed send path is outbound `<propose/>`.
   | (CallEventEnvelope & { kind: "propose"; media: CallMedia })
+  | (CallEventEnvelope & { kind: "ringing" })
   | (CallEventEnvelope & { kind: "proceed" })
   | (CallEventEnvelope & { kind: "reject"; reason?: string | null; tieBreak?: boolean })
   | (CallEventEnvelope & { kind: "retract"; reason?: string | null; tieBreak?: boolean })
@@ -51,7 +52,7 @@ export type CallEvent =
 export type CallState =
   | { phase: "idle" }
   | { phase: "incoming"; from: string; sid: string; media: CallMedia; accepting?: boolean }
-  | { phase: "outgoing"; to: string; sid: string; media: CallMedia; initiator?: string }
+  | { phase: "outgoing"; to: string; sid: string; media: CallMedia; initiator?: string; ringing?: boolean }
   | {
       phase: "muc-pending";
       peer: string;

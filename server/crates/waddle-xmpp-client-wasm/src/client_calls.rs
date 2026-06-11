@@ -2,7 +2,7 @@ use super::*;
 use waddle_xmpp_client::messaging::{
     build_finish, build_finish_migrated, build_muji_session_initiate, build_muji_session_terminate,
     build_proceed, build_propose, build_reject, build_reject_with_options, build_retract,
-    build_retract_with_options, build_session_accept, build_session_initiate,
+    build_retract_with_options, build_ringing, build_session_accept, build_session_initiate,
     build_session_terminate, jingle_reason_from_wire_name, wrap_jmi_message, CallMedia,
     JingleReason, SessionId,
 };
@@ -116,6 +116,15 @@ impl WaddleClient {
         let inner = self.inner.clone();
         future_to_promise(async move {
             let stanza = message_with_jmi_to_full(&peer_full_jid, build_proceed(&sid(sid_str)))?;
+            send_stanza_command(inner, stanza).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    pub fn send_call_ringing(&self, peer_full_jid: String, sid_str: String) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let stanza = message_with_jmi_to_full(&peer_full_jid, build_ringing(&sid(sid_str)))?;
             send_stanza_command(inner, stanza).await?;
             Ok(JsValue::UNDEFINED)
         })

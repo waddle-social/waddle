@@ -532,6 +532,8 @@ export function applyDmCallEvent(envelope: DmCallEventEnvelope): void {
   const direction = directionForEnvelope(envelope);
   const remoteFullJid = remoteFullJidForEnvelope(envelope, peerJid);
   switch (envelope.event.kind) {
+    case "ringing":
+      return;
     case "propose":
       setActivity(peerJid, envelope.event.sid, eventSelfFullJid(envelope), {
         peerJid,

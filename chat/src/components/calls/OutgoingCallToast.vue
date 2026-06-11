@@ -23,6 +23,11 @@ const mediaLabel = computed(() => {
   return state.value.media.video ? "Video call" : "Audio call";
 });
 
+const outgoingStatusLabel = computed(() => {
+  if (state.value.phase !== "outgoing") return "";
+  return state.value.ringing ? "ringing…" : "calling…";
+});
+
 const endedCopy = computed(() => {
   if (state.value.phase !== "ended") return null;
   // The reducer stamps `reason` from the wire: `reject` /
@@ -96,7 +101,7 @@ function dismissEnded(): void {
       </span>
       <div class="min-w-0 flex-1">
         <div class="type-chat-title truncate">{{ peerLabel }}</div>
-        <div class="type-caption text-muted-foreground">{{ mediaLabel }} · calling…</div>
+        <div class="type-caption text-muted-foreground">{{ mediaLabel }} · {{ outgoingStatusLabel }}</div>
       </div>
     </div>
     <div

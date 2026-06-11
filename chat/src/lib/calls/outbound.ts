@@ -9,6 +9,7 @@ import type { CallMedia } from "./types";
 export type CallWireSender = {
   send_call_propose?: (peer_bare_jid: string, sid: string, audio: boolean, video: boolean) => Promise<unknown>;
   send_call_proceed?: (peer_full_jid: string, sid: string) => Promise<unknown>;
+  send_call_ringing?: (peer_full_jid: string, sid: string) => Promise<unknown>;
   send_call_reject?: (peer_full_jid: string, sid: string) => Promise<unknown>;
   send_call_reject_tie_break?: (peer_full_jid: string, sid: string) => Promise<unknown>;
   send_call_retract?: (peer_bare_jid: string, sid: string) => Promise<unknown>;
@@ -73,6 +74,11 @@ export const outboundCalls = {
   async proceed(client: CallWireSender, peerFullJid: string, sid: string): Promise<void> {
     if (!client.send_call_proceed) throw new WasmCallApiUnavailable("send_call_proceed");
     await client.send_call_proceed(peerFullJid, sid);
+  },
+
+  async ringing(client: CallWireSender, peerFullJid: string, sid: string): Promise<void> {
+    if (!client.send_call_ringing) throw new WasmCallApiUnavailable("send_call_ringing");
+    await client.send_call_ringing(peerFullJid, sid);
   },
 
   async reject(client: CallWireSender, peerFullJid: string, sid: string): Promise<void> {
