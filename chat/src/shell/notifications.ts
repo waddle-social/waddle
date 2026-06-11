@@ -160,6 +160,9 @@ export function usePushNotifications() {
 
     const notification = new Notification(title, {
       body,
+      // Per-room tag intentionally lets the browser replace an older
+      // visible banner for the same channel while every stanza id still
+      // posts to the service worker for Web Push dedup below.
       tag: opts.roomJid,
       icon: NOTIFICATION_ICON_URL,
     });
@@ -185,6 +188,8 @@ export function usePushNotifications() {
     const body = opts.body.length > 100 ? `${opts.body.slice(0, 100)}…` : opts.body;
     const notification = new Notification(`@${opts.senderNick} in #${opts.channelName}`, {
       body,
+      // Match mention notifications: one visible banner per room, with
+      // per-message Web Push dedup still handled by stanza id below.
       tag: opts.roomJid,
       icon: NOTIFICATION_ICON_URL,
     });
