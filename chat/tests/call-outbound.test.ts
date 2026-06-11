@@ -170,6 +170,23 @@ describe("outboundCalls", () => {
     ]);
   });
 
+  test("sessionTerminateWithOutcome legacy fallback is safe when destructured", async () => {
+    const { client, calls } = recorder();
+    const { sessionTerminateWithOutcome } = outboundCalls;
+    await expect(sessionTerminateWithOutcome(
+      client,
+      "bob@waddle.test/desktop",
+      "c1",
+      "success",
+    )).resolves.toBe("ok");
+    expect(calls).toEqual([
+      {
+        method: "send_call_session_terminate",
+        args: ["bob@waddle.test/desktop", "c1", "success"],
+      },
+    ]);
+  });
+
   test("sessionTerminateWithOutcome treats malformed typed outcome as error", async () => {
     const client: CallWireSender = {
       send_call_session_terminate_with_outcome: async () => ({ kind: "forbidden" }),

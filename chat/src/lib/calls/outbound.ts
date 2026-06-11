@@ -174,7 +174,7 @@ export const outboundCalls = {
     reason: string | null,
   ): Promise<CallSessionTerminateOutcome> {
     if (!client.send_call_session_terminate_with_outcome) {
-      await this.sessionTerminate(client, peerFullJid, sid, reason);
+      await outboundCalls.sessionTerminate(client, peerFullJid, sid, reason);
       return "ok";
     }
     const result = await client.send_call_session_terminate_with_outcome(peerFullJid, sid, reason);

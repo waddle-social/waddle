@@ -356,6 +356,40 @@ describe("DM call outcome feed anchors", () => {
     });
   });
 
+  test("later finish after timeout terminate does not create a second outcome", () => {
+    const timeoutOutcome = applyDmCallEvent({
+      selfBareJid: "alice@waddle.test",
+      selfFullJid: "alice@waddle.test/web",
+      timestamp: "2026-06-09T12:00:45Z",
+      now: new Date("2026-06-09T12:01:00Z"),
+      event: {
+        kind: "session-terminate",
+        from: "alice@waddle.test/web",
+        to: "bob@waddle.test/phone",
+        sid: "c-timeout-finish",
+        reason: "timeout",
+      },
+    });
+    const firstPublished = $dmCallOutcomeAnchor.get();
+
+    const finishOutcome = applyDmCallEvent({
+      selfBareJid: "alice@waddle.test",
+      selfFullJid: "alice@waddle.test/web",
+      timestamp: "2026-06-09T12:00:46Z",
+      now: new Date("2026-06-09T12:01:00Z"),
+      event: {
+        kind: "finish",
+        from: "bob@waddle.test/phone",
+        to: "alice@waddle.test/web",
+        sid: "c-timeout-finish",
+      },
+    });
+
+    expect(timeoutOutcome?.outcome).toBe("no-answer");
+    expect(finishOutcome).toBeNull();
+    expect($dmCallOutcomeAnchor.get()).toEqual(firstPublished);
+  });
+
   test("archived MAM call events derive a missed entry after reconnect", () => {
     applyDmCallEvent({
       selfBareJid: "alice@waddle.test",
@@ -822,6 +856,32 @@ describe("tearDownActiveCall", () => {
       }),
       send_call_finish: mock(async () => undefined),
     };
+    applyDmCallEvent({
+      selfBareJid: "alice@waddle.test",
+      selfFullJid: "alice@waddle.test/web",
+      timestamp: new Date(Date.now() - 1_000).toISOString(),
+      event: {
+        kind: "propose",
+        from: "bob@waddle.test/desktop",
+        to: "alice@waddle.test/web",
+        sid: "c1",
+        media: audioVideo,
+      },
+    });
+    applyDmCallEvent({
+      selfBareJid: "alice@waddle.test",
+      selfFullJid: "alice@waddle.test/web",
+      timestamp: new Date().toISOString(),
+      event: {
+        kind: "session-accept",
+        from: "bob@waddle.test/desktop",
+        to: "alice@waddle.test/web",
+        sid: "c1",
+        media: audioVideo,
+        join,
+      },
+    });
+    expect(readDmCallActivity("bob@waddle.test")).toMatchObject({ sid: "c1" });
     $callState.set({
       phase: "active",
       peer: "bob@waddle.test/desktop",
@@ -840,6 +900,7 @@ describe("tearDownActiveCall", () => {
     expect(sender.send_call_finish).not.toHaveBeenCalled();
     expect($callState.get()).toEqual({ phase: "idle" });
     expect($lastCallError.get()).toBe("terminate failed");
+    expect(readDmCallActivity("bob@waddle.test")).toBeNull();
   });
 
   test("active DM call: typed terminate error does not send finish", async () => {
@@ -865,6 +926,54 @@ describe("tearDownActiveCall", () => {
     expect(sender.send_call_finish).not.toHaveBeenCalled();
     expect($callState.get()).toEqual({ phase: "idle" });
     expect($lastCallError.get()).toBe("call session terminate failed");
+  });
+
+  test("active DM call: typed terminate error still clears dock activity", async () => {
+    const sender: CallWireSender = {
+      send_call_session_terminate_with_outcome: mock(async () => ({ kind: "error" })),
+      send_call_finish: mock(async () => undefined),
+    };
+    applyDmCallEvent({
+      selfBareJid: "alice@waddle.test",
+      selfFullJid: "alice@waddle.test/web",
+      timestamp: new Date(Date.now() - 1_000).toISOString(),
+      event: {
+        kind: "propose",
+        from: "bob@waddle.test/desktop",
+        to: "alice@waddle.test/web",
+        sid: "c1",
+        media: audioVideo,
+      },
+    });
+    applyDmCallEvent({
+      selfBareJid: "alice@waddle.test",
+      selfFullJid: "alice@waddle.test/web",
+      timestamp: new Date().toISOString(),
+      event: {
+        kind: "session-accept",
+        from: "bob@waddle.test/desktop",
+        to: "alice@waddle.test/web",
+        sid: "c1",
+        media: audioVideo,
+        join,
+      },
+    });
+    expect(readDmCallActivity("bob@waddle.test")).toMatchObject({ sid: "c1" });
+    $callState.set({
+      phase: "active",
+      peer: "bob@waddle.test/desktop",
+      sid: "c1",
+      media: audioVideo,
+      join,
+      kind: "dm",
+      initiator: "alice@waddle.test/web",
+    });
+
+    await tearDownActiveCall(sender, "success");
+
+    expect(sender.send_call_finish).not.toHaveBeenCalled();
+    expect($callState.get()).toEqual({ phase: "idle" });
+    expect(readDmCallActivity("bob@waddle.test")).toBeNull();
   });
 
   test("active call: success reason for graceful logout", async () => {

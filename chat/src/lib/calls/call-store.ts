@@ -671,10 +671,9 @@ export async function tearDownActiveCall(
                 await outboundCalls.finish(sender, s.peer, s.sid);
               } catch (err) {
                 reportCallError(err);
-              } finally {
-                clearDmCallActivity(s.peer, s.sid);
               }
             }
+            clearDmCallActivity(s.peer, s.sid);
           } else {
             // MUC group call: clear our Muji presence AND leave via
             // the IQ surface. Presence-first ordering (XEP-0272

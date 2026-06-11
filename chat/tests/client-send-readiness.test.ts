@@ -6,7 +6,7 @@ import { useDirectMessages } from "../src/dms/messages";
 import { useChannelMessages } from "../src/channels/messages";
 import { BrowserXmppClient, roomBareJidFor, type InboxEntry, type LiveDmMessage, type RoomActivityEvent } from "../src/lib/xmpp-client";
 import { enqueueQueuedMessage, listQueuedDmMessages, listQueuedRoomMessages } from "../src/lib/outbound-queue-store";
-import { clearDmCallActivities, readDmCallActivity } from "../src/lib/calls/dm-call-activity";
+import { applyDmCallEvent, clearDmCallActivities, readDmCallActivity } from "../src/lib/calls/dm-call-activity";
 import { $dmCallOutcomeAnchor } from "../src/lib/calls/dm-call-anchor";
 import type { ResumePersistence } from "../src/lib/xmpp/resume-persistence";
 import { handlerStubs } from "./helpers/xmpp-client-mock";
@@ -2026,6 +2026,74 @@ describe("client keepalive lifecycle", () => {
     });
   });
 
+  test("searchDmMessages ignores call events without mutating call activity", async () => {
+    const client = new BrowserXmppClient(session());
+    (client as unknown as { connected: boolean }).connected = true;
+    applyDmCallEvent({
+      selfBareJid: "alice@example.com",
+      selfFullJid: "alice@example.com/desktop",
+      timestamp: new Date().toISOString(),
+      event: {
+        kind: "propose",
+        from: "bob@example.com/phone",
+        to: "alice@example.com/desktop",
+        sid: "call-existing-search",
+        media: { audio: true, video: false },
+      },
+    });
+    $dmCallOutcomeAnchor.set({
+      peerBareJid: "bob@example.com",
+      sid: "call-existing-outcome",
+      media: { audio: true, video: false },
+      outcome: "missed",
+      initiator: "bob@example.com/phone",
+      ended: "2024-01-01T00:00:00.000Z",
+    });
+    const existingActivity = readDmCallActivity("bob@example.com");
+    const existingOutcome = $dmCallOutcomeAnchor.get();
+    const searchDmHistory = mock(async () => ({
+      messages: [
+        dmWasmMessage({
+          mam_id: "mam-search-propose",
+          id: "search-propose",
+          body: undefined,
+          call_event: {
+            kind: "propose",
+            from: "bob@example.com/phone",
+            to: "alice@example.com/desktop",
+            sid: "call-search",
+            media: { audio: true, video: true },
+          },
+        }),
+        dmWasmMessage({
+          mam_id: "mam-search-body",
+          id: "search-body",
+          body: "matched text",
+          timestamp: "2024-01-01T00:00:02.000Z",
+        }),
+      ],
+      is_complete: true,
+    }));
+    (client as unknown as { xmpp: Agent }).xmpp = Object.assign(new EventEmitter(), {
+      search_dm_history: searchDmHistory,
+    }) as unknown as Agent;
+
+    const results = await client.searchDmMessages("bob@example.com", "matched", 20);
+
+    expect(results).toEqual([
+      {
+        id: "search-body",
+        archiveId: "mam-search-body",
+        nick: "bob",
+        body: "matched text",
+        createdAt: "2024-01-01T00:00:02.000Z",
+        peerJid: "bob@example.com",
+      },
+    ]);
+    expect(readDmCallActivity("bob@example.com")).toEqual(existingActivity);
+    expect($dmCallOutcomeAnchor.get()).toEqual(existingOutcome);
+  });
+
   test("queryMamThreadPage seeds room reconnect catch-up from XEP-0313 archive ids", async () => {
     const client = new BrowserXmppClient(session());
     const roomJid = roomBareJidFor(session(), "c1");
@@ -2055,6 +2123,62 @@ describe("client keepalive lifecycle", () => {
     expect((client as unknown as { catchup: { onSessionStarted: () => unknown[] } }).catchup.onSessionStarted()).toEqual([
       { kind: "room", key: roomJid, after: "mam-thread-1", since: "2024-01-01T00:00:01.000Z", seenIds: ["room-thread-1"] },
     ]);
+  });
+
+  test("queryPersonalMamThreadPage ignores call events without mutating call activity", async () => {
+    const client = new BrowserXmppClient(session());
+    (client as unknown as { connected: boolean }).connected = true;
+    applyDmCallEvent({
+      selfBareJid: "alice@example.com",
+      selfFullJid: "alice@example.com/desktop",
+      timestamp: new Date().toISOString(),
+      event: {
+        kind: "propose",
+        from: "bob@example.com/phone",
+        to: "alice@example.com/desktop",
+        sid: "call-existing-thread",
+        media: { audio: true, video: false },
+      },
+    });
+    $dmCallOutcomeAnchor.set({
+      peerBareJid: "bob@example.com",
+      sid: "call-existing-thread-outcome",
+      media: { audio: true, video: false },
+      outcome: "missed",
+      initiator: "bob@example.com/phone",
+      ended: "2024-01-01T00:00:00.000Z",
+    });
+    const existingActivity = readDmCallActivity("bob@example.com");
+    const existingOutcome = $dmCallOutcomeAnchor.get();
+    const fetchDmHistoryByThread = mock(async () => ({
+      messages: [
+        dmWasmMessage({
+          mam_id: "mam-thread-call",
+          id: "thread-call",
+          body: undefined,
+          thread: "call-thread",
+          call_event: {
+            kind: "propose",
+            from: "bob@example.com/phone",
+            to: "alice@example.com/desktop",
+            sid: "call-thread",
+            media: { audio: true, video: true },
+          },
+        }),
+      ],
+      last_id: "mam-thread-call",
+      is_complete: true,
+    }));
+    (client as unknown as { xmpp: Agent }).xmpp = Object.assign(new EventEmitter(), {
+      fetch_dm_history_by_thread: fetchDmHistoryByThread,
+    }) as unknown as Agent;
+
+    const page = await client.queryPersonalMamThreadPage("bob@example.com", "call-thread", 100, { type: "latest" });
+
+    expect(page.messages).toEqual([]);
+    expect(fetchDmHistoryByThread).toHaveBeenCalledWith("bob@example.com", "call-thread", 100, null);
+    expect(readDmCallActivity("bob@example.com")).toEqual(existingActivity);
+    expect($dmCallOutcomeAnchor.get()).toEqual(existingOutcome);
   });
 
   test("queryMamByThread seeds room reconnect catch-up from XEP-0313 archive ids", async () => {

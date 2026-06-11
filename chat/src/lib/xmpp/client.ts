@@ -2777,9 +2777,14 @@ export class BrowserXmppClient {
   private roomMamPageToMessages(page: WasmMamPage): MamHistoryPage<LiveRoomMessage> {
     return { messages: page.messages.map((message) => roomMessageFromArchived(message, { trustedMediaOrigin: this.trustedLinkPreviewMediaOrigin() })).filter((message): message is LiveRoomMessage => !!message), ...(page.first_id ? { firstArchiveId: page.first_id } : {}), ...(page.last_id ? { lastArchiveId: page.last_id } : {}), complete: page.is_complete };
   }
-  private dmMamPageToMessages(page: WasmMamPage): MamHistoryPage<LiveDmMessage> {
+  private dmMamPageToMessages(
+    page: WasmMamPage,
+    options: { applyCallEvents?: boolean } = {},
+  ): MamHistoryPage<LiveDmMessage> {
     const selfBare = barePeerJid(this.session.jid);
-    const outcomeAnchors = this.applyDmCallEventsFromMamPage(page, selfBare, { publishOutcome: false });
+    const outcomeAnchors = options.applyCallEvents === false
+      ? []
+      : this.applyDmCallEventsFromMamPage(page, selfBare, { publishOutcome: false });
     const messages = page.messages
       .map((message) => dmMessageFromArchived(message, selfBare, { trustedMediaOrigin: this.trustedLinkPreviewMediaOrigin() }))
       .filter((message): message is LiveDmMessage => !!message);
@@ -2888,7 +2893,7 @@ export class BrowserXmppClient {
     if (!threadId) return { messages: [], complete: true };
     const xmpp = await this.requireConnectedXmpp(); const page = await xmpp.fetch_dm_history_by_thread?.(barePeerJid(peerJid), threadId, max, pageParam.type === "before" ? pageParam.before : null) as WasmMamPage;
     if (!page) return { messages: [], complete: true };
-    const result = this.dmMamPageToMessages(page);
+    const result = this.dmMamPageToMessages(page, { applyCallEvents: false });
     this.recordDmMamWatermarks(result.messages);
     return result;
   }
@@ -2935,8 +2940,14 @@ export class BrowserXmppClient {
     if (!query.trim()) return [];
     const xmpp = await this.requireConnectedXmpp();
     const page = await xmpp.search_dm_history?.(barePeerJid(peerJid), query, max) as WasmMamPage;
-    const parsed = page ? this.dmMamPageToMessages(page).messages : [];
-    return parsed.filter((message) => !!message.body).map((message, index) => ({ id: message.id, ...(page?.messages[index]?.mam_id ? { archiveId: page.messages[index].mam_id } : {}), nick: message.nick, body: message.body, createdAt: message.createdAt, ...(message.threadId ? { threadId: message.threadId } : {}), ...(message.parentThreadId ? { parentThreadId: message.parentThreadId } : {}), peerJid: message.peerJid }));
+    const selfBare = barePeerJid(this.session.jid);
+    const parsed = page?.messages
+      .map((archived) => ({
+        archived,
+        message: dmMessageFromArchived(archived, selfBare, { trustedMediaOrigin: this.trustedLinkPreviewMediaOrigin() }),
+      }))
+      .filter((entry): entry is { archived: WasmArchivedMessage; message: LiveDmMessage } => !!entry.message) ?? [];
+    return parsed.filter(({ message }) => !!message.body).map(({ archived, message }) => ({ id: message.id, ...(archived.mam_id ? { archiveId: archived.mam_id } : {}), nick: message.nick, body: message.body, createdAt: message.createdAt, ...(message.threadId ? { threadId: message.threadId } : {}), ...(message.parentThreadId ? { parentThreadId: message.parentThreadId } : {}), peerJid: message.peerJid }));
   }
   async subscribeToPeerPresence(peerJid: string): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await xmpp.subscribe_to_presence?.(barePeerJid(peerJid)); }
   async listRosterContacts(): Promise<RosterContact[]> { const xmpp = await this.requireConnectedXmpp(); const roster = await xmpp.list_roster_contacts?.() as WasmRosterContact[]; return (roster ?? []).map((item) => { const jid = barePeerJid(item.jid); return { jid, name: item.name, username: item.name?.trim() || jid.split("@")[0] || jid, subscription: (item.subscription ?? "none") as RosterContact["subscription"], groups: item.groups ?? [] }; }); }

@@ -371,6 +371,10 @@ function isOlderThanTerminal(peerJid: string, sid: string, timestamp: string): b
   return nextMs <= terminalMs;
 }
 
+function hasRecordedTerminal(peerJid: string, sid: string): boolean {
+  return dmCallTerminalTimestamps.has(terminalKey(peerJid, sid));
+}
+
 function pruneTerminalTimestamps(now: Date): void {
   for (const [key, timestamp] of dmCallTerminalTimestamps) {
     if (isStale(timestamp, now)) {
@@ -661,7 +665,7 @@ export function applyDmCallEvent(envelope: DmCallEventEnvelope): DmCallOutcomeAn
     case "retract":
     case "finish":
     case "session-terminate":
-      if (isOlderThanTerminal(peerJid, envelope.event.sid, timestamp)) return null;
+      if (hasRecordedTerminal(peerJid, envelope.event.sid)) return null;
       const outcomeAnchor = terminalOutcomeAnchor({
         peerJid,
         sid: envelope.event.sid,
