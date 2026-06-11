@@ -80,7 +80,7 @@ function newTile(
 
 export function buildCallTiles(input: BuildCallTilesInput): CallTileModel[] {
   const byKey = new Map<string, CallTileModel>();
-  const remoteCameraBareIdentities = new Set<string>();
+  const activeRemoteBareIdentities = new Set<string>();
   const selfId = input.localTracks[0]?.participantIdentity ?? input.localIdentity ?? "you";
   byKey.set(callTileKey("self", selfId, "camera"), newTile("self", selfId, "camera", input.micEnabled));
 
@@ -98,13 +98,11 @@ export function buildCallTiles(input: BuildCallTilesInput): CallTileModel[] {
   for (const remote of input.remoteTracks) {
     const participantIdentity = remote.participantIdentity.trim();
     if (!participantIdentity) continue;
+    const remoteBareIdentity = bareIdentityKey(participantIdentity);
+    if (remoteBareIdentity) activeRemoteBareIdentities.add(remoteBareIdentity);
     const source = tileSourceForTrack(remote.source);
     const key = callTileKey("remote", participantIdentity, source);
     const existing = byKey.get(key) ?? newTile("remote", participantIdentity, source, input.micEnabled);
-    if (source === "camera") {
-      const remoteBareIdentity = bareIdentityKey(participantIdentity);
-      if (remoteBareIdentity) remoteCameraBareIdentities.add(remoteBareIdentity);
-    }
     if (remote.kind === "video") {
       existing.videoTrack = remote.track;
       if (source === "screen_share") existing.screenTrackKey = remote.publicationSid;
@@ -115,7 +113,7 @@ export function buildCallTiles(input: BuildCallTilesInput): CallTileModel[] {
   for (const identity of input.expectedRemoteIdentities ?? []) {
     const trimmedIdentity = identity.trim();
     const bareIdentity = bareIdentityKey(trimmedIdentity);
-    if (!bareIdentity || remoteCameraBareIdentities.has(bareIdentity)) continue;
+    if (!bareIdentity || activeRemoteBareIdentities.has(bareIdentity)) continue;
     byKey.set(
       callTileKey("remote", trimmedIdentity, "camera"),
       newTile("remote", trimmedIdentity, "camera", input.micEnabled),

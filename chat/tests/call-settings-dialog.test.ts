@@ -22,6 +22,21 @@ describe("CallSettingsDialog speaker support", () => {
     expect(html).not.toContain('aria-label="Speaker"');
     expect(html).not.toContain("System default");
   });
+
+  test("wires system-default picker rows through the active-call device selection helper", () => {
+    const source = readFileSync(
+      new URL("../src/components/calls/CallSettingsDialog.vue", import.meta.url),
+      "utf8",
+    );
+
+    expect(source).toContain('import { applyCallDeviceSelection } from "@/lib/calls/call-device-selection"');
+    expect(source).toContain('await applyCallDeviceSelection("mic", id, engine)');
+    expect(source).toContain('await applyCallDeviceSelection("cam", id, engine)');
+    expect(source).toContain('await applyCallDeviceSelection("speaker", id, engine)');
+    expect(source).toContain('@click="selectMic(null)"');
+    expect(source).toContain('@click="selectCam(null)"');
+    expect(source).toContain('@click="selectSpeaker(null)"');
+  });
 });
 
 async function renderVueComponent(path: string, props: Record<string, unknown>): Promise<string> {
