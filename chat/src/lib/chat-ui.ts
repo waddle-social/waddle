@@ -55,6 +55,7 @@ export interface CallThreadAnchor {
   started?: string;
   ended?: string;
   duration?: string;
+  outcome?: "declined" | "missed" | "no-answer" | "ended";
 }
 
 export interface LinkPreview {

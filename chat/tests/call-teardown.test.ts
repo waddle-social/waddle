@@ -16,6 +16,8 @@ import {
   applyMucCallPresence,
   clearMucCallParticipants,
 } from "../src/lib/calls/muc-call-presence";
+import { applyDmCallEvent, clearDmCallActivities, readDmCallActivity } from "../src/lib/calls/dm-call-activity";
+import { $dmCallOutcomeAnchor } from "../src/lib/calls/dm-call-anchor";
 import { leaveRetainedMucCallAction, startMucCallAction } from "../src/lib/calls/muc-call-actions";
 import {
   $mucCallTerminatePendingSessions,
@@ -229,6 +231,8 @@ afterAll(() => {
 
 afterEach(() => {
   clearCallState();
+  clearDmCallActivities();
+  $dmCallOutcomeAnchor.set(null);
   configureIncomingCallAlerts(null);
   $lastCallError.set(null);
   // The Muji mocks above fire `applyMucCallPresence` to simulate
@@ -237,6 +241,180 @@ afterEach(() => {
   // `muc-call-presence.test.ts`) that expect an empty store.
   clearMucCallParticipants();
   clearAllMucCallSessionCacheForTests();
+});
+
+describe("DM call outcome feed anchors", () => {
+  test("live reject records a declined entry for the peer feed", () => {
+    const events = wireClientEvents();
+
+    events.emitCall({
+      kind: "propose",
+      from: "bob@waddle.test/phone",
+      to: "alice@waddle.test/web",
+      sid: "c-decline",
+      media: audioVideo,
+    });
+    events.emitCall({
+      kind: "reject",
+      from: "alice@waddle.test/web",
+      to: "bob@waddle.test/phone",
+      sid: "c-decline",
+    });
+
+    expect($dmCallOutcomeAnchor.get()).toMatchObject({
+      peerBareJid: "bob@waddle.test",
+      sid: "c-decline",
+      outcome: "declined",
+    });
+  });
+
+  test("caller retract records missed for the recipient feed", () => {
+    const events = wireClientEvents();
+
+    events.emitCall({
+      kind: "propose",
+      from: "bob@waddle.test/phone",
+      to: "alice@waddle.test/web",
+      sid: "c-missed",
+      media: audioVideo,
+    });
+    events.emitCall({
+      kind: "retract",
+      from: "bob@waddle.test/phone",
+      to: "alice@waddle.test/web",
+      sid: "c-missed",
+    });
+
+    expect($dmCallOutcomeAnchor.get()).toMatchObject({
+      peerBareJid: "bob@waddle.test",
+      sid: "c-missed",
+      outcome: "missed",
+    });
+  });
+
+  test("outgoing unanswered timeout records no-answer for the caller feed", async () => {
+    const sender = mockSender();
+
+    beginOutgoingCall("bob@waddle.test", "c-no-answer", audioVideo, "alice@waddle.test/web");
+    scheduleOutgoingTimeout(sender, "c-no-answer", 10);
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect($dmCallOutcomeAnchor.get()).toMatchObject({
+      peerBareJid: "bob@waddle.test",
+      sid: "c-no-answer",
+      outcome: "no-answer",
+    });
+  });
+
+  test("completed call terminate records an ended entry for the feed", () => {
+    const events = wireClientEvents();
+
+    beginOutgoingCall("bob@waddle.test", "c-ended", audioVideo, "alice@waddle.test/web");
+    events.emitCall({
+      kind: "session-accept",
+      from: "bob@waddle.test/phone",
+      to: "alice@waddle.test/web",
+      sid: "c-ended",
+      media: audioVideo,
+      join,
+    });
+    events.emitCall({
+      kind: "session-terminate",
+      from: "bob@waddle.test/phone",
+      to: "alice@waddle.test/web",
+      sid: "c-ended",
+      reason: "success",
+    });
+
+    expect($dmCallOutcomeAnchor.get()).toMatchObject({
+      peerBareJid: "bob@waddle.test",
+      sid: "c-ended",
+      outcome: "ended",
+    });
+  });
+
+  test("archived MAM call events derive a missed entry after reconnect", () => {
+    applyDmCallEvent({
+      selfBareJid: "alice@waddle.test",
+      selfFullJid: "alice@waddle.test/web",
+      timestamp: "2026-06-09T12:00:00Z",
+      now: new Date("2026-06-09T12:01:00Z"),
+      event: {
+        kind: "propose",
+        from: "bob@waddle.test/phone",
+        to: "alice@waddle.test/web",
+        sid: "c-offline",
+        media: audioVideo,
+      },
+    });
+    applyDmCallEvent({
+      selfBareJid: "alice@waddle.test",
+      selfFullJid: "alice@waddle.test/web",
+      timestamp: "2026-06-09T12:00:45Z",
+      now: new Date("2026-06-09T12:01:00Z"),
+      event: {
+        kind: "retract",
+        from: "bob@waddle.test/phone",
+        to: "alice@waddle.test/web",
+        sid: "c-offline",
+      },
+    });
+
+    expect($dmCallOutcomeAnchor.get()).toMatchObject({
+      peerBareJid: "bob@waddle.test",
+      sid: "c-offline",
+      outcome: "missed",
+      ended: "2026-06-09T12:00:45Z",
+    });
+  });
+
+  test("background MAM call hydration can update activity without publishing feed outcomes", () => {
+    applyDmCallEvent({
+      selfBareJid: "alice@waddle.test",
+      selfFullJid: "alice@waddle.test/web",
+      timestamp: "2026-06-09T12:00:00Z",
+      now: new Date("2026-06-09T12:01:00Z"),
+      publishOutcome: false,
+      event: {
+        kind: "session-accept",
+        from: "bob@waddle.test/phone",
+        to: "alice@waddle.test/web",
+        sid: "c-silent-hydrate",
+        media: audioVideo,
+        join,
+      },
+    });
+
+    expect($dmCallOutcomeAnchor.get()).toBeNull();
+    expect(readDmCallActivity("bob@waddle.test", new Date("2026-06-09T12:01:00Z"))).toMatchObject({
+      peerJid: "bob@waddle.test",
+      sid: "c-silent-hydrate",
+      state: "accepted",
+    });
+  });
+
+  test("lone archived self-reject attributes the declined call to the peer initiator", () => {
+    applyDmCallEvent({
+      selfBareJid: "alice@waddle.test",
+      selfFullJid: "alice@waddle.test/web",
+      timestamp: "2026-06-09T12:00:45Z",
+      now: new Date("2026-06-09T12:01:00Z"),
+      event: {
+        kind: "reject",
+        from: "alice@waddle.test/web",
+        to: "bob@waddle.test/phone",
+        sid: "c-lone-reject",
+      },
+    });
+
+    expect($dmCallOutcomeAnchor.get()).toMatchObject({
+      peerBareJid: "bob@waddle.test",
+      sid: "c-lone-reject",
+      outcome: "declined",
+      initiator: "bob@waddle.test",
+    });
+  });
 });
 
 describe("incoming DM call alerting", () => {
@@ -1027,6 +1205,11 @@ describe("1:1 call event wiring", () => {
         "c-no-accept",
         "timeout",
       );
+      expect($dmCallOutcomeAnchor.get()).toMatchObject({
+        peerBareJid: "bob@waddle.test",
+        sid: "c-no-accept",
+        outcome: "no-answer",
+      });
       expect($callState.get()).toEqual({
         phase: "ended",
         sid: "c-no-accept",

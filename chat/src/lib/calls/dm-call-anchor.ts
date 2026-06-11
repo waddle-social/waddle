@@ -24,6 +24,19 @@ export type DmCallStartedAnchor = {
   started: string;
 };
 
+export type DmCallOutcome = "declined" | "missed" | "no-answer" | "ended";
+
+export type DmCallOutcomeAnchor = {
+  peerBareJid: string;
+  sid: string;
+  media: CallMedia;
+  outcome: DmCallOutcome;
+  /** Bare or full JID of the call initiator when known. */
+  initiator?: string;
+  /** ISO-8601 terminal timestamp. */
+  ended: string;
+};
+
 /**
  * Deterministic timeline id for a DM call-thread anchor, shared by the
  * synthesized live card and the MAM-replayed archive row (via a wire-id alias)
@@ -31,6 +44,10 @@ export type DmCallStartedAnchor = {
  */
 export function dmCallAnchorId(sid: string): string {
   return `dmcall:${sid}`;
+}
+
+export function dmCallOutcomeAnchorId(sid: string, outcome: DmCallOutcome): string {
+  return `dmcall:${sid}:${outcome}`;
 }
 
 function callThreadMedia(media: CallMedia): ("audio" | "video")[] {
@@ -71,6 +88,33 @@ export function buildDmCallStartedAnchor(
     isSelf,
     threadId: anchor.sid,
     callThread,
+  };
+}
+
+export function buildDmCallOutcomeAnchor(
+  anchor: DmCallOutcomeAnchor,
+  selfJid: string,
+): TimelineMessage {
+  const initiator = anchor.initiator ? barePeerJid(anchor.initiator).toLowerCase() : "";
+  const selfBare = barePeerJid(selfJid).toLowerCase();
+  const isSelfInitiated = !!initiator && initiator === selfBare;
+  return {
+    id: dmCallOutcomeAnchorId(anchor.sid, anchor.outcome),
+    author: isSelfInitiated ? (selfBare.split("@")[0] ?? "you") : (anchor.peerBareJid.split("@")[0] ?? "unknown"),
+    authorJid: isSelfInitiated ? selfJid : anchor.peerBareJid,
+    body: "",
+    createdAt: anchor.ended,
+    createdAtSource: "fallback",
+    isSelf: isSelfInitiated,
+    threadId: anchor.sid,
+    callThread: {
+      kind: "dm",
+      sid: anchor.sid,
+      media: callThreadMedia(anchor.media),
+      ...(anchor.initiator ? { initiator: anchor.initiator } : {}),
+      ended: anchor.ended,
+      outcome: anchor.outcome,
+    },
   };
 }
 
@@ -120,6 +164,21 @@ export function resolveDmCallAnchorInjection(
   return buildDmCallStartedAnchor(anchor, selfJid);
 }
 
+export function resolveDmCallOutcomeInjection(
+  anchor: DmCallOutcomeAnchor,
+  activePeerJid: string | null,
+  selfJid: string | null,
+): TimelineMessage | null {
+  if (!selfJid || !activePeerJid) return null;
+  if (
+    barePeerJid(anchor.peerBareJid).toLowerCase()
+    !== barePeerJid(activePeerJid).toLowerCase()
+  ) {
+    return null;
+  }
+  return buildDmCallOutcomeAnchor(anchor, selfJid);
+}
+
 /**
  * Bridge from the call layer (`applyCallEvent`) to the DM messaging
  * composable, which appends the synthesized anchor to the open conversation.
@@ -127,7 +186,12 @@ export function resolveDmCallAnchorInjection(
  * timeline/session — the composable derives `isSelf` from its own session.
  */
 export const $dmCallStartedAnchor = atom<DmCallStartedAnchor | null>(null);
+export const $dmCallOutcomeAnchor = atom<DmCallOutcomeAnchor | null>(null);
 
 export function publishDmCallStartedAnchor(anchor: DmCallStartedAnchor): void {
   $dmCallStartedAnchor.set(anchor);
+}
+
+export function publishDmCallOutcomeAnchor(anchor: DmCallOutcomeAnchor): void {
+  $dmCallOutcomeAnchor.set(anchor);
 }

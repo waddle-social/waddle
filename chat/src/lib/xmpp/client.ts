@@ -2784,7 +2784,7 @@ export class BrowserXmppClient {
   private applyDmCallEventsFromMamPage(
     page: WasmMamPage | null | undefined,
     selfBare = barePeerJid(this.session.jid),
-    options: { since?: string; seenIds?: ReadonlyArray<string> } = {},
+    options: { since?: string; seenIds?: ReadonlyArray<string>; publishOutcome?: boolean } = {},
   ): void {
     for (const message of page?.messages ?? []) {
       if (!message.call_event) continue;
@@ -2795,6 +2795,7 @@ export class BrowserXmppClient {
         selfFullJid: this.fullJid,
         to: message.to,
         timestamp: message.timestamp,
+        publishOutcome: options.publishOutcome,
       });
     }
   }
@@ -2873,7 +2874,7 @@ export class BrowserXmppClient {
     if (!this.isCurrentConnectedXmpp(xmpp, sessionJid)) return;
     const selfBare = barePeerJid(sessionJid);
     for (const page of [...pages].reverse()) {
-      this.applyDmCallEventsFromMamPage(page, selfBare);
+      this.applyDmCallEventsFromMamPage(page, selfBare, { publishOutcome: false });
     }
   }
   async hydrateRecentDmCallActivities(
@@ -2891,7 +2892,7 @@ export class BrowserXmppClient {
     if (!this.isCurrentConnectedXmpp(xmpp, sessionJid)) return;
     const selfBare = barePeerJid(sessionJid);
     for (const page of [...pages].reverse()) {
-      this.applyDmCallEventsFromMamPage(page, selfBare);
+      this.applyDmCallEventsFromMamPage(page, selfBare, { publishOutcome: false });
     }
   }
   async searchDmMessages(peerJid: string, query: string, max = 20): Promise<MessageSearchResult[]> {

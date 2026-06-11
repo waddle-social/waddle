@@ -33,7 +33,12 @@ import { useDmChatStates } from "@/dms/chat-states";
 import { useDmReadMarkers } from "@/dms/read-markers";
 import { useDmMessageSearch } from "@/dms/message-search";
 import { useChatWindowVisibility } from "@/shell/window-visibility";
-import { $dmCallStartedAnchor, resolveDmCallAnchorInjection } from "@/lib/calls/dm-call-anchor";
+import {
+  $dmCallOutcomeAnchor,
+  $dmCallStartedAnchor,
+  resolveDmCallAnchorInjection,
+  resolveDmCallOutcomeInjection,
+} from "@/lib/calls/dm-call-anchor";
 
 export function useDirectMessages(
   session: Ref<WaddleSession | null>,
@@ -214,7 +219,17 @@ export function useDirectMessages(
       );
       if (card) liveMerge.mergeLiveMessage(card);
     });
+    const stopDmCallOutcomeListener = $dmCallOutcomeAnchor.listen((anchor) => {
+      if (!anchor) return;
+      const card = resolveDmCallOutcomeInjection(
+        anchor,
+        activePeerJid.value,
+        session.value?.jid ?? null,
+      );
+      if (card) liveMerge.mergeLiveMessage(card);
+    });
     onScopeDispose(stopDmCallAnchorListener);
+    onScopeDispose(stopDmCallOutcomeListener);
   }
 
   const actions = useDmMessageActions({

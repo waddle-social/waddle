@@ -24,6 +24,16 @@ export interface CallAnchorCardState {
 }
 
 export function callThreadAnchorLabel(message: Pick<TimelineMessage, "body" | "author" | "callThread">): string {
+  switch (message.callThread?.outcome) {
+    case "declined":
+      return "Call declined";
+    case "missed":
+      return "Missed call";
+    case "no-answer":
+      return "No answer";
+    case "ended":
+      return "Call ended";
+  }
   if (message.callThread?.ended && message.callThread.duration) {
     return `Call ended · ${formatCallThreadDuration(message.callThread.duration)}`;
   }
@@ -200,9 +210,11 @@ function buildCallAnchorCardState(options: {
     threadId: callThreadAnchorThreadId(message),
     title: live
       ? `Live ${mediaLabel}`
-      : callThread.ended && callThread.duration
-        ? `Call ended · ${formatCallThreadDuration(callThread.duration)}`
-        : "Call ended",
+      : callThread.outcome
+        ? callThreadAnchorLabel(message)
+        : callThread.ended && callThread.duration
+          ? `Call ended · ${formatCallThreadDuration(callThread.duration)}`
+          : "Call ended",
     actionLabel: joinAvailable ? (retainedLocalResource ? "Rejoin" : "Join") : busy ? "In another call" : null,
     actionDisabled: busy,
     // Keep the aria label in step with the rendered action: only announce

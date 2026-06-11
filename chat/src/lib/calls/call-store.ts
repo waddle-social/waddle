@@ -18,7 +18,11 @@ import {
 } from "./muc-call-session-cache";
 import { clearLiveCallParticipants } from "./muc-call-live-participants";
 import { mediaErrorMessage } from "./call-media-issues";
-import { dmCallStartedAnchorFromTransition, publishDmCallStartedAnchor } from "./dm-call-anchor";
+import {
+  dmCallStartedAnchorFromTransition,
+  publishDmCallOutcomeAnchor,
+  publishDmCallStartedAnchor,
+} from "./dm-call-anchor";
 import { barePeerJid } from "../xmpp/jid";
 import type { IncomingCallAlertController } from "@/shell/audio-alerts";
 
@@ -479,6 +483,17 @@ let outgoingTimer: ReturnType<typeof setTimeout> | null = null;
 let sessionAcceptTimer: ReturnType<typeof setTimeout> | null = null;
 let sessionAcceptTimeoutMs = SESSION_ACCEPT_TIMEOUT_MS;
 
+function publishNoAnswerOutcome(peerJid: string, sid: string, media: CallMedia, initiator?: string): void {
+  publishDmCallOutcomeAnchor({
+    peerBareJid: barePeerJid(peerJid),
+    sid,
+    media,
+    outcome: "no-answer",
+    ...(initiator ? { initiator } : {}),
+    ended: new Date().toISOString(),
+  });
+}
+
 /**
  * Schedule the auto-retract for the most recent `beginOutgoingCall`.
  * The timer fires `outboundCalls.retract` if the slot is still in
@@ -504,6 +519,7 @@ export function scheduleOutgoingTimeout(
     void outboundCalls
       .retract(sender, s.to, s.sid)
       .catch((err) => reportCallError(err));
+    publishNoAnswerOutcome(s.to, sid, s.media, s.initiator);
     clearDmCallActivity(s.to, sid);
     $callState.set({
       phase: "ended",
@@ -535,6 +551,7 @@ export function scheduleSessionAcceptTimeout(
     void outboundCalls
       .sessionTerminate(sender, peerFullJid, sid, "timeout")
       .catch((err) => reportCallError(err));
+    publishNoAnswerOutcome(peerFullJid, sid, s.media, s.initiator);
     clearDmCallActivity(peerFullJid, sid);
     $callState.set({
       phase: "ended",
