@@ -46,6 +46,7 @@ import UserSettingsPage from "@/components/chat/UserSettingsPage.vue";
 import WaddlesSidebar from "@/components/chat/WaddlesSidebar.vue";
 import AdminView from "@/components/admin/AdminView.vue";
 import CallActivityDock from "@/components/calls/CallActivityDock.vue";
+import CallAudioPlaybackPrompt from "@/components/calls/CallAudioPlaybackPrompt.vue";
 import CurrentCallPanel from "@/components/calls/CurrentCallPanel.vue";
 import { navigate, useRouteMatch, type AdminMatch, type AdminPanel } from "@/router";
 import { buildHomeDashboardProps } from "@/home/dashboard-props";
@@ -500,6 +501,7 @@ onUnmounted(() => {
     @back="onAdminBack"
   />
   <div v-else class="chat-app-shell">
+    <CallAudioPlaybackPrompt />
     <ChatMobileDrawers
       :controller="controller"
       :active-channel-call-count="activeChannelCallCount"

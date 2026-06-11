@@ -633,7 +633,7 @@ describe("device-less call controls", () => {
     expect(controller.resuming.value).toBe(false);
   });
 
-  test("app shell and mounted call surface render exactly one audio recovery banner", async () => {
+  test("ready shell owns one in-viewport audio recovery banner", async () => {
     $callState.set({
       phase: "active",
       peer: "bob@waddle.test/web",
@@ -644,40 +644,31 @@ describe("device-less call controls", () => {
     });
     $callUiMode.set("split");
     $callAudioPlaybackBlocked.set(true);
-    connectionStore.appState = "ready";
-
-    const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
-    Object.defineProperty(globalThis, "window", {
-      configurable: true,
-      value: {
-        location: { pathname: "/dm/alice", search: "" },
-        history: {
-          pushState: () => undefined,
-          replaceState: () => undefined,
-        },
-        addEventListener: () => undefined,
-        removeEventListener: () => undefined,
-      },
-    });
-    let appLevelHtml: string;
-    try {
-      appLevelHtml = await renderSfcComponent(
-        "../src/components/AppShell.vue",
-        { giphyApiKey: "" },
-        import.meta.url,
-      );
-    } finally {
-      if (originalWindow) Object.defineProperty(globalThis, "window", originalWindow);
-      else Reflect.deleteProperty(globalThis, "window");
-    }
+    const appShellSource = readFileSync(
+      new URL("../src/components/AppShell.vue", import.meta.url),
+      "utf8",
+    );
+    const readyShellSource = readFileSync(
+      new URL("../src/components/chat/ChatReadyShell.vue", import.meta.url),
+      "utf8",
+    );
+    const promptHtml = await renderVueComponent(
+      await loadVueComponent("../src/components/calls/CallAudioPlaybackPrompt.vue"),
+    );
     const surfaceHtml = await renderSfcComponent(
       "../src/components/calls/CallSplitContainer.vue",
       { dmPeerJid: "bob@waddle.test" },
       import.meta.url,
     );
-    const combinedHtml = `${appLevelHtml}${surfaceHtml}`;
+    const shellStart = readyShellSource.indexOf('<div v-else class="chat-app-shell">');
+    const promptMount = readyShellSource.indexOf("<CallAudioPlaybackPrompt />");
+    const desktopShell = readyShellSource.indexOf('<div class="chat-desktop-shell">');
 
-    expect(combinedHtml.match(/Tap to enable audio/g)?.length ?? 0).toBe(1);
+    expect(appShellSource).not.toContain("<CallAudioPlaybackPrompt />");
+    expect(shellStart).toBeGreaterThanOrEqual(0);
+    expect(promptMount).toBeGreaterThan(shellStart);
+    expect(promptMount).toBeLessThan(desktopShell);
+    expect(`${promptHtml}${surfaceHtml}`.match(/Tap to enable audio/g)?.length ?? 0).toBe(1);
   });
 });
 
