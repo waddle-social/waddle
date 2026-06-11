@@ -1,34 +1,24 @@
 <script setup lang="ts">
-import { ref } from "vue";
 import { useStore } from "@nanostores/vue";
-import {
-  $callAudioPlaybackBlocked,
-  resumeCallAudioPlayback,
-} from "@/lib/calls/call-audio-playback";
+import { $callAudioPlaybackBlocked } from "@/lib/calls/call-audio-playback";
+import { useCallAudioPlaybackPromptController } from "@/lib/calls/call-audio-playback-prompt-controller";
+import { $callState } from "@/lib/calls/call-store";
 import { useCallEngine } from "@/lib/calls/use-call-engine";
 
 const blocked = useStore($callAudioPlaybackBlocked);
+const callState = useStore($callState);
 const { engine } = useCallEngine();
-const resumeFailed = ref(false);
-const resuming = ref(false);
-
-async function enableAudio(): Promise<void> {
-  if (resuming.value) return;
-  resumeFailed.value = false;
-  resuming.value = true;
-  try {
-    await resumeCallAudioPlayback(engine, () => {
-      resumeFailed.value = true;
-    });
-  } finally {
-    resuming.value = false;
-  }
-}
+const {
+  enableAudio,
+  resumeFailed,
+  resuming,
+  visible,
+} = useCallAudioPlaybackPromptController(blocked, callState, engine);
 </script>
 
 <template>
   <div
-    v-if="blocked"
+    v-if="visible"
     class="call-audio-playback-prompt"
     role="alert"
   >
