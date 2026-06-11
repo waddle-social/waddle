@@ -55,7 +55,6 @@ export function useCallAudioPlaybackPromptController(
   return {
     activeCallSid,
     enableAudio,
-    resetResumeState,
     resumeFailed,
     resuming,
     visible,
