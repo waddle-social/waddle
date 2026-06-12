@@ -762,6 +762,7 @@ async fn group_dm_member_can_leave_and_be_readded_later() {
         ("alice", "alice-pass"),
         ("bob", "bob-pass"),
         ("charlie", "charlie-pass"),
+        ("dave", "dave-pass"),
     ]);
     let mut alice = user_client(&server, "alice", "alice-pass", "group-dm-leave-alice").await;
     let mut bob = user_client(&server, "bob", "bob-pass", "group-dm-leave-bob").await;
@@ -770,6 +771,7 @@ async fn group_dm_member_can_leave_and_be_readded_later() {
         user_client(&server, "bob", "bob-pass", "group-dm-leave-bob-detached").await;
     let mut charlie =
         user_client(&server, "charlie", "charlie-pass", "group-dm-leave-charlie").await;
+    let mut dave = user_client(&server, "dave", "dave-pass", "group-dm-leave-dave").await;
 
     let room_jid = create_group_dm(
         &mut alice,
@@ -791,6 +793,14 @@ async fn group_dm_member_can_leave_and_be_readded_later() {
     assert!(
         bob_bookmarks.contains(&room_jid),
         "created group DM must be bookmarked for Bob before leave: {bob_bookmarks}"
+    );
+    let non_member_leave =
+        leave_group_dm(&mut dave, "group-dm-leave-dave-command", &room_jid).await;
+    assert!(
+        is_result(&non_member_leave)
+            && (non_member_leave.contains("<value>false</value>")
+                || non_member_leave.contains("<value>0</value>")),
+        "non-member leave must be a no-op result with left=false: {non_member_leave}"
     );
 
     bob.send(&format!(
@@ -831,6 +841,36 @@ async fn group_dm_member_can_leave_and_be_readded_later() {
 
     let leave = leave_group_dm(&mut bob, "group-dm-leave-bob-command", &room_jid).await;
     assert!(is_result(&leave), "leave command must succeed: {leave}");
+
+    let bob_self_leave = bob
+        .recv_matching(|frame| {
+            frame.contains("<presence")
+                && attr_value(frame, "type").as_deref() == Some("unavailable")
+                && attr_value(frame, "from").as_deref() == Some(&format!("{room_jid}/bob"))
+                && attr_value(frame, "to").as_deref() == Some("bob@localhost/group-dm-leave-bob")
+        })
+        .await
+        .expect("leaving command resource receives self leave presence");
+    assert!(
+        bob_self_leave.contains("status code='110'")
+            || bob_self_leave.contains("status code=\"110\""),
+        "leaving command resource must get XEP-0045 self-presence: {bob_self_leave}"
+    );
+    let bob_phone_self_leave = bob_phone
+        .recv_matching(|frame| {
+            frame.contains("<presence")
+                && attr_value(frame, "type").as_deref() == Some("unavailable")
+                && attr_value(frame, "from").as_deref() == Some(&format!("{room_jid}/bob"))
+                && attr_value(frame, "to").as_deref()
+                    == Some("bob@localhost/group-dm-leave-bob-phone")
+        })
+        .await
+        .expect("leaving sibling resource receives self leave presence");
+    assert!(
+        bob_phone_self_leave.contains("status code='110'")
+            || bob_phone_self_leave.contains("status code=\"110\""),
+        "leaving sibling resource must get XEP-0045 self-presence: {bob_phone_self_leave}"
+    );
 
     let membership_change = alice
         .recv_matching(|frame| {

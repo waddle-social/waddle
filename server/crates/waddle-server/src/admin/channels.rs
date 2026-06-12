@@ -21,7 +21,7 @@
 //! `room_registry` (`waddle_xmpp::muc::room_registry_actor::*`), and
 //! `muc_domain` (used to construct fresh room JIDs on `create`).
 
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 use jid::{BareJid, FullJid};
 use waddle_xmpp::commands::{CommandContext, CommandResult};
@@ -29,8 +29,8 @@ use waddle_xmpp::muc::room_registry_actor::{CreateRoom, DestroyRoom, GetRoom, Li
 use waddle_xmpp::muc::{
     affiliation::FederatedAffiliationConfig,
     room_actor::{
-        ApplyAdminItems, ChangeAffiliation, GetConfig, LeaveByRealJid, ListAffiliations,
-        ListOccupants, OccupantCount, UpdateConfig,
+        ApplyAdminItems, ChangeAffiliation, GetAffiliation, GetConfig, LeaveByRealJid,
+        ListAffiliations, ListOccupants, OccupantCount, UpdateConfig,
     },
     AdminItem, PinPermission, RoomConfig,
 };
@@ -1720,7 +1720,23 @@ async fn run_group_dm_leave(
             ))))
         })?;
 
-    let mut resources = connections.get_resources_for_user(&caller_bare);
+    let pre_leave_affiliation = actor
+        .ask(GetAffiliation {
+            jid: caller_bare.clone(),
+        })
+        .await
+        .map_err(send_err("room actor GetAffiliation"))?;
+    let left = pre_leave_affiliation >= Affiliation::Member;
+    if !left {
+        return Ok(GroupDmLeaveResult {
+            room_jid: args.room_jid.clone(),
+            left,
+        });
+    }
+
+    let live_resources = connections.get_resources_for_user(&caller_bare);
+    let live_resource_set = live_resources.iter().cloned().collect::<BTreeSet<_>>();
+    let mut resources = live_resources;
     match sm_sessions.detached_resources_for_user(&caller_bare).await {
         Ok(detached_resources) => resources.extend(detached_resources),
         Err(error) => {
@@ -1761,13 +1777,19 @@ async fn run_group_dm_leave(
             .await
             .map_err(send_err("room actor LeaveByRealJid"))?
         {
-            broadcast_group_dm_leave(state, connections, &resource, &outcome);
+            broadcast_group_dm_leave(
+                state,
+                connections,
+                &resource,
+                live_resource_set.contains(&resource),
+                &outcome,
+            );
         }
     }
 
     Ok(GroupDmLeaveResult {
         room_jid: args.room_jid.clone(),
-        left: true,
+        left,
     })
 }
 
@@ -1775,11 +1797,9 @@ fn broadcast_group_dm_leave(
     state: &AppState,
     connections: &ConnectionRegistry,
     leaving_real_jid: &FullJid,
+    notify_self: bool,
     outcome: &waddle_xmpp::muc::room_actor::LeaveOutcome,
 ) {
-    if !outcome.removed_last_session {
-        return;
-    }
     let from_jid = outcome
         .leaving_room_jid
         .to_bare()
@@ -1791,6 +1811,19 @@ fn broadcast_group_dm_leave(
         real_jid: Some(leaving_real_jid),
         secret: &state.occupant_id_secret,
     };
+    if notify_self {
+        let presence = waddle_xmpp::muc::build_leave_presence(
+            &from_jid,
+            leaving_real_jid,
+            outcome.affiliation,
+            true,
+            &identity,
+        );
+        let _ = connections.try_send_to(leaving_real_jid, Stanza::Presence(presence));
+    }
+    if !outcome.removed_last_session {
+        return;
+    }
     for occupant_jid in &outcome.remaining_occupants {
         let presence = waddle_xmpp::muc::build_leave_presence(
             &from_jid,
@@ -1827,7 +1860,7 @@ pub(crate) async fn publish_group_dm_bookmark(
         .map_err(|error| internal_err(format!("failed to publish group-DM bookmark: {error}")))
 }
 
-async fn retract_group_dm_bookmark(
+pub(crate) async fn retract_group_dm_bookmark(
     state: &AppState,
     member_jid: &BareJid,
     room_jid: &BareJid,

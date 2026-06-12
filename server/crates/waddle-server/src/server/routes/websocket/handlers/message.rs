@@ -459,16 +459,9 @@ async fn rollback_group_dm_invite_grant(
         })
         .await;
     let _ = delete_group_dm_archive_boundary(state, room_jid, invitee).await;
-    let _ = state
-        .deps
-        .app_state
-        .pubsub_storage
-        .retract_item(
-            invitee,
-            waddle_xmpp::xep::xep0402::PEP_NODE,
-            &room_jid.to_string(),
-        )
-        .await;
+    let _ =
+        crate::admin::channels::retract_group_dm_bookmark(&state.deps.app_state, invitee, room_jid)
+            .await;
     crate::admin::channels::rollback_group_dm_member_tuple(
         &state.deps.app_state,
         channel_id,
