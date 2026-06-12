@@ -8,7 +8,7 @@ import { useChannelMessages } from "@/channels/messages";
 import { useMessageThreads } from "@/channels/threads";
 import { useChatShellState } from "@/shell/state";
 import { useServiceWorkerUpdate } from "@/shell/service-worker-update";
-import { usePushNotifications } from "@/shell/notifications";
+import { shouldShowChannelForegroundNotification, usePushNotifications } from "@/shell/notifications";
 import { useChannelInbox } from "@/channels/inbox";
 import { useSocialFeed } from "@/services/social-feed";
 import { useStories } from "@/services/stories";
@@ -22,8 +22,8 @@ import { useDeploymentVersionInfo } from "@/shell/version";
 import { useXmppRosterContacts } from "@/contacts/roster";
 import { matchLocation, navigate, type RouteMatch } from "@/router";
 import { resolveChannelBySlug } from "@/shell/route-helpers";
-import { barePeerJid, jidDomain, parseManagedRoomBareJid } from "@/lib/xmpp-client";
-import { createNotifySettingsStore } from "@/lib/notify-settings";
+import { barePeerJid, jidDomain, parseManagedRoomBareJid, type RoomActivityEvent } from "@/lib/xmpp-client";
+import { createNotifySettingsStore, type NotifySettingsStore } from "@/lib/notify-settings";
 import { mdsChatKey, queueMdsDisplayed, setMdsDisplayed } from "@/lib/last-seen-store";
 import {
   isTrustedManagedRoomJid,
@@ -52,6 +52,78 @@ import {
   selectInitialReactionMessage,
   type ReactionModeScope,
 } from "@/lib/reaction-mode";
+
+interface ChannelActivityNotificationDeps {
+  notifySettings: Pick<NotifySettingsStore, "getMode">;
+  notifications: {
+    showMentionNotification: (opts: {
+      senderNick: string;
+      channelName: string;
+      body: string;
+      roomJid: string;
+      isBroadcast: boolean;
+      stanzaId?: string;
+      onNavigate?: (roomJid: string) => void;
+    }) => void;
+    showChannelMessageNotification: (opts: {
+      senderNick: string;
+      channelName: string;
+      body: string;
+      roomJid: string;
+      stanzaId?: string;
+      onNavigate?: (roomJid: string) => void;
+    }) => void;
+  };
+  sessionJid: string | null | undefined;
+  resolveChannelNameFromJid: (roomJid: string) => string | null;
+  onNavigate: (roomJid: string) => void;
+}
+
+export function showForegroundNotificationForChannelActivity(
+  event: RoomActivityEvent,
+  deps: ChannelActivityNotificationDeps,
+): void {
+  const channelName = deps.resolveChannelNameFromJid(event.roomJid) ?? "unknown";
+  const isBroadcast = !!event.broadcastMention;
+  const isPersonalMention = event.mentions?.some((mention) =>
+    mentionMatchesBareJid(mention, deps.sessionJid)
+  ) ?? false;
+  const isMention = isBroadcast || isPersonalMention;
+  const mode = deps.notifySettings.getMode(event.roomJid, "private-group");
+
+  if (!shouldShowChannelForegroundNotification({ mode, isMention })) return;
+
+  if (isMention) {
+    deps.notifications.showMentionNotification({
+      senderNick: event.nick,
+      channelName,
+      body: event.body,
+      roomJid: event.roomJid,
+      isBroadcast,
+      stanzaId: event.stanzaId,
+      onNavigate: deps.onNavigate,
+    });
+    return;
+  }
+
+  deps.notifications.showChannelMessageNotification({
+    senderNick: event.nick,
+    channelName,
+    body: event.body,
+    roomJid: event.roomJid,
+    stanzaId: event.stanzaId,
+    onNavigate: deps.onNavigate,
+  });
+}
+
+export function showForegroundNotificationsForChannelActivities(
+  events: RoomActivityEvent[],
+  deps: ChannelActivityNotificationDeps,
+): void {
+  for (const event of events) {
+    showForegroundNotificationForChannelActivity(event, deps);
+  }
+}
 
 export function useChatAppController(giphyApiKey: string) {
   const ui = useChatShellState();
@@ -678,32 +750,22 @@ export function useChatAppController(giphyApiKey: string) {
     return waddles.channels.value.find((c) => c.id === managedRoom.channelId)?.name ?? null;
   }
 
-  watch(() => messaging.lastMentionActivity.value, (event) => {
-    if (!event) return;
+  watch(() => messaging.pendingNotificationActivities.value, (events) => {
+    if (events.length === 0) return;
 
-    const channelName = resolveChannelNameFromJid(event.roomJid) ?? "unknown";
-    const isBroadcast = !!event.broadcastMention;
-    const isPersonalMention = event.mentions?.some((mention) =>
-      mentionMatchesBareJid(mention, connectionStore.session?.jid)
-    );
+    showForegroundNotificationsForChannelActivities(events, {
+      notifySettings,
+      notifications,
+      sessionJid: connectionStore.session?.jid,
+      resolveChannelNameFromJid,
+      onNavigate: (roomJid) => {
+        const managedRoom = parseManagedRoomBareJid(roomJid);
+        if (!managedRoom) return;
+        void selectChannel(managedRoom.channelId);
+      },
+    });
 
-    if (isBroadcast || isPersonalMention) {
-      notifications.showMentionNotification({
-        senderNick: event.nick,
-        channelName,
-        body: event.body,
-        roomJid: event.roomJid,
-        isBroadcast,
-        stanzaId: event.stanzaId,
-        onNavigate: (roomJid) => {
-          const managedRoom = parseManagedRoomBareJid(roomJid);
-          if (!managedRoom) return;
-          void selectChannel(managedRoom.channelId);
-        },
-      });
-    }
-
-    messaging.lastMentionActivity.value = null;
+    messaging.pendingNotificationActivities.value = [];
   });
 
   watch(xmppClient, (client) => {

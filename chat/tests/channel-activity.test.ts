@@ -141,6 +141,62 @@ describe("channel activity", () => {
         "general@conference.example.com": 1,
       });
       expect(messaging.lastMentionActivity.value?.body).toBe("right alice");
+      const notificationActivity = messaging.pendingNotificationActivities.value.at(-1);
+      expect(notificationActivity?.roomJid).toBe("general@conference.example.com");
+      expect(notificationActivity?.nick).toBe("bob");
+      expect(notificationActivity?.body).toBe("right alice");
+      expect(notificationActivity?.mentions).toEqual(["xmpp:alice@example.com"]);
+    } finally {
+      scope.stop();
+      cleanupDocument?.();
+    }
+  });
+
+  test("records current-room hidden plain messages as foreground notification candidates", async () => {
+    let onMessage: ((message: LiveRoomMessage) => void) | null = null;
+    const actionError = ref("");
+    const scope = effectScope();
+    let cleanupDocument: (() => void) | null = null;
+
+    try {
+      cleanupDocument = installHiddenDocument();
+      const messaging = scope.run(() =>
+        useChannelMessages(
+          ref(session()),
+          ref(null),
+          ref({
+            ...handlerStubs(),
+            setMessageHandler(handler: (message: LiveRoomMessage) => void) {
+              onMessage = handler;
+            },
+          } as never),
+          ref("team"),
+          ref("general"),
+          ref({ id: "general", name: "General", jid: "general@conference.example.com" }),
+          String,
+          actionError,
+          () => {
+            actionError.value = "";
+          },
+        )
+      );
+      if (!messaging) throw new Error("channel messages composable did not initialize");
+      await nextTick();
+
+      onMessage?.(roomMessage({
+        id: "plain-hidden",
+        body: "plain update",
+        stanzaId: "stanza-plain-hidden",
+      }));
+
+      expect(messaging.pendingNotificationActivities.value.at(-1)).toMatchObject({
+        roomJid: "general@conference.example.com",
+        nick: "bob",
+        body: "plain update",
+        stanzaId: "stanza-plain-hidden",
+      });
+      expect(messaging.mentionedChannelCounts.value).toEqual({});
+      expect(messaging.lastMentionActivity.value).toBeNull();
     } finally {
       scope.stop();
       cleanupDocument?.();
@@ -151,6 +207,7 @@ describe("channel activity", () => {
     let onMessage: ((message: LiveRoomMessage) => void) | null = null;
     const actionError = ref("");
     const scope = effectScope();
+    let cleanupDocument: (() => void) | null = null;
     const messaging = scope.run(() =>
       useChannelMessages(
         ref(session()),
@@ -173,6 +230,7 @@ describe("channel activity", () => {
     );
 
     try {
+      cleanupDocument = installHiddenDocument();
       if (!messaging) throw new Error("channel messages composable did not initialize");
       await nextTick();
 
@@ -188,8 +246,66 @@ describe("channel activity", () => {
         "general@conference.example.com": 1,
       });
       expect(messaging.lastMentionActivity.value?.body).toBe("right alice from previous room");
+      const notificationActivity = messaging.pendingNotificationActivities.value.at(-1);
+      expect(notificationActivity?.roomJid).toBe("general@conference.example.com");
+      expect(notificationActivity?.nick).toBe("bob");
+      expect(notificationActivity?.body).toBe("right alice from previous room");
+      expect(notificationActivity?.mentions).toEqual(["xmpp:alice@example.com"]);
     } finally {
       scope.stop();
+      cleanupDocument?.();
+    }
+  });
+
+  test("records previous-room hidden plain messages as foreground notification candidates", async () => {
+    let onMessage: ((message: LiveRoomMessage) => void) | null = null;
+    const actionError = ref("");
+    const scope = effectScope();
+    let cleanupDocument: (() => void) | null = null;
+    const messaging = scope.run(() =>
+      useChannelMessages(
+        ref(session()),
+        ref(null),
+        ref({
+          ...handlerStubs(),
+          setMessageHandler(handler: (message: LiveRoomMessage) => void) {
+            onMessage = handler;
+          },
+        } as never),
+        ref("team"),
+        ref(null),
+        ref(null),
+        String,
+        actionError,
+        () => {
+          actionError.value = "";
+        },
+      )
+    );
+
+    try {
+      cleanupDocument = installHiddenDocument();
+      if (!messaging) throw new Error("channel messages composable did not initialize");
+      await nextTick();
+
+      onMessage?.(roomMessage({
+        id: "home-activity-plain",
+        body: "plain update from previous room",
+        stanzaId: "stanza-previous-plain",
+      }));
+
+      expect(messaging.messages.value).toEqual([]);
+      expect(messaging.activeChannels.value.has("general@conference.example.com")).toBe(true);
+      expect(messaging.mentionedChannelCounts.value).toEqual({});
+      expect(messaging.pendingNotificationActivities.value.at(-1)).toMatchObject({
+        roomJid: "general@conference.example.com",
+        nick: "bob",
+        body: "plain update from previous room",
+        stanzaId: "stanza-previous-plain",
+      });
+    } finally {
+      scope.stop();
+      cleanupDocument?.();
     }
   });
 
@@ -409,6 +525,58 @@ describe("channel activity", () => {
       expect(messaging.messages.value[0]?.isRetracted).toBe(true);
     } finally {
       scope.stop();
+    }
+  });
+
+  test("queues every hidden plain message in a burst for foreground notification", async () => {
+    let onMessage: ((message: LiveRoomMessage) => void) | null = null;
+    const actionError = ref("");
+    const scope = effectScope();
+    let cleanupDocument: (() => void) | null = null;
+
+    try {
+      cleanupDocument = installHiddenDocument();
+      const messaging = scope.run(() =>
+        useChannelMessages(
+          ref(session()),
+          ref(null),
+          ref({
+            ...handlerStubs(),
+            setMessageHandler(handler: (message: LiveRoomMessage) => void) {
+              onMessage = handler;
+            },
+          } as never),
+          ref("team"),
+          ref("general"),
+          ref({ id: "general", name: "General", jid: "general@conference.example.com" }),
+          String,
+          actionError,
+          () => {
+            actionError.value = "";
+          },
+        )
+      );
+      if (!messaging) throw new Error("channel messages composable did not initialize");
+      await nextTick();
+
+      onMessage?.(roomMessage({
+        id: "burst-1",
+        body: "first",
+        stanzaId: "stanza-burst-1",
+      }));
+      onMessage?.(roomMessage({
+        id: "burst-2",
+        body: "second",
+        stanzaId: "stanza-burst-2",
+      }));
+
+      expect(messaging.pendingNotificationActivities.value.map((event) => event.stanzaId)).toEqual([
+        "stanza-burst-1",
+        "stanza-burst-2",
+      ]);
+    } finally {
+      scope.stop();
+      cleanupDocument?.();
     }
   });
 
