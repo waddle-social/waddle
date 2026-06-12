@@ -102,6 +102,9 @@ pub(super) async fn handle_muc_disco_info<'a>(
             snapshot.config.moderated || channel_type == "announcement",
             snapshot.config.forum || channel_type == "forum",
         );
+        if snapshot.config.group_dm {
+            features.push(Feature::new(waddle_xmpp::admin::NS_GROUP_DM_FEATURE));
+        }
         features.extend(extension_features_for_disco(state));
         let mut extensions = room_space_metadata_extensions(state, &room_jid, description).await;
         let has_space_metadata = !extensions.is_empty();

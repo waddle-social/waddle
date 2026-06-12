@@ -49,6 +49,7 @@ pub fn server_features() -> Vec<Feature> {
         crate::admin::NS_ADMIN_CHANNELS_SET_AFFILIATION,
     ));
     features.push(Feature::new(crate::admin::NS_ADMIN_CHANNELS_KICK));
+    features.push(Feature::new(crate::admin::NS_GROUP_DM_CREATE));
     features
 }
 

@@ -174,6 +174,11 @@ pub async fn handle_muc_join(
         Affiliation::Owner
     } else if let Some(affiliation) = managed_affiliation {
         affiliation
+    } else if room_jid
+        .node()
+        .is_some_and(|node| node.as_str().starts_with("group-dm-"))
+    {
+        Affiliation::None
     } else {
         Affiliation::Member
     };

@@ -27,6 +27,7 @@ use jid::{BareJid, FullJid};
 use waddle_xmpp::commands::{CommandContext, CommandResult};
 use waddle_xmpp::muc::room_registry_actor::{CreateRoom, DestroyRoom, GetRoom, ListRooms};
 use waddle_xmpp::muc::{
+    affiliation::FederatedAffiliationConfig,
     room_actor::{
         ApplyAdminItems, ChangeAffiliation, GetConfig, ListAffiliations, ListOccupants,
         OccupantCount, UpdateConfig,
@@ -63,6 +64,7 @@ pub const NODE_OCCUPANTS: &str = waddle_xmpp::admin::NS_ADMIN_CHANNELS_OCCUPANTS
 pub const NODE_AFFILIATIONS: &str = waddle_xmpp::admin::NS_ADMIN_CHANNELS_AFFILIATIONS;
 pub const NODE_SET_AFFILIATION: &str = waddle_xmpp::admin::NS_ADMIN_CHANNELS_SET_AFFILIATION;
 pub const NODE_KICK: &str = waddle_xmpp::admin::NS_ADMIN_CHANNELS_KICK;
+pub const NODE_GROUP_DM_CREATE: &str = waddle_xmpp::admin::NS_GROUP_DM_CREATE;
 
 pub const DEFAULT_PAGE_SIZE: u32 = 50;
 pub const MAX_PAGE_SIZE: u32 = 200;
@@ -272,6 +274,21 @@ pub struct ChannelsKickResult {
     pub occupant_jid: BareJid,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupDmCreateArgs {
+    pub name: String,
+    pub member_jids: Vec<BareJid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupDmRef {
+    pub room_jid: BareJid,
+    pub name: String,
+    pub is_public: bool,
+    pub members_only: bool,
+    pub persistent: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
@@ -359,6 +376,15 @@ pub async fn register(
             })
             .await;
     }
+    {
+        let state = Arc::clone(&app_state);
+        registry
+            .register(NODE_GROUP_DM_CREATE, "Create group DM", move |ctx| {
+                let state = Arc::clone(&state);
+                async move { handle_group_dm_create(ctx, state).await }
+            })
+            .await;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -415,6 +441,20 @@ async fn handle_create(ctx: CommandContext, state: Arc<AppState>) -> CommandResu
     match run_create(&state, &args).await {
         Ok(channel) => CommandResult::Completed {
             form: Some(build_channel_form(&channel)),
+            notes: vec![],
+        },
+        Err(result) => *result,
+    }
+}
+
+async fn handle_group_dm_create(ctx: CommandContext, state: Arc<AppState>) -> CommandResult {
+    let args = match parse_group_dm_create_args(ctx.command.form.as_ref()) {
+        Ok(args) => args,
+        Err(error) => return *bad_request(error),
+    };
+    match run_group_dm_create(&state, &ctx.from.to_bare(), &args).await {
+        Ok(group_dm) => CommandResult::Completed {
+            form: Some(build_group_dm_form(&group_dm)),
             notes: vec![],
         },
         Err(result) => *result,
@@ -666,6 +706,33 @@ pub fn parse_create_args(form: Option<&DataForm>) -> Result<ChannelsCreateArgs, 
         is_public,
         members_only,
     })
+}
+
+pub fn parse_group_dm_create_args(form: Option<&DataForm>) -> Result<GroupDmCreateArgs, String> {
+    let form = form.ok_or_else(|| "group-dm:create requires an args form".to_string())?;
+    let name = parse_required_text(form, "name")?;
+    validate_name(&name)?;
+    let member_values = form
+        .get_values("member_jids")
+        .ok_or_else(|| "member_jids is required".to_string())?;
+    let mut member_jids = Vec::with_capacity(member_values.len());
+    for value in member_values
+        .iter()
+        .filter(|value| !value.trim().is_empty())
+    {
+        member_jids.push(
+            value
+                .trim()
+                .parse::<BareJid>()
+                .map_err(|e| format!("member_jids contains invalid JID '{value}': {e}"))?,
+        );
+    }
+    member_jids.sort();
+    member_jids.dedup();
+    if member_jids.len() < 2 {
+        return Err("group-dm:create requires at least two member_jids".to_string());
+    }
+    Ok(GroupDmCreateArgs { name, member_jids })
 }
 
 pub fn parse_update_args(form: Option<&DataForm>) -> Result<ChannelsUpdateArgs, String> {
@@ -1433,6 +1500,63 @@ async fn run_create(state: &AppState, args: &ChannelsCreateArgs) -> Result<Chann
         topic: args.topic.clone(),
         is_public: args.is_public,
         members_only,
+    })
+}
+
+async fn run_group_dm_create(
+    state: &AppState,
+    creator_jid: &BareJid,
+    args: &GroupDmCreateArgs,
+) -> Result<GroupDmRef, AdminErr> {
+    let localpart = format!("group-dm-{}", mint_channel_localpart(&args.name));
+    let muc_domain = state.muc_domain.to_string();
+    let room_jid: BareJid = format!("{localpart}@{muc_domain}")
+        .parse()
+        .map_err(|e| internal_err(format!("constructed group-DM JID is invalid: {e}")))?;
+    let config = RoomConfig {
+        name: args.name.clone(),
+        description: None,
+        persistent: true,
+        members_only: true,
+        public_room: false,
+        moderated: false,
+        enable_logging: true,
+        group_dm: true,
+        federated_affiliation_config: FederatedAffiliationConfig::open_none(),
+        ..RoomConfig::default()
+    };
+
+    let actor = state
+        .room_registry
+        .ask(CreateRoom {
+            room_jid: room_jid.clone(),
+            waddle_id: "group-dm".to_string(),
+            channel_id: localpart,
+            config,
+        })
+        .await
+        .map_err(send_err("room_registry ask CreateRoom"))?;
+
+    let mut members = args.member_jids.clone();
+    members.push(creator_jid.clone());
+    members.sort();
+    members.dedup();
+    for member_jid in members {
+        actor
+            .ask(ChangeAffiliation {
+                jid: member_jid,
+                affiliation: Affiliation::Member,
+            })
+            .await
+            .map_err(send_err("room actor ChangeAffiliation"))?;
+    }
+
+    Ok(GroupDmRef {
+        room_jid,
+        name: args.name.clone(),
+        is_public: false,
+        members_only: true,
+        persistent: true,
     })
 }
 
@@ -2213,6 +2337,27 @@ pub fn build_channel_form(channel: &ChannelRef) -> DataForm {
         form = form.add_field(Field::text_single("topic", topic));
     }
     form
+}
+
+pub fn build_group_dm_form(group_dm: &GroupDmRef) -> DataForm {
+    DataForm::new(FormType::Result)
+        .add_field(Field::form_type(NODE_GROUP_DM_CREATE))
+        .add_field(
+            Field::new("room_jid", FieldType::JidSingle).with_value(group_dm.room_jid.to_string()),
+        )
+        .add_field(Field::text_single("name", group_dm.name.clone()))
+        .add_field(Field::text_single(
+            "is_public",
+            bool_str(group_dm.is_public),
+        ))
+        .add_field(Field::text_single(
+            "members_only",
+            bool_str(group_dm.members_only),
+        ))
+        .add_field(Field::text_single(
+            "persistent",
+            bool_str(group_dm.persistent),
+        ))
 }
 
 pub fn build_occupants_form(result: &ChannelsOccupantsResult) -> DataForm {
