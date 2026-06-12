@@ -52,7 +52,7 @@ pub(super) async fn handle_archive_inbox_upload_iq(
             return vec![iq_to_xml(build_query_form_iq(request_iq))];
         }
 
-        let (query_id, query) = match parse_mam_query(request_iq) {
+        let (query_id, mut query) = match parse_mam_query(request_iq) {
             Ok(parsed) => parsed,
             Err(err) => {
                 warn!(error = %err, target = %target_bare, "Invalid MAM query");
@@ -72,6 +72,32 @@ pub(super) async fn handle_archive_inbox_upload_iq(
                 )];
             }
         };
+
+        let visibility =
+            group_dm_archive_visibility(state, &target_bare, sender_bare.as_ref()).await;
+        let visibility_boundary = match visibility {
+            GroupDmArchiveVisibility::NotGroupDm | GroupDmArchiveVisibility::Full => None,
+            GroupDmArchiveVisibility::Restricted(boundary) => Some(boundary),
+            GroupDmArchiveVisibility::Denied => {
+                return vec![build_iq_error_xml_typed(
+                    id,
+                    None,
+                    None,
+                    forbidden_iq_error("Operation not permitted."),
+                )];
+            }
+            GroupDmArchiveVisibility::Error => {
+                return vec![build_iq_error_xml_typed(
+                    id,
+                    None,
+                    None,
+                    internal_server_error_iq_error("Internal server error."),
+                )];
+            }
+        };
+        if let Some(boundary) = visibility_boundary {
+            query.start = Some(query.start.map_or(boundary, |start| start.max(boundary)));
+        }
 
         let mut result = match state
             .deps
@@ -308,6 +334,93 @@ pub(super) async fn handle_archive_inbox_upload_iq(
         }
     }
     Vec::new()
+}
+
+enum GroupDmArchiveVisibility {
+    NotGroupDm,
+    Full,
+    Restricted(chrono::DateTime<chrono::Utc>),
+    Denied,
+    Error,
+}
+
+async fn group_dm_archive_visibility(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    sender_bare: Option<&BareJid>,
+) -> GroupDmArchiveVisibility {
+    let Some(sender_bare) = sender_bare else {
+        return GroupDmArchiveVisibility::Denied;
+    };
+    let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(room_jid) else {
+        return GroupDmArchiveVisibility::NotGroupDm;
+    };
+    let channel = get_xmpp_channel(
+        state.deps.app_state.db_pool.global_actor().clone(),
+        &channel_id,
+    )
+    .await
+    .ok()
+    .flatten();
+    let Some(channel) = channel else {
+        return GroupDmArchiveVisibility::NotGroupDm;
+    };
+    if channel.channel_type != waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM {
+        return GroupDmArchiveVisibility::NotGroupDm;
+    }
+
+    let allowed = state
+        .deps
+        .app_state
+        .permission_actor
+        .ask(CheckPermission {
+            subject: Subject::user(sender_bare.to_string()),
+            permission: Permission::Member,
+            object: Object::new(ObjectType::Channel, &channel_id),
+        })
+        .await
+        .map(|response| response.allowed);
+    match allowed {
+        Ok(true) => {}
+        Ok(false) => return GroupDmArchiveVisibility::Denied,
+        Err(error) => {
+            warn!(
+                error = %error,
+                room = %room_jid,
+                requester = %sender_bare,
+                "Failed to authorize group-DM MAM query"
+            );
+            return GroupDmArchiveVisibility::Error;
+        }
+    }
+
+    let actor = state.deps.app_state.db_pool.global_actor().clone();
+    let row = match actor
+        .ask(crate::db::actor::DbQueryOne {
+            sql: "SELECT visible_after FROM group_dm_archive_boundaries WHERE room_jid = ? AND member_jid = ?".to_string(),
+            params: vec![room_jid.to_string().into(), sender_bare.to_string().into()],
+        })
+        .await
+    {
+        Ok(Some(row)) => row,
+        Ok(None) => return GroupDmArchiveVisibility::Full,
+        Err(error) => {
+            warn!(
+                error = %error,
+                room = %room_jid,
+                requester = %sender_bare,
+                "Failed to load group-DM archive boundary"
+            );
+            return GroupDmArchiveVisibility::Error;
+        }
+    };
+    match row.first() {
+        Some(crate::db::Value::Text(value)) => chrono::DateTime::parse_from_rfc3339(value)
+            .map(|dt| GroupDmArchiveVisibility::Restricted(dt.with_timezone(&chrono::Utc)))
+            .unwrap_or(GroupDmArchiveVisibility::Error),
+        Some(value) if value.is_null() => GroupDmArchiveVisibility::Full,
+        _ => GroupDmArchiveVisibility::Error,
+    }
 }
 
 /// Handle the XEP-0430 `<inbox xmlns='urn:xmpp:inbox:1'/>` IQ-get

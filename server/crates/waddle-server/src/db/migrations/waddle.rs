@@ -193,6 +193,29 @@ ALTER TABLE channels
 ADD COLUMN IF NOT EXISTS public_room INTEGER NOT NULL DEFAULT 1;
 "#;
 
+/// Per-member MAM visibility boundary for group-DM mediated invites.
+/// A `NULL` boundary means full history access; a timestamp boundary means
+/// the member may only read archived room messages created at or after it.
+pub const V1006_ADD_GROUP_DM_ARCHIVE_BOUNDARIES: &str = r#"
+CREATE TABLE IF NOT EXISTS group_dm_archive_boundaries (
+    room_jid TEXT NOT NULL,
+    member_jid TEXT NOT NULL,
+    visible_after TEXT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (room_jid, member_jid)
+);
+"#;
+
+pub const V1006_ADD_GROUP_DM_ARCHIVE_BOUNDARIES_POSTGRES: &str = r#"
+CREATE TABLE IF NOT EXISTS group_dm_archive_boundaries (
+    room_jid TEXT NOT NULL,
+    member_jid TEXT NOT NULL,
+    visible_after TEXT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (room_jid, member_jid)
+);
+"#;
+
 /// Get all waddle schema migrations in order.
 ///
 /// Versions are intentionally offset from global migrations so a single
@@ -228,6 +251,12 @@ pub fn all() -> Vec<Migration> {
             description: "Persist channel public-room discovery visibility".to_string(),
             sql_sqlite: V1005_ADD_CHANNEL_PUBLIC_ROOM,
             sql_postgres: V1005_ADD_CHANNEL_PUBLIC_ROOM_POSTGRES,
+        },
+        Migration {
+            version: 1006,
+            description: "Persist group-DM archive visibility boundaries".to_string(),
+            sql_sqlite: V1006_ADD_GROUP_DM_ARCHIVE_BOUNDARIES,
+            sql_postgres: V1006_ADD_GROUP_DM_ARCHIVE_BOUNDARIES_POSTGRES,
         },
     ]
 }
