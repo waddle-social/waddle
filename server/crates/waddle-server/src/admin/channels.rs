@@ -29,14 +29,16 @@ use waddle_xmpp::muc::room_registry_actor::{CreateRoom, DestroyRoom, GetRoom, Li
 use waddle_xmpp::muc::{
     affiliation::FederatedAffiliationConfig,
     room_actor::{
-        ApplyAdminItems, ChangeAffiliation, GetConfig, ListAffiliations, ListOccupants,
-        OccupantCount, UpdateConfig,
+        ApplyAdminItems, ChangeAffiliation, GetConfig, LeaveByRealJid, ListAffiliations,
+        ListOccupants, OccupantCount, UpdateConfig,
     },
     AdminItem, PinPermission, RoomConfig,
 };
 use waddle_xmpp::pubsub::PubSubItem;
 use waddle_xmpp::registry::ConnectionRegistry;
+use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
 use waddle_xmpp::xep::xep0004::{DataForm, Field, FieldType, FormType};
+use waddle_xmpp::xep::xep0421::OccupantIdentity;
 use waddle_xmpp::XmppError;
 use waddle_xmpp::{Affiliation, ChannelInfo, Role, Stanza};
 
@@ -66,6 +68,7 @@ pub const NODE_AFFILIATIONS: &str = waddle_xmpp::admin::NS_ADMIN_CHANNELS_AFFILI
 pub const NODE_SET_AFFILIATION: &str = waddle_xmpp::admin::NS_ADMIN_CHANNELS_SET_AFFILIATION;
 pub const NODE_KICK: &str = waddle_xmpp::admin::NS_ADMIN_CHANNELS_KICK;
 pub const NODE_GROUP_DM_CREATE: &str = waddle_xmpp::admin::NS_GROUP_DM_CREATE;
+pub const NODE_GROUP_DM_LEAVE: &str = waddle_xmpp::admin::NS_GROUP_DM_LEAVE;
 
 pub const DEFAULT_PAGE_SIZE: u32 = 50;
 pub const MAX_PAGE_SIZE: u32 = 200;
@@ -282,12 +285,23 @@ pub struct GroupDmCreateArgs {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupDmLeaveArgs {
+    pub room_jid: BareJid,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupDmRef {
     pub room_jid: BareJid,
     pub name: String,
     pub is_public: bool,
     pub members_only: bool,
     pub persistent: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupDmLeaveResult {
+    pub room_jid: BareJid,
+    pub left: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -298,6 +312,7 @@ pub async fn register(
     registry: &waddle_xmpp::commands::CommandRegistry,
     app_state: Arc<AppState>,
     connection_registry: Arc<ConnectionRegistry>,
+    sm_session_registry: Arc<InMemorySmSessionRegistry>,
 ) {
     {
         let state = Arc::clone(&app_state);
@@ -386,6 +401,19 @@ pub async fn register(
             })
             .await;
     }
+    {
+        let state = Arc::clone(&app_state);
+        let connections = Arc::clone(&connection_registry);
+        let sm_sessions = Arc::clone(&sm_session_registry);
+        registry
+            .register(NODE_GROUP_DM_LEAVE, "Leave group DM", move |ctx| {
+                let state = Arc::clone(&state);
+                let connections = Arc::clone(&connections);
+                let sm_sessions = Arc::clone(&sm_sessions);
+                async move { handle_group_dm_leave(ctx, state, connections, sm_sessions).await }
+            })
+            .await;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -459,6 +487,37 @@ async fn handle_group_dm_create(ctx: CommandContext, state: Arc<AppState>) -> Co
             notes: vec![],
         },
         Err(result) => *result,
+    }
+}
+
+async fn handle_group_dm_leave(
+    ctx: CommandContext,
+    state: Arc<AppState>,
+    connections: Arc<ConnectionRegistry>,
+    sm_sessions: Arc<InMemorySmSessionRegistry>,
+) -> CommandResult {
+    let caller_bare = ctx.from.to_bare();
+    let caller_full = match ctx.from.clone().try_into_full() {
+        Ok(full) => full,
+        Err(_) => match caller_bare.with_resource_str("group-dm-leave") {
+            Ok(full) => full,
+            Err(error) => {
+                return *internal_err(format!(
+                    "group-DM leave caller JID '{caller_bare}' is not a valid full JID base: {error}"
+                ));
+            }
+        },
+    };
+    let args = match parse_group_dm_leave_args(ctx.command.form.as_ref()) {
+        Ok(args) => args,
+        Err(e) => return CommandResult::Error(XmppError::bad_request(Some(e))),
+    };
+    match run_group_dm_leave(&state, &connections, &sm_sessions, &caller_full, &args).await {
+        Ok(result) => CommandResult::Completed {
+            form: Some(build_group_dm_leave_form(&result)),
+            notes: vec![],
+        },
+        Err(err) => *err,
     }
 }
 
@@ -734,6 +793,12 @@ pub fn parse_group_dm_create_args(form: Option<&DataForm>) -> Result<GroupDmCrea
         return Err("group-dm:create requires at least two member_jids".to_string());
     }
     Ok(GroupDmCreateArgs { name, member_jids })
+}
+
+pub fn parse_group_dm_leave_args(form: Option<&DataForm>) -> Result<GroupDmLeaveArgs, String> {
+    let form = form.ok_or_else(|| "group-dm:leave requires an args form".to_string())?;
+    let room_jid = parse_required_bare_jid(form, "room_jid")?;
+    Ok(GroupDmLeaveArgs { room_jid })
 }
 
 pub fn parse_update_args(form: Option<&DataForm>) -> Result<ChannelsUpdateArgs, String> {
@@ -1590,13 +1655,19 @@ async fn run_group_dm_create(
         persisted_members.push(member_jid.clone());
         if let Err(error) = actor
             .ask(ChangeAffiliation {
-                jid: member_jid,
+                jid: member_jid.clone(),
                 affiliation: Affiliation::Member,
             })
             .await
         {
             rollback_group_dm_create(state, &localpart, &room_jid, &persisted_members).await;
             return Err(send_err("room actor ChangeAffiliation")(error));
+        }
+        if let Err(error) =
+            publish_group_dm_bookmark(state, &member_jid, &room_jid, &args.name).await
+        {
+            rollback_group_dm_create(state, &localpart, &room_jid, &persisted_members).await;
+            return Err(error);
         }
     }
 
@@ -1609,6 +1680,170 @@ async fn run_group_dm_create(
     })
 }
 
+async fn run_group_dm_leave(
+    state: &AppState,
+    connections: &ConnectionRegistry,
+    sm_sessions: &InMemorySmSessionRegistry,
+    caller_full_jid: &FullJid,
+    args: &GroupDmLeaveArgs,
+) -> Result<GroupDmLeaveResult, AdminErr> {
+    let channel_id = waddle_xmpp::parse_managed_room_jid(&args.room_jid).ok_or_else(|| {
+        Box::new(CommandResult::Error(XmppError::bad_request(Some(
+            "room_jid must be a managed group-DM room JID".to_string(),
+        ))))
+    })?;
+    let record = get_xmpp_channel(state.db_pool.global_actor().clone(), &channel_id)
+        .await
+        .map_err(|error| internal_err(format!("failed to load group-DM channel: {error}")))?
+        .ok_or_else(|| {
+            Box::new(CommandResult::Error(XmppError::item_not_found(Some(
+                format!("no group DM '{}'", args.room_jid),
+            ))))
+        })?;
+    if record.channel_type != waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM {
+        return Err(Box::new(CommandResult::Error(XmppError::bad_request(
+            Some("room_jid is not a group DM".to_string()),
+        ))));
+    }
+
+    let caller_bare = caller_full_jid.to_bare();
+    let actor = state
+        .room_registry
+        .ask(GetRoom {
+            room_jid: args.room_jid.clone(),
+        })
+        .await
+        .map_err(send_err("room_registry ask GetRoom"))?
+        .ok_or_else(|| {
+            Box::new(CommandResult::Error(XmppError::item_not_found(Some(
+                format!("no group DM '{}'", args.room_jid),
+            ))))
+        })?;
+
+    let mut resources = connections.get_resources_for_user(&caller_bare);
+    match sm_sessions.detached_resources_for_user(&caller_bare).await {
+        Ok(detached_resources) => resources.extend(detached_resources),
+        Err(error) => {
+            return Err(internal_err(format!(
+                "failed to list detached group-DM leave resources: {error}"
+            )));
+        }
+    }
+    if !resources.iter().any(|resource| resource == caller_full_jid) {
+        resources.push(caller_full_jid.clone());
+    }
+    resources.sort();
+    resources.dedup();
+
+    delete_group_dm_member_tuple(state, &channel_id, &caller_bare)
+        .await
+        .map_err(|error| Box::new(CommandResult::Error(error)))?;
+    if let Err(error) = retract_group_dm_bookmark(state, &caller_bare, &args.room_jid).await {
+        let _ = persist_group_dm_member_tuple(state, &channel_id, &caller_bare).await;
+        return Err(error);
+    }
+    if let Err(error) = actor
+        .ask(ChangeAffiliation {
+            jid: caller_bare.clone(),
+            affiliation: Affiliation::None,
+        })
+        .await
+    {
+        let _ = persist_group_dm_member_tuple(state, &channel_id, &caller_bare).await;
+        let _ = publish_group_dm_bookmark(state, &caller_bare, &args.room_jid, &record.name).await;
+        return Err(send_err("room actor ChangeAffiliation")(error));
+    }
+    for resource in resources {
+        if let Some(outcome) = actor
+            .ask(LeaveByRealJid {
+                sender_jid: resource.clone(),
+            })
+            .await
+            .map_err(send_err("room actor LeaveByRealJid"))?
+        {
+            broadcast_group_dm_leave(state, connections, &resource, &outcome);
+        }
+    }
+
+    Ok(GroupDmLeaveResult {
+        room_jid: args.room_jid.clone(),
+        left: true,
+    })
+}
+
+fn broadcast_group_dm_leave(
+    state: &AppState,
+    connections: &ConnectionRegistry,
+    leaving_real_jid: &FullJid,
+    outcome: &waddle_xmpp::muc::room_actor::LeaveOutcome,
+) {
+    if !outcome.removed_last_session {
+        return;
+    }
+    let from_jid = outcome
+        .leaving_room_jid
+        .to_bare()
+        .with_resource_str(&outcome.nick)
+        .unwrap_or_else(|_| outcome.leaving_room_jid.clone());
+    let sender_bare = leaving_real_jid.to_bare();
+    let identity = OccupantIdentity {
+        bare_jid: &sender_bare,
+        real_jid: Some(leaving_real_jid),
+        secret: &state.occupant_id_secret,
+    };
+    for occupant_jid in &outcome.remaining_occupants {
+        let presence = waddle_xmpp::muc::build_leave_presence(
+            &from_jid,
+            occupant_jid,
+            outcome.affiliation,
+            false,
+            &identity,
+        );
+        let _ = connections.try_send_to(occupant_jid, Stanza::Presence(presence));
+    }
+}
+
+pub(crate) async fn publish_group_dm_bookmark(
+    state: &AppState,
+    member_jid: &BareJid,
+    room_jid: &BareJid,
+    name: &str,
+) -> Result<(), AdminErr> {
+    let bookmark = waddle_xmpp::xep::xep0402::Bookmark::new(room_jid.clone())
+        .with_name(name)
+        .with_autojoin(true);
+    let item = waddle_xmpp::xep::xep0402::build_bookmark_item(&bookmark);
+    state
+        .pubsub_storage
+        .publish_item(
+            member_jid,
+            waddle_xmpp::xep::xep0402::PEP_NODE,
+            &item,
+            Some(member_jid),
+            true,
+        )
+        .await
+        .map(|_| ())
+        .map_err(|error| internal_err(format!("failed to publish group-DM bookmark: {error}")))
+}
+
+async fn retract_group_dm_bookmark(
+    state: &AppState,
+    member_jid: &BareJid,
+    room_jid: &BareJid,
+) -> Result<(), AdminErr> {
+    state
+        .pubsub_storage
+        .retract_item(
+            member_jid,
+            waddle_xmpp::xep::xep0402::PEP_NODE,
+            &room_jid.to_string(),
+        )
+        .await
+        .map(|_| ())
+        .map_err(|error| internal_err(format!("failed to retract group-DM bookmark: {error}")))
+}
+
 async fn rollback_group_dm_create(
     state: &AppState,
     group_dm_id: &str,
@@ -1616,6 +1851,7 @@ async fn rollback_group_dm_create(
     persisted_members: &[BareJid],
 ) {
     for persisted_member in persisted_members {
+        let _ = retract_group_dm_bookmark(state, persisted_member, room_jid).await;
         let _ = delete_group_dm_member_tuple(state, group_dm_id, persisted_member).await;
     }
     let _ = delete_xmpp_channel(state.db_pool.global_actor().clone(), group_dm_id).await;
@@ -2527,6 +2763,15 @@ pub fn build_group_dm_form(group_dm: &GroupDmRef) -> DataForm {
             "persistent",
             bool_str(group_dm.persistent),
         ))
+}
+
+pub fn build_group_dm_leave_form(result: &GroupDmLeaveResult) -> DataForm {
+    DataForm::new(FormType::Result)
+        .add_field(Field::form_type(NODE_GROUP_DM_LEAVE))
+        .add_field(
+            Field::new("room_jid", FieldType::JidSingle).with_value(result.room_jid.to_string()),
+        )
+        .add_field(Field::text_single("left", bool_str(result.left)))
 }
 
 pub fn build_occupants_form(result: &ChannelsOccupantsResult) -> DataForm {

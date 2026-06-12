@@ -378,7 +378,7 @@ describe("client send readiness", () => {
     enqueueQueuedMessage("alice@example.com", {
       kind: "room",
       id: "room-replay-1",
-      createdAt: "2026-06-05T10:00:00Z",
+      createdAt: new Date().toISOString(),
       roomJid,
       body: "queued room",
     });

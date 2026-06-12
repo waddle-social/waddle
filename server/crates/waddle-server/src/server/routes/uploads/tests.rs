@@ -38,7 +38,7 @@ async fn create_test_upload_state() -> (Arc<UploadState>, std::path::PathBuf) {
             .expect("test occupant-id secret meets length floor");
     let room_registry = RoomRegistryActor::spawn(RoomRegistryActor::new(
         muc_domain.to_string(),
-        occupant_id_secret,
+        occupant_id_secret.clone(),
     ));
     let app_state = Arc::new(AppState::new_with_deps(AppStateDeps {
         db_pool: Arc::clone(&db_pool),
@@ -52,6 +52,7 @@ async fn create_test_upload_state() -> (Arc<UploadState>, std::path::PathBuf) {
         room_registry,
         spaces_jid: "spaces.example.com".parse().expect("spaces JID parses"),
         muc_domain,
+        occupant_id_secret,
         permission_actor,
         server_owner_jids: Arc::from(Vec::<jid::BareJid>::new()),
     }));

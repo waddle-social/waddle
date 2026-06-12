@@ -2,7 +2,7 @@ use std::{borrow::Cow, collections::BTreeMap};
 
 use tracing::warn;
 use waddle_xmpp::{
-    muc::room_actor::{ChangeAffiliation, GetAdminContext},
+    muc::room_actor::{ChangeAffiliation, GetAdminContext, GetConfig},
     muc::room_registry_actor::GetRoom,
     parser::stanza_to_string,
     pending_delivery::{InsertOutcome, PendingPayload, PendingRow, PendingRowId},
@@ -341,6 +341,27 @@ async fn handle_group_dm_mediated_invite(
             "Internal server error.",
         )]);
     }
+    let room_name = match room_actor.ask(GetConfig).await {
+        Ok(config) => config.name,
+        Err(_) => room_jid.to_string(),
+    };
+    if crate::admin::channels::publish_group_dm_bookmark(
+        &state.deps.app_state,
+        &invitee,
+        &room_jid,
+        &room_name,
+    )
+    .await
+    .is_err()
+    {
+        rollback_group_dm_invite_grant(state, room_actor, &channel_id, &room_jid, &invitee).await;
+        return Some(vec![error_reply(
+            incoming,
+            bound_jid,
+            GroupDmInviteError::InternalServerError,
+            "Internal server error.",
+        )]);
+    }
 
     let mut invite = incoming.clone();
     invite.from = Some(jid::Jid::from(room_jid.clone()));
@@ -438,6 +459,16 @@ async fn rollback_group_dm_invite_grant(
         })
         .await;
     let _ = delete_group_dm_archive_boundary(state, room_jid, invitee).await;
+    let _ = state
+        .deps
+        .app_state
+        .pubsub_storage
+        .retract_item(
+            invitee,
+            waddle_xmpp::xep::xep0402::PEP_NODE,
+            &room_jid.to_string(),
+        )
+        .await;
     crate::admin::channels::rollback_group_dm_member_tuple(
         &state.deps.app_state,
         channel_id,

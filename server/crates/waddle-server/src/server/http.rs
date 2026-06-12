@@ -417,6 +417,7 @@ async fn create_websocket_state(
         }
     }
     let stanza_dispatcher = Arc::new(stanza_dispatcher);
+    let sm_session_registry = create_sm_session_registry(xmpp_config).await;
 
     let extension_pubsub_owner: jid::BareJid = service_domains.extensions.parse()?;
     register_extension_commands(
@@ -447,6 +448,7 @@ async fn create_websocket_state(
         &websocket_command_registry,
         Arc::clone(&state),
         Arc::clone(&connection_registry),
+        Arc::clone(&sm_session_registry),
     )
     .await;
     if let Err(error) = bootstrap_fresh_xmpp_topology(
@@ -542,7 +544,6 @@ async fn create_websocket_state(
         })?,
     );
 
-    let sm_session_registry = create_sm_session_registry(xmpp_config).await;
     let resumable_sessions: Arc<dashmap::DashMap<String, crate::auth::Session>> =
         Arc::new(dashmap::DashMap::new());
     let blocking_storage: Arc<dyn waddle_xmpp::xep::xep0191::BlockingStorage> = Arc::new(

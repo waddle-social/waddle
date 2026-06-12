@@ -12,8 +12,11 @@ const DOMAIN: &str = "localhost";
 const NS_COMMANDS: &str = "http://jabber.org/protocol/commands";
 const NS_DATA: &str = "jabber:x:data";
 const NODE_GROUP_DM_CREATE: &str = "urn:waddle:group-dm:create:0";
+const NODE_GROUP_DM_LEAVE: &str = "urn:waddle:group-dm:leave:0";
 const FEATURE_GROUP_DM: &str = "urn:waddle:group-dm:0";
 const NS_MUC_USER: &str = "http://jabber.org/protocol/muc#user";
+const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
+const PEP_NODE_BOOKMARKS: &str = "urn:xmpp:bookmarks:1";
 
 static TEST_SERIAL: Mutex<()> = Mutex::const_new(());
 
@@ -25,6 +28,18 @@ fn element_to_xml(element: Element) -> String {
     let mut buf = Vec::new();
     element.write_to(&mut buf).expect("serialize XML");
     String::from_utf8(buf).expect("xmpp_parsers serializes UTF-8")
+}
+
+fn attr_value(frame: &str, attr: &str) -> Option<String> {
+    let double = format!("{attr}=\"");
+    if let Some(start) = frame.find(&double).map(|start| start + double.len()) {
+        let end = frame[start..].find('"')?;
+        return Some(frame[start..start + end].to_string());
+    }
+    let single = format!("{attr}='");
+    let start = frame.find(&single).map(|start| start + single.len())?;
+    let end = frame[start..].find('\'')?;
+    Some(frame[start..start + end].to_string())
 }
 
 async fn user_client(
@@ -74,6 +89,18 @@ async fn disco_info(client: &mut WsXmppClient, to: &str, id: &str) -> String {
         .expect("disco info response")
 }
 
+async fn enable_resumption(client: &mut WsXmppClient) -> String {
+    client
+        .send(r#"<enable xmlns="urn:xmpp:sm:3" resume="true"/>"#)
+        .await
+        .expect("enable stream management");
+    let enabled = client
+        .recv_matching(|frame| frame.contains("<enabled"))
+        .await
+        .expect("stream management enabled");
+    attr_value(&enabled, "id").unwrap_or_else(|| panic!("enabled missing id: {enabled}"))
+}
+
 async fn create_group_dm(
     client: &mut WsXmppClient,
     id: &str,
@@ -113,6 +140,19 @@ async fn join_room(client: &mut WsXmppClient, room_jid: &str, nick: &str) {
         .expect("self join presence");
 }
 
+async fn try_join_room(client: &mut WsXmppClient, room_jid: &str, nick: &str) -> String {
+    let join = format!("<presence xmlns='jabber:client' to='{room_jid}/{nick}'/>");
+    client.send(&join).await.expect("send room join");
+    client
+        .recv_matching(|frame| {
+            frame.contains("<presence")
+                && (frame.contains(&format!("from='{room_jid}/{nick}'"))
+                    || frame.contains(&format!("from=\"{room_jid}/{nick}\"")))
+        })
+        .await
+        .expect("join response")
+}
+
 async fn send_groupchat(client: &mut WsXmppClient, room_jid: &str, id: &str, body: &str) {
     let message = format!(
         "<message xmlns='jabber:client' type='groupchat' to='{room_jid}' id='{id}'>\
@@ -124,6 +164,43 @@ async fn send_groupchat(client: &mut WsXmppClient, room_jid: &str, id: &str, bod
         .recv_matching(|frame| frame.contains(id) && frame.contains(body))
         .await
         .expect("groupchat echo");
+}
+
+async fn get_bookmarks(client: &mut WsXmppClient, id: &str) -> String {
+    let iq = Element::builder("iq", "jabber:client")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+        .append(
+            Element::builder("pubsub", NS_PUBSUB)
+                .append(
+                    Element::builder("items", NS_PUBSUB)
+                        .attr(
+                            minidom::rxml::xml_ncname!("node").to_owned(),
+                            PEP_NODE_BOOKMARKS,
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .build();
+    client
+        .send(&element_to_xml(iq))
+        .await
+        .expect("send bookmarks query");
+    client
+        .recv_matching(|frame| frame.contains("<iq") && frame_has_iq_id(frame, id))
+        .await
+        .expect("bookmarks response")
+}
+
+async fn leave_group_dm(client: &mut WsXmppClient, id: &str, room_jid: &str) -> String {
+    send_command(
+        client,
+        NODE_GROUP_DM_LEAVE,
+        id,
+        submit_form(NODE_GROUP_DM_LEAVE, vec![text_field("room_jid", room_jid)]),
+    )
+    .await
 }
 
 async fn query_room_mam(client: &mut WsXmppClient, room_jid: &str, id: &str) -> Vec<String> {
@@ -675,6 +752,207 @@ async fn group_dm_invite_to_offline_member_is_queued_for_next_presence() {
     assert!(
         delivered.contains(FEATURE_GROUP_DM) && delivered.contains("mode='full'"),
         "queued invite must preserve history-access extension: {delivered}"
+    );
+}
+
+#[tokio::test]
+async fn group_dm_member_can_leave_and_be_readded_later() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start_with_extra_accounts(&[
+        ("alice", "alice-pass"),
+        ("bob", "bob-pass"),
+        ("charlie", "charlie-pass"),
+    ]);
+    let mut alice = user_client(&server, "alice", "alice-pass", "group-dm-leave-alice").await;
+    let mut bob = user_client(&server, "bob", "bob-pass", "group-dm-leave-bob").await;
+    let mut bob_phone = user_client(&server, "bob", "bob-pass", "group-dm-leave-bob-phone").await;
+    let mut bob_detached =
+        user_client(&server, "bob", "bob-pass", "group-dm-leave-bob-detached").await;
+    let mut charlie =
+        user_client(&server, "charlie", "charlie-pass", "group-dm-leave-charlie").await;
+
+    let room_jid = create_group_dm(
+        &mut alice,
+        "group-dm-leave-create",
+        "Alice, Bob, Charlie",
+        &["alice@localhost", "bob@localhost", "charlie@localhost"],
+    )
+    .await;
+    join_room(&mut alice, &room_jid, "alice").await;
+    join_room(&mut bob, &room_jid, "bob").await;
+    join_room(&mut bob_phone, &room_jid, "bob").await;
+    join_room(&mut bob_detached, &room_jid, "bob-detached").await;
+    let bob_detached_stream_id = enable_resumption(&mut bob_detached).await;
+    drop(bob_detached);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    join_room(&mut charlie, &room_jid, "charlie").await;
+
+    let bob_bookmarks = get_bookmarks(&mut bob, "bob-bookmarks-before-leave").await;
+    assert!(
+        bob_bookmarks.contains(&room_jid),
+        "created group DM must be bookmarked for Bob before leave: {bob_bookmarks}"
+    );
+
+    bob.send(&format!(
+        "<presence xmlns='jabber:client' type='unavailable' to='{room_jid}/bob'/>"
+    ))
+    .await
+    .expect("send unavailable presence");
+    bob.recv_matching(|frame| frame.contains("type='unavailable'"))
+        .await
+        .expect("unavailable echo");
+    assert_no_frame_matching_for(
+        &mut alice,
+        Duration::from_millis(300),
+        |frame| {
+            frame.contains("<presence")
+                && frame.contains("type='unavailable'")
+                && frame.contains(&format!("{room_jid}/bob"))
+        },
+        "single-resource unavailable must not announce a leave while Bob has another joined resource",
+    )
+    .await;
+    assert_no_frame_matching_for(
+        &mut charlie,
+        Duration::from_millis(300),
+        |frame| {
+            frame.contains("<presence")
+                && frame.contains("type='unavailable'")
+                && frame.contains(&format!("{room_jid}/bob"))
+        },
+        "single-resource unavailable must not announce a leave to any remaining member while Bob has another joined resource",
+    )
+    .await;
+    let still_member_join = try_join_room(&mut bob, &room_jid, "bob").await;
+    assert!(
+        !is_error(&still_member_join),
+        "offline/unavailable presence must not remove group-DM membership: {still_member_join}"
+    );
+
+    let leave = leave_group_dm(&mut bob, "group-dm-leave-bob-command", &room_jid).await;
+    assert!(is_result(&leave), "leave command must succeed: {leave}");
+
+    let membership_change = alice
+        .recv_matching(|frame| {
+            frame.contains("<presence")
+                && frame.contains("type='unavailable'")
+                && frame.contains(&format!("{room_jid}/bob"))
+        })
+        .await
+        .expect("remaining member sees leave presence");
+    assert!(
+        membership_change.contains("affiliation='none'"),
+        "remaining members must see Bob's membership removal: {membership_change}"
+    );
+    let charlie_membership_change = charlie
+        .recv_matching(|frame| {
+            frame.contains("<presence")
+                && frame.contains("type='unavailable'")
+                && frame.contains(&format!("{room_jid}/bob"))
+        })
+        .await
+        .expect("second remaining member sees leave presence");
+    assert!(
+        charlie_membership_change.contains("affiliation='none'"),
+        "every remaining member must see Bob's membership removal: {charlie_membership_change}"
+    );
+
+    let bob_bookmarks = get_bookmarks(&mut bob, "bob-bookmarks-after-leave").await;
+    assert!(
+        !bob_bookmarks.contains(&room_jid),
+        "leave must retract Bob's XEP-0402 bookmark: {bob_bookmarks}"
+    );
+    let bob_phone_bookmarks =
+        get_bookmarks(&mut bob_phone, "bob-phone-bookmarks-after-leave").await;
+    assert!(
+        !bob_phone_bookmarks.contains(&room_jid),
+        "bookmark retraction must be visible to Bob's other device: {bob_phone_bookmarks}"
+    );
+
+    send_groupchat(
+        &mut alice,
+        &room_jid,
+        "after-bob-leaves",
+        "remaining members continue",
+    )
+    .await;
+    let charlie_echo = charlie
+        .recv_matching(|frame| frame.contains("after-bob-leaves"))
+        .await
+        .expect("remaining member receives post-leave message");
+    assert!(
+        charlie_echo.contains("remaining members continue"),
+        "remaining members must keep chatting after leave: {charlie_echo}"
+    );
+    let mut resumed_detached = WsXmppClient::connect(&server.ws_url())
+        .await
+        .expect("connect detached resume candidate");
+    resumed_detached
+        .authenticate(DOMAIN, "bob", "bob-pass")
+        .await
+        .expect("authenticate detached resume candidate");
+    resumed_detached
+        .send(&format!(
+            r#"<resume xmlns="urn:xmpp:sm:3" previd="{bob_detached_stream_id}" h="0"/>"#
+        ))
+        .await
+        .expect("resume detached Bob resource");
+    resumed_detached
+        .recv_matching(|frame| frame.contains("<resumed"))
+        .await
+        .expect("detached Bob resource resumes");
+    assert_no_frame_matching_for(
+        &mut resumed_detached,
+        Duration::from_millis(500),
+        |frame| frame.contains("after-bob-leaves"),
+        "leave must evict detached resumable resources so post-leave messages are not replayed",
+    )
+    .await;
+
+    let denied_join = try_join_room(&mut bob, &room_jid, "bob").await;
+    assert!(
+        is_error(&denied_join) && denied_join.contains("registration-required"),
+        "former member must not be able to enter members-only room: {denied_join}"
+    );
+    let denied_phone_join = try_join_room(&mut bob_phone, &room_jid, "bob").await;
+    assert!(
+        is_error(&denied_phone_join) && denied_phone_join.contains("registration-required"),
+        "leave must remove every connected resource for the former member: {denied_phone_join}"
+    );
+    let denied_mam = query_room_mam(&mut bob, &room_jid, "bob-mam-after-leave").await;
+    assert!(
+        denied_mam
+            .iter()
+            .any(|frame| is_error(frame) && frame.contains("forbidden")),
+        "former member must not read new room history after leave: {denied_mam:?}"
+    );
+
+    let invite = format!(
+        "<message xmlns='jabber:client' type='normal' to='{room_jid}' id='readd-bob-after-leave'>\
+            <x xmlns='{NS_MUC_USER}'>\
+                <invite to='bob@localhost'/>\
+            </x>\
+         </message>"
+    );
+    alice.send(&invite).await.expect("send Bob re-add invite");
+    bob.recv_matching(|frame| frame.contains("readd-bob-after-leave"))
+        .await
+        .expect("Bob receives re-add invite");
+    let bob_bookmarks = get_bookmarks(&mut bob, "bob-bookmarks-after-readd").await;
+    assert!(
+        bob_bookmarks.contains(&room_jid),
+        "normal re-add must restore Bob's XEP-0402 bookmark: {bob_bookmarks}"
+    );
+    let bob_phone_bookmarks =
+        get_bookmarks(&mut bob_phone, "bob-phone-bookmarks-after-readd").await;
+    assert!(
+        bob_phone_bookmarks.contains(&room_jid),
+        "re-add bookmark restore must be visible to Bob's other device: {bob_phone_bookmarks}"
+    );
+    let readded_join = try_join_room(&mut bob, &room_jid, "bob").await;
+    assert!(
+        !is_error(&readded_join) && readded_join.contains("affiliation='member'"),
+        "former member must be able to rejoin after normal add flow: {readded_join}"
     );
 }
 
