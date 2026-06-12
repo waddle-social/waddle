@@ -32,7 +32,7 @@ use waddle_xmpp::muc::{
         ApplyAdminItems, ChangeAffiliation, GetConfig, ListAffiliations, ListOccupants,
         OccupantCount, UpdateConfig,
     },
-    AdminItem, RoomConfig,
+    AdminItem, PinPermission, RoomConfig,
 };
 use waddle_xmpp::pubsub::PubSubItem;
 use waddle_xmpp::registry::ConnectionRegistry;
@@ -70,7 +70,6 @@ pub const NODE_GROUP_DM_CREATE: &str = waddle_xmpp::admin::NS_GROUP_DM_CREATE;
 pub const DEFAULT_PAGE_SIZE: u32 = 50;
 pub const MAX_PAGE_SIZE: u32 = 200;
 const MAX_NAME_LEN: usize = 80;
-const GROUP_DM_CHANNEL_TYPE: &str = "group-dm";
 
 // ---------------------------------------------------------------------------
 // Affiliation wire vocabulary
@@ -1233,7 +1232,7 @@ async fn retract_duplicate_channel_bookmarks(
 
 fn channel_type_from_config(config: &RoomConfig) -> &'static str {
     if config.group_dm {
-        return GROUP_DM_CHANNEL_TYPE;
+        return waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM;
     }
     if config.forum {
         "forum"
@@ -1286,7 +1285,7 @@ async fn upsert_group_dm_catalog(
         id: group_dm_id.to_string(),
         name: config.name.clone(),
         description: config.description.clone(),
-        channel_type: GROUP_DM_CHANNEL_TYPE.to_string(),
+        channel_type: waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM.to_string(),
         position: 0,
         is_default: false,
         pin_permission: config.pin_permission,
@@ -1552,6 +1551,7 @@ async fn run_group_dm_create(
         moderated: false,
         enable_logging: true,
         group_dm: true,
+        pin_permission: PinPermission::Anyone,
         federated_affiliation_config: FederatedAffiliationConfig::open_none(),
         ..RoomConfig::default()
     };
@@ -1560,7 +1560,7 @@ async fn run_group_dm_create(
         .room_registry
         .ask(CreateRoom {
             room_jid: room_jid.clone(),
-            waddle_id: "group-dm".to_string(),
+            waddle_id: waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM.to_string(),
             channel_id: localpart.clone(),
             config: config.clone(),
         })
@@ -1584,26 +1584,20 @@ async fn run_group_dm_create(
     let mut persisted_members: Vec<BareJid> = Vec::with_capacity(members.len());
     for member_jid in members {
         if let Err(error) = persist_group_dm_member_tuple(state, &localpart, &member_jid).await {
-            for persisted_member in &persisted_members {
-                let _ = delete_group_dm_member_tuple(state, &localpart, persisted_member).await;
-            }
-            let _ = delete_xmpp_channel(state.db_pool.global_actor().clone(), &localpart).await;
-            let _ = state
-                .room_registry
-                .ask(DestroyRoom {
-                    room_jid: room_jid.clone(),
-                })
-                .await;
+            rollback_group_dm_create(state, &localpart, &room_jid, &persisted_members).await;
             return Err(Box::new(CommandResult::Error(error)));
         }
         persisted_members.push(member_jid.clone());
-        actor
+        if let Err(error) = actor
             .ask(ChangeAffiliation {
                 jid: member_jid,
                 affiliation: Affiliation::Member,
             })
             .await
-            .map_err(send_err("room actor ChangeAffiliation"))?;
+        {
+            rollback_group_dm_create(state, &localpart, &room_jid, &persisted_members).await;
+            return Err(send_err("room actor ChangeAffiliation")(error));
+        }
     }
 
     Ok(GroupDmRef {
@@ -1613,6 +1607,24 @@ async fn run_group_dm_create(
         members_only: true,
         persistent: true,
     })
+}
+
+async fn rollback_group_dm_create(
+    state: &AppState,
+    group_dm_id: &str,
+    room_jid: &BareJid,
+    persisted_members: &[BareJid],
+) {
+    for persisted_member in persisted_members {
+        let _ = delete_group_dm_member_tuple(state, group_dm_id, persisted_member).await;
+    }
+    let _ = delete_xmpp_channel(state.db_pool.global_actor().clone(), group_dm_id).await;
+    let _ = state
+        .room_registry
+        .ask(DestroyRoom {
+            room_jid: room_jid.clone(),
+        })
+        .await;
 }
 
 async fn persist_group_dm_member_tuple(

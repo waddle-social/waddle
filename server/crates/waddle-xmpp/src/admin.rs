@@ -84,3 +84,6 @@ pub const NS_GROUP_DM_CREATE: &str = "urn:waddle:group-dm:create:0";
 /// Disco feature advertised by group-DM rooms so clients can classify them
 /// into the DM surface instead of the channel surface.
 pub const NS_GROUP_DM_FEATURE: &str = "urn:waddle:group-dm:0";
+
+/// Persisted channel type for private group-DM MUC rooms.
+pub const CHANNEL_TYPE_GROUP_DM: &str = "group-dm";

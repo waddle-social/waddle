@@ -4,6 +4,7 @@ mod ws_common;
 
 use tokio::sync::Mutex;
 use ws_common::{TestServer, WsXmppClient};
+use xmpp_parsers::minidom::Element;
 
 const DOMAIN: &str = "localhost";
 const NS_COMMANDS: &str = "http://jabber.org/protocol/commands";
@@ -17,6 +18,12 @@ fn frame_has_iq_id(frame: &str, id: &str) -> bool {
     frame.contains(&format!(r#"id='{id}'"#)) || frame.contains(&format!(r#"id="{id}""#))
 }
 
+fn element_to_xml(element: Element) -> String {
+    let mut buf = Vec::new();
+    element.write_to(&mut buf).expect("serialize XML");
+    String::from_utf8(buf).expect("xmpp_parsers serializes UTF-8")
+}
+
 async fn user_client(
     server: &TestServer,
     username: &str,
@@ -28,16 +35,19 @@ async fn user_client(
         .expect("user connect")
 }
 
-async fn send_command(client: &mut WsXmppClient, node: &str, id: &str, form_xml: &str) -> String {
-    let body = format!(
-        r#"<command xmlns="{NS_COMMANDS}" node="{node}" action="execute">{form_xml}</command>"#
-    );
-    client
-        .send(&format!(
-            r#"<iq type="set" id="{id}" to="{DOMAIN}">{body}</iq>"#
-        ))
-        .await
-        .expect("send iq");
+async fn send_command(client: &mut WsXmppClient, node: &str, id: &str, form: Element) -> String {
+    let command = Element::builder("command", NS_COMMANDS)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+        .attr(minidom::rxml::xml_ncname!("action").to_owned(), "execute")
+        .append(form)
+        .build();
+    let iq = Element::builder("iq", "jabber:client")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), DOMAIN)
+        .append(command)
+        .build();
+    client.send(&element_to_xml(iq)).await.expect("send iq");
     client
         .recv_matching(|frame| frame.contains("<iq") && frame_has_iq_id(frame, id))
         .await
@@ -45,10 +55,14 @@ async fn send_command(client: &mut WsXmppClient, node: &str, id: &str, form_xml:
 }
 
 async fn disco_info(client: &mut WsXmppClient, to: &str, id: &str) -> String {
+    let iq = Element::builder("iq", "jabber:client")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), to)
+        .append(Element::builder("query", "http://jabber.org/protocol/disco#info").build())
+        .build();
     client
-        .send(&format!(
-            r#"<iq type="get" id="{id}" to="{to}"><query xmlns="http://jabber.org/protocol/disco#info"/></iq>"#
-        ))
+        .send(&element_to_xml(iq))
         .await
         .expect("send disco info");
     client
@@ -57,22 +71,38 @@ async fn disco_info(client: &mut WsXmppClient, to: &str, id: &str) -> String {
         .expect("disco info response")
 }
 
-fn submit_form(node: &str, extra: &str) -> String {
-    format!(
-        r#"<x xmlns="{NS_DATA}" type="submit"><field var="FORM_TYPE" type="hidden"><value>{node}</value></field>{extra}</x>"#
-    )
+fn submit_form(node: &str, fields: Vec<Element>) -> Element {
+    let mut form = Element::builder("x", NS_DATA)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
+        .append(
+            Element::builder("field", NS_DATA)
+                .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "hidden")
+                .append(Element::builder("value", NS_DATA).append(node).build())
+                .build(),
+        );
+    for field in fields {
+        form = form.append(field);
+    }
+    form.build()
 }
 
-fn text_field(var: &str, value: &str) -> String {
-    format!(r#"<field var="{var}" type="text-single"><value>{value}</value></field>"#)
+fn text_field(var: &str, value: &str) -> Element {
+    Element::builder("field", NS_DATA)
+        .attr(minidom::rxml::xml_ncname!("var").to_owned(), var)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "text-single")
+        .append(Element::builder("value", NS_DATA).append(value).build())
+        .build()
 }
 
-fn list_multi_field(var: &str, values: &[&str]) -> String {
-    let values_xml = values
-        .iter()
-        .map(|value| format!("<value>{value}</value>"))
-        .collect::<String>();
-    format!(r#"<field var="{var}" type="list-multi">{values_xml}</field>"#)
+fn list_multi_field(var: &str, values: &[&str]) -> Element {
+    let mut field = Element::builder("field", NS_DATA)
+        .attr(minidom::rxml::xml_ncname!("var").to_owned(), var)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "list-multi");
+    for value in values {
+        field = field.append(Element::builder("value", NS_DATA).append(*value).build());
+    }
+    field.build()
 }
 
 fn extract_field(frame: &str, var: &str) -> Option<String> {
@@ -110,13 +140,12 @@ async fn group_dm_create_provisions_hidden_members_only_room_with_disco_feature(
         &mut alice,
         NODE_GROUP_DM_CREATE,
         "group-dm-create-missing-member",
-        &submit_form(
+        submit_form(
             NODE_GROUP_DM_CREATE,
-            &format!(
-                "{}{}",
+            vec![
                 text_field("name", "Alice, Mallory"),
-                list_multi_field("member_jids", &["alice@localhost", "mallory@localhost"])
-            ),
+                list_multi_field("member_jids", &["alice@localhost", "mallory@localhost"]),
+            ],
         ),
     )
     .await;
@@ -133,13 +162,12 @@ async fn group_dm_create_provisions_hidden_members_only_room_with_disco_feature(
         &mut alice,
         NODE_GROUP_DM_CREATE,
         "group-dm-create",
-        &submit_form(
+        submit_form(
             NODE_GROUP_DM_CREATE,
-            &format!(
-                "{}{}",
-                text_field("name", "Alice, Bob"),
-                list_multi_field("member_jids", &["alice@localhost", "bob@localhost"])
-            ),
+            vec![
+                text_field("name", "Rock & Roll"),
+                list_multi_field("member_jids", &["alice@localhost", "bob@localhost"]),
+            ],
         ),
     )
     .await;

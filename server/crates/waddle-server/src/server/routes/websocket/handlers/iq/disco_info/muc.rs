@@ -137,7 +137,7 @@ pub(super) async fn handle_muc_disco_info<'a>(
             channel.channel_type == "announcement",
             channel.channel_type == "forum",
         );
-        if channel.channel_type == "group-dm" {
+        if channel.channel_type == waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM {
             features.push(Feature::new(waddle_xmpp::admin::NS_GROUP_DM_FEATURE));
         }
         features.extend(extension_features_for_disco(state));
