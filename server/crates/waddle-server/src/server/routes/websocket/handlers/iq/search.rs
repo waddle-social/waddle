@@ -40,6 +40,9 @@ pub(super) async fn handle_channel_search_iq(
         };
     let mut results = Vec::new();
     for channel in channels {
+        if channel.channel_type == waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM {
+            continue;
+        }
         let Some(room_jid) = waddle_xmpp::managed_room_jid(&channel.id, muc_domain).ok() else {
             continue;
         };

@@ -40,6 +40,9 @@ pub async fn handle_muc_join(
             )];
         }
     };
+    let managed_room_is_group_dm = managed_channel
+        .as_ref()
+        .is_some_and(|channel| channel.channel_type == waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM);
     let managed_affiliation = if let Some(channel) = managed_channel.as_ref() {
         let Some(session) = authenticated_session else {
             return vec![build_muc_presence_error_xml(
@@ -138,6 +141,7 @@ pub async fn handle_muc_join(
                     public_room: channel.public_room,
                     moderated: channel.channel_type == "announcement",
                     forum: channel.channel_type == "forum",
+                    group_dm: channel.channel_type == waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM,
                     // #422: load persisted pin policy so the actor's
                     // snapshot matches the channel's last-saved value
                     // even after eviction.
@@ -174,6 +178,8 @@ pub async fn handle_muc_join(
         Affiliation::Owner
     } else if let Some(affiliation) = managed_affiliation {
         affiliation
+    } else if managed_room_is_group_dm {
+        Affiliation::None
     } else {
         Affiliation::Member
     };

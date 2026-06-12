@@ -76,3 +76,14 @@ pub const NS_ADMIN_CHANNELS_AFFILIATIONS: &str = "urn:waddle:admin:channels:affi
 pub const NS_ADMIN_CHANNELS_SET_AFFILIATION: &str = "urn:waddle:admin:channels:set-affiliation:0";
 /// `channels:kick` — XEP-0045 §9.1 role-change to `none`.
 pub const NS_ADMIN_CHANNELS_KICK: &str = "urn:waddle:admin:channels:kick:0";
+
+/// `group-dm:create` — provision a private group DM as a hidden,
+/// members-only, persistent XEP-0045 room.
+pub const NS_GROUP_DM_CREATE: &str = "urn:waddle:group-dm:create:0";
+
+/// Disco feature advertised by group-DM rooms so clients can classify them
+/// into the DM surface instead of the channel surface.
+pub const NS_GROUP_DM_FEATURE: &str = "urn:waddle:group-dm:0";
+
+/// Persisted channel type for private group-DM MUC rooms.
+pub const CHANNEL_TYPE_GROUP_DM: &str = "group-dm";

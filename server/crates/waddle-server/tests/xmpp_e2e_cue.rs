@@ -249,6 +249,10 @@ const ADVERTISED_FEATURE_EXEMPTIONS: &[FeatureCoverageExemption] = &[
         reason: "Private Waddle ad-hoc command namespace, not official XEP coverage.",
     },
     FeatureCoverageExemption {
+        feature: "urn:waddle:group-dm:create:0",
+        reason: "Private Waddle ad-hoc command namespace, not official XEP coverage.",
+    },
+    FeatureCoverageExemption {
         feature: "urn:waddle:mam-thread:0",
         reason: "Private Waddle MAM extension namespace, not official XEP coverage.",
     },

@@ -207,7 +207,13 @@ async fn seed_initial_xmpp_topology(
         room_registry
             .ask(GetOrCreateRoom {
                 room_jid: room_jid.clone(),
-                waddle_id: "space".to_string(),
+                waddle_id: if channel_record.channel_type
+                    == waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM
+                {
+                    waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM.to_string()
+                } else {
+                    "space".to_string()
+                },
                 channel_id: channel_record.id.clone(),
                 config: RoomConfig {
                     name: channel_record.name.clone(),
@@ -216,6 +222,8 @@ async fn seed_initial_xmpp_topology(
                     public_room: channel_record.public_room,
                     moderated: channel_record.channel_type == "announcement",
                     forum: channel_record.channel_type == "forum",
+                    group_dm: channel_record.channel_type
+                        == waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM,
                     pin_permission: channel_record.pin_permission,
                     ..Default::default()
                 },

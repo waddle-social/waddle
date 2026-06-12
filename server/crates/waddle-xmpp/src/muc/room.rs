@@ -44,6 +44,9 @@ pub struct RoomConfig {
     /// Whether the room uses Waddle thread-oriented metadata.
     #[serde(default)]
     pub forum: bool,
+    /// Whether this MUC room is a Waddle group DM rather than a channel.
+    #[serde(default)]
+    pub group_dm: bool,
     /// #415: who may pin/unpin messages in this room. Default is
     /// `admins-only`; when set to `anyone`, any current occupant may
     /// pin. Set via the `urn:waddle:roomconfig:pinpermission` field on
@@ -71,6 +74,7 @@ impl Default for RoomConfig {
             max_occupants: 0,
             enable_logging: true,
             forum: false,
+            group_dm: false,
             pin_permission: PinPermission::default(),
             federation_policy: FederatedPermissionPolicy::default(),
             federated_affiliation_config: FederatedAffiliationConfig::open_member(),

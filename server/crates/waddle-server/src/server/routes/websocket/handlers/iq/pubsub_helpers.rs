@@ -111,6 +111,7 @@ pub(super) fn space_details_from_node(
 fn channels_to_disco_items(channels: Vec<XmppChannelRecord>, muc_domain: &str) -> Vec<DiscoItem> {
     channels
         .into_iter()
+        .filter(|channel| channel.channel_type != waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM)
         .filter(|channel| channel.public_room)
         .filter_map(|channel| {
             waddle_xmpp::managed_room_jid(&channel.id, muc_domain)
