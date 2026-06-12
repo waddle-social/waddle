@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
-import { Bell, BellOff, ChevronUp, LogOut, Settings } from "lucide-vue-next";
+import { Bell, BellOff, ChevronUp, LogOut, Settings, Volume2, VolumeX } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import ThemeSwitcher from "@/components/chat/ThemeSwitcher.vue";
 import VersionFooter from "@/components/chat/VersionFooter.vue";
@@ -11,6 +11,7 @@ const props = defineProps<{
   session: WaddleSession;
   notificationPermission?: NotificationPermission;
   notificationsEnabled?: boolean;
+  messageSoundsEnabled?: boolean;
   totalUnreadCount?: number;
   totalMentionCount?: number;
   compact?: boolean;
@@ -23,6 +24,7 @@ const emit = defineEmits<{
   "open-settings": [];
   "request-notifications": [];
   "toggle-notifications": [];
+  "toggle-message-sounds": [];
 }>();
 
 const bellTitle = computed(() => {
@@ -51,6 +53,10 @@ function handleBellClick() {
   } else {
     emit("request-notifications");
   }
+}
+
+function handleToggleMessageSounds() {
+  emit("toggle-message-sounds");
 }
 
 function toggleDetails() {
@@ -181,6 +187,16 @@ onUnmounted(() => {
           <span>Settings</span>
         </button>
         <button
+          class="type-menu-item flex h-9 w-full items-center gap-2 rounded-lg px-2.5 text-left text-foreground transition-colors duration-200 hover:bg-muted"
+          type="button"
+          :aria-pressed="messageSoundsEnabled !== false"
+          @click="handleToggleMessageSounds"
+        >
+          <Volume2 v-if="messageSoundsEnabled !== false" class="h-3.5 w-3.5 text-primary/70" />
+          <VolumeX v-else class="h-3.5 w-3.5 text-muted-foreground" />
+          <span>{{ messageSoundsEnabled !== false ? "Message sounds on" : "Message sounds off" }}</span>
+        </button>
+        <button
           class="type-menu-item flex h-9 w-full items-center gap-2 rounded-lg px-2.5 text-left text-muted-foreground transition-colors duration-200 hover:bg-muted hover:text-destructive"
           type="button"
           @click="handleLogout"
@@ -255,6 +271,17 @@ onUnmounted(() => {
         >
           <Settings class="h-3.5 w-3.5 text-primary/70" />
           <span>Settings</span>
+        </button>
+        <button
+          role="menuitemcheckbox"
+          class="type-menu-item flex h-9 w-full items-center gap-2 rounded-lg px-2.5 text-left text-foreground transition-colors duration-200 hover:bg-muted"
+          type="button"
+          :aria-checked="messageSoundsEnabled !== false"
+          @click="handleToggleMessageSounds"
+        >
+          <Volume2 v-if="messageSoundsEnabled !== false" class="h-3.5 w-3.5 text-primary/70" />
+          <VolumeX v-else class="h-3.5 w-3.5 text-muted-foreground" />
+          <span>{{ messageSoundsEnabled !== false ? "Message sounds on" : "Message sounds off" }}</span>
         </button>
         <button
           role="menuitem"

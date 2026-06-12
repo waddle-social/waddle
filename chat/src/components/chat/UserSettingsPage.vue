@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, reactive, ref } from "vue";
-import { ChevronLeft, MessageCircle, ScanText, UserRound } from "lucide-vue-next";
+import { ChevronLeft, MessageCircle, ScanText, UserRound, Volume2, VolumeX } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import ReadReceiptSwitcher from "@/components/chat/ReadReceiptSwitcher.vue";
 import ScrollDirectionSwitcher from "@/components/chat/ScrollDirectionSwitcher.vue";
@@ -30,12 +30,14 @@ import {
 const props = defineProps<{
   session: WaddleSession;
   xmppClient?: BrowserXmppClient | null;
+  messageSoundsEnabled?: boolean;
   webCommitSha?: string;
   serverVersion?: XmppServerVersion | null;
 }>();
 
 const emit = defineEmits<{
   close: [];
+  "toggle-message-sounds": [];
 }>();
 
 type FeedbackTone = "muted" | "success" | "error";
@@ -373,6 +375,33 @@ async function clearTuneStatus() {
       </section>
 
       <VCardEditor :xmpp-client="xmppClient" :self-jid="session.jid" />
+
+      <section class="chat-section-card glass-panel">
+        <div class="flex items-center justify-between gap-3">
+          <div class="flex min-w-0 items-center gap-3">
+            <div class="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary">
+              <Volume2 v-if="messageSoundsEnabled !== false" class="h-4 w-4" />
+              <VolumeX v-else class="h-4 w-4" />
+            </div>
+            <div class="chat-settings-copy min-w-0">
+              <h2 id="message-sounds-title" class="type-pane-title">Message sounds</h2>
+              <p id="message-sounds-description" class="type-caption text-muted-foreground">
+                {{ messageSoundsEnabled !== false ? "In-app message sounds are enabled on this device." : "In-app message sounds are disabled on this device." }}
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            :class="secondaryButtonClass"
+            :aria-pressed="messageSoundsEnabled !== false"
+            :aria-label="messageSoundsEnabled !== false ? 'Disable message sounds' : 'Enable message sounds'"
+            aria-describedby="message-sounds-description"
+            @click="emit('toggle-message-sounds')"
+          >
+            {{ messageSoundsEnabled !== false ? "Disable message sounds" : "Enable message sounds" }}
+          </button>
+        </div>
+      </section>
 
       <section class="chat-section-card glass-panel">
         <div class="flex items-start gap-3 pb-4">

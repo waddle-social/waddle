@@ -9,6 +9,8 @@ import { useMessageThreads } from "@/channels/threads";
 import { useChatShellState } from "@/shell/state";
 import { useServiceWorkerUpdate } from "@/shell/service-worker-update";
 import { shouldShowChannelForegroundNotification, usePushNotifications } from "@/shell/notifications";
+import { createBrowserMessageTonePlayer } from "@/shell/audio-alerts";
+import { useChatWindowVisibility } from "@/shell/window-visibility";
 import { useChannelInbox } from "@/channels/inbox";
 import { useSocialFeed } from "@/services/social-feed";
 import { useStories } from "@/services/stories";
@@ -22,7 +24,7 @@ import { useDeploymentVersionInfo } from "@/shell/version";
 import { useXmppRosterContacts } from "@/contacts/roster";
 import { matchLocation, navigate, type RouteMatch } from "@/router";
 import { resolveChannelBySlug } from "@/shell/route-helpers";
-import { barePeerJid, jidDomain, parseManagedRoomBareJid, type RoomActivityEvent } from "@/lib/xmpp-client";
+import { barePeerJid, jidDomain, parseManagedRoomBareJid, type LiveDmMessage, type RoomActivityEvent } from "@/lib/xmpp-client";
 import { createNotifySettingsStore, type NotifySettingsStore } from "@/lib/notify-settings";
 import { mdsChatKey, queueMdsDisplayed, setMdsDisplayed } from "@/lib/last-seen-store";
 import {
@@ -74,9 +76,39 @@ interface ChannelActivityNotificationDeps {
       onNavigate?: (roomJid: string) => void;
     }) => void;
   };
+  messageSound?: {
+    play: (key: string) => void | Promise<void>;
+  };
+  messageSoundsEnabled?: () => boolean;
+  canShowForegroundNotification?: () => boolean;
+  isDoNotDisturb?: () => boolean;
+  isTabFocused?: () => boolean;
   sessionJid: string | null | undefined;
   resolveChannelNameFromJid: (roomJid: string) => string | null;
   onNavigate: (roomJid: string) => void;
+}
+
+interface DmActivityNotificationDeps {
+  notifySettings: Pick<NotifySettingsStore, "getMode">;
+  notifications: {
+    showDmNotification: (opts: {
+      senderUsername: string;
+      peerJid: string;
+      body: string;
+      stanzaId?: string;
+      onNavigate?: (peerJid: string) => void;
+    }) => void;
+  };
+  messageSound?: {
+    play: (key: string) => void | Promise<void>;
+  };
+  messageSoundsEnabled?: () => boolean;
+  canShowForegroundNotification?: () => boolean;
+  isDoNotDisturb?: () => boolean;
+  isTabFocused?: () => boolean;
+  sessionJid: string | null | undefined;
+  activePeerJid: string | null | undefined;
+  onNavigate: (peerJid: string) => void;
 }
 
 export function showForegroundNotificationForChannelActivity(
@@ -92,6 +124,12 @@ export function showForegroundNotificationForChannelActivity(
   const mode = deps.notifySettings.getMode(event.roomJid, "private-group");
 
   if (!shouldShowChannelForegroundNotification({ mode, isMention })) return;
+  if (deps.isDoNotDisturb?.() === true) return;
+  if (deps.canShowForegroundNotification?.() === false) return;
+
+  if (deps.isTabFocused?.() === false && deps.messageSoundsEnabled?.() !== false) {
+    void deps.messageSound?.play(messageSoundKey(event.roomJid, event.stanzaId));
+  }
 
   if (isMention) {
     deps.notifications.showMentionNotification({
@@ -125,9 +163,46 @@ export function showForegroundNotificationsForChannelActivities(
   }
 }
 
+export function showForegroundNotificationForDmActivity(
+  message: LiveDmMessage,
+  deps: DmActivityNotificationDeps,
+): void {
+  const isSelf = barePeerJid(message.fromJid) === barePeerJid(deps.sessionJid ?? "");
+  const isViewingThisDm = deps.activePeerJid === message.peerJid;
+  if (isSelf || isViewingThisDm) return;
+
+  const mode = deps.notifySettings.getMode(message.peerJid, "direct-chat");
+  const isMention = message.mentions?.some((mention) =>
+    mentionMatchesBareJid(mention, deps.sessionJid)
+  ) ?? false;
+  if (!shouldShowChannelForegroundNotification({ mode, isMention })) return;
+  if (deps.isDoNotDisturb?.() === true) return;
+  if (deps.canShowForegroundNotification?.() === false) return;
+  if (deps.isTabFocused?.() !== false) return;
+
+  if (deps.messageSoundsEnabled?.() !== false) {
+    void deps.messageSound?.play(messageSoundKey(message.peerJid, message.stanzaId ?? message.id));
+  }
+
+  deps.notifications.showDmNotification({
+    senderUsername: message.nick,
+    peerJid: message.peerJid,
+    body: message.body,
+    stanzaId: message.stanzaId,
+    onNavigate: deps.onNavigate,
+  });
+}
+
+let nextUnstampedSoundId = 0;
+
+function messageSoundKey(conversationJid: string, stanzaId: string | undefined): string {
+  return `message:${conversationJid}:${stanzaId ?? `unstamped-${++nextUnstampedSoundId}`}`;
+}
+
 export function useChatAppController(giphyApiKey: string) {
   const ui = useChatShellState();
   const { mode: scrollDirectionMode } = useScrollDirectionPreference();
+  const { isWindowFocused } = useChatWindowVisibility();
 
   // Seed page-level UI state from the current URL so the first render
   // lands on the right page. Without this, every cold load flashes the
@@ -651,6 +726,8 @@ export function useChatAppController(giphyApiKey: string) {
   });
 
   const notifications = usePushNotifications();
+  const messageSound = createBrowserMessageTonePlayer();
+  const selfPresenceShow = ref<"available" | "away" | "xa" | "dnd" | "offline">("available");
   const appUpdate = useServiceWorkerUpdate();
   const version = useDeploymentVersionInfo(xmppClient);
   // RFC 363 PR 6: include DM peers in the iterate-and-pull avatar
@@ -756,6 +833,11 @@ export function useChatAppController(giphyApiKey: string) {
     showForegroundNotificationsForChannelActivities(events, {
       notifySettings,
       notifications,
+      messageSound,
+      messageSoundsEnabled: () => notifications.messageSoundsEnabled.value,
+      canShowForegroundNotification: () => notifications.canShowForegroundNotifications.value,
+      isDoNotDisturb: () => selfPresenceShow.value === "dnd",
+      isTabFocused: () => isWindowFocused.value,
       sessionJid: connectionStore.session?.jid,
       resolveChannelNameFromJid,
       onNavigate: (roomJid) => {
@@ -773,20 +855,20 @@ export function useChatAppController(giphyApiKey: string) {
     client.setDirectMessageHandler((msg) => {
       dmMessaging.onIncomingMessage(msg);
       dmConversations.receiveIncomingDm(msg);
-      const isSelf = barePeerJid(msg.fromJid) === barePeerJid(session.value?.jid ?? "");
-      const isViewingThisDm = ui.sidebarMode.value === "dms"
-        && dmConversations.activePeerJid.value === msg.peerJid;
-      if (!isSelf && !isViewingThisDm) {
-        notifications.showDmNotification({
-          senderUsername: msg.nick,
-          peerJid: msg.peerJid,
-          body: msg.body,
-          stanzaId: msg.stanzaId,
-          onNavigate: (peerJid) => {
-            void handleOpenDm(peerJid);
-          },
-        });
-      }
+      showForegroundNotificationForDmActivity(msg, {
+        notifySettings,
+        notifications,
+        messageSound,
+        messageSoundsEnabled: () => notifications.messageSoundsEnabled.value,
+        canShowForegroundNotification: () => notifications.canShowForegroundNotifications.value,
+        isDoNotDisturb: () => selfPresenceShow.value === "dnd",
+        isTabFocused: () => isWindowFocused.value,
+        sessionJid: session.value?.jid,
+        activePeerJid: ui.sidebarMode.value === "dms" ? dmConversations.activePeerJid.value : null,
+        onNavigate: (peerJid) => {
+          void handleOpenDm(peerJid);
+        },
+      });
     });
     client.setDmChatStateHandler(dmMessaging.onChatState);
     client.setDmDisplayedHandler(dmMessaging.onDisplayed);
@@ -810,6 +892,9 @@ export function useChatAppController(giphyApiKey: string) {
       else queueMdsDisplayed(key, displayed);
     });
     client.setPresenceUpdateHandler((event) => {
+      if (barePeerJid(event.bareJid) === barePeerJid(session.value?.jid ?? "")) {
+        selfPresenceShow.value = event.show;
+      }
       dmConversations.updatePresence(event);
       rosterContacts.updatePresence(event.bareJid, event.show);
     });
@@ -910,6 +995,10 @@ export function useChatAppController(giphyApiKey: string) {
     } else if (xmppClient.value && connectionStore.session) {
       await notifications.disablePushSubscription(xmppClient.value, connectionStore.session.jid);
     }
+  }
+
+  function handleToggleMessageSounds() {
+    notifications.messageSoundsEnabled.value = !notifications.messageSoundsEnabled.value;
   }
 
   async function refreshAppUpdate() {
@@ -2288,6 +2377,7 @@ export function useChatAppController(giphyApiKey: string) {
       refreshAppUpdate,
       handleRequestNotifications,
       handleToggleNotifications,
+      handleToggleMessageSounds,
       openUserSettings,
       openHome,
       openDmList,

@@ -13,6 +13,7 @@ defineProps<{
   session: WaddleSession | null;
   notificationPermission?: NotificationPermission;
   notificationsEnabled?: boolean;
+  messageSoundsEnabled?: boolean;
   totalUnreadCount?: number;
   totalMentionCount?: number;
   activeChannelCallCount?: number;
@@ -33,6 +34,7 @@ const emit = defineEmits<{
   logout: [];
   "request-notifications": [];
   "toggle-notifications": [];
+  "toggle-message-sounds": [];
 }>();
 
 function activeCallLabel(count: number | undefined, noun = "call"): string {
@@ -158,6 +160,7 @@ function directMessagesLabel(hasUnread?: boolean, activeCallCount?: number): str
       :session="session"
       :notification-permission="notificationPermission"
       :notifications-enabled="notificationsEnabled"
+      :message-sounds-enabled="messageSoundsEnabled"
       :total-unread-count="totalUnreadCount"
       :total-mention-count="totalMentionCount"
       :web-commit-sha="webCommitSha"
@@ -167,6 +170,7 @@ function directMessagesLabel(hasUnread?: boolean, activeCallCount?: number): str
       @logout="emit('logout')"
       @request-notifications="emit('request-notifications')"
       @toggle-notifications="emit('toggle-notifications')"
+      @toggle-message-sounds="emit('toggle-message-sounds')"
     />
   </div>
 </template>
