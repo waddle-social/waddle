@@ -139,13 +139,21 @@ export function usePushNotifications() {
 
   watch(notificationsEnabled, (v) => {
     if (typeof window !== "undefined") {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(v));
+      try {
+        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(v));
+      } catch (error) {
+        console.warn("Unable to persist notification preference", error);
+      }
     }
   });
 
   watch(messageSoundsEnabled, (v) => {
     if (typeof window !== "undefined") {
-      window.localStorage.setItem(MESSAGE_SOUNDS_STORAGE_KEY, JSON.stringify(v));
+      try {
+        window.localStorage.setItem(MESSAGE_SOUNDS_STORAGE_KEY, JSON.stringify(v));
+      } catch (error) {
+        console.warn("Unable to persist message sound preference", error);
+      }
     }
   });
 

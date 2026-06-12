@@ -144,26 +144,37 @@ export function createBrowserMessageTonePlayer(): MessageAudioAlertPlayer {
     async play(key) {
       if (active.has(key)) return;
       if (typeof window === "undefined" || typeof AudioContext === "undefined") return;
+
       active.add(key);
-      const context = new AudioContext();
-      const oscillator = context.createOscillator();
-      const gain = context.createGain();
-      oscillator.type = "sine";
-      oscillator.frequency.value = 1046.5;
-      gain.gain.value = 0;
-      oscillator.connect(gain);
-      gain.connect(context.destination);
-      oscillator.start();
-      const now = context.currentTime;
-      gain.gain.setValueAtTime(0, now);
-      gain.gain.linearRampToValueAtTime(0.06, now + 0.02);
-      gain.gain.linearRampToValueAtTime(0, now + 0.18);
-      oscillator.stop(now + 0.22);
-      oscillator.onended = () => {
+      let context: AudioContext | undefined;
+      let cleanedUp = false;
+      const cleanup = () => {
+        if (cleanedUp) return;
+        cleanedUp = true;
         active.delete(key);
-        void context.close().catch(() => undefined);
+        void context?.close().catch(() => undefined);
       };
-      await context.resume().catch(() => undefined);
+
+      try {
+        context = new AudioContext();
+        const oscillator = context.createOscillator();
+        const gain = context.createGain();
+        oscillator.type = "sine";
+        oscillator.frequency.value = 1046.5;
+        gain.gain.value = 0;
+        oscillator.connect(gain);
+        gain.connect(context.destination);
+        oscillator.onended = cleanup;
+        await context.resume();
+        const now = context.currentTime;
+        gain.gain.setValueAtTime(0, now);
+        gain.gain.linearRampToValueAtTime(0.06, now + 0.02);
+        gain.gain.linearRampToValueAtTime(0, now + 0.18);
+        oscillator.start(now);
+        oscillator.stop(now + 0.22);
+      } catch {
+        cleanup();
+      }
     },
   };
 }

@@ -369,12 +369,18 @@ describe("DM foreground notification dispatch", () => {
     expect(harness.messageSound.play).toHaveBeenCalledWith("message:bob@example.com:dm-stanza-1");
   });
 
-  test("focused inactive DM suppresses notifications and message sounds", () => {
+  test("focused inactive DM shows notification without message sound", () => {
     const harness = createDmActivityDispatchHarness("always", { focused: true });
 
     showForegroundNotificationForDmActivity(dmMessage(), harness.deps);
 
-    expect(harness.notifications.showDmNotification).not.toHaveBeenCalled();
+    expect(harness.notifications.showDmNotification).toHaveBeenCalledWith({
+      senderUsername: "bob",
+      peerJid: "bob@example.com",
+      body: "hello",
+      stanzaId: "dm-stanza-1",
+      onNavigate: expect.any(Function),
+    });
     expect(harness.messageSound.play).not.toHaveBeenCalled();
   });
 

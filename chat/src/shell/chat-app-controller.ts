@@ -178,9 +178,8 @@ export function showForegroundNotificationForDmActivity(
   if (!shouldShowChannelForegroundNotification({ mode, isMention })) return;
   if (deps.isDoNotDisturb?.() === true) return;
   if (deps.canShowForegroundNotification?.() === false) return;
-  if (deps.isTabFocused?.() !== false) return;
 
-  if (deps.messageSoundsEnabled?.() !== false) {
+  if (deps.isTabFocused?.() === false && deps.messageSoundsEnabled?.() !== false) {
     void deps.messageSound?.play(messageSoundKey(message.peerJid, message.stanzaId ?? message.id));
   }
 
@@ -193,10 +192,15 @@ export function showForegroundNotificationForDmActivity(
   });
 }
 
-let nextUnstampedSoundId = 0;
-
 function messageSoundKey(conversationJid: string, stanzaId: string | undefined): string {
-  return `message:${conversationJid}:${stanzaId ?? `unstamped-${++nextUnstampedSoundId}`}`;
+  return `message:${conversationJid}:${stanzaId ?? createUnstampedMessageSoundId()}`;
+}
+
+function createUnstampedMessageSoundId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return `unstamped-${crypto.randomUUID()}`;
+  }
+  return `unstamped-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
 export function useChatAppController(giphyApiKey: string) {
