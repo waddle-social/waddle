@@ -41,6 +41,7 @@ use waddle_xmpp::XmppError;
 use waddle_xmpp::{Affiliation, ChannelInfo, Role, Stanza};
 
 use crate::admin::is_community_owner;
+use crate::auth::NativeUserStore;
 use crate::channel_space_links::{ChannelSpaceLink, ChannelSpaceLinkError};
 use crate::permissions::{
     DeleteTuple, Object, ObjectType, PermissionError, Relation, Subject, SubjectType, Tuple,
@@ -1508,6 +1509,7 @@ async fn run_group_dm_create(
     creator_jid: &BareJid,
     args: &GroupDmCreateArgs,
 ) -> Result<GroupDmRef, AdminErr> {
+    validate_group_dm_members(state, creator_jid, &args.member_jids).await?;
     let localpart = format!("group-dm-{}", mint_channel_localpart(&args.name));
     let muc_domain = state.muc_domain.to_string();
     let room_jid: BareJid = format!("{localpart}@{muc_domain}")
@@ -1558,6 +1560,35 @@ async fn run_group_dm_create(
         members_only: true,
         persistent: true,
     })
+}
+
+async fn validate_group_dm_members(
+    state: &AppState,
+    creator_jid: &BareJid,
+    member_jids: &[BareJid],
+) -> Result<(), AdminErr> {
+    let native_users = NativeUserStore::new(state.db_pool.global_actor().clone());
+    for member_jid in member_jids {
+        if member_jid.domain() != creator_jid.domain() {
+            return Err(bad_request(format!(
+                "member_jids must be local to {}",
+                creator_jid.domain()
+            )));
+        }
+        let Some(localpart) = member_jid.node().map(|node| node.to_string()) else {
+            return Err(bad_request("member_jids must be user JIDs with localparts"));
+        };
+        let exists = native_users
+            .user_exists(&localpart, member_jid.domain().as_str())
+            .await
+            .map_err(|error| internal_err(format!("native user lookup failed: {error}")))?;
+        if !exists {
+            return Err(Box::new(CommandResult::Error(XmppError::item_not_found(
+                Some(format!("group-DM member does not exist: {member_jid}")),
+            ))));
+        }
+    }
+    Ok(())
 }
 
 async fn run_update(state: &AppState, args: &ChannelsUpdateArgs) -> Result<ChannelRef, AdminErr> {

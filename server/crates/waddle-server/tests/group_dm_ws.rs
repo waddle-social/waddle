@@ -90,12 +90,39 @@ fn is_result(frame: &str) -> bool {
     frame.contains(r#"type='result'"#) || frame.contains(r#"type="result""#)
 }
 
+fn is_error(frame: &str) -> bool {
+    frame.contains(r#"type='error'"#) || frame.contains(r#"type="error""#)
+}
+
 #[tokio::test]
 async fn group_dm_create_provisions_hidden_members_only_room_with_disco_feature() {
     let _serial = TEST_SERIAL.lock().await;
     let server =
         TestServer::start_with_extra_accounts(&[("alice", "alice-pass"), ("bob", "bob-pass")]);
     let mut alice = user_client(&server, "alice", "alice-pass", "group-dm-create-1").await;
+
+    let missing_member_resp = send_command(
+        &mut alice,
+        NODE_GROUP_DM_CREATE,
+        "group-dm-create-missing-member",
+        &submit_form(
+            NODE_GROUP_DM_CREATE,
+            &format!(
+                "{}{}",
+                text_field("name", "Alice, Mallory"),
+                list_multi_field("member_jids", &["alice@localhost", "mallory@localhost"])
+            ),
+        ),
+    )
+    .await;
+    assert!(
+        is_error(&missing_member_resp),
+        "expected nonexistent member rejection, got: {missing_member_resp}"
+    );
+    assert!(
+        missing_member_resp.contains("item-not-found"),
+        "nonexistent member should use item-not-found: {missing_member_resp}"
+    );
 
     let resp = send_command(
         &mut alice,
