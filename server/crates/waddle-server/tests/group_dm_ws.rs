@@ -141,6 +141,31 @@ async fn query_room_mam(client: &mut WsXmppClient, room_jid: &str, id: &str) -> 
         .expect("MAM responses")
 }
 
+async fn assert_no_frame_matching_for<F>(
+    client: &mut WsXmppClient,
+    duration: Duration,
+    predicate: F,
+    description: &str,
+) where
+    F: Fn(&str) -> bool,
+{
+    let deadline = tokio::time::Instant::now() + duration;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return;
+        }
+        match client.recv_timeout(remaining).await {
+            Ok(frame) if predicate(&frame) => {
+                panic!("{description}: matched unexpected frame: {frame}");
+            }
+            Ok(_) => continue,
+            Err(error) if error == "Timeout waiting for message" => return,
+            Err(error) => panic!("{description}: receive failed: {error}"),
+        }
+    }
+}
+
 fn submit_form(node: &str, fields: Vec<Element>) -> Element {
     let mut form = Element::builder("x", NS_DATA)
         .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
@@ -427,6 +452,63 @@ async fn group_dm_default_add_hides_pre_add_history_from_mam() {
 }
 
 #[tokio::test]
+async fn group_dm_invite_to_offline_member_is_queued_for_next_presence() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start_with_extra_accounts(&[
+        ("alice", "alice-pass"),
+        ("bob", "bob-pass"),
+        ("charlie", "charlie-pass"),
+    ]);
+    let mut alice = user_client(&server, "alice", "alice-pass", "group-dm-offline-alice").await;
+    let mut bob = user_client(&server, "bob", "bob-pass", "group-dm-offline-bob").await;
+
+    let room_jid = create_group_dm(
+        &mut alice,
+        "group-dm-offline-create",
+        "Alice, Bob",
+        &["alice@localhost", "bob@localhost"],
+    )
+    .await;
+
+    let invite = format!(
+        "<message xmlns='jabber:client' type='normal' to='{room_jid}' id='offline-add-charlie'>\
+            <x xmlns='{NS_MUC_USER}'>\
+                <invite to='charlie@localhost'>\
+                    <history-access xmlns='{FEATURE_GROUP_DM}' mode='full'/>\
+                </invite>\
+            </x>\
+         </message>"
+    );
+    bob.send(&invite)
+        .await
+        .expect("send offline mediated invite");
+
+    let mut charlie = user_client(
+        &server,
+        "charlie",
+        "charlie-pass",
+        "group-dm-offline-charlie",
+    )
+    .await;
+    charlie
+        .send("<presence xmlns='jabber:client'/>")
+        .await
+        .expect("send initial presence");
+    let delivered = charlie
+        .recv_matching(|frame| frame.contains("offline-add-charlie") && frame.contains(&room_jid))
+        .await
+        .expect("queued mediated invite flushes when invitee comes online");
+    assert!(
+        delivered.contains("from='bob@localhost'") || delivered.contains("from=\"bob@localhost\""),
+        "queued invite must preserve trusted inviter stamp: {delivered}"
+    );
+    assert!(
+        delivered.contains(FEATURE_GROUP_DM) && delivered.contains("mode='full'"),
+        "queued invite must preserve history-access extension: {delivered}"
+    );
+}
+
+#[tokio::test]
 async fn group_dm_mam_rejects_non_member() {
     let _serial = TEST_SERIAL.lock().await;
     let server = TestServer::start_with_extra_accounts(&[
@@ -516,9 +598,11 @@ async fn group_dm_invite_from_blocked_member_is_suppressed() {
         .await
         .expect("send blocked mediated invite");
 
-    let maybe_invite = charlie.recv_timeout(Duration::from_millis(300)).await;
-    assert!(
-        !matches!(maybe_invite, Ok(ref frame) if frame.contains("blocked-add-charlie")),
-        "blocked inviter's mediated invite must not reach invitee: {maybe_invite:?}"
-    );
+    assert_no_frame_matching_for(
+        &mut charlie,
+        Duration::from_millis(300),
+        |frame| frame.contains("blocked-add-charlie"),
+        "blocked inviter's mediated invite must not reach invitee",
+    )
+    .await;
 }

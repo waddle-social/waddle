@@ -395,16 +395,6 @@ async fn group_dm_archive_visibility(
     }
 
     let actor = state.deps.app_state.db_pool.global_actor().clone();
-    if actor
-        .ask(crate::db::actor::DbExecute {
-            sql: "CREATE TABLE IF NOT EXISTS group_dm_archive_boundaries (room_jid TEXT NOT NULL, member_jid TEXT NOT NULL, visible_after TEXT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (room_jid, member_jid))".to_string(),
-            params: vec![],
-        })
-        .await
-        .is_err()
-    {
-        return GroupDmArchiveVisibility::Error;
-    }
     let row = match actor
         .ask(crate::db::actor::DbQueryOne {
             sql: "SELECT visible_after FROM group_dm_archive_boundaries WHERE room_jid = ? AND member_jid = ?".to_string(),
