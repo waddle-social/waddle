@@ -9,6 +9,7 @@ use tracing::warn;
 use waddle_xmpp::inbox::storage::InboxStorage;
 use waddle_xmpp::muc::room_registry_actor::RoomRegistryActor;
 use waddle_xmpp::pubsub::PubSubStorage;
+use waddle_xmpp::xep::xep0421::OccupantIdSecret;
 
 /// Server application state
 pub struct AppState {
@@ -52,6 +53,8 @@ pub struct AppState {
     /// `channels:create` constructs new managed room JIDs against this
     /// domain.
     pub muc_domain: DomainPart,
+    /// Shared secret for XEP-0421 occupant-id generation.
+    pub occupant_id_secret: OccupantIdSecret,
     /// Shared permission actor handle.
     pub permission_actor: ActorRef<PermissionActor>,
     /// Bare JIDs of server owners (resolved from
@@ -85,7 +88,7 @@ impl AppState {
                 .expect("test occupant-id secret meets length floor");
         let room_registry = RoomRegistryActor::spawn(RoomRegistryActor::new(
             muc_domain.to_string(),
-            occupant_id_secret,
+            occupant_id_secret.clone(),
         ));
         let spaces_jid: BareJid = "spaces.localhost"
             .parse()
@@ -104,6 +107,7 @@ impl AppState {
             room_registry,
             spaces_jid,
             muc_domain,
+            occupant_id_secret,
             permission_actor,
             server_owner_jids: Arc::from(Vec::<BareJid>::new()),
         })
@@ -123,6 +127,7 @@ impl AppState {
             room_registry,
             spaces_jid,
             muc_domain,
+            occupant_id_secret,
             permission_actor,
             server_owner_jids,
         } = deps;
@@ -136,6 +141,7 @@ impl AppState {
             room_registry,
             spaces_jid,
             muc_domain,
+            occupant_id_secret,
             permission_actor,
             server_owner_jids,
         }
@@ -155,6 +161,7 @@ pub struct AppStateDeps {
     pub room_registry: ActorRef<RoomRegistryActor>,
     pub spaces_jid: BareJid,
     pub muc_domain: DomainPart,
+    pub occupant_id_secret: OccupantIdSecret,
     pub permission_actor: ActorRef<PermissionActor>,
     pub server_owner_jids: Arc<[BareJid]>,
 }

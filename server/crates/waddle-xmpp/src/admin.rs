@@ -81,6 +81,11 @@ pub const NS_ADMIN_CHANNELS_KICK: &str = "urn:waddle:admin:channels:kick:0";
 /// members-only, persistent XEP-0045 room.
 pub const NS_GROUP_DM_CREATE: &str = "urn:waddle:group-dm:create:0";
 
+/// `group-dm:leave` — explicit service-mediated removal of the caller from
+/// a private group DM. Presence-unavailable is only an occupancy signal and
+/// MUST NOT remove durable membership.
+pub const NS_GROUP_DM_LEAVE: &str = "urn:waddle:group-dm:leave:0";
+
 /// Disco feature advertised by group-DM rooms so clients can classify them
 /// into the DM surface instead of the channel surface.
 pub const NS_GROUP_DM_FEATURE: &str = "urn:waddle:group-dm:0";

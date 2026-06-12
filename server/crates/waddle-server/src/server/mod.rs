@@ -191,6 +191,7 @@ pub async fn start_with_config(
         room_registry: room_registry.clone(),
         spaces_jid: xmpp_config.spaces_jid.clone(),
         muc_domain: xmpp_config.muc_domain.clone(),
+        occupant_id_secret: server_config.occupant_id_secret.clone(),
         permission_actor: permission_actor.clone(),
         server_owner_jids,
     }));

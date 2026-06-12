@@ -50,6 +50,7 @@ pub fn server_features() -> Vec<Feature> {
     ));
     features.push(Feature::new(crate::admin::NS_ADMIN_CHANNELS_KICK));
     features.push(Feature::new(crate::admin::NS_GROUP_DM_CREATE));
+    features.push(Feature::new(crate::admin::NS_GROUP_DM_LEAVE));
     features
 }
 
