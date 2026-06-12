@@ -1627,7 +1627,7 @@ async fn rollback_group_dm_create(
         .await;
 }
 
-async fn persist_group_dm_member_tuple(
+pub(crate) async fn persist_group_dm_member_tuple(
     state: &AppState,
     group_dm_id: &str,
     member_jid: &BareJid,
@@ -1661,6 +1661,43 @@ async fn delete_group_dm_member_tuple(
             "Failed to roll back group-DM member: {error}"
         ))),
     }
+}
+
+pub(crate) async fn rollback_group_dm_member_tuple(
+    state: &AppState,
+    group_dm_id: &str,
+    member_jid: &BareJid,
+) {
+    let _ = delete_group_dm_member_tuple(state, group_dm_id, member_jid).await;
+}
+
+pub(crate) async fn validate_group_dm_invitee(
+    state: &AppState,
+    inviter_jid: &BareJid,
+    invitee_jid: &BareJid,
+) -> Result<(), XmppError> {
+    if invitee_jid.domain() != inviter_jid.domain() {
+        return Err(XmppError::bad_request(Some(format!(
+            "invitee must be local to {}",
+            inviter_jid.domain()
+        ))));
+    }
+    let Some(localpart) = invitee_jid.node().map(|node| node.to_string()) else {
+        return Err(XmppError::bad_request(Some(
+            "invitee must be a user JID with a localpart".to_string(),
+        )));
+    };
+    let native_users = NativeUserStore::new(state.db_pool.global_actor().clone());
+    let exists = native_users
+        .user_exists(&localpart, invitee_jid.domain().as_str())
+        .await
+        .map_err(|error| XmppError::internal(format!("native user lookup failed: {error}")))?;
+    if !exists {
+        return Err(XmppError::item_not_found(Some(format!(
+            "group-DM invitee does not exist: {invitee_jid}"
+        ))));
+    }
+    Ok(())
 }
 
 async fn validate_group_dm_members(

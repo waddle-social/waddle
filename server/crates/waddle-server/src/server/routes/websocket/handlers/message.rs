@@ -2,6 +2,8 @@ use std::borrow::Cow;
 
 use tracing::warn;
 use waddle_xmpp::{
+    muc::room_actor::{ChangeAffiliation, GetAdminContext},
+    muc::room_registry_actor::GetRoom,
     parser::stanza_to_string,
     protocol::handlers::errors::bad_request_reply,
     protocol::{frame::InboundFrame, InboundEvent, XmppStateMachine},
@@ -87,6 +89,12 @@ pub async fn handle_message(
         &state.deps.link_preview,
     );
 
+    if let Some(frames) =
+        handle_group_dm_mediated_invite(&incoming, state, &bound_jid, authenticated_session).await
+    {
+        return frames;
+    }
+
     if incoming.type_ != xmpp_parsers::message::MessageType::Error
         && message_has_inbox_payload(&incoming)
     {
@@ -129,6 +137,294 @@ pub async fn handle_message(
     let deps = build_interpret_deps(state, authenticated_session);
     let (frames, _close) = drive_interpret_loop(events, sm, &deps).await;
     frames
+}
+
+async fn handle_group_dm_mediated_invite(
+    incoming: &xmpp_parsers::message::Message,
+    state: &WebSocketState,
+    bound_jid: &jid::FullJid,
+    authenticated_session: Option<&Session>,
+) -> Option<Vec<String>> {
+    if incoming.type_ != xmpp_parsers::message::MessageType::Normal {
+        return None;
+    }
+    let room_jid = incoming.to.as_ref()?.to_bare();
+    if room_jid.domain().as_str() != state.deps.service_domains.muc {
+        return None;
+    }
+
+    let (invitee, inbound_invite) = mediated_invitee(incoming)?;
+    let channel_id = waddle_xmpp::parse_managed_room_jid(&room_jid)?;
+    let channel = crate::server::xmpp_state::get_xmpp_channel(
+        state.deps.app_state.db_pool.global_actor().clone(),
+        &channel_id,
+    )
+    .await
+    .ok()
+    .flatten()?;
+    if channel.channel_type != waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM {
+        return None;
+    }
+    let Some(room_actor) = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(GetRoom {
+            room_jid: room_jid.clone(),
+        })
+        .await
+        .ok()
+        .flatten()
+    else {
+        return Some(vec![error_reply(
+            incoming,
+            bound_jid,
+            "Requested room not found.",
+        )]);
+    };
+    let Ok(context) = room_actor
+        .ask(GetAdminContext {
+            sender_jid: bound_jid.clone(),
+        })
+        .await
+    else {
+        return Some(vec![error_reply(
+            incoming,
+            bound_jid,
+            "Internal server error.",
+        )]);
+    };
+    if context.affiliation < waddle_xmpp::Affiliation::Member {
+        return Some(vec![error_reply(
+            incoming,
+            bound_jid,
+            "Only group-DM members may invite people.",
+        )]);
+    }
+    let invitee_blocklist = match state
+        .deps
+        .protocol
+        .blocking_storage
+        .list_blocked_jid_entries(&invitee)
+        .await
+    {
+        Ok(entries) => waddle_xmpp::protocol::Blocklist::new(entries),
+        Err(error) => {
+            warn!(
+                invitee = %invitee,
+                error = %error,
+                "Suppressing group-DM invite because blocklist lookup failed"
+            );
+            return Some(vec![]);
+        }
+    };
+    if invitee_blocklist.contains_jid(&jid::Jid::from(bound_jid.clone())) {
+        return Some(vec![]);
+    }
+
+    let Some(_session) = authenticated_session else {
+        return Some(vec![error_reply(
+            incoming,
+            bound_jid,
+            "Authentication required.",
+        )]);
+    };
+    if crate::admin::channels::validate_group_dm_invitee(
+        &state.deps.app_state,
+        &bound_jid.to_bare(),
+        &invitee,
+    )
+    .await
+    .is_err()
+    {
+        return Some(vec![error_reply(
+            incoming,
+            bound_jid,
+            "Requested invitee not found.",
+        )]);
+    }
+    if crate::admin::channels::persist_group_dm_member_tuple(
+        &state.deps.app_state,
+        &channel_id,
+        &invitee,
+    )
+    .await
+    .is_err()
+    {
+        return Some(vec![error_reply(
+            incoming,
+            bound_jid,
+            "Internal server error.",
+        )]);
+    }
+    let access =
+        waddle_xmpp::xep::xep_waddle_group_dm::history_access_from_mediated_invite(&inbound_invite)
+            .unwrap_or(waddle_xmpp::xep::xep_waddle_group_dm::GroupDmHistoryAccess::FromJoin);
+    let visible_after = match access {
+        waddle_xmpp::xep::xep_waddle_group_dm::GroupDmHistoryAccess::Full => None,
+        waddle_xmpp::xep::xep_waddle_group_dm::GroupDmHistoryAccess::FromJoin => {
+            Some(chrono::Utc::now().to_rfc3339())
+        }
+    };
+    if record_group_dm_archive_boundary(state, &room_jid, &invitee, visible_after.as_deref())
+        .await
+        .is_err()
+    {
+        crate::admin::channels::rollback_group_dm_member_tuple(
+            &state.deps.app_state,
+            &channel_id,
+            &invitee,
+        )
+        .await;
+        return Some(vec![error_reply(
+            incoming,
+            bound_jid,
+            "Internal server error.",
+        )]);
+    }
+    if room_actor
+        .ask(ChangeAffiliation {
+            jid: invitee.clone(),
+            affiliation: waddle_xmpp::Affiliation::Member,
+        })
+        .await
+        .is_err()
+    {
+        let _ = delete_group_dm_archive_boundary(state, &room_jid, &invitee).await;
+        crate::admin::channels::rollback_group_dm_member_tuple(
+            &state.deps.app_state,
+            &channel_id,
+            &invitee,
+        )
+        .await;
+        return Some(vec![error_reply(
+            incoming,
+            bound_jid,
+            "Internal server error.",
+        )]);
+    }
+
+    let mut invite = incoming.clone();
+    invite.from = Some(jid::Jid::from(room_jid.clone()));
+    invite.to = Some(jid::Jid::from(invitee.clone()));
+    invite.payloads = vec![build_server_mediated_invite_payload(
+        &bound_jid.to_bare(),
+        &invitee,
+        &inbound_invite,
+    )];
+    let resources = state
+        .deps
+        .protocol
+        .connection_registry
+        .get_resources_for_user(&invitee);
+    for resource in resources {
+        let _ = state
+            .deps
+            .protocol
+            .connection_registry
+            .send_to(&resource, Stanza::Message(invite.clone()))
+            .await;
+    }
+
+    Some(vec![])
+}
+
+async fn record_group_dm_archive_boundary(
+    state: &WebSocketState,
+    room_jid: &jid::BareJid,
+    member_jid: &jid::BareJid,
+    visible_after: Option<&str>,
+) -> Result<(), String> {
+    let actor = state.deps.app_state.db_pool.global_actor().clone();
+    actor
+        .ask(crate::db::actor::DbExecute {
+            sql: "CREATE TABLE IF NOT EXISTS group_dm_archive_boundaries (room_jid TEXT NOT NULL, member_jid TEXT NOT NULL, visible_after TEXT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (room_jid, member_jid))".to_string(),
+            params: vec![],
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    actor
+        .ask(crate::db::actor::DbExecute {
+            sql: "INSERT INTO group_dm_archive_boundaries (room_jid, member_jid, visible_after, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(room_jid, member_jid) DO UPDATE SET visible_after = excluded.visible_after, updated_at = excluded.updated_at".to_string(),
+            params: vec![
+                room_jid.to_string().into(),
+                member_jid.to_string().into(),
+                visible_after.map(str::to_string).into(),
+                chrono::Utc::now().to_rfc3339().into(),
+            ],
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+async fn delete_group_dm_archive_boundary(
+    state: &WebSocketState,
+    room_jid: &jid::BareJid,
+    member_jid: &jid::BareJid,
+) -> Result<(), String> {
+    let actor = state.deps.app_state.db_pool.global_actor().clone();
+    actor
+        .ask(crate::db::actor::DbExecute {
+            sql: "DELETE FROM group_dm_archive_boundaries WHERE room_jid = ? AND member_jid = ?"
+                .to_string(),
+            params: vec![room_jid.to_string().into(), member_jid.to_string().into()],
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn mediated_invitee(
+    message: &xmpp_parsers::message::Message,
+) -> Option<(jid::BareJid, minidom::Element)> {
+    let x = message
+        .payloads
+        .iter()
+        .find(|payload| payload.is("x", waddle_xmpp::muc::presence::NS_MUC_USER))?;
+    let invite = x.get_child("invite", waddle_xmpp::muc::presence::NS_MUC_USER)?;
+    let to = invite.attr("to")?.parse::<jid::BareJid>().ok()?;
+    Some((to, invite.clone()))
+}
+
+fn build_server_mediated_invite_payload(
+    inviter: &jid::BareJid,
+    invitee: &jid::BareJid,
+    inbound_invite: &minidom::Element,
+) -> minidom::Element {
+    let mut invite = minidom::Element::builder("invite", waddle_xmpp::muc::presence::NS_MUC_USER)
+        .attr(
+            minidom::rxml::xml_ncname!("from").to_owned(),
+            inviter.to_string(),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("to").to_owned(),
+            invitee.to_string(),
+        );
+    if let Some(reason) =
+        inbound_invite.get_child("reason", waddle_xmpp::muc::presence::NS_MUC_USER)
+    {
+        invite = invite.append(reason.clone());
+    }
+    if let Some(history_access) = inbound_invite.get_child(
+        "history-access",
+        waddle_xmpp::xep::xep_waddle_group_dm::NS_GROUP_DM,
+    ) {
+        invite = invite.append(history_access.clone());
+    }
+    minidom::Element::builder("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+        .append(invite.build())
+        .build()
+}
+
+fn error_reply(
+    incoming: &xmpp_parsers::message::Message,
+    bound_jid: &jid::FullJid,
+    text: &str,
+) -> String {
+    let mut stamped = incoming.clone();
+    stamped.from = Some(jid::Jid::from(bound_jid.clone()));
+    stanza_to_string(bad_request_reply(&stamped, text)).unwrap_or_default()
 }
 
 fn strip_client_authored_delay(message: &mut xmpp_parsers::message::Message) {

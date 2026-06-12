@@ -55,7 +55,5 @@ pub fn parse_history_access(element: &Element) -> Option<GroupDmHistoryAccess> {
 
 /// Return the first history-access child under a XEP-0045 mediated invite.
 pub fn history_access_from_mediated_invite(invite: &Element) -> Option<GroupDmHistoryAccess> {
-    invite
-        .children()
-        .find_map(|child| parse_history_access(child))
+    invite.children().find_map(parse_history_access)
 }
