@@ -65,6 +65,7 @@ const {
   handleLogout,
   handleRequestNotifications,
   handleToggleNotifications,
+  handleToggleMessageSounds,
   selectChannel,
   selectChannelByRoomJid,
   onSelectThread,
@@ -249,6 +250,7 @@ function openExtensionRoute(route: DiscoveredExtensionRoute) {
           :session="connectionStore.session"
           :notification-permission="notifications.permissionState.value"
           :notifications-enabled="notifications.notificationsEnabled.value"
+          :message-sounds-enabled="notifications.messageSoundsEnabled.value"
           :total-unread-count="channelUnread.totalUnreadCount.value"
           :total-mention-count="channelUnread.totalMentionCount.value"
           :web-commit-sha="version.webCommitSha.value"
@@ -257,6 +259,7 @@ function openExtensionRoute(route: DiscoveredExtensionRoute) {
           @logout="handleLogout"
           @request-notifications="handleRequestNotifications"
           @toggle-notifications="handleToggleNotifications"
+          @toggle-message-sounds="handleToggleMessageSounds"
         />
       </div>
     </AppDrawer>

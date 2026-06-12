@@ -1,4 +1,4 @@
-import { ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import type { BrowserXmppClient, NotifyMode } from "@/lib/xmpp-client";
 import { getOrRegisterServiceWorker, registerServiceWorker as registerChatServiceWorker } from "@/lib/service-worker-registration";
 import { createPushFlowLock } from "./push-flow-lock";
@@ -14,6 +14,7 @@ import { clearCachedVapidKey, loadVapidPublicKey } from "./vapid-cache";
 import { withVapidRotationLock } from "./vapid-rotation-lock";
 
 const STORAGE_KEY = "waddle.chat.notifications-enabled";
+const MESSAGE_SOUNDS_STORAGE_KEY = "waddle.chat.message-sounds-enabled";
 /// Prefix for the per-(account, service) persisted VAPID kid. The
 /// full key is built by `pushKidStorageKey(accountJid, serviceJid)`.
 /// Multi-account sessions MUST NOT share one global kid — without
@@ -109,6 +110,10 @@ export function usePushNotifications() {
     hasNotificationApi() ? Notification.permission : "denied",
   );
   const notificationsEnabled = ref(loadEnabled());
+  const messageSoundsEnabled = ref(loadMessageSoundsEnabled());
+  const canShowForegroundNotifications = computed(() =>
+    permissionState.value === "granted" && notificationsEnabled.value,
+  );
   /// Surfaced to the UI as a non-intrusive banner the first time a
   /// silent kid rotation re-binds the browser PushSubscription to a new
   /// VAPID key. The UI clears the flag once the banner is dismissed; we
@@ -134,7 +139,21 @@ export function usePushNotifications() {
 
   watch(notificationsEnabled, (v) => {
     if (typeof window !== "undefined") {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(v));
+      try {
+        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(v));
+      } catch (error) {
+        console.warn("Unable to persist notification preference", error);
+      }
+    }
+  });
+
+  watch(messageSoundsEnabled, (v) => {
+    if (typeof window !== "undefined") {
+      try {
+        window.localStorage.setItem(MESSAGE_SOUNDS_STORAGE_KEY, JSON.stringify(v));
+      } catch (error) {
+        console.warn("Unable to persist message sound preference", error);
+      }
     }
   });
 
@@ -595,6 +614,8 @@ export function usePushNotifications() {
   return {
     permissionState,
     notificationsEnabled,
+    messageSoundsEnabled,
+    canShowForegroundNotifications,
     rotationBannerVisible,
     dismissRotationBanner,
     requestPermission,
@@ -629,6 +650,16 @@ function loadEnabled(): boolean {
     return raw ? JSON.parse(raw) === true : false;
   } catch {
     return false;
+  }
+}
+
+function loadMessageSoundsEnabled(): boolean {
+  if (typeof window === "undefined") return true;
+  try {
+    const raw = window.localStorage.getItem(MESSAGE_SOUNDS_STORAGE_KEY);
+    return raw ? JSON.parse(raw) === true : true;
+  } catch {
+    return true;
   }
 }
 
