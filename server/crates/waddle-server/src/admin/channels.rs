@@ -70,6 +70,7 @@ pub const NODE_GROUP_DM_CREATE: &str = waddle_xmpp::admin::NS_GROUP_DM_CREATE;
 pub const DEFAULT_PAGE_SIZE: u32 = 50;
 pub const MAX_PAGE_SIZE: u32 = 200;
 const MAX_NAME_LEN: usize = 80;
+const GROUP_DM_CHANNEL_TYPE: &str = "group-dm";
 
 // ---------------------------------------------------------------------------
 // Affiliation wire vocabulary
@@ -884,6 +885,9 @@ async fn run_list(
             .ask(GetConfig)
             .await
             .map_err(send_err("room actor GetConfig"))?;
+        if config.group_dm {
+            continue;
+        }
         if let Some(prefix) = args.prefix.as_deref() {
             if !config.name.to_lowercase().starts_with(prefix) {
                 continue;
@@ -1228,6 +1232,9 @@ async fn retract_duplicate_channel_bookmarks(
 }
 
 fn channel_type_from_config(config: &RoomConfig) -> &'static str {
+    if config.group_dm {
+        return GROUP_DM_CHANNEL_TYPE;
+    }
     if config.forum {
         "forum"
     } else {
@@ -1268,6 +1275,27 @@ async fn upsert_channel_catalog(
     upsert_xmpp_channel(db_actor, &record)
         .await
         .map_err(|error| internal_err(format!("channel catalog upsert failed: {error}")))
+}
+
+async fn upsert_group_dm_catalog(
+    state: &AppState,
+    group_dm_id: &str,
+    config: &RoomConfig,
+) -> Result<(), AdminErr> {
+    let record = XmppChannelUpsert {
+        id: group_dm_id.to_string(),
+        name: config.name.clone(),
+        description: config.description.clone(),
+        channel_type: GROUP_DM_CHANNEL_TYPE.to_string(),
+        position: 0,
+        is_default: false,
+        pin_permission: config.pin_permission,
+        members_only: config.members_only,
+        public_room: config.public_room,
+    };
+    upsert_xmpp_channel(state.db_pool.global_actor().clone(), &record)
+        .await
+        .map_err(|error| internal_err(format!("group-DM catalog upsert failed: {error}")))
 }
 
 async fn restore_channel_catalog_record(state: &AppState, record: &XmppChannelRecord) {
@@ -1533,17 +1561,42 @@ async fn run_group_dm_create(
         .ask(CreateRoom {
             room_jid: room_jid.clone(),
             waddle_id: "group-dm".to_string(),
-            channel_id: localpart,
-            config,
+            channel_id: localpart.clone(),
+            config: config.clone(),
         })
         .await
         .map_err(send_err("room_registry ask CreateRoom"))?;
+
+    if let Err(error) = upsert_group_dm_catalog(state, &localpart, &config).await {
+        let _ = state
+            .room_registry
+            .ask(DestroyRoom {
+                room_jid: room_jid.clone(),
+            })
+            .await;
+        return Err(error);
+    }
 
     let mut members = args.member_jids.clone();
     members.push(creator_jid.clone());
     members.sort();
     members.dedup();
+    let mut persisted_members: Vec<BareJid> = Vec::with_capacity(members.len());
     for member_jid in members {
+        if let Err(error) = persist_group_dm_member_tuple(state, &localpart, &member_jid).await {
+            for persisted_member in &persisted_members {
+                let _ = delete_group_dm_member_tuple(state, &localpart, persisted_member).await;
+            }
+            let _ = delete_xmpp_channel(state.db_pool.global_actor().clone(), &localpart).await;
+            let _ = state
+                .room_registry
+                .ask(DestroyRoom {
+                    room_jid: room_jid.clone(),
+                })
+                .await;
+            return Err(Box::new(CommandResult::Error(error)));
+        }
+        persisted_members.push(member_jid.clone());
         actor
             .ask(ChangeAffiliation {
                 jid: member_jid,
@@ -1560,6 +1613,42 @@ async fn run_group_dm_create(
         members_only: true,
         persistent: true,
     })
+}
+
+async fn persist_group_dm_member_tuple(
+    state: &AppState,
+    group_dm_id: &str,
+    member_jid: &BareJid,
+) -> Result<(), XmppError> {
+    let tuple = Tuple::new(
+        Object::new(ObjectType::Channel, group_dm_id),
+        Relation::new("member"),
+        Subject::user(member_jid.to_string()),
+    );
+    state
+        .permission_actor
+        .ask(WriteTuple { tuple })
+        .await
+        .map_err(|error| XmppError::internal(format!("Failed to persist group-DM member: {error}")))
+}
+
+async fn delete_group_dm_member_tuple(
+    state: &AppState,
+    group_dm_id: &str,
+    member_jid: &BareJid,
+) -> Result<(), XmppError> {
+    let tuple = Tuple::new(
+        Object::new(ObjectType::Channel, group_dm_id),
+        Relation::new("member"),
+        Subject::user(member_jid.to_string()),
+    );
+    match state.permission_actor.ask(DeleteTuple { tuple }).await {
+        Ok(()) => Ok(()),
+        Err(kameo::error::SendError::HandlerError(PermissionError::TupleNotFound)) => Ok(()),
+        Err(error) => Err(XmppError::internal(format!(
+            "Failed to roll back group-DM member: {error}"
+        ))),
+    }
 }
 
 async fn validate_group_dm_members(

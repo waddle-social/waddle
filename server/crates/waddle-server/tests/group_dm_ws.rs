@@ -97,8 +97,13 @@ fn is_error(frame: &str) -> bool {
 #[tokio::test]
 async fn group_dm_create_provisions_hidden_members_only_room_with_disco_feature() {
     let _serial = TEST_SERIAL.lock().await;
-    let server =
-        TestServer::start_with_extra_accounts(&[("alice", "alice-pass"), ("bob", "bob-pass")]);
+    let db_dir = tempfile::tempdir().expect("temp db dir");
+    let db_path = db_dir.path().join("group-dm.sqlite3");
+    let database_url = format!("sqlite://{}?mode=rwc", db_path.display());
+    let server = TestServer::start_persistent_with_extra_accounts(
+        &database_url,
+        &[("alice", "alice-pass"), ("bob", "bob-pass")],
+    );
     let mut alice = user_client(&server, "alice", "alice-pass", "group-dm-create-1").await;
 
     let missing_member_resp = send_command(
@@ -163,5 +168,22 @@ async fn group_dm_create_provisions_hidden_members_only_room_with_disco_feature(
         "group DM room must stay hidden from public room discovery: {disco}"
     );
 
+    let _ = alice.close().await;
+    drop(server);
+
+    let server = TestServer::start_persistent_with_extra_accounts(
+        &database_url,
+        &[("alice", "alice-pass"), ("bob", "bob-pass")],
+    );
+    let mut alice = user_client(&server, "alice", "alice-pass", "group-dm-restart-2").await;
+    let disco = disco_info(&mut alice, &room_jid, "group-dm-disco-after-restart").await;
+    assert!(
+        disco.contains(FEATURE_GROUP_DM),
+        "restarted server lost group DM disco feature: {disco}"
+    );
+    assert!(
+        disco.contains("muc_membersonly"),
+        "restarted group DM room must stay members-only: {disco}"
+    );
     let _ = alice.close().await;
 }

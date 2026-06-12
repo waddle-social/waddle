@@ -137,6 +137,9 @@ pub(super) async fn handle_muc_disco_info<'a>(
             channel.channel_type == "announcement",
             channel.channel_type == "forum",
         );
+        if channel.channel_type == "group-dm" {
+            features.push(Feature::new(waddle_xmpp::admin::NS_GROUP_DM_FEATURE));
+        }
         features.extend(extension_features_for_disco(state));
         let mut extensions =
             room_space_metadata_extensions(state, &room_jid, channel.description.as_deref()).await;
