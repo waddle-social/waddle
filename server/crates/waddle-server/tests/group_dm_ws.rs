@@ -105,7 +105,9 @@ async fn join_room(client: &mut WsXmppClient, room_jid: &str, nick: &str) {
     client.send(&join).await.expect("send room join");
     client
         .recv_matching(|frame| {
-            frame.contains("<presence") && frame.contains(&format!("from='{room_jid}/{nick}'"))
+            frame.contains("<presence")
+                && (frame.contains(&format!("from='{room_jid}/{nick}'"))
+                    || frame.contains(&format!("from=\"{room_jid}/{nick}\"")))
         })
         .await
         .expect("self join presence");
@@ -392,6 +394,39 @@ async fn group_dm_member_invites_new_member_with_history_access_extension() {
             .any(|frame| frame.contains("pre-add visible to full")),
         "share-all add should expose pre-add room history via server MAM: {mam:?}"
     );
+
+    let reinvite = format!(
+        "<message xmlns='jabber:client' type='normal' to='{room_jid}' id='readd-charlie'>\
+            <x xmlns='{NS_MUC_USER}'>\
+                <invite to='charlie@localhost'/>\
+            </x>\
+         </message>"
+    );
+    bob.send(&reinvite)
+        .await
+        .expect("send duplicate mediated invite");
+    let duplicate_rejection = bob
+        .recv_matching(|frame| frame.contains("readd-charlie") && frame.contains("conflict"))
+        .await
+        .expect("duplicate invite rejection");
+    assert!(
+        is_error(&duplicate_rejection),
+        "duplicate invite must be rejected: {duplicate_rejection}"
+    );
+    assert_no_frame_matching_for(
+        &mut charlie,
+        Duration::from_millis(300),
+        |frame| frame.contains("readd-charlie"),
+        "duplicate invite must not be delivered to an existing member",
+    )
+    .await;
+
+    let mam = query_room_mam(&mut charlie, &room_jid, "mam-full-after-readd").await;
+    assert!(
+        mam.iter()
+            .any(|frame| frame.contains("pre-add visible to full")),
+        "duplicate invite must not overwrite an existing full-history boundary: {mam:?}"
+    );
 }
 
 #[tokio::test]
@@ -428,6 +463,48 @@ async fn group_dm_default_add_hides_pre_add_history_from_mam() {
     )
     .await;
 
+    let foreign_invite = format!(
+        "<message xmlns='jabber:client' type='normal' to='{room_jid}' id='foreign-add-charlie'>\
+            <x xmlns='{NS_MUC_USER}'>\
+                <invite to='charlie@example.org'/>\
+            </x>\
+         </message>"
+    );
+    bob.send(&foreign_invite)
+        .await
+        .expect("send invalid-domain mediated invite");
+    let foreign_rejection = bob
+        .recv_matching(|frame| {
+            frame.contains("foreign-add-charlie") && frame.contains("bad-request")
+        })
+        .await
+        .expect("invalid-domain invite rejection");
+    assert!(
+        is_error(&foreign_rejection) && !foreign_rejection.contains("item-not-found"),
+        "invitee validation must preserve typed stanza error: {foreign_rejection}"
+    );
+
+    let missing_invite = format!(
+        "<message xmlns='jabber:client' type='normal' to='{room_jid}' id='missing-add-mallory'>\
+            <x xmlns='{NS_MUC_USER}'>\
+                <invite to='mallory@localhost'/>\
+            </x>\
+         </message>"
+    );
+    bob.send(&missing_invite)
+        .await
+        .expect("send missing invitee mediated invite");
+    let missing_rejection = bob
+        .recv_matching(|frame| {
+            frame.contains("missing-add-mallory") && frame.contains("item-not-found")
+        })
+        .await
+        .expect("missing invitee rejection");
+    assert!(
+        is_error(&missing_rejection) && !missing_rejection.contains("bad-request"),
+        "missing local invitee must preserve item-not-found stanza error: {missing_rejection}"
+    );
+
     let invite = format!(
         "<message xmlns='jabber:client' type='normal' to='{room_jid}' id='default-add-charlie'>\
             <x xmlns='{NS_MUC_USER}'>\
@@ -438,16 +515,109 @@ async fn group_dm_default_add_hides_pre_add_history_from_mam() {
     bob.send(&invite)
         .await
         .expect("send default mediated invite");
-    charlie
+    let delivered = charlie
         .recv_matching(|frame| frame.contains("default-add-charlie"))
         .await
         .expect("charlie receives default invite");
+    assert!(
+        delivered.contains("mode='from-join'") || delivered.contains("mode=\"from-join\""),
+        "default invite must stamp the effective restricted access mode: {delivered}"
+    );
+    assert!(
+        !delivered.contains("mode='full'") && !delivered.contains("mode=\"full\""),
+        "default invite must not grant full-history payload: {delivered}"
+    );
 
     let mam = query_room_mam(&mut charlie, &room_jid, "mam-default-after-add").await;
     assert!(
         !mam.iter()
             .any(|frame| frame.contains("pre-add hidden by default")),
         "default add must hide pre-add room history server-side: {mam:?}"
+    );
+}
+
+#[tokio::test]
+async fn group_dm_restricted_member_cannot_grant_full_history() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start_with_extra_accounts(&[
+        ("alice", "alice-pass"),
+        ("bob", "bob-pass"),
+        ("charlie", "charlie-pass"),
+        ("dave", "dave-pass"),
+    ]);
+    let mut alice = user_client(&server, "alice", "alice-pass", "group-dm-escalate-alice").await;
+    let mut bob = user_client(&server, "bob", "bob-pass", "group-dm-escalate-bob").await;
+    let mut charlie = user_client(
+        &server,
+        "charlie",
+        "charlie-pass",
+        "group-dm-escalate-charlie",
+    )
+    .await;
+    let mut dave = user_client(&server, "dave", "dave-pass", "group-dm-escalate-dave").await;
+
+    let room_jid = create_group_dm(
+        &mut alice,
+        "group-dm-escalate-create",
+        "Alice, Bob",
+        &["alice@localhost", "bob@localhost"],
+    )
+    .await;
+    join_room(&mut alice, &room_jid, "alice").await;
+    send_groupchat(
+        &mut alice,
+        &room_jid,
+        "before-charlie-add",
+        "hidden from restricted chain",
+    )
+    .await;
+
+    let add_charlie = format!(
+        "<message xmlns='jabber:client' type='normal' to='{room_jid}' id='default-add-charlie-for-escalation'>\
+            <x xmlns='{NS_MUC_USER}'>\
+                <invite to='charlie@localhost'/>\
+            </x>\
+         </message>"
+    );
+    bob.send(&add_charlie)
+        .await
+        .expect("send default mediated invite");
+    charlie
+        .recv_matching(|frame| frame.contains("default-add-charlie-for-escalation"))
+        .await
+        .expect("charlie receives default invite");
+
+    let add_dave = format!(
+        "<message xmlns='jabber:client' type='normal' to='{room_jid}' id='restricted-full-add-dave'>\
+            <x xmlns='{NS_MUC_USER}'>\
+                <invite to='dave@localhost'>\
+                    <history-access xmlns='{FEATURE_GROUP_DM}' mode='full'/>\
+                </invite>\
+            </x>\
+         </message>"
+    );
+    charlie
+        .send(&add_dave)
+        .await
+        .expect("restricted member sends full invite");
+    let delivered = dave
+        .recv_matching(|frame| frame.contains("restricted-full-add-dave"))
+        .await
+        .expect("dave receives mediated invite");
+    assert!(
+        delivered.contains("mode='from-join'") || delivered.contains("mode=\"from-join\""),
+        "server must stamp the effective restricted access mode: {delivered}"
+    );
+    assert!(
+        !delivered.contains("mode='full'") && !delivered.contains("mode=\"full\""),
+        "restricted inviter must not grant full-history payload: {delivered}"
+    );
+
+    let mam = query_room_mam(&mut dave, &room_jid, "mam-restricted-chain").await;
+    assert!(
+        !mam.iter()
+            .any(|frame| frame.contains("hidden from restricted chain")),
+        "restricted inviter must not escalate MAM history access: {mam:?}"
     );
 }
 
