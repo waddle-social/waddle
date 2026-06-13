@@ -21,6 +21,8 @@ pub(super) enum CommandBoundary {
     /// Push-service commands at `push.<domain>` (XEP-0050
     /// `register-device` / `disable-device`).
     PushService,
+    /// Room-scoped commands addressed to a concrete MUC room JID.
+    MucRoom,
 }
 
 impl CommandBoundary {
@@ -33,6 +35,8 @@ impl CommandBoundary {
             || node == crate::push_service::commands::DISABLE_DEVICE_NODE
         {
             Self::PushService
+        } else if node == waddle_xmpp::admin::NS_GROUP_DM_RENAME {
+            Self::MucRoom
         } else {
             Self::Server
         }

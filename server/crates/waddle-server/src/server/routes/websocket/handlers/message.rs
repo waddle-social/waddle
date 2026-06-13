@@ -345,11 +345,15 @@ async fn handle_group_dm_mediated_invite(
         Ok(config) => config.name,
         Err(_) => room_jid.to_string(),
     };
+    let shared_room_name = {
+        let trimmed = room_name.trim();
+        (!trimmed.is_empty()).then_some(trimmed)
+    };
     if crate::admin::channels::publish_group_dm_bookmark(
         &state.deps.app_state,
         &invitee,
         &room_jid,
-        &room_name,
+        shared_room_name,
     )
     .await
     .is_err()

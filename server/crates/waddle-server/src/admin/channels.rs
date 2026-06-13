@@ -21,16 +21,23 @@
 //! `room_registry` (`waddle_xmpp::muc::room_registry_actor::*`), and
 //! `muc_domain` (used to construct fresh room JIDs on `create`).
 
-use std::{collections::BTreeSet, sync::Arc};
+use std::{
+    collections::BTreeSet,
+    sync::{Arc, OnceLock},
+};
 
 use jid::{BareJid, FullJid};
+use kameo::actor::ActorRef;
+use tokio::sync::{Mutex, OwnedMutexGuard};
 use waddle_xmpp::commands::{CommandContext, CommandResult};
-use waddle_xmpp::muc::room_registry_actor::{CreateRoom, DestroyRoom, GetRoom, ListRooms};
+use waddle_xmpp::muc::room_registry_actor::{
+    CreateRoom, DestroyRoom, GetOrCreateRoom, GetRoom, ListRooms,
+};
 use waddle_xmpp::muc::{
     affiliation::FederatedAffiliationConfig,
     room_actor::{
         ApplyAdminItems, ChangeAffiliation, GetAffiliation, GetConfig, LeaveByRealJid,
-        ListAffiliations, ListOccupants, OccupantCount, UpdateConfig,
+        ListAffiliations, ListOccupants, OccupantCount, RoomActor, UpdateConfig,
     },
     AdminItem, PinPermission, RoomConfig,
 };
@@ -41,10 +48,14 @@ use waddle_xmpp::xep::xep0004::{DataForm, Field, FieldType, FormType};
 use waddle_xmpp::xep::xep0421::OccupantIdentity;
 use waddle_xmpp::XmppError;
 use waddle_xmpp::{Affiliation, ChannelInfo, Role, Stanza};
+use xmpp_parsers::message::{Message, MessageType};
+use xmpp_parsers::minidom::Element;
 
 use crate::admin::is_community_owner;
 use crate::auth::NativeUserStore;
 use crate::channel_space_links::{ChannelSpaceLink, ChannelSpaceLinkError};
+use crate::db::actor::{DbExecute, DbQuery};
+use crate::db::{row_value, ValueExt};
 use crate::permissions::{
     DeleteTuple, Object, ObjectType, PermissionError, Relation, Subject, SubjectType, Tuple,
     WriteTuple,
@@ -69,10 +80,13 @@ pub const NODE_SET_AFFILIATION: &str = waddle_xmpp::admin::NS_ADMIN_CHANNELS_SET
 pub const NODE_KICK: &str = waddle_xmpp::admin::NS_ADMIN_CHANNELS_KICK;
 pub const NODE_GROUP_DM_CREATE: &str = waddle_xmpp::admin::NS_GROUP_DM_CREATE;
 pub const NODE_GROUP_DM_LEAVE: &str = waddle_xmpp::admin::NS_GROUP_DM_LEAVE;
+pub const NODE_GROUP_DM_RENAME: &str = waddle_xmpp::admin::NS_GROUP_DM_RENAME;
 
 pub const DEFAULT_PAGE_SIZE: u32 = 50;
 pub const MAX_PAGE_SIZE: u32 = 200;
 const MAX_NAME_LEN: usize = 80;
+const NS_MUC_USER: &str = "http://jabber.org/protocol/muc#user";
+type RoomConfigLockMap = dashmap::DashMap<BareJid, Arc<Mutex<()>>>;
 
 // ---------------------------------------------------------------------------
 // Affiliation wire vocabulary
@@ -290,6 +304,12 @@ pub struct GroupDmLeaveArgs {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupDmRenameArgs {
+    pub room_jid: BareJid,
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupDmRef {
     pub room_jid: BareJid,
     pub name: String,
@@ -302,6 +322,12 @@ pub struct GroupDmRef {
 pub struct GroupDmLeaveResult {
     pub room_jid: BareJid,
     pub left: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupDmRenameResult {
+    pub room_jid: BareJid,
+    pub name: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -414,6 +440,17 @@ pub async fn register(
             })
             .await;
     }
+    {
+        let state = Arc::clone(&app_state);
+        let connections = Arc::clone(&connection_registry);
+        registry
+            .register(NODE_GROUP_DM_RENAME, "Rename group DM", move |ctx| {
+                let state = Arc::clone(&state);
+                let connections = Arc::clone(&connections);
+                async move { handle_group_dm_rename(ctx, state, connections).await }
+            })
+            .await;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -440,6 +477,12 @@ fn bad_request(text: impl Into<String>) -> AdminErr {
 
 fn internal_err(text: impl Into<String>) -> AdminErr {
     Box::new(CommandResult::Error(XmppError::internal(text.into())))
+}
+
+fn unavailable(text: impl Into<String>) -> AdminErr {
+    Box::new(CommandResult::Error(XmppError::service_unavailable(Some(
+        text.into(),
+    ))))
 }
 
 async fn handle_list(ctx: CommandContext, state: Arc<AppState>) -> CommandResult {
@@ -515,6 +558,35 @@ async fn handle_group_dm_leave(
     match run_group_dm_leave(&state, &connections, &sm_sessions, &caller_full, &args).await {
         Ok(result) => CommandResult::Completed {
             form: Some(build_group_dm_leave_form(&result)),
+            notes: vec![],
+        },
+        Err(err) => *err,
+    }
+}
+
+async fn handle_group_dm_rename(
+    ctx: CommandContext,
+    state: Arc<AppState>,
+    connections: Arc<ConnectionRegistry>,
+) -> CommandResult {
+    let caller_full = match ctx.from.clone().try_into_full() {
+        Ok(full) => full,
+        Err(_) => {
+            return *internal_err("group-DM rename requires a bound full JID");
+        }
+    };
+    let args = match parse_group_dm_rename_args(ctx.command.form.as_ref()) {
+        Ok(args) => args,
+        Err(e) => return CommandResult::Error(XmppError::bad_request(Some(e))),
+    };
+    if ctx.iq.to().map(|jid| jid.to_bare()) != Some(args.room_jid.clone()) {
+        return CommandResult::Error(XmppError::bad_request(Some(
+            "group-dm:rename must be addressed to the room_jid".to_string(),
+        )));
+    }
+    match run_group_dm_rename(&state, &connections, &caller_full, &args).await {
+        Ok(result) => CommandResult::Completed {
+            form: Some(build_group_dm_rename_form(&result)),
             notes: vec![],
         },
         Err(err) => *err,
@@ -799,6 +871,23 @@ pub fn parse_group_dm_leave_args(form: Option<&DataForm>) -> Result<GroupDmLeave
     let form = form.ok_or_else(|| "group-dm:leave requires an args form".to_string())?;
     let room_jid = parse_required_bare_jid(form, "room_jid")?;
     Ok(GroupDmLeaveArgs { room_jid })
+}
+
+pub fn parse_group_dm_rename_args(form: Option<&DataForm>) -> Result<GroupDmRenameArgs, String> {
+    let form = form.ok_or_else(|| "group-dm:rename requires an args form".to_string())?;
+    let room_jid = parse_required_bare_jid(form, "room_jid")?;
+    let name = parse_optional_text(form, "name").and_then(|value| {
+        let trimmed = value.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    });
+    if let Some(ref name) = name {
+        validate_name(name)?;
+    }
+    Ok(GroupDmRenameArgs { room_jid, name })
 }
 
 pub fn parse_update_args(form: Option<&DataForm>) -> Result<ChannelsUpdateArgs, String> {
@@ -1664,7 +1753,7 @@ async fn run_group_dm_create(
             return Err(send_err("room actor ChangeAffiliation")(error));
         }
         if let Err(error) =
-            publish_group_dm_bookmark(state, &member_jid, &room_jid, &args.name).await
+            publish_group_dm_bookmark(state, &member_jid, &room_jid, Some(&args.name)).await
         {
             rollback_group_dm_create(state, &localpart, &room_jid, &persisted_members).await;
             return Err(error);
@@ -1766,7 +1855,13 @@ async fn run_group_dm_leave(
         .await
     {
         let _ = persist_group_dm_member_tuple(state, &channel_id, &caller_bare).await;
-        let _ = publish_group_dm_bookmark(state, &caller_bare, &args.room_jid, &record.name).await;
+        let _ = publish_group_dm_bookmark(
+            state,
+            &caller_bare,
+            &args.room_jid,
+            group_dm_shared_name(&record.name),
+        )
+        .await;
         return Err(send_err("room actor ChangeAffiliation")(error));
     }
     for resource in resources {
@@ -1790,6 +1885,224 @@ async fn run_group_dm_leave(
     Ok(GroupDmLeaveResult {
         room_jid: args.room_jid.clone(),
         left,
+    })
+}
+
+async fn run_group_dm_rename(
+    state: &AppState,
+    connections: &ConnectionRegistry,
+    caller_full_jid: &FullJid,
+    args: &GroupDmRenameArgs,
+) -> Result<GroupDmRenameResult, AdminErr> {
+    let channel_id = waddle_xmpp::parse_managed_room_jid(&args.room_jid).ok_or_else(|| {
+        bad_request(format!(
+            "room_jid '{}' is not a managed group-DM room",
+            args.room_jid
+        ))
+    })?;
+    let record = get_xmpp_channel(state.db_pool.global_actor().clone(), &channel_id)
+        .await
+        .map_err(|error| internal_err(format!("channel lookup failed: {error}")))?
+        .ok_or_else(|| {
+            Box::new(CommandResult::Error(XmppError::item_not_found(Some(
+                format!("no group DM '{}'", args.room_jid),
+            ))))
+        })?;
+    if record.channel_type != waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM {
+        return Err(bad_request(format!(
+            "room_jid '{}' is not a group DM",
+            args.room_jid
+        )));
+    }
+    let _config_guard = acquire_room_config_lock(&args.room_jid).await;
+    let actor = state
+        .room_registry
+        .ask(GetOrCreateRoom {
+            room_jid: args.room_jid.clone(),
+            waddle_id: waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM.to_string(),
+            channel_id: channel_id.clone(),
+            config: group_dm_record_config(&record),
+        })
+        .await
+        .map_err(send_err("room_registry ask GetOrCreateRoom"))?;
+    hydrate_group_dm_member_affiliations(state, &actor, &channel_id).await?;
+    let snapshot = actor
+        .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+        .await
+        .map_err(send_err("room actor GetSnapshot"))?;
+    if !snapshot.room.config.group_dm {
+        return Err(bad_request(format!(
+            "room_jid '{}' is not a group DM",
+            args.room_jid
+        )));
+    }
+    let previous_config = snapshot.room.config.clone();
+    let mut config = previous_config.clone();
+    config.name = args.name.clone().unwrap_or_default();
+    let updated_snapshot = actor
+        .ask(waddle_xmpp::muc::room_actor::UpdateGroupDmConfigByMember {
+            config: config.clone(),
+            sender_jid: caller_full_jid.clone(),
+        })
+        .await
+        .map_err(group_dm_rename_update_error)?;
+    let expected_revision = updated_snapshot.config_revision;
+    if find_occupant_for_full_jid(&updated_snapshot, caller_full_jid).is_none() {
+        return Err(internal_err(
+            "group-DM rename updated without sender occupant",
+        ));
+    }
+    if !group_dm_room_config_revision_is_current(&actor, expected_revision).await {
+        return Err(Box::new(CommandResult::Error(XmppError::conflict(Some(
+            "group-DM rename was superseded by a newer update".to_string(),
+        )))));
+    }
+    if let Err(error) = upsert_group_dm_catalog(state, &channel_id, &config).await {
+        let _ = rollback_room_config_if_revision(&actor, expected_revision, previous_config).await;
+        return Err(error);
+    }
+
+    let members = match actor
+        .ask(ListAffiliations {
+            filter: Some(Affiliation::Member),
+        })
+        .await
+    {
+        Ok(members) => members,
+        Err(error) => {
+            if rollback_room_config_if_revision(&actor, expected_revision, previous_config.clone())
+                .await
+            {
+                let _ = upsert_group_dm_catalog(state, &channel_id, &previous_config).await;
+            }
+            return Err(send_err("room actor ListAffiliations")(error));
+        }
+    };
+    let mut updated_bookmark_members = Vec::with_capacity(members.len());
+    for member in &members {
+        if !group_dm_room_config_revision_is_current(&actor, expected_revision).await {
+            return Err(Box::new(CommandResult::Error(XmppError::conflict(Some(
+                "group-DM rename was superseded by a newer update".to_string(),
+            )))));
+        }
+        if let Err(error) = publish_group_dm_bookmark(
+            state,
+            &member.jid,
+            &args.room_jid,
+            group_dm_shared_name(&config.name),
+        )
+        .await
+        {
+            if rollback_room_config_if_revision(&actor, expected_revision, previous_config.clone())
+                .await
+            {
+                let _ = upsert_group_dm_catalog(state, &channel_id, &previous_config).await;
+                restore_group_dm_bookmarks(
+                    state,
+                    &args.room_jid,
+                    group_dm_shared_name(&previous_config.name),
+                    &updated_bookmark_members,
+                )
+                .await;
+            }
+            return Err(error);
+        }
+        updated_bookmark_members.push(member.jid.clone());
+    }
+
+    if !group_dm_room_config_revision_is_current(&actor, expected_revision).await {
+        return Err(Box::new(CommandResult::Error(XmppError::conflict(Some(
+            "group-DM rename was superseded by a newer update".to_string(),
+        )))));
+    }
+    let broadcast_snapshot = actor
+        .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+        .await
+        .map_err(send_err("room actor GetSnapshot"))?;
+    broadcast_group_dm_config_change(connections, &args.room_jid, &broadcast_snapshot);
+
+    Ok(GroupDmRenameResult {
+        room_jid: args.room_jid.clone(),
+        name: args.name.clone(),
+    })
+}
+
+async fn acquire_room_config_lock(room_jid: &BareJid) -> OwnedMutexGuard<()> {
+    static LOCKS: OnceLock<RoomConfigLockMap> = OnceLock::new();
+    let lock = LOCKS
+        .get_or_init(RoomConfigLockMap::new)
+        .entry(room_jid.clone())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone();
+    lock.lock_owned().await
+}
+
+async fn hydrate_group_dm_member_affiliations(
+    state: &AppState,
+    actor: &ActorRef<RoomActor>,
+    group_dm_id: &str,
+) -> Result<(), AdminErr> {
+    let members = list_durable_group_dm_members(state, group_dm_id).await?;
+    for member_jid in members {
+        actor
+            .ask(ChangeAffiliation {
+                jid: member_jid,
+                affiliation: Affiliation::Member,
+            })
+            .await
+            .map_err(send_err("room actor ChangeAffiliation"))?;
+    }
+    Ok(())
+}
+
+async fn list_durable_group_dm_members(
+    state: &AppState,
+    group_dm_id: &str,
+) -> Result<Vec<BareJid>, AdminErr> {
+    let rows = state
+        .db_pool
+        .global_actor()
+        .ask(DbQuery {
+            sql: r#"
+                SELECT subject_id
+                FROM permission_tuples
+                WHERE object_type = 'channel'
+                  AND object_id = ?
+                  AND relation = 'member'
+                  AND subject_type = 'user'
+                  AND subject_relation IS NULL
+                ORDER BY subject_id ASC
+            "#
+            .to_string(),
+            params: vec![group_dm_id.into()],
+        })
+        .await
+        .map_err(|error| internal_err(format!("group-DM member lookup failed: {error}")))?;
+    rows.into_iter()
+        .map(|row| {
+            row_value(&row, 0)
+                .and_then(ValueExt::as_string)
+                .map_err(|error| internal_err(format!("invalid group-DM member row: {error}")))
+                .and_then(|jid| {
+                    jid.parse::<BareJid>().map_err(|error| {
+                        internal_err(format!("invalid durable group-DM member JID: {error}"))
+                    })
+                })
+        })
+        .collect()
+}
+
+fn find_occupant_for_full_jid<'a>(
+    snapshot: &'a waddle_xmpp::muc::room_actor::RoomSnapshot,
+    full_jid: &FullJid,
+) -> Option<&'a waddle_xmpp::muc::Occupant> {
+    snapshot.room.occupants.values().find(|occupant| {
+        occupant.real_jid == *full_jid
+            || snapshot
+                .room
+                .get_occupant_sessions(&occupant.nick)
+                .iter()
+                .any(|session| session == full_jid)
     })
 }
 
@@ -1836,15 +2149,123 @@ fn broadcast_group_dm_leave(
     }
 }
 
+fn broadcast_group_dm_config_change(
+    connections: &ConnectionRegistry,
+    room_jid: &BareJid,
+    snapshot: &waddle_xmpp::muc::room_actor::RoomSnapshot,
+) {
+    for occupant in snapshot.room.occupants.values() {
+        for recipient_jid in snapshot.room.get_occupant_sessions(&occupant.nick) {
+            let message = build_group_dm_config_change_message(room_jid, &recipient_jid);
+            let _ = connections.try_send_to(&recipient_jid, Stanza::Message(message));
+        }
+    }
+}
+
+fn build_group_dm_config_change_message(room_jid: &BareJid, to_jid: &FullJid) -> Message {
+    let status = Element::builder("status", NS_MUC_USER)
+        .attr(minidom::rxml::xml_ncname!("code").to_owned(), "104")
+        .build();
+    let x = Element::builder("x", NS_MUC_USER).append(status).build();
+    let mut message = Message::new(Some(jid::Jid::from(to_jid.clone())));
+    message.from = Some(jid::Jid::from(room_jid.clone()));
+    message.type_ = MessageType::Groupchat;
+    message.payloads.push(x);
+    message
+}
+
+async fn restore_group_dm_bookmarks(
+    state: &AppState,
+    room_jid: &BareJid,
+    previous_name: Option<&str>,
+    updated_members: &[BareJid],
+) {
+    for member_jid in updated_members {
+        let _ = publish_group_dm_bookmark(state, member_jid, room_jid, previous_name).await;
+    }
+}
+
+async fn rollback_room_config_if_revision(
+    actor: &ActorRef<RoomActor>,
+    expected_revision: u64,
+    previous_config: RoomConfig,
+) -> bool {
+    actor
+        .ask(waddle_xmpp::muc::room_actor::RollbackConfigIfRevision {
+            expected_revision,
+            config: previous_config,
+        })
+        .await
+        .unwrap_or(false)
+}
+
+async fn group_dm_room_config_revision_is_current(
+    actor: &ActorRef<RoomActor>,
+    expected: u64,
+) -> bool {
+    actor
+        .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+        .await
+        .map(|snapshot| snapshot.config_revision == expected)
+        .unwrap_or(false)
+}
+
+fn group_dm_record_config(record: &XmppChannelRecord) -> RoomConfig {
+    RoomConfig {
+        name: record.name.clone(),
+        description: record.description.clone(),
+        persistent: true,
+        members_only: true,
+        public_room: false,
+        moderated: false,
+        enable_logging: true,
+        group_dm: true,
+        pin_permission: record.pin_permission,
+        federated_affiliation_config: FederatedAffiliationConfig::open_none(),
+        ..RoomConfig::default()
+    }
+}
+
+fn group_dm_shared_name(name: &str) -> Option<&str> {
+    let trimmed = name.trim();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
+fn group_dm_rename_update_error(
+    error: kameo::error::SendError<
+        waddle_xmpp::muc::room_actor::UpdateGroupDmConfigByMember,
+        waddle_xmpp::muc::room_actor::UpdateGroupDmConfigByMemberError,
+    >,
+) -> AdminErr {
+    use waddle_xmpp::muc::room_actor::UpdateGroupDmConfigByMemberError;
+
+    match error {
+        kameo::error::SendError::HandlerError(error) => match error {
+            UpdateGroupDmConfigByMemberError::NotGroupDm => {
+                bad_request("room_jid is not a group DM")
+            }
+            UpdateGroupDmConfigByMemberError::NotMember => {
+                unavailable("Command is not available on this service")
+            }
+            UpdateGroupDmConfigByMemberError::NotOccupant => {
+                Box::new(CommandResult::Error(XmppError::forbidden(Some(
+                    "Only joined group-DM occupants can rename the room".to_string(),
+                ))))
+            }
+        },
+        error => internal_err(format!("room actor UpdateGroupDmConfigByMember: {error}")),
+    }
+}
+
 pub(crate) async fn publish_group_dm_bookmark(
     state: &AppState,
     member_jid: &BareJid,
     room_jid: &BareJid,
-    name: &str,
+    name: Option<&str>,
 ) -> Result<(), AdminErr> {
-    let bookmark = waddle_xmpp::xep::xep0402::Bookmark::new(room_jid.clone())
-        .with_name(name)
-        .with_autojoin(true);
+    let mut bookmark = existing_group_dm_bookmark(state, member_jid, room_jid).await?;
+    bookmark.name = name.map(str::to_string);
+    bookmark.autojoin = true;
     let item = waddle_xmpp::xep::xep0402::build_bookmark_item(&bookmark);
     state
         .pubsub_storage
@@ -1858,6 +2279,31 @@ pub(crate) async fn publish_group_dm_bookmark(
         .await
         .map(|_| ())
         .map_err(|error| internal_err(format!("failed to publish group-DM bookmark: {error}")))
+}
+
+async fn existing_group_dm_bookmark(
+    state: &AppState,
+    member_jid: &BareJid,
+    room_jid: &BareJid,
+) -> Result<waddle_xmpp::xep::xep0402::Bookmark, AdminErr> {
+    let item_id = room_jid.to_string();
+    let item_filter = [item_id.clone()];
+    let existing = state
+        .pubsub_storage
+        .get_items(
+            member_jid,
+            waddle_xmpp::xep::xep0402::PEP_NODE,
+            Some(1),
+            &item_filter,
+        )
+        .await
+        .map_err(|error| internal_err(format!("failed to read group-DM bookmark: {error}")))?;
+    Ok(existing
+        .into_iter()
+        .next()
+        .and_then(|item| item.to_pubsub_item().payload)
+        .and_then(|payload| waddle_xmpp::xep::xep0402::parse_bookmark(&item_id, &payload).ok())
+        .unwrap_or_else(|| waddle_xmpp::xep::xep0402::Bookmark::new(room_jid.clone())))
 }
 
 pub(crate) async fn retract_group_dm_bookmark(
@@ -1901,19 +2347,81 @@ pub(crate) async fn persist_group_dm_member_tuple(
     group_dm_id: &str,
     member_jid: &BareJid,
 ) -> Result<(), XmppError> {
+    persist_group_dm_member_actor_tuple(state, group_dm_id, member_jid).await?;
+    if let Err(error) = persist_durable_group_dm_member_tuple(state, group_dm_id, member_jid).await
+    {
+        let _ = delete_group_dm_member_actor_tuple(state, group_dm_id, member_jid).await;
+        return Err(error);
+    }
+    Ok(())
+}
+
+async fn persist_group_dm_member_actor_tuple(
+    state: &AppState,
+    group_dm_id: &str,
+    member_jid: &BareJid,
+) -> Result<(), XmppError> {
     let tuple = Tuple::new(
         Object::new(ObjectType::Channel, group_dm_id),
         Relation::new("member"),
         Subject::user(member_jid.to_string()),
     );
+    match state.permission_actor.ask(WriteTuple { tuple }).await {
+        Ok(()) => {}
+        Err(kameo::error::SendError::HandlerError(PermissionError::TupleAlreadyExists)) => {}
+        Err(error) => {
+            return Err(XmppError::internal(format!(
+                "Failed to persist group-DM member: {error}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+async fn persist_durable_group_dm_member_tuple(
+    state: &AppState,
+    group_dm_id: &str,
+    member_jid: &BareJid,
+) -> Result<(), XmppError> {
     state
-        .permission_actor
-        .ask(WriteTuple { tuple })
+        .db_pool
+        .global_actor()
+        .ask(DbExecute {
+            sql: r#"
+                INSERT OR IGNORE INTO permission_tuples
+                    (id, object_type, object_id, relation, subject_type, subject_id, subject_relation)
+                VALUES (?, 'channel', ?, 'member', 'user', ?, NULL)
+            "#
+            .to_string(),
+            params: vec![
+                format!("group-dm-member:{group_dm_id}:{member_jid}").into(),
+                group_dm_id.into(),
+                member_jid.to_string().into(),
+            ],
+        })
         .await
-        .map_err(|error| XmppError::internal(format!("Failed to persist group-DM member: {error}")))
+        .map(|_| ())
+        .map_err(|error| {
+            XmppError::internal(format!("Failed to persist durable group-DM member: {error}"))
+        })
 }
 
 async fn delete_group_dm_member_tuple(
+    state: &AppState,
+    group_dm_id: &str,
+    member_jid: &BareJid,
+) -> Result<(), XmppError> {
+    delete_group_dm_member_actor_tuple(state, group_dm_id, member_jid).await?;
+    match delete_durable_group_dm_member_tuple(state, group_dm_id, member_jid).await {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = persist_group_dm_member_actor_tuple(state, group_dm_id, member_jid).await;
+            Err(error)
+        }
+    }
+}
+
+async fn delete_group_dm_member_actor_tuple(
     state: &AppState,
     group_dm_id: &str,
     member_jid: &BareJid,
@@ -1924,12 +2432,43 @@ async fn delete_group_dm_member_tuple(
         Subject::user(member_jid.to_string()),
     );
     match state.permission_actor.ask(DeleteTuple { tuple }).await {
-        Ok(()) => Ok(()),
-        Err(kameo::error::SendError::HandlerError(PermissionError::TupleNotFound)) => Ok(()),
-        Err(error) => Err(XmppError::internal(format!(
-            "Failed to roll back group-DM member: {error}"
-        ))),
+        Ok(()) => {}
+        Err(kameo::error::SendError::HandlerError(PermissionError::TupleNotFound)) => {}
+        Err(error) => {
+            return Err(XmppError::internal(format!(
+                "Failed to roll back group-DM member: {error}"
+            )));
+        }
     }
+    Ok(())
+}
+
+async fn delete_durable_group_dm_member_tuple(
+    state: &AppState,
+    group_dm_id: &str,
+    member_jid: &BareJid,
+) -> Result<(), XmppError> {
+    state
+        .db_pool
+        .global_actor()
+        .ask(DbExecute {
+            sql: r#"
+                DELETE FROM permission_tuples
+                WHERE object_type = 'channel'
+                  AND object_id = ?
+                  AND relation = 'member'
+                  AND subject_type = 'user'
+                  AND subject_id = ?
+                  AND subject_relation IS NULL
+            "#
+            .to_string(),
+            params: vec![group_dm_id.into(), member_jid.to_string().into()],
+        })
+        .await
+        .map(|_| ())
+        .map_err(|error| {
+            XmppError::internal(format!("Failed to delete durable group-DM member: {error}"))
+        })
 }
 
 pub(crate) async fn rollback_group_dm_member_tuple(
@@ -2012,6 +2551,7 @@ async fn run_update(state: &AppState, args: &ChannelsUpdateArgs) -> Result<Chann
             ))))
         })?;
 
+    let _config_guard = acquire_room_config_lock(&args.channel_jid).await;
     let existing = actor
         .ask(GetConfig)
         .await
@@ -2056,7 +2596,7 @@ async fn run_update(state: &AppState, args: &ChannelsUpdateArgs) -> Result<Chann
         None
     };
 
-    actor
+    let expected_revision = actor
         .ask(UpdateConfig {
             config: updated.clone(),
         })
@@ -2064,11 +2604,7 @@ async fn run_update(state: &AppState, args: &ChannelsUpdateArgs) -> Result<Chann
         .map_err(send_err("room actor UpdateConfig"))?;
 
     if let Err(error) = upsert_channel_catalog(state, &channel_id, &updated).await {
-        let _ = actor
-            .ask(UpdateConfig {
-                config: existing.clone(),
-            })
-            .await;
+        let _ = rollback_room_config_if_revision(&actor, expected_revision, existing.clone()).await;
         return Err(error);
     }
 
@@ -2085,34 +2621,31 @@ async fn run_update(state: &AppState, args: &ChannelsUpdateArgs) -> Result<Chann
         {
             Ok(created) => created,
             Err(error) => {
-                let _ = actor
-                    .ask(UpdateConfig {
-                        config: existing.clone(),
-                    })
-                    .await;
-                restore_channel_catalog_snapshot(state, &channel_id, catalog_snapshot.as_ref())
-                    .await;
+                if rollback_room_config_if_revision(&actor, expected_revision, existing.clone())
+                    .await
+                {
+                    restore_channel_catalog_snapshot(state, &channel_id, catalog_snapshot.as_ref())
+                        .await;
+                }
                 return Err(error);
             }
         };
         if let Err(error) =
             retract_duplicate_channel_bookmarks(state, &node, &channel_id, &args.channel_jid).await
         {
-            let _ = actor
-                .ask(UpdateConfig {
-                    config: existing.clone(),
-                })
+            if rollback_room_config_if_revision(&actor, expected_revision, existing.clone()).await {
+                restore_channel_catalog_snapshot(state, &channel_id, catalog_snapshot.as_ref())
+                    .await;
+                restore_channel_space_bookmark(
+                    state,
+                    &node,
+                    &item_id,
+                    &channel_id,
+                    previous_bookmark.as_ref(),
+                    parent_tuple_created,
+                )
                 .await;
-            restore_channel_catalog_snapshot(state, &channel_id, catalog_snapshot.as_ref()).await;
-            restore_channel_space_bookmark(
-                state,
-                &node,
-                &item_id,
-                &channel_id,
-                previous_bookmark.as_ref(),
-                parent_tuple_created,
-            )
-            .await;
+            }
             return Err(error);
         }
     }
@@ -2805,6 +3338,18 @@ pub fn build_group_dm_leave_form(result: &GroupDmLeaveResult) -> DataForm {
             Field::new("room_jid", FieldType::JidSingle).with_value(result.room_jid.to_string()),
         )
         .add_field(Field::text_single("left", bool_str(result.left)))
+}
+
+pub fn build_group_dm_rename_form(result: &GroupDmRenameResult) -> DataForm {
+    DataForm::new(FormType::Result)
+        .add_field(Field::form_type(NODE_GROUP_DM_RENAME))
+        .add_field(
+            Field::new("room_jid", FieldType::JidSingle).with_value(result.room_jid.to_string()),
+        )
+        .add_field(Field::text_single(
+            "name",
+            result.name.clone().unwrap_or_default(),
+        ))
 }
 
 pub fn build_occupants_form(result: &ChannelsOccupantsResult) -> DataForm {
