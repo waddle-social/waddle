@@ -2,8 +2,12 @@
 
 mod ws_common;
 
-use std::time::Duration;
+use std::{
+    str::FromStr,
+    time::{Duration, Instant},
+};
 
+use sqlx::Row;
 use tokio::sync::Mutex;
 use ws_common::{TestServer, WsXmppClient};
 use xmpp_parsers::minidom::Element;
@@ -18,7 +22,12 @@ const NODE_GROUP_DM_RENAME: &str = "urn:waddle:group-dm:rename:0";
 const FEATURE_GROUP_DM: &str = "urn:waddle:group-dm:0";
 const NS_MUC_USER: &str = "http://jabber.org/protocol/muc#user";
 const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
+const NS_PUSH: &str = "urn:xmpp:push:0";
+const NS_WADDLE_PUSH_CONTEXT: &str = "urn:waddle:push:context:0";
 const PEP_NODE_BOOKMARKS: &str = "urn:xmpp:bookmarks:1";
+const PUSH_SERVICE_JID: &str = "push.localhost";
+const REGISTER_DEVICE_FORM_TYPE: &str = "urn:waddle:push-service:commands:register-device:0";
+const REGISTER_DEVICE_NODE: &str = "register-device";
 
 static TEST_SERIAL: Mutex<()> = Mutex::const_new(());
 
@@ -89,6 +98,113 @@ async fn send_command_to(
         .recv_matching(|frame| frame.contains("<iq") && frame_has_iq_id(frame, id))
         .await
         .expect("iq response")
+}
+
+async fn send_iq(client: &mut WsXmppClient, to: &str, id: &str, payload: Element) -> String {
+    let iq = Element::builder("iq", "jabber:client")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), to)
+        .append(payload)
+        .build();
+    client.send(&element_to_xml(iq)).await.expect("send iq");
+    client
+        .recv_matching(|frame| frame.contains("<iq") && frame_has_iq_id(frame, id))
+        .await
+        .expect("iq response")
+}
+
+async fn register_web_push_device_via_xep0050(
+    client: &mut WsXmppClient,
+    id_prefix: &str,
+    endpoint: &str,
+) -> String {
+    let execute = Element::builder("command", NS_COMMANDS)
+        .attr(
+            minidom::rxml::xml_ncname!("node").to_owned(),
+            REGISTER_DEVICE_NODE,
+        )
+        .attr(minidom::rxml::xml_ncname!("action").to_owned(), "execute")
+        .build();
+    let execute_id = format!("{id_prefix}-execute");
+    let executing_response = send_iq(client, PUSH_SERVICE_JID, &execute_id, execute).await;
+    let executing = parse_single_command_response(&executing_response, &execute_id);
+    assert!(
+        executing.attr("status") == Some("executing"),
+        "push register execute should start XEP-0050 session: {executing_response}"
+    );
+    let session_id = executing
+        .attr("sessionid")
+        .map(str::to_string)
+        .unwrap_or_else(|| panic!("push register execute missing sessionid: {executing_response}"));
+
+    let complete = Element::builder("command", NS_COMMANDS)
+        .attr(
+            minidom::rxml::xml_ncname!("node").to_owned(),
+            REGISTER_DEVICE_NODE,
+        )
+        .attr(minidom::rxml::xml_ncname!("action").to_owned(), "complete")
+        .attr(
+            minidom::rxml::xml_ncname!("sessionid").to_owned(),
+            session_id.as_str(),
+        )
+        .append(submit_form(
+            REGISTER_DEVICE_FORM_TYPE,
+            vec![
+                text_field("platform", "web"),
+                text_field("environment", "prod"),
+                text_field("app-id", "web"),
+                text_field("web-push-endpoint", endpoint),
+                text_field("web-push-p256dh", "group-dm-p256-key"),
+                text_field("web-push-auth", "group-dm-auth-secret"),
+            ],
+        ))
+        .build();
+    let complete_id = format!("{id_prefix}-complete");
+    let completed_response = send_iq(client, PUSH_SERVICE_JID, &complete_id, complete).await;
+    let completed = parse_single_command_response(&completed_response, &complete_id);
+    assert!(
+        completed.attr("status") == Some("completed"),
+        "push register complete should finish XEP-0050 session: {completed_response}"
+    );
+    extract_field(&completed_response, "node")
+        .unwrap_or_else(|| panic!("push register result missing node: {completed_response}"))
+}
+
+fn parse_single_command_response(xml: &str, id: &str) -> Element {
+    let iq = Element::from_str(xml).unwrap_or_else(|error| {
+        panic!("invalid IQ XML for {id}: {error}: {xml}");
+    });
+    assert_eq!(iq.name(), "iq", "expected IQ response for {id}: {xml}");
+    assert_eq!(iq.attr("id"), Some(id), "unexpected IQ id for {id}: {xml}");
+    assert_eq!(
+        iq.attr("type"),
+        Some("result"),
+        "expected IQ result for {id}: {xml}"
+    );
+    let mut commands = iq
+        .children()
+        .filter(|child| child.is("command", NS_COMMANDS));
+    let command = commands
+        .next()
+        .unwrap_or_else(|| panic!("IQ response missing XEP-0050 command for {id}: {xml}"))
+        .clone();
+    assert!(
+        commands.next().is_none(),
+        "IQ response should contain exactly one command for {id}: {xml}"
+    );
+    command
+}
+
+async fn enable_push(client: &mut WsXmppClient, id: &str, node: &str) -> String {
+    let enable = Element::builder("enable", NS_PUSH)
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            PUSH_SERVICE_JID,
+        )
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+        .build();
+    send_iq(client, DOMAIN, id, enable).await
 }
 
 async fn rename_group_dm(
@@ -352,6 +468,99 @@ async fn assert_no_frame_matching_for<F>(
             Err(error) => panic!("{description}: receive failed: {error}"),
         }
     }
+}
+
+async fn wait_for_push_publish_job(
+    pool: &sqlx::SqlitePool,
+    owner: &str,
+    node: &str,
+    after_count: i64,
+) -> String {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let count: i64 = sqlx::query(
+            "SELECT COUNT(*) AS count \
+             FROM push_publish_jobs \
+             WHERE owner_bare_jid = ? AND node = ?",
+        )
+        .bind(owner)
+        .bind(node)
+        .fetch_one(pool)
+        .await
+        .expect("count push publish jobs")
+        .get("count");
+        if count > after_count {
+            let row = sqlx::query(
+                "SELECT payload_xml \
+             FROM push_publish_jobs \
+             WHERE owner_bare_jid = ? AND node = ? \
+             ORDER BY created_at_ms DESC \
+             LIMIT 1",
+            )
+            .bind(owner)
+            .bind(node)
+            .fetch_one(pool)
+            .await
+            .expect("query push publish job");
+            return row.get("payload_xml");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for push publish job for {owner} on {node}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+async fn open_push_publish_job_pool(database_url: &str) -> sqlx::SqlitePool {
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+
+    let options = SqliteConnectOptions::from_str(database_url)
+        .expect("parse sqlite url")
+        .busy_timeout(Duration::from_secs(5));
+    SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .expect("open sqlite db with busy_timeout")
+}
+
+async fn push_publish_job_count(pool: &sqlx::SqlitePool, owner: &str, node: &str) -> i64 {
+    let row = sqlx::query(
+        "SELECT COUNT(*) AS count \
+         FROM push_publish_jobs \
+         WHERE owner_bare_jid = ? AND node = ?",
+    )
+    .bind(owner)
+    .bind(node)
+    .fetch_one(pool)
+    .await
+    .expect("count push publish jobs");
+    row.get("count")
+}
+
+fn assert_group_dm_push_context(payload: &str, room_jid: &str) {
+    let notification = Element::from_str(payload).unwrap_or_else(|error| {
+        panic!("invalid XEP-0357 notification payload: {error}: {payload}");
+    });
+    assert!(
+        notification.is("notification", NS_PUSH),
+        "push payload must be XEP-0357 notification: {payload}"
+    );
+    let context = notification
+        .children()
+        .find(|child| child.is("context", NS_WADDLE_PUSH_CONTEXT))
+        .unwrap_or_else(|| panic!("push payload missing Waddle context: {payload}"));
+    assert_eq!(
+        context.attr("class"),
+        Some("notify_all"),
+        "fresh group-DM plain message should use notify_all context: {payload}"
+    );
+    assert_eq!(
+        context.attr("conversation"),
+        Some(room_jid),
+        "fresh group-DM push should target the room conversation: {payload}"
+    );
 }
 
 fn submit_form(node: &str, fields: Vec<Element>) -> Element {
@@ -1217,6 +1426,63 @@ async fn group_dm_room_advertises_rename_command() {
             && command_info.contains(NS_DATA),
         "group-DM rename command disco#info should describe the command form surface: {command_info}"
     );
+}
+
+#[tokio::test]
+async fn fresh_group_dm_plain_message_pushes_offline_member_by_default() {
+    let _serial = TEST_SERIAL.lock().await;
+    let db_dir = tempfile::tempdir().expect("temp db dir");
+    let db_path = db_dir.path().join("group-dm-default-push.sqlite3");
+    let database_url = format!("sqlite://{}?mode=rwc", db_path.display());
+    let server = TestServer::start_persistent_with_extra_envs(
+        &database_url,
+        &[("alice", "alice-pass"), ("bob", "bob-pass")],
+        &[
+            ("WADDLE_NOTIFICATION_OUTBOX_JANITOR_INTERVAL", "1"),
+            ("WADDLE_XMPP_PUBSUB_DATABASE_URL", &database_url),
+        ],
+    );
+    let mut alice = user_client(&server, "alice", "alice-pass", "group-dm-push-alice").await;
+    let mut bob = user_client(&server, "bob", "bob-pass", "group-dm-push-bob").await;
+
+    let push_node = register_web_push_device_via_xep0050(
+        &mut bob,
+        "group-dm-bob-push",
+        "https://push.example.com/endpoint/group-dm-bob",
+    )
+    .await;
+    let enable = enable_push(&mut bob, "group-dm-bob-enable-push", &push_node).await;
+    assert!(is_result(&enable), "expected push enable result: {enable}");
+    let _ = bob.close().await;
+
+    let room_jid = create_group_dm(
+        &mut alice,
+        "group-dm-push-create",
+        "Alice, Bob",
+        &["alice@localhost", "bob@localhost"],
+    )
+    .await;
+    join_room(&mut alice, &room_jid, "alice").await;
+    let push_jobs = open_push_publish_job_pool(&database_url).await;
+    let before_message_job_count =
+        push_publish_job_count(&push_jobs, "bob@localhost", &push_node).await;
+
+    send_groupchat(
+        &mut alice,
+        &room_jid,
+        "group-dm-default-push-message",
+        "default group DM notification",
+    )
+    .await;
+
+    let payload = wait_for_push_publish_job(
+        &push_jobs,
+        "bob@localhost",
+        &push_node,
+        before_message_job_count,
+    )
+    .await;
+    assert_group_dm_push_context(&payload, &room_jid);
 }
 
 #[tokio::test]

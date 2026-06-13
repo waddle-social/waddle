@@ -243,6 +243,29 @@ describe("createNotifySettingsStore", () => {
     expect(store.bookmarks.value["general@example.com"].notifyMode).toBe("on-mention");
   });
 
+  test("group DM modes publish through the XEP-0402 room bookmark carrier", async () => {
+    const store = createNotifySettingsStore();
+    const fake = new FakeXmppClient([]);
+
+    for (const mode of ["always", "on-mention", "never"] as const) {
+      const result = await store.setMode(asClient(fake), {
+        roomJid: "group-dm-launch@muc.example.com",
+        mode,
+        kind: "private-group",
+        name: "Launch Crew",
+      });
+      expect(result).toBe("ok");
+    }
+
+    expect(fake.published).toEqual([
+      { roomJid: "group-dm-launch@muc.example.com", mode: "always", name: "Launch Crew", richPayloadOptIn: false },
+      { roomJid: "group-dm-launch@muc.example.com", mode: "on-mention", name: "Launch Crew", richPayloadOptIn: false },
+      { roomJid: "group-dm-launch@muc.example.com", mode: "never", name: "Launch Crew", richPayloadOptIn: false },
+    ]);
+    expect(fake.dmPublished).toEqual([]);
+    expect(store.getMode("group-dm-launch@muc.example.com", "private-group")).toBe("never");
+  });
+
   test("setMode preserves cached entries for other rooms", async () => {
     const store = createNotifySettingsStore();
     store.replaceAll([
