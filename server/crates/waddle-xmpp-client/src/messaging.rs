@@ -18,7 +18,8 @@ mod types;
 pub use builders::{
     build_chat_state_message, build_correction_message, build_displayed_message,
     build_file_sharing_element, build_moderation_message, build_outbound_message,
-    build_pinned_message, build_reaction_message, build_retraction_message, build_unpinned_message,
+    build_pinned_chat_message, build_pinned_message, build_reaction_message,
+    build_retraction_message, build_unpinned_chat_message, build_unpinned_message,
 };
 pub use call::{
     build_finish, build_finish_migrated, build_finish_with_options, build_finish_with_reason,

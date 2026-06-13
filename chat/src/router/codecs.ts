@@ -34,17 +34,6 @@ function encodeThreadStack(stack: readonly string[]): string | null {
   return `thread=${stack.map((id) => encodeURIComponent(id)).join(",")}`;
 }
 
-export const threadSearch: SearchCodec<{ thread: string[] }> = {
-  encode: ({ thread }) => {
-    const encoded = encodeThreadStack(thread);
-    return encoded ? `?${encoded}` : "";
-  },
-  decode: (searchString) => {
-    if (!searchString) return { thread: [] };
-    return { thread: decodeThreadStack(stripLeadingQuestion(searchString)) };
-  },
-};
-
 export const threadAndPinnedSearch: SearchCodec<{ thread: string[]; pinned: boolean }> = {
   encode: ({ thread, pinned }) => {
     const parts: string[] = [];

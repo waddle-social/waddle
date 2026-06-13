@@ -22,15 +22,18 @@ use xmpp_parsers::iq::Iq;
 use xmpp_parsers::minidom::Element;
 
 /// Detects `<iq type='get'><query xmlns='urn:waddle:pin:0'/></iq>`
-/// targeting a MUC room JID.
-pub(super) fn is_pin_query_iq(iq: &Iq, muc_domain: &str) -> bool {
+/// targeting either a MUC room JID or a local bare 1:1 peer JID.
+pub(super) fn is_pin_query_iq(iq: &Iq, muc_domain: &str, xmpp_domain: &str) -> bool {
     let Iq::Get { payload, .. } = iq else {
         return false;
     };
     if payload.name() != "query" || payload.ns() != NS_WADDLE_PIN_V0 {
         return false;
     }
-    iq.to().is_some_and(|to| to.domain().as_str() == muc_domain)
+    iq.to().is_some_and(|to| {
+        to.resource().is_none()
+            && (to.domain().as_str() == muc_domain || to.domain().as_str() == xmpp_domain)
+    })
 }
 
 pub(super) async fn handle_pin_query_iq(
@@ -61,8 +64,18 @@ pub(super) async fn handle_pin_query_iq(
             iq.id(),
             response_from,
             response_to,
-            bad_request_iq_error("Pin query 'to' must be a bare room JID."),
+            bad_request_iq_error("Pin query 'to' must be a bare room or peer JID."),
         )];
+    }
+    if target.domain().as_str() != state.deps.service_domains.muc {
+        return handle_dm_pin_query_iq(
+            iq,
+            state,
+            sender,
+            target.to_bare(),
+            response_from,
+            response_to,
+        );
     }
     let room_jid = target.to_bare();
 
@@ -157,47 +170,40 @@ pub(super) async fn handle_pin_query_iq(
         }
     };
 
+    build_pin_query_result(iq, entries, response_from, response_to)
+}
+
+fn handle_dm_pin_query_iq(
+    iq: &Iq,
+    state: &WebSocketState,
+    sender: &FullJid,
+    peer: jid::BareJid,
+    response_from: Option<&str>,
+    response_to: Option<&str>,
+) -> Vec<String> {
+    if peer.domain() != sender.domain() {
+        return vec![build_iq_error_xml_typed(
+            iq.id(),
+            response_from,
+            response_to,
+            forbidden_iq_error("DM pin list is visible only to local conversation participants."),
+        )];
+    }
+    let key = crate::server::routes::websocket::DmPairKey::new(sender.to_bare(), peer);
+    let entries = state.deps.protocol.dm_pin_store.list(&key);
+    build_pin_query_result(iq, entries, response_from, response_to)
+}
+
+fn build_pin_query_result(
+    iq: &Iq,
+    entries: Vec<waddle_xmpp::muc::PinnedEntry>,
+    response_from: Option<&str>,
+    response_to: Option<&str>,
+) -> Vec<String> {
     let mut query = Element::builder("query", NS_WADDLE_PIN_V0).build();
     for entry in entries {
-        let mut pin_elem = Element::builder("pin", NS_WADDLE_PIN_V0)
-            .attr(
-                minidom::rxml::xml_ncname!("id").to_owned(),
-                entry.target_stanza_id.id.as_str(),
-            )
-            .attr(
-                minidom::rxml::xml_ncname!("by").to_owned(),
-                entry.pinner_jid.to_string().as_str(),
-            )
-            .attr(
-                minidom::rxml::xml_ncname!("at").to_owned(),
-                entry.pinned_at.to_rfc3339().as_str(),
-            )
-            .build();
-        let mut preview = Element::builder("preview", NS_WADDLE_PIN_V0).build();
-        let mut author = Element::builder("author", NS_WADDLE_PIN_V0)
-            .attr(
-                minidom::rxml::xml_ncname!("jid").to_owned(),
-                entry.preview.author_jid.to_string().as_str(),
-            )
-            .build();
-        if let Some(ref nick) = entry.preview.author_nick {
-            author.set_attr(
-                minidom::rxml::Namespace::NONE,
-                minidom::rxml::xml_ncname!("nick").to_owned(),
-                nick,
-            );
-        }
-        preview.append_child(author);
-        let mut text = Element::builder("text", NS_WADDLE_PIN_V0).build();
-        text.append_text_node(&entry.preview.text);
-        preview.append_child(text);
-        let mut ts = Element::builder("ts", NS_WADDLE_PIN_V0).build();
-        ts.append_text_node(entry.preview.message_timestamp.to_rfc3339());
-        preview.append_child(ts);
-        pin_elem.append_child(preview);
-        query.append_child(pin_elem);
+        append_pin_entry(&mut query, entry);
     }
-
     let response = Iq::Result {
         from: response_from.and_then(|s| jid::Jid::from_str(s).ok()),
         to: response_to.and_then(|s| jid::Jid::from_str(s).ok()),
@@ -205,6 +211,46 @@ pub(super) async fn handle_pin_query_iq(
         payload: Some(query),
     };
     vec![iq_to_xml(response)]
+}
+
+fn append_pin_entry(query: &mut Element, entry: waddle_xmpp::muc::PinnedEntry) {
+    let mut pin_elem = Element::builder("pin", NS_WADDLE_PIN_V0)
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            entry.target_stanza_id.id.as_str(),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("by").to_owned(),
+            entry.pinner_jid.to_string().as_str(),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("at").to_owned(),
+            entry.pinned_at.to_rfc3339().as_str(),
+        )
+        .build();
+    let mut preview = Element::builder("preview", NS_WADDLE_PIN_V0).build();
+    let mut author = Element::builder("author", NS_WADDLE_PIN_V0)
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            entry.preview.author_jid.to_string().as_str(),
+        )
+        .build();
+    if let Some(ref nick) = entry.preview.author_nick {
+        author.set_attr(
+            minidom::rxml::Namespace::NONE,
+            minidom::rxml::xml_ncname!("nick").to_owned(),
+            nick,
+        );
+    }
+    preview.append_child(author);
+    let mut text = Element::builder("text", NS_WADDLE_PIN_V0).build();
+    text.append_text_node(&entry.preview.text);
+    preview.append_child(text);
+    let mut ts = Element::builder("ts", NS_WADDLE_PIN_V0).build();
+    ts.append_text_node(entry.preview.message_timestamp.to_rfc3339());
+    preview.append_child(ts);
+    pin_elem.append_child(preview);
+    query.append_child(pin_elem);
 }
 
 #[cfg(test)]
@@ -224,21 +270,21 @@ mod tests {
     fn is_pin_query_iq_accepts_well_formed_get() {
         let payload = Element::builder("query", NS_WADDLE_PIN_V0).build();
         let iq = iq_get_with_payload(payload, Some("room@conf.example"));
-        assert!(is_pin_query_iq(&iq, "conf.example"));
+        assert!(is_pin_query_iq(&iq, "conf.example", "example.com"));
     }
 
     #[test]
     fn is_pin_query_iq_rejects_wrong_namespace() {
         let payload = Element::builder("query", "wrong:ns").build();
         let iq = iq_get_with_payload(payload, Some("room@conf.example"));
-        assert!(!is_pin_query_iq(&iq, "conf.example"));
+        assert!(!is_pin_query_iq(&iq, "conf.example", "example.com"));
     }
 
     #[test]
     fn is_pin_query_iq_rejects_wrong_element_name() {
         let payload = Element::builder("items", NS_WADDLE_PIN_V0).build();
         let iq = iq_get_with_payload(payload, Some("room@conf.example"));
-        assert!(!is_pin_query_iq(&iq, "conf.example"));
+        assert!(!is_pin_query_iq(&iq, "conf.example", "example.com"));
     }
 
     #[test]
@@ -250,20 +296,27 @@ mod tests {
             id: "test-iq".into(),
             payload,
         };
-        assert!(!is_pin_query_iq(&iq, "conf.example"));
+        assert!(!is_pin_query_iq(&iq, "conf.example", "example.com"));
     }
 
     #[test]
     fn is_pin_query_iq_rejects_missing_to() {
         let payload = Element::builder("query", NS_WADDLE_PIN_V0).build();
         let iq = iq_get_with_payload(payload, None);
-        assert!(!is_pin_query_iq(&iq, "conf.example"));
+        assert!(!is_pin_query_iq(&iq, "conf.example", "example.com"));
     }
 
     #[test]
     fn is_pin_query_iq_rejects_wrong_domain() {
         let payload = Element::builder("query", NS_WADDLE_PIN_V0).build();
         let iq = iq_get_with_payload(payload, Some("room@other.example"));
-        assert!(!is_pin_query_iq(&iq, "conf.example"));
+        assert!(!is_pin_query_iq(&iq, "conf.example", "example.com"));
+    }
+
+    #[test]
+    fn is_pin_query_iq_accepts_local_bare_dm_peer() {
+        let payload = Element::builder("query", NS_WADDLE_PIN_V0).build();
+        let iq = iq_get_with_payload(payload, Some("alice@example.com"));
+        assert!(is_pin_query_iq(&iq, "conf.example", "example.com"));
     }
 }

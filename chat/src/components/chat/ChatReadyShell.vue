@@ -916,11 +916,10 @@ onUnmounted(() => {
           </template>
 
           <button
-            v-if="ui.sidebarMode.value === 'channels'
+            v-if="(ui.sidebarMode.value === 'channels' || ui.sidebarMode.value === 'dms')
               && activeRightPanel !== 'pinned'
               && ui.showPinnedPanel.value
-              && waddles.currentChannel.value
-              && activeChannelRoomJid"
+              && (activeChannelRoomJid || activeDmPeer?.peerJid)"
             type="button"
             class="chat-accordion-bar bg-muted/20 hover:bg-muted/50"
             title="Pinned messages"
@@ -1039,16 +1038,15 @@ onUnmounted(() => {
           </div>
 
           <div
-            v-if="ui.sidebarMode.value === 'channels'
+            v-if="(ui.sidebarMode.value === 'channels' || ui.sidebarMode.value === 'dms')
               && activeRightPanel === 'pinned'
               && ui.showPinnedPanel.value
-              && waddles.currentChannel.value
-              && activeChannelRoomJid"
+              && (activeChannelRoomJid || activeDmPeer?.peerJid)"
             class="chat-active-thread-pane"
           >
             <PinnedPanel
-              :room-jid="activeChannelRoomJid"
-              :channel-name="waddles.currentChannel.value?.name ?? ''"
+              :room-jid="ui.sidebarMode.value === 'dms' ? activeDmPeer?.peerJid ?? '' : activeChannelRoomJid ?? ''"
+              :channel-name="ui.sidebarMode.value === 'dms' ? activeDmPeer?.peerUsername ?? 'Direct message' : waddles.currentChannel.value?.name ?? ''"
               :timeline-messages="activeMessages"
               @close="closePinnedPanel"
               @jump-to-message="(stanzaId: string) => jumpToPinnedMessage(stanzaId)"

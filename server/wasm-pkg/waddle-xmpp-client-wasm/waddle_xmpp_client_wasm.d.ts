@@ -69,6 +69,11 @@ export class WaddleClient {
      */
     feed_publish(spaces_jid: string, entry: any): Promise<any>;
     /**
+     * Waddle-specific MAM stanza-id filter for 1:1 history. Targets the
+     * account's personal archive and constrains the query with `with=peer`.
+     */
+    fetch_direct_messages_by_stanza_ids(peer_jid: string, stanza_ids: string[]): Promise<any>;
+    /**
      * Fetch the user's Waddle DM-bookmark items (issue #720) from PEP,
      * surfaced as a typed array carrying the XEP-0492 fallback
      * notification mode + rich-payload opt-in (#719) per direct-chat
@@ -210,6 +215,10 @@ export class WaddleClient {
     list_roster_contacts(): Promise<any>;
     mark_inbox_read(partner_jid: string, thread_id?: string | null): Promise<any>;
     constructor(config: WaddleConfig);
+    /**
+     * Publish a 1:1 DM pin request.
+     */
+    pin_direct_message(peer_jid: string, target_stanza_id: string): Promise<any>;
     /**
      * Publish a pin request (#414). `room_jid` is the bare MUC JID;
      * `target_stanza_id` is the XEP-0359 `by=room` stanza-id of the
@@ -484,6 +493,10 @@ export class WaddleClient {
     subscribe_mds_displayed(): Promise<any>;
     subscribe_to_presence(peer_jid: string): Promise<any>;
     supports_mds_publish_options(): Promise<any>;
+    /**
+     * Publish a 1:1 DM unpin request.
+     */
+    unpin_direct_message(peer_jid: string, target_stanza_id: string): Promise<any>;
     /**
      * Publish an unpin request (#414). Same authorization rules as
      * [`Self::pin_message`].

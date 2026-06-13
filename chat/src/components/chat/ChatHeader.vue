@@ -264,7 +264,7 @@ const memberButtonCopy = computed(() => {
           <Search class="w-3.5 h-3.5" />
         </button>
         <button
-          v-if="channel"
+          v-if="channel || dmPeer"
           class="chat-icon-button chat-icon-button--md transition-all duration-200"
           :class="showPinnedPanel
             ? 'bg-muted text-primary ring-1 ring-primary/40 shadow-[0_0_10px_var(--glow)]'

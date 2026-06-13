@@ -58,7 +58,16 @@ describe("matchLocation", () => {
     expect(m).toEqual({
       id: "dm",
       params: { username: "first.last_user+test" },
-      search: { thread: [] },
+      search: { thread: [], pinned: false },
+    });
+  });
+
+  test("parses dm with thread stack and pinned flag", () => {
+    const m = matchLocation("/dm/first.last_user%2Btest", "?thread=root&pinned=1");
+    expect(m).toEqual({
+      id: "dm",
+      params: { username: "first.last_user+test" },
+      search: { thread: ["root"], pinned: true },
     });
   });
 
@@ -248,7 +257,16 @@ describe("buildHref ↔ matchLocation round trips", () => {
     const m: RouteMatch = {
       id: "dm",
       params: { username: "first.last_user+test" },
-      search: { thread: ["root"] },
+      search: { thread: ["root"], pinned: false },
+    };
+    expect(roundtrip(m)).toEqual(m);
+  });
+
+  test("dm with pinned flag round-trips", () => {
+    const m: RouteMatch = {
+      id: "dm",
+      params: { username: "first.last_user+test" },
+      search: { thread: ["root"], pinned: true },
     };
     expect(roundtrip(m)).toEqual(m);
   });

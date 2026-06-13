@@ -43,6 +43,82 @@ pub struct PendingDmCallOffer {
     pub started: chrono::DateTime<chrono::Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DmPairKey {
+    pub low_peer: BareJid,
+    pub high_peer: BareJid,
+}
+
+impl DmPairKey {
+    pub fn new(a: BareJid, b: BareJid) -> Self {
+        let (low_peer, high_peer) = if a.as_str() <= b.as_str() {
+            (a, b)
+        } else {
+            (b, a)
+        };
+        Self {
+            low_peer,
+            high_peer,
+        }
+    }
+
+    pub fn contains(&self, jid: &BareJid) -> bool {
+        self.low_peer == *jid || self.high_peer == *jid
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct DmPinStore {
+    entries: dashmap::DashMap<DmPairKey, Vec<waddle_xmpp::muc::PinnedEntry>>,
+}
+
+impl DmPinStore {
+    pub fn apply_pin(&self, key: DmPairKey, entry: waddle_xmpp::muc::PinnedEntry) {
+        let target_stanza_id = entry.target_stanza_id.clone();
+        let mut entries = self.entries.entry(key).or_default();
+        entries.retain(|existing| existing.target_stanza_id.id != target_stanza_id.id);
+        entries.insert(0, entry);
+        if entries.len() > waddle_xmpp::muc::pin::MAX_PINNED_ENTRIES {
+            entries.pop();
+        }
+    }
+
+    pub fn list(&self, key: &DmPairKey) -> Vec<waddle_xmpp::muc::PinnedEntry> {
+        self.entries
+            .get(key)
+            .map(|entries| entries.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn unpin(
+        &self,
+        key: &DmPairKey,
+        target_stanza_id: &waddle_xmpp_core::xep0359::StanzaId,
+    ) -> bool {
+        let Some(mut entries) = self.entries.get_mut(key) else {
+            return false;
+        };
+        let before = entries.len();
+        entries.retain(|entry| entry.target_stanza_id.id != target_stanza_id.id);
+        entries.len() != before
+    }
+
+    pub fn contains(
+        &self,
+        key: &DmPairKey,
+        target_stanza_id: &waddle_xmpp_core::xep0359::StanzaId,
+    ) -> bool {
+        self.entries
+            .get(key)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .any(|entry| entry.target_stanza_id.id == target_stanza_id.id)
+            })
+            .unwrap_or(false)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct XmppServiceDomains {
     pub muc: String,
@@ -219,6 +295,10 @@ pub struct ProtocolServices {
     /// JMI/Jingle sid. `proceed` creates the anchor; `finish` later
     /// consumes the entry to stamp the ended summary.
     pub dm_call_threads: Arc<dashmap::DashMap<DmCallThreadKey, ActiveCallThread>>,
+    /// Shared pair-scoped 1:1 pinned-message projection. The pair key
+    /// deliberately ignores direction so both participants fetch the
+    /// same list using their peer's bare JID.
+    pub dm_pin_store: Arc<DmPinStore>,
     /// Per-owner projection guard for 1:1 call-thread anchors. `ArchiveDirect`
     /// runs once per user archive row; this lets each owner receive its own
     /// MAM id exactly once while duplicate/replayed proceeds remain inert.

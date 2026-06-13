@@ -72,13 +72,13 @@ pub use mam::{
 pub use messaging::MessagingExt;
 pub use messaging::{
     build_chat_state_message, build_correction_message, build_displayed_message,
-    build_moderation_message, build_outbound_message, build_reaction_message,
-    build_retraction_message, parse_chat_state_payload, parse_correction_payload,
-    parse_displayed_marker_payload, parse_moderation_payload, parse_reaction_payload,
-    parse_retraction_payload, ChatStatePayload, CorrectionPayload, DisplayedMarkerPayload,
-    InboundMessage, InboundPresence, MessagingEvent, ModerationPayload, ReactionPayload,
-    RetractionPayload, NS_CHAT_MARKERS, NS_CHAT_STATES, NS_MESSAGE_CORRECT, NS_MESSAGE_MODERATE,
-    NS_MESSAGE_RETRACT, NS_REACTIONS,
+    build_moderation_message, build_outbound_message, build_pinned_chat_message,
+    build_reaction_message, build_retraction_message, build_unpinned_chat_message,
+    parse_chat_state_payload, parse_correction_payload, parse_displayed_marker_payload,
+    parse_moderation_payload, parse_reaction_payload, parse_retraction_payload, ChatStatePayload,
+    CorrectionPayload, DisplayedMarkerPayload, InboundMessage, InboundPresence, MessagingEvent,
+    ModerationPayload, ReactionPayload, RetractionPayload, NS_CHAT_MARKERS, NS_CHAT_STATES,
+    NS_MESSAGE_CORRECT, NS_MESSAGE_MODERATE, NS_MESSAGE_RETRACT, NS_REACTIONS,
 };
 pub use messaging::{MarkupSpan, MarkupSpanType};
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]

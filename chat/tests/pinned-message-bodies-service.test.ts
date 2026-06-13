@@ -63,15 +63,11 @@ describe("hydratePinnedBodiesOnPanelOpen", () => {
   });
 
   it("fetches every stanza-id not already in the timeline", async () => {
-    const client = {
-      fetchRoomMessagesByStanzaIds: mock(async (_s: string, _c: string, ids: string[]) =>
-        ids.map((id) => archived(id)),
-      ),
-    };
+    const fetchByStanzaIds = mock(async (ids: string[]) => ids.map((id) => archived(id)));
     hydratePinnedRoom("room@conf.example", [pinEntry("sid-A"), pinEntry("sid-B")]);
 
     await hydratePinnedBodiesOnPanelOpen({
-      client,
+      fetchByStanzaIds,
       spaceId: "space1",
       channelId: "channel1",
       roomJid: "room@conf.example",
@@ -79,25 +75,17 @@ describe("hydratePinnedBodiesOnPanelOpen", () => {
       convert: fakeConvert,
     });
 
-    expect(client.fetchRoomMessagesByStanzaIds).toHaveBeenCalledWith(
-      "space1",
-      "channel1",
-      ["sid-A", "sid-B"],
-    );
+    expect(fetchByStanzaIds).toHaveBeenCalledWith(["sid-A", "sid-B"]);
     const room = $pinnedMessageBodies.get().get("room@conf.example");
     expect(room?.size).toBe(2);
   });
 
   it("skips fetching ids that already resolve from the timeline", async () => {
-    const client = {
-      fetchRoomMessagesByStanzaIds: mock(async (_s: string, _c: string, ids: string[]) =>
-        ids.map((id) => archived(id)),
-      ),
-    };
+    const fetchByStanzaIds = mock(async (ids: string[]) => ids.map((id) => archived(id)));
     hydratePinnedRoom("room@conf.example", [pinEntry("sid-A"), pinEntry("sid-B")]);
 
     await hydratePinnedBodiesOnPanelOpen({
-      client,
+      fetchByStanzaIds,
       spaceId: "space1",
       channelId: "channel1",
       roomJid: "room@conf.example",
@@ -107,18 +95,14 @@ describe("hydratePinnedBodiesOnPanelOpen", () => {
       convert: fakeConvert,
     });
 
-    expect(client.fetchRoomMessagesByStanzaIds).toHaveBeenCalledWith(
-      "space1",
-      "channel1",
-      ["sid-B"],
-    );
+    expect(fetchByStanzaIds).toHaveBeenCalledWith(["sid-B"]);
   });
 
   it("is a no-op when every id is already in the timeline", async () => {
-    const client = { fetchRoomMessagesByStanzaIds: mock(async () => []) };
+    const fetchByStanzaIds = mock(async () => []);
     hydratePinnedRoom("room@x", [pinEntry("sid-A")]);
     await hydratePinnedBodiesOnPanelOpen({
-      client,
+      fetchByStanzaIds,
       spaceId: "s",
       channelId: "c",
       roomJid: "room@x",
@@ -127,17 +111,15 @@ describe("hydratePinnedBodiesOnPanelOpen", () => {
       ],
       convert: fakeConvert,
     });
-    expect(client.fetchRoomMessagesByStanzaIds).not.toHaveBeenCalled();
+    expect(fetchByStanzaIds).not.toHaveBeenCalled();
   });
 
   it("is a no-op when the room has no pinned entries", async () => {
-    const client = {
-      fetchRoomMessagesByStanzaIds: mock(async () => []),
-    };
+    const fetchByStanzaIds = mock(async () => []);
     hydratePinnedRoom("room@x", []);
 
     await hydratePinnedBodiesOnPanelOpen({
-      client,
+      fetchByStanzaIds,
       spaceId: "space1",
       channelId: "channel1",
       roomJid: "room@x",
@@ -145,15 +127,11 @@ describe("hydratePinnedBodiesOnPanelOpen", () => {
       convert: fakeConvert,
     });
 
-    expect(client.fetchRoomMessagesByStanzaIds).not.toHaveBeenCalled();
+    expect(fetchByStanzaIds).not.toHaveBeenCalled();
   });
 
   it("skips fetching ids that are already in the body cache", async () => {
-    const client = {
-      fetchRoomMessagesByStanzaIds: mock(async (_s: string, _c: string, ids: string[]) =>
-        ids.map((id) => archived(id)),
-      ),
-    };
+    const fetchByStanzaIds = mock(async (ids: string[]) => ids.map((id) => archived(id)));
     hydratePinnedRoom("room@conf.example", [pinEntry("sid-A"), pinEntry("sid-B")]);
     // Pre-populate the cache with sid-A so only sid-B should be fetched.
     cachePinnedMessageBody(
@@ -164,7 +142,7 @@ describe("hydratePinnedBodiesOnPanelOpen", () => {
     );
 
     await hydratePinnedBodiesOnPanelOpen({
-      client,
+      fetchByStanzaIds,
       spaceId: "space1",
       channelId: "channel1",
       roomJid: "room@conf.example",
@@ -172,11 +150,7 @@ describe("hydratePinnedBodiesOnPanelOpen", () => {
       convert: fakeConvert,
     });
 
-    expect(client.fetchRoomMessagesByStanzaIds).toHaveBeenCalledWith(
-      "space1",
-      "channel1",
-      ["sid-B"],
-    );
+    expect(fetchByStanzaIds).toHaveBeenCalledWith(["sid-B"]);
   });
 });
 
@@ -187,13 +161,9 @@ describe("hydrateSinglePinnedBody", () => {
   });
 
   it("fetches the single id when not in the timeline", async () => {
-    const client = {
-      fetchRoomMessagesByStanzaIds: mock(async (_s: string, _c: string, _ids: string[]) =>
-        [archived("sid-new", "live body", "room@x")],
-      ),
-    };
+    const fetchByStanzaIds = mock(async () => [archived("sid-new", "live body", "room@x")]);
     await hydrateSinglePinnedBody({
-      client,
+      fetchByStanzaIds,
       spaceId: "space1",
       channelId: "channel1",
       roomJid: "room@x",
@@ -201,18 +171,14 @@ describe("hydrateSinglePinnedBody", () => {
       timelineMessages: [],
       convert: fakeConvert,
     });
-    expect(client.fetchRoomMessagesByStanzaIds).toHaveBeenCalledWith(
-      "space1",
-      "channel1",
-      ["sid-new"],
-    );
+    expect(fetchByStanzaIds).toHaveBeenCalledWith(["sid-new"]);
     expect($pinnedMessageBodies.get().get("room@x")?.get("sid-new")).toBeTruthy();
   });
 
   it("short-circuits when id is in the timeline", async () => {
-    const client = { fetchRoomMessagesByStanzaIds: mock(async () => []) };
+    const fetchByStanzaIds = mock(async () => []);
     await hydrateSinglePinnedBody({
-      client,
+      fetchByStanzaIds,
       spaceId: "s",
       channelId: "c",
       roomJid: "room@x",
@@ -222,11 +188,11 @@ describe("hydrateSinglePinnedBody", () => {
       ],
       convert: fakeConvert,
     });
-    expect(client.fetchRoomMessagesByStanzaIds).not.toHaveBeenCalled();
+    expect(fetchByStanzaIds).not.toHaveBeenCalled();
   });
 
   it("short-circuits when id is already cached", async () => {
-    const client = { fetchRoomMessagesByStanzaIds: mock(async () => []) };
+    const fetchByStanzaIds = mock(async () => []);
     cachePinnedMessageBody(
       "room@x",
       "sid-cached",
@@ -234,7 +200,7 @@ describe("hydrateSinglePinnedBody", () => {
       pinnedMessageBodiesEpoch(),
     );
     await hydrateSinglePinnedBody({
-      client,
+      fetchByStanzaIds,
       spaceId: "s",
       channelId: "c",
       roomJid: "room@x",
@@ -242,7 +208,7 @@ describe("hydrateSinglePinnedBody", () => {
       timelineMessages: [],
       convert: fakeConvert,
     });
-    expect(client.fetchRoomMessagesByStanzaIds).not.toHaveBeenCalled();
+    expect(fetchByStanzaIds).not.toHaveBeenCalled();
   });
 });
 
@@ -278,13 +244,11 @@ describe("matchRequestedStanzaId — branch 2: singular stanza_id field", () => 
       // deliberately no stanza_ids array — branch 1 must not match
     } as unknown as WasmArchivedMessage;
 
-    const client = {
-      fetchRoomMessagesByStanzaIds: mock(async () => [archivedFixture]),
-    };
+    const fetchByStanzaIds = mock(async () => [archivedFixture]);
     hydratePinnedRoom("room@x", [pinEntry("uuid-X")]);
 
     await hydratePinnedBodiesOnPanelOpen({
-      client,
+      fetchByStanzaIds,
       spaceId: "s",
       channelId: "c",
       roomJid: "room@x",
@@ -296,15 +260,13 @@ describe("matchRequestedStanzaId — branch 2: singular stanza_id field", () => 
   });
 });
 
-describe("matchRequestedStanzaId — wrong-JID fall-through (no match)", () => {
+describe("matchRequestedStanzaId — personal archive stanza-id", () => {
   beforeEach(() => {
     resetPinnedRooms();
     resetPinnedMessageBodies();
   });
 
-  it("does not match when stanza_ids only has entries with by !== roomJid", async () => {
-    // The stanza_ids array contains only a foreign-by entry; branch 1 must
-    // not match. Branch 2 has no stanza_id_by. Result: no cache entry.
+  it("matches a requested stanza-id even when by is a personal archive JID", async () => {
     const archivedFixture = {
       id: "uuid-canonical",
       mam_id: "mam-id",
@@ -320,16 +282,14 @@ describe("matchRequestedStanzaId — wrong-JID fall-through (no match)", () => {
       markup_spans: [],
       is_sticker: false,
       shared_files: [],
-      stanza_ids: [{ by: "foreign.example", id: "uuid-canonical" }],
+      stanza_ids: [{ by: "alice@example.com", id: "uuid-canonical" }],
     } as unknown as WasmArchivedMessage;
 
-    const client = {
-      fetchRoomMessagesByStanzaIds: mock(async () => [archivedFixture]),
-    };
+    const fetchByStanzaIds = mock(async () => [archivedFixture]);
     hydratePinnedRoom("room@x", [pinEntry("uuid-canonical")]);
 
     await hydratePinnedBodiesOnPanelOpen({
-      client,
+      fetchByStanzaIds,
       spaceId: "s",
       channelId: "c",
       roomJid: "room@x",
@@ -337,9 +297,8 @@ describe("matchRequestedStanzaId — wrong-JID fall-through (no match)", () => {
       convert: fakeConvert,
     });
 
-    // Neither branch matched → nothing cached.
     const room = $pinnedMessageBodies.get().get("room@x");
-    expect(room?.size ?? 0).toBe(0);
+    expect(room?.get("uuid-canonical")?.body).toBe("foreign body");
   });
 });
 
@@ -354,13 +313,11 @@ describe("hydratePinnedBodiesOnPanelOpen — alias + requested-id fixes", () => 
   });
 
   it("skips fetching when the requested id is in timeline under reactionTargetId alias", async () => {
-    const client = {
-      fetchRoomMessagesByStanzaIds: mock(async () => []),
-    };
+    const fetchByStanzaIds = mock(async () => []);
     hydratePinnedRoom("room@x", [pinEntry("uuid-canonical")]);
 
     await hydratePinnedBodiesOnPanelOpen({
-      client,
+      fetchByStanzaIds,
       spaceId: "s",
       channelId: "c",
       roomJid: "room@x",
@@ -377,7 +334,7 @@ describe("hydratePinnedBodiesOnPanelOpen — alias + requested-id fixes", () => 
       convert: fakeConvert,
     });
 
-    expect(client.fetchRoomMessagesByStanzaIds).not.toHaveBeenCalled();
+    expect(fetchByStanzaIds).not.toHaveBeenCalled();
   });
 
   it("caches body under requested stanza-id even when result's id is the wire message-id", async () => {
@@ -404,9 +361,7 @@ describe("hydratePinnedBodiesOnPanelOpen — alias + requested-id fixes", () => 
       stanza_ids: [{ by: "room@x", id: "uuid-canonical" }],
     } as unknown as WasmArchivedMessage;
 
-    const client = {
-      fetchRoomMessagesByStanzaIds: mock(async () => [archivedFixture]),
-    };
+    const fetchByStanzaIds = mock(async () => [archivedFixture]);
     hydratePinnedRoom("room@x", [pinEntry("uuid-canonical")]);
 
     // Convert maps the archived to a TimelineMessage whose `id` is the
@@ -421,7 +376,7 @@ describe("hydratePinnedBodiesOnPanelOpen — alias + requested-id fixes", () => 
     } as TimelineMessage);
 
     await hydratePinnedBodiesOnPanelOpen({
-      client,
+      fetchByStanzaIds,
       spaceId: "s",
       channelId: "c",
       roomJid: "room@x",

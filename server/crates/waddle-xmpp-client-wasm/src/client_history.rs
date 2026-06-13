@@ -274,6 +274,41 @@ impl WaddleClient {
             to_js_value(&mam_page_to_js(page))
         })
     }
+
+    /// Waddle-specific MAM stanza-id filter for 1:1 history. Targets the
+    /// account's personal archive and constrains the query with `with=peer`.
+    pub fn fetch_direct_messages_by_stanza_ids(
+        &self,
+        peer_jid: String,
+        stanza_ids: Vec<String>,
+    ) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            if stanza_ids.is_empty() {
+                return to_js_value(&mam_page_to_js(waddle_xmpp_client::MamPage {
+                    messages: vec![],
+                    rsm: waddle_xmpp_client::RsmPageInfo::default(),
+                    query_id: String::new(),
+                    is_complete: true,
+                }));
+            }
+            let account_jid = {
+                let stored = inner.borrow().config.clone();
+                bare_jid(&stored.jid)
+            };
+            let refs: Vec<&str> = stanza_ids.iter().map(String::as_str).collect();
+            let query_id = uuid::Uuid::new_v4().to_string();
+            let iq_id = uuid::Uuid::new_v4().to_string();
+            let iq = MamIqBuilder::new(&iq_id, &query_id, stanza_ids.len() as u32)
+                .before("")
+                .to_jid(&account_jid)
+                .with_jid(&peer_jid)
+                .stanza_ids(&refs)
+                .build();
+            let page = send_mam_query_command(inner, iq, query_id).await?;
+            to_js_value(&mam_page_to_js(page))
+        })
+    }
 }
 
 fn apply_page_param<'a>(

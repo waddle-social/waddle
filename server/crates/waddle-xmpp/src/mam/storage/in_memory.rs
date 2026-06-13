@@ -162,14 +162,17 @@ impl MamStorage for InMemoryMamStorage {
             });
         }
         if !query.stanza_ids.is_empty() {
-            // `MamQuery.stanza_ids` carries canonical XEP-0359 room-stamped
-            // UUIDs, stored in the `id` field (the archive primary key). The
-            // `stanza_id` field holds the wire `<message id>` attribute —
-            // a different value. Filtering by `id` matches what the chat
-            // client supplies (via `roomAssignedStanzaId`). See
-            // `groupchat_archive.rs:10,94-97`.
+            // Room pins pass archive-primary IDs. DM pins pass the pair-stable
+            // logical message ID, stored as the wire `<message id>` on each
+            // participant's personal archive row. Match both so the same MAM
+            // filter hydrates pinned bodies for rooms and DMs.
             let allowed: HashSet<&str> = query.stanza_ids.iter().map(|id| id.as_str()).collect();
-            messages.retain(|m| allowed.contains(m.id.as_str()));
+            messages.retain(|m| {
+                allowed.contains(m.id.as_str())
+                    || m.stanza_id
+                        .as_ref()
+                        .is_some_and(|stanza_id| allowed.contains(stanza_id.id.as_str()))
+            });
         }
         if let Some(cursor) = filter_before_cursor.as_ref() {
             messages.retain(|message| archive_order_before(message, cursor));

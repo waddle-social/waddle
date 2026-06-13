@@ -105,11 +105,10 @@ fn stanza_id_filter_caps_match_pin_protocol() {
 /// single value MUST return only messages whose server-assigned stanza-id
 /// matches that value.
 ///
-/// `MamQuery.stanza_ids` filters by the canonical XEP-0359 room-stamped id,
-/// stored in the `id` column (the SQL primary key), not the `stanza_id`
-/// column which holds the wire `<message id>` attribute. The chat client
-/// supplies the canonical id via `roomAssignedStanzaId`. See
-/// `groupchat_archive.rs:10,94-97`.
+/// `MamQuery.stanza_ids` filters by either the archive-primary id or the
+/// stored wire `<message id>`. Room pins supply archive ids; DM pins supply
+/// pair-stable wire ids so either participant can hydrate the same logical
+/// pin through their personal archive.
 ///
 /// Integration level: storage API (`InMemoryMamStorage::query_messages`).
 /// The filter is exercised through the same `MamQuery.stanza_ids` path that
@@ -156,6 +155,45 @@ async fn stanza_id_filter_returns_only_matching_message() {
         "returned message has the canonical archive id"
     );
     assert!(result.complete, "single-result page is complete");
+}
+
+#[tokio::test]
+async fn stanza_id_filter_matches_wire_message_id_for_dm_pin_hydration() {
+    let store = InMemoryMamStorage::new();
+    let archive = bare("alice@example.com");
+
+    store
+        .store_message(
+            &archive,
+            &archived_with_stanza_id(&archive, "alice-archive-1", "shared-wire-id"),
+        )
+        .await
+        .expect("store matching DM archive row");
+    store
+        .store_message(
+            &archive,
+            &archived_with_stanza_id(&archive, "alice-archive-2", "other-wire-id"),
+        )
+        .await
+        .expect("store non-matching DM archive row");
+
+    let result = store
+        .query_messages(
+            &archive,
+            &MamQuery {
+                stanza_ids: vec![filter_id("shared-wire-id")],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("query must succeed");
+
+    assert_eq!(result.messages.len(), 1, "exactly one message returned");
+    assert_eq!(
+        result.messages[0].id.as_str(),
+        "alice-archive-1",
+        "wire-id filter returns the matching archive row"
+    );
 }
 
 // ── test 4 ───────────────────────────────────────────────────────────────────

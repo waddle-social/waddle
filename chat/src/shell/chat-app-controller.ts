@@ -1,5 +1,6 @@
 import { type ComponentPublicInstance, computed, onMounted, onUnmounted, ref, watch, watchEffect } from "vue";
 import { createKeystrok, type Keystrok } from "keystrok";
+import { useStore } from "@nanostores/vue";
 import { useWaddleDirectory, type MemberLoadState } from "@/waddles/directory";
 import { useWaddleMembers } from "@/waddles/members";
 import { useDirectMessageConversations } from "@/dms/conversations";
@@ -35,11 +36,12 @@ import {
 import { normalizeMucServiceDomain } from "@/lib/calls/muc-call-indicators";
 import { resolveThreadEntryTarget } from "@/lib/threads-view-target";
 import { connectionStore } from "@/lib/connection-store";
-import { resetPinnedRooms } from "@/stores/pinned-messages";
-import { hydratePinnedBodiesOnPanelOpen } from "@/services/pinned-message-bodies";
+import { $pinnedRooms, hydratePinnedRoom, pinnedRoomsEpoch, resetPinnedRooms } from "@/stores/pinned-messages";
+import { hydratePinnedBodiesOnPanelOpen, hydrateSinglePinnedBody } from "@/services/pinned-message-bodies";
 import { trustedLinkPreviewMediaOrigin } from "@/lib/xmpp/link-preview";
-import { roomMessageFromArchived } from "@/lib/xmpp/wasm-message-codecs";
+import { dmMessageFromArchived, roomMessageFromArchived } from "@/lib/xmpp/wasm-message-codecs";
 import { mapLiveRoomMessageToTimeline } from "@/channels/timeline";
+import { fromLiveDmMessage } from "@/dms/message-timeline-state";
 import { orderTimelineForScrollDirection, type ScrollDirectionMode } from "@/lib/scroll-direction";
 import { useScrollDirectionPreference } from "@/preferences/scroll-direction";
 import type { MemberSummary } from "@/lib/chat-types";
@@ -284,6 +286,7 @@ export function useChatAppController(giphyApiKey: string) {
     ui.actionError,
     ui.clearActionError,
   );
+  const pinnedRooms = useStore($pinnedRooms);
 
   type ContentAreaHandle = ComponentPublicInstance & {
     messagesContainer: HTMLDivElement | null;
@@ -402,8 +405,12 @@ export function useChatAppController(giphyApiKey: string) {
   function isRightPanelAvailable(panel: ActiveRightPanel): boolean {
     if (ui.activePage.value !== "chat") return false;
     if (panel === "thread") return activeThreadStack.value.length > 0;
+    if (panel === "pinned") {
+      if (!ui.showPinnedPanel.value) return false;
+      if (ui.sidebarMode.value === "dms") return !!dmConversations.activePeerJid.value;
+      return ui.sidebarMode.value === "channels" && !!waddles.currentChannel.value && !!activeChannelRoomJid.value;
+    }
     if (ui.sidebarMode.value !== "channels") return false;
-    if (panel === "pinned") return ui.showPinnedPanel.value && !!waddles.currentChannel.value && !!activeChannelRoomJid.value;
     return !!activeExtensionRouteKey.value && !!waddles.currentChannel.value;
   }
 
@@ -1259,10 +1266,19 @@ export function useChatAppController(giphyApiKey: string) {
    * this — but the server is authoritative. */
   function pinActiveMessage(messageId: string) {
     const client = xmppClient.value;
-    const channel = waddles.currentChannel.value;
-    if (!client || !channel) return;
+    if (!client) return;
     const stanzaId = resolvePinTargetStanzaId(messageId);
     if (!stanzaId) return;
+    if (ui.sidebarMode.value === "dms") {
+      const peer = dmConversations.activePeerJid.value;
+      if (!peer || !("pinDirectMessage" in client)) return;
+      void client.pinDirectMessage(peer, stanzaId).catch((error: unknown) => {
+        console.warn("pinDirectMessage failed", error);
+      });
+      return;
+    }
+    const channel = waddles.currentChannel.value;
+    if (!channel) return;
     void client.pinMessage(channel.spaceId ?? "", channel.id, stanzaId).catch((error: unknown) => {
       console.warn("pinMessage failed", error);
     });
@@ -1270,10 +1286,19 @@ export function useChatAppController(giphyApiKey: string) {
 
   function unpinActiveMessage(messageId: string) {
     const client = xmppClient.value;
-    const channel = waddles.currentChannel.value;
-    if (!client || !channel) return;
+    if (!client) return;
     const stanzaId = resolvePinTargetStanzaId(messageId);
     if (!stanzaId) return;
+    if (ui.sidebarMode.value === "dms") {
+      const peer = dmConversations.activePeerJid.value;
+      if (!peer || !("unpinDirectMessage" in client)) return;
+      void client.unpinDirectMessage(peer, stanzaId).catch((error: unknown) => {
+        console.warn("unpinDirectMessage failed", error);
+      });
+      return;
+    }
+    const channel = waddles.currentChannel.value;
+    if (!channel) return;
     void client.unpinMessage(channel.spaceId ?? "", channel.id, stanzaId).catch((error: unknown) => {
       console.warn("unpinMessage failed", error);
     });
@@ -1298,7 +1323,7 @@ export function useChatAppController(giphyApiKey: string) {
    * `message.stanza_id` upstream. Returns null when no archive id is
    * known yet (e.g., a queued send hasn't been reflected). */
   function resolvePinTargetStanzaId(messageId: string): string | null {
-    const message = messaging.messages.value.find((m) => m.id === messageId);
+    const message = activeTarget.value.messages.value.find((m) => m.id === messageId);
     if (!message) return null;
     const m = message as TimelineMessage & {
       reactionTargetId?: string;
@@ -1461,7 +1486,7 @@ export function useChatAppController(giphyApiKey: string) {
         navigate({
           id: "dm",
           params: { username: activeDmPeer.value.peerUsername },
-          search: { thread: activeThreadStack.value },
+          search: { thread: activeThreadStack.value, pinned: ui.showPinnedPanel.value },
         });
       } else {
         navigate({ id: "dmList" });
@@ -1509,6 +1534,7 @@ export function useChatAppController(giphyApiKey: string) {
   // any pinned stanza-ids not already in the loaded timeline or cache.
   watch(() => ui.showPinnedPanel.value, async (open) => {
     if (!open) return;
+    if (ui.sidebarMode.value === "dms") return;
     const client = xmppClient.value;
     const spaceId = waddles.activeSpaceId.value;
     const channelId = waddles.activeChannelId.value;
@@ -1527,7 +1553,8 @@ export function useChatAppController(giphyApiKey: string) {
     };
     try {
       await hydratePinnedBodiesOnPanelOpen({
-        client,
+        fetchByStanzaIds: (stanzaIds) =>
+          client.fetchRoomMessagesByStanzaIds(spaceId, channelId, stanzaIds),
         spaceId,
         channelId,
         roomJid,
@@ -1538,6 +1565,81 @@ export function useChatAppController(giphyApiKey: string) {
       console.warn("hydratePinnedBodiesOnPanelOpen failed", error);
     }
   });
+  watch(() => ui.showPinnedPanel.value, async (open) => {
+    if (!open || ui.sidebarMode.value !== "dms") return;
+    const client = xmppClient.value;
+    const peerJid = dmConversations.activePeerJid.value;
+    const currentSession = session.value;
+    if (!client || !peerJid || !currentSession) return;
+    if (!("fetchDirectMessagesByStanzaIds" in client)) return;
+    const convertForTimeline = (archived: Parameters<typeof dmMessageFromArchived>[0]) => {
+      const live = dmMessageFromArchived(archived, barePeerJid(currentSession.jid), {
+        trustedMediaOrigin: trustedLinkPreviewMediaOrigin(currentSession),
+      });
+      return live ? fromLiveDmMessage(currentSession, live) : null;
+    };
+    try {
+      await hydratePinnedBodiesOnPanelOpen({
+        fetchByStanzaIds: (stanzaIds) =>
+          client.fetchDirectMessagesByStanzaIds(peerJid, stanzaIds),
+        spaceId: "",
+        channelId: "",
+        roomJid: peerJid,
+        timelineMessages: dmMessaging.messages.value,
+        convert: convertForTimeline,
+      });
+    } catch (error) {
+      console.warn("hydratePinnedBodiesOnPanelOpen failed", error);
+    }
+  });
+  watch(pinnedRooms, (rooms) => {
+    if (!ui.showPinnedPanel.value || ui.sidebarMode.value !== "dms") return;
+    const client = xmppClient.value;
+    const peerJid = dmConversations.activePeerJid.value;
+    const currentSession = session.value;
+    if (!client || !peerJid || !currentSession) return;
+    if (!("fetchDirectMessagesByStanzaIds" in client)) return;
+    const state = rooms.get(peerJid);
+    const entry = state?.entries[0];
+    if (!entry) return;
+    const convertForTimeline = (archived: Parameters<typeof dmMessageFromArchived>[0]) => {
+      const live = dmMessageFromArchived(archived, barePeerJid(currentSession.jid), {
+        trustedMediaOrigin: trustedLinkPreviewMediaOrigin(currentSession),
+      });
+      return live ? fromLiveDmMessage(currentSession, live) : null;
+    };
+    void hydrateSinglePinnedBody({
+      fetchByStanzaIds: (stanzaIds) =>
+        client.fetchDirectMessagesByStanzaIds(peerJid, stanzaIds),
+      spaceId: "",
+      channelId: "",
+      roomJid: peerJid,
+      stanzaId: entry.target_stanza_id,
+      timelineMessages: dmMessaging.messages.value,
+      convert: convertForTimeline,
+    }).catch((error) => console.warn("hydrateSinglePinnedBody failed", error));
+  });
+  watch(
+    [xmppClient, () => ui.sidebarMode.value, () => dmConversations.activePeerJid.value],
+    ([client, mode, peerJid]) => {
+      if (mode !== "dms" || !peerJid) return;
+      if (!client || !("fetchDirectPins" in client)) {
+        hydratePinnedRoom(peerJid, []);
+        return;
+      }
+      const epoch = pinnedRoomsEpoch();
+      void client.fetchDirectPins(peerJid)
+        .then((entries) => {
+          if (ui.sidebarMode.value !== "dms" || dmConversations.activePeerJid.value !== peerJid) return;
+          hydratePinnedRoom(peerJid, entries, epoch);
+        })
+        .catch((error: unknown) => {
+          console.warn("fetchDirectPins failed", error);
+          hydratePinnedRoom(peerJid, [], epoch);
+        });
+    },
+    { immediate: true },
+  );
   watch(activeExtensionRouteKey, () => {
     normalizeActiveRightPanel();
   }, { deep: true });
@@ -1753,10 +1855,9 @@ export function useChatAppController(giphyApiKey: string) {
     }
     ui.sidebarMode.value =
       match.id === "dm" || match.id === "dmList" ? "dms" : "channels";
-    // #414: only channel-context routes carry the pinned-panel flag;
-    // DM/home/settings/threads/admin/community always clear it.
+    // #414/#951: channel and DM conversation routes carry the pinned-panel flag.
     ui.showPinnedPanel.value =
-      match.id === "channel" || match.id === "channelExtension"
+      match.id === "channel" || match.id === "channelExtension" || match.id === "dm"
         ? match.search.pinned
         : false;
   }
@@ -1825,7 +1926,14 @@ export function useChatAppController(giphyApiKey: string) {
       }
       activeThreadTargetMessageId.value = null;
       activeThreadStack.value = match.search.thread;
-      activeRightPanel.value = match.search.thread.length > 0 ? "thread" : null;
+      ui.showPinnedPanel.value = match.search.pinned;
+      if (match.search.pinned) {
+        activeRightPanel.value = "pinned";
+      } else if (match.search.thread.length > 0) {
+        activeRightPanel.value = "thread";
+      } else {
+        activeRightPanel.value = null;
+      }
       // Dedup: a nested stack can legitimately repeat a thread id (e.g.
       // `[A,B,A]`), but each thread only needs one backfill.
       for (const threadId of new Set(match.search.thread)) {
