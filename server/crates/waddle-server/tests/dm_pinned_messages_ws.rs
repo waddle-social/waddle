@@ -671,6 +671,81 @@ async fn dm_pin_to_remote_domain_returns_forbidden() {
 }
 
 #[tokio::test]
+async fn dm_pin_without_to_returns_bad_request() {
+    let _guard = TEST_SERIAL.lock().await;
+    let server = TestServer::start_with_extra_accounts(&[("alice", "alice-pass")]);
+    let mut alice = user_client(&server, "alice", "alice-pass", "dm-pin-no-to-alice").await;
+
+    alice
+        .send(&format!(
+            r#"<message xmlns="jabber:client" type="chat" id="dm-pin-no-to">
+                <pinned xmlns="{NS_WADDLE_PIN}" target="missing-peer-target"/>
+            </message>"#
+        ))
+        .await
+        .expect("send no-to DM pin request");
+
+    let error = alice
+        .recv_matching(|frame| frame.contains("dm-pin-no-to") && frame.contains("<bad-request"))
+        .await
+        .expect("no-to DM pin is rejected");
+    assert!(
+        error.contains("DM pin marker requires a local peer JID"),
+        "no-to pin should explain the malformed request: {error}"
+    );
+}
+
+#[tokio::test]
+async fn dm_pin_prefers_wire_message_id_over_origin_id() {
+    let _guard = TEST_SERIAL.lock().await;
+    let server =
+        TestServer::start_with_extra_accounts(&[("alice", "alice-pass"), ("bob", "bob-pass")]);
+    let mut alice = user_client(&server, "alice", "alice-pass", "dm-pin-origin-alice").await;
+    let mut bob = user_client(&server, "bob", "bob-pass", "dm-pin-origin-bob").await;
+
+    alice
+        .send(
+            r#"<message xmlns="jabber:client" type="chat" to="bob@localhost" id="dm-origin-target">
+                <origin-id xmlns="urn:xmpp:sid:0" id="dm-origin-different"/>
+                <body>origin id differs from wire id</body>
+            </message>"#,
+        )
+        .await
+        .expect("send target DM with origin-id");
+    let delivered = bob
+        .recv_matching(|frame| frame.contains("origin id differs from wire id"))
+        .await
+        .expect("Bob receives target DM");
+    let target_stanza_id = extract_attr_after(&delivered, "stanza-id", "id")
+        .unwrap_or_else(|| panic!("DM delivery must carry XEP-0359 stanza-id: {delivered}"));
+
+    alice
+        .send(&format!(
+            r#"<message xmlns="jabber:client" type="chat" to="bob@localhost" id="dm-origin-pin">
+                <pinned xmlns="{NS_WADDLE_PIN}" target="{target_stanza_id}"/>
+            </message>"#
+        ))
+        .await
+        .expect("send DM pin request");
+
+    let pin_event = bob
+        .recv_matching(|frame| frame.contains("<pin-event") && frame.contains("action='pinned'"))
+        .await
+        .expect("Bob receives live DM pin event");
+    let canonical_target = extract_pin_event_target(&pin_event);
+    assert_eq!(
+        canonical_target, "dm-origin-target",
+        "DM pins must use the projected wire id, not a divergent origin-id: {pin_event}"
+    );
+
+    let bob_pins = fetch_dm_pins(&mut bob, "alice@localhost", "bob-origin-pins").await;
+    assert!(
+        bob_pins.contains("dm-origin-target") && !bob_pins.contains("dm-origin-different"),
+        "pin list should expose the hydratable wire id: {bob_pins}"
+    );
+}
+
+#[tokio::test]
 async fn dm_pin_event_respects_recipient_blocklist() {
     let _guard = TEST_SERIAL.lock().await;
     let server =

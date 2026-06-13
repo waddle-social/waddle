@@ -173,7 +173,10 @@ async fn handle_dm_pin_message(
     };
     let target = intent.target().to_string();
     let Some(peer) = incoming.to.as_ref().map(|to| to.to_bare()) else {
-        return Some(Vec::new());
+        let mut stamped = incoming.clone();
+        stamped.from = Some(jid::Jid::from(bound_jid.clone()));
+        let reply = bad_request_reply(&stamped, "DM pin marker requires a local peer JID.");
+        return stanza_to_string(reply).ok().map(|frame| vec![frame]);
     };
     if peer.domain() != bound_jid.domain() {
         let mut stamped = incoming.clone();
@@ -317,11 +320,11 @@ fn canonical_dm_pin_stanza_id(
     archive_jid: &jid::BareJid,
 ) -> StanzaId {
     let by = jid::Jid::from(archive_jid.clone());
-    if let Some(origin_id) = archived.origin_id.as_ref() {
-        return StanzaId::new(origin_id.id.clone(), by);
-    }
     if let Some(stanza_id) = archived.stanza_id.as_ref() {
         return StanzaId::new(stanza_id.id.clone(), by);
+    }
+    if let Some(origin_id) = archived.origin_id.as_ref() {
+        return StanzaId::new(origin_id.id.clone(), by);
     }
     StanzaId::new(archived.id.clone(), by)
 }
