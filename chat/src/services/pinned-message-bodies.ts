@@ -40,18 +40,18 @@ import type { WasmArchivedMessage } from "@/lib/xmpp/wasm-types";
  */
 function matchRequestedStanzaId(
   archived: WasmArchivedMessage,
-  roomJid: string,
   requested: Set<string>,
 ): string | null {
-  // Branch 1: the canonical room-scoped XEP-0359 stanza-id, where the
-  // wasm `stanza_ids` array contains a `by === roomJid` entry. This is
-  // the production path for well-formed XEP-0313 §5.1.2 archives.
-  const roomStamped = archived.stanza_ids?.find((s) => s.by === roomJid)?.id;
-  if (roomStamped && requested.has(roomStamped)) return roomStamped;
+  // The server-side MAM stanza-id filter has already constrained the
+  // returned page to the requested IDs. Match by value so both room
+  // (`by=room`) and 1:1 personal archives (`by=user`) hydrate through
+  // the same cache path.
+  const stamped = archived.stanza_ids?.find((s) => requested.has(s.id))?.id;
+  if (stamped) return stamped;
 
   // Branch 2: the singular `stanza_id` field (some archive paths
   // surface the canonical id this way instead of the array).
-  if (archived.stanza_id && archived.stanza_id_by === roomJid && requested.has(archived.stanza_id)) {
+  if (archived.stanza_id && requested.has(archived.stanza_id)) {
     return archived.stanza_id;
   }
 
@@ -75,16 +75,10 @@ function timelinePresenceSet(messages: ReadonlyArray<TimelineMessage>): Set<stri
   return set;
 }
 
-interface MamFetcher {
-  fetchRoomMessagesByStanzaIds: (
-    spaceId: string,
-    channelId: string,
-    stanzaIds: string[],
-  ) => Promise<WasmArchivedMessage[]>;
-}
+type StanzaIdFetcher = (stanzaIds: string[]) => Promise<WasmArchivedMessage[]>;
 
 interface HydrateOpenArgs {
-  client: MamFetcher;
+  fetchByStanzaIds: StanzaIdFetcher;
   spaceId: string;
   channelId: string;
   roomJid: string;
@@ -106,14 +100,10 @@ export async function hydratePinnedBodiesOnPanelOpen(args: HydrateOpenArgs): Pro
   if (missing.length === 0) return;
 
   const epoch = pinnedMessageBodiesEpoch();
-  const archived = await args.client.fetchRoomMessagesByStanzaIds(
-    args.spaceId,
-    args.channelId,
-    missing,
-  );
+  const archived = await args.fetchByStanzaIds(missing);
   const requestedSet = new Set(missing);
   const cached = archived.flatMap((m) => {
-    const stanzaId = matchRequestedStanzaId(m, args.roomJid, requestedSet);
+    const stanzaId = matchRequestedStanzaId(m, requestedSet);
     if (!stanzaId) return [];
     const message = args.convert(m);
     return message ? [{ stanzaId, message }] : [];
@@ -122,7 +112,7 @@ export async function hydratePinnedBodiesOnPanelOpen(args: HydrateOpenArgs): Pro
 }
 
 interface HydrateSingleArgs {
-  client: MamFetcher;
+  fetchByStanzaIds: StanzaIdFetcher;
   spaceId: string;
   channelId: string;
   roomJid: string;
@@ -140,14 +130,10 @@ export async function hydrateSinglePinnedBody(args: HydrateSingleArgs): Promise<
   if (room?.has(args.stanzaId)) return;
 
   const epoch = pinnedMessageBodiesEpoch();
-  const archived = await args.client.fetchRoomMessagesByStanzaIds(
-    args.spaceId,
-    args.channelId,
-    [args.stanzaId],
-  );
+  const archived = await args.fetchByStanzaIds([args.stanzaId]);
   const requestedSet = new Set([args.stanzaId]);
   const cached = archived.flatMap((m) => {
-    const stanzaId = matchRequestedStanzaId(m, args.roomJid, requestedSet);
+    const stanzaId = matchRequestedStanzaId(m, requestedSet);
     if (!stanzaId) return [];
     const message = args.convert(m);
     return message ? [{ stanzaId, message }] : [];

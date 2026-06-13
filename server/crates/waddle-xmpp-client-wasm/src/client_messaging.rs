@@ -214,12 +214,34 @@ impl WaddleClient {
         })
     }
 
+    /// Publish a 1:1 DM pin request.
+    pub fn pin_direct_message(&self, peer_jid: String, target_stanza_id: String) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let stanza =
+                waddle_xmpp_client::build_pinned_chat_message(&peer_jid, &target_stanza_id);
+            send_stanza_command(inner, stanza).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
     /// Publish an unpin request (#414). Same authorization rules as
     /// [`Self::pin_message`].
     pub fn unpin_message(&self, room_jid: String, target_stanza_id: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
             let stanza = build_unpinned_message(&room_jid, &target_stanza_id);
+            send_stanza_command(inner, stanza).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    /// Publish a 1:1 DM unpin request.
+    pub fn unpin_direct_message(&self, peer_jid: String, target_stanza_id: String) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let stanza =
+                waddle_xmpp_client::build_unpinned_chat_message(&peer_jid, &target_stanza_id);
             send_stanza_command(inner, stanza).await?;
             Ok(JsValue::UNDEFINED)
         })

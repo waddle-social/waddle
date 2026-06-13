@@ -505,6 +505,7 @@ function isPinnedMessage(msg: TimelineMessage): boolean {
 // server emits status-code-104 on owner-config set (separate
 // follow-up).
 const currentUserCanPin = computed(() => {
+  if (props.sidebarMode === "dms") return true;
   const me = props.currentUser;
   if (!me) return false;
   if (props.roomPresence[me] === undefined) return false;

@@ -221,6 +221,7 @@ async fn create_test_websocket_state_with_extension_manager(
                     pep_feed_bridge: Arc::new(crate::pep_feed_bridge::PepFeedBridge::new()),
                     call_threads: Arc::new(dashmap::DashMap::new()),
                     dm_call_threads: Arc::new(dashmap::DashMap::new()),
+                    dm_pin_store: Arc::new(crate::server::routes::websocket::DmPinStore::default()),
                     dm_call_thread_projections: Arc::new(dashmap::DashSet::new()),
                     pending_dm_call_offers: Arc::new(dashmap::DashMap::new()),
                     sfu: None,

@@ -107,39 +107,59 @@ pub fn build_reaction_message(
 /// `to` is the room bare JID; `target_stanza_id` is the XEP-0359
 /// stanza-id (`by=room`) of the message being pinned.
 pub fn build_pinned_message(to: &str, target_stanza_id: &str) -> Element {
-    let stanza_id = Uuid::new_v4().to_string();
-    Element::builder("message", NS_CLIENT)
-        .attr(minidom::rxml::xml_ncname!("to").to_owned(), to)
-        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "groupchat")
-        .attr(
-            minidom::rxml::xml_ncname!("id").to_owned(),
-            stanza_id.as_str(),
-        )
-        .append(build_origin_id(&stanza_id))
-        .append(
-            Element::builder("pinned", NS_WADDLE_PIN_V0)
-                .attr(
-                    minidom::rxml::xml_ncname!("target").to_owned(),
-                    target_stanza_id,
-                )
-                .build(),
-        )
-        .build()
+    build_pin_message(to, PinMessageType::Groupchat, "pinned", target_stanza_id)
+}
+
+/// Build a 1:1 `<message type='chat'><pinned target='…'/></message>` request.
+pub fn build_pinned_chat_message(to: &str, target_stanza_id: &str) -> Element {
+    build_pin_message(to, PinMessageType::Chat, "pinned", target_stanza_id)
 }
 
 /// Build a `<message><unpinned target='…'/></message>` request for #414.
 pub fn build_unpinned_message(to: &str, target_stanza_id: &str) -> Element {
+    build_pin_message(to, PinMessageType::Groupchat, "unpinned", target_stanza_id)
+}
+
+/// Build a 1:1 `<message type='chat'><unpinned target='…'/></message>` request.
+pub fn build_unpinned_chat_message(to: &str, target_stanza_id: &str) -> Element {
+    build_pin_message(to, PinMessageType::Chat, "unpinned", target_stanza_id)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PinMessageType {
+    Chat,
+    Groupchat,
+}
+
+impl PinMessageType {
+    fn as_attr(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::Groupchat => "groupchat",
+        }
+    }
+}
+
+fn build_pin_message(
+    to: &str,
+    message_type: PinMessageType,
+    element_name: &'static str,
+    target_stanza_id: &str,
+) -> Element {
     let stanza_id = Uuid::new_v4().to_string();
     Element::builder("message", NS_CLIENT)
         .attr(minidom::rxml::xml_ncname!("to").to_owned(), to)
-        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "groupchat")
+        .attr(
+            minidom::rxml::xml_ncname!("type").to_owned(),
+            message_type.as_attr(),
+        )
         .attr(
             minidom::rxml::xml_ncname!("id").to_owned(),
             stanza_id.as_str(),
         )
         .append(build_origin_id(&stanza_id))
         .append(
-            Element::builder("unpinned", NS_WADDLE_PIN_V0)
+            Element::builder(element_name, NS_WADDLE_PIN_V0)
                 .attr(
                     minidom::rxml::xml_ncname!("target").to_owned(),
                     target_stanza_id,

@@ -228,6 +228,7 @@ mod tests {
                     pep_feed_bridge: Arc::clone(&deps.protocol.pep_feed_bridge),
                     call_threads: Arc::clone(&deps.protocol.call_threads),
                     dm_call_threads: Arc::clone(&deps.protocol.dm_call_threads),
+                    dm_pin_store: Arc::clone(&deps.protocol.dm_pin_store),
                     dm_call_thread_projections: Arc::clone(
                         &deps.protocol.dm_call_thread_projections,
                     ),

@@ -92,8 +92,8 @@ pub mod handlers;
 pub use cleanup::cleanup_muc_presence_for_jid;
 pub use connection::router;
 pub use state::{
-    ActiveCallThread, DmCallThreadKey, PendingDmCallOffer, ProtocolServices, WebSocketDeps,
-    WebSocketState, XmppServiceDomains,
+    ActiveCallThread, DmCallThreadKey, DmPairKey, DmPinStore, PendingDmCallOffer, ProtocolServices,
+    WebSocketDeps, WebSocketState, XmppServiceDomains,
 };
 
 pub(crate) use cleanup::{

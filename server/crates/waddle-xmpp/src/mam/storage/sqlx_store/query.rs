@@ -105,18 +105,21 @@ macro_rules! push_common_mam_filters {
             ids.push_unseparated(")");
         }
         if !$query.stanza_ids.is_empty() {
-            // `MamQuery.stanza_ids` carries canonical XEP-0359 room-stamped
-            // UUIDs, stored in the `id` column (the SQL primary key). The
-            // `stanza_id` column holds the wire `<message id>` attribute —
-            // a different value. Filtering by `id` matches what the chat
-            // client supplies (via `roomAssignedStanzaId`). See
-            // `groupchat_archive.rs:10,94-97`.
-            $builder.push(" AND id IN (");
+            // Room pins pass archive-primary IDs. DM pins pass the pair-stable
+            // logical message ID, stored as the wire `<message id>` on each
+            // participant's personal archive row. Match both so the same MAM
+            // filter hydrates pinned bodies for rooms and DMs.
+            $builder.push(" AND (id IN (");
             let mut ids = $builder.separated(", ");
             for id in &$query.stanza_ids {
                 ids.push_bind(id.as_str());
             }
-            ids.push_unseparated(")");
+            ids.push_unseparated(") OR stanza_id IN (");
+            let mut stanza_ids = $builder.separated(", ");
+            for id in &$query.stanza_ids {
+                stanza_ids.push_bind(id.as_str());
+            }
+            stanza_ids.push_unseparated("))");
         }
         if let Some(thread_id) = $query.thread_id.as_ref() {
             $builder

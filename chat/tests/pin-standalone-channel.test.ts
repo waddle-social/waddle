@@ -47,4 +47,13 @@ describe("pin/unpin handlers for standalone channels", () => {
     expect(pinRegion).not.toContain("currentSpace");
     expect(unpinRegion).not.toContain("currentSpace");
   });
+
+  test("pin target lookup uses the active timeline for DMs and channels", () => {
+    expect(controllerSource).toContain(
+      "activeTarget.value.messages.value.find((m) => m.id === messageId)",
+    );
+    expect(controllerSource).not.toContain(
+      "messaging.messages.value.find((m) => m.id === messageId)",
+    );
+  });
 });

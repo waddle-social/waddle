@@ -400,7 +400,7 @@ pub async fn handle_iq_with_conn_state(
         .await;
     }
 
-    if is_pin_query_iq(&iq, muc_domain) {
+    if is_pin_query_iq(&iq, muc_domain, domain) {
         return handle_pin_query_iq(&iq, state, phase.bound_jid(), response_from, response_to)
             .await;
     }

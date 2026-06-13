@@ -53,11 +53,10 @@ const timelineIndex = computed(() => {
 });
 
 function liveMessageFor(stanzaId: string): TimelineMessage | null {
-  return (
-    timelineIndex.value.get(stanzaId) ??
-    pinnedBodies.value.get(props.roomJid)?.get(stanzaId) ??
-    null
-  );
+  const live = timelineIndex.value.get(stanzaId);
+  if (live) return live as TimelineMessage;
+  const cached = pinnedBodies.value.get(props.roomJid)?.get(stanzaId);
+  return cached ? (cached as TimelineMessage) : null;
 }
 
 interface ResolvedEntry {
@@ -116,7 +115,7 @@ function relativeTime(iso: string): string {
     >
       <Pin class="w-6 h-6" aria-hidden="true" />
       <p>No pinned messages yet.</p>
-      <p class="text-xs">Admins can pin a message from the message menu.</p>
+      <p class="text-xs">Pin a message from the message menu.</p>
     </div>
     <ol v-else class="flex-1 overflow-y-auto divide-y divide-border" role="list">
       <li

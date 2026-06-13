@@ -271,7 +271,11 @@ export function useChannelMessages(
           // Waddle MAM stanza-id filter: fetch the full message body so
           // PinnedPanel can render the message without a panel re-open.
           // Skip if the client does not support the stanza-id MAM filter.
-          if (xmppClient.value && "fetchRoomMessagesByStanzaIds" in xmppClient.value) {
+          if (
+            activeTimelineRoomJid.value === roomJid &&
+            xmppClient.value &&
+            "fetchRoomMessagesByStanzaIds" in xmppClient.value
+          ) {
             const currentClient = xmppClient.value;
             const spaceId = activeSpaceId.value ?? "";
             const channelId = activeChannelId.value ?? "";
@@ -286,7 +290,8 @@ export function useChannelMessages(
                 : null;
             };
             void hydrateSinglePinnedBody({
-              client: currentClient,
+              fetchByStanzaIds: (stanzaIds) =>
+                currentClient.fetchRoomMessagesByStanzaIds(spaceId, channelId, stanzaIds),
               spaceId,
               channelId,
               roomJid,

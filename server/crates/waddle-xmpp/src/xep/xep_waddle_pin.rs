@@ -13,6 +13,9 @@
 //! </message>
 //! ```
 //!
+//! The same markers are also valid on 1:1 `<message type='chat'>`
+//! stanzas for Waddle DM pair pinning.
+//!
 //! Or for unpin:
 //!
 //! ```xml
@@ -196,6 +199,21 @@ mod tests {
             intent,
             Some(PinIntent::Pin {
                 target: "stanza-1".into()
+            })
+        );
+    }
+
+    #[test]
+    fn extract_pin_intent_accepts_direct_chat_marker() {
+        let mut msg = Message::new(Some(Jid::from(
+            BareJid::from_str("bob@example.com").expect("valid jid"),
+        )));
+        msg.type_ = MessageType::Chat;
+        msg.payloads.push(build_pinned_element(&stanza_id("dm-1")));
+        assert_eq!(
+            extract_pin_intent_from_message(&msg),
+            Some(PinIntent::Pin {
+                target: "dm-1".into()
             })
         );
     }

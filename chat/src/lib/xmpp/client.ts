@@ -670,6 +670,16 @@ type XmppClientInstance = Partial<WasmClient> & CompatEmitter & {
     deviceId: string,
   ) => Promise<{ id: string; node: string; status: "active" | "disabled" }>;
   fetch_user_bookmarks?: () => Promise<UserBookmarkItem[] | null>;
+  pin_direct_message?: (peerJid: string, targetStanzaId: string) => Promise<void>;
+  unpin_direct_message?: (peerJid: string, targetStanzaId: string) => Promise<void>;
+  fetch_room_messages_by_stanza_ids?: (
+    targetJid: string,
+    stanzaIds: string[],
+  ) => Promise<import("./wasm-types").WasmMamPage | null>;
+  fetch_direct_messages_by_stanza_ids?: (
+    peerJid: string,
+    stanzaIds: string[],
+  ) => Promise<import("./wasm-types").WasmMamPage | null>;
   set_room_notification_mode?: (options: {
     roomJid: string;
     mode: NotifyMode;
@@ -1870,6 +1880,18 @@ export class BrowserXmppClient {
     if (typeof xmpp.unpin_message !== "function") throw new Error("unpin_message not available in wasm client");
     await xmpp.unpin_message(roomJid, targetStanzaId);
   }
+  async pinDirectMessage(peerJid: string, targetStanzaId: string) {
+    const xmpp = await this.requireConnectedXmpp();
+    const normalizedPeerJid = barePeerJid(peerJid);
+    if (typeof xmpp.pin_direct_message !== "function") throw new Error("pin_direct_message not available in wasm client");
+    await xmpp.pin_direct_message(normalizedPeerJid, targetStanzaId);
+  }
+  async unpinDirectMessage(peerJid: string, targetStanzaId: string) {
+    const xmpp = await this.requireConnectedXmpp();
+    const normalizedPeerJid = barePeerJid(peerJid);
+    if (typeof xmpp.unpin_direct_message !== "function") throw new Error("unpin_direct_message not available in wasm client");
+    await xmpp.unpin_direct_message(normalizedPeerJid, targetStanzaId);
+  }
   /** #414: fetch the room's current pin list. Server requires the
    * caller to be a current room occupant. Returns entries in
    * pin-time-desc order. */
@@ -1877,6 +1899,13 @@ export class BrowserXmppClient {
     const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId);
     if (typeof xmpp.fetch_room_pins !== "function") throw new Error("fetch_room_pins not available in wasm client");
     const result = await xmpp.fetch_room_pins(roomJid);
+    return Array.isArray(result) ? (result as import("./wasm-types").WasmPinEntry[]) : [];
+  }
+  async fetchDirectPins(peerJid: string): Promise<import("./wasm-types").WasmPinEntry[]> {
+    const xmpp = await this.requireConnectedXmpp();
+    const normalizedPeerJid = barePeerJid(peerJid);
+    if (typeof xmpp.fetch_room_pins !== "function") throw new Error("fetch_room_pins not available in wasm client");
+    const result = await xmpp.fetch_room_pins(normalizedPeerJid);
     return Array.isArray(result) ? (result as import("./wasm-types").WasmPinEntry[]) : [];
   }
   /** XEP-0359: fetch a batch of MAM messages by their stanza-ids. */
@@ -1889,6 +1918,17 @@ export class BrowserXmppClient {
     const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId);
     if (typeof xmpp.fetch_room_messages_by_stanza_ids !== "function") throw new Error("fetch_room_messages_by_stanza_ids not available in wasm client");
     const page = (await xmpp.fetch_room_messages_by_stanza_ids(roomJid, stanzaIds)) as import("./wasm-types").WasmMamPage | null;
+    return Array.isArray(page?.messages) ? page.messages : [];
+  }
+  async fetchDirectMessagesByStanzaIds(
+    peerJid: string,
+    stanzaIds: string[],
+  ): Promise<import("./wasm-types").WasmArchivedMessage[]> {
+    if (stanzaIds.length === 0) return [];
+    const xmpp = await this.requireConnectedXmpp();
+    const normalizedPeerJid = barePeerJid(peerJid);
+    if (typeof xmpp.fetch_direct_messages_by_stanza_ids !== "function") throw new Error("fetch_direct_messages_by_stanza_ids not available in wasm client");
+    const page = await xmpp.fetch_direct_messages_by_stanza_ids(normalizedPeerJid, stanzaIds);
     return Array.isArray(page?.messages) ? page.messages : [];
   }
   async sendRetraction(spaceId: string, channelId: string, retractsId: string, thread?: { id: string; parent?: string }) { const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId); await this.compatSendRetraction(xmpp, roomJid, "groupchat", retractsId, thread); }
@@ -3449,9 +3489,12 @@ export class BrowserXmppClient {
     }
     if (message.displayed_marker_id) { if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").split("/")[1] ?? "unknown"; this.displayedHandler?.({ roomJid, nick, messageId: message.displayed_marker_id }); } else this.dmDisplayedHandler?.({ peerJid: barePeerJid(message.from ?? message.to ?? ""), messageId: message.displayed_marker_id }); return; }
     if (message.reaction_target_id) { if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").split("/")[1] ?? "unknown"; this.reactionHandler?.({ roomJid, nick, messageId: message.reaction_target_id, emojis: message.reaction_emojis }); } else { const fromBare = barePeerJid(message.from ?? ""); const toBare = barePeerJid(message.to ?? ""); const selfBare = barePeerJid(this.session.jid); const peerJid = fromBare === selfBare ? toBare : fromBare; const reactorJid = fromBare || selfBare; if (peerJid && reactorJid) this.dmReactionHandler?.({ peerJid, reactorJid, messageId: message.reaction_target_id, emojis: message.reaction_emojis }); } return; }
-    if (message.pin_event && message.is_muc) {
-      const roomJid = barePeerJid(message.from ?? message.to ?? "");
-      this.pinEventHandler?.({ roomJid, event: message.pin_event });
+    if (message.pin_event) {
+      const roomJid = message.is_muc
+        ? barePeerJid(message.from ?? message.to ?? "")
+        : this.directPeerFromMessage(message);
+      if (roomJid) this.pinEventHandler?.({ roomJid, event: message.pin_event });
+      if (!message.is_muc) return;
       // Fall through: also render the system message in the timeline so
       // the user sees "alice pinned a message" inline (#414). The
       // pin store update has already happened above.
@@ -3476,6 +3519,13 @@ export class BrowserXmppClient {
       this.catchup.recordDmSeen(converted.peerJid, converted.createdAt, undefined, rawMessageSeenIds(message));
       this.directMessageHandler?.(converted);
     }
+  }
+
+  private directPeerFromMessage(message: InboundWasmMessage): string {
+    const selfBare = barePeerJid(this.session.jid);
+    const fromBare = barePeerJid(message.from ?? "");
+    const toBare = barePeerJid(message.to ?? "");
+    return fromBare === selfBare ? toBare : fromBare;
   }
   private async runReconnectCatchup(
     xmpp: XmppClientInstance,
