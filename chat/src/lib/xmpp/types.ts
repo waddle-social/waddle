@@ -416,6 +416,7 @@ export interface DiscoveredChannel {
   spaceId?: string;
   standalone?: boolean;
   features?: string[];
+  isGroupDm?: boolean;
   /**
    * XEP-0402 bookmark `autojoin` value. Bookmarked rooms with the
    * attribute omitted are `false` per spec; rooms discovered outside

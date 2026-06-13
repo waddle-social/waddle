@@ -1,5 +1,5 @@
 import { ref, computed, watch, type Ref } from "vue";
-import type { SpaceSummary, ChannelSummary, MemberSummary } from "@/lib/chat-types";
+import type { SpaceSummary, ChannelSummary, GroupDmSummary, MemberSummary } from "@/lib/chat-types";
 import type { WaddleSession } from "@/lib/server-auth";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import type { CommunityFormData, CreateFormData, ChannelEditFormData, CreateChannelResult } from "@/lib/chat-ui";
@@ -35,6 +35,7 @@ export function useWaddleDirectory(
 ) {
   const waddles = ref<SpaceSummary[]>([]);
   const channels = ref<ChannelSummary[]>([]);
+  const groupDms = ref<GroupDmSummary[]>([]);
   const members = ref<MemberSummary[]>([]);
   const memberLoadState = ref<MemberLoadState>("idle");
   const serverRole = ref<SpaceSummary["role"]>(null);
@@ -97,6 +98,7 @@ export function useWaddleDirectory(
 
   const sortedChannels = computed(() =>
     [...channels.value]
+      .filter((channel) => !channel.isGroupDm)
       .sort(
       (a, b) =>
         (a.position ?? 0) - (b.position ?? 0) ||
@@ -198,7 +200,7 @@ export function useWaddleDirectory(
       }) satisfies SpaceSummary);
       waddles.value = discoveredSpaces;
 
-      const channelList: ChannelSummary[] = topology.rooms.map((c) => ({
+      const allRooms: ChannelSummary[] = topology.rooms.map((c) => ({
         id: c.id,
         name: c.name,
         jid: c.jid,
@@ -206,13 +208,26 @@ export function useWaddleDirectory(
         channel_type: c.channelType,
         position: c.position,
         features: c.features,
+        isGroupDm: c.isGroupDm,
         // #422: hydrated from the room's disco-info extended form so
         // non-owners get correct Pin action visibility without owner
         // affiliation.
         ...(c.pinPermission ? { pinPermission: c.pinPermission } : {}),
       }));
 
-      channels.value = channelList;
+      const channelList = allRooms.filter((channel) => !channel.isGroupDm);
+      groupDms.value = allRooms
+        .filter((channel): channel is ChannelSummary & { jid: string } => !!channel.isGroupDm && !!channel.jid)
+        .map((channel) => ({
+          id: channel.id,
+          roomJid: channel.jid,
+          name: channel.name,
+          position: channel.position,
+          features: channel.features,
+          pinPermission: channel.pinPermission,
+          autojoin: topology.rooms.find((room) => room.jid === channel.jid)?.autojoin,
+        }));
+      channels.value = allRooms;
 
       if (opts?.noChannelSelect) {
         activeChannelId.value = null;
@@ -539,6 +554,7 @@ export function useWaddleDirectory(
     memberRequestId++;
     waddles.value = [];
     channels.value = [];
+    groupDms.value = [];
     members.value = [];
     memberLoadState.value = "idle";
     memberSnapshotsByChannelId.clear();
@@ -552,6 +568,7 @@ export function useWaddleDirectory(
   return {
     waddles,
     channels,
+    groupDms,
     members,
     memberLoadState,
     serverRole,

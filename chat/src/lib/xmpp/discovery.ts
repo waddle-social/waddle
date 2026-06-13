@@ -10,6 +10,7 @@ const NS_SPACES_0 = "urn:xmpp:spaces:0";
 const NS_PUBSUB = "http://jabber.org/protocol/pubsub";
 const NS_PUBSUB_METADATA = "http://jabber.org/protocol/pubsub#meta-data";
 const NS_BOOKMARKS_1 = "urn:xmpp:bookmarks:1";
+const NS_WADDLE_GROUP_DM = "urn:waddle:group-dm:0";
 const NS_MUC_ROOMINFO = "http://jabber.org/protocol/muc#roominfo";
 const DISCO_INFO_NS = "http://jabber.org/protocol/disco#info";
 const DISCO_ITEMS_NS = "http://jabber.org/protocol/disco#items";
@@ -169,6 +170,10 @@ function parseDiscoveryRole(value: string | null): DiscoveryRole {
 function channelTypeFromInfo(info: DiscoInfoData): DiscoveredChannel["channelType"] {
   const forumField = parseBooleanValue(info.fields.get(FIELD_FORUM_MODE) ?? null);
   return normalizeChannelType(info.features.includes(NS_FORUMS_0) || forumField ? "forum" : "text");
+}
+
+export function isGroupDmDiscoInfo(info: DiscoInfoData | null | undefined): boolean {
+  return hasDiscoFeature(info, NS_WADDLE_GROUP_DM);
 }
 
 function hasDiscoFeature(info: DiscoInfoData | null | undefined, feature: string): boolean {
@@ -382,6 +387,7 @@ export function applyDiscoInfoToChannel(room: DiscoveredChannel, info: DiscoInfo
   return {
     ...room,
     channelType: channelTypeFromInfo(info),
+    ...(isGroupDmDiscoInfo(info) ? { isGroupDm: true } : {}),
     ...(parentSpaceId ? { spaceId: parentSpaceId, standalone: false } : {}),
     ...(info.features.length ? { features: info.features } : {}),
     ...(pinPermission ? { pinPermission } : {}),
@@ -425,7 +431,7 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
   const domain = jidDomain(jid);
   const services = await discoverComponentServices(xmpp, domain, jid);
   let rooms: DiscoveredChannel[] = [];
-  const bookmarkedRooms = new Map<string, { spaceId: string; autojoin: boolean; name?: string }>();
+  const bookmarkedRooms = new Map<string, { spaceId?: string; autojoin: boolean; name?: string }>();
   const spaces: DiscoveredSpace[] = [];
   let serverRole: DiscoveryRole = null;
 
@@ -463,6 +469,19 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
     }
   } catch {}
 
+  try {
+    const userBookmarks = await sendPubsubItems(xmpp, barePeerJid(jid), NS_BOOKMARKS_1);
+    for (const bookmark of userBookmarks) {
+      if (!bookmark.jid) continue;
+      const roomJid = barePeerJid(bookmark.jid);
+      bookmarkedRooms.set(roomJid, {
+        ...bookmarkedRooms.get(roomJid),
+        autojoin: bookmark.autojoin ?? false,
+        name: bookmark.name,
+      });
+    }
+  } catch {}
+
   // Narrow try/catch JUST around `sendDiscoItems`: a wedged muc service
   // (which now times out via `withIqTimeout` instead of hanging forever)
   // degrades the sidebar to "no rooms" rather than failing the whole
@@ -482,7 +501,8 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
     // console for diagnostics.
     void err;
   }
-  const roomItems = [...mucRooms];
+  const roomItems: Array<{ jid?: string; name?: string; bookmarkOnly?: boolean }> =
+    mucRooms.map((room) => ({ ...room, bookmarkOnly: false }));
   const discoveredRoomJids = new Set(
     roomItems
       .map((room) => room.jid ? barePeerJid(room.jid) : null)
@@ -490,7 +510,7 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
   );
   for (const [roomJid, bookmark] of bookmarkedRooms.entries()) {
     if (!discoveredRoomJids.has(roomJid)) {
-      roomItems.push({ jid: roomJid, name: bookmark.name });
+      roomItems.push({ jid: roomJid, name: bookmark.name, bookmarkOnly: true });
     }
   }
   const hydratedSettled = await Promise.allSettled(
@@ -498,11 +518,17 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
       hydrateRoomInfo(xmpp, channelFromRoom({ jid: room.jid ?? "", name: room.name }, position)),
     ),
   );
-  const hydrated = hydratedSettled.map((entry, index) =>
-    entry.status === "fulfilled"
-      ? entry.value
-      : channelFromRoom({ jid: roomItems[index]!.jid ?? "", name: roomItems[index]!.name }, index),
-  );
+  const hydrated = hydratedSettled.flatMap((entry, index) => {
+    const source = roomItems[index]!;
+    if (entry.status === "fulfilled") {
+      if (source.bookmarkOnly && !entry.value.features?.includes(NS_MUC)) {
+        return [];
+      }
+      return [entry.value];
+    }
+    if (source.bookmarkOnly) return [];
+    return [channelFromRoom({ jid: source.jid ?? "", name: source.name }, index)];
+  });
   const validSpaceIds = new Set(spaces.map((space) => space.id));
   rooms = hydrated.map((room, position) => {
     const bookmark = room.jid ? bookmarkedRooms.get(barePeerJid(room.jid)) : undefined;
@@ -511,11 +537,13 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
     return {
       ...roomWithoutSpace,
       position,
-      ...(bookmark
+      ...(bookmark?.spaceId
         ? { spaceId: bookmark.spaceId, standalone: false, autojoin: bookmark.autojoin }
         : parentSpaceId
           ? { spaceId: parentSpaceId, standalone: false, autojoin: true }
-        : { autojoin: true }),
+        : bookmark
+          ? { autojoin: bookmark.autojoin }
+          : { autojoin: true }),
     };
   });
 

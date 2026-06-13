@@ -18,6 +18,7 @@ export interface ChannelSummary {
   channel_type?: string;
   position?: number;
   features?: string[];
+  isGroupDm?: boolean;
   is_default?: boolean;
   created_at?: string;
   updated_at?: string | null;
@@ -25,6 +26,18 @@ export interface ChannelSummary {
    * `urn:waddle:roomconfig:pinpermission` field. Default
    * `admins-only`. */
   pinPermission?: PinPermission;
+}
+
+export interface GroupDmSummary {
+  id: string;
+  roomJid: string;
+  name: string;
+  position?: number;
+  features?: string[];
+  autojoin?: boolean;
+  pinPermission?: PinPermission;
+  unreadCount?: number;
+  mentionCount?: number;
 }
 
 /** #415: wire values for the `urn:waddle:roomconfig:pinpermission`

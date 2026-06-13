@@ -2,6 +2,7 @@
 import CreateChannelDialog from "@/components/modals/CreateChannelDialog.vue";
 import WaddleSettingsDialog from "@/components/modals/WaddleSettingsDialog.vue";
 import EditChannelDialog from "@/components/modals/EditChannelDialog.vue";
+import NewGroupDmDialog from "@/components/modals/NewGroupDmDialog.vue";
 import NewDmDialog from "@/components/modals/NewDmDialog.vue";
 import MemberManagement from "@/components/modals/MemberManagement.vue";
 import ConfirmDialog from "@/components/ui/ConfirmDialog.vue";
@@ -20,6 +21,7 @@ const {
   inferredMemberJids,
   displayedMemberState,
   handleNewDm,
+  handleCreateGroupDm,
   handleCreateChannel,
   handleUpdateChannel,
   handleDeleteChannel,
@@ -38,6 +40,13 @@ const {
     <NewDmDialog
       v-model:open="ui.showNewDm.value"
       @submit="handleNewDm"
+    />
+    <NewGroupDmDialog
+      v-model:open="ui.showNewGroupDm.value"
+      :contacts="controller.rosterContacts.contacts.value"
+      :is-submitting="waddles.isSubmitting.value"
+      :self-jid="controller.connectionStore.session?.jid ?? null"
+      @submit="handleCreateGroupDm"
     />
     <CreateChannelDialog
       v-model:open="ui.showCreateChannel.value"
