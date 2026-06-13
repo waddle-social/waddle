@@ -240,7 +240,7 @@ function openExtensionRoute(route: DiscoveredExtensionRoute) {
           :conversations="dmConversations.conversations.value"
           :group-dms="groupDmConversations"
           :active-peer-jid="dmConversations.activePeerJid.value"
-          :active-group-dm-room-jid="ui.sidebarMode.value === 'dms' ? activeChannelRoomJid : null"
+          :active-group-dm-room-jid="ui.sidebarMode.value === 'dms' && !dmConversations.activePeerJid.value ? activeChannelRoomJid : null"
           :self-full-jid="visibleSelfFullJid"
           hide-current-call
           class="!w-full !border-r-0 !flex-1"

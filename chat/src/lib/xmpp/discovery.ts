@@ -474,10 +474,11 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
     for (const bookmark of userBookmarks) {
       if (!bookmark.jid) continue;
       const roomJid = barePeerJid(bookmark.jid);
+      const existing = bookmarkedRooms.get(roomJid);
       bookmarkedRooms.set(roomJid, {
-        ...bookmarkedRooms.get(roomJid),
+        ...existing,
         autojoin: bookmark.autojoin ?? false,
-        name: bookmark.name,
+        name: bookmark.name ?? existing?.name,
       });
     }
   } catch {}

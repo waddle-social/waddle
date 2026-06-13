@@ -1555,12 +1555,12 @@ export function useChatAppController(giphyApiKey: string) {
   // any pinned stanza-ids not already in the loaded timeline or cache.
   watch(() => ui.showPinnedPanel.value, async (open) => {
     if (!open) return;
-    if (ui.sidebarMode.value === "dms") return;
+    if (isActiveDirectDmSurface()) return;
     const client = xmppClient.value;
-    const spaceId = waddles.activeSpaceId.value;
+    const spaceId = waddles.currentChannel.value?.spaceId ?? "";
     const channelId = waddles.activeChannelId.value;
     const roomJid = messaging.currentRoomJid.value;
-    if (!client || !spaceId || !channelId || !roomJid) return;
+    if (!client || !channelId || !roomJid) return;
     if (!("fetchRoomMessagesByStanzaIds" in client)) return;
     const convertForTimeline = (a: Parameters<typeof roomMessageFromArchived>[0]) => {
       const live = roomMessageFromArchived(a, {
@@ -1587,7 +1587,7 @@ export function useChatAppController(giphyApiKey: string) {
     }
   });
   watch(() => ui.showPinnedPanel.value, async (open) => {
-    if (!open || ui.sidebarMode.value !== "dms") return;
+    if (!open || !isActiveDirectDmSurface()) return;
     const client = xmppClient.value;
     const peerJid = dmConversations.activePeerJid.value;
     const currentSession = session.value;
@@ -1614,7 +1614,7 @@ export function useChatAppController(giphyApiKey: string) {
     }
   });
   watch(pinnedRooms, (rooms) => {
-    if (!ui.showPinnedPanel.value || ui.sidebarMode.value !== "dms") return;
+    if (!ui.showPinnedPanel.value || !isActiveDirectDmSurface()) return;
     const client = xmppClient.value;
     const peerJid = dmConversations.activePeerJid.value;
     const currentSession = session.value;
@@ -1651,7 +1651,7 @@ export function useChatAppController(giphyApiKey: string) {
       const epoch = pinnedRoomsEpoch();
       void client.fetchDirectPins(peerJid)
         .then((entries) => {
-          if (ui.sidebarMode.value !== "dms" || dmConversations.activePeerJid.value !== peerJid) return;
+          if (!isActiveDirectDmSurface() || dmConversations.activePeerJid.value !== peerJid) return;
           hydratePinnedRoom(peerJid, entries, epoch);
         })
         .catch((error: unknown) => {
@@ -1967,7 +1967,7 @@ export function useChatAppController(giphyApiKey: string) {
     if (match.id === "groupDmRoom") {
       activeExtensionRouteKey.value = null;
       dmConversations.closeDm();
-      await selectGroupDm(match.params.roomJid);
+      await selectGroupDm(match.params.roomJid, { updateUrl: false });
       if (requestId !== routeRequestId) return;
       activeThreadTargetMessageId.value = null;
       activeThreadStack.value = match.search.thread;
@@ -2030,7 +2030,18 @@ export function useChatAppController(giphyApiKey: string) {
         params: { roomJid: ch.jid },
         search: match.search,
       }, { replace: true });
-      await selectGroupDm(ch.jid);
+      await selectGroupDm(ch.jid, { updateUrl: false });
+      ui.showPinnedPanel.value = match.search.pinned;
+      activeThreadTargetMessageId.value = null;
+      activeThreadStack.value = match.search.thread;
+      activeRightPanel.value = match.search.pinned
+        ? "pinned"
+        : match.search.thread.length > 0
+          ? "thread"
+          : null;
+      for (const threadId of match.search.thread) {
+        void messaging.backfillThread(threadId);
+      }
       return;
     }
     waddles.activeChannelId.value = ch.id;
@@ -2302,7 +2313,7 @@ export function useChatAppController(giphyApiKey: string) {
     await selectChannel(channelId, { roomJid: normalizedRoomJid });
   }
 
-  async function selectGroupDm(roomJid: string) {
+  async function selectGroupDm(roomJid: string, options: { updateUrl?: boolean } = {}) {
     const normalizedRoomJid = barePeerJid(roomJid);
     const group = waddles.groupDms.value.find((candidate) => barePeerJid(candidate.roomJid) === normalizedRoomJid);
     const channelId = group?.id ?? knownChannelIdForRoomJid(
@@ -2315,10 +2326,14 @@ export function useChatAppController(giphyApiKey: string) {
       })),
       managedMucDomain.value,
     );
-    if (!channelId) return;
+    if (!channelId) {
+      ui.actionError.value = "Group message is not available yet.";
+      navigate({ id: "dmList" }, { replace: true });
+      return;
+    }
     dmConversations.closeDm();
     await selectChannel(channelId, { roomJid: normalizedRoomJid, surface: "dms" });
-    updateUrl();
+    if (options.updateUrl !== false) updateUrl();
   }
 
   async function selectExtensionRoute(channelId: string, route: DiscoveredExtensionRoute) {

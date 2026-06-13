@@ -643,7 +643,7 @@ function threadEntryLabel(entry: MessageThreadEntry): string {
             </span>
             <span class="min-w-0 flex-1">
               <span class="type-control block truncate text-sidebar-foreground">{{ group.name }}</span>
-              <span class="type-caption block truncate text-sidebar-muted">{{ group.roomJid }}</span>
+              <span class="type-caption block truncate text-sidebar-muted">Group message</span>
             </span>
             <span class="flex shrink-0 items-center gap-1">
               <span

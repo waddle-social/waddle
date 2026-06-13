@@ -33,11 +33,8 @@ export function buildCreateGroupDmCommandXml(input: CreateGroupDmInput): string 
 export function parseCreateGroupDmResult(xml: string): CreateGroupDmResult {
   const result = parseCommandIqResponse(xml);
   const form = result.form as { fields?: Array<{ name?: string; var?: string; value?: string; values?: string[] }> } | undefined;
-  const roomJid = form?.fields
-    ?.find((field) => (field.name || field.var) === "room_jid")
-    ?.values?.[0]
-    ?? form?.fields?.find((field) => (field.name || field.var) === "room_jid")?.value
-    ?? "";
+  const roomJidField = form?.fields?.find((field) => (field.name || field.var) === "room_jid");
+  const roomJid = roomJidField?.values?.[0] ?? roomJidField?.value ?? "";
   if (!roomJid) {
     throw new Error("Group-DM create response did not include room_jid.");
   }

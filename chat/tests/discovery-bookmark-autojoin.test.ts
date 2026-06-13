@@ -111,6 +111,27 @@ describe("discoverTopology XEP-0402 bookmark autojoin", () => {
     });
   });
 
+  test("user bookmarks without names do not erase space bookmark names", async () => {
+    await withFakeDomParser(async () => {
+      const topology = await discoverTopology(
+        topologyClient({
+          spaceBookmarks: [
+            { id: "named@muc.example.test", name: "Named from space", autojoin: true },
+          ],
+          userBookmarks: [
+            { id: "named@muc.example.test", autojoin: false },
+          ],
+          rooms: [],
+        }),
+        "alice@example.test",
+      );
+
+      const room = topology.rooms.find((candidate) => candidate.jid === "named@muc.example.test");
+      expect(room?.name).toBe("Named from space");
+      expect(room?.autojoin).toBe(false);
+    });
+  });
+
   test("drops bookmark-only rooms that do not disco as MUC rooms", async () => {
     await withFakeDomParser(async () => {
       const topology = await discoverTopology(
