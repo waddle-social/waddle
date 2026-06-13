@@ -33,10 +33,11 @@ import type { WasmArchivedMessage } from "@/lib/xmpp/wasm-types";
  * the room-scoped XEP-0359 id (the canonical UUID pins reference). Returns the
  * matched requested id so that the cache key equals what the caller asked for.
  *
- * Contract: the server's stanza-id filter guarantees only messages whose
- * XEP-0359 room-scoped stanza-id is in the requested set are returned. Both
- * archive paths expose that id either through the `stanza_ids` array (branch 1)
- * or the singular `stanza_id`/`stanza_id_by` fields (branch 2).
+ * Contract: the server's stanza-id filter guarantees only messages matching
+ * one of the requested pin target IDs are returned. Room archives usually
+ * expose that ID through XEP-0359 `stanza_ids`; personal DM archives may expose
+ * the pair-stable wire ID through either `stanza_ids` or the singular
+ * `stanza_id` field.
  */
 function matchRequestedStanzaId(
   archived: WasmArchivedMessage,
