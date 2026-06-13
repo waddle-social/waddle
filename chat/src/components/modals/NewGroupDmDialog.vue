@@ -10,6 +10,9 @@ const props = defineProps<{
   contacts: RosterContact[];
   isSubmitting?: boolean;
   selfJid?: string | null;
+  excludedJids?: readonly string[];
+  minimumSelectedContacts?: number;
+  title?: string;
 }>();
 
 const emit = defineEmits<{
@@ -20,8 +23,12 @@ const selected = ref<Set<string>>(new Set());
 
 const selectableContacts = computed(() => {
   const self = (props.selfJid ?? "").split("/")[0]?.toLowerCase() ?? "";
+  const excluded = new Set((props.excludedJids ?? []).map((jid) => jid.split("/")[0]?.toLowerCase() ?? ""));
   return props.contacts
-    .filter((contact) => contact.jid.toLowerCase() !== self)
+    .filter((contact) => {
+      const bare = contact.jid.split("/")[0]?.toLowerCase() ?? "";
+      return bare !== self && !excluded.has(bare);
+    })
     .sort((a, b) => contactLabel(a).localeCompare(contactLabel(b), undefined, { sensitivity: "base" }));
 });
 
@@ -31,7 +38,7 @@ const selectedContacts = computed(() =>
 
 const defaultName = computed(() => selectedContacts.value.map(contactLabel).join(", "));
 const name = ref("");
-const canSubmit = computed(() => selected.value.size >= 2 && !props.isSubmitting);
+const canSubmit = computed(() => selected.value.size >= (props.minimumSelectedContacts ?? 2) && !props.isSubmitting);
 
 watch(open, (next) => {
   if (!next) {
@@ -54,20 +61,20 @@ function toggleContact(jid: string) {
 function handleSubmit() {
   if (!canSubmit.value) return;
   emit("submit", {
-    name: name.value.trim() || defaultName.value,
+    name: name.value.trim(),
     memberJids: [...selected.value],
   });
 }
 </script>
 
 <template>
-  <AppDialog v-model:open="open">
+  <AppDialog v-model:open="open" labelled-by="new-group-dm-title">
     <div class="chat-dialog-header">
-      <h2 class="type-dialog-title">New group message</h2>
+      <h2 id="new-group-dm-title" class="type-dialog-title">{{ props.title ?? "New group message" }}</h2>
       <button
         class="chat-icon-button hover:bg-muted"
         type="button"
-        aria-label="Close new group message dialog"
+        :aria-label="`Close ${props.title ?? 'new group message'} dialog`"
         @click="open = false"
       >
         <X class="w-4 h-4 text-muted-foreground" />
@@ -119,7 +126,7 @@ function handleSubmit() {
         :disabled="!canSubmit"
         @click="handleSubmit"
       >
-        Create group
+        {{ (props.minimumSelectedContacts ?? 2) < 2 ? "Add people" : "Create group" }}
       </button>
     </div>
   </AppDialog>

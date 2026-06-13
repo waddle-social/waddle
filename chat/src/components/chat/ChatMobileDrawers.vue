@@ -73,6 +73,8 @@ const {
   selectGroupDm,
   onSelectThread,
   selectDm,
+  handleNewGroupDm,
+  handleAddPeopleToDm,
   selectExtensionRoute,
   openCreateChannelDialog,
   openChannelEdit,
@@ -250,7 +252,8 @@ function openExtensionRoute(route: DiscoveredExtensionRoute) {
           @reconnect-dm="reconnectDmFromMobile"
           @end-dm="endDmFromMobile"
           @new-dm="ui.showNewDm.value = true"
-          @new-group-dm="ui.showNewGroupDm.value = true"
+          @new-group-dm="handleNewGroupDm"
+          @add-people-to-dm="handleAddPeopleToDm"
         />
         <ProfilePanel
           v-if="connectionStore.session"

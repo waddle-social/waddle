@@ -1,6 +1,10 @@
 <script setup lang="ts">
 const open = defineModel<boolean>("open", { required: true });
 
+defineProps<{
+  labelledBy?: string;
+}>();
+
 function onBackdropClick() {
   open.value = false;
 }
@@ -24,6 +28,7 @@ function onKeydown(e: KeyboardEvent) {
           class="relative flex max-h-[min(44rem,calc(100dvh-2rem))] w-full max-w-lg flex-col overflow-hidden glass-panel rounded-lg border border-border shadow-2xl animate-slide-up"
           role="dialog"
           aria-modal="true"
+          :aria-labelledby="labelledBy"
           @click.stop
         >
           <slot />

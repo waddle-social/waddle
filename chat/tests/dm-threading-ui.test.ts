@@ -38,6 +38,63 @@ describe("DM threading UI contract", () => {
     expect(emitted).toEqual([["selectThread", "dm-thread-1"]]);
   });
 
+  test("offers Add people from a 1:1 direct message", async () => {
+    const html = await renderVueComponent("../src/components/chat/DmPanel.vue", {
+      conversations: [conversation()],
+      activePeerJid: "alice@example.com",
+    });
+
+    expect(html).toContain("Add people to Alice");
+  });
+
+  test("wires Add people clicks through desktop and mobile shells", () => {
+    const dmPanel = readFileSync(new URL("../src/components/chat/DmPanel.vue", import.meta.url), "utf8");
+    const readyShell = readFileSync(new URL("../src/components/chat/ChatReadyShell.vue", import.meta.url), "utf8");
+    const mobileDrawers = readFileSync(new URL("../src/components/chat/ChatMobileDrawers.vue", import.meta.url), "utf8");
+
+    expect(dmPanel).toContain('@click.stop="emit(\'selectDm\', conversation.peerJid)"');
+    expect(dmPanel).toContain('@click.stop="emit(\'addPeopleToDm\', conversation.peerJid)"');
+    expect(readyShell).toContain('@add-people-to-dm="handleAddPeopleToDm"');
+    expect(mobileDrawers).toContain('@add-people-to-dm="handleAddPeopleToDm"');
+  });
+
+  test("seeded group-DM submits include the original direct-message peer", () => {
+    const controller = readFileSync(new URL("../src/shell/chat-app-controller.ts", import.meta.url), "utf8");
+    const seedIndex = controller.indexOf("const seedPeerJid = ui.groupDmSeedPeerJid.value;");
+    const payloadIndex = controller.indexOf("groupDmSpawnPayloadFromDm({", seedIndex);
+    const peerIndex = controller.indexOf("peerJid: seedPeerJid", payloadIndex);
+    const nameIndex = controller.indexOf("name: payload.name", payloadIndex);
+    const membersIndex = controller.indexOf("selectedMemberJids: payload.memberJids", payloadIndex);
+    const genericNameIndex = controller.indexOf('name: payload.name.trim() || payload.memberJids.map(groupDmMemberLabel).join(", ")', payloadIndex);
+    const errorIndex = controller.indexOf('"Choose at least one more contact."', payloadIndex);
+    const createIndex = controller.indexOf("client.createGroupDm(createPayload.name, createPayload.memberJids)", payloadIndex);
+    const selectIndex = controller.indexOf("await selectGroupDm(created.roomJid);", createIndex);
+
+    expect(seedIndex).toBeGreaterThan(-1);
+    expect(payloadIndex).toBeGreaterThan(seedIndex);
+    expect(peerIndex).toBeGreaterThan(payloadIndex);
+    expect(nameIndex).toBeGreaterThan(payloadIndex);
+    expect(membersIndex).toBeGreaterThan(payloadIndex);
+    expect(genericNameIndex).toBeGreaterThan(payloadIndex);
+    expect(errorIndex).toBeGreaterThan(payloadIndex);
+    expect(createIndex).toBeGreaterThan(payloadIndex);
+    expect(selectIndex).toBeGreaterThan(createIndex);
+  });
+
+  test("seeded Add people dialog requires one picked contact while generic group creation requires two", () => {
+    const modals = readFileSync(new URL("../src/components/chat/ChatAppModals.vue", import.meta.url), "utf8");
+    const dialog = readFileSync(new URL("../src/components/modals/NewGroupDmDialog.vue", import.meta.url), "utf8");
+
+    expect(modals).toContain(':minimum-selected-contacts="ui.groupDmSeedPeerJid.value ? 1 : 2"');
+    expect(modals).toContain(':excluded-jids="ui.groupDmSeedPeerJid.value ? [ui.groupDmSeedPeerJid.value] : []"');
+    expect(dialog).toContain("selected.value.size >= (props.minimumSelectedContacts ?? 2)");
+    expect(dialog).toContain("!excluded.has(bare)");
+    expect(dialog).toContain('labelled-by="new-group-dm-title"');
+    expect(dialog).toContain('id="new-group-dm-title"');
+    expect(dialog).toContain('name: name.value.trim()');
+    expect(dialog).toContain('(props.minimumSelectedContacts ?? 2) < 2 ? "Add people" : "Create group"');
+  });
+
   test("restores DM route threads only after the async route request is still current", () => {
     const controller = readFileSync(new URL("../src/shell/chat-app-controller.ts", import.meta.url), "utf8");
     const dmRouteStart = controller.indexOf('if (match.id === "dm") {');

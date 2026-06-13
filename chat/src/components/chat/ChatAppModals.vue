@@ -46,6 +46,9 @@ const {
       :contacts="controller.rosterContacts.contacts.value"
       :is-submitting="waddles.isSubmitting.value"
       :self-jid="controller.connectionStore.session?.jid ?? null"
+      :excluded-jids="ui.groupDmSeedPeerJid.value ? [ui.groupDmSeedPeerJid.value] : []"
+      :minimum-selected-contacts="ui.groupDmSeedPeerJid.value ? 1 : 2"
+      :title="ui.groupDmSeedPeerJid.value ? 'Add people' : 'New group message'"
       @submit="handleCreateGroupDm"
     />
     <CreateChannelDialog

@@ -146,6 +146,8 @@ const {
   selectExtensionRoute,
   handleOpenDm,
   selectDm,
+  handleNewGroupDm,
+  handleAddPeopleToDm,
   openCreateChannelDialog,
   openChannelEdit,
   sendActiveMessage,
@@ -657,7 +659,8 @@ onUnmounted(() => {
           @reconnect-dm="reconnectDmFromDock"
           @end-dm="endRecoveredDmFromActivity"
           @new-dm="ui.showNewDm.value = true"
-          @new-group-dm="ui.showNewGroupDm.value = true"
+          @new-group-dm="handleNewGroupDm"
+          @add-people-to-dm="handleAddPeopleToDm"
         />
         <CurrentCallPanel
           :channels="waddles.sortedChannels.value"

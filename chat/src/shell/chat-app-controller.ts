@@ -4,6 +4,7 @@ import { useStore } from "@nanostores/vue";
 import { useWaddleDirectory, type MemberLoadState } from "@/waddles/directory";
 import { useWaddleMembers } from "@/waddles/members";
 import { useDirectMessageConversations } from "@/dms/conversations";
+import { groupDmSpawnPayloadFromDm } from "@/dms/group-dm-spawn";
 import { useDirectMessages } from "@/dms/messages";
 import { useChannelMessages } from "@/channels/messages";
 import { useMessageThreads } from "@/channels/threads";
@@ -209,6 +210,10 @@ export function useChatAppController(giphyApiKey: string) {
   const ui = useChatShellState();
   const { mode: scrollDirectionMode } = useScrollDirectionPreference();
   const { isWindowFocused } = useChatWindowVisibility();
+
+  watch(() => ui.showNewGroupDm.value, (open) => {
+    if (!open) ui.groupDmSeedPeerJid.value = null;
+  });
 
   // Seed page-level UI state from the current URL so the first render
   // lands on the right page. Without this, every cold load flashes the
@@ -2378,28 +2383,58 @@ export function useChatAppController(giphyApiKey: string) {
     await handleOpenDm(`${username}@${selfDomain.value}`);
   }
 
+  function handleAddPeopleToDm(peerJid: string) {
+    ui.groupDmSeedPeerJid.value = barePeerJid(peerJid);
+    ui.showNewGroupDm.value = true;
+  }
+
+  function handleNewGroupDm() {
+    ui.groupDmSeedPeerJid.value = null;
+    ui.showNewGroupDm.value = true;
+  }
+
   async function handleCreateGroupDm(payload: { name: string; memberJids: string[] }) {
     const client = xmppClient.value;
     if (!client) {
       ui.actionError.value = "XMPP session is not ready.";
       return;
     }
-    if (payload.memberJids.length < 2) {
-      ui.actionError.value = "Choose at least two contacts.";
+    const seedPeerJid = ui.groupDmSeedPeerJid.value;
+    const createPayload = seedPeerJid
+      ? groupDmSpawnPayloadFromDm({
+          peerJid: seedPeerJid,
+          selfJid: connectionStore.session?.jid ?? null,
+          name: payload.name,
+          selectedMemberJids: payload.memberJids,
+          selectedMemberLabels: payload.memberJids.map(groupDmMemberLabel),
+        })
+      : {
+          name: payload.name.trim() || payload.memberJids.map(groupDmMemberLabel).join(", "),
+          memberJids: payload.memberJids,
+        };
+    if (createPayload.memberJids.length < 2) {
+      ui.actionError.value = seedPeerJid ? "Choose at least one more contact." : "Choose at least two contacts.";
       return;
     }
     waddles.isSubmitting.value = true;
     ui.clearActionError();
     try {
-      const created = await client.createGroupDm(payload.name, payload.memberJids);
+      const created = await client.createGroupDm(createPayload.name, createPayload.memberJids);
       await waddles.loadStructure(null, { noChannelSelect: true });
       ui.showNewGroupDm.value = false;
+      ui.groupDmSeedPeerJid.value = null;
       await selectGroupDm(created.roomJid);
     } catch (error) {
       ui.actionError.value = ui.normalizeError(error);
     } finally {
       waddles.isSubmitting.value = false;
     }
+  }
+
+  function groupDmMemberLabel(jid: string): string {
+    const normalized = barePeerJid(jid);
+    const contact = rosterContacts.contacts.value.find((candidate) => barePeerJid(candidate.jid) === normalized);
+    return contact?.name?.trim() || contact?.username?.trim() || normalized.split("@")[0] || normalized;
   }
 
   async function handleCreateChannel() {
@@ -2620,6 +2655,8 @@ export function useChatAppController(giphyApiKey: string) {
       handleOpenDm,
       selectDm,
       handleNewDm,
+      handleNewGroupDm,
+      handleAddPeopleToDm,
       handleCreateGroupDm,
       openCreateChannelDialog,
       handleCreateChannel,

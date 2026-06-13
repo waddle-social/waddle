@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { useStore } from "@nanostores/vue";
-import { ArrowRight, MessageCircle, MessagesSquare, Phone, PhoneCall, PhoneIncoming, PhoneOff, PhoneOutgoing, Plus, Video } from "lucide-vue-next";
+import { ArrowRight, MessageCircle, MessagesSquare, Phone, PhoneCall, PhoneIncoming, PhoneOff, PhoneOutgoing, Plus, UserPlus, Video } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import { formatTimelineStamp } from "@/channels/timeline";
 import type { MessageThreadEntry } from "@/channels/threads";
@@ -47,6 +47,7 @@ const emit = defineEmits<{
   endDm: [peerJid: string, sid?: string];
   newDm: [];
   newGroupDm: [];
+  addPeopleToDm: [peerJid: string];
 }>();
 
 const dmCallActivities = useStore($dmCallActivities);
@@ -445,6 +446,10 @@ function conversationRowLabel(conversation: DmConversation): string {
   return parts.join(", ");
 }
 
+function addPeopleLabel(conversation: DmConversation): string {
+  return `Add people to ${conversation.peerUsername || normalizedPeerJid(conversation.peerJid)}`;
+}
+
 function threadEntryTitle(entry: MessageThreadEntry): string {
   const body = entry.root?.body?.trim();
   return body || entry.threadId;
@@ -660,52 +665,66 @@ function threadEntryLabel(entry: MessageThreadEntry): string {
           </button>
         </section>
 
-        <button
+        <div
           v-for="conversation in visibleConversations"
           :key="conversation.peerJid"
           class="chat-list-row w-full min-h-14 flex items-center gap-3 px-3 py-2 text-left group"
           :class="isActiveConversation(conversation.peerJid)
             ? 'chat-list-row--active bg-sidebar-accent text-sidebar-foreground'
             : 'text-sidebar-muted hover:bg-sidebar-accent/50 hover:text-sidebar-foreground'"
-          :aria-current="isActiveConversation(conversation.peerJid) ? 'page' : undefined"
-          :aria-label="conversationRowLabel(conversation)"
-          type="button"
           @click="emit('selectDm', conversation.peerJid)"
         >
-          <div class="relative">
-            <AppAvatar :name="conversation.peerUsername" :src="conversation.peerAvatarUrl ?? null" size="sm" />
-            <span class="absolute -right-0.5 -bottom-0.5 w-2 h-2 rounded-full border border-background" :class="dotClass(conversation.presenceShow)" />
-          </div>
-          <div class="min-w-0 flex-1">
-            <div class="flex items-center justify-between gap-2">
-              <span class="type-control truncate">{{ conversation.peerUsername }}</span>
-              <span v-if="conversation.lastMessageAt" class="type-meta type-numeric text-sidebar-muted">
-                {{ formatTimelineStamp(conversation.lastMessageAt) }}
-              </span>
+          <button
+            class="flex min-w-0 flex-1 items-center gap-3 text-left"
+            type="button"
+            :aria-current="isActiveConversation(conversation.peerJid) ? 'page' : undefined"
+            :aria-label="conversationRowLabel(conversation)"
+            @click.stop="emit('selectDm', conversation.peerJid)"
+          >
+            <div class="relative">
+              <AppAvatar :name="conversation.peerUsername" :src="conversation.peerAvatarUrl ?? null" size="sm" />
+              <span class="absolute -right-0.5 -bottom-0.5 w-2 h-2 rounded-full border border-background" :class="dotClass(conversation.presenceShow)" />
             </div>
-            <div class="flex items-center gap-1.5">
-              <span class="type-caption text-sidebar-muted min-w-0 flex-1 truncate">{{ preview(conversation.lastMessageBody) }}</span>
-              <span
-                v-if="hasCallActivity(conversation.peerJid)"
-                class="type-meta inline-flex h-[18px] shrink-0 items-center gap-1 rounded-full border px-1.5"
-                :class="isHiddenCurrentCallPeer(conversation.peerJid)
-                  ? 'border-border bg-muted/60 text-sidebar-muted'
-                  : 'border-success/25 bg-success/10 text-success-foreground'"
-                :title="callActivityLabel(conversation.peerJid)"
-                :aria-label="callActivityLabel(conversation.peerJid)"
-              >
-                <PhoneCall class="h-3 w-3" />
-                <span>{{ isHiddenCurrentCallPeer(conversation.peerJid) ? 'Current call' : callActivityLabel(conversation.peerJid) }}</span>
-              </span>
-              <span
-                v-if="conversation.unreadCount > 0"
-                class="chat-badge-glow--primary type-count-badge inline-flex min-w-[18px] h-[18px] shrink-0 items-center justify-center rounded-full bg-primary px-1 text-primary-foreground"
-              >
-                {{ conversation.unreadCount }}
-              </span>
+            <div class="min-w-0 flex-1">
+              <div class="flex items-center justify-between gap-2">
+                <span class="type-control truncate">{{ conversation.peerUsername }}</span>
+                <span v-if="conversation.lastMessageAt" class="type-meta type-numeric text-sidebar-muted">
+                  {{ formatTimelineStamp(conversation.lastMessageAt) }}
+                </span>
+              </div>
+              <div class="flex items-center gap-1.5">
+                <span class="type-caption text-sidebar-muted min-w-0 flex-1 truncate">{{ preview(conversation.lastMessageBody) }}</span>
+                <span
+                  v-if="hasCallActivity(conversation.peerJid)"
+                  class="type-meta inline-flex h-[18px] shrink-0 items-center gap-1 rounded-full border px-1.5"
+                  :class="isHiddenCurrentCallPeer(conversation.peerJid)
+                    ? 'border-border bg-muted/60 text-sidebar-muted'
+                    : 'border-success/25 bg-success/10 text-success-foreground'"
+                  :title="callActivityLabel(conversation.peerJid)"
+                  :aria-label="callActivityLabel(conversation.peerJid)"
+                >
+                  <PhoneCall class="h-3 w-3" />
+                  <span>{{ isHiddenCurrentCallPeer(conversation.peerJid) ? 'Current call' : callActivityLabel(conversation.peerJid) }}</span>
+                </span>
+                <span
+                  v-if="conversation.unreadCount > 0"
+                  class="chat-badge-glow--primary type-count-badge inline-flex min-w-[18px] h-[18px] shrink-0 items-center justify-center rounded-full bg-primary px-1 text-primary-foreground"
+                >
+                  {{ conversation.unreadCount }}
+                </span>
+              </div>
             </div>
-          </div>
-        </button>
+          </button>
+          <button
+            class="chat-icon-button shrink-0 text-sidebar-muted hover:bg-sidebar-accent hover:text-sidebar-foreground"
+            type="button"
+            :title="addPeopleLabel(conversation)"
+            :aria-label="addPeopleLabel(conversation)"
+            @click.stop="emit('addPeopleToDm', conversation.peerJid)"
+          >
+            <UserPlus class="h-3.5 w-3.5" aria-hidden="true" />
+          </button>
+        </div>
       </div>
     </div>
   </div>
