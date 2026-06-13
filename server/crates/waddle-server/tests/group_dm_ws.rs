@@ -846,6 +846,17 @@ async fn group_dm_rename_is_unavailable_on_standard_muc_rooms() {
         response.contains("service-unavailable"),
         "standard MUC rooms must not expose group-DM rename: {response}"
     );
+    let items = disco_items_node(
+        &mut alice,
+        &room_jid,
+        "group-dm-rename-standard-channel-items",
+        NS_COMMANDS,
+    )
+    .await;
+    assert!(
+        is_error(&items) && items.contains("item-not-found"),
+        "standard MUC rooms must not expose group-DM command discovery: {items}"
+    );
 
     let _ = admin.close().await;
     let _ = alice.close().await;
@@ -881,6 +892,17 @@ async fn group_dm_rename_is_unavailable_on_standard_muc_rooms() {
     assert!(
         dormant_response.contains("service-unavailable"),
         "dormant standard MUC rooms must not expose group-DM rename: {dormant_response}"
+    );
+    let dormant_items = disco_items_node(
+        &mut alice,
+        &room_jid,
+        "group-dm-rename-standard-channel-dormant-items",
+        NS_COMMANDS,
+    )
+    .await;
+    assert!(
+        is_error(&dormant_items) && dormant_items.contains("item-not-found"),
+        "dormant standard MUC rooms must not expose group-DM command discovery: {dormant_items}"
     );
 }
 

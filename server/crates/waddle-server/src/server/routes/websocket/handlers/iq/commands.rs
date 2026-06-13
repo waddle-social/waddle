@@ -130,8 +130,7 @@ fn exact_bare_muc_room_target(
 ) -> Option<BareJid> {
     request_iq.to().and_then(|jid| {
         let bare = jid.to_bare();
-        (jid.to_string() == bare.to_string() && bare.domain().as_str() == muc_domain)
-            .then_some(bare)
+        (jid.resource().is_none() && bare.domain().as_str() == muc_domain).then_some(bare)
     })
 }
 

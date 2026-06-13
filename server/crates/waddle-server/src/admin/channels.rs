@@ -1981,6 +1981,16 @@ async fn run_group_dm_rename(
     let mut updated_bookmark_members = Vec::with_capacity(members.len());
     for member in &members {
         if !group_dm_room_config_revision_is_current(&actor, expected_revision).await {
+            repair_group_dm_rename_side_effects_after_conflict(
+                state,
+                &actor,
+                &channel_id,
+                &args.room_jid,
+                &previous_config,
+                expected_revision,
+                &updated_bookmark_members,
+            )
+            .await;
             return Err(Box::new(CommandResult::Error(XmppError::conflict(Some(
                 "group-DM rename was superseded by a newer update".to_string(),
             )))));
@@ -2011,6 +2021,16 @@ async fn run_group_dm_rename(
     }
 
     if !group_dm_room_config_revision_is_current(&actor, expected_revision).await {
+        repair_group_dm_rename_side_effects_after_conflict(
+            state,
+            &actor,
+            &channel_id,
+            &args.room_jid,
+            &previous_config,
+            expected_revision,
+            &updated_bookmark_members,
+        )
+        .await;
         return Err(Box::new(CommandResult::Error(XmppError::conflict(Some(
             "group-DM rename was superseded by a newer update".to_string(),
         )))));
@@ -2029,6 +2049,7 @@ async fn run_group_dm_rename(
 
 async fn acquire_room_config_lock(room_jid: &BareJid) -> OwnedMutexGuard<()> {
     static LOCKS: OnceLock<RoomConfigLockMap> = OnceLock::new();
+    // Retained process-local locks trade a small per-written-room map for no weak-lock race.
     let lock = LOCKS
         .get_or_init(RoomConfigLockMap::new)
         .entry(room_jid.clone())
@@ -2064,7 +2085,7 @@ async fn list_durable_group_dm_members(
         .global_actor()
         .ask(DbQuery {
             sql: r#"
-                SELECT subject_id
+                SELECT DISTINCT subject_id
                 FROM permission_tuples
                 WHERE object_type = 'channel'
                   AND object_id = ?
@@ -2183,6 +2204,40 @@ async fn restore_group_dm_bookmarks(
     for member_jid in updated_members {
         let _ = publish_group_dm_bookmark(state, member_jid, room_jid, previous_name).await;
     }
+}
+
+async fn repair_group_dm_rename_side_effects_after_conflict(
+    state: &AppState,
+    actor: &ActorRef<RoomActor>,
+    channel_id: &str,
+    room_jid: &BareJid,
+    previous_config: &RoomConfig,
+    expected_revision: u64,
+    updated_members: &[BareJid],
+) {
+    let target_config = if rollback_room_config_if_revision(
+        actor,
+        expected_revision,
+        previous_config.clone(),
+    )
+    .await
+    {
+        previous_config.clone()
+    } else {
+        actor
+            .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+            .await
+            .map(|snapshot| snapshot.room.config)
+            .unwrap_or_else(|_| previous_config.clone())
+    };
+    let _ = upsert_group_dm_catalog(state, channel_id, &target_config).await;
+    restore_group_dm_bookmarks(
+        state,
+        room_jid,
+        group_dm_shared_name(&target_config.name),
+        updated_members,
+    )
+    .await;
 }
 
 async fn rollback_room_config_if_revision(
@@ -2388,13 +2443,24 @@ async fn persist_durable_group_dm_member_tuple(
         .global_actor()
         .ask(DbExecute {
             sql: r#"
-                INSERT OR IGNORE INTO permission_tuples
+                INSERT INTO permission_tuples
                     (id, object_type, object_id, relation, subject_type, subject_id, subject_relation)
-                VALUES (?, 'channel', ?, 'member', 'user', ?, NULL)
+                SELECT ?, 'channel', ?, 'member', 'user', ?, NULL
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM permission_tuples
+                    WHERE object_type = 'channel'
+                      AND object_id = ?
+                      AND relation = 'member'
+                      AND subject_type = 'user'
+                      AND subject_id = ?
+                      AND subject_relation IS NULL
+                )
             "#
             .to_string(),
             params: vec![
                 format!("group-dm-member:{group_dm_id}:{member_jid}").into(),
+                group_dm_id.into(),
+                member_jid.to_string().into(),
                 group_dm_id.into(),
                 member_jid.to_string().into(),
             ],

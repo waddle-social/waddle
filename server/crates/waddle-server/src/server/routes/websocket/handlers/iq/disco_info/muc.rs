@@ -138,6 +138,7 @@ async fn classify_room_command_target(
                         );
                         RoomCommandTarget::Failed
                     }
+                    Ok(response) if response.allowed => RoomCommandTarget::GroupDm,
                     Ok(_) => RoomCommandTarget::NotMember,
                     Err(error) => {
                         warn!(

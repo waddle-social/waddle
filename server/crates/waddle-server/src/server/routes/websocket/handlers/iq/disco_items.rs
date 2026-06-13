@@ -87,6 +87,7 @@ async fn classify_room_command_target(
                     );
                     RoomCommandTarget::Failed
                 }
+                Ok(response) if response.allowed => RoomCommandTarget::GroupDm,
                 Ok(_) => RoomCommandTarget::NotMember,
                 Err(error) => {
                     warn!(
@@ -233,11 +234,7 @@ pub(super) async fn handle_disco_items_iq(
                             build_command_items(request_iq, &command_refs, target_to.unwrap());
                         return vec![iq_to_xml(response)];
                     }
-                    RoomCommandTarget::NotGroupDm => {
-                        let response = build_command_items(request_iq, &[], target_to.unwrap());
-                        return vec![iq_to_xml(response)];
-                    }
-                    RoomCommandTarget::NotMember => {
+                    RoomCommandTarget::NotGroupDm | RoomCommandTarget::NotMember => {
                         return vec![build_iq_error_xml_typed(
                             id,
                             response_from,
