@@ -521,7 +521,7 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
   const hydrated = hydratedSettled.flatMap((entry, index) => {
     const source = roomItems[index]!;
     if (entry.status === "fulfilled") {
-      if (source.bookmarkOnly && !entry.value.features?.includes(NS_MUC)) {
+      if (source.bookmarkOnly && !entry.value.features?.some((feature) => feature === NS_MUC)) {
         return [];
       }
       return [entry.value];
