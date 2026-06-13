@@ -11,14 +11,23 @@ use xmpp_parsers::minidom::Element;
 const DOMAIN: &str = "localhost";
 const NS_COMMANDS: &str = "http://jabber.org/protocol/commands";
 const NS_DATA: &str = "jabber:x:data";
+const NODE_CHANNELS_CREATE: &str = "urn:waddle:admin:channels:create:0";
 const NODE_GROUP_DM_CREATE: &str = "urn:waddle:group-dm:create:0";
 const NODE_GROUP_DM_LEAVE: &str = "urn:waddle:group-dm:leave:0";
+const NODE_GROUP_DM_RENAME: &str = "urn:waddle:group-dm:rename:0";
 const FEATURE_GROUP_DM: &str = "urn:waddle:group-dm:0";
 const NS_MUC_USER: &str = "http://jabber.org/protocol/muc#user";
 const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
 const PEP_NODE_BOOKMARKS: &str = "urn:xmpp:bookmarks:1";
 
 static TEST_SERIAL: Mutex<()> = Mutex::const_new(());
+
+async fn admin_client(server: &TestServer, resource: &str) -> WsXmppClient {
+    let password = server.fixed_account_password().to_string();
+    WsXmppClient::connect_and_auth(&server.ws_url(), DOMAIN, "admin", &password, resource)
+        .await
+        .expect("admin connect")
+}
 
 fn frame_has_iq_id(frame: &str, id: &str) -> bool {
     frame.contains(&format!(r#"id='{id}'"#)) || frame.contains(&format!(r#"id="{id}""#))
@@ -54,6 +63,16 @@ async fn user_client(
 }
 
 async fn send_command(client: &mut WsXmppClient, node: &str, id: &str, form: Element) -> String {
+    send_command_to(client, DOMAIN, node, id, form).await
+}
+
+async fn send_command_to(
+    client: &mut WsXmppClient,
+    to: &str,
+    node: &str,
+    id: &str,
+    form: Element,
+) -> String {
     let command = Element::builder("command", NS_COMMANDS)
         .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
         .attr(minidom::rxml::xml_ncname!("action").to_owned(), "execute")
@@ -62,7 +81,7 @@ async fn send_command(client: &mut WsXmppClient, node: &str, id: &str, form: Ele
     let iq = Element::builder("iq", "jabber:client")
         .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
         .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
-        .attr(minidom::rxml::xml_ncname!("to").to_owned(), DOMAIN)
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), to)
         .append(command)
         .build();
     client.send(&element_to_xml(iq)).await.expect("send iq");
@@ -72,12 +91,44 @@ async fn send_command(client: &mut WsXmppClient, node: &str, id: &str, form: Ele
         .expect("iq response")
 }
 
+async fn rename_group_dm(
+    client: &mut WsXmppClient,
+    room_jid: &str,
+    id: &str,
+    name: &str,
+) -> String {
+    send_command_to(
+        client,
+        room_jid,
+        NODE_GROUP_DM_RENAME,
+        id,
+        submit_form(
+            NODE_GROUP_DM_RENAME,
+            vec![text_field("room_jid", room_jid), text_field("name", name)],
+        ),
+    )
+    .await
+}
+
 async fn disco_info(client: &mut WsXmppClient, to: &str, id: &str) -> String {
+    disco_info_node(client, to, id, None).await
+}
+
+async fn disco_info_node(
+    client: &mut WsXmppClient,
+    to: &str,
+    id: &str,
+    node: Option<&str>,
+) -> String {
+    let mut query = Element::builder("query", "http://jabber.org/protocol/disco#info");
+    if let Some(node) = node {
+        query = query.attr(minidom::rxml::xml_ncname!("node").to_owned(), node);
+    }
     let iq = Element::builder("iq", "jabber:client")
         .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
         .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
         .attr(minidom::rxml::xml_ncname!("to").to_owned(), to)
-        .append(Element::builder("query", "http://jabber.org/protocol/disco#info").build())
+        .append(query.build())
         .build();
     client
         .send(&element_to_xml(iq))
@@ -87,6 +138,27 @@ async fn disco_info(client: &mut WsXmppClient, to: &str, id: &str) -> String {
         .recv_matching(|frame| frame.contains("<iq") && frame_has_iq_id(frame, id))
         .await
         .expect("disco info response")
+}
+
+async fn disco_items_node(client: &mut WsXmppClient, to: &str, id: &str, node: &str) -> String {
+    let iq = Element::builder("iq", "jabber:client")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), to)
+        .append(
+            Element::builder("query", "http://jabber.org/protocol/disco#items")
+                .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+                .build(),
+        )
+        .build();
+    client
+        .send(&element_to_xml(iq))
+        .await
+        .expect("send disco items");
+    client
+        .recv_matching(|frame| frame.contains("<iq") && frame_has_iq_id(frame, id))
+        .await
+        .expect("disco items response")
 }
 
 async fn enable_resumption(client: &mut WsXmppClient) -> String {
@@ -125,6 +197,21 @@ async fn create_group_dm(
         "expected group-DM create result, got: {resp}"
     );
     extract_field(&resp, "room_jid").expect("room_jid in create response")
+}
+
+async fn create_channel(client: &mut WsXmppClient, id: &str, name: &str) -> String {
+    let resp = send_command(
+        client,
+        NODE_CHANNELS_CREATE,
+        id,
+        submit_form(NODE_CHANNELS_CREATE, vec![text_field("name", name)]),
+    )
+    .await;
+    assert!(
+        is_result(&resp),
+        "expected channel create result, got: {resp}"
+    );
+    extract_field(&resp, "channel_jid").expect("channel_jid in channel create response")
 }
 
 async fn join_room(client: &mut WsXmppClient, room_jid: &str, nick: &str) {
@@ -191,6 +278,28 @@ async fn get_bookmarks(client: &mut WsXmppClient, id: &str) -> String {
         .recv_matching(|frame| frame.contains("<iq") && frame_has_iq_id(frame, id))
         .await
         .expect("bookmarks response")
+}
+
+async fn publish_bookmark(
+    client: &mut WsXmppClient,
+    id: &str,
+    room_jid: &str,
+    payload: &str,
+) -> String {
+    let iq = format!(
+        "<iq xmlns='jabber:client' type='set' id='{id}'>\
+            <pubsub xmlns='{NS_PUBSUB}'>\
+                <publish node='{PEP_NODE_BOOKMARKS}'>\
+                    <item id='{room_jid}'>{payload}</item>\
+                </publish>\
+            </pubsub>\
+         </iq>"
+    );
+    client.send(&iq).await.expect("send bookmark publish");
+    client
+        .recv_matching(|frame| frame.contains("<iq") && frame_has_iq_id(frame, id))
+        .await
+        .expect("bookmark publish response")
 }
 
 async fn leave_group_dm(client: &mut WsXmppClient, id: &str, room_jid: &str) -> String {
@@ -387,6 +496,39 @@ async fn group_dm_create_provisions_hidden_members_only_room_with_disco_feature(
         disco.contains("muc_membersonly"),
         "restarted group DM room must stay members-only: {disco}"
     );
+    let not_joined_rename = rename_group_dm(
+        &mut alice,
+        &room_jid,
+        "group-dm-rename-after-restart-not-joined",
+        "Too Early",
+    )
+    .await;
+    assert!(
+        is_error(&not_joined_rename) && not_joined_rename.contains("forbidden"),
+        "persisted member on a dormant group DM must be recognized as a member but still join before rename: {not_joined_rename}"
+    );
+    join_room(&mut alice, &room_jid, "alice").await;
+    let rename = rename_group_dm(
+        &mut alice,
+        &room_jid,
+        "group-dm-rename-after-restart",
+        "Reloaded Crew",
+    )
+    .await;
+    assert!(
+        is_result(&rename),
+        "restarted dormant group DM should rehydrate and allow a joined member rename: {rename}"
+    );
+    let renamed_disco = disco_info(
+        &mut alice,
+        &room_jid,
+        "group-dm-disco-renamed-after-restart",
+    )
+    .await;
+    assert!(
+        renamed_disco.contains("Reloaded Crew"),
+        "restarted group DM should persist the rename: {renamed_disco}"
+    );
     let _ = alice.close().await;
 }
 
@@ -503,6 +645,577 @@ async fn group_dm_member_invites_new_member_with_history_access_extension() {
         mam.iter()
             .any(|frame| frame.contains("pre-add visible to full")),
         "duplicate invite must not overwrite an existing full-history boundary: {mam:?}"
+    );
+}
+
+#[tokio::test]
+async fn group_dm_member_renames_room_with_status_104_config_broadcast() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server =
+        TestServer::start_with_extra_accounts(&[("alice", "alice-pass"), ("bob", "bob-pass")]);
+    let mut alice = user_client(&server, "alice", "alice-pass", "group-dm-rename-alice").await;
+    let mut bob = user_client(&server, "bob", "bob-pass", "group-dm-rename-bob").await;
+
+    let room_jid = create_group_dm(
+        &mut alice,
+        "group-dm-rename-create",
+        "Alice, Bob",
+        &["alice@localhost", "bob@localhost"],
+    )
+    .await;
+    join_room(&mut alice, &room_jid, "alice").await;
+    join_room(&mut bob, &room_jid, "bob").await;
+
+    let seeded = publish_bookmark(
+        &mut alice,
+        "group-dm-rename-seed-bookmark",
+        &room_jid,
+        "<conference xmlns='urn:xmpp:bookmarks:1' name='Alice, Bob' autojoin='true'>\
+            <nick>AliceNick</nick>\
+            <password>keep-secret</password>\
+            <extensions><marker xmlns='urn:waddle:test:bookmark-ext'>keep-me</marker></extensions>\
+         </conference>",
+    )
+    .await;
+    assert!(
+        is_result(&seeded),
+        "expected seeded bookmark result: {seeded}"
+    );
+
+    let response =
+        rename_group_dm(&mut alice, &room_jid, "group-dm-rename-set", "Launch Crew").await;
+    assert!(
+        is_result(&response),
+        "expected rename result, got: {response}"
+    );
+    assert_eq!(
+        extract_field(&response, "name").as_deref(),
+        Some("Launch Crew")
+    );
+
+    let broadcast = bob
+        .recv_matching(|frame| {
+            frame.contains("<message")
+                && frame.contains(&format!("from='{room_jid}'"))
+                && frame.contains("code='104'")
+        })
+        .await
+        .expect("config-change status 104 broadcast");
+    assert!(
+        broadcast.contains("http://jabber.org/protocol/muc#user"),
+        "status 104 must use standard MUC user payload: {broadcast}"
+    );
+    assert!(
+        !broadcast.contains("<item"),
+        "status 104 message must not carry occupant item payload: {broadcast}"
+    );
+
+    let bookmarks = get_bookmarks(&mut alice, "group-dm-rename-bookmarks").await;
+    assert!(
+        bookmarks.contains("Launch Crew")
+            && bookmarks.contains("<nick>AliceNick</nick>")
+            && bookmarks.contains("<password>keep-secret</password>")
+            && bookmarks.contains("urn:waddle:test:bookmark-ext")
+            && bookmarks.contains("keep-me"),
+        "rename must mutate only the shared bookmark name and preserve XEP-0402 fields/extensions: {bookmarks}"
+    );
+
+    let disco = disco_info(&mut bob, &room_jid, "group-dm-rename-disco").await;
+    assert!(
+        disco.contains("Launch Crew"),
+        "renamed group DM should expose the shared room name after reload/disco: {disco}"
+    );
+
+    let full_jid_response = rename_group_dm(
+        &mut alice,
+        &format!("{room_jid}/alice"),
+        "group-dm-rename-full-jid",
+        "Wrong Target",
+    )
+    .await;
+    assert!(
+        is_error(&full_jid_response),
+        "full room JID command target should be rejected: {full_jid_response}"
+    );
+    assert!(
+        full_jid_response.contains("service-unavailable"),
+        "full room JID command target should be unavailable, not routed: {full_jid_response}"
+    );
+
+    let full_jid_disco = disco_info_node(
+        &mut alice,
+        &format!("{room_jid}/alice"),
+        "group-dm-rename-full-jid-disco",
+        Some(NODE_GROUP_DM_RENAME),
+    )
+    .await;
+    assert!(
+        is_error(&full_jid_disco) && full_jid_disco.contains("item-not-found"),
+        "full room JID command disco must be rejected, not fall through: {full_jid_disco}"
+    );
+
+    let full_jid_items = disco_items_node(
+        &mut alice,
+        &format!("{room_jid}/alice"),
+        "group-dm-rename-full-jid-items",
+        NS_COMMANDS,
+    )
+    .await;
+    assert!(
+        is_error(&full_jid_items) && full_jid_items.contains("item-not-found"),
+        "full room JID command items must be rejected, not fall through: {full_jid_items}"
+    );
+}
+
+#[tokio::test]
+async fn group_dm_rename_broadcasts_status_104_to_sibling_sessions() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server =
+        TestServer::start_with_extra_accounts(&[("alice", "alice-pass"), ("bob", "bob-pass")]);
+    let mut alice_web = user_client(&server, "alice", "alice-pass", "rename-sibling-web").await;
+    let mut alice_mobile =
+        user_client(&server, "alice", "alice-pass", "rename-sibling-mobile").await;
+    let mut bob = user_client(&server, "bob", "bob-pass", "rename-sibling-bob").await;
+
+    let room_jid = create_group_dm(
+        &mut alice_web,
+        "group-dm-rename-sibling-create",
+        "Alice, Bob",
+        &["alice@localhost", "bob@localhost"],
+    )
+    .await;
+    join_room(&mut alice_web, &room_jid, "alice").await;
+    join_room(&mut alice_mobile, &room_jid, "alice").await;
+    join_room(&mut bob, &room_jid, "bob").await;
+
+    let response = rename_group_dm(
+        &mut alice_mobile,
+        &room_jid,
+        "group-dm-rename-sibling",
+        "Shared Mobile Name",
+    )
+    .await;
+    assert!(
+        is_result(&response),
+        "expected rename result, got: {response}"
+    );
+
+    let web_status = alice_web
+        .recv_matching(|frame| frame.contains("<message") && frame.contains("code='104'"))
+        .await
+        .expect("sibling session receives status 104");
+    assert!(
+        web_status.contains(&format!("from='{room_jid}'")) && !web_status.contains("<item"),
+        "sibling status-104 broadcast must use the bare-room MUC-user message shape: {web_status}"
+    );
+}
+
+#[tokio::test]
+async fn group_dm_rename_is_unavailable_on_standard_muc_rooms() {
+    let _serial = TEST_SERIAL.lock().await;
+    let db_dir = tempfile::tempdir().expect("temp db dir");
+    let db_path = db_dir.path().join("standard-muc-rename.sqlite3");
+    let database_url = format!("sqlite://{}?mode=rwc", db_path.display());
+    let server =
+        TestServer::start_persistent_with_extra_accounts(&database_url, &[("alice", "alice-pass")]);
+    let mut admin = admin_client(&server, "rename-standard-muc-admin").await;
+    let mut alice = user_client(&server, "alice", "alice-pass", "rename-standard-muc").await;
+
+    let room_jid = create_channel(
+        &mut admin,
+        "group-dm-rename-standard-channel-create",
+        "Regular Channel",
+    )
+    .await;
+    let response = send_command_to(
+        &mut alice,
+        &room_jid,
+        NODE_GROUP_DM_RENAME,
+        "group-dm-rename-standard-channel",
+        submit_form(
+            NODE_GROUP_DM_RENAME,
+            vec![
+                text_field("room_jid", &room_jid),
+                text_field("name", "Nope"),
+            ],
+        ),
+    )
+    .await;
+    assert!(is_error(&response), "expected error, got: {response}");
+    assert!(
+        response.contains("service-unavailable"),
+        "standard MUC rooms must not expose group-DM rename: {response}"
+    );
+    let items = disco_items_node(
+        &mut alice,
+        &room_jid,
+        "group-dm-rename-standard-channel-items",
+        NS_COMMANDS,
+    )
+    .await;
+    assert!(
+        is_error(&items) && items.contains("item-not-found"),
+        "standard MUC rooms must not expose group-DM command discovery: {items}"
+    );
+
+    let _ = admin.close().await;
+    let _ = alice.close().await;
+    drop(server);
+
+    let server =
+        TestServer::start_persistent_with_extra_accounts(&database_url, &[("alice", "alice-pass")]);
+    let mut alice = user_client(
+        &server,
+        "alice",
+        "alice-pass",
+        "rename-standard-muc-restart",
+    )
+    .await;
+    let dormant_response = send_command_to(
+        &mut alice,
+        &room_jid,
+        NODE_GROUP_DM_RENAME,
+        "group-dm-rename-standard-channel-dormant",
+        submit_form(
+            NODE_GROUP_DM_RENAME,
+            vec![
+                text_field("room_jid", &room_jid),
+                text_field("name", "Nope"),
+            ],
+        ),
+    )
+    .await;
+    assert!(
+        is_error(&dormant_response),
+        "expected error, got: {dormant_response}"
+    );
+    assert!(
+        dormant_response.contains("service-unavailable"),
+        "dormant standard MUC rooms must not expose group-DM rename: {dormant_response}"
+    );
+    let dormant_items = disco_items_node(
+        &mut alice,
+        &room_jid,
+        "group-dm-rename-standard-channel-dormant-items",
+        NS_COMMANDS,
+    )
+    .await;
+    assert!(
+        is_error(&dormant_items) && dormant_items.contains("item-not-found"),
+        "dormant standard MUC rooms must not expose group-DM command discovery: {dormant_items}"
+    );
+}
+
+#[tokio::test]
+async fn group_dm_rename_missing_room_is_item_not_found() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start_with_extra_accounts(&[("alice", "alice-pass")]);
+    let mut alice = user_client(&server, "alice", "alice-pass", "rename-missing-room").await;
+
+    let missing_room = "group-dm-missing@muc.localhost";
+    let response = send_command_to(
+        &mut alice,
+        missing_room,
+        NODE_GROUP_DM_RENAME,
+        "group-dm-rename-missing-room",
+        submit_form(
+            NODE_GROUP_DM_RENAME,
+            vec![
+                text_field("room_jid", missing_room),
+                text_field("name", "Missing"),
+            ],
+        ),
+    )
+    .await;
+    assert!(is_error(&response), "expected error, got: {response}");
+    assert!(
+        response.contains("service-unavailable"),
+        "missing group-DM room target must not expose command availability: {response}"
+    );
+    assert!(
+        !response.contains("internal-server-error"),
+        "missing group-DM room target must not look like a server fault: {response}"
+    );
+}
+
+#[tokio::test]
+async fn group_dm_member_clears_shared_room_name() {
+    let _serial = TEST_SERIAL.lock().await;
+    let db_dir = tempfile::tempdir().expect("temp db dir");
+    let db_path = db_dir.path().join("group-dm-clear.sqlite3");
+    let database_url = format!("sqlite://{}?mode=rwc", db_path.display());
+    let server = TestServer::start_persistent_with_extra_accounts(
+        &database_url,
+        &[("alice", "alice-pass"), ("bob", "bob-pass")],
+    );
+    let mut alice = user_client(&server, "alice", "alice-pass", "group-dm-clear-alice").await;
+    let mut bob = user_client(&server, "bob", "bob-pass", "group-dm-clear-bob").await;
+
+    let room_jid = create_group_dm(
+        &mut alice,
+        "group-dm-clear-create",
+        "Alice, Bob",
+        &["alice@localhost", "bob@localhost"],
+    )
+    .await;
+    join_room(&mut alice, &room_jid, "alice").await;
+    join_room(&mut bob, &room_jid, "bob").await;
+
+    let set_response =
+        rename_group_dm(&mut alice, &room_jid, "group-dm-clear-set", "Launch Crew").await;
+    assert!(
+        is_result(&set_response),
+        "expected set result, got: {set_response}"
+    );
+    let _ = bob
+        .recv_matching(|frame| frame.contains("<message") && frame.contains("code='104'"))
+        .await
+        .expect("set status 104 broadcast");
+
+    let seeded = publish_bookmark(
+        &mut alice,
+        "group-dm-clear-seed-bookmark",
+        &room_jid,
+        "<conference xmlns='urn:xmpp:bookmarks:1' name='Launch Crew' autojoin='true'>\
+            <nick>AliceNick</nick>\
+            <password>keep-secret</password>\
+            <extensions><marker xmlns='urn:waddle:test:bookmark-ext'>keep-me</marker></extensions>\
+         </conference>",
+    )
+    .await;
+    assert!(
+        is_result(&seeded),
+        "expected seeded bookmark result: {seeded}"
+    );
+
+    let clear_response = rename_group_dm(&mut bob, &room_jid, "group-dm-clear-name", "").await;
+    assert!(
+        is_result(&clear_response),
+        "expected clear result, got: {clear_response}"
+    );
+    assert_eq!(extract_field(&clear_response, "name").as_deref(), Some(""));
+
+    let broadcast = alice
+        .recv_matching(|frame| {
+            frame.contains("<message")
+                && frame.contains(&format!("from='{room_jid}'"))
+                && frame.contains("code='104'")
+        })
+        .await
+        .expect("clear status 104 broadcast");
+    assert!(
+        broadcast.contains("http://jabber.org/protocol/muc#user"),
+        "clear must use standard MUC user payload: {broadcast}"
+    );
+
+    let disco = disco_info(&mut alice, &room_jid, "group-dm-clear-disco").await;
+    assert!(
+        !disco.contains("Launch Crew"),
+        "cleared group DM should no longer expose the old shared name: {disco}"
+    );
+    assert!(
+        !disco.contains("name=''") && !disco.contains("name=\"\""),
+        "cleared group DM should omit the shared room identity name: {disco}"
+    );
+
+    let bookmarks = get_bookmarks(&mut alice, "group-dm-clear-bookmarks").await;
+    assert!(
+        bookmarks.contains(&room_jid),
+        "cleared group DM bookmark should still exist: {bookmarks}"
+    );
+    assert!(
+        !bookmarks.contains("Launch Crew")
+            && !bookmarks.contains("name=''")
+            && !bookmarks.contains("name=\"\""),
+        "cleared group DM bookmark should omit the shared name: {bookmarks}"
+    );
+    assert!(
+        bookmarks.contains("<nick>AliceNick</nick>")
+            && bookmarks.contains("<password>keep-secret</password>")
+            && bookmarks.contains("urn:waddle:test:bookmark-ext")
+            && bookmarks.contains("keep-me"),
+        "clear must mutate only the shared bookmark name and preserve XEP-0402 fields/extensions: {bookmarks}"
+    );
+
+    let _ = alice.close().await;
+    let _ = bob.close().await;
+    drop(server);
+
+    let server = TestServer::start_persistent_with_extra_accounts(
+        &database_url,
+        &[("alice", "alice-pass"), ("bob", "bob-pass")],
+    );
+    let mut alice = user_client(&server, "alice", "alice-pass", "group-dm-clear-restart").await;
+    let restarted_disco = disco_info(&mut alice, &room_jid, "group-dm-clear-restart-disco").await;
+    assert!(
+        !restarted_disco.contains("Launch Crew")
+            && !restarted_disco.contains("name=''")
+            && !restarted_disco.contains("name=\"\""),
+        "restarted cleared group DM should omit shared room identity name: {restarted_disco}"
+    );
+}
+
+#[tokio::test]
+async fn group_dm_rename_rejects_non_member() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start_with_extra_accounts(&[
+        ("alice", "alice-pass"),
+        ("bob", "bob-pass"),
+        ("charlie", "charlie-pass"),
+    ]);
+    let mut alice = user_client(&server, "alice", "alice-pass", "group-dm-rename-owner").await;
+    let mut charlie = user_client(
+        &server,
+        "charlie",
+        "charlie-pass",
+        "group-dm-rename-outsider",
+    )
+    .await;
+
+    let room_jid = create_group_dm(
+        &mut alice,
+        "group-dm-rename-deny-create",
+        "Alice, Bob",
+        &["alice@localhost", "bob@localhost"],
+    )
+    .await;
+
+    let items = disco_items_node(
+        &mut charlie,
+        &room_jid,
+        "group-dm-rename-deny-command-items",
+        NS_COMMANDS,
+    )
+    .await;
+    assert!(
+        is_error(&items) && !items.contains(NODE_GROUP_DM_RENAME),
+        "non-members must not discover group-DM room commands: {items}"
+    );
+
+    let command_info = disco_info_node(
+        &mut charlie,
+        &room_jid,
+        "group-dm-rename-deny-command-info",
+        Some(NODE_GROUP_DM_RENAME),
+    )
+    .await;
+    assert!(
+        is_error(&command_info) && !command_info.contains("Rename group DM"),
+        "non-members must not discover the group-DM rename command form: {command_info}"
+    );
+
+    let response = rename_group_dm(
+        &mut charlie,
+        &room_jid,
+        "group-dm-rename-deny",
+        "Mallory Was Here",
+    )
+    .await;
+    assert!(
+        is_error(&response),
+        "expected unavailable error, got: {response}"
+    );
+    assert!(
+        response.contains("service-unavailable"),
+        "non-member rename should not reveal room command availability: {response}"
+    );
+}
+
+#[tokio::test]
+async fn group_dm_rename_rejects_member_who_has_not_joined_room() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server =
+        TestServer::start_with_extra_accounts(&[("alice", "alice-pass"), ("bob", "bob-pass")]);
+    let mut alice = user_client(&server, "alice", "alice-pass", "group-dm-rename-joined").await;
+    let mut bob = user_client(&server, "bob", "bob-pass", "group-dm-rename-not-joined").await;
+
+    let room_jid = create_group_dm(
+        &mut alice,
+        "group-dm-rename-not-joined-create",
+        "Alice, Bob",
+        &["alice@localhost", "bob@localhost"],
+    )
+    .await;
+    join_room(&mut alice, &room_jid, "alice").await;
+
+    let response = rename_group_dm(
+        &mut bob,
+        &room_jid,
+        "group-dm-rename-not-joined",
+        "Not Joined",
+    )
+    .await;
+    assert!(
+        is_error(&response),
+        "expected forbidden error, got: {response}"
+    );
+    assert!(
+        response.contains("forbidden"),
+        "member must join before emitting occupant-scoped rename: {response}"
+    );
+
+    assert_no_frame_matching_for(
+        &mut alice,
+        Duration::from_millis(150),
+        |frame| frame.contains("<message") && frame.contains("code='104'"),
+        "non-occupant member must not emit a status-104 broadcast",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn group_dm_room_advertises_rename_command() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server =
+        TestServer::start_with_extra_accounts(&[("alice", "alice-pass"), ("bob", "bob-pass")]);
+    let mut alice = user_client(&server, "alice", "alice-pass", "group-dm-rename-disco").await;
+
+    let room_jid = create_group_dm(
+        &mut alice,
+        "group-dm-rename-disco-create",
+        "Alice, Bob",
+        &["alice@localhost", "bob@localhost"],
+    )
+    .await;
+
+    let items = disco_items_node(
+        &mut alice,
+        &room_jid,
+        "group-dm-rename-command-items",
+        NS_COMMANDS,
+    )
+    .await;
+    assert!(
+        items.contains(NODE_GROUP_DM_RENAME),
+        "group-DM room command list should advertise rename: {items}"
+    );
+
+    let command_list_info = disco_info_node(
+        &mut alice,
+        &room_jid,
+        "group-dm-rename-command-list-info",
+        Some(NS_COMMANDS),
+    )
+    .await;
+    assert!(
+        command_list_info.contains("automation")
+            && command_list_info.contains("command-list")
+            && command_list_info.contains(NS_COMMANDS),
+        "group-DM room command-list disco#info should describe a command list: {command_list_info}"
+    );
+
+    let command_info = disco_info_node(
+        &mut alice,
+        &room_jid,
+        "group-dm-rename-command-info",
+        Some(NODE_GROUP_DM_RENAME),
+    )
+    .await;
+    assert!(
+        command_info.contains("automation")
+            && command_info.contains("Rename group DM")
+            && command_info.contains(NS_DATA),
+        "group-DM rename command disco#info should describe the command form surface: {command_info}"
     );
 }
 

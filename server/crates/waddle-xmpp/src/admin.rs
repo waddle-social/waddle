@@ -86,6 +86,10 @@ pub const NS_GROUP_DM_CREATE: &str = "urn:waddle:group-dm:create:0";
 /// MUST NOT remove durable membership.
 pub const NS_GROUP_DM_LEAVE: &str = "urn:waddle:group-dm:leave:0";
 
+/// `group-dm:rename` — set or clear the shared display name for a private
+/// group DM.
+pub const NS_GROUP_DM_RENAME: &str = "urn:waddle:group-dm:rename:0";
+
 /// Disco feature advertised by group-DM rooms so clients can classify them
 /// into the DM surface instead of the channel surface.
 pub const NS_GROUP_DM_FEATURE: &str = "urn:waddle:group-dm:0";

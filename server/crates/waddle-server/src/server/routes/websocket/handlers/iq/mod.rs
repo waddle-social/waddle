@@ -110,7 +110,7 @@ mod vcard_private;
 use archive_inbox_upload::handle_archive_inbox_upload_iq;
 use blocking::handle_blocking_iq;
 use caps_result::handle_caps_disco_info_result;
-use commands::handle_command_iq;
+use commands::{handle_command_iq, CommandTargets};
 pub use conn_state::IqConnState;
 use disco_info::handle_disco_info_iq;
 use disco_items::handle_disco_items_iq;
@@ -376,9 +376,12 @@ pub async fn handle_iq_with_conn_state(
         return handle_command_iq(
             &iq,
             state,
-            domain,
-            &extensions_domain,
-            &push_domain,
+            CommandTargets {
+                domain,
+                muc_domain,
+                extensions_domain: &extensions_domain,
+                push_domain: &push_domain,
+            },
             authenticated_session,
             phase.bound_jid(),
         )

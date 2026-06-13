@@ -1,5 +1,164 @@
 use super::*;
 
+enum RoomCommandTarget {
+    GroupDm,
+    NotGroupDm,
+    NotMember,
+    Missing,
+    Failed,
+}
+
+fn full_muc_room_target(target_to: Option<&str>, muc_domain: &str) -> bool {
+    target_to
+        .and_then(|target| target.split_once('/').map(|(bare, _)| bare))
+        .and_then(|bare| bare.parse::<BareJid>().ok())
+        .is_some_and(|room_jid| room_jid.domain().as_str() == muc_domain)
+}
+
+async fn classify_room_command_target(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    requester: Option<&FullJid>,
+) -> RoomCommandTarget {
+    let Some(requester_bare) = requester.map(|jid| jid.to_bare()) else {
+        return RoomCommandTarget::NotMember;
+    };
+    if let Some(room_actor) = get_room_actor(state, room_jid).await {
+        let snapshot = match room_actor.ask(GetSnapshot).await {
+            Ok(snapshot) => snapshot.room,
+            Err(error) => {
+                warn!(
+                    room = %room_jid,
+                    error = ?error,
+                    "Failed to load room snapshot for disco#items"
+                );
+                return RoomCommandTarget::Failed;
+            }
+        };
+        return if snapshot.config.group_dm {
+            if snapshot.get_affiliation(&requester_bare) >= Affiliation::Member {
+                RoomCommandTarget::GroupDm
+            } else {
+                let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(room_jid) else {
+                    return RoomCommandTarget::NotMember;
+                };
+                if requester_has_durable_group_dm_membership(state, &requester_bare, &channel_id)
+                    .await
+                {
+                    RoomCommandTarget::GroupDm
+                } else {
+                    RoomCommandTarget::NotMember
+                }
+            }
+        } else {
+            RoomCommandTarget::NotGroupDm
+        };
+    }
+
+    match get_managed_channel_for_room(state, room_jid).await {
+        Ok(Some(channel)) if channel.channel_type == waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM => {
+            let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(room_jid) else {
+                return RoomCommandTarget::Missing;
+            };
+            if requester_has_group_dm_membership_tuple(state, &requester_bare, &channel_id)
+                .await
+                .is_some_and(|allowed| allowed)
+                || requester_has_durable_group_dm_membership(state, &requester_bare, &channel_id)
+                    .await
+            {
+                return RoomCommandTarget::GroupDm;
+            }
+            match state
+                .deps
+                .app_state
+                .permission_actor
+                .ask(CheckPermission {
+                    subject: Subject::user(requester_bare.to_string()),
+                    permission: Permission::Member,
+                    object: Object::new(ObjectType::Channel, channel_id),
+                })
+                .await
+            {
+                Err(kameo::error::SendError::HandlerError(error)) => {
+                    warn!(
+                        room = %room_jid,
+                        error = ?error,
+                        "Failed to check persisted group-DM membership for disco#items"
+                    );
+                    RoomCommandTarget::Failed
+                }
+                Ok(response) if response.allowed => RoomCommandTarget::GroupDm,
+                Ok(_) => RoomCommandTarget::NotMember,
+                Err(error) => {
+                    warn!(
+                        room = %room_jid,
+                        error = ?error,
+                        "Failed to ask permission actor for disco#items"
+                    );
+                    RoomCommandTarget::Failed
+                }
+            }
+        }
+        Ok(Some(_)) => RoomCommandTarget::NotGroupDm,
+        Ok(None) => RoomCommandTarget::Missing,
+        Err(error) => {
+            warn!(
+                room = %room_jid,
+                error = ?error,
+                "Failed to load persisted room for disco#items"
+            );
+            RoomCommandTarget::Failed
+        }
+    }
+}
+
+async fn requester_has_group_dm_membership_tuple(
+    state: &WebSocketState,
+    requester_bare: &BareJid,
+    channel_id: &str,
+) -> Option<bool> {
+    state
+        .deps
+        .app_state
+        .permission_actor
+        .ask(CheckPermission {
+            subject: Subject::user(requester_bare.to_string()),
+            permission: Permission::Member,
+            object: Object::new(ObjectType::Channel, channel_id),
+        })
+        .await
+        .ok()
+        .map(|response| response.allowed)
+}
+
+async fn requester_has_durable_group_dm_membership(
+    state: &WebSocketState,
+    requester_bare: &BareJid,
+    channel_id: &str,
+) -> bool {
+    state
+        .deps
+        .app_state
+        .db_pool
+        .global_actor()
+        .ask(DbQueryOne {
+            sql: r#"
+                SELECT 1 FROM permission_tuples
+                WHERE object_type = 'channel'
+                  AND object_id = ?
+                  AND relation = 'member'
+                  AND subject_type = 'user'
+                  AND subject_id = ?
+                  AND subject_relation IS NULL
+                LIMIT 1
+            "#
+            .to_string(),
+            params: vec![channel_id.into(), requester_bare.to_string().into()],
+        })
+        .await
+        .is_ok_and(|row| row.is_some())
+}
+
 pub(super) async fn handle_disco_items_iq(
     ctx: IqHandlerContext<'_>,
     state: &WebSocketState,
@@ -50,6 +209,57 @@ pub(super) async fn handle_disco_items_iq(
 
             let response = build_disco_items_response(request_iq, &items, None);
             return vec![iq_to_xml(response)];
+        }
+
+        if query.node.as_deref() == Some(NODE_COMMANDS) {
+            if full_muc_room_target(target_to, muc_domain) {
+                return vec![build_iq_error_xml_typed(
+                    id,
+                    response_from,
+                    response_to,
+                    item_not_found_iq_error("Requested item not found."),
+                )];
+            }
+            if let Some(room_jid) = target_to
+                .filter(|target| !target.contains('/'))
+                .and_then(|target| target.parse::<BareJid>().ok())
+                .filter(|room_jid| room_jid.domain().as_str() == muc_domain)
+            {
+                match classify_room_command_target(state, &room_jid, phase.bound_jid()).await {
+                    RoomCommandTarget::GroupDm => {
+                        let commands = state.deps.protocol.command_registry.list_commands().await;
+                        let command_refs =
+                            command_refs_by_boundary(&commands, CommandBoundary::MucRoom);
+                        let response =
+                            build_command_items(request_iq, &command_refs, target_to.unwrap());
+                        return vec![iq_to_xml(response)];
+                    }
+                    RoomCommandTarget::NotGroupDm | RoomCommandTarget::NotMember => {
+                        return vec![build_iq_error_xml_typed(
+                            id,
+                            response_from,
+                            response_to,
+                            item_not_found_iq_error("Requested item not found."),
+                        )];
+                    }
+                    RoomCommandTarget::Missing => {
+                        return vec![build_iq_error_xml_typed(
+                            id,
+                            response_from,
+                            response_to,
+                            item_not_found_iq_error("Requested room not found."),
+                        )];
+                    }
+                    RoomCommandTarget::Failed => {
+                        return vec![build_iq_error_xml_typed(
+                            id,
+                            response_from,
+                            response_to,
+                            internal_server_error_iq_error("Internal server error."),
+                        )];
+                    }
+                }
+            }
         }
 
         if target_to == Some(domain) && query.node.as_deref() == Some(NODE_COMMANDS) {

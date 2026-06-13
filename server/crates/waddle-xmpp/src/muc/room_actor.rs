@@ -49,6 +49,7 @@ pub struct OccupantInfo {
 #[derive(Debug, Clone)]
 pub struct RoomSnapshot {
     pub room: MucRoom,
+    pub config_revision: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -154,6 +155,7 @@ impl OccupantInfo {
 #[derive(Actor)]
 pub struct RoomActor {
     room: MucRoom,
+    config_revision: u64,
     occupant_id_secret: crate::xep::xep0421::OccupantIdSecret,
 }
 
@@ -189,6 +191,7 @@ impl RoomActor {
     pub fn new(room: MucRoom, occupant_id_secret: crate::xep::xep0421::OccupantIdSecret) -> Self {
         Self {
             room,
+            config_revision: 0,
             occupant_id_secret,
         }
     }
@@ -322,7 +325,7 @@ pub struct UpdateConfig {
 }
 
 impl kameo::message::Message<UpdateConfig> for RoomActor {
-    type Reply = ();
+    type Reply = u64;
 
     async fn handle(
         &mut self,
@@ -330,6 +333,85 @@ impl kameo::message::Message<UpdateConfig> for RoomActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.room.config = msg.config;
+        self.config_revision = self.config_revision.saturating_add(1);
+        self.config_revision
+    }
+}
+
+/// Replace the room config only if the config revision still matches the
+/// caller's attempted update. Used for best-effort rollback without clobbering
+/// a later successful rename, including identical-name updates.
+pub struct RollbackConfigIfRevision {
+    pub expected_revision: u64,
+    pub config: RoomConfig,
+}
+
+impl kameo::message::Message<RollbackConfigIfRevision> for RoomActor {
+    type Reply = bool;
+
+    async fn handle(
+        &mut self,
+        msg: RollbackConfigIfRevision,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        if self.config_revision != msg.expected_revision {
+            return false;
+        }
+        self.room.config = msg.config;
+        self.config_revision = self.config_revision.saturating_add(1);
+        true
+    }
+}
+
+/// Atomically update a group-DM config after checking the exact sender is still
+/// both a persistent member and a joined occupant session.
+pub struct UpdateGroupDmConfigByMember {
+    pub config: RoomConfig,
+    pub sender_jid: FullJid,
+}
+
+#[derive(Debug, Error)]
+pub enum UpdateGroupDmConfigByMemberError {
+    #[error("room is not a group DM")]
+    NotGroupDm,
+    #[error("sender is not a group-DM member")]
+    NotMember,
+    #[error("sender is not a joined group-DM occupant")]
+    NotOccupant,
+}
+
+impl kameo::message::Message<UpdateGroupDmConfigByMember> for RoomActor {
+    type Reply = Result<RoomSnapshot, UpdateGroupDmConfigByMemberError>;
+
+    async fn handle(
+        &mut self,
+        msg: UpdateGroupDmConfigByMember,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        if !self.room.config.group_dm {
+            return Err(UpdateGroupDmConfigByMemberError::NotGroupDm);
+        }
+        let sender_bare = msg.sender_jid.to_bare();
+        if self.room.get_affiliation(&sender_bare) < Affiliation::Member {
+            return Err(UpdateGroupDmConfigByMemberError::NotMember);
+        }
+        let sender_is_occupant = self.room.occupants.values().any(|occupant| {
+            occupant.real_jid == msg.sender_jid
+                || self
+                    .room
+                    .get_occupant_sessions(&occupant.nick)
+                    .iter()
+                    .any(|session| session == &msg.sender_jid)
+        });
+        if !sender_is_occupant {
+            return Err(UpdateGroupDmConfigByMemberError::NotOccupant);
+        }
+        self.room.config = msg.config;
+        self.config_revision = self.config_revision.saturating_add(1);
+        Ok(RoomSnapshot {
+            room: self.room.clone(),
+            config_revision: self.config_revision,
+        })
     }
 }
 
@@ -579,6 +661,7 @@ impl kameo::message::Message<GetSnapshot> for RoomActor {
     ) -> Self::Reply {
         Ok(RoomSnapshot {
             room: self.room.clone(),
+            config_revision: self.config_revision,
         })
     }
 }
