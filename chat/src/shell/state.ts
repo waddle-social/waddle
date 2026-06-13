@@ -31,6 +31,7 @@ export function useChatShellState() {
   const confirmDeleteWaddle = ref(false);
   const confirmDeleteChannel = ref(false);
   const showNewDm = ref(false);
+  const showNewGroupDm = ref(false);
   const confirmRemoveMember = ref<string | null>(null);
   const actionError = ref("");
 
@@ -60,6 +61,7 @@ export function useChatShellState() {
     showPinnedPanel,
     confirmDeleteWaddle,
     showNewDm,
+    showNewGroupDm,
     confirmDeleteChannel,
     confirmRemoveMember,
     actionError,

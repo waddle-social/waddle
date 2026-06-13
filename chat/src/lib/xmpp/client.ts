@@ -58,6 +58,7 @@ import { prepareEncryptedAttachmentUpload } from "./encrypted-attachments";
 
 import { discoverChannels, discoverTopology } from "./discovery";
 import { discoverUploadService, uploadFile, type UploadProgress } from "./file-upload";
+import { createGroupDm, type CreateGroupDmResult } from "./group-dm";
 import { ReconnectCatchup } from "./reconnect-catchup";
 import { classifyMamError, isMamCursorNotFound } from "./mam";
 import { parseRegisterDeviceResult, type RegisterDeviceResult } from "./push-register-result";
@@ -2993,6 +2994,14 @@ export class BrowserXmppClient {
   async listRosterContacts(): Promise<RosterContact[]> { const xmpp = await this.requireConnectedXmpp(); const roster = await xmpp.list_roster_contacts?.() as WasmRosterContact[]; return (roster ?? []).map((item) => { const jid = barePeerJid(item.jid); return { jid, name: item.name, username: item.name?.trim() || jid.split("@")[0] || jid, subscription: (item.subscription ?? "none") as RosterContact["subscription"], groups: item.groups ?? [] }; }); }
   async getServerVersion(): Promise<WasmServerVersion | null> { const xmpp = await this.requireConnectedXmpp(); return await xmpp.get_server_version?.() as WasmServerVersion | null; }
   async discoverSpaceChannels(): Promise<any[]> { const xmpp = await this.requireConnectedXmpp(); return discoverChannels(xmpp as WasmClient, this.session.jid); }
+  async createGroupDm(name: string, memberJids: string[]): Promise<CreateGroupDmResult> {
+    const xmpp = await this.requireConnectedXmpp();
+    return createGroupDm(xmpp as WasmClient, {
+      userJid: this.session.jid,
+      name,
+      memberJids,
+    });
+  }
   async discoverTopology(): Promise<DiscoveredTopology> {
     const xmpp = await this.requireConnectedXmpp();
     const topology = await discoverTopology(xmpp as WasmClient, this.session.jid);

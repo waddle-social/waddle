@@ -5,6 +5,7 @@ import { dmListRoute } from "./routes/dm-list";
 import { dmRoute } from "./routes/dm";
 import { eventsRoute } from "./routes/events";
 import { feedRoute } from "./routes/feed";
+import { groupDmRoomRoute } from "./routes/group-dm-room";
 import { homeRoute } from "./routes/home";
 import { settingsRoute } from "./routes/settings";
 import { storiesRoute } from "./routes/stories";
@@ -23,6 +24,8 @@ export function buildHref(match: RouteMatch): string {
       return channelExtensionRoute.href({ params: match.params, search: match.search });
     case "dm":
       return dmRoute.href({ params: match.params, search: match.search });
+    case "groupDmRoom":
+      return groupDmRoomRoute.href({ params: match.params, search: match.search });
     case "dmList":
       return dmListRoute.href();
     case "feed":

@@ -53,6 +53,8 @@ const {
   displayedMemberState,
   memberCountLabel,
   computedChannelUnreadMap,
+  groupDmConversations,
+  activeChannelRoomJid,
   channelExtensionRoutes,
   activeExtensionRouteKey,
   activeRightPanel,
@@ -68,6 +70,7 @@ const {
   handleToggleMessageSounds,
   selectChannel,
   selectChannelByRoomJid,
+  selectGroupDm,
   onSelectThread,
   selectDm,
   selectExtensionRoute,
@@ -235,15 +238,19 @@ function openExtensionRoute(route: DiscoveredExtensionRoute) {
         <DmPanel
           v-else
           :conversations="dmConversations.conversations.value"
+          :group-dms="groupDmConversations"
           :active-peer-jid="dmConversations.activePeerJid.value"
+          :active-group-dm-room-jid="ui.sidebarMode.value === 'dms' && !dmConversations.activePeerJid.value ? activeChannelRoomJid : null"
           :self-full-jid="visibleSelfFullJid"
           hide-current-call
           class="!w-full !border-r-0 !flex-1"
           @answer-dm="answerDmFromMobile"
           @select-dm="selectDm"
+          @select-group-dm="selectGroupDm"
           @reconnect-dm="reconnectDmFromMobile"
           @end-dm="endDmFromMobile"
           @new-dm="ui.showNewDm.value = true"
+          @new-group-dm="ui.showNewGroupDm.value = true"
         />
         <ProfilePanel
           v-if="connectionStore.session"

@@ -299,11 +299,14 @@ export function useChatAppController(giphyApiKey: string) {
   ) => {
     contentAreaRef.value = instance;
   };
+  function isActiveDirectDmSurface(): boolean {
+    return ui.sidebarMode.value === "dms" && !!dmConversations.activePeerJid.value;
+  }
 
   watchEffect(() => {
     const timeline = contentAreaRef.value?.messagesContainer ?? null;
     const edgeScroller = contentAreaRef.value?.scrollToPinnedEdge ?? null;
-    if (ui.sidebarMode.value === "dms") {
+    if (isActiveDirectDmSurface()) {
       dmMessaging.timelineEl.value = timeline;
       dmMessaging.timelineEdgeScroller.value = edgeScroller;
       messaging.timelineEl.value = null;
@@ -317,10 +320,10 @@ export function useChatAppController(giphyApiKey: string) {
   });
 
   const activeMessages = computed(() =>
-    ui.sidebarMode.value === "dms" ? dmMessaging.messages.value : messaging.messages.value,
+    isActiveDirectDmSurface() ? dmMessaging.messages.value : messaging.messages.value,
   );
   const activeFirstUnseenId = computed(() =>
-    ui.sidebarMode.value === "dms" ? dmMessaging.firstUnseenId.value : messaging.firstUnseenId.value,
+    isActiveDirectDmSurface() ? dmMessaging.firstUnseenId.value : messaging.firstUnseenId.value,
   );
   const extensionRoutes = ref<DiscoveredExtensionRoute[]>([]);
   const selectedChannelRoomJids = ref<Record<string, string>>({});
@@ -593,27 +596,27 @@ export function useChatAppController(giphyApiKey: string) {
     if (!shouldYield) consumeKeystrokEvent(event);
   }
   const activeDraft = computed({
-    get: () => (ui.sidebarMode.value === "dms" ? dmMessaging.draft.value : messaging.draft.value),
+    get: () => (isActiveDirectDmSurface() ? dmMessaging.draft.value : messaging.draft.value),
     set: (value: string) => {
-      if (ui.sidebarMode.value === "dms") dmMessaging.draft.value = value;
+      if (isActiveDirectDmSurface()) dmMessaging.draft.value = value;
       else messaging.draft.value = value;
     },
   });
   const activeForumTitle = computed({
-    get: () => (ui.sidebarMode.value === "dms" ? "" : messaging.forumPostTitle.value),
+    get: () => (isActiveDirectDmSurface() ? "" : messaging.forumPostTitle.value),
     set: (value: string) => {
-      if (ui.sidebarMode.value !== "dms") {
+      if (!isActiveDirectDmSurface()) {
         messaging.forumPostTitle.value = value;
       }
     },
   });
   const activeTypingUsers = computed(() =>
-    ui.sidebarMode.value === "dms" ? dmMessaging.typingUsers.value : messaging.typingUsers.value,
+    isActiveDirectDmSurface() ? dmMessaging.typingUsers.value : messaging.typingUsers.value,
   );
   const isApplyingRoute = ref(false);
   let routeRequestId = 0;
   const activeIsLoadingMessages = computed(() =>
-    ui.sidebarMode.value === "dms" ? dmMessaging.isLoadingMessages.value : messaging.isLoadingMessages.value,
+    isActiveDirectDmSurface() ? dmMessaging.isLoadingMessages.value : messaging.isLoadingMessages.value,
   );
   const isResolvingActiveConversation = computed(() =>
     ui.activePage.value === "chat"
@@ -625,19 +628,19 @@ export function useChatAppController(giphyApiKey: string) {
     activeIsLoadingMessages.value || isResolvingActiveConversation.value,
   );
   const activeIsLoadingOlderMessages = computed(() =>
-    ui.sidebarMode.value === "dms" ? dmMessaging.isLoadingOlderMessages.value : messaging.isLoadingOlderMessages.value,
+    isActiveDirectDmSurface() ? dmMessaging.isLoadingOlderMessages.value : messaging.isLoadingOlderMessages.value,
   );
   const activeHasOlderMessages = computed(() =>
-    ui.sidebarMode.value === "dms" ? dmMessaging.hasOlderMessages.value : messaging.hasOlderMessages.value,
+    isActiveDirectDmSurface() ? dmMessaging.hasOlderMessages.value : messaging.hasOlderMessages.value,
   );
   const activeIsSending = computed(() =>
-    ui.sidebarMode.value === "dms" ? dmMessaging.isSending.value : messaging.isSending.value,
+    isActiveDirectDmSurface() ? dmMessaging.isSending.value : messaging.isSending.value,
   );
   const activeSearchResults = computed(() =>
-    ui.sidebarMode.value === "dms" ? dmMessaging.searchResults.value : messaging.searchResults.value,
+    isActiveDirectDmSurface() ? dmMessaging.searchResults.value : messaging.searchResults.value,
   );
   const activeIsSearching = computed(() =>
-    ui.sidebarMode.value === "dms" ? dmMessaging.isSearching.value : messaging.isSearching.value,
+    isActiveDirectDmSurface() ? dmMessaging.isSearching.value : messaging.isSearching.value,
   );
 
   const members = useWaddleMembers(
@@ -718,7 +721,7 @@ export function useChatAppController(giphyApiKey: string) {
   });
 
   const activeTarget = computed(() =>
-    ui.sidebarMode.value === "dms" ? dmMessaging : messaging,
+    isActiveDirectDmSurface() ? dmMessaging : messaging,
   );
   const { computedChannelUnreadMap, totalTabUnreadCount } = useChatReadActivity({
     appReady: computed(() => connectionStore.appState === "ready"),
@@ -735,6 +738,16 @@ export function useChatAppController(giphyApiKey: string) {
     activeTarget,
     roomJidForChannelId: resolveRoomJidForChannelId,
   });
+  const groupDmConversations = computed(() =>
+    waddles.groupDms.value.map((group) => {
+      const activity = computedChannelUnreadMap.value[group.id];
+      return {
+        ...group,
+        unreadCount: activity?.unread ?? 0,
+        mentionCount: activity?.mentions ?? 0,
+      };
+    }),
+  );
 
   const notifications = usePushNotifications();
   const messageSound = createBrowserMessageTonePlayer();
@@ -895,7 +908,7 @@ export function useChatAppController(giphyApiKey: string) {
         stanzaId: entry.stanzaId,
         stanzaIdBy: barePeerJid(entry.stanzaIdBy),
       };
-      const accepted = ui.sidebarMode.value === "dms"
+      const accepted = isActiveDirectDmSurface()
         ? dmMessaging.applyMdsDisplayed(chatId, displayed)
         : messaging.applyMdsDisplayed(chatId, displayed);
       const key = mdsChatKey(chatId);
@@ -1017,12 +1030,12 @@ export function useChatAppController(giphyApiKey: string) {
   }
 
   const activeUploadProgress = computed(() =>
-    ui.sidebarMode.value === "dms" ? dmMessaging.uploadProgress.value : messaging.uploadProgress.value,
+    isActiveDirectDmSurface() ? dmMessaging.uploadProgress.value : messaging.uploadProgress.value,
   );
   const activeActionError = computed(() => ui.actionError.value);
   const activeErrorActionLabel = computed(() => {
     const peer = activeDmPeer.value;
-    return ui.sidebarMode.value === "dms" &&
+    return isActiveDirectDmSurface() &&
       peer &&
       dmMessaging.loadErrorPeerJid.value === peer.peerJid &&
       activeActionError.value === dmMessaging.loadErrorMessage.value
@@ -1072,7 +1085,7 @@ export function useChatAppController(giphyApiKey: string) {
     forumTitle?: string,
     linkPreview?: ComposerLinkPreviewSendPayload,
   ) {
-    if (ui.sidebarMode.value === "dms") {
+    if (isActiveDirectDmSurface()) {
       await dmMessaging.sendMessage(body, markup, references, files, replyTo, linkPreview);
       return;
     }
@@ -1099,7 +1112,7 @@ export function useChatAppController(giphyApiKey: string) {
     threadOverride: { threadId: string; parentThreadId?: string },
     linkPreview?: ComposerLinkPreviewSendPayload,
   ) {
-    if (ui.sidebarMode.value === "dms") {
+    if (isActiveDirectDmSurface()) {
       await dmMessaging.sendMessage(body, markup, references, files, replyTo, linkPreview, threadOverride);
       return;
     }
@@ -1154,9 +1167,11 @@ export function useChatAppController(giphyApiKey: string) {
   // or a deep link shows only the replies that happen to be in the loaded
   // conversation window.
   function backfillActiveThread(threadId: string) {
-    if (ui.sidebarMode.value === "dms") {
+    if (isActiveDirectDmSurface()) {
       void dmMessaging.backfillThread(threadId);
     } else if (ui.sidebarMode.value === "channels") {
+      void messaging.backfillThread(threadId);
+    } else if (waddles.currentChannel.value?.isGroupDm) {
       void messaging.backfillThread(threadId);
     }
   }
@@ -1245,7 +1260,7 @@ export function useChatAppController(giphyApiKey: string) {
   }
 
   function editActiveMessage(messageId: string, newBody: string, markup?: MarkupSpan[], references?: MessageReference[], linkPreview?: ComposerLinkPreviewSendPayload) {
-    if (ui.sidebarMode.value === "dms") {
+    if (isActiveDirectDmSurface()) {
       void dmMessaging.editMessage(messageId, newBody, markup, references, linkPreview);
       return;
     }
@@ -1269,7 +1284,7 @@ export function useChatAppController(giphyApiKey: string) {
     if (!client) return;
     const stanzaId = resolvePinTargetStanzaId(messageId);
     if (!stanzaId) return;
-    if (ui.sidebarMode.value === "dms") {
+    if (isActiveDirectDmSurface()) {
       const peer = dmConversations.activePeerJid.value;
       if (!peer || !("pinDirectMessage" in client)) return;
       void client.pinDirectMessage(peer, stanzaId).catch((error: unknown) => {
@@ -1289,7 +1304,7 @@ export function useChatAppController(giphyApiKey: string) {
     if (!client) return;
     const stanzaId = resolvePinTargetStanzaId(messageId);
     if (!stanzaId) return;
-    if (ui.sidebarMode.value === "dms") {
+    if (isActiveDirectDmSurface()) {
       const peer = dmConversations.activePeerJid.value;
       if (!peer || !("unpinDirectMessage" in client)) return;
       void client.unpinDirectMessage(peer, stanzaId).catch((error: unknown) => {
@@ -1358,7 +1373,7 @@ export function useChatAppController(giphyApiKey: string) {
 
   function retryActiveLoad() {
     const peer = activeDmPeer.value;
-    if (ui.sidebarMode.value !== "dms" || !peer) return;
+    if (!isActiveDirectDmSurface() || !peer) return;
     void dmMessaging.loadMessages(peer.peerJid);
   }
 
@@ -1367,7 +1382,7 @@ export function useChatAppController(giphyApiKey: string) {
   }
 
   function loadOlderThreadMessages(threadId: string) {
-    if (ui.sidebarMode.value === "dms") {
+    if (isActiveDirectDmSurface()) {
       void dmMessaging.loadOlderThreadMessages(threadId);
       return;
     }
@@ -1488,6 +1503,12 @@ export function useChatAppController(giphyApiKey: string) {
           params: { username: activeDmPeer.value.peerUsername },
           search: { thread: activeThreadStack.value, pinned: ui.showPinnedPanel.value },
         });
+      } else if (channel?.isGroupDm && channel.jid) {
+        navigate({
+          id: "groupDmRoom",
+          params: { roomJid: channel.jid },
+          search: { thread: activeThreadStack.value, pinned: ui.showPinnedPanel.value },
+        });
       } else {
         navigate({ id: "dmList" });
       }
@@ -1534,12 +1555,12 @@ export function useChatAppController(giphyApiKey: string) {
   // any pinned stanza-ids not already in the loaded timeline or cache.
   watch(() => ui.showPinnedPanel.value, async (open) => {
     if (!open) return;
-    if (ui.sidebarMode.value === "dms") return;
+    if (isActiveDirectDmSurface()) return;
     const client = xmppClient.value;
-    const spaceId = waddles.activeSpaceId.value;
+    const spaceId = waddles.currentChannel.value?.spaceId ?? "";
     const channelId = waddles.activeChannelId.value;
     const roomJid = messaging.currentRoomJid.value;
-    if (!client || !spaceId || !channelId || !roomJid) return;
+    if (!client || !channelId || !roomJid) return;
     if (!("fetchRoomMessagesByStanzaIds" in client)) return;
     const convertForTimeline = (a: Parameters<typeof roomMessageFromArchived>[0]) => {
       const live = roomMessageFromArchived(a, {
@@ -1566,7 +1587,7 @@ export function useChatAppController(giphyApiKey: string) {
     }
   });
   watch(() => ui.showPinnedPanel.value, async (open) => {
-    if (!open || ui.sidebarMode.value !== "dms") return;
+    if (!open || !isActiveDirectDmSurface()) return;
     const client = xmppClient.value;
     const peerJid = dmConversations.activePeerJid.value;
     const currentSession = session.value;
@@ -1593,7 +1614,7 @@ export function useChatAppController(giphyApiKey: string) {
     }
   });
   watch(pinnedRooms, (rooms) => {
-    if (!ui.showPinnedPanel.value || ui.sidebarMode.value !== "dms") return;
+    if (!ui.showPinnedPanel.value || !isActiveDirectDmSurface()) return;
     const client = xmppClient.value;
     const peerJid = dmConversations.activePeerJid.value;
     const currentSession = session.value;
@@ -1630,7 +1651,7 @@ export function useChatAppController(giphyApiKey: string) {
       const epoch = pinnedRoomsEpoch();
       void client.fetchDirectPins(peerJid)
         .then((entries) => {
-          if (ui.sidebarMode.value !== "dms" || dmConversations.activePeerJid.value !== peerJid) return;
+          if (!isActiveDirectDmSurface() || dmConversations.activePeerJid.value !== peerJid) return;
           hydratePinnedRoom(peerJid, entries, epoch);
         })
         .catch((error: unknown) => {
@@ -1823,6 +1844,7 @@ export function useChatAppController(giphyApiKey: string) {
       case "channel":
       case "channelExtension":
       case "dm":
+      case "groupDmRoom":
       case "dmList":
       case "feed":
       case "stories":
@@ -1854,10 +1876,10 @@ export function useChatAppController(giphyApiKey: string) {
       ui.feedDefaultComposerMode.value = "post";
     }
     ui.sidebarMode.value =
-      match.id === "dm" || match.id === "dmList" ? "dms" : "channels";
+      match.id === "dm" || match.id === "groupDmRoom" || match.id === "dmList" ? "dms" : "channels";
     // #414/#951: channel and DM conversation routes carry the pinned-panel flag.
     ui.showPinnedPanel.value =
-      match.id === "channel" || match.id === "channelExtension" || match.id === "dm"
+      match.id === "channel" || match.id === "channelExtension" || match.id === "dm" || match.id === "groupDmRoom"
         ? match.search.pinned
         : false;
   }
@@ -1942,6 +1964,25 @@ export function useChatAppController(giphyApiKey: string) {
       return;
     }
 
+    if (match.id === "groupDmRoom") {
+      activeExtensionRouteKey.value = null;
+      dmConversations.closeDm();
+      await selectGroupDm(match.params.roomJid, { updateUrl: false });
+      if (requestId !== routeRequestId) return;
+      activeThreadTargetMessageId.value = null;
+      activeThreadStack.value = match.search.thread;
+      ui.showPinnedPanel.value = match.search.pinned;
+      activeRightPanel.value = match.search.pinned
+        ? "pinned"
+        : match.search.thread.length > 0
+          ? "thread"
+          : null;
+      for (const threadId of new Set(match.search.thread)) {
+        void messaging.backfillThread(threadId);
+      }
+      return;
+    }
+
 
     if (match.id === "channelExtension") {
       ui.sidebarMode.value = "channels";
@@ -1983,6 +2024,26 @@ export function useChatAppController(giphyApiKey: string) {
       messaging.clearMessages();
       return;
     }
+    if (ch.isGroupDm && ch.jid) {
+      navigate({
+        id: "groupDmRoom",
+        params: { roomJid: ch.jid },
+        search: match.search,
+      }, { replace: true });
+      await selectGroupDm(ch.jid, { updateUrl: false });
+      ui.showPinnedPanel.value = match.search.pinned;
+      activeThreadTargetMessageId.value = null;
+      activeThreadStack.value = match.search.thread;
+      activeRightPanel.value = match.search.pinned
+        ? "pinned"
+        : match.search.thread.length > 0
+          ? "thread"
+          : null;
+      for (const threadId of match.search.thread) {
+        void messaging.backfillThread(threadId);
+      }
+      return;
+    }
     waddles.activeChannelId.value = ch.id;
     void waddles.reloadChannelMembers(ch.id);
     messaging.clearMessages();
@@ -2015,12 +2076,16 @@ export function useChatAppController(giphyApiKey: string) {
   let pendingChannelRouteMatch: RouteMatch | null = null;
 
   function routeNeedsDiscoveredChannel(match: RouteMatch): boolean {
-    return match.id === "channel" || match.id === "channelExtension";
+    return match.id === "channel" || match.id === "channelExtension" || match.id === "groupDmRoom";
   }
 
   function channelRouteTargetMissing(match: RouteMatch): boolean {
+    if (match.id === "groupDmRoom") {
+      const roomJid = barePeerJid(match.params.roomJid);
+      return !waddles.groupDms.value.some((group) => barePeerJid(group.roomJid) === roomJid);
+    }
     if (match.id !== "channel" && match.id !== "channelExtension") return false;
-    return resolveChannelBySlug(match.params.channelId, waddles.channels.value) === null;
+    return resolveChannelBySlug(match.params.channelId, waddles.channels.value) == null;
   }
 
   async function applyPendingChannelRouteAfterStructure() {
@@ -2190,12 +2255,12 @@ export function useChatAppController(giphyApiKey: string) {
     await connectionStore.logout();
   }
 
-  async function selectChannel(channelId: string, options: { roomJid?: string } = {}) {
+  async function selectChannel(channelId: string, options: { roomJid?: string; surface?: "channels" | "dms" } = {}) {
     clearPendingChannelRoomJidSelection();
     ui.activePage.value = "chat";
-    ui.sidebarMode.value = "channels";
+    ui.sidebarMode.value = options.surface ?? "channels";
     activeExtensionRouteKey.value = null;
-    dmConversations.closeDm();
+    if (ui.sidebarMode.value !== "dms") dmConversations.closeDm();
     memberJidByNick.value = {};
     const selectedRoomJid = options.roomJid ? barePeerJid(options.roomJid) : null;
     if (selectedRoomJid) {
@@ -2248,6 +2313,29 @@ export function useChatAppController(giphyApiKey: string) {
     await selectChannel(channelId, { roomJid: normalizedRoomJid });
   }
 
+  async function selectGroupDm(roomJid: string, options: { updateUrl?: boolean } = {}) {
+    const normalizedRoomJid = barePeerJid(roomJid);
+    const group = waddles.groupDms.value.find((candidate) => barePeerJid(candidate.roomJid) === normalizedRoomJid);
+    const channelId = group?.id ?? knownChannelIdForRoomJid(
+      normalizedRoomJid,
+      waddles.groupDms.value.map((groupDm) => ({
+        id: groupDm.id,
+        name: groupDm.name,
+        jid: groupDm.roomJid,
+        isGroupDm: true,
+      })),
+      managedMucDomain.value,
+    );
+    if (!channelId) {
+      ui.actionError.value = "Group message is not available yet.";
+      navigate({ id: "dmList" }, { replace: true });
+      return;
+    }
+    dmConversations.closeDm();
+    await selectChannel(channelId, { roomJid: normalizedRoomJid, surface: "dms" });
+    if (options.updateUrl !== false) updateUrl();
+  }
+
   async function selectExtensionRoute(channelId: string, route: DiscoveredExtensionRoute) {
     clearPendingChannelRoomJidSelection();
     ui.activePage.value = "chat";
@@ -2288,6 +2376,30 @@ export function useChatAppController(giphyApiKey: string) {
   async function handleNewDm(username: string) {
     if (!selfDomain.value) return;
     await handleOpenDm(`${username}@${selfDomain.value}`);
+  }
+
+  async function handleCreateGroupDm(payload: { name: string; memberJids: string[] }) {
+    const client = xmppClient.value;
+    if (!client) {
+      ui.actionError.value = "XMPP session is not ready.";
+      return;
+    }
+    if (payload.memberJids.length < 2) {
+      ui.actionError.value = "Choose at least two contacts.";
+      return;
+    }
+    waddles.isSubmitting.value = true;
+    ui.clearActionError();
+    try {
+      const created = await client.createGroupDm(payload.name, payload.memberJids);
+      await waddles.loadStructure(null, { noChannelSelect: true });
+      ui.showNewGroupDm.value = false;
+      await selectGroupDm(created.roomJid);
+    } catch (error) {
+      ui.actionError.value = ui.normalizeError(error);
+    } finally {
+      waddles.isSubmitting.value = false;
+    }
   }
 
   async function handleCreateChannel() {
@@ -2472,6 +2584,7 @@ export function useChatAppController(giphyApiKey: string) {
       memberCountLabel,
       activeDmPeer,
       computedChannelUnreadMap,
+      groupDmConversations,
       totalTabUnreadCount,
       notifications,
       appUpdate,
@@ -2500,12 +2613,14 @@ export function useChatAppController(giphyApiKey: string) {
       handleLogout,
       selectChannel,
       selectChannelByRoomJid,
+      selectGroupDm,
       onSelectThread,
       onSelectThreadEntry,
       selectExtensionRoute,
       handleOpenDm,
       selectDm,
       handleNewDm,
+      handleCreateGroupDm,
       openCreateChannelDialog,
       handleCreateChannel,
       handleUpdateChannel,

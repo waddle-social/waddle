@@ -74,9 +74,10 @@ describe("discoverTopology XEP-0402 bookmark autojoin", () => {
     await withFakeDomParser(async () => {
       const topology = await discoverTopology(
         topologyClient({
-          bookmarks: [
+          spaceBookmarks: [
             { id: "bookmarked@muc.example.test", name: "Bookmarked", autojoin: true },
           ],
+          userBookmarks: [],
           rooms: [],
         }),
         "alice@example.test",
@@ -87,6 +88,64 @@ describe("discoverTopology XEP-0402 bookmark autojoin", () => {
       expect(room?.spaceId).toBe("space-engineering");
       expect(room?.standalone).toBe(false);
       expect(room?.autojoin).toBe(true);
+    });
+  });
+
+  test("preserves autojoin=false for disco-confirmed bookmark-only rooms", async () => {
+    await withFakeDomParser(async () => {
+      const topology = await discoverTopology(
+        topologyClient({
+          bookmarks: [],
+          userBookmarks: [
+            { id: "quiet@muc.example.test", name: "Quiet", autojoin: false },
+          ],
+          rooms: [],
+        }),
+        "alice@example.test",
+      );
+
+      const room = topology.rooms.find((candidate) => candidate.jid === "quiet@muc.example.test");
+      expect(room?.name).toBe("Quiet");
+      expect(room?.spaceId).toBeUndefined();
+      expect(room?.autojoin).toBe(false);
+    });
+  });
+
+  test("user bookmarks without names do not erase space bookmark names", async () => {
+    await withFakeDomParser(async () => {
+      const topology = await discoverTopology(
+        topologyClient({
+          spaceBookmarks: [
+            { id: "named@muc.example.test", name: "Named from space", autojoin: true },
+          ],
+          userBookmarks: [
+            { id: "named@muc.example.test", autojoin: false },
+          ],
+          rooms: [],
+        }),
+        "alice@example.test",
+      );
+
+      const room = topology.rooms.find((candidate) => candidate.jid === "named@muc.example.test");
+      expect(room?.name).toBe("Named from space");
+      expect(room?.autojoin).toBe(false);
+    });
+  });
+
+  test("drops bookmark-only rooms that do not disco as MUC rooms", async () => {
+    await withFakeDomParser(async () => {
+      const topology = await discoverTopology(
+        topologyClient({
+          bookmarks: [],
+          userBookmarks: [
+            { id: "not-a-room@example.test", name: "Not a room", autojoin: true },
+          ],
+          rooms: [],
+        }),
+        "alice@example.test",
+      );
+
+      expect(topology.rooms.some((candidate) => candidate.jid === "not-a-room@example.test")).toBe(false);
     });
   });
 
@@ -115,9 +174,13 @@ type Bookmark = {
 };
 
 function topologyClient(options: {
-  bookmarks: Bookmark[];
+  bookmarks?: Bookmark[];
+  spaceBookmarks?: Bookmark[];
+  userBookmarks?: Bookmark[];
   rooms: Array<{ jid: string; name?: string }>;
 }) {
+  const spaceBookmarks = options.spaceBookmarks ?? options.bookmarks ?? [];
+  const userBookmarks = options.userBookmarks ?? options.bookmarks ?? [];
   return {
     async send_raw_iq(xml: string): Promise<string> {
       if (xml.includes('xmlns="http://jabber.org/protocol/disco#items"')) {
@@ -140,6 +203,12 @@ function topologyClient(options: {
         if (xml.includes('to="muc.example.test"')) {
           return discoInfoXml({
             identities: [{ category: "conference", type: "text", name: "Chatrooms" }],
+            features: ["http://jabber.org/protocol/muc"],
+          });
+        }
+        if (xml.includes('@muc.example.test"')) {
+          return discoInfoXml({
+            identities: [{ category: "conference", type: "text" }],
             features: ["http://jabber.org/protocol/muc"],
           });
         }
@@ -166,7 +235,7 @@ function topologyClient(options: {
       }
 
       if (xml.includes('xmlns="http://jabber.org/protocol/pubsub"')) {
-        return pubsubItemsXml(options.bookmarks);
+        return pubsubItemsXml(xml.includes('to="spaces.example.test"') ? spaceBookmarks : userBookmarks);
       }
 
       throw new Error(`Unexpected IQ: ${xml}`);

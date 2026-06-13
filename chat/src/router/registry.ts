@@ -5,6 +5,7 @@ import type { DmListMatch } from "./routes/dm-list";
 import type { DmMatch } from "./routes/dm";
 import type { EventsMatch } from "./routes/events";
 import type { FeedMatch } from "./routes/feed";
+import type { GroupDmRoomMatch } from "./routes/group-dm-room";
 import type { HomeMatch } from "./routes/home";
 import type { SettingsMatch } from "./routes/settings";
 import type { StoriesMatch } from "./routes/stories";
@@ -16,6 +17,7 @@ export type RouteMatch =
   | ChannelMatch
   | ChannelExtensionMatch
   | DmMatch
+  | GroupDmRoomMatch
   | DmListMatch
   | FeedMatch
   | StoriesMatch

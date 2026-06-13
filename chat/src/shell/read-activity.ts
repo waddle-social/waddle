@@ -45,9 +45,7 @@ export function useChatReadActivity(options: {
   const { isWindowFocused } = useChatWindowVisibility();
   const readReceiptsKind = computed<"channel" | "dm" | null>(() => {
     if (options.activePage.value !== "chat") return null;
-    if (options.sidebarMode.value === "dms") {
-      return options.dmConversations.activePeerJid.value ? "dm" : null;
-    }
+    if (options.sidebarMode.value === "dms" && options.dmConversations.activePeerJid.value) return "dm";
     return options.activeChannelId.value ? "channel" : null;
   });
   const readReceiptsActiveRoomJid = computed<string | null>(() => {

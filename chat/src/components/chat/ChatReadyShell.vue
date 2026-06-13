@@ -114,6 +114,7 @@ const {
   displayedMemberState,
   activeDmPeer,
   computedChannelUnreadMap,
+  groupDmConversations,
   notifications,
   appUpdate,
   version,
@@ -139,6 +140,7 @@ const {
   handleLogout,
   selectChannel,
   selectChannelByRoomJid,
+  selectGroupDm,
   onSelectThread,
   onSelectThreadEntry,
   selectExtensionRoute,
@@ -263,7 +265,7 @@ const activeDmThreadEntries = computed<MessageThreadEntry[]>(() => {
   if (ui.sidebarMode.value !== "dms" || !activeDmPeer.value) return [];
   return [...threads.index.value.values()].sort((left, right) => right.lastTs.localeCompare(left.lastTs));
 });
-const threadPanelIsDm = computed(() => ui.sidebarMode.value === "dms");
+const threadPanelIsDm = computed(() => ui.sidebarMode.value === "dms" && !!activeDmPeer.value);
 const threadPanelConversationActive = computed(() =>
   (ui.sidebarMode.value === "channels" || ui.sidebarMode.value === "dms") &&
   activeRightPanel.value === "thread" &&
@@ -312,7 +314,7 @@ function onSelectChannelFromSidebar(id: string | null, roomJid?: string) {
 
 async function lookupActiveConversationLinkPreview(body: string) {
   const client = xmppClient.value;
-  const scope = ui.sidebarMode.value === "dms"
+  const scope = threadPanelIsDm.value
     ? activeDmPeer.value?.peerJid
     : activeChannelRoomJid.value;
   if (!client || !scope) return null;
@@ -642,16 +644,20 @@ onUnmounted(() => {
         <DmPanel
           v-else
           :conversations="dmConversations.conversations.value"
+          :group-dms="groupDmConversations"
           :active-peer-jid="dmConversations.activePeerJid.value"
+          :active-group-dm-room-jid="ui.sidebarMode.value === 'dms' && !dmConversations.activePeerJid.value ? activeChannelRoomJid : null"
           :thread-entries="activeDmThreadEntries"
           :self-full-jid="selfFullJid"
           hide-current-call
           @answer-dm="answerDmFromActivity"
           @select-dm="selectDm"
+          @select-group-dm="selectGroupDm"
           @select-thread="openThread"
           @reconnect-dm="reconnectDmFromDock"
           @end-dm="endRecoveredDmFromActivity"
           @new-dm="ui.showNewDm.value = true"
+          @new-group-dm="ui.showNewGroupDm.value = true"
         />
         <CurrentCallPanel
           :channels="waddles.sortedChannels.value"
@@ -803,8 +809,8 @@ onUnmounted(() => {
               v-model:forum-title="activeForumTitle"
               :pinned-panel-open="activeRightPanel === 'pinned' && ui.showPinnedPanel.value"
               :waddle="waddles.currentSpace.value"
-              :channel="ui.sidebarMode.value === 'dms' ? null : waddles.currentChannel.value"
-              :room-jid="ui.sidebarMode.value === 'dms' ? null : activeChannelRoomJid"
+              :channel="threadPanelIsDm ? null : waddles.currentChannel.value"
+              :room-jid="threadPanelIsDm ? null : activeChannelRoomJid"
               :dm-peer="activeDmPeer"
               :sidebar-mode="ui.sidebarMode.value"
               :messages="activeMessages"
@@ -1045,8 +1051,8 @@ onUnmounted(() => {
             class="chat-active-thread-pane"
           >
             <PinnedPanel
-              :room-jid="ui.sidebarMode.value === 'dms' ? activeDmPeer?.peerJid ?? '' : activeChannelRoomJid ?? ''"
-              :channel-name="ui.sidebarMode.value === 'dms' ? activeDmPeer?.peerUsername ?? 'Direct message' : waddles.currentChannel.value?.name ?? ''"
+              :room-jid="threadPanelIsDm ? activeDmPeer?.peerJid ?? '' : activeChannelRoomJid ?? ''"
+              :channel-name="threadPanelIsDm ? activeDmPeer?.peerUsername ?? 'Direct message' : waddles.currentChannel.value?.name ?? ''"
               :timeline-messages="activeMessages"
               @close="closePinnedPanel"
               @jump-to-message="(stanzaId: string) => jumpToPinnedMessage(stanzaId)"

@@ -20,15 +20,20 @@ import {
 import type { DmCallActivity } from "@/lib/calls/dm-call-activity";
 import type { CallMedia } from "@/lib/calls/types";
 import { barePeerJid } from "@/lib/xmpp/jid";
+import type { GroupDmSummary } from "@/lib/chat-types";
 import type { DmConversation } from "@/lib/xmpp-client";
 
 const props = withDefaults(defineProps<{
   conversations: DmConversation[];
+  groupDms?: GroupDmSummary[];
   activePeerJid: string | null;
+  activeGroupDmRoomJid?: string | null;
   threadEntries?: MessageThreadEntry[];
   selfFullJid?: string | null;
   hideCurrentCall?: boolean;
 }>(), {
+  groupDms: () => [],
+  activeGroupDmRoomJid: null,
   threadEntries: () => [],
   hideCurrentCall: false,
 });
@@ -36,10 +41,12 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   answerDm: [peerJid: string, remoteFullJid: string, sid: string, media: CallMedia];
   selectDm: [peerJid: string];
+  selectGroupDm: [roomJid: string];
   selectThread: [threadId: string];
   reconnectDm: [peerJid: string, media: CallMedia];
   endDm: [peerJid: string, sid?: string];
   newDm: [];
+  newGroupDm: [];
 }>();
 
 const dmCallActivities = useStore($dmCallActivities);
@@ -82,6 +89,9 @@ const visibleConversations = computed<DmConversation[]>(() => {
     .filter((conversation) => !activeCallPeers.has(normalizedPeerJid(conversation.peerJid)))
     .sort(compareDmConversations);
 });
+const visibleGroupDms = computed(() =>
+  [...props.groupDms].sort((a, b) => (a.position ?? 0) - (b.position ?? 0) || a.name.localeCompare(b.name)),
+);
 const visibleThreadEntries = computed(() => props.threadEntries.filter((entry) => entry.count > 0));
 
 function normalizedPeerJid(peerJid: string): string {
@@ -457,15 +467,26 @@ function threadEntryLabel(entry: MessageThreadEntry): string {
         <MessageCircle class="w-4 h-4 text-primary/70" />
         <h2 class="type-pane-title text-sidebar-foreground">Direct messages</h2>
       </div>
-      <button
-        class="chat-icon-button text-sidebar-muted hover:bg-sidebar-accent hover:text-sidebar-foreground"
-        title="New message"
-        aria-label="New direct message"
-        type="button"
-        @click="emit('newDm')"
-      >
-        <Plus class="w-4 h-4" />
-      </button>
+      <div class="flex items-center gap-1">
+        <button
+          class="chat-icon-button text-sidebar-muted hover:bg-sidebar-accent hover:text-sidebar-foreground"
+          title="New group message"
+          aria-label="New group message"
+          type="button"
+          @click="emit('newGroupDm')"
+        >
+          <MessagesSquare class="w-4 h-4" />
+        </button>
+        <button
+          class="chat-icon-button text-sidebar-muted hover:bg-sidebar-accent hover:text-sidebar-foreground"
+          title="New message"
+          aria-label="New direct message"
+          type="button"
+          @click="emit('newDm')"
+        >
+          <Plus class="w-4 h-4" />
+        </button>
+      </div>
     </div>
 
     <div class="chat-pane-scroll chat-sidebar-scroll">
@@ -475,7 +496,7 @@ function threadEntryLabel(entry: MessageThreadEntry): string {
       <!-- Empty state — halo + MessageCircle glyph + caption + hint
            matches the iter-37 / 47 / 48 authored-empty-state pattern
            used elsewhere in the app. -->
-      <div v-if="visibleConversations.length === 0 && activeCallRows.length === 0" class="flex flex-col items-center justify-center gap-2 py-10 text-center">
+      <div v-if="visibleGroupDms.length === 0 && visibleConversations.length === 0 && activeCallRows.length === 0" class="flex flex-col items-center justify-center gap-2 py-10 text-center">
         <div class="chat-empty-state__halo">
           <span class="chat-empty-state__halo-glow chat-empty-state__halo-glow--primary" aria-hidden="true" />
           <span class="chat-empty-state__halo-ring chat-empty-state__halo-ring--primary">
@@ -594,6 +615,49 @@ function threadEntryLabel(entry: MessageThreadEntry): string {
               <PhoneOff class="h-3.5 w-3.5" aria-hidden="true" />
             </button>
           </div>
+        </section>
+
+        <section
+          v-if="visibleGroupDms.length > 0"
+          class="grid gap-1"
+          aria-label="Group direct messages"
+        >
+          <div class="type-section-label flex items-center gap-1.5 px-2 pt-2 pb-1 text-sidebar-muted">
+            <MessagesSquare class="h-3 w-3 text-primary/70" aria-hidden="true" />
+            <span class="flex-1 truncate">Groups</span>
+          </div>
+          <button
+            v-for="group in visibleGroupDms"
+            :key="group.roomJid"
+            class="chat-list-row w-full min-h-14 flex items-center gap-3 px-3 py-2 text-left group"
+            :class="normalizedPeerJid(activeGroupDmRoomJid ?? '') === normalizedPeerJid(group.roomJid)
+              ? 'chat-list-row--active bg-sidebar-accent text-sidebar-foreground'
+              : 'text-sidebar-muted hover:bg-sidebar-accent/50 hover:text-sidebar-foreground'"
+            type="button"
+            :aria-current="normalizedPeerJid(activeGroupDmRoomJid ?? '') === normalizedPeerJid(group.roomJid) ? 'page' : undefined"
+            :aria-label="`Open group message ${group.name}`"
+            @click="emit('selectGroupDm', group.roomJid)"
+          >
+            <span class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-sidebar-accent text-sidebar-foreground">
+              <MessagesSquare class="h-4 w-4" aria-hidden="true" />
+            </span>
+            <span class="min-w-0 flex-1">
+              <span class="type-control block truncate text-sidebar-foreground">{{ group.name }}</span>
+              <span class="type-caption block truncate text-sidebar-muted">Group message</span>
+            </span>
+            <span class="flex shrink-0 items-center gap-1">
+              <span
+                v-if="(group.mentionCount ?? 0) > 0"
+                class="chat-list-row--mention-badge type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-destructive text-destructive-foreground"
+                aria-hidden="true"
+              >@{{ group.mentionCount }}</span>
+              <span
+                v-if="(group.unreadCount ?? 0) > 0"
+                class="chat-list-row--unread-badge type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-primary text-primary-foreground"
+                aria-hidden="true"
+              >{{ group.unreadCount }}</span>
+            </span>
+          </button>
         </section>
 
         <button
