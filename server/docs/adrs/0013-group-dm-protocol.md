@@ -31,11 +31,17 @@ Provisioned rooms advertise the Waddle classification feature
 `urn:waddle:group-dm:0` in room `disco#info`. Clients classify rooms with that
 feature into the DM sidebar, not the channel/sidebar Space hierarchy.
 
-The first walking-skeleton slice creates the room, writes the creator and
-initial participants as member affiliations, keeps the room hidden from public
-MUC discovery, and exposes the classification feature. Mediated invites and
-XEP-0402 autojoin bookmarks remain part of the same protocol shape and should be
-implemented as follow-up slices on the same command.
+The create command provisions the room, writes the creator and initial
+participants as member affiliations, keeps the room hidden from public MUC
+discovery, exposes the classification feature, and publishes XEP-0402
+`urn:xmpp:bookmarks:1` conference bookmarks with `autojoin='true'` for each
+initial member.
+
+Group-DM membership expansion uses XEP-0045 mediated invites. The server grants
+the invitee member affiliation, publishes their XEP-0402 autojoin bookmark, and
+delivers a trusted mediated invite from the room JID. Waddle-specific invite
+history policy is carried as an extension in the Waddle group-DM namespace
+rather than by changing XEP-0045 semantics.
 
 ## Consequences
 
@@ -52,8 +58,9 @@ implemented as follow-up slices on the same command.
 
 - Group-DM creation now has its own Waddle namespace because no XEP defines this
   exact provisioning command.
-- The first slice does not complete cross-device appearance until XEP-0402
-  bookmark publication is added.
+- Group-DM create and membership expansion must keep the affiliation change,
+  bookmark publication, and mediated invite delivery consistent. Rollback paths
+  are required when any provisioning step fails.
 
 ## Related
 
