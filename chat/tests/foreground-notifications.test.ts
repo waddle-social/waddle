@@ -210,6 +210,64 @@ describe("channel activity foreground notification dispatch", () => {
     expect(mention.notifications.showChannelMessageNotification).not.toHaveBeenCalled();
   });
 
+  test("group DM notification modes use the private-group display matrix", () => {
+    const plain = createChannelActivityDispatchHarness("always", { channelName: "Launch Crew" });
+    showForegroundNotificationForChannelActivity({
+      roomJid: "group-dm-launch@muc.example.com",
+      nick: "bob",
+      body: "plain group DM update",
+      stanzaId: "group-dm-plain",
+    }, plain.deps);
+    expect(plain.notifications.showChannelMessageNotification).toHaveBeenCalledWith({
+      senderNick: "bob",
+      channelName: "Launch Crew",
+      body: "plain group DM update",
+      roomJid: "group-dm-launch@muc.example.com",
+      stanzaId: "group-dm-plain",
+      onNavigate: plain.onNavigate,
+    });
+
+    const mentionsOnlyPlain = createChannelActivityDispatchHarness("on-mention", { channelName: "Launch Crew" });
+    showForegroundNotificationForChannelActivity({
+      roomJid: "group-dm-launch@muc.example.com",
+      nick: "bob",
+      body: "plain group DM update",
+      stanzaId: "group-dm-mentions-only-plain",
+    }, mentionsOnlyPlain.deps);
+    expect(mentionsOnlyPlain.notifications.showChannelMessageNotification).not.toHaveBeenCalled();
+    expect(mentionsOnlyPlain.notifications.showMentionNotification).not.toHaveBeenCalled();
+
+    const mentionsOnlyMention = createChannelActivityDispatchHarness("on-mention", { channelName: "Launch Crew" });
+    showForegroundNotificationForChannelActivity({
+      roomJid: "group-dm-launch@muc.example.com",
+      nick: "bob",
+      body: "alice please review",
+      mentions: ["xmpp:alice@example.com"],
+      stanzaId: "group-dm-mentions-only-hit",
+    }, mentionsOnlyMention.deps);
+    expect(mentionsOnlyMention.notifications.showMentionNotification).toHaveBeenCalledWith({
+      senderNick: "bob",
+      channelName: "Launch Crew",
+      body: "alice please review",
+      roomJid: "group-dm-launch@muc.example.com",
+      isBroadcast: false,
+      stanzaId: "group-dm-mentions-only-hit",
+      onNavigate: mentionsOnlyMention.onNavigate,
+    });
+    expect(mentionsOnlyMention.notifications.showChannelMessageNotification).not.toHaveBeenCalled();
+
+    const never = createChannelActivityDispatchHarness("never", { channelName: "Launch Crew" });
+    showForegroundNotificationForChannelActivity({
+      roomJid: "group-dm-launch@muc.example.com",
+      nick: "bob",
+      body: "alice please review",
+      mentions: ["xmpp:alice@example.com"],
+      stanzaId: "group-dm-never",
+    }, never.deps);
+    expect(never.notifications.showChannelMessageNotification).not.toHaveBeenCalled();
+    expect(never.notifications.showMentionNotification).not.toHaveBeenCalled();
+  });
+
   test("message sounds follow the channel foreground notification eligibility matrix", () => {
     const plainMentionOnly = createChannelActivityDispatchHarness("on-mention", { focused: false });
     showForegroundNotificationForChannelActivity({
@@ -486,6 +544,7 @@ function createChannelActivityDispatchHarness(
     messageSoundsEnabled?: boolean;
     canShowForegroundNotification?: boolean;
     doNotDisturb?: boolean;
+    channelName?: string;
   } = {},
 ) {
   const onNavigate = mock((_roomJid: string) => {});
@@ -511,7 +570,7 @@ function createChannelActivityDispatchHarness(
       isDoNotDisturb: () => options.doNotDisturb ?? false,
       isTabFocused: () => options.focused ?? false,
       sessionJid: "alice@example.com/web",
-      resolveChannelNameFromJid: mock((_roomJid: string) => "General"),
+      resolveChannelNameFromJid: mock((_roomJid: string) => options.channelName ?? "General"),
       onNavigate,
     },
   };
