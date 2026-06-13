@@ -2408,7 +2408,10 @@ export function useChatAppController(giphyApiKey: string) {
           selectedMemberJids: payload.memberJids,
           selectedMemberLabels: payload.memberJids.map(groupDmMemberLabel),
         })
-      : payload;
+      : {
+          name: payload.name.trim() || payload.memberJids.map(groupDmMemberLabel).join(", "),
+          memberJids: payload.memberJids,
+        };
     if (createPayload.memberJids.length < 2) {
       ui.actionError.value = seedPeerJid ? "Choose at least one more contact." : "Choose at least two contacts.";
       return;

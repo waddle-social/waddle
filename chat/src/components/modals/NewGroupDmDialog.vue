@@ -61,7 +61,7 @@ function toggleContact(jid: string) {
 function handleSubmit() {
   if (!canSubmit.value) return;
   emit("submit", {
-    name: name.value.trim() || defaultName.value,
+    name: name.value.trim(),
     memberJids: [...selected.value],
   });
 }
@@ -126,7 +126,7 @@ function handleSubmit() {
         :disabled="!canSubmit"
         @click="handleSubmit"
       >
-        {{ props.title === "Add people" ? "Add people" : "Create group" }}
+        {{ (props.minimumSelectedContacts ?? 2) < 2 ? "Add people" : "Create group" }}
       </button>
     </div>
   </AppDialog>

@@ -679,7 +679,7 @@ function threadEntryLabel(entry: MessageThreadEntry): string {
             type="button"
             :aria-current="isActiveConversation(conversation.peerJid) ? 'page' : undefined"
             :aria-label="conversationRowLabel(conversation)"
-            @click="emit('selectDm', conversation.peerJid)"
+            @click.stop="emit('selectDm', conversation.peerJid)"
           >
             <div class="relative">
               <AppAvatar :name="conversation.peerUsername" :src="conversation.peerAvatarUrl ?? null" size="sm" />
