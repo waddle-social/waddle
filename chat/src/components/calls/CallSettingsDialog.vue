@@ -11,11 +11,25 @@ import {
   type AudioProcessingPrefs,
 } from "@/lib/calls/device-prefs";
 import {
+  applyAiNoiseModelSelection,
   applyAudioProcessingSelection,
   applyCallDeviceSelection,
 } from "@/lib/calls/call-device-selection";
 import { $micAudioProcessing } from "@/lib/calls/mic-audio-processing-state";
 import { audioProcessingRows } from "@/lib/calls/mic-audio-processing";
+import { $micAiNoiseFilter } from "@/lib/calls/mic-ai-noise-filter-state";
+import { aiNoiseFilterRow } from "@/lib/calls/ai-noise-filter/mic-ai-noise-filter";
+import {
+  noiseModelMeta,
+  orderedNoiseModelMetas,
+} from "@/lib/calls/ai-noise-filter/model-metadata";
+import type { NoiseModelId } from "@/lib/calls/ai-noise-filter/model-id";
+import {
+  anyNoiseModelAvailable,
+  currentNoiseModelSupportEnv,
+  noiseModelSupport,
+} from "@/lib/calls/ai-noise-filter/support";
+import { $aiNoiseFilterError } from "@/lib/calls/ai-noise-filter-error-state";
 import { useCallEngine } from "@/lib/calls/use-call-engine";
 import { reportCallError } from "@/lib/calls/call-store";
 import {
@@ -59,6 +73,48 @@ const audioProcessingPending = ref(false);
 const audioProcessingDisabled = computed(
   () => micProcessing.value.kind !== "active" || audioProcessingPending.value,
 );
+
+/**
+ * Opt-in client-side AI noise filter (#914). The selected model is persisted
+ * in prefs; the *verified* row reads the attached processor, so it stays honest
+ * even when an attach fails. Capability support is a one-time probe (AudioWorklet
+ * presence doesn't change at runtime); DeepFilterNet is a deferred disabled slot.
+ */
+const aiNoiseSupport = noiseModelSupport(currentNoiseModelSupportEnv());
+const aiNoiseControlEnabled = anyNoiseModelAvailable(aiNoiseSupport);
+/** Per-model option view for the radiogroup — flattens the support union. */
+const aiNoiseModelOptions = orderedNoiseModelMetas().map((meta) => {
+  const support = aiNoiseSupport[meta.id];
+  return {
+    id: meta.id,
+    label: meta.label,
+    available: support.available,
+    hint: support.available ? meta.costHint : support.reason,
+  };
+});
+const aiNoiseModel = computed(() => prefs.value.aiNoiseModel);
+const aiFilterActive = computed(() => aiNoiseModel.value !== null);
+const aiNoisePending = ref(false);
+const aiNoiseError = useStore($aiNoiseFilterError);
+const aiNoiseErrorLabel = computed(() =>
+  aiNoiseError.value ? noiseModelMeta(aiNoiseError.value).name : null,
+);
+const aiFilterState = useStore($micAiNoiseFilter);
+const aiFilterRow = computed(() =>
+  aiFilterState.value.kind === "active" ? aiNoiseFilterRow(aiFilterState.value) : null,
+);
+
+async function selectAiNoiseModel(model: NoiseModelId | null): Promise<void> {
+  if (aiNoiseModel.value === model) return;
+  aiNoisePending.value = true;
+  try {
+    await applyAiNoiseModelSelection(model, engine);
+  } catch (err) {
+    reportCallError(err);
+  } finally {
+    aiNoisePending.value = false;
+  }
+}
 
 /**
  * Epoch counter incremented on every dialog close. `refresh()` reads
@@ -399,11 +455,18 @@ function close(): void {
             <label class="call-processing-toggle">
               <span class="call-processing-toggle__copy">
                 <span class="type-caption call-processing-toggle__label">Noise cancellation</span>
+                <span
+                  v-if="aiFilterActive"
+                  class="type-caption text-muted-foreground call-processing-toggle__hint"
+                >
+                  Handled by the AI filter
+                </span>
               </span>
               <input
                 class="call-processing-toggle__input"
                 type="checkbox"
-                :checked="prefs.audioProcessing.noiseSuppression"
+                :checked="aiFilterActive ? false : prefs.audioProcessing.noiseSuppression"
+                :disabled="aiFilterActive"
                 @change="setAudioProcessing('noiseSuppression', ($event.target as HTMLInputElement).checked, $event)"
               />
             </label>
@@ -462,6 +525,74 @@ function close(): void {
               </p>
             </li>
           </ul>
+
+          <!-- Opt-in client-side AI noise filter (#914). Runs entirely in the
+               browser as a WASM AudioWorklet; defaults off. -->
+          <div class="call-ai-filter">
+            <h4 class="type-caption call-processing__title">AI noise filter</h4>
+            <p
+              v-if="!aiNoiseControlEnabled"
+              class="type-caption text-muted-foreground"
+            >
+              Not available in this browser.
+            </p>
+            <template v-else>
+              <ul class="chat-list-stack" role="radiogroup" aria-label="AI noise filter">
+                <li>
+                  <button
+                    type="button"
+                    class="call-device-row"
+                    :class="aiNoiseModel === null ? 'call-device-row--active' : ''"
+                    role="radio"
+                    :aria-checked="aiNoiseModel === null"
+                    :disabled="aiNoisePending"
+                    @click="selectAiNoiseModel(null)"
+                  >
+                    <span class="truncate">Off</span>
+                    <Check v-if="aiNoiseModel === null" class="w-4 h-4 text-primary" />
+                  </button>
+                </li>
+                <li v-for="model in aiNoiseModelOptions" :key="model.id">
+                  <button
+                    type="button"
+                    class="call-device-row"
+                    :class="aiNoiseModel === model.id ? 'call-device-row--active' : ''"
+                    role="radio"
+                    :aria-checked="aiNoiseModel === model.id"
+                    :disabled="aiNoisePending || !model.available"
+                    @click="selectAiNoiseModel(model.id)"
+                  >
+                    <span class="call-ai-filter__option">
+                      <span class="truncate">{{ model.label }}</span>
+                      <span class="type-caption text-muted-foreground">{{ model.hint }}</span>
+                    </span>
+                    <Check v-if="aiNoiseModel === model.id" class="w-4 h-4 text-primary" />
+                  </button>
+                </li>
+              </ul>
+              <p class="type-caption text-muted-foreground call-ai-filter__note">
+                Runs entirely in your browser. Higher settings remove more noise
+                but use more CPU.
+              </p>
+              <p
+                v-if="aiNoiseErrorLabel"
+                class="type-caption call-ai-filter__error"
+              >
+                Couldn't start the {{ aiNoiseErrorLabel }} filter — using your raw mic.
+              </p>
+              <div v-if="aiFilterRow" class="call-processing__row">
+                <div class="call-processing__head">
+                  <span class="type-caption">{{ aiFilterRow.label }}</span>
+                  <span
+                    class="call-processing__badge"
+                    :class="`call-processing__badge--${aiFilterRow.tone}`"
+                  >
+                    {{ aiFilterRow.stateLabel }}
+                  </span>
+                </div>
+              </div>
+            </template>
+          </div>
         </div>
       </section>
 
@@ -651,6 +782,35 @@ function close(): void {
 
 .call-processing-toggle__copy {
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+}
+
+.call-processing-toggle__hint {
+  font-style: italic;
+}
+
+.call-ai-filter {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.call-ai-filter__option {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+  min-width: 0;
+}
+
+.call-ai-filter__note {
+  margin-top: -0.125rem;
+}
+
+.call-ai-filter__error {
+  color: var(--destructive, #dc2626);
 }
 
 .call-processing-toggle__label {

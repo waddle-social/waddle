@@ -5,6 +5,7 @@ import cloudflare from "@astrojs/cloudflare";
 import faroUploader from "@grafana/faro-rollup-plugin";
 import tailwindcss from "@tailwindcss/vite";
 import vue from "@astrojs/vue";
+import { noiseSuppressionAudioWorkletVitePlugin } from "@workadventure/noise-suppression/vite";
 import { resolveCommitSha } from "./scripts/resolve-commit-sha.mjs";
 
 const COMMIT_SHA = resolveCommitSha();
@@ -156,6 +157,10 @@ export default defineConfig({
     },
     plugins: [
       tailwindcss(),
+      // Serve the DTLN (@workadventure/noise-suppression) AudioWorklet module
+      // and its bundled LiteRT/model assets from our own origin — the #914 AI
+      // noise filter must be self-hosted, no third-party CDN.
+      noiseSuppressionAudioWorkletVitePlugin(),
       ...faroSourcemapPlugins(),
       // Force `Cache-Control: no-store` on every URL containing the WASM
       // package name. Vite's `?v=<optimizer-hash>` URL convention sends

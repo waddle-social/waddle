@@ -11,7 +11,20 @@ import {
 import { clearAllMediaIssues, recordMediaIssue } from "./call-media-issues";
 import { syncScreenShareEnabled } from "./screen-share-state";
 import { setCallAudioPlaybackBlocked } from "./call-audio-playback";
-import { resetMicAudioProcessing, setMicAudioProcessing } from "./mic-audio-processing-state";
+import {
+  $micAudioProcessing,
+  resetMicAudioProcessing,
+  setMicAudioProcessing,
+} from "./mic-audio-processing-state";
+import {
+  $micAiNoiseFilter,
+  resetMicAiNoiseFilter,
+  setMicAiNoiseFilter,
+} from "./mic-ai-noise-filter-state";
+import {
+  clearAiNoiseFilterError,
+  setAiNoiseFilterError,
+} from "./ai-noise-filter-error-state";
 import { createCallAudioProcessingBeacon } from "./call-audio-processing-telemetry";
 import { reportCallAudioProcessing } from "../telemetry";
 import {
@@ -95,10 +108,29 @@ export function useCallEngine(): {
       // Verified (applied) browser-native audio processing of the local
       // mic — drives the read-only indicator in the call-settings dialog.
       setMicAudioProcessing(state);
-      // Beacon the same verified state for fleet measurement (#913). The
-      // beacon de-dupes, so the redundant double-emit on initial publish
+      // Beacon the combined verified state for fleet measurement (#913/#914).
+      // The beacon de-dupes, so the redundant double-emit on initial publish
       // (LocalTrackPublished + ActiveDeviceChanged) collapses to one event.
-      micAudioProcessingBeacon.observe(state);
+      micAudioProcessingBeacon.observe({
+        processing: state,
+        aiNoiseFilter: $micAiNoiseFilter.get(),
+      });
+    });
+    singletonEngine.on("aiNoiseFilterChanged", (state) => {
+      // Verified AI noise filter (read from the attached processor) — drives
+      // the AI-filter row in the settings dialog. A model that is genuinely
+      // running clears any prior attach-failure notice.
+      setMicAiNoiseFilter(state);
+      if (state.kind === "active" && state.model !== null) clearAiNoiseFilterError();
+      micAudioProcessingBeacon.observe({
+        processing: $micAudioProcessing.get(),
+        aiNoiseFilter: state,
+      });
+    });
+    singletonEngine.on("aiNoiseFilterError", ({ model }) => {
+      // Non-blocking: the engine failed open to the raw mic. Surface which
+      // model couldn't start so the dialog can explain it.
+      setAiNoiseFilterError(model);
     });
     singletonEngine.on("connectionQualityChanged", (quality) => {
       // LiveKit re-scored the local participant's connection — drives the
@@ -131,6 +163,9 @@ export function useCallEngine(): {
       // The mic-processing readout belonged to the call that just
       // ended; reset so the next call's dialog starts from `no-mic`.
       resetMicAudioProcessing();
+      // Same for the verified AI-filter readout and any attach-failure notice.
+      resetMicAiNoiseFilter();
+      clearAiNoiseFilterError();
       // Re-arm the fleet-measurement beacon so the next call emits its
       // first verified state even if it matches the last call's.
       micAudioProcessingBeacon.reset();

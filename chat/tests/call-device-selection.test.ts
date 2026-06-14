@@ -5,9 +5,11 @@ import {
   type AudioProcessingPrefs,
 } from "../src/lib/calls/device-prefs";
 import {
+  applyAiNoiseModelSelection,
   applyAudioProcessingSelection,
   applyCallDeviceSelection,
 } from "../src/lib/calls/call-device-selection";
+import { $aiNoiseFilterError } from "../src/lib/calls/ai-noise-filter-error-state";
 
 afterEach(() => {
   $devicePrefs.set({
@@ -15,7 +17,9 @@ afterEach(() => {
     cam: null,
     speaker: null,
     audioProcessing: defaultAudioProcessingPrefs(),
+    aiNoiseModel: null,
   });
+  $aiNoiseFilterError.set(null);
 });
 
 describe("call device selection", () => {
@@ -35,6 +39,7 @@ describe("call device selection", () => {
       cam: "desk-cam",
       speaker: "usb-speaker",
       audioProcessing: defaultAudioProcessingPrefs(),
+      aiNoiseModel: null,
     });
     expect(engine.setMicDevice).toHaveBeenCalledWith("headset-mic");
     expect(engine.setCameraDevice).toHaveBeenCalledWith("desk-cam");
@@ -57,6 +62,7 @@ describe("call device selection", () => {
       cam: null,
       speaker: null,
       audioProcessing: defaultAudioProcessingPrefs(),
+      aiNoiseModel: null,
     });
     expect(engine.setMicDevice).toHaveBeenCalledWith("default");
     expect(engine.setCameraDevice).toHaveBeenCalledWith("default");
@@ -76,6 +82,7 @@ describe("call device selection", () => {
       cam: null,
       speaker: null,
       audioProcessing: defaultAudioProcessingPrefs(),
+      aiNoiseModel: null,
     });
 
     await expect(applyCallDeviceSelection("mic", null, engine)).rejects.toThrow("device unavailable");
@@ -86,6 +93,7 @@ describe("call device selection", () => {
       cam: null,
       speaker: null,
       audioProcessing: defaultAudioProcessingPrefs(),
+      aiNoiseModel: null,
     });
   });
 
@@ -124,5 +132,34 @@ describe("call device selection", () => {
     ).rejects.toThrow("restart failed");
 
     expect($devicePrefs.get().audioProcessing).toEqual(defaultAudioProcessingPrefs());
+  });
+});
+
+describe("applyAiNoiseModelSelection", () => {
+  test("applies the model to the engine and persists the pref", async () => {
+    const setAiNoiseModel = mock(async (_m: string | null) => undefined);
+
+    await applyAiNoiseModelSelection("rnnoise", { setAiNoiseModel });
+
+    expect(setAiNoiseModel).toHaveBeenCalledWith("rnnoise");
+    expect($devicePrefs.get().aiNoiseModel).toBe("rnnoise");
+  });
+
+  test("clears a stale attach-failure notice when re-selecting", async () => {
+    $aiNoiseFilterError.set("dtln");
+    const setAiNoiseModel = mock(async (_m: string | null) => undefined);
+
+    await applyAiNoiseModelSelection("rnnoise", { setAiNoiseModel });
+
+    expect($aiNoiseFilterError.get()).toBeNull();
+  });
+
+  test("turning the filter off persists null", async () => {
+    const setAiNoiseModel = mock(async (_m: string | null) => undefined);
+
+    await applyAiNoiseModelSelection(null, { setAiNoiseModel });
+
+    expect(setAiNoiseModel).toHaveBeenCalledWith(null);
+    expect($devicePrefs.get().aiNoiseModel).toBeNull();
   });
 });

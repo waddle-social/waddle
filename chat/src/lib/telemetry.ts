@@ -40,8 +40,10 @@ import {
 } from "@grafana/faro-web-sdk";
 import { getDefaultOTELInstrumentations, TracingInstrumentation } from "@grafana/faro-web-tracing";
 import { context, SpanStatusCode, trace, type Span } from "@opentelemetry/api";
-import { callAudioProcessingEventAttributes } from "./calls/call-audio-processing-telemetry";
-import type { MicAudioProcessing } from "./calls/mic-audio-processing";
+import {
+  callAudioProcessingEventAttributes,
+  type VerifiedCallAudioProcessing,
+} from "./calls/call-audio-processing-telemetry";
 
 type MessageKind = "room" | "dm";
 
@@ -908,15 +910,16 @@ export function reportSessionLifecycle(payload: {
 }
 
 /**
- * Beacon the verified browser-native audio-processing state of the local
- * call mic (issue #913) so we can measure, across the fleet, what fraction
- * of calls actually have noise cancellation applied. The payload is the
- * PII-free tri-state from {@link callAudioProcessingEventAttributes};
- * coarse browser/platform context rides along in Faro's event meta. Pure
- * observability — no XMPP/Jingle wire effect. De-dup (at most once per call
- * per distinct state) is the caller's job via `createCallAudioProcessingBeacon`.
+ * Beacon the verified audio-processing state of the local call mic (issues
+ * #913 / #914) so we can measure, across the fleet, what fraction of calls
+ * actually have noise cancellation applied and which layer (browser constraint
+ * vs AI model) is doing it. The payload is the PII-free state from
+ * {@link callAudioProcessingEventAttributes}; coarse browser/platform context
+ * rides along in Faro's event meta. Pure observability — no XMPP/Jingle wire
+ * effect. De-dup (at most once per call per distinct state) is the caller's job
+ * via `createCallAudioProcessingBeacon`.
  */
-export function reportCallAudioProcessing(state: MicAudioProcessing): void {
+export function reportCallAudioProcessing(state: VerifiedCallAudioProcessing): void {
   faro?.api.pushEvent("chat.call.audio_processing", callAudioProcessingEventAttributes(state));
 }
 

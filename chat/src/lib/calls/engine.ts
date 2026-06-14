@@ -27,6 +27,23 @@ import {
 } from "./device-prefs";
 import { validateLiveKitGrant } from "./dm-call-activity";
 import { activeMicAudioProcessing, type MicAudioProcessing } from "./mic-audio-processing";
+import { effectiveAudioProcessing } from "./ai-noise-filter/effective-audio-processing";
+import { activeAiNoiseFilter, type AiNoiseFilterState } from "./ai-noise-filter/mic-ai-noise-filter";
+import type { NoiseModelId } from "./ai-noise-filter/model-id";
+import type { AudioNoiseProcessor } from "./ai-noise-filter/processor";
+import { makeNoiseProcessor } from "./ai-noise-filter/registry";
+import { runAiNoiseFilterReconcile, type ProcessorTarget } from "./ai-noise-filter/reconcile";
+
+/**
+ * The local mic track surface the AI-noise reconciler drives — the subset of
+ * `LocalAudioTrack` it needs. Structural so the engine can build a
+ * `ProcessorTarget` from a real track and tests can inject a fake.
+ */
+type ProcessorCapableTrack = {
+  getProcessor(): { name: string } | undefined;
+  setProcessor(processor: AudioNoiseProcessor): Promise<void>;
+  stopProcessor(): Promise<void>;
+};
 
 /**
  * Camera capture ceiling. AdaptiveStream (`adaptiveStream: true`) and
@@ -72,12 +89,18 @@ export function callRoomOptionsForPrefs(prefs: {
   mic: string | null;
   cam: string | null;
   audioProcessing: AudioProcessingPrefs;
+  aiNoiseModel: NoiseModelId | null;
 }) {
   return {
     adaptiveStream: true,
     dynacast: true,
     webAudioMix: true,
-    audioCaptureDefaults: audioCaptureDefaultsForPrefs(prefs),
+    // When a model is selected the browser NS is superseded from the very
+    // first capture, so the model isn't fed a pre-suppressed signal.
+    audioCaptureDefaults: audioCaptureDefaultsForPrefs({
+      mic: prefs.mic,
+      audioProcessing: effectiveAudioProcessing(prefs.audioProcessing, prefs.aiNoiseModel),
+    }),
     videoCaptureDefaults: {
       deviceId: prefs.cam ?? undefined,
       resolution: CAMERA_CAPTURE_RESOLUTION,
@@ -208,6 +231,22 @@ export type CallEngineEvents = {
    */
   micAudioProcessingChanged: (state: MicAudioProcessing) => void;
   /**
+   * Fires when the *verified* AI noise filter on the local mic changes — on
+   * mic publish/unpublish, a device switch, mute/unmute, or an explicit model
+   * selection. Carries the model read back from the attached processor's name
+   * (`getProcessor()`), NOT merely the requested pref, so the indicator is
+   * honest even when an attach silently fails. The #911 `getSettings()` read
+   * cannot see a processor, hence this sibling signal. See `mic-ai-noise-filter.ts`.
+   */
+  aiNoiseFilterChanged: (state: AiNoiseFilterState) => void;
+  /**
+   * Fires when a model fails to attach (wasm/model fetch error, unsupported
+   * device, missing backend). NON-FATAL: the engine fails open to the raw mic
+   * and the UI shows a non-blocking notice; the per-(track,model) guard stops
+   * the defensive re-runs from retrying until a fresh track or re-selection.
+   */
+  aiNoiseFilterError: (info: { model: NoiseModelId; error: unknown }) => void;
+  /**
    * Fires when LiveKit re-scores the LOCAL participant's connection
    * quality (`excellent` → `lost`). Remote participants' quality is
    * intentionally not surfaced — the indicator is self-only. Push-based:
@@ -247,9 +286,32 @@ export class CallEngine {
     audioPlaybackStatusChanged: new Set(),
     mediaDevicesError: new Set(),
     micAudioProcessingChanged: new Set(),
+    aiNoiseFilterChanged: new Set(),
+    aiNoiseFilterError: new Set(),
     connectionQualityChanged: new Set(),
     connectionPhaseChanged: new Set(),
   };
+
+  /**
+   * The user's selected AI noise model (or null/off), seeded from prefs at
+   * connect. Source of "what should be attached" for the reconciler.
+   */
+  private desiredAiNoiseModel: NoiseModelId | null = null;
+  /**
+   * Models that have failed to attach to the CURRENT mic track. Skips a retry
+   * on every defensive re-run; cleared on a fresh publish or a re-selection.
+   */
+  private aiNoiseFailedModels = new Set<NoiseModelId>();
+  /** Serializes reconciles so bursty triggers can't race on setProcessor. */
+  private aiReconcileChain: Promise<void> = Promise.resolve();
+  /** Builds a processor for a model; injectable so tests avoid real wasm. */
+  private readonly makeAiNoiseProcessor: (model: NoiseModelId) => Promise<AudioNoiseProcessor>;
+
+  constructor(opts?: {
+    makeAiNoiseProcessor?: (model: NoiseModelId) => Promise<AudioNoiseProcessor>;
+  }) {
+    this.makeAiNoiseProcessor = opts?.makeAiNoiseProcessor ?? makeNoiseProcessor;
+  }
 
   /** LiveKit identity of the local participant, populated once
    *  `connect()` resolves. Exposed so the overlay can render the
@@ -293,6 +355,10 @@ export class CallEngine {
       throw new Error(`Invalid LiveKit join token: ${grant.reason}`);
     }
     const prefs = $devicePrefs.get();
+    // Seed the AI-filter desired model from prefs so it re-applies on this
+    // call's mic publish; start each call with a clean failure guard.
+    this.desiredAiNoiseModel = prefs.aiNoiseModel;
+    this.aiNoiseFailedModels.clear();
     const room = new Room(callRoomOptionsForPrefs(prefs));
     room.on(RoomEvent.TrackSubscribed, this.handleTrackSubscribed);
     room.on(RoomEvent.TrackUnsubscribed, this.handleTrackUnsubscribed);
@@ -398,9 +464,14 @@ export class CallEngine {
    * Restart the live microphone capture with updated browser-native
    * audio-processing constraints. LiveKit swaps the capture track inside
    * the existing publication, so the call stays joined and no Jingle
-   * signaling is needed.
+   * signaling is needed. The effective constraints account for an active AI
+   * model superseding the browser `noiseSuppression`.
    */
   async setAudioProcessing(prefs: AudioProcessingPrefs): Promise<void> {
+    await this.restartMicCapture(prefs);
+  }
+
+  private async restartMicCapture(prefs: AudioProcessingPrefs): Promise<void> {
     const publication = this.room?.localParticipant.getTrackPublication(Track.Source.Microphone);
     if (!publication || publication.isMuted) return;
     const track = publication.track;
@@ -412,10 +483,83 @@ export class CallEngine {
       track,
       audioCaptureDefaultsForPrefs({
         mic: settings?.deviceId ?? $devicePrefs.get().mic,
-        audioProcessing: prefs,
+        audioProcessing: effectiveAudioProcessing(prefs, this.desiredAiNoiseModel),
       }),
     );
     this.emitMicAudioProcessing();
+  }
+
+  /**
+   * Select the AI noise model (or null/off). Updates the desired model, gives
+   * the new selection a fresh attempt (clears the per-track failure guard),
+   * re-applies the effective capture constraints (browser NS off while a model
+   * runs), then reconciles the attached processor. Persistence is the caller's
+   * job (the device-selection layer writes the pref).
+   */
+  async setAiNoiseModel(model: NoiseModelId | null): Promise<void> {
+    this.desiredAiNoiseModel = model;
+    this.aiNoiseFailedModels.clear();
+    await this.restartMicCapture($devicePrefs.get().audioProcessing);
+    await this.ensureAiNoiseFilter();
+  }
+
+  /**
+   * The local mic track as a processor target, or null when no mic is live /
+   * the mic is muted (nothing to attach to).
+   */
+  private micProcessorTrack(): ProcessorCapableTrack | null {
+    const publication = this.room?.localParticipant.getTrackPublication(Track.Source.Microphone);
+    if (!publication || publication.isMuted) return null;
+    const track = publication.track as unknown as ProcessorCapableTrack | undefined;
+    return track && typeof track.getProcessor === "function" ? track : null;
+  }
+
+  /**
+   * Reconcile the attached processor toward the desired model. Idempotent and
+   * serialized; a no-op when no mic track exists (it re-runs on the next
+   * publish). Fails open on attach error and emits a typed `aiNoiseFilterError`.
+   */
+  private ensureAiNoiseFilter(): Promise<void> {
+    this.aiReconcileChain = this.aiReconcileChain
+      .then(() => this.runEnsureAiNoiseFilter())
+      .catch(() => undefined);
+    return this.aiReconcileChain;
+  }
+
+  private async runEnsureAiNoiseFilter(): Promise<void> {
+    const track = this.micProcessorTrack();
+    if (!track) {
+      // No live mic to attach to (none published, or muted) — surface the
+      // honest `no-mic` state; the desired model re-applies on the next publish.
+      this.emitAiNoiseFilter();
+      return;
+    }
+    const target: ProcessorTarget<AudioNoiseProcessor> = {
+      currentProcessorName: () => track.getProcessor()?.name,
+      attach: (processor) => track.setProcessor(processor),
+      clear: () => track.stopProcessor(),
+    };
+    const outcome = await runAiNoiseFilterReconcile({
+      target,
+      desired: this.desiredAiNoiseModel,
+      makeProcessor: this.makeAiNoiseProcessor,
+      failedModels: this.aiNoiseFailedModels,
+    });
+    if (outcome.action === "failed") {
+      this.emit("aiNoiseFilterError", { model: outcome.model, error: outcome.error });
+    }
+    this.emitAiNoiseFilter();
+  }
+
+  /** Verified AI-filter state read from the live processor's name. */
+  private computeAiNoiseFilter(): AiNoiseFilterState {
+    const track = this.micProcessorTrack();
+    if (!track) return { kind: "no-mic" };
+    return activeAiNoiseFilter(track.getProcessor()?.name);
+  }
+
+  private emitAiNoiseFilter(): void {
+    this.emit("aiNoiseFilterChanged", this.computeAiNoiseFilter());
   }
 
   /**
@@ -570,7 +714,14 @@ export class CallEngine {
     // audio processing now that `getSettings()` reflects the real
     // constraints the browser honored (which can differ from what we
     // requested in `audioCaptureDefaults`).
-    if (source === "microphone") this.emitMicAudioProcessing();
+    if (source === "microphone") {
+      // A brand-new mic track: clear the per-track failure guard so a model
+      // that failed on a previous track gets one clean attempt here, then
+      // (re-)attach the desired model.
+      this.aiNoiseFailedModels.clear();
+      this.emitMicAudioProcessing();
+      void this.ensureAiNoiseFilter();
+    }
   };
 
   private handleLocalTrackUnpublished = (
@@ -585,7 +736,11 @@ export class CallEngine {
     // for a mic that is gone. `computeMicAudioProcessing` reads the
     // participant's current mic publication, not this argument, so it is
     // safe without `track` and correctly falls back to `no-mic`.
-    if (publication.source === Track.Source.Microphone) this.emitMicAudioProcessing();
+    if (publication.source === Track.Source.Microphone) {
+      this.emitMicAudioProcessing();
+      // The mic track (and its processor) is gone — recompute to `no-mic`.
+      this.emitAiNoiseFilter();
+    }
     const track = publication.track;
     const kind = mapKind(publication.kind);
     if (!track || !kind) return;
@@ -609,6 +764,9 @@ export class CallEngine {
 
   private handleDisconnected = (reason?: unknown) => {
     this.clearParticipantAudioVolumes();
+    // LiveKit destroys the processor when the track stops; just reset our
+    // per-track failure guard so the next call starts clean.
+    this.aiNoiseFailedModels.clear();
     this.emit("disconnected", typeof reason === "string" ? reason : undefined);
   };
 
@@ -627,6 +785,9 @@ export class CallEngine {
   private handleActiveDeviceChanged = (kind: MediaDeviceKind) => {
     if (kind !== "audioinput") return;
     this.emitMicAudioProcessing();
+    // Defensive: LiveKit re-runs the processor across a device switch, but
+    // reconcile is idempotent and re-attaches if the new track came up bare.
+    void this.ensureAiNoiseFilter();
   };
 
   /**
@@ -644,6 +805,8 @@ export class CallEngine {
     if (!participant.isLocal) return;
     if (publication.source !== Track.Source.Microphone) return;
     this.emitMicAudioProcessing();
+    // Unmute restarts the track; reconcile (idempotent) re-attaches if needed.
+    void this.ensureAiNoiseFilter();
   };
 
   /**
