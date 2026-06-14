@@ -21,6 +21,7 @@
 use kameo::actor::ActorRef;
 
 use crate::db::actor::{DbActor, DbQueryOne};
+use crate::db::{row_value, ValueExt};
 
 use super::AuthError;
 
@@ -54,4 +55,34 @@ pub async fn local_account_exists(
         .map_err(|error| AuthError::DatabaseError(error.to_string()))?;
 
     Ok(row.is_some())
+}
+
+/// Resolve a local user's `users.id` — the canonical SpiceDB subject id used
+/// throughout Waddle's permission model — from their `xmpp_localpart`.
+///
+/// Returns `None` when the localpart has no OIDC `users` row. SpiceDB object ids
+/// forbid `@`/`.`, so a JID can never be a valid subject; this UUID is the
+/// stable handle. Native-only accounts (no `users` row) are not representable as
+/// permission subjects and resolve to `None`.
+pub async fn resolve_user_id(
+    actor: &ActorRef<DbActor>,
+    localpart: &str,
+) -> Result<Option<String>, AuthError> {
+    let row = actor
+        .ask(DbQueryOne {
+            sql: "SELECT id FROM users WHERE xmpp_localpart = ? LIMIT 1".to_string(),
+            params: vec![localpart.into()],
+        })
+        .await
+        .map_err(|error| AuthError::DatabaseError(error.to_string()))?;
+
+    match row {
+        Some(row) => {
+            let id = row_value(&row, 0)
+                .and_then(ValueExt::as_string)
+                .map_err(|error| AuthError::DatabaseError(format!("decode user id: {error}")))?;
+            Ok(Some(id))
+        }
+        None => Ok(None),
+    }
 }

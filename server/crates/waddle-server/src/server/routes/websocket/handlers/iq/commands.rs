@@ -1,4 +1,7 @@
 use super::extension_forms::CommandBoundary;
+use super::group_dm_membership::{
+    requester_has_durable_group_dm_membership, requester_has_group_dm_membership_tuple,
+};
 use super::*;
 
 pub(super) struct CommandTargets<'a> {
@@ -168,48 +171,11 @@ async fn room_command_available(
     if channel.channel_type != waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM {
         return false;
     }
-    if state
-        .deps
-        .app_state
-        .permission_actor
-        .ask(CheckPermission {
-            subject: Subject::user(requester_bare.to_string()),
-            permission: Permission::Member,
-            object: Object::new(ObjectType::Channel, &channel_id),
-        })
+    if requester_has_group_dm_membership_tuple(state, &requester_bare, &channel_id)
         .await
-        .ok()
-        .is_some_and(|response| response.allowed)
+        .unwrap_or(false)
     {
         return true;
     }
     requester_has_durable_group_dm_membership(state, &requester_bare, &channel_id).await
-}
-
-async fn requester_has_durable_group_dm_membership(
-    state: &WebSocketState,
-    requester_bare: &BareJid,
-    channel_id: &str,
-) -> bool {
-    state
-        .deps
-        .app_state
-        .db_pool
-        .global_actor()
-        .ask(DbQueryOne {
-            sql: r#"
-                SELECT 1 FROM permission_tuples
-                WHERE object_type = 'channel'
-                  AND object_id = ?
-                  AND relation = 'member'
-                  AND subject_type = 'user'
-                  AND subject_id = ?
-                  AND subject_relation IS NULL
-                LIMIT 1
-            "#
-            .to_string(),
-            params: vec![channel_id.into(), requester_bare.to_string().into()],
-        })
-        .await
-        .is_ok_and(|row| row.is_some())
 }

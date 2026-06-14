@@ -83,6 +83,7 @@ mod disco_info;
 mod disco_items;
 pub(crate) mod errors;
 mod extension_forms;
+mod group_dm_membership;
 mod jingle_muji_gate;
 mod last_activity;
 mod link_preview_lookup;

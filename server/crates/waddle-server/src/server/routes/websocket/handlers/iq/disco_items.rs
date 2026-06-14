@@ -1,5 +1,9 @@
 use super::*;
 
+use super::group_dm_membership::{
+    requester_has_durable_group_dm_membership, requester_has_group_dm_membership_tuple,
+};
+
 enum RoomCommandTarget {
     GroupDm,
     NotGroupDm,
@@ -60,40 +64,26 @@ async fn classify_room_command_target(
             let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(room_jid) else {
                 return RoomCommandTarget::Missing;
             };
-            if requester_has_group_dm_membership_tuple(state, &requester_bare, &channel_id)
-                .await
-                .is_some_and(|allowed| allowed)
-                || requester_has_durable_group_dm_membership(state, &requester_bare, &channel_id)
+            match requester_has_group_dm_membership_tuple(state, &requester_bare, &channel_id).await
+            {
+                Some(true) => RoomCommandTarget::GroupDm,
+                Some(false) => {
+                    if requester_has_durable_group_dm_membership(
+                        state,
+                        &requester_bare,
+                        &channel_id,
+                    )
                     .await
-            {
-                return RoomCommandTarget::GroupDm;
-            }
-            match state
-                .deps
-                .app_state
-                .permission_actor
-                .ask(CheckPermission {
-                    subject: Subject::user(requester_bare.to_string()),
-                    permission: Permission::Member,
-                    object: Object::new(ObjectType::Channel, channel_id),
-                })
-                .await
-            {
-                Err(kameo::error::SendError::HandlerError(error)) => {
-                    warn!(
-                        room = %room_jid,
-                        error = ?error,
-                        "Failed to check persisted group-DM membership for disco#items"
-                    );
-                    RoomCommandTarget::Failed
+                    {
+                        RoomCommandTarget::GroupDm
+                    } else {
+                        RoomCommandTarget::NotMember
+                    }
                 }
-                Ok(response) if response.allowed => RoomCommandTarget::GroupDm,
-                Ok(_) => RoomCommandTarget::NotMember,
-                Err(error) => {
+                None => {
                     warn!(
                         room = %room_jid,
-                        error = ?error,
-                        "Failed to ask permission actor for disco#items"
+                        "Indeterminate group-DM membership check for disco#items"
                     );
                     RoomCommandTarget::Failed
                 }
@@ -110,53 +100,6 @@ async fn classify_room_command_target(
             RoomCommandTarget::Failed
         }
     }
-}
-
-async fn requester_has_group_dm_membership_tuple(
-    state: &WebSocketState,
-    requester_bare: &BareJid,
-    channel_id: &str,
-) -> Option<bool> {
-    state
-        .deps
-        .app_state
-        .permission_actor
-        .ask(CheckPermission {
-            subject: Subject::user(requester_bare.to_string()),
-            permission: Permission::Member,
-            object: Object::new(ObjectType::Channel, channel_id),
-        })
-        .await
-        .ok()
-        .map(|response| response.allowed)
-}
-
-async fn requester_has_durable_group_dm_membership(
-    state: &WebSocketState,
-    requester_bare: &BareJid,
-    channel_id: &str,
-) -> bool {
-    state
-        .deps
-        .app_state
-        .db_pool
-        .global_actor()
-        .ask(DbQueryOne {
-            sql: r#"
-                SELECT 1 FROM permission_tuples
-                WHERE object_type = 'channel'
-                  AND object_id = ?
-                  AND relation = 'member'
-                  AND subject_type = 'user'
-                  AND subject_id = ?
-                  AND subject_relation IS NULL
-                LIMIT 1
-            "#
-            .to_string(),
-            params: vec![channel_id.into(), requester_bare.to_string().into()],
-        })
-        .await
-        .is_ok_and(|row| row.is_some())
 }
 
 pub(super) async fn handle_disco_items_iq(

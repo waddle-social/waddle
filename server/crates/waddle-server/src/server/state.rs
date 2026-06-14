@@ -53,6 +53,12 @@ pub struct AppState {
     /// `channels:create` constructs new managed room JIDs against this
     /// domain.
     pub muc_domain: DomainPart,
+    /// The deployment's user-bearing XMPP domain (e.g. `waddle.social`), the
+    /// domain local accounts are addressed under. Resolved from
+    /// [`crate::server::XmppConfig`] (`WADDLE_XMPP_DOMAIN`). Used to rebuild a
+    /// member's bare JID from their stored `users.id`/localpart when rehydrating
+    /// durable group-DM membership.
+    pub domain: DomainPart,
     /// Shared secret for XEP-0421 occupant-id generation.
     pub occupant_id_secret: OccupantIdSecret,
     /// Shared permission actor handle.
@@ -107,6 +113,8 @@ impl AppState {
             room_registry,
             spaces_jid,
             muc_domain,
+            domain: DomainPart::from_str("localhost")
+                .expect("test user domain 'localhost' parses as DomainPart"),
             occupant_id_secret,
             permission_actor,
             server_owner_jids: Arc::from(Vec::<BareJid>::new()),
@@ -127,6 +135,7 @@ impl AppState {
             room_registry,
             spaces_jid,
             muc_domain,
+            domain,
             occupant_id_secret,
             permission_actor,
             server_owner_jids,
@@ -141,6 +150,7 @@ impl AppState {
             room_registry,
             spaces_jid,
             muc_domain,
+            domain,
             occupant_id_secret,
             permission_actor,
             server_owner_jids,
@@ -161,6 +171,7 @@ pub struct AppStateDeps {
     pub room_registry: ActorRef<RoomRegistryActor>,
     pub spaces_jid: BareJid,
     pub muc_domain: DomainPart,
+    pub domain: DomainPart,
     pub occupant_id_secret: OccupantIdSecret,
     pub permission_actor: ActorRef<PermissionActor>,
     pub server_owner_jids: Arc<[BareJid]>,

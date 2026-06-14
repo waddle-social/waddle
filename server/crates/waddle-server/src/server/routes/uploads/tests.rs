@@ -52,6 +52,7 @@ async fn create_test_upload_state() -> (Arc<UploadState>, std::path::PathBuf) {
         room_registry,
         spaces_jid: "spaces.example.com".parse().expect("spaces JID parses"),
         muc_domain,
+        domain: "example.com".parse().expect("user domain parses"),
         occupant_id_secret,
         permission_actor,
         server_owner_jids: Arc::from(Vec::<jid::BareJid>::new()),

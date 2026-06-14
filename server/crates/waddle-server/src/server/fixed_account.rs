@@ -1,4 +1,5 @@
 use crate::auth::{NativeUserStore, RegisterRequest};
+use crate::db::actor::{DbExecute, DbQueryOne};
 use crate::db::DatabasePool;
 use crate::server::XmppConfig;
 use anyhow::Result;
@@ -126,10 +127,62 @@ pub(crate) async fn seed_fixed_test_account(
         .await
         .map_err(|err| anyhow::anyhow!("Failed creating fixed test account: {err}"))?;
 
+    // Provision a matching OIDC `users` identity so the account has a
+    // `users.id` — the canonical permission subject. Real deployments only have
+    // OIDC users; native-only test accounts cannot be group-DM members or carry
+    // any SpiceDB affiliation, so the fixed-account harness mirrors a real
+    // identity here.
+    ensure_oidc_identity_row(db_pool, config).await?;
+
     info!(
         username = %config.username,
         domain = %config.domain,
         "Provisioned fixed native test account"
     );
+    Ok(())
+}
+
+/// Upsert an OIDC `users` row for a fixed test account (idempotent across
+/// server restarts on a persistent DB). `display_name` is left NULL so the
+/// admin Users panel's `users`∪`native_users` walk still dedupes by localpart.
+async fn ensure_oidc_identity_row(
+    db_pool: &Arc<DatabasePool>,
+    config: &FixedTestAccountConfig,
+) -> Result<()> {
+    // Normalize the localpart the same way the OIDC path and the JID node
+    // resolution do, so SCRAM-session and group-DM membership lookups (which key
+    // on the nodeprep-normalized localpart) resolve to this row.
+    let xmpp_localpart = crate::auth::username_to_localpart(&config.username);
+    let actor = db_pool.global_actor();
+    let existing = actor
+        .ask(DbQueryOne {
+            sql: "SELECT 1 FROM users WHERE xmpp_localpart = ? LIMIT 1".to_string(),
+            params: vec![xmpp_localpart.as_str().into()],
+        })
+        .await
+        .map_err(|err| anyhow::anyhow!("Failed checking fixed OIDC identity: {err}"))?;
+    if existing.is_some() {
+        return Ok(());
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    actor
+        .ask(DbExecute {
+            sql: r#"
+                INSERT INTO users
+                    (id, username, xmpp_localpart, display_name, avatar_url, primary_email, created_at, updated_at)
+                VALUES (?, ?, ?, NULL, NULL, NULL, ?, ?)
+            "#
+            .to_string(),
+            params: vec![
+                uuid::Uuid::new_v4().to_string().into(),
+                config.username.as_str().into(),
+                xmpp_localpart.as_str().into(),
+                now.clone().into(),
+                now.into(),
+            ],
+        })
+        .await
+        .map_err(|err| anyhow::anyhow!("Failed creating fixed OIDC identity: {err}"))?;
     Ok(())
 }

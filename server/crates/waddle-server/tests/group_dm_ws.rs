@@ -835,6 +835,44 @@ async fn group_dm_create_accepts_oidc_registered_member() {
         "expected managed MUC room, got: {room_jid}"
     );
 
+    // Persisted permission subjects must be the members' `users.id` (SpiceDB
+    // object ids forbid `@`/`.`), never a raw JID — otherwise real SpiceDB
+    // rejects the tuple. Verify the durable mirror stores UUIDs, not JIDs.
+    let pool = open_push_publish_job_pool(&database_url).await;
+    let channel_id = room_jid
+        .split_once('@')
+        .map(|(node, _)| node.to_string())
+        .expect("room JID has a localpart");
+    let jid_shaped: i64 = sqlx::query(
+        "SELECT COUNT(*) AS count FROM permission_tuples \
+         WHERE object_type = 'channel' AND object_id = ? AND subject_type = 'user' \
+         AND subject_id LIKE '%@%'",
+    )
+    .bind(&channel_id)
+    .fetch_one(&pool)
+    .await
+    .expect("count jid-shaped subjects")
+    .get("count");
+    assert_eq!(
+        jid_shaped, 0,
+        "group-DM member subjects must be users.id UUIDs, not JIDs"
+    );
+    let member_rows: i64 = sqlx::query(
+        "SELECT COUNT(*) AS count FROM permission_tuples \
+         WHERE object_type = 'channel' AND object_id = ? AND relation = 'member' \
+         AND subject_type = 'user'",
+    )
+    .bind(&channel_id)
+    .fetch_one(&pool)
+    .await
+    .expect("count member tuples")
+    .get("count");
+    assert!(
+        member_rows >= 2,
+        "expected persisted member tuples for alice and carol, got {member_rows}"
+    );
+    pool.close().await;
+
     let _ = alice.close().await;
 }
 

@@ -132,7 +132,8 @@ pub(super) async fn handle_xmpp_frame(
             let scram = phase
                 .take_scram_pending()
                 .expect("SASL response must have pending SCRAM state");
-            handle_sasl_scram_response(&data, domain, scram, authenticated_session, phase)
+            handle_sasl_scram_response(&data, domain, scram, authenticated_session, phase, state)
+                .await
         }
 
         InboundFrame::Stanza(stanza) => {

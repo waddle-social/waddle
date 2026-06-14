@@ -52,7 +52,6 @@ use xmpp_parsers::message::{Message, MessageType};
 use xmpp_parsers::minidom::Element;
 
 use crate::admin::is_community_owner;
-use crate::auth::local_account_exists;
 use crate::channel_space_links::{ChannelSpaceLink, ChannelSpaceLinkError};
 use crate::db::actor::{DbExecute, DbQuery};
 use crate::db::{row_value, ValueExt};
@@ -2080,34 +2079,44 @@ async fn list_durable_group_dm_members(
     state: &AppState,
     group_dm_id: &str,
 ) -> Result<Vec<BareJid>, AdminErr> {
+    // Durable group-DM membership stores the member's `users.id` (the SpiceDB
+    // subject id), so rehydrate the addressable JID by joining `users` and
+    // pairing the localpart with the deployment's user-bearing domain.
     let rows = state
         .db_pool
         .global_actor()
         .ask(DbQuery {
             sql: r#"
-                SELECT DISTINCT subject_id
-                FROM permission_tuples
-                WHERE object_type = 'channel'
-                  AND object_id = ?
-                  AND relation = 'member'
-                  AND subject_type = 'user'
-                  AND subject_relation IS NULL
-                ORDER BY subject_id ASC
+                SELECT DISTINCT u.xmpp_localpart
+                FROM permission_tuples pt
+                JOIN users u ON u.id = pt.subject_id
+                WHERE pt.object_type = 'channel'
+                  AND pt.object_id = ?
+                  AND pt.relation = 'member'
+                  AND pt.subject_type = 'user'
+                  AND pt.subject_relation IS NULL
+                ORDER BY u.xmpp_localpart ASC
             "#
             .to_string(),
             params: vec![group_dm_id.into()],
         })
         .await
         .map_err(|error| internal_err(format!("group-DM member lookup failed: {error}")))?;
+    let domain = state.domain.as_str();
     rows.into_iter()
         .map(|row| {
-            row_value(&row, 0)
+            let localpart = row_value(&row, 0)
                 .and_then(ValueExt::as_string)
-                .map_err(|error| internal_err(format!("invalid group-DM member row: {error}")))
-                .and_then(|jid| {
-                    jid.parse::<BareJid>().map_err(|error| {
-                        internal_err(format!("invalid durable group-DM member JID: {error}"))
-                    })
+                .map_err(|error| internal_err(format!("invalid group-DM member row: {error}")))?;
+            crate::auth::localpart_to_jid(&localpart, domain)
+                .map_err(|error| {
+                    internal_err(format!(
+                        "invalid durable group-DM member localpart: {error}"
+                    ))
+                })?
+                .parse::<BareJid>()
+                .map_err(|error| {
+                    internal_err(format!("invalid durable group-DM member JID: {error}"))
                 })
         })
         .collect()
@@ -2397,15 +2406,38 @@ async fn rollback_group_dm_create(
         .await;
 }
 
+/// Resolve a group-DM member's bare JID to its canonical `users.id` (the SpiceDB
+/// subject id). Group-DM membership lives in the permission model, so a member
+/// must be a provisioned local account; native-only or unknown JIDs are rejected
+/// with `item-not-found`.
+async fn resolve_group_dm_member_user_id(
+    state: &AppState,
+    member_jid: &BareJid,
+) -> Result<String, XmppError> {
+    let Some(localpart) = member_jid.node().map(|node| node.to_string()) else {
+        return Err(XmppError::bad_request(Some(
+            "group-DM member JID must have a localpart".to_string(),
+        )));
+    };
+    crate::auth::resolve_user_id(state.db_pool.global_actor(), &localpart)
+        .await
+        .map_err(|error| XmppError::internal(format!("group-DM member lookup failed: {error}")))?
+        .ok_or_else(|| {
+            XmppError::item_not_found(Some(format!(
+                "group-DM member is not a provisioned account: {member_jid}"
+            )))
+        })
+}
+
 pub(crate) async fn persist_group_dm_member_tuple(
     state: &AppState,
     group_dm_id: &str,
     member_jid: &BareJid,
 ) -> Result<(), XmppError> {
-    persist_group_dm_member_actor_tuple(state, group_dm_id, member_jid).await?;
-    if let Err(error) = persist_durable_group_dm_member_tuple(state, group_dm_id, member_jid).await
-    {
-        let _ = delete_group_dm_member_actor_tuple(state, group_dm_id, member_jid).await;
+    let user_id = resolve_group_dm_member_user_id(state, member_jid).await?;
+    persist_group_dm_member_actor_tuple(state, group_dm_id, &user_id).await?;
+    if let Err(error) = persist_durable_group_dm_member_tuple(state, group_dm_id, &user_id).await {
+        let _ = delete_group_dm_member_actor_tuple(state, group_dm_id, &user_id).await;
         return Err(error);
     }
     Ok(())
@@ -2414,12 +2446,12 @@ pub(crate) async fn persist_group_dm_member_tuple(
 async fn persist_group_dm_member_actor_tuple(
     state: &AppState,
     group_dm_id: &str,
-    member_jid: &BareJid,
+    user_id: &str,
 ) -> Result<(), XmppError> {
     let tuple = Tuple::new(
         Object::new(ObjectType::Channel, group_dm_id),
         Relation::new("member"),
-        Subject::user(member_jid.to_string()),
+        Subject::user(user_id),
     );
     match state.permission_actor.ask(WriteTuple { tuple }).await {
         Ok(()) => {}
@@ -2436,7 +2468,7 @@ async fn persist_group_dm_member_actor_tuple(
 async fn persist_durable_group_dm_member_tuple(
     state: &AppState,
     group_dm_id: &str,
-    member_jid: &BareJid,
+    user_id: &str,
 ) -> Result<(), XmppError> {
     state
         .db_pool
@@ -2458,11 +2490,11 @@ async fn persist_durable_group_dm_member_tuple(
             "#
             .to_string(),
             params: vec![
-                format!("group-dm-member:{group_dm_id}:{member_jid}").into(),
+                format!("group-dm-member:{group_dm_id}:{user_id}").into(),
                 group_dm_id.into(),
-                member_jid.to_string().into(),
+                user_id.into(),
                 group_dm_id.into(),
-                member_jid.to_string().into(),
+                user_id.into(),
             ],
         })
         .await
@@ -2477,11 +2509,12 @@ async fn delete_group_dm_member_tuple(
     group_dm_id: &str,
     member_jid: &BareJid,
 ) -> Result<(), XmppError> {
-    delete_group_dm_member_actor_tuple(state, group_dm_id, member_jid).await?;
-    match delete_durable_group_dm_member_tuple(state, group_dm_id, member_jid).await {
+    let user_id = resolve_group_dm_member_user_id(state, member_jid).await?;
+    delete_group_dm_member_actor_tuple(state, group_dm_id, &user_id).await?;
+    match delete_durable_group_dm_member_tuple(state, group_dm_id, &user_id).await {
         Ok(()) => Ok(()),
         Err(error) => {
-            let _ = persist_group_dm_member_actor_tuple(state, group_dm_id, member_jid).await;
+            let _ = persist_group_dm_member_actor_tuple(state, group_dm_id, &user_id).await;
             Err(error)
         }
     }
@@ -2490,12 +2523,12 @@ async fn delete_group_dm_member_tuple(
 async fn delete_group_dm_member_actor_tuple(
     state: &AppState,
     group_dm_id: &str,
-    member_jid: &BareJid,
+    user_id: &str,
 ) -> Result<(), XmppError> {
     let tuple = Tuple::new(
         Object::new(ObjectType::Channel, group_dm_id),
         Relation::new("member"),
-        Subject::user(member_jid.to_string()),
+        Subject::user(user_id),
     );
     match state.permission_actor.ask(DeleteTuple { tuple }).await {
         Ok(()) => {}
@@ -2512,7 +2545,7 @@ async fn delete_group_dm_member_actor_tuple(
 async fn delete_durable_group_dm_member_tuple(
     state: &AppState,
     group_dm_id: &str,
-    member_jid: &BareJid,
+    user_id: &str,
 ) -> Result<(), XmppError> {
     state
         .db_pool
@@ -2528,7 +2561,7 @@ async fn delete_durable_group_dm_member_tuple(
                   AND subject_relation IS NULL
             "#
             .to_string(),
-            params: vec![group_dm_id.into(), member_jid.to_string().into()],
+            params: vec![group_dm_id.into(), user_id.into()],
         })
         .await
         .map(|_| ())
@@ -2556,24 +2589,14 @@ pub(crate) async fn validate_group_dm_invitee(
             inviter_jid.domain()
         ))));
     }
-    let Some(localpart) = invitee_jid.node().map(|node| node.to_string()) else {
-        return Err(XmppError::bad_request(Some(
-            "invitee must be a user JID with a localpart".to_string(),
-        )));
-    };
-    let exists = local_account_exists(
-        state.db_pool.global_actor(),
-        &localpart,
-        invitee_jid.domain().as_str(),
-    )
-    .await
-    .map_err(|error| XmppError::internal(format!("user lookup failed: {error}")))?;
-    if !exists {
-        return Err(XmppError::item_not_found(Some(format!(
-            "group-DM invitee does not exist: {invitee_jid}"
-        ))));
-    }
-    Ok(())
+    // A group-DM invitee must resolve to a `users.id` (the SpiceDB subject), the
+    // same requirement persistence enforces. Rejecting unprovisioned/native-only
+    // JIDs here with item-not-found keeps the mediated-invite precheck
+    // consistent with what the persist path can actually do, so the invite never
+    // records archive-boundary state for an invitee it cannot add.
+    resolve_group_dm_member_user_id(state, invitee_jid)
+        .await
+        .map(|_| ())
 }
 
 async fn validate_group_dm_members(
@@ -2588,21 +2611,12 @@ async fn validate_group_dm_members(
                 creator_jid.domain()
             )));
         }
-        let Some(localpart) = member_jid.node().map(|node| node.to_string()) else {
-            return Err(bad_request("member_jids must be user JIDs with localparts"));
-        };
-        let exists = local_account_exists(
-            state.db_pool.global_actor(),
-            &localpart,
-            member_jid.domain().as_str(),
-        )
-        .await
-        .map_err(|error| internal_err(format!("user lookup failed: {error}")))?;
-        if !exists {
-            return Err(Box::new(CommandResult::Error(XmppError::item_not_found(
-                Some(format!("group-DM member does not exist: {member_jid}")),
-            ))));
-        }
+        // Each member must resolve to a `users.id` (the SpiceDB subject);
+        // unprovisioned or native-only JIDs are rejected with item-not-found,
+        // matching what persistence requires.
+        resolve_group_dm_member_user_id(state, member_jid)
+            .await
+            .map_err(|error| Box::new(CommandResult::Error(error)))?;
     }
     Ok(())
 }

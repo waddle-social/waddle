@@ -171,12 +171,13 @@ pub(super) async fn handle_sasl_scram_client_first(
 ///
 /// Verifies the client proof against stored keys and returns `<success>` or
 /// `<failure>`.
-pub(super) fn handle_sasl_scram_response(
+pub(super) async fn handle_sasl_scram_response(
     b64_data: &str,
     domain: &str,
     mut scram: ScramPendingState,
     authenticated_session: &mut Option<Session>,
     phase: &mut ConnectionPhase,
+    state: &WebSocketState,
 ) -> Vec<String> {
     let decoded = match BASE64_STANDARD.decode(b64_data.trim()) {
         Ok(data) => data,
@@ -229,7 +230,33 @@ pub(super) fn handle_sasl_scram_response(
         "SASL SCRAM-SHA-256 authentication successful",
     );
 
-    let session = Session::new(&bare_jid.to_string(), scram.username(), scram.username());
+    // Use the account's canonical `users.id` as the session subject so native
+    // (SCRAM) logins key into the permission model identically to OIDC logins.
+    // Resolve against the bare-JID node (nodeprep-normalized) — the same key the
+    // membership write path uses (`member_jid.node()`) — so the session id and
+    // the persisted member id are provably equal for the same account. Fall back
+    // to the bare JID only for native-only accounts with no `users` row (which
+    // cannot hold any SpiceDB affiliation anyway).
+    let localpart = bare_jid
+        .node()
+        .map(|node| node.to_string())
+        .unwrap_or_else(|| scram.username().to_string());
+    let user_id =
+        match crate::auth::resolve_user_id(state.deps.app_state.db_pool.global_actor(), &localpart)
+            .await
+        {
+            Ok(Some(id)) => id,
+            // Native-only account with no `users` row: no permission identity.
+            Ok(None) => bare_jid.to_string(),
+            // A lookup failure must not silently vend a JID for an account that
+            // may well have a `users` row — that would hand an OIDC user the
+            // wrong session subject on a transient DB hiccup. Fail the auth.
+            Err(error) => {
+                warn!(error = %error, jid = %bare_jid, "SCRAM: failed to resolve users.id");
+                return vec![sasl_failure_xml("temporary-auth-failure")];
+            }
+        };
+    let session = Session::new(&user_id, scram.username(), &localpart);
 
     *authenticated_session = Some(session);
     *phase = ConnectionPhase::authenticated(&full_jid);

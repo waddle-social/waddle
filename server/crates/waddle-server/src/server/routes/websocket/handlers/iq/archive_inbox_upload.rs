@@ -1,5 +1,7 @@
 use super::*;
 
+use super::group_dm_membership::requester_has_group_dm_membership_tuple;
+
 pub(super) async fn handle_archive_inbox_upload_iq(
     iq: &xmpp_parsers::iq::Iq,
     id: &str,
@@ -369,23 +371,11 @@ async fn group_dm_archive_visibility(
         return GroupDmArchiveVisibility::NotGroupDm;
     }
 
-    let allowed = state
-        .deps
-        .app_state
-        .permission_actor
-        .ask(CheckPermission {
-            subject: Subject::user(sender_bare.to_string()),
-            permission: Permission::Member,
-            object: Object::new(ObjectType::Channel, &channel_id),
-        })
-        .await
-        .map(|response| response.allowed);
-    match allowed {
-        Ok(true) => {}
-        Ok(false) => return GroupDmArchiveVisibility::Denied,
-        Err(error) => {
+    match requester_has_group_dm_membership_tuple(state, sender_bare, &channel_id).await {
+        Some(true) => {}
+        Some(false) => return GroupDmArchiveVisibility::Denied,
+        None => {
             warn!(
-                error = %error,
                 room = %room_jid,
                 requester = %sender_bare,
                 "Failed to authorize group-DM MAM query"
