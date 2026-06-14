@@ -124,9 +124,13 @@ pub(super) async fn handle_last_activity_iq(
                 service_unavailable_iq_error("Service unavailable at this address."),
             )];
         };
-        let native_user_store =
-            NativeUserStore::new(state.deps.app_state.db_pool.global_actor().clone());
-        match native_user_store.user_exists(node.as_str(), domain).await {
+        match local_account_exists(
+            state.deps.app_state.db_pool.global_actor(),
+            node.as_str(),
+            domain,
+        )
+        .await
+        {
             Ok(false) => {
                 return vec![build_iq_error_xml_typed(
                     iq.id(),

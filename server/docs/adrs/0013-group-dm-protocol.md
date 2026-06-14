@@ -37,6 +37,16 @@ discovery, exposes the classification feature, and publishes XEP-0402
 `urn:xmpp:bookmarks:1` conference bookmarks with `autojoin='true'` for each
 initial member.
 
+Member eligibility is a Waddle policy layer, not an XEP-0045 requirement (MUC
+itself permits granting `member` affiliation to any JID). A group-DM member must
+be a real **local account on the creator's domain**. Locality is enforced first
+(`bad-request` for a foreign or bare-domain JID), then existence. A JID "exists"
+when it resolves to a registered local account through **either** registration
+path: the OIDC `users` table or the XEP-0077/SCRAM `native_users` table. Both are
+first-class XMPP accounts, so the existence check unions them; an unresolved
+member is rejected with `item-not-found`. (Federated/remote members are out of
+scope while members are constrained to the local domain.)
+
 Group-DM membership expansion uses XEP-0045 mediated invites. The server grants
 the invitee member affiliation, publishes their XEP-0402 autojoin bookmark, and
 delivers a trusted mediated invite from the room JID. Waddle-specific invite
