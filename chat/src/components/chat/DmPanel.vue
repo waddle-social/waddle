@@ -7,6 +7,12 @@ import { formatTimelineStamp } from "@/channels/timeline";
 import type { MessageThreadEntry } from "@/channels/threads";
 import { $callState } from "@/lib/calls/call-store";
 import {
+  $mucCallMedia,
+  $mucCallParticipants,
+  mucCallMediaForRoom,
+  normalizeMucCallRoomJid,
+} from "@/lib/calls/muc-call-presence";
+import {
   canEndRecoveredDmCallActivity,
   dmCallActivityAction,
   dmCallActivitySortPriority,
@@ -51,6 +57,8 @@ const emit = defineEmits<{
 }>();
 
 const dmCallActivities = useStore($dmCallActivities);
+const mucCallParticipants = useStore($mucCallParticipants);
+const mucCallMedia = useStore($mucCallMedia);
 const callState = useStore($callState);
 const activePeer = computed(() => normalizedPeerJid(props.activePeerJid ?? ""));
 const currentActiveDmPeer = computed(() => {
@@ -425,6 +433,33 @@ function isActiveConversation(peerJid: string): boolean {
   return !!peer && activePeer.value === peer;
 }
 
+function groupCallParticipantCount(roomJid: string): number {
+  const normalized = normalizeMucCallRoomJid(roomJid);
+  return normalized ? mucCallParticipants.value[normalized]?.length ?? 0 : 0;
+}
+
+function groupCallMediaLabel(roomJid: string): string {
+  return mucCallMediaForRoom(roomJid, mucCallMedia.value).video ? "Video call" : "Voice call";
+}
+
+function hasGroupCallActivity(roomJid: string): boolean {
+  return groupCallParticipantCount(roomJid) > 0;
+}
+
+function groupCallActivityLabel(roomJid: string): string {
+  const count = groupCallParticipantCount(roomJid);
+  if (count <= 0) return "";
+  const noun = count === 1 ? "person" : "people";
+  return `${groupCallMediaLabel(roomJid)} live, ${count} ${noun}`;
+}
+
+function groupDmRowLabel(group: GroupDmSummary): string {
+  const parts = [`Open group message ${group.name}`];
+  const call = groupCallActivityLabel(group.roomJid);
+  if (call) parts.push(call);
+  return parts.join(", ");
+}
+
 function conversationRowLabel(conversation: DmConversation): string {
   const parts = [
     conversation.peerUsername,
@@ -640,7 +675,7 @@ function threadEntryLabel(entry: MessageThreadEntry): string {
               : 'text-sidebar-muted hover:bg-sidebar-accent/50 hover:text-sidebar-foreground'"
             type="button"
             :aria-current="normalizedPeerJid(activeGroupDmRoomJid ?? '') === normalizedPeerJid(group.roomJid) ? 'page' : undefined"
-            :aria-label="`Open group message ${group.name}`"
+            :aria-label="groupDmRowLabel(group)"
             @click="emit('selectGroupDm', group.roomJid)"
           >
             <span class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-sidebar-accent text-sidebar-foreground">
@@ -648,9 +683,21 @@ function threadEntryLabel(entry: MessageThreadEntry): string {
             </span>
             <span class="min-w-0 flex-1">
               <span class="type-control block truncate text-sidebar-foreground">{{ group.name }}</span>
-              <span class="type-caption block truncate text-sidebar-muted">Group message</span>
+              <span class="type-caption block truncate text-sidebar-muted">
+                <template v-if="hasGroupCallActivity(group.roomJid)">{{ groupCallActivityLabel(group.roomJid) }}</template>
+                <template v-else>Group message</template>
+              </span>
             </span>
             <span class="flex shrink-0 items-center gap-1">
+              <span
+                v-if="hasGroupCallActivity(group.roomJid)"
+                class="type-meta inline-flex h-[18px] shrink-0 items-center gap-1 rounded-full border border-success/25 bg-success/10 px-1.5 text-success-foreground"
+                :title="groupCallMediaLabel(group.roomJid)"
+                :aria-label="groupCallMediaLabel(group.roomJid)"
+              >
+                <PhoneCall class="h-3 w-3" />
+                <span>{{ groupCallMediaLabel(group.roomJid) }}</span>
+              </span>
               <span
                 v-if="(group.mentionCount ?? 0) > 0"
                 class="chat-list-row--mention-badge type-count-badge inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full bg-destructive text-destructive-foreground"

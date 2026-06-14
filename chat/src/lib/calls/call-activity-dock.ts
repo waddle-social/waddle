@@ -1,4 +1,4 @@
-import type { ChannelSummary } from "@/lib/chat-types";
+import type { ChannelSummary, GroupDmSummary } from "@/lib/chat-types";
 import type { DmConversation } from "@/lib/xmpp/types";
 import { barePeerJid } from "@/lib/xmpp/jid";
 import type { CallMedia, CallState } from "./types";
@@ -29,6 +29,7 @@ export type CallActivityDockEntry =
       media: CallMedia;
       isKnownChannel: boolean;
       isActive: boolean;
+      isGroupDm?: boolean;
     }
   | {
       kind: "dm";
@@ -52,6 +53,8 @@ type CallActivityDockAction = "answer" | "open" | "join" | "return" | "reconnect
 type CallActivityDockSelection =
   | { kind: "channel"; channelId: string | null; roomJid: string }
   | { kind: "channel-join"; channelId: string | null; roomJid: string; media: CallMedia }
+  | { kind: "group-dm"; roomJid: string }
+  | { kind: "group-dm-join"; roomJid: string; media: CallMedia }
   | { kind: "dm-answer"; peerJid: string; remoteFullJid: string; sid: string; media: DmCallActivity["media"] }
   | { kind: "dm-open"; peerJid: string }
   | { kind: "dm-reconnect"; peerJid: string; media: DmCallActivity["media"] };
@@ -134,11 +137,24 @@ export function callActivityDockSelection(
 ): CallActivityDockSelection {
   if (entry.kind === "channel") {
     if (callActivityDockAction(entry, callState, selfFullJid) === "join") {
+      if (entry.isGroupDm === true) {
+        return {
+          kind: "group-dm-join",
+          roomJid: entry.roomJid,
+          media: entry.media,
+        };
+      }
       return {
         kind: "channel-join",
         channelId: entry.channelId,
         roomJid: entry.roomJid,
         media: entry.media,
+      };
+    }
+    if (entry.isGroupDm === true) {
+      return {
+        kind: "group-dm",
+        roomJid: entry.roomJid,
       };
     }
     return {
@@ -234,6 +250,7 @@ function entryTitleForSort(entry: CallActivityDockEntry): string {
 
 export function buildCallActivityDockEntries(options: {
   channels: ReadonlyArray<Pick<ChannelSummary, "id" | "name" | "jid">>;
+  groupDms?: ReadonlyArray<Pick<GroupDmSummary, "id" | "name" | "roomJid">>;
   conversations: ReadonlyArray<Pick<DmConversation, "peerJid" | "peerUsername">>;
   activeChannelId: string | null;
   activeChannelRoomJid?: string | null;
@@ -248,35 +265,56 @@ export function buildCallActivityDockEntries(options: {
 }): CallActivityDockEntry[] {
   const activeChannelRoomJid = normalizeMucCallRoomJid(options.activeChannelRoomJid ?? "");
   const participantLabelsByRoom = normalizedParticipantLabels(options.callParticipants ?? {});
-  const channelEntries = options.channels.flatMap((channel): CallActivityDockEntry[] => {
-    const participantCount = callParticipantCountForChannel(
-      channel,
-      options.callParticipantCounts,
-      options.activeChannelJids,
-      options.managedMucDomain,
-    );
-    if (participantCount <= 0) return [];
-    const roomJid = callRoomJidForChannel(
-      channel,
-      options.callParticipantCounts,
-      options.activeChannelJids,
-      options.managedMucDomain,
-    );
-    return [{
-      kind: "channel",
-      key: `channel:${channel.id}`,
-      channelId: channel.id,
-      roomJid,
-      title: channel.name,
-      participantCount,
-      participantLabels: participantLabelsByRoom.get(roomJid) ?? [],
-      media: mucCallMediaForRoom(roomJid, options.callMediaByRoom),
-      isKnownChannel: true,
-      isActive: options.sidebarMode === "channels" && (
-        options.activeChannelId === channel.id || activeChannelRoomJid === roomJid
+  const channelEntries = mucConversationEntries({
+    conversations: options.channels.map((channel) => ({
+      keyPrefix: "channel",
+      id: channel.id,
+      name: channel.name,
+      roomJid: callRoomJidForChannel(
+        channel,
+        options.callParticipantCounts,
+        options.activeChannelJids,
+        options.managedMucDomain,
       ),
-    }];
+      participantCount: callParticipantCountForChannel(
+        channel,
+        options.callParticipantCounts,
+        options.activeChannelJids,
+        options.managedMucDomain,
+      ),
+      activeSidebarMode: "channels" as const,
+    })),
+    activeChannelId: options.activeChannelId,
+    activeChannelRoomJid,
+    currentSidebarMode: options.sidebarMode,
+    participantLabelsByRoom,
+    callMediaByRoom: options.callMediaByRoom,
   });
+
+  const groupDmEntries = mucConversationEntries({
+    conversations: (options.groupDms ?? []).map((groupDm) => {
+      const roomJid = normalizeMucCallRoomJid(groupDm.roomJid);
+      return {
+        keyPrefix: "group-dm",
+        id: groupDm.id,
+        name: groupDm.name,
+        roomJid,
+        participantCount: roomJid ? options.callParticipantCounts[roomJid] ?? 0 : 0,
+        activeSidebarMode: "dms" as const,
+        isGroupDm: true,
+      };
+    }),
+    activeChannelId: options.activeChannelId,
+    activeChannelRoomJid,
+    currentSidebarMode: options.sidebarMode,
+    participantLabelsByRoom,
+    callMediaByRoom: options.callMediaByRoom,
+  });
+  const knownGroupDmRoomJids = new Set(
+    (options.groupDms ?? [])
+      .map((groupDm) => normalizeMucCallRoomJid(groupDm.roomJid))
+      .filter(Boolean),
+  );
 
   const fallbackChannelEntries = refreshedMucCallRooms({
     channels: options.channels,
@@ -285,6 +323,7 @@ export function buildCallActivityDockEntries(options: {
     callParticipantCounts: options.callParticipantCounts,
     callMediaByRoom: options.callMediaByRoom,
   })
+    .filter((room) => !knownGroupDmRoomJids.has(room.roomJid))
     .map((room): CallActivityDockEntry => ({
       kind: "channel",
       key: `channel:${room.roomJid}`,
@@ -296,6 +335,7 @@ export function buildCallActivityDockEntries(options: {
       media: room.media,
       isKnownChannel: false,
       isActive: options.sidebarMode === "channels" && activeChannelRoomJid === room.roomJid,
+      ...(isGroupDmFallbackRoomJid(room.roomJid) ? { isGroupDm: true } : {}),
     }));
 
   const conversationNames = new Map(
@@ -334,7 +374,44 @@ export function buildCallActivityDockEntries(options: {
       return left.title.localeCompare(right.title);
     });
 
-  return [...channelEntries, ...fallbackChannelEntries, ...dmEntries];
+  return [...channelEntries, ...groupDmEntries, ...fallbackChannelEntries, ...dmEntries];
+}
+
+function mucConversationEntries(options: {
+  conversations: ReadonlyArray<{
+    keyPrefix: string;
+    id: string;
+    name: string;
+    roomJid: string;
+    participantCount: number;
+    activeSidebarMode: SidebarMode;
+    isGroupDm?: boolean;
+  }>;
+  activeChannelId: string | null;
+  activeChannelRoomJid: string;
+  currentSidebarMode: SidebarMode;
+  participantLabelsByRoom: Map<string, string[]>;
+  callMediaByRoom?: Record<string, CallMedia>;
+}): CallActivityDockEntry[] {
+  return options.conversations.flatMap((conversation): CallActivityDockEntry[] => {
+    if (conversation.participantCount <= 0 || !conversation.roomJid) return [];
+    return [{
+      kind: "channel",
+      key: `${conversation.keyPrefix}:${conversation.id}`,
+      channelId: conversation.id,
+      roomJid: conversation.roomJid,
+      title: conversation.name,
+      participantCount: conversation.participantCount,
+      participantLabels: options.participantLabelsByRoom.get(conversation.roomJid) ?? [],
+      media: mucCallMediaForRoom(conversation.roomJid, options.callMediaByRoom),
+      isKnownChannel: true,
+      isActive: options.currentSidebarMode === conversation.activeSidebarMode && (
+        options.activeChannelId === conversation.id ||
+        options.activeChannelRoomJid === conversation.roomJid
+      ),
+      ...(conversation.isGroupDm === true ? { isGroupDm: true } : {}),
+    }];
+  });
 }
 
 function normalizedParticipantLabels(
@@ -353,4 +430,12 @@ function normalizedParticipantLabels(
     ]);
   }
   return labels;
+}
+
+function isGroupDmFallbackRoomJid(roomJid: string): boolean {
+  const localpart = normalizeMucCallRoomJid(roomJid).split("@")[0] ?? "";
+  // Server-created group-DM rooms currently use `group-dm-...` localparts.
+  // This fallback keeps pre-hydration calls on the DM route until bookmarks
+  // hydrate and the explicit group-DM summary can take over.
+  return localpart.startsWith("group-dm-");
 }

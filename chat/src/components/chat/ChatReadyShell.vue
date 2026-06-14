@@ -243,6 +243,7 @@ const homeDashboardProps = computed(() => buildHomeDashboardProps({
   mentionedRoomJids: messaging.mentionedChannelCounts.value,
   activeChannelJids: messaging.activeChannels.value,
   dmConversations: dmConversations.conversations.value,
+  groupDms: groupDmConversations?.value ?? [],
   callParticipantCounts: callParticipantCounts.value,
   callParticipants: retainedMucCallParticipantsStore.value,
   callMediaByRoom: retainedMucCallMediaStore.value,
@@ -462,6 +463,30 @@ function joinChannelCallFromActivity(channelId: string | null, roomJid: string, 
   });
 }
 
+function joinGroupDmCallFromActivity(roomJid: string, media: CallMedia): void {
+  ui.activeCommunitySurface.value = null;
+  void (async () => {
+    const selected = await selectGroupDm(roomJid);
+    if (selected === false) return;
+    await startMucCallAction({
+      roomJid,
+      media,
+      isBusy: isGroupCallBusy,
+      setStarting: (next) => {
+        activityGroupCallStarting.value = next;
+      },
+      getSender: getMucCallSender,
+      getSelfNick: () => connectionStore.session?.username ?? undefined,
+      getSelfFullJid,
+      getExpectedMixerJid,
+      ensureJoined: async () => {
+        await getClientJoiner()?.(roomJid);
+      },
+      tryResumeFirst: true,
+    });
+  })();
+}
+
 function leaveRetainedChannelCall(roomJid: string): void {
   void leaveRetainedMucCallAction({
     roomJid,
@@ -552,6 +577,7 @@ onUnmounted(() => {
     <CallActivityDock
       class="call-activity-dock--mobile"
       :channels="waddles.sortedChannels.value"
+      :group-dms="groupDmConversations"
       :conversations="dmConversations.conversations.value"
       :active-channel-id="waddles.activeChannelId.value"
       :active-channel-room-jid="activeChannelRoomJid"
@@ -564,7 +590,9 @@ onUnmounted(() => {
       :self-full-jid="selfFullJid"
       hide-current-call
       @select-channel="onSelectChannelFromSidebar"
+      @select-group-dm="selectGroupDm"
       @join-channel-call="joinChannelCallFromActivity"
+      @join-group-dm-call="joinGroupDmCallFromActivity"
       @leave-channel-call="leaveRetainedChannelCall"
       @answer-dm="answerDmFromActivity"
       @select-dm="selectDm"
@@ -673,6 +701,7 @@ onUnmounted(() => {
         />
         <CallActivityDock
           :channels="waddles.sortedChannels.value"
+          :group-dms="groupDmConversations"
           :conversations="dmConversations.conversations.value"
           :active-channel-id="waddles.activeChannelId.value"
           :active-channel-room-jid="activeChannelRoomJid"
@@ -686,7 +715,9 @@ onUnmounted(() => {
           :show-dm-calls="ui.sidebarMode.value !== 'dms'"
           hide-current-call
           @select-channel="onSelectChannelFromSidebar"
+          @select-group-dm="selectGroupDm"
           @join-channel-call="joinChannelCallFromActivity"
+          @join-group-dm-call="joinGroupDmCallFromActivity"
           @leave-channel-call="leaveRetainedChannelCall"
           @answer-dm="answerDmFromActivity"
           @select-dm="selectDm"
@@ -701,7 +732,9 @@ onUnmounted(() => {
         v-bind="homeDashboardProps"
         @select-channel="(id: string, roomJid?: string) => selectChannel(id, roomJid ? { roomJid } : undefined)"
         @select-channel-room="selectChannelByRoomJid"
+        @select-group-dm="selectGroupDm"
         @join-channel-call="joinChannelCallFromActivity"
+        @join-group-dm-call="joinGroupDmCallFromActivity"
         @leave-channel-call="leaveRetainedChannelCall"
         @answer-dm="answerDmFromActivity"
         @select-contact="handleOpenDm"

@@ -81,7 +81,7 @@ function mucCallParticipantsForRoom(roomJid: string): string[] {
 }
 
 export function mucCallParticipantCounts(
-  participants: Record<string, string[]>,
+  participants: Record<string, readonly string[]>,
 ): Record<string, number> {
   const counts: Record<string, number> = {};
   for (const [roomJid, nicks] of Object.entries(participants)) {

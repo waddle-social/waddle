@@ -20,16 +20,21 @@ use xmpp_parsers::minidom::Element;
 
 const NS_MUC: &str = "http://jabber.org/protocol/muc";
 const NS_MUC_USER: &str = "http://jabber.org/protocol/muc#user";
+const NS_COMMANDS: &str = "http://jabber.org/protocol/commands";
+const NS_DATA: &str = "jabber:x:data";
 const NS_MUJI: &str = "urn:xmpp:jingle:muji:0";
 const NS_CALL_THREAD: &str = "urn:waddle:call-thread:0";
 const NS_FASTEN: &str = "urn:xmpp:fasten:0";
 const NS_SID: &str = "urn:xmpp:sid:0";
+const NODE_GROUP_DM_CREATE: &str = "urn:waddle:group-dm:create:0";
 
 const DOMAIN: &str = "localhost";
 const ALICE: &str = "alice";
 const BOB: &str = "bob";
+const CAROL: &str = "carol";
 const ALICE_PW: &str = "alice-pw-12345";
 const BOB_PW: &str = "bob-pw-12345";
+const CAROL_PW: &str = "carol-pw-12345";
 const LIVEKIT_WEBHOOK_SECRET: &str = "test-webhook-secret-with-at-least-32-bytes";
 
 // The harness rejects api-secrets shorter than 32 bytes; this one is
@@ -371,6 +376,23 @@ async fn muji_join_room(client: &mut WsXmppClient, room: &str, nick: &str) {
         .expect("join responses including subject ack");
 }
 
+async fn try_join_room(client: &mut WsXmppClient, room: &str, nick: &str) -> String {
+    client
+        .send(&format!(
+            r#"<presence xmlns="jabber:client" to="{room}/{nick}"><x xmlns="{NS_MUC}"/></presence>"#
+        ))
+        .await
+        .expect("send join");
+    client
+        .recv_matching(|frame| {
+            frame.contains("<presence")
+                && (frame.contains(&format!("from='{room}/{nick}'"))
+                    || frame.contains(&format!("from=\"{room}/{nick}\"")))
+        })
+        .await
+        .expect("join response")
+}
+
 fn parse_presence(frame: &str) -> Element {
     frame
         .parse::<Element>()
@@ -433,6 +455,135 @@ fn element_to_xml(element: Element) -> String {
     let mut bytes = Vec::new();
     element.write_to(&mut bytes).expect("serialize XML");
     String::from_utf8(bytes).expect("XML serialization is UTF-8")
+}
+
+fn frame_has_iq_id(frame: &str, id: &str) -> bool {
+    frame.contains(&format!(r#"id='{id}'"#)) || frame.contains(&format!(r#"id="{id}""#))
+}
+
+fn text_field(var: &str, value: &str) -> Element {
+    Element::builder("field", NS_DATA)
+        .attr(minidom::rxml::xml_ncname!("var").to_owned(), var)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "text-single")
+        .append(Element::builder("value", NS_DATA).append(value).build())
+        .build()
+}
+
+fn hidden_field(var: &str, value: &str) -> Element {
+    Element::builder("field", NS_DATA)
+        .attr(minidom::rxml::xml_ncname!("var").to_owned(), var)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "hidden")
+        .append(Element::builder("value", NS_DATA).append(value).build())
+        .build()
+}
+
+fn list_multi_field(var: &str, values: &[&str]) -> Element {
+    let mut field = Element::builder("field", NS_DATA)
+        .attr(minidom::rxml::xml_ncname!("var").to_owned(), var)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "list-multi");
+    for value in values {
+        field = field.append(Element::builder("value", NS_DATA).append(*value).build());
+    }
+    field.build()
+}
+
+fn extract_field(frame: &str, var: &str) -> Option<String> {
+    let marker_dq = format!(r#"var="{var}""#);
+    let marker_sq = format!(r#"var='{var}'"#);
+    let idx = frame.find(&marker_dq).or_else(|| frame.find(&marker_sq))?;
+    let after = &frame[idx..];
+    let open = after.find("<value>")?;
+    let inner = &after[open + "<value>".len()..];
+    let close = inner.find("</value>")?;
+    Some(inner[..close].to_string())
+}
+
+fn is_result(frame: &str) -> bool {
+    frame.contains(r#"type='result'"#) || frame.contains(r#"type="result""#)
+}
+
+fn is_error(frame: &str) -> bool {
+    frame.contains(r#"type='error'"#) || frame.contains(r#"type="error""#)
+}
+
+async fn send_command(client: &mut WsXmppClient, node: &str, id: &str, form: Element) -> String {
+    let command = Element::builder("command", NS_COMMANDS)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+        .attr(minidom::rxml::xml_ncname!("action").to_owned(), "execute")
+        .append(form)
+        .build();
+    let iq = Element::builder("iq", "jabber:client")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), DOMAIN)
+        .append(command)
+        .build();
+    client.send(&element_to_xml(iq)).await.expect("send iq");
+    client
+        .recv_matching(|frame| frame.contains("<iq") && frame_has_iq_id(frame, id))
+        .await
+        .expect("iq response")
+}
+
+async fn create_group_dm(
+    client: &mut WsXmppClient,
+    id: &str,
+    name: &str,
+    members: &[&str],
+) -> String {
+    let resp = send_command(
+        client,
+        NODE_GROUP_DM_CREATE,
+        id,
+        Element::builder("x", NS_DATA)
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
+            .append(hidden_field("FORM_TYPE", NODE_GROUP_DM_CREATE))
+            .append(text_field("name", name))
+            .append(list_multi_field("member_jids", members))
+            .build(),
+    )
+    .await;
+    assert!(
+        is_result(&resp),
+        "expected group-DM create result, got: {resp}"
+    );
+    extract_field(&resp, "room_jid").expect("room_jid in create response")
+}
+
+async fn recv_muji_leave_reflection(client: &mut WsXmppClient, room: &str, nick: &str) -> Element {
+    let from_attr_single = format!("from='{room}/{nick}'");
+    let from_attr_double = format!("from=\"{room}/{nick}\"");
+    let frame = client
+        .recv_matching(|frame| {
+            frame.contains("<presence")
+                && (frame.contains(&from_attr_single) || frame.contains(&from_attr_double))
+                && !frame.contains("<muji")
+        })
+        .await
+        .unwrap_or_else(|err| panic!("{nick} leave reflection must arrive: {err}"));
+    let presence = parse_presence(&frame);
+    assert!(
+        muji_child(&presence).is_none(),
+        "XEP-0272 §Leaving wire shape: muji child must be stripped: {frame}"
+    );
+    presence
+}
+
+async fn assert_no_call_thread_ended(client: &mut WsXmppClient, context: &str) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(750);
+    while let Some(remaining) = deadline.checked_duration_since(tokio::time::Instant::now()) {
+        let frame = client.recv_timeout(remaining).await;
+        match frame {
+            Ok(frame) => {
+                assert!(
+                    !(frame.contains("<call-thread-ended") && frame.contains("<apply-to")),
+                    "{context}: call-thread-ended arrived too early: {frame}"
+                );
+            }
+            Err(err) if err.contains("Timeout waiting for message") => break,
+            Err(err) => panic!("{context}: failed while checking for premature call end: {err}"),
+        }
+    }
 }
 
 fn livekit_webhook_auth(body: &[u8]) -> String {
@@ -929,6 +1080,128 @@ async fn muji_session_initiate_from_non_occupant_is_forbidden() {
         .recv_matching(|frame| frame.contains("<call-thread-ended") && frame.contains("<apply-to"))
         .await
         .expect("observer receives ended fastening when the only accepted participant leaves");
+}
+
+#[tokio::test]
+async fn group_dm_muji_call_lifecycle_uses_existing_muc_gate() {
+    let server = TestServer::start_with_extra_envs(
+        &[(BOB, BOB_PW), (CAROL, CAROL_PW)],
+        &livekit_test_envs(),
+    );
+    let admin_pass = server.fixed_account_password().to_string();
+    let mut admin_web = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "admin",
+        &admin_pass,
+        "group-dm-call-web",
+    )
+    .await
+    .expect("admin connects");
+    let mut bob =
+        WsXmppClient::connect_and_auth(&server.ws_url(), DOMAIN, BOB, BOB_PW, "group-dm-call-bob")
+            .await
+            .expect("bob connects");
+    let mut carol = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        CAROL,
+        CAROL_PW,
+        "group-dm-call-carol",
+    )
+    .await
+    .expect("carol connects");
+
+    let room = create_group_dm(
+        &mut admin_web,
+        "group-dm-call-create",
+        "Launch crew",
+        &["admin@localhost", "bob@localhost"],
+    )
+    .await;
+    muji_join_room(&mut admin_web, &room, "admin").await;
+    muji_join_room(&mut bob, &room, "bob").await;
+
+    let active = Element::builder("presence", "jabber:client")
+        .attr(
+            minidom::rxml::xml_ncname!("to").to_owned(),
+            format!("{room}/admin"),
+        )
+        .append(Element::builder("x", NS_MUC).build())
+        .append(
+            Element::builder("muji", NS_MUJI)
+                .append(
+                    Element::builder("content", NS_MUJI)
+                        .attr(
+                            minidom::rxml::xml_ncname!("creator").to_owned(),
+                            "initiator",
+                        )
+                        .attr(minidom::rxml::xml_ncname!("name").to_owned(), "audio")
+                        .append(
+                            Element::builder("description", "urn:xmpp:jingle:apps:rtp:1")
+                                .attr(minidom::rxml::xml_ncname!("media").to_owned(), "audio")
+                                .build(),
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .build();
+    admin_web
+        .send(&element_to_xml(active))
+        .await
+        .expect("admin sends active group-DM Muji");
+
+    let bob_frames = recv_until_muji_and_anchor(&mut bob).await;
+    assert!(
+        bob_frames.iter().any(|frame| {
+            frame.contains("<presence")
+                && (frame.contains("<muji ") || frame.contains("<muji>"))
+                && frame.contains(&format!("{room}/admin"))
+        }),
+        "group-DM member must see active-call Muji presence: {bob_frames:?}"
+    );
+    assert!(
+        bob_frames
+            .iter()
+            .any(|frame| frame.contains("<call-thread") && frame.contains(NS_CALL_THREAD)),
+        "group-DM member must receive the call-thread anchor: {bob_frames:?}"
+    );
+
+    let carol_join = try_join_room(&mut carol, &room, "carol").await;
+    assert!(
+        is_error(&carol_join) && carol_join.contains("registration-required"),
+        "non-member must not be able to enter members-only group-DM room: {carol_join}"
+    );
+    send_muji_session_initiate_expect_forbidden(&mut carol, &room, "carol-forbidden").await;
+    send_muji_session_initiate(&mut admin_web, &room, "admin-group-dm-allowed").await;
+    send_muji_session_initiate(&mut bob, &room, "bob-group-dm-allowed").await;
+
+    let admin_full_jid = admin_web.full_jid.clone().expect("admin full jid");
+    post_participant_left_webhook(&server, &room, &admin_full_jid).await;
+    recv_muji_leave_reflection(&mut bob, &room, "admin").await;
+    assert_no_call_thread_ended(
+        &mut bob,
+        "first group-DM participant left while bob remained active",
+    )
+    .await;
+
+    send_muji_session_initiate(&mut admin_web, &room, "admin-group-dm-rejoin").await;
+
+    let bob_full_jid = bob.full_jid.clone().expect("bob full jid");
+    post_participant_left_webhook(&server, &room, &bob_full_jid).await;
+    recv_muji_leave_reflection(&mut admin_web, &room, "bob").await;
+    assert_no_call_thread_ended(
+        &mut admin_web,
+        "bob left while rejoined admin remained active",
+    )
+    .await;
+
+    post_participant_left_webhook(&server, &room, &admin_full_jid).await;
+    admin_web
+        .recv_matching(|frame| frame.contains("<call-thread-ended") && frame.contains("<apply-to"))
+        .await
+        .expect("group-DM call ends cleanly when the last participant leaves");
 }
 
 #[tokio::test]

@@ -2334,11 +2334,12 @@ export function useChatAppController(giphyApiKey: string) {
     if (!channelId) {
       ui.actionError.value = "Group message is not available yet.";
       navigate({ id: "dmList" }, { replace: true });
-      return;
+      return false;
     }
     dmConversations.closeDm();
     await selectChannel(channelId, { roomJid: normalizedRoomJid, surface: "dms" });
     if (options.updateUrl !== false) updateUrl();
+    return true;
   }
 
   async function selectExtensionRoute(channelId: string, route: DiscoveredExtensionRoute) {

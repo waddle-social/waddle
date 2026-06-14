@@ -21,7 +21,7 @@ import {
 } from "@/lib/calls/call-activity-dock";
 import { readRoomHasActiveCall } from "@/lib/calls/use-active-muc-call";
 import type { CallMedia } from "@/lib/calls/types";
-import type { ChannelSummary } from "@/lib/chat-types";
+import type { ChannelSummary, GroupDmSummary } from "@/lib/chat-types";
 import type { DmConversation } from "@/lib/xmpp-client";
 import { barePeerJid } from "@/lib/xmpp/jid";
 
@@ -29,6 +29,7 @@ defineOptions({ inheritAttrs: false });
 
 const props = withDefaults(defineProps<{
   channels: ChannelSummary[];
+  groupDms?: GroupDmSummary[];
   conversations: DmConversation[];
   activeChannelId: string | null;
   activeChannelRoomJid?: string | null;
@@ -44,13 +45,16 @@ const props = withDefaults(defineProps<{
 }>(), {
   showDmCalls: true,
   hideCurrentCall: false,
+  groupDms: () => [],
 });
 
 const emit = defineEmits<{
   answerDm: [peerJid: string, remoteFullJid: string, sid: string, media: CallMedia];
   selectChannel: [channelId: string | null, roomJid: string];
+  selectGroupDm: [roomJid: string];
   leaveChannelCall: [roomJid: string];
   joinChannelCall: [channelId: string | null, roomJid: string, media: CallMedia];
+  joinGroupDmCall: [roomJid: string, media: CallMedia];
   selectDm: [peerJid: string];
   reconnectDm: [peerJid: string, media: CallMedia];
   endDm: [peerJid: string, sid?: string];
@@ -69,6 +73,7 @@ const entries = computed(() =>
   sortCallActivityDockEntries(
     buildCallActivityDockEntries({
       channels: props.channels,
+      groupDms: props.groupDms,
       conversations: props.conversations,
       activeChannelId: props.activeChannelId,
       activeChannelRoomJid: props.activeChannelRoomJid ?? null,
@@ -252,8 +257,14 @@ function selectEntry(entry: CallActivityDockEntry): void {
     case "channel-join":
       emit("joinChannelCall", selection.channelId, selection.roomJid, selection.media);
       return;
+    case "group-dm-join":
+      emit("joinGroupDmCall", selection.roomJid, selection.media);
+      return;
     case "channel":
       emit("selectChannel", selection.channelId, selection.roomJid);
+      return;
+    case "group-dm":
+      emit("selectGroupDm", selection.roomJid);
       return;
     case "dm-reconnect":
       emit("reconnectDm", selection.peerJid, selection.media);
