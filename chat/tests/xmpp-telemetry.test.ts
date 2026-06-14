@@ -10,6 +10,7 @@ import {
   __setFaroForTesting,
   initTelemetry,
   markSensitiveUrlForTelemetry,
+  reportCallAudioProcessing,
   reportCatchup,
   reportError,
   reportMessageAcked,
@@ -127,6 +128,43 @@ afterEach(() => {
   } else {
     (globalThis as typeof globalThis & { window: Window & typeof globalThis }).window = originalWindow;
   }
+});
+
+describe("reportCallAudioProcessing", () => {
+  test("is a no-op when Faro is not initialized", () => {
+    expect(() =>
+      reportCallAudioProcessing({
+        kind: "active",
+        noiseSuppression: "on",
+        echoCancellation: "off",
+        autoGainControl: "unknown",
+      }),
+    ).not.toThrow();
+  });
+
+  test("pushes a single mapped audio-processing event when initialized", () => {
+    const stub = createFaroStub();
+    __setFaroForTesting(stub as never);
+
+    reportCallAudioProcessing({
+      kind: "active",
+      noiseSuppression: "on",
+      echoCancellation: "off",
+      autoGainControl: "unknown",
+    });
+
+    expect(stub.events).toEqual([
+      {
+        name: "chat.call.audio_processing",
+        attributes: {
+          kind: "active",
+          noise_suppression: "on",
+          echo_cancellation: "off",
+          auto_gain_control: "unknown",
+        },
+      },
+    ]);
+  });
 });
 
 describe("telemetry module no-op behaviour", () => {

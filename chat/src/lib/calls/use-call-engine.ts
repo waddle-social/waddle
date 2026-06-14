@@ -12,6 +12,8 @@ import { clearAllMediaIssues, recordMediaIssue } from "./call-media-issues";
 import { syncScreenShareEnabled } from "./screen-share-state";
 import { setCallAudioPlaybackBlocked } from "./call-audio-playback";
 import { resetMicAudioProcessing, setMicAudioProcessing } from "./mic-audio-processing-state";
+import { createCallAudioProcessingBeacon } from "./call-audio-processing-telemetry";
+import { reportCallAudioProcessing } from "../telemetry";
 import {
   resetCallConnectionQuality,
   setCallConnectionPhase,
@@ -35,6 +37,13 @@ const remoteTracks: Ref<RemoteMediaTrack[]> = ref([]);
  * so the renderer can use one tile component for both.
  */
 const localTracks: Ref<LocalMediaTrack[]> = ref([]);
+/**
+ * Fleet-measurement beacon for the verified mic audio-processing state
+ * (#913). De-dupes to at most one Faro event per call per distinct state;
+ * no-op when Faro isn't configured. Reset on disconnect so the next call
+ * re-arms from scratch.
+ */
+const micAudioProcessingBeacon = createCallAudioProcessingBeacon(reportCallAudioProcessing);
 
 export function useCallEngine(): {
   engine: CallEngine;
@@ -86,6 +95,10 @@ export function useCallEngine(): {
       // Verified (applied) browser-native audio processing of the local
       // mic — drives the read-only indicator in the call-settings dialog.
       setMicAudioProcessing(state);
+      // Beacon the same verified state for fleet measurement (#913). The
+      // beacon de-dupes, so the redundant double-emit on initial publish
+      // (LocalTrackPublished + ActiveDeviceChanged) collapses to one event.
+      micAudioProcessingBeacon.observe(state);
     });
     singletonEngine.on("connectionQualityChanged", (quality) => {
       // LiveKit re-scored the local participant's connection — drives the
@@ -118,6 +131,9 @@ export function useCallEngine(): {
       // The mic-processing readout belonged to the call that just
       // ended; reset so the next call's dialog starts from `no-mic`.
       resetMicAudioProcessing();
+      // Re-arm the fleet-measurement beacon so the next call emits its
+      // first verified state even if it matches the last call's.
+      micAudioProcessingBeacon.reset();
       // Drop the connection-quality chip so a stale `poor`/`reconnecting`
       // from the call that just ended can't bleed into the next call.
       resetCallConnectionQuality();
