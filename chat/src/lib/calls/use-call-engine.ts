@@ -11,16 +11,8 @@ import {
 import { clearAllMediaIssues, recordMediaIssue } from "./call-media-issues";
 import { syncScreenShareEnabled } from "./screen-share-state";
 import { setCallAudioPlaybackBlocked } from "./call-audio-playback";
-import {
-  $micAudioProcessing,
-  resetMicAudioProcessing,
-  setMicAudioProcessing,
-} from "./mic-audio-processing-state";
-import {
-  $micAiNoiseFilter,
-  resetMicAiNoiseFilter,
-  setMicAiNoiseFilter,
-} from "./mic-ai-noise-filter-state";
+import { resetMicAudioProcessing, setMicAudioProcessing } from "./mic-audio-processing-state";
+import { resetMicAiNoiseFilter, setMicAiNoiseFilter } from "./mic-ai-noise-filter-state";
 import {
   clearAiNoiseFilterError,
   setAiNoiseFilterError,
@@ -108,13 +100,6 @@ export function useCallEngine(): {
       // Verified (applied) browser-native audio processing of the local
       // mic — drives the read-only indicator in the call-settings dialog.
       setMicAudioProcessing(state);
-      // Beacon the combined verified state for fleet measurement (#913/#914).
-      // The beacon de-dupes, so the redundant double-emit on initial publish
-      // (LocalTrackPublished + ActiveDeviceChanged) collapses to one event.
-      micAudioProcessingBeacon.observe({
-        processing: state,
-        aiNoiseFilter: $micAiNoiseFilter.get(),
-      });
     });
     singletonEngine.on("aiNoiseFilterChanged", (state) => {
       // Verified AI noise filter (read from the attached processor) — drives
@@ -122,10 +107,12 @@ export function useCallEngine(): {
       // running clears any prior attach-failure notice.
       setMicAiNoiseFilter(state);
       if (state.kind === "active" && state.model !== null) clearAiNoiseFilterError();
-      micAudioProcessingBeacon.observe({
-        processing: $micAudioProcessing.get(),
-        aiNoiseFilter: state,
-      });
+    });
+    singletonEngine.on("verifiedMicProcessingChanged", (snapshot) => {
+      // One consistent {browser-trio, AI-model} snapshot per settled change —
+      // beacon it for fleet measurement (#913/#914). The beacon de-dupes, so
+      // redundant recomputes collapse to one event per distinct state.
+      micAudioProcessingBeacon.observe(snapshot);
     });
     singletonEngine.on("aiNoiseFilterError", ({ model }) => {
       // Non-blocking: the engine failed open to the raw mic. Surface which

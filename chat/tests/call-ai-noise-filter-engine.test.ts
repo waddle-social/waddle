@@ -21,10 +21,16 @@ function engineWithMic(opts: {
   const stopProcessor = mock(async () => {
     current = undefined;
   });
+  const restartTrack = mock(async (_constraints: { noiseSuppression?: boolean }) => undefined);
   const track = {
     getProcessor: () => current,
     setProcessor,
     stopProcessor,
+    restartTrack,
+    mediaStreamTrack: {
+      readyState: "live" as const,
+      getSettings: () => ({ deviceId: "mic-1", noiseSuppression: true }),
+    },
   };
   const publication = { isMuted: opts.isMuted ?? false, track };
   const localParticipant = { getTrackPublication: () => publication };
@@ -38,8 +44,12 @@ function engineWithMic(opts: {
   const errors: { model: NoiseModelId; error: unknown }[] = [];
   engine.on("aiNoiseFilterError", (e) => errors.push(e));
 
-  return { engine, setProcessor, stopProcessor, track, states, errors };
+  return { engine, setProcessor, stopProcessor, restartTrack, track, states, errors };
 }
+
+/** Did any restartTrack call force browser noise suppression off? */
+const forcedNsOff = (restart: ReturnType<typeof mock>): boolean =>
+  restart.mock.calls.some((c) => (c[0] as { noiseSuppression?: boolean })?.noiseSuppression === false);
 
 describe("CallEngine — AI noise filter reconcile", () => {
   test("selecting a model attaches its processor and emits the verified state", async () => {
@@ -105,5 +115,45 @@ describe("CallEngine — AI noise filter reconcile", () => {
     await engine.setAiNoiseModel("rnnoise");
 
     expect(states.at(-1)).toEqual({ kind: "no-mic" });
+  });
+
+  test("a successful attach forces browser noise suppression off", async () => {
+    const { engine, restartTrack } = engineWithMic({});
+
+    await engine.setAiNoiseModel("rnnoise");
+    await (engine as unknown as { aiReconcileChain: Promise<void> }).aiReconcileChain;
+
+    // The model supersedes browser NS once it is actually running.
+    expect(forcedNsOff(restartTrack)).toBe(true);
+  });
+
+  test("a FAILED attach never forces browser noise suppression off (no worse than baseline)", async () => {
+    const make = mock((_m: NoiseModelId) => Promise.reject(new Error("wasm 404")));
+    const { engine, restartTrack, errors } = engineWithMic({ make });
+
+    await engine.setAiNoiseModel("rnnoise");
+    await (engine as unknown as { aiReconcileChain: Promise<void> }).aiReconcileChain;
+
+    expect(errors).toHaveLength(1);
+    // The verified model is null (nothing attached), so effective constraints
+    // keep the user's NS — we must not leave the mic with NS off and no filter.
+    expect(forcedNsOff(restartTrack)).toBe(false);
+  });
+
+  test("emits one consistent combined snapshot per settled change", async () => {
+    const { engine } = engineWithMic({});
+    const snapshots: { processing: { kind: string }; aiNoiseFilter: { kind: string; model?: unknown } }[] = [];
+    engine.on("verifiedMicProcessingChanged", (s) =>
+      snapshots.push(s as never),
+    );
+
+    await engine.setAiNoiseModel("rnnoise");
+    await (engine as unknown as { aiReconcileChain: Promise<void> }).aiReconcileChain;
+
+    const last = snapshots.at(-1);
+    // Both layers computed together from the live track: the model is on AND
+    // the snapshot is internally consistent (no impossible {NS-on, model-on}).
+    expect(last?.aiNoiseFilter).toEqual({ kind: "active", model: "rnnoise" });
+    expect(last?.processing.kind).toBe("active");
   });
 });

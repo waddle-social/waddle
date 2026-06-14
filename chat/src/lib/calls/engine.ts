@@ -33,6 +33,7 @@ import type { NoiseModelId } from "./ai-noise-filter/model-id";
 import type { AudioNoiseProcessor } from "./ai-noise-filter/processor";
 import { makeNoiseProcessor } from "./ai-noise-filter/registry";
 import { runAiNoiseFilterReconcile, type ProcessorTarget } from "./ai-noise-filter/reconcile";
+import type { VerifiedCallAudioProcessing } from "./call-audio-processing-telemetry";
 
 /**
  * The local mic track surface the AI-noise reconciler drives — the subset of
@@ -89,18 +90,16 @@ export function callRoomOptionsForPrefs(prefs: {
   mic: string | null;
   cam: string | null;
   audioProcessing: AudioProcessingPrefs;
-  aiNoiseModel: NoiseModelId | null;
 }) {
   return {
     adaptiveStream: true,
     dynacast: true,
     webAudioMix: true,
-    // When a model is selected the browser NS is superseded from the very
-    // first capture, so the model isn't fed a pre-suppressed signal.
-    audioCaptureDefaults: audioCaptureDefaultsForPrefs({
-      mic: prefs.mic,
-      audioProcessing: effectiveAudioProcessing(prefs.audioProcessing, prefs.aiNoiseModel),
-    }),
+    // Initial capture uses the user's stored constraints. If a model is the
+    // persisted choice, the browser NS is flipped off reactively once the
+    // model actually attaches (see syncEffectiveCaptureConstraints) — so a
+    // model that fails to load never leaves capture with NS force-disabled.
+    audioCaptureDefaults: audioCaptureDefaultsForPrefs(prefs),
     videoCaptureDefaults: {
       deviceId: prefs.cam ?? undefined,
       resolution: CAMERA_CAPTURE_RESOLUTION,
@@ -247,6 +246,13 @@ export type CallEngineEvents = {
    */
   aiNoiseFilterError: (info: { model: NoiseModelId; error: unknown }) => void;
   /**
+   * Fires once per settled mic-processing change with BOTH layers (browser
+   * constraint trio + verified AI model) computed together, so the fleet
+   * beacon always sees a consistent snapshot. Telemetry-only; the UI reads
+   * `micAudioProcessingChanged` / `aiNoiseFilterChanged` for its two stores.
+   */
+  verifiedMicProcessingChanged: (snapshot: VerifiedCallAudioProcessing) => void;
+  /**
    * Fires when LiveKit re-scores the LOCAL participant's connection
    * quality (`excellent` → `lost`). Remote participants' quality is
    * intentionally not surfaced — the indicator is self-only. Push-based:
@@ -288,6 +294,7 @@ export class CallEngine {
     micAudioProcessingChanged: new Set(),
     aiNoiseFilterChanged: new Set(),
     aiNoiseFilterError: new Set(),
+    verifiedMicProcessingChanged: new Set(),
     connectionQualityChanged: new Set(),
     connectionPhaseChanged: new Set(),
   };
@@ -304,6 +311,12 @@ export class CallEngine {
   private aiNoiseFailedModels = new Set<NoiseModelId>();
   /** Serializes reconciles so bursty triggers can't race on setProcessor. */
   private aiReconcileChain: Promise<void> = Promise.resolve();
+  /**
+   * Whether the live capture currently has browser NS forced off for an
+   * attached model. Tracks the *applied* effective constraint so
+   * `syncEffectiveCaptureConstraints` only restarts capture when it flips.
+   */
+  private appliedModelActiveForCapture = false;
   /** Builds a processor for a model; injectable so tests avoid real wasm. */
   private readonly makeAiNoiseProcessor: (model: NoiseModelId) => Promise<AudioNoiseProcessor>;
 
@@ -356,9 +369,11 @@ export class CallEngine {
     }
     const prefs = $devicePrefs.get();
     // Seed the AI-filter desired model from prefs so it re-applies on this
-    // call's mic publish; start each call with a clean failure guard.
+    // call's mic publish; start each call with a clean failure guard and
+    // capture-NS state (initial capture uses the user's stored constraints).
     this.desiredAiNoiseModel = prefs.aiNoiseModel;
     this.aiNoiseFailedModels.clear();
+    this.appliedModelActiveForCapture = false;
     const room = new Room(callRoomOptionsForPrefs(prefs));
     room.on(RoomEvent.TrackSubscribed, this.handleTrackSubscribed);
     room.on(RoomEvent.TrackUnsubscribed, this.handleTrackUnsubscribed);
@@ -469,6 +484,7 @@ export class CallEngine {
    */
   async setAudioProcessing(prefs: AudioProcessingPrefs): Promise<void> {
     await this.restartMicCapture(prefs);
+    this.settleVerifiedMicProcessing();
   }
 
   private async restartMicCapture(prefs: AudioProcessingPrefs): Promise<void> {
@@ -483,7 +499,10 @@ export class CallEngine {
       track,
       audioCaptureDefaultsForPrefs({
         mic: settings?.deviceId ?? $devicePrefs.get().mic,
-        audioProcessing: effectiveAudioProcessing(prefs, this.desiredAiNoiseModel),
+        // Keyed on the VERIFIED attached model, not the desired one: if a
+        // selection failed to attach, the browser NS is left exactly as the
+        // user set it — never force-disabled with no filter to replace it.
+        audioProcessing: effectiveAudioProcessing(prefs, this.verifiedAiNoiseModel()),
       }),
     );
     this.emitMicAudioProcessing();
@@ -492,15 +511,35 @@ export class CallEngine {
   /**
    * Select the AI noise model (or null/off). Updates the desired model, gives
    * the new selection a fresh attempt (clears the per-track failure guard),
-   * re-applies the effective capture constraints (browser NS off while a model
-   * runs), then reconciles the attached processor. Persistence is the caller's
-   * job (the device-selection layer writes the pref).
+   * then reconciles the attached processor — which also brings the effective
+   * browser NS constraint in line with whatever actually attached. Persistence
+   * is the caller's job (the device-selection layer writes the pref).
    */
   async setAiNoiseModel(model: NoiseModelId | null): Promise<void> {
     this.desiredAiNoiseModel = model;
     this.aiNoiseFailedModels.clear();
-    await this.restartMicCapture($devicePrefs.get().audioProcessing);
     await this.ensureAiNoiseFilter();
+  }
+
+  /** The model actually attached to the live mic (verified), or null. */
+  private verifiedAiNoiseModel(): NoiseModelId | null {
+    const state = this.computeAiNoiseFilter();
+    return state.kind === "active" ? state.model : null;
+  }
+
+  /**
+   * Bring the browser-native capture constraints in line with the VERIFIED
+   * model: browser `noiseSuppression` is forced off iff a model is actually
+   * attached. Restarts capture only when that active-state flips, to avoid
+   * churn. This is what flips NS off after a model attaches (and restores it
+   * after one stops or fails), reactively, on every reconcile path — including
+   * a model changed while muted, which only takes effect once the mic is live.
+   */
+  private async syncEffectiveCaptureConstraints(): Promise<void> {
+    const modelActive = this.verifiedAiNoiseModel() !== null;
+    if (modelActive === this.appliedModelActiveForCapture) return;
+    this.appliedModelActiveForCapture = modelActive;
+    await this.restartMicCapture($devicePrefs.get().audioProcessing);
   }
 
   /**
@@ -532,6 +571,7 @@ export class CallEngine {
       // No live mic to attach to (none published, or muted) — surface the
       // honest `no-mic` state; the desired model re-applies on the next publish.
       this.emitAiNoiseFilter();
+      this.settleVerifiedMicProcessing();
       return;
     }
     const target: ProcessorTarget<AudioNoiseProcessor> = {
@@ -548,7 +588,11 @@ export class CallEngine {
     if (outcome.action === "failed") {
       this.emit("aiNoiseFilterError", { model: outcome.model, error: outcome.error });
     }
+    // Flip browser NS to match what actually attached, then surface the
+    // settled verified state for the UI and the fleet beacon.
+    await this.syncEffectiveCaptureConstraints();
     this.emitAiNoiseFilter();
+    this.settleVerifiedMicProcessing();
   }
 
   /** Verified AI-filter state read from the live processor's name. */
@@ -560,6 +604,20 @@ export class CallEngine {
 
   private emitAiNoiseFilter(): void {
     this.emit("aiNoiseFilterChanged", this.computeAiNoiseFilter());
+  }
+
+  /**
+   * Emit ONE combined verified snapshot (browser trio + AI model) for the
+   * fleet beacon. Computed fresh from the live track so the two layers are
+   * always consistent — unlike reading one store while the other lags, which
+   * would beacon impossible `{NS on, filter on}` combos and drop the true
+   * resting state. Drives only telemetry; the UI reads the two granular stores.
+   */
+  private settleVerifiedMicProcessing(): void {
+    this.emit("verifiedMicProcessingChanged", {
+      processing: this.computeMicAudioProcessing(),
+      aiNoiseFilter: this.computeAiNoiseFilter(),
+    });
   }
 
   /**
@@ -740,6 +798,7 @@ export class CallEngine {
       this.emitMicAudioProcessing();
       // The mic track (and its processor) is gone — recompute to `no-mic`.
       this.emitAiNoiseFilter();
+      this.settleVerifiedMicProcessing();
     }
     const track = publication.track;
     const kind = mapKind(publication.kind);
@@ -765,8 +824,9 @@ export class CallEngine {
   private handleDisconnected = (reason?: unknown) => {
     this.clearParticipantAudioVolumes();
     // LiveKit destroys the processor when the track stops; just reset our
-    // per-track failure guard so the next call starts clean.
+    // per-track failure guard + capture-NS state so the next call starts clean.
     this.aiNoiseFailedModels.clear();
+    this.appliedModelActiveForCapture = false;
     this.emit("disconnected", typeof reason === "string" ? reason : undefined);
   };
 

@@ -93,19 +93,30 @@ const aiNoiseModelOptions = orderedNoiseModelMetas().map((meta) => {
   };
 });
 const aiNoiseModel = computed(() => prefs.value.aiNoiseModel);
-const aiFilterActive = computed(() => aiNoiseModel.value !== null);
 const aiNoisePending = ref(false);
 const aiNoiseError = useStore($aiNoiseFilterError);
 const aiNoiseErrorLabel = computed(() =>
   aiNoiseError.value ? noiseModelMeta(aiNoiseError.value).name : null,
 );
 const aiFilterState = useStore($micAiNoiseFilter);
+/** The model VERIFIABLY running on the live mic (null if none/failed/no mic). */
+const verifiedAiModel = computed(() =>
+  aiFilterState.value.kind === "active" ? aiFilterState.value.model : null,
+);
+/**
+ * Drive the "browser NS is superseded" UI from the *verified* model, not the
+ * pref: a selected-but-failed model must not claim to be handling noise
+ * cancellation while browser NS is actually the only thing (and now stays) on.
+ */
+const aiFilterActive = computed(() => verifiedAiModel.value !== null);
 const aiFilterRow = computed(() =>
   aiFilterState.value.kind === "active" ? aiNoiseFilterRow(aiFilterState.value) : null,
 );
 
 async function selectAiNoiseModel(model: NoiseModelId | null): Promise<void> {
-  if (aiNoiseModel.value === model) return;
+  // Skip only when this model is both selected AND verifiably attached;
+  // otherwise allow a re-click to retry a selection that didn't take.
+  if (aiNoiseModel.value === model && verifiedAiModel.value === model) return;
   aiNoisePending.value = true;
   try {
     await applyAiNoiseModelSelection(model, engine);
