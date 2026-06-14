@@ -241,6 +241,7 @@ const homeDashboardProps = computed(() => buildHomeDashboardProps({
   mentionedRoomJids: messaging.mentionedChannelCounts.value,
   activeChannelJids: messaging.activeChannels.value,
   dmConversations: dmConversations.conversations.value,
+  groupDms: groupDmConversations?.value ?? [],
   callParticipantCounts: callParticipantCounts.value,
   callParticipants: retainedMucCallParticipantsStore.value,
   callMediaByRoom: retainedMucCallMediaStore.value,
@@ -463,7 +464,8 @@ function joinChannelCallFromActivity(channelId: string | null, roomJid: string, 
 function joinGroupDmCallFromActivity(roomJid: string, media: CallMedia): void {
   ui.activeCommunitySurface.value = null;
   void (async () => {
-    await selectGroupDm(roomJid);
+    const selected = await selectGroupDm(roomJid);
+    if (selected === false) return;
     await startMucCallAction({
       roomJid,
       media,

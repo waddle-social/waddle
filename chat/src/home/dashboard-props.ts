@@ -1,4 +1,4 @@
-import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
+import type { ChannelSummary, GroupDmSummary, SpaceSummary } from "@/lib/chat-types";
 import type { RosterContact } from "@/lib/xmpp/types";
 import type { DmConversation } from "@/lib/xmpp-client";
 import type { ChannelUnreadMap } from "@/home/activity";
@@ -13,6 +13,7 @@ export interface HomeDashboardProps {
   channelUnreadMap?: ChannelUnreadMap;
   activeChannelJids?: Set<string>;
   dmConversations?: DmConversation[];
+  groupDms?: GroupDmSummary[];
   callParticipantCounts?: Record<string, number>;
   callParticipants?: Record<string, string[]>;
   callMediaByRoom?: Record<string, CallMedia>;
@@ -39,6 +40,7 @@ export function buildHomeDashboardProps(sources: HomeDashboardSources): HomeDash
     ),
     activeChannelJids: sources.activeChannelJids,
     dmConversations: sources.dmConversations,
+    groupDms: sources.groupDms,
     callParticipantCounts: sources.callParticipantCounts,
     callParticipants: sources.callParticipants,
     callMediaByRoom: sources.callMediaByRoom,

@@ -376,6 +376,23 @@ async fn muji_join_room(client: &mut WsXmppClient, room: &str, nick: &str) {
         .expect("join responses including subject ack");
 }
 
+async fn try_join_room(client: &mut WsXmppClient, room: &str, nick: &str) -> String {
+    client
+        .send(&format!(
+            r#"<presence xmlns="jabber:client" to="{room}/{nick}"><x xmlns="{NS_MUC}"/></presence>"#
+        ))
+        .await
+        .expect("send join");
+    client
+        .recv_matching(|frame| {
+            frame.contains("<presence")
+                && (frame.contains(&format!("from='{room}/{nick}'"))
+                    || frame.contains(&format!("from=\"{room}/{nick}\"")))
+        })
+        .await
+        .expect("join response")
+}
+
 fn parse_presence(frame: &str) -> Element {
     frame
         .parse::<Element>()
@@ -483,6 +500,10 @@ fn extract_field(frame: &str, var: &str) -> Option<String> {
 
 fn is_result(frame: &str) -> bool {
     frame.contains(r#"type='result'"#) || frame.contains(r#"type="result""#)
+}
+
+fn is_error(frame: &str) -> bool {
+    frame.contains(r#"type='error'"#) || frame.contains(r#"type="error""#)
 }
 
 async fn send_command(client: &mut WsXmppClient, node: &str, id: &str, form: Element) -> String {
@@ -1147,6 +1168,11 @@ async fn group_dm_muji_call_lifecycle_uses_existing_muc_gate() {
         "group-DM member must receive the call-thread anchor: {bob_frames:?}"
     );
 
+    let carol_join = try_join_room(&mut carol, &room, "carol").await;
+    assert!(
+        is_error(&carol_join) && carol_join.contains("registration-required"),
+        "non-member must not be able to enter members-only group-DM room: {carol_join}"
+    );
     send_muji_session_initiate_expect_forbidden(&mut carol, &room, "carol-forbidden").await;
     send_muji_session_initiate(&mut admin_web, &room, "admin-group-dm-allowed").await;
     send_muji_session_initiate(&mut bob, &room, "bob-group-dm-allowed").await;

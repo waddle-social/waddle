@@ -160,6 +160,7 @@ const discoveredCallEntries = computed<CallActivityDockEntry[]>(() =>
   sortCallActivityDockEntries(
     buildCallActivityDockEntries({
       channels: props.channels,
+      groupDms: props.groupDms ?? [],
       conversations: props.dmConversations ?? [],
       activeChannelId: null,
       activeChannelRoomJid: null,

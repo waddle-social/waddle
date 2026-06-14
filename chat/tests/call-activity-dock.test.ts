@@ -3256,6 +3256,29 @@ describe("CallActivityDock rendering", () => {
     ]);
   });
 
+  test("home dashboard uses hydrated group-DM names for active group-DM calls", async () => {
+    const html = await renderVueComponent("../src/components/chat/HomeDashboard.vue", {
+      spaces: [],
+      channels: [],
+      contacts: [],
+      isLoading: false,
+      channelUnreadMap: {},
+      groupDms: [
+        { id: "gdm-launch", name: "Launch crew", roomJid: "group-dm-launch@conference.example.com" },
+      ],
+      activeChannelJids: new Set(["group-dm-launch@conference.example.com"]),
+      managedMucDomain: "conference.example.com",
+      callParticipantCounts: { "group-dm-launch@conference.example.com": 2 },
+      callParticipants: { "group-dm-launch@conference.example.com": ["alice", "bob"] },
+      callMediaByRoom: { "group-dm-launch@conference.example.com": { audio: true, video: true } },
+      dmConversations: [],
+      selfFullJid: "alice@example.com/web",
+    });
+
+    expect(html).toContain("Launch crew");
+    expect(html).not.toContain("group-dm-launch,");
+  });
+
   test("home dashboard leaves retained local group calls without rejoining media", async () => {
     connectionStore.session = {
       username: "alice",
@@ -3407,6 +3430,69 @@ describe("CallActivityDock rendering", () => {
     expect(selected).toEqual([
       ["general", { roomJid: "general@conference.example.com" }],
     ]);
+  });
+
+  test("shell does not start pre-hydration group-DM calls when selection cannot resolve", async () => {
+    const selected: unknown[][] = [];
+    let ensureJoinedCalls = 0;
+    const ui = {
+      activeCommunitySurface: { value: "feed" },
+    };
+    const bindings = await suppressVueLifecycleSetupWarnings(() =>
+      setupVueComponent("../src/components/chat/ChatReadyShell.vue", {
+        controller: {
+          ui,
+          connectionStore: {
+            client: {
+              fullJid: "alice@example.com/web",
+              ensureJoined: async () => {
+                ensureJoinedCalls += 1;
+              },
+              xmpp: {
+                send_muji_session_initiate: async () => {
+                  throw new Error("group-DM call should not start before selection resolves");
+                },
+              },
+            },
+            session: { username: "alice", jid: "alice@example.com" },
+          },
+          waddles: { mucServiceJid: { value: "conference.example.com" } },
+          selfDomain: { value: "example.com" },
+          rosterContacts: {
+            contacts: { value: [] },
+            isLoadingContacts: { value: false },
+          },
+          messaging: {
+            mentionedChannelCounts: { value: {} },
+            activeChannels: { value: new Set<string>() },
+          },
+          dmConversations: { conversations: { value: [] } },
+          computedChannelUnreadMap: { value: {} },
+          activeRightPanel: { value: null },
+          activeThreadStack: { value: [] },
+          communityEvents: { rsvp: () => undefined },
+          closePinnedPanel: () => undefined,
+          activateRightPanel: () => undefined,
+          selectDm: () => undefined,
+          selectChannel: () => undefined,
+          selectChannelByRoomJid: () => undefined,
+          selectGroupDm: async (...args: unknown[]) => {
+            selected.push(args);
+            return false;
+          },
+        },
+      }),
+    );
+
+    setupBindingFunction(bindings, "joinGroupDmCallFromActivity")(
+      "group-dm-launch@conference.example.com",
+      { audio: true, video: true },
+    );
+    await Promise.resolve();
+
+    expect(ui.activeCommunitySurface.value).toBe(null);
+    expect(selected).toEqual([["group-dm-launch@conference.example.com"]]);
+    expect(ensureJoinedCalls).toBe(0);
   });
 
   test("shell answer selects the DM and proceeds with the hydrated full JID", async () => {

@@ -434,5 +434,8 @@ function normalizedParticipantLabels(
 
 function isGroupDmFallbackRoomJid(roomJid: string): boolean {
   const localpart = normalizeMucCallRoomJid(roomJid).split("@")[0] ?? "";
+  // Server-created group-DM rooms currently use `group-dm-...` localparts.
+  // This fallback keeps pre-hydration calls on the DM route until bookmarks
+  // hydrate and the explicit group-DM summary can take over.
   return localpart.startsWith("group-dm-");
 }
