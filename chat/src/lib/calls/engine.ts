@@ -19,7 +19,12 @@ import {
 } from "livekit-client";
 import type { LiveKitJoin } from "./types";
 import type { CallConnectionPhase, CallConnectionQuality } from "./connection-quality";
-import { $devicePrefs } from "./device-prefs";
+import {
+  $devicePrefs,
+  audioProcessingConstraints,
+  type AudioProcessingConstraints,
+  type AudioProcessingPrefs,
+} from "./device-prefs";
 import { validateLiveKitGrant } from "./dm-call-activity";
 import { activeMicAudioProcessing, type MicAudioProcessing } from "./mic-audio-processing";
 
@@ -52,6 +57,36 @@ const CAMERA_PUBLISH_OPTIONS: TrackPublishOptions = {
 const SCREEN_SHARE_PUBLISH_OPTIONS: TrackPublishOptions = {
   degradationPreference: "maintain-resolution",
 };
+
+export function audioCaptureDefaultsForPrefs(prefs: {
+  mic: string | null;
+  audioProcessing: AudioProcessingPrefs;
+}): AudioProcessingConstraints & { deviceId?: string } {
+  return {
+    ...audioProcessingConstraints(prefs.audioProcessing),
+    deviceId: prefs.mic ?? undefined,
+  };
+}
+
+export function callRoomOptionsForPrefs(prefs: {
+  mic: string | null;
+  cam: string | null;
+  audioProcessing: AudioProcessingPrefs;
+}) {
+  return {
+    adaptiveStream: true,
+    dynacast: true,
+    webAudioMix: true,
+    audioCaptureDefaults: audioCaptureDefaultsForPrefs(prefs),
+    videoCaptureDefaults: {
+      deviceId: prefs.cam ?? undefined,
+      resolution: CAMERA_CAPTURE_RESOLUTION,
+    },
+    publishDefaults: {
+      screenShareEncoding: SCREEN_SHARE_ENCODING,
+    },
+  };
+}
 
 /**
  * Identifies a remote media track surfaced to the UI. The `kind`
@@ -258,24 +293,7 @@ export class CallEngine {
       throw new Error(`Invalid LiveKit join token: ${grant.reason}`);
     }
     const prefs = $devicePrefs.get();
-    const room = new Room({
-      adaptiveStream: true,
-      dynacast: true,
-      webAudioMix: true,
-      audioCaptureDefaults: {
-        autoGainControl: true,
-        echoCancellation: true,
-        noiseSuppression: true,
-        deviceId: prefs.mic ?? undefined,
-      },
-      videoCaptureDefaults: {
-        deviceId: prefs.cam ?? undefined,
-        resolution: CAMERA_CAPTURE_RESOLUTION,
-      },
-      publishDefaults: {
-        screenShareEncoding: SCREEN_SHARE_ENCODING,
-      },
-    });
+    const room = new Room(callRoomOptionsForPrefs(prefs));
     room.on(RoomEvent.TrackSubscribed, this.handleTrackSubscribed);
     room.on(RoomEvent.TrackUnsubscribed, this.handleTrackUnsubscribed);
     room.on(RoomEvent.LocalTrackPublished, this.handleLocalTrackPublished);
@@ -374,6 +392,30 @@ export class CallEngine {
   async setMicDevice(deviceId: string): Promise<void> {
     if (!this.room) return;
     await this.room.switchActiveDevice("audioinput", deviceId);
+  }
+
+  /**
+   * Restart the live microphone capture with updated browser-native
+   * audio-processing constraints. LiveKit swaps the capture track inside
+   * the existing publication, so the call stays joined and no Jingle
+   * signaling is needed.
+   */
+  async setAudioProcessing(prefs: AudioProcessingPrefs): Promise<void> {
+    const publication = this.room?.localParticipant.getTrackPublication(Track.Source.Microphone);
+    if (!publication || publication.isMuted) return;
+    const track = publication.track;
+    if (!track) return;
+    const restartTrack = track?.restartTrack;
+    if (typeof restartTrack !== "function") return;
+    const settings = track.mediaStreamTrack?.getSettings();
+    await restartTrack.call(
+      track,
+      audioCaptureDefaultsForPrefs({
+        mic: settings?.deviceId ?? $devicePrefs.get().mic,
+        audioProcessing: prefs,
+      }),
+    );
+    this.emitMicAudioProcessing();
   }
 
   /**

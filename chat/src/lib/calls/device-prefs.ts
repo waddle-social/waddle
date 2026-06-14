@@ -15,30 +15,91 @@ type DevicePrefs = {
   mic: string | null;
   cam: string | null;
   speaker: string | null;
+  audioProcessing: AudioProcessingPrefs;
 };
 
 const STORAGE_KEY = "waddle:call-device-prefs";
 
-function readInitialPrefs(): DevicePrefs {
-  if (typeof window === "undefined") {
-    return { mic: null, cam: null, speaker: null };
+export type AudioProcessingPrefs = {
+  noiseSuppression: boolean;
+  echoCancellation: boolean;
+  autoGainControl: boolean;
+};
+
+export type AudioProcessingConstraints = AudioProcessingPrefs;
+
+export function defaultAudioProcessingPrefs(): AudioProcessingPrefs {
+  return {
+    noiseSuppression: true,
+    echoCancellation: true,
+    autoGainControl: true,
+  };
+}
+
+export function normalizeAudioProcessingPrefs(value: unknown): AudioProcessingPrefs {
+  if (typeof value !== "object" || value === null) return defaultAudioProcessingPrefs();
+  const obj = value as Record<string, unknown>;
+  if (
+    typeof obj.noiseSuppression !== "boolean" ||
+    typeof obj.echoCancellation !== "boolean" ||
+    typeof obj.autoGainControl !== "boolean"
+  ) {
+    return defaultAudioProcessingPrefs();
   }
+  return {
+    noiseSuppression: obj.noiseSuppression,
+    echoCancellation: obj.echoCancellation,
+    autoGainControl: obj.autoGainControl,
+  };
+}
+
+export function audioProcessingConstraints(
+  prefs: AudioProcessingPrefs,
+): AudioProcessingConstraints {
+  return {
+    noiseSuppression: prefs.noiseSuppression,
+    echoCancellation: prefs.echoCancellation,
+    autoGainControl: prefs.autoGainControl,
+  };
+}
+
+function defaultDevicePrefs(): DevicePrefs {
+  return {
+    mic: null,
+    cam: null,
+    speaker: null,
+    audioProcessing: defaultAudioProcessingPrefs(),
+  };
+}
+
+export function parseDevicePrefsStorage(raw: string | null): DevicePrefs {
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { mic: null, cam: null, speaker: null };
+    if (!raw) return defaultDevicePrefs();
     const parsed: unknown = JSON.parse(raw);
     if (typeof parsed !== "object" || parsed === null) {
-      return { mic: null, cam: null, speaker: null };
+      return defaultDevicePrefs();
     }
     const obj = parsed as Record<string, unknown>;
     return {
       mic: typeof obj.mic === "string" ? obj.mic : null,
       cam: typeof obj.cam === "string" ? obj.cam : null,
       speaker: typeof obj.speaker === "string" ? obj.speaker : null,
+      audioProcessing: normalizeAudioProcessingPrefs(obj.audioProcessing),
     };
   } catch {
-    return { mic: null, cam: null, speaker: null };
+    return defaultDevicePrefs();
   }
+}
+
+export function serializeDevicePrefsStorage(prefs: DevicePrefs): string {
+  return JSON.stringify(prefs);
+}
+
+function readInitialPrefs(): DevicePrefs {
+  if (typeof window === "undefined") {
+    return defaultDevicePrefs();
+  }
+  return parseDevicePrefsStorage(window.localStorage.getItem(STORAGE_KEY));
 }
 
 export const $devicePrefs = atom<DevicePrefs>(readInitialPrefs());
@@ -46,7 +107,7 @@ export const $devicePrefs = atom<DevicePrefs>(readInitialPrefs());
 $devicePrefs.subscribe((prefs) => {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(prefs));
+    window.localStorage.setItem(STORAGE_KEY, serializeDevicePrefsStorage(prefs));
   } catch {
     // Persistence is best-effort.
   }
@@ -62,6 +123,10 @@ export function setCamDevice(id: string | null): void {
 
 export function setSpeakerDevice(id: string | null): void {
   $devicePrefs.set({ ...$devicePrefs.get(), speaker: id });
+}
+
+export function setAudioProcessingPrefs(audioProcessing: AudioProcessingPrefs): void {
+  $devicePrefs.set({ ...$devicePrefs.get(), audioProcessing });
 }
 
 type SpeakerOutputSelectionEnvironment = {

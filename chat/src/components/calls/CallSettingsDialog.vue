@@ -8,8 +8,12 @@ import {
   enumerateCallDevices,
   isSpeakerOutputSelectionSupported,
   type EnumeratedDevices,
+  type AudioProcessingPrefs,
 } from "@/lib/calls/device-prefs";
-import { applyCallDeviceSelection } from "@/lib/calls/call-device-selection";
+import {
+  applyAudioProcessingSelection,
+  applyCallDeviceSelection,
+} from "@/lib/calls/call-device-selection";
 import { $micAudioProcessing } from "@/lib/calls/mic-audio-processing-state";
 import { audioProcessingRows } from "@/lib/calls/mic-audio-processing";
 import { useCallEngine } from "@/lib/calls/use-call-engine";
@@ -50,6 +54,10 @@ const speakerSupported = ref(isSpeakerOutputSelectionSupported());
 const micProcessing = useStore($micAudioProcessing);
 const processingRows = computed(() =>
   micProcessing.value.kind === "active" ? audioProcessingRows(micProcessing.value) : [],
+);
+const audioProcessingPending = ref(false);
+const audioProcessingDisabled = computed(
+  () => micProcessing.value.kind !== "active" || audioProcessingPending.value,
 );
 
 /**
@@ -239,6 +247,27 @@ async function selectSpeaker(id: string | null): Promise<void> {
   }
 }
 
+async function setAudioProcessing(
+  key: keyof AudioProcessingPrefs,
+  enabled: boolean,
+  event: Event,
+): Promise<void> {
+  const input = event.target instanceof HTMLInputElement ? event.target : null;
+  const previous = prefs.value.audioProcessing[key];
+  audioProcessingPending.value = true;
+  try {
+    await applyAudioProcessingSelection(
+      { ...prefs.value.audioProcessing, [key]: enabled },
+      engine,
+    );
+  } catch (err) {
+    if (input) input.checked = previous;
+    reportCallError(err);
+  } finally {
+    audioProcessingPending.value = false;
+  }
+}
+
 /**
  * `devicechange` listener wired up only while the dialog is open.
  * Previously this was mounted for the entire call lifetime, which
@@ -359,9 +388,52 @@ function close(): void {
         <!-- Read-only verification of the audio processing the browser
              actually applied to the live mic (not what we requested). -->
         <div class="call-processing">
+          <fieldset
+            class="call-processing-controls"
+            :aria-describedby="micProcessing.kind === 'no-mic' ? 'call-processing-no-mic' : undefined"
+            :disabled="audioProcessingDisabled"
+          >
+            <legend class="type-caption call-processing__title">
+              Requested audio processing
+            </legend>
+            <label class="call-processing-toggle">
+              <span class="call-processing-toggle__copy">
+                <span class="type-caption call-processing-toggle__label">Noise cancellation</span>
+              </span>
+              <input
+                class="call-processing-toggle__input"
+                type="checkbox"
+                :checked="prefs.audioProcessing.noiseSuppression"
+                @change="setAudioProcessing('noiseSuppression', ($event.target as HTMLInputElement).checked, $event)"
+              />
+            </label>
+            <label class="call-processing-toggle">
+              <span class="call-processing-toggle__copy">
+                <span class="type-caption call-processing-toggle__label">Echo cancellation</span>
+              </span>
+              <input
+                class="call-processing-toggle__input"
+                type="checkbox"
+                :checked="prefs.audioProcessing.echoCancellation"
+                @change="setAudioProcessing('echoCancellation', ($event.target as HTMLInputElement).checked, $event)"
+              />
+            </label>
+            <label class="call-processing-toggle">
+              <span class="call-processing-toggle__copy">
+                <span class="type-caption call-processing-toggle__label">Auto gain control</span>
+              </span>
+              <input
+                class="call-processing-toggle__input"
+                type="checkbox"
+                :checked="prefs.audioProcessing.autoGainControl"
+                @change="setAudioProcessing('autoGainControl', ($event.target as HTMLInputElement).checked, $event)"
+              />
+            </label>
+          </fieldset>
           <h4 class="type-caption call-processing__title">Audio processing</h4>
           <p
             v-if="micProcessing.kind === 'no-mic'"
+            id="call-processing-no-mic"
             class="type-caption text-muted-foreground"
           >
             No microphone active — enable your mic to verify audio
@@ -561,6 +633,39 @@ function close(): void {
 
 .call-processing__title {
   color: var(--muted-foreground);
+}
+
+.call-processing-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+}
+
+.call-processing-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  min-height: 2rem;
+}
+
+.call-processing-toggle__copy {
+  min-width: 0;
+}
+
+.call-processing-toggle__label {
+  color: var(--foreground);
+}
+
+.call-processing-toggle__input {
+  width: 2.25rem;
+  height: 1.25rem;
+  flex: 0 0 auto;
+  accent-color: var(--primary);
+}
+
+.call-processing-toggle__input:disabled {
+  opacity: 0.55;
 }
 
 .call-processing__list {
