@@ -1,4 +1,4 @@
-use crate::auth::{username_to_localpart, AuthError, AuthProviderConfig};
+use crate::auth::{localpart_to_jid, username_to_localpart, AuthError, AuthProviderConfig};
 use kameo::actor::ActorRef;
 
 use crate::db::actor::{DbActor, DbExecute, DbQueryOne};
@@ -23,7 +23,8 @@ pub struct IdentityClaims {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserRecord {
-    pub id: String,
+    /// Bare JID principal (e.g. `alice@example.com`). Immutable once created.
+    pub jid: String,
     pub username: String,
     pub xmpp_localpart: String,
     pub display_name: Option<String>,
@@ -51,6 +52,7 @@ impl IdentityService {
         &self,
         provider: &AuthProviderConfig,
         claims: &IdentityClaims,
+        domain: &str,
     ) -> Result<LinkedIdentity, AuthError> {
         let subject = claims.subject.trim();
         if subject.is_empty() {
@@ -62,9 +64,9 @@ impl IdentityService {
         let issuer = Self::identity_issuer(provider, claims)?;
 
         if let Some(existing) = self.find_by_issuer_subject(&issuer, subject).await? {
-            let user = self
-                .reconcile_existing_user(provider, claims, &issuer, &existing)
-                .await?;
+            // The bare JID is immutable: reconciliation only refreshes
+            // mutable profile fields, never the localpart/JID/username.
+            let user = self.reconcile_existing_user(claims, &existing).await?;
             self.update_identity_last_login(provider, claims, &issuer, subject)
                 .await?;
             return Ok(LinkedIdentity {
@@ -74,8 +76,8 @@ impl IdentityService {
             });
         }
 
-        let user = self.create_user(provider, claims, &issuer).await?;
-        self.insert_identity(provider, claims, &issuer, &user.id)
+        let user = self.create_user(provider, claims, &issuer, domain).await?;
+        self.insert_identity(provider, claims, &issuer, &user.jid)
             .await?;
 
         Ok(LinkedIdentity {
@@ -112,9 +114,9 @@ impl IdentityService {
         subject: &str,
     ) -> Result<Option<UserRecord>, AuthError> {
         let query = r#"
-            SELECT u.id, u.username, u.xmpp_localpart, u.display_name, u.avatar_url, u.primary_email
+            SELECT u.jid, u.username, u.xmpp_localpart, u.display_name, u.avatar_url, u.primary_email
             FROM auth_identities ai
-            JOIN users u ON u.id = ai.user_id
+            JOIN users u ON u.jid = ai.user_jid
             WHERE ai.issuer = ? AND ai.subject = ?
             LIMIT 1
         "#;
@@ -130,10 +132,10 @@ impl IdentityService {
 
         match row {
             Some(row) => Ok(Some(UserRecord {
-                id: row_value(&row, 0)
+                jid: row_value(&row, 0)
                     .and_then(ValueExt::as_string)
                     .map_err(|e| {
-                        AuthError::DatabaseError(format!("Failed to get user id: {}", e))
+                        AuthError::DatabaseError(format!("Failed to get user jid: {}", e))
                     })?,
                 username: row_value(&row, 1)
                     .and_then(ValueExt::as_string)
@@ -212,6 +214,7 @@ impl IdentityService {
         provider: &AuthProviderConfig,
         claims: &IdentityClaims,
         issuer: &str,
+        domain: &str,
     ) -> Result<UserRecord, AuthError> {
         let base = Self::derive_base_username(provider, claims, issuer);
 
@@ -222,12 +225,13 @@ impl IdentityService {
                 format!("{}{}", base, i)
             };
             let xmpp_localpart = username_to_localpart(&username);
-            let user_id = Uuid::new_v4().to_string();
+            // The bare JID is the immutable principal and primary key.
+            let jid = localpart_to_jid(&xmpp_localpart, domain)?;
             let now = Utc::now().to_rfc3339();
 
             let insert = r#"
                 INSERT INTO users (
-                    id, username, xmpp_localpart, display_name, avatar_url, primary_email, created_at, updated_at
+                    jid, username, xmpp_localpart, display_name, avatar_url, primary_email, created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             "#;
 
@@ -236,7 +240,7 @@ impl IdentityService {
                 .ask(DbExecute {
                     sql: insert.to_string(),
                     params: vec![
-                        user_id.clone().into(),
+                        jid.clone().into(),
                         username.clone().into(),
                         xmpp_localpart.clone().into(),
                         claims.name.clone().into(),
@@ -251,7 +255,7 @@ impl IdentityService {
             match result {
                 Ok(_) => {
                     return Ok(UserRecord {
-                        id: user_id,
+                        jid,
                         username,
                         xmpp_localpart,
                         display_name: claims.name.clone(),
@@ -277,72 +281,52 @@ impl IdentityService {
         ))
     }
 
+    /// Refresh the mutable profile fields of an existing user from the
+    /// latest identity claims.
+    ///
+    /// The bare JID is the immutable principal (primary key referenced by
+    /// sessions, identities, messages, and permission tuples), so the
+    /// localpart/JID/username are never rewritten here — only
+    /// `display_name`, `avatar_url`, and `primary_email`.
     async fn reconcile_existing_user(
         &self,
-        provider: &AuthProviderConfig,
         claims: &IdentityClaims,
-        issuer: &str,
         existing: &UserRecord,
     ) -> Result<UserRecord, AuthError> {
-        let base = Self::derive_base_username(provider, claims, issuer);
+        let now = Utc::now().to_rfc3339();
 
-        for i in 0..200 {
-            let username = if i == 0 {
-                base.clone()
-            } else {
-                format!("{}{}", base, i)
-            };
-            let xmpp_localpart = username_to_localpart(&username);
-            let now = Utc::now().to_rfc3339();
+        self.actor
+            .ask(DbExecute {
+                sql: r#"
+                    UPDATE users
+                    SET display_name = ?, avatar_url = ?, primary_email = ?, updated_at = ?
+                    WHERE jid = ?
+                "#
+                .to_string(),
+                params: vec![
+                    claims.name.clone().into(),
+                    claims.avatar_url.clone().into(),
+                    claims.email.clone().into(),
+                    now.into(),
+                    existing.jid.clone().into(),
+                ],
+            })
+            .await
+            .map_err(|err| {
+                AuthError::DatabaseError(format!(
+                    "Failed to update user from identity claims: {}",
+                    err
+                ))
+            })?;
 
-            let result = self
-                .actor
-                .ask(DbExecute {
-                    sql: r#"
-                        UPDATE users
-                        SET username = ?, xmpp_localpart = ?, display_name = ?, avatar_url = ?, primary_email = ?, updated_at = ?
-                        WHERE id = ?
-                    "#
-                    .to_string(),
-                    params: vec![
-                        username.clone().into(),
-                        xmpp_localpart.clone().into(),
-                        claims.name.clone().into(),
-                        claims.avatar_url.clone().into(),
-                        claims.email.clone().into(),
-                        now.clone().into(),
-                        existing.id.clone().into(),
-                    ],
-                })
-                .await;
-
-            match result {
-                Ok(_) => {
-                    return Ok(UserRecord {
-                        id: existing.id.clone(),
-                        username,
-                        xmpp_localpart,
-                        display_name: claims.name.clone(),
-                        avatar_url: claims.avatar_url.clone(),
-                        primary_email: claims.email.clone(),
-                    });
-                }
-                Err(err) => {
-                    let msg = err.to_string();
-                    if msg.contains("UNIQUE") || msg.contains("constraint") {
-                        continue;
-                    }
-                    return Err(AuthError::DatabaseError(format!(
-                        "Failed to update user from identity claims: {}",
-                        err
-                    )));
-                }
-            }
-        }
-
-        Err(AuthError::DatabaseError(
-            "Failed to allocate unique username".to_string(),
-        ))
+        Ok(UserRecord {
+            jid: existing.jid.clone(),
+            username: existing.username.clone(),
+            xmpp_localpart: existing.xmpp_localpart.clone(),
+            display_name: claims.name.clone(),
+            avatar_url: claims.avatar_url.clone(),
+            primary_email: claims.email.clone(),
+        })
     }
 
     async fn insert_identity(
@@ -350,7 +334,7 @@ impl IdentityService {
         provider: &AuthProviderConfig,
         claims: &IdentityClaims,
         issuer: &str,
-        user_id: &str,
+        user_jid: &str,
     ) -> Result<(), AuthError> {
         let now = Utc::now().to_rfc3339();
         let identity_id = Uuid::new_v4().to_string();
@@ -361,14 +345,14 @@ impl IdentityService {
             .ask(DbExecute {
                 sql: r#"
                     INSERT INTO auth_identities (
-                        id, user_id, provider_id, issuer, subject, email, email_verified,
+                        id, user_jid, provider_id, issuer, subject, email, email_verified,
                         raw_claims_json, created_at, last_login_at
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 "#
                 .to_string(),
                 params: vec![
                     identity_id.into(),
-                    user_id.into(),
+                    user_jid.into(),
                     provider.id.clone().into(),
                     issuer.into(),
                     claims.subject.clone().into(),

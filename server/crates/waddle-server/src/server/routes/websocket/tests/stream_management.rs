@@ -463,8 +463,8 @@ async fn sm_resume_matching_authenticated_identity_preserves_current_session_wit
     assert_eq!(
         conn.authenticated_session
             .as_ref()
-            .map(|saved| saved.user_id.as_str()),
-        Some(session.user_id.as_str())
+            .map(|saved| saved.user_jid.as_str()),
+        Some(session.user_jid.as_str())
     );
 }
 
@@ -492,7 +492,7 @@ async fn sm_resume_matching_authenticated_identity_prefers_detached_sidecar_sess
 
     let stream_id = "stream-auth-match-with-sidecar";
     let detached_jid: FullJid = format!("bob@{domain}/web").parse().expect("jid");
-    let resumed_session = Session::new(&fresh_session.user_id, "bob", "bob");
+    let resumed_session = Session::new(&fresh_session.user_jid, "bob", "bob");
     state
         .deps
         .protocol

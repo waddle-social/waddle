@@ -142,7 +142,7 @@ pub(super) async fn apply_muc_owner_config(
                 Tuple::new(
                     Object::new(ObjectType::Channel, &channel_id),
                     Relation::new("owner"),
-                    Subject::user(&session.user_id),
+                    Subject::user(&session.user_jid),
                 ),
             )
             .await

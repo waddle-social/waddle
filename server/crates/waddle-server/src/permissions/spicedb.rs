@@ -149,7 +149,10 @@ impl SpiceDbPermissionBackend {
             let item = item.map_err(map_spicedb_error)?;
             match item.permission {
                 PermissionResult::Allowed => {
-                    resources.push(Object::new(object_type, item.resource_id));
+                    resources.push(Object::new(
+                        object_type,
+                        decode_spicedb_id(&item.resource_id),
+                    ));
                 }
                 PermissionResult::Denied => {}
                 PermissionResult::Conditional { missing_fields } => {
@@ -182,7 +185,7 @@ impl SpiceDbPermissionBackend {
                 PermissionResult::Allowed => {
                     subjects.push(Subject {
                         subject_type,
-                        id: item.subject_id,
+                        id: decode_spicedb_id(&item.subject_id),
                         relation: None,
                     });
                 }
@@ -230,14 +233,34 @@ fn map_spicedb_error(error: prescience::Error) -> PermissionError {
     }
 }
 
+/// SpiceDB object IDs disallow `@`. Bare JIDs are the user principal, so at
+/// the SpiceDB wire boundary every id has `@` encoded as `|` on the way out
+/// and decoded back on the way in. `|` does not occur in the ids Waddle
+/// produces, so the transform round-trips losslessly.
+fn encode_spicedb_id(id: &str) -> String {
+    id.replace('@', "|")
+}
+
+/// Inverse of [`encode_spicedb_id`]: restore `@` from `|` for ids read back
+/// from SpiceDB.
+fn decode_spicedb_id(id: &str) -> String {
+    id.replace('|', "@")
+}
+
 fn object_reference(object: &Object) -> Result<ObjectReference, PermissionError> {
-    ObjectReference::new(object.object_type.to_string(), object.id.clone())
-        .map_err(|e| PermissionError::InvalidObject(e.to_string()))
+    ObjectReference::new(
+        object.object_type.to_string(),
+        encode_spicedb_id(&object.id),
+    )
+    .map_err(|e| PermissionError::InvalidObject(e.to_string()))
 }
 
 fn subject_reference(subject: &Subject) -> Result<SubjectReference, PermissionError> {
-    let object = ObjectReference::new(subject.subject_type.to_string(), subject.id.clone())
-        .map_err(|e| PermissionError::InvalidSubject(e.to_string()))?;
+    let object = ObjectReference::new(
+        subject.subject_type.to_string(),
+        encode_spicedb_id(&subject.id),
+    )
+    .map_err(|e| PermissionError::InvalidSubject(e.to_string()))?;
     SubjectReference::new(object, subject.relation.clone())
         .map_err(|e| PermissionError::InvalidSubject(e.to_string()))
 }
@@ -247,7 +270,7 @@ fn subject_from_reference(reference: &SubjectReference) -> Result<Subject, Permi
         .map_err(|e| PermissionError::InvalidSubject(e.to_string()))?;
     Ok(Subject {
         subject_type,
-        id: reference.object().object_id().to_string(),
+        id: decode_spicedb_id(reference.object().object_id()),
         relation: reference.optional_relation().map(ToString::to_string),
     })
 }
@@ -263,29 +286,57 @@ fn relationship_from_tuple(tuple: &Tuple) -> Result<Relationship, PermissionErro
 fn exact_relationship_filter(tuple: &Tuple) -> RelationshipFilter {
     let subject_filter = subject_filter(&tuple.subject);
     RelationshipFilter::new(tuple.object.object_type.to_string())
-        .resource_id(tuple.object.id.clone())
+        .resource_id(encode_spicedb_id(&tuple.object.id))
         .relation(tuple.relation.name.clone())
         .subject_filter(subject_filter)
 }
 
 fn filter_for_object_and_subject(object: &Object, subject: &Subject) -> RelationshipFilter {
     RelationshipFilter::new(object.object_type.to_string())
-        .resource_id(object.id.clone())
+        .resource_id(encode_spicedb_id(&object.id))
         .subject_filter(subject_filter(subject))
 }
 
 fn filter_for_object_and_relation(object: &Object, relation: &str) -> RelationshipFilter {
     RelationshipFilter::new(object.object_type.to_string())
-        .resource_id(object.id.clone())
+        .resource_id(encode_spicedb_id(&object.id))
         .relation(relation.to_string())
 }
 
 fn subject_filter(subject: &Subject) -> SubjectFilter {
-    let filter =
-        SubjectFilter::new(subject.subject_type.to_string()).subject_id(subject.id.clone());
+    let filter = SubjectFilter::new(subject.subject_type.to_string())
+        .subject_id(encode_spicedb_id(&subject.id));
     if let Some(relation) = &subject.relation {
         filter.relation(relation.clone())
     } else {
         filter
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_spicedb_id, encode_spicedb_id};
+
+    #[test]
+    fn bare_jid_round_trips_through_pipe_encoding() {
+        let jid = "alice@example.com";
+        let encoded = encode_spicedb_id(jid);
+        assert_eq!(encoded, "alice|example.com");
+        assert_eq!(decode_spicedb_id(&encoded), jid);
+    }
+
+    #[test]
+    fn ids_without_at_are_unchanged() {
+        // Channel/space ids that carry no `@` survive the boundary intact.
+        assert_eq!(encode_spicedb_id("penguin-club"), "penguin-club");
+        assert_eq!(decode_spicedb_id("penguin-club"), "penguin-club");
+    }
+
+    #[test]
+    fn muc_room_jid_round_trips() {
+        let room = "general@conference.example.com";
+        let encoded = encode_spicedb_id(room);
+        assert_eq!(encoded, "general|conference.example.com");
+        assert_eq!(decode_spicedb_id(&encoded), room);
     }
 }

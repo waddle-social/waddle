@@ -42,7 +42,7 @@ impl MessageRepository {
             .ask(DbExecute {
                 sql: r#"
                     INSERT INTO messages (
-                        id, channel_id, author_user_id, content, reply_to_id, thread_id,
+                        id, channel_id, author_jid, content, reply_to_id, thread_id,
                         flags, edited_at, created_at, expires_at
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
                 "#
@@ -50,7 +50,7 @@ impl MessageRepository {
                 params: vec![
                     id.clone().into(),
                     create.channel_id.clone().into(),
-                    create.author_user_id.clone().into(),
+                    create.author_jid.clone().into(),
                     content.clone().into(),
                     create.reply_to_id.clone().into(),
                     create.thread_id.clone().into(),
@@ -67,7 +67,7 @@ impl MessageRepository {
         Ok(Message {
             id,
             channel_id: create.channel_id,
-            author_user_id: create.author_user_id,
+            author_jid: create.author_jid,
             content: Some(content),
             reply_to_id: create.reply_to_id,
             thread_id: create.thread_id,
@@ -81,7 +81,7 @@ impl MessageRepository {
     #[instrument(skip(self))]
     pub async fn get_by_id(&self, id: &str) -> Result<Option<Message>, MessageError> {
         let query = r#"
-            SELECT id, channel_id, author_user_id, content, reply_to_id, thread_id,
+            SELECT id, channel_id, author_jid, content, reply_to_id, thread_id,
                    flags, edited_at, created_at, expires_at
             FROM messages
             WHERE id = ?
@@ -142,7 +142,7 @@ impl MessageRepository {
 
                 (
                     r#"
-                    SELECT id, channel_id, author_user_id, content, reply_to_id, thread_id,
+                    SELECT id, channel_id, author_jid, content, reply_to_id, thread_id,
                            flags, edited_at, created_at, expires_at
                     FROM messages
                     WHERE channel_id = ? AND created_at < ?
@@ -158,7 +158,7 @@ impl MessageRepository {
             }
             None => (
                 r#"
-                SELECT id, channel_id, author_user_id, content, reply_to_id, thread_id,
+                SELECT id, channel_id, author_jid, content, reply_to_id, thread_id,
                        flags, edited_at, created_at, expires_at
                 FROM messages
                 WHERE channel_id = ?
@@ -273,11 +273,9 @@ impl MessageRepository {
             .and_then(ValueExt::as_string)
             .map_err(|e| MessageError::DatabaseError(format!("Failed to get channel_id: {}", e)))?;
 
-        let author_user_id = row_value(row, 2)
+        let author_jid = row_value(row, 2)
             .and_then(ValueExt::as_string)
-            .map_err(|e| {
-                MessageError::DatabaseError(format!("Failed to get author_user_id: {}", e))
-            })?;
+            .map_err(|e| MessageError::DatabaseError(format!("Failed to get author_jid: {}", e)))?;
 
         let content = row_value(row, 3)
             .and_then(ValueExt::as_optional_string)
@@ -334,7 +332,7 @@ impl MessageRepository {
         Ok(Message {
             id,
             channel_id,
-            author_user_id,
+            author_jid,
             content,
             reply_to_id,
             thread_id,

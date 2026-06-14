@@ -6,7 +6,7 @@ pub(super) async fn resolve_managed_channel_affiliation(
     channel_id: &str,
 ) -> Result<Option<Affiliation>, ()> {
     let object = Object::new(ObjectType::Channel, channel_id);
-    let subject = Subject::user(&session.user_id);
+    let subject = Subject::user(&session.user_jid);
     if check_channel_permission(
         state,
         object.clone(),
@@ -86,7 +86,7 @@ pub(super) async fn server_permission_allowed(
         .app_state
         .permission_actor
         .ask(CheckPermission {
-            subject: Subject::user(&session.user_id),
+            subject: Subject::user(&session.user_jid),
             permission,
             object: Object::new(ObjectType::Server, DEPLOYMENT_SERVER_ID),
         })

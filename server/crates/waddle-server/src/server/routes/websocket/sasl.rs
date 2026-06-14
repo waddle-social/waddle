@@ -62,7 +62,7 @@ pub(super) async fn handle_sasl_oauthbearer(
 
             info!(
                 jid = %bare_jid_str,
-                user_id = %session.user_id,
+                user_jid = %session.user_jid,
                 "SASL OAUTHBEARER authentication successful",
             );
 

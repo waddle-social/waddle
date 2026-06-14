@@ -254,7 +254,7 @@ pub(super) async fn cleanup_connection_shutdown(
         let user_id = conn
             .authenticated_session
             .as_ref()
-            .map(|session| session.user_id.to_string())
+            .map(|session| session.user_jid.to_string())
             .unwrap_or_else(|| jid.to_bare().to_string());
         if let Some(detached) = conn.sm_state.to_detached_session(
             waddle_xmpp::stream_management::DetachedSessionSnapshot {

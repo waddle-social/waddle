@@ -19,7 +19,7 @@ DROP TABLE IF EXISTS private_xml_storage;
 DROP TABLE IF EXISTS provider_webhook_deliveries;
 
 CREATE TABLE users (
-    id TEXT PRIMARY KEY,
+    jid TEXT PRIMARY KEY,
     username TEXT NOT NULL UNIQUE,
     xmpp_localpart TEXT NOT NULL UNIQUE,
     display_name TEXT,
@@ -31,7 +31,7 @@ CREATE TABLE users (
 
 CREATE TABLE auth_identities (
     id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL,
+    user_jid TEXT NOT NULL,
     provider_id TEXT NOT NULL,
     issuer TEXT NOT NULL,
     subject TEXT NOT NULL,
@@ -41,22 +41,22 @@ CREATE TABLE auth_identities (
     created_at TEXT NOT NULL,
     last_login_at TEXT NOT NULL,
     UNIQUE(issuer, subject),
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    FOREIGN KEY (user_jid) REFERENCES users(jid) ON DELETE CASCADE
 );
 
-CREATE INDEX idx_auth_identities_user_id ON auth_identities(user_id);
+CREATE INDEX idx_auth_identities_user_jid ON auth_identities(user_jid);
 
 CREATE TABLE sessions (
     id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL,
+    user_jid TEXT NOT NULL,
     token_hash TEXT NOT NULL UNIQUE,
     expires_at TEXT,
     created_at TEXT NOT NULL,
     last_used_at TEXT NOT NULL,
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    FOREIGN KEY (user_jid) REFERENCES users(jid) ON DELETE CASCADE
 );
 
-CREATE INDEX idx_sessions_user_id ON sessions(user_id);
+CREATE INDEX idx_sessions_user_jid ON sessions(user_jid);
 CREATE INDEX idx_sessions_expires_at ON sessions(expires_at);
 
 CREATE TABLE permission_tuples (
@@ -189,7 +189,7 @@ DROP TABLE IF EXISTS private_xml_storage CASCADE;
 DROP TABLE IF EXISTS provider_webhook_deliveries CASCADE;
 
 CREATE TABLE users (
-    id TEXT PRIMARY KEY,
+    jid TEXT PRIMARY KEY,
     username TEXT NOT NULL UNIQUE,
     xmpp_localpart TEXT NOT NULL UNIQUE,
     display_name TEXT,
@@ -201,7 +201,7 @@ CREATE TABLE users (
 
 CREATE TABLE auth_identities (
     id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL,
+    user_jid TEXT NOT NULL,
     provider_id TEXT NOT NULL,
     issuer TEXT NOT NULL,
     subject TEXT NOT NULL,
@@ -211,22 +211,22 @@ CREATE TABLE auth_identities (
     created_at TEXT NOT NULL,
     last_login_at TEXT NOT NULL,
     UNIQUE(issuer, subject),
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    FOREIGN KEY (user_jid) REFERENCES users(jid) ON DELETE CASCADE
 );
 
-CREATE INDEX idx_auth_identities_user_id ON auth_identities(user_id);
+CREATE INDEX idx_auth_identities_user_jid ON auth_identities(user_jid);
 
 CREATE TABLE sessions (
     id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL,
+    user_jid TEXT NOT NULL,
     token_hash TEXT NOT NULL UNIQUE,
     expires_at TEXT,
     created_at TEXT NOT NULL,
     last_used_at TEXT NOT NULL,
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    FOREIGN KEY (user_jid) REFERENCES users(jid) ON DELETE CASCADE
 );
 
-CREATE INDEX idx_sessions_user_id ON sessions(user_id);
+CREATE INDEX idx_sessions_user_jid ON sessions(user_jid);
 CREATE INDEX idx_sessions_expires_at ON sessions(expires_at);
 
 CREATE TABLE permission_tuples (

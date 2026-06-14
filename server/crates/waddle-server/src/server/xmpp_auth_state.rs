@@ -28,7 +28,7 @@ pub(crate) async fn validate_session(
     }
 
     Ok(XmppSession {
-        user_id: session.user_id,
+        user_id: session.user_jid,
         jid: jid.to_bare(),
         created_at: session.created_at,
         expires_at: session_expires_at(session.expires_at),
@@ -54,10 +54,10 @@ pub(crate) async fn validate_session_token(
         XmppError::auth_failed(format!("Invalid JID: {:?}", e))
     })?;
 
-    debug!(jid = %bare_jid, user_id = %session.user_id, "OAUTHBEARER session validated");
+    debug!(jid = %bare_jid, user_jid = %session.user_jid, "OAUTHBEARER session validated");
 
     Ok(XmppSession {
-        user_id: session.user_id,
+        user_id: session.user_jid,
         jid: bare_jid,
         created_at: session.created_at,
         expires_at: session_expires_at(session.expires_at),

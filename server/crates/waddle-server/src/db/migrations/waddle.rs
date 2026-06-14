@@ -1,6 +1,6 @@
 use super::Migration;
 
-/// Hard-cut per-waddle schema with UUID user principals.
+/// Hard-cut per-waddle schema with bare-JID user principals.
 pub const V0001_SCHEMA: &str = r#"
 PRAGMA foreign_keys = OFF;
 
@@ -25,7 +25,7 @@ CREATE INDEX idx_channels_position ON channels(position);
 CREATE TABLE messages (
     id TEXT PRIMARY KEY,
     channel_id TEXT NOT NULL,
-    author_user_id TEXT NOT NULL,
+    author_jid TEXT NOT NULL,
     content TEXT,
     reply_to_id TEXT,
     thread_id TEXT,
@@ -37,7 +37,7 @@ CREATE TABLE messages (
 );
 
 CREATE INDEX idx_messages_channel_id ON messages(channel_id);
-CREATE INDEX idx_messages_author_user_id ON messages(author_user_id);
+CREATE INDEX idx_messages_author_jid ON messages(author_jid);
 CREATE INDEX idx_messages_created_at ON messages(created_at);
 CREATE INDEX idx_messages_reply_to_id ON messages(reply_to_id);
 CREATE INDEX idx_messages_thread ON messages(thread_id, created_at);
@@ -47,10 +47,10 @@ CREATE INDEX idx_messages_expires ON messages(expires_at) WHERE expires_at IS NO
 CREATE TABLE reactions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     message_id TEXT NOT NULL,
-    user_id TEXT NOT NULL,
+    user_jid TEXT NOT NULL,
     emoji TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE(message_id, user_id, emoji),
+    UNIQUE(message_id, user_jid, emoji),
     FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
 );
 
@@ -72,7 +72,7 @@ CREATE INDEX idx_attachments_message_id ON attachments(message_id);
 PRAGMA foreign_keys = ON;
 "#;
 
-/// Hard-cut per-waddle schema with UUID user principals — Postgres dialect.
+/// Hard-cut per-waddle schema with bare-JID user principals — Postgres dialect.
 pub const V0001_SCHEMA_POSTGRES: &str = r#"
 DROP TABLE IF EXISTS attachments CASCADE;
 DROP TABLE IF EXISTS reactions CASCADE;
@@ -95,7 +95,7 @@ CREATE INDEX idx_channels_position ON channels(position);
 CREATE TABLE messages (
     id TEXT PRIMARY KEY,
     channel_id TEXT NOT NULL,
-    author_user_id TEXT NOT NULL,
+    author_jid TEXT NOT NULL,
     content TEXT,
     reply_to_id TEXT,
     thread_id TEXT,
@@ -107,7 +107,7 @@ CREATE TABLE messages (
 );
 
 CREATE INDEX idx_messages_channel_id ON messages(channel_id);
-CREATE INDEX idx_messages_author_user_id ON messages(author_user_id);
+CREATE INDEX idx_messages_author_jid ON messages(author_jid);
 CREATE INDEX idx_messages_created_at ON messages(created_at);
 CREATE INDEX idx_messages_reply_to_id ON messages(reply_to_id);
 CREATE INDEX idx_messages_thread ON messages(thread_id, created_at);
@@ -117,10 +117,10 @@ CREATE INDEX idx_messages_expires ON messages(expires_at) WHERE expires_at IS NO
 CREATE TABLE reactions (
     id BIGSERIAL PRIMARY KEY,
     message_id TEXT NOT NULL,
-    user_id TEXT NOT NULL,
+    user_jid TEXT NOT NULL,
     emoji TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP::TEXT,
-    UNIQUE(message_id, user_id, emoji),
+    UNIQUE(message_id, user_jid, emoji),
     FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
 );
 
@@ -224,7 +224,7 @@ pub fn all() -> Vec<Migration> {
     vec![
         Migration {
             version: 1001,
-            description: "Hard-cut per-waddle schema with user_id principals".to_string(),
+            description: "Hard-cut per-waddle schema with bare-JID principals".to_string(),
             sql_sqlite: V0001_SCHEMA,
             sql_postgres: V0001_SCHEMA_POSTGRES,
         },

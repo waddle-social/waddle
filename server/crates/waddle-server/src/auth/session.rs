@@ -21,8 +21,8 @@ type HmacSha256 = Hmac<Sha256>;
 pub struct Session {
     /// Opaque session token and database id.
     pub id: String,
-    /// Internal UUID principal.
-    pub user_id: String,
+    /// Bare JID principal (e.g. `alice@example.com`). Immutable.
+    pub user_jid: String,
     /// Immutable username.
     pub username: String,
     /// Immutable xmpp localpart.
@@ -34,10 +34,10 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new(user_id: &str, username: &str, xmpp_localpart: &str) -> Self {
+    pub fn new(user_jid: &str, username: &str, xmpp_localpart: &str) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
-            user_id: user_id.to_string(),
+            user_jid: user_jid.to_string(),
             username: username.to_string(),
             xmpp_localpart: xmpp_localpart.to_string(),
             // 30-day session by default.
@@ -99,7 +99,7 @@ impl SessionManager {
         self.actor
             .ask(CreateAuthSession {
                 session_id: session.id.clone(),
-                user_id: session.user_id.clone(),
+                user_jid: session.user_jid.clone(),
                 username: session.username.clone(),
                 xmpp_localpart: session.xmpp_localpart.clone(),
                 token_hash,
@@ -110,7 +110,7 @@ impl SessionManager {
             .await
             .map_err(Self::ask_err)?;
 
-        debug!(session_id = %session.id, user_id = %session.user_id, "Session created");
+        debug!(session_id = %session.id, user_jid = %session.user_jid, "Session created");
         Ok(())
     }
 
@@ -133,9 +133,9 @@ impl SessionManager {
         let id = row_value(row, 0)
             .and_then(ValueExt::as_string)
             .map_err(|e| AuthError::DatabaseError(format!("Failed to get session id: {}", e)))?;
-        let user_id = row_value(row, 1)
+        let user_jid = row_value(row, 1)
             .and_then(ValueExt::as_string)
-            .map_err(|e| AuthError::DatabaseError(format!("Failed to get user id: {}", e)))?;
+            .map_err(|e| AuthError::DatabaseError(format!("Failed to get user jid: {}", e)))?;
         let token_hash = row_value(row, 2)
             .and_then(ValueExt::as_string)
             .map_err(|e| AuthError::DatabaseError(format!("Failed to get token hash: {}", e)))?;
@@ -175,7 +175,7 @@ impl SessionManager {
 
         Ok(Session {
             id,
-            user_id,
+            user_jid,
             username,
             xmpp_localpart,
             expires_at,
@@ -187,10 +187,10 @@ impl SessionManager {
     #[instrument(skip(self))]
     pub async fn get_session(&self, session_id: &str) -> Result<Option<Session>, AuthError> {
         let sql = r#"
-            SELECT s.id, s.user_id, s.token_hash, s.expires_at, s.created_at, s.last_used_at,
+            SELECT s.id, s.user_jid, s.token_hash, s.expires_at, s.created_at, s.last_used_at,
                    u.username, u.xmpp_localpart
             FROM sessions s
-            JOIN users u ON u.id = s.user_id
+            JOIN users u ON u.jid = s.user_jid
             WHERE s.id = ?
             LIMIT 1
         "#
@@ -275,10 +275,10 @@ mod tests {
         let actor = DbActor::spawn(DbActor::new(db.clone()));
         let manager = SessionManager::new(actor, Some(b"test-session-key"));
 
-        let first = Session::new("user-1", "alice", "alice");
+        let first = Session::new("alice@example.com", "alice", "alice");
         manager.create_session(&first).await.expect("first session");
 
-        let second = Session::new("user-1", "alice", "alice");
+        let second = Session::new("alice@example.com", "alice", "alice");
         manager
             .create_session(&second)
             .await
@@ -290,7 +290,7 @@ mod tests {
             .expect("load session")
             .expect("session exists");
 
-        assert_eq!(loaded.user_id, "user-1");
+        assert_eq!(loaded.user_jid, "alice@example.com");
         assert_eq!(loaded.username, "alice");
         assert_eq!(loaded.xmpp_localpart, "alice");
     }

@@ -262,7 +262,7 @@ async fn create_test_server_owner_session(state: &WebSocketState, username: &str
             tuple: Tuple::new(
                 Object::new(ObjectType::Server, DEPLOYMENT_SERVER_ID),
                 Relation::new("owner"),
-                Subject::user(&session.user_id),
+                Subject::user(&session.user_jid),
             ),
         })
         .await

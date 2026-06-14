@@ -103,7 +103,7 @@ impl From<i64> for MessageFlags {
 pub struct Message {
     pub id: String,
     pub channel_id: String,
-    pub author_user_id: String,
+    pub author_jid: String,
     pub content: Option<String>,
     pub reply_to_id: Option<String>,
     pub thread_id: Option<String>,
@@ -154,7 +154,7 @@ impl Message {
 #[derive(Debug, Clone)]
 pub struct MessageCreate {
     pub channel_id: String,
-    pub author_user_id: String,
+    pub author_jid: String,
     pub content: String,
     pub reply_to_id: Option<String>,
     pub thread_id: Option<String>,
@@ -163,10 +163,10 @@ pub struct MessageCreate {
 }
 
 impl MessageCreate {
-    pub fn new(channel_id: String, author_user_id: String, content: String) -> Self {
+    pub fn new(channel_id: String, author_jid: String, content: String) -> Self {
         Self {
             channel_id,
-            author_user_id,
+            author_jid,
             content,
             reply_to_id: None,
             thread_id: None,
@@ -353,7 +353,7 @@ mod tests {
         let message = Message {
             id: "msg-123".to_string(),
             channel_id: "channel-456".to_string(),
-            author_user_id: "user-alice".to_string(),
+            author_jid: "alice@example.com".to_string(),
             content: Some("Hello".to_string()),
             reply_to_id: Some("msg-parent".to_string()),
             thread_id: Some("thread-root".to_string()),

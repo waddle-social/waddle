@@ -79,7 +79,7 @@ pub(super) async fn handle_command_iq(
         from: sender_jid,
         authenticated_user_id: authenticated_session
             .as_ref()
-            .map(|session| session.user_id.clone()),
+            .map(|session| session.user_jid.clone()),
         iq: request_iq.clone(),
         command,
     };

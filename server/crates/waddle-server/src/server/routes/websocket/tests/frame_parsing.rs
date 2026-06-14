@@ -248,8 +248,8 @@ async fn websocket_oauthbearer_authenticates_session_token() {
     assert_eq!(
         conn.authenticated_session
             .as_ref()
-            .map(|s| s.user_id.as_str()),
-        Some(session.user_id.as_str())
+            .map(|s| s.user_jid.as_str()),
+        Some(session.user_jid.as_str())
     );
     let expected_bare =
         localpart_to_jid(&session.xmpp_localpart, &state.deps.auth_state.xmpp_domain)
@@ -283,7 +283,7 @@ async fn websocket_rejects_reauthentication_after_successful_sasl() {
     let first_user_id = conn
         .authenticated_session
         .as_ref()
-        .map(|saved| saved.user_id.clone());
+        .map(|saved| saved.user_jid.clone());
 
     let second = handle_xmpp_frame(&frame, "example.com", state.as_ref(), &mut conn).await;
 
@@ -294,7 +294,7 @@ async fn websocket_rejects_reauthentication_after_successful_sasl() {
     assert_eq!(
         conn.authenticated_session
             .as_ref()
-            .map(|saved| saved.user_id.clone()),
+            .map(|saved| saved.user_jid.clone()),
         first_user_id
     );
     assert!(matches!(conn.phase, ConnectionPhase::Authenticated { .. }));

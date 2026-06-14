@@ -2,9 +2,6 @@ use kameo::actor::ActorRef;
 use tracing::{debug, warn};
 use waddle_xmpp::{Affiliation, XmppError};
 
-use crate::auth::localpart_to_jid;
-use crate::db::actor::{DbActor, DbQueryOne, RowValues};
-use crate::db::{row_value, ValueExt};
 use crate::permissions::{
     CheckPermission, DeleteTuple, ListRelations, ListSubjects, Object, ObjectType, Permission,
     PermissionActor, Relation, Subject, SubjectType, Tuple, WriteTuple,
@@ -142,64 +139,36 @@ pub(crate) async fn list_subjects(
     Ok(subject_strings)
 }
 
-pub(crate) async fn resolve_subject_jid(
-    global_db_actor: &ActorRef<DbActor>,
-    domain: &str,
-    subject: &str,
-) -> Result<Option<jid::BareJid>, XmppError> {
+/// Resolve a permission subject string to a bare JID.
+///
+/// The user principal is the bare JID itself, so a `user:` subject id is
+/// already a bare JID — no database lookup is required. Userset subjects and
+/// non-user subjects do not map to a JID.
+pub(crate) fn resolve_subject_jid(subject: &str) -> Result<Option<jid::BareJid>, XmppError> {
     let subject = parse_subject(subject)?;
     if subject.subject_type != SubjectType::User || subject.relation.is_some() {
         return Ok(None);
     }
 
-    let row = global_db_actor
-        .ask(DbQueryOne {
-            sql: "SELECT xmpp_localpart FROM users WHERE id = ? LIMIT 1".to_string(),
-            params: vec![subject.id.as_str().into()],
-        })
-        .await
-        .map_err(|e| XmppError::internal(format!("Failed to resolve user JID: {}", e)))?;
-
-    let Some(row) = row else {
-        return Ok(None);
-    };
-    let localpart = db_string(&row, 0, "xmpp_localpart")
-        .map_err(|e| XmppError::internal(format!("Failed to decode user JID: {}", e)))?;
-    let jid = localpart_to_jid(&localpart, domain)
-        .map_err(|e| XmppError::internal(format!("Failed to build user JID: {}", e)))?
-        .parse()
+    let jid = subject
+        .id
+        .parse::<jid::BareJid>()
         .map_err(|e| XmppError::internal(format!("Failed to parse user JID: {}", e)))?;
     Ok(Some(jid))
 }
 
 pub(crate) async fn set_room_affiliation(
-    global_db_actor: &ActorRef<DbActor>,
     permission_actor: &ActorRef<PermissionActor>,
     channel_id: &str,
     jid: &jid::BareJid,
     affiliation: Affiliation,
 ) -> Result<(), XmppError> {
-    let Some(localpart) = jid.node() else {
+    if jid.node().is_none() {
         return Err(XmppError::bad_request(Some("JID has no localpart".into())));
-    };
-    let row = global_db_actor
-        .ask(DbQueryOne {
-            sql: "SELECT id FROM users WHERE xmpp_localpart = ? LIMIT 1".to_string(),
-            params: vec![localpart.as_str().into()],
-        })
-        .await
-        .map_err(|e| XmppError::internal(format!("Failed to resolve user: {}", e)))?;
-    let Some(row) = row else {
-        return Err(XmppError::item_not_found(Some(format!(
-            "User {} not found",
-            jid
-        ))));
-    };
-    let user_id = db_string(&row, 0, "id")
-        .map_err(|e| XmppError::internal(format!("Failed to decode user id: {}", e)))?;
+    }
 
     let object = Object::new(ObjectType::Channel, channel_id);
-    let subject = Subject::user(&user_id);
+    let subject = Subject::user(jid.to_string());
     for relation in ["owner", "admin", "member", "outcast"] {
         let tuple = Tuple::new(object.clone(), Relation::new(relation), subject.clone());
         permission_actor
@@ -229,10 +198,4 @@ pub(crate) async fn set_room_affiliation(
     }
 
     Ok(())
-}
-
-fn db_string(row: &RowValues, index: usize, name: &str) -> Result<String, String> {
-    row_value(row, index)
-        .and_then(ValueExt::as_string)
-        .map_err(|e| format!("Failed to get {name}: {e}"))
 }

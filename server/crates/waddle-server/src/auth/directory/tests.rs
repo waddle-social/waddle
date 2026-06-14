@@ -23,11 +23,11 @@ async fn seed_oidc_user(actor: &ActorRef<DbActor>, localpart: &str) {
     actor
         .ask(DbExecute {
             sql: "INSERT INTO users \
-                  (id, username, xmpp_localpart, display_name, avatar_url, primary_email, created_at, updated_at) \
+                  (jid, username, xmpp_localpart, display_name, avatar_url, primary_email, created_at, updated_at) \
                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
                 .to_string(),
             params: vec![
-                format!("id-{localpart}").into(),
+                format!("{localpart}@localhost").into(),
                 localpart.into(),
                 localpart.into(),
                 "Test User".into(),

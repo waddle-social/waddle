@@ -127,7 +127,7 @@ fn issuer_is_normalized_for_identity_mapping() {
 }
 
 #[tokio::test]
-async fn existing_identity_updates_username_and_claims_on_login() {
+async fn existing_identity_keeps_immutable_jid_and_updates_profile_on_login() {
     let db = create_test_db().await;
     let actor = crate::db::actor::DbActor::spawn(crate::db::actor::DbActor::new((*db).clone()));
     let service = IdentityService::new(actor);
@@ -139,11 +139,11 @@ async fn existing_identity_updates_username_and_claims_on_login() {
 
         conn.execute(
             r#"
-            INSERT INTO users (id, username, xmpp_localpart, display_name, avatar_url, primary_email, created_at, updated_at)
+            INSERT INTO users (jid, username, xmpp_localpart, display_name, avatar_url, primary_email, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             "#,
             crate::db_params![
-                "user-1",
+                "example.person@waddle.test",
                 "example.person",
                 "example.person",
                 "Example Person",
@@ -159,13 +159,13 @@ async fn existing_identity_updates_username_and_claims_on_login() {
         conn.execute(
             r#"
             INSERT INTO auth_identities (
-                id, user_id, provider_id, issuer, subject, email, email_verified,
+                id, user_jid, provider_id, issuer, subject, email, email_verified,
                 raw_claims_json, created_at, last_login_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
             crate::db_params![
                 "identity-1",
-                "user-1",
+                "example.person@waddle.test",
                 "provider",
                 "https://issuer.example",
                 "sub-1234",
@@ -180,6 +180,9 @@ async fn existing_identity_updates_username_and_claims_on_login() {
         .expect("insert identity");
     }
 
+    // The IDP now reports a different preferred username, display name, and
+    // email. The bare JID is immutable, so the localpart/username/JID must
+    // NOT change; only the mutable profile fields are refreshed.
     let mut claims = claims();
     claims.preferred_username = Some("rawkode".to_string());
     claims.name = Some("Rawkode".to_string());
@@ -190,26 +193,29 @@ async fn existing_identity_updates_username_and_claims_on_login() {
     });
 
     let linked = service
-        .resolve_or_create_user(&provider, &claims)
+        .resolve_or_create_user(&provider, &claims, "waddle.test")
         .await
         .expect("resolve identity");
-    assert_eq!(linked.user.username, "rawkode");
-    assert_eq!(linked.user.xmpp_localpart, "rawkode");
+    assert_eq!(linked.user.jid, "example.person@waddle.test");
+    assert_eq!(linked.user.username, "example.person");
+    assert_eq!(linked.user.xmpp_localpart, "example.person");
 
     let conn = db.guard().await.expect("db guard");
     let mut rows = conn
         .query(
-            "SELECT username, xmpp_localpart, primary_email FROM users WHERE id = ?",
-            crate::db_params!["user-1"],
+            "SELECT username, xmpp_localpart, display_name, primary_email FROM users WHERE jid = ?",
+            crate::db_params!["example.person@waddle.test"],
         )
         .await
         .expect("query user");
     let row = rows.next().await.expect("read row").expect("row exists");
     let username: String = row.get(0).expect("username");
     let xmpp_localpart: String = row.get(1).expect("xmpp_localpart");
-    let primary_email: Option<String> = row.get(2).expect("primary_email");
-    assert_eq!(username, "rawkode");
-    assert_eq!(xmpp_localpart, "rawkode");
+    let display_name: Option<String> = row.get(2).expect("display_name");
+    let primary_email: Option<String> = row.get(3).expect("primary_email");
+    assert_eq!(username, "example.person");
+    assert_eq!(xmpp_localpart, "example.person");
+    assert_eq!(display_name.as_deref(), Some("Rawkode"));
     assert_eq!(primary_email.as_deref(), Some("rawkode@waddle.social"));
 
     let mut rows = conn
@@ -227,7 +233,7 @@ async fn existing_identity_updates_username_and_claims_on_login() {
 }
 
 #[tokio::test]
-async fn existing_identity_uses_suffix_when_username_conflicts() {
+async fn existing_identity_keeps_username_even_when_claim_conflicts() {
     let db = create_test_db().await;
     let actor = crate::db::actor::DbActor::spawn(crate::db::actor::DbActor::new((*db).clone()));
     let service = IdentityService::new(actor);
@@ -239,11 +245,11 @@ async fn existing_identity_uses_suffix_when_username_conflicts() {
 
         conn.execute(
             r#"
-            INSERT INTO users (id, username, xmpp_localpart, created_at, updated_at)
+            INSERT INTO users (jid, username, xmpp_localpart, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?)
             "#,
             crate::db_params![
-                "user-conflict",
+                "rawkode@waddle.test",
                 "rawkode",
                 "rawkode",
                 now.as_str(),
@@ -255,11 +261,11 @@ async fn existing_identity_uses_suffix_when_username_conflicts() {
 
         conn.execute(
             r#"
-            INSERT INTO users (id, username, xmpp_localpart, created_at, updated_at)
+            INSERT INTO users (jid, username, xmpp_localpart, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?)
             "#,
             crate::db_params![
-                "user-1",
+                "example.person@waddle.test",
                 "example.person",
                 "example.person",
                 now.as_str(),
@@ -272,12 +278,12 @@ async fn existing_identity_uses_suffix_when_username_conflicts() {
         conn.execute(
             r#"
             INSERT INTO auth_identities (
-                id, user_id, provider_id, issuer, subject, raw_claims_json, created_at, last_login_at
+                id, user_jid, provider_id, issuer, subject, raw_claims_json, created_at, last_login_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             "#,
             crate::db_params![
                 "identity-1",
-                "user-1",
+                "example.person@waddle.test",
                 "provider",
                 "https://issuer.example",
                 "sub-1234",
@@ -290,6 +296,9 @@ async fn existing_identity_uses_suffix_when_username_conflicts() {
         .expect("insert identity");
     }
 
+    // Even though the IDP now reports `rawkode` (which collides with another
+    // user), the existing identity's immutable JID/username are preserved —
+    // there is no username reallocation on login anymore.
     let mut claims = claims();
     claims.preferred_username = Some("rawkode".to_string());
     claims.raw_claims = json!({
@@ -298,9 +307,10 @@ async fn existing_identity_uses_suffix_when_username_conflicts() {
     });
 
     let linked = service
-        .resolve_or_create_user(&provider, &claims)
+        .resolve_or_create_user(&provider, &claims, "waddle.test")
         .await
         .expect("resolve identity");
-    assert_eq!(linked.user.username, "rawkode1");
-    assert_eq!(linked.user.xmpp_localpart, "rawkode1");
+    assert_eq!(linked.user.jid, "example.person@waddle.test");
+    assert_eq!(linked.user.username, "example.person");
+    assert_eq!(linked.user.xmpp_localpart, "example.person");
 }

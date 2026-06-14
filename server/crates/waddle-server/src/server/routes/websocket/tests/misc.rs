@@ -43,7 +43,7 @@ async fn extension_route_channel_permission_allows_bootstrap_chat_member() {
             tuple: Tuple::new(
                 Object::new(ObjectType::Server, DEPLOYMENT_SERVER_ID),
                 Relation::new("member"),
-                Subject::user(&session.user_id),
+                Subject::user(&session.user_jid),
             ),
         })
         .await
@@ -58,7 +58,7 @@ async fn extension_route_channel_permission_allows_bootstrap_chat_member() {
             tuple: Tuple::new(
                 Object::new(ObjectType::Server, DEPLOYMENT_SERVER_ID),
                 Relation::new("owner"),
-                Subject::user(&owner_session.user_id),
+                Subject::user(&owner_session.user_jid),
             ),
         })
         .await
@@ -127,7 +127,7 @@ async fn extension_route_channel_permission_allows_bootstrap_chat_member() {
             tuple: Tuple::new(
                 Object::new(ObjectType::Channel, "announcements"),
                 Relation::new("writer"),
-                Subject::user(&session.user_id),
+                Subject::user(&session.user_jid),
             ),
         })
         .await

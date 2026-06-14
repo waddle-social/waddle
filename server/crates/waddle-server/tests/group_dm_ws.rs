@@ -758,10 +758,10 @@ async fn seed_oidc_user(database_url: &str, localpart: &str) {
         .expect("open sqlite db for oidc seed");
     sqlx::query(
         "INSERT INTO users \
-         (id, username, xmpp_localpart, display_name, avatar_url, primary_email, created_at, updated_at) \
+         (jid, username, xmpp_localpart, display_name, avatar_url, primary_email, created_at, updated_at) \
          VALUES (?, ?, ?, ?, NULL, NULL, ?, ?)",
     )
-    .bind(format!("id-{localpart}"))
+    .bind(format!("{localpart}@localhost"))
     .bind(localpart)
     .bind(localpart)
     .bind("OIDC Member")
