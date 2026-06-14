@@ -24,31 +24,37 @@ export function callAudioProcessingEventAttributes(
 
 /** Stateful, per-call de-duplicating beacon over the verified mic state. */
 export type CallAudioProcessingBeacon = {
-  /** Report `state` unless it is value-equal to the last reported one. */
+  /** Report `state` unless an equal state already beaconed this call. */
   observe(state: MicAudioProcessing): void;
-  /** Forget the last reported state so the next call re-arms from scratch. */
+  /** Forget the states seen this call so the next call re-arms from scratch. */
   reset(): void;
 };
 
 /**
- * Wrap a `report` sink with the same value-dedup the #911 store uses, so a
- * given verified state beacons at most once per call: redundant recomputes
- * (the initial publish emits twice, mid-call restarts that change nothing)
- * collapse to a single beacon. `reset()` is called when a call ends so the
- * next call starts fresh.
+ * Wrap a `report` sink so each *distinct* verified state beacons at most once
+ * per call: redundant recomputes (the initial publish emits twice, mid-call
+ * restarts that change nothing) collapse to a single beacon, and a state that
+ * recurs after the mic cycles away and back — e.g. `active` → `no-mic` →
+ * `active` on a mute/unmute or device reconnect — is not beaconed a second
+ * time. Only genuinely new states for this call fire. `reset()` is called
+ * when a call ends so the next call starts with an empty seen-set.
+ *
+ * The seen-set is bounded and tiny (one `no-mic` plus the handful of reachable
+ * tri-state combinations), so a linear scan with the same value-equality the
+ * #911 store uses is both simplest and correct.
  */
 export function createCallAudioProcessingBeacon(
   report: (state: MicAudioProcessing) => void,
 ): CallAudioProcessingBeacon {
-  let last: MicAudioProcessing | null = null;
+  let seen: MicAudioProcessing[] = [];
   return {
     observe(state) {
-      if (last && sameMicAudioProcessing(last, state)) return;
-      last = state;
+      if (seen.some((prior) => sameMicAudioProcessing(prior, state))) return;
+      seen.push(state);
       report(state);
     },
     reset() {
-      last = null;
+      seen = [];
     },
   };
 }

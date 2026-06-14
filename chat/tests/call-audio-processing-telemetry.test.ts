@@ -80,6 +80,22 @@ describe("createCallAudioProcessingBeacon", () => {
     expect(reported).toEqual([ACTIVE_ON, nsOff]);
   });
 
+  test("does not re-beacon a state already seen earlier in the same call", () => {
+    const reported: MicAudioProcessing[] = [];
+    const beacon = createCallAudioProcessingBeacon((state) => reported.push(state));
+    const noMic: MicAudioProcessing = { kind: "no-mic" };
+
+    // Mute/unmute (or a device reconnect) cycles active → no-mic → active.
+    // The returning `active` state is a duplicate within the call and must
+    // not produce a second beacon (acceptance criterion: "Redundant/
+    // duplicate states do not produce repeated beacons within a call").
+    beacon.observe(ACTIVE_ON);
+    beacon.observe(noMic);
+    beacon.observe({ ...ACTIVE_ON });
+
+    expect(reported).toEqual([ACTIVE_ON, noMic]);
+  });
+
   test("reset re-arms the beacon for the next call", () => {
     const reported: MicAudioProcessing[] = [];
     const beacon = createCallAudioProcessingBeacon((state) => reported.push(state));
