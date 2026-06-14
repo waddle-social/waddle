@@ -191,7 +191,7 @@ use super::presence::{
     get_managed_channel_for_room, send_current_presence_from_user_to_jid,
     send_unavailable_presence_from_user_to_jid,
 };
-use crate::auth::{NativeUserStore, Session};
+use crate::auth::{local_account_exists, Session};
 use crate::db::actor::{DbExecute, DbQuery, DbQueryOne, GetDatabase};
 use crate::db::blocking::DatabaseBlockingStorage;
 use crate::db::roster::{

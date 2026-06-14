@@ -2,6 +2,9 @@
 
 mod ws_common;
 
+use std::str::FromStr;
+use std::time::Duration;
+
 use ws_common::{
     disco_info_query, entity_time_query, extract_element_text, last_activity_query, TestServer,
     WsXmppClient,
@@ -142,6 +145,87 @@ async fn websocket_entity_time_rejects_non_server_target() {
     assert!(
         response.contains("service-unavailable"),
         "expected service-unavailable for non-server entity time target, got: {response}"
+    );
+
+    let _ = client.close().await;
+}
+
+/// Insert an OIDC-provisioned identity straight into `users`, mirroring
+/// `auth/identity.rs::create_user`. The ws harness only provisions native
+/// accounts, so this is the only way to exercise the OIDC user path.
+async fn seed_oidc_user(database_url: &str, localpart: &str) {
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+
+    let options = SqliteConnectOptions::from_str(database_url)
+        .expect("parse sqlite url")
+        .busy_timeout(Duration::from_secs(5));
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .expect("open sqlite db for oidc seed");
+    sqlx::query(
+        "INSERT INTO users \
+         (id, username, xmpp_localpart, display_name, avatar_url, primary_email, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, NULL, NULL, ?, ?)",
+    )
+    .bind(format!("id-{localpart}"))
+    .bind(localpart)
+    .bind(localpart)
+    .bind("OIDC Member")
+    .bind("2026-01-01T00:00:00Z")
+    .bind("2026-01-01T00:00:00Z")
+    .execute(&pool)
+    .await
+    .expect("seed oidc user row");
+    pool.close().await;
+}
+
+/// Regression: a `jabber:iq:last` query for an offline **OIDC-registered** user
+/// must return `forbidden` (a known account whose presence is private), not
+/// `service-unavailable` (which means "no such entity"). The existence gate
+/// previously consulted `native_users` only, so OIDC users were reported as
+/// nonexistent. See issue #983.
+#[tokio::test]
+async fn websocket_last_activity_for_offline_oidc_user_is_forbidden() {
+    let db_dir = tempfile::tempdir().expect("temp db dir");
+    let db_path = db_dir.path().join("xep0012-oidc.sqlite3");
+    let database_url = format!("sqlite://{}?mode=rwc", db_path.display());
+    let server = TestServer::start_persistent_with_extra_accounts(&database_url, &[]);
+    let password = server.fixed_account_password().to_string();
+    let mut client = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        USERNAME,
+        &password,
+        &format!("activity-oidc-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("websocket connection");
+
+    // `carol` exists only via OIDC (a row in `users`), is offline, and has no
+    // recorded activity — so the query falls through to the existence gate.
+    seed_oidc_user(&database_url, "carol").await;
+
+    let response = last_activity_query(&mut client, "carol@localhost", "ws-last-oidc")
+        .await
+        .expect("last activity response");
+    assert!(
+        response.contains("forbidden"),
+        "offline OIDC user must be forbidden (known account), got: {response}"
+    );
+    assert!(
+        !response.contains("service-unavailable"),
+        "OIDC user must not be reported as nonexistent: {response}"
+    );
+
+    // Control: a truly unknown local user is still service-unavailable.
+    let ghost = last_activity_query(&mut client, "ghost@localhost", "ws-last-ghost")
+        .await
+        .expect("ghost response");
+    assert!(
+        ghost.contains("service-unavailable"),
+        "unknown local user must be service-unavailable: {ghost}"
     );
 
     let _ = client.close().await;
