@@ -141,6 +141,62 @@ describe("call activity dock model", () => {
     ]);
   });
 
+  test("surfaces group-DM room calls while the DM sidebar is active", () => {
+    const entries = buildCallActivityDockEntries({
+      channels: [],
+      groupDms: [
+        { id: "gdm-launch", name: "Launch crew", roomJid: "group-dm-launch@muc.example.com" },
+      ],
+      conversations: [],
+      activeChannelId: "gdm-launch",
+      activeChannelRoomJid: "group-dm-launch@muc.example.com",
+      activePeerJid: null,
+      sidebarMode: "dms",
+      activeChannelJids: new Set(["group-dm-launch@muc.example.com"]),
+      managedMucDomain: "muc.example.com",
+      callParticipantCounts: {
+        "group-dm-launch@muc.example.com": 2,
+      },
+      callParticipants: {
+        "group-dm-launch@muc.example.com": ["alice", "bob"],
+      },
+      callMediaByRoom: {
+        "group-dm-launch@muc.example.com": { audio: true, video: true },
+      },
+      dmCallActivities: {},
+    });
+
+    expect(entries).toEqual([
+      {
+        kind: "channel",
+        key: "group-dm:gdm-launch",
+        channelId: "gdm-launch",
+        roomJid: "group-dm-launch@muc.example.com",
+        title: "Launch crew",
+        participantCount: 2,
+        participantLabels: ["alice", "bob"],
+        media: { audio: true, video: true },
+        isKnownChannel: true,
+        isActive: true,
+        isGroupDm: true,
+      },
+    ]);
+    expect(callActivityDockSelection(entries[0], { phase: "idle" }, "alice@example.com/web")).toEqual({
+      kind: "group-dm-join",
+      roomJid: "group-dm-launch@muc.example.com",
+      media: { audio: true, video: true },
+    });
+    expect(callActivityDockSelection(entries[0], {
+      phase: "outgoing",
+      to: "bob@example.com",
+      sid: "dm-call",
+      media: { audio: true, video: false },
+    }, "alice@example.com/web")).toEqual({
+      kind: "group-dm",
+      roomJid: "group-dm-launch@muc.example.com",
+    });
+  });
+
   test("falls back to peer localpart and orders DM calls by recency", () => {
     const entries = buildCallActivityDockEntries({
       channels: [],
@@ -670,6 +726,59 @@ describe("CallActivityDock rendering", () => {
     ]);
   });
 
+  test("activates group-DM call rows through DM-specific join and open events", async () => {
+    const props = {
+      channels: [],
+      groupDms: [
+        { id: "gdm-launch", name: "Launch crew", roomJid: "group-dm-launch@muc.example.com" },
+      ],
+      conversations: [],
+      activeChannelId: null,
+      activePeerJid: null,
+      sidebarMode: "dms",
+      activeChannelJids: new Set(["group-dm-launch@muc.example.com"]),
+      managedMucDomain: "muc.example.com",
+      callParticipants: {
+        "group-dm-launch@muc.example.com": ["alice", "bob"],
+      },
+      callMediaByRoom: {
+        "group-dm-launch@muc.example.com": { audio: true, video: true },
+      },
+      selfFullJid: "alice@example.com/web",
+    };
+
+    const emitted: unknown[][] = [];
+    let bindings = await setupVueComponent("../src/components/calls/CallActivityDock.vue", props, (...args) => {
+      emitted.push(args);
+    });
+    setupBindingFunction(bindings, "selectEntry")(
+      setupBindingRefValue<unknown[]>(bindings, "visibleEntries")[0],
+    );
+
+    expect(emitted).toEqual([
+      ["joinGroupDmCall", "group-dm-launch@muc.example.com", { audio: true, video: true }],
+    ]);
+
+    clearCallState();
+    $callState.set({
+      phase: "outgoing",
+      to: "bob@example.com",
+      sid: "dm-call",
+      media: { audio: true, video: false },
+    });
+    emitted.length = 0;
+    bindings = await setupVueComponent("../src/components/calls/CallActivityDock.vue", props, (...args) => {
+      emitted.push(args);
+    });
+    setupBindingFunction(bindings, "selectEntry")(
+      setupBindingRefValue<unknown[]>(bindings, "visibleEntries")[0],
+    );
+
+    expect(emitted).toEqual([
+      ["selectGroupDm", "group-dm-launch@muc.example.com"],
+    ]);
+  });
+
   test("renders active group calls before channel metadata hydrates", async () => {
     $mucCallParticipants.set({
       "general@conference.example.com": ["alice", "bob"],
@@ -693,6 +802,94 @@ describe("CallActivityDock rendering", () => {
     expect(html).toContain("Join");
     expect(html).toContain("aria-label=\"Join general, Group call · syncing · 2 people, alice, bob in call\"");
     expect(html).not.toContain("disabled");
+  });
+
+  test("routes pre-hydration group-DM fallback calls through DM-specific events", async () => {
+    const props = {
+      channels: [],
+      groupDms: [],
+      conversations: [],
+      activeChannelId: null,
+      activePeerJid: null,
+      sidebarMode: "dms",
+      activeChannelJids: new Set<string>(),
+      managedMucDomain: "muc.example.com",
+      callParticipants: {
+        "group-dm-launch@muc.example.com": ["alice", "bob"],
+      },
+      callMediaByRoom: {
+        "group-dm-launch@muc.example.com": { audio: true, video: true },
+      },
+      selfFullJid: "alice@example.com/web",
+    };
+
+    const entries = buildCallActivityDockEntries({
+      ...props,
+      callParticipantCounts: {
+        "group-dm-launch@muc.example.com": 2,
+      },
+      dmCallActivities: {},
+    });
+    expect(callActivityDockSelection(entries[0], { phase: "idle" }, "alice@example.com/web")).toEqual({
+      kind: "group-dm-join",
+      roomJid: "group-dm-launch@muc.example.com",
+      media: { audio: true, video: true },
+    });
+
+    const emitted: unknown[][] = [];
+    const bindings = await setupVueComponent("../src/components/calls/CallActivityDock.vue", props, (...args) => {
+      emitted.push(args);
+    });
+    setupBindingFunction(bindings, "selectEntry")(
+      setupBindingRefValue<unknown[]>(bindings, "visibleEntries")[0],
+    );
+
+    expect(emitted).toEqual([
+      ["joinGroupDmCall", "group-dm-launch@muc.example.com", { audio: true, video: true }],
+    ]);
+  });
+
+  test("keeps unmatched channel fallback calls on channel events while DMs are open", async () => {
+    const props = {
+      channels: [],
+      groupDms: [],
+      conversations: [],
+      activeChannelId: null,
+      activePeerJid: null,
+      sidebarMode: "dms",
+      activeChannelJids: new Set<string>(),
+      managedMucDomain: "muc.example.com",
+      callParticipants: {
+        "general@muc.example.com": ["alice", "bob"],
+      },
+      selfFullJid: "alice@example.com/web",
+    };
+
+    const entries = buildCallActivityDockEntries({
+      ...props,
+      callParticipantCounts: {
+        "general@muc.example.com": 2,
+      },
+      dmCallActivities: {},
+    });
+    expect(callActivityDockSelection(entries[0], { phase: "idle" }, "alice@example.com/web")).toEqual({
+      kind: "channel-join",
+      channelId: null,
+      roomJid: "general@muc.example.com",
+      media: { audio: true, video: false },
+    });
+
+    const emitted: unknown[][] = [];
+    const bindings = await setupVueComponent("../src/components/calls/CallActivityDock.vue", props, (...args) => {
+      emitted.push(args);
+    });
+    setupBindingFunction(bindings, "selectEntry")(
+      setupBindingRefValue<unknown[]>(bindings, "visibleEntries")[0],
+    );
+
+    expect(emitted).toEqual([
+      ["joinChannelCall", null, "general@muc.example.com", { audio: true, video: false }],
+    ]);
   });
 
   test("keeps group calls visible when the desktop DM dock suppresses DM rows", async () => {
@@ -1201,7 +1398,9 @@ describe("CallActivityDock rendering", () => {
     expect(readyShell).toContain(":call-participants=\"retainedMucCallParticipantsStore\"");
     expect(readyShell).toContain(":call-media-by-room=\"retainedMucCallMediaStore\"");
     expect(readyShell).toContain("@select-channel=\"onSelectChannelFromSidebar\"");
+    expect(readyShell).toContain("@select-group-dm=\"selectGroupDm\"");
     expect(readyShell).toContain("@join-channel-call=\"joinChannelCallFromActivity\"");
+    expect(readyShell).toContain("@join-group-dm-call=\"joinGroupDmCallFromActivity\"");
     expect(readyShell.match(/@leave-channel-call="leaveRetainedChannelCall"/g)?.length ?? 0).toBeGreaterThanOrEqual(3);
     expect(readyShell).toContain("@answer-dm=\"answerDmFromActivity\"");
     expect(readyShell).toContain("@select-dm=\"selectDm\"");
@@ -1818,6 +2017,26 @@ describe("CallActivityDock rendering", () => {
     expect(html).toContain("Live video call");
     expect(html).toContain("Reconnect bob call, Live now, Live video call");
     expect(html).toContain("Live");
+  });
+
+  test("renders active group-DM call indicators in the direct-message panel", async () => {
+    $mucCallParticipants.set({
+      "group-dm-launch@muc.example.com": ["alice", "bob"],
+    });
+    $mucCallMedia.setKey("group-dm-launch@muc.example.com", { audio: true, video: true });
+
+    const html = await renderVueComponent("../src/components/chat/DmPanel.vue", {
+      conversations: [],
+      groupDms: [
+        { id: "gdm-launch", name: "Launch crew", roomJid: "group-dm-launch@muc.example.com" },
+      ],
+      activePeerJid: null,
+      activeGroupDmRoomJid: null,
+    });
+
+    expect(html).toContain("Launch crew");
+    expect(html).toContain("Video call");
+    expect(html).toContain('aria-label="Open group message Launch crew, Video call live, 2 people"');
   });
 
   test("orders direct-call panel rows by action urgency before recency", async () => {
@@ -2989,7 +3208,19 @@ describe("CallActivityDock rendering", () => {
       callParticipantCounts: { "standup@conference.example.com": 2 },
       dmCallActivities: {},
     })[0];
-    if (!validDmEntry || !staleDmEntry || !fallbackRoomEntry) {
+    const groupDmFallbackRoomEntry = buildCallActivityDockEntries({
+      channels: [],
+      conversations: [],
+      activeChannelId: null,
+      activePeerJid: null,
+      sidebarMode: "channels",
+      activeChannelJids: new Set(["group-dm-launch@conference.example.com"]),
+      managedMucDomain: "conference.example.com",
+      callParticipantCounts: { "group-dm-launch@conference.example.com": 2 },
+      callMediaByRoom: { "group-dm-launch@conference.example.com": { audio: true, video: true } },
+      dmCallActivities: {},
+    })[0];
+    if (!validDmEntry || !staleDmEntry || !fallbackRoomEntry || !groupDmFallbackRoomEntry) {
       throw new Error("expected call entries for dashboard routing test");
     }
     const bindings = await suppressVueLifecycleSetupWarnings(() =>
@@ -3001,7 +3232,10 @@ describe("CallActivityDock rendering", () => {
         channelUnreadMap: {},
         activeChannelJids: new Set(["standup@conference.example.com"]),
         managedMucDomain: "conference.example.com",
-        callParticipantCounts: { "standup@conference.example.com": 2 },
+        callParticipantCounts: {
+          "standup@conference.example.com": 2,
+          "group-dm-launch@conference.example.com": 2,
+        },
         dmConversations: [],
         selfFullJid: "alice@example.com/web",
       }, (...args) => {
@@ -3012,11 +3246,13 @@ describe("CallActivityDock rendering", () => {
     setupBindingFunction(bindings, "selectCallEntry")(validDmEntry);
     setupBindingFunction(bindings, "selectCallEntry")(staleDmEntry);
     setupBindingFunction(bindings, "selectCallEntry")(fallbackRoomEntry);
+    setupBindingFunction(bindings, "selectCallEntry")(groupDmFallbackRoomEntry);
 
     expect(emitted).toEqual([
       ["reconnectDm", "bob@example.com", { audio: true, video: true }],
       ["selectContact", "carol@example.com"],
       ["joinChannelCall", null, "standup@conference.example.com", { audio: true, video: false }],
+      ["joinGroupDmCall", "group-dm-launch@conference.example.com", { audio: true, video: true }],
     ]);
   });
 

@@ -66,6 +66,8 @@ const emit = defineEmits<{
   selectChannel: [id: string, roomJid?: string];
   selectChannelRoom: [roomJid: string];
   joinChannelCall: [channelId: string | null, roomJid: string, media: CallMedia];
+  selectGroupDm: [roomJid: string];
+  joinGroupDmCall: [roomJid: string, media: CallMedia];
   leaveChannelCall: [roomJid: string];
   answerDm: [peerJid: string, remoteFullJid: string, sid: string, media: CallMedia];
   selectContact: [jid: string];
@@ -220,12 +222,18 @@ function selectCallEntry(entry: CallActivityDockEntry) {
     case "channel-join":
       emit("joinChannelCall", selection.channelId, selection.roomJid, selection.media);
       return;
+    case "group-dm-join":
+      emit("joinGroupDmCall", selection.roomJid, selection.media);
+      return;
     case "channel":
       if (selection.channelId) {
         emit("selectChannel", selection.channelId, selection.roomJid);
         return;
       }
       if (selection.roomJid) emit("selectChannelRoom", selection.roomJid);
+      return;
+    case "group-dm":
+      emit("selectGroupDm", selection.roomJid);
       return;
     case "dm-reconnect":
       emit("reconnectDm", selection.peerJid, selection.media);
