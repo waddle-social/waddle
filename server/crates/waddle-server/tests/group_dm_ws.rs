@@ -741,6 +741,103 @@ async fn group_dm_create_provisions_hidden_members_only_room_with_disco_feature(
     let _ = alice.close().await;
 }
 
+/// Insert an OIDC-provisioned identity straight into `users`, mirroring
+/// `auth/identity.rs::create_user`. The ws harness only provisions native
+/// (`WADDLE_TEST_EXTRA_FIXED_ACCOUNTS`) accounts, so this is the only way to
+/// exercise the OIDC member path end to end.
+async fn seed_oidc_user(database_url: &str, localpart: &str) {
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+
+    let options = SqliteConnectOptions::from_str(database_url)
+        .expect("parse sqlite url")
+        .busy_timeout(Duration::from_secs(5));
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .expect("open sqlite db for oidc seed");
+    sqlx::query(
+        "INSERT INTO users \
+         (id, username, xmpp_localpart, display_name, avatar_url, primary_email, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, NULL, NULL, ?, ?)",
+    )
+    .bind(format!("id-{localpart}"))
+    .bind(localpart)
+    .bind(localpart)
+    .bind("OIDC Member")
+    .bind("2026-01-01T00:00:00Z")
+    .bind("2026-01-01T00:00:00Z")
+    .execute(&pool)
+    .await
+    .expect("seed oidc user row");
+    pool.close().await;
+}
+
+/// Regression: group-DM creation must accept members provisioned through the
+/// OIDC/web login flow (rows in `users`), not only XEP-0077/SCRAM accounts
+/// (`native_users`). Before the unified directory lookup, the member existence
+/// check consulted `native_users` only, so every web-registered user was
+/// rejected with `item-not-found` ("group-DM member does not exist").
+#[tokio::test]
+async fn group_dm_create_accepts_oidc_registered_member() {
+    let _serial = TEST_SERIAL.lock().await;
+    let db_dir = tempfile::tempdir().expect("temp db dir");
+    let db_path = db_dir.path().join("group-dm-oidc.sqlite3");
+    let database_url = format!("sqlite://{}?mode=rwc", db_path.display());
+    let server =
+        TestServer::start_persistent_with_extra_accounts(&database_url, &[("alice", "alice-pass")]);
+
+    // Connecting alice guarantees the server is up and migrations have run
+    // before we write the OIDC row directly into `users`.
+    let mut alice = user_client(&server, "alice", "alice-pass", "group-dm-oidc-1").await;
+    seed_oidc_user(&database_url, "carol").await;
+
+    // A member present in neither `users` nor `native_users` is still rejected.
+    let missing = send_command(
+        &mut alice,
+        NODE_GROUP_DM_CREATE,
+        "group-dm-oidc-missing",
+        submit_form(
+            NODE_GROUP_DM_CREATE,
+            vec![
+                text_field("name", "Alice & Ghost"),
+                list_multi_field("member_jids", &["alice@localhost", "ghost@localhost"]),
+            ],
+        ),
+    )
+    .await;
+    assert!(
+        is_error(&missing) && missing.contains("item-not-found"),
+        "unknown member must still be rejected: {missing}"
+    );
+
+    // The OIDC-registered member is accepted.
+    let resp = send_command(
+        &mut alice,
+        NODE_GROUP_DM_CREATE,
+        "group-dm-oidc-create",
+        submit_form(
+            NODE_GROUP_DM_CREATE,
+            vec![
+                text_field("name", "Alice & Carol"),
+                list_multi_field("member_jids", &["alice@localhost", "carol@localhost"]),
+            ],
+        ),
+    )
+    .await;
+    assert!(
+        is_result(&resp),
+        "OIDC-registered member must be accepted into a group DM: {resp}"
+    );
+    let room_jid = extract_field(&resp, "room_jid").expect("room_jid in response");
+    assert!(
+        room_jid.ends_with("@muc.localhost"),
+        "expected managed MUC room, got: {room_jid}"
+    );
+
+    let _ = alice.close().await;
+}
+
 #[tokio::test]
 async fn group_dm_member_invites_new_member_with_history_access_extension() {
     let _serial = TEST_SERIAL.lock().await;

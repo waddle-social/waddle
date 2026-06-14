@@ -52,7 +52,7 @@ use xmpp_parsers::message::{Message, MessageType};
 use xmpp_parsers::minidom::Element;
 
 use crate::admin::is_community_owner;
-use crate::auth::NativeUserStore;
+use crate::auth::local_account_exists;
 use crate::channel_space_links::{ChannelSpaceLink, ChannelSpaceLinkError};
 use crate::db::actor::{DbExecute, DbQuery};
 use crate::db::{row_value, ValueExt};
@@ -2561,11 +2561,13 @@ pub(crate) async fn validate_group_dm_invitee(
             "invitee must be a user JID with a localpart".to_string(),
         )));
     };
-    let native_users = NativeUserStore::new(state.db_pool.global_actor().clone());
-    let exists = native_users
-        .user_exists(&localpart, invitee_jid.domain().as_str())
-        .await
-        .map_err(|error| XmppError::internal(format!("native user lookup failed: {error}")))?;
+    let exists = local_account_exists(
+        state.db_pool.global_actor(),
+        &localpart,
+        invitee_jid.domain().as_str(),
+    )
+    .await
+    .map_err(|error| XmppError::internal(format!("user lookup failed: {error}")))?;
     if !exists {
         return Err(XmppError::item_not_found(Some(format!(
             "group-DM invitee does not exist: {invitee_jid}"
@@ -2579,7 +2581,6 @@ async fn validate_group_dm_members(
     creator_jid: &BareJid,
     member_jids: &[BareJid],
 ) -> Result<(), AdminErr> {
-    let native_users = NativeUserStore::new(state.db_pool.global_actor().clone());
     for member_jid in member_jids {
         if member_jid.domain() != creator_jid.domain() {
             return Err(bad_request(format!(
@@ -2590,10 +2591,13 @@ async fn validate_group_dm_members(
         let Some(localpart) = member_jid.node().map(|node| node.to_string()) else {
             return Err(bad_request("member_jids must be user JIDs with localparts"));
         };
-        let exists = native_users
-            .user_exists(&localpart, member_jid.domain().as_str())
-            .await
-            .map_err(|error| internal_err(format!("native user lookup failed: {error}")))?;
+        let exists = local_account_exists(
+            state.db_pool.global_actor(),
+            &localpart,
+            member_jid.domain().as_str(),
+        )
+        .await
+        .map_err(|error| internal_err(format!("user lookup failed: {error}")))?;
         if !exists {
             return Err(Box::new(CommandResult::Error(XmppError::item_not_found(
                 Some(format!("group-DM member does not exist: {member_jid}")),

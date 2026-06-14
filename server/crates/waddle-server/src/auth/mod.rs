@@ -6,6 +6,7 @@
 //! - Local session management with UUID principals
 //! - Optional native XMPP auth (XEP-0077/SCRAM)
 
+pub mod directory;
 pub mod identity;
 pub mod jid;
 pub mod native;
@@ -16,6 +17,7 @@ pub mod session;
 
 use thiserror::Error;
 
+pub use directory::local_account_exists;
 pub use identity::IdentityClaims;
 pub use jid::{localpart_to_jid, username_to_localpart};
 pub use native::{NativeUserStore, RegisterRequest};
