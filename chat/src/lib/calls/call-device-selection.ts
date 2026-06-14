@@ -1,5 +1,7 @@
 import {
+  type AudioProcessingPrefs,
   setCamDevice,
+  setAudioProcessingPrefs,
   setMicDevice,
   setSpeakerDevice,
 } from "./device-prefs";
@@ -10,6 +12,10 @@ export type CallDeviceSelectionEngine = {
   setMicDevice(deviceId: string): Promise<void>;
   setCameraDevice(deviceId: string): Promise<void>;
   setSpeakerDevice(deviceId: string): Promise<void>;
+};
+
+export type CallAudioProcessingSelectionEngine = {
+  setAudioProcessing(prefs: AudioProcessingPrefs): Promise<void>;
 };
 
 export async function applyCallDeviceSelection(
@@ -30,4 +36,12 @@ export async function applyCallDeviceSelection(
   }
   await engine.setSpeakerDevice(activeDeviceId);
   setSpeakerDevice(deviceId);
+}
+
+export async function applyAudioProcessingSelection(
+  prefs: AudioProcessingPrefs,
+  engine: CallAudioProcessingSelectionEngine,
+): Promise<void> {
+  await engine.setAudioProcessing(prefs);
+  setAudioProcessingPrefs(prefs);
 }

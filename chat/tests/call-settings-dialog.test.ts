@@ -25,6 +25,24 @@ describe("CallSettingsDialog speaker support", () => {
 
 });
 
+describe("CallSettingsDialog audio processing controls", () => {
+  test("renders requested noise cancellation controls near the applied-state readout", async () => {
+    const html = await renderVueComponent("../src/components/calls/CallSettingsDialog.vue", {
+      open: true,
+      "onUpdate:open": () => undefined,
+    });
+
+    expect(html).toContain("Noise cancellation");
+    expect(html).toContain("Echo cancellation");
+    expect(html).toContain("Auto gain control");
+    expect(html).toContain("<fieldset");
+    expect(html).toContain("disabled");
+    expect(html).toContain("aria-describedby=\"call-processing-no-mic\"");
+    expect(html).toContain("Requested audio processing");
+    expect(html).toContain("Audio processing");
+  });
+});
+
 async function renderVueComponent(path: string, props: Record<string, unknown>): Promise<string> {
   const component = await loadVueComponent(path);
   return renderToString(createSSRApp({ render: () => h(component, props) }));

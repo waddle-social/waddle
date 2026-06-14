@@ -1,5 +1,7 @@
 import { describe, expect, mock, test } from "bun:test";
 import {
+  audioCaptureDefaultsForPrefs,
+  callRoomOptionsForPrefs,
   enableRequestedCapture,
   mapLiveKitConnectionQuality,
   mapLiveKitConnectionState,
@@ -12,6 +14,7 @@ import {
 } from "../src/lib/calls/engine";
 import { ConnectionQuality, ConnectionState, Track } from "livekit-client";
 import type { MicAudioProcessing } from "../src/lib/calls/mic-audio-processing";
+import type { AudioProcessingPrefs } from "../src/lib/calls/device-prefs";
 
 function deviceError(name: string): Error {
   const err = new Error(`${name} message`);
@@ -59,6 +62,44 @@ function screenShareStub(opts: { audioThrows?: Error } = {}) {
 // is exercised by manual smoke tests in the browser per the call PR
 // plan, and by the planned `calls_e2e` integration test on the server.
 describe("call-engine module", () => {
+  test("maps persisted audio processing preferences into connect-time capture defaults", () => {
+    const audioProcessing: AudioProcessingPrefs = {
+      noiseSuppression: false,
+      echoCancellation: false,
+      autoGainControl: false,
+    };
+
+    expect(audioCaptureDefaultsForPrefs({ mic: "headset-mic", audioProcessing })).toEqual({
+      deviceId: "headset-mic",
+      noiseSuppression: false,
+      echoCancellation: false,
+      autoGainControl: false,
+    });
+    expect(audioCaptureDefaultsForPrefs({ mic: null, audioProcessing })).toEqual({
+      deviceId: undefined,
+      noiseSuppression: false,
+      echoCancellation: false,
+      autoGainControl: false,
+    });
+    expect(
+      callRoomOptionsForPrefs({
+        mic: "headset-mic",
+        cam: "desk-cam",
+        audioProcessing,
+      }),
+    ).toMatchObject({
+      audioCaptureDefaults: {
+        deviceId: "headset-mic",
+        noiseSuppression: false,
+        echoCancellation: false,
+        autoGainControl: false,
+      },
+      videoCaptureDefaults: {
+        deviceId: "desk-cam",
+      },
+    });
+  });
+
   test("resolves participant audio volume by identity and source with default full volume", () => {
     const store: ParticipantAudioVolumeStore = {
       "bob@waddle.test/desktop:microphone": 0.3,
@@ -656,16 +697,20 @@ describe("enableRequestedCapture — best-effort, never ejects", () => {
  */
 function micRoomStub(
   settings: MediaTrackSettings | null,
-  opts: { readyState?: MediaStreamTrackState; isMuted?: boolean } = {},
+  opts: {
+    readyState?: MediaStreamTrackState;
+    isMuted?: boolean;
+    restartTrack?: (constraints: unknown) => Promise<void>;
+  } = {},
 ) {
-  const { readyState = "live", isMuted = false } = opts;
+  const { readyState = "live", isMuted = false, restartTrack } = opts;
   const publication =
     settings === null
       ? undefined
       : {
           isMuted,
           source: Track.Source.Microphone,
-          track: { mediaStreamTrack: { readyState, getSettings: () => settings } },
+          track: { mediaStreamTrack: { readyState, getSettings: () => settings }, restartTrack },
         };
   return {
     localParticipant: {
@@ -897,6 +942,87 @@ describe("call-engine — verifies applied mic audio processing", () => {
         autoGainControl: "unknown",
       },
     ]);
+  });
+
+  test("a mid-call audio processing change restarts the active mic track in place", async () => {
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine();
+    const restarts: unknown[] = [];
+    const events: MicAudioProcessing[] = [];
+    engine.on("micAudioProcessingChanged", (state) => events.push(state));
+    (engine as unknown as { room: unknown }).room = micRoomStub(
+      {
+        deviceId: "headset-mic",
+        noiseSuppression: false,
+        echoCancellation: false,
+        autoGainControl: false,
+      } as MediaTrackSettings,
+      {
+        restartTrack: async (constraints: unknown) => {
+          restarts.push(constraints);
+        },
+      },
+    );
+
+    await engine.setAudioProcessing({
+      noiseSuppression: false,
+      echoCancellation: false,
+      autoGainControl: false,
+    });
+
+    expect(restarts).toEqual([
+      {
+        noiseSuppression: false,
+        echoCancellation: false,
+        autoGainControl: false,
+        deviceId: "headset-mic",
+      },
+    ]);
+    expect(events.at(-1)).toEqual({
+      kind: "active",
+      noiseSuppression: "off",
+      echoCancellation: "off",
+      autoGainControl: "off",
+    });
+  });
+
+  test("an audio processing change with no room or no active mic is a safe no-op", async () => {
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine();
+    await engine.setAudioProcessing({
+      noiseSuppression: false,
+      echoCancellation: false,
+      autoGainControl: false,
+    });
+    (engine as unknown as { room: unknown }).room = micRoomStub(null);
+    await engine.setAudioProcessing({
+      noiseSuppression: true,
+      echoCancellation: true,
+      autoGainControl: true,
+    });
+  });
+
+  test("an audio processing change with a muted mic is a safe no-op", async () => {
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine();
+    const restarts: unknown[] = [];
+    (engine as unknown as { room: unknown }).room = micRoomStub(
+      { noiseSuppression: true } as MediaTrackSettings,
+      {
+        isMuted: true,
+        restartTrack: async (constraints: unknown) => {
+          restarts.push(constraints);
+        },
+      },
+    );
+
+    await engine.setAudioProcessing({
+      noiseSuppression: false,
+      echoCancellation: false,
+      autoGainControl: false,
+    });
+
+    expect(restarts).toEqual([]);
   });
 
   test("a device change with no connected room emits no-mic, not a crash", async () => {
