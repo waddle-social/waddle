@@ -17,6 +17,8 @@ DROP TABLE IF EXISTS roster_versions;
 DROP TABLE IF EXISTS blocking_list;
 DROP TABLE IF EXISTS private_xml_storage;
 DROP TABLE IF EXISTS provider_webhook_deliveries;
+DROP TABLE IF EXISTS user_avatar_fetch_state;
+DROP TABLE IF EXISTS user_avatar_source;
 
 CREATE TABLE users (
     jid TEXT PRIMARY KEY,
@@ -187,6 +189,8 @@ DROP TABLE IF EXISTS roster_versions CASCADE;
 DROP TABLE IF EXISTS blocking_list CASCADE;
 DROP TABLE IF EXISTS private_xml_storage CASCADE;
 DROP TABLE IF EXISTS provider_webhook_deliveries CASCADE;
+DROP TABLE IF EXISTS user_avatar_fetch_state CASCADE;
+DROP TABLE IF EXISTS user_avatar_source CASCADE;
 
 CREATE TABLE users (
     jid TEXT PRIMARY KEY,
