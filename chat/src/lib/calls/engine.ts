@@ -774,9 +774,13 @@ export class CallEngine {
     // requested in `audioCaptureDefaults`).
     if (source === "microphone") {
       // A brand-new mic track: clear the per-track failure guard so a model
-      // that failed on a previous track gets one clean attempt here, then
-      // (re-)attach the desired model.
+      // that failed on a previous track gets one clean attempt here. The new
+      // capture starts from the stored constraints (browser NS per pref), so
+      // reset the applied-capture flag too — otherwise a stale `true` from the
+      // previous track makes `syncEffectiveCaptureConstraints` skip the restart
+      // that should force NS off after the model re-attaches (double NS).
       this.aiNoiseFailedModels.clear();
+      this.appliedModelActiveForCapture = false;
       this.emitMicAudioProcessing();
       void this.ensureAiNoiseFilter();
     }

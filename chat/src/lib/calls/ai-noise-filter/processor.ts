@@ -57,6 +57,10 @@ export abstract class WorkletNoiseProcessor implements AudioNoiseProcessor {
       this.disposeWorkletNode(this.workletNode);
     }
     this.destinationNode?.disconnect();
+    // A `MediaStreamAudioDestinationNode`'s output track does NOT end when the
+    // graph is torn down — only an explicit stop() transitions it to "ended".
+    // Without this, rapid device switches leak "live" ghost tracks until GC.
+    this.processedTrack?.stop();
     this.sourceNode = undefined;
     this.workletNode = undefined;
     this.destinationNode = undefined;

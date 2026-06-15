@@ -95,6 +95,13 @@ export async function runAiNoiseFilterReconcile<P>(args: {
         return { action: "attached", model: action.model };
       } catch (error) {
         failedModels.add(action.model);
+        // True fail-open: livekit's setProcessor only stops the old processor
+        // once it runs, so a failure BUILDING the new one (makeProcessor reject)
+        // would leave a previously-attached model running. Clear it so the call
+        // actually falls back to the raw mic, not a model the user didn't pick.
+        if (target.currentProcessorName() !== undefined) {
+          await target.clear().catch(() => undefined);
+        }
         return { action: "failed", model: action.model, error };
       }
     }

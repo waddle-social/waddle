@@ -140,6 +140,30 @@ describe("CallEngine — AI noise filter reconcile", () => {
     expect(forcedNsOff(restartTrack)).toBe(false);
   });
 
+  test("a fresh mic publish re-forces NS off for a still-selected model (no stale flag)", async () => {
+    // Unpublish→republish keeps the model selected but starts a NEW capture
+    // from stored prefs (NS on). The publish handler must reset the
+    // applied-capture flag so the post-attach sync flips NS off again.
+    const { engine, restartTrack, track } = engineWithMic({});
+    const internals = engine as unknown as {
+      desiredAiNoiseModel: string | null;
+      appliedModelActiveForCapture: boolean;
+      aiReconcileChain: Promise<void>;
+      handleLocalTrackPublished: (p: unknown, who: unknown) => void;
+    };
+    // Simulate the post-unpublish state: model still desired, stale flag true.
+    internals.desiredAiNoiseModel = "rnnoise";
+    internals.appliedModelActiveForCapture = true;
+
+    internals.handleLocalTrackPublished(
+      { track, kind: Track.Kind.Audio, source: Track.Source.Microphone, trackSid: "sid-1" },
+      { identity: "me" },
+    );
+    await internals.aiReconcileChain;
+
+    expect(forcedNsOff(restartTrack)).toBe(true);
+  });
+
   test("emits one consistent combined snapshot per settled change", async () => {
     const { engine } = engineWithMic({});
     const snapshots: { processing: { kind: string }; aiNoiseFilter: { kind: string; model?: unknown } }[] = [];

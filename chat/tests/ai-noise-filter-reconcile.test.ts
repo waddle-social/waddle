@@ -129,6 +129,35 @@ describe("runAiNoiseFilterReconcile — performs the decided action", () => {
     expect(outcome.action).toBe("failed");
   });
 
+  test("a make-failure during a model SWITCH stops the old processor (true fail-open)", async () => {
+    // livekit only stops the old processor inside setProcessor; if makeProcessor
+    // rejects first, the previous model would keep running. Fail open to raw mic.
+    const { target, clear } = fakeTarget(processorName("rnnoise"));
+    const failedModels = new Set<NoiseModelId>();
+    const boom = () => Promise.reject(new Error("dtln wasm 404"));
+    const outcome = await runAiNoiseFilterReconcile({
+      target,
+      desired: "dtln",
+      makeProcessor: boom,
+      failedModels,
+    });
+    expect(clear).toHaveBeenCalledTimes(1);
+    expect(target.currentProcessorName()).toBeUndefined();
+    expect(outcome.action).toBe("failed");
+  });
+
+  test("a make-failure with NOTHING attached does not call clear", async () => {
+    const { target, clear } = fakeTarget();
+    const outcome = await runAiNoiseFilterReconcile({
+      target,
+      desired: "rnnoise",
+      makeProcessor: () => Promise.reject(new Error("fail")),
+      failedModels: new Set(),
+    });
+    expect(clear).not.toHaveBeenCalled();
+    expect(outcome.action).toBe("failed");
+  });
+
   test("a failing attach also arms the guard", async () => {
     const target: ProcessorTarget<FakeProcessor> = {
       currentProcessorName: () => undefined,

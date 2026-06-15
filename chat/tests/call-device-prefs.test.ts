@@ -156,6 +156,17 @@ describe("ai noise model preference", () => {
     ).toBeNull();
   });
 
+  test("normalizes a deferred model with no backend (deepfilternet) to null", () => {
+    // Otherwise the engine would attempt to attach it every call and emit a
+    // perpetual attach-failure notice. A user can't select it via the UI; it
+    // could only reach prefs via stale/hand-edited storage.
+    expect(
+      parseDevicePrefsStorage(
+        JSON.stringify({ mic: null, cam: null, speaker: null, aiNoiseModel: "deepfilternet" }),
+      ).aiNoiseModel,
+    ).toBeNull();
+  });
+
   test("setAiNoiseModel updates the device-prefs atom", () => {
     setAiNoiseModel("dtln");
     expect($devicePrefs.get().aiNoiseModel).toBe("dtln");

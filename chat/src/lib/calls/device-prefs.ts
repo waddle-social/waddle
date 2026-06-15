@@ -1,5 +1,6 @@
 import { atom } from "nanostores";
 import { isNoiseModelId, type NoiseModelId } from "./ai-noise-filter/model-id";
+import { hasNoiseModelBackend } from "./ai-noise-filter/registry";
 
 /**
  * User-chosen audio/video device IDs, persisted to localStorage so
@@ -81,9 +82,14 @@ function defaultDevicePrefs(): DevicePrefs {
   };
 }
 
-/** Narrow a persisted `aiNoiseModel` to a known model id, else `null` (off). */
+/**
+ * Narrow a persisted `aiNoiseModel` to a known model that actually ships a
+ * backend, else `null` (off). A deferred/unimplemented model (e.g. the
+ * disabled `deepfilternet` slot) normalizes to off so the engine never tries —
+ * and perpetually fails — to attach something with no loader.
+ */
 function normalizeAiNoiseModel(value: unknown): NoiseModelId | null {
-  return isNoiseModelId(value) ? value : null;
+  return isNoiseModelId(value) && hasNoiseModelBackend(value) ? value : null;
 }
 
 export function parseDevicePrefsStorage(raw: string | null): DevicePrefs {

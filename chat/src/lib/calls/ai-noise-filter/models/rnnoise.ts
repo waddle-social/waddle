@@ -14,10 +14,18 @@ import type { NoiseModelBackend } from "../registry";
  */
 
 // Memoize the wasm binary at module scope so a mid-call device switch or a
-// re-enable re-uses it instead of refetching.
+// re-enable re-uses it instead of refetching. On rejection (e.g. a transient
+// network hiccup on the first selection) the cache is cleared so an explicit
+// re-selection can retry — otherwise a rejected promise would stick forever.
 let wasmBinary: Promise<ArrayBuffer> | undefined;
 function loadWasm(): Promise<ArrayBuffer> {
-  return (wasmBinary ??= loadRnnoise({ url: rnnoiseWasmUrl, simdUrl: rnnoiseSimdWasmUrl }));
+  if (!wasmBinary) {
+    wasmBinary = loadRnnoise({ url: rnnoiseWasmUrl, simdUrl: rnnoiseSimdWasmUrl });
+    wasmBinary.catch(() => {
+      wasmBinary = undefined;
+    });
+  }
+  return wasmBinary;
 }
 
 class RnnoiseProcessor extends WorkletNoiseProcessor {
