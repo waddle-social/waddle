@@ -1,4 +1,6 @@
 import { atom } from "nanostores";
+import { isNoiseModelId, type NoiseModelId } from "./ai-noise-filter/model-id";
+import { hasNoiseModelBackend } from "./ai-noise-filter/registry";
 
 /**
  * User-chosen audio/video device IDs, persisted to localStorage so
@@ -16,6 +18,13 @@ type DevicePrefs = {
   cam: string | null;
   speaker: string | null;
   audioProcessing: AudioProcessingPrefs;
+  /**
+   * The opt-in client-side AI noise model, or `null` for off (the default).
+   * Separate from `audioProcessing` because it is a different mechanism (a
+   * WASM `TrackProcessor`, not a `getUserMedia` constraint) with a different
+   * lifecycle and a different default.
+   */
+  aiNoiseModel: NoiseModelId | null;
 };
 
 const STORAGE_KEY = "waddle:call-device-prefs";
@@ -69,7 +78,18 @@ function defaultDevicePrefs(): DevicePrefs {
     cam: null,
     speaker: null,
     audioProcessing: defaultAudioProcessingPrefs(),
+    aiNoiseModel: null,
   };
+}
+
+/**
+ * Narrow a persisted `aiNoiseModel` to a known model that actually ships a
+ * backend, else `null` (off). A deferred/unimplemented model (e.g. the
+ * disabled `deepfilternet` slot) normalizes to off so the engine never tries —
+ * and perpetually fails — to attach something with no loader.
+ */
+function normalizeAiNoiseModel(value: unknown): NoiseModelId | null {
+  return isNoiseModelId(value) && hasNoiseModelBackend(value) ? value : null;
 }
 
 export function parseDevicePrefsStorage(raw: string | null): DevicePrefs {
@@ -85,6 +105,7 @@ export function parseDevicePrefsStorage(raw: string | null): DevicePrefs {
       cam: typeof obj.cam === "string" ? obj.cam : null,
       speaker: typeof obj.speaker === "string" ? obj.speaker : null,
       audioProcessing: normalizeAudioProcessingPrefs(obj.audioProcessing),
+      aiNoiseModel: normalizeAiNoiseModel(obj.aiNoiseModel),
     };
   } catch {
     return defaultDevicePrefs();
@@ -127,6 +148,10 @@ export function setSpeakerDevice(id: string | null): void {
 
 export function setAudioProcessingPrefs(audioProcessing: AudioProcessingPrefs): void {
   $devicePrefs.set({ ...$devicePrefs.get(), audioProcessing });
+}
+
+export function setAiNoiseModel(aiNoiseModel: NoiseModelId | null): void {
+  $devicePrefs.set({ ...$devicePrefs.get(), aiNoiseModel });
 }
 
 type SpeakerOutputSelectionEnvironment = {

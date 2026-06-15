@@ -1,10 +1,13 @@
 import {
   type AudioProcessingPrefs,
+  setAiNoiseModel,
   setCamDevice,
   setAudioProcessingPrefs,
   setMicDevice,
   setSpeakerDevice,
 } from "./device-prefs";
+import { clearAiNoiseFilterError } from "./ai-noise-filter-error-state";
+import type { NoiseModelId } from "./ai-noise-filter/model-id";
 
 export type CallDeviceKind = "mic" | "cam" | "speaker";
 
@@ -44,4 +47,23 @@ export async function applyAudioProcessingSelection(
 ): Promise<void> {
   await engine.setAudioProcessing(prefs);
   setAudioProcessingPrefs(prefs);
+}
+
+export type CallAiNoiseSelectionEngine = {
+  setAiNoiseModel(model: NoiseModelId | null): Promise<void>;
+};
+
+/**
+ * Select the AI noise model (or null/off) for the active call: clear any stale
+ * attach-failure notice (this is an explicit fresh attempt), apply it to the
+ * engine, then persist the pref so the next call re-applies it. The engine
+ * fails open on attach error, so this does not reject on a bad model.
+ */
+export async function applyAiNoiseModelSelection(
+  model: NoiseModelId | null,
+  engine: CallAiNoiseSelectionEngine,
+): Promise<void> {
+  clearAiNoiseFilterError();
+  await engine.setAiNoiseModel(model);
+  setAiNoiseModel(model);
 }

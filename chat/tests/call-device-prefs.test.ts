@@ -1,11 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import {
+  $devicePrefs,
   audioProcessingConstraints,
   defaultAudioProcessingPrefs,
   isSpeakerOutputSelectionSupported,
   normalizeAudioProcessingPrefs,
   parseDevicePrefsStorage,
   serializeDevicePrefsStorage,
+  setAiNoiseModel,
 } from "../src/lib/calls/device-prefs";
 
 describe("call speaker output support", () => {
@@ -93,6 +95,7 @@ describe("call audio processing preferences", () => {
         echoCancellation: false,
         autoGainControl: false,
       },
+      aiNoiseModel: null,
     });
 
     expect(parseDevicePrefsStorage(stored)).toEqual({
@@ -104,6 +107,7 @@ describe("call audio processing preferences", () => {
         echoCancellation: false,
         autoGainControl: false,
       },
+      aiNoiseModel: null,
     });
   });
 
@@ -121,6 +125,52 @@ describe("call audio processing preferences", () => {
       cam: "desk-cam",
       speaker: "usb-speaker",
       audioProcessing: defaultAudioProcessingPrefs(),
+      aiNoiseModel: null,
     });
+  });
+});
+
+describe("ai noise model preference", () => {
+  test("defaults to null (off) when absent from stored prefs", () => {
+    expect(
+      parseDevicePrefsStorage(JSON.stringify({ mic: null, cam: null, speaker: null })).aiNoiseModel,
+    ).toBeNull();
+  });
+
+  test("round-trips a selected model through the persisted shape", () => {
+    const stored = serializeDevicePrefsStorage({
+      mic: null,
+      cam: null,
+      speaker: null,
+      audioProcessing: defaultAudioProcessingPrefs(),
+      aiNoiseModel: "rnnoise",
+    });
+    expect(parseDevicePrefsStorage(stored).aiNoiseModel).toBe("rnnoise");
+  });
+
+  test("normalizes an unknown stored model id to null (off)", () => {
+    expect(
+      parseDevicePrefsStorage(
+        JSON.stringify({ mic: null, cam: null, speaker: null, aiNoiseModel: "bogus" }),
+      ).aiNoiseModel,
+    ).toBeNull();
+  });
+
+  test("normalizes a deferred model with no backend (deepfilternet) to null", () => {
+    // Otherwise the engine would attempt to attach it every call and emit a
+    // perpetual attach-failure notice. A user can't select it via the UI; it
+    // could only reach prefs via stale/hand-edited storage.
+    expect(
+      parseDevicePrefsStorage(
+        JSON.stringify({ mic: null, cam: null, speaker: null, aiNoiseModel: "deepfilternet" }),
+      ).aiNoiseModel,
+    ).toBeNull();
+  });
+
+  test("setAiNoiseModel updates the device-prefs atom", () => {
+    setAiNoiseModel("dtln");
+    expect($devicePrefs.get().aiNoiseModel).toBe("dtln");
+    setAiNoiseModel(null);
+    expect($devicePrefs.get().aiNoiseModel).toBeNull();
   });
 });

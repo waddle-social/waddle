@@ -134,10 +134,13 @@ describe("reportCallAudioProcessing", () => {
   test("is a no-op when Faro is not initialized", () => {
     expect(() =>
       reportCallAudioProcessing({
-        kind: "active",
-        noiseSuppression: "on",
-        echoCancellation: "off",
-        autoGainControl: "unknown",
+        processing: {
+          kind: "active",
+          noiseSuppression: "on",
+          echoCancellation: "off",
+          autoGainControl: "unknown",
+        },
+        aiNoiseFilter: { kind: "active", model: null },
       }),
     ).not.toThrow();
   });
@@ -147,10 +150,13 @@ describe("reportCallAudioProcessing", () => {
     __setFaroForTesting(stub as never);
 
     reportCallAudioProcessing({
-      kind: "active",
-      noiseSuppression: "on",
-      echoCancellation: "off",
-      autoGainControl: "unknown",
+      processing: {
+        kind: "active",
+        noiseSuppression: "off",
+        echoCancellation: "off",
+        autoGainControl: "unknown",
+      },
+      aiNoiseFilter: { kind: "active", model: "rnnoise" },
     });
 
     expect(stub.events).toEqual([
@@ -158,9 +164,10 @@ describe("reportCallAudioProcessing", () => {
         name: "chat.call.audio_processing",
         attributes: {
           kind: "active",
-          noise_suppression: "on",
+          noise_suppression: "off",
           echo_cancellation: "off",
           auto_gain_control: "unknown",
+          ai_noise_filter: "rnnoise",
         },
       },
     ]);
