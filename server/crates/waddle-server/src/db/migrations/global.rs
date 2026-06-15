@@ -358,7 +358,7 @@ CREATE TABLE user_avatar_source (
 "#;
 
 pub const V0002_USER_AVATAR_SOURCE_POSTGRES: &str = r#"
-CREATE TABLE user_avatar_source (
+CREATE TABLE IF NOT EXISTS user_avatar_source (
     xmpp_localpart TEXT PRIMARY KEY,
     source TEXT NOT NULL CHECK (source IN ('oidc', 'user')),
     updated_at TEXT NOT NULL DEFAULT to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
@@ -384,7 +384,7 @@ CREATE TABLE user_avatar_fetch_state (
 "#;
 
 pub const V0003_USER_AVATAR_FETCH_STATE_POSTGRES: &str = r#"
-CREATE TABLE user_avatar_fetch_state (
+CREATE TABLE IF NOT EXISTS user_avatar_fetch_state (
     xmpp_localpart TEXT PRIMARY KEY,
     last_attempt_at TEXT NOT NULL,
     last_error TEXT,
