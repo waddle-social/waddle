@@ -689,6 +689,16 @@ export class CallEngine {
     room.off(RoomEvent.TrackUnmuted, this.handleTrackMuteChanged);
     room.off(RoomEvent.ConnectionQualityChanged, this.handleConnectionQualityChanged);
     room.off(RoomEvent.ConnectionStateChanged, this.handleConnectionStateChanged);
+    // Tear the mic noise processor down explicitly first: its destroy() stops a
+    // private clone of the capture track that holds the input device open. A
+    // normal room.disconnect() stops local tracks (which destroys the processor)
+    // for us, but doing it here means an erroring/partial disconnect can't leave
+    // the device — and its indicator — live until GC.
+    const micTrack = room.localParticipant?.getTrackPublication?.(Track.Source.Microphone)
+      ?.track as unknown as ProcessorCapableTrack | undefined;
+    if (micTrack && typeof micTrack.getProcessor === "function" && micTrack.getProcessor()) {
+      await micTrack.stopProcessor().catch(() => undefined);
+    }
     await room.disconnect();
   }
 
