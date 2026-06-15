@@ -260,6 +260,50 @@ describe("call-engine module", () => {
     expect(disconnects).toBe(1);
   });
 
+  test("disconnect() stops an attached mic noise processor so its capture clone is released", async () => {
+    // The noise processor holds a private clone of the capture track that keeps
+    // the input device live; it is freed only in the processor's destroy(). We
+    // stop it explicitly on disconnect so an erroring/partial room.disconnect()
+    // can't leave the mic (and its indicator) on until GC.
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine();
+    let stopped = 0;
+    const micTrack = {
+      getProcessor: () => ({ name: "waddle-ai-noise-filter:rnnoise" }),
+      stopProcessor: async () => {
+        stopped += 1;
+      },
+    };
+    const stub = {
+      off: () => stub,
+      disconnect: async () => undefined,
+      localParticipant: { getTrackPublication: () => ({ track: micTrack }) },
+    };
+    (engine as unknown as { room: typeof stub }).room = stub;
+    await engine.disconnect();
+    expect(stopped).toBe(1);
+  });
+
+  test("disconnect() does not call stopProcessor when no model is attached", async () => {
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine();
+    let stopped = 0;
+    const micTrack = {
+      getProcessor: () => undefined,
+      stopProcessor: async () => {
+        stopped += 1;
+      },
+    };
+    const stub = {
+      off: () => stub,
+      disconnect: async () => undefined,
+      localParticipant: { getTrackPublication: () => ({ track: micTrack }) },
+    };
+    (engine as unknown as { room: typeof stub }).room = stub;
+    await engine.disconnect();
+    expect(stopped).toBe(0);
+  });
+
   test("disconnect() is a no-op when no room was connected", async () => {
     const { CallEngine } = await import("../src/lib/calls/engine");
     const engine = new CallEngine();
