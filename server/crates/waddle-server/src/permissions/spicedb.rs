@@ -233,18 +233,20 @@ fn map_spicedb_error(error: prescience::Error) -> PermissionError {
     }
 }
 
-/// SpiceDB object IDs disallow `@`. Bare JIDs are the user principal, so at
-/// the SpiceDB wire boundary every id has `@` encoded as `|` on the way out
-/// and decoded back on the way in. `|` does not occur in the ids Waddle
-/// produces, so the transform round-trips losslessly.
+/// SpiceDB object IDs allow only `[a-zA-Z0-9/_|\\-=+]`. Bare JIDs contain
+/// `@` (the node/domain separator) and `.` (in DNS domain labels), neither of
+/// which is in that set. Encode at the SpiceDB wire boundary:
+///   `@` → `|`   (pipe is allowed; `@` is not)
+///   `.` → `=`   (equals is allowed; `.` is not; DNS domains cannot contain `=`)
+/// Both transforms are lossless for any id Waddle produces.
 fn encode_spicedb_id(id: &str) -> String {
-    id.replace('@', "|")
+    id.replace('@', "|").replace('.', "=")
 }
 
-/// Inverse of [`encode_spicedb_id`]: restore `@` from `|` for ids read back
+/// Inverse of [`encode_spicedb_id`]: restore `@` and `.` for ids read back
 /// from SpiceDB.
 fn decode_spicedb_id(id: &str) -> String {
-    id.replace('|', "@")
+    id.replace('|', "@").replace('=', ".")
 }
 
 fn object_reference(object: &Object) -> Result<ObjectReference, PermissionError> {
@@ -318,16 +320,16 @@ mod tests {
     use super::{decode_spicedb_id, encode_spicedb_id};
 
     #[test]
-    fn bare_jid_round_trips_through_pipe_encoding() {
+    fn bare_jid_round_trips_through_encoding() {
         let jid = "alice@example.com";
         let encoded = encode_spicedb_id(jid);
-        assert_eq!(encoded, "alice|example.com");
+        assert_eq!(encoded, "alice|example=com");
         assert_eq!(decode_spicedb_id(&encoded), jid);
     }
 
     #[test]
-    fn ids_without_at_are_unchanged() {
-        // Channel/space ids that carry no `@` survive the boundary intact.
+    fn ids_without_at_or_dot_are_unchanged() {
+        // Channel/space ids that carry no `@` or `.` survive the boundary intact.
         assert_eq!(encode_spicedb_id("penguin-club"), "penguin-club");
         assert_eq!(decode_spicedb_id("penguin-club"), "penguin-club");
     }
@@ -336,7 +338,27 @@ mod tests {
     fn muc_room_jid_round_trips() {
         let room = "general@conference.example.com";
         let encoded = encode_spicedb_id(room);
-        assert_eq!(encoded, "general|conference.example.com");
+        assert_eq!(encoded, "general|conference=example=com");
         assert_eq!(decode_spicedb_id(&encoded), room);
+    }
+
+    #[test]
+    fn encoded_id_matches_spicedb_allowed_charset() {
+        // SpiceDB allows [a-zA-Z0-9/_|\\-=+]. Verify common JID forms pass.
+        let cases = [
+            "alice@waddle.social",
+            "david@rawkode.academy",
+            "bot@sub.domain.example.com",
+        ];
+        let allowed = |c: char| {
+            c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '|' | '\\' | '-' | '=' | '+')
+        };
+        for jid in cases {
+            let encoded = encode_spicedb_id(jid);
+            assert!(
+                encoded.chars().all(allowed),
+                "encoded JID {encoded:?} contains disallowed chars (input: {jid:?})"
+            );
+        }
     }
 }
