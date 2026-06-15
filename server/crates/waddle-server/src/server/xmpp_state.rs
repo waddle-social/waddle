@@ -96,12 +96,7 @@ impl waddle_xmpp::AppState for XmppAppState {
     }
 
     async fn resolve_subject_jid(&self, subject: &str) -> Result<Option<jid::BareJid>, XmppError> {
-        super::xmpp_permission_state::resolve_subject_jid(
-            &self.global_db_actor,
-            &self.domain,
-            subject,
-        )
-        .await
+        super::xmpp_permission_state::resolve_subject_jid(subject)
     }
 
     async fn search_users(
@@ -120,7 +115,6 @@ impl waddle_xmpp::AppState for XmppAppState {
         affiliation: waddle_xmpp::Affiliation,
     ) -> Result<(), XmppError> {
         super::xmpp_permission_state::set_room_affiliation(
-            &self.global_db_actor,
             &self.permission_actor,
             channel_id,
             jid,

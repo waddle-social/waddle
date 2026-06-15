@@ -113,7 +113,7 @@ pub(super) async fn session_is_server_owner(
         .permission_actor
         .ask(CheckPermission {
             object: Object::new(ObjectType::Server, DEPLOYMENT_SERVER_ID),
-            subject: Subject::user(&session.user_id),
+            subject: Subject::user(&session.user_jid),
             permission: Permission::Owner,
         })
         .await

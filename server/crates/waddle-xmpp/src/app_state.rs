@@ -463,7 +463,8 @@ pub trait AppState: Send + Sync + 'static {
 /// User session information.
 #[derive(Debug, Clone)]
 pub struct Session {
-    /// Internal user ID
+    /// Bare JID principal as a string (e.g. `alice@example.com`); mirrors
+    /// [`Self::jid`] in string form for storage/lookup paths.
     pub user_id: String,
     /// XMPP JID (bare)
     pub jid: jid::BareJid,

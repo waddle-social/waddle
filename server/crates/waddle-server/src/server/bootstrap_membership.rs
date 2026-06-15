@@ -86,17 +86,17 @@ fn normalize_localpart(value: &str) -> Option<String> {
 pub async fn provision_user_membership(
     permission_actor: &ActorRef<PermissionActor>,
     config: &BootstrapMembershipConfig,
-    user_id: &str,
+    user_jid: &str,
     xmpp_localpart: &str,
 ) -> Result<(), String> {
-    let subject = Subject::user(user_id);
+    let subject = Subject::user(user_jid);
     if config.is_owner(xmpp_localpart) {
         let object = Object::new(ObjectType::Server, config.server_id.as_str());
         let tuple = Tuple::new(object, Relation::new("owner"), subject);
         write_tuple_if_absent(permission_actor, tuple).await?;
 
         debug!(
-            user_id = %user_id,
+            user_jid = %user_jid,
             xmpp_localpart = %xmpp_localpart,
             relation = "owner",
             "Provisioned deployment owner membership"
@@ -109,7 +109,7 @@ pub async fn provision_user_membership(
     write_tuple_if_absent(permission_actor, tuple).await?;
 
     debug!(
-        user_id = %user_id,
+        user_jid = %user_jid,
         xmpp_localpart = %xmpp_localpart,
         relation = "member",
         "Provisioned bootstrap membership"
@@ -120,14 +120,14 @@ pub async fn provision_user_membership(
 pub async fn reconcile_user_membership(
     permission_actor: &ActorRef<PermissionActor>,
     config: &BootstrapMembershipConfig,
-    user_id: &str,
+    user_jid: &str,
     xmpp_localpart: &str,
 ) -> Result<(), String> {
     if config.is_owner(xmpp_localpart) {
-        return provision_user_membership(permission_actor, config, user_id, xmpp_localpart).await;
+        return provision_user_membership(permission_actor, config, user_jid, xmpp_localpart).await;
     }
 
-    let subject = Subject::user(user_id);
+    let subject = Subject::user(user_jid);
     let object = Object::new(ObjectType::Server, config.server_id.as_str());
     for permission in [Permission::Owner, Permission::Admin, Permission::Member] {
         let response = permission_actor
@@ -143,7 +143,7 @@ pub async fn reconcile_user_membership(
         }
     }
 
-    provision_user_membership(permission_actor, config, user_id, xmpp_localpart).await
+    provision_user_membership(permission_actor, config, user_jid, xmpp_localpart).await
 }
 
 async fn write_tuple_if_absent(
@@ -173,20 +173,20 @@ pub async fn reconcile_existing_accounts(
 ) -> Result<(), String> {
     let users = db_actor
         .ask(DbQuery {
-            sql: "SELECT id, xmpp_localpart FROM users".to_string(),
+            sql: "SELECT jid, xmpp_localpart FROM users".to_string(),
             params: vec![],
         })
         .await
         .map_err(|err| format!("failed listing users for membership bootstrap: {err}"))?;
 
     for row in users {
-        let user_id = row_value(&row, 0)
+        let user_jid = row_value(&row, 0)
             .and_then(ValueExt::as_string)
-            .map_err(|err| format!("failed decoding user id: {err}"))?;
+            .map_err(|err| format!("failed decoding user jid: {err}"))?;
         let localpart = row_value(&row, 1)
             .and_then(ValueExt::as_string)
             .map_err(|err| format!("failed decoding user localpart: {err}"))?;
-        reconcile_user_membership(permission_actor, config, &user_id, &localpart).await?;
+        reconcile_user_membership(permission_actor, config, &user_jid, &localpart).await?;
     }
 
     let native_users = db_actor
@@ -204,8 +204,8 @@ pub async fn reconcile_existing_accounts(
         let domain = row_value(&row, 1)
             .and_then(ValueExt::as_string)
             .map_err(|err| format!("failed decoding native domain: {err}"))?;
-        let user_id = format!("{username}@{domain}");
-        reconcile_user_membership(permission_actor, config, &user_id, &username).await?;
+        let user_jid = format!("{username}@{domain}");
+        reconcile_user_membership(permission_actor, config, &user_jid, &username).await?;
     }
 
     info!("Reconciled bootstrap memberships for existing accounts");

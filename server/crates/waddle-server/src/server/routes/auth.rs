@@ -198,7 +198,6 @@ pub struct LogoutRequest {
 #[derive(Debug, Serialize)]
 pub struct SessionResponse {
     pub session_id: String,
-    pub user_id: String,
     pub username: String,
     pub avatar_url: Option<String>,
     pub xmpp_localpart: String,
@@ -257,7 +256,7 @@ pub(super) fn auth_error_to_response(err: AuthError) -> (StatusCode, Json<ErrorR
 
 async fn load_avatar_url(
     actor: &kameo::actor::ActorRef<crate::db::actor::DbActor>,
-    user_id: &str,
+    user_jid: &str,
 ) -> Result<Option<String>, AuthError> {
     let row = actor
         .ask(DbQueryOne {
@@ -265,14 +264,14 @@ async fn load_avatar_url(
                          (
                              SELECT ai.raw_claims_json
                              FROM auth_identities ai
-                             WHERE ai.user_id = u.id
+                             WHERE ai.user_jid = u.jid
                              ORDER BY ai.last_login_at DESC
                              LIMIT 1
                          )
                   FROM users u
-                  WHERE u.id = ? LIMIT 1"
+                  WHERE u.jid = ? LIMIT 1"
                 .to_string(),
-            params: vec![user_id.into()],
+            params: vec![user_jid.into()],
         })
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to query avatar_url: {}", e)))?;
@@ -305,12 +304,12 @@ async fn load_avatar_url(
             if let Some(ref avatar_url) = avatar_url {
                 actor
                     .ask(DbExecute {
-                        sql: "UPDATE users SET avatar_url = ?, updated_at = ? WHERE id = ?"
+                        sql: "UPDATE users SET avatar_url = ?, updated_at = ? WHERE jid = ?"
                             .to_string(),
                         params: vec![
                             avatar_url.clone().into(),
                             Utc::now().to_rfc3339().into(),
-                            user_id.into(),
+                            user_jid.into(),
                         ],
                     })
                     .await
@@ -413,16 +412,19 @@ pub async fn session_handler(
             let expires_at = session.expires_at.map(|v| v.to_rfc3339());
             let jid = localpart_to_jid(&session.xmpp_localpart, &state.xmpp_domain)
                 .unwrap_or_else(|_| format!("{}@{}", session.xmpp_localpart, state.xmpp_domain));
-            let avatar_url =
-                match load_avatar_url(&state.session_manager.actor_ref(), &session.user_id).await {
-                    Ok(avatar_url) => avatar_url,
-                    Err(err) => return auth_error_to_response(err).into_response(),
-                };
+            let avatar_url = match load_avatar_url(
+                &state.session_manager.actor_ref(),
+                &session.user_jid,
+            )
+            .await
+            {
+                Ok(avatar_url) => avatar_url,
+                Err(err) => return auth_error_to_response(err).into_response(),
+            };
             (
                 StatusCode::OK,
                 Json(SessionResponse {
                     session_id: session.id,
-                    user_id: session.user_id,
                     username: session.username,
                     avatar_url,
                     xmpp_localpart: session.xmpp_localpart,

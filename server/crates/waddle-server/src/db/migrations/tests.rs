@@ -101,7 +101,7 @@ async fn test_waddle_v1002_adds_pin_permission_to_existing_v1001_schema() {
     .await
     .unwrap();
     conn.execute(
-        "INSERT INTO _migrations (version, description) VALUES (1001, 'Hard-cut per-waddle schema with user_id principals')",
+        "INSERT INTO _migrations (version, description) VALUES (1001, 'Hard-cut per-waddle schema with bare-JID principals')",
         (),
     )
     .await

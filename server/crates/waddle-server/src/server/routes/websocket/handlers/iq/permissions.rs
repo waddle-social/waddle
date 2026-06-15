@@ -90,7 +90,7 @@ pub(super) async fn permission_allowed(
         .app_state
         .permission_actor
         .ask(CheckPermission {
-            subject: Subject::user(&session.user_id),
+            subject: Subject::user(&session.user_jid),
             permission,
             object,
         })
@@ -306,7 +306,7 @@ pub(super) async fn write_space_owner_tuple(
         Tuple::new(
             Object::new(ObjectType::Space, node),
             Relation::new("owner"),
-            Subject::user(&session.user_id),
+            Subject::user(&session.user_jid),
         ),
     )
     .await

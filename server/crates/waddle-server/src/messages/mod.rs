@@ -106,13 +106,13 @@ mod tests {
         // Create a message
         let create = MessageCreate::new(
             "channel-123".to_string(),
-            "user-alice".to_string(),
+            "alice@example.com".to_string(),
             "Hello, world!".to_string(),
         );
 
         let message = repo.create(create).await.unwrap();
         assert_eq!(message.content, Some("Hello, world!".to_string()));
-        assert_eq!(message.author_user_id, "user-alice");
+        assert_eq!(message.author_jid, "alice@example.com");
         assert_eq!(message.channel_id, "channel-123");
 
         // Get the message by ID
@@ -144,7 +144,7 @@ mod tests {
         for i in 0..10 {
             let create = MessageCreate::new(
                 "channel-test".to_string(),
-                "user-alice".to_string(),
+                "alice@example.com".to_string(),
                 format!("Message {}", i),
             );
             repo.create(create).await.unwrap();

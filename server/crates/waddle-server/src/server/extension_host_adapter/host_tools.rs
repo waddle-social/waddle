@@ -345,14 +345,14 @@ impl ExtensionHostAdapter {
             .db_pool
             .global_actor()
             .ask(DbQueryOne {
-                sql: "SELECT id, username, xmpp_localpart FROM users WHERE xmpp_localpart = ? LIMIT 1"
+                sql: "SELECT jid, username, xmpp_localpart FROM users WHERE xmpp_localpart = ? LIMIT 1"
                     .to_string(),
                 params: vec![localpart.as_str().into()],
             })
             .await
             .map_err(|error| host_tool_error(ExtensionHostAdapterError::Storage(format!("{error:?}"))))?
             .ok_or_else(|| host_tool_error(ExtensionHostAdapterError::NotAuthorized))?;
-        let user_id = row_value(&row, 0)
+        let user_jid = row_value(&row, 0)
             .and_then(ValueExt::as_string)
             .map_err(|error| {
                 host_tool_error(ExtensionHostAdapterError::Storage(error.to_string()))
@@ -374,7 +374,7 @@ impl ExtensionHostAdapter {
                 host_tool_error(ExtensionHostAdapterError::Protocol(error.to_string()))
             })?;
         Ok(ExtensionInvocation {
-            session: Some(Session::new(&user_id, &username, &xmpp_localpart)),
+            session: Some(Session::new(&user_jid, &username, &xmpp_localpart)),
             actor_jid,
             plugin_id,
             source_room,

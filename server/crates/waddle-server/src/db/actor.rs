@@ -63,7 +63,7 @@ impl kameo::message::Message<DbExecute> for DbActor {
 
 pub struct CreateAuthSession {
     pub session_id: String,
-    pub user_id: String,
+    pub user_jid: String,
     pub username: String,
     pub xmpp_localpart: String,
     pub token_hash: String,
@@ -88,12 +88,12 @@ impl kameo::message::Message<CreateAuthSession> for DbActor {
 
                 query(
                     r#"
-                    INSERT INTO users (id, username, xmpp_localpart, created_at, updated_at)
+                    INSERT INTO users (jid, username, xmpp_localpart, created_at, updated_at)
                     VALUES (?, ?, ?, ?, ?)
                     ON CONFLICT DO NOTHING
                     "#,
                 )
-                .bind(&msg.user_id)
+                .bind(&msg.user_jid)
                 .bind(&msg.username)
                 .bind(&msg.xmpp_localpart)
                 .bind(msg.created_at.clone())
@@ -103,12 +103,12 @@ impl kameo::message::Message<CreateAuthSession> for DbActor {
 
                 query(
                     r#"
-                    INSERT INTO sessions (id, user_id, token_hash, expires_at, created_at, last_used_at)
+                    INSERT INTO sessions (id, user_jid, token_hash, expires_at, created_at, last_used_at)
                     VALUES (?, ?, ?, ?, ?, ?)
                     "#,
                 )
                 .bind(&msg.session_id)
-                .bind(&msg.user_id)
+                .bind(&msg.user_jid)
                 .bind(&msg.token_hash)
                 .bind(&msg.expires_at)
                 .bind(&msg.created_at)
@@ -123,12 +123,12 @@ impl kameo::message::Message<CreateAuthSession> for DbActor {
 
                 query(
                     r#"
-                    INSERT INTO users (id, username, xmpp_localpart, created_at, updated_at)
+                    INSERT INTO users (jid, username, xmpp_localpart, created_at, updated_at)
                     VALUES ($1, $2, $3, $4, $5)
                     ON CONFLICT DO NOTHING
                     "#,
                 )
-                .bind(&msg.user_id)
+                .bind(&msg.user_jid)
                 .bind(&msg.username)
                 .bind(&msg.xmpp_localpart)
                 .bind(msg.created_at.clone())
@@ -138,12 +138,12 @@ impl kameo::message::Message<CreateAuthSession> for DbActor {
 
                 query(
                     r#"
-                    INSERT INTO sessions (id, user_id, token_hash, expires_at, created_at, last_used_at)
+                    INSERT INTO sessions (id, user_jid, token_hash, expires_at, created_at, last_used_at)
                     VALUES ($1, $2, $3, $4, $5, $6)
                     "#,
                 )
                 .bind(&msg.session_id)
-                .bind(&msg.user_id)
+                .bind(&msg.user_jid)
                 .bind(&msg.token_hash)
                 .bind(&msg.expires_at)
                 .bind(&msg.created_at)

@@ -56,7 +56,6 @@ pub struct DevicePollPendingResponse {
 pub struct DevicePollCompleteResponse {
     pub status: String,
     pub session_id: String,
-    pub user_id: String,
     pub username: String,
     pub provider_id: String,
     pub jid: String,
@@ -254,7 +253,6 @@ pub async fn device_poll_handler(
                         Json(DevicePollCompleteResponse {
                             status: "complete".to_string(),
                             session_id,
-                            user_id: session.user_id,
                             username: session.username,
                             provider_id: auth.provider_id,
                             jid,

@@ -3012,7 +3012,7 @@ async fn admin_channels_create_space_bookmark_grants_space_members_channel_view(
         .expect("owner affiliation");
 
     let viewer = create_test_session(state.as_ref(), "viewer").await;
-    grant_space_member_for_test(state.as_ref(), "alpha", &viewer.user_id).await;
+    grant_space_member_for_test(state.as_ref(), "alpha", &viewer.user_jid).await;
 
     let session = create_test_server_owner_session(state.as_ref(), "owner").await;
     let bound_jid: FullJid = "owner@example.com/web".parse().expect("bound jid");
@@ -3042,7 +3042,7 @@ async fn admin_channels_create_space_bookmark_grants_space_members_channel_view(
     let channel_id = waddle_xmpp::parse_managed_room_jid(&channel_jid).expect("managed channel");
 
     assert!(
-        channel_view_allowed_for_test(state.as_ref(), &channel_id, &viewer.user_id).await,
+        channel_view_allowed_for_test(state.as_ref(), &channel_id, &viewer.user_jid).await,
         "admin-created XEP-0503 bookmark should write the channel parent tuple"
     );
 }
@@ -3129,7 +3129,7 @@ async fn admin_spaces_delete_clears_channel_parent_tuple() {
         .expect("publish bookmark");
 
     let viewer = create_test_session(state.as_ref(), "viewer").await;
-    grant_space_member_for_test(state.as_ref(), "alpha", &viewer.user_id).await;
+    grant_space_member_for_test(state.as_ref(), "alpha", &viewer.user_jid).await;
     state
         .deps
         .app_state
@@ -3144,7 +3144,7 @@ async fn admin_spaces_delete_clears_channel_parent_tuple() {
         .await
         .expect("channel parent tuple");
     assert!(
-        channel_view_allowed_for_test(state.as_ref(), "delete-parent", &viewer.user_id).await,
+        channel_view_allowed_for_test(state.as_ref(), "delete-parent", &viewer.user_jid).await,
         "test setup should grant channel view through the space parent tuple"
     );
 
@@ -3172,7 +3172,7 @@ async fn admin_spaces_delete_clears_channel_parent_tuple() {
         "expected completed space delete command response: {response}"
     );
     assert!(
-        !channel_view_allowed_for_test(state.as_ref(), "delete-parent", &viewer.user_id).await,
+        !channel_view_allowed_for_test(state.as_ref(), "delete-parent", &viewer.user_jid).await,
         "spaces:delete should remove the channel parent tuple"
     );
 }
@@ -3305,7 +3305,7 @@ async fn spaces_publish_accepts_non_jid_node_and_syncs_parent_tuple() {
         .expect("space node");
 
     let viewer = create_test_session(state.as_ref(), "viewer").await;
-    grant_space_member_for_test(state.as_ref(), "music/A", &viewer.user_id).await;
+    grant_space_member_for_test(state.as_ref(), "music/A", &viewer.user_jid).await;
 
     let session = create_test_server_owner_session(state.as_ref(), "owner").await;
     let bound_jid: FullJid = "owner@example.com/web".parse().expect("bound jid");
@@ -3346,7 +3346,7 @@ async fn spaces_publish_accepts_non_jid_node_and_syncs_parent_tuple() {
         "non-JID Space nodes should not be forced into the BareJid link projection"
     );
     assert!(
-        channel_view_allowed_for_test(state.as_ref(), "hierarchical", &viewer.user_id).await,
+        channel_view_allowed_for_test(state.as_ref(), "hierarchical", &viewer.user_jid).await,
         "publish should still write the channel parent tuple for non-JID Space nodes"
     );
 
@@ -3372,7 +3372,7 @@ async fn spaces_publish_accepts_non_jid_node_and_syncs_parent_tuple() {
         "spaces retract should accept non-JID node ids: {retract_response}"
     );
     assert!(
-        !channel_view_allowed_for_test(state.as_ref(), "hierarchical", &viewer.user_id).await,
+        !channel_view_allowed_for_test(state.as_ref(), "hierarchical", &viewer.user_jid).await,
         "retract should clear the channel parent tuple for non-JID Space nodes"
     );
 }

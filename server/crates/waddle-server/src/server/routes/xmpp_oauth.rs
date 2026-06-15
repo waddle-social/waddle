@@ -266,7 +266,7 @@ pub async fn xmpp_token_handler(
     };
 
     debug!(
-        user_id = %session.user_id,
+        user_jid = %session.user_jid,
         username = %session.username,
         "Issued XMPP OAuth bearer token"
     );

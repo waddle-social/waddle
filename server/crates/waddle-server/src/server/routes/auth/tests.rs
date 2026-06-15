@@ -31,7 +31,7 @@ async fn create_test_auth_state(
 async fn session_response_includes_jid_websocket_url_and_link_preview_media_origin() {
     let server_config = ServerConfig::test_homeserver();
     let (auth_state, actor) = create_test_auth_state(&server_config).await;
-    let session = Session::new("user-1", "alice", "alice");
+    let session = Session::new("alice@example.com", "alice", "alice");
     auth_state
         .session_manager
         .create_session(&session)
@@ -39,10 +39,10 @@ async fn session_response_includes_jid_websocket_url_and_link_preview_media_orig
         .unwrap();
     actor
         .ask(DbExecute {
-            sql: "UPDATE users SET avatar_url = ? WHERE id = ?".to_string(),
+            sql: "UPDATE users SET avatar_url = ? WHERE jid = ?".to_string(),
             params: vec![
                 "https://avatars.example.com/alice.png".into(),
-                session.user_id.clone().into(),
+                session.user_jid.clone().into(),
             ],
         })
         .await
@@ -85,7 +85,7 @@ async fn session_response_includes_jid_websocket_url_and_link_preview_media_orig
 async fn session_response_falls_back_to_raw_claim_profile_avatar() {
     let server_config = ServerConfig::test_homeserver();
     let (auth_state, actor) = create_test_auth_state(&server_config).await;
-    let session = Session::new("user-1", "alice", "alice");
+    let session = Session::new("alice@example.com", "alice", "alice");
     auth_state
         .session_manager
         .create_session(&session)
@@ -93,12 +93,12 @@ async fn session_response_falls_back_to_raw_claim_profile_avatar() {
         .unwrap();
     actor
         .ask(DbExecute {
-            sql: "INSERT INTO auth_identities (id, user_id, provider_id, issuer, subject, email, email_verified, raw_claims_json, created_at, last_login_at)
+            sql: "INSERT INTO auth_identities (id, user_jid, provider_id, issuer, subject, email, email_verified, raw_claims_json, created_at, last_login_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                 .to_string(),
             params: vec![
                 "identity-1".into(),
-                session.user_id.clone().into(),
+                session.user_jid.clone().into(),
                 "colony".into(),
                 "https://colony.waddle.social".into(),
                 "subject-1".into(),

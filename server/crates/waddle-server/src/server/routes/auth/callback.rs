@@ -141,7 +141,7 @@ pub(super) async fn callback_handler(
 
     let linked = match state
         .identity_service
-        .resolve_or_create_user(provider, &identity_claims)
+        .resolve_or_create_user(provider, &identity_claims, &state.xmpp_domain)
         .await
     {
         Ok(v) => v,
@@ -214,7 +214,7 @@ pub(super) async fn callback_handler(
     if let Err(err) = reconcile_user_membership(
         &state.permission_actor,
         &state.bootstrap_membership,
-        &linked.user.id,
+        &linked.user.jid,
         &linked.user.xmpp_localpart,
     )
     .await
@@ -226,7 +226,7 @@ pub(super) async fn callback_handler(
     }
 
     let session = Session::new(
-        &linked.user.id,
+        &linked.user.jid,
         &linked.user.username,
         &linked.user.xmpp_localpart,
     );

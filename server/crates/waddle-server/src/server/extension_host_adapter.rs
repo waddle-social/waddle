@@ -376,7 +376,7 @@ impl ExtensionHostAdapter {
         let Some(session) = invocation.session.as_ref() else {
             return Err(ExtensionHostAdapterError::NotAuthorized);
         };
-        let subject = Subject::user(&session.user_id);
+        let subject = Subject::user(&session.user_jid);
         if self
             .permission_allowed(
                 subject,
@@ -441,7 +441,7 @@ impl ExtensionHostAdapter {
         let Some(session) = invocation.session.as_ref() else {
             return Err(ExtensionHostAdapterError::NotAuthorized);
         };
-        let subject = Subject::user(&session.user_id);
+        let subject = Subject::user(&session.user_jid);
         if self
             .permission_allowed(subject.clone(), object, permission)
             .await?

@@ -147,7 +147,7 @@ async fn register_bound_connection_after_frame_completes_pending_resume_claim() 
         .sm_session_registry
         .store_session(DetachedSession {
             stream_id: stream_id.clone(),
-            user_id: session.user_id.clone(),
+            user_id: session.user_jid.clone(),
             jid: jid.clone(),
             inbound_count: 4,
             outbound_count: 10,
@@ -294,7 +294,7 @@ async fn replay_gap_during_resume_finalization_clears_blocklist_interest_for_fre
         .sm_session_registry
         .store_session(DetachedSession {
             stream_id: stream_id.clone(),
-            user_id: session.user_id.clone(),
+            user_id: session.user_jid.clone(),
             jid: jid.clone(),
             inbound_count: 4,
             outbound_count: 0,

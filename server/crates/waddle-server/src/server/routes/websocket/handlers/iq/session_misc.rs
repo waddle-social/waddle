@@ -77,7 +77,7 @@ pub(super) async fn handle_isr_token_request_iq(
         .deps
         .protocol
         .isr_token_store
-        .create_token(session.user_id.to_string(), sender_jid.to_bare());
+        .create_token(session.user_jid.to_string(), sender_jid.to_bare());
     vec![iq_to_xml(build_isr_token_result(iq, &token))]
 }
 
