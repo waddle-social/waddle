@@ -72,7 +72,12 @@ watch(
     resetCallControls(active.media.audio, active.media.video);
     try {
       const iceServers = await resolveIceServers();
-      await engine.connect(active.join, { ...active.media, iceServers });
+      // The ICE fetch can block for up to 10s. Re-confirm this is still the
+      // same active call before connecting — a hang-up + redial during the
+      // fetch would otherwise open a LiveKit session against a stale join/sid.
+      const current = state.value;
+      if (current.phase !== "active" || current.sid !== sid) return;
+      await engine.connect(current.join, { ...current.media, iceServers });
       // Capture is best-effort inside connect(): a missing device or a
       // denied mic/cam permission no longer throws — the user joins as a
       // receive-only participant and the engine emits `mediaDevicesError`

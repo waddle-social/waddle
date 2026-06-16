@@ -90,4 +90,43 @@ describe("CallEngine.connect — XEP-0215 ICE injection", () => {
 
     expect(room.connectCalls[0].opts).toBeUndefined();
   });
+
+  test("rejects a second concurrent connect before the first resolves, building only one Room", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let roomsBuilt = 0;
+    const makeRoom = () => {
+      roomsBuilt += 1;
+      const room = {
+        on() {
+          return room;
+        },
+        removeAllListeners() {},
+        async connect() {
+          await gate; // hold the connect open to overlap a second call
+        },
+        localParticipant: {
+          identity: "alice@waddle.test/desktop",
+          async setMicrophoneEnabled() {},
+          async setCameraEnabled() {},
+        },
+        remoteParticipants: new Map(),
+      };
+      return room as unknown as Room;
+    };
+    const engine = new CallEngine({
+      makeRoom,
+      videoCodecSupport: videoCodecSupport({ encode: ["video/vp8"], decode: ["video/vp8"] }),
+    });
+
+    const first = engine.connect(join(), { audio: false, video: false });
+    await expect(engine.connect(join(), { audio: false, video: false })).rejects.toThrow(
+      "already connected",
+    );
+    release();
+    await first;
+    expect(roomsBuilt).toBe(1);
+  });
 });

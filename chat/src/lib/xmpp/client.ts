@@ -2295,7 +2295,12 @@ export class BrowserXmppClient {
         );
         return [];
       }
-      const result = await Promise.race([xmpp.fetch_external_services(), timeoutPromise]);
+      const fetchPromise = xmpp.fetch_external_services();
+      // If the timeout wins the race, the IQ promise settles unobserved later.
+      // Attach a no-op catch so a late rejection never surfaces as an
+      // unhandledrejection (the race below still handles a rejection that wins).
+      fetchPromise.catch(() => {});
+      const result = await Promise.race([fetchPromise, timeoutPromise]);
       if (result === timeoutSentinel) {
         console.warn(
           `[xmpp] fetch_external_services timed out after ${TIMEOUT_MS}ms; ` +

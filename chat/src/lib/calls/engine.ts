@@ -269,6 +269,14 @@ export type CallEngineEvents = {
  */
 export class CallEngine {
   private room: Room | null = null;
+  /**
+   * True from the start of `connect()` until `this.room` is assigned. The
+   * `this.room` guard alone is set only AFTER `await room.connect`, so two
+   * overlapping `connect()` calls (e.g. a hang-up-and-redial during the
+   * pre-connect ICE fetch) would both pass it and each build a `Room`, leaking
+   * one. This bridges that await window.
+   */
+  private connecting = false;
   private participantAudioVolumes: ParticipantAudioVolumeStore = {};
   private subscribedAudioTracks = new Map<string, Set<VolumeAdjustableTrack>>();
   private listeners: { [K in keyof CallEngineEvents]: Set<CallEngineEvents[K]> } = {
@@ -367,7 +375,7 @@ export class CallEngine {
     join: LiveKitJoin,
     opts: { audio: boolean; video: boolean; iceServers?: RTCIceServer[] },
   ): Promise<void> {
-    if (this.room) throw new Error("CallEngine already connected");
+    if (this.room || this.connecting) throw new Error("CallEngine already connected");
     // Defensive pre-flight: confirm the JWT actually carries a usable
     // `video` grant (roomJoin + a room) before the SDK opens its
     // WebSocket. A mismatched / misconfigured token otherwise fails
@@ -377,6 +385,9 @@ export class CallEngine {
     if (!grant.ok) {
       throw new Error(`Invalid LiveKit join token: ${grant.reason}`);
     }
+    // Reserve the engine synchronously now that we're committed to building a
+    // Room; cleared on the connect-failure path and once `this.room` is set.
+    this.connecting = true;
     const prefs = $devicePrefs.get();
     // Seed the AI-filter desired model from prefs so it re-applies on this
     // call's mic publish; start each call with a clean failure guard and
@@ -415,9 +426,11 @@ export class CallEngine {
       // a clean path. `this.room` was never set so the caller stays
       // on the well-defined "not connected" path.
       room.removeAllListeners();
+      this.connecting = false;
       throw err;
     }
     this.room = room;
+    this.connecting = false;
     // Emit the initial participant snapshot so subscribers can seed
     // their projection without missing peers that connected before
     // our listeners attached.
