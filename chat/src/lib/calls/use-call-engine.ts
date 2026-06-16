@@ -72,6 +72,12 @@ const MEDIA_PATH_SAMPLE_INTERVAL_MS = 5_000;
 let mediaPathTimer: ReturnType<typeof setInterval> | null = null;
 // Guards against overlapping ticks if a `getStats()` pass outlives the interval.
 let mediaPathSampling = false;
+// Bumped on every start/stop. A tick captures the generation at launch and
+// re-checks it after its awaits before observing, so an in-flight pass that
+// outlives a disconnect (or a switch to another call) can never re-populate the
+// just-reset beacon — which would otherwise suppress the next call's first
+// event when both calls share a codec/ICE path.
+let mediaPathGeneration = 0;
 
 /**
  * Read one video track's live stats and reduce them to a media-path snapshot,
@@ -101,8 +107,9 @@ async function sampleTrackMediaPath(
 }
 
 /** Sample every published/subscribed video track once and beacon the distinct
- * media paths. Skips re-entrant ticks so a slow pass cannot stack. */
-async function sampleMediaPaths(): Promise<void> {
+ * media paths. Skips re-entrant ticks so a slow pass cannot stack, and discards
+ * its results if the call ended (or restarted) while `getStats()` was awaited. */
+async function sampleMediaPaths(generation: number): Promise<void> {
   if (mediaPathSampling) return;
   mediaPathSampling = true;
   try {
@@ -114,6 +121,9 @@ async function sampleMediaPaths(): Promise<void> {
         .filter((track) => track.kind === "video")
         .map((track) => sampleTrackMediaPath(track, "recv")),
     ]);
+    // Bail if polling was stopped/restarted while we awaited: this pass belongs
+    // to a torn-down call and must not observe into the (reset) beacon.
+    if (generation !== mediaPathGeneration) return;
     for (const snapshot of snapshots) {
       if (snapshot) callMediaPathBeacon.observe(snapshot);
     }
@@ -124,10 +134,16 @@ async function sampleMediaPaths(): Promise<void> {
 
 function startMediaPathPolling(): void {
   stopMediaPathPolling();
-  mediaPathTimer = setInterval(() => void sampleMediaPaths(), MEDIA_PATH_SAMPLE_INTERVAL_MS);
+  const generation = mediaPathGeneration;
+  // Sample immediately so a short call (or the early-settling host/udp path)
+  // still beacons, then poll for any mid-call re-route.
+  void sampleMediaPaths(generation);
+  mediaPathTimer = setInterval(() => void sampleMediaPaths(generation), MEDIA_PATH_SAMPLE_INTERVAL_MS);
 }
 
 function stopMediaPathPolling(): void {
+  // Invalidate any in-flight tick so its post-await observe no-ops.
+  mediaPathGeneration += 1;
   if (mediaPathTimer) {
     clearInterval(mediaPathTimer);
     mediaPathTimer = null;

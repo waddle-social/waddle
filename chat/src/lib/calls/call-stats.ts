@@ -298,12 +298,15 @@ export function summarizeVideoStats(
       }
     }
   }
-  // Prefer the active pair's RTT; fall back to any pair that reported one so a
-  // momentarily RTT-less selected pair doesn't blank an otherwise-known RTT.
+  // Prefer the active pair's RTT; fall back to any non-failed pair that
+  // reported one so a momentarily RTT-less selected pair doesn't blank an
+  // otherwise-known RTT — but never surface a failed pair's stale round-trip.
   if (rttSec === undefined) {
     rttSec =
       candidatePair?.currentRoundTripTime ??
-      candidatePairs.find((pair) => pair.currentRoundTripTime !== undefined)?.currentRoundTripTime;
+      candidatePairs.find(
+        (pair) => pair.state !== "failed" && pair.currentRoundTripTime !== undefined,
+      )?.currentRoundTripTime;
   }
   const rttMs = rttSec !== undefined ? Math.round(rttSec * 1000) : null;
 

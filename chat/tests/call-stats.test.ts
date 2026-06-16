@@ -396,6 +396,26 @@ describe("summarizeVideoStats — ICE candidate path", () => {
     expect(summary.rttMs).toBe(40); // RTT borrowed from the sibling
   });
 
+  test("does not borrow RTT from a failed pair when a non-failed pair reports one", () => {
+    // A failed pair can still carry an RTT; the borrow must skip it rather than
+    // surface a misleading round-trip from a path media never settled on.
+    const selectedPair = {
+      type: "candidate-pair",
+      id: "cp-sel",
+      state: "succeeded",
+      localCandidateId: "lc-host",
+    };
+    const failed = { type: "candidate-pair", id: "cp-failed", state: "failed", currentRoundTripTime: 0.5 };
+    const healthy = { type: "candidate-pair", id: "cp-ok", currentRoundTripTime: 0.03 };
+    const transport = { type: "transport", id: "T1", selectedCandidatePairId: "cp-sel" };
+    const host = { type: "local-candidate", id: "lc-host", candidateType: "host", protocol: "udp" };
+    const { summary } = summarizeVideoStats(
+      report([inbound, failed, selectedPair, healthy, transport, host]),
+      "recv",
+    );
+    expect(summary.rttMs).toBe(30); // from the healthy pair, not the failed 500ms one
+  });
+
   test("a relay candidate with no relayProtocol reports a null transport, not a misleading udp", () => {
     // A relay candidate's own `protocol` is the server↔peer leg (≈always udp);
     // borrowing it would hide a real TURN/TCP leg. Absent relayProtocol → null.
