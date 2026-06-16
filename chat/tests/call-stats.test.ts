@@ -368,6 +368,34 @@ describe("summarizeVideoStats — ICE candidate path", () => {
     expect(summary.rttMs).toBe(20);
   });
 
+  test("falls through to the quality chain when selectedCandidatePairId names a missing pair", () => {
+    const pair = {
+      type: "candidate-pair",
+      id: "cp-real",
+      state: "succeeded",
+      currentRoundTripTime: 0.03,
+      localCandidateId: "lc-host",
+    };
+    const transport = { type: "transport", id: "T1", selectedCandidatePairId: "cp-gone" };
+    const host = { type: "local-candidate", id: "lc-host", candidateType: "host", protocol: "udp" };
+    const { summary } = summarizeVideoStats(report([inbound, pair, transport, host]), "recv");
+    expect(summary.iceCandidateType).toBe("host");
+    expect(summary.rttMs).toBe(30);
+  });
+
+  test("borrows a sibling pair's RTT when the selected pair reports none this tick", () => {
+    const selectedPair = { type: "candidate-pair", id: "cp-sel", localCandidateId: "lc-host" };
+    const sibling = { type: "candidate-pair", id: "cp-other", currentRoundTripTime: 0.04 };
+    const transport = { type: "transport", id: "T1", selectedCandidatePairId: "cp-sel" };
+    const host = { type: "local-candidate", id: "lc-host", candidateType: "host", protocol: "udp" };
+    const { summary } = summarizeVideoStats(
+      report([inbound, selectedPair, sibling, transport, host]),
+      "recv",
+    );
+    expect(summary.iceCandidateType).toBe("host"); // path from the selected pair
+    expect(summary.rttMs).toBe(40); // RTT borrowed from the sibling
+  });
+
   test("a relay candidate with no relayProtocol reports a null transport, not a misleading udp", () => {
     // A relay candidate's own `protocol` is the server↔peer leg (≈always udp);
     // borrowing it would hide a real TURN/TCP leg. Absent relayProtocol → null.
