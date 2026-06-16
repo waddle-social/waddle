@@ -728,6 +728,8 @@ function close(): void {
               <span>{{ row.bitrate }}</span>
               <span>loss {{ row.loss }}</span>
               <span>{{ row.rtt }}</span>
+              <span>{{ row.codec }}</span>
+              <span>{{ row.icePath }}</span>
             </div>
           </li>
         </ul>

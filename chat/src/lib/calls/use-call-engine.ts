@@ -18,7 +18,12 @@ import {
   setAiNoiseFilterError,
 } from "./ai-noise-filter-error-state";
 import { createCallAudioProcessingBeacon } from "./call-audio-processing-telemetry";
-import { reportCallAudioProcessing } from "../telemetry";
+import {
+  createCallMediaPathBeacon,
+  type CallMediaPathSnapshot,
+} from "./call-media-path-telemetry";
+import { summarizeVideoStats, type CallStatDirection } from "./call-stats";
+import { reportCallAudioProcessing, reportCallMediaPath } from "../telemetry";
 import {
   resetCallConnectionQuality,
   setCallConnectionPhase,
@@ -49,6 +54,101 @@ const localTracks: Ref<LocalMediaTrack[]> = ref([]);
  * re-arms from scratch.
  */
 const micAudioProcessingBeacon = createCallAudioProcessingBeacon(reportCallAudioProcessing);
+
+/**
+ * Fleet-measurement beacon for the media path each call track actually got
+ * (#996): negotiated video codec + the succeeded ICE candidate-pair. Fed by a
+ * lightweight read-only `getRTCStatsReport` poll that runs for the whole call
+ * (independent of the diagnostics dialog), so the fleet baseline — and the
+ * silent "stuck on TCP relay" rate — is captured on every call. De-dupes to at
+ * most one event per distinct path per call; reset on disconnect.
+ */
+const callMediaPathBeacon = createCallMediaPathBeacon(reportCallMediaPath);
+
+/** Cadence of the observational media-path poll. Codec/ICE settle within the
+ * first seconds and then rarely change, and the beacon de-dupes, so a slow 5 s
+ * poll captures the path and any mid-call re-route at negligible cost. */
+const MEDIA_PATH_SAMPLE_INTERVAL_MS = 5_000;
+let mediaPathTimer: ReturnType<typeof setInterval> | null = null;
+// Guards against overlapping ticks if a `getStats()` pass outlives the interval.
+let mediaPathSampling = false;
+// Bumped on every start/stop. A tick captures the generation at launch and
+// re-checks it after its awaits before observing, so an in-flight pass that
+// outlives a disconnect (or a switch to another call) can never re-populate the
+// just-reset beacon — which would otherwise suppress the next call's first
+// event when both calls share a codec/ICE path.
+let mediaPathGeneration = 0;
+
+/**
+ * Read one video track's live stats and reduce them to a media-path snapshot,
+ * or `null` when nothing has been negotiated yet (so a not-yet-connected track
+ * never beacons) or the report is unavailable. `getRTCStatsReport()` rejects
+ * mid-teardown, so a failure drops that single track rather than the tick.
+ */
+async function sampleTrackMediaPath(
+  track: LocalMediaTrack | RemoteMediaTrack,
+  direction: CallStatDirection,
+): Promise<CallMediaPathSnapshot | null> {
+  try {
+    const report = await track.track.getRTCStatsReport();
+    if (!report) return null;
+    const { summary } = summarizeVideoStats(report, direction);
+    if (summary.codec === null && summary.iceCandidateType === null) return null;
+    return {
+      direction,
+      source: track.source === "screen_share" ? "screen" : "camera",
+      codec: summary.codec,
+      iceCandidateType: summary.iceCandidateType,
+      iceTransport: summary.iceTransport,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Sample every published/subscribed video track once and beacon the distinct
+ * media paths. Skips re-entrant ticks so a slow pass cannot stack, and discards
+ * its results if the call ended (or restarted) while `getStats()` was awaited. */
+async function sampleMediaPaths(generation: number): Promise<void> {
+  if (mediaPathSampling) return;
+  mediaPathSampling = true;
+  try {
+    const snapshots = await Promise.all([
+      ...localTracks.value
+        .filter((track) => track.kind === "video")
+        .map((track) => sampleTrackMediaPath(track, "send")),
+      ...remoteTracks.value
+        .filter((track) => track.kind === "video")
+        .map((track) => sampleTrackMediaPath(track, "recv")),
+    ]);
+    // Bail if polling was stopped/restarted while we awaited: this pass belongs
+    // to a torn-down call and must not observe into the (reset) beacon.
+    if (generation !== mediaPathGeneration) return;
+    for (const snapshot of snapshots) {
+      if (snapshot) callMediaPathBeacon.observe(snapshot);
+    }
+  } finally {
+    mediaPathSampling = false;
+  }
+}
+
+function startMediaPathPolling(): void {
+  stopMediaPathPolling();
+  const generation = mediaPathGeneration;
+  // Sample immediately so a short call (or the early-settling host/udp path)
+  // still beacons, then poll for any mid-call re-route.
+  void sampleMediaPaths(generation);
+  mediaPathTimer = setInterval(() => void sampleMediaPaths(generation), MEDIA_PATH_SAMPLE_INTERVAL_MS);
+}
+
+function stopMediaPathPolling(): void {
+  // Invalidate any in-flight tick so its post-await observe no-ops.
+  mediaPathGeneration += 1;
+  if (mediaPathTimer) {
+    clearInterval(mediaPathTimer);
+    mediaPathTimer = null;
+  }
+}
 
 export function useCallEngine(): {
   engine: CallEngine;
@@ -84,6 +184,12 @@ export function useCallEngine(): {
       const roomJid = activeMucRoomJid();
       if (!roomJid) return;
       setLiveCallParticipants(roomJid, [localIdentity, ...remoteIdentities]);
+    });
+    singletonEngine.on("connected", () => {
+      // Start the observational media-path poll for the whole call (every
+      // call, not just when the diagnostics dialog is open). Separate from the
+      // MUC-projection handler above, which early-returns for 1:1 DM calls.
+      startMediaPathPolling();
     });
     singletonEngine.on("mediaDevicesError", ({ source, error }) => {
       // A best-effort mic/cam capture failed (no device / denied
@@ -156,6 +262,9 @@ export function useCallEngine(): {
       // Re-arm the fleet-measurement beacon so the next call emits its
       // first verified state even if it matches the last call's.
       micAudioProcessingBeacon.reset();
+      // Stop the media-path poll and re-arm its beacon for the next call.
+      stopMediaPathPolling();
+      callMediaPathBeacon.reset();
       // Drop the connection-quality chip so a stale `poor`/`reconnecting`
       // from the call that just ended can't bleed into the next call.
       resetCallConnectionQuality();
