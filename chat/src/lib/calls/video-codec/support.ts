@@ -25,10 +25,20 @@ type VideoCodecAvailability = { available: true } | { available: false; reason: 
 
 export type VideoCodecSupport = Record<ProbedVideoCodec, VideoCodecAvailability>;
 
-function availability(codec: ProbedVideoCodec, env: VideoCodecSupportEnv): VideoCodecAvailability {
+function advertises(mimeTypes: readonly string[], codec: ProbedVideoCodec): boolean {
   const mime = `video/${codec}`;
-  const canEncode = env.encode.includes(mime);
-  return canEncode ? { available: true } : { available: false, reason: `This browser can't encode ${codec.toUpperCase()}.` };
+  return mimeTypes.some((m) => m.toLowerCase() === mime);
+}
+
+function availability(codec: ProbedVideoCodec, env: VideoCodecSupportEnv): VideoCodecAvailability {
+  const name = codec.toUpperCase();
+  if (!advertises(env.encode, codec)) {
+    return { available: false, reason: `This browser can't encode ${name}.` };
+  }
+  if (!advertises(env.decode, codec)) {
+    return { available: false, reason: `This browser can't decode ${name}.` };
+  }
+  return { available: true };
 }
 
 /** Per-codec availability for the current environment. */
@@ -36,5 +46,32 @@ export function videoCodecSupport(env: VideoCodecSupportEnv): VideoCodecSupport 
   return {
     vp9: availability("vp9", env),
     vp8: availability("vp8", env),
+  };
+}
+
+/**
+ * The `static getCapabilities('video')` surface of `RTCRtpSender` /
+ * `RTCRtpReceiver`. Narrowed to what the probe reads and made injectable so
+ * the edge reader is testable without real WebRTC globals.
+ */
+export type RtpCapabilitiesSource = {
+  getCapabilities?: (kind: "video") => { codecs?: { mimeType?: string }[] } | null;
+};
+
+function capabilityMimeTypes(source: RtpCapabilitiesSource | undefined): string[] {
+  const codecs = source?.getCapabilities?.("video")?.codecs ?? [];
+  return codecs.map((c) => c.mimeType ?? "").filter((m) => m.length > 0);
+}
+
+/** Read the real environment. Thin; the decision logic lives in the pure probe. */
+export function currentVideoCodecSupportEnv(
+  env: { sender?: RtpCapabilitiesSource; receiver?: RtpCapabilitiesSource } = {
+    sender: typeof RTCRtpSender === "undefined" ? undefined : RTCRtpSender,
+    receiver: typeof RTCRtpReceiver === "undefined" ? undefined : RTCRtpReceiver,
+  },
+): VideoCodecSupportEnv {
+  return {
+    encode: capabilityMimeTypes(env.sender),
+    decode: capabilityMimeTypes(env.receiver),
   };
 }
