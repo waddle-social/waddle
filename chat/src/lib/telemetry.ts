@@ -44,6 +44,10 @@ import {
   callAudioProcessingEventAttributes,
   type VerifiedCallAudioProcessing,
 } from "./calls/call-audio-processing-telemetry";
+import {
+  callMediaPathEventAttributes,
+  type CallMediaPathSnapshot,
+} from "./calls/call-media-path-telemetry";
 
 type MessageKind = "room" | "dm";
 
@@ -921,6 +925,20 @@ export function reportSessionLifecycle(payload: {
  */
 export function reportCallAudioProcessing(state: VerifiedCallAudioProcessing): void {
   faro?.api.pushEvent("chat.call.audio_processing", callAudioProcessingEventAttributes(state));
+}
+
+/**
+ * Beacon the media path a call track actually got (#996): the negotiated video
+ * codec and the succeeded ICE candidate-pair (type + transport). This is the
+ * baseline the #995 codec/Opus/ICE levers verify against and what surfaces the
+ * silent "stuck on TCP relay" rate. The payload is the PII-free attribute set
+ * from {@link callMediaPathEventAttributes}; coarse browser/platform context
+ * rides along in Faro's event meta. Pure observability — no XMPP/Jingle wire
+ * effect. De-dup (at most once per call per distinct path) is the caller's job
+ * via `createCallMediaPathBeacon`.
+ */
+export function reportCallMediaPath(snapshot: CallMediaPathSnapshot): void {
+  faro?.api.pushEvent("chat.call.media_path", callMediaPathEventAttributes(snapshot));
 }
 
 export function reportStatusChange(payload: {
