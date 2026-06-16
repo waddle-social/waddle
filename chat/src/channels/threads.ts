@@ -19,6 +19,8 @@ export interface MessageThreadEntry {
   count: number;
   /** ISO timestamp of the most recent descendant (or root when empty). */
   lastTs: string;
+  /** XEP-0201 parent thread id when this entry is a child thread. */
+  parentThreadId?: string;
 }
 
 export type MessageThreadIndex = ReadonlyMap<string, MessageThreadEntry>;
@@ -83,6 +85,7 @@ function buildIndex(messages: readonly TimelineMessage[]): MessageThreadIndex {
     const root = byId.get(threadId) ?? standardRoot;
     const directChildren = root ? group.filter((m) => m.id !== root.id) : group.slice();
     const lastTs = group[group.length - 1]?.createdAt ?? root?.createdAt ?? "";
+    const parentThreadId = parentLinks.get(threadId);
     entries.set(threadId, {
       threadId,
       root,
@@ -90,6 +93,7 @@ function buildIndex(messages: readonly TimelineMessage[]): MessageThreadIndex {
       allDescendants: directChildren.slice(),
       count: directChildren.length,
       lastTs,
+      ...(parentThreadId ? { parentThreadId } : {}),
     });
   }
 

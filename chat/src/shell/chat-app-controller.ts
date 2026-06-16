@@ -44,6 +44,7 @@ import { dmMessageFromArchived, roomMessageFromArchived } from "@/lib/xmpp/wasm-
 import { mapLiveRoomMessageToTimeline } from "@/channels/timeline";
 import { fromLiveDmMessage } from "@/dms/message-timeline-state";
 import { orderTimelineForScrollDirection, type ScrollDirectionMode } from "@/lib/scroll-direction";
+import { nextThreadStack, sameThreadStack } from "@/lib/thread-stack";
 import { useScrollDirectionPreference } from "@/preferences/scroll-direction";
 import type { MemberSummary } from "@/lib/chat-types";
 import type { ExtensionAnnotationAction, MarkupSpan, MessageReference, TimelineMessage } from "@/lib/chat-ui";
@@ -1219,18 +1220,20 @@ export function useChatAppController(giphyApiKey: string) {
     openThread(threadId);
   }
 
-  function pushThread(threadId: string) {
+  function pushThreadFromStack(baseStack: readonly string[], threadId: string) {
     if (!threadId) return;
     activeRightPanel.value = "thread";
     activeThreadTargetMessageId.value = null;
-    if (
-      activeThreadStack.value.length > 0 &&
-      activeThreadStack.value[activeThreadStack.value.length - 1] === threadId
-    ) {
+    const nextStack = nextThreadStack(baseStack, threadId);
+    if (sameThreadStack(activeThreadStack.value, nextStack)) {
       return;
     }
-    activeThreadStack.value = [...activeThreadStack.value, threadId];
+    activeThreadStack.value = nextStack;
     backfillActiveThread(threadId);
+  }
+
+  function pushThread(threadId: string) {
+    pushThreadFromStack(activeThreadStack.value, threadId);
   }
 
   function popThreadTo(index: number) {
@@ -2677,6 +2680,7 @@ export function useChatAppController(giphyApiKey: string) {
       sendCallChatMessage,
       sendGif,
       openThread,
+      pushThreadFromStack,
       pushThread,
       popThreadTo,
       closeThreadPanel,

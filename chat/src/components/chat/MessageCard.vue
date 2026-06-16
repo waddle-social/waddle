@@ -54,6 +54,7 @@ import {
 } from "@/stores/message-toolbar";
 import { QUICK_REACTION_EMOJIS } from "@/lib/reaction-mode";
 import { callThreadAnchorLabel, callThreadAnchorThreadId, useCallAnchorCardState } from "@/lib/call-thread-anchor";
+import { resolveThreadActionTarget } from "@/lib/thread-action-target";
 import type { CallMedia } from "@/lib/calls/types";
 
 // Two separate badge layers:
@@ -171,6 +172,12 @@ const props = defineProps<{
   canPinMessages?: boolean;
   linkPreviewLookup?: ComposerLinkPreviewLookup | null;
   linkPreviewScope?: string | null;
+  /**
+   * Overrides the toolbar/action-sheet/swipe thread target. ThreadPanel uses
+   * this on reply rows so "Reply in thread" enters the reply's child thread
+   * instead of reopening the parent thread carried by message.threadId.
+   */
+  threadActionThreadId?: string;
   callRoomJid?: string | null;
   callChannelId?: string | null;
   hideCallAnchorCard?: boolean;
@@ -371,6 +378,7 @@ function formatThreadRecency(iso: string | undefined): string {
 }
 
 const threadChipRecency = computed(() => formatThreadRecency(props.threadLastReplyAt));
+const threadActionTargetId = computed(() => resolveThreadActionTarget(props.message, props.threadActionThreadId));
 const callThreadLabel = computed(() => callThreadAnchorLabel(props.message));
 const callThreadId = computed(() => callThreadAnchorThreadId(props.message));
 const callAnchorCardState = useCallAnchorCardState(
@@ -406,11 +414,10 @@ function togglePinFromMenu() {
 }
 
 function startReplyInThreadFromMenu() {
-  // Open the thread first so the follow-up reply lands in the panel's
-  // composer. Panel ownership of the reply target means we just need to be
-  // sure the panel is in focus; the user can then tap "Reply" in-thread.
-  const threadId = props.message.threadId ?? props.message.id;
-  emit("openThread", threadId);
+  // Open the target thread first so the panel composer sends with the
+  // matching threadOverride. ThreadPanel can target a reply's own id here,
+  // which starts an empty child thread whose parent is the current thread.
+  emit("openThread", threadActionTargetId.value);
   closeSheet();
 }
 
@@ -733,11 +740,9 @@ const longPress = useLongPress({
 const swipe = useHorizontalSwipe({
   onSwipeLeft: () => {
     // Right-to-left drag opens (or enters) the thread for this message.
-    // For root messages this jumps to their existing thread; for replies
-    // it walks into the thread of the parent (matches the toolbar's
-    // "open thread" affordance).
-    const threadId = props.message.threadId ?? props.message.id;
-    emit("openThread", threadId);
+    // ThreadPanel can override the target so swiping a reply enters that
+    // reply's child thread instead of reopening its parent thread.
+    emit("openThread", threadActionTargetId.value);
   },
   onSwipeRight: () => {
     // Left-to-right drag fills the composer reply chip targeting this
