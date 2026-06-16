@@ -68,7 +68,7 @@ const callMediaPathBeacon = createCallMediaPathBeacon(reportCallMediaPath);
 /** Cadence of the observational media-path poll. Codec/ICE settle within the
  * first seconds and then rarely change, and the beacon de-dupes, so a slow 5 s
  * poll captures the path and any mid-call re-route at negligible cost. */
-const MEDIA_PATH_SAMPLE_INTERVAL_MS = 5000;
+const MEDIA_PATH_SAMPLE_INTERVAL_MS = 5_000;
 let mediaPathTimer: ReturnType<typeof setInterval> | null = null;
 // Guards against overlapping ticks if a `getStats()` pass outlives the interval.
 let mediaPathSampling = false;

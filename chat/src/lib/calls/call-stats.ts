@@ -106,6 +106,8 @@ type RtpLike = {
   codecId?: string;
   /** `codec` entries carry the negotiated MIME, e.g. "video/VP9". */
   mimeType?: string;
+  /** `transport` entries name the in-use pair — the spec-correct selector. */
+  selectedCandidatePairId?: string;
   /** `candidate-pair` fields used to find and qualify the active path. */
   selected?: boolean;
   state?: string;
@@ -125,17 +127,24 @@ function codecName(mimeType: string | undefined): string | null {
 }
 
 /**
- * Pick the active candidate pair: the nominated/selected/succeeded one if
- * present, else any pair carrying an RTT (a path that at least probed), else
- * the first. A failed pair can still report fields, so it must never shadow
- * the path media is actually flowing over.
+ * Pick the active candidate pair. The spec-correct selector is the transport's
+ * `selectedCandidatePairId`; without it we fall back to Firefox's `selected`
+ * flag, then a nominated *and* succeeded pair, then any succeeded pair, then a
+ * pair carrying an RTT, then a bare-nominated one, then the first. `nominated`
+ * alone is unreliable — several pairs can be nominated and a failed pair can
+ * stay nominated — so it must never shadow the path media is flowing over.
  */
-function selectCandidatePair(pairs: RtpLike[]): RtpLike | undefined {
+function selectCandidatePair(pairs: RtpLike[], selectedId: string | undefined): RtpLike | undefined {
+  if (selectedId !== undefined) {
+    const selected = pairs.find((pair) => pair.id === selectedId);
+    if (selected) return selected;
+  }
   return (
-    pairs.find((pair) => pair.nominated) ??
     pairs.find((pair) => pair.selected) ??
+    pairs.find((pair) => pair.nominated && pair.state === "succeeded") ??
     pairs.find((pair) => pair.state === "succeeded") ??
     pairs.find((pair) => pair.currentRoundTripTime !== undefined) ??
+    pairs.find((pair) => pair.nominated) ??
     pairs[0]
   );
 }
@@ -170,8 +179,10 @@ function iceCandidatePath(
   const localId = candidatePair?.localCandidateId;
   const local = localId !== undefined ? byId.get(localId) : undefined;
   const iceCandidateType = normalizeIceCandidateType(local?.candidateType);
-  const rawTransport =
-    iceCandidateType === "relay" ? local?.relayProtocol ?? local?.protocol : local?.protocol;
+  // For relay, only `relayProtocol` (the client↔TURN leg) is meaningful — the
+  // candidate's own `protocol` is the server↔peer leg (≈always udp) and would
+  // mask a TURN/TCP fallback. Absent relayProtocol → null, never a false udp.
+  const rawTransport = iceCandidateType === "relay" ? local?.relayProtocol : local?.protocol;
   return { iceCandidateType, iceTransport: normalizeIceTransport(rawTransport) };
 }
 
@@ -210,6 +221,7 @@ export function summarizeVideoStats(
   const mains: RtpLike[] = [];
   const remoteInbounds: RtpLike[] = [];
   const candidatePairs: RtpLike[] = [];
+  let selectedPairId: string | undefined;
   // Index every entry by its own `id` so RTP→codec and pair→candidate
   // references resolve without depending on how the report Map is keyed.
   const byId = new Map<string, RtpLike>();
@@ -223,9 +235,11 @@ export function summarizeVideoStats(
       remoteInbounds.push(stat);
     } else if (stat.type === "candidate-pair") {
       candidatePairs.push(stat);
+    } else if (stat.type === "transport" && stat.selectedCandidatePairId !== undefined) {
+      selectedPairId = stat.selectedCandidatePairId;
     }
   });
-  const candidatePair = selectCandidatePair(candidatePairs);
+  const candidatePair = selectCandidatePair(candidatePairs, selectedPairId);
   const { iceCandidateType, iceTransport } = iceCandidatePath(candidatePair, byId);
 
   // Resolution + fps from the top (largest-area) active layer.
@@ -241,9 +255,11 @@ export function summarizeVideoStats(
   const fps = top?.framesPerSecond !== undefined ? Math.round(top.framesPerSecond) : null;
 
   // All simulcast layers share one codec, so the first RTP entry that
-  // names a `codecId` resolves it; prefer the top layer's reference.
+  // names a `codecId` resolves it; prefer the top layer's reference. Pin to a
+  // genuine `codec` entry so a stray/duplicate id can't surface a wrong MIME.
   const codecRef = top?.codecId ?? mains.find((main) => main.codecId !== undefined)?.codecId;
-  const codec = codecRef !== undefined ? codecName(byId.get(codecRef)?.mimeType) : null;
+  const codecEntry = codecRef !== undefined ? byId.get(codecRef) : undefined;
+  const codec = codecEntry?.type === "codec" ? codecName(codecEntry.mimeType) : null;
 
   // Bytes summed across all layers; timestamp is the newest layer's.
   const bytesField = direction === "send" ? "bytesSent" : "bytesReceived";
@@ -282,7 +298,13 @@ export function summarizeVideoStats(
       }
     }
   }
-  if (rttSec === undefined) rttSec = candidatePair?.currentRoundTripTime;
+  // Prefer the active pair's RTT; fall back to any pair that reported one so a
+  // momentarily RTT-less selected pair doesn't blank an otherwise-known RTT.
+  if (rttSec === undefined) {
+    rttSec =
+      candidatePair?.currentRoundTripTime ??
+      candidatePairs.find((pair) => pair.currentRoundTripTime !== undefined)?.currentRoundTripTime;
+  }
   const rttMs = rttSec !== undefined ? Math.round(rttSec * 1000) : null;
 
   return {

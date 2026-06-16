@@ -97,6 +97,19 @@ describe("summarizeVideoStats — negotiated codec", () => {
     expect(summary.codec).toBe("VP9");
   });
 
+  test("ignores a codecId that resolves to a non-codec entry", () => {
+    const out = {
+      type: "outbound-rtp",
+      kind: "video",
+      bytesSent: 1,
+      timestamp: 1,
+      codecId: "not-a-codec",
+    };
+    const stray = { type: "track", id: "not-a-codec", mimeType: "video/HACK" };
+    const { summary } = summarizeVideoStats(report([out, stray]), "send");
+    expect(summary.codec).toBeNull();
+  });
+
   test("codec is null when no codec entry is referenced", () => {
     const out = {
       type: "outbound-rtp",
@@ -288,6 +301,87 @@ describe("summarizeVideoStats — ICE candidate path", () => {
     const { summary } = summarizeVideoStats(report([inbound, pair, local]), "recv");
     expect(summary.iceCandidateType).toBe("relay");
     expect(summary.iceTransport).toBe("tcp");
+  });
+
+  test("prefers the transport's selectedCandidatePairId over a bare nominated flag", () => {
+    // The spec allows several pairs to be `nominated`; only the one named by
+    // RTCTransportStats.selectedCandidatePairId is the path media flows over.
+    const relayPair = {
+      type: "candidate-pair",
+      id: "cp-relay",
+      nominated: true,
+      state: "succeeded",
+      currentRoundTripTime: 0.09,
+      localCandidateId: "lc-relay",
+    };
+    const hostPair = {
+      type: "candidate-pair",
+      id: "cp-host",
+      nominated: true,
+      state: "succeeded",
+      currentRoundTripTime: 0.01,
+      localCandidateId: "lc-host",
+    };
+    const transport = { type: "transport", id: "T1", selectedCandidatePairId: "cp-host" };
+    const host = { type: "local-candidate", id: "lc-host", candidateType: "host", protocol: "udp" };
+    const relay = {
+      type: "local-candidate",
+      id: "lc-relay",
+      candidateType: "relay",
+      protocol: "udp",
+      relayProtocol: "tcp",
+    };
+    // Relay first, so a naive `find(nominated)` would wrongly pick it.
+    const { summary } = summarizeVideoStats(
+      report([inbound, relayPair, hostPair, transport, host, relay]),
+      "recv",
+    );
+    expect(summary.iceCandidateType).toBe("host");
+    expect(summary.iceTransport).toBe("udp");
+    expect(summary.rttMs).toBe(10); // RTT from the actually-selected pair
+  });
+
+  test("falls back to Firefox's `selected` flag when no transport entry is present", () => {
+    const other = {
+      type: "candidate-pair",
+      id: "cp-1",
+      currentRoundTripTime: 0.2,
+      localCandidateId: "lc-host",
+    };
+    const active = {
+      type: "candidate-pair",
+      id: "cp-2",
+      selected: true,
+      currentRoundTripTime: 0.02,
+      localCandidateId: "lc-relay",
+    };
+    const host = { type: "local-candidate", id: "lc-host", candidateType: "host", protocol: "udp" };
+    const relay = {
+      type: "local-candidate",
+      id: "lc-relay",
+      candidateType: "relay",
+      protocol: "udp",
+      relayProtocol: "udp",
+    };
+    const { summary } = summarizeVideoStats(report([inbound, other, active, host, relay]), "recv");
+    expect(summary.iceCandidateType).toBe("relay");
+    expect(summary.rttMs).toBe(20);
+  });
+
+  test("a relay candidate with no relayProtocol reports a null transport, not a misleading udp", () => {
+    // A relay candidate's own `protocol` is the server↔peer leg (≈always udp);
+    // borrowing it would hide a real TURN/TCP leg. Absent relayProtocol → null.
+    const pair = {
+      type: "candidate-pair",
+      nominated: true,
+      state: "succeeded",
+      currentRoundTripTime: 0.03,
+      localCandidateId: "lc-relay",
+    };
+    const local = { type: "local-candidate", id: "lc-relay", candidateType: "relay", protocol: "udp" };
+    const { summary } = summarizeVideoStats(report([inbound, pair, local]), "recv");
+    expect(summary.iceCandidateType).toBe("relay");
+    expect(summary.iceTransport).toBeNull();
   });
 
   test("ICE fields are null when no candidate pair is reported", () => {
