@@ -107,6 +107,14 @@ export class WaddleClient {
     fetch_dm_history_page(peer_jid: string, max: number, page_param: any): Promise<any>;
     fetch_extension_route_items(route: any, room_jid: string): Promise<any>;
     /**
+     * XEP-0215 §3.2: fetch the external services (TURN/STUN) the user's own
+     * server advertises, resolving to a typed array the chat maps to
+     * `RTCIceServer[]` for LiveKit's `rtcConfig` at connect time. The query is
+     * addressed to the authenticated user's server domain; an empty
+     * `<services/>` requests every advertised service type.
+     */
+    fetch_external_services(): Promise<any>;
+    /**
      * Fetch the user's inbox via XEP-0430 (`urn:xmpp:inbox:1`).
      *
      * Wire-shape: IQ-get with `<inbox/>`, server streams

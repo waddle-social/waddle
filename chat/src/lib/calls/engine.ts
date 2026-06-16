@@ -14,6 +14,8 @@ import {
   type RemoteTrackPublication,
   type TrackPublication,
   type AudioCaptureOptions,
+  type RoomConnectOptions,
+  type RoomOptions,
   type TrackPublishOptions,
   type VideoCaptureOptions,
 } from "livekit-client";
@@ -314,13 +316,21 @@ export class CallEngine {
    * incapable devices without real WebRTC.
    */
   private readonly codecSupport: VideoCodecSupport;
+  /**
+   * Builds the LiveKit `Room`; injectable so tests can assert the connect
+   * options (notably the XEP-0215 `rtcConfig.iceServers`) without a real
+   * `RTCPeerConnection`, which `new Room()` reaches for at construction.
+   */
+  private readonly makeRoom: (options: RoomOptions) => Room;
 
   constructor(opts?: {
     makeAiNoiseProcessor?: (model: NoiseModelId) => Promise<AudioNoiseProcessor>;
     videoCodecSupport?: VideoCodecSupport;
+    makeRoom?: (options: RoomOptions) => Room;
   }) {
     this.makeAiNoiseProcessor = opts?.makeAiNoiseProcessor ?? makeNoiseProcessor;
     this.codecSupport = opts?.videoCodecSupport ?? videoCodecSupport(currentVideoCodecSupportEnv());
+    this.makeRoom = opts?.makeRoom ?? ((options) => new Room(options));
   }
 
   /** LiveKit identity of the local participant, populated once
@@ -353,7 +363,10 @@ export class CallEngine {
     return this.room?.canPlaybackAudio ?? true;
   }
 
-  async connect(join: LiveKitJoin, opts: { audio: boolean; video: boolean }): Promise<void> {
+  async connect(
+    join: LiveKitJoin,
+    opts: { audio: boolean; video: boolean; iceServers?: RTCIceServer[] },
+  ): Promise<void> {
     if (this.room) throw new Error("CallEngine already connected");
     // Defensive pre-flight: confirm the JWT actually carries a usable
     // `video` grant (roomJoin + a room) before the SDK opens its
@@ -371,7 +384,7 @@ export class CallEngine {
     this.desiredAiNoiseModel = prefs.aiNoiseModel;
     this.aiNoiseFailedModels.clear();
     this.appliedModelActiveForCapture = false;
-    const room = new Room(callRoomOptionsForPrefs(prefs));
+    const room = this.makeRoom(callRoomOptionsForPrefs(prefs));
     room.on(RoomEvent.TrackSubscribed, this.handleTrackSubscribed);
     room.on(RoomEvent.TrackUnsubscribed, this.handleTrackUnsubscribed);
     room.on(RoomEvent.LocalTrackPublished, this.handleLocalTrackPublished);
@@ -385,8 +398,16 @@ export class CallEngine {
     room.on(RoomEvent.TrackUnmuted, this.handleTrackMuteChanged);
     room.on(RoomEvent.ConnectionQualityChanged, this.handleConnectionQualityChanged);
     room.on(RoomEvent.ConnectionStateChanged, this.handleConnectionStateChanged);
+    // XEP-0215 ICE injection: when the server advertised external services,
+    // make them the authoritative ICE list via `rtcConfig`. An empty/absent
+    // list means "no advertisement" — pass no `rtcConfig` so LiveKit keeps its
+    // own signalling-provided servers rather than connecting with none.
+    const connectOptions: RoomConnectOptions | undefined =
+      opts.iceServers && opts.iceServers.length > 0
+        ? { rtcConfig: { iceServers: opts.iceServers } }
+        : undefined;
     try {
-      await room.connect(join.url, join.token);
+      await room.connect(join.url, join.token, connectOptions);
     } catch (err) {
       // Connect itself failed; the listeners we bound above would
       // otherwise dangle on a `Room` that nothing references but the

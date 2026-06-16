@@ -16,6 +16,27 @@ export type LiveKitJoin = {
   token: string;
 };
 
+/**
+ * One XEP-0215 external service (TURN/STUN) advertised by the server,
+ * surfaced by the WASM client's `fetch_external_services`. Mirrors
+ * `WaddleExternalService` in
+ * `server/crates/waddle-xmpp-client-wasm/src/types.rs`. The chat maps an array
+ * of these to `RTCIceServer[]` for LiveKit's connection `rtcConfig`.
+ *
+ * `serviceType: "turns"` is TLS-protected TURN (XEP-0215 §3.6.5); credentials
+ * are present only on `turn`/`turns` entries.
+ */
+export type ExternalService = {
+  serviceType: "stun" | "turn" | "turns";
+  host: string;
+  port: number;
+  transport?: "udp" | "tcp";
+  username?: string;
+  password?: string;
+  expires?: string;
+  restricted: boolean;
+};
+
 type CallEventEnvelope = {
   from: string;
   to?: string | null;
