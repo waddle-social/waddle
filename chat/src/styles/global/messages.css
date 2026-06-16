@@ -751,12 +751,16 @@
    * the CSS-var fallback path so a static (no-JS) page renders sanely. */
   transform: translateX(var(--chat-swipe-x, 0));
   transition: transform 0.18s cubic-bezier(0.16, 1, 0.3, 1);
-  will-change: transform;
 }
 .chat-message-swipeable.chat-message-swipe-active {
   /* While the finger is down, follow it 1:1. Easing kicks back in the
    * moment the finger lifts and the inline var snaps back to 0. */
   transition: none;
+  /* Promote to its own layer only WHILE swiping. A permanent
+   * `will-change: transform` on every row forced a compositor layer per
+   * visible message, which the compositor then had to manage on every
+   * scroll frame; the release transition still auto-promotes. */
+  will-change: transform;
 }
 
 .chat-message-swipe-hint {

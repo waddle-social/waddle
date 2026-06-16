@@ -500,6 +500,10 @@ function isPinnedMessage(msg: TimelineMessage): boolean {
   const wireIds = (msg as TimelineMessage & { wireIds?: string[] }).wireIds;
   return Boolean(wireIds?.some((wid) => set.has(wid)));
 }
+// Shared empty hats so a hatless author (the common case) hands MessageCard
+// the SAME array reference every render instead of a fresh `?? []`, which
+// would otherwise re-render the row on each scroll-driven update.
+const EMPTY_HATS: RoomHats[string] = [];
 // #415: pin gate combines the room's pin_permission with the current
 // user's MUC affiliation (XEP-0045 §5.2 — the persistent authority
 // channel, not XEP-0317 hats, which are descriptive and confer no
@@ -872,6 +876,11 @@ interface ThreadChipParticipant {
   presence: import("@/lib/xmpp-client").OccupantPresence;
 }
 
+// Shared empty result so messages without a thread hand the SAME array
+// reference to MessageCard on every render (a fresh `[]` would change the
+// `:thread-participants` prop identity every frame and re-render the row).
+const EMPTY_PARTICIPANTS: ThreadChipParticipant[] = [];
+
 // Distinct participants for a thread chip: walk newest→oldest, dedup,
 // keep EVERYONE who replied — including the thread author themselves
 // and the current user. Previously the current user was excluded
@@ -880,25 +889,40 @@ interface ThreadChipParticipant {
 // avatar, my own reply showed nothing. Capped at
 // THREAD_CHIP_MAX_PARTICIPANTS — MessageCard renders only the first
 // N visibly and shows a "+N" overflow chip.
-function threadChipParticipants(messageId: string): ThreadChipParticipant[] {
-  const entry = props.threadIndex.get(messageId);
-  if (!entry) return [];
-  const seen = new Set<string>();
-  const ordered: ThreadChipParticipant[] = [];
-  const children = entry.directChildren;
-  for (let i = children.length - 1; i >= 0; i--) {
-    const c = children[i];
-    if (!c) continue;
-    if (seen.has(c.author)) continue;
-    seen.add(c.author);
-    ordered.push({
-      nick: c.author,
-      avatarUrl: props.avatarUrlByAuthor[c.author] ?? null,
-      presence: props.roomPresence[c.author] ?? "offline",
-    });
-    if (ordered.length >= THREAD_CHIP_MAX_PARTICIPANTS) break;
+//
+// Precomputed ONCE per data change (thread index / avatars / presence)
+// rather than per render: building the participant arrays inside the
+// per-row template binding minted a new array on every scroll-driven
+// re-render, which changed the prop identity and forced every visible
+// MessageCard to re-render. Caching them keeps the references stable so
+// rows bail out of re-rendering while scrolling.
+const threadChipParticipantsById = computed(() => {
+  const map = new Map<string, ThreadChipParticipant[]>();
+  for (const msg of orderedFeedMessages.value) {
+    const entry = props.threadIndex.get(msg.id);
+    if (!entry) continue;
+    const seen = new Set<string>();
+    const ordered: ThreadChipParticipant[] = [];
+    const children = entry.directChildren;
+    for (let i = children.length - 1; i >= 0; i--) {
+      const c = children[i];
+      if (!c) continue;
+      if (seen.has(c.author)) continue;
+      seen.add(c.author);
+      ordered.push({
+        nick: c.author,
+        avatarUrl: props.avatarUrlByAuthor[c.author] ?? null,
+        presence: props.roomPresence[c.author] ?? "offline",
+      });
+      if (ordered.length >= THREAD_CHIP_MAX_PARTICIPANTS) break;
+    }
+    if (ordered.length > 0) map.set(msg.id, ordered);
   }
-  return ordered;
+  return map;
+});
+
+function threadChipParticipants(messageId: string): ThreadChipParticipant[] {
+  return threadChipParticipantsById.value.get(messageId) ?? EMPTY_PARTICIPANTS;
 }
 
 function threadChipLastReplyAt(messageId: string): string | undefined {
@@ -1403,7 +1427,7 @@ function dayDividerLabel(createdAt: string): string {
             :current-user="props.currentUser"
             :current-user-jid="props.currentUserJid"
             :avatar-url="avatarUrlByAuthor[msg.author] ?? null"
-            :hats="roomHats[msg.author] ?? []"
+            :hats="roomHats[msg.author] ?? EMPTY_HATS"
             :authority="roomAuthority[msg.author] ?? null"
             :presence="roomPresence[msg.author] ?? 'offline'"
             :last-seen="roomLastSeen[msg.author]"
