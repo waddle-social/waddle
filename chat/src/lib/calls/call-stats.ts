@@ -58,6 +58,19 @@ export type VideoStatsSummary = {
   iceTransport: IceTransport | null;
 };
 
+/**
+ * Audio counterpart of {@link VideoStatsSummary}: the negotiated audio codec
+ * (e.g. "opus"), the derived send/recv bitrate, and the succeeded ICE path.
+ * Resolution/fps/loss are video-only concepts and intentionally absent — the
+ * audio lever's signal is bitrate (banded via {@link audioBitrateBand}).
+ */
+type AudioStatsSummary = {
+  codec: string | null;
+  bitrateKbps: number | null;
+  iceCandidateType: IceCandidateType | null;
+  iceTransport: IceTransport | null;
+};
+
 /** A single diagnostics row: one video track of one participant. */
 export type CallStatRow = VideoStatsSummary & {
   key: string;
@@ -117,6 +130,39 @@ type RtpLike = {
   protocol?: string;
   relayProtocol?: string;
 };
+
+/**
+ * Coarse band over the *measured on-the-wire* audio send/recv rate (kbps).
+ * Important: this is the wire rate, which sits ABOVE the Opus encoder target —
+ * it includes RED redundancy and RTP/SRTP overhead — and Opus is VBR, so quiet
+ * speech measures lower than loud speech on the same encoder cap. So the bands
+ * describe observed activity, not the configured preset:
+ *  - `silent`   — DTX idle / comfort-noise floor; an idle participant costs
+ *                 ~nothing, so the raised default never burdens listeners.
+ *  - `standard` — light / quiet / intermittent speech, or a lower-rate path.
+ *  - `high`     — sustained active speech. On the raised ~64k default an active
+ *                 speaker's wire rate clearly clears the floor, so a fleet-wide
+ *                 shift toward `high` is the signal that the raise took effect.
+ * Three buckets keep it low-cardinality so the de-duping media-path beacon emits
+ * at most a handful of audio events per call rather than one per fluctuating
+ * sample. `null` (an unmeasured first poll) has no band yet. Thresholds are
+ * coarse operational buckets meant to be validated/tuned against Faro
+ * (telemetry-first), NOT exact encoder-target cutoffs.
+ */
+export type AudioBitrateBand = "silent" | "standard" | "high";
+
+/** ≤ this reads as `silent`: DTX comfort-noise / keepalive, not real speech. */
+const AUDIO_SILENCE_CEILING_KBPS = 12;
+/** > this reads as `high`: a sustained active speaker on the raised 64k default
+ *  clears this wire-rate floor (encoder target + RED + overhead). */
+const AUDIO_RAISED_FLOOR_KBPS = 56;
+
+export function audioBitrateBand(bitrateKbps: number | null): AudioBitrateBand | null {
+  if (bitrateKbps === null) return null;
+  if (bitrateKbps <= AUDIO_SILENCE_CEILING_KBPS) return "silent";
+  if (bitrateKbps <= AUDIO_RAISED_FLOOR_KBPS) return "standard";
+  return "high";
+}
 
 /** Strip the "video/" prefix off a codec MIME, e.g. "video/VP9" → "VP9". */
 function codecName(mimeType: string | undefined): string | null {
@@ -190,6 +236,92 @@ function isVideo(stat: RtpLike): boolean {
   return stat.kind === "video" || stat.mediaType === "video";
 }
 
+function isAudio(stat: RtpLike): boolean {
+  return stat.kind === "audio" || stat.mediaType === "audio";
+}
+
+/**
+ * Derive a kbps rate from the byte/timestamp delta between two samples. Null
+ * (unmeasured) when there is no prior sample (first poll), the clock did not
+ * advance, or the byte counter went *backwards* — a counter reset (track
+ * replaced / ICE restart) is no measurement this tick, not a genuinely idle
+ * one, so it must not collapse to 0 (which an audio band would read as DTX
+ * silence). A genuine idle tick (bytes unchanged, clock advanced) is a real 0.
+ */
+function bitrateFromSamples(
+  sample: CallStatSample | null,
+  prev: CallStatSample | undefined,
+): number | null {
+  if (!sample || !prev || sample.timestampMs <= prev.timestampMs) return null;
+  if (sample.bytes < prev.bytes) return null;
+  const deltaBits = (sample.bytes - prev.bytes) * 8;
+  const deltaSec = (sample.timestampMs - prev.timestampMs) / 1000;
+  return Math.round(deltaBits / deltaSec / 1000);
+}
+
+/**
+ * Sum a stream's byte counter across all of its RTP entries (one per simulcast
+ * layer for video; a single entry for audio) and take the newest timestamp.
+ * Null when no entry reported its bytes. Shared by the video and audio
+ * summarizers.
+ */
+function sampleFromRtp(mains: RtpLike[], bytesField: "bytesSent" | "bytesReceived"): CallStatSample | null {
+  let bytes: number | undefined;
+  let timestampMs: number | undefined;
+  for (const main of mains) {
+    const layerBytes = main[bytesField];
+    if (layerBytes !== undefined) bytes = (bytes ?? 0) + layerBytes;
+    if (main.timestamp !== undefined && (timestampMs === undefined || main.timestamp > timestampMs)) {
+      timestampMs = main.timestamp;
+    }
+  }
+  return bytes !== undefined && timestampMs !== undefined ? { bytes, timestampMs } : null;
+}
+
+/**
+ * Reduce one audio track's `RTCStatsReport` to an {@link AudioStatsSummary} plus
+ * the fresh `CallStatSample` to retain. Mirrors {@link summarizeVideoStats} but
+ * reads the audio RTP stream: the negotiated codec, the bitrate (diffed against
+ * `prev`, null on the first poll), and the succeeded ICE candidate path. Used by
+ * the media-path beacon to band the active-speaker bitrate and confirm the
+ * raised ~64k Opus default fleet-wide.
+ */
+export function summarizeAudioStats(
+  report: RTCStatsReport,
+  direction: CallStatDirection,
+  prev?: CallStatSample,
+): { summary: AudioStatsSummary; sample: CallStatSample | null } {
+  const mainType = direction === "send" ? "outbound-rtp" : "inbound-rtp";
+  const mains: RtpLike[] = [];
+  const candidatePairs: RtpLike[] = [];
+  let selectedPairId: string | undefined;
+  const byId = new Map<string, RtpLike>();
+
+  report.forEach((raw: unknown) => {
+    const stat = raw as RtpLike;
+    if (stat.id !== undefined) byId.set(stat.id, stat);
+    if (stat.type === mainType && isAudio(stat)) {
+      mains.push(stat);
+    } else if (stat.type === "candidate-pair") {
+      candidatePairs.push(stat);
+    } else if (stat.type === "transport" && stat.selectedCandidatePairId !== undefined) {
+      selectedPairId = stat.selectedCandidatePairId;
+    }
+  });
+
+  const candidatePair = selectCandidatePair(candidatePairs, selectedPairId);
+  const { iceCandidateType, iceTransport } = iceCandidatePath(candidatePair, byId);
+
+  const codecRef = mains.find((main) => main.codecId !== undefined)?.codecId;
+  const codecEntry = codecRef !== undefined ? byId.get(codecRef) : undefined;
+  const codec = codecEntry?.type === "codec" ? codecName(codecEntry.mimeType) : null;
+
+  const sample = sampleFromRtp(mains, direction === "send" ? "bytesSent" : "bytesReceived");
+  const bitrateKbps = bitrateFromSamples(sample, prev);
+
+  return { summary: { codec, bitrateKbps, iceCandidateType, iceTransport }, sample };
+}
+
 function clampPercent(value: number): number {
   if (!Number.isFinite(value) || value < 0) return 0;
   if (value > 100) return 100;
@@ -261,27 +393,9 @@ export function summarizeVideoStats(
   const codecEntry = codecRef !== undefined ? byId.get(codecRef) : undefined;
   const codec = codecEntry?.type === "codec" ? codecName(codecEntry.mimeType) : null;
 
-  // Bytes summed across all layers; timestamp is the newest layer's.
-  const bytesField = direction === "send" ? "bytesSent" : "bytesReceived";
-  let bytes: number | undefined;
-  let timestampMs: number | undefined;
-  for (const main of mains) {
-    const layerBytes = main[bytesField];
-    if (layerBytes !== undefined) bytes = (bytes ?? 0) + layerBytes;
-    if (main.timestamp !== undefined && (timestampMs === undefined || main.timestamp > timestampMs)) {
-      timestampMs = main.timestamp;
-    }
-  }
-  const sample: CallStatSample | null =
-    bytes !== undefined && timestampMs !== undefined ? { bytes, timestampMs } : null;
-
-  let bitrateKbps: number | null = null;
-  if (sample && prev && sample.timestampMs > prev.timestampMs) {
-    const deltaBits = (sample.bytes - prev.bytes) * 8;
-    const deltaSec = (sample.timestampMs - prev.timestampMs) / 1000;
-    const kbps = deltaBits / deltaSec / 1000;
-    bitrateKbps = kbps > 0 ? Math.round(kbps) : 0;
-  }
+  // Bytes summed across all simulcast layers; timestamp is the newest layer's.
+  const sample = sampleFromRtp(mains, direction === "send" ? "bytesSent" : "bytesReceived");
+  const bitrateKbps = bitrateFromSamples(sample, prev);
 
   const packetLossPct =
     direction === "recv"

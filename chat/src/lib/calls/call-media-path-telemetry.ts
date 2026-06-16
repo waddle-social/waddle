@@ -1,4 +1,9 @@
-import type { CallStatDirection, IceCandidateType, IceTransport } from "./call-stats";
+import type {
+  AudioBitrateBand,
+  CallStatDirection,
+  IceCandidateType,
+  IceTransport,
+} from "./call-stats";
 
 /**
  * Fleet-measurement telemetry for the media path one call track actually got:
@@ -13,12 +18,17 @@ import type { CallStatDirection, IceCandidateType, IceTransport } from "./call-s
  */
 
 /** What a call track is carrying its media as. */
-type CallMediaPathSource = "camera" | "screen";
+type CallMediaPathSource = "camera" | "screen" | "microphone";
 
 /**
  * One observed media path for a single track. `codec` and the two ICE fields
  * are null until the report names them; the sampler skips fully-empty
  * snapshots so a not-yet-negotiated track never beacons.
+ *
+ * `audioBitrateBand` is the active-speaker bitrate bucket — non-null only for
+ * `microphone` snapshots, so the raised ~64k Opus default is provable fleet-wide
+ * while a continuously-varying send bitrate stays low-cardinality and the beacon
+ * de-dupes. Always null for video (its quality lever is codec/ICE).
  */
 export type CallMediaPathSnapshot = {
   direction: CallStatDirection;
@@ -26,6 +36,7 @@ export type CallMediaPathSnapshot = {
   codec: string | null;
   iceCandidateType: IceCandidateType | null;
   iceTransport: IceTransport | null;
+  audioBitrateBand: AudioBitrateBand | null;
 };
 
 /**
@@ -44,6 +55,10 @@ export function callMediaPathEventAttributes(
     codec: snapshot.codec ?? "unknown",
     ice_candidate_type: snapshot.iceCandidateType ?? "unknown",
     ice_transport: snapshot.iceTransport ?? "unknown",
+    // Audio-only: emitted only for a microphone path that has a measured band,
+    // so video events keep their exact shape and never carry a meaningless
+    // audio attribute.
+    ...(snapshot.audioBitrateBand ? { audio_bitrate_band: snapshot.audioBitrateBand } : {}),
   };
 }
 
@@ -62,7 +77,8 @@ function sameCallMediaPath(a: CallMediaPathSnapshot, b: CallMediaPathSnapshot): 
     a.source === b.source &&
     a.codec === b.codec &&
     a.iceCandidateType === b.iceCandidateType &&
-    a.iceTransport === b.iceTransport
+    a.iceTransport === b.iceTransport &&
+    a.audioBitrateBand === b.audioBitrateBand
   );
 }
 

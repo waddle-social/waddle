@@ -22,7 +22,13 @@ import {
   createCallMediaPathBeacon,
   type CallMediaPathSnapshot,
 } from "./call-media-path-telemetry";
-import { summarizeVideoStats, type CallStatDirection } from "./call-stats";
+import {
+  audioBitrateBand,
+  summarizeAudioStats,
+  summarizeVideoStats,
+  type CallStatDirection,
+  type CallStatSample,
+} from "./call-stats";
 import { reportCallAudioProcessing, reportCallMediaPath } from "../telemetry";
 import {
   resetCallConnectionQuality,
@@ -78,6 +84,12 @@ let mediaPathSampling = false;
 // just-reset beacon — which would otherwise suppress the next call's first
 // event when both calls share a codec/ICE path.
 let mediaPathGeneration = 0;
+// Previous byte/timestamp sample per audio track, so the media-path poll can
+// derive the send/recv bitrate (a rate needs two samples) and band it. Keyed by
+// the same track key used in the diagnostics dialog; cleared between calls in
+// `stopMediaPathPolling`. Committed only after the generation re-check so a
+// stale in-flight pass can't seed the next call's bitrate.
+const audioMediaPathSamples = new Map<string, CallStatSample>();
 
 /**
  * Read one video track's live stats and reduce them to a media-path snapshot,
@@ -100,7 +112,63 @@ async function sampleTrackMediaPath(
       codec: summary.codec,
       iceCandidateType: summary.iceCandidateType,
       iceTransport: summary.iceTransport,
+      audioBitrateBand: null, // video paths carry no audio band
     };
+  } catch {
+    return null;
+  }
+}
+
+/** One audio track's media-path sample, carrying the fresh byte/timestamp
+ *  sample to retain so the next poll can derive a bitrate. */
+type AudioMediaPathResult = {
+  snapshot: CallMediaPathSnapshot | null;
+  key: string;
+  sample: CallStatSample | null;
+};
+
+/**
+ * Read one mic track's live stats and reduce them to an audio media-path
+ * snapshot (negotiated codec, ICE path, and the active-speaker bitrate band),
+ * plus the fresh sample to retain. The snapshot is `null` until a bitrate can be
+ * measured (the first poll has no prior sample) — codec/ICE then ride along with
+ * the band on the next tick. `getRTCStatsReport()` rejects mid-teardown, so a
+ * failure drops this track rather than the whole pass.
+ *
+ * Direction matters when reading the band downstream: a `send` band is OUR
+ * publish (direct evidence the raised default took effect); a `recv` band is a
+ * remote peer's publish (whatever client they run), disambiguated by the
+ * snapshot's `direction`.
+ */
+async function sampleAudioTrackMediaPath(
+  track: LocalMediaTrack | RemoteMediaTrack,
+  direction: CallStatDirection,
+): Promise<AudioMediaPathResult | null> {
+  // `send` is the local mic, `recv` is a remote participant's mic; the
+  // publicationSid is unique per track, scoped by direction so a stale key from
+  // a prior call never collides. Same `local:`/`remote:` scheme as the
+  // diagnostics-dialog poller, so the two are easy to correlate.
+  const key =
+    direction === "send"
+      ? `local:${track.source}:${track.publicationSid}`
+      : `remote:${track.participantIdentity}:${track.source}:${track.publicationSid}`;
+  try {
+    const report = await track.track.getRTCStatsReport();
+    if (!report) return null;
+    const { summary, sample } = summarizeAudioStats(report, direction, audioMediaPathSamples.get(key));
+    const band = audioBitrateBand(summary.bitrateKbps);
+    const snapshot: CallMediaPathSnapshot | null =
+      band === null
+        ? null
+        : {
+            direction,
+            source: "microphone",
+            codec: summary.codec,
+            iceCandidateType: summary.iceCandidateType,
+            iceTransport: summary.iceTransport,
+            audioBitrateBand: band,
+          };
+    return { snapshot, key, sample };
   } catch {
     return null;
   }
@@ -113,19 +181,37 @@ async function sampleMediaPaths(generation: number): Promise<void> {
   if (mediaPathSampling) return;
   mediaPathSampling = true;
   try {
-    const snapshots = await Promise.all([
-      ...localTracks.value
-        .filter((track) => track.kind === "video")
-        .map((track) => sampleTrackMediaPath(track, "send")),
-      ...remoteTracks.value
-        .filter((track) => track.kind === "video")
-        .map((track) => sampleTrackMediaPath(track, "recv")),
+    const [videoSnapshots, audioResults] = await Promise.all([
+      Promise.all([
+        ...localTracks.value
+          .filter((track) => track.kind === "video")
+          .map((track) => sampleTrackMediaPath(track, "send")),
+        ...remoteTracks.value
+          .filter((track) => track.kind === "video")
+          .map((track) => sampleTrackMediaPath(track, "recv")),
+      ]),
+      // Only the microphone carries the voice-clarity lever; screen-share audio
+      // is system/tab audio, not speech, so it is excluded.
+      Promise.all([
+        ...localTracks.value
+          .filter((track) => track.source === "microphone")
+          .map((track) => sampleAudioTrackMediaPath(track, "send")),
+        ...remoteTracks.value
+          .filter((track) => track.source === "microphone")
+          .map((track) => sampleAudioTrackMediaPath(track, "recv")),
+      ]),
     ]);
     // Bail if polling was stopped/restarted while we awaited: this pass belongs
-    // to a torn-down call and must not observe into the (reset) beacon.
+    // to a torn-down call and must not observe into the (reset) beacon or seed
+    // the next call's bitrate samples.
     if (generation !== mediaPathGeneration) return;
-    for (const snapshot of snapshots) {
+    for (const snapshot of videoSnapshots) {
       if (snapshot) callMediaPathBeacon.observe(snapshot);
+    }
+    for (const result of audioResults) {
+      if (!result) continue;
+      if (result.sample) audioMediaPathSamples.set(result.key, result.sample);
+      if (result.snapshot) callMediaPathBeacon.observe(result.snapshot);
     }
   } finally {
     mediaPathSampling = false;
@@ -148,6 +234,9 @@ function stopMediaPathPolling(): void {
     clearInterval(mediaPathTimer);
     mediaPathTimer = null;
   }
+  // Drop the per-track bitrate samples so the next call's first delta is not
+  // diffed against a previous call's byte counter.
+  audioMediaPathSamples.clear();
 }
 
 export function useCallEngine(): {
