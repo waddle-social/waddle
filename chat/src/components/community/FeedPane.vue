@@ -134,6 +134,7 @@ const activeFilter = ref<FeedSurfaceFilter>(props.initialFilter);
 watch(activeFilter, (filter) => {
   if (filter === "pep" || filter === "posts") {
     activeStoryId.value = null;
+    closeStoryReactionPicker();
   }
 });
 
@@ -145,6 +146,10 @@ watch(() => props.stories, (stories) => {
   const id = activeStoryId.value;
   if (id && !stories.some((story) => story.id === id)) {
     activeStoryId.value = null;
+  }
+  const pickerStoryId = reactionPickerStoryId.value;
+  if (pickerStoryId && !stories.some((story) => story.id === pickerStoryId)) {
+    closeStoryReactionPicker();
   }
 });
 
@@ -304,8 +309,11 @@ function openStoryReactionPicker(storyId: string, event: MouseEvent) {
 }
 
 function closeStoryReactionPicker() {
+  const anchor = reactionPickerAnchor.value;
   reactionPickerStoryId.value = null;
   reactionPickerAnchor.value = null;
+  // Return focus to the trigger so keyboard users don't get dropped to <body>.
+  anchor?.focus();
 }
 
 function selectStoryReaction(emoji: string) {
@@ -512,8 +520,8 @@ function selectStoryReaction(emoji: string) {
               type="button"
               class="inline-flex h-8 items-center gap-1 rounded-md border px-2 text-sm"
               :class="chip.mine ? 'border-primary bg-primary/10 text-primary' : 'border-input text-foreground hover:bg-muted/60'"
-              :aria-label="`React to story with ${chip.emoji}`"
-              :aria-pressed="chip.mine ? 'true' : 'false'"
+              :aria-label="`React with ${chip.emoji}, ${chip.count} so far`"
+              :aria-pressed="chip.mine"
               @click="reactToStory(item.story.id, chip.emoji)"
             >
               <span aria-hidden="true">{{ chip.emoji }}</span>

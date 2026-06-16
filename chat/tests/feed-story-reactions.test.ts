@@ -59,13 +59,13 @@ describe("Community feed story reactions", () => {
           : { counts: {}, reactors: {}, mine: [] },
     }));
 
-    const thumbChip = html.match(/<button[^>]*React to story with 👍[\s\S]*?<\/button>/)?.[0] ?? "";
+    const thumbChip = html.match(/<button[^>]*React with 👍[\s\S]*?<\/button>/)?.[0] ?? "";
     expect(thumbChip).toContain('aria-pressed="true"');
-    expect(thumbChip).toContain("2");
+    expect(thumbChip).toMatch(/type-numeric[^>]*>\s*2\s*</);
 
-    const heartChip = html.match(/<button[^>]*React to story with ❤️[\s\S]*?<\/button>/)?.[0] ?? "";
+    const heartChip = html.match(/<button[^>]*React with ❤️[\s\S]*?<\/button>/)?.[0] ?? "";
     expect(heartChip).toContain('aria-pressed="false"');
-    expect(heartChip).toContain("1");
+    expect(heartChip).toMatch(/type-numeric[^>]*>\s*1\s*</);
   });
 
   test("shows the react affordance on the viewer's own story (self-react parity)", async () => {
@@ -79,7 +79,7 @@ describe("Community feed story reactions", () => {
     }));
 
     expect(html).toContain('aria-label="React to story"');
-    const ownChip = html.match(/<button[^>]*React to story with 🎉[\s\S]*?<\/button>/)?.[0] ?? "";
+    const ownChip = html.match(/<button[^>]*React with 🎉[\s\S]*?<\/button>/)?.[0] ?? "";
     expect(ownChip).toContain('aria-pressed="true"');
   });
 
@@ -96,6 +96,22 @@ describe("Community feed story reactions", () => {
     setupBindingFunction(bindings, "selectStory")(0);
 
     expect(emitted).toContainEqual(["storySelected", "story-1"]);
+  });
+
+  test("selecting an emoji from the picker reacts to the story it was opened for", async () => {
+    const emitted: unknown[][] = [];
+    const bindings = await setupVueComponent(
+      FEED_PANE,
+      feedPaneProps({ stories: [{ id: "story-1", author: "a@x" }, { id: "story-2", author: "b@x" }] }),
+      (...args) => {
+        emitted.push(args);
+      },
+    );
+
+    setupBindingFunction(bindings, "openStoryReactionPicker")("story-2", { currentTarget: { focus() {} } });
+    setupBindingFunction(bindings, "selectStoryReaction")("🔥");
+
+    expect(emitted).toContainEqual(["react", "story-2", "🔥"]);
   });
 
   test("does not render a react button on non-story feed entries", async () => {
