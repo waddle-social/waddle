@@ -129,4 +129,49 @@ describe("CallEngine.connect — XEP-0215 ICE injection", () => {
     await first;
     expect(roomsBuilt).toBe(1);
   });
+
+  test("a disconnect during connect cancels it (no wedge, no orphaned Room)", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let built = 0;
+    let roomsDisconnected = 0;
+    const makeRoom = () => {
+      built += 1;
+      const room = {
+        on() {
+          return room;
+        },
+        removeAllListeners() {},
+        async connect() {
+          await gate;
+        },
+        async disconnect() {
+          roomsDisconnected += 1;
+        },
+        localParticipant: {
+          identity: "alice@waddle.test/desktop",
+          async setMicrophoneEnabled() {},
+          async setCameraEnabled() {},
+        },
+        remoteParticipants: new Map(),
+      };
+      return room as unknown as Room;
+    };
+    const engine = new CallEngine({
+      makeRoom,
+      videoCodecSupport: videoCodecSupport({ encode: ["video/vp8"], decode: ["video/vp8"] }),
+    });
+
+    const first = engine.connect(join(), { audio: false, video: false });
+    await engine.disconnect(); // cancel mid-connect, before the Room is published
+    release();
+    await first; // resolves but must abandon (tear down) its Room, not publish it
+    expect(roomsDisconnected).toBe(1);
+
+    // The engine is not wedged: a fresh connect proceeds (gate already resolved).
+    await engine.connect(join(), { audio: false, video: false });
+    expect(built).toBe(2);
+  });
 });

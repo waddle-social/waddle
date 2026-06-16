@@ -277,6 +277,15 @@ export class CallEngine {
    * one. This bridges that await window.
    */
   private connecting = false;
+  /**
+   * Bumped by every `connect()` and by `disconnect()`. A `connect()` whose
+   * generation no longer matches once `room.connect` resolves was cancelled
+   * mid-flight (a `disconnect()` or newer `connect()` superseded it); it tears
+   * its own `Room` down instead of publishing an orphan. Without this, a
+   * `disconnect()` racing the connect await sees `this.room === null`, returns,
+   * and the in-flight `Room` later connects with nothing left to tear it down.
+   */
+  private connectGeneration = 0;
   private participantAudioVolumes: ParticipantAudioVolumeStore = {};
   private subscribedAudioTracks = new Map<string, Set<VolumeAdjustableTrack>>();
   private listeners: { [K in keyof CallEngineEvents]: Set<CallEngineEvents[K]> } = {
@@ -388,6 +397,7 @@ export class CallEngine {
     // Reserve the engine synchronously now that we're committed to building a
     // Room; cleared on the connect-failure path and once `this.room` is set.
     this.connecting = true;
+    const generation = ++this.connectGeneration;
     const prefs = $devicePrefs.get();
     // Seed the AI-filter desired model from prefs so it re-applies on this
     // call's mic publish; start each call with a clean failure guard and
@@ -426,8 +436,18 @@ export class CallEngine {
       // a clean path. `this.room` was never set so the caller stays
       // on the well-defined "not connected" path.
       room.removeAllListeners();
-      this.connecting = false;
+      // Only release the reservation if it's still ours — a disconnect() or
+      // newer connect() during the await owns `connecting` now.
+      if (this.connectGeneration === generation) this.connecting = false;
       throw err;
+    }
+    // A disconnect() (or a newer connect()) during the await bumped the
+    // generation: this connect was cancelled. Tear our own Room down rather
+    // than publishing it as an orphan that nothing will ever disconnect.
+    if (this.connectGeneration !== generation) {
+      room.removeAllListeners();
+      await room.disconnect().catch(() => undefined);
+      return;
     }
     this.room = room;
     this.connecting = false;
@@ -703,6 +723,11 @@ export class CallEngine {
   }
 
   async disconnect(): Promise<void> {
+    // Cancel any in-flight connect(): bump the generation so a connect still
+    // awaiting `room.connect` tears its own Room down instead of publishing it,
+    // and release the reservation so the engine can never wedge "connecting".
+    this.connectGeneration++;
+    this.connecting = false;
     const room = this.room;
     this.room = null;
     if (!room) return;
