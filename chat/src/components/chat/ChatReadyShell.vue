@@ -94,6 +94,7 @@ const {
   activeChannelRoomJid,
   activeThreadStack,
   activeThreadTargetMessageId,
+  activeThreadTargetRequestId,
   activeRightPanel,
   threads,
   reactionModeTarget,
@@ -1062,6 +1063,7 @@ onUnmounted(() => {
               :room-jid="threadPanelIsDm ? null : activeChannelRoomJid"
               :reaction-mode="reactionModeTarget === 'thread' ? reactionModeState : null"
               :target-message-id="activeThreadTargetMessageId"
+              :target-message-request-id="activeThreadTargetRequestId"
               :link-preview-lookup="lookupActiveConversationLinkPreview"
               :link-preview-scope="threadPanelIsDm ? activeDmPeer?.peerJid ?? null : activeChannelRoomJid"
               @close="closeThreadPanel"

@@ -37,7 +37,7 @@ type UseDmMamPagingDeps = {
   loadErrorMessage: Ref<string>;
   timelineEl: Ref<HTMLDivElement | null>;
   scrollDirection: Ref<ScrollDirectionMode>;
-  pinnedEdgeScroller: { disconnect: () => void };
+  pinnedEdgeScroller: { cancelSettleLock: () => void };
   actionError: Ref<string>;
   clearActionError: () => void;
   pendingEchoClientIds: Set<string>;
@@ -101,7 +101,7 @@ export function useDmMamPaging(deps: UseDmMamPagingDeps) {
     isLoadingOlderMessages.value = false;
     hasOlderMessages.value = true;
     oldestArchiveId = null;
-    pinnedEdgeScroller.disconnect();
+    pinnedEdgeScroller.cancelSettleLock();
     firstUnseenId.value = null;
     clearActionError();
     loadErrorPeerJid.value = null;

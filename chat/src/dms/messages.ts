@@ -318,7 +318,7 @@ export function useDirectMessages(
   function clearMessages() {
     paging.reset();
     messageSearch.reset();
-    pinnedEdgeScroller.disconnect();
+    pinnedEdgeScroller.cancelSettleLock();
     pendingEchoClientIds.clear();
     messages.value = [];
     firstUnseenId.value = null;

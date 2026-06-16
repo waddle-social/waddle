@@ -745,18 +745,14 @@
  * commit threshold. */
 .chat-message-swipeable {
   touch-action: pan-y;
-  /* `transform` is now bound inline from the component (`:style`) too —
-   * a defensive double-write so the visual is guaranteed even if the CSS
-   * custom-property pipeline ever drops the var. The class still keeps
-   * the CSS-var fallback path so a static (no-JS) page renders sanely. */
-  transform: translateX(var(--chat-swipe-x, 0));
   transition: transform 0.18s cubic-bezier(0.16, 1, 0.3, 1);
-  will-change: transform;
 }
 .chat-message-swipeable.chat-message-swipe-active {
   /* While the finger is down, follow it 1:1. Easing kicks back in the
    * moment the finger lifts and the inline var snaps back to 0. */
+  transform: translateX(var(--chat-swipe-x, 0));
   transition: none;
+  will-change: transform;
 }
 
 .chat-message-swipe-hint {
@@ -823,6 +819,7 @@
   .chat-message-swipeable {
     touch-action: auto;
     transform: none;
+    will-change: auto;
   }
   .chat-message-swipe-hint {
     display: none;

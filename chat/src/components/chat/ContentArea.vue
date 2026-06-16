@@ -32,6 +32,7 @@ import type { MessageThreadIndex } from "@/channels/threads";
 import { formatTimelineStamp, formatTimelineDayDivider, isFeedTimelineMessage, isSameTimelineDay } from "@/channels/timeline";
 import { useExtensionLauncher } from "@/channels/extension-launcher";
 import { useJumpToLiveEdge } from "@/ui/use-jump-to-live-edge";
+import { createScrollFrameScheduler } from "@/ui/scroll-frame";
 import { ArrowDown, ArrowUp } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import ChatHeader, { type ChannelHeaderMember } from "@/components/chat/ChatHeader.vue";
@@ -384,10 +385,13 @@ const jumpToLive = useJumpToLiveEdge({
   mode: scrollDirection,
   scrollToEdge: (mode) => virtualTimelineRef.value?.scrollToPinnedEdge(mode) ?? false,
 });
-
-function onMessagesScroll() {
+const timelineScrollFrame = createScrollFrameScheduler(() => {
   updateCurrentDayMarker();
   jumpToLive.updateDistance();
+});
+
+function onMessagesScroll() {
+  timelineScrollFrame.schedule();
 }
 const currentDayMarkerLabel = ref("");
 const composerRef = ref<MessageComposerHandle | null>(null);
@@ -767,6 +771,7 @@ watch(() => props.isSending, (sending, prevSending) => {
 });
 
 onBeforeUnmount(() => {
+  timelineScrollFrame.disconnect();
   clearReconnectedNotice();
   if (replyJumpNoticeTimeout) {
     clearTimeout(replyJumpNoticeTimeout);
@@ -1248,7 +1253,7 @@ function dayDividerLabel(createdAt: string): string {
       v-if="isLoadingMessages || !channel && !dmPeer || feedMessages.length === 0"
       :ref="setMessagesContainer"
       class="chat-pane-scroll chat-message-scroll flex-1 min-h-0 px-[var(--chat-content-inline)]"
-      @scroll="updateCurrentDayMarker"
+      @scroll="onMessagesScroll"
     >
       <div v-if="isLoadingMessages" class="chat-message-lane flex flex-col gap-1 py-6" aria-busy="true" aria-label="Loading messages">
         <div

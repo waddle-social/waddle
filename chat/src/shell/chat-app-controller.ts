@@ -395,6 +395,7 @@ export function useChatAppController(giphyApiKey: string) {
   // Empty stack = panel closed. Channels and DMs both use XEP-0201 threads.
   const activeThreadStack = ref<string[]>([]);
   const activeThreadTargetMessageId = ref<string | null>(null);
+  const activeThreadTargetRequestId = ref(0);
   const threads = useMessageThreads(activeMessages);
   type ActiveRightPanel = "thread" | "pinned" | "extension";
   const activeRightPanel = ref<ActiveRightPanel | null>(null);
@@ -1156,6 +1157,7 @@ export function useChatAppController(giphyApiKey: string) {
     if (!threadId) return;
     activeRightPanel.value = "thread";
     activeThreadTargetMessageId.value = targetMessageId ?? null;
+    if (targetMessageId) activeThreadTargetRequestId.value += 1;
     if (
       activeThreadStack.value.length > 0 &&
       activeThreadStack.value[activeThreadStack.value.length - 1] === threadId
@@ -1355,8 +1357,8 @@ export function useChatAppController(giphyApiKey: string) {
     return m.reactionTargetId ?? m.replyableId ?? null;
   }
 
-  function markActiveDisplayed(messageId: string) {
-    activeTarget.value.markDisplayed(messageId);
+  function markActiveDisplayed(messageId: string, options?: { syncMds?: boolean }) {
+    activeTarget.value.markDisplayed(messageId, options);
   }
 
   async function invokeActiveExtensionAction(action: ExtensionAnnotationAction) {
@@ -2601,6 +2603,7 @@ export function useChatAppController(giphyApiKey: string) {
       activeChannelRoomJid,
       activeThreadStack,
       activeThreadTargetMessageId,
+      activeThreadTargetRequestId,
       activeRightPanel,
       threads,
       reactionModeTarget,

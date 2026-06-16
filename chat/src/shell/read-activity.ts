@@ -8,7 +8,7 @@ import { useChatWindowVisibility } from "@/shell/window-visibility";
 
 type ReadonlyRef<T> = Readonly<Ref<T>>;
 type ActiveTarget = {
-  markDisplayed: (messageId: string) => void;
+  markDisplayed: (messageId: string, options?: { syncMds?: boolean }) => void;
 };
 
 export function useChatReadActivity(options: {

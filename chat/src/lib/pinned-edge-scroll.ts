@@ -51,6 +51,11 @@ export function createPinnedEdgeScroller(options: {
     if (isPinnedAtEdge.value !== next) isPinnedAtEdge.value = next;
   }
 
+  function refreshPinnedState(): boolean {
+    recomputePinned();
+    return isPinnedAtEdge.value;
+  }
+
   function attachScrollListener() {
     const el = options.element.value;
     if (el === trackedElement) return;
@@ -80,6 +85,10 @@ export function createPinnedEdgeScroller(options: {
     }
     settleObserver?.disconnect();
     settleObserver = null;
+  }
+
+  function cancelSettleLock() {
+    disconnectSettleLock();
   }
 
   function captureTarget(): ScrollTarget {
@@ -173,7 +182,9 @@ export function createPinnedEdgeScroller(options: {
   }
 
   return {
+    cancelSettleLock,
     disconnect,
+    refreshPinnedState,
     scrollToPinnedEdge,
     isPinnedAtEdge: isPinnedAtEdge as Readonly<Ref<boolean>>,
   };

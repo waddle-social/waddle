@@ -121,6 +121,35 @@ describe("useChannelReadMarkers", () => {
     );
   });
 
+  test("markDisplayed can suppress MDS for thread-panel displayed markers", () => {
+    const sendDisplayed = mock(async () => undefined);
+    const publishMdsDisplayed = mock(async () => undefined);
+    const messages = ref<TimelineMessage[]>([
+      {
+        id: "sender-id",
+        stanzaId: "room-stanza-id",
+        stanzaIdBy: "general@rooms.example.com",
+        body: "",
+        nick: "",
+        timestamp: 0,
+        threadId: "thread-1",
+      } as TimelineMessage,
+    ]);
+    const r = useChannelReadMarkers({
+      xmppClient: ref<BrowserXmppClient | null>(makeChannelClient(sendDisplayed, publishMdsDisplayed)),
+      activeSpaceId: ref("space"),
+      activeChannelId: ref("general"),
+      currentChannel: ref(channel()),
+      messages,
+    });
+
+    r.markDisplayed("sender-id", { syncMds: false });
+
+    expect(sendDisplayed).toHaveBeenCalledTimes(1);
+    expect(sendDisplayed.mock.calls[0]![3]).toEqual({ id: "thread-1" });
+    expect(publishMdsDisplayed).not.toHaveBeenCalled();
+  });
+
   test("markDisplayed is a no-op when target is not in timeline", () => {
     const sendDisplayed = mock(async () => undefined);
     const messages = ref<TimelineMessage[]>([]);
@@ -293,6 +322,34 @@ describe("useDmReadMarkers", () => {
       "server-stanza-id",
       "example.com",
     );
+  });
+
+  test("markDisplayed can suppress DM MDS for thread-panel displayed markers", () => {
+    const sendDmDisplayed = mock(async () => undefined);
+    const publishMdsDisplayed = mock(async () => undefined);
+    const messages = ref<TimelineMessage[]>([
+      {
+        id: "dm1",
+        stanzaId: "server-stanza-id",
+        stanzaIdBy: "example.com",
+        body: "",
+        nick: "",
+        timestamp: 0,
+        threadId: "dm-thread",
+        displayedMarkerRequested: true,
+      } as TimelineMessage,
+    ]);
+    const r = useDmReadMarkers({
+      xmppClient: ref<BrowserXmppClient | null>(makeDmClient(sendDmDisplayed, publishMdsDisplayed)),
+      activePeerJid: ref("bob@example.com"),
+      messages,
+    });
+
+    r.markDisplayed("dm1", { syncMds: false });
+
+    expect(sendDmDisplayed).toHaveBeenCalledTimes(1);
+    expect(sendDmDisplayed.mock.calls[0]![2]).toEqual({ id: "dm-thread" });
+    expect(publishMdsDisplayed).not.toHaveBeenCalled();
   });
 
   test("no-op without active peer", () => {

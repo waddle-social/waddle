@@ -12,12 +12,14 @@ import type { MentionCandidate } from "@/lib/mentions";
 import type { ComposerLinkPreviewLookup, ComposerLinkPreviewSendPayload } from "@/lib/link-preview-composer";
 import type { OccupantAuthority, OccupantHat, OccupantPresence, RoomAuthority, RoomHats, RoomPresence } from "@/lib/xmpp-client";
 import type { MessageThreadEntry, MessageThreadIndex } from "@/channels/threads";
+import { createScrollFrameScheduler } from "@/ui/scroll-frame";
 import { useScrollDirectionPreference } from "@/preferences/scroll-direction";
 import {
   isTopPinnedScrollDirection,
   orderTimelineForScrollDirection,
   type ScrollDirectionMode,
 } from "@/lib/scroll-direction";
+import { latestRemoteMessageIdFor } from "@/lib/timeline-state";
 import { createPinnedEdgeScroller } from "@/lib/pinned-edge-scroll";
 import { useChatWindowVisibility } from "@/shell/window-visibility";
 import { formatTimelineDayDivider, isSameTimelineDay } from "@/channels/timeline";
@@ -54,6 +56,7 @@ const props = defineProps<{
   roomJid?: string | null;
   reactionMode?: { selectedMessageId: string | null } | null;
   targetMessageId?: string | null;
+  targetMessageRequestId?: number;
   /**
    * When true, the composer is hidden but sub-thread navigation stays active.
    * Used to render the parent context pane in the accordion layout.
@@ -80,7 +83,7 @@ const emit = defineEmits<{
   editMessage: [messageId: string, newBody: string, markup?: MarkupSpan[], references?: MessageReference[], linkPreview?: ComposerLinkPreviewSendPayload];
   retractMessage: [messageId: string];
   reactMessage: [messageId: string, emoji: string];
-  displayed: [messageId: string];
+  displayed: [messageId: string, options?: { syncMds?: boolean }];
   selectGif: [
     url: string,
     threadOverride: { threadId: string; parentThreadId?: string },
@@ -117,6 +120,13 @@ const orderedThreadMessages = computed(() => {
     ? [...orderedChildren.value, root]
     : [root, ...orderedChildren.value];
 });
+const chronologicalThreadMessages = computed(() => {
+  const entry = activeEntry.value;
+  if (!entry) return [];
+  const threadId = activeThreadId.value;
+  if (!threadId) return [];
+  return entry.directChildren.filter((message) => message.threadId === threadId);
+});
 const newestThreadMessageId = computed(() =>
   activeEntry.value?.directChildren.at(-1)?.id
     ?? activeEntry.value?.root?.id
@@ -124,6 +134,9 @@ const newestThreadMessageId = computed(() =>
 );
 const replyChildThreadTargets = computed(() =>
   buildReplyChildThreadTargets(props.threadIndex, activeThreadId.value),
+);
+const latestRemoteThreadMessageId = computed(() =>
+  latestRemoteMessageIdFor(chronologicalThreadMessages.value),
 );
 
 // Burst window matches the main feed (ContentArea.vue): same author + < 5 min
@@ -216,10 +229,13 @@ const jumpToLive = useJumpToLiveEdge({
     return true;
   },
 });
-
-function onThreadScroll() {
+const threadScrollFrame = createScrollFrameScheduler(() => {
   updateCurrentDayMarker();
   jumpToLive.updateDistance();
+});
+
+function onThreadScroll() {
+  threadScrollFrame.schedule();
 }
 
 function setComposerRef(el: ComposerHandle | null) {
@@ -305,6 +321,20 @@ const setVirtualTimelineRef = (instance: VirtualTimelineHandle | null) => {
   void scrollToTargetMessage();
 };
 
+const targetScrollPending = ref(Boolean(props.targetMessageId));
+let targetScrollToken = 0;
+let completedTargetScrollKey: string | null = null;
+
+const orderedThreadMessageIdsKey = computed(() =>
+  orderedThreadMessages.value.map((message) => message.id).join("\0"),
+);
+
+function targetScrollKey(): string | null {
+  return activeThreadId.value && props.targetMessageId
+    ? `${activeThreadId.value}\0${props.targetMessageId}\0${props.targetMessageRequestId ?? 0}`
+    : null;
+}
+
 // Switching threads resets composer state and scrolls to the pinned edge.
 watch(activeThreadId, () => {
   replyingTo.value = null;
@@ -313,25 +343,62 @@ watch(activeThreadId, () => {
     void scrollToTargetMessage();
     return;
   }
+  targetScrollToken++;
+  targetScrollPending.value = false;
+  completedTargetScrollKey = null;
   void scrollToPinnedEdge();
 });
 
 async function scrollToTargetMessage() {
+  const token = ++targetScrollToken;
+  const key = targetScrollKey();
   const targetMessageId = props.targetMessageId;
+  if (!targetMessageId || !key) {
+    targetScrollPending.value = false;
+    completedTargetScrollKey = null;
+    markThreadDisplayedIfVisible();
+    return;
+  }
+  if (completedTargetScrollKey === key) {
+    targetScrollPending.value = false;
+    return;
+  }
   if (
-    !targetMessageId
-    || !activeThreadId.value
+    !activeThreadId.value
     || !orderedThreadMessages.value.some((message) => message.id === targetMessageId)
   ) {
+    targetScrollPending.value = true;
+    return;
+  }
+  const timeline = virtualTimelineRef.value;
+  if (!timeline) {
+    targetScrollPending.value = true;
+    return;
+  }
+  targetScrollPending.value = true;
+  await nextTick();
+  if (!await timeline.scrollToMessageId(targetMessageId, "center")) {
+    if (token === targetScrollToken) targetScrollPending.value = false;
     return;
   }
   await nextTick();
-  await virtualTimelineRef.value?.scrollToMessageId(targetMessageId, "center");
+  if (token !== targetScrollToken) return;
+  pinnedEdgeScroller.refreshPinnedState();
   updateCurrentDayMarker();
+  completedTargetScrollKey = key;
+  targetScrollPending.value = false;
+  markThreadDisplayedIfVisible();
 }
 
 watch(
-  [() => props.targetMessageId, activeThreadId, () => orderedThreadMessages.value.map((message) => message.id).join("\0")],
+  () => props.targetMessageId,
+  () => {
+    completedTargetScrollKey = null;
+  },
+);
+
+watch(
+  [() => props.targetMessageId, () => props.targetMessageRequestId ?? 0, activeThreadId, orderedThreadMessageIdsKey],
   () => {
     void scrollToTargetMessage();
   },
@@ -339,6 +406,7 @@ watch(
 );
 
 watch(scrollDirectionMode, () => {
+  if (targetScrollPending.value) return;
   void scrollToPinnedEdge();
 });
 
@@ -347,16 +415,45 @@ watch(scrollDirectionMode, () => {
 // watchers; see `channels/messages.ts` / `dms/messages.ts`.
 const { isWindowFocused } = useChatWindowVisibility();
 watch(isWindowFocused, (focused, prev) => {
-  if (focused && !prev && pinnedEdgeScroller.isPinnedAtEdge.value) {
+  if (focused && !prev && !targetScrollPending.value && pinnedEdgeScroller.isPinnedAtEdge.value) {
     void scrollToPinnedEdge();
   }
 });
+
+let lastDisplayedThreadKey: string | null = null;
+function markThreadDisplayedIfVisible() {
+  const threadId = activeThreadId.value;
+  const messageId = latestRemoteThreadMessageId.value;
+  if (!threadId || !messageId) return;
+  if (props.hideComposer || targetScrollPending.value) return;
+  if (!scrollContainerRef.value || !isWindowFocused.value || !pinnedEdgeScroller.isPinnedAtEdge.value) return;
+
+  const chatId = props.roomJid ?? props.linkPreviewScope ?? props.channelId ?? props.channelName;
+  const key = `${chatId}\0${threadId}\0${messageId}`;
+  if (key === lastDisplayedThreadKey) return;
+  lastDisplayedThreadKey = key;
+  emit("displayed", messageId, { syncMds: false });
+}
+
+watch(
+  [
+    activeThreadId,
+    latestRemoteThreadMessageId,
+    () => props.hideComposer,
+    () => targetScrollPending.value,
+    () => scrollContainerRef.value,
+    () => isWindowFocused.value,
+    () => pinnedEdgeScroller.isPinnedAtEdge.value,
+  ],
+  () => markThreadDisplayedIfVisible(),
+  { flush: "post", immediate: true },
+);
 
 watch(
   () => props.isLoadingOlderReplies,
   (loading, wasLoading) => {
     if (loading) {
-      pinnedEdgeScroller.disconnect();
+      pinnedEdgeScroller.cancelSettleLock();
       const el = scrollContainerRef.value;
       olderLoadRestoreToken++;
       olderLoadSnapshot = el
@@ -400,12 +497,19 @@ watch(
 );
 
 watch(newestThreadMessageId, (newest, previousNewest) => {
-  if (newest && previousNewest && newest !== previousNewest) {
+  if (
+    newest
+    && previousNewest
+    && newest !== previousNewest
+    && !targetScrollPending.value
+    && pinnedEdgeScroller.isPinnedAtEdge.value
+  ) {
     void scrollToPinnedEdge();
   }
 });
 
 onBeforeUnmount(() => {
+  threadScrollFrame.disconnect();
   pinnedEdgeScroller.disconnect();
 });
 
@@ -899,7 +1003,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
       v-else
       :ref="setScrollContainerRef"
       class="chat-pane-scroll flex-1 min-h-0 px-3 py-4 lg:px-4"
-      @scroll="updateCurrentDayMarker"
+      @scroll="onThreadScroll"
     >
       <div class="type-caption text-center py-10 text-muted-foreground">
         Loading thread…

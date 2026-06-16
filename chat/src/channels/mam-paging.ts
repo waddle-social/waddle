@@ -46,7 +46,7 @@ type UseChannelMamPagingDeps = {
   firstUnseenId: Ref<string | null>;
   timelineEl: Ref<HTMLDivElement | null>;
   scrollDirection: Ref<ScrollDirectionMode>;
-  pinnedEdgeScroller: { disconnect: () => void };
+  pinnedEdgeScroller: { cancelSettleLock: () => void };
   actionError: Ref<string>;
   clearActionError: () => void;
   normalizeError: (e: unknown) => string;
@@ -126,7 +126,7 @@ export function useChannelMamPaging(deps: UseChannelMamPagingDeps) {
     loadingOlderThreadIds.value = new Set();
     threadHasOlder.value = {};
     oldestThreadArchiveIds.clear();
-    pinnedEdgeScroller.disconnect();
+    pinnedEdgeScroller.cancelSettleLock();
     // Reset the divider anchor up-front: a previous conversation's id could
     // coincidentally match a message in the new timeline, and an aborted
     // request (requestId mismatch) would otherwise leave stale state.

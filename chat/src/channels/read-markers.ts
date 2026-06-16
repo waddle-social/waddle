@@ -28,6 +28,9 @@ type UseChannelReadMarkersDeps = {
   currentChannel: Ref<ChannelSummary | null>;
   messages: Ref<TimelineMessage[]>;
 };
+type MarkDisplayedOptions = {
+  syncMds?: boolean;
+};
 
 export function useChannelReadMarkers(deps: UseChannelReadMarkersDeps) {
   const { xmppClient, activeSpaceId, activeChannelId, currentChannel, messages } = deps;
@@ -44,7 +47,7 @@ export function useChannelReadMarkers(deps: UseChannelReadMarkersDeps) {
    * publish an XEP-0490 MDS item so the user's other devices clear
    * the unread badge for this room. Both calls are best-effort.
    */
-  function markDisplayed(messageId: string) {
+  function markDisplayed(messageId: string, options: MarkDisplayedOptions = {}) {
     if (!xmppClient.value || !activeChannelId.value) return;
     const target = findMessageById(messages.value, messageId);
     const stanzaId = target?.stanzaId;
@@ -80,9 +83,11 @@ export function useChannelReadMarkers(deps: UseChannelReadMarkersDeps) {
     // when the room actually stamped the message (XEP-0359 §3.4
     // makes this conditional on room support). The chat id for
     // MUC is the room bare JID, which is also the `by` JID.
-    void client
-      .publishMdsDisplayed(barePeerJid(stanzaIdBy), stanzaId, barePeerJid(stanzaIdBy))
-      .catch(() => undefined);
+    if (options.syncMds !== false) {
+      void client
+        .publishMdsDisplayed(barePeerJid(stanzaIdBy), stanzaId, barePeerJid(stanzaIdBy))
+        .catch(() => undefined);
+    }
   }
 
   function persistLastSeen(channelId: string, messageId: string) {

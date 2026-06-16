@@ -17,6 +17,9 @@ type UseDmReadMarkersDeps = {
   activePeerJid: Ref<string | null>;
   messages: Ref<TimelineMessage[]>;
 };
+type MarkDisplayedOptions = {
+  syncMds?: boolean;
+};
 
 export function useDmReadMarkers(deps: UseDmReadMarkersDeps) {
   const { xmppClient, activePeerJid, messages } = deps;
@@ -27,7 +30,7 @@ export function useDmReadMarkers(deps: UseDmReadMarkersDeps) {
     latestRemoteMessageIdFor(messages.value),
   );
 
-  function markDisplayed(messageId: string) {
+  function markDisplayed(messageId: string, options: MarkDisplayedOptions = {}) {
     if (!xmppClient.value || !activePeerJid.value) return;
     const target = findMessageById(messages.value, messageId);
     const targetId = target?.id ?? messageId;
@@ -43,7 +46,7 @@ export function useDmReadMarkers(deps: UseDmReadMarkersDeps) {
     // the inbound message). Only fires when both are surfaced.
     const stanzaId = target?.stanzaId;
     const stanzaIdBy = target?.stanzaIdBy;
-    if (stanzaId && stanzaIdBy) {
+    if (options.syncMds !== false && stanzaId && stanzaIdBy) {
       void client
         .publishMdsDisplayed(barePeerJid(peerJid), stanzaId, stanzaIdBy)
         .catch(() => undefined);

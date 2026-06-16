@@ -558,7 +558,7 @@ export function useChannelMessages(
   function clearMessages() {
     paging.reset();
     messageSearch.reset();
-    pinnedEdgeScroller.disconnect();
+    pinnedEdgeScroller.cancelSettleLock();
     pendingEchoClientIds.clear();
     messages.value = [];
     clearTypingState();
