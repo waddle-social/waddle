@@ -358,7 +358,8 @@ pub struct WaddleExternalService {
     #[serde(rename = "serviceType")]
     pub service_type: &'static str,
     pub host: String,
-    pub port: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transport: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -379,7 +380,9 @@ impl From<waddle_xmpp_client::xep::xep0215::ExternalService> for WaddleExternalS
             transport: service.transport.map(|t| t.as_str()),
             username: service.username,
             password: service.password,
-            expires: service.expires,
+            // Serialize the typed expiry back to an RFC 3339 string for JSON
+            // transit (the JS-facing boundary).
+            expires: service.expires.map(|expires| expires.to_rfc3339()),
             restricted: service.restricted,
         }
     }
@@ -1197,11 +1200,13 @@ mod tests {
         let surfaced = WaddleExternalService::from(ExternalService {
             service_type: ExternalServiceType::Turns,
             host: "turn.waddle.social".into(),
-            port: 443,
+            port: Some(443),
             transport: Some(ExternalServiceTransport::Tcp),
             username: Some("u".into()),
             password: Some("p".into()),
-            expires: Some("2026-06-17T12:00:00Z".into()),
+            expires: Some(
+                chrono::DateTime::parse_from_rfc3339("2026-06-17T12:00:00Z").expect("rfc3339"),
+            ),
             restricted: true,
         });
         let json = serde_json::to_value(&surfaced).expect("serialize");
@@ -1211,7 +1216,7 @@ mod tests {
         assert_eq!(json["transport"], "tcp");
         assert_eq!(json["username"], "u");
         assert_eq!(json["password"], "p");
-        assert_eq!(json["expires"], "2026-06-17T12:00:00Z");
+        assert_eq!(json["expires"], "2026-06-17T12:00:00+00:00");
         assert_eq!(json["restricted"], true);
     }
 
@@ -1222,7 +1227,7 @@ mod tests {
         let surfaced = WaddleExternalService::from(ExternalService {
             service_type: ExternalServiceType::Stun,
             host: "turn.waddle.social".into(),
-            port: 3478,
+            port: None,
             transport: Some(ExternalServiceTransport::Udp),
             username: None,
             password: None,
@@ -1232,6 +1237,8 @@ mod tests {
         let json = serde_json::to_value(&surfaced).expect("serialize");
         assert_eq!(json["serviceType"], "stun");
         let obj = json.as_object().expect("object");
+        // Absent optional fields (incl. an omitted port) are dropped, not null.
+        assert!(!obj.contains_key("port"));
         assert!(!obj.contains_key("username"));
         assert!(!obj.contains_key("password"));
         assert!(!obj.contains_key("expires"));

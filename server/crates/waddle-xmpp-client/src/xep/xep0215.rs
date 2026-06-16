@@ -11,6 +11,7 @@
 //! `type='turns'` (XEP-0215 §3.6.5), and `xmpp_parsers`' `Type` enum has no
 //! `Turns` variant, so the typed parser would reject Waddle's own response.
 
+use chrono::{DateTime, FixedOffset};
 use minidom::Element;
 
 /// External Service Discovery namespace.
@@ -84,15 +85,19 @@ impl ExternalServiceTransport {
 pub struct ExternalService {
     pub service_type: ExternalServiceType,
     pub host: String,
-    pub port: u16,
+    /// `port` is RECOMMENDED but optional in XEP-0215; `None` when the server
+    /// omits it (the ICE URI then carries no explicit port and the client uses
+    /// the scheme default).
+    pub port: Option<u16>,
     pub transport: Option<ExternalServiceTransport>,
     pub username: Option<String>,
     pub password: Option<String>,
-    /// XEP-0082 dateTime string (UTC) marking when the credentials expire.
-    /// Kept verbatim from the wire — it crosses the WASM boundary unchanged for
-    /// the client's refresh logic.
-    pub expires: Option<String>,
-    /// `restricted='1'` — credentials are required (XEP-0215 §3.6.5).
+    /// When the credentials expire (XEP-0215 §3.6.5 `expires`, an XEP-0082
+    /// dateTime). Parsed to a typed value so the client's refresh logic never
+    /// re-parses a stringly-typed timestamp.
+    pub expires: Option<DateTime<FixedOffset>>,
+    /// Whether credentials are required (XEP-0215 §3.6.5 `restricted`, an
+    /// `xs:boolean` — `"1"` or `"true"`).
     pub restricted: bool,
 }
 
@@ -130,10 +135,19 @@ pub fn parse_external_services(iq: &Element) -> Vec<ExternalService> {
 fn parse_service_element(service: &Element) -> Option<ExternalService> {
     let service_type = ExternalServiceType::from_wire(service.attr("type")?)?;
     let host = service.attr("host")?.to_string();
-    let port = service.attr("port")?.parse::<u16>().ok()?;
+    // `port` is optional (XEP-0215): keep a port-less service, but drop one
+    // whose `port` is present yet not a valid u16.
+    let port = match service.attr("port") {
+        Some(raw) => Some(raw.parse::<u16>().ok()?),
+        None => None,
+    };
     let transport = service
         .attr("transport")
         .and_then(ExternalServiceTransport::from_wire);
+    // A malformed `expires` is informational only — drop it, not the service.
+    let expires = service
+        .attr("expires")
+        .and_then(|raw| DateTime::parse_from_rfc3339(raw).ok());
     Some(ExternalService {
         service_type,
         host,
@@ -141,8 +155,9 @@ fn parse_service_element(service: &Element) -> Option<ExternalService> {
         transport,
         username: service.attr("username").map(str::to_string),
         password: service.attr("password").map(str::to_string),
-        expires: service.attr("expires").map(str::to_string),
-        restricted: service.attr("restricted") == Some("1"),
+        expires,
+        // `xs:boolean` lexical space: "1" or "true" mean restricted.
+        restricted: matches!(service.attr("restricted"), Some("1") | Some("true")),
     })
 }
 
@@ -165,7 +180,7 @@ mod tests {
         let stun = &services[0];
         assert_eq!(stun.service_type, ExternalServiceType::Stun);
         assert_eq!(stun.host, "turn.waddle.social");
-        assert_eq!(stun.port, 3478);
+        assert_eq!(stun.port, Some(3478));
         assert_eq!(stun.transport, Some(ExternalServiceTransport::Udp));
         assert!(stun.username.is_none());
         assert!(stun.password.is_none());
@@ -194,13 +209,16 @@ mod tests {
         let turns = &services[0];
         assert_eq!(turns.service_type, ExternalServiceType::Turns);
         assert_eq!(turns.transport, Some(ExternalServiceTransport::Tcp));
-        assert_eq!(turns.port, 443);
+        assert_eq!(turns.port, Some(443));
         assert_eq!(
             turns.username.as_deref(),
             Some("1700000000:alice@waddle.social/desktop")
         );
         assert_eq!(turns.password.as_deref(), Some("base64hmac=="));
-        assert_eq!(turns.expires.as_deref(), Some("2026-06-17T12:00:00Z"));
+        assert_eq!(
+            turns.expires.expect("expires parsed").to_rfc3339(),
+            "2026-06-17T12:00:00+00:00"
+        );
         assert!(turns.restricted);
     }
 
@@ -238,16 +256,45 @@ mod tests {
     }
 
     #[test]
-    fn skips_entry_missing_host_or_port() {
+    fn skips_entry_missing_host_or_with_invalid_port() {
         let xml = "<iq xmlns='jabber:client' type='result' id='e1'>\
                      <services xmlns='urn:xmpp:extdisco:2'>\
                        <service type='stun' port='3478'/>\
-                       <service type='stun' host='turn.waddle.social'/>\
                        <service type='stun' host='turn.waddle.social' port='not-a-port'/>\
                      </services>\
                    </iq>";
         let iq: Element = xml.parse().expect("valid xml");
         assert!(parse_external_services(&iq).is_empty());
+    }
+
+    /// XEP-0215 marks `port` RECOMMENDED, not required: a service that omits it
+    /// is kept with `port: None` (the ICE URI then uses the scheme default).
+    #[test]
+    fn keeps_service_with_omitted_port() {
+        let xml = "<iq xmlns='jabber:client' type='result' id='e1'>\
+                     <services xmlns='urn:xmpp:extdisco:2'>\
+                       <service type='stun' host='turn.waddle.social'/>\
+                     </services>\
+                   </iq>";
+        let iq: Element = xml.parse().expect("valid xml");
+        let services = parse_external_services(&iq);
+        assert_eq!(services.len(), 1);
+        assert_eq!(services[0].port, None);
+    }
+
+    /// `xs:boolean` also permits the lexical form `"true"`, not just `"1"`.
+    #[test]
+    fn restricted_accepts_xs_boolean_true() {
+        let xml = "<iq xmlns='jabber:client' type='result' id='e1'>\
+                     <services xmlns='urn:xmpp:extdisco:2'>\
+                       <service type='turns' host='turn.waddle.social' port='443' \
+                                username='u' password='p' restricted='true'/>\
+                     </services>\
+                   </iq>";
+        let iq: Element = xml.parse().expect("valid xml");
+        let services = parse_external_services(&iq);
+        assert_eq!(services.len(), 1);
+        assert!(services[0].restricted);
     }
 
     #[test]

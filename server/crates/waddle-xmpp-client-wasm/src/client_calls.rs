@@ -309,13 +309,7 @@ impl WaddleClient {
         let inner = self.inner.clone();
         future_to_promise(async move {
             let initiator = stored_full_jid(&inner)?;
-            let initiator_bare = initiator.to_bare().to_string();
-            let server_domain = initiator_bare
-                .split('@')
-                .next_back()
-                .map(str::to_owned)
-                .ok_or_else(|| js_error("authenticated JID has no domain"))?;
-            let mixer = calls_mixer_jid(&server_domain);
+            let mixer = calls_mixer_jid(initiator.domain().as_str());
 
             let sid = sid(sid_str);
             let jingle = build_muji_session_initiate(&sid, &initiator, &room_jid, video);
@@ -349,12 +343,7 @@ impl WaddleClient {
     pub fn fetch_external_services(&self) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            let initiator_bare = stored_full_jid(&inner)?.to_bare().to_string();
-            let server_domain = initiator_bare
-                .split('@')
-                .next_back()
-                .map(str::to_owned)
-                .ok_or_else(|| js_error("authenticated JID has no domain"))?;
+            let server_domain = stored_full_jid(&inner)?.domain().to_string();
             let request_id = uuid::Uuid::new_v4().to_string();
             let iq = waddle_xmpp_client::xep::xep0215::build_extdisco_services_iq(
                 &server_domain,
@@ -400,14 +389,7 @@ impl WaddleClient {
     pub fn send_muji_session_terminate(&self, room_jid: String, sid_str: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            let full_jid = stored_full_jid(&inner)?;
-            let bare_jid = full_jid.to_bare().to_string();
-            let server_domain = bare_jid
-                .split('@')
-                .next_back()
-                .map(str::to_owned)
-                .ok_or_else(|| js_error("authenticated JID has no domain"))?;
-            let mixer = calls_mixer_jid(&server_domain);
+            let mixer = calls_mixer_jid(stored_full_jid(&inner)?.domain().as_str());
 
             let jingle = build_muji_session_terminate(&room_jid, &sid(sid_str));
             let stanza = Element::builder("iq", NS_JABBER_CLIENT)
