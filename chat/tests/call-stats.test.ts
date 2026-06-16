@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
+  audioBitrateBand,
   describeVideoStats,
   formatBitrate,
+  summarizeAudioStats,
   summarizeVideoStats,
   type CallStatSample,
 } from "../src/lib/calls/call-stats";
@@ -446,5 +448,103 @@ describe("formatBitrate", () => {
     expect(formatBitrate(450)).toBe("450 kbps");
     expect(formatBitrate(1000)).toBe("1.0 Mbps");
     expect(formatBitrate(2800)).toBe("2.8 Mbps");
+  });
+});
+
+describe("audioBitrateBand — coarse band over a measured audio bitrate", () => {
+  test("DTX-silent (≈0 kbps) reads 'silent' — idle participants cost ~nothing", () => {
+    expect(audioBitrateBand(0)).toBe("silent");
+    expect(audioBitrateBand(8)).toBe("silent");
+  });
+
+  test("old ~48k music-class default reads 'standard'", () => {
+    expect(audioBitrateBand(32)).toBe("standard");
+    expect(audioBitrateBand(48)).toBe("standard");
+  });
+
+  test("the raised ~64k musicHighQuality-class default reads 'high'", () => {
+    expect(audioBitrateBand(64)).toBe("high");
+    expect(audioBitrateBand(72)).toBe("high");
+  });
+
+  test("an unmeasured bitrate (null, first poll) has no band yet", () => {
+    expect(audioBitrateBand(null)).toBeNull();
+  });
+});
+
+describe("summarizeAudioStats — outbound (send) audio", () => {
+  const outbound = {
+    type: "outbound-rtp",
+    kind: "audio",
+    bytesSent: 100_000,
+    timestamp: 10_000,
+    codecId: "RTCCodec_opus",
+  };
+  const opus = { type: "codec", id: "RTCCodec_opus", mimeType: "audio/opus" };
+
+  test("reads the negotiated codec; bitrate is null on the first sample", () => {
+    const { summary, sample } = summarizeAudioStats(report([outbound, opus]), "send");
+    expect(summary.codec).toBe("opus");
+    expect(summary.bitrateKbps).toBeNull(); // needs two samples
+    expect(sample).toEqual({ bytes: 100_000, timestampMs: 10_000 });
+  });
+
+  test("derives the send bitrate from the byte/timestamp delta against the previous sample", () => {
+    const prev: CallStatSample = { bytes: 100_000, timestampMs: 10_000 };
+    // +8,000 bytes = 64,000 bits over 1.0s = 64 kbps (the raised target).
+    const next = { ...outbound, bytesSent: 108_000, timestamp: 11_000 };
+    const { summary } = summarizeAudioStats(report([next, opus]), "send", prev);
+    expect(summary.bitrateKbps).toBe(64);
+    expect(audioBitrateBand(summary.bitrateKbps)).toBe("high");
+  });
+
+  test("only looks at audio RTP — a co-reported video stream never bleeds in", () => {
+    const prev: CallStatSample = { bytes: 100_000, timestampMs: 10_000 };
+    const video = {
+      type: "outbound-rtp",
+      kind: "video",
+      bytesSent: 5_000_000,
+      timestamp: 11_000,
+    };
+    const next = { ...outbound, bytesSent: 108_000, timestamp: 11_000 };
+    const { summary } = summarizeAudioStats(report([next, video, opus]), "send", prev);
+    expect(summary.bitrateKbps).toBe(64); // not inflated by the 5 Mbps video
+  });
+});
+
+describe("summarizeAudioStats — inbound (recv) audio and ICE path", () => {
+  test("derives the recv bitrate and reads the succeeded ICE candidate path", () => {
+    const prev: CallStatSample = { bytes: 50_000, timestampMs: 5_000 };
+    const inbound = {
+      type: "inbound-rtp",
+      kind: "audio",
+      bytesReceived: 56_000, // +6,000 bytes = 48 kbps over 1.0s
+      timestamp: 6_000,
+      codecId: "c-opus",
+    };
+    const codec = { type: "codec", id: "c-opus", mimeType: "audio/opus" };
+    const transport = { type: "transport", selectedCandidatePairId: "pair-1" };
+    const pair = { type: "candidate-pair", id: "pair-1", state: "succeeded", localCandidateId: "lc-1" };
+    const local = { type: "local-candidate", id: "lc-1", candidateType: "host", protocol: "udp" };
+    const { summary } = summarizeAudioStats(
+      report([inbound, codec, transport, pair, local]),
+      "recv",
+      prev,
+    );
+    expect(summary.bitrateKbps).toBe(48);
+    expect(audioBitrateBand(summary.bitrateKbps)).toBe("standard");
+    expect(summary.codec).toBe("opus");
+    expect(summary.iceCandidateType).toBe("host");
+    expect(summary.iceTransport).toBe("udp");
+  });
+
+  test("a track not yet flowing yields all-null fields", () => {
+    const { summary } = summarizeAudioStats(report([]), "recv");
+    expect(summary).toEqual({
+      codec: null,
+      bitrateKbps: null,
+      iceCandidateType: null,
+      iceTransport: null,
+    });
   });
 });

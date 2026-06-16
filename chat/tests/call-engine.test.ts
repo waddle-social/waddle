@@ -101,6 +101,24 @@ describe("call-engine module", () => {
     });
   });
 
+  test("sets the Opus voice-clarity profile (~64k mono, RED + DTX) as the room publish default", () => {
+    // The voice-clarity lever is uniform (not capability-gated), so it rides on
+    // the room's `publishDefaults` and applies to every mic publish. Asserted on
+    // the returned options — the engine is a thin applier.
+    const audioProcessing: AudioProcessingPrefs = {
+      noiseSuppression: true,
+      echoCancellation: true,
+      autoGainControl: true,
+    };
+    const options = callRoomOptionsForPrefs({ mic: null, cam: null, audioProcessing });
+    expect(options.publishDefaults).toMatchObject({
+      audioPreset: { maxBitrate: 64_000 },
+      red: true,
+      dtx: true,
+      forceStereo: false,
+    });
+  });
+
   test("resolves participant audio volume by identity and source with default full volume", () => {
     const store: ParticipantAudioVolumeStore = {
       "bob@waddle.test/desktop:microphone": 0.3,

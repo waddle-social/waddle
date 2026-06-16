@@ -11,6 +11,7 @@ const RELAY_TCP: CallMediaPathSnapshot = {
   codec: "VP9",
   iceCandidateType: "relay",
   iceTransport: "tcp",
+  audioBitrateBand: null,
 };
 
 describe("callMediaPathEventAttributes", () => {
@@ -32,6 +33,7 @@ describe("callMediaPathEventAttributes", () => {
         codec: null,
         iceCandidateType: null,
         iceTransport: null,
+        audioBitrateBand: null,
       }),
     ).toEqual({
       direction: "recv",
@@ -42,6 +44,30 @@ describe("callMediaPathEventAttributes", () => {
     });
   });
 
+  test("an audio path carries the bitrate band (active-speaker signal), codec and source", () => {
+    expect(
+      callMediaPathEventAttributes({
+        direction: "send",
+        source: "microphone",
+        codec: "opus",
+        iceCandidateType: "host",
+        iceTransport: "udp",
+        audioBitrateBand: "high",
+      }),
+    ).toEqual({
+      direction: "send",
+      source: "microphone",
+      codec: "opus",
+      ice_candidate_type: "host",
+      ice_transport: "udp",
+      audio_bitrate_band: "high",
+    });
+  });
+
+  test("a video path omits the audio_bitrate_band attribute entirely", () => {
+    expect(callMediaPathEventAttributes(RELAY_TCP)).not.toHaveProperty("audio_bitrate_band");
+  });
+
   test("never emits participant identifiers or JIDs", () => {
     const attrs = callMediaPathEventAttributes(RELAY_TCP);
     const allowed = new Set([
@@ -50,6 +76,7 @@ describe("callMediaPathEventAttributes", () => {
       "codec",
       "ice_candidate_type",
       "ice_transport",
+      "audio_bitrate_band",
     ]);
     for (const key of Object.keys(attrs)) {
       expect(allowed.has(key)).toBe(true);
@@ -86,6 +113,25 @@ describe("createCallMediaPathBeacon", () => {
 
     expect(reported).toHaveLength(2);
     expect(reported[1]?.codec).toBe("VP8");
+  });
+
+  test("re-beacons when the audio bitrate band changes (silent → high speaker)", () => {
+    const reported: CallMediaPathSnapshot[] = [];
+    const beacon = createCallMediaPathBeacon((s) => reported.push(s));
+    const audio = (band: "silent" | "standard" | "high"): CallMediaPathSnapshot => ({
+      direction: "send",
+      source: "microphone",
+      codec: "opus",
+      iceCandidateType: "host",
+      iceTransport: "udp",
+      audioBitrateBand: band,
+    });
+
+    beacon.observe(audio("silent"));
+    beacon.observe(audio("high"));
+    beacon.observe(audio("silent")); // back to a band already seen → no re-beacon
+
+    expect(reported.map((s) => s.audioBitrateBand)).toEqual(["silent", "high"]);
   });
 
   test("re-beacons when the ICE path changes (relay → host)", () => {

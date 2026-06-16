@@ -17,6 +17,7 @@ import {
   type VideoCaptureOptions,
 } from "livekit-client";
 import { videoPublishPlan } from "./video-codec/video-publish";
+import { audioPublishOptions } from "./audio-publish";
 import {
   currentVideoCodecSupportEnv,
   videoCodecSupport,
@@ -89,8 +90,13 @@ export function callRoomOptionsForPrefs(prefs: {
       deviceId: prefs.cam ?? undefined,
       resolution: CAMERA_CAPTURE_RESOLUTION,
     },
-    // Screen-share encoding/codec is set per-publish by `videoPublishPlan`
-    // (it is capability-dependent), so no global `publishDefaults` here.
+    // The Opus voice-clarity profile (~64k mono, RED + DTX) is uniform — not
+    // device-capability dependent — so it lives here as a room-wide publish
+    // default rather than being threaded per-publish. It applies to every mic
+    // publish (initial join, mid-call unmute) automatically; its audio-only
+    // fields are ignored for video tracks. Screen-share/camera encoding+codec
+    // stay per-publish (`videoPublishPlan`) because those ARE capability-gated.
+    publishDefaults: audioPublishOptions(),
   };
 }
 
@@ -424,6 +430,9 @@ export class CallEngine {
 
   async setMicEnabled(enabled: boolean): Promise<void> {
     if (!this.room) return;
+    // The Opus voice-clarity profile is the room's `publishDefaults` (set in
+    // `callRoomOptionsForPrefs`), so a mid-call enable re-publishes at ~64k mono
+    // automatically — no per-publish options needed here.
     await this.room.localParticipant.setMicrophoneEnabled(enabled);
   }
 
@@ -1068,6 +1077,8 @@ export async function enableRequestedCapture(
 ): Promise<void> {
   if (opts.audio) {
     try {
+      // The mic's Opus voice-clarity profile comes from the room's
+      // `publishDefaults`, so no per-publish options are needed here.
       await participant.setMicrophoneEnabled(true);
     } catch (error) {
       onError("audio", error);
