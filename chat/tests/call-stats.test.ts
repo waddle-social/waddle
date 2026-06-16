@@ -451,19 +451,22 @@ describe("formatBitrate", () => {
   });
 });
 
-describe("audioBitrateBand — coarse band over a measured audio bitrate", () => {
-  test("DTX-silent (≈0 kbps) reads 'silent' — idle participants cost ~nothing", () => {
+describe("audioBitrateBand — coarse band over the measured on-the-wire audio rate", () => {
+  test("a near-silent wire rate (DTX idle / comfort noise) reads 'silent'", () => {
     expect(audioBitrateBand(0)).toBe("silent");
-    expect(audioBitrateBand(8)).toBe("silent");
+    expect(audioBitrateBand(12)).toBe("silent"); // boundary
   });
 
-  test("old ~48k music-class default reads 'standard'", () => {
-    expect(audioBitrateBand(32)).toBe("standard");
+  test("a light / quiet / intermittent wire rate reads 'standard'", () => {
+    expect(audioBitrateBand(13)).toBe("standard"); // just past silence
     expect(audioBitrateBand(48)).toBe("standard");
+    expect(audioBitrateBand(56)).toBe("standard"); // boundary
   });
 
-  test("the raised ~64k musicHighQuality-class default reads 'high'", () => {
-    expect(audioBitrateBand(64)).toBe("high");
+  test("a sustained active-speaker wire rate reads 'high' (the raised default's signal)", () => {
+    // Wire rate, not encoder target: a 64k Opus stream + RED + RTP overhead
+    // measures above the encoder cap, so a real active speaker clears the floor.
+    expect(audioBitrateBand(57)).toBe("high"); // just past the floor
     expect(audioBitrateBand(72)).toBe("high");
   });
 
@@ -491,7 +494,8 @@ describe("summarizeAudioStats — outbound (send) audio", () => {
 
   test("derives the send bitrate from the byte/timestamp delta against the previous sample", () => {
     const prev: CallStatSample = { bytes: 100_000, timestampMs: 10_000 };
-    // +8,000 bytes = 64,000 bits over 1.0s = 64 kbps (the raised target).
+    // +8,000 bytes = 64,000 bits over 1.0s = 64 kbps on the wire → a sustained
+    // active speaker on the raised default, so the band reads 'high'.
     const next = { ...outbound, bytesSent: 108_000, timestamp: 11_000 };
     const { summary } = summarizeAudioStats(report([next, opus]), "send", prev);
     expect(summary.bitrateKbps).toBe(64);

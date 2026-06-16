@@ -13,6 +13,7 @@ import {
   type RemoteTrack,
   type RemoteTrackPublication,
   type TrackPublication,
+  type AudioCaptureOptions,
   type TrackPublishOptions,
   type VideoCaptureOptions,
 } from "livekit-client";
@@ -90,13 +91,11 @@ export function callRoomOptionsForPrefs(prefs: {
       deviceId: prefs.cam ?? undefined,
       resolution: CAMERA_CAPTURE_RESOLUTION,
     },
-    // The Opus voice-clarity profile (~64k mono, RED + DTX) is uniform — not
-    // device-capability dependent — so it lives here as a room-wide publish
-    // default rather than being threaded per-publish. It applies to every mic
-    // publish (initial join, mid-call unmute) automatically; its audio-only
-    // fields are ignored for video tracks. Screen-share/camera encoding+codec
-    // stay per-publish (`videoPublishPlan`) because those ARE capability-gated.
-    publishDefaults: audioPublishOptions(),
+    // Screen-share encoding/codec is set per-publish by `videoPublishPlan`
+    // (it is capability-dependent), and the mic's Opus voice-clarity profile is
+    // set per-publish by `audioPublishOptions` (so it stays scoped to the
+    // microphone and never bleeds onto screen-share *system* audio, which may be
+    // stereo). Hence no global `publishDefaults` here.
   };
 }
 
@@ -417,7 +416,10 @@ export class CallEngine {
       room.localParticipant,
       { audio: opts.audio, video: opts.video },
       (source, error) => this.emit("mediaDevicesError", { source, error }),
-      videoPublishPlan({ source: "camera", capability: this.codecSupport }).publish,
+      {
+        audio: audioPublishOptions(),
+        camera: videoPublishPlan({ source: "camera", capability: this.codecSupport }).publish,
+      },
     );
     // Re-apply the speaker preference now that the room has remote
     // audio elements to retarget; the engine ignores it on connect
@@ -430,10 +432,11 @@ export class CallEngine {
 
   async setMicEnabled(enabled: boolean): Promise<void> {
     if (!this.room) return;
-    // The Opus voice-clarity profile is the room's `publishDefaults` (set in
-    // `callRoomOptionsForPrefs`), so a mid-call enable re-publishes at ~64k mono
-    // automatically — no per-publish options needed here.
-    await this.room.localParticipant.setMicrophoneEnabled(enabled);
+    // Forward the Opus voice-clarity profile (~64k mono, RED + DTX) so a mic
+    // (re)enabled mid-call publishes at the same default as the initial join,
+    // not LiveKit's lower `AudioPresets.music`. Scoped to the mic on purpose —
+    // screen-share system audio keeps the SDK defaults. Inert on disable (mute).
+    await this.room.localParticipant.setMicrophoneEnabled(enabled, undefined, audioPublishOptions());
   }
 
   async setCameraEnabled(enabled: boolean): Promise<void> {
@@ -1051,7 +1054,11 @@ function isUnsupportedScreenAudioError(error: unknown): boolean {
  * `Room` (which reaches for browser-only globals at construction).
  */
 type CapturableParticipant = {
-  setMicrophoneEnabled(enabled: boolean): Promise<unknown>;
+  setMicrophoneEnabled(
+    enabled: boolean,
+    options?: AudioCaptureOptions,
+    publishOptions?: TrackPublishOptions,
+  ): Promise<unknown>;
   setCameraEnabled(
     enabled: boolean,
     options?: VideoCaptureOptions,
@@ -1073,20 +1080,18 @@ export async function enableRequestedCapture(
   participant: CapturableParticipant,
   opts: { audio: boolean; video: boolean },
   onError: (source: "audio" | "video", error: unknown) => void,
-  cameraPublishOptions: TrackPublishOptions,
+  publish: { audio: TrackPublishOptions; camera: TrackPublishOptions },
 ): Promise<void> {
   if (opts.audio) {
     try {
-      // The mic's Opus voice-clarity profile comes from the room's
-      // `publishDefaults`, so no per-publish options are needed here.
-      await participant.setMicrophoneEnabled(true);
+      await participant.setMicrophoneEnabled(true, undefined, publish.audio);
     } catch (error) {
       onError("audio", error);
     }
   }
   if (opts.video) {
     try {
-      await participant.setCameraEnabled(true, undefined, cameraPublishOptions);
+      await participant.setCameraEnabled(true, undefined, publish.camera);
     } catch (error) {
       onError("video", error);
     }

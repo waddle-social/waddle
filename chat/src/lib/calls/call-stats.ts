@@ -132,20 +132,29 @@ type RtpLike = {
 };
 
 /**
- * Coarse band over a measured audio send/recv bitrate (kbps). Three buckets,
- * low-cardinality so the de-duping media-path beacon emits at most a handful of
- * audio events per call rather than one per fluctuating sample:
+ * Coarse band over the *measured on-the-wire* audio send/recv rate (kbps).
+ * Important: this is the wire rate, which sits ABOVE the Opus encoder target —
+ * it includes RED redundancy and RTP/SRTP overhead — and Opus is VBR, so quiet
+ * speech measures lower than loud speech on the same encoder cap. So the bands
+ * describe observed activity, not the configured preset:
  *  - `silent`   — DTX idle / comfort-noise floor; an idle participant costs
  *                 ~nothing, so the raised default never burdens listeners.
- *  - `standard` — the old `AudioPresets.music` (~48k) class and below.
- *  - `high`     — the raised ~64k musicHighQuality-class voice-clarity default.
- * `null` (an unmeasured first poll) has no band yet.
+ *  - `standard` — light / quiet / intermittent speech, or a lower-rate path.
+ *  - `high`     — sustained active speech. On the raised ~64k default an active
+ *                 speaker's wire rate clearly clears the floor, so a fleet-wide
+ *                 shift toward `high` is the signal that the raise took effect.
+ * Three buckets keep it low-cardinality so the de-duping media-path beacon emits
+ * at most a handful of audio events per call rather than one per fluctuating
+ * sample. `null` (an unmeasured first poll) has no band yet. Thresholds are
+ * coarse operational buckets meant to be validated/tuned against Faro
+ * (telemetry-first), NOT exact encoder-target cutoffs.
  */
 export type AudioBitrateBand = "silent" | "standard" | "high";
 
 /** ≤ this reads as `silent`: DTX comfort-noise / keepalive, not real speech. */
 const AUDIO_SILENCE_CEILING_KBPS = 12;
-/** > this reads as `high`: midpoint between the old 48k and the raised 64k. */
+/** > this reads as `high`: a sustained active speaker on the raised 64k default
+ *  clears this wire-rate floor (encoder target + RED + overhead). */
 const AUDIO_RAISED_FLOOR_KBPS = 56;
 
 export function audioBitrateBand(bitrateKbps: number | null): AudioBitrateBand | null {
@@ -248,9 +257,10 @@ function bitrateFromSamples(
 }
 
 /**
- * Sum a stream's byte counter and take the newest timestamp across entries
- * (audio is a single RTP stream, but summing is harmless and symmetric with the
- * video simulcast aggregation). Null when no entry reported its bytes.
+ * Sum a stream's byte counter across all of its RTP entries (one per simulcast
+ * layer for video; a single entry for audio) and take the newest timestamp.
+ * Null when no entry reported its bytes. Shared by the video and audio
+ * summarizers.
  */
 function sampleFromRtp(mains: RtpLike[], bytesField: "bytesSent" | "bytesReceived"): CallStatSample | null {
   let bytes: number | undefined;

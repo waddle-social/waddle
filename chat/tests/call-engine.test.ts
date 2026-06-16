@@ -101,24 +101,6 @@ describe("call-engine module", () => {
     });
   });
 
-  test("sets the Opus voice-clarity profile (~64k mono, RED + DTX) as the room publish default", () => {
-    // The voice-clarity lever is uniform (not capability-gated), so it rides on
-    // the room's `publishDefaults` and applies to every mic publish. Asserted on
-    // the returned options — the engine is a thin applier.
-    const audioProcessing: AudioProcessingPrefs = {
-      noiseSuppression: true,
-      echoCancellation: true,
-      autoGainControl: true,
-    };
-    const options = callRoomOptionsForPrefs({ mic: null, cam: null, audioProcessing });
-    expect(options.publishDefaults).toMatchObject({
-      audioPreset: { maxBitrate: 64_000 },
-      red: true,
-      dtx: true,
-      forceStereo: false,
-    });
-  });
-
   test("resolves participant audio volume by identity and source with default full volume", () => {
     const store: ParticipantAudioVolumeStore = {
       "bob@waddle.test/desktop:microphone": 0.3,
@@ -703,14 +685,16 @@ describe("call-engine module", () => {
 });
 
 describe("enableRequestedCapture — best-effort, never ejects", () => {
-  // Camera publish options are irrelevant to the best-effort guarantees here;
-  // any typed value satisfies the (now required) parameter.
+  // Publish options are irrelevant to the best-effort guarantees here; any
+  // typed bundle satisfies the (now required) parameter.
   const cameraOpts = { degradationPreference: "maintain-framerate" as const };
+  const audioOpts = { audioPreset: { maxBitrate: 64_000 }, red: true, dtx: true, forceStereo: false };
+  const publish = { audio: audioOpts, camera: cameraOpts };
 
   test("enables both tracks when capture succeeds", async () => {
     const stub = captureStub();
     const errors: string[] = [];
-    await enableRequestedCapture(stub, { audio: true, video: true }, (s) => errors.push(s), cameraOpts);
+    await enableRequestedCapture(stub, { audio: true, video: true }, (s) => errors.push(s), publish);
     expect(stub.calls).toEqual(["mic:true", "cam:true"]);
     expect(errors).toEqual([]);
   });
@@ -722,7 +706,7 @@ describe("enableRequestedCapture — best-effort, never ejects", () => {
     const seen: Array<{ source: string; name: string }> = [];
     await enableRequestedCapture(stub, { audio: true, video: true }, (source, error) => {
       seen.push({ source, name: (error as Error).name });
-    }, cameraOpts);
+    }, publish);
     expect(stub.calls).toEqual(["mic:true", "cam:true"]); // camera still attempted
     expect(seen).toEqual([{ source: "audio", name: "NotAllowedError" }]);
   });
@@ -730,7 +714,7 @@ describe("enableRequestedCapture — best-effort, never ejects", () => {
   test("a missing camera reports only video and leaves the mic untouched", async () => {
     const stub = captureStub({ camThrows: deviceError("NotFoundError") });
     const seen: string[] = [];
-    await enableRequestedCapture(stub, { audio: true, video: true }, (source) => seen.push(source), cameraOpts);
+    await enableRequestedCapture(stub, { audio: true, video: true }, (source) => seen.push(source), publish);
     expect(seen).toEqual(["video"]);
   });
 
@@ -742,7 +726,7 @@ describe("enableRequestedCapture — best-effort, never ejects", () => {
     });
     const seen: string[] = [];
     await expect(
-      enableRequestedCapture(stub, { audio: true, video: true }, (source) => seen.push(source), cameraOpts),
+      enableRequestedCapture(stub, { audio: true, video: true }, (source) => seen.push(source), publish),
     ).resolves.toBeUndefined();
     expect(seen).toEqual(["audio", "video"]);
   });
@@ -750,7 +734,7 @@ describe("enableRequestedCapture — best-effort, never ejects", () => {
   test("audio-only call never touches the camera", async () => {
     const stub = captureStub({ camThrows: deviceError("NotFoundError") });
     const seen: string[] = [];
-    await enableRequestedCapture(stub, { audio: true, video: false }, (source) => seen.push(source), cameraOpts);
+    await enableRequestedCapture(stub, { audio: true, video: false }, (source) => seen.push(source), publish);
     expect(stub.calls).toEqual(["mic:true"]);
     expect(seen).toEqual([]);
   });
@@ -1149,8 +1133,65 @@ describe("call-engine — camera capture ceiling + per-source degradation", () =
       },
     };
     const cameraPublishOptions = { degradationPreference: "maintain-framerate" as const };
-    await enableRequestedCapture(stub, { audio: false, video: true }, () => {}, cameraPublishOptions);
+    await enableRequestedCapture(
+      stub,
+      { audio: false, video: true },
+      () => {},
+      { audio: {}, camera: cameraPublishOptions },
+    );
     expect(camera).toEqual([{ enabled: true, publishOptions: cameraPublishOptions }]);
+  });
+});
+
+describe("call-engine — Opus voice-clarity audio publish profile (#998)", () => {
+  function micRoomStub() {
+    const mic: Array<{ enabled: boolean; options: unknown; publishOptions: unknown }> = [];
+    return {
+      mic,
+      room: {
+        localParticipant: {
+          async setMicrophoneEnabled(enabled: boolean, options?: unknown, publishOptions?: unknown) {
+            mic.push({ enabled, options, publishOptions });
+          },
+        },
+      },
+    };
+  }
+
+  test("setMicEnabled publishes the mic with ~64k mono Opus, RED + DTX on", async () => {
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine();
+    const stub = micRoomStub();
+    (engine as unknown as { room: unknown }).room = stub.room;
+
+    await engine.setMicEnabled(true);
+
+    expect(stub.mic).toHaveLength(1);
+    expect(stub.mic[0]?.enabled).toBe(true);
+    expect(stub.mic[0]?.publishOptions).toMatchObject({
+      audioPreset: { maxBitrate: 64_000 },
+      red: true,
+      dtx: true,
+      forceStereo: false,
+    });
+  });
+
+  test("enableRequestedCapture forwards the audio publish options to the mic", async () => {
+    const mic: Array<{ enabled: boolean; publishOptions: unknown }> = [];
+    const stub = {
+      async setMicrophoneEnabled(enabled: boolean, _options?: unknown, publishOptions?: unknown) {
+        mic.push({ enabled, publishOptions });
+      },
+      async setCameraEnabled() {},
+    };
+    const audioPublishOpts = { audioPreset: { maxBitrate: 64_000 }, red: true, dtx: true, forceStereo: false };
+    await enableRequestedCapture(
+      stub,
+      { audio: true, video: false },
+      () => {},
+      { audio: audioPublishOpts, camera: {} },
+    );
+    expect(mic).toEqual([{ enabled: true, publishOptions: audioPublishOpts }]);
   });
 });
 

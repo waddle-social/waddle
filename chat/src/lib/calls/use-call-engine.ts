@@ -134,6 +134,11 @@ type AudioMediaPathResult = {
  * measured (the first poll has no prior sample) — codec/ICE then ride along with
  * the band on the next tick. `getRTCStatsReport()` rejects mid-teardown, so a
  * failure drops this track rather than the whole pass.
+ *
+ * Direction matters when reading the band downstream: a `send` band is OUR
+ * publish (direct evidence the raised default took effect); a `recv` band is a
+ * remote peer's publish (whatever client they run), disambiguated by the
+ * snapshot's `direction`.
  */
 async function sampleAudioTrackMediaPath(
   track: LocalMediaTrack | RemoteMediaTrack,
