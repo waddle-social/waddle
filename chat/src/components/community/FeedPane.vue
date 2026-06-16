@@ -12,10 +12,12 @@ import {
   Music,
   RefreshCw,
   Smile,
+  SmilePlus,
   User,
 } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import Skeleton from "@/components/ui/Skeleton.vue";
+import EmojiPicker from "@/components/chat/EmojiPicker.vue";
 import FeedUpdateComposer from "@/components/community/FeedUpdateComposer.vue";
 import StoryReaderDialog from "@/components/community/StoryReaderDialog.vue";
 import type { FeedSurfaceComposerMode, FeedSurfaceFilter } from "@/shell/state";
@@ -114,8 +116,8 @@ interface FeedPaneProps {
 }
 
 const props = withDefaults(defineProps<FeedPaneProps>(), {
-  isStoryRead: () => () => false,
-  reactionSummary: () => () => ({ counts: {}, reactors: {}, mine: [] }),
+  isStoryRead: (_id: string) => false,
+  reactionSummary: (_id: string) => ({ counts: {}, reactors: {}, mine: [] }),
   initialFilter: "all",
   initialComposerMode: "post",
 });
@@ -226,14 +228,23 @@ const activeStory = computed<Story | null>(() => {
   return index === null ? null : props.stories[index] ?? null;
 });
 
-const activeReactionSummary = computed(() => activeStory.value ? props.reactionSummary(activeStory.value.id) : null);
-const activeReactionEntries = computed(() => {
-  const summary = activeReactionSummary.value;
-  if (!summary) return [];
+interface StoryReactionChip {
+  emoji: string;
+  count: number;
+  mine: boolean;
+  reactors: readonly string[];
+}
+
+/** Sorted, display-ready reaction chips for a story, highest count first. */
+function reactionChipsFor(storyId: string): StoryReactionChip[] {
+  const summary = props.reactionSummary(storyId);
   return Object.entries(summary.counts)
-    .map(([emoji, count]) => ({ emoji, count, reactors: summary.reactors[emoji] ?? [] }))
+    .map(([emoji, count]) => ({ emoji, count, mine: summary.mine.includes(emoji), reactors: summary.reactors[emoji] ?? [] }))
     .sort((a, b) => b.count - a.count || a.emoji.localeCompare(b.emoji));
-});
+}
+
+const activeReactionSummary = computed(() => activeStory.value ? props.reactionSummary(activeStory.value.id) : null);
+const activeReactionEntries = computed(() => activeStory.value ? reactionChipsFor(activeStory.value.id) : []);
 
 const loadingAny = computed(() => props.isLoading || props.isStoriesLoading);
 const emptyCopy = computed(() => {
@@ -270,10 +281,38 @@ function nextStory() {
   selectStory(index + 1);
 }
 
+function reactToStory(storyId: string, emoji: string) {
+  if (!storyId) return;
+  emit("react", storyId, emoji);
+}
+
 function toggleReaction(emoji: string) {
-  const story = activeStory.value;
-  if (!story) return;
-  emit("react", story.id, emoji);
+  if (!activeStory.value) return;
+  reactToStory(activeStory.value.id, emoji);
+}
+
+const reactionPickerStoryId = ref<string | null>(null);
+const reactionPickerAnchor = ref<HTMLElement | null>(null);
+
+function openStoryReactionPicker(storyId: string, event: MouseEvent) {
+  if (reactionPickerStoryId.value === storyId) {
+    closeStoryReactionPicker();
+    return;
+  }
+  reactionPickerAnchor.value = event.currentTarget as HTMLElement;
+  reactionPickerStoryId.value = storyId;
+}
+
+function closeStoryReactionPicker() {
+  reactionPickerStoryId.value = null;
+  reactionPickerAnchor.value = null;
+}
+
+function selectStoryReaction(emoji: string) {
+  const storyId = reactionPickerStoryId.value;
+  if (!storyId) return;
+  reactToStory(storyId, emoji);
+  closeStoryReactionPicker();
 }
 </script>
 
@@ -411,8 +450,8 @@ function toggleReaction(emoji: string) {
               {{ item.entry.link }}
             </a>
           </div>
+          <template v-else>
           <button
-            v-else
             type="button"
             class="grid w-full gap-3 p-4 text-left sm:grid-cols-[minmax(0,1fr)_8rem] sm:items-start"
             @click="selectStory(item.storyIndex)"
@@ -466,6 +505,32 @@ function toggleReaction(emoji: string) {
               />
             </span>
           </button>
+          <footer class="flex flex-wrap items-center gap-1.5 border-t border-border px-4 py-2.5">
+            <button
+              v-for="chip in reactionChipsFor(item.story.id)"
+              :key="chip.emoji"
+              type="button"
+              class="inline-flex h-8 items-center gap-1 rounded-md border px-2 text-sm"
+              :class="chip.mine ? 'border-primary bg-primary/10 text-primary' : 'border-input text-foreground hover:bg-muted/60'"
+              :aria-label="`React to story with ${chip.emoji}`"
+              :aria-pressed="chip.mine ? 'true' : 'false'"
+              @click="reactToStory(item.story.id, chip.emoji)"
+            >
+              <span aria-hidden="true">{{ chip.emoji }}</span>
+              <span class="type-numeric text-muted-foreground">{{ chip.count }}</span>
+            </button>
+            <button
+              type="button"
+              class="ml-auto inline-flex h-8 w-8 items-center justify-center rounded-md border border-input text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+              :aria-expanded="reactionPickerStoryId === item.story.id"
+              aria-haspopup="dialog"
+              aria-label="React to story"
+              @click="openStoryReactionPicker(item.story.id, $event)"
+            >
+              <SmilePlus class="h-4 w-4" aria-hidden="true" />
+            </button>
+          </footer>
+          </template>
         </article>
 
         <template v-if="loadingAny && feedItems.length === 0">
@@ -513,5 +578,12 @@ function toggleReaction(emoji: string) {
     @previous="prevStory"
     @next="nextStory"
     @react="toggleReaction"
+  />
+
+  <EmojiPicker
+    :open="reactionPickerStoryId !== null"
+    :anchor-el="reactionPickerAnchor"
+    @select="selectStoryReaction"
+    @close="closeStoryReactionPicker"
   />
 </template>
