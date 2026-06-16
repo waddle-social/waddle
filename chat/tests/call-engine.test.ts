@@ -1137,14 +1137,19 @@ describe("call-engine — camera capture ceiling + per-source degradation", () =
 });
 
 describe("call-engine — forwards the codec publish plan to the SDK", () => {
-  function videoRoomStub() {
-    const screen: Array<{ enabled: boolean; options: unknown; publishOptions: unknown }> = [];
+  function videoRoomStub(opts: { audioThrows?: Error } = {}) {
+    const screen: Array<{ enabled: boolean; options: { audio?: boolean }; publishOptions: unknown }> = [];
     return {
       screen,
       room: {
         localParticipant: {
-          async setScreenShareEnabled(enabled: boolean, options?: unknown, publishOptions?: unknown) {
-            screen.push({ enabled, options, publishOptions });
+          async setScreenShareEnabled(
+            enabled: boolean,
+            options?: { audio?: boolean },
+            publishOptions?: unknown,
+          ) {
+            screen.push({ enabled, options: options ?? {}, publishOptions });
+            if (enabled && options?.audio && opts.audioThrows) throw opts.audioThrows;
           },
         },
       },
@@ -1165,7 +1170,7 @@ describe("call-engine — forwards the codec publish plan to the SDK", () => {
     expect(stub.screen).toHaveLength(1);
     expect(stub.screen[0]?.publishOptions).toMatchObject({
       videoCodec: "vp9",
-      scalabilityMode: "L3T3_KEY",
+      scalabilityMode: "L1T3",
       backupCodec: { codec: "vp8" },
       screenShareEncoding: { maxBitrate: 5_000_000 },
       degradationPreference: "maintain-resolution",
@@ -1193,6 +1198,28 @@ describe("call-engine — forwards the codec publish plan to the SDK", () => {
     });
     expect(publishOptions.scalabilityMode).toBeUndefined();
     expect(publishOptions.backupCodec).toBeUndefined();
+  });
+
+  test("the screen-audio-unsupported fallback retry still forwards the full codec plan", async () => {
+    // Regression guard: when screen-share audio is unsupported the engine
+    // retries video-only. That retry MUST carry the same VP9 publish plan and
+    // 1440p/detail capture — otherwise the fallback would silently run at
+    // LiveKit's defaults (VP8, 1080p, no SVC).
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine({ videoCodecSupport: capable });
+    const stub = videoRoomStub({ audioThrows: deviceError("NotSupportedError") });
+    (engine as unknown as { room: unknown }).room = stub.room;
+
+    await engine.setScreenShareEnabled(true, { audio: true });
+
+    expect(stub.screen).toHaveLength(2);
+    expect(stub.screen[1]?.options).toMatchObject({ audio: false, contentHint: "detail" });
+    expect(stub.screen[1]?.publishOptions).toMatchObject({
+      videoCodec: "vp9",
+      scalabilityMode: "L1T3",
+      screenShareEncoding: { maxBitrate: 5_000_000 },
+      degradationPreference: "maintain-resolution",
+    });
   });
 });
 

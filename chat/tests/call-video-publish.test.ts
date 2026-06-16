@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { BackupCodecPolicy } from "livekit-client";
 import { videoCodecSupport } from "../src/lib/calls/video-codec/support";
 import { videoPublishPlan } from "../src/lib/calls/video-codec/video-publish";
 
@@ -18,6 +19,14 @@ describe("videoPublishPlan — screen-share on a VP9-capable device", () => {
     const plan = videoPublishPlan({ source: "screen", capability: capable });
     expect(plan.publish.scalabilityMode).toMatch(/^L\d+T\d+/);
     expect(plan.publish.backupCodec).toEqual({ codec: "vp8" });
+  });
+
+  test("keeps capable viewers on VP9 in a mixed room via multi-codec simulcast", () => {
+    // 'everybody good, capable devices better': the presenter sends VP9 AND
+    // the VP8 backup at once, so a VP8-only (iOS) viewer can't drag capable
+    // viewers down to VP8 the way the default regression policy would.
+    const plan = videoPublishPlan({ source: "screen", capability: capable });
+    expect(plan.publish.backupCodecPolicy).toBe(BackupCodecPolicy.SIMULCAST);
   });
 
   test("raises the focal-stream bitrate ceiling (~5 Mbps top layer) at a 24-30 fps target", () => {

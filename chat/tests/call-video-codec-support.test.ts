@@ -33,6 +33,12 @@ describe("videoCodecSupport — which codecs this device can publish", () => {
     if (!support.vp9.available) expect(support.vp9.reason).toMatch(/decode.*vp9/i);
   });
 
+  test("the baseline VP8 also reports unavailable-with-reason on a device that lacks it", () => {
+    const support = videoCodecSupport(env({ encode: [], decode: [] }));
+    expect(support.vp8.available).toBe(false);
+    if (!support.vp8.available) expect(support.vp8.reason).toMatch(/encode.*vp8/i);
+  });
+
   test("codec mimeType matching is case-insensitive (browsers report 'video/VP9')", () => {
     const support = videoCodecSupport(env({ encode: ["video/VP8", "video/VP9"], decode: ["video/VP8", "video/VP9"] }));
     expect(support.vp9.available).toBe(true);

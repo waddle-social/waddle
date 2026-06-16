@@ -5,6 +5,7 @@
  * applier. Source-aware so the camera slice reuses the same rails.
  */
 
+import { BackupCodecPolicy } from "livekit-client";
 import type {
   ScalabilityMode,
   ScreenShareCaptureOptions,
@@ -16,13 +17,16 @@ import type { VideoCodecSupport } from "./support";
 type VideoPublishSource = "camera" | "screen";
 
 /**
- * SVC mode for the VP9 screen-share. `L3T3_KEY` is LiveKit's SVC default and
- * the right fit for screen content: three spatial layers let small-tile
- * subscribers pull a lower resolution, and the key-picture prediction makes
- * the upper layers decode from key frames — so they survive lower-layer loss,
- * which matters for crisp text.
+ * SVC mode for the VP9 screen-share: `L1T3` — one spatial layer, three
+ * temporal layers (temporal-only scalability). We state it explicitly to
+ * document the negotiated shape, but note LiveKit *enforces* `L1T3` for any
+ * VP9 SVC screen-share track regardless of what we request: Chrome can't
+ * encode multiple spatial layers for screen content (it collapses the
+ * publish resolution), so spatial SVC (`L3T3*`) is off the table here.
+ * Temporal SVC still buys per-subscriber framerate adaptation and VP9's
+ * efficiency over VP8.
  */
-const SCREEN_SHARE_SVC_MODE: ScalabilityMode = "L3T3_KEY";
+const SCREEN_SHARE_SVC_MODE: ScalabilityMode = "L1T3";
 
 /**
  * Raised focal-stream ceiling for the shared screen. ~5 Mbps on the top SVC
@@ -36,10 +40,16 @@ const SCREEN_SHARE_ENCODING: VideoEncoding = {
 };
 
 /**
- * Capture ceiling for the shared screen: ~1440p. A `max` constraint caps a
- * larger display without upscaling a smaller source (not force-downscaled).
- * `contentHint: "detail"` tells the encoder to favour sharpness over motion
- * smoothness — the right call for text and code.
+ * Capture ceiling for the shared screen: ~1440p (2560×1440, the 16:9 QHD
+ * frame). LiveKit maps `resolution` to an `ideal`/`max` capture constraint,
+ * so it caps a larger display without upscaling a smaller source (not
+ * force-downscaled). `contentHint: "detail"` favours sharpness over motion
+ * smoothness — the right call for text and code. Note this hint only takes
+ * effect on the VP8 fallback path: for the VP9 SVC path LiveKit force-sets
+ * the track's contentHint to `"motion"` (a Chrome screenshare-SVC
+ * workaround), so VP9 screen-share rides the camera-style encode path. We
+ * still request `"detail"` because it is honoured for the VP8 fallback and
+ * harmless for VP9.
  */
 const SCREEN_SHARE_CAPTURE: ScreenShareCaptureOptions = {
   resolution: { width: 2560, height: 1440, frameRate: 30 },
@@ -63,7 +73,14 @@ function screenSharePlan(capability: VideoCodecSupport): VideoPublishPlan {
     ? {
         videoCodec: "vp9",
         scalabilityMode: SCREEN_SHARE_SVC_MODE,
+        // Send VP9 and the VP8 backup at the same time (multi-codec simulcast)
+        // rather than the default regression policy. Under regression a single
+        // VP8-only (iOS) subscriber forces the whole room down to VP8; with
+        // simulcast, capable subscribers keep VP9 — "everybody good, capable
+        // devices better" — at the cost of a second encode on the (already
+        // capability-gated) publisher.
         backupCodec: { codec: "vp8" },
+        backupCodecPolicy: BackupCodecPolicy.SIMULCAST,
       }
     : { videoCodec: "vp8" };
   return {
