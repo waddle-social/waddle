@@ -2,6 +2,8 @@
 
 use jid::BareJid;
 
+use crate::space_identity::SpaceNode;
+
 use super::{DatabaseSpacesMetadataStore, SpaceMetadata, SpacesMetadataStore};
 
 fn space_jid(local: &str) -> BareJid {
@@ -18,8 +20,10 @@ fn metadata(
     created_at: i64,
     updated_at: i64,
 ) -> SpaceMetadata {
+    let space_node = SpaceNode::from(space_jid.node().expect("space node").to_string());
     SpaceMetadata {
         space_jid,
+        space_node,
         name: name.to_string(),
         description: description.map(str::to_string),
         icon_url: icon_url.map(str::to_string),
@@ -54,6 +58,13 @@ async fn upsert_then_get_round_trips_full_row() {
         .expect("get")
         .expect("row present after upsert");
     assert_eq!(fetched, row);
+
+    let fetched_by_node = store
+        .get_by_node(&row.space_node)
+        .await
+        .expect("get_by_node")
+        .expect("row present after upsert");
+    assert_eq!(fetched_by_node, row);
 }
 
 #[tokio::test]
@@ -112,6 +123,34 @@ async fn delete_returns_true_when_row_present() {
     assert!(removed, "delete returns true when a row was removed");
     let after = store.get(&row.space_jid).await.expect("get");
     assert!(after.is_none(), "row absent after delete");
+}
+
+#[tokio::test]
+async fn delete_by_node_returns_true_when_row_present() {
+    let store = fresh_store().await;
+    let row = metadata(
+        space_jid("ops"),
+        "Ops",
+        None,
+        None,
+        1_700_000_000,
+        1_700_000_000,
+    );
+    store.upsert(&row).await.expect("upsert");
+
+    let removed = store
+        .delete_by_node(&row.space_node)
+        .await
+        .expect("delete_by_node");
+    assert!(
+        removed,
+        "delete_by_node returns true when a row was removed"
+    );
+    let after = store
+        .get_by_node(&row.space_node)
+        .await
+        .expect("get_by_node");
+    assert!(after.is_none(), "row absent after delete_by_node");
 }
 
 #[tokio::test]

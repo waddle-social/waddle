@@ -491,6 +491,7 @@ export type WasmSendMessageOutcome =
 
 export interface WasmAdminSpaceListEntry {
   space_jid: string;
+  space_node: string;
   name: string;
   description?: string | null;
   icon_url?: string | null;
@@ -505,6 +506,7 @@ export interface WasmAdminSpacesListResult {
 
 export interface WasmAdminSpaceRef {
   space_jid: string;
+  space_node: string;
   name: string;
   description?: string | null;
   icon_url?: string | null;

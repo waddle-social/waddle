@@ -26,6 +26,7 @@ const isLoadingMore = ref(false);
 const errorMessage = ref("");
 const prefix = ref("");
 const debouncedPrefix = ref("");
+const activePrefix = ref("");
 const showCreate = ref(false);
 const isSubmitting = ref(false);
 const selected = ref<WasmAdminSpaceListEntry | null>(null);
@@ -36,6 +37,8 @@ async function fetchFirstPage(currentPrefix: string): Promise<void> {
   if (!props.xmppClient) return;
   const localRequestId = ++requestId;
   isLoading.value = true;
+  isLoadingMore.value = false;
+  cursor.value = null;
   errorMessage.value = "";
   try {
     const page: WasmAdminSpacesListResult = await props.xmppClient.adminSpacesList({
@@ -43,6 +46,7 @@ async function fetchFirstPage(currentPrefix: string): Promise<void> {
       pageSize: PAGE_SIZE,
     });
     if (requestId !== localRequestId) return;
+    activePrefix.value = currentPrefix;
     entries.value = page.entries;
     cursor.value = page.next_cursor ?? null;
   } catch (err: unknown) {
@@ -54,17 +58,28 @@ async function fetchFirstPage(currentPrefix: string): Promise<void> {
 }
 
 async function loadMore(): Promise<void> {
-  if (!props.xmppClient || !cursor.value || isLoadingMore.value) return;
+  if (!props.xmppClient || !cursor.value || isLoading.value || isLoadingMore.value) return;
+  const localRequestId = requestId;
+  const afterCursor = cursor.value;
+  const currentPrefix = activePrefix.value;
   isLoadingMore.value = true;
   try {
     const page = await props.xmppClient.adminSpacesList({
-      prefix: prefix.value || null,
+      prefix: currentPrefix || null,
       pageSize: PAGE_SIZE,
-      afterCursor: cursor.value,
+      afterCursor,
     });
+    if (
+      requestId !== localRequestId ||
+      cursor.value !== afterCursor ||
+      activePrefix.value !== currentPrefix
+    ) {
+      return;
+    }
     entries.value = entries.value.concat(page.entries);
     cursor.value = page.next_cursor ?? null;
   } catch (err: unknown) {
+    if (requestId !== localRequestId) return;
     errorMessage.value = err instanceof Error ? err.message : "Failed to load more spaces.";
   } finally {
     isLoadingMore.value = false;
@@ -167,7 +182,7 @@ const showEmptyState = computed(
     </div>
 
     <ul v-else-if="entries.length > 0" class="flex flex-col gap-2" role="list">
-      <li v-for="entry in entries" :key="entry.space_jid">
+      <li v-for="entry in entries" :key="entry.space_node">
         <button
           type="button"
           class="w-full flex items-center justify-between gap-3 rounded-lg border border-border bg-card px-3 py-2.5 text-left hover:bg-muted transition-colors"
@@ -196,7 +211,7 @@ const showEmptyState = computed(
       <button
         type="button"
         class="chat-action-button chat-action-button--secondary type-control"
-        :disabled="isLoadingMore"
+        :disabled="isLoadingMore || isLoading"
         @click="loadMore"
       >
         {{ isLoadingMore ? "Loading…" : "Load more" }}

@@ -3,6 +3,7 @@ use super::permissions::{
 };
 use super::pubsub_helpers::{is_pep_self_or_to, spaces_service_bare_jid};
 use super::*;
+use crate::space_identity::{space_jid_for_node, SpaceNode};
 
 fn is_pubsub_attachment_or_summary_node(node: &str) -> bool {
     node.starts_with(&format!(
@@ -40,6 +41,10 @@ pub(super) async fn handle_pubsub_admin_request(
                     let Ok(spaces_jid) = spaces_service_bare_jid(spaces_domain) else {
                         return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
                     };
+                    let space_node = SpaceNode::from(node.as_str());
+                    if space_jid_for_node(&spaces_jid, &space_node).is_none() {
+                        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::BadRequest))];
+                    }
                     match state
                         .deps
                         .protocol

@@ -2,6 +2,8 @@
 
 use jid::BareJid;
 
+use crate::space_identity::SpaceNode;
+
 use super::{ChannelSpaceLink, ChannelSpaceLinkStore, DatabaseChannelSpaceLinkStore};
 
 fn channel_jid(local: &str) -> BareJid {
@@ -17,9 +19,11 @@ fn space_jid(local: &str) -> BareJid {
 }
 
 fn link(channel: BareJid, space: BareJid, created_at: i64) -> ChannelSpaceLink {
+    let space_node = SpaceNode::from(space.node().expect("space node").to_string());
     ChannelSpaceLink {
         channel_jid: channel,
         space_jid: space,
+        space_node,
         created_at,
     }
 }
@@ -55,6 +59,7 @@ async fn set_preserves_created_at_when_relinking_channel() {
 
     let relinked = ChannelSpaceLink {
         space_jid: space_jid("design"),
+        space_node: SpaceNode::from("design"),
         created_at: 1_700_000_500,
         ..initial.clone()
     };
@@ -66,6 +71,7 @@ async fn set_preserves_created_at_when_relinking_channel() {
         .expect("get")
         .expect("row present after relink");
     assert_eq!(fetched.space_jid, space_jid("design"));
+    assert_eq!(fetched.space_node, "design");
     assert_eq!(
         fetched.created_at, 1_700_000_000,
         "created_at preserved across relink"
@@ -122,20 +128,33 @@ async fn list_channels_in_space_filters_by_space_and_orders_by_created_at() {
         .expect("list eng");
     assert_eq!(
         in_eng,
-        vec![alpha.channel_jid, beta.channel_jid, gamma.channel_jid]
+        vec![
+            alpha.channel_jid.clone(),
+            beta.channel_jid.clone(),
+            gamma.channel_jid.clone()
+        ]
     );
 
     let in_design = store
         .list_channels_in_space(&space_jid("design"))
         .await
         .expect("list design");
-    assert_eq!(in_design, vec![unrelated.channel_jid]);
+    assert_eq!(in_design, vec![unrelated.channel_jid.clone()]);
 
     let in_empty = store
         .list_channels_in_space(&space_jid("ghost"))
         .await
         .expect("list ghost");
     assert!(in_empty.is_empty());
+
+    let in_eng_node = store
+        .list_channels_in_space_node(&SpaceNode::from("eng"))
+        .await
+        .expect("list eng node");
+    assert_eq!(
+        in_eng_node,
+        vec![alpha.channel_jid, beta.channel_jid, gamma.channel_jid]
+    );
 }
 
 #[tokio::test]

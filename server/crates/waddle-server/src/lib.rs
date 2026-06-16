@@ -24,6 +24,7 @@ pub mod room_policy;
 pub mod server;
 pub mod sm_persistence;
 pub mod sm_promotion;
+pub mod space_identity;
 pub mod spaces_metadata;
 pub mod spaces_pubsub_seed;
 pub mod storage;

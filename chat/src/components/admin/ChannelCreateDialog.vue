@@ -9,33 +9,35 @@ const open = defineModel<boolean>("open", { required: true });
 
 const props = defineProps<{
   isSubmitting?: boolean;
-  spaces?: { space_jid: string; name: string }[];
+  spaces?: { space_jid: string; space_node: string; name: string }[];
 }>();
 
 const emit = defineEmits<{
-  submit: [payload: { name: string; topic?: string | null; spaceJid?: string | null; isPublic?: boolean | null }];
+  submit: [payload: { name: string; topic?: string | null; spaceJid?: string | null; spaceNode?: string | null; isPublic?: boolean | null }];
 }>();
 
 const name = ref("");
 const topic = ref("");
-const spaceJid = ref("");
+const spaceNode = ref("");
 const isPublic = ref(true);
 
 watch(open, (isOpen) => {
   if (isOpen) {
     name.value = "";
     topic.value = "";
-    spaceJid.value = "";
+    spaceNode.value = "";
     isPublic.value = true;
   }
 });
 
 function onSubmit() {
   if (!name.value.trim() || props.isSubmitting) return;
+  const selectedSpace = props.spaces?.find((space) => space.space_node === spaceNode.value);
   emit("submit", {
     name: name.value.trim(),
     topic: topic.value.trim() || null,
-    spaceJid: spaceJid.value || null,
+    spaceJid: selectedSpace?.space_jid ?? null,
+    spaceNode: selectedSpace?.space_node ?? null,
     isPublic: isPublic.value,
   });
 }
@@ -79,9 +81,9 @@ function onSubmit() {
       </label>
       <label v-if="spaces && spaces.length > 0" class="flex flex-col gap-1">
         <span class="type-section-label text-muted-foreground">Space (optional)</span>
-        <select v-model="spaceJid" class="chat-field-control type-field">
+        <select v-model="spaceNode" class="chat-field-control type-field">
           <option value="">No space</option>
-          <option v-for="s in spaces" :key="s.space_jid" :value="s.space_jid">{{ s.name }}</option>
+          <option v-for="s in spaces" :key="s.space_node" :value="s.space_node">{{ s.name }}</option>
         </select>
       </label>
       <div class="flex flex-col gap-1.5 rounded-lg border border-border bg-muted/30 px-3 py-2.5">

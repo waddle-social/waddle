@@ -8,10 +8,11 @@ use async_trait::async_trait;
 use jid::BareJid;
 
 use super::{SpaceMetadata, SpacesMetadataError, SpacesMetadataStore};
+use crate::space_identity::SpaceNode;
 
 #[derive(Debug, Default)]
 pub struct InMemorySpacesMetadataStore {
-    rows: Mutex<HashMap<BareJid, SpaceMetadata>>,
+    rows: Mutex<HashMap<String, SpaceMetadata>>,
 }
 
 impl InMemorySpacesMetadataStore {
@@ -27,7 +28,21 @@ impl SpacesMetadataStore for InMemorySpacesMetadataStore {
             .rows
             .lock()
             .map_err(|error| SpacesMetadataError::Storage(error.to_string()))?;
-        Ok(guard.get(space_jid).cloned())
+        Ok(guard
+            .values()
+            .find(|row| &row.space_jid == space_jid)
+            .cloned())
+    }
+
+    async fn get_by_node(
+        &self,
+        space_node: &SpaceNode,
+    ) -> Result<Option<SpaceMetadata>, SpacesMetadataError> {
+        let guard = self
+            .rows
+            .lock()
+            .map_err(|error| SpacesMetadataError::Storage(error.to_string()))?;
+        Ok(guard.get(space_node.as_str()).cloned())
     }
 
     async fn upsert(&self, metadata: &SpaceMetadata) -> Result<(), SpacesMetadataError> {
@@ -38,11 +53,11 @@ impl SpacesMetadataStore for InMemorySpacesMetadataStore {
         // Preserve created_at on an existing row so callers can supply
         // it freely on `upsert`; the trait contract says created_at is
         // assigned at first insert.
-        match guard.get(&metadata.space_jid) {
+        match guard.get(metadata.space_node.as_str()) {
             Some(existing) => {
                 let preserved_created_at = existing.created_at;
                 guard.insert(
-                    metadata.space_jid.clone(),
+                    metadata.space_node.to_string(),
                     SpaceMetadata {
                         created_at: preserved_created_at,
                         ..metadata.clone()
@@ -50,7 +65,7 @@ impl SpacesMetadataStore for InMemorySpacesMetadataStore {
                 );
             }
             None => {
-                guard.insert(metadata.space_jid.clone(), metadata.clone());
+                guard.insert(metadata.space_node.to_string(), metadata.clone());
             }
         }
         Ok(())
@@ -61,7 +76,18 @@ impl SpacesMetadataStore for InMemorySpacesMetadataStore {
             .rows
             .lock()
             .map_err(|error| SpacesMetadataError::Storage(error.to_string()))?;
-        Ok(guard.remove(space_jid).is_some())
+        let key = guard
+            .iter()
+            .find_map(|(key, row)| (&row.space_jid == space_jid).then(|| key.clone()));
+        Ok(key.and_then(|key| guard.remove(&key)).is_some())
+    }
+
+    async fn delete_by_node(&self, space_node: &SpaceNode) -> Result<bool, SpacesMetadataError> {
+        let mut guard = self
+            .rows
+            .lock()
+            .map_err(|error| SpacesMetadataError::Storage(error.to_string()))?;
+        Ok(guard.remove(space_node.as_str()).is_some())
     }
 
     async fn list_all(&self) -> Result<Vec<SpaceMetadata>, SpacesMetadataError> {
@@ -73,7 +99,7 @@ impl SpacesMetadataStore for InMemorySpacesMetadataStore {
         rows.sort_by(|a, b| {
             a.created_at
                 .cmp(&b.created_at)
-                .then_with(|| a.space_jid.cmp(&b.space_jid))
+                .then_with(|| a.space_node.cmp(&b.space_node))
         });
         Ok(rows)
     }

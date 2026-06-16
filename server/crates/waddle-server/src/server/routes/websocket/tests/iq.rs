@@ -2301,6 +2301,7 @@ async fn handle_iq_pubsub_items_spaces_node_backfills_linked_channel_bookmarks()
         .set(&crate::channel_space_links::ChannelSpaceLink {
             channel_jid: channel_jid.clone(),
             space_jid: "team@spaces.example.com".parse().expect("space jid"),
+            space_node: crate::space_identity::SpaceNode::from("team"),
             created_at: 0,
         })
         .await
@@ -2408,6 +2409,7 @@ async fn handle_iq_pubsub_items_spaces_node_requires_authorization_before_backfi
             space_jid: "private-team@spaces.example.com"
                 .parse()
                 .expect("space jid"),
+            space_node: crate::space_identity::SpaceNode::from("private-team"),
             created_at: 0,
         })
         .await
@@ -2770,6 +2772,7 @@ async fn admin_channels_delete_retracts_duplicate_space_bookmarks() {
             space_jid: format!("alpha@{}", state.deps.app_state.spaces_jid.domain())
                 .parse()
                 .expect("space jid"),
+            space_node: crate::space_identity::SpaceNode::from("alpha"),
             created_at: 0,
         })
         .await
@@ -2893,6 +2896,7 @@ async fn admin_channels_update_retracts_duplicate_space_bookmarks() {
             space_jid: format!("alpha@{}", state.deps.app_state.spaces_jid.domain())
                 .parse()
                 .expect("space jid"),
+            space_node: crate::space_identity::SpaceNode::from("alpha"),
             created_at: 0,
         })
         .await
@@ -3107,6 +3111,7 @@ async fn admin_spaces_delete_clears_channel_parent_tuple() {
             space_jid: format!("alpha@{}", spaces_jid.domain())
                 .parse()
                 .expect("space jid"),
+            space_node: crate::space_identity::SpaceNode::from("alpha"),
             created_at: 0,
         })
         .await
@@ -3277,7 +3282,7 @@ async fn spaces_publish_and_retract_sync_channel_space_link_projection() {
 }
 
 #[tokio::test]
-async fn spaces_publish_accepts_non_jid_node_and_syncs_parent_tuple() {
+async fn spaces_publish_accepts_escaped_space_node_and_syncs_link_projection() {
     let state = create_test_websocket_state().await;
     let conn = state
         .deps
@@ -3334,17 +3339,15 @@ async fn spaces_publish_accepts_non_jid_node_and_syncs_parent_tuple() {
         publish_response.contains("type='result'") || publish_response.contains("type=\"result\""),
         "spaces publish should accept non-JID node ids: {publish_response}"
     );
-    assert!(
-        state
-            .deps
-            .app_state
-            .channel_space_link_store
-            .get(&room_jid)
-            .await
-            .expect("channel-space link")
-            .is_none(),
-        "non-JID Space nodes should not be forced into the BareJid link projection"
-    );
+    let link = state
+        .deps
+        .app_state
+        .channel_space_link_store
+        .get(&room_jid)
+        .await
+        .expect("channel-space link")
+        .expect("escaped Space node should sync durable channel-space link");
+    assert_eq!(link.space_node, "music/A");
     assert!(
         channel_view_allowed_for_test(state.as_ref(), "hierarchical", &viewer.user_jid).await,
         "publish should still write the channel parent tuple for non-JID Space nodes"
@@ -3374,6 +3377,17 @@ async fn spaces_publish_accepts_non_jid_node_and_syncs_parent_tuple() {
     assert!(
         !channel_view_allowed_for_test(state.as_ref(), "hierarchical", &viewer.user_jid).await,
         "retract should clear the channel parent tuple for non-JID Space nodes"
+    );
+    assert!(
+        state
+            .deps
+            .app_state
+            .channel_space_link_store
+            .get(&room_jid)
+            .await
+            .expect("channel-space link after retract")
+            .is_none(),
+        "retract should clear the matching exact-node channel-space link"
     );
 }
 

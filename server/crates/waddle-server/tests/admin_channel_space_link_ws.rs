@@ -18,12 +18,15 @@
 mod ws_common;
 
 use tokio::sync::Mutex;
+use waddle_xmpp::xep::xep0106::escape_node;
 use ws_common::{TestServer, WsXmppClient};
 
 const DOMAIN: &str = "localhost";
 const ADMIN: &str = "admin";
 const NS_COMMANDS: &str = "http://jabber.org/protocol/commands";
 const NS_DATA: &str = "jabber:x:data";
+const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
+const SPACES_JID: &str = "spaces.localhost";
 
 const NODE_SPACES_CREATE: &str = "urn:waddle:admin:spaces:create:0";
 const NODE_SPACES_DELETE: &str = "urn:waddle:admin:spaces:delete:0";
@@ -127,6 +130,33 @@ async fn create_channel_in_space(
     extract_field(&resp, "channel_jid").expect("channel_jid in channels:create response")
 }
 
+async fn create_channel_in_space_node(
+    admin: &mut WsXmppClient,
+    name: &str,
+    space_jid: &str,
+    space_node: &str,
+    id: &str,
+) -> String {
+    let extra = format!(
+        "{}{}{}",
+        text_field("name", name),
+        text_field("space_jid", space_jid),
+        text_field("space_node", space_node)
+    );
+    let resp = send_command(
+        admin,
+        NODE_CHANNELS_CREATE,
+        id,
+        &submit_form(NODE_CHANNELS_CREATE, &extra),
+    )
+    .await;
+    assert!(
+        is_result(&resp),
+        "expected channels:create result, got: {resp}"
+    );
+    extract_field(&resp, "channel_jid").expect("channel_jid in channels:create response")
+}
+
 async fn update_channel_name(admin: &mut WsXmppClient, channel_jid: &str, name: &str, id: &str) {
     let extra = format!(
         "{}{}",
@@ -163,6 +193,52 @@ async fn list_channels(admin: &mut WsXmppClient, space_jid: Option<&str>, id: &s
         "expected channels:list result, got: {resp}"
     );
     resp
+}
+
+async fn list_channels_in_space_node(
+    admin: &mut WsXmppClient,
+    space_jid: &str,
+    space_node: &str,
+    id: &str,
+) -> String {
+    let extra = format!(
+        "{}{}",
+        text_field("space_jid", space_jid),
+        text_field("space_node", space_node)
+    );
+    let resp = send_command(
+        admin,
+        NODE_CHANNELS_LIST,
+        id,
+        &submit_form(NODE_CHANNELS_LIST, &extra),
+    )
+    .await;
+    assert!(
+        is_result(&resp),
+        "expected channels:list result, got: {resp}"
+    );
+    resp
+}
+
+async fn create_pubsub_space_node(admin: &mut WsXmppClient, node: &str, id: &str) {
+    admin
+        .send(&format!(
+            r#"<iq type="set" id="{id}" to="{SPACES_JID}"><pubsub xmlns="{NS_PUBSUB}"><create node="{node}"/></pubsub></iq>"#
+        ))
+        .await
+        .expect("send pubsub create");
+    let resp = admin
+        .recv_matching(|frame| {
+            frame.contains("<iq")
+                && (frame.contains(&format!(r#"id='{id}'"#))
+                    || frame.contains(&format!(r#"id="{id}""#)))
+        })
+        .await
+        .expect("pubsub create response");
+    assert!(
+        is_result(&resp),
+        "expected pubsub create result, got: {resp}"
+    );
 }
 
 async fn space_pubsub_items(admin: &mut WsXmppClient, space_jid: &str, id: &str) -> String {
@@ -353,6 +429,42 @@ async fn channels_list_space_jid_filter_narrows_results_and_survives_lifecycle()
     assert!(
         !final_unfiltered.contains(&channel_b),
         "cascade-deleted channel B '{channel_b}' should be absent from unfiltered list, got: {final_unfiltered}"
+    );
+
+    let _ = admin.close().await;
+}
+
+#[tokio::test]
+async fn channels_create_and_list_accept_exact_space_node_for_escaped_projection() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut admin = admin_client(&server, "admin-csl-node-1").await;
+
+    let space_node = "music/A";
+    create_pubsub_space_node(&mut admin, space_node, "csl-node-create-space").await;
+    let space_jid = format!("{}@{SPACES_JID}", escape_node(space_node));
+
+    let channel = create_channel_in_space_node(
+        &mut admin,
+        "music-room",
+        &space_jid,
+        space_node,
+        "csl-node-create-channel",
+    )
+    .await;
+
+    let filtered =
+        list_channels_in_space_node(&mut admin, &space_jid, space_node, "csl-node-list-channels")
+            .await;
+    assert!(
+        filtered.contains(&channel),
+        "exact space_node filter should include channel '{channel}', got: {filtered}"
+    );
+
+    let items = client_send_pubsub_items(&mut admin, space_node, "csl-node-pubsub-items").await;
+    assert!(
+        items.contains(&channel),
+        "space PubSub node '{space_node}' should include channel bookmark '{channel}', got: {items}"
     );
 
     let _ = admin.close().await;

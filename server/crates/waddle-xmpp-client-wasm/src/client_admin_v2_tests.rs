@@ -19,6 +19,7 @@ fn parse_spaces_list_handles_empty_form() {
 fn parse_spaces_list_extracts_counts_and_cursor() {
     let item = r#"<item>
             <field var="space_jid"><value>eng@spaces.localhost</value></field>
+            <field var="space_node"><value>eng</value></field>
             <field var="name"><value>Engineering</value></field>
             <field var="description"><value>Hack stuff</value></field>
             <field var="icon_url"><value></value></field>
@@ -31,6 +32,7 @@ fn parse_spaces_list_extracts_counts_and_cursor() {
     assert_eq!(result.entries.len(), 1);
     let entry = &result.entries[0];
     assert_eq!(entry.space_jid, "eng@spaces.localhost");
+    assert_eq!(entry.space_node, "eng");
     assert_eq!(entry.name, "Engineering");
     assert_eq!(entry.description.as_deref(), Some("Hack stuff"));
     assert!(entry.icon_url.is_none());
@@ -42,11 +44,13 @@ fn parse_spaces_list_extracts_counts_and_cursor() {
 #[test]
 fn parse_space_ref_round_trip() {
     let inner = r#"<field var="space_jid"><value>eng@spaces.localhost</value></field>
+            <field var="space_node"><value>eng</value></field>
             <field var="name"><value>Engineering</value></field>
             <field var="description"><value>Hack stuff</value></field>"#;
     let iq = wrap_response(NS_ADMIN_SPACES_CREATE, inner);
     let space = parse_space_ref_result(&iq).expect("ok");
     assert_eq!(space.space_jid, "eng@spaces.localhost");
+    assert_eq!(space.space_node, "eng");
     assert_eq!(space.name, "Engineering");
     assert_eq!(space.description.as_deref(), Some("Hack stuff"));
     assert!(space.icon_url.is_none());
@@ -188,6 +192,7 @@ fn build_channels_create_iq_includes_all_optional_fields() {
         name: "general".to_string(),
         topic: Some("All things".to_string()),
         space_jid: Some("eng@spaces.localhost".to_string()),
+        space_node: Some("eng".to_string()),
         is_public: Some(true),
         members_only: Some(true),
     };
@@ -204,6 +209,7 @@ fn build_channels_create_iq_includes_all_optional_fields() {
     assert!(var_names.contains(&"name"));
     assert!(var_names.contains(&"topic"));
     assert!(var_names.contains(&"space_jid"));
+    assert!(var_names.contains(&"space_node"));
     assert!(var_names.contains(&"is_public"));
     assert!(var_names.contains(&"members_only"));
 }
@@ -212,6 +218,7 @@ fn build_channels_create_iq_includes_all_optional_fields() {
 fn build_spaces_delete_iq_carries_confirm() {
     let args = WaddleAdminSpacesDeleteArgs {
         space_jid: "eng@spaces.localhost".to_string(),
+        space_node: Some("eng".to_string()),
         confirm: "yes".to_string(),
     };
     let iq = build_spaces_delete_iq("localhost", &args);
@@ -225,4 +232,10 @@ fn build_spaces_delete_iq_carries_confirm() {
         .find_map(|f| f.get_child("value", NS_XDATA).map(|v| v.text()))
         .expect("confirm field");
     assert_eq!(confirm_value, "yes");
+    let node_value = form
+        .children()
+        .filter(|c| c.name() == "field" && c.attr("var") == Some("space_node"))
+        .find_map(|f| f.get_child("value", NS_XDATA).map(|v| v.text()))
+        .expect("space_node field");
+    assert_eq!(node_value, "eng");
 }

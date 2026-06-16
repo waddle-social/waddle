@@ -22,13 +22,14 @@
 //!
 //! The wire vocabulary for space membership (`owner`/`admin`/`member`) maps
 //! onto XEP-0060 PubSub affiliations on the space's PubSub node (the space
-//! JID is owned by [`crate::server::AppState::spaces_jid`] and the node name
-//! is the space's localpart). `owner` ↔ [`waddle_xmpp_core::pubsub::Affiliation::Owner`],
-//! `admin` ↔ [`waddle_xmpp_core::pubsub::Affiliation::Publisher`] (the
-//! highest read+write tier short of Owner), `member` ↔
+//! JID is owned by [`crate::server::AppState::spaces_jid`] and the node name is
+//! projected through the space JID's XEP-0106-escaped localpart). `owner` ↔
+//! [`waddle_xmpp_core::pubsub::Affiliation::Owner`], `admin` ↔
+//! [`waddle_xmpp_core::pubsub::Affiliation::Publisher`] (the highest read+write
+//! tier short of Owner), `member` ↔
 //! [`waddle_xmpp_core::pubsub::Affiliation::Member`], `none` removes the row.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use jid::BareJid;
 use waddle_xmpp::commands::{CommandContext, CommandResult};
@@ -45,6 +46,9 @@ use crate::permissions::{
     WriteTuple,
 };
 use crate::server::AppState;
+use crate::space_identity::{
+    canonical_space_projection, space_jid_for_node, SpaceNode, SpaceProjectionError,
+};
 use crate::spaces_metadata::{SpaceMetadata, SpacesMetadataError};
 
 // ---------------------------------------------------------------------------
@@ -152,6 +156,7 @@ pub struct SpacesListArgs {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpaceListEntry {
     pub space_jid: BareJid,
+    pub space_node: SpaceNode,
     pub name: String,
     pub description: Option<String>,
     pub icon_url: Option<String>,
@@ -175,6 +180,7 @@ pub struct SpacesCreateArgs {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpaceRef {
     pub space_jid: BareJid,
+    pub space_node: SpaceNode,
     pub name: String,
     pub description: Option<String>,
     pub icon_url: Option<String>,
@@ -183,6 +189,7 @@ pub struct SpaceRef {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpacesUpdateArgs {
     pub space_jid: BareJid,
+    pub space_node: Option<SpaceNode>,
     pub name: Option<String>,
     pub description: Option<String>,
     pub icon_url: Option<String>,
@@ -191,12 +198,14 @@ pub struct SpacesUpdateArgs {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpacesDeleteArgs {
     pub space_jid: BareJid,
+    pub space_node: Option<SpaceNode>,
     pub confirm: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpacesMembersArgs {
     pub space_jid: BareJid,
+    pub space_node: Option<SpaceNode>,
     pub page_size: u32,
     pub after_cursor: Option<String>,
 }
@@ -216,6 +225,7 @@ pub struct SpacesMembersResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpacesSetRoleArgs {
     pub space_jid: BareJid,
+    pub space_node: Option<SpaceNode>,
     pub member_jid: BareJid,
     pub role: SpaceRole,
 }
@@ -347,7 +357,7 @@ async fn handle_create(ctx: CommandContext, state: Arc<AppState>) -> CommandResu
     };
     match run_create(&state, &args).await {
         Ok(space) => CommandResult::Completed {
-            form: Some(build_space_form(&space)),
+            form: Some(build_space_form(NODE_CREATE, &space)),
             notes: vec![],
         },
         Err(result) => *result,
@@ -364,7 +374,7 @@ async fn handle_update(ctx: CommandContext, state: Arc<AppState>) -> CommandResu
     };
     match run_update(&state, &args).await {
         Ok(space) => CommandResult::Completed {
-            form: Some(build_space_form(&space)),
+            form: Some(build_space_form(NODE_UPDATE, &space)),
             notes: vec![],
         },
         Err(result) => *result,
@@ -498,6 +508,7 @@ pub fn parse_create_args(form: Option<&DataForm>) -> Result<SpacesCreateArgs, St
 pub fn parse_update_args(form: Option<&DataForm>) -> Result<SpacesUpdateArgs, String> {
     let form = form.ok_or_else(|| "spaces:update requires an args form".to_string())?;
     let space_jid = parse_required_bare_jid(form, "space_jid")?;
+    let space_node = parse_optional_text(form, "space_node").map(SpaceNode::from);
     let name = parse_optional_text(form, "name");
     if let Some(ref name) = name {
         validate_name(name)?;
@@ -506,6 +517,7 @@ pub fn parse_update_args(form: Option<&DataForm>) -> Result<SpacesUpdateArgs, St
     let icon_url = parse_optional_text(form, "icon_url");
     Ok(SpacesUpdateArgs {
         space_jid,
+        space_node,
         name,
         description,
         icon_url,
@@ -515,20 +527,27 @@ pub fn parse_update_args(form: Option<&DataForm>) -> Result<SpacesUpdateArgs, St
 pub fn parse_delete_args(form: Option<&DataForm>) -> Result<SpacesDeleteArgs, String> {
     let form = form.ok_or_else(|| "spaces:delete requires an args form".to_string())?;
     let space_jid = parse_required_bare_jid(form, "space_jid")?;
+    let space_node = parse_optional_text(form, "space_node").map(SpaceNode::from);
     let confirm = parse_required_text(form, "confirm")?;
     if confirm != "yes" {
         return Err("spaces:delete requires confirm='yes'".to_string());
     }
-    Ok(SpacesDeleteArgs { space_jid, confirm })
+    Ok(SpacesDeleteArgs {
+        space_jid,
+        space_node,
+        confirm,
+    })
 }
 
 pub fn parse_members_args(form: Option<&DataForm>) -> Result<SpacesMembersArgs, String> {
     let form = form.ok_or_else(|| "spaces:members requires an args form".to_string())?;
     let space_jid = parse_required_bare_jid(form, "space_jid")?;
+    let space_node = parse_optional_text(form, "space_node").map(SpaceNode::from);
     let page_size = parse_page_size(form)?;
     let after_cursor = parse_optional_text(form, "after_cursor");
     Ok(SpacesMembersArgs {
         space_jid,
+        space_node,
         page_size,
         after_cursor,
     })
@@ -537,11 +556,13 @@ pub fn parse_members_args(form: Option<&DataForm>) -> Result<SpacesMembersArgs, 
 pub fn parse_set_role_args(form: Option<&DataForm>) -> Result<SpacesSetRoleArgs, String> {
     let form = form.ok_or_else(|| "spaces:set-role requires an args form".to_string())?;
     let space_jid = parse_required_bare_jid(form, "space_jid")?;
+    let space_node = parse_optional_text(form, "space_node").map(SpaceNode::from);
     let member_jid = parse_required_bare_jid(form, "member_jid")?;
     let role_raw = parse_required_text(form, "role")?;
     let role = SpaceRole::parse(&role_raw)?;
     Ok(SpacesSetRoleArgs {
         space_jid,
+        space_node,
         member_jid,
         role,
     })
@@ -568,44 +589,95 @@ fn now_unix_seconds() -> i64 {
     chrono::Utc::now().timestamp()
 }
 
-fn space_node_name(space_jid: &BareJid) -> Option<String> {
-    space_jid.node().map(|n| n.to_string())
+fn canonical_space_jid(
+    spaces_jid: &BareJid,
+    space_jid: &BareJid,
+    space_node: Option<&SpaceNode>,
+) -> Result<(SpaceNode, BareJid), AdminErr> {
+    canonical_space_projection(spaces_jid, space_jid, space_node).map_err(|error| match error {
+        SpaceProjectionError::WrongDomain => {
+            bad_request("space_jid must belong to the spaces service")
+        }
+        SpaceProjectionError::MissingLocalpart => bad_request("space_jid must have a localpart"),
+        SpaceProjectionError::InvalidNode(node) => {
+            internal_err(format!("invalid space node '{node}'"))
+        }
+        SpaceProjectionError::MismatchedProjection => {
+            bad_request("space_jid must match the space_node projection")
+        }
+    })
+}
+
+fn default_space_name(node: &SpaceNode) -> String {
+    if node.as_str() == "general" {
+        "General".to_string()
+    } else {
+        node.to_string()
+    }
 }
 
 async fn run_list(state: &AppState, args: &SpacesListArgs) -> Result<SpacesListResult, AdminErr> {
-    let mut metadata_rows = state
+    let metadata_by_node: HashMap<SpaceNode, SpaceMetadata> = state
         .spaces_metadata_store
         .list_all()
         .await
-        .map_err(map_metadata_err)?;
+        .map_err(map_metadata_err)?
+        .into_iter()
+        .map(|row| (row.space_node.clone(), row))
+        .collect();
 
-    if let Some(prefix) = args.prefix.as_deref() {
-        metadata_rows.retain(|row| row.name.to_lowercase().starts_with(prefix));
-    }
+    let nodes = state
+        .pubsub_storage
+        .list_nodes(&state.spaces_jid)
+        .await
+        .map_err(|e| internal_err(format!("pubsub list_nodes failed: {e}")))?;
 
+    let mut rows: Vec<SpaceListEntry> = nodes
+        .into_iter()
+        .filter_map(|node| {
+            let node = SpaceNode::from(node);
+            let space_jid = space_jid_for_node(&state.spaces_jid, &node)?;
+            let metadata = metadata_by_node.get(&node);
+            let name = metadata
+                .map(|row| row.name.clone())
+                .unwrap_or_else(|| default_space_name(&node));
+            if args
+                .prefix
+                .as_deref()
+                .is_some_and(|prefix| !name.to_lowercase().starts_with(prefix))
+            {
+                return None;
+            }
+            Some(SpaceListEntry {
+                space_jid,
+                space_node: node,
+                name,
+                description: metadata.and_then(|row| row.description.clone()),
+                icon_url: metadata.and_then(|row| row.icon_url.clone()),
+                channel_count: 0,
+                member_count: 0,
+            })
+        })
+        .collect();
+
+    rows.sort_by(|a, b| a.space_node.cmp(&b.space_node));
     if let Some(cursor) = args.after_cursor.as_deref() {
-        metadata_rows.retain(|row| row.space_jid.to_string().as_str() > cursor);
+        rows.retain(|row| row.space_node.as_str() > cursor);
     }
-    metadata_rows.sort_by(|a, b| a.space_jid.cmp(&b.space_jid));
 
     let limit = args.page_size as usize;
-    let total = metadata_rows.len();
+    let total = rows.len();
     let mut entries = Vec::with_capacity(limit.min(total));
 
-    for row in metadata_rows.iter().take(limit) {
-        let (channel_count, member_count) = counts_for_space(state, &row.space_jid).await?;
-        entries.push(SpaceListEntry {
-            space_jid: row.space_jid.clone(),
-            name: row.name.clone(),
-            description: row.description.clone(),
-            icon_url: row.icon_url.clone(),
-            channel_count,
-            member_count,
-        });
+    for mut row in rows.into_iter().take(limit) {
+        let (channel_count, member_count) = counts_for_space(state, &row.space_node).await?;
+        row.channel_count = channel_count;
+        row.member_count = member_count;
+        entries.push(row);
     }
 
     let next_cursor = if total > limit {
-        entries.last().map(|entry| entry.space_jid.to_string())
+        entries.last().map(|entry| entry.space_node.to_string())
     } else {
         None
     };
@@ -615,18 +687,15 @@ async fn run_list(state: &AppState, args: &SpacesListArgs) -> Result<SpacesListR
     })
 }
 
-async fn counts_for_space(state: &AppState, space_jid: &BareJid) -> Result<(u32, u32), AdminErr> {
-    let Some(node) = space_node_name(space_jid) else {
-        return Ok((0, 0));
-    };
+async fn counts_for_space(state: &AppState, node: &SpaceNode) -> Result<(u32, u32), AdminErr> {
     let items = state
         .pubsub_storage
-        .get_items(&state.spaces_jid, &node, None, &[])
+        .get_items(&state.spaces_jid, node, None, &[])
         .await
         .map_err(|e| internal_err(format!("pubsub get_items failed: {e}")))?;
     let affiliations = state
         .pubsub_storage
-        .list_node_affiliations(&state.spaces_jid, &node)
+        .list_node_affiliations(&state.spaces_jid, node)
         .await
         .map_err(|e| internal_err(format!("pubsub list_node_affiliations failed: {e}")))?;
     let channel_count = u32::try_from(items.len()).unwrap_or(u32::MAX);
@@ -883,8 +952,10 @@ async fn run_create(state: &AppState, args: &SpacesCreateArgs) -> Result<SpaceRe
     )
     .await;
 
+    let space_node = SpaceNode::from(localpart.clone());
     let metadata = SpaceMetadata {
         space_jid: space_jid.clone(),
+        space_node: space_node.clone(),
         name: args.name.clone(),
         description: args.description.clone(),
         icon_url: args.icon_url.clone(),
@@ -901,6 +972,7 @@ async fn run_create(state: &AppState, args: &SpacesCreateArgs) -> Result<SpaceRe
 
     Ok(SpaceRef {
         space_jid,
+        space_node,
         name: args.name.clone(),
         description: args.description.clone(),
         icon_url: args.icon_url.clone(),
@@ -926,27 +998,49 @@ fn mint_space_localpart(name: &str) -> String {
 }
 
 async fn run_update(state: &AppState, args: &SpacesUpdateArgs) -> Result<SpaceRef, AdminErr> {
-    let existing = state
-        .spaces_metadata_store
-        .get(&args.space_jid)
+    let (node_name, space_jid) =
+        canonical_space_jid(&state.spaces_jid, &args.space_jid, args.space_node.as_ref())?;
+    let space_node = state
+        .pubsub_storage
+        .get_node(&state.spaces_jid, &node_name)
         .await
-        .map_err(map_metadata_err)?
+        .map_err(|e| internal_err(format!("pubsub get_node failed: {e}")))?
         .ok_or_else(|| {
             Box::new(CommandResult::Error(XmppError::item_not_found(Some(
                 format!("no space '{}'", args.space_jid),
             ))))
         })?;
+    let existing = state
+        .spaces_metadata_store
+        .get_by_node(&node_name)
+        .await
+        .map_err(map_metadata_err)?;
 
-    let updated_name = args.name.clone().unwrap_or_else(|| existing.name.clone());
-    let updated_description = args.description.clone().or(existing.description.clone());
-    let updated_icon_url = args.icon_url.clone().or(existing.icon_url.clone());
+    let fallback_name = default_space_name(&node_name);
+    let updated_name = args
+        .name
+        .clone()
+        .or_else(|| existing.as_ref().map(|row| row.name.clone()))
+        .unwrap_or(fallback_name);
+    let updated_description = args
+        .description
+        .clone()
+        .or_else(|| existing.as_ref().and_then(|row| row.description.clone()));
+    let updated_icon_url = args
+        .icon_url
+        .clone()
+        .or_else(|| existing.as_ref().and_then(|row| row.icon_url.clone()));
 
     let metadata = SpaceMetadata {
-        space_jid: existing.space_jid.clone(),
+        space_jid: space_jid.clone(),
+        space_node: node_name.clone(),
         name: updated_name.clone(),
         description: updated_description.clone(),
         icon_url: updated_icon_url.clone(),
-        created_at: existing.created_at,
+        created_at: existing
+            .as_ref()
+            .map(|row| row.created_at)
+            .unwrap_or_else(|| space_node.created_at.timestamp()),
         updated_at: now_unix_seconds(),
     };
     state
@@ -956,7 +1050,8 @@ async fn run_update(state: &AppState, args: &SpacesUpdateArgs) -> Result<SpaceRe
         .map_err(map_metadata_err)?;
 
     Ok(SpaceRef {
-        space_jid: existing.space_jid,
+        space_jid,
+        space_node: node_name,
         name: updated_name,
         description: updated_description,
         icon_url: updated_icon_url,
@@ -973,16 +1068,15 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
     //   2. Legacy/bookmark items stored on the space's pubsub node
     //      (each item's `id` is a managed-room JID).
     // Both are unioned so the cascade is total.
-    let Some(node_name) = space_node_name(&args.space_jid) else {
-        return Err(bad_request("space_jid must have a localpart"));
-    };
+    let (node_name, space_jid) =
+        canonical_space_jid(&state.spaces_jid, &args.space_jid, args.space_node.as_ref())?;
 
     // Collect channels-to-destroy from both sources.
     let mut targets: std::collections::BTreeSet<BareJid> = std::collections::BTreeSet::new();
 
     let linked = state
         .channel_space_link_store
-        .list_channels_in_space(&args.space_jid)
+        .list_channels_in_space_node(&node_name)
         .await
         .map_err(|e| internal_err(format!("channel-space link storage: {e}")))?;
     for jid in linked {
@@ -1079,7 +1173,7 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
 
         if existing_link
             .as_ref()
-            .is_some_and(|link| link.space_jid != args.space_jid)
+            .is_some_and(|link| link.space_node != node_name)
         {
             cleanups.push(cleanup);
             continue;
@@ -1092,7 +1186,8 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
                 cleanup.removed_link = existing_link.or_else(|| {
                     Some(ChannelSpaceLink {
                         channel_jid: room_jid.clone(),
-                        space_jid: args.space_jid.clone(),
+                        space_jid: space_jid.clone(),
+                        space_node: node_name.clone(),
                         created_at: now_unix_seconds(),
                     })
                 });
@@ -1200,7 +1295,7 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
 
     let _existed = state
         .spaces_metadata_store
-        .delete(&args.space_jid)
+        .delete_by_node(&node_name)
         .await
         .map_err(map_metadata_err)?;
 
@@ -1211,9 +1306,8 @@ async fn run_members(
     state: &AppState,
     args: &SpacesMembersArgs,
 ) -> Result<SpacesMembersResult, AdminErr> {
-    let Some(node) = space_node_name(&args.space_jid) else {
-        return Err(bad_request("space_jid must have a localpart"));
-    };
+    let (node, _) =
+        canonical_space_jid(&state.spaces_jid, &args.space_jid, args.space_node.as_ref())?;
 
     let mut affiliations = state
         .pubsub_storage
@@ -1254,16 +1348,13 @@ async fn run_set_role(
     state: &AppState,
     args: &SpacesSetRoleArgs,
 ) -> Result<SpacesSetRoleResult, AdminErr> {
-    let Some(node) = space_node_name(&args.space_jid) else {
-        return Err(bad_request("space_jid must have a localpart"));
-    };
-    // Refuse silently for unknown spaces: if there's no metadata row,
-    // there's no space to grant a role on.
+    let (node, _) =
+        canonical_space_jid(&state.spaces_jid, &args.space_jid, args.space_node.as_ref())?;
     let exists = state
-        .spaces_metadata_store
-        .get(&args.space_jid)
+        .pubsub_storage
+        .get_node(&state.spaces_jid, &node)
         .await
-        .map_err(map_metadata_err)?
+        .map_err(|e| internal_err(format!("pubsub get_node failed: {e}")))?
         .is_some();
     if !exists {
         return Err(Box::new(CommandResult::Error(XmppError::item_not_found(
@@ -1291,6 +1382,7 @@ pub fn build_list_form(result: &SpacesListResult) -> DataForm {
     let mut form = DataForm::new(FormType::Result)
         .add_field(Field::form_type(NODE_LIST))
         .add_reported(Field::new("space_jid", FieldType::JidSingle).with_label("Space JID"))
+        .add_reported(Field::new("space_node", FieldType::TextSingle).with_label("Space Node"))
         .add_reported(Field::new("name", FieldType::TextSingle).with_label("Name"))
         .add_reported(Field::new("description", FieldType::TextSingle).with_label("Description"))
         .add_reported(Field::new("icon_url", FieldType::TextSingle).with_label("Icon URL"))
@@ -1299,6 +1391,8 @@ pub fn build_list_form(result: &SpacesListResult) -> DataForm {
     for entry in &result.entries {
         let row = vec![
             Field::new("space_jid", FieldType::JidSingle).with_value(entry.space_jid.to_string()),
+            Field::new("space_node", FieldType::TextSingle)
+                .with_value(entry.space_node.to_string()),
             Field::new("name", FieldType::TextSingle).with_value(entry.name.clone()),
             Field::new("description", FieldType::TextSingle)
                 .with_value(entry.description.clone().unwrap_or_default()),
@@ -1317,12 +1411,16 @@ pub fn build_list_form(result: &SpacesListResult) -> DataForm {
     form
 }
 
-pub fn build_space_form(space: &SpaceRef) -> DataForm {
+pub fn build_space_form(form_type: &str, space: &SpaceRef) -> DataForm {
     let mut form = DataForm::new(FormType::Result)
-        .add_field(Field::form_type(NODE_CREATE))
+        .add_field(Field::form_type(form_type))
         .add_field(
             Field::new("space_jid", FieldType::JidSingle).with_value(space.space_jid.to_string()),
         )
+        .add_field(Field::text_single(
+            "space_node",
+            space.space_node.to_string(),
+        ))
         .add_field(Field::text_single("name", space.name.clone()));
     if let Some(description) = space.description.as_ref() {
         form = form.add_field(Field::text_single("description", description));
@@ -1485,19 +1583,46 @@ mod tests {
         let result = SpacesListResult {
             entries: vec![SpaceListEntry {
                 space_jid: "eng@spaces.localhost".parse().expect("jid"),
+                space_node: SpaceNode::from("eng"),
                 name: "Engineering".to_string(),
                 description: Some("Hack".to_string()),
                 icon_url: None,
                 channel_count: 3,
                 member_count: 5,
             }],
-            next_cursor: Some("eng@spaces.localhost".to_string()),
+            next_cursor: Some("eng".to_string()),
         };
         let form = build_list_form(&result);
         assert!(matches!(form.form_type, FormType::Result));
-        assert_eq!(form.reported.len(), 6);
+        assert_eq!(form.reported.len(), 7);
         assert_eq!(form.items.len(), 1);
-        assert_eq!(form.get_value("next_cursor"), Some("eng@spaces.localhost"));
+        assert_eq!(form.get_value("next_cursor"), Some("eng"));
+    }
+
+    #[test]
+    fn space_jid_projection_round_trips_xep0106_escaped_node_ids() {
+        let spaces_jid: BareJid = "spaces.localhost".parse().expect("spaces jid");
+        let node = SpaceNode::from("music/a");
+        let projected = space_jid_for_node(&spaces_jid, &node).expect("projected jid");
+        assert_eq!(projected.to_string(), "music\\2fa@spaces.localhost");
+        assert_eq!(
+            crate::space_identity::space_node_name(&projected).as_deref(),
+            Some("music/a")
+        );
+    }
+
+    #[test]
+    fn build_space_form_uses_supplied_command_form_type() {
+        let space = SpaceRef {
+            space_jid: "eng@spaces.localhost".parse().expect("jid"),
+            space_node: SpaceNode::from("eng"),
+            name: "Engineering".to_string(),
+            description: None,
+            icon_url: None,
+        };
+        let form = build_space_form(NODE_UPDATE, &space);
+        assert!(matches!(form.form_type, FormType::Result));
+        assert_eq!(form.get_value("FORM_TYPE"), Some(NODE_UPDATE));
     }
 
     #[test]

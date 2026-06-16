@@ -25,6 +25,7 @@ use thiserror::Error;
 use tracing::{info, instrument};
 
 use crate::db::{Database, DatabaseConfig, DatabaseDriver, IntoParams};
+use crate::space_identity::SpaceNode;
 
 mod schema;
 pub mod storage;
@@ -37,6 +38,7 @@ pub use storage::InMemorySpacesMetadataStore;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpaceMetadata {
     pub space_jid: BareJid,
+    pub space_node: SpaceNode,
     pub name: String,
     pub description: Option<String>,
     pub icon_url: Option<String>,
@@ -68,6 +70,12 @@ pub trait SpacesMetadataStore: Send + Sync {
     /// Fetch the metadata row for `space_jid` (`Ok(None)` when absent).
     async fn get(&self, space_jid: &BareJid) -> Result<Option<SpaceMetadata>, SpacesMetadataError>;
 
+    /// Fetch the metadata row for the exact XEP-0060 Spaces node id.
+    async fn get_by_node(
+        &self,
+        space_node: &SpaceNode,
+    ) -> Result<Option<SpaceMetadata>, SpacesMetadataError>;
+
     /// Insert or replace the metadata row keyed by `metadata.space_jid`.
     ///
     /// On conflict the row is overwritten; the caller is responsible for
@@ -79,6 +87,9 @@ pub trait SpacesMetadataStore: Send + Sync {
     ///
     /// Returns `true` when a row was removed, `false` when no row matched.
     async fn delete(&self, space_jid: &BareJid) -> Result<bool, SpacesMetadataError>;
+
+    /// Delete the metadata row for the exact XEP-0060 Spaces node id.
+    async fn delete_by_node(&self, space_node: &SpaceNode) -> Result<bool, SpacesMetadataError>;
 
     /// Return every metadata row, ordered by ascending `created_at` so
     /// callers see rows in insertion order. Pagination is intentionally
@@ -211,23 +222,27 @@ fn decode_row(row: &crate::db::Row) -> Result<SpaceMetadata, SpacesMetadataError
                 raw: space_jid_raw.clone(),
                 source: error,
             })?;
-    let name: String = row
+    let space_node: String = row
         .get(1)
         .map_err(|error| SpacesMetadataError::Storage(error.to_string()))?;
-    let description: Option<String> = row
+    let name: String = row
         .get(2)
         .map_err(|error| SpacesMetadataError::Storage(error.to_string()))?;
-    let icon_url: Option<String> = row
+    let description: Option<String> = row
         .get(3)
         .map_err(|error| SpacesMetadataError::Storage(error.to_string()))?;
-    let created_at: i64 = row
+    let icon_url: Option<String> = row
         .get(4)
         .map_err(|error| SpacesMetadataError::Storage(error.to_string()))?;
-    let updated_at: i64 = row
+    let created_at: i64 = row
         .get(5)
+        .map_err(|error| SpacesMetadataError::Storage(error.to_string()))?;
+    let updated_at: i64 = row
+        .get(6)
         .map_err(|error| SpacesMetadataError::Storage(error.to_string()))?;
     Ok(SpaceMetadata {
         space_jid,
+        space_node: SpaceNode::from(space_node),
         name,
         description,
         icon_url,
@@ -236,7 +251,8 @@ fn decode_row(row: &crate::db::Row) -> Result<SpaceMetadata, SpacesMetadataError
     })
 }
 
-const SELECT_COLS: &str = "space_jid, name, description, icon_url, created_at, updated_at";
+const SELECT_COLS: &str =
+    "space_jid, space_node, name, description, icon_url, created_at, updated_at";
 
 #[async_trait]
 impl SpacesMetadataStore for DatabaseSpacesMetadataStore {
@@ -256,13 +272,33 @@ impl SpacesMetadataStore for DatabaseSpacesMetadataStore {
         Ok(Some(decode_row(&row)?))
     }
 
+    #[instrument(skip(self), fields(space_node = %space_node))]
+    async fn get_by_node(
+        &self,
+        space_node: &SpaceNode,
+    ) -> Result<Option<SpaceMetadata>, SpacesMetadataError> {
+        let sql = format!("SELECT {SELECT_COLS} FROM spaces_metadata WHERE space_node = ?");
+        let mut rows = self
+            .query(&sql, crate::db_params![space_node.as_str()])
+            .await?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| SpacesMetadataError::Storage(error.to_string()))?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(decode_row(&row)?))
+    }
+
     #[instrument(skip(self, metadata), fields(space = %metadata.space_jid))]
     async fn upsert(&self, metadata: &SpaceMetadata) -> Result<(), SpacesMetadataError> {
         let sql = r#"
             INSERT INTO spaces_metadata (
-                space_jid, name, description, icon_url, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(space_jid) DO UPDATE SET
+                space_jid, space_node, name, description, icon_url, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(space_node) DO UPDATE SET
+                space_jid = excluded.space_jid,
                 name = excluded.name,
                 description = excluded.description,
                 icon_url = excluded.icon_url,
@@ -272,6 +308,7 @@ impl SpacesMetadataStore for DatabaseSpacesMetadataStore {
             sql,
             crate::db_params![
                 metadata.space_jid.to_string(),
+                metadata.space_node.as_str(),
                 metadata.name.clone(),
                 metadata.description.clone(),
                 metadata.icon_url.clone(),
@@ -294,10 +331,21 @@ impl SpacesMetadataStore for DatabaseSpacesMetadataStore {
         Ok(affected > 0)
     }
 
+    #[instrument(skip(self), fields(space_node = %space_node))]
+    async fn delete_by_node(&self, space_node: &SpaceNode) -> Result<bool, SpacesMetadataError> {
+        let affected = self
+            .execute(
+                "DELETE FROM spaces_metadata WHERE space_node = ?",
+                crate::db_params![space_node.as_str()],
+            )
+            .await?;
+        Ok(affected > 0)
+    }
+
     #[instrument(skip(self))]
     async fn list_all(&self) -> Result<Vec<SpaceMetadata>, SpacesMetadataError> {
         let sql = format!(
-            "SELECT {SELECT_COLS} FROM spaces_metadata ORDER BY created_at ASC, space_jid ASC"
+            "SELECT {SELECT_COLS} FROM spaces_metadata ORDER BY created_at ASC, space_node ASC"
         );
         let mut rows = self.query(&sql, ()).await?;
         let mut out = Vec::new();
