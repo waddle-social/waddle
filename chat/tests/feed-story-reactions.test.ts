@@ -114,6 +114,20 @@ describe("Community feed story reactions", () => {
     expect(emitted).toContainEqual(["react", "story-2", "🔥"]);
   });
 
+  test("returns focus to the trigger button when the picker closes", async () => {
+    const bindings = await setupVueComponent(
+      FEED_PANE,
+      feedPaneProps({ stories: [{ id: "story-1", author: "a@x" }] }),
+    );
+
+    let focusCount = 0;
+    const trigger = { focus() { focusCount += 1; } };
+    setupBindingFunction(bindings, "openStoryReactionPicker")("story-1", { currentTarget: trigger });
+    setupBindingFunction(bindings, "selectStoryReaction")("👍");
+
+    expect(focusCount).toBe(1);
+  });
+
   test("does not render a react button on non-story feed entries", async () => {
     const html = await renderVueComponent(FEED_PANE, feedPaneProps({
       entries: [{ id: "post-1", author: "bob@example.com", body: "a community post", publishedMs: 1000 }],
