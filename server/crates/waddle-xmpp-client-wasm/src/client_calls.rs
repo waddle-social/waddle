@@ -341,6 +341,46 @@ impl WaddleClient {
         })
     }
 
+    /// XEP-0215 §3.2: fetch the external services (TURN/STUN) the user's own
+    /// server advertises, resolving to a typed array the chat maps to
+    /// `RTCIceServer[]` for LiveKit's `rtcConfig` at connect time. The query is
+    /// addressed to the authenticated user's server domain; an empty
+    /// `<services/>` requests every advertised service type.
+    pub fn fetch_external_services(&self) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let initiator_bare = stored_full_jid(&inner)?.to_bare().to_string();
+            let server_domain = initiator_bare
+                .split('@')
+                .next_back()
+                .map(str::to_owned)
+                .ok_or_else(|| js_error("authenticated JID has no domain"))?;
+            let request_id = uuid::Uuid::new_v4().to_string();
+            let iq = waddle_xmpp_client::xep::xep0215::build_extdisco_services_iq(
+                &server_domain,
+                &request_id,
+            );
+            let result = send_iq_command(inner, iq).await?;
+            // Defense-in-depth (RFC 6120 §8.1.2.1): if the reply stamps a
+            // `from`, it MUST be our own server. An absent `from` is acceptable
+            // for a reply from one's own bare server — the IQ id correlation in
+            // `send_iq_command` already pins the response.
+            if let Some(from) = result.attr("from") {
+                if !from.eq_ignore_ascii_case(&server_domain) {
+                    return Err(js_error(format!(
+                        "extdisco services reply `from` {from:?} does not match queried server {server_domain:?}"
+                    )));
+                }
+            }
+            let services: Vec<WaddleExternalService> =
+                waddle_xmpp_client::xep::xep0215::parse_external_services(&result)
+                    .into_iter()
+                    .map(WaddleExternalService::from)
+                    .collect();
+            to_js_value(&services)
+        })
+    }
+
     /// Send a XEP-0272 Muji-bearing Jingle `session-terminate` IQ
     /// to the SFU mixer (`calls.<server-domain>`). Server
     /// unregisters the participant + revokes every jti it minted

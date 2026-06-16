@@ -41,6 +41,16 @@ impl ExternalServiceType {
             _ => None,
         }
     }
+
+    /// Wire-form `type` value. Single source of truth for the discriminator
+    /// that crosses the WASM boundary and drives the chat-side ICE mapping.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stun => "stun",
+            Self::Turn => "turn",
+            Self::Turns => "turns",
+        }
+    }
 }
 
 /// Transport of a `<service transport='…'/>` entry.
@@ -56,6 +66,14 @@ impl ExternalServiceTransport {
             "udp" => Some(Self::Udp),
             "tcp" => Some(Self::Tcp),
             _ => None,
+        }
+    }
+
+    /// Wire-form `transport` value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Udp => "udp",
+            Self::Tcp => "tcp",
         }
     }
 }
@@ -237,6 +255,21 @@ mod tests {
         let xml = "<iq xmlns='jabber:client' type='result' id='e1'/>";
         let iq: Element = xml.parse().expect("valid xml");
         assert!(parse_external_services(&iq).is_empty());
+    }
+
+    #[test]
+    fn service_type_wire_strings_round_trip() {
+        for t in [
+            ExternalServiceType::Stun,
+            ExternalServiceType::Turn,
+            ExternalServiceType::Turns,
+        ] {
+            assert_eq!(ExternalServiceType::from_wire(t.as_str()), Some(t));
+        }
+        assert_eq!(ExternalServiceType::Turns.as_str(), "turns");
+        for t in [ExternalServiceTransport::Udp, ExternalServiceTransport::Tcp] {
+            assert_eq!(ExternalServiceTransport::from_wire(t.as_str()), Some(t));
+        }
     }
 
     #[test]
