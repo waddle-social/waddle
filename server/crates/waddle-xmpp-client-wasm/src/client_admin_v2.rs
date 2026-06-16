@@ -62,6 +62,7 @@ pub struct WaddleAdminSpacesListArgs {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WaddleAdminSpaceListEntry {
     pub space_jid: String,
+    pub space_node: String,
     pub name: String,
     pub description: Option<String>,
     pub icon_url: Option<String>,
@@ -85,6 +86,7 @@ pub struct WaddleAdminSpacesCreateArgs {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WaddleAdminSpaceRef {
     pub space_jid: String,
+    pub space_node: String,
     pub name: String,
     pub description: Option<String>,
     pub icon_url: Option<String>,
@@ -93,6 +95,7 @@ pub struct WaddleAdminSpaceRef {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WaddleAdminSpacesUpdateArgs {
     pub space_jid: String,
+    pub space_node: Option<String>,
     pub name: Option<String>,
     pub description: Option<String>,
     pub icon_url: Option<String>,
@@ -101,6 +104,7 @@ pub struct WaddleAdminSpacesUpdateArgs {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WaddleAdminSpacesDeleteArgs {
     pub space_jid: String,
+    pub space_node: Option<String>,
     /// MUST be the literal string "yes"; mirrors the server-side guard.
     pub confirm: String,
 }
@@ -108,6 +112,7 @@ pub struct WaddleAdminSpacesDeleteArgs {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WaddleAdminSpacesMembersArgs {
     pub space_jid: String,
+    pub space_node: Option<String>,
     pub page_size: Option<u32>,
     pub after_cursor: Option<String>,
 }
@@ -128,6 +133,7 @@ pub struct WaddleAdminSpacesMembersResult {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WaddleAdminSpacesSetRoleArgs {
     pub space_jid: String,
+    pub space_node: Option<String>,
     pub member_jid: String,
     /// `owner` | `admin` | `member` | `none`.
     pub role: String,
@@ -144,6 +150,7 @@ pub struct WaddleAdminSpacesSetRoleResult {
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct WaddleAdminChannelsListArgs {
     pub space_jid: Option<String>,
+    pub space_node: Option<String>,
     pub prefix: Option<String>,
     pub page_size: Option<u32>,
     pub after_cursor: Option<String>,
@@ -174,6 +181,7 @@ pub struct WaddleAdminChannelsCreateArgs {
     pub name: String,
     pub topic: Option<String>,
     pub space_jid: Option<String>,
+    pub space_node: Option<String>,
     /// Defaults to `true` per the V2 spec; the client wrapper passes
     /// this through verbatim. The server enforces the same default
     /// when the field is absent.
@@ -563,6 +571,9 @@ fn build_spaces_create_iq(server_domain: &str, args: &WaddleAdminSpacesCreateArg
 fn build_spaces_update_iq(server_domain: &str, args: &WaddleAdminSpacesUpdateArgs) -> Element {
     let mut form = submit_form_with_type(NS_ADMIN_SPACES_UPDATE)
         .append(jid_field("space_jid", &args.space_jid));
+    if let Some(space_node) = args.space_node.as_deref() {
+        form = form.append(text_single_field("space_node", space_node));
+    }
     if let Some(name) = args.name.as_deref() {
         form = form.append(text_single_field("name", name));
     }
@@ -576,15 +587,21 @@ fn build_spaces_update_iq(server_domain: &str, args: &WaddleAdminSpacesUpdateArg
 }
 
 fn build_spaces_delete_iq(server_domain: &str, args: &WaddleAdminSpacesDeleteArgs) -> Element {
-    let form = submit_form_with_type(NS_ADMIN_SPACES_DELETE)
-        .append(jid_field("space_jid", &args.space_jid))
-        .append(text_single_field("confirm", &args.confirm));
+    let mut form = submit_form_with_type(NS_ADMIN_SPACES_DELETE)
+        .append(jid_field("space_jid", &args.space_jid));
+    if let Some(space_node) = args.space_node.as_deref() {
+        form = form.append(text_single_field("space_node", space_node));
+    }
+    form = form.append(text_single_field("confirm", &args.confirm));
     wrap_command_iq(server_domain, NS_ADMIN_SPACES_DELETE, form.build())
 }
 
 fn build_spaces_members_iq(server_domain: &str, args: &WaddleAdminSpacesMembersArgs) -> Element {
     let mut form = submit_form_with_type(NS_ADMIN_SPACES_MEMBERS)
         .append(jid_field("space_jid", &args.space_jid));
+    if let Some(space_node) = args.space_node.as_deref() {
+        form = form.append(text_single_field("space_node", space_node));
+    }
     if let Some(page_size) = args.page_size {
         form = form.append(text_single_field("page_size", &page_size.to_string()));
     }
@@ -595,8 +612,12 @@ fn build_spaces_members_iq(server_domain: &str, args: &WaddleAdminSpacesMembersA
 }
 
 fn build_spaces_set_role_iq(server_domain: &str, args: &WaddleAdminSpacesSetRoleArgs) -> Element {
-    let form = submit_form_with_type(NS_ADMIN_SPACES_SET_ROLE)
-        .append(jid_field("space_jid", &args.space_jid))
+    let mut form = submit_form_with_type(NS_ADMIN_SPACES_SET_ROLE)
+        .append(jid_field("space_jid", &args.space_jid));
+    if let Some(space_node) = args.space_node.as_deref() {
+        form = form.append(text_single_field("space_node", space_node));
+    }
+    form = form
         .append(jid_field("member_jid", &args.member_jid))
         .append(text_single_field("role", &args.role));
     wrap_command_iq(server_domain, NS_ADMIN_SPACES_SET_ROLE, form.build())
@@ -606,6 +627,9 @@ fn build_channels_list_iq(server_domain: &str, args: &WaddleAdminChannelsListArg
     let mut form = submit_form_with_type(NS_ADMIN_CHANNELS_LIST);
     if let Some(space_jid) = args.space_jid.as_deref() {
         form = form.append(jid_field("space_jid", space_jid));
+    }
+    if let Some(space_node) = args.space_node.as_deref() {
+        form = form.append(text_single_field("space_node", space_node));
     }
     if let Some(prefix) = args.prefix.as_deref() {
         form = form.append(text_single_field("prefix", prefix));
@@ -627,6 +651,9 @@ fn build_channels_create_iq(server_domain: &str, args: &WaddleAdminChannelsCreat
     }
     if let Some(space_jid) = args.space_jid.as_deref() {
         form = form.append(jid_field("space_jid", space_jid));
+    }
+    if let Some(space_node) = args.space_node.as_deref() {
+        form = form.append(text_single_field("space_node", space_node));
     }
     if let Some(is_public) = args.is_public {
         form = form.append(boolean_field("is_public", is_public));
@@ -791,6 +818,7 @@ fn parse_spaces_list_result(iq: &Element) -> AdminParseResult<WaddleAdminSpacesL
     for item in form.children().filter(|c| c.name() == "item") {
         entries.push(WaddleAdminSpaceListEntry {
             space_jid: field_text_required(item, "space_jid")?,
+            space_node: field_text_required(item, "space_node")?,
             name: field_text_required(item, "name")?,
             description: field_text(item, "description").filter(|s| !s.is_empty()),
             icon_url: field_text(item, "icon_url").filter(|s| !s.is_empty()),
@@ -808,6 +836,7 @@ fn parse_space_ref_result(iq: &Element) -> AdminParseResult<WaddleAdminSpaceRef>
     let form = command_form(iq)?;
     Ok(WaddleAdminSpaceRef {
         space_jid: top_level_field_text_required(form, "space_jid")?,
+        space_node: top_level_field_text_required(form, "space_node")?,
         name: top_level_field_text_required(form, "name")?,
         description: top_level_field_text_opt(form, "description"),
         icon_url: top_level_field_text_opt(form, "icon_url"),

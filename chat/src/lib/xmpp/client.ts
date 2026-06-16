@@ -3082,56 +3082,65 @@ export class BrowserXmppClient {
       icon_url: opts.iconUrl ?? null,
     });
   }
-  async adminSpacesUpdate(opts: { spaceJid: string; name?: string | null; description?: string | null; iconUrl?: string | null }): Promise<WasmAdminSpaceRef> {
+  async adminSpacesUpdate(opts: { spaceJid: string; spaceNode?: string | null; name?: string | null; description?: string | null; iconUrl?: string | null }): Promise<WasmAdminSpaceRef> {
     const xmpp = await this.requireConnectedXmpp();
     if (!xmpp.admin_spaces_update) throw new Error("admin_spaces_update binding missing");
     return await xmpp.admin_spaces_update({
       space_jid: opts.spaceJid,
+      space_node: opts.spaceNode ?? null,
       name: opts.name ?? null,
       description: opts.description ?? null,
       icon_url: opts.iconUrl ?? null,
     });
   }
-  async adminSpacesDelete(opts: { spaceJid: string }): Promise<boolean> {
+  async adminSpacesDelete(opts: { spaceJid: string; spaceNode?: string | null }): Promise<boolean> {
     const xmpp = await this.requireConnectedXmpp();
     if (!xmpp.admin_spaces_delete) throw new Error("admin_spaces_delete binding missing");
-    return await xmpp.admin_spaces_delete({ space_jid: opts.spaceJid, confirm: "yes" });
+    return await xmpp.admin_spaces_delete({
+      space_jid: opts.spaceJid,
+      space_node: opts.spaceNode ?? null,
+      confirm: "yes",
+    });
   }
-  async adminSpacesMembers(opts: { spaceJid: string; pageSize?: number | null; afterCursor?: string | null }): Promise<WasmAdminSpacesMembersResult> {
+  async adminSpacesMembers(opts: { spaceJid: string; spaceNode?: string | null; pageSize?: number | null; afterCursor?: string | null }): Promise<WasmAdminSpacesMembersResult> {
     const xmpp = await this.requireConnectedXmpp();
     if (!xmpp.admin_spaces_members) throw new Error("admin_spaces_members binding missing");
     return await xmpp.admin_spaces_members({
       space_jid: opts.spaceJid,
+      space_node: opts.spaceNode ?? null,
       page_size: opts.pageSize ?? null,
       after_cursor: opts.afterCursor ?? null,
     });
   }
-  async adminSpacesSetRole(opts: { spaceJid: string; memberJid: string; role: "owner" | "admin" | "member" | "none" }): Promise<WasmAdminSpacesSetRoleResult> {
+  async adminSpacesSetRole(opts: { spaceJid: string; spaceNode?: string | null; memberJid: string; role: "owner" | "admin" | "member" | "none" }): Promise<WasmAdminSpacesSetRoleResult> {
     const xmpp = await this.requireConnectedXmpp();
     if (!xmpp.admin_spaces_set_role) throw new Error("admin_spaces_set_role binding missing");
     return await xmpp.admin_spaces_set_role({
       space_jid: opts.spaceJid,
+      space_node: opts.spaceNode ?? null,
       member_jid: opts.memberJid,
       role: opts.role,
     });
   }
-  async adminChannelsList(opts: { spaceJid?: string | null; prefix?: string | null; pageSize?: number | null; afterCursor?: string | null } = {}): Promise<WasmAdminChannelsListResult> {
+  async adminChannelsList(opts: { spaceJid?: string | null; spaceNode?: string | null; prefix?: string | null; pageSize?: number | null; afterCursor?: string | null } = {}): Promise<WasmAdminChannelsListResult> {
     const xmpp = await this.requireConnectedXmpp();
     if (!xmpp.admin_channels_list) throw new Error("admin_channels_list binding missing");
     return await xmpp.admin_channels_list({
       space_jid: opts.spaceJid ?? null,
+      space_node: opts.spaceNode ?? null,
       prefix: opts.prefix ?? null,
       page_size: opts.pageSize ?? null,
       after_cursor: opts.afterCursor ?? null,
     });
   }
-  async adminChannelsCreate(opts: { name: string; topic?: string | null; spaceJid?: string | null; isPublic?: boolean | null }): Promise<WasmAdminChannelRef> {
+  async adminChannelsCreate(opts: { name: string; topic?: string | null; spaceJid?: string | null; spaceNode?: string | null; isPublic?: boolean | null }): Promise<WasmAdminChannelRef> {
     const xmpp = await this.requireConnectedXmpp();
     if (!xmpp.admin_channels_create) throw new Error("admin_channels_create binding missing");
     return await xmpp.admin_channels_create({
       name: opts.name,
       topic: opts.topic ?? null,
       space_jid: opts.spaceJid ?? null,
+      space_node: opts.spaceNode ?? null,
       is_public: opts.isPublic ?? null,
     });
   }

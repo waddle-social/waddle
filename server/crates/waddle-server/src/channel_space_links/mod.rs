@@ -28,6 +28,7 @@ use thiserror::Error;
 use tracing::{info, instrument};
 
 use crate::db::{Database, DatabaseConfig, DatabaseDriver, IntoParams};
+use crate::space_identity::SpaceNode;
 
 mod schema;
 pub mod storage;
@@ -41,6 +42,7 @@ pub use storage::InMemoryChannelSpaceLinkStore;
 pub struct ChannelSpaceLink {
     pub channel_jid: BareJid,
     pub space_jid: BareJid,
+    pub space_node: SpaceNode,
     /// Unix seconds.
     pub created_at: i64,
 }
@@ -87,6 +89,12 @@ pub trait ChannelSpaceLinkStore: Send + Sync {
     async fn list_channels_in_space(
         &self,
         space_jid: &BareJid,
+    ) -> Result<Vec<BareJid>, ChannelSpaceLinkError>;
+
+    /// Return every `channel_jid` linked to the exact XEP-0060 Spaces node id.
+    async fn list_channels_in_space_node(
+        &self,
+        space_node: &SpaceNode,
     ) -> Result<Vec<BareJid>, ChannelSpaceLinkError>;
 
     /// Return every link row, ordered by ascending `created_at` then
@@ -228,17 +236,21 @@ fn decode_row(row: &crate::db::Row) -> Result<ChannelSpaceLink, ChannelSpaceLink
                 raw: space_jid_raw.clone(),
                 source: error,
             })?;
-    let created_at: i64 = row
+    let space_node: String = row
         .get(2)
+        .map_err(|error| ChannelSpaceLinkError::Storage(error.to_string()))?;
+    let created_at: i64 = row
+        .get(3)
         .map_err(|error| ChannelSpaceLinkError::Storage(error.to_string()))?;
     Ok(ChannelSpaceLink {
         channel_jid,
         space_jid,
+        space_node: SpaceNode::from(space_node),
         created_at,
     })
 }
 
-const SELECT_COLS: &str = "channel_jid, space_jid, created_at";
+const SELECT_COLS: &str = "channel_jid, space_jid, space_node, created_at";
 
 #[async_trait]
 impl ChannelSpaceLinkStore for DatabaseChannelSpaceLinkStore {
@@ -248,16 +260,18 @@ impl ChannelSpaceLinkStore for DatabaseChannelSpaceLinkStore {
         // ordering is stable.
         let sql = r#"
             INSERT INTO channel_space_links (
-                channel_jid, space_jid, created_at
-            ) VALUES (?, ?, ?)
+                channel_jid, space_jid, space_node, created_at
+            ) VALUES (?, ?, ?, ?)
             ON CONFLICT(channel_jid) DO UPDATE SET
-                space_jid = excluded.space_jid
+                space_jid = excluded.space_jid,
+                space_node = excluded.space_node
         "#;
         self.execute(
             sql,
             crate::db_params![
                 link.channel_jid.to_string(),
                 link.space_jid.to_string(),
+                link.space_node.as_str(),
                 link.created_at,
             ],
         )
@@ -307,6 +321,30 @@ impl ChannelSpaceLinkStore for DatabaseChannelSpaceLinkStore {
         );
         let mut rows = self
             .query(&sql, crate::db_params![space_jid.to_string()])
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| ChannelSpaceLinkError::Storage(error.to_string()))?
+        {
+            out.push(decode_row(&row)?.channel_jid);
+        }
+        Ok(out)
+    }
+
+    #[instrument(skip(self), fields(space_node = %space_node))]
+    async fn list_channels_in_space_node(
+        &self,
+        space_node: &SpaceNode,
+    ) -> Result<Vec<BareJid>, ChannelSpaceLinkError> {
+        let sql = format!(
+            "SELECT {SELECT_COLS} FROM channel_space_links \
+             WHERE space_node = ? \
+             ORDER BY created_at ASC, channel_jid ASC"
+        );
+        let mut rows = self
+            .query(&sql, crate::db_params![space_node.as_str()])
             .await?;
         let mut out = Vec::new();
         while let Some(row) = rows

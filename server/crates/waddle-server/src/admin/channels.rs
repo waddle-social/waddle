@@ -65,6 +65,7 @@ use crate::server::xmpp_state::{
     XmppChannelUpsert,
 };
 use crate::server::AppState;
+use crate::space_identity::{canonical_space_projection, SpaceNode, SpaceProjectionError};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -163,6 +164,7 @@ fn role_as_wire(role: waddle_xmpp::Role) -> &'static str {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ChannelsListArgs {
     pub space_jid: Option<BareJid>,
+    pub space_node: Option<SpaceNode>,
     pub prefix: Option<String>,
     pub page_size: u32,
     pub after_cursor: Option<String>,
@@ -191,6 +193,7 @@ pub struct ChannelsListResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelsCreateArgs {
     pub space_jid: Option<BareJid>,
+    pub space_node: Option<SpaceNode>,
     pub name: String,
     pub topic: Option<String>,
     /// XEP-0045 `muc#roomconfig_publicroom`; default `true`.
@@ -782,6 +785,7 @@ pub fn parse_list_args(form: Option<&DataForm>) -> Result<ChannelsListArgs, Stri
     let Some(form) = form else {
         return Ok(ChannelsListArgs {
             space_jid: None,
+            space_node: None,
             prefix: None,
             page_size: DEFAULT_PAGE_SIZE,
             after_cursor: None,
@@ -790,6 +794,7 @@ pub fn parse_list_args(form: Option<&DataForm>) -> Result<ChannelsListArgs, Stri
     if !matches!(form.form_type, FormType::Submit) {
         return Ok(ChannelsListArgs {
             space_jid: None,
+            space_node: None,
             prefix: None,
             page_size: DEFAULT_PAGE_SIZE,
             after_cursor: None,
@@ -806,10 +811,12 @@ pub fn parse_list_args(form: Option<&DataForm>) -> Result<ChannelsListArgs, Stri
         .get_value("prefix")
         .map(|s| s.trim().to_lowercase())
         .filter(|s| !s.is_empty());
+    let space_node = parse_optional_text(form, "space_node").map(SpaceNode::from);
     let page_size = parse_page_size(form)?;
     let after_cursor = parse_optional_text(form, "after_cursor");
     Ok(ChannelsListArgs {
         space_jid,
+        space_node,
         prefix,
         page_size,
         after_cursor,
@@ -828,11 +835,13 @@ pub fn parse_create_args(form: Option<&DataForm>) -> Result<ChannelsCreateArgs, 
         ),
         _ => None,
     };
+    let space_node = parse_optional_text(form, "space_node").map(SpaceNode::from);
     // XEP-0045 public-room discovery visibility defaults true.
     let is_public = parse_optional_bool(form, "is_public")?.unwrap_or(true);
     let members_only = parse_optional_bool(form, "members_only")?;
     Ok(ChannelsCreateArgs {
         space_jid,
+        space_node,
         name,
         topic,
         is_public,
@@ -1000,14 +1009,24 @@ async fn run_list(
         .map_err(send_err("room_registry ask ListRooms"))?;
     rooms.sort();
 
-    // Narrow by `space_jid` against the channel↔space link projection.
+    // Narrow by the exact Spaces PubSub node against the channel↔space link projection.
     // A channel belongs to at most one space; rooms with no link row
     // are not in any space, so they are filtered out when a
-    // `space_jid` filter is supplied.
+    // space filter is supplied.
     if let Some(space_jid) = args.space_jid.as_ref() {
+        let (space_node, _) =
+            canonical_space_jid(&state.spaces_jid, space_jid, args.space_node.as_ref())?;
         let in_space = state
             .channel_space_link_store
-            .list_channels_in_space(space_jid)
+            .list_channels_in_space_node(&space_node)
+            .await
+            .map_err(map_link_err)?;
+        let permitted: std::collections::HashSet<BareJid> = in_space.into_iter().collect();
+        rooms.retain(|jid| permitted.contains(jid));
+    } else if let Some(space_node) = args.space_node.as_ref() {
+        let in_space = state
+            .channel_space_link_store
+            .list_channels_in_space_node(space_node)
             .await
             .map_err(map_link_err)?;
         let permitted: std::collections::HashSet<BareJid> = in_space.into_iter().collect();
@@ -1125,20 +1144,31 @@ fn mint_channel_localpart(name: &str) -> String {
     format!("{base}-{short_tail}")
 }
 
-fn space_node_name(space_jid: &BareJid) -> Option<String> {
-    space_jid.node().map(|n| n.to_string())
+fn canonical_space_jid(
+    spaces_jid: &BareJid,
+    space_jid: &BareJid,
+    space_node: Option<&SpaceNode>,
+) -> Result<(SpaceNode, BareJid), AdminErr> {
+    canonical_space_projection(spaces_jid, space_jid, space_node).map_err(|error| match error {
+        SpaceProjectionError::WrongDomain => {
+            bad_request(format!("space_jid must target {}", spaces_jid.domain()))
+        }
+        SpaceProjectionError::MissingLocalpart => bad_request("space_jid must have a localpart"),
+        SpaceProjectionError::InvalidNode(node) => {
+            internal_err(format!("invalid space node '{node}'"))
+        }
+        SpaceProjectionError::MismatchedProjection => {
+            bad_request("space_jid must match the space_node projection")
+        }
+    })
 }
 
-async fn existing_space_node(state: &AppState, space_jid: &BareJid) -> Result<String, AdminErr> {
-    if space_jid.domain() != state.spaces_jid.domain() {
-        return Err(bad_request(format!(
-            "space_jid must target {}",
-            state.spaces_jid.domain()
-        )));
-    }
-    let Some(node) = space_node_name(space_jid) else {
-        return Err(bad_request("space_jid must have a localpart"));
-    };
+async fn existing_space_node(
+    state: &AppState,
+    space_jid: &BareJid,
+    space_node: Option<&SpaceNode>,
+) -> Result<(SpaceNode, BareJid), AdminErr> {
+    let (node, canonical_jid) = canonical_space_jid(&state.spaces_jid, space_jid, space_node)?;
     let exists = state
         .pubsub_storage
         .get_node(&state.spaces_jid, &node)
@@ -1149,7 +1179,7 @@ async fn existing_space_node(state: &AppState, space_jid: &BareJid) -> Result<St
             Some(format!("no space '{}'", space_jid)),
         ))));
     }
-    Ok(node)
+    Ok((node, canonical_jid))
 }
 
 async fn publish_channel_space_bookmark(
@@ -1550,8 +1580,13 @@ async fn run_create(state: &AppState, args: &ChannelsCreateArgs) -> Result<Chann
     let channel_jid: BareJid = format!("{localpart}@{muc_domain}")
         .parse()
         .map_err(|e| internal_err(format!("constructed channel JID is invalid: {e}")))?;
-    let space_node = match args.space_jid.as_ref() {
-        Some(space_jid) => Some(existing_space_node(state, space_jid).await?),
+    let space_ref = match args.space_jid.as_ref() {
+        Some(space_jid) => {
+            Some(existing_space_node(state, space_jid, args.space_node.as_ref()).await?)
+        }
+        None if args.space_node.is_some() => {
+            return Err(bad_request("space_node requires space_jid"));
+        }
         None => None,
     };
 
@@ -1596,7 +1631,7 @@ async fn run_create(state: &AppState, args: &ChannelsCreateArgs) -> Result<Chann
     // `spaces:delete` cascade behavior; the room itself lives in the
     // MUC registry independent of any space. The matching XEP-0503
     // bookmark is the public discovery source for native clients.
-    if let (Some(space_jid), Some(node)) = (args.space_jid.as_ref(), space_node.as_deref()) {
+    if let Some((node, space_jid)) = space_ref.as_ref() {
         let parent_tuple_created = match publish_channel_space_bookmark(
             state,
             node,
@@ -1623,6 +1658,7 @@ async fn run_create(state: &AppState, args: &ChannelsCreateArgs) -> Result<Chann
             .set(&ChannelSpaceLink {
                 channel_jid: channel_jid.clone(),
                 space_jid: space_jid.clone(),
+                space_node: node.clone(),
                 created_at: now_unix_seconds(),
             })
             .await
@@ -2650,9 +2686,7 @@ async fn run_update(state: &AppState, args: &ChannelsUpdateArgs) -> Result<Chann
         .await
         .map_err(map_link_err)?
     {
-        let Some(node) = space_node_name(&link.space_jid) else {
-            return Err(bad_request("stored space_jid must have a localpart"));
-        };
+        let node = link.space_node.clone();
         let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(&args.channel_jid) else {
             return Err(internal_err(format!(
                 "linked channel JID is not managed: {}",
@@ -2735,9 +2769,8 @@ async fn run_delete(state: &AppState, args: &ChannelsDeleteArgs) -> Result<(), A
         .get(&args.channel_jid)
         .await
         .map_err(map_link_err)?;
-    let linked_node = link
-        .as_ref()
-        .and_then(|link| space_node_name(&link.space_jid));
+    let linked_node = link.as_ref().map(|link| link.space_node.clone());
+    let linked_node_text = linked_node.as_ref().map(ToString::to_string);
     let item_id = args.channel_jid.to_string();
     let channel_id = waddle_xmpp::parse_managed_room_jid(&args.channel_jid);
     let catalog_snapshot = match channel_id.as_deref() {
@@ -2756,7 +2789,7 @@ async fn run_delete(state: &AppState, args: &ChannelsDeleteArgs) -> Result<(), A
         .into_iter()
         .collect();
     if let Some(node) = linked_node.as_ref() {
-        bookmark_nodes.insert(node.clone());
+        bookmark_nodes.insert(node.to_string());
     }
 
     let mut bookmark_snapshots: std::collections::BTreeMap<String, Option<PubSubItem>> =
@@ -2772,7 +2805,7 @@ async fn run_delete(state: &AppState, args: &ChannelsDeleteArgs) -> Result<(), A
 
     for node in bookmark_nodes
         .iter()
-        .filter(|node| Some(node.as_str()) != linked_node.as_deref())
+        .filter(|node| Some(node.as_str()) != linked_node_text.as_deref())
     {
         let snapshot = bookmark_snapshots.get(node).cloned().unwrap_or(None);
         let fallback_item = if snapshot.is_none() {
@@ -2839,7 +2872,8 @@ async fn run_delete(state: &AppState, args: &ChannelsDeleteArgs) -> Result<(), A
     }
 
     if let Some(node) = linked_node.as_ref() {
-        let snapshot = bookmark_snapshots.get(node).cloned().unwrap_or(None);
+        let node = node.to_string();
+        let snapshot = bookmark_snapshots.get(&node).cloned().unwrap_or(None);
         let fallback_item = if snapshot.is_none() {
             if let Some(channel_id) = channel_id.as_deref() {
                 match rollback_channel_bookmark_item(state, &args.channel_jid, channel_id).await {
@@ -2876,11 +2910,11 @@ async fn run_delete(state: &AppState, args: &ChannelsDeleteArgs) -> Result<(), A
         } else {
             None
         };
-        match retract_channel_bookmark_and_parent(state, node, &item_id, channel_id.as_deref())
+        match retract_channel_bookmark_and_parent(state, &node, &item_id, channel_id.as_deref())
             .await
         {
             Ok(parent_tuple_deleted) => removed_bookmarks.push(RemovedChannelBookmark {
-                node: node.clone(),
+                node,
                 item: snapshot,
                 fallback_item,
                 parent_tuple_deleted,

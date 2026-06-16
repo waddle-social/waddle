@@ -4,6 +4,7 @@ use super::permissions::{
 };
 use super::*;
 use crate::server::routes::websocket::handlers::pubsub_fanout;
+use crate::space_identity::{space_jid_for_node, SpaceNode};
 
 /// PEP self-or-to check (XEP-0163 §3).
 ///
@@ -78,10 +79,6 @@ pub(super) fn spaces_service_bare_jid(spaces_domain: &str) -> Result<BareJid, St
     spaces_domain
         .parse::<BareJid>()
         .map_err(|error| format!("invalid spaces service JID: {error}"))
-}
-
-fn space_jid_for_node(spaces_jid: &BareJid, node: &str) -> Option<BareJid> {
-    format!("{}@{}", node, spaces_jid.domain()).parse().ok()
 }
 
 pub(super) fn space_details_from_node(
@@ -275,19 +272,12 @@ async fn backfill_missing_space_bookmarks(
     node: &str,
     item_ids: &[String],
 ) {
-    let Some(space_jid) = space_jid_for_node(spaces_jid, node) else {
-        warn!(
-            node,
-            spaces = %spaces_jid,
-            "Skipping channel-space link bookmark backfill for non-JID Space node"
-        );
-        return;
-    };
+    let space_node = SpaceNode::from(node);
     let links = match state
         .deps
         .app_state
         .channel_space_link_store
-        .list_channels_in_space(&space_jid)
+        .list_channels_in_space_node(&space_node)
         .await
     {
         Ok(links) => links,
@@ -720,7 +710,8 @@ pub(super) async fn handle_spaces_publish(
         .await
     {
         Ok(result) => {
-            let projected_space_jid = space_jid_for_node(&spaces_jid, node);
+            let space_node = SpaceNode::from(node);
+            let projected_space_jid = space_jid_for_node(&spaces_jid, &space_node);
             if let Some(space_jid) = projected_space_jid.as_ref() {
                 if let Err(error) = state
                     .deps
@@ -729,6 +720,7 @@ pub(super) async fn handle_spaces_publish(
                     .set(&crate::channel_space_links::ChannelSpaceLink {
                         channel_jid: bookmark.jid.clone(),
                         space_jid: space_jid.clone(),
+                        space_node: space_node.clone(),
                         created_at: chrono::Utc::now().timestamp(),
                     })
                     .await
@@ -2034,7 +2026,6 @@ pub(super) async fn handle_spaces_retract(
     let Ok(spaces_jid) = spaces_service_bare_jid(spaces_domain) else {
         return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
     };
-    let target_space_jid = space_jid_for_node(&spaces_jid, node);
     let item_filter = [item_id.to_string()];
     match state
         .deps
@@ -2062,7 +2053,7 @@ pub(super) async fn handle_spaces_retract(
         .get(&room_jid)
         .await
     {
-        Ok(Some(link)) if target_space_jid.as_ref() == Some(&link.space_jid) => Some(link),
+        Ok(Some(link)) if link.space_node == node => Some(link),
         Ok(_) => None,
         Err(error) => {
             warn!(item_id, node, error = %error, "Failed to read channel-space link before Spaces retract");

@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use jid::BareJid;
 
 use super::{ChannelSpaceLink, ChannelSpaceLinkError, ChannelSpaceLinkStore};
+use crate::space_identity::SpaceNode;
 
 #[derive(Debug, Default)]
 pub struct InMemoryChannelSpaceLinkStore {
@@ -77,6 +78,27 @@ impl ChannelSpaceLinkStore for InMemoryChannelSpaceLinkStore {
         let mut rows: Vec<ChannelSpaceLink> = guard
             .values()
             .filter(|row| &row.space_jid == space_jid)
+            .cloned()
+            .collect();
+        rows.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.channel_jid.cmp(&b.channel_jid))
+        });
+        Ok(rows.into_iter().map(|row| row.channel_jid).collect())
+    }
+
+    async fn list_channels_in_space_node(
+        &self,
+        space_node: &SpaceNode,
+    ) -> Result<Vec<BareJid>, ChannelSpaceLinkError> {
+        let guard = self
+            .rows
+            .lock()
+            .map_err(|error| ChannelSpaceLinkError::Storage(error.to_string()))?;
+        let mut rows: Vec<ChannelSpaceLink> = guard
+            .values()
+            .filter(|row| &row.space_node == space_node)
             .cloned()
             .collect();
         rows.sort_by(|a, b| {

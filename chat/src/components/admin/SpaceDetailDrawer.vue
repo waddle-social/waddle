@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // Admin V2 — slide-from-right drawer for editing a single space.
 // Three sections: editor, members, danger (delete).
-import { onMounted, ref, watch } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import AppDrawer from "@/components/ui/AppDrawer.vue";
 import ConfirmDialog from "@/components/ui/ConfirmDialog.vue";
 import type { BrowserXmppClient } from "@/lib/xmpp";
@@ -24,6 +24,7 @@ const emit = defineEmits<{
 
 type Role = "owner" | "admin" | "member" | "none";
 const ROLES: Role[] = ["owner", "admin", "member", "none"];
+const MEMBERS_PAGE_SIZE = 200;
 
 const openLocal = ref(props.open);
 watch(() => props.open, (v) => { openLocal.value = v; });
@@ -37,8 +38,11 @@ const editError = ref("");
 
 const members = ref<WasmAdminSpaceMemberEntry[]>([]);
 const membersLoading = ref(false);
+const membersLoadingMore = ref(false);
+const memberCursor = ref<string | null>(null);
 const membersError = ref("");
 const memberMutating = ref<string | null>(null);
+let membersRequestId = 0;
 
 const showDelete = ref(false);
 const deleting = ref(false);
@@ -53,15 +57,51 @@ watch(() => props.space, (s) => {
 
 async function loadMembers() {
   if (!props.xmppClient) return;
+  const requestId = ++membersRequestId;
   membersLoading.value = true;
+  membersLoadingMore.value = false;
   membersError.value = "";
+  memberCursor.value = null;
   try {
-    const page = await props.xmppClient.adminSpacesMembers({ spaceJid: props.space.space_jid, pageSize: 200 });
+    const page = await props.xmppClient.adminSpacesMembers({
+      spaceJid: props.space.space_jid,
+      spaceNode: props.space.space_node,
+      pageSize: MEMBERS_PAGE_SIZE,
+    });
+    if (requestId !== membersRequestId) return;
     members.value = page.entries;
+    memberCursor.value = page.next_cursor ?? null;
   } catch (err: unknown) {
+    if (requestId !== membersRequestId) return;
     membersError.value = err instanceof Error ? err.message : "Failed to load members.";
   } finally {
-    membersLoading.value = false;
+    if (requestId === membersRequestId) {
+      membersLoading.value = false;
+    }
+  }
+}
+
+async function loadMoreMembers() {
+  if (!props.xmppClient || !memberCursor.value || membersLoadingMore.value) return;
+  const requestId = membersRequestId;
+  const afterCursor = memberCursor.value;
+  membersLoadingMore.value = true;
+  membersError.value = "";
+  try {
+    const page = await props.xmppClient.adminSpacesMembers({
+      spaceJid: props.space.space_jid,
+      spaceNode: props.space.space_node,
+      pageSize: MEMBERS_PAGE_SIZE,
+      afterCursor,
+    });
+    if (requestId !== membersRequestId || memberCursor.value !== afterCursor) return;
+    members.value = members.value.concat(page.entries);
+    memberCursor.value = page.next_cursor ?? null;
+  } catch (err: unknown) {
+    if (requestId !== membersRequestId) return;
+    membersError.value = err instanceof Error ? err.message : "Failed to load more members.";
+  } finally {
+    membersLoadingMore.value = false;
   }
 }
 
@@ -73,6 +113,7 @@ async function saveEdits() {
   try {
     await props.xmppClient.adminSpacesUpdate({
       spaceJid: props.space.space_jid,
+      spaceNode: props.space.space_node,
       name: editName.value.trim(),
       description: editDescription.value.trim() || null,
       iconUrl: editIconUrl.value.trim() || null,
@@ -86,11 +127,12 @@ async function saveEdits() {
 }
 
 async function changeMemberRole(member: WasmAdminSpaceMemberEntry, newRole: Role) {
-  if (!props.xmppClient) return;
+  if (!props.xmppClient || membersLoading.value || membersLoadingMore.value) return;
   memberMutating.value = member.jid;
   try {
     await props.xmppClient.adminSpacesSetRole({
       spaceJid: props.space.space_jid,
+      spaceNode: props.space.space_node,
       memberJid: member.jid,
       role: newRole,
     });
@@ -108,7 +150,10 @@ async function confirmDelete() {
   deleting.value = true;
   deleteError.value = "";
   try {
-    await props.xmppClient.adminSpacesDelete({ spaceJid: props.space.space_jid });
+    await props.xmppClient.adminSpacesDelete({
+      spaceJid: props.space.space_jid,
+      spaceNode: props.space.space_node,
+    });
     showDelete.value = false;
     emit("deleted");
   } catch (err: unknown) {
@@ -119,6 +164,8 @@ async function confirmDelete() {
 }
 
 onMounted(() => { void loadMembers(); });
+
+const hasMoreMembers = computed(() => memberCursor.value !== null);
 </script>
 
 <template>
@@ -160,20 +207,31 @@ onMounted(() => { void loadMembers(); });
         <h3 class="type-section-label text-muted-foreground">Members</h3>
         <div v-if="membersError" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 type-caption text-destructive" role="alert">{{ membersError }}</div>
         <div v-if="membersLoading" class="type-caption text-muted-foreground">Loading…</div>
-        <ul v-else-if="members.length > 0" class="flex flex-col gap-1.5" role="list">
-          <li v-for="m in members" :key="m.jid" class="flex items-center gap-2 rounded-md border border-border bg-card px-2.5 py-2">
-            <span class="flex-1 truncate font-mono type-caption">{{ m.jid }}</span>
-            <select
-              :value="m.role"
-              :disabled="memberMutating === m.jid"
-              class="chat-field-control type-caption"
-              :aria-label="`Role for ${m.jid}`"
-              @change="changeMemberRole(m, ($event.target as HTMLSelectElement).value as Role)"
-            >
-              <option v-for="r in ROLES" :key="r" :value="r">{{ r }}</option>
-            </select>
-          </li>
-        </ul>
+        <div v-else-if="members.length > 0" class="flex flex-col gap-2">
+          <ul class="flex flex-col gap-1.5" role="list">
+            <li v-for="m in members" :key="m.jid" class="flex items-center gap-2 rounded-md border border-border bg-card px-2.5 py-2">
+              <span class="flex-1 truncate font-mono type-caption">{{ m.jid }}</span>
+              <select
+                :value="m.role"
+                :disabled="memberMutating === m.jid || membersLoadingMore || membersLoading"
+                class="chat-field-control type-caption"
+                :aria-label="`Role for ${m.jid}`"
+                @change="changeMemberRole(m, ($event.target as HTMLSelectElement).value as Role)"
+              >
+                <option v-for="r in ROLES" :key="r" :value="r">{{ r }}</option>
+              </select>
+            </li>
+          </ul>
+          <button
+            v-if="hasMoreMembers"
+            type="button"
+            class="chat-action-button type-action self-start disabled:opacity-30"
+            :disabled="membersLoadingMore || memberMutating !== null || membersLoading"
+            @click="loadMoreMembers"
+          >
+            {{ membersLoadingMore ? "Loading…" : "Load more members" }}
+          </button>
+        </div>
         <p v-else class="type-caption text-muted-foreground">No members yet.</p>
       </section>
 

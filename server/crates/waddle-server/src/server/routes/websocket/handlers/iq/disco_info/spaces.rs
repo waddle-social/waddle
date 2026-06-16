@@ -58,22 +58,20 @@ pub(super) async fn handle_spaces_disco_info<'a>(
                 internal_server_error_iq_error("Internal server error."),
             ));
         };
-        if let Ok(space_jid) = format!("{}@{}", node, spaces_jid.domain()).parse::<BareJid>() {
-            if let Ok(Some(metadata)) = state
-                .deps
-                .app_state
-                .spaces_metadata_store
-                .get(&space_jid)
-                .await
+        if let Ok(Some(metadata)) = state
+            .deps
+            .app_state
+            .spaces_metadata_store
+            .get_by_node(&crate::space_identity::SpaceNode::from(node))
+            .await
+        {
+            space.name = metadata.name;
+            space.description = metadata.description;
+            space.icon_url = metadata.icon_url;
+            if let Some(created_at) =
+                chrono::DateTime::<chrono::Utc>::from_timestamp(metadata.created_at, 0)
             {
-                space.name = metadata.name;
-                space.description = metadata.description;
-                space.icon_url = metadata.icon_url;
-                if let Some(created_at) =
-                    chrono::DateTime::<chrono::Utc>::from_timestamp(metadata.created_at, 0)
-                {
-                    space.created_at = created_at.to_rfc3339();
-                }
+                space.created_at = created_at.to_rfc3339();
             }
         }
         let requester_affiliation =

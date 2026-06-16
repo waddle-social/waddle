@@ -18,6 +18,8 @@ const props = defineProps<{
 
 const SEARCH_DEBOUNCE_MS = 200;
 const PAGE_SIZE = 50;
+const SPACE_OPTIONS_PAGE_SIZE = 200;
+type SpaceOption = Pick<WasmAdminSpaceListEntry, "space_jid" | "space_node" | "name">;
 
 const entries = ref<WasmAdminChannelListEntry[]>([]);
 const cursor = ref<string | null>(null);
@@ -26,8 +28,11 @@ const isLoadingMore = ref(false);
 const errorMessage = ref("");
 const prefix = ref("");
 const debouncedPrefix = ref("");
-const spaceFilter = ref<string | null>(null);
-const spaces = ref<WasmAdminSpaceListEntry[]>([]);
+const spaceFilter = ref<SpaceOption | null>(null);
+const spaces = ref<SpaceOption[]>([]);
+const activePrefix = ref("");
+const activeSpaceJid = ref<string | null>(null);
+const activeSpaceNode = ref<string | null>(null);
 const showCreate = ref(false);
 const isSubmitting = ref(false);
 const selected = ref<WasmAdminChannelListEntry | null>(null);
@@ -37,25 +42,56 @@ let requestId = 0;
 async function loadSpaces() {
   if (!props.xmppClient) return;
   try {
-    const page = await props.xmppClient.adminSpacesList({ pageSize: 200 });
-    spaces.value = page.entries;
+    const loaded: SpaceOption[] = [];
+    const seenCursors = new Set<string>();
+    let afterCursor: string | null = null;
+    do {
+      const page = await props.xmppClient.adminSpacesList({
+        pageSize: SPACE_OPTIONS_PAGE_SIZE,
+        afterCursor,
+      });
+      loaded.push(
+        ...page.entries.map((space) => ({
+          space_jid: space.space_jid,
+          space_node: space.space_node,
+          name: space.name,
+        })),
+      );
+      const nextCursor = page.next_cursor ?? null;
+      if (nextCursor && seenCursors.has(nextCursor)) break;
+      if (nextCursor) seenCursors.add(nextCursor);
+      afterCursor = nextCursor;
+    } while (afterCursor);
+    spaces.value = loaded;
+    if (
+      spaceFilter.value &&
+      !loaded.some((space) => space.space_node === spaceFilter.value?.space_node)
+    ) {
+      spaceFilter.value = null;
+    }
   } catch {
     /* ignored — the filter row gracefully degrades to "All" */
   }
 }
 
-async function fetchFirstPage(currentPrefix: string, currentSpace: string | null): Promise<void> {
+async function fetchFirstPage(currentPrefix: string, currentSpace: SpaceOption | null): Promise<void> {
   if (!props.xmppClient) return;
   const localRequestId = ++requestId;
   isLoading.value = true;
+  isLoadingMore.value = false;
+  cursor.value = null;
   errorMessage.value = "";
   try {
     const page: WasmAdminChannelsListResult = await props.xmppClient.adminChannelsList({
-      spaceJid: currentSpace ?? null,
+      spaceJid: currentSpace?.space_jid ?? null,
+      spaceNode: currentSpace?.space_node ?? null,
       prefix: currentPrefix || null,
       pageSize: PAGE_SIZE,
     });
     if (requestId !== localRequestId) return;
+    activePrefix.value = currentPrefix;
+    activeSpaceJid.value = currentSpace?.space_jid ?? null;
+    activeSpaceNode.value = currentSpace?.space_node ?? null;
     entries.value = page.entries;
     cursor.value = page.next_cursor ?? null;
   } catch (err: unknown) {
@@ -67,25 +103,41 @@ async function fetchFirstPage(currentPrefix: string, currentSpace: string | null
 }
 
 async function loadMore(): Promise<void> {
-  if (!props.xmppClient || !cursor.value || isLoadingMore.value) return;
+  if (!props.xmppClient || !cursor.value || isLoading.value || isLoadingMore.value) return;
+  const localRequestId = requestId;
+  const afterCursor = cursor.value;
+  const currentPrefix = activePrefix.value;
+  const currentSpaceJid = activeSpaceJid.value;
+  const currentSpaceNode = activeSpaceNode.value;
   isLoadingMore.value = true;
   try {
     const page = await props.xmppClient.adminChannelsList({
-      spaceJid: spaceFilter.value ?? null,
-      prefix: prefix.value || null,
+      spaceJid: currentSpaceJid,
+      spaceNode: currentSpaceNode,
+      prefix: currentPrefix || null,
       pageSize: PAGE_SIZE,
-      afterCursor: cursor.value,
+      afterCursor,
     });
+    if (
+      requestId !== localRequestId ||
+      cursor.value !== afterCursor ||
+      activePrefix.value !== currentPrefix ||
+      activeSpaceJid.value !== currentSpaceJid ||
+      activeSpaceNode.value !== currentSpaceNode
+    ) {
+      return;
+    }
     entries.value = entries.value.concat(page.entries);
     cursor.value = page.next_cursor ?? null;
   } catch (err: unknown) {
+    if (requestId !== localRequestId) return;
     errorMessage.value = err instanceof Error ? err.message : "Failed to load more channels.";
   } finally {
     isLoadingMore.value = false;
   }
 }
 
-async function onCreate(payload: { name: string; topic?: string | null; spaceJid?: string | null; isPublic?: boolean | null }) {
+async function onCreate(payload: { name: string; topic?: string | null; spaceJid?: string | null; spaceNode?: string | null; isPublic?: boolean | null }) {
   if (!props.xmppClient) return;
   isSubmitting.value = true;
   try {
@@ -137,7 +189,13 @@ const hasMore = computed(() => cursor.value !== null);
 const showEmptyState = computed(
   () => !isLoading.value && entries.value.length === 0 && !errorMessage.value,
 );
-const dialogSpaces = computed(() => spaces.value.map((s) => ({ space_jid: s.space_jid, name: s.name })));
+const dialogSpaces = computed(() =>
+  spaces.value.map((space) => ({
+    space_jid: space.space_jid,
+    space_node: space.space_node,
+    name: space.name,
+  })),
+);
 </script>
 
 <template>
@@ -174,11 +232,11 @@ const dialogSpaces = computed(() => spaces.value.map((s) => ({ space_jid: s.spac
         </button>
         <button
           v-for="s in spaces"
-          :key="s.space_jid"
+          :key="s.space_node"
           type="button"
           class="rounded-full border px-2.5 py-0.5 type-caption transition-colors"
-          :class="spaceFilter === s.space_jid ? 'border-primary/40 bg-primary/10 text-primary' : 'border-border bg-card hover:bg-muted'"
-          @click="spaceFilter = s.space_jid"
+          :class="spaceFilter?.space_node === s.space_node ? 'border-primary/40 bg-primary/10 text-primary' : 'border-border bg-card hover:bg-muted'"
+          @click="spaceFilter = s"
         >
           {{ s.name }}
         </button>
@@ -243,7 +301,7 @@ const dialogSpaces = computed(() => spaces.value.map((s) => ({ space_jid: s.spac
       <button
         type="button"
         class="chat-action-button chat-action-button--secondary type-control"
-        :disabled="isLoadingMore"
+        :disabled="isLoadingMore || isLoading"
         @click="loadMore"
       >
         {{ isLoadingMore ? "Loading…" : "Load more" }}
