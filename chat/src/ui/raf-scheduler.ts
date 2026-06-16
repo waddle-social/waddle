@@ -1,5 +1,5 @@
-type AnimationFrameRequest = (callback: FrameRequestCallback) => number;
-type AnimationFrameCancel = (handle: number) => void;
+export type AnimationFrameRequest = (callback: FrameRequestCallback) => number;
+export type AnimationFrameCancel = (handle: number) => void;
 
 export function requestFrame(callback: FrameRequestCallback): number {
   if (typeof requestAnimationFrame === "function") {

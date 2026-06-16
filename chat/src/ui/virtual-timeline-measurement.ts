@@ -1,4 +1,10 @@
-import { cancelFrame, createRafScheduler, requestFrame } from "./raf-scheduler";
+import {
+  cancelFrame,
+  createRafScheduler,
+  requestFrame,
+  type AnimationFrameCancel,
+  type AnimationFrameRequest,
+} from "./raf-scheduler";
 
 type ListenerTarget = {
   addEventListener: (
@@ -16,9 +22,6 @@ type ListenerTarget = {
 type VisibilityDocument = ListenerTarget & {
   visibilityState?: DocumentVisibilityState;
 };
-
-type AnimationFrameRequest = (callback: FrameRequestCallback) => number;
-type AnimationFrameCancel = (handle: number) => void;
 
 const MEDIA_SETTLE_EVENTS = ["load", "loadedmetadata", "error"] as const;
 
