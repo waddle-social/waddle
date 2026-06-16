@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { createSSRApp, h } from "vue";
+import { createSSRApp, h, nextTick, reactive } from "vue";
 import { parse, compileScript } from "vue/compiler-sfc";
 import { renderToString } from "vue/server-renderer";
 import ts from "typescript";
@@ -126,6 +126,37 @@ describe("Community feed story reactions", () => {
     setupBindingFunction(bindings, "selectStoryReaction")("👍");
 
     expect(focusCount).toBe(1);
+  });
+
+  test("dismisses an open reaction picker when the filter switches to a story-less view", async () => {
+    const bindings = await setupVueComponent(
+      FEED_PANE,
+      feedPaneProps({ stories: [{ id: "story-1", author: "a@x" }] }),
+    );
+    const reactionPickerStoryId = bindings.reactionPickerStoryId as { value: string | null };
+    const activeFilter = bindings.activeFilter as { value: string };
+
+    setupBindingFunction(bindings, "openStoryReactionPicker")("story-1", { currentTarget: { focus() {} } });
+    expect(reactionPickerStoryId.value).toBe("story-1");
+
+    activeFilter.value = "posts";
+    await nextTick();
+
+    expect(reactionPickerStoryId.value).toBeNull();
+  });
+
+  test("dismisses an open reaction picker when its story leaves the feed", async () => {
+    const props = reactive(feedPaneProps({ stories: [{ id: "story-1", author: "a@x" }] }));
+    const bindings = await setupVueComponent(FEED_PANE, props);
+    const reactionPickerStoryId = bindings.reactionPickerStoryId as { value: string | null };
+
+    setupBindingFunction(bindings, "openStoryReactionPicker")("story-1", { currentTarget: { focus() {} } });
+    expect(reactionPickerStoryId.value).toBe("story-1");
+
+    props.stories = [];
+    await nextTick();
+
+    expect(reactionPickerStoryId.value).toBeNull();
   });
 
   test("does not render a react button on non-story feed entries", async () => {

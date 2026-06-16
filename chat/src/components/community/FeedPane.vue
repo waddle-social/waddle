@@ -134,7 +134,7 @@ const activeFilter = ref<FeedSurfaceFilter>(props.initialFilter);
 watch(activeFilter, (filter) => {
   if (filter === "pep" || filter === "posts") {
     activeStoryId.value = null;
-    closeStoryReactionPicker();
+    closeStoryReactionPicker({ restoreFocus: false });
   }
 });
 
@@ -149,7 +149,7 @@ watch(() => props.stories, (stories) => {
   }
   const pickerStoryId = reactionPickerStoryId.value;
   if (pickerStoryId && !stories.some((story) => story.id === pickerStoryId)) {
-    closeStoryReactionPicker();
+    closeStoryReactionPicker({ restoreFocus: false });
   }
 });
 
@@ -308,12 +308,15 @@ function openStoryReactionPicker(storyId: string, event: MouseEvent) {
   reactionPickerStoryId.value = storyId;
 }
 
-function closeStoryReactionPicker() {
+function closeStoryReactionPicker({ restoreFocus = true } = {}) {
   const anchor = reactionPickerAnchor.value;
   reactionPickerStoryId.value = null;
   reactionPickerAnchor.value = null;
   // Return focus to the trigger so keyboard users don't get dropped to <body>.
-  anchor?.focus();
+  // Skip for programmatic dismissals (filter change / story removal): the
+  // anchor is about to leave the DOM, so focusing it would steal focus from
+  // wherever the user currently is and then drop it to <body> on re-render.
+  if (restoreFocus) anchor?.focus();
 }
 
 function selectStoryReaction(emoji: string) {
