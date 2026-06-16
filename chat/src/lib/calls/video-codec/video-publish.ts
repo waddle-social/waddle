@@ -13,7 +13,7 @@ import type {
 } from "livekit-client";
 import type { VideoCodecSupport } from "./support";
 
-export type VideoPublishSource = "camera" | "screen";
+type VideoPublishSource = "camera" | "screen";
 
 /**
  * SVC mode for the VP9 screen-share. `L3T3_KEY` is LiveKit's SVC default and
@@ -46,7 +46,7 @@ const SCREEN_SHARE_CAPTURE: ScreenShareCaptureOptions = {
   contentHint: "detail",
 };
 
-export type VideoPublishPlan = {
+type VideoPublishPlan = {
   /** Capture-side options (resolution cap, contentHint). `null` when the
    *  source uses the room's capture defaults (camera). */
   capture: ScreenShareCaptureOptions | null;

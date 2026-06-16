@@ -11,8 +11,7 @@
  * therefore reports VP9 unavailable and falls back to the VP8 backup.
  */
 
-export const PROBED_VIDEO_CODECS = ["vp9", "vp8"] as const;
-export type ProbedVideoCodec = (typeof PROBED_VIDEO_CODECS)[number];
+type ProbedVideoCodec = "vp9" | "vp8";
 
 export type VideoCodecSupportEnv = {
   /** Lowercased mimeTypes from `RTCRtpSender.getCapabilities('video')`. */
@@ -54,7 +53,7 @@ export function videoCodecSupport(env: VideoCodecSupportEnv): VideoCodecSupport 
  * `RTCRtpReceiver`. Narrowed to what the probe reads and made injectable so
  * the edge reader is testable without real WebRTC globals.
  */
-export type RtpCapabilitiesSource = {
+type RtpCapabilitiesSource = {
   getCapabilities?: (kind: "video") => { codecs?: { mimeType?: string }[] } | null;
 };
 

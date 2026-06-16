@@ -3,7 +3,6 @@ import {
   ConnectionState,
   Room,
   RoomEvent,
-  ScreenSharePresets,
   Track,
   VideoPresets,
   type LocalParticipant,
@@ -17,6 +16,12 @@ import {
   type TrackPublishOptions,
   type VideoCaptureOptions,
 } from "livekit-client";
+import { videoPublishPlan } from "./video-codec/video-publish";
+import {
+  currentVideoCodecSupportEnv,
+  videoCodecSupport,
+  type VideoCodecSupport,
+} from "./video-codec/support";
 import type { LiveKitJoin } from "./types";
 import type { CallConnectionPhase, CallConnectionQuality } from "./connection-quality";
 import {
@@ -55,27 +60,6 @@ type ProcessorCapableTrack = {
  */
 const CAMERA_CAPTURE_RESOLUTION = VideoPresets.h1080.resolution;
 
-/**
- * Screen-share encoding. 1080p@15fps keeps shared code/text crisp at a
- * modest 2.5 Mbps; 15fps is plenty for slides, docs, and scrolling.
- */
-const SCREEN_SHARE_ENCODING = ScreenSharePresets.h1080fps15.encoding;
-
-/**
- * Per-source degradation under CPU / bandwidth pressure. A camera is a
- * talking head: keep motion smooth and shed resolution
- * (`maintain-framerate`). A screen share is usually text: keep it
- * readable and shed frames (`maintain-resolution`). Passed per-publish
- * because the two sources want opposite tradeoffs and `publishDefaults`
- * is a single global value.
- */
-const CAMERA_PUBLISH_OPTIONS: TrackPublishOptions = {
-  degradationPreference: "maintain-framerate",
-};
-const SCREEN_SHARE_PUBLISH_OPTIONS: TrackPublishOptions = {
-  degradationPreference: "maintain-resolution",
-};
-
 export function audioCaptureDefaultsForPrefs(prefs: {
   mic: string | null;
   audioProcessing: AudioProcessingPrefs;
@@ -104,9 +88,8 @@ export function callRoomOptionsForPrefs(prefs: {
       deviceId: prefs.cam ?? undefined,
       resolution: CAMERA_CAPTURE_RESOLUTION,
     },
-    publishDefaults: {
-      screenShareEncoding: SCREEN_SHARE_ENCODING,
-    },
+    // Screen-share encoding/codec is set per-publish by `videoPublishPlan`
+    // (it is capability-dependent), so no global `publishDefaults` here.
   };
 }
 
@@ -319,11 +302,19 @@ export class CallEngine {
   private appliedModelActiveForCapture = false;
   /** Builds a processor for a model; injectable so tests avoid real wasm. */
   private readonly makeAiNoiseProcessor: (model: NoiseModelId) => Promise<AudioNoiseProcessor>;
+  /**
+   * Which video codecs this device can publish, probed once at construction.
+   * Injectable so tests assert the forwarded options for capable vs.
+   * incapable devices without real WebRTC.
+   */
+  private readonly codecSupport: VideoCodecSupport;
 
   constructor(opts?: {
     makeAiNoiseProcessor?: (model: NoiseModelId) => Promise<AudioNoiseProcessor>;
+    videoCodecSupport?: VideoCodecSupport;
   }) {
     this.makeAiNoiseProcessor = opts?.makeAiNoiseProcessor ?? makeNoiseProcessor;
+    this.codecSupport = opts?.videoCodecSupport ?? videoCodecSupport(currentVideoCodecSupportEnv());
   }
 
   /** LiveKit identity of the local participant, populated once
@@ -419,6 +410,7 @@ export class CallEngine {
       room.localParticipant,
       { audio: opts.audio, video: opts.video },
       (source, error) => this.emit("mediaDevicesError", { source, error }),
+      videoPublishPlan({ source: "camera", capability: this.codecSupport }).publish,
     );
     // Re-apply the speaker preference now that the room has remote
     // audio elements to retarget; the engine ignores it on connect
@@ -436,11 +428,8 @@ export class CallEngine {
 
   async setCameraEnabled(enabled: boolean): Promise<void> {
     if (!this.room) return;
-    await this.room.localParticipant.setCameraEnabled(
-      enabled,
-      undefined,
-      CAMERA_PUBLISH_OPTIONS,
-    );
+    const { publish } = videoPublishPlan({ source: "camera", capability: this.codecSupport });
+    await this.room.localParticipant.setCameraEnabled(enabled, undefined, publish);
   }
 
   async setScreenShareEnabled(
@@ -448,18 +437,19 @@ export class CallEngine {
     opts: { audio: boolean },
   ): Promise<void> {
     if (!this.room) return;
+    const { capture, publish } = videoPublishPlan({
+      source: "screen",
+      capability: this.codecSupport,
+    });
+    const captureOptions = { ...capture, audio: opts.audio };
     try {
-      await this.room.localParticipant.setScreenShareEnabled(
-        enabled,
-        { audio: opts.audio },
-        SCREEN_SHARE_PUBLISH_OPTIONS,
-      );
+      await this.room.localParticipant.setScreenShareEnabled(enabled, captureOptions, publish);
     } catch (error) {
       if (!enabled || !opts.audio || !isUnsupportedScreenAudioError(error)) throw error;
       await this.room.localParticipant.setScreenShareEnabled(
         true,
-        { audio: false },
-        SCREEN_SHARE_PUBLISH_OPTIONS,
+        { ...captureOptions, audio: false },
+        publish,
       );
     }
   }
@@ -1072,6 +1062,7 @@ export async function enableRequestedCapture(
   participant: CapturableParticipant,
   opts: { audio: boolean; video: boolean },
   onError: (source: "audio" | "video", error: unknown) => void,
+  cameraPublishOptions: TrackPublishOptions,
 ): Promise<void> {
   if (opts.audio) {
     try {
@@ -1082,7 +1073,7 @@ export async function enableRequestedCapture(
   }
   if (opts.video) {
     try {
-      await participant.setCameraEnabled(true, undefined, CAMERA_PUBLISH_OPTIONS);
+      await participant.setCameraEnabled(true, undefined, cameraPublishOptions);
     } catch (error) {
       onError("video", error);
     }

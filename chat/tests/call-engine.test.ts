@@ -13,6 +13,7 @@ import {
   type RemoteMediaTrack,
 } from "../src/lib/calls/engine";
 import { ConnectionQuality, ConnectionState, Track } from "livekit-client";
+import { videoCodecSupport } from "../src/lib/calls/video-codec/support";
 import type { MicAudioProcessing } from "../src/lib/calls/mic-audio-processing";
 import type { AudioProcessingPrefs } from "../src/lib/calls/device-prefs";
 
@@ -684,10 +685,14 @@ describe("call-engine module", () => {
 });
 
 describe("enableRequestedCapture — best-effort, never ejects", () => {
+  // Camera publish options are irrelevant to the best-effort guarantees here;
+  // any typed value satisfies the (now required) parameter.
+  const cameraOpts = { degradationPreference: "maintain-framerate" as const };
+
   test("enables both tracks when capture succeeds", async () => {
     const stub = captureStub();
     const errors: string[] = [];
-    await enableRequestedCapture(stub, { audio: true, video: true }, (s) => errors.push(s));
+    await enableRequestedCapture(stub, { audio: true, video: true }, (s) => errors.push(s), cameraOpts);
     expect(stub.calls).toEqual(["mic:true", "cam:true"]);
     expect(errors).toEqual([]);
   });
@@ -699,7 +704,7 @@ describe("enableRequestedCapture — best-effort, never ejects", () => {
     const seen: Array<{ source: string; name: string }> = [];
     await enableRequestedCapture(stub, { audio: true, video: true }, (source, error) => {
       seen.push({ source, name: (error as Error).name });
-    });
+    }, cameraOpts);
     expect(stub.calls).toEqual(["mic:true", "cam:true"]); // camera still attempted
     expect(seen).toEqual([{ source: "audio", name: "NotAllowedError" }]);
   });
@@ -707,7 +712,7 @@ describe("enableRequestedCapture — best-effort, never ejects", () => {
   test("a missing camera reports only video and leaves the mic untouched", async () => {
     const stub = captureStub({ camThrows: deviceError("NotFoundError") });
     const seen: string[] = [];
-    await enableRequestedCapture(stub, { audio: true, video: true }, (source) => seen.push(source));
+    await enableRequestedCapture(stub, { audio: true, video: true }, (source) => seen.push(source), cameraOpts);
     expect(seen).toEqual(["video"]);
   });
 
@@ -719,7 +724,7 @@ describe("enableRequestedCapture — best-effort, never ejects", () => {
     });
     const seen: string[] = [];
     await expect(
-      enableRequestedCapture(stub, { audio: true, video: true }, (source) => seen.push(source)),
+      enableRequestedCapture(stub, { audio: true, video: true }, (source) => seen.push(source), cameraOpts),
     ).resolves.toBeUndefined();
     expect(seen).toEqual(["audio", "video"]);
   });
@@ -727,7 +732,7 @@ describe("enableRequestedCapture — best-effort, never ejects", () => {
   test("audio-only call never touches the camera", async () => {
     const stub = captureStub({ camThrows: deviceError("NotFoundError") });
     const seen: string[] = [];
-    await enableRequestedCapture(stub, { audio: true, video: false }, (source) => seen.push(source));
+    await enableRequestedCapture(stub, { audio: true, video: false }, (source) => seen.push(source), cameraOpts);
     expect(stub.calls).toEqual(["mic:true"]);
     expect(seen).toEqual([]);
   });
@@ -1087,27 +1092,22 @@ describe("call-engine — verifies applied mic audio processing", () => {
   });
 });
 
-describe("call-engine — 1080p capture ceiling + per-source degradation", () => {
+describe("call-engine — camera capture ceiling + per-source degradation", () => {
   function videoRoomStub() {
     const camera: Array<{ enabled: boolean; options: unknown; publishOptions: unknown }> = [];
-    const screen: Array<{ enabled: boolean; options: unknown; publishOptions: unknown }> = [];
     return {
       camera,
-      screen,
       room: {
         localParticipant: {
           async setCameraEnabled(enabled: boolean, options?: unknown, publishOptions?: unknown) {
             camera.push({ enabled, options, publishOptions });
-          },
-          async setScreenShareEnabled(enabled: boolean, options?: unknown, publishOptions?: unknown) {
-            screen.push({ enabled, options, publishOptions });
           },
         },
       },
     };
   }
 
-  test("setCameraEnabled publishes the camera with maintain-framerate degradation", async () => {
+  test("setCameraEnabled publishes the camera with maintain-framerate degradation and no codec override", async () => {
     const { CallEngine } = await import("../src/lib/calls/engine");
     const engine = new CallEngine();
     const stub = videoRoomStub();
@@ -1122,22 +1122,7 @@ describe("call-engine — 1080p capture ceiling + per-source degradation", () =>
     ]);
   });
 
-  test("setScreenShareEnabled publishes the share with maintain-resolution degradation", async () => {
-    const { CallEngine } = await import("../src/lib/calls/engine");
-    const engine = new CallEngine();
-    const stub = videoRoomStub();
-    (engine as unknown as { room: unknown }).room = stub.room;
-    await engine.setScreenShareEnabled(true, { audio: false });
-    expect(stub.screen).toEqual([
-      {
-        enabled: true,
-        options: { audio: false },
-        publishOptions: { degradationPreference: "maintain-resolution" },
-      },
-    ]);
-  });
-
-  test("enableRequestedCapture publishes the camera with maintain-framerate degradation", async () => {
+  test("enableRequestedCapture forwards the camera publish options it is given", async () => {
     const camera: Array<{ enabled: boolean; publishOptions: unknown }> = [];
     const stub = {
       async setMicrophoneEnabled() {},
@@ -1145,10 +1130,69 @@ describe("call-engine — 1080p capture ceiling + per-source degradation", () =>
         camera.push({ enabled, publishOptions });
       },
     };
-    await enableRequestedCapture(stub, { audio: false, video: true }, () => {});
-    expect(camera).toEqual([
-      { enabled: true, publishOptions: { degradationPreference: "maintain-framerate" } },
-    ]);
+    const cameraPublishOptions = { degradationPreference: "maintain-framerate" as const };
+    await enableRequestedCapture(stub, { audio: false, video: true }, () => {}, cameraPublishOptions);
+    expect(camera).toEqual([{ enabled: true, publishOptions: cameraPublishOptions }]);
+  });
+});
+
+describe("call-engine — forwards the codec publish plan to the SDK", () => {
+  function videoRoomStub() {
+    const screen: Array<{ enabled: boolean; options: unknown; publishOptions: unknown }> = [];
+    return {
+      screen,
+      room: {
+        localParticipant: {
+          async setScreenShareEnabled(enabled: boolean, options?: unknown, publishOptions?: unknown) {
+            screen.push({ enabled, options, publishOptions });
+          },
+        },
+      },
+    };
+  }
+  const support = (encode: string[], decode: string[]) => videoCodecSupport({ encode, decode });
+  const capable = support(["video/vp8", "video/vp9"], ["video/vp8", "video/vp9"]);
+  const incapable = support(["video/vp8"], ["video/vp8"]);
+
+  test("a VP9-capable device forwards VP9 + SVC + VP8 backup and a 1440p/detail capture", async () => {
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine({ videoCodecSupport: capable });
+    const stub = videoRoomStub();
+    (engine as unknown as { room: unknown }).room = stub.room;
+
+    await engine.setScreenShareEnabled(true, { audio: false });
+
+    expect(stub.screen).toHaveLength(1);
+    expect(stub.screen[0]?.publishOptions).toMatchObject({
+      videoCodec: "vp9",
+      scalabilityMode: "L3T3_KEY",
+      backupCodec: { codec: "vp8" },
+      screenShareEncoding: { maxBitrate: 5_000_000 },
+      degradationPreference: "maintain-resolution",
+    });
+    expect(stub.screen[0]?.options).toMatchObject({
+      audio: false,
+      contentHint: "detail",
+      resolution: { height: 1440 },
+    });
+  });
+
+  test("an incapable device forwards VP8 with no SVC/backup at the same raised ceiling", async () => {
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine({ videoCodecSupport: incapable });
+    const stub = videoRoomStub();
+    (engine as unknown as { room: unknown }).room = stub.room;
+
+    await engine.setScreenShareEnabled(true, { audio: false });
+
+    const publishOptions = stub.screen[0]?.publishOptions as Record<string, unknown>;
+    expect(publishOptions).toMatchObject({
+      videoCodec: "vp8",
+      screenShareEncoding: { maxBitrate: 5_000_000 },
+      degradationPreference: "maintain-resolution",
+    });
+    expect(publishOptions.scalabilityMode).toBeUndefined();
+    expect(publishOptions.backupCodec).toBeUndefined();
   });
 });
 
