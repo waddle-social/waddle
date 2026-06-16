@@ -22,6 +22,7 @@ import { createPinnedEdgeScroller } from "@/lib/pinned-edge-scroll";
 import { useChatWindowVisibility } from "@/shell/window-visibility";
 import { formatTimelineDayDivider, isSameTimelineDay } from "@/channels/timeline";
 import { useCallAnchorCardState } from "@/lib/call-thread-anchor";
+import { buildReplyChildThreadTargets, resolveReplyChildThreadTarget } from "@/lib/thread-child-target";
 import type { CallMedia } from "@/lib/calls/types";
 
 const props = defineProps<{
@@ -120,6 +121,9 @@ const newestThreadMessageId = computed(() =>
   activeEntry.value?.directChildren.at(-1)?.id
     ?? activeEntry.value?.root?.id
     ?? null,
+);
+const replyChildThreadTargets = computed(() =>
+  buildReplyChildThreadTargets(props.threadIndex, activeThreadId.value),
 );
 
 // Burst window matches the main feed (ContentArea.vue): same author + < 5 min
@@ -591,9 +595,20 @@ function joinThreadCallAnchor() {
   emit("joinChannelCall", props.channelId ?? null, props.roomJid, state.media);
 }
 
+function replyChildThreadTarget(message: TimelineMessage) {
+  return resolveReplyChildThreadTarget(replyChildThreadTargets.value, message);
+}
+
+function replyChildThreadCount(message: TimelineMessage): number {
+  return replyChildThreadTarget(message).count;
+}
+
+function replyChildThreadId(message: TimelineMessage): string {
+  return replyChildThreadTarget(message).threadId;
+}
+
 function replyChildHasNestedThread(message: TimelineMessage): boolean {
-  const entry = props.threadIndex.get(message.id);
-  return !!entry && entry.count > 0;
+  return replyChildThreadCount(message) > 0;
 }
 </script>
 
@@ -789,6 +804,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
             :invoke-extension-action="props.invokeExtensionAction"
             :link-preview-lookup="props.linkPreviewLookup"
             :link-preview-scope="props.linkPreviewScope"
+            :thread-action-thread-id="activeThreadId ?? message.id"
             :call-room-jid="props.roomJid ?? null"
             :call-channel-id="props.channelId ?? null"
             :hide-call-anchor-card="!!threadCallAnchorState"
@@ -819,6 +835,9 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
             <div class="chat-day-divider__rule" />
           </div>
           <div class="relative group/thread-child">
+            <!-- In ThreadPanel, the card's thread action targets an existing
+                 XEP-0201 child thread when present, falling back to this row's
+                 message id to start an empty child thread. -->
             <MessageCard
               :message="message"
               :current-user="currentUser"
@@ -829,7 +848,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
               :presence="presenceFor(message.author)"
               :last-seen="roomLastSeen[message.author]"
               :author-jid="authorJidByNick?.[message.author]"
-              :thread-reply-count="threadIndex.get(message.id)?.count ?? 0"
+              :thread-reply-count="replyChildThreadCount(message)"
               :grouped="isGroupedFollowUp(message.id)"
               hide-thread-chip
               hide-reply-chip
@@ -837,6 +856,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
               :invoke-extension-action="props.invokeExtensionAction"
               :link-preview-lookup="props.linkPreviewLookup"
               :link-preview-scope="props.linkPreviewScope"
+              :thread-action-thread-id="replyChildThreadId(message)"
               :call-room-jid="props.roomJid ?? null"
               :call-channel-id="props.channelId ?? null"
               @edit="(id, body, m, r, lp) => emit('editMessage', id, body, m, r, lp)"
@@ -850,10 +870,10 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
             <button
               type="button"
               class="type-caption inline-flex items-center gap-1 text-primary/80 hover:text-primary transition-colors"
-              @click="onOpenThreadFromCard(message.id)"
+              @click="onOpenThreadFromCard(replyChildThreadId(message))"
             >
               <CornerDownRight class="w-3 h-3" />
-              <span>{{ threadIndex.get(message.id)?.count ?? 0 }} in sub-thread</span>
+              <span>{{ replyChildThreadCount(message) }} in sub-thread</span>
             </button>
           </div>
           </div>

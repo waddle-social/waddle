@@ -156,6 +156,7 @@ const {
   sendCallChatMessage,
   sendGif,
   openThread,
+  pushThreadFromStack,
   pushThread,
   popThreadTo,
   closeThreadPanel,
@@ -1020,7 +1021,7 @@ onUnmounted(() => {
               :link-preview-scope="threadPanelIsDm ? activeDmPeer?.peerJid ?? null : activeChannelRoomJid"
               @close="closeThreadPanel"
               @pop-to="popThreadTo"
-              @push-thread="pushThread"
+              @push-thread="(threadId) => pushThreadFromStack(activeThreadStack.slice(0, -1), threadId)"
               @edit-message="editActiveMessage"
               @retract-message="retractActiveMessage"
               @react-message="reactActiveMessage"

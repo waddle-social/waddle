@@ -87,6 +87,39 @@ describe("useMessageThreads", () => {
     expect(rootEntry!.lastTs).toBe("2026-01-01T00:03:00Z");
   });
 
+  test("records parent thread ids for arbitrary XEP-0201 child threads", () => {
+    const messages = ref<TimelineMessage[]>([
+      makeMessage({ id: "root", createdAt: "2026-01-01T00:00:00Z", body: "root" }),
+      makeMessage({ id: "c1", threadId: "root", createdAt: "2026-01-01T00:01:00Z", body: "reply" }),
+      makeMessage({
+        id: "sub1",
+        threadId: "child-thread-id",
+        parentThreadId: "root",
+        replyTo: { id: "c1", author: "alice" },
+        createdAt: "2026-01-01T00:02:00Z",
+        body: "nested",
+      }),
+      makeMessage({
+        id: "sub2",
+        threadId: "child-thread-id",
+        parentThreadId: "root",
+        replyTo: { id: "sub1", author: "alice" },
+        createdAt: "2026-01-01T00:03:00Z",
+        body: "nested 2",
+      }),
+    ]);
+    const { index } = useMessageThreads(messages);
+    const rootEntry = index.value.get("root");
+    const subEntry = index.value.get("child-thread-id");
+    expect(subEntry).toBeTruthy();
+    expect(subEntry!.parentThreadId).toBe("root");
+    expect(subEntry!.root?.id).toBe("sub1");
+    expect(subEntry!.directChildren.map((m) => m.id)).toEqual(["sub2"]);
+    expect(rootEntry).toBeTruthy();
+    expect(rootEntry!.count).toBe(3);
+    expect(rootEntry!.allDescendants.map((m) => m.id)).toEqual(["c1", "sub1", "sub2"]);
+  });
+
   test("getEntry returns undefined for unknown ids", () => {
     const messages = ref<TimelineMessage[]>([]);
     const { getEntry } = useMessageThreads(messages);
@@ -95,20 +128,23 @@ describe("useMessageThreads", () => {
   });
 
   test("resolveEntry synthesises an empty entry for a freshly-started sub-thread", () => {
-    // User clicks "Start sub-thread" on a reply (`c1`) before typing. The
-    // sub-thread has zero messages, so there's no index entry — but the
+    // User enters a reply's child thread from the thread action before typing.
+    // The sub-thread has zero messages, so there's no index entry — but the
     // panel still needs to render the root + composer instead of "Loading…".
     const messages = ref<TimelineMessage[]>([
-      makeMessage({ id: "root", threadId: "root", createdAt: "2026-01-01T00:00:00Z", body: "root msg" }),
+      makeMessage({ id: "root", createdAt: "2026-01-01T00:00:00Z", body: "root msg" }),
       makeMessage({ id: "c1", threadId: "root", createdAt: "2026-01-01T00:01:00Z", body: "reply" }),
     ]);
-    const { getEntry, resolveEntry } = useMessageThreads(messages);
+    const { index, getEntry, resolveEntry } = useMessageThreads(messages);
     expect(getEntry("c1")).toBeUndefined();
     const entry = resolveEntry("c1");
     expect(entry).toBeTruthy();
     expect(entry!.root?.id).toBe("c1");
     expect(entry!.directChildren).toEqual([]);
+    expect(entry!.allDescendants).toEqual([]);
     expect(entry!.count).toBe(0);
+    expect(entry!.lastTs).toBe("2026-01-01T00:01:00Z");
+    expect(index.value.get("root")!.directChildren.map((m) => m.id)).toEqual(["c1"]);
   });
 
   test("resolveEntry returns undefined when the id doesn't match any loaded message", () => {
