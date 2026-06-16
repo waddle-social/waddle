@@ -164,7 +164,7 @@ defineExpose({ scrollElement, scrollToMessageId, scrollToPinnedEdge });
     ref="scrollElement"
     class="chat-pane-scroll chat-message-scroll flex-1 min-h-0 px-[var(--chat-content-inline)]"
     :aria-label="ariaLabel"
-    @scroll="(event) => { emit('scroll', event); maybeLoadOlder(); }"
+    @scroll.passive="(event) => { emit('scroll', event); maybeLoadOlder(); }"
   >
     <div :class="contentClass" :style="{ height: `${totalSize}px`, position: 'relative' }">
       <div

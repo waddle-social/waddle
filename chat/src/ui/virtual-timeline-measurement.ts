@@ -1,3 +1,5 @@
+import { cancelFrame, createRafScheduler, requestFrame } from "./raf-scheduler";
+
 type ListenerTarget = {
   addEventListener: (
     type: string,
@@ -20,21 +22,6 @@ type AnimationFrameCancel = (handle: number) => void;
 
 const MEDIA_SETTLE_EVENTS = ["load", "loadedmetadata", "error"] as const;
 
-function requestFrame(callback: FrameRequestCallback): number {
-  if (typeof requestAnimationFrame === "function") {
-    return requestAnimationFrame(callback);
-  }
-  return setTimeout(() => callback(Date.now()), 16) as unknown as number;
-}
-
-function cancelFrame(handle: number): void {
-  if (typeof cancelAnimationFrame === "function") {
-    cancelAnimationFrame(handle);
-    return;
-  }
-  clearTimeout(handle as unknown as ReturnType<typeof setTimeout>);
-}
-
 export function createVirtualTimelineMeasureScheduler(
   measure: () => void,
   options: {
@@ -42,33 +29,8 @@ export function createVirtualTimelineMeasureScheduler(
     cancelAnimationFrame?: AnimationFrameCancel;
   } = {},
 ) {
-  const request = options.requestAnimationFrame ?? requestFrame;
-  const cancel = options.cancelAnimationFrame ?? cancelFrame;
-  let frame: number | null = null;
-  let disposed = false;
-
-  function clearPendingFrame() {
-    if (frame === null) return;
-    cancel(frame);
-    frame = null;
-  }
-
-  function scheduleMeasure() {
-    if (disposed || frame !== null) return;
-    frame = request(() => {
-      frame = request(() => {
-        frame = null;
-        if (!disposed) measure();
-      });
-    });
-  }
-
-  function disconnect() {
-    disposed = true;
-    clearPendingFrame();
-  }
-
-  return { scheduleMeasure, disconnect };
+  const scheduler = createRafScheduler(measure, options);
+  return { scheduleMeasure: scheduler.schedule, disconnect: scheduler.disconnect };
 }
 
 export function createVirtualTimelineElementMeasureScheduler(

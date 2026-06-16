@@ -32,6 +32,7 @@ import type { MessageThreadIndex } from "@/channels/threads";
 import { formatTimelineStamp, formatTimelineDayDivider, isFeedTimelineMessage, isSameTimelineDay } from "@/channels/timeline";
 import { useExtensionLauncher } from "@/channels/extension-launcher";
 import { useJumpToLiveEdge } from "@/ui/use-jump-to-live-edge";
+import { createRafScheduler } from "@/ui/raf-scheduler";
 import { ArrowDown, ArrowUp } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import ChatHeader, { type ChannelHeaderMember } from "@/components/chat/ChatHeader.vue";
@@ -385,9 +386,18 @@ const jumpToLive = useJumpToLiveEdge({
   scrollToEdge: (mode) => virtualTimelineRef.value?.scrollToPinnedEdge(mode) ?? false,
 });
 
-function onMessagesScroll() {
+// Scroll fires far more often than once per frame, and both the
+// day-marker probe (querySelectorAll + getBoundingClientRect per marker)
+// and the jump-to-live distance check read layout. Running them inline on
+// every scroll event — interleaved with the virtualizer's per-scroll row
+// writes — forces repeated synchronous reflow and drops frames. Coalesce
+// the layout-reading work into a single settled-layout frame instead.
+const scrollWorkScheduler = createRafScheduler(() => {
   updateCurrentDayMarker();
   jumpToLive.updateDistance();
+});
+function onMessagesScroll() {
+  scrollWorkScheduler.schedule();
 }
 const currentDayMarkerLabel = ref("");
 const composerRef = ref<MessageComposerHandle | null>(null);
@@ -768,6 +778,7 @@ watch(() => props.isSending, (sending, prevSending) => {
 
 onBeforeUnmount(() => {
   clearReconnectedNotice();
+  scrollWorkScheduler.disconnect();
   if (replyJumpNoticeTimeout) {
     clearTimeout(replyJumpNoticeTimeout);
   }
@@ -1248,7 +1259,7 @@ function dayDividerLabel(createdAt: string): string {
       v-if="isLoadingMessages || !channel && !dmPeer || feedMessages.length === 0"
       :ref="setMessagesContainer"
       class="chat-pane-scroll chat-message-scroll flex-1 min-h-0 px-[var(--chat-content-inline)]"
-      @scroll="updateCurrentDayMarker"
+      @scroll="onMessagesScroll"
     >
       <div v-if="isLoadingMessages" class="chat-message-lane flex flex-col gap-1 py-6" aria-busy="true" aria-label="Loading messages">
         <div
