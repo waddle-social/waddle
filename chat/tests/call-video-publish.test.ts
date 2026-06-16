@@ -8,6 +8,8 @@ const capable = videoCodecSupport({
   decode: ["video/vp8", "video/vp9"],
 });
 const incapable = videoCodecSupport({ encode: ["video/vp8"], decode: ["video/vp8"] });
+const noCodecs = videoCodecSupport({ encode: [], decode: [] });
+const vp9OnlyEncode = videoCodecSupport({ encode: ["video/vp9"], decode: ["video/vp9"] });
 
 describe("videoPublishPlan — screen-share on a VP9-capable device", () => {
   test("publishes VP9", () => {
@@ -63,6 +65,55 @@ describe("videoPublishPlan — screen-share on a VP9-incapable device (iOS)", ()
     expect(fallback.publish.screenShareEncoding).toEqual(best.publish.screenShareEncoding);
     expect(fallback.publish.degradationPreference).toBe("maintain-resolution");
     expect(fallback.capture).toEqual(best.capture);
+  });
+});
+
+describe("videoPublishPlan — codec gating matches the probe (no codec the device can't do)", () => {
+  test("when neither VP9 nor VP8 is reported available, leave videoCodec unset for LiveKit to pick", () => {
+    // e.g. a platform without getCapabilities: forcing a specific codec could
+    // override LiveKit's own (working) default with one the browser can't do.
+    const plan = videoPublishPlan({ source: "screen", capability: noCodecs });
+    expect(plan.publish.videoCodec).toBeUndefined();
+    expect(plan.publish.backupCodec).toBeUndefined();
+    expect(plan.publish.backupCodecPolicy).toBeUndefined();
+  });
+
+  test("VP9 without an available VP8 baseline publishes VP9 with no backup", () => {
+    const plan = videoPublishPlan({ source: "screen", capability: vp9OnlyEncode });
+    expect(plan.publish.videoCodec).toBe("vp9");
+    expect(plan.publish.backupCodec).toBeUndefined();
+    expect(plan.publish.backupCodecPolicy).toBeUndefined();
+  });
+});
+
+describe("videoPublishPlan — Safari-17 capture-resolution bug", () => {
+  test("omits the explicit resolution when the browser can't be constrained, keeping contentHint", () => {
+    const plan = videoPublishPlan({
+      source: "screen",
+      capability: capable,
+      screenCapture: { canConstrainResolution: false },
+    });
+    expect(plan.capture?.resolution).toBeUndefined();
+    expect(plan.capture?.contentHint).toBe("detail");
+  });
+
+  test("applies the 1440p cap when the browser can be constrained", () => {
+    const plan = videoPublishPlan({
+      source: "screen",
+      capability: capable,
+      screenCapture: { canConstrainResolution: true },
+    });
+    expect(plan.capture?.resolution?.height).toBe(1440);
+  });
+});
+
+describe("videoPublishPlan — pure: returns fresh objects callers can't alias", () => {
+  test("two screen plans don't share mutable option objects", () => {
+    const a = videoPublishPlan({ source: "screen", capability: capable });
+    const b = videoPublishPlan({ source: "screen", capability: capable });
+    expect(a.publish).not.toBe(b.publish);
+    expect(a.capture).not.toBe(b.capture);
+    expect(a.publish.screenShareEncoding).not.toBe(b.publish.screenShareEncoding);
   });
 });
 

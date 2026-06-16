@@ -11,8 +11,10 @@ import type {
   ScreenShareCaptureOptions,
   TrackPublishOptions,
   VideoEncoding,
+  VideoResolution,
 } from "livekit-client";
 import type { VideoCodecSupport } from "./support";
+import type { ScreenCaptureEnv } from "./screen-capture-env";
 
 type VideoPublishSource = "camera" | "screen";
 
@@ -43,18 +45,9 @@ const SCREEN_SHARE_ENCODING: VideoEncoding = {
  * Capture ceiling for the shared screen: ~1440p (2560×1440, the 16:9 QHD
  * frame). LiveKit maps `resolution` to an `ideal`/`max` capture constraint,
  * so it caps a larger display without upscaling a smaller source (not
- * force-downscaled). `contentHint: "detail"` favours sharpness over motion
- * smoothness — the right call for text and code. Note this hint only takes
- * effect on the VP8 fallback path: for the VP9 SVC path LiveKit force-sets
- * the track's contentHint to `"motion"` (a Chrome screenshare-SVC
- * workaround), so VP9 screen-share rides the camera-style encode path. We
- * still request `"detail"` because it is honoured for the VP8 fallback and
- * harmless for VP9.
+ * force-downscaled).
  */
-const SCREEN_SHARE_CAPTURE: ScreenShareCaptureOptions = {
-  resolution: { width: 2560, height: 1440, frameRate: 30 },
-  contentHint: "detail",
-};
+const SCREEN_SHARE_RESOLUTION: VideoResolution = { width: 2560, height: 1440, frameRate: 30 };
 
 type VideoPublishPlan = {
   /** Capture-side options (resolution cap, contentHint). `null` when the
@@ -65,29 +58,52 @@ type VideoPublishPlan = {
   publish: TrackPublishOptions;
 };
 
-function screenSharePlan(capability: VideoCodecSupport): VideoPublishPlan {
-  // Capable devices get VP9 + SVC + an explicit VP8 backup; incapable devices
-  // fall back to VP8 — but at the SAME raised bitrate and resolution, so the
-  // fallback is first-class, not merely working.
-  const codec: TrackPublishOptions = capability.vp9.available
-    ? {
-        videoCodec: "vp9",
-        scalabilityMode: SCREEN_SHARE_SVC_MODE,
-        // Send VP9 and the VP8 backup at the same time (multi-codec simulcast)
-        // rather than the default regression policy. Under regression a single
-        // VP8-only (iOS) subscriber forces the whole room down to VP8; with
-        // simulcast, capable subscribers keep VP9 — "everybody good, capable
-        // devices better" — at the cost of a second encode on the (already
-        // capability-gated) publisher.
-        backupCodec: { codec: "vp8" },
-        backupCodecPolicy: BackupCodecPolicy.SIMULCAST,
-      }
-    : { videoCodec: "vp8" };
+/**
+ * Per-codec publish options for the screen share, gated on what the device can
+ * actually do (never force a codec the probe reports unavailable):
+ *  - VP9-capable → VP9 + SVC, plus an explicit VP8 backup published *alongside*
+ *    via multi-codec simulcast (`SIMULCAST`) rather than the default regression
+ *    policy. Under regression a single VP8-only (iOS) subscriber forces the
+ *    whole room down to VP8; with simulcast capable subscribers keep VP9 —
+ *    "everybody good, capable devices better" — at the cost of a second encode
+ *    on the (already capability-gated) publisher. The explicit `backupCodec` is
+ *    load-bearing: simulcast only emits the second codec when it is set.
+ *  - VP8-only → VP8 at the same raised ceiling (first-class fallback).
+ *  - neither reported available (e.g. no `getCapabilities`) → leave `videoCodec`
+ *    unset so LiveKit picks its own working default rather than us forcing one.
+ */
+function screenShareCodec(capability: VideoCodecSupport): TrackPublishOptions {
+  if (capability.vp9.available) {
+    return {
+      videoCodec: "vp9",
+      scalabilityMode: SCREEN_SHARE_SVC_MODE,
+      ...(capability.vp8.available
+        ? { backupCodec: { codec: "vp8" }, backupCodecPolicy: BackupCodecPolicy.SIMULCAST }
+        : {}),
+    };
+  }
+  if (capability.vp8.available) return { videoCodec: "vp8" };
+  return {};
+}
+
+function screenSharePlan(
+  capability: VideoCodecSupport,
+  screen: ScreenCaptureEnv,
+): VideoPublishPlan {
+  // `contentHint: "detail"` favours sharpness over motion smoothness — the
+  // right call for text/code. It is honoured on the VP8 path; for VP9 SVC
+  // LiveKit force-sets the track's hint to "motion" (a Chrome screenshare-SVC
+  // workaround), so it is harmless there. The resolution cap is omitted when
+  // the browser can't be constrained (Safari 17, see ScreenCaptureEnv).
+  const capture: ScreenShareCaptureOptions = {
+    contentHint: "detail",
+    ...(screen.canConstrainResolution ? { resolution: { ...SCREEN_SHARE_RESOLUTION } } : {}),
+  };
   return {
-    capture: SCREEN_SHARE_CAPTURE,
+    capture,
     publish: {
-      ...codec,
-      screenShareEncoding: SCREEN_SHARE_ENCODING,
+      ...screenShareCodec(capability),
+      screenShareEncoding: { ...SCREEN_SHARE_ENCODING },
       degradationPreference: "maintain-resolution",
     },
   };
@@ -107,6 +123,10 @@ function cameraPlan(): VideoPublishPlan {
 export function videoPublishPlan(args: {
   source: VideoPublishSource;
   capability: VideoCodecSupport;
+  /** Screen-capture environment; defaults to "can constrain" (the common,
+   *  non-Safari-17 case). Ignored for the camera source. */
+  screenCapture?: ScreenCaptureEnv;
 }): VideoPublishPlan {
-  return args.source === "screen" ? screenSharePlan(args.capability) : cameraPlan();
+  if (args.source !== "screen") return cameraPlan();
+  return screenSharePlan(args.capability, args.screenCapture ?? { canConstrainResolution: true });
 }

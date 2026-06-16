@@ -22,6 +22,7 @@ import {
   videoCodecSupport,
   type VideoCodecSupport,
 } from "./video-codec/support";
+import { currentScreenCaptureEnv } from "./video-codec/screen-capture-env";
 import type { LiveKitJoin } from "./types";
 import type { CallConnectionPhase, CallConnectionQuality } from "./connection-quality";
 import {
@@ -440,6 +441,7 @@ export class CallEngine {
     const { capture, publish } = videoPublishPlan({
       source: "screen",
       capability: this.codecSupport,
+      screenCapture: currentScreenCaptureEnv(),
     });
     const captureOptions = { ...capture, audio: opts.audio };
     try {

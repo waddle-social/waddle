@@ -14,9 +14,11 @@
 type ProbedVideoCodec = "vp9" | "vp8";
 
 export type VideoCodecSupportEnv = {
-  /** Lowercased mimeTypes from `RTCRtpSender.getCapabilities('video')`. */
+  /** mimeTypes from `RTCRtpSender.getCapabilities('video')`, any casing
+   *  (matched case-insensitively; the edge reader passes them through raw). */
   encode: readonly string[];
-  /** Lowercased mimeTypes from `RTCRtpReceiver.getCapabilities('video')`. */
+  /** mimeTypes from `RTCRtpReceiver.getCapabilities('video')`, any casing
+   *  (matched case-insensitively; the edge reader passes them through raw). */
   decode: readonly string[];
 };
 
