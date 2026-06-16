@@ -29,7 +29,8 @@ export type LiveKitJoin = {
 export type ExternalService = {
   serviceType: "stun" | "turn" | "turns";
   host: string;
-  port: number;
+  /** RECOMMENDED but optional in XEP-0215; omitted ⇒ ICE URI uses the scheme default. */
+  port?: number;
   transport?: "udp" | "tcp";
   username?: string;
   password?: string;

@@ -2308,6 +2308,17 @@ export class BrowserXmppClient {
         );
         return [];
       }
+      if (!Array.isArray(result)) {
+        // Bundle drift: the wasm method's signature is `Promise<any>`, so a
+        // Rust-side shape regression would otherwise fall through silently.
+        // Surface it (mirrors `fetchVapidPublicKey`'s shape hard-check).
+        console.warn(
+          "[xmpp] fetch_external_services returned a non-array value; " +
+          "connecting with LiveKit's default ICE servers:",
+          result,
+        );
+        return [];
+      }
       return coerceExternalServices(result);
     } catch (error) {
       if (timedOut) return [];

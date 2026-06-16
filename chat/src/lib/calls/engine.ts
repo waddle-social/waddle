@@ -394,10 +394,6 @@ export class CallEngine {
     if (!grant.ok) {
       throw new Error(`Invalid LiveKit join token: ${grant.reason}`);
     }
-    // Reserve the engine synchronously now that we're committed to building a
-    // Room; cleared on the connect-failure path and once `this.room` is set.
-    this.connecting = true;
-    const generation = ++this.connectGeneration;
     const prefs = $devicePrefs.get();
     // Seed the AI-filter desired model from prefs so it re-applies on this
     // call's mic publish; start each call with a clean failure guard and
@@ -427,6 +423,12 @@ export class CallEngine {
       opts.iceServers && opts.iceServers.length > 0
         ? { rtcConfig: { iceServers: opts.iceServers } }
         : undefined;
+    // Reserve the engine now — AFTER the synchronous setup above, which can
+    // throw (`makeRoom`/`callRoomOptionsForPrefs` reach for WebRTC globals).
+    // There is no `await` between here and the guard at the top, so this still
+    // closes the concurrent-connect window without risking a stuck flag.
+    this.connecting = true;
+    const generation = ++this.connectGeneration;
     try {
       await room.connect(join.url, join.token, connectOptions);
     } catch (err) {

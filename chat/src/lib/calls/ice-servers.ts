@@ -24,7 +24,9 @@ export function coerceExternalServices(raw: unknown): ExternalService[] {
     if (typeof serviceType !== "string" || !SERVICE_TYPES.has(serviceType as ExternalService["serviceType"])) {
       continue;
     }
-    if (typeof candidate.host !== "string" || typeof candidate.port !== "number") continue;
+    if (typeof candidate.host !== "string") continue;
+    // `port` is optional (XEP-0215); accept a number, ignore anything else.
+    const port = typeof candidate.port === "number" ? candidate.port : undefined;
     const transport =
       typeof candidate.transport === "string" && TRANSPORTS.has(candidate.transport as never)
         ? (candidate.transport as ExternalService["transport"])
@@ -32,7 +34,7 @@ export function coerceExternalServices(raw: unknown): ExternalService[] {
     services.push({
       serviceType: serviceType as ExternalService["serviceType"],
       host: candidate.host,
-      port: candidate.port,
+      port,
       transport,
       username: optionalString(candidate.username),
       password: optionalString(candidate.password),
@@ -62,10 +64,11 @@ export function iceServersFromExternalServices(
 ): RTCIceServer[] {
   const iceServers: RTCIceServer[] = [];
   for (const service of services) {
+    const hostPort = formatHostPort(service.host, service.port);
     if (service.serviceType === "stun") {
       // STUN URIs take no `?transport` parameter (RFC 7064) and never carry
       // credentials.
-      iceServers.push({ urls: `stun:${service.host}:${service.port}` });
+      iceServers.push({ urls: `stun:${hostPort}` });
       continue;
     }
     // turn / turns require credentials to be usable as a relay.
@@ -74,8 +77,18 @@ export function iceServersFromExternalServices(
     }
     // The `?transport` parameter is turn-specific (RFC 7065).
     const transportQuery = service.transport ? `?transport=${service.transport}` : "";
-    const urls = `${service.serviceType}:${service.host}:${service.port}${transportQuery}`;
+    const urls = `${service.serviceType}:${hostPort}${transportQuery}`;
     iceServers.push({ urls, username: service.username, credential: service.password });
   }
   return iceServers;
+}
+
+/**
+ * Build the `host[:port]` portion of an ICE URI. IPv6 literals (which contain
+ * `:`) MUST be bracketed (RFC 3986 / RFC 7064) so the port colon is
+ * unambiguous; a missing port is omitted so the scheme default applies.
+ */
+function formatHostPort(host: string, port?: number): string {
+  const bracketed = host.includes(":") ? `[${host}]` : host;
+  return port === undefined ? bracketed : `${bracketed}:${port}`;
 }

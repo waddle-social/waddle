@@ -80,6 +80,20 @@ describe("iceServersFromExternalServices", () => {
   test("returns an empty array for empty input", () => {
     expect(iceServersFromExternalServices([])).toEqual([]);
   });
+
+  test("brackets IPv6 literal hosts in the URI", () => {
+    const [turnsServer] = iceServersFromExternalServices([turns({ host: "2001:db8::1" })]);
+    expect(turnsServer.urls).toBe("turns:[2001:db8::1]:443?transport=tcp");
+    const [stunServer] = iceServersFromExternalServices([stun({ host: "2001:db8::1" })]);
+    expect(stunServer.urls).toBe("stun:[2001:db8::1]:3478");
+  });
+
+  test("omits the port from the URI when the service has none", () => {
+    const [stunServer] = iceServersFromExternalServices([stun({ port: undefined })]);
+    expect(stunServer.urls).toBe("stun:turn.waddle.social");
+    const [turnsServer] = iceServersFromExternalServices([turns({ port: undefined })]);
+    expect(turnsServer.urls).toBe("turns:turn.waddle.social?transport=tcp");
+  });
 });
 
 describe("coerceExternalServices", () => {
@@ -108,11 +122,10 @@ describe("coerceExternalServices", () => {
     expect(services[1]).toMatchObject({ serviceType: "stun", port: 3478 });
   });
 
-  test("drops entries with an unknown type or missing/ill-typed host/port", () => {
+  test("drops entries with an unknown type or missing host", () => {
     const services = coerceExternalServices([
       { serviceType: "ftp", host: "ftp.waddle.social", port: 21, restricted: false },
       { serviceType: "stun", port: 3478, restricted: false },
-      { serviceType: "stun", host: "turn.waddle.social", port: "3478", restricted: false },
       { serviceType: "stun", host: "turn.waddle.social", port: 3478, restricted: false },
     ]);
     expect(services).toHaveLength(1);
@@ -124,5 +137,15 @@ describe("coerceExternalServices", () => {
       { serviceType: "stun", host: "turn.waddle.social", port: 3478, transport: "sctp", restricted: false },
     ]);
     expect(service.transport).toBeUndefined();
+  });
+
+  test("keeps an entry with an omitted or ill-typed port (port becomes undefined)", () => {
+    const services = coerceExternalServices([
+      { serviceType: "stun", host: "a.waddle.social", restricted: false },
+      { serviceType: "stun", host: "b.waddle.social", port: "3478", restricted: false },
+    ]);
+    expect(services).toHaveLength(2);
+    expect(services[0].port).toBeUndefined();
+    expect(services[1].port).toBeUndefined();
   });
 });
