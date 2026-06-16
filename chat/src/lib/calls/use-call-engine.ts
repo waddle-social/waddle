@@ -146,11 +146,12 @@ async function sampleAudioTrackMediaPath(
 ): Promise<AudioMediaPathResult | null> {
   // `send` is the local mic, `recv` is a remote participant's mic; the
   // publicationSid is unique per track, scoped by direction so a stale key from
-  // a prior call never collides.
+  // a prior call never collides. Same `local:`/`remote:` scheme as the
+  // diagnostics-dialog poller, so the two are easy to correlate.
   const key =
     direction === "send"
       ? `local:${track.source}:${track.publicationSid}`
-      : `recv:${track.participantIdentity}:${track.source}:${track.publicationSid}`;
+      : `remote:${track.participantIdentity}:${track.source}:${track.publicationSid}`;
   try {
     const report = await track.track.getRTCStatsReport();
     if (!report) return null;

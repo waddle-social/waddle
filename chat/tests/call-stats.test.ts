@@ -514,6 +514,24 @@ describe("summarizeAudioStats — outbound (send) audio", () => {
     const { summary } = summarizeAudioStats(report([next, video, opus]), "send", prev);
     expect(summary.bitrateKbps).toBe(64); // not inflated by the 5 Mbps video
   });
+
+  test("a genuine idle tick (bytes unchanged, clock advanced) reads 0 → 'silent'", () => {
+    const prev: CallStatSample = { bytes: 100_000, timestampMs: 10_000 };
+    const next = { ...outbound, bytesSent: 100_000, timestamp: 11_000 };
+    const { summary } = summarizeAudioStats(report([next, opus]), "send", prev);
+    expect(summary.bitrateKbps).toBe(0);
+    expect(audioBitrateBand(summary.bitrateKbps)).toBe("silent");
+  });
+
+  test("a byte-counter reset (negative delta) is unmeasured (null), not a false 'silent'", () => {
+    // A WebRTC counter reset (track replaced / ICE restart) must not beacon as
+    // DTX silence — it is no measurement this tick, matching the first-poll null.
+    const prev: CallStatSample = { bytes: 500_000, timestampMs: 10_000 };
+    const next = { ...outbound, bytesSent: 1_000, timestamp: 11_000 };
+    const { summary } = summarizeAudioStats(report([next, opus]), "send", prev);
+    expect(summary.bitrateKbps).toBeNull();
+    expect(audioBitrateBand(summary.bitrateKbps)).toBeNull();
+  });
 });
 
 describe("summarizeAudioStats — inbound (recv) audio and ICE path", () => {

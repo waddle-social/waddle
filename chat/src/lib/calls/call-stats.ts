@@ -241,19 +241,22 @@ function isAudio(stat: RtpLike): boolean {
 }
 
 /**
- * Derive a kbps rate from the byte/timestamp delta between two samples, or null
- * when there is no prior sample (first poll) or the clock did not advance. A
- * negative delta (counter reset) clamps to 0.
+ * Derive a kbps rate from the byte/timestamp delta between two samples. Null
+ * (unmeasured) when there is no prior sample (first poll), the clock did not
+ * advance, or the byte counter went *backwards* — a counter reset (track
+ * replaced / ICE restart) is no measurement this tick, not a genuinely idle
+ * one, so it must not collapse to 0 (which an audio band would read as DTX
+ * silence). A genuine idle tick (bytes unchanged, clock advanced) is a real 0.
  */
 function bitrateFromSamples(
   sample: CallStatSample | null,
   prev: CallStatSample | undefined,
 ): number | null {
   if (!sample || !prev || sample.timestampMs <= prev.timestampMs) return null;
+  if (sample.bytes < prev.bytes) return null;
   const deltaBits = (sample.bytes - prev.bytes) * 8;
   const deltaSec = (sample.timestampMs - prev.timestampMs) / 1000;
-  const kbps = deltaBits / deltaSec / 1000;
-  return kbps > 0 ? Math.round(kbps) : 0;
+  return Math.round(deltaBits / deltaSec / 1000);
 }
 
 /**
