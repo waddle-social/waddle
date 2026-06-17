@@ -194,22 +194,32 @@ const emit = defineEmits<{
   outline-offset: 2px;
 }
 
-/* Active-speaker highlight. An INSET ring (not a border) keeps the tile's
- * box footprint identical, so the grid never reflows or scrolls when a
- * speaker changes — the adaptive layout is untouched. A soft outer glow
- * adds emphasis; it renders outside the box like the hover glow already
- * does, so it introduces no new clipping. */
-.call-tile--speaking {
-  box-shadow:
-    inset 0 0 0 3px var(--primary),
-    0 0 16px color-mix(in oklab, var(--primary) 50%, transparent);
+/* Active-speaker highlight ring. Drawn by an overlay layered ABOVE the
+ * placeholder + video (both `position:absolute; inset:0` and opaque) — an inset
+ * box-shadow on the tile itself paints underneath those layers and stays
+ * hidden. The overlay is `inset:0` with no box size of its own, so the tile's
+ * footprint is unchanged and the adaptive grid never reflows. `border-radius`
+ * follows the tile so the ring is clipped to the same rounded corners. */
+.call-tile--speaking::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 3px var(--primary);
+  pointer-events: none;
+  z-index: 2;
 }
 
-/* Keep the speaker ring visible while hovering a speaking tile. */
+/* Soft outer glow on the tile box. It renders outside the box like the hover
+ * glow, so it is never occluded and adds no clipping. */
+.call-tile--speaking {
+  box-shadow: 0 0 16px color-mix(in oklab, var(--primary) 50%, transparent);
+}
+
+/* Keep the glow consistent while hovering a speaking tile (the ring overlay is
+ * unaffected by hover). */
 .call-tile--speaking.call-tile--interactive:hover {
-  box-shadow:
-    inset 0 0 0 3px var(--primary),
-    0 0 18px var(--glow);
+  box-shadow: 0 0 18px var(--glow);
 }
 
 /* The placeholder layer is ALWAYS painted underneath the video.

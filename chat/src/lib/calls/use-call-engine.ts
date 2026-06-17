@@ -87,16 +87,19 @@ function pumpActiveSpeakers(): void {
     clearTimeout(activeSpeakerSweep);
     activeSpeakerSweep = null;
   }
+  // One clock read for both the derivation and the sweep delay, so the timer is
+  // armed exactly relative to the `now` that produced `nextDeadline` — two reads
+  // can drift across a slow frame and fire a spurious 0 ms sweep.
+  const now = Date.now();
   const step = advanceActiveSpeakers({
     state: activeSpeakerState,
     speakingIdentities: lastSpeakingIdentities,
-    now: Date.now(),
+    now,
   });
   activeSpeakerState = step.state;
   activeSpeakerIdentities.value = step.activeIdentities;
   if (step.nextDeadline !== null) {
-    const delay = Math.max(0, step.nextDeadline - Date.now());
-    activeSpeakerSweep = setTimeout(pumpActiveSpeakers, delay);
+    activeSpeakerSweep = setTimeout(pumpActiveSpeakers, Math.max(0, step.nextDeadline - now));
   }
 }
 
