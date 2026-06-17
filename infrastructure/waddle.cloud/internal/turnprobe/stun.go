@@ -44,8 +44,11 @@ func BuildBindingRequest() ([]byte, TxID) {
 	return msg, txID
 }
 
-// RoundTripper sends a STUN request and returns the response datagram.
-// The CLI supplies a UDP-backed implementation; tests supply a fake.
+// RoundTripper sends a STUN request and returns the response datagram that
+// correlates to it — implementations must discard unrelated datagrams
+// (e.g. by matching the transaction id in request[8:20]) and surface a
+// timeout as an error. The CLI supplies a UDP-backed implementation; tests
+// supply a fake.
 type RoundTripper func(request []byte) ([]byte, error)
 
 // Probe sends a Binding request through rt and returns the
@@ -98,8 +101,13 @@ func xorMappedAddress(resp []byte) (netip.AddrPort, error) {
 		if attrType == attrXorMapped {
 			return decodeXorMapped(value)
 		}
-		// Attributes are padded to a 4-byte boundary.
-		body = body[4+((attrLen+3)&^3):]
+		// Attributes are padded to a 4-byte boundary; advancing must stay
+		// within the buffer even when a trailing attribute omits its pad.
+		advance := 4 + ((attrLen + 3) &^ 3)
+		if advance > len(body) {
+			return netip.AddrPort{}, errors.New("truncated STUN attribute padding")
+		}
+		body = body[advance:]
 	}
 	return netip.AddrPort{}, errors.New("no XOR-MAPPED-ADDRESS attribute")
 }

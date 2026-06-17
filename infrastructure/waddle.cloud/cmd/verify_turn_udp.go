@@ -21,7 +21,11 @@ var verifyTurnUDPCmd = &cobra.Command{
 		"listener and report whether a response returns. A success proves a " +
 		"UDP datagram traversed the NodePort and node firewall to the TURN " +
 		"server, so LiveKit can hand clients a usable udp relay candidate " +
-		"instead of silently forcing calls onto the TCP/443 relay.",
+		"instead of silently forcing calls onto the TCP/443 relay. " +
+		"This relies on the embedded TURN server answering an unauthenticated " +
+		"STUN Binding request (the base STUN method, which pion/turn serves on " +
+		"the TURN port); a NOT-reachable result against a known-good data plane " +
+		"may indicate that assumption changed (e.g. after a LiveKit upgrade).",
 	RunE: runVerifyTurnUDP,
 }
 
@@ -56,12 +60,22 @@ func udpRoundTripper(addr string, timeout time.Duration) turnprobe.RoundTripper 
 			return nil, fmt.Errorf("write request: %w", err)
 		}
 
-		response := make([]byte, 1500)
-		n, err := conn.Read(response)
-		if err != nil {
-			return nil, fmt.Errorf("read response: %w", err)
+		// Correlate the reply to the request: a connected UDP socket still
+		// admits stray/stale datagrams from the same peer, so discard any
+		// whose transaction id does not match and keep reading until the
+		// deadline rather than reporting a false "unreachable".
+		var want [12]byte
+		copy(want[:], request[8:20])
+		buf := make([]byte, 1500)
+		for {
+			n, err := conn.Read(buf)
+			if err != nil {
+				return nil, fmt.Errorf("read response: %w", err)
+			}
+			if n >= 20 && [12]byte(buf[8:20]) == want {
+				return append([]byte(nil), buf[:n]...), nil
+			}
 		}
-		return response[:n], nil
 	}
 }
 

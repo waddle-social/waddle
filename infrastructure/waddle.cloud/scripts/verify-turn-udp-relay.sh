@@ -51,6 +51,10 @@ If the probe reports NOT reachable, check, in order:
   2. External IP / DNS    — turn.waddle.social resolves to the node ingress IP
   3. Node firewall / LB   — 30478/UDP open inbound at the cloud/edge layer
   4. relay port range     — livekit.turn.relay_range_start/end reachable for media
+  5. probe assumption     — the probe expects the embedded TURN server to
+                            answer an unauthenticated STUN Binding request;
+                            a LiveKit/pion-turn upgrade could change that and
+                            yield a false negative against a healthy relay.
 
 EOF
 

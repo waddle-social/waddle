@@ -102,6 +102,84 @@ func TestParseBindingResponseRejectsMalformed(t *testing.T) {
 	}
 }
 
+// A trailing attribute whose declared length is not padded to a 4-byte
+// boundary must not drive the parser past the end of the buffer. This is
+// internet-facing input, so a slice panic here is a remote crash.
+func TestParseBindingResponseRejectsUnpaddedTrailingAttribute(t *testing.T) {
+	_, txID := BuildBindingRequest()
+	// One non-matching attribute: type 0x0001, length 5, 5 value bytes, no
+	// padding. The padded advance (4+8) overshoots the 9-byte body.
+	attr := []byte{0x00, 0x01, 0x00, 0x05, 0x01, 0x02, 0x03, 0x04, 0x05}
+	msg := make([]byte, 20+len(attr))
+	binary.BigEndian.PutUint16(msg[0:2], 0x0101)
+	binary.BigEndian.PutUint16(msg[2:4], uint16(len(attr)))
+	binary.BigEndian.PutUint32(msg[4:8], magicCookie)
+	copy(msg[8:20], txID[:])
+	copy(msg[20:], attr)
+
+	if _, err := ParseBindingResponse(txID, msg); err == nil {
+		t.Fatal("expected error for unpadded trailing attribute, got nil")
+	}
+}
+
+// An XOR-MAPPED-ADDRESS attribute that declares more value bytes than are
+// present must error, not panic.
+func TestParseBindingResponseRejectsTruncatedXorMapped(t *testing.T) {
+	_, txID := BuildBindingRequest()
+	// XOR-MAPPED-ADDRESS header claiming length 8, but only 2 value bytes.
+	attr := []byte{0x00, 0x20, 0x00, 0x08, 0x00, 0x01}
+	msg := make([]byte, 20+len(attr))
+	binary.BigEndian.PutUint16(msg[0:2], 0x0101)
+	binary.BigEndian.PutUint16(msg[2:4], uint16(len(attr)))
+	binary.BigEndian.PutUint32(msg[4:8], magicCookie)
+	copy(msg[8:20], txID[:])
+	copy(msg[20:], attr)
+
+	if _, err := ParseBindingResponse(txID, msg); err == nil {
+		t.Fatal("expected error for truncated XOR-MAPPED-ADDRESS, got nil")
+	}
+}
+
+// A Binding error response (class 0x0111) with a valid cookie and matching
+// transaction id must be rejected: it is not proof the relay is reachable.
+func TestParseBindingResponseRejectsErrorResponse(t *testing.T) {
+	_, txID := BuildBindingRequest()
+	msg := make([]byte, 20)
+	binary.BigEndian.PutUint16(msg[0:2], 0x0111) // Binding error response
+	binary.BigEndian.PutUint32(msg[4:8], magicCookie)
+	copy(msg[8:20], txID[:])
+
+	if _, err := ParseBindingResponse(txID, msg); err == nil {
+		t.Fatal("expected error for Binding error response (0x0111), got nil")
+	}
+}
+
+// The XOR-MAPPED-ADDRESS attribute may be preceded by other attributes;
+// the parser must skip past a non-4-byte-aligned attribute (honouring its
+// padding) to find it.
+func TestParseBindingResponseSkipsLeadingPaddedAttribute(t *testing.T) {
+	_, txID := BuildBindingRequest()
+	want := netip.MustParseAddrPort("192.0.2.33:3478")
+
+	// SOFTWARE (0x8022), length 3 ("abc") + 1 pad byte.
+	leading := []byte{0x80, 0x22, 0x00, 0x03, 'a', 'b', 'c', 0x00}
+	success := bindingSuccess(txID, want) // header + XOR-MAPPED-ADDRESS attr
+	attrs := append(leading, success[20:]...)
+
+	msg := make([]byte, 20+len(attrs))
+	copy(msg, success[:20])
+	binary.BigEndian.PutUint16(msg[2:4], uint16(len(attrs)))
+	copy(msg[20:], attrs)
+
+	got, err := ParseBindingResponse(txID, msg)
+	if err != nil {
+		t.Fatalf("ParseBindingResponse with leading attribute: %v", err)
+	}
+	if got != want {
+		t.Fatalf("reflexive address = %v, want %v", got, want)
+	}
+}
+
 // Probe composes a build → send → parse round trip over an injected
 // transport, so the reachability check is exercised without a real socket.
 func TestProbeReturnsReflexiveAddressFromRoundTrip(t *testing.T) {

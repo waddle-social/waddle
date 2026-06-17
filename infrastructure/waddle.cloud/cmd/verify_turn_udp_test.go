@@ -68,6 +68,39 @@ func TestUDPRoundTripperReachesLoopbackResponder(t *testing.T) {
 	}
 }
 
+// A stray or stale datagram arriving before the real reply must not be
+// mistaken for an unreachable relay: the round tripper discards datagrams
+// whose transaction id does not match and keeps reading until the deadline.
+func TestUDPRoundTripperSkipsStrayDatagram(t *testing.T) {
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen udp: %v", err)
+	}
+	defer conn.Close()
+
+	reflexive := netip.MustParseAddrPort("198.51.100.9:30478")
+	go func() {
+		buf := make([]byte, 1500)
+		n, from, err := conn.ReadFromUDP(buf)
+		if err != nil || n < 20 {
+			return
+		}
+		// A stray datagram with a different transaction id, then the real reply.
+		var stray turnprobe.TxID
+		stray[0] = buf[8] ^ 0xFF
+		_, _ = conn.WriteToUDP(stunBindingSuccess(stray, netip.MustParseAddrPort("203.0.113.1:1")), from)
+		_, _ = conn.WriteToUDP(stunBindingSuccess(turnprobe.TxID(buf[8:20]), reflexive), from)
+	}()
+
+	got, err := turnprobe.Probe(udpRoundTripper(conn.LocalAddr().String(), 2*time.Second))
+	if err != nil {
+		t.Fatalf("Probe should skip the stray datagram: %v", err)
+	}
+	if got != reflexive {
+		t.Fatalf("reflexive address = %v, want %v", got, reflexive)
+	}
+}
+
 // An address with no responder must fail within the timeout rather than
 // blocking forever.
 func TestUDPRoundTripperTimesOutWhenUnreachable(t *testing.T) {
