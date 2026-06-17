@@ -4,7 +4,6 @@ import {
   Room,
   RoomEvent,
   Track,
-  VideoPresets,
   type LocalParticipant,
   type LocalTrack,
   type LocalTrackPublication,
@@ -19,7 +18,7 @@ import {
   type TrackPublishOptions,
   type VideoCaptureOptions,
 } from "livekit-client";
-import { videoPublishPlan } from "./video-codec/video-publish";
+import { videoPublishPlan, type CameraPublishPlan } from "./video-codec/video-publish";
 import { audioPublishOptions } from "./audio-publish";
 import {
   currentVideoCodecSupportEnv,
@@ -56,15 +55,6 @@ type ProcessorCapableTrack = {
   stopProcessor(): Promise<void>;
 };
 
-/**
- * Camera capture ceiling. AdaptiveStream (`adaptiveStream: true`) and
- * simulcast still scale each subscriber DOWN to the layer matching its
- * rendered tile, so this only governs the maximum a large/expanded tile
- * can pull — it is not the bandwidth every viewer pays. h1080 lifts the
- * per-publisher upstream ceiling to ~3 Mbps (vs. 720p's 1.7 Mbps).
- */
-const CAMERA_CAPTURE_RESOLUTION = VideoPresets.h1080.resolution;
-
 export function audioCaptureDefaultsForPrefs(prefs: {
   mic: string | null;
   audioProcessing: AudioProcessingPrefs;
@@ -89,15 +79,16 @@ export function callRoomOptionsForPrefs(prefs: {
     // model actually attaches (see syncEffectiveCaptureConstraints) — so a
     // model that fails to load never leaves capture with NS force-disabled.
     audioCaptureDefaults: audioCaptureDefaultsForPrefs(prefs),
+    // Only the device selection lives here; the camera's 720p capture cap is set
+    // per-publish by `videoPublishPlan` (so the builder owns the cap and LiveKit
+    // merges it over this without overwriting `deviceId`). Screen-share
+    // encoding/codec is likewise per-publish (capability-dependent), and the
+    // mic's Opus voice-clarity profile is set per-publish by `audioPublishOptions`
+    // (scoped to the mic so it never bleeds onto screen-share *system* audio,
+    // which may be stereo). Hence no global `publishDefaults` here.
     videoCaptureDefaults: {
       deviceId: prefs.cam ?? undefined,
-      resolution: CAMERA_CAPTURE_RESOLUTION,
     },
-    // Screen-share encoding/codec is set per-publish by `videoPublishPlan`
-    // (it is capability-dependent), and the mic's Opus voice-clarity profile is
-    // set per-publish by `audioPublishOptions` (so it stays scoped to the
-    // microphone and never bleeds onto screen-share *system* audio, which may be
-    // stereo). Hence no global `publishDefaults` here.
   };
 }
 
@@ -474,7 +465,7 @@ export class CallEngine {
       (source, error) => this.emit("mediaDevicesError", { source, error }),
       {
         audio: audioPublishOptions(),
-        camera: videoPublishPlan({ source: "camera", capability: this.codecSupport }).publish,
+        camera: videoPublishPlan({ source: "camera", capability: this.codecSupport }),
       },
     );
     // Re-apply the speaker preference now that the room has remote
@@ -497,8 +488,11 @@ export class CallEngine {
 
   async setCameraEnabled(enabled: boolean): Promise<void> {
     if (!this.room) return;
-    const { publish } = videoPublishPlan({ source: "camera", capability: this.codecSupport });
-    await this.room.localParticipant.setCameraEnabled(enabled, undefined, publish);
+    // Forward the VP9+L3T3 / 720p camera plan — including the per-publish capture
+    // cap — so a camera (re)enabled mid-call publishes at the same default as the
+    // initial join, not LiveKit's 1080p/VP8 default.
+    const { capture, publish } = videoPublishPlan({ source: "camera", capability: this.codecSupport });
+    await this.room.localParticipant.setCameraEnabled(enabled, capture, publish);
   }
 
   async setScreenShareEnabled(
@@ -1141,7 +1135,7 @@ export async function enableRequestedCapture(
   participant: CapturableParticipant,
   opts: { audio: boolean; video: boolean },
   onError: (source: "audio" | "video", error: unknown) => void,
-  publish: { audio: TrackPublishOptions; camera: TrackPublishOptions },
+  publish: { audio: TrackPublishOptions; camera: CameraPublishPlan },
 ): Promise<void> {
   if (opts.audio) {
     try {
@@ -1152,7 +1146,9 @@ export async function enableRequestedCapture(
   }
   if (opts.video) {
     try {
-      await participant.setCameraEnabled(true, undefined, publish.camera);
+      // The camera carries both its capture cap and codec/SVC publish options;
+      // forward both so the initial join publishes the 720p VP9 plan.
+      await participant.setCameraEnabled(true, publish.camera.capture, publish.camera.publish);
     } catch (error) {
       onError("video", error);
     }
