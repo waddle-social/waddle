@@ -78,6 +78,26 @@ export function advanceActiveSpeakers(input: AdvanceActiveSpeakersInput): Active
   };
 }
 
+/**
+ * Drop a participant from the active-speaker hold entirely — both the live
+ * speaking set and any in-flight release countdown. Used when a participant
+ * leaves the call so their brief highlight (and any Speaker-view promotion
+ * derived from it) cannot survive their departure and re-apply the instant they
+ * rejoin with a fresh tile. Returns the same state when the identity is absent,
+ * so a departure that touches no speaker state causes no needless churn.
+ */
+export function evictActiveSpeaker(
+  state: ActiveSpeakerState,
+  identity: string,
+): ActiveSpeakerState {
+  if (!state.speaking.has(identity) && !state.releasing.has(identity)) return state;
+  const speaking = new Set(state.speaking);
+  speaking.delete(identity);
+  const releasing = new Map(state.releasing);
+  releasing.delete(identity);
+  return { speaking, releasing };
+}
+
 export function highlightedTileKeys(
   tiles: readonly CallTileModel[],
   activeIdentities: ReadonlySet<string>,

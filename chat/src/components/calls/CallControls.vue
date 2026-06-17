@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import {
+  LayoutGrid,
   Maximize2,
   Mic,
   MicOff,
@@ -7,10 +8,12 @@ import {
   MonitorUp,
   PhoneOff,
   Settings,
+  SquareUser,
   Video,
   VideoOff,
   Volume2,
 } from "lucide-vue-next";
+import type { CallViewMode } from "@/lib/calls/view-mode";
 import CallConnectionIndicator from "./CallConnectionIndicator.vue";
 
 /**
@@ -21,7 +24,7 @@ import CallConnectionIndicator from "./CallConnectionIndicator.vue";
  * The old multi-mode chrome (dock-toggle, minimize, PIP) is gone —
  * the only mode switch left is split ↔ expanded.
  */
-defineProps<{
+const props = defineProps<{
   micEnabled: boolean;
   camEnabled: boolean;
   screenShareEnabled: boolean;
@@ -32,6 +35,8 @@ defineProps<{
   /** True while the volume mixer dialog is open — drives the speaker
    *  button's pressed/expanded state. The parent owns the dialog. */
   volumeOpen: boolean;
+  /** The chosen stage layout — drives the view switcher's pressed state. */
+  viewMode: CallViewMode;
 }>();
 
 const emit = defineEmits<{
@@ -41,8 +46,30 @@ const emit = defineEmits<{
   toggleExpanded: [];
   toggleVolume: [];
   openSettings: [];
+  setViewMode: [mode: CallViewMode];
   hangup: [];
 }>();
+
+/**
+ * Arrow-key navigation for the two-option Gallery/Speaker radiogroup, per the
+ * WAI-ARIA radio-group pattern: an arrow moves selection to the other option
+ * (wrapping at both ends) and focus follows the selection (roving tabindex).
+ * With two options every arrow flips the mode, so no redundant emit fires.
+ */
+function onViewKeydown(event: KeyboardEvent): void {
+  const isArrow =
+    event.key === "ArrowRight" ||
+    event.key === "ArrowDown" ||
+    event.key === "ArrowLeft" ||
+    event.key === "ArrowUp";
+  if (!isArrow) return;
+  event.preventDefault();
+  const next: CallViewMode = props.viewMode === "gallery" ? "speaker" : "gallery";
+  emit("setViewMode", next);
+  const current = event.currentTarget as HTMLElement;
+  const other = current.nextElementSibling ?? current.previousElementSibling;
+  if (other instanceof HTMLElement) other.focus();
+}
 </script>
 
 <template>
@@ -81,6 +108,40 @@ const emit = defineEmits<{
       <MonitorUp class="w-4 h-4" />
       <span class="type-control sr-only sm:not-sr-only">{{ screenShareEnabled ? "Stop" : "Share" }}</span>
     </button>
+
+    <!-- Gallery ⟷ Speaker view switcher. Sticky for the call; a pin or an
+         incoming screen share still overrides the chosen layout's large tile.
+         A radiogroup (single-choice) rather than two independent toggles. -->
+    <div class="call-controls__view-switch" role="radiogroup" aria-label="Stage view">
+      <button
+        type="button"
+        role="radio"
+        class="chat-icon-button chat-icon-button--md hover:bg-muted"
+        :class="{ 'bg-muted text-foreground': viewMode === 'gallery' }"
+        title="Gallery view"
+        aria-label="Gallery view"
+        :aria-checked="viewMode === 'gallery'"
+        :tabindex="viewMode === 'gallery' ? 0 : -1"
+        @click="emit('setViewMode', 'gallery')"
+        @keydown="onViewKeydown"
+      >
+        <LayoutGrid class="w-4 h-4" />
+      </button>
+      <button
+        type="button"
+        role="radio"
+        class="chat-icon-button chat-icon-button--md hover:bg-muted"
+        :class="{ 'bg-muted text-foreground': viewMode === 'speaker' }"
+        title="Speaker view"
+        aria-label="Speaker view"
+        :aria-checked="viewMode === 'speaker'"
+        :tabindex="viewMode === 'speaker' ? 0 : -1"
+        @click="emit('setViewMode', 'speaker')"
+        @keydown="onViewKeydown"
+      >
+        <SquareUser class="w-4 h-4" />
+      </button>
+    </div>
 
     <!-- Ambient self-connection quality. Self-contained/store-connected,
          so it adds no props to this otherwise stateless bar. Shows quiet
@@ -149,5 +210,11 @@ const emit = defineEmits<{
   height: 1.5rem;
   background: var(--border);
   margin-inline: var(--space-xs);
+}
+
+.call-controls__view-switch {
+  display: flex;
+  align-items: center;
+  gap: 2px;
 }
 </style>

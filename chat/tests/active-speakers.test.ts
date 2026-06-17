@@ -3,6 +3,7 @@ import {
   ACTIVE_SPEAKER_HOLD_MS,
   advanceActiveSpeakers,
   emptyActiveSpeakerState,
+  evictActiveSpeaker,
   highlightedTileKeys,
 } from "../src/lib/calls/active-speakers";
 import { buildCallTiles } from "../src/lib/calls/call-tiles";
@@ -243,5 +244,60 @@ describe("highlightedTileKeys", () => {
     const highlighted = highlightedTileKeys(tiles, new Set(["bob@example.com/phone"]));
 
     expect([...highlighted]).toEqual([]);
+  });
+});
+
+describe("evictActiveSpeaker", () => {
+  test("removes a currently-speaking identity from the derived active set", () => {
+    const spoke = advanceActiveSpeakers({
+      state: emptyActiveSpeakerState(),
+      speakingIdentities: ["bob@example.com/web", "carol@example.com/web"],
+      now: 0,
+    });
+
+    const evicted = evictActiveSpeaker(spoke.state, "bob@example.com/web");
+    const next = advanceActiveSpeakers({
+      state: evicted,
+      speakingIdentities: ["carol@example.com/web"],
+      now: 10,
+    });
+
+    expect([...next.activeIdentities]).toEqual(["carol@example.com/web"]);
+  });
+
+  test("removes an identity still inside its release hold so it cannot be re-highlighted", () => {
+    // Bob speaks, then falls silent — he is now held in the release countdown.
+    const spoke = advanceActiveSpeakers({
+      state: emptyActiveSpeakerState(),
+      speakingIdentities: ["bob@example.com/web"],
+      now: 0,
+    });
+    const releasing = advanceActiveSpeakers({
+      state: spoke.state,
+      speakingIdentities: [],
+      now: 100,
+    });
+    expect(releasing.activeIdentities.has("bob@example.com/web")).toBe(true);
+
+    // Bob leaves mid-hold; evicting him drops the lingering release entry.
+    const evicted = evictActiveSpeaker(releasing.state, "bob@example.com/web");
+    const next = advanceActiveSpeakers({
+      state: evicted,
+      speakingIdentities: [],
+      now: 200,
+    });
+
+    expect(next.activeIdentities.has("bob@example.com/web")).toBe(false);
+    expect(next.nextDeadline).toBeNull();
+  });
+
+  test("returns the same state object when the identity is absent", () => {
+    const spoke = advanceActiveSpeakers({
+      state: emptyActiveSpeakerState(),
+      speakingIdentities: ["bob@example.com/web"],
+      now: 0,
+    });
+
+    expect(evictActiveSpeaker(spoke.state, "carol@example.com/web")).toBe(spoke.state);
   });
 });

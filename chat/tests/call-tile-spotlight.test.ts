@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   projectCallTiles,
   reconcileCallTileProjectionState,
-  retainManualFocusKey,
+  retainPinnedTileKey,
 } from "../src/lib/calls/call-tile-projection";
 import type { LocalMediaTrack, RemoteMediaTrack } from "../src/lib/calls/engine";
 
@@ -19,7 +19,7 @@ describe("call tile spotlight projection", () => {
       localIdentity: "alice@example.com/web",
       micEnabled: true,
       seenRemoteScreenTrackKeys: new Set(),
-      manualFocusKey: null,
+      pinnedTileKey: null,
     });
 
     expect(projection.spotlightKey).toBe("remote:bob@example.com/web:screen_share");
@@ -37,7 +37,7 @@ describe("call tile spotlight projection", () => {
       localIdentity: "alice@example.com/web",
       micEnabled: true,
       seenRemoteScreenTrackKeys,
-      manualFocusKey: null,
+      pinnedTileKey: null,
     });
 
     expect(projection.spotlightKey).toBe("remote:bob@example.com/web:screen_share");
@@ -55,13 +55,13 @@ describe("call tile spotlight projection", () => {
       localIdentity: "alice@example.com/web",
       micEnabled: true,
       seenRemoteScreenTrackKeys: new Set(["carol-screen-pub", "bob-screen-pub"]),
-      manualFocusKey: null,
+      pinnedTileKey: null,
     });
 
     expect(projection.spotlightKey).toBe("remote:bob@example.com/web:screen_share");
   });
 
-  test("lets manual tile focus override a remote screen spotlight", () => {
+  test("lets a remote screen share outrank a pin for the large tile", () => {
     const projection = projectCallTiles({
       remoteTracks: [
         remoteVideo("bob@example.com/web", "camera-pub", "camera"),
@@ -71,7 +71,43 @@ describe("call tile spotlight projection", () => {
       localIdentity: "alice@example.com/web",
       micEnabled: true,
       seenRemoteScreenTrackKeys: new Set(["screen-pub"]),
-      manualFocusKey: "remote:bob@example.com/web:camera",
+      pinnedTileKey: "remote:bob@example.com/web:camera",
+    });
+
+    // Screen share always claims the large tile, even over an explicit pin —
+    // the pin is retained and re-asserts once the share stops.
+    expect(projection.spotlightKey).toBe("remote:bob@example.com/web:screen_share");
+  });
+
+  test("honours a pin for the large tile when nothing is being shared", () => {
+    const projection = projectCallTiles({
+      remoteTracks: [
+        remoteVideo("bob@example.com/web", "bob-camera", "camera"),
+        remoteVideo("carol@example.com/web", "carol-camera", "camera"),
+      ],
+      localTracks: [],
+      localIdentity: "alice@example.com/web",
+      micEnabled: true,
+      seenRemoteScreenTrackKeys: new Set(),
+      pinnedTileKey: "remote:carol@example.com/web:camera",
+    });
+
+    expect(projection.spotlightKey).toBe("remote:carol@example.com/web:camera");
+  });
+
+  test("lets a pin override active-speaker promotion in Speaker view", () => {
+    const projection = projectCallTiles({
+      remoteTracks: [
+        remoteVideo("bob@example.com/web", "bob-camera", "camera"),
+        remoteVideo("carol@example.com/web", "carol-camera", "camera"),
+      ],
+      localTracks: [],
+      localIdentity: "alice@example.com/web",
+      micEnabled: true,
+      seenRemoteScreenTrackKeys: new Set(),
+      pinnedTileKey: "remote:bob@example.com/web:camera",
+      viewMode: "speaker",
+      promotedSpeakerIdentity: "carol@example.com/web",
     });
 
     expect(projection.spotlightKey).toBe("remote:bob@example.com/web:camera");
@@ -86,7 +122,7 @@ describe("call tile spotlight projection", () => {
       localIdentity: "alice@example.com/web",
       micEnabled: true,
       seenRemoteScreenTrackKeys: new Set(["bob-screen-pub", "screen-pub"]),
-      manualFocusKey: "remote:bob@example.com/web:screen_share",
+      pinnedTileKey: "remote:bob@example.com/web:screen_share",
     });
 
     expect(projection.spotlightKey).toBe("remote:carol@example.com/web:screen_share");
@@ -99,7 +135,7 @@ describe("call tile spotlight projection", () => {
       localIdentity: "alice@example.com/web",
       micEnabled: true,
       seenRemoteScreenTrackKeys: new Set(["screen-pub"]),
-      manualFocusKey: "remote:bob@example.com/web:screen_share",
+      pinnedTileKey: "remote:bob@example.com/web:screen_share",
     });
 
     expect(projection.spotlightKey).toBeNull();
@@ -113,7 +149,7 @@ describe("call tile spotlight projection", () => {
       expectedRemoteIdentities: ["bob@example.com/phone"],
       micEnabled: true,
       seenRemoteScreenTrackKeys: new Set(),
-      manualFocusKey: null,
+      pinnedTileKey: null,
     });
 
     expect(sharing.spotlightKey).toBe("remote:bob@example.com/web:screen_share");
@@ -129,7 +165,7 @@ describe("call tile spotlight projection", () => {
       expectedRemoteIdentities: ["bob@example.com/phone"],
       micEnabled: true,
       seenRemoteScreenTrackKeys: sharing.seenRemoteScreenTrackKeys,
-      manualFocusKey: sharing.spotlightKey,
+      pinnedTileKey: sharing.spotlightKey,
     });
 
     expect(afterStop.spotlightKey).toBeNull();
@@ -146,7 +182,7 @@ describe("call tile spotlight projection", () => {
       localIdentity: "alice@example.com/web",
       micEnabled: true,
       seenRemoteScreenTrackKeys: new Set(),
-      manualFocusKey: null,
+      pinnedTileKey: null,
     });
 
     expect(projection.spotlightKey).toBeNull();
@@ -166,7 +202,7 @@ describe("call tile spotlight projection", () => {
         "bob-screen-pub-1",
         "carol-screen-pub",
       ]),
-      manualFocusKey: null,
+      pinnedTileKey: null,
     });
 
     expect(projection.spotlightKey).toBe("remote:bob@example.com/web:screen_share");
@@ -187,9 +223,11 @@ describe("call tile spotlight projection", () => {
       localIdentity: "alice@example.com/web",
       micEnabled: true,
       seenRemoteScreenTrackKeys: new Set(["carol-screen-pub"]),
-      manualFocusKey: "remote:bob@example.com/web:camera",
+      pinnedTileKey: "remote:bob@example.com/web:camera",
     });
-    expect(focused.spotlightKey).toBe("remote:bob@example.com/web:camera");
+    // Carol's screen outranks Bob's pin for the large tile, but the pin is
+    // still retained internally — until Bob leaves and reconcile clears it.
+    expect(focused.spotlightKey).toBe("remote:carol@example.com/web:screen_share");
 
     const afterBobLeaves = projectCallTiles({
       remoteTracks: [
@@ -199,17 +237,17 @@ describe("call tile spotlight projection", () => {
       localIdentity: "alice@example.com/web",
       micEnabled: true,
       seenRemoteScreenTrackKeys: new Set(["carol-screen-pub"]),
-      manualFocusKey: "remote:bob@example.com/web:camera",
+      pinnedTileKey: "remote:bob@example.com/web:camera",
     });
     const reconciled = reconcileCallTileProjectionState({
       tiles: afterBobLeaves.tiles,
-      manualFocusKey: "remote:bob@example.com/web:camera",
+      pinnedTileKey: "remote:bob@example.com/web:camera",
       currentSeenRemoteScreenTrackKeys: new Set(["carol-screen-pub"]),
       nextSeenRemoteScreenTrackKeys: afterBobLeaves.seenRemoteScreenTrackKeys,
     });
 
     expect(afterBobLeaves.spotlightKey).toBe("remote:carol@example.com/web:screen_share");
-    expect(reconciled.manualFocusKey).toBeNull();
+    expect(reconciled.pinnedTileKey).toBeNull();
 
     const afterBobRejoins = projectCallTiles({
       remoteTracks: [
@@ -220,9 +258,90 @@ describe("call tile spotlight projection", () => {
       localIdentity: "alice@example.com/web",
       micEnabled: true,
       seenRemoteScreenTrackKeys: reconciled.seenRemoteScreenTrackKeys,
-      manualFocusKey: reconciled.manualFocusKey,
+      pinnedTileKey: reconciled.pinnedTileKey,
     });
     expect(afterBobRejoins.spotlightKey).toBe("remote:carol@example.com/web:screen_share");
+  });
+
+  test("promotes the active speaker's camera tile in Speaker view", () => {
+    const projection = projectCallTiles({
+      remoteTracks: [
+        remoteVideo("bob@example.com/web", "bob-camera", "camera"),
+        remoteVideo("carol@example.com/web", "carol-camera", "camera"),
+      ],
+      localTracks: [],
+      localIdentity: "alice@example.com/web",
+      micEnabled: true,
+      seenRemoteScreenTrackKeys: new Set(),
+      pinnedTileKey: null,
+      viewMode: "speaker",
+      promotedSpeakerIdentity: "carol@example.com/web",
+    });
+
+    expect(projection.spotlightKey).toBe("remote:carol@example.com/web:camera");
+  });
+
+  test("keeps the equal grid in Gallery view even with an active speaker", () => {
+    const projection = projectCallTiles({
+      remoteTracks: [remoteVideo("bob@example.com/web", "bob-camera", "camera")],
+      localTracks: [],
+      localIdentity: "alice@example.com/web",
+      micEnabled: true,
+      seenRemoteScreenTrackKeys: new Set(),
+      pinnedTileKey: null,
+      viewMode: "gallery",
+      promotedSpeakerIdentity: "bob@example.com/web",
+    });
+
+    expect(projection.spotlightKey).toBeNull();
+  });
+
+  test("falls back to a remote camera in Speaker view before anyone has spoken", () => {
+    const projection = projectCallTiles({
+      remoteTracks: [remoteVideo("bob@example.com/web", "bob-camera", "camera")],
+      localTracks: [],
+      localIdentity: "alice@example.com/web",
+      micEnabled: true,
+      seenRemoteScreenTrackKeys: new Set(),
+      pinnedTileKey: null,
+      viewMode: "speaker",
+      promotedSpeakerIdentity: null,
+    });
+
+    expect(projection.spotlightKey).toBe("remote:bob@example.com/web:camera");
+  });
+
+  test("falls back to the self tile in Speaker view when alone in the call", () => {
+    const projection = projectCallTiles({
+      remoteTracks: [],
+      localTracks: [],
+      localIdentity: "alice@example.com/web",
+      micEnabled: true,
+      seenRemoteScreenTrackKeys: new Set(),
+      pinnedTileKey: null,
+      viewMode: "speaker",
+      promotedSpeakerIdentity: null,
+    });
+
+    expect(projection.spotlightKey).toBe("self:alice@example.com/web:camera");
+  });
+
+  test("lets a screen share outrank active-speaker promotion in Speaker view", () => {
+    const projection = projectCallTiles({
+      remoteTracks: [
+        remoteVideo("bob@example.com/web", "bob-screen", "screen_share"),
+        remoteVideo("carol@example.com/web", "carol-camera", "camera"),
+      ],
+      localTracks: [],
+      localIdentity: "alice@example.com/web",
+      micEnabled: true,
+      seenRemoteScreenTrackKeys: new Set(),
+      pinnedTileKey: null,
+      viewMode: "speaker",
+      promotedSpeakerIdentity: "carol@example.com/web",
+    });
+
+    expect(projection.spotlightKey).toBe("remote:bob@example.com/web:screen_share");
   });
 
   test("retains manual focus while its target tile is still present", () => {
@@ -235,11 +354,13 @@ describe("call tile spotlight projection", () => {
       localIdentity: "alice@example.com/web",
       micEnabled: true,
       seenRemoteScreenTrackKeys: new Set(["carol-screen-pub"]),
-      manualFocusKey: "remote:bob@example.com/web:camera",
+      pinnedTileKey: "remote:bob@example.com/web:camera",
     });
 
-    expect(projection.spotlightKey).toBe("remote:bob@example.com/web:camera");
-    expect(retainManualFocusKey(projection.tiles, "remote:bob@example.com/web:camera"))
+    // Carol's screen holds the large tile, yet the pin on Bob's still-present
+    // camera tile is retained (it re-asserts once Carol stops sharing).
+    expect(projection.spotlightKey).toBe("remote:carol@example.com/web:screen_share");
+    expect(retainPinnedTileKey(projection.tiles, "remote:bob@example.com/web:camera"))
       .toBe("remote:bob@example.com/web:camera");
   });
 });

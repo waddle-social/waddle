@@ -4,8 +4,14 @@ import { CallEngine, type LocalMediaTrack, type RemoteMediaTrack } from "./engin
 import {
   advanceActiveSpeakers,
   emptyActiveSpeakerState,
+  evictActiveSpeaker,
   type ActiveSpeakerState,
 } from "./active-speakers";
+import {
+  advanceSpeakerPromotion,
+  emptySpeakerPromotion,
+  type SpeakerPromotionState,
+} from "./view-mode";
 import {
   addLiveCallParticipant,
   clearLiveCallParticipants,
@@ -78,6 +84,17 @@ let lastSpeakingIdentities: readonly string[] = [];
 let activeSpeakerSweep: ReturnType<typeof setTimeout> | null = null;
 
 /**
+ * The participant the Speaker layout auto-promotes to the large tile, derived
+ * from the held active-speaker set through the sticky `advanceSpeakerPromotion`
+ * machine: it holds the current speaker through silence and only hands the
+ * large tile to a different participant once they become active. Consumed only
+ * in Speaker view; a pin or a screen share outranks it (see `projectCallTiles`).
+ */
+const promotedSpeakerIdentity: Ref<string | null> = ref(null);
+/** Sticky promotion state for the derivation; reset between calls. */
+let speakerPromotion: SpeakerPromotionState = emptySpeakerPromotion();
+
+/**
  * Re-derive the highlighted set against `lastSpeakingIdentities` at the current
  * wall-clock time, publish it, and (re)arm a single sweep for the next release
  * deadline. Idempotent: safe to call from a LiveKit event or from the sweep.
@@ -98,9 +115,30 @@ function pumpActiveSpeakers(): void {
   });
   activeSpeakerState = step.state;
   activeSpeakerIdentities.value = step.activeIdentities;
+  speakerPromotion = advanceSpeakerPromotion({
+    state: speakerPromotion,
+    activeIdentities: step.activeIdentities,
+  });
+  promotedSpeakerIdentity.value = speakerPromotion.promotedIdentity;
   if (step.nextDeadline !== null) {
     activeSpeakerSweep = setTimeout(pumpActiveSpeakers, Math.max(0, step.nextDeadline - now));
   }
+}
+
+/**
+ * Purge a departed participant from all active-speaker state — the brief hold
+ * AND the sticky Speaker-view promotion — then re-derive. Without this, the ~1s
+ * release hold (or the sticky promotion, which holds the last speaker through
+ * silence) would survive their departure and re-highlight or re-promote them
+ * the instant they rejoin with a fresh tile.
+ */
+function forgetDepartedSpeaker(identity: string): void {
+  if (speakerPromotion.promotedIdentity === identity) {
+    speakerPromotion = emptySpeakerPromotion();
+  }
+  activeSpeakerState = evictActiveSpeaker(activeSpeakerState, identity);
+  lastSpeakingIdentities = lastSpeakingIdentities.filter((id) => id !== identity);
+  pumpActiveSpeakers();
 }
 
 /** Drop all active-speaker state so the next call starts from a clean slate. */
@@ -112,6 +150,8 @@ function resetActiveSpeakers(): void {
   activeSpeakerState = emptyActiveSpeakerState();
   lastSpeakingIdentities = [];
   activeSpeakerIdentities.value = new Set();
+  speakerPromotion = emptySpeakerPromotion();
+  promotedSpeakerIdentity.value = null;
 }
 
 /**
@@ -309,6 +349,7 @@ export function useCallEngine(): {
   remoteTracks: Ref<RemoteMediaTrack[]>;
   localTracks: Ref<LocalMediaTrack[]>;
   activeSpeakerIdentities: Ref<ReadonlySet<string>>;
+  promotedSpeakerIdentity: Ref<string | null>;
 } {
   if (!singletonEngine) {
     singletonEngine = new CallEngine();
@@ -402,6 +443,9 @@ export function useCallEngine(): {
       addLiveCallParticipant(roomJid, identity);
     });
     singletonEngine.on("participantDisconnected", (identity) => {
+      // Clear any active-speaker highlight + Speaker-view promotion the leaver
+      // held, so neither survives their departure to re-apply on a fast rejoin.
+      forgetDepartedSpeaker(identity);
       const roomJid = activeMucRoomJid();
       if (!roomJid) return;
       removeLiveCallParticipant(roomJid, identity);
@@ -447,7 +491,13 @@ export function useCallEngine(): {
       clearLiveCallParticipants(slot.roomJid);
     });
   }
-  return { engine: singletonEngine, remoteTracks, localTracks, activeSpeakerIdentities };
+  return {
+    engine: singletonEngine,
+    remoteTracks,
+    localTracks,
+    activeSpeakerIdentities,
+    promotedSpeakerIdentity,
+  };
 }
 
 /**
