@@ -42,28 +42,6 @@ function captureStub(opts: { micThrows?: Error; camThrows?: Error } = {}) {
   };
 }
 
-/**
- * Records every `setCameraEnabled(enabled, capture, publish)` the engine
- * forwards, so a test can assert the camera VP9/720p plan reaches the SDK.
- */
-function cameraStub() {
-  const calls: Array<{
-    enabled: boolean;
-    capture?: { resolution?: { width?: number; height?: number } };
-    publish?: { videoCodec?: string; scalabilityMode?: string };
-  }> = [];
-  return {
-    calls,
-    async setCameraEnabled(
-      enabled: boolean,
-      capture?: { resolution?: { width?: number; height?: number } },
-      publish?: { videoCodec?: string; scalabilityMode?: string },
-    ) {
-      calls.push({ enabled, capture, publish });
-    },
-  };
-}
-
 function screenShareStub(opts: { audioThrows?: Error } = {}) {
   const calls: Array<{ enabled: boolean; audio: boolean }> = [];
   return {
@@ -376,37 +354,6 @@ describe("call-engine module", () => {
     };
     expect(remote.source).toBe("screen_share");
     expect(local.source).toBe("screen_share_audio");
-  });
-
-  test("setCameraEnabled forwards the VP9 720p camera plan (capture + publish) to LiveKit", async () => {
-    const { CallEngine } = await import("../src/lib/calls/engine");
-    const capable = videoCodecSupport({
-      encode: ["video/vp8", "video/vp9"],
-      decode: ["video/vp8", "video/vp9"],
-    });
-    const engine = new CallEngine({ videoCodecSupport: capable });
-    const participant = cameraStub();
-    (engine as unknown as { room: unknown }).room = { localParticipant: participant };
-    await engine.setCameraEnabled(true);
-    expect(participant.calls).toHaveLength(1);
-    const [call] = participant.calls;
-    expect(call.enabled).toBe(true);
-    expect(call.capture?.resolution?.height).toBe(720);
-    expect(call.publish?.videoCodec).toBe("vp9");
-    expect(call.publish?.scalabilityMode).toBe("L3T3");
-  });
-
-  test("setCameraEnabled forwards the VP8 720p fallback on a VP9-incapable device", async () => {
-    const { CallEngine } = await import("../src/lib/calls/engine");
-    const incapable = videoCodecSupport({ encode: ["video/vp8"], decode: ["video/vp8"] });
-    const engine = new CallEngine({ videoCodecSupport: incapable });
-    const participant = cameraStub();
-    (engine as unknown as { room: unknown }).room = { localParticipant: participant };
-    await engine.setCameraEnabled(true);
-    const [call] = participant.calls;
-    expect(call.capture?.resolution?.height).toBe(720);
-    expect(call.publish?.videoCodec).toBe("vp8");
-    expect(call.publish?.scalabilityMode).toBeUndefined();
   });
 
   test("setScreenShareEnabled delegates video-only requests to LiveKit", async () => {
@@ -1184,6 +1131,35 @@ describe("call-engine — camera capture ceiling + per-source degradation", () =
         },
       },
     ]);
+  });
+
+  test("setCameraEnabled forwards the VP9 + L3T3 720p plan to the SDK on a capable device", async () => {
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const capable = videoCodecSupport({
+      encode: ["video/vp8", "video/vp9"],
+      decode: ["video/vp8", "video/vp9"],
+    });
+    const engine = new CallEngine({ videoCodecSupport: capable });
+    const stub = videoRoomStub();
+    (engine as unknown as { room: unknown }).room = stub.room;
+    await engine.setCameraEnabled(true);
+    expect(stub.camera).toHaveLength(1);
+    const [call] = stub.camera;
+    expect(call?.options).toEqual({ resolution: { width: 1280, height: 720, frameRate: 30 } });
+    expect(call?.publishOptions).toMatchObject({ videoCodec: "vp9", scalabilityMode: "L3T3" });
+  });
+
+  test("setCameraEnabled forwards the VP8 720p fallback on a VP9-incapable device (iOS)", async () => {
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const incapable = videoCodecSupport({ encode: ["video/vp8"], decode: ["video/vp8"] });
+    const engine = new CallEngine({ videoCodecSupport: incapable });
+    const stub = videoRoomStub();
+    (engine as unknown as { room: unknown }).room = stub.room;
+    await engine.setCameraEnabled(true);
+    const [call] = stub.camera;
+    expect(call?.options).toEqual({ resolution: { width: 1280, height: 720, frameRate: 30 } });
+    expect(call?.publishOptions).toMatchObject({ videoCodec: "vp8" });
+    expect(call?.publishOptions).not.toHaveProperty("scalabilityMode");
   });
 
   test("enableRequestedCapture forwards both the camera capture cap and publish options it is given", async () => {

@@ -165,9 +165,12 @@ describe("videoPublishPlan — camera on a VP9-capable device", () => {
     expect(plan.publish.degradationPreference).toBe("maintain-framerate");
   });
 
-  test("camera capture carries only resolution so the room's deviceId survives the merge", () => {
+  test("camera capture sets resolution but no deviceId, so the room default survives LiveKit's merge", () => {
     const plan = videoPublishPlan({ source: "camera", capability: capable });
-    expect(Object.keys(plan.capture)).toEqual(["resolution"]);
+    expect(plan.capture).toEqual({ resolution: { width: 1280, height: 720, frameRate: 30 } });
+    // No deviceId: LiveKit's merge-without-overwriting fills the room's chosen
+    // camera in; if the builder set one here it would clobber that choice.
+    expect("deviceId" in plan.capture).toBe(false);
   });
 });
 

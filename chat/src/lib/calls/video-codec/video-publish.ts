@@ -158,6 +158,12 @@ const CAMERA_RESOLUTION: VideoResolution = { width: 1280, height: 720, frameRate
  * multi-codec simulcast (so a VP8-only iOS subscriber can't drag capable
  * viewers down to VP8); VP8-only fallback; nothing forced when neither is
  * available.
+ *
+ * Unlike `screenShareCodec`, the backup here carries its own `encoding`: the
+ * top-level `videoEncoding` bounds only the primary codec's layers, not the
+ * simulcast backup track, so the VP8 backup needs the 720p cap set explicitly
+ * or it would re-derive an uncapped (1080p-band) ceiling. The screen share
+ * doesn't need this because its cap rides the `screenShareEncoding` field.
  */
 function cameraCodec(capability: VideoCodecSupport): TrackPublishOptions {
   if (capability.vp9.available) {

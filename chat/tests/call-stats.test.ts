@@ -5,6 +5,7 @@ import {
   formatBitrate,
   summarizeAudioStats,
   summarizeVideoStats,
+  videoResolutionBand,
   type CallStatSample,
 } from "../src/lib/calls/call-stats";
 
@@ -472,6 +473,28 @@ describe("audioBitrateBand — coarse band over the measured on-the-wire audio r
 
   test("an unmeasured bitrate (null, first poll) has no band yet", () => {
     expect(audioBitrateBand(null)).toBeNull();
+  });
+});
+
+describe("videoResolutionBand — coarse band over the negotiated top-layer resolution", () => {
+  test("the camera's new 720p cap and the old 1080p baseline land in distinct bands", () => {
+    // The egress signal for the #1001 camera lever: a fleet-wide shift from
+    // "1080p" to "720p" is what proves the cap took effect and reduced egress.
+    expect(videoResolutionBand("1280×720")).toBe("720p");
+    expect(videoResolutionBand("1920×1080")).toBe("1080p");
+  });
+
+  test("the lower SVC layers a small tile pulls read as their own bands", () => {
+    expect(videoResolutionBand("320×180")).toBe("180p");
+    expect(videoResolutionBand("640×360")).toBe("360p");
+  });
+
+  test("a higher-than-1080p share (screen QHD) reads '1440p'", () => {
+    expect(videoResolutionBand("2560×1440")).toBe("1440p");
+  });
+
+  test("an unreported resolution (null, first poll) has no band yet", () => {
+    expect(videoResolutionBand(null)).toBeNull();
   });
 });
 
