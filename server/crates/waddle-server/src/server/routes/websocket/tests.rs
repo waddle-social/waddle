@@ -50,7 +50,44 @@ mod stream_features;
 mod stream_management;
 
 pub(crate) async fn create_test_websocket_state() -> Arc<WebSocketState> {
-    create_test_websocket_state_with_extension_manager(empty_extension_manager().await).await
+    create_test_websocket_state_with_extension_manager(empty_extension_manager().await, None).await
+}
+
+/// A self-contained [`waddle_sfu::LiveKitSfu`] for tests. Mints real
+/// JWTs locally (no network), so the XEP-0166 Jingle handler can
+/// rewrite the Waddle LiveKit transport exactly as it does in
+/// production. Mirrors the fixture used by the `waddle-xmpp` Jingle
+/// unit tests.
+fn fixture_call_sfu() -> Arc<dyn waddle_sfu::SfuService> {
+    let cfg = waddle_sfu::SfuConfig {
+        api_key: waddle_sfu::ApiKey::new("APItestkey"),
+        api_secret: waddle_sfu::ApiSecret::from_text("super-secret-secret-32-bytes-min")
+            .expect("test api secret meets min length"),
+        webhook_secret: waddle_sfu::ApiSecret::from_text("super-secret-secret-32-bytes-min")
+            .expect("test webhook secret meets min length"),
+        ws_url: waddle_sfu::WebsocketUrl::new("wss://livekit.test/".parse().expect("ws url"))
+            .expect("ws url valid"),
+        turn_host: waddle_sfu::TurnHost::new("turn.test"),
+        turn_tls_port: 443,
+        turn_udp_port: 3478,
+        turn_shared_secret: waddle_sfu::TurnSharedSecret::from_text("turn-secret"),
+        token_ttl: chrono::Duration::seconds(3600),
+        turn_ttl: chrono::Duration::seconds(3600),
+    };
+    Arc::new(waddle_sfu::LiveKitSfu::new(cfg).expect("LiveKitSfu init in test"))
+}
+
+/// Build a test [`WebSocketState`] whose dispatcher has the XEP-0166
+/// Jingle + XEP-0215 extdisco handlers registered — i.e. the
+/// production wiring when `LIVEKIT_*` env is configured (see
+/// `http.rs::register_call_handlers`). Required to exercise 1:1 DM
+/// calling through the real IQ-handler path.
+pub(crate) async fn create_test_websocket_state_with_calls() -> Arc<WebSocketState> {
+    create_test_websocket_state_with_extension_manager(
+        empty_extension_manager().await,
+        Some(fixture_call_sfu()),
+    )
+    .await
 }
 
 async fn empty_extension_manager() -> Arc<ExtensionManager> {
@@ -70,6 +107,7 @@ async fn empty_extension_manager() -> Arc<ExtensionManager> {
 
 async fn create_test_websocket_state_with_extension_manager(
     extension_manager: Arc<ExtensionManager>,
+    call_sfu: Option<Arc<dyn waddle_sfu::SfuService>>,
 ) -> Arc<WebSocketState> {
     let config = DatabaseConfig::default();
     let pool_config = PoolConfig;
@@ -102,6 +140,18 @@ async fn create_test_websocket_state_with_extension_manager(
     let mut dispatcher = StanzaDispatcher::new();
     waddle_xmpp::protocol::handlers::register_default_handlers(&mut dispatcher);
     waddle_xmpp::protocol::handlers::register_default_message_handlers(&mut dispatcher);
+    if let Some(sfu) = call_sfu.as_ref() {
+        // Mirror `http.rs`: when an SFU is configured the XEP-0166
+        // Jingle + XEP-0215 extdisco handlers are registered on the
+        // dispatcher. Without this, `has_iq_handler(NS_JINGLE)` is
+        // false and a call IQ never reaches the forward path.
+        waddle_xmpp::protocol::handlers::register_call_handlers(
+            &mut dispatcher,
+            Arc::clone(sfu),
+            443,
+            3478,
+        );
+    }
     let pubsub_storage = Arc::new(
         crate::pubsub::DatabasePubSubStorage::open(Some("sqlite::memory:"))
             .await
@@ -224,7 +274,7 @@ async fn create_test_websocket_state_with_extension_manager(
                     dm_pin_store: Arc::new(crate::server::routes::websocket::DmPinStore::default()),
                     dm_call_thread_projections: Arc::new(dashmap::DashSet::new()),
                     pending_dm_call_offers: Arc::new(dashmap::DashMap::new()),
-                    sfu: None,
+                    sfu: call_sfu,
                 },
                 occupant_id_secret: OccupantIdSecret::new(
                     b"test-occupant-id-secret-32-bytes-long".to_vec(),
