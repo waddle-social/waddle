@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, onBeforeUnmount } from "vue";
+import { ref, computed, watch, onBeforeUnmount, nextTick } from "vue";
 import { Send, Paperclip, FileText, Music4, Puzzle, X, Loader2, Megaphone, Radio, CornerDownLeft } from "lucide-vue-next";
 import type { JSONContent } from "@tiptap/core";
 import GifPicker from "@/components/chat/GifPicker.vue";
@@ -489,11 +489,24 @@ async function onSend(doc: JSONContent) {
     );
   } finally {
     isPreparingSend.value = false;
+    refocusAfterSend();
   }
 }
 
 function focus() {
   editorRef.value?.focus();
+}
+
+/**
+ * Return the caret to the composer after a send so the user can keep typing
+ * without re-clicking the input. Both send paths pull focus out of the
+ * editor: clicking the send button moves focus onto the button, and the
+ * brief `isPreparingSend` disable toggles the editor's `contenteditable`
+ * off, which blurs it. Wait a tick so the editor is editable again before
+ * focusing.
+ */
+function refocusAfterSend() {
+  void nextTick(() => editorRef.value?.focus());
 }
 
 function focusExtensions() {
@@ -575,6 +588,7 @@ function onGifSelected(url: string) {
   if (isPreparingSend.value) return;
   showGifPicker.value = false;
   emit("selectGif", url);
+  refocusAfterSend();
 }
 
 function onEditorPaste(e: ClipboardEvent) {
