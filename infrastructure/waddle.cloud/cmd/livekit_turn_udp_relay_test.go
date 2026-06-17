@@ -138,6 +138,17 @@ func TestChartRejectsTurnUDPWithoutNodePort(t *testing.T) {
 	}
 }
 
+// With host networking the LiveKit pod binds the node's interface directly,
+// so the TURN/UDP listener is reachable on the node IP without a NodePort
+// Service. The guard must exempt that configuration, like the
+// use_external_ip guard does.
+func TestChartAllowsTurnUDPWithoutNodePortOnHostNetwork(t *testing.T) {
+	out, err := renderLivekitChart(t, "nodePorts.turnUdp.enabled=false", "podHostNetwork=true")
+	if err != nil {
+		t.Fatalf("chart should render TURN/UDP without a NodePort under hostNetwork; got error:\n%s", out)
+	}
+}
+
 // NodePort-exposed media is pointless if LiveKit advertises its in-cluster
 // pod IP: clients (and the TURN relay path) need the node's external IP in
 // ICE candidates. The chart must reject NodePorts with use_external_ip off.

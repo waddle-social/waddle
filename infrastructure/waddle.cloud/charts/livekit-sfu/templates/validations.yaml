@@ -70,8 +70,8 @@
 {{- if and .Values.nodePorts.turnUdp.enabled .Values.nodePorts.turnUdp.udp (or (lt (int .Values.nodePorts.turnUdp.udp) $nodePortMin) (gt (int .Values.nodePorts.turnUdp.udp) $nodePortMax)) -}}
 {{- fail "nodePorts.turnUdp.udp must be inside the Kubernetes NodePort range 30000-32767" -}}
 {{- end -}}
-{{- if and .Values.livekit.turn.enabled .Values.livekit.turn.udp_port (not .Values.nodePorts.turnUdp.enabled) -}}
-{{- fail "livekit.turn.udp_port is set but nodePorts.turnUdp.enabled=false: the embedded TURN/UDP listener would have no NodePort, so LiveKit advertises a udp relay candidate clients cannot reach and calls silently fall back to the TCP/443 relay. Set nodePorts.turnUdp.enabled=true or unset livekit.turn.udp_port." -}}
+{{- if and .Values.livekit.turn.enabled .Values.livekit.turn.udp_port (not .Values.podHostNetwork) (not .Values.nodePorts.turnUdp.enabled) -}}
+{{- fail "livekit.turn.udp_port is set but nodePorts.turnUdp.enabled=false (and podHostNetwork=false): the embedded TURN/UDP listener would have no NodePort, so LiveKit advertises a udp relay candidate clients cannot reach and calls silently fall back to the TCP/443 relay. Set nodePorts.turnUdp.enabled=true, enable podHostNetwork, or unset livekit.turn.udp_port." -}}
 {{- end -}}
 {{- if and (or .Values.nodePorts.rtc.enabled .Values.nodePorts.turnUdp.enabled) (not .Values.podHostNetwork) (not .Values.livekit.rtc.use_external_ip) -}}
 {{- fail "media NodePorts are exposed (nodePorts.rtc/turnUdp) without hostNetwork but livekit.rtc.use_external_ip=false: LiveKit would advertise its in-cluster pod IP in ICE candidates, so external clients cannot reach the SFU or the TURN relay. Set livekit.rtc.use_external_ip=true." -}}

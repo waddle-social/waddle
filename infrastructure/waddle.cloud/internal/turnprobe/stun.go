@@ -27,21 +27,26 @@ const (
 	classBindingOK  = 0x0101 // Binding success response method+class.
 	attrXorMapped   = 0x0020 // XOR-MAPPED-ADDRESS attribute type.
 	familyIPv4      = 0x01
+	familyIPv6      = 0x02
 )
 
 // BuildBindingRequest returns an attribute-less STUN Binding request and
 // the transaction id stamped into it, so the caller can match the
-// response against the request it sent.
-func BuildBindingRequest() ([]byte, TxID) {
+// response against the request it sent. It errors if a cryptographically
+// random transaction id cannot be generated — proceeding with a
+// predictable id would weaken response correlation and spoofing resistance.
+func BuildBindingRequest() ([]byte, TxID, error) {
 	var txID TxID
-	_, _ = rand.Read(txID[:])
+	if _, err := rand.Read(txID[:]); err != nil {
+		return nil, TxID{}, fmt.Errorf("generate transaction id: %w", err)
+	}
 
 	msg := make([]byte, headerLen)
 	binary.BigEndian.PutUint16(msg[0:2], methodClassBind)
 	binary.BigEndian.PutUint16(msg[2:4], 0)
 	binary.BigEndian.PutUint32(msg[4:8], magicCookie)
 	copy(msg[8:20], txID[:])
-	return msg, txID
+	return msg, txID, nil
 }
 
 // RoundTripper sends a STUN request and returns the response datagram that
@@ -55,7 +60,10 @@ type RoundTripper func(request []byte) ([]byte, error)
 // server-reflexive address from a matching success response. A non-nil
 // error means the relay was not confirmed reachable.
 func Probe(rt RoundTripper) (netip.AddrPort, error) {
-	request, txID := BuildBindingRequest()
+	request, txID, err := BuildBindingRequest()
+	if err != nil {
+		return netip.AddrPort{}, err
+	}
 	response, err := rt(request)
 	if err != nil {
 		return netip.AddrPort{}, fmt.Errorf("STUN round trip: %w", err)
@@ -80,7 +88,18 @@ func ParseBindingResponse(txID TxID, resp []byte) (netip.AddrPort, error) {
 		return netip.AddrPort{}, fmt.Errorf("not a Binding success response: type %#04x", got)
 	}
 
-	addr, err := xorMappedAddress(resp)
+	// The header's message length is authoritative (RFC 8489 §5): the
+	// attribute section is exactly that many bytes, 4-byte aligned. Clamp
+	// to it so trailing bytes past the declared boundary are never mined.
+	msgLen := int(binary.BigEndian.Uint16(resp[2:4]))
+	if msgLen%4 != 0 {
+		return netip.AddrPort{}, fmt.Errorf("STUN message length %d is not 4-byte aligned", msgLen)
+	}
+	if headerLen+msgLen > len(resp) {
+		return netip.AddrPort{}, errors.New("STUN message length exceeds datagram")
+	}
+
+	addr, err := xorMappedAddress(resp[headerLen : headerLen+msgLen])
 	if err != nil {
 		return netip.AddrPort{}, err
 	}
@@ -89,8 +108,7 @@ func ParseBindingResponse(txID TxID, resp []byte) (netip.AddrPort, error) {
 
 // xorMappedAddress walks the attribute section and decodes the first
 // XOR-MAPPED-ADDRESS attribute (RFC 8489 §14.2).
-func xorMappedAddress(resp []byte) (netip.AddrPort, error) {
-	body := resp[headerLen:]
+func xorMappedAddress(body []byte) (netip.AddrPort, error) {
 	for len(body) >= 4 {
 		attrType := binary.BigEndian.Uint16(body[0:2])
 		attrLen := int(binary.BigEndian.Uint16(body[2:4]))
@@ -113,8 +131,14 @@ func xorMappedAddress(resp []byte) (netip.AddrPort, error) {
 }
 
 func decodeXorMapped(value []byte) (netip.AddrPort, error) {
-	if len(value) < 8 || value[1] != familyIPv4 {
-		return netip.AddrPort{}, errors.New("unsupported or malformed XOR-MAPPED-ADDRESS")
+	if len(value) < 8 {
+		return netip.AddrPort{}, errors.New("malformed XOR-MAPPED-ADDRESS")
+	}
+	if value[1] == familyIPv6 {
+		return netip.AddrPort{}, errors.New("IPv6 XOR-MAPPED-ADDRESS is unsupported; probe targets the IPv4 NodePort")
+	}
+	if value[1] != familyIPv4 {
+		return netip.AddrPort{}, fmt.Errorf("unknown XOR-MAPPED-ADDRESS family %#02x", value[1])
 	}
 	port := binary.BigEndian.Uint16(value[2:4]) ^ uint16(magicCookie>>16)
 	var cookie [4]byte
