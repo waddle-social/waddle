@@ -43,8 +43,12 @@ const props = withDefaults(defineProps<{
    *  invokes this from its `<video>` ref callback. */
   attach: (key: string, el: HTMLMediaElement | null, track: TileAttachable | null) => void;
   interactive?: boolean;
+  /** Whether this participant is the (held) active speaker. Drives the
+   *  highlight border in Gallery view. */
+  speaking?: boolean;
 }>(), {
   interactive: true,
+  speaking: false,
 });
 
 const initials = computed<string>(() => {
@@ -89,6 +93,7 @@ const emit = defineEmits<{
     :class="{
       'call-tile--has-video': videoTrack !== null,
       'call-tile--interactive': interactive,
+      'call-tile--speaking': speaking,
     }"
     :role="interactive ? 'button' : 'img'"
     :tabindex="interactive ? 0 : undefined"
@@ -187,6 +192,24 @@ const emit = defineEmits<{
 .call-tile--interactive:focus-visible {
   outline: 2px solid var(--primary);
   outline-offset: 2px;
+}
+
+/* Active-speaker highlight. An INSET ring (not a border) keeps the tile's
+ * box footprint identical, so the grid never reflows or scrolls when a
+ * speaker changes — the adaptive layout is untouched. A soft outer glow
+ * adds emphasis; it renders outside the box like the hover glow already
+ * does, so it introduces no new clipping. */
+.call-tile--speaking {
+  box-shadow:
+    inset 0 0 0 3px var(--primary),
+    0 0 16px color-mix(in oklab, var(--primary) 50%, transparent);
+}
+
+/* Keep the speaker ring visible while hovering a speaking tile. */
+.call-tile--speaking.call-tile--interactive:hover {
+  box-shadow:
+    inset 0 0 0 3px var(--primary),
+    0 0 18px var(--glow);
 }
 
 /* The placeholder layer is ALWAYS painted underneath the video.

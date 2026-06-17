@@ -2,6 +2,11 @@ import { ref, type Ref } from "vue";
 import { $callState } from "./call-store";
 import { CallEngine, type LocalMediaTrack, type RemoteMediaTrack } from "./engine";
 import {
+  advanceActiveSpeakers,
+  emptyActiveSpeakerState,
+  type ActiveSpeakerState,
+} from "./active-speakers";
+import {
   addLiveCallParticipant,
   clearLiveCallParticipants,
   markRoomLeavingCall,
@@ -54,6 +59,58 @@ const remoteTracks: Ref<RemoteMediaTrack[]> = ref([]);
  * so the renderer can use one tile component for both.
  */
 const localTracks: Ref<LocalMediaTrack[]> = ref([]);
+/**
+ * Identities currently highlighted as the active speaker, derived from
+ * LiveKit's `ActiveSpeakersChanged` signal through the pure
+ * `advanceActiveSpeakers` hold logic. Drives the speaker highlight border on
+ * Gallery tiles. A `ReadonlySet` so the renderer membership-checks per tile.
+ */
+const activeSpeakerIdentities: Ref<ReadonlySet<string>> = ref(new Set());
+/** Hold state for the active-speaker derivation; reset between calls. */
+let activeSpeakerState: ActiveSpeakerState = emptyActiveSpeakerState();
+/**
+ * The speaking set from LiveKit's most recent event. The scheduled release
+ * sweep re-runs the derivation against this same set so a held highlight clears
+ * on time even when LiveKit fires no further events (continuous silence).
+ */
+let lastSpeakingIdentities: readonly string[] = [];
+/** Single pending release sweep (`setTimeout`), armed at the next deadline. */
+let activeSpeakerSweep: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Re-derive the highlighted set against `lastSpeakingIdentities` at the current
+ * wall-clock time, publish it, and (re)arm a single sweep for the next release
+ * deadline. Idempotent: safe to call from a LiveKit event or from the sweep.
+ */
+function pumpActiveSpeakers(): void {
+  if (activeSpeakerSweep) {
+    clearTimeout(activeSpeakerSweep);
+    activeSpeakerSweep = null;
+  }
+  const step = advanceActiveSpeakers({
+    state: activeSpeakerState,
+    speakingIdentities: lastSpeakingIdentities,
+    now: Date.now(),
+  });
+  activeSpeakerState = step.state;
+  activeSpeakerIdentities.value = step.activeIdentities;
+  if (step.nextDeadline !== null) {
+    const delay = Math.max(0, step.nextDeadline - Date.now());
+    activeSpeakerSweep = setTimeout(pumpActiveSpeakers, delay);
+  }
+}
+
+/** Drop all active-speaker state so the next call starts from a clean slate. */
+function resetActiveSpeakers(): void {
+  if (activeSpeakerSweep) {
+    clearTimeout(activeSpeakerSweep);
+    activeSpeakerSweep = null;
+  }
+  activeSpeakerState = emptyActiveSpeakerState();
+  lastSpeakingIdentities = [];
+  activeSpeakerIdentities.value = new Set();
+}
+
 /**
  * Fleet-measurement beacon for the verified mic audio-processing state
  * (#913). De-dupes to at most one Faro event per call per distinct state;
@@ -248,6 +305,7 @@ export function useCallEngine(): {
   engine: CallEngine;
   remoteTracks: Ref<RemoteMediaTrack[]>;
   localTracks: Ref<LocalMediaTrack[]>;
+  activeSpeakerIdentities: Ref<ReadonlySet<string>>;
 } {
   if (!singletonEngine) {
     singletonEngine = new CallEngine();
@@ -329,6 +387,12 @@ export function useCallEngine(): {
       // bars with a "Reconnecting…" label while the path is re-establishing.
       setCallConnectionPhase(phase);
     });
+    singletonEngine.on("activeSpeakersChanged", (identities) => {
+      // LiveKit re-derived who is speaking. Feed it through the brief hold so
+      // the Gallery highlight does not flicker on transient sounds.
+      lastSpeakingIdentities = identities;
+      pumpActiveSpeakers();
+    });
     singletonEngine.on("participantConnected", (identity) => {
       const roomJid = activeMucRoomJid();
       if (!roomJid) return;
@@ -342,6 +406,9 @@ export function useCallEngine(): {
     singletonEngine.on("disconnected", () => {
       remoteTracks.value = [];
       localTracks.value = [];
+      // Drop the active-speaker highlight + its pending sweep so a stale
+      // speaker from the call that just ended can't bleed into the next one.
+      resetActiveSpeakers();
       syncScreenShareEnabled(false);
       // Drop any "joined without mic/camera" notice — it belongs to the
       // call that just ended, not the next one.
@@ -377,7 +444,7 @@ export function useCallEngine(): {
       clearLiveCallParticipants(slot.roomJid);
     });
   }
-  return { engine: singletonEngine, remoteTracks, localTracks };
+  return { engine: singletonEngine, remoteTracks, localTracks, activeSpeakerIdentities };
 }
 
 /**

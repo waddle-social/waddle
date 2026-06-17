@@ -63,7 +63,7 @@ const micEnabled = useStore($callMicEnabled);
 const camEnabled = useStore($callCamEnabled);
 const screenShareEnabled = useStore($callScreenShareEnabled);
 const screenShareSupported = useStore($callScreenShareSupported);
-const { remoteTracks, localTracks, engine } = useCallEngine();
+const { remoteTracks, localTracks, engine, activeSpeakerIdentities } = useCallEngine();
 const { activeRoomJid, selfInCall } = useActiveMucCall();
 
 const settingsOpen = ref(false);
@@ -217,6 +217,7 @@ async function onHangup(): Promise<void> {
           :local-identity="localIdentity"
           :expected-remote-identities="expectedRemoteIdentities"
           :mic-enabled="micEnabled"
+          :active-speaker-identities="activeSpeakerIdentities"
         />
       </div>
       <footer class="call-split__footer">
