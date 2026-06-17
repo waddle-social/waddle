@@ -25,7 +25,8 @@ import { useActiveMucCall } from "@/lib/calls/use-active-muc-call";
 import { useSplitResize } from "@/lib/calls/use-split-resize";
 import { localScreenSharePresentation } from "@/lib/calls/call-self-share";
 import { normalizeMucCallRoomJid } from "@/lib/calls/muc-call-presence";
-import { useCallVolumeMixer } from "@/lib/calls/use-call-volume-mixer";
+import { useCallRoster } from "@/lib/calls/use-call-roster";
+import { openCallDock } from "@/lib/calls/call-dock-state";
 import { barePeerJid } from "@/lib/xmpp/jid";
 import { expectedRemoteIdentitiesForCallState } from "@/lib/calls/call-tiles";
 import CallTileGrid from "./CallTileGrid.vue";
@@ -33,7 +34,6 @@ import CallControls from "./CallControls.vue";
 import CallSettingsDialog from "./CallSettingsDialog.vue";
 import CallMediaNotice from "./CallMediaNotice.vue";
 import CallSelfShareNotice from "./CallSelfShareNotice.vue";
-import CallVolumeMixerDialog from "./CallVolumeMixerDialog.vue";
 import SplitDragHandle from "./SplitDragHandle.vue";
 
 /**
@@ -70,18 +70,22 @@ const { remoteTracks, localTracks, engine, activeSpeakerIdentities, promotedSpea
 const { activeRoomJid, selfInCall } = useActiveMucCall();
 
 const settingsOpen = ref(false);
-const volumeOpen = ref(false);
 const containerRef = ref<HTMLElement | null>(null);
 
 const normalizedRoomJid = computed(() =>
   normalizeMucCallRoomJid(props.roomJid ?? ""),
 );
 
-const {
-  rows: volumeRows,
-  setVolume: setParticipantVolume,
-  resetAll: resetParticipantVolumes,
-} = useCallVolumeMixer(normalizedRoomJid);
+// The split surface has no room for the dock itself; it only needs the
+// attendee count for the Participants button, which bumps to Expanded
+// (where the dock reflows the stage) on click.
+const { rows: rosterRows } = useCallRoster(normalizedRoomJid);
+const participantCount = computed(() => rosterRows.value.length);
+
+function enterExpandedWithDock(): void {
+  openCallDock();
+  $callUiMode.set("expanded");
+}
 
 const normalizedDmPeerJid = computed(() =>
   barePeerJid(props.dmPeerJid ?? "").toLowerCase(),
@@ -231,13 +235,14 @@ async function onHangup(): Promise<void> {
           :screen-share-enabled="screenShareEnabled"
           :screen-share-supported="screenShareSupported"
           :is-expanded="false"
-          :volume-open="volumeOpen"
+          :participants-open="false"
+          :participant-count="participantCount"
           :view-mode="viewMode"
           @toggle-mic="toggleMic"
           @toggle-cam="toggleCam"
           @toggle-screen-share="toggleScreenShare"
           @toggle-expanded="enterExpanded"
-          @toggle-volume="volumeOpen = !volumeOpen"
+          @toggle-participants="enterExpandedWithDock"
           @open-settings="settingsOpen = true"
           @set-view-mode="setCallViewMode"
           @hangup="onHangup"
@@ -250,12 +255,6 @@ async function onHangup(): Promise<void> {
       @press="onHandlePress"
     />
     <CallSettingsDialog v-model:open="settingsOpen" />
-    <CallVolumeMixerDialog
-      v-model:open="volumeOpen"
-      :rows="volumeRows"
-      @set-volume="setParticipantVolume"
-      @reset-all="resetParticipantVolumes"
-    />
   </template>
 </template>
 

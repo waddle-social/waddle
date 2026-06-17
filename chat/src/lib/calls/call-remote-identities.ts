@@ -9,10 +9,10 @@ import type { CallState } from "./types";
  */
 export function remoteParticipantIdentitiesForCall(input: {
   state: CallState;
-  liveParticipantsByRoom: Readonly<Record<string, string[]>>;
+  liveParticipantsByRoom: Readonly<Record<string, readonly string[]>>;
   normalizedRoomJid: string;
   remoteTracks: readonly RemoteMediaTrack[];
-}): string[] {
+}): readonly string[] {
   if (input.state.phase === "active" && input.state.kind === "muc") {
     return input.liveParticipantsByRoom[input.normalizedRoomJid] ?? [];
   }

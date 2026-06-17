@@ -672,20 +672,21 @@ describe("device-less call controls", () => {
   });
 });
 
-describe("call control bar volume toggle", () => {
-  test("renders an accessible speaker button reflecting the closed mixer state", async () => {
-    const html = await renderCallControls({ volumeOpen: false });
+describe("call control bar participants toggle", () => {
+  test("renders an accessible participants button reflecting the closed dock state", async () => {
+    const html = await renderCallControls({ participantsOpen: false, participantCount: 3 });
 
-    expect(html).toContain('aria-label="Open volume mixer"');
-    expect(html).toContain('aria-haspopup="dialog"');
+    expect(html).toContain('aria-label="Open participants"');
     expect(html).toContain('aria-pressed="false"');
     expect(html).toContain('aria-expanded="false"');
+    // The live attendee count rides on the button.
+    expect(html).toContain(">3<");
   });
 
-  test("reflects the open mixer state on the speaker button", async () => {
-    const html = await renderCallControls({ volumeOpen: true });
+  test("reflects the open dock state on the participants button", async () => {
+    const html = await renderCallControls({ participantsOpen: true, participantCount: 3 });
 
-    expect(html).toContain('aria-label="Close volume mixer"');
+    expect(html).toContain('aria-label="Close participants"');
     expect(html).toContain('aria-pressed="true"');
     expect(html).toContain('aria-expanded="true"');
   });
@@ -699,7 +700,9 @@ async function renderCallControls(overrides: Record<string, unknown>): Promise<s
     screenShareEnabled: false,
     screenShareSupported: true,
     isExpanded: false,
-    volumeOpen: false,
+    participantsOpen: false,
+    participantCount: 0,
+    viewMode: "gallery",
     ...overrides,
   };
   return renderToString(createSSRApp({ render: () => h(component, props) }));
