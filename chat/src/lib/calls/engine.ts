@@ -758,6 +758,7 @@ export class CallEngine {
     room.off(RoomEvent.TrackUnmuted, this.handleTrackMuteChanged);
     room.off(RoomEvent.ConnectionQualityChanged, this.handleConnectionQualityChanged);
     room.off(RoomEvent.ConnectionStateChanged, this.handleConnectionStateChanged);
+    room.off(RoomEvent.ActiveSpeakersChanged, this.handleActiveSpeakersChanged);
     // Tear the mic noise processor down explicitly first: its destroy() stops a
     // private clone of the capture track that holds the input device open. A
     // normal room.disconnect() stops local tracks (which destroys the processor)

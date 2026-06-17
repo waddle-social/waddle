@@ -184,6 +184,17 @@ describe("call-engine module", () => {
     expect(typeof engine.on("localTrackUnpublished", () => {})).toBe("function");
   });
 
+  test("on() supports the active-speakers event so the Gallery highlight can subscribe", async () => {
+    // Regression guard: the active-speaker highlight subscribes to
+    // `activeSpeakersChanged` in `use-call-engine`. `on()` indexes the
+    // per-event `listeners` record, so a new `CallEngineEvents` key that is
+    // missing from that record makes `.on(...)` throw at runtime (the bind
+    // would silently never fire otherwise). Keep them in lockstep.
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const engine = new CallEngine();
+    expect(typeof engine.on("activeSpeakersChanged", () => {})).toBe("function");
+  });
+
   test("audio playback status exposes blocked state and resume calls LiveKit startAudio", async () => {
     const { CallEngine } = await import("../src/lib/calls/engine");
     const engine = new CallEngine();
