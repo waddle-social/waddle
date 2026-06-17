@@ -932,9 +932,10 @@ pub(super) async fn handle_spaces_publish(
 /// `urn:xmpp:pubsub-social-feed:0` or XEP-0501 stories at
 /// `urn:xmpp:stories:0`. Both live on `community.<domain>` (distinct
 /// from the spaces service so the spaces enumeration only returns
-/// real spaces). Same publish gate as spaces (server owners or
-/// space owners) and the standard pubsub fan-out so subscribers see
-/// new posts in real time.
+/// real spaces). The social feed is member-postable (gated by its
+/// pubsub publish-model); stories and calendar events keep the
+/// owner-only spaces gate. The standard pubsub fan-out runs either
+/// way so subscribers see new posts in real time.
 pub(super) async fn handle_community_publish(
     iq: &xmpp_parsers::iq::Iq,
     state: &WebSocketState,
@@ -1728,11 +1729,45 @@ async fn handle_story_attachment_retract(
     }
 }
 
-/// Publish a non-bookmark item to a spaces-or-community pubsub node.
-/// Used by `handle_community_publish` (feed + stories on
-/// `community.<domain>`). Same auth gate as space-node mutations
-/// (server owners or space owners) and the standard pubsub fan-out
-/// so subscribers see new posts in real time.
+/// Whether `session` may publish to the XEP-0472 social feed node.
+///
+/// The feed is member-postable: any authenticated member may post
+/// (the node's `publish_model` is Open). This honors the node's
+/// configured pubsub publish-model via `can_publish` rather than the
+/// owner-only Spaces structural gate, while still requiring an
+/// authenticated session and rejecting outcasts (XEP-0472
+/// §"Replying to a Post"; XEP-0060 §7.1.3).
+async fn community_feed_publish_allowed(
+    state: &WebSocketState,
+    session: Option<&Session>,
+    community_jid: &BareJid,
+    node: &str,
+) -> Result<bool, String> {
+    let Some(session) = session else {
+        return Ok(false);
+    };
+    let entity = session
+        .user_jid
+        .parse::<BareJid>()
+        .map_err(|error| format!("invalid session JID for feed publish: {error}"))?;
+    crate::pubsub_authz::can_publish(
+        &state.deps.protocol.pubsub_storage,
+        community_jid,
+        node,
+        &entity,
+        false,
+    )
+    .await
+    .map_err(|error| format!("can_publish failed for feed node: {error}"))
+}
+
+/// Publish a non-bookmark item to a community pubsub node. Used by
+/// `handle_community_publish` (feed + stories + calendar events on
+/// `community.<domain>`). The XEP-0472 social feed is member-postable
+/// (gated by the node's pubsub publish-model via
+/// `community_feed_publish_allowed`); stories and calendar events keep
+/// the owner-only Spaces gate. Either way the standard pubsub fan-out
+/// runs so subscribers see new posts in real time.
 async fn handle_community_non_bookmark_publish(
     iq: &xmpp_parsers::iq::Iq,
     state: &WebSocketState,
@@ -1741,7 +1776,15 @@ async fn handle_community_non_bookmark_publish(
     item: PubSubItem,
     session: Option<&Session>,
 ) -> Vec<String> {
-    match spaces_node_mutation_allowed(state, session, node).await {
+    let Ok(community_jid) = community_domain.parse::<BareJid>() else {
+        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
+    };
+    let authorized = if node == waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED {
+        community_feed_publish_allowed(state, session, &community_jid, node).await
+    } else {
+        spaces_node_mutation_allowed(state, session, node).await
+    };
+    match authorized {
         Ok(true) => {}
         Ok(false) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))],
         Err(error) => {
@@ -1749,9 +1792,6 @@ async fn handle_community_non_bookmark_publish(
             return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
         }
     }
-    let Ok(community_jid) = community_domain.parse::<BareJid>() else {
-        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
-    };
     match state
         .deps
         .protocol

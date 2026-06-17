@@ -204,6 +204,30 @@ impl NodeConfig {
         }
     }
 
+    /// Configuration for the XEP-0472 community social-feed node.
+    ///
+    /// Open on both axes: anyone may subscribe/read (`access_model:
+    /// Open`) AND any authenticated entity may publish (`publish_model:
+    /// Open`, XEP-0060 §7.1.4). This makes the global feed
+    /// member-postable, matching XEP-0472 §"Replying to a Post"
+    /// ("Anyone can publish a post" to a shared feed node). The publish
+    /// handler still requires an authenticated session and rejects
+    /// outcasts via `can_publish`. Distinct from `spaces_public()`
+    /// (Publisher publish-model) which the owner-only stories and
+    /// calendar nodes keep.
+    pub fn community_feed() -> Self {
+        Self {
+            access_model: AccessModel::Open,
+            publish_model: PublishModel::Open,
+            max_items: u32::MAX,
+            persist_items: true,
+            deliver_payloads: true,
+            notify_retract: true,
+            notify_delete: true,
+            send_last_published_item: SendLastPublishedItem::OnSub,
+        }
+    }
+
     /// XEP-0503 configuration for a private Space node.
     pub fn spaces_private() -> Self {
         Self {
@@ -455,6 +479,21 @@ mod tests {
             Ok(PublishModel::Publishers)
         );
         assert_eq!(PublishModel::Open.to_string(), "open");
+    }
+
+    #[test]
+    fn community_feed_is_open_read_and_open_publish() {
+        let config = NodeConfig::community_feed();
+        assert_eq!(config.access_model, AccessModel::Open);
+        assert_eq!(config.publish_model, PublishModel::Open);
+        assert!(config.persist_items);
+        assert!(config.deliver_payloads);
+        // Differs from spaces_public() only on publish-model: the feed
+        // is member-postable, spaces nodes are Publisher-gated.
+        assert_eq!(
+            NodeConfig::spaces_public().publish_model,
+            PublishModel::Publishers
+        );
     }
 
     #[test]
