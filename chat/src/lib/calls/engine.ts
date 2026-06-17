@@ -247,6 +247,14 @@ export type CallEngineEvents = {
    * which must override the last quality sample while the path is down.
    */
   connectionPhaseChanged: (phase: CallConnectionPhase) => void;
+  /**
+   * Fires when LiveKit re-derives which participants are actively speaking
+   * (from audio levels). Carries the full speaking set — including the local
+   * participant — as identities, so the UI can highlight the active speaker's
+   * tile. LiveKit already debounces; the UI adds a brief hold on top to avoid
+   * flicker. See `active-speakers.ts`.
+   */
+  activeSpeakersChanged: (identities: string[]) => void;
 };
 
 /**
@@ -296,6 +304,7 @@ export class CallEngine {
     verifiedMicProcessingChanged: new Set(),
     connectionQualityChanged: new Set(),
     connectionPhaseChanged: new Set(),
+    activeSpeakersChanged: new Set(),
   };
 
   /**
@@ -406,6 +415,7 @@ export class CallEngine {
     room.on(RoomEvent.TrackUnmuted, this.handleTrackMuteChanged);
     room.on(RoomEvent.ConnectionQualityChanged, this.handleConnectionQualityChanged);
     room.on(RoomEvent.ConnectionStateChanged, this.handleConnectionStateChanged);
+    room.on(RoomEvent.ActiveSpeakersChanged, this.handleActiveSpeakersChanged);
     // XEP-0215 ICE injection: when the server advertised external services,
     // make them the authoritative ICE list via `rtcConfig`. An empty/absent
     // list means "no advertisement" — pass no `rtcConfig` so LiveKit keeps its
@@ -748,6 +758,7 @@ export class CallEngine {
     room.off(RoomEvent.TrackUnmuted, this.handleTrackMuteChanged);
     room.off(RoomEvent.ConnectionQualityChanged, this.handleConnectionQualityChanged);
     room.off(RoomEvent.ConnectionStateChanged, this.handleConnectionStateChanged);
+    room.off(RoomEvent.ActiveSpeakersChanged, this.handleActiveSpeakersChanged);
     // Tear the mic noise processor down explicitly first: its destroy() stops a
     // private clone of the capture track that holds the input device open. A
     // normal room.disconnect() stops local tracks (which destroys the processor)
@@ -983,6 +994,15 @@ export class CallEngine {
 
   private handleConnectionStateChanged = (state: ConnectionState) => {
     this.emit("connectionPhaseChanged", mapLiveKitConnectionState(state));
+  };
+
+  /**
+   * LiveKit re-derived the active-speaker set from audio levels. Surface the
+   * speaking identities (local participant included) so the UI can highlight
+   * the talking tile; the brief anti-flicker hold lives in the view layer.
+   */
+  private handleActiveSpeakersChanged = (speakers: Participant[]) => {
+    this.emit("activeSpeakersChanged", speakers.map((participant) => participant.identity));
   };
 
   private clearParticipantAudioVolumes(): void {

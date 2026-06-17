@@ -43,8 +43,12 @@ const props = withDefaults(defineProps<{
    *  invokes this from its `<video>` ref callback. */
   attach: (key: string, el: HTMLMediaElement | null, track: TileAttachable | null) => void;
   interactive?: boolean;
+  /** Whether this participant is the (held) active speaker. Drives the
+   *  highlight border in Gallery view. */
+  speaking?: boolean;
 }>(), {
   interactive: true,
+  speaking: false,
 });
 
 const initials = computed<string>(() => {
@@ -89,6 +93,7 @@ const emit = defineEmits<{
     :class="{
       'call-tile--has-video': videoTrack !== null,
       'call-tile--interactive': interactive,
+      'call-tile--speaking': speaking,
     }"
     :role="interactive ? 'button' : 'img'"
     :tabindex="interactive ? 0 : undefined"
@@ -187,6 +192,34 @@ const emit = defineEmits<{
 .call-tile--interactive:focus-visible {
   outline: 2px solid var(--primary);
   outline-offset: 2px;
+}
+
+/* Active-speaker highlight ring. Drawn by an overlay layered ABOVE the
+ * placeholder + video (both `position:absolute; inset:0` and opaque) — an inset
+ * box-shadow on the tile itself paints underneath those layers and stays
+ * hidden. The overlay is `inset:0` with no box size of its own, so the tile's
+ * footprint is unchanged and the adaptive grid never reflows. `border-radius`
+ * follows the tile so the ring is clipped to the same rounded corners. */
+.call-tile--speaking::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 3px var(--primary);
+  pointer-events: none;
+  z-index: 2;
+}
+
+/* Soft outer glow on the tile box. It renders outside the box like the hover
+ * glow, so it is never occluded and adds no clipping. */
+.call-tile--speaking {
+  box-shadow: 0 0 16px color-mix(in oklab, var(--primary) 50%, transparent);
+}
+
+/* Keep the glow consistent while hovering a speaking tile (the ring overlay is
+ * unaffected by hover). */
+.call-tile--speaking.call-tile--interactive:hover {
+  box-shadow: 0 0 18px var(--glow);
 }
 
 /* The placeholder layer is ALWAYS painted underneath the video.

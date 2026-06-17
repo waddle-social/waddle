@@ -5,6 +5,7 @@ import { TileAttachments, type TileAttachable } from "@/lib/calls/tile-attach";
 import { selectGridLayout } from "@/lib/calls/grid-layout";
 import type { CallTileModel } from "@/lib/calls/call-tiles";
 import { projectCallTiles, reconcileCallTileProjectionState } from "@/lib/calls/call-tile-projection";
+import { highlightedTileKeys } from "@/lib/calls/active-speakers";
 import CallTile from "./CallTile.vue";
 
 /**
@@ -35,6 +36,10 @@ import CallTile from "./CallTile.vue";
  */
 type Tile = CallTileModel;
 
+/** Stable fallback so the highlight computed doesn't churn when no speaker
+ *  prop is supplied. */
+const EMPTY_ACTIVE_SPEAKERS: ReadonlySet<string> = new Set();
+
 const props = defineProps<{
   remoteTracks: readonly RemoteMediaTrack[];
   localTracks: readonly LocalMediaTrack[];
@@ -44,6 +49,8 @@ const props = defineProps<{
   expectedRemoteIdentities?: readonly string[];
   /** Whether the local mic is currently un-muted. */
   micEnabled: boolean;
+  /** Identities LiveKit currently reports (held) as actively speaking. */
+  activeSpeakerIdentities?: ReadonlySet<string>;
 }>();
 
 const seenRemoteScreenTrackKeys = ref<ReadonlySet<string>>(new Set());
@@ -148,6 +155,12 @@ const layout = computed(() => {
   );
 });
 
+// Tile keys that carry the active-speaker highlight in Gallery view. The pure
+// `highlightedTileKeys` maps held speaking identities → their camera tile.
+const speakingTileKeys = computed<ReadonlySet<string>>(() =>
+  highlightedTileKeys(tiles.value, props.activeSpeakerIdentities ?? EMPTY_ACTIVE_SPEAKERS),
+);
+
 const visibleTiles = computed<Tile[]>(() => {
   // When the participant count exceeds the layout's capacity (e.g.
   // 30 participants in a 5×5), we clip to the first `maxTiles`. The
@@ -219,6 +232,7 @@ const gridStyle = computed(() => ({
         :shows-presenting-glyph="tile.showsPresentingGlyph"
         :mic-enabled="tile.micEnabledHint"
         :video-track="tile.videoTrack"
+        :speaking="speakingTileKeys.has(tile.key)"
         :attach="attach"
         @activate="toggleFocus(tile)"
       />
