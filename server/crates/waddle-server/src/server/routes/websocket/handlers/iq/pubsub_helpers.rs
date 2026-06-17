@@ -1767,6 +1767,40 @@ async fn community_feed_publisher(
     Ok(allowed.then_some(entity))
 }
 
+/// Refuse to let `entity` overwrite a social-feed item already published
+/// by a different member. The feed is one shared, open-publish node with
+/// client-chosen item ids, so without this a member could reuse another
+/// member's item id and clobber their post. Returns the stanza error to
+/// send, or `None` when the publish may proceed (a new id, or the
+/// existing item belongs to `entity`).
+async fn feed_item_ownership_error(
+    state: &WebSocketState,
+    community_jid: &BareJid,
+    node: &str,
+    item: &PubSubItem,
+    entity: &BareJid,
+) -> Option<PubSubError> {
+    let item_id = item.id.as_deref()?;
+    match state
+        .deps
+        .protocol
+        .pubsub_storage
+        .get_items(community_jid, node, None, &[item_id.to_owned()])
+        .await
+    {
+        Ok(existing) => match existing.first() {
+            Some(existing_item) if existing_item.publisher.as_ref() != Some(entity) => {
+                Some(PubSubError::Forbidden)
+            }
+            _ => None,
+        },
+        Err(error) => {
+            warn!(node, item_id, error = %error, "Failed to check feed item ownership");
+            Some(PubSubError::InternalServerError)
+        }
+    }
+}
+
 /// Publish a non-bookmark item to a community pubsub node. Used by
 /// `handle_community_publish` (feed + stories + calendar events on
 /// `community.<domain>`). The XEP-0472 social feed is member-postable
@@ -1780,34 +1814,16 @@ async fn handle_community_non_bookmark_publish(
     state: &WebSocketState,
     community_domain: &str,
     node: &str,
-    item: PubSubItem,
+    mut item: PubSubItem,
     session: Option<&Session>,
 ) -> Vec<String> {
     let Ok(community_jid) = community_domain.parse::<BareJid>() else {
         return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
     };
-    // The feed is member-postable and the service stamps the authenticated
-    // publisher on each item; stories/events stay owner-only and carry no
-    // publisher attribution (publisher == node owner).
-    let publisher = if node == waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED {
-        match community_feed_publisher(state, session, &community_jid, node).await {
-            Ok(Some(entity)) => Some(entity),
-            Ok(None) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))],
-            Err(error) => {
-                warn!(node, error = %error, "Failed to authorize community feed publish");
-                return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
-            }
-        }
-    } else {
-        match spaces_node_mutation_allowed(state, session, node).await {
-            Ok(true) => None,
-            Ok(false) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))],
-            Err(error) => {
-                warn!(node, error = %error, "Failed to authorize community publish");
-                return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
-            }
-        }
-    };
+    // Resolve the node before authorizing or mutating it. Community nodes
+    // are bootstrapped at startup; checking existence first keeps the
+    // error semantics correct (NodeNotFound, not a misleading Forbidden)
+    // for the deleted-node edge case.
     match state
         .deps
         .protocol
@@ -1820,6 +1836,57 @@ async fn handle_community_non_bookmark_publish(
         Err(error) => {
             warn!(node, error = %error, "Failed to resolve community node for publish");
             return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))];
+        }
+    }
+    // The feed is member-postable and the service stamps the authenticated
+    // publisher on each item; stories/events stay owner-only and carry no
+    // publisher attribution (publisher == node owner). A storage/permission
+    // backend failure is an internal error, not an authorization denial.
+    let publisher = if node == waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED {
+        match community_feed_publisher(state, session, &community_jid, node).await {
+            Ok(Some(entity)) => Some(entity),
+            Ok(None) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))],
+            Err(error) => {
+                warn!(node, error = %error, "Failed to authorize community feed publish");
+                return vec![iq_to_xml(build_pubsub_error(
+                    iq,
+                    PubSubError::InternalServerError,
+                ))];
+            }
+        }
+    } else {
+        match spaces_node_mutation_allowed(state, session, node).await {
+            Ok(true) => None,
+            Ok(false) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))],
+            Err(error) => {
+                warn!(node, error = %error, "Failed to authorize community publish");
+                return vec![iq_to_xml(build_pubsub_error(
+                    iq,
+                    PubSubError::InternalServerError,
+                ))];
+            }
+        }
+    };
+
+    // The social feed is a single shared, open-publish node, so the
+    // service binds each item to its author: refuse to overwrite an item
+    // published by a different member (no clobbering posts via id reuse)
+    // and stamp the authenticated JID into the payload `<author>` so a
+    // member cannot impersonate another through the displayed author.
+    // `publisher` is `Some` only for the feed; stories/events skip this.
+    if let Some(entity) = publisher.as_ref() {
+        if let Some(error) =
+            feed_item_ownership_error(state, &community_jid, node, &item, entity).await
+        {
+            return vec![iq_to_xml(build_pubsub_error(iq, error))];
+        }
+        if let Some(payload) = item.payload.as_ref() {
+            if waddle_xmpp_core::xep0472::is_feed_entry(payload) {
+                item.payload = Some(waddle_xmpp_core::xep0472::stamp_feed_entry_author(
+                    payload,
+                    &entity.to_string(),
+                ));
+            }
         }
     }
 
