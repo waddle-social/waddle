@@ -4468,8 +4468,8 @@ async fn dm_call_session_initiate_forwards_to_peer_not_feature_not_implemented()
         .connection_registry
         .register(bob.clone(), bob_tx);
 
-    // Realistic XEP-0353/0166 1:1 session-initiate: audio content with
-    // an Opus RTP description and the Waddle LiveKit transport request
+    // Realistic XEP-0166 1:1 session-initiate carrying an XEP-0167
+    // Opus RTP description and the Waddle LiveKit transport request
     // placeholder the server rewrites with an issued token.
     let frame = r#"<iq xmlns='jabber:client' id='dm-call-1' type='set' to='bob@example.com/phone'>
         <jingle xmlns='urn:xmpp:jingle:1' action='session-initiate' sid='dmcall1' initiator='alice@example.com/web'>
