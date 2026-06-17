@@ -4431,3 +4431,82 @@ async fn handle_iq_pubsub_items_empty_node_returns_result() {
     let iq = xmpp_parsers::iq::Iq::try_from(element).expect("parseable IQ");
     assert_eq!(iq.id(), "items-1");
 }
+
+// ---------------------------------------------------------------
+// 1:1 DM calling (XEP-0166 Jingle) regression
+// ---------------------------------------------------------------
+//
+// Bug: starting a call in a DM failed with "server returned a stanza
+// error: Cancel: feature-not-implemented". A 1:1 `session-initiate`
+// IQ is addressed to the peer's full JID; the Jingle handler mints a
+// LiveKit transport and forwards the stanza to the peer
+// (`RouteToConnection`), emitting NO synchronous frame back to the
+// initiator — the peer's client returns the IQ result. The WebSocket
+// IQ handler used to treat the empty sans-I/O result as "no handler
+// ran" and fall through to a generic `feature-not-implemented`.
+//
+// This test drives a real `session-initiate` through `handle_iq` with
+// the call handlers registered (production wiring when LiveKit is
+// configured) and asserts the initiator gets no error while the peer
+// receives the forwarded stanza.
+#[tokio::test]
+async fn dm_call_session_initiate_forwards_to_peer_not_feature_not_implemented() {
+    let state = create_test_websocket_state_with_calls().await;
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let bob: FullJid = "bob@example.com/phone".parse().expect("bob jid");
+
+    let (alice_tx, _alice_rx) = tokio::sync::mpsc::channel(8);
+    let (bob_tx, mut bob_rx) = tokio::sync::mpsc::channel::<OutboundStanza>(8);
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .register(alice.clone(), alice_tx);
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .register(bob.clone(), bob_tx);
+
+    // Realistic XEP-0166 1:1 session-initiate carrying an XEP-0167
+    // Opus RTP description and the Waddle LiveKit transport request
+    // placeholder the server rewrites with an issued token.
+    let frame = r#"<iq xmlns='jabber:client' id='dm-call-1' type='set' to='bob@example.com/phone'>
+        <jingle xmlns='urn:xmpp:jingle:1' action='session-initiate' sid='dmcall1' initiator='alice@example.com/web'>
+            <content creator='initiator' name='audio'>
+                <description xmlns='urn:xmpp:jingle:apps:rtp:1' media='audio'>
+                    <payload-type id='111' name='opus' clockrate='48000' channels='2'/>
+                    <rtcp-mux/>
+                </description>
+                <transport xmlns='urn:waddle:transports:livekit:0'/>
+            </content>
+        </jingle>
+    </iq>"#;
+
+    let responses = handle_iq(
+        frame,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ready_phase(&alice),
+    )
+    .await;
+
+    let joined = responses.join("\n");
+    assert!(
+        !joined.contains("feature-not-implemented"),
+        "1:1 Jingle session-initiate must not fall through to \
+         feature-not-implemented; initiator got: {joined}"
+    );
+
+    // The session-initiate must be forwarded to the peer's connection.
+    let forwarded = bob_rx
+        .try_recv()
+        .expect("peer connection must receive the forwarded session-initiate");
+    let xml = stanza_to_xml(&forwarded.stanza);
+    assert!(
+        xml.contains("urn:xmpp:jingle:1") && xml.contains("session-initiate"),
+        "peer must receive the forwarded Jingle session-initiate; got: {xml}"
+    );
+}

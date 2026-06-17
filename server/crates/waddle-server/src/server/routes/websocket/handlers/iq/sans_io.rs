@@ -14,13 +14,29 @@ fn events_contain_iq_error(events: &[waddle_xmpp::protocol::OutboundEvent]) -> b
     })
 }
 
+/// Dispatch an IQ whose payload namespace has a registered handler in
+/// the protocol dispatcher.
+///
+/// Returns `Some(frames)` when a registered handler owned the IQ —
+/// even when `frames` is empty. An empty `Some` is a legitimate,
+/// terminal outcome: a handler may forward the stanza to a peer
+/// (`OutboundEvent::RouteToConnection`) and produce no synchronous
+/// frame for the sender (e.g. XEP-0166 Jingle 1:1 `session-initiate`,
+/// which the peer's client answers). The caller MUST treat `Some(_)`
+/// as final and NOT fall through to the unhandled-IQ branch, otherwise
+/// a successfully-forwarded call IQ is wrongly answered with
+/// `feature-not-implemented`.
+///
+/// Returns `None` only when no registered handler claims the
+/// namespace, so the caller can continue to the remaining (disco,
+/// misc, MUC, pubsub) branches.
 pub(super) async fn handle_sans_io_iq(
     ctx: IqHandlerContext<'_>,
     state: &WebSocketState,
     authenticated_session: &Option<Session>,
     phase: &ConnectionPhase,
     conn_state: &mut IqConnState<'_>,
-) -> Vec<String> {
+) -> Option<Vec<String>> {
     let iq = ctx.iq;
     let id = ctx.id;
     let payload_ns = ctx.payload_ns;
@@ -46,53 +62,53 @@ pub(super) async fn handle_sans_io_iq(
     };
     if state.deps.protocol.dispatcher.has_iq_handler(payload_ns) {
         if payload_ns == waddle_xmpp::xep::NS_VERSION && !is_version_query(iq) {
-            return vec![build_iq_error_xml_typed(
+            return Some(vec![build_iq_error_xml_typed(
                 id,
                 response_from,
                 response_to,
                 bad_request_iq_error("Malformed IQ payload."),
-            )];
+            )]);
         }
         if payload_ns == waddle_xmpp::xep::NS_VERSION
             && iq
                 .to()
                 .is_some_and(|target| target.to_bare().as_str() != domain)
         {
-            return vec![build_iq_error_xml_typed(
+            return Some(vec![build_iq_error_xml_typed(
                 id,
                 response_from,
                 response_to,
                 service_unavailable_iq_error("Service unavailable at this address."),
-            )];
+            )]);
         }
         if payload_ns == waddle_xmpp::xep::NS_TIME {
             if !is_time_query(iq) {
-                return vec![build_iq_error_xml_typed(
+                return Some(vec![build_iq_error_xml_typed(
                     id,
                     response_from,
                     response_to,
                     bad_request_iq_error("Malformed IQ payload."),
-                )];
+                )]);
             }
             if iq
                 .to()
                 .is_some_and(|target| target.to_bare().as_str() != domain)
             {
-                return vec![build_iq_error_xml_typed(
+                return Some(vec![build_iq_error_xml_typed(
                     id,
                     response_from,
                     response_to,
                     service_unavailable_iq_error("Service unavailable at this address."),
-                )];
+                )]);
             }
         }
         let Some(full_jid) = phase.bound_jid() else {
-            return vec![build_iq_error_xml_typed(
+            return Some(vec![build_iq_error_xml_typed(
                 id,
                 response_from,
                 response_to,
                 not_authorized_iq_error("Authentication required."),
-            )];
+            )]);
         };
         if let Some(enabled) = carbons_toggle {
             *conn_state.carbons_enabled = enabled;
@@ -114,12 +130,12 @@ pub(super) async fn handle_sans_io_iq(
             match super::jingle_muji_gate::verify_muji_jingle_request(state, full_jid, iq).await {
                 super::jingle_muji_gate::GateOutcome::Allow => {}
                 super::jingle_muji_gate::GateOutcome::Deny(stanza_error) => {
-                    return vec![build_iq_error_xml_typed(
+                    return Some(vec![build_iq_error_xml_typed(
                         id,
                         response_from,
                         response_to,
                         *stanza_error,
-                    )];
+                    )]);
                 }
             }
         }
@@ -155,7 +171,11 @@ pub(super) async fn handle_sans_io_iq(
                  WebSocket adapter cannot honour CloseTransport yet"
             );
         }
-        return outcome.frames;
+        // A registered handler owned this IQ. Empty frames are valid
+        // and terminal (e.g. a Jingle 1:1 stanza forwarded to the peer
+        // with no synchronous reply for the sender) — return `Some` so
+        // the caller does NOT fall through to the unhandled-IQ error.
+        return Some(outcome.frames);
     }
-    Vec::new()
+    None
 }

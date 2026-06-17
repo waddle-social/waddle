@@ -350,10 +350,15 @@ pub async fn handle_iq_with_conn_state(
         response_to,
     };
 
-    let sans_io_response =
-        handle_sans_io_iq(handler_ctx, state, authenticated_session, phase, conn_state).await;
-    if !sans_io_response.is_empty() {
-        return sans_io_response;
+    // `Some(_)` means a registered dispatcher handler owned this IQ;
+    // it is terminal even when the frame list is empty (e.g. a Jingle
+    // 1:1 stanza forwarded to the peer with no synchronous reply for
+    // the sender). Only `None` — no handler claimed the namespace —
+    // continues to the remaining branches below.
+    if let Some(frames) =
+        handle_sans_io_iq(handler_ctx, state, authenticated_session, phase, conn_state).await
+    {
+        return frames;
     }
 
     let misc_response = handle_misc_iq(handler_ctx, state, phase, conn_state).await;
