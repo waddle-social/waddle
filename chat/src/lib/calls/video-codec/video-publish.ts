@@ -93,7 +93,10 @@ function screenShareCodec(capability: VideoCodecSupport): TrackPublishOptions {
       scalabilityMode: SCREEN_SHARE_SVC_MODE,
       ...(capability.vp8.available
         ? { backupCodec: { codec: "vp8" }, backupCodecPolicy: BackupCodecPolicy.SIMULCAST }
-        : {}),
+        // `false`, not omitted: an omitted `backupCodec` inherits LiveKit's
+        // `publishDefaults.backupCodec = true`, which re-enables a VP8 backup
+        // the probe said this device can't do. `false` honors the gating.
+        : { backupCodec: false }),
     };
   }
   if (capability.vp8.available) return { videoCodec: "vp8" };
@@ -175,7 +178,10 @@ function cameraCodec(capability: VideoCodecSupport): TrackPublishOptions {
             backupCodec: { codec: "vp8", encoding: { ...CAMERA_ENCODING } },
             backupCodecPolicy: BackupCodecPolicy.SIMULCAST,
           }
-        : {}),
+        // `false`, not omitted: an omitted `backupCodec` inherits LiveKit's
+        // `publishDefaults.backupCodec = true`, which re-enables a VP8 backup
+        // the probe said this device can't do. `false` honors the gating.
+        : { backupCodec: false }),
     };
   }
   if (capability.vp8.available) return { videoCodec: "vp8" };

@@ -78,10 +78,14 @@ describe("videoPublishPlan — codec gating matches the probe (no codec the devi
     expect(plan.publish.backupCodecPolicy).toBeUndefined();
   });
 
-  test("VP9 without an available VP8 baseline publishes VP9 with no backup", () => {
+  test("VP9 without an available VP8 baseline explicitly disables the backup (false, not omitted)", () => {
+    // `backupCodec` must be `false`, not just omitted: LiveKit merges per-publish
+    // options over `publishDefaults`, whose `backupCodec` default is `true`, so
+    // an omitted value silently re-enables a VP8 backup — forcing the exact codec
+    // the probe reported unavailable. `false` is what actually honors the gating.
     const plan = videoPublishPlan({ source: "screen", capability: vp9OnlyEncode });
     expect(plan.publish.videoCodec).toBe("vp9");
-    expect(plan.publish.backupCodec).toBeUndefined();
+    expect(plan.publish.backupCodec).toBe(false);
     expect(plan.publish.backupCodecPolicy).toBeUndefined();
   });
 });
@@ -200,11 +204,14 @@ describe("videoPublishPlan — camera codec gating matches the probe", () => {
     expect(plan.capture.resolution?.height).toBe(720);
   });
 
-  test("VP9 without an available VP8 baseline publishes VP9 with no backup", () => {
+  test("VP9 without an available VP8 baseline explicitly disables the backup (false, not omitted)", () => {
+    // See the screen-share twin: an omitted `backupCodec` inherits LiveKit's
+    // `publishDefaults.backupCodec = true` and re-enables a VP8 backup the probe
+    // said the device can't do. `false` is the value that honors the gating.
     const plan = videoPublishPlan({ source: "camera", capability: vp9OnlyEncode });
     expect(plan.publish.videoCodec).toBe("vp9");
     expect(plan.publish.scalabilityMode).toBe("L3T3");
-    expect(plan.publish.backupCodec).toBeUndefined();
+    expect(plan.publish.backupCodec).toBe(false);
     expect(plan.publish.backupCodecPolicy).toBeUndefined();
   });
 });
