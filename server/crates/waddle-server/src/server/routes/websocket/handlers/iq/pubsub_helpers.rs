@@ -1729,28 +1729,33 @@ async fn handle_story_attachment_retract(
     }
 }
 
-/// Whether `session` may publish to the XEP-0472 social feed node.
+/// The authenticated publisher permitted to post to the XEP-0472
+/// social feed node, or `None` if the request is not authorized.
 ///
 /// The feed is member-postable: any authenticated member may post
 /// (the node's `publish_model` is Open). This honors the node's
 /// configured pubsub publish-model via `can_publish` rather than the
 /// owner-only Spaces structural gate, while still requiring an
 /// authenticated session and rejecting outcasts (XEP-0472
-/// §"Replying to a Post"; XEP-0060 §7.1.3).
-async fn community_feed_publish_allowed(
+/// §"Replying to a Post"; XEP-0060 §7.1.3). The returned JID is the
+/// server-side session principal — the value the service stamps as the
+/// item publisher (XEP-0060 §7.1.2.1: the publisher MUST be generated
+/// by the service, never taken from the client's item, to prevent
+/// spoofing).
+async fn community_feed_publisher(
     state: &WebSocketState,
     session: Option<&Session>,
     community_jid: &BareJid,
     node: &str,
-) -> Result<bool, String> {
+) -> Result<Option<BareJid>, String> {
     let Some(session) = session else {
-        return Ok(false);
+        return Ok(None);
     };
     let entity = session
         .user_jid
         .parse::<BareJid>()
         .map_err(|error| format!("invalid session JID for feed publish: {error}"))?;
-    crate::pubsub_authz::can_publish(
+    let allowed = crate::pubsub_authz::can_publish(
         &state.deps.protocol.pubsub_storage,
         community_jid,
         node,
@@ -1758,16 +1763,18 @@ async fn community_feed_publish_allowed(
         false,
     )
     .await
-    .map_err(|error| format!("can_publish failed for feed node: {error}"))
+    .map_err(|error| format!("can_publish failed for feed node: {error}"))?;
+    Ok(allowed.then_some(entity))
 }
 
 /// Publish a non-bookmark item to a community pubsub node. Used by
 /// `handle_community_publish` (feed + stories + calendar events on
 /// `community.<domain>`). The XEP-0472 social feed is member-postable
 /// (gated by the node's pubsub publish-model via
-/// `community_feed_publish_allowed`); stories and calendar events keep
-/// the owner-only Spaces gate. Either way the standard pubsub fan-out
-/// runs so subscribers see new posts in real time.
+/// `community_feed_publisher`) and the item is stamped with the
+/// server-derived publisher; stories and calendar events keep the
+/// owner-only Spaces gate. Either way the standard pubsub fan-out runs
+/// so subscribers see new posts in real time.
 async fn handle_community_non_bookmark_publish(
     iq: &xmpp_parsers::iq::Iq,
     state: &WebSocketState,
@@ -1779,19 +1786,28 @@ async fn handle_community_non_bookmark_publish(
     let Ok(community_jid) = community_domain.parse::<BareJid>() else {
         return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
     };
-    let authorized = if node == waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED {
-        community_feed_publish_allowed(state, session, &community_jid, node).await
-    } else {
-        spaces_node_mutation_allowed(state, session, node).await
-    };
-    match authorized {
-        Ok(true) => {}
-        Ok(false) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))],
-        Err(error) => {
-            warn!(node, error = %error, "Failed to authorize community publish");
-            return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
+    // The feed is member-postable and the service stamps the authenticated
+    // publisher on each item; stories/events stay owner-only and carry no
+    // publisher attribution (publisher == node owner).
+    let publisher = if node == waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED {
+        match community_feed_publisher(state, session, &community_jid, node).await {
+            Ok(Some(entity)) => Some(entity),
+            Ok(None) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))],
+            Err(error) => {
+                warn!(node, error = %error, "Failed to authorize community feed publish");
+                return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
+            }
         }
-    }
+    } else {
+        match spaces_node_mutation_allowed(state, session, node).await {
+            Ok(true) => None,
+            Ok(false) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))],
+            Err(error) => {
+                warn!(node, error = %error, "Failed to authorize community publish");
+                return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
+            }
+        }
+    };
     match state
         .deps
         .protocol
@@ -1811,7 +1827,7 @@ async fn handle_community_non_bookmark_publish(
         .deps
         .protocol
         .pubsub_storage
-        .publish_item(&community_jid, node, &item, None, false)
+        .publish_item(&community_jid, node, &item, publisher.as_ref(), false)
         .await
     {
         Ok(result) => {
@@ -1833,7 +1849,7 @@ async fn handle_community_non_bookmark_publish(
                     node,
                     published_item: &item,
                     item_id: &result.item_id,
-                    publisher: None,
+                    publisher: publisher.as_ref(),
                     publisher_full: None,
                     is_pep: false,
                 },

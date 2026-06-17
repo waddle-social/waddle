@@ -153,13 +153,16 @@ async fn member_can_publish_to_social_feed() {
     let _guard = TEST_SERIAL.lock().await;
     let (_server, mut client) = setup_member().await;
 
+    // Spoof a `publisher` attribute pointing at admin — the server MUST
+    // ignore it and stamp the authenticated session JID instead
+    // (XEP-0060 §7.1.2.1).
     let post_id = format!("post-{}", uuid::Uuid::new_v4());
     client
         .send(&format!(
             r#"<iq type="set" id="member-feed-publish" to="{COMMUNITY_JID}">
               <pubsub xmlns="http://jabber.org/protocol/pubsub">
                 <publish node="{FEED_NODE}">
-                  <item id="{post_id}">
+                  <item id="{post_id}" publisher="admin@{DOMAIN}">
                     <entry xmlns="{NS_SOCIAL_FEED}">
                       <title>Hello from a member</title>
                       <body>Members can post to the feed now.</body>
@@ -182,7 +185,8 @@ async fn member_can_publish_to_social_feed() {
         "a non-owner member must be allowed to publish to the social feed: {publish_result}"
     );
 
-    // The member's post round-trips through an items query.
+    // The member's post round-trips through an items query, stamped with
+    // the server-derived publisher (not the spoofed admin JID).
     client
         .send(&format!(
             r#"<iq type="get" id="member-feed-items" to="{COMMUNITY_JID}">
@@ -200,6 +204,14 @@ async fn member_can_publish_to_social_feed() {
     assert!(
         items_response.contains(&post_id),
         "member's published post must round-trip through items: {items_response}"
+    );
+    assert!(
+        items_response.contains(&format!("publisher='{MEMBER_USERNAME}@{DOMAIN}'")),
+        "feed item must be stamped with the server-derived publisher: {items_response}"
+    );
+    assert!(
+        !items_response.contains(&format!("publisher='admin@{DOMAIN}'")),
+        "spoofed publisher attribute must be overridden by the server: {items_response}"
     );
 
     let _ = client.close().await;
