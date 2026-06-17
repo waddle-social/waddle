@@ -1,0 +1,284 @@
+package turnprobe
+
+import (
+	"encoding/binary"
+	"errors"
+	"net/netip"
+	"strings"
+	"testing"
+)
+
+// bindingSuccess builds a STUN Binding success response (type 0x0101)
+// carrying a single XOR-MAPPED-ADDRESS for an IPv4 reflexive transport
+// address, encoded per RFC 8489 §14.2.
+func bindingSuccess(txID TxID, addr netip.AddrPort) []byte {
+	ip := addr.Addr().As4()
+	xport := addr.Port() ^ uint16(magicCookie>>16)
+
+	attr := make([]byte, 12)
+	binary.BigEndian.PutUint16(attr[0:2], 0x0020) // XOR-MAPPED-ADDRESS
+	binary.BigEndian.PutUint16(attr[2:4], 8)      // value length
+	attr[4] = 0x00
+	attr[5] = 0x01 // IPv4 family
+	binary.BigEndian.PutUint16(attr[6:8], xport)
+	cookie := make([]byte, 4)
+	binary.BigEndian.PutUint32(cookie, magicCookie)
+	for i := 0; i < 4; i++ {
+		attr[8+i] = ip[i] ^ cookie[i]
+	}
+
+	msg := make([]byte, 20+len(attr))
+	binary.BigEndian.PutUint16(msg[0:2], 0x0101) // Binding success response
+	binary.BigEndian.PutUint16(msg[2:4], uint16(len(attr)))
+	binary.BigEndian.PutUint32(msg[4:8], magicCookie)
+	copy(msg[8:20], txID[:])
+	copy(msg[20:], attr)
+	return msg
+}
+
+// newRequest builds a Binding request, failing the test if transaction-id
+// generation errors.
+func newRequest(t *testing.T) ([]byte, TxID) {
+	t.Helper()
+	req, txID, err := BuildBindingRequest()
+	if err != nil {
+		t.Fatalf("BuildBindingRequest: %v", err)
+	}
+	return req, txID
+}
+
+// A STUN Binding request (RFC 8489 §5) is a 20-byte header: a Binding
+// request method/class (0x0001), a zero attribute length, the fixed magic
+// cookie (0x2112A442), and a 96-bit transaction id. The TURN/UDP relay
+// reachability probe sends exactly this to the embedded TURN listener.
+func TestBuildBindingRequestHasValidStunHeader(t *testing.T) {
+	req, txID := newRequest(t)
+
+	if len(req) != 20 {
+		t.Fatalf("binding request length = %d, want 20", len(req))
+	}
+	if got := binary.BigEndian.Uint16(req[0:2]); got != 0x0001 {
+		t.Fatalf("message type = %#04x, want 0x0001 (Binding request)", got)
+	}
+	if got := binary.BigEndian.Uint16(req[2:4]); got != 0 {
+		t.Fatalf("attribute length = %d, want 0 for an attribute-less request", got)
+	}
+	if got := binary.BigEndian.Uint32(req[4:8]); got != magicCookie {
+		t.Fatalf("magic cookie = %#08x, want %#08x", got, magicCookie)
+	}
+	if [12]byte(req[8:20]) != txID {
+		t.Fatalf("transaction id in header %x does not match returned id %x", req[8:20], txID)
+	}
+}
+
+// A Binding success response that matches the request's transaction id
+// yields the server-reflexive transport address it carried, proving the
+// UDP round trip reached the TURN listener and a reply returned.
+func TestParseBindingResponseDecodesReflexiveAddress(t *testing.T) {
+	_, txID := newRequest(t)
+	want := netip.MustParseAddrPort("203.0.113.7:51820")
+
+	got, err := ParseBindingResponse(txID, bindingSuccess(txID, want))
+	if err != nil {
+		t.Fatalf("ParseBindingResponse returned error: %v", err)
+	}
+	if got != want {
+		t.Fatalf("reflexive address = %v, want %v", got, want)
+	}
+}
+
+// A datagram whose transaction id differs from the request must be
+// rejected — otherwise a stray or spoofed packet could be mistaken for a
+// successful round trip and mask an unreachable relay.
+func TestParseBindingResponseRejectsTransactionIDMismatch(t *testing.T) {
+	_, sent := newRequest(t)
+	_, other := newRequest(t)
+
+	if _, err := ParseBindingResponse(sent, bindingSuccess(other, netip.MustParseAddrPort("203.0.113.7:3478"))); err == nil {
+		t.Fatal("expected error for transaction id mismatch, got nil")
+	}
+}
+
+// Truncated or non-STUN bytes must be rejected rather than panicking or
+// reporting a bogus reachable result.
+func TestParseBindingResponseRejectsMalformed(t *testing.T) {
+	_, txID := newRequest(t)
+	for name, resp := range map[string][]byte{
+		"empty":         {},
+		"short header":  make([]byte, 8),
+		"no attributes": bindingSuccessHeaderOnly(txID),
+	} {
+		if _, err := ParseBindingResponse(txID, resp); err == nil {
+			t.Fatalf("%s: expected error, got nil", name)
+		}
+	}
+}
+
+// A trailing attribute whose declared length is not padded to a 4-byte
+// boundary must not drive the parser past the end of the buffer. This is
+// internet-facing input, so a slice panic here is a remote crash.
+func TestParseBindingResponseRejectsUnpaddedTrailingAttribute(t *testing.T) {
+	_, txID := newRequest(t)
+	// One non-matching attribute: type 0x0001, length 5, 5 value bytes, no
+	// padding. The padded advance (4+8) overshoots the 9-byte body.
+	attr := []byte{0x00, 0x01, 0x00, 0x05, 0x01, 0x02, 0x03, 0x04, 0x05}
+	msg := make([]byte, 20+len(attr))
+	binary.BigEndian.PutUint16(msg[0:2], 0x0101)
+	binary.BigEndian.PutUint16(msg[2:4], uint16(len(attr)))
+	binary.BigEndian.PutUint32(msg[4:8], magicCookie)
+	copy(msg[8:20], txID[:])
+	copy(msg[20:], attr)
+
+	if _, err := ParseBindingResponse(txID, msg); err == nil {
+		t.Fatal("expected error for unpadded trailing attribute, got nil")
+	}
+}
+
+// An XOR-MAPPED-ADDRESS attribute that declares more value bytes than are
+// present must error, not panic.
+func TestParseBindingResponseRejectsTruncatedXorMapped(t *testing.T) {
+	_, txID := newRequest(t)
+	// XOR-MAPPED-ADDRESS header claiming length 8, but only 2 value bytes.
+	attr := []byte{0x00, 0x20, 0x00, 0x08, 0x00, 0x01}
+	msg := make([]byte, 20+len(attr))
+	binary.BigEndian.PutUint16(msg[0:2], 0x0101)
+	binary.BigEndian.PutUint16(msg[2:4], uint16(len(attr)))
+	binary.BigEndian.PutUint32(msg[4:8], magicCookie)
+	copy(msg[8:20], txID[:])
+	copy(msg[20:], attr)
+
+	if _, err := ParseBindingResponse(txID, msg); err == nil {
+		t.Fatal("expected error for truncated XOR-MAPPED-ADDRESS, got nil")
+	}
+}
+
+// A Binding error response (class 0x0111) must be rejected even when it
+// carries an otherwise-valid XOR-MAPPED-ADDRESS: only the success-class
+// check stands between it and a false "reachable" result, so the fixture
+// keeps the address valid to pin that specific guard.
+func TestParseBindingResponseRejectsErrorResponse(t *testing.T) {
+	_, txID := newRequest(t)
+	msg := bindingSuccess(txID, netip.MustParseAddrPort("203.0.113.7:3478"))
+	binary.BigEndian.PutUint16(msg[0:2], 0x0111) // flip class to error response
+
+	if _, err := ParseBindingResponse(txID, msg); err == nil {
+		t.Fatal("expected error for Binding error response (0x0111), got nil")
+	}
+}
+
+// The XOR-MAPPED-ADDRESS attribute may be preceded by other attributes;
+// the parser must skip past a non-4-byte-aligned attribute (honouring its
+// padding) to find it.
+func TestParseBindingResponseSkipsLeadingPaddedAttribute(t *testing.T) {
+	_, txID := newRequest(t)
+	want := netip.MustParseAddrPort("192.0.2.33:3478")
+
+	// SOFTWARE (0x8022), length 3 ("abc") + 1 pad byte.
+	leading := []byte{0x80, 0x22, 0x00, 0x03, 'a', 'b', 'c', 0x00}
+	success := bindingSuccess(txID, want) // header + XOR-MAPPED-ADDRESS attr
+	attrs := append(leading, success[20:]...)
+
+	msg := make([]byte, 20+len(attrs))
+	copy(msg, success[:20])
+	binary.BigEndian.PutUint16(msg[2:4], uint16(len(attrs)))
+	copy(msg[20:], attrs)
+
+	got, err := ParseBindingResponse(txID, msg)
+	if err != nil {
+		t.Fatalf("ParseBindingResponse with leading attribute: %v", err)
+	}
+	if got != want {
+		t.Fatalf("reflexive address = %v, want %v", got, want)
+	}
+}
+
+// Per RFC 8489 §5 the attribute section is exactly the header's message
+// length; bytes beyond it are not part of the message. A datagram that
+// declares zero attributes must not be mined for a trailing
+// XOR-MAPPED-ADDRESS appended after the declared boundary.
+func TestParseBindingResponseIgnoresAttributesBeyondMessageLength(t *testing.T) {
+	_, txID := newRequest(t)
+	msg := bindingSuccess(txID, netip.MustParseAddrPort("203.0.113.7:3478"))
+	binary.BigEndian.PutUint16(msg[2:4], 0) // declare zero attributes
+
+	if _, err := ParseBindingResponse(txID, msg); err == nil {
+		t.Fatal("expected error: attributes past the declared message length must be ignored")
+	}
+}
+
+// A declared message length that runs past the datagram is malformed and
+// must be rejected rather than parsed against a short buffer.
+func TestParseBindingResponseRejectsOverlongMessageLength(t *testing.T) {
+	_, txID := newRequest(t)
+	msg := bindingSuccess(txID, netip.MustParseAddrPort("203.0.113.7:3478"))
+	binary.BigEndian.PutUint16(msg[2:4], 64) // far beyond the actual body
+
+	if _, err := ParseBindingResponse(txID, msg); err == nil {
+		t.Fatal("expected error for message length exceeding the datagram")
+	}
+}
+
+// An IPv6 XOR-MAPPED-ADDRESS is a known limitation (the probe targets the
+// IPv4 NodePort), so the error must name IPv6 rather than read as generic
+// corruption.
+func TestParseBindingResponseReportsIPv6FamilyClearly(t *testing.T) {
+	_, txID := newRequest(t)
+	// XOR-MAPPED-ADDRESS with IPv6 family (0x02) and a 20-byte value.
+	value := make([]byte, 20)
+	value[1] = 0x02
+	attr := make([]byte, 4+len(value))
+	binary.BigEndian.PutUint16(attr[0:2], 0x0020)
+	binary.BigEndian.PutUint16(attr[2:4], uint16(len(value)))
+	copy(attr[4:], value)
+	msg := make([]byte, 20+len(attr))
+	binary.BigEndian.PutUint16(msg[0:2], 0x0101)
+	binary.BigEndian.PutUint16(msg[2:4], uint16(len(attr)))
+	binary.BigEndian.PutUint32(msg[4:8], magicCookie)
+	copy(msg[8:20], txID[:])
+	copy(msg[20:], attr)
+
+	_, err := ParseBindingResponse(txID, msg)
+	if err == nil {
+		t.Fatal("expected error for IPv6 XOR-MAPPED-ADDRESS")
+	}
+	if !strings.Contains(err.Error(), "IPv6") {
+		t.Fatalf("error should name IPv6, got: %v", err)
+	}
+}
+
+// Probe composes a build → send → parse round trip over an injected
+// transport, so the reachability check is exercised without a real socket.
+func TestProbeReturnsReflexiveAddressFromRoundTrip(t *testing.T) {
+	want := netip.MustParseAddrPort("198.51.100.9:30478")
+	rt := func(request []byte) ([]byte, error) {
+		return bindingSuccess(TxID(request[8:20]), want), nil
+	}
+
+	got, err := Probe(rt)
+	if err != nil {
+		t.Fatalf("Probe returned error: %v", err)
+	}
+	if got != want {
+		t.Fatalf("Probe address = %v, want %v", got, want)
+	}
+}
+
+// A transport failure (no datagram returned) must surface as an error so
+// an unreachable relay is reported, not silently swallowed.
+func TestProbePropagatesTransportError(t *testing.T) {
+	rt := func([]byte) ([]byte, error) { return nil, errors.New("i/o timeout") }
+
+	if _, err := Probe(rt); err == nil {
+		t.Fatal("expected Probe to propagate transport error, got nil")
+	}
+}
+
+// bindingSuccessHeaderOnly is a success response with a valid header but
+// no XOR-MAPPED-ADDRESS attribute.
+func bindingSuccessHeaderOnly(txID TxID) []byte {
+	msg := make([]byte, 20)
+	binary.BigEndian.PutUint16(msg[0:2], 0x0101)
+	binary.BigEndian.PutUint32(msg[4:8], magicCookie)
+	copy(msg[8:20], txID[:])
+	return msg
+}
