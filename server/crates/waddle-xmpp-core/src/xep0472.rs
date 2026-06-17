@@ -171,6 +171,25 @@ pub fn build_feed_entry_element(entry: &FeedEntry) -> Element {
     elem
 }
 
+/// Return a copy of a feed `<entry/>` whose `<author>` is `author`,
+/// replacing any author the client supplied. On the open, member-postable
+/// feed the service stamps the authenticated publisher here so a member
+/// cannot impersonate another user through the displayed payload author.
+/// All other children are preserved.
+pub fn stamp_feed_entry_author(elem: &Element, author: &str) -> Element {
+    let mut stamped = Element::builder("entry", NS_SOCIAL_FEED).build();
+    for child in elem.children() {
+        if child.name() == "author" && child.ns() == NS_SOCIAL_FEED {
+            continue;
+        }
+        stamped.append_child(child.clone());
+    }
+    let mut author_el = Element::builder("author", NS_SOCIAL_FEED).build();
+    author_el.append_text_node(author);
+    stamped.append_child(author_el);
+    stamped
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,5 +278,43 @@ mod tests {
     #[test]
     fn test_pubsub_node() {
         assert_eq!(PUBSUB_NODE_FEED, "urn:xmpp:pubsub-social-feed:0");
+    }
+
+    #[test]
+    fn test_stamp_feed_entry_author_overrides_and_preserves() {
+        // A client-supplied (spoofed) author is replaced; title/body/link
+        // and the entry shape survive.
+        let entry = FeedEntry::new("p-9", "Body text")
+            .with_title("Title")
+            .with_author("admin@example.com")
+            .with_published(test_time())
+            .with_link("https://example.com/p/9");
+        let elem = build_feed_entry_element(&entry);
+
+        let stamped = stamp_feed_entry_author(&elem, "member@example.com");
+        assert!(is_feed_entry(&stamped));
+
+        let parsed = parse_feed_entry("p-9", &stamped).expect("parseable");
+        assert_eq!(parsed.author.as_deref(), Some("member@example.com"));
+        assert_eq!(parsed.body, "Body text");
+        assert_eq!(parsed.title.as_deref(), Some("Title"));
+        assert_eq!(parsed.published, Some(test_time()));
+        assert_eq!(parsed.link.as_deref(), Some("https://example.com/p/9"));
+
+        // Exactly one author element after stamping.
+        let authors = stamped
+            .children()
+            .filter(|c| c.name() == "author" && c.ns() == NS_SOCIAL_FEED)
+            .count();
+        assert_eq!(authors, 1);
+    }
+
+    #[test]
+    fn test_stamp_feed_entry_author_adds_when_absent() {
+        let elem = build_feed_entry_element(&FeedEntry::new("p-10", "No author here"));
+        let stamped = stamp_feed_entry_author(&elem, "member@example.com");
+        let parsed = parse_feed_entry("p-10", &stamped).expect("parseable");
+        assert_eq!(parsed.author.as_deref(), Some("member@example.com"));
+        assert_eq!(parsed.body, "No author here");
     }
 }

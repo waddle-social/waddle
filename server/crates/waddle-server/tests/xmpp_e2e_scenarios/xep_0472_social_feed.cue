@@ -37,8 +37,8 @@ scenario: #Scenario & {
 		},
 		// 2. Publish a feed entry to the bootstrapped community feed
 		//    node. The server bootstraps this node at startup with
-		//    spaces_public() access; server-owner affiliation seed
-		//    grants admin Publisher access.
+		//    community_feed() config (open read + open publish), so any
+		//    authenticated member may post; admin publishes here.
 		#SendIq & {
 			actor: adminPhone
 			type:  "set"

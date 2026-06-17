@@ -132,8 +132,10 @@ async fn seed_initial_xmpp_topology(
 
     // XEP-0472 Social Feed — community-wide pubsub feed for
     // announcements and microblog-style posts. Access model is
-    // `spaces_public()`: anyone can subscribe and read, only entities
-    // with Publisher or Owner affiliation may publish.
+    // `community_feed()`: anyone can subscribe and read, and any
+    // authenticated member may publish (`publish_model: Open`), per
+    // XEP-0472 §"Replying to a Post". Stories and calendar nodes below
+    // deliberately keep `spaces_public()` (owner-only publish).
     pubsub_storage
         .get_or_create_node(&community_jid, waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED)
         .await
@@ -142,7 +144,7 @@ async fn seed_initial_xmpp_topology(
         .update_node_config(
             &community_jid,
             waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED,
-            &NodeConfig::spaces_public(),
+            &NodeConfig::community_feed(),
         )
         .await
         .map_err(|error| anyhow::anyhow!("failed to configure social feed node: {error}"))?;

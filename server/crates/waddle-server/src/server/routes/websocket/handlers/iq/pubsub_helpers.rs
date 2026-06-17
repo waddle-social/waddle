@@ -932,9 +932,10 @@ pub(super) async fn handle_spaces_publish(
 /// `urn:xmpp:pubsub-social-feed:0` or XEP-0501 stories at
 /// `urn:xmpp:stories:0`. Both live on `community.<domain>` (distinct
 /// from the spaces service so the spaces enumeration only returns
-/// real spaces). Same publish gate as spaces (server owners or
-/// space owners) and the standard pubsub fan-out so subscribers see
-/// new posts in real time.
+/// real spaces). The social feed is member-postable (gated by its
+/// pubsub publish-model); stories and calendar events keep the
+/// owner-only spaces gate. The standard pubsub fan-out runs either
+/// way so subscribers see new posts in real time.
 pub(super) async fn handle_community_publish(
     iq: &xmpp_parsers::iq::Iq,
     state: &WebSocketState,
@@ -1728,30 +1729,101 @@ async fn handle_story_attachment_retract(
     }
 }
 
-/// Publish a non-bookmark item to a spaces-or-community pubsub node.
-/// Used by `handle_community_publish` (feed + stories on
-/// `community.<domain>`). Same auth gate as space-node mutations
-/// (server owners or space owners) and the standard pubsub fan-out
+/// The authenticated publisher permitted to post to the XEP-0472
+/// social feed node, or `None` if the request is not authorized.
+///
+/// The feed is member-postable: any authenticated member may post
+/// (the node's `publish_model` is Open). This honors the node's
+/// configured pubsub publish-model via `can_publish` rather than the
+/// owner-only Spaces structural gate, while still requiring an
+/// authenticated session and rejecting outcasts (XEP-0472
+/// §"Replying to a Post"; XEP-0060 §7.1.3). The returned JID is the
+/// server-side session principal — the value the service stamps as the
+/// item publisher (XEP-0060 §7.1.2.1: the publisher MUST be generated
+/// by the service, never taken from the client's item, to prevent
+/// spoofing).
+async fn community_feed_publisher(
+    state: &WebSocketState,
+    session: Option<&Session>,
+    community_jid: &BareJid,
+    node: &str,
+) -> Result<Option<BareJid>, String> {
+    let Some(session) = session else {
+        return Ok(None);
+    };
+    let entity = session
+        .user_jid
+        .parse::<BareJid>()
+        .map_err(|error| format!("invalid session JID for feed publish: {error}"))?;
+    let allowed = crate::pubsub_authz::can_publish(
+        &state.deps.protocol.pubsub_storage,
+        community_jid,
+        node,
+        &entity,
+        false,
+    )
+    .await
+    .map_err(|error| format!("can_publish failed for feed node: {error}"))?;
+    Ok(allowed.then_some(entity))
+}
+
+/// Refuse to let `entity` overwrite a social-feed item already published
+/// by a different member. The feed is one shared, open-publish node with
+/// client-chosen item ids, so without this a member could reuse another
+/// member's item id and clobber their post. Returns the stanza error to
+/// send, or `None` when the publish may proceed (a new id, or the
+/// existing item belongs to `entity`).
+async fn feed_item_ownership_error(
+    state: &WebSocketState,
+    community_jid: &BareJid,
+    node: &str,
+    item: &PubSubItem,
+    entity: &BareJid,
+) -> Option<PubSubError> {
+    let item_id = item.id.as_deref()?;
+    match state
+        .deps
+        .protocol
+        .pubsub_storage
+        .get_items(community_jid, node, None, &[item_id.to_owned()])
+        .await
+    {
+        Ok(existing) => match existing.first() {
+            Some(existing_item) if existing_item.publisher.as_ref() != Some(entity) => {
+                Some(PubSubError::Forbidden)
+            }
+            _ => None,
+        },
+        Err(error) => {
+            warn!(node, item_id, error = %error, "Failed to check feed item ownership");
+            Some(PubSubError::InternalServerError)
+        }
+    }
+}
+
+/// Publish a non-bookmark item to a community pubsub node. Used by
+/// `handle_community_publish` (feed + stories + calendar events on
+/// `community.<domain>`). The XEP-0472 social feed is member-postable
+/// (gated by the node's pubsub publish-model via
+/// `community_feed_publisher`) and the item is stamped with the
+/// server-derived publisher; stories and calendar events keep the
+/// owner-only Spaces gate. Either way the standard pubsub fan-out runs
 /// so subscribers see new posts in real time.
 async fn handle_community_non_bookmark_publish(
     iq: &xmpp_parsers::iq::Iq,
     state: &WebSocketState,
     community_domain: &str,
     node: &str,
-    item: PubSubItem,
+    mut item: PubSubItem,
     session: Option<&Session>,
 ) -> Vec<String> {
-    match spaces_node_mutation_allowed(state, session, node).await {
-        Ok(true) => {}
-        Ok(false) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))],
-        Err(error) => {
-            warn!(node, error = %error, "Failed to authorize community publish");
-            return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
-        }
-    }
     let Ok(community_jid) = community_domain.parse::<BareJid>() else {
         return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
     };
+    // Resolve the node before authorizing or mutating it. Community nodes
+    // are bootstrapped at startup; checking existence first keeps the
+    // error semantics correct (NodeNotFound, not a misleading Forbidden)
+    // for the deleted-node edge case.
     match state
         .deps
         .protocol
@@ -1766,12 +1838,63 @@ async fn handle_community_non_bookmark_publish(
             return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))];
         }
     }
+    // The feed is member-postable and the service stamps the authenticated
+    // publisher on each item; stories/events stay owner-only and carry no
+    // publisher attribution (publisher == node owner). A storage/permission
+    // backend failure is an internal error, not an authorization denial.
+    let publisher = if node == waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED {
+        match community_feed_publisher(state, session, &community_jid, node).await {
+            Ok(Some(entity)) => Some(entity),
+            Ok(None) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))],
+            Err(error) => {
+                warn!(node, error = %error, "Failed to authorize community feed publish");
+                return vec![iq_to_xml(build_pubsub_error(
+                    iq,
+                    PubSubError::InternalServerError,
+                ))];
+            }
+        }
+    } else {
+        match spaces_node_mutation_allowed(state, session, node).await {
+            Ok(true) => None,
+            Ok(false) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))],
+            Err(error) => {
+                warn!(node, error = %error, "Failed to authorize community publish");
+                return vec![iq_to_xml(build_pubsub_error(
+                    iq,
+                    PubSubError::InternalServerError,
+                ))];
+            }
+        }
+    };
+
+    // The social feed is a single shared, open-publish node, so the
+    // service binds each item to its author: refuse to overwrite an item
+    // published by a different member (no clobbering posts via id reuse)
+    // and stamp the authenticated JID into the payload `<author>` so a
+    // member cannot impersonate another through the displayed author.
+    // `publisher` is `Some` only for the feed; stories/events skip this.
+    if let Some(entity) = publisher.as_ref() {
+        if let Some(error) =
+            feed_item_ownership_error(state, &community_jid, node, &item, entity).await
+        {
+            return vec![iq_to_xml(build_pubsub_error(iq, error))];
+        }
+        if let Some(payload) = item.payload.as_ref() {
+            if waddle_xmpp_core::xep0472::is_feed_entry(payload) {
+                item.payload = Some(waddle_xmpp_core::xep0472::stamp_feed_entry_author(
+                    payload,
+                    &entity.to_string(),
+                ));
+            }
+        }
+    }
 
     match state
         .deps
         .protocol
         .pubsub_storage
-        .publish_item(&community_jid, node, &item, None, false)
+        .publish_item(&community_jid, node, &item, publisher.as_ref(), false)
         .await
     {
         Ok(result) => {
@@ -1793,7 +1916,7 @@ async fn handle_community_non_bookmark_publish(
                     node,
                     published_item: &item,
                     item_id: &result.item_id,
-                    publisher: None,
+                    publisher: publisher.as_ref(),
                     publisher_full: None,
                     is_pep: false,
                 },
