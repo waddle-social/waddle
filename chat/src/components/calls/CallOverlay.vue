@@ -8,6 +8,7 @@ import {
 } from "@/lib/calls/call-store";
 import type { CallWireSender } from "@/lib/calls/outbound";
 import { useCallEngine } from "@/lib/calls/use-call-engine";
+import { iceServersFromExternalServices } from "@/lib/calls/ice-servers";
 import { connectionStore } from "@/lib/connection-store";
 import {
   $callConnecting,
@@ -42,6 +43,16 @@ function getSender(): CallWireSender | null {
   return (client?.xmpp as CallWireSender | undefined) ?? null;
 }
 
+// XEP-0215: ask our own server for its advertised TURN/STUN before connecting
+// so LiveKit negotiates ICE over the XMPP-native, client-controlled path.
+// Resolves to `[]` on any failure (the wrapper never throws) — the engine then
+// connects with LiveKit's default servers instead of an empty list.
+async function resolveIceServers(): Promise<RTCIceServer[]> {
+  const client = connectionStore.client;
+  if (!client) return [];
+  return iceServersFromExternalServices(await client.fetchExternalServices());
+}
+
 // Connect to LiveKit when a fresh `active` phase appears with a new
 // sid; disconnect on the way out. We key the watcher on the sid as a
 // PRIMITIVE — building an object literal inside the source would
@@ -60,7 +71,13 @@ watch(
     // notice left over from the previous call.
     resetCallControls(active.media.audio, active.media.video);
     try {
-      await engine.connect(active.join, active.media);
+      const iceServers = await resolveIceServers();
+      // The ICE fetch can block for up to 10s. Re-confirm this is still the
+      // same active call before connecting — a hang-up + redial during the
+      // fetch would otherwise open a LiveKit session against a stale join/sid.
+      const current = state.value;
+      if (current.phase !== "active" || current.sid !== sid) return;
+      await engine.connect(current.join, { ...current.media, iceServers });
       // Capture is best-effort inside connect(): a missing device or a
       // denied mic/cam permission no longer throws — the user joins as a
       // receive-only participant and the engine emits `mediaDevicesError`

@@ -14,6 +14,8 @@ import {
   type RemoteTrackPublication,
   type TrackPublication,
   type AudioCaptureOptions,
+  type RoomConnectOptions,
+  type RoomOptions,
   type TrackPublishOptions,
   type VideoCaptureOptions,
 } from "livekit-client";
@@ -267,6 +269,23 @@ export type CallEngineEvents = {
  */
 export class CallEngine {
   private room: Room | null = null;
+  /**
+   * True from the start of `connect()` until `this.room` is assigned. The
+   * `this.room` guard alone is set only AFTER `await room.connect`, so two
+   * overlapping `connect()` calls (e.g. a hang-up-and-redial during the
+   * pre-connect ICE fetch) would both pass it and each build a `Room`, leaking
+   * one. This bridges that await window.
+   */
+  private connecting = false;
+  /**
+   * Bumped by every `connect()` and by `disconnect()`. A `connect()` whose
+   * generation no longer matches once `room.connect` resolves was cancelled
+   * mid-flight (a `disconnect()` or newer `connect()` superseded it); it tears
+   * its own `Room` down instead of publishing an orphan. Without this, a
+   * `disconnect()` racing the connect await sees `this.room === null`, returns,
+   * and the in-flight `Room` later connects with nothing left to tear it down.
+   */
+  private connectGeneration = 0;
   private participantAudioVolumes: ParticipantAudioVolumeStore = {};
   private subscribedAudioTracks = new Map<string, Set<VolumeAdjustableTrack>>();
   private listeners: { [K in keyof CallEngineEvents]: Set<CallEngineEvents[K]> } = {
@@ -314,13 +333,21 @@ export class CallEngine {
    * incapable devices without real WebRTC.
    */
   private readonly codecSupport: VideoCodecSupport;
+  /**
+   * Builds the LiveKit `Room`; injectable so tests can assert the connect
+   * options (notably the XEP-0215 `rtcConfig.iceServers`) without a real
+   * `RTCPeerConnection`, which `new Room()` reaches for at construction.
+   */
+  private readonly makeRoom: (options: RoomOptions) => Room;
 
   constructor(opts?: {
     makeAiNoiseProcessor?: (model: NoiseModelId) => Promise<AudioNoiseProcessor>;
     videoCodecSupport?: VideoCodecSupport;
+    makeRoom?: (options: RoomOptions) => Room;
   }) {
     this.makeAiNoiseProcessor = opts?.makeAiNoiseProcessor ?? makeNoiseProcessor;
     this.codecSupport = opts?.videoCodecSupport ?? videoCodecSupport(currentVideoCodecSupportEnv());
+    this.makeRoom = opts?.makeRoom ?? ((options) => new Room(options));
   }
 
   /** LiveKit identity of the local participant, populated once
@@ -353,8 +380,11 @@ export class CallEngine {
     return this.room?.canPlaybackAudio ?? true;
   }
 
-  async connect(join: LiveKitJoin, opts: { audio: boolean; video: boolean }): Promise<void> {
-    if (this.room) throw new Error("CallEngine already connected");
+  async connect(
+    join: LiveKitJoin,
+    opts: { audio: boolean; video: boolean; iceServers?: RTCIceServer[] },
+  ): Promise<void> {
+    if (this.room || this.connecting) throw new Error("CallEngine already connected");
     // Defensive pre-flight: confirm the JWT actually carries a usable
     // `video` grant (roomJoin + a room) before the SDK opens its
     // WebSocket. A mismatched / misconfigured token otherwise fails
@@ -371,7 +401,7 @@ export class CallEngine {
     this.desiredAiNoiseModel = prefs.aiNoiseModel;
     this.aiNoiseFailedModels.clear();
     this.appliedModelActiveForCapture = false;
-    const room = new Room(callRoomOptionsForPrefs(prefs));
+    const room = this.makeRoom(callRoomOptionsForPrefs(prefs));
     room.on(RoomEvent.TrackSubscribed, this.handleTrackSubscribed);
     room.on(RoomEvent.TrackUnsubscribed, this.handleTrackUnsubscribed);
     room.on(RoomEvent.LocalTrackPublished, this.handleLocalTrackPublished);
@@ -385,8 +415,22 @@ export class CallEngine {
     room.on(RoomEvent.TrackUnmuted, this.handleTrackMuteChanged);
     room.on(RoomEvent.ConnectionQualityChanged, this.handleConnectionQualityChanged);
     room.on(RoomEvent.ConnectionStateChanged, this.handleConnectionStateChanged);
+    // XEP-0215 ICE injection: when the server advertised external services,
+    // make them the authoritative ICE list via `rtcConfig`. An empty/absent
+    // list means "no advertisement" — pass no `rtcConfig` so LiveKit keeps its
+    // own signalling-provided servers rather than connecting with none.
+    const connectOptions: RoomConnectOptions | undefined =
+      opts.iceServers && opts.iceServers.length > 0
+        ? { rtcConfig: { iceServers: opts.iceServers } }
+        : undefined;
+    // Reserve the engine now — AFTER the synchronous setup above, which can
+    // throw (`makeRoom`/`callRoomOptionsForPrefs` reach for WebRTC globals).
+    // There is no `await` between here and the guard at the top, so this still
+    // closes the concurrent-connect window without risking a stuck flag.
+    this.connecting = true;
+    const generation = ++this.connectGeneration;
     try {
-      await room.connect(join.url, join.token);
+      await room.connect(join.url, join.token, connectOptions);
     } catch (err) {
       // Connect itself failed; the listeners we bound above would
       // otherwise dangle on a `Room` that nothing references but the
@@ -394,9 +438,21 @@ export class CallEngine {
       // a clean path. `this.room` was never set so the caller stays
       // on the well-defined "not connected" path.
       room.removeAllListeners();
+      // Only release the reservation if it's still ours — a disconnect() or
+      // newer connect() during the await owns `connecting` now.
+      if (this.connectGeneration === generation) this.connecting = false;
       throw err;
     }
+    // A disconnect() (or a newer connect()) during the await bumped the
+    // generation: this connect was cancelled. Tear our own Room down rather
+    // than publishing it as an orphan that nothing will ever disconnect.
+    if (this.connectGeneration !== generation) {
+      room.removeAllListeners();
+      await room.disconnect().catch(() => undefined);
+      return;
+    }
     this.room = room;
+    this.connecting = false;
     // Emit the initial participant snapshot so subscribers can seed
     // their projection without missing peers that connected before
     // our listeners attached.
@@ -669,6 +725,11 @@ export class CallEngine {
   }
 
   async disconnect(): Promise<void> {
+    // Cancel any in-flight connect(): bump the generation so a connect still
+    // awaiting `room.connect` tears its own Room down instead of publishing it,
+    // and release the reservation so the engine can never wedge "connecting".
+    this.connectGeneration++;
+    this.connecting = false;
     const room = this.room;
     this.room = null;
     if (!room) return;

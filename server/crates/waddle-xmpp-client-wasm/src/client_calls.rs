@@ -309,13 +309,7 @@ impl WaddleClient {
         let inner = self.inner.clone();
         future_to_promise(async move {
             let initiator = stored_full_jid(&inner)?;
-            let initiator_bare = initiator.to_bare().to_string();
-            let server_domain = initiator_bare
-                .split('@')
-                .next_back()
-                .map(str::to_owned)
-                .ok_or_else(|| js_error("authenticated JID has no domain"))?;
-            let mixer = calls_mixer_jid(&server_domain);
+            let mixer = calls_mixer_jid(initiator.domain().as_str());
 
             let sid = sid(sid_str);
             let jingle = build_muji_session_initiate(&sid, &initiator, &room_jid, video);
@@ -341,6 +335,41 @@ impl WaddleClient {
         })
     }
 
+    /// XEP-0215 §3.2: fetch the external services (TURN/STUN) the user's own
+    /// server advertises, resolving to a typed array the chat maps to
+    /// `RTCIceServer[]` for LiveKit's `rtcConfig` at connect time. The query is
+    /// addressed to the authenticated user's server domain; an empty
+    /// `<services/>` requests every advertised service type.
+    pub fn fetch_external_services(&self) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let server_domain = stored_full_jid(&inner)?.domain().to_string();
+            let request_id = uuid::Uuid::new_v4().to_string();
+            let iq = waddle_xmpp_client::xep::xep0215::build_extdisco_services_iq(
+                &server_domain,
+                &request_id,
+            );
+            let result = send_iq_command(inner, iq).await?;
+            // Defense-in-depth (RFC 6120 §8.1.2.1): if the reply stamps a
+            // `from`, it MUST be our own server. An absent `from` is acceptable
+            // for a reply from one's own bare server — the IQ id correlation in
+            // `send_iq_command` already pins the response.
+            if let Some(from) = result.attr("from") {
+                if !from.eq_ignore_ascii_case(&server_domain) {
+                    return Err(js_error(format!(
+                        "extdisco services reply `from` {from:?} does not match queried server {server_domain:?}"
+                    )));
+                }
+            }
+            let services: Vec<WaddleExternalService> =
+                waddle_xmpp_client::xep::xep0215::parse_external_services(&result)
+                    .into_iter()
+                    .map(WaddleExternalService::from)
+                    .collect();
+            to_js_value(&services)
+        })
+    }
+
     /// Send a XEP-0272 Muji-bearing Jingle `session-terminate` IQ
     /// to the SFU mixer (`calls.<server-domain>`). Server
     /// unregisters the participant + revokes every jti it minted
@@ -360,14 +389,7 @@ impl WaddleClient {
     pub fn send_muji_session_terminate(&self, room_jid: String, sid_str: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            let full_jid = stored_full_jid(&inner)?;
-            let bare_jid = full_jid.to_bare().to_string();
-            let server_domain = bare_jid
-                .split('@')
-                .next_back()
-                .map(str::to_owned)
-                .ok_or_else(|| js_error("authenticated JID has no domain"))?;
-            let mixer = calls_mixer_jid(&server_domain);
+            let mixer = calls_mixer_jid(stored_full_jid(&inner)?.domain().as_str());
 
             let jingle = build_muji_session_terminate(&room_jid, &sid(sid_str));
             let stanza = Element::builder("iq", NS_JABBER_CLIENT)

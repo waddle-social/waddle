@@ -349,6 +349,45 @@ pub struct WaddleLiveKitJoin {
     pub token: String,
 }
 
+/// JS-facing XEP-0215 external service (one `<service/>` entry). The chat maps
+/// an array of these to `RTCIceServer[]` for LiveKit's `rtcConfig`. Wire-form
+/// `serviceType`/`transport` strings come straight from the typed core value's
+/// `as_str`, so the discriminator has a single source of truth.
+#[derive(Debug, Serialize)]
+pub struct WaddleExternalService {
+    #[serde(rename = "serviceType")]
+    pub service_type: &'static str,
+    pub host: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transport: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires: Option<String>,
+    pub restricted: bool,
+}
+
+impl From<waddle_xmpp_client::xep::xep0215::ExternalService> for WaddleExternalService {
+    fn from(service: waddle_xmpp_client::xep::xep0215::ExternalService) -> Self {
+        Self {
+            service_type: service.service_type.as_str(),
+            host: service.host,
+            port: service.port,
+            transport: service.transport.map(|t| t.as_str()),
+            username: service.username,
+            password: service.password,
+            // Serialize the typed expiry back to an RFC 3339 string for JSON
+            // transit (the JS-facing boundary).
+            expires: service.expires.map(|expires| expires.to_rfc3339()),
+            restricted: service.restricted,
+        }
+    }
+}
+
 /// JS-facing call event. The `kind` discriminator drives a switch
 /// on the chat side: `propose|ringing|proceed|reject|retract|finish|
 /// session-initiate|session-accept|session-terminate`.
@@ -1147,8 +1186,64 @@ pub struct SetDmNotificationModeOptions {
 
 #[cfg(test)]
 mod tests {
-    use super::RegisterPushDeviceOptions;
+    use super::{RegisterPushDeviceOptions, WaddleExternalService};
     use waddle_xmpp_client::push::{PushDeviceCredentials, PushEnvironment, PushPlatform};
+    use waddle_xmpp_client::xep::xep0215::{
+        ExternalService, ExternalServiceTransport, ExternalServiceType,
+    };
+
+    /// A TLS-TURN entry converts to the JS surface with the `turns`
+    /// discriminator, credentials, and `restricted` preserved. Pins the
+    /// camelCase `serviceType` key the chat-side mapping reads.
+    #[test]
+    fn turns_service_serializes_with_camelcase_and_credentials() {
+        let surfaced = WaddleExternalService::from(ExternalService {
+            service_type: ExternalServiceType::Turns,
+            host: "turn.waddle.social".into(),
+            port: Some(443),
+            transport: Some(ExternalServiceTransport::Tcp),
+            username: Some("u".into()),
+            password: Some("p".into()),
+            expires: Some(
+                chrono::DateTime::parse_from_rfc3339("2026-06-17T12:00:00Z").expect("rfc3339"),
+            ),
+            restricted: true,
+        });
+        let json = serde_json::to_value(&surfaced).expect("serialize");
+        assert_eq!(json["serviceType"], "turns");
+        assert_eq!(json["host"], "turn.waddle.social");
+        assert_eq!(json["port"], 443);
+        assert_eq!(json["transport"], "tcp");
+        assert_eq!(json["username"], "u");
+        assert_eq!(json["password"], "p");
+        assert_eq!(json["expires"], "2026-06-17T12:00:00+00:00");
+        assert_eq!(json["restricted"], true);
+    }
+
+    /// A STUN entry has no credentials; the optional fields are omitted from
+    /// the JS object entirely (not emitted as `null`).
+    #[test]
+    fn stun_service_omits_absent_credential_fields() {
+        let surfaced = WaddleExternalService::from(ExternalService {
+            service_type: ExternalServiceType::Stun,
+            host: "turn.waddle.social".into(),
+            port: None,
+            transport: Some(ExternalServiceTransport::Udp),
+            username: None,
+            password: None,
+            expires: None,
+            restricted: false,
+        });
+        let json = serde_json::to_value(&surfaced).expect("serialize");
+        assert_eq!(json["serviceType"], "stun");
+        let obj = json.as_object().expect("object");
+        // Absent optional fields (incl. an omitted port) are dropped, not null.
+        assert!(!obj.contains_key("port"));
+        assert!(!obj.contains_key("username"));
+        assert!(!obj.contains_key("password"));
+        assert!(!obj.contains_key("expires"));
+        assert_eq!(json["restricted"], false);
+    }
 
     /// Pin the camelCase wire contract for the `register_push_device`
     /// WASM bridge. The chat-side wrapper at

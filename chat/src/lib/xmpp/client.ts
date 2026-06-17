@@ -26,7 +26,8 @@ import {
 import { clearAllLiveCallParticipants } from "@/lib/calls/muc-call-live-participants";
 import { useCallEngine } from "@/lib/calls/use-call-engine";
 import type { CallWireSender } from "@/lib/calls/outbound";
-import type { CallEvent } from "@/lib/calls/types";
+import type { CallEvent, ExternalService } from "@/lib/calls/types";
+import { coerceExternalServices } from "@/lib/calls/ice-servers";
 import { barePeerJid, fullJidIdentityKey, jidDomain, roomBareJidFor } from "./jid";
 import type {
   ChatStateEvent,
@@ -2245,6 +2246,84 @@ export class BrowserXmppClient {
       }
       console.warn("[xmpp] fetch_vapid_public_key IQ rejected:", error);
       return null;
+    } finally {
+      if (timeoutHandle !== null) clearTimeout(timeoutHandle);
+    }
+  }
+
+  /**
+   * Fetch the XEP-0215 (`urn:xmpp:extdisco:2`) external services — TURN/STUN —
+   * the user's own server advertises, so a call can inject them into LiveKit's
+   * connection `rtcConfig.iceServers` (an XMPP-native, client-controlled ICE
+   * path).
+   *
+   * Returns `[]` on EVERY failure mode — never throws — because the caller's
+   * fallback is identical in all of them: connect without an `rtcConfig` and
+   * let LiveKit use its own signalling-provided ICE servers. Each path emits a
+   * precise `console.warn` for diagnostics:
+   *   - session not ready (mid-reconnect / mid-teardown race)
+   *   - the wasm `fetch_external_services` method is missing (older bundle)
+   *   - the IQ times out after 10s
+   *   - the IQ is rejected (transport / stanza error)
+   *   - the JS-boundary value is not an array (regression on the Rust side)
+   *
+   * Empty is also the correct success value when the server advertises no
+   * services — the caller must not connect with an empty ICE list (that would
+   * REPLACE LiveKit's servers with nothing), so `[]` deliberately collapses
+   * "none advertised" and "fetch failed" into the same fall-back action.
+   */
+  async fetchExternalServices(): Promise<ExternalService[]> {
+    // Bounded timeout (10s): the wasm-side `send_iq_command` is an unbounded
+    // oneshot, and this fetch sits on the call-connect critical path — a
+    // stalled server handler must not hang the join.
+    const TIMEOUT_MS = 10_000;
+    let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+    let timedOut = false;
+    const timeoutSentinel = Symbol("extdisco-fetch-timeout");
+    const timeoutPromise = new Promise<typeof timeoutSentinel>((resolve) => {
+      timeoutHandle = setTimeout(() => {
+        timedOut = true;
+        resolve(timeoutSentinel);
+      }, TIMEOUT_MS);
+    });
+    try {
+      const xmpp = await this.requireConnectedXmpp();
+      if (!xmpp.fetch_external_services) {
+        console.warn(
+          "[xmpp] fetch_external_services is unavailable (older wasm bundle?); " +
+          "calls will use LiveKit's default ICE servers",
+        );
+        return [];
+      }
+      const fetchPromise = xmpp.fetch_external_services();
+      // If the timeout wins the race, the IQ promise settles unobserved later.
+      // Attach a no-op catch so a late rejection never surfaces as an
+      // unhandledrejection (the race below still handles a rejection that wins).
+      fetchPromise.catch(() => {});
+      const result = await Promise.race([fetchPromise, timeoutPromise]);
+      if (result === timeoutSentinel) {
+        console.warn(
+          `[xmpp] fetch_external_services timed out after ${TIMEOUT_MS}ms; ` +
+          "connecting with LiveKit's default ICE servers.",
+        );
+        return [];
+      }
+      if (!Array.isArray(result)) {
+        // Bundle drift: the wasm method's signature is `Promise<any>`, so a
+        // Rust-side shape regression would otherwise fall through silently.
+        // Surface it (mirrors `fetchVapidPublicKey`'s shape hard-check).
+        console.warn(
+          "[xmpp] fetch_external_services returned a non-array value; " +
+          "connecting with LiveKit's default ICE servers:",
+          result,
+        );
+        return [];
+      }
+      return coerceExternalServices(result);
+    } catch (error) {
+      if (timedOut) return [];
+      console.warn("[xmpp] fetch_external_services IQ rejected:", error);
+      return [];
     } finally {
       if (timeoutHandle !== null) clearTimeout(timeoutHandle);
     }
