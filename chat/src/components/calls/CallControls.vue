@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import {
+  LayoutGrid,
   Maximize2,
   Mic,
   MicOff,
@@ -7,10 +8,12 @@ import {
   MonitorUp,
   PhoneOff,
   Settings,
+  SquareUser,
   Video,
   VideoOff,
   Volume2,
 } from "lucide-vue-next";
+import type { CallViewMode } from "@/lib/calls/view-mode";
 import CallConnectionIndicator from "./CallConnectionIndicator.vue";
 
 /**
@@ -32,6 +35,8 @@ defineProps<{
   /** True while the volume mixer dialog is open — drives the speaker
    *  button's pressed/expanded state. The parent owns the dialog. */
   volumeOpen: boolean;
+  /** The chosen stage layout — drives the view switcher's pressed state. */
+  viewMode: CallViewMode;
 }>();
 
 const emit = defineEmits<{
@@ -41,6 +46,7 @@ const emit = defineEmits<{
   toggleExpanded: [];
   toggleVolume: [];
   openSettings: [];
+  setViewMode: [mode: CallViewMode];
   hangup: [];
 }>();
 </script>
@@ -81,6 +87,33 @@ const emit = defineEmits<{
       <MonitorUp class="w-4 h-4" />
       <span class="type-control sr-only sm:not-sr-only">{{ screenShareEnabled ? "Stop" : "Share" }}</span>
     </button>
+
+    <!-- Gallery ⟷ Speaker view switcher. Sticky for the call; a pin or an
+         incoming screen share still overrides the chosen layout's large tile. -->
+    <div class="call-controls__view-switch" role="group" aria-label="Stage view">
+      <button
+        type="button"
+        class="chat-icon-button chat-icon-button--md hover:bg-muted"
+        :class="{ 'bg-muted text-foreground': viewMode === 'gallery' }"
+        title="Gallery view"
+        aria-label="Gallery view"
+        :aria-pressed="viewMode === 'gallery'"
+        @click="emit('setViewMode', 'gallery')"
+      >
+        <LayoutGrid class="w-4 h-4" />
+      </button>
+      <button
+        type="button"
+        class="chat-icon-button chat-icon-button--md hover:bg-muted"
+        :class="{ 'bg-muted text-foreground': viewMode === 'speaker' }"
+        title="Speaker view"
+        aria-label="Speaker view"
+        :aria-pressed="viewMode === 'speaker'"
+        @click="emit('setViewMode', 'speaker')"
+      >
+        <SquareUser class="w-4 h-4" />
+      </button>
+    </div>
 
     <!-- Ambient self-connection quality. Self-contained/store-connected,
          so it adds no props to this otherwise stateless bar. Shows quiet
@@ -149,5 +182,11 @@ const emit = defineEmits<{
   height: 1.5rem;
   background: var(--border);
   margin-inline: var(--space-xs);
+}
+
+.call-controls__view-switch {
+  display: flex;
+  align-items: center;
+  gap: 2px;
 }
 </style>

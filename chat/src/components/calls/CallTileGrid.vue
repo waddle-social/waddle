@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { useStore } from "@nanostores/vue";
 import type { LocalMediaTrack, RemoteMediaTrack } from "@/lib/calls/engine";
 import { TileAttachments, type TileAttachable } from "@/lib/calls/tile-attach";
 import { selectGridLayout } from "@/lib/calls/grid-layout";
 import type { CallTileModel } from "@/lib/calls/call-tiles";
 import { projectCallTiles, reconcileCallTileProjectionState } from "@/lib/calls/call-tile-projection";
 import { highlightedTileKeys } from "@/lib/calls/active-speakers";
+import { $callPinnedTileKey, $callViewMode, toggleCallPin } from "@/lib/calls/call-view-state";
 import CallTile from "./CallTile.vue";
 
 /**
@@ -51,10 +53,15 @@ const props = defineProps<{
   micEnabled: boolean;
   /** Identities LiveKit currently reports (held) as actively speaking. */
   activeSpeakerIdentities?: ReadonlySet<string>;
+  /** Participant the Speaker layout auto-promotes to the large tile. */
+  promotedSpeakerIdentity?: string | null;
 }>();
 
 const seenRemoteScreenTrackKeys = ref<ReadonlySet<string>>(new Set());
-const manualFocusKey = ref<string | null>(null);
+// View mode + pin are call-scoped atoms (not local refs) so they survive the
+// split⟷expanded surface switch that remounts this grid.
+const viewMode = useStore($callViewMode);
+const manualFocusKey = useStore($callPinnedTileKey);
 
 const projection = computed(() => {
   return projectCallTiles({
@@ -65,6 +72,8 @@ const projection = computed(() => {
     micEnabled: props.micEnabled,
     seenRemoteScreenTrackKeys: seenRemoteScreenTrackKeys.value,
     manualFocusKey: manualFocusKey.value,
+    viewMode: viewMode.value,
+    promotedSpeakerIdentity: props.promotedSpeakerIdentity ?? null,
   });
 });
 
@@ -78,8 +87,11 @@ watch(projection, (next) => {
   if (seenRemoteScreenTrackKeys.value !== reconciled.seenRemoteScreenTrackKeys) {
     seenRemoteScreenTrackKeys.value = reconciled.seenRemoteScreenTrackKeys;
   }
+  // A pinned participant who has left is cleared so the pin can't reapply if
+  // they rejoin; written back through the atom (the store is the source of
+  // truth, not a local ref).
   if (manualFocusKey.value !== reconciled.manualFocusKey) {
-    manualFocusKey.value = reconciled.manualFocusKey;
+    $callPinnedTileKey.set(reconciled.manualFocusKey);
   }
 }, { immediate: true });
 
@@ -95,7 +107,7 @@ const otherTiles = computed<Tile[]>(() => {
 });
 
 function toggleFocus(tile: Tile): void {
-  manualFocusKey.value = manualFocusKey.value === tile.key ? null : tile.key;
+  toggleCallPin(tile.key);
 }
 
 // One `TileAttachments` per grid instance — reconciles (element,

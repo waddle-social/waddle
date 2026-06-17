@@ -17,6 +17,7 @@ import {
   seedCallControlsFromEngine,
 } from "@/lib/calls/call-controls";
 import { $callUiMode } from "@/lib/calls/ui-mode";
+import { resetCallViewState } from "@/lib/calls/call-view-state";
 
 /**
  * Engine lifecycle host for the call subsystem.
@@ -70,6 +71,9 @@ watch(
     // Optimistic baseline shown while connecting; also clears any media
     // notice left over from the previous call.
     resetCallControls(active.media.audio, active.media.video);
+    // Stage presentation starts each call in Gallery with nothing pinned —
+    // a previous call's Speaker view or pin must not leak across.
+    resetCallViewState();
     try {
       const iceServers = await resolveIceServers();
       // The ICE fetch can block for up to 10s. Re-confirm this is still the

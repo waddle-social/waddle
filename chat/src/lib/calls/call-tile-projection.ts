@@ -1,8 +1,13 @@
 import { buildCallTiles, type BuildCallTilesInput, type CallTileModel } from "./call-tiles";
+import type { CallViewMode } from "./view-mode";
 
 export type ProjectCallTilesInput = BuildCallTilesInput & {
   seenRemoteScreenTrackKeys: ReadonlySet<string>;
   manualFocusKey: string | null;
+  /** Stage layout the user has chosen for this call. Defaults to `gallery`. */
+  viewMode?: CallViewMode;
+  /** Identity the Speaker layout should auto-promote to the large tile. */
+  promotedSpeakerIdentity?: string | null;
 };
 
 export type CallTileProjection = {
@@ -62,9 +67,13 @@ export function projectCallTiles(input: ProjectCallTilesInput): CallTileProjecti
   const manualTile = input.manualFocusKey
     ? tiles.find((tile) => tile.key === input.manualFocusKey) ?? null
     : null;
-  const spotlightKey = manualTile?.key
-    ?? newlyAppearedScreen?.key
+  // Precedence: a screen share always claims the large tile, then a local
+  // pin, then (in Speaker view) the auto-promoted active speaker; Gallery
+  // with nothing sharing or pinned falls through to the equal grid.
+  const spotlightKey = newlyAppearedScreen?.key
     ?? newestSeenRemoteScreen(remoteScreens, nextSeenRemoteScreenTrackKeys)?.key
+    ?? manualTile?.key
+    ?? speakerPromotionKey(tiles, input.viewMode ?? "gallery", input.promotedSpeakerIdentity ?? null)
     ?? null;
 
   return {
@@ -72,6 +81,26 @@ export function projectCallTiles(input: ProjectCallTilesInput): CallTileProjecti
     spotlightKey,
     seenRemoteScreenTrackKeys: nextSeenRemoteScreenTrackKeys,
   };
+}
+
+/**
+ * The large tile in Speaker view: the promoted speaker's camera tile, or — when
+ * nobody has spoken yet or the promoted participant has left — a stable
+ * fallback (a remote camera tile if any, else the first camera tile) so the
+ * Speaker layout always has a large tile. Returns `null` in Gallery view.
+ */
+function speakerPromotionKey(
+  tiles: readonly CallTileModel[],
+  viewMode: CallViewMode,
+  promotedSpeakerIdentity: string | null,
+): string | null {
+  if (viewMode !== "speaker") return null;
+  const cameraTiles = tiles.filter((tile) => tile.source === "camera");
+  const promoted = promotedSpeakerIdentity
+    ? cameraTiles.find((tile) => tile.identity === promotedSpeakerIdentity) ?? null
+    : null;
+  const fallback = cameraTiles.find((tile) => !tile.isSelf) ?? cameraTiles[0] ?? null;
+  return (promoted ?? fallback)?.key ?? null;
 }
 
 function newestSeenRemoteScreen(

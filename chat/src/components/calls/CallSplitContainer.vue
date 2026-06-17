@@ -6,6 +6,7 @@ import {
   $lastCallError,
 } from "@/lib/calls/call-store";
 import { $callUiMode } from "@/lib/calls/ui-mode";
+import { $callViewMode, setCallViewMode } from "@/lib/calls/call-view-state";
 import {
   $callConnecting,
   $callMicEnabled,
@@ -57,13 +58,15 @@ const props = defineProps<{
 
 const state = useStore($callState);
 const uiMode = useStore($callUiMode);
+const viewMode = useStore($callViewMode);
 const lastError = useStore($lastCallError);
 const connecting = useStore($callConnecting);
 const micEnabled = useStore($callMicEnabled);
 const camEnabled = useStore($callCamEnabled);
 const screenShareEnabled = useStore($callScreenShareEnabled);
 const screenShareSupported = useStore($callScreenShareSupported);
-const { remoteTracks, localTracks, engine, activeSpeakerIdentities } = useCallEngine();
+const { remoteTracks, localTracks, engine, activeSpeakerIdentities, promotedSpeakerIdentity } =
+  useCallEngine();
 const { activeRoomJid, selfInCall } = useActiveMucCall();
 
 const settingsOpen = ref(false);
@@ -218,6 +221,7 @@ async function onHangup(): Promise<void> {
           :expected-remote-identities="expectedRemoteIdentities"
           :mic-enabled="micEnabled"
           :active-speaker-identities="activeSpeakerIdentities"
+          :promoted-speaker-identity="promotedSpeakerIdentity"
         />
       </div>
       <footer class="call-split__footer">
@@ -228,12 +232,14 @@ async function onHangup(): Promise<void> {
           :screen-share-supported="screenShareSupported"
           :is-expanded="false"
           :volume-open="volumeOpen"
+          :view-mode="viewMode"
           @toggle-mic="toggleMic"
           @toggle-cam="toggleCam"
           @toggle-screen-share="toggleScreenShare"
           @toggle-expanded="enterExpanded"
           @toggle-volume="volumeOpen = !volumeOpen"
           @open-settings="settingsOpen = true"
+          @set-view-mode="setCallViewMode"
           @hangup="onHangup"
         />
       </footer>

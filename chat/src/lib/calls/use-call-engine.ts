@@ -7,6 +7,11 @@ import {
   type ActiveSpeakerState,
 } from "./active-speakers";
 import {
+  advanceSpeakerPromotion,
+  emptySpeakerPromotion,
+  type SpeakerPromotionState,
+} from "./view-mode";
+import {
   addLiveCallParticipant,
   clearLiveCallParticipants,
   markRoomLeavingCall,
@@ -78,6 +83,17 @@ let lastSpeakingIdentities: readonly string[] = [];
 let activeSpeakerSweep: ReturnType<typeof setTimeout> | null = null;
 
 /**
+ * The participant the Speaker layout auto-promotes to the large tile, derived
+ * from the held active-speaker set through the sticky `advanceSpeakerPromotion`
+ * machine: it holds the current speaker through silence and only hands the
+ * large tile to a different participant once they become active. Consumed only
+ * in Speaker view; a pin or a screen share outranks it (see `projectCallTiles`).
+ */
+const promotedSpeakerIdentity: Ref<string | null> = ref(null);
+/** Sticky promotion state for the derivation; reset between calls. */
+let speakerPromotion: SpeakerPromotionState = emptySpeakerPromotion();
+
+/**
  * Re-derive the highlighted set against `lastSpeakingIdentities` at the current
  * wall-clock time, publish it, and (re)arm a single sweep for the next release
  * deadline. Idempotent: safe to call from a LiveKit event or from the sweep.
@@ -98,6 +114,11 @@ function pumpActiveSpeakers(): void {
   });
   activeSpeakerState = step.state;
   activeSpeakerIdentities.value = step.activeIdentities;
+  speakerPromotion = advanceSpeakerPromotion({
+    state: speakerPromotion,
+    activeIdentities: step.activeIdentities,
+  });
+  promotedSpeakerIdentity.value = speakerPromotion.promotedIdentity;
   if (step.nextDeadline !== null) {
     activeSpeakerSweep = setTimeout(pumpActiveSpeakers, Math.max(0, step.nextDeadline - now));
   }
@@ -112,6 +133,8 @@ function resetActiveSpeakers(): void {
   activeSpeakerState = emptyActiveSpeakerState();
   lastSpeakingIdentities = [];
   activeSpeakerIdentities.value = new Set();
+  speakerPromotion = emptySpeakerPromotion();
+  promotedSpeakerIdentity.value = null;
 }
 
 /**
@@ -309,6 +332,7 @@ export function useCallEngine(): {
   remoteTracks: Ref<RemoteMediaTrack[]>;
   localTracks: Ref<LocalMediaTrack[]>;
   activeSpeakerIdentities: Ref<ReadonlySet<string>>;
+  promotedSpeakerIdentity: Ref<string | null>;
 } {
   if (!singletonEngine) {
     singletonEngine = new CallEngine();
@@ -447,7 +471,13 @@ export function useCallEngine(): {
       clearLiveCallParticipants(slot.roomJid);
     });
   }
-  return { engine: singletonEngine, remoteTracks, localTracks, activeSpeakerIdentities };
+  return {
+    engine: singletonEngine,
+    remoteTracks,
+    localTracks,
+    activeSpeakerIdentities,
+    promotedSpeakerIdentity,
+  };
 }
 
 /**

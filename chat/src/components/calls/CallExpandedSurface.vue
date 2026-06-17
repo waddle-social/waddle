@@ -6,6 +6,7 @@ import {
   $lastCallError,
 } from "@/lib/calls/call-store";
 import { $callUiMode } from "@/lib/calls/ui-mode";
+import { $callViewMode, setCallViewMode } from "@/lib/calls/call-view-state";
 import {
   $callConnecting,
   $callMicEnabled,
@@ -90,13 +91,15 @@ const emit = defineEmits<{
 
 const state = useStore($callState);
 const uiMode = useStore($callUiMode);
+const viewMode = useStore($callViewMode);
 const lastError = useStore($lastCallError);
 const connecting = useStore($callConnecting);
 const micEnabled = useStore($callMicEnabled);
 const camEnabled = useStore($callCamEnabled);
 const screenShareEnabled = useStore($callScreenShareEnabled);
 const screenShareSupported = useStore($callScreenShareSupported);
-const { remoteTracks, localTracks, engine, activeSpeakerIdentities } = useCallEngine();
+const { remoteTracks, localTracks, engine, activeSpeakerIdentities, promotedSpeakerIdentity } =
+  useCallEngine();
 const { activeRoomJid, selfInCall } = useActiveMucCall();
 
 const settingsOpen = ref(false);
@@ -294,6 +297,7 @@ onBeforeUnmount(() => {
           :expected-remote-identities="expectedRemoteIdentities"
           :mic-enabled="micEnabled"
           :active-speaker-identities="activeSpeakerIdentities"
+          :promoted-speaker-identity="promotedSpeakerIdentity"
         />
       </div>
     </main>
@@ -331,12 +335,14 @@ onBeforeUnmount(() => {
         :screen-share-supported="screenShareSupported"
         :is-expanded="true"
         :volume-open="volumeOpen"
+        :view-mode="viewMode"
         @toggle-mic="toggleMic"
         @toggle-cam="toggleCam"
         @toggle-screen-share="toggleScreenShare"
         @toggle-expanded="collapseToSplit"
         @toggle-volume="volumeOpen = !volumeOpen"
         @open-settings="settingsOpen = true"
+        @set-view-mode="setCallViewMode"
         @hangup="onHangup"
       />
     </footer>
