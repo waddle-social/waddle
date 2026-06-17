@@ -34,6 +34,10 @@ export function advanceSpeakerPromotion(
   if (current !== null && (input.activeIdentities.size === 0 || input.activeIdentities.has(current))) {
     return input.state;
   }
+  // Hand the large tile to the first active identity. The set preserves the
+  // order of LiveKit's active-speaker signal, which is sorted loudest-first,
+  // so on a hand-off with several simultaneous speakers the loudest wins — a
+  // deterministic, sensible tie-break without tracking per-speaker timestamps.
   const next = firstOf(input.activeIdentities);
   return { promotedIdentity: next };
 }

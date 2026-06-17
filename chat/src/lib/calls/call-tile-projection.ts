@@ -3,7 +3,7 @@ import type { CallViewMode } from "./view-mode";
 
 export type ProjectCallTilesInput = BuildCallTilesInput & {
   seenRemoteScreenTrackKeys: ReadonlySet<string>;
-  manualFocusKey: string | null;
+  pinnedTileKey: string | null;
   /** Stage layout the user has chosen for this call. Defaults to `gallery`. */
   viewMode?: CallViewMode;
   /** Identity the Speaker layout should auto-promote to the large tile. */
@@ -18,13 +18,13 @@ export type CallTileProjection = {
 
 export type ReconcileCallTileProjectionStateInput = {
   tiles: readonly CallTileModel[];
-  manualFocusKey: string | null;
+  pinnedTileKey: string | null;
   currentSeenRemoteScreenTrackKeys: ReadonlySet<string>;
   nextSeenRemoteScreenTrackKeys: ReadonlySet<string>;
 };
 
 export type ReconciledCallTileProjectionState = {
-  manualFocusKey: string | null;
+  pinnedTileKey: string | null;
   seenRemoteScreenTrackKeys: ReadonlySet<string>;
 };
 
@@ -32,7 +32,7 @@ export function reconcileCallTileProjectionState(
   input: ReconcileCallTileProjectionStateInput,
 ): ReconciledCallTileProjectionState {
   return {
-    manualFocusKey: retainManualFocusKey(input.tiles, input.manualFocusKey),
+    pinnedTileKey: retainPinnedTileKey(input.tiles, input.pinnedTileKey),
     seenRemoteScreenTrackKeys: sameSet(
       input.currentSeenRemoteScreenTrackKeys,
       input.nextSeenRemoteScreenTrackKeys,
@@ -42,12 +42,12 @@ export function reconcileCallTileProjectionState(
   };
 }
 
-export function retainManualFocusKey(
+export function retainPinnedTileKey(
   tiles: readonly CallTileModel[],
-  manualFocusKey: string | null,
+  pinnedTileKey: string | null,
 ): string | null {
-  if (manualFocusKey === null) return null;
-  return tiles.some((tile) => tile.key === manualFocusKey) ? manualFocusKey : null;
+  if (pinnedTileKey === null) return null;
+  return tiles.some((tile) => tile.key === pinnedTileKey) ? pinnedTileKey : null;
 }
 
 export function projectCallTiles(input: ProjectCallTilesInput): CallTileProjection {
@@ -64,15 +64,17 @@ export function projectCallTiles(input: ProjectCallTilesInput): CallTileProjecti
     if (tile.screenTrackKey !== null) nextSeenRemoteScreenTrackKeys.add(tile.screenTrackKey);
   }
 
-  const manualTile = input.manualFocusKey
-    ? tiles.find((tile) => tile.key === input.manualFocusKey) ?? null
+  const pinnedTile = input.pinnedTileKey
+    ? tiles.find((tile) => tile.key === input.pinnedTileKey) ?? null
     : null;
-  // Precedence: a screen share always claims the large tile, then a local
-  // pin, then (in Speaker view) the auto-promoted active speaker; Gallery
-  // with nothing sharing or pinned falls through to the equal grid.
+  // Precedence: an incoming (remote) screen share always claims the large
+  // tile, then a local pin, then (in Speaker view) the auto-promoted active
+  // speaker; Gallery with nothing sharing or pinned falls through to the equal
+  // grid. A local screen share is shown as a self-share notice, not a stage
+  // tile, so it never competes here.
   const spotlightKey = newlyAppearedScreen?.key
     ?? newestSeenRemoteScreen(remoteScreens, nextSeenRemoteScreenTrackKeys)?.key
-    ?? manualTile?.key
+    ?? pinnedTile?.key
     ?? speakerPromotionKey(tiles, input.viewMode ?? "gallery", input.promotedSpeakerIdentity ?? null)
     ?? null;
 

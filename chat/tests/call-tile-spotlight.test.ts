@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   projectCallTiles,
   reconcileCallTileProjectionState,
-  retainManualFocusKey,
+  retainPinnedTileKey,
 } from "../src/lib/calls/call-tile-projection";
 import type { LocalMediaTrack, RemoteMediaTrack } from "../src/lib/calls/engine";
 
@@ -19,7 +19,7 @@ describe("call tile spotlight projection", () => {
       localIdentity: "alice@example.com/web",
       micEnabled: true,
       seenRemoteScreenTrackKeys: new Set(),
-      manualFocusKey: null,
+      pinnedTileKey: null,
     });
 
     expect(projection.spotlightKey).toBe("remote:bob@example.com/web:screen_share");
@@ -37,7 +37,7 @@ describe("call tile spotlight projection", () => {
       localIdentity: "alice@example.com/web",
       micEnabled: true,
       seenRemoteScreenTrackKeys,
-      manualFocusKey: null,
+      pinnedTileKey: null,
     });
 
     expect(projection.spotlightKey).toBe("remote:bob@example.com/web:screen_share");
@@ -55,7 +55,7 @@ describe("call tile spotlight projection", () => {
       localIdentity: "alice@example.com/web",
       micEnabled: true,
       seenRemoteScreenTrackKeys: new Set(["carol-screen-pub", "bob-screen-pub"]),
-      manualFocusKey: null,
+      pinnedTileKey: null,
     });
 
     expect(projection.spotlightKey).toBe("remote:bob@example.com/web:screen_share");
@@ -71,7 +71,7 @@ describe("call tile spotlight projection", () => {
       localIdentity: "alice@example.com/web",
       micEnabled: true,
       seenRemoteScreenTrackKeys: new Set(["screen-pub"]),
-      manualFocusKey: "remote:bob@example.com/web:camera",
+      pinnedTileKey: "remote:bob@example.com/web:camera",
     });
 
     // Screen share always claims the large tile, even over an explicit pin —
@@ -89,7 +89,7 @@ describe("call tile spotlight projection", () => {
       localIdentity: "alice@example.com/web",
       micEnabled: true,
       seenRemoteScreenTrackKeys: new Set(),
-      manualFocusKey: "remote:carol@example.com/web:camera",
+      pinnedTileKey: "remote:carol@example.com/web:camera",
     });
 
     expect(projection.spotlightKey).toBe("remote:carol@example.com/web:camera");
@@ -105,7 +105,7 @@ describe("call tile spotlight projection", () => {
       localIdentity: "alice@example.com/web",
       micEnabled: true,
       seenRemoteScreenTrackKeys: new Set(),
-      manualFocusKey: "remote:bob@example.com/web:camera",
+      pinnedTileKey: "remote:bob@example.com/web:camera",
       viewMode: "speaker",
       promotedSpeakerIdentity: "carol@example.com/web",
     });
@@ -122,7 +122,7 @@ describe("call tile spotlight projection", () => {
       localIdentity: "alice@example.com/web",
       micEnabled: true,
       seenRemoteScreenTrackKeys: new Set(["bob-screen-pub", "screen-pub"]),
-      manualFocusKey: "remote:bob@example.com/web:screen_share",
+      pinnedTileKey: "remote:bob@example.com/web:screen_share",
     });
 
     expect(projection.spotlightKey).toBe("remote:carol@example.com/web:screen_share");
@@ -135,7 +135,7 @@ describe("call tile spotlight projection", () => {
       localIdentity: "alice@example.com/web",
       micEnabled: true,
       seenRemoteScreenTrackKeys: new Set(["screen-pub"]),
-      manualFocusKey: "remote:bob@example.com/web:screen_share",
+      pinnedTileKey: "remote:bob@example.com/web:screen_share",
     });
 
     expect(projection.spotlightKey).toBeNull();
@@ -149,7 +149,7 @@ describe("call tile spotlight projection", () => {
       expectedRemoteIdentities: ["bob@example.com/phone"],
       micEnabled: true,
       seenRemoteScreenTrackKeys: new Set(),
-      manualFocusKey: null,
+      pinnedTileKey: null,
     });
 
     expect(sharing.spotlightKey).toBe("remote:bob@example.com/web:screen_share");
@@ -165,7 +165,7 @@ describe("call tile spotlight projection", () => {
       expectedRemoteIdentities: ["bob@example.com/phone"],
       micEnabled: true,
       seenRemoteScreenTrackKeys: sharing.seenRemoteScreenTrackKeys,
-      manualFocusKey: sharing.spotlightKey,
+      pinnedTileKey: sharing.spotlightKey,
     });
 
     expect(afterStop.spotlightKey).toBeNull();
@@ -182,7 +182,7 @@ describe("call tile spotlight projection", () => {
       localIdentity: "alice@example.com/web",
       micEnabled: true,
       seenRemoteScreenTrackKeys: new Set(),
-      manualFocusKey: null,
+      pinnedTileKey: null,
     });
 
     expect(projection.spotlightKey).toBeNull();
@@ -202,7 +202,7 @@ describe("call tile spotlight projection", () => {
         "bob-screen-pub-1",
         "carol-screen-pub",
       ]),
-      manualFocusKey: null,
+      pinnedTileKey: null,
     });
 
     expect(projection.spotlightKey).toBe("remote:bob@example.com/web:screen_share");
@@ -223,7 +223,7 @@ describe("call tile spotlight projection", () => {
       localIdentity: "alice@example.com/web",
       micEnabled: true,
       seenRemoteScreenTrackKeys: new Set(["carol-screen-pub"]),
-      manualFocusKey: "remote:bob@example.com/web:camera",
+      pinnedTileKey: "remote:bob@example.com/web:camera",
     });
     // Carol's screen outranks Bob's pin for the large tile, but the pin is
     // still retained internally — until Bob leaves and reconcile clears it.
@@ -237,17 +237,17 @@ describe("call tile spotlight projection", () => {
       localIdentity: "alice@example.com/web",
       micEnabled: true,
       seenRemoteScreenTrackKeys: new Set(["carol-screen-pub"]),
-      manualFocusKey: "remote:bob@example.com/web:camera",
+      pinnedTileKey: "remote:bob@example.com/web:camera",
     });
     const reconciled = reconcileCallTileProjectionState({
       tiles: afterBobLeaves.tiles,
-      manualFocusKey: "remote:bob@example.com/web:camera",
+      pinnedTileKey: "remote:bob@example.com/web:camera",
       currentSeenRemoteScreenTrackKeys: new Set(["carol-screen-pub"]),
       nextSeenRemoteScreenTrackKeys: afterBobLeaves.seenRemoteScreenTrackKeys,
     });
 
     expect(afterBobLeaves.spotlightKey).toBe("remote:carol@example.com/web:screen_share");
-    expect(reconciled.manualFocusKey).toBeNull();
+    expect(reconciled.pinnedTileKey).toBeNull();
 
     const afterBobRejoins = projectCallTiles({
       remoteTracks: [
@@ -258,7 +258,7 @@ describe("call tile spotlight projection", () => {
       localIdentity: "alice@example.com/web",
       micEnabled: true,
       seenRemoteScreenTrackKeys: reconciled.seenRemoteScreenTrackKeys,
-      manualFocusKey: reconciled.manualFocusKey,
+      pinnedTileKey: reconciled.pinnedTileKey,
     });
     expect(afterBobRejoins.spotlightKey).toBe("remote:carol@example.com/web:screen_share");
   });
@@ -273,7 +273,7 @@ describe("call tile spotlight projection", () => {
       localIdentity: "alice@example.com/web",
       micEnabled: true,
       seenRemoteScreenTrackKeys: new Set(),
-      manualFocusKey: null,
+      pinnedTileKey: null,
       viewMode: "speaker",
       promotedSpeakerIdentity: "carol@example.com/web",
     });
@@ -288,7 +288,7 @@ describe("call tile spotlight projection", () => {
       localIdentity: "alice@example.com/web",
       micEnabled: true,
       seenRemoteScreenTrackKeys: new Set(),
-      manualFocusKey: null,
+      pinnedTileKey: null,
       viewMode: "gallery",
       promotedSpeakerIdentity: "bob@example.com/web",
     });
@@ -303,7 +303,7 @@ describe("call tile spotlight projection", () => {
       localIdentity: "alice@example.com/web",
       micEnabled: true,
       seenRemoteScreenTrackKeys: new Set(),
-      manualFocusKey: null,
+      pinnedTileKey: null,
       viewMode: "speaker",
       promotedSpeakerIdentity: null,
     });
@@ -318,7 +318,7 @@ describe("call tile spotlight projection", () => {
       localIdentity: "alice@example.com/web",
       micEnabled: true,
       seenRemoteScreenTrackKeys: new Set(),
-      manualFocusKey: null,
+      pinnedTileKey: null,
       viewMode: "speaker",
       promotedSpeakerIdentity: null,
     });
@@ -336,7 +336,7 @@ describe("call tile spotlight projection", () => {
       localIdentity: "alice@example.com/web",
       micEnabled: true,
       seenRemoteScreenTrackKeys: new Set(),
-      manualFocusKey: null,
+      pinnedTileKey: null,
       viewMode: "speaker",
       promotedSpeakerIdentity: "carol@example.com/web",
     });
@@ -354,13 +354,13 @@ describe("call tile spotlight projection", () => {
       localIdentity: "alice@example.com/web",
       micEnabled: true,
       seenRemoteScreenTrackKeys: new Set(["carol-screen-pub"]),
-      manualFocusKey: "remote:bob@example.com/web:camera",
+      pinnedTileKey: "remote:bob@example.com/web:camera",
     });
 
     // Carol's screen holds the large tile, yet the pin on Bob's still-present
     // camera tile is retained (it re-asserts once Carol stops sharing).
     expect(projection.spotlightKey).toBe("remote:carol@example.com/web:screen_share");
-    expect(retainManualFocusKey(projection.tiles, "remote:bob@example.com/web:camera"))
+    expect(retainPinnedTileKey(projection.tiles, "remote:bob@example.com/web:camera"))
       .toBe("remote:bob@example.com/web:camera");
   });
 });

@@ -61,7 +61,7 @@ const seenRemoteScreenTrackKeys = ref<ReadonlySet<string>>(new Set());
 // View mode + pin are call-scoped atoms (not local refs) so they survive the
 // split⟷expanded surface switch that remounts this grid.
 const viewMode = useStore($callViewMode);
-const manualFocusKey = useStore($callPinnedTileKey);
+const pinnedTileKey = useStore($callPinnedTileKey);
 
 const projection = computed(() => {
   return projectCallTiles({
@@ -71,7 +71,7 @@ const projection = computed(() => {
     expectedRemoteIdentities: props.expectedRemoteIdentities,
     micEnabled: props.micEnabled,
     seenRemoteScreenTrackKeys: seenRemoteScreenTrackKeys.value,
-    manualFocusKey: manualFocusKey.value,
+    pinnedTileKey: pinnedTileKey.value,
     viewMode: viewMode.value,
     promotedSpeakerIdentity: props.promotedSpeakerIdentity ?? null,
   });
@@ -80,7 +80,7 @@ const projection = computed(() => {
 watch(projection, (next) => {
   const reconciled = reconcileCallTileProjectionState({
     tiles: next.tiles,
-    manualFocusKey: manualFocusKey.value,
+    pinnedTileKey: pinnedTileKey.value,
     currentSeenRemoteScreenTrackKeys: seenRemoteScreenTrackKeys.value,
     nextSeenRemoteScreenTrackKeys: next.seenRemoteScreenTrackKeys,
   });
@@ -90,8 +90,8 @@ watch(projection, (next) => {
   // A pinned participant who has left is cleared so the pin can't reapply if
   // they rejoin; written back through the atom (the store is the source of
   // truth, not a local ref).
-  if (manualFocusKey.value !== reconciled.manualFocusKey) {
-    $callPinnedTileKey.set(reconciled.manualFocusKey);
+  if (pinnedTileKey.value !== reconciled.pinnedTileKey) {
+    $callPinnedTileKey.set(reconciled.pinnedTileKey);
   }
 }, { immediate: true });
 

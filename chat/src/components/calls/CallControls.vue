@@ -24,7 +24,7 @@ import CallConnectionIndicator from "./CallConnectionIndicator.vue";
  * The old multi-mode chrome (dock-toggle, minimize, PIP) is gone —
  * the only mode switch left is split ↔ expanded.
  */
-defineProps<{
+const props = defineProps<{
   micEnabled: boolean;
   camEnabled: boolean;
   screenShareEnabled: boolean;
@@ -51,19 +51,24 @@ const emit = defineEmits<{
 }>();
 
 /**
- * Arrow-key navigation for the Gallery/Speaker radiogroup: Right/Down select
- * Speaker, Left/Up select Gallery, and focus follows selection (roving
- * tabindex) per the WAI-ARIA radio-group pattern.
+ * Arrow-key navigation for the two-option Gallery/Speaker radiogroup, per the
+ * WAI-ARIA radio-group pattern: an arrow moves selection to the other option
+ * (wrapping at both ends) and focus follows the selection (roving tabindex).
+ * With two options every arrow flips the mode, so no redundant emit fires.
  */
 function onViewKeydown(event: KeyboardEvent): void {
-  const goNext = event.key === "ArrowRight" || event.key === "ArrowDown";
-  const goPrev = event.key === "ArrowLeft" || event.key === "ArrowUp";
-  if (!goNext && !goPrev) return;
+  const isArrow =
+    event.key === "ArrowRight" ||
+    event.key === "ArrowDown" ||
+    event.key === "ArrowLeft" ||
+    event.key === "ArrowUp";
+  if (!isArrow) return;
   event.preventDefault();
-  emit("setViewMode", goNext ? "speaker" : "gallery");
+  const next: CallViewMode = props.viewMode === "gallery" ? "speaker" : "gallery";
+  emit("setViewMode", next);
   const current = event.currentTarget as HTMLElement;
-  const sibling = goNext ? current.nextElementSibling : current.previousElementSibling;
-  if (sibling instanceof HTMLElement) sibling.focus();
+  const other = current.nextElementSibling ?? current.previousElementSibling;
+  if (other instanceof HTMLElement) other.focus();
 }
 </script>
 
