@@ -12,6 +12,8 @@ use ws_common::{TestServer, WsXmppClient};
 
 const DOMAIN: &str = "localhost";
 const USERNAME: &str = "admin";
+const MEMBER_USERNAME: &str = "member";
+const MEMBER_PASSWORD: &str = "xep0472-member-password";
 const COMMUNITY_JID: &str = "community.localhost";
 const FEED_NODE: &str = "urn:xmpp:pubsub-social-feed:0";
 const NS_SOCIAL_FEED: &str = "urn:xmpp:pubsub-social-feed:0";
@@ -26,6 +28,25 @@ async fn setup() -> (TestServer, WsXmppClient) {
         WsXmppClient::connect_and_auth(&server.ws_url(), DOMAIN, USERNAME, &password, &resource)
             .await
             .expect("connect and auth");
+    (server, client)
+}
+
+/// Start a server with a regular (non-owner) member account seeded and
+/// connect as that member. Only `admin` is a server owner
+/// (`WADDLE_SERVER_OWNER_LOCALPARTS`), so `member` exercises the
+/// member-write path on the social feed.
+async fn setup_member() -> (TestServer, WsXmppClient) {
+    let server = TestServer::start_with_extra_accounts(&[(MEMBER_USERNAME, MEMBER_PASSWORD)]);
+    let resource = format!("xep0472-member-{}", uuid::Uuid::new_v4());
+    let client = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        MEMBER_USERNAME,
+        MEMBER_PASSWORD,
+        &resource,
+    )
+    .await
+    .expect("connect and auth as member");
     (server, client)
 }
 
@@ -119,6 +140,66 @@ async fn social_feed_publish_and_items_round_trip() {
     assert!(
         items_response.contains("The community feed is live!"),
         "items query lost body: {items_response}"
+    );
+
+    let _ = client.close().await;
+}
+
+#[tokio::test]
+async fn member_can_publish_to_social_feed() {
+    // XEP-0472 §"Replying to a Post": "Anyone can publish a post" to a
+    // shared feed node. A non-owner community member must be able to
+    // post to the global social feed (the read path is already open).
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup_member().await;
+
+    let post_id = format!("post-{}", uuid::Uuid::new_v4());
+    client
+        .send(&format!(
+            r#"<iq type="set" id="member-feed-publish" to="{COMMUNITY_JID}">
+              <pubsub xmlns="http://jabber.org/protocol/pubsub">
+                <publish node="{FEED_NODE}">
+                  <item id="{post_id}">
+                    <entry xmlns="{NS_SOCIAL_FEED}">
+                      <title>Hello from a member</title>
+                      <body>Members can post to the feed now.</body>
+                      <author>{MEMBER_USERNAME}@{DOMAIN}</author>
+                      <published>2026-06-17T12:00:00Z</published>
+                    </entry>
+                  </item>
+                </publish>
+              </pubsub>
+            </iq>"#
+        ))
+        .await
+        .expect("send publish");
+    let publish_result = client
+        .recv_matching(|frame| frame.contains("member-feed-publish"))
+        .await
+        .expect("publish result");
+    assert!(
+        publish_result.contains("type='result'"),
+        "a non-owner member must be allowed to publish to the social feed: {publish_result}"
+    );
+
+    // The member's post round-trips through an items query.
+    client
+        .send(&format!(
+            r#"<iq type="get" id="member-feed-items" to="{COMMUNITY_JID}">
+              <pubsub xmlns="http://jabber.org/protocol/pubsub">
+                <items node="{FEED_NODE}"/>
+              </pubsub>
+            </iq>"#
+        ))
+        .await
+        .expect("send items query");
+    let items_response = client
+        .recv_matching(|frame| frame.contains("member-feed-items") && frame.contains("<entry"))
+        .await
+        .expect("items response");
+    assert!(
+        items_response.contains(&post_id),
+        "member's published post must round-trip through items: {items_response}"
     );
 
     let _ = client.close().await;

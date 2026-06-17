@@ -12,6 +12,8 @@ use ws_common::{TestServer, WsXmppClient};
 
 const DOMAIN: &str = "localhost";
 const USERNAME: &str = "admin";
+const MEMBER_USERNAME: &str = "member";
+const MEMBER_PASSWORD: &str = "xep0501-member-password";
 const COMMUNITY_JID: &str = "community.localhost";
 const STORIES_NODE: &str = "urn:xmpp:stories:0";
 const NS_STORIES: &str = "urn:xmpp:stories:0";
@@ -119,6 +121,54 @@ async fn stories_publish_and_items_round_trip() {
     assert!(
         items_response.contains(expires),
         "items query lost expires attr: {items_response}"
+    );
+
+    let _ = client.close().await;
+}
+
+#[tokio::test]
+async fn member_cannot_publish_to_stories() {
+    // Stories remain owner-only. Opening the social feed to member
+    // writes must NOT open stories: a non-owner member publishing a
+    // story must still be rejected with a `forbidden` auth error.
+    let _guard = TEST_SERIAL.lock().await;
+    let server = TestServer::start_with_extra_accounts(&[(MEMBER_USERNAME, MEMBER_PASSWORD)]);
+    let resource = format!("xep0501-member-{}", uuid::Uuid::new_v4());
+    let mut client = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        MEMBER_USERNAME,
+        MEMBER_PASSWORD,
+        &resource,
+    )
+    .await
+    .expect("connect and auth as member");
+
+    let story_id = format!("story-{}", uuid::Uuid::new_v4());
+    client
+        .send(&format!(
+            r#"<iq type="set" id="member-story-publish" to="{COMMUNITY_JID}">
+              <pubsub xmlns="http://jabber.org/protocol/pubsub">
+                <publish node="{STORIES_NODE}">
+                  <item id="{story_id}">
+                    <story xmlns="{NS_STORIES}" expires="2030-01-01T12:00:00Z">
+                      <body>Should be rejected</body>
+                      <author>{MEMBER_USERNAME}@{DOMAIN}</author>
+                    </story>
+                  </item>
+                </publish>
+              </pubsub>
+            </iq>"#
+        ))
+        .await
+        .expect("send publish");
+    let publish_result = client
+        .recv_matching(|frame| frame.contains("member-story-publish"))
+        .await
+        .expect("publish result");
+    assert!(
+        publish_result.contains("type='error'") && publish_result.contains("forbidden"),
+        "stories must stay owner-only — a member publish must be forbidden: {publish_result}"
     );
 
     let _ = client.close().await;
