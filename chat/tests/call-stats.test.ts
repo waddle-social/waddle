@@ -496,6 +496,24 @@ describe("videoResolutionBand — coarse band over the negotiated top-layer reso
   test("an unreported resolution (null, first poll) has no band yet", () => {
     expect(videoResolutionBand(null)).toBeNull();
   });
+
+  test("bands a real summarizeVideoStats resolution — guards the W×H separator coupling", () => {
+    // End-to-end: the band classifier splits on the exact separator
+    // summarizeVideoStats emits. If either side ever diverges (e.g. ASCII 'x'
+    // vs U+00D7), every band would silently go null — this catches that.
+    const camera720 = {
+      type: "outbound-rtp",
+      kind: "video",
+      frameWidth: 1280,
+      frameHeight: 720,
+      framesPerSecond: 30,
+      bytesSent: 500_000,
+      packetsSent: 500,
+      timestamp: 10_000,
+    };
+    const { summary } = summarizeVideoStats(report([camera720]), "send");
+    expect(videoResolutionBand(summary.resolution)).toBe("720p");
+  });
 });
 
 describe("summarizeAudioStats — outbound (send) audio", () => {
