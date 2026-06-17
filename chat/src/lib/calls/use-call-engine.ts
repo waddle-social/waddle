@@ -4,6 +4,7 @@ import { CallEngine, type LocalMediaTrack, type RemoteMediaTrack } from "./engin
 import {
   advanceActiveSpeakers,
   emptyActiveSpeakerState,
+  evictActiveSpeaker,
   type ActiveSpeakerState,
 } from "./active-speakers";
 import {
@@ -122,6 +123,22 @@ function pumpActiveSpeakers(): void {
   if (step.nextDeadline !== null) {
     activeSpeakerSweep = setTimeout(pumpActiveSpeakers, Math.max(0, step.nextDeadline - now));
   }
+}
+
+/**
+ * Purge a departed participant from all active-speaker state — the brief hold
+ * AND the sticky Speaker-view promotion — then re-derive. Without this, the ~1s
+ * release hold (or the sticky promotion, which holds the last speaker through
+ * silence) would survive their departure and re-highlight or re-promote them
+ * the instant they rejoin with a fresh tile.
+ */
+function forgetDepartedSpeaker(identity: string): void {
+  if (speakerPromotion.promotedIdentity === identity) {
+    speakerPromotion = emptySpeakerPromotion();
+  }
+  activeSpeakerState = evictActiveSpeaker(activeSpeakerState, identity);
+  lastSpeakingIdentities = lastSpeakingIdentities.filter((id) => id !== identity);
+  pumpActiveSpeakers();
 }
 
 /** Drop all active-speaker state so the next call starts from a clean slate. */
@@ -426,6 +443,9 @@ export function useCallEngine(): {
       addLiveCallParticipant(roomJid, identity);
     });
     singletonEngine.on("participantDisconnected", (identity) => {
+      // Clear any active-speaker highlight + Speaker-view promotion the leaver
+      // held, so neither survives their departure to re-apply on a fast rejoin.
+      forgetDepartedSpeaker(identity);
       const roomJid = activeMucRoomJid();
       if (!roomJid) return;
       removeLiveCallParticipant(roomJid, identity);

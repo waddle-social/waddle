@@ -49,6 +49,22 @@ const emit = defineEmits<{
   setViewMode: [mode: CallViewMode];
   hangup: [];
 }>();
+
+/**
+ * Arrow-key navigation for the Gallery/Speaker radiogroup: Right/Down select
+ * Speaker, Left/Up select Gallery, and focus follows selection (roving
+ * tabindex) per the WAI-ARIA radio-group pattern.
+ */
+function onViewKeydown(event: KeyboardEvent): void {
+  const goNext = event.key === "ArrowRight" || event.key === "ArrowDown";
+  const goPrev = event.key === "ArrowLeft" || event.key === "ArrowUp";
+  if (!goNext && !goPrev) return;
+  event.preventDefault();
+  emit("setViewMode", goNext ? "speaker" : "gallery");
+  const current = event.currentTarget as HTMLElement;
+  const sibling = goNext ? current.nextElementSibling : current.previousElementSibling;
+  if (sibling instanceof HTMLElement) sibling.focus();
+}
 </script>
 
 <template>
@@ -89,27 +105,34 @@ const emit = defineEmits<{
     </button>
 
     <!-- Gallery ⟷ Speaker view switcher. Sticky for the call; a pin or an
-         incoming screen share still overrides the chosen layout's large tile. -->
-    <div class="call-controls__view-switch" role="group" aria-label="Stage view">
+         incoming screen share still overrides the chosen layout's large tile.
+         A radiogroup (single-choice) rather than two independent toggles. -->
+    <div class="call-controls__view-switch" role="radiogroup" aria-label="Stage view">
       <button
         type="button"
+        role="radio"
         class="chat-icon-button chat-icon-button--md hover:bg-muted"
         :class="{ 'bg-muted text-foreground': viewMode === 'gallery' }"
         title="Gallery view"
         aria-label="Gallery view"
-        :aria-pressed="viewMode === 'gallery'"
+        :aria-checked="viewMode === 'gallery'"
+        :tabindex="viewMode === 'gallery' ? 0 : -1"
         @click="emit('setViewMode', 'gallery')"
+        @keydown="onViewKeydown"
       >
         <LayoutGrid class="w-4 h-4" />
       </button>
       <button
         type="button"
+        role="radio"
         class="chat-icon-button chat-icon-button--md hover:bg-muted"
         :class="{ 'bg-muted text-foreground': viewMode === 'speaker' }"
         title="Speaker view"
         aria-label="Speaker view"
-        :aria-pressed="viewMode === 'speaker'"
+        :aria-checked="viewMode === 'speaker'"
+        :tabindex="viewMode === 'speaker' ? 0 : -1"
         @click="emit('setViewMode', 'speaker')"
+        @keydown="onViewKeydown"
       >
         <SquareUser class="w-4 h-4" />
       </button>
