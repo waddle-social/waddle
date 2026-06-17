@@ -78,10 +78,14 @@ describe("videoPublishPlan — codec gating matches the probe (no codec the devi
     expect(plan.publish.backupCodecPolicy).toBeUndefined();
   });
 
-  test("VP9 without an available VP8 baseline publishes VP9 with no backup", () => {
+  test("VP9 without an available VP8 baseline explicitly disables the backup (false, not omitted)", () => {
+    // `backupCodec` must be `false`, not just omitted: LiveKit merges per-publish
+    // options over `publishDefaults`, whose `backupCodec` default is `true`, so
+    // an omitted value silently re-enables a VP8 backup — forcing the exact codec
+    // the probe reported unavailable. `false` is what actually honors the gating.
     const plan = videoPublishPlan({ source: "screen", capability: vp9OnlyEncode });
     expect(plan.publish.videoCodec).toBe("vp9");
-    expect(plan.publish.backupCodec).toBeUndefined();
+    expect(plan.publish.backupCodec).toBe(false);
     expect(plan.publish.backupCodecPolicy).toBeUndefined();
   });
 });
@@ -117,16 +121,107 @@ describe("videoPublishPlan — pure: returns fresh objects callers can't alias",
   });
 });
 
-describe("videoPublishPlan — camera preserves current behavior (rails only this slice)", () => {
-  test("a talking head sheds resolution before framerate and gets no codec override", () => {
+describe("videoPublishPlan — camera on a VP9-capable device", () => {
+  test("publishes VP9", () => {
     const plan = videoPublishPlan({ source: "camera", capability: capable });
-    expect(plan.publish.degradationPreference).toBe("maintain-framerate");
-    expect(plan.publish.videoCodec).toBeUndefined();
-    expect(plan.publish.scalabilityMode).toBeUndefined();
+    expect(plan.publish.videoCodec).toBe("vp9");
   });
 
-  test("camera capture is governed by the room defaults, not this plan", () => {
+  test("enables L3T3 spatial+temporal SVC and an explicit VP8 backup codec", () => {
+    // Unlike the screen share (forced to temporal-only L1T3), the camera can
+    // encode spatial layers, so L3 gives the 720/360/180 ladder subscribers
+    // adapt down — small tiles pull the 180p layer, a spotlight the 720p one.
     const plan = videoPublishPlan({ source: "camera", capability: capable });
-    expect(plan.capture).toBeNull();
+    expect(plan.publish.scalabilityMode).toBe("L3T3");
+    expect(plan.publish.backupCodec).toMatchObject({ codec: "vp8" });
+  });
+
+  test("keeps capable viewers on VP9 in a mixed room via multi-codec simulcast", () => {
+    const plan = videoPublishPlan({ source: "camera", capability: capable });
+    expect(plan.publish.backupCodecPolicy).toBe(BackupCodecPolicy.SIMULCAST);
+  });
+
+  test("caps the top layer at the 720p band (~1.7 Mbps), below the old 1080p ~3 Mbps", () => {
+    const plan = videoPublishPlan({ source: "camera", capability: capable });
+    expect(plan.publish.videoEncoding?.maxBitrate).toBe(1_700_000);
+    const fps = plan.publish.videoEncoding?.maxFramerate ?? 0;
+    expect(fps).toBeGreaterThanOrEqual(24);
+    expect(fps).toBeLessThanOrEqual(30);
+  });
+
+  test("caps the VP8 backup at the same 720p band so the fallback never exceeds it", () => {
+    const plan = videoPublishPlan({ source: "camera", capability: capable });
+    const backup = plan.publish.backupCodec;
+    expect(backup).not.toBe(false);
+    if (backup && backup !== true) {
+      expect(backup.encoding?.maxBitrate).toBe(1_700_000);
+    }
+  });
+
+  test("caps capture at 720p — no longer the old 1080p ceiling", () => {
+    const plan = videoPublishPlan({ source: "camera", capability: capable });
+    expect(plan.capture?.resolution?.width).toBe(1280);
+    expect(plan.capture?.resolution?.height).toBe(720);
+  });
+
+  test("a talking head sheds resolution before framerate (maintain-framerate)", () => {
+    const plan = videoPublishPlan({ source: "camera", capability: capable });
+    expect(plan.publish.degradationPreference).toBe("maintain-framerate");
+  });
+
+  test("camera capture sets resolution but no deviceId, so the room default survives LiveKit's merge", () => {
+    const plan = videoPublishPlan({ source: "camera", capability: capable });
+    expect(plan.capture).toEqual({ resolution: { width: 1280, height: 720, frameRate: 30 } });
+    // No deviceId: LiveKit's merge-without-overwriting fills the room's chosen
+    // camera in; if the builder set one here it would clobber that choice.
+    expect("deviceId" in plan.capture).toBe(false);
+  });
+});
+
+describe("videoPublishPlan — camera on a VP9-incapable device (iOS)", () => {
+  test("falls back to VP8 with no SVC and no backup codec", () => {
+    const plan = videoPublishPlan({ source: "camera", capability: incapable });
+    expect(plan.publish.videoCodec).toBe("vp8");
+    expect(plan.publish.scalabilityMode).toBeUndefined();
+    expect(plan.publish.backupCodec).toBeUndefined();
+  });
+
+  test("keeps the fallback first-class: same 720p capture cap, encoding and degradation", () => {
+    const fallback = videoPublishPlan({ source: "camera", capability: incapable });
+    const best = videoPublishPlan({ source: "camera", capability: capable });
+    expect(fallback.capture).toEqual(best.capture);
+    expect(fallback.publish.videoEncoding).toEqual(best.publish.videoEncoding);
+    expect(fallback.publish.degradationPreference).toBe("maintain-framerate");
+  });
+});
+
+describe("videoPublishPlan — camera codec gating matches the probe", () => {
+  test("neither codec available → videoCodec unset for LiveKit to pick, still 720p", () => {
+    const plan = videoPublishPlan({ source: "camera", capability: noCodecs });
+    expect(plan.publish.videoCodec).toBeUndefined();
+    expect(plan.publish.backupCodec).toBeUndefined();
+    expect(plan.publish.backupCodecPolicy).toBeUndefined();
+    expect(plan.capture.resolution?.height).toBe(720);
+  });
+
+  test("VP9 without an available VP8 baseline explicitly disables the backup (false, not omitted)", () => {
+    // See the screen-share twin: an omitted `backupCodec` inherits LiveKit's
+    // `publishDefaults.backupCodec = true` and re-enables a VP8 backup the probe
+    // said the device can't do. `false` is the value that honors the gating.
+    const plan = videoPublishPlan({ source: "camera", capability: vp9OnlyEncode });
+    expect(plan.publish.videoCodec).toBe("vp9");
+    expect(plan.publish.scalabilityMode).toBe("L3T3");
+    expect(plan.publish.backupCodec).toBe(false);
+    expect(plan.publish.backupCodecPolicy).toBeUndefined();
+  });
+});
+
+describe("videoPublishPlan — camera is pure: callers can't alias shared objects", () => {
+  test("two camera plans don't share mutable option objects", () => {
+    const a = videoPublishPlan({ source: "camera", capability: capable });
+    const b = videoPublishPlan({ source: "camera", capability: capable });
+    expect(a.publish).not.toBe(b.publish);
+    expect(a.capture).not.toBe(b.capture);
+    expect(a.publish.videoEncoding).not.toBe(b.publish.videoEncoding);
   });
 });

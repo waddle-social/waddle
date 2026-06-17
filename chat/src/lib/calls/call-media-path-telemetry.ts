@@ -3,6 +3,7 @@ import type {
   CallStatDirection,
   IceCandidateType,
   IceTransport,
+  VideoResolutionBand,
 } from "./call-stats";
 
 /**
@@ -28,7 +29,12 @@ type CallMediaPathSource = "camera" | "screen" | "microphone";
  * `audioBitrateBand` is the active-speaker bitrate bucket — non-null only for
  * `microphone` snapshots, so the raised ~64k Opus default is provable fleet-wide
  * while a continuously-varying send bitrate stays low-cardinality and the beacon
- * de-dupes. Always null for video (its quality lever is codec/ICE).
+ * de-dupes. Always null for video.
+ *
+ * `videoResolutionBand` is the symmetric video signal — the negotiated top-layer
+ * resolution bucket, non-null only for `camera`/`screen` snapshots. A fleet-wide
+ * shift from `1080p` to `720p` is what proves the #1001 camera cap took effect
+ * and reduced camera egress/decode. Always null for audio.
  */
 export type CallMediaPathSnapshot = {
   direction: CallStatDirection;
@@ -37,6 +43,7 @@ export type CallMediaPathSnapshot = {
   iceCandidateType: IceCandidateType | null;
   iceTransport: IceTransport | null;
   audioBitrateBand: AudioBitrateBand | null;
+  videoResolutionBand: VideoResolutionBand | null;
 };
 
 /**
@@ -59,6 +66,12 @@ export function callMediaPathEventAttributes(
     // so video events keep their exact shape and never carry a meaningless
     // audio attribute.
     ...(snapshot.audioBitrateBand ? { audio_bitrate_band: snapshot.audioBitrateBand } : {}),
+    // Video-only: the symmetric resolution bucket, emitted only for a camera /
+    // screen path that has a measured band, so audio events never carry a
+    // meaningless video attribute.
+    ...(snapshot.videoResolutionBand
+      ? { video_resolution_band: snapshot.videoResolutionBand }
+      : {}),
   };
 }
 
@@ -78,7 +91,8 @@ function sameCallMediaPath(a: CallMediaPathSnapshot, b: CallMediaPathSnapshot): 
     a.codec === b.codec &&
     a.iceCandidateType === b.iceCandidateType &&
     a.iceTransport === b.iceTransport &&
-    a.audioBitrateBand === b.audioBitrateBand
+    a.audioBitrateBand === b.audioBitrateBand &&
+    a.videoResolutionBand === b.videoResolutionBand
   );
 }
 

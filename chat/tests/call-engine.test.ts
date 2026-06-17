@@ -687,9 +687,12 @@ describe("call-engine module", () => {
 describe("enableRequestedCapture — best-effort, never ejects", () => {
   // Publish options are irrelevant to the best-effort guarantees here; any
   // typed bundle satisfies the (now required) parameter.
-  const cameraOpts = { degradationPreference: "maintain-framerate" as const };
+  const cameraPlan = {
+    capture: { resolution: { width: 1280, height: 720, frameRate: 30 } },
+    publish: { degradationPreference: "maintain-framerate" as const },
+  };
   const audioOpts = { audioPreset: { maxBitrate: 64_000 }, red: true, dtx: true, forceStereo: false };
-  const publish = { audio: audioOpts, camera: cameraOpts };
+  const publish = { audio: audioOpts, camera: cameraPlan };
 
   test("enables both tracks when capture succeeds", async () => {
     const stub = captureStub();
@@ -1109,7 +1112,10 @@ describe("call-engine — camera capture ceiling + per-source degradation", () =
     };
   }
 
-  test("setCameraEnabled publishes the camera with maintain-framerate degradation and no codec override", async () => {
+  test("setCameraEnabled caps capture at 720p with maintain-framerate; no codec forced when the probe reports none", async () => {
+    // `new CallEngine()` in bun's node env has no RTCRtpSender, so the probe
+    // reports no codecs — the camera is still capped at 720p and sheds
+    // resolution under pressure, but no codec is forced (LiveKit picks).
     const { CallEngine } = await import("../src/lib/calls/engine");
     const engine = new CallEngine();
     const stub = videoRoomStub();
@@ -1118,28 +1124,65 @@ describe("call-engine — camera capture ceiling + per-source degradation", () =
     expect(stub.camera).toEqual([
       {
         enabled: true,
-        options: undefined,
-        publishOptions: { degradationPreference: "maintain-framerate" },
+        options: { resolution: { width: 1280, height: 720, frameRate: 30 } },
+        publishOptions: {
+          videoEncoding: { maxBitrate: 1_700_000, maxFramerate: 30 },
+          degradationPreference: "maintain-framerate",
+        },
       },
     ]);
   });
 
-  test("enableRequestedCapture forwards the camera publish options it is given", async () => {
-    const camera: Array<{ enabled: boolean; publishOptions: unknown }> = [];
+  test("setCameraEnabled forwards the VP9 + L3T3 720p plan to the SDK on a capable device", async () => {
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const capable = videoCodecSupport({
+      encode: ["video/vp8", "video/vp9"],
+      decode: ["video/vp8", "video/vp9"],
+    });
+    const engine = new CallEngine({ videoCodecSupport: capable });
+    const stub = videoRoomStub();
+    (engine as unknown as { room: unknown }).room = stub.room;
+    await engine.setCameraEnabled(true);
+    expect(stub.camera).toHaveLength(1);
+    const [call] = stub.camera;
+    expect(call?.options).toEqual({ resolution: { width: 1280, height: 720, frameRate: 30 } });
+    expect(call?.publishOptions).toMatchObject({ videoCodec: "vp9", scalabilityMode: "L3T3" });
+  });
+
+  test("setCameraEnabled forwards the VP8 720p fallback on a VP9-incapable device (iOS)", async () => {
+    const { CallEngine } = await import("../src/lib/calls/engine");
+    const incapable = videoCodecSupport({ encode: ["video/vp8"], decode: ["video/vp8"] });
+    const engine = new CallEngine({ videoCodecSupport: incapable });
+    const stub = videoRoomStub();
+    (engine as unknown as { room: unknown }).room = stub.room;
+    await engine.setCameraEnabled(true);
+    const [call] = stub.camera;
+    expect(call?.options).toEqual({ resolution: { width: 1280, height: 720, frameRate: 30 } });
+    expect(call?.publishOptions).toMatchObject({ videoCodec: "vp8" });
+    expect(call?.publishOptions).not.toHaveProperty("scalabilityMode");
+  });
+
+  test("enableRequestedCapture forwards both the camera capture cap and publish options it is given", async () => {
+    const camera: Array<{ enabled: boolean; options: unknown; publishOptions: unknown }> = [];
     const stub = {
       async setMicrophoneEnabled() {},
-      async setCameraEnabled(enabled: boolean, _options?: unknown, publishOptions?: unknown) {
-        camera.push({ enabled, publishOptions });
+      async setCameraEnabled(enabled: boolean, options?: unknown, publishOptions?: unknown) {
+        camera.push({ enabled, options, publishOptions });
       },
     };
-    const cameraPublishOptions = { degradationPreference: "maintain-framerate" as const };
+    const cameraPlan = {
+      capture: { resolution: { width: 1280, height: 720, frameRate: 30 } },
+      publish: { videoCodec: "vp9" as const, degradationPreference: "maintain-framerate" as const },
+    };
     await enableRequestedCapture(
       stub,
       { audio: false, video: true },
       () => {},
-      { audio: {}, camera: cameraPublishOptions },
+      { audio: {}, camera: cameraPlan },
     );
-    expect(camera).toEqual([{ enabled: true, publishOptions: cameraPublishOptions }]);
+    expect(camera).toEqual([
+      { enabled: true, options: cameraPlan.capture, publishOptions: cameraPlan.publish },
+    ]);
   });
 });
 
@@ -1189,7 +1232,7 @@ describe("call-engine — Opus voice-clarity audio publish profile (#998)", () =
       stub,
       { audio: true, video: false },
       () => {},
-      { audio: audioPublishOpts, camera: {} },
+      { audio: audioPublishOpts, camera: { capture: { resolution: { width: 1280, height: 720 } }, publish: {} } },
     );
     expect(mic).toEqual([{ enabled: true, publishOptions: audioPublishOpts }]);
   });

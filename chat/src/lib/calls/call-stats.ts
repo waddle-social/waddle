@@ -164,6 +164,30 @@ export function audioBitrateBand(bitrateKbps: number | null): AudioBitrateBand |
   return "high";
 }
 
+/**
+ * Video counterpart of {@link audioBitrateBand}: a coarse, low-cardinality band
+ * over the negotiated top-layer resolution. It is the fleet-wide signal for the
+ * resolution levers in #995 — a shift from `1080p` to `720p` is what proves the
+ * #1001 camera cap took effect and reduced camera egress/decode. Banding the
+ * height (not beaconing the raw "W×H") keeps the de-duping media-path beacon to
+ * a handful of events per call rather than one per SVC-layer flip. `null` (an
+ * unreported first poll) has no band yet.
+ */
+export type VideoResolutionBand = "180p" | "360p" | "540p" | "720p" | "1080p" | "1440p";
+
+export function videoResolutionBand(resolution: string | null): VideoResolutionBand | null {
+  if (resolution === null) return null;
+  // `summarizeVideoStats` formats resolution as "W×H" (U+00D7); band on height.
+  const height = Number.parseInt(resolution.split("×")[1] ?? "", 10);
+  if (!Number.isFinite(height) || height <= 0) return null;
+  if (height <= 180) return "180p";
+  if (height <= 360) return "360p";
+  if (height <= 540) return "540p";
+  if (height <= 720) return "720p";
+  if (height <= 1080) return "1080p";
+  return "1440p";
+}
+
 /** Strip the "video/" prefix off a codec MIME, e.g. "video/VP9" → "VP9". */
 function codecName(mimeType: string | undefined): string | null {
   if (!mimeType) return null;

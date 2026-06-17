@@ -26,6 +26,7 @@ import {
   audioBitrateBand,
   summarizeAudioStats,
   summarizeVideoStats,
+  videoResolutionBand,
   type CallStatDirection,
   type CallStatSample,
 } from "./call-stats";
@@ -113,6 +114,9 @@ async function sampleTrackMediaPath(
       iceCandidateType: summary.iceCandidateType,
       iceTransport: summary.iceTransport,
       audioBitrateBand: null, // video paths carry no audio band
+      // The negotiated top-layer resolution bucket: a fleet shift from 1080p to
+      // 720p is the camera-cap egress signal (#1001).
+      videoResolutionBand: videoResolutionBand(summary.resolution),
     };
   } catch {
     return null;
@@ -167,6 +171,7 @@ async function sampleAudioTrackMediaPath(
             iceCandidateType: summary.iceCandidateType,
             iceTransport: summary.iceTransport,
             audioBitrateBand: band,
+            videoResolutionBand: null, // audio paths carry no resolution band
           };
     return { snapshot, key, sample };
   } catch {

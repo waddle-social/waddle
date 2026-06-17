@@ -12,6 +12,7 @@ const RELAY_TCP: CallMediaPathSnapshot = {
   iceCandidateType: "relay",
   iceTransport: "tcp",
   audioBitrateBand: null,
+  videoResolutionBand: "1440p",
 };
 
 describe("callMediaPathEventAttributes", () => {
@@ -22,6 +23,7 @@ describe("callMediaPathEventAttributes", () => {
       codec: "VP9",
       ice_candidate_type: "relay",
       ice_transport: "tcp",
+      video_resolution_band: "1440p",
     });
   });
 
@@ -34,6 +36,7 @@ describe("callMediaPathEventAttributes", () => {
         iceCandidateType: null,
         iceTransport: null,
         audioBitrateBand: null,
+        videoResolutionBand: null,
       }),
     ).toEqual({
       direction: "recv",
@@ -42,6 +45,20 @@ describe("callMediaPathEventAttributes", () => {
       ice_candidate_type: "unknown",
       ice_transport: "unknown",
     });
+  });
+
+  test("a camera path carries its resolution band — the 720p-vs-1080p egress signal", () => {
+    expect(
+      callMediaPathEventAttributes({
+        direction: "send",
+        source: "camera",
+        codec: "VP9",
+        iceCandidateType: "host",
+        iceTransport: "udp",
+        audioBitrateBand: null,
+        videoResolutionBand: "720p",
+      }),
+    ).toMatchObject({ source: "camera", codec: "VP9", video_resolution_band: "720p" });
   });
 
   test("an audio path carries the bitrate band (active-speaker signal), codec and source", () => {
@@ -53,6 +70,7 @@ describe("callMediaPathEventAttributes", () => {
         iceCandidateType: "host",
         iceTransport: "udp",
         audioBitrateBand: "high",
+        videoResolutionBand: null,
       }),
     ).toEqual({
       direction: "send",
@@ -68,6 +86,20 @@ describe("callMediaPathEventAttributes", () => {
     expect(callMediaPathEventAttributes(RELAY_TCP)).not.toHaveProperty("audio_bitrate_band");
   });
 
+  test("an audio path omits the video_resolution_band attribute entirely", () => {
+    expect(
+      callMediaPathEventAttributes({
+        direction: "send",
+        source: "microphone",
+        codec: "opus",
+        iceCandidateType: "host",
+        iceTransport: "udp",
+        audioBitrateBand: "high",
+        videoResolutionBand: null,
+      }),
+    ).not.toHaveProperty("video_resolution_band");
+  });
+
   test("never emits participant identifiers or JIDs", () => {
     const attrs = callMediaPathEventAttributes(RELAY_TCP);
     const allowed = new Set([
@@ -77,6 +109,7 @@ describe("callMediaPathEventAttributes", () => {
       "ice_candidate_type",
       "ice_transport",
       "audio_bitrate_band",
+      "video_resolution_band",
     ]);
     for (const key of Object.keys(attrs)) {
       expect(allowed.has(key)).toBe(true);
@@ -125,6 +158,7 @@ describe("createCallMediaPathBeacon", () => {
       iceCandidateType: "host",
       iceTransport: "udp",
       audioBitrateBand: band,
+      videoResolutionBand: null,
     });
 
     beacon.observe(audio("silent"));
@@ -132,6 +166,17 @@ describe("createCallMediaPathBeacon", () => {
     beacon.observe(audio("silent")); // back to a band already seen → no re-beacon
 
     expect(reported.map((s) => s.audioBitrateBand)).toEqual(["silent", "high"]);
+  });
+
+  test("re-beacons when the camera resolution band changes (1080p → 720p cap)", () => {
+    const reported: CallMediaPathSnapshot[] = [];
+    const beacon = createCallMediaPathBeacon((s) => reported.push(s));
+
+    beacon.observe(snap({ source: "camera", videoResolutionBand: "1080p" }));
+    beacon.observe(snap({ source: "camera", videoResolutionBand: "720p" }));
+
+    expect(reported).toHaveLength(2);
+    expect(reported.map((s) => s.videoResolutionBand)).toEqual(["1080p", "720p"]);
   });
 
   test("re-beacons when the ICE path changes (relay → host)", () => {
