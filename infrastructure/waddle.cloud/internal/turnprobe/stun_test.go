@@ -140,14 +140,14 @@ func TestParseBindingResponseRejectsTruncatedXorMapped(t *testing.T) {
 	}
 }
 
-// A Binding error response (class 0x0111) with a valid cookie and matching
-// transaction id must be rejected: it is not proof the relay is reachable.
+// A Binding error response (class 0x0111) must be rejected even when it
+// carries an otherwise-valid XOR-MAPPED-ADDRESS: only the success-class
+// check stands between it and a false "reachable" result, so the fixture
+// keeps the address valid to pin that specific guard.
 func TestParseBindingResponseRejectsErrorResponse(t *testing.T) {
 	_, txID := BuildBindingRequest()
-	msg := make([]byte, 20)
-	binary.BigEndian.PutUint16(msg[0:2], 0x0111) // Binding error response
-	binary.BigEndian.PutUint32(msg[4:8], magicCookie)
-	copy(msg[8:20], txID[:])
+	msg := bindingSuccess(txID, netip.MustParseAddrPort("203.0.113.7:3478"))
+	binary.BigEndian.PutUint16(msg[0:2], 0x0111) // flip class to error response
 
 	if _, err := ParseBindingResponse(txID, msg); err == nil {
 		t.Fatal("expected error for Binding error response (0x0111), got nil")
