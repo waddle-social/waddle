@@ -108,6 +108,21 @@ spec:
               protocol: UDP
             - port: "30881"
               protocol: TCP
+    # LiveKit external-IP auto-detection (`rtc.use_external_ip: true`)
+    # performs a STUN binding to public STUN servers at startup — BEFORE it
+    # logs anything or binds :7880. Without this allow a fresh pod blocks on
+    # external-IP resolution, is liveness-killed at ~30s, and CrashLoops with
+    # empty logs (a running pod survives only until its next restart). STUN
+    # is UDP/3478 (e.g. Twilio) and UDP/19302 (Google), to arbitrary public
+    # servers, hence `world`.
+    - toEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "3478"
+              protocol: UDP
+            - port: "19302"
+              protocol: UDP
     # Signaling responses back to the gateway proxy / host data path.
     - toEntities:
         - ingress
