@@ -9,7 +9,6 @@ import {
   $callUiMode,
   callUiModeAfterFullscreenExit,
   callUiModeAfterSurfaceEscape,
-  nextCallUiMode,
   shouldExitNativeFullscreenForModeChange,
 } from "@/lib/calls/ui-mode";
 import {
@@ -233,12 +232,8 @@ const {
 
 const participantCount = computed(() => rosterRows.value.length);
 
-function collapseToSplit(): void {
-  $callUiMode.set("split");
-}
-
-async function toggleUiMode(): Promise<void> {
-  const nextMode = nextCallUiMode(uiMode.value);
+async function toggleExpandedSurface(): Promise<void> {
+  const nextMode = callUiModeAfterSurfaceEscape(uiMode.value);
   if (
     shouldExitNativeFullscreenForModeChange(
       uiMode.value,
@@ -253,6 +248,10 @@ async function toggleUiMode(): Promise<void> {
   $callUiMode.set(nextMode);
 }
 
+function enterImmersive(): void {
+  $callUiMode.set("immersive");
+}
+
 function clearChromeIdleTimer(): void {
   if (typeof window === "undefined") return;
   if (chromeIdleTimer === null) return;
@@ -260,21 +259,39 @@ function clearChromeIdleTimer(): void {
   chromeIdleTimer = null;
 }
 
+function chromeHasFocus(): boolean {
+  if (typeof document === "undefined") return false;
+  const active = document.activeElement;
+  return active instanceof Element && !!active.closest(".call-expanded__chrome");
+}
+
+function scheduleImmersiveChromeHide(): void {
+  if (typeof window === "undefined" || !isImmersive.value) return;
+  chromeIdleTimer = window.setTimeout(() => {
+    chromeIdleTimer = null;
+    if (!isImmersive.value) return;
+    if (chromeHasFocus()) {
+      scheduleImmersiveChromeHide();
+      return;
+    }
+    chromeVisible.value = false;
+  }, 2_000);
+}
+
 function revealImmersiveChrome(): void {
   chromeVisible.value = true;
   if (typeof window === "undefined" || !isImmersive.value) return;
   clearChromeIdleTimer();
-  chromeIdleTimer = window.setTimeout(() => {
-    if (isImmersive.value) chromeVisible.value = false;
-  }, 2_000);
+  scheduleImmersiveChromeHide();
 }
 
 async function toggleNativeFullscreen(): Promise<void> {
   if (typeof document === "undefined") return;
-  if (document.fullscreenElement) {
+  if (document.fullscreenElement === surfaceRef.value) {
     await document.exitFullscreen();
     return;
   }
+  if (document.fullscreenElement) return;
   await surfaceRef.value?.requestFullscreen?.();
 }
 
@@ -390,6 +407,8 @@ onBeforeUnmount(() => {
     }"
     role="region"
     :aria-label="isImmersive ? 'Active call (immersive)' : 'Active call (expanded)'"
+    @focusin="revealImmersiveChrome"
+    @keydown="revealImmersiveChrome"
     @pointermove="revealImmersiveChrome"
   >
     <CallStageHeader
@@ -474,7 +493,8 @@ onBeforeUnmount(() => {
         @toggle-mic="toggleMic"
         @toggle-cam="toggleCam"
         @toggle-screen-share="toggleScreenShare"
-        @toggle-expanded="toggleUiMode"
+        @toggle-expanded="toggleExpandedSurface"
+        @toggle-immersive="enterImmersive"
         @toggle-native-fullscreen="toggleNativeFullscreen"
         @toggle-participants="toggleCallParticipants"
         @toggle-chat="toggleCallChat"
@@ -507,13 +527,35 @@ onBeforeUnmount(() => {
   background: #050507;
 }
 
+.call-expanded--immersive .call-expanded__main {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+}
+
+.call-expanded--immersive .call-expanded__header,
+.call-expanded--immersive .call-expanded__footer {
+  position: absolute;
+  inset-inline: 0;
+  z-index: 3;
+}
+
+.call-expanded--immersive .call-expanded__header {
+  inset-block-start: 0;
+}
+
+.call-expanded--immersive .call-expanded__footer {
+  inset-block-end: 0;
+}
+
 .call-expanded__chrome {
-  transition: opacity 180ms ease, transform 180ms ease;
+  transition: opacity 180ms ease, transform 180ms ease, visibility 180ms ease;
 }
 
 .call-expanded--chrome-hidden .call-expanded__chrome {
   opacity: 0;
   pointer-events: none;
+  visibility: hidden;
 }
 
 .call-expanded--chrome-hidden .call-expanded__header {
@@ -575,10 +617,6 @@ onBeforeUnmount(() => {
 @media (max-width: 760px) {
   .call-expanded__main {
     flex-direction: column;
-  }
-
-  .call-expanded--immersive .call-expanded__main {
-    flex-direction: row;
   }
 
   .call-expanded--immersive .call-expanded__dock-overlay {

@@ -64,6 +64,7 @@ const emit = defineEmits<{
   toggleCam: [];
   toggleScreenShare: [];
   toggleExpanded: [];
+  toggleImmersive: [];
   toggleNativeFullscreen: [];
   toggleParticipants: [];
   toggleChat: [];
@@ -295,12 +296,21 @@ onBeforeUnmount(() => {
     <button
       type="button"
       class="chat-icon-button chat-icon-button--md hover:bg-muted"
-      :title="isImmersive ? 'Return call to expanded view' : isExpanded ? 'Make call immersive' : 'Expand call'"
-      :aria-pressed="isExpanded"
-      :aria-label="isImmersive ? 'Return call to expanded view' : isExpanded ? 'Make call immersive' : 'Expand call to fill the chat pane'"
+      :title="isImmersive ? 'Return call to expanded view' : isExpanded ? 'Collapse call' : 'Expand call'"
+      :aria-label="isImmersive ? 'Return call to expanded view' : isExpanded ? 'Collapse call to split view' : 'Expand call to fill the chat pane'"
       @click="emit('toggleExpanded')"
     >
-      <component :is="isImmersive ? Minimize2 : Maximize2" class="w-4 h-4" />
+      <component :is="isExpanded ? Minimize2 : Maximize2" class="w-4 h-4" />
+    </button>
+    <button
+      v-if="isExpanded && !isImmersive"
+      type="button"
+      class="chat-icon-button chat-icon-button--md hover:bg-muted"
+      title="Make call immersive"
+      aria-label="Make call immersive"
+      @click="emit('toggleImmersive')"
+    >
+      <Maximize2 class="w-4 h-4" />
     </button>
     <button
       v-if="isImmersive"
