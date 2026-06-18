@@ -310,13 +310,14 @@ schema.#Project & {
 			args: ["-c", #"""
 					set -euo pipefail
 					rustup target add wasm32-wasip2 >/dev/null 2>&1 || true
-					for module in link-board ai-chatbot decision-polls github; do
+					for module in link-board ai-chatbot decision-polls github stargate-quotes; do
 					  cargo build --release --locked --target wasm32-wasip2 --target-dir target --manifest-path "extensions/${module}/Cargo.toml"
 					done
 					test -s target/wasm32-wasip2/release/link_board.wasm
 					test -s target/wasm32-wasip2/release/ai_chatbot.wasm
 					test -s target/wasm32-wasip2/release/decision_polls.wasm
 					test -s target/wasm32-wasip2/release/github.wasm
+					test -s target/wasm32-wasip2/release/stargate_quotes.wasm
 				"""#]
 			inputs: _rustInputs
 			outputs: [
@@ -324,6 +325,7 @@ schema.#Project & {
 				"server/target/wasm32-wasip2/release/ai_chatbot.wasm",
 				"server/target/wasm32-wasip2/release/decision_polls.wasm",
 				"server/target/wasm32-wasip2/release/github.wasm",
+				"server/target/wasm32-wasip2/release/stargate_quotes.wasm",
 			]
 			dependsOn: [tasks.fmt, tasks.clippy, tasks.test]
 		}
@@ -453,7 +455,8 @@ schema.#Project & {
 					  -t linkBoardDigest="${sample_digest}" \
 					  -t aiChatbotDigest="${sample_digest}" \
 					  -t decisionPollsDigest="${sample_digest}" \
-					  -t githubDigest="${sample_digest}" > "${modules_yaml}"
+					  -t githubDigest="${sample_digest}" \
+					  -t stargateQuotesDigest="${sample_digest}" > "${modules_yaml}"
 					cp "${gitops_values}" "${published_values}"
 					MODULES_YAML="${modules_yaml}" SAMPLE_DIGEST="${sample_digest}" SAMPLE_GIT_SHA="${sample_git_sha}" yq -i '
 					  .image.digest = strenv(SAMPLE_DIGEST) |
@@ -466,7 +469,8 @@ schema.#Project & {
 					  -t linkBoardDigest="${sample_digest}" \
 					  -t aiChatbotDigest="${sample_digest}" \
 					  -t decisionPollsDigest="${sample_digest}" \
-					  -t githubDigest="${sample_digest}"
+					  -t githubDigest="${sample_digest}" \
+					  -t stargateQuotesDigest="${sample_digest}"
 					helm lint charts/waddle-server -f "${published_values}"
 					helm template waddle-server charts/waddle-server \
 					  --namespace waddle \
@@ -603,12 +607,14 @@ schema.#Project & {
 					  "ai-chatbot:ai_chatbot:urn:waddle:ai-chatbot:1"
 					  "decision-polls:decision_polls:urn:waddle:decision-polls:1"
 					  "github:github:urn:waddle:web-integration:1"
+					  "stargate-quotes:stargate_quotes:urn:waddle:stargate-quotes:1"
 					)
 
 					link_board_digest=""
 					ai_chatbot_digest=""
 					decision_polls_digest=""
 					github_digest=""
+					stargate_quotes_digest=""
 					modules_yaml="../target/digests/extensions-modules.yaml"
 					for extension_spec in "${EXTENSIONS[@]}"; do
 					  IFS=: read -r extension_name crate_name _namespace_scheme _namespace_rest <<< "${extension_spec}"
@@ -641,6 +647,7 @@ schema.#Project & {
 					    ai-chatbot) ai_chatbot_digest="${extension_digest}" ;;
 					    decision-polls) decision_polls_digest="${extension_digest}" ;;
 					    github) github_digest="${extension_digest}" ;;
+					    stargate-quotes) stargate_quotes_digest="${extension_digest}" ;;
 					    *) echo "unknown extension ${extension_name}" >&2; exit 1 ;;
 					  esac
 					done
@@ -648,7 +655,8 @@ schema.#Project & {
 					  -t linkBoardDigest="${link_board_digest:?missing link-board digest}" \
 					  -t aiChatbotDigest="${ai_chatbot_digest:?missing ai-chatbot digest}" \
 					  -t decisionPollsDigest="${decision_polls_digest:?missing decision-polls digest}" \
-					  -t githubDigest="${github_digest:?missing github digest}" > "${modules_yaml}"
+					  -t githubDigest="${github_digest:?missing github digest}" \
+					  -t stargateQuotesDigest="${stargate_quotes_digest:?missing stargate-quotes digest}" > "${modules_yaml}"
 
 					FULL_SHA="${FULL_SHA}" yq -i ".spec.values.image.tag = \"sha-${SHORT_SHA}\" | .spec.values.image.digest = \"${digest}\" | .spec.values.containerExtraEnv = ((.spec.values.containerExtraEnv // []) | map(select(.name != \"WADDLE_GIT_SHA\"))) + [{\"name\": \"WADDLE_GIT_SHA\", \"value\": strenv(FULL_SHA)}] | .spec.values.extensions.enabled = true" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml
 					yq -e ".spec.values.image.tag == \"sha-${SHORT_SHA}\"" ../infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml > /dev/null
@@ -672,7 +680,8 @@ schema.#Project & {
 					  -t linkBoardDigest="${link_board_digest}" \
 					  -t aiChatbotDigest="${ai_chatbot_digest}" \
 					  -t decisionPollsDigest="${decision_polls_digest}" \
-					  -t githubDigest="${github_digest}"
+					  -t githubDigest="${github_digest}" \
+					  -t stargateQuotesDigest="${stargate_quotes_digest}"
 					helm template waddle-server charts/waddle-server \
 					  --namespace waddle \
 					  -f "${gitops_values}" > "${gitops_render}"
