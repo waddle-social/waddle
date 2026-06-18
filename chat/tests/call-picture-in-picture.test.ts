@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import type { CallTileModel } from "../src/lib/calls/call-tiles";
 import {
   $callPictureInPictureActive,
@@ -99,6 +100,17 @@ describe("call Picture-in-Picture controller", () => {
     expect(webKitCalls).toEqual(["picture-in-picture"]);
   });
 
+  test("rejects video Picture-in-Picture when a WebKit video element does not support it", async () => {
+    expect(
+      enterVideoCallPictureInPicture({
+        webkitSupportsPresentationMode: () => false,
+        webkitSetPresentationMode: () => {
+          throw new Error("should not set presentation mode");
+        },
+      } as unknown as HTMLVideoElement),
+    ).rejects.toThrow("Video Picture-in-Picture is not available for this video element");
+  });
+
   test("moves the panel into a Document PiP window and records document mode", async () => {
     const panel = {};
     const appended: unknown[] = [];
@@ -163,6 +175,23 @@ describe("call Picture-in-Picture controller", () => {
     expect(webKitCalls).toEqual(["inline"]);
   });
 
+  test("does not exit an unrelated standard video Picture-in-Picture session", async () => {
+    const callVideo = {};
+    const unrelatedVideo = {};
+    const exitPictureInPicture = mock(async () => undefined);
+    Object.defineProperty(globalThis, "document", {
+      configurable: true,
+      value: {
+        pictureInPictureElement: unrelatedVideo,
+        exitPictureInPicture,
+      },
+    });
+
+    await exitVideoCallPictureInPicture(callVideo as HTMLVideoElement);
+
+    expect(exitPictureInPicture).not.toHaveBeenCalled();
+  });
+
   test("keeps the WebKit close listener through enter and clears it on exit", () => {
     const listeners = new Map<string, Set<() => void>>();
     const video = {
@@ -190,6 +219,39 @@ describe("call Picture-in-Picture controller", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(listeners.get("webkitpresentationmodechanged")?.size).toBe(0);
   });
+});
+
+describe("call Picture-in-Picture surface wiring", () => {
+  for (const surface of ["CallSplitContainer.vue", "CallExpandedSurface.vue"] as const) {
+    test(`${surface} gates video PiP on a mounted source video`, () => {
+      const source = surfaceSource(surface);
+      expect(source).toContain("mountedPictureInPictureVideo.value !== null");
+      expect(source).toContain("findCallPictureInPictureVideo");
+      expect(source).toContain("new MutationObserver");
+      expect(source).toContain("observeMountedPictureInPictureVideos");
+    });
+
+    test(`${surface} safely closes local PiP before hangup or surface hide`, () => {
+      const source = surfaceSource(surface);
+      const resetBlock = source.slice(
+        source.indexOf("function resetLocalPictureInPictureState"),
+        source.indexOf("async function closePictureInPicture"),
+      );
+      expect(source).toContain("async function closePictureInPictureSafely()");
+      expect(source).toContain("resetLocalPictureInPictureState()");
+      expect(source).toContain("await closePictureInPictureSafely();\n  await hangupActiveCall();");
+      expect(source).toContain("hasLocalPictureInPictureHandle()");
+      expect(source).toContain("void closePictureInPictureSafely()");
+      expect(resetBlock).not.toContain("mountedPictureInPictureVideo.value = null");
+    });
+
+    test(`${surface} keeps PiP tile projection screen-share state stable`, () => {
+      const source = surfaceSource(surface);
+      expect(source).toContain("pictureInPictureSeenRemoteScreenTrackKeys");
+      expect(source).toContain("reconcileCallTileProjectionState");
+      expect(source).not.toContain("seenRemoteScreenTrackKeys: new Set()");
+    });
+  }
 });
 
 function tile(
@@ -226,4 +288,11 @@ function restoreDescriptor(
 
 function dispatch(listeners: Map<string, Set<() => void>>, type: string): void {
   for (const listener of Array.from(listeners.get(type) ?? [])) listener();
+}
+
+function surfaceSource(name: string): string {
+  return readFileSync(
+    new URL(`../src/components/calls/${name}`, import.meta.url),
+    "utf8",
+  );
 }

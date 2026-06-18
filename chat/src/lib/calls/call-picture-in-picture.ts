@@ -81,16 +81,26 @@ export async function enterVideoCallPictureInPicture(video: HTMLVideoElement): P
   }
   const webKitVideo = video as WebKitPictureInPictureVideoPrototype;
   if (
-    typeof webKitVideo.webkitSupportsPresentationMode === "function" &&
-    webKitVideo.webkitSupportsPresentationMode("picture-in-picture") &&
     typeof webKitVideo.webkitSetPresentationMode === "function"
   ) {
+    if (
+      typeof webKitVideo.webkitSupportsPresentationMode !== "function" ||
+      !webKitVideo.webkitSupportsPresentationMode("picture-in-picture")
+    ) {
+      throw new Error("Video Picture-in-Picture is not available for this video element");
+    }
     webKitVideo.webkitSetPresentationMode("picture-in-picture");
+    return;
   }
+  throw new Error("Video Picture-in-Picture is not available");
 }
 
 export async function exitVideoCallPictureInPicture(video: HTMLVideoElement | null): Promise<void> {
-  if (typeof document !== "undefined" && document.pictureInPictureElement) {
+  if (
+    typeof document !== "undefined" &&
+    video !== null &&
+    document.pictureInPictureElement === video
+  ) {
     await document.exitPictureInPicture();
     return;
   }

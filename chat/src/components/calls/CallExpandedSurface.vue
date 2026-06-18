@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useStore } from "@nanostores/vue";
 import {
   $callState,
@@ -56,7 +56,10 @@ import {
 } from "@/lib/calls/in-call-reactions";
 import { barePeerJid } from "@/lib/xmpp/jid";
 import { expectedRemoteIdentitiesForCallState } from "@/lib/calls/call-tiles";
-import { projectCallTiles } from "@/lib/calls/call-tile-projection";
+import {
+  projectCallTiles,
+  reconcileCallTileProjectionState,
+} from "@/lib/calls/call-tile-projection";
 import {
   $callPictureInPictureActive,
   $callPictureInPictureMode,
@@ -164,10 +167,14 @@ const chromeVisible = ref(true);
 const nativeFullscreenActive = ref(false);
 const pictureInPicturePanelRef = ref<HTMLElement | null>(null);
 const pictureInPictureParkingRef = ref<HTMLElement | null>(null);
+const mountedPictureInPictureVideo = ref<HTMLVideoElement | null>(null);
+const pictureInPictureSeenRemoteScreenTrackKeys = ref<ReadonlySet<string>>(new Set());
 let chromeIdleTimer: number | null = null;
 let documentPictureInPictureWindow: Window | null = null;
 let videoPictureInPictureElement: HTMLVideoElement | null = null;
 let cleanupVideoPictureInPictureListeners: (() => void) | null = null;
+let observedPictureInPictureRoot: HTMLElement | null = null;
+let pictureInPictureVideoObserver: MutationObserver | null = null;
 const dockOpen = useStore($callDockOpen);
 const dockTab = useStore($callDockTab);
 const chatUnread = useStore($callChatUnread);
@@ -265,28 +272,89 @@ const stageLocalTracks = computed(() =>
 const expectedRemoteIdentities = computed(() =>
   expectedRemoteIdentitiesForCallState(state.value),
 );
-const pictureInPictureTile = computed(() => {
-  const projection = projectCallTiles({
+const pictureInPictureProjection = computed(() =>
+  projectCallTiles({
     remoteTracks: remoteTracks.value,
     localTracks: stageLocalTracks.value,
     localIdentity: localIdentity.value,
     expectedRemoteIdentities: expectedRemoteIdentities.value,
     micEnabled: micEnabled.value,
-    seenRemoteScreenTrackKeys: new Set(),
+    seenRemoteScreenTrackKeys: pictureInPictureSeenRemoteScreenTrackKeys.value,
     pinnedTileKey: pinnedTileKey.value,
     viewMode: viewMode.value,
     promotedSpeakerIdentity: promotedSpeakerIdentity.value,
     hideSelfView: selfViewHidden.value,
+  }),
+);
+watch(pictureInPictureProjection, (next) => {
+  const reconciled = reconcileCallTileProjectionState({
+    tiles: next.tiles,
+    pinnedTileKey: pinnedTileKey.value,
+    currentSeenRemoteScreenTrackKeys: pictureInPictureSeenRemoteScreenTrackKeys.value,
+    nextSeenRemoteScreenTrackKeys: next.seenRemoteScreenTrackKeys,
   });
+  if (
+    pictureInPictureSeenRemoteScreenTrackKeys.value !==
+    reconciled.seenRemoteScreenTrackKeys
+  ) {
+    pictureInPictureSeenRemoteScreenTrackKeys.value = reconciled.seenRemoteScreenTrackKeys;
+  }
+}, { immediate: true });
+const pictureInPictureTile = computed(() => {
   return selectCallPictureInPictureTile({
-    tiles: projection.tiles,
+    tiles: pictureInPictureProjection.value.tiles,
     pinnedTileKey: pinnedTileKey.value,
     activeSpeakerIdentities: activeSpeakerIdentities.value,
   });
 });
-const pictureInPictureSupported = computed(() =>
-  pictureInPictureSupport.value !== "none" && pictureInPictureTile.value !== null,
-);
+const pictureInPictureSupported = computed(() => {
+  if (!pictureInPictureTile.value) return false;
+  if (pictureInPictureSupport.value === "document") return true;
+  if (pictureInPictureSupport.value === "video") {
+    return mountedPictureInPictureVideo.value !== null;
+  }
+  return false;
+});
+
+function refreshMountedPictureInPictureVideo(): void {
+  if (pictureInPictureSupport.value !== "video") {
+    mountedPictureInPictureVideo.value = null;
+    return;
+  }
+  const tile = pictureInPictureTile.value;
+  mountedPictureInPictureVideo.value = tile
+    ? findCallPictureInPictureVideo(surfaceRef.value, tile.key)
+    : null;
+}
+
+function observeMountedPictureInPictureVideos(root: HTMLElement | null): void {
+  if (root === observedPictureInPictureRoot) return;
+  disconnectMountedPictureInPictureVideoObserver();
+  observedPictureInPictureRoot = root;
+  if (!root || typeof MutationObserver === "undefined") return;
+  pictureInPictureVideoObserver = new MutationObserver(() => {
+    refreshMountedPictureInPictureVideo();
+  });
+  pictureInPictureVideoObserver.observe(root, { childList: true, subtree: true });
+}
+
+function disconnectMountedPictureInPictureVideoObserver(): void {
+  pictureInPictureVideoObserver?.disconnect();
+  pictureInPictureVideoObserver = null;
+  observedPictureInPictureRoot = null;
+}
+
+watch([pictureInPictureTile, pictureInPictureSupport, isOpen], async () => {
+  await nextTick();
+  observeMountedPictureInPictureVideos(isOpen.value ? surfaceRef.value : null);
+  refreshMountedPictureInPictureVideo();
+}, { immediate: true, flush: "post" });
+
+watch(isOpen, (open) => {
+  if (!open && hasLocalPictureInPictureHandle()) {
+    void closePictureInPictureSafely();
+  }
+});
 
 const {
   rows: rosterRows,
@@ -369,7 +437,7 @@ function onFullscreenChange(): void {
 }
 
 async function onHangup(): Promise<void> {
-  await closePictureInPicture();
+  await closePictureInPictureSafely();
   await hangupActiveCall();
   // After hangup the surface unmounts on its own (phase flips out of
   // "active"); flip the mode back so the next call defaults to split
@@ -385,37 +453,53 @@ function parkPictureInPicturePanel(): void {
 }
 
 function onDocumentPictureInPictureClose(): void {
-  documentPictureInPictureWindow = null;
-  parkPictureInPicturePanel();
-  $callPictureInPictureActive.set(false);
-  $callPictureInPictureMode.set(null);
+  resetLocalPictureInPictureState();
 }
 
 function onVideoPictureInPictureClose(): void {
+  resetLocalPictureInPictureState();
+}
+
+function hasLocalPictureInPictureHandle(): boolean {
+  return documentPictureInPictureWindow !== null || videoPictureInPictureElement !== null;
+}
+
+function resetLocalPictureInPictureState(): void {
   cleanupVideoPictureInPictureListeners?.();
   cleanupVideoPictureInPictureListeners = null;
+  documentPictureInPictureWindow = null;
   videoPictureInPictureElement = null;
   $callPictureInPictureActive.set(false);
   $callPictureInPictureMode.set(null);
+  parkPictureInPicturePanel();
 }
 
 async function closePictureInPicture(): Promise<void> {
   if (documentPictureInPictureWindow) {
     const pipWindow = documentPictureInPictureWindow;
     documentPictureInPictureWindow = null;
-    pipWindow.close();
-    parkPictureInPicturePanel();
-    $callPictureInPictureActive.set(false);
-    $callPictureInPictureMode.set(null);
+    try {
+      pipWindow.close();
+    } finally {
+      resetLocalPictureInPictureState();
+    }
     return;
   }
   await exitVideoCallPictureInPicture(videoPictureInPictureElement);
-  onVideoPictureInPictureClose();
+  resetLocalPictureInPictureState();
+}
+
+async function closePictureInPictureSafely(): Promise<void> {
+  try {
+    await closePictureInPicture();
+  } catch {
+    resetLocalPictureInPictureState();
+  }
 }
 
 async function togglePictureInPicture(): Promise<void> {
   if (pictureInPictureActive.value) {
-    await closePictureInPicture();
+    await closePictureInPictureSafely();
     return;
   }
   const tile = pictureInPictureTile.value;
@@ -428,7 +512,8 @@ async function togglePictureInPicture(): Promise<void> {
     pipWindow.addEventListener("pagehide", onDocumentPictureInPictureClose, { once: true });
     return;
   }
-  const video = findCallPictureInPictureVideo(surfaceRef.value, tile.key);
+  const video = mountedPictureInPictureVideo.value
+    ?? findCallPictureInPictureVideo(surfaceRef.value, tile.key);
   if (!video) return;
   await enterVideoCallPictureInPicture(video);
   videoPictureInPictureElement = video;
@@ -538,16 +623,12 @@ onBeforeUnmount(() => {
     reactionExpiryTimer = null;
   }
   clearInCallReactions();
-  if (documentPictureInPictureWindow) {
-    documentPictureInPictureWindow.close();
-    documentPictureInPictureWindow = null;
+  disconnectMountedPictureInPictureVideoObserver();
+  try {
+    documentPictureInPictureWindow?.close();
+  } finally {
+    resetLocalPictureInPictureState();
   }
-  cleanupVideoPictureInPictureListeners?.();
-  cleanupVideoPictureInPictureListeners = null;
-  videoPictureInPictureElement = null;
-  $callPictureInPictureActive.set(false);
-  $callPictureInPictureMode.set(null);
-  parkPictureInPicturePanel();
   if (typeof window !== "undefined") {
     window.removeEventListener("keydown", onKeydown, true);
   }
