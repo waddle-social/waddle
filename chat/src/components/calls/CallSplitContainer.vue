@@ -232,6 +232,7 @@ async function onHangup(): Promise<void> {
           :mic-enabled="micEnabled"
           :active-speaker-identities="activeSpeakerIdentities"
           :promoted-speaker-identity="promotedSpeakerIdentity"
+          @open-participants="enterExpandedWithDock"
         />
       </div>
       <footer class="call-split__footer">

@@ -29,6 +29,7 @@ import {
   $callDockOpen,
   $callDockTab,
   closeCallDock,
+  openCallParticipants,
   setCallDockTab,
   toggleCallChat,
   toggleCallParticipants,
@@ -324,6 +325,7 @@ onBeforeUnmount(() => {
           :mic-enabled="micEnabled"
           :active-speaker-identities="activeSpeakerIdentities"
           :promoted-speaker-identity="promotedSpeakerIdentity"
+          @open-participants="openCallParticipants"
         />
       </div>
       <CallDock

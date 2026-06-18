@@ -53,6 +53,16 @@ export function toggleCallParticipants(): void {
   toggleCallDockTab("participants");
 }
 
+/**
+ * Open the dock on the Participants tab — unlike {@link toggleCallParticipants}
+ * this never closes an already-open dock. Used by the Stage "+N more" Overflow
+ * tile, whose intent is always to reveal the roster.
+ */
+export function openCallParticipants(): void {
+  setCallDockTab("participants");
+  openCallDock();
+}
+
 export function toggleCallChat(): void {
   toggleCallDockTab("chat");
 }

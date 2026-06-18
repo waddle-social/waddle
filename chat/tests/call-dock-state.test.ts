@@ -4,6 +4,7 @@ import {
   $callDockTab,
   closeCallDock,
   openCallDock,
+  openCallParticipants,
   setCallDockTab,
   toggleCallChat,
   toggleCallParticipants,
@@ -76,6 +77,25 @@ describe("call dock tab", () => {
 
     toggleCallParticipants();
     expect($callDockOpen.get()).toBe(false);
+  });
+
+  test("openCallParticipants opens the Participants tab and never closes (unlike toggle)", () => {
+    // From closed: opens straight to Participants.
+    openCallParticipants();
+    expect($callDockOpen.get()).toBe(true);
+    expect($callDockTab.get()).toBe("participants");
+
+    // Already open on Participants: stays open — the overflow tile must open,
+    // not toggle the dock shut.
+    openCallParticipants();
+    expect($callDockOpen.get()).toBe(true);
+    expect($callDockTab.get()).toBe("participants");
+
+    // Open on Chat: switches to Participants and keeps the dock open.
+    setCallDockTab("chat");
+    openCallParticipants();
+    expect($callDockOpen.get()).toBe(true);
+    expect($callDockTab.get()).toBe("participants");
   });
 
   test("resets to the participants tab when the call ends", () => {
