@@ -432,4 +432,14 @@ onBeforeUnmount(() => {
 .call-expanded__chat-label {
   padding: 0.625rem 1rem 0;
 }
+
+/* On narrow viewports the dock becomes a full-width bottom panel (see
+ * CallDock's own ≤760px rule). Match that here by stacking the stage above
+ * it, so the grid stays visible instead of being squeezed beside a
+ * 100%-wide dock in a row layout. */
+@media (max-width: 760px) {
+  .call-expanded__main {
+    flex-direction: column;
+  }
+}
 </style>

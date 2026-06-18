@@ -26,6 +26,10 @@ describe("CallDock", () => {
     expect(html).toContain('role="tablist"');
     expect(html).toContain('role="tab"');
     expect(html).toContain('aria-selected="true"');
+    // The tab and its panel are associated both ways for screen readers.
+    expect(html).toContain('id="call-dock-tab-participants"');
+    expect(html).toContain('role="tabpanel"');
+    expect(html).toContain('aria-labelledby="call-dock-tab-participants"');
     expect(html).toContain("Participants");
     // The roster panel is embedded for real (not stubbed).
     expect(html).toContain("You");

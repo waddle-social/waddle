@@ -127,7 +127,49 @@ describe("CallParticipantsPanel", () => {
       globalThis.HTMLInputElement = originalHTMLInputElement;
     }
   });
+
+  test("preserves an in-flight slider echo across a non-volume roster re-render", async () => {
+    const originalHTMLInputElement = globalThis.HTMLInputElement;
+    globalThis.HTMLInputElement = TestInputElement as typeof HTMLInputElement;
+    try {
+      const setup = await loadParticipantsPanelSetup();
+      const emitted: number[] = [];
+      const bindings = setup({ rows: [] }, {
+        expose: () => undefined,
+        emit: (event: string, _row?: CallVolumeMixerRow, level?: number) => {
+          if (event === "setVolume" && level !== undefined) emitted.push(level);
+        },
+      });
+
+      const row = mixerRow({ key: "k", level: 0.5 });
+      // Drag to 98% from the 0.5 prop level → echo "k" = 0.98.
+      bindings.onInput(row, inputEvent("98"));
+      // A speaking/mic toggle rebuilds the roster while the volume prop is
+      // unchanged (still 0.5). The echo must survive that rebuild.
+      bindings.syncLastEmittedLevels([rosterRow([mixerRow({ key: "k", level: 0.5 })])]);
+      // From the preserved 0.98 echo, 99% snaps UP to the 100% detent (1);
+      // from the stale prop 0.5 it would have stopped at 0.99.
+      bindings.onInput(row, inputEvent("99"));
+
+      expect(emitted).toEqual([0.98, 1]);
+    } finally {
+      globalThis.HTMLInputElement = originalHTMLInputElement;
+    }
+  });
 });
+
+function rosterRow(volumeRows: CallVolumeMixerRow[]): CallRosterRow {
+  return {
+    key: "row",
+    identity: "x@waddle.test/web",
+    label: "x",
+    isSelf: false,
+    micOn: true,
+    cameraOn: false,
+    speaking: true,
+    volumeRows,
+  };
+}
 
 function mixerRow(overrides: Partial<CallVolumeMixerRow>): CallVolumeMixerRow {
   return {

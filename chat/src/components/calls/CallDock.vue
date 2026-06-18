@@ -30,6 +30,7 @@ const participantCount = computed(() => props.rows.length);
     <header class="call-dock__header">
       <div class="call-dock__tabs" role="tablist" aria-label="Dock">
         <button
+          id="call-dock-tab-participants"
           type="button"
           role="tab"
           class="call-dock__tab"
@@ -49,7 +50,12 @@ const participantCount = computed(() => props.rows.length);
         <X class="w-4 h-4" />
       </button>
     </header>
-    <div id="call-dock-participants" class="call-dock__body" role="tabpanel">
+    <div
+      id="call-dock-participants"
+      class="call-dock__body"
+      role="tabpanel"
+      aria-labelledby="call-dock-tab-participants"
+    >
       <CallParticipantsPanel
         :rows="rows"
         @set-volume="(row, level) => emit('setVolume', row, level)"

@@ -226,6 +226,31 @@ describe("useCallRoster controller", () => {
       captured.restore();
     }
   });
+
+  test("excludes the local identity from the remote rows once the live list seeds self", () => {
+    const scope = effectScope();
+    try {
+      activateMucCall("c1");
+      // The `connected` handler seeds the live list with our own join
+      // identity alongside peers. The roster must dedupe self against it —
+      // a stale (non-reactive) local identity would list the local user
+      // twice. join.identity here is "me@waddle.test/browser".
+      setLiveCallParticipants("room@muc.waddle.test", [
+        "me@waddle.test/browser",
+        "alice@waddle.test/web",
+      ]);
+
+      let controller!: ReturnType<typeof useCallRoster>;
+      scope.run(() => {
+        controller = useCallRoster(computed(() => "room@muc.waddle.test"));
+      });
+
+      expect(controller.rows.value.map((row) => row.label)).toEqual(["You", "alice"]);
+      expect(controller.rows.value.filter((row) => row.isSelf)).toHaveLength(1);
+    } finally {
+      scope.stop();
+    }
+  });
 });
 
 function captureEngineVolumeCalls() {

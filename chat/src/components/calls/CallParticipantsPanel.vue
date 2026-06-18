@@ -28,10 +28,18 @@ const emit = defineEmits<{
 // tick behind the controller's apply path).
 const lastEmittedLevels = ref<Record<string, number>>({});
 
+// Roster rows re-emit on EVERY attendee change — mic/cam toggles and
+// active-speaker flips, not just volume — so a wholesale rebuild here would
+// clobber an in-flight slider echo mid-drag and break the detent direction.
+// Keep any value we've already emitted for a still-present slider; only adopt
+// the prop level for sliders we haven't touched, and drop vanished keys.
 function syncLastEmittedLevels(rows: readonly CallRosterRow[]): void {
+  const previous = lastEmittedLevels.value;
   const next: Record<string, number> = {};
   for (const row of rows) {
-    for (const volume of row.volumeRows) next[volume.key] = volume.level;
+    for (const volume of row.volumeRows) {
+      next[volume.key] = previous[volume.key] ?? volume.level;
+    }
   }
   lastEmittedLevels.value = next;
 }

@@ -30,10 +30,19 @@ export function useCallRoster(
   const liveParticipants = useStore($mucCallLiveParticipants);
   const micEnabled = useStore($callMicEnabled);
   const camEnabled = useStore($callCamEnabled);
-  const { remoteTracks, engine, activeSpeakerIdentities } = useCallEngine();
+  const { remoteTracks, activeSpeakerIdentities } = useCallEngine();
   const volumeMixer = useCallVolumeMixer(normalizedRoomJid);
 
-  const localIdentity = computed(() => engine.localIdentity);
+  // Reactive local identity from the active call's LiveKit join, NOT the
+  // engine's non-reactive `localIdentity` getter. A `computed` over the
+  // getter has no reactive dependency, so it caches the pre-connect `null`
+  // and never updates; once the `connected` handler seeds the live list
+  // with our own identity, a stale `null` here would stop `buildCallRoster`
+  // deduping self — showing the local user twice with a self volume row.
+  // `join.identity` is the same identity LiveKit mints `localIdentity` from.
+  const localIdentity = computed(() =>
+    state.value.phase === "active" ? state.value.join.identity : null,
+  );
 
   const remoteParticipantIdentities = computed(() =>
     remoteParticipantIdentitiesForCall({
