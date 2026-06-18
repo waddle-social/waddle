@@ -1,6 +1,6 @@
 import type { CallTileModel } from "./call-tiles";
 
-export type StageOverflow = {
+type StageOverflow = {
   /** Distinct participants who have no tile on the Stage. */
   hiddenCount: number;
 };
