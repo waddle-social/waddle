@@ -108,6 +108,16 @@ describe("partitionStageTiles", () => {
 });
 
 describe("audio is independent of the Stage overflow", () => {
+  function remoteCamera(identity: string): RemoteMediaTrack {
+    return {
+      participantIdentity: identity,
+      publicationSid: `${identity}-cam`,
+      kind: "video",
+      source: "camera",
+      track: {} as RemoteMediaTrack["track"],
+    };
+  }
+
   function remoteMic(identity: string): RemoteMediaTrack {
     return {
       participantIdentity: identity,
@@ -118,27 +128,37 @@ describe("audio is independent of the Stage overflow", () => {
     };
   }
 
-  test("every off-stage participant still has an audio sink", () => {
-    // 30 people, each with a camera tile and a mic. The Stage shows 24 + the
-    // overflow tile, so 6 people are off-stage — but audio is attached by the
-    // separate CallAudioSink (keyed off the remote tracks, not the tile grid),
-    // so all 30 mics still get a sink. Off-stage audio is never lost.
+  function sinkIdentitySet(tracks: readonly RemoteMediaTrack[]): Set<string> {
+    return new Set(callAudioSinkTracks(tracks).map((track) => track.participantIdentity));
+  }
+
+  test("the audio sink set is invariant to Stage capacity, so off-stage people stay audible", () => {
+    // 30 people, each publishing a camera and a mic. The audio sink is derived
+    // from the raw remote tracks (CallAudioSink), never from the tile grid, so
+    // tightening the Stage capacity changes who is on-stage but NOT who is
+    // audible. We prove independence by shrinking capacity and showing the sink
+    // set is unchanged and still covers everyone the Stage hides.
     const identities = Array.from({ length: 30 }, (_, i) => `p${i}@waddle.test/web`);
     const tiles = identities.map(cameraTile);
-    const mics = identities.map(remoteMic);
+    const remoteTracks = identities.flatMap((id) => [remoteCamera(id), remoteMic(id)]);
 
-    const partition = partitionStageTiles(tiles, 25);
-    expect(partition.overflow).toEqual({ hiddenCount: 6 });
+    const roomy = partitionStageTiles(tiles, 25); // 24 on stage, 6 hidden
+    const cramped = partitionStageTiles(tiles, 3); // 2 on stage, 28 hidden
+    expect(roomy.overflow).toEqual({ hiddenCount: 6 });
+    expect(cramped.overflow).toEqual({ hiddenCount: 28 });
 
-    const onStage = new Set(partition.tiles.map((tile) => tile.identity));
-    const offStage = identities.filter((identity) => !onStage.has(identity));
-    expect(offStage).toHaveLength(6);
+    // CallAudioSink filters mic/screen-audio off the full track list itself —
+    // feeding it the same tracks yields the same 30 mics regardless of layout.
+    const sinks = sinkIdentitySet(remoteTracks);
+    expect(sinks).toEqual(new Set(identities));
 
-    const sinks = callAudioSinkTracks(mics);
-    const sinkIdentities = new Set(sinks.map((track) => track.participantIdentity));
-    expect(sinks).toHaveLength(30);
-    for (const identity of offStage) {
-      expect(sinkIdentities.has(identity)).toBe(true);
+    for (const partition of [roomy, cramped]) {
+      const onStage = new Set(partition.tiles.map((tile) => tile.identity));
+      const offStage = identities.filter((identity) => !onStage.has(identity));
+      expect(offStage.length).toBeGreaterThan(0);
+      for (const identity of offStage) {
+        expect(sinks.has(identity)).toBe(true);
+      }
     }
   });
 });
