@@ -327,27 +327,32 @@ const gridStyle = computed(() => ({
   gap: var(--space-2xs);
   min-width: 0;
   min-height: 0;
-  border: none;
+  border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  background: var(--color-surface-raised, rgba(255, 255, 255, 0.06));
-  color: var(--color-text, inherit);
+  background: var(--muted);
+  color: var(--foreground);
   cursor: pointer;
   font: inherit;
 }
 
 .call-tile-grid__overflow:hover,
 .call-tile-grid__overflow:focus-visible {
-  background: var(--color-surface-raised-hover, rgba(255, 255, 255, 0.12));
+  background: color-mix(in oklab, var(--muted) 70%, var(--foreground) 12%);
+}
+
+.call-tile-grid__overflow:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
 }
 
 .call-tile-grid__overflow-count {
-  font-size: var(--font-size-xl, 1.5rem);
+  font-size: var(--text-display);
   font-weight: 600;
   line-height: 1;
 }
 
 .call-tile-grid__overflow-label {
-  font-size: var(--font-size-sm, 0.875rem);
+  font-size: var(--text-body);
   opacity: 0.8;
 }
 
