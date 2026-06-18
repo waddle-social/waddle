@@ -769,6 +769,43 @@ describe("call control bar restructure (#1020)", () => {
   });
 });
 
+describe("call control bar hide self-view (#1021)", () => {
+  test("offers a checkable Self-view item under More, checked while the self-view is visible", async () => {
+    const html = await renderCallControls({ selfViewHidden: false });
+    // A menuitemcheckbox with a stable label and aria-checked carrying state,
+    // matching the codebase's other in-menu binary toggles — so a screen reader
+    // announces the current state, not just the next action.
+    expect(html).toContain('role="menuitemcheckbox"');
+    expect(html).toContain("Self-view");
+    expect(html).toMatch(/role="menuitemcheckbox"[^>]*aria-checked="true"/);
+  });
+
+  test("unchecks the Self-view item once the self-view is hidden", async () => {
+    const html = await renderCallControls({ selfViewHidden: true });
+    expect(html).toContain("Self-view");
+    expect(html).toMatch(/role="menuitemcheckbox"[^>]*aria-checked="false"/);
+  });
+
+  test("keeps the checkable Self-view item in the roving-focus set with the other menu items", () => {
+    const source = readFileSync(
+      new URL("../src/components/calls/CallControls.vue", import.meta.url),
+      "utf8",
+    );
+    // The menu's keyboard navigation must collect both plain items and the
+    // checkbox item, or the toggle drops out of arrow-key focus order.
+    expect(source).toContain('[role="menuitemcheckbox"]');
+  });
+
+  test("wires the self-view item to the toggleSelfView emit", () => {
+    const source = readFileSync(
+      new URL("../src/components/calls/CallControls.vue", import.meta.url),
+      "utf8",
+    );
+    expect(source).toContain("toggleSelfView");
+    expect(source).toContain("selfViewHidden");
+  });
+});
+
 async function renderCallControls(overrides: Record<string, unknown>): Promise<string> {
   const component = await loadVueComponent("../src/components/calls/CallControls.vue");
   const props = {
@@ -782,6 +819,7 @@ async function renderCallControls(overrides: Record<string, unknown>): Promise<s
     chatOpen: false,
     chatUnread: 0,
     viewMode: "gallery",
+    selfViewHidden: false,
     ...overrides,
   };
   return renderToString(createSSRApp({ render: () => h(component, props) }));

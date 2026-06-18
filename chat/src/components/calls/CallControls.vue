@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import {
+  Check,
   LayoutGrid,
   Maximize2,
   MessageSquare,
@@ -10,6 +11,7 @@ import {
   MonitorUp,
   MoreHorizontal,
   PhoneOff,
+  ScanFace,
   Settings,
   SquareUser,
   Users,
@@ -49,6 +51,8 @@ const props = defineProps<{
   chatUnread: number;
   /** The chosen stage layout — drives the view switcher's pressed state. */
   viewMode: CallViewMode;
+  /** True while the local self-view tile is hidden from this client's stage. */
+  selfViewHidden: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -60,6 +64,7 @@ const emit = defineEmits<{
   toggleChat: [];
   openSettings: [];
   setViewMode: [mode: CallViewMode];
+  toggleSelfView: [];
   hangup: [];
 }>();
 
@@ -110,7 +115,11 @@ const moreMenuEl = ref<HTMLElement | null>(null);
 function menuItems(): HTMLElement[] {
   const root = moreMenuEl.value;
   if (!root) return [];
-  return Array.from(root.querySelectorAll<HTMLElement>('[role="menuitem"]'));
+  // Includes the checkbox item (Self-view) alongside the plain action items so
+  // every entry stays in the arrow-key roving-focus order.
+  return Array.from(
+    root.querySelectorAll<HTMLElement>('[role="menuitem"],[role="menuitemcheckbox"]'),
+  );
 }
 
 async function openMore(focusFirst: boolean): Promise<void> {
@@ -174,6 +183,13 @@ function selectSettings(): void {
   emit("openSettings");
   // Focus moves into the dialog that opens — don't yank it back to the trigger.
   closeMore(false);
+}
+
+function selectSelfView(): void {
+  emit("toggleSelfView");
+  // Toggling self-view leaves no new surface to receive focus, so return it to
+  // the trigger as the menu closes.
+  closeMore(true);
 }
 
 function onDocumentPointerDown(event: PointerEvent): void {
@@ -337,6 +353,17 @@ onBeforeUnmount(() => {
         aria-label="More options"
         @keydown="onMoreMenuKeydown"
       >
+        <button
+          type="button"
+          role="menuitemcheckbox"
+          :aria-checked="!selfViewHidden"
+          class="call-controls__more-item"
+          @click="selectSelfView"
+        >
+          <ScanFace class="w-4 h-4" />
+          <span>Self-view</span>
+          <Check v-if="!selfViewHidden" class="ml-auto w-4 h-4 text-primary" />
+        </button>
         <button
           type="button"
           role="menuitem"

@@ -8,6 +8,13 @@ export type ProjectCallTilesInput = BuildCallTilesInput & {
   viewMode?: CallViewMode;
   /** Identity the Speaker layout should auto-promote to the large tile. */
   promotedSpeakerIdentity?: string | null;
+  /**
+   * Drop the local participant's own self-view tile from the stage. Purely a
+   * local rendering choice — the camera keeps publishing to other participants.
+   * Removing the self tile before spotlight selection also means the local
+   * participant is never auto-promoted to the large Speaker tile while hidden.
+   */
+  hideSelfView?: boolean;
 };
 
 export type CallTileProjection = {
@@ -51,7 +58,13 @@ export function retainPinnedTileKey(
 }
 
 export function projectCallTiles(input: ProjectCallTilesInput): CallTileProjection {
-  const tiles = buildCallTiles(input);
+  const built = buildCallTiles(input);
+  // Hide self-view drops only the local *camera* tile. The local screen-share
+  // tile is also `isSelf` but must stay on stage — the user is still presenting
+  // it, and other participants keep seeing it.
+  const tiles = input.hideSelfView
+    ? built.filter((tile) => !(tile.isSelf && tile.source === "camera"))
+    : built;
   const remoteScreens = tiles.filter((tile) =>
     tile.source === "screen_share" && !tile.isSelf && tile.screenTrackKey !== null
   );

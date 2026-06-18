@@ -8,7 +8,12 @@ import { partitionStageTiles } from "@/lib/calls/stage-overflow";
 import type { CallTileModel } from "@/lib/calls/call-tiles";
 import { projectCallTiles, reconcileCallTileProjectionState } from "@/lib/calls/call-tile-projection";
 import { highlightedTileKeys } from "@/lib/calls/active-speakers";
-import { $callPinnedTileKey, $callViewMode, toggleCallPin } from "@/lib/calls/call-view-state";
+import {
+  $callPinnedTileKey,
+  $callSelfViewHidden,
+  $callViewMode,
+  toggleCallPin,
+} from "@/lib/calls/call-view-state";
 import CallTile from "./CallTile.vue";
 
 /**
@@ -69,6 +74,7 @@ const seenRemoteScreenTrackKeys = ref<ReadonlySet<string>>(new Set());
 // split⟷expanded surface switch that remounts this grid.
 const viewMode = useStore($callViewMode);
 const pinnedTileKey = useStore($callPinnedTileKey);
+const selfViewHidden = useStore($callSelfViewHidden);
 
 const projection = computed(() => {
   return projectCallTiles({
@@ -81,6 +87,7 @@ const projection = computed(() => {
     pinnedTileKey: pinnedTileKey.value,
     viewMode: viewMode.value,
     promotedSpeakerIdentity: props.promotedSpeakerIdentity ?? null,
+    hideSelfView: selfViewHidden.value,
   });
 });
 

@@ -21,6 +21,14 @@ export const $callViewMode = atom<CallViewMode>("gallery");
 /** The locally pinned tile key, or `null` when nothing is pinned. */
 export const $callPinnedTileKey = atom<string | null>(null);
 
+/**
+ * Whether the local participant has hidden their own self-view tile from the
+ * stage. Local-only and view-only: the outgoing camera keeps publishing — this
+ * just removes the self tile from this client's grid (see `projectCallTiles`),
+ * which also keeps the local participant off the large Speaker tile.
+ */
+export const $callSelfViewHidden = atom<boolean>(false);
+
 export function setCallViewMode(mode: CallViewMode): void {
   $callViewMode.set(mode);
 }
@@ -30,8 +38,17 @@ export function toggleCallPin(tileKey: string): void {
   $callPinnedTileKey.set($callPinnedTileKey.get() === tileKey ? null : tileKey);
 }
 
-/** Reset stage presentation to its per-call defaults: Gallery, nothing pinned. */
+/** Hide the self-view tile, or reveal it if it is already hidden. */
+export function toggleCallSelfViewHidden(): void {
+  $callSelfViewHidden.set(!$callSelfViewHidden.get());
+}
+
+/**
+ * Reset stage presentation to its per-call defaults: Gallery, nothing pinned,
+ * self-view visible.
+ */
 export function resetCallViewState(): void {
   $callViewMode.set("gallery");
   $callPinnedTileKey.set(null);
+  $callSelfViewHidden.set(false);
 }

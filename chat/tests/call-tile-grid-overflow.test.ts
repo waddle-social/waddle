@@ -1,7 +1,8 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { renderVueComponent } from "./helpers/render-vue-sfc";
 import type { RemoteMediaTrack } from "../src/lib/calls/engine";
+import { $callSelfViewHidden, resetCallViewState } from "../src/lib/calls/call-view-state";
 
 function gridSource(): string {
   return readFileSync(
@@ -64,6 +65,59 @@ describe("CallTileGrid overflow tile", () => {
     );
     expect(html).not.toContain("call-tile-grid__overflow");
   });
+});
+
+describe("CallTileGrid hide self-view (#1021)", () => {
+  afterEach(() => {
+    resetCallViewState();
+  });
+
+  test("keeps the local self-view tile on stage by default", async () => {
+    const html = await renderVueComponent(
+      "../src/components/calls/CallTileGrid.vue",
+      {
+        remoteTracks: [remoteCamera("bob@waddle.test/web")],
+        localTracks: [],
+        localIdentity: "me@waddle.test/web",
+        micEnabled: true,
+      },
+      import.meta.url,
+    );
+    // The degenerate SSR 1×1 grid shows the first tile, which is the self tile.
+    expect(html).toContain("You");
+  });
+
+  test("drops the local self-view tile from the stage when self-view is hidden", async () => {
+    $callSelfViewHidden.set(true);
+    const html = await renderVueComponent(
+      "../src/components/calls/CallTileGrid.vue",
+      {
+        remoteTracks: [remoteCamera("bob@waddle.test/web")],
+        localTracks: [],
+        localIdentity: "me@waddle.test/web",
+        micEnabled: true,
+      },
+      import.meta.url,
+    );
+    expect(html).not.toContain("You");
+    expect(html).toContain("bob");
+  });
+});
+
+describe("surfaces wire the hide self-view control (#1021)", () => {
+  function read(rel: string): string {
+    return readFileSync(new URL(rel, import.meta.url), "utf8");
+  }
+
+  for (const surface of ["CallSplitContainer", "CallExpandedSurface"] as const) {
+    test(`${surface} binds the self-view state and toggle to CallControls`, () => {
+      const source = read(`../src/components/calls/${surface}.vue`);
+      expect(source).toContain("$callSelfViewHidden");
+      expect(source).toContain("toggleCallSelfViewHidden");
+      expect(source).toContain(":self-view-hidden=");
+      expect(source).toContain('@toggle-self-view="toggleCallSelfViewHidden"');
+    });
+  }
 });
 
 describe("surfaces wire the overflow tile to the Participants panel", () => {

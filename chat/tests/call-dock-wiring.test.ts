@@ -24,6 +24,7 @@ describe("CallControls participants toggle", () => {
         chatOpen: false,
         chatUnread: 0,
         viewMode: "gallery",
+        selfViewHidden: false,
       },
       import.meta.url,
     );
