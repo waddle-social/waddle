@@ -4,6 +4,7 @@ import { useStore } from "@nanostores/vue";
 import type { LocalMediaTrack, RemoteMediaTrack } from "@/lib/calls/engine";
 import { TileAttachments, type TileAttachable } from "@/lib/calls/tile-attach";
 import { selectGridLayout } from "@/lib/calls/grid-layout";
+import { partitionStageTiles } from "@/lib/calls/stage-overflow";
 import type { CallTileModel } from "@/lib/calls/call-tiles";
 import { projectCallTiles, reconcileCallTileProjectionState } from "@/lib/calls/call-tile-projection";
 import { highlightedTileKeys } from "@/lib/calls/active-speakers";
@@ -55,6 +56,12 @@ const props = defineProps<{
   activeSpeakerIdentities?: ReadonlySet<string>;
   /** Participant the Speaker layout auto-promotes to the large tile. */
   promotedSpeakerIdentity?: string | null;
+}>();
+
+const emit = defineEmits<{
+  /** The "+N more" Overflow tile was activated; the surface opens the
+   *  Participants panel (Split bumps to Expanded first). */
+  openParticipants: [];
 }>();
 
 const seenRemoteScreenTrackKeys = ref<ReadonlySet<string>>(new Set());
@@ -173,13 +180,21 @@ const speakingTileKeys = computed<ReadonlySet<string>>(() =>
   highlightedTileKeys(tiles.value, props.activeSpeakerIdentities ?? EMPTY_ACTIVE_SPEAKERS),
 );
 
-const visibleTiles = computed<Tile[]>(() => {
-  // When the participant count exceeds the layout's capacity (e.g.
-  // 30 participants in a 5×5), we clip to the first `maxTiles`. The
-  // "+N more" affordance lives in a future pagination pass — for
-  // now we show as many as the layout supports.
-  return tiles.value.slice(0, layout.value.maxTiles);
-});
+// When the tile count exceeds the layout's capacity, the last cell becomes a
+// "+N more" Overflow tile instead of silently dropping people. `+N` counts the
+// participants who have no tile on the Stage; audio for them stays subscribed
+// via the separate CallAudioSink, and their unrendered video auto-pauses under
+// `adaptiveStream`/`dynacast`. The grid stays structured so true Gallery
+// pagination can replace the single overflow cell later.
+const stagePartition = computed(() =>
+  partitionStageTiles(tiles.value, layout.value.maxTiles),
+);
+const visibleTiles = computed<Tile[]>(() => stagePartition.value.tiles);
+const overflow = computed(() => stagePartition.value.overflow);
+
+function activateOverflow(): void {
+  emit("openParticipants");
+}
 
 const gridStyle = computed(() => ({
   gridTemplateColumns: `repeat(${layout.value.cols}, minmax(0, 1fr))`,
@@ -248,6 +263,16 @@ const gridStyle = computed(() => ({
         :attach="attach"
         @activate="toggleFocus(tile)"
       />
+      <button
+        v-if="overflow"
+        type="button"
+        class="call-tile-grid__overflow"
+        :aria-label="`Show ${overflow.hiddenCount} more ${overflow.hiddenCount === 1 ? 'participant' : 'participants'}`"
+        @click="activateOverflow"
+      >
+        <span class="call-tile-grid__overflow-count">+{{ overflow.hiddenCount }}</span>
+        <span class="call-tile-grid__overflow-label">more</span>
+      </button>
     </div>
   </div>
 </template>
@@ -289,6 +314,41 @@ const gridStyle = computed(() => ({
   flex-shrink: 0;
   padding: 0 var(--space-xs) var(--space-xs);
   max-height: 6.5rem;
+}
+
+/* The "+N more" Overflow tile fills its grid cell like any tile, but
+ * is an activatable button (opens the Participants panel) rather than a
+ * video surface. */
+.call-tile-grid__overflow {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2xs);
+  min-width: 0;
+  min-height: 0;
+  border: none;
+  border-radius: var(--radius-md);
+  background: var(--color-surface-raised, rgba(255, 255, 255, 0.06));
+  color: var(--color-text, inherit);
+  cursor: pointer;
+  font: inherit;
+}
+
+.call-tile-grid__overflow:hover,
+.call-tile-grid__overflow:focus-visible {
+  background: var(--color-surface-raised-hover, rgba(255, 255, 255, 0.12));
+}
+
+.call-tile-grid__overflow-count {
+  font-size: var(--font-size-xl, 1.5rem);
+  font-weight: 600;
+  line-height: 1;
+}
+
+.call-tile-grid__overflow-label {
+  font-size: var(--font-size-sm, 0.875rem);
+  opacity: 0.8;
 }
 
 /* The `.call-tile--focused` and `.call-tile--thumb` variants are

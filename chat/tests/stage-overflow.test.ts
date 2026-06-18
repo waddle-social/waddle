@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import type { CallTileModel } from "../src/lib/calls/call-tiles";
 import { partitionStageTiles } from "../src/lib/calls/stage-overflow";
+import { callAudioSinkTracks } from "../src/lib/calls/call-audio-sink";
+import type { RemoteMediaTrack } from "../src/lib/calls/engine";
 
 /**
  * Build a camera tile for `identity`. Only the fields the overflow
@@ -102,5 +104,41 @@ describe("partitionStageTiles", () => {
     const partition = partitionStageTiles(tiles, 2.9);
     expect(partition.tiles).toEqual(tiles.slice(0, 1));
     expect(partition.overflow).toEqual({ hiddenCount: 4 });
+  });
+});
+
+describe("audio is independent of the Stage overflow", () => {
+  function remoteMic(identity: string): RemoteMediaTrack {
+    return {
+      participantIdentity: identity,
+      publicationSid: `${identity}-mic`,
+      kind: "audio",
+      source: "microphone",
+      track: {} as RemoteMediaTrack["track"],
+    };
+  }
+
+  test("every off-stage participant still has an audio sink", () => {
+    // 30 people, each with a camera tile and a mic. The Stage shows 24 + the
+    // overflow tile, so 6 people are off-stage — but audio is attached by the
+    // separate CallAudioSink (keyed off the remote tracks, not the tile grid),
+    // so all 30 mics still get a sink. Off-stage audio is never lost.
+    const identities = Array.from({ length: 30 }, (_, i) => `p${i}@waddle.test/web`);
+    const tiles = identities.map(cameraTile);
+    const mics = identities.map(remoteMic);
+
+    const partition = partitionStageTiles(tiles, 25);
+    expect(partition.overflow).toEqual({ hiddenCount: 6 });
+
+    const onStage = new Set(partition.tiles.map((tile) => tile.identity));
+    const offStage = identities.filter((identity) => !onStage.has(identity));
+    expect(offStage).toHaveLength(6);
+
+    const sinks = callAudioSinkTracks(mics);
+    const sinkIdentities = new Set(sinks.map((track) => track.participantIdentity));
+    expect(sinks).toHaveLength(30);
+    for (const identity of offStage) {
+      expect(sinkIdentities.has(identity)).toBe(true);
+    }
   });
 });
