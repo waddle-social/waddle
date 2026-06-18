@@ -1,0 +1,380 @@
+[
+  {
+    "id": "sg1-serpents-lair-oneill-001",
+    "series": "Stargate SG-1",
+    "episode": "The Serpent's Lair",
+    "role": "Col. O'Neill",
+    "text": "Nothing comes to mind, let's do it.",
+    "source_name": "Wikiquote",
+    "source_url": "https://en.wikiquote.org/wiki/Stargate_SG-1"
+  },
+  {
+    "id": "sg1-serpents-lair-tealc-001",
+    "series": "Stargate SG-1",
+    "episode": "The Serpent's Lair",
+    "role": "Teal'c",
+    "text": "Not to my knowledge.",
+    "source_name": "Wikiquote",
+    "source_url": "https://en.wikiquote.org/wiki/Stargate_SG-1"
+  },
+  {
+    "id": "sg1-redemption-oneill-001",
+    "series": "Stargate SG-1",
+    "episode": "Redemption",
+    "role": "Col. O'Neill",
+    "text": "Over my rotting corpse, Sir.",
+    "source_name": "Wikiquote",
+    "source_url": "https://en.wikiquote.org/wiki/Stargate_SG-1"
+  },
+  {
+    "id": "sg1-redemption-oneill-002",
+    "series": "Stargate SG-1",
+    "episode": "Redemption",
+    "role": "Col. O'Neill",
+    "text": "I'm sorry, did I say that out loud?",
+    "source_name": "Wikiquote",
+    "source_url": "https://en.wikiquote.org/wiki/Stargate_SG-1"
+  },
+  {
+    "id": "sg1-flesh-and-blood-carter-001",
+    "series": "Stargate SG-1",
+    "episode": "Flesh and Blood",
+    "role": "Lt. Colonel Carter",
+    "text": "Oh, boy.",
+    "source_name": "Wikiquote",
+    "source_url": "https://en.wikiquote.org/wiki/Stargate_SG-1"
+  },
+  {
+    "id": "atlantis-doppelganger-sheppard-001",
+    "series": "Stargate Atlantis",
+    "episode": "Doppelganger",
+    "role": "Sheppard",
+    "text": "Did I have a goatee?",
+    "source_name": "Wikiquote",
+    "source_url": "https://en.wikiquote.org/wiki/Stargate_Atlantis"
+  },
+  {
+    "id": "atlantis-doppelganger-sheppard-002",
+    "series": "Stargate Atlantis",
+    "episode": "Doppelganger",
+    "role": "Sheppard",
+    "text": "I hate clowns.",
+    "source_name": "Wikiquote",
+    "source_url": "https://en.wikiquote.org/wiki/Stargate_Atlantis"
+  },
+  {
+    "id": "atlantis-doppelganger-rodney-001",
+    "series": "Stargate Atlantis",
+    "episode": "Doppelganger",
+    "role": "Rodney",
+    "text": "Then I was eaten by a whale.",
+    "source_name": "Wikiquote",
+    "source_url": "https://en.wikiquote.org/wiki/Stargate_Atlantis"
+  },
+  {
+    "id": "atlantis-mckay-001",
+    "series": "Stargate Atlantis",
+    "episode": "The Siege",
+    "role": "Dr. Rodney McKay",
+    "text": "Who told you that?",
+    "source_name": "MovieMistakes",
+    "source_url": "https://www.moviemistakes.com/tv4411/quotes"
+  },
+  {
+    "id": "atlantis-mckay-002",
+    "series": "Stargate Atlantis",
+    "episode": "The Hive",
+    "role": "Dr. Rodney McKay",
+    "text": "So... just to confirm, we're all still... definitely not dead.",
+    "source_name": "MovieMistakes",
+    "source_url": "https://www.moviemistakes.com/tv4411/quotes"
+  },
+  {
+    "id": "atlantis-beckett-001",
+    "series": "Stargate Atlantis",
+    "episode": "The Siege",
+    "role": "Carson Beckett",
+    "text": "We're in another galaxy. How much more out can you get?",
+    "source_name": "MovieMistakes",
+    "source_url": "https://www.moviemistakes.com/tv4411/quotes"
+  },
+  {
+    "id": "universe-life-eli-001",
+    "series": "Stargate Universe",
+    "episode": "Life",
+    "role": "Eli",
+    "text": "All I've got is \"You are here.\"",
+    "source_name": "Wikiquote",
+    "source_url": "https://en.wikiquote.org/wiki/Stargate_Universe"
+  },
+  {
+    "id": "universe-justice-rush-001",
+    "series": "Stargate Universe",
+    "episode": "Justice",
+    "role": "Rush",
+    "text": "We'll never be done.",
+    "source_name": "Wikiquote",
+    "source_url": "https://en.wikiquote.org/wiki/Stargate_Universe"
+  },
+  {
+    "id": "universe-blockade-rush-001",
+    "series": "Stargate Universe",
+    "episode": "Blockade",
+    "role": "Rush",
+    "text": "Then we have a very big problem.",
+    "source_name": "Wikiquote",
+    "source_url": "https://en.wikiquote.org/wiki/Stargate_Universe"
+  },
+  {
+    "id": "universe-blockade-eli-001",
+    "series": "Stargate Universe",
+    "episode": "Blockade",
+    "role": "Eli",
+    "text": "No. No,no. We're totally screwed.",
+    "source_name": "Wikiquote",
+    "source_url": "https://en.wikiquote.org/wiki/Stargate_Universe"
+  },
+  {
+    "id": "universe-blockade-eli-002",
+    "series": "Stargate Universe",
+    "episode": "Blockade",
+    "role": "Eli",
+    "text": "Holy crap, we dialed Pittsburgh.",
+    "source_name": "Wikiquote",
+    "source_url": "https://en.wikiquote.org/wiki/Stargate_Universe"
+  },
+  {
+    "id": "universe-blockade-greer-001",
+    "series": "Stargate Universe",
+    "episode": "Blockade",
+    "role": "Greer",
+    "text": "Have you ever been to Pittsburgh?",
+    "source_name": "Wikiquote",
+    "source_url": "https://en.wikiquote.org/wiki/Stargate_Universe"
+  },
+  {
+    "id": "universe-blockade-rush-002",
+    "series": "Stargate Universe",
+    "episode": "Blockade",
+    "role": "Rush",
+    "text": "Oh, bloody hell! We're all doomed!",
+    "source_name": "Wikiquote",
+    "source_url": "https://en.wikiquote.org/wiki/Stargate_Universe"
+  },
+  {
+    "id": "sg1-children-of-the-gods-oneill-001",
+    "series": "Stargate SG-1",
+    "episode": "Children of the Gods",
+    "role": "Col. O'Neill",
+    "text": "Well, they could be blowing their noses right now.",
+    "source_name": "Wikiquote",
+    "source_url": "https://en.wikiquote.org/wiki/Stargate_SG-1"
+  },
+  {
+    "id": "sg1-serpents-lair-oneill-002",
+    "series": "Stargate SG-1",
+    "episode": "The Serpent's Lair",
+    "role": "Col. O'Neill",
+    "text": "Well, that's a bad plan.",
+    "source_name": "Wikiquote",
+    "source_url": "https://en.wikiquote.org/wiki/Stargate_SG-1"
+  },
+  {
+    "id": "sg1-thors-chariot-tealc-001",
+    "series": "Stargate SG-1",
+    "episode": "Thor's Chariot",
+    "role": "Teal'c",
+    "text": "Things will not calm down, Daniel Jackson. They will, in fact, calm up.",
+    "source_name": "Planet Claire Quotes",
+    "source_url": "https://planetclaire.tv/quotes/stargate-sg1/tealc/season-two-tealc/"
+  },
+  {
+    "id": "sg1-message-in-a-bottle-tealc-001",
+    "series": "Stargate SG-1",
+    "episode": "Message in a Bottle",
+    "role": "Teal'c",
+    "text": "Undomesticated equines could not remove me.",
+    "source_name": "Planet Claire Quotes",
+    "source_url": "https://planetclaire.tv/quotes/stargate-sg1/season-two-tealc/"
+  },
+  {
+    "id": "sg1-small-victories-oneill-001",
+    "series": "Stargate SG-1",
+    "episode": "Small Victories",
+    "role": "Col. O'Neill",
+    "text": "Again. This should not get old, General.",
+    "source_name": "Wikiquote",
+    "source_url": "https://en.wikiquote.org/wiki/Stargate_SG-1"
+  },
+  {
+    "id": "sg1-enemies-oneill-001",
+    "series": "Stargate SG-1",
+    "episode": "Enemies",
+    "role": "Col. O'Neill",
+    "text": "Shoot first, send flowers later. It works.",
+    "source_name": "Wikiquote",
+    "source_url": "https://en.wikiquote.org/wiki/Stargate_SG-1"
+  },
+  {
+    "id": "sg1-fallen-oneill-001",
+    "series": "Stargate SG-1",
+    "episode": "Fallen",
+    "role": "Col. O'Neill",
+    "text": "No, but he plays one on TV.",
+    "source_name": "Wikiquote",
+    "source_url": "https://en.wikiquote.org/wiki/Stargate_SG-1"
+  },
+  {
+    "id": "sg1-camelot-jackson-001",
+    "series": "Stargate SG-1",
+    "episode": "Camelot",
+    "role": "Dr. Jackson",
+    "text": "Boy, my timing's off today...",
+    "source_name": "Wikiquote",
+    "source_url": "https://en.wikiquote.org/wiki/Stargate_SG-1"
+  },
+  {
+    "id": "atlantis-doppelganger-sheppard-003",
+    "series": "Stargate Atlantis",
+    "episode": "Doppelganger",
+    "role": "Sheppard",
+    "text": "You know? This really isn't as strange as you made me believe.",
+    "source_name": "Wikiquote",
+    "source_url": "https://en.wikiquote.org/wiki/Stargate_Atlantis"
+  },
+  {
+    "id": "atlantis-this-mortal-coil-sheppard-001",
+    "series": "Stargate Atlantis",
+    "episode": "This Mortal Coil",
+    "role": "Sheppard",
+    "text": "Never underestimate the size of that man's ego.",
+    "source_name": "Wikiquote",
+    "source_url": "https://en.wikiquote.org/wiki/Stargate_Atlantis"
+  },
+  {
+    "id": "atlantis-this-mortal-coil-ronon-001",
+    "series": "Stargate Atlantis",
+    "episode": "This Mortal Coil",
+    "role": "Ronon",
+    "text": "A lot stronger than a shark.",
+    "source_name": "Wikiquote",
+    "source_url": "https://en.wikiquote.org/wiki/Stargate_Atlantis"
+  },
+  {
+    "id": "atlantis-harmony-sheppard-001",
+    "series": "Stargate Atlantis",
+    "episode": "Harmony",
+    "role": "Sheppard",
+    "text": "More searching, less complaining.",
+    "source_name": "Wikiquote",
+    "source_url": "https://en.wikiquote.org/wiki/Stargate_Atlantis"
+  },
+  {
+    "id": "atlantis-harmony-sheppard-002",
+    "series": "Stargate Atlantis",
+    "episode": "Harmony",
+    "role": "Sheppard",
+    "text": "Real good.",
+    "source_name": "Wikiquote",
+    "source_url": "https://en.wikiquote.org/wiki/Stargate_Atlantis"
+  },
+  {
+    "id": "atlantis-outcast-ronon-001",
+    "series": "Stargate Atlantis",
+    "episode": "Outcast",
+    "role": "Ronon",
+    "text": "Your planet's weird.",
+    "source_name": "Wikiquote",
+    "source_url": "https://en.wikiquote.org/wiki/Stargate_Atlantis"
+  },
+  {
+    "id": "atlantis-the-hive-mckay-001",
+    "series": "Stargate Atlantis",
+    "episode": "The Hive",
+    "role": "Dr. McKay",
+    "text": "Lock and load!",
+    "source_name": "Wikiquote",
+    "source_url": "https://en.wikiquote.org/wiki/Stargate_Atlantis"
+  },
+  {
+    "id": "atlantis-tracker-mckay-001",
+    "series": "Stargate Atlantis",
+    "episode": "Tracker",
+    "role": "McKay",
+    "text": "That is clearly a moustache!",
+    "source_name": "Wikiquote",
+    "source_url": "https://en.wikiquote.org/wiki/Stargate_Atlantis"
+  },
+  {
+    "id": "universe-air-eli-001",
+    "series": "Stargate Universe",
+    "episode": "Air, Part 1",
+    "role": "Eli Wallace",
+    "text": "It can't be worse than here, can it?",
+    "source_name": "Wikiquote",
+    "source_url": "https://en.wikiquote.org/wiki/Stargate_Universe"
+  },
+  {
+    "id": "universe-air-rush-001",
+    "series": "Stargate Universe",
+    "episode": "Air, Part 1",
+    "role": "Nicholas Rush",
+    "text": "Several billion light years from home.",
+    "source_name": "Wikiquote",
+    "source_url": "https://en.wikiquote.org/wiki/Stargate_Universe"
+  },
+  {
+    "id": "universe-air-rush-002",
+    "series": "Stargate Universe",
+    "episode": "Air, Part 1",
+    "role": "Nicholas Rush",
+    "text": "We have a way out.",
+    "source_name": "Wikiquote",
+    "source_url": "https://en.wikiquote.org/wiki/Stargate_Universe"
+  },
+  {
+    "id": "universe-pathogen-greer-001",
+    "series": "Stargate Universe",
+    "episode": "Pathogen",
+    "role": "Greer",
+    "text": "You were saying?",
+    "source_name": "Wikiquote",
+    "source_url": "https://en.wikiquote.org/wiki/Stargate_Universe"
+  },
+  {
+    "id": "universe-pathogen-eli-001",
+    "series": "Stargate Universe",
+    "episode": "Pathogen",
+    "role": "Eli Wallace",
+    "text": "The other side of the universe, Mom.",
+    "source_name": "Wikiquote",
+    "source_url": "https://en.wikiquote.org/wiki/Stargate_Universe"
+  },
+  {
+    "id": "universe-the-greater-good-greer-001",
+    "series": "Stargate Universe",
+    "episode": "The Greater Good",
+    "role": "Greer",
+    "text": "And got its ass kicked.",
+    "source_name": "Wikiquote",
+    "source_url": "https://en.wikiquote.org/wiki/Stargate_Universe"
+  },
+  {
+    "id": "universe-the-greater-good-rush-001",
+    "series": "Stargate Universe",
+    "episode": "The Greater Good",
+    "role": "Rush",
+    "text": "A message, perhaps, or a sign of intelligence from the beginning of time.",
+    "source_name": "Wikiquote",
+    "source_url": "https://en.wikiquote.org/wiki/Stargate_Universe"
+  },
+  {
+    "id": "universe-malice-eli-001",
+    "series": "Stargate Universe",
+    "episode": "Malice",
+    "role": "Eli",
+    "text": "Were you expecting \"Stairway to Heaven?\"",
+    "source_name": "Wikiquote",
+    "source_url": "https://en.wikiquote.org/wiki/Stargate_Universe"
+  }
+]

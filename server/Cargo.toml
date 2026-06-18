@@ -14,6 +14,7 @@ members = [
     "extensions/decision-polls",
     "extensions/github",
     "extensions/link-board",
+    "extensions/stargate-quotes",
 ]
 
 [workspace.package]

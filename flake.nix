@@ -313,7 +313,7 @@
             baseArgs
             // {
               CARGO_BUILD_TARGET = "wasm32-wasip2";
-              cargoExtraArgs = "--locked --package ai-chatbot --package decision-polls --package github --package link-board";
+              cargoExtraArgs = "--locked --package ai-chatbot --package decision-polls --package github --package link-board --package stargate-quotes";
               cargoCheckExtraArgs = "";
               cargoBuildExtraArgs = "";
               cargoTestExtraArgs = "";
@@ -359,7 +359,7 @@
               pname = "waddle-server-extension-modules";
               CARGO_BUILD_TARGET = "wasm32-wasip2";
               cargoArtifacts = extensionWasmArtifacts;
-              cargoExtraArgs = "--locked --package ai-chatbot --package decision-polls --package github --package link-board";
+              cargoExtraArgs = "--locked --package ai-chatbot --package decision-polls --package github --package link-board --package stargate-quotes";
             }
           );
           waddle-server-xmpp-unit-tests = craneLib.cargoTest (

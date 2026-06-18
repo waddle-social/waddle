@@ -6,6 +6,7 @@ wasmtime::component::bindgen!({
     with: {
         "wasi:io": wasmtime_wasi::p2::bindings::io,
         "wasi:clocks": wasmtime_wasi::p2::bindings::clocks,
+        "wasi:random": wasmtime_wasi::p2::bindings::random,
     },
 });
 
