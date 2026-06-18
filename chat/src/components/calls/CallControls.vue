@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import {
   LayoutGrid,
   Maximize2,
@@ -8,6 +8,7 @@ import {
   MicOff,
   Minimize2,
   MonitorUp,
+  MoreHorizontal,
   PhoneOff,
   Settings,
   SquareUser,
@@ -16,15 +17,17 @@ import {
   VideoOff,
 } from "lucide-vue-next";
 import type { CallViewMode } from "@/lib/calls/view-mode";
-import CallConnectionIndicator from "./CallConnectionIndicator.vue";
 
 /**
  * Shared control bar for the in-call surfaces (split + expanded).
- * Stateless: every callback is invoked on the parent, which owns the
- * shared `call-controls` store (mic/cam atoms + toggle functions).
+ * Holds every call action; the only local state is the open/closed flag
+ * of the More ▸ overflow menu — call state stays in the parent's
+ * `call-controls` store (mic/cam atoms + toggle functions).
  *
- * The old multi-mode chrome (dock-toggle, minimize, PIP) is gone —
- * the only mode switch left is split ↔ expanded.
+ * Status read-outs (connection quality, the live timer) live in the
+ * stage-header now, not here, so this bar is actions-only. Less-used
+ * actions (Settings, and future devices/diagnostics entries) live under
+ * the More ▸ overflow to keep the bar uncluttered.
  */
 const props = defineProps<{
   micEnabled: boolean;
@@ -90,6 +93,109 @@ function onViewKeydown(event: KeyboardEvent): void {
   const other = current.nextElementSibling ?? current.previousElementSibling;
   if (other instanceof HTMLElement) other.focus();
 }
+
+/**
+ * More ▸ overflow menu (WAI-ARIA menu-button pattern). The trigger
+ * carries `aria-haspopup="menu"` + `aria-expanded`; the menu is a
+ * `role="menu"` of `menuitem` buttons. Opening focuses the first item;
+ * Escape, an outside click, or selecting an item closes it. Selecting an
+ * item routes focus to whatever it opens (e.g. the settings dialog),
+ * while Escape returns focus to the trigger.
+ */
+const moreOpen = ref(false);
+const moreWrapEl = ref<HTMLElement | null>(null);
+const moreTriggerEl = ref<HTMLButtonElement | null>(null);
+const moreMenuEl = ref<HTMLElement | null>(null);
+
+function menuItems(): HTMLElement[] {
+  const root = moreMenuEl.value;
+  if (!root) return [];
+  return Array.from(root.querySelectorAll<HTMLElement>('[role="menuitem"]'));
+}
+
+async function openMore(focusFirst: boolean): Promise<void> {
+  moreOpen.value = true;
+  if (!focusFirst) return;
+  await nextTick();
+  menuItems()[0]?.focus();
+}
+
+function closeMore(returnFocus: boolean): void {
+  if (!moreOpen.value) return;
+  moreOpen.value = false;
+  if (returnFocus) moreTriggerEl.value?.focus();
+}
+
+function onMoreTriggerKeydown(event: KeyboardEvent): void {
+  if (event.key === "ArrowDown" || event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    void openMore(true);
+  } else if (event.key === "ArrowUp") {
+    event.preventDefault();
+    void openMore(true).then(() => menuItems().at(-1)?.focus());
+  } else if (event.key === "Escape") {
+    closeMore(true);
+  }
+}
+
+function onMoreMenuKeydown(event: KeyboardEvent): void {
+  const items = menuItems();
+  if (items.length === 0) return;
+  const index = items.indexOf(document.activeElement as HTMLElement);
+  switch (event.key) {
+    case "Escape":
+      event.preventDefault();
+      closeMore(true);
+      break;
+    case "Tab":
+      // Leaving the menu by Tab dismisses it without stealing focus.
+      closeMore(false);
+      break;
+    case "ArrowDown":
+      event.preventDefault();
+      items[(index + 1) % items.length]?.focus();
+      break;
+    case "ArrowUp":
+      event.preventDefault();
+      items[(index - 1 + items.length) % items.length]?.focus();
+      break;
+    case "Home":
+      event.preventDefault();
+      items[0]?.focus();
+      break;
+    case "End":
+      event.preventDefault();
+      items.at(-1)?.focus();
+      break;
+  }
+}
+
+function selectSettings(): void {
+  emit("openSettings");
+  // Focus moves into the dialog that opens — don't yank it back to the trigger.
+  closeMore(false);
+}
+
+function onDocumentPointerDown(event: PointerEvent): void {
+  const target = event.target as Node | null;
+  if (target && moreWrapEl.value?.contains(target)) return;
+  closeMore(false);
+}
+
+watch(moreOpen, (open) => {
+  if (typeof document === "undefined") return;
+  if (open) {
+    document.addEventListener("pointerdown", onDocumentPointerDown, true);
+  } else {
+    document.removeEventListener("pointerdown", onDocumentPointerDown, true);
+  }
+});
+
+onBeforeUnmount(() => {
+  if (typeof document !== "undefined") {
+    document.removeEventListener("pointerdown", onDocumentPointerDown, true);
+  }
+});
 </script>
 
 <template>
@@ -163,11 +269,6 @@ function onViewKeydown(event: KeyboardEvent): void {
       </button>
     </div>
 
-    <!-- Ambient self-connection quality. Self-contained/store-connected,
-         so it adds no props to this otherwise stateless bar. Shows quiet
-         measuring bars until the first quality sample arrives. -->
-    <CallConnectionIndicator />
-
     <span class="call-controls__divider" aria-hidden="true" />
 
     <button
@@ -214,14 +315,39 @@ function onViewKeydown(event: KeyboardEvent): void {
         aria-hidden="true"
       >{{ chatUnread }}</span>
     </button>
-    <button
-      type="button"
-      class="chat-icon-button chat-icon-button--md hover:bg-muted"
-      title="Call settings"
-      @click="emit('openSettings')"
-    >
-      <Settings class="w-4 h-4" />
-    </button>
+    <div ref="moreWrapEl" class="call-controls__more">
+      <button
+        ref="moreTriggerEl"
+        type="button"
+        class="chat-icon-button chat-icon-button--md hover:bg-muted"
+        :class="{ 'bg-muted text-foreground': moreOpen }"
+        aria-label="More options"
+        aria-haspopup="menu"
+        :aria-expanded="moreOpen"
+        @click="moreOpen ? closeMore(false) : openMore(true)"
+        @keydown="onMoreTriggerKeydown"
+      >
+        <MoreHorizontal class="w-4 h-4" />
+      </button>
+      <div
+        v-show="moreOpen"
+        ref="moreMenuEl"
+        class="call-controls__more-menu"
+        role="menu"
+        aria-label="More options"
+        @keydown="onMoreMenuKeydown"
+      >
+        <button
+          type="button"
+          role="menuitem"
+          class="call-controls__more-item"
+          @click="selectSettings"
+        >
+          <Settings class="w-4 h-4" />
+          <span>Call settings</span>
+        </button>
+      </div>
+    </div>
 
     <span class="call-controls__divider" aria-hidden="true" />
 
@@ -257,6 +383,42 @@ function onViewKeydown(event: KeyboardEvent): void {
   display: flex;
   align-items: center;
   gap: 2px;
+}
+
+/* More ▸ overflow. The menu floats above the bar (the bar sits at the
+ * bottom of both surfaces), anchored to the trigger. */
+.call-controls__more {
+  position: relative;
+  display: inline-flex;
+}
+
+.call-controls__more-menu {
+  position: absolute;
+  bottom: calc(100% + 0.375rem);
+  right: 0;
+  z-index: 10;
+  min-width: 12rem;
+  padding: var(--space-2xs);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--popover, var(--background));
+  box-shadow: var(--shadow-lg, 0 10px 30px rgb(0 0 0 / 0.18));
+}
+
+.call-controls__more-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.5rem 0.625rem;
+  border-radius: var(--radius-sm);
+  text-align: start;
+  color: var(--foreground);
+}
+
+.call-controls__more-item:hover,
+.call-controls__more-item:focus-visible {
+  background: var(--muted);
 }
 
 /* The participants toggle carries a live attendee count, so it widens

@@ -31,6 +31,7 @@ import { $callChatUnread } from "@/lib/calls/call-chat-unread";
 import { barePeerJid } from "@/lib/xmpp/jid";
 import { expectedRemoteIdentitiesForCallState } from "@/lib/calls/call-tiles";
 import CallTileGrid from "./CallTileGrid.vue";
+import CallStageHeader from "./CallStageHeader.vue";
 import CallControls from "./CallControls.vue";
 import CallSettingsDialog from "./CallSettingsDialog.vue";
 import CallMediaNotice from "./CallMediaNotice.vue";
@@ -208,12 +209,7 @@ async function onHangup(): Promise<void> {
       role="region"
       aria-label="Active call"
     >
-      <header class="call-split__header">
-        <div class="call-split__title">
-          <span class="call-split__live-dot" aria-hidden="true" />
-          <span class="type-control">Live · {{ callLabel }} · {{ subline }}</span>
-        </div>
-      </header>
+      <CallStageHeader :title="callLabel" :subline="subline" compact />
       <div
         v-if="lastError"
         class="call-split__error"
@@ -290,42 +286,6 @@ async function onHangup(): Promise<void> {
 
 .call-split--dragging {
   transition: none;
-}
-
-.call-split__header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-sm);
-  padding: 0.5rem 0.75rem;
-  border-bottom: 1px solid var(--border);
-}
-
-.call-split__title {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
-  color: var(--muted-foreground);
-}
-
-.call-split__live-dot {
-  width: 0.5rem;
-  height: 0.5rem;
-  border-radius: 9999px;
-  background: oklch(0.7 0.18 145);
-  box-shadow: 0 0 0 4px color-mix(in oklab, oklch(0.7 0.18 145) 25%, transparent);
-  animation: call-split-live-pulse 1.6s ease-in-out infinite;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .call-split__live-dot {
-    animation: none;
-  }
-}
-
-@keyframes call-split-live-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.55; }
 }
 
 .call-split__error {

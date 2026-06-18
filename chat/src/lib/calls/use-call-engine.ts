@@ -47,6 +47,7 @@ import {
   setCallConnectionPhase,
   setCallConnectionQuality,
 } from "./connection-quality";
+import { resetCallActiveSince, setCallActiveSince } from "./call-duration";
 
 /**
  * Process-wide singleton: only one call engine should ever exist
@@ -387,6 +388,13 @@ export function useCallEngine(): {
       // MUC-projection handler above, which early-returns for 1:1 DM calls.
       startMediaPathPolling();
     });
+    singletonEngine.on("connected", () => {
+      // Stamp the call clock so the stage-header's elapsed timer starts at the
+      // moment the LiveKit room actually connects (not at the optimistic
+      // `active` transition). Reset on `disconnected`, mirroring the
+      // connection-quality lifecycle.
+      setCallActiveSince(Date.now());
+    });
     singletonEngine.on("mediaDevicesError", ({ source, error }) => {
       // A best-effort mic/cam capture failed (no device / denied
       // permission). The call stays connected as receive-only; record
@@ -476,6 +484,9 @@ export function useCallEngine(): {
       // Drop the connection-quality chip so a stale `poor`/`reconnecting`
       // from the call that just ended can't bleed into the next call.
       resetCallConnectionQuality();
+      // Stop the elapsed-timer clock so the next call's header starts from
+      // "Connecting…" instead of inheriting this call's start instant.
+      resetCallActiveSince();
       // The active call's room — if any — is no longer in our LK
       // view. Drop the LK snapshot so the room's UI reverts to the
       // Muji-derived (server-bridged) view, which the LK webhook

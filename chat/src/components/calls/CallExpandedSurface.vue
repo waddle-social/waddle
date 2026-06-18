@@ -40,6 +40,7 @@ import type { MentionCandidate } from "@/lib/mentions";
 import type { MarkupSpan, MessageReference, TimelineMessage } from "@/lib/chat-ui";
 import type { ComposerLinkPreviewLookup, ComposerLinkPreviewSendPayload } from "@/lib/link-preview-composer";
 import CallTileGrid from "./CallTileGrid.vue";
+import CallStageHeader from "./CallStageHeader.vue";
 import CallControls from "./CallControls.vue";
 import CallSettingsDialog from "./CallSettingsDialog.vue";
 import CallMediaNotice from "./CallMediaNotice.vue";
@@ -245,6 +246,18 @@ async function onSendCallChat(
 function onKeydown(event: KeyboardEvent): void {
   if (!isOpen.value) return;
   if (event.key !== "Escape") return;
+  // The control bar's More overflow owns Escape while open. This listener runs
+  // in the CAPTURE phase, so without this guard it would collapse the call
+  // before the menu's own bubble-phase Escape handler could simply close the
+  // menu. Defer to it: an open menu-button advertises `aria-expanded="true"`.
+  if (
+    typeof document !== "undefined" &&
+    document.querySelector(
+      '.call-controls [aria-haspopup="menu"][aria-expanded="true"]',
+    )
+  ) {
+    return;
+  }
   // The settings modal owns Escape while open: dismiss it rather than
   // collapsing the whole expanded call out from under it. This listener
   // runs in the CAPTURE phase so it sees the still-open flag before
@@ -288,12 +301,7 @@ onBeforeUnmount(() => {
     role="region"
     aria-label="Active call (expanded)"
   >
-    <header class="call-expanded__header">
-      <div class="min-w-0 flex-1">
-        <div class="type-chat-title truncate">{{ peerLabel }}</div>
-        <div class="type-caption text-muted-foreground truncate">{{ subline }}</div>
-      </div>
-    </header>
+    <CallStageHeader :title="peerLabel" :subline="subline" />
     <div
       v-if="lastError"
       class="call-expanded__error"
@@ -386,15 +394,6 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   background: var(--background);
-}
-
-.call-expanded__header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--space-sm);
-  border-bottom: 1px solid var(--border);
-  padding: 0.75rem 1rem;
 }
 
 .call-expanded__error {

@@ -733,6 +733,42 @@ describe("call control bar chat toggle", () => {
   });
 });
 
+describe("call control bar restructure (#1020)", () => {
+  test("no longer embeds the connection-quality indicator (now in the stage-header)", () => {
+    // The indicator moved to CallStageHeader (asserted there via the recursive
+    // SFC harness). This bar must not import or render it any more.
+    const source = readFileSync(
+      new URL("../src/components/calls/CallControls.vue", import.meta.url),
+      "utf8",
+    );
+    expect(source).not.toContain("CallConnectionIndicator");
+  });
+
+  test("exposes a More overflow trigger that opens a menu", async () => {
+    const html = await renderCallControls({});
+    expect(html).toContain('aria-haspopup="menu"');
+    expect(html).toContain('aria-label="More options"');
+    // Collapsed at rest.
+    expect(html).toMatch(/aria-haspopup="menu"[^>]*aria-expanded="false"/);
+  });
+
+  test("holds the Settings action as a menu item under More, not as a top-level button", async () => {
+    const html = await renderCallControls({});
+    // Settings is a menu item now…
+    expect(html).toContain('role="menuitem"');
+    expect(html).toContain("Call settings");
+  });
+
+  test("wires the More menu's Settings item to the openSettings emit", () => {
+    const source = readFileSync(
+      new URL("../src/components/calls/CallControls.vue", import.meta.url),
+      "utf8",
+    );
+    expect(source).toContain("openSettings");
+    expect(source).toContain('role="menu"');
+  });
+});
+
 async function renderCallControls(overrides: Record<string, unknown>): Promise<string> {
   const component = await loadVueComponent("../src/components/calls/CallControls.vue");
   const props = {
