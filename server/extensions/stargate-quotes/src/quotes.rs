@@ -52,7 +52,7 @@ pub(crate) fn quote_body(quote: &Quote) -> String {
 pub(crate) fn quote_markup(quote: &Quote) -> Vec<types::MessageMarkupSpan> {
     vec![types::MessageMarkupSpan {
         kind: types::MessageMarkupKind::Blockquote,
-        start: 0,
+        start: 2,
         end: (2 + quote.quote.chars().count()) as u32,
     }]
 }

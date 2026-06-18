@@ -93,8 +93,12 @@ fn quote_markup_marks_only_the_quote_block() {
         spans[0].kind,
         types::MessageMarkupKind::Blockquote
     ));
-    assert_eq!(spans[0].start, 0);
+    assert_eq!(spans[0].start, 2);
     assert_eq!(spans[0].end, (2 + quotes[0].quote.chars().count()) as u32);
+    assert_eq!(
+        spans[0].end - spans[0].start,
+        quotes[0].quote.chars().count() as u32
+    );
     assert!(spans[0].end < quote_body(&quotes[0]).chars().count() as u32);
 }
 

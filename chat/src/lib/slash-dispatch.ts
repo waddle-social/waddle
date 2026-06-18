@@ -28,6 +28,7 @@ export function buildSlashInvocation(
   if (command.composerExecute && value.length === 0) {
     return { kind: "direct-execute", command };
   }
+  // Preserve unexpected trailing text by opening the palette with a prefill.
   if (!command.inlineField && value.length > 0) {
     return { kind: "open-palette", command, prefillFirstRequired: value };
   }

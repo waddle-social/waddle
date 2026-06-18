@@ -105,11 +105,18 @@ impl ExtensionHostTools for MockHostTools {
         assert_eq!(request.body.as_str(), "hello from extension");
         assert_eq!(
             request.markup,
-            vec![host_domain::MessageMarkupSpan {
-                kind: host_domain::MessageMarkupKind::Blockquote,
-                start: 0,
-                end: 5,
-            }]
+            vec![
+                host_domain::MessageMarkupSpan {
+                    kind: host_domain::MessageMarkupKind::Blockquote,
+                    start: 0,
+                    end: 5,
+                },
+                host_domain::MessageMarkupSpan {
+                    kind: host_domain::MessageMarkupKind::Blockquote,
+                    start: 5,
+                    end: 10,
+                },
+            ]
         );
         Ok(host_domain::SendMessageResponse {
             stanza_id: StanzaId::new("extension-stanza").expect("stanza id"),
@@ -179,11 +186,18 @@ async fn granted_send_message_import_delegates_to_trait() {
             },
             thread_id: None,
             reply_to: None,
-            markup: vec![wit_types::MessageMarkupSpan {
-                kind: wit_types::MessageMarkupKind::Blockquote,
-                start: 0,
-                end: 5,
-            }],
+            markup: vec![
+                wit_types::MessageMarkupSpan {
+                    kind: wit_types::MessageMarkupKind::Blockquote,
+                    start: 0,
+                    end: 5,
+                },
+                wit_types::MessageMarkupSpan {
+                    kind: wit_types::MessageMarkupKind::Blockquote,
+                    start: 5,
+                    end: 10,
+                },
+            ],
             extensions: None,
         },
     )
@@ -269,6 +283,50 @@ async fn crossing_send_message_markup_ranges_fail_before_delegating() {
     .expect("host import does not trap");
 
     let error = result.expect_err("crossing markup ranges are rejected");
+    assert!(matches!(
+        error.code,
+        wit_types::HostToolErrorCode::InvalidRequest
+    ));
+    assert_eq!(tools.send_message_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn contained_send_message_markup_ranges_fail_before_delegating() {
+    let tools = Arc::new(MockHostTools::default());
+    let mut grants = HashSet::new();
+    grants.insert(ExtensionCapability::HostMessageSend);
+    let mut state = host_state(Arc::clone(&tools), grants);
+
+    let result = HostToolsHost::send_message(
+        &mut state,
+        wit_types::SendMessageRequest {
+            target: wit_types::MessageTarget::Muc(wit_types::RoomJid {
+                value: "room@muc.example.com".to_string(),
+            }),
+            body: wit_types::DisplayText {
+                value: "0123456789abcdef".to_string(),
+            },
+            thread_id: None,
+            reply_to: None,
+            markup: vec![
+                wit_types::MessageMarkupSpan {
+                    kind: wit_types::MessageMarkupKind::Blockquote,
+                    start: 0,
+                    end: 10,
+                },
+                wit_types::MessageMarkupSpan {
+                    kind: wit_types::MessageMarkupKind::Blockquote,
+                    start: 2,
+                    end: 8,
+                },
+            ],
+            extensions: None,
+        },
+    )
+    .await
+    .expect("host import does not trap");
+
+    let error = result.expect_err("contained markup ranges are rejected");
     assert!(matches!(
         error.code,
         wit_types::HostToolErrorCode::InvalidRequest

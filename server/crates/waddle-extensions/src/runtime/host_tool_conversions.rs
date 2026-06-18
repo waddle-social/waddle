@@ -389,13 +389,10 @@ fn validate_message_markup(
     }
     for (index, left) in spans.iter().enumerate() {
         for right in &spans[index + 1..] {
-            let crosses_left =
-                left.start < right.start && right.start < left.end && left.end < right.end;
-            let crosses_right =
-                right.start < left.start && left.start < right.end && right.end < left.end;
-            if crosses_left || crosses_right {
+            let overlaps = left.start < right.end && right.start < left.end;
+            if overlaps {
                 return Err(HostToolError::invalid_request(
-                    DisplayText::new("message markup block ranges must not partially overlap")
+                    DisplayText::new("message markup block ranges must not overlap")
                         .expect("static message is non-empty"),
                 ));
             }
