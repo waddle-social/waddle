@@ -14,13 +14,17 @@ import { atom } from "nanostores";
  *   surrounding app shell (waddles rail, channel list, thread panel)
  *   stays visible so the user can still navigate; this is NOT the
  *   browser's native fullscreen.
+ * - `immersive`: the call stage fills the viewport edge-to-edge and
+ *   hides the surrounding app chrome. Native browser fullscreen can
+ *   be layered on top of this mode, but leaving browser fullscreen
+ *   returns to `expanded`.
  *
  * Anything that used to be `docked`, `floating`, `minimized`, or
  * `pip` is gone — see PR #743 for the rationale. The chat must never
  * be hidden behind the call, and the call must never escape the
  * channel that owns it.
  */
-type CallUiMode = "split" | "expanded";
+export type CallUiMode = "split" | "expanded" | "immersive";
 
 const STORAGE_KEY = "waddle:call-ui-mode";
 
@@ -28,7 +32,7 @@ function readInitialMode(): CallUiMode {
   if (typeof window === "undefined") return "split";
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (raw === "split" || raw === "expanded") {
+    if (raw === "split" || raw === "expanded" || raw === "immersive") {
       return raw;
     }
   } catch {
@@ -38,6 +42,32 @@ function readInitialMode(): CallUiMode {
 }
 
 export const $callUiMode = atom<CallUiMode>(readInitialMode());
+
+export function nextCallUiMode(mode: CallUiMode): CallUiMode {
+  if (mode === "split") return "expanded";
+  if (mode === "expanded") return "immersive";
+  return "expanded";
+}
+
+export function callUiModeAfterFullscreenExit(mode: CallUiMode): CallUiMode {
+  return mode === "immersive" ? "expanded" : mode;
+}
+
+export function callUiModeAfterSurfaceEscape(mode: CallUiMode): CallUiMode {
+  return mode === "immersive" ? "expanded" : "split";
+}
+
+export function shouldExitNativeFullscreenForModeChange(
+  currentMode: CallUiMode,
+  nextMode: CallUiMode,
+  nativeFullscreenActive: boolean,
+): boolean {
+  return currentMode === "immersive" && nextMode !== "immersive" && nativeFullscreenActive;
+}
+
+export function resetCallUiModeAfterCallEnd(): CallUiMode {
+  return "split";
+}
 
 $callUiMode.subscribe((mode) => {
   if (typeof window === "undefined") return;

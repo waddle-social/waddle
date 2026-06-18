@@ -1,11 +1,17 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useStore } from "@nanostores/vue";
 import {
   $callState,
   $lastCallError,
 } from "@/lib/calls/call-store";
-import { $callUiMode } from "@/lib/calls/ui-mode";
+import {
+  $callUiMode,
+  callUiModeAfterFullscreenExit,
+  callUiModeAfterSurfaceEscape,
+  nextCallUiMode,
+  shouldExitNativeFullscreenForModeChange,
+} from "@/lib/calls/ui-mode";
 import {
   $callSelfViewHidden,
   $callViewMode,
@@ -108,6 +114,7 @@ const emit = defineEmits<{
   ];
 }>();
 
+const surfaceRef = ref<HTMLElement | null>(null);
 const state = useStore($callState);
 const uiMode = useStore($callUiMode);
 const viewMode = useStore($callViewMode);
@@ -123,6 +130,9 @@ const { remoteTracks, localTracks, engine, activeSpeakerIdentities, promotedSpea
 const { activeRoomJid, selfInCall } = useActiveMucCall();
 
 const settingsOpen = ref(false);
+const chromeVisible = ref(true);
+const nativeFullscreenActive = ref(false);
+let chromeIdleTimer: number | null = null;
 const dockOpen = useStore($callDockOpen);
 const dockTab = useStore($callDockTab);
 const chatUnread = useStore($callChatUnread);
@@ -159,11 +169,13 @@ const ownsDmCall = computed(() => {
 const isOpen = computed(() => {
   return (
     state.value.phase === "active" &&
-    uiMode.value === "expanded" &&
+    (uiMode.value === "expanded" || uiMode.value === "immersive") &&
     ((state.value.kind === "muc" && ownsMucCall.value && selfInCall.value) ||
       (state.value.kind === "dm" && ownsDmCall.value))
   );
 });
+
+const isImmersive = computed(() => uiMode.value === "immersive");
 
 const remoteParticipantCount = computed(() => {
   const ids = new Set<string>();
@@ -225,6 +237,55 @@ function collapseToSplit(): void {
   $callUiMode.set("split");
 }
 
+async function toggleUiMode(): Promise<void> {
+  const nextMode = nextCallUiMode(uiMode.value);
+  if (
+    shouldExitNativeFullscreenForModeChange(
+      uiMode.value,
+      nextMode,
+      nativeFullscreenActive.value,
+    ) &&
+    typeof document !== "undefined" &&
+    document.fullscreenElement === surfaceRef.value
+  ) {
+    await document.exitFullscreen();
+  }
+  $callUiMode.set(nextMode);
+}
+
+function clearChromeIdleTimer(): void {
+  if (typeof window === "undefined") return;
+  if (chromeIdleTimer === null) return;
+  window.clearTimeout(chromeIdleTimer);
+  chromeIdleTimer = null;
+}
+
+function revealImmersiveChrome(): void {
+  chromeVisible.value = true;
+  if (typeof window === "undefined" || !isImmersive.value) return;
+  clearChromeIdleTimer();
+  chromeIdleTimer = window.setTimeout(() => {
+    if (isImmersive.value) chromeVisible.value = false;
+  }, 2_000);
+}
+
+async function toggleNativeFullscreen(): Promise<void> {
+  if (typeof document === "undefined") return;
+  if (document.fullscreenElement) {
+    await document.exitFullscreen();
+    return;
+  }
+  await surfaceRef.value?.requestFullscreen?.();
+}
+
+function onFullscreenChange(): void {
+  if (typeof document === "undefined") return;
+  nativeFullscreenActive.value = document.fullscreenElement === surfaceRef.value;
+  if (!nativeFullscreenActive.value) {
+    $callUiMode.set(callUiModeAfterFullscreenExit(uiMode.value));
+  }
+}
+
 async function onHangup(): Promise<void> {
   await hangupActiveCall();
   // After hangup the surface unmounts on its own (phase flips out of
@@ -284,19 +345,36 @@ function onKeydown(event: KeyboardEvent): void {
     return;
   }
   event.preventDefault();
-  collapseToSplit();
+  $callUiMode.set(callUiModeAfterSurfaceEscape(uiMode.value));
 }
+
+watch(isImmersive, (immersive) => {
+  if (immersive) {
+    revealImmersiveChrome();
+  } else {
+    clearChromeIdleTimer();
+    chromeVisible.value = true;
+  }
+});
 
 onMounted(() => {
   refreshScreenShareSupported();
+  revealImmersiveChrome();
   if (typeof window !== "undefined") {
     window.addEventListener("keydown", onKeydown, true);
+  }
+  if (typeof document !== "undefined") {
+    document.addEventListener("fullscreenchange", onFullscreenChange);
   }
 });
 
 onBeforeUnmount(() => {
+  clearChromeIdleTimer();
   if (typeof window !== "undefined") {
     window.removeEventListener("keydown", onKeydown, true);
+  }
+  if (typeof document !== "undefined") {
+    document.removeEventListener("fullscreenchange", onFullscreenChange);
   }
 });
 </script>
@@ -304,11 +382,21 @@ onBeforeUnmount(() => {
 <template>
   <div
     v-if="isOpen"
+    ref="surfaceRef"
     class="call-expanded"
+    :class="{
+      'call-expanded--immersive': isImmersive,
+      'call-expanded--chrome-hidden': isImmersive && !chromeVisible,
+    }"
     role="region"
-    aria-label="Active call (expanded)"
+    :aria-label="isImmersive ? 'Active call (immersive)' : 'Active call (expanded)'"
+    @pointermove="revealImmersiveChrome"
   >
-    <CallStageHeader :title="peerLabel" :subline="subline" />
+    <CallStageHeader
+      class="call-expanded__chrome call-expanded__header"
+      :title="peerLabel"
+      :subline="subline"
+    />
     <div
       v-if="lastError"
       class="call-expanded__error"
@@ -334,43 +422,49 @@ onBeforeUnmount(() => {
           @open-participants="openCallParticipants"
         />
       </div>
-      <CallDock
+      <div
         v-if="dockOpen"
-        :rows="rosterRows"
-        :active-tab="dockTab"
-        :chat-unread="chatUnread"
-        @set-tab="setCallDockTab"
-        @set-volume="setParticipantVolume"
-        @reset-all="resetParticipantVolumes"
-        @close="closeCallDock"
+        class="call-expanded__dock-overlay"
       >
-        <template #chat>
-          <CallChatPanel
-            v-model:draft="callChatDraft"
-            :messages="callChatMessages ?? []"
-            :visible="chatOpen"
-            :avatar-url-by-author="avatarUrlByAuthor ?? {}"
-            :is-sending="!!isSending"
-            :disabled="!!disabled || !callThreadOverride"
-            :giphy-api-key="giphyApiKey ?? ''"
-            :mention-candidates="mentionCandidates ?? []"
-            :slow-mode-cooldown="slowModeCooldown ?? 0"
-            :upload-progress="uploadProgress ?? { uploading: false, progress: 0, filename: '' }"
-            :in-muc="isMucCall"
-            :link-preview-lookup="linkPreviewLookup ?? null"
-            :link-preview-scope="linkPreviewScope ?? null"
-            @send="onSendCallChat"
-          />
-        </template>
-      </CallDock>
+        <CallDock
+          :rows="rosterRows"
+          :active-tab="dockTab"
+          :chat-unread="chatUnread"
+          @set-tab="setCallDockTab"
+          @set-volume="setParticipantVolume"
+          @reset-all="resetParticipantVolumes"
+          @close="closeCallDock"
+        >
+          <template #chat>
+            <CallChatPanel
+              v-model:draft="callChatDraft"
+              :messages="callChatMessages ?? []"
+              :visible="chatOpen"
+              :avatar-url-by-author="avatarUrlByAuthor ?? {}"
+              :is-sending="!!isSending"
+              :disabled="!!disabled || !callThreadOverride"
+              :giphy-api-key="giphyApiKey ?? ''"
+              :mention-candidates="mentionCandidates ?? []"
+              :slow-mode-cooldown="slowModeCooldown ?? 0"
+              :upload-progress="uploadProgress ?? { uploading: false, progress: 0, filename: '' }"
+              :in-muc="isMucCall"
+              :link-preview-lookup="linkPreviewLookup ?? null"
+              :link-preview-scope="linkPreviewScope ?? null"
+              @send="onSendCallChat"
+            />
+          </template>
+        </CallDock>
+      </div>
     </main>
-    <footer class="call-expanded__footer">
+    <footer class="call-expanded__chrome call-expanded__footer">
       <CallControls
         :mic-enabled="micEnabled"
         :cam-enabled="camEnabled"
         :screen-share-enabled="screenShareEnabled"
         :screen-share-supported="screenShareSupported"
         :is-expanded="true"
+        :is-immersive="isImmersive"
+        :is-native-fullscreen="nativeFullscreenActive"
         :participants-open="participantsOpen"
         :participant-count="participantCount"
         :chat-open="chatOpen"
@@ -380,7 +474,8 @@ onBeforeUnmount(() => {
         @toggle-mic="toggleMic"
         @toggle-cam="toggleCam"
         @toggle-screen-share="toggleScreenShare"
-        @toggle-expanded="collapseToSplit"
+        @toggle-expanded="toggleUiMode"
+        @toggle-native-fullscreen="toggleNativeFullscreen"
         @toggle-participants="toggleCallParticipants"
         @toggle-chat="toggleCallChat"
         @open-settings="settingsOpen = true"
@@ -406,6 +501,29 @@ onBeforeUnmount(() => {
   background: var(--background);
 }
 
+.call-expanded--immersive {
+  position: fixed;
+  z-index: 80;
+  background: #050507;
+}
+
+.call-expanded__chrome {
+  transition: opacity 180ms ease, transform 180ms ease;
+}
+
+.call-expanded--chrome-hidden .call-expanded__chrome {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.call-expanded--chrome-hidden .call-expanded__header {
+  transform: translateY(-0.5rem);
+}
+
+.call-expanded--chrome-hidden .call-expanded__footer {
+  transform: translateY(0.5rem);
+}
+
 .call-expanded__error {
   border-bottom: 1px solid color-mix(in oklab, var(--destructive) 30%, transparent);
   background: color-mix(in oklab, var(--destructive) 10%, transparent);
@@ -429,6 +547,19 @@ onBeforeUnmount(() => {
   overflow: hidden;
 }
 
+.call-expanded__dock-overlay {
+  display: contents;
+}
+
+.call-expanded--immersive .call-expanded__dock-overlay {
+  position: absolute;
+  inset-block: 4.5rem 5rem;
+  inset-inline-end: 1rem;
+  z-index: 2;
+  display: flex;
+  max-width: min(24rem, calc(100vw - 2rem));
+}
+
 .call-expanded__footer {
   display: flex;
   align-items: center;
@@ -444,6 +575,16 @@ onBeforeUnmount(() => {
 @media (max-width: 760px) {
   .call-expanded__main {
     flex-direction: column;
+  }
+
+  .call-expanded--immersive .call-expanded__main {
+    flex-direction: row;
+  }
+
+  .call-expanded--immersive .call-expanded__dock-overlay {
+    inset-block: auto 5rem;
+    inset-inline: 0.75rem;
+    max-width: none;
   }
 }
 </style>

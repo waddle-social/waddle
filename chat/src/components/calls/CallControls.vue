@@ -39,6 +39,10 @@ const props = defineProps<{
   /** True when the parent surface is the expanded variant — flips
    *  the toggle button between "expand" and "collapse". */
   isExpanded: boolean;
+  /** True when the parent surface is the cinematic viewport takeover. */
+  isImmersive?: boolean;
+  /** True while the immersive surface owns browser-native fullscreen. */
+  isNativeFullscreen?: boolean;
   /** True while the Participants dock is open — drives the participants
    *  button's pressed/expanded state. The parent owns the dock store. */
   participantsOpen: boolean;
@@ -60,6 +64,7 @@ const emit = defineEmits<{
   toggleCam: [];
   toggleScreenShare: [];
   toggleExpanded: [];
+  toggleNativeFullscreen: [];
   toggleParticipants: [];
   toggleChat: [];
   openSettings: [];
@@ -290,12 +295,22 @@ onBeforeUnmount(() => {
     <button
       type="button"
       class="chat-icon-button chat-icon-button--md hover:bg-muted"
-      :title="isExpanded ? 'Collapse call' : 'Expand call'"
+      :title="isImmersive ? 'Return call to expanded view' : isExpanded ? 'Make call immersive' : 'Expand call'"
       :aria-pressed="isExpanded"
-      :aria-label="isExpanded ? 'Collapse call to split view' : 'Expand call to fill the chat pane'"
+      :aria-label="isImmersive ? 'Return call to expanded view' : isExpanded ? 'Make call immersive' : 'Expand call to fill the chat pane'"
       @click="emit('toggleExpanded')"
     >
-      <component :is="isExpanded ? Minimize2 : Maximize2" class="w-4 h-4" />
+      <component :is="isImmersive ? Minimize2 : Maximize2" class="w-4 h-4" />
+    </button>
+    <button
+      v-if="isImmersive"
+      type="button"
+      class="chat-icon-button chat-icon-button--md hover:bg-muted"
+      :title="isNativeFullscreen ? 'Exit browser fullscreen' : 'Enter browser fullscreen'"
+      :aria-label="isNativeFullscreen ? 'Exit browser fullscreen' : 'Enter browser fullscreen'"
+      @click="emit('toggleNativeFullscreen')"
+    >
+      <Maximize2 class="w-4 h-4" />
     </button>
     <button
       type="button"
