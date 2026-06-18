@@ -13,6 +13,16 @@ import { $callState } from "./call-store";
  */
 export const $callDockOpen = atom<boolean>(false);
 
+/** Which tab the dock currently shows. */
+export type CallDockTab = "participants" | "chat";
+
+/**
+ * The selected dock tab. Like {@link $callDockOpen} it is module-scoped and
+ * survives the split⟷expanded remount within a call, and resets to
+ * `participants` once the call ends.
+ */
+export const $callDockTab = atom<CallDockTab>("participants");
+
 export function openCallDock(): void {
   $callDockOpen.set(true);
 }
@@ -25,8 +35,38 @@ export function toggleCallDock(): void {
   $callDockOpen.set(!$callDockOpen.get());
 }
 
-// Close the dock whenever the call leaves the active phase, so a stale
-// "open" can't carry into the next call. Subscribed once at module load.
+export function setCallDockTab(tab: CallDockTab): void {
+  $callDockTab.set(tab);
+}
+
+/**
+ * Toggle the dock for a given tab from a control-bar button: if the dock is
+ * already open on that tab, close it; otherwise select the tab and open it.
+ * A click on the *other* tab's button just switches tabs without closing.
+ */
+function toggleCallDockTab(tab: CallDockTab): void {
+  if ($callDockOpen.get() && $callDockTab.get() === tab) {
+    closeCallDock();
+    return;
+  }
+  $callDockTab.set(tab);
+  openCallDock();
+}
+
+export function toggleCallParticipants(): void {
+  toggleCallDockTab("participants");
+}
+
+export function toggleCallChat(): void {
+  toggleCallDockTab("chat");
+}
+
+// Close the dock and reset the tab whenever the call leaves the active phase,
+// so a stale "open" or tab can't carry into the next call. Subscribed once at
+// module load.
 $callState.subscribe((state) => {
-  if (state.phase !== "active") closeCallDock();
+  if (state.phase !== "active") {
+    closeCallDock();
+    $callDockTab.set("participants");
+  }
 });
