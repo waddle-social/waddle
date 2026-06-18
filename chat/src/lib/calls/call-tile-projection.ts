@@ -59,7 +59,12 @@ export function retainPinnedTileKey(
 
 export function projectCallTiles(input: ProjectCallTilesInput): CallTileProjection {
   const built = buildCallTiles(input);
-  const tiles = input.hideSelfView ? built.filter((tile) => !tile.isSelf) : built;
+  // Hide self-view drops only the local *camera* tile. The local screen-share
+  // tile is also `isSelf` but must stay on stage — the user is still presenting
+  // it, and other participants keep seeing it.
+  const tiles = input.hideSelfView
+    ? built.filter((tile) => !(tile.isSelf && tile.source === "camera"))
+    : built;
   const remoteScreens = tiles.filter((tile) =>
     tile.source === "screen_share" && !tile.isSelf && tile.screenTrackKey !== null
   );

@@ -360,6 +360,25 @@ describe("call tile spotlight projection", () => {
     ]);
   });
 
+  test("hides the camera self-view but keeps the local screen-share tile when self-view is hidden", () => {
+    const projection = projectCallTiles({
+      remoteTracks: [],
+      localTracks: [localVideo("alice@example.com/web", "screen-pub", "screen_share")],
+      localIdentity: "alice@example.com/web",
+      micEnabled: true,
+      seenRemoteScreenTrackKeys: new Set(),
+      pinnedTileKey: null,
+      hideSelfView: true,
+    });
+
+    // Only the camera self-view tile is removed; the local screen-share tile is
+    // also `isSelf` but must stay on stage — hiding self-view never affects the
+    // screen the user is still presenting.
+    expect(projection.tiles.map((tile) => tile.key)).toEqual([
+      "self:alice@example.com/web:screen_share",
+    ]);
+  });
+
   test("never auto-promotes the hidden self-view to the large Speaker tile when alone", () => {
     const projection = projectCallTiles({
       remoteTracks: [],
