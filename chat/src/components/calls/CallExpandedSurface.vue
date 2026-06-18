@@ -297,8 +297,9 @@ async function toggleNativeFullscreen(): Promise<void> {
 
 function onFullscreenChange(): void {
   if (typeof document === "undefined") return;
+  const wasNativeFullscreenActive = nativeFullscreenActive.value;
   nativeFullscreenActive.value = document.fullscreenElement === surfaceRef.value;
-  if (!nativeFullscreenActive.value) {
+  if (wasNativeFullscreenActive && !nativeFullscreenActive.value) {
     $callUiMode.set(callUiModeAfterFullscreenExit(uiMode.value));
   }
 }

@@ -157,6 +157,8 @@ describe("call surfaces use the Participants dock", () => {
     expect(surface).toContain("shouldExitNativeFullscreenForModeChange");
     expect(surface).toContain("document.fullscreenElement === surfaceRef.value");
     expect(surface).toContain("if (document.fullscreenElement) return");
+    expect(surface).toContain("const wasNativeFullscreenActive = nativeFullscreenActive.value");
+    expect(surface).toContain("if (wasNativeFullscreenActive && !nativeFullscreenActive.value)");
     expect(surface).toContain("fullscreenchange");
     expect(surface).toContain("callUiModeAfterFullscreenExit(uiMode.value)");
     expect(surface).toContain("callUiModeAfterSurfaceEscape(uiMode.value)");
@@ -167,6 +169,7 @@ describe("call surfaces use the Participants dock", () => {
     expect(controls).toContain("isImmersive");
     expect(controls).toContain("isNativeFullscreen");
     expect(controls).toContain("toggleNativeFullscreen");
+    expect(controls).toContain("isNativeFullscreen ? Minimize2 : Maximize2");
     expect(controls).toContain("toggleImmersive");
     expect(controls).not.toContain(":aria-pressed=\"isExpanded\"");
     expect(controls).toContain("Enter browser fullscreen");

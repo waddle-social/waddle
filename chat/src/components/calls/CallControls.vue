@@ -320,7 +320,7 @@ onBeforeUnmount(() => {
       :aria-label="isNativeFullscreen ? 'Exit browser fullscreen' : 'Enter browser fullscreen'"
       @click="emit('toggleNativeFullscreen')"
     >
-      <Maximize2 class="w-4 h-4" />
+      <component :is="isNativeFullscreen ? Minimize2 : Maximize2" class="w-4 h-4" />
     </button>
     <button
       type="button"

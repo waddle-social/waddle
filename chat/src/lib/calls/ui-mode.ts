@@ -32,7 +32,7 @@ function readInitialMode(): CallUiMode {
   if (typeof window === "undefined") return "split";
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (raw === "split" || raw === "expanded" || raw === "immersive") {
+    if (raw === "split" || raw === "expanded") {
       return raw;
     }
   } catch {
