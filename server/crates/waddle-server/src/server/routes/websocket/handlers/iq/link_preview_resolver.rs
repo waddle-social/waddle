@@ -729,10 +729,24 @@ async fn fetch_html_once(
             }
         }
     }
-    if let Some(expected_len) = partial_content_state.expected_len() {
-        let received_len = u64::try_from(body.len()).unwrap_or(u64::MAX);
-        if received_len != expected_len {
-            return Err(LinkPreviewResolverStatus::Failed);
+    // Reject forged/truncated slices by requiring the body to match the length the
+    // `Content-Range` commits to. Exception: on the head-cuttable (`text/html`)
+    // path an unknown total (`/*`) makes no such commitment — the range end is only
+    // what we asked for, and origins like GitHub echo it while returning the whole,
+    // shorter resource — so there we trust the completed-`</head>` gate below
+    // instead. The non-cuttable (xhtml) path has no head signal, so it keeps the
+    // length check as its sole integrity guard for every partial state.
+    let skip_exact_len_check = allow_head_cutoff
+        && matches!(
+            partial_content_state,
+            ContentRangeState::UnknownTotal { .. }
+        );
+    if !skip_exact_len_check {
+        if let Some(expected_len) = partial_content_state.expected_len() {
+            let received_len = u64::try_from(body.len()).unwrap_or(u64::MAX);
+            if received_len != expected_len {
+                return Err(LinkPreviewResolverStatus::Failed);
+            }
         }
     }
     if allow_head_cutoff
@@ -757,13 +771,29 @@ async fn fetch_html_once(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ContentRangeState {
     NotPartial,
-    Complete { expected_len: u64 },
-    HasUnreturnedTail { expected_len: u64 },
-    UnknownTotal { expected_len: u64 },
+    Complete {
+        expected_len: u64,
+    },
+    HasUnreturnedTail {
+        expected_len: u64,
+    },
+    /// `bytes 0-<end>/*` — the total is unknown, so `expected_len` (`<end>+1`) is
+    /// only the range we asked for, not a guaranteed delivered length: origins that
+    /// honor `Range` on dynamic pages (e.g. GitHub) echo the requested end while
+    /// returning the whole, shorter resource. The head-cuttable path therefore
+    /// ignores this length and trusts a completed `</head>` instead; the
+    /// non-cuttable path still enforces it as its only integrity guard.
+    UnknownTotal {
+        expected_len: u64,
+    },
     Unknown,
 }
 
 impl ContentRangeState {
+    /// The body length the slice claims to carry, when the response states one.
+    /// For numeric totals this is authoritative; for an unknown total it is the
+    /// requested range end + 1, which only the non-cuttable path enforces (the
+    /// head-cuttable call site skips it — see `skip_exact_len_check`).
     fn expected_len(self) -> Option<u64> {
         match self {
             ContentRangeState::Complete { expected_len }
@@ -2796,6 +2826,88 @@ mod tests {
         };
         assert_eq!(metadata.title.as_deref(), Some("Unknown total metadata"));
         assert_single_range_request(&server, "bytes=0-255").await;
+    }
+
+    #[tokio::test]
+    async fn unknown_total_partial_html_with_short_body_and_completed_head_uses_metadata() {
+        // Regression (GitHub): GitHub honors `Range` on repo pages with a 206 whose
+        // `Content-Range` echoes the *requested* end with an unknown total (`/*`),
+        // while sending only the real (shorter) page body — so the slice is much
+        // shorter than the requested range end. With `</head>` present, that body is
+        // sufficient and the resolver must surface metadata rather than hard-fail on
+        // a body-length mismatch against the echoed (unknown-total) range end.
+        let server = MockServer::start().await;
+        let body = "<html><head><meta property=\"og:title\" content=\"GitHub repo\">\
+            <meta property=\"og:description\" content=\"Short page, unknown total\">\
+            </head><body>x</body></html>";
+        assert!(
+            body.len() < 1024,
+            "body must be shorter than the requested range end to reproduce the short-body slice"
+        );
+        Mock::given(method("GET"))
+            .and(path("/steipete/agent-scripts"))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("content-type", "text/html; charset=utf-8")
+                    .insert_header("content-length", body.len().to_string())
+                    .insert_header("content-range", "bytes 0-1023/*")
+                    .set_body_raw(body, "text/html; charset=utf-8"),
+            )
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            max_html_head_bytes: 1024,
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/steipete/agent-scripts", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        let LinkPreviewResolverOutcome::Ready(metadata) = outcome else {
+            panic!("expected ready outcome for short-body unknown-total partial, got {outcome:?}");
+        };
+        assert_eq!(metadata.title.as_deref(), Some("GitHub repo"));
+        assert_eq!(
+            metadata.description.as_deref(),
+            Some("Short page, unknown total")
+        );
+        assert_single_range_request(&server, "bytes=0-1023").await;
+    }
+
+    #[tokio::test]
+    async fn unknown_total_partial_xhtml_with_short_body_returns_failed() {
+        // The unknown-total acceptance is scoped to the head-cuttable `text/html`
+        // path. The non-cuttable (xhtml) path cannot stop at `</head>`, so it has no
+        // positive sufficiency signal — the exact-length check is its only integrity
+        // guard. An unknown total (`/*`) commits to no length, so a short xhtml slice
+        // cannot be trusted and must still fail (unlike the text/html case above).
+        let server = MockServer::start().await;
+        let body = "<html><head><meta property=\"og:title\" content=\"XHTML repo\">\
+            </head><body>x</body></html>";
+        assert!(body.len() < 1024, "body must be a short slice");
+        Mock::given(method("GET"))
+            .and(path("/article.xhtml"))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("content-type", "application/xhtml+xml; charset=utf-8")
+                    .insert_header("content-length", body.len().to_string())
+                    .insert_header("content-range", "bytes 0-1023/*")
+                    .set_body_raw(body, "application/xhtml+xml; charset=utf-8"),
+            )
+            .mount(&server)
+            .await;
+        let policy = LinkPreviewResolverPolicy {
+            max_html_head_bytes: 1024,
+            allow_http_loopback_for_tests: true,
+            ..Default::default()
+        };
+        let url = Url::parse(&format!("{}/article.xhtml", server.uri())).expect("url");
+
+        let outcome = resolve_link_preview(&url, &policy).await;
+
+        assert_eq!(outcome.status(), LinkPreviewResolverStatus::Failed);
+        assert_single_range_request(&server, "bytes=0-1023").await;
     }
 
     #[tokio::test]
