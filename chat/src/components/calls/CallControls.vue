@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed } from "vue";
 import {
   LayoutGrid,
   Maximize2,
@@ -58,6 +59,16 @@ const emit = defineEmits<{
   setViewMode: [mode: CallViewMode];
   hangup: [];
 }>();
+
+// The button's own `aria-label` overrides the accessible-name calculation, so a
+// nested badge (even with its own label) is never announced. Fold the unread
+// count into the label and mark the visual badge `aria-hidden`.
+const chatButtonLabel = computed(() => {
+  const base = props.chatOpen ? "Close chat" : "Open chat";
+  if (props.chatUnread <= 0) return base;
+  const plural = props.chatUnread === 1 ? "" : "s";
+  return `${base}, ${props.chatUnread} unread message${plural}`;
+});
 
 /**
  * Arrow-key navigation for the two-option Gallery/Speaker radiogroup, per the
@@ -191,7 +202,7 @@ function onViewKeydown(event: KeyboardEvent): void {
       class="call-controls__chat chat-icon-button chat-icon-button--md hover:bg-muted"
       :class="{ 'bg-muted text-foreground': chatOpen }"
       :title="chatOpen ? 'Close chat' : 'Open chat'"
-      :aria-label="chatOpen ? 'Close chat' : 'Open chat'"
+      :aria-label="chatButtonLabel"
       :aria-pressed="chatOpen"
       :aria-expanded="chatOpen"
       @click="emit('toggleChat')"
@@ -200,7 +211,7 @@ function onViewKeydown(event: KeyboardEvent): void {
       <span
         v-if="chatUnread > 0"
         class="call-controls__unread"
-        :aria-label="`${chatUnread} unread message${chatUnread === 1 ? '' : 's'}`"
+        aria-hidden="true"
       >{{ chatUnread }}</span>
     </button>
     <button

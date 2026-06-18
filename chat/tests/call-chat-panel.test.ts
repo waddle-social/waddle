@@ -29,6 +29,8 @@ describe("CallChatPanel", () => {
     expect(html).toContain("hello call");
     expect(html).toContain("second");
     expect(html).toContain("alice");
+    // Each timestamp carries a machine-readable datetime for assistive tech.
+    expect(html).toContain('datetime="2026-06-18T12:00:00Z"');
     // The moved composer is present.
     expect(html).toContain("Call chat composer");
   });

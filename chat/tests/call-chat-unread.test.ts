@@ -68,6 +68,16 @@ describe("inboundCallChatThreadIds", () => {
     const messages = [{ id: "a", threadId: "call-1", isSelf: false }];
     expect(inboundCallChatThreadIds(messages, null)).toEqual([]);
   });
+
+  test("excludes the call-anchor system row that shares the thread id", () => {
+    // The call anchor (DM: threadId === sid; MUC: the thread root) carries the
+    // same threadId but is a bodyless system card, not a chat message.
+    const messages = [
+      { id: "anchor", threadId: "call-1", isSelf: false, callThread: { kind: "muc" } },
+      { id: "a", threadId: "call-1", isSelf: false },
+    ];
+    expect(inboundCallChatThreadIds(messages, "call-1")).toEqual(["a"]);
+  });
 });
 
 describe("isCallChatTabFocused", () => {

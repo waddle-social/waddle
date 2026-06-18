@@ -112,7 +112,10 @@ onMounted(() => void nextTick(scrollToBottom));
         <div class="call-chat__bubble">
           <div class="call-chat__meta">
             <span class="call-chat__author type-control">{{ m.author }}</span>
-            <time class="call-chat__time type-caption text-muted-foreground">{{ timeLabel(m.createdAt) }}</time>
+            <time
+              :datetime="m.createdAt"
+              class="call-chat__time type-caption text-muted-foreground"
+            >{{ timeLabel(m.createdAt) }}</time>
           </div>
           <MessageBody :message="m" compact />
         </div>

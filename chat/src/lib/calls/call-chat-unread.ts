@@ -35,7 +35,24 @@ type CallChatThreadMessage = {
   id: string;
   threadId?: string | null;
   isSelf?: boolean;
+  /** Present on the call-anchor system card (not a chat message). */
+  callThread?: unknown;
 };
+
+/**
+ * Whether a thread message is an actual call-chat message: on the active call
+ * thread, not the local user's own, and not the bodyless call-anchor card
+ * (which shares the thread id — DM anchors use `threadId === sid`, MUC anchors
+ * are the thread root).
+ */
+function isInboundCallChatMessage(
+  message: CallChatThreadMessage,
+  threadId: string,
+): boolean {
+  return (
+    message.threadId === threadId && !message.isSelf && !message.callThread
+  );
+}
 
 /**
  * Ordered ids of inbound (not-self) messages on the active call-chat thread.
@@ -48,9 +65,7 @@ export function inboundCallChatThreadIds(
   if (!threadId) return [];
   const ids: string[] = [];
   for (const message of messages) {
-    if (message.threadId !== threadId) continue;
-    if (message.isSelf) continue;
-    ids.push(message.id);
+    if (isInboundCallChatMessage(message, threadId)) ids.push(message.id);
   }
   return ids;
 }
@@ -67,6 +82,10 @@ export function nextCallChatUnread(input: CallChatUnreadInput): CallChatUnreadRe
     // Reading the tab marks everything currently loaded as seen.
     return { unread: 0, lastSeenId: inboundIds.at(-1) ?? lastSeenId };
   }
+  // If the watermark id is no longer in the loaded slice (-1), everything loaded
+  // counts as unread. Safe for in-call chat: the thread is short-lived and never
+  // paged/trimmed today. Revisit with a position/time sentinel if the Immersive
+  // rework (#1028) starts paging this thread.
   const seenIndex = lastSeenId ? inboundIds.lastIndexOf(lastSeenId) : -1;
   const unread = inboundIds.length - (seenIndex + 1);
   return { unread, lastSeenId };
@@ -92,7 +111,8 @@ export function syncCallChatUnread(
 ): void {
   const result = nextCallChatUnread({ inboundIds, lastSeenId, focused });
   lastSeenId = result.lastSeenId;
-  $callChatUnread.set(result.unread);
+  // Skip a no-op write so subscribers aren't notified when the count is unchanged.
+  if ($callChatUnread.get() !== result.unread) $callChatUnread.set(result.unread);
 }
 
 /** Clear the badge and the watermark — used at the start/end of a call. */

@@ -707,16 +707,19 @@ describe("call control bar chat toggle", () => {
   });
 
   test("shows an unread badge on the chat button only when there are unread messages", async () => {
+    // The unread count is folded into the button's own aria-label (a nested
+    // badge label would be ignored once the button has an aria-label), and the
+    // visual pill is aria-hidden.
     const withUnread = await renderCallControls({ chatUnread: 5 });
-    expect(withUnread).toContain('aria-label="5 unread messages"');
+    expect(withUnread).toContain('aria-label="Open chat, 5 unread messages"');
     expect(withUnread).toContain(">5<");
 
     const oneUnread = await renderCallControls({ chatUnread: 1 });
-    expect(oneUnread).toContain('aria-label="1 unread message"');
+    expect(oneUnread).toContain('aria-label="Open chat, 1 unread message"');
     expect(oneUnread).not.toContain("1 unread messages");
 
     const noUnread = await renderCallControls({ chatUnread: 0 });
-    expect(noUnread).not.toContain("unread messages");
+    expect(noUnread).not.toContain("unread message");
   });
 
   test("wires the chat toggle emit", () => {

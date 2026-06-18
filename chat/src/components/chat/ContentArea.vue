@@ -461,10 +461,14 @@ const activeCallThreadId = computed(() =>
 );
 
 // Messages on the active call's XEP-0201 thread, rendered in the Dock's Chat tab
-// (all of them, including the local user's own, so they see what they sent).
+// (all of them, including the local user's own, so they see what they sent — but
+// not the bodyless call-anchor card, which shares the thread id).
 const callChatMessages = computed(() =>
   activeCallThreadId.value
-    ? props.messages.filter((message) => message.threadId === activeCallThreadId.value)
+    ? props.messages.filter(
+        (message) =>
+          message.threadId === activeCallThreadId.value && !message.callThread,
+      )
     : [],
 );
 
@@ -472,12 +476,18 @@ const callChatMessages = computed(() =>
 // accumulate while the Chat tab isn't the focused dock tab and clear once it is.
 const callDockOpen = useStore($callDockOpen);
 const callDockTab = useStore($callDockTab);
+const callChatInboundIds = computed(() =>
+  inboundCallChatThreadIds(props.messages, activeCallThreadId.value),
+);
+// Key the watch on a stable string so it fires only when the call-thread inbound
+// ids (or focus) actually change — not on every unrelated conversation message,
+// reaction, or edit during a busy call.
 watch(
   [
-    () => inboundCallChatThreadIds(props.messages, activeCallThreadId.value),
+    () => callChatInboundIds.value.join("\n"),
     () => isCallChatTabFocused(callDockOpen.value, callDockTab.value),
   ],
-  ([inboundIds, focused]) => syncCallChatUnread(inboundIds, focused),
+  ([, focused]) => syncCallChatUnread(callChatInboundIds.value, focused),
   { immediate: true },
 );
 
