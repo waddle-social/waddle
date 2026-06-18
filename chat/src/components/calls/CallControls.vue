@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import {
+  Check,
   LayoutGrid,
   Maximize2,
   MessageSquare,
@@ -114,7 +115,11 @@ const moreMenuEl = ref<HTMLElement | null>(null);
 function menuItems(): HTMLElement[] {
   const root = moreMenuEl.value;
   if (!root) return [];
-  return Array.from(root.querySelectorAll<HTMLElement>('[role="menuitem"]'));
+  // Includes the checkbox item (Self-view) alongside the plain action items so
+  // every entry stays in the arrow-key roving-focus order.
+  return Array.from(
+    root.querySelectorAll<HTMLElement>('[role="menuitem"],[role="menuitemcheckbox"]'),
+  );
 }
 
 async function openMore(focusFirst: boolean): Promise<void> {
@@ -350,12 +355,14 @@ onBeforeUnmount(() => {
       >
         <button
           type="button"
-          role="menuitem"
+          role="menuitemcheckbox"
+          :aria-checked="!selfViewHidden"
           class="call-controls__more-item"
           @click="selectSelfView"
         >
           <ScanFace class="w-4 h-4" />
-          <span>{{ selfViewHidden ? "Show self-view" : "Hide self-view" }}</span>
+          <span>Self-view</span>
+          <Check v-if="!selfViewHidden" class="ml-auto w-4 h-4 text-primary" />
         </button>
         <button
           type="button"

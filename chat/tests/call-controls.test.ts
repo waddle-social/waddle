@@ -770,19 +770,30 @@ describe("call control bar restructure (#1020)", () => {
 });
 
 describe("call control bar hide self-view (#1021)", () => {
-  test("offers a Hide self-view action under More while the self-view is visible", async () => {
+  test("offers a checkable Self-view item under More, checked while the self-view is visible", async () => {
     const html = await renderCallControls({ selfViewHidden: false });
-    // A plain menuitem whose label is the action (Zoom/Meet convention),
-    // sitting in the same More menu as Call settings.
-    expect((html.match(/role="menuitem"/g) ?? []).length).toBeGreaterThanOrEqual(2);
-    expect(html).toContain("Hide self-view");
-    expect(html).not.toContain("Show self-view");
+    // A menuitemcheckbox with a stable label and aria-checked carrying state,
+    // matching the codebase's other in-menu binary toggles — so a screen reader
+    // announces the current state, not just the next action.
+    expect(html).toContain('role="menuitemcheckbox"');
+    expect(html).toContain("Self-view");
+    expect(html).toMatch(/role="menuitemcheckbox"[^>]*aria-checked="true"/);
   });
 
-  test("flips the action to Show self-view once the self-view is hidden", async () => {
+  test("unchecks the Self-view item once the self-view is hidden", async () => {
     const html = await renderCallControls({ selfViewHidden: true });
-    expect(html).toContain("Show self-view");
-    expect(html).not.toContain("Hide self-view");
+    expect(html).toContain("Self-view");
+    expect(html).toMatch(/role="menuitemcheckbox"[^>]*aria-checked="false"/);
+  });
+
+  test("keeps the checkable Self-view item in the roving-focus set with the other menu items", () => {
+    const source = readFileSync(
+      new URL("../src/components/calls/CallControls.vue", import.meta.url),
+      "utf8",
+    );
+    // The menu's keyboard navigation must collect both plain items and the
+    // checkbox item, or the toggle drops out of arrow-key focus order.
+    expect(source).toContain('[role="menuitemcheckbox"]');
   });
 
   test("wires the self-view item to the toggleSelfView emit", () => {
