@@ -7,13 +7,9 @@ const QUOTES_JSON: &str = include_str!("quotes.json");
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub(crate) struct Quote {
-    pub(crate) id: String,
     pub(crate) series: String,
-    pub(crate) episode: String,
     pub(crate) role: String,
-    pub(crate) text: String,
-    pub(crate) source_name: String,
-    pub(crate) source_url: String,
+    pub(crate) quote: String,
 }
 
 pub(crate) fn quote_catalog() -> Result<Vec<Quote>, types::ExtensionError> {
@@ -50,7 +46,7 @@ pub(crate) fn select_quote_with_rng(
 }
 
 pub(crate) fn quote_body(quote: &Quote) -> String {
-    format!("{}\n\n{}, {}", quote.text, quote.role, quote.series)
+    format!("{}\n\n{}, {}", quote.quote, quote.role, quote.series)
 }
 
 fn extension_error(code: types::ExtensionErrorCode, message: &str) -> types::ExtensionError {

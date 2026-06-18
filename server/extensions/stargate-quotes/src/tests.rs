@@ -3,6 +3,7 @@ use super::{
     select_quote_with_rng, take_sent_room_messages, types, COMMAND_NAME, COMMAND_NODE,
     COMMAND_RESULT_TEXT, PLUGIN_NS,
 };
+use serde_json::Value;
 
 #[test]
 fn manifest_registers_channel_stargate_command() {
@@ -42,14 +43,9 @@ fn quote_catalog_is_typed_and_covers_all_series() {
         .iter()
         .any(|quote| quote.series == "Stargate Universe"));
     assert!(quotes.len() >= 36);
-    assert!(quotes.iter().all(|quote| {
-        !quote.id.is_empty()
-            && !quote.episode.is_empty()
-            && !quote.role.is_empty()
-            && !quote.text.is_empty()
-            && !quote.source_name.is_empty()
-            && quote.source_url.starts_with("https://")
-    }));
+    assert!(quotes.iter().all(|quote| !quote.role.is_empty()
+        && !quote.quote.is_empty()
+        && !quote.series.is_empty()));
 }
 
 #[test]
@@ -58,7 +54,21 @@ fn quote_catalog_rejects_invalid_json() {
 }
 
 #[test]
-fn quote_body_renders_without_source_metadata() {
+fn quote_catalog_json_only_contains_rendered_fields() {
+    let values: Value = serde_json::from_str(include_str!("quotes.json")).expect("json parses");
+    let quotes = values.as_array().expect("quote catalog is a list");
+
+    assert!(quotes.iter().all(|quote| {
+        let fields = quote.as_object().expect("quote is object");
+        fields.len() == 3
+            && fields.contains_key("role")
+            && fields.contains_key("quote")
+            && fields.contains_key("series")
+    }));
+}
+
+#[test]
+fn quote_body_renders_plain_quote_with_role_and_series() {
     let quotes = quote_catalog().expect("quote catalog parses");
     let body = quote_body(&quotes[0]);
 
@@ -66,13 +76,11 @@ fn quote_body_renders_without_source_metadata() {
         body,
         format!(
             "{}\n\n{}, {}",
-            quotes[0].text, quotes[0].role, quotes[0].series
+            quotes[0].quote, quotes[0].role, quotes[0].series
         )
     );
     assert!(!body.starts_with('"'));
     assert!(!body.contains("\n\n- "));
-    assert!(!body.contains(quotes[0].source_name.as_str()));
-    assert!(!body.contains(quotes[0].source_url.as_str()));
 }
 
 #[test]
