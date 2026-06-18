@@ -60,9 +60,14 @@ export function buildCallRoster(input: BuildCallRosterInput): CallRosterRow[] {
     mediaByKey.set(key, media);
   }
 
+  // When we have no local identity yet (pre-connect), the self row still
+  // needs a stable key; fall back to "self". The dedup set is seeded with
+  // this same key so a remote can never collide with the self row.
+  const selfRowKey = selfKey || "self";
+
   const rows: CallRosterRow[] = [];
   rows.push({
-    key: selfKey || "self",
+    key: selfRowKey,
     identity: input.localIdentity ?? "you",
     label: "You",
     isSelf: true,
@@ -75,7 +80,7 @@ export function buildCallRoster(input: BuildCallRosterInput): CallRosterRow[] {
   // The roster list is authoritative for order; a participant present
   // only via a published track (e.g. a 1:1 peer before the presence list
   // catches up) is still an attendee, appended after the listed ones.
-  const seen = new Set<string>([selfKey]);
+  const seen = new Set<string>([selfRowKey]);
   const orderedIdentities = [
     ...input.remoteParticipantIdentities,
     ...input.remoteTracks.map((track) => track.participantIdentity),

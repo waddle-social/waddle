@@ -58,17 +58,23 @@ describe("call surfaces use the Participants dock", () => {
     expect(source).toContain("@toggle-participants");
   });
 
-  test("Expanded toggles the dock, renders it, and reflows the stage", () => {
+  test("Expanded toggles the dock, renders it gated on open, and reflows the stage", () => {
     const source = surfaceSource("CallExpandedSurface.vue");
     expect(source).toContain("$callDockOpen");
-    expect(source).toContain("CallDock");
-    expect(source).toContain("@toggle-participants");
+    expect(source).toContain("@toggle-participants=\"toggleCallDock\"");
+    // The dock renders only when open, as a sibling of the grid inside
+    // __main (a flex row), so the stage reflows beside it.
+    expect(source).toContain("<CallDock");
+    expect(source).toContain("v-if=\"dockOpen\"");
   });
 
-  test("Expanded Escape closes the dock before collapsing the call", () => {
+  test("Expanded Escape closes the open dock before collapsing the call", () => {
     const source = surfaceSource("CallExpandedSurface.vue");
     const start = source.indexOf("function onKeydown");
     const guard = source.slice(start, source.indexOf("collapseToSplit()", start));
-    expect(guard).toContain("dockOpen");
+    // The guard must actually close the dock (not merely mention the flag)
+    // and short-circuit before the collapse.
+    expect(guard).toContain("if (dockOpen.value)");
+    expect(guard).toContain("closeCallDock()");
   });
 });
