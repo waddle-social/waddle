@@ -769,6 +769,32 @@ describe("call control bar restructure (#1020)", () => {
   });
 });
 
+describe("call control bar hide self-view (#1021)", () => {
+  test("offers a Hide self-view action under More while the self-view is visible", async () => {
+    const html = await renderCallControls({ selfViewHidden: false });
+    // A plain menuitem whose label is the action (Zoom/Meet convention),
+    // sitting in the same More menu as Call settings.
+    expect((html.match(/role="menuitem"/g) ?? []).length).toBeGreaterThanOrEqual(2);
+    expect(html).toContain("Hide self-view");
+    expect(html).not.toContain("Show self-view");
+  });
+
+  test("flips the action to Show self-view once the self-view is hidden", async () => {
+    const html = await renderCallControls({ selfViewHidden: true });
+    expect(html).toContain("Show self-view");
+    expect(html).not.toContain("Hide self-view");
+  });
+
+  test("wires the self-view item to the toggleSelfView emit", () => {
+    const source = readFileSync(
+      new URL("../src/components/calls/CallControls.vue", import.meta.url),
+      "utf8",
+    );
+    expect(source).toContain("toggleSelfView");
+    expect(source).toContain("selfViewHidden");
+  });
+});
+
 async function renderCallControls(overrides: Record<string, unknown>): Promise<string> {
   const component = await loadVueComponent("../src/components/calls/CallControls.vue");
   const props = {
@@ -782,6 +808,7 @@ async function renderCallControls(overrides: Record<string, unknown>): Promise<s
     chatOpen: false,
     chatUnread: 0,
     viewMode: "gallery",
+    selfViewHidden: false,
     ...overrides,
   };
   return renderToString(createSSRApp({ render: () => h(component, props) }));

@@ -6,7 +6,12 @@ import {
   $lastCallError,
 } from "@/lib/calls/call-store";
 import { $callUiMode } from "@/lib/calls/ui-mode";
-import { $callViewMode, setCallViewMode } from "@/lib/calls/call-view-state";
+import {
+  $callSelfViewHidden,
+  $callViewMode,
+  setCallViewMode,
+  toggleCallSelfViewHidden,
+} from "@/lib/calls/call-view-state";
 import {
   $callConnecting,
   $callMicEnabled,
@@ -61,6 +66,7 @@ const props = defineProps<{
 const state = useStore($callState);
 const uiMode = useStore($callUiMode);
 const viewMode = useStore($callViewMode);
+const selfViewHidden = useStore($callSelfViewHidden);
 const lastError = useStore($lastCallError);
 const connecting = useStore($callConnecting);
 const micEnabled = useStore($callMicEnabled);
@@ -247,6 +253,7 @@ async function onHangup(): Promise<void> {
           :chat-open="false"
           :chat-unread="chatUnread"
           :view-mode="viewMode"
+          :self-view-hidden="selfViewHidden"
           @toggle-mic="toggleMic"
           @toggle-cam="toggleCam"
           @toggle-screen-share="toggleScreenShare"
@@ -255,6 +262,7 @@ async function onHangup(): Promise<void> {
           @toggle-chat="enterExpandedWithChat"
           @open-settings="settingsOpen = true"
           @set-view-mode="setCallViewMode"
+          @toggle-self-view="toggleCallSelfViewHidden"
           @hangup="onHangup"
         />
       </footer>

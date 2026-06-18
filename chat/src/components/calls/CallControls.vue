@@ -10,6 +10,7 @@ import {
   MonitorUp,
   MoreHorizontal,
   PhoneOff,
+  ScanFace,
   Settings,
   SquareUser,
   Users,
@@ -49,6 +50,8 @@ const props = defineProps<{
   chatUnread: number;
   /** The chosen stage layout — drives the view switcher's pressed state. */
   viewMode: CallViewMode;
+  /** True while the local self-view tile is hidden from this client's stage. */
+  selfViewHidden: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -60,6 +63,7 @@ const emit = defineEmits<{
   toggleChat: [];
   openSettings: [];
   setViewMode: [mode: CallViewMode];
+  toggleSelfView: [];
   hangup: [];
 }>();
 
@@ -174,6 +178,13 @@ function selectSettings(): void {
   emit("openSettings");
   // Focus moves into the dialog that opens — don't yank it back to the trigger.
   closeMore(false);
+}
+
+function selectSelfView(): void {
+  emit("toggleSelfView");
+  // Toggling self-view leaves no new surface to receive focus, so return it to
+  // the trigger as the menu closes.
+  closeMore(true);
 }
 
 function onDocumentPointerDown(event: PointerEvent): void {
@@ -337,6 +348,15 @@ onBeforeUnmount(() => {
         aria-label="More options"
         @keydown="onMoreMenuKeydown"
       >
+        <button
+          type="button"
+          role="menuitem"
+          class="call-controls__more-item"
+          @click="selectSelfView"
+        >
+          <ScanFace class="w-4 h-4" />
+          <span>{{ selfViewHidden ? "Show self-view" : "Hide self-view" }}</span>
+        </button>
         <button
           type="button"
           role="menuitem"
