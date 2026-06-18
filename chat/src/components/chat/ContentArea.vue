@@ -1585,7 +1585,6 @@ function dayDividerLabel(createdAt: string): string {
       :call-thread-id="activeCallThreadId"
       :call-chat-messages="callChatMessages"
       :avatar-url-by-author="avatarUrlByAuthor"
-      :current-user="currentUser"
       :is-sending="isSending"
       :disabled="!canShowComposer"
       :giphy-api-key="giphyApiKey"

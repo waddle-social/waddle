@@ -200,7 +200,7 @@ function onViewKeydown(event: KeyboardEvent): void {
       <span
         v-if="chatUnread > 0"
         class="call-controls__unread"
-        :aria-label="`${chatUnread} unread messages`"
+        :aria-label="`${chatUnread} unread message${chatUnread === 1 ? '' : 's'}`"
       >{{ chatUnread }}</span>
     </button>
     <button

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import MessageBody from "@/components/chat/MessageBody.vue";
 import MessageComposer from "@/components/chat/MessageComposer.vue";
@@ -20,7 +20,6 @@ import type {
 const props = defineProps<{
   messages: readonly TimelineMessage[];
   draft: string;
-  currentUser?: string;
   avatarUrlByAuthor: Record<string, string | null>;
   isSending?: boolean;
   disabled?: boolean;
@@ -51,11 +50,38 @@ function timeLabel(iso: string): string {
   if (Number.isNaN(date.getTime())) return "";
   return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
+
+// Keep the latest message in view when one arrives — but only when the reader is
+// already near the bottom, so scrolling up to read history isn't yanked away.
+const messagesRef = ref<HTMLElement | null>(null);
+const NEAR_BOTTOM_PX = 80;
+
+function isNearBottom(el: HTMLElement): boolean {
+  return el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX;
+}
+
+function scrollToBottom(): void {
+  const el = messagesRef.value;
+  if (el) el.scrollTop = el.scrollHeight;
+}
+
+// The watcher runs before the DOM patch (default "pre" flush), so `isNearBottom`
+// reflects the pre-append position; the actual scroll runs after the patch.
+watch(
+  () => props.messages.length,
+  (next, prev) => {
+    if (next <= prev) return;
+    const el = messagesRef.value;
+    if (!el || isNearBottom(el)) void nextTick(scrollToBottom);
+  },
+);
+
+onMounted(() => void nextTick(scrollToBottom));
 </script>
 
 <template>
   <div class="call-chat">
-    <div class="call-chat__messages" role="log" aria-label="Call chat messages">
+    <div ref="messagesRef" class="call-chat__messages" role="log" aria-label="Call chat messages">
       <p v-if="!hasMessages" class="call-chat__empty type-caption text-muted-foreground">
         No messages yet. Say hello.
       </p>

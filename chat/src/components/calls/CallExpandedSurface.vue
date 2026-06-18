@@ -78,7 +78,6 @@ const props = defineProps<{
   /** The active call's XEP-0201 thread messages, rendered in the Chat tab. */
   callChatMessages?: readonly TimelineMessage[];
   avatarUrlByAuthor?: Record<string, string | null>;
-  currentUser?: string;
   sendCallChatMessage?: (
     body: string,
     markup: MarkupSpan[],
@@ -333,7 +332,6 @@ onBeforeUnmount(() => {
           <CallChatPanel
             v-model:draft="callChatDraft"
             :messages="callChatMessages ?? []"
-            :current-user="currentUser"
             :avatar-url-by-author="avatarUrlByAuthor ?? {}"
             :is-sending="!!isSending"
             :disabled="!!disabled || !callThreadOverride"

@@ -711,6 +711,10 @@ describe("call control bar chat toggle", () => {
     expect(withUnread).toContain('aria-label="5 unread messages"');
     expect(withUnread).toContain(">5<");
 
+    const oneUnread = await renderCallControls({ chatUnread: 1 });
+    expect(oneUnread).toContain('aria-label="1 unread message"');
+    expect(oneUnread).not.toContain("1 unread messages");
+
     const noUnread = await renderCallControls({ chatUnread: 0 });
     expect(noUnread).not.toContain("unread messages");
   });

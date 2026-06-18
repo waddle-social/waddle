@@ -67,6 +67,15 @@ describe("CallDock", () => {
     expect(withUnread).toContain('aria-label="5 unread messages"');
     expect(withUnread).toContain(">5<");
 
+    const oneUnread = await renderVueComponent(
+      "../src/components/calls/CallDock.vue",
+      { rows: rosterFixture(), activeTab: "participants", chatUnread: 1 },
+      import.meta.url,
+    );
+    // Singular grammar for a single unread message.
+    expect(oneUnread).toContain('aria-label="1 unread message"');
+    expect(oneUnread).not.toContain("1 unread messages");
+
     const noUnread = await renderVueComponent(
       "../src/components/calls/CallDock.vue",
       { rows: rosterFixture(), activeTab: "participants", chatUnread: 0 },
