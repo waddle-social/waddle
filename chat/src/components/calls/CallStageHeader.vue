@@ -48,15 +48,18 @@ const { running, label } = useCallElapsed();
       class="call-stage-header__timer type-control"
       role="timer"
       aria-label="Call duration"
+      aria-live="off"
+      aria-atomic="true"
     >{{ running ? label : "Connecting…" }}</span>
     <CallConnectionIndicator />
-    <span
-      v-if="props.recording"
-      class="call-stage-header__recording"
-      role="status"
-    >
-      <Circle class="call-stage-header__recording-dot" aria-hidden="true" />
-      <span class="type-control">Recording</span>
+    <!-- Inert capture-state slot: a present-but-empty polite live region so
+         that, once capture lands and flips `recording` on, the inserted label
+         is announced. Empty (no dot, no label) until then. -->
+    <span class="call-stage-header__recording" role="status" aria-live="polite">
+      <template v-if="props.recording">
+        <Circle class="call-stage-header__recording-dot" aria-hidden="true" />
+        <span class="type-control">Recording</span>
+      </template>
     </span>
   </header>
 </template>

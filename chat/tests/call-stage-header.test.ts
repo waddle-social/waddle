@@ -59,7 +59,11 @@ describe("CallStageHeader", () => {
 
   test("keeps the recording indicator inert by default", async () => {
     const html = await renderHeader({ title: "Alice", subline: "Audio call" });
-    expect(html).not.toContain("Recording");
+    // The live-region slot exists (reserved for the future recording slice)…
+    expect(html).toContain('class="call-stage-header__recording"');
+    // …but shows no dot and no label until recording is wired on.
+    expect(html).not.toContain("call-stage-header__recording-dot");
+    expect(html).not.toContain(">Recording<");
   });
 
   test("renders the recording indicator when wired on (future recording slice)", async () => {
@@ -68,6 +72,7 @@ describe("CallStageHeader", () => {
       subline: "Audio call",
       recording: true,
     });
-    expect(html).toContain("Recording");
+    expect(html).toContain("call-stage-header__recording-dot");
+    expect(html).toContain(">Recording<");
   });
 });
