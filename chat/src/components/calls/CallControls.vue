@@ -2,6 +2,7 @@
 import {
   LayoutGrid,
   Maximize2,
+  MessageSquare,
   Mic,
   MicOff,
   Minimize2,
@@ -37,6 +38,11 @@ const props = defineProps<{
   participantsOpen: boolean;
   /** Attendee count shown as a badge on the participants button. */
   participantCount: number;
+  /** True while the dock is open on the Chat tab — drives the chat
+   *  button's pressed/expanded state. The parent owns the dock store. */
+  chatOpen: boolean;
+  /** Unread call-chat messages shown as a badge on the chat button. */
+  chatUnread: number;
   /** The chosen stage layout — drives the view switcher's pressed state. */
   viewMode: CallViewMode;
 }>();
@@ -47,6 +53,7 @@ const emit = defineEmits<{
   toggleScreenShare: [];
   toggleExpanded: [];
   toggleParticipants: [];
+  toggleChat: [];
   openSettings: [];
   setViewMode: [mode: CallViewMode];
   hangup: [];
@@ -181,6 +188,23 @@ function onViewKeydown(event: KeyboardEvent): void {
     </button>
     <button
       type="button"
+      class="call-controls__chat chat-icon-button chat-icon-button--md hover:bg-muted"
+      :class="{ 'bg-muted text-foreground': chatOpen }"
+      :title="chatOpen ? 'Close chat' : 'Open chat'"
+      :aria-label="chatOpen ? 'Close chat' : 'Open chat'"
+      :aria-pressed="chatOpen"
+      :aria-expanded="chatOpen"
+      @click="emit('toggleChat')"
+    >
+      <MessageSquare class="w-4 h-4" />
+      <span
+        v-if="chatUnread > 0"
+        class="call-controls__unread"
+        :aria-label="`${chatUnread} unread messages`"
+      >{{ chatUnread }}</span>
+    </button>
+    <button
+      type="button"
       class="chat-icon-button chat-icon-button--md hover:bg-muted"
       title="Call settings"
       @click="emit('openSettings')"
@@ -241,6 +265,28 @@ function onViewKeydown(event: KeyboardEvent): void {
   padding: 0 0.3125rem;
   border-radius: 9999px;
   background: color-mix(in oklab, var(--foreground) 14%, transparent);
+  font-size: 0.6875rem;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The chat toggle widens into a pill when an unread badge rides on it,
+ * mirroring the participants toggle. */
+.call-controls__chat {
+  width: auto;
+  gap: 0.375rem;
+  padding-inline: 0.5rem;
+}
+
+.call-controls__unread {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.125rem;
+  height: 1.125rem;
+  padding: 0 0.3125rem;
+  border-radius: 9999px;
+  background: var(--primary);
+  color: var(--primary-foreground);
   font-size: 0.6875rem;
   font-variant-numeric: tabular-nums;
 }

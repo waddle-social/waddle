@@ -692,6 +692,40 @@ describe("call control bar participants toggle", () => {
   });
 });
 
+describe("call control bar chat toggle", () => {
+  test("renders an accessible chat button reflecting the closed dock state", async () => {
+    const html = await renderCallControls({ chatOpen: false });
+
+    expect(html).toContain('aria-label="Open chat"');
+  });
+
+  test("reflects the open Chat tab state on the chat button", async () => {
+    const html = await renderCallControls({ chatOpen: true });
+
+    expect(html).toContain('aria-label="Close chat"');
+    expect(html).toMatch(/aria-label="Close chat"[^>]*aria-pressed="true"/);
+  });
+
+  test("shows an unread badge on the chat button only when there are unread messages", async () => {
+    const withUnread = await renderCallControls({ chatUnread: 5 });
+    expect(withUnread).toContain('aria-label="5 unread messages"');
+    expect(withUnread).toContain(">5<");
+
+    const noUnread = await renderCallControls({ chatUnread: 0 });
+    expect(noUnread).not.toContain("unread messages");
+  });
+
+  test("wires the chat toggle emit", () => {
+    const source = readFileSync(
+      new URL("../src/components/calls/CallControls.vue", import.meta.url),
+      "utf8",
+    );
+    expect(source).toContain("toggleChat");
+    expect(source).toContain("chatOpen");
+    expect(source).toContain("chatUnread");
+  });
+});
+
 async function renderCallControls(overrides: Record<string, unknown>): Promise<string> {
   const component = await loadVueComponent("../src/components/calls/CallControls.vue");
   const props = {
@@ -702,6 +736,8 @@ async function renderCallControls(overrides: Record<string, unknown>): Promise<s
     isExpanded: false,
     participantsOpen: false,
     participantCount: 0,
+    chatOpen: false,
+    chatUnread: 0,
     viewMode: "gallery",
     ...overrides,
   };
