@@ -35,11 +35,24 @@ const genericCommand: DiscoveredExtensionCommand = {
   inlineField: "prompt",
 };
 
+const stargateCommand: DiscoveredExtensionCommand = {
+  serviceJid: "extensions.example.com",
+  node: "urn:waddle:extension:1:stargate-quotes",
+  name: "/stargate",
+  scope: "channel",
+  composerPrefix: "stargate",
+};
+
 interface SubmitCall {
   command: DiscoveredExtensionCommand;
   sessionId: string;
   fields: ExtensionCommandFormField[];
   action?: ExtensionCommandAction;
+  roomJid?: string;
+}
+
+interface InvokeCall {
+  command: DiscoveredExtensionCommand;
   roomJid?: string;
 }
 
@@ -81,17 +94,18 @@ function executingResult(fields: ExtensionCommandFormField[], allowed: Extension
 function fakeClient(executeResults: ExtensionCommandResult[], options: {
   events?: string[] | undefined;
   submitError?: Error | undefined;
+  discoveredCommands?: DiscoveredExtensionCommand[] | undefined;
 } = {}): {
   client: Ref<unknown>;
   submitCalls: SubmitCall[];
-  invokeCalls: DiscoveredExtensionCommand[];
+  invokeCalls: InvokeCall[];
 } {
   const submitCalls: SubmitCall[] = [];
-  const invokeCalls: DiscoveredExtensionCommand[] = [];
+  const invokeCalls: InvokeCall[] = [];
   const queue = [...executeResults];
   const fake = {
-    async invokeExtensionCommand(command: DiscoveredExtensionCommand): Promise<ExtensionCommandResult> {
-      invokeCalls.push(command);
+    async invokeExtensionCommand(command: DiscoveredExtensionCommand, roomJid?: string): Promise<ExtensionCommandResult> {
+      invokeCalls.push({ command, roomJid });
       return queue.shift() ?? { status: "completed", notes: [] };
     },
     async submitExtensionCommandForm(
@@ -107,7 +121,7 @@ function fakeClient(executeResults: ExtensionCommandResult[], options: {
       return { status: "completed", notes: [] };
     },
     async discoverExtensionCommands(): Promise<DiscoveredExtensionCommand[]> {
-      return [];
+      return options.discoveredCommands ?? [];
     },
   };
   return { client: ref(fake), submitCalls, invokeCalls };
@@ -120,21 +134,24 @@ function createLauncher(
     sendPublicChannelMessage?: (body: string) => Promise<void>;
     events?: string[] | undefined;
     submitError?: Error | undefined;
+    discoveredCommands?: DiscoveredExtensionCommand[] | undefined;
   } = {},
 ) {
+  const roomJid = ref(options.roomJid ?? null);
   const fake = fakeClient(executeResults, {
     events: options.events,
     submitError: options.submitError,
+    discoveredCommands: options.discoveredCommands,
   });
   const launcher = useExtensionLauncher({
     xmppClient: fake.client as never,
-    roomJid: ref(options.roomJid ?? null),
+    roomJid,
     invokeExtensionAction: ref(undefined),
     sendPublicChannelMessage: ref(options.sendPublicChannelMessage),
     focusPalette: () => {},
     focusComposerExtensions: () => {},
   });
-  return { ...fake, launcher };
+  return { ...fake, launcher, roomJid };
 }
 
 describe("dispatchSlashInvocation: inline-submit", () => {
@@ -152,7 +169,7 @@ describe("dispatchSlashInvocation: inline-submit", () => {
     const ok = await launcher.dispatchSlashInvocation(invocation);
 
     expect(ok).toBe(true);
-    expect(invokeCalls).toEqual([aiCommand]);
+    expect(invokeCalls).toEqual([{ command: aiCommand, roomJid: undefined }]);
     expect(submitCalls).toHaveLength(1);
     expect(submitCalls[0].action).toBe("complete");
     expect(submitCalls[0].fields.find((f) => f.name === "prompt")?.values).toEqual([
@@ -162,7 +179,7 @@ describe("dispatchSlashInvocation: inline-submit", () => {
   });
 
   test("passes the active room into XEP-0050 inline command submissions", async () => {
-    const { launcher, submitCalls } = createLauncher([
+    const { launcher, submitCalls, invokeCalls } = createLauncher([
       executingResult([field("prompt", { required: true })], ["complete", "cancel"]),
     ], { roomJid: "pub@muc.example.com" });
 
@@ -173,6 +190,7 @@ describe("dispatchSlashInvocation: inline-submit", () => {
       value: "tell the room",
     });
 
+    expect(invokeCalls[0]).toEqual({ command: aiCommand, roomJid: "pub@muc.example.com" });
     expect(submitCalls).toHaveLength(1);
     expect(submitCalls[0].roomJid).toBe("pub@muc.example.com");
   });
@@ -368,6 +386,22 @@ describe("dispatchSlashInvocation: inline-submit", () => {
 });
 
 describe("dispatchSlashInvocation: open-palette", () => {
+  test("passes the active room into initial execute for single-stage channel commands", async () => {
+    const { launcher, invokeCalls, submitCalls } = createLauncher([
+      { status: "completed", notes: [] },
+    ], { roomJid: "pub@muc.example.com" });
+
+    const ok = await launcher.dispatchSlashInvocation({
+      kind: "open-palette",
+      command: stargateCommand,
+    });
+
+    expect(ok).toBe(true);
+    expect(invokeCalls).toEqual([{ command: stargateCommand, roomJid: "pub@muc.example.com" }]);
+    expect(submitCalls).toEqual([]);
+    expect(launcher.commandStates.value[stargateCommand.node]?.state).toBe("success");
+  });
+
   test("opens the palette and prefills the first required visible field", async () => {
     const { launcher, submitCalls } = createLauncher([
       executingResult([
@@ -419,7 +453,168 @@ describe("dispatchSlashInvocation: open-palette", () => {
   });
 });
 
+describe("invokeCommand", () => {
+  test("passes the active room into direct palette command execution", async () => {
+    const { launcher, invokeCalls } = createLauncher([
+      { status: "completed", notes: [] },
+    ], { roomJid: "pub@muc.example.com" });
+
+    await launcher.invokeCommand(stargateCommand);
+
+    expect(invokeCalls).toEqual([{ command: stargateCommand, roomJid: "pub@muc.example.com" }]);
+    expect(launcher.commandStates.value[stargateCommand.node]?.state).toBe("success");
+  });
+
+  test("ignores pending command execution results after a conversation reset", async () => {
+    let resolveInvoke: ((result: ExtensionCommandResult) => void) | null = null;
+    const invokeCalls: InvokeCall[] = [];
+    const fake = {
+      async invokeExtensionCommand(command: DiscoveredExtensionCommand, roomJid?: string): Promise<ExtensionCommandResult> {
+        invokeCalls.push({ command, roomJid });
+        return new Promise((resolve) => {
+          resolveInvoke = resolve;
+        });
+      },
+      async submitExtensionCommandForm(): Promise<ExtensionCommandResult> {
+        return { status: "completed", notes: [] };
+      },
+      async discoverExtensionCommands(): Promise<DiscoveredExtensionCommand[]> {
+        return [];
+      },
+    };
+    const launcher = useExtensionLauncher({
+      xmppClient: ref(fake) as never,
+      roomJid: ref("room-a@muc.example.com"),
+      invokeExtensionAction: ref(undefined),
+      focusPalette: () => {},
+      focusComposerExtensions: () => {},
+    });
+
+    const pending = launcher.dispatchSlashInvocation({
+      kind: "open-palette",
+      command: pollCommand,
+    });
+    launcher.reset();
+    resolveInvoke?.(executingResult([field("question", { required: true })]));
+
+    expect(await pending).toBe(false);
+    expect(invokeCalls).toEqual([{ command: pollCommand, roomJid: "room-a@muc.example.com" }]);
+    expect(launcher.commandForms.value).toEqual({});
+    expect(launcher.commandStates.value).toEqual({});
+  });
+});
+
+describe("extension command discovery lifecycle", () => {
+  test("keeps discovered commands across conversation UI resets", async () => {
+    const { launcher } = createLauncher([], {
+      roomJid: "pub@muc.example.com",
+      discoveredCommands: [stargateCommand],
+    });
+
+    await launcher.ensureDiscovered();
+    expect(launcher.commands.value).toEqual([stargateCommand]);
+    expect(launcher.availableCommands.value).toEqual([stargateCommand]);
+
+    launcher.reset();
+
+    expect(launcher.commands.value).toEqual([stargateCommand]);
+    expect(launcher.availableCommands.value).toEqual([stargateCommand]);
+    expect(launcher.open.value).toBe(false);
+    expect(launcher.commandStates.value).toEqual({});
+  });
+
+  test("clears discovered commands when explicitly resetting the session", async () => {
+    const { launcher } = createLauncher([], {
+      discoveredCommands: [stargateCommand],
+    });
+
+    await launcher.ensureDiscovered();
+    launcher.reset({ clearCommands: true });
+
+    expect(launcher.commands.value).toEqual([]);
+  });
+
+  test("retries discovery after an empty result", async () => {
+    const discovered = [
+      [],
+      [stargateCommand],
+    ];
+    const fake = {
+      async discoverExtensionCommands(): Promise<DiscoveredExtensionCommand[]> {
+        return discovered.shift() ?? [];
+      },
+      async invokeExtensionCommand(): Promise<ExtensionCommandResult> {
+        return { status: "completed", notes: [] };
+      },
+      async submitExtensionCommandForm(): Promise<ExtensionCommandResult> {
+        return { status: "completed", notes: [] };
+      },
+    };
+    const launcher = useExtensionLauncher({
+      xmppClient: ref(fake) as never,
+      roomJid: ref("pub@muc.example.com"),
+      invokeExtensionAction: ref(undefined),
+      focusPalette: () => {},
+      focusComposerExtensions: () => {},
+    });
+
+    await launcher.ensureDiscovered();
+    expect(launcher.commands.value).toEqual([]);
+
+    await launcher.ensureDiscovered();
+    expect(launcher.commands.value).toEqual([stargateCommand]);
+    expect(launcher.availableCommands.value).toEqual([stargateCommand]);
+  });
+
+  test("ignores stale discovery results after a session reset", async () => {
+    let resolveDiscovery: ((commands: DiscoveredExtensionCommand[]) => void) | null = null;
+    const fake = {
+      async discoverExtensionCommands(): Promise<DiscoveredExtensionCommand[]> {
+        return new Promise((resolve) => {
+          resolveDiscovery = resolve;
+        });
+      },
+      async invokeExtensionCommand(): Promise<ExtensionCommandResult> {
+        return { status: "completed", notes: [] };
+      },
+      async submitExtensionCommandForm(): Promise<ExtensionCommandResult> {
+        return { status: "completed", notes: [] };
+      },
+    };
+    const launcher = useExtensionLauncher({
+      xmppClient: ref(fake) as never,
+      roomJid: ref("pub@muc.example.com"),
+      invokeExtensionAction: ref(undefined),
+      focusPalette: () => {},
+      focusComposerExtensions: () => {},
+    });
+
+    const pendingDiscovery = launcher.ensureDiscovered();
+    launcher.reset({ clearCommands: true });
+    resolveDiscovery?.([stargateCommand]);
+    await pendingDiscovery;
+
+    expect(launcher.commands.value).toEqual([]);
+    expect(launcher.availableCommands.value).toEqual([]);
+  });
+});
+
 describe("submitForm: public channel output", () => {
+  test("uses the room captured when the command form was opened", async () => {
+    const { launcher, submitCalls, roomJid } = createLauncher([
+      executingResult([field("prompt", { required: true })], ["complete", "cancel"]),
+    ], { roomJid: "room-a@muc.example.com" });
+    await launcher.invokeCommand(aiCommand);
+    roomJid.value = "room-b@muc.example.com";
+    launcher.updateField(aiCommand.node, "prompt", ["stay in room a"]);
+
+    const ok = await launcher.submitForm(aiCommand, "complete", { skipPublicPrompt: true });
+
+    expect(ok).toBe(true);
+    expect(submitCalls).toHaveLength(1);
+    expect(submitCalls[0].roomJid).toBe("room-a@muc.example.com");
+  });
+
   test("posts the user's prompt to the room before submitting the command", async () => {
     const events: string[] = [];
     const { launcher, submitCalls } = createLauncher([

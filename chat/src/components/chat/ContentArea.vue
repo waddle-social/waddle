@@ -456,7 +456,8 @@ const activeCallThreadId = computed(() =>
 
 watch(
   () => props.xmppClient,
-  (client) => {
+  (client, previousClient) => {
+    if (client !== previousClient) resetExtensionLauncherState({ clearCommands: true });
     if (client) void extensionLauncher.ensureDiscovered();
   },
   { immediate: true },
@@ -756,6 +757,7 @@ watch(conversationScope, () => {
   clearReplyJumpNotice();
   clearReconnectedNotice();
   resetExtensionLauncherState();
+  if (props.xmppClient) void extensionLauncher.ensureDiscovered();
   forumTitle.value = "";
 });
 
