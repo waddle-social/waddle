@@ -3,7 +3,7 @@ import { atom } from "nanostores";
 /**
  * Wall-clock instant (ms epoch) at which the active call's LiveKit room
  * connected, or `null` while no call is connected. The engine stamps it
- * on `connected` and clears it on `disconnect`, mirroring the
+ * on the `connected` event and clears it on `disconnected`, mirroring the
  * connection-quality lifecycle. The stage-header reads it to drive a
  * live elapsed-time timer that survives split↔expanded remounts (the
  * timestamp lives in the store, not in component state).

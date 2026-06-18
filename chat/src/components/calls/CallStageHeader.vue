@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { Circle } from "lucide-vue-next";
 import { useCallElapsed } from "@/lib/calls/use-call-elapsed";
 import CallConnectionIndicator from "./CallConnectionIndicator.vue";
 
@@ -37,17 +36,27 @@ const { running, label } = useCallElapsed();
     class="call-stage-header"
     :class="{ 'call-stage-header--compact': props.compact }"
   >
-    <span class="call-stage-header__live-dot" aria-hidden="true" />
+    <!-- The live dot only goes green + pulses once the room is connected; before
+         that it stays muted and static so it doesn't imply the call is already
+         live. Always present so the connect transition doesn't reflow. -->
+    <span
+      class="call-stage-header__live-dot"
+      :class="{ 'call-stage-header__live-dot--live': running }"
+      aria-hidden="true"
+    />
     <div class="call-stage-header__meta">
       <div class="call-stage-header__title type-control truncate">{{ props.title }}</div>
       <div v-if="props.subline" class="call-stage-header__subline type-caption truncate">
         {{ props.subline }}
       </div>
     </div>
+    <!-- The timer role applies only to an actual duration; while connecting this
+         is plain status text, so the role and label are dropped until it runs.
+         The per-second tick is non-announcing so it never floods a screen reader. -->
     <span
       class="call-stage-header__timer type-control"
-      role="timer"
-      aria-label="Call duration"
+      :role="running ? 'timer' : undefined"
+      :aria-label="running ? 'Call duration' : undefined"
       aria-live="off"
       aria-atomic="true"
     >{{ running ? label : "Connecting…" }}</span>
@@ -57,7 +66,7 @@ const { running, label } = useCallElapsed();
          is announced. Empty (no dot, no label) until then. -->
     <span class="call-stage-header__recording" role="status" aria-live="polite">
       <template v-if="props.recording">
-        <Circle class="call-stage-header__recording-dot" aria-hidden="true" />
+        <span class="call-stage-header__recording-dot" aria-hidden="true" />
         <span class="type-control">Recording</span>
       </template>
     </span>
@@ -82,13 +91,19 @@ const { running, label } = useCallElapsed();
   width: 0.5rem;
   height: 0.5rem;
   border-radius: 9999px;
+  /* Muted + static while connecting — not yet "live". */
+  background: var(--muted-foreground);
+}
+
+/* Connected: green + pulsing. */
+.call-stage-header__live-dot--live {
   background: oklch(0.7 0.18 145);
   box-shadow: 0 0 0 4px color-mix(in oklab, oklch(0.7 0.18 145) 25%, transparent);
   animation: call-stage-live-pulse 1.6s ease-in-out infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .call-stage-header__live-dot {
+  .call-stage-header__live-dot--live {
     animation: none;
   }
 }
@@ -125,9 +140,12 @@ const { running, label } = useCallElapsed();
   color: var(--destructive);
 }
 
+/* A CSS-native filled circle — unambiguously solid, no SVG paint inheritance. */
 .call-stage-header__recording-dot {
+  flex: none;
   width: 0.625rem;
   height: 0.625rem;
-  fill: currentColor;
+  border-radius: 9999px;
+  background: currentColor;
 }
 </style>

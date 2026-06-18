@@ -10,7 +10,7 @@ import {
  * Live elapsed-time clock for the call stage-header.
  *
  * Reads the store-owned `$callActiveSince` stamp (set by the engine on
- * `connected`, cleared on `disconnect`) and re-renders a `M:SS` /
+ * the `connected` event, cleared on `disconnected`) and re-renders a `M:SS` /
  * `H:MM:SS` label once per second. Keeping the start instant in the
  * store — not in component state — means the timer survives the
  * split↔expanded remount of the surface that hosts the header.

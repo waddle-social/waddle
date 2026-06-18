@@ -52,6 +52,25 @@ describe("CallStageHeader", () => {
     }
   });
 
+  test("drops role=timer (and goes live) only once the call clock is running", async () => {
+    // Connecting: no real duration yet, so no timer role and the dot is muted.
+    const connecting = await renderHeader({ title: "Alice", subline: "Audio call" });
+    expect(connecting).not.toContain('role="timer"');
+    expect(connecting).not.toContain("call-stage-header__live-dot--live");
+
+    const fixed = 1_700_000_000_000;
+    const original = Date.now;
+    Date.now = () => fixed;
+    try {
+      setCallActiveSince(fixed - 5_000);
+      const running = await renderHeader({ title: "Alice", subline: "Audio call" });
+      expect(running).toContain('role="timer"');
+      expect(running).toContain("call-stage-header__live-dot--live");
+    } finally {
+      Date.now = original;
+    }
+  });
+
   test("hosts the connection-quality indicator (relocated from the control bar)", async () => {
     const html = await renderHeader({ title: "Alice", subline: "Audio call" });
     expect(html).toContain("call-connection");

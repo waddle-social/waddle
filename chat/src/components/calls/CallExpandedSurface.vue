@@ -246,6 +246,18 @@ async function onSendCallChat(
 function onKeydown(event: KeyboardEvent): void {
   if (!isOpen.value) return;
   if (event.key !== "Escape") return;
+  // The control bar's More overflow owns Escape while open. This listener runs
+  // in the CAPTURE phase, so without this guard it would collapse the call
+  // before the menu's own bubble-phase Escape handler could simply close the
+  // menu. Defer to it: an open menu-button advertises `aria-expanded="true"`.
+  if (
+    typeof document !== "undefined" &&
+    document.querySelector(
+      '.call-controls [aria-haspopup="menu"][aria-expanded="true"]',
+    )
+  ) {
+    return;
+  }
   // The settings modal owns Escape while open: dismiss it rather than
   // collapsing the whole expanded call out from under it. This listener
   // runs in the CAPTURE phase so it sees the still-open flag before
