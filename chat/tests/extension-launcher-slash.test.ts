@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { ref, type Ref } from "vue";
 import { useExtensionLauncher } from "../src/channels/extension-launcher";
+import type { ExtensionAnnotationAction } from "../src/lib/chat-ui";
 import type {
   DiscoveredExtensionCommand,
   ExtensionCommandAction,
@@ -92,10 +93,31 @@ function executingResult(fields: ExtensionCommandFormField[], allowed: Extension
   };
 }
 
+function launchResult(): ExtensionCommandResult {
+  return {
+    status: "completed",
+    notes: [],
+    form: {
+      fields: [
+        { name: "launch-count", value: "1" },
+        { name: "launch#0#id", value: "route-1" },
+        { name: "launch#0#plugin", value: "generic" },
+        { name: "launch#0#action", value: "finish" },
+        { name: "launch#0#command-node", value: genericCommand.node },
+        { name: "launch#0#label", value: "Finish" },
+        { name: "launch#0#waddle-id", value: "waddle-1" },
+        { name: "launch#0#token", value: "token-1" },
+        { name: "launch#0#expires-at", value: "2026-06-18T12:00:00Z" },
+      ],
+    },
+  };
+}
+
 function fakeClient(executeResults: ExtensionCommandResult[], options: {
   events?: string[] | undefined;
   invokeError?: Error | undefined;
   submitError?: Error | undefined;
+  submitResults?: ExtensionCommandResult[] | undefined;
   discoveredCommands?: DiscoveredExtensionCommand[] | undefined;
 } = {}): {
   client: Ref<unknown>;
@@ -105,6 +127,7 @@ function fakeClient(executeResults: ExtensionCommandResult[], options: {
   const submitCalls: SubmitCall[] = [];
   const invokeCalls: InvokeCall[] = [];
   const queue = [...executeResults];
+  const submitQueue = [...(options.submitResults ?? [])];
   const fake = {
     async invokeExtensionCommand(command: DiscoveredExtensionCommand, roomJid?: string): Promise<ExtensionCommandResult> {
       invokeCalls.push({ command, roomJid });
@@ -121,7 +144,7 @@ function fakeClient(executeResults: ExtensionCommandResult[], options: {
       options.events?.push("submit");
       submitCalls.push({ command, sessionId, fields, action, roomJid });
       if (options.submitError) throw options.submitError;
-      return { status: "completed", notes: [] };
+      return submitQueue.shift() ?? { status: "completed", notes: [] };
     },
     async discoverExtensionCommands(): Promise<DiscoveredExtensionCommand[]> {
       return options.discoveredCommands ?? [];
@@ -135,9 +158,11 @@ function createLauncher(
   options: {
     roomJid?: string | null;
     sendPublicChannelMessage?: (body: string) => Promise<void>;
+    invokeExtensionAction?: (action: ExtensionAnnotationAction) => Promise<ExtensionCommandResult>;
     events?: string[] | undefined;
     invokeError?: Error | undefined;
     submitError?: Error | undefined;
+    submitResults?: ExtensionCommandResult[] | undefined;
     discoveredCommands?: DiscoveredExtensionCommand[] | undefined;
   } = {},
 ) {
@@ -146,12 +171,13 @@ function createLauncher(
     events: options.events,
     invokeError: options.invokeError,
     submitError: options.submitError,
+    submitResults: options.submitResults,
     discoveredCommands: options.discoveredCommands,
   });
   const launcher = useExtensionLauncher({
     xmppClient: fake.client as never,
     roomJid,
-    invokeExtensionAction: ref(undefined),
+    invokeExtensionAction: ref(options.invokeExtensionAction),
     sendPublicChannelMessage: ref(options.sendPublicChannelMessage),
     focusPalette: () => {},
     focusComposerExtensions: () => {},
@@ -274,6 +300,7 @@ describe("dispatchSlashInvocation: inline-submit", () => {
     expect(submitCalls).toEqual([]);
     expect(launcher.commandStates.value[aiCommand.node]?.state).toBe("error");
     expect(launcher.commandStates.value[aiCommand.node]?.detail).toBe("channel send failed");
+    expect(launcher.open.value).toBe(true);
   });
 
   test("returns false and surfaces an error state when the XMPP client is null", async () => {
@@ -295,6 +322,27 @@ describe("dispatchSlashInvocation: inline-submit", () => {
     expect(ok).toBe(false);
     expect(launcher.state.value).toBe("error");
     expect(launcher.detail.value).toContain("disconnected");
+    expect(launcher.open.value).toBe(true);
+  });
+
+  test("opens the palette when inline command invocation fails", async () => {
+    const { launcher } = createLauncher([], {
+      invokeError: new Error("invoke failed"),
+    });
+
+    const ok = await launcher.dispatchSlashInvocation({
+      kind: "inline-submit",
+      command: aiCommand,
+      fieldName: "prompt",
+      value: "tell me a joke",
+    });
+
+    expect(ok).toBe(false);
+    expect(launcher.commandStates.value[aiCommand.node]).toEqual({
+      state: "error",
+      detail: "invoke failed",
+    });
+    expect(launcher.open.value).toBe(true);
   });
 
   test("falls back to the palette when the executing form does not allow `complete`", async () => {
@@ -329,6 +377,57 @@ describe("dispatchSlashInvocation: inline-submit", () => {
 
     expect(submitCalls).toEqual([]);
     expect(launcher.commandStates.value[aiCommand.node]?.state).toBe("success");
+    expect(launcher.open.value).toBe(false);
+  });
+
+  test("opens the palette when the initial inline invoke returns a warning", async () => {
+    const { launcher, submitCalls } = createLauncher([
+      {
+        status: "completed",
+        notes: [{ type: "warning", value: "inline command needs attention" }],
+      },
+    ]);
+
+    const ok = await launcher.dispatchSlashInvocation({
+      kind: "inline-submit",
+      command: aiCommand,
+      fieldName: "prompt",
+      value: "tell me a joke",
+    });
+
+    expect(ok).toBe(true);
+    expect(submitCalls).toEqual([]);
+    expect(launcher.commandStates.value[aiCommand.node]).toEqual({
+      state: "warning",
+      detail: "inline command needs attention",
+    });
+    expect(launcher.open.value).toBe(true);
+  });
+
+  test("opens the palette when inline submit returns a warning result", async () => {
+    const { launcher, submitCalls } = createLauncher([
+      executingResult([field("prompt", { required: true })], ["complete", "cancel"]),
+    ], {
+      submitResults: [{
+        status: "completed",
+        notes: [{ type: "warning", value: "submit needs attention" }],
+      }],
+    });
+
+    const ok = await launcher.dispatchSlashInvocation({
+      kind: "inline-submit",
+      command: aiCommand,
+      fieldName: "prompt",
+      value: "tell me a joke",
+    });
+
+    expect(ok).toBe(true);
+    expect(submitCalls).toHaveLength(1);
+    expect(launcher.commandStates.value[aiCommand.node]).toEqual({
+      state: "warning",
+      detail: "submit needs attention",
+    });
+    expect(launcher.open.value).toBe(true);
   });
 
   test("returns false when inline command submission fails", async () => {
@@ -349,6 +448,7 @@ describe("dispatchSlashInvocation: inline-submit", () => {
     expect(submitCalls).toHaveLength(1);
     expect(launcher.commandStates.value[aiCommand.node]?.state).toBe("error");
     expect(launcher.commandStates.value[aiCommand.node]?.detail).toBe("submit failed");
+    expect(launcher.open.value).toBe(true);
   });
 
   test("returns false after posting public /ai prompt when command submission fails", async () => {
@@ -387,6 +487,7 @@ describe("dispatchSlashInvocation: inline-submit", () => {
     expect(submitCalls).toHaveLength(1);
     expect(launcher.commandStates.value[aiCommand.node]?.state).toBe("error");
     expect(launcher.commandStates.value[aiCommand.node]?.detail).toBe("submit failed");
+    expect(launcher.open.value).toBe(true);
   });
 });
 
@@ -483,7 +584,10 @@ describe("dispatchSlashInvocation: direct-execute", () => {
 describe("dispatchSlashInvocation: open-palette", () => {
   test("passes the active room into initial execute for single-stage channel commands", async () => {
     const { launcher, invokeCalls, submitCalls } = createLauncher([
-      { status: "completed", notes: [] },
+      {
+        status: "completed",
+        notes: [{ type: "info", value: "Stargate quote posted to channel." }],
+      },
     ], { roomJid: "pub@muc.example.com" });
 
     const ok = await launcher.dispatchSlashInvocation({
@@ -494,7 +598,11 @@ describe("dispatchSlashInvocation: open-palette", () => {
     expect(ok).toBe(true);
     expect(invokeCalls).toEqual([{ command: stargateCommand, roomJid: "pub@muc.example.com" }]);
     expect(submitCalls).toEqual([]);
-    expect(launcher.commandStates.value[stargateCommand.node]?.state).toBe("success");
+    expect(launcher.open.value).toBe(false);
+    expect(launcher.commandStates.value[stargateCommand.node]).toEqual({
+      state: "success",
+      detail: "Stargate quote posted to channel.",
+    });
   });
 
   test("opens the palette and prefills the first required visible field", async () => {
@@ -560,6 +668,78 @@ describe("invokeCommand", () => {
     expect(launcher.commandStates.value[stargateCommand.node]?.state).toBe("success");
   });
 
+  test("closes the palette after a clean no-form command execution", async () => {
+    const { launcher } = createLauncher([
+      { status: "completed", notes: [] },
+    ], { roomJid: "pub@muc.example.com" });
+    launcher.open.value = true;
+
+    await launcher.invokeCommand(stargateCommand);
+
+    expect(launcher.open.value).toBe(false);
+  });
+
+  test("closes the palette after a no-form success result with an info note", async () => {
+    const { launcher } = createLauncher([
+      {
+        status: "completed",
+        notes: [{ type: "info", value: "Stargate quote posted to channel." }],
+      },
+    ], { roomJid: "pub@muc.example.com" });
+    launcher.open.value = true;
+
+    await launcher.invokeCommand(stargateCommand);
+
+    expect(launcher.open.value).toBe(false);
+    expect(launcher.commandStates.value[stargateCommand.node]).toEqual({
+      state: "success",
+      detail: "Stargate quote posted to channel.",
+    });
+  });
+
+  test("keeps the palette open when command execution returns a form", async () => {
+    const { launcher } = createLauncher([
+      executingResult([field("question", { required: true })]),
+    ], { roomJid: "pub@muc.example.com" });
+
+    await launcher.invokeCommand(pollCommand);
+
+    expect(launcher.open.value).toBe(true);
+    expect(launcher.commandForms.value[pollCommand.node]?.fields[0]?.name).toBe("question");
+  });
+
+  test("opens the palette when command execution returns a warning", async () => {
+    const { launcher } = createLauncher([
+      {
+        status: "completed",
+        notes: [{ type: "warning", value: "command needs attention" }],
+      },
+    ], { roomJid: "pub@muc.example.com" });
+
+    await launcher.invokeCommand(stargateCommand);
+
+    expect(launcher.open.value).toBe(true);
+    expect(launcher.commandStates.value[stargateCommand.node]).toEqual({
+      state: "warning",
+      detail: "command needs attention",
+    });
+  });
+
+  test("opens the palette when command execution fails", async () => {
+    const { launcher } = createLauncher([], {
+      roomJid: "pub@muc.example.com",
+      invokeError: new Error("command failed"),
+    });
+
+    await launcher.invokeCommand(stargateCommand);
+
+    expect(launcher.open.value).toBe(true);
+    expect(launcher.commandStates.value[stargateCommand.node]).toEqual({
+      state: "error",
+      detail: "command failed",
+    });
+  });
+
   test("ignores pending command execution results after a conversation reset", async () => {
     let resolveInvoke: ((result: ExtensionCommandResult) => void) | null = null;
     const invokeCalls: InvokeCall[] = [];
@@ -596,6 +776,86 @@ describe("invokeCommand", () => {
     expect(invokeCalls).toEqual([{ command: pollCommand, roomJid: "room-a@muc.example.com" }]);
     expect(launcher.commandForms.value).toEqual({});
     expect(launcher.commandStates.value).toEqual({});
+  });
+});
+
+describe("invokeResultAction", () => {
+  const action: ExtensionAnnotationAction = {
+    label: "Finish",
+    route: "urn:waddle:test-action",
+  };
+
+  test("closes the palette after a clean no-form action result", async () => {
+    const { launcher } = createLauncher([], {
+      invokeExtensionAction: async () => ({ status: "completed", notes: [] }),
+    });
+    launcher.open.value = true;
+    launcher.commandActions.value = { [genericCommand.node]: [action] };
+
+    await launcher.invokeResultAction(genericCommand, action);
+
+    expect(launcher.open.value).toBe(false);
+    expect(launcher.commandActions.value[genericCommand.node]).toBeUndefined();
+    expect(launcher.commandStates.value[genericCommand.node]?.state).toBe("success");
+  });
+
+  test("opens the palette when an action invocation fails", async () => {
+    const { launcher } = createLauncher([], {
+      invokeExtensionAction: async () => {
+        throw new Error("action failed");
+      },
+    });
+
+    await launcher.invokeResultAction(genericCommand, action);
+
+    expect(launcher.open.value).toBe(true);
+    expect(launcher.commandStates.value[genericCommand.node]).toEqual({
+      state: "error",
+      detail: "action failed",
+    });
+  });
+
+  test("opens the palette when an action result returns a warning", async () => {
+    const { launcher } = createLauncher([], {
+      invokeExtensionAction: async () => ({
+        status: "completed",
+        notes: [{ type: "warning", value: "action needs attention" }],
+      }),
+    });
+
+    await launcher.invokeResultAction(genericCommand, action);
+
+    expect(launcher.open.value).toBe(true);
+    expect(launcher.commandStates.value[genericCommand.node]).toEqual({
+      state: "warning",
+      detail: "action needs attention",
+    });
+  });
+
+  test("keeps the palette open when an action result returns a follow-up form", async () => {
+    const { launcher } = createLauncher([], {
+      invokeExtensionAction: async () =>
+        executingResult([field("confirm", { required: true })], ["complete", "cancel"]),
+    });
+
+    await launcher.invokeResultAction(genericCommand, action);
+
+    expect(launcher.open.value).toBe(true);
+    expect(launcher.commandForms.value[genericCommand.node]?.fields[0]?.name).toBe("confirm");
+  });
+
+  test("keeps the palette open when an action result returns launch actions", async () => {
+    const { launcher } = createLauncher([], {
+      invokeExtensionAction: async () => launchResult(),
+    });
+
+    await launcher.invokeResultAction(genericCommand, action);
+
+    expect(launcher.open.value).toBe(true);
+    expect(launcher.commandActions.value[genericCommand.node]?.[0]).toMatchObject({
+      label: "Finish",
+      route: "route-1",
+    });
   });
 });
 
@@ -700,6 +960,7 @@ describe("submitForm: public channel output", () => {
       executingResult([field("prompt", { required: true })], ["complete", "cancel"]),
     ], { roomJid: "room-a@muc.example.com" });
     await launcher.invokeCommand(aiCommand);
+    expect(launcher.open.value).toBe(true);
     roomJid.value = "room-b@muc.example.com";
     launcher.updateField(aiCommand.node, "prompt", ["stay in room a"]);
 
@@ -708,6 +969,25 @@ describe("submitForm: public channel output", () => {
     expect(ok).toBe(true);
     expect(submitCalls).toHaveLength(1);
     expect(submitCalls[0].roomJid).toBe("room-a@muc.example.com");
+    expect(launcher.open.value).toBe(false);
+  });
+
+  test("keeps the palette open when submission returns a follow-up form", async () => {
+    const { launcher } = createLauncher([
+      executingResult([field("prompt", { required: true })], ["complete", "cancel"]),
+    ], {
+      submitResults: [
+        executingResult([field("confirm", { required: true })], ["complete", "cancel"]),
+      ],
+    });
+    await launcher.invokeCommand(aiCommand);
+    launcher.updateField(aiCommand.node, "prompt", ["continue"]);
+
+    const ok = await launcher.submitForm(aiCommand, "complete", { skipPublicPrompt: true });
+
+    expect(ok).toBe(true);
+    expect(launcher.open.value).toBe(true);
+    expect(launcher.commandForms.value[aiCommand.node]?.fields[0]?.name).toBe("confirm");
   });
 
   test("posts the user's prompt to the room before submitting the command", async () => {
@@ -734,6 +1014,7 @@ describe("submitForm: public channel output", () => {
     expect(events).toEqual(["public:what changed?", "submit"]);
     expect(submitCalls).toHaveLength(1);
     expect(submitCalls[0].roomJid).toBe("pub@muc.example.com");
+    expect(launcher.open.value).toBe(false);
   });
 
   test("does not submit the command when posting the public prompt fails", async () => {
@@ -762,6 +1043,7 @@ describe("submitForm: public channel output", () => {
     expect(submitCalls).toEqual([]);
     expect(launcher.commandStates.value[aiCommand.node]?.state).toBe("error");
     expect(launcher.commandStates.value[aiCommand.node]?.detail).toBe("could not send prompt");
+    expect(launcher.open.value).toBe(true);
   });
 
   test("does not echo non-AI extension prompts with output=channel", async () => {
@@ -787,5 +1069,6 @@ describe("submitForm: public channel output", () => {
     expect(events).toEqual(["submit"]);
     expect(submitCalls).toHaveLength(1);
     expect(submitCalls[0].command).toBe(genericCommand);
+    expect(launcher.open.value).toBe(false);
   });
 });

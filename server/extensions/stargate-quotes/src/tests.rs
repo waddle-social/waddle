@@ -84,7 +84,7 @@ fn quote_body_renders_markdown_fallback_quote_with_role_and_series() {
 }
 
 #[test]
-fn quote_markup_marks_only_the_quote_block() {
+fn quote_markup_marks_the_markdown_fallback_quote_block() {
     let quotes = quote_catalog().expect("quote catalog parses");
     let spans = quote_markup(&quotes[0]);
 
@@ -93,11 +93,11 @@ fn quote_markup_marks_only_the_quote_block() {
         spans[0].kind,
         types::MessageMarkupKind::Blockquote
     ));
-    assert_eq!(spans[0].start, 2);
+    assert_eq!(spans[0].start, 0);
     assert_eq!(spans[0].end, (2 + quotes[0].quote.chars().count()) as u32);
     assert_eq!(
         spans[0].end - spans[0].start,
-        quotes[0].quote.chars().count() as u32
+        (2 + quotes[0].quote.chars().count()) as u32
     );
     assert!(spans[0].end < quote_body(&quotes[0]).chars().count() as u32);
 }

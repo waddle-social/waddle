@@ -56,6 +56,19 @@ describe("renderStyledBody", () => {
     expect(list).not.toContain("- one");
   });
 
+  test("renders stargate quote fallback as one blockquote without an orphan marker", () => {
+    const quote = "Oh, bloody hell! We're all doomed!";
+    const body = `> ${quote}\n\nRush, Stargate Universe`;
+    const html = renderStyledBody(body, [
+      { type: "bquote", start: 0, end: 2 + quote.length },
+    ]);
+
+    expect(html).toBe(
+      "<blockquote><p>Oh, bloody hell! We&#39;re all doomed!</p></blockquote><p>Rush, Stargate Universe</p>",
+    );
+    expect(html).not.toContain("<p>&gt;</p>");
+  });
+
   test("renders ordered lists and links through XEP-0372 references", () => {
     const body = "3. docs\n4. more";
     const markup: MarkupSpan[] = [

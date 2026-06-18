@@ -87,6 +87,19 @@ export function useExtensionLauncher(input: {
     commandForms.value = nextForms;
   }
 
+  function syncPaletteForCommandOutcome(
+    key: string,
+    outcome: { state: ExtensionCommandUiState; detail?: string },
+  ) {
+    const hasResultSurface = !!commandForms.value[key] || (commandActions.value[key]?.length ?? 0) > 0;
+    if (hasResultSurface || outcome.state !== "success") {
+      open.value = true;
+      void nextTick(input.focusPalette);
+      return;
+    }
+    open.value = false;
+  }
+
   let discoveryPromise: Promise<void> | null = null;
   let discoveryAttempted = false;
   let discoveryGeneration = 0;
@@ -157,13 +170,17 @@ export function useExtensionLauncher(input: {
       const result = await client.invokeExtensionCommand(command, context.roomJid);
       if (!isCurrentCommandContext(context)) return;
       storeResultSurfaces(key, result, { roomJid: context.roomJid });
-      commandStates.value = { ...commandStates.value, [key]: extensionCommandOutcome(result) };
+      const outcome = extensionCommandOutcome(result);
+      commandStates.value = { ...commandStates.value, [key]: outcome };
+      syncPaletteForCommandOutcome(key, outcome);
     } catch (error) {
       if (!isCurrentCommandContext(context)) return;
       commandStates.value = {
         ...commandStates.value,
         [key]: { state: "error", detail: error instanceof Error ? error.message : "Extension command failed." },
       };
+      open.value = true;
+      void nextTick(input.focusPalette);
     }
   }
 
@@ -223,7 +240,9 @@ export function useExtensionLauncher(input: {
       const result = await client.submitExtensionCommandForm(command, form.sessionId, form.fields, action, context.roomJid);
       if (!isCurrentCommandContext(context)) return false;
       storeResultSurfaces(key, result, { roomJid: context.roomJid });
-      commandStates.value = { ...commandStates.value, [key]: extensionCommandOutcome(result) };
+      const outcome = extensionCommandOutcome(result);
+      commandStates.value = { ...commandStates.value, [key]: outcome };
+      syncPaletteForCommandOutcome(key, outcome);
       return true;
     } catch (error) {
       if (!isCurrentCommandContext(context)) return false;
@@ -231,6 +250,8 @@ export function useExtensionLauncher(input: {
         ...commandStates.value,
         [key]: { state: "error", detail: error instanceof Error ? error.message : "Extension form submission failed." },
       };
+      open.value = true;
+      void nextTick(input.focusPalette);
       return false;
     }
   }
@@ -263,28 +284,22 @@ export function useExtensionLauncher(input: {
       const form = commandForms.value[key];
 
       if (invocation.kind === "open-palette") {
-        commandStates.value = { ...commandStates.value, [key]: extensionCommandOutcome(result) };
+        const outcome = extensionCommandOutcome(result);
+        commandStates.value = { ...commandStates.value, [key]: outcome };
         if (invocation.prefillFirstRequired && form) {
           const target = form.fields.find((field) => field.required && !field.hidden);
           if (target) {
             updateField(key, target.name, [invocation.prefillFirstRequired]);
           }
         }
+        syncPaletteForCommandOutcome(key, outcome);
         return true;
       }
 
       if (invocation.kind === "direct-execute") {
         const outcome = extensionCommandOutcome(result);
         commandStates.value = { ...commandStates.value, [key]: outcome };
-        if (form) {
-          open.value = true;
-          void nextTick(input.focusPalette);
-        } else if (outcome.state !== "success" || outcome.detail) {
-          open.value = true;
-          void nextTick(input.focusPalette);
-        } else {
-          open.value = false;
-        }
+        syncPaletteForCommandOutcome(key, outcome);
         return true;
       }
 
@@ -298,12 +313,12 @@ export function useExtensionLauncher(input: {
         return await submitForm(command, "complete", { roomJid: context.roomJid, generation: context.generation });
       }
 
-      commandStates.value = { ...commandStates.value, [key]: extensionCommandOutcome(result) };
+      const outcome = extensionCommandOutcome(result);
+      commandStates.value = { ...commandStates.value, [key]: outcome };
       if (form) {
         updateField(key, invocation.fieldName, [invocation.value]);
-        open.value = true;
-        void nextTick(input.focusPalette);
       }
+      syncPaletteForCommandOutcome(key, outcome);
       return true;
     } catch (error) {
       if (!isCurrentCommandContext(context)) return false;
@@ -311,10 +326,8 @@ export function useExtensionLauncher(input: {
         ...commandStates.value,
         [key]: { state: "error", detail: error instanceof Error ? error.message : "Extension command failed." },
       };
-      if (invocation.kind === "direct-execute") {
-        open.value = true;
-        void nextTick(input.focusPalette);
-      }
+      open.value = true;
+      void nextTick(input.focusPalette);
       return false;
     }
   }
@@ -366,13 +379,17 @@ export function useExtensionLauncher(input: {
       const result = await invokeExtensionAction(action);
       if (!isCurrentCommandContext(context)) return;
       storeResultSurfaces(key, result, { roomJid: context.roomJid });
-      commandStates.value = { ...commandStates.value, [key]: extensionCommandOutcome(result) };
+      const outcome = extensionCommandOutcome(result);
+      commandStates.value = { ...commandStates.value, [key]: outcome };
+      syncPaletteForCommandOutcome(key, outcome);
     } catch (error) {
       if (!isCurrentCommandContext(context)) return;
       commandStates.value = {
         ...commandStates.value,
         [key]: { state: "error", detail: error instanceof Error ? error.message : "Extension action failed." },
       };
+      open.value = true;
+      void nextTick(input.focusPalette);
     }
   }
 
