@@ -58,7 +58,7 @@ function onResetAll(): void {
 
 <template>
   <div class="call-participants" aria-label="Participants">
-    <ul v-if="rows.length > 0" class="call-participants__rows">
+    <ul class="call-participants__rows">
       <li
         v-for="row in rows"
         :key="row.key"
@@ -124,9 +124,6 @@ function onResetAll(): void {
         </div>
       </li>
     </ul>
-    <div v-else class="call-participants__empty type-caption">
-      No one else here yet
-    </div>
 
     <footer class="call-participants__footer">
       <button
@@ -255,12 +252,6 @@ function onResetAll(): void {
   color: var(--muted-foreground);
   font-size: 0.75rem;
   text-align: right;
-}
-
-.call-participants__empty {
-  flex: 1 1 auto;
-  padding: 0.75rem;
-  color: var(--muted-foreground);
 }
 
 .call-participants__footer {
