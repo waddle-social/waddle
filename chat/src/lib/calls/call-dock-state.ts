@@ -31,10 +31,6 @@ export function closeCallDock(): void {
   $callDockOpen.set(false);
 }
 
-export function toggleCallDock(): void {
-  $callDockOpen.set(!$callDockOpen.get());
-}
-
 export function setCallDockTab(tab: CallDockTab): void {
   $callDockTab.set(tab);
 }

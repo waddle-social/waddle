@@ -6,7 +6,6 @@ import {
   openCallDock,
   setCallDockTab,
   toggleCallChat,
-  toggleCallDock,
   toggleCallParticipants,
 } from "../src/lib/calls/call-dock-state";
 import { $callState, clearCallState } from "../src/lib/calls/call-store";
@@ -18,16 +17,10 @@ afterEach(() => {
 });
 
 describe("call dock state", () => {
-  test("defaults to closed; open/close/toggle mutate it", () => {
+  test("defaults to closed; open/close mutate it", () => {
     expect($callDockOpen.get()).toBe(false);
 
     openCallDock();
-    expect($callDockOpen.get()).toBe(true);
-
-    toggleCallDock();
-    expect($callDockOpen.get()).toBe(false);
-
-    toggleCallDock();
     expect($callDockOpen.get()).toBe(true);
 
     closeCallDock();

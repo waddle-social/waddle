@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { $callState } from "../src/lib/calls/call-store";
 import { $callUiMode } from "../src/lib/calls/ui-mode";
+import {
+  closeCallDock,
+  openCallDock,
+  setCallDockTab,
+} from "../src/lib/calls/call-dock-state";
 import { $mucCallParticipants } from "../src/lib/calls/muc-call-presence";
 import { connectionStore } from "../src/lib/connection-store";
 import { activeCallChatThreadId, resolveActiveMucCallThreadId } from "../src/lib/calls/call-chat-composer";
@@ -13,6 +18,8 @@ describe("call-chat composer", () => {
   afterEach(() => {
     $callState.set({ phase: "idle" });
     $callUiMode.set("split");
+    closeCallDock();
+    setCallDockTab("participants");
     $mucCallParticipants.set({});
     connectionStore.session = null;
   });
@@ -119,8 +126,11 @@ describe("call-chat composer", () => {
     ).toBeNull();
   });
 
-  test("expanded channel calls render a labelled call-chat composer when a call thread is available", async () => {
+  test("expanded channel calls render a labelled call-chat composer in the dock Chat tab", async () => {
     seedExpandedMucCall();
+    // Chat now lives in the dock's Chat tab, so open the dock there to render it.
+    setCallDockTab("chat");
+    openCallDock();
 
     const html = await renderVueComponent(
       "../src/components/calls/CallExpandedSurface.vue",
@@ -133,17 +143,22 @@ describe("call-chat composer", () => {
         mentionCandidates: [],
         slowModeCooldown: 0,
         uploadProgress: { uploading: false, progress: 0, filename: "" },
+        callChatMessages: [],
+        avatarUrlByAuthor: {},
       },
       import.meta.url,
     );
 
-    expect(html).toContain("Call chat");
     expect(html).toContain('aria-label="Call chat composer"');
     expect(html).not.toContain('aria-label="Extensions"');
+    // With a usable thread the composer is enabled (not greyed out).
+    expect(html).not.toContain("pointer-events-none");
   });
 
   test("expanded DM calls render the call-chat composer from the call sid", async () => {
     seedExpandedDmCall();
+    setCallDockTab("chat");
+    openCallDock();
 
     const html = await renderVueComponent(
       "../src/components/calls/CallExpandedSurface.vue",
@@ -152,16 +167,19 @@ describe("call-chat composer", () => {
         dmPeerName: "Bob",
         callThreadId: "dm-sid-1",
         uploadProgress: { uploading: false, progress: 0, filename: "" },
+        callChatMessages: [],
+        avatarUrlByAuthor: {},
       },
       import.meta.url,
     );
 
-    expect(html).toContain("Call chat");
     expect(html).toContain('aria-label="Call chat composer"');
   });
 
-  test("expanded channel calls hide the call-chat composer without a usable thread id", async () => {
+  test("expanded channel calls disable the call-chat composer without a usable thread id", async () => {
     seedExpandedMucCall();
+    setCallDockTab("chat");
+    openCallDock();
 
     const html = await renderVueComponent(
       "../src/components/calls/CallExpandedSurface.vue",
@@ -169,11 +187,15 @@ describe("call-chat composer", () => {
         roomJid: ROOM,
         callThreadId: "   ",
         uploadProgress: { uploading: false, progress: 0, filename: "" },
+        callChatMessages: [],
+        avatarUrlByAuthor: {},
       },
       import.meta.url,
     );
 
-    expect(html).not.toContain("Call chat composer");
+    // The composer stays in the tab but is disabled until a thread resolves.
+    expect(html).toContain('aria-label="Call chat composer"');
+    expect(html).toContain("pointer-events-none");
   });
 });
 

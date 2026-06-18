@@ -16,13 +16,13 @@ export function isCallChatTabFocused(dockOpen: boolean, tab: CallDockTab): boole
  * (non-self) call-thread messages currently loaded, the last-seen watermark,
  * and whether the Chat tab is the focused dock tab right now.
  */
-export type CallChatUnreadInput = {
+type CallChatUnreadInput = {
   inboundIds: readonly string[];
   lastSeenId: string | null;
   focused: boolean;
 };
 
-export type CallChatUnreadResult = {
+type CallChatUnreadResult = {
   unread: number;
   lastSeenId: string | null;
 };
@@ -31,7 +31,7 @@ export type CallChatUnreadResult = {
  * The slice of a timeline message the unread selector needs. Kept structural
  * so callers can pass live `TimelineMessage`s or test fixtures alike.
  */
-export type CallChatThreadMessage = {
+type CallChatThreadMessage = {
   id: string;
   threadId?: string | null;
   isSelf?: boolean;
