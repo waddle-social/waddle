@@ -2,6 +2,7 @@
 
 mod ws_common;
 
+use minidom::Element;
 use tokio::sync::Mutex;
 use ws_common::{TestServer, WsXmppClient};
 
@@ -9,7 +10,70 @@ const DOMAIN: &str = "localhost";
 const ALICE: &str = "admin";
 const BOB: &str = "bob";
 const BOB_PASSWORD: &str = "bob-password";
+const NS_CLIENT: &str = "jabber:client";
+const NS_HINTS: &str = "urn:xmpp:hints";
+const NS_MAM: &str = "urn:xmpp:mam:2";
+const NS_MUC: &str = "http://jabber.org/protocol/muc";
+const NS_WADDLE_IN_CALL: &str = "urn:waddle:in-call:0";
 static TEST_SERIAL: Mutex<()> = Mutex::const_new(());
+
+fn attr(name: &'static str) -> minidom::rxml::NcName {
+    minidom::rxml::NcName::try_from(name).expect("valid XML attribute name")
+}
+
+fn serialize(element: Element) -> String {
+    let mut bytes = Vec::new();
+    element.write_to(&mut bytes).expect("serialize XML");
+    String::from_utf8(bytes).expect("XML is UTF-8")
+}
+
+fn muc_join_presence(room: &str, nick: &str) -> String {
+    serialize(
+        Element::builder("presence", NS_CLIENT)
+            .attr(attr("to"), format!("{room}/{nick}"))
+            .append(Element::builder("x", NS_MUC).build())
+            .build(),
+    )
+}
+
+fn in_call_reaction_message(
+    to: &str,
+    message_type: &str,
+    id: &str,
+    sid: &str,
+    emoji: &str,
+) -> String {
+    serialize(
+        Element::builder("message", NS_CLIENT)
+            .attr(attr("type"), message_type)
+            .attr(attr("to"), to)
+            .attr(attr("id"), id)
+            .append(
+                Element::builder("in-call", NS_WADDLE_IN_CALL)
+                    .attr(attr("sid"), sid)
+                    .append(
+                        Element::builder("reaction", NS_WADDLE_IN_CALL)
+                            .attr(attr("emoji"), emoji)
+                            .build(),
+                    )
+                    .build(),
+            )
+            .append(Element::builder("no-store", NS_HINTS).build())
+            .append(Element::builder("no-copy", NS_HINTS).build())
+            .build(),
+    )
+}
+
+fn mam_query(to: &str, id: &str) -> String {
+    serialize(
+        Element::builder("iq", NS_CLIENT)
+            .attr(attr("type"), "set")
+            .attr(attr("id"), id)
+            .attr(attr("to"), to)
+            .append(Element::builder("query", NS_MAM).build())
+            .build(),
+    )
+}
 
 async fn connect(
     server: &TestServer,
@@ -25,9 +89,7 @@ async fn connect(
 
 async fn join_room(client: &mut WsXmppClient, room: &str, nick: &str) {
     client
-        .send(&format!(
-            r#"<presence to="{room}/{nick}"><x xmlns="http://jabber.org/protocol/muc"/></presence>"#
-        ))
+        .send(&muc_join_presence(room, nick))
         .await
         .expect("send join");
     client
@@ -48,14 +110,12 @@ async fn direct_in_call_reaction_routes_to_peer_full_jid_and_is_not_archived() {
     let bob_bare = format!("{BOB}@{DOMAIN}");
 
     alice
-        .send(&format!(
-            r#"<message type="chat" to="{bob_full}" id="in-call-dm-1">
-                <in-call xmlns="urn:waddle:in-call:0" sid="dm-call-1">
-                    <reaction emoji="👍"/>
-                </in-call>
-                <no-store xmlns="urn:xmpp:hints"/>
-                <no-copy xmlns="urn:xmpp:hints"/>
-            </message>"#
+        .send(&in_call_reaction_message(
+            &bob_full,
+            "chat",
+            "in-call-dm-1",
+            "dm-call-1",
+            "👍",
         ))
         .await
         .expect("send in-call reaction");
@@ -73,9 +133,7 @@ async fn direct_in_call_reaction_routes_to_peer_full_jid_and_is_not_archived() {
         (&mut bob, bob_bare.as_str(), "mam-in-call-bob"),
     ] {
         client
-            .send(&format!(
-                r#"<iq type="set" id="{query_id}" to="{archive_jid}"><query xmlns="urn:xmpp:mam:2"/></iq>"#
-            ))
+            .send(&mam_query(archive_jid, query_id))
             .await
             .expect("send personal MAM query");
         let frames = client
@@ -106,14 +164,12 @@ async fn muc_in_call_reaction_fans_out_to_room_and_is_not_archived() {
     join_room(&mut bob, &room, BOB).await;
 
     alice
-        .send(&format!(
-            r#"<message type="groupchat" to="{room}" id="in-call-muc-1">
-                <in-call xmlns="urn:waddle:in-call:0" sid="muc-call-1">
-                    <reaction emoji="🔥"/>
-                </in-call>
-                <no-store xmlns="urn:xmpp:hints"/>
-                <no-copy xmlns="urn:xmpp:hints"/>
-            </message>"#
+        .send(&in_call_reaction_message(
+            &room,
+            "groupchat",
+            "in-call-muc-1",
+            "muc-call-1",
+            "🔥",
         ))
         .await
         .expect("send room in-call reaction");
@@ -130,9 +186,7 @@ async fn muc_in_call_reaction_fans_out_to_room_and_is_not_archived() {
         .expect("alice receives own room echo");
 
     alice
-        .send(&format!(
-            r#"<iq type="set" id="mam-in-call-room" to="{room}"><query xmlns="urn:xmpp:mam:2"/></iq>"#
-        ))
+        .send(&mam_query(&room, "mam-in-call-room"))
         .await
         .expect("send room MAM query");
     let frames = alice

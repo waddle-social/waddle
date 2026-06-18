@@ -1,4 +1,5 @@
 import { atom } from "nanostores";
+import type { CallState } from "./types";
 
 const IN_CALL_REACTION_TTL_MS = 2_400;
 const MAX_IN_CALL_REACTIONS = 8;
@@ -49,6 +50,29 @@ export function reduceInCallReactions(
     case "clear":
       return [];
   }
+}
+
+export function isInCallReactionForActiveCall(
+  callState: CallState,
+  sid: string,
+): boolean {
+  return callState.phase === "active" && callState.sid === sid;
+}
+
+export function activeInCallReactions(
+  callState: CallState,
+  reactions: readonly InCallReactionAnimation[],
+): InCallReactionAnimation[] {
+  if (callState.phase !== "active") return [];
+  return reactions.filter((reaction) => reaction.sid === callState.sid);
+}
+
+export function hashInCallReactionId(value: string): number {
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash * 31 + value.charCodeAt(index)) | 0;
+  }
+  return hash;
 }
 
 export function receiveInCallReaction(input: {

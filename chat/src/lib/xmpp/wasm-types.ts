@@ -136,8 +136,7 @@ export interface WasmMessage {
   displayed_marker_id?: string;
   reaction_target_id?: string;
   reaction_emojis: string[];
-  in_call_sid?: string;
-  in_call_reaction_emoji?: string;
+  in_call?: { kind: "reaction"; sid: string; emoji: string };
   is_muc: boolean;
   thread?: string;
   parent_thread_id?: string;

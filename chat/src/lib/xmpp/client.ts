@@ -28,7 +28,10 @@ import { useCallEngine } from "@/lib/calls/use-call-engine";
 import type { CallWireSender } from "@/lib/calls/outbound";
 import type { CallEvent, ExternalService } from "@/lib/calls/types";
 import { coerceExternalServices } from "@/lib/calls/ice-servers";
-import { receiveInCallReaction } from "@/lib/calls/in-call-reactions";
+import {
+  isInCallReactionForActiveCall,
+  receiveInCallReaction,
+} from "@/lib/calls/in-call-reactions";
 import { barePeerJid, fullJidIdentityKey, jidDomain, roomBareJidFor } from "./jid";
 import type {
   ChatStateEvent,
@@ -3594,10 +3597,11 @@ export class BrowserXmppClient {
       return;
     }
     if (message.displayed_marker_id) { if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").split("/")[1] ?? "unknown"; this.displayedHandler?.({ roomJid, nick, messageId: message.displayed_marker_id }); } else this.dmDisplayedHandler?.({ peerJid: barePeerJid(message.from ?? message.to ?? ""), messageId: message.displayed_marker_id }); return; }
-    if (message.in_call_sid && message.in_call_reaction_emoji) {
+    if (message.in_call?.kind === "reaction") {
+      if (!isInCallReactionForActiveCall($callState.get(), message.in_call.sid)) return;
       receiveInCallReaction({
-        sid: message.in_call_sid,
-        emoji: message.in_call_reaction_emoji,
+        sid: message.in_call.sid,
+        emoji: message.in_call.emoji,
         from: message.from ?? "",
       });
       return;

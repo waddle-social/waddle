@@ -14,10 +14,11 @@ pub struct InCallSessionId(SessionId);
 impl InCallSessionId {
     pub fn new(value: impl Into<String>) -> Result<Self, InCallParseError> {
         let value = value.into();
-        if value.trim().is_empty() {
+        let value = value.trim();
+        if value.is_empty() {
             return Err(InCallParseError::EmptySessionId);
         }
-        Ok(Self(SessionId(value)))
+        Ok(Self(SessionId(value.to_owned())))
     }
 
     pub fn as_str(&self) -> &str {
@@ -31,10 +32,11 @@ pub struct InCallReactionEmoji(String);
 impl InCallReactionEmoji {
     pub fn new(value: impl Into<String>) -> Result<Self, InCallParseError> {
         let value = value.into();
-        if value.trim().is_empty() {
+        let value = value.trim();
+        if value.is_empty() {
             return Err(InCallParseError::EmptyReaction);
         }
-        Ok(Self(value))
+        Ok(Self(value.to_owned()))
     }
 
     pub fn as_str(&self) -> &str {
@@ -57,6 +59,7 @@ pub enum InCallSignal {
 pub enum InCallParseError {
     NotInCall,
     MissingAttribute(&'static str),
+    MissingChild(&'static str),
     EmptySessionId,
     EmptyReaction,
 }
@@ -106,8 +109,8 @@ pub fn parse_in_call_signal(element: &Element) -> Result<InCallSignal, InCallPar
     let reaction = element
         .children()
         .find(|child| child.name() == "reaction" && child.ns() == NS_WADDLE_IN_CALL)
-        .ok_or(InCallParseError::MissingAttribute("reaction"))?;
-    let emoji = InCallReactionEmoji::new(required_attr(reaction, "emoji")?.trim())?;
+        .ok_or(InCallParseError::MissingChild("reaction"))?;
+    let emoji = InCallReactionEmoji::new(required_attr(reaction, "emoji")?)?;
 
     Ok(InCallSignal::Reaction(InCallReactionSignal { sid, emoji }))
 }

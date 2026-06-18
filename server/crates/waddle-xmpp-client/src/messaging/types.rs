@@ -106,13 +106,14 @@ pub struct InCallSessionId(String);
 impl InCallSessionId {
     pub fn new(value: impl Into<String>) -> ClientResult<Self> {
         let value = value.into();
-        if value.trim().is_empty() {
+        let value = value.trim();
+        if value.is_empty() {
             return Err(CoreError::bad_request(Some(
                 "in-call session id must not be empty".to_string(),
             ))
             .into());
         }
-        Ok(Self(value))
+        Ok(Self(value.to_owned()))
     }
 
     pub fn as_str(&self) -> &str {
@@ -126,13 +127,14 @@ pub struct InCallReactionEmoji(String);
 impl InCallReactionEmoji {
     pub fn new(value: impl Into<String>) -> ClientResult<Self> {
         let value = value.into();
-        if value.trim().is_empty() {
+        let value = value.trim();
+        if value.is_empty() {
             return Err(CoreError::bad_request(Some(
                 "in-call reaction emoji must not be empty".to_string(),
             ))
             .into());
         }
-        Ok(Self(value))
+        Ok(Self(value.to_owned()))
     }
 
     pub fn as_str(&self) -> &str {

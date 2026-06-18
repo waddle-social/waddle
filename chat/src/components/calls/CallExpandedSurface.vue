@@ -47,8 +47,10 @@ import {
 import { $callChatUnread } from "@/lib/calls/call-chat-unread";
 import {
   $inCallReactions,
+  activeInCallReactions,
   clearInCallReactions,
   expireInCallReactions,
+  hashInCallReactionId,
   receiveInCallReaction,
 } from "@/lib/calls/in-call-reactions";
 import { barePeerJid } from "@/lib/xmpp/jid";
@@ -148,6 +150,10 @@ const chatUnread = useStore($callChatUnread);
 const reactions = useStore($inCallReactions);
 const callChatDraft = ref("");
 let reactionExpiryTimer: ReturnType<typeof setInterval> | null = null;
+
+const activeCallReactions = computed(() => {
+  return activeInCallReactions(state.value, reactions.value);
+});
 
 // The dock is shared with the Participants tab; split these out so the control
 // bar buttons reflect which tab (if any) the open dock is parked on.
@@ -358,14 +364,6 @@ async function onSendInCallReaction(emoji: string): Promise<void> {
   }
 }
 
-function hashString(value: string): number {
-  let hash = 0;
-  for (let index = 0; index < value.length; index += 1) {
-    hash = (hash * 31 + value.charCodeAt(index)) | 0;
-  }
-  return hash;
-}
-
 function onKeydown(event: KeyboardEvent): void {
   if (!isOpen.value) return;
   if (event.key !== "Escape") return;
@@ -486,10 +484,10 @@ onBeforeUnmount(() => {
         />
         <div class="call-expanded__reactions" aria-live="polite" aria-atomic="false">
           <span
-            v-for="reaction in reactions"
+            v-for="reaction in activeCallReactions"
             :key="reaction.id"
             class="call-expanded__reaction"
-            :style="{ '--reaction-x': `${Math.abs(hashString(reaction.id)) % 72}%` }"
+            :style="{ '--reaction-x': `${Math.abs(hashInCallReactionId(reaction.id)) % 72}%` }"
           >
             {{ reaction.emoji }}
           </span>
@@ -660,10 +658,10 @@ onBeforeUnmount(() => {
   font-size: 2.25rem;
   line-height: 1;
   filter: drop-shadow(0 0.25rem 0.5rem rgb(0 0 0 / 0.28));
-  animation: call-reaction-float 2.4s ease-out forwards;
+  animation: call-expanded-reaction-float 2.4s ease-out forwards;
 }
 
-@keyframes call-reaction-float {
+@keyframes call-expanded-reaction-float {
   0% {
     opacity: 0;
     transform: translate3d(0, 0.75rem, 0) scale(0.82);

@@ -2148,6 +2148,14 @@ fn in_call_reaction_values_reject_empty_wire_fields() {
 }
 
 #[test]
+fn in_call_reaction_values_trim_before_serialization() {
+    let sid = InCallSessionId::new(" call-1 ").expect("valid sid");
+    let emoji = InCallReactionEmoji::new(" 👍 ").expect("valid emoji");
+    assert_eq!(sid.as_str(), "call-1");
+    assert_eq!(emoji.as_str(), "👍");
+}
+
+#[test]
 fn build_retraction_message_has_expected_shape() {
     let stanza = build_retraction_message("room@muc.example", "groupchat", "msg-1", None);
     assert_origin_id_matches_message_id(&stanza);

@@ -35,8 +35,10 @@ import { openCallDock, setCallDockTab } from "@/lib/calls/call-dock-state";
 import { $callChatUnread } from "@/lib/calls/call-chat-unread";
 import {
   $inCallReactions,
+  activeInCallReactions,
   clearInCallReactions,
   expireInCallReactions,
+  hashInCallReactionId,
   receiveInCallReaction,
 } from "@/lib/calls/in-call-reactions";
 import { barePeerJid } from "@/lib/xmpp/jid";
@@ -91,6 +93,10 @@ const settingsOpen = ref(false);
 const containerRef = ref<HTMLElement | null>(null);
 const reactions = useStore($inCallReactions);
 let reactionExpiryTimer: ReturnType<typeof setInterval> | null = null;
+
+const activeCallReactions = computed(() => {
+  return activeInCallReactions(state.value, reactions.value);
+});
 
 const normalizedRoomJid = computed(() =>
   normalizeMucCallRoomJid(props.roomJid ?? ""),
@@ -241,13 +247,6 @@ async function onSendInCallReaction(emoji: string): Promise<void> {
   }
 }
 
-function hashString(value: string): number {
-  let hash = 0;
-  for (let index = 0; index < value.length; index += 1) {
-    hash = (hash * 31 + value.charCodeAt(index)) | 0;
-  }
-  return hash;
-}
 </script>
 
 <template>
@@ -287,10 +286,10 @@ function hashString(value: string): number {
         />
         <div class="call-split__reactions" aria-live="polite" aria-atomic="false">
           <span
-            v-for="reaction in reactions"
+            v-for="reaction in activeCallReactions"
             :key="reaction.id"
             class="call-split__reaction"
-            :style="{ '--reaction-x': `${Math.abs(hashString(reaction.id)) % 72}%` }"
+            :style="{ '--reaction-x': `${Math.abs(hashInCallReactionId(reaction.id)) % 72}%` }"
           >
             {{ reaction.emoji }}
           </span>
@@ -384,10 +383,10 @@ function hashString(value: string): number {
   font-size: 2rem;
   line-height: 1;
   filter: drop-shadow(0 0.25rem 0.5rem rgb(0 0 0 / 0.28));
-  animation: call-reaction-float 2.4s ease-out forwards;
+  animation: call-split-reaction-float 2.4s ease-out forwards;
 }
 
-@keyframes call-reaction-float {
+@keyframes call-split-reaction-float {
   0% {
     opacity: 0;
     transform: translate3d(0, 0.75rem, 0) scale(0.82);

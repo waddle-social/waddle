@@ -55,3 +55,23 @@ fn in_call_reaction_rejects_empty_sid() {
         Err(InCallParseError::EmptySessionId)
     );
 }
+
+#[test]
+fn in_call_reaction_values_are_trimmed_before_serialization() {
+    let sid = InCallSessionId::new(" call-123 ").expect("valid sid");
+    let emoji = InCallReactionEmoji::new(" 👍 ").expect("valid emoji");
+    assert_eq!(sid.as_str(), "call-123");
+    assert_eq!(emoji.as_str(), "👍");
+}
+
+#[test]
+fn in_call_reaction_reports_missing_reaction_child() {
+    let carrier: minidom::Element = "<in-call xmlns='urn:waddle:in-call:0' sid='call-123'/>"
+        .parse()
+        .expect("carrier xml");
+
+    assert_eq!(
+        parse_in_call_signal(&carrier),
+        Err(InCallParseError::MissingChild("reaction"))
+    );
+}
