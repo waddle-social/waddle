@@ -43,6 +43,30 @@ describe("CallControls participants toggle", () => {
   });
 });
 
+describe("ContentArea feeds the in-call Chat tab", () => {
+  function contentAreaSource(): string {
+    return readFileSync(
+      new URL("../src/components/chat/ContentArea.vue", import.meta.url),
+      "utf8",
+    );
+  }
+
+  test("passes the call-thread message slice + author maps into the Expanded surface", () => {
+    const source = contentAreaSource();
+    expect(source).toContain("callChatMessages");
+    expect(source).toContain(":call-chat-messages=\"callChatMessages\"");
+    expect(source).toContain(":avatar-url-by-author=\"avatarUrlByAuthor\"");
+    expect(source).toContain(":current-user=\"currentUser\"");
+  });
+
+  test("drives the unread sync from inbound call-thread messages and Chat-tab focus", () => {
+    const source = contentAreaSource();
+    expect(source).toContain("inboundCallChatThreadIds");
+    expect(source).toContain("isCallChatTabFocused");
+    expect(source).toContain("syncCallChatUnread");
+  });
+});
+
 describe("call surfaces use the Participants dock", () => {
   test("both surfaces drive the roster + dock and drop the volume mixer dialog", () => {
     for (const name of ["CallSplitContainer.vue", "CallExpandedSurface.vue"]) {

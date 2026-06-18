@@ -12,6 +12,12 @@ import { getReplyJumpNotice } from "@/lib/reply-ux";
 import { findThreadToAutoOpen } from "@/lib/thread-auto-open";
 import { activeCallChatThreadId } from "@/lib/calls/call-chat-composer";
 import { $callState } from "@/lib/calls/call-store";
+import { $callDockOpen, $callDockTab } from "@/lib/calls/call-dock-state";
+import {
+  inboundCallChatThreadIds,
+  isCallChatTabFocused,
+  syncCallChatUnread,
+} from "@/lib/calls/call-chat-unread";
 import {
   getPinnedScrollTop,
   getNewMessagesDividerPlacement,
@@ -452,6 +458,27 @@ const callAnchorConversationJid = computed(
 );
 const activeCallThreadId = computed(() =>
   activeCallChatThreadId(callState.value, props.messages, callRoomJid.value),
+);
+
+// Messages on the active call's XEP-0201 thread, rendered in the Dock's Chat tab
+// (all of them, including the local user's own, so they see what they sent).
+const callChatMessages = computed(() =>
+  activeCallThreadId.value
+    ? props.messages.filter((message) => message.threadId === activeCallThreadId.value)
+    : [],
+);
+
+// Drive the Chat tab's unread badge: inbound (non-self) call-thread messages
+// accumulate while the Chat tab isn't the focused dock tab and clear once it is.
+const callDockOpen = useStore($callDockOpen);
+const callDockTab = useStore($callDockTab);
+watch(
+  [
+    () => inboundCallChatThreadIds(props.messages, activeCallThreadId.value),
+    () => isCallChatTabFocused(callDockOpen.value, callDockTab.value),
+  ],
+  ([inboundIds, focused]) => syncCallChatUnread(inboundIds, focused),
+  { immediate: true },
 );
 
 watch(
@@ -1556,6 +1583,9 @@ function dayDividerLabel(createdAt: string): string {
       :dm-peer-jid="dmPeer?.peerJid"
       :dm-peer-name="dmPeer?.peerUsername"
       :call-thread-id="activeCallThreadId"
+      :call-chat-messages="callChatMessages"
+      :avatar-url-by-author="avatarUrlByAuthor"
+      :current-user="currentUser"
       :is-sending="isSending"
       :disabled="!canShowComposer"
       :giphy-api-key="giphyApiKey"

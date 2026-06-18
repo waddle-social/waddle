@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import {
   $callChatUnread,
   inboundCallChatThreadIds,
+  isCallChatTabFocused,
   nextCallChatUnread,
   resetCallChatUnread,
   syncCallChatUnread,
@@ -66,6 +67,14 @@ describe("inboundCallChatThreadIds", () => {
   test("returns nothing when there is no active call thread", () => {
     const messages = [{ id: "a", threadId: "call-1", isSelf: false }];
     expect(inboundCallChatThreadIds(messages, null)).toEqual([]);
+  });
+});
+
+describe("isCallChatTabFocused", () => {
+  test("is focused only when the dock is open on the Chat tab", () => {
+    expect(isCallChatTabFocused(true, "chat")).toBe(true);
+    expect(isCallChatTabFocused(true, "participants")).toBe(false);
+    expect(isCallChatTabFocused(false, "chat")).toBe(false);
   });
 });
 

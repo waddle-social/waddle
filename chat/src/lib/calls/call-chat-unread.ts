@@ -1,5 +1,15 @@
 import { atom } from "nanostores";
 import { $callState } from "./call-store";
+import type { CallDockTab } from "./call-dock-state";
+
+/**
+ * The Chat tab is "focused" — and therefore reads incoming messages live —
+ * only when the dock is open on the Chat tab. While the dock is closed or
+ * parked on Participants, inbound messages accumulate as unread.
+ */
+export function isCallChatTabFocused(dockOpen: boolean, tab: CallDockTab): boolean {
+  return dockOpen && tab === "chat";
+}
 
 /**
  * Inputs to the in-call Chat unread reducer: the ordered ids of inbound
