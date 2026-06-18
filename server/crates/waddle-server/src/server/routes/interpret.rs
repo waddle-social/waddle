@@ -76,7 +76,8 @@ use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 use waddle_extensions::{
     message_has_framework_envelope, DisplayText, ExtensionEffect, ExtensionEnvelope,
-    ExtensionManager, ReplyTarget, RoomJid, StanzaId, ThreadId, WaddleId,
+    ExtensionManager, MessageMarkupKind, MessageMarkupSpan, ReplyTarget, RoomJid, StanzaId,
+    ThreadId, WaddleId,
 };
 use waddle_xmpp::carbons::{build_received_carbon, build_sent_carbon};
 use waddle_xmpp::inbox::runtime::{direct_message_entry, groupchat_entry, groupchat_thread_entry};
@@ -155,7 +156,9 @@ use archive_groupchat_event::archive_groupchat_event;
 use archive_lookup::{
     build_carbon_envelope, lookup_archived_message, waddle_id_for_room_jid, ToElementString,
 };
-pub(crate) use bot::{dispatch_extension_bot_groupchat_response, ExtensionRoomMessage};
+pub(crate) use bot::{
+    build_extension_message_markup, dispatch_extension_bot_groupchat_response, ExtensionRoomMessage,
+};
 use carbons::send_carbons;
 use direct_archive::archive_direct;
 use direct_inbox::project_direct_inbox;

@@ -11,6 +11,10 @@ export type SlashInvocation =
       kind: "open-palette";
       command: DiscoveredExtensionCommand;
       prefillFirstRequired?: string;
+    }
+  | {
+      kind: "direct-execute";
+      command: DiscoveredExtensionCommand;
     };
 
 export function buildSlashInvocation(
@@ -21,6 +25,10 @@ export function buildSlashInvocation(
   if (command.inlineField && value.length > 0) {
     return { kind: "inline-submit", command, fieldName: command.inlineField, value };
   }
+  if (command.composerExecute && value.length === 0) {
+    return { kind: "direct-execute", command };
+  }
+  // Preserve unexpected trailing text by opening the palette with a prefill.
   if (!command.inlineField && value.length > 0) {
     return { kind: "open-palette", command, prefillFirstRequired: value };
   }

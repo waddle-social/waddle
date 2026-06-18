@@ -46,7 +46,15 @@ pub(crate) fn select_quote_with_rng(
 }
 
 pub(crate) fn quote_body(quote: &Quote) -> String {
-    format!("{}\n\n{}, {}", quote.quote, quote.role, quote.series)
+    format!("> {}\n\n{}, {}", quote.quote, quote.role, quote.series)
+}
+
+pub(crate) fn quote_markup(quote: &Quote) -> Vec<types::MessageMarkupSpan> {
+    vec![types::MessageMarkupSpan {
+        kind: types::MessageMarkupKind::Blockquote,
+        start: 2,
+        end: (2 + quote.quote.chars().count()) as u32,
+    }]
 }
 
 fn extension_error(code: types::ExtensionErrorCode, message: &str) -> types::ExtensionError {

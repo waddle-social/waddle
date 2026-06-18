@@ -209,6 +209,7 @@ impl ext_host::ExtensionHostTools for ExtensionHostAdapter {
                     body: request.body.into_string(),
                     thread_id: request.thread_id,
                     reply_to: request.reply_to,
+                    markup: request.markup,
                     extensions: request.extensions,
                 },
             )

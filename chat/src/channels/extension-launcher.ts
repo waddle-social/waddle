@@ -273,6 +273,21 @@ export function useExtensionLauncher(input: {
         return true;
       }
 
+      if (invocation.kind === "direct-execute") {
+        const outcome = extensionCommandOutcome(result);
+        commandStates.value = { ...commandStates.value, [key]: outcome };
+        if (form) {
+          open.value = true;
+          void nextTick(input.focusPalette);
+        } else if (outcome.state !== "success" || outcome.detail) {
+          open.value = true;
+          void nextTick(input.focusPalette);
+        } else {
+          open.value = false;
+        }
+        return true;
+      }
+
       // inline-submit only stays inline if the server returned a single-stage
       // form whose advertised XEP-0050 actions include `complete`. Otherwise
       // fall back to the palette so the user can drive the multi-stage flow.
@@ -296,6 +311,10 @@ export function useExtensionLauncher(input: {
         ...commandStates.value,
         [key]: { state: "error", detail: error instanceof Error ? error.message : "Extension command failed." },
       };
+      if (invocation.kind === "direct-execute") {
+        open.value = true;
+        void nextTick(input.focusPalette);
+      }
       return false;
     }
   }

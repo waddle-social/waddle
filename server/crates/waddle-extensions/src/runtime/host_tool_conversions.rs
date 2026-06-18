@@ -317,6 +317,12 @@ impl TryFrom<wit_types::SendMessageRequest> for host_domain::SendMessageRequest 
                 DisplayText::new(error.to_string()).expect("type error message is non-empty"),
             )
         })?;
+        let markup = value
+            .markup
+            .into_iter()
+            .map(TryInto::try_into)
+            .collect::<Result<Vec<_>, _>>()?;
+        validate_message_markup(&body, &markup)?;
         Ok(Self {
             target: value.target.try_into()?,
             body,
@@ -333,6 +339,7 @@ impl TryFrom<wit_types::SendMessageRequest> for host_domain::SendMessageRequest 
                     )
                 },
             )?,
+            markup,
             extensions: value
                 .extensions
                 .map(TryInto::try_into)
@@ -345,6 +352,53 @@ impl TryFrom<wit_types::SendMessageRequest> for host_domain::SendMessageRequest 
                 })?,
         })
     }
+}
+
+impl TryFrom<wit_types::MessageMarkupSpan> for host_domain::MessageMarkupSpan {
+    type Error = HostToolError;
+
+    fn try_from(value: wit_types::MessageMarkupSpan) -> Result<Self, Self::Error> {
+        Ok(Self {
+            kind: value.kind.into(),
+            start: value.start,
+            end: value.end,
+        })
+    }
+}
+
+impl From<wit_types::MessageMarkupKind> for host_domain::MessageMarkupKind {
+    fn from(value: wit_types::MessageMarkupKind) -> Self {
+        match value {
+            wit_types::MessageMarkupKind::Blockquote => Self::Blockquote,
+        }
+    }
+}
+
+fn validate_message_markup(
+    body: &DisplayText,
+    spans: &[host_domain::MessageMarkupSpan],
+) -> Result<(), HostToolError> {
+    let body_len = body.as_str().chars().count() as u32;
+    for span in spans {
+        if span.start >= span.end || span.end > body_len {
+            return Err(HostToolError::invalid_request(
+                DisplayText::new("message markup span range is outside the body")
+                    .expect("static message is non-empty"),
+            ));
+        }
+    }
+    for (index, left) in spans.iter().enumerate() {
+        for right in &spans[index + 1..] {
+            let overlaps = left.start < right.end && right.start < left.end;
+            if overlaps {
+                return Err(HostToolError::invalid_request(
+                    DisplayText::new("message markup block ranges must not overlap")
+                        .expect("static message is non-empty"),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 impl TryFrom<wit_types::MessageTarget> for host_domain::MessageTarget {

@@ -1594,7 +1594,10 @@ async fn dispatch_to_room_drops_when_no_web_socket_state_in_deps() {
 
 #[tokio::test]
 async fn extension_room_message_dispatches_threaded_muc_message() {
-    use waddle_extensions::{DisplayText, FullJidValue, ReplyTarget, RoomJid, StanzaId, ThreadId};
+    use waddle_extensions::{
+        DisplayText, FullJidValue, MessageMarkupKind, MessageMarkupSpan, ReplyTarget, RoomJid,
+        StanzaId, ThreadId,
+    };
 
     let registry = ConnectionRegistry::new();
     let room_jid: jid::BareJid = "chat@muc.example.com".parse().expect("room jid");
@@ -1637,6 +1640,11 @@ async fn extension_room_message_dispatches_threaded_muc_message() {
             id: StanzaId::new("root-msg").expect("reply id"),
             to: Some(FullJidValue::new(alice.to_string()).expect("reply to")),
         }),
+        markup: vec![MessageMarkupSpan {
+            kind: MessageMarkupKind::Blockquote,
+            start: 0,
+            end: 10,
+        }],
         extensions: None,
     };
 
@@ -1688,6 +1696,16 @@ async fn extension_room_message_dispatches_threaded_muc_message() {
         message.bodies.get("").map(|body| body.as_str()),
         Some("bot answer")
     );
+    let markup = message
+        .payloads
+        .iter()
+        .find(|payload| payload.is("markup", waddle_xmpp::xep::NS_MESSAGE_MARKUP))
+        .expect("markup payload");
+    let quote = markup
+        .get_child("bquote", waddle_xmpp::xep::NS_MESSAGE_MARKUP)
+        .expect("blockquote markup");
+    assert_eq!(quote.attr("start"), Some("0"));
+    assert_eq!(quote.attr("end"), Some("10"));
     let reply = parse_reply_from_message(message).expect("reply payload");
     assert_eq!(reply.id, "root-msg");
     assert_eq!(reply.to, None);

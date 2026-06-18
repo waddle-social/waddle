@@ -75,6 +75,7 @@ impl TryFrom<wit_types::CommandDescriptor> for CommandDescriptor {
             scope: value.scope.into(),
             composer_prefix: value.composer_prefix,
             inline_field: value.inline_field,
+            composer_execute: value.composer_execute,
         })
     }
 }
@@ -280,6 +281,7 @@ mod tests {
         node: &str,
         composer_prefix: Option<&str>,
         inline_field: Option<&str>,
+        composer_execute: bool,
     ) -> wit_types::CommandDescriptor {
         wit_types::CommandDescriptor {
             node: wit_types::CommandNode {
@@ -291,30 +293,34 @@ mod tests {
             scope: wit_types::CommandScope::Global,
             composer_prefix: composer_prefix.map(str::to_string),
             inline_field: inline_field.map(str::to_string),
+            composer_execute,
         }
     }
 
     #[test]
-    fn command_descriptor_round_trip_carries_composer_prefix_and_inline_field() {
+    fn command_descriptor_round_trip_carries_composer_metadata() {
         let descriptor: CommandDescriptor = wit_descriptor(
             "urn:waddle:extension:1:ai-chatbot",
             Some("ai"),
             Some("prompt"),
+            true,
         )
         .try_into()
         .expect("convert");
         assert_eq!(descriptor.composer_prefix.as_deref(), Some("ai"));
         assert_eq!(descriptor.inline_field.as_deref(), Some("prompt"));
+        assert!(descriptor.composer_execute);
     }
 
     #[test]
     fn command_descriptor_round_trip_preserves_none_when_absent() {
         let descriptor: CommandDescriptor =
-            wit_descriptor("urn:waddle:extension:1:invoke", None, None)
+            wit_descriptor("urn:waddle:extension:1:invoke", None, None, false)
                 .try_into()
                 .expect("convert");
         assert!(descriptor.composer_prefix.is_none());
         assert!(descriptor.inline_field.is_none());
+        assert!(!descriptor.composer_execute);
     }
 
     #[test]

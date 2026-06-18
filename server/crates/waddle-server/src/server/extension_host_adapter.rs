@@ -48,6 +48,14 @@ pub struct ExtensionHostAdapter {
     state: Arc<WebSocketState>,
 }
 
+struct DirectDispatchMessage {
+    stanza_id: waddle_extensions::StanzaId,
+    body: String,
+    thread_id: Option<ThreadId>,
+    reply_to: Option<ReplyTarget>,
+    markup: Vec<waddle_extensions::MessageMarkupSpan>,
+}
+
 impl ExtensionHostAdapter {
     pub fn new(state: Arc<WebSocketState>) -> Self {
         Self { state }
@@ -105,6 +113,7 @@ impl ExtensionHostAdapter {
                     stanza_id: Some(request.stanza_id),
                     thread_id: request.thread_id,
                     reply_to: request.reply_to,
+                    markup: request.markup,
                     extensions,
                 };
                 let session = invocation.session.as_ref();
@@ -133,10 +142,13 @@ impl ExtensionHostAdapter {
                 self.dispatch_direct(
                     invocation,
                     target,
-                    request.stanza_id.clone(),
-                    request.body,
-                    request.thread_id,
-                    request.reply_to,
+                    DirectDispatchMessage {
+                        stanza_id: request.stanza_id.clone(),
+                        body: request.body,
+                        thread_id: request.thread_id,
+                        reply_to: request.reply_to,
+                        markup: request.markup,
+                    },
                 )
                 .await?;
                 Ok(request.stanza_id)
@@ -148,21 +160,20 @@ impl ExtensionHostAdapter {
         &self,
         invocation: &ExtensionInvocation,
         target: Jid,
-        stanza_id: waddle_extensions::StanzaId,
-        body: String,
-        thread_id: Option<ThreadId>,
-        reply_to: Option<ReplyTarget>,
+        request: DirectDispatchMessage,
     ) -> Result<(), ExtensionHostAdapterError> {
         let mut message = Message::new(Some(target));
-        message.id = Some(xmpp_parsers::message::Id(stanza_id.as_str().to_string()));
+        message.id = Some(xmpp_parsers::message::Id(
+            request.stanza_id.as_str().to_string(),
+        ));
         message.type_ = XmppMessageType::Chat;
         message
             .bodies
-            .insert(xmpp_parsers::message::Lang(String::new()), body);
-        if let Some(thread_id) = thread_id.as_ref() {
+            .insert(xmpp_parsers::message::Lang(String::new()), request.body);
+        if let Some(thread_id) = request.thread_id.as_ref() {
             waddle_xmpp::xep0201::set_thread_id(&mut message, thread_id.as_str());
         }
-        if let Some(reply_to) = reply_to.as_ref() {
+        if let Some(reply_to) = request.reply_to.as_ref() {
             let mut reply = waddle_xmpp::xep::ReplyReference::new(reply_to.id.as_str());
             if let Some(to) = reply_to
                 .to
@@ -172,6 +183,9 @@ impl ExtensionHostAdapter {
                 reply = reply.with_to(to);
             }
             waddle_xmpp::xep::set_reply_payload(&mut message, &reply);
+        }
+        if let Some(markup) = interpret::build_extension_message_markup(&request.markup) {
+            message.payloads.push(markup);
         }
 
         let mut sm = XmppStateMachine::new(

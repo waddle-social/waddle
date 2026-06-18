@@ -2,7 +2,7 @@
 use crate::bindings::waddle::extension::host_tools;
 use crate::bindings::waddle::extension::types;
 use crate::constants::{COMMAND_NODE, COMMAND_RESULT_ID, COMMAND_RESULT_TEXT};
-use crate::quotes::{quote_body, quote_catalog, select_quote_with_rng};
+use crate::quotes::{quote_body, quote_catalog, quote_markup, select_quote_with_rng};
 use crate::ui::{display, payload_namespace, plugin_id, timestamp};
 
 #[cfg(test)]
@@ -31,7 +31,7 @@ pub(crate) fn handle_command_with_rng(
     };
     let quotes = quote_catalog()?;
     let quote = select_quote_with_rng(&quotes, &mut next_u64)?;
-    send_room_message(&room, display(&quote_body(quote)))?;
+    send_room_message(&room, display(&quote_body(quote)), quote_markup(quote))?;
     Ok(vec![posted_result_effect()])
 }
 
@@ -76,12 +76,14 @@ fn posted_result_effect() -> types::ExtensionEffect {
 fn room_message_request(
     room: &types::RoomJid,
     body: types::DisplayText,
+    markup: Vec<types::MessageMarkupSpan>,
 ) -> types::SendMessageRequest {
     types::SendMessageRequest {
         target: types::MessageTarget::Muc(room.clone()),
         body,
         thread_id: None,
         reply_to: None,
+        markup,
         extensions: None,
     }
 }
@@ -90,8 +92,9 @@ fn room_message_request(
 fn send_room_message(
     room: &types::RoomJid,
     body: types::DisplayText,
+    markup: Vec<types::MessageMarkupSpan>,
 ) -> Result<(), types::ExtensionError> {
-    host_tools::send_message(&room_message_request(room, body))
+    host_tools::send_message(&room_message_request(room, body, markup))
         .map(|_| ())
         .map_err(extension_error_from_host_tool)
 }
@@ -100,11 +103,12 @@ fn send_room_message(
 fn send_room_message(
     room: &types::RoomJid,
     body: types::DisplayText,
+    markup: Vec<types::MessageMarkupSpan>,
 ) -> Result<(), types::ExtensionError> {
     sent_room_messages()
         .lock()
         .expect("sent room messages lock")
-        .push(room_message_request(room, body));
+        .push(room_message_request(room, body, markup));
     Ok(())
 }
 

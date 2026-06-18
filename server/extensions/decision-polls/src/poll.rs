@@ -63,6 +63,7 @@ pub(super) fn send_poll_message(poll: &Poll) -> Result<(), types::ExtensionError
         body: display(&format!("Poll: {}", poll.question)),
         thread_id: None,
         reply_to: None,
+        markup: vec![],
         extensions: Some(types::ExtensionEnvelope {
             version: 1,
             enrichments: vec![poll_enrichment(poll)],

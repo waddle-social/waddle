@@ -19,6 +19,15 @@ const poll: DiscoveredExtensionCommand = {
   composerPrefix: "poll",
 };
 
+const stargate: DiscoveredExtensionCommand = {
+  serviceJid: "extensions.example.com",
+  node: "urn:waddle:extension:1:stargate-quotes",
+  name: "/stargate",
+  scope: "channel",
+  composerPrefix: "stargate",
+  composerExecute: true,
+};
+
 describe("buildSlashInvocation", () => {
   test("inline-submit when inlineField is declared and trailing has text", () => {
     expect(buildSlashInvocation(ai, "tell me a joke")).toEqual({
@@ -48,6 +57,21 @@ describe("buildSlashInvocation", () => {
     expect(buildSlashInvocation(poll, "")).toEqual({
       kind: "open-palette",
       command: poll,
+    });
+  });
+
+  test("direct-execute for composer execute commands without trailing text", () => {
+    expect(buildSlashInvocation(stargate, "")).toEqual({
+      kind: "direct-execute",
+      command: stargate,
+    });
+  });
+
+  test("open-palette with prefill for composer execute commands with trailing text", () => {
+    expect(buildSlashInvocation(stargate, "indeed")).toEqual({
+      kind: "open-palette",
+      command: stargate,
+      prefillFirstRequired: "indeed",
     });
   });
 

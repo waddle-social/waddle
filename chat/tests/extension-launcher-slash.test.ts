@@ -41,6 +41,7 @@ const stargateCommand: DiscoveredExtensionCommand = {
   name: "/stargate",
   scope: "channel",
   composerPrefix: "stargate",
+  composerExecute: true,
 };
 
 interface SubmitCall {
@@ -93,6 +94,7 @@ function executingResult(fields: ExtensionCommandFormField[], allowed: Extension
 
 function fakeClient(executeResults: ExtensionCommandResult[], options: {
   events?: string[] | undefined;
+  invokeError?: Error | undefined;
   submitError?: Error | undefined;
   discoveredCommands?: DiscoveredExtensionCommand[] | undefined;
 } = {}): {
@@ -106,6 +108,7 @@ function fakeClient(executeResults: ExtensionCommandResult[], options: {
   const fake = {
     async invokeExtensionCommand(command: DiscoveredExtensionCommand, roomJid?: string): Promise<ExtensionCommandResult> {
       invokeCalls.push({ command, roomJid });
+      if (options.invokeError) throw options.invokeError;
       return queue.shift() ?? { status: "completed", notes: [] };
     },
     async submitExtensionCommandForm(
@@ -133,6 +136,7 @@ function createLauncher(
     roomJid?: string | null;
     sendPublicChannelMessage?: (body: string) => Promise<void>;
     events?: string[] | undefined;
+    invokeError?: Error | undefined;
     submitError?: Error | undefined;
     discoveredCommands?: DiscoveredExtensionCommand[] | undefined;
   } = {},
@@ -140,6 +144,7 @@ function createLauncher(
   const roomJid = ref(options.roomJid ?? null);
   const fake = fakeClient(executeResults, {
     events: options.events,
+    invokeError: options.invokeError,
     submitError: options.submitError,
     discoveredCommands: options.discoveredCommands,
   });
@@ -382,6 +387,96 @@ describe("dispatchSlashInvocation: inline-submit", () => {
     expect(submitCalls).toHaveLength(1);
     expect(launcher.commandStates.value[aiCommand.node]?.state).toBe("error");
     expect(launcher.commandStates.value[aiCommand.node]?.detail).toBe("submit failed");
+  });
+});
+
+describe("dispatchSlashInvocation: direct-execute", () => {
+  test("invokes completed channel commands without opening the palette", async () => {
+    const { launcher, invokeCalls, submitCalls } = createLauncher([
+      { status: "completed", notes: [] },
+    ], { roomJid: "pub@muc.example.com" });
+
+    const ok = await launcher.dispatchSlashInvocation({
+      kind: "direct-execute",
+      command: stargateCommand,
+    });
+
+    expect(ok).toBe(true);
+    expect(invokeCalls).toEqual([{ command: stargateCommand, roomJid: "pub@muc.example.com" }]);
+    expect(submitCalls).toEqual([]);
+    expect(launcher.open.value).toBe(false);
+    expect(launcher.commandStates.value[stargateCommand.node]?.state).toBe("success");
+  });
+
+  test("closes an already-open palette after a clean no-form result", async () => {
+    const { launcher } = createLauncher([
+      { status: "completed", notes: [] },
+    ], { roomJid: "pub@muc.example.com" });
+    launcher.open.value = true;
+
+    const ok = await launcher.dispatchSlashInvocation({
+      kind: "direct-execute",
+      command: stargateCommand,
+    });
+
+    expect(ok).toBe(true);
+    expect(launcher.open.value).toBe(false);
+  });
+
+  test("opens the palette for a no-form warning result", async () => {
+    const { launcher } = createLauncher([
+      {
+        status: "completed",
+        notes: [{ type: "warning", value: "Stargate quotes require an active channel." }],
+      },
+    ]);
+
+    const ok = await launcher.dispatchSlashInvocation({
+      kind: "direct-execute",
+      command: stargateCommand,
+    });
+
+    expect(ok).toBe(true);
+    expect(launcher.open.value).toBe(true);
+    expect(launcher.commandStates.value[stargateCommand.node]).toEqual({
+      state: "warning",
+      detail: "Stargate quotes require an active channel.",
+    });
+  });
+
+  test("falls back to the palette when direct execution returns a form", async () => {
+    const { launcher } = createLauncher([
+      executingResult([field("question", { required: true })]),
+    ], { roomJid: "pub@muc.example.com" });
+
+    const ok = await launcher.dispatchSlashInvocation({
+      kind: "direct-execute",
+      command: stargateCommand,
+    });
+
+    expect(ok).toBe(true);
+    expect(launcher.open.value).toBe(true);
+    expect(launcher.commandForms.value[stargateCommand.node]?.fields[0]?.name).toBe("question");
+  });
+
+  test("opens the palette when direct execution fails", async () => {
+    const { launcher, invokeCalls } = createLauncher([], {
+      roomJid: "pub@muc.example.com",
+      invokeError: new Error("command failed"),
+    });
+
+    const ok = await launcher.dispatchSlashInvocation({
+      kind: "direct-execute",
+      command: stargateCommand,
+    });
+
+    expect(ok).toBe(false);
+    expect(invokeCalls).toEqual([{ command: stargateCommand, roomJid: "pub@muc.example.com" }]);
+    expect(launcher.open.value).toBe(true);
+    expect(launcher.commandStates.value[stargateCommand.node]).toEqual({
+      state: "error",
+      detail: "command failed",
+    });
   });
 });
 
