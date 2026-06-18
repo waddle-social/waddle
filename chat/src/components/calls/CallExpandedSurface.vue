@@ -40,6 +40,7 @@ import type { MentionCandidate } from "@/lib/mentions";
 import type { MarkupSpan, MessageReference, TimelineMessage } from "@/lib/chat-ui";
 import type { ComposerLinkPreviewLookup, ComposerLinkPreviewSendPayload } from "@/lib/link-preview-composer";
 import CallTileGrid from "./CallTileGrid.vue";
+import CallStageHeader from "./CallStageHeader.vue";
 import CallControls from "./CallControls.vue";
 import CallSettingsDialog from "./CallSettingsDialog.vue";
 import CallMediaNotice from "./CallMediaNotice.vue";
@@ -288,12 +289,7 @@ onBeforeUnmount(() => {
     role="region"
     aria-label="Active call (expanded)"
   >
-    <header class="call-expanded__header">
-      <div class="min-w-0 flex-1">
-        <div class="type-chat-title truncate">{{ peerLabel }}</div>
-        <div class="type-caption text-muted-foreground truncate">{{ subline }}</div>
-      </div>
-    </header>
+    <CallStageHeader :title="peerLabel" :subline="subline" />
     <div
       v-if="lastError"
       class="call-expanded__error"
@@ -386,15 +382,6 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   background: var(--background);
-}
-
-.call-expanded__header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--space-sm);
-  border-bottom: 1px solid var(--border);
-  padding: 0.75rem 1rem;
 }
 
 .call-expanded__error {
