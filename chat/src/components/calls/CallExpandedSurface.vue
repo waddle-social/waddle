@@ -24,7 +24,12 @@ import { useCallEngine } from "@/lib/calls/use-call-engine";
 import { useActiveMucCall } from "@/lib/calls/use-active-muc-call";
 import { localScreenSharePresentation } from "@/lib/calls/call-self-share";
 import { normalizeMucCallRoomJid } from "@/lib/calls/muc-call-presence";
-import { useCallVolumeMixer } from "@/lib/calls/use-call-volume-mixer";
+import { useCallRoster } from "@/lib/calls/use-call-roster";
+import {
+  $callDockOpen,
+  closeCallDock,
+  toggleCallDock,
+} from "@/lib/calls/call-dock-state";
 import { barePeerJid } from "@/lib/xmpp/jid";
 import { expectedRemoteIdentitiesForCallState } from "@/lib/calls/call-tiles";
 import type { MentionCandidate } from "@/lib/mentions";
@@ -35,7 +40,7 @@ import CallControls from "./CallControls.vue";
 import CallSettingsDialog from "./CallSettingsDialog.vue";
 import CallMediaNotice from "./CallMediaNotice.vue";
 import CallSelfShareNotice from "./CallSelfShareNotice.vue";
-import CallVolumeMixerDialog from "./CallVolumeMixerDialog.vue";
+import CallDock from "./CallDock.vue";
 import MessageComposer from "@/components/chat/MessageComposer.vue";
 
 /**
@@ -103,7 +108,7 @@ const { remoteTracks, localTracks, engine, activeSpeakerIdentities, promotedSpea
 const { activeRoomJid, selfInCall } = useActiveMucCall();
 
 const settingsOpen = ref(false);
-const volumeOpen = ref(false);
+const dockOpen = useStore($callDockOpen);
 const callChatDraft = ref("");
 
 const normalizedRoomJid = computed(() =>
@@ -196,10 +201,12 @@ const expectedRemoteIdentities = computed(() =>
 );
 
 const {
-  rows: volumeRows,
+  rows: rosterRows,
   setVolume: setParticipantVolume,
   resetAll: resetParticipantVolumes,
-} = useCallVolumeMixer(normalizedRoomJid);
+} = useCallRoster(normalizedRoomJid);
+
+const participantCount = computed(() => rosterRows.value.length);
 
 function collapseToSplit(): void {
   $callUiMode.set("split");
@@ -233,16 +240,22 @@ async function onSendCallChat(
 function onKeydown(event: KeyboardEvent): void {
   if (!isOpen.value) return;
   if (event.key !== "Escape") return;
-  // A modal (settings or the volume mixer) owns Escape while it is
-  // open: dismiss the dialog rather than collapsing the whole expanded
-  // call out from under it. This listener runs in the CAPTURE phase so
-  // it sees the still-open flag before AppDialog's own bubble-phase
-  // Escape handler flips the v-model to false — otherwise a dialog
-  // dismiss from inside the dialog would fall through to collapse.
-  if (settingsOpen.value || volumeOpen.value) {
+  // The settings modal owns Escape while open: dismiss it rather than
+  // collapsing the whole expanded call out from under it. This listener
+  // runs in the CAPTURE phase so it sees the still-open flag before
+  // AppDialog's own bubble-phase Escape handler flips the v-model to
+  // false — otherwise a dialog dismiss from inside the dialog would fall
+  // through to collapse.
+  if (settingsOpen.value) {
     event.preventDefault();
     settingsOpen.value = false;
-    volumeOpen.value = false;
+    return;
+  }
+  // The Participants dock is non-modal but still a layer the user opened
+  // on top of the stage; Escape closes it before it collapses the call.
+  if (dockOpen.value) {
+    event.preventDefault();
+    closeCallDock();
     return;
   }
   event.preventDefault();
@@ -300,6 +313,13 @@ onBeforeUnmount(() => {
           :promoted-speaker-identity="promotedSpeakerIdentity"
         />
       </div>
+      <CallDock
+        v-if="dockOpen"
+        :rows="rosterRows"
+        @set-volume="setParticipantVolume"
+        @reset-all="resetParticipantVolumes"
+        @close="closeCallDock"
+      />
     </main>
     <section
       v-if="canShowCallChatComposer"
@@ -334,25 +354,20 @@ onBeforeUnmount(() => {
         :screen-share-enabled="screenShareEnabled"
         :screen-share-supported="screenShareSupported"
         :is-expanded="true"
-        :volume-open="volumeOpen"
+        :participants-open="dockOpen"
+        :participant-count="participantCount"
         :view-mode="viewMode"
         @toggle-mic="toggleMic"
         @toggle-cam="toggleCam"
         @toggle-screen-share="toggleScreenShare"
         @toggle-expanded="collapseToSplit"
-        @toggle-volume="volumeOpen = !volumeOpen"
+        @toggle-participants="toggleCallDock"
         @open-settings="settingsOpen = true"
         @set-view-mode="setCallViewMode"
         @hangup="onHangup"
       />
     </footer>
     <CallSettingsDialog v-model:open="settingsOpen" />
-    <CallVolumeMixerDialog
-      v-model:open="volumeOpen"
-      :rows="volumeRows"
-      @set-volume="setParticipantVolume"
-      @reset-all="resetParticipantVolumes"
-    />
   </div>
 </template>
 
@@ -416,5 +431,15 @@ onBeforeUnmount(() => {
 
 .call-expanded__chat-label {
   padding: 0.625rem 1rem 0;
+}
+
+/* On narrow viewports the dock becomes a full-width bottom panel (see
+ * CallDock's own ≤760px rule). Match that here by stacking the stage above
+ * it, so the grid stays visible instead of being squeezed beside a
+ * 100%-wide dock in a row layout. */
+@media (max-width: 760px) {
+  .call-expanded__main {
+    flex-direction: column;
+  }
 }
 </style>

@@ -9,9 +9,9 @@ import {
   PhoneOff,
   Settings,
   SquareUser,
+  Users,
   Video,
   VideoOff,
-  Volume2,
 } from "lucide-vue-next";
 import type { CallViewMode } from "@/lib/calls/view-mode";
 import CallConnectionIndicator from "./CallConnectionIndicator.vue";
@@ -32,9 +32,11 @@ const props = defineProps<{
   /** True when the parent surface is the expanded variant — flips
    *  the toggle button between "expand" and "collapse". */
   isExpanded: boolean;
-  /** True while the volume mixer dialog is open — drives the speaker
-   *  button's pressed/expanded state. The parent owns the dialog. */
-  volumeOpen: boolean;
+  /** True while the Participants dock is open — drives the participants
+   *  button's pressed/expanded state. The parent owns the dock store. */
+  participantsOpen: boolean;
+  /** Attendee count shown as a badge on the participants button. */
+  participantCount: number;
   /** The chosen stage layout — drives the view switcher's pressed state. */
   viewMode: CallViewMode;
 }>();
@@ -44,7 +46,7 @@ const emit = defineEmits<{
   toggleCam: [];
   toggleScreenShare: [];
   toggleExpanded: [];
-  toggleVolume: [];
+  toggleParticipants: [];
   openSettings: [];
   setViewMode: [mode: CallViewMode];
   hangup: [];
@@ -162,16 +164,20 @@ function onViewKeydown(event: KeyboardEvent): void {
     </button>
     <button
       type="button"
-      class="chat-icon-button chat-icon-button--md hover:bg-muted"
-      :class="{ 'bg-muted text-foreground': volumeOpen }"
-      :title="volumeOpen ? 'Close volume mixer' : 'Open volume mixer'"
-      :aria-label="volumeOpen ? 'Close volume mixer' : 'Open volume mixer'"
-      :aria-pressed="volumeOpen"
-      :aria-expanded="volumeOpen"
-      aria-haspopup="dialog"
-      @click="emit('toggleVolume')"
+      class="call-controls__participants chat-icon-button chat-icon-button--md hover:bg-muted"
+      :class="{ 'bg-muted text-foreground': participantsOpen }"
+      :title="participantsOpen ? 'Close participants' : 'Open participants'"
+      :aria-label="participantsOpen ? 'Close participants' : 'Open participants'"
+      :aria-pressed="participantsOpen"
+      :aria-expanded="participantsOpen"
+      @click="emit('toggleParticipants')"
     >
-      <Volume2 class="w-4 h-4" />
+      <Users class="w-4 h-4" />
+      <span
+        v-if="participantCount > 0"
+        class="call-controls__count"
+        aria-hidden="true"
+      >{{ participantCount }}</span>
     </button>
     <button
       type="button"
@@ -216,5 +222,26 @@ function onViewKeydown(event: KeyboardEvent): void {
   display: flex;
   align-items: center;
   gap: 2px;
+}
+
+/* The participants toggle carries a live attendee count, so it widens
+ * from the square icon-button into a pill with the badge beside the icon. */
+.call-controls__participants {
+  width: auto;
+  gap: 0.375rem;
+  padding-inline: 0.5rem;
+}
+
+.call-controls__count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.125rem;
+  height: 1.125rem;
+  padding: 0 0.3125rem;
+  border-radius: 9999px;
+  background: color-mix(in oklab, var(--foreground) 14%, transparent);
+  font-size: 0.6875rem;
+  font-variant-numeric: tabular-nums;
 }
 </style>

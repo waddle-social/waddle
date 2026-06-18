@@ -4,6 +4,7 @@ import { useStore } from "@nanostores/vue";
 import { $callState } from "./call-store";
 import { $mucCallLiveParticipants } from "./muc-call-live-participants";
 import { useCallEngine } from "./use-call-engine";
+import { remoteParticipantIdentitiesForCall } from "./call-remote-identities";
 import {
   buildCallVolumeMixerRows,
   resetCallVolumeMixerLevels,
@@ -62,17 +63,14 @@ export function useCallVolumeMixer(
 
   const localIdentity = computed(() => engine.localIdentity);
 
-  const remoteParticipantIdentities = computed(() => {
-    if (state.value.phase === "active" && state.value.kind === "muc") {
-      return liveParticipants.value[normalizedRoomJid.value] ?? [];
-    }
-    const identities = new Set<string>();
-    if (state.value.phase === "active" && state.value.kind === "dm") {
-      identities.add(state.value.peer);
-    }
-    for (const track of remoteTracks.value) identities.add(track.participantIdentity);
-    return Array.from(identities);
-  });
+  const remoteParticipantIdentities = computed(() =>
+    remoteParticipantIdentitiesForCall({
+      state: state.value,
+      liveParticipantsByRoom: liveParticipants.value,
+      normalizedRoomJid: normalizedRoomJid.value,
+      remoteTracks: remoteTracks.value,
+    }),
+  );
 
   const rows = computed(() =>
     buildCallVolumeMixerRows({
