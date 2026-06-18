@@ -2,8 +2,10 @@ import { atom } from "nanostores";
 
 /**
  * How the in-call surface is presented to the user. Independent of
- * the call lifecycle in `$callState` so the user's last chosen
- * presentation outlives the connect/reconnect cycle.
+ * the call lifecycle in `$callState` so the user's last chosen split
+ * or expanded presentation outlives the connect/reconnect cycle.
+ * Immersive is intentionally not restored across page reloads because
+ * it hides the whole app chrome and should require an explicit user action.
  *
  * - `split`: the call renders inline above the channel's message lane
  *   so the chat is always visible beneath. A drag handle between the

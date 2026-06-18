@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import {
   callUiModeAfterFullscreenExit,
   callUiModeAfterSurfaceEscape,
@@ -6,6 +6,40 @@ import {
   resetCallUiModeAfterCallEnd,
   shouldExitNativeFullscreenForModeChange,
 } from "../src/lib/calls/ui-mode";
+
+const originalWindow = globalThis.window;
+
+function memoryStorage(seed: Record<string, string> = {}): Storage {
+  const values = new Map(Object.entries(seed));
+  return {
+    get length() {
+      return values.size;
+    },
+    clear() {
+      values.clear();
+    },
+    getItem(key: string) {
+      return values.get(key) ?? null;
+    },
+    key(index: number) {
+      return [...values.keys()][index] ?? null;
+    },
+    removeItem(key: string) {
+      values.delete(key);
+    },
+    setItem(key: string, value: string) {
+      values.set(key, value);
+    },
+  };
+}
+
+afterEach(() => {
+  if (originalWindow === undefined) {
+    Reflect.deleteProperty(globalThis, "window");
+    return;
+  }
+  globalThis.window = originalWindow;
+});
 
 describe("call UI mode transitions", () => {
   test("cycles split to expanded to immersive", () => {
@@ -34,5 +68,19 @@ describe("call UI mode transitions", () => {
 
   test("call end resets the next call to split", () => {
     expect(resetCallUiModeAfterCallEnd()).toBe("split");
+  });
+
+  test("fresh loads restore split or expanded, but not immersive", async () => {
+    const loadMode = async (storedMode: string) => {
+      globalThis.window = {
+        localStorage: memoryStorage({ "waddle:call-ui-mode": storedMode }),
+      } as Window & typeof globalThis;
+      const module = await import(`../src/lib/calls/ui-mode?stored=${storedMode}`);
+      return module.$callUiMode.get();
+    };
+
+    expect(await loadMode("split")).toBe("split");
+    expect(await loadMode("expanded")).toBe("expanded");
+    expect(await loadMode("immersive")).toBe("split");
   });
 });

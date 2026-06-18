@@ -363,7 +363,7 @@ function onKeydown(event: KeyboardEvent): void {
     return;
   }
   event.preventDefault();
-  $callUiMode.set(callUiModeAfterSurfaceEscape(uiMode.value));
+  void toggleExpandedSurface();
 }
 
 watch(isImmersive, (immersive) => {

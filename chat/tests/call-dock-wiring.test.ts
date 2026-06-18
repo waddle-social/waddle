@@ -161,7 +161,7 @@ describe("call surfaces use the Participants dock", () => {
     expect(surface).toContain("if (wasNativeFullscreenActive && !nativeFullscreenActive.value)");
     expect(surface).toContain("fullscreenchange");
     expect(surface).toContain("callUiModeAfterFullscreenExit(uiMode.value)");
-    expect(surface).toContain("callUiModeAfterSurfaceEscape(uiMode.value)");
+    expect(surface).toContain("void toggleExpandedSurface()");
     expect(surface).toContain("@toggle-native-fullscreen");
     expect(surface).toContain("@toggle-immersive");
 
