@@ -81,6 +81,7 @@ fn sample_manifest() -> ExtensionManifest {
             scope: CommandScope::Global,
             composer_prefix: None,
             inline_field: None,
+            composer_execute: false,
         }],
         routes: Vec::new(),
         pubsub_nodes: vec![id!(

@@ -156,6 +156,16 @@ interface types {
         end: u32,
     }
 
+    enum message-markup-kind {
+        blockquote,
+    }
+
+    record message-markup-span {
+        kind: message-markup-kind,
+        start: u32,
+        end: u32,
+    }
+
     record artifact-reference {
         uri: artifact-uri,
         sha256: sha256-digest,
@@ -244,6 +254,10 @@ interface types {
         /// XEP-0004 form has a single user-fillable field. (XEP-0128 form var
         /// `waddle#inline_field`.)
         inline-field: option<string>,
+        /// True when the chat composer may execute `/<prefix>` immediately
+        /// instead of opening the extension palette first. (XEP-0128 form var
+        /// `waddle#composer_execute`.)
+        composer-execute: bool,
     }
 
     record extension-route-descriptor {
@@ -708,6 +722,7 @@ interface types {
         body: display-text,
         thread-id: option<thread-id>,
         reply-to: option<reply-target>,
+        markup: list<message-markup-span>,
         extensions: option<extension-envelope>,
     }
 

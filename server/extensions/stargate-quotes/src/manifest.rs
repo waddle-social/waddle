@@ -23,6 +23,7 @@ pub(crate) fn manifest() -> types::ExtensionManifest {
             scope: types::CommandScope::Channel,
             composer_prefix: Some("stargate".to_string()),
             inline_field: None,
+            composer_execute: true,
         }],
         routes: vec![],
         pubsub_nodes: vec![],

@@ -104,6 +104,7 @@ pub struct HostSendMessage {
     pub body: String,
     pub thread_id: Option<ThreadId>,
     pub reply_to: Option<ReplyTarget>,
+    pub markup: Vec<waddle_extensions::MessageMarkupSpan>,
     pub extensions: Option<waddle_extensions::ExtensionEnvelope>,
 }
 

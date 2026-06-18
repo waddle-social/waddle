@@ -196,6 +196,7 @@ fn room_message_request(
         body,
         thread_id: target.thread_id.clone(),
         reply_to: target.reply_to.clone(),
+        markup: vec![],
         extensions: None,
     }
 }

@@ -178,6 +178,11 @@ pub use super::xep0393::{
     spans_to_plain, strip_unstyled, Block, Span, StyledBody, StylingCarrier, NS_STYLING,
 };
 
+pub use super::xep0394::{
+    build_message_markup_element, MarkupKind as Xep0394MarkupKind, MarkupSpan as Xep0394MarkupSpan,
+    NS_MARKUP as NS_MESSAGE_MARKUP,
+};
+
 pub use waddle_xmpp_core::xep0359::{
     add_origin_id, add_stanza_id as add_stanza_id_xep0359, build_origin_id_element,
     build_stanza_id_element, extract_origin_id as extract_origin_id_xep0359, extract_origin_id_str,

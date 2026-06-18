@@ -12,10 +12,10 @@ pub use host_tools::{
     GetPresenceRequest, GetPresenceResponse, GetRosterRequest, GetRosterResponse, HostToolError,
     HostToolErrorCode, InvocationContext, ListChannelsRequest, ListChannelsResponse,
     ListRoomMembersRequest, ListRoomMembersResponse, ListSpacesRequest, ListSpacesResponse,
-    MamQuery, MamQueryResponse, MamTarget, MessageTarget, MucAffiliation, MucRole,
-    PresenceAvailability, PresenceShow, PresenceState, PubSubGetItemsRequest,
-    PubSubGetItemsResponse, PubSubStoredItem, RoomMember, RosterAsk, RosterEntry,
-    RosterSubscription, SendMessageRequest, SendMessageResponse, SpaceSummary,
+    MamQuery, MamQueryResponse, MamTarget, MessageMarkupKind, MessageMarkupSpan, MessageTarget,
+    MucAffiliation, MucRole, PresenceAvailability, PresenceShow, PresenceState,
+    PubSubGetItemsRequest, PubSubGetItemsResponse, PubSubStoredItem, RoomMember, RosterAsk,
+    RosterEntry, RosterSubscription, SendMessageRequest, SendMessageResponse, SpaceSummary,
 };
 pub use manager::{ExtensionManager, MessageExtensionOutcome};
 pub use types::{

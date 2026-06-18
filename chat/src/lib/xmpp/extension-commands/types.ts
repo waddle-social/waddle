@@ -65,6 +65,7 @@ export interface DiscoveredExtensionCommand {
   scope: ExtensionCommandScope;
   composerPrefix?: string;
   inlineField?: string;
+  composerExecute?: boolean;
 }
 
 type ExtensionRouteScope = "channel";

@@ -47,6 +47,8 @@
 //!   from input strings via SHA-1 hue mapping with CVD correction.
 //! - **XEP-0393**: Message Styling - Inline text formatting parser for
 //!   bold, italic, strikethrough, code, code blocks, and block quotes.
+//! - **XEP-0394**: Message Markup - Semantic message formatting metadata,
+//!   including block quotes via `<bquote/>`.
 //! - **XEP-0359**: Unique and Stable Stanza IDs - Server-assigned `<stanza-id/>`
 //!   and client-assigned `<origin-id/>` for stable message referencing.
 //! - **XEP-0334**: Message Processing Hints
@@ -169,6 +171,7 @@ pub mod xep0363;
 pub mod xep0372;
 pub mod xep0377;
 pub mod xep0393;
+pub mod xep0394;
 pub mod xep0401;
 pub mod xep0402;
 pub mod xep0410;

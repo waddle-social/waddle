@@ -55,12 +55,14 @@ export async function discoverExtensionCommands(
     let scope: ExtensionCommandScope = "global";
     let composerPrefix: string | undefined;
     let inlineField: string | undefined;
+    let composerExecute = false;
     try {
       const info = await rawDiscoInfoFull(xmpp, itemServiceJid, node);
       const metadata = parseExtensionCommandMetadata(info.extensions);
       if (metadata.scope) scope = metadata.scope;
       composerPrefix = metadata.composerPrefix;
       inlineField = metadata.inlineField;
+      composerExecute = metadata.composerExecute === true;
     } catch {
       // If disco#info is unavailable, fall back to global scope.
     }
@@ -71,6 +73,7 @@ export async function discoverExtensionCommands(
       scope,
       ...(composerPrefix !== undefined ? { composerPrefix } : {}),
       ...(inlineField !== undefined ? { inlineField } : {}),
+      ...(composerExecute ? { composerExecute } : {}),
     });
   }
   return commands;
@@ -80,6 +83,7 @@ interface ExtensionCommandMetadata {
   scope: ExtensionCommandScope | null;
   composerPrefix?: string;
   inlineField?: string;
+  composerExecute?: boolean;
 }
 
 function parseExtensionCommandMetadata(extensions: unknown[] | undefined): ExtensionCommandMetadata {
@@ -96,6 +100,8 @@ function parseExtensionCommandMetadata(extensions: unknown[] | undefined): Exten
     if (composerPrefix) result.composerPrefix = composerPrefix;
     const inlineField = formFieldValue(fields, "waddle#inline_field");
     if (inlineField) result.inlineField = inlineField;
+    const composerExecute = formFieldValue(fields, "waddle#composer_execute");
+    if (composerExecute?.toLowerCase() === "true") result.composerExecute = true;
   }
   return result;
 }

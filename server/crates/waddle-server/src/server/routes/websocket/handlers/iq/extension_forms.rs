@@ -152,6 +152,9 @@ pub(super) fn extension_command_metadata_form(
     if let Some(field_name) = descriptor.inline_field.as_deref() {
         form = form.add_field(Field::text_single("waddle#inline_field", field_name));
     }
+    if descriptor.composer_execute {
+        form = form.add_field(Field::text_single("waddle#composer_execute", "true"));
+    }
     form = add_profile_fields(form, profile);
     form.into_element()
 }
@@ -200,6 +203,7 @@ mod tests {
         scope: waddle_extensions::CommandScope,
         composer_prefix: Option<&str>,
         inline_field: Option<&str>,
+        composer_execute: bool,
     ) -> waddle_extensions::CommandDescriptor {
         waddle_extensions::CommandDescriptor {
             node: waddle_extensions::CommandNode::new(node).expect("command node"),
@@ -207,6 +211,7 @@ mod tests {
             scope,
             composer_prefix: composer_prefix.map(str::to_string),
             inline_field: inline_field.map(str::to_string),
+            composer_execute,
         }
     }
 
@@ -273,11 +278,13 @@ mod tests {
                 waddle_extensions::CommandScope::Channel,
                 None,
                 None,
+                false,
             ),
             None,
         );
         assert!(!has_field(&form, "waddle#composer_prefix"));
         assert!(!has_field(&form, "waddle#inline_field"));
+        assert!(!has_field(&form, "waddle#composer_execute"));
         assert_eq!(
             field_value(&form, "waddle#command_scope").as_deref(),
             Some("channel"),
@@ -293,6 +300,7 @@ mod tests {
                 waddle_extensions::CommandScope::Global,
                 Some("ai"),
                 Some("prompt"),
+                false,
             ),
             None,
         );
@@ -315,6 +323,7 @@ mod tests {
                 waddle_extensions::CommandScope::Channel,
                 Some("poll"),
                 None,
+                false,
             ),
             None,
         );
@@ -323,6 +332,26 @@ mod tests {
             Some("poll"),
         );
         assert!(!has_field(&form, "waddle#inline_field"));
+    }
+
+    #[test]
+    fn command_metadata_form_serializes_composer_execute_when_enabled() {
+        let form = extension_command_metadata_form(
+            &plugin("stargate-quotes"),
+            &descriptor(
+                "urn:waddle:extension:1:stargate-quotes",
+                waddle_extensions::CommandScope::Channel,
+                Some("stargate"),
+                None,
+                true,
+            ),
+            None,
+        );
+
+        assert_eq!(
+            field_value(&form, "waddle#composer_execute").as_deref(),
+            Some("true"),
+        );
     }
 
     #[test]
@@ -335,6 +364,7 @@ mod tests {
                 waddle_extensions::CommandScope::Channel,
                 Some("github"),
                 None,
+                false,
             ),
             Some(&extension_profile),
         );

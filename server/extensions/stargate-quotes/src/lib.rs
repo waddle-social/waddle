@@ -53,7 +53,9 @@ pub(crate) use constants::{COMMAND_NAME, COMMAND_NODE, COMMAND_RESULT_TEXT, PLUG
 #[cfg(test)]
 pub(crate) use manifest::manifest;
 #[cfg(test)]
-pub(crate) use quotes::{parse_quotes_json, quote_body, quote_catalog, select_quote_with_rng};
+pub(crate) use quotes::{
+    parse_quotes_json, quote_body, quote_catalog, quote_markup, select_quote_with_rng,
+};
 
 #[cfg(test)]
 mod tests;

@@ -1,5 +1,5 @@
 use super::{
-    handle_command_with_rng, manifest, parse_quotes_json, quote_body, quote_catalog,
+    handle_command_with_rng, manifest, parse_quotes_json, quote_body, quote_catalog, quote_markup,
     select_quote_with_rng, take_sent_room_messages, types, COMMAND_NAME, COMMAND_NODE,
     COMMAND_RESULT_TEXT, PLUGIN_NS,
 };
@@ -17,6 +17,7 @@ fn manifest_registers_channel_stargate_command() {
         manifest.commands[0].composer_prefix.as_deref(),
         Some("stargate")
     );
+    assert!(manifest.commands[0].composer_execute);
     assert!(matches!(
         manifest.commands[0].scope,
         types::CommandScope::Channel
@@ -68,19 +69,33 @@ fn quote_catalog_json_only_contains_rendered_fields() {
 }
 
 #[test]
-fn quote_body_renders_plain_quote_with_role_and_series() {
+fn quote_body_renders_markdown_fallback_quote_with_role_and_series() {
     let quotes = quote_catalog().expect("quote catalog parses");
     let body = quote_body(&quotes[0]);
 
     assert_eq!(
         body,
         format!(
-            "{}\n\n{}, {}",
+            "> {}\n\n{}, {}",
             quotes[0].quote, quotes[0].role, quotes[0].series
         )
     );
-    assert!(!body.starts_with('"'));
     assert!(!body.contains("\n\n- "));
+}
+
+#[test]
+fn quote_markup_marks_only_the_quote_block() {
+    let quotes = quote_catalog().expect("quote catalog parses");
+    let spans = quote_markup(&quotes[0]);
+
+    assert_eq!(spans.len(), 1);
+    assert!(matches!(
+        spans[0].kind,
+        types::MessageMarkupKind::Blockquote
+    ));
+    assert_eq!(spans[0].start, 0);
+    assert_eq!(spans[0].end, (2 + quotes[0].quote.chars().count()) as u32);
+    assert!(spans[0].end < quote_body(&quotes[0]).chars().count() as u32);
 }
 
 #[test]
@@ -94,7 +109,7 @@ fn random_selection_rejects_low_values_that_would_bias_modulo() {
 }
 
 #[test]
-fn room_command_posts_plain_quote_and_returns_completion() {
+fn room_command_posts_blockquoted_quote_and_returns_completion() {
     let _ = take_sent_room_messages();
     let command = command_invocation(Some("sgc@muc.example.com"));
     let quotes = quote_catalog().expect("quote catalog parses");
@@ -115,6 +130,14 @@ fn room_command_posts_plain_quote_and_returns_completion() {
     let sent = take_sent_room_messages();
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].body.value, quote_body(expected));
+    let expected_markup = quote_markup(expected);
+    assert_eq!(sent[0].markup.len(), expected_markup.len());
+    assert!(matches!(
+        sent[0].markup[0].kind,
+        types::MessageMarkupKind::Blockquote
+    ));
+    assert_eq!(sent[0].markup[0].start, expected_markup[0].start);
+    assert_eq!(sent[0].markup[0].end, expected_markup[0].end);
     assert!(sent[0].extensions.is_none());
     assert!(matches!(
         &sent[0].target,

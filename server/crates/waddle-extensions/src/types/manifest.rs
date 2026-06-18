@@ -133,6 +133,12 @@ pub struct CommandDescriptor {
     pub composer_prefix: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inline_field: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub composer_execute: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]

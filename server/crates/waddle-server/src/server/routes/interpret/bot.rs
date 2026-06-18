@@ -59,6 +59,9 @@ pub(super) async fn dispatch_bot_groupchat_response(
         }
         set_reply_payload(&mut working, &reply);
     }
+    if let Some(markup) = build_extension_message_markup(&response.markup) {
+        working.payloads.push(markup);
+    }
     if let Some(extensions) = response.extensions.as_ref() {
         working.payloads.push(extensions.to_minidom());
         working
@@ -143,12 +146,27 @@ pub(crate) struct ExtensionRoomMessage {
     pub stanza_id: Option<StanzaId>,
     pub thread_id: Option<ThreadId>,
     pub reply_to: Option<ReplyTarget>,
+    pub markup: Vec<MessageMarkupSpan>,
     pub extensions: Option<ExtensionEnvelope>,
 }
 
 pub(crate) struct ExtensionRoomDispatchResult {
     pub outcome: InterpretOutcome,
     pub stanza_id: StanzaId,
+}
+
+pub(crate) fn build_extension_message_markup(spans: &[MessageMarkupSpan]) -> Option<Element> {
+    let xep_spans = spans
+        .iter()
+        .map(|span| waddle_xmpp::xep::Xep0394MarkupSpan {
+            kind: match span.kind {
+                MessageMarkupKind::Blockquote => waddle_xmpp::xep::Xep0394MarkupKind::Blockquote,
+            },
+            start: span.start,
+            end: span.end,
+        })
+        .collect::<Vec<_>>();
+    waddle_xmpp::xep::build_message_markup_element(&xep_spans)
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -39,6 +39,7 @@ pub(super) fn command_descriptor(
         scope,
         composer_prefix: composer_prefix.map(str::to_string),
         inline_field: inline_field.map(str::to_string),
+        composer_execute: false,
     }
 }
 

@@ -200,12 +200,25 @@ pub enum MessageTarget {
     Direct(BareJid),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageMarkupKind {
+    Blockquote,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MessageMarkupSpan {
+    pub kind: MessageMarkupKind,
+    pub start: u32,
+    pub end: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct SendMessageRequest {
     pub target: MessageTarget,
     pub body: DisplayText,
     pub thread_id: Option<ThreadId>,
     pub reply_to: Option<ReplyTarget>,
+    pub markup: Vec<MessageMarkupSpan>,
     pub extensions: Option<ExtensionEnvelope>,
 }
 

@@ -112,6 +112,7 @@ fn command_descriptor(node: &str, name: &str) -> types::CommandDescriptor {
         scope: types::CommandScope::Global,
         composer_prefix: None,
         inline_field: None,
+        composer_execute: false,
     }
 }
 
@@ -887,6 +888,7 @@ fn send_room_message(
         body,
         thread_id: None,
         reply_to: None,
+        markup: vec![],
         extensions,
     };
     send_message_request(&request)
