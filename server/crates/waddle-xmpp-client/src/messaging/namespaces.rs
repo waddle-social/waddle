@@ -11,6 +11,7 @@ pub const NS_MESSAGE_RETRACT: &str = "urn:xmpp:message-retract:1";
 pub const NS_MESSAGE_MODERATE: &str = "urn:xmpp:message-moderate:1";
 pub const NS_MESSAGE_CORRECT: &str = "urn:xmpp:message-correct:0";
 pub(crate) const NS_HINTS: &str = "urn:xmpp:hints";
+pub const NS_WADDLE_IN_CALL: &str = "urn:waddle:in-call:0";
 pub(crate) const NS_HATS: &str = "urn:xmpp:hats:0";
 pub(crate) const NS_SIMS: &str = "urn:xmpp:sims:1";
 pub(crate) const NS_SFS: &str = "urn:xmpp:sfs:0";

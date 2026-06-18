@@ -218,6 +218,25 @@ pub fn parse_reaction_payload(element: &Element) -> Option<ReactionPayload> {
     })
 }
 
+pub fn parse_in_call_reaction_payload(element: &Element) -> Option<InCallReactionPayload> {
+    let carrier = element.get_child("in-call", NS_WADDLE_IN_CALL)?;
+    let sid = carrier.attr("sid")?.trim();
+    if sid.is_empty() {
+        return None;
+    }
+    let emoji = carrier
+        .get_child("reaction", NS_WADDLE_IN_CALL)?
+        .attr("emoji")?
+        .trim();
+    if emoji.is_empty() {
+        return None;
+    }
+    Some(InCallReactionPayload {
+        sid: InCallSessionId::new(sid).ok()?,
+        emoji: InCallReactionEmoji::new(emoji).ok()?,
+    })
+}
+
 pub fn parse_retraction_payload(element: &Element) -> Option<RetractionPayload> {
     let retract = element.get_child("retract", NS_MESSAGE_RETRACT)?;
     if retract

@@ -1190,6 +1190,9 @@ function dayDividerLabel(createdAt: string): string {
       :room-jid="callRoomJid ?? undefined"
       :dm-peer-jid="dmPeer?.peerJid"
       :dm-peer-name="dmPeer?.peerUsername"
+      :xmpp-client="xmppClient"
+      :space-id="waddle?.id"
+      :channel-id="channel?.id"
     />
 
     <!-- Composer (social / top-pinned mode) -->
@@ -1606,6 +1609,9 @@ function dayDividerLabel(createdAt: string): string {
       :link-preview-lookup="linkPreviewLookup"
       :link-preview-scope="linkPreviewScope"
       :send-call-chat-message="sendCallChatMessage"
+      :xmpp-client="xmppClient"
+      :space-id="waddle?.id"
+      :channel-id="channel?.id"
       @send-call-chat="(...args) => emit('sendCallChat', ...args)"
     />
   </div>

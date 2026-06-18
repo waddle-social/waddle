@@ -12,6 +12,7 @@ import {
   MoreHorizontal,
   PhoneOff,
   ScanFace,
+  SmilePlus,
   Settings,
   SquareUser,
   Users,
@@ -68,6 +69,7 @@ const emit = defineEmits<{
   toggleNativeFullscreen: [];
   toggleParticipants: [];
   toggleChat: [];
+  sendReaction: [emoji: string];
   openSettings: [];
   setViewMode: [mode: CallViewMode];
   toggleSelfView: [];
@@ -114,9 +116,14 @@ function onViewKeydown(event: KeyboardEvent): void {
  * while Escape returns focus to the trigger.
  */
 const moreOpen = ref(false);
+const reactionsOpen = ref(false);
+const reactionsWrapEl = ref<HTMLElement | null>(null);
+const reactionsTriggerEl = ref<HTMLButtonElement | null>(null);
+const reactionsMenuEl = ref<HTMLElement | null>(null);
 const moreWrapEl = ref<HTMLElement | null>(null);
 const moreTriggerEl = ref<HTMLButtonElement | null>(null);
 const moreMenuEl = ref<HTMLElement | null>(null);
+const reactionEmojis = ["👍", "❤️", "😂", "🔥", "👏", "🎉"] as const;
 
 function menuItems(): HTMLElement[] {
   const root = moreMenuEl.value;
@@ -126,6 +133,70 @@ function menuItems(): HTMLElement[] {
   return Array.from(
     root.querySelectorAll<HTMLElement>('[role="menuitem"],[role="menuitemcheckbox"]'),
   );
+}
+
+function reactionItems(): HTMLElement[] {
+  const root = reactionsMenuEl.value;
+  if (!root) return [];
+  return Array.from(root.querySelectorAll<HTMLElement>('[role="menuitem"]'));
+}
+
+async function openReactions(focusFirst: boolean): Promise<void> {
+  reactionsOpen.value = true;
+  if (!focusFirst) return;
+  await nextTick();
+  reactionItems()[0]?.focus();
+}
+
+function closeReactions(returnFocus: boolean): void {
+  if (!reactionsOpen.value) return;
+  reactionsOpen.value = false;
+  if (returnFocus) reactionsTriggerEl.value?.focus();
+}
+
+function onReactionsTriggerKeydown(event: KeyboardEvent): void {
+  if (event.key === "ArrowDown" || event.key === "ArrowRight" || event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    void openReactions(true);
+  } else if (event.key === "ArrowUp" || event.key === "ArrowLeft") {
+    event.preventDefault();
+    void openReactions(true).then(() => reactionItems().at(-1)?.focus());
+  } else if (event.key === "Escape") {
+    closeReactions(true);
+  }
+}
+
+function onReactionsMenuKeydown(event: KeyboardEvent): void {
+  const items = reactionItems();
+  if (items.length === 0) return;
+  const index = items.indexOf(document.activeElement as HTMLElement);
+  switch (event.key) {
+    case "Escape":
+      event.preventDefault();
+      closeReactions(true);
+      break;
+    case "Tab":
+      closeReactions(false);
+      break;
+    case "ArrowDown":
+    case "ArrowRight":
+      event.preventDefault();
+      items[(index + 1) % items.length]?.focus();
+      break;
+    case "ArrowUp":
+    case "ArrowLeft":
+      event.preventDefault();
+      items[(index - 1 + items.length) % items.length]?.focus();
+      break;
+    case "Home":
+      event.preventDefault();
+      items[0]?.focus();
+      break;
+    case "End":
+      event.preventDefault();
+      items.at(-1)?.focus();
+      break;
+  }
 }
 
 async function openMore(focusFirst: boolean): Promise<void> {
@@ -198,15 +269,22 @@ function selectSelfView(): void {
   closeMore(true);
 }
 
+function selectReaction(emoji: string): void {
+  emit("sendReaction", emoji);
+  closeReactions(true);
+}
+
 function onDocumentPointerDown(event: PointerEvent): void {
   const target = event.target as Node | null;
+  if (target && reactionsWrapEl.value?.contains(target)) return;
   if (target && moreWrapEl.value?.contains(target)) return;
+  closeReactions(false);
   closeMore(false);
 }
 
-watch(moreOpen, (open) => {
+watch([moreOpen, reactionsOpen], ([moreOpenValue, reactionsOpenValue]) => {
   if (typeof document === "undefined") return;
-  if (open) {
+  if (moreOpenValue || reactionsOpenValue) {
     document.addEventListener("pointerdown", onDocumentPointerDown, true);
   } else {
     document.removeEventListener("pointerdown", onDocumentPointerDown, true);
@@ -322,6 +400,41 @@ onBeforeUnmount(() => {
     >
       <component :is="isNativeFullscreen ? Minimize2 : Maximize2" class="w-4 h-4" />
     </button>
+    <div ref="reactionsWrapEl" class="call-controls__reactions">
+      <button
+        ref="reactionsTriggerEl"
+        type="button"
+        class="chat-icon-button chat-icon-button--md hover:bg-muted"
+        :class="{ 'bg-muted text-foreground': reactionsOpen }"
+        title="Reactions"
+        aria-label="Reactions"
+        aria-haspopup="menu"
+        :aria-expanded="reactionsOpen"
+        @click="reactionsOpen ? closeReactions(false) : openReactions(true)"
+        @keydown="onReactionsTriggerKeydown"
+      >
+        <SmilePlus class="w-4 h-4" />
+      </button>
+      <div
+        v-show="reactionsOpen"
+        ref="reactionsMenuEl"
+        class="call-controls__reaction-menu"
+        role="menu"
+        aria-label="Reactions"
+        @keydown="onReactionsMenuKeydown"
+      >
+        <button
+          v-for="emoji in reactionEmojis"
+          :key="emoji"
+          type="button"
+          role="menuitem"
+          class="call-controls__reaction-item"
+          @click="selectReaction(emoji)"
+        >
+          {{ emoji }}
+        </button>
+      </div>
+    </div>
     <button
       type="button"
       class="call-controls__participants chat-icon-button chat-icon-button--md hover:bg-muted"
@@ -435,6 +548,44 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 2px;
+}
+
+.call-controls__reactions {
+  position: relative;
+  display: inline-flex;
+}
+
+.call-controls__reaction-menu {
+  position: absolute;
+  bottom: calc(100% + 0.375rem);
+  left: 50%;
+  z-index: 10;
+  display: grid;
+  grid-template-columns: repeat(6, 2rem);
+  gap: 0.125rem;
+  width: max-content;
+  padding: var(--space-2xs);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--popover, var(--background));
+  box-shadow: var(--shadow-lg, 0 10px 30px rgb(0 0 0 / 0.18));
+  transform: translateX(-50%);
+}
+
+.call-controls__reaction-item {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-emoji-picker);
+  line-height: 1;
+}
+
+.call-controls__reaction-item:hover,
+.call-controls__reaction-item:focus-visible {
+  background: var(--muted);
 }
 
 /* More ▸ overflow. The menu floats above the bar (the bar sits at the

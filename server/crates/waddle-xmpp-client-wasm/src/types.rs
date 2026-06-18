@@ -55,6 +55,8 @@ pub struct WaddleMessage {
     pub displayed_marker_id: Option<String>,
     pub reaction_target_id: Option<String>,
     pub reaction_emojis: Vec<String>,
+    pub in_call_sid: Option<String>,
+    pub in_call_reaction_emoji: Option<String>,
     pub is_muc: bool,
     pub thread: Option<String>,
     pub parent_thread_id: Option<String>,

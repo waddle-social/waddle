@@ -28,6 +28,7 @@ import { useCallEngine } from "@/lib/calls/use-call-engine";
 import type { CallWireSender } from "@/lib/calls/outbound";
 import type { CallEvent, ExternalService } from "@/lib/calls/types";
 import { coerceExternalServices } from "@/lib/calls/ice-servers";
+import { receiveInCallReaction } from "@/lib/calls/in-call-reactions";
 import { barePeerJid, fullJidIdentityKey, jidDomain, roomBareJidFor } from "./jid";
 import type {
   ChatStateEvent,
@@ -647,6 +648,7 @@ type XmppClientInstance = Partial<WasmClient> & CompatEmitter & {
   set_on_session_lifecycle?: (cb: (event: string) => void) => void;
   set_on_mds_displayed?: (cb: (entry: WasmMdsDisplayedEntry) => void) => void;
   set_on_pubsub_event?: (cb: (event: WasmPubsubEvent) => void) => void;
+  send_in_call_reaction?: (to: string, type: "chat" | "groupchat", sid: string, emoji: string) => Promise<void>;
   get_resume_state?: () => XmppResumeState | null;
   get_resume_state_handle?: () => XmppResumeStateHandle | undefined;
   publish_mds_displayed?: (chatId: string, stanzaId: string, stanzaIdBy: string) => Promise<void>;
@@ -1713,6 +1715,11 @@ export class BrowserXmppClient {
     throw new Error("XMPP session is not ready");
   }
 
+  private async compatSendInCallReaction(xmpp: XmppClientInstance, to: string, type: "chat" | "groupchat", sid: string, emoji: string) {
+    if (xmpp.send_in_call_reaction) return xmpp.send_in_call_reaction(to, type, sid, emoji);
+    throw new Error("XMPP session is not ready");
+  }
+
   private async compatSendRetraction(xmpp: XmppClientInstance, to: string, type: "chat" | "groupchat", id: string, thread?: { id: string; parent?: string }) {
     if (xmpp.send_retraction) return xmpp.send_retraction(to, type, id, thread?.id, thread?.parent);
     throw new Error("XMPP session is not ready");
@@ -1868,6 +1875,7 @@ export class BrowserXmppClient {
   async sendChatState(spaceId: string, channelId: string, state: ChatStateType, thread?: { id: string; parent?: string }) { const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId); await this.compatSendChatState(xmpp, roomJid, "groupchat", state, thread); }
   async sendDisplayed(spaceId: string, channelId: string, messageId: string, thread?: { id: string; parent?: string }) { const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId); await this.compatSendDisplayed(xmpp, roomJid, "groupchat", messageId, thread); }
   async sendReaction(spaceId: string, channelId: string, messageId: string, emojis: string[], thread?: { id: string; parent?: string }) { const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId); await this.compatSendReaction(xmpp, roomJid, "groupchat", messageId, emojis, thread); }
+  async sendInCallReaction(spaceId: string, channelId: string, sid: string, emoji: string) { const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId); await this.compatSendInCallReaction(xmpp, roomJid, "groupchat", sid, emoji); }
   /** #414: pin a message in the room. Server gates on Owner/Admin
    * affiliation; non-admins receive a `<forbidden/>` error which
    * surfaces as a rejected Promise. */
@@ -1957,6 +1965,7 @@ export class BrowserXmppClient {
     return await this.compatSendCorrection(xmpp, barePeerJid(peerJid), "chat", body, replacesId, opts);
   }
   async sendDmReaction(peerJid: string, messageId: string, emojis: string[], thread?: { id: string; parent?: string }): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await this.compatSendReaction(xmpp, barePeerJid(peerJid), "chat", messageId, emojis, thread); }
+  async sendDmInCallReaction(peerJid: string, sid: string, emoji: string): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await this.compatSendInCallReaction(xmpp, peerJid, "chat", sid, emoji); }
 
   /**
    * XEP-0490 §3 multi-device "read up to here" publish. `chatId` is
@@ -3585,6 +3594,14 @@ export class BrowserXmppClient {
       return;
     }
     if (message.displayed_marker_id) { if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").split("/")[1] ?? "unknown"; this.displayedHandler?.({ roomJid, nick, messageId: message.displayed_marker_id }); } else this.dmDisplayedHandler?.({ peerJid: barePeerJid(message.from ?? message.to ?? ""), messageId: message.displayed_marker_id }); return; }
+    if (message.in_call_sid && message.in_call_reaction_emoji) {
+      receiveInCallReaction({
+        sid: message.in_call_sid,
+        emoji: message.in_call_reaction_emoji,
+        from: message.from ?? "",
+      });
+      return;
+    }
     if (message.reaction_target_id) { if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").split("/")[1] ?? "unknown"; this.reactionHandler?.({ roomJid, nick, messageId: message.reaction_target_id, emojis: message.reaction_emojis }); } else { const fromBare = barePeerJid(message.from ?? ""); const toBare = barePeerJid(message.to ?? ""); const selfBare = barePeerJid(this.session.jid); const peerJid = fromBare === selfBare ? toBare : fromBare; const reactorJid = fromBare || selfBare; if (peerJid && reactorJid) this.dmReactionHandler?.({ peerJid, reactorJid, messageId: message.reaction_target_id, emojis: message.reaction_emojis }); } return; }
     if (message.pin_event) {
       const roomJid = message.is_muc

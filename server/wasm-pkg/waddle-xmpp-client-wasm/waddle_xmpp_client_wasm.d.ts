@@ -317,6 +317,7 @@ export class WaddleClient {
     send_correction(to: string, msg_type: string, body: string, replaces_id: string, options: any): Promise<any>;
     send_displayed(to: string, msg_type: string, message_id: string, thread_id?: string | null, thread_parent?: string | null): Promise<any>;
     send_groupchat_message(room_jid: string, body: string, options: any): Promise<any>;
+    send_in_call_reaction(to: string, msg_type: string, sid: string, emoji: string): Promise<any>;
     send_moderation(to: string, msg_type: string, target_id: string, reason?: string | null): Promise<any>;
     /**
      * Send a Jingle `session-terminate` IQ to hang up. `reason` is

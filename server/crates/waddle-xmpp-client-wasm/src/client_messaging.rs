@@ -200,6 +200,38 @@ impl WaddleClient {
         })
     }
 
+    pub fn send_in_call_reaction(
+        &self,
+        to: String,
+        msg_type: String,
+        sid: String,
+        emoji: String,
+    ) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let recipient = match msg_type.as_str() {
+                "chat" => InCallReactionRecipient::Direct(
+                    to.parse::<FullJid>()
+                        .map_err(|_| js_error(format!("invalid in-call peer full JID: {to}")))?,
+                ),
+                "groupchat" => InCallReactionRecipient::Room(
+                    to.parse::<BareJid>()
+                        .map_err(|_| js_error(format!("invalid in-call room JID: {to}")))?,
+                ),
+                _ => {
+                    return Err(js_error(format!(
+                        "invalid in-call message type: {msg_type}"
+                    )))
+                }
+            };
+            let sid = InCallSessionId::new(sid).map_err(|err| js_error(err.to_string()))?;
+            let emoji = InCallReactionEmoji::new(emoji).map_err(|err| js_error(err.to_string()))?;
+            let stanza = build_in_call_reaction_message(&recipient, &sid, &emoji);
+            send_stanza_command(inner, stanza).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
     /// Publish a pin request (#414). `room_jid` is the bare MUC JID;
     /// `target_stanza_id` is the XEP-0359 `by=room` stanza-id of the
     /// message to pin. Server gates on Owner/Admin affiliation; a

@@ -447,6 +447,12 @@ pub use super::xep_waddle_link_preview::{
     NS_WADDLE_LINK_PREVIEW,
 };
 
+pub use super::xep_waddle_in_call::{
+    build_in_call_reaction_element, build_in_call_reaction_message, parse_in_call_signal,
+    parse_in_call_signal_child, InCallParseError, InCallReactionEmoji, InCallReactionSignal,
+    InCallSessionId, InCallSignal, NS_WADDLE_IN_CALL,
+};
+
 pub use super::xep0503::{
     build_channel_item, build_muc_roominfo_form, build_muc_roominfo_pubsub_form,
     build_room_metadata_form, build_room_space_metadata_forms,

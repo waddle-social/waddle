@@ -207,6 +207,7 @@ pub mod xep_waddle_dm_bookmarks;
 pub mod xep_waddle_dnd;
 pub mod xep_waddle_forums;
 pub mod xep_waddle_group_dm;
+pub mod xep_waddle_in_call;
 pub mod xep_waddle_link_preview;
 pub mod xep_waddle_livekit_transport;
 pub mod xep_waddle_pin;
