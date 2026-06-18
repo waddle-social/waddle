@@ -50,6 +50,16 @@ pub(crate) fn references_to_js(references: Vec<messaging::ReferenceData>) -> Vec
         .collect()
 }
 
+fn in_call_signal_to_js(signal: Option<InCallSignal>) -> Option<WaddleInCallSignal> {
+    match signal {
+        Some(InCallSignal::Reaction(payload)) => Some(WaddleInCallSignal::Reaction {
+            sid: payload.sid.as_str().to_string(),
+            emoji: payload.emoji.as_str().to_string(),
+        }),
+        None => None,
+    }
+}
+
 pub(crate) fn call_thread_to_js(
     anchor: waddle_xmpp_client::xep::call_thread::CallThreadAnchor,
 ) -> WaddleCallThreadAnchor {
@@ -189,6 +199,7 @@ pub(crate) fn inbound_to_js(message: InboundMessage) -> WaddleMessage {
     } else {
         None
     };
+    let in_call = in_call_signal_to_js(message.in_call);
 
     WaddleMessage {
         id: message.id,
@@ -221,6 +232,7 @@ pub(crate) fn inbound_to_js(message: InboundMessage) -> WaddleMessage {
         displayed_marker_id: message.displayed_marker_id,
         reaction_target_id: message.reaction_target_id,
         reaction_emojis: message.reaction_emojis,
+        in_call,
         is_muc: message.message_type == "groupchat",
         thread: message.thread_id.or(message.thread),
         parent_thread_id: message.parent_thread_id,
@@ -347,6 +359,7 @@ pub(crate) fn inbox_push_to_js(
         displayed_marker_id: None,
         reaction_target_id: None,
         reaction_emojis: Vec::new(),
+        in_call: None,
         is_muc: false,
         thread: None,
         parent_thread_id: None,

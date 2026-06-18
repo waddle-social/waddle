@@ -18,8 +18,9 @@ use self::files::{parse_file_sharing_element, parse_shared_file};
 use self::markup::parse_markup_spans;
 pub use self::payloads::{
     parse_chat_state_payload, parse_correction_payload, parse_displayed_marker_payload,
-    parse_extension_envelope, parse_markable_marker_payload, parse_moderation_payload,
-    parse_reaction_payload, parse_retraction_payload, parse_retraction_tombstone_payload,
+    parse_extension_envelope, parse_in_call_reaction_payload, parse_markable_marker_payload,
+    parse_moderation_payload, parse_reaction_payload, parse_retraction_payload,
+    parse_retraction_tombstone_payload,
 };
 use super::namespaces::*;
 use super::presence::parse_presence;
@@ -112,6 +113,7 @@ fn parse_message(el: &Element) -> Option<InboundMessage> {
     let reaction = parse_reaction_payload(el);
     let reaction_target_id = reaction.as_ref().map(|payload| payload.target_id.clone());
     let reaction_emojis = reaction.map(|payload| payload.emojis).unwrap_or_default();
+    let in_call = parse_in_call_reaction_payload(el).map(InCallSignal::Reaction);
 
     let pin_event = crate::pin::extract_pin_event_from_message(el);
     let extension_envelope = parse_extension_envelope(el);
@@ -338,6 +340,7 @@ fn parse_message(el: &Element) -> Option<InboundMessage> {
         moderation_reason,
         reaction_target_id,
         reaction_emojis,
+        in_call,
         reply_to_id,
         reply_to_sender,
         reply_fallback,

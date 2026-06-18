@@ -45,8 +45,17 @@ import {
   toggleCallParticipants,
 } from "@/lib/calls/call-dock-state";
 import { $callChatUnread } from "@/lib/calls/call-chat-unread";
+import {
+  $inCallReactions,
+  activeInCallReactions,
+  clearInCallReactions,
+  expireInCallReactions,
+  hashInCallReactionId,
+  receiveInCallReaction,
+} from "@/lib/calls/in-call-reactions";
 import { barePeerJid } from "@/lib/xmpp/jid";
 import { expectedRemoteIdentitiesForCallState } from "@/lib/calls/call-tiles";
+import type { BrowserXmppClient } from "@/lib/xmpp/client";
 import type { MentionCandidate } from "@/lib/mentions";
 import type { MarkupSpan, MessageReference, TimelineMessage } from "@/lib/chat-ui";
 import type { ComposerLinkPreviewLookup, ComposerLinkPreviewSendPayload } from "@/lib/link-preview-composer";
@@ -90,6 +99,9 @@ const props = defineProps<{
   /** The active call's XEP-0201 thread messages, rendered in the Chat tab. */
   callChatMessages?: readonly TimelineMessage[];
   avatarUrlByAuthor?: Record<string, string | null>;
+  xmppClient?: BrowserXmppClient | null;
+  spaceId?: string | null;
+  channelId?: string | null;
   sendCallChatMessage?: (
     body: string,
     markup: MarkupSpan[],
@@ -135,7 +147,13 @@ let chromeIdleTimer: number | null = null;
 const dockOpen = useStore($callDockOpen);
 const dockTab = useStore($callDockTab);
 const chatUnread = useStore($callChatUnread);
+const reactions = useStore($inCallReactions);
 const callChatDraft = ref("");
+let reactionExpiryTimer: ReturnType<typeof setInterval> | null = null;
+
+const activeCallReactions = computed(() => {
+  return activeInCallReactions(state.value, reactions.value);
+});
 
 // The dock is shared with the Participants tab; split these out so the control
 // bar buttons reflect which tab (if any) the open dock is parked on.
@@ -329,6 +347,23 @@ async function onSendCallChat(
   callChatDraft.value = "";
 }
 
+async function onSendInCallReaction(emoji: string): Promise<void> {
+  const active = state.value;
+  if (active.phase !== "active") return;
+  if (active.kind === "muc") {
+    if (!props.xmppClient || !props.spaceId || !props.channelId) return;
+    await props.xmppClient.sendInCallReaction(props.spaceId, props.channelId, active.sid, emoji);
+  } else {
+    if (!props.xmppClient) return;
+    await props.xmppClient.sendDmInCallReaction(active.peer, active.sid, emoji);
+    receiveInCallReaction({
+      sid: active.sid,
+      emoji,
+      from: active.selfFullJid ?? "self",
+    });
+  }
+}
+
 function onKeydown(event: KeyboardEvent): void {
   if (!isOpen.value) return;
   if (event.key !== "Escape") return;
@@ -384,10 +419,16 @@ onMounted(() => {
   if (typeof document !== "undefined") {
     document.addEventListener("fullscreenchange", onFullscreenChange);
   }
+  reactionExpiryTimer = setInterval(() => expireInCallReactions(), 400);
 });
 
 onBeforeUnmount(() => {
   clearChromeIdleTimer();
+  if (reactionExpiryTimer) {
+    clearInterval(reactionExpiryTimer);
+    reactionExpiryTimer = null;
+  }
+  clearInCallReactions();
   if (typeof window !== "undefined") {
     window.removeEventListener("keydown", onKeydown, true);
   }
@@ -441,6 +482,16 @@ onBeforeUnmount(() => {
           :promoted-speaker-identity="promotedSpeakerIdentity"
           @open-participants="openCallParticipants"
         />
+        <div class="call-expanded__reactions" aria-live="polite" aria-atomic="false">
+          <span
+            v-for="reaction in activeCallReactions"
+            :key="reaction.id"
+            class="call-expanded__reaction"
+            :style="{ '--reaction-x': `${Math.abs(hashInCallReactionId(reaction.id)) % 72}%` }"
+          >
+            {{ reaction.emoji }}
+          </span>
+        </div>
       </div>
       <div
         v-if="dockOpen"
@@ -502,6 +553,7 @@ onBeforeUnmount(() => {
         @open-settings="settingsOpen = true"
         @set-view-mode="setCallViewMode"
         @toggle-self-view="toggleCallSelfViewHidden"
+        @send-reaction="onSendInCallReaction"
         @hangup="onHangup"
       />
     </footer>
@@ -585,9 +637,43 @@ onBeforeUnmount(() => {
   flex: 1 1 0%;
   min-width: 0;
   min-height: 0;
+  position: relative;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+.call-expanded__reactions {
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  overflow: hidden;
+}
+
+.call-expanded__reaction {
+  position: absolute;
+  left: calc(14% + var(--reaction-x, 0%));
+  bottom: 16%;
+  font-size: 2.25rem;
+  line-height: 1;
+  filter: drop-shadow(0 0.25rem 0.5rem rgb(0 0 0 / 0.28));
+  animation: call-expanded-reaction-float 2.4s ease-out forwards;
+}
+
+@keyframes call-expanded-reaction-float {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 0.75rem, 0) scale(0.82);
+  }
+  12% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(0, -8rem, 0) scale(1.18);
+  }
 }
 
 .call-expanded__dock-overlay {

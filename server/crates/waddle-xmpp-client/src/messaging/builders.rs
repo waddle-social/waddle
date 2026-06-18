@@ -103,6 +103,40 @@ pub fn build_reaction_message(
         .build()
 }
 
+pub fn build_in_call_reaction_message(
+    recipient: &InCallReactionRecipient,
+    sid: &InCallSessionId,
+    emoji: &InCallReactionEmoji,
+) -> Element {
+    let to = recipient.to_jid_string();
+    Element::builder("message", NS_CLIENT)
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), to.as_str())
+        .attr(
+            minidom::rxml::xml_ncname!("type").to_owned(),
+            recipient.message_type(),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            Uuid::new_v4().to_string(),
+        )
+        .append(
+            Element::builder("in-call", NS_WADDLE_IN_CALL)
+                .attr(minidom::rxml::xml_ncname!("sid").to_owned(), sid.as_str())
+                .append(
+                    Element::builder("reaction", NS_WADDLE_IN_CALL)
+                        .attr(
+                            minidom::rxml::xml_ncname!("emoji").to_owned(),
+                            emoji.as_str(),
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .append(Element::builder("no-store", NS_HINTS).build())
+        .append(Element::builder("no-copy", NS_HINTS).build())
+        .build()
+}
+
 /// Build a `<message><pinned target='…'/></message>` request for #414.
 /// `to` is the room bare JID; `target_stanza_id` is the XEP-0359
 /// stanza-id (`by=room`) of the message being pinned.

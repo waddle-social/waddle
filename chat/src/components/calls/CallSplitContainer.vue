@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useStore } from "@nanostores/vue";
 import {
   $callState,
@@ -33,8 +33,17 @@ import { normalizeMucCallRoomJid } from "@/lib/calls/muc-call-presence";
 import { useCallRoster } from "@/lib/calls/use-call-roster";
 import { openCallDock, setCallDockTab } from "@/lib/calls/call-dock-state";
 import { $callChatUnread } from "@/lib/calls/call-chat-unread";
+import {
+  $inCallReactions,
+  activeInCallReactions,
+  clearInCallReactions,
+  expireInCallReactions,
+  hashInCallReactionId,
+  receiveInCallReaction,
+} from "@/lib/calls/in-call-reactions";
 import { barePeerJid } from "@/lib/xmpp/jid";
 import { expectedRemoteIdentitiesForCallState } from "@/lib/calls/call-tiles";
+import type { BrowserXmppClient } from "@/lib/xmpp/client";
 import CallTileGrid from "./CallTileGrid.vue";
 import CallStageHeader from "./CallStageHeader.vue";
 import CallControls from "./CallControls.vue";
@@ -61,6 +70,9 @@ const props = defineProps<{
   roomJid?: string;
   dmPeerJid?: string;
   dmPeerName?: string;
+  xmppClient?: BrowserXmppClient | null;
+  spaceId?: string | null;
+  channelId?: string | null;
 }>();
 
 const state = useStore($callState);
@@ -79,6 +91,12 @@ const { activeRoomJid, selfInCall } = useActiveMucCall();
 
 const settingsOpen = ref(false);
 const containerRef = ref<HTMLElement | null>(null);
+const reactions = useStore($inCallReactions);
+let reactionExpiryTimer: ReturnType<typeof setInterval> | null = null;
+
+const activeCallReactions = computed(() => {
+  return activeInCallReactions(state.value, reactions.value);
+});
 
 const normalizedRoomJid = computed(() =>
   normalizeMucCallRoomJid(props.roomJid ?? ""),
@@ -198,11 +216,37 @@ const expectedRemoteIdentities = computed(() =>
 
 onMounted(() => {
   refreshScreenShareSupported();
+  reactionExpiryTimer = setInterval(() => expireInCallReactions(), 400);
+});
+
+onBeforeUnmount(() => {
+  if (reactionExpiryTimer) {
+    clearInterval(reactionExpiryTimer);
+    reactionExpiryTimer = null;
+  }
+  clearInCallReactions();
 });
 
 async function onHangup(): Promise<void> {
   await hangupActiveCall();
 }
+
+async function onSendInCallReaction(emoji: string): Promise<void> {
+  const active = state.value;
+  if (active.phase !== "active" || !props.xmppClient) return;
+  if (active.kind === "muc") {
+    if (!props.spaceId || !props.channelId) return;
+    await props.xmppClient.sendInCallReaction(props.spaceId, props.channelId, active.sid, emoji);
+  } else {
+    await props.xmppClient.sendDmInCallReaction(active.peer, active.sid, emoji);
+    receiveInCallReaction({
+      sid: active.sid,
+      emoji,
+      from: active.selfFullJid ?? "self",
+    });
+  }
+}
+
 </script>
 
 <template>
@@ -240,6 +284,16 @@ async function onHangup(): Promise<void> {
           :promoted-speaker-identity="promotedSpeakerIdentity"
           @open-participants="enterExpandedWithDock"
         />
+        <div class="call-split__reactions" aria-live="polite" aria-atomic="false">
+          <span
+            v-for="reaction in activeCallReactions"
+            :key="reaction.id"
+            class="call-split__reaction"
+            :style="{ '--reaction-x': `${Math.abs(hashInCallReactionId(reaction.id)) % 72}%` }"
+          >
+            {{ reaction.emoji }}
+          </span>
+        </div>
       </div>
       <footer class="call-split__footer">
         <CallControls
@@ -263,6 +317,7 @@ async function onHangup(): Promise<void> {
           @open-settings="settingsOpen = true"
           @set-view-mode="setCallViewMode"
           @toggle-self-view="toggleCallSelfViewHidden"
+          @send-reaction="onSendInCallReaction"
           @hangup="onHangup"
         />
       </footer>
@@ -305,11 +360,45 @@ async function onHangup(): Promise<void> {
 }
 
 .call-split__grid {
+  position: relative;
   flex: 1 1 0%;
   min-height: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+.call-split__reactions {
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  overflow: hidden;
+}
+
+.call-split__reaction {
+  position: absolute;
+  left: calc(14% + var(--reaction-x, 0%));
+  bottom: 16%;
+  font-size: 2rem;
+  line-height: 1;
+  filter: drop-shadow(0 0.25rem 0.5rem rgb(0 0 0 / 0.28));
+  animation: call-split-reaction-float 2.4s ease-out forwards;
+}
+
+@keyframes call-split-reaction-float {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 0.75rem, 0) scale(0.82);
+  }
+  12% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(0, -8rem, 0) scale(1.18);
+  }
 }
 
 .call-split__footer {

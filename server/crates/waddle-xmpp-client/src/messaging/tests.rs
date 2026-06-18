@@ -35,6 +35,29 @@ fn parse_message_with_body() {
 }
 
 #[test]
+fn parse_message_with_in_call_reaction_payload() {
+    let e = el("<message xmlns='jabber:client' \
+         from='room@conf.example/alice' \
+         to='bob@example.com' \
+         type='groupchat' \
+         id='in-call-1'>\
+         <in-call xmlns='urn:waddle:in-call:0' sid='call-1'>\
+           <reaction emoji='🔥'/>\
+         </in-call>\
+         <no-store xmlns='urn:xmpp:hints'/>\
+         <no-copy xmlns='urn:xmpp:hints'/>\
+         </message>");
+    let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+        panic!("expected Message");
+    };
+    let Some(InCallSignal::Reaction(payload)) = msg.in_call else {
+        panic!("expected in-call reaction signal");
+    };
+    assert_eq!(payload.sid.as_str(), "call-1");
+    assert_eq!(payload.emoji.as_str(), "🔥");
+}
+
+#[test]
 fn parse_message_with_waddle_extension_envelope() {
     let e = el("<message xmlns='jabber:client' \
          from='room@conf.example/github' \
@@ -2088,6 +2111,48 @@ fn build_reaction_message_includes_thread_when_present() {
         .get_child("thread", "jabber:client")
         .expect("thread child present");
     assert_eq!(thread_el.text(), "thread-react");
+}
+
+#[test]
+fn build_in_call_reaction_message_has_transient_carrier_shape() {
+    let recipient =
+        InCallReactionRecipient::Direct("bob@example.com/phone".parse().expect("full jid"));
+    let sid = InCallSessionId::new("call-1").expect("valid sid");
+    let emoji = InCallReactionEmoji::new("👍").expect("valid emoji");
+    let stanza = build_in_call_reaction_message(&recipient, &sid, &emoji);
+    assert_eq!(stanza.attr("to"), Some("bob@example.com/phone"));
+    assert_eq!(stanza.attr("type"), Some("chat"));
+    assert!(stanza.get_child("body", NS_CLIENT).is_none());
+    assert!(stanza.get_child("origin-id", NS_ORIGIN_ID).is_none());
+
+    let carrier = stanza
+        .get_child("in-call", NS_WADDLE_IN_CALL)
+        .expect("in-call child");
+    assert_eq!(carrier.attr("sid"), Some("call-1"));
+    let reaction = carrier
+        .get_child("reaction", NS_WADDLE_IN_CALL)
+        .expect("reaction child");
+    assert_eq!(reaction.attr("emoji"), Some("👍"));
+
+    assert!(stanza.get_child("no-store", NS_HINTS).is_some());
+    assert!(stanza.get_child("no-copy", NS_HINTS).is_some());
+    assert!(stanza.get_child("store", NS_HINTS).is_none());
+}
+
+#[test]
+fn in_call_reaction_values_reject_empty_wire_fields() {
+    assert!(InCallSessionId::new("").is_err());
+    assert!(InCallSessionId::new("   ").is_err());
+    assert!(InCallReactionEmoji::new("").is_err());
+    assert!(InCallReactionEmoji::new("   ").is_err());
+}
+
+#[test]
+fn in_call_reaction_values_trim_before_serialization() {
+    let sid = InCallSessionId::new(" call-1 ").expect("valid sid");
+    let emoji = InCallReactionEmoji::new(" 👍 ").expect("valid emoji");
+    assert_eq!(sid.as_str(), "call-1");
+    assert_eq!(emoji.as_str(), "👍");
 }
 
 #[test]

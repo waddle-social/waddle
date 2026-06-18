@@ -31,6 +31,12 @@ pub struct WaddleCallThreadEnded {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum WaddleInCallSignal {
+    Reaction { sid: String, emoji: String },
+}
+
+#[derive(Debug, Serialize)]
 pub struct WaddleMessage {
     pub id: Option<String>,
     pub from: Option<String>,
@@ -55,6 +61,8 @@ pub struct WaddleMessage {
     pub displayed_marker_id: Option<String>,
     pub reaction_target_id: Option<String>,
     pub reaction_emojis: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub in_call: Option<WaddleInCallSignal>,
     pub is_muc: bool,
     pub thread: Option<String>,
     pub parent_thread_id: Option<String>,

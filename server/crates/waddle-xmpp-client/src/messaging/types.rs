@@ -1,10 +1,11 @@
 use chrono::{DateTime, Utc};
-use jid::BareJid;
+use jid::{BareJid, FullJid};
 use std::fmt;
 use url::Url;
 use waddle_xmpp_core::xep0359::StanzaId as StableStanzaId;
-use waddle_xmpp_core::{DirectVideoMediaType, PreviewImageMediaType};
+use waddle_xmpp_core::{CoreError, DirectVideoMediaType, PreviewImageMediaType};
 
+use crate::error::ClientResult;
 use crate::request::StanzaId;
 use crate::xep::encrypted_file::EncryptedFile;
 use crate::xep::{reply as xep_reply, thread as xep_thread};
@@ -100,6 +101,81 @@ pub struct ReactionPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InCallSessionId(String);
+
+impl InCallSessionId {
+    pub fn new(value: impl Into<String>) -> ClientResult<Self> {
+        let value = value.into();
+        let value = value.trim();
+        if value.is_empty() {
+            return Err(CoreError::bad_request(Some(
+                "in-call session id must not be empty".to_string(),
+            ))
+            .into());
+        }
+        Ok(Self(value.to_owned()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InCallReactionEmoji(String);
+
+impl InCallReactionEmoji {
+    pub fn new(value: impl Into<String>) -> ClientResult<Self> {
+        let value = value.into();
+        let value = value.trim();
+        if value.is_empty() {
+            return Err(CoreError::bad_request(Some(
+                "in-call reaction emoji must not be empty".to_string(),
+            ))
+            .into());
+        }
+        Ok(Self(value.to_owned()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InCallReactionPayload {
+    pub sid: InCallSessionId,
+    pub emoji: InCallReactionEmoji,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InCallSignal {
+    Reaction(InCallReactionPayload),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InCallReactionRecipient {
+    Direct(FullJid),
+    Room(BareJid),
+}
+
+impl InCallReactionRecipient {
+    pub fn to_jid_string(&self) -> String {
+        match self {
+            Self::Direct(jid) => jid.to_string(),
+            Self::Room(jid) => jid.to_string(),
+        }
+    }
+
+    pub fn message_type(&self) -> &'static str {
+        match self {
+            Self::Direct(_) => "chat",
+            Self::Room(_) => "groupchat",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetractionPayload {
     pub target_id: String,
 }
@@ -145,6 +221,7 @@ pub struct InboundMessage {
     pub moderation_reason: Option<String>,
     pub reaction_target_id: Option<String>,
     pub reaction_emojis: Vec<String>,
+    pub in_call: Option<InCallSignal>,
     pub reply_to_id: Option<String>,
     pub reply_to_sender: Option<String>,
     /// XEP-0428 fallback range, in Unicode scalar offsets, end exclusive.
