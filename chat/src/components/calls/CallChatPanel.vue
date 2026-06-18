@@ -20,6 +20,9 @@ import type {
 const props = defineProps<{
   messages: readonly TimelineMessage[];
   draft: string;
+  /** Whether the Chat tab is the visible dock tab. Becoming visible re-pins to
+   *  the latest message so the unread badge → newest-message flow lands right. */
+  visible?: boolean;
   avatarUrlByAuthor: Record<string, string | null>;
   isSending?: boolean;
   disabled?: boolean;
@@ -73,6 +76,16 @@ watch(
     if (next <= prev) return;
     const el = messagesRef.value;
     if (!el || isNearBottom(el)) void nextTick(scrollToBottom);
+  },
+);
+
+// Switching to the Chat tab is a `v-show` toggle (no remount), so neither
+// `onMounted` nor the length watch fires. Re-pin to the newest message when the
+// tab becomes visible so a reader following the unread badge sees it.
+watch(
+  () => props.visible,
+  (visible) => {
+    if (visible) void nextTick(scrollToBottom);
   },
 );
 

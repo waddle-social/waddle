@@ -110,9 +110,11 @@ describe("call surfaces use the Participants dock", () => {
     expect(source).toContain(":active-tab");
     expect(source).toContain(":chat-unread");
     expect(source).toContain("@set-tab");
-    // The Chat panel is projected into the dock's chat slot.
+    // The Chat panel is projected into the dock's chat slot, and told when it's
+    // the visible tab so it can re-pin to the newest message.
     expect(source).toContain("<CallChatPanel");
     expect(source).toContain("#chat");
+    expect(source).toContain(":visible=\"chatOpen\"");
   });
 
   test("Expanded wires the control-bar Chat toggle and drops the footer composer", () => {

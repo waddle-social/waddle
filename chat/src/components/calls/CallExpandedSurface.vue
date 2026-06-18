@@ -332,6 +332,7 @@ onBeforeUnmount(() => {
           <CallChatPanel
             v-model:draft="callChatDraft"
             :messages="callChatMessages ?? []"
+            :visible="chatOpen"
             :avatar-url-by-author="avatarUrlByAuthor ?? {}"
             :is-sending="!!isSending"
             :disabled="!!disabled || !callThreadOverride"
