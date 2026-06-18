@@ -806,6 +806,37 @@ describe("call control bar hide self-view (#1021)", () => {
   });
 });
 
+describe("call control bar immersive mode (#1028)", () => {
+  test("expanded mode offers Immersive without browser fullscreen controls", async () => {
+    const html = await renderCallControls({ isExpanded: true, isImmersive: false });
+    expect(html).toContain("Collapse call to split view");
+    expect(html).toContain("Make call immersive");
+    expect(html).not.toContain("Enter browser fullscreen");
+    expect(html).not.toContain("Exit browser fullscreen");
+  });
+
+  test("immersive mode offers a return action and browser fullscreen entry", async () => {
+    const html = await renderCallControls({
+      isExpanded: true,
+      isImmersive: true,
+      isNativeFullscreen: false,
+    });
+    expect(html).toContain("Return call to expanded view");
+    expect(html).toContain("Enter browser fullscreen");
+    expect(html).not.toContain("Exit browser fullscreen");
+  });
+
+  test("immersive native fullscreen action switches to exit while active", async () => {
+    const html = await renderCallControls({
+      isExpanded: true,
+      isImmersive: true,
+      isNativeFullscreen: true,
+    });
+    expect(html).toContain("Exit browser fullscreen");
+    expect(html).not.toContain("Enter browser fullscreen");
+  });
+});
+
 async function renderCallControls(overrides: Record<string, unknown>): Promise<string> {
   const component = await loadVueComponent("../src/components/calls/CallControls.vue");
   const props = {

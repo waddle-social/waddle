@@ -16,7 +16,7 @@ import {
   resetCallControls,
   seedCallControlsFromEngine,
 } from "@/lib/calls/call-controls";
-import { $callUiMode } from "@/lib/calls/ui-mode";
+import { $callUiMode, resetCallUiModeAfterCallEnd } from "@/lib/calls/ui-mode";
 import { resetCallViewState } from "@/lib/calls/call-view-state";
 
 /**
@@ -108,8 +108,8 @@ watch(
       // a sticky preference. Otherwise hanging up an expanded call
       // would leave the next call's split surface invisible because
       // the mode was still "expanded".
-      if ($callUiMode.get() === "expanded") {
-        $callUiMode.set("split");
+      if ($callUiMode.get() !== "split") {
+        $callUiMode.set(resetCallUiModeAfterCallEnd());
       }
     });
   },
