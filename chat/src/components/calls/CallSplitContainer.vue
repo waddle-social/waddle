@@ -8,6 +8,7 @@ import {
 import { $callUiMode } from "@/lib/calls/ui-mode";
 import {
   $callSelfViewHidden,
+  $callPinnedTileKey,
   $callViewMode,
   setCallViewMode,
   toggleCallSelfViewHidden,
@@ -43,6 +44,19 @@ import {
 } from "@/lib/calls/in-call-reactions";
 import { barePeerJid } from "@/lib/xmpp/jid";
 import { expectedRemoteIdentitiesForCallState } from "@/lib/calls/call-tiles";
+import { projectCallTiles } from "@/lib/calls/call-tile-projection";
+import {
+  $callPictureInPictureActive,
+  $callPictureInPictureMode,
+  $callPictureInPictureSupport,
+  enterDocumentCallPictureInPicture,
+  enterVideoCallPictureInPicture,
+  exitVideoCallPictureInPicture,
+  findCallPictureInPictureVideo,
+  installVideoPictureInPictureCloseHandlers,
+  refreshCallPictureInPictureSupport,
+  selectCallPictureInPictureTile,
+} from "@/lib/calls/call-picture-in-picture";
 import type { BrowserXmppClient } from "@/lib/xmpp/client";
 import CallTileGrid from "./CallTileGrid.vue";
 import CallStageHeader from "./CallStageHeader.vue";
@@ -50,6 +64,7 @@ import CallControls from "./CallControls.vue";
 import CallSettingsDialog from "./CallSettingsDialog.vue";
 import CallMediaNotice from "./CallMediaNotice.vue";
 import CallSelfShareNotice from "./CallSelfShareNotice.vue";
+import CallPictureInPicturePanel from "./CallPictureInPicturePanel.vue";
 import SplitDragHandle from "./SplitDragHandle.vue";
 
 /**
@@ -78,6 +93,7 @@ const props = defineProps<{
 const state = useStore($callState);
 const uiMode = useStore($callUiMode);
 const viewMode = useStore($callViewMode);
+const pinnedTileKey = useStore($callPinnedTileKey);
 const selfViewHidden = useStore($callSelfViewHidden);
 const lastError = useStore($lastCallError);
 const connecting = useStore($callConnecting);
@@ -85,6 +101,9 @@ const micEnabled = useStore($callMicEnabled);
 const camEnabled = useStore($callCamEnabled);
 const screenShareEnabled = useStore($callScreenShareEnabled);
 const screenShareSupported = useStore($callScreenShareSupported);
+const pictureInPictureSupport = useStore($callPictureInPictureSupport);
+const pictureInPictureActive = useStore($callPictureInPictureActive);
+const pictureInPictureMode = useStore($callPictureInPictureMode);
 const { remoteTracks, localTracks, engine, activeSpeakerIdentities, promotedSpeakerIdentity } =
   useCallEngine();
 const { activeRoomJid, selfInCall } = useActiveMucCall();
@@ -97,6 +116,11 @@ let reactionExpiryTimer: ReturnType<typeof setInterval> | null = null;
 const activeCallReactions = computed(() => {
   return activeInCallReactions(state.value, reactions.value);
 });
+const pictureInPicturePanelRef = ref<HTMLElement | null>(null);
+const pictureInPictureParkingRef = ref<HTMLElement | null>(null);
+let documentPictureInPictureWindow: Window | null = null;
+let videoPictureInPictureElement: HTMLVideoElement | null = null;
+let cleanupVideoPictureInPictureListeners: (() => void) | null = null;
 
 const normalizedRoomJid = computed(() =>
   normalizeMucCallRoomJid(props.roomJid ?? ""),
@@ -213,10 +237,33 @@ const stageLocalTracks = computed(() =>
 const expectedRemoteIdentities = computed(() =>
   expectedRemoteIdentitiesForCallState(state.value),
 );
+const pictureInPictureTile = computed(() => {
+  const projection = projectCallTiles({
+    remoteTracks: remoteTracks.value,
+    localTracks: stageLocalTracks.value,
+    localIdentity: localIdentity.value,
+    expectedRemoteIdentities: expectedRemoteIdentities.value,
+    micEnabled: micEnabled.value,
+    seenRemoteScreenTrackKeys: new Set(),
+    pinnedTileKey: pinnedTileKey.value,
+    viewMode: viewMode.value,
+    promotedSpeakerIdentity: promotedSpeakerIdentity.value,
+    hideSelfView: selfViewHidden.value,
+  });
+  return selectCallPictureInPictureTile({
+    tiles: projection.tiles,
+    pinnedTileKey: pinnedTileKey.value,
+    activeSpeakerIdentities: activeSpeakerIdentities.value,
+  });
+});
+const pictureInPictureSupported = computed(() =>
+  pictureInPictureSupport.value !== "none" && pictureInPictureTile.value !== null,
+);
 
 onMounted(() => {
   refreshScreenShareSupported();
   reactionExpiryTimer = setInterval(() => expireInCallReactions(), 400);
+  refreshCallPictureInPictureSupport();
 });
 
 onBeforeUnmount(() => {
@@ -225,9 +272,20 @@ onBeforeUnmount(() => {
     reactionExpiryTimer = null;
   }
   clearInCallReactions();
+  if (documentPictureInPictureWindow) {
+    documentPictureInPictureWindow.close();
+    documentPictureInPictureWindow = null;
+  }
+  cleanupVideoPictureInPictureListeners?.();
+  cleanupVideoPictureInPictureListeners = null;
+  videoPictureInPictureElement = null;
+  $callPictureInPictureActive.set(false);
+  $callPictureInPictureMode.set(null);
+  parkPictureInPicturePanel();
 });
 
 async function onHangup(): Promise<void> {
+  await closePictureInPicture();
   await hangupActiveCall();
 }
 
@@ -247,6 +305,66 @@ async function onSendInCallReaction(emoji: string): Promise<void> {
   }
 }
 
+function parkPictureInPicturePanel(): void {
+  const panel = pictureInPicturePanelRef.value;
+  const parking = pictureInPictureParkingRef.value;
+  if (!panel || !parking || panel.parentElement === parking) return;
+  parking.appendChild(panel);
+}
+
+function onDocumentPictureInPictureClose(): void {
+  documentPictureInPictureWindow = null;
+  parkPictureInPicturePanel();
+  $callPictureInPictureActive.set(false);
+  $callPictureInPictureMode.set(null);
+}
+
+function onVideoPictureInPictureClose(): void {
+  cleanupVideoPictureInPictureListeners?.();
+  cleanupVideoPictureInPictureListeners = null;
+  videoPictureInPictureElement = null;
+  $callPictureInPictureActive.set(false);
+  $callPictureInPictureMode.set(null);
+}
+
+async function closePictureInPicture(): Promise<void> {
+  if (documentPictureInPictureWindow) {
+    const pipWindow = documentPictureInPictureWindow;
+    documentPictureInPictureWindow = null;
+    pipWindow.close();
+    parkPictureInPicturePanel();
+    $callPictureInPictureActive.set(false);
+    $callPictureInPictureMode.set(null);
+    return;
+  }
+  await exitVideoCallPictureInPicture(videoPictureInPictureElement);
+  onVideoPictureInPictureClose();
+}
+
+async function togglePictureInPicture(): Promise<void> {
+  if (pictureInPictureActive.value) {
+    await closePictureInPicture();
+    return;
+  }
+  const tile = pictureInPictureTile.value;
+  if (!tile) return;
+  if (pictureInPictureSupport.value === "document") {
+    const panel = pictureInPicturePanelRef.value;
+    if (!panel) return;
+    const pipWindow = await enterDocumentCallPictureInPicture(panel, { width: 360, height: 240 });
+    documentPictureInPictureWindow = pipWindow;
+    pipWindow.addEventListener("pagehide", onDocumentPictureInPictureClose, { once: true });
+    return;
+  }
+  const video = findCallPictureInPictureVideo(containerRef.value, tile.key);
+  if (!video) return;
+  await enterVideoCallPictureInPicture(video);
+  videoPictureInPictureElement = video;
+  cleanupVideoPictureInPictureListeners =
+    installVideoPictureInPictureCloseHandlers(video, onVideoPictureInPictureClose);
+  $callPictureInPictureActive.set(true);
+  $callPictureInPictureMode.set("video");
+}
 </script>
 
 <template>
@@ -274,7 +392,20 @@ async function onSendInCallReaction(emoji: string): Promise<void> {
         compact
       />
       <div class="call-split__grid">
+        <div
+          v-if="pictureInPictureMode === 'document'"
+          class="call-split__pip-placeholder"
+        >
+          <button
+            type="button"
+            class="chat-action-button chat-action-button--secondary"
+            @click="togglePictureInPicture"
+          >
+            Return to call
+          </button>
+        </div>
         <CallTileGrid
+          v-else
           :remote-tracks="remoteTracks"
           :local-tracks="stageLocalTracks"
           :local-identity="localIdentity"
@@ -308,6 +439,8 @@ async function onSendInCallReaction(emoji: string): Promise<void> {
           :chat-unread="chatUnread"
           :view-mode="viewMode"
           :self-view-hidden="selfViewHidden"
+          :picture-in-picture-supported="pictureInPictureSupported"
+          :picture-in-picture-active="pictureInPictureActive"
           @toggle-mic="toggleMic"
           @toggle-cam="toggleCam"
           @toggle-screen-share="toggleScreenShare"
@@ -318,9 +451,23 @@ async function onSendInCallReaction(emoji: string): Promise<void> {
           @set-view-mode="setCallViewMode"
           @toggle-self-view="toggleCallSelfViewHidden"
           @send-reaction="onSendInCallReaction"
+          @toggle-picture-in-picture="togglePictureInPicture"
           @hangup="onHangup"
         />
       </footer>
+      <div ref="pictureInPictureParkingRef" class="call-split__pip-parking" aria-hidden="true">
+        <div ref="pictureInPicturePanelRef">
+          <CallPictureInPicturePanel
+            :tile="pictureInPictureTile"
+            :mic-enabled="micEnabled"
+            :cam-enabled="camEnabled"
+            @toggle-mic="toggleMic"
+            @toggle-cam="toggleCam"
+            @return-to-call="togglePictureInPicture"
+            @hangup="onHangup"
+          />
+        </div>
+      </div>
     </section>
     <SplitDragHandle
       :dragging="isDragging"
@@ -401,8 +548,22 @@ async function onSendInCallReaction(emoji: string): Promise<void> {
   }
 }
 
+.call-split__pip-placeholder {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  min-height: 8rem;
+  background: var(--muted);
+  color: var(--muted-foreground);
+}
+
 .call-split__footer {
   padding: 0.5rem 0.75rem;
   border-top: 1px solid var(--border);
+}
+
+.call-split__pip-parking {
+  display: none;
 }
 </style>

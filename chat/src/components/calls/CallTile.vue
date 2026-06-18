@@ -98,6 +98,7 @@ const emit = defineEmits<{
     :role="interactive ? 'button' : 'img'"
     :tabindex="interactive ? 0 : undefined"
     :aria-label="interactive ? `Open ${label} tile` : label"
+    :data-call-tile-key="attachKey"
     @click="activate"
     @keydown.enter="activate"
   >
@@ -118,6 +119,7 @@ const emit = defineEmits<{
       :ref="refVideo"
       class="call-tile__video"
       :class="{ 'call-tile__video--mirrored': mirrorVideo }"
+      :data-call-tile-key="attachKey"
       autoplay
       playsinline
       :muted="isSelf"

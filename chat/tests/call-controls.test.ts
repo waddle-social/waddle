@@ -733,6 +733,40 @@ describe("call control bar chat toggle", () => {
   });
 });
 
+describe("call control bar Picture-in-Picture toggle", () => {
+  test("hides the PiP button when no browser PiP mode is available", async () => {
+    const html = await renderCallControls({ pictureInPictureSupported: false });
+
+    expect(html).not.toContain("Open Picture-in-Picture");
+  });
+
+  test("renders inactive and active PiP states accessibly", async () => {
+    const inactive = await renderCallControls({
+      pictureInPictureSupported: true,
+      pictureInPictureActive: false,
+    });
+    expect(inactive).toContain('aria-label="Open Picture-in-Picture"');
+    expect(inactive).toMatch(/aria-label="Open Picture-in-Picture"[^>]*aria-pressed="false"/);
+
+    const active = await renderCallControls({
+      pictureInPictureSupported: true,
+      pictureInPictureActive: true,
+    });
+    expect(active).toContain('aria-label="Return to call"');
+    expect(active).toMatch(/aria-label="Return to call"[^>]*aria-pressed="true"/);
+  });
+
+  test("wires the PiP toggle emit", () => {
+    const source = readFileSync(
+      new URL("../src/components/calls/CallControls.vue", import.meta.url),
+      "utf8",
+    );
+    expect(source).toContain("togglePictureInPicture");
+    expect(source).toContain("pictureInPictureSupported");
+    expect(source).toContain("pictureInPictureActive");
+  });
+});
+
 describe("call control bar restructure (#1020)", () => {
   test("no longer embeds the connection-quality indicator (now in the stage-header)", () => {
     // The indicator moved to CallStageHeader (asserted there via the recursive

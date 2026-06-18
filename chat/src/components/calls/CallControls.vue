@@ -11,6 +11,7 @@ import {
   MonitorUp,
   MoreHorizontal,
   PhoneOff,
+  PictureInPicture2,
   ScanFace,
   SmilePlus,
   Settings,
@@ -58,6 +59,10 @@ const props = defineProps<{
   viewMode: CallViewMode;
   /** True while the local self-view tile is hidden from this client's stage. */
   selfViewHidden: boolean;
+  /** True when this browser can enter either Document PiP or video PiP. */
+  pictureInPictureSupported?: boolean;
+  /** True while the call is detached into Picture-in-Picture. */
+  pictureInPictureActive?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -73,6 +78,7 @@ const emit = defineEmits<{
   openSettings: [];
   setViewMode: [mode: CallViewMode];
   toggleSelfView: [];
+  togglePictureInPicture: [];
   hangup: [];
 }>();
 
@@ -468,6 +474,18 @@ onBeforeUnmount(() => {
         class="call-controls__unread"
         aria-hidden="true"
       >{{ chatUnread }}</span>
+    </button>
+    <button
+      v-if="pictureInPictureSupported"
+      type="button"
+      class="chat-icon-button chat-icon-button--md hover:bg-muted"
+      :class="{ 'bg-muted text-foreground': pictureInPictureActive }"
+      :title="pictureInPictureActive ? 'Return to call' : 'Picture-in-Picture'"
+      :aria-label="pictureInPictureActive ? 'Return to call' : 'Open Picture-in-Picture'"
+      :aria-pressed="pictureInPictureActive"
+      @click="emit('togglePictureInPicture')"
+    >
+      <PictureInPicture2 class="w-4 h-4" />
     </button>
     <div ref="moreWrapEl" class="call-controls__more">
       <button
