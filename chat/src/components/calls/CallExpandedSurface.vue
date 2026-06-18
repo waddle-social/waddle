@@ -27,13 +27,17 @@ import { normalizeMucCallRoomJid } from "@/lib/calls/muc-call-presence";
 import { useCallRoster } from "@/lib/calls/use-call-roster";
 import {
   $callDockOpen,
+  $callDockTab,
   closeCallDock,
-  toggleCallDock,
+  setCallDockTab,
+  toggleCallChat,
+  toggleCallParticipants,
 } from "@/lib/calls/call-dock-state";
+import { $callChatUnread } from "@/lib/calls/call-chat-unread";
 import { barePeerJid } from "@/lib/xmpp/jid";
 import { expectedRemoteIdentitiesForCallState } from "@/lib/calls/call-tiles";
 import type { MentionCandidate } from "@/lib/mentions";
-import type { MarkupSpan, MessageReference } from "@/lib/chat-ui";
+import type { MarkupSpan, MessageReference, TimelineMessage } from "@/lib/chat-ui";
 import type { ComposerLinkPreviewLookup, ComposerLinkPreviewSendPayload } from "@/lib/link-preview-composer";
 import CallTileGrid from "./CallTileGrid.vue";
 import CallControls from "./CallControls.vue";
@@ -41,7 +45,7 @@ import CallSettingsDialog from "./CallSettingsDialog.vue";
 import CallMediaNotice from "./CallMediaNotice.vue";
 import CallSelfShareNotice from "./CallSelfShareNotice.vue";
 import CallDock from "./CallDock.vue";
-import MessageComposer from "@/components/chat/MessageComposer.vue";
+import CallChatPanel from "./CallChatPanel.vue";
 
 /**
  * "Expanded" call surface — fills the chat content pane while the
@@ -71,6 +75,9 @@ const props = defineProps<{
   uploadProgress?: { uploading: boolean; progress: number; filename: string };
   linkPreviewLookup?: ComposerLinkPreviewLookup | null;
   linkPreviewScope?: string | null;
+  /** The active call's XEP-0201 thread messages, rendered in the Chat tab. */
+  callChatMessages?: readonly TimelineMessage[];
+  avatarUrlByAuthor?: Record<string, string | null>;
   sendCallChatMessage?: (
     body: string,
     markup: MarkupSpan[],
@@ -109,7 +116,14 @@ const { activeRoomJid, selfInCall } = useActiveMucCall();
 
 const settingsOpen = ref(false);
 const dockOpen = useStore($callDockOpen);
+const dockTab = useStore($callDockTab);
+const chatUnread = useStore($callChatUnread);
 const callChatDraft = ref("");
+
+// The dock is shared with the Participants tab; split these out so the control
+// bar buttons reflect which tab (if any) the open dock is parked on.
+const chatOpen = computed(() => dockOpen.value && dockTab.value === "chat");
+const participantsOpen = computed(() => dockOpen.value && dockTab.value === "participants");
 
 const normalizedRoomJid = computed(() =>
   normalizeMucCallRoomJid(props.roomJid ?? ""),
@@ -172,15 +186,6 @@ const callThreadOverride = computed(() => {
   const threadId = props.callThreadId?.trim();
   return threadId ? { threadId } : null;
 });
-
-// The dedicated call chat is available for both group (MUC) and 1:1 (DM)
-// calls. A resolved `callThreadOverride` already implies an active call with
-// a usable thread (MUC: room timeline; DM: the call sid), so the thread id
-// is the only gate beyond an active call.
-const canShowCallChatComposer = computed(() =>
-  state.value.phase === "active" &&
-  !!callThreadOverride.value,
-);
 
 const isMucCall = computed(
   () => state.value.phase === "active" && state.value.kind === "muc",
@@ -251,8 +256,8 @@ function onKeydown(event: KeyboardEvent): void {
     settingsOpen.value = false;
     return;
   }
-  // The Participants dock is non-modal but still a layer the user opened
-  // on top of the stage; Escape closes it before it collapses the call.
+  // The dock is non-modal but still a layer the user opened on top of the
+  // stage; Escape closes it before it collapses the call.
   if (dockOpen.value) {
     event.preventDefault();
     closeCallDock();
@@ -316,37 +321,33 @@ onBeforeUnmount(() => {
       <CallDock
         v-if="dockOpen"
         :rows="rosterRows"
+        :active-tab="dockTab"
+        :chat-unread="chatUnread"
+        @set-tab="setCallDockTab"
         @set-volume="setParticipantVolume"
         @reset-all="resetParticipantVolumes"
         @close="closeCallDock"
-      />
+      >
+        <template #chat>
+          <CallChatPanel
+            v-model:draft="callChatDraft"
+            :messages="callChatMessages ?? []"
+            :visible="chatOpen"
+            :avatar-url-by-author="avatarUrlByAuthor ?? {}"
+            :is-sending="!!isSending"
+            :disabled="!!disabled || !callThreadOverride"
+            :giphy-api-key="giphyApiKey ?? ''"
+            :mention-candidates="mentionCandidates ?? []"
+            :slow-mode-cooldown="slowModeCooldown ?? 0"
+            :upload-progress="uploadProgress ?? { uploading: false, progress: 0, filename: '' }"
+            :in-muc="isMucCall"
+            :link-preview-lookup="linkPreviewLookup ?? null"
+            :link-preview-scope="linkPreviewScope ?? null"
+            @send="onSendCallChat"
+          />
+        </template>
+      </CallDock>
     </main>
-    <section
-      v-if="canShowCallChatComposer"
-      class="call-expanded__chat"
-      aria-label="Call chat"
-    >
-      <div class="call-expanded__chat-label type-section-label text-muted-foreground">
-        Call chat
-      </div>
-      <MessageComposer
-        v-model:draft="callChatDraft"
-        channel-name="call chat"
-        composer-label="Call chat composer"
-        :is-forum-channel="false"
-        :is-sending="!!isSending"
-        :disabled="!!disabled || !callThreadOverride"
-        :giphy-api-key="giphyApiKey ?? ''"
-        :mention-candidates="mentionCandidates ?? []"
-        :slow-mode-cooldown="slowModeCooldown ?? 0"
-        :upload-progress="uploadProgress ?? { uploading: false, progress: 0, filename: '' }"
-        :in-muc="isMucCall"
-        :link-preview-lookup="linkPreviewLookup ?? null"
-        :link-preview-scope="linkPreviewScope ?? null"
-        :show-extensions="false"
-        @send="onSendCallChat"
-      />
-    </section>
     <footer class="call-expanded__footer">
       <CallControls
         :mic-enabled="micEnabled"
@@ -354,14 +355,17 @@ onBeforeUnmount(() => {
         :screen-share-enabled="screenShareEnabled"
         :screen-share-supported="screenShareSupported"
         :is-expanded="true"
-        :participants-open="dockOpen"
+        :participants-open="participantsOpen"
         :participant-count="participantCount"
+        :chat-open="chatOpen"
+        :chat-unread="chatUnread"
         :view-mode="viewMode"
         @toggle-mic="toggleMic"
         @toggle-cam="toggleCam"
         @toggle-screen-share="toggleScreenShare"
         @toggle-expanded="collapseToSplit"
-        @toggle-participants="toggleCallDock"
+        @toggle-participants="toggleCallParticipants"
+        @toggle-chat="toggleCallChat"
         @open-settings="settingsOpen = true"
         @set-view-mode="setCallViewMode"
         @hangup="onHangup"
@@ -422,15 +426,6 @@ onBeforeUnmount(() => {
   justify-content: center;
   border-top: 1px solid var(--border);
   padding: 0.75rem 1rem;
-}
-
-.call-expanded__chat {
-  border-top: 1px solid var(--border);
-  background: color-mix(in oklab, var(--background) 88%, transparent);
-}
-
-.call-expanded__chat-label {
-  padding: 0.625rem 1rem 0;
 }
 
 /* On narrow viewports the dock becomes a full-width bottom panel (see

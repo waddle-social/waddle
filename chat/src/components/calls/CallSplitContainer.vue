@@ -26,7 +26,8 @@ import { useSplitResize } from "@/lib/calls/use-split-resize";
 import { localScreenSharePresentation } from "@/lib/calls/call-self-share";
 import { normalizeMucCallRoomJid } from "@/lib/calls/muc-call-presence";
 import { useCallRoster } from "@/lib/calls/use-call-roster";
-import { openCallDock } from "@/lib/calls/call-dock-state";
+import { openCallDock, setCallDockTab } from "@/lib/calls/call-dock-state";
+import { $callChatUnread } from "@/lib/calls/call-chat-unread";
 import { barePeerJid } from "@/lib/xmpp/jid";
 import { expectedRemoteIdentitiesForCallState } from "@/lib/calls/call-tiles";
 import CallTileGrid from "./CallTileGrid.vue";
@@ -77,12 +78,21 @@ const normalizedRoomJid = computed(() =>
 );
 
 // The split surface has no room for the dock itself; it only needs the
-// attendee count for the Participants button, which bumps to Expanded
-// (where the dock reflows the stage) on click.
+// attendee count for the Participants button and the unread count for the
+// Chat button, both of which bump to Expanded (where the dock reflows the
+// stage) on click.
 const { rows: rosterRows } = useCallRoster(normalizedRoomJid);
 const participantCount = computed(() => rosterRows.value.length);
+const chatUnread = useStore($callChatUnread);
 
 function enterExpandedWithDock(): void {
+  setCallDockTab("participants");
+  openCallDock();
+  $callUiMode.set("expanded");
+}
+
+function enterExpandedWithChat(): void {
+  setCallDockTab("chat");
   openCallDock();
   $callUiMode.set("expanded");
 }
@@ -237,12 +247,15 @@ async function onHangup(): Promise<void> {
           :is-expanded="false"
           :participants-open="false"
           :participant-count="participantCount"
+          :chat-open="false"
+          :chat-unread="chatUnread"
           :view-mode="viewMode"
           @toggle-mic="toggleMic"
           @toggle-cam="toggleCam"
           @toggle-screen-share="toggleScreenShare"
           @toggle-expanded="enterExpanded"
           @toggle-participants="enterExpandedWithDock"
+          @toggle-chat="enterExpandedWithChat"
           @open-settings="settingsOpen = true"
           @set-view-mode="setCallViewMode"
           @hangup="onHangup"
