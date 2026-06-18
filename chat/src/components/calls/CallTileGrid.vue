@@ -337,7 +337,9 @@ const gridStyle = computed(() => ({
 
 .call-tile-grid__overflow:hover,
 .call-tile-grid__overflow:focus-visible {
-  background: color-mix(in oklab, var(--muted) 70%, var(--foreground) 12%);
+  /* Single percentage so the components sum to 100% — otherwise color-mix
+   * scales the result's alpha down and the hover renders translucent. */
+  background: color-mix(in oklab, var(--muted), var(--foreground) 12%);
 }
 
 .call-tile-grid__overflow:focus-visible {
