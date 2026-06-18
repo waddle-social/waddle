@@ -284,6 +284,29 @@ describe("extension command invocation", () => {
     expect(sent).not.toContain('jabber:x:data');
   });
 
+  test("adds active room context to initial XEP-0050 execute requests", async () => {
+    let sent = "";
+    const xmpp = {
+      async send_raw_iq(xml: string) {
+        sent = xml;
+        return `<iq type="result"><command xmlns="http://jabber.org/protocol/commands" status="completed" /></iq>`;
+      },
+    };
+
+    await invokeExtensionCommand(
+      xmpp as any,
+      "alice@example.com/web",
+      { serviceJid: "extensions.example.com", node: "urn:waddle:extension:1:stargate-quotes", name: "/stargate" },
+      "pub@muc.example.com",
+    );
+
+    expect(sent).toContain('type="set"');
+    expect(sent).toContain('node="urn:waddle:extension:1:stargate-quotes"');
+    expect(sent).toContain('action="execute"');
+    expect(sent).toContain('<x xmlns="jabber:x:data" type="submit">');
+    expect(sent).toContain('<field var="waddle#room_jid"><value>pub@muc.example.com</value></field>');
+  });
+
   test("returns discovered commands from the extension service", async () => {
     const xmpp = {
       async send_raw_iq(xml: string) {

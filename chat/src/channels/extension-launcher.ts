@@ -30,7 +30,7 @@ export function useExtensionLauncher(input: {
   const state = ref<ExtensionLauncherState>("idle");
   const detail = ref("");
   const commandStates = ref<Record<string, { state: ExtensionCommandUiState; detail?: string }>>({});
-  const commandForms = ref<Record<string, { sessionId: string; fields: ExtensionCommandFormField[]; actions?: ExtensionCommandAction[] }>>({});
+  const commandForms = ref<Record<string, { sessionId: string; fields: ExtensionCommandFormField[]; actions?: ExtensionCommandAction[]; roomJid?: string }>>({});
   const commandActions = ref<Record<string, ExtensionAnnotationAction[]>>({});
   const availableCommands = computed(() =>
     input.roomJid.value
@@ -52,7 +52,7 @@ export function useExtensionLauncher(input: {
     commandActions.value = nextActions;
   }
 
-  function storeResultSurfaces(key: string, result: ExtensionCommandResult) {
+  function storeResultSurfaces(key: string, result: ExtensionCommandResult, options: { roomJid?: string } = {}) {
     let foundActions = false;
     if (result.form) {
       const actions = parseExtensionCommandLaunches(result.form);
@@ -75,6 +75,7 @@ export function useExtensionLauncher(input: {
           [key]: {
             sessionId: result.sessionId,
             fields,
+            ...(options.roomJid ? { roomJid: options.roomJid } : {}),
             ...(result.actions?.allowed.length ? { actions: result.actions.allowed } : {}),
           },
         };
@@ -88,6 +89,20 @@ export function useExtensionLauncher(input: {
 
   let discoveryPromise: Promise<void> | null = null;
   let discoveryAttempted = false;
+  let discoveryGeneration = 0;
+  let commandGeneration = 0;
+
+  function commandContext() {
+    return {
+      generation: commandGeneration,
+      roomJid: input.roomJid.value ?? undefined,
+    };
+  }
+
+  function isCurrentCommandContext(context: { generation: number }) {
+    return context.generation === commandGeneration;
+  }
+
   async function ensureDiscovered() {
     if (commands.value.length > 0 || discoveryAttempted) return;
     if (discoveryPromise) {
@@ -98,17 +113,21 @@ export function useExtensionLauncher(input: {
     if (!client) return;
     state.value = "loading";
     detail.value = "";
+    const generation = discoveryGeneration;
     discoveryPromise = (async () => {
       try {
-        commands.value = await client.discoverExtensionCommands();
-        discoveryAttempted = true;
+        const discovered = await client.discoverExtensionCommands();
+        if (generation !== discoveryGeneration) return;
+        commands.value = discovered;
+        discoveryAttempted = commands.value.length > 0;
         state.value = "idle";
         if (commands.value.length === 0) detail.value = "No extension commands discovered.";
       } catch (error) {
+        if (generation !== discoveryGeneration) return;
         state.value = "error";
         detail.value = error instanceof Error ? error.message : "Could not discover extension commands.";
       } finally {
-        discoveryPromise = null;
+        if (generation === discoveryGeneration) discoveryPromise = null;
       }
     })();
     await discoveryPromise;
@@ -131,13 +150,16 @@ export function useExtensionLauncher(input: {
     const client = input.xmppClient.value;
     if (!client) return;
     const key = command.node;
+    const context = commandContext();
     clearCommandSurfaces(key);
     commandStates.value = { ...commandStates.value, [key]: { state: "loading" } };
     try {
-      const result = await client.invokeExtensionCommand(command);
-      storeResultSurfaces(key, result);
+      const result = await client.invokeExtensionCommand(command, context.roomJid);
+      if (!isCurrentCommandContext(context)) return;
+      storeResultSurfaces(key, result, { roomJid: context.roomJid });
       commandStates.value = { ...commandStates.value, [key]: extensionCommandOutcome(result) };
     } catch (error) {
+      if (!isCurrentCommandContext(context)) return;
       commandStates.value = {
         ...commandStates.value,
         [key]: { state: "error", detail: error instanceof Error ? error.message : "Extension command failed." },
@@ -161,37 +183,50 @@ export function useExtensionLauncher(input: {
     };
   }
 
-  function reset() {
+  function reset(options: { clearCommands?: boolean } = {}) {
+    commandGeneration += 1;
     open.value = false;
-    commands.value = [];
     state.value = "idle";
     detail.value = "";
     commandStates.value = {};
     commandForms.value = {};
     commandActions.value = {};
-    discoveryAttempted = false;
+    if (options.clearCommands) {
+      discoveryGeneration += 1;
+      discoveryPromise = null;
+      commands.value = [];
+      discoveryAttempted = false;
+    }
   }
 
   async function submitForm(
     command: DiscoveredExtensionCommand,
     action: ExtensionCommandAction = "complete",
-    options: { skipPublicPrompt?: boolean } = {},
+    options: { skipPublicPrompt?: boolean; roomJid?: string; generation?: number } = {},
   ): Promise<boolean> {
     const client = input.xmppClient.value;
     if (!client) return false;
     const key = command.node;
     const form = commandForms.value[key];
     if (!form) return false;
+    const context = {
+      generation: options.generation ?? commandGeneration,
+      roomJid: options.roomJid ?? form.roomJid,
+    };
     commandStates.value = { ...commandStates.value, [key]: { state: "loading" } };
     try {
       if (!options.skipPublicPrompt) {
-        await sendPublicPromptIfRequested(command, form.fields, action);
+        if (!isCurrentCommandContext(context)) return false;
+        await sendPublicPromptIfRequested(command, form.fields, action, context.roomJid);
       }
-      const result = await client.submitExtensionCommandForm(command, form.sessionId, form.fields, action, input.roomJid.value ?? undefined);
-      storeResultSurfaces(key, result);
+      if (!isCurrentCommandContext(context)) return false;
+      const result = await client.submitExtensionCommandForm(command, form.sessionId, form.fields, action, context.roomJid);
+      if (!isCurrentCommandContext(context)) return false;
+      storeResultSurfaces(key, result, { roomJid: context.roomJid });
       commandStates.value = { ...commandStates.value, [key]: extensionCommandOutcome(result) };
       return true;
     } catch (error) {
+      if (!isCurrentCommandContext(context)) return false;
       commandStates.value = {
         ...commandStates.value,
         [key]: { state: "error", detail: error instanceof Error ? error.message : "Extension form submission failed." },
@@ -212,6 +247,7 @@ export function useExtensionLauncher(input: {
     const command = invocation.command;
     const key = command.node;
     const wantsPalette = invocation.kind === "open-palette";
+    const context = commandContext();
 
     clearCommandSurfaces(key);
     commandStates.value = { ...commandStates.value, [key]: { state: "loading" } };
@@ -221,8 +257,9 @@ export function useExtensionLauncher(input: {
     }
 
     try {
-      const result = await client.invokeExtensionCommand(command);
-      storeResultSurfaces(key, result);
+      const result = await client.invokeExtensionCommand(command, context.roomJid);
+      if (!isCurrentCommandContext(context)) return false;
+      storeResultSurfaces(key, result, { roomJid: context.roomJid });
       const form = commandForms.value[key];
 
       if (invocation.kind === "open-palette") {
@@ -242,8 +279,8 @@ export function useExtensionLauncher(input: {
       const allowed = form?.actions ?? [];
       if (form && allowed.includes("complete")) {
         updateField(key, invocation.fieldName, [invocation.value]);
-        forceChannelOutputForSlashAi(command);
-        return await submitForm(command, "complete");
+        forceChannelOutputForSlashAi(command, context.roomJid);
+        return await submitForm(command, "complete", { roomJid: context.roomJid, generation: context.generation });
       }
 
       commandStates.value = { ...commandStates.value, [key]: extensionCommandOutcome(result) };
@@ -254,6 +291,7 @@ export function useExtensionLauncher(input: {
       }
       return true;
     } catch (error) {
+      if (!isCurrentCommandContext(context)) return false;
       commandStates.value = {
         ...commandStates.value,
         [key]: { state: "error", detail: error instanceof Error ? error.message : "Extension command failed." },
@@ -266,11 +304,12 @@ export function useExtensionLauncher(input: {
     command: DiscoveredExtensionCommand,
     fields: ExtensionCommandFormField[],
     action: ExtensionCommandAction,
+    roomJid?: string,
   ) {
     if (command.node !== AI_CHATBOT_COMMAND_NODE) return;
     if (action === "cancel" || action === "prev") return;
     if (formFieldValue(fields, "output") !== "channel") return;
-    if (!input.roomJid.value) return;
+    if (!roomJid) return;
     const prompt = formFieldValue(fields, "prompt")?.trim();
     if (!prompt) return;
     const sendPublicChannelMessage = input.sendPublicChannelMessage?.value;
@@ -280,8 +319,8 @@ export function useExtensionLauncher(input: {
     await sendPublicChannelMessage(prompt);
   }
 
-  function forceChannelOutputForSlashAi(command: DiscoveredExtensionCommand) {
-    if (!input.roomJid.value || command.node !== AI_CHATBOT_COMMAND_NODE) return;
+  function forceChannelOutputForSlashAi(command: DiscoveredExtensionCommand, roomJid?: string) {
+    if (!roomJid || command.node !== AI_CHATBOT_COMMAND_NODE) return;
     const form = commandForms.value[command.node];
     const output = form?.fields.find((field) => field.name === "output");
     if (!output) return;
@@ -302,12 +341,15 @@ export function useExtensionLauncher(input: {
     const invokeExtensionAction = input.invokeExtensionAction.value;
     if (!invokeExtensionAction) return;
     const key = command.node;
+    const context = commandContext();
     commandStates.value = { ...commandStates.value, [key]: { state: "loading" } };
     try {
       const result = await invokeExtensionAction(action);
-      storeResultSurfaces(key, result);
+      if (!isCurrentCommandContext(context)) return;
+      storeResultSurfaces(key, result, { roomJid: context.roomJid });
       commandStates.value = { ...commandStates.value, [key]: extensionCommandOutcome(result) };
     } catch (error) {
+      if (!isCurrentCommandContext(context)) return;
       commandStates.value = {
         ...commandStates.value,
         [key]: { state: "error", detail: error instanceof Error ? error.message : "Extension action failed." },

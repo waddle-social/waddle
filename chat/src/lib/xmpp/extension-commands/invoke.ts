@@ -30,10 +30,12 @@ export async function invokeExtensionCommand(
   xmpp: XmppSendIq,
   userJid: string,
   command: DiscoveredExtensionCommand,
+  roomJid?: string,
 ): Promise<ExtensionCommandResult> {
   const sendRawIq = requireRawIq(xmpp);
   const serviceJid = command.serviceJid || await discoverExtensionCommandService(xmpp, userJid);
-  const responseXml = await sendRawIq(buildCommandIqXml(serviceJid, command.node, "execute"));
+  const fields: DataFormField[] = roomJid ? [{ name: "waddle#room_jid", value: roomJid }] : [];
+  const responseXml = await sendRawIq(buildCommandIqXml(serviceJid, command.node, "execute", fields));
   return parseCommandIqResponse(responseXml);
 }
 
