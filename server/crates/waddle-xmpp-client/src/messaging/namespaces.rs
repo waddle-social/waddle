@@ -119,6 +119,19 @@ fn build_muji_content(media: &str) -> minidom::Element {
         .build()
 }
 
+/// Build the `<in-call xmlns='urn:waddle:in-call:0'><hand-raised/></in-call>`
+/// presence child (#1029), carried alongside (never inside) `<muji/>` in MUC
+/// call presence to advertise a raised hand. Mirrors the server-side
+/// `waddle_xmpp::xep::build_in_call_presence_state_element`.
+///
+/// CLAUDE.md XML hard rule: callers append this typed element rather than
+/// hand-rolling the `<in-call>` shape at the wasm boundary.
+pub fn build_in_call_hand_raised_element() -> minidom::Element {
+    minidom::Element::builder("in-call", NS_WADDLE_IN_CALL)
+        .append(minidom::Element::builder("hand-raised", NS_WADDLE_IN_CALL).build())
+        .build()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,5 +177,17 @@ mod tests {
     fn ns_constants_match_xep_namespaces() {
         assert_eq!(NS_MUJI, "urn:xmpp:jingle:muji:0");
         assert_eq!(NS_JINGLE_RTP, "urn:xmpp:jingle:apps:rtp:1");
+    }
+
+    #[test]
+    fn builds_in_call_hand_raised_element() {
+        let elem = build_in_call_hand_raised_element();
+        assert_eq!(elem.name(), "in-call");
+        assert_eq!(elem.ns(), NS_WADDLE_IN_CALL);
+        let marker = elem
+            .children()
+            .find(|c| c.name() == "hand-raised")
+            .expect("hand-raised marker child");
+        assert_eq!(marker.ns(), NS_WADDLE_IN_CALL);
     }
 }

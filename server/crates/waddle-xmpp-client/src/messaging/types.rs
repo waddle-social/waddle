@@ -695,6 +695,13 @@ pub struct InboundPresence {
     /// the occupant is NOT in the call. Drives the chat-side "N in
     /// call" indicator.
     pub muji: Option<MujiPresence>,
+    /// Waddle raised-hand call presence state (#1029) —
+    /// `<in-call xmlns='urn:waddle:in-call:0'><hand-raised/></in-call>`
+    /// carried *alongside* `<muji/>` on a MUC occupant's presence. `true`
+    /// when the occupant currently advertises a raised hand; `false` when
+    /// the child is absent (lowered). Drives the chat-side raised-hand
+    /// indicator in the Participants panel and on tiles.
+    pub hand_raised: bool,
 }
 
 /// Parsed `<muji xmlns='urn:xmpp:jingle:muji:0'>` extension on a MUC

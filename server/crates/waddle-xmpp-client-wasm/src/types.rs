@@ -448,6 +448,12 @@ pub struct WaddlePresence {
     /// participant-tracking store. `None` per XEP-0272 §Leaving
     /// means the occupant has left the call.
     pub muji: Option<WaddleMujiPresence>,
+    /// Waddle raised-hand call presence state (#1029). `true` when the
+    /// occupant's presence carries
+    /// `<in-call xmlns='urn:waddle:in-call:0'><hand-raised/></in-call>`
+    /// alongside `<muji/>`. Defaults to `false` (lowered) so the chat
+    /// side can build a per-participant raised-hand map.
+    pub hand_raised: bool,
 }
 
 #[derive(Debug, Serialize)]
