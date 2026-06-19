@@ -47,21 +47,21 @@ async fn vcalendar_item_with_master_overrides_and_exdate_round_trips() {
                       <vevent>
                         <uid>{event_id}</uid>
                         <dtstamp>2026-06-01T12:00:00Z</dtstamp>
-                        <dtstart>2026-06-05T19:00:00Z</dtstart>
-                        <dtend>2026-06-05T22:00:00Z</dtend>
+                        <dtstart><date-time>2026-06-05T19:00:00Z</date-time></dtstart>
+                        <dtend><date-time>2026-06-05T22:00:00Z</date-time></dtend>
                         <summary>Friday Game Night</summary>
                         <rrule>
                           <freq>WEEKLY</freq>
                           <byday><weekday>FR</weekday></byday>
                           <count>8</count>
                         </rrule>
-                        <exdate>2026-06-19T19:00:00Z</exdate>
+                        <exdate><date-time>2026-06-19T19:00:00Z</date-time></exdate>
                       </vevent>
                       <vevent>
                         <uid>{event_id}</uid>
-                        <recurrence-id>2026-06-12T19:00:00Z</recurrence-id>
+                        <recurrence-id><date-time>2026-06-12T19:00:00Z</date-time></recurrence-id>
                         <summary>Special: Halo Tournament</summary>
-                        <dtstart>2026-06-12T20:00:00Z</dtstart>
+                        <dtstart><date-time>2026-06-12T20:00:00Z</date-time></dtstart>
                       </vevent>
                     </vcalendar>
                   </item>

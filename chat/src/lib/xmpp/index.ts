@@ -52,6 +52,7 @@ export {
 } from "./story-reads-types";
 export type {
   Attendee,
+  CalendarDateValue,
   CommunityEvent,
   CommunityEventInput,
   Freq,
@@ -59,7 +60,21 @@ export type {
   Rrule,
   Weekday,
 } from "./event-types";
-export { groupEventsWithRsvps, sortEventsUpcomingFirst } from "./event-types";
+export { groupEventsWithRsvps } from "./event-types";
+export {
+  addDaysToDateString,
+  calendarDateStartMs,
+  compareCalendarDateValues,
+  dateTimeValue,
+  dateValue,
+  eventOverlapsRange,
+  isEventUpcomingOrOngoing,
+  localDateString,
+  localDateStringFromMs,
+  localDayRange,
+  sortEventsForDay,
+  sortEventsUpcomingFirst,
+} from "./event-calendar";
 export type { UserPepProfile } from "./pep-types";
 export type {
   DmChatStateEvent,

@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use tracing::{debug, warn};
 use waddle_xmpp::pubsub::{AccessModel, PubSubStorage, StoredItem};
-use waddle_xmpp_core::xcal::{CalendarItem, Rrule, RruleEnd, VEvent};
+use waddle_xmpp_core::xcal::{CalendarDateValue, CalendarItem, Rrule, RruleEnd, VEvent};
 
 use super::auth::AuthState;
 
@@ -360,14 +360,14 @@ fn event_lines(
     let mut lines = vec![
         "BEGIN:VEVENT".to_string(),
         property("UID", &event.uid),
-        date_property("DTSTAMP", dtstamp),
-        date_property("DTSTART", dtstart),
+        date_time_property("DTSTAMP", dtstamp),
+        calendar_date_property("DTSTART", dtstart),
     ];
     if let Some(dtend) = dtend {
-        lines.push(date_property("DTEND", dtend));
+        lines.push(calendar_date_property("DTEND", dtend));
     }
     if let Some(recurrence_id) = event.recurrence_id {
-        lines.push(date_property("RECURRENCE-ID", recurrence_id));
+        lines.push(calendar_date_property("RECURRENCE-ID", recurrence_id));
     }
     lines.push(property("SUMMARY", summary));
     if let Some(description) = description {
@@ -385,27 +385,44 @@ fn event_lines(
     if !event.exdates.is_empty() {
         let mut exdates = event.exdates.clone();
         exdates.sort();
-        lines.push(format!(
-            "EXDATE:{}",
-            exdates
-                .into_iter()
-                .map(format_utc_date)
-                .collect::<Vec<_>>()
-                .join(",")
-        ));
+        lines.push(exdate_property(exdates));
     }
     lines.push("END:VEVENT".to_string());
     lines
 }
 
-fn inherited_end(master: &VEvent, dtstart: DateTime<Utc>) -> Option<DateTime<Utc>> {
+fn inherited_end(master: &VEvent, dtstart: CalendarDateValue) -> Option<CalendarDateValue> {
     let master_start = master.dtstart?;
     let master_end = master.dtend?;
-    let duration = master_end.signed_duration_since(master_start);
-    if duration.num_milliseconds() < 0 {
-        return None;
+    match (master_start, master_end, dtstart) {
+        (
+            CalendarDateValue::DateTime(master_start),
+            CalendarDateValue::DateTime(master_end),
+            CalendarDateValue::DateTime(dtstart),
+        ) => {
+            let duration = master_end.signed_duration_since(master_start);
+            if duration.num_milliseconds() < 0 {
+                return None;
+            }
+            dtstart
+                .checked_add_signed(duration)
+                .map(CalendarDateValue::DateTime)
+        }
+        (
+            CalendarDateValue::Date(master_start),
+            CalendarDateValue::Date(master_end),
+            CalendarDateValue::Date(dtstart),
+        ) => {
+            let duration = master_end.signed_duration_since(master_start);
+            if duration.num_days() < 0 {
+                return None;
+            }
+            dtstart
+                .checked_add_signed(duration)
+                .map(CalendarDateValue::Date)
+        }
+        _ => None,
     }
-    dtstart.checked_add_signed(duration)
 }
 
 fn property(name: &str, value: &str) -> String {
@@ -424,8 +441,38 @@ fn cal_address_property(name: &str, value: &str) -> String {
     line
 }
 
-fn date_property(name: &str, value: DateTime<Utc>) -> String {
-    format!("{name}:{}", format_utc_date(value))
+fn date_time_property(name: &str, value: DateTime<Utc>) -> String {
+    format!("{name}:{}", format_utc_date_time(value))
+}
+
+fn calendar_date_property(name: &str, value: CalendarDateValue) -> String {
+    match value {
+        CalendarDateValue::Date(date) => {
+            format!("{name};VALUE=DATE:{}", date.format("%Y%m%d"))
+        }
+        CalendarDateValue::DateTime(date_time) => {
+            format!("{name}:{}", format_utc_date_time(date_time))
+        }
+    }
+}
+
+fn exdate_property(values: Vec<CalendarDateValue>) -> String {
+    let all_day = values
+        .first()
+        .is_some_and(|value| matches!(value, CalendarDateValue::Date(_)));
+    let encoded = values
+        .into_iter()
+        .map(|value| match value {
+            CalendarDateValue::Date(date) => date.format("%Y%m%d").to_string(),
+            CalendarDateValue::DateTime(date_time) => format_utc_date_time(date_time),
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    if all_day {
+        format!("EXDATE;VALUE=DATE:{encoded}")
+    } else {
+        format!("EXDATE:{encoded}")
+    }
 }
 
 fn rrule_property(rrule: &Rrule) -> String {
@@ -457,7 +504,9 @@ fn rrule_property(rrule: &Rrule) -> String {
     }
     match rrule.end {
         Some(RruleEnd::Count(count)) => parts.push(format!("COUNT={count}")),
-        Some(RruleEnd::Until(until)) => parts.push(format!("UNTIL={}", format_utc_date(until))),
+        Some(RruleEnd::Until(until)) => {
+            parts.push(format!("UNTIL={}", format_utc_date_time(until)))
+        }
         None => {}
     }
     format!("RRULE:{}", parts.join(";"))
@@ -484,7 +533,7 @@ fn escape_text(value: &str) -> String {
     out
 }
 
-fn format_utc_date(value: DateTime<Utc>) -> String {
+fn format_utc_date_time(value: DateTime<Utc>) -> String {
     value.format("%Y%m%dT%H%M%SZ").to_string()
 }
 
@@ -631,6 +680,10 @@ mod tests {
             .expect("valid timestamp")
     }
 
+    fn day(y: i32, mo: u32, d: u32) -> chrono::NaiveDate {
+        chrono::NaiveDate::from_ymd_opt(y, mo, d).expect("valid date")
+    }
+
     async fn test_auth_state() -> Arc<AuthState> {
         let config = DatabaseConfig::default();
         let pool_config = PoolConfig;
@@ -709,6 +762,28 @@ mod tests {
         for line in ics.trim_end().split("\r\n") {
             assert!(line.len() <= MAX_CONTENT_LINE_BYTES);
         }
+    }
+
+    #[test]
+    fn icalendar_projection_exports_all_day_dates() {
+        let item = CalendarItem::new(
+            VEvent::new("evt-retreat", "Retreat")
+                .with_dtstamp(ts(2026, 6, 1, 12, 0))
+                .with_dtstart_date(day(2026, 6, 15))
+                .with_dtend_date(day(2026, 6, 18))
+                .with_exdate_dates([day(2026, 6, 22)]),
+        );
+
+        let ics = build_icalendar(&[StoredCalendarItem {
+            item,
+            published_at: ts(2026, 6, 1, 13, 0),
+        }]);
+
+        assert!(ics.contains("DTSTAMP:20260601T120000Z\r\n"));
+        assert!(ics.contains("DTSTART;VALUE=DATE:20260615\r\n"));
+        assert!(ics.contains("DTEND;VALUE=DATE:20260618\r\n"));
+        assert!(ics.contains("EXDATE;VALUE=DATE:20260622\r\n"));
+        assert!(!ics.contains("DTSTART:20260615T000000Z\r\n"));
     }
 
     #[tokio::test]

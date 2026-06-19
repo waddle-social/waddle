@@ -68,8 +68,8 @@ async fn xcal_recurring_event_publish_and_items_round_trip() {
                       <vevent>
                         <uid>{event_id}</uid>
                         <dtstamp>2026-06-01T12:00:00Z</dtstamp>
-                        <dtstart>2026-06-05T19:00:00Z</dtstart>
-                        <dtend>2026-06-05T22:00:00Z</dtend>
+                        <dtstart><date-time>2026-06-05T19:00:00Z</date-time></dtstart>
+                        <dtend><date-time>2026-06-05T22:00:00Z</date-time></dtend>
                         <summary>Friday Game Night</summary>
                         <description>Weekly gaming</description>
                         <location>Voice #gaming</location>

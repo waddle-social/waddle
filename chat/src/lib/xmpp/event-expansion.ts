@@ -10,17 +10,25 @@
  *
  * For each candidate occurrence:
  *   - skipped if its DTSTART matches any value in the master's
- *     `exdatesMs`;
+ *     `exdates`;
  *   - replaced by the override's properties (summary, location,
  *     dtstart, dtend, description) when an override's
- *     `recurrenceIdMs` matches the occurrence.
+ *     `recurrenceId` matches the occurrence.
  *
  * Non-recurring events pass through unchanged as a single instance.
  */
 
-import type { CommunityEvent, Weekday } from "./event-types";
+import {
+  addDaysToDateString,
+  calendarDateKey,
+  calendarDateStartMs,
+  dateTimeValue,
+  eventBounds,
+} from "./event-calendar";
+import type { CalendarDateValue, CommunityEvent, Weekday } from "./event-types";
 
 const DAY_MS = 86_400_000;
+type CalendarDateOnly = Extract<CalendarDateValue, { kind: "date" }>;
 
 const WEEKDAY_INDEX: Record<Weekday, number> = {
   SU: 0,
@@ -51,8 +59,9 @@ interface ExpandInstancesOptions {
 
 /**
  * Expand a CalendarMaster into upcoming `CommunityEvent` instances.
- * Past occurrences (DTSTART <= nowMs) are dropped. The returned list
- * is sorted ascending by DTSTART.
+ * Occurrences whose effective end is not after `nowMs` are dropped,
+ * so ongoing spanning events are retained. The returned list is
+ * sorted ascending by DTSTART.
  */
 export function expandInstances(
   group: CalendarMaster,
@@ -63,21 +72,21 @@ export function expandInstances(
   const horizonMs = options.horizonMs ?? nowMs + 365 * DAY_MS;
   const maxCount = options.maxCount ?? 50;
 
-  const dtstart = master.dtstartMs;
-  if (typeof dtstart !== "number") {
+  const dtstart = master.dtstart;
+  if (!dtstart) {
     // No timeline anchor — surface the master as-is so it still renders.
     return [{ ...master }];
   }
   if (!master.rrule) {
-    if (dtstart <= nowMs) return [];
+    if ((eventBounds(master)?.endMs ?? 0) <= nowMs) return [];
     return [{ ...master }];
   }
 
-  const exdateSet = new Set(master.exdatesMs ?? []);
-  const overrideByDtstart = new Map<number, CommunityEvent>();
+  const exdateSet = new Set((master.exdates ?? []).map(calendarDateKey));
+  const overrideByDtstart = new Map<string, CommunityEvent>();
   for (const ov of overrides) {
-    if (typeof ov.recurrenceIdMs === "number") {
-      overrideByDtstart.set(ov.recurrenceIdMs, ov);
+    if (ov.recurrenceId) {
+      overrideByDtstart.set(calendarDateKey(ov.recurrenceId), ov);
     }
   }
 
@@ -95,8 +104,8 @@ export function expandInstances(
   let walked = 0;
 
   while (
-    cursor <= horizonMs &&
-    cursor <= until &&
+    calendarDateStartMs(cursor) <= horizonMs &&
+    calendarDateStartMs(cursor) <= until &&
     candidates < countCap &&
     emitted < maxCount &&
     walked < walkCap
@@ -104,14 +113,17 @@ export function expandInstances(
     walked += 1;
     if (matchesByDay(cursor, rrule.byDay) && matchesByMonthDay(cursor, rrule.byMonthDay)) {
       candidates += 1;
-      const skip = exdateSet.has(cursor);
-      if (!skip && cursor > nowMs) {
-        const override = overrideByDtstart.get(cursor);
+      const cursorKey = calendarDateKey(cursor);
+      const skip = exdateSet.has(cursorKey);
+      if (!skip) {
+        const override = overrideByDtstart.get(cursorKey);
         const instance = override
           ? applyOverride(master, override, cursor)
           : occurrenceFromMaster(master, cursor);
-        out.push(instance);
-        emitted += 1;
+        if ((eventBounds(instance)?.endMs ?? 0) > nowMs) {
+          out.push(instance);
+          emitted += 1;
+        }
       }
     }
     cursor = advance(cursor, rrule.freq, interval);
@@ -131,7 +143,7 @@ export function groupEventsWithOverrides(
   const masters = new Map<string, CommunityEvent>();
   const overrides = new Map<string, CommunityEvent[]>();
   for (const item of items) {
-    if (typeof item.recurrenceIdMs === "number") {
+    if (item.recurrenceId) {
       const bucket = overrides.get(item.uid) ?? [];
       bucket.push(item);
       overrides.set(item.uid, bucket);
@@ -146,51 +158,80 @@ export function groupEventsWithOverrides(
   return out;
 }
 
-function matchesByDay(ms: number, byDay: readonly Weekday[] | undefined): boolean {
+function matchesByDay(value: CalendarDateValue, byDay: readonly Weekday[] | undefined): boolean {
   if (!byDay || byDay.length === 0) return true;
-  const dow = new Date(ms).getUTCDay();
+  const dow = value.kind === "date"
+    ? dateStringUtcDate(value.date).getUTCDay()
+    : new Date(value.ms).getUTCDay();
   return byDay.some((wd) => WEEKDAY_INDEX[wd] === dow);
 }
 
-function matchesByMonthDay(ms: number, byMonthDay: readonly number[] | undefined): boolean {
+function matchesByMonthDay(value: CalendarDateValue, byMonthDay: readonly number[] | undefined): boolean {
   if (!byMonthDay || byMonthDay.length === 0) return true;
-  const dom = new Date(ms).getUTCDate();
+  const dom = value.kind === "date"
+    ? dateStringUtcDate(value.date).getUTCDate()
+    : new Date(value.ms).getUTCDate();
   return byMonthDay.includes(dom);
 }
 
-function advance(ms: number, freq: string, interval: number): number {
-  const d = new Date(ms);
+function advance(value: CalendarDateValue, freq: string, interval: number): CalendarDateValue {
+  if (value.kind === "date") {
+    return advanceDate(value, freq, interval);
+  }
+  const d = new Date(value.ms);
   switch (freq) {
     case "DAILY":
       d.setUTCDate(d.getUTCDate() + interval);
-      return d.getTime();
+      return dateTimeValue(d.getTime());
     case "WEEKLY":
       // Walk by single days; BYDAY filtering picks the right ones.
       // For multi-week intervals we still walk daily and let the
       // BYDAY filter + interval-week check handle it.
       d.setUTCDate(d.getUTCDate() + (interval === 1 ? 1 : 7 * interval));
-      return d.getTime();
+      return dateTimeValue(d.getTime());
     case "MONTHLY":
       d.setUTCMonth(d.getUTCMonth() + interval);
-      return d.getTime();
+      return dateTimeValue(d.getTime());
     case "YEARLY":
       d.setUTCFullYear(d.getUTCFullYear() + interval);
-      return d.getTime();
+      return dateTimeValue(d.getTime());
     default:
       // Unknown frequency — bail to "1 day" so the loop still
       // terminates against horizonMs / walkCap.
       d.setUTCDate(d.getUTCDate() + 1);
-      return d.getTime();
+      return dateTimeValue(d.getTime());
   }
 }
 
-function occurrenceFromMaster(master: CommunityEvent, dtstartMs: number): CommunityEvent {
-  const durationMs = masterDurationMs(master);
+function advanceDate(value: CalendarDateOnly, freq: string, interval: number): CalendarDateValue {
+  switch (freq) {
+    case "DAILY":
+      return { kind: "date", date: addDaysToDateString(value.date, interval) };
+    case "WEEKLY":
+      return { kind: "date", date: addDaysToDateString(value.date, interval === 1 ? 1 : 7 * interval) };
+    case "MONTHLY": {
+      const d = dateStringUtcDate(value.date);
+      d.setUTCMonth(d.getUTCMonth() + interval);
+      return { kind: "date", date: formatUtcDateString(d) };
+    }
+    case "YEARLY": {
+      const d = dateStringUtcDate(value.date);
+      d.setUTCFullYear(d.getUTCFullYear() + interval);
+      return { kind: "date", date: formatUtcDateString(d) };
+    }
+    default:
+      return { kind: "date", date: addDaysToDateString(value.date, 1) };
+  }
+}
+
+function occurrenceFromMaster(master: CommunityEvent, dtstart: CalendarDateValue): CommunityEvent {
+  const duration = masterDuration(master);
+  const dtend = duration ? addDuration(dtstart, duration) : undefined;
   return {
     ...master,
-    id: `${master.id}::${dtstartMs}`,
-    dtstartMs,
-    ...(typeof durationMs === "number" ? { dtendMs: dtstartMs + durationMs } : {}),
+    id: `${master.id}::${calendarDateKey(dtstart)}`,
+    dtstart,
+    ...(dtend ? { dtend } : {}),
     // Per-occurrence instances inherit the master's series — drop
     // RRULE so the UI shows "single occurrence" semantics.
     rrule: undefined,
@@ -200,31 +241,65 @@ function occurrenceFromMaster(master: CommunityEvent, dtstartMs: number): Commun
 function applyOverride(
   master: CommunityEvent,
   override: CommunityEvent,
-  recurrenceIdMs: number,
+  recurrenceId: CalendarDateValue,
 ): CommunityEvent {
-  const dtstartMs = override.dtstartMs ?? recurrenceIdMs;
-  const inheritedDurationMs = masterDurationMs(master);
+  const dtstart = override.dtstart ?? recurrenceId;
+  const inheritedDuration = masterDuration(master);
+  const inheritedEnd = inheritedDuration ? addDuration(dtstart, inheritedDuration) : undefined;
   return {
     ...master,
-    id: `${master.id}::${recurrenceIdMs}::override`,
+    id: `${master.id}::${calendarDateKey(recurrenceId)}::override`,
     summary: override.summary || master.summary,
     ...(override.description !== undefined ? { description: override.description } : {}),
     ...(override.location !== undefined ? { location: override.location } : {}),
-    dtstartMs,
-    ...(typeof override.dtendMs === "number"
-      ? { dtendMs: override.dtendMs }
-      : typeof inheritedDurationMs === "number"
-        ? { dtendMs: dtstartMs + inheritedDurationMs }
-        : {}),
-    recurrenceIdMs,
+    dtstart,
+    ...(override.dtend ? { dtend: override.dtend } : inheritedEnd ? { dtend: inheritedEnd } : {}),
+    recurrenceId,
     rrule: undefined,
   };
 }
 
-function masterDurationMs(master: CommunityEvent): number | undefined {
-  if (typeof master.dtendMs !== "number" || typeof master.dtstartMs !== "number") {
+type MasterDuration =
+  | { kind: "date-time"; ms: number }
+  | { kind: "date"; days: number };
+
+function masterDuration(master: CommunityEvent): MasterDuration | undefined {
+  if (!master.dtstart || !master.dtend || master.dtstart.kind !== master.dtend.kind) {
     return undefined;
   }
-  const durationMs = master.dtendMs - master.dtstartMs;
-  return Number.isFinite(durationMs) && durationMs >= 0 ? durationMs : undefined;
+  if (master.dtstart.kind === "date-time" && master.dtend.kind === "date-time") {
+    const durationMs = master.dtend.ms - master.dtstart.ms;
+    return Number.isFinite(durationMs) && durationMs >= 0
+      ? { kind: "date-time", ms: durationMs }
+      : undefined;
+  }
+  if (master.dtstart.kind === "date" && master.dtend.kind === "date") {
+    const durationDays = Math.round(
+      (calendarDateStartMs(master.dtend) - calendarDateStartMs(master.dtstart)) / DAY_MS,
+    );
+    return Number.isFinite(durationDays) && durationDays >= 0
+      ? { kind: "date", days: durationDays }
+      : undefined;
+  }
+  return undefined;
+}
+
+function addDuration(start: CalendarDateValue, duration: MasterDuration): CalendarDateValue | undefined {
+  if (start.kind === "date-time" && duration.kind === "date-time") {
+    return dateTimeValue(start.ms + duration.ms);
+  }
+  if (start.kind === "date" && duration.kind === "date") {
+    return { kind: "date", date: addDaysToDateString(start.date, duration.days) };
+  }
+  return undefined;
+}
+
+function dateStringUtcDate(date: string): Date {
+  const [year, month, day] = date.split("-").map(Number);
+  return new Date(Date.UTC(year ?? 0, (month ?? 1) - 1, day ?? 1));
+}
+
+function formatUtcDateString(date: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}`;
 }

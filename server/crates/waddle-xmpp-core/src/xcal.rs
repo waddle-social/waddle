@@ -21,8 +21,8 @@
 //!     <vevent>
 //!       <uid>evt-1</uid>
 //!       <dtstamp>2026-06-01T12:00:00Z</dtstamp>
-//!       <dtstart>2026-06-05T19:00:00Z</dtstart>
-//!       <dtend>2026-06-05T22:00:00Z</dtend>
+//!       <dtstart><date-time>2026-06-05T19:00:00Z</date-time></dtstart>
+//!       <dtend><date-time>2026-06-05T22:00:00Z</date-time></dtend>
 //!       <summary>Game Night</summary>
 //!       <description>Weekly gaming session</description>
 //!       <location>Voice #gaming</location>
@@ -45,7 +45,7 @@
 //! aggregates per-user RSVP items into the master event and expands
 //! recurring instances client-side.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use minidom::Element;
 
 /// xCal namespace (RFC 5545 in XML serialisation — xCal-Basic
@@ -140,6 +140,50 @@ impl Weekday {
 pub enum RruleEnd {
     Count(u32),
     Until(DateTime<Utc>),
+}
+
+/// DTSTART / DTEND / RECURRENCE-ID / EXDATE value. RFC 5545 allows
+/// VEVENTs to use either DATE-TIME values or date-only all-day values;
+/// xCal represents those as explicit `<date-time/>` or `<date/>`
+/// children inside the property element.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CalendarDateValue {
+    Date(NaiveDate),
+    DateTime(DateTime<Utc>),
+}
+
+impl CalendarDateValue {
+    pub fn kind(self) -> CalendarDateValueKind {
+        match self {
+            Self::Date(_) => CalendarDateValueKind::Date,
+            Self::DateTime(_) => CalendarDateValueKind::DateTime,
+        }
+    }
+
+    pub fn as_datetime(self) -> Option<DateTime<Utc>> {
+        match self {
+            Self::DateTime(value) => Some(value),
+            Self::Date(_) => None,
+        }
+    }
+}
+
+impl From<DateTime<Utc>> for CalendarDateValue {
+    fn from(value: DateTime<Utc>) -> Self {
+        Self::DateTime(value)
+    }
+}
+
+impl From<NaiveDate> for CalendarDateValue {
+    fn from(value: NaiveDate) -> Self {
+        Self::Date(value)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CalendarDateValueKind {
+    Date,
+    DateTime,
 }
 
 /// Recurrence rule subset suitable for community events. RFC 5545
@@ -273,10 +317,10 @@ pub struct VEvent {
     /// last modified. Defaults to publish time at the call site.
     pub dtstamp: Option<DateTime<Utc>>,
     /// DTSTART (required for a usable event).
-    pub dtstart: Option<DateTime<Utc>>,
+    pub dtstart: Option<CalendarDateValue>,
     /// DTEND — optional, mutually exclusive with DURATION (we model
     /// only DTEND for now).
-    pub dtend: Option<DateTime<Utc>>,
+    pub dtend: Option<CalendarDateValue>,
     /// SUMMARY — required for a displayable event.
     pub summary: String,
     pub description: Option<String>,
@@ -292,11 +336,11 @@ pub struct VEvent {
     /// RFC 5545 §3.8.4.4 RECURRENCE-ID — set on override VEVENT
     /// components that replace a single occurrence of the master
     /// series. `None` on the master event itself.
-    pub recurrence_id: Option<DateTime<Utc>>,
+    pub recurrence_id: Option<CalendarDateValue>,
     /// RFC 5545 §3.8.5.1 EXDATE — occurrence DTSTART values that
     /// should be skipped (per-instance cancellations). Only
     /// meaningful on the master event.
-    pub exdates: Vec<DateTime<Utc>>,
+    pub exdates: Vec<CalendarDateValue>,
 }
 
 /// A logical calendar item: one master VEVENT plus any per-instance
@@ -347,11 +391,31 @@ impl VEvent {
     }
 
     pub fn with_dtstart(mut self, dtstart: DateTime<Utc>) -> Self {
-        self.dtstart = Some(dtstart);
+        self.dtstart = Some(CalendarDateValue::DateTime(dtstart));
         self
     }
 
     pub fn with_dtend(mut self, dtend: DateTime<Utc>) -> Self {
+        self.dtend = Some(CalendarDateValue::DateTime(dtend));
+        self
+    }
+
+    pub fn with_dtstart_date(mut self, dtstart: NaiveDate) -> Self {
+        self.dtstart = Some(CalendarDateValue::Date(dtstart));
+        self
+    }
+
+    pub fn with_dtend_date(mut self, dtend: NaiveDate) -> Self {
+        self.dtend = Some(CalendarDateValue::Date(dtend));
+        self
+    }
+
+    pub fn with_dtstart_value(mut self, dtstart: CalendarDateValue) -> Self {
+        self.dtstart = Some(dtstart);
+        self
+    }
+
+    pub fn with_dtend_value(mut self, dtend: CalendarDateValue) -> Self {
         self.dtend = Some(dtend);
         self
     }
@@ -387,16 +451,52 @@ impl VEvent {
     }
 
     pub fn with_recurrence_id(mut self, recurrence_id: DateTime<Utc>) -> Self {
+        self.recurrence_id = Some(CalendarDateValue::DateTime(recurrence_id));
+        self
+    }
+
+    pub fn with_recurrence_id_date(mut self, recurrence_id: NaiveDate) -> Self {
+        self.recurrence_id = Some(CalendarDateValue::Date(recurrence_id));
+        self
+    }
+
+    pub fn with_recurrence_id_value(mut self, recurrence_id: CalendarDateValue) -> Self {
         self.recurrence_id = Some(recurrence_id);
         self
     }
 
     pub fn with_exdates<I: IntoIterator<Item = DateTime<Utc>>>(mut self, exdates: I) -> Self {
+        self.exdates = exdates
+            .into_iter()
+            .map(CalendarDateValue::DateTime)
+            .collect();
+        self
+    }
+
+    pub fn with_exdate_dates<I: IntoIterator<Item = NaiveDate>>(mut self, exdates: I) -> Self {
+        self.exdates = exdates.into_iter().map(CalendarDateValue::Date).collect();
+        self
+    }
+
+    pub fn with_exdate_values<I: IntoIterator<Item = CalendarDateValue>>(
+        mut self,
+        exdates: I,
+    ) -> Self {
         self.exdates = exdates.into_iter().collect();
         self
     }
 
     pub fn add_exdate(mut self, exdate: DateTime<Utc>) -> Self {
+        self.exdates.push(CalendarDateValue::DateTime(exdate));
+        self
+    }
+
+    pub fn add_exdate_date(mut self, exdate: NaiveDate) -> Self {
+        self.exdates.push(CalendarDateValue::Date(exdate));
+        self
+    }
+
+    pub fn add_exdate_value(mut self, exdate: CalendarDateValue) -> Self {
         self.exdates.push(exdate);
         self
     }
@@ -406,7 +506,9 @@ impl VEvent {
     /// upcoming-instance expansion is a separate concern from the
     /// wire shape.
     pub fn is_upcoming(&self) -> bool {
-        self.dtstart.is_some_and(|s| s > Utc::now())
+        self.dtstart
+            .and_then(CalendarDateValue::as_datetime)
+            .is_some_and(|s| s > Utc::now())
     }
 }
 
@@ -416,6 +518,19 @@ fn append_text_child(parent: &mut Element, name: &str, value: &str) {
     let mut child = Element::builder(name, NS_XCAL).build();
     child.append_text_node(value);
     parent.append_child(child);
+}
+
+fn append_calendar_date_child(parent: &mut Element, name: &str, value: CalendarDateValue) {
+    let mut property = Element::builder(name, NS_XCAL).build();
+    match value {
+        CalendarDateValue::Date(date) => {
+            append_text_child(&mut property, "date", &date.format("%Y-%m-%d").to_string());
+        }
+        CalendarDateValue::DateTime(date_time) => {
+            append_text_child(&mut property, "date-time", &date_time.to_rfc3339());
+        }
+    }
+    parent.append_child(property);
 }
 
 fn build_rrule_element(rrule: &Rrule) -> Element {
@@ -483,10 +598,10 @@ fn build_vevent_element(event: &VEvent) -> Element {
         append_text_child(&mut vevent, "dtstamp", &dtstamp.to_rfc3339());
     }
     if let Some(dtstart) = event.dtstart {
-        append_text_child(&mut vevent, "dtstart", &dtstart.to_rfc3339());
+        append_calendar_date_child(&mut vevent, "dtstart", dtstart);
     }
     if let Some(dtend) = event.dtend {
-        append_text_child(&mut vevent, "dtend", &dtend.to_rfc3339());
+        append_calendar_date_child(&mut vevent, "dtend", dtend);
     }
     if !event.summary.is_empty() {
         append_text_child(&mut vevent, "summary", &event.summary);
@@ -504,10 +619,10 @@ fn build_vevent_element(event: &VEvent) -> Element {
         vevent.append_child(build_rrule_element(rrule));
     }
     if let Some(recurrence_id) = event.recurrence_id {
-        append_text_child(&mut vevent, "recurrence-id", &recurrence_id.to_rfc3339());
+        append_calendar_date_child(&mut vevent, "recurrence-id", recurrence_id);
     }
     for exdate in &event.exdates {
-        append_text_child(&mut vevent, "exdate", &exdate.to_rfc3339());
+        append_calendar_date_child(&mut vevent, "exdate", *exdate);
     }
     for attendee in &event.attendees {
         vevent.append_child(build_attendee_element(attendee));
@@ -545,6 +660,22 @@ fn xcal_text(parent: &Element, name: &str) -> Option<String> {
         .find(|c| c.name() == name && c.ns() == NS_XCAL)
         .map(|c| c.text())
         .filter(|t| !t.is_empty())
+}
+
+fn xcal_calendar_date(parent: &Element, name: &str) -> Option<CalendarDateValue> {
+    let property = xcal_child(parent, name)?;
+    if let Some(date) = xcal_text(property, "date") {
+        return NaiveDate::parse_from_str(&date, "%Y-%m-%d")
+            .ok()
+            .map(CalendarDateValue::Date);
+    }
+    if let Some(date_time) = xcal_text(property, "date-time") {
+        return date_time
+            .parse::<DateTime<Utc>>()
+            .ok()
+            .map(CalendarDateValue::DateTime);
+    }
+    None
 }
 
 fn xcal_child<'a>(parent: &'a Element, name: &str) -> Option<&'a Element> {
@@ -618,7 +749,7 @@ pub fn parse_vcalendar_item(item_id: &str, vcalendar: &Element) -> Option<Calend
     let mut master: Option<VEvent> = None;
     let mut overrides: Vec<VEvent> = Vec::new();
     for vevent in vevents {
-        let parsed = parse_vevent_element(item_id, vevent);
+        let parsed = parse_vevent_element(item_id, vevent)?;
         if parsed.recurrence_id.is_some() {
             overrides.push(parsed);
         } else if master.is_none() {
@@ -634,12 +765,12 @@ pub fn parse_vcalendar_item(item_id: &str, vcalendar: &Element) -> Option<Calend
     Some(CalendarItem { master, overrides })
 }
 
-fn parse_vevent_element(item_id: &str, vevent: &Element) -> VEvent {
+fn parse_vevent_element(item_id: &str, vevent: &Element) -> Option<VEvent> {
     let summary = xcal_text(vevent, "summary").unwrap_or_default();
     let uid = xcal_text(vevent, "uid").unwrap_or_else(|| item_id.to_string());
     let dtstamp = xcal_text(vevent, "dtstamp").and_then(|s| s.parse().ok());
-    let dtstart = xcal_text(vevent, "dtstart").and_then(|s| s.parse().ok());
-    let dtend = xcal_text(vevent, "dtend").and_then(|s| s.parse().ok());
+    let dtstart = xcal_calendar_date(vevent, "dtstart");
+    let dtend = xcal_calendar_date(vevent, "dtend");
     let description = xcal_text(vevent, "description");
     let location = xcal_text(vevent, "location");
     let organizer = xcal_text(vevent, "organizer");
@@ -649,16 +780,13 @@ fn parse_vevent_element(item_id: &str, vevent: &Element) -> VEvent {
         .filter(|c| c.name() == "attendee" && c.ns() == NS_XCAL)
         .filter_map(parse_attendee)
         .collect();
-    let recurrence_id = xcal_text(vevent, "recurrence-id").and_then(|s| s.parse().ok());
+    let recurrence_id = xcal_calendar_date(vevent, "recurrence-id");
     let exdates = vevent
         .children()
         .filter(|c| c.name() == "exdate" && c.ns() == NS_XCAL)
-        .filter_map(|c| {
-            let t = c.text();
-            t.trim().parse::<DateTime<Utc>>().ok()
-        })
+        .flat_map(parse_calendar_date_values)
         .collect();
-    VEvent {
+    let event = VEvent {
         uid,
         dtstamp,
         dtstart,
@@ -671,6 +799,81 @@ fn parse_vevent_element(item_id: &str, vevent: &Element) -> VEvent {
         attendees,
         recurrence_id,
         exdates,
+    };
+    if has_invalid_date_values(&event) {
+        return None;
+    }
+    Some(event)
+}
+
+fn parse_calendar_date_values(property: &Element) -> Vec<CalendarDateValue> {
+    let mut values = Vec::new();
+    for child in property.children().filter(|child| child.ns() == NS_XCAL) {
+        match child.name() {
+            "date" => {
+                if let Ok(date) = NaiveDate::parse_from_str(&child.text(), "%Y-%m-%d") {
+                    values.push(CalendarDateValue::Date(date));
+                }
+            }
+            "date-time" => {
+                if let Ok(date_time) = child.text().parse::<DateTime<Utc>>() {
+                    values.push(CalendarDateValue::DateTime(date_time));
+                }
+            }
+            _ => {}
+        }
+    }
+    values
+}
+
+fn has_invalid_date_values(event: &VEvent) -> bool {
+    has_mixed_date_value_types(event)
+        || has_non_positive_end(event)
+        || has_all_day_date_time_until(event)
+}
+
+fn has_mixed_date_value_types(event: &VEvent) -> bool {
+    let Some(expected_kind) = event
+        .dtstart
+        .or(event.recurrence_id)
+        .map(CalendarDateValue::kind)
+    else {
+        return false;
+    };
+    event
+        .dtend
+        .is_some_and(|value| value.kind() != expected_kind)
+        || event
+            .recurrence_id
+            .is_some_and(|value| value.kind() != expected_kind)
+        || event
+            .exdates
+            .iter()
+            .any(|value| value.kind() != expected_kind)
+}
+
+fn has_non_positive_end(event: &VEvent) -> bool {
+    let Some(start) = event.dtstart.or(event.recurrence_id) else {
+        return false;
+    };
+    event
+        .dtend
+        .is_some_and(|end| !calendar_date_after(end, start))
+}
+
+fn has_all_day_date_time_until(event: &VEvent) -> bool {
+    matches!(event.dtstart, Some(CalendarDateValue::Date(_)))
+        && matches!(
+            event.rrule.as_ref().and_then(|rule| rule.end.clone()),
+            Some(RruleEnd::Until(_))
+        )
+}
+
+fn calendar_date_after(end: CalendarDateValue, start: CalendarDateValue) -> bool {
+    match (end, start) {
+        (CalendarDateValue::Date(end), CalendarDateValue::Date(start)) => end > start,
+        (CalendarDateValue::DateTime(end), CalendarDateValue::DateTime(start)) => end > start,
+        _ => false,
     }
 }
 
@@ -722,6 +925,10 @@ mod tests {
             .expect("valid date")
     }
 
+    fn day(y: i32, mo: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, mo, d).expect("valid date")
+    }
+
     #[test]
     fn freq_round_trip() {
         for f in [Freq::Daily, Freq::Weekly, Freq::Monthly, Freq::Yearly] {
@@ -762,12 +969,125 @@ mod tests {
         let parsed = parse_vcalendar_event("evt-1", &vcal).expect("parseable");
         assert_eq!(parsed.uid, "evt-1");
         assert_eq!(parsed.summary, "Game Night");
-        assert_eq!(parsed.dtstart, Some(ts(2026, 6, 15, 19, 0)));
-        assert_eq!(parsed.dtend, Some(ts(2026, 6, 15, 22, 0)));
+        assert_eq!(parsed.dtstart, Some(ts(2026, 6, 15, 19, 0).into()));
+        assert_eq!(parsed.dtend, Some(ts(2026, 6, 15, 22, 0).into()));
         assert_eq!(parsed.description.as_deref(), Some("Weekly gaming"));
         assert_eq!(parsed.location.as_deref(), Some("Voice #gaming"));
         assert_eq!(parsed.organizer.as_deref(), Some("xmpp:alice@example.com"));
         assert!(parsed.rrule.is_none());
+    }
+
+    #[test]
+    fn build_and_parse_one_day_all_day_event() {
+        let event = VEvent::new("evt-all-day", "Company Holiday")
+            .with_dtstart_date(day(2026, 6, 15))
+            .with_dtend_date(day(2026, 6, 16));
+        let vcal = build_vcalendar_with_event(&event);
+        let serialised = String::from(&vcal);
+        assert!(serialised.contains("<date>2026-06-15</date>"));
+        assert!(!serialised.contains("<date-time>"));
+
+        let parsed = parse_vcalendar_event("evt-all-day", &vcal).expect("parseable");
+        assert_eq!(parsed.dtstart, Some(day(2026, 6, 15).into()));
+        assert_eq!(parsed.dtend, Some(day(2026, 6, 16).into()));
+    }
+
+    #[test]
+    fn build_and_parse_multi_day_all_day_event_with_exdate() {
+        let event = VEvent::new("evt-retreat", "Retreat")
+            .with_dtstart_date(day(2026, 6, 15))
+            .with_dtend_date(day(2026, 6, 18))
+            .with_exdate_dates([day(2026, 6, 22)]);
+        let vcal = build_vcalendar_with_event(&event);
+        let parsed = parse_vcalendar_event("evt-retreat", &vcal).expect("parseable");
+        assert_eq!(parsed.dtstart, Some(day(2026, 6, 15).into()));
+        assert_eq!(parsed.dtend, Some(day(2026, 6, 18).into()));
+        assert_eq!(parsed.exdates, vec![day(2026, 6, 22).into()]);
+    }
+
+    #[test]
+    fn parse_rejects_mixed_date_and_date_time_bounds() {
+        let xml = r#"<vcalendar xmlns='urn:ietf:params:xml:ns:xcal'>
+  <vevent>
+    <uid>mixed</uid>
+    <dtstart><date>2026-06-15</date></dtstart>
+    <dtend><date-time>2026-06-16T00:00:00Z</date-time></dtend>
+    <summary>Mixed</summary>
+  </vevent>
+</vcalendar>"#;
+        let elem: Element = xml.parse().expect("valid xml");
+        assert!(parse_vcalendar_event("mixed", &elem).is_none());
+    }
+
+    #[test]
+    fn parse_rejects_mixed_recurrence_id_and_override_end() {
+        let xml = r#"<vcalendar xmlns='urn:ietf:params:xml:ns:xcal'>
+  <vevent>
+    <uid>mixed-override</uid>
+    <dtstart><date>2026-06-15</date></dtstart>
+    <summary>Mixed override master</summary>
+  </vevent>
+  <vevent>
+    <uid>mixed-override</uid>
+    <recurrence-id><date>2026-06-22</date></recurrence-id>
+    <dtend><date-time>2026-06-23T00:00:00Z</date-time></dtend>
+    <summary>Mixed override</summary>
+  </vevent>
+</vcalendar>"#;
+        let elem: Element = xml.parse().expect("valid xml");
+        assert!(parse_vcalendar_item("mixed-override", &elem).is_none());
+    }
+
+    #[test]
+    fn parse_preserves_multi_value_exdate_property() {
+        let xml = r#"<vcalendar xmlns='urn:ietf:params:xml:ns:xcal'>
+  <vevent>
+    <uid>multi-exdate</uid>
+    <dtstart><date-time>2026-06-05T19:00:00Z</date-time></dtstart>
+    <summary>Multi EXDATE</summary>
+    <exdate>
+      <date-time>2026-06-12T19:00:00Z</date-time>
+      <date-time>2026-06-19T19:00:00Z</date-time>
+    </exdate>
+  </vevent>
+</vcalendar>"#;
+        let elem: Element = xml.parse().expect("valid xml");
+        let parsed = parse_vcalendar_event("multi-exdate", &elem).expect("parseable");
+        assert_eq!(
+            parsed.exdates,
+            vec![ts(2026, 6, 12, 19, 0).into(), ts(2026, 6, 19, 19, 0).into()]
+        );
+    }
+
+    #[test]
+    fn parse_rejects_dtend_not_after_dtstart() {
+        let xml = r#"<vcalendar xmlns='urn:ietf:params:xml:ns:xcal'>
+  <vevent>
+    <uid>bad-end</uid>
+    <dtstart><date>2026-06-15</date></dtstart>
+    <dtend><date>2026-06-15</date></dtend>
+    <summary>Bad end</summary>
+  </vevent>
+</vcalendar>"#;
+        let elem: Element = xml.parse().expect("valid xml");
+        assert!(parse_vcalendar_event("bad-end", &elem).is_none());
+    }
+
+    #[test]
+    fn parse_rejects_all_day_rrule_until_date_time() {
+        let xml = r#"<vcalendar xmlns='urn:ietf:params:xml:ns:xcal'>
+  <vevent>
+    <uid>bad-until</uid>
+    <dtstart><date>2026-06-15</date></dtstart>
+    <summary>Bad until</summary>
+    <rrule>
+      <freq>DAILY</freq>
+      <until>2026-06-30T00:00:00Z</until>
+    </rrule>
+  </vevent>
+</vcalendar>"#;
+        let elem: Element = xml.parse().expect("valid xml");
+        assert!(parse_vcalendar_event("bad-until", &elem).is_none());
     }
 
     #[test]
@@ -830,8 +1150,8 @@ mod tests {
   <vevent>
     <uid>fcd5cb18</uid>
     <dtstamp>1997-06-11T19:00:00Z</dtstamp>
-    <dtstart>1997-07-14T17:00:00Z</dtstart>
-    <dtend>1997-07-15T03:59:59Z</dtend>
+    <dtstart><date-time>1997-07-14T17:00:00Z</date-time></dtstart>
+    <dtend><date-time>1997-07-15T03:59:59Z</date-time></dtend>
     <summary>Bastille Day Party</summary>
     <organizer>xmpp:a@example.com</organizer>
   </vevent>
@@ -851,7 +1171,7 @@ mod tests {
         let xml = r#"<vcalendar xmlns='urn:ietf:params:xml:ns:xcal'>
   <vevent>
     <uid>no-summary</uid>
-    <dtstart>2026-06-01T00:00:00Z</dtstart>
+    <dtstart><date-time>2026-06-01T00:00:00Z</date-time></dtstart>
   </vevent>
 </vcalendar>"#;
         let elem: Element = xml.parse().expect("valid xml");
@@ -971,7 +1291,7 @@ mod tests {
             uid: "evt-series".to_string(),
             summary: String::new(),
             location: Some("New venue".to_string()),
-            recurrence_id: Some(ts(2026, 6, 26, 19, 0)),
+            recurrence_id: Some(ts(2026, 6, 26, 19, 0).into()),
             ..VEvent::new("evt-series", "")
         };
         let item = CalendarItem::new(master)
@@ -987,16 +1307,16 @@ mod tests {
         assert_eq!(parsed.master.uid, "evt-series");
         assert_eq!(parsed.master.summary, "Game Night");
         assert_eq!(parsed.master.exdates.len(), 2);
-        assert_eq!(parsed.master.exdates[0], ts(2026, 6, 19, 19, 0));
+        assert_eq!(parsed.master.exdates[0], ts(2026, 6, 19, 19, 0).into());
         assert_eq!(parsed.overrides.len(), 2);
         assert_eq!(
             parsed.overrides[0].recurrence_id,
-            Some(ts(2026, 6, 12, 19, 0))
+            Some(ts(2026, 6, 12, 19, 0).into())
         );
         assert_eq!(parsed.overrides[0].summary, "Special: Halo");
         assert_eq!(
             parsed.overrides[1].recurrence_id,
-            Some(ts(2026, 6, 26, 19, 0))
+            Some(ts(2026, 6, 26, 19, 0).into())
         );
         assert_eq!(parsed.overrides[1].location.as_deref(), Some("New venue"));
         assert!(parsed.overrides[1].summary.is_empty());
@@ -1009,12 +1329,12 @@ mod tests {
         let xml = r#"<vcalendar xmlns='urn:ietf:params:xml:ns:xcal'>
   <vevent>
     <uid>evt-series</uid>
-    <recurrence-id>2026-06-12T19:00:00Z</recurrence-id>
+    <recurrence-id><date-time>2026-06-12T19:00:00Z</date-time></recurrence-id>
     <summary>Override</summary>
   </vevent>
   <vevent>
     <uid>evt-series</uid>
-    <dtstart>2026-06-05T19:00:00Z</dtstart>
+    <dtstart><date-time>2026-06-05T19:00:00Z</date-time></dtstart>
     <summary>Master</summary>
   </vevent>
 </vcalendar>"#;

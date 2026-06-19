@@ -33,6 +33,10 @@ export interface Attendee {
   rsvp?: boolean;
 }
 
+export type CalendarDateValue =
+  | { kind: "date"; date: string }
+  | { kind: "date-time"; ms: number };
+
 export interface CommunityEvent {
   /** Pubsub item id (UUID). */
   id: string;
@@ -44,10 +48,8 @@ export interface CommunityEvent {
   organizer?: string;
   /** Epoch ms. */
   dtstampMs?: number;
-  /** Epoch ms. */
-  dtstartMs?: number;
-  /** Epoch ms. */
-  dtendMs?: number;
+  dtstart?: CalendarDateValue;
+  dtend?: CalendarDateValue;
   rrule?: Rrule;
   /**
    * RSVPs aggregated from sibling `<master-uid>-rsvp-<localpart>`
@@ -60,12 +62,12 @@ export interface CommunityEvent {
    * single occurrence of a recurring master. `undefined` on master
    * events.
    */
-  recurrenceIdMs?: number;
+  recurrenceId?: CalendarDateValue;
   /**
    * RFC 5545 EXDATE — occurrence DTSTART values to skip on a
    * recurring master. Empty on overrides and on non-recurring events.
    */
-  exdatesMs?: number[];
+  exdates?: CalendarDateValue[];
 }
 
 export interface CommunityEventInput {
@@ -73,17 +75,15 @@ export interface CommunityEventInput {
   description?: string;
   location?: string;
   organizer?: string;
-  /** Epoch ms. */
-  dtstartMs?: number;
-  /** Epoch ms. */
-  dtendMs?: number;
+  dtstart?: CalendarDateValue;
+  dtend?: CalendarDateValue;
   rrule?: Rrule;
   /**
-   * EXDATE list (epoch ms) — occurrence DTSTARTs to skip on a
-   * recurring master. Only meaningful when `rrule` is set. Empty /
-   * absent means no occurrences are excluded.
+   * EXDATE list — occurrence DTSTART values to skip on a recurring
+   * master. Only meaningful when `rrule` is set. Empty / absent
+   * means no occurrences are excluded.
    */
-  exdatesMs?: number[];
+  exdates?: CalendarDateValue[];
 }
 
 // ── Wasm boundary ───────────────────────────────────────────────────
@@ -112,12 +112,12 @@ export interface WasmVEvent {
   location?: string | null;
   organizer?: string | null;
   dtstamp?: string | null;
-  dtstart?: string | null;
-  dtend?: string | null;
+  dtstart?: CalendarDateValue | null;
+  dtend?: CalendarDateValue | null;
   rrule?: WasmRrule | null;
   attendees?: WasmAttendee[] | null;
-  recurrence_id?: string | null;
-  exdates?: string[] | null;
+  recurrence_id?: CalendarDateValue | null;
+  exdates?: CalendarDateValue[] | null;
 }
 
 const PARTSTATS: ReadonlySet<PartStat> = new Set([
@@ -178,16 +178,16 @@ export function rruleToWasm(rrule: Rrule): WasmRrule {
 
 export function eventFromWasm(event: WasmVEvent): CommunityEvent {
   const dtstamp = event.dtstamp ? Date.parse(event.dtstamp) : undefined;
-  const dtstart = event.dtstart ? Date.parse(event.dtstart) : undefined;
-  const dtend = event.dtend ? Date.parse(event.dtend) : undefined;
   const rrule = event.rrule ? rruleFromWasm(event.rrule) ?? undefined : undefined;
   const attendees = (event.attendees ?? [])
     .map(attendeeFromWasm)
     .filter((a): a is Attendee => a !== null);
-  const recurrenceIdMs = event.recurrence_id ? Date.parse(event.recurrence_id) : undefined;
-  const exdatesMs = (event.exdates ?? [])
-    .map((s) => Date.parse(s))
-    .filter((n) => Number.isFinite(n));
+  const dtstart = calendarDateFromWasm(event.dtstart);
+  const dtend = calendarDateFromWasm(event.dtend);
+  const recurrenceId = calendarDateFromWasm(event.recurrence_id);
+  const exdates = (event.exdates ?? [])
+    .map(calendarDateFromWasm)
+    .filter((value): value is CalendarDateValue => value !== undefined);
   return {
     id: event.id,
     uid: event.uid,
@@ -196,15 +196,24 @@ export function eventFromWasm(event: WasmVEvent): CommunityEvent {
     ...(event.location ? { location: event.location } : {}),
     ...(event.organizer ? { organizer: event.organizer } : {}),
     ...(typeof dtstamp === "number" && Number.isFinite(dtstamp) ? { dtstampMs: dtstamp } : {}),
-    ...(typeof dtstart === "number" && Number.isFinite(dtstart) ? { dtstartMs: dtstart } : {}),
-    ...(typeof dtend === "number" && Number.isFinite(dtend) ? { dtendMs: dtend } : {}),
+    ...(dtstart ? { dtstart } : {}),
+    ...(dtend ? { dtend } : {}),
     ...(rrule ? { rrule } : {}),
     ...(attendees.length > 0 ? { attendees } : {}),
-    ...(typeof recurrenceIdMs === "number" && Number.isFinite(recurrenceIdMs)
-      ? { recurrenceIdMs }
-      : {}),
-    ...(exdatesMs.length > 0 ? { exdatesMs } : {}),
+    ...(recurrenceId ? { recurrenceId } : {}),
+    ...(exdates.length > 0 ? { exdates } : {}),
   };
+}
+
+function calendarDateFromWasm(value: CalendarDateValue | null | undefined): CalendarDateValue | undefined {
+  if (!value) return undefined;
+  if (value.kind === "date") {
+    return /^\d{4}-\d{2}-\d{2}$/.test(value.date) ? value : undefined;
+  }
+  if (value.kind === "date-time") {
+    return Number.isFinite(value.ms) ? value : undefined;
+  }
+  return undefined;
 }
 
 function parseRsvpItemId(itemId: string): { masterUid: string; localpart: string } | null {
@@ -237,7 +246,7 @@ export function groupEventsWithRsvps(items: readonly CommunityEvent[]): Communit
       }
       continue;
     }
-    if (typeof item.recurrenceIdMs === "number") {
+    if (item.recurrenceId) {
       overrides.push(item);
       continue;
     }
@@ -260,23 +269,4 @@ export function groupEventsWithRsvps(items: readonly CommunityEvent[]): Communit
     });
   }
   return [...out, ...overrides];
-}
-
-/** Sort events by upcoming-first, past events at the end newest-first. */
-export function sortEventsUpcomingFirst(
-  events: readonly CommunityEvent[],
-  nowMs: number = Date.now(),
-): CommunityEvent[] {
-  const upcoming: CommunityEvent[] = [];
-  const past: CommunityEvent[] = [];
-  for (const event of events) {
-    if (typeof event.dtstartMs === "number" && event.dtstartMs < nowMs) {
-      past.push(event);
-    } else {
-      upcoming.push(event);
-    }
-  }
-  upcoming.sort((a, b) => (a.dtstartMs ?? Infinity) - (b.dtstartMs ?? Infinity));
-  past.sort((a, b) => (b.dtstartMs ?? 0) - (a.dtstartMs ?? 0));
-  return [...upcoming, ...past];
 }

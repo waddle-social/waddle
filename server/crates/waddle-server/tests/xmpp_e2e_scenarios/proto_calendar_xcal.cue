@@ -84,12 +84,24 @@ scenario: #Scenario & {
 													#XmlElement & {
 														name: "dtstart"
 														ns:   "urn:ietf:params:xml:ns:xcal"
-														text: "2026-06-05T19:00:00Z"
+														children: [
+															#XmlElement & {
+																name: "date-time"
+																ns:   "urn:ietf:params:xml:ns:xcal"
+																text: "2026-06-05T19:00:00Z"
+															},
+														]
 													},
 													#XmlElement & {
 														name: "dtend"
 														ns:   "urn:ietf:params:xml:ns:xcal"
-														text: "2026-06-05T22:00:00Z"
+														children: [
+															#XmlElement & {
+																name: "date-time"
+																ns:   "urn:ietf:params:xml:ns:xcal"
+																text: "2026-06-05T22:00:00Z"
+															},
+														]
 													},
 													#XmlElement & {
 														name: "summary"

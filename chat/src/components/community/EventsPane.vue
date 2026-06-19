@@ -4,6 +4,7 @@ import {
   CalendarDays,
   ChevronLeft,
   ChevronRight,
+  Clock3,
   Copy,
   List,
   Menu,
@@ -18,11 +19,23 @@ import CalendarFeedUrlPanel from "@/components/community/CalendarFeedUrlPanel.vu
 import RecurrencePicker from "@/components/community/RecurrencePicker.vue";
 import type {
   Attendee,
+  CalendarDateValue,
   CommunityEvent,
   CommunityEventInput,
   PartStat,
   Rrule,
   Weekday,
+} from "@/lib/xmpp-client";
+import {
+  addDaysToDateString,
+  calendarDateStartMs,
+  dateTimeValue,
+  dateValue,
+  eventOverlapsRange,
+  isEventUpcomingOrOngoing,
+  localDateStringFromMs,
+  localDayRange,
+  sortEventsForDay,
 } from "@/lib/xmpp-client";
 import { useCalendarFeedCopy } from "@/lib/use-calendar-feed-copy";
 
@@ -50,7 +63,7 @@ const emit = defineEmits<{
   post: [input: CommunityEventInput];
   edit: [itemId: string, input: CommunityEventInput];
   cancelSeries: [masterId: string];
-  cancelInstance: [masterUid: string, instanceDtstartMs: number];
+  cancelInstance: [masterUid: string, instanceDtstart: CalendarDateValue];
   rsvp: [event: CommunityEvent, partstat: PartStat];
   openNav: [];
 }>();
@@ -89,7 +102,7 @@ const selfAttendeeUri = computed(() => {
 type ViewMode = "week" | "month";
 type EventFilter = "all" | "attending";
 
-const viewMode = ref<ViewMode>("week");
+const viewMode = ref<ViewMode>("month");
 const activeFilter = ref<EventFilter>("all");
 
 // ─── RSVP helpers ─────────────────────────────────────────────────────────────
@@ -131,24 +144,36 @@ const filteredEvents = computed(() => {
 
 // ─── 7-day list view ─────────────────────────────────────────────────────────
 
-const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+interface WeekEventDay {
+  startMs: number;
+  events: CommunityEvent[];
+}
 
-/** Events starting within the next 7 days, grouped by locale date string. */
-const weekEventsByDay = computed<Map<string, CommunityEvent[]>>(() => {
-  const now = Date.now();
-  const horizon = now + SEVEN_DAYS_MS;
-  const groups = new Map<string, CommunityEvent[]>();
-  const sorted = [...filteredEvents.value]
-    .filter((e): e is CommunityEvent & { dtstartMs: number } => typeof e.dtstartMs === "number")
-    .sort((a, b) => a.dtstartMs - b.dtstartMs);
-  for (const e of sorted) {
-    if (e.dtstartMs < now || e.dtstartMs > horizon) continue;
-    const key = new Date(e.dtstartMs).toLocaleDateString(undefined, {
+/** Future or ongoing events overlapping the next 7 local days, grouped by day. */
+const weekEventsByDay = computed<Map<string, WeekEventDay>>(() => {
+  const groups = new Map<string, WeekEventDay>();
+  const now = new Date();
+  const nowMs = now.getTime();
+  for (let offset = 0; offset < 7; offset += 1) {
+    const day = new Date(now.getFullYear(), now.getMonth(), now.getDate() + offset);
+    const { startMs: dayStart, endMs: dayEnd } = localDayRange(
+      day.getFullYear(),
+      day.getMonth(),
+      day.getDate(),
+    );
+    const dayEvents = sortEventsForDay(
+      filteredEvents.value.filter((event) =>
+        isEventUpcomingOrOngoing(event, nowMs) && eventOverlapsRange(event, dayStart, dayEnd),
+      ),
+      dayStart,
+    );
+    if (dayEvents.length === 0) continue;
+    const key = day.toLocaleDateString(undefined, {
       weekday: "long",
       month: "short",
       day: "numeric",
     });
-    (groups.get(key) ?? (groups.set(key, []), groups.get(key)!)).push(e);
+    groups.set(key, { startMs: dayStart, events: dayEvents });
   }
   return groups;
 });
@@ -186,6 +211,7 @@ function goToToday() {
 
 interface CalCell {
   day: number | null;
+  rangeStartMs: number | null;
   isToday: boolean;
   events: CommunityEvent[];
 }
@@ -201,25 +227,26 @@ const calGrid = computed<CalCell[][]>(() => {
 
   // Leading empty cells
   for (let i = 0; i < firstDow; i++) {
-    cells.push({ day: null, isToday: false, events: [] });
+    cells.push({ day: null, rangeStartMs: null, isToday: false, events: [] });
   }
 
   for (let d = 1; d <= daysInMonth; d++) {
     const cellDate = new Date(y, m, d);
-    const dayStart = cellDate.getTime();
-    const dayEnd = dayStart + 86_400_000;
-    const events = filteredEvents.value.filter(
-      (e) => typeof e.dtstartMs === "number" && e.dtstartMs >= dayStart && e.dtstartMs < dayEnd,
+    const { startMs: dayStart, endMs: dayEnd } = localDayRange(y, m, d);
+    const events = sortEventsForDay(
+      filteredEvents.value.filter((event) => eventOverlapsRange(event, dayStart, dayEnd)),
+      dayStart,
     );
     cells.push({
       day: d,
+      rangeStartMs: dayStart,
       isToday: cellDate.toDateString() === todayStr,
       events,
     });
   }
 
   // Trailing empty cells to complete last row
-  while (cells.length % 7 !== 0) cells.push({ day: null, isToday: false, events: [] });
+  while (cells.length % 7 !== 0) cells.push({ day: null, rangeStartMs: null, isToday: false, events: [] });
 
   const weeks: CalCell[][] = [];
   for (let i = 0; i < cells.length; i += 7) weeks.push(cells.slice(i, i + 7));
@@ -230,6 +257,12 @@ const selectedDayEvents = computed<CommunityEvent[]>(() => {
   const d = selectedDay.value;
   if (d === null) return [];
   return calGrid.value.flat().find((c) => c.day === d)?.events ?? [];
+});
+
+const selectedDayStartMs = computed(() => {
+  const d = selectedDay.value;
+  if (d === null) return null;
+  return localDayRange(calYear.value, calMonth.value, d).startMs;
 });
 
 // ─── Formatting ───────────────────────────────────────────────────────────────
@@ -245,22 +278,70 @@ const weekdayLabels: Record<Weekday, string> = {
 };
 
 function formatStart(event: CommunityEvent): string {
-  if (typeof event.dtstartMs !== "number") return "TBD";
-  return new Date(event.dtstartMs).toLocaleString(undefined, {
+  if (!event.dtstart) return "TBD";
+  if (event.dtstart.kind === "date") {
+    const start = dateLabel(event.dtstart.date);
+    const end = allDayInclusiveEnd(event);
+    return end && end !== event.dtstart.date ? `${start} - ${dateLabel(end)} · all day` : `${start} · all day`;
+  }
+  const start = new Date(event.dtstart.ms).toLocaleString(undefined, {
     weekday: "short",
     month: "short",
     day: "numeric",
     hour: "numeric",
     minute: "2-digit",
   });
+  if (event.dtend?.kind !== "date-time") return start;
+  return `${start} - ${new Date(event.dtend.ms).toLocaleTimeString(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+  })}`;
 }
 
 function formatTime(event: CommunityEvent): string {
-  if (typeof event.dtstartMs !== "number") return "TBD";
-  return new Date(event.dtstartMs).toLocaleTimeString(undefined, {
+  if (!event.dtstart) return "TBD";
+  if (event.dtstart.kind === "date") return "All day";
+  return new Date(event.dtstart.ms).toLocaleTimeString(undefined, {
     hour: "numeric",
     minute: "2-digit",
   });
+}
+
+function formatVisibleTime(event: CommunityEvent, dayStartMs: number | null): string {
+  if (!event.dtstart) return "TBD";
+  if (event.dtstart.kind === "date") return "All day";
+  if (dayStartMs === null) return formatTime(event);
+  const startDay = localDateStringFromMs(event.dtstart.ms);
+  const visibleDay = localDateStringFromMs(dayStartMs);
+  if (startDay === visibleDay) return formatTime(event);
+  if (event.dtend?.kind === "date-time" && localDateStringFromMs(event.dtend.ms) === visibleDay) {
+    return `continues until ${new Date(event.dtend.ms).toLocaleTimeString(undefined, {
+      hour: "numeric",
+      minute: "2-digit",
+    })}`;
+  }
+  return "continues";
+}
+
+function dateLabel(date: string): string {
+  return new Date(`${date}T00:00:00`).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+  });
+}
+
+function allDayInclusiveEnd(event: CommunityEvent): string | null {
+  if (event.dtstart?.kind !== "date") return null;
+  if (event.dtend?.kind !== "date") return event.dtstart.date;
+  return addDaysToDateString(event.dtend.date, -1);
+}
+
+function monthPillLabel(event: CommunityEvent, dayStartMs: number | null): string {
+  if (dayStartMs === null || event.dtstart?.kind !== "date-time") return event.summary;
+  const startDay = localDateStringFromMs(event.dtstart.ms);
+  const cellDay = localDateStringFromMs(dayStartMs);
+  if (startDay !== cellDay) return `continues ${event.summary}`;
+  return `${formatTime(event)} ${event.summary}`;
 }
 
 function summarizeRrule(rule: Rrule): string {
@@ -299,10 +380,51 @@ const description = ref("");
 const location = ref("");
 const dtstart = ref("");
 const dtend = ref("");
+const allDay = ref(false);
+const allDayStart = ref("");
+const allDayEnd = ref("");
+const durationChoice = ref("30");
 const rrule = ref<Rrule | null>(null);
+const composerTouched = ref(false);
+const composerSubmitted = ref(false);
+
+const DURATION_OPTIONS = [
+  { value: "30", label: "30 minutes" },
+  { value: "60", label: "1 hour" },
+  { value: "90", label: "90 minutes" },
+  { value: "120", label: "2 hours" },
+  { value: "180", label: "3 hours" },
+  { value: "custom", label: "Custom" },
+] as const;
+
+const composerError = computed(() => {
+  if (summary.value.trim().length === 0) return "Add an event title.";
+  if (allDay.value) {
+    if (!allDayStart.value) return "Choose a start date.";
+    const visibleEnd = allDayEnd.value || allDayStart.value;
+    const endExclusive = addDaysToDateString(visibleEnd, 1);
+    if (calendarDateStartMs(dateValue(endExclusive)) <= calendarDateStartMs(dateValue(allDayStart.value))) {
+      return "End date must be after the start date.";
+    }
+    if (typeof rrule.value?.untilMs === "number") {
+      return "All-day repeats need a count instead of an until date.";
+    }
+    return null;
+  }
+  if (!dtstart.value) return "Choose a start time.";
+  const startMs = Date.parse(dtstart.value);
+  const endMs = timedEndMs();
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return "Choose a valid time.";
+  if (endMs <= startMs) return "End time must be after the start time.";
+  return null;
+});
 
 const canSubmit = computed(
-  () => props.canPost && !props.isPosting && summary.value.trim().length > 0,
+  () => props.canPost && !props.isPosting && composerError.value === null,
+);
+
+const visibleComposerError = computed(() =>
+  composerTouched.value || composerSubmitted.value ? composerError.value : null,
 );
 
 const calendarFeedCopy = useCalendarFeedCopy({
@@ -325,6 +447,34 @@ function toDatetimeLocal(ms: number | undefined): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+function openComposer() {
+  resetComposerFields();
+  composerOpen.value = true;
+}
+
+function markComposerTouched() {
+  composerTouched.value = true;
+}
+
+function timedEndMs(): number {
+  const startMs = Date.parse(dtstart.value);
+  if (durationChoice.value === "custom") return Date.parse(dtend.value);
+  const durationMinutes = Number(durationChoice.value);
+  return Number.isFinite(startMs) && Number.isFinite(durationMinutes)
+    ? startMs + durationMinutes * 60_000
+    : Number.NaN;
+}
+
+function selectDurationForBounds(start: CalendarDateValue | undefined, end: CalendarDateValue | undefined) {
+  if (start?.kind !== "date-time" || end?.kind !== "date-time") {
+    durationChoice.value = "30";
+    return;
+  }
+  const minutes = Math.round((end.ms - start.ms) / 60_000);
+  const match = DURATION_OPTIONS.find((option) => option.value === String(minutes));
+  durationChoice.value = match ? match.value : "custom";
+}
+
 /**
  * Edits always target the unexpanded master so the RRULE / EXDATEs
  * are preserved and the resulting publish lands at the real pubsub
@@ -337,9 +487,26 @@ function startEdit(event: CommunityEvent) {
   summary.value = master.summary;
   description.value = master.description ?? "";
   location.value = master.location ?? "";
-  dtstart.value = toDatetimeLocal(master.dtstartMs);
-  dtend.value = toDatetimeLocal(master.dtendMs);
+  if (master.dtstart?.kind === "date") {
+    allDay.value = true;
+    allDayStart.value = master.dtstart.date;
+    allDayEnd.value = allDayInclusiveEnd(master) ?? master.dtstart.date;
+    dtstart.value = "";
+    dtend.value = "";
+  } else {
+    allDay.value = false;
+    dtstart.value = toDatetimeLocal(master.dtstart?.kind === "date-time" ? master.dtstart.ms : undefined);
+    dtend.value = toDatetimeLocal(master.dtend?.kind === "date-time" ? master.dtend.ms : undefined);
+    selectDurationForBounds(master.dtstart, master.dtend);
+    const allDayDefault = master.dtstart?.kind === "date-time"
+      ? localDateStringFromMs(master.dtstart.ms)
+      : todayDateString();
+    allDayStart.value = allDayDefault;
+    allDayEnd.value = allDayDefault;
+  }
   rrule.value = master.rrule ?? null;
+  composerTouched.value = false;
+  composerSubmitted.value = false;
   composerOpen.value = true;
 }
 
@@ -364,8 +531,8 @@ function onCancelEvent(event: CommunityEvent) {
 
 function confirmCancelInstance() {
   const event = cancelTarget.value;
-  if (!event || typeof event.dtstartMs !== "number") return;
-  emit("cancelInstance", event.uid, event.dtstartMs);
+  if (!event || !event.dtstart) return;
+  emit("cancelInstance", event.uid, event.dtstart);
   cancelTarget.value = null;
 }
 
@@ -382,8 +549,11 @@ function dismissCancelSheet() {
 }
 
 function submit() {
+  composerSubmitted.value = true;
   const summaryValue = summary.value.trim();
-  if (!summaryValue) return;
+  if (!summaryValue || composerError.value) return;
+  const dateFields = buildDateInput();
+  if (!dateFields) return;
   const input: CommunityEventInput = {
     summary: summaryValue,
     ...(description.value.trim() ? { description: description.value.trim() } : {}),
@@ -391,8 +561,7 @@ function submit() {
     ...(props.selfJid
       ? { organizer: `xmpp:${props.selfJid.split("/")[0] ?? props.selfJid}` }
       : {}),
-    ...(dtstart.value ? { dtstartMs: Date.parse(dtstart.value) } : {}),
-    ...(dtend.value ? { dtendMs: Date.parse(dtend.value) } : {}),
+    ...dateFields,
     ...(rrule.value ? { rrule: rrule.value } : {}),
   };
   if (editingId.value) {
@@ -406,12 +575,50 @@ function submit() {
 function resetComposer() {
   composerOpen.value = false;
   editingId.value = null;
+  resetComposerFields();
+}
+
+function resetComposerFields() {
   summary.value = "";
   description.value = "";
   location.value = "";
   dtstart.value = "";
   dtend.value = "";
+  allDay.value = false;
+  setDefaultAllDayDates();
+  durationChoice.value = "30";
   rrule.value = null;
+  composerTouched.value = false;
+  composerSubmitted.value = false;
+}
+
+function setDefaultAllDayDates() {
+  const today = todayDateString();
+  allDayStart.value = today;
+  allDayEnd.value = today;
+}
+
+function todayDateString(): string {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+}
+
+function buildDateInput(): Pick<CommunityEventInput, "dtstart" | "dtend"> | null {
+  if (allDay.value) {
+    if (!allDayStart.value) return null;
+    const visibleEnd = allDayEnd.value || allDayStart.value;
+    return {
+      dtstart: dateValue(allDayStart.value),
+      dtend: dateValue(addDaysToDateString(visibleEnd, 1)),
+    };
+  }
+  const startMs = Date.parse(dtstart.value);
+  const endMs = timedEndMs();
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return null;
+  return {
+    dtstart: dateTimeValue(startMs),
+    dtend: dateTimeValue(endMs),
+  };
 }
 
 const copyCalendarFeedUrl = calendarFeedCopy.copy;
@@ -499,7 +706,7 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
           v-if="canPost"
           type="button"
           class="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground shadow-sm hover:bg-primary/90"
-          @click="composerOpen ? resetComposer() : (composerOpen = true)"
+          @click="composerOpen ? resetComposer() : openComposer()"
         >
           <Plus class="h-3.5 w-3.5" aria-hidden="true" />
           {{ composerOpen ? (editingId ? "Cancel edit" : "Close") : "New event" }}
@@ -530,6 +737,7 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
       <form
         v-if="composerOpen"
         class="grid gap-2 rounded-lg border border-border bg-card p-3"
+        @input="markComposerTouched"
         @submit.prevent="submit"
       >
         <input
@@ -540,7 +748,33 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
           required
           aria-label="Event title"
         />
-        <div class="grid gap-2 md:grid-cols-2">
+        <label class="inline-flex w-fit items-center gap-2 rounded-md border border-input bg-background px-3 py-2 text-xs text-foreground">
+          <input
+            v-model="allDay"
+            type="checkbox"
+            class="h-4 w-4 rounded border-input"
+          />
+          All day
+        </label>
+        <div v-if="allDay" class="grid gap-2 md:grid-cols-2">
+          <label class="grid gap-1 text-xs">
+            <span class="text-muted-foreground">Start date</span>
+            <input
+              v-model="allDayStart"
+              type="date"
+              class="rounded-md border border-input bg-background px-2 py-1.5 text-sm"
+            />
+          </label>
+          <label class="grid gap-1 text-xs">
+            <span class="text-muted-foreground">End date</span>
+            <input
+              v-model="allDayEnd"
+              type="date"
+              class="rounded-md border border-input bg-background px-2 py-1.5 text-sm"
+            />
+          </label>
+        </div>
+        <div v-else class="grid gap-2 md:grid-cols-2">
           <label class="grid gap-1 text-xs">
             <span class="text-muted-foreground">Starts</span>
             <input
@@ -550,6 +784,21 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
             />
           </label>
           <label class="grid gap-1 text-xs">
+            <span class="text-muted-foreground">Duration</span>
+            <select
+              v-model="durationChoice"
+              class="rounded-md border border-input bg-background px-2 py-1.5 text-sm"
+            >
+              <option
+                v-for="option in DURATION_OPTIONS"
+                :key="option.value"
+                :value="option.value"
+              >
+                {{ option.label }}
+              </option>
+            </select>
+          </label>
+          <label v-if="durationChoice === 'custom'" class="grid gap-1 text-xs md:col-span-2">
             <span class="text-muted-foreground">Ends</span>
             <input
               v-model="dtend"
@@ -572,6 +821,14 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
           aria-label="Event description"
         />
         <RecurrencePicker v-model="rrule" />
+        <p
+          v-if="visibleComposerError"
+          class="inline-flex items-center gap-1 text-xs text-destructive"
+          role="alert"
+        >
+          <Clock3 class="h-3.5 w-3.5" aria-hidden="true" />
+          {{ visibleComposerError }}
+        </p>
         <div class="flex items-center justify-end gap-2">
           <button
             type="button"
@@ -596,13 +853,13 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
       <template v-if="viewMode === 'week'">
         <div v-if="weekEventsByDay.size > 0" class="grid gap-4">
           <section
-            v-for="[dayLabel, dayEvents] in weekEventsByDay"
+            v-for="[dayLabel, day] in weekEventsByDay"
             :key="dayLabel"
             class="grid gap-2"
           >
             <h2 class="type-section-label text-muted-foreground">{{ dayLabel }}</h2>
             <article
-              v-for="event in dayEvents"
+              v-for="event in day.events"
               :key="event.id"
               class="grid gap-1.5 rounded-lg border border-border bg-card px-4 py-3"
             >
@@ -610,7 +867,7 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
                 <h3 class="type-control font-semibold text-foreground">{{ event.summary }}</h3>
                 <div class="flex shrink-0 items-center gap-1">
                   <span class="type-caption text-muted-foreground">
-                    {{ formatTime(event) }}
+                    {{ formatVisibleTime(event, day.startMs) }}
                   </span>
                   <template v-if="isOrganiser(event)">
                     <button
@@ -778,7 +1035,7 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
                       ? 'bg-primary/20 text-primary'
                       : 'bg-muted/60 text-muted-foreground'"
                   >
-                    {{ ev.summary }}
+                    {{ monthPillLabel(ev, cell.rangeStartMs) }}
                   </div>
                   <div
                     v-if="cell.events.length > 3"
@@ -805,7 +1062,7 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
             <header class="flex items-baseline justify-between gap-3">
               <h3 class="type-control font-semibold text-foreground">{{ event.summary }}</h3>
               <div class="flex shrink-0 items-center gap-1">
-                <span class="type-caption text-muted-foreground">{{ formatStart(event) }}</span>
+                <span class="type-caption text-muted-foreground">{{ formatVisibleTime(event, selectedDayStartMs) }}</span>
                 <template v-if="isOrganiser(event)">
                   <button
                     type="button"
@@ -906,7 +1163,7 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
           >
             <span>Just this occurrence</span>
             <span class="type-caption text-muted-foreground">
-              {{ cancelTarget.dtstartMs ? new Date(cancelTarget.dtstartMs).toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '' }}
+              {{ formatStart(cancelTarget) }}
             </span>
           </button>
           <button
