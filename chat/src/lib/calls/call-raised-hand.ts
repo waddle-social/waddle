@@ -29,7 +29,7 @@ export const $mucRaisedHands = map<Record<string, string[]>>({});
  */
 export const $selfRaisedHand = map<Record<string, boolean>>({});
 
-export type RaisedHandAction =
+type RaisedHandAction =
   | { kind: "set"; roomJid: string; identityKey: string; raised: boolean }
   | { kind: "clear-room"; roomJid: string }
   | { kind: "clear-all" };
@@ -81,7 +81,7 @@ function cloneRecord(
 }
 
 /** Minimal inbound presence shape this module reads. */
-export type RaisedHandPresence = {
+type RaisedHandPresence = {
   from?: string;
   presence_type?: string;
   muc_jid?: string | null;
@@ -141,19 +141,6 @@ export function setSelfRaisedHand(roomJid: string, raised: boolean): void {
   if (!room) return;
   if (raised) $selfRaisedHand.setKey(room, true);
   else {
-    const next = { ...$selfRaisedHand.get() };
-    delete next[room];
-    $selfRaisedHand.set(next);
-  }
-}
-
-/** Drop all raised-hand state for a room (e.g. when the local call ends). */
-export function clearRaisedHandsForRoom(roomJid: string): void {
-  $mucRaisedHands.set(
-    reduceRaisedHands($mucRaisedHands.get(), { kind: "clear-room", roomJid }),
-  );
-  const room = normalizeMucCallRoomJid(roomJid);
-  if (room && room in $selfRaisedHand.get()) {
     const next = { ...$selfRaisedHand.get() };
     delete next[room];
     $selfRaisedHand.set(next);

@@ -17,6 +17,8 @@ export type CallRosterRow = {
   micOn: boolean;
   cameraOn: boolean;
   speaking: boolean;
+  /** True when this attendee advertises a raised hand (#1029). */
+  raisedHand: boolean;
   volumeRows: CallVolumeMixerRow[];
 };
 
@@ -28,6 +30,13 @@ export type BuildCallRosterInput = {
   localCameraEnabled: boolean;
   activeSpeakerIdentities: ReadonlySet<string>;
   volumeRows: readonly CallVolumeMixerRow[];
+  /**
+   * Identity keys (`fullJidIdentityKey`) of remote attendees with a
+   * raised hand (#1029). Defaults to empty.
+   */
+  raisedHandKeys?: ReadonlySet<string>;
+  /** Whether this client currently advertises a raised hand. */
+  selfRaisedHand?: boolean;
 };
 
 type MediaState = { micOn: boolean; cameraOn: boolean };
@@ -65,6 +74,8 @@ export function buildCallRoster(input: BuildCallRosterInput): CallRosterRow[] {
   // this same key so a remote can never collide with the self row.
   const selfRowKey = selfKey || "self";
 
+  const raisedHandKeys = input.raisedHandKeys ?? new Set<string>();
+
   const rows: CallRosterRow[] = [];
   rows.push({
     key: selfRowKey,
@@ -74,6 +85,7 @@ export function buildCallRoster(input: BuildCallRosterInput): CallRosterRow[] {
     micOn: input.localMicEnabled,
     cameraOn: input.localCameraEnabled,
     speaking: speakingKeys.has(selfKey),
+    raisedHand: input.selfRaisedHand === true || raisedHandKeys.has(selfKey),
     volumeRows: [],
   });
 
@@ -98,6 +110,7 @@ export function buildCallRoster(input: BuildCallRosterInput): CallRosterRow[] {
       micOn: media.micOn,
       cameraOn: media.cameraOn,
       speaking: speakingKeys.has(key),
+      raisedHand: raisedHandKeys.has(key),
       volumeRows: volumeRowsByKey.get(key) ?? [],
     });
   }

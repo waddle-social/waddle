@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { MicOff, ScreenShare } from "lucide-vue-next";
+import { Hand, MicOff, ScreenShare } from "lucide-vue-next";
 import { consistentColor } from "@/lib/chat-ui";
 import type { TileAttachable } from "@/lib/calls/tile-attach";
 
@@ -46,9 +46,13 @@ const props = withDefaults(defineProps<{
   /** Whether this participant is the (held) active speaker. Drives the
    *  highlight border in Gallery view. */
   speaking?: boolean;
+  /** Whether this participant advertises a raised hand (#1029). Drives
+   *  the nameplate hand badge. */
+  raisedHand?: boolean;
 }>(), {
   interactive: true,
   speaking: false,
+  raisedHand: false,
 });
 
 const initials = computed<string>(() => {
@@ -136,6 +140,13 @@ const emit = defineEmits<{
           aria-hidden="true"
         />
         {{ label }}
+      </span>
+      <span
+        v-if="raisedHand"
+        class="call-tile__raised-hand"
+        aria-label="Hand raised"
+      >
+        <Hand class="w-3.5 h-3.5" />
       </span>
       <span
         v-if="isSelf && !micEnabled"
@@ -333,6 +344,18 @@ const emit = defineEmits<{
   border-radius: 9999px;
   background: var(--destructive);
   color: var(--destructive-foreground);
+  flex-shrink: 0;
+}
+
+.call-tile__raised-hand {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  border-radius: 9999px;
+  background: oklch(0.78 0.16 85);
+  color: oklch(0.2 0.05 85);
   flex-shrink: 0;
 }
 </style>

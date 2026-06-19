@@ -8,6 +8,7 @@ import { partitionStageTiles } from "@/lib/calls/stage-overflow";
 import type { CallTileModel } from "@/lib/calls/call-tiles";
 import { projectCallTiles, reconcileCallTileProjectionState } from "@/lib/calls/call-tile-projection";
 import { highlightedTileKeys } from "@/lib/calls/active-speakers";
+import { fullJidIdentityKey } from "@/lib/xmpp/jid";
 import {
   $callPinnedTileKey,
   $callSelfViewHidden,
@@ -61,6 +62,9 @@ const props = defineProps<{
   activeSpeakerIdentities?: ReadonlySet<string>;
   /** Participant the Speaker layout auto-promotes to the large tile. */
   promotedSpeakerIdentity?: string | null;
+  /** Identity keys (`fullJidIdentityKey`) of participants with a raised
+   *  hand (#1029); their camera tile shows the raised-hand badge. */
+  raisedHandKeys?: ReadonlySet<string>;
 }>();
 
 const emit = defineEmits<{
@@ -187,6 +191,21 @@ const speakingTileKeys = computed<ReadonlySet<string>>(() =>
   highlightedTileKeys(tiles.value, props.activeSpeakerIdentities ?? EMPTY_ACTIVE_SPEAKERS),
 );
 
+// Tile keys that carry the raised-hand badge (#1029). The raised-hand
+// store is keyed by `fullJidIdentityKey`, so normalize each tile's raw
+// LiveKit identity before matching. Like the speaker highlight, the badge
+// rides the person's camera tile, not their screen-share tile.
+const raisedHandTileKeys = computed<ReadonlySet<string>>(() => {
+  const raised = props.raisedHandKeys ?? EMPTY_ACTIVE_SPEAKERS;
+  if (raised.size === 0) return EMPTY_ACTIVE_SPEAKERS;
+  const keys = new Set<string>();
+  for (const tile of tiles.value) {
+    if (tile.source !== "camera") continue;
+    if (raised.has(fullJidIdentityKey(tile.identity))) keys.add(tile.key);
+  }
+  return keys;
+});
+
 // When the tile count exceeds the layout's capacity, the last cell becomes a
 // "+N more" Overflow tile instead of silently dropping people. `+N` counts the
 // participants who have no tile on the Stage; audio for them stays subscribed
@@ -223,6 +242,7 @@ const gridStyle = computed(() => ({
           :shows-presenting-glyph="focusedTile.showsPresentingGlyph"
           :mic-enabled="focusedTile.micEnabledHint"
           :video-track="focusedTile.videoTrack"
+          :raised-hand="raisedHandTileKeys.has(focusedTile.key)"
           :attach="attach"
           class="call-tile--focused"
           @activate="toggleFocus(focusedTile)"
@@ -239,6 +259,7 @@ const gridStyle = computed(() => ({
           :shows-presenting-glyph="tile.showsPresentingGlyph"
           :mic-enabled="tile.micEnabledHint"
           :video-track="tile.videoTrack"
+          :raised-hand="raisedHandTileKeys.has(tile.key)"
           :attach="attach"
           class="call-tile--thumb"
           @activate="toggleFocus(tile)"
@@ -267,6 +288,7 @@ const gridStyle = computed(() => ({
         :mic-enabled="tile.micEnabledHint"
         :video-track="tile.videoTrack"
         :speaking="speakingTileKeys.has(tile.key)"
+        :raised-hand="raisedHandTileKeys.has(tile.key)"
         :attach="attach"
         @activate="toggleFocus(tile)"
       />

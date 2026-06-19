@@ -245,6 +245,13 @@ export interface WasmPresence {
   muc_status_codes?: number[];
   vcard_avatar?: string;
   muji?: WasmMujiPresence;
+  /**
+   * Waddle raised-hand call presence state (#1029). `true` when the
+   * occupant's presence carries
+   * `<in-call xmlns='urn:waddle:in-call:0'><hand-raised/></in-call>`
+   * alongside `<muji/>`. Absent/false means the hand is lowered.
+   */
+  hand_raised?: boolean;
 }
 
 /**

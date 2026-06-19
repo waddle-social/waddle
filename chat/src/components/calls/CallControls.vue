@@ -5,6 +5,7 @@ import {
   LayoutGrid,
   Maximize2,
   MessageSquare,
+  Hand,
   Mic,
   MicOff,
   Minimize2,
@@ -63,6 +64,10 @@ const props = defineProps<{
   pictureInPictureSupported?: boolean;
   /** True while the call is detached into Picture-in-Picture. */
   pictureInPictureActive?: boolean;
+  /** True when raise-hand is offered — group (MUC) calls only (#1029). */
+  raisedHandAvailable?: boolean;
+  /** True while this client currently has its hand raised. */
+  raisedHandActive?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -75,6 +80,7 @@ const emit = defineEmits<{
   toggleParticipants: [];
   toggleChat: [];
   sendReaction: [emoji: string];
+  toggleRaisedHand: [];
   openSettings: [];
   setViewMode: [mode: CallViewMode];
   toggleSelfView: [];
@@ -441,6 +447,18 @@ onBeforeUnmount(() => {
         </button>
       </div>
     </div>
+    <button
+      v-if="raisedHandAvailable"
+      type="button"
+      class="chat-icon-button chat-icon-button--md hover:bg-muted"
+      :class="{ 'bg-muted text-foreground': raisedHandActive }"
+      :title="raisedHandActive ? 'Lower hand' : 'Raise hand'"
+      :aria-label="raisedHandActive ? 'Lower hand' : 'Raise hand'"
+      :aria-pressed="raisedHandActive ? 'true' : 'false'"
+      @click="emit('toggleRaisedHand')"
+    >
+      <Hand class="w-4 h-4" />
+    </button>
     <button
       type="button"
       class="call-controls__participants chat-icon-button chat-icon-button--md hover:bg-muted"

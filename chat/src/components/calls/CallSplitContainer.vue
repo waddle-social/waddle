@@ -4,6 +4,7 @@ import { useStore } from "@nanostores/vue";
 import {
   $callState,
   $lastCallError,
+  reportCallError,
 } from "@/lib/calls/call-store";
 import { $callUiMode } from "@/lib/calls/ui-mode";
 import {
@@ -42,7 +43,13 @@ import {
   hashInCallReactionId,
   receiveInCallReaction,
 } from "@/lib/calls/in-call-reactions";
-import { barePeerJid } from "@/lib/xmpp/jid";
+import { barePeerJid, fullJidIdentityKey } from "@/lib/xmpp/jid";
+import {
+  $mucRaisedHands,
+  $selfRaisedHand,
+  raisedHandKeysForRoom,
+  selfRaisedHandFor,
+} from "@/lib/calls/call-raised-hand";
 import { expectedRemoteIdentitiesForCallState } from "@/lib/calls/call-tiles";
 import {
   projectCallTiles,
@@ -232,6 +239,21 @@ const callLabel = computed(() => {
 });
 
 const localIdentity = computed(() => engine.localIdentity);
+
+// #1029: raised-hand identity keys for the split-view tiles, self folded
+// in optimistically (mirrors CallExpandedSurface).
+const raisedHands = useStore($mucRaisedHands);
+const selfRaisedHandStore = useStore($selfRaisedHand);
+const raisedHandIdentityKeys = computed(() => {
+  const keys = new Set(
+    raisedHandKeysForRoom(normalizedRoomJid.value, raisedHands.value),
+  );
+  const selfKey = fullJidIdentityKey(localIdentity.value);
+  if (selfRaisedHandFor(normalizedRoomJid.value, selfRaisedHandStore.value) && selfKey) {
+    keys.add(selfKey);
+  }
+  return keys;
+});
 const selfSharePresentation = computed(() =>
   localScreenSharePresentation({
     screenShareEnabled: screenShareEnabled.value,
@@ -369,6 +391,22 @@ async function onSendInCallReaction(emoji: string): Promise<void> {
   }
 }
 
+// #1029: raise-hand toggle for the split-view control bar (MUC calls only).
+const isMucCall = computed(
+  () => state.value.phase === "active" && state.value.kind === "muc",
+);
+const selfHandRaised = computed(() =>
+  selfRaisedHandFor(normalizedRoomJid.value, selfRaisedHandStore.value),
+);
+async function onToggleRaisedHand(): Promise<void> {
+  if (!props.xmppClient) return;
+  try {
+    await props.xmppClient.setCallHandRaised(!selfHandRaised.value);
+  } catch (err) {
+    reportCallError(err);
+  }
+}
+
 function parkPictureInPicturePanel(): void {
   const panel = pictureInPicturePanelRef.value;
   const parking = pictureInPictureParkingRef.value;
@@ -494,6 +532,7 @@ async function togglePictureInPicture(): Promise<void> {
           :mic-enabled="micEnabled"
           :active-speaker-identities="activeSpeakerIdentities"
           :promoted-speaker-identity="promotedSpeakerIdentity"
+          :raised-hand-keys="raisedHandIdentityKeys"
           @open-participants="enterExpandedWithDock"
         />
         <div class="call-split__reactions" aria-live="polite" aria-atomic="false">
@@ -522,6 +561,8 @@ async function togglePictureInPicture(): Promise<void> {
           :self-view-hidden="selfViewHidden"
           :picture-in-picture-supported="pictureInPictureSupported"
           :picture-in-picture-active="pictureInPictureActive"
+          :raised-hand-available="isMucCall"
+          :raised-hand-active="selfHandRaised"
           @toggle-mic="toggleMic"
           @toggle-cam="toggleCam"
           @toggle-screen-share="toggleScreenShare"
@@ -532,6 +573,7 @@ async function togglePictureInPicture(): Promise<void> {
           @set-view-mode="setCallViewMode"
           @toggle-self-view="toggleCallSelfViewHidden"
           @send-reaction="onSendInCallReaction"
+          @toggle-raised-hand="onToggleRaisedHand"
           @toggle-picture-in-picture="togglePictureInPicture"
           @hangup="onHangup"
         />
