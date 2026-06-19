@@ -14,9 +14,13 @@ import { cpSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
 const require = createRequire(import.meta.url);
-// Resolve via the package's manifest so this works regardless of how the
-// transitive dependency is hoisted in the bun store.
-const visionPkg = require.resolve("@mediapipe/tasks-vision/package.json");
+// Resolve tasks-vision EXACTLY as @livekit/track-processors does, so the hosted
+// WASM fileset always matches the MediaPipe JS the runtime actually loads. The
+// library pins an exact tasks-vision version; copying a different version's
+// fileset (e.g. a newer one hoisted to the top level) fails inside segmenter
+// setup. Resolving from the library's scope follows nested-vs-hoisted correctly.
+const libRequire = createRequire(require.resolve("@livekit/track-processors/package.json"));
+const visionPkg = libRequire.resolve("@mediapipe/tasks-vision/package.json");
 const wasmSrc = resolve(dirname(visionPkg), "wasm");
 const destDir = resolve(import.meta.dirname, "../public/mediapipe/tasks-vision");
 

@@ -809,7 +809,14 @@ export class CallEngine {
       },
       switch: async (effect) => {
         const processor = track.getProcessor() as unknown as VideoBackgroundProcessor | undefined;
-        if (processor) await this.backgroundOps.switch(processor, effect);
+        // The reconciler only decides `switch` when a processor was verifiably
+        // present (its name was just read), so this is effectively always set.
+        // Guard defensively against SDK non-determinism: if the processor
+        // vanished we must NOT claim the new effect applied — leave
+        // `appliedBackgroundEffect` reflecting the processor's actual (unchanged)
+        // effect, so the next reconcile retries the switch honestly.
+        if (!processor) return;
+        await this.backgroundOps.switch(processor, effect);
         this.appliedBackgroundEffect = effect;
       },
       clear: async () => {

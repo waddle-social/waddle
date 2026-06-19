@@ -10,7 +10,7 @@
 import { BACKGROUND_IMAGE_IDS, type BackgroundImageId } from "./effect-id";
 
 /** One catalog image: its id, a human label for the picker, and its asset URL. */
-export type BackgroundCatalogEntry = {
+type BackgroundCatalogEntry = {
   id: BackgroundImageId;
   label: string;
   assetPath: string;
