@@ -84,6 +84,7 @@ const {
   socialFeed,
   stories,
   communityEvents,
+  communityJid,
   xmppClient,
   notifySettings,
   activeMessages,
@@ -780,6 +781,9 @@ onUnmounted(() => {
         :error="communityEvents.error.value"
         :can-post="!!connectionStore.session"
         :self-jid="connectionStore.session?.jid ?? null"
+        :community-jid="communityJid.value"
+        :server-base-url="connectionStore.activeServerUrl"
+        :session-id="connectionStore.session?.session_id ?? null"
         :find-master="communityEvents.findMaster"
         @refresh="communityEvents.refresh()"
         @post="(input) => communityEvents.post(input)"

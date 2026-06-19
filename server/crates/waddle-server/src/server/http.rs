@@ -230,6 +230,12 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
         routes::extension_webhooks::router(Arc::clone(&websocket_state));
     let livekit_webhook_router = routes::livekit_webhook::router(Arc::clone(&websocket_state));
     let websocket_router = routes::websocket::router(websocket_state.clone());
+    let calendar_feed_router =
+        routes::calendar_feed::router(Arc::new(routes::calendar_feed::CalendarFeedState::new(
+            Arc::clone(&auth_state),
+            Arc::clone(&websocket_state.deps.protocol.pubsub_storage),
+            server_config.session_key.as_bytes(),
+        )));
 
     // Upload router for XEP-0363 HTTP File Upload
     let upload_state = Arc::new(UploadState::new(state.clone()));
@@ -268,7 +274,8 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
         .merge(xmpp_oauth_router)
         .merge(auth_page_router)
         .merge(extension_webhooks_router)
-        .merge(livekit_webhook_router);
+        .merge(livekit_webhook_router)
+        .merge(calendar_feed_router);
 
     // Test-only profile-publish route. Only mounted when:
     // 1. The fixed-account flag is on (the test harness opt-in).

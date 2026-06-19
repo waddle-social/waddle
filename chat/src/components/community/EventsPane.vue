@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, onUnmounted, ref, watch } from "vue";
 import {
   CalendarDays,
   ChevronLeft,
   ChevronRight,
+  Copy,
   List,
   Menu,
   Pencil,
@@ -22,6 +23,13 @@ import type {
   Rrule,
   Weekday,
 } from "@/lib/xmpp-client";
+import {
+  copyCalendarFeedUrlToClipboard,
+  isSameCalendarFeedRequestInput,
+  nextCalendarFeedCopyViewState,
+  type CalendarFeedCopyResult,
+  type CalendarFeedRequestInput,
+} from "@/lib/calendar-feed-url";
 
 interface EventsPaneProps {
   events: readonly CommunityEvent[];
@@ -30,6 +38,9 @@ interface EventsPaneProps {
   error: string | null;
   canPost: boolean;
   selfJid: string | null;
+  communityJid: string | null;
+  serverBaseUrl: string;
+  sessionId: string | null;
   /**
    * Resolver from a UID back to the unexpanded master event so the
    * pane can edit / cancel the actual pubsub item rather than the
@@ -299,6 +310,37 @@ const canSubmit = computed(
   () => props.canPost && !props.isPosting && summary.value.trim().length > 0,
 );
 
+type FeedCopyState = "idle" | "loading" | "copied" | "error";
+
+const feedCopyState = ref<FeedCopyState>("idle");
+const feedCopyFallbackUrl = ref<string | null>(null);
+let feedCopyResetTimer: ReturnType<typeof setTimeout> | null = null;
+let feedCopyAttempt = 0;
+
+const canCopyFeedUrl = computed(
+  () => !!props.communityJid && props.serverBaseUrl.trim().length > 0,
+);
+
+const feedCopyStatusLabel = computed(() => {
+  if (feedCopyState.value === "loading") return "Copying";
+  if (feedCopyState.value === "copied") return "Copied";
+  if (feedCopyState.value === "error") return "Couldn't copy";
+  return "";
+});
+
+onUnmounted(() => {
+  feedCopyAttempt += 1;
+  if (feedCopyResetTimer) clearTimeout(feedCopyResetTimer);
+});
+
+watch(
+  () => [props.communityJid, props.serverBaseUrl, props.sessionId] as const,
+  () => {
+    feedCopyAttempt += 1;
+    applyFeedCopyTransition({ contextChanged: true });
+  },
+);
+
 /** Format an epoch-ms timestamp for the `<input type="datetime-local">` widget. */
 function toDatetimeLocal(ms: number | undefined): string {
   if (typeof ms !== "number") return "";
@@ -396,6 +438,61 @@ function resetComposer() {
   rrule.value = null;
 }
 
+function scheduleFeedCopyReset(state: FeedCopyState) {
+  if (feedCopyResetTimer) clearTimeout(feedCopyResetTimer);
+  if (state === "copied" || state === "error") {
+    feedCopyResetTimer = setTimeout(() => {
+      feedCopyState.value = "idle";
+      feedCopyResetTimer = null;
+    }, 2_000);
+  }
+}
+
+function applyFeedCopyTransition(input: {
+  contextChanged?: boolean;
+  startAttempt?: boolean;
+  result?: CalendarFeedCopyResult;
+}) {
+  const next = nextCalendarFeedCopyViewState({
+    state: feedCopyState.value,
+    fallbackUrl: feedCopyFallbackUrl.value,
+    ...input,
+  });
+  feedCopyState.value = next.state;
+  feedCopyFallbackUrl.value = next.fallbackUrl;
+  scheduleFeedCopyReset(next.state);
+}
+
+function currentFeedRequestInput(): CalendarFeedRequestInput {
+  return {
+    communityJid: props.communityJid,
+    serverBaseUrl: props.serverBaseUrl,
+    sessionId: props.sessionId,
+  };
+}
+
+async function copyCalendarFeedUrl() {
+  if (!canCopyFeedUrl.value || feedCopyState.value === "loading") return;
+  const attempt = feedCopyAttempt + 1;
+  feedCopyAttempt = attempt;
+  const requestInput = currentFeedRequestInput();
+  applyFeedCopyTransition({ startAttempt: true });
+  const result = await copyCalendarFeedUrlToClipboard(requestInput);
+  if (
+    attempt !== feedCopyAttempt
+    || !isSameCalendarFeedRequestInput(requestInput, currentFeedRequestInput())
+  ) {
+    return;
+  }
+  applyFeedCopyTransition({ result });
+}
+
+function selectFallbackUrl(event: FocusEvent) {
+  if (event.target instanceof HTMLInputElement) {
+    event.target.select();
+  }
+}
+
 const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 </script>
 
@@ -456,6 +553,24 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
           {{ activeFilter === 'attending' ? 'Going / Maybe' : 'All events' }}
         </button>
 
+        <!-- Calendar feed -->
+        <button
+          type="button"
+          class="inline-flex min-h-9 min-w-[7.5rem] items-center justify-center gap-1 rounded-md border border-transparent px-3 py-2 text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-muted-foreground sm:min-h-8 sm:px-2 sm:py-1"
+          :disabled="!canCopyFeedUrl || feedCopyState === 'loading'"
+          @click="copyCalendarFeedUrl"
+        >
+          <Copy class="h-3.5 w-3.5" aria-hidden="true" />
+          Copy feed URL
+        </button>
+        <span
+          class="min-w-[5.5rem] text-xs text-muted-foreground"
+          role="status"
+          aria-live="polite"
+        >
+          {{ feedCopyStatusLabel }}
+        </span>
+
         <!-- New event / Refresh -->
         <button
           v-if="canPost"
@@ -477,6 +592,22 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
           Refresh
         </button>
       </header>
+
+      <div
+        v-if="feedCopyFallbackUrl"
+        class="flex flex-wrap items-center gap-2 rounded-md border border-border bg-muted/30 px-3 py-2"
+      >
+        <span class="text-xs font-medium text-muted-foreground">
+          Calendar subscription URL
+        </span>
+        <input
+          class="min-w-0 flex-1 rounded-md border border-input bg-background px-2 py-1.5 text-xs text-foreground"
+          readonly
+          :value="feedCopyFallbackUrl"
+          aria-label="Calendar feed URL"
+          @focus="selectFallbackUrl"
+        />
+      </div>
 
       <!-- Error -->
       <div

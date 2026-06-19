@@ -59,6 +59,7 @@ pub(crate) fn build_cors(origins: Option<&str>) -> CorsLayer {
                         HeaderName::from_static("traceparent"),
                         HeaderName::from_static("tracestate"),
                         HeaderName::from_static("baggage"),
+                        HeaderName::from_static("x-waddle-session-id"),
                     ])
                     .allow_credentials(true)
             }

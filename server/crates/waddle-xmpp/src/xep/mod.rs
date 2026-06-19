@@ -71,8 +71,8 @@
 //!   pack references, built on XEP-0446/0447 file sharing.
 //! - **XEP-0452**: MUC Mention Notifications - @mention alerts with
 //!   notification elements and per-room unread mention counter.
-//! - **XEP-0471**: Calendar Events - Community events with scheduling,
-//!   RSVP tracking (going/interested/not-going), and PubSub storage.
+//! - **Proto-calendar xCal**: Community events with scheduling, RSVP
+//!   tracking (going/interested/not-going), and PubSub storage.
 //! - **XEP-0470**: Pubsub Attachments - Reactions/comments on PubSub items
 //!   with attachment target and typed payloads.
 //! - **XEP-0472**: Pubsub Social Feed - Social posts and activity feeds
