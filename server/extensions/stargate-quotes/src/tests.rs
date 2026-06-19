@@ -117,9 +117,11 @@ fn room_command_posts_blockquoted_quote_and_returns_completion() {
     let _ = take_sent_room_messages();
     let command = command_invocation(Some("sgc@muc.example.com"));
     let quotes = quote_catalog().expect("quote catalog parses");
-    let expected = select_quote_with_rng(&quotes, || 42).expect("expected quote");
+    let deterministic_random = quotes.len() as u64;
+    let expected = select_quote_with_rng(&quotes, || deterministic_random).expect("expected quote");
 
-    let effects = handle_command_with_rng(command, || 42).expect("command succeeds");
+    let effects =
+        handle_command_with_rng(command, || deterministic_random).expect("command succeeds");
 
     assert_eq!(effects.len(), 1);
     let types::ExtensionEffect::EnrichMessage(envelope) = &effects[0] else {

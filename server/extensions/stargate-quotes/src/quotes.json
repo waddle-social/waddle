@@ -208,5 +208,385 @@
     "role": "Eli",
     "quote": "Were you expecting \"Stairway to Heaven?\"",
     "series": "Stargate Universe"
+  },
+  {
+    "role": "Col. O'Neill",
+    "quote": "Oh, for crying out loud!",
+    "series": "Stargate SG-1"
+  },
+  {
+    "role": "Col. O'Neill",
+    "quote": "You know... I'd like to take this opportunity to say that this is a very poorly designed bomb, and I think we should say something to somebody when we get back.",
+    "series": "Stargate SG-1"
+  },
+  {
+    "role": "Col. O'Neill",
+    "quote": "It's 'O'Neill,' with two L's. There's another Colonel O'Neil with only one L, and he has no sense of humor at all.",
+    "series": "Stargate SG-1"
+  },
+  {
+    "role": "Col. O'Neill",
+    "quote": "In the middle of my backswing?",
+    "series": "Stargate SG-1"
+  },
+  {
+    "role": "Col. O'Neill",
+    "quote": "Permission to barge in, sir!",
+    "series": "Stargate SG-1"
+  },
+  {
+    "role": "Col. O'Neill",
+    "quote": "You ended that sentence with a preposition. Bastard.",
+    "series": "Stargate SG-1"
+  },
+  {
+    "role": "Col. O'Neill",
+    "quote": "It's wild horses, Teal'c. That was a joke. You told a joke.",
+    "series": "Stargate SG-1"
+  },
+  {
+    "role": "Col. O'Neill",
+    "quote": "We came here in peace, we expect to go in one... piece.",
+    "series": "Stargate SG-1"
+  },
+  {
+    "role": "Teal'c",
+    "quote": "Indeed.",
+    "series": "Stargate SG-1"
+  },
+  {
+    "role": "Teal'c",
+    "quote": "I would prefer not to consume bovine lactose at any temperature.",
+    "series": "Stargate SG-1"
+  },
+  {
+    "role": "Teal'c",
+    "quote": "A Serpent guard, a Horus guard and a Setesh guard meet on a neutral planet. It is a tense moment. The Serpent guard's eyes glow. The Horus guard's beak glistens. The Setesh guard's nose drips.",
+    "series": "Stargate SG-1"
+  },
+  {
+    "role": "Teal'c",
+    "quote": "My depth is immaterial to this conversation.",
+    "series": "Stargate SG-1"
+  },
+  {
+    "role": "Teal'c",
+    "quote": "I did not intend for my statement to be humorous.",
+    "series": "Stargate SG-1"
+  },
+  {
+    "role": "Teal'c",
+    "quote": "I am not Lucy.",
+    "series": "Stargate SG-1"
+  },
+  {
+    "role": "Dr. Jackson",
+    "quote": "Jack, don't be an ass.",
+    "series": "Stargate SG-1"
+  },
+  {
+    "role": "Dr. Jackson",
+    "quote": "Just a little less talk; a little more shut the hell up.",
+    "series": "Stargate SG-1"
+  },
+  {
+    "role": "Dr. Jackson",
+    "quote": "Well, they didn't call them the Dark Ages because they were dark.",
+    "series": "Stargate SG-1"
+  },
+  {
+    "role": "Dr. Jackson",
+    "quote": "Could we stop agreeing on how we're gonna die and start doing something about it?",
+    "series": "Stargate SG-1"
+  },
+  {
+    "role": "Lt. Colonel Carter",
+    "quote": "I'm an Air Force officer just like you are, Colonel. And just because my reproductive organs are on the inside instead of the outside doesn't mean I can't handle whatever you can handle.",
+    "series": "Stargate SG-1"
+  },
+  {
+    "role": "Lt. Colonel Carter",
+    "quote": "Holy Hannah!",
+    "series": "Stargate SG-1"
+  },
+  {
+    "role": "Lt. Colonel Carter",
+    "quote": "Wackier than blowing up a sun?",
+    "series": "Stargate SG-1"
+  },
+  {
+    "role": "Vala Mal Doran",
+    "quote": "It's funny, isn't it? Daniel always wanted to get into my pants, and now I'm in his.",
+    "series": "Stargate SG-1"
+  },
+  {
+    "role": "Vala Mal Doran",
+    "quote": "Last time I was this bored I took hostages.",
+    "series": "Stargate SG-1"
+  },
+  {
+    "role": "Vala Mal Doran",
+    "quote": "I know nothing about your fair planet, other than it seems to have a rather interesting if somewhat limited gene pool.",
+    "series": "Stargate SG-1"
+  },
+  {
+    "role": "Cameron Mitchell",
+    "quote": "How good is this? Got the band back together!",
+    "series": "Stargate SG-1"
+  },
+  {
+    "role": "Cameron Mitchell",
+    "quote": "That's what I'm talking about!",
+    "series": "Stargate SG-1"
+  },
+  {
+    "role": "Cameron Mitchell",
+    "quote": "Carter and I are the same rank, Teal'c's an alien, Jackson's a civilian. I learned a long time ago I don't control anything.",
+    "series": "Stargate SG-1"
+  },
+  {
+    "role": "General Hammond",
+    "quote": "How about you go where I tell you!",
+    "series": "Stargate SG-1"
+  },
+  {
+    "role": "General Hammond",
+    "quote": "Which means she's smarter than you are, Colonel. Especially in matters related to the Stargate.",
+    "series": "Stargate SG-1"
+  },
+  {
+    "role": "General Hammond",
+    "quote": "Permission to shower granted. In fact, I insist on it, Colonel!",
+    "series": "Stargate SG-1"
+  },
+  {
+    "role": "Dr. Rodney McKay",
+    "quote": "Hey, I'm Dr. Rodney McKay, all right? 'Difficult' takes a few seconds; 'impossible,' a few minutes.",
+    "series": "Stargate Atlantis"
+  },
+  {
+    "role": "Dr. Rodney McKay",
+    "quote": "It's a city, not a yo-yo.",
+    "series": "Stargate Atlantis"
+  },
+  {
+    "role": "Dr. Rodney McKay",
+    "quote": "I didn't faint, I passed out from manly hunger!",
+    "series": "Stargate Atlantis"
+  },
+  {
+    "role": "Dr. Rodney McKay",
+    "quote": "If only we had a magical tool that could slow down time. I foolishly left mine on Earth — did you bring yours?",
+    "series": "Stargate Atlantis"
+  },
+  {
+    "role": "Dr. Rodney McKay",
+    "quote": "Five-sixths, but it's not an exact science.",
+    "series": "Stargate Atlantis"
+  },
+  {
+    "role": "Dr. Rodney McKay",
+    "quote": "Just once, I would like to be taken prisoner by the sexy aliens.",
+    "series": "Stargate Atlantis"
+  },
+  {
+    "role": "Dr. Rodney McKay",
+    "quote": "Did I mention that I know almost everything about almost everything?",
+    "series": "Stargate Atlantis"
+  },
+  {
+    "role": "Dr. Rodney McKay",
+    "quote": "What am I, MacGyver? Fix it with what?",
+    "series": "Stargate Atlantis"
+  },
+  {
+    "role": "Dr. Rodney McKay",
+    "quote": "95% of deadly is still deadly!",
+    "series": "Stargate Atlantis"
+  },
+  {
+    "role": "Sheppard",
+    "quote": "I'm sure the passengers on the Titanic were asking themselves the same thing.",
+    "series": "Stargate Atlantis"
+  },
+  {
+    "role": "Sheppard",
+    "quote": "Take it easy, Chewie — you're gonna cut your damned hands off.",
+    "series": "Stargate Atlantis"
+  },
+  {
+    "role": "Sheppard",
+    "quote": "Yeah, we're pretty broken up about it.",
+    "series": "Stargate Atlantis"
+  },
+  {
+    "role": "Sheppard",
+    "quote": "They're politicians, Rodney — they're all creepy.",
+    "series": "Stargate Atlantis"
+  },
+  {
+    "role": "Sheppard",
+    "quote": "I don't know, killing a bunch of Wraith always seems like a good idea to me.",
+    "series": "Stargate Atlantis"
+  },
+  {
+    "role": "Sheppard",
+    "quote": "This is why parents get someone else to teach their kids how to drive.",
+    "series": "Stargate Atlantis"
+  },
+  {
+    "role": "Sheppard",
+    "quote": "Well, that's why we're a team, like the Fantastic Four.",
+    "series": "Stargate Atlantis"
+  },
+  {
+    "role": "Ronon",
+    "quote": "I just want to know who thinks I'm not a threat and give them a chance to change their mind.",
+    "series": "Stargate Atlantis"
+  },
+  {
+    "role": "Ronon",
+    "quote": "I was beginning to think you were afraid to fight.",
+    "series": "Stargate Atlantis"
+  },
+  {
+    "role": "Ronon",
+    "quote": "I try not to let things I can't change bother me.",
+    "series": "Stargate Atlantis"
+  },
+  {
+    "role": "Ronon",
+    "quote": "I need to learn some science.",
+    "series": "Stargate Atlantis"
+  },
+  {
+    "role": "Carson Beckett",
+    "quote": "No-one! I wish I wasn't bloody here!",
+    "series": "Stargate Atlantis"
+  },
+  {
+    "role": "Carson Beckett",
+    "quote": "Converting a human body into energy and sending it millions of light years through a wormhole. Bloody insanity.",
+    "series": "Stargate Atlantis"
+  },
+  {
+    "role": "Carson Beckett",
+    "quote": "She knows I'm from Earth, son! It's not a bloody secret!",
+    "series": "Stargate Atlantis"
+  },
+  {
+    "role": "Teyla Emmagan",
+    "quote": "And Ronon appears to be quite angry.",
+    "series": "Stargate Atlantis"
+  },
+  {
+    "role": "Teyla Emmagan",
+    "quote": "Where there is time, there's hope.",
+    "series": "Stargate Atlantis"
+  },
+  {
+    "role": "Dr. Elizabeth Weir",
+    "quote": "It's a metaphor. Don't you see? This entire expedition is the biggest 'Hail Mary' in human history.",
+    "series": "Stargate Atlantis"
+  },
+  {
+    "role": "Dr. Elizabeth Weir",
+    "quote": "You don't leave people in the hands of the enemy.",
+    "series": "Stargate Atlantis"
+  },
+  {
+    "role": "Dr. Radek Zelenka",
+    "quote": "You know, you're not pleasant when you're like this, McKay.",
+    "series": "Stargate Atlantis"
+  },
+  {
+    "role": "Dr. Radek Zelenka",
+    "quote": "Pay up!",
+    "series": "Stargate Atlantis"
+  },
+  {
+    "role": "Nicholas Rush",
+    "quote": "It was never about going home. It's about getting us to where we're going. That is the mission.",
+    "series": "Stargate Universe"
+  },
+  {
+    "role": "Nicholas Rush",
+    "quote": "Fear is just one of those things in this world that proves beyond a shadow of a doubt that you're truly alive.",
+    "series": "Stargate Universe"
+  },
+  {
+    "role": "Nicholas Rush",
+    "quote": "Destiny is powered by the stars themselves.",
+    "series": "Stargate Universe"
+  },
+  {
+    "role": "Nicholas Rush",
+    "quote": "Oh, well, it's not been a pleasure knowing you.",
+    "series": "Stargate Universe"
+  },
+  {
+    "role": "Nicholas Rush",
+    "quote": "You've come a long way from that video-game slacker I discovered a year ago.",
+    "series": "Stargate Universe"
+  },
+  {
+    "role": "Eli",
+    "quote": "Any sufficiently advanced technology is indistinguishable from magic.",
+    "series": "Stargate Universe"
+  },
+  {
+    "role": "Eli",
+    "quote": "Wow, you must be getting to know me, because I respond really well to that.",
+    "series": "Stargate Universe"
+  },
+  {
+    "role": "Eli",
+    "quote": "You can never have too many friends, unless you're one of those people on Facebook who just accepts everyone's friend requests.",
+    "series": "Stargate Universe"
+  },
+  {
+    "role": "Eli",
+    "quote": "Say something archaeological.",
+    "series": "Stargate Universe"
+  },
+  {
+    "role": "Col. Young",
+    "quote": "That man's a lot of work.",
+    "series": "Stargate Universe"
+  },
+  {
+    "role": "Col. Young",
+    "quote": "There is no mission other than getting these people home.",
+    "series": "Stargate Universe"
+  },
+  {
+    "role": "Greer",
+    "quote": "Is it something we can barbecue?",
+    "series": "Stargate Universe"
+  },
+  {
+    "role": "Greer",
+    "quote": "What kind of city doesn't have a gun store?",
+    "series": "Stargate Universe"
+  },
+  {
+    "role": "Greer",
+    "quote": "I can't think of a better way to move on from this world into the next than to fly into the most powerful thing in all creation — a star. Out in a blaze of glory.",
+    "series": "Stargate Universe"
+  },
+  {
+    "role": "Lt. Tamara Johansen",
+    "quote": "Welcome to Destiny.",
+    "series": "Stargate Universe"
+  },
+  {
+    "role": "Lt. Scott",
+    "quote": "I'm telling you, this ship came here for a reason!",
+    "series": "Stargate Universe"
+  },
+  {
+    "role": "Camile Wray",
+    "quote": "The Lucian Alliance is planning an attack on Earth.",
+    "series": "Stargate Universe"
   }
 ]
