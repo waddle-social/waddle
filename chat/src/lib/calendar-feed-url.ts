@@ -18,7 +18,30 @@ export type CalendarFeedCopyResult =
 
 export interface CalendarFeedCopyView {
   state: "idle" | "loading" | "copied" | "error";
-  fallbackUrl: string | null;
+  url: string | null;
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  return hostname === "localhost"
+    || hostname === "127.0.0.1"
+    || hostname === "::1";
+}
+
+export function isAllowedCalendarFeedUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    if (url.protocol === "https:" || url.protocol === "webcal:") return true;
+    return url.protocol === "http:" && isLoopbackHost(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+export function calendarFeedSubscriptionHref(value: string): string | null {
+  if (!isAllowedCalendarFeedUrl(value)) return null;
+  const url = new URL(value);
+  if (url.protocol === "webcal:") return url.toString();
+  return `webcal:${url.toString().slice(url.protocol.length)}`;
 }
 
 export function nextCalendarFeedCopyViewState(input: CalendarFeedCopyView & {
@@ -27,21 +50,21 @@ export function nextCalendarFeedCopyViewState(input: CalendarFeedCopyView & {
   result?: CalendarFeedCopyResult;
 }): CalendarFeedCopyView {
   if (input.contextChanged) {
-    return { state: "idle", fallbackUrl: null };
+    return { state: "idle", url: null };
   }
   if (input.startAttempt) {
-    return { state: "loading", fallbackUrl: null };
+    return { state: "loading", url: null };
   }
   if (!input.result) {
-    return { state: input.state, fallbackUrl: input.fallbackUrl };
+    return { state: input.state, url: input.url };
   }
   switch (input.result.status) {
     case "copied":
-      return { state: "copied", fallbackUrl: null };
+      return { state: "copied", url: input.result.url };
     case "copy_failed":
-      return { state: "error", fallbackUrl: input.result.url };
+      return { state: "error", url: input.result.url };
     case "request_failed":
-      return { state: "error", fallbackUrl: null };
+      return { state: "error", url: null };
   }
 }
 
@@ -83,7 +106,11 @@ async function requestCalendarFeedUrl(
   if (!response.ok) throw new Error(`calendar feed request failed: ${response.status}`);
 
   const body = await response.json() as { url?: unknown };
-  if (typeof body.url !== "string" || body.url.length === 0) {
+  if (
+    typeof body.url !== "string"
+    || body.url.length === 0
+    || !isAllowedCalendarFeedUrl(body.url)
+  ) {
     throw new Error("calendar feed response missing url");
   }
   return body.url;
