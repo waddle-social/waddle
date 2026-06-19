@@ -39,6 +39,21 @@ export async function renderVueComponent(
   return renderToString(app);
 }
 
+export async function renderVueComponentSource(
+  source: string,
+  props: Record<string, unknown> = {},
+  configureApp?: (app: App<Element>) => void,
+): Promise<string> {
+  const outDir = mkdtempSync(join(tmpdir(), "waddle-vue-sfc-"));
+  const sourcePath = join(outDir, "inline.vue");
+  writeFileSync(sourcePath, source);
+  const moduleUrl = await compileSfcModule(pathToFileURL(sourcePath), outDir, new Map());
+  const component = (await import(moduleUrl)).default;
+  const app = createSSRApp({ render: () => h(component, props) });
+  configureApp?.(app);
+  return renderToString(app);
+}
+
 /**
  * Compiles `filename` (a `.vue` SFC) into an ESM module written under
  * `outDir`, returning its `file://` URL. `cache` dedupes shared child

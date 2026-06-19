@@ -1,10 +1,41 @@
 import { describe, expect, test } from "bun:test";
 import { computed, ref } from "vue";
-import { renderVueComponent } from "./helpers/render-vue-sfc";
+import { renderVueComponent, renderVueComponentSource } from "./helpers/render-vue-sfc";
 import {
   calendarFeedCopyControllerKey,
   type CalendarFeedCopyController,
 } from "../src/lib/use-calendar-feed-copy";
+
+const chatReadyShellSource = await Bun.file(
+  new URL("../src/components/chat/ChatReadyShell.vue", import.meta.url),
+).text();
+
+const computedCommunityJidBridge = `
+<script setup lang="ts">
+import { computed } from "vue";
+import EventsPane from "@/components/community/EventsPane.vue";
+
+const communityJid = computed(() => "community.example.com");
+function findMaster() {
+  return null;
+}
+</script>
+
+<template>
+  <EventsPane
+    :events="[]"
+    :is-loading="false"
+    :is-posting="false"
+    :error="null"
+    :can-post="true"
+    self-jid="alice@example.com"
+    :community-jid="communityJid"
+    server-base-url=""
+    session-id="session-1"
+    :find-master="findMaster"
+  />
+</template>
+`;
 
 function props(overrides: Record<string, unknown> = {}) {
   return {
@@ -48,6 +79,18 @@ function elementWithAttribute(html: string, tag: string, attribute: string): str
 }
 
 describe("EventsPane calendar feed control", () => {
+  test("receives the shell's computed community JID instead of its nested value", () => {
+    expect(chatReadyShellSource).toContain(':community-jid="communityJid"');
+    expect(chatReadyShellSource).not.toContain(':community-jid="communityJid.value"');
+  });
+
+  test("enables copy when a parent passes a computed community JID", async () => {
+    const html = await renderVueComponentSource(computedCommunityJidBridge);
+
+    expect(html).toContain("Copy feed URL");
+    expect(calendarFeedButton(html)).not.toMatch(/\sdisabled(?:[=>\s])/);
+  });
+
   test("renders an enabled copy button when feed context is available", async () => {
     const html = await renderVueComponent(
       "../src/components/community/EventsPane.vue",
