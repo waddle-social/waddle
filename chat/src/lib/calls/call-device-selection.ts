@@ -1,13 +1,16 @@
 import {
   type AudioProcessingPrefs,
   setAiNoiseModel,
+  setBackgroundEffectPref,
   setCamDevice,
   setAudioProcessingPrefs,
   setMicDevice,
   setSpeakerDevice,
 } from "./device-prefs";
 import { clearAiNoiseFilterError } from "./ai-noise-filter-error-state";
+import { clearBackgroundEffectError } from "./background-effect-error-state";
 import type { NoiseModelId } from "./ai-noise-filter/model-id";
+import type { BackgroundEffect } from "./background-effect/effect-id";
 
 export type CallDeviceKind = "mic" | "cam" | "speaker";
 
@@ -66,4 +69,23 @@ export async function applyAiNoiseModelSelection(
   clearAiNoiseFilterError();
   await engine.setAiNoiseModel(model);
   setAiNoiseModel(model);
+}
+
+export type CallBackgroundSelectionEngine = {
+  setBackgroundEffect(effect: BackgroundEffect): Promise<void>;
+};
+
+/**
+ * Select the camera background effect (off / blur / image) for the active call:
+ * clear any stale attach-failure notice (this is an explicit fresh attempt),
+ * apply it to the engine, then persist the pref so the next call re-applies it.
+ * The engine fails open on attach error, so this does not reject on a bad effect.
+ */
+export async function applyBackgroundEffectSelection(
+  effect: BackgroundEffect,
+  engine: CallBackgroundSelectionEngine,
+): Promise<void> {
+  clearBackgroundEffectError();
+  await engine.setBackgroundEffect(effect);
+  setBackgroundEffectPref(effect);
 }

@@ -1,6 +1,11 @@
 import { atom } from "nanostores";
 import { isNoiseModelId, type NoiseModelId } from "./ai-noise-filter/model-id";
 import { hasNoiseModelBackend } from "./ai-noise-filter/registry";
+import {
+  BACKGROUND_OFF,
+  normalizeBackgroundEffect,
+  type BackgroundEffect,
+} from "./background-effect/effect-id";
 
 /**
  * User-chosen audio/video device IDs, persisted to localStorage so
@@ -25,6 +30,12 @@ type DevicePrefs = {
    * lifecycle and a different default.
    */
   aiNoiseModel: NoiseModelId | null;
+  /**
+   * The opt-in camera background effect (off / blur / image), default off.
+   * Re-applied at the next call's camera publish. A custom image's `ref` points
+   * at bytes in the custom-image store; the catalog `id` at a bundled asset.
+   */
+  backgroundEffect: BackgroundEffect;
 };
 
 const STORAGE_KEY = "waddle:call-device-prefs";
@@ -79,6 +90,7 @@ function defaultDevicePrefs(): DevicePrefs {
     speaker: null,
     audioProcessing: defaultAudioProcessingPrefs(),
     aiNoiseModel: null,
+    backgroundEffect: BACKGROUND_OFF,
   };
 }
 
@@ -106,6 +118,7 @@ export function parseDevicePrefsStorage(raw: string | null): DevicePrefs {
       speaker: typeof obj.speaker === "string" ? obj.speaker : null,
       audioProcessing: normalizeAudioProcessingPrefs(obj.audioProcessing),
       aiNoiseModel: normalizeAiNoiseModel(obj.aiNoiseModel),
+      backgroundEffect: normalizeBackgroundEffect(obj.backgroundEffect),
     };
   } catch {
     return defaultDevicePrefs();
@@ -152,6 +165,10 @@ export function setAudioProcessingPrefs(audioProcessing: AudioProcessingPrefs): 
 
 export function setAiNoiseModel(aiNoiseModel: NoiseModelId | null): void {
   $devicePrefs.set({ ...$devicePrefs.get(), aiNoiseModel });
+}
+
+export function setBackgroundEffectPref(backgroundEffect: BackgroundEffect): void {
+  $devicePrefs.set({ ...$devicePrefs.get(), backgroundEffect });
 }
 
 type SpeakerOutputSelectionEnvironment = {

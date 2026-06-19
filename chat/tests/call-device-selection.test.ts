@@ -7,9 +7,12 @@ import {
 import {
   applyAiNoiseModelSelection,
   applyAudioProcessingSelection,
+  applyBackgroundEffectSelection,
   applyCallDeviceSelection,
 } from "../src/lib/calls/call-device-selection";
 import { $aiNoiseFilterError } from "../src/lib/calls/ai-noise-filter-error-state";
+import { $backgroundEffectError } from "../src/lib/calls/background-effect-error-state";
+import { BACKGROUND_OFF } from "../src/lib/calls/background-effect/effect-id";
 
 afterEach(() => {
   $devicePrefs.set({
@@ -18,8 +21,10 @@ afterEach(() => {
     speaker: null,
     audioProcessing: defaultAudioProcessingPrefs(),
     aiNoiseModel: null,
+    backgroundEffect: BACKGROUND_OFF,
   });
   $aiNoiseFilterError.set(null);
+  $backgroundEffectError.set(null);
 });
 
 describe("call device selection", () => {
@@ -40,6 +45,7 @@ describe("call device selection", () => {
       speaker: "usb-speaker",
       audioProcessing: defaultAudioProcessingPrefs(),
       aiNoiseModel: null,
+      backgroundEffect: BACKGROUND_OFF,
     });
     expect(engine.setMicDevice).toHaveBeenCalledWith("headset-mic");
     expect(engine.setCameraDevice).toHaveBeenCalledWith("desk-cam");
@@ -63,6 +69,7 @@ describe("call device selection", () => {
       speaker: null,
       audioProcessing: defaultAudioProcessingPrefs(),
       aiNoiseModel: null,
+      backgroundEffect: BACKGROUND_OFF,
     });
     expect(engine.setMicDevice).toHaveBeenCalledWith("default");
     expect(engine.setCameraDevice).toHaveBeenCalledWith("default");
@@ -83,6 +90,7 @@ describe("call device selection", () => {
       speaker: null,
       audioProcessing: defaultAudioProcessingPrefs(),
       aiNoiseModel: null,
+      backgroundEffect: BACKGROUND_OFF,
     });
 
     await expect(applyCallDeviceSelection("mic", null, engine)).rejects.toThrow("device unavailable");
@@ -94,6 +102,7 @@ describe("call device selection", () => {
       speaker: null,
       audioProcessing: defaultAudioProcessingPrefs(),
       aiNoiseModel: null,
+      backgroundEffect: BACKGROUND_OFF,
     });
   });
 
@@ -161,5 +170,35 @@ describe("applyAiNoiseModelSelection", () => {
 
     expect(setAiNoiseModel).toHaveBeenCalledWith(null);
     expect($devicePrefs.get().aiNoiseModel).toBeNull();
+  });
+});
+
+describe("applyBackgroundEffectSelection", () => {
+  test("applies the effect to the engine and persists the pref", async () => {
+    const effect = { kind: "image", image: { source: "catalog", id: "office" } } as const;
+    const setBackgroundEffect = mock(async () => undefined);
+
+    await applyBackgroundEffectSelection(effect, { setBackgroundEffect });
+
+    expect(setBackgroundEffect).toHaveBeenCalledWith(effect);
+    expect($devicePrefs.get().backgroundEffect).toEqual(effect);
+  });
+
+  test("clears a stale attach-failure notice when re-selecting", async () => {
+    $backgroundEffectError.set({ kind: "blur" });
+    const setBackgroundEffect = mock(async () => undefined);
+
+    await applyBackgroundEffectSelection({ kind: "blur" }, { setBackgroundEffect });
+
+    expect($backgroundEffectError.get()).toBeNull();
+  });
+
+  test("turning the effect off persists off", async () => {
+    const setBackgroundEffect = mock(async () => undefined);
+
+    await applyBackgroundEffectSelection(BACKGROUND_OFF, { setBackgroundEffect });
+
+    expect(setBackgroundEffect).toHaveBeenCalledWith(BACKGROUND_OFF);
+    expect($devicePrefs.get().backgroundEffect).toEqual(BACKGROUND_OFF);
   });
 });

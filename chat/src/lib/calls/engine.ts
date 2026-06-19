@@ -43,6 +43,19 @@ import type { AudioNoiseProcessor } from "./ai-noise-filter/processor";
 import { makeNoiseProcessor } from "./ai-noise-filter/registry";
 import { runAiNoiseFilterReconcile, type ProcessorTarget } from "./ai-noise-filter/reconcile";
 import type { VerifiedCallAudioProcessing } from "./call-audio-processing-telemetry";
+import {
+  BACKGROUND_OFF,
+  CAMERA_BACKGROUND_PROCESSOR_NAME,
+  type ActiveBackgroundEffect,
+  type BackgroundEffect,
+} from "./background-effect/effect-id";
+import {
+  runBackgroundEffectReconcile,
+  type BackgroundProcessorTarget,
+} from "./background-effect/reconcile";
+import type { CameraBackgroundState } from "./background-effect/camera-background";
+import type { CameraBackgroundOps, VideoBackgroundProcessor } from "./background-effect/ops";
+import { cameraBackgroundOps } from "./background-effect/registry";
 
 /**
  * The local mic track surface the AI-noise reconciler drives — the subset of
@@ -52,6 +65,17 @@ import type { VerifiedCallAudioProcessing } from "./call-audio-processing-teleme
 type ProcessorCapableTrack = {
   getProcessor(): { name: string } | undefined;
   setProcessor(processor: AudioNoiseProcessor): Promise<void>;
+  stopProcessor(): Promise<void>;
+};
+
+/**
+ * The local camera track surface the background reconciler drives — the subset
+ * of `LocalVideoTrack` it needs. Structural so the engine can build a
+ * `BackgroundProcessorTarget` from a real track and tests can inject a fake.
+ */
+type CameraProcessorTrack = {
+  getProcessor(): { name: string } | undefined;
+  setProcessor(processor: VideoBackgroundProcessor): Promise<void>;
   stopProcessor(): Promise<void>;
 };
 
@@ -228,6 +252,21 @@ export type CallEngineEvents = {
    */
   aiNoiseFilterError: (info: { model: NoiseModelId; error: unknown }) => void;
   /**
+   * Fires when the *verified* camera background effect changes — on camera
+   * publish/unpublish, a video device switch, or an explicit effect selection.
+   * Carries the effect read back from the attached processor's presence
+   * (`getProcessor()`), NOT merely the requested pref, so the indicator is
+   * honest even when an attach silently fails. See `camera-background.ts`.
+   */
+  backgroundEffectChanged: (state: CameraBackgroundState) => void;
+  /**
+   * Fires when an effect fails to attach (asset/model fetch error, unsupported
+   * device, image decode). NON-FATAL: the engine fails open to the raw camera
+   * and the UI shows a non-blocking notice; the per-(track,effect) guard stops
+   * the defensive re-runs from retrying until a fresh track or re-selection.
+   */
+  backgroundEffectError: (info: { effect: ActiveBackgroundEffect; error: unknown }) => void;
+  /**
    * Fires once per settled mic-processing change with BOTH layers (browser
    * constraint trio + verified AI model) computed together, so the fleet
    * beacon always sees a consistent snapshot. Telemetry-only; the UI reads
@@ -301,6 +340,8 @@ export class CallEngine {
     micAudioProcessingChanged: new Set(),
     aiNoiseFilterChanged: new Set(),
     aiNoiseFilterError: new Set(),
+    backgroundEffectChanged: new Set(),
+    backgroundEffectError: new Set(),
     verifiedMicProcessingChanged: new Set(),
     connectionQualityChanged: new Set(),
     connectionPhaseChanged: new Set(),
@@ -327,6 +368,27 @@ export class CallEngine {
   private appliedModelActiveForCapture = false;
   /** Builds a processor for a model; injectable so tests avoid real wasm. */
   private readonly makeAiNoiseProcessor: (model: NoiseModelId) => Promise<AudioNoiseProcessor>;
+
+  /**
+   * The user's selected camera background effect, seeded from prefs at connect.
+   * Source of "what should be attached" for the background reconciler.
+   */
+  private desiredBackgroundEffect: BackgroundEffect = BACKGROUND_OFF;
+  /**
+   * The effect last successfully applied to the live camera track. Combined
+   * with the attached processor's presence to verify what is actually on —
+   * reset to off when the camera track (and its processor) goes away.
+   */
+  private appliedBackgroundEffect: BackgroundEffect = BACKGROUND_OFF;
+  /**
+   * Effect keys that have failed to attach to the CURRENT camera track. Skips a
+   * retry on every defensive re-run; cleared on a fresh publish or re-selection.
+   */
+  private backgroundFailedEffects = new Set<string>();
+  /** Serializes reconciles so bursty triggers can't race on setProcessor. */
+  private backgroundReconcileChain: Promise<void> = Promise.resolve();
+  /** The library + asset boundary; injectable so tests avoid MediaPipe. */
+  private readonly backgroundOps: CameraBackgroundOps;
   /**
    * Which video codecs this device can publish, probed once at construction.
    * Injectable so tests assert the forwarded options for capable vs.
@@ -342,10 +404,12 @@ export class CallEngine {
 
   constructor(opts?: {
     makeAiNoiseProcessor?: (model: NoiseModelId) => Promise<AudioNoiseProcessor>;
+    backgroundOps?: CameraBackgroundOps;
     videoCodecSupport?: VideoCodecSupport;
     makeRoom?: (options: RoomOptions) => Room;
   }) {
     this.makeAiNoiseProcessor = opts?.makeAiNoiseProcessor ?? makeNoiseProcessor;
+    this.backgroundOps = opts?.backgroundOps ?? cameraBackgroundOps;
     this.codecSupport = opts?.videoCodecSupport ?? videoCodecSupport(currentVideoCodecSupportEnv());
     this.makeRoom = opts?.makeRoom ?? ((options) => new Room(options));
   }
@@ -401,6 +465,11 @@ export class CallEngine {
     this.desiredAiNoiseModel = prefs.aiNoiseModel;
     this.aiNoiseFailedModels.clear();
     this.appliedModelActiveForCapture = false;
+    // Seed the desired background effect from prefs so it re-applies on this
+    // call's camera publish; start each call with a clean failure guard.
+    this.desiredBackgroundEffect = prefs.backgroundEffect;
+    this.backgroundFailedEffects.clear();
+    this.appliedBackgroundEffect = BACKGROUND_OFF;
     const room = this.makeRoom(callRoomOptionsForPrefs(prefs));
     room.on(RoomEvent.TrackSubscribed, this.handleTrackSubscribed);
     room.on(RoomEvent.TrackUnsubscribed, this.handleTrackUnsubscribed);
@@ -685,6 +754,100 @@ export class CallEngine {
   }
 
   /**
+   * Select the camera background effect (off / blur / image). Updates the
+   * desired effect, gives the new selection a fresh attempt (clears the
+   * per-track failure guard), then reconciles the attached processor.
+   * Persistence is the caller's job (the device-selection layer writes the pref).
+   */
+  async setBackgroundEffect(effect: BackgroundEffect): Promise<void> {
+    this.desiredBackgroundEffect = effect;
+    this.backgroundFailedEffects.clear();
+    await this.ensureBackgroundEffect();
+  }
+
+  /**
+   * The local camera track as a processor target, or null when no camera is
+   * live / it is muted (nothing to attach to).
+   */
+  private cameraProcessorTrack(): CameraProcessorTrack | null {
+    const publication = this.room?.localParticipant.getTrackPublication(Track.Source.Camera);
+    if (!publication || publication.isMuted) return null;
+    const track = publication.track as unknown as CameraProcessorTrack | undefined;
+    return track && typeof track.getProcessor === "function" ? track : null;
+  }
+
+  /**
+   * Reconcile the attached background processor toward the desired effect.
+   * Idempotent and serialized; a no-op when no camera track exists (it re-runs
+   * on the next publish). Fails open on attach error and emits a typed
+   * `backgroundEffectError`.
+   */
+  private ensureBackgroundEffect(): Promise<void> {
+    this.backgroundReconcileChain = this.backgroundReconcileChain
+      .then(() => this.runEnsureBackgroundEffect())
+      .catch(() => undefined);
+    return this.backgroundReconcileChain;
+  }
+
+  private async runEnsureBackgroundEffect(): Promise<void> {
+    const track = this.cameraProcessorTrack();
+    if (!track) {
+      // No live camera to attach to — surface the honest `no-camera` state; the
+      // desired effect re-applies on the next publish.
+      this.emitBackgroundEffect();
+      return;
+    }
+    const target: BackgroundProcessorTarget = {
+      currentEffect: () =>
+        track.getProcessor()?.name === CAMERA_BACKGROUND_PROCESSOR_NAME
+          ? this.appliedBackgroundEffect
+          : BACKGROUND_OFF,
+      attach: async (effect) => {
+        const processor = await this.backgroundOps.create(effect);
+        await track.setProcessor(processor);
+        this.appliedBackgroundEffect = effect;
+      },
+      switch: async (effect) => {
+        const processor = track.getProcessor() as unknown as VideoBackgroundProcessor | undefined;
+        // The reconciler only decides `switch` when a processor was verifiably
+        // present (its name was just read), so this is effectively always set.
+        // Guard defensively against SDK non-determinism: if the processor
+        // vanished we must NOT claim the new effect applied — leave
+        // `appliedBackgroundEffect` reflecting the processor's actual (unchanged)
+        // effect, so the next reconcile retries the switch honestly.
+        if (!processor) return;
+        await this.backgroundOps.switch(processor, effect);
+        this.appliedBackgroundEffect = effect;
+      },
+      clear: async () => {
+        await track.stopProcessor();
+        this.appliedBackgroundEffect = BACKGROUND_OFF;
+      },
+    };
+    const outcome = await runBackgroundEffectReconcile({
+      target,
+      desired: this.desiredBackgroundEffect,
+      failed: this.backgroundFailedEffects,
+    });
+    if (outcome.action === "failed") {
+      this.emit("backgroundEffectError", { effect: outcome.effect, error: outcome.error });
+    }
+    this.emitBackgroundEffect();
+  }
+
+  /** Verified background effect read from the live processor's presence. */
+  private computeCameraBackground(): CameraBackgroundState {
+    const track = this.cameraProcessorTrack();
+    if (!track) return { kind: "no-camera" };
+    const present = track.getProcessor()?.name === CAMERA_BACKGROUND_PROCESSOR_NAME;
+    return { kind: "active", effect: present ? this.appliedBackgroundEffect : BACKGROUND_OFF };
+  }
+
+  private emitBackgroundEffect(): void {
+    this.emit("backgroundEffectChanged", this.computeCameraBackground());
+  }
+
+  /**
    * Same shape as `setMicDevice` but for the camera device.
    */
   async setCameraDevice(deviceId: string): Promise<void> {
@@ -864,6 +1027,13 @@ export class CallEngine {
       this.emitMicAudioProcessing();
       void this.ensureAiNoiseFilter();
     }
+    if (source === "camera") {
+      // A brand-new camera track: clear the per-track failure guard so an effect
+      // that failed on a previous track gets one clean attempt, then re-apply the
+      // still-desired effect to the fresh (bare) capture track.
+      this.backgroundFailedEffects.clear();
+      void this.ensureBackgroundEffect();
+    }
   };
 
   private handleLocalTrackUnpublished = (
@@ -883,6 +1053,12 @@ export class CallEngine {
       // The mic track (and its processor) is gone — recompute to `no-mic`.
       this.emitAiNoiseFilter();
       this.settleVerifiedMicProcessing();
+    }
+    if (publication.source === Track.Source.Camera) {
+      // The camera track (and its processor) is gone — drop the applied effect
+      // so a re-publish re-attaches fresh, and recompute to `no-camera`.
+      this.appliedBackgroundEffect = BACKGROUND_OFF;
+      this.emitBackgroundEffect();
     }
     const track = publication.track;
     const kind = mapKind(publication.kind);
@@ -911,6 +1087,10 @@ export class CallEngine {
     // per-track failure guard + capture-NS state so the next call starts clean.
     this.aiNoiseFailedModels.clear();
     this.appliedModelActiveForCapture = false;
+    // LiveKit destroys the camera processor with the track on disconnect; reset
+    // our per-track guard + applied effect so the next call starts clean.
+    this.backgroundFailedEffects.clear();
+    this.appliedBackgroundEffect = BACKGROUND_OFF;
     this.emit("disconnected", typeof reason === "string" ? reason : undefined);
   };
 
@@ -927,6 +1107,13 @@ export class CallEngine {
    * camera changes can't alter mic processing.
    */
   private handleActiveDeviceChanged = (kind: MediaDeviceKind) => {
+    if (kind === "videoinput") {
+      // A camera swap rewrites the publication's capture track in place. LiveKit
+      // re-runs the processor across it, but reconcile is idempotent and
+      // re-attaches the desired effect if the new track came up bare.
+      void this.ensureBackgroundEffect();
+      return;
+    }
     if (kind !== "audioinput") return;
     this.emitMicAudioProcessing();
     // Defensive: LiveKit re-runs the processor across a device switch, but
@@ -947,6 +1134,14 @@ export class CallEngine {
     participant: Participant,
   ) => {
     if (!participant.isLocal) return;
+    if (publication.source === Track.Source.Camera) {
+      // Camera mute stops the capture track, so an attached effect is no longer
+      // live — surface the honest `no-camera` state (mirrors the mic's no-mic),
+      // and re-reconcile on unmute, where the processor may come back bare.
+      this.emitBackgroundEffect();
+      void this.ensureBackgroundEffect();
+      return;
+    }
     if (publication.source !== Track.Source.Microphone) return;
     this.emitMicAudioProcessing();
     // Unmute restarts the track; reconcile (idempotent) re-attaches if needed.

@@ -8,7 +8,9 @@ import {
   parseDevicePrefsStorage,
   serializeDevicePrefsStorage,
   setAiNoiseModel,
+  setBackgroundEffectPref,
 } from "../src/lib/calls/device-prefs";
+import { BACKGROUND_OFF } from "../src/lib/calls/background-effect/effect-id";
 
 describe("call speaker output support", () => {
   test("is disabled during SSR or when media elements cannot switch sinks", () => {
@@ -96,6 +98,7 @@ describe("call audio processing preferences", () => {
         autoGainControl: false,
       },
       aiNoiseModel: null,
+      backgroundEffect: BACKGROUND_OFF,
     });
 
     expect(parseDevicePrefsStorage(stored)).toEqual({
@@ -108,6 +111,7 @@ describe("call audio processing preferences", () => {
         autoGainControl: false,
       },
       aiNoiseModel: null,
+      backgroundEffect: BACKGROUND_OFF,
     });
   });
 
@@ -126,6 +130,7 @@ describe("call audio processing preferences", () => {
       speaker: "usb-speaker",
       audioProcessing: defaultAudioProcessingPrefs(),
       aiNoiseModel: null,
+      backgroundEffect: BACKGROUND_OFF,
     });
   });
 });
@@ -144,6 +149,7 @@ describe("ai noise model preference", () => {
       speaker: null,
       audioProcessing: defaultAudioProcessingPrefs(),
       aiNoiseModel: "rnnoise",
+      backgroundEffect: BACKGROUND_OFF,
     });
     expect(parseDevicePrefsStorage(stored).aiNoiseModel).toBe("rnnoise");
   });
@@ -172,5 +178,44 @@ describe("ai noise model preference", () => {
     expect($devicePrefs.get().aiNoiseModel).toBe("dtln");
     setAiNoiseModel(null);
     expect($devicePrefs.get().aiNoiseModel).toBeNull();
+  });
+});
+
+describe("background effect preference", () => {
+  test("defaults to off when absent from stored prefs", () => {
+    expect(
+      parseDevicePrefsStorage(JSON.stringify({ mic: null, cam: null, speaker: null }))
+        .backgroundEffect,
+    ).toEqual(BACKGROUND_OFF);
+  });
+
+  test("round-trips a catalog image through the persisted shape", () => {
+    const stored = serializeDevicePrefsStorage({
+      mic: null,
+      cam: null,
+      speaker: null,
+      audioProcessing: defaultAudioProcessingPrefs(),
+      aiNoiseModel: null,
+      backgroundEffect: { kind: "image", image: { source: "catalog", id: "office" } },
+    });
+    expect(parseDevicePrefsStorage(stored).backgroundEffect).toEqual({
+      kind: "image",
+      image: { source: "catalog", id: "office" },
+    });
+  });
+
+  test("normalizes a malformed stored effect to off", () => {
+    expect(
+      parseDevicePrefsStorage(
+        JSON.stringify({ mic: null, cam: null, speaker: null, backgroundEffect: { kind: "zap" } }),
+      ).backgroundEffect,
+    ).toEqual(BACKGROUND_OFF);
+  });
+
+  test("setBackgroundEffectPref updates the device-prefs atom", () => {
+    setBackgroundEffectPref({ kind: "blur" });
+    expect($devicePrefs.get().backgroundEffect).toEqual({ kind: "blur" });
+    setBackgroundEffectPref(BACKGROUND_OFF);
+    expect($devicePrefs.get().backgroundEffect).toEqual(BACKGROUND_OFF);
   });
 });

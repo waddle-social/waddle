@@ -28,6 +28,11 @@ import {
   clearAiNoiseFilterError,
   setAiNoiseFilterError,
 } from "./ai-noise-filter-error-state";
+import { resetCameraBackground, setCameraBackground } from "./camera-background-effect-state";
+import {
+  clearBackgroundEffectError,
+  setBackgroundEffectError,
+} from "./background-effect-error-state";
 import { createCallAudioProcessingBeacon } from "./call-audio-processing-telemetry";
 import {
   createCallMediaPathBeacon,
@@ -429,6 +434,18 @@ export function useCallEngine(): {
       // model couldn't start so the dialog can explain it.
       setAiNoiseFilterError(model);
     });
+    singletonEngine.on("backgroundEffectChanged", (state) => {
+      // Verified camera background effect (read from the attached processor) —
+      // drives the Background section in the settings dialog. An effect that is
+      // genuinely running clears any prior attach-failure notice.
+      setCameraBackground(state);
+      if (state.kind === "active" && state.effect.kind !== "off") clearBackgroundEffectError();
+    });
+    singletonEngine.on("backgroundEffectError", ({ effect }) => {
+      // Non-blocking: the engine failed open to the raw camera. Surface which
+      // effect couldn't start so the dialog can explain it.
+      setBackgroundEffectError(effect);
+    });
     singletonEngine.on("connectionQualityChanged", (quality) => {
       // LiveKit re-scored the local participant's connection — drives the
       // ambient signal-bars chip on the call bar.
@@ -475,6 +492,9 @@ export function useCallEngine(): {
       // Same for the verified AI-filter readout and any attach-failure notice.
       resetMicAiNoiseFilter();
       clearAiNoiseFilterError();
+      // Same for the verified camera-background readout and its notice.
+      resetCameraBackground();
+      clearBackgroundEffectError();
       // Re-arm the fleet-measurement beacon so the next call emits its
       // first verified state even if it matches the last call's.
       micAudioProcessingBeacon.reset();
