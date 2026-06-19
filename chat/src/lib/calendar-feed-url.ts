@@ -70,9 +70,13 @@ export function nextCalendarFeedCopyViewState(input: CalendarFeedCopyView & {
 
 export function calendarFeedEndpoint(input: CalendarFeedRequestInput): string | null {
   if (!input.communityJid) return null;
+  const serverBaseUrl = input.serverBaseUrl.trim();
+  const path = `/api/calendar/community-feed-url?${new URLSearchParams({
+    community_jid: input.communityJid,
+  }).toString()}`;
+  if (!serverBaseUrl) return path;
   try {
-    const url = new URL("/api/calendar/community-feed-url", input.serverBaseUrl);
-    url.searchParams.set("community_jid", input.communityJid);
+    const url = new URL(path, serverBaseUrl);
     return url.toString();
   } catch {
     return null;

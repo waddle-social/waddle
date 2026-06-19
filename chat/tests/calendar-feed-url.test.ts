@@ -22,6 +22,16 @@ describe("calendar feed URL helpers", () => {
     );
   });
 
+  test("builds a same-origin helper endpoint when no server base URL is configured", () => {
+    expect(calendarFeedEndpoint({
+      communityJid: "community.example.com",
+      serverBaseUrl: "",
+      sessionId: "session-1",
+    })).toBe(
+      "/api/calendar/community-feed-url?community_jid=community.example.com",
+    );
+  });
+
   test("allows safe calendar feed URL schemes and builds subscription hrefs", () => {
     expect(isAllowedCalendarFeedUrl(
       "https://server.example.com/api/calendar/community/token/events.ics",
@@ -217,6 +227,35 @@ describe("calendar feed URL helpers", () => {
 
     expect(controller.state.value).toBe("idle");
     expect(controller.url.value).toBeNull();
+    controller.dispose();
+    scope.stop();
+  });
+
+  test("copy controller can request the feed URL from the same-origin helper", async () => {
+    const feedUrl = "https://server.example.com/api/calendar/community/token/events.ics";
+    const scope = effectScope();
+    const fetchImpl = mock(async () => new Response(JSON.stringify({ url: feedUrl }))) as CalendarFeedFetch;
+    const copyText = mock(async () => {});
+    const controller = scope.run(() =>
+      useCalendarFeedCopy({
+        communityJid: () => "community.example.com",
+        serverBaseUrl: () => "",
+        sessionId: () => "session-1",
+        fetch: fetchImpl,
+        copyText,
+        resetDelayMs: 0,
+      }),
+    );
+    if (!controller) throw new Error("failed to create calendar feed copy controller");
+
+    expect(controller.canCopy.value).toBe(true);
+    await controller.copy();
+
+    expect(fetchImpl.mock.calls[0]?.[0]).toBe(
+      "/api/calendar/community-feed-url?community_jid=community.example.com",
+    );
+    expect(controller.state.value).toBe("copied");
+    expect(controller.url.value).toBe(feedUrl);
     controller.dispose();
     scope.stop();
   });

@@ -71,6 +71,17 @@ describe("EventsPane calendar feed control", () => {
     expect(calendarFeedButton(html)).not.toMatch(/\sdisabled(?:[=>\s])/);
   });
 
+  test("keeps copy available when the feed helper uses same-origin API routes", async () => {
+    const html = await renderVueComponent(
+      "../src/components/community/EventsPane.vue",
+      props({ serverBaseUrl: "" }),
+      import.meta.url,
+    );
+
+    expect(html).toContain("Copy feed URL");
+    expect(calendarFeedButton(html)).not.toMatch(/\sdisabled(?:[=>\s])/);
+  });
+
   test("disables copy when feed context is missing", async () => {
     const html = await renderVueComponent(
       "../src/components/community/EventsPane.vue",
