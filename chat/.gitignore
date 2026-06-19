@@ -5,6 +5,9 @@ dist/
 worker-configuration.d.ts
 # generated service worker
 public/sw.js
+# build-copied MediaPipe wasm fileset for virtual background (#1024); the
+# committed segmenter model lives under public/mediapipe/models/
+public/mediapipe/tasks-vision/
 
 # dependencies
 node_modules/

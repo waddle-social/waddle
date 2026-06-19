@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onScopeDispose, ref, watch } from "vue";
 import { useStore } from "@nanostores/vue";
-import { Activity, Check, Mic, Speaker, Video, X } from "lucide-vue-next";
+import { Activity, Check, ImagePlus, Mic, Speaker, Video, X } from "lucide-vue-next";
 import AppDialog from "@/components/ui/AppDialog.vue";
 import {
   $devicePrefs,
@@ -13,6 +13,7 @@ import {
 import {
   applyAiNoiseModelSelection,
   applyAudioProcessingSelection,
+  applyBackgroundEffectSelection,
   applyCallDeviceSelection,
 } from "@/lib/calls/call-device-selection";
 import { $micAudioProcessing } from "@/lib/calls/mic-audio-processing-state";
@@ -30,6 +31,20 @@ import {
   noiseModelSupport,
 } from "@/lib/calls/ai-noise-filter/support";
 import { $aiNoiseFilterError } from "@/lib/calls/ai-noise-filter-error-state";
+import { $cameraBackground } from "@/lib/calls/camera-background-effect-state";
+import { $backgroundEffectError } from "@/lib/calls/background-effect-error-state";
+import {
+  backgroundEffectSupport,
+  currentBackgroundEffectSupportEnv,
+} from "@/lib/calls/background-effect/support";
+import { backgroundCatalog } from "@/lib/calls/background-effect/backgrounds";
+import { saveCustomBackground } from "@/lib/calls/background-effect/custom-image-store";
+import {
+  BACKGROUND_OFF,
+  sameBackgroundEffect,
+  type BackgroundEffect,
+  type BackgroundImageId,
+} from "@/lib/calls/background-effect/effect-id";
 import { useCallEngine } from "@/lib/calls/use-call-engine";
 import { reportCallError } from "@/lib/calls/call-store";
 import {
@@ -124,6 +139,76 @@ async function selectAiNoiseModel(model: NoiseModelId | null): Promise<void> {
     reportCallError(err);
   } finally {
     aiNoisePending.value = false;
+  }
+}
+
+/**
+ * Opt-in virtual background / blur (#1024). The selected effect is persisted in
+ * prefs; the *verified* state reads the attached processor, so a re-click can
+ * retry a selection that didn't take. Capability is a one-time probe (the WebGL2
+ * + frame-pipeline support doesn't change at runtime).
+ */
+const backgroundSupport = backgroundEffectSupport(currentBackgroundEffectSupportEnv());
+const backgroundControlEnabled = backgroundSupport.available;
+const backgroundUnavailableReason = backgroundSupport.available ? null : backgroundSupport.reason;
+const backgroundCatalogEntries = backgroundCatalog();
+const BLUR_EFFECT: BackgroundEffect = { kind: "blur" };
+
+const backgroundEffect = computed(() => prefs.value.backgroundEffect);
+const backgroundPending = ref(false);
+const backgroundError = useStore($backgroundEffectError);
+const backgroundErrorLabel = computed(() => {
+  const effect = backgroundError.value;
+  if (!effect) return null;
+  return effect.kind === "blur" ? "background blur" : "background image";
+});
+const cameraBackground = useStore($cameraBackground);
+/** The effect VERIFIABLY running on the live camera (null if none/failed/no camera). */
+const verifiedBackground = computed(() =>
+  cameraBackground.value.kind === "active" ? cameraBackground.value.effect : null,
+);
+
+function isBackgroundSelected(effect: BackgroundEffect): boolean {
+  return sameBackgroundEffect(backgroundEffect.value, effect);
+}
+function isCatalogSelected(id: BackgroundImageId): boolean {
+  return isBackgroundSelected({ kind: "image", image: { source: "catalog", id } });
+}
+const isCustomSelected = computed(
+  () => backgroundEffect.value.kind === "image" && backgroundEffect.value.image.source === "custom",
+);
+
+async function selectBackground(effect: BackgroundEffect): Promise<void> {
+  // Skip only when this effect is both selected AND verifiably attached;
+  // otherwise allow a re-click to retry a selection that didn't take.
+  const verified = verifiedBackground.value;
+  if (isBackgroundSelected(effect) && verified && sameBackgroundEffect(verified, effect)) return;
+  backgroundPending.value = true;
+  try {
+    await applyBackgroundEffectSelection(effect, engine);
+  } catch (err) {
+    reportCallError(err);
+  } finally {
+    backgroundPending.value = false;
+  }
+}
+
+async function uploadCustomBackground(event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = ""; // let the user re-pick the same file later
+  if (!file) return;
+  backgroundPending.value = true;
+  try {
+    const ref = await saveCustomBackground(file);
+    await applyBackgroundEffectSelection(
+      { kind: "image", image: { source: "custom", ref } },
+      engine,
+    );
+  } catch (err) {
+    reportCallError(err);
+  } finally {
+    backgroundPending.value = false;
   }
 }
 
@@ -645,6 +730,94 @@ function close(): void {
             </button>
           </li>
         </ul>
+
+        <!-- Opt-in virtual background / blur (#1024). MediaPipe segmentation
+             runs in the browser via @livekit/track-processors; defaults off. -->
+        <div class="call-ai-filter">
+          <h4 class="type-caption call-processing__title">Background</h4>
+          <p v-if="!backgroundControlEnabled" class="type-caption text-muted-foreground">
+            {{ backgroundUnavailableReason }}
+          </p>
+          <template v-else>
+            <ul class="chat-list-stack" role="radiogroup" aria-label="Camera background">
+              <li>
+                <button
+                  type="button"
+                  class="call-device-row"
+                  :class="isBackgroundSelected(BACKGROUND_OFF) ? 'call-device-row--active' : ''"
+                  role="radio"
+                  :aria-checked="isBackgroundSelected(BACKGROUND_OFF)"
+                  :disabled="backgroundPending"
+                  @click="selectBackground(BACKGROUND_OFF)"
+                >
+                  <span class="truncate">Off</span>
+                  <Check v-if="isBackgroundSelected(BACKGROUND_OFF)" class="w-4 h-4 text-primary" />
+                </button>
+              </li>
+              <li>
+                <button
+                  type="button"
+                  class="call-device-row"
+                  :class="isBackgroundSelected(BLUR_EFFECT) ? 'call-device-row--active' : ''"
+                  role="radio"
+                  :aria-checked="isBackgroundSelected(BLUR_EFFECT)"
+                  :disabled="backgroundPending"
+                  @click="selectBackground(BLUR_EFFECT)"
+                >
+                  <span class="truncate">Blur</span>
+                  <Check v-if="isBackgroundSelected(BLUR_EFFECT)" class="w-4 h-4 text-primary" />
+                </button>
+              </li>
+            </ul>
+            <ul class="call-background-grid" role="radiogroup" aria-label="Background image">
+              <li v-for="entry in backgroundCatalogEntries" :key="entry.id">
+                <button
+                  type="button"
+                  class="call-background-tile"
+                  :class="isCatalogSelected(entry.id) ? 'call-background-tile--active' : ''"
+                  role="radio"
+                  :aria-checked="isCatalogSelected(entry.id)"
+                  :aria-label="entry.label"
+                  :disabled="backgroundPending"
+                  :style="{ backgroundImage: `url(${entry.assetPath})` }"
+                  @click="selectBackground({ kind: 'image', image: { source: 'catalog', id: entry.id } })"
+                >
+                  <Check
+                    v-if="isCatalogSelected(entry.id)"
+                    class="w-4 h-4 text-primary call-background-tile__check"
+                  />
+                </button>
+              </li>
+              <li>
+                <label
+                  class="call-background-tile call-background-tile--upload"
+                  :class="isCustomSelected ? 'call-background-tile--active' : ''"
+                >
+                  <input
+                    type="file"
+                    accept="image/*"
+                    class="sr-only"
+                    :disabled="backgroundPending"
+                    @change="uploadCustomBackground"
+                  />
+                  <ImagePlus class="w-4 h-4" />
+                  <span class="type-caption">Upload</span>
+                  <Check
+                    v-if="isCustomSelected"
+                    class="w-4 h-4 text-primary call-background-tile__check"
+                  />
+                </label>
+              </li>
+            </ul>
+            <p class="type-caption text-muted-foreground call-ai-filter__note">
+              Runs entirely in your browser. Your camera image is processed on
+              your device before it's sent.
+            </p>
+            <p v-if="backgroundErrorLabel" class="type-caption call-ai-filter__error">
+              Couldn't start the {{ backgroundErrorLabel }} — using your raw camera.
+            </p>
+          </template>
+        </div>
       </section>
 
       <!-- Speaker -->
@@ -824,6 +997,56 @@ function close(): void {
 
 .call-ai-filter__error {
   color: var(--destructive, #dc2626);
+}
+
+.call-background-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(4.5rem, 1fr));
+  gap: 0.5rem;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.call-background-tile {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 0.125rem;
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  border-radius: var(--radius-sm);
+  border: 2px solid transparent;
+  background-color: var(--muted);
+  background-size: cover;
+  background-position: center;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.call-background-tile:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.call-background-tile--active {
+  border-color: var(--primary);
+}
+
+.call-background-tile--upload {
+  border-style: dashed;
+  border-color: color-mix(in oklab, var(--foreground) 22%, transparent);
+}
+
+.call-background-tile__check {
+  position: absolute;
+  top: 0.25rem;
+  right: 0.25rem;
+  background: color-mix(in oklab, var(--background) 70%, transparent);
+  border-radius: 9999px;
 }
 
 .call-processing-toggle__label {
