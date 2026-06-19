@@ -448,9 +448,10 @@ pub use super::xep_waddle_link_preview::{
 };
 
 pub use super::xep_waddle_in_call::{
-    build_in_call_reaction_element, build_in_call_reaction_message, parse_in_call_signal,
-    parse_in_call_signal_child, InCallParseError, InCallReactionEmoji, InCallReactionSignal,
-    InCallSessionId, InCallSignal, NS_WADDLE_IN_CALL,
+    build_in_call_presence_state_element, build_in_call_reaction_element,
+    build_in_call_reaction_message, parse_in_call_presence_state, parse_in_call_signal,
+    parse_in_call_signal_child, InCallParseError, InCallPresenceState, InCallReactionEmoji,
+    InCallReactionSignal, InCallSessionId, InCallSignal, NS_WADDLE_IN_CALL,
 };
 
 pub use super::xep0503::{
