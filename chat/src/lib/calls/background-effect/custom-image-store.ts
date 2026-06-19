@@ -26,20 +26,27 @@ function openDb(): Promise<IDBDatabase> {
   });
 }
 
-function withStore<T>(
+async function withStore<T>(
   mode: IDBTransactionMode,
   run: (store: IDBObjectStore) => IDBRequest<T>,
 ): Promise<T> {
-  return openDb().then(
-    (db) =>
-      new Promise<T>((resolve, reject) => {
-        const tx = db.transaction(STORE, mode);
-        const request = run(tx.objectStore(STORE));
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error);
-        tx.oncomplete = () => db.close();
-      }),
-  );
+  const db = await openDb();
+  try {
+    return await new Promise<T>((resolve, reject) => {
+      const tx = db.transaction(STORE, mode);
+      const request = run(tx.objectStore(STORE));
+      // Resolve on commit (oncomplete), not request.onsuccess, so a write is
+      // durable before we report success. Reject AND release the connection on
+      // every terminal path — including abort/error (e.g. a QuotaExceededError
+      // saving a large upload), which would otherwise leak the open connection.
+      tx.oncomplete = () => resolve(request.result);
+      tx.onabort = () => reject(tx.error);
+      tx.onerror = () => reject(tx.error);
+      request.onerror = () => reject(request.error);
+    });
+  } finally {
+    db.close();
+  }
 }
 
 /** Persist an uploaded image, replacing any previous one, and return its ref. */

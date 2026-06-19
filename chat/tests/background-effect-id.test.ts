@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   BACKGROUND_OFF,
+  backgroundEffectKey,
   normalizeBackgroundEffect,
 } from "../src/lib/calls/background-effect/effect-id";
 
@@ -38,5 +39,24 @@ describe("normalizeBackgroundEffect", () => {
     expect(normalizeBackgroundEffect(null)).toEqual(BACKGROUND_OFF);
     expect(normalizeBackgroundEffect({ kind: "wat" })).toEqual(BACKGROUND_OFF);
     expect(normalizeBackgroundEffect("blur")).toEqual(BACKGROUND_OFF);
+  });
+});
+
+describe("backgroundEffectKey", () => {
+  test("two custom uploads with different refs have distinct keys", () => {
+    // This is what makes re-uploading a *different* image not a no-op: the
+    // per-upload ref makes the new effect a distinct identity, so the reconciler
+    // switches to it instead of treating it as already-applied.
+    const a = backgroundEffectKey({ kind: "image", image: { source: "custom", ref: "u-1" } });
+    const b = backgroundEffectKey({ kind: "image", image: { source: "custom", ref: "u-2" } });
+
+    expect(a).not.toBe(b);
+  });
+
+  test("catalog images key on their id, blur on its own constant", () => {
+    expect(backgroundEffectKey({ kind: "blur" })).toBe("blur");
+    expect(
+      backgroundEffectKey({ kind: "image", image: { source: "catalog", id: "office" } }),
+    ).not.toBe(backgroundEffectKey({ kind: "image", image: { source: "catalog", id: "mountain" } }));
   });
 });

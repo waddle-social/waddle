@@ -80,6 +80,15 @@ describe("decideBackgroundEffectAction", () => {
     expect(action).toEqual({ type: "none" });
   });
 
+  test("re-uploading a different custom image switches (a new ref is not a no-op)", () => {
+    const live = { kind: "image", image: { source: "custom", ref: "u-1" } } as const;
+    const reuploaded = { kind: "image", image: { source: "custom", ref: "u-2" } } as const;
+
+    const action = decideBackgroundEffectAction(reuploaded, live);
+
+    expect(action).toEqual({ type: "switch", effect: reuploaded });
+  });
+
   test("an effect that just failed is not retried while nothing is attached", () => {
     const desired = { kind: "blur" } as const;
     const failed = new Set([backgroundEffectKey(desired)]);

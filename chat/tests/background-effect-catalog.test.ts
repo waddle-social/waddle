@@ -17,9 +17,11 @@ describe("background catalog", () => {
     }
   });
 
-  test("resolves a single catalog entry by id", () => {
-    const first = backgroundCatalog()[0]!;
-
-    expect(catalogEntry(first.id)).toEqual(first);
+  test("catalogEntry matches the catalog entry for every id (no drift)", () => {
+    // backgroundCatalog() and catalogEntry() duplicate the label/path literals;
+    // pin that they agree for EVERY id so one can't silently drift from the other.
+    for (const entry of backgroundCatalog()) {
+      expect(catalogEntry(entry.id)).toEqual(entry);
+    }
   });
 });

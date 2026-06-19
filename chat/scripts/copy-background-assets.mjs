@@ -20,6 +20,19 @@ const visionPkg = require.resolve("@mediapipe/tasks-vision/package.json");
 const wasmSrc = resolve(dirname(visionPkg), "wasm");
 const destDir = resolve(import.meta.dirname, "../public/mediapipe/tasks-vision");
 
+// Only the single-thread loader+binary pairs: FilesetResolver.forVisionTasks
+// defaults to threads=false and picks the SIMD `vision_wasm_internal` or, after
+// a runtime SIMD probe, the `_nosimd` fallback. The threaded `_module_internal`
+// variant (~11 MB) is never selected, so we don't ship it.
+const FILES = [
+  "vision_wasm_internal.js",
+  "vision_wasm_internal.wasm",
+  "vision_wasm_nosimd_internal.js",
+  "vision_wasm_nosimd_internal.wasm",
+];
+
 mkdirSync(destDir, { recursive: true });
-cpSync(wasmSrc, destDir, { recursive: true });
-console.log(`[bg-assets] copied MediaPipe tasks-vision wasm → ${destDir}`);
+for (const file of FILES) {
+  cpSync(resolve(wasmSrc, file), resolve(destDir, file));
+}
+console.log(`[bg-assets] copied ${FILES.length} MediaPipe tasks-vision wasm files → ${destDir}`);

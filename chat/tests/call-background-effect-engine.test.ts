@@ -35,14 +35,18 @@ function engineWithCamera(opts: {
     setProcessor,
     stopProcessor,
   };
-  let publication: { isMuted: boolean; track: typeof track; source: Track.Source } | undefined =
+  const publication: { isMuted: boolean; track: typeof track; source: Track.Source } | undefined =
     opts.cameraOff ? undefined : { isMuted: false, track, source: Track.Source.Camera };
+  let activePublication = publication;
   const dropCamera = () => {
-    publication = undefined;
+    activePublication = undefined;
+  };
+  const setCameraMuted = (muted: boolean) => {
+    if (publication) publication.isMuted = muted;
   };
   const localParticipant = {
     getTrackPublication: (source: Track.Source) =>
-      source === Track.Source.Camera ? publication : undefined,
+      source === Track.Source.Camera ? activePublication : undefined,
     isCameraEnabled: !opts.cameraOff,
   };
 
@@ -58,7 +62,18 @@ function engineWithCamera(opts: {
   const errors: { effect: ActiveBackgroundEffect; error: unknown }[] = [];
   engine.on("backgroundEffectError", (e) => errors.push(e));
 
-  return { engine, setProcessor, stopProcessor, create, switchTo, track, states, errors, dropCamera };
+  return {
+    engine,
+    setProcessor,
+    stopProcessor,
+    create,
+    switchTo,
+    track,
+    states,
+    errors,
+    dropCamera,
+    setCameraMuted,
+  };
 }
 
 describe("CallEngine — camera background effect reconcile", () => {
@@ -175,6 +190,23 @@ describe("CallEngine — camera background effect reconcile", () => {
     ).handleLocalTrackUnpublished(
       { source: Track.Source.Camera, track, kind: Track.Kind.Video, trackSid: "cam-1" },
       { identity: "me" },
+    );
+
+    expect(states.at(-1)).toEqual({ kind: "no-camera" });
+  });
+
+  test("muting the camera reports no-camera (honest like the mic's no-mic)", async () => {
+    const { engine, setCameraMuted, states } = engineWithCamera({});
+    await engine.setBackgroundEffect({ kind: "blur" });
+
+    setCameraMuted(true);
+    (
+      engine as unknown as {
+        handleTrackMuteChanged: (p: unknown, who: unknown) => void;
+      }
+    ).handleTrackMuteChanged(
+      { source: Track.Source.Camera, isMuted: true },
+      { isLocal: true },
     );
 
     expect(states.at(-1)).toEqual({ kind: "no-camera" });

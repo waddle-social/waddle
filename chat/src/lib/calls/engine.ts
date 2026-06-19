@@ -1127,6 +1127,14 @@ export class CallEngine {
     participant: Participant,
   ) => {
     if (!participant.isLocal) return;
+    if (publication.source === Track.Source.Camera) {
+      // Camera mute stops the capture track, so an attached effect is no longer
+      // live — surface the honest `no-camera` state (mirrors the mic's no-mic),
+      // and re-reconcile on unmute, where the processor may come back bare.
+      this.emitBackgroundEffect();
+      void this.ensureBackgroundEffect();
+      return;
+    }
     if (publication.source !== Track.Source.Microphone) return;
     this.emitMicAudioProcessing();
     // Unmute restarts the track; reconcile (idempotent) re-attaches if needed.

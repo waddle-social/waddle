@@ -70,15 +70,22 @@ async function switchOptions(
   return { mode: "virtual-background", imagePath: await resolveImagePath(effect.image) };
 }
 
-// One outstanding object URL for the custom image. Revoked when the next custom
-// image is resolved so a sequence of uploads leaks at most one URL at a time.
-let activeObjectUrl: string | undefined;
-
 async function resolveImagePath(image: BackgroundImageRef): Promise<string> {
   if (image.source === "catalog") return catalogEntry(image.id).assetPath;
   const blob = await loadCustomBackground(image.ref);
   if (!blob) throw new Error("The uploaded background image is no longer available.");
-  if (activeObjectUrl) URL.revokeObjectURL(activeObjectUrl);
-  activeObjectUrl = URL.createObjectURL(blob);
-  return activeObjectUrl;
+  // A `data:` URL rather than `URL.createObjectURL`: the library loads it into a
+  // decoded `ImageBitmap` during init/switch and never needs the URL again, so a
+  // self-contained data URL avoids the object-URL revoke lifecycle entirely (no
+  // leak of the last URL, no use-after-revoke across a re-resolve).
+  return blobToDataUrl(blob);
+}
+
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
 }
