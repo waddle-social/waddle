@@ -29,10 +29,13 @@ stack, authentication bootstrap, upload transfer, or operations require it.
   projection of the xCal community events PubSub node for external calendar
   clients. The token is a bearer subscription secret stored by calendar
   clients; the route serves data only while the backing PubSub node remains
-  public/open, returns `Cache-Control: no-store`, scans at most the latest
-  10,000 published PubSub rows, emits up to 1,000 feed-eligible calendar items
-  after filtering RSVP-only sibling rows from that bounded window, and it does
-  not expose Waddle CRUD or control semantics.
+  public/open. Subscription tokens are community-scoped and non-expiring; all
+  authenticated users receive the same URL for a community, and rotating the
+  server `session_key` mass-invalidates existing calendar subscriptions. The
+  route returns `Cache-Control: no-store`, scans at most the latest 10,000
+  published PubSub rows, emits up to 1,000 feed-eligible calendar items after
+  filtering RSVP-only sibling rows from that bounded window, and it does not
+  expose Waddle CRUD or control semantics.
 - `PUT /api/upload/:slot_id`: XEP-0363 upload transfer after an XMPP slot request.
 - `OPTIONS /api/upload/:slot_id`: CORS preflight for XEP-0363 upload transfer.
 - `GET /api/files/:slot_id/:filename`: XEP-0363 download transfer.

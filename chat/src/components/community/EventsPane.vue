@@ -26,6 +26,8 @@ import type {
 import {
   copyCalendarFeedUrlToClipboard,
   isSameCalendarFeedRequestInput,
+  nextCalendarFeedCopyViewState,
+  type CalendarFeedCopyResult,
   type CalendarFeedRequestInput,
 } from "@/lib/calendar-feed-url";
 
@@ -335,8 +337,7 @@ watch(
   () => [props.communityJid, props.serverBaseUrl, props.sessionId] as const,
   () => {
     feedCopyAttempt += 1;
-    feedCopyFallbackUrl.value = null;
-    markFeedCopyState("idle");
+    applyFeedCopyTransition({ contextChanged: true });
   },
 );
 
@@ -437,8 +438,7 @@ function resetComposer() {
   rrule.value = null;
 }
 
-function markFeedCopyState(state: FeedCopyState) {
-  feedCopyState.value = state;
+function scheduleFeedCopyReset(state: FeedCopyState) {
   if (feedCopyResetTimer) clearTimeout(feedCopyResetTimer);
   if (state === "copied" || state === "error") {
     feedCopyResetTimer = setTimeout(() => {
@@ -446,6 +446,21 @@ function markFeedCopyState(state: FeedCopyState) {
       feedCopyResetTimer = null;
     }, 2_000);
   }
+}
+
+function applyFeedCopyTransition(input: {
+  contextChanged?: boolean;
+  startAttempt?: boolean;
+  result?: CalendarFeedCopyResult;
+}) {
+  const next = nextCalendarFeedCopyViewState({
+    state: feedCopyState.value,
+    fallbackUrl: feedCopyFallbackUrl.value,
+    ...input,
+  });
+  feedCopyState.value = next.state;
+  feedCopyFallbackUrl.value = next.fallbackUrl;
+  scheduleFeedCopyReset(next.state);
 }
 
 function currentFeedRequestInput(): CalendarFeedRequestInput {
@@ -461,12 +476,7 @@ async function copyCalendarFeedUrl() {
   const attempt = feedCopyAttempt + 1;
   feedCopyAttempt = attempt;
   const requestInput = currentFeedRequestInput();
-  feedCopyFallbackUrl.value = null;
-  if (typeof fetch === "undefined") {
-    markFeedCopyState("error");
-    return;
-  }
-  markFeedCopyState("loading");
+  applyFeedCopyTransition({ startAttempt: true });
   const result = await copyCalendarFeedUrlToClipboard(requestInput);
   if (
     attempt !== feedCopyAttempt
@@ -474,15 +484,7 @@ async function copyCalendarFeedUrl() {
   ) {
     return;
   }
-  if (result.status === "copied") {
-    feedCopyFallbackUrl.value = null;
-    markFeedCopyState("copied");
-    return;
-  }
-  if (result.status === "copy_failed") {
-    feedCopyFallbackUrl.value = result.url;
-  }
-  markFeedCopyState("error");
+  applyFeedCopyTransition({ result });
 }
 
 function selectFallbackUrl(event: FocusEvent) {

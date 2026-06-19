@@ -377,7 +377,7 @@ fn event_lines(
         lines.push(property("LOCATION", location));
     }
     if let Some(organizer) = organizer {
-        lines.push(property("ORGANIZER", organizer));
+        lines.push(cal_address_property("ORGANIZER", organizer));
     }
     if let Some(rrule) = event.rrule.as_ref() {
         lines.push(rrule_property(rrule));
@@ -410,6 +410,18 @@ fn inherited_end(master: &VEvent, dtstart: DateTime<Utc>) -> Option<DateTime<Utc
 
 fn property(name: &str, value: &str) -> String {
     format!("{name}:{}", escape_text(value))
+}
+
+fn cal_address_property(name: &str, value: &str) -> String {
+    let mut line = String::with_capacity(name.len() + value.len() + 1);
+    line.push_str(name);
+    line.push(':');
+    for ch in value.chars() {
+        if ch != '\r' && ch != '\n' {
+            line.push(ch);
+        }
+    }
+    line
 }
 
 fn date_property(name: &str, value: DateTime<Utc>) -> String {
@@ -657,7 +669,7 @@ mod tests {
                 .with_dtend(ts(2026, 6, 5, 22, 0))
                 .with_description("Bring snacks, drinks; and games\nSecond line")
                 .with_location("HQ, Room A")
-                .with_organizer("xmpp:alice@example.com")
+                .with_organizer("MAILTO:u+rsvp@example.com;type=rsvp,alt")
                 .with_rrule(
                     Rrule::new(Freq::Weekly)
                         .with_interval(2)
@@ -690,6 +702,8 @@ mod tests {
         assert!(ics.contains("RECURRENCE-ID:20260612T190000Z\r\n"));
         assert!(ics.contains("DTSTART:20260612T200000Z\r\n"));
         assert!(ics.contains("DESCRIPTION:Bring snacks\\, drinks\\; and games\\nSecond line\r\n"));
+        assert!(ics.contains("ORGANIZER:MAILTO:u+rsvp@example.com;type=rsvp,alt\r\n"));
+        assert!(!ics.contains("ORGANIZER:MAILTO:u+rsvp@example.com\\;type=rsvp\\,alt\r\n"));
         assert!(!ics.contains("ATTENDEE"));
         assert!(!ics.contains("bob@example.com"));
         for line in ics.trim_end().split("\r\n") {
