@@ -24,8 +24,13 @@ import {
 } from "./effect-id";
 import type { VideoBackgroundProcessor } from "./ops";
 
-/** Same default the library uses; named here so blur stays consistent. */
-const DEFAULT_BLUR_RADIUS = 10;
+/**
+ * Background-blur strength. Higher than the library's default of 10: the
+ * MediaPipe selfie mask has a hard, slightly aliased person/background boundary
+ * (the library composites a binary mask through a fixed edge feather we can't
+ * tune), and a stronger background blur makes that boundary far less noticeable.
+ */
+const DEFAULT_BLUR_RADIUS = 18;
 
 /**
  * Self-hosted asset locations, served same-origin from `public/`. Without these
