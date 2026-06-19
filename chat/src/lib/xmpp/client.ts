@@ -3234,7 +3234,7 @@ export class BrowserXmppClient {
       after_cursor: opts.afterCursor ?? null,
     });
   }
-  async adminChannelsCreate(opts: { name: string; topic?: string | null; spaceJid?: string | null; spaceNode?: string | null; isPublic?: boolean | null }): Promise<WasmAdminChannelRef> {
+  async adminChannelsCreate(opts: { name: string; topic?: string | null; spaceJid?: string | null; spaceNode?: string | null; isPublic?: boolean | null; membersOnly?: boolean | null }): Promise<WasmAdminChannelRef> {
     const xmpp = await this.requireConnectedXmpp();
     if (!xmpp.admin_channels_create) throw new Error("admin_channels_create binding missing");
     return await xmpp.admin_channels_create({
@@ -3243,9 +3243,10 @@ export class BrowserXmppClient {
       space_jid: opts.spaceJid ?? null,
       space_node: opts.spaceNode ?? null,
       is_public: opts.isPublic ?? null,
+      members_only: opts.membersOnly ?? null,
     });
   }
-  async adminChannelsUpdate(opts: { channelJid: string; name?: string | null; topic?: string | null; isPublic?: boolean | null }): Promise<WasmAdminChannelRef> {
+  async adminChannelsUpdate(opts: { channelJid: string; name?: string | null; topic?: string | null; isPublic?: boolean | null; membersOnly?: boolean | null }): Promise<WasmAdminChannelRef> {
     const xmpp = await this.requireConnectedXmpp();
     if (!xmpp.admin_channels_update) throw new Error("admin_channels_update binding missing");
     return await xmpp.admin_channels_update({
@@ -3253,6 +3254,7 @@ export class BrowserXmppClient {
       name: opts.name ?? null,
       topic: opts.topic ?? null,
       is_public: opts.isPublic ?? null,
+      members_only: opts.membersOnly ?? null,
     });
   }
   async adminChannelsDelete(opts: { channelJid: string }): Promise<boolean> {

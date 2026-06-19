@@ -189,6 +189,7 @@ async fn link_preview_lookup_for_muc_scope_allows_current_occupant_before_resolv
             nick: "alice".to_string(),
             effective_affiliation: Affiliation::Member,
             local_domain: "example.com".to_string(),
+            admission_revision: 0,
         })
         .await
         .expect("join room");

@@ -1,5 +1,15 @@
 use super::*;
 
+async fn current_admission_revision(
+    room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+) -> u64 {
+    room_actor
+        .ask(GetSnapshot)
+        .await
+        .expect("room snapshot")
+        .admission_revision
+}
+
 fn dm_call_message(from: &str, to: &str, payload: Element) -> xmpp_parsers::message::Message {
     let mut message = xmpp_parsers::message::Message::new(Some(to.parse().expect("to jid")));
     message.from = Some(from.parse().expect("from jid"));
@@ -1358,6 +1368,7 @@ async fn groupchat_personal_mention_pushes_affiliated_non_live_member() {
             nick: "alice".to_string(),
             effective_affiliation: Affiliation::Member,
             local_domain: "example.com".to_string(),
+            admission_revision: current_admission_revision(&room_actor).await,
         })
         .await
         .expect("join alice");
@@ -1444,6 +1455,7 @@ async fn groupchat_xep0513_occupant_id_mention_pushes_affiliated_member() {
             nick: "alice".to_string(),
             effective_affiliation: Affiliation::Member,
             local_domain: "example.com".to_string(),
+            admission_revision: current_admission_revision(&room_actor).await,
         })
         .await
         .expect("join alice");
@@ -1531,6 +1543,7 @@ async fn groupchat_xep0492_never_suppresses_personal_mentions_and_plain_messages
                 nick: "alice".to_string(),
                 effective_affiliation: Affiliation::Member,
                 local_domain: "example.com".to_string(),
+                admission_revision: current_admission_revision(&room_actor).await,
             })
             .await
             .expect("join alice");
@@ -1752,6 +1765,7 @@ async fn groupchat_public_default_suppresses_plain_push_until_always() {
                 nick: "alice".to_string(),
                 effective_affiliation: Affiliation::Member,
                 local_domain: "example.com".to_string(),
+                admission_revision: current_admission_revision(&room_actor).await,
             })
             .await
             .expect("join alice");
@@ -1860,6 +1874,7 @@ async fn groupchat_channel_mention_for_foreign_room_does_not_ping_current_room()
             nick: "alice".to_string(),
             effective_affiliation: Affiliation::Member,
             local_domain: "example.com".to_string(),
+            admission_revision: current_admission_revision(&room_actor).await,
         })
         .await
         .expect("join alice");
@@ -1955,6 +1970,7 @@ async fn groupchat_active_channel_mention_pushes_live_occupants_only() {
             // sender's role is fixture scaffolding.
             effective_affiliation: Affiliation::Admin,
             local_domain: "example.com".to_string(),
+            admission_revision: current_admission_revision(&room_actor).await,
         })
         .await
         .expect("join alice");
@@ -1964,6 +1980,7 @@ async fn groupchat_active_channel_mention_pushes_live_occupants_only() {
             nick: "bob".to_string(),
             effective_affiliation: Affiliation::Member,
             local_domain: "example.com".to_string(),
+            admission_revision: current_admission_revision(&room_actor).await,
         })
         .await
         .expect("join bob");
@@ -2051,6 +2068,7 @@ async fn groupchat_active_channel_mention_does_not_expand_to_live_unaffiliated_o
             // `NotifyAll` + no durable recipient = empty jobs).
             effective_affiliation: Affiliation::Admin,
             local_domain: "example.com".to_string(),
+            admission_revision: current_admission_revision(&room_actor).await,
         })
         .await
         .expect("join alice");
@@ -2060,6 +2078,7 @@ async fn groupchat_active_channel_mention_does_not_expand_to_live_unaffiliated_o
             nick: "bob".to_string(),
             effective_affiliation: Affiliation::None,
             local_domain: "example.com".to_string(),
+            admission_revision: current_admission_revision(&room_actor).await,
         })
         .await
         .expect("join bob without durable affiliation");
@@ -2151,6 +2170,7 @@ async fn groupchat_active_channel_mention_preserves_notify_all_for_non_live_alwa
             // members-only path; sender role is scaffolding.
             effective_affiliation: Affiliation::Admin,
             local_domain: "example.com".to_string(),
+            admission_revision: current_admission_revision(&room_actor).await,
         })
         .await
         .expect("join alice");
@@ -2160,6 +2180,7 @@ async fn groupchat_active_channel_mention_preserves_notify_all_for_non_live_alwa
             nick: "bob".to_string(),
             effective_affiliation: Affiliation::Member,
             local_domain: "example.com".to_string(),
+            admission_revision: current_admission_revision(&room_actor).await,
         })
         .await
         .expect("join bob");
@@ -3412,6 +3433,7 @@ async fn handle_message_groupchat_rejects_client_authored_extension_envelope() {
             nick: "alice".to_string(),
             effective_affiliation: Affiliation::Member,
             local_domain: "example.com".to_string(),
+            admission_revision: current_admission_revision(&room_actor).await,
         })
         .await
         .expect("join alice");
@@ -3487,6 +3509,7 @@ async fn handle_message_groupchat_extension_envelope_preserves_non_occupant_erro
             nick: "bob".to_string(),
             effective_affiliation: Affiliation::Member,
             local_domain: "example.com".to_string(),
+            admission_revision: current_admission_revision(&room_actor).await,
         })
         .await
         .expect("join bob");
@@ -4083,6 +4106,7 @@ async fn groupchat_messages_are_archived_and_returned_via_mam() {
             nick: "alice".to_string(),
             effective_affiliation: Affiliation::Member,
             local_domain: "example.com".to_string(),
+            admission_revision: current_admission_revision(&room_actor).await,
         })
         .await
         .expect("join room");
@@ -4178,6 +4202,7 @@ async fn groupchat_preview_request_is_stamped_and_archived_without_private_paylo
             nick: "alice".to_string(),
             effective_affiliation: Affiliation::Member,
             local_domain: "example.com".to_string(),
+            admission_revision: current_admission_revision(&room_actor).await,
         })
         .await
         .expect("join room");

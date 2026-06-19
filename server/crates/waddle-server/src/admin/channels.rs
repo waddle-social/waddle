@@ -14,8 +14,8 @@
 //!   filtered to a single tier.
 //! - `set-affiliation` — grant/revoke owner/admin/member/none/outcast;
 //!   `outcast` is the XEP-0045 §10.2 ban.
-//! - `kick` — XEP-0045 §9.1 role-change to `none` (occupant leaves but can
-//!   rejoin).
+//! - `kick` — XEP-0045 §9.1 role-change to `none`; for Waddle-managed
+//!   members-only channels this also revokes an explicit `member` affiliation.
 //!
 //! All handlers delegate to the typed dependencies on [`AppState`]:
 //! `room_registry` (`waddle_xmpp::muc::room_registry_actor::*`), and
@@ -28,7 +28,7 @@ use std::{
 
 use jid::{BareJid, FullJid};
 use kameo::actor::ActorRef;
-use tokio::sync::{Mutex, OwnedMutexGuard};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use waddle_xmpp::commands::{CommandContext, CommandResult};
 use waddle_xmpp::muc::room_registry_actor::{
     CreateRoom, DestroyRoom, GetOrCreateRoom, GetRoom, ListRooms,
@@ -36,8 +36,9 @@ use waddle_xmpp::muc::room_registry_actor::{
 use waddle_xmpp::muc::{
     affiliation::FederatedAffiliationConfig,
     room_actor::{
-        ApplyAdminItems, ChangeAffiliation, GetAffiliation, GetConfig, LeaveByRealJid,
-        ListAffiliations, ListOccupants, OccupantCount, RoomActor, UpdateConfig,
+        ApplyAdminItems, ApplyAffiliationChange, ChangeAffiliation, EnforceMembersOnlyAffiliations,
+        GetAffiliation, GetConfig, LeaveByRealJid, ListAffiliations, ListOccupants, OccupantCount,
+        RoomActor, UpdateConfig,
     },
     AdminItem, PinPermission, RoomConfig,
 };
@@ -57,8 +58,8 @@ use crate::channel_space_links::{ChannelSpaceLink, ChannelSpaceLinkError};
 use crate::db::actor::{DbExecute, DbQuery};
 use crate::db::{row_value, ValueExt};
 use crate::permissions::{
-    DeleteTuple, Object, ObjectType, PermissionError, Relation, Subject, SubjectType, Tuple,
-    WriteTuple,
+    CheckPermission, DeleteTuple, Object, ObjectType, Permission, PermissionError, Relation,
+    Subject, SubjectType, Tuple, WriteTuple,
 };
 use crate::server::xmpp_state::{
     delete_xmpp_channel, get_xmpp_channel, upsert_xmpp_channel, XmppChannelRecord,
@@ -87,7 +88,7 @@ pub const DEFAULT_PAGE_SIZE: u32 = 50;
 pub const MAX_PAGE_SIZE: u32 = 200;
 const MAX_NAME_LEN: usize = 80;
 const NS_MUC_USER: &str = "http://jabber.org/protocol/muc#user";
-type RoomConfigLockMap = dashmap::DashMap<BareJid, Arc<Mutex<()>>>;
+type RoomConfigLockMap = dashmap::DashMap<BareJid, Arc<Semaphore>>;
 
 // ---------------------------------------------------------------------------
 // Affiliation wire vocabulary
@@ -363,10 +364,12 @@ pub async fn register(
     }
     {
         let state = Arc::clone(&app_state);
+        let connections = Arc::clone(&connection_registry);
         registry
             .register(NODE_UPDATE, "Admin · Update channel", move |ctx| {
                 let state = Arc::clone(&state);
-                async move { handle_update(ctx, state).await }
+                let connections = Arc::clone(&connections);
+                async move { handle_update(ctx, state, connections).await }
             })
             .await;
     }
@@ -399,13 +402,15 @@ pub async fn register(
     }
     {
         let state = Arc::clone(&app_state);
+        let connections = Arc::clone(&connection_registry);
         registry
             .register(
                 NODE_SET_AFFILIATION,
                 "Admin · Set affiliation",
                 move |ctx| {
                     let state = Arc::clone(&state);
-                    async move { handle_set_affiliation(ctx, state).await }
+                    let connections = Arc::clone(&connections);
+                    async move { handle_set_affiliation(ctx, state, connections).await }
                 },
             )
             .await;
@@ -596,7 +601,11 @@ async fn handle_group_dm_rename(
     }
 }
 
-async fn handle_update(ctx: CommandContext, state: Arc<AppState>) -> CommandResult {
+async fn handle_update(
+    ctx: CommandContext,
+    state: Arc<AppState>,
+    connections: Arc<ConnectionRegistry>,
+) -> CommandResult {
     if let Err(forbidden) = caller_or_forbidden(&ctx, &state).await {
         return *forbidden;
     }
@@ -604,7 +613,7 @@ async fn handle_update(ctx: CommandContext, state: Arc<AppState>) -> CommandResu
         Ok(args) => args,
         Err(error) => return *bad_request(error),
     };
-    match run_update(&state, &args).await {
+    match run_update(&state, &connections, &args).await {
         Ok(channel) => CommandResult::Completed {
             form: Some(build_channel_form(&channel)),
             notes: vec![],
@@ -664,15 +673,20 @@ async fn handle_affiliations(ctx: CommandContext, state: Arc<AppState>) -> Comma
     }
 }
 
-async fn handle_set_affiliation(ctx: CommandContext, state: Arc<AppState>) -> CommandResult {
-    if let Err(forbidden) = caller_or_forbidden(&ctx, &state).await {
-        return *forbidden;
-    }
+async fn handle_set_affiliation(
+    ctx: CommandContext,
+    state: Arc<AppState>,
+    connections: Arc<ConnectionRegistry>,
+) -> CommandResult {
+    let caller_bare = match caller_or_forbidden(&ctx, &state).await {
+        Ok(caller) => caller,
+        Err(forbidden) => return *forbidden,
+    };
     let args = match parse_set_affiliation_args(ctx.command.form.as_ref()) {
         Ok(args) => args,
         Err(error) => return *bad_request(error),
     };
-    match run_set_affiliation(&state, &args).await {
+    match run_set_affiliation(&state, &connections, &caller_bare, &args).await {
         Ok(result) => CommandResult::Completed {
             form: Some(build_set_affiliation_form(&result)),
             notes: vec![],
@@ -1351,6 +1365,151 @@ async fn delete_channel_parent_tuple(
         Err(error) => Err(internal_err(format!(
             "permission actor failed deleting channel parent tuple: {error}"
         ))),
+    }
+}
+
+fn channel_affiliation_relation(affiliation: Affiliation) -> Option<&'static str> {
+    match affiliation {
+        Affiliation::Owner => Some("owner"),
+        Affiliation::Admin => Some("admin"),
+        Affiliation::Member => Some("member"),
+        Affiliation::Outcast => Some("outcast"),
+        Affiliation::None => None,
+    }
+}
+
+pub(crate) async fn explicit_channel_affiliations_for_jids(
+    state: &AppState,
+    channel_id: &str,
+    jids: impl IntoIterator<Item = BareJid>,
+) -> Result<Vec<(BareJid, Affiliation)>, String> {
+    let object = Object::new(ObjectType::Channel, channel_id);
+    let mut seen = BTreeSet::new();
+    let mut affiliations = Vec::new();
+    for jid in jids {
+        if !seen.insert(jid.clone()) {
+            continue;
+        }
+        let subject = Subject::user(jid.to_string());
+        let affiliation = if check_explicit_channel_permission(
+            state,
+            object.clone(),
+            subject.clone(),
+            Permission::Custom("outcast".into()),
+        )
+        .await?
+        {
+            Affiliation::Outcast
+        } else if check_explicit_channel_permission(
+            state,
+            object.clone(),
+            subject.clone(),
+            Permission::Owner,
+        )
+        .await?
+        {
+            Affiliation::Owner
+        } else if check_explicit_channel_permission(
+            state,
+            object.clone(),
+            subject.clone(),
+            Permission::Admin,
+        )
+        .await?
+        {
+            Affiliation::Admin
+        } else if check_explicit_channel_permission(
+            state,
+            object.clone(),
+            subject,
+            Permission::Member,
+        )
+        .await?
+        {
+            Affiliation::Member
+        } else {
+            Affiliation::None
+        };
+        affiliations.push((jid, affiliation));
+    }
+    Ok(affiliations)
+}
+
+async fn check_explicit_channel_permission(
+    state: &AppState,
+    object: Object,
+    subject: Subject,
+    permission: Permission,
+) -> Result<bool, String> {
+    state
+        .permission_actor
+        .ask(CheckPermission {
+            object,
+            subject,
+            permission,
+        })
+        .await
+        .map(|response| response.allowed)
+        .map_err(|error| format!("permission actor failed checking channel affiliation: {error}"))
+}
+
+async fn persist_channel_affiliation(
+    state: &AppState,
+    channel_id: &str,
+    jid: &BareJid,
+    affiliation: Affiliation,
+) -> Result<(), AdminErr> {
+    let object = Object::new(ObjectType::Channel, channel_id);
+    let subject = Subject::user(jid.to_string());
+
+    for relation in ["owner", "admin", "member", "outcast"] {
+        let tuple = Tuple::new(object.clone(), Relation::new(relation), subject.clone());
+        match state.permission_actor.ask(DeleteTuple { tuple }).await {
+            Ok(()) | Err(kameo::error::SendError::HandlerError(PermissionError::TupleNotFound)) => {
+            }
+            Err(error) => {
+                return Err(internal_err(format!(
+                    "permission actor failed deleting channel affiliation tuple: {error}"
+                )));
+            }
+        }
+    }
+
+    let Some(relation) = channel_affiliation_relation(affiliation) else {
+        return Ok(());
+    };
+    let tuple = Tuple::new(object, Relation::new(relation), subject);
+    match state.permission_actor.ask(WriteTuple { tuple }).await {
+        Ok(())
+        | Err(kameo::error::SendError::HandlerError(PermissionError::TupleAlreadyExists)) => Ok(()),
+        Err(error) => Err(internal_err(format!(
+            "permission actor failed writing channel affiliation tuple: {error}"
+        ))),
+    }
+}
+
+async fn persist_channel_affiliation_or_restore(
+    state: &AppState,
+    channel_id: &str,
+    jid: &BareJid,
+    previous_affiliation: Affiliation,
+    next_affiliation: Affiliation,
+) -> Result<(), AdminErr> {
+    match persist_channel_affiliation(state, channel_id, jid, next_affiliation).await {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            if persist_channel_affiliation(state, channel_id, jid, previous_affiliation)
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    channel_id = channel_id,
+                    jid = %jid,
+                    "failed to restore channel affiliation after persistence error"
+                );
+            }
+            Err(error)
+        }
     }
 }
 
@@ -2083,15 +2242,28 @@ async fn run_group_dm_rename(
     })
 }
 
-async fn acquire_room_config_lock(room_jid: &BareJid) -> OwnedMutexGuard<()> {
+fn room_config_lock(room_jid: &BareJid) -> Arc<Semaphore> {
     static LOCKS: OnceLock<RoomConfigLockMap> = OnceLock::new();
     // Retained process-local locks trade a small per-written-room map for no weak-lock race.
-    let lock = LOCKS
-        .get_or_init(RoomConfigLockMap::new)
-        .entry(room_jid.clone())
-        .or_insert_with(|| Arc::new(Mutex::new(())))
-        .clone();
-    lock.lock_owned().await
+    let locks = LOCKS.get_or_init(RoomConfigLockMap::new);
+    if let Some(existing) = locks.get(room_jid) {
+        return Arc::clone(existing.value());
+    }
+    let lock = Arc::new(Semaphore::new(1));
+    match locks.entry(room_jid.clone()) {
+        dashmap::mapref::entry::Entry::Occupied(existing) => Arc::clone(existing.get()),
+        dashmap::mapref::entry::Entry::Vacant(vacant) => {
+            vacant.insert(Arc::clone(&lock));
+            lock
+        }
+    }
+}
+
+pub(crate) async fn acquire_room_config_lock(room_jid: &BareJid) -> OwnedSemaphorePermit {
+    let lock = room_config_lock(room_jid);
+    lock.acquire_owned()
+        .await
+        .expect("room config lock semaphore is never closed")
 }
 
 async fn hydrate_group_dm_member_affiliations(
@@ -2288,6 +2460,17 @@ async fn rollback_room_config_if_revision(
         })
         .await
         .unwrap_or(false)
+}
+
+async fn broadcast_presence_updates(
+    connections: &ConnectionRegistry,
+    updates: Vec<(FullJid, xmpp_parsers::presence::Presence)>,
+) {
+    for (recipient, presence) in updates {
+        let _ = connections
+            .send_to(&recipient, Stanza::Presence(presence))
+            .await;
+    }
 }
 
 async fn group_dm_room_config_revision_is_current(
@@ -2643,7 +2826,11 @@ async fn validate_group_dm_members(
     Ok(())
 }
 
-async fn run_update(state: &AppState, args: &ChannelsUpdateArgs) -> Result<ChannelRef, AdminErr> {
+async fn run_update(
+    state: &AppState,
+    connections: &ConnectionRegistry,
+    args: &ChannelsUpdateArgs,
+) -> Result<ChannelRef, AdminErr> {
     let actor = state
         .room_registry
         .ask(GetRoom {
@@ -2700,6 +2887,26 @@ async fn run_update(state: &AppState, args: &ChannelsUpdateArgs) -> Result<Chann
         None
     };
 
+    let members_only_enforcement_affiliations = if !existing.members_only && new_members_only {
+        let snapshot = actor
+            .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+            .await
+            .map_err(send_err("room actor GetSnapshot"))?;
+        let occupant_jids: Vec<BareJid> = snapshot
+            .room
+            .occupants
+            .values()
+            .map(|occupant| occupant.real_jid.to_bare())
+            .collect();
+        Some(
+            explicit_channel_affiliations_for_jids(state, &channel_id, occupant_jids)
+                .await
+                .map_err(internal_err)?,
+        )
+    } else {
+        None
+    };
+
     let expected_revision = actor
         .ask(UpdateConfig {
             config: updated.clone(),
@@ -2752,6 +2959,16 @@ async fn run_update(state: &AppState, args: &ChannelsUpdateArgs) -> Result<Chann
             }
             return Err(error);
         }
+    }
+
+    if let Some(explicit_affiliations) = members_only_enforcement_affiliations {
+        let updates = actor
+            .ask(EnforceMembersOnlyAffiliations {
+                affiliations: explicit_affiliations,
+            })
+            .await
+            .map_err(send_err("room actor EnforceMembersOnlyAffiliations"))?;
+        broadcast_presence_updates(connections, updates).await;
     }
 
     Ok(ChannelRef {
@@ -3221,8 +3438,13 @@ async fn run_affiliations(
 
 async fn run_set_affiliation(
     state: &AppState,
+    connections: &ConnectionRegistry,
+    caller_bare: &BareJid,
     args: &ChannelsSetAffiliationArgs,
 ) -> Result<ChannelsSetAffiliationResult, AdminErr> {
+    let channel_id = waddle_xmpp::parse_managed_room_jid(&args.channel_jid)
+        .ok_or_else(|| bad_request("channel_jid must be a managed MUC room JID"))?;
+    let _config_guard = acquire_room_config_lock(&args.channel_jid).await;
     let actor = state
         .room_registry
         .ask(GetRoom {
@@ -3235,17 +3457,115 @@ async fn run_set_affiliation(
                 format!("no channel '{}'", args.channel_jid),
             ))))
         })?;
-    actor
-        .ask(ChangeAffiliation {
+    let previous_affiliation = actor
+        .ask(GetAffiliation {
             jid: args.member_jid.clone(),
-            affiliation: args.affiliation.to_muc(),
         })
         .await
-        .map_err(send_err("room actor ChangeAffiliation"))?;
+        .map_err(send_err("room actor GetAffiliation"))?;
+    let next_affiliation = args.affiliation.to_muc();
+    if next_affiliation != Affiliation::Owner && previous_affiliation == Affiliation::Owner {
+        let owners = actor
+            .ask(ListAffiliations {
+                filter: Some(Affiliation::Owner),
+            })
+            .await
+            .map_err(send_err("room actor ListAffiliations"))?;
+        if owners.len() == 1 && owners[0].jid == args.member_jid {
+            return Err(Box::new(CommandResult::Error(XmppError::conflict(Some(
+                "cannot remove the last owner from a room".to_string(),
+            )))));
+        }
+    }
+    let durable_previous_affiliation =
+        explicit_channel_affiliations_for_jids(state, &channel_id, [args.member_jid.clone()])
+            .await
+            .map_err(internal_err)?
+            .into_iter()
+            .next()
+            .map(|(_, affiliation)| affiliation)
+            .unwrap_or(Affiliation::None);
+    persist_channel_affiliation_or_restore(
+        state,
+        &channel_id,
+        &args.member_jid,
+        durable_previous_affiliation,
+        next_affiliation,
+    )
+    .await?;
+    let updates = match actor
+        .ask(ApplyAffiliationChange {
+            actor: Some(caller_bare.clone()),
+            jid: args.member_jid.clone(),
+            affiliation: next_affiliation,
+        })
+        .await
+    {
+        Ok(updates) => updates,
+        Err(kameo::error::SendError::HandlerError(
+            waddle_xmpp::muc::room_actor::AdminApplyError::CannotRemoveLastOwner,
+        )) => {
+            let _ = persist_channel_affiliation(
+                state,
+                &channel_id,
+                &args.member_jid,
+                durable_previous_affiliation,
+            )
+            .await;
+            return Err(Box::new(CommandResult::Error(XmppError::conflict(Some(
+                "cannot remove the last owner from a room".to_string(),
+            )))));
+        }
+        Err(error) => {
+            let _ = persist_channel_affiliation(
+                state,
+                &channel_id,
+                &args.member_jid,
+                durable_previous_affiliation,
+            )
+            .await;
+            return Err(send_err("room actor ApplyAffiliationChange")(error));
+        }
+    };
+    broadcast_presence_updates(connections, updates).await;
     Ok(ChannelsSetAffiliationResult {
         member_jid: args.member_jid.clone(),
         affiliation: args.affiliation,
     })
+}
+
+async fn sync_private_kick_affiliation_revocation(
+    state: &AppState,
+    connections: &ConnectionRegistry,
+    actor: &ActorRef<RoomActor>,
+    channel_id: &str,
+    caller_bare: &BareJid,
+    occupant_jid: &BareJid,
+    durable_previous_affiliation: Affiliation,
+) -> Result<(), AdminErr> {
+    match actor
+        .ask(ApplyAffiliationChange {
+            actor: Some(caller_bare.clone()),
+            jid: occupant_jid.clone(),
+            affiliation: Affiliation::None,
+        })
+        .await
+    {
+        Ok(affiliation_updates) => {
+            broadcast_presence_updates(connections, affiliation_updates).await;
+            Ok(())
+        }
+        Err(error) => {
+            let _ = persist_channel_affiliation(
+                state,
+                channel_id,
+                occupant_jid,
+                durable_previous_affiliation,
+            )
+            .await;
+            Err(send_err("room actor ApplyAffiliationChange (kick)")(error))
+        }
+    }
 }
 
 async fn run_kick(
@@ -3263,6 +3583,9 @@ async fn run_kick(
     // occupant presence stanzas via `build_kick_presence`. Admin V2
     // reuses the same actor message so the broadcast shape is
     // exactly identical to the IQ path.
+    let channel_id = waddle_xmpp::parse_managed_room_jid(&args.channel_jid)
+        .ok_or_else(|| bad_request("channel_jid must be a managed MUC room JID"))?;
+    let _config_guard = acquire_room_config_lock(&args.channel_jid).await;
     let actor = state
         .room_registry
         .ask(GetRoom {
@@ -3275,12 +3598,40 @@ async fn run_kick(
                 format!("no channel '{}'", args.channel_jid),
             ))))
         })?;
+    let config = actor
+        .ask(GetConfig)
+        .await
+        .map_err(send_err("room actor GetConfig"))?;
+    let caller_bare = caller_full.to_bare();
+    let durable_previous_affiliation = if config.members_only {
+        explicit_channel_affiliations_for_jids(state, &channel_id, [args.occupant_jid.clone()])
+            .await
+            .map_err(internal_err)?
+            .into_iter()
+            .next()
+            .map(|(_, affiliation)| affiliation)
+            .unwrap_or(Affiliation::None)
+    } else {
+        Affiliation::None
+    };
+    let revoke_members_only_member =
+        config.members_only && durable_previous_affiliation == Affiliation::Member;
+    if revoke_members_only_member {
+        persist_channel_affiliation_or_restore(
+            state,
+            &channel_id,
+            &args.occupant_jid,
+            durable_previous_affiliation,
+            Affiliation::None,
+        )
+        .await?;
+    }
     // Resolve the occupant's nick — `ApplyAdminItems` looks up by nick
     // in the role-change branch, so we must translate the caller's
-    // bare-JID handle into the room-nick first. If the target isn't
-    // currently joined, there's nothing on the wire to broadcast and
-    // no persistent state to mutate; complete with a stable result
-    // (see §9.1.1: the kick verb is about live occupants).
+    // bare-JID handle into the room-nick first. If the target is not
+    // currently joined, there is no role-kick presence to broadcast.
+    // Private managed-channel kicks still keep the durable membership
+    // revocation above and synchronize the actor affiliation list.
     let occupants = actor
         .ask(ListOccupants)
         .await
@@ -3290,6 +3641,18 @@ async fn run_kick(
         .find(|info| info.real_jid.to_bare() == args.occupant_jid)
         .map(|info| info.nick)
     else {
+        if revoke_members_only_member {
+            sync_private_kick_affiliation_revocation(
+                state,
+                connections,
+                &actor,
+                &channel_id,
+                &caller_bare,
+                &args.occupant_jid,
+                durable_previous_affiliation,
+            )
+            .await?;
+        }
         return Ok(ChannelsKickResult {
             occupant_jid: args.occupant_jid.clone(),
         });
@@ -3319,17 +3682,65 @@ async fn run_kick(
         .await
     {
         Ok(updates) => updates,
+        Err(kameo::error::SendError::HandlerError(
+            waddle_xmpp::muc::room_actor::AdminApplyError::OccupantNotFound(_),
+        )) if revoke_members_only_member => {
+            sync_private_kick_affiliation_revocation(
+                state,
+                connections,
+                &actor,
+                &channel_id,
+                &caller_bare,
+                &args.occupant_jid,
+                durable_previous_affiliation,
+            )
+            .await?;
+            return Ok(ChannelsKickResult {
+                occupant_jid: args.occupant_jid.clone(),
+            });
+        }
         Err(kameo::error::SendError::HandlerError(error)) => {
+            if revoke_members_only_member {
+                let _ = persist_channel_affiliation(
+                    state,
+                    &channel_id,
+                    &args.occupant_jid,
+                    durable_previous_affiliation,
+                )
+                .await;
+            }
             return Err(internal_err(format!(
                 "room actor ApplyAdminItems (kick) rejected: {error}"
             )));
         }
         Err(error) => {
+            if revoke_members_only_member {
+                let _ = persist_channel_affiliation(
+                    state,
+                    &channel_id,
+                    &args.occupant_jid,
+                    durable_previous_affiliation,
+                )
+                .await;
+            }
             return Err(internal_err(format!(
                 "room actor ApplyAdminItems (kick) failed: {error}"
             )));
         }
     };
+
+    if revoke_members_only_member {
+        sync_private_kick_affiliation_revocation(
+            state,
+            connections,
+            &actor,
+            &channel_id,
+            &caller_bare,
+            &args.occupant_jid,
+            durable_previous_affiliation,
+        )
+        .await?;
+    }
 
     for (recipient, presence) in updates {
         let _ = connections

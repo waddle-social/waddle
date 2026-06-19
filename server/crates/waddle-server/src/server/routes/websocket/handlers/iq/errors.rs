@@ -84,6 +84,29 @@ pub(crate) fn forbidden_iq_error(text: &str) -> StanzaError {
     )
 }
 
+/// `<not-allowed/>` (cancel) — requested operation is disallowed by
+/// the protocol or room policy even though the sender is otherwise
+/// authenticated.
+pub(crate) fn not_allowed_iq_error(text: &str) -> StanzaError {
+    StanzaError::new(
+        ErrorType::Cancel,
+        DefinedCondition::NotAllowed,
+        DEFAULT_LANG,
+        text,
+    )
+}
+
+/// `<conflict/>` (cancel) — a well-formed request conflicts with
+/// current state, e.g. removing the final room owner.
+pub(crate) fn conflict_iq_error(text: &str) -> StanzaError {
+    StanzaError::new(
+        ErrorType::Cancel,
+        DefinedCondition::Conflict,
+        DEFAULT_LANG,
+        text,
+    )
+}
+
 /// `<item-not-found/>` (cancel) — the addressed JID, node, or item
 /// does not exist.
 pub(crate) fn item_not_found_iq_error(text: &str) -> StanzaError {

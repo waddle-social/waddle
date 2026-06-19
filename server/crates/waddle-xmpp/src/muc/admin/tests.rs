@@ -1,4 +1,5 @@
 use super::*;
+use crate::{StanzaErrorCondition, StanzaErrorType};
 
 fn make_admin_get_iq(room_jid: &str, affiliation: &str) -> Iq {
     let query = Element::builder("query", NS_MUC_ADMIN)
@@ -89,6 +90,38 @@ fn test_parse_admin_query_set() {
 }
 
 #[test]
+fn test_parse_admin_query_set_normalizes_full_jid_to_bare() {
+    let iq = make_admin_set_iq("room@muc.example.com", "user@example.com/laptop", "member");
+    let query = parse_admin_query(&iq, "muc.example.com").unwrap();
+
+    assert_eq!(query.items.len(), 1);
+    assert_eq!(
+        query.items[0].jid.as_ref().unwrap().to_string(),
+        "user@example.com"
+    );
+    assert_eq!(query.items[0].affiliation, Some(Affiliation::Member));
+}
+
+#[test]
+fn test_parse_admin_query_set_rejects_malformed_jid() {
+    let iq = make_admin_set_iq("room@muc.example.com", "not a jid", "member");
+
+    let err = parse_admin_query(&iq, "muc.example.com").expect_err("malformed jid rejected");
+    match err {
+        XmppError::Stanza {
+            condition,
+            error_type,
+            text,
+        } => {
+            assert_eq!(condition, StanzaErrorCondition::BadRequest);
+            assert_eq!(error_type, StanzaErrorType::Modify);
+            assert_eq!(text.as_deref(), Some("Malformed jid: not a jid"));
+        }
+        other => panic!("expected bad-request stanza error, got {other:?}"),
+    }
+}
+
+#[test]
 fn test_parse_affiliation() {
     assert_eq!(parse_muc_affiliation("owner").unwrap(), Affiliation::Owner);
     assert_eq!(parse_muc_affiliation("admin").unwrap(), Affiliation::Admin);
@@ -133,6 +166,34 @@ fn test_build_admin_result() {
             ..
         }
     ));
+}
+
+#[test]
+fn test_build_role_result_includes_required_affiliation_and_full_jid() {
+    let room_jid: BareJid = "room@muc.example.com".parse().unwrap();
+    let to_jid: Jid = "requester@example.com/desktop".parse().unwrap();
+    let items = vec![(
+        "thirdwitch".to_string(),
+        Role::Moderator,
+        Affiliation::Member,
+        "hag66@example.com/pda".parse().unwrap(),
+    )];
+
+    let result = build_role_result("mod3", &room_jid, &to_jid, &items);
+    let Iq::Result {
+        payload: Some(query),
+        ..
+    } = result
+    else {
+        panic!("expected IQ result with query payload");
+    };
+    let item = query
+        .get_child("item", NS_MUC_ADMIN)
+        .expect("role result item");
+    assert_eq!(item.attr("nick"), Some("thirdwitch"));
+    assert_eq!(item.attr("role"), Some("moderator"));
+    assert_eq!(item.attr("affiliation"), Some("member"));
+    assert_eq!(item.attr("jid"), Some("hag66@example.com/pda"));
 }
 
 #[test]

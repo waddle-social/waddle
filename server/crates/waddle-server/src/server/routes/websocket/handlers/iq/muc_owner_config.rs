@@ -1,5 +1,6 @@
 use super::permissions::write_tuple_if_absent;
 use super::*;
+use crate::admin::channels::{acquire_room_config_lock, explicit_channel_affiliations_for_jids};
 
 fn data_form_value(form: &Element, var: &str) -> Option<String> {
     form.children()
@@ -26,12 +27,20 @@ pub(super) async fn apply_muc_owner_config(
     let room_actor = get_room_actor(state, room_jid)
         .await
         .ok_or_else(|| "room actor not found".to_string())?;
-    let mut config = room_actor
+    let _config_guard = acquire_room_config_lock(room_jid).await;
+    let snapshot = room_actor
         .ask(GetSnapshot)
         .await
-        .map_err(|error| format!("snapshot failed: {error:?}"))?
+        .map_err(|error| format!("snapshot failed: {error:?}"))?;
+    let previous_members_only = snapshot.room.config.members_only;
+    let previous_config = snapshot.room.config.clone();
+    let occupant_jids: Vec<BareJid> = snapshot
         .room
-        .config;
+        .occupants
+        .values()
+        .map(|occupant| occupant.real_jid.to_bare())
+        .collect();
+    let mut config = previous_config.clone();
 
     if let xmpp_parsers::iq::Iq::Set { payload: query, .. } = iq {
         if let Some(form) = query.get_child("x", DATA_FORMS_NS) {
@@ -78,16 +87,60 @@ pub(super) async fn apply_muc_owner_config(
     // Waddle rooms are persistent, non-anonymous collaboration surfaces.
     config.persistent = true;
 
-    room_actor
+    let channel_id = waddle_xmpp::parse_managed_room_jid(room_jid);
+    if let (Some(channel_id), Some(session)) = (channel_id.as_deref(), session) {
+        write_tuple_if_absent(
+            state,
+            Tuple::new(
+                Object::new(ObjectType::Channel, channel_id),
+                Relation::new("owner"),
+                Subject::user(&session.user_jid),
+            ),
+        )
+        .await
+        .map_err(|error| format!("channel owner tuple failed: {error}"))?;
+    }
+    let managed_enforcement_affiliations = if !previous_members_only && config.members_only {
+        if let Some(channel_id) = channel_id.as_deref() {
+            Some(
+                explicit_channel_affiliations_for_jids(
+                    &state.deps.app_state,
+                    channel_id,
+                    occupant_jids,
+                )
+                .await?,
+            )
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let expected_revision = room_actor
         .ask(UpdateConfig {
             config: config.clone(),
         })
         .await
         .map_err(|error| format!("config update failed: {error:?}"))?;
 
-    let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(room_jid) else {
+    let Some(channel_id) = channel_id else {
+        if !previous_members_only && config.members_only {
+            let updates = room_actor
+                .ask(EnforceMembersOnly)
+                .await
+                .map_err(|error| format!("members-only enforcement failed: {error:?}"))?;
+            for (recipient, presence) in updates {
+                let _ = state
+                    .deps
+                    .protocol
+                    .connection_registry
+                    .try_send_to(&recipient, Stanza::Presence(presence));
+            }
+        }
         return Ok(());
     };
+
     let now = chrono::Utc::now().to_rfc3339();
     let actor = state.deps.app_state.db_pool.global_actor().clone();
     let existing_channel_type = get_xmpp_channel(actor.clone(), &channel_id)
@@ -101,7 +154,7 @@ pub(super) async fn apply_muc_owner_config(
     } else {
         "text".to_string()
     };
-    actor
+    if let Err(error) = actor
         .ask(DbExecute {
             sql: r#"
                 INSERT INTO channels (id, name, description, channel_type, position, is_default, pin_permission, members_only, public_room, created_at, updated_at)
@@ -118,8 +171,8 @@ pub(super) async fn apply_muc_owner_config(
             .to_string(),
             params: vec![
                 channel_id.clone().into(),
-                config.name.into(),
-                config.description.into(),
+                config.name.clone().into(),
+                config.description.clone().into(),
                 channel_type.into(),
                 config.pin_permission.as_form_value().into(),
                 config.members_only.into(),
@@ -129,31 +182,45 @@ pub(super) async fn apply_muc_owner_config(
             ],
         })
         .await
-        .map_err(|error| format!("channel upsert failed: {error}"))?;
+    {
+        let _ = room_actor
+            .ask(waddle_xmpp::muc::room_actor::RollbackConfigIfRevision {
+                expected_revision,
+                config: previous_config,
+            })
+            .await;
+        return Err(format!("channel upsert failed: {error}"));
+    }
 
-    // Write channel#owner → session user so the creator can always rejoin the
-    // managed room after a server restart (before a Space bookmark is published).
-    // XEP-0045 §10 requires the room creator to be an owner; without this tuple
-    // the channel becomes unjoinable after restart.
-    match session {
-        Some(session) => {
-            write_tuple_if_absent(
-                state,
-                Tuple::new(
-                    Object::new(ObjectType::Channel, &channel_id),
-                    Relation::new("owner"),
-                    Subject::user(&session.user_jid),
-                ),
-            )
-            .await
-            .map_err(|error| format!("channel owner tuple failed: {error}"))?;
-        }
-        None => {
-            warn!(
-                channel_id = %channel_id,
-                "apply_muc_owner_config called without a session; \
-                 channel owner tuple not written — room may be inaccessible after server restart"
-            );
+    // The channel#owner tuple was written before the config update/upsert so the
+    // creator can always rejoin after restart, before a Space bookmark is
+    // published. XEP-0045 §10 requires the room creator to be an owner.
+    if session.is_none() {
+        warn!(
+            channel_id = %channel_id,
+            "apply_muc_owner_config called without a session; \
+             channel owner tuple not written — room may be inaccessible after server restart"
+        );
+    }
+
+    if !previous_members_only && config.members_only {
+        let updates = if let Some(affiliations) = managed_enforcement_affiliations {
+            room_actor
+                .ask(EnforceMembersOnlyAffiliations { affiliations })
+                .await
+                .map_err(|error| format!("members-only enforcement failed: {error:?}"))?
+        } else {
+            room_actor
+                .ask(EnforceMembersOnly)
+                .await
+                .map_err(|error| format!("members-only enforcement failed: {error:?}"))?
+        };
+        for (recipient, presence) in updates {
+            let _ = state
+                .deps
+                .protocol
+                .connection_registry
+                .try_send_to(&recipient, Stanza::Presence(presence));
         }
     }
 

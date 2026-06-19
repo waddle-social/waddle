@@ -4,6 +4,7 @@ pub(super) async fn resolve_managed_channel_affiliation(
     state: &WebSocketState,
     session: &Session,
     channel_id: &str,
+    members_only: bool,
 ) -> Result<Option<Affiliation>, ()> {
     let object = Object::new(ObjectType::Channel, channel_id);
     let subject = Subject::user(&session.user_jid);
@@ -28,7 +29,7 @@ pub(super) async fn resolve_managed_channel_affiliation(
         }
     }
 
-    if matches!(channel_id, "chat" | "announcements" | "github-actions") {
+    if !members_only && matches!(channel_id, "chat" | "announcements" | "github-actions") {
         let server = Object::new(ObjectType::Server, DEPLOYMENT_SERVER_ID);
         if check_channel_permission(state, server.clone(), subject.clone(), Permission::Owner)
             .await?
@@ -45,9 +46,6 @@ pub(super) async fn resolve_managed_channel_affiliation(
         }
     }
 
-    if check_channel_permission(state, object, subject, Permission::Read).await? {
-        return Ok(Some(Affiliation::Member));
-    }
     Ok(None)
 }
 

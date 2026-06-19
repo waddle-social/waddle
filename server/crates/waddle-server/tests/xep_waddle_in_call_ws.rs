@@ -13,12 +13,16 @@ const BOB_PASSWORD: &str = "bob-password";
 const CAROL: &str = "carol";
 const CAROL_PASSWORD: &str = "carol-password";
 const NS_CLIENT: &str = "jabber:client";
+const NS_COMMANDS: &str = "http://jabber.org/protocol/commands";
+const NS_DATA: &str = "jabber:x:data";
 const NS_HINTS: &str = "urn:xmpp:hints";
 const NS_MAM: &str = "urn:xmpp:mam:2";
 const NS_MUC: &str = "http://jabber.org/protocol/muc";
 const NS_MUJI: &str = "urn:xmpp:jingle:muji:0";
 const NS_RTP: &str = "urn:xmpp:jingle:apps:rtp:1";
 const NS_WADDLE_IN_CALL: &str = "urn:waddle:in-call:0";
+const NODE_CHANNELS_CREATE: &str = "urn:waddle:admin:channels:create:0";
+const NODE_CHANNELS_SET_AFFILIATION: &str = "urn:waddle:admin:channels:set-affiliation:0";
 static TEST_SERIAL: Mutex<()> = Mutex::const_new(());
 
 fn attr(name: &'static str) -> minidom::rxml::NcName {
@@ -158,6 +162,79 @@ async fn join_room(client: &mut WsXmppClient, room: &str, nick: &str) {
         .recv_until(|frame| frame.contains("<subject"))
         .await
         .expect("join responses");
+}
+
+fn frame_has_iq_id(frame: &str, id: &str) -> bool {
+    frame.contains(&format!(r#"id='{id}'"#)) || frame.contains(&format!(r#"id="{id}""#))
+}
+
+fn submit_form(node: &str, extra: &str) -> String {
+    format!(
+        r#"<x xmlns="{NS_DATA}" type="submit"><field var="FORM_TYPE" type="hidden"><value>{node}</value></field>{extra}</x>"#
+    )
+}
+
+fn text_field(var: &str, value: &str) -> String {
+    format!(r#"<field var="{var}" type="text-single"><value>{value}</value></field>"#)
+}
+
+fn bool_field(var: &str, value: bool) -> String {
+    let value = if value { "1" } else { "0" };
+    format!(r#"<field var="{var}" type="boolean"><value>{value}</value></field>"#)
+}
+
+fn is_result(frame: &str) -> bool {
+    frame.contains(r#"type='result'"#) || frame.contains(r#"type="result""#)
+}
+
+fn extract_field(frame: &str, var: &str) -> Option<String> {
+    let marker_sq = format!(r#"var='{var}'"#);
+    let marker_dq = format!(r#"var="{var}""#);
+    let idx = frame.find(&marker_sq).or_else(|| frame.find(&marker_dq))?;
+    let after = &frame[idx..];
+    let open = after.find("<value>")?;
+    let inner = &after[open + "<value>".len()..];
+    let close = inner.find("</value>")?;
+    Some(inner[..close].to_string())
+}
+
+async fn send_admin_command(
+    client: &mut WsXmppClient,
+    node: &str,
+    id: &str,
+    form_xml: &str,
+) -> String {
+    let body = format!(
+        r#"<command xmlns="{NS_COMMANDS}" node="{node}" action="execute">{form_xml}</command>"#
+    );
+    client
+        .send(&format!(
+            r#"<iq type="set" id="{id}" to="{DOMAIN}">{body}</iq>"#
+        ))
+        .await
+        .expect("send admin command");
+    client
+        .recv_matching(|frame| frame.contains("<iq") && frame_has_iq_id(frame, id))
+        .await
+        .expect("admin command response")
+}
+
+async fn grant_channel_member(admin: &mut WsXmppClient, channel_jid: &str, member_jid: &str) {
+    let extra = format!(
+        "{}{}{}",
+        text_field("channel_jid", channel_jid),
+        text_field("member_jid", member_jid),
+        text_field("affiliation", "member"),
+    );
+    let id = format!("grant-member-{}", uuid::Uuid::new_v4());
+    let resp = send_admin_command(
+        admin,
+        NODE_CHANNELS_SET_AFFILIATION,
+        &id,
+        &submit_form(NODE_CHANNELS_SET_AFFILIATION, &extra),
+    )
+    .await;
+    assert!(is_result(&resp), "member grant failed: {resp}");
 }
 
 #[tokio::test]
@@ -316,6 +393,76 @@ async fn raised_hand_replays_to_late_joiner_and_clears_on_lower() {
 
     let _ = carol.close().await;
     let _ = alice.close().await;
+}
+
+#[tokio::test]
+async fn managed_members_only_join_replays_raised_hand_state() {
+    let _guard = TEST_SERIAL.lock().await;
+    let server =
+        TestServer::start_with_extra_accounts(&[(BOB, BOB_PASSWORD), (CAROL, CAROL_PASSWORD)]);
+    let alice_password = server.fixed_account_password().to_string();
+    let mut admin = connect(&server, ALICE, &alice_password, "managed-hand-admin").await;
+    let mut bob = connect(&server, BOB, BOB_PASSWORD, "managed-hand-bob").await;
+    let mut carol = connect(&server, CAROL, CAROL_PASSWORD, "managed-hand-carol").await;
+
+    let extra = format!(
+        "{}{}{}",
+        text_field("name", &format!("managed-hand-{}", uuid::Uuid::new_v4())),
+        bool_field("is_public", false),
+        bool_field("members_only", true),
+    );
+    let create_resp = send_admin_command(
+        &mut admin,
+        NODE_CHANNELS_CREATE,
+        "managed-hand-create",
+        &submit_form(NODE_CHANNELS_CREATE, &extra),
+    )
+    .await;
+    assert!(
+        is_result(&create_resp),
+        "channel create failed: {create_resp}"
+    );
+    let channel_jid = extract_field(&create_resp, "channel_jid").expect("channel_jid");
+
+    grant_channel_member(&mut admin, &channel_jid, &format!("{BOB}@{DOMAIN}")).await;
+    grant_channel_member(&mut admin, &channel_jid, &format!("{CAROL}@{DOMAIN}")).await;
+
+    join_room(&mut bob, &channel_jid, BOB).await;
+
+    bob.send(&call_presence(&channel_jid, BOB, true))
+        .await
+        .expect("bob raises hand");
+    bob.recv_matching(|f| f.contains("<presence") && f.contains("hand-raised"))
+        .await
+        .expect("bob sees own raised-hand echo");
+
+    carol
+        .send(&muc_join_presence(&channel_jid, CAROL))
+        .await
+        .expect("carol joins members-only room");
+    let replay = carol
+        .recv_until(|f| f.contains("<subject"))
+        .await
+        .expect("carol join replay");
+    let bob_from = format!("{channel_jid}/{BOB}");
+    let carol_from = format!("{channel_jid}/{CAROL}");
+    assert!(
+        replay
+            .iter()
+            .any(|f| f.contains(&bob_from) && f.contains("hand-raised")),
+        "managed members-only replay should include bob's raised hand: {replay:?}"
+    );
+    assert!(
+        replay.iter().any(|f| {
+            f.contains(&carol_from)
+                && (f.contains("code='110'") || f.contains(r#"code="110""#))
+        }),
+        "allowed managed members-only join should include carol's self-presence status 110: {replay:?}"
+    );
+
+    let _ = carol.close().await;
+    let _ = bob.close().await;
+    let _ = admin.close().await;
 }
 
 #[tokio::test]

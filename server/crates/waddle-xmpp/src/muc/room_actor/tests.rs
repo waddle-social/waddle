@@ -4,6 +4,7 @@ use crate::muc::admin::AdminItem;
 use crate::xep::xep0421::OccupantIdSecret;
 use kameo::actor::{ActorRef, Spawn};
 use kameo::error::SendError;
+use xmpp_parsers::presence::{Presence, Type as PresenceType};
 
 fn test_secret() -> OccupantIdSecret {
     OccupantIdSecret::for_testing(b"test-secret".to_vec())
@@ -25,6 +26,12 @@ fn test_full_jid(user: &str) -> FullJid {
         .expect("valid jid")
 }
 
+fn test_full_jid_resource(user: &str, resource: &str) -> FullJid {
+    format!("{}@example.com/{}", user, resource)
+        .parse()
+        .expect("valid jid")
+}
+
 async fn spawn_room_actor() -> ActorRef<RoomActor> {
     RoomActor::spawn(RoomActor::new(test_room(), test_secret()))
 }
@@ -41,6 +48,18 @@ async fn spawn_room_actor_with_config(mut config: RoomConfig) -> ActorRef<RoomAc
         ),
         test_secret(),
     ))
+}
+
+fn presence_has_status(presence: &Presence, code: &str) -> bool {
+    presence.payloads.iter().any(|payload| {
+        payload.name() == "x"
+            && payload.ns() == "http://jabber.org/protocol/muc#user"
+            && payload.children().any(|child| {
+                child.name() == "status"
+                    && child.ns() == "http://jabber.org/protocol/muc#user"
+                    && child.attr("code") == Some(code)
+            })
+    })
 }
 
 #[tokio::test]
@@ -140,6 +159,7 @@ async fn test_join_existing_session_allowed_when_room_full() {
             nick: "alice".to_string(),
             effective_affiliation: Affiliation::Member,
             local_domain: "example.com".to_string(),
+            admission_revision: 0,
         })
         .await
         .expect("first join should succeed");
@@ -150,6 +170,7 @@ async fn test_join_existing_session_allowed_when_room_full() {
             nick: "alice".to_string(),
             effective_affiliation: Affiliation::Member,
             local_domain: "example.com".to_string(),
+            admission_revision: 0,
         })
         .await
         .expect("existing session rejoin should bypass full-room rejection");
@@ -274,6 +295,43 @@ async fn test_get_and_update_config() {
 }
 
 #[tokio::test]
+async fn members_only_enforcement_ejects_current_non_members_with_status_322() {
+    let actor = spawn_room_actor_with_config(RoomConfig {
+        members_only: false,
+        ..RoomConfig::default()
+    })
+    .await;
+    let alice = test_full_jid("alice");
+
+    actor
+        .ask(Join {
+            nick: "alice".to_string(),
+            real_jid: alice.clone(),
+            role: Role::Participant,
+            affiliation: Affiliation::None,
+        })
+        .await
+        .expect("join");
+
+    let mut config = actor.ask(GetConfig).await.expect("config");
+    config.members_only = true;
+    actor
+        .ask(UpdateConfig { config })
+        .await
+        .expect("config update");
+
+    let updates = actor.ask(EnforceMembersOnly).await.expect("enforce");
+    assert_eq!(updates.len(), 1, "only Alice should receive her removal");
+    assert_eq!(updates[0].0, alice);
+    assert_eq!(updates[0].1.type_, PresenceType::Unavailable);
+    assert!(presence_has_status(&updates[0].1, "322"));
+    assert!(presence_has_status(&updates[0].1, "110"));
+
+    let count = actor.ask(OccupantCount).await.expect("count");
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
 async fn test_change_and_get_affiliation() {
     let actor = spawn_room_actor().await;
     let jid: BareJid = "alice@example.com".parse().expect("jid");
@@ -294,6 +352,49 @@ async fn test_change_and_get_affiliation() {
 
     let aff = actor.ask(GetAffiliation { jid }).await.expect("ask");
     assert_eq!(aff, Affiliation::Admin);
+}
+
+#[tokio::test]
+async fn membership_revocation_in_members_only_room_ejects_occupant_with_status_321() {
+    let actor = spawn_room_actor().await;
+    let alice_bare: BareJid = "alice@example.com".parse().expect("jid");
+    let alice = test_full_jid("alice");
+
+    actor
+        .ask(ChangeAffiliation {
+            jid: alice_bare.clone(),
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("member grant");
+    let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: alice.clone(),
+            nick: "alice".to_string(),
+            effective_affiliation: Affiliation::Member,
+            local_domain: "example.com".to_string(),
+            admission_revision: snapshot.admission_revision,
+        })
+        .await
+        .expect("join");
+
+    let updates = actor
+        .ask(ApplyAffiliationChange {
+            actor: Some("admin@example.com".parse().expect("admin")),
+            jid: alice_bare,
+            affiliation: Affiliation::None,
+        })
+        .await
+        .expect("apply");
+    assert_eq!(updates.len(), 1, "only Alice should receive her removal");
+    assert_eq!(updates[0].0, alice);
+    assert_eq!(updates[0].1.type_, PresenceType::Unavailable);
+    assert!(presence_has_status(&updates[0].1, "321"));
+    assert!(presence_has_status(&updates[0].1, "110"));
+
+    let count = actor.ask(OccupantCount).await.expect("count");
+    assert_eq!(count, 0);
 }
 
 #[tokio::test]
@@ -376,9 +477,9 @@ async fn test_apply_admin_items_rejects_moderator_role_change_on_admin() {
 
     assert!(matches!(
         result,
-        Err(SendError::HandlerError(AdminApplyError::PermissionDenied(
-            _
-        )))
+        Err(SendError::HandlerError(
+            AdminApplyError::CannotModifyPrivilegedRole
+        ))
     ));
 
     let occupant = actor
@@ -393,6 +494,113 @@ async fn test_apply_admin_items_rejects_moderator_role_change_on_admin() {
     let count = actor.ask(OccupantCount).await.expect("count");
     assert_eq!(
         count, 1,
+        "actor should stay healthy after permission denial"
+    );
+}
+
+#[tokio::test]
+async fn test_apply_admin_items_rejects_admin_role_change_on_admin() {
+    let actor = spawn_room_actor().await;
+
+    actor
+        .ask(Join {
+            nick: "alice".to_string(),
+            real_jid: test_full_jid("alice"),
+            role: Role::Moderator,
+            affiliation: Affiliation::Admin,
+        })
+        .await
+        .expect("join alice");
+
+    let result = actor
+        .ask(ApplyAdminItems {
+            sender_jid: test_full_jid("bob"),
+            sender_affiliation: Affiliation::Admin,
+            sender_role: Role::Moderator,
+            items: vec![AdminItem {
+                jid: None,
+                nick: Some("alice".to_string()),
+                affiliation: None,
+                role: Some(Role::None),
+                reason: None,
+            }],
+        })
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(SendError::HandlerError(
+            AdminApplyError::CannotModifyPrivilegedRole
+        ))
+    ));
+
+    let occupant = actor
+        .ask(GetOccupantByNick {
+            nick: "alice".to_string(),
+        })
+        .await
+        .expect("occupant")
+        .expect("occupant exists");
+    assert_eq!(occupant.role, Role::Moderator);
+}
+
+#[tokio::test]
+async fn test_apply_admin_items_rejects_moderator_grant_from_role_only_moderator() {
+    let actor = spawn_room_actor().await;
+
+    actor
+        .ask(Join {
+            nick: "bob".to_string(),
+            real_jid: test_full_jid("bob"),
+            role: Role::Moderator,
+            affiliation: Affiliation::None,
+        })
+        .await
+        .expect("join bob");
+    actor
+        .ask(Join {
+            nick: "carol".to_string(),
+            real_jid: test_full_jid("carol"),
+            role: Role::Participant,
+            affiliation: Affiliation::None,
+        })
+        .await
+        .expect("join carol");
+
+    let result = actor
+        .ask(ApplyAdminItems {
+            sender_jid: test_full_jid("bob"),
+            sender_affiliation: Affiliation::None,
+            sender_role: Role::Moderator,
+            items: vec![AdminItem {
+                jid: None,
+                nick: Some("carol".to_string()),
+                affiliation: None,
+                role: Some(Role::Moderator),
+                reason: None,
+            }],
+        })
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(SendError::HandlerError(AdminApplyError::PermissionDenied(
+            _
+        )))
+    ));
+
+    let occupant = actor
+        .ask(GetOccupantByNick {
+            nick: "carol".to_string(),
+        })
+        .await
+        .expect("occupant")
+        .expect("occupant exists");
+    assert_eq!(occupant.role, Role::Participant);
+
+    let count = actor.ask(OccupantCount).await.expect("count");
+    assert_eq!(
+        count, 2,
         "actor should stay healthy after permission denial"
     );
 }
@@ -437,6 +645,409 @@ async fn test_apply_admin_items_cannot_remove_last_owner() {
         .await
         .expect("owner check");
     assert!(still_owner, "last owner must be preserved");
+}
+
+#[tokio::test]
+async fn admin_cannot_ban_or_deaffiliate_owner() {
+    let actor = spawn_room_actor().await;
+    let owner_jid: BareJid = "owner@example.com".parse().expect("valid bare jid");
+    let other_owner_jid: BareJid = "other-owner@example.com".parse().expect("valid bare jid");
+
+    actor
+        .ask(ChangeAffiliation {
+            jid: owner_jid.clone(),
+            affiliation: Affiliation::Owner,
+        })
+        .await
+        .expect("set owner");
+    actor
+        .ask(ChangeAffiliation {
+            jid: other_owner_jid,
+            affiliation: Affiliation::Owner,
+        })
+        .await
+        .expect("set other owner");
+
+    let result = actor
+        .ask(ApplyAdminItems {
+            sender_jid: test_full_jid("admin"),
+            sender_affiliation: Affiliation::Admin,
+            sender_role: Role::Moderator,
+            items: vec![AdminItem {
+                jid: Some(owner_jid.clone()),
+                nick: None,
+                affiliation: Some(Affiliation::Outcast),
+                role: None,
+                reason: None,
+            }],
+        })
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(SendError::HandlerError(
+            AdminApplyError::CannotAdminModifyOwner
+        ))
+    ));
+
+    let still_owner = actor
+        .ask(IsOwner { jid: owner_jid })
+        .await
+        .expect("owner check");
+    assert!(still_owner, "admin must not be able to ban an owner");
+}
+
+#[tokio::test]
+async fn admin_cannot_modify_admin_affiliations() {
+    let actor = spawn_room_actor().await;
+    let target_admin: BareJid = "target-admin@example.com".parse().expect("target admin");
+    let target_member: BareJid = "target-member@example.com".parse().expect("target member");
+
+    actor
+        .ask(ChangeAffiliation {
+            jid: target_admin.clone(),
+            affiliation: Affiliation::Admin,
+        })
+        .await
+        .expect("target admin affiliation");
+    actor
+        .ask(ChangeAffiliation {
+            jid: target_member.clone(),
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("target member affiliation");
+
+    let demote_result = actor
+        .ask(ApplyAdminItems {
+            sender_jid: test_full_jid("admin"),
+            sender_affiliation: Affiliation::Admin,
+            sender_role: Role::Moderator,
+            items: vec![AdminItem {
+                jid: Some(target_admin.clone()),
+                nick: None,
+                affiliation: Some(Affiliation::Member),
+                role: None,
+                reason: None,
+            }],
+        })
+        .await;
+    assert!(matches!(
+        demote_result,
+        Err(SendError::HandlerError(AdminApplyError::PermissionDenied(
+            _
+        )))
+    ));
+
+    let promote_result = actor
+        .ask(ApplyAdminItems {
+            sender_jid: test_full_jid("admin"),
+            sender_affiliation: Affiliation::Admin,
+            sender_role: Role::Moderator,
+            items: vec![AdminItem {
+                jid: Some(target_member.clone()),
+                nick: None,
+                affiliation: Some(Affiliation::Admin),
+                role: None,
+                reason: None,
+            }],
+        })
+        .await;
+    assert!(matches!(
+        promote_result,
+        Err(SendError::HandlerError(AdminApplyError::PermissionDenied(
+            _
+        )))
+    ));
+
+    let snapshot = actor.ask(GetSnapshot).await.expect("snapshot").room;
+    assert_eq!(snapshot.get_affiliation(&target_admin), Affiliation::Admin);
+    assert_eq!(
+        snapshot.get_affiliation(&target_member),
+        Affiliation::Member
+    );
+}
+
+#[tokio::test]
+async fn affiliation_batch_validation_happens_before_members_only_ejection() {
+    let actor = spawn_room_actor_with_config(RoomConfig {
+        members_only: true,
+        ..RoomConfig::default()
+    })
+    .await;
+    let alice_bare: BareJid = "alice@example.com".parse().expect("alice bare");
+    let owner_bare: BareJid = "owner@example.com".parse().expect("owner bare");
+    let alice = test_full_jid("alice");
+
+    actor
+        .ask(ChangeAffiliation {
+            jid: alice_bare.clone(),
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("alice member");
+    actor
+        .ask(ChangeAffiliation {
+            jid: owner_bare.clone(),
+            affiliation: Affiliation::Owner,
+        })
+        .await
+        .expect("owner");
+    let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: alice.clone(),
+            nick: "alice".to_string(),
+            effective_affiliation: Affiliation::Member,
+            local_domain: "example.com".to_string(),
+            admission_revision: snapshot.admission_revision,
+        })
+        .await
+        .expect("alice join");
+
+    let result = actor
+        .ask(ApplyAdminItems {
+            sender_jid: test_full_jid("admin"),
+            sender_affiliation: Affiliation::Admin,
+            sender_role: Role::Moderator,
+            items: vec![
+                AdminItem {
+                    jid: Some(alice_bare.clone()),
+                    nick: None,
+                    affiliation: Some(Affiliation::None),
+                    role: None,
+                    reason: None,
+                },
+                AdminItem {
+                    jid: Some(owner_bare.clone()),
+                    nick: None,
+                    affiliation: Some(Affiliation::Outcast),
+                    role: None,
+                    reason: None,
+                },
+            ],
+        })
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(SendError::HandlerError(
+            AdminApplyError::CannotAdminModifyOwner
+        ))
+    ));
+    let snapshot = actor.ask(GetSnapshot).await.expect("snapshot").room;
+    assert_eq!(snapshot.get_affiliation(&alice_bare), Affiliation::Member);
+    assert_eq!(snapshot.find_nick_by_real_jid(&alice), Some("alice"));
+    assert_eq!(snapshot.get_affiliation(&owner_bare), Affiliation::Owner);
+}
+
+#[tokio::test]
+async fn stale_admission_revision_returns_retryable_error_without_joining() {
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    let config = RoomConfig {
+        name: "Renamed".to_string(),
+        ..RoomConfig::default()
+    };
+    actor
+        .ask(UpdateConfig { config })
+        .await
+        .expect("config update");
+
+    let result = actor
+        .ask(JoinWithAffiliation {
+            sender_jid: alice.clone(),
+            nick: "alice".to_string(),
+            effective_affiliation: Affiliation::None,
+            local_domain: "example.com".to_string(),
+            admission_revision: 0,
+        })
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(SendError::HandlerError(
+            RoomActorError::StaleAdmissionRevision
+        ))
+    ));
+    let snapshot = actor.ask(GetSnapshot).await.expect("snapshot").room;
+    assert!(snapshot.find_nick_by_real_jid(&alice).is_none());
+}
+
+#[tokio::test]
+async fn role_none_kick_notifies_same_nick_sibling_sessions() {
+    let actor = spawn_room_actor().await;
+    let alice_laptop = test_full_jid_resource("alice", "laptop");
+    let alice_phone = test_full_jid_resource("alice", "phone");
+
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: alice_laptop.clone(),
+            nick: "alice".to_string(),
+            effective_affiliation: Affiliation::Member,
+            local_domain: "example.com".to_string(),
+            admission_revision: 0,
+        })
+        .await
+        .expect("first session join");
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: alice_phone.clone(),
+            nick: "alice".to_string(),
+            effective_affiliation: Affiliation::Member,
+            local_domain: "example.com".to_string(),
+            admission_revision: 0,
+        })
+        .await
+        .expect("same nick sibling session join");
+
+    let updates = actor
+        .ask(ApplyAdminItems {
+            sender_jid: test_full_jid("owner"),
+            sender_affiliation: Affiliation::Owner,
+            sender_role: Role::Moderator,
+            items: vec![AdminItem {
+                jid: None,
+                nick: Some("alice".to_string()),
+                affiliation: None,
+                role: Some(Role::None),
+                reason: None,
+            }],
+        })
+        .await
+        .expect("kick succeeds");
+
+    assert!(updates.iter().any(|(recipient, presence)| {
+        recipient == &alice_laptop && presence_has_status(presence, "307")
+    }));
+    assert!(updates.iter().any(|(recipient, presence)| {
+        recipient == &alice_phone && presence_has_status(presence, "307")
+    }));
+    assert_eq!(actor.ask(OccupantCount).await.expect("count"), 0);
+}
+
+#[tokio::test]
+async fn members_only_revocation_removes_every_nick_for_bare_jid() {
+    let actor = spawn_room_actor_with_config(RoomConfig {
+        members_only: true,
+        ..RoomConfig::default()
+    })
+    .await;
+    let alice_laptop = test_full_jid_resource("alice", "laptop");
+    let alice_phone = test_full_jid_resource("alice", "phone");
+    let alice_bare = alice_laptop.to_bare();
+
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: alice_laptop.clone(),
+            nick: "alice".to_string(),
+            effective_affiliation: Affiliation::Member,
+            local_domain: "example.com".to_string(),
+            admission_revision: 0,
+        })
+        .await
+        .expect("first nick join");
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: alice_phone.clone(),
+            nick: "alice-phone".to_string(),
+            effective_affiliation: Affiliation::Member,
+            local_domain: "example.com".to_string(),
+            admission_revision: 0,
+        })
+        .await
+        .expect("second nick join");
+
+    let updates = actor
+        .ask(ApplyAffiliationChange {
+            actor: Some("owner@example.com".parse().expect("owner")),
+            jid: alice_bare,
+            affiliation: Affiliation::None,
+        })
+        .await
+        .expect("revocation succeeds");
+
+    assert!(updates.iter().any(|(recipient, presence)| {
+        recipient == &alice_laptop && presence_has_status(presence, "321")
+    }));
+    assert!(updates.iter().any(|(recipient, presence)| {
+        recipient == &alice_phone && presence_has_status(presence, "321")
+    }));
+    assert_eq!(actor.ask(OccupantCount).await.expect("count"), 0);
+}
+
+#[tokio::test]
+async fn managed_members_only_enforcement_uses_explicit_affiliation_snapshot() {
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: alice.clone(),
+            nick: "alice".to_string(),
+            effective_affiliation: Affiliation::Member,
+            local_domain: "example.com".to_string(),
+            admission_revision: 0,
+        })
+        .await
+        .expect("open-room inherited member join");
+
+    let config = RoomConfig {
+        members_only: true,
+        ..RoomConfig::default()
+    };
+    actor
+        .ask(UpdateConfig { config })
+        .await
+        .expect("members-only config");
+
+    let updates = actor
+        .ask(EnforceMembersOnlyAffiliations {
+            affiliations: vec![(alice.to_bare(), Affiliation::None)],
+        })
+        .await
+        .expect("managed enforcement succeeds");
+
+    assert!(updates.iter().any(|(recipient, presence)| {
+        recipient == &alice && presence_has_status(presence, "322")
+    }));
+    assert_eq!(actor.ask(OccupantCount).await.expect("count"), 0);
+}
+
+#[tokio::test]
+async fn managed_members_only_enforcement_treats_missing_snapshot_entry_as_none() {
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: alice.clone(),
+            nick: "alice".to_string(),
+            effective_affiliation: Affiliation::Member,
+            local_domain: "example.com".to_string(),
+            admission_revision: 0,
+        })
+        .await
+        .expect("stale-open join");
+
+    let config = RoomConfig {
+        members_only: true,
+        ..RoomConfig::default()
+    };
+    actor
+        .ask(UpdateConfig { config })
+        .await
+        .expect("members-only config");
+
+    let updates = actor
+        .ask(EnforceMembersOnlyAffiliations {
+            affiliations: Vec::new(),
+        })
+        .await
+        .expect("managed enforcement succeeds");
+
+    assert!(updates.iter().any(|(recipient, presence)| {
+        recipient == &alice && presence_has_status(presence, "322")
+    }));
+    assert_eq!(actor.ask(OccupantCount).await.expect("count"), 0);
 }
 
 #[tokio::test]
@@ -983,6 +1594,7 @@ async fn upsert_muji_presence_recipients_include_every_sibling_session_of_sender
             nick: "alice".to_string(),
             effective_affiliation: Affiliation::Member,
             local_domain: "example.com".to_string(),
+            admission_revision: 0,
         })
         .await
         .expect("desktop join");
@@ -992,6 +1604,7 @@ async fn upsert_muji_presence_recipients_include_every_sibling_session_of_sender
             nick: "alice".to_string(),
             effective_affiliation: Affiliation::Member,
             local_domain: "example.com".to_string(),
+            admission_revision: 0,
         })
         .await
         .expect("mobile join recognized as same-bare multi-session");
@@ -1030,6 +1643,7 @@ async fn same_nick_sibling_preparing_does_not_clobber_active_muji_snapshot() {
             nick: "alice".to_string(),
             effective_affiliation: Affiliation::Member,
             local_domain: "example.com".to_string(),
+            admission_revision: 0,
         })
         .await
         .expect("desktop join");
@@ -1039,6 +1653,7 @@ async fn same_nick_sibling_preparing_does_not_clobber_active_muji_snapshot() {
             nick: "alice".to_string(),
             effective_affiliation: Affiliation::Member,
             local_domain: "example.com".to_string(),
+            admission_revision: 0,
         })
         .await
         .expect("mobile join");
@@ -1082,6 +1697,7 @@ async fn same_nick_sibling_preparing_does_not_clobber_active_muji_snapshot() {
             nick: "bob".to_string(),
             effective_affiliation: Affiliation::Member,
             local_domain: "example.com".to_string(),
+            admission_revision: 0,
         })
         .await
         .expect("bob join");
@@ -1125,6 +1741,7 @@ async fn late_join_replay_includes_preparing_only_same_nick_muji_with_exact_owne
             nick: "alice".to_string(),
             effective_affiliation: Affiliation::Member,
             local_domain: "example.com".to_string(),
+            admission_revision: 0,
         })
         .await
         .expect("desktop join");
@@ -1134,6 +1751,7 @@ async fn late_join_replay_includes_preparing_only_same_nick_muji_with_exact_owne
             nick: "alice".to_string(),
             effective_affiliation: Affiliation::Member,
             local_domain: "example.com".to_string(),
+            admission_revision: 0,
         })
         .await
         .expect("mobile join");
@@ -1153,6 +1771,7 @@ async fn late_join_replay_includes_preparing_only_same_nick_muji_with_exact_owne
             nick: "bob".to_string(),
             effective_affiliation: Affiliation::Member,
             local_domain: "example.com".to_string(),
+            admission_revision: 0,
         })
         .await
         .expect("bob join");
@@ -1319,6 +1938,7 @@ async fn clear_muji_presence_clears_existing_state_without_muji_payload() {
             nick: "carol".to_string(),
             effective_affiliation: Affiliation::Member,
             local_domain: "example.com".to_string(),
+            admission_revision: 0,
         })
         .await
         .expect("carol join");
@@ -1391,6 +2011,7 @@ async fn join_replay_includes_active_muji_from_existing_occupant() {
             nick: "bob".to_string(),
             effective_affiliation: Affiliation::Member,
             local_domain: "example.com".to_string(),
+            admission_revision: 0,
         })
         .await
         .expect("bob join");
@@ -1443,6 +2064,7 @@ async fn leaving_occupant_clears_muji_state() {
             nick: "carol".to_string(),
             effective_affiliation: Affiliation::Member,
             local_domain: "example.com".to_string(),
+            admission_revision: 0,
         })
         .await
         .expect("carol join");
@@ -1472,6 +2094,7 @@ async fn leaving_originator_session_clears_muji_state_even_with_peer_sessions_re
             nick: "alice".to_string(),
             effective_affiliation: Affiliation::Member,
             local_domain: "example.com".to_string(),
+            admission_revision: 0,
         })
         .await
         .expect("desktop join");
@@ -1481,6 +2104,7 @@ async fn leaving_originator_session_clears_muji_state_even_with_peer_sessions_re
             nick: "alice".to_string(),
             effective_affiliation: Affiliation::Member,
             local_domain: "example.com".to_string(),
+            admission_revision: 0,
         })
         .await
         .expect("mobile join recognized as same-bare multi-session");
@@ -1529,6 +2153,7 @@ async fn leaving_originator_session_clears_muji_state_even_with_peer_sessions_re
             nick: "carol".to_string(),
             effective_affiliation: Affiliation::Member,
             local_domain: "example.com".to_string(),
+            admission_revision: 0,
         })
         .await
         .expect("carol join");
@@ -1560,6 +2185,7 @@ async fn leaving_non_originator_session_preserves_muji_state() {
             nick: "alice".to_string(),
             effective_affiliation: Affiliation::Member,
             local_domain: "example.com".to_string(),
+            admission_revision: 0,
         })
         .await
         .expect("desktop join");
@@ -1569,6 +2195,7 @@ async fn leaving_non_originator_session_preserves_muji_state() {
             nick: "alice".to_string(),
             effective_affiliation: Affiliation::Member,
             local_domain: "example.com".to_string(),
+            admission_revision: 0,
         })
         .await
         .expect("mobile join");
@@ -1598,6 +2225,7 @@ async fn leaving_non_originator_session_preserves_muji_state() {
             nick: "carol".to_string(),
             effective_affiliation: Affiliation::Member,
             local_domain: "example.com".to_string(),
+            admission_revision: 0,
         })
         .await
         .expect("carol join");
@@ -1625,6 +2253,7 @@ async fn leaving_one_active_same_nick_session_preserves_sibling_active_muji_stat
             nick: "alice".to_string(),
             effective_affiliation: Affiliation::Member,
             local_domain: "example.com".to_string(),
+            admission_revision: 0,
         })
         .await
         .expect("desktop join");
@@ -1634,6 +2263,7 @@ async fn leaving_one_active_same_nick_session_preserves_sibling_active_muji_stat
             nick: "alice".to_string(),
             effective_affiliation: Affiliation::Member,
             local_domain: "example.com".to_string(),
+            admission_revision: 0,
         })
         .await
         .expect("mobile join");
@@ -1677,6 +2307,7 @@ async fn leaving_one_active_same_nick_session_preserves_sibling_active_muji_stat
             nick: "carol".to_string(),
             effective_affiliation: Affiliation::Member,
             local_domain: "example.com".to_string(),
+            admission_revision: 0,
         })
         .await
         .expect("carol join");

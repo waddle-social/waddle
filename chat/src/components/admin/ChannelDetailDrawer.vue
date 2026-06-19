@@ -7,6 +7,7 @@ import AppDrawer from "@/components/ui/AppDrawer.vue";
 import ConfirmDialog from "@/components/ui/ConfirmDialog.vue";
 import AffiliationRow from "@/components/admin/AffiliationRow.vue";
 import OccupantRow from "@/components/admin/OccupantRow.vue";
+import { requireMembershipForUnlistedChannel } from "./channelAdmissionPolicy";
 import type { BrowserXmppClient } from "@/lib/xmpp";
 import type {
   WasmAdminChannelAffiliationEntry,
@@ -39,6 +40,7 @@ const tab = ref<Tab>("config");
 const editName = ref(props.channel.name);
 const editTopic = ref(props.channel.topic ?? "");
 const editIsPublic = ref(props.channel.is_public);
+const editMembersOnly = ref(props.channel.members_only);
 const editing = ref(false);
 const editError = ref("");
 
@@ -63,9 +65,19 @@ watch(() => props.channel, (c) => {
   editName.value = c.name;
   editTopic.value = c.topic ?? "";
   editIsPublic.value = c.is_public;
+  editMembersOnly.value = c.members_only;
   void loadAffiliations();
   void loadOccupants();
 }, { immediate: false });
+
+function handlePublicToggleChange() {
+  const policy = requireMembershipForUnlistedChannel({
+    isPublic: editIsPublic.value,
+    membersOnly: editMembersOnly.value,
+  });
+  editIsPublic.value = policy.isPublic;
+  editMembersOnly.value = policy.membersOnly;
+}
 
 async function loadAffiliations() {
   if (!props.xmppClient) return;
@@ -112,6 +124,7 @@ async function saveConfig() {
       name: editName.value.trim(),
       topic: editTopic.value.trim() || null,
       isPublic: editIsPublic.value,
+      membersOnly: editMembersOnly.value,
     });
     emit("changed");
   } catch (err: unknown) {
@@ -150,6 +163,7 @@ async function kickOccupant(entry: WasmAdminChannelOccupantEntry) {
       occupantJid: bareJid,
     });
     await loadOccupants();
+    await loadAffiliations();
     emit("changed");
   } catch (err: unknown) {
     occupantsError.value = err instanceof Error ? err.message : "Failed to kick occupant.";
@@ -228,14 +242,18 @@ const occupantCountLabel = computed(() => {
           <span class="type-section-label text-muted-foreground">Topic</span>
           <textarea v-model="editTopic" rows="3" class="chat-field-control chat-textarea-control type-field" />
         </label>
-        <div class="flex flex-col gap-1.5 rounded-lg border border-border bg-muted/30 px-3 py-2.5">
+        <div class="flex flex-col gap-2 rounded-lg border border-border bg-muted/30 px-3 py-2.5">
           <label class="flex items-center gap-2 cursor-pointer">
-            <input v-model="editIsPublic" type="checkbox" />
-            <span class="type-control">Public</span>
+            <input v-model="editIsPublic" type="checkbox" @change="handlePublicToggleChange" />
+            <span class="type-control">Listed in discovery</span>
+          </label>
+          <label class="flex items-center gap-2 cursor-pointer">
+            <input v-model="editMembersOnly" type="checkbox" />
+            <span class="type-control">Require explicit membership</span>
           </label>
           <p class="type-caption text-muted-foreground">
-            Anyone in the community can join. Uncheck to require explicit
-            membership.
+            Discovery visibility and room admission are separate XMPP room
+            settings.
           </p>
         </div>
         <div v-if="editError" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 type-caption text-destructive" role="alert">{{ editError }}</div>
