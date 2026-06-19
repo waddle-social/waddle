@@ -17,6 +17,12 @@ pub(crate) struct MucJoinPresence<'a> {
     /// self-presence and for occupants without an active Muji
     /// advertisement.
     pub(crate) muji: Option<&'a waddle_xmpp::xep::xep0272::Muji>,
+    /// Whether to append an `<in-call><hand-raised/></in-call>`
+    /// (`urn:waddle:in-call:0`, #1029) payload alongside `<muji/>`. Set
+    /// for the join-replay path when the occupant being replayed has a
+    /// raised hand, so a late joiner sees it immediately. `false` for
+    /// joiners' own self-presence and for occupants with no raised hand.
+    pub(crate) hand_raised: bool,
 }
 
 pub(crate) fn build_muc_join_presence_xml(params: MucJoinPresence<'_>) -> String {
@@ -55,6 +61,16 @@ pub(super) fn build_muc_join_presence_stanza(
         // helper — never with `format!`-style XML concat (CLAUDE.md
         // XML hard rule).
         presence.payloads.push(muji.to_element());
+    }
+    if params.hand_raised {
+        // The raised-hand `<in-call>` state is a sibling of `<muji>`
+        // (never nested), an additional namespaced presence extension
+        // per XEP-0045 §5.1.3. Built via the typed carrier helper.
+        presence
+            .payloads
+            .push(waddle_xmpp::xep::build_in_call_presence_state_element(
+                &waddle_xmpp::xep::InCallPresenceState { hand_raised: true },
+            ));
     }
     presence
 }
@@ -164,5 +180,6 @@ pub(super) fn create_presence_stanza(
         real_jid,
         include_self_status: false,
         muji: None,
+        hand_raised: false,
     })
 }

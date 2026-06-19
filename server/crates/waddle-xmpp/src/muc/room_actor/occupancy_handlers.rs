@@ -66,12 +66,14 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
                     .into_iter()
                     .map(|jid| {
                         let muji = self.room.muji_for_session(&o.nick, &jid);
+                        let hand_raised = self.room.hand_raised_for_session(&o.nick, &jid);
                         JoinExistingOccupant {
                             jid,
                             nick: o.nick.clone(),
                             affiliation: o.affiliation,
                             role: o.role,
                             muji,
+                            hand_raised,
                         }
                     })
             })
@@ -341,6 +343,49 @@ impl kameo::message::Message<ClearMujiPresence> for RoomActor {
             active_muji: muji_state.room_muji,
             session_mujis: muji_state.session_mujis,
             active_call_started: muji_state.active_call_started,
+        }))
+    }
+}
+
+/// Apply the calling session's `<in-call xmlns='urn:waddle:in-call:0'>`
+/// raised-hand presence state (#1029). Carried on the same MUC presence
+/// as the XEP-0272 `<muji/>` advertisement but tracked independently so
+/// muji handling stays single-purpose. Like [`UpsertMujiPresence`] this
+/// authenticates the sender as a current occupant; a non-occupant yields
+/// `Ok(None)` and the caller falls back to the join path.
+pub struct UpsertHandRaised {
+    pub sender_jid: FullJid,
+    pub state: crate::xep::InCallPresenceState,
+}
+
+#[derive(Debug, Clone)]
+pub struct HandRaisedUpdateOutcome {
+    /// Resolved nick of the sending occupant (room-authoritative).
+    pub sender_nick: String,
+    /// Full JIDs of the nick's sessions that advertise a raised hand
+    /// after the update. The presence broadcaster decorates each
+    /// reflected per-session presence whose owner appears here.
+    pub raised_hand_sessions: Vec<FullJid>,
+}
+
+impl kameo::message::Message<UpsertHandRaised> for RoomActor {
+    type Reply = Result<Option<HandRaisedUpdateOutcome>, Infallible>;
+
+    async fn handle(
+        &mut self,
+        msg: UpsertHandRaised,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let Some(sender_occupant) = self.room.find_occupant_by_real_jid(&msg.sender_jid) else {
+            return Ok(None);
+        };
+        let sender_nick = sender_occupant.nick.clone();
+        self.room
+            .upsert_hand_raised(&sender_nick, msg.sender_jid.clone(), msg.state);
+        let raised_hand_sessions = self.room.hand_raised_sessions_for_nick(&sender_nick);
+        Ok(Some(HandRaisedUpdateOutcome {
+            sender_nick,
+            raised_hand_sessions,
         }))
     }
 }
