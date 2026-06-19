@@ -9,6 +9,7 @@ import {
   type Ref,
 } from "vue";
 import {
+  calendarFeedEndpoint,
   copyCalendarFeedUrlToClipboard,
   isSameCalendarFeedRequestInput,
   nextCalendarFeedCopyViewState,
@@ -53,9 +54,7 @@ export function useCalendarFeedCopy(source: CalendarFeedCopySource): CalendarFee
   let resetTimer: ReturnType<typeof setTimeout> | null = null;
   let attemptCounter = 0;
 
-  const canCopy = computed(
-    () => !!source.communityJid() && source.serverBaseUrl().trim().length > 0,
-  );
+  const canCopy = computed(() => calendarFeedEndpoint(currentRequestInput()) !== null);
 
   const statusLabel = computed(() => {
     if (state.value === "loading") return "Copying";
