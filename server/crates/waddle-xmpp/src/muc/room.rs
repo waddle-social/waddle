@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use jid::{BareJid, FullJid};
 use serde::{Deserialize, Serialize};
@@ -147,6 +147,23 @@ pub struct MucRoom {
     /// still one occupant presence per nick; `muji_for_nick` aggregates
     /// these session entries, preferring active contents over preparing.
     pub(super) muji_state: HashMap<String, HashMap<FullJid, Muji>>,
+    /// Per-session raised-hand presence state (`urn:waddle:in-call:0`,
+    /// #1029), keyed by nick then by the set of full JIDs whose session
+    /// currently advertises `<in-call><hand-raised/></in-call>`. Mirrors
+    /// [`muji_state`](Self::muji_state):
+    ///
+    /// 1. Late joiners see who already has a hand raised — the join
+    ///    handler reads this map and appends the `<in-call>` payload to
+    ///    the replayed presence for any session that owns one.
+    /// 2. Presence-update broadcasts reflect the room-authoritative
+    ///    per-session state rather than echoing the client payload, so a
+    ///    sibling resource's presence cannot be stamped with another
+    ///    session's hand state.
+    ///
+    /// A nick is "hand raised" to the room when *any* of its sessions
+    /// advertise it. Entries are cleared when the session lowers its
+    /// hand, leaves the call (`<muji/>` cleared), or leaves the room.
+    pub(super) hand_raised_state: HashMap<String, HashSet<FullJid>>,
 }
 
 /// Result of applying one session's Muji presence update.
@@ -188,6 +205,7 @@ impl MucRoom {
             generation_floor: u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0),
             pinned_entries: Vec::new(),
             muji_state: HashMap::new(),
+            hand_raised_state: HashMap::new(),
         }
     }
 
@@ -325,6 +343,66 @@ impl MucRoom {
         }
     }
 
+    /// Apply an `<in-call xmlns='urn:waddle:in-call:0'>` raised-hand
+    /// presence state (#1029) from `nick`'s `originator` session. A
+    /// raised state records the session; a lowered/empty state removes
+    /// it. Mirrors [`upsert_muji_presence`](Self::upsert_muji_presence):
+    /// the entry is bound to the exact emitting session so one resource
+    /// can lower its hand without disturbing a sibling's.
+    pub fn upsert_hand_raised(
+        &mut self,
+        nick: &str,
+        originator: FullJid,
+        state: crate::xep::InCallPresenceState,
+    ) {
+        if state.is_empty() {
+            self.clear_hand_raised(nick, &originator);
+        } else {
+            self.hand_raised_state
+                .entry(nick.to_owned())
+                .or_default()
+                .insert(originator);
+        }
+    }
+
+    /// Clear `originator`'s raised-hand advertisement for `nick`, if it
+    /// owns one. Used when a session lowers its hand, leaves the call,
+    /// or leaves the room.
+    pub fn clear_hand_raised(&mut self, nick: &str, originator: &FullJid) {
+        if let Some(sessions) = self.hand_raised_state.get_mut(nick) {
+            sessions.remove(originator);
+            if sessions.is_empty() {
+                self.hand_raised_state.remove(nick);
+            }
+        }
+    }
+
+    /// True when *any* of `nick`'s sessions currently has a raised hand.
+    /// This is the nick-level aggregate other occupants observe.
+    pub fn hand_raised_for_nick(&self, nick: &str) -> bool {
+        self.hand_raised_state
+            .get(nick)
+            .is_some_and(|sessions| !sessions.is_empty())
+    }
+
+    /// True when the exact `jid` session of `nick` has a raised hand.
+    pub fn hand_raised_for_session(&self, nick: &str, jid: &FullJid) -> bool {
+        self.hand_raised_state
+            .get(nick)
+            .is_some_and(|sessions| sessions.contains(jid))
+    }
+
+    /// Full JIDs of `nick`'s sessions with a raised hand, sorted for
+    /// deterministic replay and broadcast ordering.
+    pub fn hand_raised_sessions_for_nick(&self, nick: &str) -> Vec<FullJid> {
+        let Some(sessions) = self.hand_raised_state.get(nick) else {
+            return Vec::new();
+        };
+        let mut sessions: Vec<FullJid> = sessions.iter().cloned().collect();
+        sessions.sort_by_key(ToString::to_string);
+        sessions
+    }
+
     /// Add an occupant to the room.
     ///
     /// When this is a fresh join (nickname not currently present), the
@@ -354,6 +432,7 @@ impl MucRoom {
     pub fn remove_occupant(&mut self, nick: &str) -> Option<Occupant> {
         self.occupant_sessions.remove(nick);
         self.muji_state.remove(nick);
+        self.hand_raised_state.remove(nick);
         self.occupants.remove(nick)
     }
 
@@ -412,10 +491,20 @@ impl MucRoom {
                 self.muji_state.remove(nick);
             }
         }
+        // The raised-hand advertisement is session-owned just like the
+        // call advertisement above; drop the leaving session's entry so
+        // a lingering hand isn't replayed to late joiners.
+        if let Some(hands) = self.hand_raised_state.get_mut(nick) {
+            hands.remove(jid);
+            if hands.is_empty() {
+                self.hand_raised_state.remove(nick);
+            }
+        }
 
         if sessions.is_empty() {
             self.occupant_sessions.remove(nick);
             self.muji_state.remove(nick);
+            self.hand_raised_state.remove(nick);
             self.occupants.remove(nick);
             return Some(true);
         }
@@ -469,6 +558,7 @@ impl MucRoom {
             && self.pinned_entries.is_empty()
             && self.affiliation_list.is_empty()
             && self.muji_state.is_empty()
+            && self.hand_raised_state.is_empty()
     }
 
     /// Whether `bare_jid` is currently joined to this room as an
@@ -639,5 +729,81 @@ mod pin_state_tests {
         // must update this contract explicitly.
         let fresh = room();
         assert!(fresh.pinned_entries().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod hand_raised_state_tests {
+    use super::*;
+    use crate::xep::InCallPresenceState;
+    use std::str::FromStr;
+
+    fn room() -> MucRoom {
+        MucRoom::new(
+            BareJid::from_str("room@conf.example").expect("valid bare jid"),
+            "wad-1".into(),
+            "chan-1".into(),
+            RoomConfig::default(),
+        )
+    }
+
+    fn full(s: &str) -> FullJid {
+        FullJid::from_str(s).expect("valid full jid")
+    }
+
+    fn raised() -> InCallPresenceState {
+        InCallPresenceState { hand_raised: true }
+    }
+
+    fn lowered() -> InCallPresenceState {
+        InCallPresenceState { hand_raised: false }
+    }
+
+    #[test]
+    fn upsert_raises_and_lower_clears_for_a_session() {
+        let mut r = room();
+        let web = full("alice@example.com/web");
+
+        r.upsert_hand_raised("alice", web.clone(), raised());
+        assert!(r.hand_raised_for_nick("alice"));
+        assert!(r.hand_raised_for_session("alice", &web));
+
+        r.upsert_hand_raised("alice", web.clone(), lowered());
+        assert!(!r.hand_raised_for_nick("alice"));
+        assert!(!r.hand_raised_for_session("alice", &web));
+    }
+
+    #[test]
+    fn raised_hand_aggregates_across_sessions() {
+        let mut r = room();
+        let web = full("alice@example.com/web");
+        let mobile = full("alice@example.com/mobile");
+
+        // Web raises; mobile explicitly lowered must not contribute.
+        r.upsert_hand_raised("alice", web.clone(), raised());
+        r.upsert_hand_raised("alice", mobile.clone(), lowered());
+        assert!(r.hand_raised_for_nick("alice"));
+        assert_eq!(r.hand_raised_sessions_for_nick("alice"), vec![web.clone()]);
+
+        // Mobile raises too — both sessions advertised, sorted by full JID.
+        r.upsert_hand_raised("alice", mobile.clone(), raised());
+        assert_eq!(
+            r.hand_raised_sessions_for_nick("alice"),
+            vec![mobile.clone(), web.clone()]
+        );
+
+        // Clearing web leaves the nick raised via mobile.
+        r.clear_hand_raised("alice", &web);
+        assert!(r.hand_raised_for_nick("alice"));
+        assert_eq!(r.hand_raised_sessions_for_nick("alice"), vec![mobile]);
+    }
+
+    #[test]
+    fn remove_occupant_clears_hand_state() {
+        let mut r = room();
+        let web = full("alice@example.com/web");
+        r.upsert_hand_raised("alice", web, raised());
+        r.remove_occupant("alice");
+        assert!(!r.hand_raised_for_nick("alice"));
     }
 }
