@@ -118,6 +118,55 @@ describe("useCommunityEvents", () => {
     expect(attendees.find((a) => a.uri === "xmpp:bob@example.com")?.partstat).toBe("DECLINED");
   });
 
+  test("refresh preserves recurrence overrides while grouping sibling RSVP items", async () => {
+    const start = Date.now() + 86_400_000;
+    const recurrenceId = start + 7 * 86_400_000;
+    const exdate = start + 14 * 86_400_000;
+    const weekday = (["SU", "MO", "TU", "WE", "TH", "FR", "SA"] as const)[
+      new Date(start).getUTCDay()
+    ];
+    const client = makeClient([
+      {
+        id: "evt-series",
+        uid: "evt-series",
+        summary: "Friday Game Night",
+        dtstartMs: start,
+        dtendMs: start + 60 * 60 * 1000,
+        rrule: { freq: "WEEKLY", byDay: [weekday], count: 4 },
+        exdatesMs: [exdate],
+      },
+      {
+        id: "evt-series::override::1",
+        uid: "evt-series",
+        summary: "Special Round",
+        recurrenceIdMs: recurrenceId,
+        dtstartMs: recurrenceId + 60 * 60 * 1000,
+      },
+      {
+        id: "evt-series-rsvp-alice",
+        uid: "evt-series",
+        summary: "",
+        attendees: [{ uri: "xmpp:alice@example.com", partstat: "ACCEPTED" }],
+      },
+    ]);
+    const events = useCommunityEvents(ref<BrowserXmppClient | null>(client), {
+      communityJid: ref<string | null>(COMMUNITY),
+    });
+    await events.refresh();
+
+    expect(events.calendarItems.value.length).toBe(1);
+    const [series] = events.calendarItems.value;
+    expect(series?.master.uid).toBe("evt-series");
+    expect(series?.master.attendees?.[0]?.uri).toBe("xmpp:alice@example.com");
+    expect(series?.master.exdatesMs).toEqual([exdate]);
+    expect(series?.overrides.length).toBe(1);
+    expect(series?.overrides[0]?.summary).toBe("Special Round");
+    expect(series?.overrides[0]?.recurrenceIdMs).toBe(recurrenceId);
+    const expandedOverride = events.events.value.find((event) => event.recurrenceIdMs === recurrenceId);
+    expect(expandedOverride?.dtstartMs).toBe(recurrenceId + 60 * 60 * 1000);
+    expect(expandedOverride?.dtendMs).toBe(recurrenceId + 2 * 60 * 60 * 1000);
+  });
+
   test("rsvp publishes via wasm and optimistically folds a self-attendee in", async () => {
     const future = Date.now() + 86_400_000;
     const client = makeClient([

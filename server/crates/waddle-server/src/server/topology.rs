@@ -172,10 +172,10 @@ async fn seed_initial_xmpp_topology(
         .await
         .map_err(|error| anyhow::anyhow!("failed to configure stories node: {error}"))?;
 
-    // XEP-0471 Calendar Events — community-wide pubsub node for
+    // xCal Proto-calendar events — community-wide PubSub node for
     // events with optional RSVP tracking. Same hosting + access
     // model as the social feed; events carry their own scheduling
-    // metadata in the typed `<event/>` payload.
+    // metadata in the typed `<vcalendar/>` payload.
     pubsub_storage
         .get_or_create_node(&community_jid, waddle_xmpp_core::xcal::PUBSUB_NODE_EVENTS)
         .await

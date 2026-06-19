@@ -185,10 +185,7 @@ function advance(ms: number, freq: string, interval: number): number {
 }
 
 function occurrenceFromMaster(master: CommunityEvent, dtstartMs: number): CommunityEvent {
-  const durationMs =
-    typeof master.dtendMs === "number" && typeof master.dtstartMs === "number"
-      ? master.dtendMs - master.dtstartMs
-      : undefined;
+  const durationMs = masterDurationMs(master);
   return {
     ...master,
     id: `${master.id}::${dtstartMs}`,
@@ -205,15 +202,29 @@ function applyOverride(
   override: CommunityEvent,
   recurrenceIdMs: number,
 ): CommunityEvent {
+  const dtstartMs = override.dtstartMs ?? recurrenceIdMs;
+  const inheritedDurationMs = masterDurationMs(master);
   return {
     ...master,
     id: `${master.id}::${recurrenceIdMs}::override`,
     summary: override.summary || master.summary,
     ...(override.description !== undefined ? { description: override.description } : {}),
     ...(override.location !== undefined ? { location: override.location } : {}),
-    dtstartMs: override.dtstartMs ?? recurrenceIdMs,
-    ...(typeof override.dtendMs === "number" ? { dtendMs: override.dtendMs } : {}),
+    dtstartMs,
+    ...(typeof override.dtendMs === "number"
+      ? { dtendMs: override.dtendMs }
+      : typeof inheritedDurationMs === "number"
+        ? { dtendMs: dtstartMs + inheritedDurationMs }
+        : {}),
     recurrenceIdMs,
     rrule: undefined,
   };
+}
+
+function masterDurationMs(master: CommunityEvent): number | undefined {
+  if (typeof master.dtendMs !== "number" || typeof master.dtstartMs !== "number") {
+    return undefined;
+  }
+  const durationMs = master.dtendMs - master.dtstartMs;
+  return Number.isFinite(durationMs) && durationMs >= 0 ? durationMs : undefined;
 }

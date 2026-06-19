@@ -2591,6 +2591,7 @@ export function useChatAppController(giphyApiKey: string) {
       socialFeed,
       stories,
       communityEvents,
+      communityJid,
       dmMessaging,
       xmppClient,
       notifySettings,

@@ -224,6 +224,7 @@ function parseRsvpItemId(itemId: string): { masterUid: string; localpart: string
 export function groupEventsWithRsvps(items: readonly CommunityEvent[]): CommunityEvent[] {
   const masters = new Map<string, CommunityEvent>();
   const rsvps = new Map<string, Map<string, Attendee>>();
+  const overrides: CommunityEvent[] = [];
 
   for (const item of items) {
     const parsed = parseRsvpItemId(item.id);
@@ -234,6 +235,10 @@ export function groupEventsWithRsvps(items: readonly CommunityEvent[]): Communit
         bucket.set(single.uri, single);
         rsvps.set(parsed.masterUid, bucket);
       }
+      continue;
+    }
+    if (typeof item.recurrenceIdMs === "number") {
+      overrides.push(item);
       continue;
     }
     masters.set(item.uid, item);
@@ -254,7 +259,7 @@ export function groupEventsWithRsvps(items: readonly CommunityEvent[]): Communit
       ...(attendees.length > 0 ? { attendees } : {}),
     });
   }
-  return out;
+  return [...out, ...overrides];
 }
 
 /** Sort events by upcoming-first, past events at the end newest-first. */

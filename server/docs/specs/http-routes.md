@@ -20,6 +20,19 @@ stack, authentication bootstrap, upload transfer, or operations require it.
 - `POST /api/auth/device/poll`: Device authorization polling.
 - `GET /api/auth/device/verify`: Device authorization verification page.
 - `POST /api/auth/device/verify`: Device authorization verification submit.
+- `GET /api/calendar/community-feed-url?community_jid=:jid`: Authenticated
+  helper returning a signed iCalendar subscription URL for the deployment's
+  xCal community events PubSub node. It accepts the browser session from the
+  `waddle_session` cookie or `X-Waddle-Session-Id` request header and returns
+  `Cache-Control: no-store`.
+- `GET /api/calendar/community/:token/events.ics`: Read-only `text/calendar`
+  projection of the xCal community events PubSub node for external calendar
+  clients. The token is a bearer subscription secret stored by calendar
+  clients; the route serves data only while the backing PubSub node remains
+  public/open, returns `Cache-Control: no-store`, scans at most the latest
+  10,000 published PubSub rows, emits up to 1,000 feed-eligible calendar items
+  after filtering RSVP-only sibling rows from that bounded window, and it does
+  not expose Waddle CRUD or control semantics.
 - `PUT /api/upload/:slot_id`: XEP-0363 upload transfer after an XMPP slot request.
 - `OPTIONS /api/upload/:slot_id`: CORS preflight for XEP-0363 upload transfer.
 - `GET /api/files/:slot_id/:filename`: XEP-0363 download transfer.

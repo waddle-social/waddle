@@ -552,6 +552,10 @@ async fn test_explicit_cors_allows_credentials() {
                 .uri("/health")
                 .header(header::ORIGIN, "https://waddle.chat")
                 .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+                .header(
+                    header::ACCESS_CONTROL_REQUEST_HEADERS,
+                    "x-waddle-session-id",
+                )
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -572,6 +576,17 @@ async fn test_explicit_cors_allows_credentials() {
             .get("access-control-allow-credentials")
             .and_then(|value| value.to_str().ok()),
         Some("true")
+    );
+    let allow_headers = response
+        .headers()
+        .get("access-control-allow-headers")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        allow_headers
+            .split(',')
+            .any(|header| header.trim() == "x-waddle-session-id"),
+        "explicit CORS allow headers must include x-waddle-session-id: {allow_headers}",
     );
 }
 

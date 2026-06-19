@@ -4,11 +4,9 @@
  * sorts upcoming-first and exposes typed event + RRULE state to the
  * UI.
  *
- * Recurrence expansion (computing each occurrence date from a master
- * event + RRULE) is deferred for now — the UI renders the master
- * event with its RRULE summary ("Weekly on Fridays · 10 occurrences").
- * Per-instance overrides will come back via RECURRENCE-ID in a
- * follow-up.
+ * Recurrence expansion and RECURRENCE-ID overrides are derived from the
+ * xCal masters here so the UI can render concrete upcoming instances while
+ * edit/cancel actions still target the stored PubSub master item.
  */
 import { computed, ref, type Ref } from "vue";
 import {
@@ -22,6 +20,7 @@ import {
 import {
   expandInstances,
   groupEventsWithOverrides,
+  type CalendarMaster,
 } from "@/lib/xmpp/event-expansion";
 
 export function useCommunityEvents(
@@ -38,10 +37,14 @@ export function useCommunityEvents(
   const pageSize = options.pageSize ?? 200;
   let fetchRequestId = 0;
 
-  const sortedEvents = computed(() => {
+  const calendarItems = computed<CalendarMaster[]>(() => {
     const merged = groupEventsWithRsvps(events.value);
+    return groupEventsWithOverrides(merged);
+  });
+
+  const sortedEvents = computed(() => {
     const expanded: CommunityEvent[] = [];
-    for (const group of groupEventsWithOverrides(merged)) {
+    for (const group of calendarItems.value) {
       if (group.master.rrule) {
         expanded.push(...expandInstances(group));
       } else {
@@ -61,8 +64,7 @@ export function useCommunityEvents(
    * and to read the master's RRULE / EXDATEs.
    */
   function findMaster(uid: string): CommunityEvent | null {
-    const merged = groupEventsWithRsvps(events.value);
-    for (const group of groupEventsWithOverrides(merged)) {
+    for (const group of calendarItems.value) {
       if (group.master.uid === uid) return group.master;
     }
     return null;
@@ -250,6 +252,7 @@ export function useCommunityEvents(
 
   return {
     events: sortedEvents,
+    calendarItems,
     isLoading,
     isPosting,
     error,
