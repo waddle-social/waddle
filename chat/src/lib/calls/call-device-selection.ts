@@ -5,9 +5,12 @@ import {
   setAudioProcessingPrefs,
   setMicDevice,
   setSpeakerDevice,
+  setVirtualBackgroundEffect,
 } from "./device-prefs";
 import { clearAiNoiseFilterError } from "./ai-noise-filter-error-state";
 import type { NoiseModelId } from "./ai-noise-filter/model-id";
+import type { VirtualBackgroundEffect } from "./virtual-background/processor";
+import { clearVirtualBackgroundError } from "./virtual-background-error-state";
 
 export type CallDeviceKind = "mic" | "cam" | "speaker";
 
@@ -66,4 +69,17 @@ export async function applyAiNoiseModelSelection(
   clearAiNoiseFilterError();
   await engine.setAiNoiseModel(model);
   setAiNoiseModel(model);
+}
+
+export type CallVirtualBackgroundSelectionEngine = {
+  setVirtualBackground(effect: VirtualBackgroundEffect): Promise<void>;
+};
+
+export async function applyVirtualBackgroundSelection(
+  effect: VirtualBackgroundEffect,
+  engine: CallVirtualBackgroundSelectionEngine,
+): Promise<void> {
+  clearVirtualBackgroundError();
+  await engine.setVirtualBackground(effect);
+  setVirtualBackgroundEffect(effect);
 }

@@ -43,6 +43,14 @@ import type { AudioNoiseProcessor } from "./ai-noise-filter/processor";
 import { makeNoiseProcessor } from "./ai-noise-filter/registry";
 import { runAiNoiseFilterReconcile, type ProcessorTarget } from "./ai-noise-filter/reconcile";
 import type { VerifiedCallAudioProcessing } from "./call-audio-processing-telemetry";
+import {
+  sameVirtualBackgroundEffect,
+  type ActiveVirtualBackgroundEffect,
+  type VideoBackgroundProcessor,
+  type VirtualBackgroundEffect,
+  virtualBackgroundEffectFromProcessorName,
+} from "./virtual-background/processor";
+import { makeVirtualBackgroundProcessor } from "./virtual-background/registry";
 
 /**
  * The local mic track surface the AI-noise reconciler drives — the subset of
@@ -52,6 +60,12 @@ import type { VerifiedCallAudioProcessing } from "./call-audio-processing-teleme
 type ProcessorCapableTrack = {
   getProcessor(): { name: string } | undefined;
   setProcessor(processor: AudioNoiseProcessor): Promise<void>;
+  stopProcessor(): Promise<void>;
+};
+
+type VideoProcessorCapableTrack = {
+  getProcessor(): { name: string } | undefined;
+  setProcessor(processor: VideoBackgroundProcessor): Promise<void>;
   stopProcessor(): Promise<void>;
 };
 
@@ -235,6 +249,15 @@ export type CallEngineEvents = {
    */
   verifiedMicProcessingChanged: (snapshot: VerifiedCallAudioProcessing) => void;
   /**
+   * Fires when the verified virtual background processor attached to the local
+   * camera changes. `off` means no camera processor is currently active.
+   */
+  virtualBackgroundChanged: (state: VirtualBackgroundEffect) => void;
+  virtualBackgroundError: (info: {
+    effect: ActiveVirtualBackgroundEffect;
+    error: unknown;
+  }) => void;
+  /**
    * Fires when LiveKit re-scores the LOCAL participant's connection
    * quality (`excellent` → `lost`). Remote participants' quality is
    * intentionally not surfaced — the indicator is self-only. Push-based:
@@ -302,6 +325,8 @@ export class CallEngine {
     aiNoiseFilterChanged: new Set(),
     aiNoiseFilterError: new Set(),
     verifiedMicProcessingChanged: new Set(),
+    virtualBackgroundChanged: new Set(),
+    virtualBackgroundError: new Set(),
     connectionQualityChanged: new Set(),
     connectionPhaseChanged: new Set(),
     activeSpeakersChanged: new Set(),
@@ -327,6 +352,13 @@ export class CallEngine {
   private appliedModelActiveForCapture = false;
   /** Builds a processor for a model; injectable so tests avoid real wasm. */
   private readonly makeAiNoiseProcessor: (model: NoiseModelId) => Promise<AudioNoiseProcessor>;
+  private desiredVirtualBackground: VirtualBackgroundEffect = { kind: "off" };
+  private appliedVirtualBackground: VirtualBackgroundEffect = { kind: "off" };
+  private virtualBackgroundFailed = false;
+  private virtualBackgroundReconcileChain: Promise<void> = Promise.resolve();
+  private readonly makeVirtualBackgroundProcessor: (
+    effect: ActiveVirtualBackgroundEffect,
+  ) => Promise<VideoBackgroundProcessor>;
   /**
    * Which video codecs this device can publish, probed once at construction.
    * Injectable so tests assert the forwarded options for capable vs.
@@ -342,10 +374,15 @@ export class CallEngine {
 
   constructor(opts?: {
     makeAiNoiseProcessor?: (model: NoiseModelId) => Promise<AudioNoiseProcessor>;
+    makeVirtualBackgroundProcessor?: (
+      effect: ActiveVirtualBackgroundEffect,
+    ) => Promise<VideoBackgroundProcessor>;
     videoCodecSupport?: VideoCodecSupport;
     makeRoom?: (options: RoomOptions) => Room;
   }) {
     this.makeAiNoiseProcessor = opts?.makeAiNoiseProcessor ?? makeNoiseProcessor;
+    this.makeVirtualBackgroundProcessor =
+      opts?.makeVirtualBackgroundProcessor ?? makeVirtualBackgroundProcessor;
     this.codecSupport = opts?.videoCodecSupport ?? videoCodecSupport(currentVideoCodecSupportEnv());
     this.makeRoom = opts?.makeRoom ?? ((options) => new Room(options));
   }
@@ -401,6 +438,9 @@ export class CallEngine {
     this.desiredAiNoiseModel = prefs.aiNoiseModel;
     this.aiNoiseFailedModels.clear();
     this.appliedModelActiveForCapture = false;
+    this.desiredVirtualBackground = prefs.virtualBackground;
+    this.appliedVirtualBackground = { kind: "off" };
+    this.virtualBackgroundFailed = false;
     const room = this.makeRoom(callRoomOptionsForPrefs(prefs));
     room.on(RoomEvent.TrackSubscribed, this.handleTrackSubscribed);
     room.on(RoomEvent.TrackUnsubscribed, this.handleTrackUnsubscribed);
@@ -503,6 +543,12 @@ export class CallEngine {
     // initial join, not LiveKit's 1080p/VP8 default.
     const { capture, publish } = videoPublishPlan({ source: "camera", capability: this.codecSupport });
     await this.room.localParticipant.setCameraEnabled(enabled, capture, publish);
+  }
+
+  async setVirtualBackground(effect: VirtualBackgroundEffect): Promise<void> {
+    this.desiredVirtualBackground = effect;
+    this.virtualBackgroundFailed = false;
+    await this.ensureVirtualBackground();
   }
 
   async setScreenShareEnabled(
@@ -627,6 +673,73 @@ export class CallEngine {
       .then(() => this.runEnsureAiNoiseFilter())
       .catch(() => undefined);
     return this.aiReconcileChain;
+  }
+
+  private ensureVirtualBackground(): Promise<void> {
+    this.virtualBackgroundReconcileChain = this.virtualBackgroundReconcileChain
+      .then(() => this.runEnsureVirtualBackground())
+      .catch(() => undefined);
+    return this.virtualBackgroundReconcileChain;
+  }
+
+  private async runEnsureVirtualBackground(): Promise<void> {
+    const track = this.cameraProcessorTrack();
+    if (!track) {
+      this.emitVirtualBackground();
+      return;
+    }
+    const current = virtualBackgroundEffectFromProcessorName(track.getProcessor()?.name);
+    if (
+      current.kind !== "off" &&
+      this.desiredVirtualBackground.kind !== "off" &&
+      sameVirtualBackgroundEffect(this.desiredVirtualBackground, this.appliedVirtualBackground)
+    ) {
+      this.emitVirtualBackground();
+      return;
+    }
+    if (this.desiredVirtualBackground.kind === "off" || this.virtualBackgroundFailed) {
+      if (current.kind !== "off") {
+        await track.stopProcessor();
+        this.appliedVirtualBackground = { kind: "off" };
+      }
+      this.emitVirtualBackground();
+      return;
+    }
+    try {
+      const processor = await this.makeVirtualBackgroundProcessor(this.desiredVirtualBackground);
+      await track.setProcessor(processor);
+      this.appliedVirtualBackground = this.desiredVirtualBackground;
+    } catch (error) {
+      this.virtualBackgroundFailed = true;
+      await track.stopProcessor().catch(() => undefined);
+      this.appliedVirtualBackground = { kind: "off" };
+      this.emit("virtualBackgroundError", {
+        effect: this.desiredVirtualBackground,
+        error,
+      });
+    }
+    this.emitVirtualBackground();
+  }
+
+  private cameraProcessorTrack(): VideoProcessorCapableTrack | null {
+    const publication = this.room?.localParticipant.getTrackPublication(Track.Source.Camera);
+    if (!publication || publication.isMuted) return null;
+    const track = publication.track as unknown as VideoProcessorCapableTrack | undefined;
+    return track && typeof track.getProcessor === "function" ? track : null;
+  }
+
+  private computeVirtualBackground(): VirtualBackgroundEffect {
+    const track = this.cameraProcessorTrack();
+    if (!track) return { kind: "off" };
+    const processorEffect = virtualBackgroundEffectFromProcessorName(track.getProcessor()?.name);
+    if (processorEffect.kind === "image" && this.appliedVirtualBackground.kind === "image") {
+      return this.appliedVirtualBackground;
+    }
+    return processorEffect;
+  }
+
+  private emitVirtualBackground(): void {
+    this.emit("virtualBackgroundChanged", this.computeVirtualBackground());
   }
 
   private async runEnsureAiNoiseFilter(): Promise<void> {
@@ -769,6 +882,16 @@ export class CallEngine {
     if (micTrack && typeof micTrack.getProcessor === "function" && micTrack.getProcessor()) {
       await micTrack.stopProcessor().catch(() => undefined);
     }
+    const cameraTrack = room.localParticipant?.getTrackPublication?.(Track.Source.Camera)
+      ?.track as unknown as VideoProcessorCapableTrack | undefined;
+    if (
+      cameraTrack &&
+      cameraTrack !== (micTrack as unknown) &&
+      typeof cameraTrack.getProcessor === "function" &&
+      cameraTrack.getProcessor()
+    ) {
+      await cameraTrack.stopProcessor().catch(() => undefined);
+    }
     await room.disconnect();
   }
 
@@ -864,6 +987,11 @@ export class CallEngine {
       this.emitMicAudioProcessing();
       void this.ensureAiNoiseFilter();
     }
+    if (source === "camera") {
+      this.virtualBackgroundFailed = false;
+      this.appliedVirtualBackground = { kind: "off" };
+      void this.ensureVirtualBackground();
+    }
   };
 
   private handleLocalTrackUnpublished = (
@@ -883,6 +1011,10 @@ export class CallEngine {
       // The mic track (and its processor) is gone — recompute to `no-mic`.
       this.emitAiNoiseFilter();
       this.settleVerifiedMicProcessing();
+    }
+    if (publication.source === Track.Source.Camera) {
+      this.appliedVirtualBackground = { kind: "off" };
+      this.emitVirtualBackground();
     }
     const track = publication.track;
     const kind = mapKind(publication.kind);
@@ -927,11 +1059,17 @@ export class CallEngine {
    * camera changes can't alter mic processing.
    */
   private handleActiveDeviceChanged = (kind: MediaDeviceKind) => {
-    if (kind !== "audioinput") return;
-    this.emitMicAudioProcessing();
-    // Defensive: LiveKit re-runs the processor across a device switch, but
-    // reconcile is idempotent and re-attaches if the new track came up bare.
-    void this.ensureAiNoiseFilter();
+    if (kind === "audioinput") {
+      this.emitMicAudioProcessing();
+      // Defensive: LiveKit re-runs the processor across a device switch, but
+      // reconcile is idempotent and re-attaches if the new track came up bare.
+      void this.ensureAiNoiseFilter();
+    }
+    if (kind === "videoinput") {
+      this.virtualBackgroundFailed = false;
+      this.appliedVirtualBackground = { kind: "off" };
+      void this.ensureVirtualBackground();
+    }
   };
 
   /**

@@ -8,6 +8,7 @@ import {
   applyAiNoiseModelSelection,
   applyAudioProcessingSelection,
   applyCallDeviceSelection,
+  applyVirtualBackgroundSelection,
 } from "../src/lib/calls/call-device-selection";
 import { $aiNoiseFilterError } from "../src/lib/calls/ai-noise-filter-error-state";
 
@@ -18,6 +19,7 @@ afterEach(() => {
     speaker: null,
     audioProcessing: defaultAudioProcessingPrefs(),
     aiNoiseModel: null,
+    virtualBackground: { kind: "off" },
   });
   $aiNoiseFilterError.set(null);
 });
@@ -40,6 +42,7 @@ describe("call device selection", () => {
       speaker: "usb-speaker",
       audioProcessing: defaultAudioProcessingPrefs(),
       aiNoiseModel: null,
+      virtualBackground: { kind: "off" },
     });
     expect(engine.setMicDevice).toHaveBeenCalledWith("headset-mic");
     expect(engine.setCameraDevice).toHaveBeenCalledWith("desk-cam");
@@ -63,6 +66,7 @@ describe("call device selection", () => {
       speaker: null,
       audioProcessing: defaultAudioProcessingPrefs(),
       aiNoiseModel: null,
+      virtualBackground: { kind: "off" },
     });
     expect(engine.setMicDevice).toHaveBeenCalledWith("default");
     expect(engine.setCameraDevice).toHaveBeenCalledWith("default");
@@ -83,6 +87,7 @@ describe("call device selection", () => {
       speaker: null,
       audioProcessing: defaultAudioProcessingPrefs(),
       aiNoiseModel: null,
+      virtualBackground: { kind: "off" },
     });
 
     await expect(applyCallDeviceSelection("mic", null, engine)).rejects.toThrow("device unavailable");
@@ -94,6 +99,7 @@ describe("call device selection", () => {
       speaker: null,
       audioProcessing: defaultAudioProcessingPrefs(),
       aiNoiseModel: null,
+      virtualBackground: { kind: "off" },
     });
   });
 
@@ -132,6 +138,17 @@ describe("call device selection", () => {
     ).rejects.toThrow("restart failed");
 
     expect($devicePrefs.get().audioProcessing).toEqual(defaultAudioProcessingPrefs());
+  });
+});
+
+describe("applyVirtualBackgroundSelection", () => {
+  test("applies the effect to the engine and persists the pref", async () => {
+    const setVirtualBackground = mock(async (_effect: { kind: "blur" }) => undefined);
+
+    await applyVirtualBackgroundSelection({ kind: "blur" }, { setVirtualBackground });
+
+    expect(setVirtualBackground).toHaveBeenCalledWith({ kind: "blur" });
+    expect($devicePrefs.get().virtualBackground).toEqual({ kind: "blur" });
   });
 });
 

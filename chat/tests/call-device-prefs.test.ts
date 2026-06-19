@@ -96,6 +96,7 @@ describe("call audio processing preferences", () => {
         autoGainControl: false,
       },
       aiNoiseModel: null,
+      virtualBackground: { kind: "off" },
     });
 
     expect(parseDevicePrefsStorage(stored)).toEqual({
@@ -108,6 +109,7 @@ describe("call audio processing preferences", () => {
         autoGainControl: false,
       },
       aiNoiseModel: null,
+      virtualBackground: { kind: "off" },
     });
   });
 
@@ -126,6 +128,7 @@ describe("call audio processing preferences", () => {
       speaker: "usb-speaker",
       audioProcessing: defaultAudioProcessingPrefs(),
       aiNoiseModel: null,
+      virtualBackground: { kind: "off" },
     });
   });
 });
@@ -144,6 +147,7 @@ describe("ai noise model preference", () => {
       speaker: null,
       audioProcessing: defaultAudioProcessingPrefs(),
       aiNoiseModel: "rnnoise",
+      virtualBackground: { kind: "off" },
     });
     expect(parseDevicePrefsStorage(stored).aiNoiseModel).toBe("rnnoise");
   });
@@ -172,5 +176,37 @@ describe("ai noise model preference", () => {
     expect($devicePrefs.get().aiNoiseModel).toBe("dtln");
     setAiNoiseModel(null);
     expect($devicePrefs.get().aiNoiseModel).toBeNull();
+  });
+});
+
+describe("virtual background preference", () => {
+  test("defaults to off when absent from stored prefs", () => {
+    expect(
+      parseDevicePrefsStorage(JSON.stringify({ mic: null, cam: null, speaker: null }))
+        .virtualBackground,
+    ).toEqual({ kind: "off" });
+  });
+
+  test("does not restore arbitrary or durable image URLs from storage", () => {
+    expect(
+      parseDevicePrefsStorage(
+        JSON.stringify({
+          virtualBackground: { kind: "image", imageUrl: "https://attacker.test/bg.png" },
+        }),
+      ).virtualBackground,
+    ).toEqual({ kind: "off" });
+  });
+
+  test("serializes selected replacement images as off to avoid durable image copies", () => {
+    const stored = serializeDevicePrefsStorage({
+      mic: null,
+      cam: null,
+      speaker: null,
+      audioProcessing: defaultAudioProcessingPrefs(),
+      aiNoiseModel: null,
+      virtualBackground: { kind: "image", imageUrl: "data:image/png;base64,ZmFrZQ==" },
+    });
+
+    expect(JSON.parse(stored).virtualBackground).toEqual({ kind: "off" });
   });
 });

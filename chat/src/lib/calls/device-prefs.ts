@@ -1,6 +1,7 @@
 import { atom } from "nanostores";
 import { isNoiseModelId, type NoiseModelId } from "./ai-noise-filter/model-id";
 import { hasNoiseModelBackend } from "./ai-noise-filter/registry";
+import type { VirtualBackgroundEffect } from "./virtual-background/processor";
 
 /**
  * User-chosen audio/video device IDs, persisted to localStorage so
@@ -25,6 +26,7 @@ type DevicePrefs = {
    * lifecycle and a different default.
    */
   aiNoiseModel: NoiseModelId | null;
+  virtualBackground: VirtualBackgroundEffect;
 };
 
 const STORAGE_KEY = "waddle:call-device-prefs";
@@ -79,7 +81,30 @@ function defaultDevicePrefs(): DevicePrefs {
     speaker: null,
     audioProcessing: defaultAudioProcessingPrefs(),
     aiNoiseModel: null,
+    virtualBackground: defaultVirtualBackgroundEffect(),
   };
+}
+
+function defaultVirtualBackgroundEffect(): VirtualBackgroundEffect {
+  return { kind: "off" };
+}
+
+function normalizeVirtualBackgroundEffect(value: unknown): VirtualBackgroundEffect {
+  if (typeof value !== "object" || value === null) return defaultVirtualBackgroundEffect();
+  const obj = value as Record<string, unknown>;
+  if (obj.kind === "blur") return { kind: "blur" };
+  if (
+    obj.kind === "image" &&
+    typeof obj.imageUrl === "string" &&
+    isAllowedVirtualBackgroundImageUrl(obj.imageUrl)
+  ) {
+    return { kind: "image", imageUrl: obj.imageUrl };
+  }
+  return defaultVirtualBackgroundEffect();
+}
+
+export function isAllowedVirtualBackgroundImageUrl(url: string): boolean {
+  return /^data:image\/(png|jpe?g|webp|gif);base64,/i.test(url);
 }
 
 /**
@@ -106,6 +131,7 @@ export function parseDevicePrefsStorage(raw: string | null): DevicePrefs {
       speaker: typeof obj.speaker === "string" ? obj.speaker : null,
       audioProcessing: normalizeAudioProcessingPrefs(obj.audioProcessing),
       aiNoiseModel: normalizeAiNoiseModel(obj.aiNoiseModel),
+      virtualBackground: normalizeVirtualBackgroundEffect(obj.virtualBackground),
     };
   } catch {
     return defaultDevicePrefs();
@@ -113,7 +139,15 @@ export function parseDevicePrefsStorage(raw: string | null): DevicePrefs {
 }
 
 export function serializeDevicePrefsStorage(prefs: DevicePrefs): string {
-  return JSON.stringify(prefs);
+  return JSON.stringify({
+    ...prefs,
+    // Image replacement is intentionally session-only: storing the full data
+    // URL would leave a durable private-image copy in localStorage.
+    virtualBackground:
+      prefs.virtualBackground.kind === "image"
+        ? defaultVirtualBackgroundEffect()
+        : prefs.virtualBackground,
+  });
 }
 
 function readInitialPrefs(): DevicePrefs {
@@ -152,6 +186,12 @@ export function setAudioProcessingPrefs(audioProcessing: AudioProcessingPrefs): 
 
 export function setAiNoiseModel(aiNoiseModel: NoiseModelId | null): void {
   $devicePrefs.set({ ...$devicePrefs.get(), aiNoiseModel });
+}
+
+export function setVirtualBackgroundEffect(
+  virtualBackground: VirtualBackgroundEffect,
+): void {
+  $devicePrefs.set({ ...$devicePrefs.get(), virtualBackground });
 }
 
 type SpeakerOutputSelectionEnvironment = {

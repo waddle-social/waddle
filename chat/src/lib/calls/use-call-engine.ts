@@ -28,6 +28,14 @@ import {
   clearAiNoiseFilterError,
   setAiNoiseFilterError,
 } from "./ai-noise-filter-error-state";
+import {
+  resetVirtualBackground,
+  setVirtualBackground,
+} from "./virtual-background-state";
+import {
+  clearVirtualBackgroundError,
+  setVirtualBackgroundError,
+} from "./virtual-background-error-state";
 import { createCallAudioProcessingBeacon } from "./call-audio-processing-telemetry";
 import {
   createCallMediaPathBeacon,
@@ -429,6 +437,13 @@ export function useCallEngine(): {
       // model couldn't start so the dialog can explain it.
       setAiNoiseFilterError(model);
     });
+    singletonEngine.on("virtualBackgroundChanged", (state) => {
+      setVirtualBackground(state);
+      if (state.kind !== "off") clearVirtualBackgroundError();
+    });
+    singletonEngine.on("virtualBackgroundError", ({ effect }) => {
+      setVirtualBackgroundError(effect);
+    });
     singletonEngine.on("connectionQualityChanged", (quality) => {
       // LiveKit re-scored the local participant's connection — drives the
       // ambient signal-bars chip on the call bar.
@@ -475,6 +490,8 @@ export function useCallEngine(): {
       // Same for the verified AI-filter readout and any attach-failure notice.
       resetMicAiNoiseFilter();
       clearAiNoiseFilterError();
+      resetVirtualBackground();
+      clearVirtualBackgroundError();
       // Re-arm the fleet-measurement beacon so the next call emits its
       // first verified state even if it matches the last call's.
       micAudioProcessingBeacon.reset();

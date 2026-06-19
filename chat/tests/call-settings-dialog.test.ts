@@ -43,6 +43,20 @@ describe("CallSettingsDialog audio processing controls", () => {
   });
 });
 
+describe("CallSettingsDialog virtual background controls", () => {
+  test("renders opt-in camera background controls", async () => {
+    const html = await renderVueComponent("../src/components/calls/CallSettingsDialog.vue", {
+      open: true,
+      "onUpdate:open": () => undefined,
+    });
+
+    expect(html).toContain("Virtual background");
+    expect(html).toContain("Background blur");
+    expect(html).toContain("Image replacement");
+    expect(html).toContain('type="file"');
+  });
+});
+
 async function renderVueComponent(path: string, props: Record<string, unknown>): Promise<string> {
   const component = await loadVueComponent(path);
   return renderToString(createSSRApp({ render: () => h(component, props) }));

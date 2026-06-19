@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed, onScopeDispose, ref, watch } from "vue";
 import { useStore } from "@nanostores/vue";
-import { Activity, Check, Mic, Speaker, Video, X } from "lucide-vue-next";
+import { Activity, Check, Image as ImageIcon, Mic, Speaker, Video, X } from "lucide-vue-next";
 import AppDialog from "@/components/ui/AppDialog.vue";
 import {
   $devicePrefs,
   enumerateCallDevices,
+  isAllowedVirtualBackgroundImageUrl,
   isSpeakerOutputSelectionSupported,
   type EnumeratedDevices,
   type AudioProcessingPrefs,
@@ -14,6 +15,7 @@ import {
   applyAiNoiseModelSelection,
   applyAudioProcessingSelection,
   applyCallDeviceSelection,
+  applyVirtualBackgroundSelection,
 } from "@/lib/calls/call-device-selection";
 import { $micAudioProcessing } from "@/lib/calls/mic-audio-processing-state";
 import { audioProcessingRows } from "@/lib/calls/mic-audio-processing";
@@ -30,6 +32,9 @@ import {
   noiseModelSupport,
 } from "@/lib/calls/ai-noise-filter/support";
 import { $aiNoiseFilterError } from "@/lib/calls/ai-noise-filter-error-state";
+import { $virtualBackground } from "@/lib/calls/virtual-background-state";
+import { $virtualBackgroundError } from "@/lib/calls/virtual-background-error-state";
+import type { VirtualBackgroundEffect } from "@/lib/calls/virtual-background/processor";
 import { useCallEngine } from "@/lib/calls/use-call-engine";
 import { reportCallError } from "@/lib/calls/call-store";
 import {
@@ -153,6 +158,11 @@ async function refresh(): Promise<void> {
 }
 
 const { engine, remoteTracks, localTracks } = useCallEngine();
+const virtualBackground = useStore($virtualBackground);
+const virtualBackgroundError = useStore($virtualBackgroundError);
+const virtualBackgroundPending = ref(false);
+const virtualBackgroundActive = computed(() => virtualBackground.value.kind);
+const selectedVirtualBackground = computed(() => prefs.value.virtualBackground);
 
 /**
  * Live call diagnostics. Polls each published (send) and subscribed
@@ -304,6 +314,46 @@ async function selectCam(id: string | null): Promise<void> {
   } catch (err) {
     reportCallError(err);
   }
+}
+
+async function selectVirtualBackground(effect: VirtualBackgroundEffect): Promise<void> {
+  virtualBackgroundPending.value = true;
+  try {
+    await applyVirtualBackgroundSelection(effect, engine);
+  } catch (err) {
+    reportCallError(err);
+  } finally {
+    virtualBackgroundPending.value = false;
+  }
+}
+
+async function selectVirtualBackgroundImage(event: Event): Promise<void> {
+  const input = event.target instanceof HTMLInputElement ? event.target : null;
+  const file = input?.files?.[0];
+  if (!file) return;
+  try {
+    const imageUrl = await readFileAsDataUrl(file);
+    if (!isAllowedVirtualBackgroundImageUrl(imageUrl)) {
+      throw new Error("Choose a PNG, JPEG, WebP, or GIF image.");
+    }
+    await selectVirtualBackground({ kind: "image", imageUrl });
+  } catch (err) {
+    reportCallError(err);
+  } finally {
+    if (input) input.value = "";
+  }
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === "string") resolve(reader.result);
+      else reject(new Error("Could not read image file"));
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("Could not read image file"));
+    reader.readAsDataURL(file);
+  });
 }
 
 async function selectSpeaker(id: string | null): Promise<void> {
@@ -645,6 +695,74 @@ function close(): void {
             </button>
           </li>
         </ul>
+
+        <div class="call-processing">
+          <div class="flex items-center gap-2">
+            <ImageIcon class="w-4 h-4 text-muted-foreground" />
+            <h4 class="type-caption call-processing__title">Virtual background</h4>
+          </div>
+          <ul class="chat-list-stack" role="radiogroup" aria-label="Virtual background">
+            <li>
+              <button
+                type="button"
+                class="call-device-row"
+                :class="selectedVirtualBackground.kind === 'off' ? 'call-device-row--active' : ''"
+                role="radio"
+                :aria-checked="selectedVirtualBackground.kind === 'off'"
+                :disabled="virtualBackgroundPending"
+                @click="selectVirtualBackground({ kind: 'off' })"
+              >
+                <span class="truncate">Off</span>
+                <Check v-if="selectedVirtualBackground.kind === 'off'" class="w-4 h-4 text-primary" />
+              </button>
+            </li>
+            <li>
+              <button
+                type="button"
+                class="call-device-row"
+                :class="selectedVirtualBackground.kind === 'blur' ? 'call-device-row--active' : ''"
+                role="radio"
+                :aria-checked="selectedVirtualBackground.kind === 'blur'"
+                :disabled="virtualBackgroundPending"
+                @click="selectVirtualBackground({ kind: 'blur' })"
+              >
+                <span class="truncate">Background blur</span>
+                <Check v-if="selectedVirtualBackground.kind === 'blur'" class="w-4 h-4 text-primary" />
+              </button>
+            </li>
+            <li>
+              <label
+                class="call-device-row"
+                :class="selectedVirtualBackground.kind === 'image' ? 'call-device-row--active' : ''"
+              >
+                <span class="call-ai-filter__option">
+                  <span class="truncate">Image replacement</span>
+                  <span
+                    v-if="virtualBackgroundActive === 'image'"
+                    class="type-caption text-muted-foreground"
+                  >
+                    Active
+                  </span>
+                </span>
+                <input
+                  class="call-background-file"
+                  type="file"
+                  accept="image/*"
+                  :disabled="virtualBackgroundPending"
+                  aria-label="Image replacement"
+                  @change="selectVirtualBackgroundImage"
+                />
+                <Check v-if="selectedVirtualBackground.kind === 'image'" class="w-4 h-4 text-primary" />
+              </label>
+            </li>
+          </ul>
+          <p
+            v-if="virtualBackgroundError"
+            class="type-caption call-ai-filter__error"
+          >
+            Couldn't start the virtual background.
+          </p>
+        </div>
       </section>
 
       <!-- Speaker -->
@@ -764,6 +882,11 @@ function close(): void {
 .call-device-row--active {
   background: color-mix(in oklab, var(--primary) 12%, transparent);
   color: var(--foreground);
+}
+
+.call-background-file {
+  max-width: 11rem;
+  font-size: 0.75rem;
 }
 
 .call-processing {
