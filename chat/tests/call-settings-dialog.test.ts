@@ -54,6 +54,7 @@ describe("CallSettingsDialog virtual background controls", () => {
     expect(html).toContain("Background blur");
     expect(html).toContain("Image replacement");
     expect(html).toContain('type="file"');
+    expect(html).toContain("Virtual backgrounds are not supported by this browser.");
   });
 });
 

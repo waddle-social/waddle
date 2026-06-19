@@ -44,11 +44,13 @@ import { makeNoiseProcessor } from "./ai-noise-filter/registry";
 import { runAiNoiseFilterReconcile, type ProcessorTarget } from "./ai-noise-filter/reconcile";
 import type { VerifiedCallAudioProcessing } from "./call-audio-processing-telemetry";
 import {
+  isSwitchableVirtualBackgroundProcessor,
+  liveKitBackgroundProcessorSwitchOptionsForEffect,
   sameVirtualBackgroundEffect,
   type ActiveVirtualBackgroundEffect,
   type VideoBackgroundProcessor,
   type VirtualBackgroundEffect,
-  virtualBackgroundEffectFromProcessorName,
+  virtualBackgroundEffectFromProcessor,
 } from "./virtual-background/processor";
 import { makeVirtualBackgroundProcessor } from "./virtual-background/registry";
 
@@ -688,7 +690,11 @@ export class CallEngine {
       this.emitVirtualBackground();
       return;
     }
-    const current = virtualBackgroundEffectFromProcessorName(track.getProcessor()?.name);
+    const currentProcessor = track.getProcessor();
+    const current = virtualBackgroundEffectFromProcessor(
+      currentProcessor,
+      this.appliedVirtualBackground,
+    );
     if (
       current.kind !== "off" &&
       this.desiredVirtualBackground.kind !== "off" &&
@@ -699,15 +705,27 @@ export class CallEngine {
     }
     if (this.desiredVirtualBackground.kind === "off" || this.virtualBackgroundFailed) {
       if (current.kind !== "off") {
-        await track.stopProcessor();
+        if (isSwitchableVirtualBackgroundProcessor(currentProcessor)) {
+          await currentProcessor
+            .switchTo(liveKitBackgroundProcessorSwitchOptionsForEffect({ kind: "off" }))
+            .catch(() => track.stopProcessor());
+        } else {
+          await track.stopProcessor();
+        }
         this.appliedVirtualBackground = { kind: "off" };
       }
       this.emitVirtualBackground();
       return;
     }
     try {
-      const processor = await this.makeVirtualBackgroundProcessor(this.desiredVirtualBackground);
-      await track.setProcessor(processor);
+      if (isSwitchableVirtualBackgroundProcessor(currentProcessor)) {
+        await currentProcessor.switchTo(
+          liveKitBackgroundProcessorSwitchOptionsForEffect(this.desiredVirtualBackground),
+        );
+      } else {
+        const processor = await this.makeVirtualBackgroundProcessor(this.desiredVirtualBackground);
+        await track.setProcessor(processor);
+      }
       this.appliedVirtualBackground = this.desiredVirtualBackground;
     } catch (error) {
       this.virtualBackgroundFailed = true;
@@ -731,11 +749,10 @@ export class CallEngine {
   private computeVirtualBackground(): VirtualBackgroundEffect {
     const track = this.cameraProcessorTrack();
     if (!track) return { kind: "off" };
-    const processorEffect = virtualBackgroundEffectFromProcessorName(track.getProcessor()?.name);
-    if (processorEffect.kind === "image" && this.appliedVirtualBackground.kind === "image") {
-      return this.appliedVirtualBackground;
-    }
-    return processorEffect;
+    return virtualBackgroundEffectFromProcessor(
+      track.getProcessor(),
+      this.appliedVirtualBackground,
+    );
   }
 
   private emitVirtualBackground(): void {

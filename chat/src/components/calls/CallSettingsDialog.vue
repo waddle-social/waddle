@@ -35,6 +35,7 @@ import { $aiNoiseFilterError } from "@/lib/calls/ai-noise-filter-error-state";
 import { $virtualBackground } from "@/lib/calls/virtual-background-state";
 import { $virtualBackgroundError } from "@/lib/calls/virtual-background-error-state";
 import type { VirtualBackgroundEffect } from "@/lib/calls/virtual-background/processor";
+import { isVirtualBackgroundProcessorSupported } from "@/lib/calls/virtual-background/registry";
 import { useCallEngine } from "@/lib/calls/use-call-engine";
 import { reportCallError } from "@/lib/calls/call-store";
 import {
@@ -161,6 +162,10 @@ const { engine, remoteTracks, localTracks } = useCallEngine();
 const virtualBackground = useStore($virtualBackground);
 const virtualBackgroundError = useStore($virtualBackgroundError);
 const virtualBackgroundPending = ref(false);
+const virtualBackgroundSupported = ref(isVirtualBackgroundProcessorSupported());
+const virtualBackgroundControlsDisabled = computed(
+  () => virtualBackgroundPending.value || !virtualBackgroundSupported.value,
+);
 const virtualBackgroundActive = computed(() => virtualBackground.value.kind);
 const selectedVirtualBackground = computed(() => prefs.value.virtualBackground);
 
@@ -723,7 +728,7 @@ function close(): void {
                 :class="selectedVirtualBackground.kind === 'blur' ? 'call-device-row--active' : ''"
                 role="radio"
                 :aria-checked="selectedVirtualBackground.kind === 'blur'"
-                :disabled="virtualBackgroundPending"
+                :disabled="virtualBackgroundControlsDisabled"
                 @click="selectVirtualBackground({ kind: 'blur' })"
               >
                 <span class="truncate">Background blur</span>
@@ -748,7 +753,7 @@ function close(): void {
                   class="call-background-file"
                   type="file"
                   accept="image/*"
-                  :disabled="virtualBackgroundPending"
+                  :disabled="virtualBackgroundControlsDisabled"
                   aria-label="Image replacement"
                   @change="selectVirtualBackgroundImage"
                 />
@@ -757,7 +762,13 @@ function close(): void {
             </li>
           </ul>
           <p
-            v-if="virtualBackgroundError"
+            v-if="!virtualBackgroundSupported"
+            class="type-caption text-muted-foreground"
+          >
+            Virtual backgrounds are not supported by this browser.
+          </p>
+          <p
+            v-else-if="virtualBackgroundError"
             class="type-caption call-ai-filter__error"
           >
             Couldn't start the virtual background.

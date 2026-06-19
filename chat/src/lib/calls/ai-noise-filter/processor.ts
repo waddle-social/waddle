@@ -8,8 +8,8 @@ import {
 
 /**
  * A LiveKit audio `TrackProcessor` we attach to the local mic via
- * `localAudioTrack.setProcessor`. We implement the interface directly against
- * livekit-client (no `@livekit/track-processors` — it has no audio pipeline).
+ * `localAudioTrack.setProcessor`. We implement this denoise pipeline directly
+ * because each model is exposed as its own AudioWorklet graph.
  */
 export type AudioNoiseProcessor = TrackProcessor<Track.Kind.Audio, AudioProcessorOptions>;
 

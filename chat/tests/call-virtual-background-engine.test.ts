@@ -86,6 +86,49 @@ describe("CallEngine — virtual background reconcile", () => {
     expect(states.at(-1)).toEqual({ kind: "off" });
   });
 
+  test("switches an attached LiveKit background processor in place", async () => {
+    const imageEffect: VirtualBackgroundEffect = {
+      kind: "image",
+      imageUrl: "data:image/png;base64,ZmFrZS1pbWFnZQ==",
+    };
+    const processor = {
+      name: "waddle:virtual-background:blur",
+      mode: "background-blur",
+      switchTo: mock(async (options: { mode: string; imagePath?: string }) => {
+        processor.mode = options.mode;
+      }),
+    } as VideoBackgroundProcessor & { mode: string; switchTo: ReturnType<typeof mock> };
+    const { engine, setProcessor, states } = engineWithCamera({ initialProcessor: processor });
+
+    await engine.setVirtualBackground(imageEffect);
+
+    expect(processor.switchTo).toHaveBeenCalledWith({
+      mode: "virtual-background",
+      imagePath: imageEffect.imageUrl,
+    });
+    expect(setProcessor).not.toHaveBeenCalled();
+    expect(states.at(-1)).toEqual(imageEffect);
+  });
+
+  test("switches an attached LiveKit background processor to disabled for off", async () => {
+    const processor = {
+      name: "waddle:virtual-background:blur",
+      mode: "background-blur",
+      switchTo: mock(async (options: { mode: string }) => {
+        processor.mode = options.mode;
+      }),
+    } as VideoBackgroundProcessor & { mode: string; switchTo: ReturnType<typeof mock> };
+    const { engine, stopProcessor, states } = engineWithCamera({
+      initialProcessor: processor,
+    });
+
+    await engine.setVirtualBackground({ kind: "off" });
+
+    expect(processor.switchTo).toHaveBeenCalledWith({ mode: "disabled" });
+    expect(stopProcessor).not.toHaveBeenCalled();
+    expect(states.at(-1)).toEqual({ kind: "off" });
+  });
+
   test("a failed attach fails open and emits a typed error", async () => {
     const make = mock((_effect: VirtualBackgroundEffect) =>
       Promise.reject(new Error("mediapipe wasm 404")),
