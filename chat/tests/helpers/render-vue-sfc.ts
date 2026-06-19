@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { createSSRApp, h } from "vue";
+import { createSSRApp, h, type App } from "vue";
 import { parse, compileScript } from "vue/compiler-sfc";
 import { renderToString } from "vue/server-renderer";
 import ts from "typescript";
@@ -29,11 +29,14 @@ export async function renderVueComponent(
   path: string,
   props: Record<string, unknown> = {},
   importMetaUrl: string,
+  configureApp?: (app: App<Element>) => void,
 ): Promise<string> {
   const outDir = mkdtempSync(join(tmpdir(), "waddle-vue-sfc-"));
   const moduleUrl = await compileSfcModule(new URL(path, importMetaUrl), outDir, new Map());
   const component = (await import(moduleUrl)).default;
-  return renderToString(createSSRApp({ render: () => h(component, props) }));
+  const app = createSSRApp({ render: () => h(component, props) });
+  configureApp?.(app);
+  return renderToString(app);
 }
 
 /**
