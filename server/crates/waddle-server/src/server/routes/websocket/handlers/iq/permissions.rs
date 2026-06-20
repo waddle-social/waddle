@@ -430,7 +430,13 @@ pub(super) async fn build_muc_owner_config_response(
         .ask(GetSnapshot)
         .await
         .map_err(|error| format!("snapshot failed: {error:?}"))?;
-    let form = build_config_form(&snapshot.room);
+    let mut room = snapshot.room;
+    if let Some(channel_type) =
+        super::muc_owner_config::managed_channel_type_for_room(state, room_jid).await?
+    {
+        super::muc_owner_config::project_channel_type_to_config(&mut room.config, channel_type);
+    }
+    let form = build_config_form(&room);
     let query = Element::builder("query", waddle_xmpp::muc::NS_MUC_OWNER)
         .append(form)
         .build();
