@@ -474,8 +474,8 @@ export class WaddleClient {
      */
     stories_items(community_jid: string, max_items?: number | null): Promise<any>;
     /**
-     * Publish a new story. At least one of `body` / `media_url` is
-     * required (the server rejects empty stories). `expiry_hours`
+     * Publish a new story. `media_url` is required by XEP-0501; `body`
+     * is optional text content attached to that media. `expiry_hours`
      * defaults to 24.
      */
     stories_publish(community_jid: string, input: any): Promise<any>;

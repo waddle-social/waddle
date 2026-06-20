@@ -297,7 +297,7 @@ pub fn build_pubsub_configure_form_result(original_iq: &Iq, node: &str, config: 
             )
             .build()
     }
-    let form = Element::builder("x", "jabber:x:data")
+    let mut form_builder = Element::builder("x", "jabber:x:data")
         .attr(minidom::rxml::xml_ncname!("type").to_owned(), "form")
         .append(hidden_field(
             "FORM_TYPE",
@@ -310,7 +310,11 @@ pub fn build_pubsub_configure_form_result(original_iq: &Iq, node: &str, config: 
         .append(field(
             "pubsub#publish_model",
             &config.publish_model.to_string(),
-        ))
+        ));
+    if let Some(node_type) = config.node_type {
+        form_builder = form_builder.append(field("pubsub#type", node_type.as_str()));
+    }
+    let form = form_builder
         .append(field("pubsub#max_items", &config.max_items.to_string()))
         .append(field(
             "pubsub#persist_items",

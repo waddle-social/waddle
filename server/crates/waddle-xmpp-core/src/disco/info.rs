@@ -475,10 +475,10 @@ pub fn community_service_features() -> Vec<Feature> {
         Feature::new("http://jabber.org/protocol/pubsub#meta-data"),
         Feature::new("http://jabber.org/protocol/pubsub#item-ids"),
         // XEP-0472 Pubsub Social Feed — community feed node lives
-        // here at `urn:xmpp:pubsub-social-feed:0`.
+        // here at `urn:xmpp:pubsub-social-feed:1`.
         Feature::social_feed(),
         // XEP-0501 Pubsub Stories — community stories node lives
-        // here at `urn:xmpp:stories:0`.
+        // here at `urn:xmpp:pubsub-social-feed:stories:0`.
         Feature::stories(),
         // xCal community events node — payload is iCalendar in XML
         // (`urn:ietf:params:xml:ns:xcal`) per the XSF ProtoXEP
@@ -500,6 +500,7 @@ pub fn muc_service_features() -> Vec<Feature> {
 pub fn muc_room_features(
     persistent: bool,
     members_only: bool,
+    public_room: bool,
     moderated: bool,
     forum: bool,
 ) -> Vec<Feature> {
@@ -561,6 +562,12 @@ pub fn muc_room_features(
         features.push(Feature::muc_membersonly());
     } else {
         features.push(Feature::muc_open());
+    }
+
+    if public_room {
+        features.push(Feature::muc_public());
+    } else {
+        features.push(Feature::muc_hidden());
     }
 
     if moderated {

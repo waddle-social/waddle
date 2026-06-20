@@ -10,7 +10,7 @@ fn server_root_disco_does_not_advertise_a_domain_archive() {
 
 #[test]
 fn muc_room_disco_advertises_mam_extended_for_supported_id_filters() {
-    let features = muc_room_features(true, true, false, false);
+    let features = muc_room_features(true, true, true, false, false);
 
     assert!(features.contains(&Feature::mam()));
     assert!(features.contains(&Feature::mam_extended()));

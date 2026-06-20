@@ -8,7 +8,7 @@ pub mod subscription;
 
 pub use affiliation::Affiliation;
 pub use node::{
-    AccessModel, NodeConfig, NodeConfigPatch, PublishModel, SendLastPublishedItem,
+    AccessModel, NodeConfig, NodeConfigPatch, PubSubNodeType, PublishModel, SendLastPublishedItem,
     PEP_BOOKMARK_MAX_ITEMS,
 };
 pub use pep::{

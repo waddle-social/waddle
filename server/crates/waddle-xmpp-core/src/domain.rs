@@ -34,8 +34,12 @@ pub struct ChannelRoomInfo {
 pub enum ChannelType {
     /// Standard text chat channel.
     Text,
+    /// Owner/moderator announcement channel.
+    Announcement,
     /// Waddle thread-oriented channel.
     Forum,
+    /// Private group direct-message channel.
+    GroupDm,
 }
 
 impl ChannelType {
@@ -43,7 +47,9 @@ impl ChannelType {
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim() {
             "text" => Some(Self::Text),
+            "announcement" => Some(Self::Announcement),
             "forum" => Some(Self::Forum),
+            "group-dm" => Some(Self::GroupDm),
             _ => None,
         }
     }
@@ -52,7 +58,9 @@ impl ChannelType {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Text => "text",
+            Self::Announcement => "announcement",
             Self::Forum => "forum",
+            Self::GroupDm => "group-dm",
         }
     }
 
@@ -144,7 +152,12 @@ mod tests {
     #[test]
     fn supported_channel_types_are_explicit() {
         assert_eq!(ChannelType::parse("text"), Some(ChannelType::Text));
+        assert_eq!(
+            ChannelType::parse("announcement"),
+            Some(ChannelType::Announcement)
+        );
         assert_eq!(ChannelType::parse("forum"), Some(ChannelType::Forum));
+        assert_eq!(ChannelType::parse("group-dm"), Some(ChannelType::GroupDm));
         assert_eq!(ChannelType::parse("voice"), None);
     }
 }

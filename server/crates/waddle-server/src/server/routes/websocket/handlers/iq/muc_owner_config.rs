@@ -149,7 +149,7 @@ pub(super) async fn apply_muc_owner_config(
         .map(|channel| channel.channel_type);
     let channel_type = if config.forum {
         "forum".to_string()
-    } else if existing_channel_type.as_deref() == Some("announcement") {
+    } else if config.moderated || existing_channel_type.as_deref() == Some("announcement") {
         "announcement".to_string()
     } else {
         "text".to_string()

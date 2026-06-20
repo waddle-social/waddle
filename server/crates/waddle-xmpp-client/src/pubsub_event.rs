@@ -165,7 +165,7 @@ mod tests {
     #[test]
     fn parses_attachment_summary_event() {
         let message = event_message(
-            "urn:xmpp:pubsub-attachments:summary:1/urn:xmpp:stories:0",
+            "urn:xmpp:pubsub-attachments:summary:1/urn:xmpp:pubsub-social-feed:stories:0",
             "story-1",
             Element::builder("summary", NS_PUBSUB_ATTACHMENTS_SUMMARY)
                 .append(
@@ -265,7 +265,7 @@ mod tests {
                         Element::builder("items", NS_PUBSUB_EVENT)
                             .attr(
                                 minidom::rxml::xml_ncname!("node").to_owned(),
-                                "urn:xmpp:stories:0",
+                                "urn:xmpp:pubsub-social-feed:stories:0",
                             )
                             .append(
                                 Element::builder("retract", NS_PUBSUB_EVENT)
@@ -280,7 +280,7 @@ mod tests {
 
         let events = parse_pubsub_events(&message);
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].node, "urn:xmpp:stories:0");
+        assert_eq!(events[0].node, "urn:xmpp:pubsub-social-feed:stories:0");
         assert_eq!(events[0].items[0].id.as_deref(), Some("story-1"));
         assert!(events[0].items[0].retracted);
         assert_eq!(events[0].items[0].payload, PubsubEventPayload::Empty);

@@ -91,6 +91,40 @@ impl FromStr for PublishModel {
     }
 }
 
+/// XEP-0060 `pubsub#type` profile identifier for a PubSub node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PubSubNodeType {
+    PubsubSocialFeed,
+    PubsubSocialFeedStories,
+}
+
+impl PubSubNodeType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PubSubNodeType::PubsubSocialFeed => crate::xep0472::NS_SOCIAL_FEED,
+            PubSubNodeType::PubsubSocialFeedStories => crate::xep0501::NS_STORIES,
+        }
+    }
+}
+
+impl fmt::Display for PubSubNodeType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl FromStr for PubSubNodeType {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            crate::xep0472::NS_SOCIAL_FEED => Ok(PubSubNodeType::PubsubSocialFeed),
+            crate::xep0501::NS_STORIES => Ok(PubSubNodeType::PubsubSocialFeedStories),
+            _ => Err(()),
+        }
+    }
+}
+
 /// When to send the last published item to a subscriber.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum SendLastPublishedItem {
@@ -132,6 +166,7 @@ impl FromStr for SendLastPublishedItem {
 pub struct NodeConfig {
     pub access_model: AccessModel,
     pub publish_model: PublishModel,
+    pub node_type: Option<PubSubNodeType>,
     pub max_items: u32,
     pub persist_items: bool,
     pub deliver_payloads: bool,
@@ -145,6 +180,7 @@ pub struct NodeConfig {
 pub struct NodeConfigPatch {
     pub access_model: Option<AccessModel>,
     pub publish_model: Option<PublishModel>,
+    pub node_type: Option<PubSubNodeType>,
     pub max_items: Option<u32>,
     pub persist_items: Option<bool>,
     pub deliver_payloads: Option<bool>,
@@ -160,6 +196,9 @@ impl NodeConfigPatch {
         }
         if let Some(publish_model) = self.publish_model {
             config.publish_model = publish_model;
+        }
+        if let Some(node_type) = self.node_type {
+            config.node_type = Some(node_type);
         }
         if let Some(max_items) = self.max_items {
             config.max_items = max_items;
@@ -195,6 +234,7 @@ impl NodeConfig {
         Self {
             access_model: AccessModel::Open,
             publish_model: PublishModel::Publishers,
+            node_type: None,
             max_items: u32::MAX,
             persist_items: true,
             deliver_payloads: true,
@@ -219,6 +259,7 @@ impl NodeConfig {
         Self {
             access_model: AccessModel::Open,
             publish_model: PublishModel::Open,
+            node_type: Some(PubSubNodeType::PubsubSocialFeed),
             max_items: u32::MAX,
             persist_items: true,
             deliver_payloads: true,
@@ -238,6 +279,7 @@ impl NodeConfig {
         Self {
             access_model: AccessModel::Open,
             publish_model: PublishModel::Open,
+            node_type: Some(PubSubNodeType::PubsubSocialFeedStories),
             max_items: u32::MAX,
             persist_items: true,
             deliver_payloads: true,
@@ -252,6 +294,7 @@ impl NodeConfig {
         Self {
             access_model: AccessModel::Whitelist,
             publish_model: PublishModel::Publishers,
+            node_type: None,
             max_items: u32::MAX,
             persist_items: true,
             deliver_payloads: true,
@@ -266,6 +309,7 @@ impl NodeConfig {
         Self {
             access_model: AccessModel::Presence,
             publish_model: PublishModel::Publishers,
+            node_type: None,
             max_items: 1,
             persist_items: true,
             deliver_payloads: true,
@@ -319,6 +363,7 @@ impl NodeConfig {
         Self {
             access_model: AccessModel::Whitelist,
             publish_model: PublishModel::Publishers,
+            node_type: None,
             max_items: PEP_BOOKMARK_MAX_ITEMS,
             persist_items: true,
             deliver_payloads: true,
@@ -349,6 +394,7 @@ impl NodeConfig {
         Self {
             access_model: AccessModel::Whitelist,
             publish_model: PublishModel::Publishers,
+            node_type: None,
             max_items: 1,
             persist_items: true,
             deliver_payloads: true,
@@ -390,6 +436,7 @@ impl NodeConfig {
         Self {
             access_model: AccessModel::Whitelist,
             publish_model: PublishModel::Publishers,
+            node_type: None,
             max_items: u32::MAX,
             persist_items: true,
             deliver_payloads: true,
@@ -437,6 +484,7 @@ impl NodeConfig {
         Self {
             access_model: AccessModel::Open,
             publish_model: PublishModel::Publishers,
+            node_type: None,
             max_items: 10,
             persist_items: true,
             deliver_payloads: true,
@@ -451,6 +499,7 @@ impl NodeConfig {
         Self {
             access_model: AccessModel::Whitelist,
             publish_model: PublishModel::Publishers,
+            node_type: None,
             max_items: 10,
             persist_items: true,
             deliver_payloads: true,
@@ -470,6 +519,7 @@ impl NodeConfig {
         Self {
             access_model: AccessModel::Whitelist,
             publish_model: PublishModel::Publishers,
+            node_type: None,
             max_items: 10_000,
             persist_items: true,
             deliver_payloads: false,
@@ -501,10 +551,23 @@ mod tests {
     }
 
     #[test]
+    fn pubsub_node_type_round_trips() {
+        assert_eq!(
+            crate::xep0472::NS_SOCIAL_FEED.parse::<PubSubNodeType>(),
+            Ok(PubSubNodeType::PubsubSocialFeed)
+        );
+        assert_eq!(
+            PubSubNodeType::PubsubSocialFeedStories.to_string(),
+            crate::xep0501::NS_STORIES
+        );
+    }
+
+    #[test]
     fn community_feed_is_open_read_and_open_publish() {
         let config = NodeConfig::community_feed();
         assert_eq!(config.access_model, AccessModel::Open);
         assert_eq!(config.publish_model, PublishModel::Open);
+        assert_eq!(config.node_type, Some(PubSubNodeType::PubsubSocialFeed));
         assert!(config.persist_items);
         assert!(config.deliver_payloads);
         // Differs from spaces_public() only on publish-model: the feed
@@ -512,6 +575,15 @@ mod tests {
         assert_eq!(
             NodeConfig::spaces_public().publish_model,
             PublishModel::Publishers
+        );
+    }
+
+    #[test]
+    fn community_stories_sets_xep0501_node_type() {
+        let config = NodeConfig::community_stories();
+        assert_eq!(
+            config.node_type,
+            Some(PubSubNodeType::PubsubSocialFeedStories)
         );
     }
 

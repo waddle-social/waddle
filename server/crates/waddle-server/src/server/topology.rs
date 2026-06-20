@@ -23,6 +23,8 @@ struct ManagedChannelSeed {
     position: i64,
     is_default: i64,
     channel_type: &'static str,
+    members_only: bool,
+    public_room: bool,
 }
 
 const INITIAL_MANAGED_CHANNELS: &[ManagedChannelSeed] = &[
@@ -33,6 +35,8 @@ const INITIAL_MANAGED_CHANNELS: &[ManagedChannelSeed] = &[
         position: 0,
         is_default: 1,
         channel_type: "text",
+        members_only: false,
+        public_room: true,
     },
     ManagedChannelSeed {
         id: "announcements",
@@ -41,6 +45,8 @@ const INITIAL_MANAGED_CHANNELS: &[ManagedChannelSeed] = &[
         position: 1,
         is_default: 0,
         channel_type: "announcement",
+        members_only: false,
+        public_room: true,
     },
     ManagedChannelSeed {
         id: "github-actions",
@@ -49,6 +55,8 @@ const INITIAL_MANAGED_CHANNELS: &[ManagedChannelSeed] = &[
         position: 2,
         is_default: 0,
         channel_type: "text",
+        members_only: false,
+        public_room: true,
     },
 ];
 
@@ -92,9 +100,16 @@ async fn seed_initial_xmpp_topology(
         actor
             .ask(DbExecute {
                 sql: r#"
-                    INSERT INTO channels (id, name, description, channel_type, position, is_default, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(id) DO NOTHING
+                    INSERT INTO channels (
+                        id, name, description, channel_type, position, is_default,
+                        members_only, public_room, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        channel_type = excluded.channel_type,
+                        members_only = excluded.members_only,
+                        public_room = excluded.public_room,
+                        updated_at = excluded.updated_at
                 "#
                 .to_string(),
                 params: vec![
@@ -104,6 +119,8 @@ async fn seed_initial_xmpp_topology(
                     channel.channel_type.into(),
                     channel.position.into(),
                     channel.is_default.into(),
+                    channel.members_only.into(),
+                    channel.public_room.into(),
                     now.clone().into(),
                     now.clone().into(),
                 ],
@@ -359,5 +376,21 @@ mod tests {
 
         assert_eq!(channel.name, "GitHub Actions");
         assert_eq!(room_jid.to_string(), "github-actions@muc.waddle.social");
+    }
+
+    #[test]
+    fn initial_managed_channels_are_public_and_open() {
+        for channel in INITIAL_MANAGED_CHANNELS {
+            assert!(
+                !channel.members_only,
+                "seeded channel {} must be open",
+                channel.id
+            );
+            assert!(
+                channel.public_room,
+                "seeded channel {} must be public",
+                channel.id
+            );
+        }
     }
 }

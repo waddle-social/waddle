@@ -1,7 +1,7 @@
 //! XEP-0501 Pubsub Stories — wasm bridge surface.
 //!
 //! The server bootstraps a community stories node at
-//! `urn:xmpp:stories:0` on the community service. These wasm methods
+//! `urn:xmpp:pubsub-social-feed:stories:0` on the community service. These wasm methods
 //! let the chat read active stories (`stories_items`, returns ALL
 //! items; the chat filters expired locally) and publish new stories
 //! with an expiry (`stories_publish`).
@@ -11,7 +11,7 @@ use minidom::Element;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use waddle_xmpp_core::xep0501::{
-    build_story_element, parse_story, Story, DEFAULT_EXPIRY_HOURS, NS_STORIES, PUBSUB_NODE_STORIES,
+    build_story_element, parse_story, Story, DEFAULT_EXPIRY_HOURS, NS_ATOM, PUBSUB_NODE_STORIES,
 };
 use wasm_bindgen::prelude::*;
 
@@ -25,6 +25,7 @@ pub(crate) struct JsStory {
     pub id: String,
     pub body: Option<String>,
     pub media_url: Option<String>,
+    pub media_type: Option<String>,
     pub author: Option<String>,
     pub posted: Option<String>,
     pub expires: Option<String>,
@@ -36,6 +37,7 @@ impl From<Story> for JsStory {
             id: story.id,
             body: story.body,
             media_url: story.media_url,
+            media_type: story.media_type.map(|media_type| media_type.to_string()),
             author: story.author,
             posted: story.posted.map(|ts| ts.to_rfc3339()),
             expires: story.expires.map(|ts| ts.to_rfc3339()),
@@ -47,6 +49,7 @@ impl From<Story> for JsStory {
 pub(crate) struct JsStoryInput {
     pub body: Option<String>,
     pub media_url: Option<String>,
+    pub media_type: Option<String>,
     pub author: Option<String>,
     pub expiry_hours: Option<i64>,
 }
@@ -114,7 +117,7 @@ fn parse_stories_items_result(iq: &Element) -> Vec<JsStory> {
             let item_id = item.attr("id")?;
             let story_el = item
                 .children()
-                .find(|child| child.name() == "story" && child.ns() == NS_STORIES)?;
+                .find(|child| child.name() == "entry" && child.ns() == NS_ATOM)?;
             parse_story(item_id, story_el).map(JsStory::from)
         })
         .collect()
@@ -136,24 +139,31 @@ impl WaddleClient {
         })
     }
 
-    /// Publish a new story. At least one of `body` / `media_url` is
-    /// required (the server rejects empty stories). `expiry_hours`
+    /// Publish a new story. `media_url` is required by XEP-0501; `body`
+    /// is optional text content attached to that media. `expiry_hours`
     /// defaults to 24.
     pub fn stories_publish(&self, community_jid: String, input: JsValue) -> js_sys::Promise {
         let inner = self.inner.clone();
         wasm_bindgen_futures::future_to_promise(async move {
             let input: JsStoryInput = serde_wasm_bindgen::from_value(input)
                 .map_err(|err| js_error(format!("invalid story input: {err}")))?;
-            if input.body.is_none() && input.media_url.is_none() {
-                return Err(js_error("story must have body or media_url"));
-            }
+            let media_url = input
+                .media_url
+                .map(|url| url.trim().to_owned())
+                .filter(|url| !url.is_empty())
+                .ok_or_else(|| js_error("story must have media_url"))?;
             let item_id = format!("story-{}", Uuid::new_v4());
             let mut story = Story::new(item_id.clone());
             if let Some(body) = input.body {
                 story = story.with_body(body);
             }
-            if let Some(url) = input.media_url {
-                story = story.with_media(url);
+            story = story.with_media(media_url);
+            if let Some(media_type) = input.media_type {
+                story = story.with_media_type(
+                    media_type
+                        .parse()
+                        .map_err(|_| js_error("invalid story media_type"))?,
+                );
             }
             if let Some(author) = input.author {
                 story = story.with_author(author);
@@ -168,6 +178,7 @@ impl WaddleClient {
                 id: item_id,
                 body: story.body,
                 media_url: story.media_url,
+                media_type: story.media_type.map(|media_type| media_type.to_string()),
                 author: story.author,
                 posted: Some(posted.to_rfc3339()),
                 expires: Some(expires.to_rfc3339()),

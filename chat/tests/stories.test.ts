@@ -52,7 +52,7 @@ function makeClient(stories: Story[] = []): MockClient {
     emitPubsubEvent: (event: PubsubEvent) => {
       for (const handler of pubsubEventHandlers) handler(event);
     },
-    publishStory: mock((_jid: string, input: { body?: string; mediaUrl?: string; author?: string }) =>
+    publishStory: mock((_jid: string, input: { body?: string; mediaUrl: string; author?: string }) =>
       Promise.resolve({
         id: "new-story",
         ...(input.body ? { body: input.body } : {}),
@@ -100,10 +100,18 @@ describe("useStories", () => {
       useStories(ref<BrowserXmppClient | null>(client), { communityJid: ref<string | null>(COMMUNITY) }),
     );
     story.nowMs.value = Date.parse("2026-06-01T12:00:00Z");
-    const empty = await story.post({ body: "  " });
+    const empty = await story.post({ body: "  ", mediaUrl: "  " });
     expect(empty).toBe(null);
     expect(client.publishStory).not.toHaveBeenCalled();
-    const posted = await story.post({ body: "hi", author: "alice@example.com" });
+    const bodyOnly = await story.post({ body: "hi", mediaUrl: "  ", author: "alice@example.com" });
+    expect(bodyOnly).toBe(null);
+    expect(client.publishStory).not.toHaveBeenCalled();
+    const posted = await story.post({
+      body: "hi",
+      mediaUrl: "https://example.com/story.jpg",
+      mediaType: "image/jpeg",
+      author: "alice@example.com",
+    });
     expect(posted?.id).toBe("new-story");
     expect(story.activeStories.value.map((s) => s.id)).toContain("new-story");
   });
@@ -190,7 +198,7 @@ describe("useStories", () => {
 
     client.emitPubsubEvent({
       from: COMMUNITY,
-      node: "urn:xmpp:pubsub-attachments:summary:1/urn:xmpp:stories:0",
+      node: "urn:xmpp:pubsub-attachments:summary:1/urn:xmpp:pubsub-social-feed:stories:0",
       items: [{
         id: "s1",
         payload: {
@@ -227,7 +235,7 @@ describe("useStories", () => {
 
     client.emitPubsubEvent({
       from: COMMUNITY,
-      node: "urn:xmpp:stories:0",
+      node: "urn:xmpp:pubsub-social-feed:stories:0",
       items: [{
         id: "s1",
         retracted: true,
@@ -250,7 +258,7 @@ describe("useStories", () => {
 
     client.emitPubsubEvent({
       from: COMMUNITY,
-      node: "urn:xmpp:pubsub-attachments:summary:1/urn:xmpp:stories:0",
+      node: "urn:xmpp:pubsub-attachments:summary:1/urn:xmpp:pubsub-social-feed:stories:0",
       items: [{
         id: "s1",
         retracted: true,
@@ -278,7 +286,7 @@ describe("useStories", () => {
 
     client.emitPubsubEvent({
       from: COMMUNITY,
-      node: "urn:xmpp:pubsub-attachments:summary:1/urn:xmpp:stories:0",
+      node: "urn:xmpp:pubsub-attachments:summary:1/urn:xmpp:pubsub-social-feed:stories:0",
       items: [{
         id: "s1",
         payload: {
@@ -307,7 +315,7 @@ describe("useStories", () => {
 
     client.emitPubsubEvent({
       from: COMMUNITY,
-      node: "urn:xmpp:pubsub-attachments:summary:1/urn:xmpp:stories:0",
+      node: "urn:xmpp:pubsub-attachments:summary:1/urn:xmpp:pubsub-social-feed:stories:0",
       items: [{
         id: "s1",
         payload: {
@@ -337,7 +345,7 @@ describe("useStories", () => {
     await Promise.resolve();
     client.emitPubsubEvent({
       from: COMMUNITY,
-      node: "urn:xmpp:pubsub-attachments:summary:1/urn:xmpp:stories:0",
+      node: "urn:xmpp:pubsub-attachments:summary:1/urn:xmpp:pubsub-social-feed:stories:0",
       items: [{
         id: "s1",
         payload: {
@@ -368,7 +376,7 @@ describe("useStories", () => {
 
     client.emitPubsubEvent({
       from: COMMUNITY,
-      node: "urn:xmpp:pubsub-attachments:summary:1/urn:xmpp:stories:0",
+      node: "urn:xmpp:pubsub-attachments:summary:1/urn:xmpp:pubsub-social-feed:stories:0",
       items: [{
         id: "s1",
         payload: {
@@ -383,7 +391,7 @@ describe("useStories", () => {
     firstScope.stop();
     client.emitPubsubEvent({
       from: COMMUNITY,
-      node: "urn:xmpp:pubsub-attachments:summary:1/urn:xmpp:stories:0",
+      node: "urn:xmpp:pubsub-attachments:summary:1/urn:xmpp:pubsub-social-feed:stories:0",
       items: [{
         id: "s1",
         payload: {
@@ -406,7 +414,7 @@ describe("useStories", () => {
 
     client.emitPubsubEvent({
       from: "other.example.com",
-      node: "urn:xmpp:pubsub-attachments:summary:1/urn:xmpp:stories:0",
+      node: "urn:xmpp:pubsub-attachments:summary:1/urn:xmpp:pubsub-social-feed:stories:0",
       items: [{
         id: "s1",
         payload: {

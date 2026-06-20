@@ -1,7 +1,7 @@
 //! XEP-0472 Pubsub Social Feed — wasm bridge surface.
 //!
 //! The server bootstraps a community feed node at
-//! `urn:xmpp:pubsub-social-feed:0` on the spaces service. These
+//! `urn:xmpp:pubsub-social-feed:1` on the spaces service. These
 //! wasm methods let the chat read the feed (`feed_items`) and
 //! publish new posts (`feed_publish`) via standard XEP-0060
 //! pubsub IQs, with the typed XEP-0472 `<entry/>` payload
@@ -12,7 +12,7 @@ use minidom::Element;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use waddle_xmpp_core::xep0472::{
-    build_feed_entry_element, parse_feed_entry, FeedEntry, NS_SOCIAL_FEED, PUBSUB_NODE_FEED,
+    build_feed_entry_element, parse_feed_entry, FeedEntry, NS_ATOM, PUBSUB_NODE_FEED,
 };
 use wasm_bindgen::prelude::*;
 
@@ -140,7 +140,7 @@ fn parse_feed_items_result(iq: &Element) -> Vec<JsFeedEntry> {
             let item_id = item.attr("id")?;
             let entry_el = item
                 .children()
-                .find(|child| child.name() == "entry" && child.ns() == NS_SOCIAL_FEED)?;
+                .find(|child| child.name() == "entry" && child.ns() == NS_ATOM)?;
             let source = extract_source_kind(entry_el);
             parse_feed_entry(item_id, entry_el).map(|entry| {
                 let mut js = JsFeedEntry::from(entry);

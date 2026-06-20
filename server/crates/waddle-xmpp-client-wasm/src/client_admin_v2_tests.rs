@@ -79,6 +79,7 @@ fn parse_channels_list_extracts_booleans_and_counts() {
             <field var="channel_jid"><value>general@muc.localhost</value></field>
             <field var="name"><value>General</value></field>
             <field var="topic"><value>All things</value></field>
+            <field var="channel_type"><value>text</value></field>
             <field var="is_public" type="boolean"><value>1</value></field>
             <field var="members_only" type="boolean"><value>0</value></field>
             <field var="occupant_count"><value>7</value></field>
@@ -91,6 +92,7 @@ fn parse_channels_list_extracts_booleans_and_counts() {
     let result = parse_channels_list_result(&iq).expect("ok");
     assert_eq!(result.entries.len(), 1);
     let entry = &result.entries[0];
+    assert_eq!(entry.channel_type, "text");
     assert!(entry.is_public);
     assert!(!entry.members_only);
     assert_eq!(entry.occupant_count, 7);
@@ -121,6 +123,7 @@ fn parse_channels_list_rejects_malformed_counts_and_booleans() {
     let malformed_count = r#"<item>
             <field var="channel_jid"><value>general@muc.localhost</value></field>
             <field var="name"><value>General</value></field>
+            <field var="channel_type"><value>text</value></field>
             <field var="is_public" type="boolean"><value>1</value></field>
             <field var="members_only" type="boolean"><value>0</value></field>
             <field var="occupant_count"><value>many</value></field>
@@ -132,6 +135,7 @@ fn parse_channels_list_rejects_malformed_counts_and_booleans() {
     let malformed_bool = r#"<item>
             <field var="channel_jid"><value>general@muc.localhost</value></field>
             <field var="name"><value>General</value></field>
+            <field var="channel_type"><value>text</value></field>
             <field var="is_public" type="boolean"><value>sometimes</value></field>
             <field var="members_only" type="boolean"><value>0</value></field>
             <field var="occupant_count"><value>7</value></field>
@@ -191,6 +195,7 @@ fn build_channels_create_iq_includes_all_optional_fields() {
     let args = WaddleAdminChannelsCreateArgs {
         name: "general".to_string(),
         topic: Some("All things".to_string()),
+        channel_type: Some("forum".to_string()),
         space_jid: Some("eng@spaces.localhost".to_string()),
         space_node: Some("eng".to_string()),
         is_public: Some(true),
@@ -208,6 +213,7 @@ fn build_channels_create_iq_includes_all_optional_fields() {
         .collect();
     assert!(var_names.contains(&"name"));
     assert!(var_names.contains(&"topic"));
+    assert!(var_names.contains(&"channel_type"));
     assert!(var_names.contains(&"space_jid"));
     assert!(var_names.contains(&"space_node"));
     assert!(var_names.contains(&"is_public"));

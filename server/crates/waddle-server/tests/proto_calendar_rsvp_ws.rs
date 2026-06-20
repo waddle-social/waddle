@@ -14,7 +14,7 @@ const DOMAIN: &str = "localhost";
 const ADMIN: &str = "admin";
 const COMMUNITY_JID: &str = "community.localhost";
 const EVENTS_NODE: &str = "urn:xmpp:calendar:0";
-const FEED_NODE: &str = "urn:xmpp:pubsub-social-feed:0";
+const FEED_NODE: &str = "urn:xmpp:pubsub-social-feed:1";
 const NS_XCAL: &str = "urn:ietf:params:xml:ns:xcal";
 
 static TEST_SERIAL: Mutex<()> = Mutex::const_new(());
@@ -336,7 +336,7 @@ async fn rsvp_publish_bridges_to_social_feed() {
         .expect("feed response");
 
     assert!(
-        feed_response.contains("<author>bob@localhost</author>"),
+        feed_response.contains("<author><uri>xmpp:bob@localhost</uri></author>"),
         "feed entry must carry bob's bare JID: {feed_response}"
     );
     assert!(

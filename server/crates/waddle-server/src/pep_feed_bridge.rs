@@ -3,7 +3,7 @@
 //! Observes successful PEP publishes (mood / activity / tune /
 //! avatar / vCard4) AND successful RSVP publishes on the calendar
 //! events node, and shadow-publishes a typed feed entry to
-//! `urn:xmpp:pubsub-social-feed:0` on the community service so the
+//! `urn:xmpp:pubsub-social-feed:1` on the community service so the
 //! Feed pane surfaces user activity automatically alongside manual
 //! posts.
 //!
@@ -473,25 +473,10 @@ fn render_vcard(payload: &Element) -> Option<String> {
 // ── Feed-entry builder ──────────────────────────────────────────────
 
 fn build_bridge_entry(item_id: &str, kind: PepKind, author: &BareJid, body: &str) -> Element {
-    let mut entry = Element::builder("entry", waddle_xmpp_core::xep0472::NS_SOCIAL_FEED).build();
-
-    let mut id_el = Element::builder("id", waddle_xmpp_core::xep0472::NS_SOCIAL_FEED).build();
-    id_el.append_text_node(item_id);
-    entry.append_child(id_el);
-
-    let mut author_el =
-        Element::builder("author", waddle_xmpp_core::xep0472::NS_SOCIAL_FEED).build();
-    author_el.append_text_node(author.to_string());
-    entry.append_child(author_el);
-
-    let mut body_el = Element::builder("body", waddle_xmpp_core::xep0472::NS_SOCIAL_FEED).build();
-    body_el.append_text_node(body);
-    entry.append_child(body_el);
-
-    let mut published_el =
-        Element::builder("published", waddle_xmpp_core::xep0472::NS_SOCIAL_FEED).build();
-    published_el.append_text_node(chrono::Utc::now().to_rfc3339());
-    entry.append_child(published_el);
+    let feed_entry = waddle_xmpp_core::xep0472::FeedEntry::new(item_id, body)
+        .with_author(author.to_string())
+        .with_published(chrono::Utc::now());
+    let mut entry = waddle_xmpp_core::xep0472::build_feed_entry_element(&feed_entry);
 
     let source = Element::builder("source", NS_FEED_SOURCE)
         .attr(minidom::rxml::xml_ncname!("kind").to_owned(), kind.as_str())
@@ -801,12 +786,12 @@ mod tests {
         );
         let xml = String::from(&entry);
         assert!(
-            xml.contains("<author>alice@example.com</author>"),
-            "author missing: {xml}"
+            xml.contains("http://www.w3.org/2005/Atom") && xml.contains("xmpp:alice@example.com"),
+            "Atom author missing: {xml}"
         );
         assert!(
-            xml.contains("<body>is feeling happy</body>"),
-            "body missing: {xml}"
+            xml.contains("is feeling happy"),
+            "Atom content missing: {xml}"
         );
         assert!(
             xml.contains("kind='mood'") || xml.contains("kind='mood'"),

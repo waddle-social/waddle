@@ -32,13 +32,13 @@ scenario: #Scenario & {
 			id:     "cue-stories-disco"
 			type:   "result"
 			contains: [
-				"var='urn:xmpp:stories:0'",
+				"var='urn:xmpp:pubsub-social-feed:stories:0'",
 			]
 		},
 		// 2. Publish a story to the bootstrapped community stories
 		//    node. The server bootstraps this node at startup with
-		//    spaces_public() access; server-owner affiliation seed
-		//    grants admin Publisher access.
+		//    the XEP-0501 story profile; server-owner affiliation
+		//    seed grants admin Publisher access.
 		#SendIq & {
 			actor: adminPhone
 			type:  "set"
@@ -51,7 +51,7 @@ scenario: #Scenario & {
 					#XmlElement & {
 						name:  "publish"
 						ns:    "http://jabber.org/protocol/pubsub"
-						attrs: node: "urn:xmpp:stories:0"
+						attrs: node: "urn:xmpp:pubsub-social-feed:stories:0"
 						children: [
 							#XmlElement & {
 								name:  "item"
@@ -59,24 +59,60 @@ scenario: #Scenario & {
 								attrs: id: "cue-story-1"
 								children: [
 									#XmlElement & {
-										name: "story"
-										ns:   "urn:xmpp:stories:0"
-										attrs: expires: "2030-01-01T12:00:00Z"
+										name: "entry"
+										ns:   "http://www.w3.org/2005/Atom"
 										children: [
 											#XmlElement & {
-												name: "body"
-												ns:   "urn:xmpp:stories:0"
+												name:  "title"
+												ns:    "http://www.w3.org/2005/Atom"
+												attrs: type: "text"
 												text: "Look at this!"
 											},
 											#XmlElement & {
-												name: "media-url"
-												ns:   "urn:xmpp:stories:0"
-												text: "https://example.com/photo.jpg"
+												name: "id"
+												ns:   "http://www.w3.org/2005/Atom"
+												text: "cue-story-1"
+											},
+											#XmlElement & {
+												name: "published"
+												ns:   "http://www.w3.org/2005/Atom"
+												text: "2026-06-01T12:00:00Z"
+											},
+											#XmlElement & {
+												name: "updated"
+												ns:   "http://www.w3.org/2005/Atom"
+												text: "2026-06-01T12:00:00Z"
+											},
+											#XmlElement & {
+												name:  "content"
+												ns:    "http://www.w3.org/2005/Atom"
+												attrs: type: "text"
+												text: "Look at this!"
 											},
 											#XmlElement & {
 												name: "author"
-												ns:   "urn:xmpp:stories:0"
-												text: "admin@\(scenario.domain)"
+												ns:   "http://www.w3.org/2005/Atom"
+												children: [
+													#XmlElement & {
+														name: "uri"
+														ns:   "http://www.w3.org/2005/Atom"
+														text: "xmpp:admin@\(scenario.domain)"
+													},
+												]
+											},
+											#XmlElement & {
+												name: "link"
+												ns:   "http://www.w3.org/2005/Atom"
+												attrs: {
+													rel:  "enclosure"
+													href: "https://example.com/photo.jpg"
+													type: "image/jpeg"
+												}
+											},
+											#XmlElement & {
+												name: "expires"
+												ns:   "urn:waddle:stories:0"
+												text: "2030-01-01T12:00:00Z"
 											},
 										]
 									},
@@ -93,8 +129,7 @@ scenario: #Scenario & {
 			type:   "result"
 		},
 		// 3. Items query MUST return the published story with the
-		//    typed <story/> payload intact (id, body, media-url,
-		//    expires).
+		//    typed Atom payload intact (id, body, enclosure, expires).
 		#SendIq & {
 			actor: adminPhone
 			type:  "get"
@@ -107,7 +142,7 @@ scenario: #Scenario & {
 					#XmlElement & {
 						name:  "items"
 						ns:    "http://jabber.org/protocol/pubsub"
-						attrs: node: "urn:xmpp:stories:0"
+						attrs: node: "urn:xmpp:pubsub-social-feed:stories:0"
 					},
 				]
 			}
@@ -118,7 +153,8 @@ scenario: #Scenario & {
 			type:   "result"
 			contains: [
 				"id='cue-story-1'",
-				"urn:xmpp:stories:0",
+				"urn:xmpp:pubsub-social-feed:stories:0",
+				"http://www.w3.org/2005/Atom",
 				"Look at this!",
 				"https://example.com/photo.jpg",
 				"2030-01-01T12:00:00Z",

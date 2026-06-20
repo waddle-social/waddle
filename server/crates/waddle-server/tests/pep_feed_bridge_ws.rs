@@ -12,7 +12,7 @@ use ws_common::{TestServer, WsXmppClient};
 const DOMAIN: &str = "localhost";
 const USERNAME: &str = "admin";
 const COMMUNITY_JID: &str = "community.localhost";
-const FEED_NODE: &str = "urn:xmpp:pubsub-social-feed:0";
+const FEED_NODE: &str = "urn:xmpp:pubsub-social-feed:1";
 
 static TEST_SERIAL: Mutex<()> = Mutex::const_new(());
 
@@ -78,11 +78,11 @@ async fn pep_mood_publish_emits_typed_feed_entry() {
         .expect("items response");
 
     assert!(
-        items_response.contains("<author>admin@localhost</author>"),
-        "bridged entry must carry author bare JID: {items_response}"
+        items_response.contains("xmpp:admin@localhost"),
+        "bridged entry must carry author URI: {items_response}"
     );
     assert!(
-        items_response.contains("<body>is feeling happy</body>"),
+        items_response.contains("is feeling happy"),
         "bridged entry must carry the rendered summary: {items_response}"
     );
     assert!(

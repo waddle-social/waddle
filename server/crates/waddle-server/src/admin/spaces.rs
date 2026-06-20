@@ -37,7 +37,7 @@ use waddle_xmpp::muc::room_actor::GetConfig;
 use waddle_xmpp::muc::room_registry_actor::GetRoom;
 use waddle_xmpp::pubsub::{Affiliation as PubSubAffiliation, PubSubItem};
 use waddle_xmpp::xep::xep0004::{DataForm, Field, FieldType, FormType};
-use waddle_xmpp::{ChannelInfo, XmppError};
+use waddle_xmpp::{ChannelInfo, ChannelType, XmppError};
 
 use crate::admin::is_community_owner;
 use crate::channel_space_links::ChannelSpaceLink;
@@ -45,6 +45,7 @@ use crate::permissions::{
     DeleteTuple, Object, ObjectType, PermissionError, Relation, Subject, SubjectType, Tuple,
     WriteTuple,
 };
+use crate::server::xmpp_state::get_xmpp_channel;
 use crate::server::AppState;
 use crate::space_identity::{
     canonical_space_projection, space_jid_for_node, SpaceNode, SpaceProjectionError,
@@ -884,12 +885,31 @@ async fn rollback_channel_bookmark_item(
             return None;
         }
     };
-    let channel_type = if config.forum { "forum" } else { "text" };
+    let catalog_snapshot = match get_xmpp_channel(state.db_pool.global_actor().clone(), channel_id)
+        .await
+    {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                room = %room_jid,
+                channel_id,
+                "spaces:delete rollback could not load channel catalog for missing channel bookmark",
+            );
+            return None;
+        }
+    };
+    let channel_type = channel_type_from_catalog_or_room_config(
+        catalog_snapshot
+            .as_ref()
+            .map(|record| record.channel_type.as_str()),
+        &config,
+    );
     match waddle_xmpp::xep::build_channel_item(
         &ChannelInfo {
             id: channel_id.to_string(),
             name: config.name,
-            channel_type: channel_type.to_string(),
+            channel_type,
         },
         &state.muc_domain.to_string(),
     ) {
@@ -903,6 +923,28 @@ async fn rollback_channel_bookmark_item(
             None
         }
     }
+}
+
+fn channel_type_from_room_config(config: &waddle_xmpp::muc::RoomConfig) -> &'static str {
+    if config.group_dm {
+        waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM
+    } else if config.forum {
+        "forum"
+    } else if config.moderated {
+        "announcement"
+    } else {
+        "text"
+    }
+}
+
+fn channel_type_from_catalog_or_room_config(
+    catalog_channel_type: Option<&str>,
+    config: &waddle_xmpp::muc::RoomConfig,
+) -> String {
+    catalog_channel_type
+        .and_then(ChannelType::parse)
+        .map(|channel_type| channel_type.as_str().to_string())
+        .unwrap_or_else(|| channel_type_from_room_config(config).to_string())
 }
 
 async fn run_create(state: &AppState, args: &SpacesCreateArgs) -> Result<SpaceRef, AdminErr> {
@@ -1623,6 +1665,32 @@ mod tests {
         let form = build_space_form(NODE_UPDATE, &space);
         assert!(matches!(form.form_type, FormType::Result));
         assert_eq!(form.get_value("FORM_TYPE"), Some(NODE_UPDATE));
+    }
+
+    #[test]
+    fn channel_type_from_room_config_preserves_announcement() {
+        let config = waddle_xmpp::muc::RoomConfig {
+            moderated: true,
+            ..waddle_xmpp::muc::RoomConfig::default()
+        };
+
+        assert_eq!(
+            super::channel_type_from_room_config(&config),
+            "announcement"
+        );
+    }
+
+    #[test]
+    fn catalog_channel_type_takes_precedence_over_room_config() {
+        let config = waddle_xmpp::muc::RoomConfig {
+            moderated: false,
+            ..waddle_xmpp::muc::RoomConfig::default()
+        };
+
+        assert_eq!(
+            super::channel_type_from_catalog_or_room_config(Some("announcement"), &config),
+            "announcement"
+        );
     }
 
     #[test]

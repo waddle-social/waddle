@@ -320,6 +320,77 @@ async fn managed_members_only_join_requires_explicit_channel_member_affiliation(
 }
 
 #[tokio::test]
+async fn managed_public_channel_allows_deployment_member_without_channel_tuple() {
+    let state = create_test_websocket_state().await;
+    let session = create_test_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "project@muc.example.com".parse().expect("room jid");
+    let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
+
+    crate::server::xmpp_state::upsert_xmpp_channel(
+        state.deps.app_state.db_pool.global_actor().clone(),
+        &crate::server::xmpp_state::XmppChannelUpsert {
+            id: "project".to_string(),
+            name: "Project".to_string(),
+            description: None,
+            channel_type: "text".to_string(),
+            position: 0,
+            is_default: false,
+            pin_permission: waddle_xmpp::muc::PinPermission::Anyone,
+            members_only: false,
+            public_room: true,
+        },
+    )
+    .await
+    .expect("channel upsert");
+    state
+        .deps
+        .app_state
+        .permission_actor
+        .ask(WriteTuple {
+            tuple: Tuple::new(
+                Object::new(ObjectType::Server, DEPLOYMENT_SERVER_ID),
+                Relation::new("member"),
+                Subject::user(&session.user_jid),
+            ),
+        })
+        .await
+        .expect("server member tuple");
+
+    let responses = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &sender_jid,
+        "alice",
+        None,
+        &Some(session),
+    )
+    .await;
+
+    let presence =
+        Element::from_str(responses.first().expect("self-presence")).expect("presence XML");
+    assert_eq!(presence.name(), "presence");
+    assert_ne!(
+        presence.attr("type"),
+        Some("error"),
+        "public/open managed channel must admit deployment members: {responses:?}"
+    );
+    let user_x = presence
+        .get_child("x", "http://jabber.org/protocol/muc#user")
+        .expect("muc user payload");
+    let item = user_x
+        .get_child("item", "http://jabber.org/protocol/muc#user")
+        .expect("muc user item");
+    assert_eq!(item.attr("affiliation"), Some("none"));
+    assert!(
+        user_x
+            .children()
+            .any(|child| child.name() == "status" && child.attr("code") == Some("110")),
+        "successful join must complete with XEP-0045 self-presence 110: {responses:?}"
+    );
+}
+
+#[tokio::test]
 async fn managed_join_uses_live_actor_members_only_config_over_stale_channel_row() {
     let state = create_test_websocket_state().await;
     let session = create_test_session(state.as_ref(), "bob").await;
@@ -2000,7 +2071,7 @@ async fn active_room_disco_preserves_managed_announcement_channel_type() {
         .await
         .expect("persistent connection");
     conn.execute(
-            "INSERT INTO channels (id, name, description, channel_type, position, is_default) VALUES (?, ?, ?, 'announcement', 0, 0)",
+            "INSERT INTO channels (id, name, description, channel_type, position, is_default, members_only, public_room) VALUES (?, ?, ?, 'announcement', 0, 0, 0, 1)",
             crate::db_params!["announcements", "Announcements", "Owner-posted announcements"],
         )
         .await
@@ -2034,6 +2105,12 @@ async fn active_room_disco_preserves_managed_announcement_channel_type() {
     .await;
     let response = responses.first().expect("room disco response");
     assert!(response.contains("muc_moderated"), "response: {response}");
+    assert!(response.contains("muc_open"), "response: {response}");
+    assert!(
+        !response.contains("muc_membersonly"),
+        "response: {response}"
+    );
+    assert!(response.contains("muc_public"), "response: {response}");
     assert!(
         response.contains("waddle#channel_type"),
         "response: {response}"

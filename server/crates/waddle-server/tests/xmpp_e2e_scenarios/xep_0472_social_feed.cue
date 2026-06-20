@@ -32,7 +32,7 @@ scenario: #Scenario & {
 			id:     "cue-feed-disco"
 			type:   "result"
 			contains: [
-				"var='urn:xmpp:pubsub-social-feed:0'",
+				"var='urn:xmpp:pubsub-social-feed:1'",
 			]
 		},
 		// 2. Publish a feed entry to the bootstrapped community feed
@@ -51,7 +51,7 @@ scenario: #Scenario & {
 					#XmlElement & {
 						name:  "publish"
 						ns:    "http://jabber.org/protocol/pubsub"
-						attrs: node: "urn:xmpp:pubsub-social-feed:0"
+						attrs: node: "urn:xmpp:pubsub-social-feed:1"
 						children: [
 							#XmlElement & {
 								name:  "item"
@@ -60,22 +60,45 @@ scenario: #Scenario & {
 								children: [
 									#XmlElement & {
 										name: "entry"
-										ns:   "urn:xmpp:pubsub-social-feed:0"
+										ns:   "http://www.w3.org/2005/Atom"
 										children: [
 											#XmlElement & {
-												name: "title"
-												ns:   "urn:xmpp:pubsub-social-feed:0"
+												name:  "title"
+												ns:    "http://www.w3.org/2005/Atom"
+												attrs: type: "text"
 												text: "First post"
 											},
 											#XmlElement & {
-												name: "body"
-												ns:   "urn:xmpp:pubsub-social-feed:0"
+												name: "id"
+												ns:   "http://www.w3.org/2005/Atom"
+												text: "tag:localhost,2026:cue-post-1"
+											},
+											#XmlElement & {
+												name: "published"
+												ns:   "http://www.w3.org/2005/Atom"
+												text: "2026-06-01T12:00:00Z"
+											},
+											#XmlElement & {
+												name: "updated"
+												ns:   "http://www.w3.org/2005/Atom"
+												text: "2026-06-01T12:00:00Z"
+											},
+											#XmlElement & {
+												name:  "content"
+												ns:    "http://www.w3.org/2005/Atom"
+												attrs: type: "text"
 												text: "Hello community feed!"
 											},
 											#XmlElement & {
 												name: "author"
-												ns:   "urn:xmpp:pubsub-social-feed:0"
-												text: "admin@\(scenario.domain)"
+												ns:   "http://www.w3.org/2005/Atom"
+												children: [
+													#XmlElement & {
+														name: "uri"
+														ns:   "http://www.w3.org/2005/Atom"
+														text: "xmpp:admin@\(scenario.domain)"
+													},
+												]
 											},
 										]
 									},
@@ -92,7 +115,8 @@ scenario: #Scenario & {
 			type:   "result"
 		},
 		// 3. Items query MUST return the published entry with the
-		//    typed <entry/> payload intact (id, title, body, author).
+		//    typed Atom <entry/> payload intact (id, title, content,
+		//    author).
 		#SendIq & {
 			actor: adminPhone
 			type:  "get"
@@ -105,7 +129,7 @@ scenario: #Scenario & {
 					#XmlElement & {
 						name:  "items"
 						ns:    "http://jabber.org/protocol/pubsub"
-						attrs: node: "urn:xmpp:pubsub-social-feed:0"
+						attrs: node: "urn:xmpp:pubsub-social-feed:1"
 					},
 				]
 			}
@@ -116,7 +140,8 @@ scenario: #Scenario & {
 			type:   "result"
 			contains: [
 				"id='cue-post-1'",
-				"urn:xmpp:pubsub-social-feed:0",
+				"urn:xmpp:pubsub-social-feed:1",
+				"http://www.w3.org/2005/Atom",
 				"First post",
 				"Hello community feed!",
 			]

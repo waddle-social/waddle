@@ -47,6 +47,13 @@ fn xdata_field(var: &str, value: &str) -> Element {
         .build()
 }
 
+fn xdata_field_value(form: &Element, var: &str) -> Option<String> {
+    form.children()
+        .find(|field| field.is("field", NS_XDATA) && field.attr("var") == Some(var))
+        .and_then(|field| field.get_child("value", NS_XDATA))
+        .map(|value| value.text())
+}
+
 #[test]
 fn parse_publish_request() {
     let item = PubSubItem::new(
@@ -218,6 +225,67 @@ fn parse_configure_set_keeps_partial_fields_partial() {
         }
         other => panic!("Expected configure-set request, got {other:?}"),
     }
+}
+
+#[test]
+fn parse_configure_set_accepts_typed_pubsub_type() {
+    let configure = Element::builder("configure", NS_PUBSUB_OWNER)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), "stories")
+        .append(
+            Element::builder("x", NS_XDATA)
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
+                .append(xdata_field("pubsub#type", crate::xep0501::NS_STORIES))
+                .build(),
+        )
+        .build();
+    let iq = iq_with_payload(
+        "cfg-set-type",
+        Some("owner@example.com"),
+        None,
+        TestIqPayload::Set(pubsub_payload(NS_PUBSUB_OWNER, [configure])),
+    );
+    let request = parse_pubsub_iq(&iq).expect("should parse");
+
+    match request {
+        PubSubRequest::ConfigureNodeSet { config, .. } => {
+            assert_eq!(
+                config.node_type,
+                Some(crate::pubsub::PubSubNodeType::PubsubSocialFeedStories)
+            );
+        }
+        other => panic!("Expected configure-set request, got {other:?}"),
+    }
+}
+
+#[test]
+fn configure_form_result_emits_pubsub_type_for_typed_node() {
+    let iq = iq_with_payload(
+        "cfg-get-type",
+        Some("owner@example.com"),
+        None,
+        TestIqPayload::Get(Element::builder("query", "jabber:iq:version").build()),
+    );
+    let result = build_pubsub_configure_form_result(
+        &iq,
+        "stories",
+        &crate::pubsub::NodeConfig::community_stories(),
+    );
+    let Iq::Result {
+        payload: Some(pubsub),
+        ..
+    } = result
+    else {
+        panic!("expected result payload");
+    };
+    let form = pubsub
+        .get_child("configure", NS_PUBSUB_OWNER)
+        .and_then(|configure| configure.get_child("x", NS_XDATA))
+        .expect("configure data form");
+
+    assert_eq!(
+        xdata_field_value(form, "pubsub#type").as_deref(),
+        Some(crate::xep0501::NS_STORIES)
+    );
 }
 
 #[test]

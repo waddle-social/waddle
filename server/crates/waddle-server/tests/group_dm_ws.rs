@@ -687,6 +687,10 @@ async fn group_dm_create_provisions_hidden_members_only_room_with_disco_feature(
         !disco.contains("muc_public"),
         "group DM room must stay hidden from public room discovery: {disco}"
     );
+    assert!(
+        disco.contains("muc_hidden"),
+        "group DM room must advertise hidden discovery status: {disco}"
+    );
 
     let _ = alice.close().await;
     drop(server);
@@ -704,6 +708,10 @@ async fn group_dm_create_provisions_hidden_members_only_room_with_disco_feature(
     assert!(
         disco.contains("muc_membersonly"),
         "restarted group DM room must stay members-only: {disco}"
+    );
+    assert!(
+        disco.contains("muc_hidden"),
+        "restarted group DM room must advertise hidden discovery status: {disco}"
     );
     let not_joined_rename = rename_group_dm(
         &mut alice,

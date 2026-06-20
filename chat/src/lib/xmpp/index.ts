@@ -22,6 +22,7 @@ export type {
   WasmAdminChannelAffiliationEntry,
   WasmAdminChannelListEntry,
   WasmAdminChannelOccupantEntry,
+  WasmAdminChannelType,
   WasmAdminChannelsListResult,
   WasmAdminSpaceListEntry,
   WasmAdminSpaceMemberEntry,

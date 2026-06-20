@@ -29,6 +29,7 @@ const entry = (
   channel_jid: jid,
   name: jid.split("@")[0] ?? jid,
   topic: null,
+  channel_type: "text",
   is_public: true,
   members_only: false,
   occupant_count: 0,

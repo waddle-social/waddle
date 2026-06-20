@@ -13,6 +13,7 @@ import type {
   WasmAdminChannelAffiliationEntry,
   WasmAdminChannelListEntry,
   WasmAdminChannelOccupantEntry,
+  WasmAdminChannelType,
 } from "@/lib/xmpp";
 
 type Affiliation = "owner" | "admin" | "member" | "none" | "outcast";
@@ -39,6 +40,7 @@ const tab = ref<Tab>("config");
 // Config edit state
 const editName = ref(props.channel.name);
 const editTopic = ref(props.channel.topic ?? "");
+const editChannelType = ref<WasmAdminChannelType>(props.channel.channel_type);
 const editIsPublic = ref(props.channel.is_public);
 const editMembersOnly = ref(props.channel.members_only);
 const editing = ref(false);
@@ -64,6 +66,7 @@ const deleteError = ref("");
 watch(() => props.channel, (c) => {
   editName.value = c.name;
   editTopic.value = c.topic ?? "";
+  editChannelType.value = c.channel_type;
   editIsPublic.value = c.is_public;
   editMembersOnly.value = c.members_only;
   void loadAffiliations();
@@ -123,6 +126,7 @@ async function saveConfig() {
       channelJid: props.channel.channel_jid,
       name: editName.value.trim(),
       topic: editTopic.value.trim() || null,
+      channelType: editChannelType.value,
       isPublic: editIsPublic.value,
       membersOnly: editMembersOnly.value,
     });
@@ -241,6 +245,14 @@ const occupantCountLabel = computed(() => {
         <label class="flex flex-col gap-1">
           <span class="type-section-label text-muted-foreground">Topic</span>
           <textarea v-model="editTopic" rows="3" class="chat-field-control chat-textarea-control type-field" />
+        </label>
+        <label class="flex flex-col gap-1">
+          <span class="type-section-label text-muted-foreground">Type</span>
+          <select v-model="editChannelType" class="chat-field-control type-field">
+            <option value="text">Text</option>
+            <option value="announcement">Announcement</option>
+            <option value="forum">Forum</option>
+          </select>
         </label>
         <div class="flex flex-col gap-2 rounded-lg border border-border bg-muted/30 px-3 py-2.5">
           <label class="flex items-center gap-2 cursor-pointer">
