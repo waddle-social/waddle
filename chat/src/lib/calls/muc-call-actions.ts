@@ -1,20 +1,8 @@
 import { $callState, beginMucCall, reportCallError, type RawIqSender } from "./call-store";
-import { $callMicEnabled } from "./call-controls";
+import { selfCallMuted } from "./call-mic-state";
 import { LIVEKIT_JOIN_EXPIRY_SKEW_MS, liveKitJoinTokenExpiresAt } from "./dm-call-activity";
 import { clearMucCallParticipant, normalizeMucCallRoomJid } from "./muc-call-presence";
 import { selfRaisedHandFor, setSelfRaisedHand } from "./call-raised-hand";
-
-/**
- * This client's current self-mute, derived from the live mic toggle
- * (`$callMicEnabled`): muted ⇔ the mic is disabled. Mute has no separate
- * intent store (unlike the raised hand) — the LiveKit mic state IS the
- * source of truth. Every call-presence re-emit must carry the CURRENT
- * value so a hand toggle (or resume) can't silently drop the `<muted/>`
- * marker — presence is last-writer-wins (#1030).
- */
-function selfCallMuted(): boolean {
-  return !$callMicEnabled.get();
-}
 import {
   forgetMucCallSession,
   markMucCallSessionTerminatePending,

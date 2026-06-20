@@ -129,7 +129,11 @@ export function mutedKeysForRoom(
   return new Set(mutedByRoom[room] ?? []);
 }
 
-/** Forget every advertised mute (logout / disconnect). */
+/** Forget every advertised mute (logout / disconnect). Routed through the
+ *  reducer so an already-empty map returns the same reference and skips a
+ *  spurious store notification (and the re-renders it would trigger). */
 export function clearAllMuted(): void {
-  $mucMutedParticipants.set({});
+  $mucMutedParticipants.set(
+    reduceMutedParticipants($mucMutedParticipants.get(), { kind: "clear-all" }),
+  );
 }

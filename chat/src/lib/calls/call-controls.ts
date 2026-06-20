@@ -7,6 +7,7 @@ import {
   type RawIqSender,
 } from "./call-store";
 import { broadcastMucCallSelfMute } from "./muc-call-actions";
+import { $callMicEnabled } from "./call-mic-state";
 import type { CallWireSender } from "./outbound";
 import { connectionStore } from "@/lib/connection-store";
 import { useCallEngine } from "./use-call-engine";
@@ -32,10 +33,15 @@ import {
  * The atoms here mirror the engine: when the user toggles mic via
  * the split-view control bar, the engine `setMicEnabled(false)` and
  * the atom flips at the same time. On failure the atom rolls back.
+ *
+ * `$callMicEnabled` is owned by the `call-mic-state` leaf (so the
+ * presence broadcaster in `muc-call-actions` can read it without a
+ * module cycle back into this file) and re-exported here for the many
+ * control-bar consumers that import it from `call-controls`.
  */
 export const $callConnecting = atom<boolean>(false);
-export const $callMicEnabled = atom<boolean>(true);
 export const $callCamEnabled = atom<boolean>(true);
+export { $callMicEnabled };
 export { $callScreenShareEnabled, $callScreenShareSupported, refreshScreenShareSupported };
 
 function isScreenSharePickerCancel(error: unknown): boolean {
