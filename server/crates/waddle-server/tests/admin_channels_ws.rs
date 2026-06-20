@@ -568,6 +568,281 @@ async fn channels_update_renames() {
 }
 
 #[tokio::test]
+async fn channels_update_private_then_kick_blocks_non_member_rejoin() {
+    let _serial = TEST_SERIAL.lock().await;
+    let alice_pass = format!("alice-pass-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[("alice", &alice_pass)]);
+    let mut admin = admin_client(&server, "admin-channels-private-kick").await;
+    let mut alice = alice_client(&server, &alice_pass, "alice-channels-private-kick").await;
+
+    let create_resp = send_command(
+        &mut admin,
+        NODE_CHANNELS_CREATE,
+        "channels-private-kick-create",
+        &submit_form(NODE_CHANNELS_CREATE, &text_field("name", "private-kick")),
+    )
+    .await;
+    assert!(
+        is_result(&create_resp),
+        "expected create result, got: {create_resp}"
+    );
+    let channel_jid = extract_field(&create_resp, "channel_jid").expect("channel_jid");
+
+    let initial_join = join_muc(&mut alice, &channel_jid, "alice").await;
+    assert!(
+        initial_join.contains("affiliation='none'")
+            || initial_join.contains(r#"affiliation="none""#),
+        "public/open room should admit alice without granting membership, got: {initial_join}"
+    );
+
+    let update_extra = format!(
+        "{}{}{}",
+        text_field("channel_jid", &channel_jid),
+        bool_field("is_public", false),
+        bool_field("members_only", true),
+    );
+    let update_resp = send_command(
+        &mut admin,
+        NODE_CHANNELS_UPDATE,
+        "channels-private-kick-update",
+        &submit_form(NODE_CHANNELS_UPDATE, &update_extra),
+    )
+    .await;
+    assert!(
+        is_result(&update_resp),
+        "expected update result, got: {update_resp}"
+    );
+    assert_eq!(
+        extract_field(&update_resp, "is_public").as_deref(),
+        Some("0")
+    );
+    assert_eq!(
+        extract_field(&update_resp, "members_only").as_deref(),
+        Some("1")
+    );
+
+    let privacy_ejection = alice
+        .recv_matching(|frame| {
+            frame.contains("<presence")
+                && frame.contains(&channel_jid)
+                && frame.contains("alice")
+                && frame.contains("322")
+        })
+        .await
+        .expect("members-only conversion ejection presence");
+    assert!(
+        privacy_ejection.contains("type='unavailable'")
+            || privacy_ejection.contains(r#"type="unavailable""#),
+        "members-only conversion must remove current non-members, got: {privacy_ejection}"
+    );
+
+    let kick_extra = format!(
+        "{}{}",
+        text_field("channel_jid", &channel_jid),
+        text_field("occupant_jid", "alice@localhost"),
+    );
+    let kick_resp = send_command(
+        &mut admin,
+        NODE_CHANNELS_KICK,
+        "channels-private-kick-go",
+        &submit_form(NODE_CHANNELS_KICK, &kick_extra),
+    )
+    .await;
+    assert!(
+        is_result(&kick_resp),
+        "kick after members-only ejection should be a stable no-op result, got: {kick_resp}"
+    );
+
+    let denied_rejoin = join_muc(&mut alice, &channel_jid, "alice").await;
+    assert!(
+        denied_rejoin.contains("registration-required"),
+        "members-only room must deny a kicked non-member rejoin with XEP-0045 registration-required, got: {denied_rejoin}"
+    );
+
+    let grant_extra = format!(
+        "{}{}{}",
+        text_field("channel_jid", &channel_jid),
+        text_field("member_jid", "alice@localhost"),
+        text_field("affiliation", "member"),
+    );
+    let grant_resp = send_command(
+        &mut admin,
+        NODE_CHANNELS_SET_AFFILIATION,
+        "channels-private-kick-grant",
+        &submit_form(NODE_CHANNELS_SET_AFFILIATION, &grant_extra),
+    )
+    .await;
+    assert!(
+        is_result(&grant_resp),
+        "expected member grant result, got: {grant_resp}"
+    );
+
+    let admitted_join = join_muc(&mut alice, &channel_jid, "alice").await;
+    assert!(
+        admitted_join.contains("affiliation='member'")
+            || admitted_join.contains(r#"affiliation="member""#),
+        "explicit member affiliation should admit alice after private conversion, got: {admitted_join}"
+    );
+
+    let kick_member_resp = send_command(
+        &mut admin,
+        NODE_CHANNELS_KICK,
+        "channels-private-kick-member",
+        &submit_form(NODE_CHANNELS_KICK, &kick_extra),
+    )
+    .await;
+    assert!(
+        is_result(&kick_member_resp),
+        "kick should succeed for an explicit private-room member, got: {kick_member_resp}"
+    );
+    let member_kick_presence = alice
+        .recv_matching(|frame| {
+            frame.contains("<presence")
+                && frame.contains(&channel_jid)
+                && frame.contains("alice")
+                && frame.contains("307")
+        })
+        .await
+        .expect("explicit member kick presence");
+    assert!(
+        member_kick_presence.contains("type='unavailable'")
+            || member_kick_presence.contains(r#"type="unavailable""#),
+        "kicking an explicit member should still use XEP-0045 kick presence, got: {member_kick_presence}"
+    );
+
+    let denied_member_rejoin = join_muc(&mut alice, &channel_jid, "alice").await;
+    assert!(
+        denied_member_rejoin.contains("registration-required"),
+        "members-only room must deny an explicit member after admin-panel kick revoked membership, got: {denied_member_rejoin}"
+    );
+
+    let offline_grant_resp = send_command(
+        &mut admin,
+        NODE_CHANNELS_SET_AFFILIATION,
+        "channels-private-kick-offline-grant",
+        &submit_form(NODE_CHANNELS_SET_AFFILIATION, &grant_extra),
+    )
+    .await;
+    assert!(
+        is_result(&offline_grant_resp),
+        "expected offline member grant result, got: {offline_grant_resp}"
+    );
+    let offline_kick_resp = send_command(
+        &mut admin,
+        NODE_CHANNELS_KICK,
+        "channels-private-kick-offline-member",
+        &submit_form(NODE_CHANNELS_KICK, &kick_extra),
+    )
+    .await;
+    assert!(
+        is_result(&offline_kick_resp),
+        "offline private member kick should revoke membership as a stable result, got: {offline_kick_resp}"
+    );
+    let denied_offline_member_rejoin = join_muc(&mut alice, &channel_jid, "alice").await;
+    assert!(
+        denied_offline_member_rejoin.contains("registration-required"),
+        "members-only room must deny rejoin after offline private-member kick revoked membership, got: {denied_offline_member_rejoin}"
+    );
+
+    let _ = alice.close().await;
+    let _ = admin.close().await;
+}
+
+#[tokio::test]
+async fn channels_revoke_member_in_private_room_ejects_active_occupant() {
+    let _serial = TEST_SERIAL.lock().await;
+    let alice_pass = format!("alice-pass-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[("alice", &alice_pass)]);
+    let mut admin = admin_client(&server, "admin-channels-revoke-member").await;
+    let mut alice = alice_client(&server, &alice_pass, "alice-channels-revoke-member").await;
+
+    let create_extra = format!(
+        "{}{}{}",
+        text_field("name", "private-revoke"),
+        bool_field("is_public", false),
+        bool_field("members_only", true),
+    );
+    let create_resp = send_command(
+        &mut admin,
+        NODE_CHANNELS_CREATE,
+        "channels-private-revoke-create",
+        &submit_form(NODE_CHANNELS_CREATE, &create_extra),
+    )
+    .await;
+    assert!(
+        is_result(&create_resp),
+        "expected create result, got: {create_resp}"
+    );
+    let channel_jid = extract_field(&create_resp, "channel_jid").expect("channel_jid");
+
+    let grant_extra = format!(
+        "{}{}{}",
+        text_field("channel_jid", &channel_jid),
+        text_field("member_jid", "alice@localhost"),
+        text_field("affiliation", "member"),
+    );
+    let grant_resp = send_command(
+        &mut admin,
+        NODE_CHANNELS_SET_AFFILIATION,
+        "channels-private-revoke-grant",
+        &submit_form(NODE_CHANNELS_SET_AFFILIATION, &grant_extra),
+    )
+    .await;
+    assert!(
+        is_result(&grant_resp),
+        "expected grant result, got: {grant_resp}"
+    );
+
+    let admitted_join = join_muc(&mut alice, &channel_jid, "alice").await;
+    assert!(
+        admitted_join.contains("affiliation='member'")
+            || admitted_join.contains(r#"affiliation="member""#),
+        "explicit member affiliation should admit alice, got: {admitted_join}"
+    );
+
+    let revoke_extra = format!(
+        "{}{}{}",
+        text_field("channel_jid", &channel_jid),
+        text_field("member_jid", "alice@localhost"),
+        text_field("affiliation", "none"),
+    );
+    let revoke_resp = send_command(
+        &mut admin,
+        NODE_CHANNELS_SET_AFFILIATION,
+        "channels-private-revoke-none",
+        &submit_form(NODE_CHANNELS_SET_AFFILIATION, &revoke_extra),
+    )
+    .await;
+    assert!(
+        is_result(&revoke_resp),
+        "expected revoke result, got: {revoke_resp}"
+    );
+
+    let revoked = alice
+        .recv_matching(|frame| {
+            frame.contains("<presence")
+                && frame.contains(&channel_jid)
+                && frame.contains("alice")
+                && frame.contains("321")
+        })
+        .await
+        .expect("membership revocation ejection presence");
+    assert!(
+        revoked.contains("type='unavailable'") || revoked.contains(r#"type="unavailable""#),
+        "membership revocation must remove active occupants in private rooms, got: {revoked}"
+    );
+
+    let denied_rejoin = join_muc(&mut alice, &channel_jid, "alice").await;
+    assert!(
+        denied_rejoin.contains("registration-required"),
+        "revoked member must be denied rejoin to members-only room, got: {denied_rejoin}"
+    );
+
+    let _ = alice.close().await;
+    let _ = admin.close().await;
+}
+
+#[tokio::test]
 async fn standard_muc_owner_config_publicroom_false_hides_room_from_muc_disco_items() {
     let _serial = TEST_SERIAL.lock().await;
     let server = TestServer::start();
@@ -830,7 +1105,7 @@ async fn channels_set_affiliation_round_trips() {
     .await;
     let channel_jid = extract_field(&create_resp, "channel_jid").expect("channel_jid");
 
-    for affiliation in ["owner", "admin", "member", "outcast", "none"] {
+    for affiliation in ["admin", "member", "outcast", "none", "owner"] {
         let extra = format!(
             "{}{}{}",
             text_field("channel_jid", &channel_jid),

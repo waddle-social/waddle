@@ -137,7 +137,7 @@ async function loadMore(): Promise<void> {
   }
 }
 
-async function onCreate(payload: { name: string; topic?: string | null; spaceJid?: string | null; spaceNode?: string | null; isPublic?: boolean | null }) {
+async function onCreate(payload: { name: string; topic?: string | null; spaceJid?: string | null; spaceNode?: string | null; isPublic?: boolean | null; membersOnly?: boolean | null }) {
   if (!props.xmppClient) return;
   isSubmitting.value = true;
   try {
@@ -278,7 +278,8 @@ const dialogSpaces = computed(() =>
           <div class="flex flex-col gap-0.5 min-w-0 flex-1">
             <div class="flex items-center gap-2 min-w-0">
               <span class="type-control truncate">{{ entry.name }}</span>
-              <span v-if="!entry.is_public" class="type-caption rounded-full bg-muted px-2 py-0.5 flex-shrink-0">Private</span>
+              <span v-if="!entry.is_public" class="type-caption rounded-full bg-muted px-2 py-0.5 flex-shrink-0">Hidden</span>
+              <span v-if="entry.members_only" class="type-caption rounded-full bg-muted px-2 py-0.5 flex-shrink-0">Members-only</span>
             </div>
             <span class="type-caption text-muted-foreground truncate font-mono">{{ entry.channel_jid }}</span>
             <span v-if="entry.topic" class="type-caption text-muted-foreground truncate">{{ entry.topic }}</span>

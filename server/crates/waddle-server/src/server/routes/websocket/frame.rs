@@ -19,6 +19,15 @@ pub(super) async fn handle_xmpp_frame(
     state: &WebSocketState,
     conn: &mut WsConnState,
 ) -> Vec<String> {
+    handle_xmpp_frame_impl(frame, domain, state, conn).await
+}
+
+async fn handle_xmpp_frame_impl(
+    frame: &str,
+    domain: &str,
+    state: &WebSocketState,
+    conn: &mut WsConnState,
+) -> Vec<String> {
     if frame.len() > MAX_FRAME_SIZE {
         warn!(len = frame.len(), "Dropping oversized XMPP frame");
         return vec![];

@@ -73,6 +73,13 @@ scenario: #Scenario & {
 			]
 			absentElements: [#XmlElement & {name: "hats", ns: "urn:xmpp:hats:0"}]
 		},
+		#SetMucAffiliation & {
+			actor:       adminPhone
+			room:        roomJid
+			jid:         bobPhone.bareJid
+			affiliation: "member"
+			id:          "cue-rich-set-bob-member"
+		},
 		#SendPresence & {
 			actor: bobPhone
 			to:    "\(roomJid)/bob"

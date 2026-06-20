@@ -6,6 +6,7 @@ mod xml;
 pub use access::{get_managed_channel_for_room, parse_room_jid_context};
 
 use access::{resolve_managed_channel_affiliation, server_permission_allowed};
+use waddle_xmpp::muc::room_actor::GetSnapshot;
 use xml::{
     build_muc_conflict_presence_xml, build_muc_presence_error_xml, build_muc_self_unavailable_xml,
     create_presence_stanza,
@@ -23,366 +24,467 @@ pub async fn handle_muc_join(
 ) -> Vec<String> {
     info!(room = %room_jid, nick = %nick, sender = %sender_jid, "MUC join request");
 
-    let managed_channel = match get_managed_channel_for_room(state, room_jid).await {
-        Ok(channel) => channel,
-        Err(error) => {
-            warn!(room = %room_jid, error = %error, "Failed to resolve managed MUC channel");
-            return vec![build_muc_presence_error_xml(
-                room_jid,
-                nick,
-                sender_jid,
-                StanzaError::new(
-                    ErrorType::Wait,
-                    DefinedCondition::InternalServerError,
-                    "en",
-                    "Failed to resolve managed channel for room.",
-                ),
-            )];
-        }
-    };
-    let managed_room_is_group_dm = managed_channel
-        .as_ref()
-        .is_some_and(|channel| channel.channel_type == waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM);
-    let managed_affiliation = if let Some(channel) = managed_channel.as_ref() {
-        let Some(session) = authenticated_session else {
-            return vec![build_muc_presence_error_xml(
-                room_jid,
-                nick,
-                sender_jid,
-                StanzaError::new(
-                    ErrorType::Auth,
-                    DefinedCondition::NotAuthorized,
-                    "en",
-                    "Authentication required to join managed channel.",
-                ),
-            )];
-        };
-        match resolve_managed_channel_affiliation(state, session, &channel.id).await {
-            Ok(Some(Affiliation::Outcast)) => {
+    handle_muc_join_unlocked(
+        state,
+        domain.to_string(),
+        room_jid,
+        sender_jid,
+        nick.to_string(),
+        presence_show,
+        authenticated_session,
+    )
+    .await
+}
+
+async fn handle_muc_join_unlocked(
+    state: &WebSocketState,
+    domain: String,
+    room_jid: &BareJid,
+    sender_jid: &FullJid,
+    nick: String,
+    presence_show: Option<crate::notification_activity::NotificationPresenceShow>,
+    authenticated_session: &Option<Session>,
+) -> Vec<String> {
+    let mut retried_stale_admission = false;
+    loop {
+        let managed_channel = match get_managed_channel_for_room(state, room_jid).await {
+            Ok(channel) => channel,
+            Err(error) => {
+                warn!(room = %room_jid, error = %error, "Failed to resolve managed MUC channel");
                 return vec![build_muc_presence_error_xml(
                     room_jid,
-                    nick,
-                    sender_jid,
-                    StanzaError::new(
-                        ErrorType::Auth,
-                        DefinedCondition::Forbidden,
-                        "en",
-                        "Banned from managed channel.",
-                    ),
-                )];
-            }
-            Ok(Some(affiliation)) => Some(affiliation),
-            Ok(None) => {
-                if channel.members_only {
-                    return vec![build_muc_presence_error_xml(
-                        room_jid,
-                        nick,
-                        sender_jid,
-                        StanzaError::new(
-                            ErrorType::Auth,
-                            DefinedCondition::RegistrationRequired,
-                            "en",
-                            "Membership required to join managed channel.",
-                        ),
-                    )];
-                }
-                Some(Affiliation::None)
-            }
-            Err(()) => {
-                return vec![build_muc_presence_error_xml(
-                    room_jid,
-                    nick,
+                    &nick,
                     sender_jid,
                     StanzaError::new(
                         ErrorType::Wait,
                         DefinedCondition::InternalServerError,
                         "en",
-                        "Failed to resolve managed-channel affiliation.",
+                        "Failed to resolve managed channel for room.",
                     ),
                 )];
             }
-        }
-    } else {
-        None
-    };
-
-    let existing_room_actor = get_room_actor(state, room_jid).await;
-    let (room_actor, created_instant_room) = match existing_room_actor {
-        Some(actor) => (actor, false),
-        None => {
-            if managed_channel.is_none()
-                && !server_permission_allowed(
-                    state,
-                    authenticated_session.as_ref(),
-                    Permission::CreateMuc,
-                )
-                .await
-                .unwrap_or(false)
-            {
+        };
+        let existing_room_actor = get_room_actor(state, room_jid).await;
+        let existing_room_snapshot = if let Some(actor) = existing_room_actor.as_ref() {
+            match actor.ask(GetSnapshot).await {
+                Ok(snapshot) => Some(snapshot),
+                Err(error) => {
+                    warn!(room = %room_jid, error = ?error, "Failed to snapshot MUC room before join");
+                    return vec![build_muc_presence_error_xml(
+                        room_jid,
+                        &nick,
+                        sender_jid,
+                        StanzaError::new(
+                            ErrorType::Wait,
+                            DefinedCondition::InternalServerError,
+                            "en",
+                            "Failed to snapshot room before join.",
+                        ),
+                    )];
+                }
+            }
+        } else {
+            None
+        };
+        let admission_revision = existing_room_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.admission_revision)
+            .unwrap_or(0);
+        let managed_affiliation = if let Some(channel) = managed_channel.as_ref() {
+            let Some(session) = authenticated_session else {
                 return vec![build_muc_presence_error_xml(
                     room_jid,
-                    nick,
+                    &nick,
                     sender_jid,
                     StanzaError::new(
-                        ErrorType::Cancel,
-                        DefinedCondition::NotAllowed,
+                        ErrorType::Auth,
+                        DefinedCondition::NotAuthorized,
                         "en",
-                        "Creating new MUC rooms is not permitted for this account.",
+                        "Authentication required to join managed channel.",
                     ),
                 )];
-            }
-
-            let config = managed_channel
-                .as_ref()
-                .map(|channel| RoomConfig {
-                    name: channel.name.clone(),
-                    description: channel.description.clone(),
-                    members_only: channel.members_only,
-                    public_room: channel.public_room,
-                    moderated: channel.channel_type == "announcement",
-                    forum: channel.channel_type == "forum",
-                    group_dm: channel.channel_type == waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM,
-                    // #422: load persisted pin policy so the actor's
-                    // snapshot matches the channel's last-saved value
-                    // even after eviction.
-                    pin_permission: channel.pin_permission,
-                    ..Default::default()
-                })
-                .unwrap_or_else(|| RoomConfig {
-                    name: room_jid
-                        .node()
-                        .map(|n| n.to_string())
-                        .unwrap_or_else(|| "Room".to_string()),
-                    members_only: false,
-                    ..Default::default()
-                });
-
-            let (waddle_id, channel_id) = managed_channel
-                .as_ref()
-                .map(|channel| {
-                    let (waddle_id, _) = parse_room_jid_context(room_jid);
-                    (waddle_id, channel.id.clone())
-                })
-                .unwrap_or_else(|| parse_room_jid_context(room_jid));
-
-            let Some(actor) =
-                get_or_create_room_actor(state, room_jid, config, waddle_id, channel_id).await
-            else {
-                return vec![];
             };
-            (actor, managed_channel.is_none())
-        }
-    };
-
-    let effective_affiliation = if created_instant_room {
-        Affiliation::Owner
-    } else if let Some(affiliation) = managed_affiliation {
-        affiliation
-    } else if managed_room_is_group_dm {
-        Affiliation::None
-    } else {
-        Affiliation::Member
-    };
-
-    let join_outcome = match room_actor
-        .ask(JoinWithAffiliation {
-            sender_jid: sender_jid.clone(),
-            nick: nick.to_string(),
-            effective_affiliation,
-            local_domain: domain.to_string(),
-        })
-        .await
-    {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            let nick_collision = matches!(
-                &error,
-                kameo::error::SendError::HandlerError(
-                    waddle_xmpp::muc::room_actor::RoomActorError::NickAlreadyInUse(_)
-                )
-            );
-            if nick_collision {
-                warn!(
-                    room = %room_jid,
-                    nick = %nick,
-                    sender = %sender_jid,
-                    "MUC nick collision; returning conflict"
-                );
-                return vec![build_muc_conflict_presence_xml(room_jid, nick, sender_jid)];
+            let admission_members_only = existing_room_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.room.config.members_only)
+                .unwrap_or(channel.members_only);
+            match resolve_managed_channel_affiliation(
+                state,
+                session,
+                &channel.id,
+                admission_members_only,
+            )
+            .await
+            {
+                Ok(Some(Affiliation::Outcast)) => {
+                    return vec![build_muc_presence_error_xml(
+                        room_jid,
+                        &nick,
+                        sender_jid,
+                        StanzaError::new(
+                            ErrorType::Auth,
+                            DefinedCondition::Forbidden,
+                            "en",
+                            "Banned from managed channel.",
+                        ),
+                    )];
+                }
+                Ok(Some(affiliation)) => Some(affiliation),
+                Ok(None) => {
+                    if admission_members_only {
+                        return vec![build_muc_presence_error_xml(
+                            room_jid,
+                            &nick,
+                            sender_jid,
+                            StanzaError::new(
+                                ErrorType::Auth,
+                                DefinedCondition::RegistrationRequired,
+                                "en",
+                                "Membership required to join managed channel.",
+                            ),
+                        )];
+                    }
+                    Some(Affiliation::None)
+                }
+                Err(()) => {
+                    return vec![build_muc_presence_error_xml(
+                        room_jid,
+                        &nick,
+                        sender_jid,
+                        StanzaError::new(
+                            ErrorType::Wait,
+                            DefinedCondition::InternalServerError,
+                            "en",
+                            "Failed to resolve managed-channel affiliation.",
+                        ),
+                    )];
+                }
             }
-            warn!(room = %room_jid, nick = %nick, error = ?error, "Failed to join MUC room");
-            return vec![];
+        } else {
+            None
+        };
+
+        let (room_actor, created_instant_room) = match existing_room_actor {
+            Some(actor) => (actor, false),
+            None => {
+                if managed_channel.is_none()
+                    && !server_permission_allowed(
+                        state,
+                        authenticated_session.as_ref(),
+                        Permission::CreateMuc,
+                    )
+                    .await
+                    .unwrap_or(false)
+                {
+                    return vec![build_muc_presence_error_xml(
+                        room_jid,
+                        &nick,
+                        sender_jid,
+                        StanzaError::new(
+                            ErrorType::Cancel,
+                            DefinedCondition::NotAllowed,
+                            "en",
+                            "Creating new MUC rooms is not permitted for this account.",
+                        ),
+                    )];
+                }
+
+                let config = managed_channel
+                    .as_ref()
+                    .map(|channel| RoomConfig {
+                        name: channel.name.clone(),
+                        description: channel.description.clone(),
+                        members_only: channel.members_only,
+                        public_room: channel.public_room,
+                        moderated: channel.channel_type == "announcement",
+                        forum: channel.channel_type == "forum",
+                        group_dm: channel.channel_type == waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM,
+                        // #422: load persisted pin policy so the actor's
+                        // snapshot matches the channel's last-saved value
+                        // even after eviction.
+                        pin_permission: channel.pin_permission,
+                        ..Default::default()
+                    })
+                    .unwrap_or_else(|| RoomConfig {
+                        name: room_jid
+                            .node()
+                            .map(|n| n.to_string())
+                            .unwrap_or_else(|| "Room".to_string()),
+                        members_only: false,
+                        ..Default::default()
+                    });
+
+                let (waddle_id, channel_id) = managed_channel
+                    .as_ref()
+                    .map(|channel| {
+                        let (waddle_id, _) = parse_room_jid_context(room_jid);
+                        (waddle_id, channel.id.clone())
+                    })
+                    .unwrap_or_else(|| parse_room_jid_context(room_jid));
+
+                let Some(actor) =
+                    get_or_create_room_actor(state, room_jid, config, waddle_id, channel_id).await
+                else {
+                    return vec![];
+                };
+                (actor, managed_channel.is_none())
+            }
+        };
+
+        let effective_affiliation = if created_instant_room {
+            Affiliation::Owner
+        } else if let Some(affiliation) = managed_affiliation {
+            affiliation
+        } else {
+            Affiliation::None
+        };
+
+        let join_outcome = match room_actor
+            .ask(JoinWithAffiliation {
+                sender_jid: sender_jid.clone(),
+                nick: nick.clone(),
+                effective_affiliation,
+                local_domain: domain.clone(),
+                admission_revision,
+            })
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let nick_collision = matches!(
+                    &error,
+                    kameo::error::SendError::HandlerError(
+                        waddle_xmpp::muc::room_actor::RoomActorError::NickAlreadyInUse(_)
+                    )
+                );
+                if nick_collision {
+                    warn!(
+                        room = %room_jid,
+                        nick = %nick,
+                        sender = %sender_jid,
+                        "MUC nick collision; returning conflict"
+                    );
+                    return vec![build_muc_conflict_presence_xml(room_jid, &nick, sender_jid)];
+                }
+                if let kameo::error::SendError::HandlerError(
+                    waddle_xmpp::muc::room_actor::RoomActorError::StaleAdmissionRevision,
+                ) = &error
+                {
+                    if !retried_stale_admission {
+                        retried_stale_admission = true;
+                        continue;
+                    }
+                    return vec![build_muc_presence_error_xml(
+                        room_jid,
+                        &nick,
+                        sender_jid,
+                        StanzaError::new(
+                            ErrorType::Wait,
+                            DefinedCondition::InternalServerError,
+                            "en",
+                            "Room admission changed while joining; please retry.",
+                        ),
+                    )];
+                }
+                if let kameo::error::SendError::HandlerError(
+                    waddle_xmpp::muc::room_actor::RoomActorError::JoinForbidden { members_only },
+                ) = &error
+                {
+                    let (error_type, condition, message) = if *members_only {
+                        (
+                            ErrorType::Auth,
+                            DefinedCondition::RegistrationRequired,
+                            "Membership required to join this room.",
+                        )
+                    } else {
+                        (
+                            ErrorType::Auth,
+                            DefinedCondition::Forbidden,
+                            "You are not allowed to join this room.",
+                        )
+                    };
+                    return vec![build_muc_presence_error_xml(
+                        room_jid,
+                        &nick,
+                        sender_jid,
+                        StanzaError::new(error_type, condition, "en", message),
+                    )];
+                }
+                warn!(room = %room_jid, nick = %nick, error = ?error, "Failed to join MUC room");
+                return vec![];
+            }
+        };
+
+        let occupant_count = join_outcome.occupant_count;
+        let self_muji = join_outcome
+            .existing_occupants
+            .iter()
+            .find(|existing| existing.nick == nick && existing.jid == *sender_jid)
+            .and_then(|existing| existing.muji.as_ref());
+        let self_hand_raised = join_outcome
+            .existing_occupants
+            .iter()
+            .find(|existing| existing.nick == nick && existing.jid == *sender_jid)
+            .is_some_and(|existing| existing.hand_raised);
+
+        info!(room = %room_jid, nick = %nick, occupants = occupant_count, "User joined MUC room");
+
+        // Notification activity ingest (slice 2b): a successful MUC join
+        // bumps `(sender_bare, room)` activity. The XEP-0513 `<active/>`
+        // filter consults this projection to admit ActiveChannelMention
+        // pushes for users who are present in the room. `presence_show` is
+        // passed in by the caller (`handle_presence`) when the incoming
+        // presence carried a typed `<show/>` token; on first join (or
+        // when no `<show/>` is present) we record `None` so the column
+        // stays NULL until the user actually broadcasts a state.
+        crate::server::routes::interpret::record_presence_available_activity_on_state(
+            state,
+            &sender_jid.to_bare(),
+            room_jid,
+            presence_show,
+        )
+        .await;
+
+        let mut responses = Vec::new();
+
+        // Replay one base occupant presence per nick to the joiner, then
+        // append extra same-nick Muji payloads for additional sessions
+        // that own call state. Active call membership is nick-level, but
+        // XEP-0272 preparing is resource-owned coordination state, so the
+        // joiner needs the exact full JID that advertised it.
+        let mut replayed_nicks = std::collections::HashSet::new();
+        let replay_occupants: Vec<_> = join_outcome
+            .existing_occupants
+            .iter()
+            .filter(|existing| existing.nick != nick)
+            .collect();
+        for existing in replay_occupants
+            .iter()
+            .copied()
+            .filter(|existing| replayed_nicks.insert(existing.nick.clone()))
+        {
+            // XEP-0045 §7.2 conformant occupant-list replay, plus the
+            // typed `<call xmlns='urn:waddle:muc-call:0'/>` extension when
+            // the room actor's snapshot still has an active advertisement
+            // for that occupant. Without this enrichment the joiner only
+            // sees the chip light up via the NEXT presence update from a
+            // call participant, which never happens if the call is steady
+            // state — the late joiner is the one we're trying to help.
+            responses.push(build_muc_join_presence_xml(MucJoinPresence {
+                occupant_id_secret: &state.deps.occupant_id_secret,
+                room_jid,
+                nick: &existing.nick,
+                to_jid: sender_jid,
+                affiliation: existing.affiliation,
+                role: existing.role,
+                real_jid: &existing.jid,
+                include_self_status: false,
+                muji: existing.muji.as_ref(),
+                hand_raised: existing.hand_raised,
+            }));
+
+            for extra in replay_occupants.iter().copied().filter(|candidate| {
+                candidate.nick == existing.nick
+                    && candidate.jid != existing.jid
+                    && (candidate.muji.is_some() || candidate.hand_raised)
+            }) {
+                responses.push(build_muc_join_presence_xml(MucJoinPresence {
+                    occupant_id_secret: &state.deps.occupant_id_secret,
+                    room_jid,
+                    nick: &extra.nick,
+                    to_jid: sender_jid,
+                    affiliation: extra.affiliation,
+                    role: extra.role,
+                    real_jid: &extra.jid,
+                    include_self_status: false,
+                    muji: extra.muji.as_ref(),
+                    hand_raised: extra.hand_raised,
+                }));
+            }
         }
-    };
 
-    let occupant_count = join_outcome.occupant_count;
-    let self_muji = join_outcome
-        .existing_occupants
-        .iter()
-        .find(|existing| existing.nick == nick && existing.jid == *sender_jid)
-        .and_then(|existing| existing.muji.as_ref());
-    let self_hand_raised = join_outcome
-        .existing_occupants
-        .iter()
-        .find(|existing| existing.nick == nick && existing.jid == *sender_jid)
-        .is_some_and(|existing| existing.hand_raised);
+        // Broadcast the new occupant's presence to all existing occupants.
+        // Non-blocking: a zombied/slow consumer must never stall the join path,
+        // which is how "Timed out waiting for self-presence" cascades start.
+        // Drop accounting is handled inside `try_send_to` (logs + metrics);
+        // per-occupant outcome is discarded here because a missed join
+        // presence self-heals via the next MUC presence/probe round-trip.
+        if !join_outcome.is_same_bare_multi_session_join && !join_outcome.is_existing_session_rejoin
+        {
+            for existing in &join_outcome.existing_occupants {
+                let presence_stanza = create_presence_stanza(
+                    state,
+                    room_jid,
+                    &nick,
+                    sender_jid,
+                    &existing.jid,
+                    join_outcome.new_occupant_affiliation,
+                    join_outcome.new_occupant_role,
+                );
+                let stanza = Stanza::Presence(presence_stanza);
+                let _outcome = state
+                    .deps
+                    .protocol
+                    .connection_registry
+                    .try_send_to(&existing.jid, stanza);
+            }
+        }
 
-    info!(room = %room_jid, nick = %nick, occupants = occupant_count, "User joined MUC room");
-
-    // Notification activity ingest (slice 2b): a successful MUC join
-    // bumps `(sender_bare, room)` activity. The XEP-0513 `<active/>`
-    // filter consults this projection to admit ActiveChannelMention
-    // pushes for users who are present in the room. `presence_show` is
-    // passed in by the caller (`handle_presence`) when the incoming
-    // presence carried a typed `<show/>` token; on first join (or
-    // when no `<show/>` is present) we record `None` so the column
-    // stays NULL until the user actually broadcasts a state.
-    crate::server::routes::interpret::record_presence_available_activity_on_state(
-        state,
-        &sender_jid.to_bare(),
-        room_jid,
-        presence_show,
-    )
-    .await;
-
-    let mut responses = Vec::new();
-
-    // Replay one base occupant presence per nick to the joiner, then
-    // append extra same-nick Muji payloads for additional sessions
-    // that own call state. Active call membership is nick-level, but
-    // XEP-0272 preparing is resource-owned coordination state, so the
-    // joiner needs the exact full JID that advertised it.
-    let mut replayed_nicks = std::collections::HashSet::new();
-    let replay_occupants: Vec<_> = join_outcome
-        .existing_occupants
-        .iter()
-        .filter(|existing| existing.nick != nick)
-        .collect();
-    for existing in replay_occupants
-        .iter()
-        .copied()
-        .filter(|existing| replayed_nicks.insert(existing.nick.clone()))
-    {
-        // XEP-0045 §7.2 conformant occupant-list replay, plus the
-        // typed `<call xmlns='urn:waddle:muc-call:0'/>` extension when
-        // the room actor's snapshot still has an active advertisement
-        // for that occupant. Without this enrichment the joiner only
-        // sees the chip light up via the NEXT presence update from a
-        // call participant, which never happens if the call is steady
-        // state — the late joiner is the one we're trying to help.
+        // Send self-presence to the joining user (with status code 110)
         responses.push(build_muc_join_presence_xml(MucJoinPresence {
             occupant_id_secret: &state.deps.occupant_id_secret,
             room_jid,
-            nick: &existing.nick,
+            nick: &nick,
             to_jid: sender_jid,
-            affiliation: existing.affiliation,
-            role: existing.role,
-            real_jid: &existing.jid,
-            include_self_status: false,
-            muji: existing.muji.as_ref(),
-            hand_raised: existing.hand_raised,
+            affiliation: join_outcome.new_occupant_affiliation,
+            role: join_outcome.new_occupant_role,
+            real_jid: sender_jid,
+            include_self_status: true,
+            muji: self_muji,
+            hand_raised: self_hand_raised,
         }));
 
-        for extra in replay_occupants.iter().copied().filter(|candidate| {
-            candidate.nick == existing.nick
-                && candidate.jid != existing.jid
-                && (candidate.muji.is_some() || candidate.hand_raised)
+        // Same-account sibling resources share one MUC nick. If a
+        // sibling already advertised Muji for this nick, reflect exact
+        // per-session snapshots after the new session's own plain
+        // self-presence so a refresh/new tab can show "call active on
+        // another device" without misattributing `<preparing/>` to the
+        // joining resource.
+        for existing in join_outcome.existing_occupants.iter().filter(|existing| {
+            existing.nick == nick
+                && existing.jid.to_bare() == sender_jid.to_bare()
+                && existing.jid != *sender_jid
+                && (existing.muji.is_some() || existing.hand_raised)
         }) {
             responses.push(build_muc_join_presence_xml(MucJoinPresence {
                 occupant_id_secret: &state.deps.occupant_id_secret,
                 room_jid,
-                nick: &extra.nick,
+                nick: &nick,
                 to_jid: sender_jid,
-                affiliation: extra.affiliation,
-                role: extra.role,
-                real_jid: &extra.jid,
-                include_self_status: false,
-                muji: extra.muji.as_ref(),
-                hand_raised: extra.hand_raised,
+                affiliation: existing.affiliation,
+                role: existing.role,
+                real_jid: &existing.jid,
+                include_self_status: true,
+                muji: existing.muji.as_ref(),
+                hand_raised: existing.hand_raised,
             }));
         }
-    }
 
-    // Broadcast the new occupant's presence to all existing occupants.
-    // Non-blocking: a zombied/slow consumer must never stall the join path,
-    // which is how "Timed out waiting for self-presence" cascades start.
-    // Drop accounting is handled inside `try_send_to` (logs + metrics);
-    // per-occupant outcome is discarded here because a missed join
-    // presence self-heals via the next MUC presence/probe round-trip.
-    if !join_outcome.is_same_bare_multi_session_join && !join_outcome.is_existing_session_rejoin {
-        for existing in &join_outcome.existing_occupants {
-            let presence_stanza = create_presence_stanza(
-                state,
-                room_jid,
-                nick,
-                sender_jid,
-                &existing.jid,
-                join_outcome.new_occupant_affiliation,
-                join_outcome.new_occupant_role,
-            );
-            let stanza = Stanza::Presence(presence_stanza);
-            let _outcome = state
-                .deps
-                .protocol
-                .connection_registry
-                .try_send_to(&existing.jid, stanza);
-        }
-    }
-
-    // Send self-presence to the joining user (with status code 110)
-    responses.push(build_muc_join_presence_xml(MucJoinPresence {
-        occupant_id_secret: &state.deps.occupant_id_secret,
-        room_jid,
-        nick,
-        to_jid: sender_jid,
-        affiliation: join_outcome.new_occupant_affiliation,
-        role: join_outcome.new_occupant_role,
-        real_jid: sender_jid,
-        include_self_status: true,
-        muji: self_muji,
-        hand_raised: self_hand_raised,
-    }));
-
-    // Same-account sibling resources share one MUC nick. If a
-    // sibling already advertised Muji for this nick, reflect exact
-    // per-session snapshots after the new session's own plain
-    // self-presence so a refresh/new tab can show "call active on
-    // another device" without misattributing `<preparing/>` to the
-    // joining resource.
-    for existing in join_outcome.existing_occupants.iter().filter(|existing| {
-        existing.nick == nick
-            && existing.jid.to_bare() == sender_jid.to_bare()
-            && existing.jid != *sender_jid
-            && (existing.muji.is_some() || existing.hand_raised)
-    }) {
-        responses.push(build_muc_join_presence_xml(MucJoinPresence {
-            occupant_id_secret: &state.deps.occupant_id_secret,
+        // XEP-0045 §7.2.15 historical room subject. The typed builder
+        // produces the conformant envelope: nick-form `from` + `<delay/>`
+        // + XEP-0421 `<occupant-id/>` when a setter is known, or bare-from
+        // empty `<subject/>` for a never-set room (matching the established
+        // resolution of XEP-0421 §3 vs §7.2.15 on never-set rooms).
+        let subject_msg = build_subject_message(
             room_jid,
-            nick,
-            to_jid: sender_jid,
-            affiliation: existing.affiliation,
-            role: existing.role,
-            real_jid: &existing.jid,
-            include_self_status: true,
-            muji: existing.muji.as_ref(),
-            hand_raised: existing.hand_raised,
-        }));
+            sender_jid,
+            join_outcome.subject_state.as_ref(),
+            &state.deps.occupant_id_secret,
+        );
+        responses.push(stanza_to_xml(&Stanza::Message(subject_msg)));
+
+        return responses;
     }
-
-    // XEP-0045 §7.2.15 historical room subject. The typed builder
-    // produces the conformant envelope: nick-form `from` + `<delay/>`
-    // + XEP-0421 `<occupant-id/>` when a setter is known, or bare-from
-    // empty `<subject/>` for a never-set room (matching the established
-    // resolution of XEP-0421 §3 vs §7.2.15 on never-set rooms).
-    let subject_msg = build_subject_message(
-        room_jid,
-        sender_jid,
-        join_outcome.subject_state.as_ref(),
-        &state.deps.occupant_id_secret,
-    );
-    responses.push(stanza_to_xml(&Stanza::Message(subject_msg)));
-
-    responses
 }
 
 /// Handle MUC room leave

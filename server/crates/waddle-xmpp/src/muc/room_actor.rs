@@ -23,7 +23,10 @@ mod snapshot_handlers;
 #[cfg(test)]
 mod tests;
 
-pub use admin_handlers::{ApplyAdminItems, GetAdminContext, IsOwner};
+pub use admin_handlers::{
+    ApplyAdminItems, ApplyAffiliationChange, EnforceMembersOnly, EnforceMembersOnlyAffiliations,
+    GetAdminContext, IsOwner,
+};
 pub use occupancy_handlers::{
     ClearMujiPresence, HandRaisedUpdateOutcome, JoinWithAffiliation, LeaveByRealJid,
     MujiPresenceUpdateOutcome, PingSelfCheck, PresenceUpdateData, ReconcileChannelBackedRoom,
@@ -51,6 +54,7 @@ pub struct OccupantInfo {
 pub struct RoomSnapshot {
     pub room: MucRoom,
     pub config_revision: u64,
+    pub admission_revision: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -135,6 +139,10 @@ pub enum AdminApplyError {
     OccupantNotFound(String),
     #[error("cannot remove the last owner from a room")]
     CannotRemoveLastOwner,
+    #[error("admin cannot change an owner's affiliation")]
+    CannotAdminModifyOwner,
+    #[error("admins and moderators cannot change an owner or admin role")]
+    CannotModifyPrivilegedRole,
     #[error("{0}")]
     PermissionDenied(String),
 }
@@ -162,6 +170,7 @@ impl OccupantInfo {
 pub struct RoomActor {
     room: MucRoom,
     config_revision: u64,
+    admission_revision: u64,
     occupant_id_secret: crate::xep::xep0421::OccupantIdSecret,
 }
 
@@ -175,6 +184,8 @@ pub enum RoomActorError {
     OccupantNotFound(String),
     #[error("join is forbidden (members_only={members_only})")]
     JoinForbidden { members_only: bool },
+    #[error("join admission snapshot is stale")]
+    StaleAdmissionRevision,
     /// XEP-0045 §7.4: sender is not an occupant of this room. Maps to
     /// the typed stanza error `<error type='cancel'><not-acceptable/></error>`.
     #[error("sender '{0}' is not an occupant of this room")]
@@ -198,6 +209,7 @@ impl RoomActor {
         Self {
             room,
             config_revision: 0,
+            admission_revision: 0,
             occupant_id_secret,
         }
     }
@@ -340,6 +352,7 @@ impl kameo::message::Message<UpdateConfig> for RoomActor {
     ) -> Self::Reply {
         self.room.config = msg.config;
         self.config_revision = self.config_revision.saturating_add(1);
+        self.admission_revision = self.admission_revision.saturating_add(1);
         self.config_revision
     }
 }
@@ -365,6 +378,7 @@ impl kameo::message::Message<RollbackConfigIfRevision> for RoomActor {
         }
         self.room.config = msg.config;
         self.config_revision = self.config_revision.saturating_add(1);
+        self.admission_revision = self.admission_revision.saturating_add(1);
         true
     }
 }
@@ -414,9 +428,11 @@ impl kameo::message::Message<UpdateGroupDmConfigByMember> for RoomActor {
         }
         self.room.config = msg.config;
         self.config_revision = self.config_revision.saturating_add(1);
+        self.admission_revision = self.admission_revision.saturating_add(1);
         Ok(RoomSnapshot {
             room: self.room.clone(),
             config_revision: self.config_revision,
+            admission_revision: self.admission_revision,
         })
     }
 }
@@ -507,7 +523,13 @@ impl kameo::message::Message<ChangeAffiliation> for RoomActor {
         msg: ChangeAffiliation,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.room.set_affiliation(msg.jid, msg.affiliation);
+        if self
+            .room
+            .set_affiliation(msg.jid, msg.affiliation)
+            .is_some()
+        {
+            self.admission_revision = self.admission_revision.saturating_add(1);
+        }
     }
 }
 
@@ -668,6 +690,7 @@ impl kameo::message::Message<GetSnapshot> for RoomActor {
         Ok(RoomSnapshot {
             room: self.room.clone(),
             config_revision: self.config_revision,
+            admission_revision: self.admission_revision,
         })
     }
 }

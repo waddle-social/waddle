@@ -51,12 +51,31 @@ pub(super) use subscription::{
 };
 
 pub async fn handle_presence(
-    mut presence: xmpp_parsers::presence::Presence,
+    presence: xmpp_parsers::presence::Presence,
     domain: &str,
     muc_domain: &str,
     state: &WebSocketState,
     phase: &ConnectionPhase,
     _authenticated_session: &Option<Session>,
+) -> Vec<String> {
+    handle_presence_impl(
+        presence,
+        domain,
+        muc_domain,
+        state,
+        phase,
+        _authenticated_session,
+    )
+    .await
+}
+
+async fn handle_presence_impl(
+    mut presence: xmpp_parsers::presence::Presence,
+    domain: &str,
+    muc_domain: &str,
+    state: &WebSocketState,
+    phase: &ConnectionPhase,
+    authenticated_session: &Option<Session>,
 ) -> Vec<String> {
     strip_client_authored_delay(&mut presence);
     let is_unavailable = presence.type_ == xmpp_parsers::presence::Type::Unavailable;
@@ -111,7 +130,7 @@ pub async fn handle_presence(
             sender_jid,
             nick,
             presence_show,
-            _authenticated_session,
+            authenticated_session,
         )
         .await;
     }

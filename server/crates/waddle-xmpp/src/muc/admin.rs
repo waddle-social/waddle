@@ -9,7 +9,7 @@
 //! - `http://jabber.org/protocol/muc#admin` - Admin operations
 //! - `http://jabber.org/protocol/muc#owner` - Owner operations (config, destroy)
 
-use jid::{BareJid, Jid};
+use jid::{BareJid, FullJid, Jid};
 use minidom::Element;
 use tracing::{debug, instrument};
 use xmpp_parsers::iq::Iq;
@@ -155,7 +155,14 @@ fn parse_admin_items(query: &Element) -> Result<Vec<AdminItem>, XmppError> {
 
     for child in query.children() {
         if child.name() == "item" {
-            let jid = child.attr("jid").and_then(|s| s.parse::<BareJid>().ok());
+            let jid = child
+                .attr("jid")
+                .map(|s| {
+                    s.parse::<Jid>()
+                        .map(|jid| jid.to_bare())
+                        .map_err(|_| XmppError::bad_request(Some(format!("Malformed jid: {s}"))))
+                })
+                .transpose()?;
 
             let nick = child.attr("nick").map(String::from);
 
@@ -337,24 +344,28 @@ pub fn build_role_result(
     iq_id: &str,
     from_room_jid: &BareJid,
     to_jid: &Jid,
-    items: &[(String, Role, Option<BareJid>)], // (nick, role, optional jid)
+    items: &[(String, Role, Affiliation, FullJid)],
 ) -> Iq {
     let mut query = Element::builder("query", NS_MUC_ADMIN);
 
-    for (nick, role, jid) in items {
-        let mut item_builder = Element::builder("item", NS_MUC_ADMIN)
+    for (nick, role, affiliation, jid) in items {
+        let item = Element::builder("item", NS_MUC_ADMIN)
             .attr(minidom::rxml::xml_ncname!("nick").to_owned(), nick.as_str())
             .attr(
                 minidom::rxml::xml_ncname!("role").to_owned(),
                 role_to_str(*role),
-            );
+            )
+            .attr(
+                minidom::rxml::xml_ncname!("affiliation").to_owned(),
+                affiliation_to_str(*affiliation),
+            )
+            .attr(
+                minidom::rxml::xml_ncname!("jid").to_owned(),
+                jid.to_string(),
+            )
+            .build();
 
-        if let Some(j) = jid {
-            item_builder =
-                item_builder.attr(minidom::rxml::xml_ncname!("jid").to_owned(), j.to_string());
-        }
-
-        query = query.append(item_builder.build());
+        query = query.append(item);
     }
 
     Iq::Result {

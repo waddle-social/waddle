@@ -15,6 +15,7 @@ pub struct JoinWithAffiliation {
     pub nick: String,
     pub effective_affiliation: Affiliation,
     pub local_domain: String,
+    pub admission_revision: u64,
 }
 
 impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
@@ -25,6 +26,10 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
         msg: JoinWithAffiliation,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        if msg.admission_revision != self.admission_revision {
+            return Err(RoomActorError::StaleAdmissionRevision);
+        }
+
         if msg.effective_affiliation != Affiliation::None {
             self.room.update_affiliation_from_resolver(
                 msg.sender_jid.to_bare(),

@@ -153,7 +153,7 @@ impl StanzaBackstop {
 /// conformant timeout response instead of letting the connection hang.
 pub(super) async fn run_with_backstop<F>(backstop: StanzaBackstop, dispatch: F) -> Vec<String>
 where
-    F: Future<Output = Vec<String>>,
+    F: Future<Output = Vec<String>> + Send,
 {
     let span = backstop.span.clone();
     match tokio::time::timeout(STANZA_HANDLER_WEDGE_TIMEOUT, dispatch.instrument(span)).await {

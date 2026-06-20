@@ -368,6 +368,40 @@ pub fn build_ban_presence(
     presence
 }
 
+/// Build an unavailable presence for XEP-0045 membership removals.
+///
+/// Used for:
+/// - status 321: a user was removed because their affiliation changed.
+/// - status 322: a user was removed because the room became members-only.
+pub fn build_membership_removal_presence(
+    from_room_jid: &FullJid,
+    to_jid: &FullJid,
+    status_code: &'static str,
+    is_self: bool,
+    actor: Option<&BareJid>,
+    identity: &OccupantIdentity<'_>,
+) -> Presence {
+    let mut presence = Presence::new(PresenceType::Unavailable);
+    presence.from = Some(Jid::from(from_room_jid.clone()));
+    presence.to = Some(Jid::from(to_jid.clone()));
+
+    let mut status_codes: Vec<&str> = vec![status_code];
+    if identity.real_jid.is_some() {
+        status_codes.push("100");
+    }
+    if is_self {
+        status_codes.push("110");
+    }
+
+    let item = build_muc_user_item(Affiliation::None, "none", identity.real_jid, None, actor);
+    presence
+        .payloads
+        .push(build_muc_user_x_element(item, &status_codes));
+    add_presence_identity_payloads(&mut presence, from_room_jid, identity);
+
+    presence
+}
+
 /// Build a presence notification for affiliation change.
 ///
 /// Per XEP-0045 §9.6: When a user's affiliation changes, a presence update

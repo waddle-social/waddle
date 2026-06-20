@@ -1,4 +1,102 @@
 use super::*;
+use crate::admin::channels::{acquire_room_config_lock, explicit_channel_affiliations_for_jids};
+
+fn admin_item_has_role_shape(item: &AdminItem) -> bool {
+    item.role.is_some()
+}
+
+fn admin_item_has_affiliation_shape(item: &AdminItem) -> bool {
+    item.affiliation.is_some()
+}
+
+fn has_mixed_admin_set_semantics(items: &[AdminItem]) -> bool {
+    let has_role = items.iter().any(admin_item_has_role_shape);
+    let has_affiliation = items.iter().any(admin_item_has_affiliation_shape);
+    items
+        .iter()
+        .any(|item| admin_item_has_role_shape(item) && admin_item_has_affiliation_shape(item))
+        || (has_role && has_affiliation)
+}
+
+fn has_incomplete_admin_set_item(items: &[AdminItem]) -> bool {
+    if is_role_change_query(items) {
+        return items
+            .iter()
+            .any(|item| item.nick.is_none() || item.role.is_none());
+    }
+    items
+        .iter()
+        .any(|item| item.jid.is_none() || item.affiliation.is_none())
+}
+
+fn channel_affiliation_relation(affiliation: Affiliation) -> Option<&'static str> {
+    match affiliation {
+        Affiliation::Owner => Some("owner"),
+        Affiliation::Admin => Some("admin"),
+        Affiliation::Member => Some("member"),
+        Affiliation::Outcast => Some("outcast"),
+        Affiliation::None => None,
+    }
+}
+
+fn can_change_affiliation(
+    sender_affiliation: Affiliation,
+    target_current_affiliation: Affiliation,
+    new_affiliation: Affiliation,
+) -> bool {
+    match new_affiliation {
+        Affiliation::Owner | Affiliation::Admin => sender_affiliation == Affiliation::Owner,
+        Affiliation::Member | Affiliation::None | Affiliation::Outcast
+            if target_current_affiliation == Affiliation::Admin =>
+        {
+            sender_affiliation == Affiliation::Owner
+        }
+        Affiliation::Member | Affiliation::None | Affiliation::Outcast => {
+            matches!(sender_affiliation, Affiliation::Owner | Affiliation::Admin)
+        }
+    }
+}
+
+async fn persist_managed_channel_affiliation(
+    state: &WebSocketState,
+    channel_id: &str,
+    jid: &BareJid,
+    affiliation: Affiliation,
+) -> Result<(), String> {
+    let object = Object::new(ObjectType::Channel, channel_id);
+    let subject = Subject::user(jid.to_string());
+
+    for relation in ["owner", "admin", "member", "outcast"] {
+        let tuple = Tuple::new(object.clone(), Relation::new(relation), subject.clone());
+        match state
+            .deps
+            .app_state
+            .permission_actor
+            .ask(DeleteTuple { tuple })
+            .await
+        {
+            Ok(()) | Err(kameo::error::SendError::HandlerError(PermissionError::TupleNotFound)) => {
+            }
+            Err(error) => return Err(format!("delete affiliation tuple failed: {error}")),
+        }
+    }
+
+    let Some(relation) = channel_affiliation_relation(affiliation) else {
+        return Ok(());
+    };
+    let tuple = Tuple::new(object, Relation::new(relation), subject);
+    match state
+        .deps
+        .app_state
+        .permission_actor
+        .ask(WriteTuple { tuple })
+        .await
+    {
+        Ok(())
+        | Err(kameo::error::SendError::HandlerError(PermissionError::TupleAlreadyExists)) => Ok(()),
+        Err(error) => Err(format!("write affiliation tuple failed: {error}")),
+    }
+}
 
 pub(super) async fn handle_muc_admin_iq(
     iq: &xmpp_parsers::iq::Iq,
@@ -30,6 +128,11 @@ pub(super) async fn handle_muc_admin_iq(
             response_to,
             item_not_found_iq_error("Requested item not found."),
         )];
+    };
+    let _config_guard = if query.is_get {
+        None
+    } else {
+        Some(acquire_room_config_lock(&query.room_jid).await)
     };
     let context = match room_actor
         .ask(GetAdminContext {
@@ -70,9 +173,9 @@ pub(super) async fn handle_muc_admin_iq(
             }
         };
         let to_jid = Jid::from(sender_jid.clone());
-        if is_role_change_query(&query.items) {
+        if query.items.iter().any(admin_item_has_role_shape) {
             let role_filter = query.items.iter().find_map(|item| item.role);
-            let items: Vec<(String, waddle_xmpp::Role, Option<BareJid>)> = snapshot
+            let items: Vec<(String, waddle_xmpp::Role, Affiliation, FullJid)> = snapshot
                 .occupants
                 .values()
                 .filter(|occupant| role_filter.is_none_or(|role| occupant.role == role))
@@ -80,7 +183,8 @@ pub(super) async fn handle_muc_admin_iq(
                     (
                         occupant.nick.clone(),
                         occupant.role,
-                        Some(occupant.real_jid.to_bare()),
+                        occupant.affiliation,
+                        occupant.real_jid.clone(),
                     )
                 })
                 .collect();
@@ -113,18 +217,303 @@ pub(super) async fn handle_muc_admin_iq(
         ))];
     }
     let room_jid = query.room_jid.clone();
+    let items = query.items;
+    if has_mixed_admin_set_semantics(&items) {
+        return vec![build_iq_error_xml_typed(
+            iq.id(),
+            response_from,
+            response_to,
+            bad_request_iq_error("MUC admin set cannot mix role and affiliation semantics."),
+        )];
+    }
+    if has_incomplete_admin_set_item(&items) {
+        return vec![build_iq_error_xml_typed(
+            iq.id(),
+            response_from,
+            response_to,
+            bad_request_iq_error("Malformed MUC admin set item."),
+        )];
+    }
+    let affiliation_updates: Vec<(BareJid, Affiliation)> = if is_role_change_query(&items) {
+        Vec::new()
+    } else {
+        items
+            .iter()
+            .filter_map(|item| item.jid.clone().zip(item.affiliation))
+            .collect()
+    };
+    let actor_previous_affiliations = if affiliation_updates.is_empty() {
+        Vec::new()
+    } else {
+        match room_actor.ask(GetSnapshot).await {
+            Ok(snapshot) => {
+                let mut final_affiliations: std::collections::BTreeMap<BareJid, Affiliation> =
+                    snapshot
+                        .room
+                        .get_all_affiliations()
+                        .into_iter()
+                        .map(|entry| (entry.jid, entry.affiliation))
+                        .collect();
+                let current_owner_count = snapshot
+                    .room
+                    .get_jids_by_affiliation(Affiliation::Owner)
+                    .len();
+                for (jid, affiliation) in &affiliation_updates {
+                    if *affiliation == Affiliation::Owner
+                        && context.affiliation != Affiliation::Owner
+                    {
+                        return vec![build_iq_error_xml_typed(
+                            iq.id(),
+                            response_from,
+                            response_to,
+                            forbidden_iq_error("Operation not permitted."),
+                        )];
+                    }
+                    if *affiliation == Affiliation::Outcast && *jid == sender_jid.to_bare() {
+                        return vec![build_iq_error_xml_typed(
+                            iq.id(),
+                            response_from,
+                            response_to,
+                            conflict_iq_error("Cannot ban yourself from a room."),
+                        )];
+                    }
+                    let previous_affiliation = snapshot.room.get_affiliation(jid);
+                    if *affiliation != Affiliation::Owner
+                        && previous_affiliation == Affiliation::Owner
+                        && context.affiliation == Affiliation::Admin
+                    {
+                        return vec![build_iq_error_xml_typed(
+                            iq.id(),
+                            response_from,
+                            response_to,
+                            not_allowed_iq_error("Admins cannot change an owner's affiliation."),
+                        )];
+                    }
+                    if !can_change_affiliation(
+                        context.affiliation,
+                        previous_affiliation,
+                        *affiliation,
+                    ) {
+                        return vec![build_iq_error_xml_typed(
+                            iq.id(),
+                            response_from,
+                            response_to,
+                            forbidden_iq_error("Operation not permitted."),
+                        )];
+                    }
+                    if *affiliation == Affiliation::None {
+                        final_affiliations.remove(jid);
+                    } else {
+                        final_affiliations.insert(jid.clone(), *affiliation);
+                    }
+                }
+                if current_owner_count > 0
+                    && !final_affiliations
+                        .values()
+                        .any(|affiliation| *affiliation == Affiliation::Owner)
+                {
+                    return vec![build_iq_error_xml_typed(
+                        iq.id(),
+                        response_from,
+                        response_to,
+                        conflict_iq_error("Cannot remove the last owner from a room."),
+                    )];
+                }
+                let mut previous_affiliations = Vec::with_capacity(affiliation_updates.len());
+                for (jid, _) in &affiliation_updates {
+                    previous_affiliations.push((jid.clone(), snapshot.room.get_affiliation(jid)));
+                }
+                previous_affiliations
+            }
+            Err(_) => {
+                return vec![build_iq_error_xml_typed(
+                    iq.id(),
+                    response_from,
+                    response_to,
+                    internal_server_error_iq_error("Internal server error."),
+                )];
+            }
+        }
+    };
+    let managed_channel_id = waddle_xmpp::parse_managed_room_jid(&room_jid);
+    let durable_previous_affiliations = if affiliation_updates.is_empty() {
+        Vec::new()
+    } else if let Some(channel_id) = managed_channel_id.as_deref() {
+        let target_jids: Vec<BareJid> = affiliation_updates
+            .iter()
+            .map(|(jid, _)| jid.clone())
+            .collect();
+        match explicit_channel_affiliations_for_jids(&state.deps.app_state, channel_id, target_jids)
+            .await
+        {
+            Ok(affiliations) => affiliations,
+            Err(error) => {
+                warn!(
+                    room = %room_jid,
+                    error = %error,
+                    "Failed to snapshot explicit channel affiliations before MUC admin update"
+                );
+                return vec![build_iq_error_xml_typed(
+                    iq.id(),
+                    response_from,
+                    response_to,
+                    internal_server_error_iq_error("Internal server error."),
+                )];
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    if let Some(channel_id) = managed_channel_id.as_deref() {
+        for (jid, affiliation) in &affiliation_updates {
+            if let Err(error) =
+                persist_managed_channel_affiliation(state, channel_id, jid, *affiliation).await
+            {
+                warn!(
+                    room = %room_jid,
+                    target = %jid,
+                    error = %error,
+                    "Failed to persist MUC admin affiliation change before actor update"
+                );
+                for (previous_jid, previous_affiliation) in &durable_previous_affiliations {
+                    let _ = persist_managed_channel_affiliation(
+                        state,
+                        channel_id,
+                        previous_jid,
+                        *previous_affiliation,
+                    )
+                    .await;
+                }
+                return vec![build_iq_error_xml_typed(
+                    iq.id(),
+                    response_from,
+                    response_to,
+                    internal_server_error_iq_error("Internal server error."),
+                )];
+            }
+        }
+    }
     let updates = match room_actor
         .ask(ApplyAdminItems {
             sender_jid: sender_jid.clone(),
             sender_affiliation: context.affiliation,
             sender_role: context.role,
-            items: query.items,
+            items,
         })
         .await
     {
         Ok(updates) => updates,
+        Err(kameo::error::SendError::HandlerError(
+            waddle_xmpp::muc::room_actor::AdminApplyError::CannotRemoveLastOwner,
+        )) => {
+            warn!(room = %room_jid, "MUC admin set rejected because it would remove the last owner");
+            if let Some(channel_id) = managed_channel_id.as_deref() {
+                for (previous_jid, previous_affiliation) in &durable_previous_affiliations {
+                    let _ = persist_managed_channel_affiliation(
+                        state,
+                        channel_id,
+                        previous_jid,
+                        *previous_affiliation,
+                    )
+                    .await;
+                }
+                for (previous_jid, previous_affiliation) in &actor_previous_affiliations {
+                    let _ = room_actor
+                        .ask(ChangeAffiliation {
+                            jid: previous_jid.clone(),
+                            affiliation: *previous_affiliation,
+                        })
+                        .await;
+                }
+            }
+            return vec![build_iq_error_xml_typed(
+                iq.id(),
+                response_from,
+                response_to,
+                conflict_iq_error("Cannot remove the last owner from a room."),
+            )];
+        }
+        Err(kameo::error::SendError::HandlerError(
+            waddle_xmpp::muc::room_actor::AdminApplyError::CannotAdminModifyOwner,
+        )) => {
+            warn!(room = %room_jid, "MUC admin set rejected because an admin tried to change an owner affiliation");
+            if let Some(channel_id) = managed_channel_id.as_deref() {
+                for (previous_jid, previous_affiliation) in &durable_previous_affiliations {
+                    let _ = persist_managed_channel_affiliation(
+                        state,
+                        channel_id,
+                        previous_jid,
+                        *previous_affiliation,
+                    )
+                    .await;
+                }
+                for (previous_jid, previous_affiliation) in &actor_previous_affiliations {
+                    let _ = room_actor
+                        .ask(ChangeAffiliation {
+                            jid: previous_jid.clone(),
+                            affiliation: *previous_affiliation,
+                        })
+                        .await;
+                }
+            }
+            return vec![build_iq_error_xml_typed(
+                iq.id(),
+                response_from,
+                response_to,
+                not_allowed_iq_error("Admins cannot change an owner's affiliation."),
+            )];
+        }
+        Err(kameo::error::SendError::HandlerError(
+            waddle_xmpp::muc::room_actor::AdminApplyError::CannotModifyPrivilegedRole,
+        )) => {
+            warn!(room = %room_jid, "MUC admin set rejected because a non-owner tried to change an owner/admin role");
+            if let Some(channel_id) = managed_channel_id.as_deref() {
+                for (previous_jid, previous_affiliation) in &durable_previous_affiliations {
+                    let _ = persist_managed_channel_affiliation(
+                        state,
+                        channel_id,
+                        previous_jid,
+                        *previous_affiliation,
+                    )
+                    .await;
+                }
+                for (previous_jid, previous_affiliation) in &actor_previous_affiliations {
+                    let _ = room_actor
+                        .ask(ChangeAffiliation {
+                            jid: previous_jid.clone(),
+                            affiliation: *previous_affiliation,
+                        })
+                        .await;
+                }
+            }
+            return vec![build_iq_error_xml_typed(
+                iq.id(),
+                response_from,
+                response_to,
+                not_allowed_iq_error("Admins and moderators cannot change an owner or admin role."),
+            )];
+        }
         Err(kameo::error::SendError::HandlerError(error)) => {
             warn!(room = %room_jid, error = %error, "MUC admin set rejected");
+            if let Some(channel_id) = managed_channel_id.as_deref() {
+                for (previous_jid, previous_affiliation) in &durable_previous_affiliations {
+                    let _ = persist_managed_channel_affiliation(
+                        state,
+                        channel_id,
+                        previous_jid,
+                        *previous_affiliation,
+                    )
+                    .await;
+                }
+                for (previous_jid, previous_affiliation) in &actor_previous_affiliations {
+                    let _ = room_actor
+                        .ask(ChangeAffiliation {
+                            jid: previous_jid.clone(),
+                            affiliation: *previous_affiliation,
+                        })
+                        .await;
+                }
+            }
             return vec![build_iq_error_xml_typed(
                 iq.id(),
                 response_from,
@@ -134,6 +523,25 @@ pub(super) async fn handle_muc_admin_iq(
         }
         Err(error) => {
             warn!(room = %room_jid, error = ?error, "Failed to apply MUC admin IQ");
+            if let Some(channel_id) = managed_channel_id.as_deref() {
+                for (previous_jid, previous_affiliation) in &durable_previous_affiliations {
+                    let _ = persist_managed_channel_affiliation(
+                        state,
+                        channel_id,
+                        previous_jid,
+                        *previous_affiliation,
+                    )
+                    .await;
+                }
+                for (previous_jid, previous_affiliation) in &actor_previous_affiliations {
+                    let _ = room_actor
+                        .ask(ChangeAffiliation {
+                            jid: previous_jid.clone(),
+                            affiliation: *previous_affiliation,
+                        })
+                        .await;
+                }
+            }
             return vec![build_iq_error_xml_typed(
                 iq.id(),
                 response_from,

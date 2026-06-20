@@ -11,7 +11,9 @@ use super::{
 };
 use crate::config::ServerConfig;
 use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig};
-use crate::permissions::{Object, ObjectType, Permission, Relation, Subject, Tuple, WriteTuple};
+use crate::permissions::{
+    CheckPermission, Object, ObjectType, Permission, Relation, Subject, Tuple, WriteTuple,
+};
 use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
 use crate::server::AppState;
 use hmac::{Hmac, KeyInit, Mac};
@@ -29,7 +31,8 @@ use handlers::presence::{handle_muc_join, handle_muc_leave, parse_room_jid_conte
 use waddle_extensions::ExtensionConfig;
 use waddle_xmpp::commands::{CommandContext, CommandResult};
 use waddle_xmpp::muc::room_actor::{
-    ChangeAffiliation, GetSnapshot, JoinWithAffiliation, SetSubject, UpdateConfig,
+    ApplyAdminItems, ChangeAffiliation, GetConfig, GetSnapshot, JoinWithAffiliation, SetSubject,
+    UpdateConfig,
 };
 use waddle_xmpp::registry::BroadcastOutcome;
 use waddle_xmpp::Affiliation;

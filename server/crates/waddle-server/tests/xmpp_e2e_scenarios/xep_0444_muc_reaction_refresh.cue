@@ -30,6 +30,13 @@ scenario: #Scenario & {
 			target:   alicePhone
 			contains: ["from='\(roomJid)'", "<subject></subject>"]
 		},
+		#SetMucAffiliation & {
+			actor:       alicePhone
+			room:        roomJid
+			jid:         bobPhone.bareJid
+			affiliation: "member"
+			id:          "cue-muc-reaction-set-bob-member"
+		},
 		#JoinMuc & {actor: bobPhone, room: roomJid, nick: "bob-phone"},
 		#ExpectPresence & {
 			target:   bobPhone

@@ -561,6 +561,7 @@ export interface WasmAdminChannelRef {
   name: string;
   topic?: string | null;
   is_public: boolean;
+  members_only: boolean;
 }
 
 export interface WasmAdminChannelOccupantEntry {

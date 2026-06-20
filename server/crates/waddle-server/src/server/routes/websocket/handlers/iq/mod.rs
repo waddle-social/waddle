@@ -21,12 +21,12 @@ use waddle_xmpp::{
     muc::{
         admin::{
             build_admin_result, build_admin_set_result, build_role_result, is_muc_admin_iq,
-            is_role_change_query, parse_admin_query,
+            is_role_change_query, parse_admin_query, AdminItem,
         },
         owner::build_config_form,
         room_actor::{
-            ApplyAdminItems, GetAdminContext, GetOccupantByJid, GetSnapshot, PingSelfCheck,
-            UpdateConfig,
+            ApplyAdminItems, ChangeAffiliation, EnforceMembersOnly, EnforceMembersOnlyAffiliations,
+            GetAdminContext, GetOccupantByJid, GetSnapshot, PingSelfCheck, UpdateConfig,
         },
         DATA_FORMS_NS,
     },
@@ -146,9 +146,9 @@ pub use test_helpers::handle_iq;
 // IQ-error constructors without each having to re-import the
 // `errors` submodule directly.
 pub(super) use errors::{
-    bad_format_iq_error, bad_request_iq_error, feature_not_implemented_iq_error,
+    bad_format_iq_error, bad_request_iq_error, conflict_iq_error, feature_not_implemented_iq_error,
     forbidden_iq_error, internal_server_error_iq_error, item_not_found_iq_error,
-    jid_malformed_iq_error, not_acceptable_iq_error, not_authorized_iq_error,
+    jid_malformed_iq_error, not_acceptable_iq_error, not_allowed_iq_error, not_authorized_iq_error,
     service_unavailable_iq_error,
 };
 
@@ -200,8 +200,8 @@ use crate::db::roster::{
 };
 use crate::db::{row_value, Database, Value, ValueExt};
 use crate::permissions::{
-    CheckPermission, Object, ObjectType, Permission, PermissionError, Relation, Subject,
-    SubjectType, Tuple, WriteTuple,
+    CheckPermission, DeleteTuple, Object, ObjectType, Permission, PermissionError, Relation,
+    Subject, SubjectType, Tuple, WriteTuple,
 };
 use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
 use crate::server::managed_channel_policy::{

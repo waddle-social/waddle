@@ -1,9 +1,9 @@
 <script setup lang="ts">
-// Admin V2 — modal for `adminChannelsCreate`. `is_public` defaults to
-// `true` per the V2 spec; the helper text reflects that.
+// Admin V2 — modal for `adminChannelsCreate`.
 import { ref, watch } from "vue";
 import { X } from "lucide-vue-next";
 import AppDialog from "@/components/ui/AppDialog.vue";
+import { requireMembershipForUnlistedChannel } from "./channelAdmissionPolicy";
 
 const open = defineModel<boolean>("open", { required: true });
 
@@ -13,13 +13,14 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  submit: [payload: { name: string; topic?: string | null; spaceJid?: string | null; spaceNode?: string | null; isPublic?: boolean | null }];
+  submit: [payload: { name: string; topic?: string | null; spaceJid?: string | null; spaceNode?: string | null; isPublic?: boolean | null; membersOnly?: boolean | null }];
 }>();
 
 const name = ref("");
 const topic = ref("");
 const spaceNode = ref("");
 const isPublic = ref(true);
+const membersOnly = ref(false);
 
 watch(open, (isOpen) => {
   if (isOpen) {
@@ -27,8 +28,18 @@ watch(open, (isOpen) => {
     topic.value = "";
     spaceNode.value = "";
     isPublic.value = true;
+    membersOnly.value = false;
   }
 });
+
+function handlePublicToggleChange() {
+  const policy = requireMembershipForUnlistedChannel({
+    isPublic: isPublic.value,
+    membersOnly: membersOnly.value,
+  });
+  isPublic.value = policy.isPublic;
+  membersOnly.value = policy.membersOnly;
+}
 
 function onSubmit() {
   if (!name.value.trim() || props.isSubmitting) return;
@@ -39,6 +50,7 @@ function onSubmit() {
     spaceJid: selectedSpace?.space_jid ?? null,
     spaceNode: selectedSpace?.space_node ?? null,
     isPublic: isPublic.value,
+    membersOnly: membersOnly.value,
   });
 }
 </script>
@@ -86,14 +98,18 @@ function onSubmit() {
           <option v-for="s in spaces" :key="s.space_node" :value="s.space_node">{{ s.name }}</option>
         </select>
       </label>
-      <div class="flex flex-col gap-1.5 rounded-lg border border-border bg-muted/30 px-3 py-2.5">
+      <div class="flex flex-col gap-2 rounded-lg border border-border bg-muted/30 px-3 py-2.5">
         <label class="flex items-center gap-2 cursor-pointer">
-          <input v-model="isPublic" type="checkbox" />
-          <span class="type-control">Public</span>
+          <input v-model="isPublic" type="checkbox" @change="handlePublicToggleChange" />
+          <span class="type-control">Listed in discovery</span>
+        </label>
+        <label class="flex items-center gap-2 cursor-pointer">
+          <input v-model="membersOnly" type="checkbox" />
+          <span class="type-control">Require explicit membership</span>
         </label>
         <p class="type-caption text-muted-foreground">
-          Anyone in the community can join. Uncheck to require explicit
-          membership.
+          Discovery visibility and room admission are separate XMPP room
+          settings.
         </p>
       </div>
     </form>

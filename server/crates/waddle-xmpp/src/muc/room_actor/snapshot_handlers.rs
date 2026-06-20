@@ -54,6 +54,8 @@ pub struct RoomChainSnapshot {
     pub config: RoomConfig,
     /// Durable affiliation-derived recipients at dispatch start.
     pub durable_recipient_bare_jids: Vec<BareJid>,
+    /// Admission revision at dispatch start for stale-join rejection.
+    pub admission_revision: u64,
 }
 
 /// One occupant session in a [`RoomChainSnapshot`].
@@ -134,6 +136,7 @@ impl kameo::message::Message<GetRoomSnapshot> for RoomActor {
             sender_nickname_generation,
             config: self.room.config.clone(),
             durable_recipient_bare_jids,
+            admission_revision: self.admission_revision,
         })
     }
 }

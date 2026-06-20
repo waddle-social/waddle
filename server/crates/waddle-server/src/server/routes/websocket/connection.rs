@@ -69,12 +69,9 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                         debug!(len = text.len(), "Received XMPP WebSocket message");
 
                         // Handle XMPP framing (RFC 7395)
-                        let mut responses = handle_xmpp_frame(
-                            &text,
-                            &domain,
-                            &state,
-                            &mut conn,
-                        ).await;
+                        let mut responses =
+                            handle_xmpp_frame(text.as_str(), &domain, state.as_ref(), &mut conn)
+                                .await;
 
                         // Mirror any phase transition `handle_xmpp_frame`
                         // performed (most importantly Ready → Closing on
