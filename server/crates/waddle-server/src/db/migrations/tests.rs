@@ -16,7 +16,7 @@ async fn test_migration_runner_global() {
 
     // Check version (global + shared waddle schema)
     let version = runner.current_version(&db).await.unwrap();
-    assert_eq!(version, Some(1006));
+    assert_eq!(version, Some(1007));
 }
 
 #[tokio::test]
@@ -136,7 +136,7 @@ async fn test_waddle_v1002_adds_pin_permission_to_existing_v1001_schema() {
 
     let runner = MigrationRunner::waddle();
     let applied = runner.run(&db).await.unwrap();
-    assert_eq!(applied, vec![1002, 1003, 1004, 1005, 1006]);
+    assert_eq!(applied, vec![1002, 1003, 1004, 1005, 1006, 1007]);
 
     let conn = db.guard().await.unwrap();
     let mut rows = conn
@@ -150,12 +150,112 @@ async fn test_waddle_v1002_adds_pin_permission_to_existing_v1001_schema() {
     let pin_permission: String = row.get(0).unwrap();
     assert_eq!(pin_permission, "admins-only");
     let members_only: i64 = row.get(1).unwrap();
-    assert_eq!(members_only, 1);
+    assert_eq!(members_only, 0);
     let public_room: i64 = row.get(2).unwrap();
     assert_eq!(public_room, 1);
 
     let version = runner.current_version(&db).await.unwrap();
-    assert_eq!(version, Some(1006));
+    assert_eq!(version, Some(1007));
+}
+
+#[tokio::test]
+async fn test_waddle_v1007_opens_already_migrated_public_channels() {
+    let db = Database::in_memory("test-waddle-v1007-public-membership-repair")
+        .await
+        .unwrap();
+    let conn = db.guard().await.unwrap();
+
+    conn.execute(
+        r#"
+            CREATE TABLE IF NOT EXISTS _migrations (
+                version INTEGER PRIMARY KEY,
+                description TEXT NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+            "#,
+        (),
+    )
+    .await
+    .unwrap();
+    seed_applied_migrations(
+        &conn,
+        waddle::all().into_iter().filter(|m| m.version <= 1006),
+    )
+    .await;
+    conn.execute(
+        r#"
+            CREATE TABLE channels (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT,
+                channel_type TEXT NOT NULL DEFAULT 'text',
+                position INTEGER NOT NULL DEFAULT 0,
+                is_default INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                pin_permission TEXT NOT NULL DEFAULT 'admins-only',
+                members_only INTEGER NOT NULL DEFAULT 1,
+                public_room INTEGER NOT NULL DEFAULT 1
+            )
+            "#,
+        (),
+    )
+    .await
+    .unwrap();
+    for (id, channel_type, members_only, public_room) in [
+        ("announcements", "announcement", 1_i64, 1_i64),
+        ("chat", "text", 1_i64, 1_i64),
+        ("forum", "forum", 1_i64, 1_i64),
+        ("github-actions", "text", 1_i64, 1_i64),
+        ("private", "text", 1_i64, 0_i64),
+        ("public-private", "text", 1_i64, 1_i64),
+        ("testing", "text", 1_i64, 1_i64),
+        ("dm", "group-dm", 1_i64, 0_i64),
+    ] {
+        conn.execute(
+            r#"
+                INSERT INTO channels
+                  (id, name, channel_type, members_only, public_room)
+                VALUES (?, ?, ?, ?, ?)
+                "#,
+            crate::db_params![id, id, channel_type, members_only, public_room],
+        )
+        .await
+        .unwrap();
+    }
+    drop(conn);
+
+    let runner = MigrationRunner::waddle();
+    let applied = runner.run(&db).await.unwrap();
+    assert_eq!(applied, vec![1007]);
+
+    let conn = db.guard().await.unwrap();
+    let mut rows = conn
+        .query("SELECT id, members_only FROM channels ORDER BY id ASC", ())
+        .await
+        .unwrap();
+    let mut policies = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        let id: String = row.get(0).unwrap();
+        let members_only: i64 = row.get(1).unwrap();
+        policies.push((id, members_only));
+    }
+    assert_eq!(
+        policies,
+        vec![
+            ("announcements".to_string(), 0),
+            ("chat".to_string(), 0),
+            ("dm".to_string(), 1),
+            ("forum".to_string(), 0),
+            ("github-actions".to_string(), 0),
+            ("private".to_string(), 1),
+            ("public-private".to_string(), 1),
+            ("testing".to_string(), 0),
+        ]
+    );
+
+    let version = runner.current_version(&db).await.unwrap();
+    assert_eq!(version, Some(1007));
 }
 
 #[tokio::test]
@@ -232,7 +332,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
     drop(conn);
 
     // `MigrationRunner::global()` composes global + waddle migrations,
-    // so the runner also reports applying 1001 through 1006 (the waddle
+    // so the runner also reports applying 1001 through 1007 (the waddle
     // schema tables) on top of V0004. The test's invariant is V0004
     // specifically, asserted via the `pragma_table_info` probe below;
     // the version list is included in the assertion so a future PR
@@ -241,7 +341,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
     let applied = runner.run(&db).await.unwrap();
     assert_eq!(
         applied,
-        vec![4, 5, 6, 7, 1001, 1002, 1003, 1004, 1005, 1006]
+        vec![4, 5, 6, 7, 1001, 1002, 1003, 1004, 1005, 1006, 1007]
     );
 
     // Column exists.
@@ -304,7 +404,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
     let version = runner.current_version(&db).await.unwrap();
     assert_eq!(
         version,
-        Some(1006),
+        Some(1007),
         "current version reflects the highest applied across global+waddle"
     );
 }
@@ -355,14 +455,14 @@ async fn test_incompatible_history_forces_hard_cut_reapply() {
     let applied = runner.run(&db).await.unwrap();
     assert_eq!(
         applied,
-        vec![1, 2, 3, 4, 5, 6, 7, 1001, 1002, 1003, 1004, 1005, 1006]
+        vec![1, 2, 3, 4, 5, 6, 7, 1001, 1002, 1003, 1004, 1005, 1006, 1007]
     );
 
     let applied_again = runner.run(&db).await.unwrap();
     assert!(applied_again.is_empty());
 
     let version = runner.current_version(&db).await.unwrap();
-    assert_eq!(version, Some(1006));
+    assert_eq!(version, Some(1007));
 }
 
 #[tokio::test]
@@ -409,7 +509,7 @@ async fn test_incompatible_history_recreates_existing_owned_tables() {
     let applied = runner.run(&db).await.unwrap();
     assert_eq!(
         applied,
-        vec![1, 2, 3, 4, 5, 6, 7, 1001, 1002, 1003, 1004, 1005, 1006]
+        vec![1, 2, 3, 4, 5, 6, 7, 1001, 1002, 1003, 1004, 1005, 1006, 1007]
     );
 
     let conn = db.guard().await.unwrap();
@@ -628,7 +728,10 @@ async fn postgres_v0006_widens_existing_upload_slot_size_bytes() {
         .run(&db)
         .await
         .expect("run global migration");
-    assert_eq!(applied, vec![6, 7, 1001, 1002, 1003, 1004, 1005, 1006]);
+    assert_eq!(
+        applied,
+        vec![6, 7, 1001, 1002, 1003, 1004, 1005, 1006, 1007]
+    );
     assert_postgres_column_type(&db, "upload_slots", "size_bytes", "bigint").await;
 
     let oversized_int4 = i64::from(i32::MAX) + 1;
@@ -693,7 +796,7 @@ async fn sqlite_v0007_tracks_link_preview_media_refs() {
     drop(conn);
 
     let applied = MigrationRunner::global().run(&db).await.unwrap();
-    assert_eq!(applied, vec![7, 1001, 1002, 1003, 1004, 1005, 1006]);
+    assert_eq!(applied, vec![7, 1001, 1002, 1003, 1004, 1005, 1006, 1007]);
 
     let conn = db.guard().await.unwrap();
     let mut rows = conn
@@ -814,7 +917,7 @@ async fn postgres_v0007_tracks_link_preview_media_refs() {
         .run(&db)
         .await
         .expect("run global migration");
-    assert_eq!(applied, vec![7, 1001, 1002, 1003, 1004, 1005, 1006]);
+    assert_eq!(applied, vec![7, 1001, 1002, 1003, 1004, 1005, 1006, 1007]);
 
     let conn = db.guard().await.expect("postgres guard");
     let mut rows = conn
@@ -984,7 +1087,7 @@ async fn postgres_v1003_widens_existing_attachment_size_bytes() {
         .run(&db)
         .await
         .expect("run waddle migration");
-    assert_eq!(applied, vec![1003, 1004, 1005, 1006]);
+    assert_eq!(applied, vec![1003, 1004, 1005, 1006, 1007]);
     assert_postgres_column_type(&db, "attachments", "size_bytes", "bigint").await;
 
     let oversized_int4 = i64::from(i32::MAX) + 1;

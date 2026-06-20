@@ -216,6 +216,26 @@ CREATE TABLE IF NOT EXISTS group_dm_archive_boundaries (
 );
 "#;
 
+/// Repair the known public channel catalogs that passed through V1004 while
+/// the members-only column defaulted to true. Keep this ID-scoped so public
+/// discoverability and members-only admission stay independent for rooms that
+/// were intentionally configured that way after the policy columns existed.
+pub const V1007_OPEN_LEGACY_PUBLIC_CHANNELS: &str = r#"
+UPDATE channels
+SET members_only = 0
+WHERE public_room <> 0
+  AND id IN ('announcements', 'chat', 'forum', 'github-actions', 'testing')
+  AND members_only <> 0;
+"#;
+
+pub const V1007_OPEN_LEGACY_PUBLIC_CHANNELS_POSTGRES: &str = r#"
+UPDATE channels
+SET members_only = 0
+WHERE public_room <> 0
+  AND id IN ('announcements', 'chat', 'forum', 'github-actions', 'testing')
+  AND members_only <> 0;
+"#;
+
 /// Get all waddle schema migrations in order.
 ///
 /// Versions are intentionally offset from global migrations so a single
@@ -257,6 +277,12 @@ pub fn all() -> Vec<Migration> {
             description: "Persist group-DM archive visibility boundaries".to_string(),
             sql_sqlite: V1006_ADD_GROUP_DM_ARCHIVE_BOUNDARIES,
             sql_postgres: V1006_ADD_GROUP_DM_ARCHIVE_BOUNDARIES_POSTGRES,
+        },
+        Migration {
+            version: 1007,
+            description: "Open legacy public channel memberships".to_string(),
+            sql_sqlite: V1007_OPEN_LEGACY_PUBLIC_CHANNELS,
+            sql_postgres: V1007_OPEN_LEGACY_PUBLIC_CHANNELS_POSTGRES,
         },
     ]
 }
