@@ -523,8 +523,17 @@ export class WaddleClient {
      *   §Joining two-phase flow. Typically the client sends this
      *   first, awaits the room's echo, then re-emits with contents
      *   declared.
+     * - `hand_raised=true`: appends an
+     *   `<in-call xmlns='urn:waddle:in-call:0'><hand-raised/></in-call>`
+     *   presence child *alongside* `<muji/>` (#1029). This is the FFI
+     *   raise/lower-hand "set method": the caller re-emits its current
+     *   call presence with the flag toggled, and the absence of the
+     *   child lowers the hand for everyone (the server clears the
+     *   stored state). Ignored unless the occupant is in the call
+     *   (`active` or `preparing`), since a raised hand is meaningless
+     *   without call participation.
      */
-    update_muji_presence(room_jid: string, nick: string, active: boolean, preparing: boolean, video: boolean): Promise<any>;
+    update_muji_presence(room_jid: string, nick: string, active: boolean, preparing: boolean, video: boolean, hand_raised: boolean): Promise<any>;
     /**
      * Fetch the latest calendar events from the community events
      * node. Returns ALL items including past events; chat-side

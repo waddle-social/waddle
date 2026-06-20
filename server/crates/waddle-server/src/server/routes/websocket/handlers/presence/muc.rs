@@ -221,6 +221,11 @@ pub async fn handle_muc_join(
         .iter()
         .find(|existing| existing.nick == nick && existing.jid == *sender_jid)
         .and_then(|existing| existing.muji.as_ref());
+    let self_hand_raised = join_outcome
+        .existing_occupants
+        .iter()
+        .find(|existing| existing.nick == nick && existing.jid == *sender_jid)
+        .is_some_and(|existing| existing.hand_raised);
 
     info!(room = %room_jid, nick = %nick, occupants = occupant_count, "User joined MUC room");
 
@@ -275,12 +280,13 @@ pub async fn handle_muc_join(
             real_jid: &existing.jid,
             include_self_status: false,
             muji: existing.muji.as_ref(),
+            hand_raised: existing.hand_raised,
         }));
 
         for extra in replay_occupants.iter().copied().filter(|candidate| {
             candidate.nick == existing.nick
                 && candidate.jid != existing.jid
-                && candidate.muji.is_some()
+                && (candidate.muji.is_some() || candidate.hand_raised)
         }) {
             responses.push(build_muc_join_presence_xml(MucJoinPresence {
                 occupant_id_secret: &state.deps.occupant_id_secret,
@@ -292,6 +298,7 @@ pub async fn handle_muc_join(
                 real_jid: &extra.jid,
                 include_self_status: false,
                 muji: extra.muji.as_ref(),
+                hand_raised: extra.hand_raised,
             }));
         }
     }
@@ -333,6 +340,7 @@ pub async fn handle_muc_join(
         real_jid: sender_jid,
         include_self_status: true,
         muji: self_muji,
+        hand_raised: self_hand_raised,
     }));
 
     // Same-account sibling resources share one MUC nick. If a
@@ -345,7 +353,7 @@ pub async fn handle_muc_join(
         existing.nick == nick
             && existing.jid.to_bare() == sender_jid.to_bare()
             && existing.jid != *sender_jid
-            && existing.muji.is_some()
+            && (existing.muji.is_some() || existing.hand_raised)
     }) {
         responses.push(build_muc_join_presence_xml(MucJoinPresence {
             occupant_id_secret: &state.deps.occupant_id_secret,
@@ -357,6 +365,7 @@ pub async fn handle_muc_join(
             real_jid: &existing.jid,
             include_self_status: true,
             muji: existing.muji.as_ref(),
+            hand_raised: existing.hand_raised,
         }));
     }
 

@@ -87,6 +87,18 @@ pub(super) fn parse_presence(el: &Element) -> InboundPresence {
         }
     });
 
+    // Waddle raised-hand call presence state (#1029): an
+    // `<in-call xmlns='urn:waddle:in-call:0'>` sibling of `<muji/>` with
+    // a `<hand-raised/>` marker child. Its absence means the hand is
+    // lowered.
+    let hand_raised = el
+        .get_child("in-call", NS_WADDLE_IN_CALL)
+        .is_some_and(|in_call| {
+            in_call
+                .children()
+                .any(|c| c.name() == "hand-raised" && c.ns() == NS_WADDLE_IN_CALL)
+        });
+
     InboundPresence {
         from,
         to,
@@ -100,6 +112,7 @@ pub(super) fn parse_presence(el: &Element) -> InboundPresence {
         muc_status,
         vcard_avatar,
         muji,
+        hand_raised,
     }
 }
 
@@ -150,6 +163,36 @@ mod tests {
         assert!(muji.active);
         assert!(muji.audio);
         assert!(muji.video);
+    }
+
+    #[test]
+    fn parses_in_call_hand_raised_alongside_muji() {
+        let xml = r#"<presence xmlns="jabber:client" from="room@muc.test/alice">
+            <muji xmlns="urn:xmpp:jingle:muji:0">
+                <content creator="initiator" name="audio">
+                    <description xmlns="urn:xmpp:jingle:apps:rtp:1" media="audio"/>
+                </content>
+            </muji>
+            <in-call xmlns="urn:waddle:in-call:0"><hand-raised/></in-call>
+        </presence>"#;
+        let elem: Element = xml.parse().unwrap();
+        let p = parse_presence(&elem);
+        assert!(p.muji.expect("muji parsed").active);
+        assert!(p.hand_raised, "raised-hand presence state parsed");
+    }
+
+    #[test]
+    fn lowered_hand_presence_has_no_in_call_child() {
+        let xml = r#"<presence xmlns="jabber:client" from="room@muc.test/alice">
+            <muji xmlns="urn:xmpp:jingle:muji:0">
+                <content creator="initiator" name="audio">
+                    <description xmlns="urn:xmpp:jingle:apps:rtp:1" media="audio"/>
+                </content>
+            </muji>
+        </presence>"#;
+        let elem: Element = xml.parse().unwrap();
+        let p = parse_presence(&elem);
+        assert!(!p.hand_raised, "no in-call child means hand lowered");
     }
 
     #[test]

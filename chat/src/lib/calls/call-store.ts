@@ -17,6 +17,7 @@ import {
   rememberMucCallSession,
 } from "./muc-call-session-cache";
 import { clearLiveCallParticipants } from "./muc-call-live-participants";
+import { selfRaisedHandFor, setSelfRaisedHand } from "./call-raised-hand";
 import { mediaErrorMessage } from "./call-media-issues";
 import {
   dmCallStartedAnchorFromTransition,
@@ -694,11 +695,13 @@ export async function tearDownActiveCall(
                   false, // active
                   false, // preparing
                   false, // video
+                  false, // hand_raised
                 );
               } catch (err) {
                 reportCallError(err);
               } finally {
                 clearMucCallParticipant(s.peer, s.selfNick, s.selfFullJid);
+                setSelfRaisedHand(s.peer, false);
               }
             }
             clearLiveCallParticipants(s.peer);
@@ -751,11 +754,13 @@ export async function tearDownActiveCall(
                   false,
                   false,
                   false,
+                  false, // hand_raised
                 );
               } catch (err) {
                 reportCallError(err);
               } finally {
                 clearMucCallParticipant(s.peer, s.selfNick, s.selfFullJid);
+                setSelfRaisedHand(s.peer, false);
               }
             }
             if (s.activePresencePublished) {
@@ -819,6 +824,7 @@ export type RawIqSender = {
     active: boolean,
     preparing: boolean,
     video: boolean,
+    hand_raised: boolean,
   ) => Promise<void>;
 };
 
@@ -884,6 +890,7 @@ async function rollbackMucCallSetup(
         false,
         false,
         false,
+        false, // hand_raised
       );
     } catch (err) {
       reportCallError(err);
@@ -980,6 +987,9 @@ export async function beginMucCall(
   if (!normalizedRoomJid) {
     throw new Error("Cannot start a group call without a room JID");
   }
+  // Fresh call: a hand left raised from a prior session in this room must
+  // not silently re-raise on the new active presence (#1029).
+  setSelfRaisedHand(normalizedRoomJid, false);
   if (!selfNick) {
     throw new Error("Cannot start a group call before MUC presence has a nick");
   }
@@ -1026,6 +1036,7 @@ export async function beginMucCall(
       false, // active (no <content/> yet)
       true, // preparing
       false, // video — irrelevant in preparing phase
+      false, // hand_raised — a hand can't be raised before joining
     );
     assertMucSetupStillPending(normalizedRoomJid, selfNick, attemptId);
     // XEP-0272 §Joining: "The client MUST then wait until the MUC
@@ -1051,6 +1062,7 @@ export async function beginMucCall(
       true, // active
       false, // preparing
       media.video, // video
+      selfRaisedHandFor(normalizedRoomJid), // hand_raised — preserve across re-emit
     );
     if (!mucSetupStillPending(normalizedRoomJid, selfNick, attemptId)) {
       await rollbackMucCallSetup(

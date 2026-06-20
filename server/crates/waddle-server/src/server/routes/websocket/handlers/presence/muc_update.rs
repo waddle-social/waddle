@@ -37,14 +37,15 @@ use tracing::{debug, warn};
 use waddle_xmpp::muc::{
     build_occupant_presence_update,
     presence::NS_MUC,
-    room_actor::{ClearMujiPresence, UpsertMujiPresence},
+    room_actor::{ClearMujiPresence, UpsertHandRaised, UpsertMujiPresence},
 };
 use waddle_xmpp::xep::xep0167::MediaKind;
 use waddle_xmpp::xep::xep0272::{find_muji, Muji, NS_MUJI};
 use waddle_xmpp::xep::xep0421::OccupantIdentity;
 use waddle_xmpp::xep::{
-    build_call_thread_anchor, build_hint_element, CallThreadAnchor, CallThreadKind,
-    CallThreadMedia, Hint, NS_WADDLE_CALL_THREAD,
+    build_call_thread_anchor, build_hint_element, build_in_call_presence_state_element,
+    parse_in_call_presence_state, CallThreadAnchor, CallThreadKind, CallThreadMedia, Hint,
+    InCallPresenceState, NS_WADDLE_CALL_THREAD, NS_WADDLE_IN_CALL,
 };
 use waddle_xmpp::Stanza;
 use waddle_xmpp_core::mam::ThreadId;
@@ -70,6 +71,19 @@ pub(super) fn extract_muji(presence: &Presence) -> Option<Muji> {
         .iter()
         .find(|elem| elem.name() == "muji" && elem.ns() == NS_MUJI)
         .and_then(|elem| Muji::try_from(elem).ok())
+}
+
+/// Pull the typed [`InCallPresenceState`] out of an inbound presence's
+/// `<in-call xmlns='urn:waddle:in-call:0'>` child (#1029), defaulting to
+/// the lowered state when the child is absent or fails to parse — a
+/// missing/malformed marker is a cleared hand, not an error.
+pub(super) fn extract_in_call_presence_state(presence: &Presence) -> InCallPresenceState {
+    presence
+        .payloads
+        .iter()
+        .find(|elem| elem.name() == "in-call" && elem.ns() == NS_WADDLE_IN_CALL)
+        .and_then(|elem| parse_in_call_presence_state(elem).ok())
+        .unwrap_or_default()
 }
 
 fn is_muc_join_presence(presence: &Presence) -> bool {
@@ -226,6 +240,36 @@ pub(super) async fn try_handle_muc_presence_update(
         "Broadcasting MUC Muji presence update"
     );
 
+    // Apply the raised-hand presence state (#1029) carried on the same
+    // stanza. Tracked independently of muji so each stays single-purpose;
+    // the post-update per-session set decorates the reflected presences
+    // below with the room-authoritative `<in-call>` child rather than
+    // echoing the client payload (which would misattribute a sibling
+    // session's hand). The sender was already confirmed as an occupant
+    // via the muji upsert above, so a `None`/error here just means no
+    // hand state to reflect.
+    // Enforce the invariant "raised hand <-> active call participant"
+    // server-side: when this stanza is the XEP-0272 leave marker
+    // (`clears_muji_presence`), the occupant is no longer in the call, so the
+    // hand MUST be lowered regardless of any `<in-call><hand-raised/></in-call>`
+    // a buggy or hostile client left on the stanza. Only an in-call presence
+    // (muji active) may carry a raised hand.
+    let hand_raised_state = if clears_muji_presence {
+        InCallPresenceState::default()
+    } else {
+        extract_in_call_presence_state(incoming)
+    };
+    let raised_hand_sessions = match actor
+        .ask(UpsertHandRaised {
+            sender_jid: sender_jid.clone(),
+            state: hand_raised_state,
+        })
+        .await
+    {
+        Ok(Some(hand_outcome)) => hand_outcome.raised_hand_sessions,
+        Ok(None) | Err(_) => Vec::new(),
+    };
+
     let from_room_jid = room_jid
         .clone()
         .with_resource_str(&outcome.update.sender_nick)
@@ -295,6 +339,22 @@ pub(super) async fn try_handle_muc_presence_update(
                 .retain(|payload| !(payload.name() == "muji" && payload.ns() == NS_MUJI));
             if let Some(muji) = entry.muji {
                 presence.payloads.push(muji.to_element());
+            }
+
+            // Replace any client-authored `<in-call>` with the room
+            // actor's authoritative per-session raised-hand state, so a
+            // sibling resource's presence is never stamped with another
+            // session's hand (#1029). The element sits alongside `<muji>`.
+            presence.payloads.retain(|payload| {
+                !(payload.name() == "in-call" && payload.ns() == NS_WADDLE_IN_CALL)
+            });
+            if raised_hand_sessions
+                .iter()
+                .any(|jid| jid == entry.owner_jid)
+            {
+                presence.payloads.push(build_in_call_presence_state_element(
+                    &InCallPresenceState { hand_raised: true },
+                ));
             }
 
             if recipient == sender_jid {

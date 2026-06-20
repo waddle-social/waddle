@@ -45,6 +45,39 @@ describe("buildCallRoster", () => {
     ]);
   });
 
+  test("flags raised hands by identity, including self", () => {
+    const rows = buildCallRoster({
+      remoteParticipantIdentities: [
+        "alice@waddle.test/web",
+        "bob@waddle.test/desktop",
+      ],
+      remoteTracks: [],
+      localIdentity: "me@waddle.test/browser",
+      localMicEnabled: true,
+      localCameraEnabled: false,
+      activeSpeakerIdentities: new Set<string>(),
+      volumeRows: [],
+      raisedHandKeys: new Set<string>(["alice@waddle.test/web"]),
+      selfRaisedHand: true,
+    });
+
+    const byLabel = Object.fromEntries(rows.map((row) => [row.label, row.raisedHand]));
+    expect(byLabel).toEqual({ You: true, alice: true, bob: false });
+  });
+
+  test("defaults raisedHand to false when no raised-hand input is given", () => {
+    const rows = buildCallRoster({
+      remoteParticipantIdentities: ["alice@waddle.test/web"],
+      remoteTracks: [],
+      localIdentity: "me@waddle.test/browser",
+      localMicEnabled: true,
+      localCameraEnabled: false,
+      activeSpeakerIdentities: new Set<string>(),
+      volumeRows: [],
+    });
+    expect(rows.every((row) => row.raisedHand === false)).toBe(true);
+  });
+
   test("derives mic and camera state from each remote participant's tracks", () => {
     const rows = buildCallRoster({
       remoteParticipantIdentities: [

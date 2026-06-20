@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
-import { Mic, MicOff, Video, VideoOff, Volume2, VolumeX } from "lucide-vue-next";
+import { Hand, Mic, MicOff, Video, VideoOff, Volume2, VolumeX } from "lucide-vue-next";
 import {
   callVolumePercentToGain,
   type CallVolumeMixerRow,
@@ -80,6 +80,11 @@ function onResetAll(): void {
             aria-label="Speaking"
           />
           <span class="call-participants__name type-control truncate">{{ row.label }}</span>
+          <Hand
+            v-if="row.raisedHand"
+            class="call-participants__raised-hand"
+            aria-label="Hand raised"
+          />
           <span class="call-participants__media">
             <component
               :is="row.micOn ? Mic : MicOff"
@@ -188,6 +193,13 @@ function onResetAll(): void {
 .call-participants__name {
   flex: 1 1 auto;
   min-width: 0;
+}
+
+.call-participants__raised-hand {
+  flex: 0 0 auto;
+  width: 1rem;
+  height: 1rem;
+  color: oklch(0.78 0.16 85);
 }
 
 .call-participants__media {

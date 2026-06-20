@@ -11,7 +11,8 @@ import {
   removeQueuedMessage,
   type PersistedQueuedDmMessage,
 } from "../outbound-queue-store";
-import { $callState, applyCallEvent, clearCallState, tearDownActiveCall } from "@/lib/calls/call-store";
+import { $callState, applyCallEvent, clearCallState, tearDownActiveCall, type RawIqSender } from "@/lib/calls/call-store";
+import { setMucCallHandRaised } from "@/lib/calls/muc-call-actions";
 import {
   DM_CALL_ACTIVITY_ACTIVE_WINDOW_MS,
   applyDmCallEvent,
@@ -23,6 +24,10 @@ import {
   applyMucCallPresence,
   clearMucCallParticipants,
 } from "@/lib/calls/muc-call-presence";
+import {
+  applyRaisedHandPresence,
+  clearAllRaisedHands,
+} from "@/lib/calls/call-raised-hand";
 import { clearAllLiveCallParticipants } from "@/lib/calls/muc-call-live-participants";
 import { useCallEngine } from "@/lib/calls/use-call-engine";
 import type { CallWireSender } from "@/lib/calls/outbound";
@@ -1306,6 +1311,7 @@ export class BrowserXmppClient {
     clearDmCallJoinCacheForAccount(this.session.jid);
     clearDmCallActivities();
     clearMucCallParticipants();
+    clearAllRaisedHands();
     clearAllLiveCallParticipants();
     // Best-effort hangup: if we're in a call when the user logs out
     // we want the peer to see session-terminate before the stream
@@ -1879,6 +1885,18 @@ export class BrowserXmppClient {
   async sendDisplayed(spaceId: string, channelId: string, messageId: string, thread?: { id: string; parent?: string }) { const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId); await this.compatSendDisplayed(xmpp, roomJid, "groupchat", messageId, thread); }
   async sendReaction(spaceId: string, channelId: string, messageId: string, emojis: string[], thread?: { id: string; parent?: string }) { const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId); await this.compatSendReaction(xmpp, roomJid, "groupchat", messageId, emojis, thread); }
   async sendInCallReaction(spaceId: string, channelId: string, sid: string, emoji: string) { const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId); await this.compatSendInCallReaction(xmpp, roomJid, "groupchat", sid, emoji); }
+  /**
+   * #1029: raise or lower this client's hand in the active MUC call. The
+   * raised-hand state is a presence extension carried alongside `<muji/>`,
+   * so this re-emits the active call presence with the flag toggled. The
+   * call-action reads the active call's room/nick/video from `$callState`;
+   * this wrapper only supplies the raw wasm sender. Returns whether the
+   * presence was emitted (no-op outside an active MUC call).
+   */
+  async setCallHandRaised(raised: boolean): Promise<boolean> {
+    const xmpp = await this.requireConnectedXmpp();
+    return setMucCallHandRaised(xmpp as unknown as RawIqSender, raised);
+  }
   /** #414: pin a message in the room. Server gates on Owner/Admin
    * affiliation; non-admins receive a `<forbidden/>` error which
    * surfaces as a rejected Promise. */
@@ -3464,6 +3482,7 @@ export class BrowserXmppClient {
     // connected).
     clearCallState();
     clearMucCallParticipants();
+    clearAllRaisedHands();
     clearAllLiveCallParticipants();
     void useCallEngine().engine.disconnect();
     this.rejectRoomJoinWaiters(new Error("XMPP disconnected while joining a room"));
@@ -3894,6 +3913,9 @@ export class BrowserXmppClient {
       // (channel header, sidebar, list) can render "N in call"
       // without subscribing to the raw presence stream.
       applyMucCallPresence(presence);
+      // #1029: the raised-hand `<in-call>` presence state rides the same
+      // stanza; mirror it into the per-room raised-hand store.
+      applyRaisedHandPresence(presence);
     });
     xmpp.set_on_message_delivery_acked?.((id: string) => {
       if (!this.isCurrentXmpp(xmpp)) return;
@@ -3999,6 +4021,7 @@ export class BrowserXmppClient {
       if (!this.isCurrentXmpp(xmpp)) return;
       this.handlePresence(presence);
       applyMucCallPresence(presence);
+      applyRaisedHandPresence(presence);
     });
   }
 }

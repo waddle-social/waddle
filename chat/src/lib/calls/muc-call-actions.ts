@@ -1,6 +1,7 @@
 import { $callState, beginMucCall, reportCallError, type RawIqSender } from "./call-store";
 import { LIVEKIT_JOIN_EXPIRY_SKEW_MS, liveKitJoinTokenExpiresAt } from "./dm-call-activity";
-import { clearMucCallParticipant } from "./muc-call-presence";
+import { clearMucCallParticipant, normalizeMucCallRoomJid } from "./muc-call-presence";
+import { selfRaisedHandFor, setSelfRaisedHand } from "./call-raised-hand";
 import {
   forgetMucCallSession,
   markMucCallSessionTerminatePending,
@@ -112,6 +113,7 @@ export async function leaveRetainedMucCallAction({
       false,
       false,
       false,
+      false, // hand_raised
     );
     clearMucCallParticipant(roomJid, selfNick, selfFullJid, {
       includeAggregate: true,
@@ -266,6 +268,7 @@ export async function resumeMucCallActivity({
         true, // active
         false, // preparing
         media.video,
+        selfRaisedHandFor(session.roomJid), // hand_raised — preserve across resume
       );
     } catch (err) {
       reportCallError(err);
@@ -273,4 +276,53 @@ export async function resumeMucCallActivity({
   }
 
   return true;
+}
+
+/**
+ * Raise or lower this client's hand in the active MUC call (#1029).
+ *
+ * The raised-hand state is a XEP-0045 presence extension carried
+ * alongside `<muji/>`, so "setting" it means re-emitting our current
+ * active call presence with the flag toggled — the wasm FFI builds the
+ * `<in-call><hand-raised/></in-call>` child when `raised` is true and
+ * omits it (lowering for everyone) when false. We optimistically record
+ * the local intent first so the control bar flips immediately and any
+ * later media re-emit preserves the flag; a send failure reverts it.
+ *
+ * No-op (returns `false`) unless we're in an active MUC call with a
+ * known nick and a wasm client that exposes the presence FFI.
+ */
+export async function setMucCallHandRaised(
+  sender: RawIqSender,
+  raised: boolean,
+): Promise<boolean> {
+  const state = $callState.get();
+  if (state.phase !== "active" || state.kind !== "muc" || !state.selfNick) {
+    return false;
+  }
+  if (!sender.update_muji_presence) return false;
+  const roomJid = normalizeMucCallRoomJid(state.peer);
+  if (!roomJid) return false;
+
+  setSelfRaisedHand(roomJid, raised);
+  try {
+    await sender.update_muji_presence(
+      roomJid,
+      state.selfNick,
+      true, // active — still in the call
+      false, // preparing
+      state.media.video,
+      raised,
+    );
+    return true;
+  } catch (err) {
+    // Revert the optimistic flip — but only if a newer toggle hasn't
+    // already superseded it (rapid click / double tap), so we don't
+    // clobber the latest user intent with this stale request's rollback.
+    if (selfRaisedHandFor(roomJid) === raised) {
+      setSelfRaisedHand(roomJid, !raised);
+    }
+    reportCallError(err);
+    return false;
+  }
 }

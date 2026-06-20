@@ -54,7 +54,13 @@ import {
   hashInCallReactionId,
   receiveInCallReaction,
 } from "@/lib/calls/in-call-reactions";
-import { barePeerJid } from "@/lib/xmpp/jid";
+import { barePeerJid, fullJidIdentityKey } from "@/lib/xmpp/jid";
+import {
+  $mucRaisedHands,
+  $selfRaisedHand,
+  raisedHandKeysForRoom,
+  selfRaisedHandFor,
+} from "@/lib/calls/call-raised-hand";
 import { expectedRemoteIdentitiesForCallState } from "@/lib/calls/call-tiles";
 import {
   projectCallTiles,
@@ -260,6 +266,32 @@ const isMucCall = computed(
 );
 
 const localIdentity = computed(() => engine.localIdentity);
+
+// #1029: raised-hand call presence state. The store is the inbound view
+// (other occupants); self is folded in optimistically so the local tile
+// and control-bar button reflect the toggle before the server echo.
+const raisedHands = useStore($mucRaisedHands);
+const selfRaisedHandStore = useStore($selfRaisedHand);
+const selfHandRaised = computed(() =>
+  selfRaisedHandFor(normalizedRoomJid.value, selfRaisedHandStore.value),
+);
+const raisedHandIdentityKeys = computed(() => {
+  const keys = new Set(
+    raisedHandKeysForRoom(normalizedRoomJid.value, raisedHands.value),
+  );
+  const selfKey = fullJidIdentityKey(localIdentity.value);
+  if (selfHandRaised.value && selfKey) keys.add(selfKey);
+  return keys;
+});
+
+async function onToggleRaisedHand(): Promise<void> {
+  if (!props.xmppClient) return;
+  try {
+    await props.xmppClient.setCallHandRaised(!selfHandRaised.value);
+  } catch (err) {
+    reportCallError(err);
+  }
+}
 const selfSharePresentation = computed(() =>
   localScreenSharePresentation({
     screenShareEnabled: screenShareEnabled.value,
@@ -693,6 +725,7 @@ onBeforeUnmount(() => {
           :mic-enabled="micEnabled"
           :active-speaker-identities="activeSpeakerIdentities"
           :promoted-speaker-identity="promotedSpeakerIdentity"
+          :raised-hand-keys="raisedHandIdentityKeys"
           @open-participants="openCallParticipants"
         />
         <div class="call-expanded__reactions" aria-live="polite" aria-atomic="false">
@@ -757,6 +790,8 @@ onBeforeUnmount(() => {
         :self-view-hidden="selfViewHidden"
         :picture-in-picture-supported="pictureInPictureSupported"
         :picture-in-picture-active="pictureInPictureActive"
+        :raised-hand-available="isMucCall"
+        :raised-hand-active="selfHandRaised"
         @toggle-mic="toggleMic"
         @toggle-cam="toggleCam"
         @toggle-screen-share="toggleScreenShare"
@@ -769,6 +804,7 @@ onBeforeUnmount(() => {
         @set-view-mode="setCallViewMode"
         @toggle-self-view="toggleCallSelfViewHidden"
         @send-reaction="onSendInCallReaction"
+        @toggle-raised-hand="onToggleRaisedHand"
         @toggle-picture-in-picture="togglePictureInPicture"
         @hangup="onHangup"
       />

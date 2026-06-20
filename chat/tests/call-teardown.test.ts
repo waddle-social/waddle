@@ -1070,6 +1070,7 @@ describe("leaveRetainedMucCallAction", () => {
       false,
       false,
       false,
+      false,
     );
     expect($mucCallParticipants.get()).toEqual({
       "chan@muc.test": ["alice"],
@@ -1098,6 +1099,7 @@ describe("leaveRetainedMucCallAction", () => {
     expect(sender.update_muji_presence).toHaveBeenCalledWith(
       "chan@muc.test",
       "alice",
+      false,
       false,
       false,
       false,
@@ -1137,7 +1139,7 @@ describe("leaveRetainedMucCallAction", () => {
     })).resolves.toBe(true);
 
     expect(sent).toEqual([
-      ["presence", "chan@muc.test", "alice", false, false, false],
+      ["presence", "chan@muc.test", "alice", false, false, false, false],
       ["terminate", "chan@muc.test", "muc-recovered-live"],
     ]);
     expect($mucCallParticipants.get()).toEqual({});
@@ -1180,6 +1182,7 @@ describe("leaveRetainedMucCallAction", () => {
     expect(sender.update_muji_presence).toHaveBeenCalledWith(
       "chan@muc.test",
       "alice",
+      false,
       false,
       false,
       false,
@@ -1230,6 +1233,7 @@ describe("leaveRetainedMucCallAction", () => {
     expect(sender.update_muji_presence).toHaveBeenCalledWith(
       "chan@muc.test",
       "alice",
+      false,
       false,
       false,
       false,
@@ -2021,6 +2025,7 @@ describe("MUC group call", () => {
       true,
       false,
       true,
+      false,
     );
     expect(send_muji_session_initiate).toHaveBeenCalledTimes(1);
     expect($callState.get()).toMatchObject({
@@ -2200,6 +2205,7 @@ describe("MUC group call", () => {
       false,
       false,
       false,
+      false,
     );
     expect($callState.get()).toEqual({ phase: "idle" });
   });
@@ -2349,6 +2355,7 @@ describe("MUC group call", () => {
       false, // active
       true, // preparing
       false, // video — irrelevant in preparing phase
+      false, // hand_raised
     );
     expect(update_muji_presence).toHaveBeenNthCalledWith(
       2,
@@ -2357,6 +2364,7 @@ describe("MUC group call", () => {
       true, // active
       false, // preparing
       true, // video (audioVideo fixture has video=true)
+      false, // hand_raised
     );
     expect(send_muji_session_initiate).toHaveBeenCalledTimes(1);
   });
@@ -2391,6 +2399,7 @@ describe("MUC group call", () => {
       false, // active
       false, // preparing
       false, // video
+      false, // hand_raised
     );
     expect($callState.get()).toEqual({ phase: "idle" });
   });
@@ -2427,6 +2436,7 @@ describe("MUC group call", () => {
       false, // active
       false, // preparing
       false, // video
+      false, // hand_raised
     );
     expect($callState.get()).toEqual({ phase: "idle" });
   });

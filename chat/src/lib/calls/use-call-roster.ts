@@ -3,6 +3,12 @@ import { useStore } from "@nanostores/vue";
 import { $callState } from "./call-store";
 import { $callCamEnabled, $callMicEnabled } from "./call-controls";
 import { $mucCallLiveParticipants } from "./muc-call-live-participants";
+import {
+  $mucRaisedHands,
+  $selfRaisedHand,
+  raisedHandKeysForRoom,
+  selfRaisedHandFor,
+} from "./call-raised-hand";
 import { useCallEngine } from "./use-call-engine";
 import { useCallVolumeMixer } from "./use-call-volume-mixer";
 import { remoteParticipantIdentitiesForCall } from "./call-remote-identities";
@@ -32,6 +38,8 @@ export function useCallRoster(
   const camEnabled = useStore($callCamEnabled);
   const { remoteTracks, activeSpeakerIdentities } = useCallEngine();
   const volumeMixer = useCallVolumeMixer(normalizedRoomJid);
+  const raisedHands = useStore($mucRaisedHands);
+  const selfRaisedHand = useStore($selfRaisedHand);
 
   // Reactive local identity from the active call's LiveKit join, NOT the
   // engine's non-reactive `localIdentity` getter. A `computed` over the
@@ -62,6 +70,8 @@ export function useCallRoster(
       localCameraEnabled: camEnabled.value,
       activeSpeakerIdentities: activeSpeakerIdentities.value,
       volumeRows: volumeMixer.rows.value,
+      raisedHandKeys: raisedHandKeysForRoom(normalizedRoomJid.value, raisedHands.value),
+      selfRaisedHand: selfRaisedHandFor(normalizedRoomJid.value, selfRaisedHand.value),
     }),
   );
 

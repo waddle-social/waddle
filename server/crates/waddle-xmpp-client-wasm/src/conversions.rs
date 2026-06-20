@@ -768,6 +768,7 @@ pub(crate) fn presence_to_js(presence: InboundPresence) -> WaddlePresence {
             audio: m.audio,
             video: m.video,
         }),
+        hand_raised: presence.hand_raised,
     }
 }
 
@@ -1046,6 +1047,7 @@ mod inbound_to_js_tests {
             ],
             vcard_avatar: None,
             muji: None,
+            hand_raised: false,
         };
         let js = presence_to_js(presence);
         assert_eq!(js.muc_status_codes, vec![100, 110, 210]);
