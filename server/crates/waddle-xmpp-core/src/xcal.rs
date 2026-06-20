@@ -506,9 +506,11 @@ impl VEvent {
     /// upcoming-instance expansion is a separate concern from the
     /// wire shape.
     pub fn is_upcoming(&self) -> bool {
-        self.dtstart
-            .and_then(CalendarDateValue::as_datetime)
-            .is_some_and(|s| s > Utc::now())
+        match self.dtstart {
+            Some(CalendarDateValue::DateTime(dtstart)) => dtstart > Utc::now(),
+            Some(CalendarDateValue::Date(dtstart)) => dtstart >= Utc::now().date_naive(),
+            None => false,
+        }
     }
 }
 
@@ -675,7 +677,20 @@ fn xcal_calendar_date(parent: &Element, name: &str) -> Option<CalendarDateValue>
             .ok()
             .map(CalendarDateValue::DateTime);
     }
-    None
+    parse_calendar_date_text(&property.text())
+}
+
+fn parse_calendar_date_text(text: &str) -> Option<CalendarDateValue> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if let Ok(date_time) = text.parse::<DateTime<Utc>>() {
+        return Some(CalendarDateValue::DateTime(date_time));
+    }
+    NaiveDate::parse_from_str(text, "%Y-%m-%d")
+        .ok()
+        .map(CalendarDateValue::Date)
 }
 
 fn xcal_child<'a>(parent: &'a Element, name: &str) -> Option<&'a Element> {
@@ -822,6 +837,9 @@ fn parse_calendar_date_values(property: &Element) -> Vec<CalendarDateValue> {
             }
             _ => {}
         }
+    }
+    if values.is_empty() {
+        values.extend(parse_calendar_date_text(&property.text()));
     }
     values
 }
@@ -1163,6 +1181,26 @@ mod tests {
     }
 
     #[test]
+    fn parse_tolerates_legacy_flat_date_time_properties() {
+        let xml = r#"<vcalendar xmlns='urn:ietf:params:xml:ns:xcal'>
+  <version>2.0</version>
+  <vevent>
+    <uid>legacy-flat</uid>
+    <dtstart>2026-06-05T19:00:00Z</dtstart>
+    <dtend>2026-06-05T22:00:00Z</dtend>
+    <exdate>2026-06-12T19:00:00Z</exdate>
+    <summary>Legacy flat event</summary>
+  </vevent>
+</vcalendar>"#;
+        let elem: Element = xml.parse().expect("valid xml");
+        let event = parse_vcalendar_event("legacy-flat", &elem).expect("parseable");
+
+        assert_eq!(event.dtstart, Some(ts(2026, 6, 5, 19, 0).into()));
+        assert_eq!(event.dtend, Some(ts(2026, 6, 5, 22, 0).into()));
+        assert_eq!(event.exdates, vec![ts(2026, 6, 12, 19, 0).into()]);
+    }
+
+    #[test]
     fn parse_tolerates_missing_summary_for_overrides() {
         // RFC 5545 makes SUMMARY optional. Overrides that only patch
         // a different field (DTSTART, LOCATION, …) ship without one,
@@ -1191,8 +1229,14 @@ mod tests {
         let future = VEvent::new("e", "Future").with_dtstart(ts(2050, 1, 1, 0, 0));
         assert!(future.is_upcoming());
 
+        let future_all_day = VEvent::new("e", "Future all-day").with_dtstart_date(day(2050, 1, 1));
+        assert!(future_all_day.is_upcoming());
+
         let past = VEvent::new("e", "Past").with_dtstart(ts(2020, 1, 1, 0, 0));
         assert!(!past.is_upcoming());
+
+        let past_all_day = VEvent::new("e", "Past all-day").with_dtstart_date(day(2020, 1, 1));
+        assert!(!past_all_day.is_upcoming());
     }
 
     #[test]

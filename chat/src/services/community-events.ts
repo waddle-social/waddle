@@ -11,6 +11,7 @@
 import { computed, ref, type Ref } from "vue";
 import {
   groupEventsWithRsvps,
+  calendarDateKey,
   compareCalendarDateValues,
   sortEventsUpcomingFirst,
   type BrowserXmppClient,
@@ -182,8 +183,8 @@ export function useCommunityEvents(
     const client = xmppClient.value;
     const jid = options.communityJid.value;
     if (!client || !jid) return false;
-    const existing = new Map((master.exdates ?? []).map((value) => [JSON.stringify(value), value]));
-    existing.set(JSON.stringify(instanceDtstart), instanceDtstart);
+    const existing = new Map((master.exdates ?? []).map((value) => [calendarDateKey(value), value]));
+    existing.set(calendarDateKey(instanceDtstart), instanceDtstart);
     const nextExdates = [...existing.values()].sort(compareCalendarDateValues);
     isPosting.value = true;
     error.value = null;

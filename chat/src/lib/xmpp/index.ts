@@ -63,6 +63,7 @@ export type {
 export { groupEventsWithRsvps } from "./event-types";
 export {
   addDaysToDateString,
+  calendarDateKey,
   calendarDateStartMs,
   compareCalendarDateValues,
   dateTimeValue,
