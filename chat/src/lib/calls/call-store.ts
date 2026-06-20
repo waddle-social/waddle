@@ -695,12 +695,13 @@ export async function tearDownActiveCall(
                   false, // active
                   false, // preparing
                   false, // video
-                    false, // hand_raised
+                  false, // hand_raised
                 );
               } catch (err) {
                 reportCallError(err);
               } finally {
                 clearMucCallParticipant(s.peer, s.selfNick, s.selfFullJid);
+                setSelfRaisedHand(s.peer, false);
               }
             }
             clearLiveCallParticipants(s.peer);
@@ -759,6 +760,7 @@ export async function tearDownActiveCall(
                 reportCallError(err);
               } finally {
                 clearMucCallParticipant(s.peer, s.selfNick, s.selfFullJid);
+                setSelfRaisedHand(s.peer, false);
               }
             }
             if (s.activePresencePublished) {
