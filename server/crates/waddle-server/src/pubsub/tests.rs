@@ -18,6 +18,12 @@ fn dnd_payload() -> minidom::Element {
         .expect("valid dnd payload")
 }
 
+fn story_payload(body: &str) -> minidom::Element {
+    format!("<story xmlns='urn:xmpp:stories:0'><body>{body}</body></story>")
+        .parse()
+        .expect("valid story payload")
+}
+
 #[tokio::test]
 async fn database_pubsub_storage_persists_file_backing() {
     let artifacts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-artifacts");
@@ -98,6 +104,74 @@ async fn spaces_config_keeps_multiple_items() {
         .await
         .expect("items");
     assert_eq!(items.len(), 2);
+}
+
+#[tokio::test]
+async fn publish_item_if_missing_or_publisher_rejects_different_publisher() {
+    let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("storage");
+    let owner = jid("community.example.com");
+    let alice = jid("alice@example.com");
+    let bob = jid("bob@example.com");
+    storage
+        .get_or_create_node(&owner, "stories")
+        .await
+        .expect("node");
+
+    let alice_item = PubSubItem {
+        id: Some("story-1".to_string()),
+        publisher: None,
+        payload: Some(story_payload("first")),
+    };
+    storage
+        .publish_item_if_missing_or_publisher(&owner, "stories", &alice_item, &alice, false)
+        .await
+        .expect("alice publish");
+
+    let alice_update = PubSubItem {
+        id: Some("story-1".to_string()),
+        publisher: None,
+        payload: Some(story_payload("updated")),
+    };
+    storage
+        .publish_item_if_missing_or_publisher(&owner, "stories", &alice_update, &alice, false)
+        .await
+        .expect("same publisher update");
+
+    let bob_update = PubSubItem {
+        id: Some("story-1".to_string()),
+        publisher: None,
+        payload: Some(story_payload("clobber")),
+    };
+    let error = storage
+        .publish_item_if_missing_or_publisher(&owner, "stories", &bob_update, &bob, false)
+        .await
+        .expect_err("different publisher must be rejected");
+    assert!(
+        matches!(
+            error,
+            waddle_xmpp::XmppError::Stanza {
+                condition: waddle_xmpp::StanzaErrorCondition::Forbidden,
+                ..
+            }
+        ),
+        "unexpected error for cross-publisher clobber: {error:?}"
+    );
+
+    let items = storage
+        .get_items(&owner, "stories", None, &["story-1".to_string()])
+        .await
+        .expect("items");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].publisher.as_ref(), Some(&alice));
+    assert!(
+        items[0]
+            .payload_xml
+            .as_deref()
+            .is_some_and(|payload| payload.contains("updated")),
+        "cross-publisher publish must not replace existing payload: {items:?}"
+    );
 }
 
 #[tokio::test]

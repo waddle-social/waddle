@@ -55,6 +55,22 @@ pub trait PubSubStorage: Send + Sync + 'static {
         auto_create: bool,
     ) -> Result<PublishResult, XmppError>;
 
+    /// Publish an item only when the item id is unused or the existing
+    /// stored item was published by the same bare JID.
+    ///
+    /// Open community nodes use this to prevent two members from clobbering
+    /// each other's client-chosen item ids while still allowing a publisher
+    /// to update their own item. Implementations must enforce this in the
+    /// same critical section or transaction as the write.
+    async fn publish_item_if_missing_or_publisher(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+        item: &PubSubItem,
+        publisher: &BareJid,
+        auto_create: bool,
+    ) -> Result<PublishResult, XmppError>;
+
     /// Get items from a node.
     ///
     /// If item_ids is empty, returns all items (up to max_items if specified).

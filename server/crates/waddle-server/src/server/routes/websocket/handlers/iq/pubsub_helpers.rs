@@ -932,8 +932,8 @@ pub(super) async fn handle_spaces_publish(
 /// `urn:xmpp:pubsub-social-feed:0` or XEP-0501 stories at
 /// `urn:xmpp:stories:0`. Both live on `community.<domain>` (distinct
 /// from the spaces service so the spaces enumeration only returns
-/// real spaces). The social feed is member-postable (gated by its
-/// pubsub publish-model); stories and calendar events keep the
+/// real spaces). Feed and stories are member-postable (gated by each
+/// node's pubsub publish-model); calendar event creation keeps the
 /// owner-only spaces gate. The standard pubsub fan-out runs either
 /// way so subscribers see new posts in real time.
 pub(super) async fn handle_community_publish(
@@ -1587,17 +1587,57 @@ pub(super) async fn handle_community_retract(
     {
         return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))];
     }
-    match spaces_node_mutation_allowed(state, session, node).await {
-        Ok(true) => {}
-        Ok(false) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))],
-        Err(error) => {
-            warn!(node, error = %error, "Failed to authorize community retract");
-            return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
-        }
-    }
     let Ok(community_jid) = community_domain.parse::<BareJid>() else {
         return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
     };
+    if node == waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED
+        || node == waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES
+    {
+        match spaces_node_mutation_allowed(state, session, node).await {
+            Ok(true) => {}
+            Ok(false) => match community_member_publisher(state, session, &community_jid, node)
+                .await
+            {
+                Ok(Some(entity)) => {
+                    if let Some(error) =
+                        community_item_retract_error(state, &community_jid, node, item_id, &entity)
+                            .await
+                    {
+                        return vec![iq_to_xml(build_pubsub_error(iq, error))];
+                    }
+                }
+                Ok(None) => {
+                    return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
+                }
+                Err(error) => {
+                    warn!(node, error = %error, "Failed to authorize community member retract");
+                    return vec![iq_to_xml(build_pubsub_error(
+                        iq,
+                        PubSubError::InternalServerError,
+                    ))];
+                }
+            },
+            Err(error) => {
+                warn!(node, error = %error, "Failed to authorize community owner retract");
+                return vec![iq_to_xml(build_pubsub_error(
+                    iq,
+                    PubSubError::InternalServerError,
+                ))];
+            }
+        }
+    } else {
+        match spaces_node_mutation_allowed(state, session, node).await {
+            Ok(true) => {}
+            Ok(false) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))],
+            Err(error) => {
+                warn!(node, error = %error, "Failed to authorize community retract");
+                return vec![iq_to_xml(build_pubsub_error(
+                    iq,
+                    PubSubError::InternalServerError,
+                ))];
+            }
+        }
+    }
     match state
         .deps
         .protocol
@@ -1729,20 +1769,17 @@ async fn handle_story_attachment_retract(
     }
 }
 
-/// The authenticated publisher permitted to post to the XEP-0472
-/// social feed node, or `None` if the request is not authorized.
+/// The authenticated publisher permitted to post to an open community
+/// node, or `None` if the request is not authorized.
 ///
-/// The feed is member-postable: any authenticated member may post
-/// (the node's `publish_model` is Open). This honors the node's
+/// Feed and stories are member-postable: any authenticated member may
+/// post when the node's `publish_model` is Open. This honors the node's
 /// configured pubsub publish-model via `can_publish` rather than the
 /// owner-only Spaces structural gate, while still requiring an
-/// authenticated session and rejecting outcasts (XEP-0472
-/// §"Replying to a Post"; XEP-0060 §7.1.3). The returned JID is the
-/// server-side session principal — the value the service stamps as the
-/// item publisher (XEP-0060 §7.1.2.1: the publisher MUST be generated
-/// by the service, never taken from the client's item, to prevent
-/// spoofing).
-async fn community_feed_publisher(
+/// authenticated session and rejecting outcasts. The returned JID is
+/// the server-side session principal — the value the service stamps as
+/// the item publisher (XEP-0060 §7.1.2.1).
+async fn community_member_publisher(
     state: &WebSocketState,
     session: Option<&Session>,
     community_jid: &BareJid,
@@ -1751,10 +1788,9 @@ async fn community_feed_publisher(
     let Some(session) = session else {
         return Ok(None);
     };
-    let entity = session
-        .user_jid
-        .parse::<BareJid>()
-        .map_err(|error| format!("invalid session JID for feed publish: {error}"))?;
+    let user_domain = state.deps.auth_state.xmpp_domain.as_str();
+    let entity = session_bare_jid(session, user_domain)
+        .map_err(|_| "invalid session JID for community publish".to_string())?;
     let allowed = crate::pubsub_authz::can_publish(
         &state.deps.protocol.pubsub_storage,
         community_jid,
@@ -1763,24 +1799,20 @@ async fn community_feed_publisher(
         false,
     )
     .await
-    .map_err(|error| format!("can_publish failed for feed node: {error}"))?;
+    .map_err(|error| format!("can_publish failed for community node: {error}"))?;
     Ok(allowed.then_some(entity))
 }
 
-/// Refuse to let `entity` overwrite a social-feed item already published
-/// by a different member. The feed is one shared, open-publish node with
-/// client-chosen item ids, so without this a member could reuse another
-/// member's item id and clobber their post. Returns the stanza error to
-/// send, or `None` when the publish may proceed (a new id, or the
-/// existing item belongs to `entity`).
-async fn feed_item_ownership_error(
+/// Refuse to let `entity` retract an open community item published by a
+/// different member. Feed and story nodes are member-postable, but item
+/// deletion remains owner-admin or original-publisher only.
+async fn community_item_retract_error(
     state: &WebSocketState,
     community_jid: &BareJid,
     node: &str,
-    item: &PubSubItem,
+    item_id: &str,
     entity: &BareJid,
 ) -> Option<PubSubError> {
-    let item_id = item.id.as_deref()?;
     match state
         .deps
         .protocol
@@ -1792,10 +1824,11 @@ async fn feed_item_ownership_error(
             Some(existing_item) if existing_item.publisher.as_ref() != Some(entity) => {
                 Some(PubSubError::Forbidden)
             }
+            None => Some(PubSubError::ItemNotFound),
             _ => None,
         },
         Err(error) => {
-            warn!(node, item_id, error = %error, "Failed to check feed item ownership");
+            warn!(node, item_id, error = %error, "Failed to check community item retract ownership");
             Some(PubSubError::InternalServerError)
         }
     }
@@ -1803,11 +1836,11 @@ async fn feed_item_ownership_error(
 
 /// Publish a non-bookmark item to a community pubsub node. Used by
 /// `handle_community_publish` (feed + stories + calendar events on
-/// `community.<domain>`). The XEP-0472 social feed is member-postable
-/// (gated by the node's pubsub publish-model via
-/// `community_feed_publisher`) and the item is stamped with the
-/// server-derived publisher; stories and calendar events keep the
-/// owner-only Spaces gate. Either way the standard pubsub fan-out runs
+/// `community.<domain>`). Feed and stories are member-postable (gated
+/// by the node's pubsub publish-model via `community_member_publisher`)
+/// and the item is stamped with the server-derived publisher; calendar
+/// events keep the owner-only Spaces gate except for validated RSVP
+/// items handled earlier. Either way the standard pubsub fan-out runs
 /// so subscribers see new posts in real time.
 async fn handle_community_non_bookmark_publish(
     iq: &xmpp_parsers::iq::Iq,
@@ -1838,16 +1871,18 @@ async fn handle_community_non_bookmark_publish(
             return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))];
         }
     }
-    // The feed is member-postable and the service stamps the authenticated
-    // publisher on each item; stories/events stay owner-only and carry no
-    // publisher attribution (publisher == node owner). A storage/permission
-    // backend failure is an internal error, not an authorization denial.
-    let publisher = if node == waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED {
-        match community_feed_publisher(state, session, &community_jid, node).await {
+    // Feed and stories are member-postable and the service stamps the
+    // authenticated publisher on each item. Calendar events stay owner-only
+    // and carry no publisher attribution here. A storage/permission backend
+    // failure is an internal error, not an authorization denial.
+    let publisher = if node == waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED
+        || node == waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES
+    {
+        match community_member_publisher(state, session, &community_jid, node).await {
             Ok(Some(entity)) => Some(entity),
             Ok(None) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))],
             Err(error) => {
-                warn!(node, error = %error, "Failed to authorize community feed publish");
+                warn!(node, error = %error, "Failed to authorize community member publish");
                 return vec![iq_to_xml(build_pubsub_error(
                     iq,
                     PubSubError::InternalServerError,
@@ -1868,17 +1903,32 @@ async fn handle_community_non_bookmark_publish(
         }
     };
 
-    // The social feed is a single shared, open-publish node, so the
-    // service binds each item to its author: refuse to overwrite an item
-    // published by a different member (no clobbering posts via id reuse)
-    // and stamp the authenticated JID into the payload `<author>` so a
-    // member cannot impersonate another through the displayed author.
-    // `publisher` is `Some` only for the feed; stories/events skip this.
+    // Feed and stories are shared, open-publish nodes, so the service binds
+    // each item to its author: stamp the authenticated JID into payload
+    // `<author>` fields so a member cannot impersonate another. The storage
+    // write below atomically refuses cross-publisher item-id clobbering.
+    // `publisher` is `Some` only for open member-postable community nodes.
     if let Some(entity) = publisher.as_ref() {
-        if let Some(error) =
-            feed_item_ownership_error(state, &community_jid, node, &item, entity).await
-        {
-            return vec![iq_to_xml(build_pubsub_error(iq, error))];
+        if node == waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES {
+            let Some(payload) = item.payload.as_ref() else {
+                return vec![iq_to_xml(build_pubsub_error(
+                    iq,
+                    PubSubError::PayloadRequired,
+                ))];
+            };
+            let item_id = item.id.as_deref().unwrap_or_default();
+            let Some(story) = waddle_xmpp_core::xep0501::parse_story(item_id, payload) else {
+                return vec![iq_to_xml(build_pubsub_error(
+                    iq,
+                    PubSubError::InvalidPayload,
+                ))];
+            };
+            if story.body.is_none() && story.media_url.is_none() {
+                return vec![iq_to_xml(build_pubsub_error(
+                    iq,
+                    PubSubError::InvalidPayload,
+                ))];
+            }
         }
         if let Some(payload) = item.payload.as_ref() {
             if waddle_xmpp_core::xep0472::is_feed_entry(payload) {
@@ -1886,17 +1936,33 @@ async fn handle_community_non_bookmark_publish(
                     payload,
                     &entity.to_string(),
                 ));
+            } else if waddle_xmpp_core::xep0501::is_story_element(payload) {
+                let item_id = item.id.as_deref().unwrap_or_default();
+                item.payload = waddle_xmpp_core::xep0501::stamp_story_author(
+                    item_id,
+                    payload,
+                    &entity.to_string(),
+                );
             }
         }
     }
 
-    match state
-        .deps
-        .protocol
-        .pubsub_storage
-        .publish_item(&community_jid, node, &item, publisher.as_ref(), false)
-        .await
-    {
+    let publish_result = if let Some(entity) = publisher.as_ref() {
+        state
+            .deps
+            .protocol
+            .pubsub_storage
+            .publish_item_if_missing_or_publisher(&community_jid, node, &item, entity, false)
+            .await
+    } else {
+        state
+            .deps
+            .protocol
+            .pubsub_storage
+            .publish_item(&community_jid, node, &item, None, false)
+            .await
+    };
+    match publish_result {
         Ok(result) => {
             if node == waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES {
                 if let Err(error) =
@@ -1932,9 +1998,30 @@ async fn handle_community_non_bookmark_publish(
             warn!(node, error = %error, "Failed to publish community item");
             vec![iq_to_xml(build_pubsub_error(
                 iq,
-                PubSubError::InternalServerError,
+                community_publish_error_from_xmpp(&error),
             ))]
         }
+    }
+}
+
+fn community_publish_error_from_xmpp(error: &waddle_xmpp::XmppError) -> PubSubError {
+    match error {
+        waddle_xmpp::XmppError::PubSubPayloadRequired(_) => PubSubError::PayloadRequired,
+        waddle_xmpp::XmppError::PubSubInvalidPayload(_) => PubSubError::InvalidPayload,
+        waddle_xmpp::XmppError::Stanza {
+            condition: waddle_xmpp::StanzaErrorCondition::Forbidden,
+            ..
+        }
+        | waddle_xmpp::XmppError::PermissionDenied(_) => PubSubError::Forbidden,
+        waddle_xmpp::XmppError::Stanza {
+            condition: waddle_xmpp::StanzaErrorCondition::ItemNotFound,
+            ..
+        } => PubSubError::NodeNotFound,
+        waddle_xmpp::XmppError::Stanza {
+            condition: waddle_xmpp::StanzaErrorCondition::BadRequest,
+            ..
+        } => PubSubError::BadRequest,
+        _ => PubSubError::InternalServerError,
     }
 }
 

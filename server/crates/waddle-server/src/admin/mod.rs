@@ -323,6 +323,16 @@ mod tests {
             ) -> Result<PublishResult, XmppError> {
                 boom("publish_item")
             }
+            async fn publish_item_if_missing_or_publisher(
+                &self,
+                _owner: &BareJid,
+                _node_name: &str,
+                _item: &PubSubItem,
+                _publisher: &BareJid,
+                _auto_create: bool,
+            ) -> Result<PublishResult, XmppError> {
+                boom("publish_item_if_missing_or_publisher")
+            }
             async fn get_items(
                 &self,
                 _owner: &BareJid,

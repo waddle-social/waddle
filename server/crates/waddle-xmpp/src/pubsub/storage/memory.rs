@@ -142,6 +142,64 @@ impl PubSubStorage for InMemoryPubSubStorage {
         })
     }
 
+    async fn publish_item_if_missing_or_publisher(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+        item: &PubSubItem,
+        publisher: &BareJid,
+        auto_create: bool,
+    ) -> Result<PublishResult, XmppError> {
+        let key = Self::key(owner, node_name);
+
+        let (node, node_created) = if let Some(node) = self.nodes.get(&key) {
+            (node.clone(), false)
+        } else if auto_create {
+            let node = PubSubNode::new_pep(owner.clone(), node_name.to_string());
+            self.nodes.insert(key.clone(), node.clone());
+            self.items.insert(key.clone(), Vec::new());
+            (node, true)
+        } else {
+            return Err(XmppError::item_not_found(Some(format!(
+                "Node '{}' does not exist",
+                node_name
+            ))));
+        };
+
+        let item_id = item.id.clone().unwrap_or_else(Self::generate_item_id);
+        let stored_item = StoredItem {
+            id: item_id.clone(),
+            payload_xml: item.payload.as_ref().map(String::from),
+            publisher: Some(publisher.clone()),
+            published_at: chrono::Utc::now(),
+        };
+
+        let mut items = self.items.entry(key).or_default();
+        if let Some(pos) = items.iter().position(|i| i.id == item_id) {
+            if items[pos].publisher.as_ref() != Some(publisher) {
+                return Err(XmppError::forbidden(Some(
+                    "PubSub item belongs to a different publisher".to_string(),
+                )));
+            }
+            items[pos] = stored_item;
+        } else {
+            items.push(stored_item);
+        }
+
+        let max_items = node.config.max_items as usize;
+        let mut evicted_item_ids = Vec::new();
+        if max_items > 0 && items.len() > max_items {
+            let excess = items.len() - max_items;
+            evicted_item_ids.extend(items.drain(0..excess).map(|item| item.id));
+        }
+
+        Ok(PublishResult {
+            item_id,
+            node_created,
+            evicted_item_ids,
+        })
+    }
+
     async fn get_items(
         &self,
         owner: &BareJid,
