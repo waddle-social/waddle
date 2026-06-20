@@ -1,4 +1,5 @@
 use super::*;
+use crate::permissions::CheckPermission;
 
 #[tokio::test]
 async fn muc_stale_leave_does_not_remove_current_resource() {
@@ -2041,6 +2042,281 @@ async fn active_room_disco_preserves_managed_announcement_channel_type() {
     assert!(
         !response.contains("<value>text</value>"),
         "announcement room must not be reported as text: {response}"
+    );
+}
+
+#[tokio::test]
+async fn managed_space_bookmark_join_repairs_missing_parent_tuple() {
+    let state = create_test_websocket_state().await;
+    let conn = state
+        .deps
+        .app_state
+        .db_pool
+        .global()
+        .guard()
+        .await
+        .expect("db connection");
+    conn.execute(
+        "INSERT INTO channels (id, name, description, channel_type, position, is_default, members_only, public_room) VALUES (?, ?, ?, 'text', 0, 0, 0, 1)",
+        crate::db_params!["legacy", "Legacy", "Legacy channel description"],
+    )
+    .await
+    .expect("insert channel");
+    drop(conn);
+
+    let spaces_jid = state.deps.app_state.spaces_jid.clone();
+    state
+        .deps
+        .protocol
+        .pubsub_storage
+        .get_or_create_node(&spaces_jid, "alpha")
+        .await
+        .expect("space node");
+    let channel = waddle_xmpp::ChannelInfo {
+        id: "legacy".to_string(),
+        name: "Legacy".to_string(),
+        channel_type: "text".to_string(),
+    };
+    let item =
+        waddle_xmpp::xep::build_channel_item(&channel, "muc.example.com").expect("bookmark item");
+    state
+        .deps
+        .protocol
+        .pubsub_storage
+        .publish_item(&spaces_jid, "alpha", &item, None, false)
+        .await
+        .expect("publish bookmark");
+
+    let viewer = create_test_session(state.as_ref(), "viewer").await;
+    state
+        .deps
+        .app_state
+        .permission_actor
+        .ask(WriteTuple {
+            tuple: Tuple::new(
+                Object::new(ObjectType::Space, "alpha"),
+                Relation::new("member"),
+                Subject::user(&viewer.user_jid),
+            ),
+        })
+        .await
+        .expect("space member tuple");
+    let allowed_before = state
+        .deps
+        .app_state
+        .permission_actor
+        .ask(CheckPermission {
+            subject: Subject::user(&viewer.user_jid),
+            permission: Permission::Read,
+            object: Object::new(ObjectType::Channel, "legacy"),
+        })
+        .await
+        .expect("permission actor")
+        .allowed;
+    assert!(
+        !allowed_before,
+        "test setup should start without the channel parent tuple"
+    );
+
+    let room_jid: BareJid = "legacy@muc.example.com".parse().expect("room jid");
+    let viewer_jid: FullJid = format!("{}@example.com/web", viewer.xmpp_localpart)
+        .parse()
+        .expect("viewer jid");
+    let responses = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &viewer_jid,
+        "viewer",
+        None,
+        &Some(viewer.clone()),
+    )
+    .await;
+
+    let presence = Element::from_str(responses.first().expect("self-presence response"))
+        .expect("presence XML");
+    assert_eq!(presence.name(), "presence");
+    assert_ne!(
+        presence.attr("type"),
+        Some("error"),
+        "managed Space bookmark join should not be rejected: {responses:?}"
+    );
+    let user_x = presence
+        .get_child("x", "http://jabber.org/protocol/muc#user")
+        .expect("muc user payload");
+    let item = user_x
+        .get_child("item", "http://jabber.org/protocol/muc#user")
+        .expect("muc user item");
+    assert_eq!(
+        item.attr("affiliation"),
+        Some("none"),
+        "repaired Space read access must not become persistent MUC membership: {responses:?}"
+    );
+    assert!(
+        user_x
+            .children()
+            .any(|child| child.name() == "status" && child.attr("code") == Some("110")),
+        "successful join must complete with XEP-0045 self-presence 110: {responses:?}"
+    );
+
+    let allowed_after = state
+        .deps
+        .app_state
+        .permission_actor
+        .ask(CheckPermission {
+            subject: Subject::user(&viewer.user_jid),
+            permission: Permission::Read,
+            object: Object::new(ObjectType::Channel, "legacy"),
+        })
+        .await
+        .expect("permission actor")
+        .allowed;
+    assert!(
+        allowed_after,
+        "join should repair the missing channel parent tuple"
+    );
+}
+
+#[tokio::test]
+async fn managed_space_bookmark_join_repairs_only_projected_parent_tuple() {
+    let state = create_test_websocket_state().await;
+    let conn = state
+        .deps
+        .app_state
+        .db_pool
+        .global()
+        .guard()
+        .await
+        .expect("db connection");
+    conn.execute(
+        "INSERT INTO channels (id, name, description, channel_type, position, is_default, members_only, public_room) VALUES (?, ?, ?, 'text', 0, 0, 1, 0)",
+        crate::db_params!["projected", "Projected", "Projected channel description"],
+    )
+    .await
+    .expect("insert channel");
+    drop(conn);
+
+    let spaces_jid = state.deps.app_state.spaces_jid.clone();
+    for node in ["alpha", "beta"] {
+        state
+            .deps
+            .protocol
+            .pubsub_storage
+            .get_or_create_node(&spaces_jid, node)
+            .await
+            .expect("space node");
+    }
+    let channel = waddle_xmpp::ChannelInfo {
+        id: "projected".to_string(),
+        name: "Projected".to_string(),
+        channel_type: "text".to_string(),
+    };
+    let item =
+        waddle_xmpp::xep::build_channel_item(&channel, "muc.example.com").expect("bookmark item");
+    for node in ["alpha", "beta"] {
+        state
+            .deps
+            .protocol
+            .pubsub_storage
+            .publish_item(&spaces_jid, node, &item, None, false)
+            .await
+            .expect("publish bookmark");
+    }
+
+    let room_jid: BareJid = "projected@muc.example.com".parse().expect("room jid");
+    state
+        .deps
+        .app_state
+        .channel_space_link_store
+        .set(&crate::channel_space_links::ChannelSpaceLink {
+            channel_jid: room_jid.clone(),
+            space_jid: format!("beta@{}", spaces_jid.domain())
+                .parse()
+                .expect("space jid"),
+            space_node: crate::space_identity::SpaceNode::from("beta"),
+            created_at: 0,
+        })
+        .await
+        .expect("channel-space link");
+
+    let stale_viewer = create_test_session(state.as_ref(), "stale-viewer").await;
+    state
+        .deps
+        .app_state
+        .permission_actor
+        .ask(WriteTuple {
+            tuple: Tuple::new(
+                Object::new(ObjectType::Space, "alpha"),
+                Relation::new("member"),
+                Subject::user(&stale_viewer.user_jid),
+            ),
+        })
+        .await
+        .expect("stale space member tuple");
+    let current_viewer = create_test_session(state.as_ref(), "current-viewer").await;
+    state
+        .deps
+        .app_state
+        .permission_actor
+        .ask(WriteTuple {
+            tuple: Tuple::new(
+                Object::new(ObjectType::Space, "beta"),
+                Relation::new("member"),
+                Subject::user(&current_viewer.user_jid),
+            ),
+        })
+        .await
+        .expect("current space member tuple");
+
+    let stale_jid: FullJid = format!("{}@example.com/web", stale_viewer.xmpp_localpart)
+        .parse()
+        .expect("stale viewer jid");
+    let stale_responses = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &stale_jid,
+        "stale-viewer",
+        None,
+        &Some(stale_viewer.clone()),
+    )
+    .await;
+    let stale_presence = Element::from_str(stale_responses.first().expect("stale join response"))
+        .expect("presence XML");
+    assert_eq!(
+        stale_presence.attr("type"),
+        Some("error"),
+        "stale Space member must remain denied: {stale_responses:?}"
+    );
+    assert!(
+        !state
+            .deps
+            .app_state
+            .permission_actor
+            .ask(CheckPermission {
+                subject: Subject::user(&stale_viewer.user_jid),
+                permission: Permission::Read,
+                object: Object::new(ObjectType::Channel, "projected"),
+            })
+            .await
+            .expect("permission actor")
+            .allowed,
+        "join must not restore the stale alpha parent tuple"
+    );
+    assert!(
+        state
+            .deps
+            .app_state
+            .permission_actor
+            .ask(CheckPermission {
+                subject: Subject::user(&current_viewer.user_jid),
+                permission: Permission::Read,
+                object: Object::new(ObjectType::Channel, "projected"),
+            })
+            .await
+            .expect("permission actor")
+            .allowed,
+        "join should repair only the projected beta parent tuple"
     );
 }
 

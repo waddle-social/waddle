@@ -869,7 +869,7 @@ export class BrowserXmppClient {
   private readonly resumeDrainHooks: Array<(info: { buffered: number; durationMs: number }) => void> = [];
   private readonly roomJoinWaiters = new Map<
     string,
-    { promise: Promise<void>; resolve: () => void; reject: (error: Error) => void }
+    { promise: Promise<void>; requestedNick: string; resolve: () => void; reject: (error: Error) => void }
   >();
   private readonly carbonDedupIds = new Set<string>();
   readonly catchup: ReconnectCatchup;
@@ -1015,12 +1015,14 @@ export class BrowserXmppClient {
 
   private handleMucPresenceError(presence: WasmPresence): boolean {
     if (presence.presence_type !== "error") return false;
-    const room = presence.from?.split("/")[0]?.trim() ?? "";
+    const [rawRoom = "", errorNick = ""] = presence.from?.split("/") ?? [];
+    const room = rawRoom.trim();
     const key = this.roomJoinKey(room);
     if (!room || !key) return false;
 
     const waiter = this.roomJoinWaiters.get(key);
     if (!waiter) return false;
+    if (errorNick !== waiter.requestedNick) return false;
 
     waiter?.reject(new Error("Channel presence was rejected. Try again in a moment."));
     this.revokeMucReadiness(this.canonicalJoinedRoomJid(room), { keepPendingJoin: true });
@@ -1340,7 +1342,7 @@ export class BrowserXmppClient {
     this.discoveredRoomJids.set(channelId, normalizedRoomJid);
   }
 
-  private waitForRoomSelfPresence(roomJid: string): Promise<void> {
+  private waitForRoomSelfPresence(roomJid: string, requestedNick: string): Promise<void> {
     const key = this.roomJoinKey(roomJid);
     // Concurrent joins for JIDs that normalize to the same room key
     // (e.g. case variants from topology vs. retained-room replay) must
@@ -1362,6 +1364,7 @@ export class BrowserXmppClient {
     }, ROOM_SELF_PRESENCE_TIMEOUT_MS);
     this.roomJoinWaiters.set(key, {
       promise,
+      requestedNick,
       resolve: () => {
         clearTimeout(timeout);
         this.roomJoinWaiters.delete(key);
@@ -1488,7 +1491,7 @@ export class BrowserXmppClient {
     if (!xmpp.join_room && !xmpp.joinRoom) {
       throw new Error("XMPP client missing join_room binding");
     }
-    const ready = this.waitForRoomSelfPresence(roomJid);
+    const ready = this.waitForRoomSelfPresence(roomJid, this.session.username);
     const joinKey = this.roomJoinKey(roomJid);
     const joinWaiter = this.roomJoinWaiters.get(joinKey);
     try {
