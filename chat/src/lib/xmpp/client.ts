@@ -28,6 +28,7 @@ import {
   applyRaisedHandPresence,
   clearAllRaisedHands,
 } from "@/lib/calls/call-raised-hand";
+import { applyMutePresence, clearAllMuted } from "@/lib/calls/call-mute";
 import { clearAllLiveCallParticipants } from "@/lib/calls/muc-call-live-participants";
 import { useCallEngine } from "@/lib/calls/use-call-engine";
 import type { CallWireSender } from "@/lib/calls/outbound";
@@ -1315,6 +1316,7 @@ export class BrowserXmppClient {
     clearDmCallActivities();
     clearMucCallParticipants();
     clearAllRaisedHands();
+    clearAllMuted();
     clearAllLiveCallParticipants();
     // Best-effort hangup: if we're in a call when the user logs out
     // we want the peer to see session-terminate before the stream
@@ -3496,6 +3498,7 @@ export class BrowserXmppClient {
     clearCallState();
     clearMucCallParticipants();
     clearAllRaisedHands();
+    clearAllMuted();
     clearAllLiveCallParticipants();
     void useCallEngine().engine.disconnect();
     this.rejectRoomJoinWaiters(new Error("XMPP disconnected while joining a room"));
@@ -3926,9 +3929,11 @@ export class BrowserXmppClient {
       // (channel header, sidebar, list) can render "N in call"
       // without subscribing to the raw presence stream.
       applyMucCallPresence(presence);
-      // #1029: the raised-hand `<in-call>` presence state rides the same
-      // stanza; mirror it into the per-room raised-hand store.
+      // #1029/#1030: the raised-hand and mute `<in-call>` presence states
+      // ride the same stanza; mirror each into its per-room store. Mute is
+      // the authoritative remote-mute source (replaces LiveKit signalling).
       applyRaisedHandPresence(presence);
+      applyMutePresence(presence);
     });
     xmpp.set_on_message_delivery_acked?.((id: string) => {
       if (!this.isCurrentXmpp(xmpp)) return;
@@ -4035,6 +4040,7 @@ export class BrowserXmppClient {
       this.handlePresence(presence);
       applyMucCallPresence(presence);
       applyRaisedHandPresence(presence);
+      applyMutePresence(presence);
     });
   }
 }

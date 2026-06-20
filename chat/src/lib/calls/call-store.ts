@@ -696,6 +696,7 @@ export async function tearDownActiveCall(
                   false, // preparing
                   false, // video
                   false, // hand_raised
+                  false, // muted — leaving clears all in-call state
                 );
               } catch (err) {
                 reportCallError(err);
@@ -755,6 +756,7 @@ export async function tearDownActiveCall(
                   false,
                   false,
                   false, // hand_raised
+                  false, // muted — leaving clears all in-call state
                 );
               } catch (err) {
                 reportCallError(err);
@@ -825,6 +827,7 @@ export type RawIqSender = {
     preparing: boolean,
     video: boolean,
     hand_raised: boolean,
+    muted: boolean,
   ) => Promise<void>;
 };
 
@@ -891,6 +894,7 @@ async function rollbackMucCallSetup(
         false,
         false,
         false, // hand_raised
+        false, // muted — rollback clears all in-call state
       );
     } catch (err) {
       reportCallError(err);
@@ -1037,6 +1041,7 @@ export async function beginMucCall(
       true, // preparing
       false, // video — irrelevant in preparing phase
       false, // hand_raised — a hand can't be raised before joining
+      false, // muted — in-call state isn't advertised before joining
     );
     assertMucSetupStillPending(normalizedRoomJid, selfNick, attemptId);
     // XEP-0272 §Joining: "The client MUST then wait until the MUC
@@ -1063,6 +1068,8 @@ export async function beginMucCall(
       false, // preparing
       media.video, // video
       selfRaisedHandFor(normalizedRoomJid), // hand_raised — preserve across re-emit
+      !media.audio, // muted — joining without mic capture advertises muted
+      // (#1030); a live mic toggle re-broadcasts the authoritative state
     );
     if (!mucSetupStillPending(normalizedRoomJid, selfNick, attemptId)) {
       await rollbackMucCallSetup(

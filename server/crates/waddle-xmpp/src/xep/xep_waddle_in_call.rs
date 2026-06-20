@@ -20,6 +20,7 @@ pub const NS_WADDLE_IN_CALL: &str = "urn:waddle:in-call:0";
 
 const IN_CALL_NAME: &str = "in-call";
 const HAND_RAISED_NAME: &str = "hand-raised";
+const MUTED_NAME: &str = "muted";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InCallSessionId(SessionId);
@@ -116,49 +117,61 @@ pub fn build_in_call_reaction_message(
 /// Presence-durable in-call state for one occupant session, carried in MUC
 /// presence as `<in-call xmlns='urn:waddle:in-call:0'>` alongside `<muji/>`.
 ///
-/// Currently models only a raised hand; the typed struct leaves room for
-/// further presence sub-states (mute, recording) without changing the wire
-/// root. An all-`false` value [`is_empty`](Self::is_empty) and clears the
-/// occupant's stored entry, mirroring `<muji/>` leave semantics.
+/// Models the durable in-call sub-states an occupant can advertise: a raised
+/// hand and a muted microphone. Each is an independent marker child of the same
+/// `<in-call/>` root, so the typed struct can grow further sub-states
+/// (recording, …) without changing the wire root. An all-`false` value
+/// [`is_empty`](Self::is_empty) and clears the occupant's stored entry,
+/// mirroring `<muji/>` leave semantics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct InCallPresenceState {
     pub hand_raised: bool,
+    pub muted: bool,
 }
 
 impl InCallPresenceState {
     /// True when no sub-state is advertised, i.e. the occupant carries no
     /// in-call presence state and any stored entry should be cleared.
     pub fn is_empty(&self) -> bool {
-        !self.hand_raised
+        !self.hand_raised && !self.muted
     }
 }
 
 /// Build the `<in-call xmlns='urn:waddle:in-call:0'>` presence child for the
-/// given state. A raised hand emits a `<hand-raised/>` marker child; a lowered
-/// hand emits an empty `<in-call/>` element (the canonical "no state" shape a
-/// peer may also omit entirely).
+/// given state. Each advertised sub-state emits its own marker child
+/// (`<hand-raised/>`, `<muted/>`); a state with none advertised emits an empty
+/// `<in-call/>` element (the canonical "no state" shape a peer may also omit
+/// entirely).
 pub fn build_in_call_presence_state_element(state: &InCallPresenceState) -> Element {
     let mut builder = Element::builder(IN_CALL_NAME, NS_WADDLE_IN_CALL);
     if state.hand_raised {
         builder = builder.append(Element::builder(HAND_RAISED_NAME, NS_WADDLE_IN_CALL).build());
+    }
+    if state.muted {
+        builder = builder.append(Element::builder(MUTED_NAME, NS_WADDLE_IN_CALL).build());
     }
     builder.build()
 }
 
 /// Parse an `<in-call xmlns='urn:waddle:in-call:0'>` presence child into its
 /// durable state. The presence shape carries no `sid` (the occupant presence
-/// already identifies the participant and room); a `<hand-raised/>` child
-/// raises the hand and its absence lowers it.
+/// already identifies the participant and room); each marker child raises its
+/// sub-state and its absence lowers it.
 pub fn parse_in_call_presence_state(
     element: &Element,
 ) -> Result<InCallPresenceState, InCallParseError> {
     if element.name() != IN_CALL_NAME || element.ns() != NS_WADDLE_IN_CALL {
         return Err(InCallParseError::NotInCall);
     }
-    let hand_raised = element
-        .children()
-        .any(|child| child.name() == HAND_RAISED_NAME && child.ns() == NS_WADDLE_IN_CALL);
-    Ok(InCallPresenceState { hand_raised })
+    let has_marker = |name: &str| {
+        element
+            .children()
+            .any(|child| child.name() == name && child.ns() == NS_WADDLE_IN_CALL)
+    };
+    Ok(InCallPresenceState {
+        hand_raised: has_marker(HAND_RAISED_NAME),
+        muted: has_marker(MUTED_NAME),
+    })
 }
 
 pub fn parse_in_call_signal(element: &Element) -> Result<InCallSignal, InCallParseError> {

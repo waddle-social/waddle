@@ -252,6 +252,13 @@ export interface WasmPresence {
    * alongside `<muji/>`. Absent/false means the hand is lowered.
    */
   hand_raised?: boolean;
+  /**
+   * Waddle mute call presence state (#1030). `true` when the occupant's
+   * presence carries a `<muted/>` marker on the same `<in-call>` carrier.
+   * Absent/false means the microphone is unmuted. Drives the
+   * authoritative remote-mute indicator on tiles and in the roster.
+   */
+  muted?: boolean;
 }
 
 /**

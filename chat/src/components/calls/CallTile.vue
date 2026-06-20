@@ -33,8 +33,9 @@ const props = withDefaults(defineProps<{
   mirrorVideo: boolean;
   /** Whether to show the presenting affordance for screen tiles. */
   showsPresentingGlyph: boolean;
-  /** Whether the local mic is currently un-muted. Drives the
-   *  destructive `MicOff` badge on the self-tile. Ignored on remotes. */
+  /** Whether this tile's mic is currently un-muted. Drives the
+   *  destructive `MicOff` badge. Authoritative for both self (the local
+   *  mic flag) and remotes (presence-advertised mute, #1030). */
   micEnabled: boolean;
   /** Optional video track to render. When `null`, the placeholder
    *  layer shows through unchanged. */
@@ -149,9 +150,9 @@ const emit = defineEmits<{
         <Hand class="w-3.5 h-3.5" />
       </span>
       <span
-        v-if="isSelf && !micEnabled"
+        v-if="!micEnabled"
         class="call-tile__mic-off"
-        aria-label="Your mic is muted"
+        :aria-label="isSelf ? 'Your mic is muted' : 'Muted'"
       >
         <MicOff class="w-3.5 h-3.5" />
       </span>

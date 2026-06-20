@@ -50,6 +50,10 @@ import {
   raisedHandKeysForRoom,
   selfRaisedHandFor,
 } from "@/lib/calls/call-raised-hand";
+import {
+  $mucMutedParticipants,
+  mutedKeysForRoom,
+} from "@/lib/calls/call-mute";
 import { expectedRemoteIdentitiesForCallState } from "@/lib/calls/call-tiles";
 import {
   projectCallTiles,
@@ -254,6 +258,14 @@ const raisedHandIdentityKeys = computed(() => {
   }
   return keys;
 });
+
+// #1030: muted call presence state for the split-view tiles. Pure
+// INBOUND-REMOTE view — self-mute comes from `micEnabled`, so the local
+// identity is NOT folded in (unlike raised-hand above).
+const mutedParticipants = useStore($mucMutedParticipants);
+const mutedIdentityKeys = computed(() =>
+  mutedKeysForRoom(normalizedRoomJid.value, mutedParticipants.value),
+);
 const selfSharePresentation = computed(() =>
   localScreenSharePresentation({
     screenShareEnabled: screenShareEnabled.value,
@@ -273,6 +285,7 @@ const pictureInPictureProjection = computed(() =>
     localIdentity: localIdentity.value,
     expectedRemoteIdentities: expectedRemoteIdentities.value,
     micEnabled: micEnabled.value,
+    mutedKeys: mutedIdentityKeys.value,
     seenRemoteScreenTrackKeys: pictureInPictureSeenRemoteScreenTrackKeys.value,
     pinnedTileKey: pinnedTileKey.value,
     viewMode: viewMode.value,
@@ -533,6 +546,7 @@ async function togglePictureInPicture(): Promise<void> {
           :active-speaker-identities="activeSpeakerIdentities"
           :promoted-speaker-identity="promotedSpeakerIdentity"
           :raised-hand-keys="raisedHandIdentityKeys"
+          :muted-keys="mutedIdentityKeys"
           @open-participants="enterExpandedWithDock"
         />
         <div class="call-split__reactions" aria-live="polite" aria-atomic="false">

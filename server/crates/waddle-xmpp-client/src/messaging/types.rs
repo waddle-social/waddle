@@ -702,6 +702,12 @@ pub struct InboundPresence {
     /// the child is absent (lowered). Drives the chat-side raised-hand
     /// indicator in the Participants panel and on tiles.
     pub hand_raised: bool,
+    /// Waddle mute call presence state (#1030) — a `<muted/>` marker on
+    /// the same `<in-call>` carrier. `true` when the occupant advertises a
+    /// muted microphone; `false` when the child is absent (unmuted).
+    /// Drives the authoritative remote-mute indicator on tiles and in the
+    /// roster.
+    pub muted: bool,
 }
 
 /// Parsed `<muji xmlns='urn:xmpp:jingle:muji:0'>` extension on a MUC

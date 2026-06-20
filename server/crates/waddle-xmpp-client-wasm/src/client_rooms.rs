@@ -79,15 +79,15 @@ impl WaddleClient {
     ///   §Joining two-phase flow. Typically the client sends this
     ///   first, awaits the room's echo, then re-emits with contents
     ///   declared.
-    /// - `hand_raised=true`: appends an
-    ///   `<in-call xmlns='urn:waddle:in-call:0'><hand-raised/></in-call>`
-    ///   presence child *alongside* `<muji/>` (#1029). This is the FFI
-    ///   raise/lower-hand "set method": the caller re-emits its current
-    ///   call presence with the flag toggled, and the absence of the
-    ///   child lowers the hand for everyone (the server clears the
-    ///   stored state). Ignored unless the occupant is in the call
-    ///   (`active` or `preparing`), since a raised hand is meaningless
-    ///   without call participation.
+    /// - `hand_raised`/`muted`: append an `<in-call
+    ///   xmlns='urn:waddle:in-call:0'>` presence child *alongside*
+    ///   `<muji/>` (#1029 raised hand / #1030 mute) carrying one marker
+    ///   child per set flag. This is the FFI in-call "set method": the
+    ///   caller re-emits its current call presence with the flags
+    ///   toggled, and the absence of a marker clears that sub-state for
+    ///   everyone (the server drops the stored state). Ignored unless the
+    ///   occupant is in the call (`active` or `preparing`), since in-call
+    ///   state is meaningless without call participation.
     pub fn update_muji_presence(
         &self,
         room_jid: String,
@@ -96,6 +96,7 @@ impl WaddleClient {
         preparing: bool,
         video: bool,
         hand_raised: bool,
+        muted: bool,
     ) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -115,9 +116,13 @@ impl WaddleClient {
                     active && video,
                 );
                 builder = builder.append(muji);
-                if hand_raised {
-                    builder = builder
-                        .append(waddle_xmpp_client::messaging::build_in_call_hand_raised_element());
+                if hand_raised || muted {
+                    builder = builder.append(
+                        waddle_xmpp_client::messaging::build_in_call_presence_state_element(
+                            hand_raised,
+                            muted,
+                        ),
+                    );
                 }
             }
             builder = builder.append(waddle_xmpp_client::caps::build_client_caps_element());

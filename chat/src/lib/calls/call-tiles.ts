@@ -1,7 +1,7 @@
 import type { CallTrackSource, LocalMediaTrack, RemoteMediaTrack } from "./engine";
 import type { TileAttachable } from "./tile-attach";
 import type { CallState } from "./types";
-import { barePeerJid } from "../xmpp/jid";
+import { barePeerJid, fullJidIdentityKey } from "../xmpp/jid";
 
 type TileSource = "camera" | "screen_share";
 
@@ -24,6 +24,13 @@ export type BuildCallTilesInput = {
   localIdentity: string | null;
   expectedRemoteIdentities?: readonly string[];
   micEnabled: boolean;
+  /**
+   * Identity keys (`fullJidIdentityKey`) of remote participants advertising
+   * a muted microphone via `urn:waddle:in-call:0` presence (#1030). A remote
+   * tile's `micEnabledHint` is the negation of membership here — authoritative
+   * over LiveKit track signalling. Self tiles always use `micEnabled`.
+   */
+  mutedKeys?: ReadonlySet<string>;
 };
 
 function displayNameForIdentity(identity: string): string {
@@ -61,7 +68,7 @@ function newTile(
   side: "self" | "remote",
   identity: string,
   source: TileSource,
-  micEnabled: boolean,
+  micEnabledHint: boolean,
 ): CallTileModel {
   const isSelf = side === "self";
   return {
@@ -73,7 +80,7 @@ function newTile(
     isSelf,
     mirrorVideo: isSelf && source === "camera",
     showsPresentingGlyph: source === "screen_share",
-    micEnabledHint: isSelf ? micEnabled : true,
+    micEnabledHint,
     videoTrack: null,
   };
 }
@@ -81,6 +88,12 @@ function newTile(
 export function buildCallTiles(input: BuildCallTilesInput): CallTileModel[] {
   const byKey = new Map<string, CallTileModel>();
   const activeRemoteBareIdentities = new Set<string>();
+  const mutedKeys = input.mutedKeys ?? new Set<string>();
+  // A remote tile's mic hint comes from authoritative XMPP presence mute
+  // (#1030), never a hard-coded `true`; LiveKit keeps a muted mic track
+  // published, so its track signalling can't tell us a remote is muted.
+  const remoteMicHint = (identity: string): boolean =>
+    !mutedKeys.has(fullJidIdentityKey(identity));
   const selfId = input.localTracks[0]?.participantIdentity ?? input.localIdentity ?? "you";
   byKey.set(callTileKey("self", selfId, "camera"), newTile("self", selfId, "camera", input.micEnabled));
 
@@ -102,7 +115,8 @@ export function buildCallTiles(input: BuildCallTilesInput): CallTileModel[] {
     if (remoteBareIdentity) activeRemoteBareIdentities.add(remoteBareIdentity);
     const source = tileSourceForTrack(remote.source);
     const key = callTileKey("remote", participantIdentity, source);
-    const existing = byKey.get(key) ?? newTile("remote", participantIdentity, source, input.micEnabled);
+    const existing =
+      byKey.get(key) ?? newTile("remote", participantIdentity, source, remoteMicHint(participantIdentity));
     if (remote.kind === "video") {
       existing.videoTrack = remote.track;
       if (source === "screen_share") existing.screenTrackKey = remote.publicationSid;
@@ -116,7 +130,7 @@ export function buildCallTiles(input: BuildCallTilesInput): CallTileModel[] {
     if (!bareIdentity || activeRemoteBareIdentities.has(bareIdentity)) continue;
     byKey.set(
       callTileKey("remote", trimmedIdentity, "camera"),
-      newTile("remote", trimmedIdentity, "camera", input.micEnabled),
+      newTile("remote", trimmedIdentity, "camera", remoteMicHint(trimmedIdentity)),
     );
   }
 

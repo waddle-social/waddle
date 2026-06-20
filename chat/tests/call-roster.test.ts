@@ -106,6 +106,32 @@ describe("buildCallRoster", () => {
     expect(byLabel.carol).toEqual({ micOn: false, cameraOn: false });
   });
 
+  test("presence-advertised mute overrides a live audio track for remote attendees (#1030)", () => {
+    const rows = buildCallRoster({
+      remoteParticipantIdentities: [
+        "alice@waddle.test/web",
+        "bob@waddle.test/desktop",
+      ],
+      // Both keep a published mic track — LiveKit's default leaves the track
+      // live while muted, so track presence alone cannot tell us mute state.
+      remoteTracks: [
+        remoteTrack("alice-mic", "alice@waddle.test/web", "audio", "microphone"),
+        remoteTrack("bob-mic", "bob@waddle.test/desktop", "audio", "microphone"),
+      ],
+      localIdentity: "me@waddle.test/browser",
+      localMicEnabled: true,
+      localCameraEnabled: false,
+      activeSpeakerIdentities: new Set<string>(),
+      volumeRows: [],
+      mutedKeys: new Set<string>(["alice@waddle.test/web"]),
+    });
+
+    const byLabel = Object.fromEntries(rows.map((row) => [row.label, row.micOn]));
+    // Authoritative XMPP presence mute wins over the live track.
+    expect(byLabel.alice).toBe(false);
+    expect(byLabel.bob).toBe(true);
+  });
+
   test("self mic and camera reflect the local flags, not self tracks", () => {
     const rows = buildCallRoster({
       remoteParticipantIdentities: [],

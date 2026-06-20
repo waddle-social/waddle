@@ -9,6 +9,7 @@ import {
   raisedHandKeysForRoom,
   selfRaisedHandFor,
 } from "./call-raised-hand";
+import { $mucMutedParticipants, mutedKeysForRoom } from "./call-mute";
 import { useCallEngine } from "./use-call-engine";
 import { useCallVolumeMixer } from "./use-call-volume-mixer";
 import { remoteParticipantIdentitiesForCall } from "./call-remote-identities";
@@ -40,6 +41,7 @@ export function useCallRoster(
   const volumeMixer = useCallVolumeMixer(normalizedRoomJid);
   const raisedHands = useStore($mucRaisedHands);
   const selfRaisedHand = useStore($selfRaisedHand);
+  const mutedParticipants = useStore($mucMutedParticipants);
 
   // Reactive local identity from the active call's LiveKit join, NOT the
   // engine's non-reactive `localIdentity` getter. A `computed` over the
@@ -72,6 +74,7 @@ export function useCallRoster(
       volumeRows: volumeMixer.rows.value,
       raisedHandKeys: raisedHandKeysForRoom(normalizedRoomJid.value, raisedHands.value),
       selfRaisedHand: selfRaisedHandFor(normalizedRoomJid.value, selfRaisedHand.value),
+      mutedKeys: mutedKeysForRoom(normalizedRoomJid.value, mutedParticipants.value),
     }),
   );
 

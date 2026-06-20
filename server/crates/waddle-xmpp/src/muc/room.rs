@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use jid::{BareJid, FullJid};
 use serde::{Deserialize, Serialize};
@@ -8,6 +8,7 @@ use super::pin::{PinPermission, PinnedEntry};
 use super::subject::SubjectState;
 use crate::types::{Affiliation, Role};
 use crate::xep::xep0272::Muji;
+use crate::xep::InCallPresenceState;
 
 /// Check if a JID is from a remote server.
 ///
@@ -147,23 +148,24 @@ pub struct MucRoom {
     /// still one occupant presence per nick; `muji_for_nick` aggregates
     /// these session entries, preferring active contents over preparing.
     pub(super) muji_state: HashMap<String, HashMap<FullJid, Muji>>,
-    /// Per-session raised-hand presence state (`urn:waddle:in-call:0`,
-    /// #1029), keyed by nick then by the set of full JIDs whose session
-    /// currently advertises `<in-call><hand-raised/></in-call>`. Mirrors
+    /// Per-session in-call presence state (`urn:waddle:in-call:0`,
+    /// #1029/#1030), keyed by nick then by full JID, carrying the full
+    /// [`InCallPresenceState`](crate::xep::InCallPresenceState) (raised
+    /// hand + mute) that session advertises. Mirrors
     /// [`muji_state`](Self::muji_state):
     ///
-    /// 1. Late joiners see who already has a hand raised — the join
-    ///    handler reads this map and appends the `<in-call>` payload to
-    ///    the replayed presence for any session that owns one.
+    /// 1. Late joiners see who already has a hand raised or is muted —
+    ///    the join handler reads this map and appends the `<in-call>`
+    ///    payload to the replayed presence for any session that owns one.
     /// 2. Presence-update broadcasts reflect the room-authoritative
     ///    per-session state rather than echoing the client payload, so a
     ///    sibling resource's presence cannot be stamped with another
-    ///    session's hand state.
+    ///    session's in-call state.
     ///
-    /// A nick is "hand raised" to the room when *any* of its sessions
-    /// advertise it. Entries are cleared when the session lowers its
-    /// hand, leaves the call (`<muji/>` cleared), or leaves the room.
-    pub(super) hand_raised_state: HashMap<String, HashSet<FullJid>>,
+    /// Only non-empty states are stored; an entry is cleared when the
+    /// session lowers its hand and unmutes, leaves the call (`<muji/>`
+    /// cleared), or leaves the room.
+    pub(super) in_call_state: HashMap<String, HashMap<FullJid, InCallPresenceState>>,
 }
 
 /// Result of applying one session's Muji presence update.
@@ -205,7 +207,7 @@ impl MucRoom {
             generation_floor: u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0),
             pinned_entries: Vec::new(),
             muji_state: HashMap::new(),
-            hand_raised_state: HashMap::new(),
+            in_call_state: HashMap::new(),
         }
     }
 
@@ -343,63 +345,63 @@ impl MucRoom {
         }
     }
 
-    /// Apply an `<in-call xmlns='urn:waddle:in-call:0'>` raised-hand
-    /// presence state (#1029) from `nick`'s `originator` session. A
-    /// raised state records the session; a lowered/empty state removes
-    /// it. Mirrors [`upsert_muji_presence`](Self::upsert_muji_presence):
-    /// the entry is bound to the exact emitting session so one resource
-    /// can lower its hand without disturbing a sibling's.
-    pub fn upsert_hand_raised(
+    /// Apply an `<in-call xmlns='urn:waddle:in-call:0'>` presence state
+    /// (#1029 raised hand / #1030 mute) from `nick`'s `originator`
+    /// session. A non-empty state records the session's full
+    /// [`InCallPresenceState`]; an empty state removes it. Mirrors
+    /// [`upsert_muji_presence`](Self::upsert_muji_presence): the entry is
+    /// bound to the exact emitting session so one resource can change its
+    /// in-call state without disturbing a sibling's.
+    pub fn upsert_in_call_state(
         &mut self,
         nick: &str,
         originator: FullJid,
-        state: crate::xep::InCallPresenceState,
+        state: InCallPresenceState,
     ) {
         if state.is_empty() {
-            self.clear_hand_raised(nick, &originator);
+            self.clear_in_call_state(nick, &originator);
         } else {
-            self.hand_raised_state
+            self.in_call_state
                 .entry(nick.to_owned())
                 .or_default()
-                .insert(originator);
+                .insert(originator, state);
         }
     }
 
-    /// Clear `originator`'s raised-hand advertisement for `nick`, if it
-    /// owns one. Used when a session lowers its hand, leaves the call,
-    /// or leaves the room.
-    pub fn clear_hand_raised(&mut self, nick: &str, originator: &FullJid) {
-        if let Some(sessions) = self.hand_raised_state.get_mut(nick) {
+    /// Clear `originator`'s in-call advertisement for `nick`, if it owns
+    /// one. Used when a session clears all its in-call sub-states, leaves
+    /// the call, or leaves the room.
+    pub fn clear_in_call_state(&mut self, nick: &str, originator: &FullJid) {
+        if let Some(sessions) = self.in_call_state.get_mut(nick) {
             sessions.remove(originator);
             if sessions.is_empty() {
-                self.hand_raised_state.remove(nick);
+                self.in_call_state.remove(nick);
             }
         }
     }
 
-    /// True when *any* of `nick`'s sessions currently has a raised hand.
-    /// This is the nick-level aggregate other occupants observe.
-    pub fn hand_raised_for_nick(&self, nick: &str) -> bool {
-        self.hand_raised_state
+    /// In-call presence state advertised by one exact `jid` session of
+    /// `nick`, or the empty default when that session advertises none.
+    pub fn in_call_state_for_session(&self, nick: &str, jid: &FullJid) -> InCallPresenceState {
+        self.in_call_state
             .get(nick)
-            .is_some_and(|sessions| !sessions.is_empty())
+            .and_then(|sessions| sessions.get(jid))
+            .copied()
+            .unwrap_or_default()
     }
 
-    /// True when the exact `jid` session of `nick` has a raised hand.
-    pub fn hand_raised_for_session(&self, nick: &str, jid: &FullJid) -> bool {
-        self.hand_raised_state
-            .get(nick)
-            .is_some_and(|sessions| sessions.contains(jid))
-    }
-
-    /// Full JIDs of `nick`'s sessions with a raised hand, sorted for
-    /// deterministic replay and broadcast ordering.
-    pub fn hand_raised_sessions_for_nick(&self, nick: &str) -> Vec<FullJid> {
-        let Some(sessions) = self.hand_raised_state.get(nick) else {
+    /// Per-session in-call states for `nick` (only non-empty), sorted by
+    /// full JID for deterministic replay and broadcast ordering.
+    pub fn in_call_sessions_for_nick(&self, nick: &str) -> Vec<(FullJid, InCallPresenceState)> {
+        let Some(sessions) = self.in_call_state.get(nick) else {
             return Vec::new();
         };
-        let mut sessions: Vec<FullJid> = sessions.iter().cloned().collect();
-        sessions.sort_by_key(ToString::to_string);
+        let mut sessions: Vec<(FullJid, InCallPresenceState)> = sessions
+            .iter()
+            .filter(|(_, state)| !state.is_empty())
+            .map(|(jid, state)| (jid.clone(), *state))
+            .collect();
+        sessions.sort_by_key(|(jid, _)| jid.to_string());
         sessions
     }
 
@@ -432,7 +434,7 @@ impl MucRoom {
     pub fn remove_occupant(&mut self, nick: &str) -> Option<Occupant> {
         self.occupant_sessions.remove(nick);
         self.muji_state.remove(nick);
-        self.hand_raised_state.remove(nick);
+        self.in_call_state.remove(nick);
         self.occupants.remove(nick)
     }
 
@@ -491,20 +493,20 @@ impl MucRoom {
                 self.muji_state.remove(nick);
             }
         }
-        // The raised-hand advertisement is session-owned just like the
-        // call advertisement above; drop the leaving session's entry so
-        // a lingering hand isn't replayed to late joiners.
-        if let Some(hands) = self.hand_raised_state.get_mut(nick) {
-            hands.remove(jid);
-            if hands.is_empty() {
-                self.hand_raised_state.remove(nick);
+        // The in-call advertisement is session-owned just like the call
+        // advertisement above; drop the leaving session's entry so a
+        // lingering hand/mute isn't replayed to late joiners.
+        if let Some(in_call) = self.in_call_state.get_mut(nick) {
+            in_call.remove(jid);
+            if in_call.is_empty() {
+                self.in_call_state.remove(nick);
             }
         }
 
         if sessions.is_empty() {
             self.occupant_sessions.remove(nick);
             self.muji_state.remove(nick);
-            self.hand_raised_state.remove(nick);
+            self.in_call_state.remove(nick);
             self.occupants.remove(nick);
             return Some(true);
         }
@@ -558,7 +560,7 @@ impl MucRoom {
             && self.pinned_entries.is_empty()
             && self.affiliation_list.is_empty()
             && self.muji_state.is_empty()
-            && self.hand_raised_state.is_empty()
+            && self.in_call_state.is_empty()
     }
 
     /// Whether `bare_jid` is currently joined to this room as an
@@ -733,9 +735,8 @@ mod pin_state_tests {
 }
 
 #[cfg(test)]
-mod hand_raised_state_tests {
+mod in_call_state_tests {
     use super::*;
-    use crate::xep::InCallPresenceState;
     use std::str::FromStr;
 
     fn room() -> MucRoom {
@@ -752,58 +753,107 @@ mod hand_raised_state_tests {
     }
 
     fn raised() -> InCallPresenceState {
-        InCallPresenceState { hand_raised: true }
+        InCallPresenceState {
+            hand_raised: true,
+            muted: false,
+        }
     }
 
-    fn lowered() -> InCallPresenceState {
-        InCallPresenceState { hand_raised: false }
+    fn muted() -> InCallPresenceState {
+        InCallPresenceState {
+            hand_raised: false,
+            muted: true,
+        }
+    }
+
+    fn nick_has_raised_hand(r: &MucRoom, nick: &str) -> bool {
+        r.in_call_sessions_for_nick(nick)
+            .iter()
+            .any(|(_, state)| state.hand_raised)
     }
 
     #[test]
-    fn upsert_raises_and_lower_clears_for_a_session() {
+    fn upsert_records_and_empty_state_clears_for_a_session() {
         let mut r = room();
         let web = full("alice@example.com/web");
 
-        r.upsert_hand_raised("alice", web.clone(), raised());
-        assert!(r.hand_raised_for_nick("alice"));
-        assert!(r.hand_raised_for_session("alice", &web));
+        r.upsert_in_call_state("alice", web.clone(), raised());
+        assert!(r.in_call_state_for_session("alice", &web).hand_raised);
+        assert!(nick_has_raised_hand(&r, "alice"));
 
-        r.upsert_hand_raised("alice", web.clone(), lowered());
-        assert!(!r.hand_raised_for_nick("alice"));
-        assert!(!r.hand_raised_for_session("alice", &web));
+        r.upsert_in_call_state("alice", web.clone(), InCallPresenceState::default());
+        assert!(!r.in_call_state_for_session("alice", &web).hand_raised);
+        assert!(!nick_has_raised_hand(&r, "alice"));
     }
 
     #[test]
-    fn raised_hand_aggregates_across_sessions() {
+    fn mute_is_carried_per_session_independently_of_the_hand() {
+        let mut r = room();
+        let web = full("alice@example.com/web");
+
+        // Muted but hand down — the session entry exists and carries mute.
+        r.upsert_in_call_state("alice", web.clone(), muted());
+        let state = r.in_call_state_for_session("alice", &web);
+        assert!(state.muted, "session advertises mute");
+        assert!(!state.hand_raised, "mute does not imply a raised hand");
+        assert_eq!(
+            r.in_call_sessions_for_nick("alice"),
+            vec![(web.clone(), muted())]
+        );
+
+        // Unmuting clears the session's entry entirely (empty state).
+        r.upsert_in_call_state("alice", web.clone(), InCallPresenceState::default());
+        assert!(!r.in_call_state_for_session("alice", &web).muted);
+        assert!(r.in_call_sessions_for_nick("alice").is_empty());
+    }
+
+    #[test]
+    fn hand_and_mute_combine_for_one_session() {
+        let mut r = room();
+        let web = full("alice@example.com/web");
+        let both = InCallPresenceState {
+            hand_raised: true,
+            muted: true,
+        };
+        r.upsert_in_call_state("alice", web.clone(), both);
+        assert_eq!(r.in_call_state_for_session("alice", &web), both);
+    }
+
+    #[test]
+    fn in_call_state_aggregates_across_sessions() {
         let mut r = room();
         let web = full("alice@example.com/web");
         let mobile = full("alice@example.com/mobile");
 
-        // Web raises; mobile explicitly lowered must not contribute.
-        r.upsert_hand_raised("alice", web.clone(), raised());
-        r.upsert_hand_raised("alice", mobile.clone(), lowered());
-        assert!(r.hand_raised_for_nick("alice"));
-        assert_eq!(r.hand_raised_sessions_for_nick("alice"), vec![web.clone()]);
-
-        // Mobile raises too — both sessions advertised, sorted by full JID.
-        r.upsert_hand_raised("alice", mobile.clone(), raised());
+        // Web raises; mobile explicitly empty must not contribute.
+        r.upsert_in_call_state("alice", web.clone(), raised());
+        r.upsert_in_call_state("alice", mobile.clone(), InCallPresenceState::default());
         assert_eq!(
-            r.hand_raised_sessions_for_nick("alice"),
-            vec![mobile.clone(), web.clone()]
+            r.in_call_sessions_for_nick("alice"),
+            vec![(web.clone(), raised())]
         );
 
-        // Clearing web leaves the nick raised via mobile.
-        r.clear_hand_raised("alice", &web);
-        assert!(r.hand_raised_for_nick("alice"));
-        assert_eq!(r.hand_raised_sessions_for_nick("alice"), vec![mobile]);
+        // Mobile mutes — both sessions advertised, sorted by full JID.
+        r.upsert_in_call_state("alice", mobile.clone(), muted());
+        assert_eq!(
+            r.in_call_sessions_for_nick("alice"),
+            vec![(mobile.clone(), muted()), (web.clone(), raised())]
+        );
+
+        // Clearing web leaves the nick's mobile mute advertised.
+        r.clear_in_call_state("alice", &web);
+        assert_eq!(
+            r.in_call_sessions_for_nick("alice"),
+            vec![(mobile, muted())]
+        );
     }
 
     #[test]
-    fn remove_occupant_clears_hand_state() {
+    fn remove_occupant_clears_in_call_state() {
         let mut r = room();
         let web = full("alice@example.com/web");
-        r.upsert_hand_raised("alice", web, raised());
+        r.upsert_in_call_state("alice", web, raised());
         r.remove_occupant("alice");
-        assert!(!r.hand_raised_for_nick("alice"));
+        assert!(r.in_call_sessions_for_nick("alice").is_empty());
     }
 }

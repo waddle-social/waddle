@@ -1,7 +1,20 @@
 import { $callState, beginMucCall, reportCallError, type RawIqSender } from "./call-store";
+import { $callMicEnabled } from "./call-controls";
 import { LIVEKIT_JOIN_EXPIRY_SKEW_MS, liveKitJoinTokenExpiresAt } from "./dm-call-activity";
 import { clearMucCallParticipant, normalizeMucCallRoomJid } from "./muc-call-presence";
 import { selfRaisedHandFor, setSelfRaisedHand } from "./call-raised-hand";
+
+/**
+ * This client's current self-mute, derived from the live mic toggle
+ * (`$callMicEnabled`): muted ⇔ the mic is disabled. Mute has no separate
+ * intent store (unlike the raised hand) — the LiveKit mic state IS the
+ * source of truth. Every call-presence re-emit must carry the CURRENT
+ * value so a hand toggle (or resume) can't silently drop the `<muted/>`
+ * marker — presence is last-writer-wins (#1030).
+ */
+function selfCallMuted(): boolean {
+  return !$callMicEnabled.get();
+}
 import {
   forgetMucCallSession,
   markMucCallSessionTerminatePending,
@@ -114,6 +127,7 @@ export async function leaveRetainedMucCallAction({
       false,
       false,
       false, // hand_raised
+      false, // muted — leaving the call clears all in-call state
     );
     clearMucCallParticipant(roomJid, selfNick, selfFullJid, {
       includeAggregate: true,
@@ -269,6 +283,7 @@ export async function resumeMucCallActivity({
         false, // preparing
         media.video,
         selfRaisedHandFor(session.roomJid), // hand_raised — preserve across resume
+        selfCallMuted(), // muted — preserve across resume
       );
     } catch (err) {
       reportCallError(err);
@@ -313,6 +328,8 @@ export async function setMucCallHandRaised(
       false, // preparing
       state.media.video,
       raised,
+      selfCallMuted(), // muted — re-stamp current mute so a hand toggle
+      // never drops the `<muted/>` marker (presence is last-writer-wins)
     );
     return true;
   } catch (err) {
@@ -322,6 +339,52 @@ export async function setMucCallHandRaised(
     if (selfRaisedHandFor(roomJid) === raised) {
       setSelfRaisedHand(roomJid, !raised);
     }
+    reportCallError(err);
+    return false;
+  }
+}
+
+/**
+ * Broadcast this client's mute state to the active MUC call as
+ * `urn:waddle:in-call:0` presence (#1030). Mirrors
+ * [`setMucCallHandRaised`]: "setting" mute means re-emitting our current
+ * active call presence with the `<muted/>` marker toggled — the wasm FFI
+ * builds the `<in-call>` child when `muted` is true and omits it (unmuting
+ * for everyone) when false. Re-stamps the CURRENT raised hand so a mute
+ * toggle never drops it.
+ *
+ * The local mic toggle (`$callMicEnabled`) is the source of truth and is
+ * already flipped by the caller, so there is no optimistic state to roll
+ * back here — a failed broadcast just leaves peers momentarily stale until
+ * the next presence, and is reported.
+ *
+ * No-op (returns `false`) unless we're in an active MUC call with a known
+ * nick and a wasm client that exposes the presence FFI.
+ */
+export async function broadcastMucCallSelfMute(
+  sender: RawIqSender,
+  muted: boolean,
+): Promise<boolean> {
+  const state = $callState.get();
+  if (state.phase !== "active" || state.kind !== "muc" || !state.selfNick) {
+    return false;
+  }
+  if (!sender.update_muji_presence) return false;
+  const roomJid = normalizeMucCallRoomJid(state.peer);
+  if (!roomJid) return false;
+
+  try {
+    await sender.update_muji_presence(
+      roomJid,
+      state.selfNick,
+      true, // active — still in the call
+      false, // preparing
+      state.media.video,
+      selfRaisedHandFor(roomJid), // hand_raised — preserve across a mute toggle
+      muted,
+    );
+    return true;
+  } catch (err) {
     reportCallError(err);
     return false;
   }

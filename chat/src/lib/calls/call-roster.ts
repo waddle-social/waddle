@@ -37,6 +37,14 @@ export type BuildCallRosterInput = {
   raisedHandKeys?: ReadonlySet<string>;
   /** Whether this client currently advertises a raised hand. */
   selfRaisedHand?: boolean;
+  /**
+   * Identity keys (`fullJidIdentityKey`) of remote attendees advertising
+   * a muted microphone via `urn:waddle:in-call:0` presence (#1030).
+   * Authoritative over track presence — LiveKit keeps a muted mic track
+   * published, so this presence signal is the only reliable remote-mute
+   * source. Defaults to empty. (Self mute comes from `localMicEnabled`.)
+   */
+  mutedKeys?: ReadonlySet<string>;
 };
 
 type MediaState = { micOn: boolean; cameraOn: boolean };
@@ -75,6 +83,7 @@ export function buildCallRoster(input: BuildCallRosterInput): CallRosterRow[] {
   const selfRowKey = selfKey || "self";
 
   const raisedHandKeys = input.raisedHandKeys ?? new Set<string>();
+  const mutedKeys = input.mutedKeys ?? new Set<string>();
 
   const rows: CallRosterRow[] = [];
   rows.push({
@@ -107,7 +116,8 @@ export function buildCallRoster(input: BuildCallRosterInput): CallRosterRow[] {
       identity,
       label: displayNameForIdentity(identity),
       isSelf: false,
-      micOn: media.micOn,
+      // Authoritative XMPP-presence mute wins over a still-published track.
+      micOn: media.micOn && !mutedKeys.has(key),
       cameraOn: media.cameraOn,
       speaking: speakingKeys.has(key),
       raisedHand: raisedHandKeys.has(key),

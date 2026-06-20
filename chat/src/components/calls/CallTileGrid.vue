@@ -65,6 +65,9 @@ const props = defineProps<{
   /** Identity keys (`fullJidIdentityKey`) of participants with a raised
    *  hand (#1029); their camera tile shows the raised-hand badge. */
   raisedHandKeys?: ReadonlySet<string>;
+  /** Identity keys (`fullJidIdentityKey`) of remote participants muted via
+   *  `urn:waddle:in-call:0` presence (#1030); their tile mic hint is off. */
+  mutedKeys?: ReadonlySet<string>;
 }>();
 
 const emit = defineEmits<{
@@ -87,6 +90,7 @@ const projection = computed(() => {
     localIdentity: props.localIdentity,
     expectedRemoteIdentities: props.expectedRemoteIdentities,
     micEnabled: props.micEnabled,
+    mutedKeys: props.mutedKeys,
     seenRemoteScreenTrackKeys: seenRemoteScreenTrackKeys.value,
     pinnedTileKey: pinnedTileKey.value,
     viewMode: viewMode.value,

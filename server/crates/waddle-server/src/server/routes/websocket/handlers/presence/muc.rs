@@ -322,11 +322,12 @@ async fn handle_muc_join_unlocked(
             .iter()
             .find(|existing| existing.nick == nick && existing.jid == *sender_jid)
             .and_then(|existing| existing.muji.as_ref());
-        let self_hand_raised = join_outcome
+        let self_in_call = join_outcome
             .existing_occupants
             .iter()
             .find(|existing| existing.nick == nick && existing.jid == *sender_jid)
-            .is_some_and(|existing| existing.hand_raised);
+            .map(|existing| existing.in_call)
+            .unwrap_or_default();
 
         info!(room = %room_jid, nick = %nick, occupants = occupant_count, "User joined MUC room");
 
@@ -381,13 +382,13 @@ async fn handle_muc_join_unlocked(
                 real_jid: &existing.jid,
                 include_self_status: false,
                 muji: existing.muji.as_ref(),
-                hand_raised: existing.hand_raised,
+                in_call: existing.in_call,
             }));
 
             for extra in replay_occupants.iter().copied().filter(|candidate| {
                 candidate.nick == existing.nick
                     && candidate.jid != existing.jid
-                    && (candidate.muji.is_some() || candidate.hand_raised)
+                    && (candidate.muji.is_some() || !candidate.in_call.is_empty())
             }) {
                 responses.push(build_muc_join_presence_xml(MucJoinPresence {
                     occupant_id_secret: &state.deps.occupant_id_secret,
@@ -399,7 +400,7 @@ async fn handle_muc_join_unlocked(
                     real_jid: &extra.jid,
                     include_self_status: false,
                     muji: extra.muji.as_ref(),
-                    hand_raised: extra.hand_raised,
+                    in_call: extra.in_call,
                 }));
             }
         }
@@ -442,7 +443,7 @@ async fn handle_muc_join_unlocked(
             real_jid: sender_jid,
             include_self_status: true,
             muji: self_muji,
-            hand_raised: self_hand_raised,
+            in_call: self_in_call,
         }));
 
         // Same-account sibling resources share one MUC nick. If a
@@ -455,7 +456,7 @@ async fn handle_muc_join_unlocked(
             existing.nick == nick
                 && existing.jid.to_bare() == sender_jid.to_bare()
                 && existing.jid != *sender_jid
-                && (existing.muji.is_some() || existing.hand_raised)
+                && (existing.muji.is_some() || !existing.in_call.is_empty())
         }) {
             responses.push(build_muc_join_presence_xml(MucJoinPresence {
                 occupant_id_secret: &state.deps.occupant_id_secret,
@@ -467,7 +468,7 @@ async fn handle_muc_join_unlocked(
                 real_jid: &existing.jid,
                 include_self_status: true,
                 muji: existing.muji.as_ref(),
-                hand_raised: existing.hand_raised,
+                in_call: existing.in_call,
             }));
         }
 
