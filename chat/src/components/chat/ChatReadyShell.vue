@@ -55,6 +55,7 @@ import type { MessageThreadEntry } from "@/channels/threads";
 import { jidDomain } from "@/lib/xmpp/jid";
 import type { ChatAppController } from "@/shell/chat-app-controller";
 import type { DiscoveredExtensionRoute } from "@/lib/xmpp/extension-commands";
+import { isEventUpcomingOrOngoing } from "@/lib/xmpp-client";
 import type { FeedPostInput, StoryPostInput } from "@/lib/xmpp-client";
 import type { ActivityPublication, MoodPublication, TunePublication } from "@/lib/xmpp/pep-types";
 import type { VCard4Profile } from "@/lib/xmpp/vcard4-types";
@@ -657,7 +658,7 @@ onUnmounted(() => {
           :thread-entries-fn="(roomJid: string) => channelUnread.threadEntries(roomJid)"
           :active-community-surface="ui.activeCommunitySurface.value"
           :stories-active-count="stories.activeStories.value.length"
-          :upcoming-event-count="communityEvents.events.value.filter((e: { dtstartMs?: number }) => typeof e.dtstartMs === 'number' && e.dtstartMs > Date.now()).length"
+          :upcoming-event-count="communityEvents.events.value.filter((event) => isEventUpcomingOrOngoing(event)).length"
           :is-threads-active="ui.activePage.value === 'threads'"
           :is-unread-active="ui.activePage.value === 'unread'"
           :unread-total-count="channelUnread.totalUnreadCount.value + channelUnread.totalThreadUnreadCount.value"
@@ -789,7 +790,7 @@ onUnmounted(() => {
         @post="(input) => communityEvents.post(input)"
         @edit="(id, input) => communityEvents.edit(id, input)"
         @cancel-series="(id) => communityEvents.cancel(id)"
-        @cancel-instance="(uid, dtstartMs) => communityEvents.cancelInstance(uid, dtstartMs)"
+        @cancel-instance="(uid, dtstart) => communityEvents.cancelInstance(uid, dtstart)"
         @rsvp="(event, partstat) => onCommunityRsvp(event, partstat)"
         @open-nav="ui.showMobileNav.value = true"
       />

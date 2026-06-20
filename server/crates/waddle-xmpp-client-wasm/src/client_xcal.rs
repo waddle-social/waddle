@@ -6,13 +6,14 @@
 //! recurrence flows through an `<rrule>` element with FREQ/INTERVAL/
 //! BYDAY/BYMONTHDAY/COUNT|UNTIL.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use minidom::Element;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use waddle_xmpp_core::xcal::{
     build_vcalendar_with_event, build_vcalendar_with_item, parse_vcalendar_item, Attendee,
-    CalendarItem, Freq, PartStat, Rrule, RruleEnd, VEvent, Weekday, NS_XCAL, PUBSUB_NODE_EVENTS,
+    CalendarDateValue, CalendarItem, Freq, PartStat, Rrule, RruleEnd, VEvent, Weekday, NS_XCAL,
+    PUBSUB_NODE_EVENTS,
 };
 use wasm_bindgen::prelude::*;
 
@@ -48,19 +49,20 @@ pub(crate) struct JsVEvent {
     pub location: Option<String>,
     pub organizer: Option<String>,
     pub dtstamp: Option<String>,
-    pub dtstart: Option<String>,
-    pub dtend: Option<String>,
+    pub dtstart: Option<JsCalendarDateValue>,
+    pub dtend: Option<JsCalendarDateValue>,
     pub rrule: Option<JsRrule>,
     /// ATTENDEE list — empty for events with no RSVPs yet. The chat
     /// folds sibling `-rsvp-*` items into this list before render.
     #[serde(default)]
     pub attendees: Vec<JsAttendee>,
-    /// RFC3339 — set on override VEVENTs (one occurrence of a
-    /// recurring master). `None` on the master event itself.
-    pub recurrence_id: Option<String>,
-    /// RFC3339[] — per-instance cancellations on the master event.
+    /// Typed RECURRENCE-ID — set on override VEVENTs (one occurrence
+    /// of a recurring master). `None` on the master event itself.
+    pub recurrence_id: Option<JsCalendarDateValue>,
+    /// Typed EXDATE values — per-instance cancellations on the
+    /// master event.
     #[serde(default)]
-    pub exdates: Vec<String>,
+    pub exdates: Vec<JsCalendarDateValue>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,16 +85,129 @@ impl From<&Attendee> for JsAttendee {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn day(year: i32, month: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(year, month, day).expect("valid test date")
+    }
+
+    #[test]
+    fn client_xcal_js_calendar_date_round_trips_date_and_date_time() {
+        let date = CalendarDateValue::try_from(JsCalendarDateValue::Date {
+            date: "2026-06-05".to_string(),
+        })
+        .expect("date converts");
+        assert_eq!(date, CalendarDateValue::Date(day(2026, 6, 5)));
+
+        let date_time = CalendarDateValue::try_from(JsCalendarDateValue::DateTime {
+            ms: 1_781_030_400_000.0,
+        })
+        .expect("date-time converts");
+        assert_eq!(
+            JsCalendarDateValue::from(&date_time),
+            JsCalendarDateValue::DateTime {
+                ms: 1_781_030_400_000.0
+            }
+        );
+    }
+
+    #[test]
+    fn client_xcal_vevent_from_vevent_emits_typed_all_day_shapes() {
+        let event = VEvent::new("evt-all-day", "Festival")
+            .with_dtstart_date(day(2026, 6, 5))
+            .with_dtend_date(day(2026, 6, 8))
+            .with_exdate_dates([day(2026, 6, 6)]);
+
+        let js = JsVEvent::from_vevent("item-1", event);
+
+        assert_eq!(
+            js.dtstart,
+            Some(JsCalendarDateValue::Date {
+                date: "2026-06-05".to_string()
+            })
+        );
+        assert_eq!(
+            js.dtend,
+            Some(JsCalendarDateValue::Date {
+                date: "2026-06-08".to_string()
+            })
+        );
+        assert_eq!(
+            js.exdates,
+            vec![JsCalendarDateValue::Date {
+                date: "2026-06-06".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn client_xcal_rejects_mixed_date_and_date_time_values() {
+        let event = VEvent::new("evt-mixed", "Mixed")
+            .with_dtstart_date(day(2026, 6, 5))
+            .with_dtend(DateTime::<Utc>::from_timestamp_millis(1_781_030_400_000).unwrap());
+
+        assert!(calendar_date_type_mismatch(&event));
+    }
+
+    #[test]
+    fn client_xcal_rejects_mixed_master_exdate_values() {
+        let master = VEvent::new("evt-mixed-exdate", "Mixed EXDATE")
+            .with_dtstart(DateTime::<Utc>::from_timestamp_millis(1_781_030_400_000).unwrap())
+            .add_exdate_date(day(2026, 6, 12));
+        let item = CalendarItem::new(master);
+
+        assert!(validate_calendar_item_data(&item).is_err());
+    }
+
+    #[test]
+    fn client_xcal_rejects_override_recurrence_id_type_mismatch() {
+        let master = VEvent::new("evt-override", "Override")
+            .with_dtstart(DateTime::<Utc>::from_timestamp_millis(1_781_030_400_000).unwrap());
+        let override_event = VEvent::new("evt-override", "All-day override")
+            .with_recurrence_id_date(day(2026, 6, 5));
+        let item = CalendarItem::new(master).add_override(override_event);
+
+        assert!(validate_calendar_item_data(&item).is_err());
+    }
+
+    #[test]
+    fn client_xcal_rejects_non_positive_dtend_duration() {
+        let event = VEvent::new("evt-order", "Order")
+            .with_dtstart_date(day(2026, 6, 5))
+            .with_dtend_date(day(2026, 6, 5));
+
+        assert!(validate_calendar_event(&event).is_err());
+    }
+
+    #[test]
+    fn client_xcal_rejects_all_day_rrule_until_date_time() {
+        let until = DateTime::<Utc>::from_timestamp_millis(1_781_030_400_000).unwrap();
+        let event = VEvent::new("evt-until", "Until")
+            .with_dtstart_date(day(2026, 6, 5))
+            .with_rrule(Rrule::new(Freq::Daily).with_until(until));
+
+        assert!(validate_calendar_event(&event).is_err());
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct JsVEventInput {
     pub summary: String,
     pub description: Option<String>,
     pub location: Option<String>,
     pub organizer: Option<String>,
-    /// RFC3339 strings.
-    pub dtstart: Option<String>,
-    pub dtend: Option<String>,
+    pub dtstart: Option<JsCalendarDateValue>,
+    pub dtend: Option<JsCalendarDateValue>,
     pub rrule: Option<JsRrule>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub(crate) enum JsCalendarDateValue {
+    Date { date: String },
+    DateTime { ms: f64 },
 }
 
 /// Full CalendarItem write input — master VEVENT plus optional
@@ -105,21 +220,60 @@ pub(crate) struct JsCalendarItemInput {
     pub master: JsVEventInput,
     #[serde(default)]
     pub overrides: Vec<JsOverrideInput>,
-    /// RFC3339[] — occurrence DTSTART values to skip on the master.
+    /// Occurrence DTSTART values to skip on the master.
     #[serde(default)]
-    pub exdates: Vec<String>,
+    pub exdates: Vec<JsCalendarDateValue>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct JsOverrideInput {
-    /// RFC3339. The occurrence this override replaces.
-    pub recurrence_id: String,
+    /// The occurrence this override replaces.
+    pub recurrence_id: JsCalendarDateValue,
     /// All fields optional — overrides patch a subset of the master.
     pub summary: Option<String>,
     pub description: Option<String>,
     pub location: Option<String>,
-    pub dtstart: Option<String>,
-    pub dtend: Option<String>,
+    pub dtstart: Option<JsCalendarDateValue>,
+    pub dtend: Option<JsCalendarDateValue>,
+}
+
+impl TryFrom<JsCalendarDateValue> for CalendarDateValue {
+    type Error = JsValue;
+
+    fn try_from(value: JsCalendarDateValue) -> Result<Self, Self::Error> {
+        match value {
+            JsCalendarDateValue::Date { date } => NaiveDate::parse_from_str(&date, "%Y-%m-%d")
+                .map(CalendarDateValue::Date)
+                .map_err(|err| js_error(format!("invalid date: {err}"))),
+            JsCalendarDateValue::DateTime { ms } => {
+                if !ms.is_finite() {
+                    return Err(js_error("invalid date-time: non-finite timestamp"));
+                }
+                let millis = ms.round();
+                if (millis - ms).abs() > f64::EPSILON {
+                    return Err(js_error(
+                        "invalid date-time: timestamp must be milliseconds",
+                    ));
+                }
+                DateTime::<Utc>::from_timestamp_millis(millis as i64)
+                    .map(CalendarDateValue::DateTime)
+                    .ok_or_else(|| js_error("invalid date-time: timestamp out of range"))
+            }
+        }
+    }
+}
+
+impl From<&CalendarDateValue> for JsCalendarDateValue {
+    fn from(value: &CalendarDateValue) -> Self {
+        match value {
+            CalendarDateValue::Date(date) => Self::Date {
+                date: date.format("%Y-%m-%d").to_string(),
+            },
+            CalendarDateValue::DateTime(date_time) => Self::DateTime {
+                ms: date_time.timestamp_millis() as f64,
+            },
+        }
+    }
 }
 
 impl From<&Rrule> for JsRrule {
@@ -193,12 +347,16 @@ impl JsVEvent {
             location: event.location,
             organizer: event.organizer,
             dtstamp: event.dtstamp.map(|ts| ts.to_rfc3339()),
-            dtstart: event.dtstart.map(|ts| ts.to_rfc3339()),
-            dtend: event.dtend.map(|ts| ts.to_rfc3339()),
+            dtstart: event.dtstart.as_ref().map(JsCalendarDateValue::from),
+            dtend: event.dtend.as_ref().map(JsCalendarDateValue::from),
             rrule: event.rrule.as_ref().map(JsRrule::from),
             attendees: event.attendees.iter().map(JsAttendee::from).collect(),
-            recurrence_id: event.recurrence_id.map(|ts| ts.to_rfc3339()),
-            exdates: event.exdates.iter().map(|ts| ts.to_rfc3339()).collect(),
+            recurrence_id: event.recurrence_id.as_ref().map(JsCalendarDateValue::from),
+            exdates: event
+                .exdates
+                .iter()
+                .map(JsCalendarDateValue::from)
+                .collect(),
         }
     }
 }
@@ -312,16 +470,10 @@ fn build_item_publish_iq(community_jid: &str, item_id: &str, item: &CalendarItem
 fn vevent_from_input(uid: &str, input: JsVEventInput) -> Result<VEvent, JsValue> {
     let mut event = VEvent::new(uid, input.summary).with_dtstamp(Utc::now());
     if let Some(dtstart) = input.dtstart {
-        let parsed: DateTime<Utc> = dtstart
-            .parse()
-            .map_err(|err| js_error(format!("invalid dtstart: {err}")))?;
-        event = event.with_dtstart(parsed);
+        event = event.with_dtstart_value(dtstart.try_into()?);
     }
     if let Some(dtend) = input.dtend {
-        let parsed: DateTime<Utc> = dtend
-            .parse()
-            .map_err(|err| js_error(format!("invalid dtend: {err}")))?;
-        event = event.with_dtend(parsed);
+        event = event.with_dtend_value(dtend.try_into()?);
     }
     if let Some(description) = input.description {
         event = event.with_description(description);
@@ -335,28 +487,20 @@ fn vevent_from_input(uid: &str, input: JsVEventInput) -> Result<VEvent, JsValue>
     if let Some(rrule) = input.rrule {
         event = event.with_rrule(rrule.into_rrule()?);
     }
+    validate_calendar_date_types(&event)?;
     Ok(event)
 }
 
 fn override_from_input(uid: &str, input: JsOverrideInput) -> Result<VEvent, JsValue> {
-    let recurrence_id: DateTime<Utc> = input
-        .recurrence_id
-        .parse()
-        .map_err(|err| js_error(format!("invalid recurrence_id: {err}")))?;
+    let recurrence_id: CalendarDateValue = input.recurrence_id.try_into()?;
     let mut event = VEvent::new(uid, input.summary.unwrap_or_default())
         .with_dtstamp(Utc::now())
-        .with_recurrence_id(recurrence_id);
+        .with_recurrence_id_value(recurrence_id);
     if let Some(dtstart) = input.dtstart {
-        let parsed: DateTime<Utc> = dtstart
-            .parse()
-            .map_err(|err| js_error(format!("invalid override dtstart: {err}")))?;
-        event = event.with_dtstart(parsed);
+        event = event.with_dtstart_value(dtstart.try_into()?);
     }
     if let Some(dtend) = input.dtend {
-        let parsed: DateTime<Utc> = dtend
-            .parse()
-            .map_err(|err| js_error(format!("invalid override dtend: {err}")))?;
-        event = event.with_dtend(parsed);
+        event = event.with_dtend_value(dtend.try_into()?);
     }
     if let Some(description) = input.description {
         event = event.with_description(description);
@@ -364,7 +508,87 @@ fn override_from_input(uid: &str, input: JsOverrideInput) -> Result<VEvent, JsVa
     if let Some(location) = input.location {
         event = event.with_location(location);
     }
+    validate_calendar_date_types(&event)?;
     Ok(event)
+}
+
+fn validate_calendar_date_types(event: &VEvent) -> Result<(), JsValue> {
+    validate_calendar_event(event).map_err(js_error)
+}
+
+fn validate_calendar_event(event: &VEvent) -> Result<(), &'static str> {
+    if calendar_date_type_mismatch(event) {
+        return Err("DTSTART, DTEND, RECURRENCE-ID, and EXDATE must use the same date value type");
+    }
+    if calendar_date_order_invalid(event) {
+        return Err("DTEND must be after DTSTART");
+    }
+    if all_day_until_invalid(event) {
+        return Err("All-day recurring events must use COUNT until DATE UNTIL is supported");
+    }
+    Ok(())
+}
+
+fn calendar_date_type_mismatch(event: &VEvent) -> bool {
+    let expected = event
+        .dtstart
+        .or(event.recurrence_id)
+        .map(CalendarDateValue::kind);
+    let Some(expected) = expected else {
+        return false;
+    };
+    event.dtend.is_some_and(|value| value.kind() != expected)
+        || event
+            .recurrence_id
+            .is_some_and(|value| value.kind() != expected)
+        || event.exdates.iter().any(|value| value.kind() != expected)
+}
+
+fn calendar_date_order_invalid(event: &VEvent) -> bool {
+    let Some(start) = event.dtstart.or(event.recurrence_id) else {
+        return false;
+    };
+    event
+        .dtend
+        .is_some_and(|end| !calendar_date_after(end, start))
+}
+
+fn all_day_until_invalid(event: &VEvent) -> bool {
+    matches!(event.dtstart, Some(CalendarDateValue::Date(_)))
+        && matches!(
+            event.rrule.as_ref().and_then(|rule| rule.end.clone()),
+            Some(RruleEnd::Until(_))
+        )
+}
+
+fn calendar_date_after(end: CalendarDateValue, start: CalendarDateValue) -> bool {
+    match (end, start) {
+        (CalendarDateValue::Date(end), CalendarDateValue::Date(start)) => end > start,
+        (CalendarDateValue::DateTime(end), CalendarDateValue::DateTime(start)) => end > start,
+        _ => false,
+    }
+}
+
+fn validate_calendar_item(item: &CalendarItem) -> Result<(), JsValue> {
+    validate_calendar_item_data(item).map_err(js_error)
+}
+
+fn validate_calendar_item_data(item: &CalendarItem) -> Result<(), &'static str> {
+    validate_calendar_event(&item.master)?;
+    let master_kind = item.master.dtstart.map(CalendarDateValue::kind);
+    for override_event in &item.overrides {
+        validate_calendar_event(override_event)?;
+        if master_kind.is_some_and(|kind| {
+            override_event
+                .recurrence_id
+                .is_some_and(|value| value.kind() != kind)
+        }) {
+            return Err(
+                "Override RECURRENCE-ID must use the same date value type as the master DTSTART",
+            );
+        }
+    }
+    Ok(())
 }
 
 fn build_event_publish_iq(community_jid: &str, item_id: &str, event: &VEvent) -> Element {
@@ -416,19 +640,26 @@ fn parse_events_items_result(iq: &Element) -> Vec<JsVEvent> {
             continue;
         };
         // Master comes back under the item id; each override gets a
-        // synthetic id `<item-id>::override::<recurrence-id-rfc3339>`
+        // synthetic id `<item-id>::override::<typed-recurrence-id>`
         // so the chat can address them individually without losing
         // the master/override correlation (preserved via `uid`).
         flattened.push(JsVEvent::from_vevent(item_id, parsed.master));
         for ov in parsed.overrides {
             let synthetic = ov
                 .recurrence_id
-                .map(|ts| format!("{item_id}::override::{}", ts.to_rfc3339()))
+                .map(|value| format!("{item_id}::override::{}", calendar_date_key(value)))
                 .unwrap_or_else(|| item_id.to_string());
             flattened.push(JsVEvent::from_vevent(&synthetic, ov));
         }
     }
     flattened
+}
+
+fn calendar_date_key(value: CalendarDateValue) -> String {
+    match value {
+        CalendarDateValue::Date(date) => format!("date:{}", date.format("%Y-%m-%d")),
+        CalendarDateValue::DateTime(ts) => format!("date-time:{}", ts.to_rfc3339()),
+    }
 }
 
 // ── Wasm methods ────────────────────────────────────────────────────
@@ -457,31 +688,7 @@ impl WaddleClient {
             let input: JsVEventInput = serde_wasm_bindgen::from_value(input)
                 .map_err(|err| js_error(format!("invalid event input: {err}")))?;
             let item_id = format!("evt-{}", Uuid::new_v4());
-            let mut event = VEvent::new(&item_id, input.summary).with_dtstamp(Utc::now());
-            if let Some(dtstart) = input.dtstart {
-                let parsed: DateTime<Utc> = dtstart
-                    .parse()
-                    .map_err(|err| js_error(format!("invalid dtstart: {err}")))?;
-                event = event.with_dtstart(parsed);
-            }
-            if let Some(dtend) = input.dtend {
-                let parsed: DateTime<Utc> = dtend
-                    .parse()
-                    .map_err(|err| js_error(format!("invalid dtend: {err}")))?;
-                event = event.with_dtend(parsed);
-            }
-            if let Some(description) = input.description {
-                event = event.with_description(description);
-            }
-            if let Some(location) = input.location {
-                event = event.with_location(location);
-            }
-            if let Some(organizer) = input.organizer {
-                event = event.with_organizer(organizer);
-            }
-            if let Some(rrule) = input.rrule {
-                event = event.with_rrule(rrule.into_rrule()?);
-            }
+            let event = vevent_from_input(&item_id, input)?;
             let iq = build_event_publish_iq(&community_jid, &item_id, &event);
             send_iq_command(inner, iq).await?;
             let js_event = JsVEvent::from_vevent(&item_id, event);
@@ -511,15 +718,13 @@ impl WaddleClient {
             }
             let mut master = vevent_from_input(&item_id, input.master)?;
             for exdate in input.exdates {
-                let parsed: DateTime<Utc> = exdate
-                    .parse()
-                    .map_err(|err| js_error(format!("invalid exdate: {err}")))?;
-                master = master.add_exdate(parsed);
+                master = master.add_exdate_value(exdate.try_into()?);
             }
             let mut item = CalendarItem::new(master);
             for ov in input.overrides {
                 item = item.add_override(override_from_input(&item_id, ov)?);
             }
+            validate_calendar_item(&item)?;
             let iq = build_item_publish_iq(&community_jid, &item_id, &item);
             send_iq_command(inner, iq).await?;
             let js_master = JsVEvent::from_vevent(&item_id, item.master);

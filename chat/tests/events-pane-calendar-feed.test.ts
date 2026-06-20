@@ -5,9 +5,18 @@ import {
   calendarFeedCopyControllerKey,
   type CalendarFeedCopyController,
 } from "../src/lib/use-calendar-feed-copy";
+import {
+  dateTimeValue,
+  dateValue,
+  localDateString,
+} from "../src/lib/xmpp-client";
 
 const chatReadyShellSource = await Bun.file(
   new URL("../src/components/chat/ChatReadyShell.vue", import.meta.url),
+).text();
+
+const eventsPaneSource = await Bun.file(
+  new URL("../src/components/community/EventsPane.vue", import.meta.url),
 ).text();
 
 const computedCommunityJidBridge = `
@@ -180,5 +189,73 @@ describe("EventsPane calendar feed control", () => {
 
     expect(openLink).toContain(`href="${subscriptionHref}"`);
     expect(urlInput).toContain(`value="${feedUrl}"`);
+  });
+
+  test("composer source keeps 30-minute duration default, all-day controls, and validation copy", () => {
+    expect(eventsPaneSource).toContain('const durationChoice = ref("30")');
+    expect(eventsPaneSource).toContain('{ value: "30", label: "30 minutes" }');
+    expect(eventsPaneSource).toContain('{ value: "60", label: "1 hour" }');
+    expect(eventsPaneSource).toContain('{ value: "custom", label: "Custom" }');
+    expect(eventsPaneSource).toContain("All day");
+    expect(eventsPaneSource).toContain('v-model="allDayStart"');
+    expect(eventsPaneSource).toContain('v-model="allDayEnd"');
+    expect(eventsPaneSource).toContain("setDefaultAllDayDates()");
+    expect(eventsPaneSource).toContain("visibleComposerError");
+    expect(eventsPaneSource).toContain('return "End date must be after the start date."');
+    expect(eventsPaneSource).toContain('return "End time must be after the start time."');
+    expect(eventsPaneSource).toContain('return "All-day repeats need a count instead of an until date."');
+  });
+
+  test("renders multi-day all-day events in every covered month cell and selected day list", async () => {
+    const now = new Date();
+    const start = localDateString(now.getFullYear(), now.getMonth(), 1);
+    const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+    const endExclusive = localDateString(
+      nextMonth.getFullYear(),
+      nextMonth.getMonth(),
+      nextMonth.getDate(),
+    );
+    const html = await renderVueComponent(
+      "../src/components/community/EventsPane.vue",
+      props({
+        events: [{
+          id: "expo",
+          uid: "expo",
+          summary: "Three Day Expo",
+          organizer: "xmpp:alice@example.com",
+          dtstart: dateValue(start),
+          dtend: dateValue(endExclusive),
+        }],
+        selfJid: "alice@example.com",
+      }),
+      import.meta.url,
+    );
+
+    expect(html.match(/Three Day Expo/g)?.length ?? 0).toBeGreaterThanOrEqual(3);
+    expect(html).toContain("All day");
+  });
+
+  test("renders ongoing timed spans on a later visible day", async () => {
+    const now = new Date();
+    const startMs = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 23, 0).getTime();
+    const endMs = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 1, 0).getTime();
+    const html = await renderVueComponent(
+      "../src/components/community/EventsPane.vue",
+      props({
+        events: [{
+          id: "overnight",
+          uid: "overnight",
+          summary: "Overnight Window",
+          organizer: "xmpp:alice@example.com",
+          dtstart: dateTimeValue(startMs),
+          dtend: dateTimeValue(endMs),
+        }],
+        selfJid: "alice@example.com",
+      }),
+      import.meta.url,
+    );
+
+    expect(html).toContain("continues Overnight Window");
+    expect(html).toContain("Overnight Window");
   });
 });

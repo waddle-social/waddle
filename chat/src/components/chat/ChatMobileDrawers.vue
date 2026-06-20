@@ -20,6 +20,7 @@ import SettingsMobileHeader from "@/components/chat/SettingsMobileHeader.vue";
 import ProfilePanel from "@/components/chat/ProfilePanel.vue";
 import AppDrawer from "@/components/ui/AppDrawer.vue";
 import { extensionRouteIconComponent, extensionRouteRailItems } from "./extension-route-rail-model";
+import { isEventUpcomingOrOngoing } from "@/lib/xmpp-client";
 import type { CallMedia } from "@/lib/calls/types";
 import type { DiscoveredExtensionRoute } from "@/lib/xmpp/extension-commands";
 import type { ChatAppController } from "@/shell/chat-app-controller";
@@ -219,7 +220,7 @@ function openExtensionRoute(route: DiscoveredExtensionRoute) {
           :thread-entries-fn="(roomJid: string) => channelUnread.threadEntries(roomJid)"
           :active-community-surface="ui.activeCommunitySurface.value"
           :stories-active-count="stories.activeStories.value.length"
-          :upcoming-event-count="communityEvents.events.value.filter((e: { dtstartMs?: number }) => typeof e.dtstartMs === 'number' && e.dtstartMs > Date.now()).length"
+          :upcoming-event-count="communityEvents.events.value.filter((event) => isEventUpcomingOrOngoing(event)).length"
           :is-threads-active="ui.activePage.value === 'threads'"
           :is-unread-active="ui.activePage.value === 'unread'"
           :unread-total-count="channelUnread.totalUnreadCount.value + channelUnread.totalThreadUnreadCount.value"
