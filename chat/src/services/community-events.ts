@@ -11,8 +11,11 @@
 import { computed, ref, type Ref } from "vue";
 import {
   groupEventsWithRsvps,
+  calendarDateKey,
+  compareCalendarDateValues,
   sortEventsUpcomingFirst,
   type BrowserXmppClient,
+  type CalendarDateValue,
   type CommunityEvent,
   type CommunityEventInput,
   type PartStat,
@@ -170,7 +173,7 @@ export function useCommunityEvents(
    */
   async function cancelInstance(
     masterUid: string,
-    instanceDtstartMs: number,
+    instanceDtstart: CalendarDateValue,
   ): Promise<boolean> {
     const master = findMaster(masterUid);
     if (!master) return false;
@@ -180,9 +183,9 @@ export function useCommunityEvents(
     const client = xmppClient.value;
     const jid = options.communityJid.value;
     if (!client || !jid) return false;
-    const existing = new Set(master.exdatesMs ?? []);
-    existing.add(instanceDtstartMs);
-    const nextExdatesMs = [...existing].sort((a, b) => a - b);
+    const existing = new Map((master.exdates ?? []).map((value) => [calendarDateKey(value), value]));
+    existing.set(calendarDateKey(instanceDtstart), instanceDtstart);
+    const nextExdates = [...existing.values()].sort(compareCalendarDateValues);
     isPosting.value = true;
     error.value = null;
     try {
@@ -191,10 +194,10 @@ export function useCommunityEvents(
         ...(master.description ? { description: master.description } : {}),
         ...(master.location ? { location: master.location } : {}),
         ...(master.organizer ? { organizer: master.organizer } : {}),
-        ...(typeof master.dtstartMs === "number" ? { dtstartMs: master.dtstartMs } : {}),
-        ...(typeof master.dtendMs === "number" ? { dtendMs: master.dtendMs } : {}),
+        ...(master.dtstart ? { dtstart: master.dtstart } : {}),
+        ...(master.dtend ? { dtend: master.dtend } : {}),
         ...(master.rrule ? { rrule: master.rrule } : {}),
-        exdatesMs: nextExdatesMs,
+        exdates: nextExdates,
       });
       events.value = events.value.map((e) => (e.id === master.id ? updated : e));
       return true;

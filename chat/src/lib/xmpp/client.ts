@@ -2795,12 +2795,8 @@ export class BrowserXmppClient {
       ...(input.description ? { description: input.description } : {}),
       ...(input.location ? { location: input.location } : {}),
       ...(input.organizer ? { organizer: input.organizer } : {}),
-      ...(typeof input.dtstartMs === "number"
-        ? { dtstart: new Date(input.dtstartMs).toISOString() }
-        : {}),
-      ...(typeof input.dtendMs === "number"
-        ? { dtend: new Date(input.dtendMs).toISOString() }
-        : {}),
+      ...(input.dtstart ? { dtstart: input.dtstart } : {}),
+      ...(input.dtend ? { dtend: input.dtend } : {}),
       ...(input.rrule ? { rrule: rruleToWasm(input.rrule) } : {}),
     }) as WasmVEvent | undefined;
     if (!result) {
@@ -2821,19 +2817,15 @@ export class BrowserXmppClient {
     input: CommunityEventInput,
   ): Promise<CommunityEvent> {
     const xmpp = await this.requireConnectedXmpp();
-    const exdates = (input.exdatesMs ?? []).map((ms) => new Date(ms).toISOString());
+    const exdates = input.exdates ?? [];
     const result = await xmpp.xcal_publish_item?.(communityJid, itemId, {
       master: {
         summary: input.summary,
         ...(input.description ? { description: input.description } : {}),
         ...(input.location ? { location: input.location } : {}),
         ...(input.organizer ? { organizer: input.organizer } : {}),
-        ...(typeof input.dtstartMs === "number"
-          ? { dtstart: new Date(input.dtstartMs).toISOString() }
-          : {}),
-        ...(typeof input.dtendMs === "number"
-          ? { dtend: new Date(input.dtendMs).toISOString() }
-          : {}),
+        ...(input.dtstart ? { dtstart: input.dtstart } : {}),
+        ...(input.dtend ? { dtend: input.dtend } : {}),
         ...(input.rrule ? { rrule: rruleToWasm(input.rrule) } : {}),
       },
       overrides: [],

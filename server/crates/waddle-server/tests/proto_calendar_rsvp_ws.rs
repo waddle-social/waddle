@@ -66,7 +66,7 @@ async fn non_owner_can_publish_rsvp_for_master_event() {
                       <vevent>
                         <uid>{event_id}</uid>
                         <dtstamp>2026-06-01T12:00:00Z</dtstamp>
-                        <dtstart>2026-06-05T19:00:00Z</dtstart>
+                        <dtstart><date-time>2026-06-05T19:00:00Z</date-time></dtstart>
                         <summary>Friday Game Night</summary>
                         <organizer>xmpp:admin@localhost</organizer>
                       </vevent>
@@ -171,7 +171,7 @@ async fn malformed_rsvp_for_other_user_is_rejected() {
                     <vcalendar xmlns="{NS_XCAL}">
                       <vevent>
                         <uid>{event_id}</uid>
-                        <dtstart>2026-06-05T19:00:00Z</dtstart>
+                        <dtstart><date-time>2026-06-05T19:00:00Z</date-time></dtstart>
                         <summary>Game Night</summary>
                       </vevent>
                     </vcalendar>
@@ -272,7 +272,7 @@ async fn rsvp_publish_bridges_to_social_feed() {
                       <version>2.0</version>
                       <vevent>
                         <uid>{event_id}</uid>
-                        <dtstart>2026-06-05T19:00:00Z</dtstart>
+                        <dtstart><date-time>2026-06-05T19:00:00Z</date-time></dtstart>
                         <summary>Friday Game Night</summary>
                       </vevent>
                     </vcalendar>
