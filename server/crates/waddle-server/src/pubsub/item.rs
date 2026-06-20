@@ -21,6 +21,31 @@ impl DatabasePubSubStorage {
         publisher: Option<&BareJid>,
         auto_create: bool,
     ) -> Result<PublishResult, XmppError> {
+        self.publish_item_internal(owner, node_name, item, publisher, auto_create, false)
+            .await
+    }
+
+    pub(super) async fn publish_item_if_missing_or_publisher_impl(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+        item: &PubSubItem,
+        publisher: &BareJid,
+        auto_create: bool,
+    ) -> Result<PublishResult, XmppError> {
+        self.publish_item_internal(owner, node_name, item, Some(publisher), auto_create, true)
+            .await
+    }
+
+    async fn publish_item_internal(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+        item: &PubSubItem,
+        publisher: Option<&BareJid>,
+        auto_create: bool,
+        require_same_publisher: bool,
+    ) -> Result<PublishResult, XmppError> {
         let item_id = item
             .id
             .clone()
@@ -188,29 +213,61 @@ impl DatabasePubSubStorage {
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
 
-        tx.execute(
-            r#"
-            INSERT INTO pubsub_items (
-                owner_jid, node_name, item_id, payload_xml, publisher_jid, published_at_ms
+        let rows_affected = if require_same_publisher {
+            tx.execute(
+                r#"
+                INSERT INTO pubsub_items (
+                    owner_jid, node_name, item_id, payload_xml, publisher_jid, published_at_ms
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(owner_jid, node_name, item_id) DO UPDATE SET
+                    seq = excluded.seq,
+                    payload_xml = excluded.payload_xml,
+                    publisher_jid = excluded.publisher_jid,
+                    published_at_ms = excluded.published_at_ms
+                WHERE pubsub_items.publisher_jid = excluded.publisher_jid
+                "#,
+                crate::db_params![
+                    owner.to_string(),
+                    node_name,
+                    item_id.clone(),
+                    payload_xml,
+                    publisher_jid,
+                    published_at_ms,
+                ],
             )
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(owner_jid, node_name, item_id) DO UPDATE SET
-                seq = excluded.seq,
-                payload_xml = excluded.payload_xml,
-                publisher_jid = excluded.publisher_jid,
-                published_at_ms = excluded.published_at_ms
-            "#,
-            crate::db_params![
-                owner.to_string(),
-                node_name,
-                item_id.clone(),
-                payload_xml,
-                publisher_jid,
-                published_at_ms,
-            ],
-        )
-        .await
-        .map_err(|error| XmppError::internal(error.to_string()))?;
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?
+        } else {
+            tx.execute(
+                r#"
+                INSERT INTO pubsub_items (
+                    owner_jid, node_name, item_id, payload_xml, publisher_jid, published_at_ms
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(owner_jid, node_name, item_id) DO UPDATE SET
+                    seq = excluded.seq,
+                    payload_xml = excluded.payload_xml,
+                    publisher_jid = excluded.publisher_jid,
+                    published_at_ms = excluded.published_at_ms
+                "#,
+                crate::db_params![
+                    owner.to_string(),
+                    node_name,
+                    item_id.clone(),
+                    payload_xml,
+                    publisher_jid,
+                    published_at_ms,
+                ],
+            )
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?
+        };
+        if rows_affected == 0 {
+            return Err(XmppError::forbidden(Some(
+                "PubSub item belongs to a different publisher".to_string(),
+            )));
+        }
         let evicted_item_ids = self
             .enforce_max_items_tx(&mut tx, owner, node_name, node.config.max_items)
             .await?;

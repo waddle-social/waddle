@@ -228,6 +228,25 @@ impl NodeConfig {
         }
     }
 
+    /// Configuration for the XEP-0501 community stories node.
+    ///
+    /// Stories are community-broadcast content, like the social feed:
+    /// any authenticated, non-outcast member may publish. The server
+    /// still stamps the authenticated publisher into the story payload
+    /// before storing it.
+    pub fn community_stories() -> Self {
+        Self {
+            access_model: AccessModel::Open,
+            publish_model: PublishModel::Open,
+            max_items: u32::MAX,
+            persist_items: true,
+            deliver_payloads: true,
+            notify_retract: true,
+            notify_delete: true,
+            send_last_published_item: SendLastPublishedItem::OnSub,
+        }
+    }
+
     /// XEP-0503 configuration for a private Space node.
     pub fn spaces_private() -> Self {
         Self {

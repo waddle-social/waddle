@@ -57,6 +57,24 @@ impl PubSubStorage for DatabasePubSubStorage {
             .await
     }
 
+    async fn publish_item_if_missing_or_publisher(
+        &self,
+        owner: &BareJid,
+        node_name: &str,
+        item: &PubSubItem,
+        publisher: &BareJid,
+        auto_create: bool,
+    ) -> Result<waddle_xmpp::pubsub::PublishResult, XmppError> {
+        self.publish_item_if_missing_or_publisher_impl(
+            owner,
+            node_name,
+            item,
+            publisher,
+            auto_create,
+        )
+        .await
+    }
+
     async fn get_items(
         &self,
         owner: &BareJid,

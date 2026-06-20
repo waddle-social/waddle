@@ -184,6 +184,27 @@ pub fn build_story_element(story: &Story) -> Element {
     elem
 }
 
+/// Stamp a story payload with the authenticated publisher as author.
+pub fn stamp_story_author(item_id: &str, elem: &Element, author: &str) -> Option<Element> {
+    parse_story(item_id, elem)?;
+
+    let mut stamped = elem.clone();
+    let author_children: Vec<(String, String)> = stamped
+        .children()
+        .filter(|child| child.name() == "author" && child.ns() == NS_STORIES)
+        .map(|child| (child.name().to_owned(), child.ns()))
+        .collect();
+    for (name, ns) in author_children {
+        stamped.remove_child(&name, ns.as_str());
+    }
+
+    let mut child = Element::builder("author", NS_STORIES).build();
+    child.append_text_node(author);
+    stamped.append_child(child);
+
+    Some(stamped)
+}
+
 /// Filter a list of stories to only active (non-expired) ones.
 pub fn filter_active(stories: &[Story]) -> Vec<&Story> {
     stories.iter().filter(|s| s.is_active()).collect()
@@ -236,6 +257,46 @@ mod tests {
         );
         assert_eq!(parsed.author.as_deref(), Some("alice@example.com"));
         assert_eq!(parsed.expires, Some(future_time()));
+    }
+
+    #[test]
+    fn test_stamp_story_author_replaces_payload_author() {
+        let story = Story::new("s-1")
+            .with_body("Hello!")
+            .with_media("https://example.com/photo.jpg")
+            .with_author("spoof@example.com")
+            .with_expires_at(future_time());
+        let elem = build_story_element(&story);
+
+        let stamped = stamp_story_author("s-1", &elem, "alice@example.com").expect("story");
+        let parsed = parse_story("s-1", &stamped).expect("parseable");
+
+        assert_eq!(parsed.author.as_deref(), Some("alice@example.com"));
+        assert_eq!(parsed.body.as_deref(), Some("Hello!"));
+        assert_eq!(
+            parsed.media_url.as_deref(),
+            Some("https://example.com/photo.jpg")
+        );
+        assert_eq!(parsed.expires, story.expires);
+    }
+
+    #[test]
+    fn test_stamp_story_author_preserves_expires_wire_value() {
+        let elem: Element =
+            "<story xmlns='urn:xmpp:stories:0' expires='2030-01-01T12:00:00Z'><body>Hello!</body><author>spoof@example.com</author></story>"
+                .parse()
+                .expect("story element");
+
+        let stamped = stamp_story_author("s-1", &elem, "alice@example.com").expect("story");
+
+        assert_eq!(stamped.attr("expires"), Some("2030-01-01T12:00:00Z"));
+        assert_eq!(
+            parse_story("s-1", &stamped)
+                .expect("parseable")
+                .author
+                .as_deref(),
+            Some("alice@example.com")
+        );
     }
 
     #[test]

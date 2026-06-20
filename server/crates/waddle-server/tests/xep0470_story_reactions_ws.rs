@@ -1,8 +1,8 @@
 //! XEP-0470 Pubsub Attachments on XEP-0501 stories.
 //!
-//! Verifies the pull-based story reaction spine: story publishes remain
-//! owner-gated, while a non-owner member can publish/retract their own
-//! `<attachments/>` item under the story attachment node.
+//! Verifies the pull-based story reaction spine: stories and story
+//! reaction attachments are member-postable, while attachment items remain
+//! self-owned.
 
 mod ws_common;
 
@@ -156,8 +156,8 @@ async fn member_can_publish_read_and_retract_story_reaction_attachment() {
               <publish node="{STORIES_NODE}">
                 <item id="member-{story_id}">
                   <story xmlns="{NS_STORIES}" expires="2030-01-01T12:00:00Z">
-                    <body>must not publish</body>
-                    <author>alice@localhost</author>
+                    <body>member story</body>
+                    <author>spoofed@localhost</author>
                   </story>
                 </item>
               </publish>
@@ -166,8 +166,8 @@ async fn member_can_publish_read_and_retract_story_reaction_attachment() {
     )
     .await;
     assert!(
-        member_story.contains("type='error'") && member_story.contains("forbidden"),
-        "non-owner story publish must remain forbidden: {member_story}"
+        member_story.contains("type='result'"),
+        "member story publish should now succeed: {member_story}"
     );
 
     let attachment_node = story_attachment_node(&story_id);

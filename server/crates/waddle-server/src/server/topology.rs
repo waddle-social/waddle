@@ -134,8 +134,8 @@ async fn seed_initial_xmpp_topology(
     // announcements and microblog-style posts. Access model is
     // `community_feed()`: anyone can subscribe and read, and any
     // authenticated member may publish (`publish_model: Open`), per
-    // XEP-0472 §"Replying to a Post". Stories and calendar nodes below
-    // deliberately keep `spaces_public()` (owner-only publish).
+    // XEP-0472 §"Replying to a Post". Stories use the same member-postable
+    // access shape below; calendar keeps `spaces_public()` plus an RSVP carve-out.
     pubsub_storage
         .get_or_create_node(&community_jid, waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED)
         .await
@@ -149,13 +149,11 @@ async fn seed_initial_xmpp_topology(
         .await
         .map_err(|error| anyhow::anyhow!("failed to configure social feed node: {error}"))?;
 
-    // XEP-0501 Stories — community-wide ephemeral pubsub node. Same
-    // hosting + access model as the social feed; stories carry an
-    // `expires` timestamp and the chat client filters expired items
-    // out of the view. (Server-side eviction of expired items is a
-    // future cleanup job; the items API and pubsub semantics work
-    // unmodified — the `expires` attribute is application-level
-    // metadata.)
+    // XEP-0501 Stories — community-wide ephemeral pubsub node. Any
+    // authenticated, non-outcast member may publish; the service stamps
+    // the authenticated author into the payload before storing it.
+    // Stories carry an `expires` timestamp and the chat client filters
+    // expired items out of the view.
     pubsub_storage
         .get_or_create_node(
             &community_jid,
@@ -167,15 +165,15 @@ async fn seed_initial_xmpp_topology(
         .update_node_config(
             &community_jid,
             waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES,
-            &NodeConfig::spaces_public(),
+            &NodeConfig::community_stories(),
         )
         .await
         .map_err(|error| anyhow::anyhow!("failed to configure stories node: {error}"))?;
 
     // xCal Proto-calendar events — community-wide PubSub node for
-    // events with optional RSVP tracking. Same hosting + access
-    // model as the social feed; events carry their own scheduling
-    // metadata in the typed `<vcalendar/>` payload.
+    // events with optional RSVP tracking. Calendar event creation stays
+    // owner-only; per-attendee RSVP items have a separate authenticated
+    // member carve-out in the IQ handler.
     pubsub_storage
         .get_or_create_node(&community_jid, waddle_xmpp_core::xcal::PUBSUB_NODE_EVENTS)
         .await
