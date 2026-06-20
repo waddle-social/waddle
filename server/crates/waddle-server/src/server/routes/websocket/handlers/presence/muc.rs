@@ -111,6 +111,7 @@ async fn handle_muc_join_unlocked(
             match resolve_managed_channel_affiliation(
                 state,
                 session,
+                room_jid,
                 &channel.id,
                 admission_members_only,
             )

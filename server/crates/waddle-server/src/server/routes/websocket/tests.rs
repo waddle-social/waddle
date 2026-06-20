@@ -11,9 +11,7 @@ use super::{
 };
 use crate::config::ServerConfig;
 use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig};
-use crate::permissions::{
-    CheckPermission, Object, ObjectType, Permission, Relation, Subject, Tuple, WriteTuple,
-};
+use crate::permissions::{Object, ObjectType, Permission, Relation, Subject, Tuple, WriteTuple};
 use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
 use crate::server::AppState;
 use hmac::{Hmac, KeyInit, Mac};

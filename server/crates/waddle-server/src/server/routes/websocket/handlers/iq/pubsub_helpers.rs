@@ -2065,6 +2065,25 @@ async fn cleanup_stale_space_bookmarks(
                     item: previous_item,
                     parent_tuple_deleted,
                 });
+                match delete_channel_parent_tuple(state, channel_id, stale).await {
+                    Ok(deleted) => {
+                        if deleted {
+                            if let Some(removed) = removed_stale.last_mut() {
+                                removed.parent_tuple_deleted = true;
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        restore_stale_space_bookmarks(
+                            state,
+                            spaces_jid,
+                            channel_id,
+                            &removed_stale,
+                        )
+                        .await;
+                        return Err(error);
+                    }
+                }
             }
             Err(error) => {
                 if parent_tuple_deleted {
@@ -2150,7 +2169,7 @@ pub(super) async fn handle_spaces_retract(
         return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
     };
     let item_filter = [item_id.to_string()];
-    match state
+    let previous_item = match state
         .deps
         .protocol
         .pubsub_storage
@@ -2160,7 +2179,12 @@ pub(super) async fn handle_spaces_retract(
         Ok(items) if items.is_empty() => {
             return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::ItemNotFound))];
         }
-        Ok(_) => {}
+        Ok(items) => {
+            let Some(item) = items.into_iter().next() else {
+                return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::ItemNotFound))];
+            };
+            item.to_pubsub_item()
+        }
         Err(error) => {
             warn!(item_id, node, error = %error, "Failed to preflight Spaces item before retract");
             return vec![iq_to_xml(build_pubsub_error(
@@ -2168,7 +2192,7 @@ pub(super) async fn handle_spaces_retract(
                 PubSubError::InternalServerError,
             ))];
         }
-    }
+    };
     let link_to_restore = match state
         .deps
         .app_state
@@ -2221,7 +2245,58 @@ pub(super) async fn handle_spaces_retract(
         .retract_item(&spaces_jid, node, item_id)
         .await
     {
-        Ok(true) => vec![iq_to_xml(build_pubsub_success(iq))],
+        Ok(true) => match delete_channel_parent_tuple(state, &channel_id, node).await {
+            Ok(_) => vec![iq_to_xml(build_pubsub_success(iq))],
+            Err(error) => {
+                if let Err(restore_error) = state
+                    .deps
+                    .protocol
+                    .pubsub_storage
+                    .publish_item(&spaces_jid, node, &previous_item, None, false)
+                    .await
+                {
+                    warn!(
+                        item_id,
+                        node,
+                        error = %restore_error,
+                        "Failed to restore Spaces item after final parent tuple cleanup failure"
+                    );
+                }
+                if parent_tuple_deleted {
+                    if let Err(restore_error) =
+                        write_channel_parent_tuple(state, &channel_id, node).await
+                    {
+                        warn!(
+                            item_id,
+                            node,
+                            error = %restore_error,
+                            "Failed to restore channel parent tuple after final cleanup failure"
+                        );
+                    }
+                }
+                if let Some(link) = link_to_restore.as_ref() {
+                    if let Err(restore_error) = state
+                        .deps
+                        .app_state
+                        .channel_space_link_store
+                        .set(link)
+                        .await
+                    {
+                        warn!(
+                            item_id,
+                            node,
+                            error = %restore_error,
+                            "Failed to restore channel-space link after final parent tuple cleanup failure"
+                        );
+                    }
+                }
+                warn!(item_id, node, error = %error, "Failed to clear channel parent tuple after Spaces retract");
+                vec![iq_to_xml(build_pubsub_error(
+                    iq,
+                    PubSubError::InternalServerError,
+                ))]
+            }
+        },
         Ok(false) => {
             if parent_tuple_deleted {
                 if let Err(restore_error) =
