@@ -108,17 +108,27 @@ fn call_presence(room: &str, nick: &str, hand_raised: bool, muted: bool) -> Stri
 }
 
 /// A XEP-0272 §Leaving presence (no `<muji/>`) that a buggy/hostile
-/// client still tags with the raised-hand `<in-call>` marker. The server
-/// must NOT honour the marker once call participation is cleared.
-fn leave_presence_with_stale_hand(room: &str, nick: &str) -> String {
+/// client still tags with an `<in-call>` marker (`<hand-raised/>` and/or
+/// `<muted/>`). The server must NOT honour any marker once call
+/// participation is cleared — in-call state only exists for an active
+/// participant.
+fn leave_presence_with_stale_in_call(
+    room: &str,
+    nick: &str,
+    hand_raised: bool,
+    muted: bool,
+) -> String {
+    let mut in_call = Element::builder("in-call", NS_WADDLE_IN_CALL);
+    if hand_raised {
+        in_call = in_call.append(Element::builder("hand-raised", NS_WADDLE_IN_CALL).build());
+    }
+    if muted {
+        in_call = in_call.append(Element::builder("muted", NS_WADDLE_IN_CALL).build());
+    }
     serialize(
         Element::builder("presence", NS_CLIENT)
             .attr(attr("to"), format!("{room}/{nick}"))
-            .append(
-                Element::builder("in-call", NS_WADDLE_IN_CALL)
-                    .append(Element::builder("hand-raised", NS_WADDLE_IN_CALL).build())
-                    .build(),
-            )
+            .append(in_call.build())
             .build(),
     )
 }
@@ -321,7 +331,9 @@ async fn leave_call_presence_forces_hand_lowered_despite_stale_marker() {
 
     // Alice leaves the call but a buggy client keeps the <hand-raised/> marker.
     alice
-        .send(&leave_presence_with_stale_hand(&room, ALICE))
+        .send(&leave_presence_with_stale_in_call(
+            &room, ALICE, true, false,
+        ))
         .await
         .expect("alice leaves call with stale hand marker");
 
@@ -335,6 +347,52 @@ async fn leave_call_presence_forces_hand_lowered_despite_stale_marker() {
     assert!(
         !leave.contains("hand-raised"),
         "server must force the hand lowered on a leave-call presence: {leave}"
+    );
+}
+
+#[tokio::test]
+async fn leave_call_presence_forces_mute_cleared_despite_stale_marker() {
+    // #1030 mirror of the hand invariant: mute only exists for an active
+    // call participant. When the XEP-0272 leave marker (no <muji/>) arrives,
+    // the server must force mute cleared regardless of any <in-call><muted/>
+    // a buggy/hostile client still attached — otherwise a non-participant is
+    // reflected and replayed to late joiners as muted.
+    let _guard = TEST_SERIAL.lock().await;
+    let server = TestServer::start_with_extra_accounts(&[(BOB, BOB_PASSWORD)]);
+    let alice_password = server.fixed_account_password().to_string();
+    let mut alice = connect(&server, ALICE, &alice_password, "stale-mute-alice").await;
+    let mut bob = connect(&server, BOB, BOB_PASSWORD, "stale-mute-bob").await;
+    let room = format!("mute-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    join_room(&mut alice, &room, ALICE).await;
+    join_room(&mut bob, &room, BOB).await;
+
+    // Alice enters the call muted legitimately, then bob drains the reflection.
+    alice
+        .send(&call_presence(&room, ALICE, false, true))
+        .await
+        .expect("alice enters call muted");
+    bob.recv_matching(|f| f.contains("<presence") && f.contains("<muted"))
+        .await
+        .expect("bob sees the mute");
+
+    // Alice leaves the call but a buggy client keeps the <muted/> marker.
+    alice
+        .send(&leave_presence_with_stale_in_call(
+            &room, ALICE, false, true,
+        ))
+        .await
+        .expect("alice leaves call with stale mute marker");
+
+    let alice_from = format!("{room}/{ALICE}");
+    let leave = bob
+        .recv_matching(|f| {
+            f.contains("<presence") && f.contains(&alice_from) && !f.contains("muji")
+        })
+        .await
+        .expect("bob sees alice's reflected leave presence");
+    assert!(
+        !leave.contains("<muted"),
+        "server must force mute cleared on a leave-call presence: {leave}"
     );
 }
 

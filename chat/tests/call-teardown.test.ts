@@ -1070,8 +1070,7 @@ describe("leaveRetainedMucCallAction", () => {
       false,
       false,
       false,
-      false,
-      false, // muted — leaving clears all in-call state (#1030)
+      { handRaised: false, muted: false }, // leaving clears all in-call state (#1030)
     );
     expect($mucCallParticipants.get()).toEqual({
       "chan@muc.test": ["alice"],
@@ -1103,8 +1102,7 @@ describe("leaveRetainedMucCallAction", () => {
       false,
       false,
       false,
-      false,
-      false, // muted — leaving clears all in-call state (#1030)
+      { handRaised: false, muted: false }, // leaving clears all in-call state (#1030)
     );
     expect($mucCallParticipants.get()).toEqual({});
     expect($mucCallParticipantOwners.get()).toEqual({});
@@ -1141,7 +1139,7 @@ describe("leaveRetainedMucCallAction", () => {
     })).resolves.toBe(true);
 
     expect(sent).toEqual([
-      ["presence", "chan@muc.test", "alice", false, false, false, false, false],
+      ["presence", "chan@muc.test", "alice", false, false, false, { handRaised: false, muted: false }],
       ["terminate", "chan@muc.test", "muc-recovered-live"],
     ]);
     expect($mucCallParticipants.get()).toEqual({});
@@ -1187,8 +1185,7 @@ describe("leaveRetainedMucCallAction", () => {
       false,
       false,
       false,
-      false,
-      false, // muted — leaving clears all in-call state (#1030)
+      { handRaised: false, muted: false }, // leaving clears all in-call state (#1030)
     );
     expect(sender.send_muji_session_terminate).toHaveBeenCalledWith(
       "chan@muc.test",
@@ -1239,8 +1236,7 @@ describe("leaveRetainedMucCallAction", () => {
       false,
       false,
       false,
-      false,
-      false, // muted — leaving clears all in-call state (#1030)
+      { handRaised: false, muted: false }, // leaving clears all in-call state (#1030)
     );
     expect($mucCallParticipants.get()).toEqual({
       "chan@muc.test": ["alice"],
@@ -2029,8 +2025,8 @@ describe("MUC group call", () => {
       true,
       false,
       true,
-      false,
-      false, // muted — audioVideo fixture captures audio, so !audio = false (#1030)
+      // audioVideo fixture captures audio, so !audio = false (#1030)
+      { handRaised: false, muted: false },
     );
     expect(send_muji_session_initiate).toHaveBeenCalledTimes(1);
     expect($callState.get()).toMatchObject({
@@ -2210,8 +2206,7 @@ describe("MUC group call", () => {
       false,
       false,
       false,
-      false,
-      false, // muted — leaving clears all in-call state (#1030)
+      { handRaised: false, muted: false }, // leaving clears all in-call state (#1030)
     );
     expect($callState.get()).toEqual({ phase: "idle" });
   });
@@ -2361,8 +2356,8 @@ describe("MUC group call", () => {
       false, // active
       true, // preparing
       false, // video — irrelevant in preparing phase
-      false, // hand_raised
-      false, // muted — in-call state isn't advertised before joining (#1030)
+      // in-call state isn't advertised before joining (#1030)
+      { handRaised: false, muted: false },
     );
     expect(update_muji_presence).toHaveBeenNthCalledWith(
       2,
@@ -2371,8 +2366,8 @@ describe("MUC group call", () => {
       true, // active
       false, // preparing
       true, // video (audioVideo fixture has video=true)
-      false, // hand_raised
-      false, // muted — audioVideo fixture captures audio, so !audio = false (#1030)
+      // audioVideo fixture captures audio, so !audio = false (#1030)
+      { handRaised: false, muted: false },
     );
     expect(send_muji_session_initiate).toHaveBeenCalledTimes(1);
   });
@@ -2407,8 +2402,7 @@ describe("MUC group call", () => {
       false, // active
       false, // preparing
       false, // video
-      false, // hand_raised
-      false, // muted — teardown clears all in-call state (#1030)
+      { handRaised: false, muted: false }, // teardown clears all in-call state (#1030)
     );
     expect($callState.get()).toEqual({ phase: "idle" });
   });
@@ -2445,8 +2439,7 @@ describe("MUC group call", () => {
       false, // active
       false, // preparing
       false, // video
-      false, // hand_raised
-      false, // muted — teardown clears all in-call state (#1030)
+      { handRaised: false, muted: false }, // teardown clears all in-call state (#1030)
     );
     expect($callState.get()).toEqual({ phase: "idle" });
   });

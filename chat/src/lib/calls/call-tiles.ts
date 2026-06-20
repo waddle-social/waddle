@@ -80,7 +80,11 @@ function newTile(
     isSelf,
     mirrorVideo: isSelf && source === "camera",
     showsPresentingGlyph: source === "screen_share",
-    micEnabledHint,
+    // Mute is a microphone / person concept; a screen-share presentation
+    // tile has no mic, so it never carries a mute hint (#1030) — only the
+    // owner's camera tile reflects their mute, mirroring how #1029 confines
+    // the raised-hand badge to the camera tile.
+    micEnabledHint: source === "screen_share" ? true : micEnabledHint,
     videoTrack: null,
   };
 }

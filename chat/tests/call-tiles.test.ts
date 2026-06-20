@@ -53,6 +53,30 @@ describe("buildCallTiles micEnabledHint", () => {
     expect(self?.micEnabledHint).toBe(false);
   });
 
+  test("a muted owner's screen-share tile keeps micEnabledHint true (#1030)", () => {
+    // A presenter who mutes their mic while sharing their screen must NOT
+    // get a mic-off badge on the screen-share tile — mute is a mic concept,
+    // not a screen concept. Only their camera tile reflects the mute.
+    const tiles = buildCallTiles({
+      remoteTracks: [
+        remoteTrack("alice-cam", "alice@waddle.test/web", "video", "camera"),
+        remoteTrack("alice-screen", "alice@waddle.test/web", "video", "screen_share"),
+      ],
+      localTracks: [],
+      localIdentity: "me@waddle.test/browser",
+      micEnabled: true,
+      mutedKeys: new Set<string>(["alice@waddle.test/web"]),
+    });
+    const camera = tiles.find(
+      (tile) => tile.identity === "alice@waddle.test/web" && tile.source === "camera",
+    );
+    const screen = tiles.find(
+      (tile) => tile.identity === "alice@waddle.test/web" && tile.source === "screen_share",
+    );
+    expect(camera?.micEnabledHint).toBe(false); // muted → camera tile shows it
+    expect(screen?.micEnabledHint).toBe(true); // screen tile never shows mute
+  });
+
   test("defaults remote mic hint to enabled when no mutedKeys given", () => {
     const tiles = buildCallTiles({
       remoteTracks: [remoteTrack("alice-cam", "alice@waddle.test/web", "video", "camera")],

@@ -523,17 +523,18 @@ export class WaddleClient {
      *   §Joining two-phase flow. Typically the client sends this
      *   first, awaits the room's echo, then re-emits with contents
      *   declared.
-     * - `hand_raised`/`muted`: append an `<in-call
+     * - `in_call`: a plain JS object `{ handRaised, muted }`
+     *   ([`InCallPresenceFlags`]) appended as an `<in-call
      *   xmlns='urn:waddle:in-call:0'>` presence child *alongside*
-     *   `<muji/>` (#1029 raised hand / #1030 mute) carrying one marker
-     *   child per set flag. This is the FFI in-call "set method": the
-     *   caller re-emits its current call presence with the flags
-     *   toggled, and the absence of a marker clears that sub-state for
-     *   everyone (the server drops the stored state). Ignored unless the
-     *   occupant is in the call (`active` or `preparing`), since in-call
-     *   state is meaningless without call participation.
+     *   `<muji/>` (#1029 raised hand / #1030 mute), one marker child per
+     *   set flag. This is the FFI in-call "set method": the caller
+     *   re-emits its current call presence with the flags toggled, and
+     *   the absence of a marker clears that sub-state for everyone (the
+     *   server drops the stored state). Ignored unless the occupant is in
+     *   the call (`active` or `preparing`), since in-call state is
+     *   meaningless without call participation.
      */
-    update_muji_presence(room_jid: string, nick: string, active: boolean, preparing: boolean, video: boolean, hand_raised: boolean, muted: boolean): Promise<any>;
+    update_muji_presence(room_jid: string, nick: string, active: boolean, preparing: boolean, video: boolean, in_call: any): Promise<any>;
     /**
      * Fetch the latest calendar events from the community events
      * node. Returns ALL items including past events; chat-side

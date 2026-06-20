@@ -120,15 +120,10 @@ export async function leaveRetainedMucCallAction({
   const cachedSession = readMucCallSession({ roomJid, selfFullJid });
   let terminated = !cachedSession;
   try {
-    await sender.update_muji_presence(
-      roomJid,
-      selfNick,
-      false,
-      false,
-      false,
-      false, // hand_raised
-      false, // muted — leaving the call clears all in-call state
-    );
+    await sender.update_muji_presence(roomJid, selfNick, false, false, false, {
+      handRaised: false,
+      muted: false, // leaving the call clears all in-call state
+    });
     clearMucCallParticipant(roomJid, selfNick, selfFullJid, {
       includeAggregate: true,
     });
@@ -276,15 +271,10 @@ export async function resumeMucCallActivity({
   const sender = getSender();
   if (sender?.update_muji_presence) {
     try {
-      await sender.update_muji_presence(
-        session.roomJid,
-        selfNick,
-        true, // active
-        false, // preparing
-        media.video,
-        selfRaisedHandFor(session.roomJid), // hand_raised — preserve across resume
-        selfCallMuted(), // muted — preserve across resume
-      );
+      await sender.update_muji_presence(session.roomJid, selfNick, true, false, media.video, {
+        handRaised: selfRaisedHandFor(session.roomJid), // preserve across resume
+        muted: selfCallMuted(), // preserve across resume
+      });
     } catch (err) {
       reportCallError(err);
     }
@@ -321,16 +311,12 @@ export async function setMucCallHandRaised(
 
   setSelfRaisedHand(roomJid, raised);
   try {
-    await sender.update_muji_presence(
-      roomJid,
-      state.selfNick,
-      true, // active — still in the call
-      false, // preparing
-      state.media.video,
-      raised,
-      selfCallMuted(), // muted — re-stamp current mute so a hand toggle
-      // never drops the `<muted/>` marker (presence is last-writer-wins)
-    );
+    await sender.update_muji_presence(roomJid, state.selfNick, true, false, state.media.video, {
+      handRaised: raised,
+      // re-stamp the current mute so a hand toggle never drops the
+      // `<muted/>` marker (presence is last-writer-wins)
+      muted: selfCallMuted(),
+    });
     return true;
   } catch (err) {
     // Revert the optimistic flip — but only if a newer toggle hasn't
@@ -374,15 +360,10 @@ export async function broadcastMucCallSelfMute(
   if (!roomJid) return false;
 
   try {
-    await sender.update_muji_presence(
-      roomJid,
-      state.selfNick,
-      true, // active — still in the call
-      false, // preparing
-      state.media.video,
-      selfRaisedHandFor(roomJid), // hand_raised — preserve across a mute toggle
+    await sender.update_muji_presence(roomJid, state.selfNick, true, false, state.media.video, {
+      handRaised: selfRaisedHandFor(roomJid), // preserve across a mute toggle
       muted,
-    );
+    });
     return true;
   } catch (err) {
     reportCallError(err);

@@ -1,5 +1,18 @@
 use super::*;
 
+/// In-call presence sub-state flags (`urn:waddle:in-call:0`) the chat
+/// passes to [`WaddleClient::update_muji_presence`] as a plain JS object
+/// `{ handRaised, muted }`. Bundled into one FFI argument so the call
+/// presence carries both the #1029 raised hand and the #1030 mute — which
+/// share the single `<in-call>` presence child — without re-spelling each
+/// sub-state at the wasm boundary. Missing keys default to `false`.
+#[derive(Debug, Clone, Copy, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct InCallPresenceFlags {
+    pub hand_raised: bool,
+    pub muted: bool,
+}
+
 #[wasm_bindgen]
 impl WaddleClient {
     pub fn join_room(&self, room_jid: String, nick: String) -> Promise {
@@ -79,15 +92,16 @@ impl WaddleClient {
     ///   §Joining two-phase flow. Typically the client sends this
     ///   first, awaits the room's echo, then re-emits with contents
     ///   declared.
-    /// - `hand_raised`/`muted`: append an `<in-call
+    /// - `in_call`: a plain JS object `{ handRaised, muted }`
+    ///   ([`InCallPresenceFlags`]) appended as an `<in-call
     ///   xmlns='urn:waddle:in-call:0'>` presence child *alongside*
-    ///   `<muji/>` (#1029 raised hand / #1030 mute) carrying one marker
-    ///   child per set flag. This is the FFI in-call "set method": the
-    ///   caller re-emits its current call presence with the flags
-    ///   toggled, and the absence of a marker clears that sub-state for
-    ///   everyone (the server drops the stored state). Ignored unless the
-    ///   occupant is in the call (`active` or `preparing`), since in-call
-    ///   state is meaningless without call participation.
+    ///   `<muji/>` (#1029 raised hand / #1030 mute), one marker child per
+    ///   set flag. This is the FFI in-call "set method": the caller
+    ///   re-emits its current call presence with the flags toggled, and
+    ///   the absence of a marker clears that sub-state for everyone (the
+    ///   server drops the stored state). Ignored unless the occupant is in
+    ///   the call (`active` or `preparing`), since in-call state is
+    ///   meaningless without call participation.
     pub fn update_muji_presence(
         &self,
         room_jid: String,
@@ -95,11 +109,12 @@ impl WaddleClient {
         active: bool,
         preparing: bool,
         video: bool,
-        hand_raised: bool,
-        muted: bool,
+        in_call: JsValue,
     ) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
+            let in_call: InCallPresenceFlags = serde_wasm_bindgen::from_value(in_call)
+                .map_err(|err| JsValue::from_str(&err.to_string()))?;
             let to = format!("{room_jid}/{nick}");
             let mut builder = Element::builder("presence", NS_CLIENT)
                 .attr(minidom::rxml::xml_ncname!("to").to_owned(), to.as_str());
@@ -116,11 +131,11 @@ impl WaddleClient {
                     active && video,
                 );
                 builder = builder.append(muji);
-                if hand_raised || muted {
+                if in_call.hand_raised || in_call.muted {
                     builder = builder.append(
                         waddle_xmpp_client::messaging::build_in_call_presence_state_element(
-                            hand_raised,
-                            muted,
+                            in_call.hand_raised,
+                            in_call.muted,
                         ),
                     );
                 }
