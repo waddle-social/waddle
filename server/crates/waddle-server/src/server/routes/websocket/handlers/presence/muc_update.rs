@@ -248,10 +248,21 @@ pub(super) async fn try_handle_muc_presence_update(
     // session's hand). The sender was already confirmed as an occupant
     // via the muji upsert above, so a `None`/error here just means no
     // hand state to reflect.
+    // Enforce the invariant "raised hand <-> active call participant"
+    // server-side: when this stanza is the XEP-0272 leave marker
+    // (`clears_muji_presence`), the occupant is no longer in the call, so the
+    // hand MUST be lowered regardless of any `<in-call><hand-raised/></in-call>`
+    // a buggy or hostile client left on the stanza. Only an in-call presence
+    // (muji active) may carry a raised hand.
+    let hand_raised_state = if clears_muji_presence {
+        InCallPresenceState::default()
+    } else {
+        extract_in_call_presence_state(incoming)
+    };
     let raised_hand_sessions = match actor
         .ask(UpsertHandRaised {
             sender_jid: sender_jid.clone(),
-            state: extract_in_call_presence_state(incoming),
+            state: hand_raised_state,
         })
         .await
     {

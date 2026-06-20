@@ -99,6 +99,22 @@ fn call_presence(room: &str, nick: &str, hand_raised: bool) -> String {
     serialize(presence.build())
 }
 
+/// A XEP-0272 §Leaving presence (no `<muji/>`) that a buggy/hostile
+/// client still tags with the raised-hand `<in-call>` marker. The server
+/// must NOT honour the marker once call participation is cleared.
+fn leave_presence_with_stale_hand(room: &str, nick: &str) -> String {
+    serialize(
+        Element::builder("presence", NS_CLIENT)
+            .attr(attr("to"), format!("{room}/{nick}"))
+            .append(
+                Element::builder("in-call", NS_WADDLE_IN_CALL)
+                    .append(Element::builder("hand-raised", NS_WADDLE_IN_CALL).build())
+                    .build(),
+            )
+            .build(),
+    )
+}
+
 fn presence_in_call_child(frame: &str) -> Option<Element> {
     let element: Element = frame.parse().ok()?;
     if element.name() != "presence" {
@@ -195,6 +211,50 @@ async fn raise_hand_presence_reflects_in_call_child_alongside_muji() {
 
     let _ = bob.close().await;
     let _ = alice.close().await;
+}
+
+#[tokio::test]
+async fn leave_call_presence_forces_hand_lowered_despite_stale_marker() {
+    // Invariant: a raised hand only exists for an active call participant.
+    // When the XEP-0272 leave marker (no <muji/>) arrives, the server must
+    // force the hand lowered regardless of any <in-call><hand-raised/> the
+    // client still attached — otherwise a non-participant's hand is reflected
+    // and replayed to late joiners.
+    let _guard = TEST_SERIAL.lock().await;
+    let server = TestServer::start_with_extra_accounts(&[(BOB, BOB_PASSWORD)]);
+    let alice_password = server.fixed_account_password().to_string();
+    let mut alice = connect(&server, ALICE, &alice_password, "stale-alice").await;
+    let mut bob = connect(&server, BOB, BOB_PASSWORD, "stale-bob").await;
+    let room = format!("hand-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    join_room(&mut alice, &room, ALICE).await;
+    join_room(&mut bob, &room, BOB).await;
+
+    // Alice raises her hand legitimately, then bob drains the raise.
+    alice
+        .send(&call_presence(&room, ALICE, true))
+        .await
+        .expect("alice raises hand");
+    bob.recv_matching(|f| f.contains("<presence") && f.contains("hand-raised"))
+        .await
+        .expect("bob sees the raise");
+
+    // Alice leaves the call but a buggy client keeps the <hand-raised/> marker.
+    alice
+        .send(&leave_presence_with_stale_hand(&room, ALICE))
+        .await
+        .expect("alice leaves call with stale hand marker");
+
+    let alice_from = format!("{room}/{ALICE}");
+    let leave = bob
+        .recv_matching(|f| {
+            f.contains("<presence") && f.contains(&alice_from) && !f.contains("muji")
+        })
+        .await
+        .expect("bob sees alice's reflected leave presence");
+    assert!(
+        !leave.contains("hand-raised"),
+        "server must force the hand lowered on a leave-call presence: {leave}"
+    );
 }
 
 #[tokio::test]
