@@ -62,6 +62,35 @@ describe("raised-hand reducer", () => {
     });
   });
 
+  test("returns the same reference for no-op updates (no spurious rerenders)", () => {
+    const state = { "r@muc.test": ["a@x/1"] };
+    // Raising an already-raised hand.
+    expect(
+      reduceRaisedHands(state, {
+        kind: "set",
+        roomJid: "r@muc.test",
+        identityKey: "a@x/1",
+        raised: true,
+      }),
+    ).toBe(state);
+    // Lowering a hand that was never raised.
+    expect(
+      reduceRaisedHands(state, {
+        kind: "set",
+        roomJid: "r@muc.test",
+        identityKey: "nobody@x/1",
+        raised: false,
+      }),
+    ).toBe(state);
+    // clear-room for a room with no raised hands.
+    expect(
+      reduceRaisedHands(state, { kind: "clear-room", roomJid: "other@muc.test" }),
+    ).toBe(state);
+    // clear-all on an already-empty record.
+    const empty = {};
+    expect(reduceRaisedHands(empty, { kind: "clear-all" })).toBe(empty);
+  });
+
   test("does not mutate the input record", () => {
     const input = { "r@muc.test": ["a@x/1"] };
     const snapshot = structuredClone(input);

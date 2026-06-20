@@ -316,7 +316,12 @@ export async function setMucCallHandRaised(
     );
     return true;
   } catch (err) {
-    setSelfRaisedHand(roomJid, !raised); // revert optimistic flip
+    // Revert the optimistic flip — but only if a newer toggle hasn't
+    // already superseded it (rapid click / double tap), so we don't
+    // clobber the latest user intent with this stale request's rollback.
+    if (selfRaisedHandFor(roomJid) === raised) {
+      setSelfRaisedHand(roomJid, !raised);
+    }
     reportCallError(err);
     return false;
   }

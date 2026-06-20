@@ -36,45 +36,52 @@ type RaisedHandAction =
 
 /**
  * Pure reducer over the room → identity-keys raised-hand record.
- * Never mutates `current`. Pruning an empty room keeps the record
- * free of stale keys so `Object.keys` reflects rooms with live hands.
+ * Never mutates `current`, and returns the SAME `current` reference for
+ * no-op updates (idempotent set, invalid room/id, clearing what's
+ * already absent) so a `$mucRaisedHands.set(...)` round-trip skips the
+ * store notification and avoids spurious rerenders. Pruning an empty
+ * room keeps the record free of stale keys so `Object.keys` reflects
+ * rooms with live hands.
  */
 export function reduceRaisedHands(
-  current: Record<string, readonly string[]>,
+  current: Record<string, string[]>,
   action: RaisedHandAction,
 ): Record<string, string[]> {
-  if (action.kind === "clear-all") return {};
+  if (action.kind === "clear-all") {
+    return Object.keys(current).length === 0 ? current : {};
+  }
 
   const room = normalizeMucCallRoomJid(action.roomJid);
-  const next = cloneRecord(current);
-  if (!room) return next;
+  if (!room) return current;
 
   if (action.kind === "clear-room") {
+    if (!(room in current)) return current;
+    const next = cloneRecord(current);
     delete next[room];
     return next;
   }
 
   const { identityKey, raised } = action;
-  if (!identityKey) return next;
-  const existing = next[room] ?? [];
+  if (!identityKey) return current;
+  const existing = current[room] ?? [];
   const has = existing.includes(identityKey);
 
   if (raised) {
-    if (has) return next;
+    if (has) return current;
+    const next = cloneRecord(current);
     next[room] = [...existing, identityKey].sort();
     return next;
   }
 
-  if (!has) return next;
+  if (!has) return current;
+  const next = cloneRecord(current);
   const filtered = existing.filter((key) => key !== identityKey);
   if (filtered.length === 0) delete next[room];
   else next[room] = filtered;
   return next;
 }
 
-function cloneRecord(
-  current: Record<string, readonly string[]>,
-): Record<string, string[]> {
+function cloneRecord(current: Record<string, string[]>): Record<string, string[]> {
   const next: Record<string, string[]> = {};
   for (const [room, keys] of Object.entries(current)) next[room] = [...keys];
   return next;
