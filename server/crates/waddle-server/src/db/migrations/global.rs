@@ -518,6 +518,84 @@ CREATE INDEX idx_link_preview_media_refs_message
     ON link_preview_media_refs(archive_jid, message_id);
 "#;
 
+/// Repair databases where migration bookkeeping recorded V0005/V0007
+/// without the tables being present. This is intentionally idempotent:
+/// healthy databases no-op, while drifted databases recreate the missing
+/// schema without requiring operators to rewrite `_migrations`.
+pub const V0008_REPAIR_GLOBAL_SCHEMA_DRIFT: &str = r#"
+CREATE TABLE IF NOT EXISTS provider_webhook_deliveries (
+    provider_id TEXT NOT NULL,
+    delivery_id TEXT NOT NULL,
+    plugin_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    payload_sha256 TEXT NOT NULL,
+    status TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (provider_id, delivery_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_provider_webhook_deliveries_status
+    ON provider_webhook_deliveries(status, attempts, created_at);
+
+CREATE TABLE IF NOT EXISTS link_preview_media_refs (
+    upload_slot_id TEXT NOT NULL,
+    archive_jid TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    current_archive_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('current', 'unreferenced')),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (upload_slot_id, archive_jid, message_id),
+    FOREIGN KEY (upload_slot_id) REFERENCES upload_slots(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_link_preview_media_refs_current
+    ON link_preview_media_refs(upload_slot_id, state)
+    WHERE state = 'current';
+CREATE INDEX IF NOT EXISTS idx_link_preview_media_refs_message
+    ON link_preview_media_refs(archive_jid, message_id);
+"#;
+
+pub const V0008_REPAIR_GLOBAL_SCHEMA_DRIFT_POSTGRES: &str = r#"
+CREATE TABLE IF NOT EXISTS provider_webhook_deliveries (
+    provider_id TEXT NOT NULL,
+    delivery_id TEXT NOT NULL,
+    plugin_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    payload_sha256 TEXT NOT NULL,
+    status TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP::TEXT,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP::TEXT,
+    PRIMARY KEY (provider_id, delivery_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_provider_webhook_deliveries_status
+    ON provider_webhook_deliveries(status, attempts, created_at);
+
+CREATE TABLE IF NOT EXISTS link_preview_media_refs (
+    upload_slot_id TEXT NOT NULL,
+    archive_jid TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    current_archive_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('current', 'unreferenced')),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP::TEXT,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP::TEXT,
+    PRIMARY KEY (upload_slot_id, archive_jid, message_id),
+    FOREIGN KEY (upload_slot_id) REFERENCES upload_slots(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_link_preview_media_refs_current
+    ON link_preview_media_refs(upload_slot_id, state)
+    WHERE state = 'current';
+CREATE INDEX IF NOT EXISTS idx_link_preview_media_refs_message
+    ON link_preview_media_refs(archive_jid, message_id);
+"#;
+
 /// Get all global migrations in order
 pub fn all() -> Vec<Migration> {
     vec![
@@ -565,6 +643,12 @@ pub fn all() -> Vec<Migration> {
             description: "Track current link preview media references".to_string(),
             sql_sqlite: V0007_LINK_PREVIEW_MEDIA_REFS,
             sql_postgres: V0007_LINK_PREVIEW_MEDIA_REFS_POSTGRES,
+        },
+        Migration {
+            version: 8,
+            description: "Repair missing global tables after migration drift".to_string(),
+            sql_sqlite: V0008_REPAIR_GLOBAL_SCHEMA_DRIFT,
+            sql_postgres: V0008_REPAIR_GLOBAL_SCHEMA_DRIFT_POSTGRES,
         },
     ]
 }
