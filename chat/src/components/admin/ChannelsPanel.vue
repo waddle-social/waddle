@@ -6,6 +6,7 @@ import { Plus, Search } from "lucide-vue-next";
 import type { BrowserXmppClient } from "@/lib/xmpp";
 import type {
   WasmAdminChannelListEntry,
+  WasmAdminChannelType,
   WasmAdminChannelsListResult,
   WasmAdminSpaceListEntry,
 } from "@/lib/xmpp";
@@ -137,7 +138,7 @@ async function loadMore(): Promise<void> {
   }
 }
 
-async function onCreate(payload: { name: string; topic?: string | null; spaceJid?: string | null; spaceNode?: string | null; isPublic?: boolean | null; membersOnly?: boolean | null }) {
+async function onCreate(payload: { name: string; topic?: string | null; channelType?: WasmAdminChannelType | null; spaceJid?: string | null; spaceNode?: string | null; isPublic?: boolean | null; membersOnly?: boolean | null }) {
   if (!props.xmppClient) return;
   isSubmitting.value = true;
   try {
@@ -156,6 +157,19 @@ function openDetail(entry: WasmAdminChannelListEntry) {
 }
 function closeDetail() {
   selected.value = null;
+}
+function channelTypeLabel(type: WasmAdminChannelType): string {
+  switch (type) {
+    case "announcement":
+      return "Announcement";
+    case "forum":
+      return "Forum";
+    case "group-dm":
+      return "Group DM";
+    case "text":
+    default:
+      return "Text";
+  }
 }
 async function onDetailChanged() {
   await fetchFirstPage(prefix.value, spaceFilter.value);
@@ -278,6 +292,7 @@ const dialogSpaces = computed(() =>
           <div class="flex flex-col gap-0.5 min-w-0 flex-1">
             <div class="flex items-center gap-2 min-w-0">
               <span class="type-control truncate">{{ entry.name }}</span>
+              <span class="type-caption rounded-full bg-muted px-2 py-0.5 flex-shrink-0">{{ channelTypeLabel(entry.channel_type) }}</span>
               <span v-if="!entry.is_public" class="type-caption rounded-full bg-muted px-2 py-0.5 flex-shrink-0">Hidden</span>
               <span v-if="entry.members_only" class="type-caption rounded-full bg-muted px-2 py-0.5 flex-shrink-0">Members-only</span>
             </div>

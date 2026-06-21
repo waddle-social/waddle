@@ -356,6 +356,7 @@ pub(super) async fn handle_muc_disco_info<'a>(
         let mut features = muc_room_features(
             snapshot.config.persistent,
             snapshot.config.members_only,
+            snapshot.config.public_room,
             snapshot.config.moderated || channel_type == "announcement",
             snapshot.config.forum || channel_type == "forum",
         );
@@ -396,6 +397,7 @@ pub(super) async fn handle_muc_disco_info<'a>(
         let mut features = muc_room_features(
             true,
             channel.members_only,
+            channel.public_room,
             channel.channel_type == "announcement",
             channel.channel_type == "forum",
         );
@@ -430,7 +432,7 @@ pub(super) async fn handle_muc_disco_info<'a>(
         .map(|n| n.to_string())
         .unwrap_or_else(|| "Room".to_string());
     let identities = vec![Identity::muc_room(Some(&room_name))];
-    let mut features = muc_room_features(false, false, false, false);
+    let mut features = muc_room_features(false, false, true, false, false);
     features.extend(extension_features_for_disco(state));
     let response = build_disco_info_response(req.request_iq, &identities, &features, None);
     Some(DiscoInfoResponse::iq(response))

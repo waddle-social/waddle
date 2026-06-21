@@ -320,6 +320,77 @@ async fn managed_members_only_join_requires_explicit_channel_member_affiliation(
 }
 
 #[tokio::test]
+async fn managed_public_channel_allows_deployment_member_without_channel_tuple() {
+    let state = create_test_websocket_state().await;
+    let session = create_test_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "project@muc.example.com".parse().expect("room jid");
+    let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
+
+    crate::server::xmpp_state::upsert_xmpp_channel(
+        state.deps.app_state.db_pool.global_actor().clone(),
+        &crate::server::xmpp_state::XmppChannelUpsert {
+            id: "project".to_string(),
+            name: "Project".to_string(),
+            description: None,
+            channel_type: "text".to_string(),
+            position: 0,
+            is_default: false,
+            pin_permission: waddle_xmpp::muc::PinPermission::Anyone,
+            members_only: false,
+            public_room: true,
+        },
+    )
+    .await
+    .expect("channel upsert");
+    state
+        .deps
+        .app_state
+        .permission_actor
+        .ask(WriteTuple {
+            tuple: Tuple::new(
+                Object::new(ObjectType::Server, DEPLOYMENT_SERVER_ID),
+                Relation::new("member"),
+                Subject::user(&session.user_jid),
+            ),
+        })
+        .await
+        .expect("server member tuple");
+
+    let responses = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &sender_jid,
+        "alice",
+        None,
+        &Some(session),
+    )
+    .await;
+
+    let presence =
+        Element::from_str(responses.first().expect("self-presence")).expect("presence XML");
+    assert_eq!(presence.name(), "presence");
+    assert_ne!(
+        presence.attr("type"),
+        Some("error"),
+        "public/open managed channel must admit deployment members: {responses:?}"
+    );
+    let user_x = presence
+        .get_child("x", "http://jabber.org/protocol/muc#user")
+        .expect("muc user payload");
+    let item = user_x
+        .get_child("item", "http://jabber.org/protocol/muc#user")
+        .expect("muc user item");
+    assert_eq!(item.attr("affiliation"), Some("none"));
+    assert!(
+        user_x
+            .children()
+            .any(|child| child.name() == "status" && child.attr("code") == Some("110")),
+        "successful join must complete with XEP-0045 self-presence 110: {responses:?}"
+    );
+}
+
+#[tokio::test]
 async fn managed_join_uses_live_actor_members_only_config_over_stale_channel_row() {
     let state = create_test_websocket_state().await;
     let session = create_test_session(state.as_ref(), "bob").await;
@@ -2000,7 +2071,7 @@ async fn active_room_disco_preserves_managed_announcement_channel_type() {
         .await
         .expect("persistent connection");
     conn.execute(
-            "INSERT INTO channels (id, name, description, channel_type, position, is_default) VALUES (?, ?, ?, 'announcement', 0, 0)",
+            "INSERT INTO channels (id, name, description, channel_type, position, is_default, members_only, public_room) VALUES (?, ?, ?, 'announcement', 0, 0, 0, 1)",
             crate::db_params!["announcements", "Announcements", "Owner-posted announcements"],
         )
         .await
@@ -2034,6 +2105,12 @@ async fn active_room_disco_preserves_managed_announcement_channel_type() {
     .await;
     let response = responses.first().expect("room disco response");
     assert!(response.contains("muc_moderated"), "response: {response}");
+    assert!(response.contains("muc_open"), "response: {response}");
+    assert!(
+        !response.contains("muc_membersonly"),
+        "response: {response}"
+    );
+    assert!(response.contains("muc_public"), "response: {response}");
     assert!(
         response.contains("waddle#channel_type"),
         "response: {response}"
@@ -2042,6 +2119,199 @@ async fn active_room_disco_preserves_managed_announcement_channel_type() {
     assert!(
         !response.contains("<value>text</value>"),
         "announcement room must not be reported as text: {response}"
+    );
+}
+
+#[tokio::test]
+async fn muc_owner_config_cannot_unmoderate_managed_announcement_channel() {
+    let state = create_test_websocket_state().await;
+    let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let bob_session = create_test_session(state.as_ref(), "bob").await;
+    let conn = state
+        .deps
+        .app_state
+        .db_pool
+        .global()
+        .guard()
+        .await
+        .expect("persistent connection");
+    conn.execute(
+        "INSERT INTO channels (id, name, description, channel_type, position, is_default, members_only, public_room) VALUES (?, ?, ?, 'announcement', 0, 0, 0, 1)",
+        crate::db_params![
+            "ops-announcements",
+            "Ops Announcements",
+            "Owner-posted operational updates"
+        ],
+    )
+    .await
+    .expect("insert announcement channel");
+    drop(conn);
+
+    let room_jid: BareJid = "ops-announcements@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let alice_jid: FullJid = format!("{}@example.com/web", alice_session.xmpp_localpart)
+        .parse()
+        .expect("alice jid");
+    let bob_jid: FullJid = format!("{}@example.com/web", bob_session.xmpp_localpart)
+        .parse()
+        .expect("bob jid");
+    handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice_jid,
+        "alice",
+        None,
+        &Some(alice_session.clone()),
+    )
+    .await;
+
+    let submit_form = Element::builder("x", waddle_xmpp::muc::DATA_FORMS_NS)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
+        .append(
+            Element::builder("field", waddle_xmpp::muc::DATA_FORMS_NS)
+                .attr(
+                    minidom::rxml::xml_ncname!("var").to_owned(),
+                    "muc#roomconfig_moderatedroom",
+                )
+                .append(
+                    Element::builder("value", waddle_xmpp::muc::DATA_FORMS_NS)
+                        .append("0")
+                        .build(),
+                )
+                .build(),
+        )
+        .build();
+    let owner_set = element_to_xml(
+        Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
+            .attr(
+                minidom::rxml::xml_ncname!("id").to_owned(),
+                "announcement-owner-submit",
+            )
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+            .attr(
+                minidom::rxml::xml_ncname!("to").to_owned(),
+                room_jid.to_string(),
+            )
+            .append(
+                Element::builder("query", waddle_xmpp::muc::NS_MUC_OWNER)
+                    .append(submit_form)
+                    .build(),
+            )
+            .build(),
+    );
+
+    let responses = handle_iq(
+        &owner_set,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(alice_session.clone()),
+        &ready_phase(&alice_jid),
+    )
+    .await;
+    assert_eq!(responses.len(), 1, "owner config response: {responses:?}");
+    assert!(responses[0].contains("type='result'"));
+
+    let snapshot = get_room_actor(state.as_ref(), &room_jid)
+        .await
+        .expect("room actor")
+        .ask(GetSnapshot)
+        .await
+        .expect("snapshot")
+        .room;
+    assert!(
+        snapshot.config.moderated,
+        "announcement owner config must keep the live room moderated"
+    );
+    assert!(
+        !snapshot.config.forum,
+        "announcement owner config must not drift into forum mode"
+    );
+
+    let owner_get = element_to_xml(
+        Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
+            .attr(
+                minidom::rxml::xml_ncname!("id").to_owned(),
+                "announcement-owner-get",
+            )
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+            .attr(
+                minidom::rxml::xml_ncname!("to").to_owned(),
+                room_jid.to_string(),
+            )
+            .append(Element::builder("query", waddle_xmpp::muc::NS_MUC_OWNER).build())
+            .build(),
+    );
+    let responses = handle_iq(
+        &owner_get,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(alice_session),
+        &ready_phase(&alice_jid),
+    )
+    .await;
+    assert_eq!(responses.len(), 1, "owner get response: {responses:?}");
+    let response =
+        Element::from_str(responses.first().expect("owner get response")).expect("owner get XML");
+    let form = response
+        .get_child("query", waddle_xmpp::muc::NS_MUC_OWNER)
+        .and_then(|query| query.get_child("x", waddle_xmpp::muc::DATA_FORMS_NS))
+        .expect("owner config form");
+    let moderated_field = form
+        .children()
+        .find(|field| {
+            field.name() == "field"
+                && field.ns() == waddle_xmpp::muc::DATA_FORMS_NS
+                && field.attr("var") == Some("muc#roomconfig_moderatedroom")
+        })
+        .expect("moderated field");
+    let moderated_value = moderated_field
+        .get_child("value", waddle_xmpp::muc::DATA_FORMS_NS)
+        .map(|value| value.texts().collect::<String>())
+        .expect("moderated value");
+    assert_eq!(
+        moderated_value, "1",
+        "owner config GET must project managed announcements as moderated"
+    );
+
+    handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &bob_jid,
+        "bob",
+        None,
+        &Some(bob_session.clone()),
+    )
+    .await;
+    let bob = snapshot_room(state.as_ref(), &room_jid)
+        .await
+        .room
+        .get_occupant("bob")
+        .expect("bob occupant")
+        .clone();
+    assert_eq!(bob.role, waddle_xmpp::Role::Visitor);
+
+    let message = format!(
+        "<message xmlns='jabber:client' to='{room_jid}' type='groupchat' id='bob-announcement-post'>\
+            <body>not an owner</body>\
+        </message>"
+    );
+    let responses = handle_message_for_test(
+        state.as_ref(),
+        &bob_jid,
+        Some(&bob_session),
+        parse_message_for_test(&message),
+    )
+    .await;
+    assert_eq!(responses.len(), 1, "message response: {responses:?}");
+    assert!(
+        responses[0].contains("type='error'") && responses[0].contains("forbidden"),
+        "announcement visitor post must be rejected: {}",
+        responses[0]
     );
 }
 

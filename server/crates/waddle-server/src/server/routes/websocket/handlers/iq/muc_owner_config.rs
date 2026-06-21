@@ -18,6 +18,59 @@ fn data_form_bool(form: &Element, var: &str) -> Option<bool> {
     })
 }
 
+fn channel_type_from_config(config: &waddle_xmpp::muc::RoomConfig) -> waddle_xmpp::ChannelType {
+    if config.group_dm {
+        waddle_xmpp::ChannelType::GroupDm
+    } else if config.forum {
+        waddle_xmpp::ChannelType::Forum
+    } else if config.moderated {
+        waddle_xmpp::ChannelType::Announcement
+    } else {
+        waddle_xmpp::ChannelType::Text
+    }
+}
+
+pub(super) fn project_channel_type_to_config(
+    config: &mut waddle_xmpp::muc::RoomConfig,
+    channel_type: waddle_xmpp::ChannelType,
+) {
+    match channel_type {
+        waddle_xmpp::ChannelType::Text => {
+            config.group_dm = false;
+            config.forum = false;
+        }
+        waddle_xmpp::ChannelType::Announcement => {
+            config.group_dm = false;
+            config.forum = false;
+            config.moderated = true;
+        }
+        waddle_xmpp::ChannelType::Forum => {
+            config.group_dm = false;
+            config.forum = true;
+        }
+        waddle_xmpp::ChannelType::GroupDm => {
+            config.group_dm = true;
+            config.forum = false;
+        }
+    }
+}
+
+pub(super) async fn managed_channel_type_for_room(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+) -> Result<Option<waddle_xmpp::ChannelType>, String> {
+    let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(room_jid) else {
+        return Ok(None);
+    };
+    let actor = state.deps.app_state.db_pool.global_actor().clone();
+    get_xmpp_channel(actor, &channel_id)
+        .await
+        .map_err(|error| format!("channel lookup failed: {error}"))
+        .map(|channel| {
+            channel.and_then(|channel| waddle_xmpp::ChannelType::parse(&channel.channel_type))
+        })
+}
+
 pub(super) async fn apply_muc_owner_config(
     state: &WebSocketState,
     room_jid: &BareJid,
@@ -88,6 +141,10 @@ pub(super) async fn apply_muc_owner_config(
     config.persistent = true;
 
     let channel_id = waddle_xmpp::parse_managed_room_jid(room_jid);
+    let existing_channel_type = managed_channel_type_for_room(state, room_jid).await?;
+    if let Some(channel_type) = existing_channel_type {
+        project_channel_type_to_config(&mut config, channel_type);
+    }
     if let (Some(channel_id), Some(session)) = (channel_id.as_deref(), session) {
         write_tuple_if_absent(
             state,
@@ -143,17 +200,7 @@ pub(super) async fn apply_muc_owner_config(
 
     let now = chrono::Utc::now().to_rfc3339();
     let actor = state.deps.app_state.db_pool.global_actor().clone();
-    let existing_channel_type = get_xmpp_channel(actor.clone(), &channel_id)
-        .await
-        .map_err(|error| format!("channel lookup failed: {error}"))?
-        .map(|channel| channel.channel_type);
-    let channel_type = if config.forum {
-        "forum".to_string()
-    } else if existing_channel_type.as_deref() == Some("announcement") {
-        "announcement".to_string()
-    } else {
-        "text".to_string()
-    };
+    let channel_type = existing_channel_type.unwrap_or_else(|| channel_type_from_config(&config));
     if let Err(error) = actor
         .ask(DbExecute {
             sql: r#"
@@ -173,7 +220,7 @@ pub(super) async fn apply_muc_owner_config(
                 channel_id.clone().into(),
                 config.name.clone().into(),
                 config.description.clone().into(),
-                channel_type.into(),
+                channel_type.as_str().into(),
                 config.pin_permission.as_form_value().into(),
                 config.members_only.into(),
                 config.public_room.into(),
@@ -225,4 +272,40 @@ pub(super) async fn apply_muc_owner_config(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod channel_type_projection_tests {
+    use super::*;
+
+    #[test]
+    fn text_projection_preserves_xep_moderatedroom() {
+        let mut config = waddle_xmpp::muc::RoomConfig {
+            group_dm: true,
+            forum: true,
+            moderated: true,
+            ..waddle_xmpp::muc::RoomConfig::default()
+        };
+
+        project_channel_type_to_config(&mut config, waddle_xmpp::ChannelType::Text);
+
+        assert!(!config.group_dm);
+        assert!(!config.forum);
+        assert!(config.moderated);
+    }
+
+    #[test]
+    fn announcement_projection_forces_moderatedroom() {
+        let mut config = waddle_xmpp::muc::RoomConfig {
+            forum: true,
+            moderated: false,
+            ..waddle_xmpp::muc::RoomConfig::default()
+        };
+
+        project_channel_type_to_config(&mut config, waddle_xmpp::ChannelType::Announcement);
+
+        assert!(!config.group_dm);
+        assert!(!config.forum);
+        assert!(config.moderated);
+    }
 }

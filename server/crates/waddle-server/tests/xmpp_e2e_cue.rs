@@ -136,8 +136,8 @@ const ADVERTISED_FEATURE_XEPS: &[(&str, &str)] = &[
     ("urn:xmpp:jingle-message:0", "XEP-0353"),
     ("urn:xmpp:extdisco:2", "XEP-0215"),
     ("urn:xmpp:jingle:muji:0", "XEP-0272"),
-    ("urn:xmpp:pubsub-social-feed:0", "XEP-0472"),
-    ("urn:xmpp:stories:0", "XEP-0501"),
+    ("urn:xmpp:pubsub-social-feed:1", "XEP-0472"),
+    ("urn:xmpp:pubsub-social-feed:stories:0", "XEP-0501"),
     ("urn:xmpp:spaces:0", "XEP-0503"),
     ("urn:xmpp:inbox:1", "XEP-0430"),
     // xCal calendar — XSF ProtoXEP "Calendaring Extensions to
@@ -174,6 +174,10 @@ const ADVERTISED_FEATURE_EXEMPTIONS: &[FeatureCoverageExemption] = &[
     },
     FeatureCoverageExemption {
         feature: "muc_public",
+        reason: "XEP-0045 room configuration identity flag, not a separate XEP namespace.",
+    },
+    FeatureCoverageExemption {
+        feature: "muc_hidden",
         reason: "XEP-0045 room configuration identity flag, not a separate XEP namespace.",
     },
     FeatureCoverageExemption {
@@ -1345,9 +1349,9 @@ fn add_text_xep_evidence(text: &str, evidence: &mut BTreeSet<&'static str>) {
         ("urn:xmpp:file:metadata:0", "XEP-0446"),
         ("urn:xmpp:sfs:0", "XEP-0447"),
         ("urn:xmpp:reply:0", "XEP-0461"),
-        ("urn:xmpp:pubsub-social-feed:0", "XEP-0472"),
+        ("urn:xmpp:pubsub-social-feed:1", "XEP-0472"),
         ("urn:xmpp:notification-settings:1", "XEP-0492"),
-        ("urn:xmpp:stories:0", "XEP-0501"),
+        ("urn:xmpp:pubsub-social-feed:stories:0", "XEP-0501"),
         ("urn:xmpp:spaces:0", "XEP-0503"),
         ("urn:xmpp:mentions:0", "XEP-0513"),
     ] {
@@ -1630,7 +1634,10 @@ fn advertised_feature_vars() -> BTreeSet<String> {
         .chain(waddle_xmpp::disco::info::spaces_service_features())
         .chain(waddle_xmpp::disco::info::muc_service_features())
         .chain(waddle_xmpp::disco::info::muc_room_features(
-            true, true, false, true,
+            true, true, false, false, true,
+        ))
+        .chain(waddle_xmpp::disco::info::muc_room_features(
+            true, false, true, false, false,
         ))
         .chain(waddle_xmpp::disco::info::call_features())
         .chain(waddle_xmpp::pubsub::pep_features())

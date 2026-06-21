@@ -1,5 +1,7 @@
 use super::*;
-use crate::permissions::{DeleteTuple, PermissionError, Relation, SubjectType, Tuple, WriteTuple};
+use crate::permissions::{
+    DeleteTuple, ListRelations, PermissionError, Relation, SubjectType, Tuple, WriteTuple,
+};
 
 pub(super) async fn resolve_managed_channel_affiliation(
     state: &WebSocketState,
@@ -10,28 +12,13 @@ pub(super) async fn resolve_managed_channel_affiliation(
 ) -> Result<Option<Affiliation>, ()> {
     let object = Object::new(ObjectType::Channel, channel_id);
     let subject = Subject::user(&session.user_jid);
-    if check_channel_permission(
-        state,
-        object.clone(),
-        subject.clone(),
-        Permission::Custom("outcast".into()),
-    )
-    .await?
+    if let Some(affiliation) =
+        direct_channel_affiliation(state, object.clone(), subject.clone()).await?
     {
-        return Ok(Some(Affiliation::Outcast));
+        return Ok(Some(affiliation));
     }
 
-    for (permission, affiliation) in [
-        (Permission::Owner, Affiliation::Owner),
-        (Permission::Admin, Affiliation::Admin),
-        (Permission::Member, Affiliation::Member),
-    ] {
-        if check_channel_permission(state, object.clone(), subject.clone(), permission).await? {
-            return Ok(Some(affiliation));
-        }
-    }
-
-    if !members_only && matches!(channel_id, "chat" | "announcements" | "github-actions") {
+    if !members_only {
         let server = Object::new(ObjectType::Server, DEPLOYMENT_SERVER_ID);
         if check_channel_permission(state, server.clone(), subject.clone(), Permission::Owner)
             .await?
@@ -44,7 +31,7 @@ pub(super) async fn resolve_managed_channel_affiliation(
             return Ok(Some(Affiliation::Admin));
         }
         if check_channel_permission(state, server, subject.clone(), Permission::Member).await? {
-            return Ok(Some(Affiliation::Member));
+            return Ok(Some(Affiliation::None));
         }
     }
 
@@ -57,6 +44,35 @@ pub(super) async fn resolve_managed_channel_affiliation(
         return Ok(read_access_affiliation(members_only));
     }
     Ok(None)
+}
+
+async fn direct_channel_affiliation(
+    state: &WebSocketState,
+    object: Object,
+    subject: Subject,
+) -> Result<Option<Affiliation>, ()> {
+    let relations = state
+        .deps
+        .app_state
+        .permission_actor
+        .ask(ListRelations { subject, object })
+        .await
+        .map_err(|error| {
+            warn!(error = ?error, "Failed to load direct managed MUC affiliation relations");
+        })?;
+
+    let affiliation = ["outcast", "owner", "admin", "member"]
+        .into_iter()
+        .find(|relation| relations.iter().any(|actual| actual.name == *relation))
+        .and_then(|relation| match relation {
+            "outcast" => Some(Affiliation::Outcast),
+            "owner" => Some(Affiliation::Owner),
+            "admin" => Some(Affiliation::Admin),
+            "member" => Some(Affiliation::Member),
+            _ => None,
+        });
+
+    Ok(affiliation)
 }
 
 fn read_access_affiliation(members_only: bool) -> Option<Affiliation> {

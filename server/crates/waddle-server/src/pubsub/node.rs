@@ -15,9 +15,9 @@ impl DatabasePubSubStorage {
             INSERT INTO pubsub_nodes (
                 owner_jid, node_name, access_model, publish_model, max_items,
                 persist_items, deliver_payloads, notify_retract, notify_delete,
-                send_last_published_item, created_at_ms
+                send_last_published_item, node_type, created_at_ms
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(owner_jid, node_name) DO NOTHING
             "#,
             crate::db_params![
@@ -31,6 +31,7 @@ impl DatabasePubSubStorage {
                 config.notify_retract,
                 config.notify_delete,
                 config.send_last_published_item.to_string(),
+                config.node_type.map(|node_type| node_type.to_string()),
                 node.created_at.timestamp_millis(),
             ],
         )
@@ -62,7 +63,7 @@ impl DatabasePubSubStorage {
                 r#"
                 SELECT owner_jid, node_name, access_model, publish_model, max_items,
                        persist_items, deliver_payloads, notify_retract, notify_delete,
-                       send_last_published_item, created_at_ms
+                       send_last_published_item, node_type, created_at_ms
                 FROM pubsub_nodes
                 WHERE owner_jid = ? AND node_name = ?
                 "#,
@@ -171,7 +172,7 @@ impl DatabasePubSubStorage {
                 r#"
                 SELECT n.owner_jid, n.node_name, n.access_model, n.publish_model, n.max_items,
                        n.persist_items, n.deliver_payloads, n.notify_retract, n.notify_delete,
-                       n.send_last_published_item, n.created_at_ms
+                       n.send_last_published_item, n.node_type, n.created_at_ms
                 FROM pubsub_nodes n
                 JOIN pubsub_items i
                   ON i.owner_jid = n.owner_jid AND i.node_name = n.node_name
@@ -243,7 +244,8 @@ impl DatabasePubSubStorage {
                     deliver_payloads = ?,
                     notify_retract = ?,
                     notify_delete = ?,
-                    send_last_published_item = ?
+                    send_last_published_item = ?,
+                    node_type = ?
                 WHERE owner_jid = ? AND node_name = ?
                 "#,
                 crate::db_params![
@@ -255,6 +257,7 @@ impl DatabasePubSubStorage {
                     config.notify_retract,
                     config.notify_delete,
                     config.send_last_published_item.to_string(),
+                    config.node_type.map(|node_type| node_type.to_string()),
                     owner.to_string(),
                     node_name,
                 ],
@@ -302,8 +305,16 @@ impl DatabasePubSubStorage {
         let send_last_raw: String = row
             .get(9)
             .map_err(|error| XmppError::internal(error.to_string()))?;
-        let created_at_ms: i64 = row
+        let node_type_raw: Option<String> = row
             .get(10)
+            .map_err(|error| XmppError::internal(error.to_string()))?;
+        let node_type = node_type_raw
+            .as_deref()
+            .map(str::parse)
+            .transpose()
+            .map_err(|_| XmppError::internal("invalid PubSub node_type".to_string()))?;
+        let created_at_ms: i64 = row
+            .get(11)
             .map_err(|error| XmppError::internal(error.to_string()))?;
         let created_at = chrono::DateTime::from_timestamp_millis(created_at_ms)
             .ok_or_else(|| XmppError::internal("invalid PubSub created_at_ms".to_string()))?;
@@ -314,6 +325,7 @@ impl DatabasePubSubStorage {
             config: NodeConfig {
                 access_model: access_model_raw.parse().unwrap_or_default(),
                 publish_model: publish_model_raw.parse().unwrap_or_default(),
+                node_type,
                 max_items: u32::try_from(max_items)
                     .map_err(|error| XmppError::internal(error.to_string()))?,
                 persist_items,

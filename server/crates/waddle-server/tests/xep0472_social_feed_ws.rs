@@ -1,7 +1,7 @@
 //! XEP-0472 Pubsub Social Feed integration tests over WebSocket.
 //!
 //! Verifies the server-side bootstrap: the spaces service hosts the
-//! global `urn:xmpp:pubsub-social-feed:0` node, advertises the
+//! global `urn:xmpp:pubsub-social-feed:1` node, advertises the
 //! namespace on disco#info, and accepts publish + items-query for
 //! `<entry/>` payloads built per XEP-0472 §3.
 
@@ -17,8 +17,9 @@ const MEMBER_PASSWORD: &str = "xep0472-member-password";
 const MEMBER2_USERNAME: &str = "member2";
 const MEMBER2_PASSWORD: &str = "xep0472-member2-password";
 const COMMUNITY_JID: &str = "community.localhost";
-const FEED_NODE: &str = "urn:xmpp:pubsub-social-feed:0";
-const NS_SOCIAL_FEED: &str = "urn:xmpp:pubsub-social-feed:0";
+const FEED_NODE: &str = "urn:xmpp:pubsub-social-feed:1";
+const NS_SOCIAL_FEED: &str = "urn:xmpp:pubsub-social-feed:1";
+const NS_ATOM: &str = "http://www.w3.org/2005/Atom";
 
 static TEST_SERIAL: Mutex<()> = Mutex::const_new(());
 
@@ -50,6 +51,19 @@ async fn setup_member() -> (TestServer, WsXmppClient) {
     .await
     .expect("connect and auth as member");
     (server, client)
+}
+
+fn feed_entry_xml(item_id: &str, title: &str, body: &str, author: &str) -> String {
+    format!(
+        r#"<entry xmlns="{NS_ATOM}">
+          <title type="text">{title}</title>
+          <id>tag:localhost,2026:{item_id}</id>
+          <published>2026-06-17T12:00:00Z</published>
+          <updated>2026-06-17T12:00:00Z</updated>
+          <content type="text">{body}</content>
+          <author><uri>xmpp:{author}</uri></author>
+        </entry>"#
+    )
 }
 
 #[tokio::test]
@@ -93,16 +107,17 @@ async fn social_feed_publish_and_items_round_trip() {
               <pubsub xmlns="http://jabber.org/protocol/pubsub">
                 <publish node="{FEED_NODE}">
                   <item id="{post_id}">
-                    <entry xmlns="{NS_SOCIAL_FEED}">
-                      <title>Launch day</title>
-                      <body>The community feed is live!</body>
-                      <author>admin@localhost</author>
-                      <published>2026-05-16T12:00:00Z</published>
-                    </entry>
+                    {}
                   </item>
                 </publish>
               </pubsub>
-            </iq>"#
+            </iq>"#,
+            feed_entry_xml(
+                &post_id,
+                "Launch day",
+                "The community feed is live!",
+                "admin@localhost",
+            )
         ))
         .await
         .expect("send publish");
@@ -166,16 +181,17 @@ async fn member_can_publish_to_social_feed() {
               <pubsub xmlns="http://jabber.org/protocol/pubsub">
                 <publish node="{FEED_NODE}">
                   <item id="{post_id}" publisher="admin@{DOMAIN}">
-                    <entry xmlns="{NS_SOCIAL_FEED}">
-                      <title>Hello from a member</title>
-                      <body>Members can post to the feed now.</body>
-                      <author>admin@{DOMAIN}</author>
-                      <published>2026-06-17T12:00:00Z</published>
-                    </entry>
+                    {}
                   </item>
                 </publish>
               </pubsub>
-            </iq>"#
+            </iq>"#,
+            feed_entry_xml(
+                &post_id,
+                "Hello from a member",
+                "Members can post to the feed now.",
+                &format!("admin@{DOMAIN}"),
+            )
         ))
         .await
         .expect("send publish");
@@ -213,12 +229,92 @@ async fn member_can_publish_to_social_feed() {
         "feed item must be stamped with the server-derived publisher: {items_response}"
     );
     assert!(
-        items_response.contains(&format!(">{MEMBER_USERNAME}@{DOMAIN}<")),
-        "feed entry author must be stamped with the authenticated JID: {items_response}"
+        items_response.contains(&format!("xmpp:{MEMBER_USERNAME}@{DOMAIN}")),
+        "feed entry author URI must be stamped with the authenticated JID: {items_response}"
     );
     assert!(
         !items_response.contains(&format!("admin@{DOMAIN}")),
         "spoofed publisher AND author must be overridden by the server: {items_response}"
+    );
+
+    let _ = client.close().await;
+}
+
+#[tokio::test]
+async fn member_feed_publish_requires_atom_payload() {
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup_member().await;
+
+    client
+        .send(&format!(
+            r#"<iq type="set" id="feed-missing-payload" to="{COMMUNITY_JID}">
+              <pubsub xmlns="http://jabber.org/protocol/pubsub">
+                <publish node="{FEED_NODE}"><item id="missing-feed-payload"/></publish>
+              </pubsub>
+            </iq>"#
+        ))
+        .await
+        .expect("send missing payload publish");
+    let missing_payload = client
+        .recv_matching(|frame| frame.contains("feed-missing-payload"))
+        .await
+        .expect("missing payload response");
+    assert!(
+        missing_payload.contains("type='error'") && missing_payload.contains("payload-required"),
+        "feed publish without Atom entry must be payload-required: {missing_payload}"
+    );
+
+    client
+        .send(&format!(
+            r#"<iq type="set" id="feed-invalid-payload" to="{COMMUNITY_JID}">
+              <pubsub xmlns="http://jabber.org/protocol/pubsub">
+                <publish node="{FEED_NODE}">
+                  <item id="invalid-feed-payload">
+                    <entry xmlns="{NS_ATOM}">
+                      <id>invalid-feed-payload</id>
+                      <updated>2026-06-17T12:00:00Z</updated>
+                      <content type="text">missing title</content>
+                    </entry>
+                  </item>
+                </publish>
+              </pubsub>
+            </iq>"#
+        ))
+        .await
+        .expect("send invalid payload publish");
+    let invalid_payload = client
+        .recv_matching(|frame| frame.contains("feed-invalid-payload"))
+        .await
+        .expect("invalid payload response");
+    assert!(
+        invalid_payload.contains("type='error'") && invalid_payload.contains("invalid-payload"),
+        "feed publish with malformed Atom entry must be invalid-payload: {invalid_payload}"
+    );
+
+    client
+        .send(&format!(
+            r#"<iq type="set" id="feed-invalid-atom-updated" to="{COMMUNITY_JID}">
+              <pubsub xmlns="http://jabber.org/protocol/pubsub">
+                <publish node="{FEED_NODE}">
+                  <item id="invalid-feed-updated">
+                    <entry xmlns="{NS_ATOM}">
+                      <title type="text">missing updated</title>
+                      <id>invalid-feed-updated</id>
+                    </entry>
+                  </item>
+                </publish>
+              </pubsub>
+            </iq>"#
+        ))
+        .await
+        .expect("send invalid Atom publish");
+    let invalid_atom = client
+        .recv_matching(|frame| frame.contains("feed-invalid-atom-updated"))
+        .await
+        .expect("invalid Atom response");
+    assert!(
+        invalid_atom.contains("type='error'") && invalid_atom.contains("invalid-payload"),
+        "feed publish missing required Atom fields must be invalid-payload: {invalid_atom}"
     );
 
     let _ = client.close().await;
@@ -260,11 +356,17 @@ async fn member_cannot_clobber_another_members_feed_post() {
               <pubsub xmlns="http://jabber.org/protocol/pubsub">
                 <publish node="{FEED_NODE}">
                   <item id="{post_id}">
-                    <entry xmlns="{NS_SOCIAL_FEED}"><body>Original by A</body></entry>
+                    {}
                   </item>
                 </publish>
               </pubsub>
-            </iq>"#
+            </iq>"#,
+            feed_entry_xml(
+                &post_id,
+                "Original by A",
+                "Original by A",
+                "member@localhost"
+            )
         ))
         .await
         .expect("A publish");
@@ -282,11 +384,17 @@ async fn member_cannot_clobber_another_members_feed_post() {
               <pubsub xmlns="http://jabber.org/protocol/pubsub">
                 <publish node="{FEED_NODE}">
                   <item id="{post_id}">
-                    <entry xmlns="{NS_SOCIAL_FEED}"><body>Hijacked by B</body></entry>
+                    {}
                   </item>
                 </publish>
               </pubsub>
-            </iq>"#
+            </iq>"#,
+        feed_entry_xml(
+            &post_id,
+            "Hijacked by B",
+            "Hijacked by B",
+            "member2@localhost"
+        )
     ))
     .await
     .expect("B publish");

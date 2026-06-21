@@ -4,6 +4,7 @@ import { ref, watch } from "vue";
 import { X } from "lucide-vue-next";
 import AppDialog from "@/components/ui/AppDialog.vue";
 import { requireMembershipForUnlistedChannel } from "./channelAdmissionPolicy";
+import type { WasmAdminChannelType } from "@/lib/xmpp";
 
 const open = defineModel<boolean>("open", { required: true });
 
@@ -13,11 +14,12 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  submit: [payload: { name: string; topic?: string | null; spaceJid?: string | null; spaceNode?: string | null; isPublic?: boolean | null; membersOnly?: boolean | null }];
+  submit: [payload: { name: string; topic?: string | null; channelType?: WasmAdminChannelType | null; spaceJid?: string | null; spaceNode?: string | null; isPublic?: boolean | null; membersOnly?: boolean | null }];
 }>();
 
 const name = ref("");
 const topic = ref("");
+const channelType = ref<WasmAdminChannelType>("text");
 const spaceNode = ref("");
 const isPublic = ref(true);
 const membersOnly = ref(false);
@@ -26,6 +28,7 @@ watch(open, (isOpen) => {
   if (isOpen) {
     name.value = "";
     topic.value = "";
+    channelType.value = "text";
     spaceNode.value = "";
     isPublic.value = true;
     membersOnly.value = false;
@@ -47,6 +50,7 @@ function onSubmit() {
   emit("submit", {
     name: name.value.trim(),
     topic: topic.value.trim() || null,
+    channelType: channelType.value,
     spaceJid: selectedSpace?.space_jid ?? null,
     spaceNode: selectedSpace?.space_node ?? null,
     isPublic: isPublic.value,
@@ -96,6 +100,14 @@ function onSubmit() {
         <select v-model="spaceNode" class="chat-field-control type-field">
           <option value="">No space</option>
           <option v-for="s in spaces" :key="s.space_node" :value="s.space_node">{{ s.name }}</option>
+        </select>
+      </label>
+      <label class="flex flex-col gap-1">
+        <span class="type-section-label text-muted-foreground">Type</span>
+        <select v-model="channelType" class="chat-field-control type-field">
+          <option value="text">Text</option>
+          <option value="announcement">Announcement</option>
+          <option value="forum">Forum</option>
         </select>
       </label>
       <div class="flex flex-col gap-2 rounded-lg border border-border bg-muted/30 px-3 py-2.5">

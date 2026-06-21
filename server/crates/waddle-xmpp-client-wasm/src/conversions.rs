@@ -877,7 +877,8 @@ mod inbound_to_js_tests {
     fn pubsub_event_to_js_serializes_typed_and_opaque_payloads() {
         let event = waddle_xmpp_client::PubsubEvent {
             from: Some("community.example.com".parse().expect("valid event jid")),
-            node: "urn:xmpp:pubsub-attachments:summary:1/urn:xmpp:stories:0".to_string(),
+            node: "urn:xmpp:pubsub-attachments:summary:1/urn:xmpp:pubsub-social-feed:stories:0"
+                .to_string(),
             items: vec![
                 waddle_xmpp_client::PubsubEventItem {
                     id: Some("story-1".to_string()),

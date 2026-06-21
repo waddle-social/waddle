@@ -19,9 +19,11 @@ fn dnd_payload() -> minidom::Element {
 }
 
 fn story_payload(body: &str) -> minidom::Element {
-    format!("<story xmlns='urn:xmpp:stories:0'><body>{body}</body></story>")
-        .parse()
-        .expect("valid story payload")
+    format!(
+        "<entry xmlns='http://www.w3.org/2005/Atom'><title type='text'>{body}</title><id>story-test</id><updated>2026-06-01T12:00:00Z</updated><content type='text'>{body}</content><link rel='enclosure' href='https://example.com/story-test.jpg' type='image/jpeg'/></entry>"
+    )
+    .parse()
+    .expect("valid story payload")
 }
 
 #[tokio::test]
@@ -104,6 +106,33 @@ async fn spaces_config_keeps_multiple_items() {
         .await
         .expect("items");
     assert_eq!(items.len(), 2);
+}
+
+#[tokio::test]
+async fn database_node_config_persists_pubsub_type() {
+    let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("storage");
+    let owner = jid("community.example.com");
+    let node = waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES;
+    storage
+        .get_or_create_node(&owner, node)
+        .await
+        .expect("node");
+    storage
+        .update_node_config(&owner, node, &NodeConfig::community_stories())
+        .await
+        .expect("config");
+
+    let stored = storage
+        .get_node(&owner, node)
+        .await
+        .expect("get node")
+        .expect("node exists");
+    assert_eq!(
+        stored.config.node_type,
+        Some(waddle_xmpp_core::pubsub::PubSubNodeType::PubsubSocialFeedStories)
+    );
 }
 
 #[tokio::test]

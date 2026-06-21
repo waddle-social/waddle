@@ -11,13 +11,15 @@ use ws_common::{TestServer, WsXmppClient};
 
 const DOMAIN: &str = "localhost";
 const COMMUNITY_JID: &str = "community.localhost";
-const STORIES_NODE: &str = "urn:xmpp:stories:0";
+const STORIES_NODE: &str = "urn:xmpp:pubsub-social-feed:stories:0";
 const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
 const NS_PUBSUB_EVENT: &str = "http://jabber.org/protocol/pubsub#event";
-const NS_STORIES: &str = "urn:xmpp:stories:0";
+const NS_ATOM: &str = "http://www.w3.org/2005/Atom";
+const NS_WADDLE_STORIES: &str = "urn:waddle:stories:0";
 const NS_ATTACHMENTS: &str = "urn:xmpp:pubsub-attachments:1";
 const NS_ATTACHMENTS_SUMMARY: &str = "urn:xmpp:pubsub-attachments:summary:1";
-const STORY_SUMMARY_NODE: &str = "urn:xmpp:pubsub-attachments:summary:1/urn:xmpp:stories:0";
+const STORY_SUMMARY_NODE: &str =
+    "urn:xmpp:pubsub-attachments:summary:1/urn:xmpp:pubsub-social-feed:stories:0";
 
 static TEST_SERIAL: Mutex<()> = Mutex::const_new(());
 
@@ -54,7 +56,28 @@ async fn iq_get_to(client: &mut WsXmppClient, id: &str, to: &str, body: &str) ->
 
 fn story_attachment_node(story_id: &str) -> String {
     format!(
-        "{NS_ATTACHMENTS}/xmpp:community.localhost?;node=urn%3Axmpp%3Astories%3A0;item={story_id}"
+        "{NS_ATTACHMENTS}/xmpp:community.localhost?;node=urn%3Axmpp%3Apubsub-social-feed%3Astories%3A0;item={story_id}"
+    )
+}
+
+fn story_publish_body(item_id: &str, body: &str, author: &str) -> String {
+    format!(
+        r#"<pubsub xmlns="{NS_PUBSUB}">
+          <publish node="{STORIES_NODE}">
+            <item id="{item_id}">
+              <entry xmlns="{NS_ATOM}">
+                <title type="text">{body}</title>
+                <id>{item_id}</id>
+                <published>2026-06-01T12:00:00Z</published>
+                <updated>2026-06-01T12:00:00Z</updated>
+                <content type="text">{body}</content>
+                <author><uri>xmpp:{author}</uri></author>
+                <link rel="enclosure" href="https://example.com/{item_id}.jpg" type="image/jpeg"/>
+                <expires xmlns="{NS_WADDLE_STORIES}">2030-01-01T12:00:00Z</expires>
+              </entry>
+            </item>
+          </publish>
+        </pubsub>"#
     )
 }
 
@@ -114,18 +137,7 @@ async fn member_can_publish_read_and_retract_story_reaction_attachment() {
         &mut admin,
         "owner-story",
         COMMUNITY_JID,
-        &format!(
-            r#"<pubsub xmlns="{NS_PUBSUB}">
-              <publish node="{STORIES_NODE}">
-                <item id="{story_id}">
-                  <story xmlns="{NS_STORIES}" expires="2030-01-01T12:00:00Z">
-                    <body>story with reactions</body>
-                    <author>admin@localhost</author>
-                  </story>
-                </item>
-              </publish>
-            </pubsub>"#
-        ),
+        &story_publish_body(&story_id, "story with reactions", "admin@localhost"),
     )
     .await;
     assert!(
@@ -151,17 +163,10 @@ async fn member_can_publish_read_and_retract_story_reaction_attachment() {
         &mut alice,
         "member-story",
         COMMUNITY_JID,
-        &format!(
-            r#"<pubsub xmlns="{NS_PUBSUB}">
-              <publish node="{STORIES_NODE}">
-                <item id="member-{story_id}">
-                  <story xmlns="{NS_STORIES}" expires="2030-01-01T12:00:00Z">
-                    <body>member story</body>
-                    <author>spoofed@localhost</author>
-                  </story>
-                </item>
-              </publish>
-            </pubsub>"#
+        &story_publish_body(
+            &format!("member-{story_id}"),
+            "member story",
+            "spoofed@localhost",
         ),
     )
     .await;
@@ -341,7 +346,7 @@ async fn member_can_publish_read_and_retract_story_reaction_attachment() {
     );
 
     let crafted_node = format!(
-        "{NS_ATTACHMENTS}/xmpp:community.localhost?;node=urn%3Axmpp%3Astories%3A0evil;item={story_id}"
+        "{NS_ATTACHMENTS}/xmpp:community.localhost?;node=urn%3Axmpp%3Apubsub-social-feed%3Astories%3A0evil;item={story_id}"
     );
     let crafted_publish = iq_set_to(
         &mut alice,
@@ -366,7 +371,7 @@ async fn member_can_publish_read_and_retract_story_reaction_attachment() {
     );
 
     let wrong_host_node = format!(
-        "{NS_ATTACHMENTS}/xmpp:other.localhost?;node=urn%3Axmpp%3Astories%3A0;item={story_id}"
+        "{NS_ATTACHMENTS}/xmpp:other.localhost?;node=urn%3Axmpp%3Apubsub-social-feed%3Astories%3A0;item={story_id}"
     );
     let wrong_host_publish = iq_set_to(
         &mut alice,
@@ -391,7 +396,7 @@ async fn member_can_publish_read_and_retract_story_reaction_attachment() {
     );
 
     let extra_param_node = format!(
-        "{NS_ATTACHMENTS}/xmpp:community.localhost?;node=urn%3Axmpp%3Astories%3A0;item={story_id};foo=bar"
+        "{NS_ATTACHMENTS}/xmpp:community.localhost?;node=urn%3Axmpp%3Apubsub-social-feed%3Astories%3A0;item={story_id};foo=bar"
     );
     let extra_param_publish = iq_set_to(
         &mut alice,
@@ -573,18 +578,7 @@ async fn retracting_story_removes_attachment_node_and_summary_item() {
         &mut admin,
         "cleanup-story",
         COMMUNITY_JID,
-        &format!(
-            r#"<pubsub xmlns="{NS_PUBSUB}">
-              <publish node="{STORIES_NODE}">
-                <item id="{story_id}">
-                  <story xmlns="{NS_STORIES}" expires="2030-01-01T12:00:00Z">
-                    <body>story that will be removed</body>
-                    <author>admin@localhost</author>
-                  </story>
-                </item>
-              </publish>
-            </pubsub>"#
-        ),
+        &story_publish_body(&story_id, "story that will be removed", "admin@localhost"),
     )
     .await;
     assert!(
@@ -797,17 +791,10 @@ async fn retracting_story_without_summary_item_does_not_fan_out_summary_retract(
         &mut admin,
         "no-summary-seed-story",
         COMMUNITY_JID,
-        &format!(
-            r#"<pubsub xmlns="{NS_PUBSUB}">
-              <publish node="{STORIES_NODE}">
-                <item id="{seeded_story_id}">
-                  <story xmlns="{NS_STORIES}" expires="2030-01-01T12:00:00Z">
-                    <body>story that seeds summary node</body>
-                    <author>admin@localhost</author>
-                  </story>
-                </item>
-              </publish>
-            </pubsub>"#
+        &story_publish_body(
+            &seeded_story_id,
+            "story that seeds summary node",
+            "admin@localhost",
         ),
     )
     .await;
@@ -857,18 +844,7 @@ async fn retracting_story_without_summary_item_does_not_fan_out_summary_retract(
         &mut admin,
         "no-summary-story",
         COMMUNITY_JID,
-        &format!(
-            r#"<pubsub xmlns="{NS_PUBSUB}">
-              <publish node="{STORIES_NODE}">
-                <item id="{story_id}">
-                  <story xmlns="{NS_STORIES}" expires="2030-01-01T12:00:00Z">
-                    <body>story with no reactions</body>
-                    <author>admin@localhost</author>
-                  </story>
-                </item>
-              </publish>
-            </pubsub>"#
-        ),
+        &story_publish_body(&story_id, "story with no reactions", "admin@localhost"),
     )
     .await;
     assert!(

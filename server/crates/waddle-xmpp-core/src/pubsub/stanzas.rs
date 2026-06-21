@@ -462,6 +462,11 @@ fn parse_configure_form(form: &Element) -> CoreResult<NodeConfigPatch> {
                     CoreError::bad_request(Some(format!("invalid pubsub#publish_model: {value}")))
                 })?);
             }
+            "pubsub#type" => {
+                config.node_type = Some(value.parse().map_err(|_| {
+                    CoreError::bad_request(Some(format!("invalid pubsub#type: {value}")))
+                })?);
+            }
             "pubsub#max_items" => {
                 // XEP-0060 §16.4.3 + XEP-0490 §3 publish-options use the
                 // literal token "max" to mean "no upper bound". Accept it

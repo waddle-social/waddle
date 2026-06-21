@@ -203,12 +203,12 @@ impl Feature {
 
     /// XEP-0472 Pubsub Social Feed.
     pub fn social_feed() -> Self {
-        Self::new("urn:xmpp:pubsub-social-feed:0")
+        Self::new("urn:xmpp:pubsub-social-feed:1")
     }
 
     /// XEP-0501 Pubsub Stories.
     pub fn stories() -> Self {
-        Self::new("urn:xmpp:stories:0")
+        Self::new("urn:xmpp:pubsub-social-feed:stories:0")
     }
 
     /// xCal calendar events per the XSF ProtoXEP
@@ -261,6 +261,14 @@ impl Feature {
 
     pub fn muc_membersonly() -> Self {
         Self::new("muc_membersonly")
+    }
+
+    pub fn muc_public() -> Self {
+        Self::new("muc_public")
+    }
+
+    pub fn muc_hidden() -> Self {
+        Self::new("muc_hidden")
     }
 
     pub fn muc_semianonymous() -> Self {

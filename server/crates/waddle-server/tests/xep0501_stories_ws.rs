@@ -1,8 +1,8 @@
 //! XEP-0501 Pubsub Stories integration tests over WebSocket.
 //!
 //! Verifies the server bootstrap: the spaces service hosts the
-//! global `urn:xmpp:stories:0` node, advertises the namespace on
-//! disco#info, and accepts publish + items-query for `<story/>`
+//! global `urn:xmpp:pubsub-social-feed:stories:0` node, advertises the namespace on
+//! disco#info, and accepts publish + items-query for Atom `<entry/>`
 //! payloads built per XEP-0501.
 
 mod ws_common;
@@ -17,10 +17,34 @@ const MEMBER_PASSWORD: &str = "xep0501-member-password";
 const OTHER_MEMBER_USERNAME: &str = "other";
 const OTHER_MEMBER_PASSWORD: &str = "xep0501-other-password";
 const COMMUNITY_JID: &str = "community.localhost";
-const STORIES_NODE: &str = "urn:xmpp:stories:0";
-const NS_STORIES: &str = "urn:xmpp:stories:0";
+const STORIES_NODE: &str = "urn:xmpp:pubsub-social-feed:stories:0";
+const NS_STORIES: &str = "urn:xmpp:pubsub-social-feed:stories:0";
+const NS_ATOM: &str = "http://www.w3.org/2005/Atom";
+const NS_WADDLE_STORIES: &str = "urn:waddle:stories:0";
 
 static TEST_SERIAL: Mutex<()> = Mutex::const_new(());
+
+fn story_entry_xml(
+    item_id: &str,
+    body: &str,
+    media_url: &str,
+    media_type: &str,
+    author: &str,
+    expires: &str,
+) -> String {
+    format!(
+        r#"<entry xmlns="{NS_ATOM}">
+          <title type="text">{body}</title>
+          <id>{item_id}</id>
+          <published>2026-06-01T12:00:00Z</published>
+          <updated>2026-06-01T12:00:00Z</updated>
+          <content type="text">{body}</content>
+          <author><uri>xmpp:{author}</uri></author>
+          <link rel="enclosure" href="{media_url}" type="{media_type}"/>
+          <expires xmlns="{NS_WADDLE_STORIES}">{expires}</expires>
+        </entry>"#
+    )
+}
 
 async fn setup() -> (TestServer, WsXmppClient) {
     let server = TestServer::start();
@@ -58,6 +82,35 @@ async fn community_disco_info_advertises_stories_namespace() {
 }
 
 #[tokio::test]
+async fn stories_node_config_declares_xep0501_pubsub_type() {
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup().await;
+
+    client
+        .send(&format!(
+            r#"<iq type="get" id="stories-node-config" to="{COMMUNITY_JID}">
+              <pubsub xmlns="http://jabber.org/protocol/pubsub#owner">
+                <configure node="{STORIES_NODE}"/>
+              </pubsub>
+            </iq>"#
+        ))
+        .await
+        .expect("send stories node configure get");
+    let frame = client
+        .recv_matching(|frame| frame.contains("stories-node-config"))
+        .await
+        .expect("stories node configure response");
+    assert!(
+        frame.contains("type='result'")
+            && frame.contains("var='pubsub#type'")
+            && frame.contains(&format!("<value>{STORIES_NODE}</value>")),
+        "stories node configure form must declare the XEP-0501 pubsub#type: {frame}"
+    );
+
+    let _ = client.close().await;
+}
+
+#[tokio::test]
 async fn member_story_publish_requires_story_payload() {
     let _guard = TEST_SERIAL.lock().await;
     let server = TestServer::start_with_extra_accounts(&[(MEMBER_USERNAME, MEMBER_PASSWORD)]);
@@ -88,7 +141,7 @@ async fn member_story_publish_requires_story_payload() {
         .expect("missing payload response");
     assert!(
         missing_payload.contains("type='error'") && missing_payload.contains("payload-required"),
-        "story publish without <story/> must be payload-required: {missing_payload}"
+        "story publish without an Atom entry must be payload-required: {missing_payload}"
     );
 
     client
@@ -97,7 +150,12 @@ async fn member_story_publish_requires_story_payload() {
               <pubsub xmlns="http://jabber.org/protocol/pubsub">
                 <publish node="{STORIES_NODE}">
                   <item id="invalid-payload">
-                    <entry xmlns="urn:xmpp:pubsub-social-feed:0"><content>not a story</content></entry>
+                    <entry xmlns="{NS_ATOM}">
+                      <title type="text">not a story</title>
+                      <id>invalid-payload</id>
+                      <updated>2026-06-01T12:00:00Z</updated>
+                      <content type="text">missing enclosure</content>
+                    </entry>
                   </item>
                 </publish>
               </pubsub>
@@ -120,7 +178,11 @@ async fn member_story_publish_requires_story_payload() {
               <pubsub xmlns="http://jabber.org/protocol/pubsub">
                 <publish node="{STORIES_NODE}">
                   <item id="empty-story">
-                    <story xmlns="{NS_STORIES}" expires="2030-01-01T12:00:00Z"/>
+                    <entry xmlns="{NS_ATOM}">
+                      <title type="text">no media</title>
+                      <id>empty-story</id>
+                      <updated>2026-06-01T12:00:00Z</updated>
+                    </entry>
                   </item>
                 </publish>
               </pubsub>
@@ -134,7 +196,91 @@ async fn member_story_publish_requires_story_payload() {
         .expect("empty story response");
     assert!(
         empty_payload.contains("type='error'") && empty_payload.contains("invalid-payload"),
-        "story publish with no body or media-url must be invalid-payload: {empty_payload}"
+        "story publish with no enclosure must be invalid-payload: {empty_payload}"
+    );
+
+    client
+        .send(&format!(
+            r#"<iq type="set" id="member-story-missing-updated" to="{COMMUNITY_JID}">
+              <pubsub xmlns="http://jabber.org/protocol/pubsub">
+                <publish node="{STORIES_NODE}">
+                  <item id="missing-updated-story">
+                    <entry xmlns="{NS_ATOM}">
+                      <title type="text">missing updated</title>
+                      <id>missing-updated-story</id>
+                      <link rel="enclosure" href="https://example.com/photo.jpg" type="image/jpeg"/>
+                    </entry>
+                  </item>
+                </publish>
+              </pubsub>
+            </iq>"#
+        ))
+        .await
+        .expect("send story missing updated publish");
+    let missing_updated = client
+        .recv_matching(|frame| frame.contains("member-story-missing-updated"))
+        .await
+        .expect("story missing updated response");
+    assert!(
+        missing_updated.contains("type='error'") && missing_updated.contains("invalid-payload"),
+        "story publish missing required Atom fields must be invalid-payload: {missing_updated}"
+    );
+
+    client
+        .send(&format!(
+            r#"<iq type="set" id="member-story-blank-href" to="{COMMUNITY_JID}">
+              <pubsub xmlns="http://jabber.org/protocol/pubsub">
+                <publish node="{STORIES_NODE}">
+                  <item id="blank-href-story">
+                    <entry xmlns="{NS_ATOM}">
+                      <title type="text">blank media</title>
+                      <id>blank-href-story</id>
+                      <updated>2026-06-01T12:00:00Z</updated>
+                      <link rel="enclosure" href="   " type="image/jpeg"/>
+                    </entry>
+                  </item>
+                </publish>
+              </pubsub>
+            </iq>"#
+        ))
+        .await
+        .expect("send story blank href publish");
+    let blank_href = client
+        .recv_matching(|frame| frame.contains("member-story-blank-href"))
+        .await
+        .expect("story blank href response");
+    assert!(
+        blank_href.contains("type='error'") && blank_href.contains("invalid-payload"),
+        "story publish with blank media href must be invalid-payload: {blank_href}"
+    );
+
+    client
+        .send(&format!(
+            r#"<iq type="set" id="member-story-bad-published" to="{COMMUNITY_JID}">
+              <pubsub xmlns="http://jabber.org/protocol/pubsub">
+                <publish node="{STORIES_NODE}">
+                  <item id="bad-published-story">
+                    <entry xmlns="{NS_ATOM}">
+                      <title type="text">bad published</title>
+                      <id>bad-published-story</id>
+                      <updated>2026-06-01T12:00:00Z</updated>
+                      <published>not-a-date</published>
+                      <link rel="enclosure" href="https://example.com/photo.jpg" type="image/jpeg"/>
+                    </entry>
+                  </item>
+                </publish>
+              </pubsub>
+            </iq>"#
+        ))
+        .await
+        .expect("send story bad published publish");
+    let bad_published = client
+        .recv_matching(|frame| frame.contains("member-story-bad-published"))
+        .await
+        .expect("story bad published response");
+    assert!(
+        bad_published.contains("type='error'") && bad_published.contains("invalid-payload"),
+        "story publish with invalid published timestamp must be invalid-payload: {bad_published}"
     );
 
     let _ = client.close().await;
@@ -173,13 +319,19 @@ async fn member_can_retract_own_story_but_not_another_member_story() {
               <pubsub xmlns="http://jabber.org/protocol/pubsub">
                 <publish node="{STORIES_NODE}">
                   <item id="{story_id}">
-                    <story xmlns="{NS_STORIES}" expires="2030-01-01T12:00:00Z">
-                      <body>member-owned story</body>
-                    </story>
+                    {}
                   </item>
                 </publish>
               </pubsub>
-            </iq>"#
+            </iq>"#,
+            story_entry_xml(
+                &story_id,
+                "member-owned story",
+                "https://example.com/member-owned-story.jpg",
+                "image/jpeg",
+                "member@localhost",
+                "2030-01-01T12:00:00Z",
+            )
         ))
         .await
         .expect("send publish");
@@ -267,15 +419,19 @@ async fn stories_publish_and_items_round_trip() {
               <pubsub xmlns="http://jabber.org/protocol/pubsub">
                 <publish node="{STORIES_NODE}">
                   <item id="{story_id}">
-                    <story xmlns="{NS_STORIES}" expires="{expires}">
-                      <body>Look at this!</body>
-                      <media-url>https://example.com/photo.jpg</media-url>
-                      <author>admin@localhost</author>
-                    </story>
+                    {}
                   </item>
                 </publish>
               </pubsub>
-            </iq>"#
+            </iq>"#,
+            story_entry_xml(
+                &story_id,
+                "Look at this!",
+                "https://example.com/photo.jpg",
+                "image/jpeg",
+                "admin@localhost",
+                expires,
+            )
         ))
         .await
         .expect("send publish");
@@ -289,7 +445,7 @@ async fn stories_publish_and_items_round_trip() {
     );
 
     // Items query — the published story should round-trip with the
-    // typed `<story/>` payload intact (id, expires, body, media-url).
+    // typed Atom payload intact (id, expires, body, enclosure link).
     client
         .send(&format!(
             r#"<iq type="get" id="story-items" to="{COMMUNITY_JID}">
@@ -301,7 +457,7 @@ async fn stories_publish_and_items_round_trip() {
         .await
         .expect("send items query");
     let items_response = client
-        .recv_matching(|frame| frame.contains("story-items") && frame.contains("<story"))
+        .recv_matching(|frame| frame.contains("story-items") && frame.contains("<entry"))
         .await
         .expect("items response");
     assert!(
@@ -314,7 +470,7 @@ async fn stories_publish_and_items_round_trip() {
     );
     assert!(
         items_response.contains("https://example.com/photo.jpg"),
-        "items query lost media-url: {items_response}"
+        "items query lost enclosure href: {items_response}"
     );
     assert!(
         items_response.contains(expires),
@@ -349,15 +505,19 @@ async fn member_can_publish_story_media() {
               <pubsub xmlns="http://jabber.org/protocol/pubsub">
                 <publish node="{STORIES_NODE}">
                   <item id="{story_id}">
-                    <story xmlns="{NS_STORIES}" expires="2030-01-01T12:00:00Z">
-                      <body>From the new office</body>
-                      <media-url>https://example.com/member-photo.jpg</media-url>
-                      <author>spoofed@localhost</author>
-                    </story>
+                    {}
                   </item>
                 </publish>
               </pubsub>
-            </iq>"#
+            </iq>"#,
+            story_entry_xml(
+                &story_id,
+                "From the new office",
+                "https://example.com/member-photo.jpg",
+                "image/jpeg",
+                "spoofed@localhost",
+                "2030-01-01T12:00:00Z",
+            )
         ))
         .await
         .expect("send publish");
@@ -381,7 +541,7 @@ async fn member_can_publish_story_media() {
         .await
         .expect("send items query");
     let items_response = client
-        .recv_matching(|frame| frame.contains("member-story-items") && frame.contains("<story"))
+        .recv_matching(|frame| frame.contains("member-story-items") && frame.contains("<entry"))
         .await
         .expect("items response");
     assert!(
@@ -390,7 +550,7 @@ async fn member_can_publish_story_media() {
     );
     assert!(
         items_response.contains("https://example.com/member-photo.jpg"),
-        "items query lost media-url: {items_response}"
+        "items query lost enclosure href: {items_response}"
     );
     assert!(
         items_response.contains(&format!("{MEMBER_USERNAME}@{DOMAIN}")),

@@ -12,7 +12,7 @@ fn xep0085_advertisement_consistency_no_false_feature_claim() {
 
 #[test]
 fn xep0085_muc_rooms_advertise_chat_states() {
-    let features = muc_room_features(false, false, false, false);
+    let features = muc_room_features(false, false, true, false, false);
     assert!(features.contains(&Feature::chat_states()));
     assert_eq!(Feature::chat_states(), Feature::new(CHAT_STATES_NS));
 }

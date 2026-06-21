@@ -240,6 +240,7 @@ async function handleStorySubmit(payload: { body?: string; file: Blob; mediaKind
     await props.publishStory({
       ...(payload.body ? { body: payload.body } : {}),
       mediaUrl: uploaded.url,
+      mediaType: uploaded.contentType,
       ...(props.selfJid ? { author: props.selfJid.split("/")[0] } : {}),
     });
     storyComposerKey.value += 1;

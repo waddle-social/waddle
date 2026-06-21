@@ -146,6 +146,7 @@ import {
 } from "./wasm-message-codecs";
 import type {
   WasmAdminChannelRef,
+  WasmAdminChannelType,
   WasmAdminChannelsAffiliationsResult,
   WasmAdminChannelsKickResult,
   WasmAdminChannelsListResult,
@@ -2717,14 +2718,19 @@ export class BrowserXmppClient {
   }
 
   /**
-   * Publish a XEP-0501 story. At least one of `body`/`mediaUrl` is
-   * required (the server rejects empty stories).
+   * Publish a XEP-0501 story. `mediaUrl` is required; `body` is
+   * optional text content attached to that media.
    */
   async publishStory(communityJid: string, input: StoryPostInput): Promise<Story> {
+    const mediaUrl = input.mediaUrl.trim();
+    if (!mediaUrl) {
+      throw new Error("Story mediaUrl is required");
+    }
     const xmpp = await this.requireConnectedXmpp();
     const result = await xmpp.stories_publish?.(communityJid, {
       ...(input.body ? { body: input.body } : {}),
-      ...(input.mediaUrl ? { media_url: input.mediaUrl } : {}),
+      media_url: mediaUrl,
+      ...(input.mediaType ? { media_type: input.mediaType } : {}),
       ...(input.author ? { author: input.author } : {}),
       ...(typeof input.expiryHours === "number" ? { expiry_hours: input.expiryHours } : {}),
     }) as WasmStory | undefined;
@@ -3237,25 +3243,27 @@ export class BrowserXmppClient {
       after_cursor: opts.afterCursor ?? null,
     });
   }
-  async adminChannelsCreate(opts: { name: string; topic?: string | null; spaceJid?: string | null; spaceNode?: string | null; isPublic?: boolean | null; membersOnly?: boolean | null }): Promise<WasmAdminChannelRef> {
+  async adminChannelsCreate(opts: { name: string; topic?: string | null; channelType?: WasmAdminChannelType | null; spaceJid?: string | null; spaceNode?: string | null; isPublic?: boolean | null; membersOnly?: boolean | null }): Promise<WasmAdminChannelRef> {
     const xmpp = await this.requireConnectedXmpp();
     if (!xmpp.admin_channels_create) throw new Error("admin_channels_create binding missing");
     return await xmpp.admin_channels_create({
       name: opts.name,
       topic: opts.topic ?? null,
+      channel_type: opts.channelType ?? null,
       space_jid: opts.spaceJid ?? null,
       space_node: opts.spaceNode ?? null,
       is_public: opts.isPublic ?? null,
       members_only: opts.membersOnly ?? null,
     });
   }
-  async adminChannelsUpdate(opts: { channelJid: string; name?: string | null; topic?: string | null; isPublic?: boolean | null; membersOnly?: boolean | null }): Promise<WasmAdminChannelRef> {
+  async adminChannelsUpdate(opts: { channelJid: string; name?: string | null; topic?: string | null; channelType?: WasmAdminChannelType | null; isPublic?: boolean | null; membersOnly?: boolean | null }): Promise<WasmAdminChannelRef> {
     const xmpp = await this.requireConnectedXmpp();
     if (!xmpp.admin_channels_update) throw new Error("admin_channels_update binding missing");
     return await xmpp.admin_channels_update({
       channel_jid: opts.channelJid,
       name: opts.name ?? null,
       topic: opts.topic ?? null,
+      channel_type: opts.channelType ?? null,
       is_public: opts.isPublic ?? null,
       members_only: opts.membersOnly ?? null,
     });

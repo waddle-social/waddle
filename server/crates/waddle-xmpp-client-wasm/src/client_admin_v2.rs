@@ -161,6 +161,7 @@ pub struct WaddleAdminChannelListEntry {
     pub channel_jid: String,
     pub name: String,
     pub topic: Option<String>,
+    pub channel_type: String,
     pub is_public: bool,
     pub members_only: bool,
     pub occupant_count: u32,
@@ -180,6 +181,7 @@ pub struct WaddleAdminChannelsListResult {
 pub struct WaddleAdminChannelsCreateArgs {
     pub name: String,
     pub topic: Option<String>,
+    pub channel_type: Option<String>,
     pub space_jid: Option<String>,
     pub space_node: Option<String>,
     /// Defaults to `true` per the V2 spec; the client wrapper passes
@@ -196,6 +198,7 @@ pub struct WaddleAdminChannelRef {
     pub channel_jid: String,
     pub name: String,
     pub topic: Option<String>,
+    pub channel_type: String,
     pub is_public: bool,
     pub members_only: bool,
 }
@@ -205,6 +208,7 @@ pub struct WaddleAdminChannelsUpdateArgs {
     pub channel_jid: String,
     pub name: Option<String>,
     pub topic: Option<String>,
+    pub channel_type: Option<String>,
     pub is_public: Option<bool>,
     pub members_only: Option<bool>,
 }
@@ -649,6 +653,9 @@ fn build_channels_create_iq(server_domain: &str, args: &WaddleAdminChannelsCreat
     if let Some(topic) = args.topic.as_deref() {
         form = form.append(text_single_field("topic", topic));
     }
+    if let Some(channel_type) = args.channel_type.as_deref() {
+        form = form.append(text_single_field("channel_type", channel_type));
+    }
     if let Some(space_jid) = args.space_jid.as_deref() {
         form = form.append(jid_field("space_jid", space_jid));
     }
@@ -672,6 +679,9 @@ fn build_channels_update_iq(server_domain: &str, args: &WaddleAdminChannelsUpdat
     }
     if let Some(topic) = args.topic.as_deref() {
         form = form.append(text_single_field("topic", topic));
+    }
+    if let Some(channel_type) = args.channel_type.as_deref() {
+        form = form.append(text_single_field("channel_type", channel_type));
     }
     if let Some(is_public) = args.is_public {
         form = form.append(boolean_field("is_public", is_public));
@@ -910,6 +920,7 @@ fn parse_channels_list_result(iq: &Element) -> AdminParseResult<WaddleAdminChann
             channel_jid: field_text_required(item, "channel_jid")?,
             name: field_text_required(item, "name")?,
             topic: field_text(item, "topic").filter(|s| !s.is_empty()),
+            channel_type: field_text_required(item, "channel_type")?,
             is_public: field_bool(item, "is_public")?,
             members_only: field_bool(item, "members_only")?,
             occupant_count: field_u32(item, "occupant_count")?,
@@ -931,6 +942,7 @@ fn parse_channel_ref_result(iq: &Element) -> AdminParseResult<WaddleAdminChannel
         channel_jid: top_level_field_text_required(form, "channel_jid")?,
         name: top_level_field_text_required(form, "name")?,
         topic: top_level_field_text_opt(form, "topic"),
+        channel_type: top_level_field_text_required(form, "channel_type")?,
         is_public: top_level_field_bool(form, "is_public")?,
         members_only: top_level_field_bool(form, "members_only")?,
     })

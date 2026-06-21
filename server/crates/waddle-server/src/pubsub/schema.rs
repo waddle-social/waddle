@@ -19,7 +19,9 @@ use super::DatabasePubSubStorage;
 // v7 (#719): notification_settings_projection gains the
 // `rich_payload_opt_in` column (XEP-0492 `<advanced/>` rich-payload
 // opt-in). Version-gated drop-and-recreate carries the schema change.
-const PUBSUB_SCHEMA_VERSION: i64 = 7;
+// * v8 — pubsub_nodes gains nullable node_type for XEP-0060
+//   `pubsub#type` profile metadata (XEP-0472/XEP-0501).
+const PUBSUB_SCHEMA_VERSION: i64 = 8;
 
 impl DatabasePubSubStorage {
     pub(super) async fn initialize(&self) -> Result<(), XmppError> {
@@ -111,6 +113,7 @@ impl DatabasePubSubStorage {
                     node_name TEXT NOT NULL,
                     access_model TEXT NOT NULL,
                     publish_model TEXT NOT NULL,
+                    node_type TEXT,
                     max_items INTEGER NOT NULL,
                     persist_items INTEGER NOT NULL,
                     deliver_payloads INTEGER NOT NULL,
@@ -129,6 +132,7 @@ impl DatabasePubSubStorage {
                     node_name TEXT NOT NULL,
                     access_model TEXT NOT NULL,
                     publish_model TEXT NOT NULL,
+                    node_type TEXT,
                     max_items BIGINT NOT NULL,
                     persist_items INTEGER NOT NULL,
                     deliver_payloads INTEGER NOT NULL,

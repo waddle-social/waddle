@@ -66,7 +66,7 @@ fn xep0513_muc_rooms_advertise_mentions_and_channel_mentions() {
         for members_only in [false, true] {
             for moderated in [false, true] {
                 for forum in [false, true] {
-                    let feats = muc_room_features(persistent, members_only, moderated, forum);
+                    let feats = muc_room_features(persistent, members_only, true, moderated, forum);
                     assert!(
                         feats.iter().any(|f| f == &mentions),
                         "muc_room_features({persistent}, {members_only}, {moderated}, {forum}) \

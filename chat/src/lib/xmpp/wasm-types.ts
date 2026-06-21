@@ -538,10 +538,13 @@ export interface WasmAdminSpacesSetRoleResult {
 
 // ─── Admin V2 — Channels ──────────────────────────────────────────────
 
+export type WasmAdminChannelType = "text" | "announcement" | "forum" | "group-dm";
+
 export interface WasmAdminChannelListEntry {
   channel_jid: string;
   name: string;
   topic?: string | null;
+  channel_type: WasmAdminChannelType;
   is_public: boolean;
   members_only: boolean;
   occupant_count: number;
@@ -560,6 +563,7 @@ export interface WasmAdminChannelRef {
   channel_jid: string;
   name: string;
   topic?: string | null;
+  channel_type: WasmAdminChannelType;
   is_public: boolean;
   members_only: boolean;
 }

@@ -10,7 +10,7 @@ fn xep0333_server_and_muc_disco_advertise_displayed_markers() {
     let server = server_features();
     assert!(server.contains(&Feature::chat_markers()));
 
-    let room = muc_room_features(false, false, false, false);
+    let room = muc_room_features(false, false, true, false, false);
     assert!(room.contains(&Feature::chat_markers()));
 }
 

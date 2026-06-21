@@ -13,6 +13,8 @@ export interface Story {
   body?: string;
   /** Image / video URL. */
   mediaUrl?: string;
+  /** MIME type for the story media URL. */
+  mediaType?: string;
   /** Author bare JID. */
   author?: string;
   /** Epoch ms when the story was posted. */
@@ -38,13 +40,14 @@ export interface StoryReactionSummary {
 
 export const NS_PUBSUB_ATTACHMENTS = "urn:xmpp:pubsub-attachments:1";
 export const NS_PUBSUB_ATTACHMENTS_SUMMARY = "urn:xmpp:pubsub-attachments:summary:1";
-export const STORIES_NODE = "urn:xmpp:stories:0";
-export const STORY_REACTIONS_SUMMARY_NODE = `${NS_PUBSUB_ATTACHMENTS_SUMMARY}/urn:xmpp:stories:0`;
+export const STORIES_NODE = "urn:xmpp:pubsub-social-feed:stories:0";
+export const STORY_REACTIONS_SUMMARY_NODE = `${NS_PUBSUB_ATTACHMENTS_SUMMARY}/${STORIES_NODE}`;
 export const STORY_REACTIONS_MAX = 12;
 
 export interface StoryPostInput {
   body?: string;
-  mediaUrl?: string;
+  mediaUrl: string;
+  mediaType?: string;
   author?: string;
   /** Hours from now until expiry. Defaults to 24 server-side. */
   expiryHours?: number;
@@ -55,6 +58,7 @@ export interface WasmStory {
   id: string;
   body?: string | null;
   media_url?: string | null;
+  media_type?: string | null;
   author?: string | null;
   posted?: string | null;
   expires?: string | null;
@@ -67,6 +71,7 @@ export function storyFromWasm(story: WasmStory): Story {
     id: story.id,
     ...(story.body ? { body: story.body } : {}),
     ...(story.media_url ? { mediaUrl: story.media_url } : {}),
+    ...(story.media_type ? { mediaType: story.media_type } : {}),
     ...(story.author ? { author: story.author } : {}),
     ...(typeof postedMs === "number" && Number.isFinite(postedMs) ? { postedMs } : {}),
     ...(typeof expiresMs === "number" && Number.isFinite(expiresMs) ? { expiresMs } : {}),

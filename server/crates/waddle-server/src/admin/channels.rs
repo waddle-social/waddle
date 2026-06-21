@@ -48,7 +48,7 @@ use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
 use waddle_xmpp::xep::xep0004::{DataForm, Field, FieldType, FormType};
 use waddle_xmpp::xep::xep0421::OccupantIdentity;
 use waddle_xmpp::XmppError;
-use waddle_xmpp::{Affiliation, ChannelInfo, Role, Stanza};
+use waddle_xmpp::{Affiliation, ChannelInfo, ChannelType, Role, Stanza};
 use xmpp_parsers::message::{Message, MessageType};
 use xmpp_parsers::minidom::Element;
 
@@ -176,6 +176,7 @@ pub struct ChannelListEntry {
     pub channel_jid: BareJid,
     pub name: String,
     pub topic: Option<String>,
+    pub channel_type: ChannelType,
     pub is_public: bool,
     pub members_only: bool,
     pub occupant_count: u32,
@@ -197,6 +198,7 @@ pub struct ChannelsCreateArgs {
     pub space_node: Option<SpaceNode>,
     pub name: String,
     pub topic: Option<String>,
+    pub channel_type: ChannelType,
     /// XEP-0045 `muc#roomconfig_publicroom`; default `true`.
     pub is_public: bool,
     /// XEP-0045 `muc#roomconfig_membersonly`. When omitted during create,
@@ -209,6 +211,7 @@ pub struct ChannelRef {
     pub channel_jid: BareJid,
     pub name: String,
     pub topic: Option<String>,
+    pub channel_type: ChannelType,
     pub is_public: bool,
     pub members_only: bool,
 }
@@ -218,6 +221,7 @@ pub struct ChannelsUpdateArgs {
     pub channel_jid: BareJid,
     pub name: Option<String>,
     pub topic: Option<String>,
+    pub channel_type: Option<ChannelType>,
     pub is_public: Option<bool>,
     pub members_only: Option<bool>,
 }
@@ -770,6 +774,19 @@ fn parse_optional_bool(form: &DataForm, var: &str) -> Result<Option<bool>, Strin
     }
 }
 
+fn parse_optional_channel_type(form: &DataForm, var: &str) -> Result<Option<ChannelType>, String> {
+    let Some(raw) = parse_optional_text(form, var) else {
+        return Ok(None);
+    };
+    let Some(channel_type) = ChannelType::parse(&raw) else {
+        return Err(format!("'{var}' has unsupported channel type '{raw}'"));
+    };
+    if matches!(channel_type, ChannelType::GroupDm) {
+        return Err(format!("'{var}' group-dm is managed by group-dm:create"));
+    }
+    Ok(Some(channel_type))
+}
+
 fn parse_page_size(form: &DataForm) -> Result<u32, String> {
     match form.get_value("page_size") {
         Some(raw) if !raw.is_empty() => {
@@ -850,6 +867,8 @@ pub fn parse_create_args(form: Option<&DataForm>) -> Result<ChannelsCreateArgs, 
         _ => None,
     };
     let space_node = parse_optional_text(form, "space_node").map(SpaceNode::from);
+    let channel_type =
+        parse_optional_channel_type(form, "channel_type")?.unwrap_or(ChannelType::Text);
     // XEP-0045 public-room discovery visibility defaults true.
     let is_public = parse_optional_bool(form, "is_public")?.unwrap_or(true);
     let members_only = parse_optional_bool(form, "members_only")?;
@@ -858,6 +877,7 @@ pub fn parse_create_args(form: Option<&DataForm>) -> Result<ChannelsCreateArgs, 
         space_node,
         name,
         topic,
+        channel_type,
         is_public,
         members_only,
     })
@@ -921,12 +941,14 @@ pub fn parse_update_args(form: Option<&DataForm>) -> Result<ChannelsUpdateArgs, 
         validate_name(name)?;
     }
     let topic = parse_optional_text(form, "topic");
+    let channel_type = parse_optional_channel_type(form, "channel_type")?;
     let is_public = parse_optional_bool(form, "is_public")?;
     let members_only = parse_optional_bool(form, "members_only")?;
     Ok(ChannelsUpdateArgs {
         channel_jid,
         name,
         topic,
+        channel_type,
         is_public,
         members_only,
     })
@@ -1079,6 +1101,14 @@ async fn run_list(
                 continue;
             }
         }
+        let channel_id = match waddle_xmpp::parse_managed_room_jid(room_jid) {
+            Some(channel_id) => channel_id,
+            None => continue,
+        };
+        let catalog_snapshot = get_xmpp_channel(state.db_pool.global_actor().clone(), &channel_id)
+            .await
+            .map_err(|error| internal_err(format!("channel catalog lookup failed: {error}")))?;
+        let channel_type = channel_type_from_catalog_or_config(catalog_snapshot.as_ref(), &config);
         let occupant_count = actor
             .ask(OccupantCount)
             .await
@@ -1105,6 +1135,7 @@ async fn run_list(
             channel_jid: room_jid.clone(),
             name: config.name,
             topic: config.description,
+            channel_type,
             is_public: config.public_room,
             members_only: config.members_only,
             occupant_count: u32::try_from(occupant_count).unwrap_or(u32::MAX),
@@ -1579,25 +1610,35 @@ fn channel_type_from_config(config: &RoomConfig) -> &'static str {
     }
     if config.forum {
         "forum"
+    } else if config.moderated {
+        "announcement"
     } else {
         "text"
     }
 }
 
-fn channel_type_for_catalog(config: &RoomConfig, existing: Option<&XmppChannelRecord>) -> String {
-    if config.forum {
-        return "forum".to_string();
-    }
-    if existing.is_some_and(|row| row.channel_type == "announcement") {
-        return "announcement".to_string();
-    }
-    channel_type_from_config(config).to_string()
+fn channel_type_from_catalog_or_config(
+    existing: Option<&XmppChannelRecord>,
+    config: &RoomConfig,
+) -> ChannelType {
+    existing
+        .and_then(|row| ChannelType::parse(&row.channel_type))
+        .unwrap_or_else(|| {
+            ChannelType::parse(channel_type_from_config(config)).unwrap_or(ChannelType::Text)
+        })
+}
+
+fn apply_channel_type(config: &mut RoomConfig, channel_type: ChannelType) {
+    config.group_dm = matches!(channel_type, ChannelType::GroupDm);
+    config.forum = matches!(channel_type, ChannelType::Forum);
+    config.moderated = matches!(channel_type, ChannelType::Announcement);
 }
 
 async fn upsert_channel_catalog(
     state: &AppState,
     channel_id: &str,
     config: &RoomConfig,
+    channel_type: ChannelType,
 ) -> Result<(), AdminErr> {
     let db_actor = state.db_pool.global_actor().clone();
     let existing = get_xmpp_channel(db_actor.clone(), channel_id)
@@ -1607,7 +1648,7 @@ async fn upsert_channel_catalog(
         id: channel_id.to_string(),
         name: config.name.clone(),
         description: config.description.clone(),
-        channel_type: channel_type_for_catalog(config, existing.as_ref()),
+        channel_type: channel_type.as_str().to_string(),
         position: existing.as_ref().map(|row| row.position).unwrap_or(0),
         is_default: existing.as_ref().map(|row| row.is_default).unwrap_or(false),
         pin_permission: config.pin_permission,
@@ -1714,12 +1755,25 @@ async fn rollback_channel_bookmark_item(
             return None;
         }
     };
-    let channel_type = channel_type_from_config(&config).to_string();
+    let catalog_snapshot =
+        match get_xmpp_channel(state.db_pool.global_actor().clone(), channel_id).await {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    room = %room_jid,
+                    channel_id,
+                    "channels rollback could not load channel catalog for missing Spaces bookmark",
+                );
+                return None;
+            }
+        };
+    let channel_type = channel_type_from_catalog_or_config(catalog_snapshot.as_ref(), &config);
     waddle_xmpp::xep::build_channel_item(
         &ChannelInfo {
             id: channel_id.to_string(),
             name: config.name,
-            channel_type,
+            channel_type: channel_type.as_str().to_string(),
         },
         &state.muc_domain.to_string(),
     )
@@ -1758,9 +1812,7 @@ async fn run_create(state: &AppState, args: &ChannelsCreateArgs) -> Result<Chann
         public_room: args.is_public,
         ..RoomConfig::default()
     };
-    // Spec: forum/announcement etc default off; only name/topic/visibility
-    // are exposed at the admin V2 wire.
-    config.moderated = false;
+    apply_channel_type(&mut config, args.channel_type);
     config.max_occupants = 0;
     config.enable_logging = true;
 
@@ -1775,7 +1827,8 @@ async fn run_create(state: &AppState, args: &ChannelsCreateArgs) -> Result<Chann
         .await
         .map_err(send_err("room_registry ask CreateRoom"))?;
 
-    if let Err(error) = upsert_channel_catalog(state, &localpart, &config).await {
+    if let Err(error) = upsert_channel_catalog(state, &localpart, &config, args.channel_type).await
+    {
         let _ = state
             .room_registry
             .ask(DestroyRoom {
@@ -1796,7 +1849,7 @@ async fn run_create(state: &AppState, args: &ChannelsCreateArgs) -> Result<Chann
             node,
             &localpart,
             &args.name,
-            channel_type_from_config(&config),
+            args.channel_type.as_str(),
         )
         .await
         {
@@ -1875,6 +1928,7 @@ async fn run_create(state: &AppState, args: &ChannelsCreateArgs) -> Result<Chann
         channel_jid,
         name: args.name.clone(),
         topic: args.topic.clone(),
+        channel_type: args.channel_type,
         is_public: args.is_public,
         members_only,
     })
@@ -2859,14 +2913,18 @@ async fn run_update(
     let catalog_snapshot = get_xmpp_channel(state.db_pool.global_actor().clone(), &channel_id)
         .await
         .map_err(|error| internal_err(format!("channel catalog lookup failed: {error}")))?;
+    let existing_channel_type =
+        channel_type_from_catalog_or_config(catalog_snapshot.as_ref(), &existing);
+    let new_channel_type = args.channel_type.unwrap_or(existing_channel_type);
 
-    let updated = RoomConfig {
+    let mut updated = RoomConfig {
         name: new_name.clone(),
         description: new_topic.clone(),
         members_only: new_members_only,
         public_room: new_public_room,
         ..existing.clone()
     };
+    apply_channel_type(&mut updated, new_channel_type);
     let linked_bookmark = if let Some(link) = state
         .channel_space_link_store
         .get(&args.channel_jid)
@@ -2914,13 +2972,14 @@ async fn run_update(
         .await
         .map_err(send_err("room actor UpdateConfig"))?;
 
-    if let Err(error) = upsert_channel_catalog(state, &channel_id, &updated).await {
+    if let Err(error) = upsert_channel_catalog(state, &channel_id, &updated, new_channel_type).await
+    {
         let _ = rollback_room_config_if_revision(&actor, expected_revision, existing.clone()).await;
         return Err(error);
     }
 
     if let Some((node, channel_id, item_id, previous_bookmark)) = linked_bookmark {
-        let bookmark_channel_type = channel_type_for_catalog(&updated, catalog_snapshot.as_ref());
+        let bookmark_channel_type = new_channel_type.as_str().to_string();
         let parent_tuple_created = match publish_channel_space_bookmark(
             state,
             &node,
@@ -2975,6 +3034,7 @@ async fn run_update(
         channel_jid: args.channel_jid.clone(),
         name: new_name,
         topic: new_topic,
+        channel_type: new_channel_type,
         is_public: new_public_room,
         members_only: new_members_only,
     })
@@ -3771,6 +3831,7 @@ pub fn build_list_form(result: &ChannelsListResult) -> DataForm {
         .add_reported(Field::new("channel_jid", FieldType::JidSingle).with_label("Channel JID"))
         .add_reported(Field::new("name", FieldType::TextSingle).with_label("Name"))
         .add_reported(Field::new("topic", FieldType::TextSingle).with_label("Topic"))
+        .add_reported(Field::new("channel_type", FieldType::TextSingle).with_label("Type"))
         .add_reported(Field::new("is_public", FieldType::Boolean).with_label("Public"))
         .add_reported(Field::new("members_only", FieldType::Boolean).with_label("Members only"))
         .add_reported(Field::new("occupant_count", FieldType::TextSingle).with_label("Occupants"))
@@ -3785,6 +3846,8 @@ pub fn build_list_form(result: &ChannelsListResult) -> DataForm {
             Field::new("name", FieldType::TextSingle).with_value(entry.name.clone()),
             Field::new("topic", FieldType::TextSingle)
                 .with_value(entry.topic.clone().unwrap_or_default()),
+            Field::new("channel_type", FieldType::TextSingle)
+                .with_value(entry.channel_type.as_str()),
             Field::boolean("is_public", entry.is_public),
             Field::boolean("members_only", entry.members_only),
             Field::new("occupant_count", FieldType::TextSingle)
@@ -3814,6 +3877,10 @@ pub fn build_channel_form(channel: &ChannelRef) -> DataForm {
                 .with_value(channel.channel_jid.to_string()),
         )
         .add_field(Field::text_single("name", channel.name.clone()))
+        .add_field(Field::text_single(
+            "channel_type",
+            channel.channel_type.as_str(),
+        ))
         .add_field(Field::text_single("is_public", bool_str(channel.is_public)))
         .add_field(Field::text_single(
             "members_only",
@@ -4031,6 +4098,7 @@ mod tests {
                 channel_jid: "general@muc.localhost".parse().expect("jid"),
                 name: "General".to_string(),
                 topic: Some("All things".to_string()),
+                channel_type: ChannelType::Text,
                 is_public: true,
                 members_only: false,
                 occupant_count: 7,
@@ -4043,7 +4111,7 @@ mod tests {
         };
         let form = build_list_form(&result);
         assert!(matches!(form.form_type, FormType::Result));
-        assert_eq!(form.reported.len(), 10);
+        assert_eq!(form.reported.len(), 11);
         assert_eq!(form.items.len(), 1);
     }
 
@@ -4053,12 +4121,39 @@ mod tests {
             channel_jid: "general@muc.localhost".parse().expect("jid"),
             name: "General".to_string(),
             topic: None,
+            channel_type: ChannelType::Text,
             is_public: true,
             members_only: true,
         };
         let form = build_channel_form(&channel);
         assert_eq!(form.get_value("is_public"), Some("1"));
         assert_eq!(form.get_value("members_only"), Some("1"));
+    }
+
+    #[test]
+    fn catalog_channel_type_takes_precedence_over_room_config() {
+        let record = XmppChannelRecord {
+            id: "announcements".to_string(),
+            name: "Announcements".to_string(),
+            description: None,
+            channel_type: "announcement".to_string(),
+            position: 0,
+            is_default: false,
+            pin_permission: PinPermission::Anyone,
+            members_only: false,
+            public_room: true,
+            created_at: "2026-06-21T00:00:00Z".to_string(),
+            updated_at: None,
+        };
+        let config = RoomConfig {
+            moderated: false,
+            ..RoomConfig::default()
+        };
+
+        assert_eq!(
+            channel_type_from_catalog_or_config(Some(&record), &config),
+            ChannelType::Announcement
+        );
     }
 
     #[test]

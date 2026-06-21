@@ -134,7 +134,7 @@ export function useStories(
     const client = xmppClient.value;
     const jid = options.communityJid.value;
     if (!client || !jid) return null;
-    if (!(input.body?.trim() || input.mediaUrl?.trim())) return null;
+    if (!input.mediaUrl.trim()) return null;
     isPosting.value = true;
     error.value = null;
     try {

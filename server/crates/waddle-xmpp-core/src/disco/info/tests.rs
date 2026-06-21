@@ -102,16 +102,26 @@ fn test_server_features_exclude_unimplemented_advertisements() {
 
 #[test]
 fn test_muc_room_features_forum_room() {
-    let features = muc_room_features(true, true, false, true);
+    let features = muc_room_features(true, true, false, false, true);
     assert!(!features.contains(&Feature::new("urn:xmpp:forums:0")));
     assert!(features.contains(&Feature::muc_persistent()));
     assert!(features.contains(&Feature::muc_membersonly()));
+    assert!(features.contains(&Feature::muc_hidden()));
     assert!(features.contains(&Feature::muc_unmoderated()));
     assert!(features.contains(&Feature::muc_self_ping_optimization()));
     assert!(features.contains(&Feature::mam_extended()));
     assert!(features.contains(&Feature::fulltext_mam()));
     assert!(features.contains(&Feature::chat_states()));
     assert_eq!(Feature::chat_states().0, NS_CHATSTATES);
+}
+
+#[test]
+fn test_muc_room_features_public_open_room() {
+    let features = muc_room_features(true, false, true, false, false);
+    assert!(features.contains(&Feature::muc_open()));
+    assert!(features.contains(&Feature::muc_public()));
+    assert!(!features.contains(&Feature::muc_membersonly()));
+    assert!(!features.contains(&Feature::muc_hidden()));
 }
 
 #[test]

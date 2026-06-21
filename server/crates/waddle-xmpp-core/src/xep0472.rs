@@ -8,10 +8,12 @@
 //! A social post published to PubSub:
 //! ```xml
 //! <item id='post-123' xmlns='http://jabber.org/protocol/pubsub'>
-//!   <entry xmlns='urn:xmpp:pubsub-social-feed:0'>
-//!     <title>Announcement</title>
-//!     <body>We're launching a new feature!</body>
-//!     <author>alice@example.com</author>
+//!   <entry xmlns='http://www.w3.org/2005/Atom'>
+//!     <title type='text'>Announcement</title>
+//!     <id>tag:example.com,2024:post-123</id>
+//!     <updated>2024-06-01T12:00:00Z</updated>
+//!     <content type='text'>We're launching a new feature!</content>
+//!     <author><uri>xmpp:alice@example.com</uri></author>
 //!     <published>2024-06-01T12:00:00Z</published>
 //!   </entry>
 //! </item>
@@ -27,10 +29,13 @@ use chrono::{DateTime, Utc};
 use minidom::Element;
 
 /// Namespace for XEP-0472 Social Feed.
-pub const NS_SOCIAL_FEED: &str = "urn:xmpp:pubsub-social-feed:0";
+pub const NS_SOCIAL_FEED: &str = "urn:xmpp:pubsub-social-feed:1";
+
+/// Atom namespace used for XEP-0472 feed item payloads.
+pub const NS_ATOM: &str = "http://www.w3.org/2005/Atom";
 
 /// PubSub node for social feed posts.
-pub const PUBSUB_NODE_FEED: &str = "urn:xmpp:pubsub-social-feed:0";
+pub const PUBSUB_NODE_FEED: &str = "urn:xmpp:pubsub-social-feed:1";
 
 /// A social feed post/entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,7 +117,7 @@ impl FeedEntry {
 
 /// Check if an element is a feed entry element.
 pub fn is_feed_entry(elem: &Element) -> bool {
-    elem.ns() == NS_SOCIAL_FEED && elem.name() == "entry"
+    elem.ns() == NS_ATOM && elem.name() == "entry"
 }
 
 // ── Extraction ───────────────────────────────────────────────────────
@@ -123,22 +128,25 @@ pub fn parse_feed_entry(item_id: &str, elem: &Element) -> Option<FeedEntry> {
         return None;
     }
 
-    let text = |name: &str| -> Option<String> {
-        elem.children()
-            .find(|c| c.name() == name && c.ns() == NS_SOCIAL_FEED)
-            .map(|c| c.text())
-            .filter(|t| !t.is_empty())
+    let title = atom_child_text(elem, "title")?;
+    let _atom_id = atom_child_text(elem, "id")?;
+    let updated = atom_child_text(elem, "updated")?.parse().ok()?;
+    let body = atom_child_text(elem, "content")
+        .or_else(|| atom_child_text(elem, "summary"))
+        .unwrap_or_else(|| title.clone());
+    let published = if let Some(published) = atom_child_text(elem, "published") {
+        Some(published.parse().ok()?)
+    } else {
+        Some(updated)
     };
-
-    let body = text("body")?;
 
     Some(FeedEntry {
         id: item_id.to_owned(),
-        title: text("title"),
+        title: Some(title),
         body,
-        author: text("author"),
-        published: text("published").and_then(|t| t.parse().ok()),
-        link: text("link"),
+        author: atom_author(elem),
+        published,
+        link: atom_link_href(elem, None),
     })
 }
 
@@ -146,48 +154,118 @@ pub fn parse_feed_entry(item_id: &str, elem: &Element) -> Option<FeedEntry> {
 
 /// Build an `<entry/>` element for PubSub publication.
 pub fn build_feed_entry_element(entry: &FeedEntry) -> Element {
-    let mut elem = Element::builder("entry", NS_SOCIAL_FEED).build();
+    let mut elem = Element::builder("entry", NS_ATOM).build();
+    let title = entry
+        .title
+        .as_deref()
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or_else(|| {
+            let preview = entry.preview(80).trim();
+            if preview.is_empty() {
+                "Untitled"
+            } else {
+                preview
+            }
+        });
+    let timestamp = entry.published.unwrap_or_else(Utc::now).to_rfc3339();
 
-    let add = |parent: &mut Element, name: &str, value: &str| {
-        let mut child = Element::builder(name, NS_SOCIAL_FEED).build();
-        child.append_text_node(value);
-        parent.append_child(child);
-    };
-
-    if let Some(ref title) = entry.title {
-        add(&mut elem, "title", title);
+    append_atom_text(&mut elem, "title", title, Some("text"));
+    append_atom_text(&mut elem, "id", &entry.id, None);
+    append_atom_text(&mut elem, "published", &timestamp, None);
+    append_atom_text(&mut elem, "updated", &timestamp, None);
+    if !entry.body.trim().is_empty() {
+        append_atom_text(&mut elem, "content", &entry.body, Some("text"));
     }
-    add(&mut elem, "body", &entry.body);
     if let Some(ref author) = entry.author {
-        add(&mut elem, "author", author);
-    }
-    if let Some(ts) = entry.published {
-        add(&mut elem, "published", &ts.to_rfc3339());
+        elem.append_child(build_atom_author(author));
     }
     if let Some(ref link) = entry.link {
-        add(&mut elem, "link", link);
+        elem.append_child(build_atom_link(link, Some("alternate"), None));
     }
 
     elem
 }
 
-/// Return a copy of a feed `<entry/>` whose `<author>` is `author`,
+/// Return a copy of a feed Atom `<entry/>` whose `<author>` is `author`,
 /// replacing any author the client supplied. On the open, member-postable
 /// feed the service stamps the authenticated publisher here so a member
 /// cannot impersonate another user through the displayed payload author.
 /// All other children are preserved.
 pub fn stamp_feed_entry_author(elem: &Element, author: &str) -> Element {
-    let mut stamped = Element::builder("entry", NS_SOCIAL_FEED).build();
-    for child in elem.children() {
-        if child.name() == "author" && child.ns() == NS_SOCIAL_FEED {
-            continue;
-        }
-        stamped.append_child(child.clone());
+    let mut stamped = elem.clone();
+    let author_children: Vec<(String, String)> = stamped
+        .children()
+        .filter(|child| child.name() == "author" && child.ns() == NS_ATOM)
+        .map(|child| (child.name().to_owned(), child.ns()))
+        .collect();
+    for (name, ns) in author_children {
+        stamped.remove_child(&name, ns.as_str());
     }
-    let mut author_el = Element::builder("author", NS_SOCIAL_FEED).build();
-    author_el.append_text_node(author);
-    stamped.append_child(author_el);
+    stamped.append_child(build_atom_author(author));
     stamped
+}
+
+fn atom_child_text(elem: &Element, name: &str) -> Option<String> {
+    elem.children()
+        .find(|c| c.name() == name && c.ns() == NS_ATOM)
+        .map(|c| c.text())
+        .map(|text| text.trim().to_owned())
+        .filter(|text| !text.is_empty())
+}
+
+fn atom_author(elem: &Element) -> Option<String> {
+    let author = elem
+        .children()
+        .find(|c| c.name() == "author" && c.ns() == NS_ATOM)?;
+    atom_child_text(author, "uri")
+        .map(|uri| uri.strip_prefix("xmpp:").unwrap_or(&uri).to_owned())
+        .or_else(|| atom_child_text(author, "name"))
+        .or_else(|| {
+            let text = author.text().trim().to_owned();
+            (!text.is_empty()).then_some(text)
+        })
+}
+
+fn atom_link_href(elem: &Element, rel: Option<&str>) -> Option<String> {
+    elem.children()
+        .filter(|c| c.name() == "link" && c.ns() == NS_ATOM)
+        .find(|link| match rel {
+            Some(expected) => match link.attr("rel") {
+                Some(actual) => actual == expected,
+                None => true,
+            },
+            None => true,
+        })
+        .and_then(|link| link.attr("href"))
+        .map(str::to_owned)
+}
+
+fn append_atom_text(parent: &mut Element, name: &str, value: &str, type_attr: Option<&str>) {
+    let mut builder = Element::builder(name, NS_ATOM);
+    if let Some(type_attr) = type_attr {
+        builder = builder.attr(minidom::rxml::xml_ncname!("type").to_owned(), type_attr);
+    }
+    let mut child = builder.build();
+    child.append_text_node(value);
+    parent.append_child(child);
+}
+
+fn build_atom_author(author: &str) -> Element {
+    let mut uri = Element::builder("uri", NS_ATOM).build();
+    uri.append_text_node(format!("xmpp:{author}"));
+    Element::builder("author", NS_ATOM).append(uri).build()
+}
+
+fn build_atom_link(href: &str, rel: Option<&str>, media_type: Option<&str>) -> Element {
+    let mut builder =
+        Element::builder("link", NS_ATOM).attr(minidom::rxml::xml_ncname!("href").to_owned(), href);
+    if let Some(rel) = rel {
+        builder = builder.attr(minidom::rxml::xml_ncname!("rel").to_owned(), rel);
+    }
+    if let Some(media_type) = media_type {
+        builder = builder.attr(minidom::rxml::xml_ncname!("type").to_owned(), media_type);
+    }
+    builder.build()
 }
 
 #[cfg(test)]
@@ -203,7 +281,7 @@ mod tests {
 
     #[test]
     fn test_is_feed_entry() {
-        let elem = Element::builder("entry", NS_SOCIAL_FEED).build();
+        let elem = Element::builder("entry", NS_ATOM).build();
         assert!(is_feed_entry(&elem));
 
         let wrong = Element::builder("entry", "jabber:client").build();
@@ -220,6 +298,7 @@ mod tests {
 
         let elem = build_feed_entry_element(&entry);
         assert_eq!(elem.name(), "entry");
+        assert_eq!(elem.ns(), NS_ATOM);
 
         let parsed = parse_feed_entry("p-1", &elem).expect("parseable");
         assert_eq!(parsed.id, "p-1");
@@ -232,23 +311,40 @@ mod tests {
 
     #[test]
     fn test_parse_minimal() {
-        let xml = "<entry xmlns='urn:xmpp:pubsub-social-feed:0'>\
-                    <body>Just a quick update</body>\
+        let xml = "<entry xmlns='http://www.w3.org/2005/Atom'>\
+                    <title type='text'>Just a quick update</title>\
+                    <id>tag:example.com,2024:p-2</id>\
+                    <updated>2024-06-01T12:00:00Z</updated>\
                     </entry>";
         let elem: Element = xml.parse().expect("valid");
         let entry = parse_feed_entry("p-2", &elem).expect("parseable");
         assert_eq!(entry.body, "Just a quick update");
-        assert_eq!(entry.title, None);
+        assert_eq!(entry.title.as_deref(), Some("Just a quick update"));
         assert_eq!(entry.author, None);
     }
 
     #[test]
-    fn test_parse_missing_body() {
-        let xml = "<entry xmlns='urn:xmpp:pubsub-social-feed:0'>\
-                    <title>No body</title>\
+    fn test_parse_missing_title() {
+        let xml = "<entry xmlns='http://www.w3.org/2005/Atom'>\
+                    <id>tag:example.com,2024:p-3</id>\
+                    <updated>2024-06-01T12:00:00Z</updated>\
+                    <content>No title</content>\
                     </entry>";
         let elem: Element = xml.parse().expect("valid");
         assert!(parse_feed_entry("p-3", &elem).is_none());
+    }
+
+    #[test]
+    fn test_parse_missing_required_atom_fields() {
+        for xml in [
+            "<entry xmlns='http://www.w3.org/2005/Atom'><title>No id</title><updated>2024-06-01T12:00:00Z</updated></entry>",
+            "<entry xmlns='http://www.w3.org/2005/Atom'><title>No updated</title><id>tag:example.com,2024:no-updated</id></entry>",
+            "<entry xmlns='http://www.w3.org/2005/Atom'><title>Bad updated</title><id>tag:example.com,2024:bad-updated</id><updated>not-a-date</updated></entry>",
+            "<entry xmlns='http://www.w3.org/2005/Atom'><title>Bad published</title><id>tag:example.com,2024:bad-published</id><updated>2024-06-01T12:00:00Z</updated><published>not-a-date</published></entry>",
+        ] {
+            let elem: Element = xml.parse().expect("valid");
+            assert!(parse_feed_entry("p-required", &elem).is_none());
+        }
     }
 
     #[test]
@@ -277,7 +373,7 @@ mod tests {
 
     #[test]
     fn test_pubsub_node() {
-        assert_eq!(PUBSUB_NODE_FEED, "urn:xmpp:pubsub-social-feed:0");
+        assert_eq!(PUBSUB_NODE_FEED, "urn:xmpp:pubsub-social-feed:1");
     }
 
     #[test]
@@ -304,7 +400,7 @@ mod tests {
         // Exactly one author element after stamping.
         let authors = stamped
             .children()
-            .filter(|c| c.name() == "author" && c.ns() == NS_SOCIAL_FEED)
+            .filter(|c| c.name() == "author" && c.ns() == NS_ATOM)
             .count();
         assert_eq!(authors, 1);
     }

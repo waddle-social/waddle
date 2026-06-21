@@ -344,12 +344,16 @@ async fn backfill_missing_space_bookmarks(
                 continue;
             }
         };
-        let channel_type = if config.forum { "forum" } else { "text" };
+        let Some(channel_type) =
+            channel_type_for_space_bookmark(state, &channel_id, &channel_jid, &config).await
+        else {
+            continue;
+        };
         let item = match waddle_xmpp::xep::build_channel_item(
             &waddle_xmpp::ChannelInfo {
                 id: channel_id.clone(),
                 name: config.name,
-                channel_type: channel_type.to_string(),
+                channel_type,
             },
             &state.deps.service_domains.muc,
         ) {
@@ -929,8 +933,8 @@ pub(super) async fn handle_spaces_publish(
 }
 
 /// Publish to a community pubsub node — XEP-0472 social feed at
-/// `urn:xmpp:pubsub-social-feed:0` or XEP-0501 stories at
-/// `urn:xmpp:stories:0`. Both live on `community.<domain>` (distinct
+/// `urn:xmpp:pubsub-social-feed:1` or XEP-0501 stories at
+/// `urn:xmpp:pubsub-social-feed:stories:0`. Both live on `community.<domain>` (distinct
 /// from the spaces service so the spaces enumeration only returns
 /// real spaces). Feed and stories are member-postable (gated by each
 /// node's pubsub publish-model); calendar event creation keeps the
@@ -1904,12 +1908,30 @@ async fn handle_community_non_bookmark_publish(
     };
 
     // Feed and stories are shared, open-publish nodes, so the service binds
-    // each item to its author: stamp the authenticated JID into payload
-    // `<author>` fields so a member cannot impersonate another. The storage
-    // write below atomically refuses cross-publisher item-id clobbering.
+    // each item to its author: stamp the authenticated JID into Atom author
+    // fields so a member cannot impersonate another. The storage write below
+    // atomically refuses cross-publisher item-id clobbering.
     // `publisher` is `Some` only for open member-postable community nodes.
     if let Some(entity) = publisher.as_ref() {
-        if node == waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES {
+        if node == waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED {
+            let Some(payload) = item.payload.as_ref() else {
+                return vec![iq_to_xml(build_pubsub_error(
+                    iq,
+                    PubSubError::PayloadRequired,
+                ))];
+            };
+            let item_id = item.id.as_deref().unwrap_or_default();
+            if waddle_xmpp_core::xep0472::parse_feed_entry(item_id, payload).is_none() {
+                return vec![iq_to_xml(build_pubsub_error(
+                    iq,
+                    PubSubError::InvalidPayload,
+                ))];
+            }
+            item.payload = Some(waddle_xmpp_core::xep0472::stamp_feed_entry_author(
+                payload,
+                &entity.to_string(),
+            ));
+        } else if node == waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES {
             let Some(payload) = item.payload.as_ref() else {
                 return vec![iq_to_xml(build_pubsub_error(
                     iq,
@@ -1923,27 +1945,17 @@ async fn handle_community_non_bookmark_publish(
                     PubSubError::InvalidPayload,
                 ))];
             };
-            if story.body.is_none() && story.media_url.is_none() {
+            if story.media_url.is_none() {
                 return vec![iq_to_xml(build_pubsub_error(
                     iq,
                     PubSubError::InvalidPayload,
                 ))];
             }
-        }
-        if let Some(payload) = item.payload.as_ref() {
-            if waddle_xmpp_core::xep0472::is_feed_entry(payload) {
-                item.payload = Some(waddle_xmpp_core::xep0472::stamp_feed_entry_author(
-                    payload,
-                    &entity.to_string(),
-                ));
-            } else if waddle_xmpp_core::xep0501::is_story_element(payload) {
-                let item_id = item.id.as_deref().unwrap_or_default();
-                item.payload = waddle_xmpp_core::xep0501::stamp_story_author(
-                    item_id,
-                    payload,
-                    &entity.to_string(),
-                );
-            }
+            item.payload = waddle_xmpp_core::xep0501::stamp_story_author(
+                item_id,
+                payload,
+                &entity.to_string(),
+            );
         }
     }
 
@@ -2483,6 +2495,56 @@ pub(super) async fn room_space_metadata_extensions(
     }
 }
 
+async fn channel_type_for_space_bookmark(
+    state: &WebSocketState,
+    channel_id: &str,
+    channel_jid: &BareJid,
+    config: &waddle_xmpp::muc::RoomConfig,
+) -> Option<String> {
+    match get_xmpp_channel(
+        state.deps.app_state.db_pool.global_actor().clone(),
+        channel_id,
+    )
+    .await
+    {
+        Ok(existing) => Some(channel_type_from_catalog_or_room_config(
+            existing.as_ref().map(|row| row.channel_type.as_str()),
+            config,
+        )),
+        Err(error) => {
+            warn!(
+                channel = %channel_jid,
+                channel_id,
+                error = %error,
+                "Failed to load channel catalog type for Spaces bookmark backfill"
+            );
+            None
+        }
+    }
+}
+
+fn channel_type_from_catalog_or_room_config(
+    catalog_channel_type: Option<&str>,
+    config: &waddle_xmpp::muc::RoomConfig,
+) -> String {
+    catalog_channel_type
+        .and_then(waddle_xmpp::ChannelType::parse)
+        .map(|channel_type| channel_type.as_str().to_string())
+        .unwrap_or_else(|| channel_type_from_room_config(config).to_string())
+}
+
+fn channel_type_from_room_config(config: &waddle_xmpp::muc::RoomConfig) -> &'static str {
+    if config.group_dm {
+        waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM
+    } else if config.forum {
+        "forum"
+    } else if config.moderated {
+        "announcement"
+    } else {
+        "text"
+    }
+}
+
 #[cfg(test)]
 mod story_attachment_target_tests {
     use super::*;
@@ -2492,7 +2554,9 @@ mod story_attachment_target_tests {
 
     #[test]
     fn parses_only_canonical_story_attachment_target() {
-        let node = format!("{PREFIX}/xmpp:{COMMUNITY}?;node=urn%3Axmpp%3Astories%3A0;item=story-1");
+        let node = format!(
+            "{PREFIX}/xmpp:{COMMUNITY}?;node=urn%3Axmpp%3Apubsub-social-feed%3Astories%3A0;item=story-1"
+        );
 
         assert_eq!(
             parse_story_attachment_target(&node, COMMUNITY),
@@ -2504,20 +2568,51 @@ mod story_attachment_target_tests {
 
     #[test]
     fn rejects_lookalike_story_node_target() {
-        let node =
-            format!("{PREFIX}/xmpp:{COMMUNITY}?;node=urn%3Axmpp%3Astories%3A0evil;item=story-1");
+        let node = format!(
+            "{PREFIX}/xmpp:{COMMUNITY}?;node=urn%3Axmpp%3Apubsub-social-feed%3Astories%3A0evil;item=story-1"
+        );
 
         assert_eq!(parse_story_attachment_target(&node, COMMUNITY), None);
     }
 
     #[test]
     fn rejects_non_canonical_story_attachment_target() {
-        let wrong_host =
-            format!("{PREFIX}/xmpp:other.localhost?;node=urn%3Axmpp%3Astories%3A0;item=story-1");
-        let extra_param =
-            format!("{PREFIX}/xmpp:{COMMUNITY}?;node=urn%3Axmpp%3Astories%3A0;item=story-1;x=1");
+        let wrong_host = format!(
+            "{PREFIX}/xmpp:other.localhost?;node=urn%3Axmpp%3Apubsub-social-feed%3Astories%3A0;item=story-1"
+        );
+        let extra_param = format!(
+            "{PREFIX}/xmpp:{COMMUNITY}?;node=urn%3Axmpp%3Apubsub-social-feed%3Astories%3A0;item=story-1;x=1"
+        );
 
         assert_eq!(parse_story_attachment_target(&wrong_host, COMMUNITY), None);
         assert_eq!(parse_story_attachment_target(&extra_param, COMMUNITY), None);
+    }
+}
+
+#[cfg(test)]
+mod channel_type_projection_tests {
+    use super::*;
+
+    #[test]
+    fn channel_type_from_room_config_preserves_announcement() {
+        let config = waddle_xmpp::muc::RoomConfig {
+            moderated: true,
+            ..waddle_xmpp::muc::RoomConfig::default()
+        };
+
+        assert_eq!(channel_type_from_room_config(&config), "announcement");
+    }
+
+    #[test]
+    fn catalog_channel_type_takes_precedence_over_room_config() {
+        let config = waddle_xmpp::muc::RoomConfig {
+            moderated: false,
+            ..waddle_xmpp::muc::RoomConfig::default()
+        };
+
+        assert_eq!(
+            channel_type_from_catalog_or_room_config(Some("announcement"), &config),
+            "announcement"
+        );
     }
 }
