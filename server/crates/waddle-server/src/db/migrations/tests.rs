@@ -241,7 +241,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
     let applied = runner.run(&db).await.unwrap();
     assert_eq!(
         applied,
-        vec![4, 5, 6, 7, 1001, 1002, 1003, 1004, 1005, 1006]
+        vec![4, 5, 6, 7, 8, 1001, 1002, 1003, 1004, 1005, 1006]
     );
 
     // Column exists.
@@ -355,7 +355,7 @@ async fn test_incompatible_history_forces_hard_cut_reapply() {
     let applied = runner.run(&db).await.unwrap();
     assert_eq!(
         applied,
-        vec![1, 2, 3, 4, 5, 6, 7, 1001, 1002, 1003, 1004, 1005, 1006]
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 1001, 1002, 1003, 1004, 1005, 1006]
     );
 
     let applied_again = runner.run(&db).await.unwrap();
@@ -409,7 +409,7 @@ async fn test_incompatible_history_recreates_existing_owned_tables() {
     let applied = runner.run(&db).await.unwrap();
     assert_eq!(
         applied,
-        vec![1, 2, 3, 4, 5, 6, 7, 1001, 1002, 1003, 1004, 1005, 1006]
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 1001, 1002, 1003, 1004, 1005, 1006]
     );
 
     let conn = db.guard().await.unwrap();
@@ -628,7 +628,7 @@ async fn postgres_v0006_widens_existing_upload_slot_size_bytes() {
         .run(&db)
         .await
         .expect("run global migration");
-    assert_eq!(applied, vec![6, 7, 1001, 1002, 1003, 1004, 1005, 1006]);
+    assert_eq!(applied, vec![6, 7, 8, 1001, 1002, 1003, 1004, 1005, 1006]);
     assert_postgres_column_type(&db, "upload_slots", "size_bytes", "bigint").await;
 
     let oversized_int4 = i64::from(i32::MAX) + 1;
@@ -693,7 +693,7 @@ async fn sqlite_v0007_tracks_link_preview_media_refs() {
     drop(conn);
 
     let applied = MigrationRunner::global().run(&db).await.unwrap();
-    assert_eq!(applied, vec![7, 1001, 1002, 1003, 1004, 1005, 1006]);
+    assert_eq!(applied, vec![7, 8, 1001, 1002, 1003, 1004, 1005, 1006]);
 
     let conn = db.guard().await.unwrap();
     let mut rows = conn
@@ -773,6 +773,75 @@ async fn sqlite_v0007_tracks_link_preview_media_refs() {
 }
 
 #[tokio::test]
+async fn sqlite_v0008_repairs_marked_but_missing_global_tables() {
+    let db = Database::in_memory("test-global-v0008-repair-drift")
+        .await
+        .unwrap();
+    let conn = db.guard().await.unwrap();
+    conn.execute(sql::migrations_table_sql(DatabaseDriver::Sqlite), ())
+        .await
+        .unwrap();
+    seed_applied_migrations(&conn, global::all().into_iter().filter(|m| m.version < 8)).await;
+    seed_applied_migrations(&conn, waddle::all()).await;
+    conn.execute(
+        r#"
+        CREATE TABLE upload_slots (
+            id TEXT PRIMARY KEY,
+            requester_jid TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            content_type TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            storage_key TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            expires_at TEXT NOT NULL,
+            uploaded_at TEXT
+        )
+        "#,
+        (),
+    )
+    .await
+    .unwrap();
+    drop(conn);
+
+    let applied = MigrationRunner::global().run(&db).await.unwrap();
+    assert_eq!(applied, vec![8]);
+
+    let conn = db.guard().await.unwrap();
+    for table in ["provider_webhook_deliveries", "link_preview_media_refs"] {
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
+                crate::db_params![table],
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        let table_count: i64 = row.get(0).unwrap();
+        assert_eq!(table_count, 1, "{table} should be repaired");
+    }
+
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM sqlite_master \
+             WHERE type = 'index' \
+               AND name IN ('idx_provider_webhook_deliveries_status', \
+                            'idx_link_preview_media_refs_current', \
+                            'idx_link_preview_media_refs_message')",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    let index_count: i64 = row.get(0).unwrap();
+    assert_eq!(index_count, 3);
+
+    conn.execute("PRAGMA foreign_keys = ON", ()).await.unwrap();
+    assert_provider_delivery_conflict_target(&conn).await;
+    assert_link_preview_constraints_and_cascade(&conn).await;
+}
+
+#[tokio::test]
 async fn postgres_v0007_tracks_link_preview_media_refs() {
     let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
         eprintln!(
@@ -814,7 +883,7 @@ async fn postgres_v0007_tracks_link_preview_media_refs() {
         .run(&db)
         .await
         .expect("run global migration");
-    assert_eq!(applied, vec![7, 1001, 1002, 1003, 1004, 1005, 1006]);
+    assert_eq!(applied, vec![7, 8, 1001, 1002, 1003, 1004, 1005, 1006]);
 
     let conn = db.guard().await.expect("postgres guard");
     let mut rows = conn
@@ -903,6 +972,97 @@ async fn postgres_v0007_tracks_link_preview_media_refs() {
     let row = rows.next().await.expect("read refs row").expect("refs row");
     let ref_count: i64 = row.get(0).expect("decode ref count");
     assert_eq!(ref_count, 0);
+    drop(conn);
+
+    drop_postgres_schema(&admin, &schema).await;
+}
+
+#[tokio::test]
+async fn postgres_v0008_repairs_marked_but_missing_global_tables() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!(
+            "skipping: WADDLE_TEST_POSTGRES_URL not set \
+             (postgres-backed migration regression for repairing drifted global tables)"
+        );
+        return;
+    };
+
+    let schema = unique_postgres_schema_name("repair_global_drift");
+    let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
+    let conn = db.guard().await.expect("postgres guard");
+    conn.execute(sql::migrations_table_sql(DatabaseDriver::Postgres), ())
+        .await
+        .expect("create migration table");
+    seed_applied_migrations(&conn, global::all().into_iter().filter(|m| m.version < 8)).await;
+    seed_applied_migrations(&conn, waddle::all()).await;
+    conn.execute(
+        r#"
+        CREATE TABLE upload_slots (
+            id TEXT PRIMARY KEY,
+            requester_jid TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            size_bytes BIGINT NOT NULL,
+            content_type TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            storage_key TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP::TEXT,
+            expires_at TEXT NOT NULL,
+            uploaded_at TEXT
+        )
+        "#,
+        (),
+    )
+    .await
+    .expect("create upload_slots");
+    drop(conn);
+
+    let applied = MigrationRunner::global()
+        .run(&db)
+        .await
+        .expect("run global migration");
+    assert_eq!(applied, vec![8]);
+
+    let conn = db.guard().await.expect("postgres guard");
+    for table in ["provider_webhook_deliveries", "link_preview_media_refs"] {
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM information_schema.tables \
+                 WHERE table_schema = current_schema() \
+                   AND table_name = ?",
+                crate::db_params![table],
+            )
+            .await
+            .expect("query repaired table");
+        let row = rows
+            .next()
+            .await
+            .expect("read table row")
+            .expect("table row");
+        let table_count: i64 = row.get(0).expect("decode table count");
+        assert_eq!(table_count, 1, "{table} should be repaired");
+    }
+
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM pg_indexes \
+             WHERE schemaname = current_schema() \
+               AND indexname IN ('idx_provider_webhook_deliveries_status', \
+                                'idx_link_preview_media_refs_current', \
+                                'idx_link_preview_media_refs_message')",
+            (),
+        )
+        .await
+        .expect("query repaired indexes");
+    let row = rows
+        .next()
+        .await
+        .expect("read index row")
+        .expect("index row");
+    let index_count: i64 = row.get(0).expect("decode index count");
+    assert_eq!(index_count, 3);
+
+    assert_provider_delivery_conflict_target(&conn).await;
+    assert_link_preview_constraints_and_cascade(&conn).await;
     drop(conn);
 
     drop_postgres_schema(&admin, &schema).await;
@@ -1028,6 +1188,147 @@ async fn seed_applied_migrations(
         .await
         .expect("seed applied migration row");
     }
+}
+
+async fn assert_provider_delivery_conflict_target(conn: &crate::db::ConnectionGuard) {
+    let insert = "INSERT INTO provider_webhook_deliveries \
+         (provider_id, delivery_id, plugin_id, event_type, payload_sha256, status) \
+         VALUES (?, ?, ?, ?, ?, 'queued') \
+         ON CONFLICT(provider_id, delivery_id) DO NOTHING";
+    let first = conn
+        .execute(
+            insert,
+            crate::db_params![
+                "github",
+                "repair-delivery-1",
+                "github",
+                "ping",
+                "0123456789abcdef",
+            ],
+        )
+        .await
+        .expect("insert provider delivery");
+    assert_eq!(first, 1);
+
+    let duplicate = conn
+        .execute(
+            insert,
+            crate::db_params![
+                "github",
+                "repair-delivery-1",
+                "github",
+                "ping",
+                "0123456789abcdef",
+            ],
+        )
+        .await
+        .expect("dedupe provider delivery");
+    assert_eq!(duplicate, 0);
+
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM provider_webhook_deliveries \
+             WHERE provider_id = ? AND delivery_id = ?",
+            crate::db_params!["github", "repair-delivery-1"],
+        )
+        .await
+        .expect("query provider delivery");
+    let row = rows.next().await.expect("read delivery row").expect("row");
+    let count: i64 = row.get(0).expect("decode delivery count");
+    assert_eq!(count, 1);
+
+    let updated = conn
+        .execute(
+            "UPDATE provider_webhook_deliveries \
+             SET status = ?, \
+                 attempts = attempts + 1, \
+                 last_error = ?, \
+                 updated_at = CURRENT_TIMESTAMP \
+             WHERE provider_id = ? AND delivery_id = ?",
+            crate::db_params![
+                "processed",
+                Option::<String>::None,
+                "github",
+                "repair-delivery-1",
+            ],
+        )
+        .await
+        .expect("mark provider delivery processed");
+    assert_eq!(updated, 1);
+
+    let mut rows = conn
+        .query(
+            "SELECT status, attempts, last_error FROM provider_webhook_deliveries \
+             WHERE provider_id = ? AND delivery_id = ?",
+            crate::db_params!["github", "repair-delivery-1"],
+        )
+        .await
+        .expect("query processed provider delivery");
+    let row = rows.next().await.expect("read processed row").expect("row");
+    let status: String = row.get(0).expect("decode status");
+    let attempts: i64 = row.get(1).expect("decode attempts");
+    let last_error: Option<String> = row.get(2).expect("decode last_error");
+    assert_eq!(status, "processed");
+    assert_eq!(attempts, 1);
+    assert_eq!(last_error, None);
+}
+
+async fn assert_link_preview_constraints_and_cascade(conn: &crate::db::ConnectionGuard) {
+    conn.execute(
+        "INSERT INTO upload_slots (id, requester_jid, filename, size_bytes, content_type, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+        crate::db_params![
+            "repair-slot-1",
+            "alice@example.com",
+            "link-preview-test.png",
+            12_i64,
+            "image/png",
+            "2030-01-01T00:00:00Z"
+        ],
+    )
+    .await
+    .expect("seed upload slot");
+    conn.execute(
+        "INSERT INTO link_preview_media_refs (upload_slot_id, archive_jid, message_id, current_archive_id, state) VALUES (?, ?, ?, ?, ?)",
+        crate::db_params![
+            "repair-slot-1",
+            "alice@example.com",
+            "msg-1",
+            "archive-1",
+            "current"
+        ],
+    )
+    .await
+    .expect("insert valid preview ref");
+    let invalid_state = conn
+        .execute(
+            "INSERT INTO link_preview_media_refs (upload_slot_id, archive_jid, message_id, current_archive_id, state) VALUES (?, ?, ?, ?, ?)",
+            crate::db_params![
+                "repair-slot-1",
+                "alice@example.com",
+                "msg-2",
+                "archive-2",
+                "expired"
+            ],
+        )
+        .await;
+    assert!(invalid_state.is_err());
+
+    conn.execute(
+        "DELETE FROM upload_slots WHERE id = ?",
+        crate::db_params!["repair-slot-1"],
+    )
+    .await
+    .expect("delete upload slot");
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM link_preview_media_refs WHERE upload_slot_id = ?",
+            crate::db_params!["repair-slot-1"],
+        )
+        .await
+        .expect("query refs after cascade");
+    let row = rows.next().await.expect("read refs row").expect("refs row");
+    let ref_count: i64 = row.get(0).expect("decode ref count");
+    assert_eq!(ref_count, 0);
 }
 
 async fn assert_postgres_column_type(
