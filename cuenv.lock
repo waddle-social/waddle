@@ -1,5 +1,11 @@
 version = 4
 
+[runtimes.chat]
+type = "nix"
+flake = ".."
+digest = "sha256:22c72a3faea22e798923cadadad88c625122228e05204cc052fc74d5f2d8d883"
+lockfile = "chat/../flake.lock"
+
 [runtimes.colony]
 type = "nix"
 flake = ".."
@@ -11,6 +17,18 @@ type = "nix"
 flake = "../.."
 digest = "sha256:22c72a3faea22e798923cadadad88c625122228e05204cc052fc74d5f2d8d883"
 lockfile = "infrastructure/waddle.cloud/../../flake.lock"
+
+[runtimes.server]
+type = "nix"
+flake = ".."
+digest = "sha256:22c72a3faea22e798923cadadad88c625122228e05204cc052fc74d5f2d8d883"
+lockfile = "server/../flake.lock"
+
+[runtimes.website]
+type = "nix"
+flake = ".."
+digest = "sha256:22c72a3faea22e798923cadadad88c625122228e05204cc052fc74d5f2d8d883"
+lockfile = "website/../flake.lock"
 
 [vcs.cuenv-skills]
 url = "https://github.com/cuenv/cuenv.git"
