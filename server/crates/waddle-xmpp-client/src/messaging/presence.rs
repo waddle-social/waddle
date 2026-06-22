@@ -87,17 +87,19 @@ pub(super) fn parse_presence(el: &Element) -> InboundPresence {
         }
     });
 
-    // Waddle raised-hand call presence state (#1029): an
-    // `<in-call xmlns='urn:waddle:in-call:0'>` sibling of `<muji/>` with
-    // a `<hand-raised/>` marker child. Its absence means the hand is
-    // lowered.
-    let hand_raised = el
-        .get_child("in-call", NS_WADDLE_IN_CALL)
-        .is_some_and(|in_call| {
-            in_call
-                .children()
-                .any(|c| c.name() == "hand-raised" && c.ns() == NS_WADDLE_IN_CALL)
-        });
+    // Waddle in-call presence state (#1029 raised hand / #1030 mute): an
+    // `<in-call xmlns='urn:waddle:in-call:0'>` sibling of `<muji/>` whose
+    // marker children advertise each sub-state. A missing child (or a
+    // missing `<in-call/>`) means that sub-state is off.
+    let in_call = el.get_child("in-call", NS_WADDLE_IN_CALL);
+    let in_call_has = |name: &str| {
+        in_call.is_some_and(|el| {
+            el.children()
+                .any(|c| c.name() == name && c.ns() == NS_WADDLE_IN_CALL)
+        })
+    };
+    let hand_raised = in_call_has("hand-raised");
+    let muted = in_call_has("muted");
 
     InboundPresence {
         from,
@@ -113,6 +115,7 @@ pub(super) fn parse_presence(el: &Element) -> InboundPresence {
         vcard_avatar,
         muji,
         hand_raised,
+        muted,
     }
 }
 
@@ -193,6 +196,34 @@ mod tests {
         let elem: Element = xml.parse().unwrap();
         let p = parse_presence(&elem);
         assert!(!p.hand_raised, "no in-call child means hand lowered");
+        assert!(!p.muted, "no in-call child means unmuted");
+    }
+
+    #[test]
+    fn parses_in_call_muted_alongside_muji() {
+        let xml = r#"<presence xmlns="jabber:client" from="room@muc.test/alice">
+            <muji xmlns="urn:xmpp:jingle:muji:0">
+                <content creator="initiator" name="audio">
+                    <description xmlns="urn:xmpp:jingle:apps:rtp:1" media="audio"/>
+                </content>
+            </muji>
+            <in-call xmlns="urn:waddle:in-call:0"><muted/></in-call>
+        </presence>"#;
+        let elem: Element = xml.parse().unwrap();
+        let p = parse_presence(&elem);
+        assert!(p.muted, "muted presence state parsed (#1030)");
+        assert!(!p.hand_raised, "mute alone does not raise the hand");
+    }
+
+    #[test]
+    fn parses_in_call_hand_raised_and_muted_together() {
+        let xml = r#"<presence xmlns="jabber:client" from="room@muc.test/alice">
+            <in-call xmlns="urn:waddle:in-call:0"><hand-raised/><muted/></in-call>
+        </presence>"#;
+        let elem: Element = xml.parse().unwrap();
+        let p = parse_presence(&elem);
+        assert!(p.hand_raised, "hand parsed when both markers present");
+        assert!(p.muted, "mute parsed when both markers present");
     }
 
     #[test]

@@ -689,14 +689,10 @@ export async function tearDownActiveCall(
             const raw = sender as RawIqSender;
             if (s.selfNick && raw.update_muji_presence) {
               try {
-                await raw.update_muji_presence(
-                  s.peer,
-                  s.selfNick,
-                  false, // active
-                  false, // preparing
-                  false, // video
-                  false, // hand_raised
-                );
+                await raw.update_muji_presence(s.peer, s.selfNick, false, false, false, {
+                  handRaised: false,
+                  muted: false, // leaving clears all in-call state
+                });
               } catch (err) {
                 reportCallError(err);
               } finally {
@@ -748,14 +744,10 @@ export async function tearDownActiveCall(
             const raw = sender as RawIqSender;
             if (s.selfNick && raw.update_muji_presence) {
               try {
-                await raw.update_muji_presence(
-                  s.peer,
-                  s.selfNick,
-                  false,
-                  false,
-                  false,
-                  false, // hand_raised
-                );
+                await raw.update_muji_presence(s.peer, s.selfNick, false, false, false, {
+                  handRaised: false,
+                  muted: false, // leaving clears all in-call state
+                });
               } catch (err) {
                 reportCallError(err);
               } finally {
@@ -824,7 +816,7 @@ export type RawIqSender = {
     active: boolean,
     preparing: boolean,
     video: boolean,
-    hand_raised: boolean,
+    in_call: { handRaised: boolean; muted: boolean },
   ) => Promise<void>;
 };
 
@@ -884,14 +876,10 @@ async function rollbackMucCallSetup(
 ): Promise<void> {
   if (sender.update_muji_presence) {
     try {
-      await sender.update_muji_presence(
-        roomJid,
-        selfNick,
-        false,
-        false,
-        false,
-        false, // hand_raised
-      );
+      await sender.update_muji_presence(roomJid, selfNick, false, false, false, {
+        handRaised: false,
+        muted: false, // rollback clears all in-call state
+      });
     } catch (err) {
       reportCallError(err);
     } finally {
@@ -1030,14 +1018,11 @@ export async function beginMucCall(
       PREPARING_ECHO_TIMEOUT_MS,
       selfFullJid,
     );
-    await sender.update_muji_presence(
-      normalizedRoomJid,
-      selfNick,
-      false, // active (no <content/> yet)
-      true, // preparing
-      false, // video — irrelevant in preparing phase
-      false, // hand_raised — a hand can't be raised before joining
-    );
+    await sender.update_muji_presence(normalizedRoomJid, selfNick, false, true, false, {
+      // in-call state isn't advertised before joining
+      handRaised: false,
+      muted: false,
+    });
     assertMucSetupStillPending(normalizedRoomJid, selfNick, attemptId);
     // XEP-0272 §Joining: "The client MUST then wait until the MUC
     // rebroadcasts its presence message", then wait for other
@@ -1056,14 +1041,12 @@ export async function beginMucCall(
     // Step 2 — content-declaring presence. XEP-0272 §Joining says a
     // client advertises contents in MUC presence before initiating
     // the corresponding Jingle sessions.
-    await sender.update_muji_presence(
-      normalizedRoomJid,
-      selfNick,
-      true, // active
-      false, // preparing
-      media.video, // video
-      selfRaisedHandFor(normalizedRoomJid), // hand_raised — preserve across re-emit
-    );
+    await sender.update_muji_presence(normalizedRoomJid, selfNick, true, false, media.video, {
+      handRaised: selfRaisedHandFor(normalizedRoomJid), // preserve across re-emit
+      // joining without mic capture advertises muted (#1030); a live mic
+      // toggle re-broadcasts the authoritative state post-connect
+      muted: !media.audio,
+    });
     if (!mucSetupStillPending(normalizedRoomJid, selfNick, attemptId)) {
       await rollbackMucCallSetup(
         sender,

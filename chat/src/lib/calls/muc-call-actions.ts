@@ -1,4 +1,5 @@
 import { $callState, beginMucCall, reportCallError, type RawIqSender } from "./call-store";
+import { selfCallMuted } from "./call-mic-state";
 import { LIVEKIT_JOIN_EXPIRY_SKEW_MS, liveKitJoinTokenExpiresAt } from "./dm-call-activity";
 import { clearMucCallParticipant, normalizeMucCallRoomJid } from "./muc-call-presence";
 import { selfRaisedHandFor, setSelfRaisedHand } from "./call-raised-hand";
@@ -107,14 +108,10 @@ export async function leaveRetainedMucCallAction({
   const cachedSession = readMucCallSession({ roomJid, selfFullJid });
   let terminated = !cachedSession;
   try {
-    await sender.update_muji_presence(
-      roomJid,
-      selfNick,
-      false,
-      false,
-      false,
-      false, // hand_raised
-    );
+    await sender.update_muji_presence(roomJid, selfNick, false, false, false, {
+      handRaised: false,
+      muted: false, // leaving the call clears all in-call state
+    });
     clearMucCallParticipant(roomJid, selfNick, selfFullJid, {
       includeAggregate: true,
     });
@@ -262,14 +259,10 @@ export async function resumeMucCallActivity({
   const sender = getSender();
   if (sender?.update_muji_presence) {
     try {
-      await sender.update_muji_presence(
-        session.roomJid,
-        selfNick,
-        true, // active
-        false, // preparing
-        media.video,
-        selfRaisedHandFor(session.roomJid), // hand_raised — preserve across resume
-      );
+      await sender.update_muji_presence(session.roomJid, selfNick, true, false, media.video, {
+        handRaised: selfRaisedHandFor(session.roomJid), // preserve across resume
+        muted: selfCallMuted(), // preserve across resume
+      });
     } catch (err) {
       reportCallError(err);
     }
@@ -306,14 +299,12 @@ export async function setMucCallHandRaised(
 
   setSelfRaisedHand(roomJid, raised);
   try {
-    await sender.update_muji_presence(
-      roomJid,
-      state.selfNick,
-      true, // active — still in the call
-      false, // preparing
-      state.media.video,
-      raised,
-    );
+    await sender.update_muji_presence(roomJid, state.selfNick, true, false, state.media.video, {
+      handRaised: raised,
+      // re-stamp the current mute so a hand toggle never drops the
+      // `<muted/>` marker (presence is last-writer-wins)
+      muted: selfCallMuted(),
+    });
     return true;
   } catch (err) {
     // Revert the optimistic flip — but only if a newer toggle hasn't
@@ -322,6 +313,47 @@ export async function setMucCallHandRaised(
     if (selfRaisedHandFor(roomJid) === raised) {
       setSelfRaisedHand(roomJid, !raised);
     }
+    reportCallError(err);
+    return false;
+  }
+}
+
+/**
+ * Broadcast this client's mute state to the active MUC call as
+ * `urn:waddle:in-call:0` presence (#1030). Mirrors
+ * [`setMucCallHandRaised`]: "setting" mute means re-emitting our current
+ * active call presence with the `<muted/>` marker toggled — the wasm FFI
+ * builds the `<in-call>` child when `muted` is true and omits it (unmuting
+ * for everyone) when false. Re-stamps the CURRENT raised hand so a mute
+ * toggle never drops it.
+ *
+ * The local mic toggle (`$callMicEnabled`) is the source of truth and is
+ * already flipped by the caller, so there is no optimistic state to roll
+ * back here — a failed broadcast just leaves peers momentarily stale until
+ * the next presence, and is reported.
+ *
+ * No-op (returns `false`) unless we're in an active MUC call with a known
+ * nick and a wasm client that exposes the presence FFI.
+ */
+export async function broadcastMucCallSelfMute(
+  sender: RawIqSender,
+  muted: boolean,
+): Promise<boolean> {
+  const state = $callState.get();
+  if (state.phase !== "active" || state.kind !== "muc" || !state.selfNick) {
+    return false;
+  }
+  if (!sender.update_muji_presence) return false;
+  const roomJid = normalizeMucCallRoomJid(state.peer);
+  if (!roomJid) return false;
+
+  try {
+    await sender.update_muji_presence(roomJid, state.selfNick, true, false, state.media.video, {
+      handRaised: selfRaisedHandFor(roomJid), // preserve across a mute toggle
+      muted,
+    });
+    return true;
+  } catch (err) {
     reportCallError(err);
     return false;
   }

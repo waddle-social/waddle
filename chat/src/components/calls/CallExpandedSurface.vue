@@ -61,6 +61,10 @@ import {
   raisedHandKeysForRoom,
   selfRaisedHandFor,
 } from "@/lib/calls/call-raised-hand";
+import {
+  $mucMutedParticipants,
+  mutedKeysForRoom,
+} from "@/lib/calls/call-mute";
 import { expectedRemoteIdentitiesForCallState } from "@/lib/calls/call-tiles";
 import {
   projectCallTiles,
@@ -284,6 +288,14 @@ const raisedHandIdentityKeys = computed(() => {
   return keys;
 });
 
+// #1030: muted call presence state. Pure INBOUND-REMOTE view — self-mute
+// is sourced from the local mic flag (`micEnabled`), so unlike raised-hand
+// the local identity is NOT folded in here.
+const mutedParticipants = useStore($mucMutedParticipants);
+const mutedIdentityKeys = computed(() =>
+  mutedKeysForRoom(normalizedRoomJid.value, mutedParticipants.value),
+);
+
 async function onToggleRaisedHand(): Promise<void> {
   if (!props.xmppClient) return;
   try {
@@ -311,6 +323,7 @@ const pictureInPictureProjection = computed(() =>
     localIdentity: localIdentity.value,
     expectedRemoteIdentities: expectedRemoteIdentities.value,
     micEnabled: micEnabled.value,
+    mutedKeys: mutedIdentityKeys.value,
     seenRemoteScreenTrackKeys: pictureInPictureSeenRemoteScreenTrackKeys.value,
     pinnedTileKey: pinnedTileKey.value,
     viewMode: viewMode.value,
@@ -726,6 +739,7 @@ onBeforeUnmount(() => {
           :active-speaker-identities="activeSpeakerIdentities"
           :promoted-speaker-identity="promotedSpeakerIdentity"
           :raised-hand-keys="raisedHandIdentityKeys"
+          :muted-keys="mutedIdentityKeys"
           @open-participants="openCallParticipants"
         />
         <div class="call-expanded__reactions" aria-live="polite" aria-atomic="false">

@@ -454,6 +454,11 @@ pub struct WaddlePresence {
     /// alongside `<muji/>`. Defaults to `false` (lowered) so the chat
     /// side can build a per-participant raised-hand map.
     pub hand_raised: bool,
+    /// Waddle mute call presence state (#1030). `true` when the
+    /// occupant's presence carries a `<muted/>` marker on the same
+    /// `<in-call>` carrier. Defaults to `false` (unmuted) so the chat
+    /// side can build a per-participant mute map for tiles and the roster.
+    pub muted: bool,
 }
 
 #[derive(Debug, Serialize)]

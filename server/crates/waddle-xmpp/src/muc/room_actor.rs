@@ -28,9 +28,9 @@ pub use admin_handlers::{
     GetAdminContext, IsOwner,
 };
 pub use occupancy_handlers::{
-    ClearMujiPresence, HandRaisedUpdateOutcome, JoinWithAffiliation, LeaveByRealJid,
+    ClearMujiPresence, InCallPresenceUpdateOutcome, JoinWithAffiliation, LeaveByRealJid,
     MujiPresenceUpdateOutcome, PingSelfCheck, PresenceUpdateData, ReconcileChannelBackedRoom,
-    UpsertHandRaised, UpsertMujiPresence,
+    UpsertInCallState, UpsertMujiPresence,
 };
 pub use snapshot_handlers::{
     BuildGroupchatBroadcast, GetNicknameGeneration, GetRoomSnapshot, GroupchatBroadcastResult,
@@ -69,11 +69,12 @@ pub struct JoinExistingOccupant {
     /// coordination state, so join replay must not stamp an aggregate
     /// same-nick Muji payload onto an arbitrary full JID.
     pub muji: Option<crate::xep::xep0272::Muji>,
-    /// Whether this exact session advertises a raised hand
-    /// (`urn:waddle:in-call:0`, #1029) at join time. The join handler
-    /// appends an `<in-call><hand-raised/></in-call>` payload to the
-    /// replayed presence so a late joiner sees who already has a hand up.
-    pub hand_raised: bool,
+    /// This exact session's in-call presence state
+    /// (`urn:waddle:in-call:0`, #1029 raised hand / #1030 mute) at join
+    /// time. The join handler appends an `<in-call>` payload carrying
+    /// these sub-states to the replayed presence so a late joiner sees
+    /// who already has a hand up or is muted.
+    pub in_call: crate::xep::InCallPresenceState,
 }
 
 #[derive(Debug, Clone)]

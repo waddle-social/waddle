@@ -119,17 +119,25 @@ fn build_muji_content(media: &str) -> minidom::Element {
         .build()
 }
 
-/// Build the `<in-call xmlns='urn:waddle:in-call:0'><hand-raised/></in-call>`
-/// presence child (#1029), carried alongside (never inside) `<muji/>` in MUC
-/// call presence to advertise a raised hand. Mirrors the server-side
+/// Build the `<in-call xmlns='urn:waddle:in-call:0'>` presence child
+/// (#1029 raised hand / #1030 mute), carried alongside (never inside)
+/// `<muji/>` in MUC call presence. Emits one marker child per advertised
+/// sub-state (`<hand-raised/>`, `<muted/>`); an all-`false` state yields
+/// an empty `<in-call/>`. Mirrors the server-side
 /// `waddle_xmpp::xep::build_in_call_presence_state_element`.
 ///
 /// CLAUDE.md XML hard rule: callers append this typed element rather than
 /// hand-rolling the `<in-call>` shape at the wasm boundary.
-pub fn build_in_call_hand_raised_element() -> minidom::Element {
-    minidom::Element::builder("in-call", NS_WADDLE_IN_CALL)
-        .append(minidom::Element::builder("hand-raised", NS_WADDLE_IN_CALL).build())
-        .build()
+pub fn build_in_call_presence_state_element(hand_raised: bool, muted: bool) -> minidom::Element {
+    let mut builder = minidom::Element::builder("in-call", NS_WADDLE_IN_CALL);
+    if hand_raised {
+        builder =
+            builder.append(minidom::Element::builder("hand-raised", NS_WADDLE_IN_CALL).build());
+    }
+    if muted {
+        builder = builder.append(minidom::Element::builder("muted", NS_WADDLE_IN_CALL).build());
+    }
+    builder.build()
 }
 
 #[cfg(test)]
@@ -181,7 +189,7 @@ mod tests {
 
     #[test]
     fn builds_in_call_hand_raised_element() {
-        let elem = build_in_call_hand_raised_element();
+        let elem = build_in_call_presence_state_element(true, false);
         assert_eq!(elem.name(), "in-call");
         assert_eq!(elem.ns(), NS_WADDLE_IN_CALL);
         let marker = elem
@@ -189,5 +197,30 @@ mod tests {
             .find(|c| c.name() == "hand-raised")
             .expect("hand-raised marker child");
         assert_eq!(marker.ns(), NS_WADDLE_IN_CALL);
+        assert!(
+            elem.children().all(|c| c.name() != "muted"),
+            "hand-only state carries no <muted/> marker"
+        );
+    }
+
+    #[test]
+    fn builds_in_call_muted_element() {
+        let elem = build_in_call_presence_state_element(false, true);
+        let marker = elem
+            .children()
+            .find(|c| c.name() == "muted")
+            .expect("muted marker child");
+        assert_eq!(marker.ns(), NS_WADDLE_IN_CALL);
+        assert!(
+            elem.children().all(|c| c.name() != "hand-raised"),
+            "mute-only state carries no <hand-raised/> marker"
+        );
+    }
+
+    #[test]
+    fn builds_in_call_hand_raised_and_muted_together() {
+        let elem = build_in_call_presence_state_element(true, true);
+        assert!(elem.children().any(|c| c.name() == "hand-raised"));
+        assert!(elem.children().any(|c| c.name() == "muted"));
     }
 }

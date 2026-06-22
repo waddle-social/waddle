@@ -29,7 +29,7 @@ fn muc_join_presence_carries_authority_in_xep_0045_payload_only() {
         real_jid: &real_jid,
         include_self_status: false,
         muji: None,
-        hand_raised: false,
+        in_call: waddle_xmpp::xep::InCallPresenceState::default(),
     });
 
     // XEP-0045: authority lives in the muc#user payload.

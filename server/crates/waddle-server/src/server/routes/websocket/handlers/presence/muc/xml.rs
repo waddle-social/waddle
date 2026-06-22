@@ -17,12 +17,14 @@ pub(crate) struct MucJoinPresence<'a> {
     /// self-presence and for occupants without an active Muji
     /// advertisement.
     pub(crate) muji: Option<&'a waddle_xmpp::xep::xep0272::Muji>,
-    /// Whether to append an `<in-call><hand-raised/></in-call>`
-    /// (`urn:waddle:in-call:0`, #1029) payload alongside `<muji/>`. Set
-    /// for the join-replay path when the occupant being replayed has a
-    /// raised hand, so a late joiner sees it immediately. `false` for
-    /// joiners' own self-presence and for occupants with no raised hand.
-    pub(crate) hand_raised: bool,
+    /// In-call presence state (`urn:waddle:in-call:0`, #1029 raised hand
+    /// / #1030 mute) to append as an `<in-call>` payload alongside
+    /// `<muji/>`. Set for the join-replay path when the occupant being
+    /// replayed advertises one, so a late joiner sees their hand/mute
+    /// immediately. Empty (default) for joiners' own self-presence and
+    /// for occupants advertising no in-call state — an empty state emits
+    /// no `<in-call>` element.
+    pub(crate) in_call: waddle_xmpp::xep::InCallPresenceState,
 }
 
 pub(crate) fn build_muc_join_presence_xml(params: MucJoinPresence<'_>) -> String {
@@ -62,14 +64,15 @@ pub(super) fn build_muc_join_presence_stanza(
         // XML hard rule).
         presence.payloads.push(muji.to_element());
     }
-    if params.hand_raised {
-        // The raised-hand `<in-call>` state is a sibling of `<muji>`
-        // (never nested), an additional namespaced presence extension
-        // per XEP-0045 §5.1.3. Built via the typed carrier helper.
+    if !params.in_call.is_empty() {
+        // The `<in-call>` state (raised hand / mute) is a sibling of
+        // `<muji>` (never nested), an additional namespaced presence
+        // extension per XEP-0045 §5.1.3. Built via the typed carrier
+        // helper, which emits one marker child per advertised sub-state.
         presence
             .payloads
             .push(waddle_xmpp::xep::build_in_call_presence_state_element(
-                &waddle_xmpp::xep::InCallPresenceState { hand_raised: true },
+                &params.in_call,
             ));
     }
     presence
@@ -180,6 +183,6 @@ pub(super) fn create_presence_stanza(
         real_jid,
         include_self_status: false,
         muji: None,
-        hand_raised: false,
+        in_call: waddle_xmpp::xep::InCallPresenceState::default(),
     })
 }

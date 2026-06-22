@@ -12,7 +12,10 @@ use xmpp_parsers::message::MessageType;
 
 #[test]
 fn hand_raised_presence_state_round_trips() {
-    let element = build_in_call_presence_state_element(&InCallPresenceState { hand_raised: true });
+    let element = build_in_call_presence_state_element(&InCallPresenceState {
+        hand_raised: true,
+        muted: false,
+    });
 
     // Carried as `<in-call xmlns='urn:waddle:in-call:0'>` so it sits next to
     // (never inside) the `<muji/>` element in MUC call presence.
@@ -27,7 +30,90 @@ fn hand_raised_presence_state_round_trips() {
 
     assert_eq!(
         parse_in_call_presence_state(&element),
-        Ok(InCallPresenceState { hand_raised: true })
+        Ok(InCallPresenceState {
+            hand_raised: true,
+            muted: false,
+        })
+    );
+}
+
+#[test]
+fn muted_presence_state_round_trips() {
+    let element = build_in_call_presence_state_element(&InCallPresenceState {
+        muted: true,
+        ..InCallPresenceState::default()
+    });
+
+    // Same `<in-call xmlns='urn:waddle:in-call:0'>` root as the raised hand, so
+    // mute rides alongside `<muji/>` and any other in-call sub-state.
+    assert_eq!(element.name(), "in-call");
+    assert_eq!(element.ns(), NS_WADDLE_IN_CALL);
+    assert!(
+        element
+            .children()
+            .any(|child| child.name() == "muted" && child.ns() == NS_WADDLE_IN_CALL),
+        "muted serializes a <muted/> child"
+    );
+    assert!(
+        !element
+            .children()
+            .any(|child| child.name() == "hand-raised"),
+        "an unmuted-only state carries no <hand-raised/> child"
+    );
+
+    assert_eq!(
+        parse_in_call_presence_state(&element),
+        Ok(InCallPresenceState {
+            muted: true,
+            hand_raised: false,
+        })
+    );
+}
+
+#[test]
+fn hand_raised_and_muted_combine_in_one_in_call_element() {
+    let element = build_in_call_presence_state_element(&InCallPresenceState {
+        hand_raised: true,
+        muted: true,
+    });
+
+    // Both sub-states are carried as sibling marker children of the SAME
+    // `<in-call/>` element — never as nested or duplicated roots.
+    assert!(
+        element
+            .children()
+            .any(|child| child.name() == "hand-raised" && child.ns() == NS_WADDLE_IN_CALL),
+        "raised hand still serializes a <hand-raised/> child"
+    );
+    assert!(
+        element
+            .children()
+            .any(|child| child.name() == "muted" && child.ns() == NS_WADDLE_IN_CALL),
+        "muted still serializes a <muted/> child"
+    );
+
+    assert_eq!(
+        parse_in_call_presence_state(&element),
+        Ok(InCallPresenceState {
+            hand_raised: true,
+            muted: true,
+        })
+    );
+}
+
+#[test]
+fn muted_only_state_is_not_empty() {
+    assert!(
+        !InCallPresenceState {
+            muted: true,
+            ..InCallPresenceState::default()
+        }
+        .is_empty(),
+        "an advertised mute is in-call presence state"
+    );
+    assert!(
+        InCallPresenceState::default().is_empty(),
+        "no sub-state advertised is the empty/clearing state"
     );
 }
 
@@ -68,9 +154,16 @@ fn in_call_reaction_message_round_trips_with_transient_hints() {
 
 #[test]
 fn lowered_hand_is_empty_state_with_no_marker_child() {
-    let lowered = InCallPresenceState { hand_raised: false };
+    let lowered = InCallPresenceState {
+        hand_raised: false,
+        muted: false,
+    };
     assert!(lowered.is_empty());
-    assert!(!InCallPresenceState { hand_raised: true }.is_empty());
+    assert!(!InCallPresenceState {
+        hand_raised: true,
+        muted: false,
+    }
+    .is_empty());
 
     let element = build_in_call_presence_state_element(&lowered);
     assert_eq!(element.name(), "in-call");
@@ -81,7 +174,10 @@ fn lowered_hand_is_empty_state_with_no_marker_child() {
     );
     assert_eq!(
         parse_in_call_presence_state(&element),
-        Ok(InCallPresenceState { hand_raised: false })
+        Ok(InCallPresenceState {
+            hand_raised: false,
+            muted: false,
+        })
     );
 }
 

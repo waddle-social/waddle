@@ -4,7 +4,10 @@ import {
   clearCallState,
   reportCallError,
   tearDownActiveCall,
+  type RawIqSender,
 } from "./call-store";
+import { broadcastMucCallSelfMute } from "./muc-call-actions";
+import { $callMicEnabled } from "./call-mic-state";
 import type { CallWireSender } from "./outbound";
 import { connectionStore } from "@/lib/connection-store";
 import { useCallEngine } from "./use-call-engine";
@@ -30,10 +33,15 @@ import {
  * The atoms here mirror the engine: when the user toggles mic via
  * the split-view control bar, the engine `setMicEnabled(false)` and
  * the atom flips at the same time. On failure the atom rolls back.
+ *
+ * `$callMicEnabled` is owned by the `call-mic-state` leaf (so the
+ * presence broadcaster in `muc-call-actions` can read it without a
+ * module cycle back into this file) and re-exported here for the many
+ * control-bar consumers that import it from `call-controls`.
  */
 export const $callConnecting = atom<boolean>(false);
-export const $callMicEnabled = atom<boolean>(true);
 export const $callCamEnabled = atom<boolean>(true);
+export { $callMicEnabled };
 export { $callScreenShareEnabled, $callScreenShareSupported, refreshScreenShareSupported };
 
 function isScreenSharePickerCancel(error: unknown): boolean {
@@ -63,6 +71,13 @@ export async function toggleMic(): Promise<void> {
     const { engine } = useCallEngine();
     await engine.setMicEnabled(next);
     clearMediaIssue("mic");
+    // #1030: broadcast the new mute state as `urn:waddle:in-call:0`
+    // presence so other participants' tiles and roster reflect it — the
+    // authoritative, XMPP-native remote-mute path (no LiveKit data
+    // channel). A no-op for DM calls; the broadcaster guards on an active
+    // MUC call. Fire-and-forget: a failed presence self-heals on the next.
+    const sender = getSender();
+    if (sender) void broadcastMucCallSelfMute(sender as unknown as RawIqSender, !next);
   } catch (err) {
     $callMicEnabled.set(!next);
     recordMediaIssue("mic", err);
@@ -178,6 +193,14 @@ export function seedCallControlsFromEngine(engine: {
   $callMicEnabled.set(engine.micEnabled);
   $callCamEnabled.set(engine.cameraEnabled);
   $callScreenShareEnabled.set(engine.screenShareEnabled ?? false);
+  // #1030: capture is best-effort, so the join-time mute advertisement
+  // (derived from the REQUESTED media) can be wrong — device missing,
+  // permission denied, or the user joined muted. Now that `$callMicEnabled`
+  // reflects the ACTUAL published mic, re-broadcast the true mute so peers'
+  // tiles/roster are accurate. No-op for DM calls; the broadcaster guards on
+  // an active MUC call, and `getSender()` is null outside a live connection.
+  const sender = getSender();
+  if (sender) void broadcastMucCallSelfMute(sender as unknown as RawIqSender, !engine.micEnabled);
 }
 
 /** Read the live call's peer label (`#room` for MUC, localpart for DM). */

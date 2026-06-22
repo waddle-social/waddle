@@ -74,8 +74,9 @@ fn in_call_reaction_message(
 
 /// A MUC call presence: an active XEP-0272 `<muji/>` advertisement
 /// (one audio content), optionally carrying the `urn:waddle:in-call:0`
-/// `<hand-raised/>` presence state *alongside* (never inside) `<muji/>`.
-fn call_presence(room: &str, nick: &str, hand_raised: bool) -> String {
+/// presence state (`<hand-raised/>` and/or `<muted/>`) *alongside*
+/// (never inside) `<muji/>`. Both markers ride one `<in-call/>` element.
+fn call_presence(room: &str, nick: &str, hand_raised: bool, muted: bool) -> String {
     let muji = Element::builder("muji", NS_MUJI)
         .append(
             Element::builder("content", NS_MUJI)
@@ -93,28 +94,41 @@ fn call_presence(room: &str, nick: &str, hand_raised: bool) -> String {
         .attr(attr("to"), format!("{room}/{nick}"))
         .append(Element::builder("x", NS_MUC).build())
         .append(muji);
-    if hand_raised {
-        presence = presence.append(
-            Element::builder("in-call", NS_WADDLE_IN_CALL)
-                .append(Element::builder("hand-raised", NS_WADDLE_IN_CALL).build())
-                .build(),
-        );
+    if hand_raised || muted {
+        let mut in_call = Element::builder("in-call", NS_WADDLE_IN_CALL);
+        if hand_raised {
+            in_call = in_call.append(Element::builder("hand-raised", NS_WADDLE_IN_CALL).build());
+        }
+        if muted {
+            in_call = in_call.append(Element::builder("muted", NS_WADDLE_IN_CALL).build());
+        }
+        presence = presence.append(in_call.build());
     }
     serialize(presence.build())
 }
 
 /// A XEP-0272 §Leaving presence (no `<muji/>`) that a buggy/hostile
-/// client still tags with the raised-hand `<in-call>` marker. The server
-/// must NOT honour the marker once call participation is cleared.
-fn leave_presence_with_stale_hand(room: &str, nick: &str) -> String {
+/// client still tags with an `<in-call>` marker (`<hand-raised/>` and/or
+/// `<muted/>`). The server must NOT honour any marker once call
+/// participation is cleared — in-call state only exists for an active
+/// participant.
+fn leave_presence_with_stale_in_call(
+    room: &str,
+    nick: &str,
+    hand_raised: bool,
+    muted: bool,
+) -> String {
+    let mut in_call = Element::builder("in-call", NS_WADDLE_IN_CALL);
+    if hand_raised {
+        in_call = in_call.append(Element::builder("hand-raised", NS_WADDLE_IN_CALL).build());
+    }
+    if muted {
+        in_call = in_call.append(Element::builder("muted", NS_WADDLE_IN_CALL).build());
+    }
     serialize(
         Element::builder("presence", NS_CLIENT)
             .attr(attr("to"), format!("{room}/{nick}"))
-            .append(
-                Element::builder("in-call", NS_WADDLE_IN_CALL)
-                    .append(Element::builder("hand-raised", NS_WADDLE_IN_CALL).build())
-                    .build(),
-            )
+            .append(in_call.build())
             .build(),
     )
 }
@@ -250,7 +264,7 @@ async fn raise_hand_presence_reflects_in_call_child_alongside_muji() {
 
     // Alice enters the call and raises her hand in one presence update.
     alice
-        .send(&call_presence(&room, ALICE, true))
+        .send(&call_presence(&room, ALICE, true, false))
         .await
         .expect("alice raises hand");
 
@@ -308,7 +322,7 @@ async fn leave_call_presence_forces_hand_lowered_despite_stale_marker() {
 
     // Alice raises her hand legitimately, then bob drains the raise.
     alice
-        .send(&call_presence(&room, ALICE, true))
+        .send(&call_presence(&room, ALICE, true, false))
         .await
         .expect("alice raises hand");
     bob.recv_matching(|f| f.contains("<presence") && f.contains("hand-raised"))
@@ -317,7 +331,9 @@ async fn leave_call_presence_forces_hand_lowered_despite_stale_marker() {
 
     // Alice leaves the call but a buggy client keeps the <hand-raised/> marker.
     alice
-        .send(&leave_presence_with_stale_hand(&room, ALICE))
+        .send(&leave_presence_with_stale_in_call(
+            &room, ALICE, true, false,
+        ))
         .await
         .expect("alice leaves call with stale hand marker");
 
@@ -335,6 +351,52 @@ async fn leave_call_presence_forces_hand_lowered_despite_stale_marker() {
 }
 
 #[tokio::test]
+async fn leave_call_presence_forces_mute_cleared_despite_stale_marker() {
+    // #1030 mirror of the hand invariant: mute only exists for an active
+    // call participant. When the XEP-0272 leave marker (no <muji/>) arrives,
+    // the server must force mute cleared regardless of any <in-call><muted/>
+    // a buggy/hostile client still attached — otherwise a non-participant is
+    // reflected and replayed to late joiners as muted.
+    let _guard = TEST_SERIAL.lock().await;
+    let server = TestServer::start_with_extra_accounts(&[(BOB, BOB_PASSWORD)]);
+    let alice_password = server.fixed_account_password().to_string();
+    let mut alice = connect(&server, ALICE, &alice_password, "stale-mute-alice").await;
+    let mut bob = connect(&server, BOB, BOB_PASSWORD, "stale-mute-bob").await;
+    let room = format!("mute-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    join_room(&mut alice, &room, ALICE).await;
+    join_room(&mut bob, &room, BOB).await;
+
+    // Alice enters the call muted legitimately, then bob drains the reflection.
+    alice
+        .send(&call_presence(&room, ALICE, false, true))
+        .await
+        .expect("alice enters call muted");
+    bob.recv_matching(|f| f.contains("<presence") && f.contains("<muted"))
+        .await
+        .expect("bob sees the mute");
+
+    // Alice leaves the call but a buggy client keeps the <muted/> marker.
+    alice
+        .send(&leave_presence_with_stale_in_call(
+            &room, ALICE, false, true,
+        ))
+        .await
+        .expect("alice leaves call with stale mute marker");
+
+    let alice_from = format!("{room}/{ALICE}");
+    let leave = bob
+        .recv_matching(|f| {
+            f.contains("<presence") && f.contains(&alice_from) && !f.contains("muji")
+        })
+        .await
+        .expect("bob sees alice's reflected leave presence");
+    assert!(
+        !leave.contains("<muted"),
+        "server must force mute cleared on a leave-call presence: {leave}"
+    );
+}
+
+#[tokio::test]
 async fn raised_hand_replays_to_late_joiner_and_clears_on_lower() {
     let _guard = TEST_SERIAL.lock().await;
     let server =
@@ -347,7 +409,7 @@ async fn raised_hand_replays_to_late_joiner_and_clears_on_lower() {
     // Alice enters the call and raises her hand, then drains her own echo
     // so the room actor has committed the state before Carol arrives.
     alice
-        .send(&call_presence(&room, ALICE, true))
+        .send(&call_presence(&room, ALICE, true, false))
         .await
         .expect("alice raises hand");
     alice
@@ -377,7 +439,7 @@ async fn raised_hand_replays_to_late_joiner_and_clears_on_lower() {
     // Alice lowers her hand (stays in the call): the reflected presence drops
     // the in-call child for everyone.
     alice
-        .send(&call_presence(&room, ALICE, false))
+        .send(&call_presence(&room, ALICE, false, false))
         .await
         .expect("alice lowers hand");
     let lowered = carol
@@ -429,7 +491,7 @@ async fn managed_members_only_join_replays_raised_hand_state() {
 
     join_room(&mut bob, &channel_jid, BOB).await;
 
-    bob.send(&call_presence(&channel_jid, BOB, true))
+    bob.send(&call_presence(&channel_jid, BOB, true, false))
         .await
         .expect("bob raises hand");
     bob.recv_matching(|f| f.contains("<presence") && f.contains("hand-raised"))
@@ -463,6 +525,167 @@ async fn managed_members_only_join_replays_raised_hand_state() {
     let _ = carol.close().await;
     let _ = bob.close().await;
     let _ = admin.close().await;
+}
+
+#[tokio::test]
+async fn mute_presence_reflects_in_call_child_alongside_muji() {
+    // #1030: mute rides the same `urn:waddle:in-call:0` presence carrier as
+    // the raised hand — a `<muted/>` marker sibling of `<muji/>` (never
+    // nested). The server reflects the room-authoritative state to peers.
+    let _guard = TEST_SERIAL.lock().await;
+    let server = TestServer::start_with_extra_accounts(&[(BOB, BOB_PASSWORD)]);
+    let alice_password = server.fixed_account_password().to_string();
+    let mut alice = connect(&server, ALICE, &alice_password, "mute-alice").await;
+    let mut bob = connect(&server, BOB, BOB_PASSWORD, "mute-bob").await;
+    let room = format!("mute-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    join_room(&mut alice, &room, ALICE).await;
+    join_room(&mut bob, &room, BOB).await;
+
+    // Alice enters the call muted in one presence update.
+    alice
+        .send(&call_presence(&room, ALICE, false, true))
+        .await
+        .expect("alice enters call muted");
+
+    let frame = bob
+        .recv_matching(|f| f.contains("<presence") && f.contains("<muted"))
+        .await
+        .expect("bob sees alice's muted state");
+    let element: Element = frame.parse().expect("presence xml");
+    assert_eq!(
+        element.attr("from"),
+        Some(format!("{room}/{ALICE}").as_str()),
+        "reflection is from room/nick: {frame}"
+    );
+    let in_call = element
+        .children()
+        .find(|c| c.name() == "in-call" && c.ns() == NS_WADDLE_IN_CALL)
+        .unwrap_or_else(|| panic!("reflection carries an <in-call> child: {frame}"));
+    assert!(
+        in_call
+            .children()
+            .any(|c| c.name() == "muted" && c.ns() == NS_WADDLE_IN_CALL),
+        "<in-call> carries the <muted/> marker: {frame}"
+    );
+    assert!(
+        in_call.children().all(|c| c.name() != "hand-raised"),
+        "a mute-only state carries no <hand-raised/> marker: {frame}"
+    );
+    let muji = element
+        .children()
+        .find(|c| c.name() == "muji" && c.ns() == NS_MUJI)
+        .unwrap_or_else(|| panic!("reflection still carries <muji>: {frame}"));
+    assert!(
+        muji.children().all(|c| c.name() != "in-call"),
+        "<in-call> must sit alongside, never inside, <muji>: {frame}"
+    );
+
+    let _ = bob.close().await;
+    let _ = alice.close().await;
+}
+
+#[tokio::test]
+async fn muted_state_replays_to_late_joiner_and_clears_on_unmute() {
+    let _guard = TEST_SERIAL.lock().await;
+    let server =
+        TestServer::start_with_extra_accounts(&[(BOB, BOB_PASSWORD), (CAROL, CAROL_PASSWORD)]);
+    let alice_password = server.fixed_account_password().to_string();
+    let mut alice = connect(&server, ALICE, &alice_password, "mute-late-alice").await;
+    let room = format!("mute-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    join_room(&mut alice, &room, ALICE).await;
+
+    // Alice enters the call muted, then drains her own echo so the room actor
+    // has committed the state before Carol arrives.
+    alice
+        .send(&call_presence(&room, ALICE, false, true))
+        .await
+        .expect("alice enters call muted");
+    alice
+        .recv_matching(|f| f.contains("<muted"))
+        .await
+        .expect("alice self echo");
+
+    // Carol joins mid-call: her XEP-0045 occupant-list replay must already
+    // show Alice's muted state — no fresh update is coming for a steady call.
+    let mut carol = connect(&server, CAROL, CAROL_PASSWORD, "mute-late-carol").await;
+    carol
+        .send(&muc_join_presence(&room, CAROL))
+        .await
+        .expect("carol joins");
+    let replay = carol
+        .recv_until(|f| f.contains("<subject"))
+        .await
+        .expect("carol join replay");
+    let alice_from = format!("{room}/{ALICE}");
+    assert!(
+        replay
+            .iter()
+            .any(|f| f.contains(&alice_from) && f.contains("<muted")),
+        "carol's join replay shows alice's muted state: {replay:?}"
+    );
+
+    // Alice unmutes (stays in the call): the reflected presence drops the
+    // `<muted/>` marker for everyone.
+    alice
+        .send(&call_presence(&room, ALICE, false, false))
+        .await
+        .expect("alice unmutes");
+    let unmuted = carol
+        .recv_matching(|f| f.contains("<presence") && f.contains(&alice_from) && f.contains("muji"))
+        .await
+        .expect("carol sees alice's unmuted presence");
+    assert!(
+        presence_in_call_child(&unmuted)
+            .map(|c| c.children().all(|g| g.name() != "muted"))
+            .unwrap_or(true),
+        "unmuted presence carries no <muted/> marker: {unmuted}"
+    );
+
+    let _ = carol.close().await;
+    let _ = alice.close().await;
+}
+
+#[tokio::test]
+async fn hand_raised_and_muted_coexist_on_the_wire() {
+    // Both sub-states advertised at once reflect as two sibling marker
+    // children of one `<in-call/>` element.
+    let _guard = TEST_SERIAL.lock().await;
+    let server = TestServer::start_with_extra_accounts(&[(BOB, BOB_PASSWORD)]);
+    let alice_password = server.fixed_account_password().to_string();
+    let mut alice = connect(&server, ALICE, &alice_password, "both-alice").await;
+    let mut bob = connect(&server, BOB, BOB_PASSWORD, "both-bob").await;
+    let room = format!("both-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    join_room(&mut alice, &room, ALICE).await;
+    join_room(&mut bob, &room, BOB).await;
+
+    alice
+        .send(&call_presence(&room, ALICE, true, true))
+        .await
+        .expect("alice enters call muted with hand raised");
+
+    let frame = bob
+        .recv_matching(|f| {
+            f.contains("<presence") && f.contains("<muted") && f.contains("hand-raised")
+        })
+        .await
+        .expect("bob sees alice muted with hand raised");
+    let in_call = presence_in_call_child(&frame)
+        .unwrap_or_else(|| panic!("reflection carries an <in-call> child: {frame}"));
+    assert!(
+        in_call
+            .children()
+            .any(|c| c.name() == "muted" && c.ns() == NS_WADDLE_IN_CALL),
+        "carries <muted/>: {frame}"
+    );
+    assert!(
+        in_call
+            .children()
+            .any(|c| c.name() == "hand-raised" && c.ns() == NS_WADDLE_IN_CALL),
+        "carries <hand-raised/>: {frame}"
+    );
+
+    let _ = bob.close().await;
+    let _ = alice.close().await;
 }
 
 #[tokio::test]

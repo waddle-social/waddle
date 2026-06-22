@@ -71,14 +71,14 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
                     .into_iter()
                     .map(|jid| {
                         let muji = self.room.muji_for_session(&o.nick, &jid);
-                        let hand_raised = self.room.hand_raised_for_session(&o.nick, &jid);
+                        let in_call = self.room.in_call_state_for_session(&o.nick, &jid);
                         JoinExistingOccupant {
                             jid,
                             nick: o.nick.clone(),
                             affiliation: o.affiliation,
                             role: o.role,
                             muji,
-                            hand_raised,
+                            in_call,
                         }
                     })
             })
@@ -353,32 +353,34 @@ impl kameo::message::Message<ClearMujiPresence> for RoomActor {
 }
 
 /// Apply the calling session's `<in-call xmlns='urn:waddle:in-call:0'>`
-/// raised-hand presence state (#1029). Carried on the same MUC presence
-/// as the XEP-0272 `<muji/>` advertisement but tracked independently so
-/// muji handling stays single-purpose. Like [`UpsertMujiPresence`] this
-/// authenticates the sender as a current occupant; a non-occupant yields
-/// `Ok(None)` and the caller falls back to the join path.
-pub struct UpsertHandRaised {
+/// presence state (#1029 raised hand / #1030 mute). Carried on the same
+/// MUC presence as the XEP-0272 `<muji/>` advertisement but tracked
+/// independently so muji handling stays single-purpose. Like
+/// [`UpsertMujiPresence`] this authenticates the sender as a current
+/// occupant; a non-occupant yields `Ok(None)` and the caller falls back
+/// to the join path.
+pub struct UpsertInCallState {
     pub sender_jid: FullJid,
     pub state: crate::xep::InCallPresenceState,
 }
 
 #[derive(Debug, Clone)]
-pub struct HandRaisedUpdateOutcome {
+pub struct InCallPresenceUpdateOutcome {
     /// Resolved nick of the sending occupant (room-authoritative).
     pub sender_nick: String,
-    /// Full JIDs of the nick's sessions that advertise a raised hand
-    /// after the update. The presence broadcaster decorates each
-    /// reflected per-session presence whose owner appears here.
-    pub raised_hand_sessions: Vec<FullJid>,
+    /// Per-session in-call states for the nick after the update (only
+    /// sessions advertising a non-empty state). The presence broadcaster
+    /// decorates each reflected per-session presence with its owner's
+    /// state from this list.
+    pub in_call_sessions: Vec<(FullJid, crate::xep::InCallPresenceState)>,
 }
 
-impl kameo::message::Message<UpsertHandRaised> for RoomActor {
-    type Reply = Result<Option<HandRaisedUpdateOutcome>, Infallible>;
+impl kameo::message::Message<UpsertInCallState> for RoomActor {
+    type Reply = Result<Option<InCallPresenceUpdateOutcome>, Infallible>;
 
     async fn handle(
         &mut self,
-        msg: UpsertHandRaised,
+        msg: UpsertInCallState,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let Some(sender_occupant) = self.room.find_occupant_by_real_jid(&msg.sender_jid) else {
@@ -386,11 +388,11 @@ impl kameo::message::Message<UpsertHandRaised> for RoomActor {
         };
         let sender_nick = sender_occupant.nick.clone();
         self.room
-            .upsert_hand_raised(&sender_nick, msg.sender_jid.clone(), msg.state);
-        let raised_hand_sessions = self.room.hand_raised_sessions_for_nick(&sender_nick);
-        Ok(Some(HandRaisedUpdateOutcome {
+            .upsert_in_call_state(&sender_nick, msg.sender_jid.clone(), msg.state);
+        let in_call_sessions = self.room.in_call_sessions_for_nick(&sender_nick);
+        Ok(Some(InCallPresenceUpdateOutcome {
             sender_nick,
-            raised_hand_sessions,
+            in_call_sessions,
         }))
     }
 }
