@@ -534,7 +534,7 @@ export class WaddleClient {
      *   the call (`active` or `preparing`), since in-call state is
      *   meaningless without call participation.
      */
-    update_muji_presence(room_jid: string, nick: string, active: boolean, preparing: boolean, video: boolean, in_call: any): Promise<any>;
+    update_muji_presence(room_jid: string, nick: string, active: boolean, preparing: boolean, video: boolean, in_call: { handRaised?: boolean; muted?: boolean }): Promise<any>;
     /**
      * Fetch the latest calendar events from the community events
      * node. Returns ALL items including past events; chat-side
