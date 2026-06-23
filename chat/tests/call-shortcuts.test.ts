@@ -120,10 +120,11 @@ describe("describeCallShortcutTarget", () => {
     );
   });
 
-  test("the picture-in-picture document counts as a focused surface", () => {
+  test("the document picture-in-picture window is not treated as a focused surface", () => {
+    // It is a separate Window; its key events never reach this listener.
     expect(
       describeCallShortcutTarget(fakeTarget([".call-pip-document"])).surfaceFocused,
-    ).toBe(true);
+    ).toBe(false);
   });
 
   test("an editable element is flagged so typing stays inert", () => {

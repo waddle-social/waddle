@@ -447,7 +447,9 @@ useCallShortcuts(
     "toggle-raise-hand": () => void onToggleRaisedHand(),
     "enter-immersive": () => {
       enterImmersive();
-      if (!nativeFullscreenActive.value) void toggleNativeFullscreen();
+      // requestFullscreen rejects if the gesture was consumed or denied;
+      // swallow it so the immersive switch still stands.
+      if (!nativeFullscreenActive.value) void toggleNativeFullscreen().catch(() => {});
     },
   },
   () => isOpen.value,
@@ -725,6 +727,7 @@ onBeforeUnmount(() => {
     }"
     role="region"
     :aria-label="isImmersive ? 'Active call (immersive)' : 'Active call (expanded)'"
+    tabindex="-1"
     @focusin="revealImmersiveChrome"
     @keydown="revealImmersiveChrome"
     @pointermove="revealImmersiveChrome"

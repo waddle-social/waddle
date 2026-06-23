@@ -35,22 +35,48 @@ function closestQueryable(target: EventTarget | null): ClosestQueryable | null {
 
 /**
  * Install capture-phase keydown/keyup listeners that resolve and dispatch
- * call shortcuts. Returns a teardown that removes both listeners. Capture
+ * call shortcuts. Returns a teardown that removes the listeners. Capture
  * phase keeps the editable-target guard authoritative even when an inner
  * widget would otherwise stop propagation.
  *
  * `isActive` gates dispatch: both call surfaces stay mounted at once, so each
  * passes a predicate for "am I the visible surface?" — without it every
  * shortcut would fire twice. Defaults to always-active for single-surface use.
+ *
+ * Push-to-talk release is handled out-of-band from the pure mapping: once a
+ * hold has engaged the mic, the release must ALWAYS fire — even if focus moved
+ * into the chat composer mid-hold (the Space keyup still bubbles to the window)
+ * or the window lost focus entirely (alt-tab) — otherwise the mic sticks open.
+ * So the Space keyup, a window `blur`, and teardown all force a release while
+ * engaged, regardless of the focus/active scoping that gates the press.
  */
 export function installCallShortcuts(
   handlers: CallShortcutHandlers,
   target: ShortcutListenerTarget,
   isActive: () => boolean = () => true,
 ): () => void {
+  let pushToTalkEngaged = false;
+
+  const releasePushToTalk = (): void => {
+    if (!pushToTalkEngaged) return;
+    pushToTalkEngaged = false;
+    handlers["push-to-talk-end"]?.();
+  };
+
   const onKey = (event: Event): void => {
     const keyboardEvent = event as KeyboardEvent;
     if (keyboardEvent.type !== "keydown" && keyboardEvent.type !== "keyup") return;
+
+    // Release safety net first, before the focus/active scoping that gates the
+    // press: a held mic must come back down on release no matter where focus
+    // went. A Space keyup with no engaged hold is left untouched.
+    if (keyboardEvent.type === "keyup" && keyboardEvent.key === " ") {
+      if (!pushToTalkEngaged) return;
+      releasePushToTalk();
+      keyboardEvent.preventDefault();
+      return;
+    }
+
     if (!isActive()) return;
     const { surfaceFocused, editableTarget } = describeCallShortcutTarget(
       closestQueryable(keyboardEvent.target),
@@ -70,14 +96,20 @@ export function installCallShortcuts(
     if (handler === undefined) return;
     // A handler that returns false declined to act — leave the key alone.
     if (handler() === false) return;
+    if (intent === "push-to-talk-start") pushToTalkEngaged = true;
     keyboardEvent.preventDefault();
   };
 
+  const onBlur = (): void => releasePushToTalk();
+
   target.addEventListener("keydown", onKey, true);
   target.addEventListener("keyup", onKey, true);
+  target.addEventListener("blur", onBlur);
   return () => {
     target.removeEventListener("keydown", onKey, true);
     target.removeEventListener("keyup", onKey, true);
+    target.removeEventListener("blur", onBlur);
+    releasePushToTalk();
   };
 }
 

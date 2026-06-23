@@ -151,3 +151,63 @@ describe("installCallShortcuts", () => {
     expect(win.count("keyup")).toBe(0);
   });
 });
+
+describe("push-to-talk release safety net", () => {
+  test("ends push-to-talk even when focus left the surface mid-hold", () => {
+    // Hold Space on the call surface, click into the chat composer, release.
+    // The keyup still reaches the window listener, so the mic must release.
+    const win = fakeWindow();
+    const h = handlers();
+    installCallShortcuts(h, win);
+
+    win.dispatch(keyEvent({ key: " ", type: "keydown", targetMatches: [".call-split"] }));
+    win.dispatch(keyEvent({ key: " ", type: "keyup", targetMatches: ["textarea"] }));
+
+    expect(h.calls).toEqual(["ptt-start", "ptt-end"]);
+  });
+
+  test("a stray Space keyup without an active push-to-talk does nothing", () => {
+    const win = fakeWindow();
+    const h = handlers();
+    installCallShortcuts(h, win);
+
+    // Space released in the composer where push-to-talk never engaged.
+    win.dispatch(keyEvent({ key: " ", type: "keyup", targetMatches: ["textarea"] }));
+
+    expect(h.calls).toEqual([]);
+  });
+
+  test("losing window focus mid-hold releases push-to-talk", () => {
+    const win = fakeWindow();
+    const h = handlers();
+    installCallShortcuts(h, win);
+
+    win.dispatch(keyEvent({ key: " ", type: "keydown" }));
+    win.dispatch({ type: "blur" });
+
+    expect(h.calls).toEqual(["ptt-start", "ptt-end"]);
+  });
+
+  test("teardown while holding releases push-to-talk", () => {
+    const win = fakeWindow();
+    const h = handlers();
+    const cleanup = installCallShortcuts(h, win);
+
+    win.dispatch(keyEvent({ key: " ", type: "keydown" }));
+    cleanup();
+
+    expect(h.calls).toEqual(["ptt-start", "ptt-end"]);
+  });
+
+  test("does not double-release on keyup after window blur", () => {
+    const win = fakeWindow();
+    const h = handlers();
+    installCallShortcuts(h, win);
+
+    win.dispatch(keyEvent({ key: " ", type: "keydown" }));
+    win.dispatch({ type: "blur" });
+    win.dispatch(keyEvent({ key: " ", type: "keyup" }));
+
+    expect(h.calls).toEqual(["ptt-start", "ptt-end"]);
+  });
+});

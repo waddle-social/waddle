@@ -388,9 +388,11 @@ onBeforeUnmount(() => {
 // #1034: keyboard shortcuts while the split call surface is focused. Gated on
 // `shouldRender` because the expanded surface stays mounted alongside this one
 // — without the gate every shortcut would fire twice. From the inline split
-// view, `F` promotes to the immersive surface (which owns native fullscreen),
-// and `Esc` closes Picture-in-Picture when one is open (otherwise it declines,
-// returning false, so the keystroke is left for other handlers).
+// view `F` enters immersive; native fullscreen can't be requested here because
+// switching modes remounts the surface (the requestFullscreen call would lose
+// its user-gesture), so the immersive surface requests it on its own `F`. `Esc`
+// closes Picture-in-Picture when one is open, otherwise it declines (returns
+// false) so the keystroke is left for other handlers.
 useCallShortcuts(
   {
     "toggle-mic": () => void toggleMic(),
@@ -533,6 +535,7 @@ async function togglePictureInPicture(): Promise<void> {
       :class="{ 'call-split--dragging': isDragging }"
       role="region"
       aria-label="Active call"
+      tabindex="-1"
     >
       <CallStageHeader :title="callLabel" :subline="subline" compact />
       <div

@@ -37,11 +37,13 @@ export type CallShortcutInput = {
 };
 
 /**
- * Roots of the three in-call surfaces — split (inline above chat),
- * expanded/immersive, and the document Picture-in-Picture window body.
- * Focus within any of them scopes the shortcuts to "a focused call surface".
+ * Roots of the in-call surfaces that live in the main document — split
+ * (inline above chat) and expanded/immersive. Focus within either scopes the
+ * shortcuts to "a focused call surface". The document Picture-in-Picture
+ * window is intentionally excluded: it is a separate `Window`, so its key
+ * events never reach this window's listener — it owns its own dismissal.
  */
-const CALL_SURFACE_SELECTOR = ".call-split, .call-expanded, .call-pip-document";
+const CALL_SURFACE_SELECTOR = ".call-split, .call-expanded";
 
 /**
  * Text-entry targets where the keys must stay inert. Matches the editable
