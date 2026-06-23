@@ -108,7 +108,11 @@ schema.#Project & {
 					  --set egress.wsUrl=ws://livekit-sfu.livekit.svc.cluster.local:7880 \
 					  --set egress.redisAddress=livekit-redis.livekit.svc.cluster.local:6379 \
 					  --set egress.s3.bucket=waddle-social-files \
-					  --set egress.s3.endpoint=https://example.r2.cloudflarestorage.com
+					  --set egress.s3.endpoint=https://example.r2.cloudflarestorage.com \
+					  --set egress.apiKey=ci-key \
+					  --set egress.apiSecret=ci-secret \
+					  --set egress.s3.accessKey=ci-access \
+					  --set egress.s3.secret=ci-secret
 					helm package charts/livekit-egress -d /tmp/charts
 					egress_version="$(helm show chart charts/livekit-egress | awk '$1 == "version:" { print $2 }')"
 					if helm show chart oci://ghcr.io/waddle-social/waddle/charts/livekit-egress --version "${egress_version}" >/dev/null 2>&1; then

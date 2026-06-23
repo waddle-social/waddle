@@ -51,6 +51,25 @@ spec:
         - ports:
             - port: "6379"
               protocol: TCP
+    # WebRTC media subscription from the SFU. Egress joins the room as a
+    # participant and pulls each track's RTP. The SFU runs
+    # `use_external_ip: true`, so it advertises its PUBLIC IP + NodePort
+    # media ports in ICE — the egress reaches them as `world` (the same
+    # path the SFU itself uses for media egress), not as an in-cluster
+    # service. Without this, egress joins the room but receives no media
+    # and records black/silent output. Scoped to the SFU's RTC + TURN
+    # relay ports (mirrors gitops/livekit-sfu/networkpolicy.yaml).
+    - toEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "30000"
+              endPort: 40000
+              protocol: UDP
+            - port: "30882"
+              protocol: UDP
+            - port: "30881"
+              protocol: TCP
     # R2 artifact upload over HTTPS. The bucket endpoint is a public
     # Cloudflare hostname reached via the cluster's external egress, i.e.
     # `world`, not an in-cluster service.

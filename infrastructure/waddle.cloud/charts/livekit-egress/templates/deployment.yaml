@@ -36,6 +36,23 @@ spec:
           env:
             - name: EGRESS_CONFIG_FILE
               value: /etc/egress/config.yaml
+          ports:
+            - name: health
+              containerPort: {{ .Values.egress.healthPort }}
+              protocol: TCP
+          # tcpSocket (not httpGet): only asserts the health server is
+          # listening — egress opens it once initialized, so this gates
+          # Flux `wait: true` on real startup without assuming a path.
+          readinessProbe:
+            tcpSocket:
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 20
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

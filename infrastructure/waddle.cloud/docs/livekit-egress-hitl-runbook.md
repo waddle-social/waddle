@@ -41,8 +41,13 @@ waddle-server already uses for `waddle-social-files`. No new R2 key is minted.
 
 > The egress key/secret is a dedicated pair (mirroring the `webhook-key`
 > precedent) so an egress credential leak cannot forge room-join JWTs or
-> webhooks. It is added to the SFU `keys.yaml` so the SFU accepts the egress
-> worker's authentication.
+> webhooks. The SFU `keys.yaml` is wired to consume the same
+> `egress-key`/`egress-secret` properties automatically (see
+> `gitops/livekit-sfu/external-secret.yaml`), so the SFU accepts the egress
+> worker's auth — **the operator only adds the two 1Password properties; no
+> manual `keys.yaml` edit is needed.** Once added, BOTH the `livekit-sfu`
+> and `livekit-egress` ExternalSecrets must reconcile without
+> `SecretSyncedError` (a missing property wedges the whole sync).
 
 ## Deploy & verify (closes AC 1–3)
 

@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 const egressChartPath = "../charts/livekit-egress"
@@ -183,6 +185,67 @@ func TestLiveKitEgressUploadsToExistingR2Bucket(t *testing.T) {
 	}
 }
 
+// sfuExternalSecret reads the SFU api-keys ExternalSecret: both the
+// 1Password remoteRefs and the rendered keys.yaml template.
+type sfuExternalSecret struct {
+	Spec struct {
+		Target struct {
+			Template struct {
+				Data map[string]string `yaml:"data"`
+			} `yaml:"template"`
+		} `yaml:"target"`
+		Data []struct {
+			SecretKey string `yaml:"secretKey"`
+			RemoteRef struct {
+				Key      string `yaml:"key"`
+				Property string `yaml:"property"`
+			} `yaml:"remoteRef"`
+		} `yaml:"data"`
+	} `yaml:"spec"`
+}
+
+// AC2: egress authenticates to the SFU with the dedicated egress-key pair,
+// but the SFU only accepts API keys present in its keys.yaml. Pull the
+// egress pair from the SAME 1Password item the egress ExternalSecret uses
+// AND render it into the SFU keys.yaml, or egress joins are rejected and
+// nothing records. This pins both halves so they can't drift.
+func TestSfuKeysAcceptEgressCredential(t *testing.T) {
+	sfu := readYAML[sfuExternalSecret](t, gitOpsPath("livekit-sfu", "external-secret.yaml"))
+
+	refs := map[string]struct{ key, property string }{}
+	for _, d := range sfu.Spec.Data {
+		refs[d.SecretKey] = struct{ key, property string }{d.RemoteRef.Key, d.RemoteRef.Property}
+	}
+	for secretKey, property := range map[string]string{
+		"egressKey":    "egress-key",
+		"egressSecret": "egress-secret",
+	} {
+		r, ok := refs[secretKey]
+		if !ok {
+			t.Fatalf("SFU ExternalSecret missing %s remoteRef: %#v", secretKey, refs)
+		}
+		if r.key != "livekit-sfu" || r.property != property {
+			t.Fatalf("SFU %s remoteRef = %q/%q, want livekit-sfu/%q", secretKey, r.key, r.property, property)
+		}
+	}
+
+	// The egress ExternalSecret must read the SAME 1Password properties so
+	// the key NAME/secret the egress signs with matches what the SFU accepts.
+	egress := readYAML[externalSecretManifest](t, gitOpsPath("livekit-egress", "external-secret.yaml"))
+	egressRefs := map[string]string{}
+	for _, d := range egress.Spec.Data {
+		egressRefs[d.SecretKey] = d.RemoteRef.Key + "/" + d.RemoteRef.Property
+	}
+	if egressRefs["apiKey"] != "livekit-sfu/egress-key" || egressRefs["apiSecret"] != "livekit-sfu/egress-secret" {
+		t.Fatalf("egress auth refs = %q/%q, want livekit-sfu/egress-key and -secret", egressRefs["apiKey"], egressRefs["apiSecret"])
+	}
+
+	keysYAML := sfu.Spec.Target.Template.Data["keys.yaml"]
+	if !strings.Contains(keysYAML, ".egressKey") || !strings.Contains(keysYAML, ".egressSecret") {
+		t.Fatalf("SFU keys.yaml template does not render the egress pair; egress auth will be rejected:\n%s", keysYAML)
+	}
+}
+
 // sfuRedisHelmRelease reads the SFU's LiveKit config redis address.
 type sfuRedisHelmRelease struct {
 	Spec struct {
@@ -247,6 +310,76 @@ func TestLiveKitRedisComponentRegisteredAndOwnsNamespace(t *testing.T) {
 	}
 }
 
+type redisService struct {
+	Spec struct {
+		Selector map[string]string `yaml:"selector"`
+		Ports    []struct {
+			Port       int    `yaml:"port"`
+			TargetPort string `yaml:"targetPort"`
+		} `yaml:"ports"`
+	} `yaml:"spec"`
+}
+
+type redisDeployment struct {
+	Spec struct {
+		Selector struct {
+			MatchLabels map[string]string `yaml:"matchLabels"`
+		} `yaml:"selector"`
+		Template struct {
+			Metadata struct {
+				Labels map[string]string `yaml:"labels"`
+			} `yaml:"metadata"`
+			Spec struct {
+				Containers []struct {
+					Ports []struct {
+						Name          string `yaml:"name"`
+						ContainerPort int    `yaml:"containerPort"`
+					} `yaml:"ports"`
+				} `yaml:"containers"`
+			} `yaml:"spec"`
+		} `yaml:"template"`
+	} `yaml:"spec"`
+}
+
+// The Redis bus is the new critical path for AC2 (no bus → egress never
+// receives jobs). Assert the Service actually routes to the Deployment's
+// pod and port, and that the instance label both halves (and the SFU/egress
+// NetworkPolicies) key on is consistent — a named-port or label rename on
+// one side would otherwise pass every other test while silently breaking
+// dispatch.
+func TestLiveKitRedisServiceTargetsDeployment(t *testing.T) {
+	svc := readYAML[redisService](t, gitOpsPath("livekit-redis", "service.yaml"))
+	dep := readYAML[redisDeployment](t, gitOpsPath("livekit-redis", "deployment.yaml"))
+
+	if len(svc.Spec.Ports) == 0 || svc.Spec.Ports[0].Port != 6379 {
+		t.Fatalf("redis service must expose port 6379: %#v", svc.Spec.Ports)
+	}
+	targetPort := svc.Spec.Ports[0].TargetPort
+
+	if len(dep.Spec.Template.Spec.Containers) == 0 {
+		t.Fatal("redis deployment has no containers")
+	}
+	var named bool
+	for _, p := range dep.Spec.Template.Spec.Containers[0].Ports {
+		if p.Name == targetPort && p.ContainerPort == 6379 {
+			named = true
+		}
+	}
+	if !named {
+		t.Fatalf("redis service targetPort %q does not resolve to a container port named %q on 6379: %#v",
+			targetPort, targetPort, dep.Spec.Template.Spec.Containers[0].Ports)
+	}
+
+	const wantInstance = "livekit-redis"
+	if svc.Spec.Selector["app.kubernetes.io/instance"] != wantInstance {
+		t.Fatalf("redis service selector instance = %q, want %q", svc.Spec.Selector["app.kubernetes.io/instance"], wantInstance)
+	}
+	if dep.Spec.Selector.MatchLabels["app.kubernetes.io/instance"] != wantInstance ||
+		dep.Spec.Template.Metadata.Labels["app.kubernetes.io/instance"] != wantInstance {
+		t.Fatalf("redis deployment instance label must be %q on both selector and pod template (NetworkPolicies key on it)", wantInstance)
+	}
+}
+
 // fluxKustomization reads a Flux Kustomization's source binding and
 // dependency ordering.
 type fluxKustomization struct {
@@ -294,58 +427,107 @@ func TestLiveKitEgressComponentRegistered(t *testing.T) {
 	}
 }
 
-// ciliumPort is one (port, protocol) pair asserted on a policy.
-type ciliumPort struct {
-	Port     string
-	Protocol string
-}
-
 // AC1/AC2/AC3: every leg of the egress data path must be allowed out of
-// the default-deny policy — to the SFU (7880), the Redis bus (6379), and
-// R2 over HTTPS (443) — and the SFU must additionally be allowed to reach
-// the new Redis bus. The SFU's existing STUN egress (3478/19302) must NOT
-// regress: dropping it stalls external-IP detection and CrashLoops the SFU
-// (the 2026-06-17 outage).
+// the default-deny policy AND target the right peer (a port allowed to the
+// wrong endpoint is still broken). Egress reaches the SFU signalling
+// (7880→livekit-sfu) and its WebRTC media — the SFU advertises external-IP
+// candidates (use_external_ip), so media leaves to `world` on the RTC/TURN
+// ports — plus the Redis bus (6379→livekit-redis) and R2 over HTTPS
+// (443→world). The SFU must additionally reach the new Redis bus, and its
+// STUN egress (3478/19302→world) must NOT regress (the 2026-06-17 outage).
 func TestLiveKitStackNetworkPolicyAllowsEgressPaths(t *testing.T) {
 	egress := readYAML[ciliumNetworkPolicy](t, gitOpsPath("livekit-egress", "networkpolicy.yaml"))
-	for _, want := range []ciliumPort{
-		{"7880", "TCP"}, // SFU signalling
-		{"6379", "TCP"}, // Redis bus
-		{"443", "TCP"},  // R2 upload over HTTPS
-	} {
-		if !egress.egressOpens(want.Port, want.Protocol) {
-			t.Fatalf("livekit-egress networkpolicy does not allow egress to %s/%s", want.Port, want.Protocol)
-		}
+
+	if !egress.egressOpensToInstance("7880", "TCP", "livekit-sfu") {
+		t.Fatal("egress networkpolicy must allow 7880/TCP to the livekit-sfu endpoint (signalling)")
+	}
+	if !egress.egressOpensToInstance("6379", "TCP", "livekit-redis") {
+		t.Fatal("egress networkpolicy must allow 6379/TCP to the livekit-redis endpoint (job bus)")
+	}
+	if !egress.egressOpensToEntity("443", "TCP", "world") {
+		t.Fatal("egress networkpolicy must allow 443/TCP to world (R2 upload)")
+	}
+	// WebRTC media subscription to the SFU's external-IP candidates.
+	if !egress.egressOpensToEntity("30882", "UDP", "world") || !egress.egressOpensToEntity("30881", "TCP", "world") {
+		t.Fatal("egress networkpolicy must allow the SFU RTC media ports to world (30882/UDP, 30881/TCP); else egress joins the room but receives no media")
 	}
 
 	sfu := readYAML[ciliumNetworkPolicy](t, gitOpsPath("livekit-sfu", "networkpolicy.yaml"))
-	if !sfu.egressOpens("6379", "TCP") {
-		t.Fatal("livekit-sfu networkpolicy must allow egress to the Redis bus (6379/TCP) to dispatch egress jobs")
+	if !sfu.egressOpensToInstance("6379", "TCP", "livekit-redis") {
+		t.Fatal("livekit-sfu networkpolicy must allow egress 6379/TCP to the livekit-redis endpoint to dispatch egress jobs")
 	}
 	for _, stun := range []string{"3478", "19302"} {
-		if !sfu.egressOpens(stun, "UDP") {
-			t.Fatalf("livekit-sfu networkpolicy dropped STUN egress %s/UDP — regresses external-IP detection (2026-06-17 outage)", stun)
+		if !sfu.egressOpensToEntity(stun, "UDP", "world") {
+			t.Fatalf("livekit-sfu networkpolicy dropped STUN egress %s/UDP to world — regresses external-IP detection (2026-06-17 outage)", stun)
 		}
 	}
+}
+
+// renderedEgressConfig is the LiveKit egress ServiceConfig shape we parse
+// out of the rendered Secret. The S3 upload target MUST sit under `storage`
+// (BaseConfig.StorageConfig is `yaml:"storage,omitempty"`, NOT inline); a
+// top-level `s3:` is silently dropped by egress's non-strict yaml load, so
+// recordings would fall back to ephemeral local disk and never reach R2.
+type renderedEgressConfig struct {
+	WsURL string `yaml:"ws_url"`
+	Redis struct {
+		Address string `yaml:"address"`
+	} `yaml:"redis"`
+	Storage struct {
+		S3 struct {
+			Bucket         string `yaml:"bucket"`
+			Endpoint       string `yaml:"endpoint"`
+			AccessKey      string `yaml:"access_key"`
+			Secret         string `yaml:"secret"`
+			ForcePathStyle bool   `yaml:"force_path_style"`
+		} `yaml:"s3"`
+	} `yaml:"storage"`
+	// Must stay nil: a top-level s3 means the storage is mis-nested.
+	TopLevelS3 map[string]any `yaml:"s3"`
+}
+
+func renderEgressConfig(t *testing.T) renderedEgressConfig {
+	t.Helper()
+	out, err := renderEgressTemplate(t, "templates/secret.yaml")
+	if err != nil {
+		t.Fatalf("helm template livekit-egress secret failed: %v\n%s", err, out)
+	}
+	var secret struct {
+		StringData struct {
+			ConfigYAML string `yaml:"config.yaml"`
+		} `yaml:"stringData"`
+	}
+	if err := yaml.Unmarshal([]byte(out), &secret); err != nil {
+		t.Fatalf("parse rendered secret: %v\n%s", err, out)
+	}
+	var cfg renderedEgressConfig
+	if err := yaml.Unmarshal([]byte(secret.StringData.ConfigYAML), &cfg); err != nil {
+		t.Fatalf("parse rendered config.yaml: %v\n%s", err, secret.StringData.ConfigYAML)
+	}
+	return cfg
 }
 
 // The chart is a deep module over the LiveKit egress config: the operator
 // sets connectivity + storage values and the chart renders a valid egress
-// config.yaml. Assert the SFU signal URL, the Redis bus, and the R2 bucket
-// all flow from values into the rendered config.
+// ServiceConfig. Assert the SFU signal URL, the Redis bus, and the R2
+// target land in the CORRECT config keys (storage.s3.*, not top-level s3).
 func TestLiveKitEgressChartRendersConfigFromValues(t *testing.T) {
-	out, err := renderEgressTemplate(t, "")
-	if err != nil {
-		t.Fatalf("helm template livekit-egress failed: %v\n%s", err, out)
+	cfg := renderEgressConfig(t)
+
+	if cfg.WsURL != "ws://livekit-sfu.livekit.svc.cluster.local:7880" {
+		t.Fatalf("rendered ws_url = %q", cfg.WsURL)
 	}
-	for _, want := range []string{
-		"livekit-sfu.livekit.svc.cluster.local:7880",   // ws_url
-		"livekit-redis.livekit.svc.cluster.local:6379", // redis address
-		"waddle-social-files",                          // R2 bucket
-	} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("rendered egress config missing %q\n%s", want, out)
-		}
+	if cfg.Redis.Address != "livekit-redis.livekit.svc.cluster.local:6379" {
+		t.Fatalf("rendered redis.address = %q", cfg.Redis.Address)
+	}
+	if cfg.TopLevelS3 != nil {
+		t.Fatalf("rendered config has a TOP-LEVEL s3 key; egress requires it under storage.s3 — top-level is silently dropped: %#v", cfg.TopLevelS3)
+	}
+	if cfg.Storage.S3.Bucket != "waddle-social-files" {
+		t.Fatalf("rendered storage.s3.bucket = %q, want waddle-social-files", cfg.Storage.S3.Bucket)
+	}
+	if !cfg.Storage.S3.ForcePathStyle {
+		t.Fatal("rendered storage.s3.force_path_style must be true for Cloudflare R2")
 	}
 }
 
