@@ -27,10 +27,9 @@ type ShortcutListenerTarget = Pick<Window, "addEventListener" | "removeEventList
 type ClosestQueryable = { closest(selectors: string): Element | null };
 
 function closestQueryable(target: EventTarget | null): ClosestQueryable | null {
-  return target !== null &&
-    typeof (target as { closest?: unknown }).closest === "function"
-    ? (target as ClosestQueryable)
-    : null;
+  if (target === null) return null;
+  const candidate = target as { closest?: unknown };
+  return typeof candidate.closest === "function" ? (candidate as ClosestQueryable) : null;
 }
 
 /**
