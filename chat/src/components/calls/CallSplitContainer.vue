@@ -23,10 +23,12 @@ import {
   hangupActiveCall,
   peerLabelFromState,
   refreshScreenShareSupported,
+  setPushToTalkActive,
   toggleCam,
   toggleMic,
   toggleScreenShare,
 } from "@/lib/calls/call-controls";
+import { useCallShortcuts } from "@/lib/calls/use-call-shortcuts";
 import { useCallEngine } from "@/lib/calls/use-call-engine";
 import { useActiveMucCall } from "@/lib/calls/use-active-muc-call";
 import { useSplitResize } from "@/lib/calls/use-split-resize";
@@ -382,6 +384,29 @@ onBeforeUnmount(() => {
     resetLocalPictureInPictureState();
   }
 });
+
+// #1034: keyboard shortcuts while the split call surface is focused. Gated on
+// `shouldRender` because the expanded surface stays mounted alongside this one
+// — without the gate every shortcut would fire twice. From the inline split
+// view, `F` promotes to the immersive surface (which owns native fullscreen),
+// and `Esc` closes Picture-in-Picture when one is open (otherwise it declines,
+// returning false, so the keystroke is left for other handlers).
+useCallShortcuts(
+  {
+    "toggle-mic": () => void toggleMic(),
+    "push-to-talk-start": () => setPushToTalkActive(true),
+    "push-to-talk-end": () => setPushToTalkActive(false),
+    "toggle-camera": () => void toggleCam(),
+    "toggle-share": () => void toggleScreenShare(),
+    "toggle-raise-hand": () => void onToggleRaisedHand(),
+    "enter-immersive": () => $callUiMode.set("immersive"),
+    "exit-immersive": () => {
+      if (!pictureInPictureActive.value) return false;
+      void closePictureInPictureSafely();
+    },
+  },
+  () => shouldRender.value,
+);
 
 async function onHangup(): Promise<void> {
   await closePictureInPictureSafely();

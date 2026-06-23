@@ -18,6 +18,7 @@ import {
   refreshScreenShareSupported,
   resetCallControls,
   seedCallControlsFromEngine,
+  setPushToTalkActive,
   suspendCallForPageHide,
   toggleScreenShare,
   toggleMic,
@@ -321,6 +322,57 @@ describe("device-less call controls", () => {
     expect($callMicEnabled.get()).toBe(true);
     expect($callCamEnabled.get()).toBe(true);
     expect($callScreenShareEnabled.get()).toBe(false);
+  });
+
+  test("push-to-talk activation unmutes a muted mic", async () => {
+    const { engine } = useCallEngine();
+    const calls: boolean[] = [];
+    (engine as unknown as { room: unknown }).room = {
+      localParticipant: {
+        setMicrophoneEnabled: async (on: boolean) => {
+          calls.push(on);
+        },
+      },
+    };
+    $callMicEnabled.set(false);
+    setPushToTalkActive(true);
+    await Promise.resolve();
+    expect($callMicEnabled.get()).toBe(true);
+    expect(calls).toEqual([true]);
+  });
+
+  test("push-to-talk release mutes a live mic", async () => {
+    const { engine } = useCallEngine();
+    const calls: boolean[] = [];
+    (engine as unknown as { room: unknown }).room = {
+      localParticipant: {
+        setMicrophoneEnabled: async (on: boolean) => {
+          calls.push(on);
+        },
+      },
+    };
+    $callMicEnabled.set(true);
+    setPushToTalkActive(false);
+    await Promise.resolve();
+    expect($callMicEnabled.get()).toBe(false);
+    expect(calls).toEqual([false]);
+  });
+
+  test("push-to-talk activation is a no-op when the mic is already live", async () => {
+    const { engine } = useCallEngine();
+    const calls: boolean[] = [];
+    (engine as unknown as { room: unknown }).room = {
+      localParticipant: {
+        setMicrophoneEnabled: async (on: boolean) => {
+          calls.push(on);
+        },
+      },
+    };
+    $callMicEnabled.set(true);
+    setPushToTalkActive(true);
+    await Promise.resolve();
+    expect($callMicEnabled.get()).toBe(true);
+    expect(calls).toEqual([]);
   });
 
   test("toggleMic retry that is still denied rolls back AND records a classified issue", async () => {

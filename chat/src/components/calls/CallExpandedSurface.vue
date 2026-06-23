@@ -27,10 +27,12 @@ import {
   hangupActiveCall,
   peerLabelFromState,
   refreshScreenShareSupported,
+  setPushToTalkActive,
   toggleCam,
   toggleMic,
   toggleScreenShare,
 } from "@/lib/calls/call-controls";
+import { useCallShortcuts } from "@/lib/calls/use-call-shortcuts";
 import { useCallEngine } from "@/lib/calls/use-call-engine";
 import { useActiveMucCall } from "@/lib/calls/use-active-muc-call";
 import { localScreenSharePresentation } from "@/lib/calls/call-self-share";
@@ -429,6 +431,28 @@ function enterImmersive(): void {
   $callUiMode.set("immersive");
 }
 
+// #1034: keyboard shortcuts while the expanded/immersive surface is focused.
+// Gated on `isOpen` because the split surface stays mounted alongside this one
+// — without the gate every shortcut would fire twice. `F` enters immersive and
+// requests native fullscreen (idempotent: it never toggles fullscreen back
+// off). `Esc` is intentionally NOT mapped here: the bespoke `onKeydown` below
+// already owns Escape (menu/settings/dock/PiP/collapse precedence).
+useCallShortcuts(
+  {
+    "toggle-mic": () => void toggleMic(),
+    "push-to-talk-start": () => setPushToTalkActive(true),
+    "push-to-talk-end": () => setPushToTalkActive(false),
+    "toggle-camera": () => void toggleCam(),
+    "toggle-share": () => void toggleScreenShare(),
+    "toggle-raise-hand": () => void onToggleRaisedHand(),
+    "enter-immersive": () => {
+      enterImmersive();
+      if (!nativeFullscreenActive.value) void toggleNativeFullscreen();
+    },
+  },
+  () => isOpen.value,
+);
+
 function clearChromeIdleTimer(): void {
   if (typeof window === "undefined") return;
   if (chromeIdleTimer === null) return;
@@ -633,6 +657,13 @@ function onKeydown(event: KeyboardEvent): void {
   if (dockOpen.value) {
     event.preventDefault();
     closeCallDock();
+    return;
+  }
+  // #1034: Picture-in-Picture is another layer above the stage — Escape pops
+  // it before collapsing the surface, matching "Esc exits immersive/PiP".
+  if (pictureInPictureActive.value) {
+    event.preventDefault();
+    void closePictureInPictureSafely();
     return;
   }
   event.preventDefault();

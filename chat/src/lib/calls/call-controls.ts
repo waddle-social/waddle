@@ -84,6 +84,18 @@ export async function toggleMic(): Promise<void> {
   }
 }
 
+/**
+ * Push-to-talk (#1034): force the mic on while the Space key is held and
+ * off on release. Implemented on top of [`toggleMic`] so the optimistic
+ * flip, rollback, recorded media issue, and `urn:waddle:in-call:0` mute
+ * broadcast all match a manual mute toggle — and so it is a no-op when the
+ * mic is already in the requested state (no redundant engine call or
+ * presence churn while the key repeats or when the user already unmuted).
+ */
+export function setPushToTalkActive(active: boolean): void {
+  if ($callMicEnabled.get() !== active) void toggleMic();
+}
+
 /** Toggle the local camera, with optimistic UI + rollback. Mirrors
  *  [`toggleMic`] — also the retry path for a device-less / denied
  *  camera once a device is attached or access is granted. */
