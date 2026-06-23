@@ -469,8 +469,13 @@ func TestLiveKitStackNetworkPolicyAllowsEgressPaths(t *testing.T) {
 // top-level `s3:` is silently dropped by egress's non-strict yaml load, so
 // recordings would fall back to ephemeral local disk and never reach R2.
 type renderedEgressConfig struct {
-	WsURL string `yaml:"ws_url"`
-	Redis struct {
+	WsURL   string `yaml:"ws_url"`
+	Logging struct {
+		Level string `yaml:"level"`
+	} `yaml:"logging"`
+	// Must stay nil: egress v1.9.0 has no `log_level` key (it's `logging.level`).
+	TopLevelLogLevel *string `yaml:"log_level"`
+	Redis            struct {
 		Address string `yaml:"address"`
 	} `yaml:"redis"`
 	Storage struct {
@@ -519,6 +524,12 @@ func TestLiveKitEgressChartRendersConfigFromValues(t *testing.T) {
 	}
 	if cfg.Redis.Address != "livekit-redis.livekit.svc.cluster.local:6379" {
 		t.Fatalf("rendered redis.address = %q", cfg.Redis.Address)
+	}
+	if cfg.TopLevelLogLevel != nil {
+		t.Fatalf("rendered config has a top-level log_level; egress uses logging.level — top-level is ignored: %q", *cfg.TopLevelLogLevel)
+	}
+	if cfg.Logging.Level != "info" {
+		t.Fatalf("rendered logging.level = %q, want info", cfg.Logging.Level)
 	}
 	if cfg.TopLevelS3 != nil {
 		t.Fatalf("rendered config has a TOP-LEVEL s3 key; egress requires it under storage.s3 — top-level is silently dropped: %#v", cfg.TopLevelS3)

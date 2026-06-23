@@ -22,9 +22,10 @@ serviceAccount:
 # (never committed to git).
 egress:
   logLevel: info
-  # HTTP health server port. Egress serves readiness here when set; the
-  # Deployment probes it so Flux `wait: true` reflects real readiness
-  # (connected to the bus) rather than just "container started".
+  # HTTP health server port. When set, egress binds a listener here early
+  # in startup; the Deployment tcpSocket-probes it so Flux `wait: true`
+  # reflects the egress process being up and serving, not merely that the
+  # container image started.
   healthPort: 8080
   wsUrl: ""
   redisAddress: ""
