@@ -1,0 +1,10 @@
+apiVersion: v2
+name: livekit-egress
+description: Minimal LiveKit Egress chart for Waddle call recording to R2.
+type: application
+version: 0.1.0
+appVersion: v1.9.0
+
+sources:
+  - https://github.com/livekit/egress
+  - https://github.com/livekit/livekit-helm

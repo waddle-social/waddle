@@ -1,0 +1,42 @@
+# Default-deny + targeted-allow isolation for the LiveKit Redis bus.
+#
+# CiliumNetworkPolicy (not vanilla NetworkPolicy) to match the rest of the
+# livekit stack — see gitops/livekit-sfu/networkpolicy.yaml for why this
+# cluster's Cilium/Gateway setup requires `fromEntities`/`toEndpoints` over
+# `namespaceSelector`. The single ingress/egress block below puts the Redis
+# pod in default-deny on both directions, then re-opens only the bus.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: livekit-redis
+  namespace: livekit
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: livekit-redis
+      app.kubernetes.io/instance: livekit-redis
+  ingress:
+    # Only the SFU and the egress workers may reach the bus, on 6379.
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: livekit
+            app.kubernetes.io/instance: livekit-sfu
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: livekit
+            app.kubernetes.io/instance: livekit-egress
+      toPorts:
+        - ports:
+            - port: "6379"
+              protocol: TCP
+  egress:
+    # DNS only — Redis initiates no other outbound traffic.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s:k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP

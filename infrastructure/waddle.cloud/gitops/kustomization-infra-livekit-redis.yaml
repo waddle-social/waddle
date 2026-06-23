@@ -1,0 +1,25 @@
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: infra-livekit-redis
+  namespace: flux-system
+spec:
+  # Foundational component of the livekit stack: owns the `livekit`
+  # namespace and the SFU↔egress message bus, so it depends only on the
+  # gateway/CNI being up for its CiliumNetworkPolicy.
+  dependsOn:
+    - name: infra-cilium-gateway
+  interval: 10m
+  retryInterval: 1m
+  timeout: 10m
+  path: ./
+  prune: true
+  wait: true
+  sourceRef:
+    kind: OCIRepository
+    name: livekit-redis
+  healthChecks:
+    - apiVersion: apps/v1
+      kind: Deployment
+      name: livekit-redis
+      namespace: livekit

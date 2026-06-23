@@ -1,0 +1,12 @@
+{{- if not .Values.egress.wsUrl -}}
+{{- fail "egress.wsUrl is required (the in-cluster livekit-sfu signal URL)" -}}
+{{- end -}}
+{{- if not .Values.egress.redisAddress -}}
+{{- fail "egress.redisAddress is required: egress receives jobs over the shared Redis bus; without it the SFU cannot dispatch recordings" -}}
+{{- end -}}
+{{- if not .Values.egress.s3.bucket -}}
+{{- fail "egress.s3.bucket is required (the R2 upload target)" -}}
+{{- end -}}
+{{- if not .Values.egress.s3.endpoint -}}
+{{- fail "egress.s3.endpoint is required (the R2 S3 endpoint)" -}}
+{{- end -}}

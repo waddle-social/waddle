@@ -36,7 +36,8 @@ type livekitHelmRelease struct {
 	} `yaml:"spec"`
 }
 
-// ciliumNetworkPolicy captures the ingress rules of the SFU policy.
+// ciliumNetworkPolicy captures the ingress and egress port rules of a
+// livekit-stack CiliumNetworkPolicy.
 type ciliumNetworkPolicy struct {
 	Spec struct {
 		Ingress []struct {
@@ -48,7 +49,29 @@ type ciliumNetworkPolicy struct {
 				} `yaml:"ports"`
 			} `yaml:"toPorts"`
 		} `yaml:"ingress"`
+		Egress []struct {
+			ToPorts []struct {
+				Ports []struct {
+					Port     string `yaml:"port"`
+					Protocol string `yaml:"protocol"`
+				} `yaml:"ports"`
+			} `yaml:"toPorts"`
+		} `yaml:"egress"`
 	} `yaml:"spec"`
+}
+
+// egressOpens reports whether any egress rule allows port/proto out.
+func (p ciliumNetworkPolicy) egressOpens(port, proto string) bool {
+	for _, rule := range p.Spec.Egress {
+		for _, tp := range rule.ToPorts {
+			for _, pt := range tp.Ports {
+				if pt.Port == port && pt.Protocol == proto {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // k8sService is the rendered NodePort Service shape we assert on.
