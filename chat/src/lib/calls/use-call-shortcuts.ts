@@ -77,7 +77,7 @@ export function installCallShortcuts(
     }
 
     if (!isActive()) return;
-    const { surfaceFocused, editableTarget } = describeCallShortcutTarget(
+    const { surfaceFocused, editableTarget, activationTarget } = describeCallShortcutTarget(
       closestQueryable(keyboardEvent.target),
     );
     const intent = resolveCallShortcut({
@@ -88,6 +88,7 @@ export function installCallShortcuts(
       metaKey: keyboardEvent.metaKey,
       altKey: keyboardEvent.altKey,
       editableTarget,
+      activationTarget,
       surfaceFocused,
     });
     if (intent === null) return;

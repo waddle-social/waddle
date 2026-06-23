@@ -358,6 +358,27 @@ describe("device-less call controls", () => {
     expect(calls).toEqual([false]);
   });
 
+  test("rapid push-to-talk tap settles on the released state without stranding the engine", async () => {
+    // Press + release in the same tick. The enable must never win late and
+    // re-open the mic — serialized last-writer-wins means only the disable
+    // reaches the engine and the final state is muted.
+    const { engine } = useCallEngine();
+    const calls: boolean[] = [];
+    (engine as unknown as { room: unknown }).room = {
+      localParticipant: {
+        setMicrophoneEnabled: async (on: boolean) => {
+          calls.push(on);
+        },
+      },
+    };
+    $callMicEnabled.set(false);
+    setPushToTalkActive(true);
+    setPushToTalkActive(false);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect($callMicEnabled.get()).toBe(false);
+    expect(calls).toEqual([false]);
+  });
+
   test("push-to-talk activation is a no-op when the mic is already live", async () => {
     const { engine } = useCallEngine();
     const calls: boolean[] = [];

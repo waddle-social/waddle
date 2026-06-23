@@ -57,43 +57,71 @@ function getSender(): CallWireSender | null {
 }
 
 /**
- * Toggle the local microphone, with optimistic UI + rollback. Doubles
- * as the recovery path: a device-less / permission-denied participant
- * who later plugs in a mic or grants access can click "unmute" to
- * retry capture. On success the recorded media issue is cleared; on
- * failure the atom rolls back and the issue is (re)recorded so the
- * non-blocking notice updates instead of a transient error toast.
+ * Serialize mic enable/disable (#1034). Push-to-talk fires `setCallMic`
+ * back-to-back on Space down/up; without ordering, a late-resolving enable
+ * could land after a newer disable and strand the mic open (and broadcast a
+ * stale mute). Each request bumps a generation token and chains behind the
+ * previous op, so engine calls never overlap and a request that is no longer
+ * the latest is dropped — before the engine call if it never started, or
+ * before its post-effects if it was superseded mid-flight. Only the last
+ * requested state is applied and broadcast.
+ */
+let micOpChain: Promise<void> = Promise.resolve();
+let micRequestGen = 0;
+
+/**
+ * Drive the local microphone to `next` with optimistic UI + rollback, the
+ * recorded media-issue notice, and the `urn:waddle:in-call:0` mute broadcast —
+ * serialized last-writer-wins (see [`micOpChain`]). Doubles as the recovery
+ * path: a device-less / permission-denied participant who later plugs in a mic
+ * or grants access can retry capture. Resolves once this request's effects
+ * have settled (or it was superseded).
+ */
+function setCallMic(next: boolean): Promise<void> {
+  const gen = ++micRequestGen;
+  $callMicEnabled.set(next); // optimistic
+  const op = micOpChain.then(async () => {
+    if (gen !== micRequestGen) return; // a newer request superseded this one
+    try {
+      const { engine } = useCallEngine();
+      await engine.setMicEnabled(next);
+      if (gen !== micRequestGen) return; // superseded while awaiting the engine
+      clearMediaIssue("mic");
+      // #1030: broadcast the new mute state as `urn:waddle:in-call:0`
+      // presence so other participants' tiles and roster reflect it — the
+      // authoritative, XMPP-native remote-mute path (no LiveKit data
+      // channel). A no-op for DM calls; the broadcaster guards on an active
+      // MUC call. Fire-and-forget: a failed presence self-heals on the next.
+      const sender = getSender();
+      if (sender) void broadcastMucCallSelfMute(sender as unknown as RawIqSender, !next);
+    } catch (err) {
+      if (gen === micRequestGen) {
+        $callMicEnabled.set(!next);
+        recordMediaIssue("mic", err);
+      }
+    }
+  });
+  micOpChain = op;
+  return op;
+}
+
+/**
+ * Toggle the local microphone. Thin wrapper over [`setCallMic`] so manual
+ * mute clicks share the same serialized, optimistic, rollback-and-broadcast
+ * path as push-to-talk.
  */
 export async function toggleMic(): Promise<void> {
-  const next = !$callMicEnabled.get();
-  $callMicEnabled.set(next);
-  try {
-    const { engine } = useCallEngine();
-    await engine.setMicEnabled(next);
-    clearMediaIssue("mic");
-    // #1030: broadcast the new mute state as `urn:waddle:in-call:0`
-    // presence so other participants' tiles and roster reflect it — the
-    // authoritative, XMPP-native remote-mute path (no LiveKit data
-    // channel). A no-op for DM calls; the broadcaster guards on an active
-    // MUC call. Fire-and-forget: a failed presence self-heals on the next.
-    const sender = getSender();
-    if (sender) void broadcastMucCallSelfMute(sender as unknown as RawIqSender, !next);
-  } catch (err) {
-    $callMicEnabled.set(!next);
-    recordMediaIssue("mic", err);
-  }
+  await setCallMic(!$callMicEnabled.get());
 }
 
 /**
  * Push-to-talk (#1034): force the mic on while the Space key is held and
- * off on release. Implemented on top of [`toggleMic`] so the optimistic
- * flip, rollback, recorded media issue, and `urn:waddle:in-call:0` mute
- * broadcast all match a manual mute toggle — and so it is a no-op when the
- * mic is already in the requested state (no redundant engine call or
- * presence churn while the key repeats or when the user already unmuted).
+ * off on release, via the serialized [`setCallMic`]. A no-op when the mic is
+ * already in the requested state, so a held/repeating key or an already-open
+ * mic doesn't churn the engine or the mute presence.
  */
 export function setPushToTalkActive(active: boolean): void {
-  if ($callMicEnabled.get() !== active) void toggleMic();
+  if ($callMicEnabled.get() !== active) void setCallMic(active);
 }
 
 /** Toggle the local camera, with optimistic UI + rollback. Mirrors

@@ -33,6 +33,7 @@ function keydown(overrides: Partial<CallShortcutInput> = {}): CallShortcutInput 
     metaKey: false,
     altKey: false,
     editableTarget: false,
+    activationTarget: false,
     surfaceFocused: true,
     ...overrides,
   };
@@ -97,13 +98,30 @@ describe("resolveCallShortcut", () => {
     expect(resolveCallShortcut(keydown({ key: "m", surfaceFocused: false }))).toBeNull();
     expect(resolveCallShortcut(keydown({ key: " ", surfaceFocused: false }))).toBeNull();
   });
+
+  test("Space on a focused control passes through to native activation", () => {
+    // A focused Mute/Hang-up button must still activate on Space — don't
+    // hijack it for push-to-talk (keydown AND keyup, since buttons fire on up).
+    expect(resolveCallShortcut(keydown({ key: " ", activationTarget: true }))).toBeNull();
+    expect(
+      resolveCallShortcut(keydown({ key: " ", type: "keyup", activationTarget: true })),
+    ).toBeNull();
+  });
+
+  test("letter shortcuts still fire while a control is focused", () => {
+    // Letters don't collide with native button activation, so they still work.
+    expect(resolveCallShortcut(keydown({ key: "m", activationTarget: true }))).toBe(
+      "toggle-mic",
+    );
+  });
 });
 
 describe("describeCallShortcutTarget", () => {
-  test("a null target is neither focused nor editable", () => {
+  test("a null target is neither focused nor editable nor an activation target", () => {
     expect(describeCallShortcutTarget(null)).toEqual({
       surfaceFocused: false,
       editableTarget: false,
+      activationTarget: false,
     });
   });
 
@@ -111,7 +129,15 @@ describe("describeCallShortcutTarget", () => {
     expect(describeCallShortcutTarget(fakeTarget([".call-split"]))).toEqual({
       surfaceFocused: true,
       editableTarget: false,
+      activationTarget: false,
     });
+  });
+
+  test("a focused button is flagged as an activation target", () => {
+    expect(describeCallShortcutTarget(fakeTarget(["button"])).activationTarget).toBe(true);
+    expect(
+      describeCallShortcutTarget(fakeTarget(['[role="button"]'])).activationTarget,
+    ).toBe(true);
   });
 
   test("focus inside the expanded/immersive surface counts too", () => {
@@ -138,6 +164,7 @@ describe("describeCallShortcutTarget", () => {
     expect(describeCallShortcutTarget(fakeTarget(["[contenteditable='true']"]))).toEqual({
       surfaceFocused: false,
       editableTarget: true,
+      activationTarget: false,
     });
   });
 });

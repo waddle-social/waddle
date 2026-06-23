@@ -399,7 +399,11 @@ useCallShortcuts(
     "push-to-talk-start": () => setPushToTalkActive(true),
     "push-to-talk-end": () => setPushToTalkActive(false),
     "toggle-camera": () => void toggleCam(),
-    "toggle-share": () => void toggleScreenShare(),
+    "toggle-share": () => {
+      // Mirror the hidden Share button: don't start capture where unsupported.
+      if (!screenShareSupported.value) return false;
+      void toggleScreenShare();
+    },
     "toggle-raise-hand": () => void onToggleRaisedHand(),
     "enter-immersive": () => $callUiMode.set("immersive"),
     "exit-immersive": () => {
