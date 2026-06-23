@@ -51,9 +51,9 @@ function handlers(): CallShortcutHandlers & { calls: string[] } {
   const calls: string[] = [];
   return {
     calls,
-    "toggle-mic": () => calls.push("toggle-mic"),
-    "push-to-talk-start": () => calls.push("ptt-start"),
-    "push-to-talk-end": () => calls.push("ptt-end"),
+    "toggle-mic": () => void calls.push("toggle-mic"),
+    "push-to-talk-start": () => void calls.push("ptt-start"),
+    "push-to-talk-end": () => void calls.push("ptt-end"),
   };
 }
 
