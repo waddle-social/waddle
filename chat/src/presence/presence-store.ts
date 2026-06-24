@@ -16,3 +16,12 @@ export const $selfShow = computed($presenceMode, (mode) => resolveShow(mode));
 export function pickPresence(pick: PresencePick): void {
   $presenceMode.set(applyPick(pick));
 }
+
+/**
+ * Reset to Automatic. Call on logout: this store is module-global, so a
+ * manual Away/DND chosen by one account would otherwise leak to the next
+ * account signing in within the same tab.
+ */
+export function resetPresenceMode(): void {
+  $presenceMode.set({ kind: "automatic" });
+}

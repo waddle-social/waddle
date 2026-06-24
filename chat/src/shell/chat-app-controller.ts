@@ -26,7 +26,7 @@ import { useDeploymentVersionInfo } from "@/shell/version";
 import { useXmppRosterContacts } from "@/contacts/roster";
 import { resolveShow } from "@/presence/effective-show";
 import { PresenceRegistry } from "@/presence/presence-registry";
-import { $presenceMode } from "@/presence/presence-store";
+import { $presenceMode, resetPresenceMode } from "@/presence/presence-store";
 import { matchLocation, navigate, type RouteMatch } from "@/router";
 import { resolveChannelBySlug } from "@/shell/route-helpers";
 import { barePeerJid, jidDomain, parseManagedRoomBareJid, type LiveDmMessage, type RoomActivityEvent } from "@/lib/xmpp-client";
@@ -2294,6 +2294,11 @@ export function useChatAppController(giphyApiKey: string) {
     // sign-in does not leak the previous account's per-chat modes
     // into UI reads while the fresh `hydrate` is still in flight.
     notifySettings.reset();
+    // Drop the module-global presence mode and the aggregated per-resource
+    // presence so the next account in this tab doesn't inherit a manual
+    // Away/DND or another user's contact presence.
+    resetPresenceMode();
+    presenceRegistry.clear();
     ui.showPinnedPanel.value = false;
     navigate({ id: "home" });
     await connectionStore.logout();
