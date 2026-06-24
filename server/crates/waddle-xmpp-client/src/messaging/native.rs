@@ -107,7 +107,10 @@ impl MessagingExt for ClientHandle {
     }
 
     async fn send_presence(&self, status: Option<&str>, show: Option<&str>) -> ClientResult<()> {
-        let presence = super::presence::build_presence_stanza(status, show);
+        let presence = super::presence::build_presence_stanza(
+            status,
+            show.and_then(super::presence::parse_show),
+        );
         self.send_stanza(presence.into()).await
     }
 

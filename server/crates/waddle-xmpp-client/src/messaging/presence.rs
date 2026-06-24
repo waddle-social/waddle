@@ -127,27 +127,35 @@ fn muji_content_media(content: &Element) -> impl Iterator<Item = &str> {
         .into_iter()
 }
 
-/// Build the user's own outbound presence (RFC 6121 §4.7) as a typed
-/// [`xmpp_parsers::Presence`]. `show` is an RFC 6121 `<show>` token
-/// (`away` / `xa` / `dnd` / `chat`); an unknown or absent token is plain
-/// Available (no `<show>`, never an invalid one). An optional free-text
-/// `<status>` is set, and the presence advertises XEP-0115 caps.
-///
-/// The signature mirrors the server's
-/// `waddle_xmpp_core::presence::subscription::build_available_presence`, so
-/// client and server presence builders stay consistent. Shared by the
-/// native [`super::MessagingExt::send_presence`] and the wasm
-/// `send_presence` binding; the caller serialises to an [`Element`] at the
-/// I/O boundary (`send_stanza`).
-pub fn build_presence_stanza(status: Option<&str>, show: Option<&str>) -> Presence {
-    let mut presence = Presence::new(PresenceType::None);
-    presence.show = show.and_then(|token| match token {
+/// Parse an RFC 6121 `<show>` token into the typed [`Show`]. This is the
+/// single point where the untyped wire / JS token becomes typed; the native
+/// and wasm `send_presence` boundaries convert their `&str` / `String` here
+/// before handing a typed `Option<Show>` to [`build_presence_stanza`]. An
+/// unknown token yields `None` (plain Available) so an invalid value never
+/// reaches the wire.
+pub fn parse_show(token: &str) -> Option<Show> {
+    match token {
         "away" => Some(Show::Away),
         "chat" => Some(Show::Chat),
         "dnd" => Some(Show::Dnd),
         "xa" => Some(Show::Xa),
         _ => None,
-    });
+    }
+}
+
+/// Build the user's own outbound presence (RFC 6121 §4.7) as a typed
+/// [`xmpp_parsers::Presence`]. `show` is the typed availability state (or
+/// `None` for plain Available); `status` is an optional free-text `<status>`
+/// line. The presence advertises XEP-0115 caps.
+///
+/// Protocol data stays typed at this boundary (per the CLAUDE.md
+/// typed-payloads rule): `show` is `Option<Show>`, not a raw token. Shared
+/// by the native [`super::MessagingExt::send_presence`] and the wasm
+/// `send_presence` binding; the caller serialises to an [`Element`] at the
+/// I/O boundary (`send_stanza`).
+pub fn build_presence_stanza(status: Option<&str>, show: Option<Show>) -> Presence {
+    let mut presence = Presence::new(PresenceType::None);
+    presence.show = show;
     if let Some(text) = status {
         presence
             .statuses
@@ -165,7 +173,7 @@ mod tests {
 
     #[test]
     fn builds_presence_with_show_status_and_caps() {
-        let presence = build_presence_stanza(Some("Out for lunch"), Some("away"));
+        let presence = build_presence_stanza(Some("Out for lunch"), Some(Show::Away));
         assert_eq!(presence.type_, PresenceType::None);
         assert_eq!(presence.show, Some(Show::Away));
         assert_eq!(
@@ -195,10 +203,14 @@ mod tests {
     }
 
     #[test]
-    fn unknown_show_token_degrades_to_available() {
-        // A bogus token must never produce an RFC-invalid `<show>`.
-        let presence = build_presence_stanza(None, Some("bogus"));
-        assert!(presence.show.is_none());
+    fn parse_show_maps_rfc6121_tokens_and_rejects_others() {
+        assert_eq!(parse_show("away"), Some(Show::Away));
+        assert_eq!(parse_show("chat"), Some(Show::Chat));
+        assert_eq!(parse_show("dnd"), Some(Show::Dnd));
+        assert_eq!(parse_show("xa"), Some(Show::Xa));
+        // A bogus token degrades to Available so it never reaches the wire.
+        assert_eq!(parse_show("bogus"), None);
+        assert_eq!(parse_show(""), None);
     }
 
     #[test]

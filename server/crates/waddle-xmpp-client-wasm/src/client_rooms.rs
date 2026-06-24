@@ -226,7 +226,8 @@ impl WaddleClient {
         future_to_promise(async move {
             let presence = waddle_xmpp_client::messaging::build_presence_stanza(
                 status.as_deref(),
-                show.as_deref(),
+                show.as_deref()
+                    .and_then(waddle_xmpp_client::messaging::parse_show),
             );
             send_stanza_command(inner, presence.into()).await?;
             Ok(JsValue::UNDEFINED)
