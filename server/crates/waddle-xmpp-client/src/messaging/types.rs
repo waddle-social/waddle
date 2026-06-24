@@ -708,6 +708,11 @@ pub struct InboundPresence {
     /// Drives the authoritative remote-mute indicator on tiles and in the
     /// roster.
     pub muted: bool,
+    /// XEP-0319 Last User Interaction — the raw `since` xs:dateTime from
+    /// `<idle xmlns='urn:xmpp:idle:1' since='…'/>`, or `None` when the
+    /// presence carries no `<idle/>` (the contact is interacting now). Lets
+    /// the chat side render the idle age ("away, idle 20m") on an away dot.
+    pub idle_since: Option<String>,
 }
 
 /// Parsed `<muji xmlns='urn:xmpp:jingle:muji:0'>` extension on a MUC

@@ -13,6 +13,14 @@ pub(super) async fn handle_regular_presence_update(
 ) {
     let available = presence.type_ != xmpp_parsers::presence::Type::Unavailable;
     let priority: i8 = priority_to_i8(&presence.priority);
+    // XEP-0319 last-interaction instant, parsed once from the inbound stanza.
+    // Carried through the rebuilt presence so subscribers see the idle age,
+    // and persisted so a later probe of this resource keeps it.
+    let idle_since = if available {
+        waddle_xmpp::xep::xep0319::extract_idle_from_presence(&presence).map(|info| info.since)
+    } else {
+        None
+    };
     if available {
         state
             .deps
@@ -44,6 +52,7 @@ pub(super) async fn handle_regular_presence_update(
                     .map(|show| show_name(show).to_string()),
                 presence.statuses.values().next().cloned(),
                 priority,
+                idle_since,
             );
         for stanza in state
             .deps
@@ -78,7 +87,7 @@ pub(super) async fn handle_regular_presence_update(
                 presence.statuses.values().next().cloned(),
             );
     }
-    broadcast_presence_to_subscribers(state, sender_jid, &presence, available).await;
+    broadcast_presence_to_subscribers(state, sender_jid, &presence, available, idle_since).await;
 }
 
 /// XEP-0160 §3 step 5 + locked Q7a / Q7c / Q7d: on the recovering
@@ -146,6 +155,7 @@ async fn broadcast_presence_to_subscribers(
     sender_jid: &FullJid,
     presence: &xmpp_parsers::presence::Presence,
     available: bool,
+    idle_since: Option<chrono::DateTime<chrono::Utc>>,
 ) {
     let Some(storage) = roster_storage(state).await else {
         return;
@@ -170,13 +180,19 @@ async fn broadcast_presence_to_subscribers(
         }
         let stanza = if available {
             let show = presence.show.as_ref().map(show_name);
-            Stanza::Presence(build_available_presence(
+            let mut rebuilt = build_available_presence(
                 sender_jid,
                 &subscriber_bare,
                 show,
                 presence.statuses.values().next().map(String::as_str),
                 priority,
-            ))
+            );
+            // Carry the XEP-0319 idle stamp the rebuild would otherwise drop,
+            // so subscribers can render the contact's idle age.
+            if let Some(since) = idle_since {
+                waddle_xmpp::xep::xep0319::add_idle(&mut rebuilt, since);
+            }
+            Stanza::Presence(rebuilt)
         } else {
             let mut unavailable = presence.clone();
             unavailable.from = Some(Jid::from(sender_jid.clone()));

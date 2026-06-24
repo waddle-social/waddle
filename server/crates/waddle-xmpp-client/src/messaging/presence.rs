@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use minidom::Element;
 use xmpp_parsers::presence::{Presence, Show, Type as PresenceType};
 
@@ -102,6 +103,14 @@ pub(super) fn parse_presence(el: &Element) -> InboundPresence {
     let hand_raised = in_call_has("hand-raised");
     let muted = in_call_has("muted");
 
+    // XEP-0319 Last User Interaction: `<idle xmlns='urn:xmpp:idle:1' since='…'/>`.
+    // Captured as the raw xs:dateTime so the chat side can render the idle age
+    // ("away, idle 20m"). Absent means the contact is interacting now.
+    let idle_since = el
+        .get_child("idle", NS_IDLE)
+        .and_then(|idle| idle.attr("since"))
+        .map(str::to_string);
+
     InboundPresence {
         from,
         to,
@@ -117,6 +126,7 @@ pub(super) fn parse_presence(el: &Element) -> InboundPresence {
         muji,
         hand_raised,
         muted,
+        idle_since,
     }
 }
 
@@ -146,20 +156,32 @@ pub fn parse_show(token: &str) -> Option<Show> {
 /// Build the user's own outbound presence (RFC 6121 §4.7) as a typed
 /// [`xmpp_parsers::Presence`]. `show` is the typed availability state (or
 /// `None` for plain Available); `status` is an optional free-text `<status>`
-/// line. The presence advertises XEP-0115 caps.
+/// line; `idle_since` is the typed XEP-0319 last-interaction instant, present
+/// only on an auto-away presence and `None` on a return-from-idle (RFC 6121 /
+/// XEP-0319: returning omits the `<idle/>`). The presence advertises XEP-0115
+/// caps.
 ///
 /// Protocol data stays typed at this boundary (per the CLAUDE.md
-/// typed-payloads rule): `show` is `Option<Show>`, not a raw token. Shared
-/// by the native [`super::MessagingExt::send_presence`] and the wasm
-/// `send_presence` binding; the caller serialises to an [`Element`] at the
-/// I/O boundary (`send_stanza`).
-pub fn build_presence_stanza(status: Option<&str>, show: Option<Show>) -> Presence {
+/// typed-payloads rule): `show` is `Option<Show>` and `idle_since` is
+/// `Option<DateTime<Utc>>`, not raw tokens. Shared by the native
+/// [`super::MessagingExt::send_presence`] and the wasm `send_presence` binding;
+/// the caller serialises to an [`Element`] at the I/O boundary (`send_stanza`).
+pub fn build_presence_stanza(
+    status: Option<&str>,
+    show: Option<Show>,
+    idle_since: Option<DateTime<Utc>>,
+) -> Presence {
     let mut presence = Presence::new(PresenceType::None);
     presence.show = show;
     if let Some(text) = status {
         presence
             .statuses
             .insert(xmpp_parsers::message::Lang::new(), text.to_string());
+    }
+    // XEP-0319 idle is orthogonal to the Show and rides any presence; omit it
+    // entirely when the user is back (no `<idle/>` means "interacting now").
+    if let Some(since) = idle_since {
+        presence.payloads.push(build_idle_element(since));
     }
     presence
         .payloads
@@ -173,7 +195,7 @@ mod tests {
 
     #[test]
     fn builds_presence_with_show_status_and_caps() {
-        let presence = build_presence_stanza(Some("Out for lunch"), Some(Show::Away));
+        let presence = build_presence_stanza(Some("Out for lunch"), Some(Show::Away), None);
         assert_eq!(presence.type_, PresenceType::None);
         assert_eq!(presence.show, Some(Show::Away));
         assert_eq!(
@@ -192,13 +214,49 @@ mod tests {
     #[test]
     fn available_presence_omits_show() {
         // RFC 6121 §4.7.2.1: Available is the absence of a <show>.
-        let presence = build_presence_stanza(None, None);
+        let presence = build_presence_stanza(None, None, None);
         assert_eq!(presence.type_, PresenceType::None);
         assert!(presence.show.is_none());
         assert!(presence.statuses.is_empty());
         assert!(
             presence.payloads.iter().any(|p| p.name() == "c"),
             "even bare Available advertises caps"
+        );
+    }
+
+    #[test]
+    fn auto_away_presence_carries_xep0319_idle() {
+        use crate::messaging::namespaces::NS_IDLE;
+        use chrono::TimeZone;
+        let since = Utc
+            .with_ymd_and_hms(2024, 6, 1, 12, 0, 0)
+            .single()
+            .expect("valid test date");
+        let presence = build_presence_stanza(None, Some(Show::Away), Some(since));
+        let idle = presence
+            .payloads
+            .iter()
+            .find(|p| p.name() == "idle" && p.ns() == NS_IDLE)
+            .expect("away presence carries an <idle/> stamp");
+        assert_eq!(
+            idle.attr("since")
+                .and_then(|s| s.parse::<DateTime<Utc>>().ok()),
+            Some(since),
+            "idle since is the typed last-interaction instant"
+        );
+        // Idle is orthogonal — caps still advertised alongside it.
+        assert!(presence.payloads.iter().any(|p| p.name() == "c"));
+    }
+
+    #[test]
+    fn return_from_idle_omits_idle_element() {
+        use crate::messaging::namespaces::NS_IDLE;
+        // XEP-0319 §back-from-idle: returning sends a normal presence with no
+        // `<idle/>`. A None idle_since must not leave a stale stamp on the wire.
+        let presence = build_presence_stanza(None, None, None);
+        assert!(
+            !presence.payloads.iter().any(|p| p.ns() == NS_IDLE),
+            "return-from-idle presence has no <idle/>"
         );
     }
 
@@ -211,6 +269,37 @@ mod tests {
         // A bogus token degrades to Available so it never reaches the wire.
         assert_eq!(parse_show("bogus"), None);
         assert_eq!(parse_show(""), None);
+    }
+
+    #[test]
+    fn parses_xep0319_idle_since_from_away_presence() {
+        // XEP-0319 §last-interact: an away presence carries the idle instant.
+        let xml = r#"<presence xmlns="jabber:client" from="alice@test/desktop">
+            <show>away</show>
+            <idle xmlns="urn:xmpp:idle:1" since="1969-07-21T02:56:15Z"/>
+        </presence>"#;
+        let elem: Element = xml.parse().unwrap();
+        let p = parse_presence(&elem);
+        assert_eq!(p.show.as_deref(), Some("away"));
+        assert_eq!(p.idle_since.as_deref(), Some("1969-07-21T02:56:15Z"));
+    }
+
+    #[test]
+    fn presence_without_idle_has_no_idle_since() {
+        // XEP-0319 §back-from-idle: a normal presence omits <idle/> entirely.
+        let xml = r#"<presence xmlns="jabber:client" from="alice@test/desktop"/>"#;
+        let elem: Element = xml.parse().unwrap();
+        assert!(parse_presence(&elem).idle_since.is_none());
+    }
+
+    #[test]
+    fn idle_in_wrong_namespace_is_not_parsed() {
+        // Only `urn:xmpp:idle:1` is XEP-0319; a look-alike must be ignored.
+        let xml = r#"<presence xmlns="jabber:client" from="alice@test/desktop">
+            <idle xmlns="urn:waddle:not-idle" since="1969-07-21T02:56:15Z"/>
+        </presence>"#;
+        let elem: Element = xml.parse().unwrap();
+        assert!(parse_presence(&elem).idle_since.is_none());
     }
 
     #[test]

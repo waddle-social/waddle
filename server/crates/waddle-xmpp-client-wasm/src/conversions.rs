@@ -770,6 +770,7 @@ pub(crate) fn presence_to_js(presence: InboundPresence) -> WaddlePresence {
         }),
         hand_raised: presence.hand_raised,
         muted: presence.muted,
+        idle_since: presence.idle_since,
     }
 }
 
@@ -1051,6 +1052,7 @@ mod inbound_to_js_tests {
             muji: None,
             hand_raised: false,
             muted: false,
+            idle_since: None,
         };
         let js = presence_to_js(presence);
         assert_eq!(js.muc_status_codes, vec![100, 110, 210]);

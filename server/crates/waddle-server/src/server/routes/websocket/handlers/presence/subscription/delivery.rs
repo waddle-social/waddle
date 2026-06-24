@@ -137,6 +137,11 @@ pub(in crate::server::routes::websocket::handlers) async fn send_current_presenc
                 .map(|state| state.priority)
                 .unwrap_or(0),
         );
+        // Carry the XEP-0319 idle stamp so a probing contact sees the idle age,
+        // not just a bare away dot.
+        if let Some(since) = presence_state.as_ref().and_then(|state| state.idle_since) {
+            waddle_xmpp::xep::xep0319::add_idle(&mut presence, since);
+        }
         presence.to = Some(to.clone());
         send_presence_stanza_to_jid(state, to, Stanza::Presence(presence), "current presence")
             .await;
@@ -320,6 +325,7 @@ async fn presence_state_for_available_resource(
             show: state.show.as_deref().and_then(show_from_name),
             status: state.status,
             priority: state.priority,
+            idle_since: state.idle_since,
         });
     }
     match state
@@ -333,6 +339,8 @@ async fn presence_state_for_available_resource(
             show,
             status,
             priority,
+            // Detached (XEP-0198) presence state does not yet persist idle.
+            idle_since: None,
         }),
         Ok(None) => None,
         Err(error) => {
@@ -346,6 +354,9 @@ struct PresenceStateSnapshot {
     show: Option<xmpp_parsers::presence::Show>,
     status: Option<String>,
     priority: i8,
+    /// XEP-0319 idle instant for a probing contact's rebuilt presence. Only
+    /// the live registry persists it; the detached (XEP-0198) path has none yet.
+    idle_since: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 async fn send_stanza_to_available_user_resources_and_detached_available(

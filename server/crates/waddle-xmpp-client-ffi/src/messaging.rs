@@ -182,13 +182,18 @@ impl WaddleClient {
         }
     }
 
-    pub async fn send_presence(&self, status: Option<String>, show: Option<String>) {
+    pub async fn send_presence(
+        &self,
+        status: Option<String>,
+        show: Option<String>,
+        idle_since: Option<String>,
+    ) {
         let Some(handle) = self.clone_handle().await else {
             return;
         };
 
         if let Err(e) = handle
-            .send_presence(status.as_deref(), show.as_deref())
+            .send_presence(status.as_deref(), show.as_deref(), idle_since.as_deref())
             .await
         {
             self.listener.on_error(format!("send_presence failed: {e}"));

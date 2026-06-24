@@ -40,6 +40,7 @@ pub trait MessagingExt {
         &'a self,
         status: Option<&'a str>,
         show: Option<&'a str>,
+        idle_since: Option<&'a str>,
     ) -> impl std::future::Future<Output = ClientResult<()>> + Send + 'a;
     fn send_chat_state<'a>(
         &'a self,
@@ -106,10 +107,18 @@ impl MessagingExt for ClientHandle {
         Ok(stanza_id)
     }
 
-    async fn send_presence(&self, status: Option<&str>, show: Option<&str>) -> ClientResult<()> {
+    async fn send_presence(
+        &self,
+        status: Option<&str>,
+        show: Option<&str>,
+        idle_since: Option<&str>,
+    ) -> ClientResult<()> {
+        // Parse the untyped xs:dateTime once at this boundary (typed-payloads
+        // rule); an unparseable value degrades to "no idle" rather than wire junk.
         let presence = super::presence::build_presence_stanza(
             status,
             show.and_then(super::presence::parse_show),
+            idle_since.and_then(|s| s.parse::<chrono::DateTime<chrono::Utc>>().ok()),
         );
         self.send_stanza(presence.into()).await
     }

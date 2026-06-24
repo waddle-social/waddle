@@ -459,6 +459,10 @@ pub struct WaddlePresence {
     /// `<in-call>` carrier. Defaults to `false` (unmuted) so the chat
     /// side can build a per-participant mute map for tiles and the roster.
     pub muted: bool,
+    /// XEP-0319 Last User Interaction — the raw `since` xs:dateTime from the
+    /// contact's `<idle/>`, or `None` when the presence carries none. The chat
+    /// side turns it into the rendered idle age on an away presence.
+    pub idle_since: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
