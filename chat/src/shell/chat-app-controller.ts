@@ -941,9 +941,6 @@ export function useChatAppController(giphyApiKey: string) {
       dmConversations.updatePresence({ ...event, show: rendered });
       rosterContacts.updatePresence(event.bareJid, rendered);
     });
-    // Broadcast this device's chosen Show on (re)connect so a manually-set
-    // status survives a reconnect.
-    void client.setPresence(resolveShow(presenceMode.value));
     client.setMemberJidHandler((nick, bareJid) => {
       memberJidByNick.value = { ...memberJidByNick.value, [nick]: bareJid };
     });
@@ -990,6 +987,14 @@ export function useChatAppController(giphyApiKey: string) {
       void socialFeed.refresh();
       void stories.refresh();
       void communityEvents.refresh();
+      // Re-broadcast this device's chosen Show on every session-ready. A
+      // fresh reconnect (resume window expired / server restart) starts the
+      // session with no directed presence and the client layer never
+      // auto-sends one, so a manually-set Away/DND would otherwise silently
+      // revert; a resumed session re-sends the same Show idempotently. This
+      // also lands a pick made while disconnected (setPresence then rejects
+      // unqueued) on the next session-ready.
+      void client.setPresence(resolveShow(presenceMode.value));
       // Re-hydrate XEP-0492 notification settings only on *fresh*
       // reconnects. A stream resume is by definition gap-free —
       // any bookmark publish from another tab during the disconnect

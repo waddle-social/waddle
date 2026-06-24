@@ -82,7 +82,9 @@ branch and the rejected alternatives:
   account-wide and persisted; auto-away per-device. vs. *per-device
   ephemeral* vs. *fully account-global*. Per-device manual status is
   self-defeating under most-available-wins (your own active phone masks
-  the DND you set on your laptop). Fully-global is wrong for idle (one
+  the Away you set on your laptop — Away loses to Available; only a
+  deliberate DND is exempt, since it outranks every online state).
+  Fully-global is wrong for idle (one
   idle device should not mark the whole account away). Hybrid is the only
   coherent split: idle is inherently per-device; a deliberate choice is a
   human-level intent that should follow the user.
