@@ -24,6 +24,9 @@ import {
 } from "@/shell/structure-retry";
 import { useDeploymentVersionInfo } from "@/shell/version";
 import { useXmppRosterContacts } from "@/contacts/roster";
+import { resolveShow } from "@/presence/effective-show";
+import { PresenceRegistry } from "@/presence/presence-registry";
+import { $presenceMode } from "@/presence/presence-store";
 import { matchLocation, navigate, type RouteMatch } from "@/router";
 import { resolveChannelBySlug } from "@/shell/route-helpers";
 import { barePeerJid, jidDomain, parseManagedRoomBareJid, type LiveDmMessage, type RoomActivityEvent } from "@/lib/xmpp-client";
@@ -758,7 +761,16 @@ export function useChatAppController(giphyApiKey: string) {
 
   const notifications = usePushNotifications();
   const messageSound = createBrowserMessageTonePlayer();
-  const selfPresenceShow = ref<"available" | "away" | "xa" | "dnd" | "offline">("available");
+  // Aggregates each contact's resources into one rendered Show
+  // (most-available-wins, ADR-010); inbound presence is per-resource.
+  const presenceRegistry = new PresenceRegistry();
+  // This device's own mode drives the Show we broadcast and the local
+  // DND checks; the picker writes it via the presence store.
+  const presenceMode = useStore($presenceMode);
+  const selfPresenceShow = computed(() => resolveShow(presenceMode.value));
+  watch(presenceMode, (mode) => {
+    void xmppClient.value?.setPresence(resolveShow(mode));
+  });
   const appUpdate = useServiceWorkerUpdate();
   const version = useDeploymentVersionInfo(xmppClient);
   // RFC 363 PR 6: include DM peers in the iterate-and-pull avatar
@@ -923,12 +935,15 @@ export function useChatAppController(giphyApiKey: string) {
       else queueMdsDisplayed(key, displayed);
     });
     client.setPresenceUpdateHandler((event) => {
-      if (barePeerJid(event.bareJid) === barePeerJid(session.value?.jid ?? "")) {
-        selfPresenceShow.value = event.show;
-      }
-      dmConversations.updatePresence(event);
-      rosterContacts.updatePresence(event.bareJid, event.show);
+      // Collapse the contact's resources into one rendered Show before it
+      // reaches the per-bare conversation/roster stores.
+      const rendered = presenceRegistry.apply(event.bareJid, event.resource, event.show);
+      dmConversations.updatePresence({ ...event, show: rendered });
+      rosterContacts.updatePresence(event.bareJid, rendered);
     });
+    // Broadcast this device's chosen Show on (re)connect so a manually-set
+    // status survives a reconnect.
+    void client.setPresence(resolveShow(presenceMode.value));
     client.setMemberJidHandler((nick, bareJid) => {
       memberJidByNick.value = { ...memberJidByNick.value, [nick]: bareJid };
     });
