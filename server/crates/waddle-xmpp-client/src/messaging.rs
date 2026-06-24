@@ -36,7 +36,6 @@ pub use namespaces::{
     NS_CLIENT, NS_JINGLE_RTP, NS_MESSAGE_CORRECT, NS_MESSAGE_MODERATE, NS_MESSAGE_RETRACT, NS_MUJI,
     NS_REACTIONS, NS_WADDLE_IN_CALL, NS_WADDLE_PIN_V0,
 };
-pub use presence::build_presence_stanza;
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub use native::MessagingExt;
 pub use parsing::{
@@ -44,6 +43,7 @@ pub use parsing::{
     parse_markable_marker_payload, parse_moderation_payload, parse_reaction_payload,
     parse_retraction_payload,
 };
+pub use presence::build_presence_stanza;
 pub use types::{
     ChatStatePayload, CorrectionPayload, DisplayedMarkerPayload, ExtensionCapabilityData,
     ExtensionCommandNode, ExtensionDisplayText, ExtensionEnrichmentData, ExtensionEnvelopeData,

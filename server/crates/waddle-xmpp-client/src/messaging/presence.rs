@@ -155,13 +155,18 @@ mod tests {
     fn builds_presence_with_show_status_and_caps() {
         let el = build_presence_stanza(Some("Out for lunch"), Some("away"));
         assert_eq!(el.name(), "presence");
-        assert!(el.attr("type").is_none(), "an available presence has no type");
+        assert!(
+            el.attr("type").is_none(),
+            "an available presence has no type"
+        );
         assert_eq!(
             el.get_child("show", NS_CLIENT).map(|c| c.text()).as_deref(),
             Some("away")
         );
         assert_eq!(
-            el.get_child("status", NS_CLIENT).map(|c| c.text()).as_deref(),
+            el.get_child("status", NS_CLIENT)
+                .map(|c| c.text())
+                .as_deref(),
             Some("Out for lunch")
         );
         assert!(
