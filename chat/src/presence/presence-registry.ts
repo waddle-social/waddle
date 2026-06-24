@@ -32,4 +32,13 @@ export class PresenceRegistry {
     if (!resources || resources.size === 0) return "offline";
     return mostAvailableShow([...resources.values()]);
   }
+
+  /**
+   * Forget all tracked presence. Call on logout and on a fresh reconnect:
+   * across a disconnect we may never observe a resource's `unavailable`, so
+   * its entry would otherwise linger and distort the aggregated Show.
+   */
+  clear(): void {
+    this.byBare.clear();
+  }
 }

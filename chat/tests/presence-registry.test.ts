@@ -38,4 +38,13 @@ describe("PresenceRegistry", () => {
     reg.apply("alice@waddle.test", "laptop", "available");
     expect(reg.apply("alice@waddle.test", "laptop", "dnd")).toBe("dnd");
   });
+
+  test("clear forgets all tracked presence", () => {
+    const reg = new PresenceRegistry();
+    reg.apply("alice@waddle.test", "laptop", "available");
+    reg.apply("bob@waddle.test", "phone", "dnd");
+    reg.clear();
+    expect(reg.renderedFor("alice@waddle.test")).toBe("offline");
+    expect(reg.renderedFor("bob@waddle.test")).toBe("offline");
+  });
 });

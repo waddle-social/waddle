@@ -769,7 +769,10 @@ export function useChatAppController(giphyApiKey: string) {
   const presenceMode = useStore($presenceMode);
   const selfPresenceShow = computed(() => resolveShow(presenceMode.value));
   watch(presenceMode, (mode) => {
-    void xmppClient.value?.setPresence(resolveShow(mode));
+    // A pick while disconnected rejects (setPresence is not queued); swallow
+    // it — the session-ready handler re-broadcasts the current mode on the
+    // next connect. Without the catch this is an unhandled rejection.
+    xmppClient.value?.setPresence(resolveShow(mode)).catch(() => undefined);
   });
   const appUpdate = useServiceWorkerUpdate();
   const version = useDeploymentVersionInfo(xmppClient);
@@ -894,7 +897,12 @@ export function useChatAppController(giphyApiKey: string) {
   });
 
   watch(xmppClient, (client) => {
-    if (!client || !session.value) return;
+    if (!client || !session.value) {
+      // Client torn down (logout) — drop aggregated presence so a later
+      // session never inherits another account's / a stale resource's Show.
+      presenceRegistry.clear();
+      return;
+    }
     client.setDirectMessageHandler((msg) => {
       dmMessaging.onIncomingMessage(msg);
       dmConversations.receiveIncomingDm(msg);
@@ -993,8 +1001,9 @@ export function useChatAppController(giphyApiKey: string) {
       // auto-sends one, so a manually-set Away/DND would otherwise silently
       // revert; a resumed session re-sends the same Show idempotently. This
       // also lands a pick made while disconnected (setPresence then rejects
-      // unqueued) on the next session-ready.
-      void client.setPresence(resolveShow(presenceMode.value));
+      // unqueued) on the next session-ready. Guard the rejection in case the
+      // lifecycle event fires during teardown.
+      client.setPresence(resolveShow(presenceMode.value)).catch(() => undefined);
       // Re-hydrate XEP-0492 notification settings only on *fresh*
       // reconnects. A stream resume is by definition gap-free —
       // any bookmark publish from another tab during the disconnect
@@ -1005,6 +1014,11 @@ export function useChatAppController(giphyApiKey: string) {
       // headlines on `urn:xmpp:bookmarks:1` (deferred follow-up),
       // fresh-only hydrate is the correct cadence.
       if (event.type === "fresh") {
+        // A fresh session may have missed contacts' `unavailable` while we
+        // were gone; drop the stale per-resource map so the fresh presence
+        // probes repopulate it cleanly. A resumed session is gap-free, so
+        // its registry is preserved.
+        presenceRegistry.clear();
         // Belt-and-braces: hydrate already catches lower-layer
         // throws, but call-site .catch defends against any future
         // regression so an unhandled rejection doesn't propagate
