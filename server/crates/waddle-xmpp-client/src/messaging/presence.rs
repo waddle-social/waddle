@@ -126,9 +126,62 @@ fn muji_content_media(content: &Element) -> impl Iterator<Item = &str> {
         .into_iter()
 }
 
+/// Build the user's own outbound presence (RFC 6121 §4.7). `show` is an
+/// RFC 6121 `<show>` value (`away`, `xa`, `dnd`, `chat`); `None` is plain
+/// Available (no `<show>` child). An optional free-text `<status>` line is
+/// appended when present. Every broadcast presence advertises XEP-0115
+/// caps so contacts can resolve the client's features.
+///
+/// Shared by the native [`super::MessagingExt::send_presence`] and the
+/// wasm `send_presence` binding so both emit byte-identical presence
+/// (same child order, same caps advertisement).
+pub fn build_presence_stanza(status: Option<&str>, show: Option<&str>) -> Element {
+    let mut builder = Element::builder("presence", NS_CLIENT);
+    if let Some(status) = status {
+        builder = builder.append(Element::builder("status", NS_CLIENT).append(status).build());
+    }
+    if let Some(show) = show {
+        builder = builder.append(Element::builder("show", NS_CLIENT).append(show).build());
+    }
+    builder = builder.append(crate::caps::build_client_caps_element());
+    builder.build()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builds_presence_with_show_status_and_caps() {
+        let el = build_presence_stanza(Some("Out for lunch"), Some("away"));
+        assert_eq!(el.name(), "presence");
+        assert!(el.attr("type").is_none(), "an available presence has no type");
+        assert_eq!(
+            el.get_child("show", NS_CLIENT).map(|c| c.text()).as_deref(),
+            Some("away")
+        );
+        assert_eq!(
+            el.get_child("status", NS_CLIENT).map(|c| c.text()).as_deref(),
+            Some("Out for lunch")
+        );
+        assert!(
+            el.children().any(|c| c.name() == "c"),
+            "presence advertises XEP-0115 caps"
+        );
+    }
+
+    #[test]
+    fn available_presence_omits_show() {
+        // RFC 6121 §4.7.2.1: Available is the absence of a <show>.
+        let el = build_presence_stanza(None, None);
+        assert!(el.get_child("show", NS_CLIENT).is_none());
+        assert!(el.get_child("status", NS_CLIENT).is_none());
+        assert!(el.attr("type").is_none());
+        assert!(
+            el.children().any(|c| c.name() == "c"),
+            "even bare Available advertises caps"
+        );
+    }
 
     #[test]
     fn parses_muji_active_with_content() {
