@@ -60,6 +60,17 @@ export function mapPresenceShow(presence: WasmPresence): PresenceUpdateEvent["sh
   }
 }
 
+/**
+ * XEP-0319 `<idle since>` → epoch ms for {@link PresenceUpdateEvent.idleSince}.
+ * Returns `undefined` when absent or when the wire value isn't a valid
+ * xs:dateTime, so a malformed stamp degrades to "no idle" rather than NaN.
+ */
+export function mapPresenceIdleSince(presence: WasmPresence): number | undefined {
+  if (!presence.idle_since) return undefined;
+  const ms = Date.parse(presence.idle_since);
+  return Number.isNaN(ms) ? undefined : ms;
+}
+
 function bufferLikeToBase64(value: Uint8Array): string {
   let binary = "";
   for (const byte of value) binary += String.fromCharCode(byte);

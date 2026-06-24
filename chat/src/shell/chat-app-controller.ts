@@ -25,6 +25,7 @@ import {
 import { useDeploymentVersionInfo } from "@/shell/version";
 import { useXmppRosterContacts } from "@/contacts/roster";
 import { resolveShow } from "@/presence/effective-show";
+import { IdleTracker } from "@/presence/idle-tracker";
 import { PresenceRegistry } from "@/presence/presence-registry";
 import { $presenceMode, resetPresenceMode } from "@/presence/presence-store";
 import { matchLocation, navigate, type RouteMatch } from "@/router";
@@ -727,6 +728,7 @@ export function useChatAppController(giphyApiKey: string) {
       peerJid: conversation.peerJid,
       peerUsername: conversation.peerUsername,
       presenceShow: conversation.presenceShow,
+      presenceIdleSince: conversation.presenceIdleSince,
     };
   });
 
@@ -768,11 +770,26 @@ export function useChatAppController(giphyApiKey: string) {
   // DND checks; the picker writes it via the presence store.
   const presenceMode = useStore($presenceMode);
   const selfPresenceShow = computed(() => resolveShow(presenceMode.value));
+  // Per-device auto-away (ADR-010 Phase 2): the tracker watches in-tab
+  // interaction + visibility and broadcasts Away/Extended Away with an
+  // XEP-0319 idle stamp while Automatic; a Manual status suspends it.
+  const idleTracker = new IdleTracker({
+    now: () => Date.now(),
+    getMode: () => presenceMode.value,
+    onBroadcast: (presence) => {
+      xmppClient.value?.setPresence(presence.show, presence.idleSince).catch(() => undefined);
+    },
+  });
   watch(presenceMode, (mode) => {
     // A pick while disconnected rejects (setPresence is not queued); swallow
     // it — the session-ready handler re-broadcasts the current mode on the
     // next connect. Without the catch this is an unhandled rejection.
     xmppClient.value?.setPresence(resolveShow(mode)).catch(() => undefined);
+    // A pick — including "Reset to automatic" — is itself an interaction:
+    // restart the idle clock so auto-away measures from now, and let the
+    // tracker re-sync its baseline (it stays silent while a Manual status is
+    // pinned, so this never double-broadcasts the manual Show above).
+    idleTracker.markActive();
   });
   const appUpdate = useServiceWorkerUpdate();
   const version = useDeploymentVersionInfo(xmppClient);
@@ -944,9 +961,16 @@ export function useChatAppController(giphyApiKey: string) {
     });
     client.setPresenceUpdateHandler((event) => {
       // Collapse the contact's resources into one rendered Show before it
-      // reaches the per-bare conversation/roster stores.
-      const rendered = presenceRegistry.apply(event.bareJid, event.resource, event.show);
-      dmConversations.updatePresence({ ...event, show: rendered });
+      // reaches the per-bare conversation/roster stores; carry the matching
+      // XEP-0319 idle instant so an away dot can render the idle age.
+      const rendered = presenceRegistry.apply(
+        event.bareJid,
+        event.resource,
+        event.show,
+        event.idleSince,
+      );
+      const renderedIdle = presenceRegistry.renderedIdleFor(event.bareJid);
+      dmConversations.updatePresence({ ...event, show: rendered, idleSince: renderedIdle });
       rosterContacts.updatePresence(event.bareJid, rendered);
     });
     client.setMemberJidHandler((nick, bareJid) => {
@@ -1003,7 +1027,12 @@ export function useChatAppController(giphyApiKey: string) {
       // also lands a pick made while disconnected (setPresence then rejects
       // unqueued) on the next session-ready. Guard the rejection in case the
       // lifecycle event fires during teardown.
-      client.setPresence(resolveShow(presenceMode.value)).catch(() => undefined);
+      // Re-broadcast the device's *current* effective presence — a pinned
+      // Manual status, or the live auto-away Show with its XEP-0319 idle stamp
+      // if the user is idle right now — so a fresh reconnect restores the true
+      // state rather than a stale Available.
+      const broadcast = idleTracker.current();
+      client.setPresence(broadcast.show, broadcast.idleSince).catch(() => undefined);
       // Re-hydrate XEP-0492 notification settings only on *fresh*
       // reconnects. A stream resume is by definition gap-free —
       // any bookmark publish from another tab during the disconnect
@@ -2607,6 +2636,10 @@ export function useChatAppController(giphyApiKey: string) {
     // handled directly while the rest of reaction mode remains scoped there.
     window.addEventListener("keydown", handleLiteralPlusKeyDown, true);
     bindChatKeystrokShortcuts();
+    // Reset the idle clock at mount (the user just opened the app), then wire
+    // the interaction + visibility listeners and the poll timer.
+    idleTracker.markActive();
+    idleTracker.start();
   });
 
   onUnmounted(() => {
@@ -2615,6 +2648,7 @@ export function useChatAppController(giphyApiKey: string) {
     chatKeystrok?.destroy();
     chatKeystrok = null;
     appUpdate.stop();
+    idleTracker.stop();
     messaging.disconnect();
     dmMessaging.disconnect();
   });

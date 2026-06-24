@@ -6,6 +6,7 @@ import CallButton from "@/components/calls/CallButton.vue";
 import MucCallButton from "@/components/calls/MucCallButton.vue";
 import NotifyModeButton from "@/components/chat/NotifyModeButton.vue";
 import { hasKnownDmCallMedia, useDmCallActivity } from "@/lib/calls/dm-call-activity";
+import { formatIdle } from "@/presence/idle-duration";
 import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
 import type { ConnectionNoticeCopy } from "@/lib/connection-notice";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
@@ -30,7 +31,12 @@ export interface ChannelHeaderMember {
 const props = withDefaults(defineProps<{
   waddle: SpaceSummary | null;
   channel: ChannelSummary | null;
-  dmPeer?: { peerJid?: string; peerUsername: string; presenceShow?: string } | null;
+  dmPeer?: {
+    peerJid?: string;
+    peerUsername: string;
+    presenceShow?: string;
+    presenceIdleSince?: number;
+  } | null;
   callRoomJid?: string | null;
   isForumChannel: boolean;
   canManageChannels: boolean;
@@ -109,8 +115,19 @@ const dmCallActivityLabel = computed(() => {
 const showDmCallActivityStatus = computed(() =>
   props.showDmCallActivityControls !== false && !!dmCallActivity.value,
 );
+// Presence line for a DM peer, appending the XEP-0319 idle age behind an
+// away/xa dot ("away · idle 20m"). Recomputed when the peer's presence/idle
+// changes; it does not tick live, which is fine at minute granularity.
+const dmPeerPresenceText = computed(() => {
+  const show = props.dmPeer?.presenceShow;
+  const base = presenceText(show);
+  const idleSince = props.dmPeer?.presenceIdleSince;
+  return (show === "away" || show === "xa") && idleSince !== undefined
+    ? `${base} · ${formatIdle(idleSince, Date.now())}`
+    : base;
+});
 const dmHeaderSecondaryText = computed(() =>
-  showDmCallActivityStatus.value ? dmCallActivityLabel.value : presenceText(props.dmPeer?.presenceShow),
+  showDmCallActivityStatus.value ? dmCallActivityLabel.value : dmPeerPresenceText.value,
 );
 
 const emit = defineEmits<{
@@ -202,7 +219,7 @@ const memberButtonCopy = computed(() => {
               Forum
             </span>
             <span v-if="dmPeer" class="hidden lg:inline type-meta text-muted-foreground">
-              · {{ presenceText(dmPeer.presenceShow) }}
+              · {{ dmPeerPresenceText }}
             </span>
             <span
               v-if="showDmCallActivityStatus"

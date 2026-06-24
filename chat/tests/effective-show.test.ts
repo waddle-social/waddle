@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 
-import { applyPick, resolveShow, type PresenceMode } from "../src/presence/effective-show";
+import {
+  applyPick,
+  resolveBroadcast,
+  resolveShow,
+  type PresenceMode,
+} from "../src/presence/effective-show";
 
 describe("effective-show: resolveShow", () => {
   test("automatic mode resolves to available", () => {
@@ -30,5 +35,23 @@ describe("effective-show: applyPick", () => {
 
   test("picking available is a pinned manual mode, distinct from automatic", () => {
     expect(applyPick("available")).toEqual({ kind: "manual", status: "available" });
+  });
+});
+
+describe("effective-show: resolveBroadcast", () => {
+  test("a manual pick broadcasts that status and never an idle stamp", () => {
+    // Manual suspends auto-away: even a long idle gap is ignored.
+    const longIdle = { show: "xa", idleSince: 123 } as const;
+    expect(resolveBroadcast({ kind: "manual", status: "dnd" }, longIdle)).toEqual({
+      show: "dnd",
+      idleSince: null,
+    });
+  });
+
+  test("automatic mode adopts the auto-away computation verbatim", () => {
+    expect(resolveBroadcast({ kind: "automatic" }, { show: "away", idleSince: 500 })).toEqual({
+      show: "away",
+      idleSince: 500,
+    });
   });
 });

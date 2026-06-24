@@ -47,4 +47,32 @@ describe("PresenceRegistry", () => {
     expect(reg.renderedFor("alice@waddle.test")).toBe("offline");
     expect(reg.renderedFor("bob@waddle.test")).toBe("offline");
   });
+
+  test("an away resource exposes its XEP-0319 idle instant", () => {
+    const reg = new PresenceRegistry();
+    reg.apply("alice@waddle.test", "laptop", "away", 1_000);
+    expect(reg.renderedIdleFor("alice@waddle.test")).toBe(1_000);
+  });
+
+  test("an available contact reports no idle", () => {
+    const reg = new PresenceRegistry();
+    reg.apply("alice@waddle.test", "laptop", "available", 1_000);
+    // Idle is only meaningful behind an away/xa dot; available reads as "here now".
+    expect(reg.renderedIdleFor("alice@waddle.test")).toBeUndefined();
+  });
+
+  test("idle is forgotten once the away resource goes offline", () => {
+    const reg = new PresenceRegistry();
+    reg.apply("alice@waddle.test", "laptop", "away", 1_000);
+    reg.apply("alice@waddle.test", "laptop", "offline");
+    expect(reg.renderedIdleFor("alice@waddle.test")).toBeUndefined();
+  });
+
+  test("with two away devices, the most-recently-active idle is shown", () => {
+    const reg = new PresenceRegistry();
+    reg.apply("alice@waddle.test", "laptop", "away", 1_000);
+    reg.apply("alice@waddle.test", "phone", "away", 5_000);
+    // 5_000 is the later instant → the shorter idle → the one to render.
+    expect(reg.renderedIdleFor("alice@waddle.test")).toBe(5_000);
+  });
 });

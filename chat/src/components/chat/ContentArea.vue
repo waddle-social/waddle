@@ -76,7 +76,12 @@ const props = defineProps<{
   waddle: SpaceSummary | null;
   channel: ChannelSummary | null;
   roomJid?: string | null;
-  dmPeer?: { peerJid: string; peerUsername: string; presenceShow?: string } | null;
+  dmPeer?: {
+    peerJid: string;
+    peerUsername: string;
+    presenceShow?: string;
+    presenceIdleSince?: number;
+  } | null;
   sidebarMode?: "channels" | "dms";
   messages: TimelineMessage[];
   firstUnseenId: string | null;
