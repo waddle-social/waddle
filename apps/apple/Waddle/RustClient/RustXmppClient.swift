@@ -141,8 +141,8 @@ final class RustXmppClient: ObservableObject {
 
     // MARK: - Presence
 
-    func sendPresence(status: String? = nil, show: String? = nil) async {
-        await waddleClient.sendPresence(status: status, show: show)
+    func sendPresence(status: String? = nil, show: String? = nil, idleSince: String? = nil) async {
+        await waddleClient.sendPresence(status: status, show: show, idleSince: idleSince)
     }
 
     // MARK: - Avatar (XEP-0084)
