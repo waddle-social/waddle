@@ -75,7 +75,7 @@ The single Show a given resource actually broadcasts, after resolving precedence
 _Avoid_: Computed presence.
 
 **Most-available-wins**:
-The rule a *receiving* client uses to collapse a contact's several resources into one rendered Show: the most available resource wins (Available > Away > Extended Away > Offline). A Do Not Disturb set as a synced Manual status appears on every resource, so it is never masked by a more-available device.
+The rule a *receiving* client uses to collapse a contact's several resources into one rendered Show. Order: Do Not Disturb > Available > Away > Extended Away > Offline — a deliberate Do Not Disturb wins over every other online state, so it is always shown even when another resource is available, and Offline is the floor.
 _Avoid_: Highest priority (priority is the routing concept, not the render rule).
 
 ### In a call

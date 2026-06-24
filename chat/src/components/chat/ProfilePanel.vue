@@ -264,13 +264,12 @@ onUnmounted(() => {
       <div
         v-if="accountMenuOpen"
         class="z-floating animate-fade-in absolute bottom-full left-0 mb-2 flex w-[var(--chat-account-menu-width)] flex-col gap-1 rounded-lg border border-border bg-popover/95 p-2 text-popover-foreground shadow-xl backdrop-blur-xl"
-        role="menu"
+        role="dialog"
         :aria-label="`${session.username} account menu`"
       >
         <PresencePicker />
         <div class="my-1 border-t border-border" aria-hidden="true" />
         <button
-          role="menuitem"
           class="type-menu-item flex h-9 w-full items-center gap-2 rounded-lg px-2.5 text-left text-foreground transition-colors duration-200 hover:bg-muted"
           type="button"
           @click="handleOpenSettings"
@@ -279,10 +278,9 @@ onUnmounted(() => {
           <span>Settings</span>
         </button>
         <button
-          role="menuitemcheckbox"
           class="type-menu-item flex h-9 w-full items-center gap-2 rounded-lg px-2.5 text-left text-foreground transition-colors duration-200 hover:bg-muted"
           type="button"
-          :aria-checked="messageSoundsEnabled !== false"
+          :aria-pressed="messageSoundsEnabled !== false"
           @click="handleToggleMessageSounds"
         >
           <Volume2 v-if="messageSoundsEnabled !== false" class="h-3.5 w-3.5 text-primary/70" />
@@ -290,7 +288,6 @@ onUnmounted(() => {
           <span>{{ messageSoundsEnabled !== false ? "Message sounds on" : "Message sounds off" }}</span>
         </button>
         <button
-          role="menuitem"
           class="type-menu-item flex h-9 w-full items-center gap-2 rounded-lg px-2.5 text-left text-muted-foreground transition-colors duration-200 hover:bg-muted hover:text-destructive"
           type="button"
           @click="handleLogout"

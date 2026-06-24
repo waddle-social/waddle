@@ -16,6 +16,7 @@ export function resolveShow(mode: PresenceMode): EffectiveShow {
 
 export type PresencePick = ManualStatus | "reset";
 
-export function applyPick(_mode: PresenceMode, pick: PresencePick): PresenceMode {
+/** Map a picker choice to the next mode: a status pins manual, `reset` returns to Automatic. */
+export function applyPick(pick: PresencePick): PresenceMode {
   return pick === "reset" ? { kind: "automatic" } : { kind: "manual", status: pick };
 }

@@ -149,8 +149,12 @@ What keeps this XMPP-native is fixed by these invariants:
 - **In-call pauses auto-away.** While the overlay is active, the idle
   timer does not downgrade the Effective Show — being in a call is proof
   of presence. Prevents broadcasting "Away + in a call."
-- **Most-available ordering.** Available > Away > Extended Away > Offline.
-  A synced Manual DND shows on every resource, so it is never masked.
+- **Most-available ordering.** Do Not Disturb > Available > Away > Extended
+  Away > Offline. A deliberate Do Not Disturb wins over every other online
+  state, so an explicit "do not disturb" is always shown even when another
+  resource is available — it is never masked. (Once cross-device sync lands
+  in Phase 4 a manual DND is on every resource anyway; until then this rule
+  also resolves the per-device case the same way.)
 - **Manual Available is a pin.** Selecting Available is a sticky Manual
   status that defeats the idle timer; "Reset to automatic" is the only
   way back to Automatic mode. The picker must make Available (pinned) and

@@ -14,5 +14,5 @@ export const $selfShow = computed($presenceMode, (mode) => resolveShow(mode));
 
 /** Apply a picker choice — Available / Away / Do Not Disturb, or `reset` to Automatic. */
 export function pickPresence(pick: PresencePick): void {
-  $presenceMode.set(applyPick($presenceMode.get(), pick));
+  $presenceMode.set(applyPick(pick));
 }

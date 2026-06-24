@@ -20,23 +20,15 @@ describe("effective-show: resolveShow", () => {
 });
 
 describe("effective-show: applyPick", () => {
-  test("picking a status from automatic yields a sticky manual mode", () => {
-    expect(applyPick({ kind: "automatic" }, "away")).toEqual({
-      kind: "manual",
-      status: "away",
-    });
+  test("picking a status yields a sticky manual mode", () => {
+    expect(applyPick("away")).toEqual({ kind: "manual", status: "away" });
   });
 
   test("reset returns to automatic mode", () => {
-    expect(applyPick({ kind: "manual", status: "away" }, "reset")).toEqual({
-      kind: "automatic",
-    });
+    expect(applyPick("reset")).toEqual({ kind: "automatic" });
   });
 
   test("picking available is a pinned manual mode, distinct from automatic", () => {
-    expect(applyPick({ kind: "automatic" }, "available")).toEqual({
-      kind: "manual",
-      status: "available",
-    });
+    expect(applyPick("available")).toEqual({ kind: "manual", status: "available" });
   });
 });
