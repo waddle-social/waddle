@@ -224,11 +224,11 @@ impl WaddleClient {
     pub fn send_presence(&self, status: Option<String>, show: Option<String>) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            let stanza = waddle_xmpp_client::messaging::build_presence_stanza(
+            let presence = waddle_xmpp_client::messaging::build_presence_stanza(
                 status.as_deref(),
                 show.as_deref(),
             );
-            send_stanza_command(inner, stanza).await?;
+            send_stanza_command(inner, presence.into()).await?;
             Ok(JsValue::UNDEFINED)
         })
     }

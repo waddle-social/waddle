@@ -1,4 +1,5 @@
 use minidom::Element;
+use xmpp_parsers::presence::{Presence, Show, Type as PresenceType};
 
 use super::namespaces::*;
 use super::types::*;
@@ -126,25 +127,36 @@ fn muji_content_media(content: &Element) -> impl Iterator<Item = &str> {
         .into_iter()
 }
 
-/// Build the user's own outbound presence (RFC 6121 §4.7). `show` is an
-/// RFC 6121 `<show>` value (`away`, `xa`, `dnd`, `chat`); `None` is plain
-/// Available (no `<show>` child). An optional free-text `<status>` line is
-/// appended when present. Every broadcast presence advertises XEP-0115
-/// caps so contacts can resolve the client's features.
+/// Build the user's own outbound presence (RFC 6121 §4.7) as a typed
+/// [`xmpp_parsers::Presence`]. `show` is an RFC 6121 `<show>` token
+/// (`away` / `xa` / `dnd` / `chat`); an unknown or absent token is plain
+/// Available (no `<show>`, never an invalid one). An optional free-text
+/// `<status>` is set, and the presence advertises XEP-0115 caps.
 ///
-/// Shared by the native [`super::MessagingExt::send_presence`] and the
-/// wasm `send_presence` binding so both emit byte-identical presence
-/// (same child order, same caps advertisement).
-pub fn build_presence_stanza(status: Option<&str>, show: Option<&str>) -> Element {
-    let mut builder = Element::builder("presence", NS_CLIENT);
-    if let Some(status) = status {
-        builder = builder.append(Element::builder("status", NS_CLIENT).append(status).build());
+/// The signature mirrors the server's
+/// `waddle_xmpp_core::presence::subscription::build_available_presence`, so
+/// client and server presence builders stay consistent. Shared by the
+/// native [`super::MessagingExt::send_presence`] and the wasm
+/// `send_presence` binding; the caller serialises to an [`Element`] at the
+/// I/O boundary (`send_stanza`).
+pub fn build_presence_stanza(status: Option<&str>, show: Option<&str>) -> Presence {
+    let mut presence = Presence::new(PresenceType::None);
+    presence.show = show.and_then(|token| match token {
+        "away" => Some(Show::Away),
+        "chat" => Some(Show::Chat),
+        "dnd" => Some(Show::Dnd),
+        "xa" => Some(Show::Xa),
+        _ => None,
+    });
+    if let Some(text) = status {
+        presence
+            .statuses
+            .insert(xmpp_parsers::message::Lang::new(), text.to_string());
     }
-    if let Some(show) = show {
-        builder = builder.append(Element::builder("show", NS_CLIENT).append(show).build());
-    }
-    builder = builder.append(crate::caps::build_client_caps_element());
-    builder.build()
+    presence
+        .payloads
+        .push(crate::caps::build_client_caps_element());
+    presence
 }
 
 #[cfg(test)]
@@ -153,24 +165,18 @@ mod tests {
 
     #[test]
     fn builds_presence_with_show_status_and_caps() {
-        let el = build_presence_stanza(Some("Out for lunch"), Some("away"));
-        assert_eq!(el.name(), "presence");
-        assert!(
-            el.attr("type").is_none(),
-            "an available presence has no type"
-        );
+        let presence = build_presence_stanza(Some("Out for lunch"), Some("away"));
+        assert_eq!(presence.type_, PresenceType::None);
+        assert_eq!(presence.show, Some(Show::Away));
         assert_eq!(
-            el.get_child("show", NS_CLIENT).map(|c| c.text()).as_deref(),
-            Some("away")
-        );
-        assert_eq!(
-            el.get_child("status", NS_CLIENT)
-                .map(|c| c.text())
-                .as_deref(),
+            presence
+                .statuses
+                .get(&xmpp_parsers::message::Lang::new())
+                .map(String::as_str),
             Some("Out for lunch")
         );
         assert!(
-            el.children().any(|c| c.name() == "c"),
+            presence.payloads.iter().any(|p| p.name() == "c"),
             "presence advertises XEP-0115 caps"
         );
     }
@@ -178,14 +184,21 @@ mod tests {
     #[test]
     fn available_presence_omits_show() {
         // RFC 6121 §4.7.2.1: Available is the absence of a <show>.
-        let el = build_presence_stanza(None, None);
-        assert!(el.get_child("show", NS_CLIENT).is_none());
-        assert!(el.get_child("status", NS_CLIENT).is_none());
-        assert!(el.attr("type").is_none());
+        let presence = build_presence_stanza(None, None);
+        assert_eq!(presence.type_, PresenceType::None);
+        assert!(presence.show.is_none());
+        assert!(presence.statuses.is_empty());
         assert!(
-            el.children().any(|c| c.name() == "c"),
+            presence.payloads.iter().any(|p| p.name() == "c"),
             "even bare Available advertises caps"
         );
+    }
+
+    #[test]
+    fn unknown_show_token_degrades_to_available() {
+        // A bogus token must never produce an RFC-invalid `<show>`.
+        let presence = build_presence_stanza(None, Some("bogus"));
+        assert!(presence.show.is_none());
     }
 
     #[test]
