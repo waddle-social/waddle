@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
 import type { PresenceMode } from "../src/presence/effective-show";
 import type { BroadcastPresence } from "../src/presence/effective-show";
@@ -95,5 +95,92 @@ describe("IdleTracker", () => {
     const stoppedAt = h.at();
     h.advance(AWAY_MS + 1);
     expect(h.tracker.current()).toEqual({ show: "away", idleSince: stoppedAt });
+  });
+
+  test("resuming Automatic after a manual status restarts the clock by itself", () => {
+    // No markActive() here — the tracker must self-reset on the manual→auto
+    // edge so a stale pre-manual idle instant never resurfaces.
+    h.setMode({ kind: "manual", status: "dnd" });
+    h.tracker.evaluate(); // suspend
+    h.advance(XA_MS + 1); // long idle accrues while suspended
+    h.setMode({ kind: "automatic" });
+    h.tracker.evaluate();
+    // Resumes as Available (clock restarted), not a stale Extended Away.
+    expect(h.tracker.current().show).toBe("available");
+    expect(h.sent).toEqual([]);
+  });
+});
+
+// The DOM half of the state machine — start() wiring interaction + visibility
+// to markActive. Exercises the acceptance criterion "any interaction or tab
+// refocus restores Available promptly" and the hidden-runs-the-clock model.
+describe("IdleTracker DOM wiring", () => {
+  const originalWindow = globalThis.window;
+  const originalDocument = globalThis.document;
+  let clock: number;
+  let win: EventTarget;
+  let doc: EventTarget & { visibilityState: string };
+
+  function set(name: string, value: unknown) {
+    Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+  }
+
+  beforeEach(() => {
+    clock = 1_000_000;
+    win = new EventTarget();
+    doc = Object.assign(new EventTarget(), { visibilityState: "visible" });
+    set("window", win);
+    set("document", doc);
+  });
+
+  afterEach(() => {
+    set("window", originalWindow);
+    set("document", originalDocument);
+  });
+
+  function startedTracker() {
+    const sent: BroadcastPresence[] = [];
+    const tracker = new IdleTracker({
+      now: () => clock,
+      getMode: () => ({ kind: "automatic" }),
+      onBroadcast: (b) => sent.push(b),
+      thresholds,
+    });
+    tracker.start();
+    return { tracker, sent };
+  }
+
+  test("a window focus event restores Available after going idle", () => {
+    const { tracker, sent } = startedTracker();
+    clock += AWAY_MS + 1;
+    tracker.evaluate(); // away
+    win.dispatchEvent(new Event("focus"));
+    tracker.stop();
+    expect(sent.at(-1)).toEqual({ show: "available", idleSince: null });
+  });
+
+  test("becoming visible restores Available; a hidden tab keeps the clock running", () => {
+    const { tracker, sent } = startedTracker();
+    clock += AWAY_MS + 1;
+    tracker.evaluate(); // away
+    // visibilitychange while hidden must NOT reset the clock.
+    doc.visibilityState = "hidden";
+    doc.dispatchEvent(new Event("visibilitychange"));
+    expect(sent.at(-1)?.show).toBe("away");
+    // Returning to visible restores Available.
+    doc.visibilityState = "visible";
+    doc.dispatchEvent(new Event("visibilitychange"));
+    tracker.stop();
+    expect(sent.at(-1)).toEqual({ show: "available", idleSince: null });
+  });
+
+  test("stop() unwires the listeners so later events are inert", () => {
+    const { tracker, sent } = startedTracker();
+    clock += AWAY_MS + 1;
+    tracker.evaluate(); // away
+    tracker.stop();
+    win.dispatchEvent(new Event("focus"));
+    // No restore broadcast after stop().
+    expect(sent.at(-1)?.show).toBe("away");
   });
 });

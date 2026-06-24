@@ -42,6 +42,9 @@ export class IdleTracker {
   // Baseline the wire is assumed to already hold (the controller broadcasts
   // Available on connect), so the tracker stays silent until it diverges.
   private lastEmitted: BroadcastPresence = AVAILABLE;
+  // True while a manual status suspends auto-away, so the next Automatic
+  // evaluation can restart the idle clock from the resume instant.
+  private suspended = false;
   private timer: ReturnType<typeof setInterval> | null = null;
   private readonly boundMarkActive = () => this.markActive();
   private readonly boundVisibility = () => {
@@ -80,7 +83,16 @@ export class IdleTracker {
       // A manual status suspends auto-away — the picker owns the wire. Reset
       // the baseline so returning to Automatic re-emits the right Show.
       this.lastEmitted = AVAILABLE;
+      this.suspended = true;
       return;
+    }
+    if (this.suspended) {
+      // Resuming Automatic after a manual status: measure idle from now, never
+      // from the stale instant before the pick (choosing a status is itself
+      // activity). Self-protecting, so correctness does not hinge on the
+      // caller also marking active.
+      this.lastActive = this.deps.now();
+      this.suspended = false;
     }
     const next = this.current();
     if (samePresence(next, this.lastEmitted)) return;
