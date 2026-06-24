@@ -10,6 +10,12 @@ export function barePeerJid(fullJid: string): string {
   return fullJid.split("/")[0] ?? "";
 }
 
+/** The resource part of a full JID (everything after the first `/`), or `""` for a bare JID. */
+export function resourceOf(fullJid: string): string {
+  const separator = fullJid.indexOf("/");
+  return separator < 0 ? "" : fullJid.slice(separator + 1);
+}
+
 export function fullJidIdentityKey(fullJid?: string | null): string {
   const trimmed = fullJid?.trim() ?? "";
   if (!trimmed) return "";

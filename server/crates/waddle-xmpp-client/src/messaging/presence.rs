@@ -1,4 +1,5 @@
 use minidom::Element;
+use xmpp_parsers::presence::{Presence, Show, Type as PresenceType};
 
 use super::namespaces::*;
 use super::types::*;
@@ -126,9 +127,91 @@ fn muji_content_media(content: &Element) -> impl Iterator<Item = &str> {
         .into_iter()
 }
 
+/// Parse an RFC 6121 `<show>` token into the typed [`Show`]. This is the
+/// single point where the untyped wire / JS token becomes typed; the native
+/// and wasm `send_presence` boundaries convert their `&str` / `String` here
+/// before handing a typed `Option<Show>` to [`build_presence_stanza`]. An
+/// unknown token yields `None` (plain Available) so an invalid value never
+/// reaches the wire.
+pub fn parse_show(token: &str) -> Option<Show> {
+    match token {
+        "away" => Some(Show::Away),
+        "chat" => Some(Show::Chat),
+        "dnd" => Some(Show::Dnd),
+        "xa" => Some(Show::Xa),
+        _ => None,
+    }
+}
+
+/// Build the user's own outbound presence (RFC 6121 §4.7) as a typed
+/// [`xmpp_parsers::Presence`]. `show` is the typed availability state (or
+/// `None` for plain Available); `status` is an optional free-text `<status>`
+/// line. The presence advertises XEP-0115 caps.
+///
+/// Protocol data stays typed at this boundary (per the CLAUDE.md
+/// typed-payloads rule): `show` is `Option<Show>`, not a raw token. Shared
+/// by the native [`super::MessagingExt::send_presence`] and the wasm
+/// `send_presence` binding; the caller serialises to an [`Element`] at the
+/// I/O boundary (`send_stanza`).
+pub fn build_presence_stanza(status: Option<&str>, show: Option<Show>) -> Presence {
+    let mut presence = Presence::new(PresenceType::None);
+    presence.show = show;
+    if let Some(text) = status {
+        presence
+            .statuses
+            .insert(xmpp_parsers::message::Lang::new(), text.to_string());
+    }
+    presence
+        .payloads
+        .push(crate::caps::build_client_caps_element());
+    presence
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builds_presence_with_show_status_and_caps() {
+        let presence = build_presence_stanza(Some("Out for lunch"), Some(Show::Away));
+        assert_eq!(presence.type_, PresenceType::None);
+        assert_eq!(presence.show, Some(Show::Away));
+        assert_eq!(
+            presence
+                .statuses
+                .get(&xmpp_parsers::message::Lang::new())
+                .map(String::as_str),
+            Some("Out for lunch")
+        );
+        assert!(
+            presence.payloads.iter().any(|p| p.name() == "c"),
+            "presence advertises XEP-0115 caps"
+        );
+    }
+
+    #[test]
+    fn available_presence_omits_show() {
+        // RFC 6121 §4.7.2.1: Available is the absence of a <show>.
+        let presence = build_presence_stanza(None, None);
+        assert_eq!(presence.type_, PresenceType::None);
+        assert!(presence.show.is_none());
+        assert!(presence.statuses.is_empty());
+        assert!(
+            presence.payloads.iter().any(|p| p.name() == "c"),
+            "even bare Available advertises caps"
+        );
+    }
+
+    #[test]
+    fn parse_show_maps_rfc6121_tokens_and_rejects_others() {
+        assert_eq!(parse_show("away"), Some(Show::Away));
+        assert_eq!(parse_show("chat"), Some(Show::Chat));
+        assert_eq!(parse_show("dnd"), Some(Show::Dnd));
+        assert_eq!(parse_show("xa"), Some(Show::Xa));
+        // A bogus token degrades to Available so it never reaches the wire.
+        assert_eq!(parse_show("bogus"), None);
+        assert_eq!(parse_show(""), None);
+    }
 
     #[test]
     fn parses_muji_active_with_content() {

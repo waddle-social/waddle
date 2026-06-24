@@ -107,15 +107,11 @@ impl MessagingExt for ClientHandle {
     }
 
     async fn send_presence(&self, status: Option<&str>, show: Option<&str>) -> ClientResult<()> {
-        let mut builder = Element::builder("presence", NS_CLIENT);
-        if let Some(s) = status {
-            builder = builder.append(Element::builder("status", NS_CLIENT).append(s).build());
-        }
-        if let Some(s) = show {
-            builder = builder.append(Element::builder("show", NS_CLIENT).append(s).build());
-        }
-        builder = builder.append(crate::caps::build_client_caps_element());
-        self.send_stanza(builder.build()).await
+        let presence = super::presence::build_presence_stanza(
+            status,
+            show.and_then(super::presence::parse_show),
+        );
+        self.send_stanza(presence.into()).await
     }
 
     async fn send_chat_state(

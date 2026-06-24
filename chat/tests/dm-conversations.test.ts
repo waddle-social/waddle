@@ -423,7 +423,7 @@ describe("useDirectMessageConversations", () => {
   test("updatePresence updates conversation presence", async () => {
     const { composable } = makeComposable();
     await composable.openDm("bob@example.com");
-    composable.updatePresence({ bareJid: "bob@example.com", show: "away" });
+    composable.updatePresence({ bareJid: "bob@example.com", resource: "phone", show: "away" });
     expect(composable.conversations.value[0].presenceShow).toBe("away");
   });
 

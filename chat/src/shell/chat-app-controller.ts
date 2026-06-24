@@ -24,6 +24,9 @@ import {
 } from "@/shell/structure-retry";
 import { useDeploymentVersionInfo } from "@/shell/version";
 import { useXmppRosterContacts } from "@/contacts/roster";
+import { resolveShow } from "@/presence/effective-show";
+import { PresenceRegistry } from "@/presence/presence-registry";
+import { $presenceMode, resetPresenceMode } from "@/presence/presence-store";
 import { matchLocation, navigate, type RouteMatch } from "@/router";
 import { resolveChannelBySlug } from "@/shell/route-helpers";
 import { barePeerJid, jidDomain, parseManagedRoomBareJid, type LiveDmMessage, type RoomActivityEvent } from "@/lib/xmpp-client";
@@ -758,7 +761,19 @@ export function useChatAppController(giphyApiKey: string) {
 
   const notifications = usePushNotifications();
   const messageSound = createBrowserMessageTonePlayer();
-  const selfPresenceShow = ref<"available" | "away" | "xa" | "dnd" | "offline">("available");
+  // Aggregates each contact's resources into one rendered Show
+  // (most-available-wins, ADR-010); inbound presence is per-resource.
+  const presenceRegistry = new PresenceRegistry();
+  // This device's own mode drives the Show we broadcast and the local
+  // DND checks; the picker writes it via the presence store.
+  const presenceMode = useStore($presenceMode);
+  const selfPresenceShow = computed(() => resolveShow(presenceMode.value));
+  watch(presenceMode, (mode) => {
+    // A pick while disconnected rejects (setPresence is not queued); swallow
+    // it — the session-ready handler re-broadcasts the current mode on the
+    // next connect. Without the catch this is an unhandled rejection.
+    xmppClient.value?.setPresence(resolveShow(mode)).catch(() => undefined);
+  });
   const appUpdate = useServiceWorkerUpdate();
   const version = useDeploymentVersionInfo(xmppClient);
   // RFC 363 PR 6: include DM peers in the iterate-and-pull avatar
@@ -882,7 +897,12 @@ export function useChatAppController(giphyApiKey: string) {
   });
 
   watch(xmppClient, (client) => {
-    if (!client || !session.value) return;
+    if (!client || !session.value) {
+      // Client torn down (logout) — drop aggregated presence so a later
+      // session never inherits another account's / a stale resource's Show.
+      presenceRegistry.clear();
+      return;
+    }
     client.setDirectMessageHandler((msg) => {
       dmMessaging.onIncomingMessage(msg);
       dmConversations.receiveIncomingDm(msg);
@@ -923,11 +943,11 @@ export function useChatAppController(giphyApiKey: string) {
       else queueMdsDisplayed(key, displayed);
     });
     client.setPresenceUpdateHandler((event) => {
-      if (barePeerJid(event.bareJid) === barePeerJid(session.value?.jid ?? "")) {
-        selfPresenceShow.value = event.show;
-      }
-      dmConversations.updatePresence(event);
-      rosterContacts.updatePresence(event.bareJid, event.show);
+      // Collapse the contact's resources into one rendered Show before it
+      // reaches the per-bare conversation/roster stores.
+      const rendered = presenceRegistry.apply(event.bareJid, event.resource, event.show);
+      dmConversations.updatePresence({ ...event, show: rendered });
+      rosterContacts.updatePresence(event.bareJid, rendered);
     });
     client.setMemberJidHandler((nick, bareJid) => {
       memberJidByNick.value = { ...memberJidByNick.value, [nick]: bareJid };
@@ -975,6 +995,15 @@ export function useChatAppController(giphyApiKey: string) {
       void socialFeed.refresh();
       void stories.refresh();
       void communityEvents.refresh();
+      // Re-broadcast this device's chosen Show on every session-ready. A
+      // fresh reconnect (resume window expired / server restart) starts the
+      // session with no directed presence and the client layer never
+      // auto-sends one, so a manually-set Away/DND would otherwise silently
+      // revert; a resumed session re-sends the same Show idempotently. This
+      // also lands a pick made while disconnected (setPresence then rejects
+      // unqueued) on the next session-ready. Guard the rejection in case the
+      // lifecycle event fires during teardown.
+      client.setPresence(resolveShow(presenceMode.value)).catch(() => undefined);
       // Re-hydrate XEP-0492 notification settings only on *fresh*
       // reconnects. A stream resume is by definition gap-free —
       // any bookmark publish from another tab during the disconnect
@@ -985,6 +1014,11 @@ export function useChatAppController(giphyApiKey: string) {
       // headlines on `urn:xmpp:bookmarks:1` (deferred follow-up),
       // fresh-only hydrate is the correct cadence.
       if (event.type === "fresh") {
+        // A fresh session may have missed contacts' `unavailable` while we
+        // were gone; drop the stale per-resource map so the fresh presence
+        // probes repopulate it cleanly. A resumed session is gap-free, so
+        // its registry is preserved.
+        presenceRegistry.clear();
         // Belt-and-braces: hydrate already catches lower-layer
         // throws, but call-site .catch defends against any future
         // regression so an unhandled rejection doesn't propagate
@@ -2260,6 +2294,11 @@ export function useChatAppController(giphyApiKey: string) {
     // sign-in does not leak the previous account's per-chat modes
     // into UI reads while the fresh `hydrate` is still in flight.
     notifySettings.reset();
+    // Drop the module-global presence mode and the aggregated per-resource
+    // presence so the next account in this tab doesn't inherit a manual
+    // Away/DND or another user's contact presence.
+    resetPresenceMode();
+    presenceRegistry.clear();
     ui.showPinnedPanel.value = false;
     navigate({ id: "home" });
     await connectionStore.logout();

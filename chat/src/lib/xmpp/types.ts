@@ -394,6 +394,8 @@ export interface DmReactionEvent {
 
 export interface PresenceUpdateEvent {
   bareJid: string;
+  /** The sending resource (full-JID part after `/`), or `""` if bare. Used to aggregate a contact's devices via most-available-wins. */
+  resource: string;
   show: "available" | "away" | "xa" | "dnd" | "offline";
   status?: string;
 }

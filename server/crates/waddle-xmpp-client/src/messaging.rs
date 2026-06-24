@@ -43,6 +43,7 @@ pub use parsing::{
     parse_markable_marker_payload, parse_moderation_payload, parse_reaction_payload,
     parse_retraction_payload,
 };
+pub use presence::{build_presence_stanza, parse_show};
 pub use types::{
     ChatStatePayload, CorrectionPayload, DisplayedMarkerPayload, ExtensionCapabilityData,
     ExtensionCommandNode, ExtensionDisplayText, ExtensionEnrichmentData, ExtensionEnvelopeData,

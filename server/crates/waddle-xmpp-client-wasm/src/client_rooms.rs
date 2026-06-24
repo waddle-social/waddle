@@ -215,19 +215,21 @@ impl WaddleClient {
         })
     }
 
+    /// Publish the user's own presence (RFC 6121 §4.7). `show` is an RFC
+    /// 6121 `<show>` value (`away` / `xa` / `dnd` / `chat`) or `None` for
+    /// plain Available (the absence of a `<show>`); `status` is the optional
+    /// free-text line. Shares `build_presence_stanza` with the native + FFI
+    /// `send_presence`, so every Waddle client emits byte-identical presence
+    /// including the XEP-0115 caps advertisement.
     pub fn send_presence(&self, status: Option<String>, show: Option<String>) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            let mut builder = Element::builder("presence", NS_CLIENT);
-            if let Some(status) = status.as_deref() {
-                builder =
-                    builder.append(Element::builder("status", NS_CLIENT).append(status).build());
-            }
-            if let Some(show) = show.as_deref() {
-                builder = builder.append(Element::builder("show", NS_CLIENT).append(show).build());
-            }
-            builder = builder.append(waddle_xmpp_client::caps::build_client_caps_element());
-            send_stanza_command(inner, builder.build()).await?;
+            let presence = waddle_xmpp_client::messaging::build_presence_stanza(
+                status.as_deref(),
+                show.as_deref()
+                    .and_then(waddle_xmpp_client::messaging::parse_show),
+            );
+            send_stanza_command(inner, presence.into()).await?;
             Ok(JsValue::UNDEFINED)
         })
     }
