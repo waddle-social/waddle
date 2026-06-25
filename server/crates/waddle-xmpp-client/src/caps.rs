@@ -18,6 +18,10 @@ pub fn client_caps_features() -> Vec<&'static str> {
         NS_CAPS,
         NS_CHAT_MARKERS,
         crate::mds::NS_MDS_NOTIFY,
+        // XEP-0163 §3: advertise interest in peers' User Activity so the server
+        // fans their in-call overlay (ADR-010 Phase 3) out to us. Without this
+        // the activity PEP node is published but no contact is ever notified.
+        crate::pep::NS_ACTIVITY_NOTIFY,
     ]
 }
 
@@ -128,6 +132,9 @@ mod tests {
         );
         assert!(client_caps_features().contains(&crate::mds::NS_MDS_NOTIFY));
         assert!(client_caps_features().contains(&NS_CHAT_MARKERS));
+        // ADR-010 Phase 3: the in-call overlay receive path depends on this
+        // being advertised, or the server never fans a peer's activity to us.
+        assert!(client_caps_features().contains(&crate::pep::NS_ACTIVITY_NOTIFY));
     }
 
     #[test]
