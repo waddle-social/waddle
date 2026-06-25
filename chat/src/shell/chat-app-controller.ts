@@ -45,7 +45,7 @@ import {
   roomJidForChannelId as resolveRoomJidForChannelId,
 } from "@/lib/channel-room";
 import { $callState } from "@/lib/calls/call-store";
-import { ActivityCoordinator } from "@/presence/activity-coordinator";
+import { ActivityCoordinator, activityFlushForDisconnect } from "@/presence/activity-coordinator";
 import { $manualActivity, resetManualActivity } from "@/presence/self-activity";
 import { normalizeMucServiceDomain } from "@/lib/calls/muc-call-indicators";
 import { resolveThreadEntryTarget } from "@/lib/threads-view-target";
@@ -2406,12 +2406,17 @@ export function useChatAppController(giphyApiKey: string) {
     // server and the user's chosen status is preserved across the logout. Then
     // drop the coordinator baseline + manual activity + receiver overlays so the
     // next account starts clean.
-    if ($callState.get().phase === "active") {
-      const manual = $manualActivity.get();
-      await (manual
-        ? xmppClient.value?.publishActivity(manual)
-        : xmppClient.value?.retractActivity()
-      )?.catch(() => undefined);
+    const disconnectClient = xmppClient.value;
+    const flush = activityFlushForDisconnect(
+      $callState.get().phase === "active",
+      $manualActivity.get(),
+    );
+    if (disconnectClient) {
+      if (flush.kind === "publish") {
+        await disconnectClient.publishActivity(flush.activity).catch(() => undefined);
+      } else if (flush.kind === "retract") {
+        await disconnectClient.retractActivity().catch(() => undefined);
+      }
     }
     activityCoordinator.reset();
     resetManualActivity();

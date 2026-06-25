@@ -19,6 +19,28 @@ function sameActivity(a: ActivityPublication | null, b: ActivityPublication | nu
   return a.general === b.general && a.specific === b.specific && a.text === b.text;
 }
 
+/** What to write to the activity node before a graceful disconnect (logout). */
+export type ActivityFlush =
+  | { kind: "publish"; activity: ActivityPublication }
+  | { kind: "retract" }
+  | { kind: "none" };
+
+/**
+ * The write the activity node needs before a graceful disconnect. If a call is
+ * active the wire holds the in-call overlay, so restore the user's manual
+ * activity (or clear it) — no stale "in a call" survives on the server and the
+ * chosen status is preserved across the logout. Otherwise the node already
+ * reflects the manual activity, so leave it untouched. Pure, so the ghost-
+ * cleanup-on-disconnect decision is unit-tested without the controller.
+ */
+export function activityFlushForDisconnect(
+  callActive: boolean,
+  manual: ActivityPublication | null,
+): ActivityFlush {
+  if (!callActive) return { kind: "none" };
+  return manual ? { kind: "publish", activity: manual } : { kind: "retract" };
+}
+
 export interface ActivityCoordinatorDeps {
   /** Publish the activity item; returns whether it actually reached the wire. */
   publish: (activity: ActivityPublication) => boolean;

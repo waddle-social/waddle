@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { ActivityCoordinator } from "../src/presence/activity-coordinator";
+import { ActivityCoordinator, activityFlushForDisconnect } from "../src/presence/activity-coordinator";
 import type { CallState } from "../src/lib/calls/types";
 import type { ActivityPublication } from "../src/lib/xmpp/pep-types";
 
@@ -131,5 +131,22 @@ describe("ActivityCoordinator", () => {
     h.coord.reset();
     h.coord.reconcile();
     expect(h.events.filter((e) => e.type === "publish")).toHaveLength(2);
+  });
+});
+
+// Graceful-disconnect ghost cleanup (ADR-010): the decision the logout path
+// runs before the stream closes, so no stale "in a call" survives.
+describe("activityFlushForDisconnect", () => {
+  test("no active call: nothing to flush (the node already holds the manual activity)", () => {
+    expect(activityFlushForDisconnect(false, WORKING)).toEqual({ kind: "none" });
+    expect(activityFlushForDisconnect(false, null)).toEqual({ kind: "none" });
+  });
+
+  test("in a call with a manual activity: restore it before disconnect", () => {
+    expect(activityFlushForDisconnect(true, WORKING)).toEqual({ kind: "publish", activity: WORKING });
+  });
+
+  test("in a call with no manual activity: retract the overlay before disconnect", () => {
+    expect(activityFlushForDisconnect(true, null)).toEqual({ kind: "retract" });
   });
 });
