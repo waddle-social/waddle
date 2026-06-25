@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, type Component } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, type Component } from "vue";
 import { Hash, Menu, MessageCircle, MessagesSquare, PhoneCall, Pin, Search, Settings, Users } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import CallButton from "@/components/calls/CallButton.vue";
@@ -115,15 +115,33 @@ const dmCallActivityLabel = computed(() => {
 const showDmCallActivityStatus = computed(() =>
   props.showDmCallActivityControls !== false && !!dmCallActivity.value,
 );
+// Live clock so the idle age refreshes as time passes. The idle tracker
+// deliberately does not rebroadcast unchanged presence, so without a reactive
+// `now` the computed below would never recompute and "idle 20m" would go stale.
+// Ticks at minute granularity (matching formatIdle); cleared on unmount.
+const nowMs = ref(Date.now());
+let idleTicker: ReturnType<typeof setInterval> | null = null;
+onMounted(() => {
+  idleTicker = setInterval(() => {
+    nowMs.value = Date.now();
+  }, 60_000);
+});
+onBeforeUnmount(() => {
+  if (idleTicker !== null) {
+    clearInterval(idleTicker);
+    idleTicker = null;
+  }
+});
+
 // Presence line for a DM peer, appending the XEP-0319 idle age behind an
-// away/xa dot ("away · idle 20m"). Recomputed when the peer's presence/idle
-// changes; it does not tick live, which is fine at minute granularity.
+// away/xa dot ("away · idle 20m"). Recomputes both when the peer's presence
+// changes and every minute as `nowMs` ticks, so the age stays current.
 const dmPeerPresenceText = computed(() => {
   const show = props.dmPeer?.presenceShow;
   const base = presenceText(show);
   const idleSince = props.dmPeer?.presenceIdleSince;
   return (show === "away" || show === "xa") && idleSince !== undefined
-    ? `${base} · ${formatIdle(idleSince, Date.now())}`
+    ? `${base} · ${formatIdle(idleSince, nowMs.value)}`
     : base;
 });
 const dmHeaderSecondaryText = computed(() =>

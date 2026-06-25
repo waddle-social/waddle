@@ -68,7 +68,11 @@ export function useDirectMessageConversations(
     window.sessionStorage.setItem(
       key,
       JSON.stringify({
-        conversations: conversations.value,
+        // presenceIdleSince is ephemeral (repopulated by live presence). Strip
+        // it before persisting — JSON.stringify drops the `undefined` key — so a
+        // stale "idle 20m" can't survive a reload. presenceShow is still
+        // persisted so the dot doesn't flash offline before presence arrives.
+        conversations: conversations.value.map((c) => ({ ...c, presenceIdleSince: undefined })),
         activePeerJid: activePeerJid.value,
       }),
     );
@@ -87,6 +91,9 @@ export function useDirectMessageConversations(
         peerJid: barePeerJid(c.peerJid),
         peerUsername: c.peerUsername || peerUsername(c.peerJid),
         unreadCount: c.unreadCount ?? 0,
+        // Clear any idle age from an older persisted blob — it starts empty and
+        // only repopulates from live presence updates.
+        presenceIdleSince: undefined,
       })));
       activePeerJid.value = parsed.activePeerJid ? barePeerJid(parsed.activePeerJid) : null;
       for (const c of conversations.value) {
