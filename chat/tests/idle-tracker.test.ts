@@ -12,11 +12,13 @@ const thresholds = { awayMs: AWAY_MS, xaMs: XA_MS };
 function harness(initialMode: PresenceMode = { kind: "automatic" }) {
   let clock = 1_000_000;
   let mode = initialMode;
+  let paused = false;
   const sent: BroadcastPresence[] = [];
   const tracker = new IdleTracker({
     now: () => clock,
     getMode: () => mode,
     onBroadcast: (b) => sent.push(b),
+    isPaused: () => paused,
     thresholds,
   });
   return {
@@ -27,6 +29,9 @@ function harness(initialMode: PresenceMode = { kind: "automatic" }) {
     },
     setMode: (m: PresenceMode) => {
       mode = m;
+    },
+    setPaused: (p: boolean) => {
+      paused = p;
     },
     at: () => clock,
   };
@@ -95,6 +100,48 @@ describe("IdleTracker", () => {
     const stoppedAt = h.at();
     h.advance(AWAY_MS + 1);
     expect(h.tracker.current()).toEqual({ show: "away", idleSince: stoppedAt });
+  });
+
+  test("an active call pauses auto-away — no Away past the threshold (ADR-010)", () => {
+    h.setPaused(true);
+    h.advance(XA_MS + 1);
+    h.tracker.evaluate();
+    expect(h.sent).toEqual([]);
+    expect(h.tracker.current().show).toBe("available");
+  });
+
+  test("starting a call restores Available from a pre-call Away", () => {
+    h.advance(AWAY_MS + 1);
+    h.tracker.evaluate(); // away
+    h.setPaused(true);
+    h.tracker.evaluate();
+    expect(h.sent.at(-1)).toEqual({ show: "available", idleSince: null });
+  });
+
+  test("leaving a call resumes the idle timer from call-end, not stale idle", () => {
+    h.setPaused(true);
+    h.advance(XA_MS + 1);
+    h.tracker.evaluate(); // in-call: clock kept fresh, stays Available
+    h.setPaused(false);
+    h.advance(AWAY_MS - 1); // not yet idle past the threshold since call-end
+    h.tracker.evaluate();
+    expect(h.tracker.current().show).toBe("available");
+    // One more nudge past the threshold and it does go Away (clock runs again).
+    h.advance(2);
+    h.tracker.evaluate();
+    expect(h.tracker.current().show).toBe("away");
+  });
+
+  test("rebroadcast commits the baseline so a later restore is not suppressed", () => {
+    // Simulate a reconnect after the poll was frozen (e.g. hidden tab): the
+    // clock is past the threshold but the tracker never emitted Away itself.
+    h.advance(AWAY_MS + 1);
+    h.tracker.rebroadcast(); // reconnect re-broadcast: sends away + commits baseline
+    expect(h.sent).toEqual([{ show: "away", idleSince: expect.any(Number) }]);
+    // A real interaction must now restore Available — not be swallowed because
+    // the tracker still believed Available was on the wire.
+    h.tracker.markActive();
+    expect(h.sent.at(-1)).toEqual({ show: "available", idleSince: null });
   });
 
   test("resuming Automatic after a manual status restarts the clock by itself", () => {

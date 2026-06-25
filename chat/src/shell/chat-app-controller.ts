@@ -38,6 +38,7 @@ import {
   knownChannelIdForRoomJid,
   roomJidForChannelId as resolveRoomJidForChannelId,
 } from "@/lib/channel-room";
+import { $callState } from "@/lib/calls/call-store";
 import { normalizeMucServiceDomain } from "@/lib/calls/muc-call-indicators";
 import { resolveThreadEntryTarget } from "@/lib/threads-view-target";
 import { connectionStore } from "@/lib/connection-store";
@@ -779,18 +780,27 @@ export function useChatAppController(giphyApiKey: string) {
     onBroadcast: (presence) => {
       xmppClient.value?.setPresence(presence.show, presence.idleSince).catch(() => undefined);
     },
+    // In-call pauses auto-away (ADR-010): never broadcast "Away + in a call".
+    // `$callState` is the unified 1:1 + MUC store; `active` is the in-call phase.
+    isPaused: () => $callState.get().phase === "active",
   });
-  watch(presenceMode, (mode) => {
-    // A pick while disconnected rejects (setPresence is not queued); swallow
-    // it — the session-ready handler re-broadcasts the current mode on the
-    // next connect. Without the catch this is an unhandled rejection.
-    xmppClient.value?.setPresence(resolveShow(mode)).catch(() => undefined);
+  watch(presenceMode, () => {
     // A pick — including "Reset to automatic" — is itself an interaction:
-    // restart the idle clock so auto-away measures from now, and let the
-    // tracker re-sync its baseline (it stays silent while a Manual status is
-    // pinned, so this never double-broadcasts the manual Show above).
+    // restart the idle clock (so auto-away measures from now), then re-emit
+    // through the tracker so it sends the new effective Show *and* commits its
+    // baseline. Routing the send through `rebroadcast` (not a bare setPresence)
+    // keeps the wire and the tracker's `lastEmitted` in sync, so a later
+    // restore is never wrongly suppressed. A pick while disconnected rejects
+    // (setPresence is unqueued) and is swallowed in onBroadcast; the
+    // session-ready handler re-broadcasts on the next connect.
     idleTracker.markActive();
+    idleTracker.rebroadcast();
   });
+  // Re-evaluate the moment a call starts/ends so the pause is prompt: starting a
+  // call restores Available immediately (rather than after the next poll), and
+  // ending one resumes the idle timer from call-end.
+  const callState = useStore($callState);
+  watch(() => callState.value.phase === "active", () => idleTracker.evaluate());
   const appUpdate = useServiceWorkerUpdate();
   const version = useDeploymentVersionInfo(xmppClient);
   // RFC 363 PR 6: include DM peers in the iterate-and-pull avatar
@@ -1030,9 +1040,10 @@ export function useChatAppController(giphyApiKey: string) {
       // Re-broadcast the device's *current* effective presence — a pinned
       // Manual status, or the live auto-away Show with its XEP-0319 idle stamp
       // if the user is idle right now — so a fresh reconnect restores the true
-      // state rather than a stale Available.
-      const broadcast = idleTracker.current();
-      client.setPresence(broadcast.show, broadcast.idleSince).catch(() => undefined);
+      // state rather than a stale Available. `rebroadcast` commits the tracker's
+      // baseline too, so a later restore after this out-of-band send is never
+      // wrongly suppressed.
+      idleTracker.rebroadcast();
       // Re-hydrate XEP-0492 notification settings only on *fresh*
       // reconnects. A stream resume is by definition gap-free —
       // any bookmark publish from another tab during the disconnect

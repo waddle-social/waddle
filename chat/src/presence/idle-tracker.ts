@@ -21,6 +21,12 @@ export interface IdleTrackerDeps {
   getMode: () => PresenceMode;
   /** Called when the device's outbound presence should change. */
   onBroadcast: (presence: BroadcastPresence) => void;
+  /**
+   * True while auto-away must be paused — i.e. an in-call overlay is active
+   * (ADR-010: a live call is proof of presence, so the idle timer never
+   * downgrades the Show to "Away + in a call"). Optional; absent = never paused.
+   */
+  isPaused?: () => boolean;
   /** Inactivity thresholds; defaults to ADR-010's 10 min / 30 min. */
   thresholds?: AutoAwayThresholds;
   /** How often to re-check the idle clock while running. Default 30 s. */
@@ -63,12 +69,30 @@ export class IdleTracker {
 
   /** The outbound presence implied by the mode + idle clock right now. */
   current(): BroadcastPresence {
-    const autoAway = computeAutoAway({
-      now: this.deps.now(),
-      lastActive: this.lastActive,
-      ...this.thresholds,
-    });
+    // In-call pauses auto-away (ADR-010): suppress the idle computation so the
+    // Show never drops below Available while a call is active. A Manual status
+    // still wins via resolveBroadcast — the call only pauses the *auto* path.
+    const autoAway = this.deps.isPaused?.()
+      ? ({ show: "available", idleSince: null } as const)
+      : computeAutoAway({
+          now: this.deps.now(),
+          lastActive: this.lastActive,
+          ...this.thresholds,
+        });
     return resolveBroadcast(this.deps.getMode(), autoAway);
+  }
+
+  /**
+   * Re-emit the current effective presence and commit it as the baseline. The
+   * reconnect re-broadcast and a manual pick send out-of-band (not via the idle
+   * timer), so without committing `lastEmitted` here a later restore could be
+   * wrongly suppressed (the tracker would think the new state was already on the
+   * wire). One authoritative send path keeps the wire and `lastEmitted` in sync.
+   */
+  rebroadcast(): void {
+    const next = this.current();
+    this.lastEmitted = next;
+    this.deps.onBroadcast(next);
   }
 
   /** The user interacted or the tab refocused: reset the clock, restore promptly. */
@@ -93,6 +117,11 @@ export class IdleTracker {
       // caller also marking active.
       this.lastActive = this.deps.now();
       this.suspended = false;
+    }
+    if (this.deps.isPaused?.()) {
+      // While in a call the clock must not accrue idle, so the user resumes the
+      // timer from call-end rather than from when they last touched the tab.
+      this.lastActive = this.deps.now();
     }
     const next = this.current();
     if (samePresence(next, this.lastEmitted)) return;
