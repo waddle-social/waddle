@@ -7,6 +7,7 @@ import {
   resetInCallOverlays,
   setInCallOverlay,
   useInCallOverlay,
+  useInCallOverlays,
 } from "../src/presence/in-call-overlay-store";
 
 describe("in-call overlay store", () => {
@@ -41,6 +42,14 @@ describe("in-call overlay store", () => {
     expect(isInCall("alice@waddle.test")).toBe(false);
   });
 
+  test("a contact can rejoin after a retract (in → out → in)", () => {
+    setInCallOverlay("alice@waddle.test", true);
+    setInCallOverlay("alice@waddle.test", false);
+    expect(isInCall("alice@waddle.test")).toBe(false);
+    setInCallOverlay("alice@waddle.test", true);
+    expect(isInCall("alice@waddle.test")).toBe(true);
+  });
+
   test("reset forgets every overlay (logout)", () => {
     setInCallOverlay("alice@waddle.test", true);
     setInCallOverlay("bob@waddle.test", true);
@@ -60,6 +69,18 @@ describe("in-call overlay store", () => {
       expect(useInCallOverlay(() => "alice@waddle.test").value).toBe(true);
       clearInCallOverlay("alice@waddle.test");
       expect(useInCallOverlay(() => "alice@waddle.test").value).toBe(false);
+    });
+    scope.stop();
+  });
+
+  test("useInCallOverlays.peerInCall reads per-contact state for list rows", () => {
+    // Snapshot semantics under bun (no window): seed before reading.
+    const scope = effectScope();
+    scope.run(() => {
+      setInCallOverlay("alice@waddle.test", true);
+      const { peerInCall } = useInCallOverlays();
+      expect(peerInCall("alice@waddle.test")).toBe(true);
+      expect(peerInCall("bob@waddle.test")).toBe(false);
     });
     scope.stop();
   });

@@ -80,4 +80,29 @@ describe("CallOverlayPublisher", () => {
     publisher.update(active({ audio: true, video: false }));
     expect(events.filter((e) => e.type === "publish")).toHaveLength(2);
   });
+
+  test("reassert re-publishes the live overlay (session-ready self-heal)", () => {
+    const { publisher, events } = harness();
+    // A publish that never reached the wire (client briefly null on connect)
+    // still advanced the baseline; session-ready must re-assert it.
+    publisher.reassert(active({ audio: true, video: false }));
+    expect(events).toEqual([
+      { type: "publish", activity: { general: "talking", specific: "on_the_phone" } },
+    ]);
+  });
+
+  test("reassert is silent when not in a call (no empty-retraction spam)", () => {
+    const { publisher, events } = harness();
+    publisher.reassert(IDLE);
+    expect(events).toEqual([]);
+  });
+
+  test("reassert refreshes the baseline so a later leave still retracts once", () => {
+    const { publisher, events } = harness();
+    publisher.update(active({ audio: true, video: false }));
+    publisher.reassert(active({ audio: true, video: false })); // reconnect mid-call
+    publisher.update(IDLE);
+    expect(events.filter((e) => e.type === "publish")).toHaveLength(2);
+    expect(events.filter((e) => e.type === "retract")).toHaveLength(1);
+  });
 });

@@ -28,7 +28,7 @@ import {
   type CallActivityDockEntry,
 } from "@/lib/calls/call-activity-dock";
 import { $callState } from "@/lib/calls/call-store";
-import { $inCallOverlays, isInCall } from "@/presence/in-call-overlay-store";
+import { useInCallOverlays } from "@/presence/in-call-overlay-store";
 import {
   dmCallActivitiesForPeer,
   dmCallResumeBlockReason,
@@ -138,11 +138,8 @@ const callParticipants = computed(() => props.callParticipants ?? {});
 const callMediaByRoom = computed(() => props.callMediaByRoom ?? {});
 const dmCallActivities = computed(() => props.dmCallActivities ?? {});
 const callState = useStore($callState);
-const inCallOverlays = useStore($inCallOverlays);
 // Whether a DM peer is in a call (their XEP-0108 overlay, ADR-010 Phase 3).
-function peerInCall(peerJid: string): boolean {
-  return isInCall(peerJid, inCallOverlays.value);
-}
+const { peerInCall } = useInCallOverlays();
 const currentActiveDmPeer = computed(() => {
   const current = callState.value;
   return current.phase === "active" && current.kind === "dm"

@@ -1016,6 +1016,9 @@ export function useChatAppController(giphyApiKey: string) {
     // retraction (or any other activity) clears it.
     client.addPubsubEventHandler((event) => {
       if (event.node !== ACTIVITY_PEP_NODE || !event.from) return;
+      // XEP-0163 §3.4 also self-notifies our own other resources (from = our
+      // bare JID). The overlay is a *contact* signal; never badge ourselves.
+      if (barePeerJid(event.from) === barePeerJid(session.value?.jid ?? "")) return;
       for (const item of event.items) {
         const inCall =
           !item.retracted && item.payload.kind === "opaque"
@@ -1085,6 +1088,12 @@ export function useChatAppController(giphyApiKey: string) {
       // baseline too, so a later restore after this out-of-band send is never
       // wrongly suppressed.
       idleTracker.rebroadcast();
+      // Re-assert the in-call overlay too: a publish that never reached the
+      // wire (client briefly null on connect, or a rejected IQ) would otherwise
+      // strand a live call's overlay off-wire for its whole duration. PEP items
+      // are durable across resume, so this only re-publishes when actually in a
+      // call — a no-op otherwise.
+      callOverlayPublisher.reassert($callState.get());
       // Re-hydrate XEP-0492 notification settings only on *fresh*
       // reconnects. A stream resume is by definition gap-free —
       // any bookmark publish from another tab during the disconnect

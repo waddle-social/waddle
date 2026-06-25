@@ -66,6 +66,18 @@ export class CallOverlayPublisher {
   }
 
   /**
+   * Re-publish the overlay implied by `state` from a clean baseline. Call on
+   * session-ready so a publish that never reached the wire (client briefly
+   * null, IQ rejected, reconnect) self-heals on the next connect — mirroring
+   * the presence re-broadcast. A no-op when not in a call, so it never spams an
+   * empty retraction; the refreshed baseline keeps a later leave retracting.
+   */
+  reassert(state: CallState): void {
+    this.lastPublished = callOverlayActivity(state);
+    if (this.lastPublished !== null) this.deps.publish(this.lastPublished);
+  }
+
+  /**
    * Forget what the wire is assumed to hold. Call on logout: the PEP item
    * belongs to the signed-out account, so the next session must re-publish from
    * a clean baseline rather than suppress an "unchanged" overlay it never sent.

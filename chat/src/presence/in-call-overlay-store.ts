@@ -10,7 +10,10 @@ import { useStore } from "@nanostores/vue";
 
 import { barePeerJid } from "@/lib/xmpp/jid";
 
-export const $inCallOverlays = map<Record<string, true>>({});
+// Module-private — reads go through `isInCall` / the composables, writes
+// through `setInCallOverlay` / `clearInCallOverlay`, so the keying (bare JID)
+// stays in one place.
+const $inCallOverlays = map<Record<string, true>>({});
 
 /** Set or clear a contact's in-call overlay. A full JID is collapsed to bare. */
 export function setInCallOverlay(jid: string, inCall: boolean): void {
@@ -46,8 +49,18 @@ export function isInCall(jid: string, snapshot: Record<string, true> = $inCallOv
   return bare.length > 0 && snapshot[bare] === true;
 }
 
-/** Reactive "is this contact in a call" for a component. */
+/** Reactive "is this contact in a call" for a single, known JID. */
 export function useInCallOverlay(jid: () => string | null | undefined): ComputedRef<boolean> {
   const overlays = useStore($inCallOverlays);
   return computed(() => isInCall(jid() ?? "", overlays.value));
+}
+
+/**
+ * Reactive per-contact lookup for list rows, where `v-for` can't call the
+ * single-JID composable per row. Returns a `peerInCall(jid)` reader backed by
+ * the live store, so a render reflects the current overlays.
+ */
+export function useInCallOverlays(): { peerInCall: (jid: string) => boolean } {
+  const overlays = useStore($inCallOverlays);
+  return { peerInCall: (jid: string) => isInCall(jid, overlays.value) };
 }
