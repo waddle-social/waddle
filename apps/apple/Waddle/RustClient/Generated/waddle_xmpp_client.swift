@@ -657,7 +657,7 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
 
     func sendGroupchatMessage(roomJid: String, body: String, options: WaddleSendOptions?) async  -> WaddleSendMessageOutcome
 
-    func sendPresence(status: String?, show: String?) async
+    func sendPresence(status: String?, show: String?, idleSince: String?) async
 
     /**
      * XEP-0050 `disable-device` ad-hoc command on `push.<domain>`.
@@ -1223,13 +1223,13 @@ open func sendGroupchatMessage(roomJid: String, body: String, options: WaddleSen
         )
 }
 
-open func sendPresence(status: String?, show: String?)async   {
+open func sendPresence(status: String?, show: String?, idleSince: String?)async   {
     return
         try!  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_presence(
                     self.uniffiCloneHandle(),
-                    FfiConverterOptionString.lower(status),FfiConverterOptionString.lower(show)
+                    FfiConverterOptionString.lower(status),FfiConverterOptionString.lower(show),FfiConverterOptionString.lower(idleSince)
                 )
             },
             pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
@@ -5346,7 +5346,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_groupchat_message() != 8770) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_presence() != 8574) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_presence() != 49649) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disable_push_device() != 48200) {

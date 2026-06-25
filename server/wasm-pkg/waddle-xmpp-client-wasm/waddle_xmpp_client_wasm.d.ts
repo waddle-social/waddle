@@ -378,7 +378,17 @@ export class WaddleClient {
      * ```
      */
     send_muji_session_terminate(room_jid: string, sid_str: string): Promise<any>;
-    send_presence(status?: string | null, show?: string | null): Promise<any>;
+    /**
+     * Publish the user's own presence (RFC 6121 §4.7). `show` is an RFC
+     * 6121 `<show>` value (`away` / `xa` / `dnd` / `chat`) or `None` for
+     * plain Available (the absence of a `<show>`); `status` is the optional
+     * free-text line; `idle_since` is the XEP-0319 last-interaction instant as
+     * an xs:dateTime string (auto-away only), or `None` on a return-from-idle.
+     * Shares `build_presence_stanza` with the native + FFI `send_presence`, so
+     * every Waddle client emits byte-identical presence including the XEP-0115
+     * caps advertisement.
+     */
+    send_presence(status?: string | null, show?: string | null, idle_since?: string | null): Promise<any>;
     send_raw_iq(xml: string): Promise<any>;
     send_reaction(to: string, msg_type: string, target_id: string, emojis: string[], thread_id?: string | null, thread_parent?: string | null): Promise<any>;
     send_retraction(to: string, msg_type: string, retracts_id: string, thread_id?: string | null, thread_parent?: string | null): Promise<any>;

@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, type Component } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, type Component } from "vue";
 import { Hash, Menu, MessageCircle, MessagesSquare, PhoneCall, Pin, Search, Settings, Users } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import CallButton from "@/components/calls/CallButton.vue";
 import MucCallButton from "@/components/calls/MucCallButton.vue";
 import NotifyModeButton from "@/components/chat/NotifyModeButton.vue";
 import { hasKnownDmCallMedia, useDmCallActivity } from "@/lib/calls/dm-call-activity";
+import { formatIdle } from "@/presence/idle-duration";
 import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
 import type { ConnectionNoticeCopy } from "@/lib/connection-notice";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
@@ -30,7 +31,12 @@ export interface ChannelHeaderMember {
 const props = withDefaults(defineProps<{
   waddle: SpaceSummary | null;
   channel: ChannelSummary | null;
-  dmPeer?: { peerJid?: string; peerUsername: string; presenceShow?: string } | null;
+  dmPeer?: {
+    peerJid?: string;
+    peerUsername: string;
+    presenceShow?: string;
+    presenceIdleSince?: number;
+  } | null;
   callRoomJid?: string | null;
   isForumChannel: boolean;
   canManageChannels: boolean;
@@ -109,8 +115,37 @@ const dmCallActivityLabel = computed(() => {
 const showDmCallActivityStatus = computed(() =>
   props.showDmCallActivityControls !== false && !!dmCallActivity.value,
 );
+// Live clock so the idle age refreshes as time passes. The idle tracker
+// deliberately does not rebroadcast unchanged presence, so without a reactive
+// `now` the computed below would never recompute and "idle 20m" would go stale.
+// Ticks at minute granularity (matching formatIdle); cleared on unmount.
+const nowMs = ref(Date.now());
+let idleTicker: ReturnType<typeof setInterval> | null = null;
+onMounted(() => {
+  idleTicker = setInterval(() => {
+    nowMs.value = Date.now();
+  }, 60_000);
+});
+onBeforeUnmount(() => {
+  if (idleTicker !== null) {
+    clearInterval(idleTicker);
+    idleTicker = null;
+  }
+});
+
+// Presence line for a DM peer, appending the XEP-0319 idle age behind an
+// away/xa dot ("away · idle 20m"). Recomputes both when the peer's presence
+// changes and every minute as `nowMs` ticks, so the age stays current.
+const dmPeerPresenceText = computed(() => {
+  const show = props.dmPeer?.presenceShow;
+  const base = presenceText(show);
+  const idleSince = props.dmPeer?.presenceIdleSince;
+  return (show === "away" || show === "xa") && idleSince !== undefined
+    ? `${base} · ${formatIdle(idleSince, nowMs.value)}`
+    : base;
+});
 const dmHeaderSecondaryText = computed(() =>
-  showDmCallActivityStatus.value ? dmCallActivityLabel.value : presenceText(props.dmPeer?.presenceShow),
+  showDmCallActivityStatus.value ? dmCallActivityLabel.value : dmPeerPresenceText.value,
 );
 
 const emit = defineEmits<{
@@ -202,7 +237,7 @@ const memberButtonCopy = computed(() => {
               Forum
             </span>
             <span v-if="dmPeer" class="hidden lg:inline type-meta text-muted-foreground">
-              · {{ presenceText(dmPeer.presenceShow) }}
+              · {{ dmPeerPresenceText }}
             </span>
             <span
               v-if="showDmCallActivityStatus"

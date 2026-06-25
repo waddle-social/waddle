@@ -1,7 +1,7 @@
 import { withSpan } from "@/lib/telemetry";
 import { inferredFileDisposition } from "@/lib/chat-ui";
 import type { ThreadsSort, ThreadsStatusFilter } from "@/lib/threads-view-filters";
-import type { EffectiveShow } from "@/presence/effective-show";
+import type { BroadcastShow } from "@/presence/effective-show";
 import type { MemberSummary, UserSearchResult } from "../chat-types";
 import type { WaddleSession } from "../server-auth";
 import {
@@ -142,6 +142,7 @@ import {
   dmMessageFromArchived,
   encodeBodyForSend,
   inboxEntryFromWasm,
+  mapPresenceIdleSince,
   mapPresenceShow,
   parsePresenceShow,
   roomMessageFromArchived,
@@ -3104,8 +3105,11 @@ export class BrowserXmppClient {
     return parsed.filter(({ message }) => !!message.body).map(({ archived, message }) => ({ id: message.id, ...(archived.mam_id ? { archiveId: archived.mam_id } : {}), nick: message.nick, body: message.body, createdAt: message.createdAt, ...(message.threadId ? { threadId: message.threadId } : {}), ...(message.parentThreadId ? { parentThreadId: message.parentThreadId } : {}), peerJid: message.peerJid }));
   }
   async subscribeToPeerPresence(peerJid: string): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await xmpp.subscribe_to_presence?.(barePeerJid(peerJid)); }
-  /** Publish the user's own Show. RFC 6121 §4.7.2.1: Available is the absence of a `<show>`, so it sends no show element. */
-  async setPresence(show: EffectiveShow): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await xmpp.send_presence?.(undefined, show === "available" ? undefined : show); }
+  /** Publish the user's own Show plus an optional XEP-0319 idle stamp.
+   * RFC 6121 §4.7.2.1: Available is the absence of a `<show>`, so it sends no
+   * show element. `idleSince` (epoch ms) is serialised to an xs:dateTime; a
+   * null/omitted value sends no `<idle/>` (XEP-0319 return-from-idle). */
+  async setPresence(show: BroadcastShow, idleSince?: number | null): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await xmpp.send_presence?.(undefined, show === "available" ? undefined : show, idleSince != null ? new Date(idleSince).toISOString() : undefined); }
   async listRosterContacts(): Promise<RosterContact[]> { const xmpp = await this.requireConnectedXmpp(); const roster = await xmpp.list_roster_contacts?.() as WasmRosterContact[]; return (roster ?? []).map((item) => { const jid = barePeerJid(item.jid); return { jid, name: item.name, username: item.name?.trim() || jid.split("@")[0] || jid, subscription: (item.subscription ?? "none") as RosterContact["subscription"], groups: item.groups ?? [] }; }); }
   async getServerVersion(): Promise<WasmServerVersion | null> { const xmpp = await this.requireConnectedXmpp(); return await xmpp.get_server_version?.() as WasmServerVersion | null; }
   async discoverSpaceChannels(): Promise<any[]> { const xmpp = await this.requireConnectedXmpp(); return discoverChannels(xmpp as WasmClient, this.session.jid); }
@@ -3601,7 +3605,7 @@ export class BrowserXmppClient {
       }
       return;
     }
-    const bare = barePeerJid(from); if (!bare) return; if (presence.presence_type === "subscribe") return; this.presenceUpdateHandler?.({ bareJid: bare, resource: resourceOf(from), show: mapPresenceShow(presence), ...(presence.status ? { status: presence.status } : {}) });
+    const bare = barePeerJid(from); if (!bare) return; if (presence.presence_type === "subscribe") return; const idleSince = mapPresenceIdleSince(presence); this.presenceUpdateHandler?.({ bareJid: bare, resource: resourceOf(from), show: mapPresenceShow(presence), ...(presence.status ? { status: presence.status } : {}), ...(idleSince !== undefined ? { idleSince } : {}) });
   }
   private handleMessage(message: InboundWasmMessage) {
     const inboxPush = message.inboxPush ?? (message.inbox_push ? inboxEntryFromWasm(message.inbox_push) : undefined);

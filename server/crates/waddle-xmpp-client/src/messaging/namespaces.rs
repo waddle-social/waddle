@@ -36,6 +36,12 @@ pub(crate) const NS_STICKERS: &str = "urn:xmpp:stickers:0";
 pub(crate) const NS_VCARD_UPDATE: &str = "vcard-temp:x:update";
 pub const NS_WADDLE_PIN_V0: &str = "urn:waddle:pin:0";
 
+/// `urn:xmpp:idle:1` — XEP-0319 Last User Interaction in Presence. Stamped on
+/// auto-away presence so contacts can render the idle age ("away, idle 20m").
+/// Mirrors `waddle_xmpp::xep::xep0319::NS_IDLE`; the client crate cannot depend
+/// on the server crate, so the constant is duplicated and pinned by a test.
+pub const NS_IDLE: &str = "urn:xmpp:idle:1";
+
 /// `urn:xmpp:jingle:muji:0` — XEP-0272 Multiparty Jingle (Muji)
 /// namespace. Used in MUC presence to advertise call participation
 /// (`<muji><preparing/></muji>` while joining; `<muji><content/></muji>`
@@ -119,6 +125,22 @@ fn build_muji_content(media: &str) -> minidom::Element {
         .build()
 }
 
+/// Build an `<idle xmlns='urn:xmpp:idle:1' since='…'/>` element (XEP-0319).
+/// `since` is the instant the user last interacted, serialised as an XEP-0082 /
+/// xs:dateTime. Mirrors the server-side `waddle_xmpp::xep::xep0319::
+/// build_idle_element`.
+///
+/// CLAUDE.md XML hard rule: built from a typed `DateTime<Utc>`, never
+/// string-concatenated at the call site.
+pub fn build_idle_element(since: chrono::DateTime<chrono::Utc>) -> minidom::Element {
+    minidom::Element::builder("idle", NS_IDLE)
+        .attr(
+            minidom::rxml::xml_ncname!("since").to_owned(),
+            since.to_rfc3339(),
+        )
+        .build()
+}
+
 /// Build the `<in-call xmlns='urn:waddle:in-call:0'>` presence child
 /// (#1029 raised hand / #1030 mute), carried alongside (never inside)
 /// `<muji/>` in MUC call presence. Emits one marker child per advertised
@@ -185,6 +207,27 @@ mod tests {
     fn ns_constants_match_xep_namespaces() {
         assert_eq!(NS_MUJI, "urn:xmpp:jingle:muji:0");
         assert_eq!(NS_JINGLE_RTP, "urn:xmpp:jingle:apps:rtp:1");
+        // XEP-0319 §XML Schema targetNamespace.
+        assert_eq!(NS_IDLE, "urn:xmpp:idle:1");
+    }
+
+    #[test]
+    fn builds_idle_element_with_since() {
+        use chrono::TimeZone;
+        let since = chrono::Utc
+            .with_ymd_and_hms(2024, 6, 1, 12, 0, 0)
+            .single()
+            .expect("valid test date");
+        let elem = build_idle_element(since);
+        assert_eq!(elem.name(), "idle");
+        assert_eq!(elem.ns(), NS_IDLE);
+        let attr = elem.attr("since").expect("since attribute present");
+        // Round-trips back to the same instant as an xs:dateTime.
+        assert_eq!(
+            attr.parse::<chrono::DateTime<chrono::Utc>>()
+                .expect("valid xs:dateTime"),
+            since,
+        );
     }
 
     #[test]

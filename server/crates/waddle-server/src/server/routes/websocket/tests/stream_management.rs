@@ -2154,6 +2154,7 @@ async fn cleanup_shutdown_detaches_resumable_session_on_transport_drop() {
             Some("away".to_string()),
             Some("stepped out".to_string()),
             3,
+            None,
         );
 
     let mut conn = WsConnState::new();

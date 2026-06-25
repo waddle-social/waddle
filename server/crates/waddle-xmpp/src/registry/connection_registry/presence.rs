@@ -21,13 +21,14 @@ impl ConnectionRegistry {
         }
     }
 
-    /// Update full presence state (show/status/priority) for a connected resource.
+    /// Update full presence state (show/status/priority/idle) for a connected resource.
     pub fn update_presence_state(
         &self,
         jid: &FullJid,
         show: Option<String>,
         status: Option<String>,
         priority: i8,
+        idle_since: Option<chrono::DateTime<Utc>>,
     ) {
         self.presence_states.insert(
             jid.clone(),
@@ -35,6 +36,7 @@ impl ConnectionRegistry {
                 show,
                 status,
                 priority,
+                idle_since,
             },
         );
     }

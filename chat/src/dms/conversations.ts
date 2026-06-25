@@ -38,6 +38,9 @@ export function useDirectMessageConversations(
   const conversations = ref<DmConversation[]>([]);
   const activePeerJid = ref<string | null>(null);
   const presenceByJid = ref<Record<string, DmConversation["presenceShow"]>>({});
+  // Per-peer XEP-0319 idle instant (epoch ms) behind an away dot; ephemeral
+  // (repopulated by live presence), so unlike unread it is not persisted.
+  const presenceIdleByJid = ref<Record<string, number | undefined>>({});
   const localReadAtByJid = ref<Record<string, number>>({});
 
   const hasUnread = computed(() => conversations.value.some((c) => c.unreadCount > 0));
@@ -65,7 +68,11 @@ export function useDirectMessageConversations(
     window.sessionStorage.setItem(
       key,
       JSON.stringify({
-        conversations: conversations.value,
+        // presenceIdleSince is ephemeral (repopulated by live presence). Strip
+        // it before persisting — JSON.stringify drops the `undefined` key — so a
+        // stale "idle 20m" can't survive a reload. presenceShow is still
+        // persisted so the dot doesn't flash offline before presence arrives.
+        conversations: conversations.value.map((c) => ({ ...c, presenceIdleSince: undefined })),
         activePeerJid: activePeerJid.value,
       }),
     );
@@ -84,6 +91,9 @@ export function useDirectMessageConversations(
         peerJid: barePeerJid(c.peerJid),
         peerUsername: c.peerUsername || peerUsername(c.peerJid),
         unreadCount: c.unreadCount ?? 0,
+        // Clear any idle age from an older persisted blob — it starts empty and
+        // only repopulates from live presence updates.
+        presenceIdleSince: undefined,
       })));
       activePeerJid.value = parsed.activePeerJid ? barePeerJid(parsed.activePeerJid) : null;
       for (const c of conversations.value) {
@@ -106,6 +116,7 @@ export function useDirectMessageConversations(
       peerUsername: peerUsername(bare),
       unreadCount: 0,
       presenceShow: presenceByJid.value[bare] ?? "offline",
+      presenceIdleSince: presenceIdleByJid.value[bare],
     };
     conversations.value = sortByRecent([...conversations.value, created]);
     return created;
@@ -184,6 +195,7 @@ export function useDirectMessageConversations(
           ? Math.max(existing?.unreadCount ?? 0, entry.unread)
           : entry.unread,
       presenceShow: presenceByJid.value[bare] ?? existing?.presenceShow ?? "offline",
+      presenceIdleSince: presenceIdleByJid.value[bare] ?? existing?.presenceIdleSince,
     };
   }
 
@@ -321,6 +333,7 @@ export function useDirectMessageConversations(
             lastMessageAt: msg.createdAt,
             unreadCount: shouldIncrementUnread ? c.unreadCount + 1 : c.unreadCount,
             presenceShow: presenceByJid.value[bare] ?? c.presenceShow,
+            presenceIdleSince: presenceIdleByJid.value[bare] ?? c.presenceIdleSince,
           }
         : c
     )));
@@ -329,8 +342,13 @@ export function useDirectMessageConversations(
   function updatePresence(event: PresenceUpdateEvent) {
     const bare = barePeerJid(event.bareJid);
     presenceByJid.value = { ...presenceByJid.value, [bare]: event.show };
+    // Always overwrite (including to undefined) so returning to Available
+    // clears a previously rendered idle age rather than stranding it.
+    presenceIdleByJid.value = { ...presenceIdleByJid.value, [bare]: event.idleSince };
     conversations.value = conversations.value.map((c) => (
-      c.peerJid === bare ? { ...c, presenceShow: event.show } : c
+      c.peerJid === bare
+        ? { ...c, presenceShow: event.show, presenceIdleSince: event.idleSince }
+        : c
     ));
   }
 
@@ -346,6 +364,7 @@ export function useDirectMessageConversations(
       conversations.value = [];
       activePeerJid.value = null;
       presenceByJid.value = {};
+      presenceIdleByJid.value = {};
       localReadAtByJid.value = {};
       restore();
       for (const c of conversations.value) {

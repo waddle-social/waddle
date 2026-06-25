@@ -361,6 +361,11 @@ export interface DmConversation {
   lastMessageAt?: string;
   unreadCount: number;
   presenceShow?: "available" | "away" | "xa" | "dnd" | "offline";
+  /**
+   * XEP-0319 idle instant (epoch ms) behind an away/xa presence, for rendering
+   * the idle age ("away, idle 20m"). Absent when the peer is interacting.
+   */
+  presenceIdleSince?: number;
 }
 
 export interface ChatStateEvent {
@@ -398,6 +403,12 @@ export interface PresenceUpdateEvent {
   resource: string;
   show: "available" | "away" | "xa" | "dnd" | "offline";
   status?: string;
+  /**
+   * XEP-0319 last-interaction instant as epoch ms, when the presence carried
+   * an `<idle since>` (auto-away). Absent on an interacting contact. Lets the
+   * receiver render the idle age ("away, idle 20m").
+   */
+  idleSince?: number;
 }
 
 export interface RosterContact {

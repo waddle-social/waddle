@@ -259,6 +259,12 @@ export interface WasmPresence {
    * authoritative remote-mute indicator on tiles and in the roster.
    */
   muted?: boolean;
+  /**
+   * XEP-0319 Last User Interaction — the raw `since` xs:dateTime from the
+   * contact's `<idle xmlns='urn:xmpp:idle:1'/>`, or absent when the presence
+   * carries none. The chat side renders the idle age on an away presence.
+   */
+  idle_since?: string;
 }
 
 /**
