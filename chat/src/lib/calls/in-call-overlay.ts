@@ -64,4 +64,13 @@ export class CallOverlayPublisher {
       this.deps.publish(desired);
     }
   }
+
+  /**
+   * Forget what the wire is assumed to hold. Call on logout: the PEP item
+   * belongs to the signed-out account, so the next session must re-publish from
+   * a clean baseline rather than suppress an "unchanged" overlay it never sent.
+   */
+  reset(): void {
+    this.lastPublished = null;
+  }
 }

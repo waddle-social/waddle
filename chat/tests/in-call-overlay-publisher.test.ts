@@ -71,4 +71,13 @@ describe("CallOverlayPublisher", () => {
     publisher.update(IDLE);
     expect(events.filter((e) => e.type === "retract")).toHaveLength(1);
   });
+
+  test("reset() forgets the wire baseline so the next session re-publishes", () => {
+    const { publisher, events } = harness();
+    publisher.update(active({ audio: true, video: false }));
+    // Logout: the wire baseline is no longer trustworthy (new session/account).
+    publisher.reset();
+    publisher.update(active({ audio: true, video: false }));
+    expect(events.filter((e) => e.type === "publish")).toHaveLength(2);
+  });
 });

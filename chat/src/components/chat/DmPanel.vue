@@ -26,6 +26,7 @@ import {
 import type { DmCallActivity } from "@/lib/calls/dm-call-activity";
 import type { CallMedia } from "@/lib/calls/types";
 import { barePeerJid } from "@/lib/xmpp/jid";
+import { $inCallOverlays, isInCall } from "@/presence/in-call-overlay-store";
 import type { GroupDmSummary } from "@/lib/chat-types";
 import type { DmConversation } from "@/lib/xmpp-client";
 
@@ -57,7 +58,14 @@ const emit = defineEmits<{
 }>();
 
 const dmCallActivities = useStore($dmCallActivities);
+const inCallOverlays = useStore($inCallOverlays);
 const mucCallParticipants = useStore($mucCallParticipants);
+
+// Whether a DM peer is in a call (their XEP-0108 overlay, ADR-010 Phase 3),
+// for the badge layered on top of their presence dot.
+function peerInCall(peerJid: string): boolean {
+  return isInCall(peerJid, inCallOverlays.value);
+}
 const mucCallMedia = useStore($mucCallMedia);
 const callState = useStore($callState);
 const activePeer = computed(() => normalizedPeerJid(props.activePeerJid ?? ""));
@@ -729,7 +737,7 @@ function threadEntryLabel(entry: MessageThreadEntry): string {
             @click.stop="emit('selectDm', conversation.peerJid)"
           >
             <div class="relative">
-              <AppAvatar :name="conversation.peerUsername" :src="conversation.peerAvatarUrl ?? null" size="sm" />
+              <AppAvatar :name="conversation.peerUsername" :src="conversation.peerAvatarUrl ?? null" size="sm" :in-call="peerInCall(conversation.peerJid)" />
               <span class="absolute -right-0.5 -bottom-0.5 w-2 h-2 rounded-full border border-background" :class="dotClass(conversation.presenceShow)" />
             </div>
             <div class="min-w-0 flex-1">

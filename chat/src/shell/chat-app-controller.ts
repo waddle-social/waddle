@@ -28,6 +28,12 @@ import { resolveShow } from "@/presence/effective-show";
 import { IdleTracker } from "@/presence/idle-tracker";
 import { PresenceRegistry } from "@/presence/presence-registry";
 import { $presenceMode, resetPresenceMode } from "@/presence/presence-store";
+import { ACTIVITY_PEP_NODE, parseActivityOverlay } from "@/presence/in-call-activity";
+import {
+  clearInCallOverlay,
+  resetInCallOverlays,
+  setInCallOverlay,
+} from "@/presence/in-call-overlay-store";
 import { matchLocation, navigate, type RouteMatch } from "@/router";
 import { resolveChannelBySlug } from "@/shell/route-helpers";
 import { barePeerJid, jidDomain, parseManagedRoomBareJid, type LiveDmMessage, type RoomActivityEvent } from "@/lib/xmpp-client";
@@ -39,6 +45,7 @@ import {
   roomJidForChannelId as resolveRoomJidForChannelId,
 } from "@/lib/channel-room";
 import { $callState } from "@/lib/calls/call-store";
+import { CallOverlayPublisher } from "@/lib/calls/in-call-overlay";
 import { normalizeMucServiceDomain } from "@/lib/calls/muc-call-indicators";
 import { resolveThreadEntryTarget } from "@/lib/threads-view-target";
 import { connectionStore } from "@/lib/connection-store";
@@ -801,6 +808,19 @@ export function useChatAppController(giphyApiKey: string) {
   // ending one resumes the idle timer from call-end.
   const callState = useStore($callState);
   watch(() => callState.value.phase === "active", () => idleTracker.evaluate());
+  // In-call presence overlay (ADR-010 Phase 3): joining a 1:1 or MUC call
+  // publishes XEP-0108 `talking/on_the_phone` (audio) or `on_video_phone`
+  // (video) over PEP; leaving retracts it. The publisher diffs against the wire
+  // so identical states never re-publish. Orthogonal to the Show.
+  const callOverlayPublisher = new CallOverlayPublisher({
+    publish: (activity) => {
+      xmppClient.value?.publishActivity(activity).catch(() => undefined);
+    },
+    retract: () => {
+      xmppClient.value?.retractActivity().catch(() => undefined);
+    },
+  });
+  watch(callState, (state) => callOverlayPublisher.update(state), { immediate: true });
   const appUpdate = useServiceWorkerUpdate();
   const version = useDeploymentVersionInfo(xmppClient);
   // RFC 363 PR 6: include DM peers in the iterate-and-pull avatar
@@ -928,6 +948,9 @@ export function useChatAppController(giphyApiKey: string) {
       // Client torn down (logout) — drop aggregated presence so a later
       // session never inherits another account's / a stale resource's Show.
       presenceRegistry.clear();
+      // Likewise drop every contact's in-call overlay so it can't bleed into
+      // the next account in this tab.
+      resetInCallOverlays();
       return;
     }
     client.setDirectMessageHandler((msg) => {
@@ -982,6 +1005,24 @@ export function useChatAppController(giphyApiKey: string) {
       const renderedIdle = presenceRegistry.renderedIdleFor(event.bareJid);
       dmConversations.updatePresence({ ...event, show: rendered, idleSince: renderedIdle });
       rosterContacts.updatePresence(event.bareJid, rendered);
+      // Ghost-call cleanup (ADR-010): a contact whose last resource went
+      // unavailable can't still be in a call — clear any overlay a crashed
+      // client left published, even if its XEP-0108 retract never arrived.
+      if (rendered === "offline") clearInCallOverlay(event.bareJid);
+    });
+    // In-call overlay receive side (ADR-010 Phase 3): a contact's XEP-0108
+    // activity arrives as an opaque `<activity/>` on the activity PEP node.
+    // `talking/on_the_phone` or `on_video_phone` lights the badge; the empty
+    // retraction (or any other activity) clears it.
+    client.addPubsubEventHandler((event) => {
+      if (event.node !== ACTIVITY_PEP_NODE || !event.from) return;
+      for (const item of event.items) {
+        const inCall =
+          !item.retracted && item.payload.kind === "opaque"
+            ? parseActivityOverlay(item.payload.xml)
+            : false;
+        setInCallOverlay(event.from, inCall);
+      }
     });
     client.setMemberJidHandler((nick, bareJid) => {
       memberJidByNick.value = { ...memberJidByNick.value, [nick]: bareJid };
@@ -1059,6 +1100,10 @@ export function useChatAppController(giphyApiKey: string) {
         // probes repopulate it cleanly. A resumed session is gap-free, so
         // its registry is preserved.
         presenceRegistry.clear();
+        // Same gap applies to the in-call overlay: a fresh session may have
+        // missed contacts' activity retracts, so drop it and let live presence
+        // + PEP repopulate. A resumed session is gap-free, so it's preserved.
+        resetInCallOverlays();
         // Belt-and-braces: hydrate already catches lower-layer
         // throws, but call-site .catch defends against any future
         // regression so an unhandled rejection doesn't propagate
@@ -2339,6 +2384,15 @@ export function useChatAppController(giphyApiKey: string) {
     // Away/DND or another user's contact presence.
     resetPresenceMode();
     presenceRegistry.clear();
+    // Graceful disconnect (ADR-010 ghost cleanup): if a call is live, retract
+    // the XEP-0108 overlay at the source before the stream closes so no stale
+    // "in a call" survives on the server. Then reset the publisher baseline and
+    // the receiver overlays so the next account starts clean.
+    if ($callState.get().phase === "active") {
+      await xmppClient.value?.retractActivity().catch(() => undefined);
+    }
+    callOverlayPublisher.reset();
+    resetInCallOverlays();
     ui.showPinnedPanel.value = false;
     navigate({ id: "home" });
     await connectionStore.logout();

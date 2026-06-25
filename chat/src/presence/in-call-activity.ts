@@ -15,6 +15,9 @@ import {
 
 const NS_ACTIVITY = "http://jabber.org/protocol/activity";
 
+/** The PEP node XEP-0108 activity is published to (equal to its namespace). */
+export const ACTIVITY_PEP_NODE = NS_ACTIVITY;
+
 /**
  * Whether a parsed `<activity/>` (its general + optional specific element
  * names) is an in-call overlay. Only `talking/on_the_phone` and
