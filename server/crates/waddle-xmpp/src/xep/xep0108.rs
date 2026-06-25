@@ -230,6 +230,33 @@ mod tests {
         assert_eq!(parsed, a);
     }
 
+    // The in-call presence overlay (ADR-010 Phase 3) rides exactly these two
+    // wire shapes; lock them so the receiver's parse keeps matching the builder.
+    #[test]
+    fn test_in_call_overlay_on_the_phone_round_trips() {
+        let a = Activity::new(GeneralActivity::Talking)
+            .with_specific(SpecificActivity::new("on_the_phone").unwrap());
+        let elem = build_activity_element(&a);
+        // Exact shape: <activity><talking><on_the_phone/></talking></activity>.
+        let talking = elem
+            .get_child("talking", NS_ACTIVITY)
+            .expect("talking element");
+        assert!(talking.has_child("on_the_phone", NS_ACTIVITY));
+        assert_eq!(parse_activity_element(&elem).unwrap().unwrap(), a);
+    }
+
+    #[test]
+    fn test_in_call_overlay_on_video_phone_round_trips() {
+        let a = Activity::new(GeneralActivity::Talking)
+            .with_specific(SpecificActivity::new("on_video_phone").unwrap());
+        let elem = build_activity_element(&a);
+        let talking = elem
+            .get_child("talking", NS_ACTIVITY)
+            .expect("talking element");
+        assert!(talking.has_child("on_video_phone", NS_ACTIVITY));
+        assert_eq!(parse_activity_element(&elem).unwrap().unwrap(), a);
+    }
+
     #[test]
     fn test_retraction_empty() {
         let elem = build_activity_retraction();
