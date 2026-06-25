@@ -770,7 +770,8 @@ pub(crate) fn presence_to_js(presence: InboundPresence) -> WaddlePresence {
         }),
         hand_raised: presence.hand_raised,
         muted: presence.muted,
-        idle_since: presence.idle_since,
+        // Typed instant → xs:dateTime only at this JS boundary (typed-payloads).
+        idle_since: presence.idle_since.map(|since| since.to_rfc3339()),
     }
 }
 

@@ -104,12 +104,13 @@ pub(super) fn parse_presence(el: &Element) -> InboundPresence {
     let muted = in_call_has("muted");
 
     // XEP-0319 Last User Interaction: `<idle xmlns='urn:xmpp:idle:1' since='…'/>`.
-    // Captured as the raw xs:dateTime so the chat side can render the idle age
-    // ("away, idle 20m"). Absent means the contact is interacting now.
+    // Parsed once here into a typed instant (typed-payloads hard rule); a missing
+    // or malformed xs:dateTime degrades to `None` rather than flowing past the
+    // boundary as an unvalidated string. Re-serialized only at the JS boundary.
     let idle_since = el
         .get_child("idle", NS_IDLE)
         .and_then(|idle| idle.attr("since"))
-        .map(str::to_string);
+        .and_then(|since| since.parse::<DateTime<Utc>>().ok());
 
     InboundPresence {
         from,
@@ -273,7 +274,8 @@ mod tests {
 
     #[test]
     fn parses_xep0319_idle_since_from_away_presence() {
-        // XEP-0319 §last-interact: an away presence carries the idle instant.
+        // XEP-0319 §last-interact: an away presence carries the idle instant,
+        // parsed once into a typed `DateTime<Utc>` (typed-payloads hard rule).
         let xml = r#"<presence xmlns="jabber:client" from="alice@test/desktop">
             <show>away</show>
             <idle xmlns="urn:xmpp:idle:1" since="1969-07-21T02:56:15Z"/>
@@ -281,7 +283,22 @@ mod tests {
         let elem: Element = xml.parse().unwrap();
         let p = parse_presence(&elem);
         assert_eq!(p.show.as_deref(), Some("away"));
-        assert_eq!(p.idle_since.as_deref(), Some("1969-07-21T02:56:15Z"));
+        assert_eq!(
+            p.idle_since,
+            Some("1969-07-21T02:56:15Z".parse::<DateTime<Utc>>().unwrap())
+        );
+    }
+
+    #[test]
+    fn malformed_idle_since_degrades_to_none() {
+        // A non-xs:dateTime `since` must not flow past the wire boundary as a
+        // string — it parses to `None` (typed-payloads hard rule).
+        let xml = r#"<presence xmlns="jabber:client" from="alice@test/desktop">
+            <show>away</show>
+            <idle xmlns="urn:xmpp:idle:1" since="not-a-timestamp"/>
+        </presence>"#;
+        let elem: Element = xml.parse().unwrap();
+        assert!(parse_presence(&elem).idle_since.is_none());
     }
 
     #[test]
