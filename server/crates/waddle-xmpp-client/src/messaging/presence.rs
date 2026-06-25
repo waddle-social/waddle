@@ -276,46 +276,54 @@ mod tests {
     fn parses_xep0319_idle_since_from_away_presence() {
         // XEP-0319 §last-interact: an away presence carries the idle instant,
         // parsed once into a typed `DateTime<Utc>` (typed-payloads hard rule).
-        let xml = r#"<presence xmlns="jabber:client" from="alice@test/desktop">
-            <show>away</show>
-            <idle xmlns="urn:xmpp:idle:1" since="1969-07-21T02:56:15Z"/>
-        </presence>"#;
-        let elem: Element = xml.parse().unwrap();
+        // Built through the typed presence/idle builders and round-tripped
+        // (no hand-written XML, so the fixture can't diverge from the wire shape).
+        let since = "1969-07-21T02:56:15Z".parse::<DateTime<Utc>>().unwrap();
+        let elem = Element::from(build_presence_stanza(None, Some(Show::Away), Some(since)));
         let p = parse_presence(&elem);
         assert_eq!(p.show.as_deref(), Some("away"));
-        assert_eq!(
-            p.idle_since,
-            Some("1969-07-21T02:56:15Z".parse::<DateTime<Utc>>().unwrap())
-        );
+        assert_eq!(p.idle_since, Some(since));
     }
 
     #[test]
     fn malformed_idle_since_degrades_to_none() {
         // A non-xs:dateTime `since` must not flow past the wire boundary as a
-        // string — it parses to `None` (typed-payloads hard rule).
-        let xml = r#"<presence xmlns="jabber:client" from="alice@test/desktop">
-            <show>away</show>
-            <idle xmlns="urn:xmpp:idle:1" since="not-a-timestamp"/>
-        </presence>"#;
-        let elem: Element = xml.parse().unwrap();
+        // string — it parses to `None` (typed-payloads hard rule). The builder
+        // can't emit a malformed instant, so assemble the bad `<idle/>` via the
+        // typed `Element` builder rather than a raw XML string.
+        let elem = Element::builder("presence", NS_CLIENT)
+            .append(
+                Element::builder("idle", NS_IDLE)
+                    .attr(
+                        minidom::rxml::xml_ncname!("since").to_owned(),
+                        "not-a-timestamp",
+                    )
+                    .build(),
+            )
+            .build();
         assert!(parse_presence(&elem).idle_since.is_none());
     }
 
     #[test]
     fn presence_without_idle_has_no_idle_since() {
         // XEP-0319 §back-from-idle: a normal presence omits <idle/> entirely.
-        let xml = r#"<presence xmlns="jabber:client" from="alice@test/desktop"/>"#;
-        let elem: Element = xml.parse().unwrap();
+        let elem = Element::from(build_presence_stanza(None, Some(Show::Away), None));
         assert!(parse_presence(&elem).idle_since.is_none());
     }
 
     #[test]
     fn idle_in_wrong_namespace_is_not_parsed() {
-        // Only `urn:xmpp:idle:1` is XEP-0319; a look-alike must be ignored.
-        let xml = r#"<presence xmlns="jabber:client" from="alice@test/desktop">
-            <idle xmlns="urn:waddle:not-idle" since="1969-07-21T02:56:15Z"/>
-        </presence>"#;
-        let elem: Element = xml.parse().unwrap();
+        // Only `urn:xmpp:idle:1` is XEP-0319; a look-alike namespace is ignored.
+        let elem = Element::builder("presence", NS_CLIENT)
+            .append(
+                Element::builder("idle", "urn:waddle:not-idle")
+                    .attr(
+                        minidom::rxml::xml_ncname!("since").to_owned(),
+                        "1969-07-21T02:56:15Z",
+                    )
+                    .build(),
+            )
+            .build();
         assert!(parse_presence(&elem).idle_since.is_none());
     }
 
