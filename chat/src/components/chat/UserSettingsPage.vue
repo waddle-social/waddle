@@ -9,6 +9,7 @@ import VersionFooter from "@/components/chat/VersionFooter.vue";
 import type { XmppServerVersion } from "@/shell/version";
 import type { WaddleSession } from "@/lib/server-auth";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
+import { clearManualActivity, setManualActivity } from "@/presence/self-activity";
 import {
   buildActivityPublication,
   buildMoodPublication,
@@ -240,7 +241,7 @@ async function publishActivityStatus() {
 
   activityBusy.value = true;
   try {
-    await props.xmppClient.publishActivity(publication);
+    setManualActivity(publication);
     applyActivityDraft();
     activityFeedback.value = {
       tone: "success",
@@ -265,7 +266,7 @@ async function clearActivityStatus() {
 
   activityBusy.value = true;
   try {
-    await props.xmppClient.retractActivity();
+    clearManualActivity();
     resetActivityDraft();
     activityFeedback.value = {
       tone: "success",

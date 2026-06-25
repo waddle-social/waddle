@@ -1,9 +1,9 @@
-// Outbound half of the in-call presence overlay (ADR-010 Phase 3). Joining a
-// 1:1 or MUC call publishes XEP-0108 User Activity `talking/on_the_phone`
-// (audio) or `talking/on_video_phone` (video) over PEP so a contact's roster /
-// DM clients can layer an "in a call" badge on top of their existing Show.
-// Leaving retracts it. The overlay is orthogonal to the Show — it never
-// changes Available/Away/DND.
+// The in-call half of the XEP-0108 presence overlay (ADR-010 Phase 3): the pure
+// mapping from call state to the activity to publish. Joining a 1:1 or MUC call
+// is `talking/on_the_phone` (audio) or `talking/on_video_phone` (video); the
+// overlay is orthogonal to the Show — it never changes Available/Away/DND. The
+// `ActivityCoordinator` owns the node and merges this with the user's manual
+// activity (a call overrides it, then it is restored on leave).
 
 import {
   ACTIVITY_GENERAL_TALKING,
@@ -14,9 +14,9 @@ import {
 import type { CallState } from "./types";
 
 /**
- * The XEP-0108 activity to publish for a given call state, or `null` when no
- * overlay should be on the wire (any non-active phase ⇒ retract). A live call
- * is `talking`; the specific sub-activity carries the audio/video distinction.
+ * The XEP-0108 activity for a given call state, or `null` when the call implies
+ * no overlay (any non-active phase). A live call is `talking`; the specific
+ * sub-activity carries the audio/video distinction.
  */
 export function callOverlayActivity(state: CallState): ActivityPublication | null {
   if (state.phase !== "active") return null;
@@ -26,63 +26,4 @@ export function callOverlayActivity(state: CallState): ActivityPublication | nul
       ? ACTIVITY_SPECIFIC_ON_VIDEO_PHONE
       : ACTIVITY_SPECIFIC_ON_THE_PHONE,
   };
-}
-
-function sameActivity(a: ActivityPublication | null, b: ActivityPublication | null): boolean {
-  if (a === null || b === null) return a === b;
-  return a.general === b.general && a.specific === b.specific;
-}
-
-export interface CallOverlayPublisherDeps {
-  /** Publish the in-call XEP-0108 activity item over PEP. */
-  publish: (activity: ActivityPublication) => void;
-  /** Clear the activity item (publish the empty `<activity/>` retraction). */
-  retract: () => void;
-}
-
-/**
- * Drives the outbound overlay from call-state transitions. Fed each new
- * `CallState`, it diffs the desired overlay against what it last put on the
- * wire and emits a publish or retract only on a real change — so a stream of
- * identical "active" states never re-publishes, and toggling video mid-call
- * re-publishes the matching specific. It never retracts something it never
- * published (idle→idle is silent). One instance owns the activity node, so the
- * wire and `lastPublished` stay in lock-step.
- */
-export class CallOverlayPublisher {
-  private lastPublished: ActivityPublication | null = null;
-
-  constructor(private readonly deps: CallOverlayPublisherDeps) {}
-
-  update(state: CallState): void {
-    const desired = callOverlayActivity(state);
-    if (sameActivity(desired, this.lastPublished)) return;
-    this.lastPublished = desired;
-    if (desired === null) {
-      this.deps.retract();
-    } else {
-      this.deps.publish(desired);
-    }
-  }
-
-  /**
-   * Re-publish the overlay implied by `state` from a clean baseline. Call on
-   * session-ready so a publish that never reached the wire (client briefly
-   * null, IQ rejected, reconnect) self-heals on the next connect — mirroring
-   * the presence re-broadcast. A no-op when not in a call, so it never spams an
-   * empty retraction; the refreshed baseline keeps a later leave retracting.
-   */
-  reassert(state: CallState): void {
-    this.lastPublished = callOverlayActivity(state);
-    if (this.lastPublished !== null) this.deps.publish(this.lastPublished);
-  }
-
-  /**
-   * Forget what the wire is assumed to hold. Call on logout: the PEP item
-   * belongs to the signed-out account, so the next session must re-publish from
-   * a clean baseline rather than suppress an "unchanged" overlay it never sent.
-   */
-  reset(): void {
-    this.lastPublished = null;
-  }
 }

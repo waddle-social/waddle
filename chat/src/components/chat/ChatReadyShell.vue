@@ -58,6 +58,7 @@ import type { DiscoveredExtensionRoute } from "@/lib/xmpp/extension-commands";
 import { isEventUpcomingOrOngoing } from "@/lib/xmpp-client";
 import type { FeedPostInput, StoryPostInput } from "@/lib/xmpp-client";
 import type { ActivityPublication, MoodPublication, TunePublication } from "@/lib/xmpp/pep-types";
+import { setManualActivity } from "@/presence/self-activity";
 import type { VCard4Profile } from "@/lib/xmpp/vcard4-types";
 import { installMessageToolbarLifecycleSuppression } from "@/stores/message-toolbar";
 import {
@@ -360,7 +361,12 @@ async function publishFeedMood(input: MoodPublication): Promise<void> {
 }
 
 async function publishFeedActivity(input: ActivityPublication): Promise<void> {
-  await requireFeedPepClient().publishActivity(input);
+  // The activity node is owned by the ActivityCoordinator (so the in-call
+  // overlay and manual activity don't clobber each other); record the intent
+  // and the coordinator publishes synchronously before the feed refresh.
+  // `requireFeedPepClient` keeps the connected-guard error UX.
+  requireFeedPepClient();
+  setManualActivity(input);
   await refreshFeedAfterPepPublish();
 }
 
