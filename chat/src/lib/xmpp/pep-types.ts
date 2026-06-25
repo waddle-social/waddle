@@ -40,6 +40,13 @@ export const GENERAL_ACTIVITIES = [
 
 export type GeneralActivity = typeof GENERAL_ACTIVITIES[number];
 
+// XEP-0108 §3.2 specific sub-activities under `talking` that mean "on a call".
+// Waddle's in-call presence overlay (ADR-010 Phase 3) rides exactly these:
+// audio-only publishes `on_the_phone`, video publishes `on_video_phone`.
+export const ACTIVITY_GENERAL_TALKING = "talking" as const;
+export const ACTIVITY_SPECIFIC_ON_THE_PHONE = "on_the_phone" as const;
+export const ACTIVITY_SPECIFIC_ON_VIDEO_PHONE = "on_video_phone" as const;
+
 export interface ActivityPublication {
   general: GeneralActivity;
   specific?: string;
