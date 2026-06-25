@@ -28,7 +28,7 @@ import { resolveShow } from "@/presence/effective-show";
 import { IdleTracker } from "@/presence/idle-tracker";
 import { PresenceRegistry } from "@/presence/presence-registry";
 import { $presenceMode, resetPresenceMode } from "@/presence/presence-store";
-import { ACTIVITY_PEP_NODE, parseActivityOverlay } from "@/presence/in-call-activity";
+import { activityOverlayUpdate } from "@/presence/in-call-activity";
 import {
   clearInCallOverlay,
   resetInCallOverlays,
@@ -1015,17 +1015,8 @@ export function useChatAppController(giphyApiKey: string) {
     // `talking/on_the_phone` or `on_video_phone` lights the badge; the empty
     // retraction (or any other activity) clears it.
     client.addPubsubEventHandler((event) => {
-      if (event.node !== ACTIVITY_PEP_NODE || !event.from) return;
-      // XEP-0163 §3.4 also self-notifies our own other resources (from = our
-      // bare JID). The overlay is a *contact* signal; never badge ourselves.
-      if (barePeerJid(event.from) === barePeerJid(session.value?.jid ?? "")) return;
-      for (const item of event.items) {
-        const inCall =
-          !item.retracted && item.payload.kind === "opaque"
-            ? parseActivityOverlay(item.payload.xml)
-            : false;
-        setInCallOverlay(event.from, inCall);
-      }
+      const update = activityOverlayUpdate(event, session.value?.jid ?? "");
+      if (update) setInCallOverlay(update.jid, update.inCall);
     });
     client.setMemberJidHandler((nick, bareJid) => {
       memberJidByNick.value = { ...memberJidByNick.value, [nick]: bareJid };

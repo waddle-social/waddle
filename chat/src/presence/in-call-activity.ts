@@ -12,11 +12,12 @@ import {
   ACTIVITY_SPECIFIC_ON_THE_PHONE,
   ACTIVITY_SPECIFIC_ON_VIDEO_PHONE,
 } from "@/lib/xmpp/pep-types";
+import { barePeerJid } from "@/lib/xmpp/jid";
 
 const NS_ACTIVITY = "http://jabber.org/protocol/activity";
 
 /** The PEP node XEP-0108 activity is published to (equal to its namespace). */
-export const ACTIVITY_PEP_NODE = NS_ACTIVITY;
+const ACTIVITY_PEP_NODE = NS_ACTIVITY;
 
 /**
  * Whether a parsed `<activity/>` (its general + optional specific element
@@ -27,6 +28,47 @@ export const ACTIVITY_PEP_NODE = NS_ACTIVITY;
 export function inCallFromActivity(general: string, specific: string | null): boolean {
   if (general !== ACTIVITY_GENERAL_TALKING) return false;
   return specific === ACTIVITY_SPECIFIC_ON_THE_PHONE || specific === ACTIVITY_SPECIFIC_ON_VIDEO_PHONE;
+}
+
+/**
+ * One inbound pubsub item, structurally typed to the subset this decision
+ * reads (assignable from the wasm `WasmPubsubEventItem`).
+ */
+interface ActivityPubsubItem {
+  retracted?: boolean;
+  payload: { kind: string; xml?: string };
+}
+
+/** One inbound pubsub event, structural subset of the wasm `WasmPubsubEvent`. */
+interface ActivityPubsubEvent {
+  from?: string;
+  node: string;
+  items: ActivityPubsubItem[];
+}
+
+/**
+ * Resolve an inbound pubsub event into a single in-call overlay update for the
+ * publishing contact, or `null` when it carries no overlay signal: a foreign
+ * node, no sender, our own self-echo (XEP-0163 §3.4 notifies our other
+ * resources with our bare JID — never badge ourselves), or no items. The
+ * activity node is single-item (id `current`); if several items arrive the last
+ * wins, matching what the node would hold.
+ */
+export function activityOverlayUpdate(
+  event: ActivityPubsubEvent,
+  selfBareJid: string,
+): { jid: string; inCall: boolean } | null {
+  if (event.node !== ACTIVITY_PEP_NODE || !event.from) return null;
+  if (barePeerJid(event.from) === barePeerJid(selfBareJid)) return null;
+  let update: { jid: string; inCall: boolean } | null = null;
+  for (const item of event.items) {
+    const inCall =
+      !item.retracted && item.payload.kind === "opaque" && item.payload.xml !== undefined
+        ? parseActivityOverlay(item.payload.xml)
+        : false;
+    update = { jid: event.from, inCall };
+  }
+  return update;
 }
 
 /** Parse incoming opaque `<activity/>` XML into the in-call overlay boolean. */
