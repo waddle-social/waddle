@@ -477,6 +477,21 @@ export class WaddleClient {
      */
     set_room_notification_mode(options: any): Promise<any>;
     /**
+     * Fetch the user's stored preference from their own PEP node.
+     * Resolves to `null` when nothing is stored.
+     *
+     * Per XEP-0223 §Security Considerations (CVE-2023-28686), the
+     * result IQ's `from` MUST be absent or the account's bare JID;
+     * anything else is treated as spoofed and yields `null`.
+     */
+    status_preference_fetch(): Promise<any>;
+    /**
+     * Publish the user's picked presence mode. Overwrites the single
+     * `current` item on every call (reset publishes `mode='automatic'`
+     * rather than retracting, so the change fans out to other devices).
+     */
+    status_preference_publish(input: any): Promise<any>;
+    /**
      * Fetch the latest stories from the community stories node on
      * `community_jid`. Returns ALL items including expired ones —
      * the chat filters active vs expired locally so a story fades

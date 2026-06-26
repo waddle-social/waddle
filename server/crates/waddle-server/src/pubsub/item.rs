@@ -188,6 +188,69 @@ impl DatabasePubSubStorage {
         } else {
             None
         };
+        // Validate `urn:waddle:status-preference:0` publishes up-front
+        // (ADR-010 Phase 4). The synced manual-status payload is
+        // user-identity state, so the same invariants as `urn:waddle:dnd:0`
+        // apply: only the node owner may publish, and the single-item PEP
+        // idiom (`id="current"`) is enforced so a later retract of
+        // `current` reliably clears the state. Unlike DND there is no
+        // server-side projection — the payload is pure owner↔own-devices
+        // sync — so the parsed value is discarded after validation; we
+        // still parse it to reject a malformed `<status-preference>` with
+        // `<bad-request/>` instead of persisting garbage other resources
+        // would choke on.
+        if is_status_preference_node(node_name) {
+            match publisher {
+                Some(publisher_jid) if publisher_jid == owner => {}
+                _ => {
+                    warn!(
+                        owner = %owner,
+                        publisher = ?publisher,
+                        "urn:waddle:status-preference:0 publish rejected: publisher is not the node owner"
+                    );
+                    return Err(XmppError::forbidden(Some(
+                        "urn:waddle:status-preference:0 may only be published by the node owner"
+                            .to_string(),
+                    )));
+                }
+            }
+            match item.id.as_deref() {
+                Some(id)
+                    if id
+                        == waddle_xmpp_core::waddle_status_preference::PEP_ITEM_WADDLE_STATUS_PREFERENCE => {}
+                _ => {
+                    warn!(
+                        owner = %owner,
+                        item_id = ?item.id,
+                        "urn:waddle:status-preference:0 publish rejected: item id is not 'current'"
+                    );
+                    return Err(XmppError::pubsub_invalid_payload(Some(format!(
+                        "urn:waddle:status-preference:0 publish must use item id '{}'",
+                        waddle_xmpp_core::waddle_status_preference::PEP_ITEM_WADDLE_STATUS_PREFERENCE,
+                    ))));
+                }
+            }
+            let payload = item.payload.as_ref().ok_or_else(|| {
+                warn!(
+                    owner = %owner,
+                    "urn:waddle:status-preference:0 publish rejected: missing <status-preference> payload"
+                );
+                XmppError::pubsub_payload_required(Some(
+                    "urn:waddle:status-preference:0 publish requires a <status-preference> payload"
+                        .to_string(),
+                ))
+            })?;
+            waddle_xmpp_core::waddle_status_preference::StatusPreference::parse(payload).map_err(
+                |error| {
+                    warn!(
+                        owner = %owner,
+                        %error,
+                        "urn:waddle:status-preference:0 publish rejected: invalid <status-preference> payload"
+                    );
+                    XmppError::pubsub_invalid_payload(Some(error.to_string()))
+                },
+            )?;
+        }
 
         let (node, node_created) = match self.get_node_impl(owner, node_name).await? {
             Some(node) => (node, false),
@@ -875,4 +938,8 @@ fn is_bookmarks_node(node_name: &str) -> bool {
 
 fn is_dnd_node(node_name: &str) -> bool {
     node_name == waddle_xmpp::xep::xep_waddle_dnd::PEP_NODE_WADDLE_DND
+}
+
+fn is_status_preference_node(node_name: &str) -> bool {
+    node_name == waddle_xmpp_core::waddle_status_preference::PEP_NODE_WADDLE_STATUS_PREFERENCE
 }

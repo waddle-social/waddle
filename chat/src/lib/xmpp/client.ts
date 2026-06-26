@@ -181,6 +181,10 @@ import type {
 } from "./wasm-types";
 import type { VCard4Profile } from "./vcard4-types";
 import { escapeXml } from "./extension-commands/xml";
+// Type-only: the status-preference wire shape (`{ mode, status? }`). The
+// PresenceMode <-> wire mapping lives in the presence layer; this wrapper just
+// carries the wire shape across the wasm boundary.
+import type { StatusPreferenceWire } from "@/presence/status-preference";
 
 export { dmMessageFromArchived, roomMessageFromArchived } from "./wasm-message-codecs";
 
@@ -660,6 +664,10 @@ type XmppClientInstance = Partial<WasmClient> & CompatEmitter & {
   set_on_session_lifecycle?: (cb: (event: string) => void) => void;
   set_on_mds_displayed?: (cb: (entry: WasmMdsDisplayedEntry) => void) => void;
   set_on_pubsub_event?: (cb: (event: WasmPubsubEvent) => void) => void;
+  status_preference_publish?: (
+    input: StatusPreferenceWire,
+  ) => Promise<StatusPreferenceWire | null>;
+  status_preference_fetch?: () => Promise<StatusPreferenceWire | null>;
   send_in_call_reaction?: (to: string, type: "chat" | "groupchat", sid: string, emoji: string) => Promise<void>;
   get_resume_state?: () => XmppResumeState | null;
   get_resume_state_handle?: () => XmppResumeStateHandle | undefined;
@@ -2719,6 +2727,28 @@ export class BrowserXmppClient {
       storyReadsToWasm(reads),
     )) as WasmStoryReads | undefined;
     return storyReadsFromWasm(result);
+  }
+
+  /**
+   * Publish the user's picked presence mode to their private
+   * `urn:waddle:status-preference:0` PEP node (ADR-010 Phase 4), so it
+   * syncs to their other devices. Reset publishes `mode='automatic'`
+   * rather than retracting (the node never fans out retracts).
+   */
+  async publishStatusPreference(pref: StatusPreferenceWire): Promise<void> {
+    const xmpp = await this.requireConnectedXmpp();
+    await xmpp.status_preference_publish?.(pref);
+  }
+
+  /**
+   * Fetch the user's stored status preference from their own PEP node,
+   * or `null` when nothing is stored. The preference is non-critical:
+   * any failure resolves to `null` (the chat layer then keeps the
+   * device's current mode).
+   */
+  async fetchStatusPreference(): Promise<StatusPreferenceWire | null> {
+    const xmpp = await this.requireConnectedXmpp();
+    return (await xmpp.status_preference_fetch?.()) ?? null;
   }
 
   /**

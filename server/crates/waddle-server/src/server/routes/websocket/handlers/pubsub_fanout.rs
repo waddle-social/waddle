@@ -95,7 +95,16 @@ pub async fn fan_out_publish(state: &WebSocketState, req: FanOutRequest<'_>) {
     let is_private_bookmarks_node = is_pep && node == waddle_xmpp::xep::xep0402::PEP_NODE;
     let is_private_story_reads_node =
         is_pep && node == waddle_xmpp_core::waddle_story_reads::PEP_NODE_WADDLE_STORY_READS;
-    let is_private_pep_node = is_private_bookmarks_node || is_private_story_reads_node;
+    // ADR-010 Phase 4: the synced manual-status node is owner-only. Skip
+    // the §3 roster pass so a contact advertising
+    // `urn:waddle:status-preference:0+notify` never learns the user's
+    // picked mode; the §3.4 owner-self pass still runs so the user's own
+    // resources adopt it live.
+    let is_private_status_preference_node = is_pep
+        && node == waddle_xmpp_core::waddle_status_preference::PEP_NODE_WADDLE_STATUS_PREFERENCE;
+    let is_private_pep_node = is_private_bookmarks_node
+        || is_private_story_reads_node
+        || is_private_status_preference_node;
     let storage = &state.deps.protocol.pubsub_storage;
 
     let node_cfg = match storage.get_node(owner, node).await {

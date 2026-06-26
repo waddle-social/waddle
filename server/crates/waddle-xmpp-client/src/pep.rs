@@ -18,6 +18,12 @@ pub const NS_ACTIVITY: &str = "http://jabber.org/protocol/activity";
 /// receives a peer's in-call overlay (ADR-010 Phase 3) only if it advertises
 /// this in its XEP-0115 caps.
 pub const NS_ACTIVITY_NOTIFY: &str = "http://jabber.org/protocol/activity+notify";
+/// XEP-0163 §3.4 notification filter for the Waddle status-preference node:
+/// the user's own resources receive a manual-status pick (ADR-010 Phase 4)
+/// only if they advertise this in their XEP-0115 caps. Pinned to
+/// `waddle_xmpp_core::waddle_status_preference::PEP_NODE_WADDLE_STATUS_PREFERENCE`
+/// by `caps::tests::status_preference_notify_matches_core_node`.
+pub const NS_STATUS_PREFERENCE_NOTIFY: &str = "urn:waddle:status-preference:0+notify";
 pub const NS_TUNE: &str = "http://jabber.org/protocol/tune";
 pub const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
 pub const NS_PUBSUB_EVENT: &str = "http://jabber.org/protocol/pubsub#event";

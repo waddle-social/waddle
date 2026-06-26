@@ -103,6 +103,7 @@ impl PepHandler {
             || node == PEP_NODE_VCARD4
             || node == PEP_NODE_WADDLE_DND
             || node == PEP_NODE_WADDLE_DM_BOOKMARKS
+            || node == crate::waddle_status_preference::PEP_NODE_WADDLE_STATUS_PREFERENCE
             || node == "http://jabber.org/protocol/nick"
             || node == "http://jabber.org/protocol/mood"
             || node == "http://jabber.org/protocol/activity"
@@ -117,6 +118,7 @@ impl PepHandler {
             || node == PEP_NODE_MDS_DISPLAYED
             || node == PEP_NODE_WADDLE_DND
             || node == PEP_NODE_WADDLE_DM_BOOKMARKS
+            || node == crate::waddle_status_preference::PEP_NODE_WADDLE_STATUS_PREFERENCE
         {
             return AccessModel::Whitelist;
         }
@@ -214,6 +216,16 @@ mod tests {
         assert!(PepHandler::is_well_known_node(PEP_NODE_WADDLE_DM_BOOKMARKS));
         assert_eq!(
             PepHandler::default_access_model_for_node(PEP_NODE_WADDLE_DM_BOOKMARKS),
+            AccessModel::Whitelist
+        );
+    }
+
+    #[test]
+    fn waddle_status_preference_node_is_well_known_and_whitelisted() {
+        let node = crate::waddle_status_preference::PEP_NODE_WADDLE_STATUS_PREFERENCE;
+        assert!(PepHandler::is_well_known_node(node));
+        assert_eq!(
+            PepHandler::default_access_model_for_node(node),
             AccessModel::Whitelist
         );
     }

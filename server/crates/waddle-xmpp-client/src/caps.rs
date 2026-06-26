@@ -22,6 +22,11 @@ pub fn client_caps_features() -> Vec<&'static str> {
         // fans their in-call overlay (ADR-010 Phase 3) out to us. Without this
         // the activity PEP node is published but no contact is ever notified.
         crate::pep::NS_ACTIVITY_NOTIFY,
+        // XEP-0163 §3.4: advertise interest in our OWN status-preference node
+        // (ADR-010 Phase 4) so the server's owner-self fan-out delivers a pick
+        // made on one device to our other resources live. Without this the
+        // node is published but no resource is ever notified.
+        crate::pep::NS_STATUS_PREFERENCE_NOTIFY,
     ]
 }
 
@@ -135,6 +140,21 @@ mod tests {
         // ADR-010 Phase 3: the in-call overlay receive path depends on this
         // being advertised, or the server never fans a peer's activity to us.
         assert!(client_caps_features().contains(&crate::pep::NS_ACTIVITY_NOTIFY));
+        // ADR-010 Phase 4: the cross-device manual-status sync depends on
+        // this, or the server's §3.4 owner-self fan-out never delivers the
+        // user's pick to their other resources.
+        assert!(client_caps_features().contains(&crate::pep::NS_STATUS_PREFERENCE_NOTIFY));
+    }
+
+    #[test]
+    fn status_preference_notify_matches_core_node() {
+        assert_eq!(
+            crate::pep::NS_STATUS_PREFERENCE_NOTIFY,
+            format!(
+                "{}+notify",
+                waddle_xmpp_core::waddle_status_preference::PEP_NODE_WADDLE_STATUS_PREFERENCE
+            )
+        );
     }
 
     #[test]
