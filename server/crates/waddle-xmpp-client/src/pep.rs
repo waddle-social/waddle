@@ -14,6 +14,10 @@ use uuid::Uuid;
 
 pub const NS_MOOD: &str = "http://jabber.org/protocol/mood";
 pub const NS_ACTIVITY: &str = "http://jabber.org/protocol/activity";
+/// XEP-0163 §3 notification filter for the activity node: a roster contact
+/// receives a peer's in-call overlay (ADR-010 Phase 3) only if it advertises
+/// this in its XEP-0115 caps.
+pub const NS_ACTIVITY_NOTIFY: &str = "http://jabber.org/protocol/activity+notify";
 pub const NS_TUNE: &str = "http://jabber.org/protocol/tune";
 pub const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
 pub const NS_PUBSUB_EVENT: &str = "http://jabber.org/protocol/pubsub#event";

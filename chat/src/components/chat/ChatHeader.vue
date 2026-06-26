@@ -7,6 +7,7 @@ import MucCallButton from "@/components/calls/MucCallButton.vue";
 import NotifyModeButton from "@/components/chat/NotifyModeButton.vue";
 import { hasKnownDmCallMedia, useDmCallActivity } from "@/lib/calls/dm-call-activity";
 import { formatIdle } from "@/presence/idle-duration";
+import { useInCallOverlay } from "@/presence/in-call-overlay-store";
 import type { ChannelSummary, SpaceSummary } from "@/lib/chat-types";
 import type { ConnectionNoticeCopy } from "@/lib/connection-notice";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
@@ -144,8 +145,15 @@ const dmPeerPresenceText = computed(() => {
     ? `${base} · ${formatIdle(idleSince, nowMs.value)}`
     : base;
 });
+// Whether the peer is in a call elsewhere (their XEP-0108 overlay, ADR-010
+// Phase 3) — distinct from a call *with* us (`dmCallActivity`).
+const dmPeerInCall = useInCallOverlay(() => props.dmPeer?.peerJid);
 const dmHeaderSecondaryText = computed(() =>
-  showDmCallActivityStatus.value ? dmCallActivityLabel.value : dmPeerPresenceText.value,
+  showDmCallActivityStatus.value
+    ? dmCallActivityLabel.value
+    : dmPeerInCall.value
+      ? "in a call"
+      : dmPeerPresenceText.value,
 );
 
 const emit = defineEmits<{

@@ -28,6 +28,7 @@ import {
   type CallActivityDockEntry,
 } from "@/lib/calls/call-activity-dock";
 import { $callState } from "@/lib/calls/call-store";
+import { useInCallOverlays } from "@/presence/in-call-overlay-store";
 import {
   dmCallActivitiesForPeer,
   dmCallResumeBlockReason,
@@ -137,6 +138,8 @@ const callParticipants = computed(() => props.callParticipants ?? {});
 const callMediaByRoom = computed(() => props.callMediaByRoom ?? {});
 const dmCallActivities = computed(() => props.dmCallActivities ?? {});
 const callState = useStore($callState);
+// Whether a DM peer is in a call (their XEP-0108 overlay, ADR-010 Phase 3).
+const { peerInCall } = useInCallOverlays();
 const currentActiveDmPeer = computed(() => {
   const current = callState.value;
   return current.phase === "active" && current.kind === "dm"
@@ -1256,7 +1259,7 @@ function callEntryActionPhrase(entry: CallActivityDockEntry): string {
             @click="emit('selectContact', conversation.peerJid)"
           >
             <span class="relative">
-              <AppAvatar :name="conversation.peerUsername" :src="conversation.peerAvatarUrl ?? null" size="sm" />
+              <AppAvatar :name="conversation.peerUsername" :src="conversation.peerAvatarUrl ?? null" size="sm" :in-call="peerInCall(conversation.peerJid)" />
               <span class="absolute -right-0.5 -bottom-0.5 w-2 h-2 rounded-full border border-background" :class="dotClass(conversation.presenceShow)" />
               <span class="sr-only">{{ dmPresenceLabel(conversation.presenceShow) }}</span>
             </span>

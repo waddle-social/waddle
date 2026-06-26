@@ -9,6 +9,12 @@ const props = defineProps<{
   size?: "xs" | "sm" | "md" | "lg" | "message";
   presence?: OccupantPresence;
   lastSeen?: number;
+  /**
+   * Whether the contact is in a call (XEP-0108 overlay, ADR-010 Phase 3).
+   * Renders an "in a call" badge layered on top of the presence dot — it is
+   * orthogonal to the Show and never replaces it. One badge for audio + video.
+   */
+  inCall?: boolean;
 }>();
 
 const imageFailed = ref(false);
@@ -139,5 +145,17 @@ watch(
       class="app-avatar-presence-dot absolute rounded-full border-background"
       :class="[dotSize, presenceDotColor]"
     />
+    <span
+      v-if="inCall"
+      class="app-avatar-call-badge absolute -top-1 -right-1 flex items-center justify-center rounded-full border border-background bg-success text-white"
+      :class="dotSize"
+      role="img"
+      aria-label="In a call"
+      title="In a call"
+    >
+      <svg viewBox="0 0 24 24" fill="currentColor" class="w-2 h-2" aria-hidden="true">
+        <path d="M6.6 10.8a15.2 15.2 0 0 0 6.6 6.6l2.2-2.2a1 1 0 0 1 1-.25 11.4 11.4 0 0 0 3.6.57 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1A17 17 0 0 1 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1c0 1.25.2 2.46.57 3.6a1 1 0 0 1-.25 1z" />
+      </svg>
+    </span>
   </div>
 </template>

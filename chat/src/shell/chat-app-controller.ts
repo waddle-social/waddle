@@ -28,6 +28,12 @@ import { resolveShow } from "@/presence/effective-show";
 import { IdleTracker } from "@/presence/idle-tracker";
 import { PresenceRegistry } from "@/presence/presence-registry";
 import { $presenceMode, resetPresenceMode } from "@/presence/presence-store";
+import { activityOverlayUpdate } from "@/presence/in-call-activity";
+import {
+  clearInCallOverlay,
+  resetInCallOverlays,
+  setInCallOverlay,
+} from "@/presence/in-call-overlay-store";
 import { matchLocation, navigate, type RouteMatch } from "@/router";
 import { resolveChannelBySlug } from "@/shell/route-helpers";
 import { barePeerJid, jidDomain, parseManagedRoomBareJid, type LiveDmMessage, type RoomActivityEvent } from "@/lib/xmpp-client";
@@ -39,6 +45,8 @@ import {
   roomJidForChannelId as resolveRoomJidForChannelId,
 } from "@/lib/channel-room";
 import { $callState } from "@/lib/calls/call-store";
+import { ActivityCoordinator, activityFlushForDisconnect } from "@/presence/activity-coordinator";
+import { $manualActivity, resetManualActivity } from "@/presence/self-activity";
 import { normalizeMucServiceDomain } from "@/lib/calls/muc-call-indicators";
 import { resolveThreadEntryTarget } from "@/lib/threads-view-target";
 import { connectionStore } from "@/lib/connection-store";
@@ -801,6 +809,35 @@ export function useChatAppController(giphyApiKey: string) {
   // ending one resumes the idle timer from call-end.
   const callState = useStore($callState);
   watch(() => callState.value.phase === "active", () => idleTracker.evaluate());
+  // Sole owner of the user's XEP-0108 activity node (ADR-010 Phase 3). The node
+  // holds one item, so the automatic in-call overlay (`talking/on_the_phone` /
+  // `on_video_phone`) and the user's manual activity (Settings / feed composer)
+  // must not clobber each other: a live call overrides what's published, then
+  // the manual activity is restored on leave. The publish/retract sinks report
+  // whether they reached the wire, so a write lost while disconnected retries on
+  // the next reconcile (call/manual change or session-ready) — no stale overlay.
+  const activityCoordinator = new ActivityCoordinator({
+    publish: (activity) => {
+      const client = xmppClient.value;
+      if (!client) return false;
+      client.publishActivity(activity).catch(() => undefined);
+      return true;
+    },
+    retract: () => {
+      const client = xmppClient.value;
+      if (!client) return false;
+      client.retractActivity().catch(() => undefined);
+      return true;
+    },
+    callState: () => $callState.get(),
+    manualActivity: () => $manualActivity.get(),
+  });
+  // Reconcile on either trigger via the nanostores (not a Vue `watch`): the
+  // subscriptions fire synchronously, so a manual publish reaches the wire
+  // before the feed composer's follow-up refresh fetch — a microtask-deferred
+  // Vue watcher would let the refresh race ahead of the publish.
+  $callState.subscribe(() => activityCoordinator.reconcile());
+  $manualActivity.subscribe(() => activityCoordinator.reconcile());
   const appUpdate = useServiceWorkerUpdate();
   const version = useDeploymentVersionInfo(xmppClient);
   // RFC 363 PR 6: include DM peers in the iterate-and-pull avatar
@@ -928,6 +965,9 @@ export function useChatAppController(giphyApiKey: string) {
       // Client torn down (logout) — drop aggregated presence so a later
       // session never inherits another account's / a stale resource's Show.
       presenceRegistry.clear();
+      // Likewise drop every contact's in-call overlay so it can't bleed into
+      // the next account in this tab.
+      resetInCallOverlays();
       return;
     }
     client.setDirectMessageHandler((msg) => {
@@ -982,6 +1022,18 @@ export function useChatAppController(giphyApiKey: string) {
       const renderedIdle = presenceRegistry.renderedIdleFor(event.bareJid);
       dmConversations.updatePresence({ ...event, show: rendered, idleSince: renderedIdle });
       rosterContacts.updatePresence(event.bareJid, rendered);
+      // Ghost-call cleanup (ADR-010): a contact whose last resource went
+      // unavailable can't still be in a call — clear any overlay a crashed
+      // client left published, even if its XEP-0108 retract never arrived.
+      if (rendered === "offline") clearInCallOverlay(event.bareJid);
+    });
+    // In-call overlay receive side (ADR-010 Phase 3): a contact's XEP-0108
+    // activity arrives as an opaque `<activity/>` on the activity PEP node.
+    // `talking/on_the_phone` or `on_video_phone` lights the badge; the empty
+    // retraction (or any other activity) clears it.
+    client.addPubsubEventHandler((event) => {
+      const update = activityOverlayUpdate(event, session.value?.jid ?? "");
+      if (update) setInCallOverlay(update.jid, update.inCall);
     });
     client.setMemberJidHandler((nick, bareJid) => {
       memberJidByNick.value = { ...memberJidByNick.value, [nick]: bareJid };
@@ -1044,6 +1096,11 @@ export function useChatAppController(giphyApiKey: string) {
       // baseline too, so a later restore after this out-of-band send is never
       // wrongly suppressed.
       idleTracker.rebroadcast();
+      // Reconcile the activity node too: a write that never reached the wire
+      // (client briefly null on connect, a rejected IQ, or a retract lost when a
+      // call ended during a stream drop) is retried here, so neither a stale
+      // in-call overlay nor a missing manual activity survives a reconnect.
+      activityCoordinator.reconcile();
       // Re-hydrate XEP-0492 notification settings only on *fresh*
       // reconnects. A stream resume is by definition gap-free —
       // any bookmark publish from another tab during the disconnect
@@ -1059,6 +1116,10 @@ export function useChatAppController(giphyApiKey: string) {
         // probes repopulate it cleanly. A resumed session is gap-free, so
         // its registry is preserved.
         presenceRegistry.clear();
+        // Same gap applies to the in-call overlay: a fresh session may have
+        // missed contacts' activity retracts, so drop it and let live presence
+        // + PEP repopulate. A resumed session is gap-free, so it's preserved.
+        resetInCallOverlays();
         // Belt-and-braces: hydrate already catches lower-layer
         // throws, but call-site .catch defends against any future
         // regression so an unhandled rejection doesn't propagate
@@ -2339,6 +2400,27 @@ export function useChatAppController(giphyApiKey: string) {
     // Away/DND or another user's contact presence.
     resetPresenceMode();
     presenceRegistry.clear();
+    // Graceful disconnect (ADR-010 ghost cleanup): if a call is live the wire
+    // holds the in-call overlay, so restore the user's manual activity (or clear
+    // it) before the stream closes — no stale "in a call" survives on the
+    // server and the user's chosen status is preserved across the logout. Then
+    // drop the coordinator baseline + manual activity + receiver overlays so the
+    // next account starts clean.
+    const disconnectClient = xmppClient.value;
+    const flush = activityFlushForDisconnect(
+      $callState.get().phase === "active",
+      $manualActivity.get(),
+    );
+    if (disconnectClient) {
+      if (flush.kind === "publish") {
+        await disconnectClient.publishActivity(flush.activity).catch(() => undefined);
+      } else if (flush.kind === "retract") {
+        await disconnectClient.retractActivity().catch(() => undefined);
+      }
+    }
+    activityCoordinator.reset();
+    resetManualActivity();
+    resetInCallOverlays();
     ui.showPinnedPanel.value = false;
     navigate({ id: "home" });
     await connectionStore.logout();
