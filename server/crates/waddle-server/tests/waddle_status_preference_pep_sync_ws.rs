@@ -17,16 +17,22 @@
 //! - The private-PEP carve-out suppresses roster fan-out.
 //! - The owner's OTHER resource (advertising `…+notify` caps) DOES
 //!   receive the headline event — the live cross-device sync path.
+//!
+//! Every stanza is assembled with `minidom::Element` builders and
+//! serialized (never `format!`-interpolated XML markup), per the
+//! CLAUDE.md XML-generation hard rule.
 
 mod ws_common;
 
 use std::time::Duration;
 use tokio::sync::Mutex;
 use ws_common::{extract_attr_after, TestServer, WsXmppClient};
+use xmpp_parsers::minidom::Element;
 
 const DOMAIN: &str = "localhost";
 const NODE: &str = "urn:waddle:status-preference:0";
 const NS: &str = "urn:waddle:status-preference:0";
+const CLIENT_NS: &str = "jabber:client";
 const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
 const NS_CAPS: &str = "http://jabber.org/protocol/caps";
 const NS_DISCO_INFO: &str = "http://jabber.org/protocol/disco#info";
@@ -65,38 +71,84 @@ async fn connect_two_accounts() -> (TestServer, WsXmppClient, WsXmppClient) {
     (server, alice, bob)
 }
 
-/// Build the `<status-preference>` payload XML for a mode.
-fn pref_body(mode: &str, status: Option<&str>) -> String {
-    match status {
-        Some(status) => {
-            format!(r#"<status-preference xmlns="{NS}" mode="{mode}" status="{status}"/>"#)
-        }
-        None => format!(r#"<status-preference xmlns="{NS}" mode="{mode}"/>"#),
+// ── Stanza builders ─────────────────────────────────────────────────
+// All XML is built via `minidom::Element` and serialized; only attribute
+// *values* (jids, the caps `node#ver`, the `+notify` feature var) are
+// computed as plain strings, which minidom escapes on serialization.
+
+fn attr(name: &str) -> minidom::rxml::NcName {
+    // The builder API wants an owned NcName; this keeps call sites terse for
+    // the (statically valid) attribute names used throughout the file.
+    <minidom::rxml::NcName as std::convert::TryFrom<&str>>::try_from(name)
+        .expect("static ncname is valid")
+}
+
+fn element_to_xml(element: Element) -> String {
+    let mut bytes = Vec::new();
+    element.write_to(&mut bytes).expect("serialize element");
+    String::from_utf8(bytes).expect("serializer emits utf-8")
+}
+
+/// `<iq>` wrapper around a payload, with optional `to` / `from`.
+fn iq(iq_type: &str, id: &str, to: Option<&str>, from: Option<&str>, payload: Element) -> String {
+    let mut builder = Element::builder("iq", CLIENT_NS)
+        .attr(attr("type"), iq_type)
+        .attr(attr("id"), id);
+    if let Some(to) = to {
+        builder = builder.attr(attr("to"), to);
     }
+    if let Some(from) = from {
+        builder = builder.attr(attr("from"), from);
+    }
+    element_to_xml(builder.append(payload).build())
+}
+
+/// The `<status-preference>` payload for a mode.
+fn status_preference_payload(mode: &str, status: Option<&str>) -> Element {
+    let mut builder = Element::builder("status-preference", NS).attr(attr("mode"), mode);
+    if let Some(status) = status {
+        builder = builder.attr(attr("status"), status);
+    }
+    builder.build()
+}
+
+/// A `<pubsub><publish node=…><item id=…>[payload]</item>…` element.
+fn publish_pubsub(item_id: &str, payload: Option<Element>) -> Element {
+    let mut item = Element::builder("item", NS_PUBSUB).attr(attr("id"), item_id);
+    if let Some(payload) = payload {
+        item = item.append(payload);
+    }
+    let publish = Element::builder("publish", NS_PUBSUB)
+        .attr(attr("node"), NODE)
+        .append(item)
+        .build();
+    Element::builder("pubsub", NS_PUBSUB)
+        .append(publish)
+        .build()
 }
 
 /// Self-publish IQ (no `to`, addressed to the account's own PEP service).
-fn publish_iq(id: &str, item_id: &str, body_xml: &str) -> String {
-    format!(
-        r#"<iq type="set" id="{id}">
-          <pubsub xmlns="{NS_PUBSUB}">
-            <publish node="{NODE}">
-              <item id="{item_id}">{body_xml}</item>
-            </publish>
-          </pubsub>
-        </iq>"#
+fn publish_iq(id: &str, item_id: &str, payload: Element) -> String {
+    iq(
+        "set",
+        id,
+        None,
+        None,
+        publish_pubsub(item_id, Some(payload)),
     )
 }
 
 fn items_get_iq(id: &str, to: Option<&str>) -> String {
-    let to_attr = to.map(|jid| format!(r#" to="{jid}""#)).unwrap_or_default();
-    format!(
-        r#"<iq type="get" id="{id}"{to_attr}>
-          <pubsub xmlns="{NS_PUBSUB}">
-            <items node="{NODE}" max_items="1"/>
-          </pubsub>
-        </iq>"#
-    )
+    let items = Element::builder("items", NS_PUBSUB)
+        .attr(attr("node"), NODE)
+        .attr(attr("max_items"), "1")
+        .build();
+    let pubsub = Element::builder("pubsub", NS_PUBSUB).append(items).build();
+    iq("get", id, to, None, pubsub)
+}
+
+fn bare_presence() -> String {
+    element_to_xml(Element::builder("presence", CLIENT_NS).build())
 }
 
 fn assert_invalid_payload(xml: &str) {
@@ -120,7 +172,7 @@ async fn publish_then_owner_fetch_round_trips() {
         .send(&publish_iq(
             "pub-1",
             "current",
-            &pref_body("manual", Some("away")),
+            status_preference_payload("manual", Some("away")),
         ))
         .await
         .expect("send publish");
@@ -166,7 +218,7 @@ async fn republish_overwrites_item() {
         .send(&publish_iq(
             "pub-auto",
             "current",
-            &pref_body("automatic", None),
+            status_preference_payload("automatic", None),
         ))
         .await
         .expect("send first publish");
@@ -179,7 +231,7 @@ async fn republish_overwrites_item() {
         .send(&publish_iq(
             "pub-manual",
             "current",
-            &pref_body("manual", Some("dnd")),
+            status_preference_payload("manual", Some("dnd")),
         ))
         .await
         .expect("send second publish");
@@ -217,7 +269,7 @@ async fn publish_with_wrong_item_id_rejected() {
         .send(&publish_iq(
             "pub-wrong-id",
             "not-current",
-            &pref_body("manual", Some("away")),
+            status_preference_payload("manual", Some("away")),
         ))
         .await
         .expect("send publish");
@@ -235,25 +287,24 @@ async fn publish_malformed_payload_rejected() {
     let _guard = TEST_SERIAL.lock().await;
     let (_server, mut client) = connect_admin().await;
 
-    // A few representative malformed shapes, each rejected by the strict
-    // parser at the publish boundary and never persisted: unknown mode, a
-    // status on automatic, and a stray child element. (The full rejection
-    // matrix is exercised by the parser's unit suite; these prove the server
-    // publish path actually runs that parser.)
-    let cases: &[(&str, String)] = &[
-        ("pub-bad-mode", pref_body("invisible", None)),
+    // A `<status-preference>` payload carrying a stray child element — the
+    // strict parser rejects it (the full rejection matrix is in the parser's
+    // unit suite; this proves the server publish path runs that parser).
+    let stray_child = Element::builder("status-preference", NS)
+        .attr(attr("mode"), "automatic")
+        .append(Element::builder("x", NS).build())
+        .build();
+    let cases: Vec<(&str, Element)> = vec![
+        ("pub-bad-mode", status_preference_payload("invisible", None)),
         (
             "pub-bad-status-on-auto",
-            pref_body("automatic", Some("away")),
+            status_preference_payload("automatic", Some("away")),
         ),
-        (
-            "pub-bad-child",
-            format!(r#"<status-preference xmlns="{NS}" mode="automatic"><x/></status-preference>"#),
-        ),
+        ("pub-bad-child", stray_child),
     ];
-    for (id, body) in cases {
+    for (id, payload) in cases {
         client
-            .send(&publish_iq(id, "current", body))
+            .send(&publish_iq(id, "current", payload))
             .await
             .expect("send publish");
         let result = client
@@ -265,12 +316,12 @@ async fn publish_malformed_payload_rejected() {
 
     // A publish carrying no `<status-preference>` payload at all is refused.
     client
-        .send(&format!(
-            r#"<iq type="set" id="pub-empty">
-              <pubsub xmlns="{NS_PUBSUB}">
-                <publish node="{NODE}"><item id="current"/></publish>
-              </pubsub>
-            </iq>"#
+        .send(&iq(
+            "set",
+            "pub-empty",
+            None,
+            None,
+            publish_pubsub("current", None),
         ))
         .await
         .expect("send empty publish");
@@ -290,19 +341,20 @@ async fn publish_malformed_payload_rejected() {
 async fn non_owner_publish_is_rejected() {
     let _guard = TEST_SERIAL.lock().await;
     let (_server, mut alice, mut bob) = connect_two_accounts().await;
+    let alice_jid = format!("alice@{DOMAIN}");
 
     // Bob addresses alice's PEP service directly and tries to write her
     // status preference. The node owner is alice; the publisher is bob,
     // so the publish MUST be refused.
-    bob.send(&format!(
-        r#"<iq type="set" id="bob-spoof" to="alice@{DOMAIN}">
-          <pubsub xmlns="{NS_PUBSUB}">
-            <publish node="{NODE}">
-              <item id="current">{}</item>
-            </publish>
-          </pubsub>
-        </iq>"#,
-        pref_body("manual", Some("dnd"))
+    bob.send(&iq(
+        "set",
+        "bob-spoof",
+        Some(&alice_jid),
+        None,
+        publish_pubsub(
+            "current",
+            Some(status_preference_payload("manual", Some("dnd"))),
+        ),
     ))
     .await
     .expect("bob spoof publish");
@@ -342,7 +394,7 @@ async fn node_is_private_to_non_owner() {
         .send(&publish_iq(
             "alice-pub",
             "current",
-            &pref_body("manual", Some("away")),
+            status_preference_payload("manual", Some("away")),
         ))
         .await
         .expect("alice publish");
@@ -378,17 +430,24 @@ async fn private_pep_does_not_fan_out_to_roster() {
     let _guard = TEST_SERIAL.lock().await;
     let (_server, mut alice, mut bob) = connect_two_accounts().await;
 
-    alice.send("<presence/>").await.expect("alice presence");
-    bob.send("<presence/>").await.expect("bob presence");
+    alice.send(&bare_presence()).await.expect("alice presence");
+    bob.send(&bare_presence()).await.expect("bob presence");
 
-    // Bob best-effort subscribes to alice's node (whitelist should
-    // refuse, but the fan-out carve-out is the real guard under test).
-    bob.send(&format!(
-        r#"<iq type="set" id="bob-sub" to="alice@{DOMAIN}">
-          <pubsub xmlns="{NS_PUBSUB}">
-            <subscribe node="{NODE}" jid="bob@{DOMAIN}"/>
-          </pubsub>
-        </iq>"#
+    // Bob best-effort subscribes to alice's node (whitelist should refuse, but
+    // the fan-out carve-out is the real guard under test).
+    let subscribe = Element::builder("subscribe", NS_PUBSUB)
+        .attr(attr("node"), NODE)
+        .attr(attr("jid"), format!("bob@{DOMAIN}"))
+        .build();
+    let subscribe_pubsub = Element::builder("pubsub", NS_PUBSUB)
+        .append(subscribe)
+        .build();
+    bob.send(&iq(
+        "set",
+        "bob-sub",
+        Some(&format!("alice@{DOMAIN}")),
+        None,
+        subscribe_pubsub,
     ))
     .await
     .expect("bob subscribe");
@@ -401,7 +460,7 @@ async fn private_pep_does_not_fan_out_to_roster() {
         .send(&publish_iq(
             "alice-pub",
             "current",
-            &pref_body("manual", Some("dnd")),
+            status_preference_payload("manual", Some("dnd")),
         ))
         .await
         .expect("alice publish");
@@ -450,12 +509,15 @@ async fn announce_status_preference_notify_caps(client: &mut WsXmppClient) {
     let ver = caps_verification_string(&features);
     let full = client.full_jid.clone().expect("full jid");
 
-    client
-        .send(&format!(
-            r#"<presence xmlns="jabber:client"><c xmlns="{NS_CAPS}" hash="sha-1" node="{caps_node}" ver="{ver}"/></presence>"#
-        ))
-        .await
-        .expect("presence with caps");
+    // `<presence><c hash node ver/></presence>`
+    let caps = Element::builder("c", NS_CAPS)
+        .attr(attr("hash"), "sha-1")
+        .attr(attr("node"), caps_node)
+        .attr(attr("ver"), ver.as_str())
+        .build();
+    let presence = element_to_xml(Element::builder("presence", CLIENT_NS).append(caps).build());
+    client.send(&presence).await.expect("presence with caps");
+
     let disco_query = client
         .recv_matching(|frame| {
             frame.contains("<iq")
@@ -465,14 +527,26 @@ async fn announce_status_preference_notify_caps(client: &mut WsXmppClient) {
         .await
         .expect("server queries caps");
     let iq_id = extract_attr_after(&disco_query, "<iq", "id").expect("disco iq id");
-    let feature_xml: String = features
-        .iter()
-        .map(|f| format!(r#"<feature var="{f}"/>"#))
-        .collect();
+
+    // `<iq type=result from=…><query node=caps#ver><identity/><feature/>…`
+    let mut query = Element::builder("query", NS_DISCO_INFO)
+        .attr(attr("node"), format!("{caps_node}#{ver}"))
+        .append(
+            Element::builder("identity", NS_DISCO_INFO)
+                .attr(attr("category"), "client")
+                .attr(attr("type"), "pc")
+                .attr(attr("name"), "Waddle")
+                .build(),
+        );
+    for feature in features {
+        query = query.append(
+            Element::builder("feature", NS_DISCO_INFO)
+                .attr(attr("var"), feature)
+                .build(),
+        );
+    }
     client
-        .send(&format!(
-            r#"<iq xmlns="jabber:client" type="result" id="{iq_id}" from="{full}"><query xmlns="{NS_DISCO_INFO}" node="{caps_node}#{ver}"><identity category="client" type="pc" name="Waddle"/>{feature_xml}</query></iq>"#
-        ))
+        .send(&iq("result", &iq_id, None, Some(&full), query.build()))
         .await
         .expect("disco#info reply");
 }
@@ -489,7 +563,7 @@ async fn self_fanout_reaches_owner_other_resource() {
 
     // r1 is online (the publisher); r2 advertises +notify caps so the
     // §3.4 owner-self pass delivers the headline to it.
-    r1.send("<presence/>").await.expect("r1 presence");
+    r1.send(&bare_presence()).await.expect("r1 presence");
     announce_status_preference_notify_caps(&mut r2).await;
 
     // r1 publishes a pick. r2 — alice's other resource — MUST receive
@@ -497,7 +571,7 @@ async fn self_fanout_reaches_owner_other_resource() {
     r1.send(&publish_iq(
         "r1-pub",
         "current",
-        &pref_body("manual", Some("away")),
+        status_preference_payload("manual", Some("away")),
     ))
     .await
     .expect("r1 publish");
@@ -533,13 +607,13 @@ async fn self_fanout_skips_owner_resource_without_notify_caps() {
     // `urn:waddle:status-preference:0+notify`. The §3.4 owner-self pass is
     // caps-gated, so r2 MUST NOT receive the headline: the `+notify` filter is
     // the real gate, not mere co-ownership of the account.
-    r1.send("<presence/>").await.expect("r1 presence");
-    r2.send("<presence/>").await.expect("r2 presence");
+    r1.send(&bare_presence()).await.expect("r1 presence");
+    r2.send(&bare_presence()).await.expect("r2 presence");
 
     r1.send(&publish_iq(
         "noflt-pub",
         "current",
-        &pref_body("manual", Some("away")),
+        status_preference_payload("manual", Some("away")),
     ))
     .await
     .expect("r1 publish");
@@ -581,7 +655,7 @@ async fn preference_survives_disconnect_and_fresh_reconnect() {
         r1.send(&publish_iq(
             "persist-pub",
             "current",
-            &pref_body("manual", Some("dnd")),
+            status_preference_payload("manual", Some("dnd")),
         ))
         .await
         .expect("publish");

@@ -849,11 +849,19 @@ export function useChatAppController(giphyApiKey: string) {
   // user across devices and survives reconnects. Auto-away stays per-device and
   // is NOT synced (it is never written here — only the chosen mode is).
   const statusPreferenceCoordinator = new StatusPreferenceCoordinator({
-    publish: (mode) => {
+    // Resolve `true` only when the publish is confirmed on the wire. A
+    // not-yet-ready session makes `publishStatusPreference` reject (via
+    // `requireConnectedXmpp`); returning `false` then keeps the coordinator's
+    // baseline unadvanced so the pick is retried on the next reconcile.
+    publish: async (mode) => {
       const client = xmppClient.value;
       if (!client) return false;
-      client.publishStatusPreference(presenceModeToWire(mode)).catch(() => undefined);
-      return true;
+      try {
+        await client.publishStatusPreference(presenceModeToWire(mode));
+        return true;
+      } catch {
+        return false;
+      }
     },
     mode: () => $presenceMode.get(),
     setMode: (mode) => $presenceMode.set(mode),
@@ -863,7 +871,9 @@ export function useChatAppController(giphyApiKey: string) {
   // pick would echo back to the wire. `applyRemote` sets the baseline before
   // writing `$presenceMode`, so this reconcile no-ops for adopted picks and
   // only publishes genuine local ones.
-  $presenceMode.subscribe(() => statusPreferenceCoordinator.reconcile());
+  $presenceMode.subscribe(() => {
+    statusPreferenceCoordinator.reconcile().catch(() => undefined);
+  });
   const appUpdate = useServiceWorkerUpdate();
   const version = useDeploymentVersionInfo(xmppClient);
   // RFC 363 PR 6: include DM peers in the iterate-and-pull avatar
@@ -1145,7 +1155,7 @@ export function useChatAppController(giphyApiKey: string) {
           .syncOnConnect(() => client.fetchStatusPreference().then(presenceModeFromWire))
           .catch(() => undefined);
       } else {
-        statusPreferenceCoordinator.reconcile();
+        statusPreferenceCoordinator.reconcile().catch(() => undefined);
       }
       // Re-hydrate XEP-0492 notification settings only on *fresh*
       // reconnects. A stream resume is by definition gap-free —

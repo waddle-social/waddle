@@ -9,13 +9,18 @@
 //   - Fresh-login clobber: a new device defaults to Automatic; it must adopt
 //     the server's stored pick rather than publish its default over a peer's
 //     manual status. `syncOnConnect` fetches and adopts unless this device has
-//     an unpublished local pick.
+//     a pending local pick.
+//   - Disconnected-pick loss: a manual pick made before any successful publish
+//     (offline, or before the first session) must win on connect, not be
+//     overwritten by the stale stored value — see `hasPendingLocalPick`.
 //   - Logout clobber: signing out is local-only (a manual status must follow
 //     the user to their other devices), so `suspend` stops the logout-time
 //     reset from publishing Automatic.
 //
-// Diff-driven like ActivityCoordinator: writes report whether they reached the
-// wire, so a pick made while disconnected is retried on the next reconcile.
+// The baseline (`lastPublished`) only advances when a publish actually reaches
+// the wire: `publish` resolves `true` iff the IQ was sent, and `reconcile`
+// awaits it. A publish that fails (disconnected, session not ready, server
+// error) leaves the baseline untouched so the next reconcile retries.
 
 import type { PresenceMode } from "./effective-show";
 
@@ -27,8 +32,12 @@ export function sameMode(a: PresenceMode | null, b: PresenceMode | null): boolea
 }
 
 export interface StatusPreferenceCoordinatorDeps {
-  /** Publish the mode to the PEP node; returns whether it reached the wire. */
-  publish: (mode: PresenceMode) => boolean;
+  /**
+   * Publish the mode to the PEP node. Resolves `true` IFF it reached the wire;
+   * resolves `false` on any failure (disconnected, session not ready, server
+   * error) so the baseline is not advanced and the next reconcile retries.
+   */
+  publish: (mode: PresenceMode) => Promise<boolean>;
   /** This device's current picked mode (reads `$presenceMode`). */
   mode: () => PresenceMode;
   /** Adopt a mode locally (writes `$presenceMode`). */
@@ -36,22 +45,37 @@ export interface StatusPreferenceCoordinatorDeps {
 }
 
 export class StatusPreferenceCoordinator {
-  /** Last mode we know is on the wire; `null` until the first sync/publish. */
+  /** Last mode confirmed on the wire; `null` until the first success/hydrate. */
   private lastPublished: PresenceMode | null = null;
   private suspended = false;
+  /** Guards against overlapping publishes (an async publish is in flight). */
+  private publishing = false;
 
   constructor(private readonly deps: StatusPreferenceCoordinatorDeps) {}
 
   /**
-   * Publish the current mode if it differs from the wire baseline. Idempotent;
-   * only advances the baseline when the write was actually sent, so a pick made
-   * while disconnected is retried on the next reconcile (session-ready).
+   * Publish the current mode if it differs from the wire baseline, advancing
+   * the baseline only when the publish is confirmed sent. A publish that fails
+   * leaves the baseline untouched, so the next reconcile (a later pick or
+   * session-ready) retries. Overlapping publishes are deduped via `publishing`;
+   * a mode that changed mid-flight triggers one more pass on success.
    */
-  reconcile(): void {
-    if (this.suspended) return;
+  async reconcile(): Promise<void> {
+    if (this.suspended || this.publishing) return;
     const desired = this.deps.mode();
     if (this.lastPublished !== null && sameMode(desired, this.lastPublished)) return;
-    if (this.deps.publish(desired)) this.lastPublished = desired;
+    this.publishing = true;
+    let sent = false;
+    try {
+      sent = await this.deps.publish(desired);
+    } finally {
+      this.publishing = false;
+    }
+    if (!sent) return; // baseline unchanged → retried on the next trigger
+    this.lastPublished = desired;
+    // A pick made while the publish was in flight needs another pass to
+    // converge. Only recurse on success, so a persistent failure can't loop.
+    if (!sameMode(this.deps.mode(), this.lastPublished)) await this.reconcile();
   }
 
   /**
@@ -64,42 +88,40 @@ export class StatusPreferenceCoordinator {
     this.deps.setMode(mode);
   }
 
-  /** True when this device holds a pick that has not reached the wire yet. */
+  /**
+   * Whether this device holds a pick that should be published rather than
+   * overwritten by the stored value on connect. With no confirmed baseline yet
+   * (`lastPublished === null`), a deliberate Manual pick counts as pending
+   * intent — so a status chosen while disconnected wins over the stale stored
+   * value — but the default Automatic does not (a fresh device must adopt a
+   * peer's stored pick, not clobber it with its default). With a baseline, any
+   * divergence from it is a pending pick.
+   */
   hasPendingLocalPick(): boolean {
-    return this.lastPublished !== null && !sameMode(this.deps.mode(), this.lastPublished);
+    const mode = this.deps.mode();
+    if (this.lastPublished === null) return mode.kind === "manual";
+    return !sameMode(mode, this.lastPublished);
   }
 
   /**
-   * Reconcile the local state against the node on (re)connect. An unpublished
-   * local pick (e.g. chosen while disconnected) wins and is published;
-   * otherwise the server's stored preference is adopted — a fresh device thus
-   * inherits the user's pick rather than overwriting it with its default.
+   * Reconcile the local state against the node on (re)connect. A pending local
+   * pick (offline pick, or a pick made before the first successful publish)
+   * wins and is published; otherwise the server's stored preference is adopted
+   * — a fresh device thus inherits the user's pick rather than overwriting it
+   * with its default. When nothing is stored and there is no pending pick, the
+   * current (Automatic) state is the synced baseline.
    */
   async syncOnConnect(fetch: () => Promise<PresenceMode | null>): Promise<void> {
     this.resume();
     if (this.hasPendingLocalPick()) {
-      this.reconcile();
+      await this.reconcile();
       return;
     }
-    this.hydrate(await fetch());
-  }
-
-  /**
-   * Apply a fetched preference. A stored pick is adopted. When nothing is
-   * stored, a deliberate local manual pick is published, but the default
-   * Automatic is treated as already-synced — publishing it would clobber a
-   * peer's stored manual status on the peer's own next connect.
-   */
-  hydrate(fetched: PresenceMode | null): void {
+    const fetched = await fetch();
     if (fetched) {
       this.applyRemote(fetched);
-      return;
-    }
-    if (this.deps.mode().kind === "manual") {
-      this.lastPublished = null;
-      this.reconcile();
     } else {
-      this.lastPublished = { kind: "automatic" };
+      this.lastPublished = this.deps.mode();
     }
   }
 
@@ -113,7 +135,7 @@ export class StatusPreferenceCoordinator {
     this.lastPublished = null;
   }
 
-  /** Re-enable publishing (called on session-ready before fetch/hydrate). */
+  /** Re-enable publishing (called on session-ready before fetch/sync). */
   resume(): void {
     this.suspended = false;
   }
