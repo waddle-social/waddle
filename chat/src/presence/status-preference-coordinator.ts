@@ -117,7 +117,18 @@ export class StatusPreferenceCoordinator {
       await this.reconcile();
       return;
     }
+    const before = this.deps.mode();
     const fetched = await fetch();
+    // A newer intent may have landed while the fetch was in flight: a local
+    // pick (the `$presenceMode` subscriber fired `reconcile()`) or an inbound
+    // peer update (`applyRemote`). Either is fresher than the snapshot we just
+    // fetched, so adopting `fetched` here would overwrite it. If the mode
+    // changed, reconcile instead — it publishes a local pick and no-ops an
+    // already-applied remote one, never clobbering the newer value.
+    if (!sameMode(before, this.deps.mode())) {
+      await this.reconcile();
+      return;
+    }
     if (fetched) {
       this.applyRemote(fetched);
     } else {

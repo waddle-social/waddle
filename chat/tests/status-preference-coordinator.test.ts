@@ -220,6 +220,29 @@ describe("StatusPreferenceCoordinator.syncOnConnect", () => {
     expect(h.published).toEqual([AWAY]); // adopted, not re-published
   });
 
+  test("a local pick made WHILE the fetch is in flight is not clobbered by the stale fetched value", async () => {
+    const h = harness(AUTO);
+    // The fetch resolves the server's stale value, but the user picks DND
+    // before it returns. The pick must win and be published, not be
+    // overwritten by the fetched AWAY.
+    await h.coord.syncOnConnect(async () => {
+      h.setMode(DND); // user picks mid-fetch (the store subscriber would also fire reconcile)
+      return AWAY;
+    });
+    expect(h.getMode()).toEqual(DND);
+    expect(h.published).toEqual([DND]);
+  });
+
+  test("an inbound update arriving WHILE the fetch is in flight wins over the stale fetched value", async () => {
+    const h = harness(AUTO);
+    await h.coord.syncOnConnect(async () => {
+      h.coord.applyRemote(DND); // a live peer update lands mid-fetch
+      return AWAY; // stale snapshot
+    });
+    expect(h.getMode()).toEqual(DND); // the live update is kept, not overwritten
+    expect(h.published).toEqual([]); // applyRemote does not echo
+  });
+
   test("resume re-enables publishing after a suspend/login cycle", async () => {
     const h = harness();
     h.setMode(AWAY);
