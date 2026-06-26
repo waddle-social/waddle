@@ -235,21 +235,53 @@ async fn publish_malformed_payload_rejected() {
     let _guard = TEST_SERIAL.lock().await;
     let (_server, mut client) = connect_admin().await;
 
-    // Unknown mode value — rejected by the strict parser at the publish
-    // boundary, never persisted.
+    // A few representative malformed shapes, each rejected by the strict
+    // parser at the publish boundary and never persisted: unknown mode, a
+    // status on automatic, and a stray child element. (The full rejection
+    // matrix is exercised by the parser's unit suite; these prove the server
+    // publish path actually runs that parser.)
+    let cases: &[(&str, String)] = &[
+        ("pub-bad-mode", pref_body("invisible", None)),
+        (
+            "pub-bad-status-on-auto",
+            pref_body("automatic", Some("away")),
+        ),
+        (
+            "pub-bad-child",
+            format!(r#"<status-preference xmlns="{NS}" mode="automatic"><x/></status-preference>"#),
+        ),
+    ];
+    for (id, body) in cases {
+        client
+            .send(&publish_iq(id, "current", body))
+            .await
+            .expect("send publish");
+        let result = client
+            .recv_matching(|frame| frame.contains(&format!("id='{id}'")))
+            .await
+            .expect("publish result");
+        assert_invalid_payload(&result);
+    }
+
+    // A publish carrying no `<status-preference>` payload at all is refused.
     client
-        .send(&publish_iq(
-            "pub-bad",
-            "current",
-            &pref_body("invisible", None),
+        .send(&format!(
+            r#"<iq type="set" id="pub-empty">
+              <pubsub xmlns="{NS_PUBSUB}">
+                <publish node="{NODE}"><item id="current"/></publish>
+              </pubsub>
+            </iq>"#
         ))
         .await
-        .expect("send publish");
-    let result = client
-        .recv_matching(|frame| frame.contains(r#"id='pub-bad'"#))
+        .expect("send empty publish");
+    let empty = client
+        .recv_matching(|frame| frame.contains(r#"id='pub-empty'"#))
         .await
-        .expect("publish result");
-    assert_invalid_payload(&result);
+        .expect("empty publish result");
+    assert!(
+        empty.contains(r#"type='error'"#),
+        "missing payload must error: {empty}"
+    );
 
     let _ = client.close().await;
 }
@@ -486,5 +518,104 @@ async fn self_fanout_reaches_owner_other_resource() {
     );
 
     let _ = r1.close().await;
+    let _ = r2.close().await;
+}
+
+#[tokio::test]
+async fn self_fanout_skips_owner_resource_without_notify_caps() {
+    let _guard = TEST_SERIAL.lock().await;
+    let alice_password = format!("alice-pass-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[("alice", &alice_password)]);
+    let mut r1 = connect_account(&server, "alice", &alice_password).await;
+    let mut r2 = connect_account(&server, "alice", &alice_password).await;
+
+    // Both online, but r2 advertises NO caps — so it does not opt into
+    // `urn:waddle:status-preference:0+notify`. The §3.4 owner-self pass is
+    // caps-gated, so r2 MUST NOT receive the headline: the `+notify` filter is
+    // the real gate, not mere co-ownership of the account.
+    r1.send("<presence/>").await.expect("r1 presence");
+    r2.send("<presence/>").await.expect("r2 presence");
+
+    r1.send(&publish_iq(
+        "noflt-pub",
+        "current",
+        &pref_body("manual", Some("away")),
+    ))
+    .await
+    .expect("r1 publish");
+    let _ = r1
+        .recv_matching(|f| f.contains(r#"id='noflt-pub'"#))
+        .await
+        .expect("r1 publish result");
+
+    let mut received: Option<String> = None;
+    for _ in 0..3 {
+        match r2.recv_timeout(Duration::from_millis(250)).await {
+            Ok(frame) => {
+                if frame.contains(NODE) {
+                    received = Some(frame);
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    assert!(
+        received.is_none(),
+        "a resource without +notify caps must NOT receive the headline: {received:?}"
+    );
+
+    let _ = r1.close().await;
+    let _ = r2.close().await;
+}
+
+#[tokio::test]
+async fn preference_survives_disconnect_and_fresh_reconnect() {
+    let _guard = TEST_SERIAL.lock().await;
+    let alice_password = format!("alice-pass-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[("alice", &alice_password)]);
+
+    // First session publishes a manual pick, then fully disconnects.
+    {
+        let mut r1 = connect_account(&server, "alice", &alice_password).await;
+        r1.send(&publish_iq(
+            "persist-pub",
+            "current",
+            &pref_body("manual", Some("dnd")),
+        ))
+        .await
+        .expect("publish");
+        let res = r1
+            .recv_matching(|f| f.contains(r#"id='persist-pub'"#))
+            .await
+            .expect("publish result");
+        assert!(res.contains(r#"type='result'"#), "publish: {res}");
+        let _ = r1.close().await;
+    }
+
+    // A brand-new connection (fresh login, same account) reads the stored pick
+    // back — proving the preference persists across sessions, replacing the
+    // Phase 1 in-memory store (AC3).
+    let mut r2 = connect_account(&server, "alice", &alice_password).await;
+    r2.send(&items_get_iq("persist-fetch", None))
+        .await
+        .expect("fetch");
+    let fetched = r2
+        .recv_matching(|f| f.contains(r#"id='persist-fetch'"#))
+        .await
+        .expect("fetch result");
+    assert!(
+        fetched.contains(r#"id='current'"#),
+        "stored item id must be 'current': {fetched}"
+    );
+    assert!(
+        fetched.contains(r#"mode="manual""#) || fetched.contains(r#"mode='manual'"#),
+        "persisted mode missing: {fetched}"
+    );
+    assert!(
+        fetched.contains(r#"status="dnd""#) || fetched.contains(r#"status='dnd'"#),
+        "persisted status missing: {fetched}"
+    );
+
     let _ = r2.close().await;
 }

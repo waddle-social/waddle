@@ -1141,9 +1141,9 @@ export function useChatAppController(giphyApiKey: string) {
       // gap-free, so just flush a pick made while the stream was down rather
       // than burn an items-get round-trip.
       if (event.type === "fresh") {
-        void statusPreferenceCoordinator.syncOnConnect(() =>
-          client.fetchStatusPreference().then(presenceModeFromWire),
-        );
+        statusPreferenceCoordinator
+          .syncOnConnect(() => client.fetchStatusPreference().then(presenceModeFromWire))
+          .catch(() => undefined);
       } else {
         statusPreferenceCoordinator.reconcile();
       }
