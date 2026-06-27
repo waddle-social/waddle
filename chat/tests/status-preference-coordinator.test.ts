@@ -141,6 +141,44 @@ describe("StatusPreferenceCoordinator", () => {
     await h.coord.reconcile();
     expect(h.published).toEqual([AWAY]); // automatic was NOT published
   });
+
+  test("suspend racing an in-flight publish does not re-advance the baseline (no next-login clobber)", async () => {
+    // The logout-time `suspend()` lands while a publish is still in flight. When
+    // that publish resolves, the baseline must stay as suspend left it (null) —
+    // otherwise the pre-logout pick is resurrected and the next login publishes
+    // Automatic over the synced preference, clobbering it for every device.
+    let resolveFirst: ((v: boolean) => void) | undefined;
+    const published: PresenceMode[] = [];
+    let mode: PresenceMode = AWAY;
+    let first = true;
+    const coord = new StatusPreferenceCoordinator({
+      publish: (m) => {
+        published.push(m);
+        if (first) {
+          first = false;
+          return new Promise<boolean>((res) => {
+            resolveFirst = res;
+          });
+        }
+        return Promise.resolve(true);
+      },
+      mode: () => mode,
+      setMode: (m) => {
+        mode = m;
+      },
+    });
+    const inFlight = coord.reconcile(); // publishing AWAY (pending)
+    coord.suspend(); // logout fires mid-publish → baseline zeroed
+    mode = AUTO; // logout-time reset-to-Automatic
+    resolveFirst?.(true); // the in-flight AWAY publish now confirms
+    await inFlight;
+    // Next login: the server still holds AWAY (the synced pick). A resurrected
+    // baseline would make `hasPendingLocalPick` publish AUTO over it; a baseline
+    // left null lets the fresh device adopt the stored AWAY and publish nothing.
+    await coord.syncOnConnect(async () => AWAY);
+    expect(mode).toEqual(AWAY); // adopted the stored pick
+    expect(published).toEqual([AWAY]); // only the original publish; no AUTO clobber
+  });
 });
 
 describe("StatusPreferenceCoordinator.hasPendingLocalPick", () => {

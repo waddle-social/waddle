@@ -72,6 +72,13 @@ export class StatusPreferenceCoordinator {
       this.publishing = false;
     }
     if (!sent) return; // baseline unchanged → retried on the next trigger
+    // `suspend()` (logout) may have fired while the publish was in flight,
+    // zeroing the baseline so the reset-to-Automatic that follows never
+    // publishes. Re-advancing it here would resurrect the pre-logout pick and,
+    // on the next login, `hasPendingLocalPick` would publish Automatic over it —
+    // clobbering the synced preference for every device. Leave the baseline as
+    // suspend left it.
+    if (this.suspended) return;
     this.lastPublished = desired;
     // A pick made while the publish was in flight needs another pass to
     // converge. Only recurse on success, so a persistent failure can't loop.
