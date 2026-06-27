@@ -24,10 +24,9 @@ import {
 } from "@/shell/structure-retry";
 import { useDeploymentVersionInfo } from "@/shell/version";
 import { useXmppRosterContacts } from "@/contacts/roster";
-import { resolveShow } from "@/presence/effective-show";
 import { IdleTracker } from "@/presence/idle-tracker";
 import { PresenceRegistry } from "@/presence/presence-registry";
-import { $presenceMode, resetPresenceMode } from "@/presence/presence-store";
+import { $ownNotificationsSuppressed, $presenceMode, resetPresenceMode } from "@/presence/presence-store";
 import { activityOverlayUpdate } from "@/presence/in-call-activity";
 import {
   presenceModeFromWire,
@@ -784,7 +783,13 @@ export function useChatAppController(giphyApiKey: string) {
   // This device's own mode drives the Show we broadcast and the local
   // DND checks; the picker writes it via the presence store.
   const presenceMode = useStore($presenceMode);
-  const selfPresenceShow = computed(() => resolveShow(presenceMode.value));
+  // Presence-DND silences this device's own message banners + sounds
+  // (ADR-010 Phase 5a). Derived from the picker store so Reset-to-automatic
+  // restores notifications live; badge / unread counts are unaffected, and
+  // this is orthogonal to the server-side `urn:waddle:dnd:0` quiet-hours
+  // schedule (both can suppress, for different reasons).
+  const ownNotificationsSuppressed = useStore($ownNotificationsSuppressed);
+  const isSelfDoNotDisturb = (): boolean => ownNotificationsSuppressed.value;
   // Per-device auto-away (ADR-010 Phase 2): the tracker watches in-tab
   // interaction + visibility and broadcasts Away/Extended Away with an
   // XEP-0319 idle stamp while Automatic; a Manual status suspends it.
@@ -982,7 +987,7 @@ export function useChatAppController(giphyApiKey: string) {
       messageSound,
       messageSoundsEnabled: () => notifications.messageSoundsEnabled.value,
       canShowForegroundNotification: () => notifications.canShowForegroundNotifications.value,
-      isDoNotDisturb: () => selfPresenceShow.value === "dnd",
+      isDoNotDisturb: isSelfDoNotDisturb,
       isTabFocused: () => isWindowFocused.value,
       sessionJid: connectionStore.session?.jid,
       resolveChannelNameFromJid,
@@ -1015,7 +1020,7 @@ export function useChatAppController(giphyApiKey: string) {
         messageSound,
         messageSoundsEnabled: () => notifications.messageSoundsEnabled.value,
         canShowForegroundNotification: () => notifications.canShowForegroundNotifications.value,
-        isDoNotDisturb: () => selfPresenceShow.value === "dnd",
+        isDoNotDisturb: isSelfDoNotDisturb,
         isTabFocused: () => isWindowFocused.value,
         sessionJid: session.value?.jid,
         activePeerJid: ui.sidebarMode.value === "dms" ? dmConversations.activePeerJid.value : null,
