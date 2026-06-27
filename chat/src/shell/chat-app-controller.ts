@@ -30,6 +30,12 @@ import { PresenceRegistry } from "@/presence/presence-registry";
 import { $presenceMode, resetPresenceMode } from "@/presence/presence-store";
 import { activityOverlayUpdate } from "@/presence/in-call-activity";
 import {
+  presenceModeFromWire,
+  presenceModeToWire,
+  statusPreferenceUpdate,
+} from "@/presence/status-preference";
+import { StatusPreferenceCoordinator } from "@/presence/status-preference-coordinator";
+import {
   clearInCallOverlay,
   resetInCallOverlays,
   setInCallOverlay,
@@ -838,6 +844,36 @@ export function useChatAppController(giphyApiKey: string) {
   // Vue watcher would let the refresh race ahead of the publish.
   $callState.subscribe(() => activityCoordinator.reconcile());
   $manualActivity.subscribe(() => activityCoordinator.reconcile());
+  // Cross-device manual-status sync (ADR-010 Phase 4): publish the picked mode
+  // to the private `urn:waddle:status-preference:0` PEP node so it follows the
+  // user across devices and survives reconnects. Auto-away stays per-device and
+  // is NOT synced (it is never written here — only the chosen mode is).
+  const statusPreferenceCoordinator = new StatusPreferenceCoordinator({
+    // Resolve `true` only when the publish is confirmed on the wire. A
+    // not-yet-ready session makes `publishStatusPreference` reject (via
+    // `requireConnectedXmpp`); returning `false` then keeps the coordinator's
+    // baseline unadvanced so the pick is retried on the next reconcile.
+    publish: async (mode) => {
+      const client = xmppClient.value;
+      if (!client) return false;
+      try {
+        await client.publishStatusPreference(presenceModeToWire(mode));
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    mode: () => $presenceMode.get(),
+    setMode: (mode) => $presenceMode.set(mode),
+  });
+  // Sync subscription (not a Vue `watch`): the baseline seeded by `applyRemote`
+  // must already be in place when this reconcile fires, or an adopted remote
+  // pick would echo back to the wire. `applyRemote` sets the baseline before
+  // writing `$presenceMode`, so this reconcile no-ops for adopted picks and
+  // only publishes genuine local ones.
+  $presenceMode.subscribe(() => {
+    statusPreferenceCoordinator.reconcile().catch(() => undefined);
+  });
   const appUpdate = useServiceWorkerUpdate();
   const version = useDeploymentVersionInfo(xmppClient);
   // RFC 363 PR 6: include DM peers in the iterate-and-pull avatar
@@ -1035,6 +1071,14 @@ export function useChatAppController(giphyApiKey: string) {
       const update = activityOverlayUpdate(event, session.value?.jid ?? "");
       if (update) setInCallOverlay(update.jid, update.inCall);
     });
+    // Cross-device manual-status sync receive side (ADR-010 Phase 4): a pick
+    // made on another of our resources arrives as an opaque
+    // `<status-preference/>` on our own status-preference node. Adopt it
+    // without re-publishing (the coordinator seeds its baseline first).
+    client.addPubsubEventHandler((event) => {
+      const mode = statusPreferenceUpdate(event, session.value?.jid ?? "");
+      if (mode) statusPreferenceCoordinator.applyRemote(mode);
+    });
     client.setMemberJidHandler((nick, bareJid) => {
       memberJidByNick.value = { ...memberJidByNick.value, [nick]: bareJid };
     });
@@ -1101,6 +1145,18 @@ export function useChatAppController(giphyApiKey: string) {
       // call ended during a stream drop) is retried here, so neither a stale
       // in-call overlay nor a missing manual activity survives a reconnect.
       activityCoordinator.reconcile();
+      // Sync the cross-device manual status (ADR-010 Phase 4). On a *fresh*
+      // session, read the node and adopt the stored pick (unless this device
+      // has an unpublished local pick, which then wins). A *resumed* session is
+      // gap-free, so just flush a pick made while the stream was down rather
+      // than burn an items-get round-trip.
+      if (event.type === "fresh") {
+        statusPreferenceCoordinator
+          .syncOnConnect(() => client.fetchStatusPreference().then(presenceModeFromWire))
+          .catch(() => undefined);
+      } else {
+        statusPreferenceCoordinator.reconcile().catch(() => undefined);
+      }
       // Re-hydrate XEP-0492 notification settings only on *fresh*
       // reconnects. A stream resume is by definition gap-free —
       // any bookmark publish from another tab during the disconnect
@@ -2397,7 +2453,11 @@ export function useChatAppController(giphyApiKey: string) {
     notifySettings.reset();
     // Drop the module-global presence mode and the aggregated per-resource
     // presence so the next account in this tab doesn't inherit a manual
-    // Away/DND or another user's contact presence.
+    // Away/DND or another user's contact presence. Suspend the sync coordinator
+    // FIRST: signing out is local-only — the chosen status must persist on the
+    // user's other devices — so the reset-to-Automatic below must not publish
+    // (which would clear the synced preference for every device).
+    statusPreferenceCoordinator.suspend();
     resetPresenceMode();
     presenceRegistry.clear();
     // Graceful disconnect (ADR-010 ghost cleanup): if a call is live the wire

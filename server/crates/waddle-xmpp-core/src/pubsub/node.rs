@@ -333,8 +333,41 @@ impl NodeConfig {
             config = Self::waddle_dnd_defaults();
         } else if node == super::pep::PEP_NODE_WADDLE_DM_BOOKMARKS {
             config = Self::waddle_dm_bookmarks_defaults();
+        } else if node == crate::waddle_status_preference::PEP_NODE_WADDLE_STATUS_PREFERENCE {
+            config = Self::waddle_status_preference_defaults();
         }
         config
+    }
+
+    /// Defaults for the Waddle status-preference PEP node (ADR-010
+    /// Phase 4).
+    ///
+    /// The synced manual-status payload is owner-only private state: it
+    /// follows the user across their own resources but no roster contact
+    /// needs to read it (contacts see only the resulting `<show>` on the
+    /// normal presence broadcast). Force `whitelist` access and `never`
+    /// send-last-published so a fresh roster subscription never receives
+    /// it; the user's own resources read it via `<items/>` GET on connect
+    /// and adopt live changes via the XEP-0163 §3.4 self fan-out.
+    /// `max_items = 1` keeps the node single-slot (`id = current`).
+    ///
+    /// `notify_retract` / `notify_delete` are `false` because the server
+    /// does not emit the XEP-0060 §7.2.2 / §9.1.5 retract/delete events
+    /// on the wire — advertising them as `true` would lie to subscribers,
+    /// and reset is published as an explicit `mode='automatic'` item
+    /// rather than a retract precisely so it fans out as a publish.
+    pub fn waddle_status_preference_defaults() -> Self {
+        Self {
+            access_model: AccessModel::Whitelist,
+            publish_model: PublishModel::Publishers,
+            node_type: None,
+            max_items: 1,
+            persist_items: true,
+            deliver_payloads: true,
+            notify_retract: false,
+            notify_delete: false,
+            send_last_published_item: SendLastPublishedItem::Never,
+        }
     }
 
     /// Defaults for the Waddle DM-bookmarks PEP node (issue #720).
@@ -700,6 +733,36 @@ mod tests {
         assert_eq!(
             NodeConfig::pep_for_node(super::super::pep::PEP_NODE_WADDLE_DM_BOOKMARKS),
             NodeConfig::waddle_dm_bookmarks_defaults()
+        );
+    }
+
+    #[test]
+    fn waddle_status_preference_pep_config_is_single_slot_whitelist() {
+        // The synced manual-status payload (ADR-010 Phase 4) is owner-only
+        // private state — only the user's own resources read it, never
+        // roster contacts — so it must stay off the roster fan-out
+        // (whitelist + send-last=never), single-slot (`id = current`).
+        let node = crate::waddle_status_preference::PEP_NODE_WADDLE_STATUS_PREFERENCE;
+        let config = NodeConfig::pep_for_node(node);
+        assert_eq!(config.access_model, AccessModel::Whitelist);
+        assert_eq!(config.publish_model, PublishModel::Publishers);
+        assert_eq!(config.max_items, 1);
+        assert!(config.persist_items);
+        assert!(config.deliver_payloads);
+        assert!(!config.notify_retract);
+        assert!(!config.notify_delete);
+        assert_eq!(
+            config.send_last_published_item,
+            SendLastPublishedItem::Never
+        );
+    }
+
+    #[test]
+    fn waddle_status_preference_defaults_helper_matches_pep_for_node() {
+        let node = crate::waddle_status_preference::PEP_NODE_WADDLE_STATUS_PREFERENCE;
+        assert_eq!(
+            NodeConfig::pep_for_node(node),
+            NodeConfig::waddle_status_preference_defaults()
         );
     }
 

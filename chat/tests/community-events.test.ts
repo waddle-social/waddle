@@ -332,7 +332,11 @@ describe("useCommunityEvents", () => {
   });
 
   test("findMaster recovers the unexpanded master by uid", async () => {
-    const dtstart = Date.parse("2026-06-05T19:00:00Z");
+    // Anchor the series to "now" so the weekly expansion always has upcoming
+    // Fridays to emit — a hardcoded past DTSTART would expand to zero surviving
+    // instances once that date slips behind the run-time clock (expandInstances
+    // drops occurrences whose end is <= Date.now()).
+    const dtstart = Date.now();
     const client = makeClient([
       {
         id: "evt-series",
