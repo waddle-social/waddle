@@ -1,8 +1,13 @@
-import { describe, expect, mock, test } from "bun:test";
+import { afterEach, describe, expect, mock, test } from "bun:test";
 import {
   createIncomingCallAlertController,
   type IncomingCallNotifier,
 } from "../src/shell/audio-alerts";
+import {
+  $ownNotificationsSuppressed,
+  pickPresence,
+  resetPresenceMode,
+} from "../src/presence/presence-store";
 
 // Presence Do Not Disturb (effective `<show>dnd</show>`) must silence this
 // device's own incoming-call ringtone AND OS notification banner — the whole
@@ -81,5 +86,32 @@ describe("incoming-call alert under presence Do Not Disturb", () => {
     controller.stopAll();
 
     expect(player.stop).not.toHaveBeenCalled();
+  });
+});
+
+// Integration: prove the real presence-store signal — the exact expression the
+// production caller wires (`ChatReadyShell.vue`: `() => $ownNotificationsSuppressed.get()`)
+// — reaches the controller. Guards the seam between the picker store and the
+// call alert, not just the injected-predicate contract.
+describe("incoming-call alert wired to the presence store", () => {
+  afterEach(() => {
+    // The store is module-global; reset so a picked DND can't leak across tests.
+    resetPresenceMode();
+  });
+
+  test("picking Do Not Disturb suppresses the ring; resetting restores it", () => {
+    const player = makePlayer();
+    const controller = createIncomingCallAlertController({
+      player,
+      isDoNotDisturb: () => $ownNotificationsSuppressed.get(),
+    });
+
+    pickPresence("dnd");
+    controller.start(CALL);
+    expect(player.startLoop).not.toHaveBeenCalled();
+
+    resetPresenceMode();
+    controller.start(CALL);
+    expect(player.startLoop).toHaveBeenCalledWith("call-1");
   });
 });
