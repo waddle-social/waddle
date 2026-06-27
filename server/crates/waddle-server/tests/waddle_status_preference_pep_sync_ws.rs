@@ -151,6 +151,71 @@ fn bare_presence() -> String {
     element_to_xml(Element::builder("presence", CLIENT_NS).build())
 }
 
+/// `<presence type=… to=…/>` (subscription-management presence).
+fn presence_typed(presence_type: &str, to: &str) -> String {
+    element_to_xml(
+        Element::builder("presence", CLIENT_NS)
+            .attr(attr("type"), presence_type)
+            .attr(attr("to"), to)
+            .build(),
+    )
+}
+
+/// `<iq type='get'><query xmlns='jabber:iq:roster'/></iq>` — priming the
+/// roster establishes roster interest so the server later pushes subscription
+/// state changes to the client.
+fn roster_get_iq(id: &str) -> String {
+    let query = Element::builder("query", "jabber:iq:roster").build();
+    iq("get", id, None, None, query)
+}
+
+/// Establish bob → alice presence subscription so alice's roster carries bob
+/// with `subscription = from`. That makes bob a target of alice's XEP-0163 §3
+/// roster+CAPS PEP fan-out — so a non-private node WOULD deliver the headline to
+/// him. The private-node carve-out is what must suppress it. Mirrors
+/// `establish_bob_subscribes_to_alice` in `xep0163_pep_ws.rs`.
+async fn establish_roster_from(
+    alice: &mut WsXmppClient,
+    bob: &mut WsXmppClient,
+    alice_bare: &str,
+    bob_bare: &str,
+) {
+    // Prime both rosters first (roster interest), or the subscription-state
+    // pushes below are not delivered.
+    alice
+        .send(&roster_get_iq("roster-init-a"))
+        .await
+        .expect("alice roster get");
+    let _ = alice
+        .recv_matching(|f| f.contains("roster-init-a"))
+        .await
+        .expect("alice roster result");
+    bob.send(&roster_get_iq("roster-init-b"))
+        .await
+        .expect("bob roster get");
+    let _ = bob
+        .recv_matching(|f| f.contains("roster-init-b"))
+        .await
+        .expect("bob roster result");
+
+    alice.send(&bare_presence()).await.expect("alice presence");
+    bob.send(&presence_typed("subscribe", alice_bare))
+        .await
+        .expect("bob subscribes to alice");
+    let _ = alice
+        .recv_matching(|f| f.contains(r#"type='subscribe'"#))
+        .await
+        .expect("alice receives subscribe request");
+    alice
+        .send(&presence_typed("subscribed", bob_bare))
+        .await
+        .expect("alice approves subscription");
+    let _ = bob
+        .recv_matching(|f| f.contains(r#"type='subscribed'"#))
+        .await
+        .expect("bob receives approval");
+}
+
 fn assert_invalid_payload(xml: &str) {
     assert!(xml.contains(r#"type='error'"#), "expected error iq: {xml}");
     assert!(
@@ -429,32 +494,17 @@ async fn node_is_private_to_non_owner() {
 async fn private_pep_does_not_fan_out_to_roster() {
     let _guard = TEST_SERIAL.lock().await;
     let (_server, mut alice, mut bob) = connect_two_accounts().await;
+    let alice_bare = format!("alice@{DOMAIN}");
+    let bob_bare = format!("bob@{DOMAIN}");
 
-    alice.send(&bare_presence()).await.expect("alice presence");
-    bob.send(&bare_presence()).await.expect("bob presence");
-
-    // Bob best-effort subscribes to alice's node (whitelist should refuse, but
-    // the fan-out carve-out is the real guard under test).
-    let subscribe = Element::builder("subscribe", NS_PUBSUB)
-        .attr(attr("node"), NODE)
-        .attr(attr("jid"), format!("bob@{DOMAIN}"))
-        .build();
-    let subscribe_pubsub = Element::builder("pubsub", NS_PUBSUB)
-        .append(subscribe)
-        .build();
-    bob.send(&iq(
-        "set",
-        "bob-sub",
-        Some(&format!("alice@{DOMAIN}")),
-        None,
-        subscribe_pubsub,
-    ))
-    .await
-    .expect("bob subscribe");
-    let _ = bob
-        .recv_matching(|f| f.contains(r#"id='bob-sub'"#))
-        .await
-        .expect("bob subscribe response");
+    // Make bob a genuine fan-out candidate for alice's §3 roster+CAPS pass:
+    // (1) bob is a roster contact of alice with `subscription = from`, and
+    // (2) bob advertises `urn:waddle:status-preference:0+notify` in his caps.
+    // For a NON-private node both conditions together would deliver the headline
+    // to bob — so this setup is what makes the carve-out the real thing under
+    // test (delete `is_private_pep_node` for this node and this test fails).
+    establish_roster_from(&mut alice, &mut bob, &alice_bare, &bob_bare).await;
+    announce_status_preference_notify_caps(&mut bob).await;
 
     alice
         .send(&publish_iq(
@@ -469,7 +519,9 @@ async fn private_pep_does_not_fan_out_to_roster() {
         .await
         .expect("alice publish result");
 
-    // Bob's stream MUST stay silent for the preference node.
+    // Despite being a roster-`from` contact WITH matching `+notify` caps, bob's
+    // stream MUST stay silent for the preference node — the picked status is
+    // private and never leaks to contacts.
     let mut leaked: Option<String> = None;
     for _ in 0..3 {
         match bob.recv_timeout(Duration::from_millis(250)).await {

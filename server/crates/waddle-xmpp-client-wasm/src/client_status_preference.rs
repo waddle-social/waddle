@@ -94,6 +94,18 @@ pub(crate) fn build_status_preference_fetch_iq() -> Element {
         .build()
 }
 
+/// Whether a fetch result IQ's `from` is acceptable per XEP-0223 §Security
+/// Considerations (CVE-2023-28686): the stored preference may be read only
+/// from the account's own bare JID. An absent `from` is the account's own
+/// (PEP) service and is accepted; any other sender is treated as spoofed so
+/// a contact cannot inject a forged preference into the user's other devices.
+fn accept_fetch_from(result_from: Option<&str>, own_bare: &str) -> bool {
+    match result_from {
+        None => true,
+        Some(from) => from == own_bare,
+    }
+}
+
 /// Parse the items result from [`build_status_preference_fetch_iq`].
 ///
 /// Returns `None` when the node has no item, the result shape doesn't
@@ -151,10 +163,8 @@ impl WaddleClient {
                 Ok(r) => r,
                 Err(_) => return Ok(JsValue::NULL),
             };
-            if let Some(from) = result.attr("from") {
-                if from != own_bare {
-                    return Ok(JsValue::NULL);
-                }
+            if !accept_fetch_from(result.attr("from"), &own_bare) {
+                return Ok(JsValue::NULL);
             }
             match parse_status_preference_fetch_result(&result) {
                 Some(pref) => to_js_value(&JsStatusPreference::from(pref)),
@@ -234,5 +244,37 @@ mod tests {
             .parse()
             .expect("valid");
         assert_eq!(parse_status_preference_fetch_result(&iq), None);
+    }
+
+    #[test]
+    fn fetch_from_guard_accepts_absent_or_own_bare() {
+        // The PEP service answers as the account's own bare JID; an absent
+        // `from` is equally the own account. Both are legitimate.
+        assert!(accept_fetch_from(None, "alice@localhost"));
+        assert!(accept_fetch_from(
+            Some("alice@localhost"),
+            "alice@localhost"
+        ));
+    }
+
+    #[test]
+    fn fetch_from_guard_rejects_spoofed_sender() {
+        // CVE-2023-28686: a result purporting to come from anyone other than the
+        // account's own bare JID (a contact, or a look-alike domain) must be
+        // rejected so it cannot inject a forged preference cross-device.
+        assert!(!accept_fetch_from(
+            Some("mallory@localhost"),
+            "alice@localhost"
+        ));
+        assert!(!accept_fetch_from(
+            Some("alice@evil.example"),
+            "alice@localhost"
+        ));
+        // A full JID (resource-qualified) is not the bare-JID PEP service form
+        // and is likewise not accepted.
+        assert!(!accept_fetch_from(
+            Some("alice@localhost/phone"),
+            "alice@localhost"
+        ));
     }
 }
