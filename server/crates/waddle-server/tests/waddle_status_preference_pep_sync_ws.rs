@@ -275,6 +275,48 @@ async fn publish_then_owner_fetch_round_trips() {
 }
 
 #[tokio::test]
+async fn publish_chat_status_round_trips() {
+    // RFC 6121 `chat` ("free for chat") became a pickable manual status in
+    // ADR-010 Phase 5b. Before that it was an UnknownStatus the strict payload
+    // validator rejected with <bad-request/>. This guards the full wire path:
+    // the server now ACCEPTS the publish and round-trips `status='chat'`.
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = connect_admin().await;
+
+    client
+        .send(&publish_iq(
+            "pub-chat",
+            "current",
+            status_preference_payload("manual", Some("chat")),
+        ))
+        .await
+        .expect("send publish");
+    let publish_result = client
+        .recv_matching(|frame| frame.contains(r#"id='pub-chat'"#))
+        .await
+        .expect("publish result");
+    assert!(
+        publish_result.contains(r#"type='result'"#),
+        "chat publish must be accepted, not rejected: {publish_result}"
+    );
+
+    client
+        .send(&items_get_iq("fetch-chat", None))
+        .await
+        .expect("send fetch");
+    let fetch_result = client
+        .recv_matching(|frame| frame.contains(r#"id='fetch-chat'"#))
+        .await
+        .expect("fetch result");
+    assert!(
+        fetch_result.contains(r#"status="chat""#) || fetch_result.contains(r#"status='chat'"#),
+        "fetched payload missing status=chat: {fetch_result}"
+    );
+
+    let _ = client.close().await;
+}
+
+#[tokio::test]
 async fn republish_overwrites_item() {
     let _guard = TEST_SERIAL.lock().await;
     let (_server, mut client) = connect_admin().await;

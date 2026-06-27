@@ -23,7 +23,7 @@ export const $ownNotificationsSuppressed = computed($selfShow, (show) =>
   presenceSuppressesOwnNotifications(show)
 );
 
-/** Apply a picker choice — Available / Away / Do Not Disturb, or `reset` to Automatic. */
+/** Apply a picker choice — Available / Free to chat / Away / Do Not Disturb, or `reset` to Automatic. */
 export function pickPresence(pick: PresencePick): void {
   $presenceMode.set(applyPick(pick));
 }

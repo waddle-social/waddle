@@ -23,8 +23,8 @@
 //!
 //! * `mode` — required, `automatic` | `manual`.
 //! * `status` — required iff `mode='manual'`, one of `available` |
-//!   `away` | `dnd` (the Phase 1 manual-status set). Forbidden when
-//!   `mode='automatic'`.
+//!   `chat` | `away` | `dnd` (the pickable manual-status set). Forbidden
+//!   when `mode='automatic'`.
 //!
 //! Reset-to-automatic is published as an explicit `mode='automatic'`
 //! item rather than a retract: the node defaults pin `notify_retract =
@@ -62,23 +62,27 @@ const MODE_AUTOMATIC: &str = "automatic";
 const MODE_MANUAL: &str = "manual";
 
 const STATUS_AVAILABLE: &str = "available";
+const STATUS_CHAT: &str = "chat";
 const STATUS_AWAY: &str = "away";
 const STATUS_DND: &str = "dnd";
 
 /// The user's manually-picked status when not in Automatic mode. Mirrors
-/// the chat client's `ManualStatus` (`available | away | dnd`).
+/// the chat client's `ManualStatus` (`available | chat | away | dnd`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManualStatus {
     Available,
+    /// RFC 6121 `<show>chat</show>` — "free for chat" (ADR-010 Phase 5b).
+    Chat,
     Away,
     Dnd,
 }
 
 impl ManualStatus {
-    /// The wire token for this status (`available` | `away` | `dnd`).
+    /// The wire token for this status (`available` | `chat` | `away` | `dnd`).
     pub fn as_str(self) -> &'static str {
         match self {
             ManualStatus::Available => STATUS_AVAILABLE,
+            ManualStatus::Chat => STATUS_CHAT,
             ManualStatus::Away => STATUS_AWAY,
             ManualStatus::Dnd => STATUS_DND,
         }
@@ -88,6 +92,7 @@ impl ManualStatus {
     pub fn from_token(raw: &str) -> Result<Self, StatusPreferenceParseError> {
         match raw {
             STATUS_AVAILABLE => Ok(ManualStatus::Available),
+            STATUS_CHAT => Ok(ManualStatus::Chat),
             STATUS_AWAY => Ok(ManualStatus::Away),
             STATUS_DND => Ok(ManualStatus::Dnd),
             other => Err(StatusPreferenceParseError::UnknownStatus(other.to_string())),
@@ -119,7 +124,7 @@ pub enum StatusPreferenceParseError {
     MissingStatus,
     #[error("'status' attribute is not allowed when mode='automatic'")]
     UnexpectedStatus,
-    #[error("unknown status '{0}' (expected 'available', 'away', or 'dnd')")]
+    #[error("unknown status '{0}' (expected 'available', 'chat', 'away', or 'dnd')")]
     UnknownStatus(String),
     #[error("unknown attribute '{0}' on <status-preference>")]
     UnknownAttribute(String),
@@ -259,6 +264,7 @@ mod tests {
     #[test]
     fn round_trip_manual_statuses() {
         round_trip(StatusPreference::Manual(ManualStatus::Available));
+        round_trip(StatusPreference::Manual(ManualStatus::Chat));
         round_trip(StatusPreference::Manual(ManualStatus::Away));
         round_trip(StatusPreference::Manual(ManualStatus::Dnd));
     }
@@ -287,6 +293,16 @@ mod tests {
         assert_eq!(
             parse_str("<status-preference xmlns='urn:waddle:status-preference:0' mode='manual' status='available'/>"),
             Ok(StatusPreference::Manual(ManualStatus::Available))
+        );
+    }
+
+    #[test]
+    fn parse_chat_status_token() {
+        // RFC 6121 `chat` ("free for chat") is a pickable manual status
+        // (ADR-010 Phase 5b), so it must round-trip across the user's devices.
+        assert_eq!(
+            parse_str("<status-preference xmlns='urn:waddle:status-preference:0' mode='manual' status='chat'/>"),
+            Ok(StatusPreference::Manual(ManualStatus::Chat))
         );
     }
 
@@ -388,6 +404,7 @@ mod tests {
         for pref in [
             StatusPreference::Automatic,
             StatusPreference::Manual(ManualStatus::Available),
+            StatusPreference::Manual(ManualStatus::Chat),
             StatusPreference::Manual(ManualStatus::Away),
             StatusPreference::Manual(ManualStatus::Dnd),
         ] {

@@ -41,6 +41,9 @@ export function parsePresenceShow(show: string | undefined): OccupantPresence {
       return "away";
     case "dnd":
       return "dnd";
+    // RFC 6121 `chat` ("free for chat") folds into online — an available
+    // substate, rendered the same as plain Available (ADR-010 Phase 5b).
+    case "chat":
     default:
       return "online";
   }
@@ -55,6 +58,9 @@ export function mapPresenceShow(presence: WasmPresence): PresenceUpdateEvent["sh
       return "xa";
     case "dnd":
       return "dnd";
+    // RFC 6121 `chat` ("free for chat") folds into available — an available
+    // substate, rendered the same as plain Available (ADR-010 Phase 5b).
+    case "chat":
     default:
       return "available";
   }

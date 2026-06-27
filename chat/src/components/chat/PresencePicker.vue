@@ -10,6 +10,9 @@ const selfShow = useStore($selfShow);
 
 const options: { status: ManualStatus; label: string; dot: string }[] = [
   { status: "available", label: "Available", dot: "bg-success/75" },
+  // RFC 6121 `<show>chat</show>` — "free for chat". An available substate, so
+  // it shares the green dot; contacts render it as Available (ADR-010 fold).
+  { status: "chat", label: "Free to chat", dot: "bg-success/75" },
   { status: "away", label: "Away", dot: "bg-warning/75" },
   { status: "dnd", label: "Do Not Disturb", dot: "bg-destructive/75" },
 ];
