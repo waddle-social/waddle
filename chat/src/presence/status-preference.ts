@@ -16,7 +16,7 @@ const NS_STATUS_PREFERENCE = "urn:waddle:status-preference:0";
 /** The PEP node the preference is published to (equal to its namespace). */
 const STATUS_PREFERENCE_PEP_NODE = NS_STATUS_PREFERENCE;
 
-const MANUAL_STATUSES: readonly ManualStatus[] = ["available", "away", "dnd"];
+const MANUAL_STATUSES: readonly ManualStatus[] = ["available", "chat", "away", "dnd"];
 
 function isManualStatus(value: string | null | undefined): value is ManualStatus {
   return value != null && (MANUAL_STATUSES as readonly string[]).includes(value);

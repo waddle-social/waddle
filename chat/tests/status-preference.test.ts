@@ -25,7 +25,9 @@ describe("presenceModeFromWire / presenceModeToWire", () => {
   });
 
   test("each manual status round-trips", () => {
-    for (const status of ["available", "away", "dnd"] as const) {
+    // `chat` ("free for chat", ADR-010 Phase 5b) syncs across devices like the
+    // other manual picks — both directions of the wire mapping must carry it.
+    for (const status of ["available", "chat", "away", "dnd"] as const) {
       expect(presenceModeFromWire({ mode: "manual", status })).toEqual({ kind: "manual", status });
       expect(presenceModeToWire({ kind: "manual", status })).toEqual({ mode: "manual", status });
     }

@@ -22,6 +22,11 @@ describe("effective-show: resolveShow", () => {
     const mode: PresenceMode = { kind: "manual", status: "dnd" };
     expect(resolveShow(mode)).toBe("dnd");
   });
+
+  test("a manual free-to-chat pick resolves to chat", () => {
+    const mode: PresenceMode = { kind: "manual", status: "chat" };
+    expect(resolveShow(mode)).toBe("chat");
+  });
 });
 
 describe("effective-show: applyPick", () => {
@@ -35,6 +40,10 @@ describe("effective-show: applyPick", () => {
 
   test("picking available is a pinned manual mode, distinct from automatic", () => {
     expect(applyPick("available")).toEqual({ kind: "manual", status: "available" });
+  });
+
+  test("picking free-to-chat is a sticky manual mode", () => {
+    expect(applyPick("chat")).toEqual({ kind: "manual", status: "chat" });
   });
 });
 
@@ -52,6 +61,15 @@ describe("effective-show: resolveBroadcast", () => {
     expect(resolveBroadcast({ kind: "automatic" }, { show: "away", idleSince: 500 })).toEqual({
       show: "away",
       idleSince: 500,
+    });
+  });
+
+  test("a manual free-to-chat pick broadcasts chat and suspends auto-away", () => {
+    // Manual suspends auto-away even mid-idle: chat goes out with no idle stamp.
+    const longIdle = { show: "xa", idleSince: 999 } as const;
+    expect(resolveBroadcast({ kind: "manual", status: "chat" }, longIdle)).toEqual({
+      show: "chat",
+      idleSince: null,
     });
   });
 });

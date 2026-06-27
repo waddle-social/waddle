@@ -12,10 +12,11 @@ describe("PresencePicker", () => {
     $presenceMode.set({ kind: "automatic" });
   });
 
-  test("renders the three pickable statuses as a radiogroup", async () => {
+  test("renders the four pickable statuses as a radiogroup", async () => {
     const html = await render();
     expect(html).toContain('role="radiogroup"');
     expect(html).toContain("Available");
+    expect(html).toContain("Free to chat");
     expect(html).toContain("Away");
     expect(html).toContain("Do Not Disturb");
   });
@@ -31,5 +32,13 @@ describe("PresencePicker", () => {
     const html = await render();
     expect(html).toContain("Reset to automatic");
     expect(html).toContain('aria-checked="true"');
+  });
+
+  test("a manual free-to-chat pick is sticky and offers Reset to automatic", async () => {
+    $presenceMode.set({ kind: "manual", status: "chat" });
+    const html = await render();
+    expect(html).toContain("Free to chat");
+    expect(html).toContain('aria-checked="true"');
+    expect(html).toContain("Reset to automatic");
   });
 });

@@ -4,9 +4,9 @@
 
 import type { AutoAway } from "./idle";
 
-export type ManualStatus = "available" | "away" | "dnd";
+export type ManualStatus = "available" | "chat" | "away" | "dnd";
 
-export type EffectiveShow = "available" | "away" | "dnd";
+export type EffectiveShow = "available" | "chat" | "away" | "dnd";
 
 export type PresenceMode =
   | { kind: "automatic" }
@@ -18,7 +18,7 @@ export function resolveShow(mode: PresenceMode): EffectiveShow {
 
 /** The Show this device actually broadcasts. Adds `xa` over the manual set —
  * Extended Away is only ever reached automatically, never picked. */
-export type BroadcastShow = "available" | "away" | "xa" | "dnd";
+export type BroadcastShow = "available" | "chat" | "away" | "xa" | "dnd";
 
 /** The full outbound presence this device should advertise: a Show plus the
  * XEP-0319 idle instant (epoch ms) to stamp, or `null` for none. */
