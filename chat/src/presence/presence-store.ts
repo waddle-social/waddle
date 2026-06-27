@@ -5,12 +5,23 @@
 import { atom, computed } from "nanostores";
 
 import { applyPick, resolveShow, type PresenceMode, type PresencePick } from "./effective-show";
+import { presenceSuppressesOwnNotifications } from "./own-notification-gate";
 
 /** The user's chosen presence mode on this device. Defaults to Automatic. */
 export const $presenceMode = atom<PresenceMode>({ kind: "automatic" });
 
 /** The Show this device currently broadcasts, derived from the mode. */
 export const $selfShow = computed($presenceMode, (mode) => resolveShow(mode));
+
+/**
+ * Whether this device should silence its OWN message banners/sounds because
+ * the Effective Show is Do Not Disturb (ADR-010 Phase 5a). Badge / unread
+ * counts are unaffected. Orthogonal to the server-side `urn:waddle:dnd:0`
+ * quiet-hours schedule; both can suppress, for different reasons.
+ */
+export const $ownNotificationsSuppressed = computed($selfShow, (show) =>
+  presenceSuppressesOwnNotifications(show)
+);
 
 /** Apply a picker choice — Available / Away / Do Not Disturb, or `reset` to Automatic. */
 export function pickPresence(pick: PresencePick): void {
