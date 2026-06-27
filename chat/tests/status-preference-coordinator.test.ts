@@ -142,6 +142,72 @@ describe("StatusPreferenceCoordinator", () => {
     expect(h.published).toEqual([AWAY]); // automatic was NOT published
   });
 
+  test("a remote pick adopted while a local publish is in flight is not echoed back", async () => {
+    // A peer update lands via applyRemote while this device's own publish is
+    // mid-flight. When the publish resolves the coordinator must NOT overwrite
+    // the adopted baseline and re-publish it — that is the echo applyRemote
+    // exists to prevent.
+    let resolveFirst: ((v: boolean) => void) | undefined;
+    const published: PresenceMode[] = [];
+    let mode: PresenceMode = DND;
+    let first = true;
+    const coord = new StatusPreferenceCoordinator({
+      publish: (m) => {
+        published.push(m);
+        if (first) {
+          first = false;
+          return new Promise<boolean>((res) => {
+            resolveFirst = res;
+          });
+        }
+        return Promise.resolve(true);
+      },
+      mode: () => mode,
+      setMode: (m) => {
+        mode = m;
+      },
+    });
+    const inFlight = coord.reconcile(); // publishing DND (pending)
+    coord.applyRemote(AWAY); // a peer update lands mid-publish
+    resolveFirst?.(true); // the DND publish confirms
+    await inFlight;
+    expect(mode).toEqual(AWAY); // the adopted remote value is kept
+    expect(published).toEqual([DND]); // AWAY is NOT re-published (no echo)
+  });
+
+  test("a pick made while a publish is failing is retried, not stranded", async () => {
+    // The user picks DND while AWAY's publish is in flight; that publish then
+    // FAILS. The mid-flight DND pick must still be retried once the failure
+    // settles — it must not be silently dropped by the in-flight guard.
+    let resolveFirst: ((v: boolean) => void) | undefined;
+    const published: PresenceMode[] = [];
+    let mode: PresenceMode = AWAY;
+    let first = true;
+    const coord = new StatusPreferenceCoordinator({
+      publish: (m) => {
+        published.push(m);
+        if (first) {
+          first = false;
+          return new Promise<boolean>((res) => {
+            resolveFirst = res;
+          });
+        }
+        return Promise.resolve(true);
+      },
+      mode: () => mode,
+      setMode: (m) => {
+        mode = m;
+      },
+    });
+    const inFlight = coord.reconcile(); // publishing AWAY (pending)
+    mode = DND; // user picks DND mid-flight
+    await coord.reconcile(); // coalesced (a publish is in flight) — not dropped
+    resolveFirst?.(false); // the AWAY publish FAILS
+    await inFlight;
+    expect(published).toEqual([AWAY, DND]); // DND is retried after the failure
+    expect(mode).toEqual(DND);
+  });
+
   test("suspend racing an in-flight publish does not re-advance the baseline (no next-login clobber)", async () => {
     // The logout-time `suspend()` lands while a publish is still in flight. When
     // that publish resolves, the baseline must stay as suspend left it (null) —
@@ -279,6 +345,21 @@ describe("StatusPreferenceCoordinator.syncOnConnect", () => {
     });
     expect(h.getMode()).toEqual(DND); // the live update is kept, not overwritten
     expect(h.published).toEqual([]); // applyRemote does not echo
+  });
+
+  test("logout during the connect-time fetch does not leak the stored status into the store", async () => {
+    // A fresh connect begins syncing (fetch in flight) and the user logs out
+    // before it returns: suspend() + reset-to-Automatic run, then the server's
+    // stored AWAY resolves. It must NOT be written into $presenceMode after the
+    // reset, or the next account in this tab inherits the signed-out user's pick.
+    const h = harness(AUTO);
+    await h.coord.syncOnConnect(async () => {
+      h.coord.suspend(); // logout fires mid-fetch
+      h.setMode(AUTO); // resetPresenceMode()
+      return AWAY; // stored value resolves after the logout reset
+    });
+    expect(h.getMode()).toEqual(AUTO); // the stored AWAY is dropped, not adopted
+    expect(h.published).toEqual([]);
   });
 
   test("resume re-enables publishing after a suspend/login cycle", async () => {

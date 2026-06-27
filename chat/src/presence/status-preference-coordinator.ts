@@ -21,6 +21,13 @@
 // the wire: `publish` resolves `true` iff the IQ was sent, and `reconcile`
 // awaits it. A publish that fails (disconnected, session not ready, server
 // error) leaves the baseline untouched so the next reconcile retries.
+//
+// Because publishing is async, the baseline can be changed *while a publish is
+// in flight*. An `epoch` counter disowns a publish whose baseline was moved
+// under it (by `suspend` or `applyRemote`), so its late success can neither
+// echo an adopted remote pick nor resurrect a pre-logout one. A trigger that
+// fires mid-publish is coalesced (`rerunRequested`) rather than dropped, so a
+// pick made during a publish is honored even if that publish then fails.
 
 import type { PresenceMode } from "./effective-show";
 
@@ -50,47 +57,76 @@ export class StatusPreferenceCoordinator {
   private suspended = false;
   /** Guards against overlapping publishes (an async publish is in flight). */
   private publishing = false;
+  /** A reconcile trigger that arrived mid-publish, to be honored once on settle. */
+  private rerunRequested = false;
+  /**
+   * Bumped whenever the baseline is changed out from under an in-flight publish
+   * — by logout (`suspend`) or by adopting a remote pick (`applyRemote`). A
+   * publish that resolves after the epoch moved no longer owns the baseline and
+   * must not advance it (which would echo an adopted pick or resurrect a
+   * pre-logout one). Robust to a `resume()` that flips `suspended` back.
+   */
+  private epoch = 0;
 
   constructor(private readonly deps: StatusPreferenceCoordinatorDeps) {}
 
   /**
    * Publish the current mode if it differs from the wire baseline, advancing
    * the baseline only when the publish is confirmed sent. A publish that fails
-   * leaves the baseline untouched, so the next reconcile (a later pick or
-   * session-ready) retries. Overlapping publishes are deduped via `publishing`;
-   * a mode that changed mid-flight triggers one more pass on success.
+   * leaves the baseline untouched, so the next reconcile retries. A trigger
+   * arriving mid-publish is coalesced into one rerun (never dropped), so a pick
+   * made while a publish is in flight is honored even if that publish fails. A
+   * baseline moved mid-flight by `suspend`/`applyRemote` is left untouched.
    */
   async reconcile(): Promise<void> {
-    if (this.suspended || this.publishing) return;
+    if (this.suspended) return;
+    // Coalesce, don't drop: a pick that fires while a publish is in flight must
+    // still be published once the current one settles — including when it fails
+    // (the success-only recursion below would otherwise strand it).
+    if (this.publishing) {
+      this.rerunRequested = true;
+      return;
+    }
     const desired = this.deps.mode();
     if (this.lastPublished !== null && sameMode(desired, this.lastPublished)) return;
     this.publishing = true;
+    const startEpoch = this.epoch;
     let sent = false;
     try {
       sent = await this.deps.publish(desired);
     } finally {
       this.publishing = false;
     }
-    if (!sent) return; // baseline unchanged → retried on the next trigger
-    // `suspend()` (logout) may have fired while the publish was in flight,
-    // zeroing the baseline so the reset-to-Automatic that follows never
-    // publishes. Re-advancing it here would resurrect the pre-logout pick and,
-    // on the next login, `hasPendingLocalPick` would publish Automatic over it —
-    // clobbering the synced preference for every device. Leave the baseline as
-    // suspend left it.
-    if (this.suspended) return;
-    this.lastPublished = desired;
-    // A pick made while the publish was in flight needs another pass to
-    // converge. Only recurse on success, so a persistent failure can't loop.
-    if (!sameMode(this.deps.mode(), this.lastPublished)) await this.reconcile();
+    // The baseline moved under us while the publish was in flight: logout
+    // (`suspend`) zeroed it, or a remote pick was adopted (`applyRemote`).
+    // Advancing it now would resurrect a stale value — re-publishing an adopted
+    // remote pick (echo), or clobbering the synced preference after logout.
+    // Leave the baseline as the newer writer left it.
+    if (this.epoch !== startEpoch) {
+      this.rerunRequested = false;
+      return;
+    }
+    if (sent) this.lastPublished = desired;
+    // Converge once more if a trigger landed during the flight (coalesced
+    // rerun) or a successful publish still trails the current mode. Only a real
+    // external trigger re-arms `rerunRequested`, so a persistent failure retries
+    // the stranded pick exactly once and then waits for the next trigger — no
+    // hot loop.
+    const rerun = this.rerunRequested || (sent && !sameMode(this.deps.mode(), this.lastPublished));
+    this.rerunRequested = false;
+    if (rerun) await this.reconcile();
   }
 
   /**
    * Adopt a mode that arrived from another of the user's resources, WITHOUT
    * re-publishing it. The baseline is seeded first so the store write's
-   * reconcile is a no-op — otherwise the two devices would echo forever.
+   * reconcile is a no-op — otherwise the two devices would echo forever. The
+   * epoch bump disowns any in-flight publish so its late success can't clobber
+   * this adopted baseline back onto the wire.
    */
   applyRemote(mode: PresenceMode): void {
+    if (this.suspended) return; // a post-logout event must not revive the store
+    this.epoch += 1;
     this.lastPublished = mode;
     this.deps.setMode(mode);
   }
@@ -126,6 +162,11 @@ export class StatusPreferenceCoordinator {
     }
     const before = this.deps.mode();
     const fetched = await fetch();
+    // Logout may have raced the fetch (suspend() + reset-to-Automatic ran while
+    // the IQ was in flight). Drop the stored value rather than write it into the
+    // store after the reset — it would otherwise leak the signed-out user's pick
+    // into the next account opened in this tab.
+    if (this.suspended) return;
     // A newer intent may have landed while the fetch was in flight: a local
     // pick (the `$presenceMode` subscriber fired `reconcile()`) or an inbound
     // peer update (`applyRemote`). Either is fresher than the snapshot we just
@@ -151,6 +192,7 @@ export class StatusPreferenceCoordinator {
   suspend(): void {
     this.suspended = true;
     this.lastPublished = null;
+    this.epoch += 1; // disown any in-flight publish so its late success can't re-advance the baseline
   }
 
   /** Re-enable publishing (called on session-ready before fetch/sync). */
