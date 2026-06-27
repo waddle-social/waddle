@@ -37,12 +37,19 @@ export function createIncomingCallAlertController(options: {
   notifier?: IncomingCallNotifier;
   focusTarget?: IncomingCallFocusTarget;
   isTabFocused?: () => boolean;
+  // Presence Do Not Disturb (effective `<show>dnd</show>`): when true, the
+  // whole incoming-call alert — looping ringtone + OS notification banner — is
+  // silenced, mirroring the message-notification DND gate (ADR-010, #1075/#1081).
+  // The in-app IncomingCallToast is `$callState`-driven and unaffected, so the
+  // call stays visible/answerable; only the disturbance is suppressed.
+  isDoNotDisturb?: () => boolean;
 }): IncomingCallAlertController {
   const active = new Map<string, IncomingCallNotificationHandle | null>();
 
   return {
     start({ peerJid, sid, media }) {
       if (active.has(sid)) return;
+      if (options.isDoNotDisturb?.() === true) return;
       active.set(sid, null);
       void options.player.startLoop(sid);
       if (options.isTabFocused?.() !== false) return;

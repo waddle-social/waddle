@@ -59,6 +59,7 @@ import { isEventUpcomingOrOngoing } from "@/lib/xmpp-client";
 import type { FeedPostInput, StoryPostInput } from "@/lib/xmpp-client";
 import type { ActivityPublication, MoodPublication, TunePublication } from "@/lib/xmpp/pep-types";
 import { setManualActivity } from "@/presence/self-activity";
+import { $ownNotificationsSuppressed } from "@/presence/presence-store";
 import type { VCard4Profile } from "@/lib/xmpp/vcard4-types";
 import { installMessageToolbarLifecycleSuppression } from "@/stores/message-toolbar";
 import {
@@ -535,6 +536,12 @@ onMounted(() => {
       },
     },
     isTabFocused: () => document.visibilityState === "visible" && document.hasFocus(),
+    // Presence Do Not Disturb silences this device's own incoming-call ringtone
+    // + OS banner, reusing the same signal as the message-notification gate
+    // (ADR-010 Phase 5a / #1075, #1081). The in-app IncomingCallToast is
+    // `$callState`-driven, so the call stays visible/answerable — only the
+    // disturbance is suppressed. Read at ring time via `.get()`.
+    isDoNotDisturb: () => $ownNotificationsSuppressed.get(),
   }));
 });
 
