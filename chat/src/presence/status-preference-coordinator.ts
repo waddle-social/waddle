@@ -101,9 +101,14 @@ export class StatusPreferenceCoordinator {
     // (`suspend`) zeroed it, or a remote pick was adopted (`applyRemote`).
     // Advancing it now would resurrect a stale value — re-publishing an adopted
     // remote pick (echo), or clobbering the synced preference after logout.
-    // Leave the baseline as the newer writer left it.
+    // Leave the baseline as the newer writer left it. But a trigger that landed
+    // mid-flight (e.g. a local pick made after the adopted remote) must still
+    // reconcile against the NEW baseline — recursing is safe, it re-reads the
+    // mode and no-ops if it already matches (and bails if suspended).
     if (this.epoch !== startEpoch) {
+      const rerun = this.rerunRequested;
       this.rerunRequested = false;
+      if (rerun) await this.reconcile();
       return;
     }
     if (sent) this.lastPublished = desired;

@@ -4,6 +4,7 @@ import { sameMode, StatusPreferenceCoordinator } from "../src/presence/status-pr
 import type { PresenceMode } from "../src/presence/effective-show";
 
 const AUTO: PresenceMode = { kind: "automatic" };
+const AVAIL: PresenceMode = { kind: "manual", status: "available" };
 const AWAY: PresenceMode = { kind: "manual", status: "away" };
 const DND: PresenceMode = { kind: "manual", status: "dnd" };
 
@@ -175,6 +176,41 @@ describe("StatusPreferenceCoordinator", () => {
     expect(published).toEqual([DND]); // AWAY is NOT re-published (no echo)
   });
 
+  test("a local pick made after an adopted remote, both mid-flight, is still published", async () => {
+    // While AWAY's publish is in flight: a peer update (AVAIL) is adopted, THEN
+    // the user picks DND locally. The epoch bump from applyRemote must not
+    // swallow the coalesced DND pick — DND must still reach the wire, not be
+    // stranded off-device until the next reconnect.
+    let resolveFirst: ((v: boolean) => void) | undefined;
+    const published: PresenceMode[] = [];
+    let mode: PresenceMode = AWAY;
+    let first = true;
+    const coord = new StatusPreferenceCoordinator({
+      publish: (m) => {
+        published.push(m);
+        if (first) {
+          first = false;
+          return new Promise<boolean>((res) => {
+            resolveFirst = res;
+          });
+        }
+        return Promise.resolve(true);
+      },
+      mode: () => mode,
+      setMode: (m) => {
+        mode = m;
+      },
+    });
+    const inFlight = coord.reconcile(); // publishing AWAY (pending)
+    coord.applyRemote(AVAIL); // a peer update is adopted mid-flight (mode = AVAIL)
+    mode = DND; // the user then picks DND locally
+    await coord.reconcile(); // coalesced (a publish is in flight) — arms a rerun
+    resolveFirst?.(true); // the AWAY publish confirms; epoch moved via applyRemote
+    await inFlight;
+    expect(mode).toEqual(DND);
+    expect(published).toEqual([AWAY, DND]); // DND is published, not stranded
+  });
+
   test("a pick made while a publish is failing is retried, not stranded", async () => {
     // The user picks DND while AWAY's publish is in flight; that publish then
     // FAILS. The mid-flight DND pick must still be retried once the failure
@@ -206,6 +242,40 @@ describe("StatusPreferenceCoordinator", () => {
     await inFlight;
     expect(published).toEqual([AWAY, DND]); // DND is retried after the failure
     expect(mode).toEqual(DND);
+  });
+
+  test("a rerun armed mid-flight before logout publishes nothing after suspend", async () => {
+    // A pick fires mid-publish (arming a coalesced rerun), THEN logout suspends.
+    // When the publish settles the epoch has moved AND a rerun is armed — the
+    // epoch-branch recursion must hit the suspend guard and publish nothing.
+    let resolveFirst: ((v: boolean) => void) | undefined;
+    const published: PresenceMode[] = [];
+    let mode: PresenceMode = AWAY;
+    let first = true;
+    const coord = new StatusPreferenceCoordinator({
+      publish: (m) => {
+        published.push(m);
+        if (first) {
+          first = false;
+          return new Promise<boolean>((res) => {
+            resolveFirst = res;
+          });
+        }
+        return Promise.resolve(true);
+      },
+      mode: () => mode,
+      setMode: (m) => {
+        mode = m;
+      },
+    });
+    const inFlight = coord.reconcile(); // publishing AWAY (pending)
+    mode = DND; // user picks DND mid-flight
+    await coord.reconcile(); // coalesced — arms a rerun
+    coord.suspend(); // logout: suspended, baseline zeroed, epoch bumped
+    mode = AUTO; // reset-to-Automatic
+    resolveFirst?.(true); // AWAY confirms; epoch moved AND a rerun is armed
+    await inFlight;
+    expect(published).toEqual([AWAY]); // the armed rerun bails on suspend — nothing else published
   });
 
   test("suspend racing an in-flight publish does not re-advance the baseline (no next-login clobber)", async () => {
