@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(./target/release/bench-runner --backend sqlite --scale 10k --duration 10s --ops-per-user-per-min 60 --out results/)",
-      "Bash(cargo build:*)",
-      "Bash(./target/release/bench-runner --backend sqlite --scale 10k --duration 10s --ops-per-user-per-min 60 --in-memory --flush-interval 10s --out results/)"
-    ]
-  }
-}

@@ -1,7 +1,0 @@
-/target
-/results/*.json
-/results/*.csv
-/results/*.db
-/results/*.db-shm
-/results/*.db-wal
-Cargo.lock.bak
