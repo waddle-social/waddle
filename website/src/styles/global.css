@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "./global/brand-palette.css";
 @import "./global/base-theme.css";
 @import "./global/stage-footer.css";
 @import "./global/sky.css";
