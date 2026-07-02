@@ -7,7 +7,6 @@ interface ConnectionStore {
   client: BrowserXmppClient | null;
   appState: AppState;
   session: WaddleSession | null;
-  api: null;
   appError: string;
   activeServerUrl: string;
   providers: AuthProvider[];
@@ -21,7 +20,6 @@ export const connectionStore: ConnectionStore = shallowReactive({
   client: null,
   appState: "loading" as AppState,
   session: null as WaddleSession | null,
-  api: null,
   appError: "",
   activeServerUrl: "",
   providers: [] as AuthProvider[],

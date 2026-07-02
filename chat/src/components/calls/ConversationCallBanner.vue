@@ -18,7 +18,7 @@ import {
 import { $mucCallParticipants, normalizeMucCallRoomJid } from "@/lib/calls/muc-call-presence";
 import { useRoomHasActiveCall } from "@/lib/calls/use-active-muc-call";
 import type { CallMedia } from "@/lib/calls/types";
-import { barePeerJid } from "@/lib/xmpp/jid";
+import { barePeerJid, jidLocalpart } from "@/lib/xmpp/jid";
 
 const props = defineProps<{
   roomJid?: string | null;
@@ -150,7 +150,7 @@ function dmBanner(): BannerView | null {
   if (action === "return") return null;
 
   const media = activity.media;
-  const peerName = props.dmPeerName || peerJid.split("@")[0] || "this person";
+  const peerName = props.dmPeerName || jidLocalpart(peerJid) || "this person";
   const mediaLabel = media.video ? "video call" : "voice call";
   const title = dmTitle(activity, peerName);
   const busy = isBusy(callState.value);

@@ -1,7 +1,7 @@
 import type { WaddleClient } from "@waddle/xmpp-client-wasm";
 import { normalizeChannelType } from "@/lib/channel-types";
 import type { DiscoveredChannel, DiscoveredSpace, DiscoveredTopology } from "./types";
-import { barePeerJid, jidDomain } from "./jid";
+import { barePeerJid, jidDomain, jidLocalpart } from "./jid";
 import { FIELD_PIN_PERMISSION } from "./protocol-helpers";
 
 const NS_FORUMS_0 = "urn:xmpp:forums:0";
@@ -363,7 +363,7 @@ async function discoverComponentServices(xmpp: HybridClient, domain: string, jid
 }
 
 function channelFromRoom(room: { jid: string; name?: string; channel_type?: string }, position: number): DiscoveredChannel {
-  const id = barePeerJid(room.jid).split("@")[0] ?? room.jid;
+  const id = jidLocalpart(room.jid);
   return { id, name: room.name || id, jid: room.jid, channelType: normalizeChannelType(room.channel_type || "text"), position };
 }
 

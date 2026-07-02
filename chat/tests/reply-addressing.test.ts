@@ -22,7 +22,6 @@ describe("reply addressing", () => {
     const actionError = ref("");
     const messaging = useChannelMessages(
       ref(session()),
-      ref(null),
       ref({ ...handlerStubs(), sendGroupMessage, sendChatState } as never),
       ref("w1"),
       ref("c1"),
@@ -79,7 +78,6 @@ describe("reply addressing", () => {
     const actionError = ref("");
     const messaging = useChannelMessages(
       ref(session()),
-      ref(null),
       ref({ ...handlerStubs(), sendGroupMessage, sendChatState } as never),
       ref("w1"),
       ref("c1"),
@@ -183,7 +181,6 @@ describe("reply addressing", () => {
     const actionError = ref("");
     const messaging = useChannelMessages(
       ref(session()),
-      ref(null),
       ref({ ...handlerStubs(), sendGroupMessage, sendChatState } as never),
       ref("w1"),
       ref("c1"),
@@ -224,7 +221,6 @@ describe("reply addressing", () => {
     const actionError = ref("");
     const messaging = useChannelMessages(
       ref(session()),
-      ref(null),
       ref({ ...handlerStubs(), sendGroupMessage, sendChatState } as never),
       ref("w1"),
       ref("c2"),
@@ -369,7 +365,6 @@ describe("room stanza-id targeting", () => {
     const actionError = ref("");
     const messaging = useChannelMessages(
       ref(session()),
-      ref(null),
       ref({ ...handlerStubs(), sendRetraction, sendModeration, sendChatState } as never),
       ref("w1"),
       ref("c1"),
@@ -408,7 +403,6 @@ describe("room stanza-id targeting", () => {
     const actionError = ref("");
     const messaging = useChannelMessages(
       ref(session()),
-      ref(null),
       ref({ ...handlerStubs(), sendRetraction, sendModeration, sendChatState } as never),
       ref("w1"),
       ref("c1"),

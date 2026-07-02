@@ -41,7 +41,7 @@ import {
 } from "@/presence/in-call-overlay-store";
 import { matchLocation, navigate, type RouteMatch } from "@/router";
 import { resolveChannelBySlug } from "@/shell/route-helpers";
-import { barePeerJid, jidDomain, parseManagedRoomBareJid, type LiveDmMessage, type RoomActivityEvent } from "@/lib/xmpp-client";
+import { barePeerJid, jidDomain, jidDomainOrEmpty, jidLocalpart, parseManagedRoomBareJid, type LiveDmMessage, type RoomActivityEvent } from "@/lib/xmpp-client";
 import { createNotifySettingsStore, type NotifySettingsStore } from "@/lib/notify-settings";
 import { mdsChatKey, queueMdsDisplayed, setMdsDisplayed } from "@/lib/last-seen-store";
 import {
@@ -246,7 +246,6 @@ export function useChatAppController(giphyApiKey: string) {
 
   const xmppClient = computed(() => connectionStore.client);
   const session = computed(() => connectionStore.session);
-  const api = computed(() => connectionStore.api);
   // Per-controller XEP-0492 store. Constructed here (not a
   // module-level singleton) so unrelated consumers can't share
   // state implicitly — PR-review compliance. Exposed on the
@@ -255,7 +254,6 @@ export function useChatAppController(giphyApiKey: string) {
   const notifySettings = createNotifySettingsStore();
 
   const waddles = useWaddleDirectory(
-    api,
     xmppClient,
     session,
     ui.normalizeError,
@@ -268,7 +266,6 @@ export function useChatAppController(giphyApiKey: string) {
 
   const messaging = useChannelMessages(
     session,
-    api,
     xmppClient,
     waddles.activeSpaceId,
     waddles.activeChannelId,
@@ -295,7 +292,7 @@ export function useChatAppController(giphyApiKey: string) {
   const communityJid = computed(() => {
     const jid = session.value?.jid;
     if (!jid) return null;
-    const domain = jid.split("@")[1]?.split("/")[0];
+    const domain = jidDomainOrEmpty(jid);
     return domain ? `community.${domain}` : null;
   });
   const socialFeed = useSocialFeed(xmppClient, { communityJid });
@@ -2666,7 +2663,7 @@ export function useChatAppController(giphyApiKey: string) {
   function groupDmMemberLabel(jid: string): string {
     const normalized = barePeerJid(jid);
     const contact = rosterContacts.contacts.value.find((candidate) => barePeerJid(candidate.jid) === normalized);
-    return contact?.name?.trim() || contact?.username?.trim() || normalized.split("@")[0] || normalized;
+    return contact?.name?.trim() || contact?.username?.trim() || jidLocalpart(normalized) || normalized;
   }
 
   async function handleCreateChannel() {

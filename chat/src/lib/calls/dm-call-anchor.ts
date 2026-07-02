@@ -1,6 +1,6 @@
 import { atom } from "nanostores";
 import type { CallThreadAnchor, TimelineMessage } from "@/lib/chat-ui";
-import { barePeerJid } from "../xmpp/jid";
+import { barePeerJid, jidLocalpart } from "../xmpp/jid";
 import type { CallMedia, CallState } from "./types";
 
 /**
@@ -80,7 +80,7 @@ export function buildDmCallStartedAnchor(
   };
   return {
     id: dmCallAnchorId(anchor.sid),
-    author: initiatorBare.split("@")[0] ?? "unknown",
+    author: jidLocalpart(initiatorBare),
     authorJid: anchor.initiator,
     body: "",
     createdAt: anchor.started,
@@ -104,7 +104,7 @@ export function buildDmCallOutcomeAnchor(
   const isSelfInitiated = !!initiator && initiator === selfBare;
   return {
     id: dmCallOutcomeAnchorId(anchor.sid, anchor.outcome),
-    author: isSelfInitiated ? (selfBare.split("@")[0] ?? "you") : (anchor.peerBareJid.split("@")[0] ?? "unknown"),
+    author: isSelfInitiated ? jidLocalpart(selfBare) : jidLocalpart(anchor.peerBareJid),
     authorJid: isSelfInitiated ? selfJid : anchor.peerBareJid,
     body: "",
     createdAt: anchor.ended,

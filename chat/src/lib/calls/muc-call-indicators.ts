@@ -1,11 +1,12 @@
 import type { ChannelSummary } from "@/lib/chat-types";
+import { barePeerJid, jidDomainOrEmpty, jidLocalpart } from "@/lib/xmpp/jid";
 import { mucCallMediaForRoom, normalizeMucCallRoomJid } from "./muc-call-presence";
 import type { CallMedia } from "./types";
 
 export function normalizeMucServiceDomain(serviceJid?: string | null): string {
-  const bare = serviceJid?.split("/")[0]?.trim().toLowerCase() ?? "";
+  const bare = barePeerJid(serviceJid ?? "").trim().toLowerCase();
   if (!bare) return "";
-  return bare.includes("@") ? bare.split("@")[1] ?? "" : bare;
+  return bare.includes("@") ? jidDomainOrEmpty(bare) : bare;
 }
 
 function candidateRoomJidsForChannel(
@@ -15,7 +16,7 @@ function candidateRoomJidsForChannel(
 ): string[] {
   const candidates: string[] = [];
   const channelRoomJid = normalizeMucCallRoomJid(channel.jid ?? "");
-  const channelRoomDomain = channelRoomJid.split("@")[1] ?? "";
+  const channelRoomDomain = jidDomainOrEmpty(channelRoomJid);
   const trustedDomain = channelRoomDomain || normalizeMucServiceDomain(managedMucDomain);
   if (channelRoomJid) candidates.push(channelRoomJid);
   if (!channelRoomJid && trustedDomain) {
@@ -24,8 +25,8 @@ function candidateRoomJidsForChannel(
   for (const jid of activeChannelJids) {
     const normalized = normalizeMucCallRoomJid(jid);
     if (!normalized) continue;
-    const localpart = normalized.split("@")[0] ?? "";
-    const domain = normalized.split("@")[1] ?? "";
+    const localpart = jidLocalpart(normalized);
+    const domain = jidDomainOrEmpty(normalized);
     if (trustedDomain && domain === trustedDomain && localpart === channel.id.toLowerCase()) {
       candidates.push(normalized);
     }
@@ -97,9 +98,9 @@ export function refreshedMucCallRooms(options: {
 
   return [...countsByRoomJid.entries()]
     .flatMap(([roomJid, participantCount]): RefreshedMucCallRoom[] => {
-      const roomDomain = roomJid.split("@")[1] ?? "";
+      const roomDomain = jidDomainOrEmpty(roomJid);
       if (roomDomain !== trustedDomain || matchedRoomJids.has(roomJid)) return [];
-      const title = roomJid.split("@")[0] || roomJid;
+      const title = jidLocalpart(roomJid) || roomJid;
       return [{
         key: `group-call:${roomJid}`,
         roomJid,

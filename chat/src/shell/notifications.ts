@@ -1,5 +1,5 @@
 import { computed, ref, watch } from "vue";
-import type { BrowserXmppClient, NotifyMode } from "@/lib/xmpp-client";
+import { barePeerJid, jidDomainOrEmpty, type BrowserXmppClient, type NotifyMode } from "@/lib/xmpp-client";
 import { getOrRegisterServiceWorker, registerServiceWorker as registerChatServiceWorker } from "@/lib/service-worker-registration";
 import { createPushFlowLock } from "./push-flow-lock";
 import {
@@ -638,8 +638,7 @@ function resolvePushServiceJid(userJid: string): string {
   // address that breaks both XEP-0050 push commands and the
   // user-server XEP-0357 enable. Round-5 Copilot review on PR #760.
   if (!userJid.includes("@")) return "";
-  const bare = userJid.split("/")[0] ?? "";
-  const domain = bare.split("@")[1] ?? "";
+  const domain = jidDomainOrEmpty(userJid);
   return PUSH_SERVICE_JID || (domain ? `push.${domain}` : "");
 }
 
@@ -709,7 +708,7 @@ function clearPersistedKid(accountJid: string, serviceJid: string): void {
 /// behavior — both must treat `alice@example.com/abc` and
 /// `alice@example.com` as the same logical account.
 function barePart(userJid: string): string {
-  return userJid.split("/")[0] ?? userJid;
+  return barePeerJid(userJid);
 }
 
 /// Compare an existing PushSubscription's applicationServerKey (the

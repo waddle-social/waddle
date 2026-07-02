@@ -38,6 +38,7 @@ import {
 } from "@/lib/chat-ui";
 import { useExtensionAnnotationActions } from "@/channels/extension-annotation-actions";
 import { messageMentionsBareJid } from "@/lib/mentions";
+import { jidLocalpart } from "@/lib/xmpp/jid";
 import { richMessageToTiptap, tiptapToRichMessage } from "@/lib/rich-message";
 import { useComposerLinkPreview } from "@/lib/use-composer-link-preview";
 import type { ComposerLinkPreviewLookup, ComposerLinkPreviewSendPayload } from "@/lib/link-preview-composer";
@@ -284,8 +285,7 @@ const {
 const replyAuthorName = computed(() => {
   const author = props.message.replyTo?.author;
   if (!author) return "";
-  const nickPart = author.includes("/") ? author.split("/").pop()! : author.split("@")[0];
-  return nickPart ?? author;
+  return author.includes("/") ? author.split("/").pop() ?? author : jidLocalpart(author);
 });
 
 const deliveryStatusLabel = computed(() => {

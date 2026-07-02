@@ -19,7 +19,6 @@ const auth = useSessionAuth(props.serverBaseUrl);
 function syncStoreFromAuth() {
   connectionStore.appState = auth.appState.value;
   connectionStore.session = auth.session.value;
-  connectionStore.api = auth.api.value;
   connectionStore.appError = auth.appError.value;
   connectionStore.activeServerUrl = auth.activeServerUrl.value;
   connectionStore.providers = auth.providers.value;

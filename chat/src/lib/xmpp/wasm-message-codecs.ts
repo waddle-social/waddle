@@ -3,7 +3,7 @@ import type { MarkupSpan, MessageReference } from "@/lib/rich-message";
 import type { RichInlineStyle } from "@/lib/rich-message/types";
 
 import type { WaddleEncryptedFile } from "./extensions/encrypted-file";
-import { barePeerJid, jidDomain } from "./jid";
+import { barePeerJid, jidDomain, jidLocalpart } from "./jid";
 import type { InboxEntry } from "./inbox-types";
 import { isTrustedCachedPreviewImageUrl } from "./link-preview";
 import { isAllowedPlayerEmbedOrigin } from "@/lib/xmpp/player-embed-allowlist";
@@ -611,7 +611,7 @@ export function dmMessageFromArchived(
   if (!peerJid) return null;
   const ownStanzaId = assignedStanzaIdBy(message, [jidDomain(selfBareJid), selfBareJid]);
   const fromJid = message.from ?? fromBare;
-  const nick = barePeerJid(fromJid).split("@")[0] ?? "unknown";
+  const nick = jidLocalpart(fromJid);
   const { createdAt, createdAtSource } = deriveCreatedAt(message.timestamp, source);
   const dmPrimaryId = message.id ?? message.origin_id ?? message.mam_id;
   if (message.retracts_id) {

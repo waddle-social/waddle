@@ -3076,7 +3076,6 @@ describe("optimistic UI waits for successful sends", () => {
     const actionError = ref("");
     const messaging = useChannelMessages(
       ref(session()),
-      ref(null),
       ref({ ...handlerStubs(), sendGroupMessage, sendChatState } as never),
       ref("w1"),
       ref("c1"),
@@ -3103,7 +3102,6 @@ describe("optimistic UI waits for successful sends", () => {
     const actionError = ref("");
     const messaging = useChannelMessages(
       ref(session()),
-      ref(null),
       ref({ ...handlerStubs(), sendGroupMessage, sendChatState } as never),
       ref("w1"),
       ref("c1"),
@@ -3134,7 +3132,6 @@ describe("optimistic UI waits for successful sends", () => {
     const actionError = ref("");
     const messaging = useChannelMessages(
       ref(session()),
-      ref(null),
       ref({ ...handlerStubs(), sendGroupMessage, sendChatState } as never),
       ref("w1"),
       ref("c1"),
@@ -3195,7 +3192,6 @@ describe("optimistic UI waits for successful sends", () => {
     const actionError = ref("");
     const messaging = useChannelMessages(
       ref(session()),
-      ref(null),
       ref({ ...handlerStubs(), sendGroupMessage, sendChatState } as never),
       ref("w1"),
       ref("c1"),

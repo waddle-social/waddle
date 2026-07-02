@@ -28,7 +28,6 @@ describe("channel activity", () => {
     const messaging = scope.run(() =>
       useChannelMessages(
         ref(session()),
-        ref(null),
         ref({
           ...handlerStubs(),
           setActivityHandler(handler: (event: RoomActivityEvent) => void) {
@@ -102,7 +101,6 @@ describe("channel activity", () => {
       const messaging = scope.run(() =>
         useChannelMessages(
           ref(session()),
-          ref(null),
           ref({
             ...handlerStubs(),
             setMessageHandler(handler: (message: LiveRoomMessage) => void) {
@@ -163,7 +161,6 @@ describe("channel activity", () => {
       const messaging = scope.run(() =>
         useChannelMessages(
           ref(session()),
-          ref(null),
           ref({
             ...handlerStubs(),
             setMessageHandler(handler: (message: LiveRoomMessage) => void) {
@@ -211,7 +208,6 @@ describe("channel activity", () => {
     const messaging = scope.run(() =>
       useChannelMessages(
         ref(session()),
-        ref(null),
         ref({
           ...handlerStubs(),
           setMessageHandler(handler: (message: LiveRoomMessage) => void) {
@@ -265,7 +261,6 @@ describe("channel activity", () => {
     const messaging = scope.run(() =>
       useChannelMessages(
         ref(session()),
-        ref(null),
         ref({
           ...handlerStubs(),
           setMessageHandler(handler: (message: LiveRoomMessage) => void) {
@@ -316,7 +311,6 @@ describe("channel activity", () => {
     const messaging = scope.run(() =>
       useChannelMessages(
         ref(session()),
-        ref(null),
         ref({
           ...handlerStubs(),
           setMessageHandler(handler: (message: LiveRoomMessage) => void) {
@@ -361,7 +355,6 @@ describe("channel activity", () => {
     const messaging = scope.run(() =>
       useChannelMessages(
         ref(session()),
-        ref(null),
         ref({
           ...handlerStubs(),
           setMessageHandler(handler: (message: LiveRoomMessage) => void) {
@@ -409,7 +402,6 @@ describe("channel activity", () => {
     const messaging = scope.run(() =>
       useChannelMessages(
         ref(session()),
-        ref(null),
         ref({
           ...handlerStubs(),
           setMessageHandler(handler: (message: LiveRoomMessage) => void) {
@@ -539,7 +531,6 @@ describe("channel activity", () => {
       const messaging = scope.run(() =>
         useChannelMessages(
           ref(session()),
-          ref(null),
           ref({
             ...handlerStubs(),
             setMessageHandler(handler: (message: LiveRoomMessage) => void) {
@@ -587,7 +578,6 @@ describe("channel activity", () => {
     const messaging = scope.run(() =>
       useChannelMessages(
         ref(session()),
-        ref(null),
         ref({
           ...handlerStubs(),
           setActivityHandler(handler: (event: RoomActivityEvent) => void) {

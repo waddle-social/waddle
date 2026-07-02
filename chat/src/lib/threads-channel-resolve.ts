@@ -7,7 +7,7 @@
 // specific way available and fall back to the local-part split which
 // is always correct for managed Waddle rooms.
 
-import { barePeerJid } from "@/lib/xmpp/jid";
+import { barePeerJid, jidLocalpart } from "@/lib/xmpp/jid";
 
 interface ChannelLike {
   id: string;
@@ -31,6 +31,6 @@ export function resolveChannelIdForRoomJid(
   if (!bare) return null;
   const matched = channels.find((c) => c.jid && barePeerJid(c.jid) === bare);
   if (matched) return matched.id;
-  const node = bare.split("@")[0] ?? "";
+  const node = jidLocalpart(bare);
   return node.length > 0 ? node : null;
 }

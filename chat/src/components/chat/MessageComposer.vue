@@ -11,6 +11,7 @@ import { getComposerAutocompleteAction, getComposerEscapeAction } from "@/lib/re
 import { tiptapToRichMessage } from "@/lib/rich-message";
 import { extractImagesFromClipboardEvent } from "@/lib/xmpp/file-upload";
 import type { MentionCandidate } from "@/lib/mentions";
+import { jidLocalpart } from "@/lib/xmpp/jid";
 import { parseSlashTrigger } from "@/lib/slash-trigger";
 import { filterSlashCandidates, resolveSlashCommand } from "@/lib/slash-match";
 import { buildSlashInvocation, type SlashInvocation } from "@/lib/slash-dispatch";
@@ -80,7 +81,7 @@ const emit = defineEmits<{
 const replyAuthorName = computed(() => {
   const author = props.replyingTo?.author;
   if (!author) return "";
-  return author.includes("/") ? author.split("/").pop()! : author.split("@")[0] ?? author;
+  return author.includes("/") ? author.split("/").pop() ?? author : jidLocalpart(author);
 });
 
 const showGifPicker = ref(false);

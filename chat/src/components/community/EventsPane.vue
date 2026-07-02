@@ -38,6 +38,7 @@ import {
   sortEventsForDay,
 } from "@/lib/xmpp-client";
 import { useCalendarFeedCopy } from "@/lib/use-calendar-feed-copy";
+import { barePeerJid, jidLocalpart } from "@/lib/xmpp/jid";
 
 interface EventsPaneProps {
   events: readonly CommunityEvent[];
@@ -75,7 +76,7 @@ const emit = defineEmits<{
 function bareFromUri(uri: string | undefined | null): string | null {
   if (!uri) return null;
   const stripped = uri.startsWith("xmpp:") ? uri.slice(5) : uri;
-  return stripped.split("/")[0] ?? stripped;
+  return barePeerJid(stripped);
 }
 
 function isOrganiser(event: CommunityEvent): boolean {
@@ -89,7 +90,7 @@ function isOrganiser(event: CommunityEvent): boolean {
 
 const selfBareJid = computed(() => {
   const raw = props.selfJid;
-  return raw ? raw.split("/")[0] ?? raw : null;
+  return raw ? barePeerJid(raw) : null;
 });
 
 const selfAttendeeUri = computed(() => {
@@ -368,7 +369,7 @@ function summarizeRrule(rule: Rrule): string {
 function authorLabel(jid: string | undefined): string {
   if (!jid) return "Unknown";
   const stripped = jid.startsWith("xmpp:") ? jid.slice(5) : jid;
-  return stripped.split("@")[0] ?? stripped;
+  return jidLocalpart(stripped);
 }
 
 // ─── Composer ─────────────────────────────────────────────────────────────────
@@ -559,7 +560,7 @@ function submit() {
     ...(description.value.trim() ? { description: description.value.trim() } : {}),
     ...(location.value.trim() ? { location: location.value.trim() } : {}),
     ...(props.selfJid
-      ? { organizer: `xmpp:${props.selfJid.split("/")[0] ?? props.selfJid}` }
+      ? { organizer: `xmpp:${barePeerJid(props.selfJid)}` }
       : {}),
     ...dateFields,
     ...(rrule.value ? { rrule: rrule.value } : {}),

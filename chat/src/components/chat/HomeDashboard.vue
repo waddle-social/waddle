@@ -41,7 +41,7 @@ import {
 } from "@/lib/calls/muc-call-indicators";
 import { normalizeMucCallRoomJid } from "@/lib/calls/muc-call-presence";
 import { readRoomHasActiveCall } from "@/lib/calls/use-active-muc-call";
-import { barePeerJid } from "@/lib/xmpp/jid";
+import { barePeerJid, jidLocalpart } from "@/lib/xmpp/jid";
 import type { CallMedia } from "@/lib/calls/types";
 import { groupChannelsBySpace } from "@/lib/channel-grouping";
 import { formatTimelineStamp } from "@/channels/timeline";
@@ -331,7 +331,7 @@ function buildCurrentCallFallbackEntry(): CallActivityDockEntry | null {
       key: `current-channel:${roomJid}:${current.sid}`,
       channelId: channel?.id ?? null,
       roomJid,
-      title: channel?.name ?? roomJid.split("@")[0] ?? "Group call",
+      title: channel?.name ?? jidLocalpart(roomJid),
       participantCount: Math.max(fallbackLabels.length, 1),
       participantLabels: fallbackLabels,
       media: current.media,
@@ -353,7 +353,7 @@ function buildCurrentCallFallbackEntry(): CallActivityDockEntry | null {
       sid: current.sid,
       remoteFullJid: current.peer,
       join: current.join,
-      title: conversation?.peerUsername ?? peerJid.split("@")[0] ?? "Direct call",
+      title: conversation?.peerUsername ?? jidLocalpart(peerJid),
       media: current.media,
       state: "accepted",
       direction: "unknown",

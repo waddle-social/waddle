@@ -31,6 +31,8 @@ export type {
 export {
   barePeerJid,
   jidDomain,
+  jidDomainOrEmpty,
+  jidLocalpart,
   parseManagedRoomBareJid,
   roomBareJidFor,
 } from "./jid";

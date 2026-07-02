@@ -24,6 +24,7 @@ import type { FeedSurfaceComposerMode, FeedSurfaceFilter } from "@/shell/state";
 import type { ActivityPublication, MoodPublication, TunePublication } from "@/lib/xmpp/pep-types";
 import type { VCard4Profile } from "@/lib/xmpp/vcard4-types";
 import type { FeedEntry, FeedPostInput, FeedSourceKind, Story, StoryPostInput, StoryReactionSummary } from "@/lib/xmpp-client";
+import { jidLocalpart } from "@/lib/xmpp/jid";
 
 const SOURCE_ICONS = {
   mood: Smile,
@@ -181,7 +182,7 @@ function listedAgo(story: Story): string {
 
 function authorLabel(author: string | undefined): string {
   if (!author) return "Anonymous";
-  return author.split("@")[0] ?? author;
+  return jidLocalpart(author);
 }
 
 type FeedItem =

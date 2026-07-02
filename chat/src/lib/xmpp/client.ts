@@ -1,5 +1,5 @@
 import { withSpan } from "@/lib/telemetry";
-import { inferredFileDisposition } from "@/lib/chat-ui";
+import { inferredFileDisposition, type ExtensionLaunchDescriptor } from "@/lib/chat-ui";
 import type { ThreadsSort, ThreadsStatusFilter } from "@/lib/threads-view-filters";
 import type { BroadcastShow } from "@/presence/effective-show";
 import type { MemberSummary, UserSearchResult } from "../chat-types";
@@ -39,13 +39,14 @@ import {
   isInCallReactionForActiveCall,
   receiveInCallReaction,
 } from "@/lib/calls/in-call-reactions";
-import { barePeerJid, fullJidIdentityKey, jidDomain, resourceOf, roomBareJidFor } from "./jid";
+import { barePeerJid, fullJidIdentityKey, jidDomain, jidLocalpart, resourceOf, roomBareJidFor } from "./jid";
 import type {
   ChatStateEvent,
   ChatStateType,
   DmChatStateEvent,
   DmDisplayedEvent,
   DmReactionEvent,
+  DiscoveredChannel,
   DiscoveredTopology,
   ListRoomMembersOptions,
   LiveDmMessage,
@@ -129,7 +130,7 @@ import {
   type WasmVEvent,
 } from "./event-types";
 import type { FetchInboxOptions, InboxEntry, InboxResult } from "./inbox-types";
-import type { ActivityPublication, MoodPublication, TunePublication, UserPepProfile } from "./pep-types";
+import type { ActivityPublication, GeneralActivity, MoodKind, MoodPublication, TunePublication, UserPepProfile } from "./pep-types";
 import {
   type OutboundFileAttachment,
   type SendDirectMessageOptions,
@@ -207,6 +208,19 @@ class WasmSendFailureError extends Error {
 function isNonRetryableWasmSendFailure(error: unknown): error is WasmSendFailureError {
   return error instanceof WasmSendFailureError
     && (error.kind === "invalid-recipient" || error.kind === "invalid-options");
+}
+
+/** Stanza-error condition from a rejected wasm promise. The bridge
+ * rejects with either `{ condition }` or `{ error: { condition } }`;
+ * anything else yields `undefined`. */
+function stanzaErrorCondition(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  const direct = (error as { condition?: unknown }).condition;
+  if (typeof direct === "string") return direct;
+  const nested = (error as { error?: unknown }).error;
+  if (typeof nested !== "object" || nested === null) return undefined;
+  const nestedCondition = (nested as { condition?: unknown }).condition;
+  return typeof nestedCondition === "string" ? nestedCondition : undefined;
 }
 
 function sentStanzaIdOrThrowFromWasmOutcome(result: string | WasmSendMessageOutcome | null | undefined): string | null {
@@ -645,9 +659,25 @@ export type SetDmNotificationModeResult =
   | { kind: "node-config-mismatch" }
   | { kind: "error" };
 
+/** XEP-0280 carbon envelope as surfaced by the compat emitter. */
+type WasmCarbonEvent = { carbon?: { forward?: { message?: WasmMessage } } };
+
+/** Per-event handler signatures for the legacy emitter surface some
+ * wasm builds expose alongside the `set_on_*` registration methods. */
+type CompatEmitterEvents = {
+  "session:started": () => void;
+  "stream:management:resumed": () => void;
+  disconnected: (error?: Error) => void;
+  "message:acked": (msg: { id?: string }) => void;
+  "message:failed": (msg: { id?: string }) => void;
+  message: (message: WasmMessage) => void;
+  "carbon:sent": (event: WasmCarbonEvent) => void;
+  "carbon:received": (event: WasmCarbonEvent) => void;
+  presence: (presence: WasmPresence) => void;
+};
+
 type CompatEmitter = {
-  on?: (event: string, handler: (...args: any[]) => void) => void;
-  off?: (event: string, handler: (...args: any[]) => void) => void;
+  on?: <E extends keyof CompatEmitterEvents>(event: E, handler: CompatEmitterEvents[E]) => void;
 };
 
 type XmppClientInstance = Partial<WasmClient> & CompatEmitter & {
@@ -1253,9 +1283,9 @@ export class BrowserXmppClient {
       this.session.session_id,
       this.resource,
     );
-    if (this.resumeStateHandle && typeof (config as any).with_resume_state_handle === "function") {
+    if (this.resumeStateHandle && typeof config.with_resume_state_handle === "function") {
       const handle = this.resumeStateHandle;
-      (config as any).with_resume_state_handle(handle);
+      config.with_resume_state_handle(handle);
       this.clearResumeState();
     } else if (this.resumeState) {
       applyResumeStateToWasmConfig(config, this.resumeState);
@@ -2157,7 +2187,7 @@ export class BrowserXmppClient {
     return results;
   }
 
-  async invokeExtensionLaunch(launch: any): Promise<ExtensionCommandResult> { const xmpp = await this.requireConnectedXmpp(); return invokeExtensionLaunch(xmpp as WasmClient, this.session.jid, launch); }
+  async invokeExtensionLaunch(launch: ExtensionLaunchDescriptor): Promise<ExtensionCommandResult> { const xmpp = await this.requireConnectedXmpp(); return invokeExtensionLaunch(xmpp as WasmClient, this.session.jid, launch); }
   async discoverExtensionCommands(): Promise<DiscoveredExtensionCommand[]> { const xmpp = await this.requireConnectedXmpp(); return discoverExtensionCommands(xmpp as WasmClient, this.session.jid); }
   async discoverExtensionRoutes(): Promise<DiscoveredExtensionRoute[]> { const xmpp = await this.requireConnectedXmpp(); return discoverExtensionRoutes(xmpp as WasmClient, this.session.jid); }
   async fetchExtensionRouteItems(route: DiscoveredExtensionRoute, roomJid: string): Promise<ExtensionRouteItem[]> { const xmpp = await this.requireConnectedXmpp(); return fetchExtensionRouteItems(xmpp as WasmClient, route, roomJid); }
@@ -2932,7 +2962,10 @@ export class BrowserXmppClient {
   async fetchUserPepProfile(jid: string): Promise<UserPepProfile> {
     const xmpp = await this.requireConnectedXmpp();
     const profile = await xmpp.fetch_user_pep_profile?.(jid) as WasmPepProfile | null;
-    return { mood: profile?.mood ? { kind: profile.mood.kind as any, ...(profile.mood.text ? { text: profile.mood.text } : {}) } : null, activity: profile?.activity ? { general: profile.activity.general as any, ...(profile.activity.specific ? { specific: profile.activity.specific } : {}), ...(profile.activity.text ? { text: profile.activity.text } : {}) } : null, tune: profile?.tune ? { ...profile.tune } : null };
+    // Wire `kind` / `general` arrive as plain strings from the wasm
+    // bridge; the server publishes XEP-0107 / XEP-0108 vocabulary, so
+    // they are asserted (not re-validated) against the chat unions.
+    return { mood: profile?.mood ? { kind: profile.mood.kind as MoodKind, ...(profile.mood.text ? { text: profile.mood.text } : {}) } : null, activity: profile?.activity ? { general: profile.activity.general as GeneralActivity, ...(profile.activity.specific ? { specific: profile.activity.specific } : {}), ...(profile.activity.text ? { text: profile.activity.text } : {}) } : null, tune: profile?.tune ? { ...profile.tune } : null };
   }
   async fetchVCard4(jid: string): Promise<VCard4Profile | null> {
     const xmpp = await this.requireConnectedXmpp();
@@ -3140,9 +3173,9 @@ export class BrowserXmppClient {
    * show element. `idleSince` (epoch ms) is serialised to an xs:dateTime; a
    * null/omitted value sends no `<idle/>` (XEP-0319 return-from-idle). */
   async setPresence(show: BroadcastShow, idleSince?: number | null): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await xmpp.send_presence?.(undefined, show === "available" ? undefined : show, idleSince != null ? new Date(idleSince).toISOString() : undefined); }
-  async listRosterContacts(): Promise<RosterContact[]> { const xmpp = await this.requireConnectedXmpp(); const roster = await xmpp.list_roster_contacts?.() as WasmRosterContact[]; return (roster ?? []).map((item) => { const jid = barePeerJid(item.jid); return { jid, name: item.name, username: item.name?.trim() || jid.split("@")[0] || jid, subscription: (item.subscription ?? "none") as RosterContact["subscription"], groups: item.groups ?? [] }; }); }
+  async listRosterContacts(): Promise<RosterContact[]> { const xmpp = await this.requireConnectedXmpp(); const roster = await xmpp.list_roster_contacts?.() as WasmRosterContact[]; return (roster ?? []).map((item) => { const jid = barePeerJid(item.jid); return { jid, name: item.name, username: item.name?.trim() || jidLocalpart(jid) || jid, subscription: (item.subscription ?? "none") as RosterContact["subscription"], groups: item.groups ?? [] }; }); }
   async getServerVersion(): Promise<WasmServerVersion | null> { const xmpp = await this.requireConnectedXmpp(); return await xmpp.get_server_version?.() as WasmServerVersion | null; }
-  async discoverSpaceChannels(): Promise<any[]> { const xmpp = await this.requireConnectedXmpp(); return discoverChannels(xmpp as WasmClient, this.session.jid); }
+  async discoverSpaceChannels(): Promise<DiscoveredChannel[]> { const xmpp = await this.requireConnectedXmpp(); return discoverChannels(xmpp as WasmClient, this.session.jid); }
   async createGroupDm(name: string, memberJids: string[]): Promise<CreateGroupDmResult> {
     const xmpp = await this.requireConnectedXmpp();
     return createGroupDm(xmpp as WasmClient, {
@@ -3170,7 +3203,7 @@ export class BrowserXmppClient {
     if (!listMembers) { this.emitError({ kind: "member-query", recoverable: false, detail: "missing list_room_members" }); throw new Error("missing list_room_members"); }
     const affiliations = ["owner", "admin", "member", "outcast"] as const; const members: MemberSummary[] = []; const failedAffiliations: string[] = [];
     for (const affiliation of affiliations) {
-      try { const result = await listMembers(affiliation); for (const item of result ?? []) { if (!item.jid) continue; members.push({ jid: item.jid, username: item.jid.split("@")[0] ?? item.jid, avatar_url: null, affiliation, joined_at: "" }); } } catch (error: any) { failedAffiliations.push(affiliation); const condition = error?.condition ?? error?.error?.condition; const detail = condition === "forbidden" ? `forbidden affiliation query — ${roomJid}` : condition === "service-unavailable" ? `unsupported member query — ${roomJid}` : `affiliation query failed for ${affiliation} — ${roomJid}; reconstructed room JID may not match`; this.emitError({ kind: "member-query", recoverable: true, detail, cause: error, condition }); }
+      try { const result = await listMembers(affiliation); for (const item of result ?? []) { if (!item.jid) continue; members.push({ jid: item.jid, username: jidLocalpart(item.jid), avatar_url: null, affiliation, joined_at: "" }); } } catch (error) { failedAffiliations.push(affiliation); const condition = stanzaErrorCondition(error); const detail = condition === "forbidden" ? `forbidden affiliation query — ${roomJid}` : condition === "service-unavailable" ? `unsupported member query — ${roomJid}` : `affiliation query failed for ${affiliation} — ${roomJid}; reconstructed room JID may not match`; this.emitError({ kind: "member-query", recoverable: true, detail, cause: error, condition }); }
     }
     if (members.length === 0 && failedAffiliations.length > 0) {
       throw new RoomMemberListUnavailableError();
@@ -3350,7 +3383,7 @@ export class BrowserXmppClient {
       reason: opts.reason ?? null,
     });
   }
-  async searchUsers(query: string): Promise<UserSearchResult[]> { if (!query.trim()) return []; const xmpp = await this.requireConnectedXmpp(); const users = await xmpp.search_users?.(query) as WasmUserSearchResult[]; return (users ?? []).map((user) => ({ id: user.jid, jid: user.jid, username: user.username ?? user.nick ?? user.jid.split("@")[0] ?? user.jid, display_name: user.display_name ?? user.name ?? null, avatar_url: null })); }
+  async searchUsers(query: string): Promise<UserSearchResult[]> { if (!query.trim()) return []; const xmpp = await this.requireConnectedXmpp(); const users = await xmpp.search_users?.(query) as WasmUserSearchResult[]; return (users ?? []).map((user) => ({ id: user.jid, jid: user.jid, username: user.username ?? user.nick ?? jidLocalpart(user.jid), display_name: user.display_name ?? user.name ?? null, avatar_url: null })); }
   async fetchUserAvatar(jid: string): Promise<string | null> {
     const xmpp = await this.requireConnectedXmpp();
     const bareJid = barePeerJid(jid);
@@ -3614,17 +3647,17 @@ export class BrowserXmppClient {
       // those flow as `roomAuthority` and drive authority chips
       // independently (see `parseMucAffiliation` / `parseMucRole`
       // below).
-      roomHats[nick] = ((presence as any).hats ?? []).map((hat: any) => ({
+      roomHats[nick] = (presence.hats ?? []).map((hat) => ({
         uri: hat.uri,
         title: hat.title,
       }));
       roomAuthority[nick] = {
-        affiliation: parseMucAffiliation((presence as any).muc_affiliation),
-        role: parseMucRole((presence as any).muc_role),
+        affiliation: parseMucAffiliation(presence.muc_affiliation),
+        role: parseMucRole(presence.muc_role),
       };
       roomPresence[nick] = parsePresenceShow(presence.show);
-      if ((presence as any).muc_jid) {
-        const bare = barePeerJid((presence as any).muc_jid);
+      if (presence.muc_jid) {
+        const bare = barePeerJid(presence.muc_jid);
         roomMemberJids[nick] = bare;
         if (isFocusedRoom) this.memberJidHandler?.(nick, bare);
       }

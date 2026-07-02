@@ -179,7 +179,6 @@ describe("scroll direction preference", () => {
     const actionError = ref("");
     const messaging = useChannelMessages(
       ref(session()),
-      ref(null),
       ref({
         ...handlerStubs(),
         sendChatState,
@@ -212,7 +211,6 @@ describe("scroll direction preference", () => {
     const actionError = ref("");
     const messaging = useChannelMessages(
       ref(session()),
-      ref(null),
       ref({
         ...handlerStubs(),
         sendChatState,
@@ -262,7 +260,6 @@ describe("scroll direction preference", () => {
     const actionError = ref("");
     const messaging = useChannelMessages(
       ref(session()),
-      ref(null),
       ref({ ...handlerStubs(), queryMam } as never) as never,
       ref("w1"),
       ref("c1"),
@@ -305,7 +302,6 @@ describe("scroll direction preference", () => {
     const actionError = ref("");
     const messaging = useChannelMessages(
       ref(session()),
-      ref(null),
       ref({ ...handlerStubs(), queryMam } as never) as never,
       ref("w1"),
       ref("c1"),
@@ -356,7 +352,6 @@ describe("scroll direction preference", () => {
     const actionError = ref("");
     const messaging = useChannelMessages(
       ref(session()),
-      ref(null),
       ref({ ...handlerStubs(), queryMam } as never) as never,
       ref("w1"),
       ref("c1"),
@@ -397,7 +392,6 @@ describe("scroll direction preference", () => {
     const actionError = ref("");
     const messaging = useChannelMessages(
       ref(session()),
-      ref(null),
       ref({ ...handlerStubs(), queryMam } as never) as never,
       ref("w1"),
       ref("c1"),
@@ -469,7 +463,6 @@ describe("scroll direction preference", () => {
     const actionError = ref("");
     const messaging = useChannelMessages(
       ref(session()),
-      ref(null),
       ref({ ...handlerStubs(), queryMamPage } as never) as never,
       ref("w1"),
       ref("c1"),
@@ -516,7 +509,6 @@ describe("scroll direction preference", () => {
     const actionError = ref("");
     const messaging = useChannelMessages(
       ref(session()),
-      ref(null),
       ref({ ...handlerStubs(), queryMam } as never) as never,
       ref("w1"),
       activeChannelId,
@@ -590,7 +582,6 @@ describe("scroll direction preference", () => {
     const actionError = ref("");
     const messaging = useChannelMessages(
       ref(session()),
-      ref(null),
       ref({ ...handlerStubs(), queryMamPage } as never) as never,
       ref("w1"),
       ref("c1"),
@@ -661,7 +652,6 @@ describe("scroll direction preference", () => {
     const actionError = ref("");
     const messaging = useChannelMessages(
       ref(session()),
-      ref(null),
       ref({ ...handlerStubs(), queryMamPage } as never) as never,
       ref("w1"),
       ref("c1"),
@@ -1182,7 +1172,6 @@ describe("scroll direction preference", () => {
     const actionError = ref("");
     const messaging = useChannelMessages(
       ref(session()),
-      ref(null),
       ref({
         ...handlerStubs(),
         setMessageHandler: (handler: (msg: LiveRoomMessage) => void) => {
