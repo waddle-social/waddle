@@ -12,6 +12,7 @@ use url::Url;
 mod boundary_convert;
 mod calls;
 mod convert;
+mod jid_parts;
 mod messaging;
 mod push;
 mod send_outcome;

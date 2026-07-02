@@ -6,23 +6,12 @@ struct XMPPJID: Sendable, Equatable {
     let resource: String?
 
     init?(string: String) {
-        let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
+        guard let parts = parseJid(input: string) else {
             return nil
         }
-
-        let resourceParts = trimmed.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false)
-        let bare = String(resourceParts[0])
-        resource = resourceParts.count > 1 ? String(resourceParts[1]) : nil
-
-        let jidParts = bare.split(separator: "@", maxSplits: 1, omittingEmptySubsequences: false)
-        if jidParts.count == 2 {
-            localpart = String(jidParts[0])
-            domain = String(jidParts[1])
-        } else {
-            localpart = nil
-            domain = bare
-        }
+        localpart = parts.localpart
+        domain = parts.domain
+        resource = parts.resource
     }
 
     var bare: String {
@@ -375,17 +364,15 @@ extension WaddleSession {
 }
 
 func barePeerJID(_ fullJID: String) -> String {
-    fullJID.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? fullJID
+    XMPPJID(string: fullJID)?.bare ?? fullJID
 }
 
 func jidDomain(_ jid: String) -> String {
-    let bare = barePeerJID(jid)
-    return bare.split(separator: "@", maxSplits: 1, omittingEmptySubsequences: false).last.map(String.init) ?? bare
+    XMPPJID(string: jid)?.domain ?? jid
 }
 
 func parseManagedRoomBareJID(_ roomJID: String) -> String? {
-    let node = barePeerJID(roomJID).split(separator: "@", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? ""
-    return node.isEmpty ? nil : node
+    XMPPJID(string: roomJID)?.localpart
 }
 
 // MARK: - Channel creation result

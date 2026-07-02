@@ -2166,6 +2166,70 @@ public func FfiConverterTypeWaddleFallbackRange_lower(_ value: WaddleFallbackRan
 
 
 /**
+ * Parsed JID components, validated per RFC 7622 by the shared `jid` crate.
+ *
+ * Exposed so native clients reuse the workspace JID parser instead of
+ * hand-rolling string splits.
+ */
+public struct WaddleJidParts: Equatable, Hashable {
+    public var localpart: String?
+    public var domain: String
+    public var resource: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(localpart: String?, domain: String, resource: String?) {
+        self.localpart = localpart
+        self.domain = domain
+        self.resource = resource
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleJidParts: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleJidParts: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleJidParts {
+        return
+            try WaddleJidParts(
+                localpart: FfiConverterOptionString.read(from: &buf),
+                domain: FfiConverterString.read(from: &buf),
+                resource: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleJidParts, into buf: inout [UInt8]) {
+        FfiConverterOptionString.write(value.localpart, into: &buf)
+        FfiConverterString.write(value.domain, into: &buf)
+        FfiConverterOptionString.write(value.resource, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleJidParts_lift(_ buf: RustBuffer) throws -> WaddleJidParts {
+    return try FfiConverterTypeWaddleJidParts.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleJidParts_lower(_ value: WaddleJidParts) -> RustBuffer {
+    return FfiConverterTypeWaddleJidParts.lower(value)
+}
+
+
+/**
  * LiveKit join credentials extracted from the server-issued
  * `urn:waddle:transports:livekit:0` transport on a Jingle
  * session-initiate / session-accept. The Swift app feeds these
@@ -4752,6 +4816,30 @@ fileprivate struct FfiConverterOptionTypeWaddleFallbackRange: FfiConverterRustBu
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeWaddleJidParts: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleJidParts?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddleJidParts.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddleJidParts.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeWaddleMujiPresence: FfiConverterRustBuffer {
     typealias SwiftType = WaddleMujiPresence?
 
@@ -5261,6 +5349,16 @@ fileprivate func uniffiFutureContinuationCallback(handle: UInt64, pollResult: In
         print("uniffiFutureContinuationCallback invalid handle")
     }
 }
+/**
+ * Parse and validate a JID string. Returns `None` for invalid JIDs.
+ */
+public func parseJid(input: String) -> WaddleJidParts?  {
+    return try!  FfiConverterOptionTypeWaddleJidParts.lift(try! rustCall() {
+    uniffi_waddle_xmpp_client_ffi_fn_func_parse_jid(
+        FfiConverterString.lower(input),$0
+    )
+})
+}
 
 private enum InitializationResult {
     case ok
@@ -5276,6 +5374,9 @@ private let initializationResult: InitializationResult = {
     let scaffolding_contract_version = ffi_waddle_xmpp_client_ffi_uniffi_contract_version()
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_func_parse_jid() != 54118) {
+        return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_connect() != 32392) {
         return InitializationResult.apiChecksumMismatch
