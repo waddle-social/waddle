@@ -1,4 +1,4 @@
-# ADR 0016: Drop MIX; channels stay on MUC
+# ADR-0016: Drop MIX; channels stay on MUC
 
 ## Status
 

@@ -24,9 +24,9 @@ Four workstreams run in parallel; phases within a workstream are sequential.
 3. Fix `server/TODO.md`. Outcome: the file was deleted; the false XEP-0448-suite claim died with it, the open test items were folded into phase S2 below (no GitHub issues created), and the MIX-rejection decision it held was preserved as `server/docs/adrs/0016-drop-mix-stay-on-muc.md` (RFC-0002's stale MIX references corrected to match).
 4. Add a `"test": "bun test"` script to `chat/package.json`. — Done.
 5. Rename `server/crates/waddle-xmpp/tests/xep_0272_muji.rs` → `xep0272_muji.rs` to match the `xepNNNN_*` convention (57 of the other 61 files follow it; the 4 `xep_waddle_*.rs` custom-XEP suites are a separate, intentional naming family). — Done, including the comment reference in `handlers/jingle.rs`.
-6. Add a default-branch build job for the Apple app. Note: unlike the chat/colony/website/server workflows, `waddle-apple-pullrequest.yml` is hand-written (no cuenv header, no `apps/apple/env.cue`), so the fix is a hand-written sibling `waddle-apple-default.yml` (push-to-main trigger, same build steps). Migrating apple CI under cuenv is a possible follow-up, not Phase 0.
+6. Add a default-branch build job for the Apple app. Note: unlike the chat/colony/website/server workflows, `waddle-apple-pullrequest.yml` is hand-written (no cuenv header, no `apps/apple/env.cue`), so the fix is a hand-written sibling `waddle-apple-default.yml` (push-to-main trigger, same build steps). Migrating apple CI under cuenv is a possible follow-up, not Phase 0. — Done.
 
-Commits: `chore(repo): …`, `chore(chat): add test script`, `test(xmpp): rename muji suite`, `ci(apple): build on default branch`.
+Commits landed: `chore(infra): drop unwired bench workspace and stale agent plan`, `chore(server): delete stale TODO.md`, `test(server): rename muji suite to xep0272 naming convention`, `chore(chat): add test script`, `ci(apple): build the apple app on the default branch`, `docs(server): record MIX rejection as ADR 0016`.
 
 ---
 
