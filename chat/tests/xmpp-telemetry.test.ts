@@ -566,17 +566,7 @@ describe("BrowserXmppClient telemetry hooks", () => {
       wireEvents: (xmpp: unknown) => void;
       emitStatus: (snap: { state: string; detail?: string }) => void;
       emitSessionLifecycle: (evt: { type: "fresh" | "resumed" }) => void;
-      fireHook: <Args extends unknown[]>(hooks: Array<(...args: Args) => void>, ...args: Args) => void;
-      reconnectScheduledHooks: Array<(info: { attempt: number; delayMs: number }) => void>;
-      catchupHooks: Array<(info: {
-        conversations: number;
-        processedConversations: number;
-        pages: number;
-        messages: number;
-        durationMs: number;
-        outcome: "completed" | "aborted" | "failed";
-      }) => void>;
-      resumeDrainHooks: Array<(info: { buffered: number; durationMs: number }) => void>;
+      events: { emitSafe: (event: string, ...args: unknown[]) => void };
     };
     const handlers = new Map<string, Array<(msg: unknown) => void>>();
     const stubXmpp = {
@@ -605,8 +595,8 @@ describe("BrowserXmppClient telemetry hooks", () => {
     internal.emitStatus({ state: "reconnecting", detail: "ws dropped" });
     internal.emitStatus({ state: "online", detail: "back" });
     // Background-tab health hooks
-    internal.fireHook(internal.reconnectScheduledHooks, { attempt: 1, delayMs: 2_000 });
-    internal.fireHook(internal.catchupHooks, {
+    internal.events.emitSafe("reconnectScheduled", { attempt: 1, delayMs: 2_000 });
+    internal.events.emitSafe("catchup", {
       conversations: 1,
       processedConversations: 1,
       pages: 2,
@@ -614,7 +604,7 @@ describe("BrowserXmppClient telemetry hooks", () => {
       durationMs: 4,
       outcome: "completed",
     });
-    internal.fireHook(internal.resumeDrainHooks, { buffered: 7, durationMs: 8 });
+    internal.events.emitSafe("resumeDrain", { buffered: 7, durationMs: 8 });
 
     const eventNames = stub.events.map((e) => e.name);
     expect(eventNames).toContain("chat.xmpp.message.acked");

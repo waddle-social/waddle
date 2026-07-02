@@ -40,6 +40,7 @@ import {
   receiveInCallReaction,
 } from "@/lib/calls/in-call-reactions";
 import { barePeerJid, fullJidIdentityKey, jidDomain, jidLocalpart, resourceOf, roomBareJidFor } from "./jid";
+import { TypedEventBus } from "./client-events";
 import type {
   ChatStateEvent,
   ChatStateType,
@@ -828,37 +829,74 @@ export class RoomMemberListUnavailableError extends Error {
   }
 }
 
+type CatchupHookInfo = {
+  conversations: number;
+  processedConversations: number;
+  pages: number;
+  messages: number;
+  durationMs: number;
+  outcome: CatchupOutcome;
+};
+
+/**
+ * Event map for `BrowserXmppClient`'s internal bus.
+ *
+ * Events registered via `set*Handler` methods use single-listener
+ * (`events.set`) semantics — re-registration replaces the previous
+ * handler, which `src/channels/messages.ts` relies on across room
+ * switches. Events registered via `on*` hook methods and
+ * `addPubsubEventHandler` use multi-listener (`events.on`) semantics.
+ */
+type ClientEvents = {
+  message: [message: LiveRoomMessage];
+  pinEvent: [event: { roomJid: string; event: WasmPinEvent }];
+  directMessage: [message: LiveDmMessage];
+  status: [status: XmppStatusSnapshot];
+  reaction: [event: ReactionEvent];
+  displayed: [event: { roomJid: string; nick: string; messageId: string }];
+  mdsDisplayed: [entry: MdsDisplayedEntry];
+  pubsubEvent: [event: PubsubEvent];
+  chatState: [event: ChatStateEvent];
+  dmChatState: [event: DmChatStateEvent];
+  dmReaction: [event: DmReactionEvent];
+  dmDisplayed: [event: DmDisplayedEvent];
+  presenceUpdate: [event: PresenceUpdateEvent];
+  memberJid: [nick: string, bareJid: string];
+  hats: [hats: RoomHats];
+  authority: [authority: RoomAuthority];
+  activity: [event: RoomActivityEvent];
+  inboxPush: [entry: InboxEntry];
+  roomAvatar: [roomJid: string, hash: string];
+  roomDisconnect: [];
+  presence: [presence: RoomPresence];
+  lastSeen: [nick: string, timestamp: number];
+  messageAck: [messageId: string];
+  messageDeliveryFailure: [messageId: string];
+  queuedMessageStatus: [messageId: string, status: "queued" | "sending"];
+  sessionLifecycle: [event: SessionLifecycleEvent];
+  // Observe-only telemetry hooks (multi-listener, error-isolated via
+  // `emitSafe`). Includes the background-tab RESULT_CODE_HUNG health
+  // hooks (see docs/planning/hung-tab-investigation.md); the client
+  // stays telemetry-agnostic — xmpp-instrumentation.ts binds these to
+  // the Faro report* sink.
+  messageAcked: [id: string, meta: { kind: "room" | "dm"; latencyMs: number }];
+  messageDeliveryFailed: [id: string, meta: { kind: "room" | "dm" }];
+  sessionLifecycleHook: [event: SessionLifecycleEvent];
+  statusHook: [status: XmppStatusSnapshot, meta: { reconnectDurationMs?: number }];
+  sendEnqueued: [info: { kind: "room" | "dm"; reason: string }];
+  queueDepthChange: [depth: { persisted: number; inflight: number }];
+  error: [event: XmppErrorEvent];
+  reconnectScheduled: [info: { attempt: number; delayMs: number }];
+  catchup: [info: CatchupHookInfo];
+  resumeDrain: [info: { buffered: number; durationMs: number }];
+};
+
 export class BrowserXmppClient {
   private session: WaddleSession;
   private get queueScope() { return barePeerJid(this.session.jid); }
   private readonly resource: string;
-  private messageHandler: ((message: LiveRoomMessage) => void) | null = null;
-  private pinEventHandler: ((event: { roomJid: string; event: WasmPinEvent }) => void) | null = null;
-  private directMessageHandler: ((message: LiveDmMessage) => void) | null = null;
-  private statusHandler: ((status: XmppStatusSnapshot) => void) | null = null;
-  private reactionHandler: ((event: ReactionEvent) => void) | null = null;
-  private displayedHandler: ((event: { roomJid: string; nick: string; messageId: string }) => void) | null = null;
-  private mdsDisplayedHandler: ((entry: MdsDisplayedEntry) => void) | null = null;
-  private pubsubEventHandlers = new Set<(event: PubsubEvent) => void>();
-  private chatStateHandler: ((event: ChatStateEvent) => void) | null = null;
-  private dmChatStateHandler: ((event: DmChatStateEvent) => void) | null = null;
-  private dmReactionHandler: ((event: DmReactionEvent) => void) | null = null;
-  private dmDisplayedHandler: ((event: DmDisplayedEvent) => void) | null = null;
-  private presenceUpdateHandler: ((event: PresenceUpdateEvent) => void) | null = null;
+  private readonly events = new TypedEventBus<ClientEvents>();
   private roomMemberJidsByRoom = new Map<string, Record<string, string>>();
-  private memberJidHandler: ((nick: string, bareJid: string) => void) | null = null;
-  private hatsHandler: ((hats: RoomHats) => void) | null = null;
-  private authorityHandler: ((authority: RoomAuthority) => void) | null = null;
-  private activityHandler: ((event: RoomActivityEvent) => void) | null = null;
-  private inboxPushHandler: ((entry: InboxEntry) => void) | null = null;
-  private roomAvatarHandler: ((roomJid: string, hash: string) => void) | null = null;
-  private roomDisconnectHandler: (() => void) | null = null;
-  private presenceHandler: ((presence: RoomPresence) => void) | null = null;
-  private lastSeenHandler: ((nick: string, timestamp: number) => void) | null = null;
-  private messageAckHandler: ((messageId: string) => void) | null = null;
-  private messageDeliveryFailureHandler: ((messageId: string) => void) | null = null;
-  private queuedMessageStatusHandler: ((messageId: string, status: "queued" | "sending") => void) | null = null;
-  private sessionLifecycleHandler: ((event: SessionLifecycleEvent) => void) | null = null;
   private xmpp: XmppClientInstance | null = null;
   private mdsPublishOptionsSupport: Promise<boolean> | null = null;
   private connectPromise: Promise<void> | null = null;
@@ -888,27 +926,6 @@ export class BrowserXmppClient {
   private readonly inflightQueuedIds = new Set<string>();
   private readonly resumeReplayQueuedIds = new Set<string>();
   private readonly pendingSendAt = new Map<string, { at: number; kind: "room" | "dm" }>();
-  private readonly messageAckHooks: Array<(id: string, meta: { kind: "room" | "dm"; latencyMs: number }) => void> = [];
-  private readonly messageFailHooks: Array<(id: string, meta: { kind: "room" | "dm" }) => void> = [];
-  private readonly sessionLifecycleHooks: Array<(event: SessionLifecycleEvent) => void> = [];
-  private readonly statusHooks: Array<(status: XmppStatusSnapshot, meta: { reconnectDurationMs?: number }) => void> = [];
-  private readonly sendEnqueuedHooks: Array<(info: { kind: "room" | "dm"; reason: string }) => void> = [];
-  private readonly queueDepthHooks: Array<(depth: { persisted: number; inflight: number }) => void> = [];
-  private readonly errorHooks: Array<(event: XmppErrorEvent) => void> = [];
-  // Observe-only health hooks for the background-tab RESULT_CODE_HUNG
-  // investigation (see docs/planning/hung-tab-investigation.md). The
-  // client stays telemetry-agnostic; xmpp-instrumentation.ts binds these
-  // to the Faro report* sink.
-  private readonly reconnectScheduledHooks: Array<(info: { attempt: number; delayMs: number }) => void> = [];
-  private readonly catchupHooks: Array<(info: {
-    conversations: number;
-    processedConversations: number;
-    pages: number;
-    messages: number;
-    durationMs: number;
-    outcome: CatchupOutcome;
-  }) => void> = [];
-  private readonly resumeDrainHooks: Array<(info: { buffered: number; durationMs: number }) => void> = [];
   private readonly roomJoinWaiters = new Map<
     string,
     { promise: Promise<void>; requestedNick: string; resolve: () => void; reject: (error: Error) => void }
@@ -1103,57 +1120,44 @@ export class BrowserXmppClient {
     }
   }
 
-  setMessageHandler(h: (message: LiveRoomMessage) => void) { this.messageHandler = h; }
+  setMessageHandler(h: (message: LiveRoomMessage) => void) { this.events.set("message", h); }
   /** #414: receive `<pin-event/>` system messages from a room. */
-  setPinEventHandler(h: (event: { roomJid: string; event: WasmPinEvent }) => void) { this.pinEventHandler = h; }
-  setDirectMessageHandler(h: (message: LiveDmMessage) => void) { this.directMessageHandler = h; }
-  setStatusHandler(h: (status: XmppStatusSnapshot) => void) { this.statusHandler = h; }
-  setChatStateHandler(h: (event: ChatStateEvent) => void) { this.chatStateHandler = h; }
-  setDmChatStateHandler(h: (event: DmChatStateEvent) => void) { this.dmChatStateHandler = h; }
-  setReactionHandler(h: (event: ReactionEvent) => void) { this.reactionHandler = h; }
-  setDmReactionHandler(h: (event: DmReactionEvent) => void) { this.dmReactionHandler = h; }
-  setDisplayedHandler(h: (event: { roomJid: string; nick: string; messageId: string }) => void) { this.displayedHandler = h; }
-  setDmDisplayedHandler(h: (event: DmDisplayedEvent) => void) { this.dmDisplayedHandler = h; }
-  setPresenceUpdateHandler(h: (event: PresenceUpdateEvent) => void) { this.presenceUpdateHandler = h; }
-  setMemberJidHandler(h: (nick: string, bareJid: string) => void) { this.memberJidHandler = h; }
-  setHatsHandler(h: (hats: RoomHats) => void) { this.hatsHandler = h; }
-  setAuthorityHandler(h: (authority: RoomAuthority) => void) { this.authorityHandler = h; }
-  setActivityHandler(h: (event: RoomActivityEvent) => void) { this.activityHandler = h; }
-  setInboxPushHandler(h: (entry: InboxEntry) => void) { this.inboxPushHandler = h; }
-  setRoomAvatarHandler(h: (roomJid: string, hash: string) => void) { this.roomAvatarHandler = h; }
-  setRoomDisconnectHandler(h: () => void) { this.roomDisconnectHandler = h; }
-  setPresenceHandler(h: (presence: RoomPresence) => void) { this.presenceHandler = h; }
-  setLastSeenHandler(h: (nick: string, timestamp: number) => void) { this.lastSeenHandler = h; }
-  setMessageAckHandler(h: (messageId: string) => void) { this.messageAckHandler = h; }
-  setMessageDeliveryFailureHandler(h: (messageId: string) => void) { this.messageDeliveryFailureHandler = h; }
-  setQueuedMessageStatusHandler(h: (messageId: string, status: "queued" | "sending") => void) { this.queuedMessageStatusHandler = h; }
-  setSessionLifecycleHandler(h: (event: SessionLifecycleEvent) => void) { this.sessionLifecycleHandler = h; }
+  setPinEventHandler(h: (event: { roomJid: string; event: WasmPinEvent }) => void) { this.events.set("pinEvent", h); }
+  setDirectMessageHandler(h: (message: LiveDmMessage) => void) { this.events.set("directMessage", h); }
+  setStatusHandler(h: (status: XmppStatusSnapshot) => void) { this.events.set("status", h); }
+  setChatStateHandler(h: (event: ChatStateEvent) => void) { this.events.set("chatState", h); }
+  setDmChatStateHandler(h: (event: DmChatStateEvent) => void) { this.events.set("dmChatState", h); }
+  setReactionHandler(h: (event: ReactionEvent) => void) { this.events.set("reaction", h); }
+  setDmReactionHandler(h: (event: DmReactionEvent) => void) { this.events.set("dmReaction", h); }
+  setDisplayedHandler(h: (event: { roomJid: string; nick: string; messageId: string }) => void) { this.events.set("displayed", h); }
+  setDmDisplayedHandler(h: (event: DmDisplayedEvent) => void) { this.events.set("dmDisplayed", h); }
+  setPresenceUpdateHandler(h: (event: PresenceUpdateEvent) => void) { this.events.set("presenceUpdate", h); }
+  setMemberJidHandler(h: (nick: string, bareJid: string) => void) { this.events.set("memberJid", h); }
+  setHatsHandler(h: (hats: RoomHats) => void) { this.events.set("hats", h); }
+  setAuthorityHandler(h: (authority: RoomAuthority) => void) { this.events.set("authority", h); }
+  setActivityHandler(h: (event: RoomActivityEvent) => void) { this.events.set("activity", h); }
+  setInboxPushHandler(h: (entry: InboxEntry) => void) { this.events.set("inboxPush", h); }
+  setRoomAvatarHandler(h: (roomJid: string, hash: string) => void) { this.events.set("roomAvatar", h); }
+  setRoomDisconnectHandler(h: () => void) { this.events.set("roomDisconnect", h); }
+  setPresenceHandler(h: (presence: RoomPresence) => void) { this.events.set("presence", h); }
+  setLastSeenHandler(h: (nick: string, timestamp: number) => void) { this.events.set("lastSeen", h); }
+  setMessageAckHandler(h: (messageId: string) => void) { this.events.set("messageAck", h); }
+  setMessageDeliveryFailureHandler(h: (messageId: string) => void) { this.events.set("messageDeliveryFailure", h); }
+  setQueuedMessageStatusHandler(h: (messageId: string, status: "queued" | "sending") => void) { this.events.set("queuedMessageStatus", h); }
+  setSessionLifecycleHandler(h: (event: SessionLifecycleEvent) => void) { this.events.set("sessionLifecycle", h); }
 
-  onMessageAcked(hook: (id: string, meta: { kind: "room" | "dm"; latencyMs: number }) => void) { this.messageAckHooks.push(hook); }
-  onMessageDeliveryFailed(hook: (id: string, meta: { kind: "room" | "dm" }) => void) { this.messageFailHooks.push(hook); }
-  onSessionLifecycle(hook: (event: SessionLifecycleEvent) => void) { this.sessionLifecycleHooks.push(hook); }
-  onStatus(hook: (status: XmppStatusSnapshot, meta: { reconnectDurationMs?: number }) => void) { this.statusHooks.push(hook); }
-  onSendEnqueued(hook: (info: { kind: "room" | "dm"; reason: string }) => void) { this.sendEnqueuedHooks.push(hook); }
-  onQueueDepthChange(hook: (depth: { persisted: number; inflight: number }) => void) { this.queueDepthHooks.push(hook); }
-  onError(hook: (event: XmppErrorEvent) => void) { this.errorHooks.push(hook); }
-  onReconnectScheduled(hook: (info: { attempt: number; delayMs: number }) => void) { this.reconnectScheduledHooks.push(hook); }
-  onCatchup(hook: (info: {
-    conversations: number;
-    processedConversations: number;
-    pages: number;
-    messages: number;
-    durationMs: number;
-    outcome: CatchupOutcome;
-  }) => void) { this.catchupHooks.push(hook); }
-  onResumeDrain(hook: (info: { buffered: number; durationMs: number }) => void) { this.resumeDrainHooks.push(hook); }
+  onMessageAcked(hook: (id: string, meta: { kind: "room" | "dm"; latencyMs: number }) => void) { this.events.on("messageAcked", hook); }
+  onMessageDeliveryFailed(hook: (id: string, meta: { kind: "room" | "dm" }) => void) { this.events.on("messageDeliveryFailed", hook); }
+  onSessionLifecycle(hook: (event: SessionLifecycleEvent) => void) { this.events.on("sessionLifecycleHook", hook); }
+  onStatus(hook: (status: XmppStatusSnapshot, meta: { reconnectDurationMs?: number }) => void) { this.events.on("statusHook", hook); }
+  onSendEnqueued(hook: (info: { kind: "room" | "dm"; reason: string }) => void) { this.events.on("sendEnqueued", hook); }
+  onQueueDepthChange(hook: (depth: { persisted: number; inflight: number }) => void) { this.events.on("queueDepthChange", hook); }
+  onError(hook: (event: XmppErrorEvent) => void) { this.events.on("error", hook); }
+  onReconnectScheduled(hook: (info: { attempt: number; delayMs: number }) => void) { this.events.on("reconnectScheduled", hook); }
+  onCatchup(hook: (info: CatchupHookInfo) => void) { this.events.on("catchup", hook); }
+  onResumeDrain(hook: (info: { buffered: number; durationMs: number }) => void) { this.events.on("resumeDrain", hook); }
 
-  private fireHook<Args extends unknown[]>(hooks: Array<(...args: Args) => void>, ...args: Args) {
-    for (const hook of hooks) {
-      try { hook(...args); } catch (error) { console.error("xmpp telemetry hook threw", error); }
-    }
-  }
-
-  private emitError(event: XmppErrorEvent) { this.fireHook(this.errorHooks, event); }
+  private emitError(event: XmppErrorEvent) { this.events.emitSafe("error", event); }
 
   private updateReconnectTimer(snap: XmppStatusSnapshot): { reconnectDurationMs?: number } {
     if (snap.state === "reconnecting") {
@@ -1171,18 +1175,18 @@ export class BrowserXmppClient {
   }
 
   private emitStatus(snapshot: XmppStatusSnapshot) {
-    this.statusHandler?.(snapshot);
+    this.events.emit("status", snapshot);
     const meta = this.updateReconnectTimer(snapshot);
-    this.fireHook(this.statusHooks, snapshot, meta);
+    this.events.emitSafe("statusHook", snapshot, meta);
   }
 
   private emitSessionLifecycle(event: SessionLifecycleEvent) {
-    this.sessionLifecycleHandler?.(event);
-    this.fireHook(this.sessionLifecycleHooks, event);
+    this.events.emit("sessionLifecycle", event);
+    this.events.emitSafe("sessionLifecycleHook", event);
   }
 
   private emitQueueDepth() {
-    this.fireHook(this.queueDepthHooks, {
+    this.events.emitSafe("queueDepthChange", {
       persisted: countQueuedMessages(this.queueScope),
       inflight: this.inflightQueuedIds.size,
     });
@@ -1259,7 +1263,7 @@ export class BrowserXmppClient {
     if (this.destroying || this.reconnectTimer) return;
     const delay = Math.min(2000 * (2 ** this.reconnectAttempt), 60000);
     this.reconnectAttempt += 1;
-    this.fireHook(this.reconnectScheduledHooks, { attempt: this.reconnectAttempt, delayMs: delay });
+    this.events.emitSafe("reconnectScheduled", { attempt: this.reconnectAttempt, delayMs: delay });
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       void this.connect().catch(() => undefined);
@@ -1468,17 +1472,17 @@ export class BrowserXmppClient {
   private dispatchFocusedRoomHandlers(): void {
     const roomJid = this.currentRoom;
     if (!roomJid) {
-      this.hatsHandler?.({});
-      this.authorityHandler?.({});
-      this.presenceHandler?.({});
+      this.events.emit("hats", {});
+      this.events.emit("authority", {});
+      this.events.emit("presence", {});
       return;
     }
-    this.hatsHandler?.({ ...(this.roomHatsByRoom.get(roomJid) ?? {}) });
-    this.authorityHandler?.({ ...(this.roomAuthorityByRoom.get(roomJid) ?? {}) });
-    this.presenceHandler?.({ ...(this.roomPresenceByRoom.get(roomJid) ?? {}) });
+    this.events.emit("hats", { ...(this.roomHatsByRoom.get(roomJid) ?? {}) });
+    this.events.emit("authority", { ...(this.roomAuthorityByRoom.get(roomJid) ?? {}) });
+    this.events.emit("presence", { ...(this.roomPresenceByRoom.get(roomJid) ?? {}) });
     const memberJids = this.roomMemberJidsByRoom.get(roomJid) ?? {};
     for (const [nick, bare] of Object.entries(memberJids)) {
-      this.memberJidHandler?.(nick, bare);
+      this.events.emit("memberJid", nick, bare);
     }
   }
 
@@ -1667,9 +1671,9 @@ export class BrowserXmppClient {
       ...(opts.threadCreate ? { threadCreate: opts.threadCreate } : {}),
       ...(opts.threadReply ? { threadReply: opts.threadReply } : {}),
     });
-    this.queuedMessageStatusHandler?.(queuedId, "queued");
+    this.events.emit("queuedMessageStatus", queuedId, "queued");
     this.noteQueuedMessage();
-    this.fireHook(this.sendEnqueuedHooks, { kind: "room", reason: this.enqueueReason() });
+    this.events.emitSafe("sendEnqueued", { kind: "room", reason: this.enqueueReason() });
     this.emitQueueDepth();
     return { id: queuedId, state: "queued" };
   }
@@ -1689,9 +1693,9 @@ export class BrowserXmppClient {
       ...(opts.threadId ? { threadId: opts.threadId } : {}),
       ...(opts.parentThreadId ? { parentThreadId: opts.parentThreadId } : {}),
     });
-    this.queuedMessageStatusHandler?.(queuedId, "queued");
+    this.events.emit("queuedMessageStatus", queuedId, "queued");
     this.noteQueuedMessage();
-    this.fireHook(this.sendEnqueuedHooks, { kind: "dm", reason: this.enqueueReason() });
+    this.events.emitSafe("sendEnqueued", { kind: "dm", reason: this.enqueueReason() });
     this.emitQueueDepth();
     return { id: queuedId, state: "queued" };
   }
@@ -1813,7 +1817,7 @@ export class BrowserXmppClient {
       for (const entry of entries) {
         if (!this.canUseConnectedSession() || !this.xmpp) break;
         if (this.inflightQueuedIds.has(entry.id)) continue;
-        this.queuedMessageStatusHandler?.(entry.id, "sending");
+        this.events.emit("queuedMessageStatus", entry.id, "sending");
         let messageId: string | null;
         try {
           messageId = await this.compatSendDirectMessage(this.xmpp, barePeerJid(entry.peerJid), entry.body, { ...(entry.markup?.length ? { markup: entry.markup } : {}), ...(entry.references?.length ? { references: entry.references } : {}), ...(entry.files?.length ? { files: entry.files } : {}), ...(entry.replyTo ? { replyTo: entry.replyTo } : {}), ...(entry.threadId ? { threadId: entry.threadId } : {}), ...(entry.parentThreadId ? { parentThreadId: entry.parentThreadId } : {}), id: entry.id });
@@ -1840,7 +1844,7 @@ export class BrowserXmppClient {
       for (const entry of entries) {
         if (!this.roomIsReady(roomJid) || !this.xmpp) break;
         if (this.inflightQueuedIds.has(entry.id)) continue;
-        this.queuedMessageStatusHandler?.(entry.id, "sending");
+        this.events.emit("queuedMessageStatus", entry.id, "sending");
         let messageId: string | null;
         try {
           messageId = await this.compatSendGroupMessage(this.xmpp, roomJid, entry.body, { ...(entry.markup?.length ? { markup: entry.markup } : {}), ...(entry.references?.length ? { references: entry.references } : {}), mentionJidsByNick: { ...(entry.mentionJidsByNick ?? {}), ...this.memberJidsFor(roomJid) }, ...(entry.files?.length ? { files: entry.files } : {}), ...(entry.replyTo ? { replyTo: entry.replyTo } : {}), ...(entry.threadId ? { threadId: entry.threadId } : {}), ...(entry.parentThreadId ? { parentThreadId: entry.parentThreadId } : {}), ...(entry.threadCreate ? { threadCreate: entry.threadCreate } : {}), ...(entry.threadReply ? { threadReply: entry.threadReply } : {}), id: entry.id });
@@ -1862,11 +1866,11 @@ export class BrowserXmppClient {
     this.inflightQueuedIds.delete(id);
     this.resumeReplayQueuedIds.delete(id);
     removeQueuedMessage(this.queueScope, id);
-    this.messageDeliveryFailureHandler?.(id);
+    this.events.emit("messageDeliveryFailure", id);
     const pending = this.pendingSendAt.get(id);
     if (pending) {
       this.pendingSendAt.delete(id);
-      this.fireHook(this.messageFailHooks, id, { kind: pending.kind });
+      this.events.emitSafe("messageDeliveryFailed", id, { kind: pending.kind });
     }
     this.emitQueueDepth();
   }
@@ -2089,7 +2093,7 @@ export class BrowserXmppClient {
     try { await xmpp.subscribe_mds_displayed(); } catch { /* best-effort */ }
   }
 
-  setMdsDisplayedHandler(handler: ((entry: MdsDisplayedEntry) => void) | null) { this.mdsDisplayedHandler = handler; }
+  setMdsDisplayedHandler(handler: ((entry: MdsDisplayedEntry) => void) | null) { this.events.set("mdsDisplayed", handler); }
 
   async subscribeStoryReactionSummaries(communityJid: string): Promise<void> {
     const xmpp = await this.requireConnectedXmpp();
@@ -2116,13 +2120,11 @@ export class BrowserXmppClient {
   }
 
   addPubsubEventHandler(handler: (event: PubsubEvent) => void): () => void {
-    this.pubsubEventHandlers.add(handler);
-    return () => this.pubsubEventHandlers.delete(handler);
+    return this.events.on("pubsubEvent", handler);
   }
 
   setPubsubEventHandler(handler: ((event: PubsubEvent) => void) | null) {
-    this.pubsubEventHandlers.clear();
-    if (handler) this.pubsubEventHandlers.add(handler);
+    this.events.set("pubsubEvent", handler);
   }
 
   private async resolveUploadService(): Promise<string> {
@@ -3398,9 +3400,9 @@ export class BrowserXmppClient {
 
   private startSelfPing() { this.stopSelfPing(); this.selfPingTimer = setInterval(() => { void this.doSelfPing(); }, 60000); }
   private stopSelfPing() { if (this.selfPingTimer) { clearInterval(this.selfPingTimer); this.selfPingTimer = null; } }
-  private async doSelfPing() { if (!this.xmpp?.send_raw_iq || !this.currentRoom) return; try { await this.xmpp.send_raw_iq(`<iq type="get" id="${crypto.randomUUID()}" to="${this.currentRoom}/${this.session.username}"><ping xmlns="urn:xmpp:ping"/></iq>`); } catch { this.roomDisconnectHandler?.(); } }
-  private handleMessageAck(id: string) { const wasQueued = this.inflightQueuedIds.delete(id); this.resumeReplayQueuedIds.delete(id); if (wasQueued) removeQueuedMessage(this.queueScope, id); this.messageAckHandler?.(id); const pending = this.pendingSendAt.get(id); if (pending) { this.pendingSendAt.delete(id); this.fireHook(this.messageAckHooks, id, { kind: pending.kind, latencyMs: performance.now() - pending.at }); } if (wasQueued) this.emitQueueDepth(); }
-  private handleMessageFailed(id: string) { const wasQueued = this.inflightQueuedIds.delete(id); const wasResumeReplay = this.resumeReplayQueuedIds.delete(id); if (wasResumeReplay) removeQueuedMessage(this.queueScope, id); this.messageDeliveryFailureHandler?.(id); const pending = this.pendingSendAt.get(id); if (pending) { this.pendingSendAt.delete(id); this.fireHook(this.messageFailHooks, id, { kind: pending.kind }); } if (wasQueued || wasResumeReplay) this.emitQueueDepth(); }
+  private async doSelfPing() { if (!this.xmpp?.send_raw_iq || !this.currentRoom) return; try { await this.xmpp.send_raw_iq(`<iq type="get" id="${crypto.randomUUID()}" to="${this.currentRoom}/${this.session.username}"><ping xmlns="urn:xmpp:ping"/></iq>`); } catch { this.events.emit("roomDisconnect"); } }
+  private handleMessageAck(id: string) { const wasQueued = this.inflightQueuedIds.delete(id); this.resumeReplayQueuedIds.delete(id); if (wasQueued) removeQueuedMessage(this.queueScope, id); this.events.emit("messageAck", id); const pending = this.pendingSendAt.get(id); if (pending) { this.pendingSendAt.delete(id); this.events.emitSafe("messageAcked", id, { kind: pending.kind, latencyMs: performance.now() - pending.at }); } if (wasQueued) this.emitQueueDepth(); }
+  private handleMessageFailed(id: string) { const wasQueued = this.inflightQueuedIds.delete(id); const wasResumeReplay = this.resumeReplayQueuedIds.delete(id); if (wasResumeReplay) removeQueuedMessage(this.queueScope, id); this.events.emit("messageDeliveryFailure", id); const pending = this.pendingSendAt.get(id); if (pending) { this.pendingSendAt.delete(id); this.events.emitSafe("messageDeliveryFailed", id, { kind: pending.kind }); } if (wasQueued || wasResumeReplay) this.emitQueueDepth(); }
   private handleSessionReady(xmpp: XmppClientInstance, lifecycle: SessionLifecycleEvent) {
     void this.runSessionReady(xmpp, lifecycle);
   }
@@ -3490,14 +3492,14 @@ export class BrowserXmppClient {
     this.flushAfterSessionReady(xmpp);
     // Drain in arrival order. Each replay flows through the same
     // `dispatchLiveBodyMessage` path that a fresh socket arrival
-    // would, so cursor advance + downstream `messageHandler` /
-    // `directMessageHandler` dedup behave identically.
+    // would, so cursor advance + downstream `message` /
+    // `directMessage` listener dedup behave identically.
     // Observe-only: the buffer drain is a single synchronous task over
     // everything that arrived during the resume barrier — a prime
     // background-tab HUNG suspect. Measure its size + wall-clock.
     const drainStartedAt = performance.now();
     for (const m of buffered) this.dispatchLiveBodyMessage(m);
-    this.fireHook(this.resumeDrainHooks, {
+    this.events.emitSafe("resumeDrain", {
       buffered: buffered.length,
       durationMs: performance.now() - drainStartedAt,
     });
@@ -3533,10 +3535,9 @@ export class BrowserXmppClient {
       try {
         const raw = await xmpp.fetch_mds_displayed();
         if (this.xmpp !== xmpp) return;
-        const handler = this.mdsDisplayedHandler;
-        if (handler && raw) {
+        if (raw) {
           for (const entry of raw) {
-            handler({ chatId: entry.chat_id, stanzaId: entry.stanza_id, stanzaIdBy: entry.stanza_id_by });
+            this.events.emit("mdsDisplayed", { chatId: entry.chat_id, stanzaId: entry.stanza_id, stanzaIdBy: entry.stanza_id_by });
           }
         }
       } catch { /* best-effort */ }
@@ -3612,7 +3613,7 @@ export class BrowserXmppClient {
         this.roomJoinWaiters.get(this.roomJoinKey(room))?.resolve();
         this.markMucReadyFromSelfPresence(room);
       }
-      if (!nick && presence.vcard_avatar) this.roomAvatarHandler?.(room, presence.vcard_avatar);
+      if (!nick && presence.vcard_avatar) this.events.emit("roomAvatar", room, presence.vcard_avatar);
       if (!nick) return;
       const roomHats = this.hatsFor(room);
       const roomAuthority = this.authorityFor(room);
@@ -3635,10 +3636,10 @@ export class BrowserXmppClient {
         roomPresence[nick] = "offline";
         delete roomMemberJids[nick];
         if (isFocusedRoom) {
-          this.hatsHandler?.({ ...roomHats });
-          this.authorityHandler?.({ ...roomAuthority });
-          this.presenceHandler?.({ ...roomPresence });
-          this.lastSeenHandler?.(nick, Date.now());
+          this.events.emit("hats", { ...roomHats });
+          this.events.emit("authority", { ...roomAuthority });
+          this.events.emit("presence", { ...roomPresence });
+          this.events.emit("lastSeen", nick, Date.now());
         }
         return;
       }
@@ -3659,20 +3660,20 @@ export class BrowserXmppClient {
       if (presence.muc_jid) {
         const bare = barePeerJid(presence.muc_jid);
         roomMemberJids[nick] = bare;
-        if (isFocusedRoom) this.memberJidHandler?.(nick, bare);
+        if (isFocusedRoom) this.events.emit("memberJid", nick, bare);
       }
       if (isFocusedRoom) {
-        this.hatsHandler?.({ ...roomHats });
-        this.authorityHandler?.({ ...roomAuthority });
-        this.presenceHandler?.({ ...roomPresence });
+        this.events.emit("hats", { ...roomHats });
+        this.events.emit("authority", { ...roomAuthority });
+        this.events.emit("presence", { ...roomPresence });
       }
       return;
     }
-    const bare = barePeerJid(from); if (!bare) return; if (presence.presence_type === "subscribe") return; const idleSince = mapPresenceIdleSince(presence); this.presenceUpdateHandler?.({ bareJid: bare, resource: resourceOf(from), show: mapPresenceShow(presence), ...(presence.status ? { status: presence.status } : {}), ...(idleSince !== undefined ? { idleSince } : {}) });
+    const bare = barePeerJid(from); if (!bare) return; if (presence.presence_type === "subscribe") return; const idleSince = mapPresenceIdleSince(presence); this.events.emit("presenceUpdate", { bareJid: bare, resource: resourceOf(from), show: mapPresenceShow(presence), ...(presence.status ? { status: presence.status } : {}), ...(idleSince !== undefined ? { idleSince } : {}) });
   }
   private handleMessage(message: InboundWasmMessage) {
     const inboxPush = message.inboxPush ?? (message.inbox_push ? inboxEntryFromWasm(message.inbox_push) : undefined);
-    if (inboxPush) { this.inboxPushHandler?.(inboxPush); return; }
+    if (inboxPush) { this.events.emit("inboxPush", inboxPush); return; }
     if (message.id && this.carbonDedupIds.has(message.id) && !message._fromCarbon) {
       this.carbonDedupIds.delete(message.id);
       return;
@@ -3689,11 +3690,11 @@ export class BrowserXmppClient {
     }
     if (message.carbon?.sent || message.carbon?.received) return;
     if (message.chat_state && !message.body) {
-      if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").split("/")[1] ?? "unknown"; if (roomJid === this.currentRoom && nick !== this.session.username) this.chatStateHandler?.({ roomJid, nick, state: message.chat_state as ChatStateType }); }
-      else this.dmChatStateHandler?.({ peerJid: barePeerJid(message.from ?? message.to ?? ""), state: message.chat_state as ChatStateType });
+      if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").split("/")[1] ?? "unknown"; if (roomJid === this.currentRoom && nick !== this.session.username) this.events.emit("chatState", { roomJid, nick, state: message.chat_state as ChatStateType }); }
+      else this.events.emit("dmChatState", { peerJid: barePeerJid(message.from ?? message.to ?? ""), state: message.chat_state as ChatStateType });
       return;
     }
-    if (message.displayed_marker_id) { if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").split("/")[1] ?? "unknown"; this.displayedHandler?.({ roomJid, nick, messageId: message.displayed_marker_id }); } else this.dmDisplayedHandler?.({ peerJid: barePeerJid(message.from ?? message.to ?? ""), messageId: message.displayed_marker_id }); return; }
+    if (message.displayed_marker_id) { if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").split("/")[1] ?? "unknown"; this.events.emit("displayed", { roomJid, nick, messageId: message.displayed_marker_id }); } else this.events.emit("dmDisplayed", { peerJid: barePeerJid(message.from ?? message.to ?? ""), messageId: message.displayed_marker_id }); return; }
     if (message.in_call?.kind === "reaction") {
       if (!isInCallReactionForActiveCall($callState.get(), message.in_call.sid)) return;
       receiveInCallReaction({
@@ -3703,12 +3704,12 @@ export class BrowserXmppClient {
       });
       return;
     }
-    if (message.reaction_target_id) { if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").split("/")[1] ?? "unknown"; this.reactionHandler?.({ roomJid, nick, messageId: message.reaction_target_id, emojis: message.reaction_emojis }); } else { const fromBare = barePeerJid(message.from ?? ""); const toBare = barePeerJid(message.to ?? ""); const selfBare = barePeerJid(this.session.jid); const peerJid = fromBare === selfBare ? toBare : fromBare; const reactorJid = fromBare || selfBare; if (peerJid && reactorJid) this.dmReactionHandler?.({ peerJid, reactorJid, messageId: message.reaction_target_id, emojis: message.reaction_emojis }); } return; }
+    if (message.reaction_target_id) { if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").split("/")[1] ?? "unknown"; this.events.emit("reaction", { roomJid, nick, messageId: message.reaction_target_id, emojis: message.reaction_emojis }); } else { const fromBare = barePeerJid(message.from ?? ""); const toBare = barePeerJid(message.to ?? ""); const selfBare = barePeerJid(this.session.jid); const peerJid = fromBare === selfBare ? toBare : fromBare; const reactorJid = fromBare || selfBare; if (peerJid && reactorJid) this.events.emit("dmReaction", { peerJid, reactorJid, messageId: message.reaction_target_id, emojis: message.reaction_emojis }); } return; }
     if (message.pin_event) {
       const roomJid = message.is_muc
         ? barePeerJid(message.from ?? message.to ?? "")
         : this.directPeerFromMessage(message);
-      if (roomJid) this.pinEventHandler?.({ roomJid, event: message.pin_event });
+      if (roomJid) this.events.emit("pinEvent", { roomJid, event: message.pin_event });
       if (!message.is_muc) return;
       // Fall through: also render the system message in the timeline so
       // the user sees "alice pinned a message" inline (#414). The
@@ -3726,13 +3727,13 @@ export class BrowserXmppClient {
       const converted = roomMessageFromArchived({ ...message, mam_id: message.id ?? crypto.randomUUID() } as WasmArchivedMessage, "live", { trustedMediaOrigin: this.trustedLinkPreviewMediaOrigin() });
       if (!converted) return;
       this.catchup.recordRoomSeen(converted.roomJid, converted.createdAt, undefined, rawMessageSeenIds(message));
-      if (converted.roomJid !== this.currentRoom && isRoomActivityMessage(converted)) { this.activityHandler?.(roomActivityEventFromMessage(converted)); return; }
-      this.messageHandler?.(converted); return;
+      if (converted.roomJid !== this.currentRoom && isRoomActivityMessage(converted)) { this.events.emit("activity", roomActivityEventFromMessage(converted)); return; }
+      this.events.emit("message", converted); return;
     }
     const converted = dmMessageFromArchived({ ...message, mam_id: message.id ?? crypto.randomUUID() } as WasmArchivedMessage, barePeerJid(this.session.jid), "live", { trustedMediaOrigin: this.trustedLinkPreviewMediaOrigin() });
     if (converted) {
       this.catchup.recordDmSeen(converted.peerJid, converted.createdAt, undefined, rawMessageSeenIds(message));
-      this.directMessageHandler?.(converted);
+      this.events.emit("directMessage", converted);
     }
   }
 
@@ -3787,7 +3788,7 @@ export class BrowserXmppClient {
         }
       }
     } finally {
-      this.fireHook(this.catchupHooks, {
+      this.events.emitSafe("catchup", {
         conversations: entries.length,
         processedConversations,
         pages: stats.pages,
@@ -3943,7 +3944,7 @@ export class BrowserXmppClient {
       const converted = dmMessageFromArchived(message, selfBare, { trustedMediaOrigin: this.trustedLinkPreviewMediaOrigin() });
       if (!converted || shouldSkipCatchupMessage(converted, since, seenIds)) continue;
       this.catchup.recordDmSeen(converted.peerJid, converted.createdAt, converted.archiveId, messageSeenIds(converted));
-      this.directMessageHandler?.(converted);
+      this.events.emit("directMessage", converted);
       if (options.stats) options.stats.messages += 1;
       lastArchiveId = converted.archiveId ?? lastArchiveId;
     }
@@ -3957,9 +3958,9 @@ export class BrowserXmppClient {
       if (!converted || shouldSkipCatchupMessage(converted, since, seenIds)) continue;
       this.catchup.recordRoomSeen(converted.roomJid, converted.createdAt, converted.archiveId, messageSeenIds(converted));
       if (converted.roomJid !== this.currentRoom && isRoomActivityMessage(converted)) {
-        this.activityHandler?.(roomActivityEventFromMessage(converted));
+        this.events.emit("activity", roomActivityEventFromMessage(converted));
       } else {
-        this.messageHandler?.(converted);
+        this.events.emit("message", converted);
       }
       if (stats) stats.messages += 1;
       lastArchiveId = converted.archiveId ?? lastArchiveId;
@@ -4015,11 +4016,11 @@ export class BrowserXmppClient {
     });
     xmpp.set_on_mds_displayed?.((entry: WasmMdsDisplayedEntry) => {
       if (!this.isCurrentXmpp(xmpp)) return;
-      this.mdsDisplayedHandler?.({ chatId: entry.chat_id, stanzaId: entry.stanza_id, stanzaIdBy: entry.stanza_id_by });
+      this.events.emit("mdsDisplayed", { chatId: entry.chat_id, stanzaId: entry.stanza_id, stanzaIdBy: entry.stanza_id_by });
     });
     xmpp.set_on_pubsub_event?.((event: WasmPubsubEvent) => {
       if (!this.isCurrentXmpp(xmpp)) return;
-      for (const handler of this.pubsubEventHandlers) handler(event);
+      this.events.emit("pubsubEvent", event);
     });
     xmpp.set_on_call?.((event: CallEvent) => {
       if (!this.isCurrentXmpp(xmpp)) return;
