@@ -19,12 +19,12 @@ Four workstreams run in parallel; phases within a workstream are sequential.
 
 ## Phase 0 — Repo-wide hygiene & guardrails (1–2 small PRs)
 
-1. Delete root cruft after `git grep`/`git log` confirms nothing references it: `.impeccable.md`, `.omx/plans/issue-875-live-reaction-push.md`. For `CONTEXT.md` (glossary), fold still-true content into `AGENTS.md` (note `CLAUDE.md` symlinks to it) or keep if actively referenced — check first. **Keep `.rules.cue`** — it is the cuenv `rules.#DirectoryRules` config that generates the repo's `.gitignore`; it is live infrastructure, and the plan should use it *more*: any generated artifacts introduced by later phases (e.g. Phase T token outputs if they end up ignored, or new generated schema/test fixtures) get their ignore entries added through `.rules.cue`, never by hand-editing `.gitignore`.
+1. Delete root cruft after `git grep`/`git log` confirms nothing references it. Outcome of those checks: `.omx/plans/issue-875-live-reaction-push.md` was a stale TDD plan for an already-landed feature — deleted. **`.impeccable.md` stays** — it carries live design direction (brand personality, aesthetic principles), not cruft. **`CONTEXT.md` stays** — the glossary is referenced by `docs/adr/010-presence-statuses.md`. **Keep `.rules.cue`** — it is the cuenv `rules.#DirectoryRules` config that generates the repo's `.gitignore`; it is live infrastructure, and the plan should use it *more*: any generated artifacts introduced by later phases (e.g. Phase T token outputs if they end up ignored, or new generated schema/test fixtures) get their ignore entries added through `.rules.cue`, never by hand-editing `.gitignore`.
 2. **Delete `bench-storage-backends/`** entirely (user-confirmed). Do not wire it into CI.
 3. Fix `server/TODO.md`: remove the false XEP-0448-suite claim; preferably convert remaining entries to issues and delete the file.
 4. Add a `"test": "bun test"` script to `chat/package.json`.
 5. Rename `server/crates/waddle-xmpp/tests/xep_0272_muji.rs` → `xep0272_*.rs` to match the convention of the other 61 files.
-6. Add a default-branch build job for the Apple app (currently PR-only workflow `waddle-apple-pullrequest.yml`; workflows are cuenv-generated — change via `cuenv sync ci`, not hand-editing YAML).
+6. Add a default-branch build job for the Apple app. Note: unlike the chat/colony/website/server workflows, `waddle-apple-pullrequest.yml` is hand-written (no cuenv header, no `apps/apple/env.cue`), so the fix is a hand-written sibling `waddle-apple-default.yml` (push-to-main trigger, same build steps). Migrating apple CI under cuenv is a possible follow-up, not Phase 0.
 
 Commits: `chore(repo): …`, `chore(chat): add test script`, `test(xmpp): rename muji suite`, `ci(apple): build on default branch`.
 
@@ -45,6 +45,8 @@ Verify: `cargo clippy --all-targets -- -D warnings`; `git grep -n 'format!("<' s
 Add dedicated suites under `server/crates/waddle-xmpp/tests/` (following the existing `xepNNNN_*.rs` pattern and `ws_common` harness) for the 22 inline-only XEPs: 0004, 0047, 0048, 0059, 0319, 0377, 0393, 0394, 0401, 0433, 0437, 0445, 0446, 0447, 0448, 0449, 0452, 0469, 0486, 0488, 0500, 0502. Batch by theme (~4–5 XEPs per PR): forms/paging (0004+0059), file sharing (0446–0449+0452), styling/markers (0393/0394/…), etc. Also add a ~50-line conformance test that globs `src/**/xepNNNN.rs` against `tests/xepNNNN_*.rs` and fails on missing suites — cheap recurrence prevention.
 
 This satisfies the per-XEP-suite hard rule *and* provides characterization coverage for S3/S4.
+
+Carried over from the deleted `server/TODO.md`: deepen the existing XEP-0292 (vCard4 PEP publish/retrieve), XEP-0402 (PEP bookmarks), and XEP-0115 (entity caps) integration suites alongside this phase; XEP-0047's missing IQ-session suite is already in the list above.
 
 ### S3 — God-module decomposition (3–4 PRs, medium risk)
 
