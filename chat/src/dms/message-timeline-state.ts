@@ -9,7 +9,10 @@ import {
   findMessageById,
   MessageIdIndex,
 } from "@/lib/message-ids";
-import { compareTimelineMessages, pickAuthoritativeTimestamp } from "@/lib/timeline-timestamps";
+import { compareTimelineMessages } from "@/lib/timeline-timestamps";
+import { assignCorrectionFields, type CorrectionPayload } from "@/lib/messaging/correction";
+import { retractTimelineMessage } from "@/lib/messaging/retraction";
+import { type ArchiveMergeHooks, mergeRetractionTombstone } from "@/lib/messaging/timeline-insert";
 
 export function fromLiveDmMessage(
   session: WaddleSession,
@@ -52,7 +55,7 @@ export function fromLiveDmMessage(
   if (msg.threadId) tm.threadId = msg.threadId;
   if (msg.parentThreadId) tm.parentThreadId = msg.parentThreadId;
   if (msg.callThread) tm.callThread = msg.callThread;
-  return tm.isRetracted ? retractDmTimelineMessage(tm, tm.retractionId) : tm;
+  return tm.isRetracted ? retractTimelineMessage(tm, tm.retractionId) : tm;
 }
 
 export function queuedDmMessageToTimeline(
@@ -100,70 +103,48 @@ export function isSameDmCorrectionSender(target: TimelineMessage, correctionFrom
   return barePeerJid(target.authorJid ?? "") === barePeerJid(correctionFromJid);
 }
 
-export function retractDmTimelineMessage(
-  existing: TimelineMessage,
-  retractionId?: string,
-): TimelineMessage {
-  const next: TimelineMessage = {
-    ...existing,
-    body: "",
-    isRetracted: true,
-    ...(retractionId ? { retractionId } : {}),
-  };
-  delete next.markup;
-  delete next.references;
-  delete next.sharedFiles;
-  delete next.linkPreviews;
-  delete next.extensionAnnotations;
-  delete next.extensionBodyFallback;
-  delete next.isSticker;
-  delete next.mentions;
-  delete next.broadcastMention;
-  delete next.forumPostKind;
-  delete next.forumTitle;
-  delete next.forumThreadTitle;
-  return next;
+// XEP-0444 nick-keyed aggregate bookkeeping — the DM side of reaction
+// divergence 5. No real-JID sender attribution: the DM stanza already
+// arrives keyed on the conversation partner, so the reaction-set per
+// nick is sufficient. Replace semantics: the sender's previous set is
+// wiped before the new one lands, so unticking an emoji removes it.
+// Returns `undefined` when the resulting set is empty (drops the field).
+function replacedNickReactions(
+  current: Record<string, string[]> | undefined,
+  nick: string,
+  emojis: string[],
+): Record<string, string[]> | undefined {
+  const next: Record<string, string[]> = current ? { ...current } : {};
+  for (const key of Object.keys(next)) {
+    next[key] = (next[key] ?? []).filter((n) => n !== nick);
+    if (next[key].length === 0) delete next[key];
+  }
+  for (const emoji of emojis) {
+    if (!next[emoji]) next[emoji] = [];
+    if (!next[emoji].includes(nick)) next[emoji].push(nick);
+  }
+  return Object.keys(next).length > 0 ? next : undefined;
 }
 
-function mergeDmRetractionTombstone(
-  existing: TimelineMessage,
-  incoming: TimelineMessage,
+/** Immutable variant of the DM reaction bookkeeping (live merge path). */
+export function dmReactedRow(
+  target: TimelineMessage,
+  event: { nick: string; emojis: string[] },
 ): TimelineMessage {
-  let result = incoming.isRetracted
-    ? retractDmTimelineMessage(existing, incoming.retractionId)
-    : existing;
-  // Upgrade the timestamp if the MAM hit carries a higher-authority
-  // stamp than the row we already had — this is the path that
-  // corrects a previously-fallback live insert once the archive
-  // result lands.
-  const authoritativeTimestamp = pickAuthoritativeTimestamp(
-    { createdAt: result.createdAt, createdAtSource: result.createdAtSource },
-    { createdAt: incoming.createdAt, createdAtSource: incoming.createdAtSource },
-  );
-  if (
-    authoritativeTimestamp.createdAt !== result.createdAt
-    || authoritativeTimestamp.createdAtSource !== result.createdAtSource
-  ) {
-    result = {
-      ...result,
-      createdAt: authoritativeTimestamp.createdAt,
-      createdAtSource: authoritativeTimestamp.createdAtSource,
-    };
-  }
-  if (incoming.isRetracted) return result;
-  if (incoming.callThread) {
-    result = { ...result, callThread: incoming.callThread };
-  }
-  if (Object.prototype.hasOwnProperty.call(incoming, "linkPreviews")) {
-    return { ...result, linkPreviews: incoming.linkPreviews };
-  }
-  if (!result.linkPreviews) {
-    return result;
-  }
-  const next = { ...result };
-  delete next.linkPreviews;
-  return next;
+  const reactions = replacedNickReactions(target.reactions, event.nick, event.emojis);
+  const updated: TimelineMessage = { ...target };
+  if (reactions) updated.reactions = reactions;
+  else delete updated.reactions;
+  return updated;
 }
+
+// DM-only extra on the shared MAM duplicate merge: adopt the archive
+// row's call-thread payload (the channel side reconciles call anchors via
+// the separate `callThreadEnded` pass instead).
+const dmArchiveMergeHooks: ArchiveMergeHooks = {
+  mergeExtras: (result, incoming) =>
+    incoming.callThread ? { ...result, callThread: incoming.callThread } : result,
+};
 
 export function buildDmTimelineFromMamResults(params: {
   session: WaddleSession;
@@ -177,12 +158,7 @@ export function buildDmTimelineFromMamResults(params: {
   const correctionUpdates: {
     targetId: string;
     correctionFromJid: string;
-    body: string;
-    markup?: LiveDmMessage["markup"];
-    references?: LiveDmMessage["references"];
-    linkPreviews?: LiveDmMessage["linkPreviews"];
-    extensionAnnotations?: LiveDmMessage["extensionAnnotations"];
-    extensionBodyFallback?: boolean;
+    payload: CorrectionPayload;
   }[] = [];
   for (const msg of mamResults) {
     if (msg._reactionTarget && msg._reactionEmojis) {
@@ -193,12 +169,14 @@ export function buildDmTimelineFromMamResults(params: {
       correctionUpdates.push({
         targetId: msg.replacesId,
         correctionFromJid: msg.fromJid,
-        body: msg.body,
-        markup: msg.markup,
-        references: msg.references,
-        linkPreviews: msg.linkPreviews,
-        extensionAnnotations: msg.extensionAnnotations,
-        extensionBodyFallback: msg.extensionBodyFallback,
+        payload: {
+          body: msg.body,
+          markup: msg.markup,
+          references: msg.references,
+          linkPreviews: msg.linkPreviews,
+          extensionAnnotations: msg.extensionAnnotations,
+          extensionBodyFallback: msg.extensionBodyFallback,
+        },
       });
     } else if (
       msg.body
@@ -227,7 +205,7 @@ export function buildDmTimelineFromMamResults(params: {
       .map((id) => byId.get(id))
       .find((message): message is TimelineMessage => !!message);
     if (existingMessage) {
-      const merged = mergeDmRetractionTombstone(existingMessage, tm);
+      const merged = mergeRetractionTombstone(existingMessage, tm, dmArchiveMergeHooks);
       if (merged !== existingMessage) {
         const index = timeline.indexOf(existingMessage);
         if (index !== -1) timeline[index] = merged;
@@ -241,45 +219,22 @@ export function buildDmTimelineFromMamResults(params: {
   for (const update of correctionUpdates) {
     const target = findMessageById(timeline, update.targetId);
     if (!target || !isSameDmCorrectionSender(target, update.correctionFromJid)) continue;
-    target.body = update.body;
-    target.isEdited = true;
-    if (update.markup && update.markup.length > 0) target.markup = update.markup;
-    else delete target.markup;
-    if (update.references && update.references.length > 0) target.references = update.references;
-    else delete target.references;
-    if (update.linkPreviews && update.linkPreviews.length > 0) target.linkPreviews = update.linkPreviews;
-    else delete target.linkPreviews;
-    if (update.extensionAnnotations && update.extensionAnnotations.length > 0) {
-      target.extensionAnnotations = update.extensionAnnotations;
-      if (update.extensionBodyFallback) target.extensionBodyFallback = true;
-      else delete target.extensionBodyFallback;
-    } else {
-      delete target.extensionAnnotations;
-      delete target.extensionBodyFallback;
-    }
+    assignCorrectionFields(target, update.payload);
   }
   for (const update of retractionUpdates) {
     const target = findMessageById(timeline, update.targetId);
     if (!target || !isSameDmCorrectionSender(target, update.fromJid)) continue;
     const index = timeline.indexOf(target);
     if (index === -1) continue;
-    const retracted = retractDmTimelineMessage(target);
+    const retracted = retractTimelineMessage(target);
     timeline[index] = retracted;
     byId.add(retracted);
   }
   for (const update of reactionUpdates) {
     const target = findMessageById(timeline, update.targetId);
     if (!target) continue;
-    const reactions: Record<string, string[]> = target.reactions ? { ...target.reactions } : {};
-    for (const key of Object.keys(reactions)) {
-      reactions[key] = (reactions[key] ?? []).filter((n) => n !== update.nick);
-      if (reactions[key].length === 0) delete reactions[key];
-    }
-    for (const emoji of update.emojis) {
-      if (!reactions[emoji]) reactions[emoji] = [];
-      if (!reactions[emoji].includes(update.nick)) reactions[emoji].push(update.nick);
-    }
-    if (Object.keys(reactions).length > 0) target.reactions = reactions;
+    const reactions = replacedNickReactions(target.reactions, update.nick, update.emojis);
+    if (reactions) target.reactions = reactions;
     else delete target.reactions;
   }
   return timeline.sort(compareTimelineMessages);

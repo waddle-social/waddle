@@ -1,20 +1,18 @@
 import type { Ref } from "vue";
 import type { WaddleSession } from "@/lib/server-auth";
 import type { LiveDmMessage } from "@/lib/xmpp-client";
+import type { TimelineMessage } from "@/lib/chat-ui";
+import { findMessageById, findMessageIndexById } from "@/lib/message-ids";
 import {
-  type DeliveryStatus,
-  type TimelineMessage,
-} from "@/lib/chat-ui";
-import { findMessageById, findMessageIndexById, mergeMessageIds } from "@/lib/message-ids";
-import {
+  dmReactedRow,
   fromLiveDmMessage,
   isSameDmCorrectionSender,
-  retractDmTimelineMessage,
 } from "@/dms/message-timeline-state";
-import { compareTimelineMessages, pickAuthoritativeTimestamp } from "@/lib/timeline-timestamps";
-import {
-  canUseSelfEchoBodyFallback,
-} from "@/lib/self-echo-fallback";
+import { applyCorrection as applyCorrectionUpdate } from "@/lib/messaging/correction";
+import { applyDisplayedMarker } from "@/lib/messaging/displayed";
+import { applyReactionUpdate, type ReactionPolicy } from "@/lib/messaging/reactions";
+import { applyRetraction as applyRetractionUpdate, retractTimelineMessage } from "@/lib/messaging/retraction";
+import { insertLiveMessage } from "@/lib/messaging/timeline-insert";
 
 // Inbound merge composable for DMs: applies incoming retractions
 // (XEP-0424), corrections (XEP-0308), reactions (XEP-0444), and displayed
@@ -38,6 +36,13 @@ type UseDmLiveMergeDeps = {
   isFeedVisible: (m: TimelineMessage) => boolean;
 };
 
+// Divergences 4 + 5: primary-id + wire-alias resolution and the
+// nick-keyed aggregate (see `@/lib/messaging/reactions`).
+const dmReactionPolicy: ReactionPolicy = {
+  findTargetIndex: findMessageIndexById,
+  reactedRow: dmReactedRow,
+};
+
 export function useDmLiveMerge(deps: UseDmLiveMergeDeps) {
   const {
     session,
@@ -49,67 +54,46 @@ export function useDmLiveMerge(deps: UseDmLiveMergeDeps) {
     isFeedVisible,
   } = deps;
 
-  /**
-   * XEP-0333 displayed marker: append the reader's nick to `readBy`.
-   * Short-circuits on target miss / already-marked.
-   */
+  /** XEP-0333 displayed marker — shared merge, no DM divergences. */
   function applyDisplayed(messageId: string, nick: string) {
-    const index = findMessageIndexById(messages.value, messageId);
-    if (index < 0) return;
-    const current = messages.value[index]!;
-    const existing = current.readBy ? [...current.readBy] : [];
-    if (existing.includes(nick)) return;
-    existing.push(nick);
-    const next = messages.value.slice();
-    next[index] = { ...current, readBy: existing };
-    messages.value = next;
+    const next = applyDisplayedMarker(messages.value, messageId, nick);
+    if (next) messages.value = next;
   }
 
   /**
-   * XEP-0444 replace semantics for DMs. No real-JID sender attribution —
-   * the DM stanza already arrives keyed on the conversation partner, so
-   * the reaction-set per nick is sufficient. (Carbon-forwarded self
-   * reactions are attributed via the orchestrator-side `peerNameFromJid`
-   * mapping in onReaction.) Short-circuits on target miss.
+   * XEP-0444 replace semantics via the shared merge; the DM policy
+   * resolves targets through the row's primary id plus XEP-0359 wire
+   * aliases and keeps only the nick-keyed aggregate. (Carbon-forwarded
+   * self reactions are attributed via the orchestrator-side
+   * `peerNameFromJid` mapping in onReaction.)
    */
   function applyReaction(messageId: string, nick: string, emojis: string[]) {
-    const index = findMessageIndexById(messages.value, messageId);
-    if (index < 0) return;
-    const current = messages.value[index]!;
-    const existing: Record<string, string[]> = current.reactions ? { ...current.reactions } : {};
-    for (const key of Object.keys(existing)) {
-      existing[key] = (existing[key] ?? []).filter((n) => n !== nick);
-      if (existing[key].length === 0) delete existing[key];
-    }
-    for (const emoji of emojis) {
-      if (!existing[emoji]) existing[emoji] = [];
-      existing[emoji].push(nick);
-    }
-    const updated: TimelineMessage = { ...current };
-    if (Object.keys(existing).length > 0) updated.reactions = existing;
-    else delete updated.reactions;
-    const next = messages.value.slice();
-    next[index] = updated;
-    messages.value = next;
+    const next = applyReactionUpdate(
+      messages.value,
+      { targetId: messageId, nick, emojis, senderId: nick },
+      dmReactionPolicy,
+    );
+    if (next) messages.value = next;
   }
 
   /**
-   * XEP-0424 retraction. Sender match via `isSameDmCorrectionSender`
-   * — short-circuits on target miss / sender mismatch.
+   * XEP-0424 retraction. The bare-JID sender match is the DM policy; the
+   * merge mechanics are shared. The DM side retracts any id-resolvable
+   * row (no replyableId gate, no XEP-0425 moderation).
    */
   function applyRetraction(msg: LiveDmMessage) {
     if (!msg.retractsId) return;
-    const candidateIndex = findMessageIndexById(messages.value, msg.retractsId);
-    if (candidateIndex < 0) return;
-    if (!isSameDmCorrectionSender(messages.value[candidateIndex]!, msg.fromJid)) return;
-    const next = messages.value.slice();
-    next[candidateIndex] = retractDmTimelineMessage(messages.value[candidateIndex]!, msg.retractionId);
-    messages.value = next;
+    const next = applyRetractionUpdate(
+      messages.value,
+      { retractsId: msg.retractsId, retractionId: msg.retractionId },
+      { canRetract: (target) => isSameDmCorrectionSender(target, msg.fromJid) },
+    );
+    if (next) messages.value = next;
   }
 
   /**
-   * XEP-0308 last-message correction. Same sender match as retraction.
-   * Short-circuits on target miss / sender mismatch.
+   * XEP-0308 last-message correction. Same bare-JID sender match as
+   * retraction (the DM policy); the merge mechanics are shared.
    */
   function applyCorrection(
     replacesId: string,
@@ -121,98 +105,28 @@ export function useDmLiveMerge(deps: UseDmLiveMergeDeps) {
     extensionBodyFallback?: boolean,
     linkPreviews?: LiveDmMessage["linkPreviews"],
   ) {
-    const candidateIndex = findMessageIndexById(messages.value, replacesId);
-    if (candidateIndex < 0) return;
-    if (!isSameDmCorrectionSender(messages.value[candidateIndex]!, correctionFromJid)) return;
-    const index = candidateIndex;
-    const current = messages.value[index]!;
-    const updated: TimelineMessage = { ...current, body: newBody.trim(), isEdited: true };
-    if (markup && markup.length > 0) updated.markup = markup;
-    else delete updated.markup;
-    if (references && references.length > 0) updated.references = references;
-    else delete updated.references;
-    if (linkPreviews && linkPreviews.length > 0) updated.linkPreviews = linkPreviews;
-    else delete updated.linkPreviews;
-    if (extensionAnnotations && extensionAnnotations.length > 0) {
-      updated.extensionAnnotations = extensionAnnotations;
-      if (extensionBodyFallback) updated.extensionBodyFallback = true;
-      else delete updated.extensionBodyFallback;
-    } else {
-      delete updated.extensionAnnotations;
-      delete updated.extensionBodyFallback;
-    }
-    const next = messages.value.slice();
-    next[index] = updated;
-    messages.value = next;
+    const next = applyCorrectionUpdate(
+      messages.value,
+      replacesId,
+      { body: newBody, markup, references, linkPreviews, extensionAnnotations, extensionBodyFallback },
+      { senderMatches: (target) => isSameDmCorrectionSender(target, correctionFromJid) },
+    );
+    if (next) messages.value = next;
   }
 
-  /** Plain inbound message — reconciles self-echo if pending, else appends. */
+  /**
+   * Plain inbound message via the shared insert — reconciles self-echo if
+   * pending, else appends. No finalize pass (the DM side has no forum
+   * concept — divergence 7 is channel-only).
+   */
   function mergeLiveMessage(rawMessage: TimelineMessage) {
     const msg = rawMessage.isRetracted
-      ? retractDmTimelineMessage(rawMessage, rawMessage.retractionId)
+      ? retractTimelineMessage(rawMessage, rawMessage.retractionId)
       : rawMessage;
-    const existingById = [msg.id, ...(msg.wireIds ?? [])]
-      .map((id) => findMessageById(messages.value, id))
-      .find((message): message is TimelineMessage => !!message);
-    const bodyFallbackAllowed = !existingById && canUseSelfEchoBodyFallback(msg);
-    const pendingSelfEcho = bodyFallbackAllowed
-      ? messages.value.find(
-        (m) =>
-          pendingEchoClientIds.has(m.id)
-          && m.isSelf
-          && m.body === msg.body,
-      )
-      : undefined;
-    const preservedSelfEcho = bodyFallbackAllowed
-      ? [...messages.value].reverse().find(
-        (m) =>
-          m.isSelf
-          && m.body === msg.body
-          && !!m.deliveryStatus
-          && m.deliveryStatus !== "delivered",
-      )
-      : undefined;
-    const existing = existingById ?? pendingSelfEcho ?? preservedSelfEcho;
-    if (existing) {
-      messages.value = messages.value.map((m) => {
-        if (m.id !== existing.id) return m;
-        const mergedIds = mergeMessageIds(m, msg.id, msg.wireIds);
-        // Pick the more authoritative `createdAt` so a redelivered
-        // live stanza (`fallback`) can't overwrite a true server
-        // stamp (`archive`/`delay`) that landed via MAM first. This
-        // is the path that produced the "old message lands at the
-        // bottom on tab restore" symptom (PR1 root cause).
-        const authoritativeTimestamp = pickAuthoritativeTimestamp(
-          { createdAt: m.createdAt, createdAtSource: m.createdAtSource },
-          { createdAt: msg.createdAt, createdAtSource: msg.createdAtSource },
-        );
-        const updated: TimelineMessage = {
-          ...m,
-          ...msg,
-          id: mergedIds.id,
-          createdAt: authoritativeTimestamp.createdAt,
-          createdAtSource: authoritativeTimestamp.createdAtSource,
-        };
-        if (!Object.prototype.hasOwnProperty.call(msg, "linkPreviews")) {
-          delete updated.linkPreviews;
-        }
-        if (mergedIds.wireIds?.length) updated.wireIds = mergedIds.wireIds;
-        else delete updated.wireIds;
-        if (m.isSelf && msg.isSelf) {
-          updated.deliveryStatus = "delivered" as DeliveryStatus;
-        }
-        return updated;
-      }).sort(compareTimelineMessages);
-      // Drop every pending optimistic id this reconciliation accounted
-      // for — both the previous primary id and any pre-existing wire
-      // aliases — so a later same-body replay within the fallback window
-      // can never retarget the now-delivered row.
-      pendingEchoClientIds.delete(existing.id);
-      for (const alias of existing.wireIds ?? []) pendingEchoClientIds.delete(alias);
-      return;
-    }
     const peerJid = activePeerJid.value;
-    messages.value = [...messages.value, msg].sort(compareTimelineMessages);
+    const result = insertLiveMessage(messages.value, msg, pendingEchoClientIds);
+    messages.value = result.messages;
+    if (!result.appended) return;
     void scrollToPinnedEdgeAndPin();
     if (peerJid && isFeedVisible(msg)) {
       persistLastSeen(peerJid, msg.id);
