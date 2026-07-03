@@ -9,17 +9,17 @@ fn test_secret() -> String {
 #[test]
 fn test_generate_scram_keys() {
     let password = test_secret();
-    let salt = b"salt1234salt1234"; // 16 bytes
+    let salt: [u8; 16] = rand::random();
     let iterations = 4096;
 
-    let (stored_key, server_key) = generate_scram_keys(&password, salt, iterations);
+    let (stored_key, server_key) = generate_scram_keys(&password, &salt, iterations);
 
     // Keys should be 32 bytes (SHA-256 output)
     assert_eq!(stored_key.len(), 32);
     assert_eq!(server_key.len(), 32);
 
     // Keys should be deterministic
-    let (stored_key2, server_key2) = generate_scram_keys(&password, salt, iterations);
+    let (stored_key2, server_key2) = generate_scram_keys(&password, &salt, iterations);
     assert_eq!(stored_key, stored_key2);
     assert_eq!(server_key, server_key2);
 }
