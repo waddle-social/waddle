@@ -356,6 +356,7 @@ fn outbound_variant_name(event: &OutboundEvent) -> &'static str {
         OutboundEvent::LoadScramCredentials { .. } => "LoadScramCredentials",
         OutboundEvent::ValidateOAuthBearer { .. } => "ValidateOAuthBearer",
         OutboundEvent::LookupArchivedMessage { .. } => "LookupArchivedMessage",
+        OutboundEvent::SendKeepaliveProbe => "SendKeepaliveProbe",
         OutboundEvent::SetTimer { .. } => "SetTimer",
         OutboundEvent::CancelTimer(_) => "CancelTimer",
         OutboundEvent::QueueOfflineDelivery { .. } => "QueueOfflineDelivery",

@@ -28,6 +28,15 @@ pub enum OutboundEvent {
     /// Write a typed stanza to the transport. The interpreter serializes
     /// the stanza to its XML wire form at the I/O boundary.
     SendStanza(Box<Stanza>),
+    /// Send a transport-native liveness probe (RFC 7395 §3.8 / issue
+    /// #1090). The probe is a transport control frame with no stanza
+    /// semantics, so the *adapter* — not the interpreter's XML path —
+    /// maps it to its native mechanism: a WebSocket `Ping` frame with
+    /// an empty payload today; a future TCP transport would map it to
+    /// whitespace keepalive or XEP-0199. Emitted by
+    /// [`crate::protocol::keepalive::KeepalivePolicy`] on an
+    /// inbound-idle tick.
+    SendKeepaliveProbe,
     /// Close the transport gracefully.
     CloseTransport,
 

@@ -75,6 +75,11 @@ pub(super) async fn run_headless_recipient_pass(
         frames,
         close,
         feedback,
+        // The transient SM has no transport, so it never receives
+        // TransportReady/Tick and cannot emit keepalive or timer
+        // effects; discarding matches the frames/feedback semantics.
+        keepalive_probes: _,
+        timer_commands: _,
     } = nested;
     debug!(
         bare_jid = %recipient_bare,

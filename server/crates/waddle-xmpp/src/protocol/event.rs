@@ -100,8 +100,10 @@ pub struct CallbackId(pub u64);
 
 /// Opaque identifier for a state-machine-owned timer.
 ///
-/// Later migration steps use this for SCRAM timeouts and
-/// XEP-0198 stream-management keep-alives.
+/// The RFC 7395 keepalive clock reserves
+/// [`crate::protocol::keepalive::KEEPALIVE_TIMER`]; later migration
+/// steps allocate distinct ids for SCRAM timeouts and XEP-0198 ack
+/// deadlines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TimerId(pub u64);
 
@@ -116,8 +118,24 @@ pub enum InboundEvent {
     ///
     /// Boxed to keep `InboundEvent` small (see `InboundFrame::Stanza`).
     StanzaFromPeer(Box<Stanza>),
+    /// The transport reports it is up and ready to carry frames (WS
+    /// upgrade complete). Fed exactly once, before any client frame —
+    /// arms the RFC 7395 §3.8 keepalive clock so even a connection
+    /// that never authenticates is reaped by the liveness policy.
+    TransportReady,
     /// The transport reports it has been closed.
     TransportClosed,
+    /// A timer previously armed via [`OutboundEvent::SetTimer`] fired.
+    Tick(TimerId),
+    /// Transport-level liveness evidence. Under the issue #1090 policy
+    /// *any* inbound frame proves the peer alive, so the WebSocket
+    /// adapter feeds this for **every** received frame — text, binary,
+    /// client-initiated ping, and pong (any payload) — because most
+    /// frames are dispatched on the legacy path and never reach the
+    /// machine as [`InboundEvent::FrameReceived`]. `FrameReceived`
+    /// also marks the peer alive for the frames that *do* take the
+    /// machine path; the double-mark is idempotent.
+    KeepaliveAck,
 
     // -------------------------------------------------------------------
     // Async callback completions (matched to a previously emitted

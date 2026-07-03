@@ -2,12 +2,15 @@ use super::*;
 use super::{
     cleanup::cleanup_connection_shutdown,
     frame::handle_xmpp_frame,
+    interpret_loop::build_interpret_deps,
     outbound::handle_outbound_stanza,
     registration::{register_bound_connection_after_frame, RegistrationAfterFrame},
+    replay::drive_interpret_loop,
     send::{close_ws_connection, send_ws_message, send_ws_text_frames},
     session_init::build_internal_server_error_stream_error,
     state::WsConnState,
     stream_management::{is_countable_stanza, SmRegistrationFinalization},
+    timers::TransportTimers,
     transport_xml::{build_handled_count_too_high_stream_error, websocket_stream_close_xml},
 };
 use waddle_xmpp::stream_management::SmRequest;
@@ -54,6 +57,23 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
 
     // Track connection state
     let mut conn = WsConnState::new();
+    // RFC 7395 §3.8 keepalive (issue #1090): the liveness policy lives
+    // in the per-connection sans-io machine, so one must exist from
+    // the very first instant — a client that wedges before
+    // authenticating is reaped by the same clock. `TransportReady`
+    // arms the keepalive timer; the machine re-arms it on every tick.
+    conn.init_prebind_state_machine(
+        &domain,
+        &state.deps.protocol.dispatcher,
+        state.deps.ws_keepalive,
+    );
+    let mut timers = TransportTimers::new();
+    if let Some(sm) = conn.state_machine.as_mut() {
+        let events = sm.handle(InboundEvent::TransportReady);
+        let interpret_deps = build_interpret_deps(state.as_ref(), None);
+        let drive = drive_interpret_loop(events, sm, &interpret_deps).await;
+        timers.apply(drive.timer_commands);
+    }
     // Set when our own registry slot was replaced by a newer connection for
     // the same FullJid (detected via outbound_rx closing). In that case the
     // cleanup block below must NOT touch the registry or MUC state — those
@@ -67,6 +87,9 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         debug!(len = text.len(), "Received XMPP WebSocket message");
+                        // Any inbound frame is liveness evidence for the
+                        // RFC 7395 §3.8 keepalive policy (issue #1090).
+                        conn.note_transport_activity();
 
                         // Handle XMPP framing (RFC 7395)
                         let mut responses =
@@ -209,9 +232,11 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                         }
                     }
                     Some(Ok(Message::Binary(_))) => {
+                        conn.note_transport_activity();
                         warn!("Received binary WebSocket message (not supported for XMPP)");
                     }
                     Some(Ok(Message::Ping(data))) => {
+                        conn.note_transport_activity();
                         if !send_ws_message(&mut ws_sender, Message::Pong(data), "Failed to send pong")
                             .await
                         {
@@ -219,7 +244,10 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                         }
                     }
                     Some(Ok(Message::Pong(_))) => {
-                        // Ignore pongs
+                        // Liveness evidence for the keepalive policy —
+                        // any payload counts, no probe correlation
+                        // (issue #1090 "any inbound frame = alive").
+                        conn.note_transport_activity();
                     }
                     Some(Ok(Message::Close(_))) => {
                         info!("WebSocket close requested");
@@ -245,6 +273,7 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                             &mut ws_sender,
                             &state,
                             &mut conn,
+                            &mut timers,
                             outbound_stanza,
                         )
                         .await
@@ -266,6 +295,67 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                         superseded = true;
                         break;
                     }
+                }
+            }
+
+            // RFC 7395 §3.8 keepalive clock (issue #1090). Fires only
+            // when the state machine armed a timer; the tick is fed
+            // back into the machine, whose policy decides: quiet
+            // re-arm, probe + re-arm, or close a dead peer. A
+            // keepalive close breaks the loop with a graceful WS close
+            // handshake and rides the normal shutdown fork below — SM
+            // detach-for-resume when negotiated, full cleanup
+            // otherwise.
+            timer_id = timers.next_expired() => {
+                let Some(sm) = conn.state_machine.as_mut() else {
+                    warn!(timer_id = timer_id.0, "Timer fired without a state machine; disarming");
+                    continue;
+                };
+                let events = sm.handle(InboundEvent::Tick(timer_id));
+                let interpret_deps =
+                    build_interpret_deps(state.as_ref(), conn.authenticated_session.as_ref());
+                let drive = drive_interpret_loop(events, sm, &interpret_deps).await;
+                timers.apply(drive.timer_commands);
+                if !drive.frames.is_empty() {
+                    // No tick pathway emits stanzas today; a frame here
+                    // means a new timer consumer forgot to extend this
+                    // arm with the SM-recording write contract.
+                    warn!(
+                        frames = drive.frames.len(),
+                        "Timer tick produced wire frames; dropping"
+                    );
+                }
+                let mut ping_send_failed = false;
+                for _ in 0..drive.keepalive_probes {
+                    if !send_ws_message(
+                        &mut ws_sender,
+                        Message::Ping(axum::body::Bytes::new()),
+                        "Failed to send keepalive ping",
+                    )
+                    .await
+                    {
+                        ping_send_failed = true;
+                        break;
+                    }
+                }
+                if ping_send_failed {
+                    break;
+                }
+                if drive.close {
+                    // The policy's Log event (relayed above via interpret)
+                    // carries the reason (miss limit vs negotiation
+                    // deadline); this line adds the connection identity
+                    // for correlation with gateway/Loki reset queries.
+                    info!(
+                        jid = ?conn.phase.bound_jid(),
+                        "Keepalive policy closed the connection"
+                    );
+                    let _ = close_ws_connection(
+                        &mut ws_sender,
+                        "Failed to send WebSocket close frame after keepalive close",
+                    )
+                    .await;
+                    break;
                 }
             }
         }

@@ -128,8 +128,10 @@ pub async fn handle_message(
         Stanza::Message(incoming),
     ))));
     let deps = build_interpret_deps(state, authenticated_session);
-    let (frames, _close) = drive_interpret_loop(events, sm, &deps).await;
-    frames
+    // Stanza dispatch never emits keepalive/timer effects (those come
+    // only from TransportReady/Tick in the connection loop), and
+    // `close` was already ignored on this path — only frames matter.
+    drive_interpret_loop(events, sm, &deps).await.frames
 }
 
 fn strip_client_authored_delay(message: &mut xmpp_parsers::message::Message) {

@@ -184,7 +184,20 @@ fn reset_registered_resume_attempt(
         .unregister_if_owner(jid, owner);
     conn.registry_owner = None;
     conn.phase = ConnectionPhase::authenticated(jid);
-    conn.state_machine = None;
+    // Replace (never null) the per-connection state machine: the
+    // connection loop's keepalive timer arm feeds `Tick` into
+    // `conn.state_machine`, and the policy re-arms the adapter's timer
+    // wheel on every tick. Dropping the machine to `None` here would
+    // let the next tick hit the loop's no-machine guard, which cannot
+    // re-arm — permanently disarming dead-peer detection (issue #1090)
+    // for whatever remains of this connection. A fresh pre-bind
+    // machine restores the session-free semantics this reset wants
+    // (an `Unauthenticated` machine drops peer stanzas with a WARN,
+    // matching the old `None` guard) while keeping the keepalive
+    // clock chain unbroken.
+    let domain = state.deps.auth_state.xmpp_domain.clone();
+    let keepalive = conn.keepalive_config;
+    conn.init_prebind_state_machine(&domain, &state.deps.protocol.dispatcher, keepalive);
     conn.sm_state = StreamManagementState::new();
     conn.blocklist_interested = false;
     conn.suppress_sm_record_next_batch = false;

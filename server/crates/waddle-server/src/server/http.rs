@@ -608,6 +608,7 @@ async fn create_websocket_state(
             },
             occupant_id_secret: server_config.occupant_id_secret.clone(),
             link_preview: server_config.link_preview.clone(),
+            ws_keepalive: server_config.ws_keepalive,
             provider_ingress,
             provider_dispatch_tasks,
         },

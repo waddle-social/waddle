@@ -93,3 +93,51 @@ async fn close_ws_connection_closes_sink() {
     assert!(closed);
     assert!(sink.closed);
 }
+
+/// A sink whose peer never drains: `poll_ready` pends forever, the
+/// shape of a black-holed TCP path with a full send buffer.
+struct StalledSink;
+
+impl Sink<Message> for StalledSink {
+    type Error = &'static str;
+
+    fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Pending
+    }
+
+    fn start_send(self: Pin<&mut Self>, _item: Message) -> Result<(), Self::Error> {
+        unreachable!("poll_ready never completes")
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Pending
+    }
+
+    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Pending
+    }
+}
+
+/// Issue #1090 write-stall budget: a send that cannot make progress
+/// must report failure within the 60s budget instead of parking the
+/// connection task forever (which would freeze the keepalive clock —
+/// the adversarial-review finding the budget exists to close). Paused
+/// tokio time auto-advances past the timeout, so this pins the bound
+/// without a real 60s wait.
+#[tokio::test(start_paused = true)]
+async fn send_ws_message_fails_when_the_sink_stalls_past_the_budget() {
+    let mut sink = StalledSink;
+
+    let sent = send_ws_message(&mut sink, Message::Text("<ping/>".into()), "expected stall").await;
+
+    assert!(!sent, "a stalled send must report failure, not hang");
+}
+
+#[tokio::test(start_paused = true)]
+async fn close_ws_connection_fails_when_the_sink_stalls_past_the_budget() {
+    let mut sink = StalledSink;
+
+    let closed = close_ws_connection(&mut sink, "expected stall").await;
+
+    assert!(!closed, "a stalled close must report failure, not hang");
+}
