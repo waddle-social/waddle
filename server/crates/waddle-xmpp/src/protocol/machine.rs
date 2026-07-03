@@ -16,6 +16,7 @@ use super::dispatch::StanzaDispatcher;
 use super::event::{CallbackId, InboundEvent, OutboundEvent, StanzaContext};
 use super::frame::InboundFrame;
 use super::id_gen::{IdGenerator, UuidV4Generator};
+use super::keepalive::{dispatch_tick, KeepaliveConfig, KeepalivePolicy};
 use super::message_context::{MessageContext, MessageContextEnv};
 use super::phase::ConnectionPhase;
 use super::session_state::{Blocklist, CarbonsState, MucOccupancy};
@@ -54,6 +55,12 @@ pub struct XmppStateMachine {
     /// Source of fresh, opaque XEP-0359 stanza-ids stamped by message
     /// handlers. Defaults to UUIDv4; tests can override.
     id_gen: Arc<dyn IdGenerator>,
+    /// RFC 7395 §3.8 transport keepalive policy (issue #1090). Driven
+    /// by [`InboundEvent::TransportReady`] / [`InboundEvent::Tick`] /
+    /// [`InboundEvent::KeepaliveAck`]; emits
+    /// [`OutboundEvent::SendKeepaliveProbe`] and, after the miss
+    /// limit, [`OutboundEvent::CloseTransport`].
+    keepalive: KeepalivePolicy,
 }
 
 impl XmppStateMachine {
@@ -83,7 +90,18 @@ impl XmppStateMachine {
             muc_occupancy: MucOccupancy::empty(),
             has_live_transport: true,
             id_gen,
+            keepalive: KeepalivePolicy::new(KeepaliveConfig::default()),
         }
+    }
+
+    /// Replace the keepalive policy with one built from a
+    /// deployment-supplied [`KeepaliveConfig`]. Called by the transport
+    /// adapter immediately after construction (both the pre-bind
+    /// machine created at WS upgrade and the bind-time replacement in
+    /// `ensure_state_machine`), before any event is fed. Mirrors the
+    /// [`Self::set_blocklist`] seeding pattern.
+    pub fn set_keepalive_config(&mut self, config: KeepaliveConfig) {
+        self.keepalive = KeepalivePolicy::new(config);
     }
 
     /// Allocate a fresh [`CallbackId`] for an outbound async delegation.
@@ -180,9 +198,26 @@ impl XmppStateMachine {
     /// This is the only public entry point during normal operation.
     pub fn handle(&mut self, event: InboundEvent) -> Vec<OutboundEvent> {
         match event {
-            InboundEvent::FrameReceived(frame) => self.on_frame(frame),
+            InboundEvent::FrameReceived(frame) => {
+                // Any client-origin frame is liveness evidence for the
+                // RFC 7395 keepalive policy. Peer-routed stanzas
+                // (`StanzaFromPeer`) deliberately are NOT — they are
+                // outbound-direction traffic and say nothing about
+                // whether *this* peer is alive.
+                self.keepalive.mark_alive();
+                self.on_frame(frame)
+            }
             InboundEvent::StanzaFromPeer(stanza) => self.on_peer_stanza(*stanza),
+            InboundEvent::TransportReady => self.keepalive.on_transport_ready(),
             InboundEvent::TransportClosed => self.on_closed(),
+            InboundEvent::Tick(id) => {
+                let session_ready = matches!(self.phase, ConnectionPhase::Ready { .. });
+                dispatch_tick(&mut self.keepalive, id, session_ready)
+            }
+            InboundEvent::KeepaliveAck => {
+                self.keepalive.mark_alive();
+                Vec::new()
+            }
             InboundEvent::EnrichmentComplete { id, message } => {
                 self.on_enrichment_complete(id, *message)
             }

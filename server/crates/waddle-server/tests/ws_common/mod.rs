@@ -279,7 +279,13 @@ impl Drop for TestServer {
 
 /// A WebSocket XMPP client for integration tests.
 pub struct WsXmppClient {
-    ws: tokio_tungstenite::WebSocketStream<
+    /// `pub(crate)` so suites with frame-level needs (the RFC 7395
+    /// keepalive tests observe raw `Ping`/`Close` control frames,
+    /// which [`Self::recv_timeout`] deliberately treats as errors)
+    /// can poll the stream directly with their own local helpers —
+    /// keeping this shared harness free of per-suite methods that
+    /// would be dead code in every other test binary.
+    pub(crate) ws: tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
     pub full_jid: Option<String>,

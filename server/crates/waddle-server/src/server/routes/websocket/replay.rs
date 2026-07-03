@@ -66,9 +66,12 @@ pub(super) async fn drain_outbound_into_replay(
                 let events = sm.handle(InboundEvent::StanzaFromPeer(Box::new(
                     outbound_stanza.stanza,
                 )));
-                let (frames, _close) = drive_interpret_loop(events, sm, &deps).await;
+                // Detach drain: there is no live socket, so `close`,
+                // keepalive probes, and timer commands are all moot —
+                // only the frames matter, recorded for resume replay.
+                let drive = drive_interpret_loop(events, sm, &deps).await;
                 let mut row_id_for_first = pending_row_id.clone();
-                for xml in frames {
+                for xml in drive.frames {
                     let row_for_this = row_id_for_first.take();
                     record_drained_xml(
                         state,
@@ -165,34 +168,50 @@ async fn record_drained_xml(
     }
 }
 
+/// Accumulated result of [`drive_interpret_loop`]: everything the
+/// transport adapter must act on after the state machine + interpreter
+/// finished a dispatch, across all feedback rounds.
+#[derive(Debug, Default)]
+pub(super) struct DriveOutcome {
+    /// Serialized wire frames to write, in order.
+    pub(super) frames: Vec<String>,
+    /// Set when any round emitted [`OutboundEvent::CloseTransport`].
+    pub(super) close: bool,
+    /// RFC 7395 §3.8 liveness probes to send as WS `Ping` frames
+    /// (issue #1090).
+    pub(super) keepalive_probes: u32,
+    /// Timer effects for the connection-local timer wheel.
+    pub(super) timer_commands: Vec<crate::server::routes::interpret::TimerCommand>,
+}
+
 /// Drive the interpret-loop that resolves an initial batch of
 /// [`OutboundEvent`]s and any callback-feedback rounds the dispatcher
 /// chain produces (e.g. `LookupArchivedMessage` -> `ArchivedMessageLoaded`
 /// -> resumed pipeline events).
 ///
-/// Returns the accumulated wire frames (already serialized via
-/// [`crate::server::routes::interpret::interpret`]) and a `close`
-/// flag set when any round emitted [`OutboundEvent::CloseTransport`].
-/// The state machine `sm` is borrowed mutably so feedback events can
-/// be re-fed via `sm.handle(...)` and produce the next-round
-/// `OutboundEvent` batch.
+/// Returns the accumulated [`DriveOutcome`] (frames already serialized
+/// via [`crate::server::routes::interpret::interpret`]). The state
+/// machine `sm` is borrowed mutably so feedback events can be re-fed
+/// via `sm.handle(...)` and produce the next-round `OutboundEvent`
+/// batch.
 pub(super) async fn drive_interpret_loop(
     initial_events: Vec<OutboundEvent>,
     sm: &mut XmppStateMachine,
     deps: &crate::server::routes::interpret::Deps<'_>,
-) -> (Vec<String>, bool) {
-    let mut all_frames = Vec::new();
-    let mut close = false;
+) -> DriveOutcome {
+    let mut drive = DriveOutcome::default();
     let mut events_to_run = initial_events;
     // Each iteration: resolve the current batch, append its frames,
     // honour `close`, and if the batch produced callback-feedback,
     // feed it back through the SM to get the next batch.
     while !events_to_run.is_empty() {
         let outcome = crate::server::routes::interpret::interpret(events_to_run, deps).await;
-        all_frames.extend(outcome.frames);
+        drive.frames.extend(outcome.frames);
         if outcome.close {
-            close = true;
+            drive.close = true;
         }
+        drive.keepalive_probes += outcome.keepalive_probes;
+        drive.timer_commands.extend(outcome.timer_commands);
         if outcome.feedback.is_empty() {
             break;
         }
@@ -202,5 +221,5 @@ pub(super) async fn drive_interpret_loop(
         }
         events_to_run = next_events;
     }
-    (all_frames, close)
+    drive
 }

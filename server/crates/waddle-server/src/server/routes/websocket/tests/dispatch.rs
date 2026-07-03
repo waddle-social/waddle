@@ -52,7 +52,8 @@ async fn drive_interpret_loop_resolves_send_stanza_into_wire_frames() {
 
     let initial_events = vec![OutboundEvent::SendStanza(Box::new(Stanza::Message(msg)))];
     let deps = build_interpret_deps(state.as_ref(), None);
-    let (frames, close) = drive_interpret_loop(initial_events, sm, &deps).await;
+    let drive = drive_interpret_loop(initial_events, sm, &deps).await;
+    let (frames, close) = (drive.frames, drive.close);
 
     assert!(!close, "SendStanza alone never requests transport close");
     assert_eq!(frames.len(), 1, "single SendStanza -> single wire frame");
@@ -105,7 +106,7 @@ async fn drive_interpret_loop_runs_recipient_pass_for_peer_message() {
         peer_msg,
     ))));
     let deps = build_interpret_deps(state.as_ref(), None);
-    let (frames, _close) = drive_interpret_loop(events, sm, &deps).await;
+    let frames = drive_interpret_loop(events, sm, &deps).await.frames;
 
     // Recipient pass terminates with at least one SendStanza
     // carrying bob's stamp.

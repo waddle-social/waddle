@@ -1,7 +1,8 @@
 use super::*;
 use super::{
     interpret_loop::build_interpret_deps, replay::drive_interpret_loop, send::send_ws_message,
-    state::WsConnState, stream_management::is_countable_stanza, transport_xml::stanza_to_xml,
+    state::WsConnState, stream_management::is_countable_stanza, timers::TransportTimers,
+    transport_xml::stanza_to_xml,
 };
 use waddle_xmpp::stream_management::SmRequest;
 
@@ -9,6 +10,7 @@ pub(super) async fn handle_outbound_stanza<S, E>(
     sender: &mut S,
     state: &Arc<WebSocketState>,
     conn: &mut WsConnState,
+    timers: &mut TransportTimers,
     outbound_stanza: OutboundStanza,
 ) -> bool
 where
@@ -130,12 +132,29 @@ where
             )));
             let interpret_deps =
                 build_interpret_deps(state.as_ref(), conn.authenticated_session.as_ref());
-            let (frames, close) = drive_interpret_loop(events, sm, &interpret_deps).await;
+            let drive = drive_interpret_loop(events, sm, &interpret_deps).await;
+            // Timer/keepalive effects can't arise from a StanzaFromPeer
+            // dispatch today (only TransportReady/Tick produce them),
+            // but honour them anyway so a future policy change can't
+            // silently drop effects on this path.
+            timers.apply(drive.timer_commands);
+            for _ in 0..drive.keepalive_probes {
+                if !send_ws_message(
+                    sender,
+                    Message::Ping(axum::body::Bytes::new()),
+                    "Failed to send keepalive ping",
+                )
+                .await
+                {
+                    return false;
+                }
+            }
+            let close = drive.close;
             // Always best-effort flush the accumulated frames first, even if
             // `close=true`, so a final error stanza or stream-close frame is
             // visible before transport teardown.
             let mut request_ack_after = false;
-            for xml in frames {
+            for xml in drive.frames {
                 if conn.sm_state.enabled && is_countable_stanza(&xml) {
                     let result = conn.sm_state.record_outbound(xml.clone());
                     request_ack_after |= result.request_ack;

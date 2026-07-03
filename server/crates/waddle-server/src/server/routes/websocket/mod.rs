@@ -85,6 +85,7 @@ mod send;
 mod session_init;
 mod state;
 mod stream_management;
+mod timers;
 mod transport_xml;
 
 pub mod handlers;
