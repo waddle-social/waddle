@@ -10,35 +10,23 @@
 //! `WADDLE_WS_KEEPALIVE_INTERVAL_SECS`; the pure policy timing lives in
 //! the clock-free suite at `waddle-xmpp/tests/rfc7395_keepalive.rs`.
 
-mod ws_common;
+use waddle_ws_test_support as ws_common;
 
 use std::time::Duration;
 
-use futures::StreamExt;
-use tokio_tungstenite::tungstenite;
-use ws_common::{TestServer, WsXmppClient};
+use ws_common::{raw_ws as tungstenite, TestServer, WsXmppClient};
 
 const DOMAIN: &str = "localhost";
 const USERNAME: &str = "admin";
 
-/// Receive one raw WebSocket frame — control frames included.
-///
-/// This suite observes server-initiated `Ping` frames, which the
-/// harness's `recv_timeout` deliberately treats as errors. Polling the
-/// stream also lets tokio-tungstenite flush its automatic `Pong`
-/// replies, so a client driven by this helper behaves like a healthy
-/// browser. `Ok(None)` means the stream ended. Local to this suite (on
-/// the harness it would be dead code in every other test binary).
+/// Receive one raw WebSocket frame via the harness's raw-stream API —
+/// this suite observes server-initiated `Ping` frames, which the
+/// harness's `recv_timeout` deliberately treats as errors.
 async fn recv_raw_timeout(
     client: &mut WsXmppClient,
     dur: Duration,
 ) -> Result<Option<tungstenite::Message>, String> {
-    match tokio::time::timeout(dur, client.ws.next()).await {
-        Ok(Some(Ok(message))) => Ok(Some(message)),
-        Ok(Some(Err(e))) => Err(format!("WebSocket error: {e}")),
-        Ok(None) => Ok(None),
-        Err(_) => Err("Timeout waiting for raw frame".to_string()),
-    }
+    client.recv_raw_timeout(dur).await
 }
 
 fn keepalive_server(interval_secs: &str, miss_limit: &str) -> TestServer {

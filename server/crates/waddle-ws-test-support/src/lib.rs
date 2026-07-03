@@ -20,6 +20,10 @@ use std::time::{Duration, Instant};
 use tokio::time::timeout;
 use tokio_tungstenite::{connect_async, tungstenite};
 
+/// Re-exported so suites can match on raw frames from
+/// [`WsXmppClient::recv_raw_timeout`] without a direct dependency.
+pub use tokio_tungstenite::tungstenite as raw_ws;
+
 type HmacSha256 = Hmac<Sha256>;
 
 const RECV_TIMEOUT: Duration = Duration::from_secs(10);
@@ -469,6 +473,25 @@ impl WsXmppClient {
 
     pub async fn recv(&mut self) -> Result<String, String> {
         self.recv_timeout(RECV_TIMEOUT).await
+    }
+
+    /// Receive one raw WebSocket frame — control frames included.
+    ///
+    /// Suites observing server-initiated `Ping`/`Close` frames need the
+    /// raw stream, which `recv_timeout` deliberately treats as errors.
+    /// Polling also lets tokio-tungstenite flush its automatic `Pong`
+    /// replies, so a client driven by this helper behaves like a
+    /// healthy browser. `Ok(None)` means the stream ended.
+    pub async fn recv_raw_timeout(
+        &mut self,
+        dur: Duration,
+    ) -> Result<Option<tungstenite::Message>, String> {
+        match timeout(dur, self.ws.next()).await {
+            Ok(Some(Ok(message))) => Ok(Some(message)),
+            Ok(Some(Err(e))) => Err(format!("WebSocket error: {e}")),
+            Ok(None) => Ok(None),
+            Err(_) => Err("Timeout waiting for raw frame".to_string()),
+        }
     }
 
     pub async fn recv_timeout(&mut self, dur: Duration) -> Result<String, String> {
