@@ -14,6 +14,8 @@ use waddle_xmpp_core::mam::{
 use waddle_xmpp_core::xep0359::{OriginId, StanzaId as StableStanzaId, NS_SID as XEP0359_NS};
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+use std::collections::HashSet;
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use std::time::Duration;
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use tokio::sync::broadcast;
@@ -394,6 +396,9 @@ async fn run_mam_query(
 
     let query = async {
         let mut messages: Vec<ArchivedMessage> = Vec::new();
+        // XEP-0198 resume mid-query retransmits unacked results with the same
+        // queryid and mam_id; XEP-0313 puts the dedup obligation on us.
+        let mut seen_mam_ids: HashSet<String> = HashSet::new();
         let mut send_iq_fut = Box::pin(handle.send_iq(iq));
 
         let fin_el = loop {
@@ -403,7 +408,9 @@ async fn run_mam_query(
                     Ok(ClientEvent::MamResult(archived))
                         if archived.query_id.as_deref() == Some(&query_id_owned) =>
                     {
-                        messages.push(*archived);
+                        if seen_mam_ids.insert(archived.mam_id.clone()) {
+                            messages.push(*archived);
+                        }
                     }
                     Ok(_) => {}
                     Err(broadcast::error::RecvError::Closed) => {
@@ -423,7 +430,9 @@ async fn run_mam_query(
                 Ok(ClientEvent::MamResult(archived))
                     if archived.query_id.as_deref() == Some(&query_id_owned) =>
                 {
-                    messages.push(*archived);
+                    if seen_mam_ids.insert(archived.mam_id.clone()) {
+                        messages.push(*archived);
+                    }
                 }
                 Ok(_) => continue,
                 Err(broadcast::error::TryRecvError::Empty)
