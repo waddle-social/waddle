@@ -1,6 +1,10 @@
-use super::bot::{dispatch_bot_groupchat_response, BotGroupchatDispatch};
+use super::bot::{
+    available_bot_nick, available_bot_nick_with_base, dispatch_bot_groupchat_response,
+    BotGroupchatDispatch,
+};
 use super::groupchat_archive::room_scoped_reply_to_attr;
 use super::groupchat_validation::lookup_groupchat_retraction_target;
+use super::room_dispatch::normalize_thread_create_source;
 use super::*;
 use kameo::actor::Spawn;
 use waddle_xmpp::xep::{set_thread_create, ThreadCreate};
@@ -2625,4 +2629,17 @@ async fn xep_0424_apply_groupchat_retraction_tombstone_keys_off_room_stanza_id()
             panic!("expected ArchivedRichPayload::Tombstone after retraction, got {other:?}")
         }
     }
+}
+
+fn message_thread_id(message: &Message) -> Option<String> {
+    message
+        .thread
+        .as_ref()
+        .map(|thread| thread.id.clone())
+        .or_else(|| {
+            extract_forum_action(message).and_then(|action| match action {
+                ForumAction::Reply(reply) => Some(reply.thread_id),
+                ForumAction::CreateThread(_) => message.id.as_ref().map(|id| id.0.clone()),
+            })
+        })
 }

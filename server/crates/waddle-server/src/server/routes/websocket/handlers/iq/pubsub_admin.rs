@@ -1,7 +1,6 @@
 use super::permissions::{
     seed_spaces_node_owners, server_permission_allowed, write_space_owner_tuple,
 };
-use super::pubsub_helpers::{is_pep_self_or_to, spaces_service_bare_jid};
 use super::*;
 use crate::space_identity::{space_jid_for_node, SpaceNode};
 

@@ -346,3 +346,44 @@ pub(super) async fn dispatch_to_room(
 
     outcome
 }
+
+pub(super) fn normalize_thread_create_source(message: &mut Message) -> Option<String> {
+    let Some(ForumAction::CreateThread(_)) = extract_forum_action(message) else {
+        return None;
+    };
+    let thread_id = message
+        .thread
+        .as_ref()
+        .map(|thread| thread.id.clone())
+        .or_else(|| message.id.as_ref().map(|id| id.0.clone()))
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    if message.id.is_none() {
+        message.id = Some(xmpp_parsers::message::Id(thread_id.clone()));
+    }
+    if message.thread.is_none() {
+        set_thread_id(message, &thread_id);
+    }
+    Some(thread_id)
+}
+
+/// Resolve the managed-room owner override against the deployment
+/// permission actor. Mirrors the legacy
+/// `session_is_server_owner` helper that lived on the legacy MUC
+/// bridge — kept here so the room handler chain can stay synchronous
+/// and the async permission-actor call lands in the interpreter.
+async fn session_is_server_owner(state: &WebSocketState, session: Option<&Session>) -> bool {
+    let Some(session) = session else {
+        return false;
+    };
+    state
+        .deps
+        .app_state
+        .permission_actor
+        .ask(CheckPermission {
+            object: Object::new(ObjectType::Server, DEPLOYMENT_SERVER_ID),
+            subject: Subject::user(&session.user_jid),
+            permission: Permission::Owner,
+        })
+        .await
+        .is_ok_and(|response| response.allowed)
+}

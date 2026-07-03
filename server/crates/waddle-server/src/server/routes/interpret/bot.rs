@@ -417,3 +417,65 @@ pub(crate) async fn dispatch_extension_bot_groupchat_response(
         stanza_id: nested.stanza_id,
     })
 }
+
+#[cfg(test)]
+pub(super) fn available_bot_nick(occupants: &[OccupantSnapshot]) -> String {
+    available_bot_nick_with_base(occupants, "waddle")
+}
+
+pub(super) fn available_bot_nick_with_base(
+    occupants: &[OccupantSnapshot],
+    preferred_base: &str,
+) -> String {
+    let base = valid_bot_nick_base(preferred_base);
+    if !occupants.iter().any(|occupant| occupant.nick == base) {
+        return base;
+    }
+    for suffix in 2.. {
+        let candidate = format!("{base}-{suffix}");
+        if jid::ResourcePart::new(candidate.as_str()).is_ok()
+            && !occupants.iter().any(|occupant| occupant.nick == candidate)
+        {
+            return candidate;
+        }
+    }
+    unreachable!("unbounded suffix search always returns")
+}
+
+fn valid_bot_nick_base(preferred_base: &str) -> String {
+    let trimmed = preferred_base.trim();
+    if !trimmed.is_empty() && jid::ResourcePart::new(trimmed).is_ok() {
+        return trimmed.to_string();
+    }
+
+    let mut sanitized = String::new();
+    let mut previous_dash = false;
+    for ch in trimmed.chars() {
+        let replacement = if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+            Some(ch)
+        } else if ch.is_whitespace() || matches!(ch, '/' | '\\' | ':' | '@') {
+            Some('-')
+        } else {
+            None
+        };
+        let Some(ch) = replacement else {
+            continue;
+        };
+        if ch == '-' {
+            if previous_dash {
+                continue;
+            }
+            previous_dash = true;
+        } else {
+            previous_dash = false;
+        }
+        sanitized.push(ch);
+    }
+
+    let sanitized = sanitized.trim_matches('-');
+    if !sanitized.is_empty() && jid::ResourcePart::new(sanitized).is_ok() {
+        sanitized.to_string()
+    } else {
+        "waddle".to_string()
+    }
+}
