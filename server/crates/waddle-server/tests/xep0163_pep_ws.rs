@@ -794,6 +794,110 @@ async fn pep_bookmark_publish_skips_roster_contacts_even_with_matching_caps_noti
 }
 
 #[tokio::test]
+async fn pep_bookmark_member_affiliation_grants_no_event_delivery() {
+    // XEP-0402 bookmarks are owner-only regardless of affiliation: the
+    // `can_subscribe` carve-out denies a member-affiliated non-owner,
+    // and the fan-out entitlement must apply the SAME rule. An owner
+    // subscriptions-set (§8.8) can force a subscription row without a
+    // can_subscribe check, so fan-out must not treat "subscription row
+    // exists + member affiliation" as authorization on this node.
+    let _serial = TEST_SERIAL.lock().await;
+    let alice_password = format!("alice-{}", uuid::Uuid::new_v4());
+    let bob_password = format!("bob-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[
+        ("alice", &alice_password),
+        ("bob", &bob_password),
+    ]);
+    let mut alice = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "alice",
+        &alice_password,
+        "alice-bookmark-member-1",
+    )
+    .await
+    .expect("alice connect");
+    let mut bob = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "bob",
+        &bob_password,
+        "bob-bookmark-member-1",
+    )
+    .await
+    .expect("bob connect");
+    let alice_bare = format!("alice@{DOMAIN}");
+    let bob_bare = format!("bob@{DOMAIN}");
+    let node = "urn:xmpp:bookmarks:1";
+
+    alice
+        .send(r#"<presence xmlns="jabber:client"/>"#)
+        .await
+        .expect("alice presence");
+    bob.send(r#"<presence xmlns="jabber:client"/>"#)
+        .await
+        .expect("bob presence");
+
+    let seed = iq_set_to(
+        &mut alice,
+        "pep-bookmark-member-seed",
+        &alice_bare,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="{node}"><item id="seed-member@muc.example.com"><conference xmlns="{node}" name="Seed"><extensions><notify xmlns="urn:xmpp:notification-settings:1"><never/></notify></extensions></conference></item></publish></pubsub>"#
+        ),
+    )
+    .await;
+    assert!(seed.contains(r#"type='result'"#), "seed publish: {seed}");
+
+    // Owner affiliates bob as member (§8.9.4) and force-subscribes him
+    // via the owner subscriptions-set (§8.8), which bypasses
+    // can_subscribe.
+    let aff = iq_set_to(
+        &mut alice,
+        "pep-bookmark-member-aff",
+        &alice_bare,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB_OWNER}"><affiliations node="{node}"><affiliation jid="{bob_bare}" affiliation="member"/></affiliations></pubsub>"#
+        ),
+    )
+    .await;
+    assert!(aff.contains(r#"type='result'"#), "affiliations set: {aff}");
+    let subs = iq_set_to(
+        &mut alice,
+        "pep-bookmark-member-subs",
+        &alice_bare,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB_OWNER}"><subscriptions node="{node}"><subscription jid="{bob_bare}" subscription="subscribed"/></subscriptions></pubsub>"#
+        ),
+    )
+    .await;
+    assert!(
+        subs.contains(r#"type='result'"#),
+        "owner subscriptions set: {subs}"
+    );
+
+    let pub_resp = iq_set_to(
+        &mut alice,
+        "pep-bookmark-member-pub",
+        &alice_bare,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="{node}"><item id="private-member@muc.example.com"><conference xmlns="{node}" name="Private"><extensions><notify xmlns="urn:xmpp:notification-settings:1"><never/></notify></extensions></conference></item></publish></pubsub>"#
+        ),
+    )
+    .await;
+    assert!(pub_resp.contains(r#"type='result'"#), "publish: {pub_resp}");
+
+    let event = wait_for_event_message(&mut bob, node, Duration::from_millis(700)).await;
+    assert!(
+        event.is_none(),
+        "bookmarks are owner-only even for member-affiliated subscribers; leaked: {event:?}"
+    );
+
+    let _ = bob.close().await;
+    let _ = alice.close().await;
+}
+
+#[tokio::test]
 async fn pep_bookmark_open_config_does_not_grant_non_owner_access() {
     let _serial = TEST_SERIAL.lock().await;
     let alice_password = format!("alice-{}", uuid::Uuid::new_v4());

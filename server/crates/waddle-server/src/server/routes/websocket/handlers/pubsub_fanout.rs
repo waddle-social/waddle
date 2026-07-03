@@ -32,7 +32,7 @@
 use jid::{BareJid, FullJid, Jid};
 use std::collections::HashSet;
 use tracing::{info, warn};
-use waddle_xmpp::pubsub::{build_pubsub_event, AccessModel, Affiliation, PubSubEvent, PubSubItem};
+use waddle_xmpp::pubsub::{build_pubsub_event, AccessModel, PubSubEvent, PubSubItem};
 use waddle_xmpp::registry::BroadcastOutcome;
 use waddle_xmpp::Stanza;
 use waddle_xmpp_core::build_pubsub_retract_event;
@@ -181,14 +181,7 @@ pub async fn fan_out_publish(state: &WebSocketState, req: FanOutRequest<'_>) {
 
     for sub in subscribers {
         if is_private_pep_node
-            && !private_node_subscriber_allowed(
-                state,
-                owner,
-                node,
-                node_cfg.access_model,
-                &sub.subscriber.to_bare(),
-            )
-            .await
+            && !private_node_subscriber_allowed(state, owner, node, &sub.subscriber.to_bare()).await
         {
             continue;
         }
@@ -375,26 +368,26 @@ pub async fn fan_out_publish(state: &WebSocketState, req: FanOutRequest<'_>) {
 /// entity by affiliating it (member/publisher), and that entity's
 /// server-approved subscription MUST then be notified (§7.1) — the
 /// access model suppresses the implicit XEP-0163 §3 roster fan-out,
-/// not deliveries the owner explicitly authorized. Mirrors the
-/// Whitelist arm of `pubsub_authz::can_subscribe`. `Authorize` is
-/// owner-only in this server (see `AccessModel::Authorize`), so
-/// non-owner subscribers are never entitled there. Fails closed on
-/// affiliation-lookup errors — withholding one event beats leaking to
-/// a subscriber we cannot vet.
+/// not deliveries the owner explicitly authorized.
+///
+/// Delegates to `pubsub_authz::can_subscribe` so the fan-out
+/// entitlement can never diverge from the subscribe/read gate: the
+/// XEP-0402 bookmarks owner-only carve-out and the Authorize arm apply
+/// identically here. This matters because an XEP-0060 §8.8 owner
+/// subscriptions-set writes subscription rows WITHOUT a can_subscribe
+/// check — a row's existence is not authorization. Fails closed on
+/// lookup errors — withholding one event beats leaking to a subscriber
+/// we cannot vet.
 async fn private_node_subscriber_allowed(
     state: &WebSocketState,
     owner: &BareJid,
     node: &str,
-    access_model: AccessModel,
     subscriber: &BareJid,
 ) -> bool {
     if subscriber == owner {
         return true;
     }
-    if access_model != AccessModel::Whitelist {
-        return false;
-    }
-    match crate::pubsub_authz::effective_affiliation(
+    match crate::pubsub_authz::can_subscribe(
         &state.deps.protocol.pubsub_storage,
         owner,
         node,
@@ -403,17 +396,14 @@ async fn private_node_subscriber_allowed(
     )
     .await
     {
-        Ok(affiliation) => matches!(
-            affiliation,
-            Affiliation::Owner | Affiliation::Publisher | Affiliation::Member
-        ),
+        Ok(allowed) => allowed,
         Err(error) => {
             warn!(
                 owner = %owner,
                 node,
                 subscriber = %subscriber,
                 error = %error,
-                "Affiliation lookup failed during private-node fan-out; failing closed"
+                "Subscriber authorization lookup failed during private-node fan-out; failing closed"
             );
             false
         }
