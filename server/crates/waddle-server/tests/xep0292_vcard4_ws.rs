@@ -17,12 +17,23 @@
 //!
 //! These tests sit alongside `xep0060_pubsub_ws.rs` and exercise the
 //! same WebSocket binding the wasm chat client uses.
+//!
+//! Publish/retrieve integration coverage beyond the access-model
+//! tests:
+//! 4. Republish to the single-slot node replaces the `current` item —
+//!    a peer fetch returns exactly one item carrying the latest
+//!    payload (max_items=1 per `NodeConfig::vcard4_defaults`).
+//! 5. Fetching the vCard of a user who never published returns an IQ
+//!    error, not an empty success (the node does not exist).
+//! 6. XEP-0163 §3 fan-out: a roster contact whose cached caps carry
+//!    `urn:xmpp:vcard4+notify` receives the vCard4 PEP event on
+//!    publish without any explicit pubsub subscription.
 
 use waddle_ws_test_support as ws_common;
 
 use std::time::Duration;
 use tokio::sync::Mutex;
-use ws_common::{TestServer, WsXmppClient};
+use ws_common::{extract_attr_after, TestServer, WsXmppClient};
 
 const DOMAIN: &str = "localhost";
 const USERNAME: &str = "admin";
@@ -188,6 +199,283 @@ async fn xep0292_non_roster_peer_can_fetch_published_vcard4() {
 
     let _ = bob.close().await;
     let _ = admin.close().await;
+}
+
+/// Count `<item ` occurrences — not `<items`.
+fn count_item_elements(xml: &str) -> usize {
+    xml.match_indices("<item ").count()
+}
+
+#[tokio::test]
+async fn xep0292_republish_replaces_current_item_in_single_slot_node() {
+    // `NodeConfig::vcard4_defaults` pins max_items=1 so the vCard4
+    // node is single-slot: each publish of `id='current'` replaces
+    // the previous item. A peer fetch after two publishes MUST return
+    // exactly one item carrying the second payload — two items (or
+    // the stale payload) would mean the profile editor can never
+    // update a vCard.
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut admin = admin_client(&server, "xep0292-replace-1").await;
+    let admin_bare = format!("{USERNAME}@{DOMAIN}");
+
+    let first = iq_set_to(
+        &mut admin,
+        "vc-rep-1",
+        &admin_bare,
+        &vcard4_publish_body("First Draft", "v1"),
+    )
+    .await;
+    assert!(first.contains(r#"type='result'"#), "first publish: {first}");
+
+    let second = iq_set_to(
+        &mut admin,
+        "vc-rep-2",
+        &admin_bare,
+        &vcard4_publish_body("Final Version", "v2"),
+    )
+    .await;
+    assert!(
+        second.contains(r#"type='result'"#),
+        "second publish: {second}"
+    );
+
+    let items_resp = iq_get_to(
+        &mut admin,
+        "vc-rep-items",
+        &admin_bare,
+        &vcard4_items_body(),
+    )
+    .await;
+    assert!(
+        items_resp.contains(r#"type='result'"#),
+        "fetch after republish: {items_resp}"
+    );
+    assert!(
+        items_resp.contains("Final Version"),
+        "fetch MUST return the replacement payload: {items_resp}"
+    );
+    assert!(
+        !items_resp.contains("First Draft"),
+        "the replaced item MUST NOT survive on a max_items=1 node: {items_resp}"
+    );
+    assert_eq!(
+        count_item_elements(&items_resp),
+        1,
+        "exactly one <item/> on the single-slot vcard4 node: {items_resp}"
+    );
+
+    let _ = admin.close().await;
+}
+
+#[tokio::test]
+async fn xep0292_fetch_from_user_without_vcard_returns_iq_error() {
+    // Fetching `urn:xmpp:vcard4` items from an account that never
+    // published MUST come back as an IQ error (the node does not
+    // exist) — not as an empty `<items/>` success that a client
+    // would cache as "this user has an empty profile".
+    let _serial = TEST_SERIAL.lock().await;
+    let bob_password = format!("ws-test-bob-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[("bob", bob_password.as_str())]);
+    let mut admin = admin_client(&server, "xep0292-novcard-admin").await;
+
+    // Admin queries bob's (never-published) vCard4 node.
+    let bob_bare = format!("bob@{DOMAIN}");
+    let resp = iq_get_to(&mut admin, "vc-none-1", &bob_bare, &vcard4_items_body()).await;
+    assert!(
+        resp.contains(r#"type='error'"#),
+        "items fetch on a nonexistent vcard4 node MUST be an IQ error: {resp}"
+    );
+    assert!(
+        resp.contains("item-not-found"),
+        "the error SHOULD be item-not-found per XEP-0060 §6.5.9.11: {resp}"
+    );
+
+    let _ = admin.close().await;
+}
+
+const NS_CAPS: &str = "http://jabber.org/protocol/caps";
+const NS_DISCO_INFO: &str = "http://jabber.org/protocol/disco#info";
+const NS_PUBSUB_EVENT: &str = "http://jabber.org/protocol/pubsub#event";
+
+fn caps_verification_string(features: &[&str]) -> String {
+    use waddle_xmpp::disco::info::{Feature, Identity};
+    use waddle_xmpp::xep::xep0115::compute_caps_hash;
+    let identities = vec![Identity::new("client", "pc", Some("Bob's Client"))];
+    let features: Vec<Feature> = features.iter().map(|f| Feature::new(f)).collect();
+    compute_caps_hash(&identities, &features)
+}
+
+/// Send a ping IQ and wait for its result — a deterministic FIFO
+/// anchor confirming the server processed everything sent before it.
+async fn ping_anchor(client: &mut WsXmppClient, id: &str) {
+    client
+        .send(&format!(
+            r#"<iq xmlns="jabber:client" type="get" id="{id}"><ping xmlns="urn:xmpp:ping"/></iq>"#
+        ))
+        .await
+        .expect("send ping");
+    let _ = client
+        .recv_matching(|frame| frame.contains(&format!(r#"id='{id}'"#)) && frame.contains("<iq"))
+        .await
+        .expect("ping result");
+}
+
+#[tokio::test]
+async fn xep0292_publish_fans_out_to_roster_contact_with_vcard4_notify_caps() {
+    // XEP-0163 §3 + XEP-0292: a contact with a presence subscription
+    // to the publisher whose cached entity caps advertise
+    // `urn:xmpp:vcard4+notify` MUST receive the vCard4 event message
+    // when the publisher updates their profile — this is how clients
+    // keep displayed names/avatars live without polling.
+    let _serial = TEST_SERIAL.lock().await;
+    let alice_password = format!("alice-{}", uuid::Uuid::new_v4());
+    let bob_password = format!("bob-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[
+        ("alice", &alice_password),
+        ("bob", &bob_password),
+    ]);
+    let mut alice = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "alice",
+        &alice_password,
+        "vc-fanout-alice",
+    )
+    .await
+    .expect("alice connect");
+    let mut bob = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "bob",
+        &bob_password,
+        "vc-fanout-bob",
+    )
+    .await
+    .expect("bob connect");
+    let alice_bare = format!("alice@{DOMAIN}");
+    let bob_bare = format!("bob@{DOMAIN}");
+    let bob_full = bob.full_jid.clone().expect("bob full jid");
+
+    // bob → alice presence subscription so alice's roster carries bob
+    // with subscription=from (the §3 fan-out filter). Both sessions
+    // fetch their roster first so they count as interested resources
+    // and receive the subscription pushes (RFC 6121 §2.2).
+    alice
+        .send(r#"<iq xmlns="jabber:client" type="get" id="vc-roster-a"><query xmlns="jabber:iq:roster"/></iq>"#)
+        .await
+        .expect("alice roster get");
+    let _ = alice
+        .recv_matching(|f| f.contains("vc-roster-a"))
+        .await
+        .expect("alice roster result");
+    bob.send(r#"<iq xmlns="jabber:client" type="get" id="vc-roster-b"><query xmlns="jabber:iq:roster"/></iq>"#)
+        .await
+        .expect("bob roster get");
+    let _ = bob
+        .recv_matching(|f| f.contains("vc-roster-b"))
+        .await
+        .expect("bob roster result");
+
+    alice
+        .send(r#"<presence xmlns="jabber:client"/>"#)
+        .await
+        .expect("alice presence");
+    bob.send(&format!(
+        r#"<presence xmlns="jabber:client" type="subscribe" to="{alice_bare}"/>"#
+    ))
+    .await
+    .expect("bob subscribes");
+    let _ = alice
+        .recv_matching(|f| f.contains(r#"type='subscribe'"#))
+        .await
+        .expect("alice receives subscribe");
+    alice
+        .send(&format!(
+            r#"<presence xmlns="jabber:client" type="subscribed" to="{bob_bare}"/>"#
+        ))
+        .await
+        .expect("alice approves");
+    let _ = bob
+        .recv_matching(|f| f.contains(r#"type='subscribed'"#))
+        .await
+        .expect("bob receives approval");
+
+    // bob advertises caps carrying `urn:xmpp:vcard4+notify` and
+    // completes the XEP-0115 verification round-trip.
+    let notify_var = format!("{PEP_NODE_VCARD4}+notify");
+    let features = ["http://jabber.org/protocol/disco#info", notify_var.as_str()];
+    let ver = caps_verification_string(&features);
+    bob.send(&format!(
+        r#"<presence xmlns="jabber:client"><c xmlns="{NS_CAPS}" hash="sha-1" node="https://bob.example/caps" ver="{ver}"/></presence>"#
+    ))
+    .await
+    .expect("bob presence with caps");
+    let disco_query = bob
+        .recv_matching(|frame| {
+            frame.contains("<iq")
+                && frame.contains(r#"type='get'"#)
+                && frame.contains(NS_DISCO_INFO)
+        })
+        .await
+        .expect("server resolves bob's caps");
+    let iq_id = extract_attr_after(&disco_query, "<iq", "id").expect("iq id");
+    let feature_xml: String = features
+        .iter()
+        .map(|f| format!(r#"<feature var="{f}"/>"#))
+        .collect();
+    bob.send(&format!(
+        r#"<iq xmlns="jabber:client" type="result" id="{iq_id}" from="{bob_full}"><query xmlns="{NS_DISCO_INFO}" node="https://bob.example/caps#{ver}"><identity category="client" type="pc" name="Bob's Client"/>{feature_xml}</query></iq>"#
+    ))
+    .await
+    .expect("bob disco#info reply");
+    ping_anchor(&mut bob, "vc-fanout-anchor").await;
+
+    // Alice publishes her vCard4.
+    let pub_resp = iq_set_to(
+        &mut alice,
+        "vc-fanout-pub",
+        &alice_bare,
+        &vcard4_publish_body("Alice Liddell", "Through the looking glass"),
+    )
+    .await;
+    assert!(
+        pub_resp.contains(r#"type='result'"#),
+        "alice vcard4 publish: {pub_resp}"
+    );
+
+    // Bob receives the PEP event with the vCard payload, from alice's
+    // bare JID (XEP-0163 §4.3).
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let event = loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "bob (roster from + vcard4+notify caps) MUST receive the vCard4 PEP event"
+        );
+        match bob.recv_timeout(remaining).await {
+            Ok(frame)
+                if frame.contains("<message")
+                    && frame.contains(NS_PUBSUB_EVENT)
+                    && frame.contains(PEP_NODE_VCARD4) =>
+            {
+                break frame;
+            }
+            Ok(_) => continue,
+            Err(e) => panic!("waiting for vcard4 event: {e}"),
+        }
+    };
+    assert!(
+        event.contains(&format!(r#"from='{alice_bare}'"#)),
+        "event from MUST be alice's bare JID per XEP-0163 §4.3: {event}"
+    );
+    assert!(
+        event.contains("Alice Liddell"),
+        "event MUST carry the published <fn> payload: {event}"
+    );
+
+    let _ = bob.close().await;
+    let _ = alice.close().await;
 }
 
 #[tokio::test]

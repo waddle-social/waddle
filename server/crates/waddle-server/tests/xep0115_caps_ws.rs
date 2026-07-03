@@ -10,6 +10,14 @@
 //! - Cache hit short-circuits the disco query.
 //! - Disconnect drops the per-resource mapping while the hash-keyed
 //!   cache stays warm for cross-session reuse (§6).
+//! - Legacy pre-v1.4 `<c/>` without a `hash` attribute is unverifiable
+//!   and MUST NOT trigger resolution (§6.1 legacy format).
+//! - An ill-formed reply (duplicate feature var, §5.4 step 2.4) is
+//!   discarded whole and the next advert re-resolves.
+//! - A reply arriving from a different resource than the one queried
+//!   is dropped and never cached.
+//! - Re-advertising the same `(hash, ver)` while a resolution is
+//!   already in flight MUST NOT queue a second disco#info query.
 
 use waddle_ws_test_support as ws_common;
 
@@ -881,4 +889,248 @@ async fn caps_multi_resource_independent_tracking() {
     let _ = admin2.close().await;
     let _ = bob.close().await;
     let _ = bob2.close().await;
+}
+
+// ============================================================================
+// Test 9 — caps_legacy_advert_without_hash_attribute_is_ignored
+// ============================================================================
+//
+// XEP-0115 §6.1: the pre-v1.4 legacy format omits the `hash`
+// attribute (`<c node ver ext/>` where `ver` is a plain version
+// string, not a verification hash). There is nothing to verify, so
+// the server MUST NOT start a disco#info resolution — an unverifiable
+// entry can never be cached (§5.4 step 2).
+#[tokio::test]
+async fn caps_legacy_advert_without_hash_attribute_is_ignored() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut admin = admin_client(&server, "caps-legacy-1").await;
+
+    admin
+        .send(&format!(
+            r#"<presence xmlns="jabber:client"><c xmlns="{NS_CAPS}" node="http://legacy.example/client" ver="1.2.3"/></presence>"#
+        ))
+        .await
+        .expect("send legacy caps presence");
+    ping_anchor(&mut admin, "caps-legacy-anchor-1").await;
+
+    let timed = tokio::time::timeout(
+        Duration::from_millis(50),
+        admin.recv_matching(|frame| {
+            frame.contains("<iq")
+                && frame.contains(r#"type='get'"#)
+                && frame.contains(NS_DISCO_INFO)
+        }),
+    )
+    .await;
+    assert!(
+        timed.is_err(),
+        "legacy (hash-less) caps MUST NOT trigger disco#info resolution: {timed:?}"
+    );
+
+    let _ = admin.close().await;
+}
+
+// ============================================================================
+// Test 10 — caps_duplicate_feature_reply_is_ill_formed_and_not_cached
+// ============================================================================
+//
+// XEP-0115 §5.4 step 2.4: if the disco#info response includes more
+// than one identical `<feature/>`, the response is ill-formed and the
+// entity MUST discard it entirely. Even though the duplicated feature
+// would hash to the advertised ver only if the sender crafted it that
+// way, the well-formedness check runs FIRST — nothing is cached and a
+// later advert of the same ver MUST re-resolve.
+#[tokio::test]
+async fn caps_duplicate_feature_reply_is_ill_formed_and_not_cached() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut admin = admin_client(&server, "caps-illformed-1").await;
+    let admin_full_jid = admin.full_jid.clone().expect("full jid");
+
+    let node = "https://example.test/caps#ill-formed";
+    let features = ["urn:xmpp:ping"];
+    let ver = caps_verification_string("client", "pc", "Duplicating Client", &features);
+
+    admin
+        .send(&format!(
+            r#"<presence xmlns="jabber:client"><c xmlns="{NS_CAPS}" hash="sha-1" node="{node}" ver="{ver}"/></presence>"#
+        ))
+        .await
+        .expect("send caps presence");
+    let disco_query = admin
+        .recv_matching(|frame| {
+            frame.contains("<iq")
+                && frame.contains(r#"type='get'"#)
+                && frame.contains(NS_DISCO_INFO)
+        })
+        .await
+        .expect("server queries admin");
+    let iq_id = extract_iq_id(&disco_query);
+
+    // The reply duplicates the `urn:xmpp:ping` feature — ill-formed
+    // per §5.4 step 2.4 regardless of what it recomputes to.
+    admin
+        .send(&format!(
+            r#"<iq xmlns="jabber:client" type="result" id="{iq_id}" from="{admin_full_jid}"><query xmlns="{NS_DISCO_INFO}" node="{node}#{ver}"><identity category="client" type="pc" name="Duplicating Client"/><feature var="urn:xmpp:ping"/><feature var="urn:xmpp:ping"/></query></iq>"#
+        ))
+        .await
+        .expect("admin sends duplicate-feature reply");
+    ping_anchor(&mut admin, "caps-illformed-anchor-1").await;
+
+    // A fresh resource advertising the same ver MUST re-resolve —
+    // the ill-formed reply must not have populated the cache.
+    let mut admin2 = admin_client(&server, "caps-illformed-2").await;
+    admin2
+        .send(&format!(
+            r#"<presence xmlns="jabber:client"><c xmlns="{NS_CAPS}" hash="sha-1" node="{node}" ver="{ver}"/></presence>"#
+        ))
+        .await
+        .expect("admin2 sends caps");
+    let _re_query = admin2
+        .recv_matching(|frame| {
+            frame.contains("<iq")
+                && frame.contains(r#"type='get'"#)
+                && frame.contains(NS_DISCO_INFO)
+        })
+        .await
+        .expect("ill-formed reply MUST NOT be cached; next advert MUST re-resolve (§5.4 step 2.4)");
+
+    let _ = admin.close().await;
+    let _ = admin2.close().await;
+}
+
+// ============================================================================
+// Test 11 — caps_reply_from_wrong_resource_is_dropped_and_not_cached
+// ============================================================================
+//
+// Anti-spoofing: the server queried resource A, so a result carrying
+// the same IQ id but arriving over resource B's stream is not a valid
+// answer. It MUST be dropped without caching — otherwise any co-tenant
+// who can observe/guess IQ ids could poison the shared caps cache.
+#[tokio::test]
+async fn caps_reply_from_wrong_resource_is_dropped_and_not_cached() {
+    let _serial = TEST_SERIAL.lock().await;
+    let bob_password = format!("bob-pass-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[("bob", &bob_password)]);
+
+    let mut admin = admin_client(&server, "caps-spoof-1").await;
+    let mut bob = extra_client(&server, "bob", &bob_password, "caps-spoof-bob").await;
+    let bob_full = bob.full_jid.clone().expect("bob full");
+
+    let node = "https://example.test/caps#spoof";
+    let features = ["urn:xmpp:ping"];
+    let ver = caps_verification_string("client", "pc", "Spoofed Client", &features);
+
+    admin
+        .send(&format!(
+            r#"<presence xmlns="jabber:client"><c xmlns="{NS_CAPS}" hash="sha-1" node="{node}" ver="{ver}"/></presence>"#
+        ))
+        .await
+        .expect("admin sends caps");
+    let disco_query = admin
+        .recv_matching(|frame| {
+            frame.contains("<iq")
+                && frame.contains(r#"type='get'"#)
+                && frame.contains(NS_DISCO_INFO)
+        })
+        .await
+        .expect("server queries admin");
+    let iq_id = extract_iq_id(&disco_query);
+
+    // Bob answers admin's query id over HIS OWN stream with a payload
+    // that WOULD verify. The server must ignore it: wrong sender.
+    let feature_xml: String = features
+        .iter()
+        .map(|f| format!(r#"<feature var="{f}"/>"#))
+        .collect();
+    bob.send(&format!(
+        r#"<iq xmlns="jabber:client" type="result" id="{iq_id}" from="{bob_full}"><query xmlns="{NS_DISCO_INFO}" node="{node}#{ver}"><identity category="client" type="pc" name="Spoofed Client"/>{feature_xml}</query></iq>"#
+    ))
+    .await
+    .expect("bob sends spoofed reply");
+    ping_anchor(&mut bob, "caps-spoof-anchor-1").await;
+
+    // A fresh resource advertising the same ver MUST re-resolve —
+    // the spoofed reply must not have landed in the cache.
+    let mut admin2 = admin_client(&server, "caps-spoof-2").await;
+    admin2
+        .send(&format!(
+            r#"<presence xmlns="jabber:client"><c xmlns="{NS_CAPS}" hash="sha-1" node="{node}" ver="{ver}"/></presence>"#
+        ))
+        .await
+        .expect("admin2 sends caps");
+    let _re_query = admin2
+        .recv_matching(|frame| {
+            frame.contains("<iq")
+                && frame.contains(r#"type='get'"#)
+                && frame.contains(NS_DISCO_INFO)
+        })
+        .await
+        .expect("a reply from the wrong resource MUST be dropped, not cached");
+
+    let _ = admin.close().await;
+    let _ = admin2.close().await;
+    let _ = bob.close().await;
+}
+
+// ============================================================================
+// Test 12 — caps_repeated_advert_while_resolution_pending_sends_one_query
+// ============================================================================
+//
+// Anti-amplification: `CapsResolver::has_pending_for` guards against a
+// client spamming the same unknown `(hash, ver)` in rapid presence
+// updates. Only ONE outbound disco#info may be in flight per
+// (resource, hash, ver); the repeats must not fan out into a query
+// storm.
+#[tokio::test]
+async fn caps_repeated_advert_while_resolution_pending_sends_one_query() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut admin = admin_client(&server, "caps-pending-1").await;
+
+    let node = "https://example.test/caps#pending";
+    let ver = "unresolved-ver-pending-dedup";
+    let presence = format!(
+        r#"<presence xmlns="jabber:client"><c xmlns="{NS_CAPS}" hash="sha-1" node="{node}" ver="{ver}"/></presence>"#
+    );
+    admin.send(&presence).await.expect("first caps presence");
+    admin.send(&presence).await.expect("second caps presence");
+    admin.send(&presence).await.expect("third caps presence");
+
+    // FIFO anchor: everything the server emitted in response to the
+    // three presences is on the wire before the ping result. Collect
+    // every frame up to the anchor and count the disco#info queries
+    // among them.
+    admin
+        .send(r#"<iq xmlns="jabber:client" type="get" id="caps-pending-anchor-1"><ping xmlns="urn:xmpp:ping"/></iq>"#)
+        .await
+        .expect("send ping anchor");
+    let frames = admin
+        .recv_until(|frame| {
+            frame.contains(r#"id='caps-pending-anchor-1'"#) && frame.contains("<iq")
+        })
+        .await
+        .expect("frames up to ping anchor");
+
+    let disco_queries: Vec<&String> = frames
+        .iter()
+        .filter(|frame| {
+            frame.contains("<iq")
+                && frame.contains(r#"type='get'"#)
+                && frame.contains(NS_DISCO_INFO)
+        })
+        .collect();
+    assert_eq!(
+        disco_queries.len(),
+        1,
+        "exactly one disco#info may be in flight for a repeated (hash, ver): {disco_queries:?}"
+    );
+    assert!(
+        disco_queries[0].contains(&format!(r#"node='{node}#{ver}'"#)),
+        "query targets the advertised node#ver: {}",
+        disco_queries[0]
+    );
+
+    let _ = admin.close().await;
 }
