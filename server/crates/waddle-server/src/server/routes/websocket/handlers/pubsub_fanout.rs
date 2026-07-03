@@ -32,7 +32,7 @@
 use jid::{BareJid, FullJid, Jid};
 use std::collections::HashSet;
 use tracing::{info, warn};
-use waddle_xmpp::pubsub::{build_pubsub_event, AccessModel, PubSubEvent, PubSubItem};
+use waddle_xmpp::pubsub::{build_pubsub_event, AccessModel, Affiliation, PubSubEvent, PubSubItem};
 use waddle_xmpp::registry::BroadcastOutcome;
 use waddle_xmpp::Stanza;
 use waddle_xmpp_core::build_pubsub_retract_event;
@@ -180,7 +180,16 @@ pub async fn fan_out_publish(state: &WebSocketState, req: FanOutRequest<'_>) {
     }
 
     for sub in subscribers {
-        if is_private_pep_node && sub.subscriber.to_bare() != *owner {
+        if is_private_pep_node
+            && !private_node_subscriber_allowed(
+                state,
+                owner,
+                node,
+                node_cfg.access_model,
+                &sub.subscriber.to_bare(),
+            )
+            .await
+        {
             continue;
         }
 
@@ -357,6 +366,58 @@ pub async fn fan_out_publish(state: &WebSocketState, req: FanOutRequest<'_>) {
         self_caps_delivered = self_metrics.delivered,
         "PubSub publish fan-out complete"
     );
+}
+
+/// Whether an explicit subscriber of a private (Whitelist/Authorize)
+/// PEP node is entitled to event notifications.
+///
+/// XEP-0060 §4.5 + §8.9: on a Whitelist node the owner whitelists an
+/// entity by affiliating it (member/publisher), and that entity's
+/// server-approved subscription MUST then be notified (§7.1) — the
+/// access model suppresses the implicit XEP-0163 §3 roster fan-out,
+/// not deliveries the owner explicitly authorized. Mirrors the
+/// Whitelist arm of `pubsub_authz::can_subscribe`. `Authorize` is
+/// owner-only in this server (see `AccessModel::Authorize`), so
+/// non-owner subscribers are never entitled there. Fails closed on
+/// affiliation-lookup errors — withholding one event beats leaking to
+/// a subscriber we cannot vet.
+async fn private_node_subscriber_allowed(
+    state: &WebSocketState,
+    owner: &BareJid,
+    node: &str,
+    access_model: AccessModel,
+    subscriber: &BareJid,
+) -> bool {
+    if subscriber == owner {
+        return true;
+    }
+    if access_model != AccessModel::Whitelist {
+        return false;
+    }
+    match crate::pubsub_authz::effective_affiliation(
+        &state.deps.protocol.pubsub_storage,
+        owner,
+        node,
+        subscriber,
+        true,
+    )
+    .await
+    {
+        Ok(affiliation) => matches!(
+            affiliation,
+            Affiliation::Owner | Affiliation::Publisher | Affiliation::Member
+        ),
+        Err(error) => {
+            warn!(
+                owner = %owner,
+                node,
+                subscriber = %subscriber,
+                error = %error,
+                "Affiliation lookup failed during private-node fan-out; failing closed"
+            );
+            false
+        }
+    }
 }
 
 pub async fn fan_out_retract(state: &WebSocketState, req: FanOutRetractRequest<'_>) {

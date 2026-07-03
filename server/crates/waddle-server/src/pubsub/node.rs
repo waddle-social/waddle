@@ -1,5 +1,5 @@
 use jid::BareJid;
-use waddle_xmpp::pubsub::{NodeConfig, PubSubNode};
+use waddle_xmpp::pubsub::{AccessModel, NodeConfig, PubSubNode};
 use waddle_xmpp::XmppError;
 
 use super::{
@@ -346,7 +346,17 @@ fn bounded_node_config(node_name: &str, config: &NodeConfig) -> NodeConfig {
     if is_dm_bookmarks_node(node_name) {
         return config.clone().normalize_waddle_dm_bookmarks();
     }
-    config.clone()
+    let mut config = config.clone();
+    // Well-known private PEP nodes (whitelist in `NodeConfig::pep_for_node`:
+    // MDS per XEP-0490 §3, DND, story reads, status preference) must stay
+    // whitelist: an owner configure-set flipping the access model would
+    // re-enable the #1094 roster fan-out and non-owner item reads. Derived
+    // from the well-known table so new private nodes are pinned without
+    // another list to maintain.
+    if NodeConfig::pep_for_node(node_name).access_model == AccessModel::Whitelist {
+        config.access_model = AccessModel::Whitelist;
+    }
+    config
 }
 
 fn is_bookmarks_node(node_name: &str) -> bool {

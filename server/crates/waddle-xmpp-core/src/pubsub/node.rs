@@ -335,8 +335,40 @@ impl NodeConfig {
             config = Self::waddle_dm_bookmarks_defaults();
         } else if node == crate::waddle_status_preference::PEP_NODE_WADDLE_STATUS_PREFERENCE {
             config = Self::waddle_status_preference_defaults();
+        } else if node == crate::waddle_story_reads::PEP_NODE_WADDLE_STORY_READS {
+            config = Self::waddle_story_reads_defaults();
         }
         config
+    }
+
+    /// Defaults for the Waddle story-reads PEP node.
+    ///
+    /// The single `current` item is the user's private story read-state
+    /// (which stories they have seen, and when) — no roster contact may
+    /// read it. The wasm client requests exactly this shape via
+    /// publish-options, but publish-options are not enforced at the
+    /// server's Publish arm, so the auto-create default MUST already be
+    /// `whitelist` + `never`: with the generic `pep_default()`
+    /// (`access_model = presence`) the access_model-derived fan-out
+    /// gate (issue #1094) would let the XEP-0163 §3 roster pass deliver
+    /// read-state to any contact advertising
+    /// `urn:waddle:story:reads:0+notify`.
+    ///
+    /// `notify_retract` / `notify_delete` are `false` because the
+    /// server does not emit those events for this node; read-state
+    /// changes are always republishes of the `current` item.
+    pub fn waddle_story_reads_defaults() -> Self {
+        Self {
+            access_model: AccessModel::Whitelist,
+            publish_model: PublishModel::Publishers,
+            node_type: None,
+            max_items: 1,
+            persist_items: true,
+            deliver_payloads: true,
+            notify_retract: false,
+            notify_delete: false,
+            send_last_published_item: SendLastPublishedItem::Never,
+        }
     }
 
     /// Defaults for the Waddle status-preference PEP node (ADR-010
