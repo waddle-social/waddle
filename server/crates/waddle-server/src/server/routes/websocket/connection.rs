@@ -57,6 +57,14 @@ async fn xmpp_websocket_handler(
 /// Size of the outbound message channel buffer
 const OUTBOUND_CHANNEL_SIZE: usize = 256;
 
+/// Budget for writing the system-shutdown stream error + close frames
+/// to one peer during graceful shutdown (issue #1091). Deliberately
+/// much shorter than the generic 60s `SEND_STALL_TIMEOUT`: a peer that
+/// has stopped reading must not hold its connection guard past the
+/// drain window — the notification is best-effort, while the SM detach
+/// that follows the break is what actually preserves the session.
+const SHUTDOWN_CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Handle an XMPP WebSocket connection
 async fn handle_xmpp_websocket(
     socket: WebSocket,
@@ -246,22 +254,35 @@ async fn handle_xmpp_websocket(
                     jid = ?conn.phase.bound_jid(),
                     "Graceful shutdown: closing live session with system-shutdown stream error"
                 );
-                if conn.stream_open_sent {
-                    let _ = send_ws_text_frames(
+                let close_peer = async {
+                    if conn.stream_open_sent {
+                        let _ = send_ws_text_frames(
+                            &mut ws_sender,
+                            [
+                                build_system_shutdown_stream_error(),
+                                websocket_stream_close_xml(),
+                            ],
+                            "Failed to send system-shutdown stream error",
+                        )
+                        .await;
+                    }
+                    let _ = close_ws_connection(
                         &mut ws_sender,
-                        [
-                            build_system_shutdown_stream_error(),
-                            websocket_stream_close_xml(),
-                        ],
-                        "Failed to send system-shutdown stream error",
+                        "Failed to send WebSocket close frame after system-shutdown",
                     )
                     .await;
+                };
+                if tokio::time::timeout(SHUTDOWN_CLOSE_TIMEOUT, close_peer)
+                    .await
+                    .is_err()
+                {
+                    warn!(
+                        jid = ?conn.phase.bound_jid(),
+                        timeout_secs = SHUTDOWN_CLOSE_TIMEOUT.as_secs(),
+                        "Graceful shutdown: peer did not accept the close frames in time; \
+                         proceeding to detach without them"
+                    );
                 }
-                let _ = close_ws_connection(
-                    &mut ws_sender,
-                    "Failed to send WebSocket close frame after system-shutdown",
-                )
-                .await;
                 break;
             }
 

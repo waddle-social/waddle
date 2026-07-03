@@ -696,9 +696,14 @@ pub(crate) fn spawn_graceful_shutdown_drain(
         // One deadline covers BOTH phases (connection drain + Q6
         // promotion): the pod's terminationGracePeriodSeconds is sized
         // for a single WADDLE_DRAIN_TIMEOUT_SECS budget, so serializing
-        // two full budgets would let SIGKILL truncate Q6 promotion when
-        // one stuck peer burns the whole connection-drain slice.
-        let drain_deadline = std::time::Instant::now() + max_drain_duration_from_env();
+        // two full budgets would let SIGKILL truncate Q6 promotion.
+        // The connection wait gets at most HALF the budget: a single
+        // stuck peer must not consume the whole deadline and starve Q6
+        // promotion for sessions that already detached cleanly — the
+        // stuck session itself falls back to its durable SM row on
+        // next startup either way.
+        let total_budget = max_drain_duration_from_env();
+        let drain_deadline = std::time::Instant::now() + total_budget;
         info!(
             active_connections = websocket_state.deps.shutdown.active_connections(),
             "Graceful shutdown: waiting for live sessions to close and detach"
@@ -706,9 +711,7 @@ pub(crate) fn spawn_graceful_shutdown_drain(
         if !websocket_state
             .deps
             .shutdown
-            .wait_for_connections_drained_for(
-                drain_deadline.saturating_duration_since(std::time::Instant::now()),
-            )
+            .wait_for_connections_drained_for(total_budget / 2)
             .await
         {
             warn!(
