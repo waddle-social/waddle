@@ -64,7 +64,7 @@ describe("extension route rail UI contract", () => {
 
   test("keeps direct extension routes in chat with a right-side panel", () => {
     const readyShell = readFileSync(new URL("../src/components/chat/ChatReadyShell.vue", import.meta.url), "utf8");
-    const controller = readFileSync(new URL("../src/shell/chat-app-controller.ts", import.meta.url), "utf8");
+    const controller = readFileSync(new URL("../src/shell/controllers/use-route-sync.ts", import.meta.url), "utf8");
     const state = readFileSync(new URL("../src/shell/state.ts", import.meta.url), "utf8");
 
     expect(state).toContain('ref<"dashboard" | "chat" | "settings" | "admin" | "threads" | "unread">');
@@ -83,7 +83,7 @@ describe("extension route rail UI contract", () => {
     expect(routeView).toContain('tabindex="-1"');
     expect(routeView).not.toContain("<main");
     expect(routeView).toContain("type-caption inline-flex min-h-8");
-    expect(controller).toContain("applyMatchToShellState(match)");
+    expect(controller).toContain("applyMatchToShellState(ui, match)");
     const extensionStart = controller.indexOf('if (match.id === "channelExtension") {');
     const loadIndex = controller.indexOf("await messaging.loadMessages(ch.spaceId ?? \"\", ch.id);", extensionStart);
     const guardIndex = controller.indexOf("if (requestId !== routeRequestId) return;", loadIndex);

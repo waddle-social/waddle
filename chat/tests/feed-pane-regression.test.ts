@@ -16,7 +16,7 @@ const shellStateSource = await Bun.file(
   new URL("../src/shell/state.ts", import.meta.url),
 ).text();
 const shellControllerSource = await Bun.file(
-  new URL("../src/shell/chat-app-controller.ts", import.meta.url),
+  new URL("../src/shell/controllers/use-route-sync.ts", import.meta.url),
 ).text();
 
 function occurrences(haystack: string, needle: string): number {

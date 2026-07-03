@@ -11,7 +11,7 @@ import { readFileSync } from "node:fs";
 // edit, retract, react) addresses its room.
 
 const controllerSource = readFileSync(
-  new URL("../src/shell/chat-app-controller.ts", import.meta.url),
+  new URL("../src/shell/controllers/use-pinned-messages.ts", import.meta.url),
   "utf8",
 );
 

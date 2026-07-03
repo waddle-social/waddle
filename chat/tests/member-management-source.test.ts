@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 
 describe("member management source contract", () => {
   test("presence-inferred occupants are displayed but not editable as affiliations", () => {
-    const chatController = readFileSync(new URL("../src/shell/chat-app-controller.ts", import.meta.url), "utf8");
+    const chatController = readFileSync(new URL("../src/shell/controllers/use-member-directory.ts", import.meta.url), "utf8");
     const chatModals = readFileSync(new URL("../src/components/chat/ChatAppModals.vue", import.meta.url), "utf8");
     const memberManagement = readFileSync(new URL("../src/components/modals/MemberManagement.vue", import.meta.url), "utf8");
 

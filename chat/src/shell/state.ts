@@ -8,6 +8,8 @@ export type CommunitySurface = "feed" | "events";
 export type FeedSurfaceFilter = "all" | "pep" | "stories" | "posts";
 export type FeedSurfaceComposerMode = "post" | "story";
 
+export type ChatShellState = ReturnType<typeof useChatShellState>;
+
 export function useChatShellState() {
   const activePage = ref<"dashboard" | "chat" | "settings" | "admin" | "threads" | "unread">("dashboard");
   const adminTab = ref<AdminTab>("rooms");
