@@ -185,8 +185,9 @@ fn auto_ponging_socket_that_never_binds_is_reaped() {
     }
     assert_eq!(
         closed_at,
-        Some(4),
-        "pre-bind socket must close on the tick after NEGOTIATION_TICK_LIMIT"
+        Some(3),
+        "pre-bind socket must close on the NEGOTIATION_TICK_LIMIT tick itself \
+         (3 ticks = 135s at the default 45s interval)"
     );
 }
 

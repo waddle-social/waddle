@@ -90,6 +90,13 @@ impl Default for KeepaliveConfig {
 /// remove that bound. Three ticks is 135s at the default 45s interval
 /// (and 360s at the 120s config ceiling) — orders of magnitude above a
 /// normal sub-second SASL + bind negotiation.
+///
+/// The budget is tick-based, so it scales with the configured
+/// interval: at the 1s config floor a client has only ~3s of wall
+/// clock to authenticate (inbound frames do NOT extend it — auto-pongs
+/// are indistinguishable from progress at this layer). Ample for any
+/// real SASL exchange, but worth knowing when tuning the interval far
+/// below the default.
 pub const NEGOTIATION_TICK_LIMIT: u32 = 3;
 
 /// Per-connection keepalive policy state.
@@ -157,9 +164,9 @@ impl KeepalivePolicy {
     /// resource); pre-`Ready` connections are additionally bounded by
     /// [`NEGOTIATION_TICK_LIMIT`].
     ///
-    /// - Still negotiating past the tick limit → close, even if the
-    ///   peer answers probes (auto-pong proves nothing about session
-    ///   progress).
+    /// - Still negotiating when the tick limit is reached → close,
+    ///   even if the peer answers probes (auto-pong proves nothing
+    ///   about session progress).
     /// - Evidence since the last tick → quiet re-arm.
     /// - Silence → probe and re-arm, until `miss_limit` probes have
     ///   gone unanswered, then close the transport.
@@ -168,15 +175,14 @@ impl KeepalivePolicy {
             self.negotiation_ticks = 0;
         } else {
             self.negotiation_ticks += 1;
-            if self.negotiation_ticks > NEGOTIATION_TICK_LIMIT {
+            if self.negotiation_ticks >= NEGOTIATION_TICK_LIMIT {
                 return vec![
                     OutboundEvent::Log {
                         level: Level::INFO,
                         message: format!(
                             "Keepalive: session still negotiating after {} ticks \
                              (interval {}ms); closing stalled pre-bind connection",
-                            self.negotiation_ticks - 1,
-                            self.config.interval_ms
+                            self.negotiation_ticks, self.config.interval_ms
                         ),
                     },
                     OutboundEvent::CloseTransport,
@@ -377,17 +383,16 @@ mod tests {
         // The peer's WS stack answers every probe (mark_alive), but the
         // session never reaches Ready — liveness must not grant
         // immortality to a socket that makes no session progress.
-        for _ in 0..NEGOTIATION_TICK_LIMIT {
+        for _ in 0..NEGOTIATION_TICK_LIMIT - 1 {
             p.mark_alive();
             let events = p.on_tick(false);
             assert!(!has_close(&events), "still within negotiation budget");
         }
+        // The limit tick itself closes: 3 ticks = 135s at defaults,
+        // exactly as the NEGOTIATION_TICK_LIMIT docs state.
         p.mark_alive();
         let events = p.on_tick(false);
-        assert!(
-            has_close(&events),
-            "negotiation limit exhausted: {events:?}"
-        );
+        assert!(has_close(&events), "negotiation limit reached: {events:?}");
         assert!(
             !events
                 .iter()
@@ -400,7 +405,7 @@ mod tests {
     fn reaching_ready_resets_the_negotiation_budget() {
         let mut p = KeepalivePolicy::new(cfg(45_000, 2));
         p.on_transport_ready();
-        for _ in 0..NEGOTIATION_TICK_LIMIT {
+        for _ in 0..NEGOTIATION_TICK_LIMIT - 1 {
             p.mark_alive();
             assert!(!has_close(&p.on_tick(false)));
         }
@@ -415,9 +420,12 @@ mod tests {
     }
 
     #[test]
-    fn silent_negotiating_peer_still_dies_by_miss_limit_first() {
-        // A pre-bind peer that also stops ponging hits the ordinary
-        // dead-peer close (miss limit) before the negotiation limit.
+    fn silent_negotiating_peer_is_probed_then_closed_at_the_limit() {
+        // A pre-bind peer that also stops ponging: grace tick, one
+        // unanswered probe, then the third tick closes it — the miss
+        // limit's earliest possible close is also the third tick, and
+        // the negotiation check runs first, so the negotiation deadline
+        // is the operative bound for silent pre-bind peers.
         let mut p = KeepalivePolicy::new(cfg(45_000, 1));
         p.on_transport_ready();
         assert!(!has_probe(&p.on_tick(false))); // grace

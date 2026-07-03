@@ -146,7 +146,7 @@ async fn unauthenticated_socket_is_reaped_despite_auto_pongs() {
 
     // Poll continuously so every server ping is auto-ponged — this is
     // the "wedged app, live network stack" shape. Expect the server to
-    // close ~4-5s in (negotiation limit 3 ticks + close tick at 1s).
+    // close ~3-4s in (negotiation limit tick 3 at the 1s interval).
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     let mut closed = false;
     while tokio::time::Instant::now() < deadline {
