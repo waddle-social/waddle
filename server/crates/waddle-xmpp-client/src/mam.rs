@@ -397,7 +397,8 @@ async fn run_mam_query(
     let query = async {
         let mut messages: Vec<ArchivedMessage> = Vec::new();
         // XEP-0198 resume mid-query retransmits unacked results with the same
-        // queryid and mam_id; XEP-0313 puts the dedup obligation on us.
+        // queryid and mam_id; XEP-0198 §5 leaves weeding out such duplicates
+        // to the recipient.
         let mut seen_mam_ids: HashSet<String> = HashSet::new();
         let mut send_iq_fut = Box::pin(handle.send_iq(iq));
 
