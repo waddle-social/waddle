@@ -209,6 +209,16 @@ where
                         "Dropping oversized inbound frame during mid-batch drain"
                     );
                 } else if let Some(h) = parse_sm_ack_h(text.as_str()) {
+                    // Applied ahead of any frames already parked in
+                    // `deferred_inbound`. Safe ONLY because ack
+                    // application is order-independent here: `h` is
+                    // cumulative/monotone, and `delete_acked_through`
+                    // removes rows keyed sequence <= h — outbound
+                    // stanzas a deferred frame produces later get
+                    // sequences > h and are untouched. If ack handling
+                    // ever grows a side effect that is not keyed on
+                    // sequence <= h, it must move to the deferred
+                    // queue instead of running inline.
                     apply_sm_ack(state, &mut conn.sm_state, h).await;
                 } else {
                     conn.deferred_inbound.push_back(text);
