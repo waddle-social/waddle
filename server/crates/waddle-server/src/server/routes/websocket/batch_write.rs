@@ -62,8 +62,11 @@ pub(super) enum BatchWriteOutcome {
 /// in order, so an ack behind parked frames cannot be consumed until
 /// the connection loop processes the backlog. At the cap, behavior
 /// degrades exactly to the pre-#1089 semantics (no mid-batch ack
-/// draining: the queue may evict and mark a replay gap), and the only
-/// affected stream is the one whose own client is flooding it.
+/// draining: the queue may evict and mark a replay gap), and only
+/// this connection's own stream is affected. Note a well-behaved
+/// client can reach the cap during a very large batch — e.g. one
+/// XEP-0184 receipt or XEP-0085 chat state per delivered message —
+/// so this is a graceful-degradation bound, not a misbehavior gate.
 const DEFERRED_INBOUND_CAP: usize = 64;
 
 /// Write a response batch to the WebSocket, recording countable
