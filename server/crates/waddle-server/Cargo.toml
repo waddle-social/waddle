@@ -112,12 +112,15 @@ prescience = { version = "0.1.0", features = ["tls-rustls"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 
 [dev-dependencies]
+# Shared WebSocket integration-test harness (TestServer + WsXmppClient).
+# A separate library crate so per-test-binary `dead_code` lints cannot
+# fire on helpers a given binary does not use.
+waddle-ws-test-support = { path = "../waddle-ws-test-support" }
 tokio-test = "0.4"
 wiremock = "0.6"
 # `image` is already a regular dependency; integration tests reach
 # it via the same crate without a separate dev-dep declaration.
 http-body-util = "0.1"
-tokio-tungstenite = "0.29"
 pbkdf2 = { version = "0.13", features = ["hmac"] }
 cuengine = "0.40.6"
 tempfile = "3.27"

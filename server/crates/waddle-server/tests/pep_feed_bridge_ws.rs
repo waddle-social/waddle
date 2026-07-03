@@ -4,7 +4,7 @@
 //! a typed feed entry appears on the community feed node, carrying
 //! the author's bare JID and a `<source kind='mood'/>` typed child.
 
-mod ws_common;
+use waddle_ws_test_support as ws_common;
 
 use tokio::sync::Mutex;
 use ws_common::{TestServer, WsXmppClient};

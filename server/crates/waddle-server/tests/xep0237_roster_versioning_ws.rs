@@ -1,6 +1,6 @@
 //! XEP-0237: Roster Versioning over WebSocket C2S.
 
-mod ws_common;
+use waddle_ws_test_support as ws_common;
 
 use ws_common::{TestServer, WsXmppClient};
 

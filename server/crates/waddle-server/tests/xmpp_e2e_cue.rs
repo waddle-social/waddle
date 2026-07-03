@@ -1,6 +1,6 @@
 //! CUE-authored XMPP E2E scenarios over the active WebSocket C2S transport.
 
-mod ws_common;
+use waddle_ws_test_support as ws_common;
 
 use anyhow::{anyhow, Context, Result};
 use jid::Jid;

@@ -11,7 +11,7 @@
 //! - Disconnect drops the per-resource mapping while the hash-keyed
 //!   cache stays warm for cross-session reuse (§6).
 
-mod ws_common;
+use waddle_ws_test_support as ws_common;
 
 use std::time::Duration;
 use tokio::sync::Mutex;

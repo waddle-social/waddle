@@ -5,8 +5,8 @@ use crate::XmppError;
 pub(super) struct ClientFirstMessage {
     /// GS2 channel binding flag ('n', 'y', or 'p')
     pub(super) gs2_cbind_flag: char,
-    /// Optional authzid (reserved for future use per SCRAM spec)
-    #[allow(dead_code)]
+    /// Optional authzid; the server rejects client-first messages that
+    /// carry one (authorization-identity mapping is not implemented).
     pub(super) authzid: Option<String>,
     /// Username (authcid)
     pub(super) username: String,
@@ -19,8 +19,8 @@ pub(super) struct ClientFirstMessage {
 /// Parsed client-final-message components.
 #[derive(Debug, Clone)]
 pub(super) struct ClientFinalMessage {
-    /// Channel binding data (base64) - required by SCRAM protocol
-    #[allow(dead_code)]
+    /// Channel binding data (base64) - required by SCRAM protocol;
+    /// verified against the GS2 header in `process_client_final`.
     pub(super) channel_binding: String,
     /// Combined nonce
     pub(super) nonce: String,

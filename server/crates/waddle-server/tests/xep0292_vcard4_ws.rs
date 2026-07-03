@@ -18,7 +18,7 @@
 //! These tests sit alongside `xep0060_pubsub_ws.rs` and exercise the
 //! same WebSocket binding the wasm chat client uses.
 
-mod ws_common;
+use waddle_ws_test_support as ws_common;
 
 use std::time::Duration;
 use tokio::sync::Mutex;

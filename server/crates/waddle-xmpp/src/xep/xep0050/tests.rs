@@ -1,5 +1,5 @@
 use super::*;
-use crate::xep::xep0004::{DataForm, Field, FormType, FromElement, IntoElement};
+use crate::xep::xep0004::{DataForm, Field, FormType, FromElement, ToElement};
 use minidom::Element;
 use xmpp_parsers::iq::Iq;
 
@@ -79,7 +79,7 @@ fn test_note_constructors() {
 #[test]
 fn test_note_roundtrip() {
     let note = Note::warn("be careful");
-    let elem = note.into_element();
+    let elem = note.to_element();
     let parsed = Note::from_element(&elem).expect("parse note");
     assert_eq!(parsed.note_type, NoteType::Warn);
     assert_eq!(parsed.text, "be careful");
@@ -101,7 +101,7 @@ fn test_allowed_actions_roundtrip() {
         .with_next()
         .with_complete();
 
-    let elem = actions.into_element();
+    let elem = actions.to_element();
     let parsed = AllowedActions::from_element(&elem).expect("parse actions");
 
     assert_eq!(parsed.execute_default, Action::Next);
@@ -113,7 +113,7 @@ fn test_allowed_actions_roundtrip() {
 #[test]
 fn test_allowed_actions_minimal() {
     let actions = AllowedActions::new(Action::Complete);
-    let elem = actions.into_element();
+    let elem = actions.to_element();
     let parsed = AllowedActions::from_element(&elem).expect("parse actions");
 
     assert_eq!(parsed.execute_default, Action::Complete);
@@ -157,7 +157,7 @@ fn test_command_builder() {
 #[test]
 fn test_command_roundtrip_minimal() {
     let cmd = Command::new("test-node").with_action(Action::Execute);
-    let elem = cmd.into_element();
+    let elem = cmd.to_element();
     let parsed = Command::from_element(&elem).expect("parse command");
 
     assert_eq!(parsed.node, "test-node");
@@ -178,7 +178,7 @@ fn test_command_roundtrip_full() {
         .with_note(Note::info("Please fill this form"))
         .with_form(DataForm::new(FormType::Form).add_field(Field::text_single("username", "")));
 
-    let elem = cmd.into_element();
+    let elem = cmd.to_element();
     let parsed = Command::from_element(&elem).expect("parse command");
 
     assert_eq!(parsed.node, "my-command");
@@ -483,7 +483,7 @@ fn test_build_command_items() {
 fn test_multi_step_command_flow() {
     // Step 1: Client sends execute
     let request = Command::new("change-password").with_action(Action::Execute);
-    let request_elem = request.into_element();
+    let request_elem = request.to_element();
     let parsed_request = Command::from_element(&request_elem).expect("parse request");
     assert_eq!(parsed_request.action, Some(Action::Execute));
 
@@ -493,7 +493,7 @@ fn test_multi_step_command_flow() {
         .with_status(Status::Executing)
         .with_actions(AllowedActions::new(Action::Complete).with_complete())
         .with_form(DataForm::new(FormType::Form).add_field(Field::text_single("new-password", "")));
-    let response_elem = response.into_element();
+    let response_elem = response.to_element();
     let parsed_response = Command::from_element(&response_elem).expect("parse response");
     assert_eq!(parsed_response.status, Some(Status::Executing));
     assert!(parsed_response.form.is_some());
@@ -505,7 +505,7 @@ fn test_multi_step_command_flow() {
         .with_form(
             DataForm::new(FormType::Submit).add_field(Field::text_single("new-password", "s3cret")),
         );
-    let submit_elem = submit.into_element();
+    let submit_elem = submit.to_element();
     let parsed_submit = Command::from_element(&submit_elem).expect("parse submit");
     assert_eq!(parsed_submit.action, Some(Action::Complete));
     assert_eq!(parsed_submit.session_id.as_deref(), Some("session-abc"));
@@ -515,7 +515,7 @@ fn test_multi_step_command_flow() {
         .with_session_id("session-abc")
         .with_status(Status::Completed)
         .with_note(Note::info("Password changed successfully"));
-    let completed_elem = completed.into_element();
+    let completed_elem = completed.to_element();
     let parsed_completed = Command::from_element(&completed_elem).expect("parse completed");
     assert_eq!(parsed_completed.status, Some(Status::Completed));
     assert_eq!(parsed_completed.notes.len(), 1);
@@ -532,7 +532,7 @@ fn test_cancel_command_flow() {
     let cancel = Command::new("some-command")
         .with_session_id("sess-xyz")
         .with_action(Action::Cancel);
-    let elem = cancel.into_element();
+    let elem = cancel.to_element();
     let parsed = Command::from_element(&elem).expect("parse cancel");
     assert_eq!(parsed.action, Some(Action::Cancel));
 
@@ -540,7 +540,7 @@ fn test_cancel_command_flow() {
         .with_session_id("sess-xyz")
         .with_status(Status::Canceled)
         .with_note(Note::info("Command canceled"));
-    let resp_elem = canceled_response.into_element();
+    let resp_elem = canceled_response.to_element();
     let parsed_resp = Command::from_element(&resp_elem).expect("parse canceled response");
     assert_eq!(parsed_resp.status, Some(Status::Canceled));
 }
@@ -554,7 +554,7 @@ fn test_command_with_multiple_notes() {
         .with_note(Note::info("Step completed"))
         .with_note(Note::warn("But check logs"));
 
-    let elem = cmd.into_element();
+    let elem = cmd.to_element();
     let parsed = Command::from_element(&elem).expect("parse");
     assert_eq!(parsed.notes.len(), 2);
     assert_eq!(parsed.notes[0].note_type, NoteType::Info);

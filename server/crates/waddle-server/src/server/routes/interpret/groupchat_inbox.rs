@@ -1,4 +1,6 @@
-use super::groupchat_archive::{extract_room_stanza_id, GroupchatInboxProjectionOutcome};
+use super::groupchat_archive::{
+    extract_room_stanza_id, GroupchatInboxProjectionInputs, GroupchatInboxProjectionOutcome,
+};
 use super::*;
 
 pub(super) struct ProjectGroupchatInboxEvent<'a, 'deps> {
@@ -19,6 +21,7 @@ pub(super) struct ProjectGroupchatInboxEvent<'a, 'deps> {
 }
 
 pub(super) async fn project_groupchat_inbox_event(input: ProjectGroupchatInboxEvent<'_, '_>) {
+    let notification_recovery = groupchat_notification_recovery_item(&input);
     let ProjectGroupchatInboxEvent {
         deps,
         owner,
@@ -40,32 +43,20 @@ pub(super) async fn project_groupchat_inbox_event(input: ProjectGroupchatInboxEv
         );
         return;
     };
-    let notification_recovery = groupchat_notification_recovery_item(
-        &owner,
-        &room,
-        &message,
-        is_recipient,
-        is_durable_recipient,
-        is_live_occupant,
-        room_members_only,
-        sender_can_broadcast_channel_mention,
-        &thread,
-        dispatch_timestamp,
-    );
     let notification_recovery_key = notification_recovery
         .as_ref()
         .map(|recovery| recovery.key.clone());
-    let outcome = project_groupchat_inbox(
+    let outcome = project_groupchat_inbox(GroupchatInboxProjectionInputs {
         inbox_storage,
-        deps.connection_registry,
-        &owner,
-        &room,
-        &message,
+        connection_registry: deps.connection_registry,
+        owner: &owner,
+        room: &room,
+        message: &message,
         is_recipient,
-        &thread,
+        thread: &thread,
         dispatch_timestamp,
         notification_recovery,
-    )
+    })
     .await;
     maybe_enqueue_groupchat_notification_candidate(GroupchatNotificationProjection {
         deps,
@@ -101,36 +92,26 @@ struct GroupchatNotificationProjection<'a, 'deps> {
     recovery_key: Option<&'a waddle_xmpp::inbox::storage::GroupchatNotificationRecoveryKey>,
 }
 
-#[allow(clippy::too_many_arguments)]
 fn groupchat_notification_recovery_item(
-    owner: &BareJid,
-    room: &BareJid,
-    message: &Message,
-    is_recipient: bool,
-    is_durable_recipient: bool,
-    is_live_occupant: bool,
-    room_members_only: bool,
-    sender_can_broadcast_channel_mention: bool,
-    thread: &Option<GroupchatThreadProjection>,
-    dispatch_timestamp: i64,
+    event: &ProjectGroupchatInboxEvent<'_, '_>,
 ) -> Option<waddle_xmpp::inbox::storage::GroupchatNotificationRecovery> {
-    if !is_recipient || !is_durable_recipient {
+    if !event.is_recipient || !event.is_durable_recipient {
         return None;
     }
-    let archive_id = extract_room_stanza_id(message, room)?;
-    let sender_jid = message.from.clone()?;
+    let archive_id = extract_room_stanza_id(&event.message, &event.room)?;
+    let sender_jid = event.message.from.clone()?;
     Some(waddle_xmpp::inbox::storage::GroupchatNotificationRecovery {
         key: waddle_xmpp::inbox::storage::GroupchatNotificationRecoveryKey {
-            recipient: owner.clone(),
-            room: room.clone(),
-            thread_id: thread.as_ref().map(|thread| thread.thread_id.clone()),
-            archive_stanza_id: Xep0359StanzaId::new(archive_id, Jid::from(room.clone())),
+            recipient: event.owner.clone(),
+            room: event.room.clone(),
+            thread_id: event.thread.as_ref().map(|thread| thread.thread_id.clone()),
+            archive_stanza_id: Xep0359StanzaId::new(archive_id, Jid::from(event.room.clone())),
         },
         sender_jid,
-        is_live_occupant,
-        room_members_only,
-        sender_can_broadcast_channel_mention,
-        created_at_ms: dispatch_timestamp.saturating_mul(1_000),
+        is_live_occupant: event.is_live_occupant,
+        room_members_only: event.room_members_only,
+        sender_can_broadcast_channel_mention: event.sender_can_broadcast_channel_mention,
+        created_at_ms: event.dispatch_timestamp.saturating_mul(1_000),
     })
 }
 
@@ -249,46 +230,65 @@ async fn enqueue_groupchat_notification_candidate(
             crate::notification_outbox::NotificationThreadId::new(thread.thread_id.clone())
         })
         .unwrap_or_else(crate::notification_outbox::NotificationThreadId::root);
-    insert_groupchat_notification_candidate(
+    insert_groupchat_notification_candidate(GroupchatNotificationCandidateSeed {
         state,
         owner,
         room,
         message,
         sender_jid,
         thread_id,
-        Xep0359StanzaId::new(archive_id, Jid::from(room.clone())),
+        archive_stanza_id: Xep0359StanzaId::new(archive_id, Jid::from(room.clone())),
         is_live_occupant,
         room_members_only,
         sender_can_broadcast_channel_mention,
-    )
+    })
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn insert_groupchat_notification_candidate(
-    state: &WebSocketState,
-    owner: &BareJid,
-    room: &BareJid,
-    message: &Message,
+/// Inputs for [`insert_groupchat_notification_candidate`]: one
+/// recipient's XEP-0357 candidate row, assembled either at T0 dispatch
+/// (`enqueue_groupchat_notification_candidate`) or during restart
+/// recovery (`reconcile_groupchat_notification_candidates`).
+struct GroupchatNotificationCandidateSeed<'a> {
+    state: &'a WebSocketState,
+    owner: &'a BareJid,
+    room: &'a BareJid,
+    message: &'a Message,
     sender_jid: Jid,
     thread_id: crate::notification_outbox::NotificationThreadId,
     archive_stanza_id: Xep0359StanzaId,
     is_live_occupant: bool,
-    // `room_members_only` is known message-locally on this T0 path
-    // (the projection event carries it) and is consumed below to
-    // pre-populate the policy cache so the synchronous T0 evaluator
-    // never asks the live `RoomRegistryActor`. Each recipient in a
-    // groupchat fan-out would otherwise produce an actor round-trip,
-    // even though the same bit is already in hand.
+    /// `room_members_only` is known message-locally on this T0 path
+    /// (the projection event carries it) and is consumed to
+    /// pre-populate the policy cache so the synchronous T0 evaluator
+    /// never asks the live `RoomRegistryActor`. Each recipient in a
+    /// groupchat fan-out would otherwise produce an actor round-trip,
+    /// even though the same bit is already in hand.
     room_members_only: bool,
-    // XEP-0513 §"Multi-User Chats Permissions": frozen permission
-    // snapshot for `urn:xmpp:mentions:0#channel`. `false` downgrades
-    // channel mentions to `NotifyAll` (still delivered, but not pushed
-    // as a forced channel mention). The recovery path passes the
-    // bool persisted on the recovery row at original T0 dispatch —
-    // see [`reconcile_groupchat_notification_candidates`].
+    /// XEP-0513 §"Multi-User Chats Permissions": frozen permission
+    /// snapshot for `urn:xmpp:mentions:0#channel`. `false` downgrades
+    /// channel mentions to `NotifyAll` (still delivered, but not pushed
+    /// as a forced channel mention). The recovery path passes the
+    /// bool persisted on the recovery row at original T0 dispatch —
+    /// see [`reconcile_groupchat_notification_candidates`].
     sender_can_broadcast_channel_mention: bool,
+}
+
+async fn insert_groupchat_notification_candidate(
+    seed: GroupchatNotificationCandidateSeed<'_>,
 ) -> GroupchatNotificationCandidateQueueOutcome {
+    let GroupchatNotificationCandidateSeed {
+        state,
+        owner,
+        room,
+        message,
+        sender_jid,
+        thread_id,
+        archive_stanza_id,
+        is_live_occupant,
+        room_members_only,
+        sender_can_broadcast_channel_mention,
+    } = seed;
     // Parse explicit mentions ONCE per message and derive every
     // XEP-0513 signal (personal-mention bit, channel-mention scope,
     // owner-`<noping/>`) from the same parsed structure. The previous
@@ -603,16 +603,16 @@ pub(crate) async fn reconcile_groupchat_notification_candidates(
                 crate::notification_outbox::NotificationThreadId::new(thread_id.clone())
             })
             .unwrap_or_else(crate::notification_outbox::NotificationThreadId::root);
-        let outcome = insert_groupchat_notification_candidate(
+        let outcome = insert_groupchat_notification_candidate(GroupchatNotificationCandidateSeed {
             state,
-            &recovery.key.recipient,
-            &recovery.key.room,
-            &message,
-            recovery.sender_jid.clone(),
+            owner: &recovery.key.recipient,
+            room: &recovery.key.room,
+            message: &message,
+            sender_jid: recovery.sender_jid.clone(),
             thread_id,
-            recovery.key.archive_stanza_id.clone(),
-            recovery.is_live_occupant,
-            recovery.room_members_only,
+            archive_stanza_id: recovery.key.archive_stanza_id.clone(),
+            is_live_occupant: recovery.is_live_occupant,
+            room_members_only: recovery.room_members_only,
             // XEP-0513 §"Multi-User Chats Permissions" frozen at the
             // original T0 dispatch — persisted on the recovery row so
             // replay re-creates the same notification class. Defaulting
@@ -621,8 +621,8 @@ pub(crate) async fn reconcile_groupchat_notification_candidates(
             // XEP-0492 default suppress it at T1: a silent moderator-
             // push outage after every server restart (adversarial review
             // P1 on PR #738).
-            recovery.sender_can_broadcast_channel_mention,
-        )
+            sender_can_broadcast_channel_mention: recovery.sender_can_broadcast_channel_mention,
+        })
         .await;
         if outcome == GroupchatNotificationCandidateQueueOutcome::Completed
             && mark_recovery_completed_from_state(state, &recovery.key).await

@@ -5,7 +5,7 @@
 //! else's master event, and that malformed RSVP shapes fall through
 //! to the standard admin-only gate and are rejected.
 
-mod ws_common;
+use waddle_ws_test_support as ws_common;
 
 use tokio::sync::Mutex;
 use ws_common::{TestServer, WsXmppClient};

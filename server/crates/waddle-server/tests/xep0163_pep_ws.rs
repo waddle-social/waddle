@@ -4,7 +4,7 @@
 //! (XEP-0060): auto-create on first publish, access control (owner-only
 //! publish), the default max_items=1 policy, and owner purge.
 
-mod ws_common;
+use waddle_ws_test_support as ws_common;
 
 use std::time::Duration;
 use tokio::sync::Mutex;

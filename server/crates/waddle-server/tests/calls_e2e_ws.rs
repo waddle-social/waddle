@@ -9,7 +9,7 @@
 //! the browser; this suite covers everything the server is
 //! responsible for on the wire.
 
-mod ws_common;
+use waddle_ws_test_support as ws_common;
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use jsonwebtoken::{encode, EncodingKey, Header};

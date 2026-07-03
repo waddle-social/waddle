@@ -89,7 +89,7 @@ pub(super) fn extension_route_metadata_form(
     route: &waddle_extensions::ExtensionRouteDescriptor,
     profile: Option<&waddle_extensions::ExtensionProfile>,
 ) -> Element {
-    use waddle_xmpp::xep::xep0004::{DataForm, Field, FormType, IntoElement};
+    use waddle_xmpp::xep::xep0004::{DataForm, Field, FormType, ToElement};
 
     add_profile_fields(
         DataForm::new(FormType::Result)
@@ -121,7 +121,7 @@ pub(super) fn extension_route_metadata_form(
             )),
         profile,
     )
-    .into_element()
+    .to_element()
 }
 
 pub(super) fn extension_command_metadata_form(
@@ -129,7 +129,7 @@ pub(super) fn extension_command_metadata_form(
     descriptor: &waddle_extensions::CommandDescriptor,
     profile: Option<&waddle_extensions::ExtensionProfile>,
 ) -> Element {
-    use waddle_xmpp::xep::xep0004::{DataForm, Field, FormType, IntoElement};
+    use waddle_xmpp::xep::xep0004::{DataForm, Field, FormType, ToElement};
 
     let mut form = DataForm::new(FormType::Result)
         .add_field(Field::form_type(EXTENSION_COMMAND_FORM_TYPE))
@@ -156,7 +156,7 @@ pub(super) fn extension_command_metadata_form(
         form = form.add_field(Field::text_single("waddle#composer_execute", "true"));
     }
     form = add_profile_fields(form, profile);
-    form.into_element()
+    form.to_element()
 }
 
 fn add_profile_fields(

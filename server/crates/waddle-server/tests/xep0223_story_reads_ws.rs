@@ -11,7 +11,7 @@
 //! - The private-PEP carve-out in `pubsub_fanout.rs` suppresses
 //!   roster fan-out (no headline event delivered to roster contacts).
 
-mod ws_common;
+use waddle_ws_test_support as ws_common;
 
 use std::time::Duration;
 use tokio::sync::Mutex;

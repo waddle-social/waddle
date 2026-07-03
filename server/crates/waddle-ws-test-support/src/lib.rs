@@ -3,6 +3,12 @@
 //! - `TestServer` spawns the `waddle-server` binary with test env vars and
 //!   waits for it to become ready.
 //! - `WsXmppClient` connects via WebSocket and authenticates with SCRAM-SHA-256.
+//!
+//! This lives in its own crate (rather than a `tests/ws_common/mod.rs`
+//! shared module) so that every integration-test binary links the same
+//! compiled library: helpers unused by one particular test binary are
+//! still reachable public API of this crate, so per-binary `dead_code`
+//! warnings cannot fire and no lint suppressions are needed.
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use futures::{SinkExt, StreamExt};
@@ -25,6 +31,31 @@ pub const TEST_GIT_SHA: &str = "feedface1234567890abcdef";
 // budget to reduce CI flake during full-workspace test runs.
 const SERVER_STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// Locate the `waddle-server` binary produced by the current build.
+///
+/// The harness lives in a separate test-support crate, so the
+/// `CARGO_BIN_EXE_waddle-server` compile-time env (which cargo injects
+/// only into waddle-server's own test targets) is not available here.
+/// Integration-test executables run from `<target>/<profile>/deps/`,
+/// and cargo places package binaries one directory up. Running the
+/// tests through cargo (`cargo test -p waddle-server`, `cargo test
+/// --workspace`) always builds the binary before the tests execute.
+fn waddle_server_bin() -> std::path::PathBuf {
+    let exe = std::env::current_exe().expect("current test executable path");
+    let profile_dir = exe
+        .parent() // <target>/<profile>/deps
+        .and_then(std::path::Path::parent) // <target>/<profile>
+        .expect("test executable directory layout");
+    let bin = profile_dir.join(format!("waddle-server{}", std::env::consts::EXE_SUFFIX));
+    assert!(
+        bin.exists(),
+        "waddle-server binary not found at {}; run the tests via cargo \
+         (e.g. `cargo test -p waddle-server`) so the binary is built first",
+        bin.display()
+    );
+    bin
+}
+
 // ---------------------------------------------------------------------------
 // Test server harness
 // ---------------------------------------------------------------------------
@@ -40,15 +71,12 @@ pub struct TestServer {
     http_port: u16,
     port_file: std::path::PathBuf,
     upload_dir: std::path::PathBuf,
-    #[allow(dead_code)]
     fixed_account_password: String,
-    #[allow(dead_code)]
     test_profile_publish_token: String,
 }
 
 impl TestServer {
     /// Start a waddle-server with test configuration on dynamic ports.
-    #[allow(dead_code)]
     pub fn start() -> Self {
         Self::start_with_extra_accounts(&[])
     }
@@ -62,7 +90,6 @@ impl TestServer {
     /// that need state to survive a server restart (e.g. XEP-0237 T5).
     /// `database_url` is passed verbatim as `WADDLE_DATABASE_URL`, e.g.
     /// `format!("sqlite://{}?mode=rwc", path.display())`.
-    #[allow(dead_code)]
     pub fn start_persistent_with_extra_accounts(
         database_url: &str,
         extra_accounts: &[(&str, &str)],
@@ -75,7 +102,6 @@ impl TestServer {
     /// that need to exercise the production-shaped MAM read/write path
     /// against a real on-disk SQLite backend (rather than the
     /// `sqlite::memory:` shortcut the rest of the harness uses).
-    #[allow(dead_code)]
     pub fn start_with_persistent_mam(mam_database_url: &str) -> Self {
         Self::spawn(&[], None, Some(mam_database_url.to_string()), &[])
     }
@@ -85,7 +111,6 @@ impl TestServer {
     /// envs to make tests deterministic; this hook is the only path
     /// for tests that need a specific `WADDLE_*` or feature-toggling
     /// env present (e.g. `LIVEKIT_*` for A/V call tests).
-    #[allow(dead_code)]
     pub fn start_with_extra_envs(
         extra_accounts: &[(&str, &str)],
         extra_envs: &[(&str, &str)],
@@ -96,16 +121,6 @@ impl TestServer {
     /// Combine persistent SQLite with extra `WADDLE_*` env vars. Used
     /// by tests that need to point the harness at a fixed sqlite file
     /// AND tune janitor intervals (e.g. `WADDLE_NOTIFICATION_OUTBOX_JANITOR_INTERVAL`).
-    ///
-    /// `#[allow(dead_code)]` is required (matching the established
-    /// pattern on every other TestServer constructor in this file)
-    /// because each integration test compiles as its own crate; a
-    /// helper unused by a given test crate would otherwise fail
-    /// `cargo clippy --tests -- -D warnings`. The CLAUDE.md "never
-    /// add allow(...)" rule targets production code — there is no
-    /// structural way to satisfy it for shared test harness helpers
-    /// in the cargo integration-test layout.
-    #[allow(dead_code)]
     pub fn start_persistent_with_extra_envs(
         database_url: &str,
         extra_accounts: &[(&str, &str)],
@@ -125,7 +140,7 @@ impl TestServer {
         mam_database_url: Option<String>,
         extra_envs: &[(&str, &str)],
     ) -> Self {
-        let bin = env!("CARGO_BIN_EXE_waddle-server");
+        let bin = waddle_server_bin();
         let fixed_account_password = format!("ws-test-password-{}", uuid::Uuid::new_v4());
         let test_profile_publish_token = uuid::Uuid::new_v4().to_string();
         let extra_accounts_env = extra_accounts
@@ -141,7 +156,7 @@ impl TestServer {
         let upload_dir =
             std::env::temp_dir().join(format!("waddle-test-uploads-{}", uuid::Uuid::new_v4()));
 
-        let mut command = Command::new(bin);
+        let mut command = Command::new(&bin);
         for (key, _) in std::env::vars() {
             if key.starts_with("WADDLE_") || key.starts_with("OTEL_") {
                 command.env_remove(key);
@@ -196,7 +211,7 @@ impl TestServer {
         command.stdout(Stdio::null()).stderr(Stdio::null());
         let child = command
             .spawn()
-            .unwrap_or_else(|e| panic!("Failed to start waddle-server at {bin}: {e}"));
+            .unwrap_or_else(|e| panic!("Failed to start waddle-server at {}: {e}", bin.display()));
 
         // Poll the port file until the server writes it
         let deadline = Instant::now() + SERVER_STARTUP_TIMEOUT;
@@ -239,7 +254,6 @@ impl TestServer {
     /// Token the harness generated to authenticate against the
     /// test-only `/api/test/profile-publish` route. Pass it as the
     /// `X-Waddle-Test-Token` header value.
-    #[allow(dead_code)]
     pub fn test_profile_publish_token(&self) -> &str {
         &self.test_profile_publish_token
     }
@@ -252,13 +266,11 @@ impl TestServer {
     /// Base HTTP URL (no path). Useful for hitting test-only routes
     /// like `/api/test/profile-publish` that the harness gates on
     /// `WADDLE_TEST_FIXED_ACCOUNT_ENABLED=true`.
-    #[allow(dead_code)]
     pub fn http_base_url(&self) -> String {
         format!("http://127.0.0.1:{}", self.http_port)
     }
 
     /// The password for the fixed test account (username: "admin").
-    #[allow(dead_code)]
     pub fn fixed_account_password(&self) -> &str {
         &self.fixed_account_password
     }
@@ -464,7 +476,6 @@ impl WsXmppClient {
     }
 
     /// Receive frames until one matches the predicate. Returns all collected frames.
-    #[allow(dead_code)]
     pub async fn recv_until<F: Fn(&str) -> bool>(
         &mut self,
         predicate: F,
@@ -493,7 +504,6 @@ impl WsXmppClient {
         }
     }
 
-    #[allow(dead_code)]
     pub async fn close(mut self) -> Result<(), String> {
         let close =
             xmpp_parsers::minidom::Element::builder("close", "urn:ietf:params:xml:ns:xmpp-framing")
@@ -598,7 +608,6 @@ impl WsXmppClient {
     }
 }
 
-#[allow(dead_code)]
 pub async fn disco_info_query(
     client: &mut WsXmppClient,
     to: &str,
@@ -612,7 +621,6 @@ pub async fn disco_info_query(
     client.recv_matching(|frame| frame.contains(id)).await
 }
 
-#[allow(dead_code)]
 pub async fn version_query(
     client: &mut WsXmppClient,
     to: &str,
@@ -626,7 +634,6 @@ pub async fn version_query(
     client.recv_matching(|frame| frame.contains(id)).await
 }
 
-#[allow(dead_code)]
 pub async fn entity_time_query(
     client: &mut WsXmppClient,
     to: &str,
@@ -640,7 +647,6 @@ pub async fn entity_time_query(
     client.recv_matching(|frame| frame.contains(id)).await
 }
 
-#[allow(dead_code)]
 pub async fn last_activity_query(
     client: &mut WsXmppClient,
     to: &str,
@@ -690,7 +696,6 @@ pub fn extract_element_text(xml: &str, tag: &str) -> Option<String> {
     Some(content[..end_idx].trim().to_string())
 }
 
-#[allow(dead_code)]
 pub fn extract_attr_after(xml: &str, marker: &str, attr: &str) -> Option<String> {
     let start = xml.find(marker)?;
     let tail = &xml[start..];

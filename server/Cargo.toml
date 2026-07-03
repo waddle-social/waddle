@@ -10,6 +10,7 @@ members = [
     "crates/waddle-xmpp-client",
     "crates/waddle-xmpp-client-ffi",
     "crates/waddle-xmpp-client-wasm",
+    "crates/waddle-ws-test-support",
     "extensions/ai-chatbot",
     "extensions/decision-polls",
     "extensions/github",

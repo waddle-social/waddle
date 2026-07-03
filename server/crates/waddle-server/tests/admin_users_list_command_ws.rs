@@ -14,7 +14,7 @@
 //! handler that flipped a node identifier would have to flip it
 //! here too, which is the point.
 
-mod ws_common;
+use waddle_ws_test_support as ws_common;
 
 use tokio::sync::Mutex;
 use ws_common::{TestServer, WsXmppClient};

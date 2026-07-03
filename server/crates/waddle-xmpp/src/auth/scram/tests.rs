@@ -144,6 +144,57 @@ fn test_sasl_name_decoding() {
     assert_eq!(decode_sasl_name("a=2Cb=3Dc").unwrap(), "a,b=c");
 }
 
+/// RFC 5802 §5.1: the server rejects a client-first-message carrying an
+/// authzid — authorization-identity mapping is not implemented, so
+/// accepting one would silently authenticate a different identity.
+#[test]
+fn test_client_first_with_authzid_is_rejected() {
+    let mut server = ScramServer::new();
+    let result = server.process_client_first("n,a=admin,n=user,r=nonce123");
+    assert!(result.is_err());
+}
+
+/// RFC 5802 §5.1: the `c=` value in client-final MUST be the base64
+/// encoding of the GS2 header from client-first ("n,," → "biws").
+/// A mismatching value must fail authentication even with a valid proof.
+#[test]
+fn test_client_final_channel_binding_mismatch_is_rejected() {
+    let password = test_secret();
+    let salt = generate_salt();
+    let iterations = 4096;
+    let (stored_key, server_key) = generate_scram_keys(&password, &salt, iterations);
+
+    let mut server = ScramServer::with_salt(salt.clone(), iterations);
+    let client_nonce = "test-nonce";
+    let client_first = format!("n,,n=user,r={}", client_nonce);
+    let server_first = server.process_client_first(&client_first).unwrap();
+
+    // Compute a VALID proof, but over a tampered channel-binding value
+    // ("eSws" is base64("y,,") — a gs2 header the server never saw).
+    let salted_password = hi(password.as_bytes(), &salt, iterations);
+    let client_key = hmac_sha256(&salted_password, b"Client Key");
+    let client_final_without_proof = format!("c=eSws,r={}", server.combined_nonce);
+    let auth_message = format!(
+        "n=user,r={},{},{}",
+        client_nonce, server_first.message, client_final_without_proof
+    );
+    let client_signature = hmac_sha256(&stored_key, auth_message.as_bytes());
+    let client_proof: Vec<u8> = client_key
+        .iter()
+        .zip(client_signature.iter())
+        .map(|(a, b)| a ^ b)
+        .collect();
+    let client_final = format!(
+        "{},p={}",
+        client_final_without_proof,
+        BASE64_STANDARD.encode(&client_proof)
+    );
+
+    let result = server.process_client_final(&client_final, &stored_key, &server_key);
+    assert!(result.is_err());
+    assert_eq!(server.state(), &ScramState::Complete);
+}
+
 /// Test invalid SCRAM state transitions.
 #[test]
 fn test_invalid_state_transitions() {

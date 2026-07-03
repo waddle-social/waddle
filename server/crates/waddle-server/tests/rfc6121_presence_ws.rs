@@ -1,6 +1,6 @@
 //! RFC 6121 presence behavior over the active WebSocket C2S transport.
 
-mod ws_common;
+use waddle_ws_test_support as ws_common;
 
 use std::time::Duration;
 use ws_common::{TestServer, WsXmppClient};

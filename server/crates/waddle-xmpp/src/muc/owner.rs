@@ -19,7 +19,7 @@ use super::RoomConfig;
 /// permission policy (#415).
 pub const FIELD_PIN_PERMISSION: &str = "urn:waddle:roomconfig:pinpermission";
 
-use crate::xep::xep0004::{self, DataForm, Field, FieldOption, FieldType, FormType, IntoElement};
+use crate::xep::xep0004::{self, DataForm, Field, FieldOption, FieldType, FormType, ToElement};
 use crate::xep::FIELD_FORUM_MODE;
 
 /// Namespace for XEP-0004 Data Forms (re-exported for backward compatibility).
@@ -86,7 +86,7 @@ pub fn build_config_form(room: &MucRoom) -> Element {
                     PinPermission::Anyone.as_form_value(),
                 )),
         )
-        .into_element()
+        .to_element()
 }
 
 #[cfg(test)]

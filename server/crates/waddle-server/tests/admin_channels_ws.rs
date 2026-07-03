@@ -20,7 +20,7 @@
 //!   occupant *and* the kicked occupant, even when the admin V2 caller
 //!   is not joined to the room.
 
-mod ws_common;
+use waddle_ws_test_support as ws_common;
 
 use tokio::sync::Mutex;
 use ws_common::{TestServer, WsXmppClient};

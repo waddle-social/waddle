@@ -1,6 +1,6 @@
 //! XEP-0503 Spaces wire-conformance integration tests over WebSocket.
 
-mod ws_common;
+use waddle_ws_test_support as ws_common;
 
 use tokio::sync::Mutex;
 use waddle_xmpp::Stanza;

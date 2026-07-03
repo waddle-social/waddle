@@ -5,7 +5,7 @@
 //! master. Per ProtoXEP §"Calendar Items", components sharing a UID
 //! MUST live in the same item.
 
-mod ws_common;
+use waddle_ws_test_support as ws_common;
 
 use tokio::sync::Mutex;
 use ws_common::{TestServer, WsXmppClient};

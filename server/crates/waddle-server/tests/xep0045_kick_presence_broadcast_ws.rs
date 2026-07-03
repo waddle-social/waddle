@@ -29,7 +29,7 @@
 //! structurally so reordering of children or attribute-quoting changes
 //! do not flake the test.
 
-mod ws_common;
+use waddle_ws_test_support as ws_common;
 
 use tokio::sync::Mutex;
 use ws_common::{TestServer, WsXmppClient};

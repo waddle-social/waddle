@@ -1,6 +1,6 @@
 //! XEP-0444 reaction integration tests over WebSocket.
 
-mod ws_common;
+use waddle_ws_test_support as ws_common;
 
 use std::str::FromStr;
 use tokio::sync::Mutex;

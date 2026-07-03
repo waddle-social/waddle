@@ -24,7 +24,7 @@ pub fn message_to_string(msg: &xmpp_parsers::message::Message) -> Result<String,
     let thread_id = msg.thread.as_ref().map(|t| t.id.as_str());
     let mut element: Element = msg.clone().into();
 
-    crate::parser_utils::ensure_thread_element(&mut element, thread_id);
+    waddle_xmpp_core::parser_utils::ensure_thread_element(&mut element, thread_id);
 
     element_to_string(&element)
 }

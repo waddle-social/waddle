@@ -15,7 +15,7 @@
 //! 5. `spaces:delete <spB>` cascades to destroy the linked channel and
 //!    drop its link row.
 
-mod ws_common;
+use waddle_ws_test_support as ws_common;
 
 use tokio::sync::Mutex;
 use waddle_xmpp::xep::xep0106::escape_node;

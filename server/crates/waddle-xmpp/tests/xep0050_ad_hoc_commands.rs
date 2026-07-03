@@ -18,7 +18,7 @@
 
 use minidom::Element;
 use waddle_xmpp::disco::{server_features, Feature};
-use waddle_xmpp::xep::xep0004::{FromElement, IntoElement};
+use waddle_xmpp::xep::xep0004::{FromElement, ToElement};
 use waddle_xmpp::xep::xep0050::{
     is_command_request, parse_command_from_iq, Action as CommandAction,
     AllowedActions as CommandAllowedActions, Command, Note as CommandNote,
@@ -188,7 +188,7 @@ fn xep0050_allowed_actions_round_trip() {
     let actions = CommandAllowedActions::new(CommandAction::Next)
         .with_next()
         .with_complete();
-    let elem = actions.into_element();
+    let elem = actions.to_element();
     let round_tripped = CommandAllowedActions::from_element(&elem).expect("parses back");
     assert!(round_tripped.next);
     assert!(round_tripped.complete);
@@ -210,7 +210,7 @@ fn xep0050_command_round_trip_preserves_all_fields() {
         .with_note(CommandNote::info("Step 1 of 2"))
         .with_note(CommandNote::warn("This is destructive"));
 
-    let elem = command.into_element();
+    let elem = command.to_element();
     let parsed = Command::from_element(&elem).expect("round-trips");
     assert_eq!(parsed.node, "admin:wipe-room");
     assert_eq!(parsed.status, Some(CommandStatus::Executing));

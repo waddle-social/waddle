@@ -7,7 +7,7 @@
 /// its size to ~424 bytes vs. ~216 for the next-largest variant. Boxing
 /// keeps the enum compact (it's pattern-matched and cloned through a lot
 /// of dispatcher code) and silences the clippy
-/// `large_enum_variant` lint without an `#[allow(...)]` escape hatch.
+/// `large_enum_variant` lint without a lint-suppression escape hatch.
 #[derive(Debug, Clone)]
 pub enum Stanza {
     Message(xmpp_parsers::message::Message),

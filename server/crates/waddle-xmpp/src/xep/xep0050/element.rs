@@ -1,11 +1,11 @@
 use minidom::Element;
 
-use crate::xep::xep0004::{DataForm, FromElement, IntoElement, NS_DATA_FORMS};
+use crate::xep::xep0004::{DataForm, FromElement, ToElement, NS_DATA_FORMS};
 
 use super::{Action, AllowedActions, Command, CommandError, Note, NoteType, Status, NS_COMMANDS};
 
 // ---------------------------------------------------------------------------
-// FromElement / IntoElement
+// FromElement / ToElement
 // ---------------------------------------------------------------------------
 
 impl FromElement for Note {
@@ -25,8 +25,8 @@ impl FromElement for Note {
     }
 }
 
-impl IntoElement for Note {
-    fn into_element(&self) -> Element {
+impl ToElement for Note {
+    fn to_element(&self) -> Element {
         let mut builder = Element::builder("note", NS_COMMANDS).attr(
             minidom::rxml::xml_ncname!("type").to_owned(),
             self.note_type.as_str(),
@@ -59,8 +59,8 @@ impl FromElement for AllowedActions {
     }
 }
 
-impl IntoElement for AllowedActions {
-    fn into_element(&self) -> Element {
+impl ToElement for AllowedActions {
+    fn to_element(&self) -> Element {
         let mut builder = Element::builder("actions", NS_COMMANDS).attr(
             minidom::rxml::xml_ncname!("execute").to_owned(),
             self.execute_default.as_str(),
@@ -135,8 +135,8 @@ impl FromElement for Command {
     }
 }
 
-impl IntoElement for Command {
-    fn into_element(&self) -> Element {
+impl ToElement for Command {
+    fn to_element(&self) -> Element {
         let mut builder = Element::builder("command", NS_COMMANDS)
             .attr(minidom::rxml::xml_ncname!("node").to_owned(), &self.node);
 
@@ -159,15 +159,15 @@ impl IntoElement for Command {
         }
 
         if let Some(ref actions) = self.actions {
-            builder = builder.append(actions.into_element());
+            builder = builder.append(actions.to_element());
         }
 
         for note in &self.notes {
-            builder = builder.append(note.into_element());
+            builder = builder.append(note.to_element());
         }
 
         if let Some(ref form) = self.form {
-            builder = builder.append(form.into_element());
+            builder = builder.append(form.to_element());
         }
 
         builder.build()

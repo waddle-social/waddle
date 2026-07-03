@@ -1,6 +1,6 @@
 //! Integration suite for Waddle group-DM provisioning over XEP-0050.
 
-mod ws_common;
+use waddle_ws_test_support as ws_common;
 
 use std::{
     str::FromStr,

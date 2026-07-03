@@ -1,6 +1,6 @@
 //! Waddle in-call signaling integration tests over WebSocket.
 
-mod ws_common;
+use waddle_ws_test_support as ws_common;
 
 use minidom::Element;
 use tokio::sync::Mutex;

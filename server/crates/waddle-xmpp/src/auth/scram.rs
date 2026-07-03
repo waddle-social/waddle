@@ -169,6 +169,13 @@ impl ScramServer {
             return Err(XmppError::auth_failed("Channel binding not supported"));
         }
 
+        // RFC 5802 §5.1: authzid support is optional; we do not implement
+        // authorization-identity mapping, so reject rather than silently
+        // authenticating as a different identity than requested.
+        if parsed.authzid.is_some() {
+            return Err(XmppError::auth_failed("SCRAM authzid is not supported"));
+        }
+
         // Store username
         self.username = parsed.username.clone();
 
@@ -217,6 +224,16 @@ impl ScramServer {
 
         // Parse client-final-message
         let parsed = parse_client_final(client_final)?;
+
+        // RFC 5802 §5.1: the `c=` value MUST be the base64 encoding of the
+        // GS2 header from client-first. process_client_first only accepts
+        // the flag 'n' with no authzid, i.e. the header "n,,", whose
+        // base64 encoding is the constant below.
+        const GS2_HEADER_NO_CHANNEL_BINDING_B64: &str = "biws";
+        if parsed.channel_binding != GS2_HEADER_NO_CHANNEL_BINDING_B64 {
+            self.state = ScramState::Complete;
+            return Err(XmppError::auth_failed("Channel binding mismatch"));
+        }
 
         // Verify the nonce matches
         if parsed.nonce != self.combined_nonce {

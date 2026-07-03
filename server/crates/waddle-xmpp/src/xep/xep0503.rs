@@ -17,7 +17,7 @@
 
 use minidom::Element;
 
-use super::xep0004::{DataForm, Field, FieldType, FormType, IntoElement};
+use super::xep0004::{DataForm, Field, FieldType, FormType, ToElement};
 use crate::pubsub::stanzas::PubSubItem;
 use crate::xep::xep0402;
 use crate::{managed_room_jid, ChannelInfo, ChannelType, SpaceDetails, XmppError};
@@ -155,7 +155,7 @@ pub fn build_spaces_metadata_form_for_requester_with_owners(
         ));
     }
 
-    form.into_element()
+    form.to_element()
 }
 
 /// Build authenticated server role metadata for XEP-0030 disco#info.
@@ -166,7 +166,7 @@ pub fn build_server_role_form(role: SpaceAffiliation) -> Element {
             "waddle#server_affiliation",
             role.as_str(),
         ))
-        .into_element()
+        .to_element()
 }
 
 /// Build the XEP-0503 space node IRI used by room disco metadata.
@@ -185,7 +185,7 @@ pub fn build_space_parent_form(spaces_service: &str, node: &str) -> Element {
             "parent",
             build_space_node_iri(spaces_service, node),
         ))
-        .into_element()
+        .to_element()
 }
 
 /// Build the MUC roominfo compatibility form for room disco metadata.
@@ -203,7 +203,7 @@ pub fn build_muc_roominfo_form(
     if let Some(description) = description.filter(|value| !value.trim().is_empty()) {
         form = form.add_field(Field::text_single("muc#roominfo_description", description));
     }
-    form.into_element()
+    form.to_element()
 }
 
 /// Build the MUC roominfo compatibility form for XEP-0503 parent metadata.
@@ -242,7 +242,7 @@ pub fn build_room_metadata_form(channel_type: &str, pin_permission: &str) -> Ele
             crate::muc::owner::FIELD_PIN_PERMISSION,
             pin_permission,
         ))
-        .into_element()
+        .to_element()
 }
 
 /// Build a simple `pubsub#type` data form indicating a spaces node.
@@ -255,7 +255,7 @@ pub fn build_spaces_type_form() -> Element {
             "http://jabber.org/protocol/pubsub#meta-data",
         ))
         .add_field(Field::text_single("pubsub#type", NS_SPACES))
-        .into_element()
+        .to_element()
 }
 
 #[cfg(test)]

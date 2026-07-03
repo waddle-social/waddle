@@ -182,9 +182,13 @@ pub struct RegisterDeviceResult {
 /// genuinely needed (e.g. a different runtime), open an issue first
 /// rather than relying on the trait's `pub` visibility — the shape
 /// here may evolve as the composer gains new stages.
-#[allow(async_fn_in_trait)]
+/// Deliberately NOT `+ Send`: the WASM driver's future wraps a
+/// `JsFuture` and is single-threaded by construction. Native callers
+/// that need `Send` futures get them structurally because the
+/// `ClientHandle` impl's future is `Send` anyway.
 pub trait CommandDriver {
-    async fn send_iq(&self, iq: Element) -> ClientResult<Element>;
+    fn send_iq(&self, iq: Element)
+        -> impl std::future::Future<Output = ClientResult<Element>> + '_;
 }
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]

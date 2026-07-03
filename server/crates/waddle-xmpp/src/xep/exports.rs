@@ -1,6 +1,6 @@
 pub use super::xep0004::{
     find_data_form, is_data_form, DataForm, DataFormError, Field, FieldOption, FieldType, FormType,
-    FromElement, IntoElement, NS_DATA_FORMS,
+    FromElement, ToElement, NS_DATA_FORMS,
 };
 
 pub use super::xep0012::{build_last_activity_response, is_last_activity_query, NS_LAST_ACTIVITY};

@@ -1,6 +1,6 @@
 //! XEP-0092 software version over the active WebSocket C2S transport.
 
-mod ws_common;
+use waddle_ws_test_support as ws_common;
 
 use ws_common::{
     disco_info_query, extract_element_text, version_query, TestServer, WsXmppClient, TEST_GIT_SHA,

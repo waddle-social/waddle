@@ -113,7 +113,6 @@ impl VCardStore {
     /// Delete the vCard for a user.
     ///
     /// Returns true if a vCard was deleted, false if no vCard existed.
-    #[allow(dead_code)]
     pub async fn delete(&self, jid: &jid::BareJid) -> Result<bool, VCardError> {
         let jid_str = jid.to_string();
         debug!(jid = %jid_str, "Deleting vCard");

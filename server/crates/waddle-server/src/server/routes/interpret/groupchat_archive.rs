@@ -292,23 +292,40 @@ pub(super) async fn scrub_unacked_for_tombstone(
     }
 }
 
+/// Inputs for [`project_groupchat_inbox`]: one `(owner, room, message)`
+/// projection against the inbox storage plus the delivery context it
+/// needs to push XEP-0430 updates and persist notification recovery.
+pub(super) struct GroupchatInboxProjectionInputs<'a> {
+    pub inbox_storage: &'a Arc<dyn InboxStorage>,
+    pub connection_registry: &'a waddle_xmpp::registry::ConnectionRegistry,
+    pub owner: &'a BareJid,
+    pub room: &'a BareJid,
+    pub message: &'a Message,
+    pub is_recipient: bool,
+    pub thread: &'a Option<GroupchatThreadProjection>,
+    pub dispatch_timestamp: i64,
+    pub notification_recovery: Option<waddle_xmpp::inbox::storage::GroupchatNotificationRecovery>,
+}
+
 /// Apply the `(owner, room, message)` projection against the inbox
 /// storage. Mirrors the legacy
 /// `deliver_groupchat_via_room_actor`'s groupchat
 /// channel + thread upserts and the XEP-0430 inbox push to the
 /// owner's other resources.
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn project_groupchat_inbox(
-    inbox_storage: &Arc<dyn InboxStorage>,
-    connection_registry: &waddle_xmpp::registry::ConnectionRegistry,
-    owner: &BareJid,
-    room: &BareJid,
-    message: &Message,
-    is_recipient: bool,
-    thread: &Option<GroupchatThreadProjection>,
-    dispatch_timestamp: i64,
-    notification_recovery: Option<waddle_xmpp::inbox::storage::GroupchatNotificationRecovery>,
+    inputs: GroupchatInboxProjectionInputs<'_>,
 ) -> GroupchatInboxProjectionOutcome {
+    let GroupchatInboxProjectionInputs {
+        inbox_storage,
+        connection_registry,
+        owner,
+        room,
+        message,
+        is_recipient,
+        thread,
+        dispatch_timestamp,
+        notification_recovery,
+    } = inputs;
     let mut outcome = GroupchatInboxProjectionOutcome::default();
     let entry = groupchat_entry(room.clone(), message, dispatch_timestamp);
     let channel_recovery = if thread.is_none() {

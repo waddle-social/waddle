@@ -4,7 +4,7 @@
 //! Spec: `docs/superpowers/specs/2026-05-17-threads-design.md`.
 //! Plan: `docs/superpowers/plans/2026-05-17-threads-implementation.md` Task 5.
 
-mod ws_common;
+use waddle_ws_test_support as ws_common;
 
 use std::str::FromStr;
 use tokio::sync::Mutex;

@@ -18,7 +18,7 @@
 //!    accelerated via `WADDLE_NOTIFICATION_OUTBOX_JANITOR_INTERVAL=1`
 //!    so the test stays within a reasonable wall-clock budget.
 
-mod ws_common;
+use waddle_ws_test_support as ws_common;
 
 use std::{
     str::FromStr,

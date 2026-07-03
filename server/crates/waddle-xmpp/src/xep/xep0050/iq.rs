@@ -1,7 +1,7 @@
 use minidom::Element;
 use xmpp_parsers::iq::Iq;
 
-use crate::xep::xep0004::{FromElement, IntoElement};
+use crate::xep::xep0004::{FromElement, ToElement};
 
 use super::{Command, CommandError, NODE_COMMANDS, NS_COMMANDS};
 
@@ -30,7 +30,7 @@ pub fn build_command_result(original_iq: &Iq, command: &Command) -> Iq {
         from: original_iq.to().cloned(),
         to: original_iq.from().cloned(),
         id: original_iq.id().to_string(),
-        payload: Some(command.into_element()),
+        payload: Some(command.to_element()),
     }
 }
 

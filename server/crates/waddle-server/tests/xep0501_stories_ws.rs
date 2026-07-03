@@ -5,7 +5,7 @@
 //! disco#info, and accepts publish + items-query for Atom `<entry/>`
 //! payloads built per XEP-0501.
 
-mod ws_common;
+use waddle_ws_test_support as ws_common;
 
 use tokio::sync::Mutex;
 use ws_common::{TestServer, WsXmppClient};
