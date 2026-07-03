@@ -189,13 +189,26 @@ conventional commits rather than the per-phase PR series assumed above.
 - **A1** — done: FFI JID parsing replaces the hand-rolled Swift version;
   `AppModel` split into feature models; `ChatWorkspaceView` subviews
   extracted. Validated via darwin CI only (no local xcodebuild).
-- **T** — done: `tokens.css` is authoritative; generator emits `brand.css`
-  and `WaddleTheme.swift` with GENERATED headers; idempotence enforced as
-  a cuenv CI task.
+- **T** — done: `chat/src/styles/global/tokens.css` is authoritative;
+  `scripts/generate-design-tokens.mjs` emits the website
+  `brand-palette.css` and the apple `AccentColor.colorset` with generated
+  markers (`WaddleTheme.swift` consumes the colorset rather than being
+  generated); drift is gated by a `--check` cuenv task in the chat PR
+  pipeline whose trigger paths include the generator and both outputs.
+
+Adversarial-review rounds additionally fixed: XEP-0377 report reasons
+(bare tokens → registered URNs), XEP-0447 disposition (tri-state per §4),
+SCRAM authzid handling (RFC 5802 self-referential authzid accepted;
+client-final `c=` verified against the actual GS2 header), and hardened
+the suite-conformance guard (exact prefix + non-empty). Further wire-shape
+deviations found by the audit (0433, 0448 placement, 0488) are tracked in
+issue #1150 alongside 0452/0500/0502/0446.
 
 Known deviations from the letter of the plan: work landed as one PR
 (#1085) instead of ~30 small PRs; S3's split landed as a single commit
 rather than separate test-move/prod-split commits (the intermediate states
 existed only in the working tree); dev profile now uses
 `line-tables-only` debuginfo after full debuginfo repeatedly exhausted CI
-containers' disks.
+containers' disks. Intentional behavior changes beyond pure refactoring,
+all verified by tests: the 0401 invite purge fix, the 0377/0447/SCRAM
+conformance fixes above.
