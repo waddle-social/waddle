@@ -138,4 +138,6 @@ codegen-units = 4
 
 [profile.dev]
 opt-level = 0
-debug = true
+# line-tables-only keeps usable backtraces while cutting test-binary size
+# roughly 5-10x; full debuginfo repeatedly exhausted local dev disks.
+debug = "line-tables-only"
