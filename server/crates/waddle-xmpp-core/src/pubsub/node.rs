@@ -341,6 +341,21 @@ impl NodeConfig {
         config
     }
 
+    /// Whether a node's access model is pinned to `whitelist` by its
+    /// well-known PEP defaults (issue #1094).
+    ///
+    /// Fan-out privacy is derived from the persisted `access_model`,
+    /// so nodes whose well-known default is `whitelist` must never be
+    /// stored with anything weaker — neither via an owner
+    /// configure-set nor as a legacy row created before the default
+    /// existed. Consumers use this single predicate for both the
+    /// configure-time clamp and the read-time backfill so the pin set
+    /// always tracks the `pep_for_node` table and never becomes a
+    /// second hand-maintained node-name list.
+    pub fn pins_whitelist_access(node: &str) -> bool {
+        Self::pep_for_node(node).access_model == AccessModel::Whitelist
+    }
+
     /// Defaults for the Waddle story-reads PEP node.
     ///
     /// The single `current` item is the user's private story read-state
