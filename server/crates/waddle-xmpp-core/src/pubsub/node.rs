@@ -335,8 +335,55 @@ impl NodeConfig {
             config = Self::waddle_dm_bookmarks_defaults();
         } else if node == crate::waddle_status_preference::PEP_NODE_WADDLE_STATUS_PREFERENCE {
             config = Self::waddle_status_preference_defaults();
+        } else if node == crate::waddle_story_reads::PEP_NODE_WADDLE_STORY_READS {
+            config = Self::waddle_story_reads_defaults();
         }
         config
+    }
+
+    /// Whether a node's access model is pinned to `whitelist` by its
+    /// well-known PEP defaults (issue #1094).
+    ///
+    /// Fan-out privacy is derived from the persisted `access_model`,
+    /// so nodes whose well-known default is `whitelist` must never be
+    /// stored with anything weaker — neither via an owner
+    /// configure-set nor as a legacy row created before the default
+    /// existed. Consumers use this single predicate for both the
+    /// configure-time clamp and the read-time backfill so the pin set
+    /// always tracks the `pep_for_node` table and never becomes a
+    /// second hand-maintained node-name list.
+    pub fn pins_whitelist_access(node: &str) -> bool {
+        Self::pep_for_node(node).access_model == AccessModel::Whitelist
+    }
+
+    /// Defaults for the Waddle story-reads PEP node.
+    ///
+    /// The single `current` item is the user's private story read-state
+    /// (which stories they have seen, and when) — no roster contact may
+    /// read it. The wasm client requests exactly this shape via
+    /// publish-options, but publish-options are not enforced at the
+    /// server's Publish arm, so the auto-create default MUST already be
+    /// `whitelist` + `never`: with the generic `pep_default()`
+    /// (`access_model = presence`) the access_model-derived fan-out
+    /// gate (issue #1094) would let the XEP-0163 §3 roster pass deliver
+    /// read-state to any contact advertising
+    /// `urn:waddle:story:reads:0+notify`.
+    ///
+    /// `notify_retract` / `notify_delete` are `false` because the
+    /// server does not emit those events for this node; read-state
+    /// changes are always republishes of the `current` item.
+    pub fn waddle_story_reads_defaults() -> Self {
+        Self {
+            access_model: AccessModel::Whitelist,
+            publish_model: PublishModel::Publishers,
+            node_type: None,
+            max_items: 1,
+            persist_items: true,
+            deliver_payloads: true,
+            notify_retract: false,
+            notify_delete: false,
+            send_last_published_item: SendLastPublishedItem::Never,
+        }
     }
 
     /// Defaults for the Waddle status-preference PEP node (ADR-010

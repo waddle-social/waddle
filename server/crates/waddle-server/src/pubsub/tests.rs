@@ -387,6 +387,118 @@ async fn dm_bookmark_node_config_clamps_unbounded_max_items_and_pins_whitelist()
 }
 
 #[tokio::test]
+async fn well_known_private_pep_nodes_pin_whitelist_across_reconfigure() {
+    // Issue #1094: fan-out privacy is derived from the stored
+    // access_model, so every well-known whitelist PEP node must resist
+    // an owner configure-set flipping it open — otherwise one IQ
+    // re-enables the roster fan-out and non-owner item reads the
+    // whitelist default exists to prevent.
+    use waddle_xmpp_core::pubsub::AccessModel;
+    let private_nodes = [
+        waddle_xmpp_core::pubsub::pep::PEP_NODE_MDS_DISPLAYED,
+        waddle_xmpp_core::pubsub::pep::PEP_NODE_WADDLE_DND,
+        waddle_xmpp_core::waddle_story_reads::PEP_NODE_WADDLE_STORY_READS,
+        waddle_xmpp_core::waddle_status_preference::PEP_NODE_WADDLE_STATUS_PREFERENCE,
+    ];
+
+    let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("storage");
+    let owner = jid("alice@example.com");
+
+    for pep_node in private_nodes {
+        let (node, _) = storage
+            .get_or_create_node(&owner, pep_node)
+            .await
+            .expect("node");
+        assert_eq!(
+            node.config.access_model,
+            AccessModel::Whitelist,
+            "{pep_node} must auto-create whitelist"
+        );
+
+        let mut config = node.config.clone();
+        config.access_model = AccessModel::Open;
+        storage
+            .update_node_config(&owner, pep_node, &config)
+            .await
+            .expect("reconfigure");
+        let node = storage
+            .get_node(&owner, pep_node)
+            .await
+            .expect("node lookup")
+            .expect("node exists");
+        assert_eq!(
+            node.config.access_model,
+            AccessModel::Whitelist,
+            "{pep_node} access_model must be forced back to whitelist"
+        );
+    }
+}
+
+#[tokio::test]
+async fn legacy_presence_row_on_pinned_private_node_is_backfilled_to_whitelist_on_read() {
+    // Issue #1094 follow-up: fan-out privacy is derived from the
+    // PERSISTED access_model, so a well-known private node created
+    // before its whitelist default existed (persisted as `presence`)
+    // would silently re-enter roster+CAPS fan-out. The read path must
+    // lazily backfill such rows: return whitelist AND rewrite the
+    // stored row so every later reader (fan-out, authz) sees it too.
+    use waddle_xmpp_core::pubsub::AccessModel;
+    let reads_node = waddle_xmpp_core::waddle_story_reads::PEP_NODE_WADDLE_STORY_READS;
+
+    let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("storage");
+    let owner = jid("alice@example.com");
+    let (_, created) = storage
+        .get_or_create_node(&owner, reads_node)
+        .await
+        .expect("node");
+    assert!(created);
+
+    // Simulate the pre-deploy legacy row: the pin in
+    // update_node_config makes this state unreachable via the public
+    // API, so write it directly.
+    let db = storage.database();
+    let conn = db.guard().await.expect("guard");
+    conn.execute(
+        "UPDATE pubsub_nodes SET access_model = 'presence' WHERE owner_jid = ? AND node_name = ?",
+        crate::db_params![owner.to_string(), reads_node],
+    )
+    .await
+    .expect("write legacy access_model");
+    drop(conn);
+
+    let node = storage
+        .get_node(&owner, reads_node)
+        .await
+        .expect("node lookup")
+        .expect("node exists");
+    assert_eq!(
+        node.config.access_model,
+        AccessModel::Whitelist,
+        "read path must backfill a legacy presence row to whitelist"
+    );
+
+    // The heal must be persisted, not just patched in the returned value.
+    let conn = db.guard().await.expect("guard");
+    let mut rows = conn
+        .query(
+            "SELECT access_model FROM pubsub_nodes WHERE owner_jid = ? AND node_name = ?",
+            crate::db_params![owner.to_string(), reads_node],
+        )
+        .await
+        .expect("row query");
+    let row = rows.next().await.expect("row result").expect("row");
+    let stored: String = row.get(0).expect("access_model column");
+    assert_eq!(
+        stored, "whitelist",
+        "backfill must rewrite the persisted row"
+    );
+}
+
+#[tokio::test]
 async fn xep0402_bookmark_node_config_forces_private_durable_fields() {
     let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
         .await

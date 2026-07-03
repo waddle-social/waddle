@@ -1,5 +1,5 @@
 use jid::BareJid;
-use waddle_xmpp::pubsub::{NodeConfig, PubSubNode};
+use waddle_xmpp::pubsub::{AccessModel, NodeConfig, PubSubNode};
 use waddle_xmpp::XmppError;
 
 use super::{
@@ -77,7 +77,32 @@ impl DatabasePubSubStorage {
         else {
             return Ok(None);
         };
-        Ok(Some(Self::decode_node(&row)?))
+        let mut node = Self::decode_node(&row)?;
+
+        // Lazy backfill (issue #1094): fan-out privacy is derived from
+        // the PERSISTED access_model, so a well-known private node
+        // created before its whitelist default existed (stored as
+        // `presence`) would silently re-enter roster+CAPS fan-out. The
+        // configure-time clamp in `bounded_node_config` only fires on
+        // updates; heal legacy rows here on read so every consumer
+        // (fan-out, authz, items) sees the pinned model. The UPDATE
+        // runs once per stale row — steady state is a pure in-memory
+        // comparison.
+        if NodeConfig::pins_whitelist_access(node_name)
+            && node.config.access_model != AccessModel::Whitelist
+        {
+            self.execute(
+                "UPDATE pubsub_nodes SET access_model = ? WHERE owner_jid = ? AND node_name = ?",
+                crate::db_params![
+                    AccessModel::Whitelist.to_string(),
+                    owner.to_string(),
+                    node_name
+                ],
+            )
+            .await?;
+            node.config.access_model = AccessModel::Whitelist;
+        }
+        Ok(Some(node))
     }
 
     pub(super) async fn delete_node_impl(
@@ -346,7 +371,16 @@ fn bounded_node_config(node_name: &str, config: &NodeConfig) -> NodeConfig {
     if is_dm_bookmarks_node(node_name) {
         return config.clone().normalize_waddle_dm_bookmarks();
     }
-    config.clone()
+    let mut config = config.clone();
+    // Well-known private PEP nodes (whitelist in `NodeConfig::pep_for_node`:
+    // MDS per XEP-0490 §3, DND, story reads, status preference) must stay
+    // whitelist: an owner configure-set flipping the access model would
+    // re-enable the #1094 roster fan-out and non-owner item reads. Same
+    // predicate as the read-path backfill in `get_node_impl`.
+    if NodeConfig::pins_whitelist_access(node_name) {
+        config.access_model = AccessModel::Whitelist;
+    }
+    config
 }
 
 fn is_bookmarks_node(node_name: &str) -> bool {
