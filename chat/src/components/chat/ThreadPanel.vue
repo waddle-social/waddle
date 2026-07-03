@@ -1,11 +1,10 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch, type ComponentPublicInstance, type Ref } from "vue";
-import { ArrowDown, ArrowUp, X, CornerDownRight, ChevronRight, ChevronLeft } from "lucide-vue-next";
+import { ArrowDown, ArrowUp, CornerDownRight } from "lucide-vue-next";
 import { useJumpToLiveEdge } from "@/ui/use-jump-to-live-edge";
-import AppAvatar from "@/components/ui/AppAvatar.vue";
-import CallAnchorCard from "@/components/calls/CallAnchorCard.vue";
 import MessageCard from "@/components/chat/MessageCard.vue";
 import MessageComposer from "@/components/chat/MessageComposer.vue";
+import ThreadPanelHeader from "@/components/chat/ThreadPanelHeader.vue";
 import VirtualTimeline from "@/components/chat/VirtualTimeline.vue";
 import type { ExtensionAnnotationAction, TimelineMessage, MarkupSpan, MessageReference } from "@/lib/chat-ui";
 import type { MentionCandidate } from "@/lib/mentions";
@@ -14,18 +13,35 @@ import type { OccupantAuthority, OccupantHat, OccupantPresence, RoomAuthority, R
 import type { MessageThreadEntry, MessageThreadIndex } from "@/channels/threads";
 import { createScrollFrameScheduler } from "@/ui/scroll-frame";
 import { useScrollDirectionPreference } from "@/preferences/scroll-direction";
-import {
-  isTopPinnedScrollDirection,
-  orderTimelineForScrollDirection,
-  type ScrollDirectionMode,
-} from "@/lib/scroll-direction";
+import { isTopPinnedScrollDirection, type ScrollDirectionMode } from "@/lib/scroll-direction";
 import { latestRemoteMessageIdFor } from "@/lib/timeline-state";
 import { createPinnedEdgeScroller } from "@/lib/pinned-edge-scroll";
 import { useChatWindowVisibility } from "@/shell/window-visibility";
-import { formatTimelineDayDivider, isSameTimelineDay } from "@/channels/timeline";
+import { formatTimelineDayDivider } from "@/channels/timeline";
 import { useCallAnchorCardState } from "@/lib/call-thread-anchor";
 import { buildReplyChildThreadTargets, resolveReplyChildThreadTarget } from "@/lib/thread-child-target";
 import type { CallMedia } from "@/lib/calls/types";
+import { currentDayMarkerLabelFor } from "./current-day-marker";
+import { buildMessageDisplayMeta } from "./timeline-display-meta";
+import {
+  chronologicalThreadReplies,
+  newestThreadMessageId as newestThreadMessageIdFor,
+  olderRepliesSentinelPosition,
+  orderThreadChildren,
+  orderThreadMessages,
+  threadEdgeMessage,
+} from "./thread-panel-messages";
+import {
+  formatThreadLastActivity,
+  threadBreadcrumbLabels,
+  threadLastActivityFor,
+  threadParticipantsFor,
+  threadPreviewFor,
+} from "./thread-lobby-meta";
+import { useThreadComposer } from "./composables/use-thread-composer";
+import { useThreadDisplayedTracking } from "./composables/use-thread-displayed-tracking";
+import { useThreadOlderLoadRestore } from "./composables/use-thread-older-load-restore";
+import { useThreadTargetScroll } from "./composables/use-thread-target-scroll";
 
 const props = defineProps<{
   threadStack: string[];
@@ -106,64 +122,22 @@ const activeEntry = computed(() =>
   activeThreadId.value ? props.resolveEntry(activeThreadId.value) ?? null : null,
 );
 
-const orderedChildren = computed(() => {
-  const children = activeEntry.value?.directChildren ?? [];
-  return orderTimelineForScrollDirection(children, scrollDirectionMode.value);
-});
-const orderedThreadMessages = computed(() => {
-  const root = activeEntry.value?.root;
-  if (!root) return [...orderedChildren.value];
-  // The root is always the oldest message in the thread. Place it at whichever
-  // end of the rendered list represents "oldest" for the active scroll mode:
-  // bottom in social/top-pinned mode, top in chat/bottom-pinned mode.
-  return isTopPinnedScrollDirection(scrollDirectionMode.value)
-    ? [...orderedChildren.value, root]
-    : [root, ...orderedChildren.value];
-});
-const chronologicalThreadMessages = computed(() => {
-  const entry = activeEntry.value;
-  if (!entry) return [];
-  const threadId = activeThreadId.value;
-  if (!threadId) return [];
-  return entry.directChildren.filter((message) => message.threadId === threadId);
-});
-const newestThreadMessageId = computed(() =>
-  activeEntry.value?.directChildren.at(-1)?.id
-    ?? activeEntry.value?.root?.id
-    ?? null,
+const orderedChildren = computed(() =>
+  orderThreadChildren(activeEntry.value, scrollDirectionMode.value),
 );
+const orderedThreadMessages = computed(() =>
+  orderThreadMessages(activeEntry.value, orderedChildren.value, scrollDirectionMode.value),
+);
+const newestThreadMessageId = computed(() => newestThreadMessageIdFor(activeEntry.value));
 const replyChildThreadTargets = computed(() =>
   buildReplyChildThreadTargets(props.threadIndex, activeThreadId.value),
 );
 const latestRemoteThreadMessageId = computed(() =>
-  latestRemoteMessageIdFor(chronologicalThreadMessages.value),
+  latestRemoteMessageIdFor(chronologicalThreadReplies(activeEntry.value, activeThreadId.value)),
 );
 
-// Burst window matches the main feed (ContentArea.vue): same author + < 5 min
-// apart + same day, no intervening other-author message in rendered order.
-const BURST_WINDOW_MS = 5 * 60 * 1000;
-
-const threadDisplayMeta = computed(() => {
-  const grouped = new Set<string>();
-  const dayDivider = new Set<string>();
-  const sequence = orderedThreadMessages.value;
-  for (let i = 0; i < sequence.length; i++) {
-    const cur = sequence[i];
-    if (!cur) continue;
-    const prev = i > 0 ? sequence[i - 1] : null;
-    if (!prev) continue;
-    const sameDay = isSameTimelineDay(prev.createdAt, cur.createdAt);
-    if (!sameDay) dayDivider.add(cur.id);
-    if (
-      sameDay
-      && prev.author === cur.author
-      && Math.abs(new Date(cur.createdAt).getTime() - new Date(prev.createdAt).getTime()) < BURST_WINDOW_MS
-    ) {
-      grouped.add(cur.id);
-    }
-  }
-  return { grouped, dayDivider };
-});
+// Burst grouping and day dividers match the main feed (ContentArea.vue).
+const threadDisplayMeta = computed(() => buildMessageDisplayMeta(orderedThreadMessages.value));
 
 function isGroupedFollowUp(messageId: string): boolean {
   return threadDisplayMeta.value.grouped.has(messageId);
@@ -180,13 +154,9 @@ function dayDividerLabel(createdAt: string): string {
 const isTopPinned = computed(() =>
   isTopPinnedScrollDirection(scrollDirectionMode.value),
 );
-// Older replies paginate at the chronologically-older end of the list. In
-// social mode the root is appended after the loaded replies, so the sentinel
-// has to sit one slot inboard of the trailing root rather than below it.
-const olderSentinelPosition = computed<"start" | "end" | "before-end">(() => {
-  if (scrollDirectionMode.value !== "social") return "start";
-  return activeEntry.value?.root ? "before-end" : "end";
-});
+const olderSentinelPosition = computed(() =>
+  olderRepliesSentinelPosition(scrollDirectionMode.value, Boolean(activeEntry.value?.root)),
+);
 
 const scrollContainerRef = ref<HTMLElement | null>(null);
 const virtualTimelineEdgeScroller: Ref<((mode: ScrollDirectionMode) => boolean | Promise<boolean>) | null> = ref(null);
@@ -196,20 +166,28 @@ const pinnedEdgeScroller = createPinnedEdgeScroller({
   virtualScroll: virtualTimelineEdgeScroller,
 });
 const currentDayMarkerLabel = ref("");
-const draft = ref("");
-const replyingTo = ref<{ id: string; author: string; body?: string } | null>(null);
-let olderLoadSnapshot: {
-  element: HTMLElement;
-  height: number;
-  mode: ScrollDirectionMode;
-  threadId: string | null;
-  top: number;
-  token: number;
-} | null = null;
-let olderLoadRestoreToken = 0;
 
-type ComposerHandle = { focus: () => void };
-const composerRef = ref<ComposerHandle | null>(null);
+const {
+  draft,
+  replyingTo,
+  setComposerRef,
+  beginReplyInThread,
+  cancelReplyInThread,
+  resetForThreadSwitch,
+  onSend,
+  onSelectGif,
+  onTyping,
+} = useThreadComposer({
+  activeThreadId: () => activeThreadId.value,
+  parentThreadId: () => parentThreadId.value,
+  rootMessage: () => activeEntry.value?.root ?? null,
+  hideComposer: () => props.hideComposer ?? false,
+  emitSend: (body, markup, references, files, replyTo, threadOverride, linkPreview) =>
+    emit("send", body, markup, references, files, replyTo, threadOverride, linkPreview),
+  emitSelectGif: (url, threadOverride) => emit("selectGif", url, threadOverride),
+  emitTyping: (threadOverride) => emit("typing", threadOverride),
+});
+
 type VirtualTimelineHandle = ComponentPublicInstance & {
   scrollElement: HTMLDivElement | null;
   scrollToMessageId: (messageId: string, align?: "start" | "center" | "end") => Promise<boolean>;
@@ -238,66 +216,13 @@ function onThreadScroll() {
   threadScrollFrame.schedule();
 }
 
-function setComposerRef(el: ComposerHandle | null) {
-  composerRef.value = el;
-}
-
 async function scrollToPinnedEdge() {
   await pinnedEdgeScroller.scrollToPinnedEdge({ settle: true });
   updateCurrentDayMarker();
 }
 
-function newestRenderedMessage() {
-  return orderedChildren.value[0]
-    ?? activeEntry.value?.root
-    ?? null;
-}
-
-function oldestRenderedMessage() {
-  const children = orderedChildren.value;
-  return children[children.length - 1]
-    ?? activeEntry.value?.root
-    ?? null;
-}
-
-function activeEdgeMessage(mode: ScrollDirectionMode) {
-  return isTopPinnedScrollDirection(mode)
-    ? newestRenderedMessage()
-    : (orderedThreadMessages.value[orderedThreadMessages.value.length - 1] ?? oldestRenderedMessage());
-}
-
 function updateCurrentDayMarker() {
-  const container = scrollContainerRef.value;
-  if (!container) {
-    currentDayMarkerLabel.value = "";
-    return;
-  }
-
-  const markerEls = [
-    ...container.querySelectorAll<HTMLElement>("[data-day-marker-created-at], [data-message-created-at]"),
-  ];
-  if (markerEls.length === 0) {
-    currentDayMarkerLabel.value = "";
-    return;
-  }
-
-  const containerTop = container.getBoundingClientRect().top;
-  const probeTop = containerTop + 1;
-  let current = markerEls[0];
-  for (const el of markerEls) {
-    const rect = el.getBoundingClientRect();
-    if (rect.bottom < probeTop) {
-      current = el;
-      continue;
-    }
-    if (rect.top <= probeTop || current === markerEls[0]) {
-      current = el;
-    }
-    break;
-  }
-
-  const createdAt = current.dataset.dayMarkerCreatedAt ?? current.dataset.messageCreatedAt;
-  currentDayMarkerLabel.value = createdAt ? formatTimelineDayDivider(createdAt) : "";
+  currentDayMarkerLabel.value = currentDayMarkerLabelFor(scrollContainerRef.value);
 }
 
 function setScrollContainerRef(el: HTMLElement | null) {
@@ -310,7 +235,12 @@ const setVirtualTimelineRef = (instance: VirtualTimelineHandle | null) => {
   setScrollContainerRef(instance?.scrollElement ?? null);
   virtualTimelineEdgeScroller.value = instance
     ? async (mode) => {
-        const target = activeEdgeMessage(mode);
+        const target = threadEdgeMessage(
+          orderedChildren.value,
+          orderedThreadMessages.value,
+          activeEntry.value?.root ?? null,
+          mode,
+        );
         if (!target) return false;
         return instance.scrollToMessageId(
           target.id,
@@ -318,95 +248,35 @@ const setVirtualTimelineRef = (instance: VirtualTimelineHandle | null) => {
         );
       }
     : null;
-  void scrollToTargetMessage();
+  void targetScroll.scrollToTargetMessage();
 };
-
-const targetScrollPending = ref(Boolean(props.targetMessageId));
-let targetScrollToken = 0;
-let completedTargetScrollKey: string | null = null;
-
-const orderedThreadMessageIdsKey = computed(() =>
-  orderedThreadMessages.value.map((message) => message.id).join("\0"),
-);
-
-function targetScrollKey(): string | null {
-  return activeThreadId.value && props.targetMessageId
-    ? `${activeThreadId.value}\0${props.targetMessageId}\0${props.targetMessageRequestId ?? 0}`
-    : null;
-}
 
 // Switching threads resets composer state and scrolls to the pinned edge.
 watch(activeThreadId, () => {
-  replyingTo.value = null;
-  draft.value = "";
+  resetForThreadSwitch();
   if (props.targetMessageId) {
-    void scrollToTargetMessage();
+    void targetScroll.scrollToTargetMessage();
     return;
   }
-  targetScrollToken++;
-  targetScrollPending.value = false;
-  completedTargetScrollKey = null;
+  targetScroll.cancelPendingTargetScroll();
   void scrollToPinnedEdge();
 });
 
-async function scrollToTargetMessage() {
-  const token = ++targetScrollToken;
-  const key = targetScrollKey();
-  const targetMessageId = props.targetMessageId;
-  if (!targetMessageId || !key) {
-    targetScrollPending.value = false;
-    completedTargetScrollKey = null;
-    markThreadDisplayedIfVisible();
-    return;
-  }
-  if (completedTargetScrollKey === key) {
-    targetScrollPending.value = false;
-    return;
-  }
-  if (
-    !activeThreadId.value
-    || !orderedThreadMessages.value.some((message) => message.id === targetMessageId)
-  ) {
-    targetScrollPending.value = true;
-    return;
-  }
-  const timeline = virtualTimelineRef.value;
-  if (!timeline) {
-    targetScrollPending.value = true;
-    return;
-  }
-  targetScrollPending.value = true;
-  await nextTick();
-  if (!await timeline.scrollToMessageId(targetMessageId, "center")) {
-    if (token === targetScrollToken) targetScrollPending.value = false;
-    return;
-  }
-  await nextTick();
-  if (token !== targetScrollToken) return;
-  pinnedEdgeScroller.refreshPinnedState();
-  updateCurrentDayMarker();
-  completedTargetScrollKey = key;
-  targetScrollPending.value = false;
-  markThreadDisplayedIfVisible();
-}
-
-watch(
-  () => props.targetMessageId,
-  () => {
-    completedTargetScrollKey = null;
+const targetScroll = useThreadTargetScroll({
+  targetMessageId: () => props.targetMessageId,
+  targetMessageRequestId: () => props.targetMessageRequestId ?? 0,
+  activeThreadId: () => activeThreadId.value,
+  orderedMessages: () => orderedThreadMessages.value,
+  timeline: () => virtualTimelineRef.value,
+  afterScroll: () => {
+    pinnedEdgeScroller.refreshPinnedState();
+    updateCurrentDayMarker();
   },
-);
-
-watch(
-  [() => props.targetMessageId, () => props.targetMessageRequestId ?? 0, activeThreadId, orderedThreadMessageIdsKey],
-  () => {
-    void scrollToTargetMessage();
-  },
-  { flush: "post" },
-);
+  markDisplayed: () => displayedTracking.markThreadDisplayedIfVisible(),
+});
 
 watch(scrollDirectionMode, () => {
-  if (targetScrollPending.value) return;
+  if (targetScroll.targetScrollPending.value) return;
   void scrollToPinnedEdge();
 });
 
@@ -415,78 +285,31 @@ watch(scrollDirectionMode, () => {
 // watchers; see `channels/messages.ts` / `dms/messages.ts`.
 const { isWindowFocused } = useChatWindowVisibility();
 watch(isWindowFocused, (focused, prev) => {
-  if (focused && !prev && !targetScrollPending.value && pinnedEdgeScroller.isPinnedAtEdge.value) {
+  if (focused && !prev && !targetScroll.targetScrollPending.value && pinnedEdgeScroller.isPinnedAtEdge.value) {
     void scrollToPinnedEdge();
   }
 });
 
-let lastDisplayedThreadKey: string | null = null;
-function markThreadDisplayedIfVisible() {
-  const threadId = activeThreadId.value;
-  const messageId = latestRemoteThreadMessageId.value;
-  if (!threadId || !messageId) return;
-  if (props.hideComposer || targetScrollPending.value) return;
-  if (!scrollContainerRef.value || !isWindowFocused.value || !pinnedEdgeScroller.isPinnedAtEdge.value) return;
+const displayedTracking = useThreadDisplayedTracking({
+  activeThreadId: () => activeThreadId.value,
+  latestRemoteMessageId: () => latestRemoteThreadMessageId.value,
+  hideComposer: () => props.hideComposer ?? false,
+  targetScrollPending: () => targetScroll.targetScrollPending.value,
+  scrollContainer: scrollContainerRef,
+  isWindowFocused: () => isWindowFocused.value,
+  isPinnedAtEdge: () => pinnedEdgeScroller.isPinnedAtEdge.value,
+  chatKey: () => props.roomJid ?? props.linkPreviewScope ?? props.channelId ?? props.channelName,
+  emitDisplayed: (messageId) => emit("displayed", messageId, { syncMds: false }),
+});
 
-  const chatId = props.roomJid ?? props.linkPreviewScope ?? props.channelId ?? props.channelName;
-  const key = `${chatId}\0${threadId}\0${messageId}`;
-  if (key === lastDisplayedThreadKey) return;
-  lastDisplayedThreadKey = key;
-  emit("displayed", messageId, { syncMds: false });
-}
-
-watch(
-  [
-    activeThreadId,
-    latestRemoteThreadMessageId,
-    () => props.hideComposer,
-    () => targetScrollPending.value,
-    () => scrollContainerRef.value,
-    () => isWindowFocused.value,
-    () => pinnedEdgeScroller.isPinnedAtEdge.value,
-  ],
-  () => markThreadDisplayedIfVisible(),
-  { flush: "post", immediate: true },
-);
-
-watch(
-  () => props.isLoadingOlderReplies,
-  (loading, wasLoading) => {
-    if (loading) {
-      pinnedEdgeScroller.cancelSettleLock();
-      const el = scrollContainerRef.value;
-      olderLoadRestoreToken++;
-      olderLoadSnapshot = el
-        ? {
-            element: el,
-            height: el.scrollHeight,
-            mode: scrollDirectionMode.value,
-            threadId: activeThreadId.value,
-            top: el.scrollTop,
-            token: olderLoadRestoreToken,
-          }
-        : null;
-      return;
-    }
-    if (!wasLoading || !olderLoadSnapshot) return;
-    const snapshot = olderLoadSnapshot;
-    olderLoadSnapshot = null;
-    void nextTick(() => {
-      const el = scrollContainerRef.value;
-      if (
-        !props.isLoadingOlderReplies
-        && snapshot.token === olderLoadRestoreToken
-        && el === snapshot.element
-        && activeThreadId.value === snapshot.threadId
-        && scrollDirectionMode.value === snapshot.mode
-        && !isTopPinnedScrollDirection(scrollDirectionMode.value)
-      ) {
-        el.scrollTop = snapshot.top + (el.scrollHeight - snapshot.height);
-      }
-      updateCurrentDayMarker();
-    });
-  },
-);
+useThreadOlderLoadRestore({
+  isLoadingOlderReplies: () => props.isLoadingOlderReplies,
+  scrollContainer: scrollContainerRef,
+  mode: () => scrollDirectionMode.value,
+  activeThreadId: () => activeThreadId.value,
+  cancelSettleLock: () => pinnedEdgeScroller.cancelSettleLock(),
+  afterRestore: updateCurrentDayMarker,
+});
 
 watch(
   [activeEntry, orderedChildren],
@@ -501,7 +324,7 @@ watch(newestThreadMessageId, (newest, previousNewest) => {
     newest
     && previousNewest
     && newest !== previousNewest
-    && !targetScrollPending.value
+    && !targetScroll.targetScrollPending.value
     && pinnedEdgeScroller.isPinnedAtEdge.value
   ) {
     void scrollToPinnedEdge();
@@ -513,103 +336,24 @@ onBeforeUnmount(() => {
   pinnedEdgeScroller.disconnect();
 });
 
+// Thread "lobby" metadata for the rich header (see `thread-lobby-meta.ts`).
 const breadcrumbLabels = computed(() =>
-  props.threadStack.map((id) => {
-    const entry = props.resolveEntry(id);
-    const body = entry?.root?.body?.trim() ?? "";
-    return body.length > 0 ? body.slice(0, 40) : id.slice(0, 8);
-  }),
+  threadBreadcrumbLabels(props.threadStack, props.resolveEntry),
 );
-
-// Thread "lobby" metadata for the rich header. Substitutes the bland
-// "Thread > author" breadcrumb with: who started it, how many replies,
-// who's been participating, and when activity last happened.
 const threadReplyCount = computed(() => activeEntry.value?.count ?? 0);
 const threadCallAnchorState = useCallAnchorCardState(
   () => activeEntry.value?.root ?? { body: "", author: "" },
   () => props.roomJid,
   () => threadReplyCount.value,
 );
-
 const threadRootAuthor = computed(() => activeEntry.value?.root?.author ?? null);
-
-const threadPreview = computed(() => {
-  const body = activeEntry.value?.root?.body?.trim() ?? "";
-  if (!body) return "";
-  return body.length > 96 ? `${body.slice(0, 95).trimEnd()}…` : body;
-});
-
-interface ThreadParticipant {
-  nick: string;
-  avatarUrl?: string | null;
-  presence: OccupantPresence;
-}
-
-// Materialise the set of unique authors contributing to this thread —
-// ordered by recency (most-recently-posted first), capped for the
-// avatar stack. Exclude the current user so the stack answers
-// "who else is in this thread?".
-const threadParticipants = computed<ThreadParticipant[]>(() => {
-  const entry = activeEntry.value;
-  if (!entry) return [];
-  const seen = new Set<string>();
-  const ordered: ThreadParticipant[] = [];
-  // Include every participant — the thread author themselves and the
-  // current user — so the avatar stack is consistent regardless of
-  // who replies. Walk newest → oldest to bias the visible avatars
-  // toward recent participants.
-  const children = entry.directChildren;
-  for (let i = children.length - 1; i >= 0; i--) {
-    const c = children[i];
-    if (!c) continue;
-    if (seen.has(c.author)) continue;
-    seen.add(c.author);
-    ordered.push({
-      nick: c.author,
-      avatarUrl: props.avatarUrlByAuthor[c.author] ?? null,
-      presence: props.roomPresence[c.author] ?? "offline",
-    });
-  }
-  const root = entry.root;
-  if (root && !seen.has(root.author)) {
-    ordered.push({
-      nick: root.author,
-      avatarUrl: props.avatarUrlByAuthor[root.author] ?? null,
-      presence: props.roomPresence[root.author] ?? "offline",
-    });
-  }
-  return ordered;
-});
-
-const MAX_THREAD_AVATARS = 4;
-const visibleThreadParticipants = computed(() => threadParticipants.value.slice(0, MAX_THREAD_AVATARS));
-const overflowParticipants = computed(() => Math.max(0, threadParticipants.value.length - visibleThreadParticipants.value.length));
-
-const threadLastActivity = computed(() => {
-  const entry = activeEntry.value;
-  if (!entry) return null;
-  const last = entry.directChildren.at(-1) ?? entry.root;
-  return last?.createdAt ?? null;
-});
-
-function formatLastActivity(iso: string | null): string {
-  if (!iso) return "";
-  const ms = Date.now() - new Date(iso).getTime();
-  if (Number.isNaN(ms) || ms < 0) return "";
-  const seconds = Math.floor(ms / 1000);
-  if (seconds < 45) return "just now";
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 2) return "1 min ago";
-  if (minutes < 60) return `${minutes} min ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 2) return "1 hour ago";
-  if (hours < 24) return `${hours} hours ago`;
-  const days = Math.floor(hours / 24);
-  if (days < 2) return "yesterday";
-  return `${days} days ago`;
-}
-
-const threadLastActivityLabel = computed(() => formatLastActivity(threadLastActivity.value));
+const threadPreview = computed(() => threadPreviewFor(activeEntry.value));
+const threadParticipants = computed(() =>
+  threadParticipantsFor(activeEntry.value, props.avatarUrlByAuthor, props.roomPresence),
+);
+const threadLastActivityLabel = computed(() =>
+  formatThreadLastActivity(threadLastActivityFor(activeEntry.value)),
+);
 
 function hatsFor(author: string): OccupantHat[] {
   return props.roomHats[author] ?? [];
@@ -621,70 +365,6 @@ function authorityFor(author: string): OccupantAuthority | null {
 
 function presenceFor(author: string): OccupantPresence {
   return props.roomPresence[author] ?? "offline";
-}
-
-function beginReplyInThread(message: TimelineMessage) {
-  if (props.hideComposer) return;
-  replyingTo.value = {
-    id: message.id,
-    author: message.author,
-    ...(message.body ? { body: message.body } : {}),
-  };
-  void nextTick(() => composerRef.value?.focus());
-}
-
-function cancelReplyInThread() {
-  replyingTo.value = null;
-}
-
-function onSend(
-  body: string,
-  markup: MarkupSpan[],
-  references: MessageReference[],
-  files?: Array<File | Blob>,
-  linkPreview?: ComposerLinkPreviewSendPayload,
-) {
-  const threadId = activeThreadId.value;
-  if (!threadId) return;
-  const entry = activeEntry.value;
-  const root = entry?.root ?? null;
-  const pending = replyingTo.value;
-  // Default target = the thread root so the reply chip still points somewhere
-  // useful; explicit in-thread reply overrides it.
-  const effectiveReply = pending
-    ? { id: pending.id, author: pending.author, ...(pending.body ? { body: pending.body } : {}) }
-    : root
-      ? { id: root.id, author: root.authorJid ?? root.author, ...(root.body ? { body: root.body } : {}) }
-      : undefined;
-  const override: { threadId: string; parentThreadId?: string } = { threadId };
-  if (parentThreadId.value) override.parentThreadId = parentThreadId.value;
-  emit("send", body, markup, references, files, effectiveReply, override, linkPreview);
-  replyingTo.value = null;
-  draft.value = "";
-}
-
-// GIF picks mirror onSend's thread routing: derive the active thread (and
-// parent, when nested) so the GIF message joins the open thread instead of
-// landing in the parent channel timeline.
-function onSelectGif(url: string) {
-  const threadId = activeThreadId.value;
-  if (!threadId) return;
-  const override: { threadId: string; parentThreadId?: string } = { threadId };
-  if (parentThreadId.value) override.parentThreadId = parentThreadId.value;
-  emit("selectGif", url, override);
-}
-
-// Forward composer typing with the active thread context attached so the
-// outbound XEP-0085 chat-state stanza can include the matching `<thread/>`.
-function onTyping() {
-  const threadId = activeThreadId.value;
-  if (!threadId) {
-    emit("typing");
-    return;
-  }
-  const override: { threadId: string; parentThreadId?: string } = { threadId };
-  if (parentThreadId.value) override.parentThreadId = parentThreadId.value;
-  emit("typing", override);
 }
 
 function onOpenThreadFromCard(threadId: string) {
@@ -718,104 +398,19 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
 
 <template>
   <div class="flex flex-col flex-1 min-h-0 bg-background border-l border-border">
-    <!-- Thread lobby header — substantial metadata that helps you orient
-         inside a thread. Top row: preview of the root message (or
-         breadcrumb when nested). Bottom row: who started it · N replies ·
-         when it last moved · who's been participating · close.
-         When threadStack.length > 1 the top row becomes a breadcrumb
-         trail so the user can pop back through nested sub-threads. -->
-    <div class="chat-thread-header flex-shrink-0 glass-panel">
-      <div class="chat-thread-header__row chat-thread-header__row--top">
-        <template v-if="threadStack.length > 1">
-          <div class="chat-thread-header__breadcrumb type-caption">
-            <span class="chat-thread-header__breadcrumb-label">Threads</span>
-            <template v-for="(label, i) in breadcrumbLabels" :key="i">
-              <ChevronRight class="chat-thread-header__breadcrumb-sep" aria-hidden="true" />
-              <button
-                type="button"
-                class="chat-thread-header__breadcrumb-crumb"
-                :class="i === breadcrumbLabels.length - 1 ? 'chat-thread-header__breadcrumb-crumb--active' : ''"
-                :title="label"
-                @click="emit('popTo', i)"
-              >{{ label }}</button>
-            </template>
-          </div>
-        </template>
-        <template v-else>
-          <p
-            v-if="threadPreview"
-            class="chat-thread-header__preview"
-            :title="threadPreview"
-          >{{ threadPreview }}</p>
-          <p v-else class="chat-thread-header__preview chat-thread-header__preview--empty">Thread</p>
-        </template>
-        <div class="chat-thread-header__actions">
-          <button
-            v-if="threadStack.length > 1"
-            type="button"
-            class="chat-icon-button hover:bg-muted lg:hidden"
-            title="Go back"
-            aria-label="Go back"
-            @click="emit('popTo', threadStack.length - 2)"
-          >
-            <ChevronLeft class="w-4 h-4" />
-          </button>
-          <button
-            type="button"
-            class="chat-icon-button hover:bg-muted"
-            title="Close thread"
-            aria-label="Close thread"
-            @click="emit('close')"
-          >
-            <X class="w-4 h-4" />
-          </button>
-        </div>
-      </div>
-      <div v-if="threadCallAnchorState" class="chat-thread-header__row">
-        <CallAnchorCard
-          :state="threadCallAnchorState"
-          class="w-full"
-          @join="joinThreadCallAnchor"
-          @open-thread="onOpenThreadFromCard"
-        />
-      </div>
-      <div class="chat-thread-header__row chat-thread-header__row--meta">
-        <div class="chat-thread-header__meta type-caption">
-          <span v-if="threadRootAuthor" class="chat-thread-header__meta-item">
-            <span class="chat-thread-header__meta-label">Started by</span>
-            <span class="chat-thread-header__meta-value">{{ threadRootAuthor }}</span>
-          </span>
-          <span class="chat-thread-header__meta-item">
-            <span class="chat-thread-header__meta-value">
-              <strong>{{ threadReplyCount }}</strong>
-              {{ threadReplyCount === 1 ? "reply" : "replies" }}
-            </span>
-          </span>
-          <span v-if="threadLastActivityLabel" class="chat-thread-header__meta-item">
-            <span class="chat-thread-header__pulse" aria-hidden="true" />
-            <span class="chat-thread-header__meta-value">active {{ threadLastActivityLabel }}</span>
-          </span>
-        </div>
-        <div v-if="visibleThreadParticipants.length > 0" class="chat-thread-header__participants">
-          <span class="chat-thread-header__avatars">
-            <span
-              v-for="participant in visibleThreadParticipants"
-              :key="`thread-participant:${participant.nick}`"
-              class="chat-thread-header__avatar-wrap"
-              :title="`${participant.nick}`"
-            >
-              <AppAvatar
-                :name="participant.nick"
-                :src="participant.avatarUrl ?? null"
-                :presence="participant.presence"
-                size="xs"
-              />
-            </span>
-          </span>
-          <span v-if="overflowParticipants > 0" class="chat-thread-header__overflow">+{{ overflowParticipants }}</span>
-        </div>
-      </div>
-    </div>
+    <ThreadPanelHeader
+      :breadcrumb-labels="breadcrumbLabels"
+      :thread-preview="threadPreview"
+      :call-anchor-state="threadCallAnchorState"
+      :root-author="threadRootAuthor"
+      :reply-count="threadReplyCount"
+      :last-activity-label="threadLastActivityLabel"
+      :participants="threadParticipants"
+      @close="emit('close')"
+      @pop-to="(index) => emit('popTo', index)"
+      @join-call="joinThreadCallAnchor"
+      @open-thread="onOpenThreadFromCard"
+    />
 
     <!-- Composer: top-pinned mode (social mode) -->
     <div v-if="!hideComposer && isTopPinned" class="flex-shrink-0">

@@ -27,20 +27,46 @@ import {
   sortCallActivityDockEntries,
   type CallActivityDockEntry,
 } from "@/lib/calls/call-activity-dock";
+import {
+  callEntryAccentClass as accentClassForTone,
+  callEntryActionLabel as callEntryActionLabelFor,
+  callEntryDescription as callEntryDescriptionFor,
+  callEntryDetail as callEntryDetailFor,
+  callEntryDotClass as dotClassForTone,
+  callEntryEyebrow as callEntryEyebrowFor,
+  callEntryIconClass as iconClassForTone,
+  callEntryLabel as callEntryLabelFor,
+  callEntryParticipantInitial,
+  callEntryParticipantPreview,
+  callEntryPillClass as pillClassForTone,
+  callEntryToneClass as toneClassForTone,
+  callEntryVisibleParticipantLabels,
+  callEntryVisualTone,
+  canLeaveRetainedChannelCallEntry as canLeaveRetainedChannelCallEntryFor,
+  endCallEntryButtonText,
+  endCallEntryLabel,
+  isSameCallEntry,
+} from "./home-call-entry-presentation";
+import {
+  heroEyebrowFor,
+  heroGreetingFor,
+  heroQuietMessageFor,
+  heroSummaryPartsFor,
+  heroTimeOfDayFor,
+  type HeroSummary,
+  type HeroSummaryPart,
+} from "./home-hero";
 import { $callState } from "@/lib/calls/call-store";
 import { useInCallOverlays } from "@/presence/in-call-overlay-store";
 import {
   dmCallActivitiesForPeer,
-  dmCallResumeBlockReason,
   hasKnownDmCallMedia,
 } from "@/lib/calls/dm-call-activity";
 import {
   callRoomJidForChannel,
   callParticipantCountForChannel,
-  mucCallParticipantPreview,
 } from "@/lib/calls/muc-call-indicators";
 import { normalizeMucCallRoomJid } from "@/lib/calls/muc-call-presence";
-import { readRoomHasActiveCall } from "@/lib/calls/use-active-muc-call";
 import { barePeerJid, jidLocalpart } from "@/lib/xmpp/jid";
 import type { CallMedia } from "@/lib/calls/types";
 import { groupChannelsBySpace } from "@/lib/channel-grouping";
@@ -88,47 +114,9 @@ onBeforeUnmount(() => {
   if (heroClockHandle) clearInterval(heroClockHandle);
 });
 
-type HeroTimeOfDay = "morning" | "day" | "evening" | "night";
-
-const heroTimeOfDay = computed<HeroTimeOfDay>(() => {
-  const h = now.value.getHours();
-  if (h >= 5 && h < 11) return "morning";
-  if (h >= 11 && h < 17) return "day";
-  if (h >= 17 && h < 22) return "evening";
-  return "night";
-});
-
-const heroGreeting = computed(() => {
-  switch (heroTimeOfDay.value) {
-    case "morning": return "Good morning.";
-    case "day":     return "Good afternoon.";
-    case "evening": return "Good evening.";
-    case "night":   return "Late one tonight.";
-  }
-});
-
-const heroEyebrow = computed(() =>
-  new Intl.DateTimeFormat(undefined, {
-    weekday: "long",
-    month: "short",
-    day: "numeric",
-  }).format(now.value),
-);
-
-interface HeroSummary {
-  totalUnread: number;
-  totalMentions: number;
-  totalThreadUnread: number;
-  dmUnread: number;
-  activeCalls: number;
-  onlineFriends: number;
-  hasUnread: boolean;
-}
-
-interface HeroSummaryPart {
-  count: number;
-  label: string;
-}
+const heroTimeOfDay = computed(() => heroTimeOfDayFor(now.value));
+const heroGreeting = computed(() => heroGreetingFor(heroTimeOfDay.value));
+const heroEyebrow = computed(() => heroEyebrowFor(now.value));
 
 const groups = computed(() => groupChannelsBySpace(props.spaces, props.channels));
 const visibleChannelGroups = computed(() => groups.value.filter((group) => group.channels.length > 0));
@@ -262,54 +250,8 @@ function endCallEntry(entry: CallActivityDockEntry): void {
   emit("endDm", entry.peerJid, entry.sid);
 }
 
-function endCallEntryLabel(entry: CallActivityDockEntry): string {
-  if (entry.kind === "channel") return `Leave ${entry.title} call`;
-  const media = entry.mediaKnown !== false
-    ? `${entry.media.video ? "video" : "voice"} call`
-    : "call";
-  return `End ${entry.title} ${media}`;
-}
-
-function endCallEntryButtonText(entry: CallActivityDockEntry): string {
-  return entry.kind === "channel" ? "Leave call" : "End call";
-}
-
 function canLeaveRetainedChannelCallEntry(entry: Extract<CallActivityDockEntry, { kind: "channel" }>): boolean {
-  const roomJid = normalizeMucCallRoomJid(entry.roomJid);
-  if (!roomJid || currentMucCallRoomJid() === roomJid) return false;
-  return readRoomHasActiveCall(roomJid).localResourceInCall;
-}
-
-function currentMucCallRoomJid(): string {
-  const current = callState.value;
-  if (current.phase !== "active" && current.phase !== "muc-pending") return "";
-  if (current.kind !== "muc") return "";
-  return normalizeMucCallRoomJid(current.peer);
-}
-
-function isCurrentCallEntry(entry: CallActivityDockEntry): boolean {
-  const current = callState.value;
-  if (current.phase === "muc-pending" || (current.phase === "active" && current.kind === "muc")) {
-    if (entry.kind !== "channel") return false;
-    return normalizeMucCallRoomJid(entry.roomJid) === normalizeMucCallRoomJid(current.peer);
-  }
-  if (current.phase !== "active" || current.kind !== "dm" || entry.kind !== "dm") return false;
-  return entry.peerJid.toLowerCase() === barePeerJid(current.peer).toLowerCase() &&
-    entry.sid === current.sid;
-}
-
-function isSameCallEntry(target: CallActivityDockEntry): (entry: CallActivityDockEntry) => boolean {
-  return (entry) => {
-    if (target.kind !== entry.kind) return false;
-    if (target.kind === "channel" && entry.kind === "channel") {
-      return normalizeMucCallRoomJid(target.roomJid) === normalizeMucCallRoomJid(entry.roomJid);
-    }
-    if (target.kind === "dm" && entry.kind === "dm") {
-      return target.peerJid.toLowerCase() === entry.peerJid.toLowerCase() &&
-        target.sid === entry.sid;
-    }
-    return false;
-  };
+  return canLeaveRetainedChannelCallEntryFor(entry, callState.value);
 }
 
 function buildCurrentCallFallbackEntry(): CallActivityDockEntry | null {
@@ -558,226 +500,48 @@ function dmHomeAriaLabel(conversation: {
   return call ? `${base}, ${call}` : base;
 }
 
-function callEntryStatus(entry: CallActivityDockEntry): string {
-  if (entry.kind === "channel") {
-    const noun = entry.participantCount === 1 ? "person" : "people";
-    return `${entry.participantCount} ${noun}`;
-  }
-  if (entry.state === "accepted") return "Live";
-  if (entry.direction === "outgoing") return "Calling";
-  return "Ringing";
-}
-
-function callEntryKindLabel(entry: CallActivityDockEntry): string {
-  if (entry.kind === "channel") {
-    const media = entry.media.video ? "Group video call" : "Group call";
-    return entry.isKnownChannel ? media : `${media} syncing`;
-  }
-  if (entry.mediaKnown === false) return "Call";
-  return entry.media.video ? "Video call" : "Voice call";
-}
-
-type CallEntryVisualTone = "primary" | "success" | "warning";
-
-function callEntryAcceptedAvailability(entry: CallActivityDockEntry): {
-  eyebrow: string;
-  meta: string;
-  description: string;
-  tone: CallEntryVisualTone;
-} | null {
-  if (entry.kind !== "dm" || entry.state !== "accepted") return null;
-  const mediaLabel = entry.mediaKnown === false ? "call" : `${entry.media.video ? "video" : "voice"} call`;
-  const mediaTitle = `${mediaLabel.charAt(0).toUpperCase()}${mediaLabel.slice(1)}`;
-  const reason = dmCallResumeBlockReason(entry, props.selfFullJid ?? null);
-  if (reason === null) {
-    return {
-      eyebrow: "Live now",
-      meta: `Live ${mediaLabel}`,
-      description: `The ${mediaLabel} is still live.`,
-      tone: "success",
-    };
-  }
-  if (reason === "other-resource") {
-    return {
-      eyebrow: "Other device",
-      meta: `${mediaTitle} · Other device`,
-      description: "This call is live on another browser or device.",
-      tone: "warning",
-    };
-  }
-  if (reason === "expired-token" || reason === "invalid-token") {
-    if (canEndRecoveredDmCallActivity(entry, callState.value, props.selfFullJid ?? null)) {
-      return {
-        eyebrow: "Recovered after refresh",
-        meta: `${mediaTitle} · End available`,
-        description: `The saved reconnect details expired, but this tab can still end the call.`,
-        tone: "warning",
-      };
-    }
-    return {
-      eyebrow: "Expired",
-      meta: `${mediaTitle} · Expired`,
-      description: "The saved reconnect details expired.",
-      tone: "warning",
-    };
-  }
-  return {
-    eyebrow: "Syncing",
-    meta: `${mediaTitle} · Details pending`,
-    description: "Reconnect details are not available on this tab yet.",
-    tone: "primary",
-  };
-}
-
-function callEntryVisualTone(entry: CallActivityDockEntry): CallEntryVisualTone {
-  if (entry.kind === "dm" && entry.state === "ringing" && entry.direction === "incoming") return "warning";
-  if (entry.kind === "dm" && entry.state === "ringing" && entry.direction === "outgoing") return "primary";
-  return callEntryAcceptedAvailability(entry)?.tone ?? "success";
-}
-
 function callEntryLabel(entry: CallActivityDockEntry): string {
-  return [
-    callEntryActionPhrase(entry),
-    callEntryKindLabel(entry),
-    callEntryStatus(entry),
-    callEntryEyebrow(entry),
-    callEntryDescription(entry),
-    callEntryDetail(entry),
-  ].filter(Boolean).join(", ");
+  return callEntryLabelFor(entry, callState.value, props.selfFullJid ?? null);
 }
 
 function callEntryEyebrow(entry: CallActivityDockEntry): string {
-  if (entry.kind === "channel") return entry.isActive ? "You're here" : "Live now";
-  if (entry.isActive) return "You're here";
-  const availability = callEntryAcceptedAvailability(entry);
-  if (availability) return availability.eyebrow;
-  if (entry.state === "accepted") return "Live now";
-  if (entry.direction === "incoming") return "Incoming call";
-  if (entry.direction === "outgoing") return "Calling";
-  return "Ringing";
+  return callEntryEyebrowFor(entry, callState.value, props.selfFullJid ?? null);
 }
 
 function callEntryDescription(entry: CallActivityDockEntry): string {
-  if (entry.kind === "channel") {
-    const noun = entry.participantCount === 1 ? "person" : "people";
-    const location = entry.isKnownChannel ? "this channel" : "the channel";
-    const preview = callEntryParticipantPreview(entry);
-    if (entry.media.video) {
-      if (preview) return `${entry.participantCount} ${noun} connected to the video call in ${location}: ${preview}.`;
-      return `${entry.participantCount} ${noun} connected to the video call in ${location}.`;
-    }
-    if (preview) return `${entry.participantCount} ${noun} connected in ${location}: ${preview}.`;
-    return `${entry.participantCount} ${noun} connected in ${location}.`;
-  }
-
-  const availability = callEntryAcceptedAvailability(entry);
-  if (availability) return availability.description;
-
-  if (entry.mediaKnown === false) {
-    if (entry.state === "accepted") return "Call details are still syncing.";
-    if (entry.direction === "incoming") return "Incoming call details are still syncing.";
-    if (entry.direction === "outgoing") return "Outgoing call details are still syncing.";
-    return "Call details are still syncing.";
-  }
-
-  const media = entry.media.video ? "video" : "voice";
-  if (entry.state === "accepted") return `The ${media} call is still live.`;
-  if (entry.direction === "incoming") return `Incoming ${media} call from this direct message.`;
-  if (entry.direction === "outgoing") return `Outgoing ${media} call is still ringing.`;
-  return `${media.charAt(0).toUpperCase()}${media.slice(1)} call is ringing.`;
+  return callEntryDescriptionFor(entry, callState.value, props.selfFullJid ?? null);
 }
 
 function callEntryDetail(entry: CallActivityDockEntry): string {
-  if (entry.kind === "channel") return callEntryKindLabel(entry);
-  const stamp = entry.updatedAt ? formatTimelineStamp(entry.updatedAt) : "";
-  return [
-    callEntryAcceptedAvailability(entry)?.meta ?? callEntryKindLabel(entry),
-    ...(stamp ? [`Updated ${stamp}`] : []),
-  ].join(" · ");
+  return callEntryDetailFor(entry, callState.value, props.selfFullJid ?? null);
 }
 
-function callEntryParticipantPreview(entry: CallActivityDockEntry): string {
-  if (entry.kind !== "channel") return "";
-  return mucCallParticipantPreview(entry.participantLabels);
-}
-
-function callEntryVisibleParticipantLabels(entry: CallActivityDockEntry): string[] {
-  if (entry.kind !== "channel") return [];
-  return entry.participantLabels.slice(0, 3);
-}
-
-function callEntryParticipantInitial(label: string): string {
-  return label.trim().charAt(0).toUpperCase() || "?";
+function callEntryTone(entry: CallActivityDockEntry) {
+  return callEntryVisualTone(entry, callState.value, props.selfFullJid ?? null);
 }
 
 function callEntryToneClass(entry: CallActivityDockEntry): string {
-  switch (callEntryVisualTone(entry)) {
-    case "warning":
-      return "border-warning/25 bg-warning/10 hover:bg-warning/15";
-    case "primary":
-      return "border-primary/25 bg-primary/8 hover:bg-primary/12";
-    case "success":
-      return "border-success/20 bg-success/10 hover:bg-success/15";
-  }
+  return toneClassForTone(callEntryTone(entry));
 }
 
 function callEntryAccentClass(entry: CallActivityDockEntry): string {
-  switch (callEntryVisualTone(entry)) {
-    case "warning":
-      return "text-warning-foreground";
-    case "primary":
-      return "text-primary";
-    case "success":
-      return "text-success-foreground";
-  }
+  return accentClassForTone(callEntryTone(entry));
 }
 
 function callEntryIconClass(entry: CallActivityDockEntry): string {
-  switch (callEntryVisualTone(entry)) {
-    case "warning":
-      return "border-warning/25 bg-background/90 text-warning-foreground";
-    case "primary":
-      return "border-primary/25 bg-background/90 text-primary";
-    case "success":
-      return "border-success/25 bg-background/90 text-success-foreground";
-  }
+  return iconClassForTone(callEntryTone(entry));
 }
 
 function callEntryDotClass(entry: CallActivityDockEntry): string {
-  switch (callEntryVisualTone(entry)) {
-    case "warning":
-      return "bg-warning shadow-[0_0_6px_var(--warning)]";
-    case "primary":
-      return "bg-primary shadow-[0_0_6px_var(--primary)]";
-    case "success":
-      return "bg-success shadow-[0_0_6px_var(--success)]";
-  }
+  return dotClassForTone(callEntryTone(entry));
 }
 
 function callEntryPillClass(entry: CallActivityDockEntry): string {
-  switch (callEntryVisualTone(entry)) {
-    case "warning":
-      return "border-warning/25 bg-background/70 text-warning-foreground";
-    case "primary":
-      return "border-primary/25 bg-background/70 text-primary";
-    case "success":
-      return "border-success/25 bg-background/70 text-success-foreground";
-  }
+  return pillClassForTone(callEntryTone(entry));
 }
 
 function callEntryActionLabel(entry: CallActivityDockEntry): string {
-  switch (callActivityDockAction(entry, callState.value, props.selfFullJid ?? null)) {
-    case "answer":
-      return "Answer";
-    case "join":
-      return entry.kind === "channel" && canLeaveRetainedChannelCallEntry(entry) ? "Rejoin" : "Join";
-    case "return":
-      return "Return";
-    case "reconnect":
-      return "Reconnect";
-    case "open":
-      return "Open";
-  }
+  return callEntryActionLabelFor(entry, callState.value, props.selfFullJid ?? null);
 }
 
 const heroSummary = computed<HeroSummary>(() => {
@@ -812,36 +576,9 @@ const heroSummary = computed<HeroSummary>(() => {
   };
 });
 
-const heroSummaryParts = computed<HeroSummaryPart[]>(() => {
-  const s = heroSummary.value;
-  const parts: HeroSummaryPart[] = [];
-  if (s.totalMentions > 0) {
-    parts.push({ count: s.totalMentions, label: s.totalMentions === 1 ? "mention" : "mentions" });
-  }
-  const unreadTotal = s.totalUnread + s.dmUnread;
-  if (unreadTotal > 0) {
-    parts.push({ count: unreadTotal, label: unreadTotal === 1 ? "unread message" : "unread messages" });
-  }
-  if (s.totalThreadUnread > 0) {
-    parts.push({ count: s.totalThreadUnread, label: s.totalThreadUnread === 1 ? "thread reply" : "thread replies" });
-  }
-  if (s.activeCalls > 0) {
-    parts.push({ count: s.activeCalls, label: s.activeCalls === 1 ? "active call" : "active calls" });
-  }
-  if (s.onlineFriends > 0) {
-    parts.push({ count: s.onlineFriends, label: s.onlineFriends === 1 ? "friend online" : "friends online" });
-  }
-  return parts;
-});
+const heroSummaryParts = computed<HeroSummaryPart[]>(() => heroSummaryPartsFor(heroSummary.value));
 
-const heroQuietMessage = computed(() => {
-  switch (heroTimeOfDay.value) {
-    case "morning": return "Everything's quiet. A good moment to start something.";
-    case "day":     return "All caught up. The room is yours.";
-    case "evening": return "All caught up. Maybe say hi to someone.";
-    case "night":   return "Quiet night. Sleep well — or send a long-form note.";
-  }
-});
+const heroQuietMessage = computed(() => heroQuietMessageFor(heroTimeOfDay.value));
 
 const heroPrimaryChannel = computed<ChannelSummary | undefined>(() => {
   if (heroPrimaryCall.value) return undefined;
@@ -890,15 +627,7 @@ function heroCallCtaLabel(entry: CallActivityDockEntry): string {
   return `${action} ${entry.title} call`;
 }
 
-function callEntryActionPhrase(entry: CallActivityDockEntry): string {
-  const action = callEntryActionLabel(entry);
-  if (action === "Open") {
-    return entry.kind === "dm"
-      ? `Open ${entry.title} conversation`
-      : `Open ${entry.title} channel`;
-  }
-  return `${action} ${entry.title}`;
-}
+
 </script>
 
 <template>

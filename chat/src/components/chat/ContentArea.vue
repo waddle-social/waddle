@@ -1,13 +1,10 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch, type ComponentPublicInstance } from "vue";
 import { useStore } from "@nanostores/vue";
-import { AlertCircle, CheckCircle2, Hash, Loader2, MessageCircle, MessagesSquare, RefreshCw, Search, SearchX, Upload, WifiOff, X } from "lucide-vue-next";
+import { AlertCircle, RefreshCw, Upload } from "lucide-vue-next";
 import { $pinnedStanzaIds } from "@/stores/pinned-messages";
 import { isForumChannel as detectForumChannel } from "@/lib/channel-types";
 import type { NotifySettingsStore } from "@/lib/notify-settings";
-import { getConnectionNoticeCopy } from "@/lib/connection-notice";
-import { findMessageElementById } from "@/lib/message-targeting";
-import { findMessageById } from "@/lib/message-ids";
 import { getReplyJumpNotice } from "@/lib/reply-ux";
 import { findThreadToAutoOpen } from "@/lib/thread-auto-open";
 import { activeCallChatThreadId } from "@/lib/calls/call-chat-composer";
@@ -35,12 +32,11 @@ import type { DiscoveredExtensionCommand, ExtensionCommandAction, ExtensionComma
 import type { ComposerLinkPreviewLookup, ComposerLinkPreviewSendPayload } from "@/lib/link-preview-composer";
 import { useScrollDirectionPreference } from "@/preferences/scroll-direction";
 import type { MessageThreadIndex } from "@/channels/threads";
-import { formatTimelineStamp, formatTimelineDayDivider, isFeedTimelineMessage, isSameTimelineDay } from "@/channels/timeline";
+import { formatTimelineDayDivider, isFeedTimelineMessage } from "@/channels/timeline";
 import { useExtensionLauncher } from "@/channels/extension-launcher";
 import { useJumpToLiveEdge } from "@/ui/use-jump-to-live-edge";
 import { createScrollFrameScheduler } from "@/ui/scroll-frame";
 import { ArrowDown, ArrowUp } from "lucide-vue-next";
-import AppAvatar from "@/components/ui/AppAvatar.vue";
 import ChatHeader, { type ChannelHeaderMember } from "@/components/chat/ChatHeader.vue";
 import CallExpandedSurface from "@/components/calls/CallExpandedSurface.vue";
 import ConversationCallBanner from "@/components/calls/ConversationCallBanner.vue";
@@ -48,25 +44,20 @@ import CallSplitContainer from "@/components/calls/CallSplitContainer.vue";
 import ExtensionPalette from "@/components/chat/ExtensionPalette.vue";
 import MessageCard from "@/components/chat/MessageCard.vue";
 import MessageComposer from "@/components/chat/MessageComposer.vue";
+import MessageListSkeleton from "@/components/chat/MessageListSkeleton.vue";
+import MessageSearchPanel from "@/components/chat/MessageSearchPanel.vue";
+import TimelineEmptyState from "@/components/chat/TimelineEmptyState.vue";
+import TypingIndicator from "@/components/chat/TypingIndicator.vue";
 import UserProfileDrawer from "@/components/chat/UserProfileDrawer.vue";
 import VirtualTimeline from "@/components/chat/VirtualTimeline.vue";
-import Skeleton from "@/components/ui/Skeleton.vue";
-
-type MessageSkeletonRow = {
-  id: number;
-  grouped: boolean;
-  authorWidth: string;
-  lines: string[];
-};
-
-const skeletonMessageRows: ReadonlyArray<MessageSkeletonRow> = Object.freeze([
-  { id: 1, grouped: false, authorWidth: "5rem",   lines: ["72%"] },
-  { id: 2, grouped: true,  authorWidth: "",       lines: ["55%", "38%"] },
-  { id: 3, grouped: false, authorWidth: "6.5rem", lines: ["88%", "63%", "41%"] },
-  { id: 4, grouped: false, authorWidth: "4.5rem", lines: ["49%"] },
-  { id: 5, grouped: true,  authorWidth: "",       lines: ["66%"] },
-  { id: 6, grouped: false, authorWidth: "5.75rem", lines: ["78%", "52%"] },
-]);
+import { currentDayMarkerLabelFor } from "./current-day-marker";
+import {
+  buildMessageDisplayMeta,
+  threadChipLastReplyAt as threadChipLastReplyAtFor,
+  threadChipParticipants as threadChipParticipantsFor,
+} from "./timeline-display-meta";
+import { useConnectionNotice } from "./composables/use-connection-notice";
+import { useMessageJump } from "./composables/use-message-jump";
 
 const draft = defineModel<string>("draft", { required: true });
 const forumTitle = defineModel<string>("forumTitle", { default: "" });
@@ -248,86 +239,6 @@ function cancelReply() {
   replyingTo.value = null;
 }
 
-const replyJumpNotice = ref("");
-let replyJumpNoticeTimeout: ReturnType<typeof setTimeout> | null = null;
-
-function clearReplyJumpNotice() {
-  if (replyJumpNoticeTimeout) {
-    clearTimeout(replyJumpNoticeTimeout);
-    replyJumpNoticeTimeout = null;
-  }
-  replyJumpNotice.value = "";
-}
-
-function showReplyJumpNotice(message: string) {
-  clearReplyJumpNotice();
-  replyJumpNotice.value = message;
-  replyJumpNoticeTimeout = setTimeout(() => {
-    replyJumpNotice.value = "";
-    replyJumpNoticeTimeout = null;
-  }, 2800);
-}
-
-// Tracks pending flash timers so repeated jumps don't race each other — a
-// stale fade/cleanup from the previous animation would otherwise remove the
-// classes in the middle of the new flash.
-let flashEl: HTMLElement | null = null;
-let flashFadeTimer: ReturnType<typeof setTimeout> | null = null;
-let flashCleanupTimer: ReturnType<typeof setTimeout> | null = null;
-
-function cancelPendingFlash() {
-  if (flashFadeTimer !== null) {
-    clearTimeout(flashFadeTimer);
-    flashFadeTimer = null;
-  }
-  if (flashCleanupTimer !== null) {
-    clearTimeout(flashCleanupTimer);
-    flashCleanupTimer = null;
-  }
-  if (flashEl) {
-    flashEl.classList.remove("message-jump-flash", "message-jump-flash-fade");
-    flashEl = null;
-  }
-}
-
-async function scrollToMessage(messageId: string) {
-  if (props.ensureMessageLoaded && !await props.ensureMessageLoaded(messageId)) {
-    showReplyJumpNotice(getReplyJumpNotice(false));
-    return;
-  }
-  // VirtualTimeline + the data-message-id index match items by their
-  // primary `id` only. Pinned-panel "jump to message" passes a
-  // XEP-0359 stanza-id, which on the timeline lives in `wireIds[]`,
-  // not `id`. Resolve the candidate to the primary id first so both
-  // paths work (#414).
-  const resolvedId = findMessageById(props.messages, messageId)?.id ?? messageId;
-  if (await virtualTimelineRef.value?.scrollToMessageId(resolvedId, "center")) {
-    await nextTick();
-  }
-  const el = findMessageElementById(messagesContainer.value, resolvedId);
-  const notice = getReplyJumpNotice(el instanceof HTMLElement);
-  if (!notice && el instanceof HTMLElement) {
-    clearReplyJumpNotice();
-    cancelPendingFlash();
-    el.scrollIntoView({ behavior: "smooth", block: "center" });
-    // Force a reflow before re-adding so repeat clicks re-trigger the animation.
-    void el.offsetWidth;
-    el.classList.add("message-jump-flash");
-    flashEl = el;
-    flashFadeTimer = setTimeout(() => {
-      flashFadeTimer = null;
-      el.classList.add("message-jump-flash-fade");
-    }, 200);
-    flashCleanupTimer = setTimeout(() => {
-      flashCleanupTimer = null;
-      el.classList.remove("message-jump-flash", "message-jump-flash-fade");
-      if (flashEl === el) flashEl = null;
-    }, 2000);
-    return;
-  }
-
-  showReplyJumpNotice(notice);
-}
 
 async function openSearchResult(result: MessageSearchResult) {
   if (result.threadId && result.threadId !== result.id) {
@@ -386,6 +297,18 @@ const setVirtualTimelineRef = (
   virtualTimelineRef.value = instance;
   setMessagesContainer(instance?.scrollElement ?? null);
 };
+
+const {
+  replyJumpNotice,
+  clearReplyJumpNotice,
+  showReplyJumpNotice,
+  scrollToMessage,
+} = useMessageJump({
+  messages: () => props.messages,
+  ensureMessageLoaded: () => props.ensureMessageLoaded,
+  virtualTimeline: () => virtualTimelineRef.value,
+  messagesContainer,
+});
 
 // "Jump to latest" floating button — shown when the user has scrolled
 // away from the live edge. The live-edge anchor flips with the user's
@@ -505,19 +428,6 @@ watch(
   { immediate: true },
 );
 const showSearch = ref(false);
-const searchInput = ref("");
-const searchSubmitted = ref(false);
-const searchInputEl = ref<HTMLInputElement | null>(null);
-
-// Drop the caret straight into the search input when the bar opens —
-// without this the user had to click the input a second time after
-// clicking the header Search button. Matches the autofocus convention
-// the GIF picker already follows.
-watch(showSearch, async (open) => {
-  if (!open) return;
-  await nextTick();
-  searchInputEl.value?.focus();
-});
 const avatarUrlByAuthor = computed(() => props.avatarUrlByAuthor ?? {});
 const isForumChannel = computed(() => detectForumChannel(props.channel));
 
@@ -581,9 +491,8 @@ const conversationScope = computed(() => [
 
 watch(conversationScope, () => {
   autoOpenedThreadIds.clear();
+  // Closing the search panel also resets its internal input state.
   showSearch.value = false;
-  searchInput.value = "";
-  searchSubmitted.value = false;
   emit("clearSearch");
 });
 
@@ -617,100 +526,16 @@ watch(() => props.messages, (newMessages, oldMessages) => {
     emit("openThread", threadId);
   }
 });
-const hasSeenOnline = ref(props.xmppStatus.state === "online");
-const showReconnectedNotice = ref(false);
-let reconnectedNoticeTimeout: ReturnType<typeof setTimeout> | null = null;
-
-function clearReconnectedNotice() {
-  if (reconnectedNoticeTimeout) {
-    clearTimeout(reconnectedNoticeTimeout);
-    reconnectedNoticeTimeout = null;
-  }
-  showReconnectedNotice.value = false;
-}
-
-watch(() => props.xmppStatus.state, (state, previousState) => {
-  if (state === "online") {
-    if (previousState && previousState !== "online" && hasSeenOnline.value) {
-      clearReconnectedNotice();
-      showReconnectedNotice.value = true;
-      reconnectedNoticeTimeout = setTimeout(() => {
-        showReconnectedNotice.value = false;
-        reconnectedNoticeTimeout = null;
-      }, 4200);
-    }
-    hasSeenOnline.value = true;
-    return;
-  }
-
-  clearReconnectedNotice();
+const {
+  connectionNotice,
+  connectionStatusIcon,
+  connectionStatusClasses,
+  clearReconnectedNotice,
+} = useConnectionNotice({
+  status: () => props.xmppStatus,
+  queuedMessageCount: () => queuedMessageCount.value,
 });
 
-const connectionNotice = computed(() =>
-  getConnectionNoticeCopy({
-    status: props.xmppStatus,
-    queuedMessageCount: queuedMessageCount.value,
-    showReconnected: showReconnectedNotice.value,
-  }),
-);
-const connectionStatusIcon = computed(() => {
-  switch (connectionNotice.value?.tone) {
-    case "offline":
-      return WifiOff;
-    case "reconnecting":
-      return RefreshCw;
-    case "error":
-      return AlertCircle;
-    case "reconnected":
-      return CheckCircle2;
-    default:
-      return WifiOff;
-  }
-});
-const connectionStatusClasses = computed(() => {
-  switch (connectionNotice.value?.tone) {
-    case "offline":
-      // Passive state — user already knows they're disconnected.
-      // Keep the chip quiet: muted bg tint, no glow halo.
-      return {
-        banner: "bg-muted/35 text-foreground",
-        iconWrap: "border-border/70 bg-background/60 text-muted-foreground/80",
-        chip: "border-border/70 bg-muted/25 text-muted-foreground/80",
-        body: "text-muted-foreground",
-      };
-    case "reconnecting":
-      // Active reconnection — warning-tinted bg + warning-glow halo
-      // reach the eye without becoming an alarm. The icon's spinner
-      // carries the "moving" signal.
-      return {
-        banner: "bg-warning/10 text-foreground",
-        iconWrap: "border-warning/15 bg-background/60 text-warning/80",
-        chip: "chat-connection-chip-glow--warning border-warning/35 bg-warning/10 text-warning/90",
-        body: "text-foreground/75",
-      };
-    case "error":
-      // Wants user attention (session expired, etc.). Destructive-
-      // tinted bg + destructive-glow halo distinguish it from the
-      // reconnecting tone without escalating to a banner.
-      return {
-        banner: "bg-destructive/10 text-foreground",
-        iconWrap: "border-destructive/15 bg-background/60 text-destructive/80",
-        chip: "chat-connection-chip-glow--destructive border-destructive/35 bg-destructive/10 text-destructive/90",
-        body: "text-foreground/80",
-      };
-    case "reconnected":
-      // Brief celebration. Primary-tinted bg + --glow-strong halo
-      // so the chip reads "we're back" before the banner ages out.
-      return {
-        banner: "bg-primary/8 text-foreground",
-        iconWrap: "border-primary/12 bg-background/60 text-primary/80",
-        chip: "chat-connection-chip-glow--primary border-primary/35 bg-primary/10 text-primary/90",
-        body: "text-foreground/75",
-      };
-    default:
-      return null;
-  }
-});
 const updateNoticeBody = computed(() =>
   props.isApplyingUpdate
     ? "Refreshing to load the latest version."
@@ -727,18 +552,6 @@ async function scrollToPinnedEdge(mode: ScrollDirectionMode) {
 }
 
 defineExpose({ messagesContainer, scrollToPinnedEdge, scrollToMessage });
-
-function doSearch() {
-  searchSubmitted.value = !!searchInput.value.trim();
-  emit("search", searchInput.value);
-}
-
-function closeSearch() {
-  showSearch.value = false;
-  searchInput.value = "";
-  searchSubmitted.value = false;
-  emit("clearSearch");
-}
 
 function presenceText(show?: string): string {
   if (show === "available") return "online";
@@ -817,9 +630,7 @@ watch(() => props.isSending, (sending, prevSending) => {
 onBeforeUnmount(() => {
   timelineScrollFrame.disconnect();
   clearReconnectedNotice();
-  if (replyJumpNoticeTimeout) {
-    clearTimeout(replyJumpNoticeTimeout);
-  }
+  clearReplyJumpNotice();
 });
 
 function showDividerBefore(messageId: string): boolean {
@@ -831,37 +642,7 @@ function showDividerAfter(messageId: string): boolean {
 }
 
 function updateCurrentDayMarker() {
-  const container = messagesContainer.value;
-  if (!container) {
-    currentDayMarkerLabel.value = "";
-    return;
-  }
-
-  const markerEls = [
-    ...container.querySelectorAll<HTMLElement>("[data-day-marker-created-at], [data-message-created-at]"),
-  ];
-  if (markerEls.length === 0) {
-    currentDayMarkerLabel.value = "";
-    return;
-  }
-
-  const containerTop = container.getBoundingClientRect().top;
-  const probeTop = containerTop + 1;
-  let current = markerEls[0];
-  for (const el of markerEls) {
-    const rect = el.getBoundingClientRect();
-    if (rect.bottom < probeTop) {
-      current = el;
-      continue;
-    }
-    if (rect.top <= probeTop || current === markerEls[0]) {
-      current = el;
-    }
-    break;
-  }
-
-  const createdAt = current.dataset.dayMarkerCreatedAt ?? current.dataset.messageCreatedAt;
-  currentDayMarkerLabel.value = createdAt ? formatTimelineDayDivider(createdAt) : "";
+  currentDayMarkerLabel.value = currentDayMarkerLabelFor(messagesContainer.value);
 }
 
 watch(
@@ -872,76 +653,23 @@ watch(
   { flush: "post" },
 );
 
-// Burst window: same author + < 5 min apart + same day, with no
-// intervening other-author message in the rendered order.
-const BURST_WINDOW_MS = 5 * 60 * 1000;
-
-const messageDisplayMeta = computed(() => {
-  const grouped = new Set<string>();
-  const dayDivider = new Set<string>();
-  const list = orderedFeedMessages.value;
-  for (let i = 0; i < list.length; i++) {
-    const cur = list[i];
-    if (!cur) continue;
-    const prev = i > 0 ? list[i - 1] : null;
-    if (!prev) continue;
-    const sameDay = isSameTimelineDay(prev.createdAt, cur.createdAt);
-    if (!sameDay) dayDivider.add(cur.id);
-    if (
-      sameDay
-      && prev.author === cur.author
-      && Math.abs(new Date(cur.createdAt).getTime() - new Date(prev.createdAt).getTime()) < BURST_WINDOW_MS
-    ) {
-      grouped.add(cur.id);
-    }
-  }
-  return { grouped, dayDivider };
-});
+const messageDisplayMeta = computed(() => buildMessageDisplayMeta(orderedFeedMessages.value));
 
 function isGroupedFollowUp(messageId: string): boolean {
   return messageDisplayMeta.value.grouped.has(messageId);
 }
 
-const THREAD_CHIP_MAX_PARTICIPANTS = 5;
-
-interface ThreadChipParticipant {
-  nick: string;
-  avatarUrl?: string | null;
-  presence: import("@/lib/xmpp-client").OccupantPresence;
-}
-
-// Distinct participants for a thread chip: walk newest→oldest, dedup,
-// keep EVERYONE who replied — including the thread author themselves
-// and the current user. Previously the current user was excluded
-// (logic: "the chip answers who *else* has been talking"), but that
-// made the chip read inconsistently: a stranger's reply showed an
-// avatar, my own reply showed nothing. Capped at
-// THREAD_CHIP_MAX_PARTICIPANTS — MessageCard renders only the first
-// N visibly and shows a "+N" overflow chip.
-function threadChipParticipants(messageId: string): ThreadChipParticipant[] {
-  const entry = props.threadIndex.get(messageId);
-  if (!entry) return [];
-  const seen = new Set<string>();
-  const ordered: ThreadChipParticipant[] = [];
-  const children = entry.directChildren;
-  for (let i = children.length - 1; i >= 0; i--) {
-    const c = children[i];
-    if (!c) continue;
-    if (seen.has(c.author)) continue;
-    seen.add(c.author);
-    ordered.push({
-      nick: c.author,
-      avatarUrl: props.avatarUrlByAuthor[c.author] ?? null,
-      presence: props.roomPresence[c.author] ?? "offline",
-    });
-    if (ordered.length >= THREAD_CHIP_MAX_PARTICIPANTS) break;
-  }
-  return ordered;
+function threadChipParticipants(messageId: string) {
+  return threadChipParticipantsFor(
+    props.threadIndex,
+    messageId,
+    props.avatarUrlByAuthor,
+    props.roomPresence,
+  );
 }
 
 function threadChipLastReplyAt(messageId: string): string | undefined {
-  const entry = props.threadIndex.get(messageId);
-  return entry?.directChildren.at(-1)?.createdAt;
+  return threadChipLastReplyAtFor(props.threadIndex, messageId);
 }
 
 function showDayDividerBefore(messageId: string): boolean {
@@ -1076,84 +804,16 @@ function dayDividerLabel(createdAt: string): string {
       </div>
     </div>
 
-    <!-- Search bar -->
-    <div v-if="showSearch" class="px-[var(--chat-content-inline)] py-2.5 border-b border-border glass-surface flex items-center gap-3 flex-shrink-0 animate-fade-in">
-      <div class="chat-message-lane flex items-center gap-3">
-        <Search class="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />
-        <input
-          ref="searchInputEl"
-          v-model="searchInput"
-          placeholder="Search messages…"
-          aria-label="Search messages"
-          class="type-field flex-1 bg-transparent focus:outline-none placeholder:text-muted-foreground/40"
-          @keydown.enter="doSearch"
-          @keydown.escape="closeSearch"
-        />
-        <button
-          v-if="searchInput"
-          class="chat-icon-button chat-icon-button--md text-muted-foreground hover:bg-muted hover:text-foreground"
-          aria-label="Clear search"
-          type="button"
-          @click="closeSearch"
-        >
-          <X class="w-3.5 h-3.5" />
-        </button>
-      </div>
-    </div>
-
-    <!-- Search results -->
-    <div v-if="showSearch && (searchSubmitted || isSearching)" class="border-b border-border glass-surface max-h-56 overflow-auto flex-shrink-0">
-      <div class="chat-message-lane">
-        <!-- Loading state — Loader2 spinner alongside the copy so the
-             user sees the request is in flight, not just frozen. -->
-        <div
-          v-if="isSearching"
-          class="type-caption flex items-center justify-center gap-2 px-[var(--chat-content-inline)] py-5 text-muted-foreground"
-        >
-          <Loader2 class="h-3.5 w-3.5 motion-safe:animate-spin" aria-hidden="true" />
-          <span>Searching…</span>
-        </div>
-        <!-- Empty state — SearchX glyph stacked above the copy so the
-             "no matches" outcome reads as an authored state, not a
-             one-line ghost. -->
-        <div
-          v-else-if="searchResults.length === 0"
-          class="flex flex-col items-center justify-center gap-1.5 px-[var(--chat-content-inline)] py-6 text-center"
-        >
-          <SearchX class="h-5 w-5 text-muted-foreground/60" aria-hidden="true" />
-          <span class="type-caption text-muted-foreground">No matching messages</span>
-        </div>
-        <div v-else class="divide-y divide-border">
-          <!-- Each search result row gets the author's avatar on the
-               left so the eye can triage results by who-said-it at a
-               glance — the same recognition cue the timeline uses.
-               Avatar (xs) + content stack (name + time on row one,
-               truncated body on row two) lets the row read as a
-               compact preview of the matching message. -->
-          <button
-            v-for="result in searchResults"
-            :key="result.id"
-            class="flex w-full items-start gap-3 px-[var(--chat-content-inline)] py-3 text-left hover:bg-muted/50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25"
-            type="button"
-            @click="openSearchResult(result)"
-          >
-            <AppAvatar
-              :name="result.nick"
-              :src="avatarUrlByAuthor[result.nick] ?? null"
-              :presence="roomPresence[result.nick] ?? 'offline'"
-              size="xs"
-            />
-            <div class="min-w-0 flex-1">
-              <div class="flex items-baseline gap-2">
-                <span class="type-control">{{ result.nick }}</span>
-                <span class="type-meta type-numeric text-muted-foreground">{{ formatTimelineStamp(result.createdAt) }}</span>
-              </div>
-              <p class="type-caption truncate text-muted-foreground">{{ result.body }}</p>
-            </div>
-          </button>
-        </div>
-      </div>
-    </div>
+    <MessageSearchPanel
+      v-model:open="showSearch"
+      :results="searchResults"
+      :is-searching="isSearching"
+      :avatar-url-by-author="avatarUrlByAuthor"
+      :room-presence="roomPresence"
+      @search="(query) => emit('search', query)"
+      @clear="emit('clearSearch')"
+      @open-result="openSearchResult"
+    />
 
     <!-- Error banner -->
     <div
@@ -1250,39 +910,13 @@ function dayDividerLabel(createdAt: string): string {
     />
 
     <!-- Typing indicator (social / top-pinned mode) -->
-    <div
+    <TypingIndicator
       v-if="typingUsers.length > 0 && isTopPinned"
-      class="chat-typing-indicator chat-typing-indicator--social flex-shrink-0 border-b border-border"
-    >
-      <div class="chat-message-lane chat-typing-indicator__lane">
-        <span class="chat-typing-indicator__avatars" aria-hidden="true">
-          <span
-            v-for="nick in typingUsers.slice(0, 3)"
-            :key="`typing-avatar:${nick}`"
-            class="chat-typing-indicator__avatar-wrap"
-          >
-            <AppAvatar
-              :name="nick"
-              :src="avatarUrlByAuthor[nick] ?? null"
-              :presence="roomPresence[nick] ?? 'offline'"
-              size="xs"
-            />
-          </span>
-        </span>
-        <span class="chat-typing-indicator__bubble">
-          <span class="chat-typing-indicator__wave" aria-hidden="true">
-            <span class="chat-typing-indicator__wave-dot" />
-            <span class="chat-typing-indicator__wave-dot" />
-            <span class="chat-typing-indicator__wave-dot" />
-          </span>
-          <span class="chat-typing-indicator__text">
-            <template v-if="typingUsers.length === 1">{{ typingUsers[0] }} is typing</template>
-            <template v-else-if="typingUsers.length === 2">{{ typingUsers[0] }} and {{ typingUsers[1] }} are typing</template>
-            <template v-else>{{ typingUsers[0] }} and {{ typingUsers.length - 1 }} others are typing</template>
-          </span>
-        </span>
-      </div>
-    </div>
+      variant="social"
+      :typing-users="typingUsers"
+      :avatar-url-by-author="avatarUrlByAuthor"
+      :room-presence="roomPresence"
+    />
 
     <div
       v-if="currentDayMarkerLabel"
@@ -1302,60 +936,14 @@ function dayDividerLabel(createdAt: string): string {
       class="chat-pane-scroll chat-message-scroll flex-1 min-h-0 px-[var(--chat-content-inline)]"
       @scroll="onMessagesScroll"
     >
-      <div v-if="isLoadingMessages" class="chat-message-lane flex flex-col gap-1 py-6" aria-busy="true" aria-label="Loading messages">
-        <div
-          v-for="row in skeletonMessageRows"
-          :key="`msg-skel-${row.id}`"
-          class="chat-message-grid"
-          :class="row.grouped ? 'chat-message-grouped' : ''"
-        >
-          <div class="chat-message-avatar-cell">
-            <Skeleton
-              v-if="!row.grouped"
-              width="var(--chat-message-avatar-size)"
-              height="var(--chat-message-avatar-size)"
-              radius="var(--radius-md)"
-            />
-          </div>
-          <div class="chat-message-body-stack flex flex-col gap-1.5">
-            <div v-if="!row.grouped" class="flex items-center gap-2">
-              <Skeleton :width="row.authorWidth" height="0.65rem" />
-              <Skeleton width="2.25rem" height="0.55rem" />
-            </div>
-            <Skeleton
-              v-for="(width, i) in row.lines"
-              :key="`msg-skel-line-${row.id}-${i}`"
-              :width="width"
-              height="0.7rem"
-            />
-          </div>
-        </div>
-      </div>
+      <MessageListSkeleton v-if="isLoadingMessages" />
 
-      <div v-else-if="!channel && !dmPeer" class="chat-empty-state">
-        <div class="chat-empty-state__halo">
-          <span class="chat-empty-state__halo-glow" aria-hidden="true" />
-          <span class="chat-empty-state__halo-ring chat-empty-state__halo-ring--muted">
-            <component :is="sidebarMode === 'dms' ? MessageCircle : isForumChannel ? MessagesSquare : Hash" class="w-6 h-6 text-primary/70" />
-          </span>
-        </div>
-        <div class="chat-field-stack">
-          <p class="type-empty-title">
-            {{ sidebarMode === "dms"
-              ? "Pick a conversation"
-              : isForumChannel
-                ? "Pick a forum"
-                : "Pick a channel" }}
-          </p>
-          <p class="type-field text-muted-foreground chat-copy-measure">
-            {{ sidebarMode === "dms"
-              ? "Open one from the sidebar to keep chatting."
-              : isForumChannel
-                ? "Open one to browse its topics."
-                : "Open one from the sidebar to drop into the conversation." }}
-          </p>
-        </div>
-      </div>
+      <TimelineEmptyState
+        v-else-if="!channel && !dmPeer"
+        variant="pick"
+        :sidebar-mode="sidebarMode"
+        :is-forum-channel="isForumChannel"
+      />
 
       <div v-else-if="errorActionLabel" class="chat-empty-state">
         <div class="w-12 h-12 rounded-lg bg-destructive/10 flex items-center justify-center">
@@ -1371,34 +959,13 @@ function dayDividerLabel(createdAt: string): string {
         </div>
       </div>
 
-      <div v-else-if="feedMessages.length === 0" class="chat-empty-state">
-        <div v-if="!dmPeer && !isForumChannel" class="chat-empty-state__mascot-wrap" aria-hidden="true">
-          <span class="chat-empty-state__mascot-halo" />
-          <img class="chat-empty-state__mascot" src="/waddle-logo.svg" alt="" />
-        </div>
-        <div v-else class="chat-empty-state__halo">
-          <span class="chat-empty-state__halo-glow chat-empty-state__halo-glow--primary" aria-hidden="true" />
-          <span class="chat-empty-state__halo-ring chat-empty-state__halo-ring--primary">
-            <component :is="dmPeer ? MessageCircle : MessagesSquare" class="w-6 h-6 text-primary" />
-          </span>
-        </div>
-        <div class="chat-field-stack">
-          <p class="type-empty-title">
-            {{ dmPeer
-              ? `Just you and @${dmPeer.peerUsername}`
-              : isForumChannel
-                ? `Welcome to #${channel?.name}`
-                : `It's quiet in #${channel?.name}` }}
-          </p>
-          <p class="type-field text-muted-foreground chat-copy-measure">
-            {{ isForumChannel
-              ? "Start the first topic with a clear title so people can follow the thread."
-              : dmPeer
-                ? "Send the first message to get the conversation going."
-                : "Be the one who breaks the silence. Drop a hello, share what you're working on, ask the room something interesting." }}
-          </p>
-        </div>
-      </div>
+      <TimelineEmptyState
+        v-else-if="feedMessages.length === 0"
+        variant="quiet"
+        :is-forum-channel="isForumChannel"
+        :dm-peer-username="dmPeer?.peerUsername ?? null"
+        :channel-name="channel?.name ?? null"
+      />
 
     </div>
 
@@ -1504,39 +1071,13 @@ function dayDividerLabel(createdAt: string): string {
     </div>
 
     <!-- Typing indicator (chat / bottom-pinned mode) -->
-    <div
+    <TypingIndicator
       v-if="typingUsers.length > 0 && !isTopPinned"
-      class="chat-typing-indicator chat-typing-indicator--chat flex-shrink-0"
-    >
-      <div class="chat-message-lane chat-typing-indicator__lane">
-        <span class="chat-typing-indicator__avatars" aria-hidden="true">
-          <span
-            v-for="nick in typingUsers.slice(0, 3)"
-            :key="`typing-avatar-bottom:${nick}`"
-            class="chat-typing-indicator__avatar-wrap"
-          >
-            <AppAvatar
-              :name="nick"
-              :src="avatarUrlByAuthor[nick] ?? null"
-              :presence="roomPresence[nick] ?? 'offline'"
-              size="xs"
-            />
-          </span>
-        </span>
-        <span class="chat-typing-indicator__bubble">
-          <span class="chat-typing-indicator__wave" aria-hidden="true">
-            <span class="chat-typing-indicator__wave-dot" />
-            <span class="chat-typing-indicator__wave-dot" />
-            <span class="chat-typing-indicator__wave-dot" />
-          </span>
-          <span class="chat-typing-indicator__text">
-            <template v-if="typingUsers.length === 1">{{ typingUsers[0] }} is typing</template>
-            <template v-else-if="typingUsers.length === 2">{{ typingUsers[0] }} and {{ typingUsers[1] }} are typing</template>
-            <template v-else>{{ typingUsers[0] }} and {{ typingUsers.length - 1 }} others are typing</template>
-          </span>
-        </span>
-      </div>
-    </div>
+      variant="chat"
+      :typing-users="typingUsers"
+      :avatar-url-by-author="avatarUrlByAuthor"
+      :room-presence="roomPresence"
+    />
 
     <!-- Composer -->
     <MessageComposer

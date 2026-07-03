@@ -1,44 +1,31 @@
 <script setup lang="ts">
 import { ref, computed, watch, onBeforeUnmount, nextTick } from "vue";
-import { Send, Paperclip, FileText, Music4, Puzzle, X, Loader2, Megaphone, Radio, CornerDownLeft } from "lucide-vue-next";
+import { Send, Paperclip, FileText, Puzzle, X, Loader2, CornerDownLeft } from "lucide-vue-next";
 import type { JSONContent } from "@tiptap/core";
 import GifPicker from "@/components/chat/GifPicker.vue";
 import ChatEditor from "@/components/chat/ChatEditor.vue";
+import ComposerAttachmentGrid from "@/components/chat/ComposerAttachmentGrid.vue";
+import ComposerEmojiPopover from "@/components/chat/ComposerEmojiPopover.vue";
+import ComposerMentionPopover from "@/components/chat/ComposerMentionPopover.vue";
 import EditorBubbleToolbar from "@/components/chat/EditorBubbleToolbar.vue";
 import SlashCommandPopover from "@/components/chat/SlashCommandPopover.vue";
-import { searchEmoji } from "@/lib/emoji";
-import { getComposerAutocompleteAction, getComposerEscapeAction } from "@/lib/reply-ux";
+import { getComposerEscapeAction } from "@/lib/reply-ux";
 import { tiptapToRichMessage } from "@/lib/rich-message";
 import { extractImagesFromClipboardEvent } from "@/lib/xmpp/file-upload";
 import type { MentionCandidate } from "@/lib/mentions";
 import { jidLocalpart } from "@/lib/xmpp/jid";
-import { parseSlashTrigger } from "@/lib/slash-trigger";
-import { filterSlashCandidates, resolveSlashCommand } from "@/lib/slash-match";
-import { buildSlashInvocation, type SlashInvocation } from "@/lib/slash-dispatch";
+import type { SlashInvocation } from "@/lib/slash-dispatch";
 import type { DiscoveredExtensionCommand } from "@/lib/xmpp/extension-commands";
 import { useComposerLinkPreview } from "@/lib/use-composer-link-preview";
 import { prepareComposerSendEvent } from "@/lib/composer-send-preparation";
 import type { ComposerLinkPreviewLookup, ComposerLinkPreviewSendPayload } from "@/lib/link-preview-composer";
+import type { MarkupSpan, MessageReference } from "@/lib/chat-ui";
 import {
-  isAudioFile,
-  isImageFile,
-  isPdfFile,
-  isVideoFile,
-  type MarkupSpan,
-  type MessageReference,
-} from "@/lib/chat-ui";
-
-type AttachmentPreviewKind = "image" | "video" | "audio" | "pdf" | "file";
-
-interface PendingAttachment {
-  id: string;
-  file: File | Blob;
-  previewUrl: string;
-  name: string;
-  mediaType: string;
-  size: number;
-  previewKind: AttachmentPreviewKind;
-}
+  attachmentName,
+  attachmentPreviewKind,
+  type PendingAttachment,
+} from "./composer-attachments";
+import { useComposerAutocomplete } from "./composables/use-composer-autocomplete";
 
 const draft = defineModel<string>("draft", { required: true });
 const forumTitle = defineModel<string>("forumTitle", { default: "" });
@@ -85,15 +72,6 @@ const replyAuthorName = computed(() => {
 });
 
 const showGifPicker = ref(false);
-const showMentions = ref(false);
-const showEmoji = ref(false);
-const showSlash = ref(false);
-const slashPrefix = ref("");
-const slashTrailing = ref("");
-const dismissedSlashPrefix = ref<string | null>(null);
-const mentionQuery = ref("");
-const emojiQuery = ref("");
-const selectedIndex = ref(0);
 const editorRef = ref<InstanceType<typeof ChatEditor> | null>(null);
 const setEditorRef = (instance: InstanceType<typeof ChatEditor> | null) => {
   editorRef.value = instance;
@@ -107,6 +85,12 @@ const setExtensionButtonRef = (el: HTMLButtonElement | null) => {
   extensionButtonRef.value = el;
 };
 
+/** Get the underlying TipTap Editor instance from the ChatEditor ref. */
+function getTiptapEditor() {
+  const e = editorRef.value as any;
+  return e?.editor?.value ?? e?.editor ?? null;
+}
+
 const tiptapEditor = computed(() => {
   const e = editorRef.value as any;
   return e?.editor?.value ?? e?.editor ?? null;
@@ -119,27 +103,6 @@ const linkPreview = useComposerLinkPreview(
   computed(() => props.linkPreviewLookup),
   computed(() => props.linkPreviewScope),
 );
-
-function attachmentName(file: File | Blob): string {
-  return file instanceof File && file.name
-    ? file.name
-    : `attachment-${Date.now()}.bin`;
-}
-
-function attachmentPreviewKind(mediaType?: string, name?: string): AttachmentPreviewKind {
-  const candidate = name ?? "";
-  if (isImageFile(mediaType, candidate)) return "image";
-  if (isVideoFile(mediaType, candidate)) return "video";
-  if (isAudioFile(mediaType, candidate)) return "audio";
-  if (isPdfFile(mediaType, candidate)) return "pdf";
-  return "file";
-}
-
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
 
 function addAttachments(files: Array<File | Blob>) {
   if (isPreparingSend.value) return;
@@ -170,63 +133,36 @@ onBeforeUnmount(() => {
   for (const a of pendingAttachments.value) URL.revokeObjectURL(a.previewUrl);
 });
 
-/** Get the underlying TipTap Editor instance from the ChatEditor ref. */
-function getTiptapEditor() {
-  const e = editorRef.value as any;
-  return e?.editor?.value ?? e?.editor ?? null;
-}
-
-// Track the ProseMirror position range for the active autocomplete trigger
-const triggerRange = ref<{ from: number; to: number } | null>(null);
-
-function stripDiacritics(s: string): string {
-  return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
-}
-
-const mentionResults = computed(() => {
-  const q = mentionQuery.value.toLowerCase();
-  const qNorm = stripDiacritics(mentionQuery.value);
-  if (!q) return props.mentionCandidates.slice(0, 8);
-  return props.mentionCandidates.filter((candidate) => {
-    const lower = candidate.username.toLowerCase();
-    return lower.includes(q) || stripDiacritics(candidate.username).includes(qNorm);
-  }).slice(0, 8);
-});
-
-const emojiResults = computed(() => searchEmoji(emojiQuery.value));
 const showForumTitleInput = computed(() => props.isForumChannel && !props.replyingTo);
-
-const slashContext = computed(() => ({ inMuc: !!props.inMuc }));
 const showExtensions = computed(() => props.showExtensions !== false);
-const slashCandidates = computed(() =>
-  filterSlashCandidates(slashPrefix.value, props.slashCommands ?? [], slashContext.value),
-);
-const slashResolution = computed(() =>
-  resolveSlashCommand(slashPrefix.value, props.slashCommands ?? [], slashContext.value),
-);
-const slashBlocked = computed(() =>
-  showSlash.value && slashPrefix.value.length > 0 && !slashResolution.value && slashCandidates.value.length === 0,
-);
 
-const activeResults = computed(() => {
-  if (showMentions.value) return mentionResults.value;
-  if (showEmoji.value) return emojiResults.value;
-  if (showSlash.value) return slashCandidates.value;
-  return [];
+const {
+  showMentions,
+  showEmoji,
+  showSlash,
+  slashPrefix,
+  slashBlocked,
+  selectedIndex,
+  mentionResults,
+  emojiResults,
+  slashCandidates,
+  autocompleteAction,
+  checkAutocompleteFromEditor,
+  clearAutocomplete,
+  dismissSlash,
+  insertMention,
+  insertEmoji,
+  expandSlashCandidate,
+  selectAutocompleteResult,
+  onKeydown,
+} = useComposerAutocomplete({
+  getTiptapEditor,
+  mentionCandidates: () => props.mentionCandidates,
+  slashCommands: () => props.slashCommands ?? [],
+  inMuc: () => !!props.inMuc,
+  slashSubmitBlocked: () => showForumTitleInput.value && !forumTitle.value.trim(),
+  dispatchSlashCommand: () => props.dispatchSlashCommand,
 });
-
-const autocompleteAction = computed(() =>
-  getComposerAutocompleteAction({
-    showMentions: showMentions.value,
-    mentionCount: mentionResults.value.length,
-    showEmoji: showEmoji.value,
-    emojiCount: emojiResults.value.length,
-    showSlash: showSlash.value,
-    slashHasPrefix: slashPrefix.value.length > 0,
-    slashCandidateCount: slashCandidates.value.length,
-    slashHasResolution: !!slashResolution.value,
-  }),
-);
 
 /** Whether the composer has nothing sendable (no text and no pending attachments). */
 const isEmpty = computed(() => !draft.value.trim() && pendingAttachments.value.length === 0);
@@ -255,199 +191,6 @@ function onEditorUpdate(doc: JSONContent) {
   draft.value = tiptapToRichMessage(doc).body;
   emit("typing");
   checkAutocompleteFromEditor();
-}
-
-function clearAutocomplete() {
-  showMentions.value = false;
-  showEmoji.value = false;
-  showSlash.value = false;
-  triggerRange.value = null;
-}
-
-function firstParagraphTextFromDoc(doc: any): string {
-  const firstChild = doc?.firstChild;
-  if (!firstChild || firstChild.type?.name !== "paragraph") return "";
-  return firstChild.textContent ?? "";
-}
-
-function checkAutocompleteFromEditor() {
-  const editor = editorRef.value;
-  if (!editor) return;
-  const json = editor.getJSON?.();
-  if (!json) return;
-
-  // Access the underlying TipTap editor to get ProseMirror state
-  const tiptapEditor = getTiptapEditor();
-  if (!tiptapEditor?.state) return;
-
-  const { selection, doc } = tiptapEditor.state;
-  if (!selection.empty) {
-    clearAutocomplete();
-    return;
-  }
-
-  const pos = selection.from;
-  const textBefore = doc.textBetween(0, pos, "\n", "\uFFFC");
-
-  const mentionMatch = textBefore.match(/(?:^|\s)@(\S*)$/);
-  if (mentionMatch) {
-    mentionQuery.value = mentionMatch[1];
-    selectedIndex.value = 0;
-    showMentions.value = true;
-    showEmoji.value = false;
-    showSlash.value = false;
-    triggerRange.value = {
-      from: pos - mentionMatch[0].trimStart().length,
-      to: pos,
-    };
-    return;
-  }
-  showMentions.value = false;
-
-  const emojiMatch = textBefore.match(/(?:^|\s):([a-z0-9_+-]*)$/i);
-  if (emojiMatch && emojiMatch[1].length >= 2) {
-    emojiQuery.value = emojiMatch[1];
-    selectedIndex.value = 0;
-    showEmoji.value = true;
-    showSlash.value = false;
-    triggerRange.value = {
-      from: pos - emojiMatch[0].trimStart().length,
-      to: pos,
-    };
-    return;
-  }
-  showEmoji.value = false;
-
-  // Slash autocomplete is anchored to paragraph 0; if the cursor is in a
-  // later paragraph, an earlier `/word` must not arm the slash submit path.
-  const firstChild = doc.firstChild;
-  const cursorInFirstParagraph =
-    !!firstChild && firstChild.type?.name === "paragraph" && pos > 0 && pos <= firstChild.nodeSize - 1;
-
-  const firstParagraph = firstParagraphTextFromDoc(doc);
-  const slash = parseSlashTrigger(firstParagraph);
-  if (slash) {
-    // Hold the popover when the cursor is outside paragraph 0 — but keep the
-    // dismissedSlashPrefix intact so the user can navigate away and back
-    // without re-arming the same `/word` they already dismissed.
-    const suppressedByDismissal =
-      dismissedSlashPrefix.value !== null && dismissedSlashPrefix.value === slash.prefix;
-    if (!cursorInFirstParagraph || suppressedByDismissal) {
-      showSlash.value = false;
-    } else {
-      slashPrefix.value = slash.prefix;
-      slashTrailing.value = slash.trailing;
-      selectedIndex.value = 0;
-      showSlash.value = true;
-      // The slash trigger spans the first paragraph from position 1 (after the
-      // leading <p> open tag) through the prefix length.
-      triggerRange.value = { from: 1, to: 1 + 1 + slash.prefix.length };
-    }
-    return;
-  }
-
-  // The leading `/word` is gone; safe to reset the dismissal too.
-  dismissedSlashPrefix.value = null;
-  showSlash.value = false;
-  triggerRange.value = null;
-}
-
-function insertMention(candidate: MentionCandidate) {
-  const tiptapEditor = getTiptapEditor();
-  if (!tiptapEditor || !triggerRange.value) return;
-
-  const replacement = `@${candidate.username} `;
-  tiptapEditor.chain()
-    .focus()
-    .insertContentAt(triggerRange.value, replacement)
-    .run();
-
-  showMentions.value = false;
-  triggerRange.value = null;
-}
-
-function insertEmoji(emoji: string) {
-  const tiptapEditor = getTiptapEditor();
-  if (!tiptapEditor || !triggerRange.value) return;
-
-  const replacement = `${emoji} `;
-  tiptapEditor.chain()
-    .focus()
-    .insertContentAt(triggerRange.value, replacement)
-    .run();
-
-  showEmoji.value = false;
-  triggerRange.value = null;
-}
-
-function expandSlashCandidate(command: DiscoveredExtensionCommand) {
-  const tiptapEditor = getTiptapEditor();
-  if (!tiptapEditor || !command.composerPrefix) return;
-  // If the user already typed a space after the partial prefix, swallow it
-  // so we don't end up with double spaces (e.g. `/p ` + `/poll ` → `/poll  `).
-  const firstParagraph = firstParagraphTextFromDoc(tiptapEditor.state.doc);
-  const consumedExtra = firstParagraph.charAt(1 + slashPrefix.value.length) === " " ? 1 : 0;
-  const replacement = `/${command.composerPrefix} `;
-  tiptapEditor.chain()
-    .focus()
-    .setTextSelection({ from: 1, to: 1 + 1 + slashPrefix.value.length + consumedExtra })
-    .insertContent(replacement)
-    .run();
-  slashPrefix.value = command.composerPrefix;
-  slashTrailing.value = "";
-  showSlash.value = true;
-}
-
-function dispatchSlashResolution(): boolean {
-  const command = slashResolution.value;
-  if (!command) return false;
-  // Forum channels demand a title; don't smuggle a slash dispatch past that gate.
-  if (showForumTitleInput.value && !forumTitle.value.trim()) return true;
-  const invocation = buildSlashInvocation(command, slashTrailing.value);
-  const dispatcher = props.dispatchSlashCommand;
-  // Hide the popover for the round-trip; only commit the dismissal once the
-  // parent reports success, so a failed dispatch leaves slash mode armed for
-  // the user to retry, edit, or Esc.
-  showSlash.value = false;
-  triggerRange.value = null;
-  if (!dispatcher) return true;
-  const dispatchedPrefix = slashPrefix.value;
-  void (async () => {
-    const ok = await dispatcher(invocation);
-    if (ok) {
-      dismissedSlashPrefix.value = dispatchedPrefix;
-    }
-  })();
-  return true;
-}
-
-function selectAutocompleteResult(action = autocompleteAction.value): boolean {
-  if (action === "select-mention") {
-    insertMention(mentionResults.value[selectedIndex.value]);
-    return true;
-  }
-
-  if (action === "select-emoji") {
-    insertEmoji(emojiResults.value[selectedIndex.value].emoji);
-    return true;
-  }
-
-  if (action === "select-command") {
-    const candidate = slashCandidates.value[selectedIndex.value];
-    if (candidate) expandSlashCandidate(candidate);
-    return true;
-  }
-
-  if (action === "submit-slash") {
-    return dispatchSlashResolution();
-  }
-
-  if (action === "block-slash") {
-    // Hold the message; popover already shows an inline "no command" hint.
-    return true;
-  }
-
-  return false;
 }
 
 async function onSend(doc: JSONContent) {
@@ -545,43 +288,12 @@ function onEditorCancel() {
   }
 
   if (action === "dismiss-slash") {
-    showSlash.value = false;
-    dismissedSlashPrefix.value = slashPrefix.value;
+    dismissSlash();
     return;
   }
 
   if (action === "cancel-reply" && !isPreparingSend.value) {
     emit("cancelReply");
-  }
-}
-
-function onKeydown(e: KeyboardEvent) {
-  if (activeResults.value.length > 0 && (showMentions.value || showEmoji.value || showSlash.value)) {
-    if (e.key === "ArrowDown") {
-      e.preventDefault();
-      e.stopPropagation();
-      selectedIndex.value = (selectedIndex.value + 1) % activeResults.value.length;
-      return;
-    }
-    if (e.key === "ArrowUp") {
-      e.preventDefault();
-      e.stopPropagation();
-      selectedIndex.value =
-        (selectedIndex.value - 1 + activeResults.value.length) % activeResults.value.length;
-      return;
-    }
-    if (e.key === "Tab") {
-      e.preventDefault();
-      e.stopPropagation();
-      selectAutocompleteResult();
-      return;
-    }
-    if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
-      e.preventDefault();
-      e.stopPropagation();
-      selectAutocompleteResult();
-      return;
-    }
   }
 }
 
@@ -707,82 +419,11 @@ watch(isPreparingSend, (preparing) => {
         </p>
       </div>
 
-      <!-- Pending attachment previews -->
-      <div
+      <ComposerAttachmentGrid
         v-if="pendingAttachments.length > 0"
-        class="chat-composer-attachment-grid animate-fade-in"
-      >
-        <div
-          v-for="att in pendingAttachments"
-          :key="att.id"
-          class="relative group/att rounded-lg border border-border bg-muted overflow-hidden"
-        >
-          <img
-            v-if="att.previewKind === 'image'"
-            :src="att.previewUrl"
-            :alt="att.name"
-            class="h-20 w-20 object-cover"
-          />
-          <div v-else-if="att.previewKind === 'video'" class="w-44">
-            <video
-              :src="att.previewUrl"
-              class="h-24 w-full bg-black object-cover"
-              controls
-              muted
-              playsinline
-              preload="metadata"
-            />
-            <div class="type-caption px-2 py-1.5">
-              <div class="type-emphasis truncate text-foreground">{{ att.name }}</div>
-              <div class="text-muted-foreground">{{ formatFileSize(att.size) }}</div>
-            </div>
-          </div>
-          <div v-else-if="att.previewKind === 'audio'" class="flex w-full max-w-72 flex-col gap-2 p-3">
-            <div class="type-caption type-emphasis flex items-center gap-2">
-              <Music4 class="h-4 w-4 text-primary" />
-              <span class="truncate">{{ att.name }}</span>
-            </div>
-            <audio :src="att.previewUrl" controls class="h-9 w-full" />
-            <div class="type-caption text-muted-foreground">
-              {{ att.mediaType }} · {{ formatFileSize(att.size) }}
-            </div>
-          </div>
-          <div v-else-if="att.previewKind === 'pdf'" class="w-44">
-            <object
-              :data="att.previewUrl"
-              type="application/pdf"
-              class="h-24 w-full bg-background"
-            >
-              <div class="type-caption flex h-24 w-full flex-col items-center justify-center gap-2 text-muted-foreground">
-                <FileText class="h-5 w-5 text-primary" />
-                <span>PDF preview</span>
-              </div>
-            </object>
-            <div class="type-caption px-2 py-1.5">
-              <div class="type-emphasis truncate text-foreground">{{ att.name }}</div>
-              <div class="text-muted-foreground">{{ formatFileSize(att.size) }}</div>
-            </div>
-          </div>
-          <div v-else class="flex w-full max-w-72 items-center gap-3 p-3">
-            <FileText class="h-5 w-5 flex-shrink-0 text-primary" />
-            <div class="min-w-0 flex-1">
-              <div class="type-control truncate text-foreground">{{ att.name }}</div>
-              <div class="type-caption truncate text-muted-foreground">
-                {{ att.mediaType }} · {{ formatFileSize(att.size) }}
-              </div>
-            </div>
-          </div>
-          <button
-            type="button"
-            class="absolute top-1 right-1 h-6 w-6 flex items-center justify-center rounded-full bg-background/90 text-muted-foreground hover:text-destructive border border-border shadow-sm opacity-0 group-hover/att:opacity-100 focus:opacity-100 transition-opacity"
-            :title="`Remove ${att.name}`"
-            :aria-label="`Remove attachment ${att.name}`"
-            @click="removeAttachment(att.id)"
-          >
-            <X class="w-3.5 h-3.5" aria-hidden="true" />
-          </button>
-        </div>
-      </div>
+        :attachments="pendingAttachments"
+        @remove="removeAttachment"
+      />
 
       <!-- Upload progress bar -->
       <div
@@ -808,84 +449,21 @@ watch(isPreparingSend, (preparing) => {
       @close="showGifPicker = false"
     />
 
-
-
-    <!-- @mention autocomplete -->
-    <div
+    <ComposerMentionPopover
       v-if="showMentions && mentionResults.length > 0"
-      class="z-popover chat-composer-popover absolute glass-panel border border-border rounded-lg max-h-56 overflow-auto min-w-0 shadow-xl animate-fade-in p-1"
-      :class="isTopPinned ? 'top-full mt-2' : 'bottom-full mb-2'"
-    >
-      <div class="flex flex-col gap-1">
-        <button
-          v-for="(candidate, i) in mentionResults"
-          :key="candidate.kind === 'broadcast' ? `broadcast:${candidate.username}` : candidate.jid ?? candidate.username"
-          type="button"
-          class="type-control w-full h-9 px-3 py-0 text-left transition-colors flex items-center gap-2 rounded-lg"
-          :class="i === selectedIndex
-            ? 'bg-primary/15 hover:bg-primary/20'
-            : 'hover:bg-muted'"
-          @mousedown.prevent="insertMention(candidate)"
-        >
-          <!-- Broadcast mentions get distinct glyphs so @everyone vs @here
-               reads at a glance without scanning the username text:
-               Megaphone = announce to everyone, Radio = ping the people
-               who are tuned in (online here). Other broadcast values
-               (future-proof) fall back to a generic @ mark. -->
-          <span
-            v-if="candidate.kind === 'broadcast' && candidate.username === 'everyone'"
-            class="flex h-5 w-5 items-center justify-center rounded bg-primary/10 text-primary"
-          >
-            <Megaphone class="h-3 w-3" aria-hidden="true" />
-          </span>
-          <span
-            v-else-if="candidate.kind === 'broadcast' && candidate.username === 'here'"
-            class="flex h-5 w-5 items-center justify-center rounded bg-primary/10 text-primary"
-          >
-            <Radio class="h-3 w-3" aria-hidden="true" />
-          </span>
-          <span
-            v-else-if="candidate.kind === 'broadcast'"
-            class="flex h-5 w-5 items-center justify-center rounded bg-primary/10 text-primary type-caption"
-          >@</span>
-          <img
-            v-else-if="candidate.avatar_url"
-            :src="candidate.avatar_url"
-            :alt="candidate.username"
-            class="h-5 w-5 rounded object-cover bg-muted"
-            loading="lazy"
-          />
-          <span
-            v-else
-            class="type-caption flex h-5 w-5 items-center justify-center rounded bg-muted text-muted-foreground"
-          >@</span>
-          <span class="type-emphasis">{{ candidate.username }}</span>
-        </button>
-      </div>
-    </div>
+      :results="mentionResults"
+      :selected-index="selectedIndex"
+      :is-top-pinned="isTopPinned"
+      @pick="insertMention"
+    />
 
-    <!-- :emoji autocomplete -->
-    <div
+    <ComposerEmojiPopover
       v-if="showEmoji && emojiResults.length > 0"
-      class="z-popover chat-composer-popover absolute glass-panel border border-border rounded-lg max-h-56 overflow-auto min-w-0 shadow-xl animate-fade-in p-1"
-      :class="isTopPinned ? 'top-full mt-2' : 'bottom-full mb-2'"
-    >
-      <div class="flex flex-col gap-1">
-        <button
-          v-for="(entry, i) in emojiResults"
-          :key="entry.name"
-          type="button"
-          class="type-control w-full h-9 px-3 py-0 text-left transition-colors flex items-center gap-2 rounded-lg"
-          :class="i === selectedIndex
-            ? 'bg-primary/15 hover:bg-primary/20'
-            : 'hover:bg-muted'"
-          @mousedown.prevent="insertEmoji(entry.emoji)"
-        >
-          <span>{{ entry.emoji }}</span>
-          <span class="type-caption text-muted-foreground">:{{ entry.name }}:</span>
-        </button>
-      </div>
-    </div>
+      :results="emojiResults"
+      :selected-index="selectedIndex"
+      :is-top-pinned="isTopPinned"
+      @pick="insertEmoji"
+    />
 
     <!-- /slash command autocomplete -->
     <SlashCommandPopover

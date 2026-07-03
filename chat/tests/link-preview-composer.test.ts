@@ -388,18 +388,26 @@ describe("composer link preview state", () => {
   });
 
   test("MessageCard inline edits reuse composer preview lookup and emit payloads", async () => {
-    const source = await Bun.file(
+    const cardSource = await Bun.file(
       new URL("../src/components/chat/MessageCard.vue", import.meta.url),
     ).text();
+    const editFormSource = await Bun.file(
+      new URL("../src/components/chat/MessageEditForm.vue", import.meta.url),
+    ).text();
 
-    expect(source).toContain("useComposerLinkPreview(");
-    expect(source).toContain("@update=\"updateEditDraft\"");
-    expect(source).toContain("editLinkPreview.sendPayloadFor(body)");
-    expect(source).toContain("if (!isEditing.value || editDraft.value !== draftAtSubmit) return;");
-    expect(source).toContain("originalPreviewUrl !== null && !body.includes(originalPreviewUrl)");
-    expect(source).not.toContain("originalPreviewUrl ?? \"\\0\"");
-    expect(source).toContain("emit(\"edit\", props.message.id, body, markup, references, linkPreview)");
-    expect(source).toContain("@click=\"editLinkPreview.dismiss\"");
+    // The card forwards its composer preview lookup into the edit form and
+    // re-emits the saved payload with the message id.
+    expect(cardSource).toContain(":link-preview-lookup=\"linkPreviewLookup\"");
+    expect(cardSource).toContain("emit(\"edit\", props.message.id, newBody, markup, references, linkPreview)");
+
+    expect(editFormSource).toContain("useComposerLinkPreview(");
+    expect(editFormSource).toContain("@update=\"updateEditDraft\"");
+    expect(editFormSource).toContain("editLinkPreview.sendPayloadFor(body)");
+    expect(editFormSource).toContain("if (closed.value || editDraft.value !== draftAtSubmit) return;");
+    expect(editFormSource).toContain("originalPreviewUrl !== null && !body.includes(originalPreviewUrl)");
+    expect(editFormSource).not.toContain("originalPreviewUrl ?? \"\\0\"");
+    expect(editFormSource).toContain("emit(\"save\", body, markup, references, linkPreview)");
+    expect(editFormSource).toContain("@click=\"editLinkPreview.dismiss\"");
   });
 });
 
