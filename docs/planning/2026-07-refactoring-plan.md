@@ -153,3 +153,49 @@ Phase 0 + S1 + C1 are quick small-PR work; S2 + characterization suites are the 
 - **Apple**: xcodebuild for both targets via CI (PR + new main-branch job); XCTest for extracted models; JID round-trip tests against FFI.
 - **Tokens**: regen script idempotent in CI (`git diff --exit-code`); visual spot-check chat + website; Apple builds.
 - Per project convention, each phase's implementation work starts with a draft PR containing the phase plan, monitors CI to green, and finishes with adversarial-persona review before undrafting.
+
+## Outcomes (executed 2026-07-02/03, PR #1085)
+
+All workstreams were executed on a single branch (per direction) as scoped
+conventional commits rather than the per-phase PR series assumed above.
+
+- **Phase 0** — done as planned (cruft removal, bench workspace deletion,
+  TODO.md fix, chat test script, 0272 rename, apple main-branch CI job).
+- **S1** — done: typed vcard-temp builder replaces `format!` XML; all
+  production `#[allow]`s removed (parameter structs for the arity cases,
+  restructured ws_common harness); duplicate `parser_utils` deleted in
+  favor of `waddle-xmpp-core`.
+- **S2** — done: 25 dedicated suites (~300 tests) covering the 22 missing
+  XEPs plus deepened 0115/0292/0402; `xep_suite_conformance.rs` now fails
+  the build if an advertised XEP lacks a suite. Found one real bug (0401
+  `InviteStore::cleanup_expired` never purged unused expired invites —
+  fixed) and four XEP-conformance deviations (0452 wire shape, 0500 field
+  name, 0502 invented namespace, 0446 duration/length) tracked in #1150 as
+  wire-protocol follow-ups.
+- **S3** — done: `notification_outbox`, `push_service`,
+  `notification_activity`, `notification_settings_projection` split into
+  module directories with inline tests moved to integration suites; the
+  `iq/misc`, `iq/session_misc`, `iq/pubsub_helpers`, and
+  `interpret/room_helpers` grab-bags dissolved into per-handler modules.
+- **S4** — the RouteToConnection migration had in fact landed with #229;
+  only stale doc comments in `outbound.rs` remained and were corrected.
+  No wire or interpreter changes were needed.
+- **C1–C4** — done: JID helpers routed everywhere, single `escapeXml`,
+  dead `connectionStore.api` removed, WASM boundary typed; merge core
+  unified under `chat/src/lib/messaging/`; `BrowserXmppClient` decomposed
+  behind a typed event emitter; `chat-app-controller` split into
+  per-feature composables and the six named SFCs thinned (call dialogs
+  deferred as the roadmap allowed).
+- **A1** — done: FFI JID parsing replaces the hand-rolled Swift version;
+  `AppModel` split into feature models; `ChatWorkspaceView` subviews
+  extracted. Validated via darwin CI only (no local xcodebuild).
+- **T** — done: `tokens.css` is authoritative; generator emits `brand.css`
+  and `WaddleTheme.swift` with GENERATED headers; idempotence enforced as
+  a cuenv CI task.
+
+Known deviations from the letter of the plan: work landed as one PR
+(#1085) instead of ~30 small PRs; S3's split landed as a single commit
+rather than separate test-move/prod-split commits (the intermediate states
+existed only in the working tree); dev profile now uses
+`line-tables-only` debuginfo after full debuginfo repeatedly exhausted CI
+containers' disks.
