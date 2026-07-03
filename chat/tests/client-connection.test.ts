@@ -1,0 +1,356 @@
+/**
+ * Unit tests for the connection-support modules extracted from
+ * `BrowserXmppClient` (`src/lib/xmpp/client-connection.ts`):
+ * offline-queue drain ordering, non-retryable discard, ack/failure
+ * bookkeeping, reconnect backoff scheduling, and resume-state
+ * persistence — all exercised without constructing the full client.
+ */
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { TypedEventBus, type ClientEvents } from "../src/lib/xmpp/client-events";
+import {
+  OfflineSendQueue,
+  ReconnectScheduler,
+  ResumeStateStore,
+  compatWasmSendResult,
+  type XmppResumeState,
+} from "../src/lib/xmpp/client-connection";
+import { listQueuedMessages } from "../src/lib/outbound-queue-store";
+import type { ResumePersistence } from "../src/lib/xmpp/resume-persistence";
+import type { XmppStatusSnapshot } from "../src/lib/xmpp/types";
+
+const SCOPE = "alice@example.com";
+
+function createStorageMock() {
+  const values = new Map<string, string>();
+  return {
+    getItem(key: string) {
+      return values.has(key) ? values.get(key)! : null;
+    },
+    setItem(key: string, value: string) {
+      values.set(key, value);
+    },
+    removeItem(key: string) {
+      values.delete(key);
+    },
+    clear() {
+      values.clear();
+    },
+  };
+}
+
+const originalWindow = globalThis.window;
+const originalLocalStorage = globalThis.localStorage;
+
+beforeEach(() => {
+  const storage = createStorageMock();
+  (globalThis as typeof globalThis & { localStorage: typeof storage }).localStorage = storage;
+  (globalThis as typeof globalThis & { window: Window & { localStorage: typeof storage } }).window = {
+    ...(originalWindow ?? {}),
+    localStorage: storage,
+  } as Window & { localStorage: typeof storage };
+  localStorage.clear();
+});
+
+afterEach(() => {
+  localStorage.clear();
+  if (originalLocalStorage === undefined) {
+    Reflect.deleteProperty(globalThis, "localStorage");
+  } else {
+    (globalThis as typeof globalThis & { localStorage: Storage }).localStorage = originalLocalStorage;
+  }
+  if (originalWindow === undefined) {
+    Reflect.deleteProperty(globalThis, "window");
+  } else {
+    (globalThis as typeof globalThis & { window: Window & typeof globalThis }).window = originalWindow;
+  }
+});
+
+type QueueOverrides = {
+  canUseConnectedSession?: () => boolean;
+  roomIsReady?: (roomJid: string) => boolean;
+  sendDirect?: (peerJid: string, body: string, opts: { id: string }) => Promise<string | null>;
+  sendRoom?: (roomJid: string, body: string, opts: { id: string }) => Promise<string | null>;
+  emitStatus?: (snapshot: XmppStatusSnapshot) => void;
+};
+
+function createQueue(overrides: QueueOverrides = {}) {
+  const events = new TypedEventBus<ClientEvents>();
+  const statuses: XmppStatusSnapshot[] = [];
+  const queue = new OfflineSendQueue({
+    queueScope: () => SCOPE,
+    events,
+    canUseConnectedSession: overrides.canUseConnectedSession ?? (() => true),
+    roomIsReady: overrides.roomIsReady ?? (() => true),
+    enqueueReason: () => "reconnecting",
+    emitStatus: overrides.emitStatus ?? ((snapshot) => statuses.push(snapshot)),
+    roomMemberJids: () => ({}),
+    sendDirect: overrides.sendDirect ?? (async (_peer, _body, opts) => opts.id),
+    sendRoom: overrides.sendRoom ?? (async (_room, _body, opts) => opts.id),
+  });
+  return { queue, events, statuses };
+}
+
+describe("OfflineSendQueue drain ordering", () => {
+  test("flushDirect replays queued DMs in enqueue order and marks them in flight", async () => {
+    const sent: string[] = [];
+    const { queue, events } = createQueue({
+      sendDirect: async (_peer, body, opts) => {
+        sent.push(body);
+        return opts.id;
+      },
+    });
+    const statusEvents: Array<{ id: string; status: "queued" | "sending" }> = [];
+    events.on("queuedMessageStatus", (id, status) => statusEvents.push({ id, status }));
+
+    queue.queueDirectMessage("bob@example.com", "first", { id: "dm-1" });
+    queue.queueDirectMessage("bob@example.com", "second", { id: "dm-2" });
+    queue.queueDirectMessage("bob@example.com", "third", { id: "dm-3" });
+
+    await queue.flushDirect();
+
+    expect(sent).toEqual(["first", "second", "third"]);
+    expect(statusEvents.filter((event) => event.status === "sending").map((event) => event.id))
+      .toEqual(["dm-1", "dm-2", "dm-3"]);
+    // Replayed entries stay persisted until the server acks them.
+    expect(listQueuedMessages(SCOPE).map((entry) => entry.id)).toEqual(["dm-1", "dm-2", "dm-3"]);
+  });
+
+  test("flushDirect skips entries already in flight and stops when the session drops", async () => {
+    let connected = true;
+    const sent: string[] = [];
+    const { queue } = createQueue({
+      canUseConnectedSession: () => connected,
+      sendDirect: async (_peer, body, opts) => {
+        sent.push(body);
+        if (body === "second") connected = false;
+        return opts.id;
+      },
+    });
+
+    queue.queueDirectMessage("bob@example.com", "first", { id: "dm-1" });
+    queue.queueDirectMessage("bob@example.com", "second", { id: "dm-2" });
+    queue.queueDirectMessage("bob@example.com", "third", { id: "dm-3" });
+    queue.markInflight("dm-1");
+
+    await queue.flushDirect();
+
+    // dm-1 already in flight, dm-3 not reached after the drop mid-drain.
+    expect(sent).toEqual(["second"]);
+  });
+
+  test("ack removes the persisted copy and reports queue depth + latency", async () => {
+    const { queue, events } = createQueue();
+    const depths: Array<{ persisted: number; inflight: number }> = [];
+    const acked: Array<{ id: string; kind: "room" | "dm" }> = [];
+    events.on("queueDepthChange", (depth) => depths.push(depth));
+    events.on("messageAcked", (id, meta) => acked.push({ id, kind: meta.kind }));
+
+    queue.queueDirectMessage("bob@example.com", "hello", { id: "dm-1" });
+    await queue.flushDirect();
+    queue.handleAck("dm-1");
+
+    expect(listQueuedMessages(SCOPE)).toHaveLength(0);
+    expect(acked).toEqual([{ id: "dm-1", kind: "dm" }]);
+    expect(depths.at(-1)).toEqual({ persisted: 0, inflight: 0 });
+  });
+
+  test("non-retryable send failures are discarded instead of retried forever", async () => {
+    const attempts: string[] = [];
+    const { queue, events } = createQueue({
+      sendDirect: async (_peer, body, _opts) => {
+        attempts.push(body);
+        if (body === "bad recipient") return compatWasmSendResult({ kind: "invalid-recipient" });
+        return _opts.id;
+      },
+    });
+    const failures: string[] = [];
+    events.on("messageDeliveryFailure", (id) => failures.push(id));
+
+    queue.queueDirectMessage("bob@example.com", "bad recipient", { id: "dm-bad" });
+    queue.queueDirectMessage("bob@example.com", "fine", { id: "dm-ok" });
+
+    await queue.flushDirect();
+
+    expect(attempts).toEqual(["bad recipient", "fine"]);
+    expect(failures).toEqual(["dm-bad"]);
+    expect(listQueuedMessages(SCOPE).map((entry) => entry.id)).toEqual(["dm-ok"]);
+  });
+
+  test("flushRoom only drains the ready room and merges its member mentions", async () => {
+    const sends: Array<{ roomJid: string; body: string }> = [];
+    const { queue } = createQueue({
+      roomIsReady: (roomJid) => roomJid === "general@muc.example.com",
+      sendRoom: async (roomJid, body, opts) => {
+        sends.push({ roomJid, body });
+        return opts.id;
+      },
+    });
+
+    queue.queueRoomMessage("general@muc.example.com", "to general", { id: "room-1" });
+    queue.queueRoomMessage("random@muc.example.com", "to random", { id: "room-2" });
+
+    await queue.flushRoom("general@muc.example.com");
+    await queue.flushRoom("random@muc.example.com");
+
+    expect(sends).toEqual([{ roomJid: "general@muc.example.com", body: "to general" }]);
+  });
+
+  test("seedFromResumeState tracks XEP-0198 replayed stanza ids so acks clear the store", () => {
+    const { queue, events } = createQueue();
+    const depths: Array<{ persisted: number; inflight: number }> = [];
+    events.on("queueDepthChange", (depth) => depths.push(depth));
+
+    queue.queueDirectMessage("bob@example.com", "native replay", { id: "dm-native" });
+    queue.seedFromResumeState({
+      previd: "p",
+      inboundH: 1,
+      outboundH: 2,
+      unhandledOutboundStanzas: ['<message id="dm-native" to="bob@example.com"><body>native replay</body></message>'],
+    });
+
+    queue.handleAck("dm-native");
+
+    expect(listQueuedMessages(SCOPE)).toHaveLength(0);
+    expect(depths.at(-1)).toEqual({ persisted: 0, inflight: 0 });
+  });
+});
+
+describe("ReconnectScheduler", () => {
+  test("backs off exponentially and coalesces while a timer is pending", () => {
+    const scheduled: Array<{ attempt: number; delayMs: number }> = [];
+    const scheduler = new ReconnectScheduler({
+      isDestroying: () => false,
+      connect: async () => undefined,
+      onScheduled: (info) => scheduled.push(info),
+    });
+
+    scheduler.schedule();
+    scheduler.schedule(); // timer pending — must not double-schedule
+    scheduler.clearTimer();
+    scheduler.schedule();
+    scheduler.clearTimer();
+
+    expect(scheduled).toEqual([
+      { attempt: 1, delayMs: 2000 },
+      { attempt: 2, delayMs: 4000 },
+    ]);
+
+    scheduler.resetAttempts();
+    scheduler.schedule();
+    scheduler.clearTimer();
+    expect(scheduled.at(-1)).toEqual({ attempt: 1, delayMs: 2000 });
+  });
+
+  test("does not schedule while destroying and reports reconnect duration on completion", () => {
+    const scheduled: Array<{ attempt: number; delayMs: number }> = [];
+    const scheduler = new ReconnectScheduler({
+      isDestroying: () => true,
+      connect: async () => undefined,
+      onScheduled: (info) => scheduled.push(info),
+    });
+    scheduler.schedule();
+    expect(scheduled).toHaveLength(0);
+
+    expect(scheduler.noteStatus({ state: "online", detail: "" })).toEqual({});
+    expect(scheduler.noteStatus({ state: "reconnecting", detail: "" })).toEqual({});
+    const meta = scheduler.noteStatus({ state: "online", detail: "" });
+    expect(meta.reconnectDurationMs).toBeGreaterThanOrEqual(0);
+    expect(scheduler.noteStatus({ state: "online", detail: "" })).toEqual({});
+  });
+});
+
+function createRecordingPersistence() {
+  let saved: XmppResumeState | null = null;
+  const calls: string[] = [];
+  const persistence: ResumePersistence = {
+    loadCatchup: () => null,
+    saveCatchup: () => undefined,
+    clearCatchup: () => undefined,
+    loadSm: () => saved,
+    consumeSm: () => {
+      calls.push("consumeSm");
+      return saved;
+    },
+    saveSm: (state) => {
+      calls.push("saveSm");
+      saved = state;
+    },
+    clearSm: () => {
+      calls.push("clearSm");
+      saved = null;
+    },
+    preparePagehideHandoff: () => calls.push("preparePagehideHandoff"),
+    loadJoinedRooms: () => [],
+    saveJoinedRooms: () => undefined,
+    clearJoinedRooms: () => calls.push("clearJoinedRooms"),
+  };
+  return { persistence, calls, getSaved: () => saved };
+}
+
+describe("ResumeStateStore", () => {
+  test("persistForPageHide snapshots the live state with the session resource", () => {
+    const { persistence, calls, getSaved } = createRecordingPersistence();
+    const store = new ResumeStateStore(persistence);
+    let persistedRooms = 0;
+
+    store.persistForPageHide(
+      { previd: "p1", inboundH: 3, outboundH: 4 },
+      "web-abc",
+      () => { persistedRooms += 1; },
+    );
+
+    expect(calls).toEqual(["preparePagehideHandoff", "saveSm"]);
+    expect(getSaved()).toEqual({ previd: "p1", inboundH: 3, outboundH: 4, resource: "web-abc" });
+    expect(persistedRooms).toBe(1);
+  });
+
+  test("persistForPageHide drops unacked-outbound state it cannot replay", () => {
+    const { persistence, calls } = createRecordingPersistence();
+    const store = new ResumeStateStore(persistence);
+    let persistedRooms = 0;
+
+    store.persistForPageHide(
+      { previd: "p1", inboundH: 3, outboundH: 4, hasUnackedOutbound: true },
+      "web-abc",
+      () => { persistedRooms += 1; },
+    );
+
+    expect(calls).toEqual(["preparePagehideHandoff", "clearSm"]);
+    expect(store.state).toBeNull();
+    expect(persistedRooms).toBe(1);
+  });
+
+  test("captureFromDisconnect stamps the resource and keeps state in memory only", () => {
+    const { persistence, calls } = createRecordingPersistence();
+    const store = new ResumeStateStore(persistence);
+
+    const captured = store.captureFromDisconnect(
+      { get_resume_state: () => ({ previd: "p2", inboundH: 1, outboundH: 2 }) },
+      "web-xyz",
+    );
+
+    expect(captured).toEqual({ previd: "p2", inboundH: 1, outboundH: 2, resource: "web-xyz" });
+    expect(store.state).toEqual(captured);
+    // In-memory only: ordinary disconnects never touch the persisted slot.
+    expect(calls).toEqual([]);
+  });
+
+  test("discardState clears the persisted slot; clearAll also drops joined rooms + handle", () => {
+    const { persistence, calls } = createRecordingPersistence();
+    const store = new ResumeStateStore(persistence);
+    store.captureFromDisconnect(
+      { get_resume_state: () => ({ previd: "p3", inboundH: 0, outboundH: 0 }) },
+      "web-r",
+    );
+
+    store.discardState();
+    expect(store.state).toBeNull();
+    expect(calls).toEqual(["clearSm"]);
+
+    let freed = 0;
+    store.setHandle({ free: () => { freed += 1; } } as never);
+    store.clearAll();
+    expect(freed).toBe(1);
+    expect(store.handle).toBeNull();
+  });
+});

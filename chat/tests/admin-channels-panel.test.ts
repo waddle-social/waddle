@@ -386,7 +386,7 @@ describe("ChannelsPanel source wiring — XEP visibility vs admission", () => {
   });
 
   test("browser XMPP wrapper maps membersOnly into the WASM payload", () => {
-    const source = readSource("../src/lib/xmpp/client.ts");
+    const source = readSource("../src/lib/xmpp/client-muc-admin.ts");
     expect(source).toContain("membersOnly?: boolean | null");
     expect(source).toContain("members_only: opts.membersOnly ?? null");
   });

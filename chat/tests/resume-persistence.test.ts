@@ -12,7 +12,8 @@
  */
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { ReconnectCatchup } from "../src/lib/xmpp/reconnect-catchup";
-import { BrowserXmppClient, applyResumeStateToWasmConfig } from "../src/lib/xmpp/client";
+import { BrowserXmppClient } from "../src/lib/xmpp/client";
+import { applyResumeStateToWasmConfig } from "../src/lib/xmpp/client-connection";
 import { enqueueQueuedMessage, listQueuedDmMessages } from "../src/lib/outbound-queue-store";
 import type { WaddleSession } from "../src/lib/server-auth";
 import {

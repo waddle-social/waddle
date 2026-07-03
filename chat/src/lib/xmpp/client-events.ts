@@ -18,8 +18,109 @@
  *   must not break the others or the client.
  */
 
+import type {
+  ChatStateEvent,
+  DmChatStateEvent,
+  DmDisplayedEvent,
+  DmReactionEvent,
+  LiveDmMessage,
+  LiveRoomMessage,
+  PresenceUpdateEvent,
+  ReactionEvent,
+  RoomActivityEvent,
+  RoomAuthority,
+  RoomHats,
+  RoomPresence,
+  SessionLifecycleEvent,
+  XmppErrorEvent,
+  XmppStatusSnapshot,
+} from "./types";
+import type { InboxEntry } from "./inbox-types";
+import type { WasmPinEvent, WasmPubsubEvent } from "./wasm-types";
+
 /** Event name → payload tuple. */
 export type ClientEventMap = Record<string, ReadonlyArray<unknown>>;
+
+/**
+ * Typed XEP-0490 entry surfaced from the WASM client into the chat
+ * layer. External consumers can use TypeScript structural typing
+ * (`{ chatId, stanzaId, stanzaIdBy }`) on the `setMdsDisplayedHandler`
+ * callback parameter without importing this name.
+ */
+export interface MdsDisplayedEntry {
+  /** PEP item id = bare JID of the chat (DM contact or MUC room). */
+  chatId: string;
+  /** XEP-0359 id of the latest displayed message. */
+  stanzaId: string;
+  /** JID that injected the stanza-id (room for MUC, user's server for DM). */
+  stanzaIdBy: string;
+}
+
+export type PubsubEvent = WasmPubsubEvent;
+
+type CatchupOutcome = "completed" | "aborted" | "failed";
+
+export type CatchupHookInfo = {
+  conversations: number;
+  processedConversations: number;
+  pages: number;
+  messages: number;
+  durationMs: number;
+  outcome: CatchupOutcome;
+};
+
+/**
+ * Event map for `BrowserXmppClient`'s internal bus.
+ *
+ * Events registered via `set*Handler` methods use single-listener
+ * (`events.set`) semantics — re-registration replaces the previous
+ * handler, which `src/channels/messages.ts` relies on across room
+ * switches. Events registered via `on*` hook methods and
+ * `addPubsubEventHandler` use multi-listener (`events.on`) semantics.
+ */
+export type ClientEvents = {
+  message: [message: LiveRoomMessage];
+  pinEvent: [event: { roomJid: string; event: WasmPinEvent }];
+  directMessage: [message: LiveDmMessage];
+  status: [status: XmppStatusSnapshot];
+  reaction: [event: ReactionEvent];
+  displayed: [event: { roomJid: string; nick: string; messageId: string }];
+  mdsDisplayed: [entry: MdsDisplayedEntry];
+  pubsubEvent: [event: PubsubEvent];
+  chatState: [event: ChatStateEvent];
+  dmChatState: [event: DmChatStateEvent];
+  dmReaction: [event: DmReactionEvent];
+  dmDisplayed: [event: DmDisplayedEvent];
+  presenceUpdate: [event: PresenceUpdateEvent];
+  memberJid: [nick: string, bareJid: string];
+  hats: [hats: RoomHats];
+  authority: [authority: RoomAuthority];
+  activity: [event: RoomActivityEvent];
+  inboxPush: [entry: InboxEntry];
+  roomAvatar: [roomJid: string, hash: string];
+  roomDisconnect: [];
+  presence: [presence: RoomPresence];
+  lastSeen: [nick: string, timestamp: number];
+  messageAck: [messageId: string];
+  messageDeliveryFailure: [messageId: string];
+  queuedMessageStatus: [messageId: string, status: "queued" | "sending"];
+  sessionLifecycle: [event: SessionLifecycleEvent];
+  // Observe-only telemetry hooks (multi-listener, error-isolated via
+  // `emitSafe`). Includes the background-tab RESULT_CODE_HUNG health
+  // hooks (see docs/planning/hung-tab-investigation.md); the client
+  // stays telemetry-agnostic — xmpp-instrumentation.ts binds these to
+  // the Faro report* sink.
+  messageAcked: [id: string, meta: { kind: "room" | "dm"; latencyMs: number }];
+  messageDeliveryFailed: [id: string, meta: { kind: "room" | "dm" }];
+  sessionLifecycleHook: [event: SessionLifecycleEvent];
+  statusHook: [status: XmppStatusSnapshot, meta: { reconnectDurationMs?: number }];
+  sendEnqueued: [info: { kind: "room" | "dm"; reason: string }];
+  queueDepthChange: [depth: { persisted: number; inflight: number }];
+  error: [event: XmppErrorEvent];
+  reconnectScheduled: [info: { attempt: number; delayMs: number }];
+  catchup: [info: CatchupHookInfo];
+  resumeDrain: [info: { buffered: number; durationMs: number }];
+};
 
 type GenericListener = (...args: ReadonlyArray<unknown>) => void;
 
