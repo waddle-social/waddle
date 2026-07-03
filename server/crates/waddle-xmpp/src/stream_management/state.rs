@@ -193,22 +193,6 @@ impl StreamManagementState {
         self.ack_request_cadence()
     }
 
-    /// Record an outbound stanza that counts toward the XEP-0198 wire
-    /// counter but is exempt from the replay window.
-    ///
-    /// Used for XEP-0313 MAM `<result/>` messages (issue #1089): the
-    /// client's `h` includes them, so `outbound_count` must advance in
-    /// lockstep — but replaying archive results after a resume would
-    /// duplicate data the client already holds, and during a large
-    /// history sync they are what pins the unacked queue at capacity
-    /// and drives the eviction storm that permanently breaks resume.
-    /// Skipping the queue means a resume simply never replays them;
-    /// `get_unacked_after` returns only the stored sequences.
-    pub fn record_outbound_replay_exempt(&mut self) -> RecordOutboundResult {
-        self.outbound_count = self.outbound_count.wrapping_add(1);
-        self.ack_request_cadence()
-    }
-
     /// Cadence: once `ack_threshold` stanzas have flowed since the
     /// last `<r/>` (or the stream was enabled / resumed), tell the
     /// caller to follow this stanza with an `<r/>`. The wasm
@@ -576,48 +560,6 @@ mod tests {
         assert!(!state.record_outbound("<m id='5'/>".to_string()).request_ack);
         // Push 6 — three more since the last request, next request fires.
         assert!(state.record_outbound("<m id='6'/>".to_string()).request_ack);
-    }
-
-    /// XEP-0313 §6 MAM result messages are countable stanzas on the
-    /// wire (the client's `h` includes them), but replaying them after
-    /// a XEP-0198 resume would duplicate archive results the client
-    /// already received — and during a large history sync they are
-    /// exactly what floods the unacked queue into its eviction storm
-    /// (issue #1089). The replay-exempt record keeps the outbound
-    /// counter and `<r/>` cadence in agreement with the client while
-    /// keeping the stanza out of the replay window.
-    #[test]
-    fn record_outbound_replay_exempt_counts_but_never_enters_replay_window() {
-        let mut state = StreamManagementState::with_config(1000, 3);
-        state.enable("mam-exempt".to_string(), true, Some(300));
-
-        // Two queued stanzas, then one replay-exempt (MAM result).
-        assert!(!state.record_outbound("<m id='1'/>".to_string()).request_ack);
-        assert!(!state.record_outbound("<m id='2'/>".to_string()).request_ack);
-        // Exempt stanza still advances the wire counter — and, being
-        // the third countable stanza since enable, trips the cadence.
-        assert!(state.record_outbound_replay_exempt().request_ack);
-
-        assert_eq!(state.outbound_count, 3, "exempt stanza must count toward h");
-        assert_eq!(
-            state.queue_len(),
-            2,
-            "exempt stanza must not enter the unacked replay queue"
-        );
-        // Replay after client h=0 must contain only the queued pair.
-        let resend = state.get_stanzas_to_resend(0);
-        assert_eq!(resend, vec!["<m id='1'/>", "<m id='2'/>"]);
-        // No eviction/gap bookkeeping was touched.
-        assert_eq!(state.replay_gap_through(), None);
-        assert!(state.can_resume_from(0));
-    }
-
-    #[test]
-    fn record_outbound_replay_exempt_does_not_request_ack_when_sm_disabled() {
-        let mut state = StreamManagementState::with_config(1000, 1);
-        // NOTE: `enable` deliberately NOT called.
-        assert!(!state.record_outbound_replay_exempt().request_ack);
-        assert_eq!(state.queue_len(), 0);
     }
 
     #[test]

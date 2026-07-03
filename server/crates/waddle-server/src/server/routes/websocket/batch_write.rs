@@ -14,25 +14,28 @@
 
 use super::send::send_ws_message;
 use super::state::WsConnState;
-use super::stream_management::{apply_sm_ack, is_countable_stanza, is_mam_response_frame};
+use super::stream_management::{apply_sm_ack, is_countable_stanza};
 use super::*;
 use futures::FutureExt as _;
 use waddle_xmpp::stream_management::SmRequest;
 
 /// How the writer records countable frames into XEP-0198 bookkeeping.
+///
+/// Note there is deliberately NO replay exemption for XEP-0313 MAM
+/// result frames (issue #1089 asked for one; adversarial review
+/// killed it): the client's `h` counts every stanza it receives, and
+/// a frame that is counted but can never be re-delivered by resume
+/// replay permanently desyncs `outbound_count` from `h` the moment a
+/// written frame is lost in flight — un-ackable queue entries and
+/// duplicate replays forever after. Recording MAM results like any
+/// other stanza keeps the counters convergent; a replayed result is
+/// protocol-harmless (XEP-0313 §6.1: clients MUST ignore results they
+/// did not request), and queue pressure from archive floods is solved
+/// by this writer's chunking + mid-batch ack draining instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum BatchSmPolicy {
-    /// Record countable frames; XEP-0313 MAM response frames
-    /// (`<result/>` carriers and the closing `<fin/>` IQ) are
-    /// replay-exempt. ONLY legal for the requester's own connection
-    /// batch, where MAM responses are server-generated — the MAM
-    /// shape is spoofable, so relayed peer content must never get
-    /// this policy.
-    RecordWithMamExemption,
-    /// Record every countable frame. Used for peer-relayed content
-    /// (recipient-pass output), where a forged `{urn:xmpp:mam:2}`
-    /// child must not opt a message out of the reliability layer.
-    RecordAll,
+    /// Record every countable frame into the unacked replay queue.
+    Record,
     /// Record nothing. Only for SM resume replay batches, whose
     /// stanzas already sit in the restored unacked queue with their
     /// original sequence numbers.
@@ -54,8 +57,13 @@ pub(super) enum BatchWriteOutcome {
 /// [`WsConnState::deferred_inbound`]. Once reached the drain stops
 /// reading, so a flooding client hits TCP backpressure again instead
 /// of converting its send rate into unbounded server heap. `<a/>`
-/// acks are consumed (never parked), so ack draining keeps working on
-/// later passes even at the cap.
+/// acks are consumed (never parked), acks only stop draining once 64
+/// non-ack frames are already parked ahead of them — reads must stay
+/// in order, so an ack behind parked frames cannot be consumed until
+/// the connection loop processes the backlog. At the cap, behavior
+/// degrades exactly to the pre-#1089 semantics (no mid-batch ack
+/// draining: the queue may evict and mark a replay gap), and the only
+/// affected stream is the one whose own client is flooding it.
 const DEFERRED_INBOUND_CAP: usize = 64;
 
 /// Write a response batch to the WebSocket, recording countable
@@ -63,11 +71,7 @@ const DEFERRED_INBOUND_CAP: usize = 64;
 /// interleaving an `<r/>` ack request after every `ack_threshold`th
 /// countable stanza.
 ///
-/// XEP-0198 counter discipline for replay-exempt frames: the client
-/// counts a stanza in `h` only when it actually receives it, so an
-/// exempt frame — which can never be re-delivered by replay — must
-/// advance `outbound_count` only after its write succeeded. Queued
-/// (non-exempt) frames are recorded before the write: if the send
+/// Frames are recorded just before their own write: if the send
 /// fails they replay on resume, and the counters re-converge when
 /// the client receives them.
 pub(super) async fn write_response_batch<S, SE, R, RE>(
@@ -86,17 +90,10 @@ where
 {
     let mut frames = frames.into_iter();
     while let Some(frame) = frames.next() {
-        let class = if conn.sm_state.enabled {
-            classify_frame(&frame, policy)
+        let request_ack = if should_record(conn, &frame, policy) {
+            conn.sm_state.record_outbound(frame.clone()).request_ack
         } else {
-            FrameSmClass::Untracked
-        };
-        // Queued frames are recorded pre-send (resume replays them if
-        // the send fails). Replay-exempt frames must not be counted
-        // until the write succeeds — see the function doc.
-        let mut request_ack = match class {
-            FrameSmClass::Queue => conn.sm_state.record_outbound(frame.clone()).request_ack,
-            FrameSmClass::ReplayExempt | FrameSmClass::Untracked => false,
+            false
         };
         if !send_ws_message(
             sender,
@@ -107,9 +104,6 @@ where
         {
             record_remaining_for_replay(conn, frames, policy);
             return BatchWriteOutcome::TransportClosed;
-        }
-        if matches!(class, FrameSmClass::ReplayExempt) {
-            request_ack = conn.sm_state.record_outbound_replay_exempt().request_ack;
         }
         if request_ack {
             if !send_ws_message(
@@ -137,35 +131,14 @@ where
     BatchWriteOutcome::Continue
 }
 
-/// XEP-0198 handling class of one outbound frame under a policy.
-#[derive(Debug, Clone, Copy)]
-enum FrameSmClass {
-    /// Countable; recorded into the unacked replay queue.
-    Queue,
-    /// Countable MAM response frame; counts toward `h` only once
-    /// actually written, never enters the replay queue.
-    ReplayExempt,
-    /// Not countable (nonza / stream frame), or recording suppressed.
-    Untracked,
-}
-
-fn classify_frame(frame: &str, policy: BatchSmPolicy) -> FrameSmClass {
-    if matches!(policy, BatchSmPolicy::ReplaySuppressed) || !is_countable_stanza(frame) {
-        return FrameSmClass::Untracked;
-    }
-    if matches!(policy, BatchSmPolicy::RecordWithMamExemption) && is_mam_response_frame(frame) {
-        return FrameSmClass::ReplayExempt;
-    }
-    FrameSmClass::Queue
+fn should_record(conn: &WsConnState, frame: &str, policy: BatchSmPolicy) -> bool {
+    conn.sm_state.enabled && matches!(policy, BatchSmPolicy::Record) && is_countable_stanza(frame)
 }
 
 /// The transport died mid-batch: record every not-yet-written
-/// replayable frame so the resume replay window covers the rest of
-/// the batch. Replay-exempt frames are dropped entirely — they were
-/// never written, so counting them would permanently desync
-/// `outbound_count` from the client's `h`; the client re-runs its
-/// archive query instead. The cadence signal is moot (no wire), which
-/// mirrors the detach-drain contract in `replay.rs`.
+/// countable frame so the resume replay window covers the rest of
+/// the batch. The cadence signal is moot (no wire), which mirrors the
+/// detach-drain contract in `replay.rs`.
 ///
 /// Also used by the connection loop's shutdown path for responses to
 /// frames the drain had deferred before the transport went away.
@@ -174,11 +147,8 @@ pub(super) fn record_remaining_for_replay(
     frames: impl Iterator<Item = String>,
     policy: BatchSmPolicy,
 ) {
-    if !conn.sm_state.enabled {
-        return;
-    }
     for frame in frames {
-        if matches!(classify_frame(&frame, policy), FrameSmClass::Queue) {
+        if should_record(conn, &frame, policy) {
             let _ = conn.sm_state.record_outbound(frame);
         }
     }

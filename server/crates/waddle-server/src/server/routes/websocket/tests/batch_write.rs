@@ -114,7 +114,7 @@ async fn write_response_batch_requests_ack_every_threshold_not_once_per_batch() 
         state.as_ref(),
         &mut conn,
         frames,
-        BatchSmPolicy::RecordWithMamExemption,
+        BatchSmPolicy::Record,
     )
     .await;
 
@@ -181,7 +181,7 @@ async fn write_response_batch_drains_acks_between_chunks_so_nothing_evicts() {
         state.as_ref(),
         &mut conn,
         frames,
-        BatchSmPolicy::RecordWithMamExemption,
+        BatchSmPolicy::Record,
     )
     .await;
 
@@ -231,7 +231,7 @@ async fn drained_non_ack_frames_are_deferred_in_arrival_order() {
         state.as_ref(),
         &mut conn,
         frames,
-        BatchSmPolicy::RecordWithMamExemption,
+        BatchSmPolicy::Record,
     )
     .await;
 
@@ -249,33 +249,32 @@ async fn drained_non_ack_frames_are_deferred_in_arrival_order() {
     assert_eq!(deferred, vec![chat.to_string(), client_r.to_string()]);
 }
 
-/// Issue #1089 acceptance: XEP-0313 MAM result messages count toward
-/// the wire counter (the client's `h` includes them) but must not be
-/// double-counted into the replay window — a resume must not replay
-/// archive results, and a history sync must not evict live stanzas.
+/// Deliberate design decision (issue #1089 adversarial review): MAM
+/// result messages are recorded into the replay window like ANY other
+/// stanza. An exemption ("count toward h, never replay") permanently
+/// desyncs `outbound_count` from the client's `h` the moment a
+/// written result is lost in flight — XEP-0198 offers no legal way to
+/// count a stanza the client will never receive. A replayed result is
+/// harmless (XEP-0313 §6.1: clients MUST ignore results they did not
+/// request); queue pressure from archive floods is handled by the
+/// chunked writer's mid-batch ack draining instead. This also means a
+/// message spoofing the MAM shape gets no special treatment anywhere.
 #[tokio::test]
-async fn mam_result_messages_count_toward_h_but_stay_out_of_replay_window() {
-    let _metrics_guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
-    let evicted_before = sm_evicted_total();
-
+async fn mam_results_are_recorded_like_any_stanza_for_counter_convergence() {
     let state = create_test_websocket_state().await;
     let mut conn = WsConnState::new();
-    // Queue cap 3: a 20-result MAM page would evict live stanzas if
-    // results were queued for replay.
-    conn.sm_state = StreamManagementState::with_config(3, 5);
+    conn.sm_state = StreamManagementState::with_config(100, 5);
     conn.sm_state.enable("mam".to_string(), true, Some(300));
 
     let live = countable_message(1);
     let mut frames = vec![live.clone()];
-    frames.extend((1..=20).map(|i| {
-        format!(
-            "<message xmlns='jabber:client' to='u@example.com/r'>\
-               <result xmlns='urn:xmpp:mam:2' queryid='q1' id='{i}'>\
-                 <forwarded xmlns='urn:xmpp:forward:0'/>\
-               </result>\
-             </message>"
-        )
-    }));
+    frames.extend((1..=3).map(mam_result_frame));
+    frames.push(
+        "<iq xmlns='jabber:client' type='result' id='q1'>\
+           <fin xmlns='urn:xmpp:mam:2' complete='true'/>\
+         </iq>"
+            .to_string(),
+    );
 
     let mut sink = CollectSink::default();
     let mut reader = ScriptedReader::new(vec![]);
@@ -285,27 +284,18 @@ async fn mam_result_messages_count_toward_h_but_stay_out_of_replay_window() {
         state.as_ref(),
         &mut conn,
         frames,
-        BatchSmPolicy::RecordWithMamExemption,
+        BatchSmPolicy::Record,
     )
     .await;
 
     assert!(matches!(outcome, BatchWriteOutcome::Continue));
-    // All 21 stanzas counted on the wire (h agreement with client)...
-    assert_eq!(conn.sm_state.outbound_count, 21);
-    // ...but only the live message occupies the replay window.
-    assert_eq!(conn.sm_state.queue_len(), 1);
+    // Live message + 3 results + fin: all counted AND all replayable,
+    // so the server can always retransmit what the client's h lacks.
+    assert_eq!(conn.sm_state.outbound_count, 5);
+    assert_eq!(conn.sm_state.queue_len(), 5);
     let replay = conn.sm_state.get_stanzas_to_resend(0);
-    assert_eq!(replay, vec![live]);
-    assert_eq!(
-        sm_evicted_total() - evicted_before,
-        0,
-        "MAM flood must not evict live stanzas from the replay window"
-    );
-    assert_eq!(conn.sm_state.replay_gap_through(), None);
-    // Cadence still fires over exempt stanzas: 21 countable frames at
-    // threshold 5 → four <r/> requests on the wire.
-    let r_xml = SmRequest::to_xml();
-    assert_eq!(sink_texts(&sink).iter().filter(|t| **t == r_xml).count(), 4);
+    assert_eq!(replay.len(), 5);
+    assert_eq!(replay[0], live);
 }
 
 /// If the peer closes (or the socket dies) mid-batch, every countable
@@ -332,7 +322,7 @@ async fn transport_close_mid_batch_still_records_unwritten_frames_for_replay() {
         state.as_ref(),
         &mut conn,
         frames,
-        BatchSmPolicy::RecordWithMamExemption,
+        BatchSmPolicy::Record,
     )
     .await;
 
@@ -392,130 +382,6 @@ fn mam_result_frame(i: usize) -> String {
     )
 }
 
-/// The MAM `<fin/>` IQ is replay-exempt together with its results: a
-/// replayed `fin complete='true'` whose results were not replayed
-/// would falsely assert the page arrived in full and the client would
-/// never re-query — a permanent archive hole. Exempt, the query stays
-/// visibly unanswered on the resumed stream and the client retries.
-#[tokio::test]
-async fn mam_fin_iq_is_replay_exempt_alongside_its_results() {
-    let state = create_test_websocket_state().await;
-    let mut conn = WsConnState::new();
-    conn.sm_state = StreamManagementState::with_config(100, 5);
-    conn.sm_state.enable("fin".to_string(), true, Some(300));
-
-    let fin = "<iq xmlns='jabber:client' type='result' id='q1'>\
-                 <fin xmlns='urn:xmpp:mam:2' complete='true'/>\
-               </iq>";
-    let frames = vec![mam_result_frame(1), mam_result_frame(2), fin.to_string()];
-
-    let mut sink = CollectSink::default();
-    let mut reader = ScriptedReader::new(vec![]);
-    let outcome = write_response_batch(
-        &mut sink,
-        &mut reader,
-        state.as_ref(),
-        &mut conn,
-        frames,
-        BatchSmPolicy::RecordWithMamExemption,
-    )
-    .await;
-
-    assert!(matches!(outcome, BatchWriteOutcome::Continue));
-    assert_eq!(conn.sm_state.outbound_count, 3, "all written, all counted");
-    assert_eq!(
-        conn.sm_state.queue_len(),
-        0,
-        "nothing enters the replay window"
-    );
-}
-
-/// XEP-0198 counter discipline (issue #1089 review): the client only
-/// counts stanzas it actually receives, and a replay-exempt frame can
-/// never be re-delivered by resume — so an exempt frame that never
-/// reached the wire must NOT advance `outbound_count`. Otherwise the
-/// server's counter permanently outruns the client's `h`: the newest
-/// queue entries become un-ackable and every subsequent resume
-/// replays stanzas the client already has.
-#[tokio::test]
-async fn unwritten_exempt_frames_in_a_dead_batch_tail_are_not_counted() {
-    let state = create_test_websocket_state().await;
-    let mut conn = WsConnState::new();
-    conn.sm_state = StreamManagementState::with_config(100, 5);
-    conn.sm_state.enable("tail".to_string(), true, Some(300));
-
-    // Frames 1..=5 live (trigger the first <r/> + drain), 6..=12 MAM
-    // results. The drain after frame 5 sees a Close: the tail (6..12)
-    // is never written.
-    let mut frames: Vec<String> = (1..=5).map(countable_message).collect();
-    frames.extend((6..=12).map(mam_result_frame));
-
-    let mut sink = CollectSink::default();
-    let mut reader = ScriptedReader::new(vec![Some(Message::Close(None))]);
-    let outcome = write_response_batch(
-        &mut sink,
-        &mut reader,
-        state.as_ref(),
-        &mut conn,
-        frames,
-        BatchSmPolicy::RecordWithMamExemption,
-    )
-    .await;
-
-    assert!(matches!(outcome, BatchWriteOutcome::TransportClosed));
-    assert_eq!(
-        conn.sm_state.outbound_count, 5,
-        "unwritten exempt tail frames must not advance the wire counter"
-    );
-    assert_eq!(
-        conn.sm_state.queue_len(),
-        5,
-        "only the written live frames queue"
-    );
-}
-
-/// The MAM exemption is origin-gated: the structural shape is
-/// spoofable, so peer-relayed content (RecordAll policy) must record
-/// a MAM-shaped message into the replay window like any other stanza
-/// — otherwise a sender could craft `<message><result
-/// xmlns='urn:xmpp:mam:2'/>…` to opt its messages out of the
-/// reliability layer and have them silently dropped on resume.
-#[tokio::test]
-async fn peer_path_records_mam_shaped_frames_into_replay_window() {
-    let state = create_test_websocket_state().await;
-    let mut conn = WsConnState::new();
-    conn.sm_state = StreamManagementState::with_config(100, 5);
-    conn.sm_state.enable("spoof".to_string(), true, Some(300));
-
-    let spoofed = "<message xmlns='jabber:client' to='victim@example.com/r'>\
-                     <body>hi</body>\
-                     <result xmlns='urn:xmpp:mam:2' queryid='x' id='1'/>\
-                   </message>";
-
-    let mut sink = CollectSink::default();
-    let mut reader = ScriptedReader::new(vec![]);
-    let outcome = write_response_batch(
-        &mut sink,
-        &mut reader,
-        state.as_ref(),
-        &mut conn,
-        vec![spoofed.to_string()],
-        BatchSmPolicy::RecordAll,
-    )
-    .await;
-
-    assert!(matches!(outcome, BatchWriteOutcome::Continue));
-    assert_eq!(
-        conn.sm_state.queue_len(),
-        1,
-        "spoof-shaped frame stays replayable"
-    );
-    assert_eq!(
-        conn.sm_state.get_stanzas_to_resend(0),
-        vec![spoofed.to_string()]
-    );
-}
-
 /// The drain parks non-ack frames in `deferred_inbound` — but only up
 /// to a cap, past which it stops reading so a flooding client hits
 /// TCP backpressure instead of growing server heap without bound.
@@ -545,7 +411,7 @@ async fn drain_stops_parking_deferred_frames_at_the_cap() {
         state.as_ref(),
         &mut conn,
         frames,
-        BatchSmPolicy::RecordWithMamExemption,
+        BatchSmPolicy::Record,
     )
     .await;
 

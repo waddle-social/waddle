@@ -100,55 +100,6 @@ fn is_countable_stanza_matches_element_name_not_prefix() {
     assert!(!is_countable_stanza(""));
 }
 
-/// The MAM `<fin/>` IQ must be replay-exempt alongside the results it
-/// closes: replaying a `<fin complete='true'/>` after a resume that
-/// did NOT replay the (exempt) results would tell the client the page
-/// arrived in full and stop it from re-querying — a permanent archive
-/// hole. Exempting the fin leaves the query visibly unanswered on the
-/// resumed stream, so the client re-runs it.
-#[test]
-fn is_mam_response_frame_covers_result_carriers_and_fin_iq() {
-    use super::super::stream_management::is_mam_response_frame;
-
-    // Result carrier message qualifies.
-    assert!(is_mam_response_frame(
-        "<message xmlns='jabber:client' to='u@example.com/r'>\
-           <result xmlns='urn:xmpp:mam:2' queryid='q1' id='42'>\
-             <forwarded xmlns='urn:xmpp:forward:0'/>\
-           </result>\
-         </message>"
-    ));
-    // A live message that merely mentions the namespace in a body is
-    // NOT a MAM result — detection must be structural, not substring.
-    assert!(!is_mam_response_frame(
-        "<message xmlns='jabber:client'><body>urn:xmpp:mam:2 &lt;result</body></message>"
-    ));
-    // A result child in the wrong namespace does not qualify.
-    assert!(!is_mam_response_frame(
-        "<message xmlns='jabber:client'><result xmlns='urn:example:0' id='1'/></message>"
-    ));
-    // The closing fin IQ qualifies.
-    assert!(is_mam_response_frame(
-        "<iq xmlns='jabber:client' type='result' id='q1'>\
-           <fin xmlns='urn:xmpp:mam:2' complete='true'/>\
-         </iq>"
-    ));
-    // A fin in the wrong namespace does not.
-    assert!(!is_mam_response_frame(
-        "<iq xmlns='jabber:client' type='result' id='q1'>\
-           <fin xmlns='urn:example:0'/>\
-         </iq>"
-    ));
-    // Ordinary IQ results and live messages do not.
-    assert!(!is_mam_response_frame(
-        "<iq xmlns='jabber:client' type='result' id='p1'/>"
-    ));
-    assert!(!is_mam_response_frame(
-        "<message xmlns='jabber:client'><body>hi</body></message>"
-    ));
-    assert!(!is_mam_response_frame("not-xml"));
-}
-
 #[tokio::test]
 async fn handle_xmpp_frame_drops_oversized_sm_nonza_before_parse() {
     let state = create_test_websocket_state().await;

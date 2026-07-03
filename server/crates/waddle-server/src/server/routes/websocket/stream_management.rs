@@ -29,48 +29,6 @@ pub(super) fn is_countable_stanza(frame: &str) -> bool {
     matches!(local_name, "iq" | "message" | "presence")
 }
 
-/// Returns true if the frame is part of a XEP-0313 MAM query response
-/// — a `<result/>` carrier message or the closing `<fin/>` IQ.
-///
-/// Both are replay-exempt in the XEP-0198 unacked queue (issue #1089)
-/// on the requester's own response batch: replaying archive results
-/// after a resume would duplicate data the client can re-query, and
-/// during a large history sync they are what pins the queue at
-/// capacity and drives the eviction storm. The `<fin/>` must be
-/// exempt WITH the results: replaying a `fin complete='true'` whose
-/// results were not replayed would falsely tell the client the page
-/// arrived in full and stop it from re-querying — a permanent archive
-/// hole. With both exempt, an interrupted query stays visibly
-/// unanswered on the resumed stream and the client re-runs it.
-///
-/// Callers MUST only apply this exemption to server-generated MAM
-/// responses (the requester's own connection batch). The shape is
-/// spoofable: a relayed peer message carrying a forged
-/// `{urn:xmpp:mam:2}result` child must NOT be able to opt itself out
-/// of the reliability layer, so the peer-relay paths record
-/// everything.
-///
-/// Detection is structural (parse + direct child lookup), not a
-/// substring match — a live message quoting the namespace in its body
-/// must not be exempted from replay. The cheap `contains` gate keeps
-/// the parse off the hot path for the overwhelmingly common non-MAM
-/// frame.
-pub(super) fn is_mam_response_frame(frame: &str) -> bool {
-    use std::str::FromStr as _;
-
-    if !frame.contains(waddle_xmpp_core::mam::MAM_NS) {
-        return false;
-    }
-    let Ok(element) = Element::from_str(frame) else {
-        return false;
-    };
-    match element.name() {
-        "message" => element.has_child("result", waddle_xmpp_core::mam::MAM_NS),
-        "iq" => element.has_child("fin", waddle_xmpp_core::mam::MAM_NS),
-        _ => false,
-    }
-}
-
 pub(super) fn sm_show_from_name(value: &str) -> Option<xmpp_parsers::presence::Show> {
     match value {
         "away" => Some(xmpp_parsers::presence::Show::Away),

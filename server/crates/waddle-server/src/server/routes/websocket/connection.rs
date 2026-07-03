@@ -387,11 +387,7 @@ async fn handle_inbound_text(
         conn.suppress_sm_record_next_batch = false;
         BatchSmPolicy::ReplaySuppressed
     } else {
-        // These responses answer the client's own frames on its own
-        // connection — MAM responses in here are server-generated, so
-        // the replay exemption is safe. Peer-relayed content (which
-        // could spoof the MAM shape) never flows through this batch.
-        BatchSmPolicy::RecordWithMamExemption
+        BatchSmPolicy::Record
     };
     match write_response_batch(
         ws_sender,
@@ -437,7 +433,7 @@ async fn process_deferred_inbound_after_transport_loss(
             conn.suppress_sm_record_next_batch = false;
             BatchSmPolicy::ReplaySuppressed
         } else {
-            BatchSmPolicy::RecordWithMamExemption
+            BatchSmPolicy::Record
         };
         batch_write::record_remaining_for_replay(conn, responses.into_iter(), policy);
     }
