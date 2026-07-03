@@ -57,19 +57,46 @@ pub async fn can_subscribe(
     let Some(node_meta) = storage.get_node(target, node).await? else {
         return Ok(false);
     };
-    if is_pep && node == waddle_xmpp::xep::xep0402::PEP_NODE {
-        return Ok(derive_pep_owner(target, entity));
+    Ok(can_subscribe_with_config(
+        &node_meta.config,
+        aff,
+        target,
+        node,
+        entity,
+        is_pep,
+    ))
+}
+
+/// Access-model arm of [`can_subscribe`] against an already-loaded
+/// node config. Callers that hold the config (the publish fan-out gate
+/// fetches it once per publish) use this to avoid a redundant
+/// `get_node` round-trip per entity; `can_subscribe` itself is the
+/// fetching wrapper, so the decision logic cannot diverge between the
+/// subscribe/read gate and the fan-out entitlement.
+pub fn can_subscribe_with_config(
+    node_cfg: &waddle_xmpp::pubsub::NodeConfig,
+    aff: Affiliation,
+    target: &BareJid,
+    node: &str,
+    entity: &BareJid,
+    is_pep: bool,
+) -> bool {
+    if aff.is_outcast() {
+        return false;
     }
-    match node_meta.config.access_model {
-        AccessModel::Open => Ok(true),
-        AccessModel::Whitelist => Ok(matches!(
+    if is_pep && node == waddle_xmpp::xep::xep0402::PEP_NODE {
+        return derive_pep_owner(target, entity);
+    }
+    match node_cfg.access_model {
+        AccessModel::Open => true,
+        AccessModel::Whitelist => matches!(
             aff,
             Affiliation::Owner | Affiliation::Publisher | Affiliation::Member
-        )),
+        ),
         AccessModel::Presence | AccessModel::Roster => {
-            Ok(matches!(aff, Affiliation::Owner) || (is_pep && derive_pep_owner(target, entity)))
+            matches!(aff, Affiliation::Owner) || (is_pep && derive_pep_owner(target, entity))
         }
-        AccessModel::Authorize => Ok(matches!(aff, Affiliation::Owner)),
+        AccessModel::Authorize => matches!(aff, Affiliation::Owner),
     }
 }
 

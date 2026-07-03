@@ -181,7 +181,14 @@ pub async fn fan_out_publish(state: &WebSocketState, req: FanOutRequest<'_>) {
 
     for sub in subscribers {
         if is_private_pep_node
-            && !private_node_subscriber_allowed(state, owner, node, &sub.subscriber.to_bare()).await
+            && !private_node_subscriber_allowed(
+                state,
+                owner,
+                node,
+                &node_cfg,
+                &sub.subscriber.to_bare(),
+            )
+            .await
         {
             continue;
         }
@@ -370,24 +377,28 @@ pub async fn fan_out_publish(state: &WebSocketState, req: FanOutRequest<'_>) {
 /// access model suppresses the implicit XEP-0163 §3 roster fan-out,
 /// not deliveries the owner explicitly authorized.
 ///
-/// Delegates to `pubsub_authz::can_subscribe` so the fan-out
-/// entitlement can never diverge from the subscribe/read gate: the
-/// XEP-0402 bookmarks owner-only carve-out and the Authorize arm apply
-/// identically here. This matters because an XEP-0060 §8.8 owner
-/// subscriptions-set writes subscription rows WITHOUT a can_subscribe
-/// check — a row's existence is not authorization. Fails closed on
-/// lookup errors — withholding one event beats leaking to a subscriber
-/// we cannot vet.
+/// Delegates to `pubsub_authz::can_subscribe_with_config` — the same
+/// decision arm as the subscribe/read gate — so the fan-out
+/// entitlement can never diverge from it: the XEP-0402 bookmarks
+/// owner-only carve-out and the Authorize arm apply identically here.
+/// This matters because an XEP-0060 §8.8 owner subscriptions-set
+/// writes subscription rows WITHOUT a can_subscribe check — a row's
+/// existence is not authorization. The node config fetched once at the
+/// top of `fan_out_publish` is reused, so the only per-subscriber
+/// storage hit is the affiliation lookup. Fails closed on lookup
+/// errors — withholding one event beats leaking to a subscriber we
+/// cannot vet.
 async fn private_node_subscriber_allowed(
     state: &WebSocketState,
     owner: &BareJid,
     node: &str,
+    node_cfg: &waddle_xmpp::pubsub::NodeConfig,
     subscriber: &BareJid,
 ) -> bool {
     if subscriber == owner {
         return true;
     }
-    match crate::pubsub_authz::can_subscribe(
+    match crate::pubsub_authz::effective_affiliation(
         &state.deps.protocol.pubsub_storage,
         owner,
         node,
@@ -396,7 +407,14 @@ async fn private_node_subscriber_allowed(
     )
     .await
     {
-        Ok(allowed) => allowed,
+        Ok(affiliation) => crate::pubsub_authz::can_subscribe_with_config(
+            node_cfg,
+            affiliation,
+            owner,
+            node,
+            subscriber,
+            true,
+        ),
         Err(error) => {
             warn!(
                 owner = %owner,
