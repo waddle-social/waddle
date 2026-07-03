@@ -184,6 +184,12 @@ pub struct WebSocketDeps {
     /// RFC 7395 §3.8 keepalive knobs (issue #1090), parsed and
     /// validated at startup from `WADDLE_WS_KEEPALIVE_*` env vars.
     pub ws_keepalive: waddle_xmpp::protocol::KeepaliveConfig,
+    /// Ecdysis graceful-shutdown view (issue #1091): the accept path
+    /// mints a [`waddle_ecdysis::ConnectionGuard`] per connection so
+    /// `drain()` tracks real connections, and the per-connection loop
+    /// observes the stop token to close live sessions with
+    /// `<stream:error><system-shutdown/>`.
+    pub shutdown: waddle_ecdysis::ShutdownHandle,
 }
 
 pub struct ProtocolServices {

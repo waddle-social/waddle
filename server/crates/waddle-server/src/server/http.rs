@@ -46,7 +46,10 @@ pub(crate) struct HttpServerDeps {
     pub(crate) pubsub_database_storage: Arc<crate::pubsub::DatabasePubSubStorage>,
     pub(crate) acme_http01_challenge_service: Option<TowerHttp01ChallengeService>,
     pub(crate) listener: tokio::net::TcpListener,
-    pub(crate) stop_token: tokio_util::sync::CancellationToken,
+    /// Ecdysis shutdown view: carries the stop token that gates the
+    /// graceful_shutdown closure and mints per-connection guards in
+    /// the WebSocket accept path (issue #1091).
+    pub(crate) shutdown_handle: waddle_ecdysis::ShutdownHandle,
     /// Q6 graceful-shutdown drain completion signal — fired by the
     /// drain task when it finishes promoting unacked queues. The
     /// HTTP server's graceful_shutdown closure waits on this after
@@ -64,10 +67,11 @@ pub(crate) async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
         pubsub_database_storage,
         acme_http01_challenge_service,
         listener,
-        stop_token,
+        shutdown_handle,
         drain_complete,
     } = deps;
 
+    let stop_token = shutdown_handle.stop_token();
     let app = create_router(RouterDeps {
         state,
         server_config,
@@ -75,7 +79,7 @@ pub(crate) async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
         mam_storage,
         pubsub_database_storage,
         acme_http01_challenge_service,
-        shutdown_stop_token: stop_token.clone(),
+        shutdown_handle,
         drain_complete: drain_complete.clone(),
     })
     .await?;
@@ -126,7 +130,7 @@ pub(crate) struct RouterDeps {
     pub(crate) mam_storage: Arc<dyn MamStorage>,
     pub(crate) pubsub_database_storage: Arc<crate::pubsub::DatabasePubSubStorage>,
     pub(crate) acme_http01_challenge_service: Option<TowerHttp01ChallengeService>,
-    pub(crate) shutdown_stop_token: tokio_util::sync::CancellationToken,
+    pub(crate) shutdown_handle: waddle_ecdysis::ShutdownHandle,
     pub(crate) drain_complete: Arc<tokio::sync::Notify>,
 }
 
@@ -139,9 +143,10 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
         mam_storage,
         pubsub_database_storage,
         acme_http01_challenge_service,
-        shutdown_stop_token,
+        shutdown_handle,
         drain_complete,
     } = deps;
+    let shutdown_stop_token = shutdown_handle.stop_token();
     // Create auth broker state
     let auth_state = Arc::new(AuthState::new(
         state.clone(),
@@ -156,6 +161,7 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
         Arc::clone(&auth_state),
         mam_storage,
         pubsub_database_storage,
+        shutdown_handle,
     )
     .await?;
 
@@ -328,6 +334,7 @@ async fn create_websocket_state(
     auth_state: Arc<AuthState>,
     mam_storage: Arc<dyn MamStorage>,
     pubsub_database_storage: Arc<crate::pubsub::DatabasePubSubStorage>,
+    shutdown_handle: waddle_ecdysis::ShutdownHandle,
 ) -> Result<Arc<WebSocketState>> {
     // Create connection registry for WebSocket message routing
     let connection_registry = Arc::new(ConnectionRegistry::new());
@@ -611,6 +618,7 @@ async fn create_websocket_state(
             ws_keepalive: server_config.ws_keepalive,
             provider_ingress,
             provider_dispatch_tasks,
+            shutdown: shutdown_handle,
         },
     });
     deferred_extension_host_tools.set(Arc::new(extension_host_adapter::ExtensionHostAdapter::new(

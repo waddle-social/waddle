@@ -686,6 +686,30 @@ pub(crate) fn spawn_graceful_shutdown_drain(
         let _notify_guard = NotifyOnDrop(drain_notify);
 
         drain_token.cancelled().await;
+        // Issue #1091: live sessions observe the same stop token, send
+        // <system-shutdown/> and detach into the SmSessionRegistry.
+        // Wait (bounded by the ecdysis drain timeout) for every
+        // connection guard to drop before the Q6 passes below, so live
+        // sessions' unacked queues are in the registry when
+        // drain_all_for_shutdown runs — otherwise the quiet window
+        // could conclude before a slow session finishes detaching.
+        info!(
+            active_connections = websocket_state.deps.shutdown.active_connections(),
+            "Graceful shutdown: waiting for live sessions to close and detach"
+        );
+        if !websocket_state
+            .deps
+            .shutdown
+            .wait_for_connections_drained()
+            .await
+        {
+            warn!(
+                remaining_connections = websocket_state.deps.shutdown.active_connections(),
+                "Graceful shutdown: connection drain timed out; promoting \
+                 whatever detached in time. Remaining sessions keep their \
+                 durable SM rows for next-startup retry."
+            );
+        }
         info!("Graceful shutdown: starting SM session Q6 drain");
         const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
         const QUIET_WINDOW_PASSES: u32 = 8;

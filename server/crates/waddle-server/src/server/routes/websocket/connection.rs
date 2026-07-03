@@ -12,8 +12,12 @@ use super::{
     state::WsConnState,
     stream_management::SmRegistrationFinalization,
     timers::TransportTimers,
-    transport_xml::{build_handled_count_too_high_stream_error, websocket_stream_close_xml},
+    transport_xml::{
+        build_handled_count_too_high_stream_error, build_system_shutdown_stream_error,
+        websocket_stream_close_xml,
+    },
 };
+use axum::response::IntoResponse;
 use futures::stream::{SplitSink, SplitStream};
 
 /// Create the WebSocket router
@@ -31,6 +35,12 @@ async fn xmpp_websocket_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<WebSocketState>>,
 ) -> Response {
+    // Graceful shutdown has begun (issue #1091): refuse new sessions so
+    // the drain converges. Clients retry against the replacement pod.
+    if state.deps.shutdown.stop_token().is_cancelled() {
+        info!("Rejecting XMPP WebSocket upgrade: server is draining");
+        return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
     info!("XMPP WebSocket connection request");
 
     ws.protocols(["xmpp"])
@@ -43,6 +53,12 @@ const OUTBOUND_CHANNEL_SIZE: usize = 256;
 /// Handle an XMPP WebSocket connection
 async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
     let domain = state.deps.auth_state.xmpp_domain.clone();
+    // Held for the connection's whole lifetime — including the
+    // detach/cleanup below — so the ecdysis drain (issue #1091) only
+    // completes once every live session has been closed AND its SM
+    // state handed to the session registry for Q6 promotion.
+    let _connection_guard = state.deps.shutdown.connection_guard();
+    let shutdown_token = state.deps.shutdown.stop_token();
     info!(domain = %domain, "XMPP WebSocket connection established");
 
     let (mut ws_sender, mut ws_receiver) = socket.split();
@@ -198,6 +214,36 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                         break;
                     }
                 }
+            }
+
+            // Graceful shutdown (issue #1091): SIGTERM cancelled the
+            // ecdysis stop token. Close this live session natively —
+            // RFC 6120 §4.9.3.19 <system-shutdown/> stream error, then
+            // the RFC 7395 <close/> frame and the WS close handshake —
+            // and break WITHOUT transitioning to Closing: the cleanup
+            // fork below must still see a resumable phase so an
+            // XEP-0198 session detaches into the SmSessionRegistry,
+            // where the shutdown drain promotes its unacked queue (Q6).
+            _ = shutdown_token.cancelled() => {
+                info!(
+                    jid = ?conn.phase.bound_jid(),
+                    "Graceful shutdown: closing live session with system-shutdown stream error"
+                );
+                let _ = send_ws_text_frames(
+                    &mut ws_sender,
+                    [
+                        build_system_shutdown_stream_error(),
+                        websocket_stream_close_xml(),
+                    ],
+                    "Failed to send system-shutdown stream error",
+                )
+                .await;
+                let _ = close_ws_connection(
+                    &mut ws_sender,
+                    "Failed to send WebSocket close frame after system-shutdown",
+                )
+                .await;
+                break;
             }
 
             // RFC 7395 §3.8 keepalive clock (issue #1090). Fires only

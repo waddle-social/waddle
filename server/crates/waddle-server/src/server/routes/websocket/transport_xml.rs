@@ -184,6 +184,30 @@ pub(super) fn build_handled_count_too_high_stream_error(
     String::from_utf8(writer.into_inner()).expect("quick-xml serializes valid UTF-8")
 }
 
+/// Build the RFC 6120 §4.9.3.19 `<stream:error><system-shutdown/>`
+/// frame sent to every live session when graceful shutdown begins
+/// (issue #1091). Pairs with `websocket_stream_close_xml()` so the
+/// client sees error → close → WS close and reconnects elsewhere.
+pub(super) fn build_system_shutdown_stream_error() -> String {
+    let mut writer = Writer::new(Vec::new());
+    let mut stream_error = BytesStart::new("stream:error");
+    stream_error.push_attribute(("xmlns:stream", waddle_xmpp::ns::STREAM));
+    writer
+        .write_event(Event::Start(stream_error))
+        .expect("serializing stream error should not fail");
+
+    let mut shutdown = BytesStart::new("system-shutdown");
+    shutdown.push_attribute(("xmlns", "urn:ietf:params:xml:ns:xmpp-streams"));
+    writer
+        .write_event(Event::Empty(shutdown))
+        .expect("serializing system-shutdown should not fail");
+
+    writer
+        .write_event(Event::End(BytesEnd::new("stream:error")))
+        .expect("serializing stream error end should not fail");
+    String::from_utf8(writer.into_inner()).expect("quick-xml serializes valid UTF-8")
+}
+
 pub(super) fn build_stream_features_xml(authenticated: bool) -> String {
     let mut features = Element::builder("features", waddle_xmpp::ns::STREAM);
     if authenticated {
@@ -229,4 +253,22 @@ pub(super) fn sasl_failure_xml(condition: &str) -> String {
             .append(Element::builder(condition, waddle_xmpp::ns::SASL).build())
             .build(),
     )
+}
+
+#[cfg(test)]
+mod stream_error_tests {
+    use super::*;
+
+    #[test]
+    fn system_shutdown_stream_error_matches_rfc6120_wire_shape() {
+        // RFC 6120 §4.9.3.19: <system-shutdown/> in the
+        // urn:ietf:params:xml:ns:xmpp-streams namespace, wrapped in
+        // <stream:error> qualified by the streams prefix namespace.
+        assert_eq!(
+            build_system_shutdown_stream_error(),
+            "<stream:error xmlns:stream=\"http://etherx.jabber.org/streams\">\
+             <system-shutdown xmlns=\"urn:ietf:params:xml:ns:xmpp-streams\"/>\
+             </stream:error>"
+        );
+    }
 }
