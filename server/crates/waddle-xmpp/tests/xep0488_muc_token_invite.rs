@@ -8,6 +8,15 @@
 //!   `xmpp:…?join;password=TOKEN` URI rendering,
 //! - extraction robustness (empty/missing token, wrong namespace,
 //!   IQ result direction/room recovery).
+//!
+//! Known spec divergence (reported in issue #1150, not pinned as
+//! conformant): xep-0488.xml replies with a `<token>` element whose
+//! token is the TEXT CONTENT (`<token xmlns='…'>abc</token>`), and
+//! shares tokens only via the `?join;password=TOKEN` URI. This module
+//! instead replies `<invite token='…'/>` and adds a message-embedded
+//! `<invite token jid/>` share element the spec does not define. Only
+//! the URI rendering below is fully conformant; the rest pins actual
+//! behaviour pending reconciliation.
 
 use minidom::Element;
 use waddle_xmpp::xep::xep0488::{

@@ -25,7 +25,7 @@ fn xep0377_namespace_is_exact() {
 fn xep0377_spam_report_round_trips_through_wire_xml() {
     let elem = reparse(&build_report_element(&Report::spam()));
     assert!(is_report_element(&elem));
-    assert_eq!(elem.attr("reason"), Some("spam"));
+    assert_eq!(elem.attr("reason"), Some("urn:xmpp:reporting:spam"));
 
     let parsed = parse_report(&elem).expect("parses");
     assert_eq!(parsed.reason, ReportReason::Spam);
@@ -51,6 +51,9 @@ fn xep0377_report_text_child_is_in_reporting_namespace() {
 #[test]
 fn xep0377_unknown_reason_is_rejected() {
     assert_eq!(ReportReason::from_str_attr("phishing"), None);
+    // Bare tokens are not the registered URN values from XEP-0377 §3.
+    assert_eq!(ReportReason::from_str_attr("spam"), None);
+    assert_eq!(ReportReason::from_str_attr("abuse"), None);
 
     let elem: Element = "<report xmlns='urn:xmpp:reporting:1' reason='phishing'/>"
         .parse()
@@ -68,7 +71,7 @@ fn xep0377_report_without_reason_is_rejected() {
 
 #[test]
 fn xep0377_report_in_wrong_namespace_is_not_detected() {
-    let elem: Element = "<report xmlns='urn:xmpp:reporting:0' reason='spam'/>"
+    let elem: Element = "<report xmlns='urn:xmpp:reporting:0' reason='urn:xmpp:reporting:spam'/>"
         .parse()
         .expect("valid xml");
     assert!(!is_report_element(&elem));
@@ -80,7 +83,7 @@ fn xep0377_report_extracts_from_blocking_item_shape() {
     // XEP-0377 §3.2: the report rides inside a XEP-0191 block <item/>.
     let block: Element = "<block xmlns='urn:xmpp:blocking'>\
                           <item jid='spammer@badhost.example'>\
-                          <report xmlns='urn:xmpp:reporting:1' reason='spam'>\
+                          <report xmlns='urn:xmpp:reporting:1' reason='urn:xmpp:reporting:spam'>\
                           <text xmlns='urn:xmpp:reporting:1'>Never came trouble to my house like this.</text>\
                           </report></item></block>"
         .parse()

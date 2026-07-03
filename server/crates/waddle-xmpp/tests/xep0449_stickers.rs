@@ -58,7 +58,7 @@ fn xep0449_full_sticker_message_carries_body_ref_and_file_sharing() {
     assert!(!msg.bodies.is_empty(), "fallback body is mandatory");
 
     let sharing = extract_file_sharing_from_message(&msg).expect("file-sharing payload present");
-    assert_eq!(sharing.disposition, Disposition::Inline);
+    assert_eq!(sharing.disposition, Some(Disposition::Inline));
     assert_eq!(sharing.metadata.media_type.as_deref(), Some("image/webp"));
     assert_eq!(
         sharing.first_url(),

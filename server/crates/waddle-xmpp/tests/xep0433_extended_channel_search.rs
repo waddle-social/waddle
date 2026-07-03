@@ -3,6 +3,16 @@
 //! Wire-level round trips of the search IQ pair, id/addressing
 //! mirroring on the response, resilience to malformed channel
 //! entries, and the case-insensitive `Searchable` matcher.
+//!
+//! Known spec divergence (reported in issue #1150, not pinned as
+//! conformant): xep-0433.xml defines the request as a XEP-0004 data
+//! form (FORM_TYPE `urn:xmpp:channel-search:0:search-params`) plus
+//! XEP-0059 RSM, and results as `<item address='...'>` with `<name/>`,
+//! `<description/>`, `<language/>`, `<nusers/>` children. This module
+//! instead models `<search><query/><max/></search>` and
+//! `<channel jid name description occupants/>` inside the official
+//! namespace. The tests below pin the module's actual behaviour;
+//! reconciling the wire shape is production work outside this suite.
 
 use minidom::Element;
 use waddle_xmpp::xep::{

@@ -3,6 +3,14 @@
 //! Note: `server/TODO.md` previously claimed this suite existed; it did
 //! not. This file is the actual dedicated coverage.
 //!
+//! Known spec divergence (reported in issue #1150, not pinned as
+//! conformant): xep-0448.xml places `<encrypted/>` only inside the
+//! `<sources/>` of a XEP-0447 `<file-sharing/>`; `set_encrypted_file`
+//! attaches it as a direct `<message/>` child instead. The
+//! element-internal shape (cipher URIs, key/iv/hash/inner sources) is
+//! conformant; the placement tests pin actual behaviour pending
+//! reconciliation.
+//!
 //! Pins:
 //! - the registrar namespace `urn:xmpp:esfs:0` and the two cipher URIs
 //!   Waddle implements (`aes-128/256-gcm-nopadding`),

@@ -111,29 +111,34 @@ fn xep0447_multiple_sources_preserve_order() {
 // ── Disposition semantics ────────────────────────────────────────────
 
 #[test]
-fn xep0447_missing_disposition_defaults_to_inline() {
-    // XEP-0447: `disposition` defaults to `inline` when absent.
+fn xep0447_missing_disposition_stays_unspecified() {
+    // XEP-0447 §4: absence is its own state (receiver MAY display
+    // inline) — it must not be collapsed into an asserted `inline`.
     let elem: Element = "<file-sharing xmlns='urn:xmpp:sfs:0'>\
             <file xmlns='urn:xmpp:file:metadata:0'><name>a.txt</name></file>\
         </file-sharing>"
         .parse()
         .expect("valid xml");
     let parsed = parse_file_sharing_element(&elem).expect("parses");
-    assert_eq!(parsed.disposition, Disposition::Inline);
-    assert!(parsed.is_inline());
+    assert_eq!(parsed.disposition, None);
+    assert!(!parsed.is_inline());
+
+    // Reserialization must not invent a disposition the sender never sent.
+    let rebuilt = build_file_sharing_element(&parsed);
+    assert_eq!(rebuilt.attr("disposition"), None);
 }
 
 #[test]
-fn xep0447_unknown_disposition_value_falls_back_to_default() {
+fn xep0447_unknown_disposition_value_is_treated_as_unspecified() {
     // An unrecognized attribute value must not fail the whole parse;
-    // the receiver falls back to the spec default.
+    // the receiver treats it like an absent disposition.
     let elem: Element = "<file-sharing xmlns='urn:xmpp:sfs:0' disposition='sideways'>\
             <file xmlns='urn:xmpp:file:metadata:0'><name>a.txt</name></file>\
         </file-sharing>"
         .parse()
         .expect("valid xml");
     let parsed = parse_file_sharing_element(&elem).expect("parses");
-    assert_eq!(parsed.disposition, Disposition::Inline);
+    assert_eq!(parsed.disposition, None);
 }
 
 #[test]

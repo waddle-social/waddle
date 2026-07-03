@@ -28,11 +28,30 @@ fn suite_exists_for(number: &str, test_dirs: &[&Path]) -> bool {
                 entries.filter_map(Result::ok).any(|entry| {
                     let name = entry.file_name();
                     let name = name.to_string_lossy();
-                    name.starts_with("xep") && name.ends_with(".rs") && name.contains(number)
+                    // Exact `xepNNNN` prefix followed by a suite name or
+                    // extension — `name.contains(number)` would let a
+                    // future `xep04471_foo.rs` satisfy module `xep0447`.
+                    let Some(rest) = name
+                        .strip_prefix("xep")
+                        .and_then(|s| s.strip_prefix(number))
+                    else {
+                        return false;
+                    };
+                    (rest == ".rs" || rest.starts_with('_'))
+                        && name.ends_with(".rs")
+                        && non_empty_suite(&entry.path())
                 })
             })
             .unwrap_or(false)
     })
+}
+
+/// A suite file must contain at least one test — an empty file would
+/// satisfy an existence-only check without testing anything.
+fn non_empty_suite(path: &Path) -> bool {
+    std::fs::read_to_string(path)
+        .map(|src| src.contains("#[test]") || src.contains("#[tokio::test"))
+        .unwrap_or(false)
 }
 
 #[test]

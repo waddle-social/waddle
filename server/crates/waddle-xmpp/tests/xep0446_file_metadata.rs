@@ -2,6 +2,10 @@
 //!
 //! Pins:
 //! - the registrar namespace `urn:xmpp:file:metadata:0`,
+//! - Known spec divergence (reported in issue #1150, not pinned as
+//!   conformant): the module emits `<duration>` in seconds where
+//!   xep-0446.xml defines `<length>` in milliseconds, and
+//!   `width`/`height` values above `u32::MAX` are silently truncated.
 //! - the `<file/>` wire shape with namespaced children
 //!   (`media-type`, `name`, `size`, `width`, `height`, `desc`),
 //! - build → serialize → reparse round-trips,
