@@ -190,13 +190,17 @@ impl StreamManagementState {
                 );
             }
         }
-        // Cadence: once `ack_threshold` stanzas have flowed since the
-        // last `<r/>` (or the stream was enabled / resumed), tell the
-        // caller to follow this stanza with an `<r/>`. The wasm
-        // client only sends `<a h='N'/>` in response to an explicit
-        // request, so without this signal the unacked queue grows
-        // unbounded and eventually starts evicting — breaking SM
-        // resume forever for that stream.
+        self.ack_request_cadence()
+    }
+
+    /// Cadence: once `ack_threshold` stanzas have flowed since the
+    /// last `<r/>` (or the stream was enabled / resumed), tell the
+    /// caller to follow this stanza with an `<r/>`. The wasm
+    /// client only sends `<a h='N'/>` in response to an explicit
+    /// request, so without this signal the unacked queue grows
+    /// unbounded and eventually starts evicting — breaking SM
+    /// resume forever for that stream.
+    fn ack_request_cadence(&mut self) -> RecordOutboundResult {
         let request_ack = self.enabled
             && self
                 .outbound_count

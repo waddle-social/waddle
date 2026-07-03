@@ -1,21 +1,29 @@
 use super::*;
 use super::{
-    interpret_loop::build_interpret_deps, replay::drive_interpret_loop, send::send_ws_message,
-    state::WsConnState, stream_management::is_countable_stanza, timers::TransportTimers,
+    batch_write::{write_response_batch, BatchSmPolicy, BatchWriteOutcome},
+    interpret_loop::build_interpret_deps,
+    replay::drive_interpret_loop,
+    send::send_ws_message,
+    state::WsConnState,
+    stream_management::is_countable_stanza,
+    timers::TransportTimers,
     transport_xml::stanza_to_xml,
 };
 use waddle_xmpp::stream_management::SmRequest;
 
-pub(super) async fn handle_outbound_stanza<S, E>(
+pub(super) async fn handle_outbound_stanza<S, SE, R, RE>(
     sender: &mut S,
+    reader: &mut R,
     state: &Arc<WebSocketState>,
     conn: &mut WsConnState,
     timers: &mut TransportTimers,
     outbound_stanza: OutboundStanza,
 ) -> bool
 where
-    S: Sink<Message, Error = E> + Unpin,
-    E: std::fmt::Display,
+    S: Sink<Message, Error = SE> + Unpin,
+    SE: std::fmt::Display,
+    R: futures::Stream<Item = Result<Message, RE>> + Unpin,
+    RE: std::fmt::Display,
 {
     debug!(kind = ?outbound_stanza.kind, "Received outbound stanza from registry");
     match outbound_stanza.kind {
@@ -153,36 +161,25 @@ where
             // Always best-effort flush the accumulated frames first, even if
             // `close=true`, so a final error stanza or stream-close frame is
             // visible before transport teardown.
-            let mut request_ack_after = false;
-            for xml in drive.frames {
-                if conn.sm_state.enabled && is_countable_stanza(&xml) {
-                    let result = conn.sm_state.record_outbound(xml.clone());
-                    request_ack_after |= result.request_ack;
-                }
-                if !send_ws_message(
-                    sender,
-                    Message::Text(xml.into()),
-                    "Failed to send recipient-pass frame",
-                )
-                .await
-                {
-                    return false;
-                }
-            }
-            // Emit one `<r/>` per batch once threshold has been
-            // reached — see DirectFrame branch comment above. Coalescing
-            // per-batch (rather than per-frame) keeps wire traffic tight
-            // when the recipient pass produces many countable stanzas at
-            // once (carbons + receipts + archive side-effects).
-            if request_ack_after
-                && !send_ws_message(
-                    sender,
-                    Message::Text(SmRequest::to_xml().into()),
-                    "Failed to send SM <r/> request",
-                )
-                .await
+            //
+            // The chunked writer (issue #1089) records each countable
+            // frame just before its own write, follows every
+            // `ack_threshold`th one with an `<r/>`, and drains
+            // already-arrived inbound `<a/>` acks after each `<r/>` so
+            // a recipient-pass burst (carbons + receipts + archive
+            // side-effects) can't pin the unacked queue at capacity.
+            match write_response_batch(
+                sender,
+                reader,
+                state.as_ref(),
+                conn,
+                drive.frames,
+                BatchSmPolicy::Record,
+            )
+            .await
             {
-                return false;
+                BatchWriteOutcome::Continue => {}
+                BatchWriteOutcome::TransportClosed => return false,
             }
             if close {
                 info!("PeerStanza dispatch requested transport close");

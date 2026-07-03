@@ -37,6 +37,7 @@ use waddle_xmpp::Affiliation;
 use xmpp_parsers::iq::{Iq, IqPayload};
 use xmpp_parsers::message::MessageType as XmppMessageType;
 
+mod batch_write;
 mod broadcast;
 mod disco_trace;
 mod dispatch;
