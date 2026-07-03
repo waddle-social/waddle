@@ -204,7 +204,7 @@ pub async fn start_with_config(
     let http_mam_storage = websocket_mam_storage.clone();
     let http_server_config = server_config.clone();
     let http_xmpp_config = xmpp_config.clone();
-    let http_stop = stop_token.clone();
+    let http_shutdown_handle = shutdown.handle();
     let acme_http01_challenge_service = acme_runtime
         .as_ref()
         .map(|runtime| runtime.http01_challenge_service.clone());
@@ -224,7 +224,7 @@ pub async fn start_with_config(
             pubsub_database_storage: http_pubsub_database_storage,
             acme_http01_challenge_service,
             listener: http_listener,
-            stop_token: http_stop,
+            shutdown_handle: http_shutdown_handle,
             drain_complete: http_drain_complete,
         })
         .await

@@ -284,6 +284,8 @@ async fn create_test_websocket_state_with_extension_manager(
                 .expect("test secret meets length floor"),
                 link_preview: server_config.link_preview.clone(),
                 ws_keepalive: server_config.ws_keepalive,
+                shutdown: waddle_ecdysis::GracefulShutdown::new(std::time::Duration::from_secs(1))
+                    .handle(),
                 provider_ingress: Arc::new(
                     crate::server::routes::extension_webhooks::ProviderIngressRegistry::default(),
                 ),

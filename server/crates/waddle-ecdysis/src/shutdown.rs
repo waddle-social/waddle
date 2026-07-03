@@ -45,8 +45,13 @@ impl Drop for DropNotifier {
     }
 }
 
-/// Coordinator for graceful shutdown with connection draining.
-pub struct GracefulShutdown {
+/// Cheap-clone view of the shutdown coordinator's connection-tracking
+/// state. Threaded into accept paths (to mint [`ConnectionGuard`]s and
+/// observe the stop token) and drain tasks (to wait for live
+/// connections to finish) without moving the [`GracefulShutdown`]
+/// coordinator itself.
+#[derive(Clone)]
+pub struct ShutdownHandle {
     /// Token cancelled when the server should stop accepting new connections.
     stop_accepting: CancellationToken,
 
@@ -60,27 +65,7 @@ pub struct GracefulShutdown {
     drain_timeout: Duration,
 }
 
-impl GracefulShutdown {
-    /// Create a new shutdown coordinator.
-    pub fn new(drain_timeout: Duration) -> Self {
-        Self {
-            stop_accepting: CancellationToken::new(),
-            connection_count: Arc::new(AtomicUsize::new(0)),
-            drain_notify: Arc::new(tokio::sync::Notify::new()),
-            drain_timeout,
-        }
-    }
-
-    /// Create with drain timeout from `WADDLE_DRAIN_TIMEOUT_SECS` env or default (30s).
-    pub fn from_env() -> Self {
-        let timeout_secs: u64 = std::env::var("WADDLE_DRAIN_TIMEOUT_SECS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(30);
-
-        Self::new(Duration::from_secs(timeout_secs))
-    }
-
+impl ShutdownHandle {
     /// Get a `CancellationToken` that fires when the accept loop should stop.
     pub fn stop_token(&self) -> CancellationToken {
         self.stop_accepting.clone()
@@ -104,6 +89,93 @@ impl GracefulShutdown {
         self.connection_count.load(Ordering::SeqCst)
     }
 
+    /// Wait until every [`ConnectionGuard`] has dropped, bounded by the
+    /// drain timeout.
+    ///
+    /// Returns `true` if all connections drained, `false` on timeout.
+    pub async fn wait_for_connections_drained(&self) -> bool {
+        self.wait_for_connections_drained_for(self.drain_timeout)
+            .await
+    }
+
+    /// Like [`Self::wait_for_connections_drained`], but bounded by an
+    /// explicit `timeout` so callers sharing one overall drain budget
+    /// (e.g. connection drain + Q6 promotion inside a single pod
+    /// termination grace period) can pass the remaining slice.
+    pub async fn wait_for_connections_drained_for(&self, timeout: Duration) -> bool {
+        if self.active_connections() == 0 {
+            return true;
+        }
+        tokio::select! {
+            _ = self.wait_for_drain() => true,
+            _ = tokio::time::sleep(timeout) => false,
+        }
+    }
+
+    async fn wait_for_drain(&self) {
+        loop {
+            // Register interest BEFORE checking the counter:
+            // `notify_waiters()` (fired by the last guard's drop) wakes
+            // only already-registered waiters and stores no permit, so
+            // check-then-register would lose a wakeup that lands
+            // between the load and the first poll of `notified()` —
+            // stalling the drain until the timeout despite zero
+            // connections remaining.
+            let notified = self.drain_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.connection_count.load(Ordering::SeqCst) == 0 {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+/// Coordinator for graceful shutdown with connection draining.
+pub struct GracefulShutdown {
+    handle: ShutdownHandle,
+}
+
+impl GracefulShutdown {
+    /// Create a new shutdown coordinator.
+    pub fn new(drain_timeout: Duration) -> Self {
+        Self {
+            handle: ShutdownHandle {
+                stop_accepting: CancellationToken::new(),
+                connection_count: Arc::new(AtomicUsize::new(0)),
+                drain_notify: Arc::new(tokio::sync::Notify::new()),
+                drain_timeout,
+            },
+        }
+    }
+
+    /// Get a cheap-clone [`ShutdownHandle`] sharing this coordinator's
+    /// stop token and connection-tracking state.
+    pub fn handle(&self) -> ShutdownHandle {
+        self.handle.clone()
+    }
+
+    /// Create with drain timeout from `WADDLE_DRAIN_TIMEOUT_SECS` env or default (30s).
+    pub fn from_env() -> Self {
+        let timeout_secs: u64 = std::env::var("WADDLE_DRAIN_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30);
+
+        Self::new(Duration::from_secs(timeout_secs))
+    }
+
+    /// Get a `CancellationToken` that fires when the accept loop should stop.
+    pub fn stop_token(&self) -> CancellationToken {
+        self.handle.stop_token()
+    }
+
+    /// Get the current number of active connections.
+    pub fn active_connections(&self) -> usize {
+        self.handle.active_connections()
+    }
+
     /// Wait for a shutdown signal (SIGTERM or SIGQUIT).
     pub async fn wait_for_signal(&self) -> ShutdownSignal {
         let mut sigterm =
@@ -124,7 +196,7 @@ impl GracefulShutdown {
 
     /// Trigger the stop-accepting phase programmatically (for testing).
     pub fn trigger_stop(&self) {
-        self.stop_accepting.cancel();
+        self.handle.stop_accepting.cancel();
     }
 
     /// Run the drain phase: wait for all connections to complete or timeout.
@@ -139,34 +211,21 @@ impl GracefulShutdown {
 
         info!(
             active_connections = active,
-            timeout_secs = self.drain_timeout.as_secs(),
+            timeout_secs = self.handle.drain_timeout.as_secs(),
             "Draining active connections"
         );
 
-        tokio::select! {
-            _ = self.wait_for_drain() => {
-                info!("All connections drained cleanly");
-                true
-            }
-            _ = tokio::time::sleep(self.drain_timeout) => {
-                let remaining = self.active_connections();
-                warn!(
-                    remaining_connections = remaining,
-                    timeout_secs = self.drain_timeout.as_secs(),
-                    "Drain timeout expired, force-exiting"
-                );
-                false
-            }
+        let drained = self.handle.wait_for_connections_drained().await;
+        if drained {
+            info!("All connections drained cleanly");
+        } else {
+            warn!(
+                remaining_connections = self.active_connections(),
+                timeout_secs = self.handle.drain_timeout.as_secs(),
+                "Drain timeout expired with connections still active"
+            );
         }
-    }
-
-    async fn wait_for_drain(&self) {
-        loop {
-            if self.connection_count.load(Ordering::SeqCst) == 0 {
-                return;
-            }
-            self.drain_notify.notified().await;
-        }
+        drained
     }
 
     /// Run the full shutdown lifecycle.
@@ -192,13 +251,13 @@ impl GracefulShutdown {
         }
 
         info!("Stopping accept loops");
-        self.stop_accepting.cancel();
+        self.handle.stop_accepting.cancel();
 
         let clean = self.drain().await;
         if !clean {
             error!(
                 remaining_connections = self.active_connections(),
-                "Force-exiting with remaining connections"
+                "Drain phase ended with connections still active"
             );
         }
 
@@ -215,8 +274,8 @@ mod tests {
         let shutdown = GracefulShutdown::new(Duration::from_secs(5));
         let stop_token = shutdown.stop_token();
 
-        let guard1 = shutdown.connection_guard();
-        let guard2 = shutdown.connection_guard();
+        let guard1 = shutdown.handle().connection_guard();
+        let guard2 = shutdown.handle().connection_guard();
         assert_eq!(shutdown.active_connections(), 2);
 
         shutdown.trigger_stop();
@@ -236,7 +295,7 @@ mod tests {
     async fn test_drain_timeout() {
         let shutdown = GracefulShutdown::new(Duration::from_millis(100));
 
-        let _guard = shutdown.connection_guard();
+        let _guard = shutdown.handle().connection_guard();
         assert_eq!(shutdown.active_connections(), 1);
 
         shutdown.trigger_stop();
@@ -252,7 +311,9 @@ mod tests {
 
         assert_eq!(shutdown.active_connections(), 0);
 
-        let mut guards: Vec<_> = (0..10).map(|_| shutdown.connection_guard()).collect();
+        let mut guards: Vec<_> = (0..10)
+            .map(|_| shutdown.handle().connection_guard())
+            .collect();
         assert_eq!(shutdown.active_connections(), 10);
 
         guards.truncate(5);
@@ -262,10 +323,43 @@ mod tests {
         assert_eq!(shutdown.active_connections(), 0);
     }
 
+    #[tokio::test]
+    async fn handle_mints_guards_that_count_and_drain() {
+        let shutdown = GracefulShutdown::new(Duration::from_secs(5));
+        let handle = shutdown.handle();
+
+        let guard = handle.connection_guard();
+        assert_eq!(shutdown.active_connections(), 1);
+        assert_eq!(handle.active_connections(), 1);
+
+        shutdown.trigger_stop();
+        assert!(handle.stop_token().is_cancelled());
+
+        let waiter = tokio::spawn({
+            let handle = handle.clone();
+            async move { handle.wait_for_connections_drained().await }
+        });
+        drop(guard);
+        let drained = waiter.await.expect("drain waiter task");
+        assert!(drained);
+        assert_eq!(shutdown.active_connections(), 0);
+    }
+
+    #[tokio::test]
+    async fn handle_wait_for_connections_drained_times_out() {
+        let shutdown = GracefulShutdown::new(Duration::from_millis(50));
+        let handle = shutdown.handle();
+        let _guard = handle.connection_guard();
+
+        let drained = handle.wait_for_connections_drained().await;
+        assert!(!drained);
+        assert_eq!(handle.active_connections(), 1);
+    }
+
     #[test]
     fn test_from_env_default() {
         std::env::remove_var("WADDLE_DRAIN_TIMEOUT_SECS");
         let shutdown = GracefulShutdown::from_env();
-        assert_eq!(shutdown.drain_timeout, Duration::from_secs(30));
+        assert_eq!(shutdown.handle.drain_timeout, Duration::from_secs(30));
     }
 }

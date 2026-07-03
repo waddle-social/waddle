@@ -708,7 +708,8 @@ async fn test_app() -> Router {
         mam_storage,
         pubsub_database_storage,
         acme_http01_challenge_service: None,
-        shutdown_stop_token: tokio_util::sync::CancellationToken::new(),
+        shutdown_handle: waddle_ecdysis::GracefulShutdown::new(std::time::Duration::from_secs(1))
+            .handle(),
         drain_complete: std::sync::Arc::new(tokio::sync::Notify::new()),
     })
     .await

@@ -238,6 +238,7 @@ mod tests {
                 occupant_id_secret: deps.occupant_id_secret.clone(),
                 link_preview: deps.link_preview.clone(),
                 ws_keepalive: deps.ws_keepalive,
+                shutdown: deps.shutdown.clone(),
                 provider_ingress: Arc::clone(&deps.provider_ingress),
                 provider_dispatch_tasks: deps.provider_dispatch_tasks.clone(),
             },

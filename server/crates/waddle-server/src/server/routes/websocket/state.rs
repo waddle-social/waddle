@@ -184,6 +184,12 @@ pub struct WebSocketDeps {
     /// RFC 7395 §3.8 keepalive knobs (issue #1090), parsed and
     /// validated at startup from `WADDLE_WS_KEEPALIVE_*` env vars.
     pub ws_keepalive: waddle_xmpp::protocol::KeepaliveConfig,
+    /// Ecdysis graceful-shutdown view (issue #1091): the accept path
+    /// mints a [`waddle_ecdysis::ConnectionGuard`] per connection so
+    /// `drain()` tracks real connections, and the per-connection loop
+    /// observes the stop token to close live sessions with
+    /// `<stream:error><system-shutdown/>`.
+    pub shutdown: waddle_ecdysis::ShutdownHandle,
 }
 
 pub struct ProtocolServices {
@@ -327,6 +333,12 @@ pub struct ProtocolServices {
 /// value threaded through the frame dispatcher.
 pub(super) struct WsConnState {
     pub(super) phase: ConnectionPhase,
+    /// True once the server has answered the client's RFC 7395 `<open/>`
+    /// with its own `<open/>` response. Gates the graceful-shutdown
+    /// stream error (issue #1091): RFC 6120 §4.9.1.2 forbids sending a
+    /// stream error before the response stream header, so a connection
+    /// still in the upgrade-to-open gap is closed at the WS layer only.
+    pub(super) stream_open_sent: bool,
     /// The authenticated backend Session for this connection, if any.
     /// Populated on SASL success and used for SM resume/detach.
     pub(super) authenticated_session: Option<Session>,
@@ -398,6 +410,7 @@ impl WsConnState {
     pub(super) fn new() -> Self {
         Self {
             phase: ConnectionPhase::new(),
+            stream_open_sent: false,
             authenticated_session: None,
             sm_state: StreamManagementState::new(),
             carbons_enabled: false,

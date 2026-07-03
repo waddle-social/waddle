@@ -48,6 +48,7 @@ async fn handle_xmpp_frame_impl(
         pending_resume_h,
         suppress_sm_record_next_batch,
         state_machine,
+        stream_open_sent,
         ..
     } = conn;
     let muc_domain = state.deps.service_domains.muc.clone();
@@ -101,12 +102,16 @@ async fn handle_xmpp_frame_impl(
             info!("XMPP stream open requested");
             let open_element = websocket_stream_open_xml(domain);
             let features_element = build_stream_features_for_phase(phase);
+            *stream_open_sent = true;
             vec![open_element, features_element]
         }
 
         InboundFrame::Close => {
             info!("XMPP stream close requested");
             *phase = ConnectionPhase::closing(phase.bound_jid().cloned());
+            // The stream is over: no response header remains to hang a
+            // graceful-shutdown <stream:error> on.
+            *stream_open_sent = false;
             vec![websocket_stream_close_xml()]
         }
 
@@ -119,7 +124,7 @@ async fn handle_xmpp_frame_impl(
                 }
                 return vec![sasl_failure_xml("not-authorized")];
             }
-            match mechanism.as_str() {
+            let responses = match mechanism.as_str() {
                 "SCRAM-SHA-256" => {
                     handle_sasl_scram_client_first(&data, domain, state, phase).await
                 }
@@ -130,7 +135,15 @@ async fn handle_xmpp_frame_impl(
                     warn!(mechanism = %other, "Unsupported SASL mechanism");
                     vec![sasl_failure_xml("invalid-mechanism")]
                 }
+            };
+            // RFC 6120 §6.4.6: SASL success restarts the stream. Until
+            // the client's next <open/> is answered, no response header
+            // exists for the new stream, so the graceful-shutdown arm
+            // must not send a <stream:error> (§4.9.1.2).
+            if phase.is_authenticated() {
+                *stream_open_sent = false;
             }
+            responses
         }
 
         InboundFrame::SaslResponse(data) => {
@@ -141,7 +154,15 @@ async fn handle_xmpp_frame_impl(
             let scram = phase
                 .take_scram_pending()
                 .expect("SASL response must have pending SCRAM state");
-            handle_sasl_scram_response(&data, domain, scram, authenticated_session, phase)
+            let responses =
+                handle_sasl_scram_response(&data, domain, scram, authenticated_session, phase);
+            // Same stream-restart rule as the <auth/> arm above: after
+            // SCRAM success no response header exists for the new
+            // stream until the next <open/> is answered.
+            if phase.is_authenticated() {
+                *stream_open_sent = false;
+            }
+            responses
         }
 
         InboundFrame::Stanza(stanza) => {

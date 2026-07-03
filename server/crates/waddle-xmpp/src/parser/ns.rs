@@ -14,6 +14,8 @@ pub const BIND: &str = "urn:ietf:params:xml:ns:xmpp-bind";
 pub const SESSION: &str = "urn:ietf:params:xml:ns:xmpp-session";
 /// Stanza error namespace
 pub const STANZAS: &str = "urn:ietf:params:xml:ns:xmpp-stanzas";
+/// Stream error namespace (RFC 6120 §4.9)
+pub const STREAMS: &str = "urn:ietf:params:xml:ns:xmpp-streams";
 /// Stream Management namespace (XEP-0198, version 3)
 pub const SM: &str = "urn:xmpp:sm:3";
 /// Instant Stream Resumption namespace (XEP-0397)

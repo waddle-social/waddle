@@ -12,8 +12,12 @@ use super::{
     state::WsConnState,
     stream_management::SmRegistrationFinalization,
     timers::TransportTimers,
-    transport_xml::{build_handled_count_too_high_stream_error, websocket_stream_close_xml},
+    transport_xml::{
+        build_handled_count_too_high_stream_error, build_system_shutdown_stream_error,
+        websocket_stream_close_xml,
+    },
 };
+use axum::response::IntoResponse;
 use futures::stream::{SplitSink, SplitStream};
 
 /// Create the WebSocket router
@@ -31,18 +35,49 @@ async fn xmpp_websocket_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<WebSocketState>>,
 ) -> Response {
+    // Graceful shutdown gate (issue #1091). The guard is minted BEFORE
+    // the stop-token check: the upgrade handshake spans a client
+    // round-trip, so a check-then-mint order would let a connection be
+    // admitted after `wait_for_connections_drained` already observed
+    // zero guards and the Q6 drain concluded — reintroducing the very
+    // unpromoted-queue gap this issue closes. Mint-then-check means
+    // every request either sees the cancelled token (503, guard drops)
+    // or is counted by the drain.
+    let connection_guard = state.deps.shutdown.connection_guard();
+    if state.deps.shutdown.stop_token().is_cancelled() {
+        info!("Rejecting XMPP WebSocket upgrade: server is draining");
+        return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
     info!("XMPP WebSocket connection request");
 
     ws.protocols(["xmpp"])
-        .on_upgrade(move |socket| handle_xmpp_websocket(socket, state))
+        .on_upgrade(move |socket| handle_xmpp_websocket(socket, state, connection_guard))
 }
 
 /// Size of the outbound message channel buffer
 const OUTBOUND_CHANNEL_SIZE: usize = 256;
 
+/// Budget for writing the system-shutdown stream error + close frames
+/// to one peer during graceful shutdown (issue #1091). Deliberately
+/// much shorter than the generic 60s `SEND_STALL_TIMEOUT`: a peer that
+/// has stopped reading must not hold its connection guard past the
+/// drain window — the notification is best-effort, while the SM detach
+/// that follows the break is what actually preserves the session.
+const SHUTDOWN_CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Handle an XMPP WebSocket connection
-async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
+async fn handle_xmpp_websocket(
+    socket: WebSocket,
+    state: Arc<WebSocketState>,
+    // Minted in the upgrade handler and held for the connection's whole
+    // lifetime — including the detach/cleanup below — so the ecdysis
+    // drain (issue #1091) only completes once every live session has
+    // been closed AND its SM state handed to the session registry for
+    // Q6 promotion.
+    _connection_guard: waddle_ecdysis::ConnectionGuard,
+) {
     let domain = state.deps.auth_state.xmpp_domain.clone();
+    let shutdown_token = state.deps.shutdown.stop_token();
     info!(domain = %domain, "XMPP WebSocket connection established");
 
     let (mut ws_sender, mut ws_receiver) = socket.split();
@@ -198,6 +233,57 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                         break;
                     }
                 }
+            }
+
+            // Graceful shutdown (issue #1091): SIGTERM cancelled the
+            // ecdysis stop token. Close this live session natively —
+            // RFC 6120 §4.9.3.20 <system-shutdown/> stream error, then
+            // the RFC 7395 <close/> frame and the WS close handshake —
+            // and break WITHOUT transitioning to Closing: the cleanup
+            // fork below must still see a resumable phase so an
+            // XEP-0198 session detaches into the SmSessionRegistry,
+            // where the shutdown drain promotes its unacked queue (Q6).
+            //
+            // Stream frames are sent only after the server has answered
+            // the client's <open/>: RFC 6120 §4.9.1.2 forbids a stream
+            // error before the response stream header, so a connection
+            // still in the upgrade-to-open gap gets the WS closing
+            // handshake alone.
+            _ = shutdown_token.cancelled() => {
+                info!(
+                    jid = ?conn.phase.bound_jid(),
+                    "Graceful shutdown: closing live session with system-shutdown stream error"
+                );
+                let close_peer = async {
+                    if conn.stream_open_sent {
+                        let _ = send_ws_text_frames(
+                            &mut ws_sender,
+                            [
+                                build_system_shutdown_stream_error(),
+                                websocket_stream_close_xml(),
+                            ],
+                            "Failed to send system-shutdown stream error",
+                        )
+                        .await;
+                    }
+                    let _ = close_ws_connection(
+                        &mut ws_sender,
+                        "Failed to send WebSocket close frame after system-shutdown",
+                    )
+                    .await;
+                };
+                if tokio::time::timeout(SHUTDOWN_CLOSE_TIMEOUT, close_peer)
+                    .await
+                    .is_err()
+                {
+                    warn!(
+                        jid = ?conn.phase.bound_jid(),
+                        timeout_secs = SHUTDOWN_CLOSE_TIMEOUT.as_secs(),
+                        "Graceful shutdown: peer did not accept the close frames in time; \
+                         proceeding to detach without them"
+                    );
+                }
+                break;
             }
 
             // RFC 7395 §3.8 keepalive clock (issue #1090). Fires only
