@@ -268,16 +268,15 @@ impl TestServer {
     }
 
     /// Send SIGTERM to the server process — the real deploy-time
-    /// graceful-shutdown trigger (issue #1091).
+    /// graceful-shutdown trigger (issue #1091). Sent via the raw
+    /// syscall so the suite has no external `kill` binary dependency.
     #[allow(dead_code)]
     pub fn send_sigterm(&self) {
-        let pid = self.process.id();
-        let status = Command::new("kill")
-            .arg("-TERM")
-            .arg(pid.to_string())
-            .status()
-            .expect("spawn kill -TERM");
-        assert!(status.success(), "kill -TERM {pid} failed: {status}");
+        let pid = self.process.id() as libc::pid_t;
+        // SAFETY: pid is a live child owned by this TestServer (reaped
+        // only in Drop), so the signal cannot hit a recycled pid.
+        let rc = unsafe { libc::kill(pid, libc::SIGTERM) };
+        assert_eq!(rc, 0, "kill(SIGTERM) failed for pid {pid}");
     }
 
     /// Wait for the server process to exit on its own, polling

@@ -262,6 +262,49 @@ async fn websocket_oauthbearer_authenticates_session_token() {
 }
 
 #[tokio::test]
+async fn websocket_stream_open_sent_tracks_current_stream_instance() {
+    let state = create_test_websocket_state().await;
+    let session = create_test_session(state.as_ref(), "alice").await;
+    let mut conn = WsConnState::new();
+    let open =
+        r#"<open xmlns="urn:ietf:params:xml:ns:xmpp-framing" to="example.com" version="1.0"/>"#;
+    let close = r#"<close xmlns="urn:ietf:params:xml:ns:xmpp-framing"/>"#;
+
+    assert!(!conn.stream_open_sent, "no stream answered yet at upgrade");
+    handle_xmpp_frame(open, "example.com", state.as_ref(), &mut conn).await;
+    assert!(conn.stream_open_sent, "server answered the first <open/>");
+
+    // RFC 6120 §6.4.6: SASL success restarts the stream — the server
+    // has not yet sent a response header for the NEW stream, so a
+    // stream error is illegal in this gap.
+    let payload = BASE64_STANDARD.encode(format!("n,,\x01auth=Bearer {}\x01\x01", session.id));
+    let auth = element_to_xml(
+        Element::builder("auth", waddle_xmpp::ns::SASL)
+            .attr(
+                minidom::rxml::xml_ncname!("mechanism").to_owned(),
+                "OAUTHBEARER",
+            )
+            .append(payload)
+            .build(),
+    );
+    let responses = handle_xmpp_frame(&auth, "example.com", state.as_ref(), &mut conn).await;
+    assert_eq!(responses, vec![sasl_success_xml()]);
+    assert!(
+        !conn.stream_open_sent,
+        "SASL success restarts the stream; no response header exists for the new stream yet"
+    );
+
+    handle_xmpp_frame(open, "example.com", state.as_ref(), &mut conn).await;
+    assert!(conn.stream_open_sent, "restarted stream answered");
+
+    handle_xmpp_frame(close, "example.com", state.as_ref(), &mut conn).await;
+    assert!(
+        !conn.stream_open_sent,
+        "a closed stream has no live response header to error on"
+    );
+}
+
+#[tokio::test]
 async fn websocket_rejects_reauthentication_after_successful_sasl() {
     let state = create_test_websocket_state().await;
     let session = create_test_session(state.as_ref(), "alice").await;

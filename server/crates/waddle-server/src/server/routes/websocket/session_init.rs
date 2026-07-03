@@ -45,13 +45,13 @@ pub(super) fn build_internal_server_error_stream_error(text: &str) -> String {
         .expect("serializing stream error should not fail");
 
     let mut internal = BytesStart::new("internal-server-error");
-    internal.push_attribute(("xmlns", "urn:ietf:params:xml:ns:xmpp-streams"));
+    internal.push_attribute(("xmlns", waddle_xmpp::ns::STREAMS));
     writer
         .write_event(Event::Empty(internal))
         .expect("serializing internal-server-error should not fail");
 
     let mut text_elem = BytesStart::new("text");
-    text_elem.push_attribute(("xmlns", "urn:ietf:params:xml:ns:xmpp-streams"));
+    text_elem.push_attribute(("xmlns", waddle_xmpp::ns::STREAMS));
     text_elem.push_attribute(("xml:lang", "en"));
     writer
         .write_event(Event::Start(text_elem))

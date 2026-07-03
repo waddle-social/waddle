@@ -149,7 +149,7 @@ pub(super) fn build_handled_count_too_high_stream_error(
         .expect("serializing stream error should not fail");
 
     let mut undefined = BytesStart::new("undefined-condition");
-    undefined.push_attribute(("xmlns", "urn:ietf:params:xml:ns:xmpp-streams"));
+    undefined.push_attribute(("xmlns", waddle_xmpp::ns::STREAMS));
     writer
         .write_event(Event::Empty(undefined))
         .expect("serializing undefined-condition should not fail");
@@ -165,7 +165,7 @@ pub(super) fn build_handled_count_too_high_stream_error(
         .expect("serializing handled-count-too-high should not fail");
 
     let mut text = BytesStart::new("text");
-    text.push_attribute(("xmlns", "urn:ietf:params:xml:ns:xmpp-streams"));
+    text.push_attribute(("xmlns", waddle_xmpp::ns::STREAMS));
     text.push_attribute(("xml:lang", "en"));
     writer
         .write_event(Event::Start(text))
@@ -197,7 +197,7 @@ pub(super) fn build_system_shutdown_stream_error() -> String {
         .expect("serializing stream error should not fail");
 
     let mut shutdown = BytesStart::new("system-shutdown");
-    shutdown.push_attribute(("xmlns", "urn:ietf:params:xml:ns:xmpp-streams"));
+    shutdown.push_attribute(("xmlns", waddle_xmpp::ns::STREAMS));
     writer
         .write_event(Event::Empty(shutdown))
         .expect("serializing system-shutdown should not fail");
@@ -266,9 +266,11 @@ mod stream_error_tests {
         // <stream:error> qualified by the streams prefix namespace.
         assert_eq!(
             build_system_shutdown_stream_error(),
-            "<stream:error xmlns:stream=\"http://etherx.jabber.org/streams\">\
-             <system-shutdown xmlns=\"urn:ietf:params:xml:ns:xmpp-streams\"/>\
-             </stream:error>"
+            concat!(
+                "<stream:error xmlns:stream=\"http://etherx.jabber.org/streams\">",
+                "<system-shutdown xmlns=\"urn:ietf:params:xml:ns:xmpp-streams\"/>",
+                "</stream:error>"
+            )
         );
     }
 }
