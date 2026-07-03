@@ -785,6 +785,29 @@ mod query {
         assert_eq!(page.rsm.count, Some(5));
     }
 
+    #[test]
+    fn collector_dedups_replayed_results_and_filters_foreign_query_ids() {
+        let mut collector = super::super::MamResultCollector::new("query-1");
+
+        // Original delivery.
+        collector.collect(build_archived("mam-0", "query-1", "hello 0"));
+        collector.collect(build_archived("mam-1", "query-1", "hello 1"));
+        // XEP-0198 resume replays the unacked tail: same queryid, same mam_id.
+        collector.collect(build_archived("mam-1", "query-1", "hello 1"));
+        collector.collect(build_archived("mam-0", "query-1", "hello 0"));
+        // A result for another open query must never be collected.
+        collector.collect(build_archived("mam-9", "some-other-query", "noise"));
+
+        let messages = collector.into_messages();
+        assert_eq!(
+            messages.len(),
+            2,
+            "replayed results with an already-collected mam_id must be dropped"
+        );
+        assert_eq!(messages[0].mam_id, "mam-0");
+        assert_eq!(messages[1].mam_id, "mam-1");
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn fetch_room_history_dedups_replayed_results_by_mam_id() {
         let (handle, mut cmd_rx, evt_tx) = make_handle();

@@ -374,6 +374,43 @@ fn parse_archived_author_real_jid(inner: &Element) -> Option<String> {
         .map(|jid| bare_jid(jid).to_string())
 }
 
+/// Accumulates MAM results for one query: filters out results belonging to
+/// other queries and drops duplicates by `mam_id` (XEP-0198 §5 leaves weeding
+/// out resume-replayed duplicates to the recipient). Both collection arms of
+/// [`run_mam_query`] delegate to one instance, so the dedup state cannot
+/// diverge between them.
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+struct MamResultCollector {
+    query_id: String,
+    seen_mam_ids: HashSet<String>,
+    messages: Vec<ArchivedMessage>,
+}
+
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+impl MamResultCollector {
+    fn new(query_id: &str) -> Self {
+        Self {
+            query_id: query_id.to_string(),
+            seen_mam_ids: HashSet::new(),
+            messages: Vec::new(),
+        }
+    }
+
+    /// Keep the result if it belongs to this query and its `mam_id` has not
+    /// been collected yet; ignore it otherwise.
+    fn collect(&mut self, archived: ArchivedMessage) {
+        if archived.query_id.as_deref() == Some(&self.query_id)
+            && self.seen_mam_ids.insert(archived.mam_id.clone())
+        {
+            self.messages.push(archived);
+        }
+    }
+
+    fn into_messages(self) -> Vec<ArchivedMessage> {
+        self.messages
+    }
+}
+
 /// Subscribe to the event bus, send the IQ, collect MAM result messages until
 /// the IQ correlation resolves, then assemble and return a [`MamPage`].
 ///
@@ -392,27 +429,16 @@ async fn run_mam_query(
 ) -> ClientResult<MamPage> {
     // Subscribe BEFORE sending so we don't miss any result messages.
     let mut rx = handle.events();
-    let query_id_owned = query_id.to_string();
 
     let query = async {
-        let mut messages: Vec<ArchivedMessage> = Vec::new();
-        // XEP-0198 resume mid-query retransmits unacked results with the same
-        // queryid and mam_id; XEP-0198 §5 leaves weeding out such duplicates
-        // to the recipient.
-        let mut seen_mam_ids: HashSet<String> = HashSet::new();
+        let mut collector = MamResultCollector::new(query_id);
         let mut send_iq_fut = Box::pin(handle.send_iq(iq));
 
         let fin_el = loop {
             tokio::select! {
                 result = &mut send_iq_fut => break result?,
                 event = rx.recv() => match event {
-                    Ok(ClientEvent::MamResult(archived))
-                        if archived.query_id.as_deref() == Some(&query_id_owned) =>
-                    {
-                        if seen_mam_ids.insert(archived.mam_id.clone()) {
-                            messages.push(*archived);
-                        }
-                    }
+                    Ok(ClientEvent::MamResult(archived)) => collector.collect(*archived),
                     Ok(_) => {}
                     Err(broadcast::error::RecvError::Closed) => {
                         return Err(ClientError::Disconnected);
@@ -428,13 +454,7 @@ async fn run_mam_query(
         // before the IQ result resolves the oneshot.
         loop {
             match rx.try_recv() {
-                Ok(ClientEvent::MamResult(archived))
-                    if archived.query_id.as_deref() == Some(&query_id_owned) =>
-                {
-                    if seen_mam_ids.insert(archived.mam_id.clone()) {
-                        messages.push(*archived);
-                    }
-                }
+                Ok(ClientEvent::MamResult(archived)) => collector.collect(*archived),
                 Ok(_) => continue,
                 Err(broadcast::error::TryRecvError::Empty)
                 | Err(broadcast::error::TryRecvError::Closed) => break,
@@ -442,7 +462,7 @@ async fn run_mam_query(
             }
         }
 
-        Ok::<_, ClientError>((fin_el, messages))
+        Ok::<_, ClientError>((fin_el, collector.into_messages()))
     };
 
     let (fin_el, messages) = timeout(Duration::from_secs(30), query)
