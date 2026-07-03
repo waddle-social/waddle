@@ -279,7 +279,13 @@ impl Drop for TestServer {
 
 /// A WebSocket XMPP client for integration tests.
 pub struct WsXmppClient {
-    ws: tokio_tungstenite::WebSocketStream<
+    /// `pub(crate)` so suites with frame-level needs (the RFC 7395
+    /// keepalive tests observe raw `Ping`/`Close` control frames,
+    /// which [`Self::recv_timeout`] deliberately treats as errors)
+    /// can poll the stream directly with their own local helpers —
+    /// keeping this shared harness free of per-suite methods that
+    /// would be dead code in every other test binary.
+    pub(crate) ws: tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
     pub full_jid: Option<String>,
@@ -460,30 +466,6 @@ impl WsXmppClient {
             Ok(Some(Err(e))) => Err(format!("WebSocket error: {e}")),
             Ok(None) => Err("WebSocket stream ended".to_string()),
             Err(_) => Err("Timeout waiting for message".to_string()),
-        }
-    }
-
-    /// Receive one raw WebSocket frame — control frames included.
-    ///
-    /// The RFC 7395 keepalive suite uses this to observe
-    /// server-initiated `Ping` frames, which [`Self::recv_timeout`]
-    /// deliberately treats as errors. Polling the stream also lets
-    /// tokio-tungstenite flush its automatic `Pong` replies, so a
-    /// client that keeps calling this behaves like a healthy browser.
-    /// `Ok(None)` means the stream ended.
-    ///
-    /// `#[allow(dead_code)]` matches the established pattern on this
-    /// harness (each integration test compiles as its own crate).
-    #[allow(dead_code)]
-    pub async fn recv_raw_timeout(
-        &mut self,
-        dur: Duration,
-    ) -> Result<Option<tungstenite::Message>, String> {
-        match timeout(dur, self.ws.next()).await {
-            Ok(Some(Ok(message))) => Ok(Some(message)),
-            Ok(Some(Err(e))) => Err(format!("WebSocket error: {e}")),
-            Ok(None) => Ok(None),
-            Err(_) => Err("Timeout waiting for raw frame".to_string()),
         }
     }
 

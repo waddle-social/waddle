@@ -14,11 +14,32 @@ mod ws_common;
 
 use std::time::Duration;
 
+use futures::StreamExt;
 use tokio_tungstenite::tungstenite;
 use ws_common::{TestServer, WsXmppClient};
 
 const DOMAIN: &str = "localhost";
 const USERNAME: &str = "admin";
+
+/// Receive one raw WebSocket frame — control frames included.
+///
+/// This suite observes server-initiated `Ping` frames, which the
+/// harness's `recv_timeout` deliberately treats as errors. Polling the
+/// stream also lets tokio-tungstenite flush its automatic `Pong`
+/// replies, so a client driven by this helper behaves like a healthy
+/// browser. `Ok(None)` means the stream ended. Local to this suite (on
+/// the harness it would be dead code in every other test binary).
+async fn recv_raw_timeout(
+    client: &mut WsXmppClient,
+    dur: Duration,
+) -> Result<Option<tungstenite::Message>, String> {
+    match tokio::time::timeout(dur, client.ws.next()).await {
+        Ok(Some(Ok(message))) => Ok(Some(message)),
+        Ok(Some(Err(e))) => Err(format!("WebSocket error: {e}")),
+        Ok(None) => Ok(None),
+        Err(_) => Err("Timeout waiting for raw frame".to_string()),
+    }
+}
 
 fn keepalive_server(interval_secs: &str, miss_limit: &str) -> TestServer {
     TestServer::start_with_extra_envs(
@@ -58,7 +79,7 @@ async fn idle_session_receives_pings_and_survives() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
     let mut pings = 0u32;
     while tokio::time::Instant::now() < deadline && pings < 3 {
-        match client.recv_raw_timeout(Duration::from_secs(12)).await {
+        match recv_raw_timeout(&mut client, Duration::from_secs(12)).await {
             Ok(Some(tungstenite::Message::Ping(_))) => pings += 1,
             Ok(Some(_)) => {} // unrelated frame (SM nudges, etc.)
             Ok(None) => panic!("server closed an idle-but-responsive connection"),
@@ -106,7 +127,7 @@ async fn silent_peer_is_closed_after_miss_limit() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     let mut closed = false;
     while tokio::time::Instant::now() < deadline {
-        match client.recv_raw_timeout(Duration::from_secs(10)).await {
+        match recv_raw_timeout(&mut client, Duration::from_secs(10)).await {
             Ok(Some(tungstenite::Message::Close(_))) | Ok(None) => {
                 closed = true;
                 break;
@@ -150,7 +171,7 @@ async fn unauthenticated_socket_is_reaped_despite_auto_pongs() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     let mut closed = false;
     while tokio::time::Instant::now() < deadline {
-        match client.recv_raw_timeout(Duration::from_secs(15)).await {
+        match recv_raw_timeout(&mut client, Duration::from_secs(15)).await {
             Ok(Some(tungstenite::Message::Close(_))) | Ok(None) => {
                 closed = true;
                 break;
