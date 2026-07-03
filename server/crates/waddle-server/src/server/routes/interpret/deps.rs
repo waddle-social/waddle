@@ -19,7 +19,7 @@ pub struct InterpretOutcome {
     /// Async-callback completions to feed back to the state machine.
     pub feedback: Vec<InboundEvent>,
     /// Number of [`OutboundEvent::SendKeepaliveProbe`] effects in the
-    /// batch (RFC 7395 §5.6 / issue #1090). Probes are transport
+    /// batch (RFC 7395 §3.8 / issue #1090). Probes are transport
     /// control frames with no XML form, so they ride the outcome as a
     /// count and the adapter maps each to its native frame (WS
     /// `Ping`). In practice this is 0 or 1 per tick.

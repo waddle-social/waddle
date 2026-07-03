@@ -61,7 +61,7 @@
 //!   recipient inbox upsert (channel + thread rows) plus the XEP-0430
 //!   inbox push to the owner's other resources.
 //!
-//! - [`OutboundEvent::SendKeepaliveProbe`] — RFC 7395 §5.6 liveness
+//! - [`OutboundEvent::SendKeepaliveProbe`] — RFC 7395 §3.8 liveness
 //!   probe; counted into [`InterpretOutcome::keepalive_probes`] for the
 //!   transport adapter to map to a WS `Ping` frame (issue #1090).
 //! - [`OutboundEvent::SetTimer`] / [`OutboundEvent::CancelTimer`] —

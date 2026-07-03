@@ -1,7 +1,10 @@
-//! RFC 7395 §5.6 transport keepalive policy (issue #1090).
+//! RFC 7395 §3.8 transport keepalive policy (issue #1090).
 //!
-//! The XMPP-over-WebSocket subprotocol prescribes WebSocket ping/pong
-//! frames as the keepalive mechanism. This module owns the *policy* —
+//! RFC 7395 §3.8 ("Pings and Keepalives") sanctions WebSocket ping/pong
+//! control frames as the keepalive mechanism for the XMPP subprotocol
+//! (alongside XEP-0199 and XEP-0198); Waddle uses WS ping/pong because
+//! it needs no stanza semantics and browsers answer it automatically at
+//! the protocol layer. This module owns the *policy* —
 //! when to probe, when to give up — as pure, clock-free state driven by
 //! [`InboundEvent::Tick`](super::InboundEvent::Tick) and liveness
 //! evidence. The transport adapter owns the *mechanism*: it maps
@@ -73,6 +76,22 @@ impl Default for KeepaliveConfig {
     }
 }
 
+/// Ticks a connection may spend outside the `Ready` phase before it is
+/// closed regardless of pong answers.
+///
+/// Every RFC 6455 stack auto-pongs below the application (browsers
+/// answer from the network process even for a frozen tab), so "answers
+/// probes" proves only that the TCP path and WS stack are alive — not
+/// that the client is making session progress. Without this bound, an
+/// unauthenticated socket would be held forever: the server's own
+/// pings keep the gateway's idle timer happy and the auto-pongs keep
+/// the miss counter at zero. Ironically, before issue #1090 the
+/// gateway's ~300s reset reaped such sockets; the keepalive must not
+/// remove that bound. Three ticks is 135s at the default 45s interval
+/// (and 360s at the 120s config ceiling) — orders of magnitude above a
+/// normal sub-second SASL + bind negotiation.
+pub const NEGOTIATION_TICK_LIMIT: u32 = 3;
+
 /// Per-connection keepalive policy state.
 ///
 /// Owned by [`XmppStateMachine`](super::XmppStateMachine); driven
@@ -96,6 +115,8 @@ pub struct KeepalivePolicy {
     alive_since_tick: bool,
     /// Probes sent without any intervening inbound evidence.
     consecutive_misses: u32,
+    /// Ticks observed while the session was not yet `Ready`.
+    negotiation_ticks: u32,
 }
 
 impl KeepalivePolicy {
@@ -108,6 +129,7 @@ impl KeepalivePolicy {
             config,
             alive_since_tick: true,
             consecutive_misses: 0,
+            negotiation_ticks: 0,
         }
     }
 
@@ -117,6 +139,7 @@ impl KeepalivePolicy {
     pub fn on_transport_ready(&mut self) -> Vec<OutboundEvent> {
         self.alive_since_tick = true;
         self.consecutive_misses = 0;
+        self.negotiation_ticks = 0;
         vec![OutboundEvent::SetTimer {
             id: KEEPALIVE_TIMER,
             duration_ms: self.config.interval_ms,
@@ -129,12 +152,37 @@ impl KeepalivePolicy {
         self.consecutive_misses = 0;
     }
 
-    /// Evaluate the policy on a keepalive tick.
+    /// Evaluate the policy on a keepalive tick. `session_ready` is
+    /// whether the machine has reached the `Ready` phase (bound
+    /// resource); pre-`Ready` connections are additionally bounded by
+    /// [`NEGOTIATION_TICK_LIMIT`].
     ///
+    /// - Still negotiating past the tick limit → close, even if the
+    ///   peer answers probes (auto-pong proves nothing about session
+    ///   progress).
     /// - Evidence since the last tick → quiet re-arm.
     /// - Silence → probe and re-arm, until `miss_limit` probes have
     ///   gone unanswered, then close the transport.
-    pub fn on_tick(&mut self) -> Vec<OutboundEvent> {
+    pub fn on_tick(&mut self, session_ready: bool) -> Vec<OutboundEvent> {
+        if session_ready {
+            self.negotiation_ticks = 0;
+        } else {
+            self.negotiation_ticks += 1;
+            if self.negotiation_ticks > NEGOTIATION_TICK_LIMIT {
+                return vec![
+                    OutboundEvent::Log {
+                        level: Level::INFO,
+                        message: format!(
+                            "Keepalive: session still negotiating after {} ticks \
+                             (interval {}ms); closing stalled pre-bind connection",
+                            self.negotiation_ticks - 1,
+                            self.config.interval_ms
+                        ),
+                    },
+                    OutboundEvent::CloseTransport,
+                ];
+            }
+        }
         let rearm = OutboundEvent::SetTimer {
             id: KEEPALIVE_TIMER,
             duration_ms: self.config.interval_ms,
@@ -165,12 +213,17 @@ impl KeepalivePolicy {
 ///
 /// Free function so [`XmppStateMachine::handle`] stays a thin match:
 /// unknown ids are logged (a cancelled-then-fired race is benign), the
-/// keepalive id runs the policy.
+/// keepalive id runs the policy. `session_ready` mirrors whether the
+/// machine's phase is `Ready`.
 ///
 /// [`XmppStateMachine::handle`]: super::XmppStateMachine::handle
-pub(super) fn dispatch_tick(policy: &mut KeepalivePolicy, id: TimerId) -> Vec<OutboundEvent> {
+pub(super) fn dispatch_tick(
+    policy: &mut KeepalivePolicy,
+    id: TimerId,
+    session_ready: bool,
+) -> Vec<OutboundEvent> {
     if id == KEEPALIVE_TIMER {
-        policy.on_tick()
+        policy.on_tick(session_ready)
     } else {
         vec![OutboundEvent::Log {
             level: Level::WARN,
@@ -227,7 +280,7 @@ mod tests {
         p.on_transport_ready();
         for _ in 0..10 {
             p.mark_alive();
-            let events = p.on_tick();
+            let events = p.on_tick(true);
             assert!(!has_probe(&events), "active peer got probed: {events:?}");
             assert!(!has_close(&events));
             assert_rearm(&events, 45_000);
@@ -239,16 +292,16 @@ mod tests {
         let mut p = KeepalivePolicy::new(cfg(45_000, 2));
         p.on_transport_ready();
         // Tick 1: initial alive grace clears quietly.
-        assert!(!has_probe(&p.on_tick()));
+        assert!(!has_probe(&p.on_tick(true)));
         // Tick 2: silence → probe. Peer pongs.
-        let events = p.on_tick();
+        let events = p.on_tick(true);
         assert!(has_probe(&events));
         assert_rearm(&events, 45_000);
         p.mark_alive();
         // Tick 3: pong counted as evidence → quiet.
-        assert!(!has_probe(&p.on_tick()));
+        assert!(!has_probe(&p.on_tick(true)));
         // Tick 4: silence again → probe. Worst-case wire gap is 2·interval.
-        assert!(has_probe(&p.on_tick()));
+        assert!(has_probe(&p.on_tick(true)));
     }
 
     #[test]
@@ -256,15 +309,15 @@ mod tests {
         let mut p = KeepalivePolicy::new(cfg(45_000, 2));
         p.on_transport_ready();
         // Tick 1: initial grace.
-        assert!(!has_probe(&p.on_tick()));
+        assert!(!has_probe(&p.on_tick(true)));
         // Ticks 2..=3: two probes, never answered.
         for _ in 0..2 {
-            let events = p.on_tick();
+            let events = p.on_tick(true);
             assert!(has_probe(&events));
             assert!(!has_close(&events));
         }
         // Tick 4: miss limit reached → close, no further probe or re-arm.
-        let events = p.on_tick();
+        let events = p.on_tick(true);
         assert!(has_close(&events));
         assert!(!has_probe(&events));
         assert!(
@@ -279,31 +332,31 @@ mod tests {
     fn late_evidence_resets_the_miss_counter() {
         let mut p = KeepalivePolicy::new(cfg(45_000, 2));
         p.on_transport_ready();
-        p.on_tick(); // grace
-        assert!(has_probe(&p.on_tick())); // miss 1
-        assert!(has_probe(&p.on_tick())); // miss 2
+        p.on_tick(true); // grace
+        assert!(has_probe(&p.on_tick(true))); // miss 1
+        assert!(has_probe(&p.on_tick(true))); // miss 2
         p.mark_alive(); // peer answers just in time
-        assert!(!has_probe(&p.on_tick())); // quiet tick
-                                           // The full miss budget is available again.
-        assert!(has_probe(&p.on_tick()));
-        assert!(has_probe(&p.on_tick()));
-        assert!(has_close(&p.on_tick()));
+        assert!(!has_probe(&p.on_tick(true))); // quiet tick
+                                               // The full miss budget is available again.
+        assert!(has_probe(&p.on_tick(true)));
+        assert!(has_probe(&p.on_tick(true)));
+        assert!(has_close(&p.on_tick(true)));
     }
 
     #[test]
     fn miss_limit_one_closes_on_second_silent_tick() {
         let mut p = KeepalivePolicy::new(cfg(1_000, 1));
         p.on_transport_ready();
-        p.on_tick(); // grace
-        assert!(has_probe(&p.on_tick()));
-        assert!(has_close(&p.on_tick()));
+        p.on_tick(true); // grace
+        assert!(has_probe(&p.on_tick(true)));
+        assert!(has_close(&p.on_tick(true)));
     }
 
     #[test]
     fn unknown_timer_id_is_logged_not_actioned() {
         let mut p = KeepalivePolicy::new(cfg(45_000, 2));
         p.on_transport_ready();
-        let events = dispatch_tick(&mut p, TimerId(999));
+        let events = dispatch_tick(&mut p, TimerId(999), true);
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0], OutboundEvent::Log { .. }));
         assert!(!has_probe(&events) && !has_close(&events));
@@ -313,7 +366,62 @@ mod tests {
     fn keepalive_tick_routes_through_dispatch() {
         let mut p = KeepalivePolicy::new(cfg(45_000, 2));
         p.on_transport_ready();
-        dispatch_tick(&mut p, KEEPALIVE_TIMER); // grace
-        assert!(has_probe(&dispatch_tick(&mut p, KEEPALIVE_TIMER)));
+        dispatch_tick(&mut p, KEEPALIVE_TIMER, true); // grace
+        assert!(has_probe(&dispatch_tick(&mut p, KEEPALIVE_TIMER, true)));
+    }
+
+    #[test]
+    fn auto_ponging_but_never_binding_peer_is_closed_at_the_negotiation_limit() {
+        let mut p = KeepalivePolicy::new(cfg(45_000, 2));
+        p.on_transport_ready();
+        // The peer's WS stack answers every probe (mark_alive), but the
+        // session never reaches Ready — liveness must not grant
+        // immortality to a socket that makes no session progress.
+        for _ in 0..NEGOTIATION_TICK_LIMIT {
+            p.mark_alive();
+            let events = p.on_tick(false);
+            assert!(!has_close(&events), "still within negotiation budget");
+        }
+        p.mark_alive();
+        let events = p.on_tick(false);
+        assert!(
+            has_close(&events),
+            "negotiation limit exhausted: {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, OutboundEvent::SetTimer { .. })),
+            "negotiation close must not re-arm: {events:?}"
+        );
+    }
+
+    #[test]
+    fn reaching_ready_resets_the_negotiation_budget() {
+        let mut p = KeepalivePolicy::new(cfg(45_000, 2));
+        p.on_transport_ready();
+        for _ in 0..NEGOTIATION_TICK_LIMIT {
+            p.mark_alive();
+            assert!(!has_close(&p.on_tick(false)));
+        }
+        // Session binds just in time; ready ticks clear the counter and
+        // ordinary keepalive behavior takes over indefinitely.
+        for _ in 0..10 {
+            p.mark_alive();
+            let events = p.on_tick(true);
+            assert!(!has_close(&events));
+            assert_rearm(&events, 45_000);
+        }
+    }
+
+    #[test]
+    fn silent_negotiating_peer_still_dies_by_miss_limit_first() {
+        // A pre-bind peer that also stops ponging hits the ordinary
+        // dead-peer close (miss limit) before the negotiation limit.
+        let mut p = KeepalivePolicy::new(cfg(45_000, 1));
+        p.on_transport_ready();
+        assert!(!has_probe(&p.on_tick(false))); // grace
+        assert!(has_probe(&p.on_tick(false))); // probe, unanswered
+        assert!(has_close(&p.on_tick(false)));
     }
 }

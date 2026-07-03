@@ -177,7 +177,7 @@ pub(super) struct DriveOutcome {
     pub(super) frames: Vec<String>,
     /// Set when any round emitted [`OutboundEvent::CloseTransport`].
     pub(super) close: bool,
-    /// RFC 7395 §5.6 liveness probes to send as WS `Ping` frames
+    /// RFC 7395 §3.8 liveness probes to send as WS `Ping` frames
     /// (issue #1090).
     pub(super) keepalive_probes: u32,
     /// Timer effects for the connection-local timer wheel.

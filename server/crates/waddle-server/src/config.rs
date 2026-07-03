@@ -134,7 +134,7 @@ pub struct ServerConfig {
     pub extensions: ExtensionConfig,
     /// Operator controls for server-side link-preview enrichment.
     pub link_preview: LinkPreviewConfig,
-    /// RFC 7395 §5.6 WebSocket keepalive knobs (issue #1090), parsed
+    /// RFC 7395 §3.8 WebSocket keepalive knobs (issue #1090), parsed
     /// from `WADDLE_WS_KEEPALIVE_*` by [`ws_keepalive_from_vars`].
     pub ws_keepalive: waddle_xmpp::protocol::KeepaliveConfig,
     /// SpiceDB backend configuration.
@@ -391,7 +391,7 @@ const WS_KEEPALIVE_MAX_INTERVAL_SECS: u64 = 120;
 /// cap on busy rooms.
 const WS_KEEPALIVE_MAX_MISS_LIMIT: u64 = 10;
 
-/// Parse + validate the RFC 7395 §5.6 keepalive knobs (issue #1090):
+/// Parse + validate the RFC 7395 §3.8 keepalive knobs (issue #1090):
 ///
 /// - `WADDLE_WS_KEEPALIVE_INTERVAL_SECS` — probe/tick interval,
 ///   default 45, valid range 1..=120 (see

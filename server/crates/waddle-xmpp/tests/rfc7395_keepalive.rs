@@ -1,4 +1,4 @@
-//! RFC 7395 §5.6 keepalive — dedicated conformance suite (issue #1090).
+//! RFC 7395 §3.8 keepalive — dedicated conformance suite (issue #1090).
 //!
 //! Exercises the liveness policy through the public
 //! [`XmppStateMachine::handle`] entry point exactly as the WebSocket
@@ -7,17 +7,28 @@
 //! evidence (pong / client ping), `FrameReceived` for client frames.
 //! Everything here is pure and clock-free — no sockets, no tokio time.
 
+use std::str::FromStr;
 use waddle_xmpp::protocol::{
     InboundEvent, InboundFrame, KeepaliveConfig, OutboundEvent, StanzaDispatcher, TimerId,
     XmppStateMachine, KEEPALIVE_TIMER,
 };
 
-fn machine(interval_ms: u64, miss_limit: u32) -> XmppStateMachine {
+/// A machine still in stream negotiation (pre-bind), as at WS upgrade.
+fn negotiating_machine(interval_ms: u64, miss_limit: u32) -> XmppStateMachine {
     let mut sm = XmppStateMachine::new("example.com", StanzaDispatcher::new());
     sm.set_keepalive_config(KeepaliveConfig {
         interval_ms,
         miss_limit,
     });
+    sm
+}
+
+/// A machine with a bound session (`Ready`), as after bind — the
+/// steady-state the keepalive spends its life in.
+fn machine(interval_ms: u64, miss_limit: u32) -> XmppStateMachine {
+    let mut sm = negotiating_machine(interval_ms, miss_limit);
+    let jid = jid::FullJid::from_str("alice@example.com/web").expect("static test jid");
+    sm.transition_to_ready(jid, false);
     sm
 }
 
@@ -152,4 +163,50 @@ fn keepalive_ack_is_effect_free() {
     let mut sm = machine(45_000, 2);
     sm.handle(InboundEvent::TransportReady);
     assert!(sm.handle(InboundEvent::KeepaliveAck).is_empty());
+}
+
+#[test]
+fn auto_ponging_socket_that_never_binds_is_reaped() {
+    // Every RFC 6455 stack auto-pongs below the application, so a
+    // wedged-but-TCP-alive pre-auth socket answers every probe. The
+    // negotiation deadline must reap it anyway — otherwise the
+    // keepalive would hold unauthenticated sockets forever (the
+    // gateway's idle reset used to bound them; issue #1090 must not
+    // remove that bound).
+    let mut sm = negotiating_machine(45_000, 2);
+    sm.handle(InboundEvent::TransportReady);
+    let mut closed_at = None;
+    for round in 1..=10 {
+        sm.handle(InboundEvent::KeepaliveAck); // auto-pong
+        if has_close(&tick(&mut sm)) {
+            closed_at = Some(round);
+            break;
+        }
+    }
+    assert_eq!(
+        closed_at,
+        Some(4),
+        "pre-bind socket must close on the tick after NEGOTIATION_TICK_LIMIT"
+    );
+}
+
+#[test]
+fn binding_before_the_negotiation_deadline_grants_normal_keepalive() {
+    let mut sm = negotiating_machine(45_000, 2);
+    sm.handle(InboundEvent::TransportReady);
+    // Two negotiating ticks pass while the client authenticates.
+    sm.handle(InboundEvent::KeepaliveAck);
+    assert!(!has_close(&tick(&mut sm)));
+    sm.handle(InboundEvent::KeepaliveAck);
+    assert!(!has_close(&tick(&mut sm)));
+    // Bind lands (the adapter replaces the machine at bind; phase
+    // transition models the same outcome for the policy).
+    let jid = jid::FullJid::from_str("alice@example.com/web").expect("static test jid");
+    sm.transition_to_ready(jid, false);
+    // A responsive bound session now lives indefinitely.
+    for _ in 0..10 {
+        sm.handle(InboundEvent::KeepaliveAck);
+        let events = tick(&mut sm);
+        assert!(!has_close(&events), "bound responsive session must live");
+    }
 }

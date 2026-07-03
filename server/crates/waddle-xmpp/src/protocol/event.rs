@@ -120,19 +120,21 @@ pub enum InboundEvent {
     StanzaFromPeer(Box<Stanza>),
     /// The transport reports it is up and ready to carry frames (WS
     /// upgrade complete). Fed exactly once, before any client frame —
-    /// arms the RFC 7395 §5.6 keepalive clock so even a connection
+    /// arms the RFC 7395 §3.8 keepalive clock so even a connection
     /// that never authenticates is reaped by the liveness policy.
     TransportReady,
     /// The transport reports it has been closed.
     TransportClosed,
     /// A timer previously armed via [`OutboundEvent::SetTimer`] fired.
     Tick(TimerId),
-    /// Transport-level liveness evidence that does not surface as a
-    /// parsed frame — a WS pong (any payload) or a client-initiated WS
-    /// ping. Under the issue #1090 policy *any* inbound frame proves
-    /// the peer alive; the WebSocket adapter feeds this for control
-    /// frames while [`InboundEvent::FrameReceived`] covers text frames
-    /// on the state-machine path.
+    /// Transport-level liveness evidence. Under the issue #1090 policy
+    /// *any* inbound frame proves the peer alive, so the WebSocket
+    /// adapter feeds this for **every** received frame — text, binary,
+    /// client-initiated ping, and pong (any payload) — because most
+    /// frames are dispatched on the legacy path and never reach the
+    /// machine as [`InboundEvent::FrameReceived`]. `FrameReceived`
+    /// also marks the peer alive for the frames that *do* take the
+    /// machine path; the double-mark is idempotent.
     KeepaliveAck,
 
     // -------------------------------------------------------------------

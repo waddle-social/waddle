@@ -181,7 +181,7 @@ pub struct WebSocketDeps {
     /// graceful shutdown so in-flight deliveries can finish updating the
     /// ledger before runtime teardown.
     pub provider_dispatch_tasks: crate::server::routes::extension_webhooks::ProviderDispatchTracker,
-    /// RFC 7395 §5.6 keepalive knobs (issue #1090), parsed and
+    /// RFC 7395 §3.8 keepalive knobs (issue #1090), parsed and
     /// validated at startup from `WADDLE_WS_KEEPALIVE_*` env vars.
     pub ws_keepalive: waddle_xmpp::protocol::KeepaliveConfig,
 }
@@ -364,7 +364,7 @@ pub(super) struct WsConnState {
     /// Per-connection sans-I/O state machine.
     ///
     /// Initialized in the `Unauthenticated` phase at WS upgrade by
-    /// [`Self::init_prebind_state_machine`] so the RFC 7395 §5.6
+    /// [`Self::init_prebind_state_machine`] so the RFC 7395 §3.8
     /// keepalive policy (issue #1090) covers the connection from its
     /// very first instant — a client that wedges before authenticating
     /// is reaped by the same liveness clock. Replaced at bind /
@@ -411,11 +411,13 @@ impl WsConnState {
     }
 
     /// Initialize the per-connection [`XmppStateMachine`] in the
-    /// `Unauthenticated` phase at WS upgrade, seeding the RFC 7395
-    /// §5.6 keepalive policy (issue #1090) with the deployment
-    /// config. Called exactly once, before the connection loop's
-    /// first `select!`; the caller then feeds
-    /// `InboundEvent::TransportReady` to arm the keepalive clock.
+    /// `Unauthenticated` phase, seeding the RFC 7395 §3.8 keepalive
+    /// policy (issue #1090) with the deployment config. Called at WS
+    /// upgrade, before the connection loop's first `select!` (the
+    /// caller then feeds `InboundEvent::TransportReady` to arm the
+    /// keepalive clock), and again by the failed-SM-resume reset so
+    /// the machine — and with it the keepalive tick chain — is never
+    /// absent mid-connection.
     pub(super) fn init_prebind_state_machine(
         &mut self,
         domain: &str,

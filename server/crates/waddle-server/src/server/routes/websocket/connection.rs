@@ -57,7 +57,7 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
 
     // Track connection state
     let mut conn = WsConnState::new();
-    // RFC 7395 §5.6 keepalive (issue #1090): the liveness policy lives
+    // RFC 7395 §3.8 keepalive (issue #1090): the liveness policy lives
     // in the per-connection sans-io machine, so one must exist from
     // the very first instant — a client that wedges before
     // authenticating is reaped by the same clock. `TransportReady`
@@ -88,7 +88,7 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                     Some(Ok(Message::Text(text))) => {
                         debug!(len = text.len(), "Received XMPP WebSocket message");
                         // Any inbound frame is liveness evidence for the
-                        // RFC 7395 §5.6 keepalive policy (issue #1090).
+                        // RFC 7395 §3.8 keepalive policy (issue #1090).
                         conn.note_transport_activity();
 
                         // Handle XMPP framing (RFC 7395)
@@ -298,7 +298,7 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                 }
             }
 
-            // RFC 7395 §5.6 keepalive clock (issue #1090). Fires only
+            // RFC 7395 §3.8 keepalive clock (issue #1090). Fires only
             // when the state machine armed a timer; the tick is fed
             // back into the machine, whose policy decides: quiet
             // re-arm, probe + re-arm, or close a dead peer. A
@@ -342,10 +342,17 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                     break;
                 }
                 if drive.close {
-                    info!("Keepalive miss limit reached; closing dead connection");
+                    // The policy's Log event (relayed above via interpret)
+                    // carries the reason (miss limit vs negotiation
+                    // deadline); this line adds the connection identity
+                    // for correlation with gateway/Loki reset queries.
+                    info!(
+                        jid = ?conn.phase.bound_jid(),
+                        "Keepalive policy closed the connection"
+                    );
                     let _ = close_ws_connection(
                         &mut ws_sender,
-                        "Failed to send WebSocket close frame after keepalive miss limit",
+                        "Failed to send WebSocket close frame after keepalive close",
                     )
                     .await;
                     break;

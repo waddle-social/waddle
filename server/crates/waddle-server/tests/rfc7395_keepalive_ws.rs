@@ -1,4 +1,4 @@
-//! RFC 7395 §5.6 keepalive over a real WebSocket (issue #1090).
+//! RFC 7395 §3.8 keepalive over a real WebSocket (issue #1090).
 //!
 //! End-to-end conformance: the server sends `Ping` frames on an
 //! inbound-idle interval, an idle-but-responsive client survives
@@ -127,6 +127,48 @@ async fn silent_peer_is_closed_after_miss_limit() {
     assert!(
         closed,
         "server must close a silent peer after the miss limit"
+    );
+}
+
+/// Locked design decision on #1090: "timer runs from WS upgrade so
+/// wedged pre-bind connections get reaped too." A socket that upgrades
+/// but never authenticates keeps auto-ponging at the WS layer
+/// (tokio-tungstenite here, the browser network process in real
+/// clients), so probe answers alone must not keep it alive — the
+/// negotiation deadline (NEGOTIATION_TICK_LIMIT ticks) closes it.
+#[tokio::test]
+async fn unauthenticated_socket_is_reaped_despite_auto_pongs() {
+    let server = keepalive_server("1", "2");
+    // Connect the raw WebSocket only — no SASL, no bind.
+    let mut client = WsXmppClient::connect(&server.ws_url())
+        .await
+        .expect("raw websocket connect");
+
+    // Poll continuously so every server ping is auto-ponged — this is
+    // the "wedged app, live network stack" shape. Expect the server to
+    // close ~4-5s in (negotiation limit 3 ticks + close tick at 1s).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let mut closed = false;
+    while tokio::time::Instant::now() < deadline {
+        match client.recv_raw_timeout(Duration::from_secs(15)).await {
+            Ok(Some(tungstenite::Message::Close(_))) | Ok(None) => {
+                closed = true;
+                break;
+            }
+            Ok(Some(_)) => {}
+            Err(e) => {
+                assert!(
+                    e.contains("WebSocket error"),
+                    "expected close/EOF/error, got timeout: {e}"
+                );
+                closed = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        closed,
+        "an unauthenticated auto-ponging socket must be reaped by the negotiation deadline"
     );
 }
 

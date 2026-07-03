@@ -55,7 +55,7 @@ pub struct XmppStateMachine {
     /// Source of fresh, opaque XEP-0359 stanza-ids stamped by message
     /// handlers. Defaults to UUIDv4; tests can override.
     id_gen: Arc<dyn IdGenerator>,
-    /// RFC 7395 §5.6 transport keepalive policy (issue #1090). Driven
+    /// RFC 7395 §3.8 transport keepalive policy (issue #1090). Driven
     /// by [`InboundEvent::TransportReady`] / [`InboundEvent::Tick`] /
     /// [`InboundEvent::KeepaliveAck`]; emits
     /// [`OutboundEvent::SendKeepaliveProbe`] and, after the miss
@@ -210,7 +210,10 @@ impl XmppStateMachine {
             InboundEvent::StanzaFromPeer(stanza) => self.on_peer_stanza(*stanza),
             InboundEvent::TransportReady => self.keepalive.on_transport_ready(),
             InboundEvent::TransportClosed => self.on_closed(),
-            InboundEvent::Tick(id) => dispatch_tick(&mut self.keepalive, id),
+            InboundEvent::Tick(id) => {
+                let session_ready = matches!(self.phase, ConnectionPhase::Ready { .. });
+                dispatch_tick(&mut self.keepalive, id, session_ready)
+            }
             InboundEvent::KeepaliveAck => {
                 self.keepalive.mark_alive();
                 Vec::new()
