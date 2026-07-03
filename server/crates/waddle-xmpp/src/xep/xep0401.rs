@@ -165,7 +165,7 @@ impl InviteStore {
 
     /// Remove expired invites.
     pub fn cleanup_expired(&mut self) {
-        self.invites.retain(|i| !i.is_expired() || !i.used);
+        self.invites.retain(|i| !i.is_expired());
     }
 
     /// Total invites.
