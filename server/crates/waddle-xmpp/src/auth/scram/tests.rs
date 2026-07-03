@@ -161,6 +161,16 @@ fn test_client_first_authzid_must_match_authcid() {
     assert_eq!(accepted.username, "user");
 }
 
+/// RFC 5802 ABNF: the GS2 flag token is exactly "n", "y", or "p=…";
+/// a longer token must not be accepted as if it were 'n'.
+#[test]
+fn test_malformed_gs2_flag_token_is_rejected() {
+    assert!(parse_client_first("nonsense,,n=user,r=abc").is_err());
+    assert!(parse_client_first("nn,,n=user,r=abc").is_err());
+    assert!(parse_client_first("p=,,n=user,r=abc").is_err());
+    assert!(parse_client_first(",,n=user,r=abc").is_err());
+}
+
 /// When client-first carried an authzid, client-final's `c=` is the
 /// base64 of that exact GS2 header — not the bare "n,," constant.
 #[test]

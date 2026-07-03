@@ -6,7 +6,8 @@ on:
   pull_request:
     paths:
     - .github/workflows/waddle-chat-pullrequest.yml
-    - apps/apple/Waddle/Assets.xcassets/AccentColor.colorset/**
+    - apps/apple/Waddle/Assets.xcassets/AccentColor.colorset/Contents.json
+    - apps/apple/Waddle/Assets.xcassets/AccentColor.colorset/Contents.json/**
     - bun.lock
     - bun.lock/**
     - chat/astro.config.mjs
@@ -27,6 +28,8 @@ on:
     - chat/scripts/resolve-commit-sha.mjs
     - chat/scripts/resolve-commit-sha.mjs/**
     - chat/src/**
+    - chat/src/styles/global/tokens.css
+    - chat/src/styles/global/tokens.css/**
     - chat/tests/**
     - chat/tsconfig.json
     - chat/tsconfig.json/**
