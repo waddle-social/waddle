@@ -458,6 +458,103 @@ async fn xep0490_other_resource_with_notify_caps_receives_event() {
 }
 
 #[tokio::test]
+async fn xep0490_publish_does_not_fan_out_to_roster_contacts_with_notify_caps() {
+    // Issue #1094: the MDS node is whitelist-access (XEP-0490 §3), so
+    // read-state publishes are private to the account. A roster contact
+    // with subscription=from advertising `urn:xmpp:mds:displayed:0+notify`
+    // MUST NOT receive the §3 roster fan-out — otherwise every message
+    // read leaks last-read stanza-ids to the whole roster.
+    let _serial = TEST_SERIAL.lock().await;
+    let alice_password = format!("alice-{}", uuid::Uuid::new_v4());
+    let bob_password = format!("bob-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[
+        ("alice", &alice_password),
+        ("bob", &bob_password),
+    ]);
+    let mut alice = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "alice",
+        &alice_password,
+        "mds-roster-alice",
+    )
+    .await
+    .expect("alice connect");
+    let mut bob = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "bob",
+        &bob_password,
+        "mds-roster-bob",
+    )
+    .await
+    .expect("bob connect");
+    let alice_bare = format!("alice@{DOMAIN}");
+    let bob_bare = format!("bob@{DOMAIN}");
+    let bob_full = bob.full_jid.clone().expect("bob full jid");
+
+    establish_bob_subscribes_to_alice(&mut alice, &mut bob, &alice_bare, &bob_bare).await;
+
+    // Bob advertises the MDS +notify filter via XEP-0115 caps — the
+    // exact posture of a real MDS-capable client.
+    let features = [NS_DISCO_INFO, MDS_NOTIFY];
+    let caps_node = "https://bob.example/mds-roster-caps";
+    let ver = caps_verification_string("client", "pc", "Bob's Client", &features);
+    bob.send(&format!(
+        r#"<presence xmlns="jabber:client"><c xmlns="{NS_CAPS}" hash="sha-1" node="{caps_node}" ver="{ver}"/></presence>"#
+    ))
+    .await
+    .expect("bob caps presence");
+    let disco_query = bob
+        .recv_matching(|f| {
+            f.contains("<iq") && f.contains(r#"type='get'"#) && f.contains(NS_DISCO_INFO)
+        })
+        .await
+        .expect("server caps disco to bob");
+    let iq_id = extract_iq_id(&disco_query);
+    let feature_xml: String = features
+        .iter()
+        .map(|f| format!(r#"<feature var="{f}"/>"#))
+        .collect();
+    bob.send(&format!(
+        r#"<iq xmlns="jabber:client" type="result" id="{iq_id}" from="{bob_full}"><query xmlns="{NS_DISCO_INFO}" node="{caps_node}#{ver}"><identity category="client" type="pc" name="Bob's Client"/>{feature_xml}</query></iq>"#
+    ))
+    .await
+    .expect("bob disco reply");
+
+    ping_anchor(
+        &mut bob,
+        &format!("mds-roster-anchor-{}", uuid::Uuid::new_v4()),
+    )
+    .await;
+
+    // Alice marks a chat as read.
+    let pub_resp = iq_set_to(
+        &mut alice,
+        "mds-roster-pub",
+        &alice_bare,
+        &mds_publish_xml(
+            "romeo@montague.lit",
+            "0f710f2b-52ed-4d52-b928-784dad74a52b",
+            &alice_bare,
+        ),
+    )
+    .await;
+    assert!(pub_resp.contains(r#"type='result'"#), "publish: {pub_resp}");
+
+    // No ping anchor here: recv_matching would consume (and hide) a
+    // leaked event. Poll the raw stream like the bookmark privacy test.
+    let event = wait_for_event_message(&mut bob, MDS_NODE, Duration::from_millis(700)).await;
+    assert!(
+        event.is_none(),
+        "whitelist-access MDS node MUST NOT fan out read state to roster contacts: {event:?}"
+    );
+
+    let _ = alice.close().await;
+    let _ = bob.close().await;
+}
+
+#[tokio::test]
 async fn xep0490_muc_stanza_id_by_attribute_round_trips_through_publish_and_catchup() {
     let _serial = TEST_SERIAL.lock().await;
     let server = TestServer::start();
@@ -525,6 +622,56 @@ fn caps_verification_string(
 fn extract_iq_id(frame: &str) -> String {
     use ws_common::extract_attr_after;
     extract_attr_after(frame, "<iq", "id").expect("iq has id attribute")
+}
+
+/// Establish bob -> alice presence subscription so alice's roster
+/// has bob with `subscription = from` (alice's PEP fan-out target).
+/// Copied verbatim from `xep0163_pep_ws.rs`.
+async fn establish_bob_subscribes_to_alice(
+    alice: &mut WsXmppClient,
+    bob: &mut WsXmppClient,
+    alice_bare: &str,
+    bob_bare: &str,
+) {
+    alice
+        .send(r#"<iq xmlns="jabber:client" type="get" id="roster-init-a"><query xmlns="jabber:iq:roster"/></iq>"#)
+        .await
+        .expect("alice roster get");
+    let _ = alice
+        .recv_matching(|f| f.contains("roster-init-a"))
+        .await
+        .expect("alice roster result");
+    bob.send(r#"<iq xmlns="jabber:client" type="get" id="roster-init-b"><query xmlns="jabber:iq:roster"/></iq>"#)
+        .await
+        .expect("bob roster get");
+    let _ = bob
+        .recv_matching(|f| f.contains("roster-init-b"))
+        .await
+        .expect("bob roster result");
+
+    alice
+        .send(r#"<presence xmlns="jabber:client"/>"#)
+        .await
+        .expect("alice presence");
+    bob.send(&format!(
+        r#"<presence xmlns="jabber:client" type="subscribe" to="{alice_bare}"/>"#
+    ))
+    .await
+    .expect("bob subscribes");
+    let _subscribe = alice
+        .recv_matching(|f| f.contains(r#"type='subscribe'"#))
+        .await
+        .expect("alice receives subscribe");
+    alice
+        .send(&format!(
+            r#"<presence xmlns="jabber:client" type="subscribed" to="{bob_bare}"/>"#
+        ))
+        .await
+        .expect("alice approves");
+    let _subscribed = bob
+        .recv_matching(|f| f.contains(r#"type='subscribed'"#))
+        .await
+        .expect("bob receives approval");
 }
 
 async fn ping_anchor(client: &mut WsXmppClient, id: &str) {
