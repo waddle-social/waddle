@@ -5,6 +5,7 @@
 //! countable stanza with an `<r/>`, and drains already-arrived inbound
 //! frames after each `<r/>` so `<a/>` acks shrink the queue mid-flood.
 
+use super::super::transport_xml::element_to_xml;
 use super::super::{
     batch_write::{write_response_batch, BatchSmPolicy, BatchWriteOutcome},
     state::WsConnState,
@@ -17,6 +18,7 @@ use std::task::{Context, Poll};
 use waddle_xmpp::stream_management::{SmAck, SmRequest, StreamManagementState};
 
 use axum::extract::ws::Message;
+use xmpp_parsers::minidom::Element;
 
 /// Reader driven by a script: `Some(msg)` yields the message,
 /// `None` yields one `Poll::Pending` (— "nothing more buffered right
@@ -88,8 +90,16 @@ fn reader_with(frames: Vec<Message>) -> impl Stream<Item = Result<Message, Infal
     stream::iter(frames.into_iter().map(Ok)).chain(stream::pending())
 }
 
+fn message_with_id(id: &str) -> String {
+    element_to_xml(
+        Element::builder("message", "jabber:client")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+            .build(),
+    )
+}
+
 fn countable_message(i: usize) -> String {
-    format!("<message xmlns='jabber:client' id='m{i}'/>")
+    message_with_id(&format!("m{i}"))
 }
 
 /// XEP-0198 §4: the server may request acks at any time. A large
@@ -214,13 +224,22 @@ async fn drained_non_ack_frames_are_deferred_in_arrival_order() {
     conn.sm_state = StreamManagementState::with_config(100, 5);
     conn.sm_state.enable("defer".to_string(), true, Some(300));
 
-    let chat = "<message xmlns='jabber:client' id='live-1'><body>hi</body></message>";
-    let client_r = "<r xmlns='urn:xmpp:sm:3'/>";
+    let chat = element_to_xml(
+        Element::builder("message", "jabber:client")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "live-1")
+            .append(
+                Element::builder("body", "jabber:client")
+                    .append("hi")
+                    .build(),
+            )
+            .build(),
+    );
+    let client_r = SmRequest::to_xml();
     let mut sink = CollectSink::default();
     let mut reader = ScriptedReader::new(vec![
-        Some(Message::Text(chat.into())),
+        Some(Message::Text(chat.clone().into())),
         Some(ack_frame(5)),
-        Some(Message::Text(client_r.into())),
+        Some(Message::Text(client_r.clone().into())),
         None,
     ]);
     let frames: Vec<String> = (1..=5).map(countable_message).collect();
@@ -246,7 +265,7 @@ async fn drained_non_ack_frames_are_deferred_in_arrival_order() {
         .iter()
         .map(|t| t.to_string())
         .collect();
-    assert_eq!(deferred, vec![chat.to_string(), client_r.to_string()]);
+    assert_eq!(deferred, vec![chat, client_r]);
 }
 
 /// Deliberate design decision (issue #1089 adversarial review): MAM
@@ -269,12 +288,17 @@ async fn mam_results_are_recorded_like_any_stanza_for_counter_convergence() {
     let live = countable_message(1);
     let mut frames = vec![live.clone()];
     frames.extend((1..=3).map(mam_result_frame));
-    frames.push(
-        "<iq xmlns='jabber:client' type='result' id='q1'>\
-           <fin xmlns='urn:xmpp:mam:2' complete='true'/>\
-         </iq>"
-            .to_string(),
-    );
+    frames.push(element_to_xml(
+        Element::builder("iq", "jabber:client")
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "q1")
+            .append(
+                Element::builder("fin", "urn:xmpp:mam:2")
+                    .attr(minidom::rxml::xml_ncname!("complete").to_owned(), "true")
+                    .build(),
+            )
+            .build(),
+    ));
 
     let mut sink = CollectSink::default();
     let mut reader = ScriptedReader::new(vec![]);
@@ -373,13 +397,67 @@ async fn resume_replay_batch_is_written_without_recording_or_ack_requests() {
 }
 
 fn mam_result_frame(i: usize) -> String {
-    format!(
-        "<message xmlns='jabber:client' to='u@example.com/r'>\
-           <result xmlns='urn:xmpp:mam:2' queryid='q1' id='{i}'>\
-             <forwarded xmlns='urn:xmpp:forward:0'/>\
-           </result>\
-         </message>"
+    element_to_xml(
+        Element::builder("message", "jabber:client")
+            .attr(
+                minidom::rxml::xml_ncname!("to").to_owned(),
+                "u@example.com/r",
+            )
+            .append(
+                Element::builder("result", "urn:xmpp:mam:2")
+                    .attr(minidom::rxml::xml_ncname!("queryid").to_owned(), "q1")
+                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), i.to_string())
+                    .append(Element::builder("forwarded", "urn:xmpp:forward:0").build())
+                    .build(),
+            )
+            .build(),
     )
+}
+
+/// Oversized inbound frames are dropped by the drain immediately —
+/// the main dispatcher's MAX_FRAME_SIZE backstop would discard them
+/// anyway, so parking them would only retain up to 64 near-1MiB
+/// payloads in `deferred_inbound` until the loop chews through the
+/// backlog. Well-sized frames around them are still drained normally.
+#[tokio::test]
+async fn drain_drops_oversized_frames_instead_of_parking_them() {
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    conn.sm_state = StreamManagementState::with_config(100, 5);
+    conn.sm_state
+        .enable("oversize".to_string(), true, Some(300));
+
+    let oversized = "a".repeat(waddle_xmpp::protocol::frame::MAX_FRAME_SIZE + 1);
+    let kept = message_with_id("kept-1");
+    let mut reader = ScriptedReader::new(vec![
+        Some(Message::Text(oversized.into())),
+        Some(ack_frame(5)),
+        Some(Message::Text(kept.clone().into())),
+        None,
+    ]);
+    let mut sink = CollectSink::default();
+    let frames: Vec<String> = (1..=5).map(countable_message).collect();
+
+    let outcome = write_response_batch(
+        &mut sink,
+        &mut reader,
+        state.as_ref(),
+        &mut conn,
+        frames,
+        BatchSmPolicy::Record,
+    )
+    .await;
+
+    assert!(matches!(outcome, BatchWriteOutcome::Continue));
+    // The ack behind the oversized frame was still applied...
+    assert_eq!(conn.sm_state.last_acked, 5);
+    // ...and only the well-sized frame was parked.
+    let deferred: Vec<String> = conn
+        .deferred_inbound
+        .iter()
+        .map(|t| t.to_string())
+        .collect();
+    assert_eq!(deferred, vec![kept]);
 }
 
 /// The drain parks non-ack frames in `deferred_inbound` — but only up
@@ -394,11 +472,7 @@ async fn drain_stops_parking_deferred_frames_at_the_cap() {
 
     // 200 buffered non-ack frames, far more than the cap.
     let script: Vec<Option<Message>> = (0..200)
-        .map(|i| {
-            Some(Message::Text(
-                format!("<message xmlns='jabber:client' id='flood-{i}'/>").into(),
-            ))
-        })
+        .map(|i| Some(Message::Text(message_with_id(&format!("flood-{i}")).into())))
         .collect();
     let mut reader = ScriptedReader::new(script);
     let mut sink = CollectSink::default();

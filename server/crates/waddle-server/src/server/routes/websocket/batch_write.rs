@@ -197,7 +197,18 @@ where
         match next {
             Some(Ok(Message::Text(text))) => {
                 conn.note_transport_activity();
-                if let Some(h) = parse_sm_ack_h(text.as_str()) {
+                if text.len() > MAX_FRAME_SIZE {
+                    // The main dispatcher's MAX_FRAME_SIZE backstop
+                    // would drop this frame anyway; dropping it here
+                    // keeps up to 64 near-1MiB frames from being
+                    // retained in `deferred_inbound` until the loop
+                    // gets around to processing the backlog.
+                    warn!(
+                        len = text.len(),
+                        max = MAX_FRAME_SIZE,
+                        "Dropping oversized inbound frame during mid-batch drain"
+                    );
+                } else if let Some(h) = parse_sm_ack_h(text.as_str()) {
                     apply_sm_ack(state, &mut conn.sm_state, h).await;
                 } else {
                     conn.deferred_inbound.push_back(text);
@@ -229,11 +240,12 @@ where
 }
 
 /// Parse a frame as an XEP-0198 `<a h='N'/>` nonza, returning `h`.
-/// Anything else — including oversized frames, which the main
-/// dispatcher's `MAX_FRAME_SIZE` backstop must see and drop — returns
-/// `None` and is left for the main frame dispatcher.
+/// Anything else returns `None` and is left for the main frame
+/// dispatcher. Oversized frames never reach this — the drain drops
+/// them before parsing, mirroring the dispatcher's `MAX_FRAME_SIZE`
+/// backstop.
 fn parse_sm_ack_h(frame: &str) -> Option<u32> {
-    if frame.len() > MAX_FRAME_SIZE || !SmStanza::is_client_nonza_candidate(frame) {
+    if !SmStanza::is_client_nonza_candidate(frame) {
         return None;
     }
     match SmStanza::parse(frame) {

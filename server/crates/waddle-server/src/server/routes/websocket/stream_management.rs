@@ -11,22 +11,19 @@ pub(super) use registration::{
 /// handled/sent counters. Only `<iq>`, `<message>`, `<presence>` qualify;
 /// stream headers, SASL frames, and SM control nonzas do not.
 ///
-/// Matches on the element name rather than a string-prefix: a substring
-/// match like `starts_with("<message")` would also accept future nonzas
-/// such as `<messages>` or `<presences>`.
+/// Frames at this layer sit past the serialization boundary (they are
+/// the exact bytes about to hit — or replay onto — the wire), so the
+/// XEP-0198 decision re-enters the typed domain here: the frame is
+/// parsed into a [`minidom::Element`] and classified on the resolved
+/// element name, never on string prefixes (a substring match like
+/// `starts_with("<message")` would also accept nonzas such as
+/// `<messages>`). Anything that does not parse is by definition not a
+/// stanza this server produced and does not count.
 pub(super) fn is_countable_stanza(frame: &str) -> bool {
-    let trimmed = frame.trim_start();
-    let Some(after_lt) = trimmed.strip_prefix('<') else {
+    let Ok(element) = Element::from_str(frame.trim_start()) else {
         return false;
     };
-    let name_end = after_lt
-        .find(|c: char| c.is_whitespace() || c == '>' || c == '/')
-        .unwrap_or(after_lt.len());
-    let element_name = &after_lt[..name_end];
-    let local_name = element_name
-        .rsplit_once(':')
-        .map_or(element_name, |(_, local)| local);
-    matches!(local_name, "iq" | "message" | "presence")
+    matches!(element.name(), "iq" | "message" | "presence")
 }
 
 pub(super) fn sm_show_from_name(value: &str) -> Option<xmpp_parsers::presence::Show> {

@@ -270,7 +270,16 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
     // must still happen. There is no wire to answer on: responses to
     // the departed client are recorded for XEP-0198 resume replay
     // instead of being written.
-    process_deferred_inbound_after_transport_loss(&domain, state.as_ref(), &mut conn).await;
+    //
+    // Skipped when superseded: the registry slot, MUC occupancy, and
+    // SM continuity now belong to the replacement session, and
+    // running handlers from the stale session here could still emit
+    // side effects (routing, inbound_count) against state the
+    // newcomer owns — the same reason the cleanup block below
+    // short-circuits.
+    if !superseded {
+        process_deferred_inbound_after_transport_loss(&domain, state.as_ref(), &mut conn).await;
+    }
 
     // Connection is ending. Decide between two paths:
     //   A. Fully clean up (unregister + remove MUC occupants) — the default
