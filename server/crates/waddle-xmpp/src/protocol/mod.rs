@@ -29,6 +29,7 @@ pub mod event;
 pub mod frame;
 pub mod handlers;
 pub mod id_gen;
+pub mod keepalive;
 pub mod machine;
 pub mod message_context;
 pub mod phase;
@@ -56,6 +57,7 @@ pub use event::{
 };
 pub use frame::InboundFrame;
 pub use id_gen::{CounterIdGenerator, FixedIdGenerator, IdGenerator, UuidV4Generator};
+pub use keepalive::{KeepaliveConfig, KEEPALIVE_TIMER};
 pub use machine::XmppStateMachine;
 pub use message_context::{MessageContext, MessageContextEnv};
 pub use phase::{ConnectionPhase, ScramPendingState};

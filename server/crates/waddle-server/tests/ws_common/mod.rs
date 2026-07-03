@@ -463,6 +463,30 @@ impl WsXmppClient {
         }
     }
 
+    /// Receive one raw WebSocket frame — control frames included.
+    ///
+    /// The RFC 7395 keepalive suite uses this to observe
+    /// server-initiated `Ping` frames, which [`Self::recv_timeout`]
+    /// deliberately treats as errors. Polling the stream also lets
+    /// tokio-tungstenite flush its automatic `Pong` replies, so a
+    /// client that keeps calling this behaves like a healthy browser.
+    /// `Ok(None)` means the stream ended.
+    ///
+    /// `#[allow(dead_code)]` matches the established pattern on this
+    /// harness (each integration test compiles as its own crate).
+    #[allow(dead_code)]
+    pub async fn recv_raw_timeout(
+        &mut self,
+        dur: Duration,
+    ) -> Result<Option<tungstenite::Message>, String> {
+        match timeout(dur, self.ws.next()).await {
+            Ok(Some(Ok(message))) => Ok(Some(message)),
+            Ok(Some(Err(e))) => Err(format!("WebSocket error: {e}")),
+            Ok(None) => Ok(None),
+            Err(_) => Err("Timeout waiting for raw frame".to_string()),
+        }
+    }
+
     /// Receive frames until one matches the predicate. Returns all collected frames.
     #[allow(dead_code)]
     pub async fn recv_until<F: Fn(&str) -> bool>(

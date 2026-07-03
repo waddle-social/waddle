@@ -36,5 +36,6 @@ pub fn ready_machine_with_id_gen(
         muc_occupancy: MucOccupancy::empty(),
         has_live_transport: true,
         id_gen,
+        keepalive: KeepalivePolicy::new(KeepaliveConfig::default()),
     }
 }

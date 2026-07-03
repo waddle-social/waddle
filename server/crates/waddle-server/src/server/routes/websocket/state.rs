@@ -181,6 +181,9 @@ pub struct WebSocketDeps {
     /// graceful shutdown so in-flight deliveries can finish updating the
     /// ledger before runtime teardown.
     pub provider_dispatch_tasks: crate::server::routes::extension_webhooks::ProviderDispatchTracker,
+    /// RFC 7395 §5.6 keepalive knobs (issue #1090), parsed and
+    /// validated at startup from `WADDLE_WS_KEEPALIVE_*` env vars.
+    pub ws_keepalive: waddle_xmpp::protocol::KeepaliveConfig,
 }
 
 pub struct ProtocolServices {
@@ -358,20 +361,31 @@ pub(super) struct WsConnState {
     /// and duplicate queue entries. The main loop resets the flag to
     /// `false` after skipping the record step.
     pub(super) suppress_sm_record_next_batch: bool,
-    /// Per-connection sans-I/O state machine for the message
-    /// pipeline (issue #229 PR11). `None` until `transition_to_ready`
-    /// is called on bind — see [`Self::ensure_state_machine`].
+    /// Per-connection sans-I/O state machine.
     ///
-    /// When `Some`, the per-connection main loop dispatches
-    /// [`OutboundStanza`] entries on their [`DeliveryKind`]:
-    /// `PeerStanza` values feed [`InboundEvent::StanzaFromPeer`]
-    /// into this state machine and the resulting outbound events are
-    /// resolved via [`crate::server::routes::interpret::interpret`]
-    /// before any wire write. `DirectFrame` values bypass the state
-    /// machine entirely and write straight to the wire.
+    /// Initialized in the `Unauthenticated` phase at WS upgrade by
+    /// [`Self::init_prebind_state_machine`] so the RFC 7395 §5.6
+    /// keepalive policy (issue #1090) covers the connection from its
+    /// very first instant — a client that wedges before authenticating
+    /// is reaped by the same liveness clock. Replaced at bind /
+    /// SM-resume by [`Self::ensure_state_machine`] with a `Ready`
+    /// machine carrying the bound user's session snapshot.
+    ///
+    /// The per-connection main loop dispatches [`OutboundStanza`]
+    /// entries on their [`DeliveryKind`]: `PeerStanza` values feed
+    /// [`InboundEvent::StanzaFromPeer`] into this state machine and
+    /// the resulting outbound events are resolved via
+    /// [`crate::server::routes::interpret::interpret`] before any wire
+    /// write (an `Unauthenticated` machine drops them with a WARN, as
+    /// the previous `None` guard did). `DirectFrame` values bypass the
+    /// state machine entirely and write straight to the wire.
     ///
     /// [`InboundEvent::StanzaFromPeer`]: waddle_xmpp::protocol::InboundEvent::StanzaFromPeer
     pub(super) state_machine: Option<XmppStateMachine>,
+    /// Deployment keepalive knobs, retained so the bind-time machine
+    /// replacement in [`Self::ensure_state_machine`] re-seeds the
+    /// policy with the same configuration the pre-bind machine used.
+    pub(super) keepalive_config: waddle_xmpp::protocol::KeepaliveConfig,
 }
 
 impl WsConnState {
@@ -392,6 +406,35 @@ impl WsConnState {
             registry_owner: None,
             suppress_sm_record_next_batch: false,
             state_machine: None,
+            keepalive_config: waddle_xmpp::protocol::KeepaliveConfig::default(),
+        }
+    }
+
+    /// Initialize the per-connection [`XmppStateMachine`] in the
+    /// `Unauthenticated` phase at WS upgrade, seeding the RFC 7395
+    /// §5.6 keepalive policy (issue #1090) with the deployment
+    /// config. Called exactly once, before the connection loop's
+    /// first `select!`; the caller then feeds
+    /// `InboundEvent::TransportReady` to arm the keepalive clock.
+    pub(super) fn init_prebind_state_machine(
+        &mut self,
+        domain: &str,
+        dispatcher: &Arc<StanzaDispatcher>,
+        keepalive: waddle_xmpp::protocol::KeepaliveConfig,
+    ) {
+        self.keepalive_config = keepalive;
+        let mut sm = XmppStateMachine::new(domain.to_string(), (**dispatcher).clone());
+        sm.set_keepalive_config(keepalive);
+        self.state_machine = Some(sm);
+    }
+
+    /// Feed transport-level liveness evidence (any inbound WS frame —
+    /// text, ping, pong, or binary) into the keepalive policy. The
+    /// `KeepaliveAck` event never produces outbound effects.
+    pub(super) fn note_transport_activity(&mut self) {
+        if let Some(sm) = self.state_machine.as_mut() {
+            let events = sm.handle(InboundEvent::KeepaliveAck);
+            debug_assert!(events.is_empty(), "KeepaliveAck must be effect-free");
         }
     }
 
@@ -427,6 +470,7 @@ impl WsConnState {
         blocklist: Blocklist,
     ) {
         let mut sm = XmppStateMachine::new(domain.to_string(), (**dispatcher).clone());
+        sm.set_keepalive_config(self.keepalive_config);
         sm.transition_to_ready(full_jid, resumed);
         sm.set_blocklist(blocklist);
         self.state_machine = Some(sm);

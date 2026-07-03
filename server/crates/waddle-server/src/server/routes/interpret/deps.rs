@@ -1,4 +1,5 @@
 use super::*;
+use waddle_xmpp::protocol::TimerId;
 
 /// Outcome of interpreting a batch of [`OutboundEvent`]s.
 ///
@@ -17,6 +18,29 @@ pub struct InterpretOutcome {
     pub close: bool,
     /// Async-callback completions to feed back to the state machine.
     pub feedback: Vec<InboundEvent>,
+    /// Number of [`OutboundEvent::SendKeepaliveProbe`] effects in the
+    /// batch (RFC 7395 §5.6 / issue #1090). Probes are transport
+    /// control frames with no XML form, so they ride the outcome as a
+    /// count and the adapter maps each to its native frame (WS
+    /// `Ping`). In practice this is 0 or 1 per tick.
+    pub keepalive_probes: u32,
+    /// Timer effects ([`OutboundEvent::SetTimer`] /
+    /// [`OutboundEvent::CancelTimer`]) for the adapter's
+    /// connection-local timer wheel. Only the transport adapter owns a
+    /// clock; the interpreter just relays the typed commands.
+    pub timer_commands: Vec<TimerCommand>,
+}
+
+/// Typed timer instruction relayed from the state machine to the
+/// transport adapter's timer wheel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimerCommand {
+    /// Arm (or re-arm, replacing any existing deadline for `id`) a
+    /// one-shot timer that feeds `InboundEvent::Tick(id)` back into
+    /// the state machine after `duration_ms`.
+    Set { id: TimerId, duration_ms: u64 },
+    /// Disarm the timer for `id`; a no-op when none is pending.
+    Cancel(TimerId),
 }
 
 /// Typed dependency context for the interpreter.

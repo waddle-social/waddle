@@ -61,10 +61,18 @@
 //!   recipient inbox upsert (channel + thread rows) plus the XEP-0430
 //!   inbox push to the owner's other resources.
 //!
+//! - [`OutboundEvent::SendKeepaliveProbe`] — RFC 7395 §5.6 liveness
+//!   probe; counted into [`InterpretOutcome::keepalive_probes`] for the
+//!   transport adapter to map to a WS `Ping` frame (issue #1090).
+//! - [`OutboundEvent::SetTimer`] / [`OutboundEvent::CancelTimer`] —
+//!   relayed as typed [`TimerCommand`]s in
+//!   [`InterpretOutcome::timer_commands`]; the adapter owns the actual
+//!   clock and feeds `InboundEvent::Tick` back on expiry.
+//!
 //! Stubbed (warn-logged until migration steps land them):
 //! - `AskSfu`, `QueryMam`, `LoadScramCredentials`,
-//!   `ValidateOAuthBearer`, `SetTimer`, `CancelTimer`,
-//!   `RegisterConnection` — wired in later migration steps.
+//!   `ValidateOAuthBearer`, `RegisterConnection` — wired in later
+//!   migration steps.
 
 use crate::auth::Session;
 use crate::permissions::{CheckPermission, Object, ObjectType, Permission, Subject};
@@ -189,7 +197,7 @@ use room_subject::persist_room_subject_event;
 use route_to_connection::route_to_connection;
 use routing::{deliver_peer_to_full, run_headless_recipient_pass};
 
-pub use deps::{Deps, InterpretOutcome};
+pub use deps::{Deps, InterpretOutcome, TimerCommand};
 pub(crate) use groupchat_archive::push_inbox_update;
 pub(crate) use notification_activity_ingest::{
     record_presence_available_activity_on_state, record_presence_unavailable_activity_on_state,
@@ -411,12 +419,16 @@ async fn interpret_with_depth(
                     frames: nested_frames,
                     close: nested_close,
                     feedback: nested_feedback,
+                    keepalive_probes: nested_probes,
+                    timer_commands: nested_timer_commands,
                 } = nested;
                 outcome.frames.extend(nested_frames);
                 if nested_close {
                     outcome.close = true;
                 }
                 outcome.feedback.extend(nested_feedback);
+                outcome.keepalive_probes += nested_probes;
+                outcome.timer_commands.extend(nested_timer_commands);
             }
             OutboundEvent::ProjectInbox {
                 owner,
@@ -606,20 +618,20 @@ async fn interpret_with_depth(
                     "OutboundEvent variant not yet wired in interpreter"
                 );
             }
+            OutboundEvent::SendKeepaliveProbe => {
+                // A liveness probe is a transport control frame, not a
+                // stanza — it never serializes to XML here. The command
+                // rides the outcome back to the transport adapter,
+                // which maps it to its native frame (WS `Ping`).
+                outcome.keepalive_probes += 1;
+            }
             OutboundEvent::SetTimer { id, duration_ms } => {
-                warn!(
-                    variant = "SetTimer",
-                    timer_id = id.0,
-                    duration_ms,
-                    "OutboundEvent variant not yet wired in interpreter"
-                );
+                outcome
+                    .timer_commands
+                    .push(TimerCommand::Set { id, duration_ms });
             }
             OutboundEvent::CancelTimer(id) => {
-                warn!(
-                    variant = "CancelTimer",
-                    timer_id = id.0,
-                    "OutboundEvent variant not yet wired in interpreter"
-                );
+                outcome.timer_commands.push(TimerCommand::Cancel(id));
             }
             OutboundEvent::QueueOfflineDelivery {
                 recipient,

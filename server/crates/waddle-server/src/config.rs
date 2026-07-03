@@ -134,6 +134,9 @@ pub struct ServerConfig {
     pub extensions: ExtensionConfig,
     /// Operator controls for server-side link-preview enrichment.
     pub link_preview: LinkPreviewConfig,
+    /// RFC 7395 §5.6 WebSocket keepalive knobs (issue #1090), parsed
+    /// from `WADDLE_WS_KEEPALIVE_*` by [`ws_keepalive_from_vars`].
+    pub ws_keepalive: waddle_xmpp::protocol::KeepaliveConfig,
     /// SpiceDB backend configuration.
     /// Runtime startup requires this to be set.
     pub spicedb: Option<SpiceDbConfig>,
@@ -370,6 +373,73 @@ fn parse_u64_var(
         .unwrap_or(Ok(default))
 }
 
+/// Ceiling for `WADDLE_WS_KEEPALIVE_INTERVAL_SECS`.
+///
+/// On an idle-but-alive connection the probe's pong counts as activity
+/// for the following tick, so the worst-case inter-traffic gap on the
+/// stream is `2 × interval`. The Cilium/Envoy gateway in front resets
+/// idle streams at its ~300s default; capping the interval at 120s
+/// bounds the gap at 240s with a 60s margin. This startup guard
+/// replaces the "raise gateway idleTimeout" defense-in-depth from
+/// issue #1090's original acceptance criteria — a fat-fingered
+/// interval fails fast instead of silently reintroducing the ~304s
+/// reset storm.
+const WS_KEEPALIVE_MAX_INTERVAL_SECS: u64 = 120;
+
+/// Upper bound for `WADDLE_WS_KEEPALIVE_MISS_LIMIT`; beyond this the
+/// dead-peer detection is too slow to beat the XEP-0198 unacked-queue
+/// cap on busy rooms.
+const WS_KEEPALIVE_MAX_MISS_LIMIT: u64 = 10;
+
+/// Parse + validate the RFC 7395 §5.6 keepalive knobs (issue #1090):
+///
+/// - `WADDLE_WS_KEEPALIVE_INTERVAL_SECS` — probe/tick interval,
+///   default 45, valid range 1..=120 (see
+///   [`WS_KEEPALIVE_MAX_INTERVAL_SECS`]).
+/// - `WADDLE_WS_KEEPALIVE_MISS_LIMIT` — consecutive unanswered probes
+///   before the connection is closed, default 2, valid range 1..=10.
+///
+/// Out-of-range values are startup errors, never clamped: a config
+/// that would defeat the keepalive must fail loudly.
+pub fn ws_keepalive_from_vars<I, K, V>(
+    vars: I,
+) -> Result<waddle_xmpp::protocol::KeepaliveConfig, String>
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: AsRef<str>,
+    V: AsRef<str>,
+{
+    let vars = vars
+        .into_iter()
+        .map(|(key, value)| (key.as_ref().to_string(), value.as_ref().to_string()))
+        .collect::<std::collections::HashMap<_, _>>();
+    let interval_secs = parse_u64_var(&vars, "WADDLE_WS_KEEPALIVE_INTERVAL_SECS", 45)?;
+    if !(1..=WS_KEEPALIVE_MAX_INTERVAL_SECS).contains(&interval_secs) {
+        return Err(format!(
+            "WADDLE_WS_KEEPALIVE_INTERVAL_SECS='{interval_secs}' must be between 1 and \
+             {WS_KEEPALIVE_MAX_INTERVAL_SECS}: the worst-case inter-traffic gap is twice the \
+             interval and must stay under the gateway's 300s stream-idle timeout"
+        ));
+    }
+    let miss_limit = parse_u64_var(&vars, "WADDLE_WS_KEEPALIVE_MISS_LIMIT", 2)?;
+    if !(1..=WS_KEEPALIVE_MAX_MISS_LIMIT).contains(&miss_limit) {
+        return Err(format!(
+            "WADDLE_WS_KEEPALIVE_MISS_LIMIT='{miss_limit}' must be between 1 and \
+             {WS_KEEPALIVE_MAX_MISS_LIMIT}"
+        ));
+    }
+    Ok(waddle_xmpp::protocol::KeepaliveConfig {
+        interval_ms: interval_secs * 1_000,
+        miss_limit: u32::try_from(miss_limit)
+            .map_err(|_| "WADDLE_WS_KEEPALIVE_MISS_LIMIT out of range".to_string())?,
+    })
+}
+
+/// Env-reading wrapper around [`ws_keepalive_from_vars`].
+pub fn ws_keepalive_from_env() -> Result<waddle_xmpp::protocol::KeepaliveConfig, String> {
+    ws_keepalive_from_vars(std::env::vars())
+}
+
 fn parse_host_patterns_var(
     vars: &std::collections::HashMap<String, String>,
     key: &str,
@@ -417,6 +487,7 @@ impl Default for ServerConfig {
             auth: AuthConfig::default(),
             extensions: ExtensionConfig::default(),
             link_preview: LinkPreviewConfig::default(),
+            ws_keepalive: waddle_xmpp::protocol::KeepaliveConfig::default(),
             spicedb: None,
             occupant_id_secret: test_occupant_id_secret(),
         }
@@ -437,6 +508,7 @@ impl ServerConfig {
         let extensions =
             ExtensionConfig::from_env().map_err(|e| format!("invalid extension config: {e}"))?;
         let link_preview = LinkPreviewConfig::from_env()?;
+        let ws_keepalive = ws_keepalive_from_env()?;
         let spicedb = SpiceDbConfig::from_env()?;
 
         let occupant_id_secret =
@@ -449,6 +521,7 @@ impl ServerConfig {
             auth,
             extensions,
             link_preview,
+            ws_keepalive,
             spicedb,
             occupant_id_secret,
         })
@@ -481,6 +554,7 @@ impl ServerConfig {
             auth: AuthConfig::default(),
             extensions: ExtensionConfig::default(),
             link_preview: LinkPreviewConfig::default(),
+            ws_keepalive: waddle_xmpp::protocol::KeepaliveConfig::default(),
             spicedb: None,
             occupant_id_secret: test_occupant_id_secret(),
         }
@@ -495,6 +569,7 @@ impl ServerConfig {
             auth: AuthConfig::default(),
             extensions: ExtensionConfig::default(),
             link_preview: LinkPreviewConfig::default(),
+            ws_keepalive: waddle_xmpp::protocol::KeepaliveConfig::default(),
             spicedb: None,
             occupant_id_secret: test_occupant_id_secret(),
         }
@@ -504,6 +579,62 @@ impl ServerConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ws_keepalive_defaults_are_45s_2_misses() {
+        let config = ws_keepalive_from_vars(std::iter::empty::<(&str, &str)>()).unwrap();
+        assert_eq!(config.interval_ms, 45_000);
+        assert_eq!(config.miss_limit, 2);
+    }
+
+    #[test]
+    fn ws_keepalive_parses_operator_overrides() {
+        let config = ws_keepalive_from_vars([
+            ("WADDLE_WS_KEEPALIVE_INTERVAL_SECS", "60"),
+            ("WADDLE_WS_KEEPALIVE_MISS_LIMIT", "3"),
+        ])
+        .unwrap();
+        assert_eq!(config.interval_ms, 60_000);
+        assert_eq!(config.miss_limit, 3);
+    }
+
+    #[test]
+    fn ws_keepalive_rejects_intervals_that_defeat_the_gateway_timeout() {
+        // 2×interval must stay under the gateway's 300s stream-idle
+        // timeout; anything above the 120s ceiling fails startup
+        // instead of silently reintroducing the ~304s reset storm.
+        for bad in ["0", "121", "300"] {
+            let err =
+                ws_keepalive_from_vars([("WADDLE_WS_KEEPALIVE_INTERVAL_SECS", bad)]).unwrap_err();
+            assert!(
+                err.contains("WADDLE_WS_KEEPALIVE_INTERVAL_SECS"),
+                "error must name the env var; got: {err}"
+            );
+            assert!(
+                err.contains("300s"),
+                "error must explain the gateway constraint; got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn ws_keepalive_rejects_out_of_range_miss_limits() {
+        for bad in ["0", "11"] {
+            let err =
+                ws_keepalive_from_vars([("WADDLE_WS_KEEPALIVE_MISS_LIMIT", bad)]).unwrap_err();
+            assert!(
+                err.contains("WADDLE_WS_KEEPALIVE_MISS_LIMIT"),
+                "error must name the env var; got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn ws_keepalive_rejects_non_numeric_values() {
+        let err =
+            ws_keepalive_from_vars([("WADDLE_WS_KEEPALIVE_INTERVAL_SECS", "45s")]).unwrap_err();
+        assert!(err.contains("must be a positive integer"));
+    }
 
     #[test]
     fn parse_session_key_rejects_unset() {
