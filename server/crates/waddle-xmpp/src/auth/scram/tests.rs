@@ -144,14 +144,70 @@ fn test_sasl_name_decoding() {
     assert_eq!(decode_sasl_name("a=2Cb=3Dc").unwrap(), "a,b=c");
 }
 
-/// RFC 5802 §5.1: the server rejects a client-first-message carrying an
-/// authzid — authorization-identity mapping is not implemented, so
-/// accepting one would silently authenticate a different identity.
+/// RFC 5802 §5.1 permits a client to send an authzid naming itself;
+/// authorization-identity mapping is not implemented, so only a
+/// self-referential authzid is accepted and any other identity is
+/// rejected rather than silently ignored.
 #[test]
-fn test_client_first_with_authzid_is_rejected() {
+fn test_client_first_authzid_must_match_authcid() {
     let mut server = ScramServer::new();
     let result = server.process_client_first("n,a=admin,n=user,r=nonce123");
     assert!(result.is_err());
+
+    let mut server = ScramServer::new();
+    let accepted = server
+        .process_client_first("n,a=user,n=user,r=nonce123")
+        .expect("self-referential authzid is RFC-conformant");
+    assert_eq!(accepted.username, "user");
+}
+
+/// When client-first carried an authzid, client-final's `c=` is the
+/// base64 of that exact GS2 header — not the bare "n,," constant.
+#[test]
+fn test_full_exchange_with_self_authzid() {
+    let password = test_secret();
+    let salt = generate_salt();
+    let iterations = 4096;
+    let (stored_key, server_key) = generate_scram_keys(&password, &salt, iterations);
+
+    let mut server = ScramServer::with_salt(salt.clone(), iterations);
+    let client_nonce = "self-authzid-nonce";
+    let gs2_header = "n,a=testuser,";
+    let client_first = format!("{}n=testuser,r={}", gs2_header, client_nonce);
+    let server_first = server.process_client_first(&client_first).unwrap();
+
+    let salted_password = hi(password.as_bytes(), &salt, iterations);
+    let client_key = hmac_sha256(&salted_password, b"Client Key");
+    let channel_binding = BASE64_STANDARD.encode(gs2_header);
+    let client_final_without_proof = format!("c={},r={}", channel_binding, server.combined_nonce);
+    let auth_message = format!(
+        "n=testuser,r={},{},{}",
+        client_nonce, server_first.message, client_final_without_proof
+    );
+    let client_signature = hmac_sha256(&stored_key, auth_message.as_bytes());
+    let client_proof: Vec<u8> = client_key
+        .iter()
+        .zip(client_signature.iter())
+        .map(|(a, b)| a ^ b)
+        .collect();
+    let client_final = format!(
+        "{},p={}",
+        client_final_without_proof,
+        BASE64_STANDARD.encode(&client_proof)
+    );
+
+    let server_final = server
+        .process_client_final(&client_final, &stored_key, &server_key)
+        .expect("exchange with self authzid succeeds");
+    assert!(server_final.message.starts_with("v="));
+
+    // The bare "biws" constant must NOT be accepted for this header.
+    let mut server = ScramServer::with_salt(salt, iterations);
+    server.process_client_first(&client_first).unwrap();
+    let tampered = client_final.replace(&format!("c={}", channel_binding), "c=biws");
+    assert!(server
+        .process_client_final(&tampered, &stored_key, &server_key)
+        .is_err());
 }
 
 /// RFC 5802 §5.1: the `c=` value in client-final MUST be the base64

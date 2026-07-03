@@ -5,9 +5,13 @@ use crate::XmppError;
 pub(super) struct ClientFirstMessage {
     /// GS2 channel binding flag ('n', 'y', or 'p')
     pub(super) gs2_cbind_flag: char,
-    /// Optional authzid; the server rejects client-first messages that
-    /// carry one (authorization-identity mapping is not implemented).
+    /// Optional authzid, saslname-decoded. Authorization-identity
+    /// mapping is not implemented, so the server only accepts an
+    /// authzid naming the authenticating user itself.
     pub(super) authzid: Option<String>,
+    /// The verbatim GS2 header (`[flag],[a=authzid],`) exactly as the
+    /// client sent it; client-final `c=` must be its base64 encoding.
+    pub(super) gs2_header: String,
     /// Username (authcid)
     pub(super) username: String,
     /// Client nonce
@@ -50,14 +54,16 @@ pub(super) fn parse_client_first(message: &str) -> Result<ClientFirstMessage, Xm
         .next()
         .ok_or_else(|| XmppError::auth_failed("Missing GS2 channel binding flag"))?;
 
-    // Parse optional authzid (a=...)
-    let authzid = if parts[1].starts_with("a=") {
-        Some(parts[1][2..].to_string())
+    // Parse optional authzid (a=...); RFC 5802 encodes it as a saslname.
+    let authzid = if let Some(raw) = parts[1].strip_prefix("a=") {
+        Some(decode_sasl_name(raw)?)
     } else if parts[1].is_empty() {
         None
     } else {
         return Err(XmppError::auth_failed("Invalid authzid format"));
     };
+
+    let gs2_header = format!("{},{},", parts[0], parts[1]);
 
     // The rest is client-first-message-bare
     let bare = parts[2].to_string();
@@ -84,6 +90,7 @@ pub(super) fn parse_client_first(message: &str) -> Result<ClientFirstMessage, Xm
     Ok(ClientFirstMessage {
         gs2_cbind_flag,
         authzid,
+        gs2_header,
         username,
         client_nonce,
         bare,

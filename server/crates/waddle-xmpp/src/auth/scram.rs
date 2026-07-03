@@ -54,6 +54,8 @@ pub struct ScramServer {
     combined_nonce: String,
     /// The username extracted from client-first-message
     username: String,
+    /// The GS2 header from client-first, verified against client-final's `c=`
+    gs2_header: String,
     /// Salt used for this authentication (base64 encoded)
     salt_b64: String,
     /// Number of iterations for PBKDF2
@@ -104,6 +106,7 @@ impl ScramServer {
             server_first_message: String::new(),
             combined_nonce: String::new(),
             username: String::new(),
+            gs2_header: String::new(),
             salt_b64: BASE64_STANDARD.encode(&salt),
             iterations,
         }
@@ -119,6 +122,7 @@ impl ScramServer {
             server_first_message: String::new(),
             combined_nonce: String::new(),
             username: String::new(),
+            gs2_header: String::new(),
             salt_b64,
             iterations,
         }
@@ -169,11 +173,16 @@ impl ScramServer {
             return Err(XmppError::auth_failed("Channel binding not supported"));
         }
 
-        // RFC 5802 §5.1: authzid support is optional; we do not implement
-        // authorization-identity mapping, so reject rather than silently
-        // authenticating as a different identity than requested.
-        if parsed.authzid.is_some() {
-            return Err(XmppError::auth_failed("SCRAM authzid is not supported"));
+        // RFC 5802 §5.1 permits an authzid, but authorization-identity
+        // mapping is not implemented: accept it only when it names the
+        // authenticating user itself, and reject a request to act as a
+        // different identity rather than silently ignoring it.
+        if let Some(authzid) = &parsed.authzid {
+            if *authzid != parsed.username {
+                return Err(XmppError::auth_failed(
+                    "SCRAM authzid must match the authenticating user",
+                ));
+            }
         }
 
         // Store username
@@ -181,6 +190,9 @@ impl ScramServer {
 
         // Store client-first-message-bare for auth message computation
         self.client_first_message_bare = parsed.bare.clone();
+
+        // Store the GS2 header for verifying client-final's `c=` value.
+        self.gs2_header = parsed.gs2_header.clone();
 
         // Generate server nonce and combine with client nonce
         let server_nonce = generate_nonce();
@@ -226,11 +238,8 @@ impl ScramServer {
         let parsed = parse_client_final(client_final)?;
 
         // RFC 5802 §5.1: the `c=` value MUST be the base64 encoding of the
-        // GS2 header from client-first. process_client_first only accepts
-        // the flag 'n' with no authzid, i.e. the header "n,,", whose
-        // base64 encoding is the constant below.
-        const GS2_HEADER_NO_CHANNEL_BINDING_B64: &str = "biws";
-        if parsed.channel_binding != GS2_HEADER_NO_CHANNEL_BINDING_B64 {
+        // GS2 header exactly as sent in client-first (e.g. "n,," → "biws").
+        if parsed.channel_binding != BASE64_STANDARD.encode(&self.gs2_header) {
             self.state = ScramState::Complete;
             return Err(XmppError::auth_failed("Channel binding mismatch"));
         }
