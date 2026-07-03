@@ -1,6 +1,6 @@
 use super::*;
 use super::{
-    batch_write::{write_response_batch, BatchWriteOutcome},
+    batch_write::{write_response_batch, BatchSmPolicy, BatchWriteOutcome},
     cleanup::cleanup_connection_shutdown,
     frame::handle_xmpp_frame,
     interpret_loop::build_interpret_deps,
@@ -83,29 +83,39 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
 
     loop {
         // Frames the mid-batch ack drain (issue #1089) pulled off the
-        // socket ahead of the dispatcher. They must be processed in
-        // arrival order BEFORE the socket is polled again, or a frame
-        // the client sent mid-flood would be reordered behind frames
-        // it sent afterwards.
-        if let Some(text) = conn.deferred_inbound.pop_front() {
-            if !handle_inbound_text(
-                &text,
-                &domain,
-                &state,
-                &mut conn,
-                &mut pending_tx,
-                &mut ws_sender,
-                &mut ws_receiver,
-            )
-            .await
-            {
-                break;
-            }
-            continue;
-        }
+        // socket ahead of the dispatcher must be processed in arrival
+        // order BEFORE the socket is polled again — so the socket arm
+        // below is gated on the queue being empty, and an
+        // always-ready arm processes one deferred frame per
+        // iteration. Deferred processing stays a select arm (not a
+        // pre-select loop) so the outbound channel and the keepalive
+        // timer keep getting polled between deferred frames — a
+        // client streaming frames mid-flood must not be able to
+        // starve routed stanzas or dead-peer detection.
+        let deferred_pending = !conn.deferred_inbound.is_empty();
         tokio::select! {
+            // Process one drain-deferred inbound frame.
+            _ = std::future::ready(()), if deferred_pending => {
+                let Some(text) = conn.deferred_inbound.pop_front() else {
+                    continue;
+                };
+                if !handle_inbound_text(
+                    &text,
+                    &domain,
+                    &state,
+                    &mut conn,
+                    &mut pending_tx,
+                    &mut ws_sender,
+                    &mut ws_receiver,
+                )
+                .await
+                {
+                    break;
+                }
+            }
+
             // Handle inbound WebSocket messages from the client
-            msg = ws_receiver.next() => {
+            msg = ws_receiver.next(), if !deferred_pending => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         if !handle_inbound_text(
@@ -253,6 +263,15 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
         }
     }
 
+    // Frames the mid-batch ack drain had already pulled off the
+    // socket when the transport went away (issue #1089). The old loop
+    // would have processed them before ever seeing the close, so
+    // their inbound side effects (routing to peers, inbound_count)
+    // must still happen. There is no wire to answer on: responses to
+    // the departed client are recorded for XEP-0198 resume replay
+    // instead of being written.
+    process_deferred_inbound_after_transport_loss(&domain, state.as_ref(), &mut conn).await;
+
     // Connection is ending. Decide between two paths:
     //   A. Fully clean up (unregister + remove MUC occupants) — the default
     //      for non-SM sessions and for SM sessions that didn't negotiate
@@ -364,11 +383,15 @@ async fn handle_inbound_text(
     // the queue. Re-recording them would bump `outbound_count` past
     // reality and push duplicate queue entries, breaking subsequent
     // acks and a second resume.
-    let record = if conn.suppress_sm_record_next_batch {
+    let policy = if conn.suppress_sm_record_next_batch {
         conn.suppress_sm_record_next_batch = false;
-        false
+        BatchSmPolicy::ReplaySuppressed
     } else {
-        true
+        // These responses answer the client's own frames on its own
+        // connection — MAM responses in here are server-generated, so
+        // the replay exemption is safe. Peer-relayed content (which
+        // could spoof the MAM shape) never flows through this batch.
+        BatchSmPolicy::RecordWithMamExemption
     };
     match write_response_batch(
         ws_sender,
@@ -376,7 +399,7 @@ async fn handle_inbound_text(
         state.as_ref(),
         conn,
         responses,
-        record,
+        policy,
     )
     .await
     {
@@ -393,6 +416,31 @@ async fn handle_inbound_text(
         return false;
     }
     true
+}
+
+/// Process inbound frames the mid-batch drain deferred before the
+/// transport was lost. Runs after the connection loop breaks, before
+/// shutdown cleanup: side effects (peer routing, `inbound_count`)
+/// still happen; responses cannot be written, so replayable countable
+/// ones are recorded into the unacked queue for a future resume.
+/// Registration is skipped — a dead transport must not (re)register
+/// itself.
+async fn process_deferred_inbound_after_transport_loss(
+    domain: &str,
+    state: &WebSocketState,
+    conn: &mut WsConnState,
+) {
+    while let Some(text) = conn.deferred_inbound.pop_front() {
+        let responses = handle_xmpp_frame(&text, domain, state, conn).await;
+        conn.sync_state_machine_phase();
+        let policy = if conn.suppress_sm_record_next_batch {
+            conn.suppress_sm_record_next_batch = false;
+            BatchSmPolicy::ReplaySuppressed
+        } else {
+            BatchSmPolicy::RecordWithMamExemption
+        };
+        batch_write::record_remaining_for_replay(conn, responses.into_iter(), policy);
+    }
 }
 
 fn ensure_websocket_stream_close_for_closing_phase(

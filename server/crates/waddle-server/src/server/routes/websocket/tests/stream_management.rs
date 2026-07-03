@@ -100,42 +100,53 @@ fn is_countable_stanza_matches_element_name_not_prefix() {
     assert!(!is_countable_stanza(""));
 }
 
-/// XEP-0313 MAM `<result/>` messages count toward the XEP-0198 wire
-/// counter but must never enter the replay window (issue #1089):
-/// replaying archive results after a resume duplicates data the
-/// client already has, and a large history sync would otherwise pin
-/// the unacked queue at capacity and evict live stanzas.
+/// The MAM `<fin/>` IQ must be replay-exempt alongside the results it
+/// closes: replaying a `<fin complete='true'/>` after a resume that
+/// did NOT replay the (exempt) results would tell the client the page
+/// arrived in full and stop it from re-querying — a permanent archive
+/// hole. Exempting the fin leaves the query visibly unanswered on the
+/// resumed stream, so the client re-runs it.
 #[test]
-fn is_mam_result_message_detects_only_mam_result_carriers() {
-    use super::super::stream_management::is_mam_result_message;
+fn is_mam_response_frame_covers_result_carriers_and_fin_iq() {
+    use super::super::stream_management::is_mam_response_frame;
 
-    // A serialized MAM result carrier message.
-    assert!(is_mam_result_message(
+    // Result carrier message qualifies.
+    assert!(is_mam_response_frame(
         "<message xmlns='jabber:client' to='u@example.com/r'>\
            <result xmlns='urn:xmpp:mam:2' queryid='q1' id='42'>\
              <forwarded xmlns='urn:xmpp:forward:0'/>\
            </result>\
          </message>"
     ));
-
     // A live message that merely mentions the namespace in a body is
     // NOT a MAM result — detection must be structural, not substring.
-    assert!(!is_mam_result_message(
+    assert!(!is_mam_response_frame(
         "<message xmlns='jabber:client'><body>urn:xmpp:mam:2 &lt;result</body></message>"
     ));
     // A result child in the wrong namespace does not qualify.
-    assert!(!is_mam_result_message(
+    assert!(!is_mam_response_frame(
         "<message xmlns='jabber:client'><result xmlns='urn:example:0' id='1'/></message>"
     ));
-    // Non-message stanzas never qualify, even with a MAM child.
-    assert!(!is_mam_result_message(
+    // The closing fin IQ qualifies.
+    assert!(is_mam_response_frame(
         "<iq xmlns='jabber:client' type='result' id='q1'>\
-           <fin xmlns='urn:xmpp:mam:2'/>\
+           <fin xmlns='urn:xmpp:mam:2' complete='true'/>\
          </iq>"
     ));
-    // Malformed XML must not panic or match.
-    assert!(!is_mam_result_message("not-xml"));
-    assert!(!is_mam_result_message(""));
+    // A fin in the wrong namespace does not.
+    assert!(!is_mam_response_frame(
+        "<iq xmlns='jabber:client' type='result' id='q1'>\
+           <fin xmlns='urn:example:0'/>\
+         </iq>"
+    ));
+    // Ordinary IQ results and live messages do not.
+    assert!(!is_mam_response_frame(
+        "<iq xmlns='jabber:client' type='result' id='p1'/>"
+    ));
+    assert!(!is_mam_response_frame(
+        "<message xmlns='jabber:client'><body>hi</body></message>"
+    ));
+    assert!(!is_mam_response_frame("not-xml"));
 }
 
 #[tokio::test]

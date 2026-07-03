@@ -1,7 +1,6 @@
 use super::*;
 use super::{
-    interpret_loop::build_interpret_deps,
-    stream_management::{is_countable_stanza, is_mam_result_message},
+    interpret_loop::build_interpret_deps, stream_management::is_countable_stanza,
     transport_xml::stanza_to_xml,
 };
 
@@ -125,16 +124,15 @@ async fn record_drained_xml(
     // on the next resume, NOT writing to a live wire. The SM cadence
     // signal is moot — there is no socket to follow up with `<r/>`.
     //
-    // XEP-0313 MAM result messages advance the wire counter but stay
-    // out of the replay window (issue #1089): a resume must not
-    // duplicate archive results the client can re-query, so they are
-    // neither queued locally nor stored on the detached session.
-    let mam_result = is_mam_result_message(&xml);
-    if mam_result {
-        let _ = sm_state.record_outbound_replay_exempt();
-    } else {
-        let _ = sm_state.record_outbound_with_receipt_at(xml.clone(), original_receipt_at);
-    }
+    // No MAM replay exemption here (issue #1089 review): nothing on
+    // this path was ever written to a wire, so the client's `h` can
+    // never include it — counting without queueing would permanently
+    // desync `outbound_count` from `h`. Recording everything keeps
+    // the counters convergent (the resume delivers the stanza, the
+    // client counts it). Server-generated MAM responses also cannot
+    // reach this path: they are produced synchronously on the
+    // requester's own connection, never routed via the registry.
+    let _ = sm_state.record_outbound_with_receipt_at(xml.clone(), original_receipt_at);
     let sequence = sm_state.outbound_count;
     if let Some(row_id) = pending_row_id.as_ref() {
         if let Err(error) = state
@@ -165,9 +163,6 @@ async fn record_drained_xml(
                 );
             }
         }
-    }
-    if mam_result {
-        return;
     }
     if let Some(stream_id) = detached_stream_id {
         if let Err(error) = state

@@ -1,6 +1,6 @@
 use super::*;
 use super::{
-    batch_write::{write_response_batch, BatchWriteOutcome},
+    batch_write::{write_response_batch, BatchSmPolicy, BatchWriteOutcome},
     interpret_loop::build_interpret_deps,
     replay::drive_interpret_loop,
     send::send_ws_message,
@@ -168,8 +168,19 @@ where
             // already-arrived inbound `<a/>` acks after each `<r/>` so
             // a recipient-pass burst (carbons + receipts + archive
             // side-effects) can't pin the unacked queue at capacity.
-            match write_response_batch(sender, reader, state.as_ref(), conn, drive.frames, true)
-                .await
+            //
+            // RecordAll: this is peer-relayed content — a forged
+            // `{urn:xmpp:mam:2}` child must not opt a message out of
+            // the reliability layer, so no MAM replay exemption here.
+            match write_response_batch(
+                sender,
+                reader,
+                state.as_ref(),
+                conn,
+                drive.frames,
+                BatchSmPolicy::RecordAll,
+            )
+            .await
             {
                 BatchWriteOutcome::Continue => {}
                 BatchWriteOutcome::TransportClosed => return false,

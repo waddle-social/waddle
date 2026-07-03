@@ -6,7 +6,7 @@
 //! frames after each `<r/>` so `<a/>` acks shrink the queue mid-flood.
 
 use super::super::{
-    batch_write::{write_response_batch, BatchWriteOutcome},
+    batch_write::{write_response_batch, BatchSmPolicy, BatchWriteOutcome},
     state::WsConnState,
 };
 use super::create_test_websocket_state;
@@ -114,7 +114,7 @@ async fn write_response_batch_requests_ack_every_threshold_not_once_per_batch() 
         state.as_ref(),
         &mut conn,
         frames,
-        true,
+        BatchSmPolicy::RecordWithMamExemption,
     )
     .await;
 
@@ -181,7 +181,7 @@ async fn write_response_batch_drains_acks_between_chunks_so_nothing_evicts() {
         state.as_ref(),
         &mut conn,
         frames,
-        true,
+        BatchSmPolicy::RecordWithMamExemption,
     )
     .await;
 
@@ -231,7 +231,7 @@ async fn drained_non_ack_frames_are_deferred_in_arrival_order() {
         state.as_ref(),
         &mut conn,
         frames,
-        true,
+        BatchSmPolicy::RecordWithMamExemption,
     )
     .await;
 
@@ -285,7 +285,7 @@ async fn mam_result_messages_count_toward_h_but_stay_out_of_replay_window() {
         state.as_ref(),
         &mut conn,
         frames,
-        true,
+        BatchSmPolicy::RecordWithMamExemption,
     )
     .await;
 
@@ -332,7 +332,7 @@ async fn transport_close_mid_batch_still_records_unwritten_frames_for_replay() {
         state.as_ref(),
         &mut conn,
         frames,
-        true,
+        BatchSmPolicy::RecordWithMamExemption,
     )
     .await;
 
@@ -370,7 +370,7 @@ async fn resume_replay_batch_is_written_without_recording_or_ack_requests() {
         state.as_ref(),
         &mut conn,
         frames,
-        false,
+        BatchSmPolicy::ReplaySuppressed,
     )
     .await;
 
@@ -380,6 +380,181 @@ async fn resume_replay_batch_is_written_without_recording_or_ack_requests() {
     let texts = sink_texts(&sink);
     assert_eq!(texts.len(), 12, "all frames written, no <r/> interleaved");
     assert!(!texts.iter().any(|t| *t == SmRequest::to_xml()));
+}
+
+fn mam_result_frame(i: usize) -> String {
+    format!(
+        "<message xmlns='jabber:client' to='u@example.com/r'>\
+           <result xmlns='urn:xmpp:mam:2' queryid='q1' id='{i}'>\
+             <forwarded xmlns='urn:xmpp:forward:0'/>\
+           </result>\
+         </message>"
+    )
+}
+
+/// The MAM `<fin/>` IQ is replay-exempt together with its results: a
+/// replayed `fin complete='true'` whose results were not replayed
+/// would falsely assert the page arrived in full and the client would
+/// never re-query — a permanent archive hole. Exempt, the query stays
+/// visibly unanswered on the resumed stream and the client retries.
+#[tokio::test]
+async fn mam_fin_iq_is_replay_exempt_alongside_its_results() {
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    conn.sm_state = StreamManagementState::with_config(100, 5);
+    conn.sm_state.enable("fin".to_string(), true, Some(300));
+
+    let fin = "<iq xmlns='jabber:client' type='result' id='q1'>\
+                 <fin xmlns='urn:xmpp:mam:2' complete='true'/>\
+               </iq>";
+    let frames = vec![mam_result_frame(1), mam_result_frame(2), fin.to_string()];
+
+    let mut sink = CollectSink::default();
+    let mut reader = ScriptedReader::new(vec![]);
+    let outcome = write_response_batch(
+        &mut sink,
+        &mut reader,
+        state.as_ref(),
+        &mut conn,
+        frames,
+        BatchSmPolicy::RecordWithMamExemption,
+    )
+    .await;
+
+    assert!(matches!(outcome, BatchWriteOutcome::Continue));
+    assert_eq!(conn.sm_state.outbound_count, 3, "all written, all counted");
+    assert_eq!(
+        conn.sm_state.queue_len(),
+        0,
+        "nothing enters the replay window"
+    );
+}
+
+/// XEP-0198 counter discipline (issue #1089 review): the client only
+/// counts stanzas it actually receives, and a replay-exempt frame can
+/// never be re-delivered by resume — so an exempt frame that never
+/// reached the wire must NOT advance `outbound_count`. Otherwise the
+/// server's counter permanently outruns the client's `h`: the newest
+/// queue entries become un-ackable and every subsequent resume
+/// replays stanzas the client already has.
+#[tokio::test]
+async fn unwritten_exempt_frames_in_a_dead_batch_tail_are_not_counted() {
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    conn.sm_state = StreamManagementState::with_config(100, 5);
+    conn.sm_state.enable("tail".to_string(), true, Some(300));
+
+    // Frames 1..=5 live (trigger the first <r/> + drain), 6..=12 MAM
+    // results. The drain after frame 5 sees a Close: the tail (6..12)
+    // is never written.
+    let mut frames: Vec<String> = (1..=5).map(countable_message).collect();
+    frames.extend((6..=12).map(mam_result_frame));
+
+    let mut sink = CollectSink::default();
+    let mut reader = ScriptedReader::new(vec![Some(Message::Close(None))]);
+    let outcome = write_response_batch(
+        &mut sink,
+        &mut reader,
+        state.as_ref(),
+        &mut conn,
+        frames,
+        BatchSmPolicy::RecordWithMamExemption,
+    )
+    .await;
+
+    assert!(matches!(outcome, BatchWriteOutcome::TransportClosed));
+    assert_eq!(
+        conn.sm_state.outbound_count, 5,
+        "unwritten exempt tail frames must not advance the wire counter"
+    );
+    assert_eq!(
+        conn.sm_state.queue_len(),
+        5,
+        "only the written live frames queue"
+    );
+}
+
+/// The MAM exemption is origin-gated: the structural shape is
+/// spoofable, so peer-relayed content (RecordAll policy) must record
+/// a MAM-shaped message into the replay window like any other stanza
+/// — otherwise a sender could craft `<message><result
+/// xmlns='urn:xmpp:mam:2'/>…` to opt its messages out of the
+/// reliability layer and have them silently dropped on resume.
+#[tokio::test]
+async fn peer_path_records_mam_shaped_frames_into_replay_window() {
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    conn.sm_state = StreamManagementState::with_config(100, 5);
+    conn.sm_state.enable("spoof".to_string(), true, Some(300));
+
+    let spoofed = "<message xmlns='jabber:client' to='victim@example.com/r'>\
+                     <body>hi</body>\
+                     <result xmlns='urn:xmpp:mam:2' queryid='x' id='1'/>\
+                   </message>";
+
+    let mut sink = CollectSink::default();
+    let mut reader = ScriptedReader::new(vec![]);
+    let outcome = write_response_batch(
+        &mut sink,
+        &mut reader,
+        state.as_ref(),
+        &mut conn,
+        vec![spoofed.to_string()],
+        BatchSmPolicy::RecordAll,
+    )
+    .await;
+
+    assert!(matches!(outcome, BatchWriteOutcome::Continue));
+    assert_eq!(
+        conn.sm_state.queue_len(),
+        1,
+        "spoof-shaped frame stays replayable"
+    );
+    assert_eq!(
+        conn.sm_state.get_stanzas_to_resend(0),
+        vec![spoofed.to_string()]
+    );
+}
+
+/// The drain parks non-ack frames in `deferred_inbound` — but only up
+/// to a cap, past which it stops reading so a flooding client hits
+/// TCP backpressure instead of growing server heap without bound.
+#[tokio::test]
+async fn drain_stops_parking_deferred_frames_at_the_cap() {
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    conn.sm_state = StreamManagementState::with_config(10_000, 5);
+    conn.sm_state.enable("cap".to_string(), true, Some(300));
+
+    // 200 buffered non-ack frames, far more than the cap.
+    let script: Vec<Option<Message>> = (0..200)
+        .map(|i| {
+            Some(Message::Text(
+                format!("<message xmlns='jabber:client' id='flood-{i}'/>").into(),
+            ))
+        })
+        .collect();
+    let mut reader = ScriptedReader::new(script);
+    let mut sink = CollectSink::default();
+    // 10 countable frames → two <r/> drains.
+    let frames: Vec<String> = (1..=10).map(countable_message).collect();
+
+    let outcome = write_response_batch(
+        &mut sink,
+        &mut reader,
+        state.as_ref(),
+        &mut conn,
+        frames,
+        BatchSmPolicy::RecordWithMamExemption,
+    )
+    .await;
+
+    assert!(matches!(outcome, BatchWriteOutcome::Continue));
+    assert_eq!(
+        conn.deferred_inbound.len(),
+        64,
+        "deferred queue must stop growing at the cap"
+    );
 }
 
 fn sm_evicted_total() -> u64 {
