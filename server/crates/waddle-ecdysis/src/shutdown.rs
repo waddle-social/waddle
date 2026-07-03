@@ -94,21 +94,40 @@ impl ShutdownHandle {
     ///
     /// Returns `true` if all connections drained, `false` on timeout.
     pub async fn wait_for_connections_drained(&self) -> bool {
+        self.wait_for_connections_drained_for(self.drain_timeout)
+            .await
+    }
+
+    /// Like [`Self::wait_for_connections_drained`], but bounded by an
+    /// explicit `timeout` so callers sharing one overall drain budget
+    /// (e.g. connection drain + Q6 promotion inside a single pod
+    /// termination grace period) can pass the remaining slice.
+    pub async fn wait_for_connections_drained_for(&self, timeout: Duration) -> bool {
         if self.active_connections() == 0 {
             return true;
         }
         tokio::select! {
             _ = self.wait_for_drain() => true,
-            _ = tokio::time::sleep(self.drain_timeout) => false,
+            _ = tokio::time::sleep(timeout) => false,
         }
     }
 
     async fn wait_for_drain(&self) {
         loop {
+            // Register interest BEFORE checking the counter:
+            // `notify_waiters()` (fired by the last guard's drop) wakes
+            // only already-registered waiters and stores no permit, so
+            // check-then-register would lose a wakeup that lands
+            // between the load and the first poll of `notified()` —
+            // stalling the drain until the timeout despite zero
+            // connections remaining.
+            let notified = self.drain_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             if self.connection_count.load(Ordering::SeqCst) == 0 {
                 return;
             }
-            self.drain_notify.notified().await;
+            notified.await;
         }
     }
 }
@@ -150,13 +169,6 @@ impl GracefulShutdown {
     /// Get a `CancellationToken` that fires when the accept loop should stop.
     pub fn stop_token(&self) -> CancellationToken {
         self.handle.stop_token()
-    }
-
-    /// Create a `ConnectionGuard` for a new connection.
-    ///
-    /// Increments the counter on creation, decrements on drop.
-    pub fn connection_guard(&self) -> ConnectionGuard {
-        self.handle.connection_guard()
     }
 
     /// Get the current number of active connections.
@@ -210,7 +222,7 @@ impl GracefulShutdown {
             warn!(
                 remaining_connections = self.active_connections(),
                 timeout_secs = self.handle.drain_timeout.as_secs(),
-                "Drain timeout expired, force-exiting"
+                "Drain timeout expired with connections still active"
             );
         }
         drained
@@ -245,7 +257,7 @@ impl GracefulShutdown {
         if !clean {
             error!(
                 remaining_connections = self.active_connections(),
-                "Force-exiting with remaining connections"
+                "Drain phase ended with connections still active"
             );
         }
 
@@ -262,8 +274,8 @@ mod tests {
         let shutdown = GracefulShutdown::new(Duration::from_secs(5));
         let stop_token = shutdown.stop_token();
 
-        let guard1 = shutdown.connection_guard();
-        let guard2 = shutdown.connection_guard();
+        let guard1 = shutdown.handle().connection_guard();
+        let guard2 = shutdown.handle().connection_guard();
         assert_eq!(shutdown.active_connections(), 2);
 
         shutdown.trigger_stop();
@@ -283,7 +295,7 @@ mod tests {
     async fn test_drain_timeout() {
         let shutdown = GracefulShutdown::new(Duration::from_millis(100));
 
-        let _guard = shutdown.connection_guard();
+        let _guard = shutdown.handle().connection_guard();
         assert_eq!(shutdown.active_connections(), 1);
 
         shutdown.trigger_stop();
@@ -299,7 +311,9 @@ mod tests {
 
         assert_eq!(shutdown.active_connections(), 0);
 
-        let mut guards: Vec<_> = (0..10).map(|_| shutdown.connection_guard()).collect();
+        let mut guards: Vec<_> = (0..10)
+            .map(|_| shutdown.handle().connection_guard())
+            .collect();
         assert_eq!(shutdown.active_connections(), 10);
 
         guards.truncate(5);

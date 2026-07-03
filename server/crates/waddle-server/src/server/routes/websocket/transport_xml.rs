@@ -184,7 +184,7 @@ pub(super) fn build_handled_count_too_high_stream_error(
     String::from_utf8(writer.into_inner()).expect("quick-xml serializes valid UTF-8")
 }
 
-/// Build the RFC 6120 §4.9.3.19 `<stream:error><system-shutdown/>`
+/// Build the RFC 6120 §4.9.3.20 `<stream:error><system-shutdown/>`
 /// frame sent to every live session when graceful shutdown begins
 /// (issue #1091). Pairs with `websocket_stream_close_xml()` so the
 /// client sees error → close → WS close and reconnects elsewhere.
@@ -261,7 +261,7 @@ mod stream_error_tests {
 
     #[test]
     fn system_shutdown_stream_error_matches_rfc6120_wire_shape() {
-        // RFC 6120 §4.9.3.19: <system-shutdown/> in the
+        // RFC 6120 §4.9.3.20: <system-shutdown/> in the
         // urn:ietf:params:xml:ns:xmpp-streams namespace, wrapped in
         // <stream:error> qualified by the streams prefix namespace.
         assert_eq!(

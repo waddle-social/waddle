@@ -48,6 +48,7 @@ async fn handle_xmpp_frame_impl(
         pending_resume_h,
         suppress_sm_record_next_batch,
         state_machine,
+        stream_open_sent,
         ..
     } = conn;
     let muc_domain = state.deps.service_domains.muc.clone();
@@ -101,6 +102,7 @@ async fn handle_xmpp_frame_impl(
             info!("XMPP stream open requested");
             let open_element = websocket_stream_open_xml(domain);
             let features_element = build_stream_features_for_phase(phase);
+            *stream_open_sent = true;
             vec![open_element, features_element]
         }
 

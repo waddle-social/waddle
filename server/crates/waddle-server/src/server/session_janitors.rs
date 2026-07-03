@@ -688,11 +688,17 @@ pub(crate) fn spawn_graceful_shutdown_drain(
         drain_token.cancelled().await;
         // Issue #1091: live sessions observe the same stop token, send
         // <system-shutdown/> and detach into the SmSessionRegistry.
-        // Wait (bounded by the ecdysis drain timeout) for every
-        // connection guard to drop before the Q6 passes below, so live
-        // sessions' unacked queues are in the registry when
-        // drain_all_for_shutdown runs — otherwise the quiet window
+        // Wait for every connection guard to drop before the Q6 passes
+        // below, so live sessions' unacked queues are in the registry
+        // when drain_all_for_shutdown runs — otherwise the quiet window
         // could conclude before a slow session finishes detaching.
+        //
+        // One deadline covers BOTH phases (connection drain + Q6
+        // promotion): the pod's terminationGracePeriodSeconds is sized
+        // for a single WADDLE_DRAIN_TIMEOUT_SECS budget, so serializing
+        // two full budgets would let SIGKILL truncate Q6 promotion when
+        // one stuck peer burns the whole connection-drain slice.
+        let drain_deadline = std::time::Instant::now() + max_drain_duration_from_env();
         info!(
             active_connections = websocket_state.deps.shutdown.active_connections(),
             "Graceful shutdown: waiting for live sessions to close and detach"
@@ -700,7 +706,9 @@ pub(crate) fn spawn_graceful_shutdown_drain(
         if !websocket_state
             .deps
             .shutdown
-            .wait_for_connections_drained()
+            .wait_for_connections_drained_for(
+                drain_deadline.saturating_duration_since(std::time::Instant::now()),
+            )
             .await
         {
             warn!(
@@ -713,7 +721,6 @@ pub(crate) fn spawn_graceful_shutdown_drain(
         info!("Graceful shutdown: starting SM session Q6 drain");
         const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
         const QUIET_WINDOW_PASSES: u32 = 8;
-        let drain_deadline = std::time::Instant::now() + max_drain_duration_from_env();
         let mut empty_passes = 0u32;
         let mut total_drained = 0usize;
         loop {

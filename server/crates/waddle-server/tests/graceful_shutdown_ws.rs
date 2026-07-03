@@ -1,7 +1,7 @@
 //! Graceful shutdown of live WebSocket sessions (issue #1091).
 //!
 //! On SIGTERM the server must natively close every live session:
-//! send `<stream:error><system-shutdown/>` (RFC 6120 §4.9.3.19)
+//! send `<stream:error><system-shutdown/>` (RFC 6120 §4.9.3.20)
 //! followed by the RFC 7395 `<close/>` frame, detach XEP-0198
 //! sessions so their unacked queues flow through Q6 promotion, and
 //! exit within the drain timeout — no SIGKILL required.
@@ -38,7 +38,7 @@ async fn sigterm_closes_live_session_with_system_shutdown_and_exits() {
         .expect("receive stream error after SIGTERM");
     assert!(
         stream_error.contains("system-shutdown"),
-        "stream error must carry RFC 6120 §4.9.3.19 system-shutdown: {stream_error}"
+        "stream error must carry RFC 6120 §4.9.3.20 system-shutdown: {stream_error}"
     );
     assert!(
         stream_error.contains("urn:ietf:params:xml:ns:xmpp-streams"),
@@ -67,8 +67,10 @@ async fn sigterm_closes_live_session_with_system_shutdown_and_exits() {
 /// every deploy.
 #[tokio::test]
 async fn sigterm_promotes_live_sm_session_unacked_queue_for_next_startup_delivery() {
-    let scratch = std::env::temp_dir().join(format!("waddle-shutdown-q6-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&scratch).expect("create scratch dir");
+    // RAII tempdir: cleans up the sqlite files even when an assertion
+    // below panics; the guard outlives both server phases.
+    let scratch_dir = tempfile::tempdir().expect("create scratch dir");
+    let scratch = scratch_dir.path();
     let global_db = format!("sqlite://{}?mode=rwc", scratch.join("global.db").display());
     let sm_db = format!("sqlite://{}?mode=rwc", scratch.join("sm.db").display());
     let pending_db = format!("sqlite://{}?mode=rwc", scratch.join("pending.db").display());
@@ -171,8 +173,6 @@ async fn sigterm_promotes_live_sm_session_unacked_queue_for_next_startup_deliver
         delivered.contains("urn:xmpp:delay"),
         "offline redelivery must carry an XEP-0203 delay stamp: {delivered}"
     );
-
-    let _ = std::fs::remove_dir_all(&scratch);
 }
 
 /// SIGTERM with several live clients: every session gets the
