@@ -100,6 +100,44 @@ fn is_countable_stanza_matches_element_name_not_prefix() {
     assert!(!is_countable_stanza(""));
 }
 
+/// XEP-0313 MAM `<result/>` messages count toward the XEP-0198 wire
+/// counter but must never enter the replay window (issue #1089):
+/// replaying archive results after a resume duplicates data the
+/// client already has, and a large history sync would otherwise pin
+/// the unacked queue at capacity and evict live stanzas.
+#[test]
+fn is_mam_result_message_detects_only_mam_result_carriers() {
+    use super::super::stream_management::is_mam_result_message;
+
+    // A serialized MAM result carrier message.
+    assert!(is_mam_result_message(
+        "<message xmlns='jabber:client' to='u@example.com/r'>\
+           <result xmlns='urn:xmpp:mam:2' queryid='q1' id='42'>\
+             <forwarded xmlns='urn:xmpp:forward:0'/>\
+           </result>\
+         </message>"
+    ));
+
+    // A live message that merely mentions the namespace in a body is
+    // NOT a MAM result — detection must be structural, not substring.
+    assert!(!is_mam_result_message(
+        "<message xmlns='jabber:client'><body>urn:xmpp:mam:2 &lt;result</body></message>"
+    ));
+    // A result child in the wrong namespace does not qualify.
+    assert!(!is_mam_result_message(
+        "<message xmlns='jabber:client'><result xmlns='urn:example:0' id='1'/></message>"
+    ));
+    // Non-message stanzas never qualify, even with a MAM child.
+    assert!(!is_mam_result_message(
+        "<iq xmlns='jabber:client' type='result' id='q1'>\
+           <fin xmlns='urn:xmpp:mam:2'/>\
+         </iq>"
+    ));
+    // Malformed XML must not panic or match.
+    assert!(!is_mam_result_message("not-xml"));
+    assert!(!is_mam_result_message(""));
+}
+
 #[tokio::test]
 async fn handle_xmpp_frame_drops_oversized_sm_nonza_before_parse() {
     let state = create_test_websocket_state().await;

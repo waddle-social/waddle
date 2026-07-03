@@ -29,6 +29,31 @@ pub(super) fn is_countable_stanza(frame: &str) -> bool {
     matches!(local_name, "iq" | "message" | "presence")
 }
 
+/// Returns true if the frame is a XEP-0313 MAM `<result/>` carrier
+/// message. Such messages count toward the XEP-0198 wire counter (the
+/// client's `h` includes them) but are exempt from the unacked replay
+/// queue: replaying archive results after a resume would duplicate
+/// data the client already holds, and during a large history sync
+/// they are what pins the queue at capacity and drives the eviction
+/// storm that permanently breaks resume (issue #1089).
+///
+/// Detection is structural (parse + direct child lookup), not a
+/// substring match — a live message quoting the namespace in its body
+/// must not be exempted from replay. The cheap `contains` gate keeps
+/// the parse off the hot path for the overwhelmingly common non-MAM
+/// frame.
+pub(super) fn is_mam_result_message(frame: &str) -> bool {
+    use std::str::FromStr as _;
+
+    if !frame.contains(waddle_xmpp_core::mam::MAM_NS) {
+        return false;
+    }
+    let Ok(element) = Element::from_str(frame) else {
+        return false;
+    };
+    element.name() == "message" && element.has_child("result", waddle_xmpp_core::mam::MAM_NS)
+}
+
 pub(super) fn sm_show_from_name(value: &str) -> Option<xmpp_parsers::presence::Show> {
     match value {
         "away" => Some(xmpp_parsers::presence::Show::Away),
@@ -102,62 +127,75 @@ pub(super) async fn handle_sm_stanza(
         SmStanza::Enable(enable) => handle_sm_enable(enable, state, ctx.sm_state, ctx.phase),
         SmStanza::Request => vec![SmAck::new(ctx.sm_state.get_inbound_count()).to_xml()],
         SmStanza::Ack(ack) => {
-            ctx.sm_state.acknowledge(ack.h);
-            // Locked Q7b SM-ack lifecycle (issue #209): range-delete
-            // every `pending_delivery` row claimed by this XEP-0198
-            // session whose recorded outbound counter is <= `ack.h`.
-            // This is what actually frees the row from the durable
-            // queue — the flush path no longer deletes on push.
-            //
-            // Session id is the XEP-0198 stream_id (NOT the resource
-            // JID — Qodo review on PR #358: distinct SM sessions on
-            // the same resource share the same JID, so keying by JID
-            // would let one session's ack delete another's claimed
-            // rows). The flush function reads the same stream_id from
-            // the connection's `ConnectionEntry` so claim and delete
-            // agree on the key.
-            // Greptile review on PR #358: this MUST run inline so it
-            // executes after any preceding `record_pushed_at` for the
-            // same connection. Spawning would let a quick ack arrive
-            // and run delete_acked_through against a row whose
-            // outbound_sequence is still NULL (because the
-            // record_pushed_at task hadn't completed), silently
-            // skipping the delete.
-            if let Some(stream_id) = ctx.sm_state.stream_id.clone() {
-                let session_id = waddle_xmpp::pending_delivery::SmSessionId::new(stream_id);
-                let h = ack.h;
-                match state
-                    .deps
-                    .protocol
-                    .pending_delivery_storage
-                    .delete_acked_through(&session_id, h)
-                    .await
-                {
-                    Ok(removed) if removed > 0 => {
-                        debug!(
-                            session = %session_id,
-                            h,
-                            removed,
-                            "pending_delivery rows cleared by SM ack"
-                        );
-                    }
-                    Ok(_) => {}
-                    Err(error) => {
-                        warn!(
-                            session = %session_id,
-                            h,
-                            error = %error,
-                            "pending_delivery delete_acked_through failed; rows \
-                             will be retried on next session via release_claim"
-                        );
-                    }
-                }
-            }
+            apply_sm_ack(state, ctx.sm_state, ack.h).await;
             vec![]
         }
         SmStanza::Resume(resume) => handle_sm_resume(resume, state, ctx).await,
         // Server-origin nonzas should never arrive from a client. Ignore.
         SmStanza::Enabled(_) | SmStanza::Resumed(_) | SmStanza::Failed(_) => vec![],
+    }
+}
+
+/// Apply a client `<a h='N'/>` ack: advance the SM counters, drop the
+/// acked prefix of the unacked queue, and range-delete every
+/// `pending_delivery` row this XEP-0198 session claimed whose
+/// recorded outbound counter is <= `h`.
+///
+/// Locked Q7b SM-ack lifecycle (issue #209): the range-delete is what
+/// actually frees rows from the durable queue — the flush path no
+/// longer deletes on push.
+///
+/// Session id is the XEP-0198 stream_id (NOT the resource JID — Qodo
+/// review on PR #358: distinct SM sessions on the same resource share
+/// the same JID, so keying by JID would let one session's ack delete
+/// another's claimed rows). The flush function reads the same
+/// stream_id from the connection's `ConnectionEntry` so claim and
+/// delete agree on the key.
+///
+/// Greptile review on PR #358: this MUST run inline so it executes
+/// after any preceding `record_pushed_at` for the same connection.
+/// Spawning would let a quick ack arrive and run delete_acked_through
+/// against a row whose outbound_sequence is still NULL (because the
+/// record_pushed_at task hadn't completed), silently skipping the
+/// delete.
+///
+/// Shared by the `<a/>` frame handler and the mid-batch drain in
+/// [`super::batch_write`] (issue #1089) so both paths honour the same
+/// ack lifecycle.
+pub(super) async fn apply_sm_ack(
+    state: &WebSocketState,
+    sm_state: &mut StreamManagementState,
+    h: u32,
+) {
+    sm_state.acknowledge(h);
+    if let Some(stream_id) = sm_state.stream_id.clone() {
+        let session_id = waddle_xmpp::pending_delivery::SmSessionId::new(stream_id);
+        match state
+            .deps
+            .protocol
+            .pending_delivery_storage
+            .delete_acked_through(&session_id, h)
+            .await
+        {
+            Ok(removed) if removed > 0 => {
+                debug!(
+                    session = %session_id,
+                    h,
+                    removed,
+                    "pending_delivery rows cleared by SM ack"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                warn!(
+                    session = %session_id,
+                    h,
+                    error = %error,
+                    "pending_delivery delete_acked_through failed; rows \
+                     will be retried on next session via release_claim"
+                );
+            }
+        }
     }
 }
 

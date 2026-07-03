@@ -361,6 +361,12 @@ pub(super) struct WsConnState {
     /// and duplicate queue entries. The main loop resets the flag to
     /// `false` after skipping the record step.
     pub(super) suppress_sm_record_next_batch: bool,
+    /// Inbound text frames pulled off the socket by the mid-batch ack
+    /// drain (issue #1089) that were NOT `<a/>` acks. The batch writer
+    /// may only consume acks out of order; everything else must reach
+    /// the main frame dispatcher in arrival order, so the connection
+    /// loop processes this queue before polling the socket again.
+    pub(super) deferred_inbound: std::collections::VecDeque<axum::extract::ws::Utf8Bytes>,
     /// Per-connection sans-I/O state machine.
     ///
     /// Initialized in the `Unauthenticated` phase at WS upgrade by
@@ -405,6 +411,7 @@ impl WsConnState {
             pending_resume_h: None,
             registry_owner: None,
             suppress_sm_record_next_batch: false,
+            deferred_inbound: std::collections::VecDeque::new(),
             state_machine: None,
             keepalive_config: waddle_xmpp::protocol::KeepaliveConfig::default(),
         }
