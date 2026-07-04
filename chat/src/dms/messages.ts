@@ -297,6 +297,11 @@ export function useDirectMessages(
     const peerJid = activePeerJid.value;
     if (!peerJid) return;
     if (messages.value.length === 0) return;
+    // #1180: the reconnect catch-up is about to page this conversation
+    // itself — a wholesale reload here would race its merges for
+    // messages.value. Skip the rebuild; cursor paging + live-merge
+    // closes the gap, same choreography as a resumed session.
+    if (event.catchup.dmJids.includes(barePeerJid(peerJid))) return;
     const preserved = messages.value.filter(
       (m) =>
         m.isSelf && (

@@ -479,6 +479,34 @@ describe("XEP-0198 delivery status (DM)", () => {
     expect(dm.messages.value[0].deliveryStatus).toBe("delivered");
   });
 
+  test("fresh DM session skips the MAM reload when reconnect catch-up covers the peer", async () => {
+    const client = makeDmClient();
+    const { dm } = makeDmMessaging(client);
+
+    const existing = [
+      {
+        id: "dm-old",
+        author: "bob",
+        body: "earlier",
+        createdAt: "2024-01-01T00:00:00Z",
+        isSelf: false,
+      },
+    ];
+    dm.messages.value = existing;
+
+    dm.onSessionLifecycle({
+      type: "fresh",
+      catchup: { dmJids: ["bob@example.com"], roomJids: [] },
+    });
+    await new Promise((r) => setTimeout(r, 0));
+
+    const clientAny = client as unknown as {
+      value: { queryPersonalMam: ReturnType<typeof mock> };
+    };
+    expect(clientAny.value.queryPersonalMam).not.toHaveBeenCalled();
+    expect(dm.messages.value).toEqual(existing);
+  });
+
   test("fresh DM session re-fetches personal MAM when messages were loaded", async () => {
     const client = makeDmClient();
     const { dm } = makeDmMessaging(client);
