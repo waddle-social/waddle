@@ -422,6 +422,12 @@ async fn join_burst_does_not_drop_at_capacity_256() {
     // Compile-time guard: the burst must fit under the 256 mailbox.
     const _: () = assert!(OCCUPANTS < CONNECTION_ACTOR_MAILBOX_CAPACITY);
 
+    // This test drives 200 sends through the process-global broadcast
+    // counters; serialize against metric-asserting tests so it cannot perturb
+    // their reads (Copilot review on PR #1177).
+    let _guard = crate::prometheus::metrics_test_lock().lock().await;
+    crate::prometheus::reset_metrics_for_test();
+
     let actor = spawn_actor("alice").await;
     let jid = full("alice", "phone");
     // Never drained: the receiver is held but no recv() is called, modelling a
@@ -451,6 +457,10 @@ async fn join_burst_does_not_drop_at_capacity_256() {
 #[tokio::test]
 async fn join_burst_drops_at_default_capacity_64() {
     const OCCUPANTS: usize = 200;
+    // Serialize against metric-asserting tests (Copilot review on PR #1177).
+    let _guard = crate::prometheus::metrics_test_lock().lock().await;
+    crate::prometheus::reset_metrics_for_test();
+
     let actor = spawn_actor("alice").await;
     let jid = full("alice", "phone");
     let (e, _rx) = entry_with_capacity(64);

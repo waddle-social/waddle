@@ -1,5 +1,11 @@
 use super::*;
 
+/// Upper bound on the outer `UserRegistryActor` routing asks, so a saturated
+/// registry mailbox degrades to the DashMap fallback instead of stalling the
+/// interpreter loop (Greptile P1 on PR #1177). Matches the registry's own
+/// per-child bound.
+const ACTOR_ROUTE_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 pub(super) async fn route_to_connection(
     registry: &ConnectionRegistry,
     deps: &Deps<'_>,
@@ -143,34 +149,51 @@ pub(super) async fn route_to_connection(
                 // RFC priority routing for clients that do use
                 // presence.
                 // ADR-0017 Phase 1 read-cutover: resolve bare-JID targets
-                // through the actor tree when it is wired (production). The
-                // actor shares the DashMap's `Arc`-backed presence atomics, so
-                // its selection is identical; unit tests without a
-                // `user_registry` fall back to the DashMap directly.
-                let live_targets = if let Some(user_registry) = deps.user_registry {
-                    let priority = user_registry
-                        .ask(waddle_xmpp::registry::SelectRoutableResourcesForUser {
-                            bare_jid: bare.clone(),
-                        })
-                        .await
-                        .unwrap_or_default();
-                    if priority.is_empty() {
-                        user_registry
-                            .ask(waddle_xmpp::registry::ResourcesForUser {
+                // through the actor tree as the fast path (production), then
+                // fall back to the DashMap. The actor shares the DashMap's
+                // `Arc`-backed presence atomics, so when the mirror is coherent
+                // its selection is identical; the DashMap fallback means a
+                // best-effort mirror gap, failure, or timeout (Greptile/Copilot
+                // P1 on PR #1177) degrades to the authoritative DashMap
+                // registration rather than blackholing bare-JID delivery. Unit
+                // tests without a `user_registry` use the DashMap directly.
+                let actor_targets = match deps.user_registry {
+                    Some(user_registry) => {
+                        // Bound the OUTER registry ask (Greptile P1 on PR
+                        // #1177): `UserRegistryActor` processes sequentially,
+                        // so an unbounded await could stall the interpreter
+                        // loop if its mailbox saturates under load. On timeout
+                        // the empty result falls through to the DashMap below.
+                        let priority = user_registry
+                            .ask(waddle_xmpp::registry::SelectRoutableResourcesForUser {
                                 bare_jid: bare.clone(),
                             })
+                            .mailbox_timeout(ACTOR_ROUTE_ASK_TIMEOUT)
                             .await
-                            .unwrap_or_default()
-                    } else {
-                        priority
+                            .unwrap_or_default();
+                        if priority.is_empty() {
+                            user_registry
+                                .ask(waddle_xmpp::registry::ResourcesForUser {
+                                    bare_jid: bare.clone(),
+                                })
+                                .mailbox_timeout(ACTOR_ROUTE_ASK_TIMEOUT)
+                                .await
+                                .unwrap_or_default()
+                        } else {
+                            priority
+                        }
                     }
-                } else {
+                    None => Vec::new(),
+                };
+                let live_targets = if actor_targets.is_empty() {
                     let priority = registry.select_routable_resources_for_user(&bare);
                     if priority.is_empty() {
                         registry.get_resources_for_user(&bare)
                     } else {
                         priority
                     }
+                } else {
+                    actor_targets
                 };
                 if live_targets.is_empty() && detached_targets.is_empty() {
                     if bare.domain().as_str() != deps.local_domain {

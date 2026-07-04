@@ -38,10 +38,13 @@ pub mod delivery;
 pub struct UserActor {
     bare_jid: BareJid,
     /// Connected resources keyed by full JID. The [`ConnectionEntry`] carries
-    /// the outbound `mpsc::Sender` and the presence/carbons atomics, so it is
-    /// the authoritative per-resource record (no parallel presence/carbons
-    /// maps to drift out of sync).
+    /// the outbound `mpsc::Sender` and the presence-**availability**/priority
+    /// and carbons atomics, so those are single-sourced here with no parallel
+    /// map to drift out of sync. (`presence_states` below is a distinct
+    /// concern — the full show/status/priority snapshot used for XEP-0012 /
+    /// probe responses — not a duplicate of the availability atomics.)
     connections: HashMap<FullJid, ConnectionEntry>,
+    /// Per-resource show/status/priority snapshot for presence-probe replies.
     presence_states: HashMap<FullJid, PresenceState>,
     pending_subscriptions: Vec<Stanza>,
 }

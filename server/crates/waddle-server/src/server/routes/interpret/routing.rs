@@ -129,19 +129,40 @@ pub(super) async fn deliver_peer_to_full(
     );
     if is_groupchat_reflection {
         // ADR-0017 Phase 1 delivery cutover: route fan-out through the actor
-        // tree when wired (production). `try_send` semantics are identical to
-        // the DashMap path; unit tests without a `user_registry` use the
-        // DashMap directly.
-        let outcome = if let Some(user_registry) = user_registry {
-            user_registry
-                .ask(waddle_xmpp::registry::TrySendPeerToUser {
-                    jid: target.clone(),
-                    stanza: stanza.clone(),
-                })
-                .await
-                .unwrap_or(waddle_xmpp::registry::BroadcastOutcome::NotConnected)
-        } else {
-            registry.try_send_peer_to(target, stanza.clone())
+        // tree as the fast path (production), then fall back to the DashMap.
+        // `try_send` semantics are identical when the mirror is coherent; the
+        // DashMap fallback (Greptile/Copilot P1 on PR #1177) means an actor
+        // ask error/timeout or a mirror gap that reports `NotConnected` retries
+        // the authoritative DashMap route before dropping to the detached
+        // path — so a live connection is never skipped. Unit tests without a
+        // `user_registry` use the DashMap directly.
+        let outcome = match user_registry {
+            Some(user_registry) => {
+                // Bound the OUTER registry ask (Greptile P1 on PR #1177):
+                // `UserRegistryActor` is sequential, so under concurrent MUC
+                // fan-out an unbounded await could stall the interpreter loop
+                // (a partial #699 regression). On timeout this degrades to the
+                // DashMap route below via `NotConnected`.
+                let actor_outcome = user_registry
+                    .ask(waddle_xmpp::registry::TrySendPeerToUser {
+                        jid: target.clone(),
+                        stanza: stanza.clone(),
+                    })
+                    .mailbox_timeout(std::time::Duration::from_secs(2))
+                    .await
+                    .unwrap_or(waddle_xmpp::registry::BroadcastOutcome::NotConnected);
+                if matches!(
+                    actor_outcome,
+                    waddle_xmpp::registry::BroadcastOutcome::NotConnected
+                ) {
+                    // Actor has no entry (mirror gap) or the ask failed — retry
+                    // the authoritative DashMap route before giving up.
+                    registry.try_send_peer_to(target, stanza.clone())
+                } else {
+                    actor_outcome
+                }
+            }
+            None => registry.try_send_peer_to(target, stanza.clone()),
         };
         match outcome {
             waddle_xmpp::registry::BroadcastOutcome::Delivered => {

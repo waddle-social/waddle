@@ -21,7 +21,7 @@ use super::user_actor::delivery::{SelectRoutableResources, TrySendPeer};
 use super::user_actor::{
     GetResources, RegisterConnection, UnregisterConnectionAndReportEmpty, UserActor,
 };
-use crate::{metrics, prometheus, Stanza};
+use crate::{metrics, Stanza};
 
 const CHILD_ACTOR_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -357,24 +357,21 @@ impl kameo::message::Message<TrySendPeerToUser> for UserRegistryActor {
         msg: TrySendPeerToUser,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        // No metric on the miss/error path: the caller
+        // (`deliver_peer_to_full`) falls back to the DashMap route on
+        // `NotConnected`, which does its own accounting — counting here too
+        // would double-report a single fan-out attempt.
         let Some(user_actor) = self.users.get(&msg.jid.to_bare()).cloned() else {
-            prometheus::increment_broadcast_not_connected();
             return BroadcastOutcome::NotConnected;
         };
-        match user_actor
+        user_actor
             .ask(TrySendPeer {
                 jid: msg.jid,
                 stanza: msg.stanza,
             })
             .mailbox_timeout(CHILD_ACTOR_TIMEOUT)
             .await
-        {
-            Ok(outcome) => outcome,
-            Err(_) => {
-                prometheus::increment_broadcast_not_connected();
-                BroadcastOutcome::NotConnected
-            }
-        }
+            .unwrap_or(BroadcastOutcome::NotConnected)
     }
 }
 

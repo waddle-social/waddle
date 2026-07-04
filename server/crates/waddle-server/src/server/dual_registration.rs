@@ -7,9 +7,16 @@
 //! sessions ahead of the read-cutover.
 //!
 //! Both mirrors are **best-effort**: the DashMap registry is authoritative for
-//! delivery, and nothing reads the actor tree for routing yet, so a failed or
-//! lost mirror can never drop a live stanza. A failure is logged, never
-//! propagated — it must not fail a connection or a teardown path.
+//! delivery. Bare-JID selection and fan-out delivery read the actor tree as a
+//! fast path but fall back to the DashMap when the actor has no entry (see
+//! `route_to_connection` / `deliver_peer_to_full`), so a failed or lost mirror
+//! degrades to the DashMap rather than dropping a stanza. A failure is logged,
+//! never propagated — it must not fail a connection or a teardown path, and it
+//! must never stall one either: every mirror `ask` is bounded by
+//! [`MIRROR_TIMEOUT`] so a slow/wedged `UserRegistryActor` cannot hang the
+//! live registration or teardown path (Copilot review on PR #1177).
+
+use std::time::Duration;
 
 use jid::FullJid;
 use kameo::actor::ActorRef;
@@ -18,7 +25,13 @@ use waddle_xmpp::registry::{
     ConnectionEntry, RegisterUserResource, UnregisterUserResource, UserRegistryActor,
 };
 
-/// Mirror a resource registration into the actor tree (best-effort).
+/// Upper bound on how long a best-effort mirror may wait to enqueue onto the
+/// `UserRegistryActor` mailbox before the caller gives up and logs. Sized well
+/// above normal in-process mailbox latency but small enough that a wedged
+/// actor cannot meaningfully delay connection setup or teardown.
+const MIRROR_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Mirror a resource registration into the actor tree (best-effort, bounded).
 ///
 /// `entry` MUST be the live DashMap [`ConnectionEntry`] (obtained via
 /// `entry_if_owner`), so the actor shares its `Arc`-backed presence/carbons
@@ -33,6 +46,7 @@ pub(crate) async fn mirror_register(
             jid: jid.clone(),
             entry,
         })
+        .mailbox_timeout(MIRROR_TIMEOUT)
         .await
     {
         warn!(
@@ -44,10 +58,11 @@ pub(crate) async fn mirror_register(
     }
 }
 
-/// Mirror a resource unregistration into the actor tree (best-effort).
+/// Mirror a resource unregistration into the actor tree (best-effort, bounded).
 pub(crate) async fn mirror_unregister(user_registry: &ActorRef<UserRegistryActor>, jid: &FullJid) {
     if let Err(error) = user_registry
         .ask(UnregisterUserResource { jid: jid.clone() })
+        .mailbox_timeout(MIRROR_TIMEOUT)
         .await
     {
         warn!(

@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (consensus of the adversarial review council: six domain reviewers —
+Accepted (consensus of the adversarial review council: six domain reviewers —
 XMPP/XEP conformance, distributed systems, Rust/kameo/libp2p, SRE/Kubernetes,
 storage, security — approve with no blocking or major findings remaining)
 
