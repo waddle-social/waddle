@@ -1,11 +1,5 @@
 use super::*;
 
-/// Upper bound on the outer `UserRegistryActor` routing asks, so a saturated
-/// registry mailbox degrades to the DashMap fallback instead of stalling the
-/// interpreter loop (Greptile P1 on PR #1177). Matches the registry's own
-/// per-child bound.
-const ACTOR_ROUTE_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
-
 pub(super) async fn route_to_connection(
     registry: &ConnectionRegistry,
     deps: &Deps<'_>,
@@ -148,54 +142,28 @@ pub(super) async fn route_to_connection(
                 // preserves that behaviour without giving up
                 // RFC priority routing for clients that do use
                 // presence.
-                // ADR-0017 Phase 1 read-cutover: resolve bare-JID targets
-                // through the actor tree as the fast path (production), then
-                // fall back to the DashMap. The actor shares the DashMap's
-                // `Arc`-backed presence atomics, so when the mirror is coherent
-                // its selection is identical; the DashMap fallback means a
-                // best-effort mirror gap, failure, or timeout (Greptile/Copilot
-                // P1 on PR #1177) degrades to the authoritative DashMap
-                // registration rather than blackholing bare-JID delivery. Unit
-                // tests without a `user_registry` use the DashMap directly.
-                let actor_targets = match deps.user_registry {
-                    Some(user_registry) => {
-                        // Bound the OUTER registry ask (Greptile P1 on PR
-                        // #1177): `UserRegistryActor` processes sequentially,
-                        // so an unbounded await could stall the interpreter
-                        // loop if its mailbox saturates under load. On timeout
-                        // the empty result falls through to the DashMap below.
-                        let priority = user_registry
-                            .ask(waddle_xmpp::registry::SelectRoutableResourcesForUser {
-                                bare_jid: bare.clone(),
-                            })
-                            .mailbox_timeout(ACTOR_ROUTE_ASK_TIMEOUT)
-                            .reply_timeout(ACTOR_ROUTE_ASK_TIMEOUT)
-                            .await
-                            .unwrap_or_default();
-                        if priority.is_empty() {
-                            user_registry
-                                .ask(waddle_xmpp::registry::ResourcesForUser {
-                                    bare_jid: bare.clone(),
-                                })
-                                .mailbox_timeout(ACTOR_ROUTE_ASK_TIMEOUT)
-                                .reply_timeout(ACTOR_ROUTE_ASK_TIMEOUT)
-                                .await
-                                .unwrap_or_default()
-                        } else {
-                            priority
-                        }
-                    }
-                    None => Vec::new(),
-                };
-                let live_targets = if actor_targets.is_empty() {
+                //
+                // ADR-0017 Phase 1: bare-JID *selection* stays
+                // DashMap-authoritative and is NOT cut over to the actor tree
+                // yet (Greptile P1 on PR #1177). Selection returns a *set*, and
+                // during the best-effort async mirror window the actor can hold
+                // a coherent-but-partial set (resource A mirrored, resource B's
+                // mirror still in flight): a non-empty `[A]` looks complete, so
+                // an `is_empty()`-gated fallback would never consult the DashMap
+                // and would silently miss B — a live, available, top-priority
+                // resource. Unlike per-target fan-out delivery (which resolves
+                // one JID at a time and can fall back per-target), set
+                // completeness cannot be verified against an async mirror, so
+                // the selection cutover waits until registration is
+                // actor-authoritative. `SelectRoutableResourcesForUser` /
+                // `ResourcesForUser` are wired and tested, ready for that slice.
+                let live_targets = {
                     let priority = registry.select_routable_resources_for_user(&bare);
                     if priority.is_empty() {
                         registry.get_resources_for_user(&bare)
                     } else {
                         priority
                     }
-                } else {
-                    actor_targets
                 };
                 if live_targets.is_empty() && detached_targets.is_empty() {
                     if bare.domain().as_str() != deps.local_domain {
