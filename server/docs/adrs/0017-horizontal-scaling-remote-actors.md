@@ -2,7 +2,7 @@
 
 ## Status
 
-Draft (revised after adversarial review council, round 2)
+Draft (revised after adversarial review council, round 3)
 
 ## Context
 
@@ -95,9 +95,22 @@ Key elements:
    portable `DatabaseSmPersistence` (`sm_persistence.rs`, `sm_promotion`)
    remains the single-node implementation, untouched — its exclusivity
    guarantee stays process-level. Cluster mode selects a **Postgres-only
-   fenced implementation of `SmPersistenceStorage`** (a fencing decorator
-   that wraps each write in the claims-row-locked transaction of element 4),
-   chosen when `clustering.enabled`. Cluster mode never routes SM writes
+   fenced implementation of `SmPersistenceStorage`** — a full second
+   implementation of the trait built on `Database::begin`, **not a
+   decorator**: the portable impl acquires a pooled connection per
+   statement (`ConnectionGuard`), so no wrapper can place the `FOR SHARE`
+   fencing lock in the same transaction as the inner impl's writes, and
+   multi-statement methods (`delete_session`, `store_session_atomic`,
+   `record_promotion_failure`) each need the fencing SELECT inside one
+   `Transaction`. Two trait-shape divergences from the portable impl are
+   explicit and accepted: (a) detach writes ignore the caller-supplied
+   `detached_at` and stamp/re-read Postgres `now()` (element 4), so
+   `PersistedSession.detached_at` as read back is the DB value, not the
+   caller's; (b) expiry listing evaluates the window in SQL against
+   Postgres `now()`, treating the trait's `now` parameter as advisory in
+   the fenced impl. The portable impl and schema remain byte-identical for
+   SQLite. The fenced impl is chosen when `clustering.enabled`. Cluster
+   mode never routes SM writes
    through the portable layer; no conditional SQL is scattered into shared
    statements. This split is a named Phase 3 deliverable, not an
    implementation surprise.
@@ -124,11 +137,35 @@ Key elements:
    transports, manages a per-pod keypair, dials peers resolved from a
    Kubernetes headless Service (no mDNS), runs kademlia bootstrap, and drives
    the swarm event loop. Node identity and trust:
-   - Each replica's libp2p static keypair is provisioned from a mounted
-     Kubernetes Secret; the cluster maintains an **allowlist of enrolled peer
-     IDs** (rows in Postgres, refreshed periodically). Connections from peer
-     IDs not on the allowlist are rejected at the swarm behaviour layer —
-     completing the Noise handshake is necessary but never sufficient.
+   - **Per-pod swarm identity is a leased slot from a pre-enrolled keypair
+     pool.** A Deployment cannot mount distinct per-pod Secrets — every
+     replica mounts the identical pod template — so "one static keypair
+     Secret per pod" is unimplementable on this chart; a single shared
+     keypair would collapse all replicas onto one libp2p PeerId (breaking
+     kademlia discovery, connection bookkeeping, and per-pod revocation),
+     and startup-generated keys can never be pre-enrolled by a pipeline
+     that runs before the pod exists. Instead the chart mounts **one
+     Secret containing a pool of ≥ `maxReplicas + maxSurge` enrolled
+     keypairs**; at startup each pod leases exactly one slot via a
+     Postgres CAS (`keypair_slots`, a heartbeat-renewed lease of the same
+     shape as the `nodes` lease, landing with the Phase 2 swarm
+     subsystem) and releases it on drain. The CAS guarantees at most one
+     live leaseholder per slot, so no two concurrent swarm members ever
+     share a PeerId — including the old+new pod overlap of a
+     RollingUpdate with surge; as defense in depth, the swarm behaviour
+     layer rejects a second live session for an already-connected PeerId.
+     **Scale-up beyond the enrolled pool requires a pipeline enrollment
+     run first** — a documented operational constraint — and the Phase 4
+     chart ships the pool-Secret templating plus the enrollment Helm hook
+     job with its own admin-role Secret. (Alternative considered: a
+     StatefulSet with per-ordinal Secrets dissolves the duplicate-PeerId
+     window structurally, but forces reworking the Deployment-based
+     rollout-placement design and the storage story; the pool lease
+     reuses CAS machinery this ADR already owns. Tradeoff recorded.)
+     The cluster maintains an **allowlist of enrolled peer IDs** (rows in
+     Postgres, refreshed periodically). Connections from peer IDs not on
+     the allowlist are rejected at the swarm behaviour layer — completing
+     the Noise handshake is necessary but never sufficient.
    - **Enrollment authority is separate from the runtime DSN.** Allowlist
      rows are provisioned only by an authority distinct from the shared
      runtime database credential: an operator/admin-only Postgres role used
@@ -139,6 +176,17 @@ Key elements:
      the runtime DSN (i.e. any compromised pod) could mint swarm members
      and the allowlist would add nothing over Noise. Key rotation = enroll
      new key via the pipeline, roll the pod, revoke old key.
+   - **Revocation acts on live connections, not only new dials.** Each
+     periodic allowlist refresh diffs the enrolled set and actively
+     closes/bans existing swarm connections whose peer ID is no longer
+     enrolled (libp2p deny-list behaviour plus explicit disconnect), and
+     every inbound remote message re-checks that the origin peer is
+     *currently* allowlisted — not merely that it presents a valid claim
+     epoch. Gating only new dials would make revocation a no-op against
+     an active attacker whose connections predate the row deletion —
+     exactly the case revocation exists for. Containment bound: a revoked
+     peer's swarm access ends within one refresh interval, asserted by a
+     Phase 2 fault-injection case (revoked-peer-with-live-connection).
    - The **remote-actor boundary is an untrusted ingress**, not a
      pre-authorized internal channel. Every inbound remote message carries
      the authenticated origin node identity and the sender's claim epoch; the
@@ -168,8 +216,11 @@ Key elements:
 
 4. **Postgres-authoritative ownership with per-node leases and epoch
    fencing.** Two tables:
-   - `nodes (node_id, node_epoch, heartbeat, pod_template_hash)` — one
-     liveness row per replica, one heartbeat CAS per node per interval.
+   - `nodes (node_id, node_epoch, heartbeat, expired, pod_template_hash)` —
+     one liveness row per replica, one heartbeat CAS per node per interval.
+     `expired` is the **committed, monotone expiry fact** (see *Expire*
+     below): no other statement ever infers staleness from a raw
+     `heartbeat` comparison.
      Heartbeats are **per node, not per entity**: at 50k users + 5k rooms a
      per-entity heartbeat would be ~thousands of liveness UPDATEs/sec;
      per-node is O(replicas). `node_id` is **per pod instance** — freshly
@@ -182,44 +233,130 @@ Key elements:
      which node owns a given `UserActor`, `RoomActor`, **SM session (live or
      detached — the claim row is created at `<enable/>` time, element 8)**,
      or ISR token scope. A claim is stale iff its node's liveness row is
-     expired, **missing**, or its `node_epoch` predates the node's current
-     registration. The stale predicate is written as a `LEFT JOIN` against
-     `nodes` with `nodes.node_id IS NULL OR heartbeat expired OR node_epoch
-     mismatch`, so a claim whose owner row never registered or was reaped is
-     definitionally stale rather than permanently unstealable.
+     expired (the committed flag), **missing**, or its `node_epoch`
+     predates the node's current registration. The stale predicate is
+     written as a `LEFT JOIN` against `nodes` with `nodes.node_id IS NULL
+     OR nodes.expired OR node_epoch mismatch` — never a raw
+     `heartbeat < now() - ttl` comparison, which would be an unordered
+     snapshot read (see *Expire*) — so a claim whose owner row never
+     registered or was reaped is definitionally stale rather than
+     permanently unstealable.
 
    The exact SQL contract (so "transactional" cannot be implemented as a
    broken READ COMMITTED SELECT-then-UPDATE):
    - *Acquire*: `INSERT ... ON CONFLICT (entity) DO NOTHING` +
      `rows_affected == 1` check.
-   - *Steal*: single-statement CAS —
+   - *Expire* — the single serialized ordering point that makes lease
+     expiry genuinely monotone: before any steal or reap that relies on
+     owner staleness, the stealer/reaper first executes
+     `UPDATE nodes SET expired = true WHERE node_id=$owner AND
+     node_epoch=$theirs AND NOT expired AND heartbeat < now() - $lease_ttl`
+     and proceeds only if it committed (or the flag is already committed
+     `true`). Because this CAS and the heartbeat renewal write the **same
+     `nodes` row**, row-lock ordering serializes them and EvalPlanQual
+     re-evaluates the blocked statement against the new committed row
+     version — the same EPQ fact that makes lockless *join* fencing
+     unsafe makes same-row CAS safe. Renewal-commits-first ⇒ the expire
+     CAS re-evaluates, sees a fresh heartbeat, returns 0 rows ⇒ no steal.
+     Expire-commits-first ⇒ the renewal's `AND NOT expired` fails ⇒
+     0 rows ⇒ the owner demotes. A prior revision claimed the renewal
+     predicate alone made expiry monotone; it does not: a renewal whose
+     transaction-fixed `now()` was evaluated pre-expiry (e.g. its commit
+     delayed by an fsync/replication stall — exactly the overloaded-DB
+     condition that also makes heartbeats late) can commit *after* a
+     steal that judged the owner stale from an earlier snapshot. Both
+     statements then succeed — they lock disjoint rows, so Postgres never
+     ordered them — and the owner sees `rows_affected == 1` ("lease
+     intact") while serving stolen claims with zero signal, resurrecting
+     exactly the half-reaped/ghost-presence states the design must
+     exclude. The `expired` flag closes that interleaving; it is a named
+     Phase 3 race test (renewal evaluated pre-expiry, committed
+     post-steal, must return 0 rows). `expired` is cleared only by
+     explicit re-registration under a fresh `node_id`/`node_epoch` —
+     never in place.
+   - *Steal (stale owner)*: single-statement CAS —
      `UPDATE claims SET node_id=$me, node_epoch=$my_node_epoch,
      claim_epoch = claim_epoch + 1 WHERE entity=$e AND claim_epoch=$observed
      AND <owner-stale LEFT-JOIN predicate over nodes>` with
      `rows_affected == 1` required. Losers observe 0 rows and give up.
-     The snapshot read of `nodes.heartbeat` inside this CAS is safe only
-     because lease expiry is **monotone** (see *Heartbeat*): an expired
-     owner cannot concurrently refresh itself back to fresh.
+     The join read of `nodes` inside this CAS is safe **only because it
+     reads the committed `expired` flag** — monotone by the *Expire*
+     contract above — and never re-derives staleness from `heartbeat`
+     directly.
+   - *Steal (consent/epoch-only — SM resume paths exclusively)*: element
+     8's two resume paths steal from owners whose lease is **fresh**,
+     which the owner-stale predicate can never authorize, so they use a
+     third CAS variant with no staleness predicate:
+     `UPDATE claims SET node_id=$me, node_epoch=$mine,
+     claim_epoch = claim_epoch + 1 WHERE entity=$e AND
+     claim_epoch=$observed` — authorized exclusively by the
+     identity-bound resume path (detached-session steal) or by the old
+     owner's handshake ack (live-session steal). The epoch CAS resolves
+     two simultaneous resumes: the loser observes 0 rows and answers
+     `<failed/>`; if the owner acks the first handshake and a second
+     requester races it, the second falls back to the detached path and
+     loses the epoch CAS. No other path may use this variant.
    - *Heartbeat*: renewal is itself a CAS on lease freshness —
      `UPDATE nodes SET heartbeat = now() WHERE node_id=$me AND
-     node_epoch=$mine AND heartbeat >= now() - $lease_ttl`.
+     node_epoch=$mine AND NOT expired AND heartbeat >= now() - $lease_ttl`.
      `rows_affected == 0` is **fencing loss**, and now unambiguously means
-     "your lease lapsed (or your epoch was superseded)": the node must
-     immediately demote all local actors, drop all claims, stop writing,
-     and may return to service only by re-registering with a fresh
-     `node_id`/`node_epoch` and re-acquiring claims from scratch. This makes
-     expiry monotone — once a node row is expired it stays expired until
-     explicit re-registration — so a GC/VM pause longer than the pause
-     budget cannot resurrect liveness mid-reap (half-reaped state, ghost
+     "your lease lapsed, was expired by a stealer/reaper, or your epoch
+     was superseded": the node must immediately demote all local actors,
+     drop all claims, stop writing, and may return to service only by
+     re-registering with a fresh `node_id`/`node_epoch` and re-acquiring
+     claims from scratch. Monotone expiry is a property of the
+     **committed `expired` flag** (the *Expire* CAS), not of this
+     predicate alone — so a GC/VM pause longer than the pause budget
+     cannot resurrect liveness mid-reap (half-reaped state, ghost
      synthesized-unavailable presence, staleness flapping under the reaper
-     are all excluded by the predicate, not by node-local timers). All time
+     are all excluded by the flag's one-way transition, not by node-local
+     timers). All time
      predicates use **Postgres `now()`**, never node-local
      `chrono::Utc::now()`, so only one clock matters. Stored timestamps that
      feed those predicates are also DB-stamped: `detached_at` is derived
      from `now()` inside the fenced detach write, never bound from a
      node-supplied value (node clocks stamp timestamps only in single-node
      SQLite, where one clock exists by construction). Lease TTL ≥
-     heartbeat-interval × N-missed + max GC/pause budget.
+     heartbeat-interval × N-missed + max GC/pause budget + **p99
+     heartbeat-write-latency budget under load** — process pauses are not
+     the only thing that delays a renewal; DB pool-wait and statement
+     latency degrade first under exactly the load the cluster is scaled
+     for.
+   - *The liveness control plane is isolated from the data plane*: the
+     heartbeat CAS and the claim acquire/steal/expire/release statements
+     execute on a **dedicated, small connection pool** (or a reserved
+     connection), never the shared statement pool. Otherwise a traffic
+     spike exhausts the shared pool, the renewal queues behind fenced
+     bulk transactions and claims-read storms, the lease lapses, the node
+     demotes *everything*, and the resulting reconnect storm loads the
+     survivors' pools in turn — a metastable, self-amplifying failure.
+     Pool exhaustion must degrade stanza latency, never lease liveness; a
+     heartbeat-write-latency histogram + alert (Phase 3) watches the
+     cause, not just the heartbeat-age symptom.
+   - *Demotion reconciliation — guaranteed discovery for every entity
+     type*: epoch fencing fires only on durable writes, and a `UserActor`
+     serving live local sockets performs none on its delivery hot path
+     (unacked queues are in-memory until detach), so without a backstop a
+     deposed UserActor owner could keep answering stream-level XEP-0198
+     `<r/>`/`<a/>` on a healthy-looking socket indefinitely while inbound
+     traffic routes to the new owner — the user sends successfully and
+     receives nothing — and the best-effort Demote ask travels the same
+     swarm path whose failure typically motivated the steal. Two
+     mechanisms close this: (1) each heartbeat interval, alongside the
+     renewal CAS on the control-plane pool, the node runs **one indexed
+     reconciliation query** over `claims WHERE node_id = $me AND
+     node_epoch = $mine`, diffs the result against its local owned-entity
+     set, and demotes/tombstones anything it no longer owns —
+     conflict-closing live local sockets for lost `UserActor`/SM claims —
+     bounding dual-ownership for **every** entity type to one heartbeat
+     interval at the cost of one O(local claims) indexed query per node
+     per interval, consistent with the O(replicas) write-amplification
+     goal; (2) an owner whose internal health ask fails during
+     steal-intent processing does not wait to be stolen from: it kills
+     the wedged actor and conflict-closes its sockets **before** the
+     steal lands at `intent_ttl`, since it already knows the steal will
+     proceed. The Demote ask (element 7) remains the fast path;
+     reconciliation is the guarantee.
    - *Fencing*: every durable write performed on behalf of a claimed entity
      (`sm_sessions`, `sm_unacked`, `pending_delivery` promotion,
      `confirm_drained` deletes, MAM writes from a `RoomActor`, occupant
@@ -261,21 +398,46 @@ Key elements:
      intervals) must stop serving its claimed entities — detach sessions,
      close sockets, stop MUC broadcasts — **before** its lease becomes
      stealable (guaranteed by the TTL formula). Heartbeat renewal is
-     additionally coupled to self-health, with the condition detecting
-     **partition, not peer absence**: a node refuses to renew only when the
-     `nodes` table shows at least one *other* node with a fresh heartbeat
-     (live per Postgres, the authority) that this node cannot reach over the
-     swarm for M consecutive intervals, or when the actor runtime fails an
-     internal ping. A node whose peers are all heartbeat-expired in Postgres
-     — the lone survivor at `replicaCount: 2`, or the first pod of a rolling
-     restart — **keeps renewing and serving**: Postgres, not the swarm, is
-     the ownership authority, and a survivor that can reach Postgres is safe.
-     "Partitions degrade to slower lookups" is true only because of this
-     rule; a total pairwise swarm partition with Postgres still reachable
-     fences every side, an accepted, conservative, and rare failure mode
-     (swarm and Postgres largely share network fate). The intended replica
-     count is never configured into the node — it is read as live `nodes`
-     rows.
+     additionally coupled to self-health, with the swarm condition
+     detecting **isolation, not any single unreachable peer**: a node
+     refuses to renew only when the `nodes` table shows **two or more**
+     other live nodes (fresh per Postgres, the authority) and this node
+     can reach **none of them** over the swarm for M consecutive
+     intervals, or when the actor runtime fails an internal ping.
+     Partial pairwise unreachability — some live peers reachable, some
+     not — is a **degraded-routing condition, never node suicide**:
+     traffic to unreachable peers diverts to the durable
+     `pending_delivery` fallback (delivery bounded by one janitor sweep,
+     element 5) and an alert fires. The previous "at least one
+     unreachable live peer" rule over-fenced: a single bad A↔B link in a
+     healthy three-node mesh would fence both endpoints — 2/3 capacity
+     destroyed while every entity remained reachable via Postgres and
+     via C — and a misconfigured NetworkPolicy on the swarm port (which
+     Phase 4 itself introduces) would fence the entire cluster. With
+     exactly one other live node (N=2), swarm unreachability alone
+     **never fences**: there is no witness to assign blame, and both
+     sides fencing converts a one-link fault into a total outage; the
+     pair degrades to durable-queue routing plus an alert instead.
+     **Re-registration hysteresis**: a node that fenced due to swarm
+     isolation re-registers (making its liveness visible) but
+     re-acquires claims only after observing swarm reachability to at
+     least one live peer whenever other live node rows exist, with
+     exponential backoff on re-registration — without this, two mutually
+     partitioned survivors oscillate forever (fence → leases expire →
+     each sees "all peers expired" → lone-survivor rule → both serve →
+     both see each other fresh-and-unreachable → fence again),
+     conflict-closing every client once per cycle; with it, a persistent
+     swarm-only fault converges to a stable degraded state. A total
+     pairwise swarm partition with Postgres still reachable therefore
+     fences every node at N≥3 and, with hysteresis, *stays* fenced until
+     connectivity returns — an accepted, conservative, rare failure mode
+     (swarm and Postgres largely share network fate) that now settles
+     instead of flapping. A node whose peers are all heartbeat-expired
+     in Postgres — the lone survivor, or the first pod of a rolling
+     restart — **keeps renewing and serving**: Postgres, not the swarm,
+     is the ownership authority, and a survivor that can reach Postgres
+     is safe. The intended replica count is never configured into the
+     node — it is read as live `nodes` rows.
    - *Unwedge (steal-intent with owner veto — replaces "forced steal")*:
      no node may evict an owner whose lease is fresh on its own unverifiable
      say-so ("I saw N failures" cannot be attested in a CAS, so it would be
@@ -294,7 +456,10 @@ Key elements:
      substituting for the owner-stale predicate. This applies to **both
      `RoomActor` and `UserActor` claims** (a deposed UserActor owner
      conflict-closes any live local socket for that user upon demotion
-     discovery, reusing element 8's demote machinery), bounding a
+     discovery — guaranteed within one heartbeat interval by the
+     reconciliation query above, and pre-empted entirely when the owner's
+     own failed health ask triggers the proactive wedge-kill — reusing
+     element 8's demote machinery), bounding a
      sick-but-heartbeating node's hostage window to `intent_ttl` for every
      routed entity type. SM-session claims are still stolen **only** via the
      identity-bound resume path (element 8). The fresh-heartbeat carve-out
@@ -316,18 +481,53 @@ Key elements:
      meaning. Until acked, the sender retains the stanza; on timeout/failure
      it retries, then falls back to writing durable `pending_delivery`
      itself.
-   - **Inbound `h` accounting is coupled to handoff.** A cross-node-destined
-     inbound stanza counts as "handled" for the origin client's stream —
-     included in inbound `h` and eligible to satisfy the client's `<r/>` —
-     only after the handoff ack arrives or the durable fallback write
-     commits. XEP-0198 defines "handled" as the server having taken
+   - **The timeout hierarchy is explicit and transport-capped.** kameo's
+     `messaging::Config` carries a fourth, easily missed field:
+     `request_timeout` (default **10s**, mapped to libp2p
+     `request_response::Config::with_request_timeout`), which bounds the
+     entire ask exchange sender-side — dial, send, receiver handler
+     execution, reply — while `mailbox_timeout`/`reply_timeout` are
+     serialized into the request and enforced only on the receiving
+     node. Any reply_timeout above request_timeout is dead configuration:
+     the sender observes `OutboundFailure(Timeout)` at the transport cap
+     regardless. Because this design deliberately places durable
+     Postgres writes inside ask round-trips (the handoff ack fires after
+     the receiver's durable/SM record; the live-resume handshake asks
+     the old owner to detach-flush a full `sm_unacked` snapshot), Phase
+     2 sets `with_request_timeout` explicitly, sized above the
+     worst-case fenced-write/handshake budget — the live-resume
+     detach-flush of a large unacked queue on a loaded DB is the sizing
+     case: at the 10s default, every backoff retry of a >10s flush times
+     out identically and forfeits a live session the held-response
+     window (element 8) exists to save. Stated invariants:
+     reply_timeout ≤ request_timeout, and mailbox_timeout + receiver
+     handler budget ≤ request_timeout. `max_concurrent_streams` (default
+     100) caps **all** concurrent asks per peer connection — relay
+     traffic, state-mutation asks, flush pokes, presence anti-entropy,
+     Demote, and steal handshakes share it — and is set/documented
+     against the modeled concurrent-ask load per peer pair.
+   - **Inbound `h` accounting is coupled to handoff; `<r/>` answers are
+     not.** A cross-node-destined inbound stanza counts as "handled" for
+     the origin client's stream — included in inbound `h` — only after
+     the handoff ack arrives or the durable fallback write commits.
+     XEP-0198 defines "handled" as the server having taken
      responsibility; we take responsibility exactly at owner-acked or
-     durable handoff, never before. `h` advances in stream order, so an
-     unresolved handoff for stanza k defers acking k and everything after
-     it. This closes the sender-node-crash loss window: a stanza the server
-     has acked to the origin client is, by construction, already in the
-     recipient's SM queue or in durable storage. (Latency consequence
-     recorded in Consequences.)
+     durable handoff, never before, and `h` advances in stream order, so
+     an unresolved handoff for stanza k holds `h` at k−1. But every
+     client `<r/>` is **answered immediately with the current `h`** —
+     never withheld: XEP-0198 §4 is explicit that the `<a/>` response
+     "MUST NOT be withheld for any condition other than a timeout", and
+     a pending remote handoff is not a timeout. Answering `h = k−1`
+     while stanza k is unresolved is fully conformant — the client keeps
+     k in its unacked queue and, if the stream later drops, retransmits
+     it on resume; the dedup layer absorbs that retransmission by design
+     (see the dedup key below). Withholding would additionally starve
+     clients of keepalive acks during handoff retries, turning every
+     slow cross-node handoff into a client-side ack timeout and a
+     needless reconnect. The sender-node-crash loss window stays closed
+     exactly as before: any stanza covered by an acked `h` is, by
+     construction, already in the recipient's SM queue or in durable
+     storage. (Latency consequence recorded in Consequences.)
    - Whenever a node inserts `pending_delivery` rows for a user owned
      elsewhere, it sends a **flush poke** to the owning `UserActor` — as an
      **acked ask with bounded retries** feeding a `stalled_pending_delivery`
@@ -336,17 +536,62 @@ Key elements:
      optimization, not the guarantee: the **guaranteed flush path is the
      owning node's claim-scoped janitor**, which periodically sweeps
      `pending_delivery` for bare JIDs whose `UserActor` claim it holds and
-     flushes rows to any locally connected resource. Both sides of a partial
-     swarm partition still reach Postgres, so delivery delay for an online
-     user is bounded by one sweep interval regardless of swarm reachability
-     (the existing presence-triggered flush in `pending_delivery/flush.rs`
-     remains the fast path on reconnect). Persistent poke failure also files
+     flushes rows through the UserActor's **full delivery surface — local
+     connection actors and the ordered relay to remote connection actors
+     alike**, never "locally connected resources" only. Ownership is
+     deliberately decoupled from socket location (a UserActor claim on
+     node A with the socket on node B is routine multi-device topology),
+     so a local-only flush would strand rows indefinitely for an *online*
+     user whose socket lives elsewhere even while the A↔B relay is
+     healthy — and the flush poke cannot cover that case, because the
+     poke targets the same owner whose local flush is the dead end.
+     Flushed rows route through the same per-`(origin stream → recipient)`
+     sequencing and sticky-failover machinery as live traffic, preserving
+     order across both ingress paths. Both sides of a partial swarm
+     partition still reach Postgres, so delivery delay for an online user
+     is bounded by one sweep interval plus one relay hop regardless of
+     which node terminates the socket (the existing presence-triggered
+     flush in `pending_delivery/flush.rs` remains the fast path on
+     reconnect). Persistent poke failure also files
      a `steal_intents` row for the UserActor claim (element 4), bounding the
      wedged-owner case.
    - Retries are idempotent via a dedup key **exclusively** the
-     server-internal `(origin stream-id, inbound sequence)` carried in the
+     server-internal `(origin stream id, inbound sequence)` carried in the
      envelope, preserving XEP-0198's no-duplication guarantee under
-     at-least-once. XEP-0359 `origin-id` is client-controlled input: it is
+     at-least-once — with two properties that are load-bearing, not
+     implementation detail:
+     1. **The origin stream id is the origin session's SM-ID** (a
+        server-generated stream UUID for non-SM streams) — an identifier
+        stable across stream resumption and cross-node resume-steal,
+        **never a per-TCP-connection id**. Stability is what makes the
+        resume-retransmit race collide in dedup: after a live
+        resume-steal, the old owner's already-in-flight relay envelope
+        for stanza k (a socket close cannot retract it) and the resumed
+        client's §5-mandated retransmission of k, relayed by the new
+        owner, must carry the **same** key at the recipient — with a
+        per-connection id they would be two distinct keys and the
+        recipient would deliver twice.
+     2. **Dedup state survives the receiver.** In-memory receiver-side
+        dedup cannot close the at-least-once edge cases — receiver
+        restart after a committed-but-unacked write, and recipient-claim
+        movement between retries, are precisely when memory is gone. So:
+        (a) the durable tables enforce the key — `pending_delivery` and
+        `sm_unacked` carry a **UNIQUE constraint on
+        `(origin_stream_id, inbound_seq)`** and fallback/promotion
+        inserts are `INSERT ... ON CONFLICT DO NOTHING` inside the
+        fenced transaction, making a retry that races a committed write
+        (ask reply lost, or reply_timeout fired during a slow commit)
+        idempotent regardless of which node handles it, including a new
+        owner after a mid-flight claim steal; (b) the receiver-side
+        per-origin-stream dedup high-water mark / recent-key ledger is
+        **part of the recipient session's SM state** — included in the
+        detach snapshot and the live-handoff flush, and consulted by the
+        durable fallback path — so a sender retry that arrives after the
+        recipient's claim moved to a node whose snapshot already
+        contains the stanza is still suppressed. Dedup-key retention is
+        bounded to the origin stream's lifetime: rows and ledger entries
+        are dropped when the origin SM session completes or expires.
+     XEP-0359 `origin-id` is client-controlled input: it is
      propagated unchanged so receiving clients can deduplicate per XEP-0359,
      and is **never** used server-side as a suppression key (a client reusing
      an origin-id across distinct messages must not get stanzas dropped).
@@ -363,8 +608,23 @@ Key elements:
      durable per-recipient path — an oversized envelope is never retried
      as-is (it fails forever at the transport). Sticky failover: once any
      stanza for a given `(origin stream → recipient)` pair diverts to the
-     durable queue, all subsequent stanzas for that pair divert too until
-     the queue has flushed in order.
+     durable queue, all subsequent stanzas for that pair divert too, and
+     the pair resumes direct sends only via an **explicit un-divert
+     protocol** — "until the queue has flushed" cannot be left as an
+     invariant without a mechanism, because the flush is executed by the
+     owning node's janitor on its own schedule and relay-channel recovery
+     is *not* the same event as queue drain; naive resumption on relay
+     recovery reorders on exactly the path this machinery protects
+     (divert at seq n; n..n+4 sit queued; the relay heals; the sender
+     resumes direct at n+5; the receiver delivers n+5 before the janitor
+     flushes n..n+4 — an RFC 6120 §10.1 violation on the recovery path).
+     Concretely: (a) `pending_delivery` rows carry the per-pair sequence
+     number; (b) a diverted sender resumes direct sends only after
+     observing zero remaining queued rows for that pair — via a point
+     read of the queue or an ack from the owning node's janitor; (c) the
+     receiving node's per-pair gap detection spans **both ingress paths**
+     (relay and janitor flush), so a premature direct send is held, never
+     delivered out of order.
    - **IQ**: a cross-node IQ whose handoff ultimately fails synthesizes a
      typed `<service-unavailable/>` error back to the requester — offline
      storage is message-only and must never be the IQ fallback.
@@ -400,6 +660,35 @@ Key elements:
      relayed traffic with `NotOwner` rather than processing it; demotion
      (graceful or discovered) also calls `remote::unregister()` for any
      name the node will no longer serve.
+   - **The relay actor is supervised; re-registration is mandatory; stale
+     `RemoteActorRef`s have an explicit refresh trigger.** kameo
+     auto-unregisters any actor that stops or panics — removal from the
+     remote registry plus `swarm.unregister` of its provider/metadata
+     records (kameo 0.20 `actor/spawn.rs`) — so an unsupervised relay
+     panic silently removes a healthy node from the routing fabric while
+     its Postgres heartbeat stays fresh: peers' cached `RemoteActorRef`s
+     fail with `ActorNotRunning` (respawn mints a new `ActorId`), the
+     healthy owner correctly vetoes the resulting steal intents, and all
+     traffic toward the node diverts to the durable queue at janitor
+     latency — a steady-state, cluster-wide degradation with no
+     self-healing path. Therefore the relay actor runs under supervision
+     (kameo link or owning task) with respawn plus **mandatory
+     re-registration under the same `node_id` name** (same-peer metadata
+     overwrite is permitted by kameo); and sender-side
+     `ActorNotRunning`/`UnknownActor`/`BadActorType` errors are an
+     explicit trigger for a kademlia re-lookup of the peer's relay name
+     with bounded backoff — a node_id→`RemoteActorRef` refresh path
+     **distinct from** the `NotOwner` claims-refresh path, which only
+     refreshes entity→node_id and never sees these transport-layer
+     errors.
+   - **Negative caching**: entities with no claims row (offline users,
+     absent rooms) get short-TTL negative cache entries, invalidated
+     locally when this node acquires a claim for the entity and treated
+     as a miss on any inbound envelope naming the entity. Without this,
+     every stanza to every offline recipient — roster fan-out where most
+     contacts are offline, MUC invites, retry storms — is an uncacheable
+     claims-table point read on the hot path; the negative-lookup rate is
+     an explicit term in element 12's load model.
    - Staleness bound: a hard-dead node's provider and metadata records
      remain visible until the libp2p provider/record TTLs expire; the
      **measured visibility window of a dead publisher's records** — not the
@@ -416,9 +705,30 @@ Key elements:
    set. Because occupant state died with the owner under the old design and
    nobody could send the `<presence type='unavailable'/>` that re-join
    depends on, occupant tracking becomes durable:
-   - The owning `RoomActor` persists the room's **occupant roster (real JID,
-     nick, occupant-id)** in Postgres alongside the room claim, epoch-fenced
-     like all claimed-entity writes.
+   - The owning `RoomActor` persists in Postgres alongside the room claim,
+     epoch-fenced like all claimed-entity writes: the **occupant roster
+     (real JID, nick, occupant-id)** on join/leave, and the **room's
+     long-lived state** — the full room configuration (including password
+     and members-only), the **affiliation lists
+     (owner/admin/member/outcast)**, and the current subject — on every
+     change. Occupant-roster durability alone is nowhere near sufficient
+     for a correct takeover: room state is in-memory only today
+     (`muc/room.rs` `is_dormant` documents exactly this, and no
+     room/affiliation table exists in any schema), so a takeover that
+     rematerialized a default `MucRoom` would silently drop ban lists,
+     member lists, passwords, config, and subject on **every** ownership
+     move — including once per room per rolling deploy — letting outcasts
+     rejoin right after their 332 kick (violating XEP-0045 §7.2.8 and
+     §5.2's long-lived affiliations: ban evasion on every deploy),
+     opening password-protected and members-only rooms, and resetting
+     owner lists. Config/affiliation/subject changes are low-rate, and
+     join/leave already pays a durable write, so the added write
+     amplification is marginal. The new owner **restores configuration,
+     affiliations, and subject from Postgres before accepting any join**
+     and serves §7.2.15 subject-after-join from the restored subject; the
+     Phase 4 GA gates assert that an outcast is still denied entry and
+     that password/members-only protection holds after an ownership
+     steal.
    - **Deposed-owner demotion is a two-part protocol**, because epoch
      fencing alone only fires on durable writes and a quiet room might never
      perform one: (1) after any steal CAS succeeds, the new owner sends a
@@ -427,9 +737,18 @@ Key elements:
      subsequent traffic. (2) As the guaranteed backstop, the owning
      `RoomActor` passes **every broadcast through one fenced statement
      before local fan-out** — the MAM archive insert where archiving is on
-     (already fenced, so free), otherwise a conditional epoch-check `UPDATE`
-     touching the claims row. Because fencing takes a `FOR SHARE` lock on
-     the claims row (element 4), this statement is ordered against the steal:
+     (already fenced, so free), otherwise the exact fencing primitive
+     element 4 already prescribes: an autocommit `SELECT 1 FROM claims
+     WHERE entity=$e AND node_id=$me AND claim_epoch=$mine FOR SHARE`
+     (0 rows ⇒ demote before fan-out). A per-broadcast epoch-check
+     `UPDATE` on the claims row was considered and rejected: at 20–50
+     msg/s an archive-off room would churn millions of dead tuples per
+     day on one row of the routing-critical claims table (HOT-chain
+     growth and autovacuum pressure against the table every cache-miss
+     route point-reads) and would take an exclusive lock where a share
+     lock gives the identical ordering guarantee for free. Because the
+     `FOR SHARE` lock conflicts with the steal CAS's row lock
+     (element 4), this statement is ordered against the steal:
      a deposed owner's very next broadcast attempt returns 0 rows and
      demotes it **before** any local fan-out. The dual-owner exposure is
      therefore bounded: a deposed owner delivers no post-steal broadcasts,
@@ -460,7 +779,10 @@ Key elements:
    authoritative owner lookup and gives every branch below a real lease to
    consult; there is no unclaimed live-session state.
    - **Detached session owned elsewhere**: the receiving node steals the
-     claim via the fenced CAS, loads the durable snapshot, and resumes. The
+     claim via the **consent/epoch-only CAS** (element 4 — the previous
+     owner's lease may be perfectly fresh, so the owner-stale predicate
+     can never authorize this path), loads the durable snapshot, and
+     resumes. The
      final durable delete in `complete_claim` is epoch-fenced, so of two
      simultaneous `<resume/>` attempts on different nodes exactly one wins;
      the loser returns `<failed/>`.
@@ -469,8 +791,9 @@ Key elements:
      not a bare table write**. The stealing node resolves the owner from the
      claims row and asks it (remote ask with timeout) to detach-flush a
      snapshot and close the old stream with a `<conflict/>` stream error per
-     XEP-0198 §5; only on ack does the fenced epoch-bump CAS on the claims
-     row commit and the snapshot get loaded. This also prevents the old node
+     XEP-0198 §5; only on ack does the fenced epoch-bump CAS (the
+     consent/epoch-only variant, element 4) on the claims row commit and
+     the snapshot get loaded. This also prevents the old node
      from continuing to count/send on a half-open socket and diverging `h`.
    - **Owner unreachable but lease fresh**: XEP-0198 has no retry-after
      semantic (`<failed/>` children MUST be RFC 6120 conditions, and real
@@ -521,17 +844,27 @@ Key elements:
      assuming exclusive table ownership.
    - An **orphan reaper** handles rows claimed by nodes whose liveness
      expired: any node may steal such claims (fenced CAS) and then expire or
-     promote them. Monotone lease expiry (element 4) guarantees a reaped
-     node cannot flip back to fresh mid-sweep.
+     promote them, after first committing the expire CAS on the owner's
+     `nodes` row (element 4). The committed `expired` flag guarantees a
+     reaped node cannot flip back to fresh mid-sweep: a concurrent
+     renewal either commits first (blocking the expire CAS via the shared
+     row lock) or fails its `NOT expired` predicate.
    - A stanza that arrives at a node whose claim was stolen mid-flight is
      re-routed: the node re-reads the claims table and relays to the new
      owner (element 6's `NotOwner` path applies symmetrically).
 
 10. **XEP-0397 ISR becomes cluster-correct or is not advertised.**
     `IsrTokenStore` moves to Postgres, keyed to the SM claim: token consume
-    is an atomic single-use `DELETE ... RETURNING` with constant-time token
-    comparison, epoch-fenced like SM steals, and bound to the same
-    authenticated-identity check as resume (element 8). A wrong-node ISR
+    fetches the token row **by the non-secret key** (the SM-ID/claim),
+    compares the stored token against the presented token **in Rust with a
+    constant-time primitive** (`subtle`/`constant_time_eq`), and only then
+    performs the delete — all inside one epoch-fenced, `FOR SHARE`-locked
+    transaction preserving single-use atomicity, bound to the same
+    authenticated-identity check as resume (element 8). Matching the token
+    in a SQL `WHERE` clause (`DELETE ... WHERE token=$2 RETURNING`) is
+    explicitly banned: Postgres byte-wise equality short-circuits on the
+    first mismatching byte and is a timing oracle, so a "constant-time"
+    claim over it would be false. A wrong-node ISR
     attempt performs the same claim lookup as `<resume/>`. Failure handling
     distinguishes the XEP's two cases exactly:
     - **Authentication succeeded but instant resumption impossible** (e.g.
@@ -565,9 +898,9 @@ Key elements:
       remote users their local users subscribe to.
     - The claims orphan-reaper emits **synthesized unavailable presence** for
       all resources of entities whose owner's liveness was reaped — the same
-      fenced-expiry event that triggers SM drain. Monotone lease expiry
-      (element 4) guarantees the reaped owner cannot return mid-sweep and
-      contradict the synthesized presence.
+      fenced-expiry event that triggers SM drain. The committed `expired`
+      flag (element 4's expire CAS) guarantees the reaped owner cannot
+      return mid-sweep and contradict the synthesized presence.
     - Presence **probes are answered only by the authoritative owner**, never
       from a cached remote view.
     - The remote presence message set is typed end-to-end:
@@ -576,17 +909,33 @@ Key elements:
       defined, per the typed-payloads rule.
 
 12. **Database capacity is planned, not discovered.** Pool size becomes a
-    `DatabaseConfig` field surfaced through Helm values (both adapters
-    currently hardcode `.max_connections(10)`). The ADR's load model per
-    replica: claims point-reads at (stanza rate × in-process-cache-miss
-    ratio + NotOwner NACK rate) — the cache is process-local with NotOwner
-    invalidation (element 6), so the miss ratio, not a DHT hit rate, is the
-    modeled variable; one heartbeat CAS per interval (per node, element 4);
-    claim CAS on enable/resume/join/steal; per-broadcast fencing statements
-    for archive-off rooms (element 7); and claim-scoped janitor batches —
-    plus the existing per-subsystem pools. Deployment docs must budget total
-    connections (replicas × pools × size) against Postgres
-    `max_connections`; PgBouncer in transaction mode is compatible with this
+    `DatabaseConfig` field surfaced through Helm values **in Phase 3, not
+    Phase 4**: pool configurability is a prerequisite of the Phase 3
+    drain sequence, which funnels O(owned-entities) fenced transactions
+    through the pool (both adapters currently hardcode
+    `.max_connections(10)`). The **liveness control plane runs on its own
+    dedicated pool** (element 4): the heartbeat CAS and claim CAS
+    statements never queue behind fenced bulk writes, backstop fencing
+    SELECTs, claims-read storms, or janitor batches — pool exhaustion
+    must degrade stanza latency, never lease liveness. The ADR's load
+    model per replica: claims point-reads at (stanza rate ×
+    in-process-cache-miss ratio + NotOwner NACK rate + negative-lookup
+    rate for unclaimed entities, element 6) — the cache is process-local
+    with NotOwner invalidation, so the miss ratio, not a DHT hit rate, is
+    the modeled variable; one heartbeat CAS plus one
+    demotion-reconciliation query per interval (per node, element 4);
+    claim CAS on enable/resume/join/steal; per-broadcast `FOR SHARE`
+    fencing SELECTs for archive-off rooms (element 7); and claim-scoped
+    janitor batches — plus the existing per-subsystem pools. **The
+    model's inputs are exported as metrics** (Phase 3: routing-cache
+    hit/miss counters, NotOwner NACK counters sent/received by entity
+    type, claims-table point-read rate) so the sizing is validated in
+    production rather than inferred from connection-acquire timeouts on
+    the routing hot path, with Phase 4 alerts on NotOwner rate and on
+    cache-miss ratio exceeding the sizing assumption. Deployment docs
+    must budget total connections (replicas × pools × size, including the
+    dedicated control-plane pool) against Postgres `max_connections`;
+    PgBouncer in transaction mode is compatible with this
     design **because** the contract is single-statement CAS plus
     transaction-scoped `FOR SHARE` row locks, never session advisory locks —
     one more reason advisory locks are prohibited here.
@@ -594,7 +943,9 @@ Key elements:
 ## Implementation Plan
 
 Phased so each step ships value independently. `replicaCount: 1` remains the
-default until the final phase, **enforced by the chart, not by convention**.
+default until the final phase, **enforced by the chart at render time and
+by the server-side singleton guard at runtime (Phase 0)** — never by
+convention alone.
 
 - **Phase 0 — restart hardening + guardrails (independent of clustering):**
   - Chart validation (unconditional, now): fail rendering when
@@ -611,13 +962,39 @@ default until the final phase, **enforced by the chart, not by convention**.
     a separate concern. Today an S3-configured deployment can scale to N and
     split-brain with a one-line values change; this closes that, and closes
     it against unknown-key injection too.
+  - **Server-side singleton guard.** Chart validation is render-time only:
+    `kubectl scale deployment waddle-server --replicas=3` during an
+    incident, or an externally attached HPA/KEDA policy silently taking
+    over `.spec.replicas`, bypasses every Helm check — and an
+    S3-configured deployment with persistence disabled scales today
+    without even a Multi-Attach wedge, after which three pods sharing the
+    Postgres DSN each run the unscoped `restore_from_persistence`
+    hydration and the SM-expiry janitor: double/triple promotion of the
+    same `sm_unacked` queues and MUC split-brain — data duplication, not
+    just degraded service. So in non-clustering mode the server itself
+    acquires an **exclusive cluster-singleton lease row** at startup
+    (heartbeat-renewed, Postgres `now()`-based — a degenerate
+    single-entity precursor of the Phase 3 `nodes` table; SQLite gets
+    exclusivity free from its single-writer file) and refuses to serve
+    while another live holder exists, crash-looping with an explicit
+    error. This also protects raw-manifest and non-Helm installs.
+  - Delete the now-dead `persistence.allowUnsafeRwoScale` escape hatch
+    (`values.yaml`, `validations.yaml`): the unconditional
+    `replicaCount > 1` fail makes it unreachable — dead compatibility
+    code is removed, not preserved, per project policy.
   - Set `strategy: Recreate` in the deployment while persistence uses a RWO
     PVC (the default RollingUpdate surges a second pod that deadlocks on
     Multi-Attach with attach-based storage); flip to RollingUpdate with surge
     only in Phase 4 when the PVC requirement is dropped.
   - `preStop` hook via the **Kubernetes native Sleep lifecycle action**
-    (`lifecycle.preStop.sleep: {seconds: 5}`, GA in Kubernetes 1.30;
-    document the minimum Kubernetes version in the chart). An exec `sleep 5`
+    (`lifecycle.preStop.sleep: {seconds: 5}` — `PodLifecycleSleepAction`
+    is beta and enabled by default in Kubernetes 1.30 and **GA in 1.32**,
+    not "GA in 1.30": on 1.29, or on 1.30/1.31 with the feature gate
+    disabled, the pod spec fails API validation and the entire Deployment
+    stops applying — a hard rollout failure, not a degraded hook. The
+    version floor is therefore encoded, not merely documented: Chart.yaml
+    gains `kubeVersion: ">=1.30.0"`, with the residual 1.30/1.31
+    feature-gate caveat noted in the README). An exec `sleep 5`
     cannot work: the production image is a Nix `streamLayeredImage`
     containing only the waddle-server binary, cacert, and iana-etc — no
     shell, no coreutils — so an exec hook would fail with
@@ -625,10 +1002,16 @@ default until the final phase, **enforced by the chart, not by convention**.
     immediately, silently skipping the endpoint-removal propagation bridge.
     The chart template currently has **no lifecycle block or value**; Phase
     0 adds it. Re-derive the budget: `terminationGracePeriodSeconds ≥
-    preStop(5) + WADDLE_DRAIN_TIMEOUT_SECS (30) + claimReleaseBudget(5,
-    Phase 3+) + kill margin(5)` and extend the existing `validations.yaml`
-    grace≥drain check to encode the full formula (current 35s grace + 30s
-    drain leaves no room for either hook or claim release).
+    preStop(5) + WADDLE_DRAIN_TIMEOUT_SECS (30) + claimReleaseBudget (a
+    chart value, default 5, consumed from Phase 3 on) + kill margin(5)`,
+    extend the existing `validations.yaml` grace≥drain check to encode the
+    full formula, **and bump the chart default
+    `terminationGracePeriodSeconds` to satisfy it** (≥ 40 at Phase 0,
+    ≥ 45 once claim release lands in Phase 3): encoding the formula
+    against the current 35s default would fail the chart's own render
+    (35 < 5+30+5). `claimReleaseBudget` is a chart value, not a constant,
+    because the drain's claim-release tail is O(owned entities), not
+    O(1) — see the Phase 3 drain sequence.
   - Fail hard at startup when SM persistence has no DSN in production.
   - Ecdysis listener fd hand-off: **scoped to non-K8s/in-place binary
     restarts only.** A Kubernetes rollout replaces the pod and network
@@ -655,42 +1038,78 @@ default until the final phase, **enforced by the chart, not by convention**.
      default bounded(64).
   All fan-out paths use `try_send` + typed drop outcome.
 - **Phase 2 — remote subsystem spike:** build the swarm subsystem (event
-  loop, Secret-mounted keypair management, peer-ID allowlist enforcement
-  with read-only runtime grants per element 3, headless-DNS peer dialing
-  with re-dial on pod churn, kademlia config, explicit `messaging::Config`
-  request/response size maxima) behind a config flag — this is a new
-  long-lived networking subsystem, not a feature toggle. Build the remote
+  loop; **keypair-pool Secret management with the Postgres CAS slot lease
+  and duplicate-PeerId rejection** per element 3; peer-ID allowlist
+  enforcement with read-only runtime grants and **live-connection
+  revocation on refresh** per element 3; headless-DNS peer dialing
+  with re-dial on pod churn; swarm-level configuration — listen addrs,
+  dialing, transports; explicit `messaging::Config` limits:
+  request/response size maxima, **`with_request_timeout` sized per
+  element 5's timeout hierarchy** with the reply_timeout ≤
+  request_timeout invariants, and `max_concurrent_streams` set against
+  the modeled per-peer concurrent-ask load) behind a config flag — this
+  is a new long-lived networking subsystem, not a feature toggle.
+  Kademlia parameters themselves are **hardcoded by kameo 0.20** (query
+  timeout 10s, replication 5, record TTL 1h, republish 30min, Server
+  mode; the `kademlia` field is private, no accessor): they are
+  documented, not configured — nothing about kademlia is tunable without
+  the fork this ADR already rejected. Build the remote
   codec (XML-text serde wrappers for `Stanza`/`Element`, typed re-parse
   errors, nesting-depth/attribute caps, drop metrics) and the per-peer relay
-  actors. Spike **exit criteria**: cross-node `UserActor` ask round-trip;
+  actors, **supervised with mandatory same-name re-registration on respawn
+  and the `ActorNotRunning` re-lookup trigger** (element 6). Spike **exit
+  criteria**: cross-node `UserActor` ask round-trip;
   **ordering verified under concurrent large/small stanzas** (libp2p
-  per-substream flow control reorders naively-parallel requests); kademlia
+  per-substream flow control reorders naively-parallel requests); **an ask
+  whose receiver handler exceeds `request_timeout` fails sender-side with
+  `OutboundFailure(Timeout)`** — proving the transport cap, not
+  `reply_timeout`, is the binding bound; kademlia
   re-discovery after all bootstrap peers churn in a rolling restart;
   **measured visibility window of a dead publisher's provider+metadata
-  records** (the true staleness bound for node discovery, element 6);
-  partition behavior. Deliverables include swarm observability
-  (connected-peer gauge, kademlia routing-table size, bootstrap retry
-  counter) and a **multi-process cluster test harness** (spawned processes
-  or containers + shared Postgres via testcontainers, with fault injection:
-  dropped tells, paused heartbeats, stale node records, **lone-survivor at
-  N=2 keeps serving while a swarm-partitioned node with Postgres-live
-  unreachable peers fences**) — kameo's `init_global()` is a process
-  singleton, so two in-process swarms cannot be tested; single-process
-  multi-swarm testing is unavailable by construction.
-- **Phase 3 — ownership claims:** `nodes` + `claims` + `steal_intents`
-  schema with the exact CAS/fencing SQL contract from element 4 (including
-  the `FOR SHARE` fencing transaction, the lease-freshness heartbeat CAS,
-  and the LEFT-JOIN stale predicate), behind the `ClaimStore` trait; the
-  **Postgres-only fenced `SmPersistenceStorage` implementation** (fencing
-  decorator) alongside the untouched portable single-node layer (element 1);
-  epoch fencing on **every** `sm_sessions`/`sm_unacked`/promotion write;
+  records against an explicit acceptance threshold** (the window is
+  dominated by the hardcoded 1h record TTL / 30min republish and cannot
+  be tuned — if it fails the threshold the only options are the rejected
+  fork or upstreaming a config surface, so this is a go/no-go
+  measurement; graceful stops proactively unregister, so the bound
+  applies to hard-killed nodes); partition behavior. Deliverables include
+  swarm observability (connected-peer gauge, kademlia routing-table size,
+  bootstrap retry counter) and a **multi-process cluster test harness**
+  (spawned processes or containers + shared Postgres via testcontainers,
+  with fault injection: dropped tells, paused heartbeats, stale node
+  records, **relay-actor panic and recover** — asserting re-registration
+  under the same name and peer re-resolution after `ActorNotRunning`,
+  **revoked-peer-with-live-connection** — asserting disconnect within one
+  allowlist refresh interval, **lone-survivor at N=2 keeps serving while
+  a node isolated from all live swarm peers with Postgres reachable
+  fences**, and **a single dead link between two of three nodes degrades
+  routing to the durable fallback without fencing either endpoint**) —
+  kameo's `init_global()` is a process singleton, so two in-process
+  swarms cannot be tested; single-process multi-swarm testing is
+  unavailable by construction.
+- **Phase 3 — ownership claims:** `nodes` (with the `expired` flag) +
+  `claims` + `steal_intents` schema with the exact CAS/fencing SQL
+  contract from element 4 (the expire CAS, the `NOT expired`
+  lease-freshness heartbeat CAS, the `FOR SHARE` fencing transaction, the
+  expired-flag LEFT-JOIN stale predicate, the consent/epoch-only steal
+  variant, and the per-heartbeat demotion-reconciliation query), behind
+  the `ClaimStore` trait, running on the **dedicated control-plane pool**;
+  **DB pool-size configurability ships here** (element 12 — a drain
+  prerequisite, not a Phase 4 nicety); the **Postgres-only fenced
+  `SmPersistenceStorage` implementation** (a full second trait
+  implementation on `Database::begin`, element 1) alongside the untouched
+  portable single-node layer; epoch fencing on **every**
+  `sm_sessions`/`sm_unacked`/promotion write, with the
+  `(origin_stream_id, inbound_seq)` UNIQUE dedup constraint and
+  `ON CONFLICT DO NOTHING` inserts (element 5);
   SM-claim creation at `<enable/>`; claim-scoped `restore_from_persistence`,
   SM-expiry janitor with `pending_delivery` sweep-flush, and shutdown drain
   (element 9) plus the orphan reaper; cross-node SM resume steal (detached
   fenced-CAS path and live owner-handshake path with `<conflict/>` close and
   the bounded held-response retry window, element 8) with the
   authenticated-identity binding; `RoomActor` ownership with durable
-  occupant roster, the Demote/fenced-broadcast backstop, and the re-election
+  occupant roster **and durable room state — configuration, affiliation
+  lists, subject — restored before the new owner accepts joins**, the
+  Demote/fenced-broadcast backstop, and the re-election
   protocol (element 7); steal-intent/owner-veto unwedge path for RoomActor
   and UserActor claims (element 4); Postgres-backed ISR token store with the
   two-case failure handling (element 10). Graceful drain sequence,
@@ -706,34 +1125,74 @@ default until the final phase, **enforced by the chart, not by convention**.
   parallel with connection drain but completing before process exit. There
   is no global "promote what remains" step after release: releasing first
   and promoting second is a fencing violation by this ADR's own rules.
-  Rollout-aware claim placement: the `nodes` row carries the pod's
+  **Claim release is batched**: the ordering constraint is
+  writes-before-release *per entity*, which batching preserves — entities
+  whose final fenced writes have committed are released in fenced
+  multi-row statements (or the release piggybacks on the entity's final
+  fenced write's transaction), because a per-entity release tail of ~18k
+  claims (the modeled 50k users + 5k rooms over ~3 replicas) through a
+  small pool cannot fit a seconds-scale budget one statement at a time.
+  If the budget still overruns, the kubelet SIGKILLs with claims
+  unreleased — fencing keeps that safe, but the affected entities stall
+  until lease-TTL expiry, silently degrading the "~1 move per entity per
+  deploy" property, so the overrun must be *visible*: **drain
+  observability is a deliverable** — a drain-duration histogram,
+  `claims_released_on_drain` / `claims_abandoned_on_drain` counters, and
+  an alert on nonzero abandonment — and the multi-process harness gains a
+  **drain-at-modeled-scale measurement** (drain thousands of claimed
+  entities; assert wall clock fits `claimReleaseBudget`) as an exit
+  criterion. Rollout-aware claim placement: the `nodes` row carries the pod's
   `pod-template-hash` (downward API); during a rollout, pods whose hash
   matches the newest generation acquire released claims without backoff
   while old-generation pods back off first, so each entity moves
   approximately once per deploy instead of up to N times. Observability
   deliverables: claim acquire/steal/release/expire counters labeled by
   entity type, steal-intent filed/vetoed/expired counters, heartbeat age
-  gauge, per-node owned-entity gauges (wired into the existing
+  gauge **plus heartbeat-write-latency histogram + alert (the cause, not
+  just the symptom — element 4)**, routing-cache hit/miss counters,
+  NotOwner NACK counters (sent and received, by entity type),
+  claims-table point-read rate (element 12's model inputs), per-node
+  owned-entity gauges (wired into the existing
   `room_registry_gauge.rs` / `state_inventory_metrics.rs` patterns), remote
   ask latency histogram + failure counter by reason, **per-peer relay
   queue-depth and in-flight gauges, a sticky-failover activation counter
   plus a gauge of (origin stream → recipient) pairs currently diverted to
-  the durable queue, a durable-queue flush-lag histogram, and the
-  `stalled_pending_delivery` gauge** (element 5). **Test deliverables
+  the durable queue, a durable-queue flush-lag histogram, the
+  `stalled_pending_delivery` gauge** (element 5), and the drain metrics
+  above. **Test deliverables
   (per the XEP test-suite hard rule):** Postgres-backed integration tests
   for acquire/steal/heartbeat/fencing races, **including a race test that
   interleaves a steal commit inside a fenced multi-statement transaction**
   (the cross-node resurrection/double-promotion case that lockless join
-  fencing fails), steal-from-vanished-node (missing `nodes` row), the
-  lapsed-lease heartbeat CAS (paused node must observe fencing loss on
-  wake), and steal-intent veto vs expiry; a two-registry
+  fencing fails), **the renewal-vs-expire interleaving** (renewal
+  evaluated pre-expiry, committed post-steal, must return 0 rows — the
+  expired-flag ordering point, element 4), steal-from-vanished-node
+  (missing `nodes` row), the lapsed-lease heartbeat CAS (paused node must
+  observe fencing loss on wake), steal-intent veto vs expiry, and the
+  **deposed-owner-with-live-socket case** (wedged UserActor, steal at
+  `intent_ttl`, reconciliation conflict-closes the socket within one
+  heartbeat interval — no indefinite inbound blackhole behind a
+  healthy-looking stream); a two-registry
   (two-node-simulating) XEP-0198 suite covering h-counter integrity across
   steal, `<conflict/>` close of the old stream, deferred-`h`/handoff
-  coupling (client `<r/>` unanswered until handoff ack or durable write),
+  coupling (**`<r/>` answered immediately with `h` excluding unresolved
+  handoffs; `h` advances only after handoff ack or durable commit** —
+  never an unanswered `<r/>`, per §4's MUST NOT),
   duplicate-promotion (double-janitor) prevention, dedup under
-  at-least-once retry, and the forged-previd-wrong-identity case returning
-  `not-authorized` without stealing; reconnect-storm sizing (claim-steal
-  QPS for the largest tenant).
+  at-least-once retry **including the resume-retransmit race (old owner's
+  in-flight relay envelope vs the resumed client's retransmission through
+  the new owner — same SM-ID-scoped key), the recipient-claim-move retry
+  (dedup ledger travels in the snapshot), retry-after-ack-lost-post-commit
+  and retry-to-new-owner-after-steal (absorbed by the durable UNIQUE
+  key)**, the **un-divert reorder case** (divert, heal relay, resume —
+  per-pair gap detection holds the premature direct send), the
+  **multi-node janitor flush** (sender→owner handoff fails, recipient's
+  socket on a third node, delivery within one sweep interval over the
+  relay), the **two-simultaneous-live-resume race** (owner acks the first
+  handshake; the second requester loses the consent epoch CAS and falls
+  back to the detached path), and the forged-previd-wrong-identity case
+  returning `not-authorized` without stealing; reconnect-storm sizing
+  (claim-steal QPS for the largest tenant).
 - **Phase 4 — cross-node routing GA:** DM routing across nodes over the
   ordered relay channel; MUC proxying via the remote-safe message set with
   per-node fan-out aggregation and recipient-list chunking; presence
@@ -750,23 +1209,36 @@ default until the final phase, **enforced by the chart, not by convention**.
   (readiness must NOT gate on swarm membership — bootstrap tolerates an
   empty peer set and retries continuously, avoiding cold-start deadlock).
   Swarm connectivity feeds the **liveness** signal only under the same
-  Postgres-relative condition as heartbeat fencing (element 4): liveness
-  fails only after **sustained** (minutes, ≥ M intervals — never one probe
-  period) inability to reach peers that the `nodes` table shows as live,
-  and **never** for 0 connected peers when no other live node rows exist
-  (cold start, scale-down to 1, lone survivor) — otherwise a slow bootstrap
-  or a single peer failure at N=2 produces restart loops. Also: a
+  Postgres-relative isolation condition as heartbeat fencing (element 4):
+  liveness fails only after **sustained** (minutes, ≥ M intervals — never
+  one probe period) inability to reach **any** of two-or-more peers that
+  the `nodes` table shows as live, **never** for a single unreachable
+  peer (partial unreachability is degraded routing plus an alert, not
+  restart), **never** at N=2 on swarm signal alone, and **never** for 0
+  connected peers when no other live node rows exist (cold start,
+  scale-down to 1, lone survivor) — otherwise a slow bootstrap, a single
+  peer failure, or one bad link produces restart loops. Also: a
   **NetworkPolicy restricting ingress on the swarm port to pods matching
   the waddle-server selector** (required deliverable, defense-in-depth
   behind peer authorization, not instead of it), a PodDisruptionBudget
   (`maxUnavailable: 1`) plus soft podAntiAffinity so node drains cannot
   evict multiple replicas at once and stampede claim-steals, RollingUpdate
   strategy (documenting expected deploy churn: with rollout-aware placement,
-  ~1 re-election per room per deploy; without it, up to N), and configurable
-  DB pool size. **GA gates:** dashboards + alerts for claim churn (including
-  a deploy-window claim-churn panel), swarm partition, relay backlog, and
-  durable-queue diversion exist; XEP-0045 re-election kick tests (status
-  332/110, gap-bounce) pass; XEP-0397 cross-node consume tests pass,
+  ~1 re-election per room per deploy; without it, up to N — the keypair
+  slot lease, not pod identity, is what prevents duplicate PeerIds during
+  surge), and the **keypair-pool Secret templating plus the enrollment
+  Helm hook job with its own admin-role Secret** (element 3; scale-up
+  beyond the enrolled pool requires a pipeline enrollment run first —
+  documented). DB pool-size configurability shipped in Phase 3 (element
+  12). **GA gates:** dashboards + alerts for claim churn (including
+  a deploy-window claim-churn panel), swarm partition, relay backlog,
+  durable-queue diversion, drain abandonment, NotOwner NACK rate, and
+  cache-miss ratio vs the pool-sizing assumption exist; XEP-0045
+  re-election kick tests (status 332/110, gap-bounce) pass, **plus
+  room-state survival tests: an outcast is still denied entry after an
+  ownership steal (§7.2.8) and password/members-only configuration still
+  holds — asserting the restore-before-joins path (element 7)**; XEP-0397
+  cross-node consume tests pass,
   including **both failure cases: authenticated-but-resume-impossible
   returns `<success/>`+`<inst-resume-failed/>`+`<failed/>` and continues
   session establishment, and failed token authentication returns a XEP-0388
@@ -796,7 +1268,9 @@ default until the final phase, **enforced by the chart, not by convention**.
 - A lone survivor that can reach Postgres keeps serving (partition
   detection is Postgres-relative, not peer-count-absolute), so losing one
   of two replicas degrades capacity instead of self-inflicting a total
-  outage; a genuinely partitioned minority still fences.
+  outage; a node genuinely isolated from all of two-or-more live peers
+  still fences, while partial link failures degrade to durable-queue
+  routing instead of amputating healthy nodes (element 4).
 - Rolling deploys re-elect ownership immediately via proactive per-entity
   claim release instead of stalling every owned room/user for a heartbeat
   TTL, and rollout-aware placement moves each entity approximately once per
@@ -820,6 +1294,9 @@ default until the final phase, **enforced by the chart, not by convention**.
   exists to keep "holds the runtime DSN" from being sufficient to *join*
   the swarm, and the steal-intent owner veto keeps a healthy owner from
   being evicted, but neither contains a fully compromised enrolled peer.
+  Revocation is the containment lever, and it acts on live connections
+  (element 3): a revoked peer is disconnected within one allowlist
+  refresh interval, not merely refused future dials.
 - The socket can never be remote: delivery always terminates at the node
   owning the TCP connection, so node death always drops live sockets and
   relies on client reconnect.
@@ -836,20 +1313,27 @@ default until the final phase, **enforced by the chart, not by convention**.
   are absorbed by the held-response retry. Detached sessions and graceful
   drains are fully covered.
 - Ordered acked handoff is RTT-bound per relay channel; cross-node
-  throughput per (node pair) is serialized by design, and coupling inbound
-  `h` to handoff means a client's `<r/>` for cross-node-destined stanzas is
-  answered one relay RTT (or one durable write) later than today, with `h`
-  advancing in stream order behind the slowest outstanding handoff.
+  throughput per (node pair) is serialized by design. Coupling inbound `h`
+  to handoff means `h` advances in stream order behind the slowest
+  outstanding handoff — but every client `<r/>` is still answered
+  immediately with the current `h` (XEP-0198 §4's MUST NOT withhold), so
+  the client-visible cost is a later-advancing ack horizon: stanzas stay
+  in the client's unacked queue one relay RTT (or one durable write)
+  longer and may be retransmitted on resume, which the dedup layer
+  absorbs — never a withheld keepalive or a starved ack timer.
   Acceptable in-cluster; revisit with pipelining-with-reorder-buffer if it
   becomes the bottleneck. The relay backlog and diversion gauges (Phase 3)
   exist so saturation is diagnosable rather than inferred from ask latency.
 - MUC ownership re-election causes occupant re-joins (visible as presence
   churn in large rooms), now bounded by jittered backoff and made *correct*
-  (locally synthesized 332/110 kicks) at the cost of a durable occupant
-  roster write path on join/leave — plus, for archive-disabled rooms, one
-  conditional epoch-check statement per broadcast as the deposed-owner
-  backstop (archive-enabled rooms pay nothing extra: the fenced MAM insert
-  doubles as the backstop).
+  (locally synthesized 332/110 kicks; configuration, affiliations, and
+  subject restored from Postgres before the new owner accepts joins, so
+  bans, passwords, and member lists survive takeovers and rolling deploys)
+  at the cost of a durable write path for the occupant roster on
+  join/leave and for config/affiliation/subject changes — plus, for
+  archive-disabled rooms, one `FOR SHARE` fencing SELECT per broadcast as
+  the deposed-owner backstop (archive-enabled rooms pay nothing extra: the
+  fenced MAM insert doubles as the backstop).
 - Every SM session costs one claims-row insert at `<enable/>` — a durable
   write per session establishment (not per stanza), the price of giving
   live sessions a real ownership substrate for cross-node resume.
@@ -857,9 +1341,23 @@ default until the final phase, **enforced by the chart, not by convention**.
   a node that is alive but has wedged one actor holds that entity only
   until the steal-intent `intent_ttl` expires (the owner's failure to veto
   is the evidence), for RoomActor and UserActor claims alike.
-- Claims, fencing, occupant rosters, steal intents, and ISR tokens all add
-  Postgres write paths; capacity is modeled (element 12) but Postgres is
-  now availability-critical for routing decisions, not just storage.
+- Claims, fencing, occupant rosters, room state, steal intents, and ISR
+  tokens all add Postgres write paths; capacity is modeled (element 12)
+  but Postgres is now availability-critical for routing decisions, not
+  just storage — which is why the liveness control plane gets a dedicated
+  pool and its own latency alerting.
+- Swarm identity comes from a finite pre-enrolled keypair pool: scaling
+  beyond `maxReplicas + maxSurge` enrolled keys requires a pipeline
+  enrollment run before the new pod can join the swarm — an explicit
+  operational gate, traded for per-pod revocable identity on a Deployment
+  topology.
+- With exactly two nodes, a swarm-only link failure no longer fences
+  either side; the pair serves in durable-queue degraded mode
+  (janitor-sweep delivery latency for cross-node traffic) until the link
+  heals. This trades bounded staleness for availability: the alternative
+  — both endpoints fencing on one link fault, then oscillating through
+  re-registration — converted a routing degradation into a total outage
+  plus a repeating kick storm.
 
 ## XEP Conformance Notes
 
@@ -869,10 +1367,16 @@ default until the final phase, **enforced by the chart, not by convention**.
   and from the owner-flushed snapshot for live handoffs; when the old stream
   is still open at resume time, the old owner closes it with a `<conflict/>`
   stream error per §5. "Handled" for inbound `h` means responsibility taken:
-  a cross-node-destined stanza is counted (and the client's `<r/>` answered)
-  only after the receiving node acked the handoff or the durable fallback
-  committed — permitted by the XEP and required for the deliver-or-error
-  obligation. Negative `<resume/>` responses are `<failed/>` with RFC 6120
+  a cross-node-destined stanza is counted in `h` only after the receiving
+  node acked the handoff or the durable fallback committed — permitted by
+  the XEP and required for the deliver-or-error obligation — while every
+  client `<r/>` is **answered immediately with the current `h`** per §4's
+  MUST NOT (the `<a/>` response "MUST NOT be withheld for any condition
+  other than a timeout"; a pending remote handoff is not a timeout). A
+  stanza whose handoff is unresolved simply remains outside `h`, kept in
+  the client's unacked queue; any resume-time retransmission is absorbed
+  by the server-side dedup key. Negative `<resume/>` responses are
+  `<failed/>` with RFC 6120
   conditions only (`<item-not-found/>` when the session is gone,
   `<resource-constraint/>` when the owner is unreachable past the bounded
   held-response window); no custom retry-after child is ever emitted, and
@@ -881,7 +1385,13 @@ default until the final phase, **enforced by the chart, not by convention**.
   `complete_claim` delete is epoch-fenced and stale-owner snapshot writes
   are fenced out by the row-locked claims check. At-least-once inter-node
   retry preserves §5's no-duplication guarantee via the server-internal
-  `(origin stream-id, inbound sequence)` dedup key; XEP-0359 origin-ids are
+  `(origin stream id, inbound sequence)` dedup key, where the stream id is
+  the resumption-stable SM-ID, the key is durably enforced by a UNIQUE
+  constraint on the fallback/promotion tables, and the receiver-side
+  dedup ledger travels inside the recipient's SM snapshot across claim
+  moves (element 5) — so the guarantee holds across stream resumption,
+  resume-steal, and recipient-claim movement, not only under static
+  ownership; XEP-0359 origin-ids are
   passed through for client-side dedup and never used as a server-side
   suppression key. XEP-0198 acks are hop-scoped; end-to-end responsibility
   is carried by the acked handoff + durable fallback, never attributed to
@@ -893,10 +1403,17 @@ default until the final phase, **enforced by the chart, not by convention**.
   with status **332** (and **110** on self-presence) from the durable
   occupant roster, satisfying the service-shutdown obligation and triggering
   standard client re-join; gap-window messages bounce with
-  `<resource-constraint/>`.
+  `<resource-constraint/>`. Room configuration, affiliation lists, and
+  subject are durable under the room claim and restored before the new
+  owner accepts joins, so §5.2's long-lived affiliations and §7.2.8's
+  outcast denial hold across takeover (no ban evasion via re-election),
+  password/members-only protection persists, and §7.2.15
+  subject-after-join is served from the restored subject.
 - **XEP-0397 (ISR) / XEP-0388 (SASL2):** not advertised until the
-  Postgres-backed, epoch-fenced, single-use (`DELETE ... RETURNING`,
-  constant-time compare) token store ships in Phase 3. Failure handling
+  Postgres-backed, epoch-fenced, single-use token store ships in Phase 3
+  (lookup by the non-secret SM-ID, constant-time comparison in Rust,
+  fenced delete — never a token-matching SQL `WHERE` clause, which is a
+  timing oracle). Failure handling
   follows the XEP's two distinct cases: authenticated-but-resume-impossible
   returns `<success/>` containing `<inst-resume-failed/>` wrapping the
   XEP-0198 `<failed/>` (client continues normal session establishment);
