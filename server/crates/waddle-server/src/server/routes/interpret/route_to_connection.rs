@@ -169,6 +169,7 @@ pub(super) async fn route_to_connection(
                                 bare_jid: bare.clone(),
                             })
                             .mailbox_timeout(ACTOR_ROUTE_ASK_TIMEOUT)
+                            .reply_timeout(ACTOR_ROUTE_ASK_TIMEOUT)
                             .await
                             .unwrap_or_default();
                         if priority.is_empty() {
@@ -177,6 +178,7 @@ pub(super) async fn route_to_connection(
                                     bare_jid: bare.clone(),
                                 })
                                 .mailbox_timeout(ACTOR_ROUTE_ASK_TIMEOUT)
+                                .reply_timeout(ACTOR_ROUTE_ASK_TIMEOUT)
                                 .await
                                 .unwrap_or_default()
                         } else {

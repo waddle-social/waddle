@@ -176,6 +176,7 @@ impl kameo::message::Message<RegisterUserResource> for UserRegistryActor {
                 entry: msg.entry,
             })
             .mailbox_timeout(CHILD_ACTOR_TIMEOUT)
+            .reply_timeout(CHILD_ACTOR_TIMEOUT)
             .await
         {
             Ok(()) => {}
@@ -217,6 +218,7 @@ impl kameo::message::Message<UnregisterUserResource> for UserRegistryActor {
         let is_empty = match user_actor
             .ask(UnregisterConnectionAndReportEmpty { jid: msg.jid })
             .mailbox_timeout(CHILD_ACTOR_TIMEOUT)
+            .reply_timeout(CHILD_ACTOR_TIMEOUT)
             .await
         {
             Ok(is_empty) => is_empty,
@@ -303,6 +305,7 @@ impl kameo::message::Message<SelectRoutableResourcesForUser> for UserRegistryAct
         user_actor
             .ask(SelectRoutableResources)
             .mailbox_timeout(CHILD_ACTOR_TIMEOUT)
+            .reply_timeout(CHILD_ACTOR_TIMEOUT)
             .await
             .unwrap_or_default()
     }
@@ -331,6 +334,7 @@ impl kameo::message::Message<ResourcesForUser> for UserRegistryActor {
         user_actor
             .ask(GetResources)
             .mailbox_timeout(CHILD_ACTOR_TIMEOUT)
+            .reply_timeout(CHILD_ACTOR_TIMEOUT)
             .await
             .unwrap_or_default()
     }
@@ -370,6 +374,7 @@ impl kameo::message::Message<TrySendPeerToUser> for UserRegistryActor {
                 stanza: msg.stanza,
             })
             .mailbox_timeout(CHILD_ACTOR_TIMEOUT)
+            .reply_timeout(CHILD_ACTOR_TIMEOUT)
             .await
             .unwrap_or(BroadcastOutcome::NotConnected)
     }

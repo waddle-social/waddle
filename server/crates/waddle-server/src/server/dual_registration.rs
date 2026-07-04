@@ -47,6 +47,7 @@ pub(crate) async fn mirror_register(
             entry,
         })
         .mailbox_timeout(MIRROR_TIMEOUT)
+        .reply_timeout(MIRROR_TIMEOUT)
         .await
     {
         warn!(
@@ -63,6 +64,7 @@ pub(crate) async fn mirror_unregister(user_registry: &ActorRef<UserRegistryActor
     if let Err(error) = user_registry
         .ask(UnregisterUserResource { jid: jid.clone() })
         .mailbox_timeout(MIRROR_TIMEOUT)
+        .reply_timeout(MIRROR_TIMEOUT)
         .await
     {
         warn!(

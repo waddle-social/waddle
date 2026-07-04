@@ -1,5 +1,12 @@
 use super::*;
 
+/// Upper bound on the outer `UserRegistryActor` fan-out ask, so a saturated or
+/// wedged registry degrades to the DashMap route rather than stalling the
+/// interpreter loop — a partial #699 regression otherwise (Greptile/Copilot P1
+/// on PR #1177). Bounds both enqueue (`mailbox_timeout`) and reply
+/// (`reply_timeout`).
+const ACTOR_FANOUT_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 pub(super) async fn run_headless_recipient_pass(
     deps: &Deps<'_>,
     recipient_bare: &jid::BareJid,
@@ -132,10 +139,20 @@ pub(super) async fn deliver_peer_to_full(
         // tree as the fast path (production), then fall back to the DashMap.
         // `try_send` semantics are identical when the mirror is coherent; the
         // DashMap fallback (Greptile/Copilot P1 on PR #1177) means an actor
-        // ask error/timeout or a mirror gap that reports `NotConnected` retries
-        // the authoritative DashMap route before dropping to the detached
-        // path — so a live connection is never skipped. Unit tests without a
-        // `user_registry` use the DashMap directly.
+        // ask error/timeout or a mirror gap that reports `NotConnected` /
+        // `DroppedClosed` retries the authoritative DashMap route before
+        // dropping to the detached path — so a live connection is never
+        // skipped. Unit tests without a `user_registry` use the DashMap
+        // directly.
+        //
+        // Transitional metric note: a target the actor reports as
+        // `NotConnected`/`DroppedClosed` is counted once by the actor's
+        // `try_deliver` and again by the DashMap `try_send_peer_to` fallback,
+        // so `waddle_broadcast_not_connected_total` / `_dropped_closed_total`
+        // can slightly over-count during the dual-path window. This is a
+        // diagnostic counter, not a correctness signal, and the double-count
+        // disappears when the DashMap delivery path is retired (single
+        // counting site). Accepted for Phase 1.
         let outcome = match user_registry {
             Some(user_registry) => {
                 // Bound the OUTER registry ask (Greptile P1 on PR #1177):
@@ -148,15 +165,20 @@ pub(super) async fn deliver_peer_to_full(
                         jid: target.clone(),
                         stanza: stanza.clone(),
                     })
-                    .mailbox_timeout(std::time::Duration::from_secs(2))
+                    .mailbox_timeout(ACTOR_FANOUT_ASK_TIMEOUT)
+                    .reply_timeout(ACTOR_FANOUT_ASK_TIMEOUT)
                     .await
                     .unwrap_or(waddle_xmpp::registry::BroadcastOutcome::NotConnected);
                 if matches!(
                     actor_outcome,
                     waddle_xmpp::registry::BroadcastOutcome::NotConnected
+                        | waddle_xmpp::registry::BroadcastOutcome::DroppedClosed
                 ) {
-                    // Actor has no entry (mirror gap) or the ask failed — retry
-                    // the authoritative DashMap route before giving up.
+                    // Actor has no entry (mirror gap), a stale closed sender
+                    // (`DroppedClosed`) while the DashMap already holds a live
+                    // replacement, or the ask failed/timed out — retry the
+                    // authoritative DashMap route before dropping to detached
+                    // (Copilot review on PR #1177).
                     registry.try_send_peer_to(target, stanza.clone())
                 } else {
                     actor_outcome
