@@ -3,6 +3,7 @@ import { mergeMessageIds } from "@/lib/message-ids";
 import { compareTimelineMessages, pickAuthoritativeTimestamp } from "@/lib/timeline-timestamps";
 import { retractTimelineMessage } from "@/lib/messaging/retraction";
 import { consumeReconciledEchoIds, findLiveMergeTarget } from "@/lib/messaging/self-echo";
+import { findSynthesizedIdMergeTarget } from "@/lib/messaging/synthesized-id-merge";
 
 // Timeline insertion mechanics shared by the channel and DM pipelines:
 // ordering, id-based dedupe, in-place merge of duplicate arrivals, and
@@ -31,7 +32,11 @@ export interface LiveInsertResult {
  * prior "sending" / "failed" optimistic state).
  */
 function mergedLiveRow(existing: TimelineMessage, incoming: TimelineMessage): TimelineMessage {
-  const mergedIds = mergeMessageIds(existing, incoming.id, incoming.wireIds);
+  // #1182: a fabricated primary id must never displace a real one — keep
+  // the existing row's identity and demote the incoming UUID to an alias.
+  const mergedIds = incoming.synthesizedId
+    ? mergeMessageIds(existing, existing.id, [incoming.id, ...(incoming.wireIds ?? [])])
+    : mergeMessageIds(existing, incoming.id, incoming.wireIds);
   const authoritativeTimestamp = pickAuthoritativeTimestamp(
     { createdAt: existing.createdAt, createdAtSource: existing.createdAtSource },
     { createdAt: incoming.createdAt, createdAtSource: incoming.createdAtSource },
@@ -48,6 +53,8 @@ function mergedLiveRow(existing: TimelineMessage, incoming: TimelineMessage): Ti
   }
   if (mergedIds.wireIds?.length) updated.wireIds = mergedIds.wireIds;
   else delete updated.wireIds;
+  // #1182: the reconciled row is only still identity-less if both sides were.
+  if (!(existing.synthesizedId && incoming.synthesizedId)) delete updated.synthesizedId;
   if (existing.isSelf && incoming.isSelf) {
     updated.deliveryStatus = "delivered";
   }
@@ -67,7 +74,10 @@ export function insertLiveMessage(
   policy: LiveInsertPolicy = {},
 ): LiveInsertResult {
   const finalize = policy.finalize ?? ((timeline: TimelineMessage[]) => timeline);
-  const existing = findLiveMergeTarget(messages, msg, pendingEchoClientIds);
+  // #1182: an id-less (re)delivery has no wire ids to overlap the row a
+  // MAM reload already seeded — fall back to content reconciliation.
+  const existing = findLiveMergeTarget(messages, msg, pendingEchoClientIds)
+    ?? findSynthesizedIdMergeTarget(messages, msg);
   if (existing) {
     const merged = messages
       .map((m) => (m.id === existing.id ? mergedLiveRow(m, msg) : m))

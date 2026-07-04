@@ -441,6 +441,12 @@ export function roomMessageFromArchived(
   const roomPrimaryId = message.id ?? stampedByRoom ?? message.mam_id;
   const roomWireIds = [message.id, message.origin_id, stampedByRoom]
     .filter((value): value is string => !!value && value !== roomPrimaryId);
+  // #1182: on the live path `mam_id` is fabricated by the dispatcher, so a
+  // stanza with no wire identity at all ends up keyed on a random UUID that
+  // the MAM copy can never match. Flag it for content-based reconciliation
+  // and don't let the fabricated UUID masquerade as an archive UID.
+  const synthesizedPrimary =
+    source === "live" && roomPrimaryId === message.mam_id && roomWireIds.length === 0;
   if (activeRetractionTarget) {
     return {
       id: roomPrimaryId,
@@ -538,7 +544,7 @@ export function roomMessageFromArchived(
     );
   const base: LiveRoomMessage = {
     id: roomPrimaryId,
-    archiveId: message.mam_id,
+    ...(synthesizedPrimary ? { synthesizedId: true } : { archiveId: message.mam_id }),
     fromJid,
     roomJid,
     nick,
@@ -668,6 +674,11 @@ export function dmMessageFromArchived(
   // anyway, but the codec stays symmetric with the room path so a stray
   // foreign-server archive row can't manifest a bodyless DM ghost either.
   if (!message.body && !message.subject && !callThread && !sharedFiles.length && !linkPreviews.length && !extensionAnnotations.length && !message.is_retracted) return null;
+  // #1182: see `roomMessageFromArchived` — a live stanza with no wire
+  // identity is keyed on a dispatcher-fabricated UUID; flag it for
+  // content-based reconciliation instead of claiming an archive UID.
+  const synthesizedPrimary =
+    source === "live" && dmPrimaryId === message.mam_id && dmWireIds.length === 0;
   const { linkPreviews: associatedLinkPreviews, sharedFiles: associatedSharedFiles } =
     associateDirectVideoPreviews(
       linkPreviews.map((preview) => linkPreviewFromWasm(preview, decodeOptions)),
@@ -675,7 +686,7 @@ export function dmMessageFromArchived(
     );
   const base: LiveDmMessage = {
     id: dmPrimaryId,
-    archiveId: message.mam_id,
+    ...(synthesizedPrimary ? { synthesizedId: true } : { archiveId: message.mam_id }),
     peerJid,
     fromJid,
     nick,

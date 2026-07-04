@@ -151,6 +151,10 @@ export interface LiveRoomMessage {
   id: string;
   /** XEP-0313 archive UID from the MAM result envelope, when known. */
   archiveId?: string;
+  /** #1182: `id` is a fabricated UUID — the live stanza carried no wire
+   * identity at all (no client id, no XEP-0359 stanza-id/origin-id), so
+   * only content-based reconciliation can match it to its MAM copy. */
+  synthesizedId?: true;
   wireIds?: string[];
   /** XEP-0308 correction target: original sender message id/origin-id. */
   correctionTargetId?: string;
@@ -237,6 +241,8 @@ export interface LiveDmMessage {
   id: string;
   /** XEP-0313 archive UID from the MAM result envelope, when known. */
   archiveId?: string;
+  /** #1182: `id` is a fabricated UUID — see `LiveRoomMessage.synthesizedId`. */
+  synthesizedId?: true;
   wireIds?: string[];
   /** XEP-0308 correction target: original sender message id/origin-id. */
   correctionTargetId?: string;

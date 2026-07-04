@@ -196,6 +196,10 @@ export interface ExtensionAnnotation {
 
 export interface TimelineMessage {
   id: string;
+  /** #1182: `id` is a fabricated UUID — the live stanza carried no wire
+   * identity at all, so only content-based reconciliation can match it
+   * to its MAM copy. Cleared once the row adopts a real identity. */
+  synthesizedId?: true;
   /** Equivalent wire-level ids (XEP-0359 stanza/origin ids, echoed ids). */
   wireIds?: string[];
   /** XEP-0308 correction target: original sender message id/origin-id. */
