@@ -104,6 +104,7 @@ pub(super) async fn run_headless_recipient_pass(
 /// authoritative payload after this point.
 pub(super) async fn deliver_peer_to_full(
     registry: &waddle_xmpp::registry::ConnectionRegistry,
+    user_registry: Option<&kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>>,
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
     target: &jid::FullJid,
     stanza: &Stanza,
@@ -127,7 +128,22 @@ pub(super) async fn deliver_peer_to_full(
             if message.type_ == xmpp_parsers::message::MessageType::Groupchat
     );
     if is_groupchat_reflection {
-        match registry.try_send_peer_to(target, stanza.clone()) {
+        // ADR-0017 Phase 1 delivery cutover: route fan-out through the actor
+        // tree when wired (production). `try_send` semantics are identical to
+        // the DashMap path; unit tests without a `user_registry` use the
+        // DashMap directly.
+        let outcome = if let Some(user_registry) = user_registry {
+            user_registry
+                .ask(waddle_xmpp::registry::TrySendPeerToUser {
+                    jid: target.clone(),
+                    stanza: stanza.clone(),
+                })
+                .await
+                .unwrap_or(waddle_xmpp::registry::BroadcastOutcome::NotConnected)
+        } else {
+            registry.try_send_peer_to(target, stanza.clone())
+        };
+        match outcome {
             waddle_xmpp::registry::BroadcastOutcome::Delivered => {
                 debug!(jid = %target, "RouteToConnection: groupchat reflection queued for recipient pass");
             }

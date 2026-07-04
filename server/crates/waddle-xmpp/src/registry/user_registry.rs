@@ -16,12 +16,12 @@ use kameo::Actor;
 use thiserror::Error;
 use tracing::{debug, info};
 
-use super::connection_registry::ConnectionEntry;
-use super::user_actor::delivery::SelectRoutableResources;
+use super::connection_registry::{BroadcastOutcome, ConnectionEntry};
+use super::user_actor::delivery::{SelectRoutableResources, TrySendPeer};
 use super::user_actor::{
     GetResources, RegisterConnection, UnregisterConnectionAndReportEmpty, UserActor,
 };
-use crate::metrics;
+use crate::{metrics, prometheus, Stanza};
 
 const CHILD_ACTOR_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -333,6 +333,48 @@ impl kameo::message::Message<ResourcesForUser> for UserRegistryActor {
             .mailbox_timeout(CHILD_ACTOR_TIMEOUT)
             .await
             .unwrap_or_default()
+    }
+}
+
+/// Non-blocking `try_send` of a peer-routed stanza to one resource, resolved
+/// through the actor tree (ADR-0017 Phase 1 delivery cutover for fan-out).
+/// Resolves the `UserActor` for `jid.to_bare()` and forwards
+/// [`TrySendPeer`]; a missing user or child error maps to
+/// [`BroadcastOutcome::NotConnected`] (counted like the DashMap path), so the
+/// caller's detached-resource fallback runs. Reserved for genuine fan-out
+/// (MUC reflection, presence/PEP broadcast) where drop-on-full is correct —
+/// directed 1:1/IQ delivery keeps the DashMap await-capacity path.
+pub struct TrySendPeerToUser {
+    pub jid: FullJid,
+    pub stanza: Stanza,
+}
+
+impl kameo::message::Message<TrySendPeerToUser> for UserRegistryActor {
+    type Reply = BroadcastOutcome;
+
+    async fn handle(
+        &mut self,
+        msg: TrySendPeerToUser,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let Some(user_actor) = self.users.get(&msg.jid.to_bare()).cloned() else {
+            prometheus::increment_broadcast_not_connected();
+            return BroadcastOutcome::NotConnected;
+        };
+        match user_actor
+            .ask(TrySendPeer {
+                jid: msg.jid,
+                stanza: msg.stanza,
+            })
+            .mailbox_timeout(CHILD_ACTOR_TIMEOUT)
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(_) => {
+                prometheus::increment_broadcast_not_connected();
+                BroadcastOutcome::NotConnected
+            }
+        }
     }
 }
 

@@ -4105,11 +4105,7 @@ async fn groupchat_messages_are_archived_and_returned_via_mam() {
     // connection registry as PeerStanza, so register the sender's
     // outbound channel before driving `handle_message`.
     let (sender_tx, mut sender_rx) = mpsc::channel(8);
-    state
-        .deps
-        .protocol
-        .connection_registry
-        .register(sender_jid.clone(), sender_tx);
+    register_test_connection(state.as_ref(), &sender_jid, sender_tx).await;
     let room_actor = get_or_create_room_actor(
         state.as_ref(),
         &room_jid,
@@ -4201,11 +4197,7 @@ async fn groupchat_preview_request_is_stamped_and_archived_without_private_paylo
         .parse()
         .expect("sender jid");
     let (sender_tx, mut sender_rx) = mpsc::channel(8);
-    state
-        .deps
-        .protocol
-        .connection_registry
-        .register(sender_jid.clone(), sender_tx);
+    register_test_connection(state.as_ref(), &sender_jid, sender_tx).await;
     let room_actor = get_or_create_room_actor(
         state.as_ref(),
         &room_jid,

@@ -55,6 +55,33 @@ pub(crate) async fn create_test_websocket_state() -> Arc<WebSocketState> {
     create_test_websocket_state_with_extension_manager(empty_extension_manager().await, None).await
 }
 
+/// Register a connection into BOTH the DashMap `ConnectionRegistry` and the
+/// actor tree, sharing the `Arc`-backed `ConnectionEntry` exactly as the
+/// production dual-registration path does (ADR-0017 Phase 1).
+///
+/// Tests that drive delivery or bare-JID selection through the actor cutover
+/// MUST use this instead of a bare `connection_registry.register(...)`;
+/// otherwise the actor tree is empty and the cutover paths resolve no target.
+pub(crate) async fn register_test_connection(
+    state: &WebSocketState,
+    jid: &jid::FullJid,
+    sender: mpsc::Sender<waddle_xmpp::registry::OutboundStanza>,
+) {
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .register(jid.clone(), sender);
+    if let Some(entry) = state.deps.protocol.connection_registry.get_entry(jid) {
+        crate::server::dual_registration::mirror_register(
+            &state.deps.protocol.user_registry,
+            jid.clone(),
+            entry,
+        )
+        .await;
+    }
+}
+
 /// A self-contained [`waddle_sfu::LiveKitSfu`] for tests. Mints real
 /// JWTs locally (no network), so the XEP-0166 Jingle handler can
 /// rewrite the Waddle LiveKit transport exactly as it does in

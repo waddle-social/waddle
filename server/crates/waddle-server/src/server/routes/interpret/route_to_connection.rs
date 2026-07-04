@@ -99,7 +99,14 @@ pub(super) async fn route_to_connection(
 
         match jid.clone().try_into_full() {
             Ok(full) => {
-                deliver_peer_to_full(registry, deps.sm_session_registry, &full, &stanza).await
+                deliver_peer_to_full(
+                    registry,
+                    deps.user_registry,
+                    deps.sm_session_registry,
+                    &full,
+                    &stanza,
+                )
+                .await
             }
             Err(bare) => {
                 // Enumerate XEP-0198 detached-but-resumable
@@ -188,8 +195,14 @@ pub(super) async fn route_to_connection(
                     let live_set: std::collections::HashSet<jid::FullJid> =
                         live_targets.iter().cloned().collect();
                     for full in live_targets {
-                        deliver_peer_to_full(registry, deps.sm_session_registry, &full, &stanza)
-                            .await;
+                        deliver_peer_to_full(
+                            registry,
+                            deps.user_registry,
+                            deps.sm_session_registry,
+                            &full,
+                            &stanza,
+                        )
+                        .await;
                     }
                     if let Some(sm) = deps.sm_session_registry {
                         for full in detached_targets {

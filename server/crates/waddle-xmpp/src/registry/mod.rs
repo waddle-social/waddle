@@ -28,6 +28,6 @@ pub use user_actor::delivery::{
 };
 pub use user_registry::{
     GetOrCreateUser, GetUser, ListUsers, RegisterUserResource, RemoveUser, ResourcesForUser,
-    SelectRoutableResourcesForUser, UnregisterUserResource, UserCount, UserRegistryActor,
-    UserRegistryError,
+    SelectRoutableResourcesForUser, TrySendPeerToUser, UnregisterUserResource, UserCount,
+    UserRegistryActor, UserRegistryError,
 };
