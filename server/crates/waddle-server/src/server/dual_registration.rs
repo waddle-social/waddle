@@ -36,43 +36,51 @@ const MIRROR_TIMEOUT: Duration = Duration::from_secs(2);
 /// `entry` MUST be the live DashMap [`ConnectionEntry`] (obtained via
 /// `entry_if_owner`), so the actor shares its `Arc`-backed presence/carbons
 /// atomics and later updates stay coherent without per-site mirroring.
+///
+/// Uses a bounded `tell` (enqueue-only), not `ask` (Copilot review on PR
+/// #1177): the mirror is best-effort and its reply is unused, so the live bind
+/// path must not block for the handler to run — only for a mailbox slot, and
+/// only up to [`MIRROR_TIMEOUT`]. The `UserRegistryActor` mailbox is FIFO, so a
+/// later `unregister` tell (or a same-session read) is still ordered after this
+/// register.
 pub(crate) async fn mirror_register(
     user_registry: &ActorRef<UserRegistryActor>,
     jid: FullJid,
     entry: ConnectionEntry,
 ) {
     if let Err(error) = user_registry
-        .ask(RegisterUserResource {
+        .tell(RegisterUserResource {
             jid: jid.clone(),
             entry,
         })
         .mailbox_timeout(MIRROR_TIMEOUT)
-        .reply_timeout(MIRROR_TIMEOUT)
         .await
     {
         warn!(
             jid = %jid,
             %error,
-            "dual-registration: failed to mirror register into user_registry \
-             actor; DashMap registration remains authoritative"
+            "dual-registration: failed to enqueue register mirror into \
+             user_registry actor; DashMap registration remains authoritative"
         );
     }
 }
 
 /// Mirror a resource unregistration into the actor tree (best-effort, bounded).
+///
+/// Bounded `tell`, not `ask` — see [`mirror_register`]. Teardown paths (SM
+/// expiry, disconnect cleanup, drain) must not block for the handler.
 pub(crate) async fn mirror_unregister(user_registry: &ActorRef<UserRegistryActor>, jid: &FullJid) {
     if let Err(error) = user_registry
-        .ask(UnregisterUserResource { jid: jid.clone() })
+        .tell(UnregisterUserResource { jid: jid.clone() })
         .mailbox_timeout(MIRROR_TIMEOUT)
-        .reply_timeout(MIRROR_TIMEOUT)
         .await
     {
         warn!(
             jid = %jid,
             %error,
-            "dual-registration: failed to mirror unregister into user_registry \
-             actor; the actor tree may retain a stale resource until the next \
-             successful mirror"
+            "dual-registration: failed to enqueue unregister mirror into \
+             user_registry actor; the actor tree may retain a stale resource \
+             until the next successful mirror"
         );
     }
 }

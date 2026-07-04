@@ -5,7 +5,16 @@ use super::*;
 /// interpreter loop — a partial #699 regression otherwise (Greptile/Copilot P1
 /// on PR #1177). Bounds both enqueue (`mailbox_timeout`) and reply
 /// (`reply_timeout`).
-const ACTOR_FANOUT_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+///
+/// Deliberately small (250ms): `deliver_peer_to_full` runs once per MUC
+/// occupant, so a large timeout compounds across a big room under a wedged
+/// registry (200 occupants × 2s = minutes) before the DashMap fallback runs.
+/// A healthy in-process ask returns in sub-milliseconds, so 250ms never trips
+/// on normal load; under pressure each occupant falls back to the DashMap
+/// quickly. Delivery correctness is unaffected — the DashMap route is
+/// authoritative — only the fast-path attempt is time-boxed (Copilot review on
+/// PR #1177).
+const ACTOR_FANOUT_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
 
 pub(super) async fn run_headless_recipient_pass(
     deps: &Deps<'_>,

@@ -24,14 +24,13 @@
 //!    counters (`try_send_to_with_kind` in `ConnectionRegistry` bumps them;
 //!    the [`BroadcastOutcome`] returned here maps 1:1 so callers and tests
 //!    can assert them);
+//! 6. no drop-rate regression under a join burst — a property of the
+//!    per-connection actor's mailbox capacity, covered by the
+//!    `join_burst_does_not_drop_at_capacity_256` /
+//!    `join_burst_drops_at_default_capacity_64` tests in the parent `tests`
+//!    submodule;
 //! 7. RFC 6121 §8.5.2.1 bare-JID resource selection, excluding
 //!    negative-priority resources.
-//!
-//! Invariant 6 — no drop-rate regression under a join burst — is a property
-//! of the per-connection actor's mailbox capacity and is covered by the
-//! `join_burst_does_not_drop_at_capacity_256` /
-//! `join_burst_drops_at_default_capacity_64` tests in the parent `tests`
-//! submodule.
 
 use jid::FullJid;
 use kameo::message::Context;
