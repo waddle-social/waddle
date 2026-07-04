@@ -24,6 +24,17 @@ use crate::xep::NS_DELAY;
 /// One entry of the `<resumed/>` replay set: the queued wire XML plus
 /// the server-side receipt time of the original stanza, so the caller
 /// can stamp the XEP-0203 `<delay/>` with the true send time.
+///
+/// `stanza_xml` is deliberately the raw wire form, not a typed
+/// [`minidom::Element`]: the unacked queue is XEP-0198's retransmission
+/// log — a byte-preserving record of the frames that already hit the
+/// socket (see [`super::UnackedStanza`] / [`super::DetachedUnackedStanza`],
+/// which model the same domain). Replay entries are the literal
+/// write-to-wire frames, i.e. the I/O boundary where the typed-payloads
+/// rule permits `String`. Keeping the bytes also lets
+/// [`stamp_replay_delay`] fall back to verbatim (unstamped) replay when
+/// an entry does not re-parse, instead of dropping an unacked stanza —
+/// XEP-0198's no-loss guarantee outranks the stamp.
 #[derive(Debug, Clone)]
 pub struct ReplayStanza {
     /// The wire XML captured when the stanza was first sent.
@@ -61,7 +72,10 @@ pub fn stamp_replay_delay(
         // arm should be unreachable; if it ever fires, the stanza
         // replays unstamped and the #1178 out-of-order symptom returns
         // for it — make that observable instead of silent.
-        warn!("SM replay stanza is not a well-formed element; replaying unstamped");
+        warn!(
+            stanza_prefix = %stanza_xml.chars().take(120).collect::<String>(),
+            "SM replay stanza is not a well-formed element; replaying unstamped"
+        );
         return stanza_xml.to_string();
     };
 
