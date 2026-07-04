@@ -386,6 +386,13 @@ async fn test_mailbox_backpressure_marks_best_effort_as_dropped() {
 // Delivery surface (ADR-0017 Phase 1 invariants)
 // ---------------------------------------------------------------------------
 
+/// The connection outbound-channel capacity — mirrors
+/// `waddle_server::…::websocket::connection::OUTBOUND_CHANNEL_SIZE` (256).
+/// The per-connection task that drains this channel is the "connection
+/// actor" of ADR-0017 Phase 1; this constant is its mailbox capacity
+/// (`CONNECTION_ACTOR_MAILBOX_CAPACITY`), never kameo's spawn default of 64.
+const CONNECTION_ACTOR_MAILBOX_CAPACITY: usize = 256;
+
 async fn register(actor: &ActorRef<UserActor>, jid: FullJid, entry: ConnectionEntry) {
     actor
         .ask(RegisterConnection { jid, entry })
@@ -403,6 +410,69 @@ async fn make_available(actor: &ActorRef<UserActor>, jid: FullJid, priority: i8)
         .await
         .expect("update presence");
     assert!(updated);
+}
+
+/// Invariant 6: no outbound drop-rate regression under a join-burst. A slow
+/// client that never drains its channel while a 200-occupant room fans in
+/// must buffer the whole burst without a single `DroppedFull` — the 256
+/// capacity absorbs it, where kameo's default 64 would drop from the 65th.
+#[tokio::test]
+async fn join_burst_does_not_drop_at_capacity_256() {
+    const OCCUPANTS: usize = 200;
+    // Compile-time guard: the burst must fit under the 256 mailbox.
+    const _: () = assert!(OCCUPANTS < CONNECTION_ACTOR_MAILBOX_CAPACITY);
+
+    let actor = spawn_actor("alice").await;
+    let jid = full("alice", "phone");
+    // Never drained: the receiver is held but no recv() is called, modelling a
+    // slow socket during the burst.
+    let (e, _rx) = entry_with_capacity(CONNECTION_ACTOR_MAILBOX_CAPACITY);
+    register(&actor, jid.clone(), e).await;
+
+    for _ in 0..OCCUPANTS {
+        let outcome: BroadcastOutcome = actor
+            .ask(TrySendPeer {
+                jid: jid.clone(),
+                stanza: any_stanza(),
+            })
+            .await
+            .expect("fan-out send");
+        assert_eq!(
+            outcome,
+            BroadcastOutcome::Delivered,
+            "256 capacity must absorb a 200-occupant join burst without drops"
+        );
+    }
+}
+
+/// The contrast that justifies the 256 capacity: kameo's default 64 would
+/// drop under the same 200-occupant burst, so the explicit constant is
+/// load-bearing, not incidental.
+#[tokio::test]
+async fn join_burst_drops_at_default_capacity_64() {
+    const OCCUPANTS: usize = 200;
+    let actor = spawn_actor("alice").await;
+    let jid = full("alice", "phone");
+    let (e, _rx) = entry_with_capacity(64);
+    register(&actor, jid.clone(), e).await;
+
+    let mut dropped = 0usize;
+    for _ in 0..OCCUPANTS {
+        let outcome: BroadcastOutcome = actor
+            .ask(TrySendPeer {
+                jid: jid.clone(),
+                stanza: any_stanza(),
+            })
+            .await
+            .expect("fan-out send");
+        if outcome == BroadcastOutcome::DroppedFull {
+            dropped += 1;
+        }
+    }
+    assert!(
+        dropped > 0,
+        "a 64-capacity channel must drop under a 200-occupant burst"
+    );
 }
 
 /// Invariant 7: RFC 6121 §8.5.2.1 — only available resources are candidates,
