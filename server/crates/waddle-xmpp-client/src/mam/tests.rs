@@ -785,6 +785,97 @@ mod query {
         assert_eq!(page.rsm.count, Some(5));
     }
 
+    #[test]
+    fn collector_dedups_replayed_results_and_filters_foreign_query_ids() {
+        let mut collector = super::super::MamResultCollector::new("query-1");
+
+        // Original delivery.
+        collector.collect(build_archived("mam-0", "query-1", "hello 0"));
+        collector.collect(build_archived("mam-1", "query-1", "hello 1"));
+        // XEP-0198 resume replays the unacked tail: same queryid, same mam_id.
+        collector.collect(build_archived("mam-1", "query-1", "hello 1"));
+        collector.collect(build_archived("mam-0", "query-1", "hello 0"));
+        // A result for another open query must never be collected.
+        collector.collect(build_archived("mam-9", "some-other-query", "noise"));
+
+        let messages = collector.into_messages();
+        assert_eq!(
+            messages.len(),
+            2,
+            "replayed results with an already-collected mam_id must be dropped"
+        );
+        assert_eq!(messages[0].mam_id, "mam-0");
+        assert_eq!(messages[1].mam_id, "mam-1");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_room_history_dedups_replayed_results_by_mam_id() {
+        let (handle, mut cmd_rx, evt_tx) = make_handle();
+
+        tokio::spawn(async move {
+            let cmd = cmd_rx.recv().await.expect("driver received cmd");
+            let (stanza, responder) = match cmd {
+                XmppCommand::SendIq { stanza, responder } => (stanza, responder),
+                other => panic!("unexpected command: {other:?}"),
+            };
+
+            let query_id = stanza
+                .get_child("query", MAM_NS)
+                .and_then(|q| q.attr("queryid"))
+                .expect("queryid attribute on <query>")
+                .to_string();
+            let iq_id = stanza.attr("id").expect("id attribute on <iq>").to_string();
+
+            // Original delivery.
+            for i in 0..3u32 {
+                evt_tx
+                    .send(ClientEvent::MamResult(Box::new(build_archived(
+                        &format!("mam-{i}"),
+                        &query_id,
+                        &format!("hello {i}"),
+                    ))))
+                    .expect("broadcast MAM result");
+            }
+
+            // XEP-0198 resume replays the unacked tail: same queryid, same
+            // mam_id, delivered again before the (also replayed) <fin/>.
+            for i in 1..3u32 {
+                evt_tx
+                    .send(ClientEvent::MamResult(Box::new(build_archived(
+                        &format!("mam-{i}"),
+                        &query_id,
+                        &format!("hello {i}"),
+                    ))))
+                    .expect("broadcast replayed MAM result");
+            }
+
+            responder
+                .send(Ok(build_fin_iq(&iq_id, "mam-0", "mam-2", 3)))
+                .expect("responder not dropped");
+        });
+
+        let page = timeout(
+            Duration::from_secs(2),
+            handle.fetch_room_history("room@muc.example.com", 50, None),
+        )
+        .await
+        .expect("run_mam_query must resolve once <fin/> arrives")
+        .expect("fetch_room_history succeeds");
+
+        assert_eq!(
+            page.messages.len(),
+            3,
+            "replayed results with an already-collected mam_id must be dropped"
+        );
+        for (i, msg) in page.messages.iter().enumerate() {
+            assert_eq!(msg.mam_id, format!("mam-{i}"));
+        }
+        assert!(page.is_complete);
+        assert_eq!(page.rsm.first.as_deref(), Some("mam-0"));
+        assert_eq!(page.rsm.last.as_deref(), Some("mam-2"));
+        assert_eq!(page.rsm.count, Some(3));
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn fetch_room_history_propagates_send_iq_error() {
         let (handle, mut cmd_rx, _evt_tx) = make_handle();

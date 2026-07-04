@@ -212,7 +212,11 @@ impl TestServer {
         for (key, value) in extra_envs {
             command.env(*key, *value);
         }
-        command.stdout(Stdio::null()).stderr(Stdio::null());
+        if std::env::var("WADDLE_TEST_SERVER_STDIO").as_deref() == Ok("inherit") {
+            command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+        } else {
+            command.stdout(Stdio::null()).stderr(Stdio::null());
+        }
         let child = command
             .spawn()
             .unwrap_or_else(|e| panic!("Failed to start waddle-server at {}: {e}", bin.display()));
@@ -277,6 +281,33 @@ impl TestServer {
     /// The password for the fixed test account (username: "admin").
     pub fn fixed_account_password(&self) -> &str {
         &self.fixed_account_password
+    }
+
+    /// Send SIGTERM to the server process — the real deploy-time
+    /// graceful-shutdown trigger (issue #1091). Sent via the raw
+    /// syscall so the suite has no external `kill` binary dependency.
+    #[allow(dead_code)]
+    pub fn send_sigterm(&self) {
+        let pid = self.process.id() as libc::pid_t;
+        // SAFETY: pid is a live child owned by this TestServer (reaped
+        // only in Drop), so the signal cannot hit a recycled pid.
+        let rc = unsafe { libc::kill(pid, libc::SIGTERM) };
+        assert_eq!(rc, 0, "kill(SIGTERM) failed for pid {pid}");
+    }
+
+    /// Wait for the server process to exit on its own, polling
+    /// `try_wait`. Returns `true` if it exited within `timeout`.
+    #[allow(dead_code)]
+    pub async fn wait_for_exit(&mut self, timeout: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        while tokio::time::Instant::now() < deadline {
+            match self.process.try_wait() {
+                Ok(Some(_status)) => return true,
+                Ok(None) => tokio::time::sleep(Duration::from_millis(100)).await,
+                Err(error) => panic!("try_wait on waddle-server: {error}"),
+            }
+        }
+        false
     }
 }
 

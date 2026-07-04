@@ -35,4 +35,4 @@ mod shutdown;
 
 pub use listener::ListenerSet;
 pub use restart::{restart, RestartError};
-pub use shutdown::{ConnectionGuard, GracefulShutdown, ShutdownSignal};
+pub use shutdown::{ConnectionGuard, GracefulShutdown, ShutdownHandle, ShutdownSignal};

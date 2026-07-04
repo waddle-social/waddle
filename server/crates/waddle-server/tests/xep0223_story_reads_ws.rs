@@ -20,8 +20,92 @@ use ws_common::{TestServer, WsXmppClient};
 const DOMAIN: &str = "localhost";
 const READS_NODE: &str = "urn:waddle:story:reads:0";
 const READS_NS: &str = "urn:waddle:story:reads:0";
+const NS_CAPS: &str = "http://jabber.org/protocol/caps";
+const NS_DISCO_INFO: &str = "http://jabber.org/protocol/disco#info";
 
 static TEST_SERIAL: Mutex<()> = Mutex::const_new(());
+
+/// Compute the XEP-0115 ver hash for the advertised feature set.
+/// Copied verbatim from `xep0163_pep_ws.rs`.
+fn caps_verification_string(
+    identity_category: &str,
+    identity_type: &str,
+    identity_name: &str,
+    features: &[&str],
+) -> String {
+    use waddle_xmpp::disco::info::{Feature, Identity};
+    use waddle_xmpp::xep::xep0115::compute_caps_hash;
+    let identities = vec![Identity::new(
+        identity_category,
+        identity_type,
+        Some(identity_name),
+    )];
+    let features: Vec<Feature> = features.iter().map(|f| Feature::new(f)).collect();
+    compute_caps_hash(&identities, &features)
+}
+
+/// Send a ping IQ and wait for its result — a deterministic FIFO
+/// anchor proving all prior frames on this connection were processed.
+/// Copied verbatim from `xep0163_pep_ws.rs`.
+async fn ping_anchor(client: &mut WsXmppClient, id: &str) {
+    client
+        .send(&format!(
+            r#"<iq xmlns="jabber:client" type="get" id="{id}"><ping xmlns="urn:xmpp:ping"/></iq>"#
+        ))
+        .await
+        .expect("send ping");
+    let _ = client
+        .recv_matching(|frame| frame.contains(&format!(r#"id='{id}'"#)) && frame.contains("<iq"))
+        .await
+        .expect("ping result");
+}
+
+/// Establish bob -> alice presence subscription so alice's roster has
+/// bob with `subscription = from` (the XEP-0163 §3 fan-out target).
+/// Adapted from `xep0163_pep_ws.rs`.
+async fn establish_bob_subscribes_to_alice(alice: &mut WsXmppClient, bob: &mut WsXmppClient) {
+    let alice_bare = format!("alice@{DOMAIN}");
+    let bob_bare = format!("bob@{DOMAIN}");
+    alice
+        .send(r#"<iq xmlns="jabber:client" type="get" id="roster-init-a"><query xmlns="jabber:iq:roster"/></iq>"#)
+        .await
+        .expect("alice roster get");
+    let _ = alice
+        .recv_matching(|f| f.contains("roster-init-a"))
+        .await
+        .expect("alice roster result");
+    bob.send(r#"<iq xmlns="jabber:client" type="get" id="roster-init-b"><query xmlns="jabber:iq:roster"/></iq>"#)
+        .await
+        .expect("bob roster get");
+    let _ = bob
+        .recv_matching(|f| f.contains("roster-init-b"))
+        .await
+        .expect("bob roster result");
+
+    alice
+        .send(r#"<presence xmlns="jabber:client"/>"#)
+        .await
+        .expect("alice presence");
+    bob.send(&format!(
+        r#"<presence xmlns="jabber:client" type="subscribe" to="{alice_bare}"/>"#
+    ))
+    .await
+    .expect("bob subscribes");
+    let _subscribe = alice
+        .recv_matching(|f| f.contains(r#"type='subscribe'"#))
+        .await
+        .expect("alice receives subscribe");
+    alice
+        .send(&format!(
+            r#"<presence xmlns="jabber:client" type="subscribed" to="{bob_bare}"/>"#
+        ))
+        .await
+        .expect("alice approves");
+    let _subscribed = bob
+        .recv_matching(|f| f.contains(r#"type='subscribed'"#))
+        .await
+        .expect("bob receives approval");
+}
 
 async fn connect_admin() -> (TestServer, WsXmppClient) {
     let server = TestServer::start();
@@ -236,6 +320,89 @@ async fn node_is_private_to_owner() {
     assert!(
         bob_result.contains("forbidden") || bob_result.contains("item-not-found"),
         "expected forbidden or item-not-found, got: {bob_result}"
+    );
+
+    let _ = alice.close().await;
+    let _ = bob.close().await;
+}
+
+#[tokio::test]
+async fn private_pep_does_not_fan_out_to_roster_contact_with_notify_caps() {
+    // Issue #1094 regression guard for the access_model-derived fan-out
+    // gate: story reads must be whitelist-configured at auto-create so
+    // a roster contact (subscription=from) advertising
+    // `urn:waddle:story:reads:0+notify` caps never receives the §3
+    // roster fan-out. Unlike `private_pep_does_not_fan_out_to_roster`
+    // below, this test puts bob on the REAL leak path (roster + caps),
+    // which is presence-driven and needs no pubsub <subscribe/>.
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut alice, mut bob) = connect_two_accounts().await;
+
+    establish_bob_subscribes_to_alice(&mut alice, &mut bob).await;
+
+    let notify_var = format!("{READS_NODE}+notify");
+    let features = [NS_DISCO_INFO, notify_var.as_str()];
+    let caps_node = "https://bob.example/story-reads-caps";
+    let ver = caps_verification_string("client", "pc", "Bob's Client", &features);
+    let bob_full = bob.full_jid.clone().expect("bob full jid");
+    bob.send(&format!(
+        r#"<presence xmlns="jabber:client"><c xmlns="{NS_CAPS}" hash="sha-1" node="{caps_node}" ver="{ver}"/></presence>"#
+    ))
+    .await
+    .expect("bob caps presence");
+    let disco_query = bob
+        .recv_matching(|f| {
+            f.contains("<iq") && f.contains(r#"type='get'"#) && f.contains(NS_DISCO_INFO)
+        })
+        .await
+        .expect("server caps disco to bob");
+    let iq_id = ws_common::extract_attr_after(&disco_query, "<iq", "id").expect("iq id");
+    let feature_xml: String = features
+        .iter()
+        .map(|f| format!(r#"<feature var="{f}"/>"#))
+        .collect();
+    bob.send(&format!(
+        r#"<iq xmlns="jabber:client" type="result" id="{iq_id}" from="{bob_full}"><query xmlns="{NS_DISCO_INFO}" node="{caps_node}#{ver}"><identity category="client" type="pc" name="Bob's Client"/>{feature_xml}</query></iq>"#
+    ))
+    .await
+    .expect("bob disco reply");
+    ping_anchor(&mut bob, "story-reads-caps-anchor").await;
+
+    let body = reads_body(&[("story-leak", "2026-07-03T10:00:00Z")]);
+    alice
+        .send(&publish_reads_iq("alice-caps-pub", &body))
+        .await
+        .expect("alice publish");
+    let publish_result = alice
+        .recv_matching(|f| f.contains(r#"id='alice-caps-pub'"#))
+        .await
+        .expect("alice publish result");
+    assert!(
+        publish_result.contains(r#"type='result'"#),
+        "publish failed: {publish_result}"
+    );
+
+    // Poll the raw stream (no consuming anchor) for a leaked event.
+    let mut leaked: Option<String> = None;
+    let deadline = std::time::Instant::now() + Duration::from_millis(700);
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match bob.recv_timeout(remaining).await {
+            Ok(frame) => {
+                if frame.contains(READS_NODE) || frame.contains("story-leak") {
+                    leaked = Some(frame);
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    assert!(
+        leaked.is_none(),
+        "story-reads leaked to roster contact with +notify caps: {leaked:?}"
     );
 
     let _ = alice.close().await;

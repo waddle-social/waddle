@@ -123,6 +123,15 @@ async fn record_drained_xml(
     // Drain path: we're recording into the unacked queue for replay
     // on the next resume, NOT writing to a live wire. The SM cadence
     // signal is moot — there is no socket to follow up with `<r/>`.
+    //
+    // No MAM replay exemption here (issue #1089 review): nothing on
+    // this path was ever written to a wire, so the client's `h` can
+    // never include it — counting without queueing would permanently
+    // desync `outbound_count` from `h`. Recording everything keeps
+    // the counters convergent (the resume delivers the stanza, the
+    // client counts it). Server-generated MAM responses also cannot
+    // reach this path: they are produced synchronously on the
+    // requester's own connection, never routed via the registry.
     let _ = sm_state.record_outbound_with_receipt_at(xml.clone(), original_receipt_at);
     let sequence = sm_state.outbound_count;
     if let Some(row_id) = pending_row_id.as_ref() {

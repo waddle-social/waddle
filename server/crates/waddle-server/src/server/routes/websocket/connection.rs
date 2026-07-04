@@ -1,5 +1,6 @@
 use super::*;
 use super::{
+    batch_write::{write_response_batch, BatchSmPolicy, BatchWriteOutcome},
     cleanup::cleanup_connection_shutdown,
     frame::handle_xmpp_frame,
     interpret_loop::build_interpret_deps,
@@ -9,11 +10,15 @@ use super::{
     send::{close_ws_connection, send_ws_message, send_ws_text_frames},
     session_init::build_internal_server_error_stream_error,
     state::WsConnState,
-    stream_management::{is_countable_stanza, SmRegistrationFinalization},
+    stream_management::SmRegistrationFinalization,
     timers::TransportTimers,
-    transport_xml::{build_handled_count_too_high_stream_error, websocket_stream_close_xml},
+    transport_xml::{
+        build_handled_count_too_high_stream_error, build_system_shutdown_stream_error,
+        websocket_stream_close_xml,
+    },
 };
-use waddle_xmpp::stream_management::SmRequest;
+use axum::response::IntoResponse;
+use futures::stream::{SplitSink, SplitStream};
 
 /// Create the WebSocket router
 pub fn router(state: Arc<WebSocketState>) -> Router {
@@ -30,18 +35,49 @@ async fn xmpp_websocket_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<WebSocketState>>,
 ) -> Response {
+    // Graceful shutdown gate (issue #1091). The guard is minted BEFORE
+    // the stop-token check: the upgrade handshake spans a client
+    // round-trip, so a check-then-mint order would let a connection be
+    // admitted after `wait_for_connections_drained` already observed
+    // zero guards and the Q6 drain concluded — reintroducing the very
+    // unpromoted-queue gap this issue closes. Mint-then-check means
+    // every request either sees the cancelled token (503, guard drops)
+    // or is counted by the drain.
+    let connection_guard = state.deps.shutdown.connection_guard();
+    if state.deps.shutdown.stop_token().is_cancelled() {
+        info!("Rejecting XMPP WebSocket upgrade: server is draining");
+        return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
     info!("XMPP WebSocket connection request");
 
     ws.protocols(["xmpp"])
-        .on_upgrade(move |socket| handle_xmpp_websocket(socket, state))
+        .on_upgrade(move |socket| handle_xmpp_websocket(socket, state, connection_guard))
 }
 
 /// Size of the outbound message channel buffer
 const OUTBOUND_CHANNEL_SIZE: usize = 256;
 
+/// Budget for writing the system-shutdown stream error + close frames
+/// to one peer during graceful shutdown (issue #1091). Deliberately
+/// much shorter than the generic 60s `SEND_STALL_TIMEOUT`: a peer that
+/// has stopped reading must not hold its connection guard past the
+/// drain window — the notification is best-effort, while the SM detach
+/// that follows the break is what actually preserves the session.
+const SHUTDOWN_CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Handle an XMPP WebSocket connection
-async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
+async fn handle_xmpp_websocket(
+    socket: WebSocket,
+    state: Arc<WebSocketState>,
+    // Minted in the upgrade handler and held for the connection's whole
+    // lifetime — including the detach/cleanup below — so the ecdysis
+    // drain (issue #1091) only completes once every live session has
+    // been closed AND its SM state handed to the session registry for
+    // Q6 promotion.
+    _connection_guard: waddle_ecdysis::ConnectionGuard,
+) {
     let domain = state.deps.auth_state.xmpp_domain.clone();
+    let shutdown_token = state.deps.shutdown.stop_token();
     info!(domain = %domain, "XMPP WebSocket connection established");
 
     let (mut ws_sender, mut ws_receiver) = socket.split();
@@ -81,153 +117,53 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
     let mut superseded = false;
 
     loop {
+        // Frames the mid-batch ack drain (issue #1089) pulled off the
+        // socket ahead of the dispatcher must be processed in arrival
+        // order BEFORE the socket is polled again — so the socket arm
+        // below is gated on the queue being empty, and an
+        // always-ready arm processes one deferred frame per
+        // iteration. Deferred processing stays a select arm (not a
+        // pre-select loop) so the outbound channel and the keepalive
+        // timer keep getting polled between deferred frames — a
+        // client streaming frames mid-flood must not be able to
+        // starve routed stanzas or dead-peer detection.
+        let deferred_pending = !conn.deferred_inbound.is_empty();
         tokio::select! {
+            // Process one drain-deferred inbound frame.
+            _ = std::future::ready(()), if deferred_pending => {
+                let Some(text) = conn.deferred_inbound.pop_front() else {
+                    continue;
+                };
+                if !handle_inbound_text(
+                    &text,
+                    &domain,
+                    &state,
+                    &mut conn,
+                    &mut pending_tx,
+                    &mut ws_sender,
+                    &mut ws_receiver,
+                )
+                .await
+                {
+                    break;
+                }
+            }
+
             // Handle inbound WebSocket messages from the client
-            msg = ws_receiver.next() => {
+            msg = ws_receiver.next(), if !deferred_pending => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        debug!(len = text.len(), "Received XMPP WebSocket message");
-                        // Any inbound frame is liveness evidence for the
-                        // RFC 7395 §3.8 keepalive policy (issue #1090).
-                        conn.note_transport_activity();
-
-                        // Handle XMPP framing (RFC 7395)
-                        let mut responses =
-                            handle_xmpp_frame(text.as_str(), &domain, state.as_ref(), &mut conn)
-                                .await;
-
-                        // Mirror any phase transition `handle_xmpp_frame`
-                        // performed (most importantly Ready → Closing on
-                        // SASL failure / stream error) into the per-
-                        // connection state machine. Without this, late
-                        // `PeerStanza` dispatches from the outbound
-                        // channel would still go through the recipient
-                        // pipeline even though the legacy phase tracker
-                        // has marked the connection Closing.
-                        conn.sync_state_machine_phase();
-
-                        // Register the connection after successful authentication
-                        // and resource binding. This keeps the transport loop
-                        // focused on WebSocket I/O while the registration module
-                        // owns registry publication and post-registration SM
-                        // finalization.
-                        match register_bound_connection_after_frame(
-                            state.as_ref(),
+                        if !handle_inbound_text(
+                            text.as_str(),
                             &domain,
+                            &state,
                             &mut conn,
                             &mut pending_tx,
-                        )
-                        .await
-                        {
-                            RegistrationAfterFrame::Unchanged => {}
-                            RegistrationAfterFrame::SessionInitializationFailed => {
-                                let stream_error = build_internal_server_error_stream_error(
-                                    "Session initialization failed; please reconnect.",
-                                );
-                                let _ = send_ws_text_frames(
-                                    &mut ws_sender,
-                                    [stream_error, websocket_stream_close_xml()],
-                                    "Failed to send session-init stream error",
-                                )
-                                .await;
-                                let _ = close_ws_connection(
-                                    &mut ws_sender,
-                                    "Failed to send WebSocket close frame after session-init error",
-                                )
-                                .await;
-                                break;
-                            }
-                            RegistrationAfterFrame::Registered(sm_finalization) => {
-                                match sm_finalization {
-                                    SmRegistrationFinalization::KeepExistingResponses => {}
-                                    SmRegistrationFinalization::ReplaceWithResumed {
-                                        resumed,
-                                        replay_after_h,
-                                    } => {
-                                        responses = vec![resumed.to_xml()];
-                                        responses.extend(
-                                            conn.sm_state.get_stanzas_to_resend(replay_after_h),
-                                        );
-                                    }
-                                    SmRegistrationFinalization::ReplaceWithFailed(failed) => {
-                                        responses = vec![failed.to_xml()];
-                                    }
-                                    SmRegistrationFinalization::ReplaceWithHandledCountTooHigh {
-                                        acknowledged,
-                                        send_count,
-                                    } => {
-                                        responses = vec![
-                                            build_handled_count_too_high_stream_error(
-                                                acknowledged,
-                                                send_count,
-                                            ),
-                                            websocket_stream_close_xml(),
-                                        ];
-                                    }
-                                }
-                            }
-                        }
-
-                        ensure_websocket_stream_close_for_closing_phase(&conn, &mut responses);
-
-                        // Record outbound stanzas for XEP-0198 replay BEFORE
-                        // writing them to the socket. If SM is enabled and
-                        // the stanza is countable, push it into the unacked
-                        // queue; a future resume will replay this exact XML.
-                        //
-                        // Exception: when `handle_sm_resume` just ran, the
-                        // responses ARE the replay of the restored unacked
-                        // queue — those stanzas already have their original
-                        // sequence numbers and are still in the queue.
-                        // Re-recording them would bump `outbound_count` past
-                        // reality and push duplicate queue entries, breaking
-                        // subsequent acks and a second resume.
-                        let mut request_ack_after = false;
-                        if conn.suppress_sm_record_next_batch {
-                            conn.suppress_sm_record_next_batch = false;
-                        } else if conn.sm_state.enabled {
-                            for frame in &responses {
-                                if is_countable_stanza(frame) {
-                                    let result = conn.sm_state.record_outbound(frame.clone());
-                                    request_ack_after |= result.request_ack;
-                                }
-                            }
-                        }
-
-                        if !send_ws_text_frames(
                             &mut ws_sender,
-                            responses,
-                            "Failed to send WebSocket message",
+                            &mut ws_receiver,
                         )
                         .await
                         {
-                            break;
-                        }
-                        // SM cadence (XEP-0198 §4): once the unacked
-                        // outbound stanza count since the last `<r/>`
-                        // hits the threshold, follow the batch with an
-                        // `<r/>` so the wasm client sends back `<a
-                        // h='N'/>`. Without this, the unacked queue
-                        // grows monotonically until the 1000-cap
-                        // triggers eviction and resume is permanently
-                        // broken for the stream.
-                        if request_ack_after
-                            && !send_ws_message(
-                                &mut ws_sender,
-                                Message::Text(SmRequest::to_xml().into()),
-                                "Failed to send SM <r/> request",
-                            )
-                            .await
-                        {
-                            break;
-                        }
-
-                        if matches!(conn.phase, ConnectionPhase::Closing { .. }) {
-                            let _ = close_ws_connection(
-                                &mut ws_sender,
-                                "Failed to send WebSocket close frame after XMPP stream close",
-                            )
-                            .await;
                             break;
                         }
                     }
@@ -271,6 +207,7 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                     Some(outbound_stanza) => {
                         if !handle_outbound_stanza(
                             &mut ws_sender,
+                            &mut ws_receiver,
                             &state,
                             &mut conn,
                             &mut timers,
@@ -296,6 +233,57 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                         break;
                     }
                 }
+            }
+
+            // Graceful shutdown (issue #1091): SIGTERM cancelled the
+            // ecdysis stop token. Close this live session natively —
+            // RFC 6120 §4.9.3.20 <system-shutdown/> stream error, then
+            // the RFC 7395 <close/> frame and the WS close handshake —
+            // and break WITHOUT transitioning to Closing: the cleanup
+            // fork below must still see a resumable phase so an
+            // XEP-0198 session detaches into the SmSessionRegistry,
+            // where the shutdown drain promotes its unacked queue (Q6).
+            //
+            // Stream frames are sent only after the server has answered
+            // the client's <open/>: RFC 6120 §4.9.1.2 forbids a stream
+            // error before the response stream header, so a connection
+            // still in the upgrade-to-open gap gets the WS closing
+            // handshake alone.
+            _ = shutdown_token.cancelled() => {
+                info!(
+                    jid = ?conn.phase.bound_jid(),
+                    "Graceful shutdown: closing live session with system-shutdown stream error"
+                );
+                let close_peer = async {
+                    if conn.stream_open_sent {
+                        let _ = send_ws_text_frames(
+                            &mut ws_sender,
+                            [
+                                build_system_shutdown_stream_error(),
+                                websocket_stream_close_xml(),
+                            ],
+                            "Failed to send system-shutdown stream error",
+                        )
+                        .await;
+                    }
+                    let _ = close_ws_connection(
+                        &mut ws_sender,
+                        "Failed to send WebSocket close frame after system-shutdown",
+                    )
+                    .await;
+                };
+                if tokio::time::timeout(SHUTDOWN_CLOSE_TIMEOUT, close_peer)
+                    .await
+                    .is_err()
+                {
+                    warn!(
+                        jid = ?conn.phase.bound_jid(),
+                        timeout_secs = SHUTDOWN_CLOSE_TIMEOUT.as_secs(),
+                        "Graceful shutdown: peer did not accept the close frames in time; \
+                         proceeding to detach without them"
+                    );
+                }
+                break;
             }
 
             // RFC 7395 §3.8 keepalive clock (issue #1090). Fires only
@@ -361,6 +349,24 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
         }
     }
 
+    // Frames the mid-batch ack drain had already pulled off the
+    // socket when the transport went away (issue #1089). The old loop
+    // would have processed them before ever seeing the close, so
+    // their inbound side effects (routing to peers, inbound_count)
+    // must still happen. There is no wire to answer on: responses to
+    // the departed client are recorded for XEP-0198 resume replay
+    // instead of being written.
+    //
+    // Skipped when superseded: the registry slot, MUC occupancy, and
+    // SM continuity now belong to the replacement session, and
+    // running handlers from the stale session here could still emit
+    // side effects (routing, inbound_count) against state the
+    // newcomer owns — the same reason the cleanup block below
+    // short-circuits.
+    if !superseded {
+        process_deferred_inbound_after_transport_loss(&domain, state.as_ref(), &mut conn).await;
+    }
+
     // Connection is ending. Decide between two paths:
     //   A. Fully clean up (unregister + remove MUC occupants) — the default
     //      for non-SM sessions and for SM sessions that didn't negotiate
@@ -377,6 +383,155 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
     cleanup_connection_shutdown(state.as_ref(), &mut outbound_rx, &mut conn, superseded).await;
 
     info!("XMPP WebSocket connection closed");
+}
+
+/// Handle one inbound XMPP text frame end to end: framing, phase
+/// mirroring, post-frame registration, and the chunked XEP-0198-aware
+/// response write. Extracted from the connection loop's Text arm so
+/// frames deferred by the mid-batch ack drain (issue #1089) go
+/// through the exact same path as frames read off the socket.
+///
+/// Returns `false` when the connection loop must break.
+async fn handle_inbound_text(
+    text: &str,
+    domain: &str,
+    state: &Arc<WebSocketState>,
+    conn: &mut WsConnState,
+    pending_tx: &mut Option<mpsc::Sender<OutboundStanza>>,
+    ws_sender: &mut SplitSink<WebSocket, Message>,
+    ws_receiver: &mut SplitStream<WebSocket>,
+) -> bool {
+    debug!(len = text.len(), "Received XMPP WebSocket message");
+    // Any inbound frame is liveness evidence for the
+    // RFC 7395 §3.8 keepalive policy (issue #1090).
+    conn.note_transport_activity();
+
+    // Handle XMPP framing (RFC 7395)
+    let mut responses = handle_xmpp_frame(text, domain, state.as_ref(), conn).await;
+
+    // Mirror any phase transition `handle_xmpp_frame` performed (most
+    // importantly Ready → Closing on SASL failure / stream error)
+    // into the per-connection state machine. Without this, late
+    // `PeerStanza` dispatches from the outbound channel would still
+    // go through the recipient pipeline even though the legacy phase
+    // tracker has marked the connection Closing.
+    conn.sync_state_machine_phase();
+
+    // Register the connection after successful authentication and
+    // resource binding. This keeps the transport loop focused on
+    // WebSocket I/O while the registration module owns registry
+    // publication and post-registration SM finalization.
+    match register_bound_connection_after_frame(state.as_ref(), domain, conn, pending_tx).await {
+        RegistrationAfterFrame::Unchanged => {}
+        RegistrationAfterFrame::SessionInitializationFailed => {
+            let stream_error = build_internal_server_error_stream_error(
+                "Session initialization failed; please reconnect.",
+            );
+            let _ = send_ws_text_frames(
+                ws_sender,
+                [stream_error, websocket_stream_close_xml()],
+                "Failed to send session-init stream error",
+            )
+            .await;
+            let _ = close_ws_connection(
+                ws_sender,
+                "Failed to send WebSocket close frame after session-init error",
+            )
+            .await;
+            return false;
+        }
+        RegistrationAfterFrame::Registered(sm_finalization) => match sm_finalization {
+            SmRegistrationFinalization::KeepExistingResponses => {}
+            SmRegistrationFinalization::ReplaceWithResumed {
+                resumed,
+                replay_after_h,
+            } => {
+                responses = vec![resumed.to_xml()];
+                responses.extend(conn.sm_state.get_stanzas_to_resend(replay_after_h));
+            }
+            SmRegistrationFinalization::ReplaceWithFailed(failed) => {
+                responses = vec![failed.to_xml()];
+            }
+            SmRegistrationFinalization::ReplaceWithHandledCountTooHigh {
+                acknowledged,
+                send_count,
+            } => {
+                responses = vec![
+                    build_handled_count_too_high_stream_error(acknowledged, send_count),
+                    websocket_stream_close_xml(),
+                ];
+            }
+        },
+    }
+
+    ensure_websocket_stream_close_for_closing_phase(conn, &mut responses);
+
+    // Write the batch through the chunked XEP-0198-aware writer
+    // (issue #1089): each countable stanza is recorded just before
+    // its own write, an `<r/>` follows every `ack_threshold`th one,
+    // and already-arrived inbound frames are drained after each `<r/>`
+    // so `<a/>` acks shrink the unacked queue mid-flood.
+    //
+    // Exception: when `handle_sm_resume` just ran, the responses ARE
+    // the replay of the restored unacked queue — those stanzas
+    // already have their original sequence numbers and are still in
+    // the queue. Re-recording them would bump `outbound_count` past
+    // reality and push duplicate queue entries, breaking subsequent
+    // acks and a second resume.
+    let policy = if conn.suppress_sm_record_next_batch {
+        conn.suppress_sm_record_next_batch = false;
+        BatchSmPolicy::ReplaySuppressed
+    } else {
+        BatchSmPolicy::Record
+    };
+    match write_response_batch(
+        ws_sender,
+        ws_receiver,
+        state.as_ref(),
+        conn,
+        responses,
+        policy,
+    )
+    .await
+    {
+        BatchWriteOutcome::Continue => {}
+        BatchWriteOutcome::TransportClosed => return false,
+    }
+
+    if matches!(conn.phase, ConnectionPhase::Closing { .. }) {
+        let _ = close_ws_connection(
+            ws_sender,
+            "Failed to send WebSocket close frame after XMPP stream close",
+        )
+        .await;
+        return false;
+    }
+    true
+}
+
+/// Process inbound frames the mid-batch drain deferred before the
+/// transport was lost. Runs after the connection loop breaks, before
+/// shutdown cleanup: side effects (peer routing, `inbound_count`)
+/// still happen; responses cannot be written, so replayable countable
+/// ones are recorded into the unacked queue for a future resume.
+/// Registration is skipped — a dead transport must not (re)register
+/// itself.
+async fn process_deferred_inbound_after_transport_loss(
+    domain: &str,
+    state: &WebSocketState,
+    conn: &mut WsConnState,
+) {
+    while let Some(text) = conn.deferred_inbound.pop_front() {
+        let responses = handle_xmpp_frame(&text, domain, state, conn).await;
+        conn.sync_state_machine_phase();
+        let policy = if conn.suppress_sm_record_next_batch {
+            conn.suppress_sm_record_next_batch = false;
+            BatchSmPolicy::ReplaySuppressed
+        } else {
+            BatchSmPolicy::Record
+        };
+        batch_write::record_remaining_for_replay(conn, responses.into_iter(), policy);
+    }
 }
 
 fn ensure_websocket_stream_close_for_closing_phase(

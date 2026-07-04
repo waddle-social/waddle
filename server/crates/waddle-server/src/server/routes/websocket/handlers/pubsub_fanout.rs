@@ -32,7 +32,7 @@
 use jid::{BareJid, FullJid, Jid};
 use std::collections::HashSet;
 use tracing::{info, warn};
-use waddle_xmpp::pubsub::{build_pubsub_event, PubSubEvent, PubSubItem};
+use waddle_xmpp::pubsub::{build_pubsub_event, AccessModel, PubSubEvent, PubSubItem};
 use waddle_xmpp::registry::BroadcastOutcome;
 use waddle_xmpp::Stanza;
 use waddle_xmpp_core::build_pubsub_retract_event;
@@ -84,27 +84,6 @@ pub async fn fan_out_publish(state: &WebSocketState, req: FanOutRequest<'_>) {
     let publisher = req.publisher;
     let publisher_full = req.publisher_full;
     let is_pep = req.is_pep;
-    // Private PEP nodes (whitelist-access) carve out of roster + CAPS
-    // fan-out even though the published payload is broadcast at the
-    // pubsub layer. Whitelist `access_model` only gates the items-fetch
-    // path; without this check a contact with `+notify` for the node's
-    // namespace would still receive headline events. New entries here
-    // require an integration test asserting roster contacts do NOT
-    // receive the event (see `xep0402_bookmarks_*` and the
-    // `urn:waddle:story:reads:0` fan-out test).
-    let is_private_bookmarks_node = is_pep && node == waddle_xmpp::xep::xep0402::PEP_NODE;
-    let is_private_story_reads_node =
-        is_pep && node == waddle_xmpp_core::waddle_story_reads::PEP_NODE_WADDLE_STORY_READS;
-    // ADR-010 Phase 4: the synced manual-status node is owner-only. Skip
-    // the §3 roster pass so a contact advertising
-    // `urn:waddle:status-preference:0+notify` never learns the user's
-    // picked mode; the §3.4 owner-self pass still runs so the user's own
-    // resources adopt it live.
-    let is_private_status_preference_node = is_pep
-        && node == waddle_xmpp_core::waddle_status_preference::PEP_NODE_WADDLE_STATUS_PREFERENCE;
-    let is_private_pep_node = is_private_bookmarks_node
-        || is_private_story_reads_node
-        || is_private_status_preference_node;
     let storage = &state.deps.protocol.pubsub_storage;
 
     let node_cfg = match storage.get_node(owner, node).await {
@@ -127,6 +106,24 @@ pub async fn fan_out_publish(state: &WebSocketState, req: FanOutRequest<'_>) {
             return;
         }
     };
+
+    // Private PEP nodes carve out of roster + CAPS fan-out even though
+    // the published payload is broadcast at the pubsub layer. Whitelist
+    // `access_model` only gates the items-fetch path; without this
+    // check a contact with `+notify` for the node's namespace would
+    // still receive headline events (issue #1094: MDS read-state
+    // leaked to the whole roster this way). Derived from the node's
+    // actual `access_model` — NOT a node-name allowlist — so any
+    // whitelist-configured node (XEP-0490 MDS, XEP-0402 bookmarks,
+    // story reads, status preference, DND, DM bookmarks, ...) is
+    // private by construction: the §3 roster pass runs only for
+    // Open/Presence/Roster nodes; Whitelist/Authorize nodes reach the
+    // owner's own resources exclusively (§3.4 owner-self pass).
+    let is_private_pep_node = is_pep
+        && matches!(
+            node_cfg.access_model,
+            AccessModel::Whitelist | AccessModel::Authorize
+        );
 
     let subscribers = match storage.list_deliverable_subscribers(owner, node).await {
         Ok(subs) => subs,
@@ -183,7 +180,16 @@ pub async fn fan_out_publish(state: &WebSocketState, req: FanOutRequest<'_>) {
     }
 
     for sub in subscribers {
-        if is_private_pep_node && sub.subscriber.to_bare() != *owner {
+        if is_private_pep_node
+            && !private_node_subscriber_allowed(
+                state,
+                owner,
+                node,
+                &node_cfg,
+                &sub.subscriber.to_bare(),
+            )
+            .await
+        {
             continue;
         }
 
@@ -360,6 +366,66 @@ pub async fn fan_out_publish(state: &WebSocketState, req: FanOutRequest<'_>) {
         self_caps_delivered = self_metrics.delivered,
         "PubSub publish fan-out complete"
     );
+}
+
+/// Whether an explicit subscriber of a private (Whitelist/Authorize)
+/// PEP node is entitled to event notifications.
+///
+/// XEP-0060 §4.5 + §8.9: on a Whitelist node the owner whitelists an
+/// entity by affiliating it (member/publisher), and that entity's
+/// server-approved subscription MUST then be notified (§7.1) — the
+/// access model suppresses the implicit XEP-0163 §3 roster fan-out,
+/// not deliveries the owner explicitly authorized.
+///
+/// Delegates to `pubsub_authz::can_subscribe_with_config` — the same
+/// decision arm as the subscribe/read gate — so the fan-out
+/// entitlement can never diverge from it: the XEP-0402 bookmarks
+/// owner-only carve-out and the Authorize arm apply identically here.
+/// This matters because an XEP-0060 §8.8 owner subscriptions-set
+/// writes subscription rows WITHOUT a can_subscribe check — a row's
+/// existence is not authorization. The node config fetched once at the
+/// top of `fan_out_publish` is reused, so the only per-subscriber
+/// storage hit is the affiliation lookup. Fails closed on lookup
+/// errors — withholding one event beats leaking to a subscriber we
+/// cannot vet.
+async fn private_node_subscriber_allowed(
+    state: &WebSocketState,
+    owner: &BareJid,
+    node: &str,
+    node_cfg: &waddle_xmpp::pubsub::NodeConfig,
+    subscriber: &BareJid,
+) -> bool {
+    if subscriber == owner {
+        return true;
+    }
+    match crate::pubsub_authz::effective_affiliation(
+        &state.deps.protocol.pubsub_storage,
+        owner,
+        node,
+        subscriber,
+        true,
+    )
+    .await
+    {
+        Ok(affiliation) => crate::pubsub_authz::can_subscribe_with_config(
+            node_cfg,
+            affiliation,
+            owner,
+            node,
+            subscriber,
+            true,
+        ),
+        Err(error) => {
+            warn!(
+                owner = %owner,
+                node,
+                subscriber = %subscriber,
+                error = %error,
+                "Subscriber authorization lookup failed during private-node fan-out; failing closed"
+            );
+            false
+        }
+    }
 }
 
 pub async fn fan_out_retract(state: &WebSocketState, req: FanOutRetractRequest<'_>) {
