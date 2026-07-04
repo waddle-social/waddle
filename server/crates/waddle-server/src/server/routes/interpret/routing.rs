@@ -1,21 +1,5 @@
 use super::*;
 
-/// Upper bound on the outer `UserRegistryActor` fan-out ask, so a saturated or
-/// wedged registry degrades to the DashMap route rather than stalling the
-/// interpreter loop — a partial #699 regression otherwise (Greptile/Copilot P1
-/// on PR #1177). Bounds both enqueue (`mailbox_timeout`) and reply
-/// (`reply_timeout`).
-///
-/// Deliberately small (250ms): `deliver_peer_to_full` runs once per MUC
-/// occupant, so a large timeout compounds across a big room under a wedged
-/// registry (200 occupants × 2s = minutes) before the DashMap fallback runs.
-/// A healthy in-process ask returns in sub-milliseconds, so 250ms never trips
-/// on normal load; under pressure each occupant falls back to the DashMap
-/// quickly. Delivery correctness is unaffected — the DashMap route is
-/// authoritative — only the fast-path attempt is time-boxed (Copilot review on
-/// PR #1177).
-const ACTOR_FANOUT_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
-
 pub(super) async fn run_headless_recipient_pass(
     deps: &Deps<'_>,
     recipient_bare: &jid::BareJid,
@@ -120,7 +104,6 @@ pub(super) async fn run_headless_recipient_pass(
 /// authoritative payload after this point.
 pub(super) async fn deliver_peer_to_full(
     registry: &waddle_xmpp::registry::ConnectionRegistry,
-    user_registry: Option<&kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>>,
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
     target: &jid::FullJid,
     stanza: &Stanza,
@@ -144,58 +127,17 @@ pub(super) async fn deliver_peer_to_full(
             if message.type_ == xmpp_parsers::message::MessageType::Groupchat
     );
     if is_groupchat_reflection {
-        // ADR-0017 Phase 1 delivery cutover: route fan-out through the actor
-        // tree as the fast path (production), then fall back to the DashMap.
-        // `try_send` semantics are identical when the mirror is coherent; the
-        // DashMap fallback (Greptile/Copilot P1 on PR #1177) means an actor
-        // ask error/timeout or a mirror gap that reports `NotConnected` /
-        // `DroppedClosed` retries the authoritative DashMap route before
-        // dropping to the detached path — so a live connection is never
-        // skipped. Unit tests without a `user_registry` use the DashMap
-        // directly.
-        //
-        // Transitional metric note: a target the actor reports as
-        // `NotConnected`/`DroppedClosed` is counted once by the actor's
-        // `try_deliver` and again by the DashMap `try_send_peer_to` fallback,
-        // so `waddle_broadcast_not_connected_total` / `_dropped_closed_total`
-        // can slightly over-count during the dual-path window. This is a
-        // diagnostic counter, not a correctness signal, and the double-count
-        // disappears when the DashMap delivery path is retired (single
-        // counting site). Accepted for Phase 1.
-        let outcome = match user_registry {
-            Some(user_registry) => {
-                // Bound the OUTER registry ask (Greptile P1 on PR #1177):
-                // `UserRegistryActor` is sequential, so under concurrent MUC
-                // fan-out an unbounded await could stall the interpreter loop
-                // (a partial #699 regression). On timeout this degrades to the
-                // DashMap route below via `NotConnected`.
-                let actor_outcome = user_registry
-                    .ask(waddle_xmpp::registry::TrySendPeerToUser {
-                        jid: target.clone(),
-                        stanza: stanza.clone(),
-                    })
-                    .mailbox_timeout(ACTOR_FANOUT_ASK_TIMEOUT)
-                    .reply_timeout(ACTOR_FANOUT_ASK_TIMEOUT)
-                    .await
-                    .unwrap_or(waddle_xmpp::registry::BroadcastOutcome::NotConnected);
-                if matches!(
-                    actor_outcome,
-                    waddle_xmpp::registry::BroadcastOutcome::NotConnected
-                        | waddle_xmpp::registry::BroadcastOutcome::DroppedClosed
-                ) {
-                    // Actor has no entry (mirror gap), a stale closed sender
-                    // (`DroppedClosed`) while the DashMap already holds a live
-                    // replacement, or the ask failed/timed out — retry the
-                    // authoritative DashMap route before dropping to detached
-                    // (Copilot review on PR #1177).
-                    registry.try_send_peer_to(target, stanza.clone())
-                } else {
-                    actor_outcome
-                }
-            }
-            None => registry.try_send_peer_to(target, stanza.clone()),
-        };
-        match outcome {
+        // ADR-0017 Phase 1: MUC fan-out delivery stays on the DashMap.
+        // Routing it through the actor tree as a best-effort fast path with a
+        // DashMap fallback was reverted (Copilot review on PR #1177): kameo's
+        // reply_timeout does not cancel the enqueued handler, so a timed-out
+        // `TrySendPeerToUser` could still `try_send` while the fallback
+        // `try_send_peer_to` sends a second copy on the SAME shared channel —
+        // a duplicate reflection. Delivery cutover waits for
+        // actor-authoritative registration (Phase 1 completion), where the
+        // actor is the sole source and no fallback (hence no duplication) is
+        // needed.
+        match registry.try_send_peer_to(target, stanza.clone()) {
             waddle_xmpp::registry::BroadcastOutcome::Delivered => {
                 debug!(jid = %target, "RouteToConnection: groupchat reflection queued for recipient pass");
             }

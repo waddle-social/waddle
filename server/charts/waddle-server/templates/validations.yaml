@@ -2,14 +2,17 @@
   ADR-0017 Phase 0 shutdown budget: the grace period must cover the whole
   ordered shutdown — preStop endpoint-propagation sleep, then the connection
   drain, plus a kill margin — or the kubelet SIGKILLs mid-drain and in-flight
-  sessions are lost instead of cleanly detached.
+  sessions are lost instead of cleanly detached. The margin (5s) is the slack
+  the drain coordinator needs after the socket loop exits, so the floor is
+  strictly greater than preStop + drain (Copilot review on PR #1177).
 */ -}}
+{{- $killMargin := 5 -}}
 {{- $drainTimeout := int .Values.config.drainTimeoutSeconds -}}
 {{- $preStopSleep := int .Values.preStopSleepSeconds -}}
 {{- $terminationGrace := int .Values.terminationGracePeriodSeconds -}}
-{{- $shutdownFloor := add $preStopSleep $drainTimeout -}}
+{{- $shutdownFloor := add $preStopSleep $drainTimeout $killMargin -}}
 {{- if lt $terminationGrace $shutdownFloor -}}
-{{- fail (printf "terminationGracePeriodSeconds (%d) must be >= preStopSleepSeconds (%d) + config.drainTimeoutSeconds (%d) = %d" $terminationGrace $preStopSleep $drainTimeout $shutdownFloor) -}}
+{{- fail (printf "terminationGracePeriodSeconds (%d) must be >= preStopSleepSeconds (%d) + config.drainTimeoutSeconds (%d) + kill margin (%d) = %d" $terminationGrace $preStopSleep $drainTimeout $killMargin $shutdownFloor) -}}
 {{- end -}}
 
 {{- /*

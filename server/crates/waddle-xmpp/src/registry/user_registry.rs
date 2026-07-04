@@ -16,12 +16,9 @@ use kameo::Actor;
 use thiserror::Error;
 use tracing::{debug, info};
 
-use super::connection_registry::{BroadcastOutcome, ConnectionEntry};
-use super::user_actor::delivery::{SelectRoutableResources, TrySendPeer};
-use super::user_actor::{
-    GetResources, RegisterConnection, UnregisterConnectionAndReportEmpty, UserActor,
-};
-use crate::{metrics, Stanza};
+use super::connection_registry::ConnectionEntry;
+use super::user_actor::{RegisterConnection, UnregisterConnectionAndReportEmpty, UserActor};
+use crate::metrics;
 
 const CHILD_ACTOR_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -276,109 +273,17 @@ impl kameo::message::Message<ListUsers> for UserRegistryActor {
     }
 }
 
-/// RFC 6121 §8.5.2.1.1 bare-JID destination selection, resolved through the
-/// actor tree (ADR-0017 Phase 1 read-cutover). Looks up the `UserActor` for
-/// `bare_jid` and forwards [`SelectRoutableResources`]; returns the highest-
-/// priority available, non-negative-priority resources (empty when the user
-/// has no such resource — the caller falls back to offline handling or, for
-/// deferred-presence clients, [`ResourcesForUser`]).
-///
-/// A missing user or a child-actor error yields an empty vec (best-effort
-/// read): the selection is never authoritative for correctness — delivery
-/// still errors/queues per the caller — so degrading to "no live target" is
-/// safe.
-pub struct SelectRoutableResourcesForUser {
-    pub bare_jid: BareJid,
-}
-
-impl kameo::message::Message<SelectRoutableResourcesForUser> for UserRegistryActor {
-    type Reply = Vec<FullJid>;
-
-    async fn handle(
-        &mut self,
-        msg: SelectRoutableResourcesForUser,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        let Some(user_actor) = self.users.get(&msg.bare_jid).cloned() else {
-            return Vec::new();
-        };
-        user_actor
-            .ask(SelectRoutableResources)
-            .mailbox_timeout(CHILD_ACTOR_TIMEOUT)
-            .reply_timeout(CHILD_ACTOR_TIMEOUT)
-            .await
-            .unwrap_or_default()
-    }
-}
-
-/// Every currently-connected resource for `bare_jid`, resolved through the
-/// actor tree. The deferred-presence fallback for
-/// [`SelectRoutableResourcesForUser`]: many clients bind before emitting
-/// `<presence/>`, and the legacy direct-route path delivered to any connected
-/// resource in that window. Returns empty for a missing user or child error.
-pub struct ResourcesForUser {
-    pub bare_jid: BareJid,
-}
-
-impl kameo::message::Message<ResourcesForUser> for UserRegistryActor {
-    type Reply = Vec<FullJid>;
-
-    async fn handle(
-        &mut self,
-        msg: ResourcesForUser,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        let Some(user_actor) = self.users.get(&msg.bare_jid).cloned() else {
-            return Vec::new();
-        };
-        user_actor
-            .ask(GetResources)
-            .mailbox_timeout(CHILD_ACTOR_TIMEOUT)
-            .reply_timeout(CHILD_ACTOR_TIMEOUT)
-            .await
-            .unwrap_or_default()
-    }
-}
-
-/// Non-blocking `try_send` of a peer-routed stanza to one resource, resolved
-/// through the actor tree (ADR-0017 Phase 1 delivery cutover for fan-out).
-/// Resolves the `UserActor` for `jid.to_bare()` and forwards
-/// [`TrySendPeer`]; a missing user or child error maps to
-/// [`BroadcastOutcome::NotConnected`] (counted like the DashMap path), so the
-/// caller's detached-resource fallback runs. Reserved for genuine fan-out
-/// (MUC reflection, presence/PEP broadcast) where drop-on-full is correct —
-/// directed 1:1/IQ delivery keeps the DashMap await-capacity path.
-pub struct TrySendPeerToUser {
-    pub jid: FullJid,
-    pub stanza: Stanza,
-}
-
-impl kameo::message::Message<TrySendPeerToUser> for UserRegistryActor {
-    type Reply = BroadcastOutcome;
-
-    async fn handle(
-        &mut self,
-        msg: TrySendPeerToUser,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        // No metric on the miss/error path: the caller
-        // (`deliver_peer_to_full`) falls back to the DashMap route on
-        // `NotConnected`, which does its own accounting — counting here too
-        // would double-report a single fan-out attempt.
-        let Some(user_actor) = self.users.get(&msg.jid.to_bare()).cloned() else {
-            return BroadcastOutcome::NotConnected;
-        };
-        user_actor
-            .ask(TrySendPeer {
-                jid: msg.jid,
-                stanza: msg.stanza,
-            })
-            .mailbox_timeout(CHILD_ACTOR_TIMEOUT)
-            .reply_timeout(CHILD_ACTOR_TIMEOUT)
-            .await
-            .unwrap_or(BroadcastOutcome::NotConnected)
-    }
-}
+// ADR-0017 Phase 1: the registry-level routing convenience messages
+// (SelectRoutableResourcesForUser / ResourcesForUser / TrySendPeerToUser) that
+// wired bare-JID selection and MUC fan-out through the actor tree were removed.
+// Both cutovers proved unsound over a best-effort async mirror — set-selection
+// can't be verified complete (partial-mirror miss), and a timed-out fan-out
+// ask can still deliver while the DashMap fallback delivers a duplicate on the
+// same channel. Delivery/selection cutover waits for actor-authoritative
+// registration in Phase 1 completion, where the actor is the sole source and
+// no DashMap fallback is needed. The per-resource delivery surface on
+// `UserActor` (SelectRoutableResources, TrySendDirect/Peer/PendingFlush) stays
+// — it is the tested foundation those cutovers will build on.
 
 /// Return the number of tracked users.
 pub struct UserCount;
