@@ -17,7 +17,10 @@ use thiserror::Error;
 use tracing::{debug, info};
 
 use super::connection_registry::ConnectionEntry;
-use super::user_actor::{RegisterConnection, UnregisterConnectionAndReportEmpty, UserActor};
+use super::user_actor::delivery::SelectRoutableResources;
+use super::user_actor::{
+    GetResources, RegisterConnection, UnregisterConnectionAndReportEmpty, UserActor,
+};
 use crate::metrics;
 
 const CHILD_ACTOR_TIMEOUT: Duration = Duration::from_secs(2);
@@ -268,6 +271,68 @@ impl kameo::message::Message<ListUsers> for UserRegistryActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.users.keys().cloned().collect()
+    }
+}
+
+/// RFC 6121 §8.5.2.1.1 bare-JID destination selection, resolved through the
+/// actor tree (ADR-0017 Phase 1 read-cutover). Looks up the `UserActor` for
+/// `bare_jid` and forwards [`SelectRoutableResources`]; returns the highest-
+/// priority available, non-negative-priority resources (empty when the user
+/// has no such resource — the caller falls back to offline handling or, for
+/// deferred-presence clients, [`ResourcesForUser`]).
+///
+/// A missing user or a child-actor error yields an empty vec (best-effort
+/// read): the selection is never authoritative for correctness — delivery
+/// still errors/queues per the caller — so degrading to "no live target" is
+/// safe.
+pub struct SelectRoutableResourcesForUser {
+    pub bare_jid: BareJid,
+}
+
+impl kameo::message::Message<SelectRoutableResourcesForUser> for UserRegistryActor {
+    type Reply = Vec<FullJid>;
+
+    async fn handle(
+        &mut self,
+        msg: SelectRoutableResourcesForUser,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let Some(user_actor) = self.users.get(&msg.bare_jid).cloned() else {
+            return Vec::new();
+        };
+        user_actor
+            .ask(SelectRoutableResources)
+            .mailbox_timeout(CHILD_ACTOR_TIMEOUT)
+            .await
+            .unwrap_or_default()
+    }
+}
+
+/// Every currently-connected resource for `bare_jid`, resolved through the
+/// actor tree. The deferred-presence fallback for
+/// [`SelectRoutableResourcesForUser`]: many clients bind before emitting
+/// `<presence/>`, and the legacy direct-route path delivered to any connected
+/// resource in that window. Returns empty for a missing user or child error.
+pub struct ResourcesForUser {
+    pub bare_jid: BareJid,
+}
+
+impl kameo::message::Message<ResourcesForUser> for UserRegistryActor {
+    type Reply = Vec<FullJid>;
+
+    async fn handle(
+        &mut self,
+        msg: ResourcesForUser,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let Some(user_actor) = self.users.get(&msg.bare_jid).cloned() else {
+            return Vec::new();
+        };
+        user_actor
+            .ask(GetResources)
+            .mailbox_timeout(CHILD_ACTOR_TIMEOUT)
+            .await
+            .unwrap_or_default()
     }
 }
 

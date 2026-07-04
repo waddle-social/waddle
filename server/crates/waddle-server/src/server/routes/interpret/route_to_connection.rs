@@ -135,7 +135,29 @@ pub(super) async fn route_to_connection(
                 // preserves that behaviour without giving up
                 // RFC priority routing for clients that do use
                 // presence.
-                let live_targets = {
+                // ADR-0017 Phase 1 read-cutover: resolve bare-JID targets
+                // through the actor tree when it is wired (production). The
+                // actor shares the DashMap's `Arc`-backed presence atomics, so
+                // its selection is identical; unit tests without a
+                // `user_registry` fall back to the DashMap directly.
+                let live_targets = if let Some(user_registry) = deps.user_registry {
+                    let priority = user_registry
+                        .ask(waddle_xmpp::registry::SelectRoutableResourcesForUser {
+                            bare_jid: bare.clone(),
+                        })
+                        .await
+                        .unwrap_or_default();
+                    if priority.is_empty() {
+                        user_registry
+                            .ask(waddle_xmpp::registry::ResourcesForUser {
+                                bare_jid: bare.clone(),
+                            })
+                            .await
+                            .unwrap_or_default()
+                    } else {
+                        priority
+                    }
+                } else {
                     let priority = registry.select_routable_resources_for_user(&bare);
                     if priority.is_empty() {
                         registry.get_resources_for_user(&bare)

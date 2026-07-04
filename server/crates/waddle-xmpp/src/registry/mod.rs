@@ -27,6 +27,7 @@ pub use user_actor::delivery::{
     GetConnectionEntry, SelectRoutableResources, TrySendDirect, TrySendPeer, TrySendPendingFlush,
 };
 pub use user_registry::{
-    GetOrCreateUser, GetUser, ListUsers, RegisterUserResource, RemoveUser, UnregisterUserResource,
-    UserCount, UserRegistryActor, UserRegistryError,
+    GetOrCreateUser, GetUser, ListUsers, RegisterUserResource, RemoveUser, ResourcesForUser,
+    SelectRoutableResourcesForUser, UnregisterUserResource, UserCount, UserRegistryActor,
+    UserRegistryError,
 };
