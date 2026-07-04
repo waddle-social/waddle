@@ -6,7 +6,7 @@
 //! resulting `<occupant-id/>` matches the documented derivation
 //! `HMAC_SHA256(secret, room_bare || 0x00 || user_bare)`.
 
-mod ws_common;
+use waddle_ws_test_support as ws_common;
 
 use tokio::sync::Mutex;
 use waddle_xmpp::xep::xep0421::{generate_occupant_id, OccupantIdSecret};

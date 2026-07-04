@@ -10,6 +10,19 @@ export function barePeerJid(fullJid: string): string {
   return fullJid.split("/")[0] ?? "";
 }
 
+/**
+ * Localpart of a JID (text before the first `@` of the bare JID).
+ * Mirrors `bare.split("@")[0]`: a bare JID without an `@` is returned as-is.
+ */
+export function jidLocalpart(jid: string): string {
+  return barePeerJid(jid).split("@")[0] ?? "";
+}
+
+/** Domain part of a JID, or `""` when the bare JID contains no `@`. */
+export function jidDomainOrEmpty(jid: string): string {
+  return barePeerJid(jid).split("@")[1] ?? "";
+}
+
 /** The resource part of a full JID (everything after the first `/`), or `""` for a bare JID. */
 export function resourceOf(fullJid: string): string {
   const separator = fullJid.indexOf("/");
@@ -29,7 +42,7 @@ export function fullJidIdentityKey(fullJid?: string | null): string {
 export function parseManagedRoomBareJid(
   roomJid: string,
 ): { channelId: string } | null {
-  const node = barePeerJid(roomJid).split("@")[0] ?? "";
+  const node = jidLocalpart(roomJid);
   if (!node) return null;
   return {
     channelId: node,

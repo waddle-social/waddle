@@ -5,7 +5,7 @@
 //! `POST /api/test/profile-publish` (gated on
 //! `WADDLE_TEST_FIXED_ACCOUNT_ENABLED=true`, which the harness sets).
 
-mod ws_common;
+use waddle_ws_test_support as ws_common;
 
 use serde_json::json;
 use tokio::sync::Mutex;

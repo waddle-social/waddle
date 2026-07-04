@@ -19,7 +19,7 @@ import {
 } from "./muc-call-session-cache";
 import type { CallMedia } from "./types";
 import { connectionStore } from "@/lib/connection-store";
-import { fullJidIdentityKey } from "@/lib/xmpp/jid";
+import { fullJidIdentityKey, jidLocalpart } from "@/lib/xmpp/jid";
 
 /**
  * Derived view of "is the local user currently in an active MUC group
@@ -311,7 +311,7 @@ function identitiesToNicks(
     // returned the *resource* (e.g. `web` for `alice@host/web`); the
     // localpart is the correct user-facing label until presence catches
     // up. After: `alice` for `alice@host/web`.
-    const nick = byRealJid.get(key) ?? identity.split("@")[0] ?? identity;
+    const nick = byRealJid.get(key) ?? jidLocalpart(identity);
     if (seen.has(nick)) continue;
     seen.add(nick);
     out.push(nick);

@@ -5,7 +5,7 @@
 //! namespace on disco#info, and accepts publish + items-query for
 //! `<entry/>` payloads built per XEP-0472 §3.
 
-mod ws_common;
+use waddle_ws_test_support as ws_common;
 
 use tokio::sync::Mutex;
 use ws_common::{TestServer, WsXmppClient};

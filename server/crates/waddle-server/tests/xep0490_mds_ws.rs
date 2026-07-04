@@ -19,7 +19,7 @@
 //!   0060 max-items / same-id semantics).
 //! - MUC `stanza-id` retains its `by=room` attribute end-to-end.
 
-mod ws_common;
+use waddle_ws_test_support as ws_common;
 
 use std::time::Duration;
 use tokio::sync::Mutex;

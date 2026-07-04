@@ -2,7 +2,7 @@
 //!
 //! Each test starts its own isolated waddle-server on dynamic ports.
 
-mod ws_common;
+use waddle_ws_test_support as ws_common;
 
 use jid::Jid;
 use tokio::sync::Mutex;

@@ -32,7 +32,6 @@ describe("edit targeting", () => {
     const actionError = ref("");
     const messaging = useChannelMessages(
       ref(session()),
-      ref(null),
       ref({ ...handlerStubs(), sendCorrection } as never),
       ref("w1"),
       ref("c1"),
@@ -78,7 +77,6 @@ describe("edit targeting", () => {
     const actionError = ref("");
     const messaging = useChannelMessages(
       ref(session()),
-      ref(null),
       ref({
         ...handlerStubs(),
         setMessageHandler: (handler: (msg: LiveRoomMessage) => void) => {
@@ -127,7 +125,6 @@ describe("edit targeting", () => {
     const actionError = ref("");
     const messaging = useChannelMessages(
       ref(session()),
-      ref(null),
       ref({
         ...handlerStubs(),
         setMessageHandler: (handler: (msg: LiveRoomMessage) => void) => {
@@ -178,7 +175,6 @@ describe("edit targeting", () => {
     const actionError = ref("");
     const messaging = useChannelMessages(
       ref(session()),
-      ref(null),
       ref({
         ...handlerStubs(),
         setMessageHandler: (handler: (msg: LiveRoomMessage) => void) => {
@@ -230,7 +226,6 @@ describe("edit targeting", () => {
     const actionError = ref("");
     const messaging = useChannelMessages(
       ref(session()),
-      ref(null),
       ref({
         ...handlerStubs(),
         setMessageHandler: (handler: (msg: LiveRoomMessage) => void) => {

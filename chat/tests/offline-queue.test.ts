@@ -269,7 +269,6 @@ describe("offline outbound queue hydration", () => {
     const messaging = useChannelMessages(
       ref(session()),
       ref(null),
-      ref(null),
       ref("w1"),
       ref("c1"),
       ref({ id: "c1", name: "general", channel_type: "text" }),

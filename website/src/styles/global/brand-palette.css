@@ -1,0 +1,10 @@
+/* GENERATED — do not edit.
+ * Source: chat/src/styles/global/tokens.css (--primary)
+ * Regenerate: bun scripts/generate-design-tokens.mjs
+ */
+:root {
+  --brand-accent: oklch(0.63 0.13 184);
+  --brand-accent-dark: oklch(0.78 0.14 184);
+  --brand-accent-hex: #00a292;
+  --brand-accent-dark-hex: #00d4c1;
+}

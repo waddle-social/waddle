@@ -42,10 +42,14 @@ pub const NS_SFS: &str = "urn:xmpp:sfs:0";
 pub const NS_URL_DATA: &str = "http://jabber.org/protocol/url-data";
 
 /// Content disposition for shared files.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+///
+/// XEP-0447 §4 defines three states: `inline` (SHOULD display inline),
+/// `attachment` (SHOULD NOT display inline), and absent (MAY display
+/// inline). Absence is modelled as `Option::None` on [`FileSharing`],
+/// not as a default variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Disposition {
     /// File should be displayed inline (images, videos).
-    #[default]
     Inline,
     /// File should be offered as download (documents, archives).
     Attachment,
@@ -98,8 +102,8 @@ pub struct FileSharing {
     pub metadata: FileMetadata,
     /// Download sources.
     pub sources: Vec<Source>,
-    /// Content disposition.
-    pub disposition: Disposition,
+    /// Content disposition; `None` when the sender did not assert one.
+    pub disposition: Option<Disposition>,
 }
 
 impl FileSharing {
@@ -108,7 +112,7 @@ impl FileSharing {
         Self {
             metadata,
             sources: Vec::new(),
-            disposition: Disposition::default(),
+            disposition: None,
         }
     }
 
@@ -120,7 +124,7 @@ impl FileSharing {
 
     /// Set the disposition.
     pub fn with_disposition(mut self, disposition: Disposition) -> Self {
-        self.disposition = disposition;
+        self.disposition = Some(disposition);
         self
     }
 
@@ -129,9 +133,9 @@ impl FileSharing {
         self.sources.iter().find_map(|s| s.as_url())
     }
 
-    /// Returns `true` if inline disposition (images, videos).
+    /// Returns `true` if the sender asserted inline disposition.
     pub fn is_inline(&self) -> bool {
-        self.disposition == Disposition::Inline
+        self.disposition == Some(Disposition::Inline)
     }
 }
 
@@ -182,8 +186,7 @@ pub fn parse_file_sharing_element(elem: &Element) -> Option<FileSharing> {
 
     let disposition = elem
         .attr("disposition")
-        .and_then(Disposition::from_str_attr)
-        .unwrap_or_default();
+        .and_then(Disposition::from_str_attr);
 
     // Parse file metadata
     let file_elem = elem
@@ -214,12 +217,14 @@ pub fn parse_file_sharing_element(elem: &Element) -> Option<FileSharing> {
 
 /// Build a `<file-sharing/>` element.
 pub fn build_file_sharing_element(sharing: &FileSharing) -> Element {
-    let mut fs = Element::builder("file-sharing", NS_SFS)
-        .attr(
+    let mut builder = Element::builder("file-sharing", NS_SFS);
+    if let Some(disposition) = sharing.disposition {
+        builder = builder.attr(
             minidom::rxml::xml_ncname!("disposition").to_owned(),
-            sharing.disposition.as_str(),
-        )
-        .build();
+            disposition.as_str(),
+        );
+    }
+    let mut fs = builder.build();
 
     fs.append_child(xep0446::build_file_metadata_element(&sharing.metadata));
 
@@ -322,7 +327,7 @@ mod tests {
 
         let sharing = extract_file_sharing_from_message(&msg).expect("has sharing");
         assert_eq!(sharing.metadata.name.as_deref(), Some("doc.pdf"));
-        assert_eq!(sharing.disposition, Disposition::Attachment);
+        assert_eq!(sharing.disposition, Some(Disposition::Attachment));
         assert!(!sharing.is_inline());
         assert_eq!(sharing.first_url(), Some("https://example.com/doc.pdf"));
     }
@@ -397,11 +402,6 @@ mod tests {
     }
 
     #[test]
-    fn test_disposition_default() {
-        assert_eq!(Disposition::default(), Disposition::Inline);
-    }
-
-    #[test]
     fn test_disposition_parsing() {
         assert_eq!(
             Disposition::from_str_attr("inline"),
@@ -426,7 +426,7 @@ mod tests {
             .with_url("https://example.com/test.txt")
             .with_disposition(Disposition::Attachment);
 
-        assert_eq!(sharing.disposition, Disposition::Attachment);
+        assert_eq!(sharing.disposition, Some(Disposition::Attachment));
         assert_eq!(sharing.sources.len(), 1);
         assert!(!sharing.is_inline());
     }

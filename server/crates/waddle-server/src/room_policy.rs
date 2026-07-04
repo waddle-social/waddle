@@ -18,8 +18,8 @@
 //!   actor transport / mailbox failure. Surfaces actionable lookup
 //!   failures to [`crate::notification_outbox::resolve_cached_room_policy`],
 //!   which classifies the cache entry as
-//!   [`crate::notification_outbox::UnknownRoomPolicySource::LookupError`]
-//!   and emits a single typed `warn!` per (drain batch, room). The
+//!   `UnknownRoomPolicySource::LookupError` (private to the outbox gate
+//!   module) and emits a single typed `warn!` per (drain batch, room). The
 //!   evaluator then defers via the same policy-error backoff.
 //!
 //! Slice 2 will replace this with a durable T1 projection alongside

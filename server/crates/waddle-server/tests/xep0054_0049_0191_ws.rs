@@ -1,6 +1,6 @@
 //! Stateful legacy C2S IQs over the active WebSocket transport.
 
-mod ws_common;
+use waddle_ws_test_support as ws_common;
 
 use std::time::Duration;
 use ws_common::{disco_info_query, TestServer, WsXmppClient};

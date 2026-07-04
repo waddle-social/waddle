@@ -26,7 +26,7 @@
 //!    surfaces `waddle#server_affiliation='owner'` — same edge as the
 //!    admin ACL.
 
-mod ws_common;
+use waddle_ws_test_support as ws_common;
 
 use tokio::sync::Mutex;
 use ws_common::{disco_info_query, TestServer, WsXmppClient};

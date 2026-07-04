@@ -45,7 +45,7 @@
 //! single server; this test deliberately stays focused on durability
 //! so the assertion is insensitive to second-server warmup timing.
 
-mod ws_common;
+use waddle_ws_test_support as ws_common;
 
 use std::{
     str::FromStr,

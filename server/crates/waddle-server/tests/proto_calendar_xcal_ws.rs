@@ -4,7 +4,7 @@
 //! `<vcalendar><vevent/></vcalendar>` payload built from iCalendar
 //! (RFC 5545) properties, with `<rrule/>` for recurrence.
 
-mod ws_common;
+use waddle_ws_test_support as ws_common;
 
 use tokio::sync::Mutex;
 use ws_common::{TestServer, WsXmppClient};

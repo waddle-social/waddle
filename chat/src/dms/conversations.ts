@@ -1,10 +1,10 @@
 import { computed, ref, watch, type Ref } from "vue";
 import type { WaddleSession } from "@/lib/server-auth";
 import type { BrowserXmppClient, DmConversation, InboxEntry, LiveDmMessage, PresenceUpdateEvent } from "@/lib/xmpp-client";
-import { barePeerJid } from "@/lib/xmpp-client";
+import { barePeerJid, jidLocalpart } from "@/lib/xmpp-client";
 
 function peerUsername(peerJid: string): string {
-  return barePeerJid(peerJid).split("@")[0] ?? peerJid;
+  return jidLocalpart(peerJid);
 }
 
 function conversationTimestamp(value?: string): number {

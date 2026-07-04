@@ -1,5 +1,6 @@
 import type { WaddleClient } from "@waddle/xmpp-client-wasm";
 import type { PinPermission } from "@/lib/chat-types";
+import { escapeXml } from "./extension-commands/xml";
 
 const NS_DATAFORM = "jabber:x:data";
 const NS_MUC_OWNER = "http://jabber.org/protocol/muc#owner";
@@ -44,10 +45,6 @@ interface CreateSpaceWithMucParams {
   mucName: string;
   mucDescription?: string;
   mucType?: "text" | "forum";
-}
-
-function escapeXml(value: string): string {
-  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&apos;");
 }
 
 function dataField(name: string, value: string) {

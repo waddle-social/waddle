@@ -13,6 +13,7 @@ import {
   moveMucToSpace,
 } from "@/lib/xmpp/protocol-helpers";
 import { mucServiceDomain, spacesServiceDomain } from "@/lib/xmpp/discovery";
+import { barePeerJid, jidLocalpart } from "@/lib/xmpp/jid";
 
 interface LoadSpaceOptions {
   loadStructure?: boolean;
@@ -26,7 +27,6 @@ interface LoadStructureOptions {
 export type MemberLoadState = "idle" | "loading" | "ready" | "unavailable";
 
 export function useWaddleDirectory(
-  _api: Ref<null>,
   xmppClient: Ref<BrowserXmppClient | null>,
   session: Ref<WaddleSession | null>,
   normalizeError: (v: unknown) => string,
@@ -83,7 +83,7 @@ export function useWaddleDirectory(
   const currentRole = computed(() => {
     if (!session.value || !currentSpace.value) return null;
     return (
-      members.value.find((m) => m.jid === session.value!.jid.split("/")[0])?.affiliation ??
+      members.value.find((m) => m.jid === barePeerJid(session.value!.jid))?.affiliation ??
       currentSpace.value.role ??
       null
     );
@@ -349,7 +349,7 @@ export function useWaddleDirectory(
           mucType: form.muc_type,
         });
 
-        const channelId = roomJid.split("@")[0] ?? form.name.trim();
+        const channelId = jidLocalpart(roomJid);
         createChannelForm.value = defaultCreateForm();
         await loadStructure(channelId);
         return {
@@ -392,7 +392,7 @@ export function useWaddleDirectory(
           spaceNode,
         });
 
-        const channelId = roomJid.split("@")[0] ?? form.name.trim();
+        const channelId = jidLocalpart(roomJid);
         createChannelForm.value = defaultCreateForm();
         await loadStructure(channelId);
         return {
@@ -423,7 +423,7 @@ export function useWaddleDirectory(
           },
         );
 
-        const channelId = roomJid.split("@")[0] ?? form.muc_name.trim();
+        const channelId = jidLocalpart(roomJid);
         createChannelForm.value = defaultCreateForm();
         await loadStructure(channelId);
         return {

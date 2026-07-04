@@ -93,7 +93,7 @@ schema.#Project & {
 				contents:   "read"
 				"id-token": "write"
 			}
-			"tasks": [tasks.test, tasks.lint, tasks.build]
+			"tasks": [tasks.test, tasks.lint, tasks.build, tasks.tokensCheck]
 		}
 	}
 
@@ -157,6 +157,18 @@ schema.#Project & {
 				"src/**",
 				"scripts/**",
 				"tests/**",
+			]
+		}
+
+		// Fails when generated brand-palette outputs drift from tokens.css.
+		tokensCheck: schema.#Task & {
+			command: "bun"
+			args: ["../scripts/generate-design-tokens.mjs", "--check"]
+			inputs: [
+				"../scripts/generate-design-tokens.mjs",
+				"src/styles/global/tokens.css",
+				"../website/src/styles/global/brand-palette.css",
+				"../apps/apple/Waddle/Assets.xcassets/AccentColor.colorset/Contents.json",
 			]
 		}
 

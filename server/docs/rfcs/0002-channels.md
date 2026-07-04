@@ -2,7 +2,7 @@
 
 ## Summary
 
-Channels are the primary organizational unit for conversations within a Waddle. They are implemented as XMPP Multi-User Chat (MUC) rooms with MIX extensions for modern semantics.
+Channels are the primary organizational unit for conversations within a Waddle. They are implemented as XMPP Multi-User Chat (MUC) rooms with extension XEPs for modern semantics (MIX was investigated and dropped — see ADR 0016).
 
 ## Motivation
 
@@ -17,7 +17,7 @@ Users need to:
 
 ### XMPP Implementation
 
-Channels map to XMPP MUC rooms (XEP-0045) with MIX (XEP-0369) for persistent membership:
+Channels map to XMPP MUC rooms (XEP-0045); persistent membership comes from MUC affiliations plus extension XEPs, not MIX (see ADR 0016):
 
 ```
 Waddle: penguin-club

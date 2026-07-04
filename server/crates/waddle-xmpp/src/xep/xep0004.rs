@@ -27,7 +27,7 @@
 mod element;
 mod types;
 
-pub use element::{find_data_form, is_data_form, FromElement, IntoElement};
+pub use element::{find_data_form, is_data_form, FromElement, ToElement};
 pub use types::{DataForm, DataFormError, Field, FieldOption, FieldType, FormType};
 
 /// Namespace for XEP-0004 Data Forms.

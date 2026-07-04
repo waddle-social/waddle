@@ -4,7 +4,7 @@
 //! can `<configure/>` get/set, `<purge/>`, and `<affiliations/>` set against
 //! Spaces nodes after the seeding wired in for issue #241.
 
-mod ws_common;
+use waddle_ws_test_support as ws_common;
 
 use std::time::Duration;
 use tokio::sync::Mutex;

@@ -1,6 +1,6 @@
 import type { ChannelSummary, GroupDmSummary } from "@/lib/chat-types";
 import type { DmConversation } from "@/lib/xmpp/types";
-import { barePeerJid } from "@/lib/xmpp/jid";
+import { barePeerJid, jidLocalpart } from "@/lib/xmpp/jid";
 import type { CallMedia, CallState } from "./types";
 import {
   callParticipantCountForChannel,
@@ -348,7 +348,7 @@ export function buildCallActivityDockEntries(options: {
   const dmEntries = Object.values(options.dmCallActivities)
     .map((activity): DmCallActivityDockEntry => {
       const peerJid = barePeerJid(activity.peerJid).toLowerCase();
-      const fallbackName = peerJid.split("@")[0] || peerJid;
+      const fallbackName = jidLocalpart(peerJid) || peerJid;
       return {
         kind: "dm",
         key: `dm:${peerJid}:${activity.sid}`,
@@ -433,7 +433,7 @@ function normalizedParticipantLabels(
 }
 
 function isGroupDmFallbackRoomJid(roomJid: string): boolean {
-  const localpart = normalizeMucCallRoomJid(roomJid).split("@")[0] ?? "";
+  const localpart = jidLocalpart(normalizeMucCallRoomJid(roomJid));
   // Server-created group-DM rooms currently use `group-dm-...` localparts.
   // This fallback keeps pre-hydration calls on the DM route until bookmarks
   // hydrate and the explicit group-DM summary can take over.

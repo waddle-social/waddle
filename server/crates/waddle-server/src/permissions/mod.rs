@@ -6,16 +6,12 @@ mod schema;
 mod spicedb;
 mod tuple;
 
-#[allow(unused_imports)]
 pub use actor::{
     CheckPermission, DeleteTuple, EnsureSchema, ListRelations, ListSubjects, LookupResources,
     LookupSubjects, Permission, PermissionActor, WriteTuple,
 };
-#[allow(unused_imports)]
 pub use check::{CheckRequest, CheckResponse, PermissionChecker};
-#[allow(unused_imports)]
 pub use schema::{ComputedPermission, ObjectTypeSchema, PermissionSchema};
-#[allow(unused_imports)]
 pub use tuple::{Object, ObjectType, Relation, Subject, SubjectType, Tuple, TupleStore};
 
 use thiserror::Error;
@@ -23,7 +19,6 @@ use thiserror::Error;
 /// Permission-specific errors.
 #[derive(Error, Debug)]
 pub enum PermissionError {
-    #[allow(dead_code)]
     #[error("Permission denied: {0}")]
     Denied(String),
 

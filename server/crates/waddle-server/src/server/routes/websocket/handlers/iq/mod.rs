@@ -78,31 +78,44 @@ mod archive_inbox_upload;
 mod blocking;
 mod caps_result;
 mod commands;
+mod community_items;
+mod community_publish;
+mod community_retract;
+mod community_rsvp;
 mod conn_state;
 mod disco_info;
 mod disco_items;
 pub(crate) mod errors;
 mod extension_forms;
+mod extension_route_items;
+mod full_jid_forward;
+mod isr_token;
 mod jingle_muji_gate;
 mod last_activity;
 mod link_preview_lookup;
 pub(crate) mod link_preview_player_embed;
 mod link_preview_resolver;
 mod mentions_permissions;
-mod misc;
 mod muc_admin;
 mod muc_owner_config;
 mod muc_owner_moderation;
+mod muc_self_ping;
+mod pep_addressing;
 mod permissions;
 mod pin_query;
 mod pubsub_admin;
 mod pubsub_dispatch;
-mod pubsub_helpers;
 mod push;
 mod roster;
 mod sans_io;
 mod search;
-mod session_misc;
+mod session_jid;
+mod spaces_bookmark_cleanup;
+mod spaces_discovery;
+mod spaces_items;
+mod spaces_publish;
+mod spaces_retract;
+mod story_attachments;
 #[cfg(test)]
 mod test_helpers;
 mod vcard_private;
@@ -111,6 +124,9 @@ use archive_inbox_upload::handle_archive_inbox_upload_iq;
 use blocking::handle_blocking_iq;
 use caps_result::handle_caps_disco_info_result;
 use commands::{handle_command_iq, CommandTargets};
+use community_items::handle_community_items;
+use community_publish::handle_community_publish;
+use community_retract::handle_community_retract;
 pub use conn_state::IqConnState;
 use disco_info::handle_disco_info_iq;
 use disco_items::handle_disco_items_iq;
@@ -119,11 +135,16 @@ use extension_forms::{
     extension_features_for_disco, extension_route_disco_node, extension_route_metadata_form,
     CommandBoundary, EXTENSION_COMMAND_FORM_TYPE, EXTENSION_ROUTE_FORM_TYPE,
 };
+use extension_route_items::{handle_extension_route_items, PubSubItemsRead};
+use full_jid_forward::route_full_jid_iq;
+use isr_token::handle_isr_token_request_iq;
 use last_activity::handle_last_activity_iq;
 use link_preview_lookup::{handle_link_preview_lookup_iq, is_link_preview_lookup_iq};
 use mentions_permissions::{handle_mentions_permissions_iq, is_mentions_permissions_iq};
 use muc_owner_config::apply_muc_owner_config;
 use muc_owner_moderation::handle_muc_owner_and_moderation_iq;
+use muc_self_ping::handle_muc_self_ping_iq;
+use pep_addressing::is_pep_self_or_to;
 pub(crate) use permissions::managed_channel_permission_allowed;
 use permissions::{
     build_muc_owner_config_response, build_xmpp_error_response, global_database,
@@ -132,13 +153,12 @@ use permissions::{
 };
 use pin_query::{handle_pin_query_iq, is_pin_query_iq};
 use pubsub_dispatch::handle_pubsub_iq;
-use pubsub_helpers::{
-    canonical_channel_disco_items, handle_community_items, handle_community_publish,
-    handle_community_retract, handle_extension_route_items, handle_spaces_items,
-    handle_spaces_publish, handle_spaces_retract, is_pep_self_or_to,
+use spaces_discovery::{
     room_space_metadata_extensions, space_details_from_node, spaces_service_bare_jid,
-    PubSubItemsRead,
 };
+use spaces_items::handle_spaces_items;
+use spaces_publish::handle_spaces_publish;
+use spaces_retract::handle_spaces_retract;
 #[cfg(test)]
 pub use test_helpers::handle_iq;
 // Re-exported via `pub(super)` so submodules that wildcard-import the
@@ -170,13 +190,11 @@ fn push_service_stanza_error(error: XmppError) -> xmpp_parsers::stanza_error::St
         _ => internal_server_error_iq_error("Internal server error."),
     }
 }
-use misc::handle_misc_iq;
 use muc_admin::handle_muc_admin_iq;
 use push::handle_push_iq;
 use roster::handle_roster_iq;
 use sans_io::handle_sans_io_iq;
 use search::{handle_channel_search_iq, handle_user_search_iq};
-use session_misc::{handle_isr_token_request_iq, handle_muc_self_ping_iq, route_full_jid_iq};
 use vcard_private::{handle_private_storage_iq, handle_vcard_iq};
 
 // `build_iq_error_xml_typed` is re-exported via `pub(super) use` so
@@ -361,7 +379,52 @@ pub async fn handle_iq_with_conn_state(
         return frames;
     }
 
-    let misc_response = handle_misc_iq(handler_ctx, state, phase, conn_state).await;
+    // jabber:iq:roster is served by handle_roster_iq above because it needs
+    // durable roster storage and roster-push fanout.
+    let misc_response = if waddle_xmpp::xep::xep0054::is_vcard_get(&iq)
+        || waddle_xmpp::xep::xep0054::is_vcard_set(&iq)
+    {
+        handle_vcard_iq(&iq, state, phase.bound_jid(), response_from, response_to).await
+    } else if is_last_activity_query(&iq) {
+        handle_last_activity_iq(
+            &iq,
+            domain,
+            state,
+            phase.bound_jid(),
+            response_from,
+            response_to,
+        )
+        .await
+    } else if waddle_xmpp::xep::xep0049::is_private_storage_query(&iq) {
+        handle_private_storage_iq(&iq, state, phase.bound_jid(), response_from, response_to).await
+    } else if waddle_xmpp::xep::xep0191::is_blocking_query(&iq) {
+        handle_blocking_iq(
+            &iq,
+            state,
+            phase.bound_jid(),
+            response_from,
+            response_to,
+            conn_state.blocklist_interested,
+            conn_state.state_machine.as_deref_mut(),
+        )
+        .await
+    } else if is_push_enable(&iq) || is_push_disable(&iq) {
+        handle_push_iq(
+            &iq,
+            state,
+            phase.bound_jid(),
+            push_domain.as_str(),
+            response_from,
+            response_to,
+        )
+        .await
+    } else if is_search_request(&iq) {
+        handle_channel_search_iq(&iq, muc_domain, state, response_from, response_to).await
+    } else if payload_ns == "jabber:iq:search" {
+        handle_user_search_iq(&iq, domain, state, response_from, response_to).await
+    } else {
+        Vec::new()
+    };
     if !misc_response.is_empty() {
         return misc_response;
     }

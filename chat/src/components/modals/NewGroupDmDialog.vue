@@ -3,6 +3,7 @@ import { computed, ref, watch } from "vue";
 import { Check, X } from "lucide-vue-next";
 import AppDialog from "@/components/ui/AppDialog.vue";
 import type { RosterContact } from "@/lib/xmpp/types";
+import { barePeerJid, jidLocalpart } from "@/lib/xmpp/jid";
 
 const open = defineModel<boolean>("open", { required: true });
 
@@ -22,11 +23,11 @@ const emit = defineEmits<{
 const selected = ref<Set<string>>(new Set());
 
 const selectableContacts = computed(() => {
-  const self = (props.selfJid ?? "").split("/")[0]?.toLowerCase() ?? "";
-  const excluded = new Set((props.excludedJids ?? []).map((jid) => jid.split("/")[0]?.toLowerCase() ?? ""));
+  const self = barePeerJid(props.selfJid ?? "").toLowerCase();
+  const excluded = new Set((props.excludedJids ?? []).map((jid) => barePeerJid(jid).toLowerCase()));
   return props.contacts
     .filter((contact) => {
-      const bare = contact.jid.split("/")[0]?.toLowerCase() ?? "";
+      const bare = barePeerJid(contact.jid).toLowerCase();
       return bare !== self && !excluded.has(bare);
     })
     .sort((a, b) => contactLabel(a).localeCompare(contactLabel(b), undefined, { sensitivity: "base" }));
@@ -48,7 +49,7 @@ watch(open, (next) => {
 });
 
 function contactLabel(contact: RosterContact): string {
-  return contact.name?.trim() || contact.username?.trim() || contact.jid.split("@")[0] || contact.jid;
+  return contact.name?.trim() || contact.username?.trim() || jidLocalpart(contact.jid) || contact.jid;
 }
 
 function toggleContact(jid: string) {

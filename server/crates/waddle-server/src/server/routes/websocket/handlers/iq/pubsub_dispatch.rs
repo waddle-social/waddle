@@ -1,5 +1,4 @@
 use super::pubsub_admin::handle_pubsub_admin_request;
-use super::pubsub_helpers;
 use super::*;
 use crate::server::routes::websocket::handlers::pubsub_fanout;
 
@@ -169,8 +168,7 @@ pub(super) async fn handle_pubsub_iq(
                 // service is affected — peer fetches go through the
                 // Items arm, not Publish.
                 if is_pep && target_jid == user_jid {
-                    pubsub_helpers::reconcile_well_known_pep_node_config(state, &user_jid, &node)
-                        .await;
+                    reconcile_well_known_pep_node_config(state, &user_jid, &node).await;
                 }
 
                 let result = state
@@ -538,5 +536,56 @@ fn pubsub_publish_error_from_xmpp_error(error: &waddle_xmpp::XmppError) -> PubSu
         }
         | waddle_xmpp::XmppError::Internal(_) => PubSubError::InternalServerError,
         _ => PubSubError::Forbidden,
+    }
+}
+
+/// Bring a well-known PEP node's stored config into line with the
+/// current `NodeConfig::pep_for_node` defaults BEFORE a publish lands
+/// its item.
+///
+/// Use case: an earlier version of Waddle auto-created the
+/// `urn:xmpp:vcard4` node with `AccessModel::Presence` (the bare
+/// `pep_default()`). After XEP-0292 §6.1 was wired through
+/// `pep_for_node` the canonical access model is `Open`, but the
+/// already-created node stays on the old config until something
+/// explicitly reconfigures it. A user retrying their first vCard4
+/// publish after upgrading would otherwise still be invisible to
+/// non-roster peers. We reconcile the config in-place so the next
+/// publish lands on a spec-conformant node.
+///
+/// Scope is deliberately narrow: only nodes whose well-known defaults
+/// are stricter than ad-hoc PEP defaults (currently `urn:xmpp:vcard4`)
+/// — we don't bulk-rewrite arbitrary user node configs here.
+async fn reconcile_well_known_pep_node_config(state: &WebSocketState, owner: &BareJid, node: &str) {
+    if node != waddle_xmpp_core::pubsub::PEP_NODE_VCARD4
+        && node != waddle_xmpp_core::pubsub::PEP_NODE_WADDLE_DND
+    {
+        return;
+    }
+    let storage = &state.deps.protocol.pubsub_storage;
+    let existing = match storage.get_node(owner, node).await {
+        Ok(Some(node)) => node,
+        Ok(None) => return,
+        Err(error) => {
+            warn!(
+                node,
+                error = %error,
+                "Failed to read PEP node config for reconcile-on-publish; \
+                 letting publish proceed against whatever config is stored"
+            );
+            return;
+        }
+    };
+    let canonical = waddle_xmpp_core::pubsub::NodeConfig::pep_for_node(node);
+    if existing.config == canonical {
+        return;
+    }
+    if let Err(error) = storage.update_node_config(owner, node, &canonical).await {
+        warn!(
+            node,
+            error = %error,
+            "Failed to reconcile PEP node config to XEP-defaults on publish; \
+             publish will proceed against the divergent config"
+        );
     }
 }

@@ -22,7 +22,6 @@ function makeRoomMessaging(xmppClient: ReturnType<typeof makeRoomClient>) {
   const actionError = ref("");
   const messaging = useChannelMessages(
     ref(session()),
-    ref(null),
     xmppClient,
     ref("w1"),
     ref("c1"),
@@ -871,7 +870,6 @@ describe("XEP-0198 self-echo reconciliation (group chat)", () => {
     const xmppClient = ref(null as never);
     const messaging = useChannelMessages(
       ref(currentSession),
-      ref(null),
       xmppClient,
       ref("w1"),
       ref("c1"),

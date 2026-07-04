@@ -29,30 +29,40 @@ fn parse_error() -> ClientError {
 
 // ── Extension trait ──────────────────────────────────────────────────────────
 
-#[allow(async_fn_in_trait)]
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub trait DiscoveryExt {
     /// Query `disco#info` for a JID, optionally scoped to a node.
-    async fn discover_info(&self, jid: &str, node: Option<&str>) -> ClientResult<DiscoInfoResult>;
+    fn discover_info<'a>(
+        &'a self,
+        jid: &'a str,
+        node: Option<&'a str>,
+    ) -> impl std::future::Future<Output = ClientResult<DiscoInfoResult>> + Send + 'a;
 
     /// Query `disco#items` for a JID.
-    async fn discover_items(&self, jid: &str, node: Option<&str>) -> ClientResult<Vec<DiscoItem>>;
+    fn discover_items<'a>(
+        &'a self,
+        jid: &'a str,
+        node: Option<&'a str>,
+    ) -> impl std::future::Future<Output = ClientResult<Vec<DiscoItem>>> + Send + 'a;
 
     /// Discover the HTTP upload service under `server_domain`.
     ///
     /// Queries `disco#items` on the domain and then `disco#info` on each item
     /// until one advertises `urn:xmpp:http:upload:0`.  Returns its JID, or
     /// `None` if no matching component is found.
-    async fn discover_upload_service(&self, server_domain: &str) -> ClientResult<Option<String>>;
+    fn discover_upload_service<'a>(
+        &'a self,
+        server_domain: &'a str,
+    ) -> impl std::future::Future<Output = ClientResult<Option<String>>> + Send + 'a;
 
     /// Request an HTTP upload slot from `service_jid` (XEP-0363).
-    async fn request_upload_slot(
-        &self,
-        service_jid: &str,
-        filename: &str,
+    fn request_upload_slot<'a>(
+        &'a self,
+        service_jid: &'a str,
+        filename: &'a str,
         size: u64,
-        content_type: &str,
-    ) -> ClientResult<UploadSlot>;
+        content_type: &'a str,
+    ) -> impl std::future::Future<Output = ClientResult<UploadSlot>> + Send + 'a;
 
     /// Enable push notifications via a push service (XEP-0357 §5).
     ///
@@ -61,30 +71,33 @@ pub trait DiscoveryExt {
     /// user server passes it through verbatim. Provider credentials
     /// MUST NOT be carried here; they live behind the Push Service
     /// component (registered separately via XEP-0050).
-    async fn enable_push_notifications(
-        &self,
-        push_service_jid: &str,
-        node: &str,
+    fn enable_push_notifications<'a>(
+        &'a self,
+        push_service_jid: &'a str,
+        node: &'a str,
         publish_options: Option<xmpp_parsers::data_forms::DataForm>,
-    ) -> ClientResult<()>;
+    ) -> impl std::future::Future<Output = ClientResult<()>> + Send + 'a;
 
     /// Disable push notifications. A `None` `node` disables ALL nodes
     /// at the service for this user (XEP-0357 §6.1).
-    async fn disable_push_notifications(
-        &self,
-        push_service_jid: &str,
-        node: Option<&str>,
-    ) -> ClientResult<()>;
+    fn disable_push_notifications<'a>(
+        &'a self,
+        push_service_jid: &'a str,
+        node: Option<&'a str>,
+    ) -> impl std::future::Future<Output = ClientResult<()>> + Send + 'a;
 
     /// Discover XEP-0503 spaces from the spaces service.
-    async fn discover_spaces(&self, spaces_jid: &BareJid) -> ClientResult<Vec<DiscoveredSpace>>;
+    fn discover_spaces<'a>(
+        &'a self,
+        spaces_jid: &'a BareJid,
+    ) -> impl std::future::Future<Output = ClientResult<Vec<DiscoveredSpace>>> + Send + 'a;
 
     /// Discover bookmark-backed MUC channels within one XEP-0503 space.
-    async fn discover_space_channels(
-        &self,
-        spaces_jid: &BareJid,
-        space_id: &SpaceNode,
-    ) -> ClientResult<Vec<DiscoveredChannel>>;
+    fn discover_space_channels<'a>(
+        &'a self,
+        spaces_jid: &'a BareJid,
+        space_id: &'a SpaceNode,
+    ) -> impl std::future::Future<Output = ClientResult<Vec<DiscoveredChannel>>> + Send + 'a;
 
     /// Resolve the MUC and Spaces service JIDs against `server_domain`
     /// via `disco#items` + `disco#info`. Falls back to the conventional
@@ -92,10 +105,10 @@ pub trait DiscoveryExt {
     /// server does not explicitly advertise the relevant features
     /// (XEP-0045 `http://jabber.org/protocol/muc` for MUC, the
     /// `urn:xmpp:spaces:0` feature for Spaces).
-    async fn discover_component_services(
-        &self,
-        server_domain: &str,
-    ) -> ClientResult<DiscoveredComponentServices>;
+    fn discover_component_services<'a>(
+        &'a self,
+        server_domain: &'a str,
+    ) -> impl std::future::Future<Output = ClientResult<DiscoveredComponentServices>> + Send + 'a;
 
     /// Discover the native spaces + channels topology against the
     /// server domain. Resolves both the MUC and Spaces service JIDs
@@ -106,7 +119,10 @@ pub trait DiscoveryExt {
     /// attached to a synthetic space with id [`STANDALONE_SPACE_ID`]
     /// so a single channel list can be rendered without
     /// special-casing.
-    async fn discover_topology(&self, server_domain: &str) -> ClientResult<DiscoveredTopology>;
+    fn discover_topology<'a>(
+        &'a self,
+        server_domain: &'a str,
+    ) -> impl std::future::Future<Output = ClientResult<DiscoveredTopology>> + Send + 'a;
 }
 
 // ── Implementation ────────────────────────────────────────────────────────────

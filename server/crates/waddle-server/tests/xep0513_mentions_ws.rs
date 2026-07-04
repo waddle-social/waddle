@@ -1,11 +1,11 @@
 //! XEP-0513 explicit mention integration tests over WebSocket.
 
-mod ws_common;
+use waddle_ws_test_support as ws_common;
 
 use std::str::FromStr;
 use tokio::sync::Mutex;
 use waddle_xmpp::xep::{
-    DataForm, Field, FieldType, FormType, IntoElement, MentionsPermission, FIELD_MENTIONS_CHANNEL,
+    DataForm, Field, FieldType, FormType, MentionsPermission, ToElement, FIELD_MENTIONS_CHANNEL,
     FIELD_MENTIONS_COUNT, FIELD_MENTIONS_INDIVIDUAL, NS_EXPLICIT_MENTIONS,
 };
 use waddle_xmpp::Stanza;
@@ -308,7 +308,7 @@ async fn mentions_permissions_iq_set_returns_forbidden() {
             Field::new(FIELD_MENTIONS_CHANNEL, FieldType::ListSingle)
                 .with_value(MentionsPermission::Moderators.as_wire()),
         )
-        .into_element();
+        .to_element();
     let mut submit_query = Element::builder("query", NS_EXPLICIT_MENTIONS).build();
     submit_query.append_child(submit_form);
     client

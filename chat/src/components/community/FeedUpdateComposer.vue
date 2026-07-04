@@ -31,6 +31,7 @@ import {
   type TuneValidationErrors,
 } from "@/lib/status-publication-ui";
 import type { FeedPostInput, StoryPostInput } from "@/lib/xmpp-client";
+import { barePeerJid, jidLocalpart } from "@/lib/xmpp/jid";
 import type { ActivityPublication, MoodPublication, TunePublication } from "@/lib/xmpp/pep-types";
 import {
   draftFromProfile,
@@ -147,7 +148,7 @@ watch(() => props.initialMode, (mode) => {
 
 function authorLabel(author: string | undefined): string {
   if (!author) return "Anonymous";
-  return author.split("@")[0] ?? author;
+  return jidLocalpart(author);
 }
 
 function feedbackClass(tone: FeedbackTone): string {
@@ -217,7 +218,7 @@ async function submitPost() {
   }
   postBusy.value = true;
   try {
-    await props.publishPost({ body, ...(props.selfJid ? { author: props.selfJid.split("/")[0] } : {}) });
+    await props.publishPost({ body, ...(props.selfJid ? { author: barePeerJid(props.selfJid) } : {}) });
     composerBody.value = "";
     setComposerFeedback("post", "success", "Post shared.");
   } catch (err) {
@@ -241,7 +242,7 @@ async function handleStorySubmit(payload: { body?: string; file: Blob; mediaKind
       ...(payload.body ? { body: payload.body } : {}),
       mediaUrl: uploaded.url,
       mediaType: uploaded.contentType,
-      ...(props.selfJid ? { author: props.selfJid.split("/")[0] } : {}),
+      ...(props.selfJid ? { author: barePeerJid(props.selfJid) } : {}),
     });
     storyComposerKey.value += 1;
     setComposerFeedback("story", "success", "Story shared.");

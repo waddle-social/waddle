@@ -14,13 +14,14 @@ describe("DM load error UI contract", () => {
   });
 
   test("wires the retry action only for active DM load failures", () => {
-    const chatController = readFileSync(new URL("../src/shell/chat-app-controller.ts", import.meta.url), "utf8");
+    const activeConversation = readFileSync(new URL("../src/shell/controllers/use-active-conversation.ts", import.meta.url), "utf8");
+    const sendOrchestration = readFileSync(new URL("../src/shell/controllers/use-send-orchestration.ts", import.meta.url), "utf8");
     const readyShell = readFileSync(new URL("../src/components/chat/ChatReadyShell.vue", import.meta.url), "utf8");
 
-    expect(chatController).toContain("dmMessaging.loadErrorPeerJid.value === peer.peerJid");
-    expect(chatController).toContain("activeActionError.value === dmMessaging.loadErrorMessage.value");
-    expect(chatController).toContain('? "Try again"');
-    expect(chatController).toContain("void dmMessaging.loadMessages(peer.peerJid)");
+    expect(activeConversation).toContain("dmMessaging.loadErrorPeerJid.value === peer.peerJid");
+    expect(activeConversation).toContain("activeActionError.value === dmMessaging.loadErrorMessage.value");
+    expect(activeConversation).toContain('? "Try again"');
+    expect(sendOrchestration).toContain("void dmMessaging.loadMessages(peer.peerJid)");
     expect(readyShell).toContain('@retry-load="retryActiveLoad"');
   });
 });

@@ -33,7 +33,6 @@ function makeWaddles(client: BrowserXmppClient | null = null) {
   const normalizeError = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
   const w = useWaddleDirectory(
-    ref(null),
     xmppClient,
     ref(null),
     normalizeError,

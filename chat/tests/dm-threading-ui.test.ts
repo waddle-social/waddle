@@ -59,7 +59,7 @@ describe("DM threading UI contract", () => {
   });
 
   test("seeded group-DM submits include the original direct-message peer", () => {
-    const controller = readFileSync(new URL("../src/shell/chat-app-controller.ts", import.meta.url), "utf8");
+    const controller = readFileSync(new URL("../src/shell/controllers/use-dm-sync.ts", import.meta.url), "utf8");
     const seedIndex = controller.indexOf("const seedPeerJid = ui.groupDmSeedPeerJid.value;");
     const payloadIndex = controller.indexOf("groupDmSpawnPayloadFromDm({", seedIndex);
     const peerIndex = controller.indexOf("peerJid: seedPeerJid", payloadIndex);
@@ -96,9 +96,9 @@ describe("DM threading UI contract", () => {
   });
 
   test("restores DM route threads only after the async route request is still current", () => {
-    const controller = readFileSync(new URL("../src/shell/chat-app-controller.ts", import.meta.url), "utf8");
+    const controller = readFileSync(new URL("../src/shell/controllers/use-route-sync.ts", import.meta.url), "utf8");
     const dmRouteStart = controller.indexOf('if (match.id === "dm") {');
-    const openDmIndex = controller.indexOf("await handleOpenDm(`${username}@${domain}`);", dmRouteStart);
+    const openDmIndex = controller.indexOf("await openDm(`${username}@${domain}`);", dmRouteStart);
     const staleGuardIndex = controller.indexOf("if (requestId !== routeRequestId) return;", openDmIndex);
     const restoreIndex = controller.indexOf("activeThreadStack.value = match.search.thread;", staleGuardIndex);
 

@@ -1,5 +1,6 @@
 import type { MemberSummary } from "@/lib/chat-types";
 import type { TimelineMessage } from "@/lib/chat-ui";
+import { jidDomainOrEmpty } from "@/lib/xmpp/jid";
 
 const BROADCAST_MENTION_SET = new Set(["everyone", "here"]);
 const MENTIONABLE_MEMBER_AFFILIATIONS = new Set<MemberSummary["affiliation"]>(["owner", "admin", "member"]);
@@ -31,7 +32,7 @@ function bareJid(value?: string | null): string | null {
 
 function isMucOccupantJid(jid: string): boolean {
   const bare = bareJid(jid) ?? jid;
-  return jid.includes("/") && bare.split("@")[1]?.startsWith("muc.") === true;
+  return jid.includes("/") && jidDomainOrEmpty(bare).startsWith("muc.");
 }
 
 function inferLocalUserJid(nick: string, selfDomain: string): string | null {

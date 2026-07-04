@@ -2,8 +2,6 @@ import type { WaddleSession } from "@/lib/server-auth";
 import { barePeerJid, type LiveRoomMessage } from "@/lib/xmpp-client";
 import {
   inferredFileDisposition,
-  type MarkupSpan,
-  type MessageReference,
   type TimelineMessage,
 } from "@/lib/chat-ui";
 import type { PersistedQueuedRoomMessage } from "@/lib/outbound-queue-store";
@@ -16,7 +14,10 @@ import {
   applyForumContext,
   mapLiveRoomMessageToTimeline,
 } from "@/channels/timeline";
-import { compareTimelineMessages, pickAuthoritativeTimestamp } from "@/lib/timeline-timestamps";
+import { compareTimelineMessages } from "@/lib/timeline-timestamps";
+import { assignCorrectionFields, type CorrectionPayload } from "@/lib/messaging/correction";
+import { retractTimelineMessage } from "@/lib/messaging/retraction";
+import { mergeRetractionTombstone } from "@/lib/messaging/timeline-insert";
 
 function mergeReplyToMetadata(
   existing: TimelineMessage["replyTo"],
@@ -63,70 +64,6 @@ function mergeMissingThreadMetadata(
   if (replyTo !== next.replyTo) assign({ replyTo });
 
   return next;
-}
-
-function mergeAuthoritativeLinkPreviews(
-  existing: TimelineMessage,
-  incoming: TimelineMessage,
-): TimelineMessage {
-  if (Object.prototype.hasOwnProperty.call(incoming, "linkPreviews")) {
-    return { ...existing, linkPreviews: incoming.linkPreviews };
-  }
-  if (!existing.linkPreviews) return existing;
-  const next = { ...existing };
-  delete next.linkPreviews;
-  return next;
-}
-
-export function retractChannelTimelineMessage(
-  existing: TimelineMessage,
-  retractionId?: string,
-): TimelineMessage {
-  const next: TimelineMessage = {
-    ...existing,
-    body: "",
-    isRetracted: true,
-    ...(retractionId ? { retractionId } : {}),
-  };
-  delete next.markup;
-  delete next.references;
-  delete next.sharedFiles;
-  delete next.linkPreviews;
-  delete next.extensionAnnotations;
-  delete next.extensionBodyFallback;
-  delete next.isSticker;
-  delete next.mentions;
-  delete next.broadcastMention;
-  delete next.forumPostKind;
-  delete next.forumTitle;
-  delete next.forumThreadTitle;
-  return next;
-}
-
-function mergeRetractionTombstone(
-  existing: TimelineMessage,
-  incoming: TimelineMessage,
-): TimelineMessage {
-  let result = incoming.isRetracted
-    ? retractChannelTimelineMessage(existing, incoming.retractionId)
-    : existing;
-  // Upgrade the timestamp if the MAM hit carries a higher-authority
-  // stamp than the row we already had — see `dms/message-timeline-state.ts`.
-  const authoritativeTimestamp = pickAuthoritativeTimestamp(
-    { createdAt: result.createdAt, createdAtSource: result.createdAtSource },
-    { createdAt: incoming.createdAt, createdAtSource: incoming.createdAtSource },
-  );
-  if (
-    authoritativeTimestamp.createdAt !== result.createdAt
-    || authoritativeTimestamp.createdAtSource !== result.createdAtSource
-  ) {
-    result = {
-      ...result,
-      createdAt: authoritativeTimestamp.createdAt,
-      createdAtSource: authoritativeTimestamp.createdAtSource,
-    };
-  }
-  return incoming.isRetracted ? result : mergeAuthoritativeLinkPreviews(result, incoming);
 }
 
 export interface TimelineBuildOptions {
@@ -183,7 +120,7 @@ export function queuedRoomMessageToTimeline(
   return message;
 }
 
-export function reactionSendersForUpdate(
+function reactionSendersForUpdate(
   message: TimelineMessage,
   nick?: string,
   senderId?: string,
@@ -203,7 +140,7 @@ export function reactionSendersForUpdate(
   return reactionSenders;
 }
 
-export function removeSenderReactions(
+function removeSenderReactions(
   reactionSenders: Record<string, Record<string, string>>,
   nick: string,
   senderId: string,
@@ -222,12 +159,48 @@ export function removeSenderReactions(
   }
 }
 
-export function reactionsFromSenders(
+function reactionsFromSenders(
   reactionSenders: Record<string, Record<string, string>>,
 ): Record<string, string[]> {
   return Object.fromEntries(
     Object.entries(reactionSenders).map(([emoji, senders]) => [emoji, Object.values(senders)]),
   );
+}
+
+// XEP-0444 occupant-keyed sender bookkeeping — the channel side of
+// reaction divergence 5. Replace semantics: this author's full reaction
+// set on the target becomes `emojis`; the previous per-author set is
+// wiped via `removeSenderReactions` so unticking an emoji actually
+// removes it.
+function channelReactionState(
+  target: TimelineMessage,
+  event: { nick: string; senderId: string; emojis: string[] },
+): { reactionSenders: Record<string, Record<string, string>>; reactions: Record<string, string[]> } | null {
+  const reactionSenders = reactionSendersForUpdate(target, event.nick, event.senderId);
+  removeSenderReactions(reactionSenders, event.nick, event.senderId);
+  for (const emoji of event.emojis) {
+    if (!reactionSenders[emoji]) reactionSenders[emoji] = {};
+    reactionSenders[emoji][event.senderId] = event.nick;
+  }
+  if (Object.keys(reactionSenders).length === 0) return null;
+  return { reactionSenders, reactions: reactionsFromSenders(reactionSenders) };
+}
+
+/** Immutable variant of the channel reaction bookkeeping (live merge path). */
+export function channelReactedRow(
+  target: TimelineMessage,
+  event: { nick: string; senderId: string; emojis: string[] },
+): TimelineMessage {
+  const state = channelReactionState(target, event);
+  const updated: TimelineMessage = { ...target };
+  if (state) {
+    updated.reactionSenders = state.reactionSenders;
+    updated.reactions = state.reactions;
+  } else {
+    delete updated.reactionSenders;
+    delete updated.reactions;
+  }
+  return updated;
 }
 
 export function mucCorrectionSender(msg: Pick<LiveRoomMessage, "roomJid" | "nick" | "authorRealJid">): {
@@ -290,12 +263,7 @@ export function buildChannelTimelineFromMamResults(params: {
   const correctionUpdates: {
     targetId: string;
     correctionSender: { authorJid: string; authorRealJid?: string };
-    body: string;
-    markup?: MarkupSpan[];
-    references?: MessageReference[];
-    linkPreviews?: LiveRoomMessage["linkPreviews"];
-    extensionAnnotations?: LiveRoomMessage["extensionAnnotations"];
-    extensionBodyFallback?: boolean;
+    payload: CorrectionPayload;
   }[] = [];
   const callThreadEndedUpdates: NonNullable<LiveRoomMessage["callThreadEnded"]>[] = [];
 
@@ -318,12 +286,14 @@ export function buildChannelTimelineFromMamResults(params: {
       correctionUpdates.push({
         targetId: msg.replacesId,
         correctionSender: mucCorrectionSender(msg),
-        body: msg.body,
-        markup: msg.markup,
-        references: msg.references,
-        linkPreviews: msg.linkPreviews,
-        extensionAnnotations: msg.extensionAnnotations,
-        extensionBodyFallback: msg.extensionBodyFallback,
+        payload: {
+          body: msg.body,
+          markup: msg.markup,
+          references: msg.references,
+          linkPreviews: msg.linkPreviews,
+          extensionAnnotations: msg.extensionAnnotations,
+          extensionBodyFallback: msg.extensionBodyFallback,
+        },
       });
     } else if (msg.callThreadEnded) {
       callThreadEndedUpdates.push(msg.callThreadEnded);
@@ -356,7 +326,7 @@ export function buildChannelTimelineFromMamResults(params: {
   for (const raw of regularMessages) {
     const mapped = mapLiveRoomMessageToTimeline(session, raw, (id) => byId.get(id));
     const tm = mapped.isRetracted
-      ? retractChannelTimelineMessage(mapped, mapped.retractionId)
+      ? retractTimelineMessage(mapped, mapped.retractionId)
       : mapped;
     const existingMessage = [tm.id, ...(tm.wireIds ?? [])]
       .map((id) => byId.get(id))
@@ -401,22 +371,7 @@ export function buildChannelTimelineFromMamResults(params: {
   for (const update of correctionUpdates) {
     const target = findMessageById(timeline, update.targetId);
     if (!target || !isSameMucCorrectionSender(target, update.correctionSender)) continue;
-    target.body = update.body;
-    target.isEdited = true;
-    if (update.markup && update.markup.length > 0) target.markup = update.markup;
-    else delete target.markup;
-    if (update.references && update.references.length > 0) target.references = update.references;
-    else delete target.references;
-    if (update.linkPreviews && update.linkPreviews.length > 0) target.linkPreviews = update.linkPreviews;
-    else delete target.linkPreviews;
-    if (update.extensionAnnotations && update.extensionAnnotations.length > 0) {
-      target.extensionAnnotations = update.extensionAnnotations;
-      if (update.extensionBodyFallback) target.extensionBodyFallback = true;
-      else delete target.extensionBodyFallback;
-    } else {
-      delete target.extensionAnnotations;
-      delete target.extensionBodyFallback;
-    }
+    assignCorrectionFields(target, update.payload);
   }
 
   for (const update of retractionUpdates) {
@@ -432,7 +387,7 @@ export function buildChannelTimelineFromMamResults(params: {
     }
     const index = timeline.indexOf(target);
     if (index === -1) continue;
-    const retracted = retractChannelTimelineMessage(target);
+    const retracted = retractTimelineMessage(target);
     timeline[index] = retracted;
     byId.add(retracted);
   }
@@ -440,16 +395,10 @@ export function buildChannelTimelineFromMamResults(params: {
   for (const update of reactionUpdates) {
     const target = timeline.find((message) => message.reactionTargetId === update.targetId);
     if (!target) continue;
-    const reactionSenders = reactionSendersForUpdate(target, update.nick, update.senderId);
-    removeSenderReactions(reactionSenders, update.nick, update.senderId);
-    for (const emoji of update.emojis) {
-      if (!reactionSenders[emoji]) reactionSenders[emoji] = {};
-      reactionSenders[emoji][update.senderId] = update.nick;
-    }
-    const reactions = reactionsFromSenders(reactionSenders);
-    if (Object.keys(reactionSenders).length > 0) {
-      target.reactionSenders = reactionSenders;
-      target.reactions = reactions;
+    const state = channelReactionState(target, update);
+    if (state) {
+      target.reactionSenders = state.reactionSenders;
+      target.reactions = state.reactions;
     } else {
       delete target.reactionSenders;
       delete target.reactions;

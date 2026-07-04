@@ -6,9 +6,9 @@
 //! sessions so their unacked queues flow through Q6 promotion, and
 //! exit within the drain timeout — no SIGKILL required.
 
-mod ws_common;
-
 use std::time::Duration;
+
+use waddle_ws_test_support as ws_common;
 use ws_common::{TestServer, WsXmppClient};
 
 const DOMAIN: &str = "localhost";

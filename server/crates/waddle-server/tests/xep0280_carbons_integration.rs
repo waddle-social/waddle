@@ -3,7 +3,7 @@
 //! This covers the app-facing `waddle-server` WebSocket path, which is
 //! the only supported XMPP C2S transport.
 
-mod ws_common;
+use waddle_ws_test_support as ws_common;
 
 use ws_common::{TestServer, WsXmppClient};
 

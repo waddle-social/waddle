@@ -1,6 +1,6 @@
 //! XEP-0012 last activity and XEP-0202 entity time over WebSocket C2S.
 
-mod ws_common;
+use waddle_ws_test_support as ws_common;
 
 use std::str::FromStr;
 use std::time::Duration;

@@ -34,7 +34,6 @@ pub mod mam;
 pub mod metrics;
 pub mod muc;
 pub mod parser;
-pub mod parser_utils;
 pub mod pending_delivery;
 pub mod presence;
 pub mod prometheus;

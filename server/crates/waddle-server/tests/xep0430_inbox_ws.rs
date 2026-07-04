@@ -16,7 +16,7 @@
 //! 6. A XEP-0333 displayed marker decrements unread state, reflected
 //!    in the next inbox query.
 
-mod ws_common;
+use waddle_ws_test_support as ws_common;
 
 use std::str::FromStr;
 use tokio::sync::Mutex;

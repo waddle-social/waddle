@@ -29,7 +29,7 @@ import {
   normalizeMucCallRoomJid,
 } from "@/lib/calls/muc-call-presence";
 import { mucCallParticipantPreview } from "@/lib/calls/muc-call-indicators";
-import { barePeerJid } from "@/lib/xmpp/jid";
+import { barePeerJid, jidLocalpart } from "@/lib/xmpp/jid";
 import type { ChannelSummary } from "@/lib/chat-types";
 import type { DmConversation } from "@/lib/xmpp-client";
 import CallSettingsDialog from "./CallSettingsDialog.vue";
@@ -90,7 +90,7 @@ const panel = computed<CurrentCallPanelState | null>(() => {
     const participantCount = Math.max(fallbackLabels.length, current.phase === "muc-pending" ? 1 : 0);
     return {
       kind: "muc",
-      title: channel?.name ?? roomJid.split("@")[0] ?? "Group call",
+      title: channel?.name ?? jidLocalpart(roomJid),
       targetJid: roomJid,
       channelId: channel?.id ?? null,
       media: current.media,
@@ -111,7 +111,7 @@ const panel = computed<CurrentCallPanelState | null>(() => {
   );
   return {
     kind: "dm",
-    title: conversation?.peerUsername ?? peerJid.split("@")[0] ?? "Direct call",
+    title: conversation?.peerUsername ?? jidLocalpart(peerJid),
     targetJid: peerJid,
     channelId: null,
     media: current.media,

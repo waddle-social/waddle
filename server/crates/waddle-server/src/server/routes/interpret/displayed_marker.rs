@@ -151,7 +151,7 @@ mod tests {
     use waddle_xmpp::inbox::storage::{InMemoryInboxStorage, InboxStorage};
     use waddle_xmpp::inbox::{ConversationKind, InboxEntry};
     use waddle_xmpp::mam::storage::{InMemoryMamStorage, MamStorage};
-    use waddle_xmpp::mam::{ArchivedMessage as MamArchivedMessage, RichMessageId};
+    use waddle_xmpp::mam::ArchivedMessage as MamArchivedMessage;
     use waddle_xmpp::registry::ConnectionRegistry;
     use waddle_xmpp_core::mam::ThreadId;
     use waddle_xmpp_core::xep0359::StanzaId as Xep0359StanzaId;
@@ -214,13 +214,6 @@ mod tests {
         inbox_storage: &'a Arc<dyn InboxStorage>,
     ) -> Deps<'a> {
         Deps::test_with_storage(registry, mam_storage, inbox_storage)
-    }
-
-    /// Use `RichMessageId::new` only for its non-empty pre-condition;
-    /// silences the unused-import lint when the test module is enabled.
-    #[allow(dead_code)]
-    fn rich_id_is_typed_constructor() {
-        let _ = RichMessageId::new("anchor");
     }
 
     #[tokio::test]

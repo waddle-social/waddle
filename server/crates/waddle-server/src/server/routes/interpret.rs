@@ -153,7 +153,6 @@ mod groupchat_validation;
 mod notification_activity_ingest;
 mod offline_delivery;
 mod room_dispatch;
-mod room_helpers;
 mod room_pin;
 mod room_subject;
 mod room_system_message;
@@ -184,14 +183,6 @@ use groupchat_validation::{
 use offline_delivery::queue_offline_delivery;
 pub(crate) use offline_delivery::reconcile_xep0357_notification_candidates;
 use room_dispatch::dispatch_to_room;
-#[cfg(test)]
-use room_helpers::available_bot_nick;
-#[cfg(test)]
-use room_helpers::message_thread_id;
-use room_helpers::{
-    available_bot_nick_with_base, enrich_message_event, normalize_thread_create_source,
-    session_is_server_owner,
-};
 use room_pin::apply_pin_change_event;
 use room_subject::persist_room_subject_event;
 use route_to_connection::route_to_connection;
@@ -652,6 +643,18 @@ async fn interpret_with_depth(
     }
 
     outcome
+}
+
+async fn enrich_message_event(deps: &Deps<'_>, message: Message) -> Message {
+    if deps.extension_manager.is_none() {
+        debug!(
+            "RequestEnrichment: no extension_manager in Deps; \
+             feeding original message back unchanged"
+        );
+        return message;
+    }
+    debug!("RequestEnrichment: direct messages do not carry a typed Waddle scope; skipping");
+    message
 }
 
 #[cfg(test)]

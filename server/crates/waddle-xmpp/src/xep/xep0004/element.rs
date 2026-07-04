@@ -12,10 +12,9 @@ pub trait FromElement: Sized {
 }
 
 /// Trait for types that can be serialized to a minidom `Element`.
-pub trait IntoElement {
+pub trait ToElement {
     /// Serialize into a minidom `Element`.
-    #[allow(clippy::wrong_self_convention)]
-    fn into_element(&self) -> Element;
+    fn to_element(&self) -> Element;
 }
 
 impl FromElement for FieldOption {
@@ -32,8 +31,8 @@ impl FromElement for FieldOption {
     }
 }
 
-impl IntoElement for FieldOption {
-    fn into_element(&self) -> Element {
+impl ToElement for FieldOption {
+    fn to_element(&self) -> Element {
         let mut builder = Element::builder("option", NS_DATA_FORMS);
 
         if let Some(ref label) = self.label {
@@ -97,8 +96,8 @@ impl FromElement for Field {
     }
 }
 
-impl IntoElement for Field {
-    fn into_element(&self) -> Element {
+impl ToElement for Field {
+    fn to_element(&self) -> Element {
         let mut builder = Element::builder("field", NS_DATA_FORMS).attr(
             minidom::rxml::xml_ncname!("type").to_owned(),
             self.field_type.as_str(),
@@ -136,7 +135,7 @@ impl IntoElement for Field {
         }
 
         for option in &self.options {
-            builder = builder.append(option.into_element());
+            builder = builder.append(option.to_element());
         }
 
         builder.build()
@@ -205,8 +204,8 @@ impl FromElement for DataForm {
     }
 }
 
-impl IntoElement for DataForm {
-    fn into_element(&self) -> Element {
+impl ToElement for DataForm {
+    fn to_element(&self) -> Element {
         let mut builder = Element::builder("x", NS_DATA_FORMS).attr(
             minidom::rxml::xml_ncname!("type").to_owned(),
             self.form_type.as_str(),
@@ -229,13 +228,13 @@ impl IntoElement for DataForm {
         }
 
         for field in &self.fields {
-            builder = builder.append(field.into_element());
+            builder = builder.append(field.to_element());
         }
 
         if !self.reported.is_empty() {
             let mut reported_builder = Element::builder("reported", NS_DATA_FORMS);
             for field in &self.reported {
-                reported_builder = reported_builder.append(field.into_element());
+                reported_builder = reported_builder.append(field.to_element());
             }
             builder = builder.append(reported_builder.build());
         }
@@ -243,7 +242,7 @@ impl IntoElement for DataForm {
         for item_fields in &self.items {
             let mut item_builder = Element::builder("item", NS_DATA_FORMS);
             for field in item_fields {
-                item_builder = item_builder.append(field.into_element());
+                item_builder = item_builder.append(field.to_element());
             }
             builder = builder.append(item_builder.build());
         }

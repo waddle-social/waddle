@@ -633,7 +633,7 @@ fn xep0160_hints_in_error_stanzas_are_ignored() {
 // number stable since PR #346). Any Q6 promotion test in
 // `sm_promotion::tests::*` is therefore also a classifier-reuse
 // test by construction. Trying to re-test it here would just be
-// asserting against an `#[allow(dead_code)]` re-export of the
+// asserting against a lint-suppressed re-export of the
 // classifier, which adds no value.
 
 // XEP-0160 promoted stanzas carrying their original receipt time on

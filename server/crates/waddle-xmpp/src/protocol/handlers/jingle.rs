@@ -1634,7 +1634,7 @@ mod tests {
         // must continue to forward to the peer connection without
         // tripping `feature-not-implemented`. Muji equivalents live
         // in the XEP-0272 dedicated test suite at
-        // `crates/waddle-xmpp/tests/xep_0272_muji.rs` per the
+        // `crates/waddle-xmpp/tests/xep0272_muji.rs` per the
         // CLAUDE.md "XEP custom test-suite hard rule."
         let iq = session_initiate_iq(
             "alice@waddle.test/desktop",

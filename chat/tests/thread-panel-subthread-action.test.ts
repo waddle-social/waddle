@@ -19,7 +19,7 @@ const chatReadyShellSource = readFileSync(
   "utf8",
 );
 const chatControllerSource = readFileSync(
-  new URL("../src/shell/chat-app-controller.ts", import.meta.url),
+  new URL("../src/shell/controllers/use-thread-panels.ts", import.meta.url),
   "utf8",
 );
 
@@ -212,26 +212,26 @@ describe("ThreadPanel desktop sub-thread action", () => {
     expect(menuAction).toContain('emit("openThread", threadActionTargetId.value)');
     expect(menuAction).not.toContain("props.message.threadId ?? props.message.id");
 
-    const toolbarThreadButton = sourceBlockAfter(
+    // The hover toolbar and action sheet are child components; the card must
+    // wire their thread action to the explicit-target handler.
+    const toolbarWiring = sourceBlock(
       messageCardSource,
-      '@click="startReplyFromMenu"',
-      '<button\n        type="button"',
-      '<button\n        v-if="canPinMessages',
+      "<MessageHoverToolbar",
+      "/>",
     );
-    expect(toolbarThreadButton).toContain('@click="startReplyInThreadFromMenu"');
+    expect(toolbarWiring).toContain('@reply-in-thread="startReplyInThreadFromMenu"');
 
-    const actionSheetThreadButton = sourceBlockAfter(
+    const actionSheetWiring = sourceBlock(
       messageCardSource,
-      '@click="sheetView = \'emoji\'"',
-      '<button\n            type="button"',
-      '<button\n            v-if="canPinMessages',
+      "<MessageActionSheet",
+      "/>",
     );
-    expect(actionSheetThreadButton).toContain('@click="startReplyInThreadFromMenu"');
+    expect(actionSheetWiring).toContain('@reply-in-thread="startReplyInThreadFromMenu"');
 
     const swipeAction = sourceBlock(
       messageCardSource,
-      "const swipe = useHorizontalSwipe({",
-      "function onSwipePointerdown",
+      "const gestures = useMessageGestures({",
+      "const swipe = gestures.swipe",
     );
     expect(swipeAction).toContain('emit("openThread", threadActionTargetId.value)');
     expect(swipeAction).not.toContain("props.message.threadId ?? props.message.id");

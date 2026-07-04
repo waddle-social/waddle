@@ -57,29 +57,21 @@ pub enum OutboundEvent {
     /// `format!("{}/", bare)` + `parse`, which violates the rule and
     /// produces an invalid resource.
     ///
-    /// **Migration status (issue #229 PR1)**: the variant is renamed
-    /// from `SendDirect` and the protocol-level intent is described
-    /// below, but the live `waddle-server` interpreter still implements
-    /// the legacy "write directly to the peer's outbound channel"
-    /// behaviour to keep the existing integration tests green during
-    /// the staged migration. The semantic change to "feed the
-    /// destination's state machine via
-    /// [`InboundEvent::StanzaFromPeer`]" lands in PR5 alongside the
-    /// `message.rs` cutover, at which point the recipient pipeline
-    /// (XEP-0191 incoming block, XEP-0359 recipient stamp, XEP-0313
-    /// archive, XEP-0280 received-carbons, inbox projection) starts
-    /// running on the destination side.
+    /// **Semantics (issue #229, landed)**: the interpreter resolves
+    /// `jid` against `ConnectionRegistry` and delivers the stanza to
+    /// the destination connection as a peer stanza. The destination's
+    /// recipient-pass pipeline runs — XEP-0191 incoming block,
+    /// XEP-0359 recipient stamp, XEP-0313 recipient-side archive,
+    /// XEP-0280 received-carbons, inbox projection — and ultimately
+    /// emits [`OutboundEvent::SendStanza`] to the destination's wire.
+    /// When a local bare-JID target has no available resources, the
+    /// interpreter runs a headless recipient pass so persistence and
+    /// incoming-block effects still execute.
     ///
-    /// **Intended semantic (PR5 onward)**: the interpreter resolves
-    /// `jid` against `ConnectionRegistry` and feeds the stanza into
-    /// the destination connection's machine as
-    /// [`InboundEvent::StanzaFromPeer`]. The destination's
-    /// recipient-pass pipeline runs and ultimately emits
-    /// [`OutboundEvent::SendStanza`] to the destination's wire.
-    ///
-    /// If the target is offline the event is logged and dropped (XMPP
-    /// offline-delivery semantics are archive-based, not
-    /// routing-based).
+    /// Cross-domain bare-JID targets with no local resources are
+    /// logged and dropped (s2s is out of scope); wire delivery to an
+    /// offline local recipient is archive-based, via the headless
+    /// pass's persistence effects, not routing-based.
     RouteToConnection { jid: jid::Jid, stanza: Box<Stanza> },
     /// Hand a `<message type='groupchat'>` to the room handler chain
     /// (Option C — issue #229 Q7) for occupancy validation,

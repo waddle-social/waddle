@@ -1,0 +1,21 @@
+[package]
+name = "waddle-ws-test-support"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Shared WebSocket XMPP integration-test harness (test server spawner + SCRAM WebSocket client)"
+
+[dependencies]
+base64 = { workspace = true }
+futures = { workspace = true }
+hmac = { workspace = true }
+libc = "0.2"
+pbkdf2 = { version = "0.13", features = ["hmac"] }
+rand = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+uuid = { workspace = true }
+xmpp-parsers = { workspace = true }

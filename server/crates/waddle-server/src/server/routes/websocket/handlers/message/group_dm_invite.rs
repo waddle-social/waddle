@@ -1,0 +1,536 @@
+use std::collections::BTreeMap;
+
+use tracing::warn;
+use waddle_xmpp::{
+    muc::room_actor::{ChangeAffiliation, GetAdminContext, GetConfig},
+    muc::room_registry_actor::GetRoom,
+    parser::stanza_to_string,
+    pending_delivery::{InsertOutcome, PendingPayload, PendingRow, PendingRowId},
+    protocol::handlers::errors::message_error_reply,
+    Stanza,
+};
+use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
+
+use crate::auth::Session;
+use crate::db::ValueExt;
+use crate::server::routes::websocket::WebSocketState;
+
+pub(super) async fn handle_group_dm_mediated_invite(
+    incoming: &xmpp_parsers::message::Message,
+    state: &WebSocketState,
+    bound_jid: &jid::FullJid,
+    authenticated_session: Option<&Session>,
+) -> Option<Vec<String>> {
+    if incoming.type_ != xmpp_parsers::message::MessageType::Normal {
+        return None;
+    }
+    let room_jid = incoming.to.as_ref()?.to_bare();
+    if room_jid.domain().as_str() != state.deps.service_domains.muc {
+        return None;
+    }
+
+    let (invitee, inbound_invite) = mediated_invitee(incoming)?;
+    let channel_id = waddle_xmpp::parse_managed_room_jid(&room_jid)?;
+    let channel = crate::server::xmpp_state::get_xmpp_channel(
+        state.deps.app_state.db_pool.global_actor().clone(),
+        &channel_id,
+    )
+    .await
+    .ok()
+    .flatten()?;
+    if channel.channel_type != waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM {
+        return None;
+    }
+    let Some(room_actor) = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(GetRoom {
+            room_jid: room_jid.clone(),
+        })
+        .await
+        .ok()
+        .flatten()
+    else {
+        return Some(vec![error_reply(
+            incoming,
+            bound_jid,
+            GroupDmInviteError::ItemNotFound,
+            "Requested room not found.",
+        )]);
+    };
+    let Ok(context) = room_actor
+        .ask(GetAdminContext {
+            sender_jid: bound_jid.clone(),
+        })
+        .await
+    else {
+        return Some(vec![error_reply(
+            incoming,
+            bound_jid,
+            GroupDmInviteError::InternalServerError,
+            "Internal server error.",
+        )]);
+    };
+    if context.affiliation < waddle_xmpp::Affiliation::Member {
+        return Some(vec![error_reply(
+            incoming,
+            bound_jid,
+            GroupDmInviteError::Forbidden,
+            "Only group-DM members may invite people.",
+        )]);
+    }
+    let invitee_blocklist = match state
+        .deps
+        .protocol
+        .blocking_storage
+        .list_blocked_jid_entries(&invitee)
+        .await
+    {
+        Ok(entries) => waddle_xmpp::protocol::Blocklist::new(entries),
+        Err(error) => {
+            warn!(
+                invitee = %invitee,
+                error = %error,
+                "Suppressing group-DM invite because blocklist lookup failed"
+            );
+            return Some(vec![]);
+        }
+    };
+    if invitee_blocklist.contains_jid(&jid::Jid::from(bound_jid.clone())) {
+        return Some(vec![]);
+    }
+
+    let Some(_session) = authenticated_session else {
+        return Some(vec![error_reply(
+            incoming,
+            bound_jid,
+            GroupDmInviteError::NotAuthorized,
+            "Authentication required.",
+        )]);
+    };
+    if let Err(error) = crate::admin::channels::validate_group_dm_invitee(
+        &state.deps.app_state,
+        &bound_jid.to_bare(),
+        &invitee,
+    )
+    .await
+    {
+        return Some(vec![xmpp_error_reply(incoming, bound_jid, error)]);
+    }
+    let Ok(invitee_context) = room_actor
+        .ask(GetAdminContext {
+            sender_jid: invitee
+                .clone()
+                .with_resource_str("group-dm-invite-check")
+                .expect("static resource is valid"),
+        })
+        .await
+    else {
+        return Some(vec![error_reply(
+            incoming,
+            bound_jid,
+            GroupDmInviteError::InternalServerError,
+            "Internal server error.",
+        )]);
+    };
+    if invitee_context.affiliation >= waddle_xmpp::Affiliation::Member {
+        return Some(vec![error_reply(
+            incoming,
+            bound_jid,
+            GroupDmInviteError::Conflict,
+            "Invitee is already a group-DM member.",
+        )]);
+    }
+
+    let requested_access =
+        waddle_xmpp::xep::xep_waddle_group_dm::history_access_from_mediated_invite(&inbound_invite)
+            .unwrap_or(waddle_xmpp::xep::xep_waddle_group_dm::GroupDmHistoryAccess::FromJoin);
+    let inviter_has_full_history =
+        group_dm_archive_boundary(state, &room_jid, &bound_jid.to_bare())
+            .await
+            .map(|boundary| boundary.is_none())
+            .unwrap_or(false);
+    let access = match requested_access {
+        waddle_xmpp::xep::xep_waddle_group_dm::GroupDmHistoryAccess::Full
+            if inviter_has_full_history =>
+        {
+            waddle_xmpp::xep::xep_waddle_group_dm::GroupDmHistoryAccess::Full
+        }
+        _ => waddle_xmpp::xep::xep_waddle_group_dm::GroupDmHistoryAccess::FromJoin,
+    };
+    let visible_after = match access {
+        waddle_xmpp::xep::xep_waddle_group_dm::GroupDmHistoryAccess::Full => None,
+        waddle_xmpp::xep::xep_waddle_group_dm::GroupDmHistoryAccess::FromJoin => {
+            Some(chrono::Utc::now().to_rfc3339())
+        }
+    };
+    if record_group_dm_archive_boundary(state, &room_jid, &invitee, visible_after.as_deref())
+        .await
+        .is_err()
+    {
+        return Some(vec![error_reply(
+            incoming,
+            bound_jid,
+            GroupDmInviteError::InternalServerError,
+            "Internal server error.",
+        )]);
+    }
+    if crate::admin::channels::persist_group_dm_member_tuple(
+        &state.deps.app_state,
+        &channel_id,
+        &invitee,
+    )
+    .await
+    .is_err()
+    {
+        let _ = delete_group_dm_archive_boundary(state, &room_jid, &invitee).await;
+        return Some(vec![error_reply(
+            incoming,
+            bound_jid,
+            GroupDmInviteError::InternalServerError,
+            "Internal server error.",
+        )]);
+    }
+    if room_actor
+        .ask(ChangeAffiliation {
+            jid: invitee.clone(),
+            affiliation: waddle_xmpp::Affiliation::Member,
+        })
+        .await
+        .is_err()
+    {
+        let _ = delete_group_dm_archive_boundary(state, &room_jid, &invitee).await;
+        crate::admin::channels::rollback_group_dm_member_tuple(
+            &state.deps.app_state,
+            &channel_id,
+            &invitee,
+        )
+        .await;
+        return Some(vec![error_reply(
+            incoming,
+            bound_jid,
+            GroupDmInviteError::InternalServerError,
+            "Internal server error.",
+        )]);
+    }
+    let room_name = match room_actor.ask(GetConfig).await {
+        Ok(config) => config.name,
+        Err(_) => room_jid.to_string(),
+    };
+    let shared_room_name = {
+        let trimmed = room_name.trim();
+        (!trimmed.is_empty()).then_some(trimmed)
+    };
+    if crate::admin::channels::publish_group_dm_bookmark(
+        &state.deps.app_state,
+        &invitee,
+        &room_jid,
+        shared_room_name,
+    )
+    .await
+    .is_err()
+    {
+        rollback_group_dm_invite_grant(state, room_actor, &channel_id, &room_jid, &invitee).await;
+        return Some(vec![error_reply(
+            incoming,
+            bound_jid,
+            GroupDmInviteError::InternalServerError,
+            "Internal server error.",
+        )]);
+    }
+
+    let mut invite = incoming.clone();
+    invite.from = Some(jid::Jid::from(room_jid.clone()));
+    invite.to = Some(jid::Jid::from(invitee.clone()));
+    invite.payloads = vec![build_server_mediated_invite_payload(
+        &bound_jid.to_bare(),
+        &invitee,
+        &inbound_invite,
+        access,
+    )];
+    let resources = state
+        .deps
+        .protocol
+        .connection_registry
+        .get_resources_for_user(&invitee);
+    if resources.is_empty() {
+        if let Err(error) = queue_offline_group_dm_invite(state, &invitee, &invite).await {
+            warn!(
+                invitee = %invitee,
+                error = %error,
+                "Failed to queue offline group-DM invite; rolling back member grant"
+            );
+            rollback_group_dm_invite_grant(state, room_actor, &channel_id, &room_jid, &invitee)
+                .await;
+            let error_kind = match error {
+                OfflineGroupDmInviteError::QuotaExceeded => GroupDmInviteError::ServiceUnavailable,
+                OfflineGroupDmInviteError::Storage(_) => GroupDmInviteError::InternalServerError,
+            };
+            return Some(vec![error_reply(
+                incoming,
+                bound_jid,
+                error_kind,
+                "Internal server error.",
+            )]);
+        }
+    } else {
+        for resource in resources {
+            let _ = state
+                .deps
+                .protocol
+                .connection_registry
+                .send_to(&resource, Stanza::Message(invite.clone()))
+                .await;
+        }
+    }
+
+    Some(vec![])
+}
+
+#[derive(Debug, thiserror::Error)]
+enum OfflineGroupDmInviteError {
+    #[error("pending_delivery quota exceeded")]
+    QuotaExceeded,
+    #[error("{0}")]
+    Storage(String),
+}
+
+async fn queue_offline_group_dm_invite(
+    state: &WebSocketState,
+    invitee: &jid::BareJid,
+    invite: &xmpp_parsers::message::Message,
+) -> Result<(), OfflineGroupDmInviteError> {
+    let row = PendingRow {
+        id: PendingRowId::fresh(),
+        recipient: invitee.clone(),
+        original_receipt_at: chrono::Utc::now(),
+        payload: PendingPayload::Transient(Box::new(invite.clone())),
+        flushed_in_session: None,
+        outbound_sequence: None,
+    };
+    match state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .insert(row)
+        .await
+    {
+        Ok(InsertOutcome::Inserted) => Ok(()),
+        Ok(InsertOutcome::QuotaExceeded) => Err(OfflineGroupDmInviteError::QuotaExceeded),
+        Err(error) => Err(OfflineGroupDmInviteError::Storage(error.to_string())),
+    }
+}
+
+async fn rollback_group_dm_invite_grant(
+    state: &WebSocketState,
+    room_actor: kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    channel_id: &str,
+    room_jid: &jid::BareJid,
+    invitee: &jid::BareJid,
+) {
+    let _ = room_actor
+        .ask(ChangeAffiliation {
+            jid: invitee.clone(),
+            affiliation: waddle_xmpp::Affiliation::None,
+        })
+        .await;
+    let _ = delete_group_dm_archive_boundary(state, room_jid, invitee).await;
+    let _ =
+        crate::admin::channels::retract_group_dm_bookmark(&state.deps.app_state, invitee, room_jid)
+            .await;
+    crate::admin::channels::rollback_group_dm_member_tuple(
+        &state.deps.app_state,
+        channel_id,
+        invitee,
+    )
+    .await;
+}
+
+async fn record_group_dm_archive_boundary(
+    state: &WebSocketState,
+    room_jid: &jid::BareJid,
+    member_jid: &jid::BareJid,
+    visible_after: Option<&str>,
+) -> Result<(), String> {
+    let actor = state.deps.app_state.db_pool.global_actor().clone();
+    actor
+        .ask(crate::db::actor::DbExecute {
+            sql: "INSERT INTO group_dm_archive_boundaries (room_jid, member_jid, visible_after, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(room_jid, member_jid) DO UPDATE SET visible_after = excluded.visible_after, updated_at = excluded.updated_at".to_string(),
+            params: vec![
+                room_jid.to_string().into(),
+                member_jid.to_string().into(),
+                visible_after.map(str::to_string).into(),
+                chrono::Utc::now().to_rfc3339().into(),
+            ],
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+async fn group_dm_archive_boundary(
+    state: &WebSocketState,
+    room_jid: &jid::BareJid,
+    member_jid: &jid::BareJid,
+) -> Result<Option<chrono::DateTime<chrono::Utc>>, String> {
+    let actor = state.deps.app_state.db_pool.global_actor().clone();
+    let row = actor
+        .ask(crate::db::actor::DbQueryOne {
+            sql: "SELECT visible_after FROM group_dm_archive_boundaries WHERE room_jid = ? AND member_jid = ?"
+                .to_string(),
+            params: vec![room_jid.to_string().into(), member_jid.to_string().into()],
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let visible_after = crate::db::row_value(&row, 0)
+        .map_err(|error| error.to_string())?
+        .as_optional_string()
+        .map_err(|error| error.to_string())?;
+    match visible_after {
+        Some(value) => chrono::DateTime::parse_from_rfc3339(&value)
+            .map(|dt| Some(dt.with_timezone(&chrono::Utc)))
+            .map_err(|error| error.to_string()),
+        None => Ok(None),
+    }
+}
+
+async fn delete_group_dm_archive_boundary(
+    state: &WebSocketState,
+    room_jid: &jid::BareJid,
+    member_jid: &jid::BareJid,
+) -> Result<(), String> {
+    let actor = state.deps.app_state.db_pool.global_actor().clone();
+    actor
+        .ask(crate::db::actor::DbExecute {
+            sql: "DELETE FROM group_dm_archive_boundaries WHERE room_jid = ? AND member_jid = ?"
+                .to_string(),
+            params: vec![room_jid.to_string().into(), member_jid.to_string().into()],
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn mediated_invitee(
+    message: &xmpp_parsers::message::Message,
+) -> Option<(jid::BareJid, minidom::Element)> {
+    let x = message
+        .payloads
+        .iter()
+        .find(|payload| payload.is("x", waddle_xmpp::muc::presence::NS_MUC_USER))?;
+    let invite = x.get_child("invite", waddle_xmpp::muc::presence::NS_MUC_USER)?;
+    let to = invite.attr("to")?.parse::<jid::BareJid>().ok()?;
+    Some((to, invite.clone()))
+}
+
+fn build_server_mediated_invite_payload(
+    inviter: &jid::BareJid,
+    invitee: &jid::BareJid,
+    inbound_invite: &minidom::Element,
+    access: waddle_xmpp::xep::xep_waddle_group_dm::GroupDmHistoryAccess,
+) -> minidom::Element {
+    let mut invite = minidom::Element::builder("invite", waddle_xmpp::muc::presence::NS_MUC_USER)
+        .attr(
+            minidom::rxml::xml_ncname!("from").to_owned(),
+            inviter.to_string(),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("to").to_owned(),
+            invitee.to_string(),
+        );
+    if let Some(reason) =
+        inbound_invite.get_child("reason", waddle_xmpp::muc::presence::NS_MUC_USER)
+    {
+        invite = invite.append(reason.clone());
+    }
+    invite = invite.append(waddle_xmpp::xep::xep_waddle_group_dm::build_history_access(
+        access,
+    ));
+    minidom::Element::builder("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+        .append(invite.build())
+        .build()
+}
+
+#[derive(Clone, Copy)]
+enum GroupDmInviteError {
+    NotAuthorized,
+    Forbidden,
+    Conflict,
+    ItemNotFound,
+    InternalServerError,
+    ServiceUnavailable,
+}
+
+impl GroupDmInviteError {
+    fn stanza_error(self, text: &str) -> StanzaError {
+        let (error_type, condition) = match self {
+            Self::NotAuthorized => (ErrorType::Auth, DefinedCondition::NotAuthorized),
+            Self::Forbidden => (ErrorType::Auth, DefinedCondition::Forbidden),
+            Self::Conflict => (ErrorType::Cancel, DefinedCondition::Conflict),
+            Self::ItemNotFound => (ErrorType::Cancel, DefinedCondition::ItemNotFound),
+            Self::InternalServerError => (ErrorType::Wait, DefinedCondition::InternalServerError),
+            Self::ServiceUnavailable => (ErrorType::Cancel, DefinedCondition::ServiceUnavailable),
+        };
+        StanzaError::new(error_type, condition, "en", text)
+    }
+}
+
+fn error_reply(
+    incoming: &xmpp_parsers::message::Message,
+    bound_jid: &jid::FullJid,
+    kind: GroupDmInviteError,
+    text: &str,
+) -> String {
+    let mut stamped = incoming.clone();
+    stamped.from = Some(jid::Jid::from(bound_jid.clone()));
+    stanza_to_string(message_error_reply(&stamped, kind.stanza_error(text))).unwrap_or_default()
+}
+
+fn xmpp_error_reply(
+    incoming: &xmpp_parsers::message::Message,
+    bound_jid: &jid::FullJid,
+    error: waddle_xmpp::XmppError,
+) -> String {
+    let stanza_error = match error {
+        waddle_xmpp::XmppError::Stanza {
+            condition,
+            error_type,
+            text,
+        } => stanza_error_from_waddle_parts(error_type, condition, text),
+        other => {
+            warn!(
+                error = %other,
+                "group-DM invite validation failed with non-stanza error"
+            );
+            stanza_error_from_waddle_parts(
+                waddle_xmpp::StanzaErrorType::Wait,
+                waddle_xmpp::StanzaErrorCondition::InternalServerError,
+                Some("Internal server error.".to_string()),
+            )
+        }
+    };
+    let mut stamped = incoming.clone();
+    stamped.from = Some(jid::Jid::from(bound_jid.clone()));
+    stanza_to_string(message_error_reply(&stamped, stanza_error)).unwrap_or_default()
+}
+
+fn stanza_error_from_waddle_parts(
+    error_type: waddle_xmpp::StanzaErrorType,
+    condition: waddle_xmpp::StanzaErrorCondition,
+    text: Option<String>,
+) -> StanzaError {
+    match text {
+        Some(text) => StanzaError::new(error_type.to_xmpp(), condition.to_xmpp(), "en", text),
+        None => StanzaError {
+            type_: error_type.to_xmpp(),
+            by: None,
+            defined_condition: condition.to_xmpp(),
+            texts: BTreeMap::new(),
+            other: None,
+        },
+    }
+}

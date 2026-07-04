@@ -17,7 +17,6 @@ pub enum ComputedPermission {
     Union(Vec<ComputedPermission>),
 
     /// Permission is granted if ALL of the specified permissions/relations are satisfied
-    #[allow(dead_code)]
     Intersection(Vec<ComputedPermission>),
 
     /// Permission is granted by following a relation to a parent object and checking a permission there

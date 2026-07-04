@@ -214,7 +214,7 @@ fn test_simple_form_round_trip() {
         )
         .add_field(Field::boolean("public", true).with_label("Make public?"));
 
-    let elem = original.into_element();
+    let elem = original.to_element();
     let parsed = DataForm::from_element(&elem).expect("parse");
 
     assert_eq!(parsed.form_type, FormType::Form);
@@ -232,7 +232,7 @@ fn test_submit_form_round_trip() {
         .add_field(Field::text_single("name", "Alice"))
         .add_field(Field::boolean("agree", true));
 
-    let elem = original.into_element();
+    let elem = original.to_element();
     let parsed = DataForm::from_element(&elem).expect("parse");
 
     assert_eq!(parsed.form_type, FormType::Submit);
@@ -251,7 +251,7 @@ fn test_list_field_round_trip() {
             .add_option(FieldOption::with_label("Blue", "blue")),
     );
 
-    let elem = original.into_element();
+    let elem = original.to_element();
     let parsed = DataForm::from_element(&elem).expect("parse");
 
     let field = parsed.field("color").expect("color field");
@@ -271,7 +271,7 @@ fn test_multi_value_field_round_trip() {
             .add_value("voice"),
     );
 
-    let elem = original.into_element();
+    let elem = original.to_element();
     let parsed = DataForm::from_element(&elem).expect("parse");
 
     let values = parsed.get_values("features").expect("features values");
@@ -293,7 +293,7 @@ fn test_tabular_form_round_trip() {
             Field::text_single("name", "Bob"),
         ]);
 
-    let elem = original.into_element();
+    let elem = original.to_element();
     let parsed = DataForm::from_element(&elem).expect("parse");
 
     assert_eq!(parsed.form_type, FormType::Result);
@@ -312,7 +312,7 @@ fn test_required_and_desc_round_trip() {
             .with_required(),
     );
 
-    let elem = original.into_element();
+    let elem = original.to_element();
     let parsed = DataForm::from_element(&elem).expect("parse");
 
     let field = parsed.field("email").expect("email field");
@@ -324,7 +324,7 @@ fn test_required_and_desc_round_trip() {
 #[test]
 fn test_cancel_form_round_trip() {
     let original = DataForm::new(FormType::Cancel);
-    let elem = original.into_element();
+    let elem = original.to_element();
     let parsed = DataForm::from_element(&elem).expect("parse");
 
     assert_eq!(parsed.form_type, FormType::Cancel);
@@ -384,7 +384,7 @@ fn test_find_data_form() {
         .append(
             Element::builder("x", NS_DATA_FORMS)
                 .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
-                .append(Field::text_single("name", "test").into_element())
+                .append(Field::text_single("name", "test").to_element())
                 .build(),
         )
         .build();

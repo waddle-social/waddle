@@ -11,7 +11,7 @@
 //! <iq type='set' id='block-report-1'>
 //!   <block xmlns='urn:xmpp:blocking'>
 //!     <item jid='spammer@example.com'>
-//!       <report xmlns='urn:xmpp:reporting:1' reason='spam'/>
+//!       <report xmlns='urn:xmpp:reporting:1' reason='urn:xmpp:reporting:spam'/>
 //!     </item>
 //!   </block>
 //! </iq>
@@ -44,10 +44,12 @@ pub enum ReportReason {
 
 impl ReportReason {
     /// Parse from attribute string.
+    ///
+    /// Reasons are the registered URNs from XEP-0377 §3.
     pub fn from_str_attr(s: &str) -> Option<Self> {
         match s {
-            "spam" => Some(Self::Spam),
-            "abuse" => Some(Self::Abuse),
+            "urn:xmpp:reporting:spam" => Some(Self::Spam),
+            "urn:xmpp:reporting:abuse" => Some(Self::Abuse),
             _ => None,
         }
     }
@@ -55,8 +57,8 @@ impl ReportReason {
     /// Convert to attribute string.
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Spam => "spam",
-            Self::Abuse => "abuse",
+            Self::Spam => "urn:xmpp:reporting:spam",
+            Self::Abuse => "urn:xmpp:reporting:abuse",
         }
     }
 }
@@ -243,14 +245,17 @@ mod tests {
 
     #[test]
     fn test_report_reason_display() {
-        assert_eq!(ReportReason::Spam.to_string(), "spam");
-        assert_eq!(ReportReason::Abuse.to_string(), "abuse");
+        assert_eq!(ReportReason::Spam.to_string(), "urn:xmpp:reporting:spam");
+        assert_eq!(ReportReason::Abuse.to_string(), "urn:xmpp:reporting:abuse");
     }
 
     #[test]
     fn test_is_report_element() {
         let elem = Element::builder("report", NS_REPORTING)
-            .attr(minidom::rxml::xml_ncname!("reason").to_owned(), "spam")
+            .attr(
+                minidom::rxml::xml_ncname!("reason").to_owned(),
+                "urn:xmpp:reporting:spam",
+            )
             .build();
         assert!(is_report_element(&elem));
 
@@ -263,7 +268,7 @@ mod tests {
         let report = Report::spam();
         let elem = build_report_element(&report);
 
-        assert_eq!(elem.attr("reason"), Some("spam"));
+        assert_eq!(elem.attr("reason"), Some("urn:xmpp:reporting:spam"));
         let parsed = parse_report(&elem).expect("parseable");
         assert_eq!(parsed.reason, ReportReason::Spam);
         assert_eq!(parsed.text, None);

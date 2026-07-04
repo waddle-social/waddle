@@ -1,17 +1,14 @@
-export {
-  BrowserXmppClient,
-  RoomMemberListUnavailableError,
-} from "./client";
+export { BrowserXmppClient } from "./client";
+export type { PubsubEvent } from "./client-events";
 export type {
-  AdminUserEntry,
-  AdminUsersPage,
   DmBookmarkItem,
   NotifyMode,
-  PubsubEvent,
   SetDmNotificationModeResult,
   SetRoomNotificationModeOutcome,
   UserBookmarkItem,
-} from "./client";
+} from "./client-pubsub";
+export { RoomMemberListUnavailableError } from "./client-muc-admin";
+export type { AdminUserEntry, AdminUsersPage } from "./client-muc-admin";
 // Admin V2 — types re-exported for consumption by SpacesPanel,
 // ChannelsPanel, and their detail drawers. The `*Ref` /
 // `*SetRoleResult` / `*SetAffiliationResult` / `*KickResult` shapes
@@ -31,6 +28,8 @@ export type {
 export {
   barePeerJid,
   jidDomain,
+  jidDomainOrEmpty,
+  jidLocalpart,
   parseManagedRoomBareJid,
   roomBareJidFor,
 } from "./jid";

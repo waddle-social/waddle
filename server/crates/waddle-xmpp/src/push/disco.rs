@@ -42,7 +42,7 @@ use minidom::Element;
 use p256::elliptic_curve::sec1::ToEncodedPoint;
 use thiserror::Error;
 
-use crate::xep::xep0004::{DataForm, Field, FormType, FromElement, IntoElement};
+use crate::xep::xep0004::{DataForm, Field, FormType, FromElement, ToElement};
 
 use super::types::Kid;
 
@@ -95,7 +95,7 @@ pub fn push_vapid_disco_form(advertisement: &VapidAdvertisement) -> Element {
             PUSH_VAPID_FIELD_KID,
             advertisement.kid.to_string(),
         ))
-        .into_element()
+        .to_element()
 }
 
 /// Parse error for [`parse_push_vapid_disco_form`].
@@ -217,7 +217,7 @@ mod tests {
                 PUSH_VAPID_FIELD_KID,
                 uuid::Uuid::nil().to_string(),
             ))
-            .into_element();
+            .to_element();
         let err = parse_push_vapid_disco_form(&element).expect_err("wrong form type");
         assert!(matches!(err, PushVapidDiscoFormError::WrongFormType { .. }));
     }
@@ -230,7 +230,7 @@ mod tests {
                 PUSH_VAPID_FIELD_KID,
                 uuid::Uuid::nil().to_string(),
             ))
-            .into_element();
+            .to_element();
         let err = parse_push_vapid_disco_form(&element).expect_err("missing field");
         assert_eq!(
             err,
@@ -250,7 +250,7 @@ mod tests {
                 PUSH_VAPID_FIELD_KID,
                 uuid::Uuid::new_v4().to_string(),
             ))
-            .into_element();
+            .to_element();
         let err = parse_push_vapid_disco_form(&element).expect_err("short key");
         assert!(matches!(
             err,
@@ -272,7 +272,7 @@ mod tests {
                 PUSH_VAPID_FIELD_KID,
                 uuid::Uuid::new_v4().to_string(),
             ))
-            .into_element();
+            .to_element();
         let err = parse_push_vapid_disco_form(&element).expect_err("wrong prefix");
         assert_eq!(err, PushVapidDiscoFormError::PublicKeyWrongPrefix);
     }
@@ -287,7 +287,7 @@ mod tests {
                 advertisement.public_key_base64url(),
             ))
             .add_field(Field::text_single(PUSH_VAPID_FIELD_KID, "not-a-uuid"))
-            .into_element();
+            .to_element();
         let err = parse_push_vapid_disco_form(&element).expect_err("bad kid");
         assert_eq!(err, PushVapidDiscoFormError::KidInvalidUuid);
     }
@@ -308,7 +308,7 @@ mod tests {
                 PUSH_VAPID_FIELD_KID,
                 uuid::Uuid::new_v4().to_string(),
             ))
-            .into_element();
+            .to_element();
         let err = parse_push_vapid_disco_form(&element).expect_err("invalid point");
         assert_eq!(err, PushVapidDiscoFormError::PublicKeyInvalidPoint);
     }

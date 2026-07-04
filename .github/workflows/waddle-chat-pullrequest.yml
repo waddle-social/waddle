@@ -6,6 +6,8 @@ on:
   pull_request:
     paths:
     - .github/workflows/waddle-chat-pullrequest.yml
+    - apps/apple/Waddle/Assets.xcassets/AccentColor.colorset/Contents.json
+    - apps/apple/Waddle/Assets.xcassets/AccentColor.colorset/Contents.json/**
     - bun.lock
     - bun.lock/**
     - chat/astro.config.mjs
@@ -26,6 +28,8 @@ on:
     - chat/scripts/resolve-commit-sha.mjs
     - chat/scripts/resolve-commit-sha.mjs/**
     - chat/src/**
+    - chat/src/styles/global/tokens.css
+    - chat/src/styles/global/tokens.css/**
     - chat/tests/**
     - chat/tsconfig.json
     - chat/tsconfig.json/**
@@ -36,12 +40,16 @@ on:
     - env.cue/**
     - package.json
     - package.json/**
+    - scripts/generate-design-tokens.mjs
+    - scripts/generate-design-tokens.mjs/**
     - server/Cargo.lock
     - server/Cargo.lock/**
     - server/Cargo.toml
     - server/Cargo.toml/**
     - server/crates/waddle-xmpp-client-wasm/**
     - server/crates/waddle-xmpp-client/**
+    - website/src/styles/global/brand-palette.css
+    - website/src/styles/global/brand-palette.css/**
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true

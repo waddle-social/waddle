@@ -497,3 +497,36 @@ pub(super) async fn handle_disco_items_iq(
     }
     Vec::new()
 }
+
+fn channels_to_disco_items(channels: Vec<XmppChannelRecord>, muc_domain: &str) -> Vec<DiscoItem> {
+    channels
+        .into_iter()
+        .filter(|channel| channel.channel_type != waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM)
+        .filter(|channel| channel.public_room)
+        .filter_map(|channel| {
+            waddle_xmpp::managed_room_jid(&channel.id, muc_domain)
+                .ok()
+                .map(|room_jid| DiscoItem::muc_room(&room_jid.to_string(), &channel.name))
+        })
+        .collect()
+}
+
+async fn canonical_channel_disco_items(
+    state: &WebSocketState,
+    muc_domain: &str,
+    limit: usize,
+) -> Result<Vec<DiscoItem>, String> {
+    match list_xmpp_channels(
+        state.deps.app_state.db_pool.global_actor().clone(),
+        limit,
+        0,
+    )
+    .await
+    {
+        Ok(channels) => Ok(channels_to_disco_items(channels, muc_domain)),
+        Err(error) => {
+            warn!(error = %error, "Failed to list canonical channels for MUC discovery");
+            Err(error)
+        }
+    }
+}

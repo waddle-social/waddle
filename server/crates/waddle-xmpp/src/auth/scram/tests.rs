@@ -9,17 +9,17 @@ fn test_secret() -> String {
 #[test]
 fn test_generate_scram_keys() {
     let password = test_secret();
-    let salt = b"salt1234salt1234"; // 16 bytes
+    let salt: [u8; 16] = rand::random();
     let iterations = 4096;
 
-    let (stored_key, server_key) = generate_scram_keys(&password, salt, iterations);
+    let (stored_key, server_key) = generate_scram_keys(&password, &salt, iterations);
 
     // Keys should be 32 bytes (SHA-256 output)
     assert_eq!(stored_key.len(), 32);
     assert_eq!(server_key.len(), 32);
 
     // Keys should be deterministic
-    let (stored_key2, server_key2) = generate_scram_keys(&password, salt, iterations);
+    let (stored_key2, server_key2) = generate_scram_keys(&password, &salt, iterations);
     assert_eq!(stored_key, stored_key2);
     assert_eq!(server_key, server_key2);
 }
@@ -142,6 +142,123 @@ fn test_sasl_name_decoding() {
     assert_eq!(decode_sasl_name("user=2Cname").unwrap(), "user,name");
     assert_eq!(decode_sasl_name("user=3Dname").unwrap(), "user=name");
     assert_eq!(decode_sasl_name("a=2Cb=3Dc").unwrap(), "a,b=c");
+}
+
+/// RFC 5802 §5.1 permits a client to send an authzid naming itself;
+/// authorization-identity mapping is not implemented, so only a
+/// self-referential authzid is accepted and any other identity is
+/// rejected rather than silently ignored.
+#[test]
+fn test_client_first_authzid_must_match_authcid() {
+    let mut server = ScramServer::new();
+    let result = server.process_client_first("n,a=admin,n=user,r=nonce123");
+    assert!(result.is_err());
+
+    let mut server = ScramServer::new();
+    let accepted = server
+        .process_client_first("n,a=user,n=user,r=nonce123")
+        .expect("self-referential authzid is RFC-conformant");
+    assert_eq!(accepted.username, "user");
+}
+
+/// RFC 5802 ABNF: the GS2 flag token is exactly "n", "y", or "p=…";
+/// a longer token must not be accepted as if it were 'n'.
+#[test]
+fn test_malformed_gs2_flag_token_is_rejected() {
+    assert!(parse_client_first("nonsense,,n=user,r=abc").is_err());
+    assert!(parse_client_first("nn,,n=user,r=abc").is_err());
+    assert!(parse_client_first("p=,,n=user,r=abc").is_err());
+    assert!(parse_client_first(",,n=user,r=abc").is_err());
+}
+
+/// When client-first carried an authzid, client-final's `c=` is the
+/// base64 of that exact GS2 header — not the bare "n,," constant.
+#[test]
+fn test_full_exchange_with_self_authzid() {
+    let password = test_secret();
+    let salt = generate_salt();
+    let iterations = 4096;
+    let (stored_key, server_key) = generate_scram_keys(&password, &salt, iterations);
+
+    let mut server = ScramServer::with_salt(salt.clone(), iterations);
+    let client_nonce = "self-authzid-nonce";
+    let gs2_header = "n,a=testuser,";
+    let client_first = format!("{}n=testuser,r={}", gs2_header, client_nonce);
+    let server_first = server.process_client_first(&client_first).unwrap();
+
+    let salted_password = hi(password.as_bytes(), &salt, iterations);
+    let client_key = hmac_sha256(&salted_password, b"Client Key");
+    let channel_binding = BASE64_STANDARD.encode(gs2_header);
+    let client_final_without_proof = format!("c={},r={}", channel_binding, server.combined_nonce);
+    let auth_message = format!(
+        "n=testuser,r={},{},{}",
+        client_nonce, server_first.message, client_final_without_proof
+    );
+    let client_signature = hmac_sha256(&stored_key, auth_message.as_bytes());
+    let client_proof: Vec<u8> = client_key
+        .iter()
+        .zip(client_signature.iter())
+        .map(|(a, b)| a ^ b)
+        .collect();
+    let client_final = format!(
+        "{},p={}",
+        client_final_without_proof,
+        BASE64_STANDARD.encode(&client_proof)
+    );
+
+    let server_final = server
+        .process_client_final(&client_final, &stored_key, &server_key)
+        .expect("exchange with self authzid succeeds");
+    assert!(server_final.message.starts_with("v="));
+
+    // The bare "biws" constant must NOT be accepted for this header.
+    let mut server = ScramServer::with_salt(salt, iterations);
+    server.process_client_first(&client_first).unwrap();
+    let tampered = client_final.replace(&format!("c={}", channel_binding), "c=biws");
+    assert!(server
+        .process_client_final(&tampered, &stored_key, &server_key)
+        .is_err());
+}
+
+/// RFC 5802 §5.1: the `c=` value in client-final MUST be the base64
+/// encoding of the GS2 header from client-first ("n,," → "biws").
+/// A mismatching value must fail authentication even with a valid proof.
+#[test]
+fn test_client_final_channel_binding_mismatch_is_rejected() {
+    let password = test_secret();
+    let salt = generate_salt();
+    let iterations = 4096;
+    let (stored_key, server_key) = generate_scram_keys(&password, &salt, iterations);
+
+    let mut server = ScramServer::with_salt(salt.clone(), iterations);
+    let client_nonce = "test-nonce";
+    let client_first = format!("n,,n=user,r={}", client_nonce);
+    let server_first = server.process_client_first(&client_first).unwrap();
+
+    // Compute a VALID proof, but over a tampered channel-binding value
+    // ("eSws" is base64("y,,") — a gs2 header the server never saw).
+    let salted_password = hi(password.as_bytes(), &salt, iterations);
+    let client_key = hmac_sha256(&salted_password, b"Client Key");
+    let client_final_without_proof = format!("c=eSws,r={}", server.combined_nonce);
+    let auth_message = format!(
+        "n=user,r={},{},{}",
+        client_nonce, server_first.message, client_final_without_proof
+    );
+    let client_signature = hmac_sha256(&stored_key, auth_message.as_bytes());
+    let client_proof: Vec<u8> = client_key
+        .iter()
+        .zip(client_signature.iter())
+        .map(|(a, b)| a ^ b)
+        .collect();
+    let client_final = format!(
+        "{},p={}",
+        client_final_without_proof,
+        BASE64_STANDARD.encode(&client_proof)
+    );
+
+    let result = server.process_client_final(&client_final, &stored_key, &server_key);
+    assert!(result.is_err());
+    assert_eq!(server.state(), &ScramState::Complete);
 }
 
 /// Test invalid SCRAM state transitions.

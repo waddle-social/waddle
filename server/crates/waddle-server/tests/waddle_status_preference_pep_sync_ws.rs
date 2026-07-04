@@ -22,7 +22,7 @@
 //! serialized (never `format!`-interpolated XML markup), per the
 //! CLAUDE.md XML-generation hard rule.
 
-mod ws_common;
+use waddle_ws_test_support as ws_common;
 
 use std::time::Duration;
 use tokio::sync::Mutex;

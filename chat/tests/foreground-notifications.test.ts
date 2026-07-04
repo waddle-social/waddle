@@ -8,7 +8,7 @@ import {
   showForegroundNotificationForDmActivity,
   showForegroundNotificationForChannelActivity,
   showForegroundNotificationsForChannelActivities,
-} from "../src/shell/chat-app-controller";
+} from "../src/shell/controllers/foreground-notifications";
 import type { LiveDmMessage, NotifyMode } from "../src/lib/xmpp-client";
 
 const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");

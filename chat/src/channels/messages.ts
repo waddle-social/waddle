@@ -54,7 +54,6 @@ import { useChatWindowVisibility } from "@/shell/window-visibility";
 
 export function useChannelMessages(
   session: Ref<WaddleSession | null>,
-  _api: Ref<null>,
   xmppClient: Ref<BrowserXmppClient | null>,
   activeSpaceId: Ref<string | null>,
   activeChannelId: Ref<string | null>,

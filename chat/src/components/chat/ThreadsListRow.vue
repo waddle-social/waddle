@@ -2,6 +2,7 @@
 import { computed } from "vue";
 import { Phone, Video } from "lucide-vue-next";
 import type { WasmThreadEntry } from "@/lib/xmpp/wasm-types";
+import { jidLocalpart } from "@/lib/xmpp/jid";
 import type { CallMedia } from "@/lib/calls/types";
 import { threadDisplayTitle } from "@/lib/threads-view-filters";
 import { useCallAnchorCardState, wasmThreadEntryToAnchorMessage } from "@/lib/call-thread-anchor";
@@ -41,7 +42,7 @@ const recencyLabel = computed(() => {
 });
 
 const channelLabel = computed(() => {
-  const local = props.entry.channel.split("@")[0] ?? props.entry.channel;
+  const local = jidLocalpart(props.entry.channel);
   return `#${local}`;
 });
 

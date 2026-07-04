@@ -4,6 +4,7 @@ import { ChevronLeft, ChevronRight, X } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import { QUICK_REACTION_EMOJIS } from "@/lib/reaction-mode";
 import type { Story, StoryReactionSummary } from "@/lib/xmpp-client";
+import { jidLocalpart } from "@/lib/xmpp/jid";
 
 interface StoryReactionEntry {
   emoji: string;
@@ -62,7 +63,7 @@ function plural(value: number, unit: string): string {
 
 function authorLabel(author: string | undefined): string {
   if (!author) return "Anonymous";
-  return author.split("@")[0] ?? author;
+  return jidLocalpart(author);
 }
 
 function isVideoStory(story: Story): boolean {

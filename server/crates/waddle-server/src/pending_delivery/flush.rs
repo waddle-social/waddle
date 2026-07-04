@@ -23,7 +23,7 @@ pub struct FlushOutcome {
 /// adding a new dependency (e.g. a future XEP-0411 hook) doesn't push
 /// the parameter count over the clippy threshold and tempt a
 /// suppression. Project hard rule (`server/CLAUDE.md`): never add
-/// `#[allow(clippy::too_many_arguments)]` (Greptile/Qodo review on
+/// a clippy suppression attribute (Greptile/Qodo review on
 /// PR #360).
 pub struct FlushContext<'a, R>
 where

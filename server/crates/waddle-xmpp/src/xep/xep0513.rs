@@ -496,7 +496,7 @@ pub fn is_mentions_permissions_query(elem: &Element) -> bool {
 /// - `mentions#channel` list-single, required, value =
 ///   `permissions.channel` (only when `permissions.channel.is_some()`).
 pub fn build_mentions_permissions_query(permissions: &MentionsPermissions) -> Element {
-    use crate::xep::xep0004::{DataForm, Field, FormType, IntoElement};
+    use crate::xep::xep0004::{DataForm, Field, FormType, ToElement};
 
     let mut form = DataForm::new(FormType::Form)
         .with_title("Permissions for Explicit Mentions")
@@ -528,7 +528,7 @@ pub fn build_mentions_permissions_query(permissions: &MentionsPermissions) -> El
     }
 
     let mut query = Element::builder("query", NS_EXPLICIT_MENTIONS).build();
-    query.append_child(form.into_element());
+    query.append_child(form.to_element());
     query
 }
 

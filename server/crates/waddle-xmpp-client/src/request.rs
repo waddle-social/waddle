@@ -74,7 +74,7 @@ pub enum ClientRequest {
         // Boxed because xmpp-parsers 0.22's `Iq` is now an enum with
         // embedded variant payloads (~448 bytes). Boxing keeps the
         // enclosing `ClientRequest` enum compact and satisfies clippy
-        // `large_enum_variant` without an `#[allow(...)]` escape.
+        // `large_enum_variant` without a lint-suppression escape.
         iq: Box<Iq>,
     },
     SendMessage {

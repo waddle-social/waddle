@@ -1,4 +1,4 @@
-import { barePeerJid } from "@/lib/xmpp/jid";
+import { barePeerJid, jidLocalpart } from "@/lib/xmpp/jid";
 
 interface GroupDmSpawnInput {
   peerJid: string;
@@ -37,6 +37,6 @@ function groupDmSpawnName(peerJid: string, selectedMemberLabels: readonly string
 }
 
 function labelFromJid(jid: string): string {
-  const localpart = normalizedBareJid(jid).split("@")[0] ?? "";
+  const localpart = jidLocalpart(normalizedBareJid(jid));
   return localpart ? `${localpart.charAt(0).toUpperCase()}${localpart.slice(1)}` : jid;
 }

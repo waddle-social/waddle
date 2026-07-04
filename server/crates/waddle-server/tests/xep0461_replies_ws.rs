@@ -1,6 +1,6 @@
 //! XEP-0461 reply integration tests over WebSocket.
 
-mod ws_common;
+use waddle_ws_test_support as ws_common;
 
 use tokio::sync::Mutex;
 use waddle_xmpp::mam::{ArchivedMessage, MamQuery, MamStorage, MamStorageError, SqlxMamStorage};

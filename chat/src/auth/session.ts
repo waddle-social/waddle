@@ -23,7 +23,6 @@ export function useSessionAuth(defaultServerUrl: string) {
 
   const appState = ref<AppState>("loading");
   const session: Ref<WaddleSession | null> = ref(null);
-  const api: Ref<null> = ref(null);
   const appError = ref("");
   const isBootstrapping = ref(false);
 
@@ -48,7 +47,6 @@ export function useSessionAuth(defaultServerUrl: string) {
       if (!loaded || loaded.is_expired) {
         clearStoredSessionId();
         session.value = null;
-        api.value = null;
         await loadProviders();
         appState.value = "signed-out";
         return;
@@ -56,7 +54,6 @@ export function useSessionAuth(defaultServerUrl: string) {
 
       storeSessionId(loaded.session_id);
       session.value = loaded;
-      api.value = null;
       appState.value = "ready";
     } catch (e) {
       appError.value = e instanceof Error ? e.message : "Something went wrong.";
@@ -102,7 +99,6 @@ export function useSessionAuth(defaultServerUrl: string) {
     clearStoredSessionId();
     await loadProviders();
     session.value = null;
-    api.value = null;
     appState.value = "signed-out";
     appError.value = "";
   }
@@ -110,7 +106,6 @@ export function useSessionAuth(defaultServerUrl: string) {
   return {
     appState,
     session,
-    api,
     appError,
     isBootstrapping,
     activeServerUrl,

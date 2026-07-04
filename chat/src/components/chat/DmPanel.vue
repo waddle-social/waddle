@@ -25,7 +25,7 @@ import {
 } from "@/lib/calls/dm-call-activity";
 import type { DmCallActivity } from "@/lib/calls/dm-call-activity";
 import type { CallMedia } from "@/lib/calls/types";
-import { barePeerJid } from "@/lib/xmpp/jid";
+import { barePeerJid, jidLocalpart } from "@/lib/xmpp/jid";
 import { useInCallOverlays } from "@/presence/in-call-overlay-store";
 import type { GroupDmSummary } from "@/lib/chat-types";
 import type { DmConversation } from "@/lib/xmpp-client";
@@ -185,7 +185,7 @@ function callActivityTitle(activity: DmCallActivity): string {
   const existing = props.conversations.find((conversation) =>
     normalizedPeerJid(conversation.peerJid) === peerJid
   );
-  return existing?.peerUsername || peerJid.split("@")[0] || peerJid;
+  return existing?.peerUsername || jidLocalpart(peerJid) || peerJid;
 }
 
 function callActivityAvatarUrl(activity: DmCallActivity): string | null {

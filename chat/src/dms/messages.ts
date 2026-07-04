@@ -8,7 +8,7 @@ import type {
   LiveDmMessage,
   SessionLifecycleEvent,
 } from "@/lib/xmpp-client";
-import { barePeerJid } from "@/lib/xmpp-client";
+import { barePeerJid, jidLocalpart } from "@/lib/xmpp-client";
 import type { WaddleSession } from "@/lib/server-auth";
 import {
   displayedStateCanAdvance,
@@ -49,7 +49,7 @@ export function useDirectMessages(
   clearActionError: () => void,
 ) {
   const { mode: scrollDirection } = useScrollDirectionPreference();
-  const peerNameFromJid = (jid: string) => barePeerJid(jid).split("@")[0] ?? "unknown";
+  const peerNameFromJid = (jid: string) => jidLocalpart(jid);
   const dmLoadErrorMessage = (peerJid: string, opts: { queuedOnly?: boolean } = {}) => {
     const username = peerNameFromJid(peerJid).trim();
     const target = username ? `@${username}` : "this chat";

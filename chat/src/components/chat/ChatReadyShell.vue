@@ -52,7 +52,7 @@ import CurrentCallPanel from "@/components/calls/CurrentCallPanel.vue";
 import { navigate, useRouteMatch, type AdminMatch, type AdminPanel } from "@/router";
 import { buildHomeDashboardProps } from "@/home/dashboard-props";
 import type { MessageThreadEntry } from "@/channels/threads";
-import { jidDomain } from "@/lib/xmpp/jid";
+import { barePeerJid, jidDomain, jidLocalpart } from "@/lib/xmpp/jid";
 import type { ChatAppController } from "@/shell/chat-app-controller";
 import type { DiscoveredExtensionRoute } from "@/lib/xmpp/extension-commands";
 import { isEventUpcomingOrOngoing } from "@/lib/xmpp-client";
@@ -287,8 +287,8 @@ function onCommunityRsvp(
 ) {
   const session = connectionStore.session;
   if (!session) return;
-  const bareJid = session.jid.split("/")[0] ?? session.jid;
-  const localpart = bareJid.split("@")[0];
+  const bareJid = barePeerJid(session.jid);
+  const localpart = jidLocalpart(bareJid);
   if (!localpart) return;
   void communityEvents.rsvp(event.uid, localpart, bareJid, partstat);
 }

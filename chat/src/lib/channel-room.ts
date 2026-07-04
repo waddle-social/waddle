@@ -1,6 +1,6 @@
 import type { ChannelSummary } from "@/lib/chat-types";
 import type { WaddleSession } from "@/lib/server-auth";
-import { barePeerJid, parseManagedRoomBareJid, roomBareJidFor } from "@/lib/xmpp-client";
+import { barePeerJid, jidDomainOrEmpty, parseManagedRoomBareJid, roomBareJidFor } from "@/lib/xmpp-client";
 
 export function roomJidForChannelSummary(
   session: WaddleSession,
@@ -31,7 +31,7 @@ export function knownChannelIdForRoomJid(
   );
   if (explicit) return explicit.id;
 
-  const roomDomain = normalizedRoomJid.split("@")[1] ?? "";
+  const roomDomain = jidDomainOrEmpty(normalizedRoomJid);
   const trustedDomain = normalizeManagedMucDomain(managedMucDomain);
   if (!trustedDomain || roomDomain !== trustedDomain) return null;
 
@@ -48,7 +48,7 @@ export function isTrustedManagedRoomJid(
   managedMucDomain?: string | null,
 ): boolean {
   const normalizedRoomJid = barePeerJid(roomJid).trim().toLowerCase();
-  const roomDomain = normalizedRoomJid.split("@")[1] ?? "";
+  const roomDomain = jidDomainOrEmpty(normalizedRoomJid);
   const trustedDomain = normalizeManagedMucDomain(managedMucDomain);
   return Boolean(
     roomDomain &&
@@ -61,5 +61,5 @@ export function isTrustedManagedRoomJid(
 function normalizeManagedMucDomain(managedMucDomain?: string | null): string {
   const bare = barePeerJid(managedMucDomain ?? "").trim().toLowerCase();
   if (!bare) return "";
-  return bare.includes("@") ? bare.split("@")[1] ?? "" : bare;
+  return bare.includes("@") ? jidDomainOrEmpty(bare) : bare;
 }
