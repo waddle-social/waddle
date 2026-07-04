@@ -495,3 +495,31 @@ describe("reconnect catch-up (archive-sourced live emit) reconciles synthesized 
     expect(result.messages[0]!.synthesizedId).toBeUndefined();
   });
 });
+
+describe("archive stamps well after the synthesized receipt are distinct messages (#1182)", () => {
+  test("a same-content archive arrival stamped 3 minutes later appends instead of merging", () => {
+    // A's synthesized row was received at 10:00:00; an archive copy of A
+    // can only lead that stamp by clock skew. A same-content row stamped
+    // 10:03:00 is a distinct message sent while we were offline.
+    const synthesized = mapLiveRoomMessageToTimeline(
+      session,
+      roomMessageFromArchived(
+        { ...baseArchivedRoom, mam_id: crypto.randomUUID(), timestamp: "2026-07-01T10:00:00.000Z" },
+        "live",
+      )!,
+    );
+    const laterDistinct = mapLiveRoomMessageToTimeline(
+      session,
+      roomMessageFromArchived({
+        ...baseArchivedRoom,
+        mam_id: "archive-uid-12",
+        stanza_id: "archive-uid-12",
+        stanza_id_by: "room@conf.example.com",
+        timestamp: "2026-07-01T10:03:00.000Z",
+      })!,
+    );
+    const result = insertLiveMessage([synthesized], laterDistinct, new Set());
+    expect(result.appended).toBe(true);
+    expect(result.messages).toHaveLength(2);
+  });
+});

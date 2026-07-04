@@ -18,6 +18,15 @@ import { barePeerJid } from "@/lib/xmpp-client";
 const SYNTHESIZED_MATCH_WINDOW_MS = 5 * 60_000;
 
 /**
+ * How far the real (archive) stamp may *lead* the synthesized receipt
+ * stamp. The archive records the same message the client already
+ * received, so it can only lead by clock skew — a same-content row
+ * stamped later than this is a distinct message sent while we were
+ * offline and must never be swallowed.
+ */
+const REAL_STAMP_AHEAD_TOLERANCE_MS = 90_000;
+
+/**
  * Same-author check that works for both pipelines: MUC rows compare the
  * room-occupant JID (the MAM copy may add a real JID the live copy never
  * saw); DM rows compare the bare sender JID.
@@ -30,9 +39,17 @@ function sameAuthor(a: TimelineMessage, b: TimelineMessage): boolean {
     && barePeerJid(a.authorJid ?? "") === barePeerJid(b.authorJid ?? "");
 }
 
-function withinMatchWindow(a: TimelineMessage, b: TimelineMessage): boolean {
-  const delta = Math.abs(Date.parse(a.createdAt) - Date.parse(b.createdAt));
-  return Number.isFinite(delta) && delta <= SYNTHESIZED_MATCH_WINDOW_MS;
+/**
+ * Asymmetric stamp check: the real side may trail the synthesized
+ * receipt by the full window (slow delivery, skew) but only lead it by
+ * the skew tolerance (see `REAL_STAMP_AHEAD_TOLERANCE_MS`).
+ */
+function stampsReconcilable(synthesized: TimelineMessage, real: TimelineMessage): boolean {
+  const synthesizedStamp = Date.parse(synthesized.createdAt);
+  const realStamp = Date.parse(real.createdAt);
+  if (!Number.isFinite(synthesizedStamp) || !Number.isFinite(realStamp)) return false;
+  return realStamp - synthesizedStamp <= REAL_STAMP_AHEAD_TOLERANCE_MS
+    && synthesizedStamp - realStamp <= SYNTHESIZED_MATCH_WINDOW_MS;
 }
 
 /**
@@ -62,7 +79,9 @@ export function findSynthesizedIdMergeTarget(
     !existing.synthesizedId !== !incoming.synthesizedId
     && contentKey(existing) === incomingKey
     && sameAuthor(existing, incoming)
-    && withinMatchWindow(existing, incoming)
+    && (incoming.synthesizedId
+      ? stampsReconcilable(incoming, existing)
+      : stampsReconcilable(existing, incoming))
   );
 }
 
