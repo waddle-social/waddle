@@ -4,6 +4,7 @@ import type { ChannelSummary } from "@/lib/chat-types";
 import type { WaddleSession } from "@/lib/server-auth";
 import {
   BrowserXmppClient,
+  bareJidKey,
   barePeerJid,
   type RoomActivityEvent,
   type SessionLifecycleEvent,
@@ -395,8 +396,11 @@ export function useChannelMessages(
     // MAM fetch racing the catch-up's merges for messages.value. The
     // catch-up path (cursor paging + live-merge) fully closes the gap,
     // so skip the rebuild — same choreography as a resumed session.
+    // Coverage keys are server-emitted (RFC 7622-lowercased) JIDs while
+    // the directory-derived room JID may differ in case — compare via
+    // bareJidKey or the skip silently fails open back into the race.
     const roomJid = roomJidForChannel(channelId);
-    if (roomJid && event.catchup.roomJids.includes(roomJid)) return;
+    if (roomJid && event.catchup.roomJids.some((jid) => bareJidKey(jid) === bareJidKey(roomJid))) return;
     const metadataSeed = messages.value;
     const preserved = messages.value.filter(
       (m) =>

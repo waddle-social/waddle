@@ -169,6 +169,33 @@ describe("XEP-0198 session lifecycle catch-up (group chat)", () => {
     expect(messaging.messages.value).toEqual(existing);
   });
 
+  test("catch-up coverage matches room JIDs case-insensitively", async () => {
+    // Cursor keys are server-emitted JIDs (RFC 7622 lowercased); the
+    // directory-derived room JID can differ in case. The skip must
+    // still fire or the double-MAM race silently returns.
+    const client = makeRoomClient();
+    const { messaging } = makeRoomMessaging(client);
+
+    messaging.messages.value = [
+      {
+        id: "seen-1",
+        author: "bob",
+        body: "hi",
+        createdAt: "2024-01-01T00:00:00Z",
+        isSelf: false,
+      },
+    ];
+
+    messaging.onSessionLifecycle({
+      type: "fresh",
+      catchup: { dmJids: [], roomJids: ["C1@MUC.Example.com"] },
+    });
+    await new Promise((r) => setTimeout(r, 0));
+
+    const clientAny = client as unknown as { value: { queryMam: ReturnType<typeof mock> } };
+    expect(clientAny.value.queryMam).not.toHaveBeenCalled();
+  });
+
   test("fresh session re-fetches MAM when messages were already loaded", async () => {
     const client = makeRoomClient();
     const { messaging } = makeRoomMessaging(client);

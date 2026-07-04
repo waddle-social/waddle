@@ -26,6 +26,7 @@ export type {
   WasmAdminSpacesListResult,
 } from "./wasm-types";
 export {
+  bareJidKey,
   barePeerJid,
   jidDomain,
   jidDomainOrEmpty,

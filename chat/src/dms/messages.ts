@@ -8,7 +8,7 @@ import type {
   LiveDmMessage,
   SessionLifecycleEvent,
 } from "@/lib/xmpp-client";
-import { barePeerJid, jidLocalpart } from "@/lib/xmpp-client";
+import { bareJidKey, barePeerJid, jidLocalpart } from "@/lib/xmpp-client";
 import type { WaddleSession } from "@/lib/server-auth";
 import {
   displayedStateCanAdvance,
@@ -301,7 +301,7 @@ export function useDirectMessages(
     // itself — a wholesale reload here would race its merges for
     // messages.value. Skip the rebuild; cursor paging + live-merge
     // closes the gap, same choreography as a resumed session.
-    if (event.catchup.dmJids.includes(barePeerJid(peerJid))) return;
+    if (event.catchup.dmJids.some((jid) => bareJidKey(jid) === bareJidKey(peerJid))) return;
     const preserved = messages.value.filter(
       (m) =>
         m.isSelf && (
