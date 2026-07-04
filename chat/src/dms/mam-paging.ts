@@ -147,7 +147,10 @@ export function useDmMamPaging(deps: UseDmMamPagingDeps) {
       );
       if (displayed) setMdsDisplayed(mdsKey, displayed);
       const pinned = await scrollToPinnedEdgeAndPin();
-      if (!pinned || requestId !== messageRequestId || activePeerJid.value !== peerJid) return "loaded";
+      // Superseded during the pin step: the timeline was rebuilt, but a
+      // newer request owns it now — callers must not react.
+      if (requestId !== messageRequestId || activePeerJid.value !== peerJid) return "aborted";
+      if (!pinned) return "loaded";
       initialLatestPagePinned = true;
       const newest = [...timelineWithQueue].reverse().find(isFeedVisible);
       if (newest) persistLastSeen(peerJid, newest.id);

@@ -146,6 +146,29 @@ describe("#1180 fresh lifecycle carries reconnect catch-up coverage", () => {
     ]);
   });
 
+  test("a failed catch-up on a RESUMED session emits no catchupFailure", async () => {
+    // Resumed sessions never skipped a reload (the fresh-only lifecycle
+    // path is the only skipper), so there is nothing to fall back to —
+    // emitting here would trigger a spurious wholesale reload for a
+    // gap-free stream.
+    const { client, state, received } = makeClient();
+    const xmpp = {
+      fetch_room_history_page: () => {
+        throw new Error("boom");
+      },
+    };
+    state.xmpp = xmpp;
+    state.catchup.onSessionStarted();
+    state.catchup.recordRoomSeen("c1@muc.example.com", "2026-07-01T10:00:01.000Z");
+    const failures: Array<{ kind: "dm" | "room"; key: string }> = [];
+    client.setCatchupFailureHandler((failure) => failures.push(failure));
+
+    await state.runSessionReady(xmpp, { type: "resumed" });
+
+    expect(failures).toEqual([]);
+    expect(received).toEqual([{ type: "resumed" }]);
+  });
+
   test("resumed session-ready carries no coverage field", async () => {
     const { state, xmpp, received } = makeClient();
     state.catchup.onSessionStarted();

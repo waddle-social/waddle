@@ -331,6 +331,9 @@ export function useDirectMessages(
     );
     void (async () => {
       const result = await loadMessages(peerJid);
+      // "aborted": a newer request (same or switched conversation) owns
+      // the timeline now — reacting would push stale rows onto it.
+      if (result === "aborted") return;
       if (activePeerJid.value !== peerJid) return;
       if (result === "failed") {
         // A failed reload must not leave the timeline wiped to

@@ -206,11 +206,15 @@ export function useChannelMamPaging(deps: UseChannelMamPagingDeps) {
       if (displayed) setMdsDisplayed(mdsKey, displayed);
       const pinned = await scrollToPinnedEdgeAndPin();
       if (
-        !pinned ||
         requestId !== messageRequestId ||
         (activeSpaceId.value ?? "") !== spaceId ||
         activeChannelId.value !== channelId
       ) {
+        // Superseded during the pin step: the timeline was rebuilt, but
+        // a newer request owns it now — callers must not react.
+        return "aborted";
+      }
+      if (!pinned) {
         return "loaded";
       }
       initialLatestPagePinned = true;

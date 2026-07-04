@@ -437,6 +437,9 @@ export function useChannelMessages(
     );
     void (async () => {
       const result = await loadMessages(spaceId ?? "", channelId, 0, metadataSeed);
+      // "aborted": a newer request (same or switched conversation) owns
+      // the timeline now — reacting would push stale rows onto it.
+      if (result === "aborted") return;
       if (
         (activeSpaceId.value ?? "") !== (spaceId ?? "") ||
         activeChannelId.value !== channelId

@@ -661,6 +661,55 @@ describe("XEP-0198 delivery status (DM)", () => {
     expect(dm.messages.value).toEqual(existing);
   });
 
+  test("a superseded fallback reload does not append stale rows onto the newer load", async () => {
+    // The fallback reload can be superseded by a user-triggered reload
+    // of the SAME conversation. The superseded call reports "aborted"
+    // and the fallback must not react — the newer request owns the
+    // timeline now.
+    const resolvers: Array<(value: LiveDmMessage[]) => void> = [];
+    const queryPersonalMam = mock(
+      () => new Promise<LiveDmMessage[]>((resolve) => resolvers.push(resolve)),
+    );
+    const client = ref({ queryPersonalMam } as never) as never;
+    const { dm } = makeDmMessaging(client);
+
+    dm.messages.value = [
+      {
+        id: "dm-old",
+        author: "bob",
+        body: "earlier",
+        createdAt: "2024-01-01T00:00:00Z",
+        isSelf: false,
+      },
+      {
+        id: "failed-1",
+        author: "alice",
+        body: "unsent",
+        createdAt: "2024-01-01T00:01:00Z",
+        isSelf: true,
+        deliveryStatus: "failed",
+      },
+    ];
+
+    dm.onCatchupFailed({ kind: "dm", key: "bob@example.com" });
+    await new Promise((r) => setTimeout(r, 0));
+    void dm.loadMessages("bob@example.com");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(resolvers).toHaveLength(2);
+
+    // Newer request completes first and owns the timeline.
+    resolvers[1]([]);
+    await new Promise((r) => setTimeout(r, 0));
+    const ownedByNewer = [...dm.messages.value];
+
+    // The superseded fallback reload now resolves → "aborted".
+    resolvers[0]([]);
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(dm.messages.value).toEqual(ownedByNewer);
+  });
+
   test("catch-up failure for a different DM peer does not reload", async () => {
     const client = makeDmClient();
     const { dm } = makeDmMessaging(client);

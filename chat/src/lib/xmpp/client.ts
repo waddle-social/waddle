@@ -1912,7 +1912,7 @@ export class BrowserXmppClient {
     // `handleSessionReady` (synchronous WASM callback) can never
     // observe `pendingDuringResume` set without `resumeBarrier`
     // also set.
-    const catchupPromise = this.runReconnectCatchup(xmpp, catchupEntries);
+    const catchupPromise = this.runReconnectCatchup(xmpp, catchupEntries, lifecycle.type);
     const barrierPromise = catchupPromise.finally(() => this.completeResumeBarrier(xmpp));
     this.pendingDuringResume = [];
     this.resumeBarrier = { xmpp, promise: barrierPromise };
@@ -2134,8 +2134,9 @@ export class BrowserXmppClient {
   private runReconnectCatchup(
     xmpp: XmppClientInstance,
     entries: Array<{ kind: "dm" | "room"; key: string; after?: string; since?: string; seenIds?: string[] }>,
+    lifecycle: SessionLifecycleEvent["type"],
   ) {
-    return this.mam.runReconnectCatchup(xmpp, entries);
+    return this.mam.runReconnectCatchup(xmpp, entries, lifecycle);
   }
   private wireEvents(xmpp: XmppClientInstance & { enableKeepAlive?: (opts: { interval: number; timeout: number }) => void; disableKeepAlive?: () => void }) {
     if (!this.xmpp && !this.destroying) this.xmpp = xmpp;
