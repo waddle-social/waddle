@@ -660,7 +660,12 @@ export function dmMessageFromArchived(
   const extensionAnnotations = extensionAnnotationsFromWasm(message.extension_envelope);
   const callThread = isSupportedDmCallThread(message.call_thread) ? message.call_thread : undefined;
   const callThreadEnded = message.call_thread_ended;
-  const dmWireIds = [message.id, message.origin_id]
+  // #1182: the user-server-injected XEP-0359 stanza-id is a real wire
+  // identity — the MAM copy is keyed on it (XEP-0313 servers use it as the
+  // archive UID) — so fold it into the aliases like the room path does
+  // with `stampedByRoom`. This both dedupes exactly and keeps such rows
+  // out of the synthesized-id content-match pool.
+  const dmWireIds = [message.id, message.origin_id, ownStanzaId?.id]
     .filter((value): value is string => !!value && value !== dmPrimaryId);
   // Alias a DM call-thread anchor by its sid so a same-session MAM backfill
   // collapses onto the synthesized live anchor (see `dm-call-anchor.ts`)

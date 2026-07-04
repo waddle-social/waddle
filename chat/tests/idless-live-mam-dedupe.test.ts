@@ -387,3 +387,83 @@ describe("file-only id-less messages reconcile by attachment URLs (#1182)", () =
     expect(timeline).toHaveLength(2);
   });
 });
+
+describe("DM server-stamped stanza-id is a real wire identity (#1182)", () => {
+  test("live DM with only a stanza-id is not flagged and carries it as an alias", () => {
+    const result = dmMessageFromArchived(
+      {
+        ...baseArchivedDm,
+        stanza_id: "srv-stamped-1",
+        stanza_id_by: "example.com",
+        mam_id: "fabricated-uuid-9",
+      },
+      "alice@example.com",
+      "live",
+    );
+    expect(result?.synthesizedId).toBeUndefined();
+    expect(result?.wireIds).toContain("srv-stamped-1");
+  });
+
+  test("MAM copy keyed on the stanza-id dedupes exactly against the live row", () => {
+    const existing = [
+      fromLiveDmMessage(
+        session,
+        dmMessageFromArchived(
+          {
+            ...baseArchivedDm,
+            stanza_id: "srv-stamped-2",
+            stanza_id_by: "example.com",
+            mam_id: "fabricated-uuid-10",
+            timestamp: "2026-07-01T10:00:00.000Z",
+          },
+          "alice@example.com",
+          "live",
+        )!,
+      ),
+    ];
+    const timeline = buildDmTimelineFromMamResults({
+      session,
+      mamResults: [
+        dmMessageFromArchived(
+          { ...baseArchivedDm, mam_id: "srv-stamped-2", timestamp: "2026-07-01T10:00:00.000Z" },
+          "alice@example.com",
+        )!,
+      ],
+      existing,
+    });
+    expect(timeline).toHaveLength(1);
+  });
+});
+
+describe("seedExistingOnly keeps the consumed synthesized row's UUID as alias (#1182)", () => {
+  test("lifecycle-reload merge preserves the fabricated id so persisted last-seen still resolves", () => {
+    const fabricated = crypto.randomUUID();
+    const existing = [
+      mapLiveRoomMessageToTimeline(
+        session,
+        roomMessageFromArchived(
+          { ...baseArchivedRoom, mam_id: fabricated, timestamp: "2026-07-01T10:00:00.000Z" },
+          "live",
+        )!,
+      ),
+    ];
+    const timeline = buildChannelTimelineFromMamResults({
+      session,
+      channelIsForum: false,
+      mamResults: [
+        roomMessageFromArchived({
+          ...baseArchivedRoom,
+          mam_id: "archive-uid-9",
+          stanza_id: "archive-uid-9",
+          stanza_id_by: "room@conf.example.com",
+          timestamp: "2026-07-01T10:00:01.000Z",
+        })!,
+      ],
+      existing,
+      options: { seedExistingOnly: true },
+    });
+    expect(timeline).toHaveLength(1);
+    expect(timeline[0]!.id).toBe("archive-uid-9");
+    expect(timeline[0]!.wireIds).toContain(fabricated);
+  });
+});
