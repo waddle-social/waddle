@@ -446,8 +446,11 @@ export function useChannelMessages(
         // A failed reload must not leave the timeline wiped to
         // queued-only: the catch-up coverage skip would then block the
         // self-heal on the next reconnect. Restore the pre-reload
-        // timeline; the load error stays surfaced.
-        messages.value = metadataSeed;
+        // timeline (the load error stays surfaced) — merging in what
+        // the catch's queued-only reset holds, so a message the user
+        // queued DURING the reload doesn't vanish until its echo.
+        const queuedDuringReload = messages.value.filter((m) => !findMessageById(metadataSeed, m.id));
+        messages.value = [...metadataSeed, ...queuedDuringReload];
         return;
       }
       if (preserved.length === 0) return;
