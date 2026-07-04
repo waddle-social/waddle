@@ -2430,6 +2430,36 @@ async fn sm_resume_replay_stamps_xep0203_delay_with_original_receipt_time() {
 
     let original_receipt = Utc.with_ymd_and_hms(2026, 7, 1, 9, 15, 30).unwrap();
     let detached_jid: FullJid = format!("bob@{domain}/web").parse().expect("jid");
+    let queued_message_xml = {
+        let mut message =
+            xmpp_parsers::message::Message::new(Some(jid::Jid::from(detached_jid.clone())));
+        message.from = Some(
+            format!("alice@{domain}/a")
+                .parse::<jid::Jid>()
+                .expect("jid"),
+        );
+        message.type_ = xmpp_parsers::message::MessageType::Chat;
+        message.id = Some(xmpp_parsers::message::Id("replayed-1".to_string()));
+        message.bodies.insert(
+            xmpp_parsers::message::Lang::new(),
+            "while you were away".to_string(),
+        );
+        stanza_to_xml(&Stanza::Message(message))
+    };
+    let queued_iq_xml = element_to_xml(
+        Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
+            .attr(
+                minidom::rxml::xml_ncname!("from").to_owned(),
+                domain.as_str(),
+            )
+            .attr(
+                minidom::rxml::xml_ncname!("to").to_owned(),
+                detached_jid.to_string(),
+            )
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "replayed-iq")
+            .build(),
+    );
     state
         .deps
         .protocol
@@ -2445,19 +2475,12 @@ async fn sm_resume_replay_stamps_xep0203_delay_with_original_receipt_time() {
             unacked_stanzas: vec![
                 DetachedUnackedStanza {
                     sequence: 1,
-                    stanza_xml: format!(
-                        "<message xmlns='jabber:client' from='alice@{domain}/a' \
-                         to='bob@{domain}/web' type='chat' id='replayed-1'>\
-                         <body>while you were away</body></message>"
-                    ),
+                    stanza_xml: queued_message_xml,
                     original_receipt_at: original_receipt,
                 },
                 DetachedUnackedStanza {
                     sequence: 2,
-                    stanza_xml: format!(
-                        "<iq xmlns='jabber:client' from='{domain}' to='bob@{domain}/web' \
-                         type='result' id='replayed-iq'/>"
-                    ),
+                    stanza_xml: queued_iq_xml,
                     original_receipt_at: original_receipt,
                 },
             ],

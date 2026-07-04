@@ -10,15 +10,30 @@
 //! (failed) delivery timestamp, as per XEP-0203"); we apply the same
 //! stamping to the `<resumed/>` replay by analogy.
 
-use chrono::{TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Utc};
+use jid::Jid;
 use minidom::Element;
 use std::str::FromStr;
+use waddle_xmpp::parser::{element_to_string, message_to_string};
 use waddle_xmpp::stream_management::{stamp_replay_delay, StreamManagementState};
+use waddle_xmpp::xep::xep0203::{build_delay_element, DelayInfo};
+use waddle_xmpp::xep::NS_DELAY;
+use xmpp_parsers::message::{Id, Lang, Message, MessageType};
 
-const NS_DELAY: &str = "urn:xmpp:delay";
-
-fn fixed_receipt() -> chrono::DateTime<Utc> {
+fn fixed_receipt() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 7, 1, 9, 15, 30).unwrap()
+}
+
+/// Serialize a typed chat `<message/>` fixture (bob → alice) with the
+/// given id, body, and any pre-attached `<delay/>` payloads.
+fn chat_message_xml(id: &str, body: &str, delays: Vec<Element>) -> String {
+    let mut message = Message::new(Some("alice@example.com".parse::<Jid>().expect("jid")));
+    message.from = Some("bob@example.com/x".parse::<Jid>().expect("jid"));
+    message.type_ = MessageType::Chat;
+    message.id = Some(Id(id.to_string()));
+    message.bodies.insert(Lang::new(), body.to_string());
+    message.payloads.extend(delays);
+    message_to_string(&message).expect("serialize message fixture")
 }
 
 fn delay_children(xml: &str) -> Vec<Element> {
@@ -32,11 +47,9 @@ fn delay_children(xml: &str) -> Vec<Element> {
 
 #[test]
 fn replayed_message_carries_delay_with_original_receipt_stamp() {
-    let original =
-        "<message xmlns='jabber:client' from='bob@example.com/x' to='alice@example.com' \
-         type='chat' id='m1'><body>hi</body></message>";
+    let original = chat_message_xml("m1", "hi", Vec::new());
 
-    let stamped = stamp_replay_delay(original, "example.com", fixed_receipt());
+    let stamped = stamp_replay_delay(&original, "example.com", fixed_receipt());
 
     let delays = delay_children(&stamped);
     assert_eq!(delays.len(), 1, "exactly one delay element on replay");
@@ -54,11 +67,22 @@ fn replayed_message_carries_delay_with_original_receipt_stamp() {
 fn replayed_iq_is_not_stamped() {
     // XEP-0203 §2 defines delay annotations for message and presence
     // stanzas; a replayed <iq/> must go out byte-identical.
-    let original = "<iq xmlns='jabber:client' from='example.com' to='alice@example.com/r' \
-                    type='result' id='q1'/>";
+    let original = element_to_string(
+        &Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
+            .attr(minidom::rxml::xml_ncname!("from").to_owned(), "example.com")
+            .attr(
+                minidom::rxml::xml_ncname!("to").to_owned(),
+                "alice@example.com/r",
+            )
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "q1")
+            .build(),
+    )
+    .expect("serialize iq fixture");
 
-    let stamped = stamp_replay_delay(original, "example.com", fixed_receipt());
+    let stamped = stamp_replay_delay(&original, "example.com", fixed_receipt());
 
+    assert_eq!(stamped, original, "iq replays byte-identical");
     assert!(delay_children(&stamped).is_empty(), "iq gains no delay");
 }
 
@@ -72,14 +96,19 @@ fn replay_preserves_existing_self_stamped_delay_and_upstream_delay() {
     // MUST be kept as-is (no second self-stamp, no overwrite with the
     // later queue receipt). Delays from other entities are the
     // recipient's delivery history and stay untouched.
-    let original = "<message xmlns='jabber:client' from='bob@example.com/x' \
-         to='alice@example.com' type='chat' id='m2'><body>hi</body>\
-         <delay xmlns='urn:xmpp:delay' from='example.com' \
-         stamp='2026-06-30T08:00:00Z'>Offline Storage</delay>\
-         <delay xmlns='urn:xmpp:delay' from='upstream.example.org' \
-         stamp='2026-06-30T07:59:00Z'>Forwarded by upstream</delay></message>";
+    let self_stamp = build_delay_element(&DelayInfo {
+        from: Some("example.com".to_string()),
+        stamp: Utc.with_ymd_and_hms(2026, 6, 30, 8, 0, 0).unwrap(),
+        reason: Some("Offline Storage".to_string()),
+    });
+    let upstream_delay = build_delay_element(&DelayInfo {
+        from: Some("upstream.example.org".to_string()),
+        stamp: Utc.with_ymd_and_hms(2026, 6, 30, 7, 59, 0).unwrap(),
+        reason: Some("Forwarded by upstream".to_string()),
+    });
+    let original = chat_message_xml("m2", "hi", vec![self_stamp, upstream_delay]);
 
-    let stamped = stamp_replay_delay(original, "example.com", fixed_receipt());
+    let stamped = stamp_replay_delay(&original, "example.com", fixed_receipt());
 
     let delays = delay_children(&stamped);
     let self_stamped: Vec<_> = delays
@@ -116,9 +145,8 @@ fn first_send_is_recorded_unstamped_and_gains_delay_only_at_replay() {
     let mut state = StreamManagementState::new();
     state.enable("stream-first-send".to_string(), true, Some(300));
 
-    let wire = "<message xmlns='jabber:client' from='bob@example.com/x' to='alice@example.com' \
-         type='chat' id='live-1'><body>live</body></message>";
-    let _ = state.record_outbound_with_receipt_at(wire.to_string(), fixed_receipt());
+    let wire = chat_message_xml("live-1", "live", Vec::new());
+    let _ = state.record_outbound_with_receipt_at(wire.clone(), fixed_receipt());
 
     let replay = state.get_stanzas_to_resend(0);
     assert_eq!(replay.len(), 1);
@@ -147,19 +175,15 @@ fn resend_set_carries_each_stanzas_original_receipt_time() {
 
     let first_receipt = Utc.with_ymd_and_hms(2026, 7, 1, 9, 0, 0).unwrap();
     let second_receipt = Utc.with_ymd_and_hms(2026, 7, 1, 9, 5, 0).unwrap();
-    let _ = state.record_outbound_with_receipt_at(
-        "<message xmlns='jabber:client' id='a'/>".to_string(),
-        first_receipt,
-    );
-    let _ = state.record_outbound_with_receipt_at(
-        "<message xmlns='jabber:client' id='b'/>".to_string(),
-        second_receipt,
-    );
+    let first_xml = chat_message_xml("a", "first", Vec::new());
+    let second_xml = chat_message_xml("b", "second", Vec::new());
+    let _ = state.record_outbound_with_receipt_at(first_xml.clone(), first_receipt);
+    let _ = state.record_outbound_with_receipt_at(second_xml.clone(), second_receipt);
 
     let replay = state.get_stanzas_to_resend(0);
     assert_eq!(replay.len(), 2);
     assert_eq!(replay[0].original_receipt_at, first_receipt);
-    assert!(replay[0].stanza_xml.contains("id='a'"));
+    assert_eq!(replay[0].stanza_xml, first_xml);
     assert_eq!(replay[1].original_receipt_at, second_receipt);
-    assert!(replay[1].stanza_xml.contains("id='b'"));
+    assert_eq!(replay[1].stanza_xml, second_xml);
 }
