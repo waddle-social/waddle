@@ -32,6 +32,7 @@ import {
 import { barePeerJid, fullJidIdentityKey, jidDomain, jidLocalpart, roomBareJidFor } from "./jid";
 import { TypedEventBus } from "./client-events";
 import type {
+  CatchupConversationFailure,
   CatchupHookInfo,
   ClientEvents,
   MdsDisplayedEntry,
@@ -610,6 +611,7 @@ export class BrowserXmppClient {
   setMessageDeliveryFailureHandler(h: (messageId: string) => void) { this.events.set("messageDeliveryFailure", h); }
   setQueuedMessageStatusHandler(h: (messageId: string, status: "queued" | "sending") => void) { this.events.set("queuedMessageStatus", h); }
   setSessionLifecycleHandler(h: (event: SessionLifecycleEvent) => void) { this.events.set("sessionLifecycle", h); }
+  setCatchupFailureHandler(h: (failure: CatchupConversationFailure) => void) { this.events.set("catchupFailure", h); }
 
   onMessageAcked(hook: (id: string, meta: { kind: "room" | "dm"; latencyMs: number }) => void) { this.events.on("messageAcked", hook); }
   onMessageDeliveryFailed(hook: (id: string, meta: { kind: "room" | "dm" }) => void) { this.events.on("messageDeliveryFailed", hook); }
@@ -1844,11 +1846,14 @@ export class BrowserXmppClient {
   private async doSelfPing() { if (!this.xmpp?.send_raw_iq || !this.currentRoom) return; try { await this.xmpp.send_raw_iq(`<iq type="get" id="${crypto.randomUUID()}" to="${this.currentRoom}/${this.session.username}"><ping xmlns="urn:xmpp:ping"/></iq>`); } catch { this.events.emit("roomDisconnect"); } }
   private handleMessageAck(id: string) { this.outboundQueue.handleAck(id); }
   private handleMessageFailed(id: string) { this.outboundQueue.handleFailed(id); }
-  private handleSessionReady(xmpp: XmppClientInstance, lifecycle: SessionLifecycleEvent) {
+  // `lifecycle` is the bare kind here — the emitted
+  // `SessionLifecycleEvent` is built inside `runSessionReady`, where
+  // the fresh variant gains its reconnect catch-up coverage (#1180).
+  private handleSessionReady(xmpp: XmppClientInstance, lifecycle: { type: SessionLifecycleEvent["type"] }) {
     void this.runSessionReady(xmpp, lifecycle);
   }
 
-  private async runSessionReady(xmpp: XmppClientInstance, lifecycle: SessionLifecycleEvent) {
+  private async runSessionReady(xmpp: XmppClientInstance, lifecycle: { type: SessionLifecycleEvent["type"] }) {
     if (this.xmpp !== xmpp) return;
     this.connected = true; this.reconnect.resetAttempts();
     this.emitStatus({ state: "online", detail: this.outboundQueue.persistedCount() > 0 ? lifecycle.type === "fresh" ? "Reconnected — replaying queued messages" : "Connection resumed — replaying queued messages" : lifecycle.type === "fresh" ? "Connection ready" : "Connection resumed" });
@@ -1879,8 +1884,24 @@ export class BrowserXmppClient {
     if (roomsToJoin.size > 0) {
       void this.fanOutAutoJoin([...roomsToJoin]);
     }
-    this.emitSessionLifecycle(lifecycle);
+    // #1180: consume the catch-up cursors BEFORE emitting the
+    // lifecycle event so the fresh event can report which
+    // conversations `runReconnectCatchup` is about to page. Timeline
+    // consumers skip their own wholesale MAM reload for covered
+    // conversations — otherwise two concurrent fetches race to write
+    // the timeline and the rebuild clobbers the catch-up's merges.
     const catchupEntries = this.catchup.onSessionStarted();
+    this.emitSessionLifecycle(
+      lifecycle.type === "fresh"
+        ? {
+          type: "fresh",
+          catchup: {
+            dmJids: catchupEntries.filter((e) => e.kind === "dm").map((e) => e.key),
+            roomJids: catchupEntries.filter((e) => e.kind === "room").map((e) => e.key),
+          },
+        }
+        : { type: "resumed" },
+    );
     if (catchupEntries.length === 0) {
       this.flushAfterSessionReady(xmpp);
       this.fulfillOnceConnected();
@@ -1891,7 +1912,7 @@ export class BrowserXmppClient {
     // `handleSessionReady` (synchronous WASM callback) can never
     // observe `pendingDuringResume` set without `resumeBarrier`
     // also set.
-    const catchupPromise = this.runReconnectCatchup(xmpp, catchupEntries);
+    const catchupPromise = this.runReconnectCatchup(xmpp, catchupEntries, lifecycle.type);
     const barrierPromise = catchupPromise.finally(() => this.completeResumeBarrier(xmpp));
     this.pendingDuringResume = [];
     this.resumeBarrier = { xmpp, promise: barrierPromise };
@@ -2113,8 +2134,9 @@ export class BrowserXmppClient {
   private runReconnectCatchup(
     xmpp: XmppClientInstance,
     entries: Array<{ kind: "dm" | "room"; key: string; after?: string; since?: string; seenIds?: string[] }>,
+    lifecycle: SessionLifecycleEvent["type"],
   ) {
-    return this.mam.runReconnectCatchup(xmpp, entries);
+    return this.mam.runReconnectCatchup(xmpp, entries, lifecycle);
   }
   private wireEvents(xmpp: XmppClientInstance & { enableKeepAlive?: (opts: { interval: number; timeout: number }) => void; disableKeepAlive?: () => void }) {
     if (!this.xmpp && !this.destroying) this.xmpp = xmpp;

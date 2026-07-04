@@ -4,7 +4,9 @@ import type { ChannelSummary } from "@/lib/chat-types";
 import type { WaddleSession } from "@/lib/server-auth";
 import {
   BrowserXmppClient,
+  bareJidKey,
   barePeerJid,
+  type CatchupConversationFailure,
   type RoomActivityEvent,
   type SessionLifecycleEvent,
   type RoomAuthority,
@@ -377,13 +379,47 @@ export function useChannelMessages(
 
   /**
    * On a fresh XMPP session (resume failed or first connect after a drop),
-   * refetch MAM to close any message gap for the current channel. Local
-   * optimistic sends (sending/failed) are preserved across the reload so
-   * the UI doesn't drop unsent entries the user can still retry.
-   * Resumed sessions never call this — the server replays everything.
+   * refetch MAM to close any message gap for the current channel — unless
+   * the client's own reconnect catch-up covers this room (#1180): a
+   * wholesale reload would then be a second concurrent MAM fetch racing
+   * the catch-up's merges for messages.value. The catch-up path (cursor
+   * paging + live-merge) fully closes the gap, same choreography as a
+   * resumed session. Resumed sessions never call this — the server
+   * replays everything.
    */
   function onSessionLifecycle(event: SessionLifecycleEvent) {
     if (event.type !== "fresh") return;
+    const channelId = activeChannelId.value;
+    if (!channelId) return;
+    // Coverage keys are server-emitted (RFC 7622-lowercased) JIDs while
+    // the directory-derived room JID may differ in case — compare via
+    // bareJidKey or the skip silently fails open back into the race.
+    const roomJid = roomJidForChannel(channelId);
+    if (roomJid && event.catchup.roomJids.some((jid) => bareJidKey(jid) === bareJidKey(roomJid))) return;
+    refetchTimelineToCloseGap();
+  }
+
+  /**
+   * Fallback for a covered-but-failed reconnect catch-up (#1180): the
+   * lifecycle skip above trusted the catch-up to close this room's gap;
+   * when it fails, run the wholesale reload it suppressed — serialized
+   * after the failed attempt, so the two fetches can no longer race.
+   */
+  function onCatchupFailed(failure: CatchupConversationFailure) {
+    if (failure.kind !== "room") return;
+    const channelId = activeChannelId.value;
+    if (!channelId) return;
+    const roomJid = roomJidForChannel(channelId);
+    if (!roomJid || bareJidKey(roomJid) !== bareJidKey(failure.key)) return;
+    refetchTimelineToCloseGap();
+  }
+
+  /**
+   * Wholesale MAM refetch of the active channel. Local optimistic sends
+   * (queued/sending/failed) are preserved across the reload so the UI
+   * doesn't drop unsent entries the user can still retry.
+   */
+  function refetchTimelineToCloseGap() {
     const spaceId = activeSpaceId.value;
     const channelId = activeChannelId.value;
     if (!channelId) return;
@@ -400,13 +436,27 @@ export function useChannelMessages(
         ),
     );
     void (async () => {
-      await loadMessages(spaceId ?? "", channelId, 0, metadataSeed);
+      const result = await loadMessages(spaceId ?? "", channelId, 0, metadataSeed);
+      // "aborted": a newer request (same or switched conversation) owns
+      // the timeline now — reacting would push stale rows onto it.
+      if (result === "aborted") return;
       if (
-        preserved.length === 0 ||
         (activeSpaceId.value ?? "") !== (spaceId ?? "") ||
         activeChannelId.value !== channelId
       )
         return;
+      if (result === "failed") {
+        // A failed reload must not leave the timeline wiped to
+        // queued-only: the catch-up coverage skip would then block the
+        // self-heal on the next reconnect. Restore the pre-reload
+        // timeline (the load error stays surfaced) — merging in what
+        // the catch's queued-only reset holds, so a message the user
+        // queued DURING the reload doesn't vanish until its echo.
+        const queuedDuringReload = messages.value.filter((m) => !findMessageById(metadataSeed, m.id));
+        messages.value = [...metadataSeed, ...queuedDuringReload];
+        return;
+      }
+      if (preserved.length === 0) return;
       const toAppend = preserved.filter((m) => !findMessageById(messages.value, m.id));
       if (toAppend.length > 0) messages.value = [...messages.value, ...toAppend];
     })();
@@ -533,7 +583,7 @@ export function useChannelMessages(
     metadataSeed: TimelineMessage[] = [],
   ) {
     messageSearch.reset();
-    await paging.loadMessages(spaceId, channelId, unreadAtLoad, metadataSeed);
+    return paging.loadMessages(spaceId, channelId, unreadAtLoad, metadataSeed);
   }
 
   async function selectChannel(channelId: string) {
@@ -731,5 +781,6 @@ export function useChannelMessages(
     onMessageAck,
     onMessageDeliveryFailure,
     onSessionLifecycle,
+    onCatchupFailed,
   };
 }

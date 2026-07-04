@@ -8,7 +8,8 @@ import type {
   LiveDmMessage,
   SessionLifecycleEvent,
 } from "@/lib/xmpp-client";
-import { barePeerJid, jidLocalpart } from "@/lib/xmpp-client";
+import { bareJidKey, barePeerJid, jidLocalpart } from "@/lib/xmpp-client";
+import type { CatchupConversationFailure } from "@/lib/xmpp-client";
 import type { WaddleSession } from "@/lib/server-auth";
 import {
   displayedStateCanAdvance,
@@ -286,18 +287,41 @@ export function useDirectMessages(
   // clears stale results.
   async function loadMessages(peerJid: string, unreadAtLoad = 0) {
     messageSearch.reset();
-    await paging.loadMessages(peerJid, unreadAtLoad);
+    return paging.loadMessages(peerJid, unreadAtLoad);
   }
 
   /** On a fresh session (SM resume failed), re-fetch MAM to close any gap
-   *  for the currently-open conversation. Local optimistic sends are
-   *  preserved across the reload so the user keeps retry affordances. */
+   *  for the currently-open conversation — unless the client's reconnect
+   *  catch-up covers this peer (#1180): a wholesale reload would then
+   *  race the catch-up's merges for messages.value. Cursor paging +
+   *  live-merge closes the gap, same choreography as a resumed session. */
   function onSessionLifecycle(event: SessionLifecycleEvent) {
     if (event.type !== "fresh") return;
     const peerJid = activePeerJid.value;
     if (!peerJid) return;
+    if (event.catchup.dmJids.some((jid) => bareJidKey(jid) === bareJidKey(peerJid))) return;
+    refetchTimelineToCloseGap();
+  }
+
+  /** Fallback for a covered-but-failed reconnect catch-up (#1180): run
+   *  the wholesale reload the lifecycle skip suppressed — serialized
+   *  after the failed attempt, so the two fetches can no longer race. */
+  function onCatchupFailed(failure: CatchupConversationFailure) {
+    if (failure.kind !== "dm") return;
+    const peerJid = activePeerJid.value;
+    if (!peerJid || bareJidKey(peerJid) !== bareJidKey(failure.key)) return;
+    refetchTimelineToCloseGap();
+  }
+
+  /** Wholesale MAM refetch of the active conversation. Local optimistic
+   *  sends are preserved across the reload so the user keeps retry
+   *  affordances. */
+  function refetchTimelineToCloseGap() {
+    const peerJid = activePeerJid.value;
+    if (!peerJid) return;
     if (messages.value.length === 0) return;
-    const preserved = messages.value.filter(
+    const snapshot = messages.value;
+    const preserved = snapshot.filter(
       (m) =>
         m.isSelf && (
           m.deliveryStatus === "queued"
@@ -306,8 +330,23 @@ export function useDirectMessages(
         ),
     );
     void (async () => {
-      await loadMessages(peerJid);
-      if (preserved.length === 0 || activePeerJid.value !== peerJid) return;
+      const result = await loadMessages(peerJid);
+      // "aborted": a newer request (same or switched conversation) owns
+      // the timeline now — reacting would push stale rows onto it.
+      if (result === "aborted") return;
+      if (activePeerJid.value !== peerJid) return;
+      if (result === "failed") {
+        // A failed reload must not leave the timeline wiped to
+        // queued-only: the catch-up coverage skip would then block the
+        // self-heal on the next reconnect. Restore the pre-reload
+        // timeline (the load error stays surfaced) — merging in what
+        // the catch's queued-only reset holds, so a message the user
+        // queued DURING the reload doesn't vanish until its echo.
+        const queuedDuringReload = messages.value.filter((m) => !findMessageById(snapshot, m.id));
+        messages.value = [...snapshot, ...queuedDuringReload];
+        return;
+      }
+      if (preserved.length === 0) return;
       const toAppend = preserved.filter((m) => !findMessageById(messages.value, m.id));
       if (toAppend.length > 0) messages.value = [...messages.value, ...toAppend];
     })();
@@ -455,6 +494,7 @@ export function useDirectMessages(
     onMessageAck,
     onMessageDeliveryFailure,
     onSessionLifecycle,
+    onCatchupFailed,
     scrollToPinnedEdge,
     isPinnedAtEdge: pinnedEdgeScroller.isPinnedAtEdge,
     latestRemoteMessageId,

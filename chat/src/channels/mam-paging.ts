@@ -7,6 +7,7 @@ import type {
   LiveRoomMessage,
 } from "@/lib/xmpp-client";
 import type { TimelineMessage } from "@/lib/chat-ui";
+import type { TimelineLoadResult } from "@/lib/timeline-load-result";
 import { findMessageById } from "@/lib/message-ids";
 import {
   isTopPinnedScrollDirection,
@@ -112,12 +113,12 @@ export function useChannelMamPaging(deps: UseChannelMamPagingDeps) {
     channelId: string,
     unreadAtLoad = 0,
     metadataSeed: TimelineMessage[] = [],
-  ) {
-    if (!session.value) return;
+  ): Promise<TimelineLoadResult> {
+    if (!session.value) return "aborted";
 
     const requestId = ++messageRequestId;
     const roomJid = roomJidForChannel(channelId);
-    if (!roomJid) return;
+    if (!roomJid) return "aborted";
     initialLatestPagePinned = false;
     isLoadingMessages.value = true;
     isLoadingOlderMessages.value = false;
@@ -170,7 +171,7 @@ export function useChannelMamPaging(deps: UseChannelMamPagingDeps) {
         (activeSpaceId.value ?? "") !== spaceId ||
         activeChannelId.value !== channelId
       ) {
-        return;
+        return "aborted";
       }
 
       const cursor = cursorFromLatestPage({
@@ -205,23 +206,28 @@ export function useChannelMamPaging(deps: UseChannelMamPagingDeps) {
       if (displayed) setMdsDisplayed(mdsKey, displayed);
       const pinned = await scrollToPinnedEdgeAndPin();
       if (
-        !pinned ||
         requestId !== messageRequestId ||
         (activeSpaceId.value ?? "") !== spaceId ||
         activeChannelId.value !== channelId
       ) {
-        return;
+        // Superseded during the pin step: the timeline was rebuilt, but
+        // a newer request owns it now — callers must not react.
+        return "aborted";
+      }
+      if (!pinned) {
+        return "loaded";
       }
       initialLatestPagePinned = true;
       const newest = [...timelineWithQueue].reverse().find(isFeedVisible);
       if (newest) persistLastSeen(channelId, newest.id);
+      return "loaded";
     } catch (e) {
-      if (requestId === messageRequestId) {
-        const queuedOnly = appendQueuedMessages([], roomJid);
-        messages.value = queuedOnly;
-        actionError.value = queuedOnly.length > 0 ? "" : normalizeError(e);
-        isLoadingMessages.value = false;
-      }
+      if (requestId !== messageRequestId) return "aborted";
+      const queuedOnly = appendQueuedMessages([], roomJid);
+      messages.value = queuedOnly;
+      actionError.value = queuedOnly.length > 0 ? "" : normalizeError(e);
+      isLoadingMessages.value = false;
+      return "failed";
     }
   }
 

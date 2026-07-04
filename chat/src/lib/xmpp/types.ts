@@ -12,12 +12,27 @@ export interface XmppStatusSnapshot {
 }
 
 /**
+ * Conversations the client's own reconnect catch-up will page via
+ * XEP-0313 after this session-ready (bare JIDs, keyed the same way as
+ * `ReconnectCatchup` cursors). Consumers whose active conversation is
+ * covered must NOT fire their own MAM reload — two concurrent fetches
+ * for the same conversation race on the timeline (#1180).
+ */
+type SessionCatchupCoverage = {
+  dmJids: readonly string[];
+  roomJids: readonly string[];
+};
+
+/**
  * XEP-0198 Stream Management session lifecycle:
  * - "resumed": the prior stream was resumed server-side, no gap.
  * - "fresh": a new session was bound (either first connect, or resume failed).
- *   Consumers may re-fetch MAM to close any gap.
+ *   Consumers may re-fetch MAM to close any gap — unless `catchup`
+ *   already covers the conversation.
  */
-export type SessionLifecycleEvent = { type: "resumed" } | { type: "fresh" };
+export type SessionLifecycleEvent =
+  | { type: "resumed" }
+  | { type: "fresh"; catchup: SessionCatchupCoverage };
 
 export type MamPageParam =
   | { type: "latest"; start?: string }

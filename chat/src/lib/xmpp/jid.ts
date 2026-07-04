@@ -39,6 +39,15 @@ export function fullJidIdentityKey(fullJid?: string | null): string {
   return `${bare}/${resource}`;
 }
 
+/**
+ * Comparison key for bare-JID equality across sources: server-emitted
+ * JIDs are RFC 7622-lowercased while directory/UI-derived JIDs may
+ * carry the original case, so byte comparison silently misses.
+ */
+export function bareJidKey(jid: string): string {
+  return barePeerJid(jid).trim().toLowerCase();
+}
+
 export function parseManagedRoomBareJid(
   roomJid: string,
 ): { channelId: string } | null {

@@ -395,6 +395,7 @@ export class MamPager {
   async runReconnectCatchup(
     xmpp: MamWasmClient,
     entries: ReadonlyArray<ReconnectCatchupEntry>,
+    lifecycle: "fresh" | "resumed",
   ) {
     const sessionJid = this.deps.sessionJid();
     // Observe-only: measure how much work a single catch-up did and how
@@ -434,6 +435,31 @@ export class MamPager {
             detail: `Reconnect catch-up failed for ${entry.key}`,
             cause: error,
           });
+          // #1180: the FRESH lifecycle event promised this conversation
+          // was covered, so its consumer skipped the wholesale reload.
+          // Signal the failure so that reload can run as the fallback.
+          // Serialization is per-conversation: the fallback fires after
+          // THIS conversation's attempt failed (other entries may still
+          // be paging their own conversations concurrently). Resumed
+          // sessions never skipped a reload — the stream is gap-free —
+          // so a failure there must not trigger a spurious reload.
+          if (lifecycle === "fresh") {
+            // Plain `emit` with local isolation, not `emitSafe`: a throw
+            // must neither propagate (it would reject the resume barrier
+            // and abort the remaining entries) nor be mislabeled as a
+            // telemetry-hook failure — this handler is the reload
+            // fallback, so surface a failure on the typed error channel.
+            try {
+              this.deps.events.emit("catchupFailure", { kind: entry.kind, key: entry.key });
+            } catch (handlerError) {
+              this.deps.emitError({
+                kind: "history",
+                recoverable: true,
+                detail: `Reconnect catch-up fallback handler failed for ${entry.key}`,
+                cause: handlerError,
+              });
+            }
+          }
         }
       }
     } finally {

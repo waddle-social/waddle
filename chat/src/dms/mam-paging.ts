@@ -3,6 +3,7 @@ import type { BrowserXmppClient, LiveDmMessage } from "@/lib/xmpp-client";
 import { barePeerJid } from "@/lib/xmpp-client";
 import type { WaddleSession } from "@/lib/server-auth";
 import type { TimelineMessage } from "@/lib/chat-ui";
+import type { TimelineLoadResult } from "@/lib/timeline-load-result";
 import { findMessageById } from "@/lib/message-ids";
 import {
   isTopPinnedScrollDirection,
@@ -93,8 +94,8 @@ export function useDmMamPaging(deps: UseDmMamPagingDeps) {
     });
   }
 
-  async function loadMessages(peerJid: string, unreadAtLoad = 0) {
-    if (!session.value) return;
+  async function loadMessages(peerJid: string, unreadAtLoad = 0): Promise<TimelineLoadResult> {
+    if (!session.value) return "aborted";
     const requestId = ++messageRequestId;
     initialLatestPagePinned = false;
     isLoadingMessages.value = true;
@@ -118,7 +119,7 @@ export function useDmMamPaging(deps: UseDmMamPagingDeps) {
         : xmppClient.value
           ? await xmppClient.value.queryPersonalMam(peerJid, PAGE_SIZE)
           : [];
-      if (requestId !== messageRequestId || activePeerJid.value !== peerJid) return;
+      if (requestId !== messageRequestId || activePeerJid.value !== peerJid) return "aborted";
       loadErrorPeerJid.value = null;
       loadErrorMessage.value = "";
       const cursor = cursorFromLatestPage({
@@ -146,20 +147,24 @@ export function useDmMamPaging(deps: UseDmMamPagingDeps) {
       );
       if (displayed) setMdsDisplayed(mdsKey, displayed);
       const pinned = await scrollToPinnedEdgeAndPin();
-      if (!pinned || requestId !== messageRequestId || activePeerJid.value !== peerJid) return;
+      // Superseded during the pin step: the timeline was rebuilt, but a
+      // newer request owns it now — callers must not react.
+      if (requestId !== messageRequestId || activePeerJid.value !== peerJid) return "aborted";
+      if (!pinned) return "loaded";
       initialLatestPagePinned = true;
       const newest = [...timelineWithQueue].reverse().find(isFeedVisible);
       if (newest) persistLastSeen(peerJid, newest.id);
+      return "loaded";
     } catch {
-      if (requestId === messageRequestId) {
-        console.warn("Could not load DM conversation");
-        const queuedOnly = appendQueuedMessages([], peerJid);
-        messages.value = queuedOnly;
-        loadErrorPeerJid.value = peerJid;
-        loadErrorMessage.value = dmLoadErrorMessage(peerJid, { queuedOnly: queuedOnly.length > 0 });
-        actionError.value = loadErrorMessage.value;
-        isLoadingMessages.value = false;
-      }
+      if (requestId !== messageRequestId) return "aborted";
+      console.warn("Could not load DM conversation");
+      const queuedOnly = appendQueuedMessages([], peerJid);
+      messages.value = queuedOnly;
+      loadErrorPeerJid.value = peerJid;
+      loadErrorMessage.value = dmLoadErrorMessage(peerJid, { queuedOnly: queuedOnly.length > 0 });
+      actionError.value = loadErrorMessage.value;
+      isLoadingMessages.value = false;
+      return "failed";
     }
   }
 
