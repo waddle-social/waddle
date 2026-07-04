@@ -18,7 +18,7 @@ export interface XmppStatusSnapshot {
  * covered must NOT fire their own MAM reload — two concurrent fetches
  * for the same conversation race on the timeline (#1180).
  */
-export type SessionCatchupCoverage = {
+type SessionCatchupCoverage = {
   dmJids: readonly string[];
   roomJids: readonly string[];
 };

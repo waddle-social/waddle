@@ -1844,11 +1844,14 @@ export class BrowserXmppClient {
   private async doSelfPing() { if (!this.xmpp?.send_raw_iq || !this.currentRoom) return; try { await this.xmpp.send_raw_iq(`<iq type="get" id="${crypto.randomUUID()}" to="${this.currentRoom}/${this.session.username}"><ping xmlns="urn:xmpp:ping"/></iq>`); } catch { this.events.emit("roomDisconnect"); } }
   private handleMessageAck(id: string) { this.outboundQueue.handleAck(id); }
   private handleMessageFailed(id: string) { this.outboundQueue.handleFailed(id); }
-  private handleSessionReady(xmpp: XmppClientInstance, lifecycle: SessionLifecycleEvent) {
+  // `lifecycle` is the bare kind here — the emitted
+  // `SessionLifecycleEvent` is built inside `runSessionReady`, where
+  // the fresh variant gains its reconnect catch-up coverage (#1180).
+  private handleSessionReady(xmpp: XmppClientInstance, lifecycle: { type: SessionLifecycleEvent["type"] }) {
     void this.runSessionReady(xmpp, lifecycle);
   }
 
-  private async runSessionReady(xmpp: XmppClientInstance, lifecycle: SessionLifecycleEvent) {
+  private async runSessionReady(xmpp: XmppClientInstance, lifecycle: { type: SessionLifecycleEvent["type"] }) {
     if (this.xmpp !== xmpp) return;
     this.connected = true; this.reconnect.resetAttempts();
     this.emitStatus({ state: "online", detail: this.outboundQueue.persistedCount() > 0 ? lifecycle.type === "fresh" ? "Reconnected — replaying queued messages" : "Connection resumed — replaying queued messages" : lifecycle.type === "fresh" ? "Connection ready" : "Connection resumed" });
@@ -1879,8 +1882,24 @@ export class BrowserXmppClient {
     if (roomsToJoin.size > 0) {
       void this.fanOutAutoJoin([...roomsToJoin]);
     }
-    this.emitSessionLifecycle(lifecycle);
+    // #1180: consume the catch-up cursors BEFORE emitting the
+    // lifecycle event so the fresh event can report which
+    // conversations `runReconnectCatchup` is about to page. Timeline
+    // consumers skip their own wholesale MAM reload for covered
+    // conversations — otherwise two concurrent fetches race to write
+    // the timeline and the rebuild clobbers the catch-up's merges.
     const catchupEntries = this.catchup.onSessionStarted();
+    this.emitSessionLifecycle(
+      lifecycle.type === "fresh"
+        ? {
+          type: "fresh",
+          catchup: {
+            dmJids: catchupEntries.filter((e) => e.kind === "dm").map((e) => e.key),
+            roomJids: catchupEntries.filter((e) => e.kind === "room").map((e) => e.key),
+          },
+        }
+        : { type: "resumed" },
+    );
     if (catchupEntries.length === 0) {
       this.flushAfterSessionReady(xmpp);
       this.fulfillOnceConnected();
