@@ -336,11 +336,25 @@ pub(super) async fn cleanup_connection_shutdown(
                 Err(err) => {
                     warn!(jid = %jid, error = %err, "Failed to detach SM session; falling back to full cleanup");
                     state.deps.protocol.resumable_sessions.remove(&stream_id);
-                    let _ = state
+                    let detach_fail_removed = state
                         .deps
                         .protocol
                         .connection_registry
-                        .unregister_if_owner(&jid, owner);
+                        .unregister_if_owner(&jid, owner)
+                        .is_some();
+                    if detach_fail_removed {
+                        // ADR-0017 Phase 1: mirror the unregister into the
+                        // actor tree on the SM-detach-failure fallback. This
+                        // session is never stored, so no SM-expiry janitor
+                        // will ever converge it — without this mirror the
+                        // resource leaks in the actor tree forever. Gated on
+                        // ownership so a superseding newcomer is not clobbered.
+                        crate::server::dual_registration::mirror_unregister(
+                            &state.deps.protocol.user_registry,
+                            &jid,
+                        )
+                        .await;
+                    }
                     // PR #438 review (Copilot): when SM detachment
                     // fails we fall back to a full unregister, so the
                     // caps resource→ver mapping AND any pending
@@ -363,6 +377,15 @@ pub(super) async fn cleanup_connection_shutdown(
             .is_some()
     });
     if removed {
+        // ADR-0017 Phase 1: mirror the unregister into the actor tree on
+        // the dominant disconnect teardown path. Gated on `removed` (i.e.
+        // we still owned the DashMap entry) so a superseding newcomer that
+        // already replaced this FullJid's actor-tree entry is not clobbered.
+        crate::server::dual_registration::mirror_unregister(
+            &state.deps.protocol.user_registry,
+            &jid,
+        )
+        .await;
         // XEP-0115 §6: drop the per-resource caps mapping for this
         // resource. The hash-keyed `CapsCache` itself stays warm so
         // a future session reusing the same `(hash, ver)` short-

@@ -8,10 +8,10 @@ impl ConnectionRegistry {
     /// advertised presence priority equals the maximum among the
     /// user's available, non-negative-priority resources. Per
     /// §8.5.2.1.1, only resources that have advertised availability
-    /// are eligible and a resource with negative priority is never a
-    /// bare-JID destination; per §8.5.2.1.2, when multiple resources
-    /// tie at the highest priority the server SHOULD deliver to all of
-    /// them.
+    /// are eligible, a resource with negative priority is never a
+    /// bare-JID destination, and when multiple resources tie at the
+    /// highest priority the server SHOULD deliver to all of them
+    /// (§8.5.2.1.1 governs message routing; §8.5.2.1.2 is presence).
     ///
     /// Returns `Vec::new()` when the user has no available,
     /// non-negative-priority resource — caller should fall back to

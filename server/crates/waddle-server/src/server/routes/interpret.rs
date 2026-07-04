@@ -467,6 +467,15 @@ async fn interpret_with_depth(
                 let _entry = registry.unregister(&jid);
                 debug!(jid = %jid, "UnregisterConnection: removed from registry");
                 // ADR-0017 Phase 1: mirror the unregister into the actor tree.
+                //
+                // NOTE: no producer currently emits `OutboundEvent::Unregister\
+                // Connection`, so this arm is a placeholder — the live teardown
+                // paths mirror the unregister directly (see
+                // `cleanup::cleanup_connection_shutdown`,
+                // `stream_management::registration`'s resume-rollback helpers,
+                // `cleanup_invalidated_detached_session`, and the SM-expiry
+                // janitor). If the state machine ever starts emitting this
+                // event, this keeps the mirror symmetric on that path too.
                 if let Some(user_registry) = deps.user_registry {
                     crate::server::dual_registration::mirror_unregister(user_registry, &jid).await;
                 }

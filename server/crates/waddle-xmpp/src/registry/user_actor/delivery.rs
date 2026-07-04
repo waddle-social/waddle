@@ -27,9 +27,11 @@
 //! 7. RFC 6121 §8.5.2.1 bare-JID resource selection, excluding
 //!    negative-priority resources.
 //!
-//! (Invariant 6 — no drop-rate regression under a join burst — is a property
-//! of the per-connection actor's mailbox capacity and is exercised by the
-//! connection-actor slice, not here.)
+//! Invariant 6 — no drop-rate regression under a join burst — is a property
+//! of the per-connection actor's mailbox capacity and is covered by the
+//! `join_burst_does_not_drop_at_capacity_256` /
+//! `join_burst_drops_at_default_capacity_64` tests in the parent `tests`
+//! submodule.
 
 use jid::FullJid;
 use kameo::message::Context;
@@ -79,9 +81,10 @@ impl UserActor {
 /// Returns every connected resource whose advertised priority equals the
 /// maximum among the user's **available, non-negative-priority** resources.
 /// Per §8.5.2.1.1 a resource with negative priority is never a bare-JID
-/// destination (invariant 7); per §8.5.2.1.2 ties at the top priority all
-/// receive the stanza. An empty result means the caller should fall back to
-/// offline-storage semantics.
+/// destination (invariant 7), and ties at the top priority all receive the
+/// stanza (§8.5.2.1.1 governs message routing; §8.5.2.1.2 is presence). An
+/// empty result means the caller should fall back to offline-storage
+/// semantics.
 pub struct SelectRoutableResources;
 
 impl kameo::message::Message<SelectRoutableResources> for UserActor {
