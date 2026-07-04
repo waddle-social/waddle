@@ -100,6 +100,11 @@ impl XmppRuntime {
             self.sm_state.previd = previd.clone();
             self.sm_state.max_resume_seconds = max_resume_seconds;
             self.sm_state.enabled = true;
+            // <enabled/> always establishes a NEW SM session (a resumed
+            // one answers with <resumed/> instead), so the received-
+            // stanza counter restarts from zero here (XEP-0198 §5,
+            // issue #1181).
+            self.sm_state.start_inbound();
             events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
                 StreamManagementEvent::Enabled { previd },
             )));
