@@ -99,37 +99,6 @@ impl kameo::message::Message<RegisterConnection> for UserActor {
     }
 }
 
-/// Register a new connection with an explicit initial carbons state.
-///
-/// A convenience over [`RegisterConnection`] that stamps the entry's
-/// XEP-0280 carbons atomic before inserting it.
-pub struct RegisterConnectionWithCarbons {
-    pub jid: FullJid,
-    pub entry: ConnectionEntry,
-    pub carbons_enabled: bool,
-}
-
-impl kameo::message::Message<RegisterConnectionWithCarbons> for UserActor {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        msg: RegisterConnectionWithCarbons,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        debug!(
-            jid = %msg.jid,
-            bare = %self.bare_jid,
-            carbons = msg.carbons_enabled,
-            "Registering connection with explicit carbons state"
-        );
-        msg.entry
-            .carbons_enabled
-            .store(msg.carbons_enabled, Ordering::Relaxed);
-        self.connections.insert(msg.jid, msg.entry);
-    }
-}
-
 /// Unregister a connection (resource) for this user.
 pub struct UnregisterConnection {
     pub jid: FullJid,

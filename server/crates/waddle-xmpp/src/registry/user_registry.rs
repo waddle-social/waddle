@@ -16,12 +16,8 @@ use kameo::Actor;
 use thiserror::Error;
 use tracing::{debug, info};
 
-use tokio::sync::mpsc;
-
-use super::connection_registry::{ConnectionEntry, OutboundStanza};
-use super::user_actor::{
-    RegisterConnectionWithCarbons, UnregisterConnectionAndReportEmpty, UserActor,
-};
+use super::connection_registry::ConnectionEntry;
+use super::user_actor::{RegisterConnection, UnregisterConnectionAndReportEmpty, UserActor};
 use crate::metrics;
 
 const CHILD_ACTOR_TIMEOUT: Duration = Duration::from_secs(2);
@@ -137,12 +133,15 @@ impl kameo::message::Message<GetUser> for UserRegistryActor {
 
 /// Register a user resource through the registry actor, serializing user lifecycle mutations.
 ///
-/// Carries the resource's outbound `mpsc::Sender` so the spawned `UserActor`
-/// owns the delivery channel for the resource (ADR-0017 Phase 1).
+/// Carries the live [`ConnectionEntry`] — the SAME `Arc`-backed struct held in
+/// the DashMap `ConnectionRegistry` — so the spawned `UserActor` shares its
+/// sender AND its presence/carbons atomics. Because every field is `Arc`- or
+/// channel-backed, a later `update_presence` / `set_carbons_enabled` on the
+/// DashMap entry is automatically visible through the actor's clone; no
+/// per-site presence mirroring is required (ADR-0017 Phase 1).
 pub struct RegisterUserResource {
     pub jid: FullJid,
-    pub sender: mpsc::Sender<OutboundStanza>,
-    pub carbons_enabled: bool,
+    pub entry: ConnectionEntry,
 }
 
 impl kameo::message::Message<RegisterUserResource> for UserRegistryActor {
@@ -169,10 +168,9 @@ impl kameo::message::Message<RegisterUserResource> for UserRegistryActor {
         };
 
         match user_actor
-            .ask(RegisterConnectionWithCarbons {
+            .ask(RegisterConnection {
                 jid: msg.jid.clone(),
-                entry: ConnectionEntry::new(msg.sender),
-                carbons_enabled: msg.carbons_enabled,
+                entry: msg.entry,
             })
             .mailbox_timeout(CHILD_ACTOR_TIMEOUT)
             .await

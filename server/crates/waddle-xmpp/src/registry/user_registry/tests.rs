@@ -1,5 +1,5 @@
 use super::*;
-use crate::registry::connection_registry::OutboundStanza;
+use crate::registry::connection_registry::{ConnectionEntry, OutboundStanza};
 use kameo::actor::Spawn;
 use kameo::error::SendError;
 use tokio::sync::mpsc;
@@ -232,8 +232,7 @@ async fn test_unregister_and_register_are_serialized_without_user_loss() {
     registry
         .ask(RegisterUserResource {
             jid: phone.clone(),
-            sender: phone_tx,
-            carbons_enabled: false,
+            entry: ConnectionEntry::new(phone_tx),
         })
         .await
         .expect("register phone");
@@ -241,8 +240,7 @@ async fn test_unregister_and_register_are_serialized_without_user_loss() {
     let unregister = registry.ask(UnregisterUserResource { jid: phone });
     let register = registry.ask(RegisterUserResource {
         jid: laptop.clone(),
-        sender: laptop_tx,
-        carbons_enabled: true,
+        entry: ConnectionEntry::new(laptop_tx),
     });
     let (unregister_done, register_done) = tokio::join!(unregister, register);
     unregister_done.expect("unregister");

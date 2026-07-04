@@ -13,24 +13,25 @@
 
 use jid::FullJid;
 use kameo::actor::ActorRef;
-use tokio::sync::mpsc;
 use tracing::warn;
 use waddle_xmpp::registry::{
-    OutboundStanza, RegisterUserResource, UnregisterUserResource, UserRegistryActor,
+    ConnectionEntry, RegisterUserResource, UnregisterUserResource, UserRegistryActor,
 };
 
 /// Mirror a resource registration into the actor tree (best-effort).
+///
+/// `entry` MUST be the live DashMap [`ConnectionEntry`] (obtained via
+/// `entry_if_owner`), so the actor shares its `Arc`-backed presence/carbons
+/// atomics and later updates stay coherent without per-site mirroring.
 pub(crate) async fn mirror_register(
     user_registry: &ActorRef<UserRegistryActor>,
     jid: FullJid,
-    sender: mpsc::Sender<OutboundStanza>,
-    carbons_enabled: bool,
+    entry: ConnectionEntry,
 ) {
     if let Err(error) = user_registry
         .ask(RegisterUserResource {
             jid: jid.clone(),
-            sender,
-            carbons_enabled,
+            entry,
         })
         .await
     {
@@ -63,6 +64,7 @@ pub(crate) async fn mirror_unregister(user_registry: &ActorRef<UserRegistryActor
 mod tests {
     use super::*;
     use kameo::actor::Spawn;
+    use tokio::sync::mpsc;
     use waddle_xmpp::registry::{GetUser, UserRegistryActor};
 
     fn full(s: &str) -> FullJid {
@@ -78,7 +80,7 @@ mod tests {
         let jid = full("alice@example.com/phone");
         let (tx, _rx) = mpsc::channel(16);
 
-        mirror_register(&registry, jid.clone(), tx, false).await;
+        mirror_register(&registry, jid.clone(), ConnectionEntry::new(tx)).await;
 
         let user = registry
             .ask(GetUser {
