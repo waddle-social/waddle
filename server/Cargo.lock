@@ -6611,6 +6611,7 @@ dependencies = [
  "base64",
  "futures",
  "hmac 0.13.0",
+ "libc",
  "pbkdf2",
  "rand 0.10.1",
  "sha2 0.11.0",

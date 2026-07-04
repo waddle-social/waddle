@@ -11,6 +11,7 @@ description = "Shared WebSocket XMPP integration-test harness (test server spawn
 base64 = { workspace = true }
 futures = { workspace = true }
 hmac = { workspace = true }
+libc = "0.2"
 pbkdf2 = { version = "0.13", features = ["hmac"] }
 rand = { workspace = true }
 sha2 = { workspace = true }
