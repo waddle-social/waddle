@@ -129,8 +129,10 @@ pub fn build_replay_stanza(
     // Legitimate upstream `<delay/>` elements (e.g. ones a different
     // server in a federated chain stamped, or a forwarded-message
     // delay from a stored stanza) are preserved unchanged so the
-    // recipient sees the full delivery history per XEP-0203 §5
-    // ("multiple delay elements MAY appear").
+    // recipient sees the full delivery history. XEP-0203 §2 has each
+    // delaying entity add one and only one <delay/>; this server adds
+    // only its own, and stacking alongside foreign delays matches
+    // common ecosystem practice (MUC history + MAM).
     message.payloads.retain(|payload| {
         !(payload.name() == "delay"
             && payload.ns() == NS_DELAY

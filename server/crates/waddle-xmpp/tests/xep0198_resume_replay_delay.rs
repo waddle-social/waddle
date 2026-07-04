@@ -1,12 +1,14 @@
-//! XEP-0198 §5/§6 + XEP-0203 — delay stamping on `<resumed/>` replay
+//! XEP-0198 + XEP-0203 — delay stamping on `<resumed/>` replay
 //! (issue #1178).
 //!
 //! When a stream resumes, unacked stanzas replayed from the queue MUST
 //! carry a `<delay xmlns='urn:xmpp:delay'/>` whose `stamp` is the
 //! server-side receipt time of the original stanza — not the replay
 //! time — so clients sort them at their true timeline position instead
-//! of the drain time (XEP-0198 §5 "add a delay element with the
-//! original (failed) delivery timestamp, as per XEP-0203").
+//! of the drain time. XEP-0198's Acks section requires this delay for
+//! failed-session redelivery ("add a delay element with the original
+//! (failed) delivery timestamp, as per XEP-0203"); we apply the same
+//! stamping to the `<resumed/>` replay by analogy.
 
 use chrono::{TimeZone, Utc};
 use minidom::Element;
@@ -61,15 +63,19 @@ fn replayed_iq_is_not_stamped() {
 }
 
 #[test]
-fn replay_replaces_self_stamped_delay_but_preserves_upstream_delay() {
-    // A queued stanza can already carry delays: one this server itself
-    // stamped on an earlier path (offline flush before the SM queue),
-    // and one from an upstream entity. Re-stamping must replace only
-    // our own (no two <delay from='example.com'/> siblings) and keep
-    // the upstream delivery history per XEP-0203 §5.
+fn replay_preserves_existing_self_stamped_delay_and_upstream_delay() {
+    // A queued stanza can already carry a delay this server itself
+    // stamped on an earlier path — the offline flush, or a Q6
+    // SM-expiry redelivery whose queue receipt time is the REDELIVERY
+    // time, not the original send time. In that case the existing
+    // self-stamp is the only accurate record of the original time and
+    // MUST be kept as-is (no second self-stamp, no overwrite with the
+    // later queue receipt). Delays from other entities are the
+    // recipient's delivery history and stay untouched.
     let original = "<message xmlns='jabber:client' from='bob@example.com/x' \
          to='alice@example.com' type='chat' id='m2'><body>hi</body>\
-         <delay xmlns='urn:xmpp:delay' from='example.com' stamp='2026-06-30T08:00:00Z'/>\
+         <delay xmlns='urn:xmpp:delay' from='example.com' \
+         stamp='2026-06-30T08:00:00Z'>Offline Storage</delay>\
          <delay xmlns='urn:xmpp:delay' from='upstream.example.org' \
          stamp='2026-06-30T07:59:00Z'>Forwarded by upstream</delay></message>";
 
@@ -83,8 +89,14 @@ fn replay_replaces_self_stamped_delay_but_preserves_upstream_delay() {
     assert_eq!(self_stamped.len(), 1, "exactly one self-stamped delay");
     assert_eq!(
         self_stamped[0].attr("stamp"),
-        Some("2026-07-01T09:15:30Z"),
-        "self-stamped delay carries the queue receipt time"
+        Some("2026-06-30T08:00:00Z"),
+        "the earlier accurate self-stamp is kept, not overwritten with \
+         the (possibly later) queue receipt time"
+    );
+    assert_eq!(
+        self_stamped[0].text(),
+        "Offline Storage",
+        "the original delay's reason text survives replay"
     );
     assert!(
         delays

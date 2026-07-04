@@ -379,7 +379,8 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
 
     // Issue #1178: stamp each replayed stanza with a XEP-0203 <delay/>
     // carrying its original receipt time, so clients sort it at its true
-    // timeline position instead of the drain time (XEP-0198 §5).
+    // timeline position instead of the drain time (XEP-0198 Acks-section
+    // redelivery stamping, applied to the <resumed/> replay by analogy).
     let server_domain = state.deps.auth_state.xmpp_domain.as_str();
     let replay: Vec<String> = sm_state
         .get_stanzas_to_resend(resume.h)

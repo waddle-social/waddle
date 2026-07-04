@@ -449,7 +449,7 @@ async fn handle_inbound_text(
                 responses = vec![resumed.to_xml()];
                 // Issue #1178: like the pre-registration resume path,
                 // replayed stanzas carry a XEP-0203 <delay/> with their
-                // original receipt time (XEP-0198 §5).
+                // original receipt time.
                 let server_domain = state.deps.auth_state.xmpp_domain.as_str();
                 responses.extend(
                     conn.sm_state
