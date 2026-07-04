@@ -447,7 +447,22 @@ async fn handle_inbound_text(
                 replay_after_h,
             } => {
                 responses = vec![resumed.to_xml()];
-                responses.extend(conn.sm_state.get_stanzas_to_resend(replay_after_h));
+                // Issue #1178: like the pre-registration resume path,
+                // replayed stanzas carry a XEP-0203 <delay/> with their
+                // original receipt time (XEP-0198 §5).
+                let server_domain = state.deps.auth_state.xmpp_domain.as_str();
+                responses.extend(
+                    conn.sm_state
+                        .get_stanzas_to_resend(replay_after_h)
+                        .into_iter()
+                        .map(|entry| {
+                            waddle_xmpp::stream_management::stamp_replay_delay(
+                                &entry.stanza_xml,
+                                server_domain,
+                                entry.original_receipt_at,
+                            )
+                        }),
+                );
             }
             SmRegistrationFinalization::ReplaceWithFailed(failed) => {
                 responses = vec![failed.to_xml()];
