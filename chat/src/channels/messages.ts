@@ -6,6 +6,7 @@ import {
   BrowserXmppClient,
   bareJidKey,
   barePeerJid,
+  type CatchupConversationFailure,
   type RoomActivityEvent,
   type SessionLifecycleEvent,
   type RoomAuthority,
@@ -378,29 +379,53 @@ export function useChannelMessages(
 
   /**
    * On a fresh XMPP session (resume failed or first connect after a drop),
-   * refetch MAM to close any message gap for the current channel. Local
-   * optimistic sends (sending/failed) are preserved across the reload so
-   * the UI doesn't drop unsent entries the user can still retry.
-   * Resumed sessions never call this — the server replays everything.
+   * refetch MAM to close any message gap for the current channel — unless
+   * the client's own reconnect catch-up covers this room (#1180): a
+   * wholesale reload would then be a second concurrent MAM fetch racing
+   * the catch-up's merges for messages.value. The catch-up path (cursor
+   * paging + live-merge) fully closes the gap, same choreography as a
+   * resumed session. Resumed sessions never call this — the server
+   * replays everything.
    */
   function onSessionLifecycle(event: SessionLifecycleEvent) {
     if (event.type !== "fresh") return;
+    const channelId = activeChannelId.value;
+    if (!channelId) return;
+    // Coverage keys are server-emitted (RFC 7622-lowercased) JIDs while
+    // the directory-derived room JID may differ in case — compare via
+    // bareJidKey or the skip silently fails open back into the race.
+    const roomJid = roomJidForChannel(channelId);
+    if (roomJid && event.catchup.roomJids.some((jid) => bareJidKey(jid) === bareJidKey(roomJid))) return;
+    refetchTimelineToCloseGap();
+  }
+
+  /**
+   * Fallback for a covered-but-failed reconnect catch-up (#1180): the
+   * lifecycle skip above trusted the catch-up to close this room's gap;
+   * when it fails, run the wholesale reload it suppressed — serialized
+   * after the failed attempt, so the two fetches can no longer race.
+   */
+  function onCatchupFailed(failure: CatchupConversationFailure) {
+    if (failure.kind !== "room") return;
+    const channelId = activeChannelId.value;
+    if (!channelId) return;
+    const roomJid = roomJidForChannel(channelId);
+    if (!roomJid || bareJidKey(roomJid) !== bareJidKey(failure.key)) return;
+    refetchTimelineToCloseGap();
+  }
+
+  /**
+   * Wholesale MAM refetch of the active channel. Local optimistic sends
+   * (queued/sending/failed) are preserved across the reload so the UI
+   * doesn't drop unsent entries the user can still retry.
+   */
+  function refetchTimelineToCloseGap() {
     const spaceId = activeSpaceId.value;
     const channelId = activeChannelId.value;
     if (!channelId) return;
     // Only catch up if we had already loaded this channel; otherwise the
     // standard loadMessages call on channel-select handles it.
     if (messages.value.length === 0) return;
-    // #1180: when the client's reconnect catch-up is about to page this
-    // room itself, a wholesale reload here would be a second concurrent
-    // MAM fetch racing the catch-up's merges for messages.value. The
-    // catch-up path (cursor paging + live-merge) fully closes the gap,
-    // so skip the rebuild — same choreography as a resumed session.
-    // Coverage keys are server-emitted (RFC 7622-lowercased) JIDs while
-    // the directory-derived room JID may differ in case — compare via
-    // bareJidKey or the skip silently fails open back into the race.
-    const roomJid = roomJidForChannel(channelId);
-    if (roomJid && event.catchup.roomJids.some((jid) => bareJidKey(jid) === bareJidKey(roomJid))) return;
     const metadataSeed = messages.value;
     const preserved = messages.value.filter(
       (m) =>
@@ -742,5 +767,6 @@ export function useChannelMessages(
     onMessageAck,
     onMessageDeliveryFailure,
     onSessionLifecycle,
+    onCatchupFailed,
   };
 }

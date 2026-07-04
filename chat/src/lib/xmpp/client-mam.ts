@@ -434,6 +434,11 @@ export class MamPager {
             detail: `Reconnect catch-up failed for ${entry.key}`,
             cause: error,
           });
+          // #1180: the fresh lifecycle event promised this conversation
+          // was covered, so its consumer skipped the wholesale reload.
+          // Signal the failure so that reload can run as the fallback —
+          // after the failed attempt, never concurrently with it.
+          this.deps.events.emitSafe("catchupFailure", { kind: entry.kind, key: entry.key });
         }
       }
     } finally {

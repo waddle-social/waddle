@@ -9,6 +9,7 @@ import type {
   SessionLifecycleEvent,
 } from "@/lib/xmpp-client";
 import { bareJidKey, barePeerJid, jidLocalpart } from "@/lib/xmpp-client";
+import type { CatchupConversationFailure } from "@/lib/xmpp-client";
 import type { WaddleSession } from "@/lib/server-auth";
 import {
   displayedStateCanAdvance,
@@ -290,18 +291,35 @@ export function useDirectMessages(
   }
 
   /** On a fresh session (SM resume failed), re-fetch MAM to close any gap
-   *  for the currently-open conversation. Local optimistic sends are
-   *  preserved across the reload so the user keeps retry affordances. */
+   *  for the currently-open conversation — unless the client's reconnect
+   *  catch-up covers this peer (#1180): a wholesale reload would then
+   *  race the catch-up's merges for messages.value. Cursor paging +
+   *  live-merge closes the gap, same choreography as a resumed session. */
   function onSessionLifecycle(event: SessionLifecycleEvent) {
     if (event.type !== "fresh") return;
     const peerJid = activePeerJid.value;
     if (!peerJid) return;
-    if (messages.value.length === 0) return;
-    // #1180: the reconnect catch-up is about to page this conversation
-    // itself — a wholesale reload here would race its merges for
-    // messages.value. Skip the rebuild; cursor paging + live-merge
-    // closes the gap, same choreography as a resumed session.
     if (event.catchup.dmJids.some((jid) => bareJidKey(jid) === bareJidKey(peerJid))) return;
+    refetchTimelineToCloseGap();
+  }
+
+  /** Fallback for a covered-but-failed reconnect catch-up (#1180): run
+   *  the wholesale reload the lifecycle skip suppressed — serialized
+   *  after the failed attempt, so the two fetches can no longer race. */
+  function onCatchupFailed(failure: CatchupConversationFailure) {
+    if (failure.kind !== "dm") return;
+    const peerJid = activePeerJid.value;
+    if (!peerJid || bareJidKey(peerJid) !== bareJidKey(failure.key)) return;
+    refetchTimelineToCloseGap();
+  }
+
+  /** Wholesale MAM refetch of the active conversation. Local optimistic
+   *  sends are preserved across the reload so the user keeps retry
+   *  affordances. */
+  function refetchTimelineToCloseGap() {
+    const peerJid = activePeerJid.value;
+    if (!peerJid) return;
+    if (messages.value.length === 0) return;
     const preserved = messages.value.filter(
       (m) =>
         m.isSelf && (
@@ -460,6 +478,7 @@ export function useDirectMessages(
     onMessageAck,
     onMessageDeliveryFailure,
     onSessionLifecycle,
+    onCatchupFailed,
     scrollToPinnedEdge,
     isPinnedAtEdge: pinnedEdgeScroller.isPinnedAtEdge,
     latestRemoteMessageId,

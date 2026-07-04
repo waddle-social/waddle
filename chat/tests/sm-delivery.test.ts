@@ -196,6 +196,52 @@ describe("XEP-0198 session lifecycle catch-up (group chat)", () => {
     expect(clientAny.value.queryMam).not.toHaveBeenCalled();
   });
 
+  test("catch-up failure for the active room falls back to the wholesale reload", async () => {
+    // The coverage-based skip trusts the catch-up to close the gap; when
+    // that catch-up fails for this room the reload is the safety net —
+    // serialized after the failed attempt, so the #1180 race can't recur.
+    const client = makeRoomClient();
+    const { messaging } = makeRoomMessaging(client);
+
+    messaging.messages.value = [
+      {
+        id: "seen-1",
+        author: "bob",
+        body: "hi",
+        createdAt: "2024-01-01T00:00:00Z",
+        isSelf: false,
+      },
+    ];
+
+    messaging.onCatchupFailed({ kind: "room", key: "C1@muc.example.com" });
+    await new Promise((r) => setTimeout(r, 0));
+
+    const clientAny = client as unknown as { value: { queryMam: ReturnType<typeof mock> } };
+    expect(clientAny.value.queryMam).toHaveBeenCalledWith("w1", "c1", 100);
+  });
+
+  test("catch-up failure for a different room does not reload", async () => {
+    const client = makeRoomClient();
+    const { messaging } = makeRoomMessaging(client);
+
+    messaging.messages.value = [
+      {
+        id: "seen-1",
+        author: "bob",
+        body: "hi",
+        createdAt: "2024-01-01T00:00:00Z",
+        isSelf: false,
+      },
+    ];
+
+    messaging.onCatchupFailed({ kind: "room", key: "other@muc.example.com" });
+    messaging.onCatchupFailed({ kind: "dm", key: "c1@muc.example.com" });
+    await new Promise((r) => setTimeout(r, 0));
+
+    const clientAny = client as unknown as { value: { queryMam: ReturnType<typeof mock> } };
+    expect(clientAny.value.queryMam).not.toHaveBeenCalled();
+  });
+
   test("fresh session re-fetches MAM when messages were already loaded", async () => {
     const client = makeRoomClient();
     const { messaging } = makeRoomMessaging(client);
@@ -532,6 +578,53 @@ describe("XEP-0198 delivery status (DM)", () => {
     };
     expect(clientAny.value.queryPersonalMam).not.toHaveBeenCalled();
     expect(dm.messages.value).toEqual(existing);
+  });
+
+  test("catch-up failure for the active DM peer falls back to the wholesale reload", async () => {
+    const client = makeDmClient();
+    const { dm } = makeDmMessaging(client);
+
+    dm.messages.value = [
+      {
+        id: "dm-old",
+        author: "bob",
+        body: "earlier",
+        createdAt: "2024-01-01T00:00:00Z",
+        isSelf: false,
+      },
+    ];
+
+    dm.onCatchupFailed({ kind: "dm", key: "Bob@example.com" });
+    await new Promise((r) => setTimeout(r, 0));
+
+    const clientAny = client as unknown as {
+      value: { queryPersonalMam: ReturnType<typeof mock> };
+    };
+    expect(clientAny.value.queryPersonalMam).toHaveBeenCalledWith("bob@example.com", 100);
+  });
+
+  test("catch-up failure for a different DM peer does not reload", async () => {
+    const client = makeDmClient();
+    const { dm } = makeDmMessaging(client);
+
+    dm.messages.value = [
+      {
+        id: "dm-old",
+        author: "bob",
+        body: "earlier",
+        createdAt: "2024-01-01T00:00:00Z",
+        isSelf: false,
+      },
+    ];
+
+    dm.onCatchupFailed({ kind: "dm", key: "carol@example.com" });
+    dm.onCatchupFailed({ kind: "room", key: "bob@example.com" });
+    await new Promise((r) => setTimeout(r, 0));
+
+    const clientAny = client as unknown as {
+      value: { queryPersonalMam: ReturnType<typeof mock> };
+    };
+    expect(clientAny.value.queryPersonalMam).not.toHaveBeenCalled();
   });
 
   test("fresh DM session re-fetches personal MAM when messages were loaded", async () => {

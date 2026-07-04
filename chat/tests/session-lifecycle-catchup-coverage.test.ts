@@ -77,6 +77,48 @@ describe("#1180 fresh lifecycle carries reconnect catch-up coverage", () => {
     ]);
   });
 
+  test("a failed per-conversation catch-up emits catchupFailure with the entry key", async () => {
+    const { client, state, received } = makeClient();
+    const xmpp = {
+      fetch_room_history_page: () => {
+        throw new Error("boom");
+      },
+    };
+    state.xmpp = xmpp;
+    state.catchup.onSessionStarted();
+    state.catchup.recordRoomSeen("c1@muc.example.com", "2026-07-01T10:00:01.000Z");
+    const failures: Array<{ kind: "dm" | "room"; key: string }> = [];
+    client.setCatchupFailureHandler((failure) => failures.push(failure));
+
+    await state.runSessionReady(xmpp, { type: "fresh" });
+
+    expect(failures).toEqual([{ kind: "room", key: "c1@muc.example.com" }]);
+    // The lifecycle event still reported coverage — the failure signal
+    // is the consumer's cue to run the reload it skipped.
+    expect(received).toEqual([
+      { type: "fresh", catchup: { dmJids: [], roomJids: ["c1@muc.example.com"] } },
+    ]);
+  });
+
+  test("a successful catch-up emits no catchupFailure", async () => {
+    const { client, state, received } = makeClient();
+    const xmpp = {
+      fetch_room_history_page: async () => ({ messages: [], complete: true }),
+    };
+    state.xmpp = xmpp;
+    state.catchup.onSessionStarted();
+    state.catchup.recordRoomSeen("c1@muc.example.com", "2026-07-01T10:00:01.000Z");
+    const failures: Array<{ kind: "dm" | "room"; key: string }> = [];
+    client.setCatchupFailureHandler((failure) => failures.push(failure));
+
+    await state.runSessionReady(xmpp, { type: "fresh" });
+
+    expect(failures).toEqual([]);
+    expect(received).toEqual([
+      { type: "fresh", catchup: { dmJids: [], roomJids: ["c1@muc.example.com"] } },
+    ]);
+  });
+
   test("resumed session-ready carries no coverage field", async () => {
     const { state, xmpp, received } = makeClient();
     state.catchup.onSessionStarted();

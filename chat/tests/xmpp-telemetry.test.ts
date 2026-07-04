@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import type { WaddleSession } from "../src/lib/server-auth";
-import { BrowserXmppClient } from "../src/lib/xmpp-client";
+import { BrowserXmppClient, type SessionLifecycleEvent } from "../src/lib/xmpp-client";
 import {
   __clearSensitiveUrlsForTesting,
   __scrubMissingFetchSpanUrlForTesting,
@@ -569,7 +569,7 @@ describe("BrowserXmppClient telemetry hooks", () => {
       xmpp: unknown;
       wireEvents: (xmpp: unknown) => void;
       emitStatus: (snap: { state: string; detail?: string }) => void;
-      emitSessionLifecycle: (evt: { type: "fresh" | "resumed" }) => void;
+      emitSessionLifecycle: (evt: SessionLifecycleEvent) => void;
       events: { emitSafe: (event: string, ...args: unknown[]) => void };
     };
     const handlers = new Map<string, Array<(msg: unknown) => void>>();

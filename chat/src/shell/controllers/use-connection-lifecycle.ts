@@ -161,6 +161,13 @@ export function useConnectionLifecycle(deps: ConnectionLifecycleDeps) {
       dmConversations.onInboxPush(entry);
       channelUnread.onInboxPush(entry);
     });
+    // #1180: the fresh lifecycle event's coverage made the composables
+    // skip their MAM reload; a covered-but-failed catch-up hands the
+    // reload back to them here, after the failed attempt.
+    client.setCatchupFailureHandler((failure) => {
+      messaging.onCatchupFailed(failure);
+      dmMessaging.onCatchupFailed(failure);
+    });
     client.setSessionLifecycleHandler((event) => {
       messaging.onSessionLifecycle(event);
       dmMessaging.onSessionLifecycle(event);

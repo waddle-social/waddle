@@ -32,6 +32,7 @@ import {
 import { barePeerJid, fullJidIdentityKey, jidDomain, jidLocalpart, roomBareJidFor } from "./jid";
 import { TypedEventBus } from "./client-events";
 import type {
+  CatchupConversationFailure,
   CatchupHookInfo,
   ClientEvents,
   MdsDisplayedEntry,
@@ -610,6 +611,7 @@ export class BrowserXmppClient {
   setMessageDeliveryFailureHandler(h: (messageId: string) => void) { this.events.set("messageDeliveryFailure", h); }
   setQueuedMessageStatusHandler(h: (messageId: string, status: "queued" | "sending") => void) { this.events.set("queuedMessageStatus", h); }
   setSessionLifecycleHandler(h: (event: SessionLifecycleEvent) => void) { this.events.set("sessionLifecycle", h); }
+  setCatchupFailureHandler(h: (failure: CatchupConversationFailure) => void) { this.events.set("catchupFailure", h); }
 
   onMessageAcked(hook: (id: string, meta: { kind: "room" | "dm"; latencyMs: number }) => void) { this.events.on("messageAcked", hook); }
   onMessageDeliveryFailed(hook: (id: string, meta: { kind: "room" | "dm" }) => void) { this.events.on("messageDeliveryFailed", hook); }
