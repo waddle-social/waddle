@@ -262,14 +262,8 @@ impl WasmDriverTask {
         {
             Ok(()) => match id {
                 Some(id) => {
-                    self.pending_mam_queries.insert(
-                        id,
-                        PendingMamQuery {
-                            query_id,
-                            messages: Vec::new(),
-                            responder,
-                        },
-                    );
+                    self.pending_mam_queries
+                        .insert(id, PendingMamQuery::new(&query_id, responder));
                     true
                 }
                 None => {
@@ -489,18 +483,22 @@ impl WasmDriverTask {
                     };
                     let _ = responder.send(result);
                 } else if let Some(pending) = self.pending_mam_queries.remove(&id) {
+                    let PendingMamQuery {
+                        collector,
+                        responder,
+                    } = pending;
                     let result = if element.attr("type") == Some("result") {
                         let (rsm, is_complete) = mam::parse_fin_from_iq_result(&element);
                         Ok(waddle_xmpp_client::MamPage {
-                            messages: pending.messages,
+                            query_id: collector.query_id().to_string(),
+                            messages: collector.into_messages(),
                             rsm,
-                            query_id: pending.query_id,
                             is_complete,
                         })
                     } else {
                         Err(ClientError::StanzaError(parse_stanza_error(&element)))
                     };
-                    let _ = pending.responder.send(result);
+                    let _ = responder.send(result);
                 } else if let Some(pending) = self.pending_inbox_queries.remove(&id) {
                     let result = if element.attr("type") == Some("result") {
                         let fin = waddle_xmpp_client::inbox::parse_inbox_fin(&element)
@@ -517,15 +515,7 @@ impl WasmDriverTask {
                 None
             }
             ClientEvent::MamResult(archived) => {
-                if let Some(query_id) = archived.query_id.as_deref() {
-                    if let Some((_, pending)) = self
-                        .pending_mam_queries
-                        .iter_mut()
-                        .find(|(_, pending)| pending.query_id == query_id)
-                    {
-                        pending.messages.push(*archived);
-                    }
-                }
+                collect_pending_mam_result(&mut self.pending_mam_queries, *archived);
                 None
             }
             ClientEvent::InboxStreamEntry(entry) => {
@@ -668,6 +658,24 @@ fn cancel_raw_iq_state(
     *deferred_commands = retained;
 }
 
+/// Route a MAM result stanza to the pending query it belongs to, matching on
+/// the XEP-0313 `queryid`. Results without a `queryid`, or for a query that is
+/// no longer pending, are dropped; the pending query's collector weeds out
+/// XEP-0198 resume-replayed duplicates by `mam_id`.
+fn collect_pending_mam_result(
+    pending_mam_queries: &mut HashMap<String, PendingMamQuery>,
+    archived: ArchivedMessage,
+) {
+    if let Some(query_id) = archived.query_id.as_deref() {
+        if let Some((_, pending)) = pending_mam_queries
+            .iter_mut()
+            .find(|(_, pending)| pending.query_id() == query_id)
+        {
+            pending.collect(archived);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -697,6 +705,77 @@ mod tests {
             on_call: None,
             resume_state: None,
         }))
+    }
+
+    fn build_archived(mam_id: &str, query_id: &str, body: &str) -> ArchivedMessage {
+        let stanza_id = waddle_xmpp_core::xep0359::StanzaId::new(
+            mam_id,
+            "room@muc.example.com".parse().expect("valid archive jid"),
+        );
+        ArchivedMessage {
+            mam_id: mam_id.to_string(),
+            query_id: Some(query_id.to_string()),
+            id: None,
+            stanza_id: Some(stanza_id.clone()),
+            origin_id: None,
+            timestamp: None,
+            from: Some("room@muc.example.com/alice".to_string()),
+            to: Some("alice@example.com/res".to_string()),
+            stanza_ids: vec![stanza_id],
+            parent_thread_id: None,
+            message_type: "groupchat".to_string(),
+            body: Some(body.to_string()),
+            thread: None,
+            author_real_jid: None,
+            inner: Element::builder("message", NS_CLIENT).build(),
+            payload: Default::default(),
+        }
+    }
+
+    #[test]
+    fn mam_collection_dedups_replayed_results_and_filters_foreign_query_ids() {
+        let mut pending_mam_queries = HashMap::new();
+        let (responder, _rx) = oneshot::channel();
+        pending_mam_queries.insert(
+            "iq-1".to_string(),
+            PendingMamQuery::new("query-1", responder),
+        );
+
+        // Original delivery.
+        collect_pending_mam_result(
+            &mut pending_mam_queries,
+            build_archived("mam-0", "query-1", "hello 0"),
+        );
+        collect_pending_mam_result(
+            &mut pending_mam_queries,
+            build_archived("mam-1", "query-1", "hello 1"),
+        );
+        // XEP-0198 resume replays the unacked tail: same queryid, same mam_id.
+        collect_pending_mam_result(
+            &mut pending_mam_queries,
+            build_archived("mam-1", "query-1", "hello 1"),
+        );
+        collect_pending_mam_result(
+            &mut pending_mam_queries,
+            build_archived("mam-0", "query-1", "hello 0"),
+        );
+        // A result for another open query must never be collected.
+        collect_pending_mam_result(
+            &mut pending_mam_queries,
+            build_archived("mam-9", "some-other-query", "noise"),
+        );
+
+        let pending = pending_mam_queries
+            .remove("iq-1")
+            .expect("pending query still registered");
+        let messages = pending.collector.into_messages();
+        assert_eq!(
+            messages.len(),
+            2,
+            "replayed results with an already-collected mam_id must be dropped"
+        );
+        assert_eq!(messages[0].mam_id, "mam-0");
+        assert_eq!(messages[1].mam_id, "mam-1");
     }
 
     #[test]

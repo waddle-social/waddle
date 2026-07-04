@@ -267,9 +267,28 @@ pub(crate) fn client_driver_event(event: ClientEvent) -> DriverEvent {
 }
 
 pub(crate) struct PendingMamQuery {
-    pub(crate) query_id: String,
-    pub(crate) messages: Vec<ArchivedMessage>,
+    pub(crate) collector: MamResultCollector,
     pub(crate) responder: oneshot::Sender<DriverResult<waddle_xmpp_client::MamPage>>,
+}
+
+impl PendingMamQuery {
+    pub(crate) fn new(
+        query_id: &str,
+        responder: oneshot::Sender<DriverResult<waddle_xmpp_client::MamPage>>,
+    ) -> Self {
+        Self {
+            collector: MamResultCollector::new(query_id),
+            responder,
+        }
+    }
+
+    pub(crate) fn query_id(&self) -> &str {
+        self.collector.query_id()
+    }
+
+    pub(crate) fn collect(&mut self, archived: ArchivedMessage) {
+        self.collector.collect(archived);
+    }
 }
 
 pub(crate) struct PendingInboxQuery {

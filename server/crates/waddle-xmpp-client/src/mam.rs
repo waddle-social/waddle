@@ -13,7 +13,6 @@ use waddle_xmpp_core::mam::{
 };
 use waddle_xmpp_core::xep0359::{OriginId, StanzaId as StableStanzaId, NS_SID as XEP0359_NS};
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use std::collections::HashSet;
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use std::time::Duration;
@@ -376,19 +375,18 @@ fn parse_archived_author_real_jid(inner: &Element) -> Option<String> {
 
 /// Accumulates MAM results for one query: filters out results belonging to
 /// other queries and drops duplicates by `mam_id` (XEP-0198 §5 leaves weeding
-/// out resume-replayed duplicates to the recipient). Both collection arms of
-/// [`run_mam_query`] delegate to one instance, so the dedup state cannot
+/// out resume-replayed duplicates to the recipient). Every collection path —
+/// both arms of the native [`run_mam_query`] and the WASM driver's pending
+/// query — delegates to one instance per query, so the dedup state cannot
 /// diverge between them.
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
-struct MamResultCollector {
+pub struct MamResultCollector {
     query_id: String,
     seen_mam_ids: HashSet<String>,
     messages: Vec<ArchivedMessage>,
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 impl MamResultCollector {
-    fn new(query_id: &str) -> Self {
+    pub fn new(query_id: &str) -> Self {
         Self {
             query_id: query_id.to_string(),
             seen_mam_ids: HashSet::new(),
@@ -396,9 +394,13 @@ impl MamResultCollector {
         }
     }
 
+    pub fn query_id(&self) -> &str {
+        &self.query_id
+    }
+
     /// Keep the result if it belongs to this query and its `mam_id` has not
     /// been collected yet; ignore it otherwise.
-    fn collect(&mut self, archived: ArchivedMessage) {
+    pub fn collect(&mut self, archived: ArchivedMessage) {
         if archived.query_id.as_deref() == Some(&self.query_id)
             && self.seen_mam_ids.insert(archived.mam_id.clone())
         {
@@ -406,7 +408,7 @@ impl MamResultCollector {
         }
     }
 
-    fn into_messages(self) -> Vec<ArchivedMessage> {
+    pub fn into_messages(self) -> Vec<ArchivedMessage> {
         self.messages
     }
 }
