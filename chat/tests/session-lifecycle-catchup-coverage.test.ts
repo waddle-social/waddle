@@ -146,6 +146,33 @@ describe("#1180 fresh lifecycle carries reconnect catch-up coverage", () => {
     ]);
   });
 
+  test("a throwing catchupFailure handler surfaces as an error event, not an unhandled rejection", async () => {
+    // The fallback handler is business-critical: if it throws, the
+    // failure must land on the typed error channel (visible, correctly
+    // attributed) while the session-ready flow still completes.
+    const { client, state } = makeClient();
+    const xmpp = {
+      fetch_room_history_page: () => {
+        throw new Error("boom");
+      },
+    };
+    state.xmpp = xmpp;
+    state.catchup.onSessionStarted();
+    state.catchup.recordRoomSeen("c1@muc.example.com", "2026-07-01T10:00:01.000Z");
+    client.setCatchupFailureHandler(() => {
+      throw new Error("handler broke");
+    });
+    const errors: Array<{ detail?: string }> = [];
+    client.onError((event) => errors.push(event));
+
+    // Must resolve — a throwing handler must not reject the barrier.
+    await state.runSessionReady(xmpp, { type: "fresh" });
+
+    expect(
+      errors.some((e) => e.detail?.includes("catch-up fallback handler failed")),
+    ).toBe(true);
+  });
+
   test("a failed catch-up on a RESUMED session emits no catchupFailure", async () => {
     // Resumed sessions never skipped a reload (the fresh-only lifecycle
     // path is the only skipper), so there is nothing to fall back to —

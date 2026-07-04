@@ -444,7 +444,21 @@ export class MamPager {
           // sessions never skipped a reload — the stream is gap-free —
           // so a failure there must not trigger a spurious reload.
           if (lifecycle === "fresh") {
-            this.deps.events.emitSafe("catchupFailure", { kind: entry.kind, key: entry.key });
+            // Plain `emit` with local isolation, not `emitSafe`: a throw
+            // must neither propagate (it would reject the resume barrier
+            // and abort the remaining entries) nor be mislabeled as a
+            // telemetry-hook failure — this handler is the reload
+            // fallback, so surface a failure on the typed error channel.
+            try {
+              this.deps.events.emit("catchupFailure", { kind: entry.kind, key: entry.key });
+            } catch (handlerError) {
+              this.deps.emitError({
+                kind: "history",
+                recoverable: true,
+                detail: `Reconnect catch-up fallback handler failed for ${entry.key}`,
+                cause: handlerError,
+              });
+            }
           }
         }
       }
