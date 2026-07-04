@@ -314,7 +314,18 @@ Key elements:
      two simultaneous resumes: the loser observes 0 rows and answers
      `<failed/>`; if the owner acks the first handshake and a second
      requester races it, the second falls back to the detached path and
-     loses the epoch CAS. No other path may use this variant.
+     loses the epoch CAS. No other path may use this variant — and this
+     "exclusively" is **compiler-enforced, not conventional** (Greptile P2 on
+     PR #1177): the `ClaimStore` trait exposes the consent variant only as
+     `steal_for_resume(entity, observed_epoch, witness: ResumeIdentityProof)`,
+     where `ResumeIdentityProof` is a witness type constructable **only**
+     inside the resume module (private field; minted after the SASL-identity
+     ↔ snapshot bare-JID check of element 8). General stale-owner takeover is a
+     separate `steal_stale(entity, observed_epoch, staleness: StalePredicate)`
+     method that cannot express the no-staleness variant. A caller outside the
+     resume path therefore cannot even name the consent CAS, so "any enrolled
+     node displacing a fresh-lease owner without an identity check" is
+     unrepresentable rather than merely forbidden by review.
    - *Heartbeat*: renewal is itself a CAS on lease freshness —
      `UPDATE nodes SET heartbeat = now() WHERE node_id=$me AND
      node_epoch=$mine AND NOT expired AND heartbeat >= now() - $lease_ttl`.
@@ -504,7 +515,17 @@ Key elements:
      a room/user-takeover primitive for any enrolled node). Instead, after N
      consecutive failed/NACKed remote deliveries to a fresh-lease owner, the
      frustrated node writes a `steal_intents (entity, reporter_node,
-     created_at DEFAULT now())` row. Every owner's heartbeat loop reads
+     created_at DEFAULT now())` row. The table carries **`UNIQUE (entity,
+     reporter_node)` with `ON CONFLICT (entity, reporter_node) DO UPDATE SET
+     created_at = EXCLUDED.created_at`** (refresh, not accumulate) so N
+     consecutive failures from one reporter against one entity collapse to a
+     single row rather than growing unbounded during a sustained A↔B relay
+     fault, and an **index on `(entity, created_at)`** so the steal CAS's
+     `EXISTS` predicate is a bounded index probe, never an O(table) seq-scan
+     on the routing-critical path (Greptile P2 on PR #1177). Cleared rows are
+     deleted on the owner-veto path above; abandoned rows (reporter died) are
+     swept by the orphan-reaper on its existing cadence, keyed by
+     `created_at < now() - k·intent_ttl`. Every owner's heartbeat loop reads
      intents against its own claims and, for each, performs an internal
      health ask **of that entity's owning actor**; on success it clears the
      intent with an epoch-fenced DELETE — a healthy owner has an unforgeable
@@ -1123,8 +1144,15 @@ convention alone.
     disabled, the pod spec fails API validation and the entire Deployment
     stops applying — a hard rollout failure, not a degraded hook. The
     version floor is therefore encoded, not merely documented: Chart.yaml
-    gains `kubeVersion: ">=1.30.0"`, with the residual 1.30/1.31
-    feature-gate caveat noted in the README). An exec `sleep 5`
+    gains **`kubeVersion: ">=1.32.0"`** — the GA version where the gate can no
+    longer be disabled — rather than `">=1.30.0"`, because Helm's
+    `kubeVersion` promises the chart works on *every* version at or above the
+    floor, and a documented "but it hard-fails on 1.30/1.31 with the gate off"
+    caveat (common in security-hardened clusters that opt out of beta gates)
+    breaks that contract with no `helm install` warning (Greptile P2 on PR
+    #1177). Operators pinned to 1.30/1.31 who have verified the gate is
+    enabled may lower the floor via a values override, accepting the caveat
+    explicitly. An exec `sleep 5`
     cannot work: the production image is a Nix `streamLayeredImage`
     containing only the waddle-server binary, cacert, and iana-etc — no
     shell, no coreutils — so an exec hook would fail with
