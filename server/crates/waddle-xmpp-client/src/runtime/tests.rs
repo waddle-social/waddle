@@ -506,6 +506,382 @@ fn runtime_falls_back_to_resource_binding_when_sm_resume_fails() {
 }
 
 #[test]
+fn runtime_fresh_sm_session_ack_counts_only_current_session_inbound_stanzas() {
+    // Issue #1181: a failed resume followed by a fresh bind + <enable/>
+    // starts a NEW XEP-0198 session. XEP-0198 §5 zeroes both counters at
+    // session start, so the h reported to the new stream must not carry
+    // the previous session's received-stanza count (7 here).
+    let mut config = config();
+    config.session.stream_management.resume_state =
+        Some(SmResumeState::new("old-sm-id", 7, 12).unwrap());
+    let mut runtime = XmppRuntime::new(config).unwrap();
+    drive_to_authenticated_stream(&mut runtime);
+    runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            post_auth_features_with_sm(),
+        )))
+        .unwrap();
+
+    let failed_events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            Element::builder("failed", crate::stream_management::NS_SM).build(),
+        )))
+        .unwrap();
+    let bind_id = failed_events
+        .iter()
+        .find_map(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::ResourceBindingRequested(request)) => {
+                Some(request.stanza_id.clone())
+            }
+            _ => None,
+        })
+        .expect("bind requested after failed resume");
+    let ready_events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            bind_result(&bind_id),
+        )))
+        .unwrap();
+    let enable = ready_events
+        .iter()
+        .find_map(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                TransportMessage::Element(element),
+            )) if element.name() == "enable" && element.ns() == crate::stream_management::NS_SM => {
+                Some(element.clone())
+            }
+            _ => None,
+        })
+        .expect("fresh stream management enable");
+    runtime
+        .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
+            enable,
+        )))
+        .unwrap();
+    runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            Element::builder("enabled", crate::stream_management::NS_SM)
+                .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "true")
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "new-sm-id")
+                .build(),
+        )))
+        .unwrap();
+
+    for id in ["inbound-1", "inbound-2"] {
+        runtime
+            .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+                Element::builder("message", crate::NS_CLIENT)
+                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+                    .attr(minidom::rxml::xml_ncname!("type").to_owned(), "chat")
+                    .build(),
+            )))
+            .unwrap();
+    }
+
+    let ack_events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            Element::builder("r", crate::stream_management::NS_SM).build(),
+        )))
+        .unwrap();
+
+    let ack = ack_events
+        .iter()
+        .find_map(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                TransportMessage::Element(element),
+            )) if element.name() == "a" && element.ns() == crate::stream_management::NS_SM => {
+                Some(element.clone())
+            }
+            _ => None,
+        })
+        .expect("ack in response to <r/>");
+    assert_eq!(
+        ack.attr("h"),
+        Some("2"),
+        "fresh SM session must count only stanzas received on the new session, \
+         not carry the previous session's inbound count"
+    );
+}
+
+#[test]
+fn runtime_resume_after_fresh_sm_session_reports_only_current_session_inbound() {
+    // Issue #1181 prod loop: failed resume → fresh enable → detach →
+    // resume. The h in the next <resume/> is what the server compares
+    // against its per-session send count; a carried-over count gets the
+    // resume rejected with handled-count-too-high.
+    let mut first_config = config();
+    first_config.session.stream_management.resume_state =
+        Some(SmResumeState::new("old-sm-id", 7, 12).unwrap());
+    let mut runtime = XmppRuntime::new(first_config).unwrap();
+    drive_to_authenticated_stream(&mut runtime);
+    runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            post_auth_features_with_sm(),
+        )))
+        .unwrap();
+    let failed_events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            Element::builder("failed", crate::stream_management::NS_SM).build(),
+        )))
+        .unwrap();
+    let bind_id = failed_events
+        .iter()
+        .find_map(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::ResourceBindingRequested(request)) => {
+                Some(request.stanza_id.clone())
+            }
+            _ => None,
+        })
+        .expect("bind requested after failed resume");
+    runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            bind_result(&bind_id),
+        )))
+        .unwrap();
+    runtime
+        .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
+            SmState::build_enable(true),
+        )))
+        .unwrap();
+    runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            Element::builder("enabled", crate::stream_management::NS_SM)
+                .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "true")
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "new-sm-id")
+                .build(),
+        )))
+        .unwrap();
+    for id in ["inbound-1", "inbound-2"] {
+        runtime
+            .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+                Element::builder("message", crate::NS_CLIENT)
+                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+                    .attr(minidom::rxml::xml_ncname!("type").to_owned(), "chat")
+                    .build(),
+            )))
+            .unwrap();
+    }
+
+    // Transport drops; the snapshot carries the session into a new runtime.
+    let resume_state = runtime.resume_state().expect("resume state");
+    let mut next_config = config();
+    next_config.session.stream_management.resume_state = Some(resume_state);
+    let mut next_runtime = XmppRuntime::new(next_config).unwrap();
+    drive_to_authenticated_stream(&mut next_runtime);
+    let events = next_runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            post_auth_features_with_sm(),
+        )))
+        .unwrap();
+
+    let resume = events
+        .iter()
+        .find_map(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                TransportMessage::Element(element),
+            )) if element.name() == "resume" && element.ns() == crate::stream_management::NS_SM => {
+                Some(element.clone())
+            }
+            _ => None,
+        })
+        .expect("resume element");
+    assert_eq!(resume.attr("previd"), Some("new-sm-id"));
+    assert_eq!(
+        resume.attr("h"),
+        Some("2"),
+        "resume h must never exceed what the server sent on the new session"
+    );
+}
+
+#[test]
+fn runtime_rejects_duplicate_enabled_on_live_sm_session() {
+    // A stray/duplicate <enabled/> mid-session must be a protocol
+    // violation (mirroring unexpected <resumed/>), NOT a silent
+    // re-establish: re-running the XEP-0198 §5 counter reset on a live
+    // session would drive the client's next <a h/> backwards on the
+    // wire (issue #1181 adversarial review).
+    let mut runtime = XmppRuntime::new(config()).unwrap();
+    drive_to_authenticated_stream(&mut runtime);
+    let bind_events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            post_auth_features_with_sm(),
+        )))
+        .unwrap();
+    let bind_id = bind_events
+        .iter()
+        .find_map(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::ResourceBindingRequested(request)) => {
+                Some(request.stanza_id.clone())
+            }
+            _ => None,
+        })
+        .unwrap();
+    runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            bind_result(&bind_id),
+        )))
+        .unwrap();
+    runtime
+        .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
+            SmState::build_enable(true),
+        )))
+        .unwrap();
+    let enabled = Element::builder("enabled", crate::stream_management::NS_SM)
+        .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "true")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "sm-1")
+        .build();
+    runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            enabled.clone(),
+        )))
+        .unwrap();
+    for id in ["live-1", "live-2", "live-3"] {
+        runtime
+            .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+                Element::builder("message", crate::NS_CLIENT)
+                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+                    .attr(minidom::rxml::xml_ncname!("type").to_owned(), "chat")
+                    .build(),
+            )))
+            .unwrap();
+    }
+
+    let duplicate_events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            enabled,
+        )))
+        .unwrap();
+
+    assert!(
+        duplicate_events.iter().any(|event| matches!(
+            event,
+            ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                TransportMessage::Element(element)
+            )) if element.name() == "error"
+                && element
+                    .get_child("bad-request", "urn:ietf:params:xml:ns:xmpp-streams")
+                    .is_some()
+        )),
+        "duplicate <enabled/> on a live SM session must be answered with a \
+         stream error, not silently re-establish the session"
+    );
+}
+
+#[test]
+fn runtime_resume_h_stays_consistent_across_repeated_resume_cycles() {
+    // Issue #1181 conformance cycle: enable → receive → detach → resume →
+    // receive → detach → resume. Each <resume/> h must equal exactly the
+    // stanzas received across the SAME SM session (successful resumes
+    // continue the session; the counter carries forward, never inflates).
+    let mut runtime = XmppRuntime::new(config()).unwrap();
+    drive_to_authenticated_stream(&mut runtime);
+    let bind_events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            post_auth_features_with_sm(),
+        )))
+        .unwrap();
+    let bind_id = bind_events
+        .iter()
+        .find_map(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::ResourceBindingRequested(request)) => {
+                Some(request.stanza_id.clone())
+            }
+            _ => None,
+        })
+        .unwrap();
+    runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            bind_result(&bind_id),
+        )))
+        .unwrap();
+    runtime
+        .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
+            SmState::build_enable(true),
+        )))
+        .unwrap();
+    runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            Element::builder("enabled", crate::stream_management::NS_SM)
+                .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "true")
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "sm-1")
+                .build(),
+        )))
+        .unwrap();
+    for id in ["a-1", "a-2", "a-3"] {
+        runtime
+            .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+                Element::builder("message", crate::NS_CLIENT)
+                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+                    .attr(minidom::rxml::xml_ncname!("type").to_owned(), "chat")
+                    .build(),
+            )))
+            .unwrap();
+    }
+
+    // First detach → resume.
+    let resume_state = runtime.resume_state().expect("first resume state");
+    let mut second_config = config();
+    second_config.session.stream_management.resume_state = Some(resume_state);
+    let mut second = XmppRuntime::new(second_config).unwrap();
+    drive_to_authenticated_stream(&mut second);
+    let events = second
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            post_auth_features_with_sm(),
+        )))
+        .unwrap();
+    let first_resume = events
+        .iter()
+        .find_map(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                TransportMessage::Element(element),
+            )) if element.name() == "resume" => Some(element.clone()),
+            _ => None,
+        })
+        .expect("first resume element");
+    assert_eq!(first_resume.attr("h"), Some("3"));
+    second
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            Element::builder("resumed", crate::stream_management::NS_SM)
+                .attr(minidom::rxml::xml_ncname!("previd").to_owned(), "sm-1")
+                .attr(minidom::rxml::xml_ncname!("h").to_owned(), "0")
+                .build(),
+        )))
+        .unwrap();
+    for id in ["b-1", "b-2"] {
+        second
+            .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+                Element::builder("message", crate::NS_CLIENT)
+                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+                    .attr(minidom::rxml::xml_ncname!("type").to_owned(), "chat")
+                    .build(),
+            )))
+            .unwrap();
+    }
+
+    // Second detach → resume: the counter continues the same session.
+    let resume_state = second.resume_state().expect("second resume state");
+    let mut third_config = config();
+    third_config.session.stream_management.resume_state = Some(resume_state);
+    let mut third = XmppRuntime::new(third_config).unwrap();
+    drive_to_authenticated_stream(&mut third);
+    let events = third
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            post_auth_features_with_sm(),
+        )))
+        .unwrap();
+    let second_resume = events
+        .iter()
+        .find_map(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                TransportMessage::Element(element),
+            )) if element.name() == "resume" => Some(element.clone()),
+            _ => None,
+        })
+        .expect("second resume element");
+    assert_eq!(second_resume.attr("previd"), Some("sm-1"));
+    assert_eq!(second_resume.attr("h"), Some("5"));
+}
+
+#[test]
 fn runtime_requests_default_resume_window_when_enabling_stream_management() {
     let mut runtime = XmppRuntime::new(config()).unwrap();
     drive_to_authenticated_stream(&mut runtime);

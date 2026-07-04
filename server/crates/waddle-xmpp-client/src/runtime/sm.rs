@@ -95,11 +95,25 @@ impl XmppRuntime {
                 ClientEvent::MessageDelivery(MessageDeliveryEvent::Acked { stanza_id })
             }));
         } else if element.name() == "enabled" {
+            // <enabled/> is only legal as the answer to <enable/>. A
+            // duplicate on a live SM session is a protocol violation
+            // (mirroring unexpected <resumed/>): silently re-running the
+            // XEP-0198 §5 counter reset below would drive the next
+            // <a h/> backwards on the wire.
+            if self.sm_state.enabled {
+                self.handle_sm_protocol_violation(events);
+                return Ok(());
+            }
             let previd = crate::stream_management::SmState::parse_enabled(element);
             let max_resume_seconds = crate::stream_management::SmState::parse_enabled_max(element);
             self.sm_state.previd = previd.clone();
             self.sm_state.max_resume_seconds = max_resume_seconds;
             self.sm_state.enabled = true;
+            // <enabled/> always establishes a NEW SM session (a resumed
+            // one answers with <resumed/> instead), so the received-
+            // stanza counter restarts from zero here (XEP-0198 §5,
+            // issue #1181).
+            self.sm_state.start_inbound();
             events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
                 StreamManagementEvent::Enabled { previd },
             )));

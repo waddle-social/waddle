@@ -189,6 +189,19 @@ impl SmState {
         });
     }
 
+    /// Start a fresh inbound SM sequence after receiving `<enabled/>`.
+    ///
+    /// XEP-0198 §5: the received-stanza counter is "set to zero and
+    /// started after receiving either `<enable/>` or `<enabled/>`".
+    /// Without this reset, a failed resume followed by a fresh
+    /// `<enable/>` carries the previous session's inbound count into
+    /// the new session's `h`, compounding per reconnect cycle until
+    /// the server rejects `<resume/>` with handled-count-too-high
+    /// (issue #1181).
+    pub fn start_inbound(&mut self) {
+        self.inbound_count = 0;
+    }
+
     /// Start a fresh outbound SM sequence after sending `<enable/>`.
     pub fn start_outbound(&mut self) {
         self.outbound_count = 0;
