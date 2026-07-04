@@ -16,6 +16,9 @@ use kameo::Actor;
 use thiserror::Error;
 use tracing::{debug, info};
 
+use tokio::sync::mpsc;
+
+use super::connection_registry::{ConnectionEntry, OutboundStanza};
 use super::user_actor::{
     RegisterConnectionWithCarbons, UnregisterConnectionAndReportEmpty, UserActor,
 };
@@ -133,8 +136,12 @@ impl kameo::message::Message<GetUser> for UserRegistryActor {
 }
 
 /// Register a user resource through the registry actor, serializing user lifecycle mutations.
+///
+/// Carries the resource's outbound `mpsc::Sender` so the spawned `UserActor`
+/// owns the delivery channel for the resource (ADR-0017 Phase 1).
 pub struct RegisterUserResource {
     pub jid: FullJid,
+    pub sender: mpsc::Sender<OutboundStanza>,
     pub carbons_enabled: bool,
 }
 
@@ -164,6 +171,7 @@ impl kameo::message::Message<RegisterUserResource> for UserRegistryActor {
         match user_actor
             .ask(RegisterConnectionWithCarbons {
                 jid: msg.jid.clone(),
+                entry: ConnectionEntry::new(msg.sender),
                 carbons_enabled: msg.carbons_enabled,
             })
             .mailbox_timeout(CHILD_ACTOR_TIMEOUT)

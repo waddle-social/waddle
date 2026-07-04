@@ -1,6 +1,15 @@
 use super::*;
+use crate::registry::connection_registry::OutboundStanza;
 use kameo::actor::Spawn;
 use kameo::error::SendError;
+use tokio::sync::mpsc;
+
+/// A bounded outbound channel for a test registration. Returns the sender to
+/// register and the receiver, which the caller keeps alive so the channel
+/// does not report closed.
+fn outbound_channel() -> (mpsc::Sender<OutboundStanza>, mpsc::Receiver<OutboundStanza>) {
+    mpsc::channel(16)
+}
 
 fn bare(user: &str) -> BareJid {
     format!("{user}@example.com").parse().expect("valid JID")
@@ -217,9 +226,13 @@ async fn test_unregister_and_register_are_serialized_without_user_loss() {
     let phone = full("alice", "phone");
     let laptop = full("alice", "laptop");
 
+    let (phone_tx, _phone_rx) = outbound_channel();
+    let (laptop_tx, _laptop_rx) = outbound_channel();
+
     registry
         .ask(RegisterUserResource {
             jid: phone.clone(),
+            sender: phone_tx,
             carbons_enabled: false,
         })
         .await
@@ -228,6 +241,7 @@ async fn test_unregister_and_register_are_serialized_without_user_loss() {
     let unregister = registry.ask(UnregisterUserResource { jid: phone });
     let register = registry.ask(RegisterUserResource {
         jid: laptop.clone(),
+        sender: laptop_tx,
         carbons_enabled: true,
     });
     let (unregister_done, register_done) = tokio::join!(unregister, register);
