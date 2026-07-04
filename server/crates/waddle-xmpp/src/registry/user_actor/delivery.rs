@@ -64,9 +64,10 @@ impl UserActor {
                 // The actor serializes register against send, so unlike the
                 // DashMap path there is no concurrent-replacement window: if
                 // the stored entry's channel is closed it is genuinely dead
-                // and safe to evict.
-                self.connections.remove(jid);
-                self.presence_states.remove(jid);
+                // and safe to evict. Route through `remove_resource` so the
+                // per-resource cleanup set stays single-sourced and cannot
+                // drift from the eviction path if a new field is added.
+                self.remove_resource(jid);
                 BroadcastOutcome::DroppedClosed
             }
         }

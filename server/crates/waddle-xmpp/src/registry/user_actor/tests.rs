@@ -456,6 +456,32 @@ async fn select_routable_empty_when_only_negative_priority() {
     );
 }
 
+/// Invariant 7 (top-priority): RFC 6121 §8.5.2.1.2 — a lower positive priority
+/// is NOT a destination when a strictly-higher priority is available. Pins the
+/// `*p == max_priority` filter so it can't silently degrade to a plain `>= 0`
+/// filter (which would deliver a bare-JID 1:1 message to both resources).
+#[tokio::test]
+async fn select_routable_prefers_top_priority_over_lower_positive() {
+    let actor = spawn_actor("alice").await;
+    let phone = full("alice", "phone");
+    let laptop = full("alice", "laptop");
+    let (e1, _r1) = entry();
+    let (e2, _r2) = entry();
+    register(&actor, phone.clone(), e1).await;
+    register(&actor, laptop.clone(), e2).await;
+
+    // Both available and non-negative, but at DIFFERENT priorities.
+    make_available(&actor, phone.clone(), 5).await;
+    make_available(&actor, laptop.clone(), 3).await;
+
+    let selected: Vec<FullJid> = actor.ask(SelectRoutableResources).await.expect("select");
+    assert_eq!(
+        selected,
+        vec![phone],
+        "only the strictly-highest-priority resource is a destination"
+    );
+}
+
 /// Invariant 3: the DirectFrame vs PeerStanza recipient-pass split survives
 /// the actor boundary on the queued envelope.
 #[tokio::test]
@@ -568,6 +594,40 @@ async fn delivery_closed_channel_evicts_and_replacement_delivers() {
         .expect("replacement send");
     assert_eq!(outcome, BroadcastOutcome::Delivered);
     assert!(rx_live.try_recv().is_ok(), "replacement channel receives");
+}
+
+/// Invariant 2: re-registering an already-connected resource whose channel is
+/// still OPEN takes over the resource — delivery lands on the new receiver and
+/// the stale live sender receives nothing (the common "new stream takes over"
+/// case, distinct from register-after-eviction).
+#[tokio::test]
+async fn register_over_live_entry_routes_to_new_receiver() {
+    let actor = spawn_actor("alice").await;
+    let jid = full("alice", "phone");
+
+    let (e_old, mut rx_old) = entry();
+    register(&actor, jid.clone(), e_old).await;
+
+    // Re-register the same resource without closing the old channel.
+    let (e_new, mut rx_new) = entry();
+    register(&actor, jid.clone(), e_new).await;
+
+    let outcome: BroadcastOutcome = actor
+        .ask(TrySendDirect {
+            jid,
+            stanza: any_stanza(),
+        })
+        .await
+        .expect("send");
+    assert_eq!(outcome, BroadcastOutcome::Delivered);
+    assert!(
+        rx_new.try_recv().is_ok(),
+        "delivery must land on the new receiver"
+    );
+    assert!(
+        rx_old.try_recv().is_err(),
+        "the replaced live sender must receive nothing"
+    );
 }
 
 /// Invariant 4: the Q7b pending-flush SM-row binding rides the queued
