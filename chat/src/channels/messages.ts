@@ -390,6 +390,13 @@ export function useChannelMessages(
     // Only catch up if we had already loaded this channel; otherwise the
     // standard loadMessages call on channel-select handles it.
     if (messages.value.length === 0) return;
+    // #1180: when the client's reconnect catch-up is about to page this
+    // room itself, a wholesale reload here would be a second concurrent
+    // MAM fetch racing the catch-up's merges for messages.value. The
+    // catch-up path (cursor paging + live-merge) fully closes the gap,
+    // so skip the rebuild — same choreography as a resumed session.
+    const roomJid = roomJidForChannel(channelId);
+    if (roomJid && event.catchup.roomJids.includes(roomJid)) return;
     const metadataSeed = messages.value;
     const preserved = messages.value.filter(
       (m) =>

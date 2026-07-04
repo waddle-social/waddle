@@ -143,6 +143,32 @@ describe("XEP-0198 delivery status (group chat)", () => {
 });
 
 describe("XEP-0198 session lifecycle catch-up (group chat)", () => {
+  test("fresh session skips the MAM reload when reconnect catch-up covers the room", async () => {
+    const client = makeRoomClient();
+    const { messaging } = makeRoomMessaging(client);
+
+    const existing = [
+      {
+        id: "seen-1",
+        author: "bob",
+        body: "hi",
+        createdAt: "2024-01-01T00:00:00Z",
+        isSelf: false,
+      },
+    ];
+    messaging.messages.value = existing;
+
+    messaging.onSessionLifecycle({
+      type: "fresh",
+      catchup: { dmJids: [], roomJids: ["c1@muc.example.com"] },
+    });
+    await new Promise((r) => setTimeout(r, 0));
+
+    const clientAny = client as unknown as { value: { queryMam: ReturnType<typeof mock> } };
+    expect(clientAny.value.queryMam).not.toHaveBeenCalled();
+    expect(messaging.messages.value).toEqual(existing);
+  });
+
   test("fresh session re-fetches MAM when messages were already loaded", async () => {
     const client = makeRoomClient();
     const { messaging } = makeRoomMessaging(client);
@@ -157,7 +183,7 @@ describe("XEP-0198 session lifecycle catch-up (group chat)", () => {
       },
     ];
 
-    messaging.onSessionLifecycle({ type: "fresh" });
+    messaging.onSessionLifecycle({ type: "fresh", catchup: { dmJids: [], roomJids: [] } });
 
     // Wait for microtasks so loadMessages can fire.
     await new Promise((r) => setTimeout(r, 0));
@@ -226,7 +252,7 @@ describe("XEP-0198 session lifecycle catch-up (group chat)", () => {
       },
     ];
 
-    messaging.onSessionLifecycle({ type: "fresh" });
+    messaging.onSessionLifecycle({ type: "fresh", catchup: { dmJids: [], roomJids: [] } });
     await new Promise((r) => setTimeout(r, 0));
     await new Promise((r) => setTimeout(r, 0));
     await nextTick();
@@ -250,7 +276,7 @@ describe("XEP-0198 session lifecycle catch-up (group chat)", () => {
     const client = makeRoomClient();
     const { messaging } = makeRoomMessaging(client);
 
-    messaging.onSessionLifecycle({ type: "fresh" });
+    messaging.onSessionLifecycle({ type: "fresh", catchup: { dmJids: [], roomJids: [] } });
     await new Promise((r) => setTimeout(r, 0));
 
     const clientAny = client as unknown as { value: { queryMam: ReturnType<typeof mock> } };
@@ -467,7 +493,7 @@ describe("XEP-0198 delivery status (DM)", () => {
       },
     ];
 
-    dm.onSessionLifecycle({ type: "fresh" });
+    dm.onSessionLifecycle({ type: "fresh", catchup: { dmJids: [], roomJids: [] } });
     await new Promise((r) => setTimeout(r, 0));
 
     const clientAny = client as unknown as {
@@ -804,7 +830,7 @@ describe("XEP-0198 delivery status (DM)", () => {
       },
     ];
 
-    dm.onSessionLifecycle({ type: "fresh" });
+    dm.onSessionLifecycle({ type: "fresh", catchup: { dmJids: [], roomJids: [] } });
     // Wait two ticks: one for microtask, one for loadMessages async path.
     await new Promise((r) => setTimeout(r, 0));
     await new Promise((r) => setTimeout(r, 0));
@@ -849,7 +875,7 @@ describe("XEP-0198 self-echo reconciliation (group chat)", () => {
       },
     ];
 
-    messaging.onSessionLifecycle({ type: "fresh" });
+    messaging.onSessionLifecycle({ type: "fresh", catchup: { dmJids: [], roomJids: [] } });
     await new Promise((r) => setTimeout(r, 0));
     await new Promise((r) => setTimeout(r, 0));
     await nextTick();
@@ -904,7 +930,7 @@ describe("XEP-0198 self-echo reconciliation (group chat)", () => {
     await messaging.sendMessage("hello room");
     expect(messaging.messages.value[0]?.deliveryStatus).toBe("sending");
 
-    messaging.onSessionLifecycle({ type: "fresh" });
+    messaging.onSessionLifecycle({ type: "fresh", catchup: { dmJids: [], roomJids: [] } });
     await new Promise((r) => setTimeout(r, 0));
     await new Promise((r) => setTimeout(r, 0));
     await nextTick();
@@ -943,7 +969,7 @@ test("fresh DM session self-echo reconciles preserved sending entries", async ()
   await dm.sendMessage("hello dm");
   expect(dm.messages.value[0]?.deliveryStatus).toBe("sending");
 
-  dm.onSessionLifecycle({ type: "fresh" });
+  dm.onSessionLifecycle({ type: "fresh", catchup: { dmJids: [], roomJids: [] } });
   await new Promise((r) => setTimeout(r, 0));
   await new Promise((r) => setTimeout(r, 0));
   await nextTick();
