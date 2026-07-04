@@ -1,7 +1,30 @@
+{{- /*
+  ADR-0017 Phase 0 shutdown budget: the grace period must cover the whole
+  ordered shutdown — preStop endpoint-propagation sleep, then the connection
+  drain, plus a kill margin — or the kubelet SIGKILLs mid-drain and in-flight
+  sessions are lost instead of cleanly detached.
+*/ -}}
 {{- $drainTimeout := int .Values.config.drainTimeoutSeconds -}}
+{{- $preStopSleep := int .Values.preStopSleepSeconds -}}
 {{- $terminationGrace := int .Values.terminationGracePeriodSeconds -}}
-{{- if lt $terminationGrace $drainTimeout -}}
-{{- fail (printf "terminationGracePeriodSeconds (%d) must be >= config.drainTimeoutSeconds (%d)" $terminationGrace $drainTimeout) -}}
+{{- $shutdownFloor := add $preStopSleep $drainTimeout -}}
+{{- if lt $terminationGrace $shutdownFloor -}}
+{{- fail (printf "terminationGracePeriodSeconds (%d) must be >= preStopSleepSeconds (%d) + config.drainTimeoutSeconds (%d) = %d" $terminationGrace $preStopSleep $drainTimeout $shutdownFloor) -}}
+{{- end -}}
+
+{{- /*
+  ADR-0017: multi-replica is refused until clustering ships (Phase 4). The
+  cross-node routing/ownership fabric does not exist yet, so replicaCount > 1
+  would split routing, presence, and MUC rooms across replicas that cannot
+  reach each other. Gate on clustering.enabled so scale-up is impossible until
+  the fabric lands and flips the flag.
+*/ -}}
+{{- if and (gt (int .Values.replicaCount) 1) (not .Values.clustering.enabled) -}}
+{{- fail (printf "replicaCount (%d) > 1 requires clustering.enabled=true, which ships in ADR-0017 Phase 4. Cross-node routing does not exist yet; a second replica would split routing/presence/MUC state." (int .Values.replicaCount)) -}}
+{{- end -}}
+
+{{- if and (eq .Values.updateStrategy.type "RollingUpdate") .Values.persistence.enabled (has "ReadWriteOnce" .Values.persistence.accessModes) (not .Values.persistence.allowUnsafeRwoScale) -}}
+{{- fail "updateStrategy.type=RollingUpdate with a ReadWriteOnce PVC surges a second pod that deadlocks on Multi-Attach. Use updateStrategy.type=Recreate, switch to ReadWriteMany, or set persistence.allowUnsafeRwoScale=true if your storage backend supports concurrent attach." -}}
 {{- end -}}
 
 {{- if and .Values.persistence.enabled (gt (int .Values.replicaCount) 1) (has "ReadWriteOnce" .Values.persistence.accessModes) (not .Values.persistence.allowUnsafeRwoScale) -}}

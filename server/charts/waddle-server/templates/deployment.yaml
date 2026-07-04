@@ -6,6 +6,17 @@ metadata:
     {{- include "waddle-server.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  strategy:
+    {{- /*
+      ADR-0017 Phase 0: Recreate while a ReadWriteOnce PVC is in use so a
+      RollingUpdate surge pod cannot deadlock on Multi-Attach. Phase 4 sets
+      updateStrategy.type=RollingUpdate once the RWO requirement is dropped.
+    */}}
+    type: {{ .Values.updateStrategy.type }}
+    {{- if eq .Values.updateStrategy.type "RollingUpdate" }}
+    rollingUpdate:
+      {{- toYaml (.Values.updateStrategy.rollingUpdate | default dict) | nindent 6 }}
+    {{- end }}
   selector:
     matchLabels:
       {{- include "waddle-server.selectorLabels" . | nindent 6 }}
@@ -45,6 +56,20 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
+          {{- if gt (int .Values.preStopSleepSeconds) 0 }}
+          lifecycle:
+            {{- /*
+              ADR-0017 Phase 0: native Sleep preStop (no shell in the
+              distroless image, so an `exec: sleep` hook cannot work). Delays
+              SIGTERM so the pod's endpoint removal propagates before the drain
+              begins — new connections stop landing on a terminating pod.
+              Requires the PodLifecycleSleepAction feature (GA in k8s 1.32; see
+              Chart.yaml kubeVersion floor).
+            */}}
+            preStop:
+              sleep:
+                seconds: {{ int .Values.preStopSleepSeconds }}
+          {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.service.ports.http }}

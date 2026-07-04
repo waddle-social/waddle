@@ -1,5 +1,27 @@
 replicaCount: 1
 
+# ADR-0017 clustering gate. Multi-replica (replicaCount > 1) is refused until
+# clustering ships in Phase 4; this flag does not enable clustering on its own
+# (the swarm/claims machinery is not built yet) — it exists so the chart can
+# gate replicaCount and the RollingUpdate strategy on a single switch once it
+# does. Leave false.
+clustering:
+  enabled: false
+
+# Deployment update strategy. While persistence uses a ReadWriteOnce PVC, a
+# RollingUpdate surges a second pod that deadlocks on Multi-Attach, so the
+# single-replica phases pin Recreate (a brief per-deploy connection gap
+# absorbed by XEP-0198 resume + client reconnect). Phase 4 flips this to
+# RollingUpdate once the RWO PVC requirement is dropped and clustering ships.
+updateStrategy:
+  type: Recreate
+
+# ADR-0017 Phase 0 preStop: seconds to sleep before SIGTERM so the endpoint
+# removal propagates through kube-proxy/ingress and no new connections land on
+# a terminating pod while the drain runs. Must be included in
+# terminationGracePeriodSeconds below.
+preStopSleepSeconds: 5
+
 image:
   repository: ghcr.io/waddle-social/waddle
   pullPolicy: Always
@@ -22,8 +44,10 @@ podSecurityContext:
   fsGroup: 1000
 
 # Pod termination grace period (seconds).
-# Keep this >= config.drainTimeoutSeconds so graceful drain can complete.
-terminationGracePeriodSeconds: 35
+# Must cover the full shutdown budget: preStopSleepSeconds (endpoint
+# propagation) + config.drainTimeoutSeconds (connection drain) + a kill margin.
+# Default = 5 + 30 + 5. validations.yaml enforces the floor.
+terminationGracePeriodSeconds: 40
 
 securityContext:
   runAsNonRoot: true
