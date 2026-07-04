@@ -74,13 +74,16 @@ export function insertLiveMessage(
   policy: LiveInsertPolicy = {},
 ): LiveInsertResult {
   const finalize = policy.finalize ?? ((timeline: TimelineMessage[]) => timeline);
-  // #1182: an id-less (re)delivery has no wire ids to overlap the row a
-  // MAM reload already seeded — fall back to content reconciliation. Only
-  // for a synthesized *incoming*: an id-carrying arrival is a distinct
-  // message (an id-less original can never be redelivered with an id) and
-  // must not be swallowed by an earlier same-body synthesized row.
+  // #1182: content reconciliation bridges the fabricated-UUID gap in two
+  // shapes only: a synthesized incoming (id-less redelivery onto a
+  // MAM-seeded row) and an archive-decoded incoming (reconnect catch-up
+  // emits archive rows through this path — #1190 skips the lifecycle
+  // reload, so this is the only chance to reconcile the id-less
+  // original). A genuinely new id-carrying *live* arrival is a distinct
+  // message and must not be swallowed by a same-body synthesized row.
+  const contentMatchable = msg.synthesizedId || msg.createdAtSource === "archive";
   const existing = findLiveMergeTarget(messages, msg, pendingEchoClientIds)
-    ?? (msg.synthesizedId ? findSynthesizedIdMergeTarget(messages, msg) : undefined);
+    ?? (contentMatchable ? findSynthesizedIdMergeTarget(messages, msg) : undefined);
   if (existing) {
     const merged = messages
       .map((m) => (m.id === existing.id ? mergedLiveRow(m, msg) : m))

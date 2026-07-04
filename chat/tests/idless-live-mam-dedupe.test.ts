@@ -467,3 +467,31 @@ describe("seedExistingOnly keeps the consumed synthesized row's UUID as alias (#
     expect(timeline[0]!.wireIds).toContain(fabricated);
   });
 });
+
+describe("reconnect catch-up (archive-sourced live emit) reconciles synthesized rows (#1182)", () => {
+  test("an archive-decoded catch-up arrival merges into the synthesized live row", () => {
+    const synthesized = mapLiveRoomMessageToTimeline(
+      session,
+      roomMessageFromArchived(
+        { ...baseArchivedRoom, mam_id: crypto.randomUUID(), timestamp: "2026-07-01T10:00:00.000Z" },
+        "live",
+      )!,
+    );
+    // client-mam catch-up decodes with the default "archive" source and
+    // emits through the live pipeline (insertLiveMessage).
+    const catchupCopy = mapLiveRoomMessageToTimeline(
+      session,
+      roomMessageFromArchived({
+        ...baseArchivedRoom,
+        mam_id: "archive-uid-11",
+        stanza_id: "archive-uid-11",
+        stanza_id_by: "room@conf.example.com",
+        timestamp: "2026-07-01T10:00:01.000Z",
+      })!,
+    );
+    const result = insertLiveMessage([synthesized], catchupCopy, new Set());
+    expect(result.appended).toBe(false);
+    expect(result.messages).toHaveLength(1);
+    expect(result.messages[0]!.synthesizedId).toBeUndefined();
+  });
+});
