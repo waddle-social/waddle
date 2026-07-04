@@ -436,8 +436,10 @@ export class MamPager {
           });
           // #1180: the fresh lifecycle event promised this conversation
           // was covered, so its consumer skipped the wholesale reload.
-          // Signal the failure so that reload can run as the fallback —
-          // after the failed attempt, never concurrently with it.
+          // Signal the failure so that reload can run as the fallback.
+          // Serialization is per-conversation: the fallback fires after
+          // THIS conversation's attempt failed (other entries may still
+          // be paging their own conversations concurrently).
           this.deps.events.emitSafe("catchupFailure", { kind: entry.kind, key: entry.key });
         }
       }

@@ -100,6 +100,33 @@ describe("#1180 fresh lifecycle carries reconnect catch-up coverage", () => {
     ]);
   });
 
+  test("an entry aborted by disconnect emits no catchupFailure", async () => {
+    // The fallback reload must never fire against a dead handle: when
+    // the connection dropped mid-catch-up, the NEXT session-ready owns
+    // recovery (its coverage/catch-up run starts over).
+    const { client, state, received } = makeClient();
+    const xmpp = {
+      fetch_room_history_page: () => {
+        // Simulate the connection dropping mid-fetch: a new handle
+        // takes over before the error propagates.
+        state.xmpp = { tag: "successor" };
+        throw new Error("socket closed");
+      },
+    };
+    state.xmpp = xmpp;
+    state.catchup.onSessionStarted();
+    state.catchup.recordRoomSeen("c1@muc.example.com", "2026-07-01T10:00:01.000Z");
+    const failures: Array<{ kind: "dm" | "room"; key: string }> = [];
+    client.setCatchupFailureHandler((failure) => failures.push(failure));
+
+    await state.runSessionReady(xmpp, { type: "fresh" });
+
+    expect(failures).toEqual([]);
+    expect(received).toEqual([
+      { type: "fresh", catchup: { dmJids: [], roomJids: ["c1@muc.example.com"] } },
+    ]);
+  });
+
   test("a successful catch-up emits no catchupFailure", async () => {
     const { client, state, received } = makeClient();
     const xmpp = {

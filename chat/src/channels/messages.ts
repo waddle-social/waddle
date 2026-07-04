@@ -436,13 +436,21 @@ export function useChannelMessages(
         ),
     );
     void (async () => {
-      await loadMessages(spaceId ?? "", channelId, 0, metadataSeed);
+      const result = await loadMessages(spaceId ?? "", channelId, 0, metadataSeed);
       if (
-        preserved.length === 0 ||
         (activeSpaceId.value ?? "") !== (spaceId ?? "") ||
         activeChannelId.value !== channelId
       )
         return;
+      if (result === "failed") {
+        // A failed reload must not leave the timeline wiped to
+        // queued-only: the catch-up coverage skip would then block the
+        // self-heal on the next reconnect. Restore the pre-reload
+        // timeline; the load error stays surfaced.
+        messages.value = metadataSeed;
+        return;
+      }
+      if (preserved.length === 0) return;
       const toAppend = preserved.filter((m) => !findMessageById(messages.value, m.id));
       if (toAppend.length > 0) messages.value = [...messages.value, ...toAppend];
     })();
@@ -569,7 +577,7 @@ export function useChannelMessages(
     metadataSeed: TimelineMessage[] = [],
   ) {
     messageSearch.reset();
-    await paging.loadMessages(spaceId, channelId, unreadAtLoad, metadataSeed);
+    return paging.loadMessages(spaceId, channelId, unreadAtLoad, metadataSeed);
   }
 
   async function selectChannel(channelId: string) {

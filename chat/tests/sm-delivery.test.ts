@@ -220,6 +220,36 @@ describe("XEP-0198 session lifecycle catch-up (group chat)", () => {
     expect(clientAny.value.queryMam).toHaveBeenCalledWith("w1", "c1", 100);
   });
 
+  test("a failed fallback reload restores the pre-reload timeline instead of wiping it", async () => {
+    // If the reload the fallback fires ALSO fails, loadMessages' catch
+    // wipes the timeline to queued-only — and the covered-skip would
+    // then block the self-heal on the next reconnect. The fallback must
+    // put the pre-reload timeline back.
+    const queryMam = mock(async () => {
+      throw new Error("mam down");
+    });
+    const client = ref({ ...handlerStubs(), queryMam } as never) as never;
+    const { messaging } = makeRoomMessaging(client);
+
+    const existing = [
+      {
+        id: "seen-1",
+        author: "bob",
+        body: "hi",
+        createdAt: "2024-01-01T00:00:00Z",
+        isSelf: false,
+      },
+    ];
+    messaging.messages.value = existing;
+
+    messaging.onCatchupFailed({ kind: "room", key: "c1@muc.example.com" });
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(queryMam).toHaveBeenCalled();
+    expect(messaging.messages.value).toEqual(existing);
+  });
+
   test("catch-up failure for a different room does not reload", async () => {
     const client = makeRoomClient();
     const { messaging } = makeRoomMessaging(client);
@@ -569,7 +599,9 @@ describe("XEP-0198 delivery status (DM)", () => {
 
     dm.onSessionLifecycle({
       type: "fresh",
-      catchup: { dmJids: ["bob@example.com"], roomJids: [] },
+      // Case differs from the active peer JID on purpose: coverage
+      // matching must be case-insensitive (RFC 7622-lowercased keys).
+      catchup: { dmJids: ["Bob@Example.com"], roomJids: [] },
     });
     await new Promise((r) => setTimeout(r, 0));
 
@@ -601,6 +633,32 @@ describe("XEP-0198 delivery status (DM)", () => {
       value: { queryPersonalMam: ReturnType<typeof mock> };
     };
     expect(clientAny.value.queryPersonalMam).toHaveBeenCalledWith("bob@example.com", 100);
+  });
+
+  test("a failed DM fallback reload restores the pre-reload timeline instead of wiping it", async () => {
+    const queryPersonalMam = mock(async () => {
+      throw new Error("mam down");
+    });
+    const client = ref({ queryPersonalMam } as never) as never;
+    const { dm } = makeDmMessaging(client);
+
+    const existing = [
+      {
+        id: "dm-old",
+        author: "bob",
+        body: "earlier",
+        createdAt: "2024-01-01T00:00:00Z",
+        isSelf: false,
+      },
+    ];
+    dm.messages.value = existing;
+
+    dm.onCatchupFailed({ kind: "dm", key: "bob@example.com" });
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(queryPersonalMam).toHaveBeenCalled();
+    expect(dm.messages.value).toEqual(existing);
   });
 
   test("catch-up failure for a different DM peer does not reload", async () => {

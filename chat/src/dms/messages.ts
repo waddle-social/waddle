@@ -287,7 +287,7 @@ export function useDirectMessages(
   // clears stale results.
   async function loadMessages(peerJid: string, unreadAtLoad = 0) {
     messageSearch.reset();
-    await paging.loadMessages(peerJid, unreadAtLoad);
+    return paging.loadMessages(peerJid, unreadAtLoad);
   }
 
   /** On a fresh session (SM resume failed), re-fetch MAM to close any gap
@@ -320,7 +320,8 @@ export function useDirectMessages(
     const peerJid = activePeerJid.value;
     if (!peerJid) return;
     if (messages.value.length === 0) return;
-    const preserved = messages.value.filter(
+    const snapshot = messages.value;
+    const preserved = snapshot.filter(
       (m) =>
         m.isSelf && (
           m.deliveryStatus === "queued"
@@ -329,8 +330,17 @@ export function useDirectMessages(
         ),
     );
     void (async () => {
-      await loadMessages(peerJid);
-      if (preserved.length === 0 || activePeerJid.value !== peerJid) return;
+      const result = await loadMessages(peerJid);
+      if (activePeerJid.value !== peerJid) return;
+      if (result === "failed") {
+        // A failed reload must not leave the timeline wiped to
+        // queued-only: the catch-up coverage skip would then block the
+        // self-heal on the next reconnect. Restore the pre-reload
+        // timeline; the load error stays surfaced.
+        messages.value = snapshot;
+        return;
+      }
+      if (preserved.length === 0) return;
       const toAppend = preserved.filter((m) => !findMessageById(messages.value, m.id));
       if (toAppend.length > 0) messages.value = [...messages.value, ...toAppend];
     })();
