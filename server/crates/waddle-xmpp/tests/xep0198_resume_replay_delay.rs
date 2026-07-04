@@ -52,7 +52,7 @@ fn replayed_message_carries_delay_with_original_receipt_stamp() {
 
 #[test]
 fn replayed_iq_is_not_stamped() {
-    // XEP-0203 §3 defines delay annotations for message and presence
+    // XEP-0203 §2 defines delay annotations for message and presence
     // stanzas; a replayed <iq/> must go out byte-identical.
     let original = "<iq xmlns='jabber:client' from='example.com' to='alice@example.com/r' \
                     type='result' id='q1'/>";
