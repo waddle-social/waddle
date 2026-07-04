@@ -150,12 +150,17 @@ impl UnackedQueue {
     /// Get all stanzas with sequence > h that need to be resent.
     ///
     /// This is used during stream resumption when the client reports
-    /// which stanza it last received.
-    pub fn get_unacked_after(&self, h: u32) -> Vec<String> {
+    /// which stanza it last received. Each entry carries the original
+    /// receipt time so the resume path can stamp the XEP-0203
+    /// `<delay/>` with the true send time (issue #1178).
+    pub fn get_unacked_after(&self, h: u32) -> Vec<super::ReplayStanza> {
         self.stanzas
             .iter()
             .filter(|s| sequence_gt(s.sequence, h))
-            .map(|s| s.stanza_xml.clone())
+            .map(|s| super::ReplayStanza {
+                stanza_xml: s.stanza_xml.clone(),
+                original_receipt_at: s.original_receipt_at,
+            })
             .collect()
     }
 
@@ -293,8 +298,8 @@ mod tests {
         // Get stanzas after h=2 (should be 3 and 4)
         let unacked = queue.get_unacked_after(2);
         assert_eq!(unacked.len(), 2);
-        assert_eq!(unacked[0], "<msg3/>");
-        assert_eq!(unacked[1], "<msg4/>");
+        assert_eq!(unacked[0].stanza_xml, "<msg3/>");
+        assert_eq!(unacked[1].stanza_xml, "<msg4/>");
 
         // Get stanzas after h=0 (all of them)
         let unacked = queue.get_unacked_after(0);

@@ -720,3 +720,59 @@ async fn storage_failure_records_storage_failed_not_dropped() {
         "has_storage_failure() must be true so caller skips confirm_drained"
     );
 }
+
+#[tokio::test]
+async fn promotion_prefers_existing_self_stamp_time_over_queue_receipt_time() {
+    // Multi-hop Q6 chain (issue #1178 round-3 review): a message
+    // received at T0 was Q6-redelivered with an accurate
+    // <delay from='example.com' stamp='T0'/> and recorded into the
+    // destination's unacked queue at redelivery time T1. When THAT
+    // session also expires, the promoted pending_delivery row must
+    // carry T0 — the self-stamp on the in-flight stanza — not the
+    // queue's T1, or the eventual flush stamps the redelivery time
+    // (Archived rows rehydrate from MAM, which has no self-stamp, so
+    // the row time is what ends up on the wire).
+    use chrono::TimeZone;
+
+    let t0 = Utc.with_ymd_and_hms(2026, 7, 1, 10, 0, 0).unwrap();
+    let mut m =
+        xmpp_parsers::message::Message::new(Some("alice@example.com".parse::<jid::Jid>().unwrap()));
+    m.from = Some("bob@elsewhere/x".parse::<jid::Jid>().unwrap());
+    m.type_ = xmpp_parsers::message::MessageType::Chat;
+    m.bodies
+        .insert(xmpp_parsers::message::Lang::new(), "second hop".to_string());
+    waddle_xmpp::xep::xep0203::add_delay_stamp(&mut m, t0, "example.com");
+    let element: xmpp_parsers::minidom::Element = m.into();
+    let mut buf = Vec::new();
+    element.write_to(&mut buf).unwrap();
+    let xml = String::from_utf8(buf).unwrap();
+
+    let storage: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    let registry = ConnectionRegistry::new();
+    // detached_session_with_unacked stamps original_receipt_at with
+    // Utc::now() — the (later) redelivery-time T1.
+    let session = detached_session_with_unacked(
+        "stream-second-hop",
+        full("alice@example.com/laptop"),
+        vec![xml],
+    );
+
+    let summary = promote_session_unacked(
+        &session,
+        &registry,
+        &storage,
+        &Blocklist::empty(),
+        "example.com",
+    )
+    .await;
+
+    assert_eq!(summary.queued, 1);
+    let rows = storage.list(&bare("alice@example.com")).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].original_receipt_at, t0,
+        "promoted row must carry the self-stamp's original time, \
+         not the unacked queue's redelivery-time receipt"
+    );
+}

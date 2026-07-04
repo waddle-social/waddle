@@ -177,7 +177,7 @@ async fn drain_outbound_dispatches_direct_frame_into_unacked_unchanged() {
     let queue = conn.sm_state.get_stanzas_to_resend(0);
     assert_eq!(queue.len(), 1, "DirectFrame recorded once");
     assert_eq!(
-        queue[0], expected_xml,
+        queue[0].stanza_xml, expected_xml,
         "DirectFrame is recorded byte-for-byte (no recipient pipeline rewrite)"
     );
 }
@@ -239,7 +239,11 @@ async fn drain_outbound_dispatches_peer_stanza_through_recipient_pass() {
         !queue.is_empty(),
         "PeerStanza drain MUST record at least the recipient-pass wire frame"
     );
-    let combined: String = queue.join("\n");
+    let combined: String = queue
+        .iter()
+        .map(|entry| entry.stanza_xml.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(
         combined.contains("by='bob@example.com'"),
         "drained PeerStanza replay must carry bob's recipient-side stanza-id; got: {combined}"

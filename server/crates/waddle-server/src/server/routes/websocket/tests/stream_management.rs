@@ -2401,3 +2401,126 @@ async fn sm_janitor_helper_drains_expired_and_cleans_muc() {
         "MUC occupant must be gone after janitor sweep"
     );
 }
+
+#[tokio::test]
+async fn sm_resume_replay_stamps_xep0203_delay_with_original_receipt_time() {
+    // Issue #1178: stanzas replayed after <resumed/> must carry a
+    // XEP-0203 <delay/> whose stamp is the ORIGINAL server receipt
+    // time — otherwise clients timestamp them at drain time and sort
+    // them to the bottom of the timeline.
+    use chrono::{TimeZone, Utc};
+    use waddle_xmpp::stream_management::{DetachedSession, DetachedUnackedStanza};
+
+    let state = create_test_websocket_state().await;
+    let domain = state.deps.auth_state.xmpp_domain.clone();
+    let session = create_test_session(state.as_ref(), "bob").await;
+    let payload = BASE64_STANDARD.encode(format!("n,,\x01auth=Bearer {}\x01\x01", session.id));
+    let auth_frame = element_to_xml(
+        Element::builder("auth", waddle_xmpp::ns::SASL)
+            .attr(
+                minidom::rxml::xml_ncname!("mechanism").to_owned(),
+                "OAUTHBEARER",
+            )
+            .append(payload)
+            .build(),
+    );
+    let mut conn = WsConnState::new();
+    let auth_responses = handle_xmpp_frame(&auth_frame, &domain, state.as_ref(), &mut conn).await;
+    assert_eq!(auth_responses, vec![sasl_success_xml()]);
+
+    let original_receipt = Utc.with_ymd_and_hms(2026, 7, 1, 9, 15, 30).unwrap();
+    let detached_jid: FullJid = format!("bob@{domain}/web").parse().expect("jid");
+    let queued_message_xml = {
+        let mut message =
+            xmpp_parsers::message::Message::new(Some(jid::Jid::from(detached_jid.clone())));
+        message.from = Some(
+            format!("alice@{domain}/a")
+                .parse::<jid::Jid>()
+                .expect("jid"),
+        );
+        message.type_ = xmpp_parsers::message::MessageType::Chat;
+        message.id = Some(xmpp_parsers::message::Id("replayed-1".to_string()));
+        message.bodies.insert(
+            xmpp_parsers::message::Lang::new(),
+            "while you were away".to_string(),
+        );
+        stanza_to_xml(&Stanza::Message(message))
+    };
+    let queued_iq_xml = element_to_xml(
+        Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
+            .attr(
+                minidom::rxml::xml_ncname!("from").to_owned(),
+                domain.as_str(),
+            )
+            .attr(
+                minidom::rxml::xml_ncname!("to").to_owned(),
+                detached_jid.to_string(),
+            )
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "replayed-iq")
+            .build(),
+    );
+    state
+        .deps
+        .protocol
+        .sm_session_registry
+        .store_session(DetachedSession {
+            stream_id: "stream-replay-delay".to_string(),
+            user_id: format!("bob@{domain}"),
+            jid: detached_jid.clone(),
+            inbound_count: 1,
+            outbound_count: 2,
+            last_acked: 0,
+            replay_gap_through: None,
+            unacked_stanzas: vec![
+                DetachedUnackedStanza {
+                    sequence: 1,
+                    stanza_xml: queued_message_xml,
+                    original_receipt_at: original_receipt,
+                },
+                DetachedUnackedStanza {
+                    sequence: 2,
+                    stanza_xml: queued_iq_xml,
+                    original_receipt_at: original_receipt,
+                },
+            ],
+            max_resume_time: Some(300),
+            detached_at: std::time::Instant::now(),
+            carbons_enabled: false,
+            roster_interested: false,
+            blocklist_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+        })
+        .await
+        .expect("store");
+
+    let resume_frame = resume_frame_xml("stream-replay-delay", 0);
+    let responses = handle_xmpp_frame(&resume_frame, &domain, state.as_ref(), &mut conn).await;
+
+    assert_eq!(responses.len(), 3, "<resumed/> + 2 replayed stanzas");
+    let resumed = Element::from_str(&responses[0]).expect("xml");
+    assert_eq!(resumed.name(), "resumed");
+
+    // The replayed <message/> carries the server's delay stamp with the
+    // original receipt time, not the resume time.
+    let replayed_message = Element::from_str(&responses[1]).expect("replayed message xml");
+    assert_eq!(replayed_message.name(), "message");
+    let delay = replayed_message
+        .children()
+        .find(|child| child.name() == "delay" && child.ns() == "urn:xmpp:delay")
+        .expect("replayed message must carry a XEP-0203 delay");
+    assert_eq!(delay.attr("from"), Some(domain.as_str()));
+    assert_eq!(delay.attr("stamp"), Some("2026-07-01T09:15:30Z"));
+
+    // The replayed <iq/> stays unstamped — XEP-0203 covers message and
+    // presence only.
+    let replayed_iq = Element::from_str(&responses[2]).expect("replayed iq xml");
+    assert_eq!(replayed_iq.name(), "iq");
+    assert!(
+        !replayed_iq.children().any(|child| child.name() == "delay"),
+        "iq replay must not gain a delay element"
+    );
+}

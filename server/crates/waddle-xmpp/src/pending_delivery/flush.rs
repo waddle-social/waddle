@@ -10,7 +10,7 @@
 //! - **XEP-0203 §4.1** — `<delay xmlns='urn:xmpp:delay' from='SERVER'
 //!   stamp='ORIGINAL_RECEIPT_ISO8601'>Offline Storage</delay>`. The
 //!   stamp is the original (failed) receipt time, NOT the flush time
-//!   (XEP-0198 §5 line 364 + locked Q6c).
+//!   (XEP-0198 Acks section, xep-0198.xml line 364, + locked Q6c).
 //! - **XEP-0359 §3.1** — for `Archived` rows the server-stamped
 //!   `<stanza-id by='RECIPIENT_BARE'/>` is preserved (it was added at
 //!   archive time and lives in MAM); for `Transient` rows no
@@ -101,7 +101,7 @@ impl ReplayReason {
 ///
 /// `original_receipt_at` is the server-side receipt time of the
 /// original stanza (before it was queued for offline delivery). This
-/// is what XEP-0203 §4.2 + XEP-0198 §5 line 364 require on the
+/// is what XEP-0203 §4.2 + XEP-0198's Acks section (xep-0198.xml line 364) require on the
 /// `<delay/>` stamp.
 ///
 /// `reason` selects the optional human-readable description carried
@@ -120,27 +120,34 @@ pub fn build_replay_stanza(
     reason: ReplayReason,
 ) -> Message {
     let mut message = *payload.into_message();
-    // Strip ONLY any pre-existing `<delay/>` whose `from` attribute
-    // matches our own server domain — that would be a stamp this
-    // server itself added on a prior path (round-trip via MAM, replay
-    // through a transient pass, etc.) and re-emitting it would result
-    // in two `<delay from='our-domain'/>` siblings.
+    // If the stanza already carries a `<delay/>` this server stamped on
+    // a prior hop, keep it and add nothing: that stamp records the true
+    // original time, which can be EARLIER than the caller's
+    // `original_receipt_at` (a Q6 SM-expiry redelivery is recorded into
+    // the destination's unacked queue at redelivery time, so a second
+    // Q6 pass would otherwise overwrite the accurate stamp — and
+    // persist the corruption into `pending_delivery`). This also keeps
+    // exactly one `<delay from='our-domain'/>` on re-flush round-trips.
     //
     // Legitimate upstream `<delay/>` elements (e.g. ones a different
     // server in a federated chain stamped, or a forwarded-message
     // delay from a stored stanza) are preserved unchanged so the
-    // recipient sees the full delivery history per XEP-0203 §5
-    // ("multiple delay elements MAY appear").
-    message.payloads.retain(|payload| {
-        !(payload.name() == "delay"
+    // recipient sees the full delivery history. XEP-0203 §2 has each
+    // delaying entity add one and only one <delay/>; this server adds
+    // only its own, and stacking alongside foreign delays matches
+    // common ecosystem practice (MUC history + MAM).
+    let already_self_stamped = message.payloads.iter().any(|payload| {
+        payload.name() == "delay"
             && payload.ns() == NS_DELAY
-            && payload.attr("from") == Some(server_domain))
+            && payload.attr("from") == Some(server_domain)
     });
-    message.payloads.push(build_offline_delay(
-        server_domain,
-        original_receipt_at,
-        reason.description(),
-    ));
+    if !already_self_stamped {
+        message.payloads.push(build_offline_delay(
+            server_domain,
+            original_receipt_at,
+            reason.description(),
+        ));
+    }
     message
 }
 
@@ -317,11 +324,9 @@ mod tests {
     }
 
     #[test]
-    fn replay_stanza_strips_only_self_stamped_delay_to_avoid_double_stamping() {
-        // Pre-existing delay stamped by THIS server should be replaced
-        // by the freshly-built one (avoid two `<delay from='example.com'/>`
-        // siblings). Round-trip safety: if a stanza somehow ends up
-        // re-flushed, we don't want two of the server's own stamps.
+    fn replay_stanza_keeps_single_self_stamp_when_reflushed() {
+        // Round-trip safety: if a stanza somehow ends up re-flushed, we
+        // don't want two of the server's own stamps.
         let mut row = transient_row("alice@example.com", "hi");
         if let PendingPayload::Transient(msg) = &mut row.payload {
             msg.payloads
@@ -350,8 +355,41 @@ mod tests {
     }
 
     #[test]
+    fn replay_stanza_preserves_earlier_self_stamp_from_prior_hop() {
+        // Multi-hop Q6 chain (issue #1178 round-2 review): a message
+        // received at T0 is Q6-redelivered to a live resource with an
+        // accurate `<delay stamp='T0'/>`, recorded into THAT resource's
+        // unacked queue at redelivery time T1, and that session also
+        // expires. The second Q6 pass calls this builder with
+        // `original_receipt_at = T1`; replacing the T0 self-stamp with
+        // T1 would corrupt the timeline AND persist the corruption into
+        // `pending_delivery`. The existing self-stamp records the true
+        // original time and must survive.
+        let t0 = Utc.with_ymd_and_hms(2026, 5, 1, 10, 0, 0).unwrap();
+        let t1_redelivery = fixed_receipt(); // 12:30, later than T0
+        let mut row = transient_row("alice@example.com", "hi");
+        if let PendingPayload::Transient(msg) = &mut row.payload {
+            msg.payloads
+                .push(build_offline_delay("example.com", t0, None));
+        }
+        let payload = MaterializedPayload::from_transient(&row).unwrap();
+        let replayed = build_replay_stanza(
+            payload,
+            "example.com",
+            t1_redelivery,
+            ReplayReason::SmRedelivery,
+        );
+        let delay = delay_element(&replayed).expect("delay present");
+        assert_eq!(
+            delay.attr("stamp"),
+            Some("2026-05-01T10:00:00Z"),
+            "the earlier accurate self-stamp survives the second hop"
+        );
+    }
+
+    #[test]
     fn replay_stanza_preserves_upstream_delay_metadata() {
-        // XEP-0203 §5 allows multiple `<delay/>` elements, e.g. when a
+        // Delays stamped by other entities are preserved, e.g. when a
         // stanza traverses multiple servers in a federated chain. Our
         // offline-delay stamping must NOT strip delays stamped by
         // other entities.
