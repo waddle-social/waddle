@@ -466,6 +466,10 @@ async fn interpret_with_depth(
             OutboundEvent::UnregisterConnection(jid) => {
                 let _entry = registry.unregister(&jid);
                 debug!(jid = %jid, "UnregisterConnection: removed from registry");
+                // ADR-0017 Phase 1: mirror the unregister into the actor tree.
+                if let Some(user_registry) = deps.user_registry {
+                    crate::server::dual_registration::mirror_unregister(user_registry, &jid).await;
+                }
             }
             OutboundEvent::ArchiveGroupchat {
                 room,

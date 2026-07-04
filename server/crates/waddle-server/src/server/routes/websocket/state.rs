@@ -195,6 +195,13 @@ pub struct WebSocketDeps {
 pub struct ProtocolServices {
     /// Registry for tracking active connections by JID.
     pub connection_registry: Arc<ConnectionRegistry>,
+    /// Actor-backed per-user registry (ADR-0017 Phase 1). Populated in
+    /// lock-step with `connection_registry` on the live register/unregister
+    /// path so the actor tree mirrors live sessions. Nothing reads it for
+    /// delivery yet — the DashMap `connection_registry` remains the sole
+    /// routing source until the read-cutover slice — so this mirror cannot
+    /// change wire behavior.
+    pub user_registry: ActorRef<waddle_xmpp::registry::UserRegistryActor>,
     /// Actor-backed registry for MUC rooms.
     pub room_registry: ActorRef<RoomRegistryActor>,
     /// Shared XMPP MAM storage for archived message history.

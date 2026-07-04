@@ -52,6 +52,12 @@ pub enum TimerCommand {
 #[derive(Clone)]
 pub struct Deps<'a> {
     pub connection_registry: &'a ConnectionRegistry,
+    /// Actor-backed per-user registry (ADR-0017 Phase 1). Threaded so the
+    /// [`OutboundEvent::UnregisterConnection`] arm can mirror the DashMap
+    /// unregister into the actor tree. `None` in unit tests; supplied in
+    /// production via [`super::super::websocket::build_interpret_deps`].
+    /// Nothing reads it for delivery yet.
+    pub user_registry: Option<&'a ActorRef<waddle_xmpp::registry::UserRegistryActor>>,
     /// XEP-0198 stream-management session registry. Used to fan
     /// XEP-0280 carbons out to *detached but resumable* resources so
     /// briefly-disconnected secondary devices don't lose carbon
@@ -126,6 +132,7 @@ impl<'a> Deps<'a> {
     pub fn registry_only(connection_registry: &'a ConnectionRegistry) -> Self {
         Self {
             connection_registry,
+            user_registry: None,
             sm_session_registry: None,
             mam_storage: None,
             inbox_storage: None,
@@ -151,6 +158,7 @@ impl<'a> Deps<'a> {
     ) -> Self {
         Self {
             connection_registry,
+            user_registry: None,
             sm_session_registry: None,
             mam_storage: Some(mam_storage),
             inbox_storage: Some(inbox_storage),
@@ -174,6 +182,7 @@ impl<'a> Deps<'a> {
     ) -> Self {
         Self {
             connection_registry,
+            user_registry: None,
             sm_session_registry: None,
             mam_storage: None,
             inbox_storage: None,

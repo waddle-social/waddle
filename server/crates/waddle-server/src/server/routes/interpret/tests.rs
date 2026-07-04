@@ -248,6 +248,7 @@ async fn xep_0280_send_carbons_queues_for_detached_xep_0198_resources() {
     let original = chat_msg("alice@example.com/web", "bob@example.com", "hi");
     let deps = Deps {
         connection_registry: &registry,
+        user_registry: None,
         sm_session_registry: Some(&sm),
         mam_storage: None,
         inbox_storage: None,
@@ -1842,6 +1843,7 @@ fn offline_pass_deps<'a>(
 ) -> Deps<'a> {
     Deps {
         connection_registry: registry,
+        user_registry: None,
         sm_session_registry: None,
         mam_storage: Some(mam),
         inbox_storage: Some(inbox),
@@ -2331,6 +2333,7 @@ async fn xep_0045_persist_room_subject_writes_state_via_room_actor() {
 
     let deps = Deps {
         connection_registry: &registry,
+        user_registry: None,
         sm_session_registry: None,
         mam_storage: None,
         inbox_storage: None,

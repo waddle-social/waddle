@@ -212,6 +212,9 @@ async fn create_test_websocket_state_with_extension_manager(
                 },
                 protocol: ProtocolServices {
                     connection_registry: Arc::new(ConnectionRegistry::new()),
+                    user_registry: waddle_xmpp::registry::UserRegistryActor::spawn(
+                        waddle_xmpp::registry::UserRegistryActor::new(),
+                    ),
                     room_registry: RoomRegistryActor::spawn(RoomRegistryActor::new(
                         "muc.example.com".to_string(),
                         OccupantIdSecret::new(b"test-occupant-id-secret-32-bytes-long".to_vec())

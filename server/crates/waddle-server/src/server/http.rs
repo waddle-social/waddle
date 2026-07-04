@@ -339,6 +339,17 @@ async fn create_websocket_state(
     // Create connection registry for WebSocket message routing
     let connection_registry = Arc::new(ConnectionRegistry::new());
 
+    // ADR-0017 Phase 1: spawn the actor-backed per-user registry. It is
+    // populated alongside `connection_registry` on the live register/
+    // unregister path (dual-registration) so the actor tree mirrors live
+    // sessions ahead of the read-cutover. Nothing reads it for delivery yet.
+    let user_registry = {
+        use kameo::actor::Spawn;
+        waddle_xmpp::registry::UserRegistryActor::spawn(
+            waddle_xmpp::registry::UserRegistryActor::new(),
+        )
+    };
+
     // Read the MUC room registry and PubSub storage off the shared
     // `AppState` — both are built in `start_with_config` so admin V2
     // handlers and the WebSocket transport operate on the same handles.
@@ -580,6 +591,7 @@ async fn create_websocket_state(
             service_domains,
             protocol: ProtocolServices {
                 connection_registry,
+                user_registry,
                 room_registry,
                 mam_storage,
                 inbox_storage: Arc::clone(&state.inbox_storage),

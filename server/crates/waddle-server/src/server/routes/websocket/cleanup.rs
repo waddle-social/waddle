@@ -455,6 +455,12 @@ pub(super) async fn cleanup_invalidated_detached_session(
             .protocol
             .connection_registry
             .unregister(&detached.jid);
+        // ADR-0017 Phase 1: mirror the unregister into the actor tree.
+        crate::server::dual_registration::mirror_unregister(
+            &state.deps.protocol.user_registry,
+            &detached.jid,
+        )
+        .await;
         // XEP-0115 §6: clear the resource→ver mapping AND any stuck
         // pending disco#info resolution for this resource so an
         // unresumed detached session doesn't leak indefinitely.

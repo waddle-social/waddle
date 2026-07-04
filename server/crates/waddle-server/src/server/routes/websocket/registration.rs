@@ -64,6 +64,11 @@ pub(super) async fn register_bound_connection_after_frame(
         blocklist,
     );
 
+    // ADR-0017 Phase 1 dual-registration: mirror this resource into the
+    // actor-backed `user_registry` before the sender is moved into the
+    // DashMap registry below. Clone the sender for the actor mirror.
+    let tx_for_actor = tx.clone();
+
     let owner = state
         .deps
         .protocol
@@ -76,6 +81,16 @@ pub(super) async fn register_bound_connection_after_frame(
             conn.blocklist_interested,
         );
     conn.registry_owner = Some(owner.clone());
+
+    // Best-effort mirror into the actor tree (nothing reads it for delivery
+    // yet; the DashMap registration above is authoritative).
+    crate::server::dual_registration::mirror_register(
+        &state.deps.protocol.user_registry,
+        jid.clone(),
+        tx_for_actor,
+        conn.carbons_enabled,
+    )
+    .await;
 
     // Publish the SM stream id onto the freshly-registered entry so the
     // offline-flush path keys claims by the XEP-0198 session id, not the
