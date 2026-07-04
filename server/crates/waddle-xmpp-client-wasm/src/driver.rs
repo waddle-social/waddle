@@ -483,22 +483,7 @@ impl WasmDriverTask {
                     };
                     let _ = responder.send(result);
                 } else if let Some(pending) = self.pending_mam_queries.remove(&id) {
-                    let PendingMamQuery {
-                        collector,
-                        responder,
-                    } = pending;
-                    let result = if element.attr("type") == Some("result") {
-                        let (rsm, is_complete) = mam::parse_fin_from_iq_result(&element);
-                        Ok(waddle_xmpp_client::MamPage {
-                            query_id: collector.query_id().to_string(),
-                            messages: collector.into_messages(),
-                            rsm,
-                            is_complete,
-                        })
-                    } else {
-                        Err(ClientError::StanzaError(parse_stanza_error(&element)))
-                    };
-                    let _ = responder.send(result);
+                    resolve_pending_mam_query(pending, &element);
                 } else if let Some(pending) = self.pending_inbox_queries.remove(&id) {
                     let result = if element.attr("type") == Some("result") {
                         let fin = waddle_xmpp_client::inbox::parse_inbox_fin(&element)
@@ -676,6 +661,28 @@ fn collect_pending_mam_result(
     }
 }
 
+/// Complete a pending MAM query with the IQ that resolved it: a `<fin/>` IQ
+/// result yields the deduped [`waddle_xmpp_client::MamPage`], anything else a
+/// stanza error.
+fn resolve_pending_mam_query(pending: PendingMamQuery, element: &Element) {
+    let PendingMamQuery {
+        collector,
+        responder,
+    } = pending;
+    let result = if element.attr("type") == Some("result") {
+        let (rsm, is_complete) = mam::parse_fin_from_iq_result(element);
+        Ok(waddle_xmpp_client::MamPage {
+            query_id: collector.query_id().to_string(),
+            messages: collector.into_messages(),
+            rsm,
+            is_complete,
+        })
+    } else {
+        Err(ClientError::StanzaError(parse_stanza_error(element)))
+    };
+    let _ = responder.send(result);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -776,6 +783,107 @@ mod tests {
         );
         assert_eq!(messages[0].mam_id, "mam-0");
         assert_eq!(messages[1].mam_id, "mam-1");
+    }
+
+    #[test]
+    fn mam_collection_drops_results_without_a_query_id() {
+        let mut pending_mam_queries = HashMap::new();
+        let (responder, _rx) = oneshot::channel();
+        pending_mam_queries.insert(
+            "iq-1".to_string(),
+            PendingMamQuery::new("query-1", responder),
+        );
+
+        let mut archived = build_archived("mam-0", "query-1", "hello 0");
+        archived.query_id = None;
+        collect_pending_mam_result(&mut pending_mam_queries, archived);
+
+        let pending = pending_mam_queries
+            .remove("iq-1")
+            .expect("pending query still registered");
+        assert!(
+            pending.collector.into_messages().is_empty(),
+            "a result without a queryid must not be attributed to any pending query"
+        );
+    }
+
+    fn build_fin_iq(iq_id: &str, first: &str, last: &str, count: u32) -> Element {
+        let set = Element::builder("set", waddle_xmpp_core::mam::RSM_NS)
+            .append(
+                Element::builder("first", waddle_xmpp_core::mam::RSM_NS)
+                    .append(first)
+                    .build(),
+            )
+            .append(
+                Element::builder("last", waddle_xmpp_core::mam::RSM_NS)
+                    .append(last)
+                    .build(),
+            )
+            .append(
+                Element::builder("count", waddle_xmpp_core::mam::RSM_NS)
+                    .append(count.to_string())
+                    .build(),
+            )
+            .build();
+
+        let fin = Element::builder("fin", waddle_xmpp_core::mam::MAM_NS)
+            .attr(minidom::rxml::xml_ncname!("complete").to_owned(), "true")
+            .append(set)
+            .build();
+
+        Element::builder("iq", NS_CLIENT)
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), iq_id)
+            .append(fin)
+            .build()
+    }
+
+    #[test]
+    fn fin_iq_result_resolves_pending_query_with_deduped_page() {
+        let mut pending_mam_queries = HashMap::new();
+        let (responder, mut rx) = oneshot::channel();
+        pending_mam_queries.insert(
+            "iq-1".to_string(),
+            PendingMamQuery::new("query-1", responder),
+        );
+
+        collect_pending_mam_result(
+            &mut pending_mam_queries,
+            build_archived("mam-0", "query-1", "hello 0"),
+        );
+        collect_pending_mam_result(
+            &mut pending_mam_queries,
+            build_archived("mam-1", "query-1", "hello 1"),
+        );
+        // XEP-0198 resume replays the unacked tail before the (also replayed)
+        // <fin/> arrives.
+        collect_pending_mam_result(
+            &mut pending_mam_queries,
+            build_archived("mam-1", "query-1", "hello 1"),
+        );
+
+        let pending = pending_mam_queries
+            .remove("iq-1")
+            .expect("pending query still registered");
+        resolve_pending_mam_query(pending, &build_fin_iq("iq-1", "mam-0", "mam-1", 2));
+
+        let page = rx
+            .try_recv()
+            .expect("responder completed")
+            .expect("responder sent a result")
+            .expect("fin result resolves to a page");
+        assert_eq!(page.query_id, "query-1");
+        assert_eq!(
+            page.messages.len(),
+            2,
+            "the page must carry the deduped rows, not the replayed duplicates"
+        );
+        assert_eq!(page.messages[0].mam_id, "mam-0");
+        assert_eq!(page.messages[1].mam_id, "mam-1");
+        assert!(page.is_complete, "<fin complete='true'/> must propagate");
+        assert_eq!(page.rsm.first.as_deref(), Some("mam-0"));
+        assert_eq!(page.rsm.last.as_deref(), Some("mam-1"));
+        assert_eq!(page.rsm.count, Some(2));
     }
 
     #[test]
