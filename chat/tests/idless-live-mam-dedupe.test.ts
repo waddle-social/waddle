@@ -266,3 +266,124 @@ describe("live insert reconciles id-less redelivery onto MAM-seeded rows (#1182)
     expect(second.messages).toHaveLength(2);
   });
 });
+
+describe("client-id-only live stanzas are real identities, not synthesized (#1182)", () => {
+  // The dispatcher reshapes live stanzas with `mam_id: message.id ?? uuid`,
+  // so a client-id-only stanza also has primary === mam_id — it must still
+  // NOT be flagged: the client id is a real wire identity.
+  test("live MUC stanza with only a client id is not flagged", () => {
+    const result = roomMessageFromArchived(
+      { ...baseArchivedRoom, id: "client-1", mam_id: "client-1" },
+      "live",
+    );
+    expect(result?.id).toBe("client-1");
+    expect(result?.synthesizedId).toBeUndefined();
+  });
+
+  test("live DM stanza with only a client id is not flagged", () => {
+    const result = dmMessageFromArchived(
+      { ...baseArchivedDm, id: "client-2", mam_id: "client-2" },
+      "alice@example.com",
+      "live",
+    );
+    expect(result?.id).toBe("client-2");
+    expect(result?.synthesizedId).toBeUndefined();
+  });
+});
+
+describe("live insert only content-matches when the incoming row is synthesized (#1182)", () => {
+  test("an id-carrying same-body live arrival never merges into a synthesized row", () => {
+    const synthesized = mapLiveRoomMessageToTimeline(
+      session,
+      roomMessageFromArchived(
+        { ...baseArchivedRoom, mam_id: crypto.randomUUID(), timestamp: "2026-07-01T10:00:00.000Z" },
+        "live",
+      )!,
+    );
+    const withClientId = mapLiveRoomMessageToTimeline(
+      session,
+      roomMessageFromArchived(
+        { ...baseArchivedRoom, id: "client-9", mam_id: "client-9", timestamp: "2026-07-01T10:00:30.000Z" },
+        "live",
+      )!,
+    );
+    const result = insertLiveMessage([synthesized], withClientId, new Set());
+    expect(result.appended).toBe(true);
+    expect(result.messages).toHaveLength(2);
+  });
+});
+
+describe("file-only id-less messages reconcile by attachment URLs (#1182)", () => {
+  const file = { url: "https://files.example.com/pic.png", disposition: "inline" };
+
+  test("MAM copy of a body-less file message merges into the synthesized live row", () => {
+    const existing = [
+      mapLiveRoomMessageToTimeline(
+        session,
+        roomMessageFromArchived(
+          {
+            ...baseArchivedRoom,
+            body: undefined,
+            shared_files: [file],
+            mam_id: crypto.randomUUID(),
+            timestamp: "2026-07-01T10:00:00.000Z",
+          },
+          "live",
+        )!,
+      ),
+    ];
+    const timeline = buildChannelTimelineFromMamResults({
+      session,
+      channelIsForum: false,
+      mamResults: [
+        roomMessageFromArchived({
+          ...baseArchivedRoom,
+          body: undefined,
+          shared_files: [file],
+          mam_id: "archive-uid-7",
+          stanza_id: "archive-uid-7",
+          stanza_id_by: "room@conf.example.com",
+          timestamp: "2026-07-01T10:00:01.000Z",
+        })!,
+      ],
+      existing,
+    });
+    expect(timeline).toHaveLength(1);
+    expect(timeline[0]!.id).toBe("archive-uid-7");
+  });
+
+  test("a body-less file message with a different attachment still appends", () => {
+    const existing = [
+      mapLiveRoomMessageToTimeline(
+        session,
+        roomMessageFromArchived(
+          {
+            ...baseArchivedRoom,
+            body: undefined,
+            shared_files: [file],
+            mam_id: crypto.randomUUID(),
+            timestamp: "2026-07-01T10:00:00.000Z",
+          },
+          "live",
+        )!,
+      ),
+    ];
+    const timeline = buildChannelTimelineFromMamResults({
+      session,
+      channelIsForum: false,
+      mamResults: [
+        roomMessageFromArchived({
+          ...baseArchivedRoom,
+          body: undefined,
+          shared_files: [{ url: "https://files.example.com/other.png", disposition: "inline" }],
+          mam_id: "archive-uid-8",
+          stanza_id: "archive-uid-8",
+          stanza_id_by: "room@conf.example.com",
+          timestamp: "2026-07-01T10:00:01.000Z",
+        })!,
+      ],
+      existing,
+    });
+    expect(timeline).toHaveLength(2);
+  });
+});

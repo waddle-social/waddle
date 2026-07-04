@@ -441,12 +441,14 @@ export function roomMessageFromArchived(
   const roomPrimaryId = message.id ?? stampedByRoom ?? message.mam_id;
   const roomWireIds = [message.id, message.origin_id, stampedByRoom]
     .filter((value): value is string => !!value && value !== roomPrimaryId);
-  // #1182: on the live path `mam_id` is fabricated by the dispatcher, so a
-  // stanza with no wire identity at all ends up keyed on a random UUID that
-  // the MAM copy can never match. Flag it for content-based reconciliation
-  // and don't let the fabricated UUID masquerade as an archive UID.
+  // #1182: on the live path `mam_id` is fabricated by the dispatcher
+  // (`message.id ?? randomUUID`), so a stanza with no wire identity at all
+  // ends up keyed on a random UUID that the MAM copy can never match. Flag
+  // it for content-based reconciliation and don't let the fabricated UUID
+  // masquerade as an archive UID. `!message.id` is essential: a client-id-
+  // only stanza also satisfies `primary === mam_id` but has a real identity.
   const synthesizedPrimary =
-    source === "live" && roomPrimaryId === message.mam_id && roomWireIds.length === 0;
+    source === "live" && !message.id && roomPrimaryId === message.mam_id && roomWireIds.length === 0;
   if (activeRetractionTarget) {
     return {
       id: roomPrimaryId,
@@ -677,8 +679,9 @@ export function dmMessageFromArchived(
   // #1182: see `roomMessageFromArchived` — a live stanza with no wire
   // identity is keyed on a dispatcher-fabricated UUID; flag it for
   // content-based reconciliation instead of claiming an archive UID.
+  // `!message.id` is essential (client-id-only also has primary === mam_id).
   const synthesizedPrimary =
-    source === "live" && dmPrimaryId === message.mam_id && dmWireIds.length === 0;
+    source === "live" && !message.id && dmPrimaryId === message.mam_id && dmWireIds.length === 0;
   const { linkPreviews: associatedLinkPreviews, sharedFiles: associatedSharedFiles } =
     associateDirectVideoPreviews(
       linkPreviews.map((preview) => linkPreviewFromWasm(preview, decodeOptions)),

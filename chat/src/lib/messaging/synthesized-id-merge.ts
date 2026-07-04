@@ -36,19 +36,31 @@ function withinMatchWindow(a: TimelineMessage, b: TimelineMessage): boolean {
 }
 
 /**
+ * The comparable content of a row: its body, or — for body-less file
+ * messages — its attachment URLs. Empty for rows with neither (e.g.
+ * retraction tombstones), which therefore never content-match.
+ */
+function contentKey(message: TimelineMessage): string {
+  if (message.body) return message.body;
+  const urls = (message.sharedFiles ?? []).map((file) => file.url);
+  return urls.length ? `files:${urls.join("\n")}` : "";
+}
+
+/**
  * Finds the row an identity-less arrival reconciles into: same author,
- * same body, timestamps within the match window — and exactly one side
+ * same content, timestamps within the match window — and exactly one side
  * synthesized, so two genuinely distinct id-less messages with equal
- * bodies can never collapse into each other.
+ * content can never collapse into each other.
  */
 export function findSynthesizedIdMergeTarget(
   candidates: readonly TimelineMessage[],
   incoming: TimelineMessage,
 ): TimelineMessage | undefined {
-  if (!incoming.body) return undefined;
+  const incomingKey = contentKey(incoming);
+  if (!incomingKey) return undefined;
   return candidates.find((existing) =>
     !existing.synthesizedId !== !incoming.synthesizedId
-    && existing.body === incoming.body
+    && contentKey(existing) === incomingKey
     && sameAuthor(existing, incoming)
     && withinMatchWindow(existing, incoming)
   );
