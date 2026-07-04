@@ -693,12 +693,106 @@ fn runtime_resume_after_fresh_sm_session_reports_only_current_session_inbound() 
 }
 
 #[test]
+fn runtime_rejects_duplicate_enabled_on_live_sm_session() {
+    // A stray/duplicate <enabled/> mid-session must be a protocol
+    // violation (mirroring unexpected <resumed/>), NOT a silent
+    // re-establish: re-running the XEP-0198 §5 counter reset on a live
+    // session would drive the client's next <a h/> backwards on the
+    // wire (issue #1181 adversarial review).
+    let mut runtime = XmppRuntime::new(config()).unwrap();
+    drive_to_authenticated_stream(&mut runtime);
+    let bind_events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            post_auth_features_with_sm(),
+        )))
+        .unwrap();
+    let bind_id = bind_events
+        .iter()
+        .find_map(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::ResourceBindingRequested(request)) => {
+                Some(request.stanza_id.clone())
+            }
+            _ => None,
+        })
+        .unwrap();
+    runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            bind_result(&bind_id),
+        )))
+        .unwrap();
+    runtime
+        .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
+            SmState::build_enable(true),
+        )))
+        .unwrap();
+    let enabled = Element::builder("enabled", crate::stream_management::NS_SM)
+        .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "true")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "sm-1")
+        .build();
+    runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            enabled.clone(),
+        )))
+        .unwrap();
+    for id in ["live-1", "live-2", "live-3"] {
+        runtime
+            .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+                Element::builder("message", crate::NS_CLIENT)
+                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+                    .attr(minidom::rxml::xml_ncname!("type").to_owned(), "chat")
+                    .build(),
+            )))
+            .unwrap();
+    }
+
+    let duplicate_events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            enabled,
+        )))
+        .unwrap();
+
+    assert!(
+        duplicate_events.iter().any(|event| matches!(
+            event,
+            ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                TransportMessage::Element(element)
+            )) if element.name() == "error"
+                && element
+                    .get_child("bad-request", "urn:ietf:params:xml:ns:xmpp-streams")
+                    .is_some()
+        )),
+        "duplicate <enabled/> on a live SM session must be answered with a \
+         stream error, not silently re-establish the session"
+    );
+}
+
+#[test]
 fn runtime_resume_h_stays_consistent_across_repeated_resume_cycles() {
     // Issue #1181 conformance cycle: enable → receive → detach → resume →
     // receive → detach → resume. Each <resume/> h must equal exactly the
     // stanzas received across the SAME SM session (successful resumes
     // continue the session; the counter carries forward, never inflates).
     let mut runtime = XmppRuntime::new(config()).unwrap();
+    drive_to_authenticated_stream(&mut runtime);
+    let bind_events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            post_auth_features_with_sm(),
+        )))
+        .unwrap();
+    let bind_id = bind_events
+        .iter()
+        .find_map(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::ResourceBindingRequested(request)) => {
+                Some(request.stanza_id.clone())
+            }
+            _ => None,
+        })
+        .unwrap();
+    runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            bind_result(&bind_id),
+        )))
+        .unwrap();
     runtime
         .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
             SmState::build_enable(true),
