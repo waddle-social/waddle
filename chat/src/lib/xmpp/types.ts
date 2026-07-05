@@ -372,6 +372,9 @@ export interface ReactionEvent {
   authorRealJid?: string;
   messageId: string;
   emojis: string[];
+  /** RFC 3339 instant the reaction stanza was emitted (delay stamp on
+   * SM/MAM replays). Absent on live undelayed stanzas. */
+  occurredAt?: string;
 }
 
 export interface DmConversation {
@@ -416,6 +419,9 @@ export interface DmReactionEvent {
   reactorJid: string;
   messageId: string;
   emojis: string[];
+  /** RFC 3339 instant the reaction stanza was emitted (delay stamp on
+   * SM/MAM replays). Absent on live undelayed stanzas. */
+  occurredAt?: string;
 }
 
 export interface PresenceUpdateEvent {

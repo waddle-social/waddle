@@ -16,6 +16,7 @@ import {
 } from "@/channels/timeline";
 import { compareTimelineMessages } from "@/lib/timeline-timestamps";
 import { assignCorrectionFields, type CorrectionPayload } from "@/lib/messaging/correction";
+import { isStaleReactionUpdate } from "@/lib/messaging/reactions";
 import { retractTimelineMessage } from "@/lib/messaging/retraction";
 import { mergeRetractionTombstone } from "@/lib/messaging/timeline-insert";
 import { adoptArchiveIdentity, findSynthesizedIdMergeTarget } from "@/lib/messaging/synthesized-id-merge";
@@ -255,7 +256,7 @@ export function buildChannelTimelineFromMamResults(params: {
 }): TimelineMessage[] {
   const { session, channelIsForum, mamResults, existing = [], options = {} } = params;
   const regularMessages: LiveRoomMessage[] = [];
-  const reactionUpdates: { targetId: string; nick: string; senderId: string; emojis: string[] }[] = [];
+  const reactionUpdates: { targetId: string; nick: string; senderId: string; emojis: string[]; occurredAt?: string }[] = [];
   const retractionUpdates: {
     targetId: string;
     retractionSender: { authorJid: string; authorRealJid?: string };
@@ -275,6 +276,7 @@ export function buildChannelTimelineFromMamResults(params: {
         nick: msg.nick,
         senderId: msg._reactionSenderId ?? `${msg.roomJid}/${msg.nick}`,
         emojis: msg._reactionEmojis,
+        ...(msg.createdAt ? { occurredAt: msg.createdAt } : {}),
       });
     } else if (msg.retractsId) {
       if (msg.moderationTargetId && !isMucServiceModeration(msg)) continue;
@@ -404,6 +406,9 @@ export function buildChannelTimelineFromMamResults(params: {
   for (const update of reactionUpdates) {
     const target = timeline.find((message) => message.reactionTargetId === update.targetId);
     if (!target) continue;
+    // C5: XEP-0444 recency — an archived reaction older than one
+    // already applied for the same sender must not clobber it.
+    if (isStaleReactionUpdate(target, update.nick, update.occurredAt)) continue;
     const state = channelReactionState(target, update);
     if (state) {
       target.reactionSenders = state.reactionSenders;
@@ -411,6 +416,9 @@ export function buildChannelTimelineFromMamResults(params: {
     } else {
       delete target.reactionSenders;
       delete target.reactions;
+    }
+    if (update.occurredAt) {
+      target.reactionTimes = { ...(target.reactionTimes ?? {}), [update.nick]: update.occurredAt };
     }
   }
 

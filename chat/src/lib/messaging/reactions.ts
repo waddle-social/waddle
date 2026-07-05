@@ -17,6 +17,39 @@ export interface ReactionEvent {
   emojis: string[];
   /** Channel: MUC occupant JID; DM: same as `nick`. */
   senderId: string;
+  /** RFC 3339 instant the reaction was emitted (delay stamp for SM/MAM
+   * replays). Absent on a live undelayed stanza — those always apply. */
+  occurredAt?: string;
+}
+
+/**
+ * XEP-0444 Business Rules recency check: a delayed reaction SHOULD be
+ * accepted only if no NEWER reaction from the same sender was already
+ * accepted. `reactionTimes` on the row records the last-applied instant
+ * per sender nick (nicks are the stable per-conversation sender key on
+ * both the channel and DM paths).
+ */
+export function isStaleReactionUpdate(
+  target: TimelineMessage,
+  senderNick: string,
+  occurredAt: string | undefined,
+): boolean {
+  if (!occurredAt) return false;
+  const applied = target.reactionTimes?.[senderNick];
+  if (!applied) return false;
+  const appliedMs = Date.parse(applied);
+  const incomingMs = Date.parse(occurredAt);
+  return Number.isFinite(appliedMs) && Number.isFinite(incomingMs) && appliedMs > incomingMs;
+}
+
+/** Immutably stamp the sender's last-applied reaction instant on the row. */
+function withReactionTime(
+  row: TimelineMessage,
+  senderNick: string,
+  occurredAt: string | undefined,
+): TimelineMessage {
+  if (!occurredAt) return row;
+  return { ...row, reactionTimes: { ...(row.reactionTimes ?? {}), [senderNick]: occurredAt } };
 }
 
 export interface ReactionPolicy {
@@ -38,7 +71,11 @@ export function applyReactionUpdate(
 ): TimelineMessage[] | null {
   const index = policy.findTargetIndex(messages, event.targetId);
   if (index < 0) return null;
+  const target = messages[index]!;
+  // C5: reject a delayed reaction that is older than one already
+  // applied for the same sender (XEP-0444 Business Rules).
+  if (isStaleReactionUpdate(target, event.nick, event.occurredAt)) return null;
   const next = messages.slice();
-  next[index] = policy.reactedRow(messages[index]!, event);
+  next[index] = withReactionTime(policy.reactedRow(target, event), event.nick, event.occurredAt);
   return next;
 }

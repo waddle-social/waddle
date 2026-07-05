@@ -11,6 +11,7 @@ import {
 } from "@/lib/message-ids";
 import { compareTimelineMessages } from "@/lib/timeline-timestamps";
 import { assignCorrectionFields, type CorrectionPayload } from "@/lib/messaging/correction";
+import { isStaleReactionUpdate } from "@/lib/messaging/reactions";
 import { retractTimelineMessage } from "@/lib/messaging/retraction";
 import { type ArchiveMergeHooks, mergeRetractionTombstone } from "@/lib/messaging/timeline-insert";
 import { adoptArchiveIdentity, findSynthesizedIdMergeTarget } from "@/lib/messaging/synthesized-id-merge";
@@ -155,7 +156,7 @@ export function buildDmTimelineFromMamResults(params: {
 }): TimelineMessage[] {
   const { session, mamResults, existing = [] } = params;
   const regular: LiveDmMessage[] = [];
-  const reactionUpdates: { targetId: string; nick: string; emojis: string[] }[] = [];
+  const reactionUpdates: { targetId: string; nick: string; emojis: string[]; occurredAt?: string }[] = [];
   const retractionUpdates: { targetId: string; fromJid: string }[] = [];
   const correctionUpdates: {
     targetId: string;
@@ -164,7 +165,12 @@ export function buildDmTimelineFromMamResults(params: {
   }[] = [];
   for (const msg of mamResults) {
     if (msg._reactionTarget && msg._reactionEmojis) {
-      reactionUpdates.push({ targetId: msg._reactionTarget, nick: msg.nick, emojis: msg._reactionEmojis });
+      reactionUpdates.push({
+        targetId: msg._reactionTarget,
+        nick: msg.nick,
+        emojis: msg._reactionEmojis,
+        ...(msg.createdAt ? { occurredAt: msg.createdAt } : {}),
+      });
     } else if (msg.retractsId) {
       retractionUpdates.push({ targetId: msg.retractsId, fromJid: msg.fromJid });
     } else if (msg.replacesId) {
@@ -243,9 +249,15 @@ export function buildDmTimelineFromMamResults(params: {
   for (const update of reactionUpdates) {
     const target = findMessageById(timeline, update.targetId);
     if (!target) continue;
+    // C5: XEP-0444 recency — an archived reaction older than one
+    // already applied for the same sender must not clobber it.
+    if (isStaleReactionUpdate(target, update.nick, update.occurredAt)) continue;
     const reactions = replacedNickReactions(target.reactions, update.nick, update.emojis);
     if (reactions) target.reactions = reactions;
     else delete target.reactions;
+    if (update.occurredAt) {
+      target.reactionTimes = { ...(target.reactionTimes ?? {}), [update.nick]: update.occurredAt };
+    }
   }
   return timeline.sort(compareTimelineMessages);
 }

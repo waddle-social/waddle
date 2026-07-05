@@ -247,6 +247,9 @@ export interface TimelineMessage {
   reactions?: Record<string, string[]>;
   /** Archived reaction sender identities: emoji -> sender id -> display nick. */
   reactionSenders?: Record<string, Record<string, string>>;
+  /** XEP-0444 recency bookkeeping: sender nick -> RFC 3339 instant of the
+   * last applied reaction, so an older delayed replay can't clobber it. */
+  reactionTimes?: Record<string, string>;
   /** Users who have seen this message (XEP-0333). */
   readBy?: string[];
   /** Whether this received message requested XEP-0333 displayed markers. */

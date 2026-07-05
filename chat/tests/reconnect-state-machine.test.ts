@@ -29,7 +29,17 @@ type PrivateState = {
   connected: boolean;
   wireEvents: (xmpp: StubXmpp) => void;
   reconnect: { clearTimer: () => void };
+  handleDisconnected: (xmpp: unknown, error?: Error) => void;
+  handleMessage: (message: unknown) => void;
+  connectTimeoutMs: number;
+  doConnect: () => Promise<void>;
+  loadModule: () => Promise<unknown>;
+  runSessionReady: (xmpp: unknown, lifecycle: { type: "fresh" | "resumed" }) => Promise<void>;
+  runReconnectCatchup: (...args: unknown[]) => Promise<void>;
+  catchup: { onSessionStarted: () => Array<{ kind: "dm" | "room"; key: string }> };
 };
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function session(): WaddleSession {
   return {
@@ -132,6 +142,219 @@ describe("room-scoped queueing keeps the global banner honest (#1164 slice 4)", 
 
     expect(result?.state).toBe("queued");
     expect(statuses).toHaveLength(0);
+  });
+});
+
+describe("connect budget measures to session-ready, not catch-up completion (C1)", () => {
+  test("a reconnect catch-up outliving connectTimeoutMs does not tear down the established session", async () => {
+    const client = new BrowserXmppClient(session());
+    const state = client as unknown as PrivateState;
+    const statuses: XmppStatusSnapshot[] = [];
+    client.setStatusHandler((snapshot) => statuses.push(snapshot));
+    const bodies: string[] = [];
+    client.setDirectMessageHandler((message) => bodies.push(message.body));
+
+    state.connectTimeoutMs = 20;
+    // Catch-up (behind the resume barrier) outlives the connect budget.
+    state.runReconnectCatchup = () => sleep(60);
+    state.catchup.onSessionStarted = () => [{ kind: "dm", key: "bob@example.com" }];
+    let stalledHandleDisconnects = 0;
+    const handle = { disconnect: async () => { stalledHandleDisconnects += 1; } };
+    state.doConnect = async () => {
+      state.xmpp = handle;
+      void state.runSessionReady(handle, { type: "fresh" });
+    };
+
+    let settled: "resolved" | "rejected" | null = null;
+    const connected = client.connect().then(
+      () => { settled = "resolved"; },
+      () => { settled = "rejected"; },
+    );
+
+    // A live DM arriving mid-barrier is buffered for the drain.
+    await sleep(5);
+    state.handleMessage({
+      id: "dm-1",
+      from: "bob@example.com/phone",
+      to: "alice@example.com/desktop",
+      message_type: "chat",
+      body: "hi",
+      timestamp: "2026-07-05T10:00:00.000Z",
+      reaction_emojis: [],
+      shared_files: [],
+      is_muc: false,
+    });
+
+    // Wait past the connect budget while the barrier is still open.
+    await sleep(40);
+    expect(state.xmpp).toBe(handle);
+    expect(stalledHandleDisconnects).toBe(0);
+    expect(statuses.some((snapshot) => snapshot.state === "reconnecting")).toBe(false);
+
+    await connected;
+    expect(settled).toBe("resolved");
+    expect(state.connected).toBe(true);
+    expect(bodies).toEqual(["hi"]);
+    state.reconnect.clearTimer();
+  });
+});
+
+describe("exhaustion recovery (C2)", () => {
+  test("an explicit connect() after exhaustion restores a fresh retry budget", async () => {
+    const { client, state, stub, scheduled, fireDisconnected } = createHarness();
+    for (let i = 0; i < 11; i += 1) {
+      state.reconnect.clearTimer();
+      state.xmpp = stub;
+      state.connected = true;
+      fireDisconnected();
+    }
+    expect(scheduled).toHaveLength(10);
+
+    // User-triggered connect: the attempt itself fails, but the budget
+    // is fresh — the next disconnect schedules attempt 1 again instead
+    // of re-exhausting instantly.
+    state.doConnect = async () => { throw new Error("still down"); };
+    await client.connect().catch(() => undefined);
+    state.reconnect.clearTimer();
+    state.xmpp = stub;
+    state.connected = true;
+    fireDisconnected();
+
+    expect(scheduled).toHaveLength(11);
+    expect(scheduled.at(-1)?.attempt).toBe(1);
+    state.reconnect.clearTimer();
+  });
+
+  test("exhaustion while the browser is offline reports offline, not terminal error", () => {
+    const originalNavigator = globalThis.navigator;
+    Object.defineProperty(globalThis, "navigator", {
+      value: { onLine: false },
+      configurable: true,
+    });
+    try {
+      const { state, stub, statuses, fireDisconnected } = createHarness();
+      for (let i = 0; i < 11; i += 1) {
+        state.reconnect.clearTimer();
+        state.xmpp = stub;
+        state.connected = true;
+        fireDisconnected();
+      }
+      expect(statuses.at(-1)?.state).toBe("offline");
+      state.reconnect.clearTimer();
+    } finally {
+      Object.defineProperty(globalThis, "navigator", {
+        value: originalNavigator,
+        configurable: true,
+      });
+    }
+  });
+
+  test("a window online event after exhaustion triggers a fresh connect", () => {
+    const listeners: Record<string, Array<() => void>> = {};
+    const globals = globalThis as { window?: unknown };
+    const originalWindow = globals.window;
+    globals.window = {
+      addEventListener: (name: string, cb: () => void) => { (listeners[name] ??= []).push(cb); },
+      removeEventListener: (name: string, cb: () => void) => {
+        listeners[name] = (listeners[name] ?? []).filter((l) => l !== cb);
+      },
+    };
+    try {
+      const { client, state, stub, fireDisconnected } = createHarness();
+      for (let i = 0; i < 11; i += 1) {
+        state.reconnect.clearTimer();
+        state.xmpp = stub;
+        state.connected = true;
+        fireDisconnected();
+      }
+      let connects = 0;
+      (client as unknown as { connect: () => Promise<void> }).connect = async () => { connects += 1; };
+      for (const cb of listeners.online ?? []) cb();
+      expect(connects).toBe(1);
+      state.reconnect.clearTimer();
+    } finally {
+      if (originalWindow === undefined) delete globals.window;
+      else globals.window = originalWindow;
+    }
+  });
+});
+
+describe("stalled WASM load cannot double-connect (C3)", () => {
+  test("a module load resolving after timeout + second connect yields exactly one live handle", async () => {
+    const client = new BrowserXmppClient(session());
+    const state = client as unknown as PrivateState;
+    client.setStatusHandler(() => {});
+
+    class StubConfig {
+      constructor(..._args: unknown[]) {}
+    }
+    const created: Array<{ connects: number; disconnects: number }> = [];
+    class StubClient {
+      connects = 0;
+      disconnects = 0;
+      constructor(..._args: unknown[]) { created.push(this); }
+      async connect() { this.connects += 1; }
+      async disconnect() { this.disconnects += 1; }
+    }
+    const stubModule = { WaddleConfig: StubConfig, WaddleClient: StubClient };
+    let releaseFirstLoad!: () => void;
+    const firstLoad = new Promise((resolve) => { releaseFirstLoad = () => resolve(stubModule); });
+    let loads = 0;
+    state.loadModule = () => {
+      loads += 1;
+      return (loads === 1 ? firstLoad : Promise.resolve(stubModule)) as Promise<never>;
+    };
+    state.connectTimeoutMs = 30;
+
+    // Connect #1: the module load stalls past the connect budget.
+    const first = client.connect();
+    first.catch(() => undefined);
+    await sleep(45);
+    state.reconnect.clearTimer();
+
+    // Connect #2 starts while #1's module load is still pending.
+    const second = client.connect();
+    second.catch(() => undefined);
+    await sleep(5);
+    releaseFirstLoad();
+    await sleep(5);
+
+    // Exactly one handle was created and connected; the stale
+    // continuation from connect #1 aborted without creating a zombie.
+    expect(created).toHaveLength(1);
+    expect(created[0]!.connects).toBe(1);
+    expect(state.xmpp).toBe(created[0]);
+
+    await second.catch(() => undefined);
+    state.reconnect.clearTimer();
+  });
+});
+
+describe("terminal classification requires the structured stream-error (C4)", () => {
+  test("a free-text disconnect reason containing 'conflict' stays recoverable", () => {
+    const { state, stub, statuses, scheduled } = createHarness();
+
+    state.handleDisconnected(stub, new Error("write conflict on shard"));
+
+    expect(statuses.at(-1)?.state).toBe("reconnecting");
+    expect(scheduled).toHaveLength(1);
+    state.reconnect.clearTimer();
+  });
+
+  test("the WASM driver's SASL-rejection string still classifies terminal via set_on_error", () => {
+    const { state, statuses, scheduled, fireError, fireDisconnected } = createHarness();
+
+    // The WASM core reports connect-time SASL failure through
+    // `set_on_error` with the ClientError display string — not through
+    // the disconnect callback (which carries no error at all).
+    (fireError as unknown as (payload: unknown) => void)(
+      "server rejected SASL authentication with condition `not-authorized`",
+    );
+    fireDisconnected();
+
+    expect(statuses.at(-1)?.state).toBe("error");
+    expect(scheduled).toHaveLength(0);
+    state.reconnect.clearTimer();
   });
 });
 

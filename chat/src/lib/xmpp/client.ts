@@ -524,16 +524,28 @@ export class BrowserXmppClient {
     });
     this.reconnect = new ReconnectScheduler({
       isDestroying: () => this.destroying,
-      connect: () => this.connect(),
+      connect: () => this.connectFromScheduler(),
       onScheduled: (info) => this.events.emitSafe("reconnectScheduled", info),
       // #1164: the retry budget ran out — an endless "reconnecting"
-      // banner would be dishonest. Terminal error state; the user can
-      // retry via reload / sign-in (`connect()` resets the budget path
-      // through session-ready's `resetAttempts`).
-      onExhausted: () => this.emitStatus({
-        state: "error",
-        detail: "We couldn't reconnect after several attempts. Check your connection, then reload to try again.",
-      }),
+      // banner would be dishonest. An explicit `connect()` restores
+      // the budget; a network-return `online` event triggers one.
+      onExhausted: () => {
+        this.armOnlineRecovery();
+        if (browserOffline()) {
+          // C2: the truthful state is offline, not a terminal error —
+          // and the armed `online` listener retries when the network
+          // returns instead of demanding a reload.
+          this.emitStatus({
+            state: "offline",
+            detail: "You're offline — reconnecting when the network returns.",
+          });
+          return;
+        }
+        this.emitStatus({
+          state: "error",
+          detail: "We couldn't reconnect after several attempts. Check your connection, then reload to try again.",
+        });
+      },
     });
     this.retainedJoinedRoomJids = new Set(this.resumePersistence.loadJoinedRooms());
   }
@@ -685,6 +697,28 @@ export class BrowserXmppClient {
     this.reconnect.clearTimer();
   }
 
+  // C2: after retry exhaustion nothing would ever try again when the
+  // network returns. Armed from `onExhausted`; a fresh `connect()`
+  // (which the listener fires, with a full budget) disarms it, as does
+  // the `disconnect()` logout path.
+  private onlineRecoveryListener: (() => void) | null = null;
+
+  private armOnlineRecovery(): void {
+    if (typeof window === "undefined" || this.onlineRecoveryListener) return;
+    const listener = () => {
+      this.disarmOnlineRecovery();
+      void this.connect().catch(() => undefined);
+    };
+    this.onlineRecoveryListener = listener;
+    window.addEventListener("online", listener);
+  }
+
+  private disarmOnlineRecovery(): void {
+    if (typeof window === "undefined" || !this.onlineRecoveryListener) return;
+    window.removeEventListener("online", this.onlineRecoveryListener);
+    this.onlineRecoveryListener = null;
+  }
+
   private clearResumeState() {
     this.resume.clearAll();
     // Only called from the `destroying` path — i.e. intentional
@@ -713,8 +747,25 @@ export class BrowserXmppClient {
     try { await xmpp.send_raw_iq(`<iq type="set" id="${crypto.randomUUID()}"><enable xmlns="urn:xmpp:carbons:2"/></iq>`); } catch {}
   }
 
+  /** Seam for tests: instance-level indirection over the module-level
+   * WASM loader so a stalled load can be simulated. */
+  private loadModule: () => Promise<WasmModule> = loadWasmModule;
+  /** C3 (#1164 follow-up): generation token for connect attempts. Bumped
+   * when a new `doConnect` starts and when the connect timeout tears an
+   * attempt down, so a continuation resuming after a stalled `await`
+   * (e.g. the WASM module load) can detect it was superseded and abort
+   * WITHOUT creating a second live handle that would bind the same
+   * resource and trigger a self-inflicted terminal `conflict`. */
+  private connectEpoch = 0;
+
   private async doConnect(): Promise<void> {
-    const mod = await loadWasmModule();
+    const epoch = ++this.connectEpoch;
+    const mod = await this.loadModule();
+    // Stale continuation: a newer connect attempt started (or the
+    // timeout tore this one down) while the module load was pending.
+    // Abort before creating a handle — the current attempt owns the
+    // connection now.
+    if (epoch !== this.connectEpoch || this.destroying) return;
     const config = new mod.WaddleConfig(
       this.session.xmpp_websocket_url,
       this.session.jid,
@@ -741,23 +792,53 @@ export class BrowserXmppClient {
   private connectTimeoutMs = 15_000;
 
   async connect(): Promise<void> {
+    // An explicit connect is a fresh start: restore the retry budget
+    // (C2 — otherwise a post-exhaustion user-triggered connect that
+    // fails re-exhausts instantly) alongside the terminal-error
+    // classification cleared below. Scheduler-driven retries go through
+    // `connectFromScheduler` and do NOT reset the budget.
+    this.reconnect.resetAttempts();
+    return this.connectInternal();
+  }
+
+  /** Reconnect-scheduler entry point: same connect machinery, but the
+   * retry budget is left alone so the attempt cap can exhaust. */
+  private connectFromScheduler(): Promise<void> {
+    return this.connectInternal();
+  }
+
+  private async connectInternal(): Promise<void> {
     if (this.xmpp && this.connected) return;
     if (this.connectPromise) return this.connectPromise;
     this.destroying = false;
     // An explicit connect is a fresh start: drop any terminal-error
     // classification from the previous session (#1164).
     this.terminalDisconnectDetail = null;
+    this.disarmOnlineRecovery();
     this.clearReconnectTimer();
     this.connectPromise = withSpan(
       "xmpp.connect",
       { "waddle.xmpp.transport": "websocket" },
       () => new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(() => {
+          // C1: the connect budget measures to session-ready, not to
+          // catch-up completion. `connect()`'s promise still resolves
+          // only after the resume barrier (callers rely on "connected
+          // AND caught up"), but once the session is established a
+          // slow MAM catch-up must not be treated as a stalled
+          // connect — tearing it down would drop the live handle,
+          // lose the buffered resume traffic, and livelock
+          // structurally-slow catch-ups into terminal error.
+          if (this.connected && this.xmpp) return;
           // #1164: a stalled connect must not strand the client in
           // limbo. Tear the half-open handle down (so a late
           // session-ready from it can't land — `isCurrentXmpp` guards
           // key off `this.xmpp`), tell the UI we're still trying, and
           // hand the retry to the backoff scheduler.
+          // C3: invalidate any continuation of this attempt still
+          // stalled on an `await` (module load) so it can't race a
+          // newer attempt into a second live handle.
+          this.connectEpoch += 1;
           this.connectPromise = null;
           this.onceConnected = null;
           this.onceConnectFailed = null;
@@ -793,6 +874,7 @@ export class BrowserXmppClient {
 
   async disconnect() {
     this.destroying = true;
+    this.disarmOnlineRecovery();
     this.clearReconnectTimer();
     this.clearResumeState();
     const xmpp = this.xmpp;
@@ -2124,11 +2206,15 @@ export class BrowserXmppClient {
     // #1164: a terminal failure (auth rejection, resource conflict)
     // means retrying is dishonest — surface `state: "error"` so the
     // connection notice tells the user to sign in again, and do NOT
-    // schedule a reconnect. The classification usually arrives via
-    // the preceding stream-error callback; connect-time failures may
-    // only carry it in the disconnect error's message.
-    const terminalDetail = this.terminalDisconnectDetail
-      ?? terminalDisconnectDetail(streamErrorConditionFromText(error?.message));
+    // schedule a reconnect. The classification comes exclusively from
+    // the preceding `set_on_error` callback (the WASM core reports
+    // stream errors structured, and connect-time SASL failures as the
+    // driver's ClientError display string — both land there BEFORE the
+    // disconnect callback, which itself carries no error). C4: never
+    // word-scan the disconnect error's free-text message — a proxied
+    // close reason like "409 Conflict" must not permanently kill
+    // reconnection.
+    const terminalDetail = this.terminalDisconnectDetail;
     if (terminalDetail) {
       this.terminalDisconnectDetail = null;
       this.emitStatus({ state: "error", detail: terminalDetail });
@@ -2205,7 +2291,7 @@ export class BrowserXmppClient {
    */
   private dispatchLiveMessage(message: InboundWasmMessage) {
     if (message.displayed_marker_id) { if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").split("/")[1] ?? "unknown"; this.events.emit("displayed", { roomJid, nick, messageId: message.displayed_marker_id }); } else this.events.emit("dmDisplayed", { peerJid: barePeerJid(message.from ?? message.to ?? ""), messageId: message.displayed_marker_id }); return; }
-    if (message.reaction_target_id) { if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").split("/")[1] ?? "unknown"; this.events.emit("reaction", { roomJid, nick, messageId: message.reaction_target_id, emojis: message.reaction_emojis }); } else { const fromBare = barePeerJid(message.from ?? ""); const toBare = barePeerJid(message.to ?? ""); const selfBare = barePeerJid(this.session.jid); const peerJid = fromBare === selfBare ? toBare : fromBare; const reactorJid = fromBare || selfBare; if (peerJid && reactorJid) this.events.emit("dmReaction", { peerJid, reactorJid, messageId: message.reaction_target_id, emojis: message.reaction_emojis }); } return; }
+    if (message.reaction_target_id) { const occurredAt = message.timestamp ? { occurredAt: message.timestamp } : {}; if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").split("/")[1] ?? "unknown"; this.events.emit("reaction", { roomJid, nick, messageId: message.reaction_target_id, emojis: message.reaction_emojis, ...occurredAt }); } else { const fromBare = barePeerJid(message.from ?? ""); const toBare = barePeerJid(message.to ?? ""); const selfBare = barePeerJid(this.session.jid); const peerJid = fromBare === selfBare ? toBare : fromBare; const reactorJid = fromBare || selfBare; if (peerJid && reactorJid) this.events.emit("dmReaction", { peerJid, reactorJid, messageId: message.reaction_target_id, emojis: message.reaction_emojis, ...occurredAt }); } return; }
     this.dispatchLiveBodyMessage(message);
   }
 

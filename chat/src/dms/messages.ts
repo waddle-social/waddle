@@ -411,7 +411,7 @@ export function useDirectMessages(
     // conversation key. For self-sent carbon-forwarded reactions
     // `peerJid` is normalized to the recipient, so deriving the nick
     // from `peerJid` would wrongly credit the partner.
-    applyReaction(event.messageId, peerNameFromJid(event.reactorJid), event.emojis);
+    applyReaction(event.messageId, peerNameFromJid(event.reactorJid), event.emojis, event.occurredAt);
   }
 
   watch(scrollDirection, () => {

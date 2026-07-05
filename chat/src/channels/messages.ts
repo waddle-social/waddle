@@ -252,6 +252,7 @@ export function useChannelMessages(
           event.nick,
           event.emojis,
           event.authorRealJid ?? `${event.roomJid}/${event.nick}`,
+          event.occurredAt,
         );
       });
       // #414: route pin/unpin system events into the pinned-messages
