@@ -502,6 +502,65 @@ async fn db_storage_lists_only_unoutboxed_unclaimed_archived_rows() {
 }
 
 #[tokio::test]
+async fn db_storage_reclaim_excludes_already_pushed_rows_for_same_session() {
+    // Regression (issue #1122 review, P1): after a transient MAM error
+    // defers rows mid-batch and `reset_offline_flush` re-opens the CAS, the
+    // NEXT flush re-claims the same SM session. `claim_for_session` must
+    // return only the freshly-claimed (deferred) rows, never a row already
+    // pushed on this session and still awaiting its SM ack — re-pushing it
+    // would duplicate delivery and overwrite its outbound_sequence. Exercises
+    // the real SQL backend (the in-memory backend already had this property,
+    // which is why the earlier flush tests missed it).
+    let storage = DatabasePendingDeliveryStorage::open(None, QuotaPolicy::Unlimited)
+        .await
+        .expect("open in-memory storage");
+    let session = SmSessionId::new("resumed-session");
+
+    let pushed = transient_row("carol@example.com", "pushed-first");
+    let pushed_id = pushed.id.clone();
+    let deferred = transient_row("carol@example.com", "deferred-second");
+    let deferred_id = deferred.id.clone();
+    assert_eq!(storage.insert(pushed).await.unwrap(), InsertOutcome::Inserted);
+    assert_eq!(
+        storage.insert(deferred).await.unwrap(),
+        InsertOutcome::Inserted
+    );
+
+    // First flush claims both rows FIFO.
+    let first = storage
+        .claim_for_session(&bare("carol@example.com"), &session)
+        .await
+        .expect("first claim");
+    assert_eq!(first.len(), 2, "both rows claimed on first flush");
+
+    // Row one is pushed (SM sequence stamped); row two is released back for
+    // retry, exactly as the transient-error batch abort does.
+    assert_eq!(storage.record_pushed_at(&pushed_id, 1).await.unwrap(), 1);
+    assert_eq!(storage.release_row(&deferred_id).await.unwrap(), 1);
+
+    // Re-flush of the SAME session must re-claim ONLY the deferred row.
+    let second = storage
+        .claim_for_session(&bare("carol@example.com"), &session)
+        .await
+        .expect("second claim");
+    assert_eq!(second.len(), 1, "only the deferred row is re-claimed");
+    assert_eq!(second[0].id, deferred_id);
+
+    // The already-pushed row keeps its outbound_sequence (not re-claimed,
+    // not cleared), so the pending SM ack still deletes exactly it.
+    let rows = storage
+        .list(&bare("carol@example.com"))
+        .await
+        .expect("list rows");
+    let pushed_row = rows
+        .iter()
+        .find(|r| r.id == pushed_id)
+        .expect("pushed row still present");
+    assert_eq!(pushed_row.outbound_sequence, Some(1));
+    assert_eq!(pushed_row.flushed_in_session.as_ref(), Some(&session));
+}
+
+#[tokio::test]
 async fn db_storage_archived_full_jid_by_round_trips_as_bare() {
     // Regression: `StanzaId.by` is a `jid::Jid`, so a future call site
     // could legitimately construct one with a resource. The
