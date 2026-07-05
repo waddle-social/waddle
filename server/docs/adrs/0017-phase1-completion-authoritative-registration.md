@@ -97,9 +97,27 @@ get-or-create/reaper split is a fast follow-up availability slice.
   mirror into an authority. Entire e2e suite stays green unchanged.
 - **Slice 1 — selection cutover.** `route_to_connection` bare-JID selection
   reads *both* tiers (`SelectRoutableResources`, then `GetResources`) from the
-  *same* authoritative actor — no DashMap selection fallback. The prior revert
-  mixed sources (tier-1 actor, tier-2 DashMap), which is why a partial `[A]`
-  never consulted tier 2.
+  *same* authoritative actor — no DashMap *fallback* for the candidate set. The
+  prior revert mixed sources (tier-1 actor, tier-2 DashMap), which is why a
+  partial `[A]` never consulted tier 2.
+
+  **Transitional DashMap-liveness intersection (council review on PR #1177).**
+  While delivery still reads the DashMap (`deliver_peer_to_full`, cut over in
+  Slice 2), each tier's actor result is intersected with DashMap membership
+  (`is_connected`). This is required to avoid a stale-extra message-loss window:
+  the best-effort, owner-gated unregister mirror can leave a resource in the
+  actor whose DashMap entry was already removed at teardown (teardown does not
+  flip the shared presence atomic, so the actor may still report it available).
+  Selecting such a stale resource and handing it to DashMap delivery would find
+  it gone and — if it were the only/top candidate — skip the offline pass,
+  silently losing or delaying the message. The intersection is a *pure
+  strengthening*, not a mixed-source fallback: since Slice 0 makes registration
+  authoritative, `DashMap ⊆ actor` for live resources, so actor-selection ∩
+  DashMap == the DashMap live set ranked by the actor — provably equal to the
+  legacy selection, no false-negative. Applying the filter *inside* each tier
+  keeps a stale high-priority extra from masking a live lower-priority resource
+  (tier-1 filtered-empty falls through to tier-2). Slice 2 retires this filter
+  when delivery moves to the actor (whose `try_deliver` evicts closed channels).
 - **Slice 2 — delivery + MUC fan-out cutover.** `deliver_peer_to_full` routes
   via `TrySendPeer` with **no DashMap send fallback**. Duplicate is impossible
   structurally (one `try_send` per recipient). Distinguish the ask-level

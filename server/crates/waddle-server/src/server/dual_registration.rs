@@ -77,6 +77,14 @@ pub(crate) async fn mirror_register(
     jid: FullJid,
     entry: ConnectionEntry,
 ) -> bool {
+    // `RegisterUserResource` replies `Result<(), UserRegistryError>`, and kameo
+    // *flattens* a `Result` reply: `ask().await` yields
+    // `Result<(), SendError<RegisterUserResource, UserRegistryError>>`, NOT a
+    // nested `Result<Result<..>, SendError>`. So `Ok(())` is the sole success
+    // and the single `Err(_)` arm already covers BOTH transport failures
+    // (mailbox-full / timeout / actor-not-running) AND a handler-returned
+    // `UserRegistryError` (busy / state-lost) as `SendError::HandlerError` —
+    // every one is a failed authoritative register that must fail the bind.
     match user_registry
         .ask(RegisterUserResource {
             jid: jid.clone(),

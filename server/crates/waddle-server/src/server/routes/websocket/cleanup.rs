@@ -467,6 +467,13 @@ pub(super) async fn cleanup_invalidated_detached_session(
         .protocol
         .resumable_sessions
         .remove(&detached.stream_id);
+    // `entry_if_owner` is a READ-ONLY ownership check — it does NOT remove the
+    // DashMap entry (unlike `unregister_if_owner`). So the branch below is the
+    // sole remover: when the replacement is not the current owner (detached
+    // session still owns the slot, or no replacement), the plain `unregister`
+    // removes the detached entry and returns it, and the mirror fires with that
+    // entry's token. The entry is therefore never removed here without a
+    // matching actor-tree mirror.
     let replacement_is_current_owner = replacement_owner.is_some_and(|owner| {
         state
             .deps

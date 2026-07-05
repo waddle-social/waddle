@@ -16,6 +16,31 @@ fn test_registry() -> ConnectionRegistry {
     ConnectionRegistry::new()
 }
 
+/// Register a resource into BOTH the DashMap `ConnectionRegistry` and the
+/// actor-authoritative `UserRegistryActor`, sharing the SAME `Arc`-backed
+/// `ConnectionEntry` exactly as the production bind path does (ADR-0017
+/// Phase 1). Bare-JID selection reads the actor tree after the Slice 1
+/// cutover, so tests that drive `route_to_connection` bare-JID delivery must
+/// mirror into the actor here — a later `update_presence` on the DashMap
+/// mutates the shared atomics, so the actor observes the same availability.
+async fn register_into_both_tiers(
+    connection_registry: &ConnectionRegistry,
+    user_registry: &kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>,
+    jid: &jid::FullJid,
+    sender: tokio::sync::mpsc::Sender<waddle_xmpp::registry::OutboundStanza>,
+) {
+    connection_registry.register_with_carbons(jid.clone(), sender, false);
+    let entry = connection_registry
+        .get_entry(jid)
+        .expect("entry just registered into the DashMap");
+    let registered =
+        crate::server::dual_registration::mirror_register(user_registry, jid.clone(), entry).await;
+    assert!(
+        registered,
+        "authoritative mirror register should confirm {jid} in the actor tree"
+    );
+}
+
 fn result_iq(id: &str) -> Iq {
     Iq::Result {
         from: None,
@@ -1447,19 +1472,21 @@ async fn route_to_connection_bare_jid_selects_highest_priority_available_resourc
     // bare-JID `to` from the sender pass (handlers/route.rs
     // emits `message.to` verbatim) lands here; without selection
     // the cutover would silently drop bare-targeted 1:1 traffic.
-    use waddle_xmpp::registry::DeliveryKind;
+    use waddle_xmpp::registry::{DeliveryKind, UserRegistryActor};
     let registry = ConnectionRegistry::new();
+    let user_registry = UserRegistryActor::spawn(UserRegistryActor::new());
     let bob_desk: jid::FullJid = "bob@example.com/desk".parse().expect("jid");
     let bob_phone: jid::FullJid = "bob@example.com/phone".parse().expect("jid");
     let bob_tablet: jid::FullJid = "bob@example.com/tablet".parse().expect("jid");
     let (desk_tx, mut desk_rx) = tokio::sync::mpsc::channel(8);
     let (phone_tx, mut phone_rx) = tokio::sync::mpsc::channel(8);
     let (tablet_tx, mut tablet_rx) = tokio::sync::mpsc::channel(8);
-    registry.register_with_carbons(bob_desk.clone(), desk_tx, false);
-    registry.register_with_carbons(bob_phone.clone(), phone_tx, false);
-    registry.register_with_carbons(bob_tablet.clone(), tablet_tx, false);
+    register_into_both_tiers(&registry, &user_registry, &bob_desk, desk_tx).await;
+    register_into_both_tiers(&registry, &user_registry, &bob_phone, phone_tx).await;
+    register_into_both_tiers(&registry, &user_registry, &bob_tablet, tablet_tx).await;
     // desk + phone available at priority 5 (tied); tablet at
-    // lower priority 1. Tablet must NOT receive.
+    // lower priority 1. Tablet must NOT receive. `update_presence`
+    // mutates the shared `Arc` atomics, so the actor sees these too.
     registry.update_presence(&bob_desk, true, 5);
     registry.update_presence(&bob_phone, true, 5);
     registry.update_presence(&bob_tablet, true, 1);
@@ -1469,7 +1496,11 @@ async fn route_to_connection_bare_jid_selects_highest_priority_available_resourc
         jid: "bob@example.com".parse::<jid::Jid>().expect("bare jid"),
         stanza: Box::new(Stanza::Message(msg)),
     }];
-    let _outcome = interpret(events, &Deps::registry_only(&registry)).await;
+    let _outcome = interpret(
+        events,
+        &Deps::registry_with_user_registry(&registry, &user_registry),
+    )
+    .await;
 
     let desk_q = drain_inbound(&mut desk_rx);
     let phone_q = drain_inbound(&mut phone_rx);
@@ -1505,25 +1536,194 @@ async fn route_to_connection_bare_jid_falls_back_to_connected_resources_without_
     // registered-but-not-presence-available resource is delivered
     // to that resource instead of falling through to the offline
     // headless pass.
+    use waddle_xmpp::registry::UserRegistryActor;
     let registry = ConnectionRegistry::new();
+    let user_registry = UserRegistryActor::spawn(UserRegistryActor::new());
     let bob_desk: jid::FullJid = "bob@example.com/desk".parse().expect("jid");
     let (desk_tx, mut desk_rx) = tokio::sync::mpsc::channel(8);
-    registry.register_with_carbons(bob_desk.clone(), desk_tx, false);
+    register_into_both_tiers(&registry, &user_registry, &bob_desk, desk_tx).await;
     // Registered but presence NOT made available — legacy
-    // routing still delivers to this resource.
+    // routing still delivers to this resource (tier-2 `GetResources`
+    // fallback, read from the same authoritative actor).
 
     let msg = chat_msg("alice@example.com/web", "bob@example.com", "hi");
     let events = vec![OutboundEvent::RouteToConnection {
         jid: "bob@example.com".parse::<jid::Jid>().expect("bare jid"),
         stanza: Box::new(Stanza::Message(msg)),
     }];
-    let _outcome = interpret(events, &Deps::registry_only(&registry)).await;
+    let _outcome = interpret(
+        events,
+        &Deps::registry_with_user_registry(&registry, &user_registry),
+    )
+    .await;
 
     let delivered = drain_inbound(&mut desk_rx);
     assert_eq!(
         delivered.len(),
         1,
         "no presence -> still delivered to connected resource as a legacy fallback"
+    );
+}
+
+/// Slice 1 cutover proof: the candidate set is sourced from the
+/// actor-authoritative `UserActor`, NOT the DashMap. A resource present +
+/// presence-available in the DashMap but never mirrored into the
+/// `UserRegistryActor` (so `GetUser` returns `Ok(None)`) must NOT be selected —
+/// if selection still read the DashMap this would deliver. Pins that the actor
+/// gates the candidate set.
+#[tokio::test]
+async fn route_to_connection_bare_jid_ignores_resource_absent_from_actor() {
+    use waddle_xmpp::registry::UserRegistryActor;
+    let registry = ConnectionRegistry::new();
+    let user_registry = UserRegistryActor::spawn(UserRegistryActor::new());
+    let bob_desk: jid::FullJid = "bob@example.com/desk".parse().expect("jid");
+    let (desk_tx, mut desk_rx) = tokio::sync::mpsc::channel(8);
+    // DashMap ONLY — never mirrored into the actor tree.
+    registry.register_with_carbons(bob_desk.clone(), desk_tx, false);
+    registry.update_presence(&bob_desk, true, 5);
+
+    let msg = chat_msg("alice@example.com/web", "bob@example.com", "hi");
+    let events = vec![OutboundEvent::RouteToConnection {
+        jid: "bob@example.com".parse::<jid::Jid>().expect("bare jid"),
+        stanza: Box::new(Stanza::Message(msg)),
+    }];
+    let _outcome = interpret(
+        events,
+        &Deps::registry_with_user_registry(&registry, &user_registry),
+    )
+    .await;
+
+    assert!(
+        drain_inbound(&mut desk_rx).is_empty(),
+        "a DashMap-only resource (absent from the actor) must NOT be selected; \
+         the actor is the authoritative candidate source"
+    );
+}
+
+/// Slice 1 Finding-1 guard (council review on PR #1177): a *stale extra* — a
+/// resource still in the actor because the best-effort unregister mirror has
+/// not reaped it, but already removed from the DashMap at teardown — must be
+/// filtered out of selection by the DashMap liveness intersection. Otherwise
+/// the stale resource would be selected, DashMap delivery would find it gone,
+/// and a bare-JID message to that sole resource would skip the offline pass and
+/// be lost. Here it must not be delivered to the (dead) resource.
+#[tokio::test]
+async fn route_to_connection_bare_jid_filters_stale_actor_extra_absent_from_dashmap() {
+    use waddle_xmpp::registry::UserRegistryActor;
+    let registry = ConnectionRegistry::new();
+    let user_registry = UserRegistryActor::spawn(UserRegistryActor::new());
+    let bob_desk: jid::FullJid = "bob@example.com/desk".parse().expect("jid");
+    let (desk_tx, mut desk_rx) = tokio::sync::mpsc::channel(8);
+    register_into_both_tiers(&registry, &user_registry, &bob_desk, desk_tx).await;
+    registry.update_presence(&bob_desk, true, 5);
+    // Simulate a lagging unregister mirror: teardown removed the DashMap entry
+    // but the actor still holds the resource (presence atomic not flipped).
+    registry.unregister(&bob_desk);
+
+    let msg = chat_msg("alice@example.com/web", "bob@example.com", "hi");
+    let events = vec![OutboundEvent::RouteToConnection {
+        jid: "bob@example.com".parse::<jid::Jid>().expect("bare jid"),
+        stanza: Box::new(Stanza::Message(msg)),
+    }];
+    let _outcome = interpret(
+        events,
+        &Deps::registry_with_user_registry(&registry, &user_registry),
+    )
+    .await;
+
+    assert!(
+        drain_inbound(&mut desk_rx).is_empty(),
+        "a stale actor-extra absent from the DashMap must be filtered out of \
+         selection, not delivered to (would be a dead-channel misroute)"
+    );
+}
+
+/// Slice 1 exact-parity guard (council review on PR #1177): a stale extra
+/// holding a UNIQUE top priority must not distort the ranking of the live set.
+/// Because tier 1 collapses to the max priority AFTER the DashMap liveness
+/// filter (over `GetAvailableResources`), the stale pri-5 resource is dropped
+/// before the max is taken, so delivery goes to the true live top-priority
+/// resource (pri 3) only — NOT promoting the live pri-1 resource. This matches
+/// the legacy DashMap selection exactly.
+#[tokio::test]
+async fn route_to_connection_bare_jid_stale_top_priority_extra_does_not_promote_lower() {
+    use waddle_xmpp::registry::UserRegistryActor;
+    let registry = ConnectionRegistry::new();
+    let user_registry = UserRegistryActor::spawn(UserRegistryActor::new());
+    let bob_mid: jid::FullJid = "bob@example.com/mid".parse().expect("jid");
+    let bob_low: jid::FullJid = "bob@example.com/low".parse().expect("jid");
+    let bob_stale: jid::FullJid = "bob@example.com/stale".parse().expect("jid");
+    let (mid_tx, mut mid_rx) = tokio::sync::mpsc::channel(8);
+    let (low_tx, mut low_rx) = tokio::sync::mpsc::channel(8);
+    let (stale_tx, mut stale_rx) = tokio::sync::mpsc::channel(8);
+    register_into_both_tiers(&registry, &user_registry, &bob_mid, mid_tx).await;
+    register_into_both_tiers(&registry, &user_registry, &bob_low, low_tx).await;
+    register_into_both_tiers(&registry, &user_registry, &bob_stale, stale_tx).await;
+    registry.update_presence(&bob_mid, true, 3);
+    registry.update_presence(&bob_low, true, 1);
+    registry.update_presence(&bob_stale, true, 5);
+    // Stale extra: removed from the DashMap at teardown, still in the actor at
+    // its old available pri-5 (the lagging-unregister window).
+    registry.unregister(&bob_stale);
+
+    let msg = chat_msg("alice@example.com/web", "bob@example.com", "hi");
+    let events = vec![OutboundEvent::RouteToConnection {
+        jid: "bob@example.com".parse::<jid::Jid>().expect("bare jid"),
+        stanza: Box::new(Stanza::Message(msg)),
+    }];
+    let _outcome = interpret(
+        events,
+        &Deps::registry_with_user_registry(&registry, &user_registry),
+    )
+    .await;
+
+    assert_eq!(
+        drain_inbound(&mut mid_rx).len(),
+        1,
+        "the true live top-priority resource (pri 3) receives"
+    );
+    assert!(
+        drain_inbound(&mut low_rx).is_empty(),
+        "the live pri-1 resource must NOT be promoted by the stale pri-5 extra"
+    );
+    assert!(
+        drain_inbound(&mut stale_rx).is_empty(),
+        "the stale extra (absent from the DashMap) must not be selected"
+    );
+}
+
+/// Slice 1 degradation path: when the `UserRegistryActor` is dead (crashed /
+/// poisoned), `GetUser` errors and selection degrades to empty — the caller
+/// runs the offline/headless pass rather than delivering live. No live
+/// delivery reaches any DashMap resource.
+#[tokio::test]
+async fn route_to_connection_bare_jid_degrades_to_offline_on_dead_user_registry() {
+    use waddle_xmpp::registry::UserRegistryActor;
+    let registry = ConnectionRegistry::new();
+    let user_registry = UserRegistryActor::spawn(UserRegistryActor::new());
+    let bob_desk: jid::FullJid = "bob@example.com/desk".parse().expect("jid");
+    let (desk_tx, mut desk_rx) = tokio::sync::mpsc::channel(8);
+    register_into_both_tiers(&registry, &user_registry, &bob_desk, desk_tx).await;
+    registry.update_presence(&bob_desk, true, 5);
+    // Kill the registry actor so the GetUser ask errors.
+    user_registry.kill();
+    tokio::task::yield_now().await;
+
+    let msg = chat_msg("alice@example.com/web", "bob@example.com", "hi");
+    let events = vec![OutboundEvent::RouteToConnection {
+        jid: "bob@example.com".parse::<jid::Jid>().expect("bare jid"),
+        stanza: Box::new(Stanza::Message(msg)),
+    }];
+    let _outcome = interpret(
+        events,
+        &Deps::registry_with_user_registry(&registry, &user_registry),
+    )
+    .await;
+
+    assert!(
+        drain_inbound(&mut desk_rx).is_empty(),
+        "a dead UserRegistryActor must degrade selection to offline, not \
+         deliver live"
     );
 }
 

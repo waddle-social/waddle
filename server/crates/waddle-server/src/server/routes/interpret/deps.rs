@@ -147,6 +147,34 @@ impl<'a> Deps<'a> {
         }
     }
 
+    /// Build a `Deps` with the connection registry AND the
+    /// actor-authoritative `UserRegistryActor` — for unit tests that
+    /// exercise bare-JID selection, which after ADR-0017 Phase 1 Slice 1
+    /// reads resources from the actor tree (`route_to_connection`), not the
+    /// DashMap. The registry must have the resources mirrored into it (see
+    /// the test-side `register_into_both_tiers` helper).
+    #[cfg(test)]
+    pub fn registry_with_user_registry(
+        connection_registry: &'a ConnectionRegistry,
+        user_registry: &'a kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>,
+    ) -> Self {
+        Self {
+            connection_registry,
+            user_registry: Some(user_registry),
+            sm_session_registry: None,
+            mam_storage: None,
+            inbox_storage: None,
+            extension_manager: None,
+            room_registry: None,
+            web_socket_state: None,
+            authenticated_session: None,
+            local_domain: "example.com",
+            blocking_storage: None,
+            message_dispatcher: None,
+            pending_delivery_storage: None,
+        }
+    }
+
     /// Build a `Deps` for unit tests that exercise the storage arms
     /// (`ArchiveDirect`, `ProjectInbox`). SM fan-out is left disabled
     /// so the carbon-detached path stays an independent test concern.
