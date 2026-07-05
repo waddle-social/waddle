@@ -271,14 +271,8 @@ pub(super) async fn route_to_connection(
 
         match jid.clone().try_into_full() {
             Ok(full) => {
-                deliver_peer_to_full(
-                    deps.user_registry,
-                    registry,
-                    deps.sm_session_registry,
-                    &full,
-                    &stanza,
-                )
-                .await
+                deliver_peer_to_full(deps.user_registry, deps.sm_session_registry, &full, &stanza)
+                    .await
             }
             Err(bare) => {
                 // Enumerate XEP-0198 detached-but-resumable
@@ -407,7 +401,6 @@ pub(super) async fn route_to_connection(
                                     for full in &live_targets {
                                         deliver_direct_to_full(
                                             deps.user_registry,
-                                            registry,
                                             deps.sm_session_registry,
                                             full,
                                             &processed,
@@ -474,7 +467,6 @@ pub(super) async fn route_to_connection(
                     for full in live_targets {
                         deliver_peer_to_full(
                             deps.user_registry,
-                            registry,
                             deps.sm_session_registry,
                             &full,
                             &stanza,

@@ -1441,18 +1441,27 @@ async fn route_to_connection_full_jid_queues_peer_stanza_kind() {
     // RouteToConnection events queue an OutboundStanza tagged
     // PeerStanza so the destination's main loop runs the
     // recipient pass before any wire write.
-    use waddle_xmpp::registry::DeliveryKind;
+    use waddle_xmpp::registry::{DeliveryKind, UserRegistryActor};
     let registry = ConnectionRegistry::new();
+    let user_registry = UserRegistryActor::spawn(UserRegistryActor::new());
     let bob: jid::FullJid = "bob@example.com/desk".parse().expect("jid");
     let (bob_tx, mut bob_rx) = tokio::sync::mpsc::channel(8);
-    registry.register_with_carbons(bob.clone(), bob_tx, false);
+    // ADR-0017 Slice 3: full-JID delivery now routes exclusively through the
+    // authoritative actor (`deliver_peer_to_full` no longer has a DashMap
+    // path), so register into both tiers and drive it with a `Some`
+    // user_registry.
+    register_into_both_tiers(&registry, &user_registry, &bob, bob_tx).await;
 
     let msg = chat_msg("alice@example.com/web", "bob@example.com", "hi");
     let events = vec![OutboundEvent::RouteToConnection {
         jid: jid::Jid::from(bob.clone()),
         stanza: Box::new(Stanza::Message(msg)),
     }];
-    let _outcome = interpret(events, &Deps::registry_only(&registry)).await;
+    let _outcome = interpret(
+        events,
+        &Deps::registry_with_user_registry(&registry, &user_registry),
+    )
+    .await;
 
     let queued = drain_inbound(&mut bob_rx);
     assert_eq!(queued.len(), 1, "delivered to bob's queue exactly once");
@@ -1805,14 +1814,19 @@ async fn extension_room_message_dispatches_threaded_muc_message() {
     };
 
     let registry = ConnectionRegistry::new();
+    // ADR-0017 Slice 3: groupchat reflection delivers through the authoritative
+    // actor (`deliver_peer_to_full`), so occupants must be in both tiers.
+    let user_registry = waddle_xmpp::registry::UserRegistryActor::spawn(
+        waddle_xmpp::registry::UserRegistryActor::new(),
+    );
     let room_jid: jid::BareJid = "chat@muc.example.com".parse().expect("room jid");
     let alice: jid::FullJid = "alice@example.com/web".parse().expect("alice jid");
     let bob: jid::FullJid = "bob@example.com/web".parse().expect("bob jid");
     let bot: jid::FullJid = "chat@example.com/bot".parse().expect("bot jid");
     let (alice_tx, mut alice_rx) = tokio::sync::mpsc::channel(8);
     let (bob_tx, mut bob_rx) = tokio::sync::mpsc::channel(8);
-    registry.register(alice.clone(), alice_tx);
-    registry.register(bob.clone(), bob_tx);
+    register_into_both_tiers(&registry, &user_registry, &alice, alice_tx).await;
+    register_into_both_tiers(&registry, &user_registry, &bob, bob_tx).await;
 
     let occupants = vec![
         OccupantSnapshot {
@@ -1858,7 +1872,7 @@ async fn extension_room_message_dispatches_threaded_muc_message() {
     )
     .expect("test secret meets length floor");
     let outcome = dispatch_bot_groupchat_response(
-        &Deps::registry_only(&registry),
+        &Deps::registry_with_user_registry(&registry, &user_registry),
         BotGroupchatDispatch {
             room_jid: &room_jid,
             occupants: &occupants,

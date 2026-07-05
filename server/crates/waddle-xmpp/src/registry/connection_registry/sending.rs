@@ -6,8 +6,9 @@ impl ConnectionRegistry {
     /// without running the recipient pass.
     ///
     /// This is the right call for server-generated frames (carbons,
-    /// IQ replies, SM acks, …). For peer-routed stanzas that should
-    /// run through the recipient pipeline, use [`Self::send_peer_to`].
+    /// IQ replies, SM acks, …). Peer-routed stanzas that must run through
+    /// the recipient pipeline go through the authoritative `UserActor`'s
+    /// `TrySendPeer` (ADR-0017 Slice 2), not a DashMap send.
     ///
     /// This waits for outbound channel capacity instead of dropping stanzas when
     /// a connection is temporarily backpressured. Closed channels are treated as
@@ -48,23 +49,8 @@ impl ConnectionRegistry {
         }
     }
 
-    /// Send a stanza to a connected user as a [`DeliveryKind::PeerStanza`]
-    /// — the destination's main loop feeds
-    /// [`crate::protocol::InboundEvent::StanzaFromPeer`] into its
-    /// state machine so the recipient-pass pipeline (XEP-0191
-    /// incoming block, XEP-0359 recipient stamp, XEP-0313 archive,
-    /// XEP-0280 received-carbons, inbox projection) runs before any
-    /// wire write.
-    ///
-    /// Used by the [`crate::protocol::OutboundEvent::RouteToConnection`]
-    /// interpreter arm starting in #229 PR12.
-    #[instrument(skip(self, stanza), fields(to = %jid))]
-    pub async fn send_peer_to(&self, jid: &FullJid, stanza: Stanza) -> SendResult {
-        self.send_to_with_kind(jid, stanza, DeliveryKind::PeerStanza)
-            .await
-    }
-
-    /// Inner helper shared by [`Self::send_to`] and [`Self::send_peer_to`]
+    /// Inner helper shared by [`Self::send_to`] (and, before the ADR-0017
+    /// Slice 3 delivery cutover, the now-deleted `send_peer_to`)
     /// so the queueing / replacement / channel-closed paths stay in
     /// one place. The only thing the public callers vary is the
     /// [`DeliveryKind`] tag on the queued [`OutboundStanza`], which
@@ -128,30 +114,11 @@ impl ConnectionRegistry {
     /// broadcasts, roster pushes, …) where a slow or zombied
     /// consumer must never stall the producer task.
     ///
-    /// For peer-routed groupchat reflection that needs the recipient
-    /// pass (XEP-0359 recipient stamp, XEP-0313 archive, XEP-0280
-    /// received-carbons, inbox projection), use
-    /// [`Self::try_send_peer_to`] instead — same non-blocking
-    /// guarantees, but the destination's main loop runs its state
-    /// machine before writing to the wire.
+    /// Peer-routed groupchat reflection that needs the recipient pass now routes
+    /// through the authoritative `UserActor`'s `TrySendPeer` (ADR-0017 Slice 2),
+    /// not a DashMap send.
     pub fn try_send_to(&self, jid: &FullJid, stanza: Stanza) -> BroadcastOutcome {
         self.try_send_to_with_kind(jid, stanza, DeliveryKind::DirectFrame)
-    }
-
-    /// Non-blocking [`DeliveryKind::PeerStanza`] send. Locked Q-fix
-    /// #699: the MUC reflector emits one `RouteToConnection` per
-    /// occupant and must NOT block on any single connection's mpsc
-    /// — one zombie WebSocket peer with a hung consumer task was
-    /// enough to stall every groupchat dispatch through the same
-    /// interpreter loop (and therefore archive + inbox writes for
-    /// every other user of the room) until the pod restarted.
-    ///
-    /// Same `BroadcastOutcome` contract as [`Self::try_send_to`];
-    /// the destination's main loop feeds the stanza through its
-    /// state machine as `InboundEvent::StanzaFromPeer` so the
-    /// recipient pass still runs when the channel has capacity.
-    pub fn try_send_peer_to(&self, jid: &FullJid, stanza: Stanza) -> BroadcastOutcome {
-        self.try_send_to_with_kind(jid, stanza, DeliveryKind::PeerStanza)
     }
 
     /// Shared non-blocking send path. The only thing the public

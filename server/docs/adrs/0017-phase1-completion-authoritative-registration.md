@@ -221,10 +221,25 @@ get-or-create/reaper split is a fast follow-up availability slice.
   - **Council review** (concurrency + correctness) before commit: 1:1
     backpressure loss, Finding-1 gate soundness, no MUC duplicate (no
     fallback), terminal-timeout no-double-deliver, ordering.
-- **Slice 3 — delete the DashMap *delivery* methods** (`send_peer_to`,
-  `try_send_peer_to`, `select_routable_resources_for_user`,
-  `get_resources_for_user`) once Slices 1–2 are green in prod and the remaining
-  `None`-path delivery tests are migrated onto the actor.
+- **Slice 3 — delete the DashMap *delivery* methods.** ✅ **Landed.** Deleted
+  `send_peer_to` and `try_send_peer_to` (the peer-routed delivery methods that
+  let `deliver_peer_to_full` bypass the actor). `deliver_peer_to_full` /
+  `deliver_direct_to_full` now have no DashMap path — an actor-less (`None`)
+  Deps falls back to the detached XEP-0198 buffer, not a DashMap send — and drop
+  their unused `ConnectionRegistry` param. The two remaining `None`-path
+  delivery tests were migrated onto the actor
+  (`route_to_connection_full_jid_queues_peer_stanza_kind` and the MUC
+  reflection test `extension_room_message_dispatches_threaded_muc_message`);
+  the two DashMap-method unit tests were deleted with their methods.
+
+  **Scope correction:** `select_routable_resources_for_user` and
+  `get_resources_for_user` are NOT deleted — they are load-bearing *survivors*
+  of Phase 1 (see "What survives" below), with ~14 live production callers
+  outside the interpret delivery path (SM Q6 promotion, the `StanzaRouter`
+  bare-JID local routing, the offline/headless pass, MUC groupchat archive,
+  presence probe/subscription broadcast, PEP/pubsub fan-out, group-DM invite,
+  admin). Retiring the DashMap *selection* surface belongs to a later phase that
+  migrates those consumers, not to this delivery-focused slice.
 
 ## After Phase 1
 

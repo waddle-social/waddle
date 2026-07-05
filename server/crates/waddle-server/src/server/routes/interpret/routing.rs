@@ -456,98 +456,60 @@ async fn deliver_one_via_actor(
     }
 }
 
-/// Deliver a peer-routed (`PeerStanza`) stanza to one resource.
+/// Deliver a peer-routed (`PeerStanza`) stanza to one resource through the
+/// authoritative `UserActor` (`TrySendPeer`).
 ///
-/// ADR-0017 Phase 1 Slice 2: routes through the authoritative `UserActor` via
-/// [`deliver_one_via_actor`] when `user_registry` is present (production).
-/// `None` — test fixtures without an actor tree — keeps the legacy DashMap
-/// path (groupchat fan-out via the non-blocking `try_send_peer_to`, 1:1 via the
-/// blocking `send_peer_to`); Slice 3 migrates those tests and deletes the
-/// DashMap delivery methods.
+/// ADR-0017 Phase 1 Slice 3: the legacy DashMap delivery methods
+/// (`send_peer_to` / `try_send_peer_to`) are deleted, so `user_registry` is the
+/// only delivery path. `None` — test fixtures without an actor tree — can no
+/// longer deliver live and falls back to the detached XEP-0198 buffer (the same
+/// "no live target" fallback used everywhere), never a DashMap send.
 pub(super) async fn deliver_peer_to_full(
     user_registry: Option<&kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>>,
-    registry: &waddle_xmpp::registry::ConnectionRegistry,
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
     target: &jid::FullJid,
     stanza: &Stanza,
 ) {
-    if let Some(user_registry) = user_registry {
-        deliver_one_via_actor(
-            user_registry,
-            sm_session_registry,
-            target,
-            stanza,
-            ActorSendKind::Peer,
-        )
-        .await;
-        return;
-    }
-
-    // Legacy DashMap path — `None`-Deps tests only.
-    let is_groupchat_reflection = matches!(
-        stanza,
-        Stanza::Message(message)
-            if message.type_ == xmpp_parsers::message::MessageType::Groupchat
-    );
-    if is_groupchat_reflection {
-        match registry.try_send_peer_to(target, stanza.clone()) {
-            waddle_xmpp::registry::BroadcastOutcome::Delivered => {
-                debug!(jid = %target, "RouteToConnection: groupchat reflection queued for recipient pass");
-            }
-            waddle_xmpp::registry::BroadcastOutcome::DroppedFull => {
-                debug!(
-                    jid = %target,
-                    "RouteToConnection: groupchat reflection dropped (recipient mpsc full)"
-                );
-            }
-            waddle_xmpp::registry::BroadcastOutcome::NotConnected
-            | waddle_xmpp::registry::BroadcastOutcome::DroppedClosed => {
-                deliver_to_detached(sm_session_registry, target, stanza).await;
-            }
+    match user_registry {
+        Some(user_registry) => {
+            deliver_one_via_actor(
+                user_registry,
+                sm_session_registry,
+                target,
+                stanza,
+                ActorSendKind::Peer,
+            )
+            .await
         }
-        return;
-    }
-    match registry.send_peer_to(target, stanza.clone()).await {
-        waddle_xmpp::registry::SendResult::Sent => {
-            debug!(jid = %target, "RouteToConnection: peer-stanza queued for recipient pass");
-        }
-        waddle_xmpp::registry::SendResult::NotConnected
-        | waddle_xmpp::registry::SendResult::ChannelClosed => {
-            deliver_to_detached(sm_session_registry, target, stanza).await;
-        }
+        None => deliver_to_detached(sm_session_registry, target, stanza).await,
     }
 }
 
 /// Deliver an already-recipient-passed (`DirectFrame`) stanza to one resource
-/// — the #1106 shared fan-out `processed` copy. ADR-0017 Phase 1 Slice 2:
-/// routes through the actor (`TrySendDirect`) when `user_registry` is present;
-/// `None` keeps the legacy blocking DashMap `send_to`.
+/// — the #1106 shared fan-out `processed` copy — through the authoritative
+/// `UserActor` (`TrySendDirect`).
+///
+/// ADR-0017 Phase 1 Slice 3: mirrors [`deliver_peer_to_full`] — the actor is
+/// the only delivery path; `None` (actor-less test fixtures) falls back to the
+/// detached XEP-0198 buffer instead of a DashMap `send_to`.
 pub(super) async fn deliver_direct_to_full(
     user_registry: Option<&kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>>,
-    registry: &waddle_xmpp::registry::ConnectionRegistry,
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
     target: &jid::FullJid,
     stanza: &Stanza,
 ) {
-    if let Some(user_registry) = user_registry {
-        deliver_one_via_actor(
-            user_registry,
-            sm_session_registry,
-            target,
-            stanza,
-            ActorSendKind::Direct,
-        )
-        .await;
-        return;
-    }
-    match registry.send_to(target, stanza.clone()).await {
-        waddle_xmpp::registry::SendResult::Sent => {
-            debug!(jid = %target, "RouteToConnection: processed DM delivered (shared recipient pass)");
+    match user_registry {
+        Some(user_registry) => {
+            deliver_one_via_actor(
+                user_registry,
+                sm_session_registry,
+                target,
+                stanza,
+                ActorSendKind::Direct,
+            )
+            .await
         }
-        waddle_xmpp::registry::SendResult::NotConnected
-        | waddle_xmpp::registry::SendResult::ChannelClosed => {
-            deliver_to_detached(sm_session_registry, target, stanza).await;
-        }
+        None => deliver_to_detached(sm_session_registry, target, stanza).await,
     }
 }
 
