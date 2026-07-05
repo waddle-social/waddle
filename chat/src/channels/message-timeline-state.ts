@@ -18,6 +18,7 @@ import { compareTimelineMessages } from "@/lib/timeline-timestamps";
 import { assignCorrectionFields, type CorrectionPayload } from "@/lib/messaging/correction";
 import { retractTimelineMessage } from "@/lib/messaging/retraction";
 import { mergeRetractionTombstone } from "@/lib/messaging/timeline-insert";
+import { adoptArchiveIdentity, findSynthesizedIdMergeTarget } from "@/lib/messaging/synthesized-id-merge";
 
 function mergeReplyToMetadata(
   existing: TimelineMessage["replyTo"],
@@ -323,19 +324,27 @@ export function buildChannelTimelineFromMamResults(params: {
     byId.add(message);
   }
   const timeline = options.seedExistingOnly ? [] : [...existing];
+  // #1182: rows whose primary id had to be fabricated (id-less live
+  // stanzas) can only reconcile by content. Each is consumable once so
+  // two identical archive hits can't both collapse into it.
+  const synthesizedRows = existing.filter((message) => message.synthesizedId);
   for (const raw of regularMessages) {
     const mapped = mapLiveRoomMessageToTimeline(session, raw, (id) => byId.get(id));
     const tm = mapped.isRetracted
       ? retractTimelineMessage(mapped, mapped.retractionId)
       : mapped;
-    const existingMessage = [tm.id, ...(tm.wireIds ?? [])]
+    const idMatch = [tm.id, ...(tm.wireIds ?? [])]
       .map((id) => byId.get(id))
       .find((message): message is TimelineMessage => !!message);
+    const synthesizedMatch = idMatch ? undefined : findSynthesizedIdMergeTarget(synthesizedRows, tm);
+    if (synthesizedMatch) synthesizedRows.splice(synthesizedRows.indexOf(synthesizedMatch), 1);
+    const existingMessage = idMatch ?? synthesizedMatch;
     if (existingMessage) {
       const mergedBase = options.seedExistingOnly
         ? mergeMissingThreadMetadata(tm, existingMessage)
         : mergeMissingThreadMetadata(existingMessage, tm);
-      const merged = mergeRetractionTombstone(mergedBase, tm);
+      let merged = mergeRetractionTombstone(mergedBase, tm);
+      if (synthesizedMatch) merged = adoptArchiveIdentity(merged, tm);
       if (options.seedExistingOnly) {
         byId.add(merged);
         timeline.push(merged);

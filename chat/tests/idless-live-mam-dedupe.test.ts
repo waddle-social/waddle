@@ -1,0 +1,612 @@
+// #1182: live stanzas lacking any wire identity (client id, XEP-0359
+// stanza-id/origin-id) get a fabricated UUID as their primary id and can
+// never dedupe against their MAM copy. These tests pin the codec marking
+// (`synthesizedId`) and the content-based reconciliation fallback at both
+// merge directions.
+
+import { describe, expect, test } from "bun:test";
+
+import { dmMessageFromArchived, roomMessageFromArchived } from "@/lib/xmpp/wasm-message-codecs";
+import { buildChannelTimelineFromMamResults } from "../src/channels/message-timeline-state";
+import { buildDmTimelineFromMamResults, fromLiveDmMessage } from "../src/dms/message-timeline-state";
+import { mapLiveRoomMessageToTimeline } from "../src/channels/timeline";
+import { insertLiveMessage } from "../src/lib/messaging/timeline-insert";
+import type { WasmArchivedMessage } from "../src/lib/xmpp/wasm-types";
+import type { WaddleSession } from "../src/lib/server-auth";
+
+const session: WaddleSession = {
+  session_id: "tok",
+  user_id: "alice-id",
+  username: "alice",
+  avatar_url: null,
+  xmpp_localpart: "alice",
+  jid: "alice@example.com/desktop",
+  xmpp_websocket_url: "wss://example.com/ws",
+  is_expired: false,
+  expires_at: null,
+};
+
+const baseArchivedRoom: WasmArchivedMessage = {
+  mam_id: "fabricated-uuid-1",
+  message_type: "groupchat",
+  from: "room@conf.example.com/bob",
+  to: "alice@example.com",
+  body: "hello",
+  reaction_emojis: [],
+  is_muc: true,
+  markup_spans: [],
+  mention_uris: [],
+  references: [],
+  is_sticker: false,
+  shared_files: [],
+};
+
+const baseArchivedDm: WasmArchivedMessage = {
+  mam_id: "fabricated-uuid-2",
+  message_type: "chat",
+  from: "bob@example.com",
+  to: "alice@example.com",
+  body: "hello",
+  reaction_emojis: [],
+  is_muc: false,
+  markup_spans: [],
+  mention_uris: [],
+  references: [],
+  is_sticker: false,
+  shared_files: [],
+};
+
+describe("codec synthesized-primary-id marking (#1182)", () => {
+  test("live MUC stanza with no wire identity is flagged and gets no archiveId", () => {
+    const result = roomMessageFromArchived(baseArchivedRoom, "live");
+    expect(result?.id).toBe("fabricated-uuid-1");
+    expect(result?.synthesizedId).toBe(true);
+    expect(result?.archiveId).toBeUndefined();
+  });
+
+  test("live MUC stanza with a room-stamped stanza-id is not flagged", () => {
+    const result = roomMessageFromArchived(
+      {
+        ...baseArchivedRoom,
+        stanza_id: "room-stamped-1",
+        stanza_id_by: "room@conf.example.com",
+      },
+      "live",
+    );
+    expect(result?.id).toBe("room-stamped-1");
+    expect(result?.synthesizedId).toBeUndefined();
+  });
+
+  test("live DM stanza with no wire identity is flagged and gets no archiveId", () => {
+    const result = dmMessageFromArchived(baseArchivedDm, "alice@example.com", "live");
+    expect(result?.id).toBe("fabricated-uuid-2");
+    expect(result?.synthesizedId).toBe(true);
+    expect(result?.archiveId).toBeUndefined();
+  });
+
+  test("live DM stanza with an origin-id is not flagged", () => {
+    const result = dmMessageFromArchived(
+      { ...baseArchivedDm, origin_id: "origin-1" },
+      "alice@example.com",
+      "live",
+    );
+    expect(result?.id).toBe("origin-1");
+    expect(result?.synthesizedId).toBeUndefined();
+  });
+
+  test("archive MUC row is never flagged and keeps its archiveId", () => {
+    const result = roomMessageFromArchived({ ...baseArchivedRoom, mam_id: "mam-1" });
+    expect(result?.synthesizedId).toBeUndefined();
+    expect(result?.archiveId).toBe("mam-1");
+  });
+});
+
+describe("channel MAM merge reconciles synthesized live rows (#1182)", () => {
+  const liveIdless = (overrides: Partial<WasmArchivedMessage> = {}) =>
+    roomMessageFromArchived(
+      { ...baseArchivedRoom, timestamp: "2026-07-01T10:00:00.000Z", ...overrides },
+      "live",
+    )!;
+  const mamCopy = (overrides: Partial<WasmArchivedMessage> = {}) =>
+    roomMessageFromArchived({
+      ...baseArchivedRoom,
+      mam_id: "archive-uid-1",
+      stanza_id: "archive-uid-1",
+      stanza_id_by: "room@conf.example.com",
+      timestamp: "2026-07-01T10:00:01.000Z",
+      ...overrides,
+    })!;
+
+  test("MAM copy merges into the synthesized live row instead of duplicating", () => {
+    const existing = [mapLiveRoomMessageToTimeline(session, liveIdless())];
+    const timeline = buildChannelTimelineFromMamResults({
+      session,
+      channelIsForum: false,
+      mamResults: [mamCopy()],
+      existing,
+    });
+    expect(timeline).toHaveLength(1);
+    const row = timeline[0]!;
+    expect(row.id).toBe("archive-uid-1");
+    expect(row.wireIds).toContain(existing[0]!.id);
+    expect(row.synthesizedId).toBeUndefined();
+    expect(row.replyableId).toBe("archive-uid-1");
+  });
+
+  test("a different-body MAM row still appends", () => {
+    const existing = [mapLiveRoomMessageToTimeline(session, liveIdless())];
+    const timeline = buildChannelTimelineFromMamResults({
+      session,
+      channelIsForum: false,
+      mamResults: [mamCopy({ body: "something else" })],
+      existing,
+    });
+    expect(timeline).toHaveLength(2);
+  });
+
+  test("a same-body MAM row outside the timestamp window still appends", () => {
+    const existing = [mapLiveRoomMessageToTimeline(session, liveIdless())];
+    const timeline = buildChannelTimelineFromMamResults({
+      session,
+      channelIsForum: false,
+      mamResults: [mamCopy({ timestamp: "2026-07-01T11:00:00.000Z" })],
+      existing,
+    });
+    expect(timeline).toHaveLength(2);
+  });
+
+  test("two identical MAM rows only consume the synthesized row once", () => {
+    const existing = [mapLiveRoomMessageToTimeline(session, liveIdless())];
+    const timeline = buildChannelTimelineFromMamResults({
+      session,
+      channelIsForum: false,
+      mamResults: [
+        mamCopy(),
+        mamCopy({ mam_id: "archive-uid-2", stanza_id: "archive-uid-2" }),
+      ],
+      existing,
+    });
+    expect(timeline).toHaveLength(2);
+    expect(timeline.map((m) => m.id).sort()).toEqual(["archive-uid-1", "archive-uid-2"]);
+  });
+
+  test("a same-body MAM row from a different occupant still appends", () => {
+    const existing = [mapLiveRoomMessageToTimeline(session, liveIdless())];
+    const timeline = buildChannelTimelineFromMamResults({
+      session,
+      channelIsForum: false,
+      mamResults: [mamCopy({ from: "room@conf.example.com/carol" })],
+      existing,
+    });
+    expect(timeline).toHaveLength(2);
+  });
+});
+
+describe("DM MAM merge reconciles synthesized live rows (#1182)", () => {
+  const liveIdlessDm = () =>
+    dmMessageFromArchived(
+      { ...baseArchivedDm, timestamp: "2026-07-01T10:00:00.000Z" },
+      "alice@example.com",
+      "live",
+    )!;
+  const mamDmCopy = (overrides: Partial<WasmArchivedMessage> = {}) =>
+    dmMessageFromArchived(
+      {
+        ...baseArchivedDm,
+        mam_id: "dm-archive-uid-1",
+        timestamp: "2026-07-01T10:00:01.000Z",
+        ...overrides,
+      },
+      "alice@example.com",
+    )!;
+
+  test("MAM copy merges into the synthesized live DM row instead of duplicating", () => {
+    const existing = [fromLiveDmMessage(session, liveIdlessDm())];
+    const timeline = buildDmTimelineFromMamResults({
+      session,
+      mamResults: [mamDmCopy()],
+      existing,
+    });
+    expect(timeline).toHaveLength(1);
+    const row = timeline[0]!;
+    expect(row.id).toBe("dm-archive-uid-1");
+    expect(row.wireIds).toContain(existing[0]!.id);
+    expect(row.synthesizedId).toBeUndefined();
+  });
+
+  test("a same-body MAM row from the other conversation side still appends", () => {
+    const existing = [fromLiveDmMessage(session, liveIdlessDm())];
+    const timeline = buildDmTimelineFromMamResults({
+      session,
+      mamResults: [
+        mamDmCopy({ from: "alice@example.com", to: "bob@example.com", id: "self-1" }),
+      ],
+      existing,
+    });
+    expect(timeline).toHaveLength(2);
+  });
+});
+
+describe("live insert reconciles id-less redelivery onto MAM-seeded rows (#1182)", () => {
+  const mamSeededRow = () =>
+    mapLiveRoomMessageToTimeline(
+      session,
+      roomMessageFromArchived({
+        ...baseArchivedRoom,
+        mam_id: "archive-uid-1",
+        stanza_id: "archive-uid-1",
+        stanza_id_by: "room@conf.example.com",
+        timestamp: "2026-07-01T10:00:01.000Z",
+      })!,
+    );
+  // The dispatcher fabricates a fresh UUID per id-less delivery — mirror
+  // that so two rows never share the fabricated primary id.
+  const idlessLiveRow = (fabricatedId = crypto.randomUUID()) =>
+    mapLiveRoomMessageToTimeline(
+      session,
+      roomMessageFromArchived(
+        { ...baseArchivedRoom, mam_id: fabricatedId, timestamp: "2026-07-01T10:00:00.000Z" },
+        "live",
+      )!,
+    );
+
+  test("id-less live redelivery merges into the archive-keyed row", () => {
+    const result = insertLiveMessage([mamSeededRow()], idlessLiveRow(), new Set());
+    expect(result.appended).toBe(false);
+    expect(result.messages).toHaveLength(1);
+    const row = result.messages[0]!;
+    expect(row.id).toBe("archive-uid-1");
+    expect(row.synthesizedId).toBeUndefined();
+  });
+
+  test("two distinct id-less live messages with equal bodies never merge", () => {
+    const first = insertLiveMessage([], idlessLiveRow(), new Set());
+    const second = insertLiveMessage(first.messages, idlessLiveRow(), new Set());
+    expect(second.appended).toBe(true);
+    expect(second.messages).toHaveLength(2);
+  });
+});
+
+describe("client-id-only live stanzas are real identities, not synthesized (#1182)", () => {
+  // The dispatcher reshapes live stanzas with `mam_id: message.id ?? uuid`,
+  // so a client-id-only stanza also has primary === mam_id — it must still
+  // NOT be flagged: the client id is a real wire identity.
+  test("live MUC stanza with only a client id is not flagged", () => {
+    const result = roomMessageFromArchived(
+      { ...baseArchivedRoom, id: "client-1", mam_id: "client-1" },
+      "live",
+    );
+    expect(result?.id).toBe("client-1");
+    expect(result?.synthesizedId).toBeUndefined();
+  });
+
+  test("live DM stanza with only a client id is not flagged", () => {
+    const result = dmMessageFromArchived(
+      { ...baseArchivedDm, id: "client-2", mam_id: "client-2" },
+      "alice@example.com",
+      "live",
+    );
+    expect(result?.id).toBe("client-2");
+    expect(result?.synthesizedId).toBeUndefined();
+  });
+});
+
+describe("live insert only content-matches when the incoming row is synthesized (#1182)", () => {
+  test("an id-carrying same-body live arrival never merges into a synthesized row", () => {
+    const synthesized = mapLiveRoomMessageToTimeline(
+      session,
+      roomMessageFromArchived(
+        { ...baseArchivedRoom, mam_id: crypto.randomUUID(), timestamp: "2026-07-01T10:00:00.000Z" },
+        "live",
+      )!,
+    );
+    const withClientId = mapLiveRoomMessageToTimeline(
+      session,
+      roomMessageFromArchived(
+        { ...baseArchivedRoom, id: "client-9", mam_id: "client-9", timestamp: "2026-07-01T10:00:30.000Z" },
+        "live",
+      )!,
+    );
+    const result = insertLiveMessage([synthesized], withClientId, new Set());
+    expect(result.appended).toBe(true);
+    expect(result.messages).toHaveLength(2);
+  });
+});
+
+describe("file-only id-less messages reconcile by attachment URLs (#1182)", () => {
+  const file = { url: "https://files.example.com/pic.png", disposition: "inline" };
+
+  test("MAM copy of a body-less file message merges into the synthesized live row", () => {
+    const existing = [
+      mapLiveRoomMessageToTimeline(
+        session,
+        roomMessageFromArchived(
+          {
+            ...baseArchivedRoom,
+            body: undefined,
+            shared_files: [file],
+            mam_id: crypto.randomUUID(),
+            timestamp: "2026-07-01T10:00:00.000Z",
+          },
+          "live",
+        )!,
+      ),
+    ];
+    const timeline = buildChannelTimelineFromMamResults({
+      session,
+      channelIsForum: false,
+      mamResults: [
+        roomMessageFromArchived({
+          ...baseArchivedRoom,
+          body: undefined,
+          shared_files: [file],
+          mam_id: "archive-uid-7",
+          stanza_id: "archive-uid-7",
+          stanza_id_by: "room@conf.example.com",
+          timestamp: "2026-07-01T10:00:01.000Z",
+        })!,
+      ],
+      existing,
+    });
+    expect(timeline).toHaveLength(1);
+    expect(timeline[0]!.id).toBe("archive-uid-7");
+  });
+
+  test("a body-less file message with a different attachment still appends", () => {
+    const existing = [
+      mapLiveRoomMessageToTimeline(
+        session,
+        roomMessageFromArchived(
+          {
+            ...baseArchivedRoom,
+            body: undefined,
+            shared_files: [file],
+            mam_id: crypto.randomUUID(),
+            timestamp: "2026-07-01T10:00:00.000Z",
+          },
+          "live",
+        )!,
+      ),
+    ];
+    const timeline = buildChannelTimelineFromMamResults({
+      session,
+      channelIsForum: false,
+      mamResults: [
+        roomMessageFromArchived({
+          ...baseArchivedRoom,
+          body: undefined,
+          shared_files: [{ url: "https://files.example.com/other.png", disposition: "inline" }],
+          mam_id: "archive-uid-8",
+          stanza_id: "archive-uid-8",
+          stanza_id_by: "room@conf.example.com",
+          timestamp: "2026-07-01T10:00:01.000Z",
+        })!,
+      ],
+      existing,
+    });
+    expect(timeline).toHaveLength(2);
+  });
+});
+
+describe("DM server-stamped stanza-id is a real wire identity (#1182)", () => {
+  test("live DM with only a stanza-id is not flagged and carries it as an alias", () => {
+    const result = dmMessageFromArchived(
+      {
+        ...baseArchivedDm,
+        stanza_id: "srv-stamped-1",
+        stanza_id_by: "example.com",
+        mam_id: "fabricated-uuid-9",
+      },
+      "alice@example.com",
+      "live",
+    );
+    expect(result?.synthesizedId).toBeUndefined();
+    expect(result?.wireIds).toContain("srv-stamped-1");
+  });
+
+  test("MAM copy keyed on the stanza-id dedupes exactly against the live row", () => {
+    const existing = [
+      fromLiveDmMessage(
+        session,
+        dmMessageFromArchived(
+          {
+            ...baseArchivedDm,
+            stanza_id: "srv-stamped-2",
+            stanza_id_by: "example.com",
+            mam_id: "fabricated-uuid-10",
+            timestamp: "2026-07-01T10:00:00.000Z",
+          },
+          "alice@example.com",
+          "live",
+        )!,
+      ),
+    ];
+    const timeline = buildDmTimelineFromMamResults({
+      session,
+      mamResults: [
+        dmMessageFromArchived(
+          { ...baseArchivedDm, mam_id: "srv-stamped-2", timestamp: "2026-07-01T10:00:00.000Z" },
+          "alice@example.com",
+        )!,
+      ],
+      existing,
+    });
+    expect(timeline).toHaveLength(1);
+  });
+});
+
+describe("seedExistingOnly keeps the consumed synthesized row's UUID as alias (#1182)", () => {
+  test("lifecycle-reload merge preserves the fabricated id so persisted last-seen still resolves", () => {
+    const fabricated = crypto.randomUUID();
+    const existing = [
+      mapLiveRoomMessageToTimeline(
+        session,
+        roomMessageFromArchived(
+          { ...baseArchivedRoom, mam_id: fabricated, timestamp: "2026-07-01T10:00:00.000Z" },
+          "live",
+        )!,
+      ),
+    ];
+    const timeline = buildChannelTimelineFromMamResults({
+      session,
+      channelIsForum: false,
+      mamResults: [
+        roomMessageFromArchived({
+          ...baseArchivedRoom,
+          mam_id: "archive-uid-9",
+          stanza_id: "archive-uid-9",
+          stanza_id_by: "room@conf.example.com",
+          timestamp: "2026-07-01T10:00:01.000Z",
+        })!,
+      ],
+      existing,
+      options: { seedExistingOnly: true },
+    });
+    expect(timeline).toHaveLength(1);
+    expect(timeline[0]!.id).toBe("archive-uid-9");
+    expect(timeline[0]!.wireIds).toContain(fabricated);
+  });
+});
+
+describe("reconnect catch-up (archive-sourced live emit) reconciles synthesized rows (#1182)", () => {
+  test("an archive-decoded catch-up arrival merges into the synthesized live row", () => {
+    const synthesized = mapLiveRoomMessageToTimeline(
+      session,
+      roomMessageFromArchived(
+        { ...baseArchivedRoom, mam_id: crypto.randomUUID(), timestamp: "2026-07-01T10:00:00.000Z" },
+        "live",
+      )!,
+    );
+    // client-mam catch-up decodes with the default "archive" source and
+    // emits through the live pipeline (insertLiveMessage).
+    const catchupCopy = mapLiveRoomMessageToTimeline(
+      session,
+      roomMessageFromArchived({
+        ...baseArchivedRoom,
+        mam_id: "archive-uid-11",
+        stanza_id: "archive-uid-11",
+        stanza_id_by: "room@conf.example.com",
+        timestamp: "2026-07-01T10:00:01.000Z",
+      })!,
+    );
+    const result = insertLiveMessage([synthesized], catchupCopy, new Set());
+    expect(result.appended).toBe(false);
+    expect(result.messages).toHaveLength(1);
+    expect(result.messages[0]!.synthesizedId).toBeUndefined();
+  });
+});
+
+describe("archive stamps well after the synthesized receipt are distinct messages (#1182)", () => {
+  test("a same-content archive arrival stamped 3 minutes later appends instead of merging", () => {
+    // A's synthesized row was received at 10:00:00; an archive copy of A
+    // can only lead that stamp by clock skew. A same-content row stamped
+    // 10:03:00 is a distinct message sent while we were offline.
+    const synthesized = mapLiveRoomMessageToTimeline(
+      session,
+      roomMessageFromArchived(
+        { ...baseArchivedRoom, mam_id: crypto.randomUUID(), timestamp: "2026-07-01T10:00:00.000Z" },
+        "live",
+      )!,
+    );
+    const laterDistinct = mapLiveRoomMessageToTimeline(
+      session,
+      roomMessageFromArchived({
+        ...baseArchivedRoom,
+        mam_id: "archive-uid-12",
+        stanza_id: "archive-uid-12",
+        stanza_id_by: "room@conf.example.com",
+        timestamp: "2026-07-01T10:03:00.000Z",
+      })!,
+    );
+    const result = insertLiveMessage([synthesized], laterDistinct, new Set());
+    expect(result.appended).toBe(true);
+    expect(result.messages).toHaveLength(2);
+  });
+});
+
+describe("content key covers caption + attachments together (#1182 review)", () => {
+  const withFile = (url: string, overrides: Partial<WasmArchivedMessage> = {}): WasmArchivedMessage => ({
+    ...baseArchivedRoom,
+    body: "look",
+    shared_files: [{ url, disposition: "inline" }],
+    timestamp: "2026-07-01T10:00:00.000Z",
+    ...overrides,
+  });
+
+  test("same caption but different attachment does not merge", () => {
+    const existing = [
+      mapLiveRoomMessageToTimeline(
+        session,
+        roomMessageFromArchived(withFile("https://files.example.com/a.png", { mam_id: crypto.randomUUID() }), "live")!,
+      ),
+    ];
+    const timeline = buildChannelTimelineFromMamResults({
+      session,
+      channelIsForum: false,
+      mamResults: [
+        roomMessageFromArchived(withFile("https://files.example.com/b.png", {
+          mam_id: "archive-uid-13",
+          stanza_id: "archive-uid-13",
+          stanza_id_by: "room@conf.example.com",
+          timestamp: "2026-07-01T10:00:01.000Z",
+        }))!,
+      ],
+      existing,
+    });
+    expect(timeline).toHaveLength(2);
+  });
+
+  test("same caption and same attachment merges", () => {
+    const existing = [
+      mapLiveRoomMessageToTimeline(
+        session,
+        roomMessageFromArchived(withFile("https://files.example.com/a.png", { mam_id: crypto.randomUUID() }), "live")!,
+      ),
+    ];
+    const timeline = buildChannelTimelineFromMamResults({
+      session,
+      channelIsForum: false,
+      mamResults: [
+        roomMessageFromArchived(withFile("https://files.example.com/a.png", {
+          mam_id: "archive-uid-14",
+          stanza_id: "archive-uid-14",
+          stanza_id_by: "room@conf.example.com",
+          timestamp: "2026-07-01T10:00:01.000Z",
+        }))!,
+      ],
+      existing,
+    });
+    expect(timeline).toHaveLength(1);
+    expect(timeline[0]!.id).toBe("archive-uid-14");
+  });
+
+  test("a body that spells a file key never collides with a file-only message", () => {
+    const bodySpoof = mapLiveRoomMessageToTimeline(
+      session,
+      roomMessageFromArchived(
+        {
+          ...baseArchivedRoom,
+          body: "files:https://files.example.com/pic.png",
+          mam_id: crypto.randomUUID(),
+          timestamp: "2026-07-01T10:00:00.000Z",
+        },
+        "live",
+      )!,
+    );
+    const fileOnly = mapLiveRoomMessageToTimeline(
+      session,
+      roomMessageFromArchived({
+        ...baseArchivedRoom,
+        body: undefined,
+        shared_files: [{ url: "https://files.example.com/pic.png", disposition: "inline" }],
+        mam_id: "archive-uid-15",
+        stanza_id: "archive-uid-15",
+        stanza_id_by: "room@conf.example.com",
+        timestamp: "2026-07-01T10:00:01.000Z",
+      })!,
+    );
+    const result = insertLiveMessage([bodySpoof], fileOnly, new Set());
+    expect(result.appended).toBe(true);
+    expect(result.messages).toHaveLength(2);
+  });
+});

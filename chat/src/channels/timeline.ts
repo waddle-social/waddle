@@ -27,6 +27,7 @@ export function mapLiveRoomMessageToTimeline(
   if (msg.isRetracted) tm.isRetracted = true;
   if (msg.retractionId) tm.retractionId = msg.retractionId;
   if (msg.authorRealJid) tm.authorRealJid = msg.authorRealJid;
+  if (msg.synthesizedId) tm.synthesizedId = true;
   if (msg.wireIds && msg.wireIds.length > 0) tm.wireIds = msg.wireIds;
   if (msg.mentions && msg.mentions.length > 0) tm.mentions = msg.mentions;
   if (msg.sharedFiles && msg.sharedFiles.length > 0) tm.sharedFiles = msg.sharedFiles;
