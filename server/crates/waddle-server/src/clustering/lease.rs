@@ -124,13 +124,13 @@ impl PostgresKeypairSlotLease {
                     expired = false
                 WHERE clustering_keypair_slots.holder_node IS NULL
                    OR clustering_keypair_slots.expired
-                   OR clustering_keypair_slots.heartbeat < now() - (? || ' seconds')::interval
+                   OR clustering_keypair_slots.heartbeat < now() - (? || ' milliseconds')::interval
                 "#,
                 crate::db_params![
                     i64::from(slot_index),
                     identity.node_id.clone(),
                     identity.node_epoch.clone(),
-                    lease_ttl.as_secs().to_string(),
+                    lease_ttl.as_millis().to_string(),
                 ],
             )
             .await?;
@@ -202,13 +202,13 @@ impl KeypairSlotLease for PostgresKeypairSlotLease {
                   AND holder_node = ?
                   AND holder_epoch = ?
                   AND NOT expired
-                  AND heartbeat >= now() - (? || ' seconds')::interval
+                  AND heartbeat >= now() - (? || ' milliseconds')::interval
                 "#,
                 crate::db_params![
                     i64::from(slot.slot_index),
                     identity.node_id.clone(),
                     identity.node_epoch.clone(),
-                    lease_ttl.as_secs().to_string(),
+                    lease_ttl.as_millis().to_string(),
                 ],
             )
             .await?;
@@ -363,6 +363,30 @@ mod tests {
             .await
             .expect_err("a fences");
         assert!(matches!(err, LeaseError::FencingLoss { .. }));
+    }
+
+    #[tokio::test]
+    async fn sub_second_ttl_uses_millisecond_precision() {
+        let _guard = serial_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let (a, b) = (ident(), ident());
+        // A 300ms TTL must NOT floor to '0 seconds' (which would make every
+        // slot instantly stealable and every renewal fence).
+        let ttl = Duration::from_millis(300);
+        let slot = store.acquire(&a, 1, ttl).await.expect("a acquires");
+        // Immediately renewable within the sub-second window, and the fresh
+        // slot is not stealable by B.
+        store
+            .heartbeat(&a, slot, ttl)
+            .await
+            .expect("a renews in-window");
+        assert!(store.acquire(&b, 1, ttl).await.is_err());
+        // After the window lapses, B steals it.
+        tokio::time::sleep(Duration::from_millis(450)).await;
+        let slot_b = store.acquire(&b, 1, ttl).await.expect("b steals expired");
+        assert_eq!(slot_b.slot_index, slot.slot_index);
     }
 
     #[test]
