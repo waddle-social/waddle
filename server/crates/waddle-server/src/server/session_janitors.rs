@@ -271,17 +271,25 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                     .protocol
                     .resumable_sessions
                     .remove(&session.stream_id);
-                state
+                let removed_entry = state
                     .deps
                     .protocol
                     .connection_registry
                     .unregister(&session.jid);
-                // ADR-0017 Phase 1: mirror the unregister into the actor tree.
-                crate::server::dual_registration::mirror_unregister(
-                    &state.deps.protocol.user_registry,
-                    &session.jid,
-                )
-                .await;
+                // ADR-0017 Phase 1: mirror the unregister into the actor tree
+                // only when the DashMap actually removed an entry (Greptile
+                // review on PR #1177). Gating on the removal keeps the mirror
+                // consistent with every other teardown site and with the
+                // DashMap itself: if the janitor found nothing to remove
+                // (already superseded), it must not evict the actor-tree entry
+                // a newer session may have installed for the same JID.
+                if removed_entry.is_some() {
+                    crate::server::dual_registration::mirror_unregister(
+                        &state.deps.protocol.user_registry,
+                        &session.jid,
+                    )
+                    .await;
+                }
                 // PR #438 review (Qodo issue #2): the periodic SM expiry
                 // janitor takes its own cleanup path; without this drop
                 // it leaks `resource_to_ver` and `pending` entries for
