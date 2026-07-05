@@ -12,7 +12,7 @@ use super::behaviour::{WaddleBehaviour, WaddleBehaviourEvent};
 use super::lease::{
     KeypairSlotLease, LeaseError, LeaseIdentity, LeasedSlot, PostgresKeypairSlotLease,
 };
-use super::{dns, identity, metrics};
+use super::{dns, identity, metrics, relay};
 use crate::config::{ClusteringBootstrapConfig, ClusteringConfig};
 use crate::db::Database;
 use core::convert::Infallible;
@@ -71,8 +71,17 @@ pub enum SwarmError {
     Allowlist(#[from] AllowlistError),
 }
 
-/// Build the swarm, install the global `ActorSwarm`, start listening, and
-/// spawn the event loop on `stop_token`. Returns the local `PeerId`.
+/// Identity of a running swarm: the libp2p `PeerId` plus the per-process
+/// `node_id` that names this node's keypair-slot lease and relay registration.
+#[derive(Debug, Clone)]
+pub struct SwarmHandle {
+    pub local_peer_id: PeerId,
+    pub node_id: String,
+}
+
+/// Build the swarm, install the global `ActorSwarm`, start listening, spawn
+/// the event loop and the supervised relay on `stop_token`, and return the
+/// node's swarm identity.
 ///
 /// When a keypair pool is configured the node leases one pool slot from the
 /// Postgres control plane and uses that keypair (and heartbeats it); otherwise
@@ -81,7 +90,7 @@ pub async fn spawn(
     config: &ClusteringConfig,
     db: &Database,
     stop_token: CancellationToken,
-) -> Result<PeerId, SwarmError> {
+) -> Result<SwarmHandle, SwarmError> {
     // Parse and validate the listen multiaddrs first, before building any
     // transport or touching the process-global `ActorSwarm` — fail fast on bad
     // config.
@@ -99,7 +108,12 @@ pub async fn spawn(
         })
         .collect::<Result<Vec<Multiaddr>, SwarmError>>()?;
 
-    let keypair = node_keypair(config, db, &stop_token).await?;
+    // One per-process node id: freshly generated every start, never reused
+    // across restarts. Names this node's keypair-slot lease and its single
+    // kademlia relay registration.
+    let node_id = uuid::Uuid::new_v4().to_string();
+
+    let keypair = node_keypair(config, db, &node_id, &stop_token).await?;
     let local_peer_id = keypair.public().to_peer_id();
 
     // Peer authorization (ADR element 3): load the enrolled peer set before
@@ -169,10 +183,18 @@ pub async fn spawn(
             current: enrolled,
             interval: config.allowlist_refresh_interval,
         },
-        stop_token,
+        stop_token.clone(),
     ));
 
-    Ok(local_peer_id)
+    // The node's single kademlia registration: its supervised relay actor.
+    // Must start after the event loop is polling (registration flows through
+    // the swarm command channel serviced by the loop).
+    relay::spawn_supervised(node_id.clone(), stop_token);
+
+    Ok(SwarmHandle {
+        local_peer_id,
+        node_id,
+    })
 }
 
 /// State for the periodic allowlist refresh driven by the event loop.
@@ -190,6 +212,7 @@ struct AllowlistRefresh {
 async fn node_keypair(
     config: &ClusteringConfig,
     db: &Database,
+    node_id: &str,
     stop_token: &CancellationToken,
 ) -> Result<Keypair, SwarmError> {
     if config.keypair_pool.is_empty() {
@@ -206,7 +229,7 @@ async fn node_keypair(
     let lease = PostgresKeypairSlotLease::new(db.clone());
     lease.ensure_schema().await?;
     let node = LeaseIdentity {
-        node_id: uuid::Uuid::new_v4().to_string(),
+        node_id: node_id.to_string(),
         node_epoch: uuid::Uuid::new_v4().to_string(),
     };
     let pool_size = config.keypair_pool.len();
@@ -553,14 +576,43 @@ mod tests {
         .expect("open test postgres");
         let stop = CancellationToken::new();
 
-        let peer_id = spawn(&config, &db, stop.clone())
+        let handle = spawn(&config, &db, stop.clone())
             .await
             .expect("swarm brings up cleanly");
-        assert!(!peer_id.to_string().is_empty());
+        assert!(!handle.local_peer_id.to_string().is_empty());
 
-        // Let the event loop run a beat so a NewListenAddr is processed, then
-        // signal shutdown; the loop must stop on the token.
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Relay round-trip through the remote registry + ask path (kameo
+        // short-circuits asks whose target peer is the local node, so this
+        // exercises registration, kademlia lookup, payload serde, and the
+        // handler without a second process; the true cross-node round-trip is
+        // a Slice 6 harness case). Registration is async — poll briefly.
+        let mut relay_handle = relay::RelayHandle::new(handle.node_id.clone());
+        let pong = relay_handle.ping().await.expect("relay answers ping");
+        assert_eq!(pong.node_id, handle.node_id);
+
+        // Codec proof over the ask path: a thread-carrying message survives
+        // the RemoteStanza round-trip.
+        let mut message = xmpp_parsers::message::Message::new(None::<jid::Jid>);
+        message.thread = Some(xmpp_parsers::message::Thread {
+            id: "relay-echo-thread".to_string(),
+            parent: None,
+        });
+        let echoed = relay_handle
+            .echo_stanza(super::super::codec::RemoteStanza(
+                waddle_xmpp::Stanza::Message(message),
+            ))
+            .await
+            .expect("relay echoes stanza");
+        match echoed.stanza.0 {
+            waddle_xmpp::Stanza::Message(message) => {
+                assert_eq!(
+                    message.thread.expect("thread survives").id,
+                    "relay-echo-thread"
+                );
+            }
+            other => panic!("expected message, got {}", other.name()),
+        }
+
         stop.cancel();
         tokio::time::sleep(Duration::from_millis(50)).await;
     }

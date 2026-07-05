@@ -87,6 +87,20 @@ pub fn record_remote_codec_drop(reason: &'static str) {
     .add(1, &[opentelemetry::KeyValue::new("reason", reason)]);
 }
 
+/// Count a supervised relay-actor respawn (unexpected stop + mandatory
+/// same-name re-registration).
+pub fn record_relay_respawn() {
+    static C: OnceLock<Counter<u64>> = OnceLock::new();
+    C.get_or_init(|| {
+        meter()
+            .u64_counter("waddle.clustering.relay_respawns")
+            .with_description("Supervised relay-actor respawns with same-name re-registration")
+            .with_unit("respawn")
+            .build()
+    })
+    .add(1, &[]);
+}
+
 /// Count peers revoked by an allowlist refresh (live connections closed).
 pub fn record_peers_revoked(count: u64) {
     static C: OnceLock<Counter<u64>> = OnceLock::new();

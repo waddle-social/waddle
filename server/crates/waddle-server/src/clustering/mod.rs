@@ -32,6 +32,11 @@ mod identity;
 mod lease;
 #[cfg(feature = "clustering")]
 mod metrics;
+/// Per-node supervised relay actor + client handle. Public: the multi-process
+/// cluster harness drives `RelayHandle` cross-node, and Phase 4's routing
+/// builds on the relay message set.
+#[cfg(feature = "clustering")]
+pub mod relay;
 #[cfg(feature = "clustering")]
 mod swarm;
 
@@ -104,11 +109,12 @@ pub async fn start_if_enabled(
             return Err(ClusteringError::RequiresPostgres { driver });
         }
         // The swarm leases its keypair-pool slot from `db` (Postgres control
-        // plane) before binding. Slices 3–5 add the peer allowlist, remote
-        // codec, and supervised relay actors on top.
-        let local_peer_id = swarm::spawn(config, db, stop_token.clone()).await?;
+        // plane) before binding, enforces the peer allowlist at the behaviour
+        // layer, and registers its supervised relay actor in kademlia.
+        let handle = swarm::spawn(config, db, stop_token.clone()).await?;
         tracing::info!(
-            %local_peer_id,
+            local_peer_id = %handle.local_peer_id,
+            node_id = %handle.node_id,
             listen_addrs = ?config.listen_addrs,
             request_timeout_ms = config.messaging.request_timeout.as_millis() as u64,
             "ADR-0017 Phase 2: clustering swarm started (node discovery only)"
