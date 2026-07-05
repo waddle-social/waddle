@@ -25,6 +25,13 @@ pub(super) async fn list_all_sessions_with_unacked(
     // row in the same session was undercutting the cold-start
     // perf goal for large queues).
     let mut current_stream_id: Option<String> = None;
+    // Explicit "the current group's session failed to decode" flag.
+    // Inferring this from `out.last().is_none()` is wrong once any
+    // valid session precedes the poison one: `out` is non-empty, so
+    // the poison group's unacked rows would be appended to the
+    // preceding session's queue and replayed on the wrong user's
+    // `<resumed/>` (issue #1157).
+    let mut skipping_current_group = false;
     let mut poison_sessions = 0usize;
     while let Some(row) = rows
         .next()
@@ -65,13 +72,15 @@ pub(super) async fn list_all_sessions_with_unacked(
                     // belonging to the same skipped group and
                     // also dropped.
                     current_stream_id = Some(row_stream_id);
+                    skipping_current_group = true;
                     poison_sessions += 1;
                     continue;
                 }
             };
             current_stream_id = Some(row_stream_id);
+            skipping_current_group = false;
             out.push((session, Vec::new()));
-        } else if out.last().is_none() {
+        } else if skipping_current_group {
             // Same stream_id as a previously-skipped poison
             // session; drop this unacked row too.
             continue;
