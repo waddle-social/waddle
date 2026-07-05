@@ -22,6 +22,7 @@
 //! complementary to the coarse per-stanza frame backstop (#808): see
 //! `docs/adr/008-stanza-handler-wedge-backstop.md`.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use jid::BareJid;
@@ -31,6 +32,7 @@ use kameo::mailbox;
 use tokio::time::Instant;
 use tracing::warn;
 
+use super::affiliation::DurableMembershipSource;
 use super::room_actor::RoomActor;
 use super::room_registry_actor::{
     CreateInstantRoom, CreateRoom, DestroyRoom, GetOrCreateRoom, GetRoom, IsMucJid, ListRooms,
@@ -84,8 +86,22 @@ pub struct RoomRegistry {
 impl RoomRegistry {
     /// Spawn the registry actor behind an explicit bounded mailbox and return an
     /// instrumented handle to it.
-    pub fn spawn(muc_domain: String, occupant_id_secret: OccupantIdSecret) -> Self {
-        let actor = RoomRegistryActor::new(muc_domain, occupant_id_secret);
+    ///
+    /// `membership_source` hydrates every freshly spawned `RoomActor`'s
+    /// durable inbox recipient set from the deployment's durable
+    /// membership store (#1135). Pass `None` only when no durable
+    /// membership store exists (tests, tools); production deployments
+    /// must wire one or offline members drop out of groupchat inbox
+    /// fan-out after each room-actor respawn.
+    pub fn spawn(
+        muc_domain: String,
+        occupant_id_secret: OccupantIdSecret,
+        membership_source: Option<Arc<dyn DurableMembershipSource>>,
+    ) -> Self {
+        let mut actor = RoomRegistryActor::new(muc_domain, occupant_id_secret);
+        if let Some(source) = membership_source {
+            actor = actor.with_membership_source(source);
+        }
         let inner = RoomRegistryActor::spawn_with_mailbox(
             actor,
             mailbox::bounded(ROOM_REGISTRY_MAILBOX_CAPACITY),

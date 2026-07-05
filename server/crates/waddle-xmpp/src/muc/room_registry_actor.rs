@@ -5,6 +5,7 @@
 //! spawns per-room `RoomActor` instances on demand.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use jid::BareJid;
 use kameo::actor::{ActorRef, Spawn};
@@ -13,7 +14,8 @@ use kameo::Actor;
 use thiserror::Error;
 use tracing::{debug, info, warn};
 
-use super::room_actor::RoomActor;
+use super::affiliation::DurableMembershipSource;
+use super::room_actor::{HydrateDurableRecipients, RoomActor};
 use super::{MucRoom, RoomConfig};
 use crate::metrics;
 use crate::xep::xep0421::OccupantIdSecret;
@@ -31,6 +33,11 @@ pub struct RoomRegistryActor {
     /// `RoomActor` at spawn so all rooms in this deployment share the
     /// same keying material.
     occupant_id_secret: OccupantIdSecret,
+    /// Durable membership source used to hydrate each freshly spawned
+    /// `RoomActor`'s durable-recipient set (#1135). `None` in
+    /// deployments/tests without a durable membership store; such
+    /// rooms fall back to session-observed affiliations only.
+    membership_source: Option<Arc<dyn DurableMembershipSource>>,
 }
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
@@ -62,13 +69,28 @@ impl RoomRegistryActor {
             poisoned_rooms: HashSet::new(),
             muc_domain,
             occupant_id_secret,
+            membership_source: None,
         }
+    }
+
+    /// Attach a durable membership source so every spawned `RoomActor`
+    /// hydrates its durable-recipient set before serving snapshots (#1135).
+    #[must_use]
+    pub fn with_membership_source(mut self, source: Arc<dyn DurableMembershipSource>) -> Self {
+        self.membership_source = Some(source);
+        self
     }
 
     /// Spawn a `RoomActor` for the given room and insert it into the map.
     ///
+    /// When a [`DurableMembershipSource`] is configured, a
+    /// [`HydrateDurableRecipients`] message is enqueued as the very
+    /// first item in the fresh actor's FIFO mailbox *before* the actor
+    /// ref is handed to any caller, so every later `GetRoomSnapshot`
+    /// observes the hydrated durable-recipient set (#1135).
+    ///
     /// Returns a reference to the spawned actor.
-    fn spawn_room(
+    async fn spawn_room(
         &mut self,
         room_jid: BareJid,
         waddle_id: String,
@@ -77,6 +99,21 @@ impl RoomRegistryActor {
     ) -> ActorRef<RoomActor> {
         let room = MucRoom::new(room_jid.clone(), waddle_id, channel_id, config);
         let actor_ref = RoomActor::spawn(RoomActor::new(room, self.occupant_id_secret.clone()));
+        if let Some(source) = &self.membership_source {
+            if let Err(error) = actor_ref
+                .tell(HydrateDurableRecipients {
+                    source: Arc::clone(source),
+                })
+                .await
+            {
+                warn!(
+                    room = %room_jid,
+                    %error,
+                    "failed to enqueue durable-recipient hydration for \
+                     freshly spawned room actor"
+                );
+            }
+        }
         self.rooms.insert(room_jid, actor_ref.clone());
         actor_ref
     }
@@ -145,7 +182,9 @@ impl kameo::message::Message<GetOrCreateRoom> for RoomRegistryActor {
 
         info!(room = %msg.room_jid, "Creating new room via GetOrCreateRoom");
         self.poisoned_rooms.remove(&msg.room_jid);
-        Ok(self.spawn_room(msg.room_jid, msg.waddle_id, msg.channel_id, msg.config))
+        Ok(self
+            .spawn_room(msg.room_jid, msg.waddle_id, msg.channel_id, msg.config)
+            .await)
     }
 }
 
@@ -181,7 +220,9 @@ impl kameo::message::Message<CreateInstantRoom> for RoomRegistryActor {
         };
 
         self.poisoned_rooms.remove(&msg.room_jid);
-        Ok(self.spawn_room(msg.room_jid, waddle_id, channel_id, config))
+        Ok(self
+            .spawn_room(msg.room_jid, waddle_id, channel_id, config)
+            .await)
     }
 }
 
@@ -207,7 +248,9 @@ impl kameo::message::Message<CreateRoom> for RoomRegistryActor {
 
         info!(room = %msg.room_jid, "Creating new room");
         self.poisoned_rooms.remove(&msg.room_jid);
-        let actor_ref = self.spawn_room(msg.room_jid, msg.waddle_id, msg.channel_id, msg.config);
+        let actor_ref = self
+            .spawn_room(msg.room_jid, msg.waddle_id, msg.channel_id, msg.config)
+            .await;
         Ok(actor_ref)
     }
 }

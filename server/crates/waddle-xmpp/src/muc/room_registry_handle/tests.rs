@@ -6,6 +6,7 @@ fn test_registry() -> RoomRegistry {
     RoomRegistry::spawn(
         "muc.example.com".to_string(),
         OccupantIdSecret::for_testing(b"test-secret".to_vec()),
+        None,
     )
 }
 

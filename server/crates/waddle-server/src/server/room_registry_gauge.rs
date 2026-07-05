@@ -59,7 +59,7 @@ mod tests {
     fn test_registry() -> RoomRegistry {
         let secret = OccupantIdSecret::new(b"test-occupant-id-secret-32-bytes-long".to_vec())
             .expect("test occupant-id secret meets length floor");
-        RoomRegistry::spawn("muc.example.com".to_string(), secret)
+        RoomRegistry::spawn("muc.example.com".to_string(), secret, None)
     }
 
     #[tokio::test]

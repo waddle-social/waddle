@@ -2,6 +2,7 @@ mod acme;
 pub(crate) mod caps_resolution;
 mod config;
 pub(crate) mod dual_registration;
+pub(crate) mod durable_membership;
 mod extension_commands;
 pub mod extension_host_adapter;
 mod extension_host_tools;
@@ -168,9 +169,18 @@ pub async fn start_with_config(
     // handle (named bounded mailbox + per-request reply timeout + typed errors),
     // and start the periodic mailbox-depth gauge. The shared graph still stores
     // the underlying `ActorRef`, so existing call sites are unchanged.
+    // #1135: hydrate every freshly spawned RoomActor's durable inbox
+    // recipient set from the permission tuples, so offline channel
+    // members keep receiving inbox rows / notification candidates
+    // across deploys and actor respawns.
+    let durable_membership_source: Arc<dyn waddle_xmpp::muc::affiliation::DurableMembershipSource> =
+        Arc::new(durable_membership::PermissionDurableMembershipSource::new(
+            permission_actor.clone(),
+        ));
     let room_registry_handle = waddle_xmpp::muc::RoomRegistry::spawn(
         xmpp_config.muc_domain.to_string(),
         server_config.occupant_id_secret.clone(),
+        Some(durable_membership_source),
     );
     room_registry_gauge::spawn(room_registry_handle.clone(), stop_token.clone());
     let room_registry = room_registry_handle.actor_ref().clone();

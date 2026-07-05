@@ -173,6 +173,15 @@ pub struct RoomActor {
     config_revision: u64,
     admission_revision: u64,
     occupant_id_secret: crate::xep::xep0421::OccupantIdSecret,
+    /// Durable membership hydrated from the deployment's membership
+    /// source at spawn (#1135). Kept separate from
+    /// `MucRoom.affiliation_list` on purpose: it never grants join /
+    /// admin rights and never clobbers richer session-observed
+    /// affiliations (owner/admin) — it only widens the durable inbox
+    /// recipient set computed by [`GetRoomSnapshot`], and being a pure
+    /// mirror of the durable store it does not block room dormancy
+    /// ([`MucRoom::is_dormant`]) the way in-memory-only affiliations do.
+    durable_member_recipients: Vec<BareJid>,
 }
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
@@ -212,6 +221,54 @@ impl RoomActor {
             config_revision: 0,
             admission_revision: 0,
             occupant_id_secret,
+            durable_member_recipients: Vec::new(),
+        }
+    }
+}
+
+/// Hydrate this actor incarnation's durable-recipient set from the
+/// deployment's durable membership store (#1135).
+///
+/// The room registry enqueues this as the *first* message after
+/// spawning a `RoomActor`, before handing the actor ref to any caller.
+/// Because the mailbox is FIFO and the actor processes messages
+/// sequentially, every later [`GetRoomSnapshot`] observes the hydrated
+/// set — there is no window in which a groupchat message fans out
+/// against a not-yet-hydrated recipient list.
+///
+/// Fail-open on source errors: the actor keeps serving with
+/// session-observed affiliations only (pre-#1135 behavior) rather than
+/// wedging the room.
+pub struct HydrateDurableRecipients {
+    pub source: std::sync::Arc<dyn super::affiliation::DurableMembershipSource>,
+}
+
+impl kameo::message::Message<HydrateDurableRecipients> for RoomActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: HydrateDurableRecipients,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        match msg
+            .source
+            .list_durable_member_jids(&self.room.waddle_id, &self.room.channel_id)
+            .await
+        {
+            Ok(mut members) => {
+                members.sort();
+                members.dedup();
+                self.durable_member_recipients = members;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    room = %self.room.room_jid,
+                    %error,
+                    "durable membership hydration failed; durable inbox \
+                     recipients limited to session-observed affiliations"
+                );
+            }
         }
     }
 }
