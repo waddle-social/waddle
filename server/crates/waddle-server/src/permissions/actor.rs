@@ -18,7 +18,12 @@ enum PermissionActorBackend {
     SpiceDb(Box<SpiceDbPermissionBackend>),
     Local {
         tuple_store: TupleStore,
-        checker: PermissionChecker,
+        // Boxed to keep the enum's `Local` variant small: enabling the
+        // `clustering` feature unifies the dependency graph on libp2p's
+        // (larger) transitive crypto crates, which grows `PermissionChecker`
+        // enough to trip `clippy::large_enum_variant` on this two-variant enum
+        // (`SpiceDb` is already boxed for the same reason).
+        checker: Box<PermissionChecker>,
     },
 }
 
@@ -114,7 +119,7 @@ impl PermissionActor {
         Self {
             backend: PermissionActorBackend::Local {
                 tuple_store,
-                checker,
+                checker: Box::new(checker),
             },
         }
     }

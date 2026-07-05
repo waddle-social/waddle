@@ -192,6 +192,24 @@ async fn run_event_loop(
     }
 }
 
+/// Record a newly connected peer, updating the connected-peer gauge on the
+/// first connection to that peer.
+fn track_peer_connected(peer_id: PeerId, connected: &mut HashSet<PeerId>) {
+    if connected.insert(peer_id) {
+        metrics::record_connected_peers(connected.len() as i64);
+        tracing::debug!(%peer_id, "clustering peer connected");
+    }
+}
+
+/// Record a peer whose last connection closed, updating the connected-peer
+/// gauge if it was tracked.
+fn track_peer_disconnected(peer_id: PeerId, connected: &mut HashSet<PeerId>) {
+    if connected.remove(&peer_id) {
+        metrics::record_connected_peers(connected.len() as i64);
+        tracing::debug!(%peer_id, "clustering peer disconnected");
+    }
+}
+
 /// Update local peer bookkeeping and metrics from a single swarm event.
 fn handle_swarm_event(
     event: SwarmEvent<WaddleBehaviourEvent>,
@@ -203,21 +221,15 @@ fn handle_swarm_event(
             tracing::info!(%address, "clustering swarm listening");
         }
         SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-            if connected.insert(peer_id) {
-                metrics::record_connected_peers(connected.len() as i64);
-                tracing::debug!(%peer_id, "clustering peer connected");
-            }
+            track_peer_connected(peer_id, connected);
         }
+        // Only drop the peer when its last connection closes (num_established 0).
         SwarmEvent::ConnectionClosed {
             peer_id,
-            num_established,
+            num_established: 0,
             ..
         } => {
-            // Only drop the peer when its last connection closes.
-            if num_established == 0 && connected.remove(&peer_id) {
-                metrics::record_connected_peers(connected.len() as i64);
-                tracing::debug!(%peer_id, "clustering peer disconnected");
-            }
+            track_peer_disconnected(peer_id, connected);
         }
         SwarmEvent::Behaviour(WaddleBehaviourEvent::Kameo(remote::Event::Registry(
             registry::Event::RoutingUpdated {
