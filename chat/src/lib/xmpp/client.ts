@@ -829,6 +829,13 @@ export class BrowserXmppClient {
    */
   async connect(): Promise<void> {
     if (this.xmpp && this.connected) return;
+    // Join an in-flight attempt BEFORE the terminal/exhausted gate:
+    // during the scheduler's FINAL attempt the timer is already null
+    // and the attempt counter is at the cap, so `isExhausted()` reads
+    // true for the whole (up to `connectTimeoutMs`) window even though
+    // the attempt may still succeed. A user action in that window must
+    // ride the pending attempt, not fast-reject.
+    if (this.connectPromise) return this.connectPromise;
     if (this.inTerminalErrorState || this.reconnect.isExhausted()) {
       throw new Error("XMPP session is not ready");
     }
@@ -892,6 +899,14 @@ export class BrowserXmppClient {
             this.xmpp = null;
             void Promise.resolve(stalled.disconnect?.()).catch(() => undefined);
           }
+          // An armed terminal detail is stale by construction here: it
+          // belongs to the handle we just destroyed, whose disconnect
+          // callback (the sole consumer) is now dropped by the handle
+          // guard. Left in place it would poison the scheduler's next
+          // attempt — its first transient disconnect would read as
+          // terminal. The retry re-encounters a genuinely terminal
+          // condition and re-classifies it via `set_on_error`.
+          this.terminalDisconnectDetail = null;
           if (!this.destroying) {
             this.emitStatus({ state: "reconnecting", detail: "Connection attempt timed out — retrying" });
             this.reconnect.schedule();
@@ -939,8 +954,13 @@ export class BrowserXmppClient {
     this.onceConnectFailed = null;
     failPendingConnect?.(new Error("XMPP disconnected"));
     // A disconnect is user-explicit (logout): the terminal-error latch
-    // must not survive into a later session on this instance.
+    // must not survive into a later session on this instance. The armed
+    // detail moves with it — the disconnect callback that would consume
+    // it is dropped by the handle guard once we tear down here, and a
+    // leftover detail would make the NEXT session's first transient
+    // disconnect flip to a false terminal "sign in again".
     this.inTerminalErrorState = false;
+    this.terminalDisconnectDetail = null;
     this.clearResumeState();
     const xmpp = this.xmpp;
     const joinedRooms = [...this.joinedMucs.keys()];

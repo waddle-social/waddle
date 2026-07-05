@@ -213,9 +213,14 @@ export class ReconnectScheduler {
   }
 
   /**
-   * True once the attempt cap is spent and no retry timer is pending —
-   * i.e. the state `onExhausted` announced. While a timer is still
-   * armed the loop is alive, so callers must not treat it as exhausted.
+   * True once the attempt cap is spent and no retry timer is pending.
+   * While a timer is still armed the loop is alive, so callers must not
+   * treat it as exhausted. Caveat: the timer is nulled BEFORE the final
+   * attempt's `connect()` is invoked, so this also reads true while
+   * that last attempt is still in flight — callers gating on it must
+   * first join any pending connect promise (see `connect()` in
+   * `client.ts`) so a user action during that window rides the attempt
+   * instead of fast-rejecting.
    */
   isExhausted(): boolean {
     return this.attempt >= MAX_RECONNECT_ATTEMPTS && this.timer === null;

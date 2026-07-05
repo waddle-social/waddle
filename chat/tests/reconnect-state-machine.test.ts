@@ -30,6 +30,7 @@ type PrivateState = {
   wireEvents: (xmpp: StubXmpp) => void;
   reconnect: { clearTimer: () => void };
   connectWithFreshBudget: () => Promise<void>;
+  connectFromScheduler: () => Promise<void>;
   handleDisconnected: (xmpp: unknown, error?: Error) => void;
   handleMessage: (message: unknown) => void;
   connectTimeoutMs: number;
@@ -488,6 +489,104 @@ describe("terminal classification requires the structured stream-error (C4)", ()
 
     expect(statuses.at(-1)?.state).toBe("error");
     expect(scheduled).toHaveLength(0);
+    state.reconnect.clearTimer();
+  });
+});
+
+describe("stale terminalDisconnectDetail must not survive disconnect()", () => {
+  test("terminal stream error + disconnect() before the disconnect callback: the next session's transient drop stays recoverable", async () => {
+    const { client, state, stub, statuses, scheduled, fireError } = createHarness();
+
+    // Terminal classification arrives, but the user disconnects before
+    // the WASM disconnect callback consumes the armed detail (the
+    // destroying path returns early; the late callback is dropped by
+    // the handle guard).
+    fireError({ condition: "not-authorized", detail: "SASL authentication failed" });
+    await client.disconnect();
+
+    // Next session on the same instance: a connect is in flight...
+    statuses.length = 0;
+    state.connectTimeoutMs = 200;
+    state.doConnect = async () => {
+      state.xmpp = stub;
+      state.connected = true;
+    };
+    const pending = client.connect();
+    pending.catch(() => undefined);
+    await sleep(5);
+
+    // ...and its FIRST transient disconnect must reconnect — not consume
+    // the previous session's stale terminal detail into a false
+    // "sign in again" error with zero retries.
+    state.handleDisconnected(stub);
+
+    expect(statuses.at(-1)?.state).toBe("reconnecting");
+    expect(scheduled).toHaveLength(1);
+    state.reconnect.clearTimer();
+  });
+
+  test("connect-budget timeout after a terminal stream error does not poison the scheduler's next attempt", async () => {
+    const { client, state, stub, statuses, scheduled, fireError, fireDisconnected } = createHarness();
+
+    // A connect attempt is pending; a terminal stream error lands, then
+    // the connect budget fires BEFORE the disconnect callback — nulling
+    // `this.xmpp` and orphaning the armed detail.
+    state.connected = false;
+    state.connectTimeoutMs = 10;
+    state.doConnect = async () => {};
+    const pending = client.connect();
+    pending.catch(() => undefined);
+    fireError({ condition: "not-authorized", detail: "SASL authentication failed" });
+    await sleep(25);
+    expect(scheduled).toHaveLength(1);
+
+    // The scheduler's next attempt suffers a transient disconnect: it
+    // must stay in the reconnecting loop, not flip terminal off the
+    // orphaned detail.
+    state.reconnect.clearTimer();
+    state.xmpp = stub;
+    state.connected = true;
+    fireDisconnected();
+
+    expect(statuses.at(-1)?.state).toBe("reconnecting");
+    expect(scheduled).toHaveLength(2);
+    state.reconnect.clearTimer();
+  });
+});
+
+describe("isExhausted must not fast-reject during the final in-flight attempt", () => {
+  test("connect() during the last scheduled attempt joins it; after it truly exhausts, connect() fast-rejects", async () => {
+    const client = new BrowserXmppClient(session());
+    const state = client as unknown as PrivateState;
+    const statuses: XmppStatusSnapshot[] = [];
+    client.setStatusHandler((snapshot) => statuses.push(snapshot));
+
+    // The budget is fully spent and the scheduler's FINAL timer has just
+    // fired: attempt == MAX, timer == null, the attempt is in flight.
+    (state.reconnect as unknown as { attempt: number }).attempt = 10;
+    state.connectTimeoutMs = 30;
+    state.doConnect = async () => {}; // socket never establishes a session
+    const inflight = state.connectFromScheduler();
+    inflight.catch(() => undefined);
+
+    // A user action during the window must join the in-flight attempt
+    // (which may still succeed), not fast-reject.
+    let rejection: Error | null = null;
+    let settled = false;
+    const joined = client.connect().then(
+      () => { settled = true; },
+      (error: Error) => { settled = true; rejection = error; },
+    );
+    await sleep(5);
+    expect(settled).toBe(false);
+
+    // The final attempt times out → NOW the loop is truly exhausted.
+    await sleep(45);
+    await joined;
+    expect(rejection?.message).toBe("Reconnection timed out");
+    expect(statuses.at(-1)?.state).toBe("error");
+
+    await expect(client.connect()).rejects.toThrow("XMPP session is not ready");
     state.reconnect.clearTimer();
   });
 });
