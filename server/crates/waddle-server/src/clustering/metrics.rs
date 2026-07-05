@@ -71,6 +71,22 @@ pub fn record_allowlist_size(count: i64) {
     .record(count, &[]);
 }
 
+/// Count a remote-codec decode rejection (bounds violation or re-parse
+/// failure). `reason` is a stable low-cardinality label
+/// (`too_large`/`too_deep`/`too_many_attributes`/`malformed`/`not_a_stanza`/
+/// `serialize`).
+pub fn record_remote_codec_drop(reason: &'static str) {
+    static C: OnceLock<Counter<u64>> = OnceLock::new();
+    C.get_or_init(|| {
+        meter()
+            .u64_counter("waddle.clustering.remote_codec_drops")
+            .with_description("Remote payloads rejected by the XML codec (NACKed, never silent)")
+            .with_unit("payload")
+            .build()
+    })
+    .add(1, &[opentelemetry::KeyValue::new("reason", reason)]);
+}
+
 /// Count peers revoked by an allowlist refresh (live connections closed).
 pub fn record_peers_revoked(count: u64) {
     static C: OnceLock<Counter<u64>> = OnceLock::new();
