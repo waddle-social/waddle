@@ -53,7 +53,7 @@ pub(super) async fn list_all_sessions_with_unacked(
         };
         let starts_new_group = current_stream_id.as_deref() != Some(row_stream_id.as_str());
         if starts_new_group {
-            // Decode the session columns (0..=14, 15 columns)
+            // Decode the session columns (0..=16, 17 columns)
             // exactly once per stream_id group. On decode
             // failure, skip the entire group's rows so a single
             // poison-pill session can't brick cold startup
