@@ -464,9 +464,13 @@ async fn interpret_with_depth(
                 );
             }
             OutboundEvent::UnregisterConnection(jid) => {
-                let _entry = registry.unregister(&jid);
+                let removed_entry = registry.unregister(&jid);
                 debug!(jid = %jid, "UnregisterConnection: removed from registry");
-                // ADR-0017 Phase 1: mirror the unregister into the actor tree.
+                // ADR-0017 Phase 1: mirror the unregister into the actor tree,
+                // gated on the DashMap actually removing an entry (Copilot
+                // review on PR #1177) — consistent with every other teardown
+                // site, so a stale/duplicate event cannot evict the actor-tree
+                // entry a newer session installed for the same FullJid.
                 //
                 // NOTE: no producer currently emits `OutboundEvent::Unregister\
                 // Connection`, so this arm is a placeholder — the live teardown
@@ -476,8 +480,11 @@ async fn interpret_with_depth(
                 // `cleanup_invalidated_detached_session`, and the SM-expiry
                 // janitor). If the state machine ever starts emitting this
                 // event, this keeps the mirror symmetric on that path too.
-                if let Some(user_registry) = deps.user_registry {
-                    crate::server::dual_registration::mirror_unregister(user_registry, &jid).await;
+                if removed_entry.is_some() {
+                    if let Some(user_registry) = deps.user_registry {
+                        crate::server::dual_registration::mirror_unregister(user_registry, &jid)
+                            .await;
+                    }
                 }
             }
             OutboundEvent::ArchiveGroupchat {
