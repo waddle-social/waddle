@@ -632,3 +632,55 @@ async fn postgres_handles_i32_overflow_session_and_unacked_timestamps_ms() {
         .await
         .expect("cleanup postgres sm rows");
 }
+
+#[tokio::test]
+async fn delete_unacked_removes_only_named_sequences_for_stream() {
+    // Issue #1145: the tombstone scrub needs a targeted durable
+    // delete keyed on the (stream_id, sequence) PK so retracted
+    // stanzas cannot be rehydrated after a restart. Rows for other
+    // sequences and other streams must be untouched.
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    storage
+        .upsert_session(fixture_session("stream-a"))
+        .await
+        .unwrap();
+    storage
+        .upsert_session(fixture_session("stream-b"))
+        .await
+        .unwrap();
+    for seq in [1u32, 2, 3] {
+        storage
+            .append_unacked(fixture_unacked("stream-a", seq))
+            .await
+            .unwrap();
+    }
+    storage
+        .append_unacked(fixture_unacked("stream-b", 2))
+        .await
+        .unwrap();
+
+    let removed = storage
+        .delete_unacked(&SmSessionId::new("stream-a"), &[1, 3])
+        .await
+        .unwrap();
+    assert_eq!(removed, 2);
+
+    let remaining_a = storage
+        .list_unacked(&SmSessionId::new("stream-a"))
+        .await
+        .unwrap();
+    let seqs: Vec<u32> = remaining_a.iter().map(|r| r.sequence).collect();
+    assert_eq!(seqs, vec![2]);
+    let remaining_b = storage
+        .list_unacked(&SmSessionId::new("stream-b"))
+        .await
+        .unwrap();
+    assert_eq!(remaining_b.len(), 1, "other streams' rows are untouched");
+
+    // Deleting sequences that no longer exist is a no-op, not an error.
+    let removed = storage
+        .delete_unacked(&SmSessionId::new("stream-a"), &[1, 3])
+        .await
+        .unwrap();
+    assert_eq!(removed, 0);
+}

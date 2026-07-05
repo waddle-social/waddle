@@ -285,7 +285,30 @@ pub(super) async fn cleanup_connection_shutdown(
                 .store_session(detached)
                 .await
             {
-                Ok(()) => {
+                Ok(displaced) => {
+                    // Issue #1097: sessions the registry displaced to make
+                    // room (max_sessions overflow, or a stale detached
+                    // stream for this same JID) carry unacked queues that
+                    // must run the XEP-0198 §5 promote → confirm chain
+                    // instead of being dropped. Promote before anything
+                    // else in this arm — the early-return below must not
+                    // skip it.
+                    if !displaced.is_empty() {
+                        crate::sm_promotion::promote_displaced_sessions(
+                            displaced.clone(),
+                            crate::sm_promotion::DisplacedPromotionDeps {
+                                sm_registry: &state.deps.protocol.sm_session_registry,
+                                connection_registry: &state.deps.protocol.connection_registry,
+                                pending_storage: &state.deps.protocol.pending_delivery_storage,
+                                blocking_storage: state.deps.protocol.blocking_storage.as_ref(),
+                                server_domain: state.deps.auth_state.xmpp_domain.as_str(),
+                            },
+                        )
+                        .await;
+                        for dead in displaced {
+                            cleanup_invalidated_detached_session(state, dead, None).await;
+                        }
+                    }
                     if state
                         .deps
                         .protocol

@@ -1,10 +1,11 @@
-use super::DetachedSession;
-
-/// Strip every unacked outbound `<message/>` entry that matches a
-/// XEP-0424 / XEP-0425 tombstone. Returns the number of entries
-/// removed.
+/// Select the sequences of unacked outbound `<message/>` entries that
+/// match a XEP-0424 / XEP-0425 tombstone. Pure — takes a snapshot of
+/// `(sequence, stanza_xml)` pairs so the caller can parse OUTSIDE the
+/// registry's write locks (issue #1145) and later remove exactly the
+/// returned `(stream_id, sequence)` pairs, which is safe even if the
+/// queue changed between snapshot and removal.
 ///
-/// A cached message is removed iff:
+/// A cached message matches iff:
 ///   1. it is a `<message>` element,
 ///   2. its `from` or `to` attribute bare-equals `archive_jid` (scope
 ///      guard — prevents cross-conversation collateral damage when
@@ -16,20 +17,22 @@ use super::DetachedSession;
 ///      invariant).
 ///
 /// Parse errors and non-message frames are skipped silently — only
-/// matching messages are removed.
-pub(super) fn scrub_session_unacked(
-    session: &mut DetachedSession,
+/// matching messages are selected.
+pub(super) fn matching_tombstone_sequences(
+    entries: &[(u32, String)],
     target_id: &str,
     archive_jid: &str,
-) -> usize {
-    let before = session.unacked_stanzas.len();
-    session
-        .unacked_stanzas
-        .retain(|entry| match entry.stanza_xml.parse::<minidom::Element>() {
-            Ok(el) => !cached_message_matches_tombstone(&el, target_id, archive_jid),
-            Err(_) => true,
-        });
-    before - session.unacked_stanzas.len()
+) -> Vec<u32> {
+    entries
+        .iter()
+        .filter(
+            |(_, stanza_xml)| match stanza_xml.parse::<minidom::Element>() {
+                Ok(el) => cached_message_matches_tombstone(&el, target_id, archive_jid),
+                Err(_) => false,
+            },
+        )
+        .map(|(sequence, _)| *sequence)
+        .collect()
 }
 
 fn cached_message_matches_tombstone(

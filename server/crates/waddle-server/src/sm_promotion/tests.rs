@@ -776,3 +776,299 @@ async fn promotion_prefers_existing_self_stamp_time_over_queue_receipt_time() {
          not the unacked queue's redelivery-time receipt"
     );
 }
+
+#[tokio::test]
+async fn restart_outlasting_resume_window_promotes_queue_into_pending_delivery() {
+    // Issue #1098 acceptance: a server restart that outlasts the
+    // XEP-0198 resume window must not lose the dead session's unacked
+    // queue. The restore path hydrates the (already-expired) session,
+    // the janitor-shaped drain → promote → confirm chain lands the
+    // stanza in pending delivery storage, and only then are the
+    // durable SM rows erased.
+    use waddle_xmpp::pending_delivery::SmSessionId;
+    use waddle_xmpp::stream_management::persistence::{
+        InMemorySmPersistence, PersistedSession, PersistedUnackedStanza, SmPersistenceStorage,
+    };
+    use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
+
+    let sm_storage = Arc::new(InMemorySmPersistence::new());
+    let now = Utc::now();
+    sm_storage
+        .upsert_session(PersistedSession {
+            stream_id: SmSessionId::new("stream-dead"),
+            user_id: "alice".to_string(),
+            jid: full("alice@example.com/laptop"),
+            inbound_count: 0,
+            outbound_count: 1,
+            last_acked: 0,
+            replay_gap_through: None,
+            max_resume_time: Some(60),
+            detached_at: now - chrono::Duration::seconds(600),
+            max_resume_duration: std::time::Duration::from_secs(60),
+            carbons_enabled: false,
+            roster_interested: false,
+            blocklist_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+        })
+        .await
+        .unwrap();
+    let mut queued =
+        xmpp_parsers::message::Message::new(Some("alice@example.com".parse::<jid::Jid>().unwrap()));
+    queued.from = Some("bob@elsewhere/x".parse::<jid::Jid>().unwrap());
+    queued.type_ = xmpp_parsers::message::MessageType::Chat;
+    queued
+        .bodies
+        .insert(xmpp_parsers::message::Lang::new(), "while down".to_string());
+    sm_storage
+        .append_unacked(PersistedUnackedStanza {
+            stream_id: SmSessionId::new("stream-dead"),
+            sequence: 1,
+            stanza: Box::new(Stanza::Message(queued)),
+            original_receipt_at: now - chrono::Duration::seconds(610),
+        })
+        .await
+        .unwrap();
+
+    // Restart-style bring-up: fresh registry over the same storage.
+    let sm_registry = InMemorySmSessionRegistry::new()
+        .with_persistence(Arc::clone(&sm_storage) as Arc<dyn SmPersistenceStorage>);
+    assert_eq!(sm_registry.restore_from_persistence().await.unwrap(), 1);
+
+    // Janitor pass: drain expired, promote, confirm.
+    let drained = sm_registry.drain_expired().await.unwrap();
+    assert_eq!(drained.len(), 1);
+    let pending: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    let registry = ConnectionRegistry::new();
+    let summary = promote_session_unacked(
+        &drained[0],
+        &registry,
+        &pending,
+        &Blocklist::empty(),
+        "example.com",
+    )
+    .await;
+    assert_eq!(summary.queued, 1);
+    assert!(!summary.has_storage_failure());
+    sm_registry.confirm_drained("stream-dead").await;
+
+    assert_eq!(pending.count(&bare("alice@example.com")).await.unwrap(), 1);
+    assert!(sm_storage
+        .get_session(&SmSessionId::new("stream-dead"))
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn displaced_sessions_are_promoted_and_confirmed() {
+    // Issue #1097 acceptance: sessions displaced from the SM registry
+    // (max_sessions overflow eviction or fresh-bind invalidation) run
+    // the full promote → confirm chain. The queued DM lands in
+    // pending delivery storage and the displaced session's durable SM
+    // rows are erased only afterwards.
+    use waddle_xmpp::pending_delivery::SmSessionId;
+    use waddle_xmpp::stream_management::persistence::{
+        InMemorySmPersistence, SmPersistenceStorage,
+    };
+    use waddle_xmpp::stream_management::{InMemorySmSessionRegistry, SmSessionRegistry};
+    use waddle_xmpp::xep::xep0191::{BlockingStorage, InMemoryBlockingStorage};
+
+    let sm_storage = Arc::new(InMemorySmPersistence::new());
+    let sm_registry = InMemorySmSessionRegistry::with_capacity(1)
+        .with_persistence(Arc::clone(&sm_storage) as Arc<dyn SmPersistenceStorage>);
+    let mut oldest = detached_session_with_unacked(
+        "stream-oldest",
+        full("alice@example.com/web"),
+        vec![dm_xml("bob@elsewhere/x", "alice@example.com", "displaced")],
+    );
+    oldest.detached_at = Instant::now() - std::time::Duration::from_secs(30);
+    assert!(sm_registry.store_session(oldest).await.unwrap().is_empty());
+
+    // Filling past capacity displaces the oldest session.
+    let displaced = sm_registry
+        .store_session(detached_session_with_unacked(
+            "stream-newer",
+            full("carol@example.com/web"),
+            Vec::new(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(displaced.len(), 1);
+
+    let pending: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    let registry = ConnectionRegistry::new();
+    let blocking: Arc<dyn BlockingStorage> = Arc::new(InMemoryBlockingStorage::new());
+    promote_displaced_sessions(
+        displaced,
+        DisplacedPromotionDeps {
+            sm_registry: &sm_registry,
+            connection_registry: &registry,
+            pending_storage: &pending,
+            blocking_storage: blocking.as_ref(),
+            server_domain: "example.com",
+        },
+    )
+    .await;
+
+    // The displaced queue landed in pending delivery — no message lost.
+    assert_eq!(pending.count(&bare("alice@example.com")).await.unwrap(), 1);
+    // Confirmed: durable SM rows for the displaced session are gone.
+    assert!(sm_storage
+        .get_session(&SmSessionId::new("stream-oldest"))
+        .await
+        .unwrap()
+        .is_none());
+    // The surviving session's rows remain.
+    assert!(sm_storage
+        .get_session(&SmSessionId::new("stream-newer"))
+        .await
+        .unwrap()
+        .is_some());
+}
+
+#[tokio::test]
+async fn fresh_bind_invalidation_delivers_displaced_queue_to_new_session() {
+    // Issue #1097 acceptance (fresh-bind path): the resource just
+    // re-bound (registered in the ConnectionRegistry), so promoting
+    // the invalidated old detached session live-delivers its queue to
+    // the new session via the promotion chain's alt-resource step —
+    // then confirms, erasing the stale durable rows.
+    use waddle_xmpp::pending_delivery::SmSessionId;
+    use waddle_xmpp::stream_management::persistence::{
+        InMemorySmPersistence, SmPersistenceStorage,
+    };
+    use waddle_xmpp::stream_management::{InMemorySmSessionRegistry, SmSessionRegistry};
+    use waddle_xmpp::xep::xep0191::{BlockingStorage, InMemoryBlockingStorage};
+
+    let sm_storage = Arc::new(InMemorySmPersistence::new());
+    let sm_registry = InMemorySmSessionRegistry::new()
+        .with_persistence(Arc::clone(&sm_storage) as Arc<dyn SmPersistenceStorage>);
+    let jid = full("alice@example.com/phone");
+    assert!(sm_registry
+        .store_session(detached_session_with_unacked(
+            "stream-stale",
+            jid.clone(),
+            vec![dm_xml(
+                "bob@elsewhere/x",
+                "alice@example.com",
+                "for the new bind"
+            )],
+        ))
+        .await
+        .unwrap()
+        .is_empty());
+
+    // The fresh bind registers its connection BEFORE invalidation runs
+    // (finalize_sm_after_registry_registration ordering).
+    let registry = ConnectionRegistry::new();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    registry.register(jid.clone(), tx);
+    registry.update_presence(&jid, true, 0);
+
+    let removed = sm_registry.invalidate_sessions_for_jid(&jid).await.unwrap();
+    assert_eq!(removed.len(), 1);
+
+    let pending: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    let blocking: Arc<dyn BlockingStorage> = Arc::new(InMemoryBlockingStorage::new());
+    promote_displaced_sessions(
+        removed,
+        DisplacedPromotionDeps {
+            sm_registry: &sm_registry,
+            connection_registry: &registry,
+            pending_storage: &pending,
+            blocking_storage: blocking.as_ref(),
+            server_domain: "example.com",
+        },
+    )
+    .await;
+
+    assert!(
+        rx.try_recv().is_ok(),
+        "displaced queue must be live-delivered to the freshly bound session"
+    );
+    assert_eq!(pending.count(&bare("alice@example.com")).await.unwrap(), 0);
+    assert!(sm_storage
+        .get_session(&SmSessionId::new("stream-stale"))
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn capacity_churn_loses_no_messages_across_restart_style_read() {
+    // Issue #1097 acceptance (churn): fill the registry to capacity,
+    // keep storing so the oldest sessions are evicted, promote every
+    // displaced session, then do a restart-style read: every evicted
+    // user's message must be in pending delivery storage and no
+    // stale durable SM rows may remain for confirmed streams.
+    use waddle_xmpp::stream_management::persistence::{
+        InMemorySmPersistence, SmPersistenceStorage,
+    };
+    use waddle_xmpp::stream_management::{InMemorySmSessionRegistry, SmSessionRegistry};
+    use waddle_xmpp::xep::xep0191::{BlockingStorage, InMemoryBlockingStorage};
+
+    let sm_storage = Arc::new(InMemorySmPersistence::new());
+    let sm_registry = InMemorySmSessionRegistry::with_capacity(2)
+        .with_persistence(Arc::clone(&sm_storage) as Arc<dyn SmPersistenceStorage>);
+    let pending: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    let registry = ConnectionRegistry::new();
+    let blocking: Arc<dyn BlockingStorage> = Arc::new(InMemoryBlockingStorage::new());
+
+    for i in 0..5u32 {
+        let user = format!("user{i}@example.com");
+        let mut session = detached_session_with_unacked(
+            &format!("stream-{i}"),
+            format!("{user}/web").parse().unwrap(),
+            vec![dm_xml("bob@elsewhere/x", &user, &format!("msg-{i}"))],
+        );
+        // Strictly increasing ages so eviction order is deterministic.
+        session.detached_at = Instant::now() - std::time::Duration::from_secs(60 - u64::from(i));
+        let displaced = sm_registry.store_session(session).await.unwrap();
+        promote_displaced_sessions(
+            displaced,
+            DisplacedPromotionDeps {
+                sm_registry: &sm_registry,
+                connection_registry: &registry,
+                pending_storage: &pending,
+                blocking_storage: blocking.as_ref(),
+                server_domain: "example.com",
+            },
+        )
+        .await;
+    }
+
+    // 5 stored into capacity 2 → 3 evictions, all promoted offline.
+    let mut evicted_recipients = 0u32;
+    let mut retained_streams = 0u32;
+    for i in 0..5u32 {
+        let user: BareJid = format!("user{i}@example.com").parse().unwrap();
+        let queued = pending.count(&user).await.unwrap();
+        let still_detached = sm_registry
+            .peek_session(&format!("stream-{i}"))
+            .await
+            .unwrap()
+            .is_some();
+        assert!(
+            (queued == 1) ^ still_detached,
+            "user{i}: message must be either queued for delivery or still \
+             replayable from its detached session — never lost, never both"
+        );
+        evicted_recipients += queued;
+        retained_streams += u32::from(still_detached);
+    }
+    assert_eq!(evicted_recipients, 3);
+    assert_eq!(retained_streams, 2);
+
+    // Restart-style read: a fresh registry over the same durable
+    // storage hydrates exactly the retained (unconfirmed) sessions.
+    let restarted = InMemorySmSessionRegistry::new()
+        .with_persistence(Arc::clone(&sm_storage) as Arc<dyn SmPersistenceStorage>);
+    assert_eq!(restarted.restore_from_persistence().await.unwrap(), 2);
+}

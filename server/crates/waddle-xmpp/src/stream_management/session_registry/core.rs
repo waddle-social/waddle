@@ -116,22 +116,24 @@ impl InMemorySmSessionRegistry {
             .await
             .map_err(|e| SmRegistryError::Internal(e.to_string()))?;
         let mut hydrated_sessions = Vec::with_capacity(stored.len());
-        let mut expired_ids = Vec::new();
+        let mut expired = 0usize;
         let mut bad_rows = 0usize;
         for (persisted, unacked) in stored {
-            // Filter expired-during-downtime: detached_at +
-            // max_resume_duration <= now means the resume window is
-            // already closed. Hydrating these would let them appear
-            // resumable on the wire and silently exceed
-            // max_sessions, plus they'd be re-loaded on every
-            // restart since the in-memory janitor doesn't drain
-            // durable rows. Mark for durable deletion below.
+            // Expired-during-downtime sessions (detached_at +
+            // max_resume_duration <= now) are hydrated too (issue
+            // #1098): deleting their rows here would silently discard
+            // their unacked queues, violating XEP-0198 §5 ("treat
+            // unacknowledged stanzas … like stanzas to an unavailable
+            // resource"). They are not resumable on the wire —
+            // peek/take/claim all gate on `is_expired()` — and the
+            // SM-expiry janitor's next `drain_expired` pass runs the
+            // promote → confirm chain, which is what finally deletes
+            // the durable rows via `confirm_drained`.
             let expires_at = persisted.detached_at
                 + chrono::Duration::from_std(persisted.max_resume_duration)
                     .unwrap_or(chrono::Duration::seconds(0));
             if expires_at <= now {
-                expired_ids.push(persisted.stream_id.clone());
-                continue;
+                expired += 1;
             }
             match persisted_to_detached(&persisted, &unacked) {
                 Ok(session) => hydrated_sessions.push(session),
@@ -143,17 +145,6 @@ impl InMemorySmSessionRegistry {
                     );
                     bad_rows += 1;
                 }
-            }
-        }
-        // Best-effort durable cleanup of expired rows. Failures here
-        // are non-fatal — the janitor's next pass will retry.
-        for stream_id in &expired_ids {
-            if let Err(error) = storage.delete_session(stream_id).await {
-                debug!(
-                    stream_id = %stream_id,
-                    error = %error,
-                    "failed to delete expired persisted SM session during restore; will retry"
-                );
             }
         }
         let hydrated = hydrated_sessions.len();
@@ -168,9 +159,7 @@ impl InMemorySmSessionRegistry {
         }
         debug!(
             hydrated,
-            expired = expired_ids.len(),
-            bad_rows,
-            "restored detached SM sessions from persistence"
+            expired, bad_rows, "restored detached SM sessions from persistence"
         );
         Ok(hydrated)
     }

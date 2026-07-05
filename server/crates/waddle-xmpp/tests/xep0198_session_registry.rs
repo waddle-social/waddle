@@ -114,6 +114,14 @@ impl SmPersistenceStorage for BlockingFirstAtomicStore {
         self.inner.ack_through(stream_id, up_to_sequence).await
     }
 
+    async fn delete_unacked(
+        &self,
+        stream_id: &SmSessionId,
+        sequences: &[u32],
+    ) -> Result<u64, SmPersistenceError> {
+        self.inner.delete_unacked(stream_id, sequences).await
+    }
+
     async fn list_unacked(
         &self,
         stream_id: &SmSessionId,
@@ -191,6 +199,14 @@ impl SmPersistenceStorage for MislabelingStore {
         up_to_sequence: u32,
     ) -> Result<u64, SmPersistenceError> {
         self.inner.ack_through(stream_id, up_to_sequence).await
+    }
+
+    async fn delete_unacked(
+        &self,
+        stream_id: &SmSessionId,
+        sequences: &[u32],
+    ) -> Result<u64, SmPersistenceError> {
+        self.inner.delete_unacked(stream_id, sequences).await
     }
 
     async fn list_unacked(

@@ -26,8 +26,21 @@ pub enum SmRegistryError {
 pub trait SmSessionRegistry: Send + Sync {
     /// Store a detached session.
     ///
-    /// The session can be retrieved later using `take_session` with the stream_id.
-    async fn store_session(&self, session: DetachedSession) -> Result<(), SmRegistryError>;
+    /// The session can be retrieved later using `take_session` with the
+    /// stream_id.
+    ///
+    /// Returns the sessions this store displaced from the in-memory
+    /// pool — a superseded detached stream for the same full JID and/or
+    /// the oldest session evicted on `max_sessions` overflow. Their
+    /// unacked queues must NOT be discarded (XEP-0198 §5): the caller
+    /// runs the promote → confirm chain on each and calls
+    /// `confirm_drained` afterwards; durable rows for displaced
+    /// sessions survive until that confirmation so a crash mid-
+    /// promotion retries on the next startup.
+    async fn store_session(
+        &self,
+        session: DetachedSession,
+    ) -> Result<Vec<DetachedSession>, SmRegistryError>;
 
     /// Take (retrieve and remove) a session by stream ID.
     ///

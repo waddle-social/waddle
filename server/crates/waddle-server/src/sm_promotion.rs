@@ -114,6 +114,124 @@ pub async fn promote_session_unacked(
     summary
 }
 
+/// Dependencies for [`promote_displaced_sessions`]. Grouped so the
+/// two displacement call sites (max_sessions eviction at detach,
+/// fresh-bind invalidation at registration) share one signature.
+pub struct DisplacedPromotionDeps<'a> {
+    pub sm_registry: &'a waddle_xmpp::stream_management::InMemorySmSessionRegistry,
+    pub connection_registry: &'a ConnectionRegistry,
+    pub pending_storage: &'a Arc<dyn PendingDeliveryStorage>,
+    pub blocking_storage: &'a dyn waddle_xmpp::xep::xep0191::BlockingStorage,
+    pub server_domain: &'a str,
+}
+
+/// Run the XEP-0198 §5 promote → confirm chain on sessions the SM
+/// registry displaced (issue #1097): max_sessions overflow eviction
+/// and fresh-bind invalidation previously dropped these sessions'
+/// unacked queues silently.
+///
+/// Mirrors the SM-expiry janitor's contract: a blocklist-load or
+/// promotion storage failure records a promotion failure and
+/// PRESERVES the session's durable rows (a later restart rehydrates
+/// them and the janitor retries, including its dead-letter cap);
+/// success confirms the drain, erasing the durable rows, and releases
+/// any pending_delivery claim held by the dead stream.
+pub async fn promote_displaced_sessions(
+    sessions: Vec<DetachedSession>,
+    deps: DisplacedPromotionDeps<'_>,
+) {
+    for session in sessions {
+        let blocklist = match deps
+            .blocking_storage
+            .list_blocked_jid_entries(&session.jid.to_bare())
+            .await
+        {
+            Ok(jids) => waddle_xmpp::protocol::session_state::Blocklist::new(jids),
+            Err(error) => {
+                waddle_xmpp::prometheus::increment_sm_promotion_blocklist_failed();
+                if let Err(record_error) = deps
+                    .sm_registry
+                    .record_promotion_failure(&session.stream_id)
+                    .await
+                {
+                    tracing::warn!(
+                        jid = %session.jid,
+                        error = %error,
+                        record_error = %record_error,
+                        "displaced SM session: blocklist load and failure recording both \
+                         failed; preserving durable rows for janitor retry"
+                    );
+                    continue;
+                }
+                tracing::warn!(
+                    jid = %session.jid,
+                    stream_id = %session.stream_id,
+                    error = %error,
+                    "displaced SM session: blocklist load failed; SKIPPING promotion to \
+                     preserve fail-closed XEP-0191 policy. Durable rows retry via the \
+                     SM-expiry janitor after restart."
+                );
+                continue;
+            }
+        };
+        let summary = promote_session_unacked(
+            &session,
+            deps.connection_registry,
+            deps.pending_storage,
+            &blocklist,
+            deps.server_domain,
+        )
+        .await;
+        if summary.has_storage_failure() {
+            waddle_xmpp::prometheus::add_sm_promotion_storage_failed(u64::from(
+                summary.storage_failed,
+            ));
+            if let Err(error) = deps
+                .sm_registry
+                .record_promotion_failure(&session.stream_id)
+                .await
+            {
+                tracing::warn!(
+                    jid = %session.jid,
+                    %error,
+                    "displaced SM session: record_promotion_failure failed; \
+                     preserving durable rows for janitor retry"
+                );
+            }
+            tracing::warn!(
+                jid = %session.jid,
+                stream_id = %session.stream_id,
+                storage_failed = summary.storage_failed,
+                "displaced SM session: promotion had storage failures; \
+                 preserving durable rows for janitor retry"
+            );
+            continue;
+        }
+        deps.sm_registry.confirm_drained(&session.stream_id).await;
+        let session_id = waddle_xmpp::pending_delivery::SmSessionId::new(session.stream_id.clone());
+        if let Err(error) = deps.pending_storage.release_claim(&session_id).await {
+            tracing::warn!(
+                jid = %session.jid,
+                stream_id = %session.stream_id,
+                error = %error,
+                "displaced SM session: pending_delivery release_claim failed; \
+                 rows remain claimed and will be released by the claim-expiry janitor"
+            );
+        }
+        debug!(
+            jid = %session.jid,
+            stream_id = %session.stream_id,
+            redelivered = summary.redelivered,
+            queued = summary.queued,
+            bounced = summary.bounced,
+            dropped = summary.dropped,
+            not_promotable = summary.not_promotable,
+            unparseable = summary.unparseable,
+            "displaced SM session: Q6 promotion completed"
+        );
+    }
+}
+
 /// Extract the stamp of a `<delay/>` this server itself added to the
 /// stanza on a prior replay hop, if one is present.
 fn self_stamp_time(

@@ -2,12 +2,15 @@ use async_trait::async_trait;
 use tracing::debug;
 
 use super::core::InMemorySmSessionRegistry;
-use super::tombstone::scrub_session_unacked;
+use super::tombstone::matching_tombstone_sequences;
 use super::{DetachedSession, SmRegistryError, SmSessionRegistry};
 
 #[async_trait]
 impl SmSessionRegistry for InMemorySmSessionRegistry {
-    async fn store_session(&self, session: DetachedSession) -> Result<(), SmRegistryError> {
+    async fn store_session(
+        &self,
+        session: DetachedSession,
+    ) -> Result<Vec<DetachedSession>, SmRegistryError> {
         let stream_id = session.stream_id.clone();
         let jid = session.jid.clone();
         let stream_lock = self.stream_lock(&stream_id)?;
@@ -16,9 +19,11 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
         // dropped before any await point. RwLockWriteGuard is not
         // Send, and explicit `drop()` doesn't satisfy the async
         // future's lifetime analysis. Capture eviction victims
-        // (jid-collision retain + max_sessions oldest) so we can
-        // mirror their durable rows after releasing the lock.
-        let mut evicted_stream_ids: Vec<String> = Vec::new();
+        // (jid-collision retain + max_sessions oldest) IN FULL so the
+        // caller can run XEP-0198 §5 promotion on their unacked
+        // queues (issue #1097) — previously they were silently
+        // dropped and their durable rows mirror-deleted.
+        let mut displaced: Vec<DetachedSession> = Vec::new();
         let count = {
             let mut sessions = self
                 .sessions
@@ -32,12 +37,12 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
             // retain mutates; same for `claimed`.
             for (id, existing) in sessions.iter() {
                 if id != &stream_id && existing.jid == jid {
-                    evicted_stream_ids.push(id.clone());
+                    displaced.push(existing.clone());
                 }
             }
             for (id, existing) in claimed.iter() {
                 if id != &stream_id && existing.jid == jid {
-                    evicted_stream_ids.push(id.clone());
+                    displaced.push(existing.clone());
                 }
             }
             sessions.retain(|existing_stream_id, existing| {
@@ -54,38 +59,24 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
                     .min_by_key(|(_, s)| s.detached_at)
                     .map(|(k, _)| k.clone())
                 {
-                    sessions.remove(&oldest_key);
-                    debug!(stream_id = %oldest_key, "Evicted oldest SM session to make room");
-                    evicted_stream_ids.push(oldest_key);
+                    if let Some(oldest) = sessions.remove(&oldest_key) {
+                        debug!(stream_id = %oldest_key, "Evicted oldest SM session to make room");
+                        displaced.push(oldest);
+                    }
                 }
             }
 
             sessions.insert(stream_id.clone(), session.clone());
             sessions.len()
         };
-        // Mirror in-memory evictions to durable storage so a restart
-        // doesn't resurrect sessions that were displaced by a fresh
-        // bind for the same JID or by max_sessions overflow. (Copilot
-        // review on PR #344: durable rows for evicted streams must
-        // not be silently rehydrated.)
-        for evicted in &evicted_stream_ids {
-            // Best-effort: failure to delete an evictee row means
-            // the next restart MAY resurrect it via
-            // restore_from_persistence (until its resume window
-            // expires and the restore-time expired-filter drops it).
-            // Bubbling the error here would fail the whole detach
-            // because an unrelated evictee row couldn't be cleaned;
-            // log loudly instead so operators can spot storage
-            // health issues.
-            if let Err(error) = self.persist_delete_session(evicted).await {
-                debug!(
-                    stream_id = %evicted,
-                    error = %error,
-                    "evicted SM session: durable delete failed; row will be \
-                     filtered by restore-time expiry check"
-                );
-            }
-        }
+        // Durable rows for displaced sessions are deliberately NOT
+        // deleted here. They follow the drain_expired/confirm_drained
+        // persist-until-confirmed contract: the caller promotes each
+        // displaced session's unacked queue (XEP-0198 §5 alt-resource
+        // → offline storage → error chain) and calls
+        // `confirm_drained` on success, which erases the rows. If the
+        // process crashes before promotion, restore_from_persistence
+        // rehydrates them and the SM-expiry janitor retries.
 
         // `store_session` publishes the session in memory before its first
         // durable snapshot is written so the cleanup path can keep draining
@@ -96,7 +87,7 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
         self.persist_detached_session_snapshot(&session).await?;
 
         debug!(stream_id = %stream_id, count = count, "Stored detached SM session");
-        Ok(())
+        Ok(displaced)
     }
 
     async fn take_session(
@@ -228,21 +219,129 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
         target_id: &str,
         archive_jid: &str,
     ) -> Result<usize, SmRegistryError> {
-        let mut removed_total = 0usize;
-        let mut sessions = self
-            .sessions
-            .write()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-        for session in sessions.values_mut() {
-            removed_total += scrub_session_unacked(session, target_id, archive_jid);
+        // Phase 1 (issue #1145 lock-scope fix): snapshot every queue
+        // under READ locks only. XML parsing of every entry used to
+        // run under the sessions write lock, stalling all detach /
+        // resume traffic for the duration of a full-registry scan.
+        let mut snapshots: Vec<(String, Vec<(u32, String)>)> = Vec::new();
+        {
+            let sessions = self
+                .sessions
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            for (stream_id, session) in sessions.iter() {
+                snapshots.push((
+                    stream_id.clone(),
+                    session
+                        .unacked_stanzas
+                        .iter()
+                        .map(|entry| (entry.sequence, entry.stanza_xml.clone()))
+                        .collect(),
+                ));
+            }
         }
-        drop(sessions);
-        let mut claimed = self
-            .claimed_sessions
-            .write()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-        for session in claimed.values_mut() {
-            removed_total += scrub_session_unacked(session, target_id, archive_jid);
+        {
+            let claimed = self
+                .claimed_sessions
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            for (stream_id, session) in claimed.iter() {
+                snapshots.push((
+                    stream_id.clone(),
+                    session
+                        .unacked_stanzas
+                        .iter()
+                        .map(|entry| (entry.sequence, entry.stanza_xml.clone()))
+                        .collect(),
+                ));
+            }
+        }
+
+        // Phase 2: parse and match with NO registry lock held. A
+        // queue can change between snapshot and removal; removing by
+        // exact (stream_id, sequence) pairs below is safe regardless.
+        let mut matched: Vec<(String, Vec<u32>)> = Vec::new();
+        for (stream_id, entries) in snapshots {
+            let sequences = matching_tombstone_sequences(&entries, target_id, archive_jid);
+            if !sequences.is_empty() {
+                matched.push((stream_id, sequences));
+            }
+        }
+
+        // Phase 3 (issue #1145 durability fix): per stream, under its
+        // stream lock (serializing with detached-append snapshots so a
+        // concurrent full-snapshot write cannot resurrect the rows we
+        // just deleted), erase the durable rows FIRST and only then
+        // the in-memory entries. If the durable delete fails, the
+        // in-memory entries are deliberately left in place — memory
+        // and storage stay consistent, and the caller's error path
+        // logs that the pre-scrub stanza may still replay so the
+        // failure is never silent.
+        let mut removed_total = 0usize;
+        let mut durable_failures = 0usize;
+        for (stream_id, sequences) in matched {
+            let stream_lock = self.stream_lock(&stream_id)?;
+            let _stream_guard = stream_lock.lock().await;
+            if let Some(storage) = &self.persistence {
+                if let Err(error) = storage
+                    .delete_unacked(
+                        &crate::pending_delivery::SmSessionId::new(stream_id.clone()),
+                        &sequences,
+                    )
+                    .await
+                {
+                    durable_failures += 1;
+                    debug!(
+                        stream_id = %stream_id,
+                        error = %error,
+                        "tombstone scrub: durable delete_unacked failed; keeping the \
+                         in-memory entries so memory and storage stay consistent"
+                    );
+                    continue;
+                }
+            }
+            let removed_here = {
+                let mut sessions = self
+                    .sessions
+                    .write()
+                    .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+                match sessions.get_mut(&stream_id) {
+                    Some(session) => {
+                        let before = session.unacked_stanzas.len();
+                        session
+                            .unacked_stanzas
+                            .retain(|entry| !sequences.contains(&entry.sequence));
+                        Some(before - session.unacked_stanzas.len())
+                    }
+                    None => None,
+                }
+            };
+            let removed_here = match removed_here {
+                Some(count) => count,
+                None => {
+                    let mut claimed = self
+                        .claimed_sessions
+                        .write()
+                        .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+                    match claimed.get_mut(&stream_id) {
+                        Some(session) => {
+                            let before = session.unacked_stanzas.len();
+                            session
+                                .unacked_stanzas
+                                .retain(|entry| !sequences.contains(&entry.sequence));
+                            before - session.unacked_stanzas.len()
+                        }
+                        None => 0,
+                    }
+                }
+            };
+            removed_total += removed_here;
+        }
+        if durable_failures > 0 {
+            return Err(SmRegistryError::Internal(format!(
+                "tombstone scrub: durable delete_unacked failed for {durable_failures} \
+                 stream(s); matching entries were preserved for retry"
+            )));
         }
         Ok(removed_total)
     }

@@ -948,47 +948,248 @@ async fn complete_claim_deletes_durable_session_on_resume() {
 }
 
 #[tokio::test]
-async fn store_session_evicts_jid_collision_durably() {
+async fn store_session_returns_jid_collision_eviction_and_preserves_rows_until_confirmed() {
     // Two store_session calls for the same JID with different
-    // stream_ids: the second supersedes the first per RFC
-    // resume semantics. The first's durable rows must be
-    // deleted too — otherwise restart_from_persistence
-    // resurrects the obsolete stream and exposes a stale
-    // <resume previd='…'/> path. (Copilot review on PR #344.)
+    // stream_ids: the second supersedes the first per RFC resume
+    // semantics. Issue #1097: the displaced session's unacked queue
+    // must NOT be silently dropped — it is returned to the caller for
+    // XEP-0198 §5 promotion, and its durable rows survive until the
+    // caller confirms via `confirm_drained`.
     let storage = std::sync::Arc::new(super::super::persistence::InMemorySmPersistence::new());
     let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
-    registry
+    let displaced = registry
         .store_session(realistic_test_session_for_jid(
             "stream-old",
             "alice@example.com/web".parse().unwrap(),
         ))
         .await
         .unwrap();
-    registry
+    assert!(displaced.is_empty(), "first store displaces nothing");
+    let displaced = registry
         .store_session(realistic_test_session_for_jid(
             "stream-new",
             "alice@example.com/web".parse().unwrap(),
         ))
         .await
         .unwrap();
+    assert_eq!(displaced.len(), 1);
+    assert_eq!(displaced[0].stream_id, "stream-old");
+    assert_eq!(
+        displaced[0].unacked_stanzas.len(),
+        2,
+        "displaced session carries its full unacked queue for promotion"
+    );
     let old_id = crate::pending_delivery::SmSessionId::new("stream-old");
     let new_id = crate::pending_delivery::SmSessionId::new("stream-new");
     assert!(
-        storage.get_session(&old_id).await.unwrap().is_none(),
-        "evicted stream-old should be removed from durable storage"
+        registry.peek_session("stream-old").await.unwrap().is_none(),
+        "displaced session must leave the in-memory pool"
+    );
+    assert!(
+        storage.get_session(&old_id).await.unwrap().is_some(),
+        "displaced rows survive until promotion is confirmed"
     );
     assert!(
         storage.get_session(&new_id).await.unwrap().is_some(),
         "stream-new should remain"
     );
+
+    registry.confirm_drained("stream-old").await;
+    assert!(
+        storage.get_session(&old_id).await.unwrap().is_none(),
+        "confirm_drained erases the displaced session's durable rows"
+    );
 }
 
 #[tokio::test]
-async fn restore_skips_and_deletes_expired_sessions() {
-    // Sessions whose resume window already closed during the
-    // server's downtime must not be rehydrated, AND their
-    // durable rows must be deleted so restart doesn't re-load
-    // them next boot. (Copilot review on PR #344.)
+async fn store_session_returns_capacity_evicted_session_and_preserves_rows() {
+    // Issue #1097: max_sessions overflow eviction must not silently
+    // drop the oldest session's unacked queue. The evicted session is
+    // returned so the waddle-server caller can run the XEP-0198 §5
+    // promote → confirm chain; durable rows survive until
+    // `confirm_drained`.
+    let storage = std::sync::Arc::new(super::super::persistence::InMemorySmPersistence::new());
+    let registry = InMemorySmSessionRegistry::with_capacity(1).with_persistence(storage.clone());
+    let mut oldest =
+        realistic_test_session_for_jid("stream-oldest", "alice@example.com/web".parse().unwrap());
+    oldest.detached_at = Instant::now() - Duration::from_secs(30);
+    registry.store_session(oldest).await.unwrap();
+
+    let evicted = registry
+        .store_session(realistic_test_session_for_jid(
+            "stream-newer",
+            "bob@example.com/web".parse().unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(evicted.len(), 1);
+    assert_eq!(evicted[0].stream_id, "stream-oldest");
+    assert_eq!(
+        evicted[0].unacked_stanzas.len(),
+        2,
+        "evicted session carries its full unacked queue for promotion"
+    );
+    assert!(registry
+        .peek_session("stream-oldest")
+        .await
+        .unwrap()
+        .is_none());
+    assert!(registry
+        .peek_session("stream-newer")
+        .await
+        .unwrap()
+        .is_some());
+
+    let oldest_id = crate::pending_delivery::SmSessionId::new("stream-oldest");
+    assert!(
+        storage.get_session(&oldest_id).await.unwrap().is_some(),
+        "evicted rows survive until promotion is confirmed"
+    );
+    assert_eq!(
+        storage.list_unacked(&oldest_id).await.unwrap().len(),
+        2,
+        "evicted unacked rows survive until promotion is confirmed"
+    );
+
+    registry.confirm_drained("stream-oldest").await;
+    assert!(storage.get_session(&oldest_id).await.unwrap().is_none());
+    assert!(storage.list_unacked(&oldest_id).await.unwrap().is_empty());
+}
+
+fn realistic_dm_stanza_xml(from: &str, to: &str, id: &str, body: &str) -> String {
+    let mut m = xmpp_parsers::message::Message::new(Some(to.parse::<jid::Jid>().expect("jid")));
+    m.from = Some(from.parse::<jid::Jid>().expect("jid"));
+    m.id = Some(xmpp_parsers::message::Id(id.to_string()));
+    m.type_ = xmpp_parsers::message::MessageType::Chat;
+    m.bodies
+        .insert(xmpp_parsers::message::Lang::new(), body.to_string());
+    let element: xmpp_parsers::minidom::Element = m.into();
+    let mut buf = Vec::new();
+    element.write_to(&mut buf).expect("serialize message");
+    String::from_utf8(buf).expect("utf8")
+}
+
+#[tokio::test]
+async fn scrub_for_tombstone_deletes_durable_rows_so_restart_cannot_replay() {
+    // Issue #1145: the tombstone scrub previously mutated memory only.
+    // A restart rehydrated the retracted stanza from sm_unacked and
+    // <resumed/> replayed it on the wire, defeating XEP-0424/0425
+    // retraction. The scrub must durably delete the matched
+    // (stream_id, sequence) rows too.
+    let storage = std::sync::Arc::new(super::super::persistence::InMemorySmPersistence::new());
+    let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
+    let session = make_test_session_with_unacked(
+        "stream-durable-tomb",
+        vec![
+            (
+                6,
+                realistic_dm_stanza_xml(
+                    "alice@example.com/web",
+                    "user@example.com/resource",
+                    "retracted-id",
+                    "secret",
+                ),
+            ),
+            (
+                7,
+                realistic_dm_stanza_xml(
+                    "alice@example.com/web",
+                    "user@example.com/resource",
+                    "kept-id",
+                    "safe",
+                ),
+            ),
+        ],
+    );
+    registry.store_session(session).await.unwrap();
+
+    let removed = registry
+        .scrub_unacked_for_tombstone("retracted-id", "user@example.com")
+        .await
+        .unwrap();
+    assert_eq!(removed, 1);
+
+    // Durable rows for the scrubbed stanza are gone.
+    let stream_id = crate::pending_delivery::SmSessionId::new("stream-durable-tomb");
+    let rows = storage.list_unacked(&stream_id).await.unwrap();
+    let seqs: Vec<u32> = rows.iter().map(|r| r.sequence).collect();
+    assert_eq!(
+        seqs,
+        vec![7],
+        "only the non-retracted stanza's row may remain durably"
+    );
+
+    // Restart simulation: a fresh registry over the same storage must
+    // not resurrect the retracted stanza into the replay queue.
+    let restarted = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
+    restarted.restore_from_persistence().await.unwrap();
+    let hydrated = restarted
+        .peek_session("stream-durable-tomb")
+        .await
+        .unwrap()
+        .expect("session survives restart");
+    assert_eq!(hydrated.unacked_stanzas.len(), 1);
+    assert!(
+        !hydrated
+            .unacked_stanzas
+            .iter()
+            .any(|entry| entry.stanza_xml.contains("secret")),
+        "retracted stanza must not be replayable after restart"
+    );
+    assert!(hydrated
+        .unacked_stanzas
+        .iter()
+        .any(|entry| entry.stanza_xml.contains("safe")));
+}
+
+#[tokio::test]
+async fn invalidate_sessions_for_jid_preserves_rows_until_confirmed() {
+    // Issue #1097 (fresh-bind invalidation): superseded detached
+    // sessions removed on a fresh bind carry unacked queues that the
+    // caller must promote (XEP-0198 §5). Durable rows survive until
+    // the caller confirms successful promotion via `confirm_drained`
+    // so a crash mid-promotion retries after restart.
+    let storage = std::sync::Arc::new(super::super::persistence::InMemorySmPersistence::new());
+    let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
+    let jid: FullJid = "alice@example.com/web".parse().unwrap();
+    registry
+        .store_session(realistic_test_session_for_jid("stream-stale", jid.clone()))
+        .await
+        .unwrap();
+
+    let removed = registry.invalidate_sessions_for_jid(&jid).await.unwrap();
+    assert_eq!(removed.len(), 1);
+    assert_eq!(removed[0].stream_id, "stream-stale");
+    assert_eq!(
+        removed[0].unacked_stanzas.len(),
+        2,
+        "invalidated session carries its full unacked queue for promotion"
+    );
+    assert!(registry
+        .peek_session("stream-stale")
+        .await
+        .unwrap()
+        .is_none());
+
+    let stale_id = crate::pending_delivery::SmSessionId::new("stream-stale");
+    assert!(
+        storage.get_session(&stale_id).await.unwrap().is_some(),
+        "invalidated rows survive until promotion is confirmed"
+    );
+
+    registry.confirm_drained("stream-stale").await;
+    assert!(storage.get_session(&stale_id).await.unwrap().is_none());
+    assert!(storage.list_unacked(&stale_id).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn restore_hydrates_expired_sessions_for_promotion_and_preserves_rows() {
+    // Issue #1098: sessions whose resume window closed during the
+    // server's downtime must NOT be durably deleted at restore time —
+    // that silently discards their unacked queues. Instead they are
+    // hydrated (expired) so the SM-expiry janitor's next
+    // `drain_expired` pass runs the XEP-0198 §5 promote → confirm
+    // chain; durable rows survive until `confirm_drained`.
     let storage = std::sync::Arc::new(super::super::persistence::InMemorySmPersistence::new());
 
     // Manually insert an already-expired session by writing
@@ -1000,7 +1201,7 @@ async fn restore_skips_and_deletes_expired_sessions() {
         user_id: "alice".to_string(),
         jid: "alice@example.com/web".parse().unwrap(),
         inbound_count: 0,
-        outbound_count: 0,
+        outbound_count: 1,
         last_acked: 0,
         replay_gap_through: None,
         max_resume_time: Some(60),
@@ -1015,14 +1216,60 @@ async fn restore_skips_and_deletes_expired_sessions() {
         presence_priority: 0,
     };
     storage.upsert_session(expired).await.unwrap();
+    let mut queued =
+        xmpp_parsers::message::Message::new(Some("alice@example.com".parse::<jid::Jid>().unwrap()));
+    queued
+        .bodies
+        .insert(xmpp_parsers::message::Lang::new(), "missed".to_string());
+    storage
+        .append_unacked(super::super::persistence::PersistedUnackedStanza {
+            stream_id: crate::pending_delivery::SmSessionId::new("stream-expired"),
+            sequence: 1,
+            stanza: Box::new(Stanza::Message(queued)),
+            original_receipt_at: now - chrono::Duration::seconds(130),
+        })
+        .await
+        .unwrap();
 
     let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
     let hydrated = registry.restore_from_persistence().await.unwrap();
-    assert_eq!(hydrated, 0);
-    // Durable cleanup of expired rows.
+    assert_eq!(
+        hydrated, 1,
+        "expired session must be hydrated for the janitor"
+    );
+
+    // Expired sessions are never resumable on the wire.
+    assert!(registry
+        .peek_session("stream-expired")
+        .await
+        .unwrap()
+        .is_none());
+
+    // Durable rows survive restore — deletion happens only after the
+    // caller confirms successful promotion.
+    assert!(storage
+        .get_session(&crate::pending_delivery::SmSessionId::new("stream-expired"))
+        .await
+        .unwrap()
+        .is_some());
+
+    // The janitor's drain pass sees the session with its full queue.
+    let drained = registry.drain_expired().await.unwrap();
+    assert_eq!(drained.len(), 1);
+    assert_eq!(drained[0].stream_id, "stream-expired");
+    assert_eq!(drained[0].unacked_stanzas.len(), 1);
+    assert!(drained[0].unacked_stanzas[0].stanza_xml.contains("missed"));
+
+    // Only confirm_drained erases the durable rows.
+    registry.confirm_drained("stream-expired").await;
     assert!(storage
         .get_session(&crate::pending_delivery::SmSessionId::new("stream-expired"))
         .await
         .unwrap()
         .is_none());
+    assert!(storage
+        .list_unacked(&crate::pending_delivery::SmSessionId::new("stream-expired"))
+        .await
+        .unwrap()
+        .is_empty());
 }

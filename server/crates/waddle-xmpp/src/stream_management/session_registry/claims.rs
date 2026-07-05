@@ -365,14 +365,19 @@ impl InMemorySmSessionRegistry {
 
     /// Invalidate detached sessions for a FullJID after a fresh bind has
     /// replaced that stream identity.
+    ///
+    /// Follows the drain_expired/confirm_drained persist-until-
+    /// confirmed contract (issue #1097): the removed sessions'
+    /// durable rows are deliberately NOT deleted here. The caller
+    /// promotes each returned session's unacked queue (XEP-0198 §5:
+    /// the freshly-bound resource is a natural alt-resource target)
+    /// and calls [`Self::confirm_drained`] on success. If the process
+    /// crashes before promotion, `restore_from_persistence`
+    /// rehydrates the rows and the SM-expiry janitor retries.
     pub async fn invalidate_sessions_for_jid(
         &self,
         jid: &FullJid,
     ) -> Result<Vec<DetachedSession>, SmRegistryError> {
-        // Persist-first: enumerate matching stream-ids under a brief
-        // lock, durably erase each, then remove from in-memory. If
-        // any durable erase fails, abort before in-memory mutation
-        // so a transient storage error doesn't leave orphans.
         let matching_ids: Vec<String> = {
             let sessions = self
                 .sessions
@@ -398,7 +403,6 @@ impl InMemorySmSessionRegistry {
         for stream_id in &matching_ids {
             let stream_lock = self.stream_lock(stream_id)?;
             let _stream_guard = stream_lock.lock().await;
-            self.persist_delete_session(stream_id).await?;
             let mut sessions = self
                 .sessions
                 .write()

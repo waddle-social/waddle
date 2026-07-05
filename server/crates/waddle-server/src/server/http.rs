@@ -798,6 +798,22 @@ fn install_profile_publish_hook(
     tracing::debug!("OIDC → PEP profile-publish hook installed");
 }
 
+/// Maximum number of detached XEP-0198 sessions held resumable at
+/// once (issue #1097 sizing item). Overflow evicts the oldest session
+/// through the promote → confirm chain (no message loss), but each
+/// eviction still costs its owner the resume window — size this above
+/// the expected concurrent detached-session peak (roughly: peak
+/// concurrent users × resume-window churn rate).
+fn sm_max_sessions_from_env() -> usize {
+    const MIN_SESSIONS: usize = 100;
+    const MAX_SESSIONS: usize = 10_000_000;
+    std::env::var("WADDLE_SM_MAX_SESSIONS")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .map(|v| v.clamp(MIN_SESSIONS, MAX_SESSIONS))
+        .unwrap_or(waddle_xmpp::stream_management::DEFAULT_MAX_SESSIONS)
+}
+
 async fn create_sm_session_registry(
     xmpp_config: &XmppConfig,
 ) -> Arc<waddle_xmpp::stream_management::InMemorySmSessionRegistry> {
@@ -816,7 +832,10 @@ async fn create_sm_session_registry(
                 .await
                 .expect("open SM persistence storage"),
         );
-    let sm_session_registry = waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()
+    let sm_session_registry =
+        waddle_xmpp::stream_management::InMemorySmSessionRegistry::with_capacity(
+            sm_max_sessions_from_env(),
+        )
         .with_persistence(Arc::clone(&sm_persistence));
     if let Err(error) = sm_session_registry.restore_from_persistence().await {
         warn!(
