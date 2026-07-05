@@ -21,7 +21,16 @@ const USER_ACTOR_REAPER_INTERVAL: Duration = Duration::from_secs(300);
 /// per-user `ReapUserIfEmpty`, `UserCount`). A wedged or backed-up registry
 /// must never hang the janitor task indefinitely (Copilot review on PR #1177):
 /// on timeout the sweep logs and moves on (or ends), retrying next interval.
-const REAPER_ASK_TIMEOUT: Duration = Duration::from_secs(2);
+///
+/// Sized to *strictly exceed* the registry's internal per-child ask bound
+/// (`user_registry::CHILD_ACTOR_TIMEOUT`, 2s): `ReapUserIfEmpty` itself asks the
+/// child `UserActor` for its `ResourceCount` bounded at that inner timeout, so a
+/// janitor timeout equal to the inner one could fire simultaneously and abandon
+/// a reap the registry actually completes — undercounting
+/// `waddle_user_actor_reaped_total` (Greptile review on PR #1177). The extra
+/// headroom lets the outer ask observe the reply instead of racing it; it is
+/// harmless for the child-less `ListUsers`/`UserCount` reads, which reply fast.
+const REAPER_ASK_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn pending_delivery_max_age_days_from_env() -> u32 {
     const DEFAULT_DAYS: u32 = 30;
@@ -1239,12 +1248,21 @@ pub(crate) async fn sweep_empty_user_actors_once(
             }
         }
     }
-    counts.remaining = user_registry
+    counts.remaining = match user_registry
         .ask(UserCount)
         .mailbox_timeout(REAPER_ASK_TIMEOUT)
         .reply_timeout(REAPER_ASK_TIMEOUT)
         .await
-        .unwrap_or(0);
+    {
+        Ok(count) => count,
+        Err(error) => {
+            // The closing count is a log-only diagnostic, so a failure is not
+            // fatal — but surface it rather than reporting a misleading `0
+            // remaining` that reads as "everything was reaped".
+            warn!(error = ?error, "user actor reaper: UserCount ask failed; remaining is unknown");
+            counts.examined.saturating_sub(counts.reaped)
+        }
+    };
     counts
 }
 
