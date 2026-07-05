@@ -174,6 +174,17 @@ get-or-create/reaper split is a fast follow-up availability slice.
     reached a live/detached resource, run `run_headless_recipient_pass`
     (local-domain only) so a sole stale extra (`DroppedClosed` → drop) still
     archives.
+  - **Empty-actor reaper (MUST land with this slice — Copilot review on PR
+    #1177).** Slice 2 activates `try_deliver`'s closed-channel eviction in
+    production. When that eviction removes a `UserActor`'s *last* resource, the
+    now-empty actor is not pruned by the explicit
+    `UnregisterConnectionAndReportEmpty` path, so an empty actor can accumulate
+    in `UserRegistryActor.users` if a teardown's `mirror_unregister` was dropped
+    (e.g. mailbox timeout). Land the lazy reaper (see "Availability (full
+    version)" — a candidate set + periodic sweep mirroring
+    `spawn_room_dormancy_janitor`) together with the delivery cutover so the
+    eviction and pruning paths ship as one. Do NOT self-prune on empty: it
+    races an in-flight re-registration and trips the crashed-actor poison path.
   - **Council review** (concurrency + correctness) before commit: 1:1
     backpressure loss, Finding-1 gate soundness, no MUC duplicate (no
     fallback), terminal-timeout no-double-deliver, ordering.
