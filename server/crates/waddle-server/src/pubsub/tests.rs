@@ -499,6 +499,100 @@ async fn legacy_presence_row_on_pinned_private_node_is_backfilled_to_whitelist_o
 }
 
 #[tokio::test]
+async fn unknown_stored_access_model_fails_node_load_closed() {
+    // Issue #1158: an unrecognized persisted access_model must fail the
+    // node load, not silently default to Presence (fail-open).
+    let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("storage");
+    let owner = jid("alice@example.com");
+    let node_name = "urn:test:fail-closed-access";
+    storage
+        .get_or_create_node(&owner, node_name)
+        .await
+        .expect("node");
+
+    let db = storage.database();
+    let conn = db.guard().await.expect("guard");
+    conn.execute(
+        "UPDATE pubsub_nodes SET access_model = 'bogus' WHERE owner_jid = ? AND node_name = ?",
+        crate::db_params![owner.to_string(), node_name],
+    )
+    .await
+    .expect("write bogus access_model");
+    drop(conn);
+
+    let result = storage.get_node(&owner, node_name).await;
+    assert!(
+        result.is_err(),
+        "unknown stored access_model must fail node load, got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn unknown_stored_publish_model_fails_node_load_closed() {
+    // Issue #1158: an unrecognized persisted publish_model must fail the
+    // node load, not silently default to Open (fail-open).
+    let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("storage");
+    let owner = jid("alice@example.com");
+    let node_name = "urn:test:fail-closed-publish";
+    storage
+        .get_or_create_node(&owner, node_name)
+        .await
+        .expect("node");
+
+    let db = storage.database();
+    let conn = db.guard().await.expect("guard");
+    conn.execute(
+        "UPDATE pubsub_nodes SET publish_model = 'bogus' WHERE owner_jid = ? AND node_name = ?",
+        crate::db_params![owner.to_string(), node_name],
+    )
+    .await
+    .expect("write bogus publish_model");
+    drop(conn);
+
+    let result = storage.get_node(&owner, node_name).await;
+    assert!(
+        result.is_err(),
+        "unknown stored publish_model must fail node load, got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn unknown_stored_send_last_published_item_fails_node_load_closed() {
+    // Issue #1158: an unrecognized persisted send_last_published_item must
+    // fail the node load, not silently default to OnSubAndPresence.
+    let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("storage");
+    let owner = jid("alice@example.com");
+    let node_name = "urn:test:fail-closed-send-last";
+    storage
+        .get_or_create_node(&owner, node_name)
+        .await
+        .expect("node");
+
+    let db = storage.database();
+    let conn = db.guard().await.expect("guard");
+    conn.execute(
+        "UPDATE pubsub_nodes SET send_last_published_item = 'bogus' \
+         WHERE owner_jid = ? AND node_name = ?",
+        crate::db_params![owner.to_string(), node_name],
+    )
+    .await
+    .expect("write bogus send_last_published_item");
+    drop(conn);
+
+    let result = storage.get_node(&owner, node_name).await;
+    assert!(
+        result.is_err(),
+        "unknown stored send_last_published_item must fail node load, got {result:?}"
+    );
+}
+
+#[tokio::test]
 async fn xep0402_bookmark_node_config_forces_private_durable_fields() {
     let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
         .await
