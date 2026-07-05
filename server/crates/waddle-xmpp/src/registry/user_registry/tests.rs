@@ -385,3 +385,42 @@ async fn test_reap_user_if_empty_absent_is_false() {
     assert!(!reaped);
     assert_eq!(registry.ask(UserCount).await.expect("count"), 0);
 }
+
+/// A dead `UserActor` is a state-lost condition, not an empty one: the reaper
+/// must fold it into the poison path (so `poisoned_users` stays the single
+/// source of dead-actor truth) and report nothing reaped, leaving
+/// `GetOrCreateUser` failing fast until explicit cleanup.
+#[tokio::test]
+async fn test_reap_user_if_empty_poisons_dead_actor() {
+    let registry = spawn_registry().await;
+    let bare_jid = bare("restart");
+
+    let actor = registry
+        .ask(GetOrCreateUser {
+            bare_jid: bare_jid.clone(),
+        })
+        .await
+        .expect("create");
+    actor.kill();
+    tokio::task::yield_now().await;
+
+    let reaped = registry
+        .ask(ReapUserIfEmpty {
+            bare_jid: bare_jid.clone(),
+        })
+        .await
+        .expect("reap");
+    assert!(!reaped, "a dead actor is poisoned, not reaped");
+
+    // The dead actor is now poisoned: GetOrCreateUser fails fast until cleanup.
+    let result = registry
+        .ask(GetOrCreateUser {
+            bare_jid: bare_jid.clone(),
+        })
+        .await;
+    assert!(matches!(
+        result,
+        Err(SendError::HandlerError(UserRegistryError::UserActorStateLost(jid)))
+            if jid == bare_jid
+    ));
+}

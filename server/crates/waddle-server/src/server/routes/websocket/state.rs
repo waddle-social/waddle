@@ -197,10 +197,13 @@ pub struct ProtocolServices {
     pub connection_registry: Arc<ConnectionRegistry>,
     /// Actor-backed per-user registry (ADR-0017 Phase 1). Populated in
     /// lock-step with `connection_registry` on the live register/unregister
-    /// path. As of Slice 1, bare-JID routing selection (`route_to_connection`)
-    /// reads the candidate set + RFC priority ranking from this actor
-    /// (intersected with DashMap liveness, provably equal to the legacy
-    /// selection); delivery still uses the DashMap until Slice 2.
+    /// path. Bare-JID routing selection (`route_to_connection`) reads the
+    /// candidate set + RFC priority ranking from this actor (Slice 1,
+    /// intersected with DashMap liveness, provably equal to the legacy
+    /// selection), and 1:1/DM delivery routes through the actor's `TrySend*`
+    /// (Slice 2, `deliver_*_to_full`) with no DashMap send fallback. Empty
+    /// actors left by delivery-path eviction are reaped by
+    /// `spawn_user_actor_reaper`.
     pub user_registry: ActorRef<waddle_xmpp::registry::UserRegistryActor>,
     /// Actor-backed registry for MUC rooms.
     pub room_registry: ActorRef<RoomRegistryActor>,

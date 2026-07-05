@@ -59,13 +59,17 @@ pub enum TimerCommand {
 #[derive(Clone)]
 pub struct Deps<'a> {
     pub connection_registry: &'a ConnectionRegistry,
-    /// Actor-backed per-user registry (ADR-0017 Phase 1). Threaded so the
-    /// [`OutboundEvent::UnregisterConnection`] arm can mirror the DashMap
-    /// unregister into the actor tree AND so bare-JID routing selection
-    /// (`route_to_connection`, Slice 1) can source its candidate set + RFC
-    /// priority ranking from the actor. `None` in unit tests that do not
-    /// exercise live bare-JID delivery (selection then degrades to the
-    /// offline/headless path); supplied in production via
+    /// Actor-backed per-user registry (ADR-0017 Phase 1). Threaded so bare-JID
+    /// routing selection (`route_to_connection`, Slice 1) can source its
+    /// candidate set + RFC priority ranking from the actor, and so 1:1/DM
+    /// delivery (`deliver_*_to_full`, Slice 2) can route through the actor's
+    /// `TrySend*` with no DashMap send fallback. (The token-less
+    /// [`OutboundEvent::UnregisterConnection`] interpreter arm is now a
+    /// warn-only stub — it does NOT mirror into the actor tree; ownership-gated
+    /// teardown mirrors via `mirror_unregister` at the connection sites
+    /// instead.) `None` in unit tests that do not exercise live bare-JID
+    /// delivery (selection then degrades to the offline/headless path);
+    /// supplied in production via
     /// [`super::super::websocket::build_interpret_deps`].
     pub user_registry: Option<&'a ActorRef<waddle_xmpp::registry::UserRegistryActor>>,
     /// XEP-0198 stream-management session registry. Used to fan

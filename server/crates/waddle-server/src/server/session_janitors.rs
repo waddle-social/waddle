@@ -17,6 +17,12 @@ const ROOM_DORMANCY_JANITOR_INTERVAL: Duration = Duration::from_secs(300);
 /// 5-minute reap keeps `UserRegistryActor.users` bounded without hot-looping.
 const USER_ACTOR_REAPER_INTERVAL: Duration = Duration::from_secs(300);
 
+/// Upper bound on each `UserRegistryActor` ask the reaper makes (`ListUsers`,
+/// per-user `ReapUserIfEmpty`, `UserCount`). A wedged or backed-up registry
+/// must never hang the janitor task indefinitely (Copilot review on PR #1177):
+/// on timeout the sweep logs and moves on (or ends), retrying next interval.
+const REAPER_ASK_TIMEOUT: Duration = Duration::from_secs(2);
+
 fn pending_delivery_max_age_days_from_env() -> u32 {
     const DEFAULT_DAYS: u32 = 30;
     const MIN_DAYS: u32 = 1;
@@ -1182,9 +1188,12 @@ pub(crate) struct UserReaperSweepCounts {
 /// message — the emptiness check and the removal happen in one registry handler
 /// so a concurrent re-registration cannot slip a resource in between (see that
 /// message's docs). The janitor only drives the per-user asks; it never reads
-/// then removes across two asks, which would reintroduce that race. Each ask is
-/// bounded inside the registry handler, so one wedged `UserActor` stalls only
-/// its own check, not the sweep.
+/// then removes across two asks, which would reintroduce that race.
+///
+/// Every registry ask — `ListUsers`, each per-user `ReapUserIfEmpty`, and the
+/// closing `UserCount` — is bounded by [`REAPER_ASK_TIMEOUT`], so a wedged or
+/// backed-up registry stalls only that ask (logged, skipped) rather than
+/// hanging the whole janitor task; the sweep resumes on the next interval.
 ///
 /// Pure helper so the live reaper and unit tests share the same logic.
 pub(crate) async fn sweep_empty_user_actors_once(
@@ -1193,7 +1202,12 @@ pub(crate) async fn sweep_empty_user_actors_once(
     use waddle_xmpp::registry::{ListUsers, ReapUserIfEmpty, UserCount};
     let mut counts = UserReaperSweepCounts::default();
     let user_registry = &websocket_state.deps.protocol.user_registry;
-    let users = match user_registry.ask(ListUsers).await {
+    let users = match user_registry
+        .ask(ListUsers)
+        .mailbox_timeout(REAPER_ASK_TIMEOUT)
+        .reply_timeout(REAPER_ASK_TIMEOUT)
+        .await
+    {
         Ok(list) => list,
         Err(error) => {
             warn!(error = ?error, "user actor reaper: ListUsers ask failed");
@@ -1206,6 +1220,8 @@ pub(crate) async fn sweep_empty_user_actors_once(
             .ask(ReapUserIfEmpty {
                 bare_jid: bare_jid.clone(),
             })
+            .mailbox_timeout(REAPER_ASK_TIMEOUT)
+            .reply_timeout(REAPER_ASK_TIMEOUT)
             .await
         {
             Ok(true) => {
@@ -1223,7 +1239,12 @@ pub(crate) async fn sweep_empty_user_actors_once(
             }
         }
     }
-    counts.remaining = user_registry.ask(UserCount).await.unwrap_or(0);
+    counts.remaining = user_registry
+        .ask(UserCount)
+        .mailbox_timeout(REAPER_ASK_TIMEOUT)
+        .reply_timeout(REAPER_ASK_TIMEOUT)
+        .await
+        .unwrap_or(0);
     counts
 }
 
@@ -1522,5 +1543,103 @@ mod room_dormancy_tests {
         let counts = sweep_dormant_rooms_once(&state).await;
         assert_eq!(counts.evicted, 1);
         assert_eq!(counts.remaining, 0);
+    }
+}
+
+#[cfg(test)]
+mod user_reaper_tests {
+    use super::sweep_empty_user_actors_once;
+    use crate::server::routes::websocket::tests::create_test_websocket_state;
+    use waddle_xmpp::registry::{
+        ConnectionEntry, GetUser, RegisterUserResource, TrySendPeer, UserCount,
+    };
+
+    fn full_jid(s: &str) -> jid::FullJid {
+        s.parse().expect("valid full jid")
+    }
+
+    fn sample_stanza(to: &jid::FullJid) -> waddle_xmpp::Stanza {
+        let mut msg = xmpp_parsers::message::Message::new(Some(jid::Jid::from(to.clone())));
+        msg.type_ = xmpp_parsers::message::MessageType::Chat;
+        msg.bodies
+            .insert(xmpp_parsers::message::Lang::new(), "hi".to_string());
+        waddle_xmpp::Stanza::Message(msg)
+    }
+
+    /// End-to-end sweep over the actor tree: register a resource, force the
+    /// production closed-channel eviction so the actor is empty-but-registered,
+    /// then assert the sweep reaps it, its accounting is correct, and the
+    /// `waddle_user_actor_reaped_total` metric fires.
+    #[tokio::test]
+    async fn sweep_reaps_orphaned_empty_user_actor() {
+        // Hold the metrics lock for the whole check: the reaped counter is a
+        // process-wide global, so serialise against other metric-asserting
+        // tests and reset first for a clean baseline.
+        let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
+        waddle_xmpp::prometheus::reset_metrics_for_test();
+
+        let state = create_test_websocket_state().await;
+        let jid = full_jid("alice@example.com/web");
+        let user_registry = &state.deps.protocol.user_registry;
+
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        user_registry
+            .ask(RegisterUserResource {
+                jid: jid.clone(),
+                entry: ConnectionEntry::new(tx),
+            })
+            .await
+            .expect("register");
+
+        // Close the channel and drive one delivery so try_deliver evicts the
+        // last resource — the actor is now empty but still registered.
+        drop(rx);
+        let actor = user_registry
+            .ask(GetUser {
+                bare_jid: jid.to_bare(),
+            })
+            .await
+            .expect("get user")
+            .expect("actor exists");
+        actor
+            .ask(TrySendPeer {
+                jid: jid.clone(),
+                stanza: sample_stanza(&jid),
+            })
+            .await
+            .expect("try send");
+        assert_eq!(user_registry.ask(UserCount).await.expect("count"), 1);
+
+        let counts = sweep_empty_user_actors_once(&state).await;
+        assert_eq!(counts.examined, 1);
+        assert_eq!(counts.reaped, 1);
+        assert_eq!(counts.remaining, 0);
+
+        assert!(
+            waddle_xmpp::prometheus::render_metrics().contains("waddle_user_actor_reaped_total 1"),
+            "the reaper must increment waddle_user_actor_reaped_total"
+        );
+    }
+
+    /// A user with a live resource is examined but never reaped.
+    #[tokio::test]
+    async fn sweep_keeps_user_with_live_resource() {
+        let state = create_test_websocket_state().await;
+        let jid = full_jid("bob@example.com/web");
+        let user_registry = &state.deps.protocol.user_registry;
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        user_registry
+            .ask(RegisterUserResource {
+                jid: jid.clone(),
+                entry: ConnectionEntry::new(tx),
+            })
+            .await
+            .expect("register");
+
+        let counts = sweep_empty_user_actors_once(&state).await;
+        assert_eq!(counts.examined, 1);
+        assert_eq!(counts.reaped, 0);
+        assert_eq!(counts.remaining, 1);
     }
 }

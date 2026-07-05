@@ -1,10 +1,11 @@
 # ADR-0017 Phase 1 Completion — Actor-Authoritative Registration
 
 Companion design note to [ADR-0017](./0017-horizontal-scaling-remote-actors.md).
-Status: **In progress** — Slices 0–1 landed; Slice 2 delivery cutover landed
-(1:1/DM via the actor's `TrySend*`, liveness filter KEPT); the empty-actor
-reaper is the immediate next unit (required now that production delivery
-activates `try_deliver`'s closed-channel eviction).
+Status: **In progress** — Slices 0–2 landed. Slice 2 delivery cutover (1:1/DM
+via the actor's `TrySend*`, liveness filter KEPT) and its empty-actor reaper
+(`ReapUserIfEmpty` + `spawn_user_actor_reaper`, required because production
+delivery activates `try_deliver`'s closed-channel eviction) are both in. Slice 3
+(deleting the now-unused DashMap delivery/selection methods) is next.
 See the slice order below for per-slice status and issue #1195 (ADR-0017
 horizontal-scaling epic) for the live tracker.
 
@@ -131,8 +132,8 @@ get-or-create/reaper split is a fast follow-up availability slice.
   retires it once teardown flips the shared ownership atomic (or the empty-actor
   reaper eagerly reaps stale extras), returning tier 1 to the actor's
   `SelectRoutableResources`.
-- **Slice 2 — delivery + MUC fan-out cutover.** ✅ **Delivery cutover landed;
-  empty-actor reaper is the remaining unit.** `deliver_peer_to_full`
+- **Slice 2 — delivery + MUC fan-out cutover.** ✅ **Landed** (delivery cutover
+  + empty-actor reaper). `deliver_peer_to_full`
   routes via the actor's `TrySendPeer` with **no DashMap send fallback**.
   Duplicate is impossible structurally (one `try_send` per recipient). Full
   design, locked:
@@ -205,17 +206,18 @@ get-or-create/reaper split is a fast follow-up availability slice.
     bare-JID else-branch must track whether *any* live target returned
     `DeliveredLive`/`QueuedDetached` or any detached target queued, and run
     `run_headless_recipient_pass` (local-domain only) when none did.
-  - **Empty-actor reaper (MUST land with this slice — Copilot review on PR
-    #1177).** Slice 2 activates `try_deliver`'s closed-channel eviction in
-    production. When that eviction removes a `UserActor`'s *last* resource, the
-    now-empty actor is not pruned by the explicit
-    `UnregisterConnectionAndReportEmpty` path, so an empty actor can accumulate
-    in `UserRegistryActor.users` if a teardown's `mirror_unregister` was dropped
-    (e.g. mailbox timeout). Land the lazy reaper (see "Availability (full
-    version)" — a candidate set + periodic sweep mirroring
-    `spawn_room_dormancy_janitor`) together with the delivery cutover so the
-    eviction and pruning paths ship as one. Do NOT self-prune on empty: it
-    races an in-flight re-registration and trips the crashed-actor poison path.
+  - **Empty-actor reaper (LANDED — Copilot review on PR #1177).** Slice 2
+    activates `try_deliver`'s closed-channel eviction in production. When that
+    eviction removes a `UserActor`'s *last* resource, the now-empty actor is not
+    pruned by the explicit `UnregisterConnectionAndReportEmpty` path, so an empty
+    actor can accumulate in `UserRegistryActor.users` if a teardown's
+    `mirror_unregister` was dropped (e.g. mailbox timeout). Shipped as the
+    atomic `ReapUserIfEmpty` registry message (single-handler check-and-remove,
+    so a concurrent re-registration cannot orphan a live resource) driven by the
+    periodic `spawn_user_actor_reaper` (mirrors `spawn_room_dormancy_janitor`;
+    every registry ask bounded by `REAPER_ASK_TIMEOUT`). The `UserActor`
+    deliberately does NOT self-prune on empty: that races an in-flight
+    re-registration and trips the crashed-actor poison path.
   - **Council review** (concurrency + correctness) before commit: 1:1
     backpressure loss, Finding-1 gate soundness, no MUC duplicate (no
     fallback), terminal-timeout no-double-deliver, ordering.
