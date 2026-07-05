@@ -473,17 +473,23 @@ pub(super) async fn cleanup_invalidated_detached_session(
             .is_some()
     });
     if !replacement_is_current_owner {
-        state
+        let removed_entry = state
             .deps
             .protocol
             .connection_registry
             .unregister(&detached.jid);
-        // ADR-0017 Phase 1: mirror the unregister into the actor tree.
-        crate::server::dual_registration::mirror_unregister(
-            &state.deps.protocol.user_registry,
-            &detached.jid,
-        )
-        .await;
+        // ADR-0017 Phase 1: mirror the unregister into the actor tree only when
+        // the DashMap actually removed an entry (Greptile review on PR #1177),
+        // consistent with every other teardown site — so a branch that found
+        // nothing to remove cannot evict an actor-tree entry a newer session
+        // installed for the same JID.
+        if removed_entry.is_some() {
+            crate::server::dual_registration::mirror_unregister(
+                &state.deps.protocol.user_registry,
+                &detached.jid,
+            )
+            .await;
+        }
         // XEP-0115 §6: clear the resource→ver mapping AND any stuck
         // pending disco#info resolution for this resource so an
         // unresumed detached session doesn't leak indefinitely.
