@@ -35,17 +35,23 @@ interface GiphyProxyGif {
 export function createGiphyRateLimiter(
   maxPerWindow: number,
   windowMs: number,
+  maxKeys = 10_000,
 ): (key: string, nowMs: number) => boolean {
   const windows = new Map<string, { start: number; count: number }>();
   return (key, nowMs) => {
     const entry = windows.get(key);
     if (!entry || nowMs - entry.start >= windowMs) {
-      // Rolling into a new window: also drop other stale entries so
-      // the map can't grow unboundedly from one-off client keys.
-      if (windows.size > 10_000) {
-        for (const [k, v] of windows) {
-          if (nowMs - v.start >= windowMs) windows.delete(k);
-        }
+      // Hard cap the table by evicting the oldest-inserted keys (Map
+      // preserves insertion order): a flood of fresh keys inside one
+      // window must cost O(1) per request and bounded memory, or the
+      // limiter itself becomes the amplification vector. At cap, an
+      // evicted key regains a fresh budget — bounded memory wins over
+      // per-key strictness.
+      windows.delete(key);
+      while (windows.size >= maxKeys) {
+        const oldest = windows.keys().next().value;
+        if (oldest === undefined) break;
+        windows.delete(oldest);
       }
       windows.set(key, { start: nowMs, count: 1 });
       return true;
@@ -53,6 +59,25 @@ export function createGiphyRateLimiter(
     entry.count += 1;
     return entry.count <= maxPerWindow;
   };
+}
+
+/**
+ * Normalize a client IP into a rate-limit bucket key. IPv6 collapses
+ * to its /64 prefix — a single routed /64 (standard residential/VPS
+ * allocation) holds 2^64 addresses, so keying on the full address
+ * would hand an attacker unlimited fresh budgets. IPv4 and opaque
+ * values pass through unchanged.
+ */
+export function clientRateKey(ip: string): string {
+  if (!ip.includes(":")) return ip;
+  const [head, tail = ""] = ip.split("::", 2);
+  const headGroups = head === "" ? [] : head.split(":");
+  const tailGroups = tail === "" ? [] : tail.split(":");
+  const missing = 8 - headGroups.length - tailGroups.length;
+  const groups = ip.includes("::")
+    ? [...headGroups, ...Array<string>(Math.max(missing, 0)).fill("0"), ...tailGroups]
+    : headGroups;
+  return groups.slice(0, 4).join(":");
 }
 
 export async function handleGiphyProxyRequest(
@@ -65,7 +90,10 @@ export async function handleGiphyProxyRequest(
     return jsonError("GIF search is not configured", 503);
   }
   if (rateGate && !rateGate()) {
-    return jsonError("Too many GIF searches — try again shortly", 429);
+    return Response.json(
+      { error: "Too many GIF searches — try again shortly" },
+      { status: 429, headers: { "Retry-After": "60" } },
+    );
   }
 
   const query = (params.get("q") ?? "").trim().slice(0, MAX_QUERY_LENGTH);

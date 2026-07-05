@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createGiphyRateLimiter, handleGiphyProxyRequest } from "../src/lib/giphy-proxy";
+import { clientRateKey, createGiphyRateLimiter, handleGiphyProxyRequest } from "../src/lib/giphy-proxy";
 
 const KEY = "super-secret-giphy-key";
 
@@ -228,5 +228,45 @@ describe("rate limiting", () => {
       () => true,
     );
     expect(response.status).toBe(200);
+  });
+});
+
+describe("rate limiter hardening", () => {
+  test("the key table is hard-capped: oldest keys are evicted instead of scanning/growing under a fresh-key flood", () => {
+    const allow = createGiphyRateLimiter(1, 60_000, 2);
+    expect(allow("k1", 0)).toBe(true);
+    expect(allow("k1", 1)).toBe(false);
+    // Two more unique keys within the same window evict k1 (cap = 2).
+    expect(allow("k2", 2)).toBe(true);
+    expect(allow("k3", 3)).toBe(true);
+    // k1 was evicted, so it gets a fresh budget — bounded memory is
+    // the guarantee; per-key strictness degrades gracefully at cap.
+    expect(allow("k1", 4)).toBe(true);
+    // k3 is still tracked (not evicted by k1's re-insert beyond cap...
+    // k1's re-insert evicts the now-oldest k2).
+    expect(allow("k3", 5)).toBe(false);
+  });
+
+  test("rate keys collapse IPv6 to the /64 prefix so one routed /64 cannot mint unlimited budgets", () => {
+    expect(clientRateKey("2001:db8:1:2:3:4:5:6")).toBe("2001:db8:1:2");
+    expect(clientRateKey("2001:db8:1:2:aaaa:bbbb:cccc:dddd")).toBe("2001:db8:1:2");
+    // Compressed forms expand before truncation.
+    expect(clientRateKey("2001:db8::5")).toBe("2001:db8:0:0");
+    expect(clientRateKey("::1")).toBe("0:0:0:0");
+    // IPv4 stays as-is.
+    expect(clientRateKey("203.0.113.9")).toBe("203.0.113.9");
+    expect(clientRateKey("unknown")).toBe("unknown");
+  });
+
+  test("the 429 advises a retry window", async () => {
+    const { fetchImpl } = stubFetch(() => Response.json(giphyUpstreamBody()));
+    const response = await handleGiphyProxyRequest(
+      KEY,
+      new URLSearchParams(),
+      fetchImpl,
+      () => false,
+    );
+    expect(response.status).toBe(429);
+    expect(response.headers.get("Retry-After")).toBe("60");
   });
 });

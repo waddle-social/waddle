@@ -1,6 +1,6 @@
 import type { APIRoute } from "astro";
 import { env } from "cloudflare:workers";
-import { createGiphyRateLimiter, handleGiphyProxyRequest } from "@/lib/giphy-proxy";
+import { clientRateKey, createGiphyRateLimiter, handleGiphyProxyRequest } from "@/lib/giphy-proxy";
 
 const RATE_LIMIT_PER_MINUTE = 30;
 
@@ -13,7 +13,7 @@ const allowRequest = createGiphyRateLimiter(RATE_LIMIT_PER_MINUTE, 60_000);
  * unauthenticated. See `@/lib/giphy-proxy` for the handler logic.
  */
 export const GET: APIRoute = ({ url, request }) => {
-  const clientKey = request.headers.get("CF-Connecting-IP") ?? "unknown";
+  const clientKey = clientRateKey(request.headers.get("CF-Connecting-IP") ?? "unknown");
   return handleGiphyProxyRequest(env.GIPHY_API_KEY, url.searchParams, fetch, () =>
     allowRequest(clientKey, Date.now()),
   );
