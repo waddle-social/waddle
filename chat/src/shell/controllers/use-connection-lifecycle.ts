@@ -105,6 +105,26 @@ export function useConnectionLifecycle(deps: ConnectionLifecycleDeps) {
     resetSetupPrompt,
   } = deps;
 
+  // #754: the single bootstrap choreographer. Every per-session hydrate
+  // lives here and fires exactly once per *fresh* XMPP session — from the
+  // session-lifecycle handler only. A XEP-0198 resume is gap-free (SM
+  // replays the push stream), so resumed events re-fire nothing, and
+  // onConnectionReady no longer duplicates this set (appState turns
+  // "ready" on the HTTP session load, before XMPP even connects — the
+  // fresh lifecycle event of that first connection covers it).
+  function runSessionBootstrap(client: BrowserXmppClient) {
+    void dmConversations.hydrateFromInbox();
+    void channelUnread.hydrateFromInbox();
+    void socialFeed.refresh();
+    void stories.refresh();
+    void communityEvents.refresh();
+    // XEP-0492 notification settings ride the same fresh-only cadence:
+    // a resume can't have missed a bookmark publish. Belt-and-braces
+    // .catch so an unhandled rejection can't propagate out of the
+    // lifecycle handler.
+    notifySettings.hydrate(client).catch(() => undefined);
+  }
+
   watch(xmppClient, (client) => {
     if (!client || !session.value) {
       presence.onClientCleared();
@@ -177,37 +197,14 @@ export function useConnectionLifecycle(deps: ConnectionLifecycleDeps) {
       // otherwise restart hydrate against the about-to-disconnect
       // client. Round-12 reviewer P1.
       if (!connectionStore.session) return;
-      // Re-hydrate inbox on every XMPP session-ready, both resumed and
-      // fresh. Stream resume catches up on stanzas the client missed
-      // while disconnected, but a *fresh* reconnection (resume failed
-      // — too much time elapsed, server restart, network blip past the
-      // resume window) means we lost the push stream entirely and the
-      // local unread map is stale. `onConnectionReady` only hydrates
-      // on the first sign-in (one-shot `hasBootstrapped` guard), so
-      // subsequent fresh reconnections would otherwise never refresh.
-      // `hydrateFromInbox` is request-id deduped, so the redundant
-      // call on the very first connection is harmless.
-      void dmConversations.hydrateFromInbox();
-      void channelUnread.hydrateFromInbox();
-      void socialFeed.refresh();
-      void stories.refresh();
-      void communityEvents.refresh();
       presence.onSessionReady(event, client);
-      // Re-hydrate XEP-0492 notification settings only on *fresh*
-      // reconnects. A stream resume is by definition gap-free —
-      // any bookmark publish from another tab during the disconnect
-      // is impossible because we never disconnected as far as the
-      // server's PEP queue is concerned. Refetching on every resume
-      // burns one IQ round-trip per resume for no payoff (round-12
-      // reviewer P2). Until the chat subscribes to PEP `+notify`
-      // headlines on `urn:xmpp:bookmarks:1` (deferred follow-up),
-      // fresh-only hydrate is the correct cadence.
+      // #754: a *fresh* session (resume failed — too much time elapsed,
+      // server restart, network blip past the resume window) means the
+      // push stream was lost and local unread/feed state is stale —
+      // re-hydrate once. A resume replays the missed push stanzas, so
+      // re-hydrating there is N wasted IQ round-trips per reconnect.
       if (event.type === "fresh") {
-        // Belt-and-braces: hydrate already catches lower-layer
-        // throws, but call-site .catch defends against any future
-        // regression so an unhandled rejection doesn't propagate
-        // out of the lifecycle handler. Round-14 PR review.
-        notifySettings.hydrate(client).catch(() => undefined);
+        runSessionBootstrap(client);
       }
     });
   }, { immediate: true });
@@ -348,24 +345,12 @@ export function useConnectionLifecycle(deps: ConnectionLifecycleDeps) {
       }
     }
 
-    void dmConversations.hydrateFromInbox();
-    void channelUnread.hydrateFromInbox();
+    // #754: inbox/feed/stories/events/notify-settings hydrates are NOT
+    // fired here — the fresh session-lifecycle event of the first XMPP
+    // connection runs them exactly once via runSessionBootstrap (the
+    // client is registered in the store before it lazily connects, so
+    // that event cannot be missed).
     void rosterContacts.loadRosterContacts();
-    void socialFeed.refresh();
-
-    // Hydrate XEP-0492 per-chat notification settings from the user's
-    // XEP-0402 PEP bookmarks. Best-effort — an empty result is the
-    // first-run state and the UI falls back to the §3 conversation
-    // default via [[effectiveNotifyMode]].
-    void (async () => {
-      const client = xmppClient.value;
-      if (!client) return;
-      // Best-effort: hydrate already swallows lower-layer
-      // exceptions, but a defensive .catch keeps the IIFE quiet
-      // even if a future regression bypasses the inner guard.
-      // Round-14 PR review.
-      await notifySettings.hydrate(client).catch(() => undefined);
-    })();
 
     // Register service worker and sync push subscription (best-effort, non-blocking)
     void (async () => {

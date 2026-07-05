@@ -1,0 +1,300 @@
+// Regression tests for #754: every session-ready used to re-fire the whole
+// bootstrap fan-out (inbox hydrates, social feed / stories / events
+// refreshes, notification-settings hydrate) from multiple subscribers —
+// the session-lifecycle handler on BOTH fresh and resumed events, plus a
+// duplicate tail in onConnectionReady. The contract under test: each
+// bootstrap action fires exactly once per fresh session, and never on a
+// XEP-0198 resume (a resume is gap-free — SM replays the push stream).
+
+import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
+import { computed, effectScope, nextTick, ref, shallowReactive } from "vue";
+import { useChatShellState } from "../src/shell/state";
+import { useConnectionLifecycle } from "../src/shell/controllers/use-connection-lifecycle";
+import { handlerStubs } from "./helpers/xmpp-client-mock";
+import type { BrowserXmppClient, SessionLifecycleEvent } from "../src/lib/xmpp-client";
+import type { WaddleSession } from "../src/lib/server-auth";
+
+const session: WaddleSession = {
+  session_id: "tok",
+  user_id: "alice-id",
+  username: "alice",
+  avatar_url: null,
+  xmpp_localpart: "alice",
+  jid: "alice@example.com/desktop",
+  xmpp_websocket_url: "wss://example.com/ws",
+  is_expired: false,
+  expires_at: null,
+};
+
+const freshEvent = {
+  type: "fresh",
+  catchup: { roomJids: [], dmJids: [] },
+} as unknown as SessionLifecycleEvent;
+
+function flushAsync(times = 4): Promise<void> {
+  let p = Promise.resolve();
+  for (let i = 0; i < times; i += 1) p = p.then(() => new Promise((r) => setTimeout(r, 0)));
+  return p;
+}
+
+// onConnectionReady reads window.location through matchLocation; shim it
+// for this file only and restore afterwards so other test files see the
+// environment they expect.
+const hadWindow = "window" in globalThis;
+const originalWindow = (globalThis as Record<string, unknown>).window;
+
+beforeAll(() => {
+  (globalThis as Record<string, unknown>).window = {
+    location: { pathname: "/", search: "", hash: "" },
+  };
+});
+
+afterAll(() => {
+  if (hadWindow) (globalThis as Record<string, unknown>).window = originalWindow;
+  else delete (globalThis as Record<string, unknown>).window;
+});
+
+function makeHarness() {
+  let lifecycleHandler: ((event: SessionLifecycleEvent) => void) | null = null;
+  const client = {
+    ...handlerStubs(),
+    setDirectMessageHandler: () => {},
+    setDmChatStateHandler: () => {},
+    setDmDisplayedHandler: () => {},
+    setDmReactionHandler: () => {},
+    setMdsDisplayedHandler: () => {},
+    setPresenceUpdateHandler: () => {},
+    addPubsubEventHandler: () => {},
+    setMemberJidHandler: () => {},
+    setMessageAckHandler: () => {},
+    setMessageDeliveryFailureHandler: () => {},
+    setQueuedMessageStatusHandler: () => {},
+    setInboxPushHandler: () => {},
+    setCatchupFailureHandler: () => {},
+    setSessionLifecycleHandler: (h: (event: SessionLifecycleEvent) => void) => {
+      lifecycleHandler = h;
+    },
+  } as unknown as BrowserXmppClient;
+
+  const connectionStore = shallowReactive({
+    client,
+    appState: "loading",
+    session,
+    appError: "",
+    activeServerUrl: "",
+    providers: [],
+    login: async () => {},
+    logout: async () => {},
+    fetchProviders: async () => {},
+    bootstrap: async () => {},
+  });
+
+  const hydrateDmInbox = mock(async () => {});
+  const hydrateChannelInbox = mock(async () => {});
+  const refreshSocialFeed = mock(async () => {});
+  const refreshStories = mock(async () => {});
+  const refreshCommunityEvents = mock(async () => {});
+  const hydrateNotifySettings = mock(async () => {});
+  const loadRosterContacts = mock(async () => {});
+  const presenceOnSessionReady = mock(() => {});
+
+  const ui = useChatShellState();
+  const deps = {
+    ui,
+    connectionStore: connectionStore as never,
+    xmppClient: computed(() => client),
+    session: computed(() => session),
+    waddles: {
+      waddles: ref([]),
+      channels: ref([]),
+      groupDms: ref([]),
+      activeChannelId: ref<string | null>(null),
+      isLoadingStructure: ref(false),
+      loadStructure: mock(async () => {}),
+      clearData: mock(() => {}),
+    },
+    messaging: {
+      onSessionLifecycle: mock(() => {}),
+      onCatchupFailed: mock(() => {}),
+      onMessageAck: mock(() => {}),
+      onMessageDeliveryFailure: mock(() => {}),
+      onMessageQueueStatus: mock(() => {}),
+      applyMdsDisplayed: mock(() => true),
+      xmppStatus: ref({ state: "offline" }),
+      disconnect: mock(() => {}),
+      clearMessages: mock(() => {}),
+    },
+    dmMessaging: {
+      onIncomingMessage: mock(() => {}),
+      onChatState: mock(() => {}),
+      onDisplayed: mock(() => {}),
+      onReaction: mock(() => {}),
+      onSessionLifecycle: mock(() => {}),
+      onCatchupFailed: mock(() => {}),
+      onMessageAck: mock(() => {}),
+      onMessageDeliveryFailure: mock(() => {}),
+      onMessageQueueStatus: mock(() => {}),
+      applyMdsDisplayed: mock(() => true),
+      disconnect: mock(() => {}),
+      clearMessages: mock(() => {}),
+    },
+    dmConversations: {
+      hydrateFromInbox: hydrateDmInbox,
+      receiveIncomingDm: mock(() => {}),
+      onInboxPush: mock(() => {}),
+    },
+    channelUnread: {
+      hydrateFromInbox: hydrateChannelInbox,
+      onInboxPush: mock(() => {}),
+      clearAll: mock(() => {}),
+    },
+    rosterContacts: {
+      loadRosterContacts,
+      clearRosterContacts: mock(() => {}),
+    },
+    socialFeed: { refresh: refreshSocialFeed },
+    stories: { refresh: refreshStories },
+    communityEvents: { refresh: refreshCommunityEvents },
+    notifications: { registerServiceWorker: mock(async () => {}) },
+    notifySettings: {
+      hydrate: hydrateNotifySettings,
+      reset: mock(() => {}),
+    },
+    appUpdate: { start: mock(async () => {}), stop: mock(() => {}) },
+    isApplyingRoute: ref(false),
+    memberJidByNick: ref({}),
+    extensionRoutes: ref([]),
+    activeExtensionRouteKey: ref(null),
+    activeRightPanel: ref(null),
+    selectedChannelRoomJids: ref({}),
+    isActiveDirectDmSurface: () => false,
+    presence: {
+      onClientCleared: mock(() => {}),
+      handlePresenceUpdate: mock(() => {}),
+      handleActivityPubsubEvent: mock(() => {}),
+      handleStatusPreferencePubsubEvent: mock(() => {}),
+      onSessionReady: presenceOnSessionReady,
+      flushAndResetForLogout: mock(async () => {}),
+    },
+    notificationOrchestration: {
+      notifyDmActivity: mock(() => {}),
+      setupPushSubscription: mock(async () => {}),
+    },
+    routeSync: {
+      beginRouteRequest: mock(() => 1),
+      isCurrentRouteRequest: mock(() => true),
+      applyRouteTarget: mock(async () => {}),
+      updateUrl: mock(() => {}),
+    },
+    refreshExtensionRoutes: mock(async () => {}),
+    clearPendingChannelRoomJidSelection: mock(() => {}),
+    showFirstRunSetupIfNeeded: mock(() => {}),
+    resetSetupPrompt: mock(() => {}),
+  };
+
+  const scope = effectScope();
+  scope.run(() => {
+    useConnectionLifecycle(deps as never);
+  });
+
+  return {
+    scope,
+    connectionStore,
+    dispatchLifecycle: (event: SessionLifecycleEvent) => {
+      if (!lifecycleHandler) throw new Error("session lifecycle handler was not registered");
+      lifecycleHandler(event);
+    },
+    counts: () => ({
+      dmInbox: hydrateDmInbox.mock.calls.length,
+      channelInbox: hydrateChannelInbox.mock.calls.length,
+      socialFeed: refreshSocialFeed.mock.calls.length,
+      stories: refreshStories.mock.calls.length,
+      communityEvents: refreshCommunityEvents.mock.calls.length,
+      notifySettings: hydrateNotifySettings.mock.calls.length,
+    }),
+    presenceOnSessionReady,
+  };
+}
+
+describe("session bootstrap choreography (#754)", () => {
+  test("a resumed session-ready fires no bootstrap hydrates (XEP-0198 resume is gap-free)", async () => {
+    const h = makeHarness();
+    await nextTick();
+
+    h.dispatchLifecycle({ type: "resumed" } as SessionLifecycleEvent);
+    await flushAsync();
+
+    expect(h.counts()).toEqual({
+      dmInbox: 0,
+      channelInbox: 0,
+      socialFeed: 0,
+      stories: 0,
+      communityEvents: 0,
+      notifySettings: 0,
+    });
+    // Presence re-assertion is per-session-ready and must keep firing.
+    expect(h.presenceOnSessionReady.mock.calls.length).toBe(1);
+    h.scope.stop();
+  });
+
+  test("a fresh session-ready fires each bootstrap action exactly once", async () => {
+    const h = makeHarness();
+    await nextTick();
+
+    h.dispatchLifecycle(freshEvent);
+    await flushAsync();
+
+    expect(h.counts()).toEqual({
+      dmInbox: 1,
+      channelInbox: 1,
+      socialFeed: 1,
+      stories: 1,
+      communityEvents: 1,
+      notifySettings: 1,
+    });
+    h.scope.stop();
+  });
+
+  test("first connect (app-ready then fresh session event) fires each bootstrap action exactly once", async () => {
+    const h = makeHarness();
+    await nextTick();
+
+    // App shell becomes ready first (HTTP session load), then the XMPP
+    // connection comes up and emits the fresh lifecycle event.
+    h.connectionStore.appState = "ready";
+    await nextTick();
+    await flushAsync();
+    h.dispatchLifecycle(freshEvent);
+    await flushAsync();
+
+    expect(h.counts()).toEqual({
+      dmInbox: 1,
+      channelInbox: 1,
+      socialFeed: 1,
+      stories: 1,
+      communityEvents: 1,
+      notifySettings: 1,
+    });
+    h.scope.stop();
+  });
+
+  test("two fresh reconnects re-hydrate once each (per-session, not per-subscriber)", async () => {
+    const h = makeHarness();
+    await nextTick();
+
+    h.dispatchLifecycle(freshEvent);
+    await flushAsync();
+    h.dispatchLifecycle(freshEvent);
+    await flushAsync();
+
+    expect(h.counts()).toEqual({
+      dmInbox: 2,
+      channelInbox: 2,
+      socialFeed: 2,
+      stories: 2,
+      communityEvents: 2,
+      notifySettings: 2,
+    });
+    h.scope.stop();
+  });
+});
