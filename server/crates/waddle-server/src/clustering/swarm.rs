@@ -364,6 +364,15 @@ async fn run_event_loop(
     let mut connected: HashSet<PeerId> = HashSet::new();
     let mut routing_peers: HashSet<PeerId> = HashSet::new();
     let mut conn_addrs: HashMap<libp2p::swarm::ConnectionId, Multiaddr> = HashMap::new();
+    // Which peer answered at each dialed address, learned from outbound
+    // establishments and never expired (bounded by the seed set; a same-port
+    // replacement pod overwrites its entry on the next outbound dial). Lets
+    // the dial loop skip a seed whose owner is connected *inbound-only* —
+    // `conn_addrs` alone cannot, because an inbound connection's remote
+    // address is an ephemeral source port that never matches the seed addr,
+    // so every interval would churn a duplicate connection for the
+    // duplicate-PeerId defense to close.
+    let mut addr_owners: HashMap<Multiaddr, PeerId> = HashMap::new();
 
     // `interval` fires its first tick immediately, so the first dial round
     // happens right away rather than after a full interval.
@@ -443,8 +452,17 @@ async fn run_event_loop(
             Some(addr) = dial_rx.recv() => {
                 // Skip endpoints we already hold a connection to: redialing a
                 // connected peer every interval would just mint a duplicate
-                // connection for the duplicate-PeerId defense to close.
+                // connection for the duplicate-PeerId defense to close. Two
+                // checks: an outbound connection's remote address matches the
+                // seed addr directly; an inbound-only peer is recognized via
+                // the addr's last known owner.
                 if conn_addrs.values().any(|connected_addr| *connected_addr == addr) {
+                    continue;
+                }
+                if addr_owners
+                    .get(&addr)
+                    .is_some_and(|owner| connected.contains(owner))
+                {
                     continue;
                 }
                 metrics::record_bootstrap_dial();
@@ -459,6 +477,7 @@ async fn run_event_loop(
                     &mut connected,
                     &mut routing_peers,
                     &mut conn_addrs,
+                    &mut addr_owners,
                 );
             }
         }
@@ -533,6 +552,7 @@ fn handle_swarm_event(
     connected: &mut HashSet<PeerId>,
     routing_peers: &mut HashSet<PeerId>,
     conn_addrs: &mut HashMap<libp2p::swarm::ConnectionId, Multiaddr>,
+    addr_owners: &mut HashMap<Multiaddr, PeerId>,
 ) {
     match event {
         SwarmEvent::NewListenAddr { address, .. } => {
@@ -553,6 +573,10 @@ fn handle_swarm_event(
             // addresses are ephemeral ports, never dialable — skip those.
             if endpoint.is_dialer() {
                 swarm.add_peer_address(peer_id, endpoint.get_remote_address().clone());
+                // Remember who owns this dialable address so the dial loop
+                // can skip it while the peer stays connected (even if only
+                // through an inbound connection).
+                addr_owners.insert(endpoint.get_remote_address().clone(), peer_id);
             }
             // Duplicate-PeerId defense-in-depth (ADR element 3): the
             // keypair-slot lease already guarantees a unique PeerId per live
