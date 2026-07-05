@@ -257,12 +257,122 @@ async fn recipient_inbox_unread_increments_once_per_message() {
     let _ = fx.phone.close().await;
 }
 
-/// Extract the `id` of the recipient-stamped XEP-0359 `<stanza-id/>`.
+#[tokio::test]
+async fn detached_carbons_enabled_sibling_gets_the_dm_exactly_once_on_resume() {
+    // A detached-but-resumable resource is also a "client the original
+    // <message/> stanza was addressed to" (its XEP-0198 buffer gets the
+    // original queued for replay) — XEP-0280 §6.3 forbids ALSO queueing
+    // a received-carbon for it.
+    let server = TestServer::start_with_extra_accounts(&[(SENDER_USER, SENDER_PASSWORD)]);
+    let password = server.fixed_account_password().to_string();
+
+    let mut web = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        RECIPIENT_USER,
+        &password,
+        &format!("web-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("web connection");
+    enable_carbons(&mut web, "carbons-enable-web").await;
+    send_available_presence(&mut web).await;
+
+    let mut phone = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        RECIPIENT_USER,
+        &password,
+        &format!("phone-detached-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("phone connection");
+    enable_carbons(&mut phone, "carbons-enable-phone").await;
+    phone
+        .send(r#"<enable xmlns="urn:xmpp:sm:3" resume="true"/>"#)
+        .await
+        .expect("enable resumption");
+    let enabled = phone
+        .recv_matching(|frame| frame.contains("<enabled"))
+        .await
+        .expect("sm enabled");
+    let stream_id = attr_value(&enabled, "id").expect("enabled missing id");
+    drop(phone);
+
+    let mut sender = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        SENDER_USER,
+        SENDER_PASSWORD,
+        &format!("sender-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("sender connection");
+    let body = format!("detached-dedupe-proof-{}", uuid::Uuid::new_v4());
+    sender
+        .send(&format!(
+            r#"<message xmlns="jabber:client" to="admin@{DOMAIN}" type="chat" id="fanout-4"><body>{body}</body></message>"#
+        ))
+        .await
+        .expect("send dm");
+    // Wait for the live resource's copy so queueing for the detached
+    // sibling has completed before we resume.
+    let web_copies = drain_matching(&mut web, &body).await;
+    assert!(!web_copies.is_empty(), "web must receive the DM live");
+
+    let mut resumed = WsXmppClient::connect(&server.ws_url())
+        .await
+        .expect("resume connection");
+    resumed
+        .authenticate(DOMAIN, RECIPIENT_USER, &password)
+        .await
+        .expect("authenticate resume connection");
+    resumed
+        .send(&format!(
+            r#"<resume xmlns="urn:xmpp:sm:3" previd="{stream_id}" h="0"/>"#
+        ))
+        .await
+        .expect("send resume");
+    let _ = resumed
+        .recv_matching(|frame| frame.contains("<resumed"))
+        .await
+        .expect("sm resumed");
+
+    let replayed = drain_matching(&mut resumed, &body).await;
+    assert_eq!(
+        replayed.len(),
+        1,
+        "detached sibling must get the DM exactly once on resume \
+         (original replay only, no received-carbon — XEP-0280 §6.3), got: {replayed:?}"
+    );
+    assert!(
+        !replayed[0].contains(NS_CARBONS),
+        "the replayed copy must be the original delivery, not a carbon: {}",
+        replayed[0]
+    );
+
+    let _ = sender.close().await;
+    let _ = web.close().await;
+    let _ = resumed.close().await;
+}
+
+/// Extract the `id` of the XEP-0359 `<stanza-id/>` stamped by the
+/// recipient's bare JID (`by='admin@DOMAIN'`). Walks each `<stanza-id`
+/// element so the message's own `id` attribute (identical across
+/// resources by construction) can never satisfy the assertion.
 fn stanza_id_of(frame: &str) -> Option<String> {
-    let marker = "urn:xmpp:sid:0";
-    let start = frame.find(marker)?;
-    let scope = &frame[start.saturating_sub(200)..(start + 200).min(frame.len())];
-    attr_value(scope, "id")
+    let recipient_bare = format!("admin@{DOMAIN}");
+    let mut rest = frame;
+    while let Some(start) = rest.find("<stanza-id") {
+        let element_rest = &rest[start..];
+        let end = element_rest.find("/>")?;
+        let element = &element_rest[..end + 2];
+        if attr_value(element, "by").as_deref() == Some(recipient_bare.as_str()) {
+            return attr_value(element, "id");
+        }
+        rest = &element_rest[end + 2..];
+    }
+    None
 }
 
 fn attr_value(frame: &str, attr: &str) -> Option<String> {

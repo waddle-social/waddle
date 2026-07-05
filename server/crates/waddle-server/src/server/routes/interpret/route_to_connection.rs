@@ -185,10 +185,24 @@ pub(super) async fn route_to_connection(
                             )
                     );
                     if is_dm_message && !live_targets.is_empty() {
+                        // The carbon exclusion set is every client the
+                        // original stanza is addressed to (XEP-0280 §6.3):
+                        // the live delivery set PLUS the detached XEP-0198
+                        // resources whose replay buffers get the processed
+                        // original queued below — a detached sibling must
+                        // not ALSO find a received-carbon in its buffer on
+                        // resume.
+                        let mut delivery_fanout = live_targets.clone();
+                        delivery_fanout.extend(
+                            detached_targets
+                                .iter()
+                                .filter(|full| !live_set.contains(*full))
+                                .cloned(),
+                        );
                         match run_fanout_recipient_pass(
                             deps,
                             &bare,
-                            live_targets.clone(),
+                            delivery_fanout,
                             (*stanza).clone(),
                             recursion_depth + 1,
                         )

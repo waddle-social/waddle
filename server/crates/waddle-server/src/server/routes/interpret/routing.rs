@@ -102,8 +102,11 @@ pub(super) enum FanoutPassResult {
         processed: Option<Box<Stanza>>,
         side_routes: Vec<(Jid, Box<Stanza>)>,
     },
-    /// No `message_dispatcher` in `Deps` (unit-test fixtures) — the
-    /// caller falls back to per-resource `PeerStanza` delivery.
+    /// The shared pass could not be constructed — no
+    /// `message_dispatcher` in `Deps` (unit-test fixtures) or the
+    /// static synthetic resource literal was rejected (should not
+    /// happen). The caller falls back to per-resource `PeerStanza`
+    /// delivery.
     Unavailable,
     /// XEP-0191 blocklist load failed — fail closed and drop the
     /// message entirely, mirroring [`run_headless_recipient_pass`].
@@ -329,7 +332,10 @@ pub(super) async fn deliver_peer_to_full(
 /// into the recipient's detached XEP-0198 replay buffer if a
 /// resumable session exists, otherwise drops with a debug log.
 ///
-/// Known limitation (Copilot review on PR #276): the buffered XML
+/// Known limitation (Copilot review on PR #276) — applies to the
+/// LEGACY call sites only (full-JID targets, non-DM stanzas); the
+/// #1106 shared fan-out pass hands this function the PROCESSED
+/// stanza instead: the buffered XML here
 /// is the pre-recipient-pass form, so replay on resume sends it
 /// verbatim WITHOUT running the recipient-pass chain. The replayed
 /// message is missing the recipient-side `<stanza-id by='recipient'/>`
