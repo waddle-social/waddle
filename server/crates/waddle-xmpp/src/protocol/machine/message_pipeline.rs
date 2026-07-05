@@ -104,6 +104,7 @@ impl XmppStateMachine {
                 carbons: snapshot.carbons,
                 muc_occupancy: &snapshot.muc_occupancy,
                 has_live_transport: self.has_live_transport,
+                delivery_fanout: &self.delivery_fanout,
                 id_gen: self.id_gen.as_ref(),
             };
             let mctx = MessageContext::derive(env, &message);
@@ -150,6 +151,7 @@ fn infer_resume_kind(
                         carbons: CarbonsState::Disabled,
                         muc_occupancy: &muc_occupancy,
                         has_live_transport: true,
+                        delivery_fanout: &[],
                         id_gen: &id_gen,
                     },
                 )?;

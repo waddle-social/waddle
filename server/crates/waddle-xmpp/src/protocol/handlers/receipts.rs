@@ -107,6 +107,7 @@ mod tests {
             carbons: CarbonsState::Disabled,
             muc_occupancy: &occupancy,
             has_live_transport,
+            delivery_fanout: &[],
             id_gen: &id_gen,
         };
         let mut ctx = MessageContext::derive(env, message);

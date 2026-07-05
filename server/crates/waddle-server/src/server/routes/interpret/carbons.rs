@@ -6,7 +6,7 @@ pub(super) async fn send_carbons(
     owner: BareJid,
     message: Box<Message>,
     kind: CarbonKind,
-    exclude: FullJid,
+    exclude: Vec<FullJid>,
 ) {
     // Per XEP-0280 §5, a carbon copy is the original
     // <message/> wrapped in <sent>/<received> →
@@ -15,6 +15,14 @@ pub(super) async fn send_carbons(
     // bare JID TO the receiving resource. We fan out only
     // to other resources of `owner` that have explicitly
     // opted in via XEP-0280 enable.
+    //
+    // `exclude` is the original stanza's delivery set —
+    // XEP-0280 §6.3: the receiving server MUST NOT send a
+    // forwarded copy to the client(s) the original
+    // <message/> stanza was addressed to. For the shared
+    // bare-JID recipient pass (#1106) that is every
+    // same-priority resource; for the sender pass it is
+    // the single originating resource.
     //
     // Suppression rules (groupchat, <private/>, no-copy,
     // body-less) are enforced by `CarbonsMessageHandler`

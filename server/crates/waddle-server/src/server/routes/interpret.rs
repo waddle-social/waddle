@@ -186,7 +186,10 @@ use room_dispatch::dispatch_to_room;
 use room_pin::apply_pin_change_event;
 use room_subject::persist_room_subject_event;
 use route_to_connection::route_to_connection;
-use routing::{deliver_peer_to_full, run_headless_recipient_pass};
+use routing::{
+    deliver_peer_to_full, deliver_to_detached, run_fanout_recipient_pass,
+    run_headless_recipient_pass, FanoutPassResult,
+};
 
 pub use deps::{Deps, InterpretOutcome, TimerCommand};
 pub(crate) use groupchat_archive::push_inbox_update;

@@ -59,7 +59,18 @@ impl MessageHandler for CarbonsMessageHandler {
         }
 
         let owner = ctx.full_jid.to_bare();
-        let exclude = ctx.full_jid.clone();
+        // XEP-0280 §6.3: "The receiving server MUST NOT send a forwarded
+        // copy to the client(s) the original <message/> stanza was
+        // addressed to." When this dispatch is the single shared
+        // recipient pass for a bare-JID DM (#1106), the exclusion set is
+        // the whole RFC 6121 §8.5.2.1.1 delivery-fanout set. On ordinary
+        // per-connection dispatches the fanout is empty and only the
+        // local resource is excluded (sender pass / full-JID delivery).
+        let exclude = if ctx.delivery_fanout.is_empty() {
+            vec![ctx.full_jid.clone()]
+        } else {
+            ctx.delivery_fanout.to_vec()
+        };
         let kind = match ctx.locality {
             Locality::Sender => CarbonKind::Sent,
             Locality::Recipient => CarbonKind::Received,
@@ -108,6 +119,15 @@ mod tests {
     }
 
     fn run(local: &FullJid, carbons: CarbonsState, msg: &mut Message) -> HandlerOutcome {
+        run_with_fanout(local, carbons, &[], msg)
+    }
+
+    fn run_with_fanout(
+        local: &FullJid,
+        carbons: CarbonsState,
+        delivery_fanout: &[FullJid],
+        msg: &mut Message,
+    ) -> HandlerOutcome {
         let bl = Blocklist::empty();
         let occ = MucOccupancy::empty();
         let gen = FixedIdGenerator("test".to_string());
@@ -118,6 +138,7 @@ mod tests {
             carbons,
             muc_occupancy: &occ,
             has_live_transport: true,
+            delivery_fanout,
             id_gen: &gen,
         };
         let ctx = MessageContext::derive(env, msg);
@@ -283,16 +304,40 @@ mod tests {
 
     #[test]
     fn xep_0280_excludes_originating_resource_from_fanout() {
-        // The `exclude` field carries the local connection's full JID
-        // so the interpreter doesn't echo the carbon back to the
-        // resource that originated the message.
+        // Without a delivery-fanout set the `exclude` field falls back
+        // to the local connection's full JID so the interpreter doesn't
+        // echo the carbon back to the resource that originated the
+        // message.
         let local = full("alice@example.com/web");
         let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "hi");
         let outcome = run(&local, CarbonsState::Enabled, &mut msg);
         match outcome {
             HandlerOutcome::Continue(events) => match &events[0] {
                 OutboundEvent::SendCarbons { exclude, .. } => {
-                    assert_eq!(exclude.to_string(), "alice@example.com/web");
+                    assert_eq!(exclude, &vec![full("alice@example.com/web")]);
+                }
+                _ => panic!("expected SendCarbons"),
+            },
+            other => panic!("expected Continue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn xep_0280_delivery_fanout_set_is_the_exclusion_set() {
+        // #1106 / XEP-0280 §6.3: on the single shared recipient pass
+        // for a bare-JID DM, every resource in the RFC 6121
+        // §8.5.2.1.1 delivery set receives the original stanza, so the
+        // whole set — not just the pass's synthetic local resource —
+        // must be excluded from received-carbon fan-out.
+        let local = full("bob@example.com/offline-recipient-pass");
+        let fanout = vec![full("bob@example.com/web"), full("bob@example.com/phone")];
+        let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "hi");
+        let outcome = run_with_fanout(&local, CarbonsState::Enabled, &fanout, &mut msg);
+        match outcome {
+            HandlerOutcome::Continue(events) => match &events[0] {
+                OutboundEvent::SendCarbons { exclude, kind, .. } => {
+                    assert_eq!(exclude, &fanout);
+                    assert_eq!(*kind, CarbonKind::Received);
                 }
                 _ => panic!("expected SendCarbons"),
             },

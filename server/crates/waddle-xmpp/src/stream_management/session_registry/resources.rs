@@ -259,11 +259,16 @@ impl InMemorySmSessionRegistry {
         Ok(resources)
     }
 
-    /// List detached resources for a bare JID that had XEP-0280 carbons enabled.
+    /// List detached resources for a bare JID that had XEP-0280 carbons
+    /// enabled, excluding every full JID in `except`.
+    ///
+    /// `except` is the original stanza's delivery set (XEP-0280 §6.3:
+    /// clients addressed by the original MUST NOT also get a forwarded
+    /// copy).
     pub async fn detached_carbon_resources_for_user(
         &self,
         bare_jid: &BareJid,
-        except: &FullJid,
+        except: &[FullJid],
     ) -> Result<Vec<FullJid>, SmRegistryError> {
         let sessions = self
             .sessions
@@ -276,7 +281,7 @@ impl InMemorySmSessionRegistry {
                 session.carbons_enabled
                     && !session.is_expired()
                     && session.jid.to_bare() == *bare_jid
-                    && session.jid != *except
+                    && !except.contains(&session.jid)
             })
             .map(|session| session.jid.clone())
             .collect();
@@ -293,7 +298,7 @@ impl InMemorySmSessionRegistry {
                     session.carbons_enabled
                         && !session.is_expired()
                         && session.jid.to_bare() == *bare_jid
-                        && session.jid != *except
+                        && !except.contains(&session.jid)
                 })
                 .map(|session| session.jid.clone()),
         );

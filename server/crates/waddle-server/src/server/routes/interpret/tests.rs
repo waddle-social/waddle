@@ -97,7 +97,7 @@ async fn xep_0280_send_carbons_fans_out_to_other_carbon_enabled_resources() {
         owner,
         message: Box::new(original),
         kind: CarbonKind::Sent,
-        exclude: alice_web,
+        exclude: vec![alice_web],
     }];
     let _outcome = interpret(events, &Deps::registry_only(&registry)).await;
 
@@ -135,7 +135,7 @@ async fn xep_0280_send_carbons_skips_originating_resource() {
         owner,
         message: Box::new(original),
         kind: CarbonKind::Sent,
-        exclude: alice_web,
+        exclude: vec![alice_web],
     }];
     let _outcome = interpret(events, &Deps::registry_only(&registry)).await;
 
@@ -161,7 +161,7 @@ async fn xep_0280_send_carbons_skips_resources_without_carbons_enabled() {
         owner,
         message: Box::new(original),
         kind: CarbonKind::Sent,
-        exclude: alice_web,
+        exclude: vec![alice_web],
     }];
     let _outcome = interpret(events, &Deps::registry_only(&registry)).await;
 
@@ -185,7 +185,7 @@ async fn xep_0280_send_carbons_received_kind_emits_received_envelope() {
         owner,
         message: Box::new(original),
         kind: CarbonKind::Received,
-        exclude: bob_desk,
+        exclude: vec![bob_desk],
     }];
     let _outcome = interpret(events, &Deps::registry_only(&registry)).await;
 
@@ -265,7 +265,7 @@ async fn xep_0280_send_carbons_queues_for_detached_xep_0198_resources() {
             owner: owner.clone(),
             message: Box::new(original),
             kind: CarbonKind::Sent,
-            exclude: alice_web,
+            exclude: vec![alice_web],
         }],
         &deps,
     )
