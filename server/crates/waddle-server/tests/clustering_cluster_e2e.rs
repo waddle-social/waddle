@@ -36,6 +36,7 @@ use tokio_util::sync::CancellationToken;
 use waddle_server::clustering::codec::RemoteStanza;
 use waddle_server::clustering::relay::RelayHandle;
 use waddle_server::clustering::swarm;
+use waddle_server::clustering::NodeId;
 use waddle_server::config::{ClusteringBootstrapConfig, ClusteringConfig, ClusteringLeaseConfig};
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
 use waddle_ws_test_support::TestServer;
@@ -192,7 +193,7 @@ async fn ping_until(
     let mut last_error = String::new();
     while Instant::now() < until {
         match handle.ping().await {
-            Ok(pong) if pong.node_id == expected_node => return Ok(()),
+            Ok(pong) if pong.node_id.as_str() == expected_node => return Ok(()),
             Ok(pong) => return Err(format!("wrong node answered: {}", pong.node_id)),
             Err(error) => last_error = error.to_string(),
         }
@@ -281,16 +282,21 @@ async fn cluster_exit_criteria_end_to_end() {
     let handle = swarm::spawn(&config, &db, stop.clone())
         .await
         .expect("test-process swarm joins the mesh");
-    assert!(!handle.node_id.is_empty());
+    assert!(!handle.node_id.as_str().is_empty());
 
     // --- Exit criterion: cross-node ask round-trip (real network, two other
     // processes), including discovery of B through the mesh (the test only
     // bootstraps toward A).
-    let mut relay_a = RelayHandle::new(node_a.clone());
+    // Exercise the configured receiver-side ask timeouts (ADR element 5)
+    // through the handle's wiring, not just config validation.
+    let mut relay_a = RelayHandle::new(NodeId::new(node_a.clone())).with_ask_timeouts(
+        config.messaging.mailbox_timeout,
+        config.messaging.reply_timeout,
+    );
     ping_until(&mut relay_a, &node_a, Duration::from_secs(30))
         .await
         .expect("cross-node ping to A");
-    let mut relay_b = RelayHandle::new(node_b.clone());
+    let mut relay_b = RelayHandle::new(NodeId::new(node_b.clone()));
     ping_until(&mut relay_b, &node_b, Duration::from_secs(30))
         .await
         .expect("cross-node ping to B");
@@ -317,7 +323,7 @@ async fn cluster_exit_criteria_end_to_end() {
         let size = if index % 2 == 0 { 100 * 1024 } else { 16 };
         let thread_id = format!("mix-{index}");
         join_set.spawn(async move {
-            let mut relay = RelayHandle::new(node);
+            let mut relay = RelayHandle::new(NodeId::new(node));
             let reply = relay
                 .echo_stanza(thread_message(&thread_id, size))
                 .await
@@ -402,7 +408,7 @@ async fn cluster_exit_criteria_end_to_end() {
     let (server_b2, node_b2, _peer_b2) =
         spawn_cluster_server(&postgres_url, &pool.pool_env, port_b, &[port_a]);
     assert_ne!(node_b2, node_b, "restarted node must mint a fresh node_id");
-    let mut relay_b2 = RelayHandle::new(node_b2.clone());
+    let mut relay_b2 = RelayHandle::new(NodeId::new(node_b2.clone()));
     ping_until(&mut relay_b2, &node_b2, Duration::from_secs(45))
         .await
         .expect("restarted node re-discovered via kademlia");

@@ -44,6 +44,39 @@ pub mod relay;
 #[cfg(feature = "clustering")]
 pub mod swarm;
 
+/// A node's per-process clustering identity: freshly generated on every
+/// start, never reused across restarts. Names the node's keypair-slot lease
+/// and its single kademlia relay registration, and travels on remote actor
+/// message types (typed per the typed-payloads rule — never a bare `String`).
+#[cfg(feature = "clustering")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct NodeId(String);
+
+#[cfg(feature = "clustering")]
+impl NodeId {
+    /// Mint a fresh per-process node id.
+    pub fn generate() -> Self {
+        Self(uuid::Uuid::new_v4().to_string())
+    }
+
+    /// Wrap an id received out-of-band (e.g. a harness node-id file).
+    pub fn new(raw: String) -> Self {
+        Self(raw)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[cfg(feature = "clustering")]
+impl std::fmt::Display for NodeId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// Serializes tests that touch the shared `clustering_peer_allowlist` table
 /// (the allowlist store tests and the swarm bring-up smoke test, which loads
 /// the allowlist at startup) so a concurrently seeded row cannot leak between

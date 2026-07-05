@@ -209,8 +209,11 @@ pub struct ClusteringBootstrapConfig {
 ///
 /// Invariants enforced at parse time: `reply_timeout <= request_timeout` and
 /// `mailbox_timeout <= request_timeout`. `request_timeout` is the sender-side
-/// libp2p transport cap (`with_request_timeout`) and is the binding bound; any
-/// `reply_timeout` above it is dead configuration.
+/// libp2p transport cap (`with_request_timeout`, applied at swarm build) and
+/// is the binding bound; any `reply_timeout` above it is dead configuration.
+/// `mailbox_timeout`/`reply_timeout` are per-ask parameters, applied by every
+/// relay ask (`clustering::relay::RelayHandle`); Phase 4's delivery asks
+/// inherit the same wiring.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClusteringMessagingConfig {
     pub request_timeout: Duration,

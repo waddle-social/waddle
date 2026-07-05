@@ -12,7 +12,7 @@ use super::behaviour::{WaddleBehaviour, WaddleBehaviourEvent};
 use super::lease::{
     KeypairSlotLease, LeaseError, LeaseIdentity, LeasedSlot, PostgresKeypairSlotLease,
 };
-use super::{dns, identity, metrics, relay};
+use super::{dns, identity, metrics, relay, NodeId};
 use crate::config::{ClusteringBootstrapConfig, ClusteringConfig};
 use crate::db::Database;
 use core::convert::Infallible;
@@ -80,7 +80,7 @@ pub enum SwarmError {
 #[derive(Debug, Clone)]
 pub struct SwarmHandle {
     pub local_peer_id: PeerId,
-    pub node_id: String,
+    pub node_id: NodeId,
 }
 
 /// Build the swarm, install the global `ActorSwarm`, start listening, spawn
@@ -115,7 +115,7 @@ pub async fn spawn(
     // One per-process node id: freshly generated every start, never reused
     // across restarts. Names this node's keypair-slot lease and its single
     // kademlia relay registration.
-    let node_id = uuid::Uuid::new_v4().to_string();
+    let node_id = NodeId::generate();
 
     let keypair = node_keypair(config, db, &node_id, &stop_token).await?;
     let local_peer_id = keypair.public().to_peer_id();
@@ -209,10 +209,12 @@ pub async fn spawn(
     // WADDLE_HTTP_PORT_FILE convention).
     if let Some(path) = &config.node_id_file {
         let contents = format!("{} {}\n", handle.node_id, handle.local_peer_id);
-        std::fs::write(path, contents).map_err(|error| SwarmError::NodeIdFile {
-            path: path.display().to_string(),
-            reason: error.to_string(),
-        })?;
+        tokio::fs::write(path, contents)
+            .await
+            .map_err(|error| SwarmError::NodeIdFile {
+                path: path.display().to_string(),
+                reason: error.to_string(),
+            })?;
     }
 
     Ok(handle)
@@ -233,7 +235,7 @@ struct AllowlistRefresh {
 async fn node_keypair(
     config: &ClusteringConfig,
     db: &Database,
-    node_id: &str,
+    node_id: &NodeId,
     stop_token: &CancellationToken,
 ) -> Result<Keypair, SwarmError> {
     if config.keypair_pool.is_empty() {
@@ -249,8 +251,9 @@ async fn node_keypair(
 
     let lease = PostgresKeypairSlotLease::new(db.clone());
     lease.ensure_schema().await?;
+    // Storage boundary: the lease persists the id as TEXT.
     let node = LeaseIdentity {
-        node_id: node_id.to_string(),
+        node_id: node_id.as_str().to_string(),
         node_epoch: uuid::Uuid::new_v4().to_string(),
     };
     let pool_size = config.keypair_pool.len();
@@ -259,7 +262,23 @@ async fn node_keypair(
         .await?;
     // `acquire` only ever returns an in-range slot, so this index is valid.
     let entry = &config.keypair_pool[slot.slot_index as usize];
-    let keypair = identity::keypair_from_pool_entry(entry)?;
+    let keypair = match identity::keypair_from_pool_entry(entry) {
+        Ok(keypair) => keypair,
+        Err(error) => {
+            // Best-effort release: without it a malformed pool entry holds
+            // the slot hostage until lease-TTL expiry while this node
+            // crash-loops onto fresh slots, transiently shrinking the pool
+            // for every other node.
+            if let Err(release_error) = lease.release(&node, slot).await {
+                tracing::warn!(
+                    %release_error,
+                    slot = slot.slot_index,
+                    "failed to release keypair slot after decode failure"
+                );
+            }
+            return Err(error.into());
+        }
+    };
     tracing::info!(
         slot = slot.slot_index,
         pool_size,

@@ -21,6 +21,7 @@
 
 use super::codec::RemoteStanza;
 use super::metrics;
+use super::NodeId;
 use kameo::actor::{ActorRef, RemoteActorRef, Spawn};
 use kameo::error::RemoteSendError;
 use kameo::message::{Context, Message};
@@ -31,7 +32,7 @@ use tokio_util::sync::CancellationToken;
 
 /// The kademlia registration name for a node's relay actor — the node's ONLY
 /// kademlia name (O(1) registrations per node, never per entity).
-pub fn relay_name(node_id: &str) -> String {
+pub fn relay_name(node_id: &NodeId) -> String {
     format!("waddle-relay/{node_id}")
 }
 
@@ -69,13 +70,13 @@ const LOOKUP_BACKOFF: [Duration; 3] = [
 #[derive(Actor, RemoteActor)]
 #[remote_actor(id = "waddle.clustering.relay-actor.v1")]
 pub struct RelayActor {
-    node_id: String,
+    node_id: NodeId,
     /// When false (production), the fault-injection messages are inert acks.
     fault_injection: bool,
 }
 
 impl RelayActor {
-    pub fn new(node_id: String, fault_injection: bool) -> Self {
+    pub fn new(node_id: NodeId, fault_injection: bool) -> Self {
         Self {
             node_id,
             fault_injection,
@@ -90,7 +91,7 @@ pub struct RelayPing;
 /// Reply to [`RelayPing`].
 #[derive(Debug, Clone, Serialize, Deserialize, Reply)]
 pub struct RelayPong {
-    pub node_id: String,
+    pub node_id: NodeId,
 }
 
 #[kameo::remote_message("waddle.clustering.relay.ping.v1")]
@@ -119,7 +120,7 @@ pub struct RelayEchoStanza {
 /// Reply to [`RelayEchoStanza`].
 #[derive(Debug, Clone, Serialize, Deserialize, Reply)]
 pub struct RelayEchoReply {
-    pub node_id: String,
+    pub node_id: NodeId,
     pub stanza: RemoteStanza,
 }
 
@@ -211,7 +212,7 @@ impl Message<RelaySleep> for RelayActor {
 /// **re-register under the same name** on every respawn (kameo auto-registers
 /// removal on actor stop, so re-registration is mandatory, not optional).
 /// Stops cleanly when `stop_token` fires.
-pub fn spawn_supervised(node_id: String, fault_injection: bool, stop_token: CancellationToken) {
+pub fn spawn_supervised(node_id: NodeId, fault_injection: bool, stop_token: CancellationToken) {
     tokio::spawn(async move {
         let name = relay_name(&node_id);
         let mut respawns: u64 = 0;
@@ -286,9 +287,17 @@ pub fn spawn_supervised(node_id: String, fault_injection: bool, stop_token: Canc
 /// when the transport reports the cached ref dead
 /// (`ActorNotRunning`/`UnknownActor`/`BadActorType` — e.g. after a supervised
 /// respawn minted a new `ActorId` under the same name).
+///
+/// Every ask carries the ADR element-5 receiver-side timeouts
+/// (`mailbox_timeout`/`reply_timeout`), defaulting to the compiled
+/// [`ClusteringMessagingConfig`](crate::config::ClusteringMessagingConfig)
+/// defaults; callers with a runtime config apply it via
+/// [`Self::with_ask_timeouts`].
 pub struct RelayHandle {
-    node_id: String,
+    node_id: NodeId,
     cached: Option<RemoteActorRef<RelayActor>>,
+    mailbox_timeout: Duration,
+    reply_timeout: Duration,
 }
 
 /// Failures asking a remote relay.
@@ -296,18 +305,30 @@ pub struct RelayHandle {
 pub enum RelayAskError {
     /// The relay name did not resolve in kademlia within the backoff budget.
     #[error("relay for node '{node_id}' not found in the swarm registry")]
-    NotFound { node_id: String },
+    NotFound { node_id: NodeId },
     /// The ask failed at the transport/handler layer.
     #[error("relay ask failed: {0}")]
     Send(String),
 }
 
 impl RelayHandle {
-    pub fn new(node_id: String) -> Self {
+    pub fn new(node_id: NodeId) -> Self {
+        let defaults = crate::config::ClusteringMessagingConfig::default();
         Self {
             node_id,
             cached: None,
+            mailbox_timeout: defaults.mailbox_timeout,
+            reply_timeout: defaults.reply_timeout,
         }
+    }
+
+    /// Apply the deployment's configured receiver-side ask timeouts (ADR
+    /// element 5: both must sit under the transport `request_timeout`, which
+    /// config parsing already validates).
+    pub fn with_ask_timeouts(mut self, mailbox_timeout: Duration, reply_timeout: Duration) -> Self {
+        self.mailbox_timeout = mailbox_timeout;
+        self.reply_timeout = reply_timeout;
+        self
     }
 
     /// Resolve the relay ref, using the cache when warm and a bounded-backoff
@@ -347,7 +368,12 @@ impl RelayHandle {
     /// re-resolve via kademlia, then retry the ask exactly once.
     pub async fn ping(&mut self) -> Result<RelayPong, RelayAskError> {
         let remote_ref = self.resolve().await?;
-        match remote_ref.ask(&RelayPing).await {
+        match remote_ref
+            .ask(&RelayPing)
+            .mailbox_timeout(self.mailbox_timeout)
+            .reply_timeout(self.reply_timeout)
+            .await
+        {
             Ok(pong) => Ok(pong),
             Err(error) if is_stale_ref_error(&error) => {
                 tracing::debug!(
@@ -359,6 +385,8 @@ impl RelayHandle {
                 let remote_ref = self.resolve().await?;
                 remote_ref
                     .ask(&RelayPing)
+                    .mailbox_timeout(self.mailbox_timeout)
+                    .reply_timeout(self.reply_timeout)
                     .await
                     .map_err(|error| RelayAskError::Send(error.to_string()))
             }
@@ -371,7 +399,12 @@ impl RelayHandle {
     /// whether the *request* went out; callers assert recovery separately.
     pub async fn crash(&mut self) -> Result<(), RelayAskError> {
         let remote_ref = self.resolve().await?;
-        match remote_ref.ask(&RelayCrash).await {
+        match remote_ref
+            .ask(&RelayCrash)
+            .mailbox_timeout(self.mailbox_timeout)
+            .reply_timeout(self.reply_timeout)
+            .await
+        {
             // A dead-before-reply error is the expected outcome of a crash.
             Ok(_) | Err(_) => Ok(()),
         }
@@ -384,6 +417,8 @@ impl RelayHandle {
         let remote_ref = self.resolve().await?;
         remote_ref
             .ask(&RelaySleep { millis })
+            .mailbox_timeout(self.mailbox_timeout)
+            .reply_timeout(self.reply_timeout)
             .await
             .map_err(|error| RelayAskError::Send(error.to_string()))
     }
@@ -396,13 +431,20 @@ impl RelayHandle {
     ) -> Result<RelayEchoReply, RelayAskError> {
         let message = RelayEchoStanza { stanza };
         let remote_ref = self.resolve().await?;
-        match remote_ref.ask(&message).await {
+        match remote_ref
+            .ask(&message)
+            .mailbox_timeout(self.mailbox_timeout)
+            .reply_timeout(self.reply_timeout)
+            .await
+        {
             Ok(reply) => Ok(reply),
             Err(error) if is_stale_ref_error(&error) => {
                 self.cached = None;
                 let remote_ref = self.resolve().await?;
                 remote_ref
                     .ask(&message)
+                    .mailbox_timeout(self.mailbox_timeout)
+                    .reply_timeout(self.reply_timeout)
                     .await
                     .map_err(|error| RelayAskError::Send(error.to_string()))
             }
@@ -430,8 +472,12 @@ mod tests {
 
     #[test]
     fn relay_name_is_node_scoped() {
-        assert_eq!(relay_name("node-1"), "waddle-relay/node-1");
-        assert_ne!(relay_name("node-1"), relay_name("node-2"));
+        let (a, b) = (
+            NodeId::new("node-1".to_string()),
+            NodeId::new("node-2".to_string()),
+        );
+        assert_eq!(relay_name(&a), "waddle-relay/node-1");
+        assert_ne!(relay_name(&a), relay_name(&b));
     }
 
     #[test]

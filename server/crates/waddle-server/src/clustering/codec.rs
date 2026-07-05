@@ -210,6 +210,13 @@ impl<'de> Deserialize<'de> for RemoteElement {
     }
 }
 
+// NB on the XML-generation hard rule: several tests below assemble XML with
+// `format!`/`push_str`. That is deliberate and necessary — they produce
+// ADVERSARIAL payloads (nesting bombs, attribute bombs, oversized and
+// malformed documents) that typed builders cannot emit by construction;
+// builder-only XML is exactly the property the production encode path keeps.
+// The rule protects wire/production XML, which never goes through these
+// helpers.
 #[cfg(test)]
 mod tests {
     use super::*;
