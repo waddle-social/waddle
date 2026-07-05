@@ -341,8 +341,10 @@ async fn create_websocket_state(
 
     // ADR-0017 Phase 1: spawn the actor-backed per-user registry. It is
     // populated alongside `connection_registry` on the live register/
-    // unregister path (dual-registration) so the actor tree mirrors live
-    // sessions ahead of the read-cutover. Nothing reads it for delivery yet.
+    // unregister path (dual-registration). As of Slice 1, bare-JID routing
+    // selection (`route_to_connection`) sources its candidate set + RFC
+    // priority ranking from this actor, intersected with DashMap liveness;
+    // delivery still uses the DashMap until Slice 2.
     let user_registry = {
         use kameo::actor::Spawn;
         waddle_xmpp::registry::UserRegistryActor::spawn(

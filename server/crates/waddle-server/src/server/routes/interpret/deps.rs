@@ -54,9 +54,12 @@ pub struct Deps<'a> {
     pub connection_registry: &'a ConnectionRegistry,
     /// Actor-backed per-user registry (ADR-0017 Phase 1). Threaded so the
     /// [`OutboundEvent::UnregisterConnection`] arm can mirror the DashMap
-    /// unregister into the actor tree. `None` in unit tests; supplied in
-    /// production via [`super::super::websocket::build_interpret_deps`].
-    /// Nothing reads it for delivery yet.
+    /// unregister into the actor tree AND so bare-JID routing selection
+    /// (`route_to_connection`, Slice 1) can source its candidate set + RFC
+    /// priority ranking from the actor. `None` in unit tests that do not
+    /// exercise live bare-JID delivery (selection then degrades to the
+    /// offline/headless path); supplied in production via
+    /// [`super::super::websocket::build_interpret_deps`].
     pub user_registry: Option<&'a ActorRef<waddle_xmpp::registry::UserRegistryActor>>,
     /// XEP-0198 stream-management session registry. Used to fan
     /// XEP-0280 carbons out to *detached but resumable* resources so

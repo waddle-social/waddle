@@ -3672,13 +3672,13 @@ async fn handle_message_direct_chat_to_bare_jid_fans_out_to_all_connected_resour
         .connection_registry
         .update_presence(&recipient_mobile, true, 0);
 
-    // ADR-0017 Phase 1: dual-registration mirrors the (shared-Arc) entries
-    // into the actor tree exactly as the production registration path does, so
-    // the actor tree tracks the same live resources. Bare-JID selection is
-    // still DashMap-authoritative in this PR (the read-cutover has NOT landed);
-    // the mirror is kept warm here so the future cutover has an accurate tree.
-    // update_presence above mutates the shared atomics, so the actor observes
-    // the same availability.
+    // ADR-0017 Phase 1 Slice 1: bare-JID selection now sources its candidate
+    // set + RFC ranking from the actor tree (intersected with DashMap
+    // liveness), so mirroring these resources into the actor is REQUIRED for
+    // this test to resolve live targets — not merely pre-warming. The
+    // dual-registration mirror shares the same Arc-backed entries as the
+    // DashMap registration, and `update_presence` above mutates the shared
+    // atomics, so the actor observes the same availability.
     for jid in [&recipient_web, &recipient_mobile] {
         let entry = state
             .deps
