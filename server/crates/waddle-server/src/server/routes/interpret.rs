@@ -36,7 +36,6 @@
 //!   [`waddle_xmpp::protocol::handlers::archive::ArchiveHandler`].
 //! - [`OutboundEvent::ProjectInbox`] — Waddle inbox upsert keyed by
 //!   `(owner, peer)` with `archive_ref` linking back to the MAM entry.
-//! - [`OutboundEvent::UnregisterConnection`] — drop from the registry.
 //! - [`OutboundEvent::LookupArchivedMessage`] — XEP-0359 stanza-id /
 //!   origin-id lookup against personal MAM; result feeds back as
 //!   [`InboundEvent::ArchivedMessageLoaded`] in
@@ -73,6 +72,9 @@
 //! - `AskSfu`, `QueryMam`, `LoadScramCredentials`,
 //!   `ValidateOAuthBearer`, `RegisterConnection` — wired in later
 //!   migration steps.
+//! - `UnregisterConnection` — intentionally NOT wired: owner-gated registry
+//!   removal is driven by the live teardown paths (which hold the session's
+//!   ownership token), not by the token-less state machine. See the arm.
 
 use crate::auth::Session;
 use crate::permissions::{CheckPermission, Object, ObjectType, Permission, Subject};
@@ -471,32 +473,28 @@ async fn interpret_with_depth(
                 );
             }
             OutboundEvent::UnregisterConnection(jid) => {
-                let removed_entry = registry.unregister(&jid);
-                debug!(jid = %jid, "UnregisterConnection: removed from registry");
-                // ADR-0017 Phase 1: mirror the unregister into the actor tree,
-                // gated on the DashMap actually removing an entry (Copilot
-                // review on PR #1177) — consistent with every other teardown
-                // site, so a stale/duplicate event cannot evict the actor-tree
-                // entry a newer session installed for the same FullJid.
-                //
-                // NOTE: no producer currently emits `OutboundEvent::Unregister\
-                // Connection`, so this arm is a placeholder — the live teardown
-                // paths mirror the unregister directly (see
-                // `cleanup::cleanup_connection_shutdown`,
+                // Deliberately a warn-only stub, NOT a registry unregister
+                // (Greptile review on PR #1177). No producer emits this event,
+                // and the variant carries only a `FullJid` — no ownership token
+                // or SM stream id — so a plain `registry.unregister(&jid)` here
+                // could evict an UNRELATED live session that holds the same full
+                // JID, exactly the replacement-eviction footgun fixed on every
+                // real teardown path (`unregister_if_owner` /
+                // `unregister_if_sm_stream_id`). Owner-gated registry removal is
+                // a server-side concern the live teardown paths already own
+                // (`cleanup::cleanup_connection_shutdown`,
                 // `stream_management::registration`'s resume-rollback helpers,
-                // `cleanup_invalidated_detached_session`, and the SM-expiry
-                // janitor). If the state machine ever starts emitting this
-                // event, this keeps the mirror symmetric on that path too.
-                if let Some(entry) = removed_entry {
-                    if let Some(user_registry) = deps.user_registry {
-                        crate::server::dual_registration::mirror_unregister(
-                            user_registry,
-                            &jid,
-                            Some(std::sync::Arc::clone(&entry.carbons_enabled)),
-                        )
-                        .await;
-                    }
-                }
+                // `cleanup_invalidated_detached_session`, the SM-expiry janitor);
+                // the pure state machine has no ownership token to drive it
+                // safely. If this is ever wired, the event MUST first carry the
+                // owning session's token so the removal can be gated.
+                warn!(
+                    variant = "UnregisterConnection",
+                    jid = %jid,
+                    "OutboundEvent variant not wired in interpreter: registry \
+                     unregister is owner-gated and driven by the live teardown \
+                     paths, not the state machine"
+                );
             }
             OutboundEvent::ArchiveGroupchat {
                 room,
