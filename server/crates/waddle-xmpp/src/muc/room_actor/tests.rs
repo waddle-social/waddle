@@ -387,6 +387,7 @@ async fn membership_revocation_in_members_only_room_ejects_occupant_with_status_
         })
         .await
         .expect("apply");
+    let updates = updates.presence_updates;
     assert_eq!(updates.len(), 1, "only Alice should receive her removal");
     assert_eq!(updates[0].0, alice);
     assert_eq!(updates[0].1.type_, PresenceType::Unavailable);
@@ -917,12 +918,18 @@ async fn role_none_kick_notifies_same_nick_sibling_sessions() {
         .await
         .expect("kick succeeds");
 
-    assert!(updates.iter().any(|(recipient, presence)| {
-        recipient == &alice_laptop && presence_has_status(presence, "307")
-    }));
-    assert!(updates.iter().any(|(recipient, presence)| {
-        recipient == &alice_phone && presence_has_status(presence, "307")
-    }));
+    assert!(updates
+        .presence_updates
+        .iter()
+        .any(|(recipient, presence)| {
+            recipient == &alice_laptop && presence_has_status(presence, "307")
+        }));
+    assert!(updates
+        .presence_updates
+        .iter()
+        .any(|(recipient, presence)| {
+            recipient == &alice_phone && presence_has_status(presence, "307")
+        }));
     assert_eq!(actor.ask(OccupantCount).await.expect("count"), 0);
 }
 
@@ -967,12 +974,18 @@ async fn members_only_revocation_removes_every_nick_for_bare_jid() {
         .await
         .expect("revocation succeeds");
 
-    assert!(updates.iter().any(|(recipient, presence)| {
-        recipient == &alice_laptop && presence_has_status(presence, "321")
-    }));
-    assert!(updates.iter().any(|(recipient, presence)| {
-        recipient == &alice_phone && presence_has_status(presence, "321")
-    }));
+    assert!(updates
+        .presence_updates
+        .iter()
+        .any(|(recipient, presence)| {
+            recipient == &alice_laptop && presence_has_status(presence, "321")
+        }));
+    assert!(updates
+        .presence_updates
+        .iter()
+        .any(|(recipient, presence)| {
+            recipient == &alice_phone && presence_has_status(presence, "321")
+        }));
     assert_eq!(actor.ask(OccupantCount).await.expect("count"), 0);
 }
 
@@ -2322,5 +2335,156 @@ async fn leaving_one_active_same_nick_session_preserves_sibling_active_muji_stat
             .as_ref()
             .is_some_and(|muji| muji.is_active()),
         "late join replay preserves the remaining active sibling"
+    );
+}
+
+#[tokio::test]
+async fn kick_reports_every_removed_session_for_sfu_eviction() {
+    let actor = spawn_room_actor().await;
+
+    // Alice is in the room from two devices under one nick; both
+    // sessions must be surfaced when she is kicked (issue #935).
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: test_full_jid_resource("alice", "desktop"),
+            nick: "alice".to_string(),
+            effective_affiliation: Affiliation::Member,
+            local_domain: "example.com".to_string(),
+            admission_revision: 0,
+        })
+        .await
+        .expect("join alice desktop");
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: test_full_jid_resource("alice", "mobile"),
+            nick: "alice".to_string(),
+            effective_affiliation: Affiliation::Member,
+            local_domain: "example.com".to_string(),
+            admission_revision: 0,
+        })
+        .await
+        .expect("join alice mobile");
+
+    let applied = actor
+        .ask(ApplyAdminItems {
+            sender_jid: test_full_jid("mod"),
+            sender_affiliation: Affiliation::Admin,
+            sender_role: Role::Moderator,
+            items: vec![AdminItem {
+                jid: None,
+                nick: Some("alice".to_string()),
+                affiliation: None,
+                role: Some(Role::None),
+                reason: None,
+            }],
+        })
+        .await
+        .expect("kick alice");
+
+    let mut removed = applied.removed_by_moderation.clone();
+    removed.sort_by_key(std::string::ToString::to_string);
+    assert_eq!(
+        removed,
+        vec![
+            test_full_jid_resource("alice", "desktop"),
+            test_full_jid_resource("alice", "mobile"),
+        ],
+        "kick (XEP-0045 status 307) must surface all removed sessions"
+    );
+    assert!(
+        !applied.presence_updates.is_empty(),
+        "kick still fans out unavailable presence"
+    );
+}
+
+#[tokio::test]
+async fn ban_reports_every_removed_session_for_sfu_eviction() {
+    let actor = spawn_room_actor().await;
+
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: test_full_jid_resource("alice", "desktop"),
+            nick: "alice".to_string(),
+            effective_affiliation: Affiliation::Member,
+            local_domain: "example.com".to_string(),
+            admission_revision: 0,
+        })
+        .await
+        .expect("join alice desktop");
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: test_full_jid_resource("alice", "mobile"),
+            nick: "alice".to_string(),
+            effective_affiliation: Affiliation::Member,
+            local_domain: "example.com".to_string(),
+            admission_revision: 0,
+        })
+        .await
+        .expect("join alice mobile");
+
+    let applied = actor
+        .ask(ApplyAdminItems {
+            sender_jid: test_full_jid("mod"),
+            sender_affiliation: Affiliation::Admin,
+            sender_role: Role::Moderator,
+            items: vec![AdminItem {
+                jid: Some("alice@example.com".parse().expect("bare jid")),
+                nick: None,
+                affiliation: Some(Affiliation::Outcast),
+                role: None,
+                reason: None,
+            }],
+        })
+        .await
+        .expect("ban alice");
+
+    let mut removed = applied.removed_by_moderation.clone();
+    removed.sort_by_key(std::string::ToString::to_string);
+    assert_eq!(
+        removed,
+        vec![
+            test_full_jid_resource("alice", "desktop"),
+            test_full_jid_resource("alice", "mobile"),
+        ],
+        "ban (XEP-0045 status 301) must surface all removed sessions"
+    );
+}
+
+#[tokio::test]
+async fn non_removing_admin_changes_report_no_moderation_removals() {
+    let actor = spawn_room_actor().await;
+
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: test_full_jid("alice"),
+            nick: "alice".to_string(),
+            effective_affiliation: Affiliation::Member,
+            local_domain: "example.com".to_string(),
+            admission_revision: 0,
+        })
+        .await
+        .expect("join alice");
+
+    // A plain role demotion (still an occupant afterwards) must NOT
+    // mark the session for SFU eviction.
+    let applied = actor
+        .ask(ApplyAdminItems {
+            sender_jid: test_full_jid("mod"),
+            sender_affiliation: Affiliation::Admin,
+            sender_role: Role::Moderator,
+            items: vec![AdminItem {
+                jid: None,
+                nick: Some("alice".to_string()),
+                affiliation: None,
+                role: Some(Role::Visitor),
+                reason: None,
+            }],
+        })
+        .await
+        .expect("demote alice");
+
+    assert!(
+        applied.removed_by_moderation.is_empty(),
+        "a role change that keeps the occupant must not evict their call session"
     );
 }

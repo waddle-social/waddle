@@ -4219,3 +4219,177 @@ async fn handle_muc_leave_records_notification_activity_and_clears_show() {
         after_leave.presence_show,
     );
 }
+
+// --- Issue #935: involuntary MUC removal must evict SFU call participants ---
+
+fn build_admin_set_iq_xml(room_jid: &BareJid, id: &str, item: Element) -> String {
+    element_to_xml(
+        Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+            .attr(
+                minidom::rxml::xml_ncname!("to").to_owned(),
+                room_jid.to_string(),
+            )
+            .append(
+                Element::builder("query", waddle_xmpp::muc::NS_MUC_ADMIN)
+                    .append(item)
+                    .build(),
+            )
+            .build(),
+    )
+}
+
+async fn join_alice_owner_and_bob(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+) -> (Session, FullJid, FullJid) {
+    let alice_session = create_test_server_owner_session(state, "alice").await;
+    let bob_session = create_test_session(state, "bob").await;
+    let alice_jid: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let bob_jid: FullJid = "bob@example.com/web".parse().expect("bob jid");
+    handle_muc_join(
+        state,
+        "example.com",
+        room_jid,
+        &alice_jid,
+        "alice",
+        None,
+        &Some(alice_session.clone()),
+    )
+    .await;
+    let _ = handle_muc_join(
+        state,
+        "example.com",
+        room_jid,
+        &bob_jid,
+        "bob",
+        None,
+        &Some(bob_session),
+    )
+    .await;
+    (alice_session, alice_jid, bob_jid)
+}
+
+#[tokio::test]
+async fn muc_admin_kick_evicts_target_sessions_from_room_call() {
+    let recorder = Arc::new(crate::server::routes::websocket::tests::RecordingSfu::default());
+    let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+    let room_jid: BareJid = "kick-evicts@muc.example.com".parse().expect("room jid");
+    let (alice_session, alice_jid, _bob_jid) =
+        join_alice_owner_and_bob(state.as_ref(), &room_jid).await;
+    let ready = ready_phase(&alice_jid);
+
+    let kick_iq = build_admin_set_iq_xml(
+        &room_jid,
+        "kick-bob",
+        Element::builder("item", waddle_xmpp::muc::NS_MUC_ADMIN)
+            .attr(minidom::rxml::xml_ncname!("nick").to_owned(), "bob")
+            .attr(minidom::rxml::xml_ncname!("role").to_owned(), "none")
+            .build(),
+    );
+    let responses = handle_iq(
+        &kick_iq,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(alice_session),
+        &ready,
+    )
+    .await;
+    assert_eq!(responses.len(), 1, "kick response: {responses:?}");
+    assert!(responses[0].contains("type='result'"), "{responses:?}");
+
+    let evicted = recorder.snapshot();
+    assert_eq!(
+        evicted.len(),
+        1,
+        "exactly the kicked occupant's session is evicted: {evicted:?}"
+    );
+    assert_eq!(evicted[0].0.as_str(), "kick-evicts@muc.example.com");
+    assert_eq!(evicted[0].1.as_livekit_identity(), "bob@example.com/web");
+    assert!(
+        recorder.note_snapshot().is_empty(),
+        "moderation must use the full admin-evict path, not webhook bookkeeping"
+    );
+}
+
+#[tokio::test]
+async fn muc_admin_ban_evicts_target_sessions_from_room_call() {
+    let recorder = Arc::new(crate::server::routes::websocket::tests::RecordingSfu::default());
+    let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+    let room_jid: BareJid = "ban-evicts@muc.example.com".parse().expect("room jid");
+    let (alice_session, alice_jid, _bob_jid) =
+        join_alice_owner_and_bob(state.as_ref(), &room_jid).await;
+    let ready = ready_phase(&alice_jid);
+
+    let ban_iq = build_admin_set_iq_xml(
+        &room_jid,
+        "ban-bob",
+        Element::builder("item", waddle_xmpp::muc::NS_MUC_ADMIN)
+            .attr(
+                minidom::rxml::xml_ncname!("jid").to_owned(),
+                "bob@example.com",
+            )
+            .attr(
+                minidom::rxml::xml_ncname!("affiliation").to_owned(),
+                "outcast",
+            )
+            .build(),
+    );
+    let responses = handle_iq(
+        &ban_iq,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(alice_session),
+        &ready,
+    )
+    .await;
+    assert_eq!(responses.len(), 1, "ban response: {responses:?}");
+    assert!(responses[0].contains("type='result'"), "{responses:?}");
+
+    let evicted = recorder.snapshot();
+    assert_eq!(
+        evicted.len(),
+        1,
+        "exactly the banned occupant's session is evicted: {evicted:?}"
+    );
+    assert_eq!(evicted[0].0.as_str(), "ban-evicts@muc.example.com");
+    assert_eq!(evicted[0].1.as_livekit_identity(), "bob@example.com/web");
+}
+
+#[tokio::test]
+async fn muc_admin_role_demotion_does_not_evict_from_room_call() {
+    let recorder = Arc::new(crate::server::routes::websocket::tests::RecordingSfu::default());
+    let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+    let room_jid: BareJid = "demote-keeps@muc.example.com".parse().expect("room jid");
+    let (alice_session, alice_jid, _bob_jid) =
+        join_alice_owner_and_bob(state.as_ref(), &room_jid).await;
+    let ready = ready_phase(&alice_jid);
+
+    let demote_iq = build_admin_set_iq_xml(
+        &room_jid,
+        "demote-bob",
+        Element::builder("item", waddle_xmpp::muc::NS_MUC_ADMIN)
+            .attr(minidom::rxml::xml_ncname!("nick").to_owned(), "bob")
+            .attr(minidom::rxml::xml_ncname!("role").to_owned(), "visitor")
+            .build(),
+    );
+    let responses = handle_iq(
+        &demote_iq,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(alice_session),
+        &ready,
+    )
+    .await;
+    assert_eq!(responses.len(), 1, "demote response: {responses:?}");
+    assert!(responses[0].contains("type='result'"), "{responses:?}");
+
+    assert!(
+        recorder.snapshot().is_empty(),
+        "a role change that keeps the occupant must not end their call session"
+    );
+}

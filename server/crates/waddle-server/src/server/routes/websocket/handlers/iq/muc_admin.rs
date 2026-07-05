@@ -393,7 +393,7 @@ pub(super) async fn handle_muc_admin_iq(
             }
         }
     }
-    let updates = match room_actor
+    let applied = match room_actor
         .ask(ApplyAdminItems {
             sender_jid: sender_jid.clone(),
             sender_affiliation: context.affiliation,
@@ -402,7 +402,7 @@ pub(super) async fn handle_muc_admin_iq(
         })
         .await
     {
-        Ok(updates) => updates,
+        Ok(applied) => applied,
         Err(kameo::error::SendError::HandlerError(
             waddle_xmpp::muc::room_actor::AdminApplyError::CannotRemoveLastOwner,
         )) => {
@@ -550,13 +550,24 @@ pub(super) async fn handle_muc_admin_iq(
             )];
         }
     };
-    for (recipient, presence) in updates {
+    for (recipient, presence) in applied.presence_updates {
         let _ = state
             .deps
             .protocol
             .connection_registry
             .send_to(&recipient, Stanza::Presence(presence))
             .await;
+    }
+    // Membership-scoped visibility (#935): a kick (307) or ban (301)
+    // ends the occupant's room membership, so their live SFU call
+    // participation must end with it. Presence loss never reaches
+    // this handler, and eviction failure is fire-and-forget inside
+    // the SFU layer — the moderation IQ result below is never
+    // blocked on LiveKit.
+    for removed in &applied.removed_by_moderation {
+        super::super::super::muc_call_sfu::unregister_participant_from_room(
+            state, &room_jid, removed,
+        );
     }
     vec![iq_to_xml(build_admin_set_result(
         iq.id(),

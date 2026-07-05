@@ -486,6 +486,7 @@ async fn create_websocket_state(
         Arc::clone(&state),
         Arc::clone(&connection_registry),
         Arc::clone(&sm_session_registry),
+        sfu_service.clone(),
     )
     .await;
     if let Err(error) = bootstrap_fresh_xmpp_topology(
