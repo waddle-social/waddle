@@ -57,3 +57,29 @@ pub fn record_bootstrap_dial() {
     })
     .add(1, &[]);
 }
+
+/// Set the current number of enrolled allowlist peers.
+pub fn record_allowlist_size(count: i64) {
+    static G: OnceLock<Gauge<i64>> = OnceLock::new();
+    G.get_or_init(|| {
+        meter()
+            .i64_gauge("waddle.clustering.allowlist_size")
+            .with_description("Currently enrolled clustering peer-allowlist entries")
+            .with_unit("peer")
+            .build()
+    })
+    .record(count, &[]);
+}
+
+/// Count peers revoked by an allowlist refresh (live connections closed).
+pub fn record_peers_revoked(count: u64) {
+    static C: OnceLock<Counter<u64>> = OnceLock::new();
+    C.get_or_init(|| {
+        meter()
+            .u64_counter("waddle.clustering.peers_revoked")
+            .with_description("Peers revoked by allowlist refresh (live connections closed)")
+            .with_unit("peer")
+            .build()
+    })
+    .add(count, &[]);
+}

@@ -155,6 +155,11 @@ pub struct ClusteringConfig {
     pub keypair_pool: Vec<String>,
     /// Keypair-slot lease timing (heartbeat interval + lease TTL).
     pub lease: ClusteringLeaseConfig,
+    /// How often the swarm re-reads the peer allowlist and revokes live
+    /// connections whose PeerId is no longer enrolled
+    /// (`WADDLE_CLUSTERING_ALLOWLIST_REFRESH_MS`). This interval is the
+    /// containment bound for a revoked peer (ADR element 3).
+    pub allowlist_refresh_interval: Duration,
 }
 
 /// Timing for the keypair-slot lease heartbeat and expiry (ADR element 4
@@ -227,6 +232,7 @@ impl Default for ClusteringConfig {
             messaging: ClusteringMessagingConfig::default(),
             keypair_pool: Vec::new(),
             lease: ClusteringLeaseConfig::default(),
+            allowlist_refresh_interval: Duration::from_secs(30),
         }
     }
 }
@@ -393,6 +399,17 @@ impl ClusteringConfig {
             ));
         }
 
+        let allowlist_refresh_interval = Duration::from_millis(parse_u64_var(
+            &vars,
+            "WADDLE_CLUSTERING_ALLOWLIST_REFRESH_MS",
+            millis_u64(Self::default().allowlist_refresh_interval),
+        )?);
+        if allowlist_refresh_interval.is_zero() {
+            return Err(
+                "WADDLE_CLUSTERING_ALLOWLIST_REFRESH_MS must be greater than 0".to_string(),
+            );
+        }
+
         Ok(Self {
             enabled,
             listen_addrs,
@@ -410,6 +427,7 @@ impl ClusteringConfig {
                 heartbeat_interval,
                 lease_ttl,
             },
+            allowlist_refresh_interval,
         })
     }
 }
@@ -1066,6 +1084,18 @@ mod tests {
         ])
         .unwrap_err();
         assert!(err.contains("WADDLE_CLUSTERING_LEASE_TTL_MS"));
+    }
+
+    #[test]
+    fn clustering_parses_allowlist_refresh_and_rejects_zero() {
+        let config =
+            ClusteringConfig::from_vars([("WADDLE_CLUSTERING_ALLOWLIST_REFRESH_MS", "5000")])
+                .unwrap();
+        assert_eq!(config.allowlist_refresh_interval.as_millis(), 5000);
+
+        let err = ClusteringConfig::from_vars([("WADDLE_CLUSTERING_ALLOWLIST_REFRESH_MS", "0")])
+            .unwrap_err();
+        assert!(err.contains("WADDLE_CLUSTERING_ALLOWLIST_REFRESH_MS"));
     }
 
     #[test]

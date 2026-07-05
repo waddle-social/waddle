@@ -7,6 +7,7 @@
 //! run the event loop until the shared shutdown token fires. No stanza is
 //! routed cross-node.
 
+use super::allowlist::{diff_allowlist, AllowlistError, AllowlistStore, PostgresAllowlistStore};
 use super::behaviour::{WaddleBehaviour, WaddleBehaviourEvent};
 use super::lease::{
     KeypairSlotLease, LeaseError, LeaseIdentity, LeasedSlot, PostgresKeypairSlotLease,
@@ -35,6 +36,11 @@ const BOOTSTRAP_DIAL_INTERVAL: Duration = Duration::from_secs(15);
 /// back to the event loop for dialing.
 const DIAL_CHANNEL_CAPACITY: usize = 64;
 
+/// Buffer for enrolled-peer sets flowing from the off-loop allowlist reader
+/// back to the event loop. Single-flight refreshes mean at most one set is
+/// ever in flight; a small buffer keeps the sender from awaiting.
+const ALLOWLIST_CHANNEL_CAPACITY: usize = 4;
+
 /// Failures while building or starting the swarm. Human-facing `Display` text
 /// is surfaced at server startup.
 #[derive(Debug, thiserror::Error)]
@@ -60,6 +66,9 @@ pub enum SwarmError {
     /// A leased pool slot's keypair could not be decoded.
     #[error(transparent)]
     Identity(#[from] identity::IdentityError),
+    /// The peer allowlist could not be read at startup.
+    #[error(transparent)]
+    Allowlist(#[from] AllowlistError),
 }
 
 /// Build the swarm, install the global `ActorSwarm`, start listening, and
@@ -93,6 +102,20 @@ pub async fn spawn(
     let keypair = node_keypair(config, db, &stop_token).await?;
     let local_peer_id = keypair.public().to_peer_id();
 
+    // Peer authorization (ADR element 3): load the enrolled peer set before
+    // the swarm accepts anything. An empty allowlist is deny-all — correct for
+    // a first node with no peers, but worth a loud note.
+    let allowlist: Arc<dyn AllowlistStore> = Arc::new(PostgresAllowlistStore::new(db.clone()));
+    allowlist.ensure_schema().await?;
+    let enrolled = allowlist.enrolled_peers().await?;
+    metrics::record_allowlist_size(enrolled.len() as i64);
+    if enrolled.is_empty() {
+        tracing::warn!(
+            "clustering peer allowlist is empty: all peer connections will be rejected until \
+             peers are enrolled (deny-all)"
+        );
+    }
+
     let messaging_config = remote::messaging::Config::default()
         .with_request_timeout(config.messaging.request_timeout)
         .with_max_concurrent_streams(config.messaging.max_concurrent_streams)
@@ -112,7 +135,9 @@ pub async fn spawn(
         // `TryIntoBehaviour<B> for B` form, whose error is `Infallible`). The
         // fallible form requires exactly `Box<dyn Error + Send + Sync>`, so an
         // `Ok::<_, Infallible>` wrapper would be misread as the behaviour type.
-        .with_behaviour(|key| WaddleBehaviour::new(key.public().to_peer_id(), messaging_config))
+        .with_behaviour(|key| {
+            WaddleBehaviour::new(key.public().to_peer_id(), messaging_config, &enrolled)
+        })
         .map_err(|never: Infallible| -> SwarmError { match never {} })?
         .build();
 
@@ -136,9 +161,27 @@ pub async fn spawn(
     }
 
     let bootstrap = config.bootstrap.clone();
-    tokio::spawn(run_event_loop(swarm, bootstrap, stop_token));
+    tokio::spawn(run_event_loop(
+        swarm,
+        bootstrap,
+        AllowlistRefresh {
+            store: allowlist,
+            current: enrolled,
+            interval: config.allowlist_refresh_interval,
+        },
+        stop_token,
+    ));
 
     Ok(local_peer_id)
+}
+
+/// State for the periodic allowlist refresh driven by the event loop.
+struct AllowlistRefresh {
+    store: Arc<dyn AllowlistStore>,
+    /// The enrolled set as currently applied to the swarm's allowed-peers
+    /// behaviour.
+    current: HashSet<PeerId>,
+    interval: Duration,
 }
 
 /// Resolve this node's libp2p keypair: lease a pool slot (and start its
@@ -231,11 +274,13 @@ async fn run_heartbeat(
     }
 }
 
-/// Drive the swarm until `stop_token` fires: dial seed peers on a timer, feed
-/// swarm events to the handler, and stop cleanly on shutdown.
+/// Drive the swarm until `stop_token` fires: dial seed peers on a timer,
+/// refresh the peer allowlist on a timer (revoking removed peers), feed swarm
+/// events to the handler, and stop cleanly on shutdown.
 async fn run_event_loop(
     mut swarm: Swarm<WaddleBehaviour>,
     bootstrap: Option<ClusteringBootstrapConfig>,
+    mut allowlist: AllowlistRefresh,
     stop_token: CancellationToken,
 ) {
     // Peers we currently hold a connection to (authoritative from connection
@@ -247,6 +292,8 @@ async fn run_event_loop(
     // happens right away rather than after a full interval.
     let mut dial_timer = tokio::time::interval(BOOTSTRAP_DIAL_INTERVAL);
     dial_timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut allowlist_timer = tokio::time::interval(allowlist.interval);
+    allowlist_timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     // DNS resolution runs in a spawned task and hands resolved multiaddrs back
     // over this channel, so a slow lookup never stalls swarm polling (which
@@ -261,6 +308,13 @@ async fn run_event_loop(
     // process-wide. At most one resolver runs at a time; ticks are skipped
     // while one is in flight and resume once it returns.
     let dns_in_flight = Arc::new(AtomicBool::new(false));
+
+    // Allowlist refreshes follow the same off-loop + single-flight shape: the
+    // DB read runs in a spawned task and the fresh enrolled set comes back
+    // over a channel, so a slow query never stalls swarm polling.
+    let (allowlist_tx, mut allowlist_rx) =
+        tokio::sync::mpsc::channel::<HashSet<PeerId>>(ALLOWLIST_CHANNEL_CAPACITY);
+    let allowlist_in_flight = Arc::new(AtomicBool::new(false));
 
     loop {
         tokio::select! {
@@ -285,6 +339,30 @@ async fn run_event_loop(
                     }
                 }
             }
+            _ = allowlist_timer.tick() => {
+                if !allowlist_in_flight.swap(true, Ordering::AcqRel) {
+                    let store = Arc::clone(&allowlist.store);
+                    let allowlist_tx = allowlist_tx.clone();
+                    let in_flight = Arc::clone(&allowlist_in_flight);
+                    tokio::spawn(async move {
+                        match store.enrolled_peers().await {
+                            Ok(enrolled) => {
+                                let _ = allowlist_tx.send(enrolled).await;
+                            }
+                            Err(error) => {
+                                // Keep the last-known set on a read failure —
+                                // never fail open, never mass-revoke on a
+                                // transient DB error.
+                                tracing::warn!(%error, "clustering allowlist refresh failed; keeping current set");
+                            }
+                        }
+                        in_flight.store(false, Ordering::Release);
+                    });
+                }
+            }
+            Some(enrolled) = allowlist_rx.recv() => {
+                apply_allowlist(&mut swarm, &mut allowlist, enrolled);
+            }
             Some(addr) = dial_rx.recv() => {
                 metrics::record_bootstrap_dial();
                 if let Err(error) = swarm.dial(addr.clone()) {
@@ -296,6 +374,39 @@ async fn run_event_loop(
             }
         }
     }
+}
+
+/// Apply a freshly read enrolled set to the swarm's allowed-peers behaviour:
+/// newly enrolled peers become dialable/acceptable, and removed peers are
+/// revoked — `disallow_peer` also closes their live connections, so a revoked
+/// peer's swarm access ends within one refresh interval (ADR element 3).
+fn apply_allowlist(
+    swarm: &mut Swarm<WaddleBehaviour>,
+    allowlist: &mut AllowlistRefresh,
+    enrolled: HashSet<PeerId>,
+) {
+    let diff = diff_allowlist(&allowlist.current, &enrolled);
+    if diff.added.is_empty() && diff.removed.is_empty() {
+        return;
+    }
+    for peer in &diff.added {
+        swarm.behaviour_mut().allowed.allow_peer(*peer);
+    }
+    for peer in &diff.removed {
+        swarm.behaviour_mut().allowed.disallow_peer(*peer);
+        tracing::warn!(peer_id = %peer, "clustering peer revoked: closing live connections");
+    }
+    if !diff.removed.is_empty() {
+        metrics::record_peers_revoked(diff.removed.len() as u64);
+    }
+    metrics::record_allowlist_size(enrolled.len() as i64);
+    tracing::info!(
+        added = diff.added.len(),
+        revoked = diff.removed.len(),
+        enrolled = enrolled.len(),
+        "clustering peer allowlist refreshed"
+    );
+    allowlist.current = enrolled;
 }
 
 /// Record a newly connected peer, updating the connected-peer gauge on the
@@ -389,8 +500,8 @@ mod tests {
     use crate::config::ClusteringConfig;
     use crate::db::{DatabaseConfig, DatabaseDriver};
 
-    // An in-memory SQLite handle for tests that take the ephemeral-identity
-    // path (empty keypair pool), where the DB is never touched.
+    // An in-memory SQLite handle for tests that fail before any DB touch
+    // (listen-addr parsing precedes allowlist and lease access).
     async fn scratch_db() -> Database {
         Database::from_config(
             "clustering-swarm-test",
@@ -402,19 +513,29 @@ mod tests {
 
     // kameo's `init_global` is a process singleton, so exactly ONE test per
     // test binary may successfully bring up the swarm. This smoke test
-    // exercises the whole bring-up: keypair generation, transport init (tcp +
-    // quic + Noise + yamux), the global `ActorSwarm` install, and `listen_on`
-    // binding an ephemeral port — then drives the event loop briefly and shuts
-    // it down on the token.
+    // exercises the whole bring-up: keypair generation, allowlist load
+    // (deny-all empty set), transport init (tcp + quic + Noise + yamux), the
+    // global `ActorSwarm` install, and `listen_on` binding an ephemeral port —
+    // then drives the event loop briefly and shuts it down on the token.
+    // Postgres-gated: allowlist enforcement is unconditional and its store is
+    // Postgres-only (as clustering itself is).
     #[tokio::test]
     async fn swarm_spawn_brings_up_and_shuts_down() {
+        let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+            return;
+        };
         let config = ClusteringConfig {
             enabled: true,
             listen_addrs: vec!["/ip4/127.0.0.1/tcp/0".to_string()],
             bootstrap: None,
             ..ClusteringConfig::default()
         };
-        let db = scratch_db().await;
+        let db = Database::from_config(
+            "clustering-swarm-test",
+            &DatabaseConfig::new(DatabaseDriver::Postgres, url),
+        )
+        .await
+        .expect("open test postgres");
         let stop = CancellationToken::new();
 
         let peer_id = spawn(&config, &db, stop.clone())
@@ -437,6 +558,8 @@ mod tests {
             bootstrap: None,
             ..ClusteringConfig::default()
         };
+        // Listen-addr validation fails before any DB access, so a SQLite
+        // scratch handle is fine here.
         let db = scratch_db().await;
         let err = spawn(&config, &db, CancellationToken::new())
             .await

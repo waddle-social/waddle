@@ -16,6 +16,8 @@ use crate::db::{Database, DatabaseDriver};
 use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "clustering")]
+mod allowlist;
+#[cfg(feature = "clustering")]
 mod behaviour;
 #[cfg(feature = "clustering")]
 mod dns;
