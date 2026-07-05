@@ -275,18 +275,6 @@ pub(super) async fn run_fanout_recipient_pass(
     }
 }
 
-/// Apply a XEP-0424 §"prevent further distribution" tombstone to the
-/// retraction target inside `archive`. Looks up the target via the
-/// retraction's wire id (matches legacy
-/// `lookup_retraction_target_message`), then replaces the row with a
-/// tombstone using `mam_storage.replace_with_tombstone`.
-///
-/// Called from the [`OutboundEvent::ArchiveDirect`] arm once per
-/// archive write, so sender's and recipient's archives both
-/// independently observe the tombstone. Failures are logged at WARN
-/// and ignored — the retraction message itself was already archived
-/// and the original is the SHOULD-be-tombstoned target, never the
-/// authoritative payload after this point.
 /// Upper bound on each actor `ask` on the delivery hot path (mailbox enqueue +
 /// handler reply). `UserActor` delivery handlers are non-blocking `try_send`s,
 /// so a real stall is rare; the bound keeps a wedged actor from stalling the
