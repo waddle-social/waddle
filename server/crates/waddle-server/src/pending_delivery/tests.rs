@@ -520,7 +520,10 @@ async fn db_storage_reclaim_excludes_already_pushed_rows_for_same_session() {
     let pushed_id = pushed.id.clone();
     let deferred = transient_row("carol@example.com", "deferred-second");
     let deferred_id = deferred.id.clone();
-    assert_eq!(storage.insert(pushed).await.unwrap(), InsertOutcome::Inserted);
+    assert_eq!(
+        storage.insert(pushed).await.unwrap(),
+        InsertOutcome::Inserted
+    );
     assert_eq!(
         storage.insert(deferred).await.unwrap(),
         InsertOutcome::Inserted
