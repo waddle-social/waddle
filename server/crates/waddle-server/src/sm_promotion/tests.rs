@@ -1347,9 +1347,14 @@ async fn promotion_scrubs_stanzas_matching_recent_tombstone() {
         &storage,
         &Blocklist::empty(),
         "example.com",
-        &[waddle_xmpp::stream_management::TombstoneKey {
-            target_id: "retract-me".to_string(),
-            archive_jid: "alice@example.com".to_string(),
+        // Recorded AFTER the session's stanzas were received, so the
+        // backward-in-time scope applies.
+        &[waddle_xmpp::stream_management::RecentTombstoneRecord {
+            key: waddle_xmpp::stream_management::TombstoneKey {
+                target_id: "retract-me".to_string(),
+                archive_jid: "alice@example.com".to_string(),
+            },
+            recorded_at_utc: Utc::now(),
         }],
     )
     .await;
@@ -1365,6 +1370,58 @@ async fn promotion_scrubs_stanzas_matching_recent_tombstone() {
         transient_bodies(&rows),
         vec!["safe".to_string()],
         "retracted content must not reach pending_delivery"
+    );
+}
+
+#[tokio::test]
+async fn tombstone_does_not_scrub_stanza_received_after_its_recording() {
+    // Round-3 review finding 2: a tombstone applies backward in time
+    // only. A NEW message that legitimately reuses the same wire id
+    // (counter-style client ids) in the same conversation scope,
+    // received AFTER the retraction was recorded, must promote
+    // normally instead of being silently lost.
+    let storage: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    let registry = ConnectionRegistry::new();
+    // The helper stamps original_receipt_at = Utc::now(); the tombstone
+    // predates it by an hour.
+    let session = detached_session_with_unacked(
+        "stream-reuse",
+        full("alice@example.com/laptop"),
+        vec![dm_xml_with_id(
+            "bob@elsewhere/x",
+            "alice@example.com",
+            "retract-me",
+            "fresh reuse",
+        )],
+    );
+
+    let summary = promote_session_unacked(
+        &session,
+        &registry,
+        &storage,
+        &Blocklist::empty(),
+        "example.com",
+        &[waddle_xmpp::stream_management::RecentTombstoneRecord {
+            key: waddle_xmpp::stream_management::TombstoneKey {
+                target_id: "retract-me".to_string(),
+                archive_jid: "alice@example.com".to_string(),
+            },
+            recorded_at_utc: Utc::now() - chrono::Duration::hours(1),
+        }],
+    )
+    .await;
+
+    assert_eq!(
+        summary.scrubbed, 0,
+        "a stanza received after the tombstone's recording must not be scrubbed"
+    );
+    assert_eq!(summary.queued, 1, "the reused-id stanza promotes normally");
+    let rows = storage.list(&bare("alice@example.com")).await.unwrap();
+    assert_eq!(
+        transient_bodies(&rows),
+        vec!["fresh reuse".to_string()],
+        "the legitimate new message must reach pending_delivery"
     );
 }
 
@@ -1436,6 +1493,105 @@ async fn retraction_racing_in_flight_promotion_does_not_deliver_retracted_conten
         vec!["safe".to_string()],
         "the retracted stanza must be absent from pending storage; the \
          other stanza must still be promoted"
+    );
+}
+
+/// BlockingStorage stub whose Nth `list_blocked_jids` call records a
+/// tombstone on the shared SM registry — simulates a XEP-0424/0425
+/// retraction landing MID-BATCH, after earlier sessions in the same
+/// drained batch were already promoted.
+struct MidBatchRetractingBlocking {
+    sm_registry: Arc<waddle_xmpp::stream_management::InMemorySmSessionRegistry>,
+    calls: std::sync::atomic::AtomicU32,
+    retract_on_call: u32,
+    target_id: &'static str,
+    archive_jid: &'static str,
+}
+
+#[async_trait::async_trait]
+impl waddle_xmpp::xep::xep0191::BlockingStorage for MidBatchRetractingBlocking {
+    async fn list_blocked_jids(
+        &self,
+        _user: &BareJid,
+    ) -> Result<Vec<BareJid>, waddle_xmpp::xep::xep0191::BlockingStorageError> {
+        use waddle_xmpp::stream_management::SmSessionRegistry;
+
+        let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        if call == self.retract_on_call {
+            self.sm_registry
+                .scrub_unacked_for_tombstone(self.target_id, self.archive_jid)
+                .await
+                .expect("mid-batch scrub must succeed");
+        }
+        Ok(Vec::new())
+    }
+}
+
+#[tokio::test]
+async fn mid_batch_retraction_still_scrubs_later_sessions_in_displaced_promotion() {
+    // Round-3 review finding 1: the recent-tombstone list must be
+    // fetched PER SESSION inside the batch loop, not once per batch.
+    // A retraction landing after the first session of a drained batch
+    // was promoted (sessions are off-map, so the scrub phases cannot
+    // see them) must still scrub the second session's matching stanza.
+    use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
+
+    let sm_registry = Arc::new(InMemorySmSessionRegistry::new());
+    let sessions = vec![
+        detached_session_with_unacked(
+            "stream-first",
+            full("alice@example.com/laptop"),
+            vec![dm_xml("bob@elsewhere/x", "alice@example.com", "hello")],
+        ),
+        detached_session_with_unacked(
+            "stream-second",
+            full("carol@example.com/laptop"),
+            vec![
+                dm_xml_with_id(
+                    "bob@elsewhere/x",
+                    "carol@example.com",
+                    "retract-me",
+                    "secret",
+                ),
+                dm_xml_with_id("bob@elsewhere/x", "carol@example.com", "keep-me", "safe"),
+            ],
+        ),
+    ];
+    // The retraction lands during the SECOND session's blocklist load —
+    // strictly after the first session's promotion completed.
+    let blocking = MidBatchRetractingBlocking {
+        sm_registry: Arc::clone(&sm_registry),
+        calls: std::sync::atomic::AtomicU32::new(0),
+        retract_on_call: 2,
+        target_id: "retract-me",
+        archive_jid: "carol@example.com",
+    };
+    let pending: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    let registry = ConnectionRegistry::new();
+
+    promote_displaced_sessions(
+        sessions,
+        DisplacedPromotionDeps {
+            sm_registry: &sm_registry,
+            connection_registry: &registry,
+            pending_storage: &pending,
+            blocking_storage: &blocking,
+            server_domain: "example.com",
+        },
+    )
+    .await;
+
+    assert_eq!(
+        transient_bodies(&pending.list(&bare("alice@example.com")).await.unwrap()),
+        vec!["hello".to_string()],
+        "the first session (promoted before the retraction) is unaffected"
+    );
+    assert_eq!(
+        transient_bodies(&pending.list(&bare("carol@example.com")).await.unwrap()),
+        vec!["safe".to_string()],
+        "a retraction landing mid-batch must still scrub the later \
+         session's matching stanza"
     );
 }
 

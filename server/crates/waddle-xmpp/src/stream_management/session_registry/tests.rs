@@ -1685,19 +1685,30 @@ async fn scrub_records_recent_tombstone_for_promotion_time_recheck() {
     // promotion path can re-check before inserting into pending
     // delivery.
     let registry = InMemorySmSessionRegistry::new();
+    let before = chrono::Utc::now();
     registry
         .scrub_unacked_for_tombstone("retract-me", "user@example.com")
         .await
         .unwrap();
+    let after = chrono::Utc::now();
 
-    let keys = registry.recent_tombstones().unwrap();
+    let records = registry.recent_tombstones().unwrap();
     assert_eq!(
-        keys,
+        records.iter().map(|r| r.key.clone()).collect::<Vec<_>>(),
         vec![TombstoneKey {
             target_id: "retract-me".to_string(),
             archive_jid: "user@example.com".to_string(),
         }],
         "the scrub must record its tombstone identity for promotion-time re-check"
+    );
+    // Round-3 review finding 2: the record carries the wall-clock
+    // recording time so promotion can scope the match backward in
+    // time (a stanza received after the retraction must not match).
+    let recorded_at_utc = records[0].recorded_at_utc;
+    assert!(
+        before <= recorded_at_utc && recorded_at_utc <= after,
+        "recorded_at_utc must be the wall-clock time of the scrub \
+         (got {recorded_at_utc}, expected within [{before}, {after}])"
     );
 }
 
@@ -1712,9 +1723,9 @@ async fn recent_tombstones_evicts_entries_past_ttl() {
         .record_recent_tombstone_at("fresh-target", "user@example.com", Instant::now())
         .unwrap();
 
-    let keys = registry.recent_tombstones().unwrap();
+    let records = registry.recent_tombstones().unwrap();
     assert_eq!(
-        keys,
+        records.iter().map(|r| r.key.clone()).collect::<Vec<_>>(),
         vec![TombstoneKey {
             target_id: "fresh-target".to_string(),
             archive_jid: "user@example.com".to_string(),
@@ -1731,14 +1742,14 @@ async fn recent_tombstones_bounds_entry_count() {
             .record_recent_tombstone_at(&format!("target-{i}"), "user@example.com", Instant::now())
             .unwrap();
     }
-    let keys = registry.recent_tombstones().unwrap();
+    let records = registry.recent_tombstones().unwrap();
     assert_eq!(
-        keys.len(),
+        records.len(),
         tombstones::MAX_RECENT_TOMBSTONES,
         "the recent-tombstone record must stay bounded"
     );
     assert_eq!(
-        keys.last().map(|k| k.target_id.as_str()),
+        records.last().map(|r| r.key.target_id.as_str()),
         Some(format!("target-{}", tombstones::MAX_RECENT_TOMBSTONES + 4).as_str()),
         "overflow must evict the oldest entries, keeping the newest"
     );

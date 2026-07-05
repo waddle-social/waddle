@@ -72,7 +72,7 @@ pub async fn promote_session_unacked(
     pending_storage: &Arc<dyn PendingDeliveryStorage>,
     blocklist: &Blocklist,
     server_domain: &str,
-    recent_tombstones: &[waddle_xmpp::stream_management::TombstoneKey],
+    recent_tombstones: &[waddle_xmpp::stream_management::RecentTombstoneRecord],
 ) -> PromotionSummary {
     let mut summary = PromotionSummary::default();
     let recipient_bare = session.jid.to_bare();
@@ -85,7 +85,11 @@ pub async fn promote_session_unacked(
 
     // Round-2 review R2: select the sequences a recently applied
     // tombstone matches, using the same shared matcher as the
-    // registry / pending-delivery scrubs.
+    // registry / pending-delivery scrubs. Round-3 review finding 2: a
+    // tombstone applies BACKWARD in time only — a stanza whose
+    // original receipt postdates the tombstone's recording is a NEW
+    // message that merely reuses the wire id in the same scope, not
+    // the retracted one, and must promote normally.
     let tombstoned_sequences: std::collections::HashSet<u32> = if recent_tombstones.is_empty() {
         std::collections::HashSet::new()
     } else {
@@ -94,14 +98,26 @@ pub async fn promote_session_unacked(
             .iter()
             .map(|entry| (entry.sequence, entry.stanza_xml.clone()))
             .collect();
+        let receipt_by_sequence: std::collections::HashMap<u32, DateTime<Utc>> = session
+            .unacked_stanzas
+            .iter()
+            .map(|entry| (entry.sequence, entry.original_receipt_at))
+            .collect();
         recent_tombstones
             .iter()
-            .flat_map(|key| {
+            .flat_map(|record| {
                 waddle_xmpp::tombstone::matching_tombstone_sequences(
                     &entries,
-                    &key.target_id,
-                    &key.archive_jid,
+                    &record.key.target_id,
+                    &record.key.archive_jid,
                 )
+                .into_iter()
+                .filter(|sequence| {
+                    receipt_by_sequence
+                        .get(sequence)
+                        .is_some_and(|received_at| *received_at <= record.recorded_at_utc)
+                })
+                .collect::<Vec<u32>>()
             })
             .collect()
     };
@@ -243,26 +259,39 @@ pub async fn prune_promoted_then_reinsert_for_retry(
     reinsert_failed_session_for_retry(sm_registry, session).await;
 }
 
+/// Read the SM registry's recent-tombstone record immediately before a
+/// SINGLE session's promotion. Round-3 review finding 1: a per-batch
+/// snapshot leaves a mid-loop TOCTOU — a retraction landing after the
+/// snapshot but before a later session's pending insert was missed
+/// (drained sessions are off both registry maps, so the scrub phases
+/// cannot see them either). Fetching per session shrinks the window to
+/// that one session's promotion span, which is the intended contract.
+///
+/// Lock poisoning is process-fatal territory; promotion proceeds
+/// without the re-check (the durable phase-4 scrub already covered
+/// rows present at scrub time).
+pub fn recent_tombstones_for_promotion(
+    sm_registry: &waddle_xmpp::stream_management::InMemorySmSessionRegistry,
+    context: &'static str,
+) -> Vec<waddle_xmpp::stream_management::RecentTombstoneRecord> {
+    match sm_registry.recent_tombstones() {
+        Ok(records) => records,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                context,
+                "recent-tombstone read failed; proceeding without the \
+                 promotion-time tombstone re-check"
+            );
+            Vec::new()
+        }
+    }
+}
+
 pub async fn promote_displaced_sessions(
     sessions: Vec<DetachedSession>,
     deps: DisplacedPromotionDeps<'_>,
 ) {
-    // Round-2 review R2: consult the registry's recent-tombstone
-    // record so a retraction racing the displacement drain still
-    // scrubs the in-flight copies. Lock poisoning is process-fatal
-    // territory; promotion proceeds without the re-check (the durable
-    // phase-4 scrub already covered rows present at scrub time).
-    let recent_tombstones = match deps.sm_registry.recent_tombstones() {
-        Ok(keys) => keys,
-        Err(error) => {
-            tracing::warn!(
-                %error,
-                "displaced SM promotion: recent-tombstone read failed; \
-                 proceeding without the promotion-time tombstone re-check"
-            );
-            Vec::new()
-        }
-    };
     for session in sessions {
         let blocklist = match deps
             .blocking_storage
@@ -299,6 +328,13 @@ pub async fn promote_displaced_sessions(
                 continue;
             }
         };
+        // Round-2 review R2 + round-3 finding 1: consult the registry's
+        // recent-tombstone record PER SESSION, immediately before this
+        // session's promotion, so a retraction racing the displacement
+        // drain — even one landing mid-batch — still scrubs the
+        // in-flight copies.
+        let recent_tombstones =
+            recent_tombstones_for_promotion(deps.sm_registry, "displaced SM promotion");
         let summary = promote_session_unacked(
             &session,
             deps.connection_registry,

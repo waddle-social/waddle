@@ -19,7 +19,7 @@ mod traits;
 
 pub use core::InMemorySmSessionRegistry;
 pub use session::{DetachedSession, DetachedUnackedStanza};
-pub use tombstones::TombstoneKey;
+pub use tombstones::{RecentTombstoneRecord, TombstoneKey};
 pub use traits::{SmClaimCompletion, SmRegistryError, SmSessionRegistry};
 
 /// Default session timeout (5 minutes)
