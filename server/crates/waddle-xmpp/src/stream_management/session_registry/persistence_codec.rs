@@ -99,6 +99,24 @@ pub(super) fn persisted_to_detached(
 
     let unacked_stanzas: Vec<DetachedUnackedStanza> = unacked
         .iter()
+        .filter(|row| {
+            // Defense in depth (issue #1157): each row carries the
+            // stream_id it was persisted under. Drop any row whose
+            // stream_id is not the session being hydrated, so a
+            // grouping bug in a storage backend can never replay one
+            // user's stanzas on another user's `<resumed/>`
+            // (XEP-0198 §5 retransmission is per-stream).
+            let matches = row.stream_id == persisted.stream_id;
+            if !matches {
+                tracing::warn!(
+                    session_stream_id = %persisted.stream_id,
+                    row_stream_id = %row.stream_id,
+                    sequence = row.sequence,
+                    "dropping unacked row labeled with a foreign stream_id during hydration"
+                );
+            }
+            matches
+        })
         .map(|row| {
             let element: minidom::Element = match &*row.stanza {
                 crate::Stanza::Message(m) => m.clone().into(),

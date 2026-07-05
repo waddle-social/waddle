@@ -521,6 +521,59 @@ async fn list_all_sessions_with_unacked_skips_poison_pill_unacked_rows() {
     assert_eq!(beta_unacked.map(Vec::len), Some(0));
 }
 
+/// Regression for #1157: a session row that fails to decode while
+/// its unacked rows decode fine MUST have those rows dropped with
+/// the group — not appended to the preceding valid session's queue,
+/// which would replay one user's stanzas on another user's
+/// `<resumed/>` (XEP-0198 §5 retransmission is per-stream).
+#[tokio::test]
+async fn poison_session_rows_do_not_leak_into_preceding_sessions_queue() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    // Valid session "alpha" with one unacked stanza; sorts before
+    // "beta" under the query's ORDER BY stream_id ASC.
+    storage
+        .upsert_session(fixture_session("alpha"))
+        .await
+        .unwrap();
+    storage
+        .append_unacked(fixture_unacked("alpha", 1))
+        .await
+        .unwrap();
+    // Session "beta" with two healthy unacked stanzas, then corrupt
+    // beta's session row so decode_session fails while the unacked
+    // rows still decode.
+    storage
+        .upsert_session(fixture_session("beta"))
+        .await
+        .unwrap();
+    storage
+        .append_unacked(fixture_unacked("beta", 1))
+        .await
+        .unwrap();
+    storage
+        .append_unacked(fixture_unacked("beta", 2))
+        .await
+        .unwrap();
+    storage
+        .execute(
+            "UPDATE sm_sessions SET presence_show = 'bogus' WHERE stream_id = ?",
+            crate::db_params!["beta".to_string()],
+        )
+        .await
+        .expect("corrupt beta session row");
+
+    let grouped = storage.list_all_sessions_with_unacked().await.unwrap();
+    // The poison group is fully dropped...
+    assert_eq!(grouped.len(), 1);
+    let (session, unacked) = &grouped[0];
+    assert_eq!(session.stream_id.as_str(), "alpha");
+    // ...and alpha's queue holds exactly its own stanza — beta's
+    // rows must not have been appended to it.
+    assert_eq!(unacked.len(), 1);
+    assert_eq!(unacked[0].sequence, 1);
+    assert_eq!(unacked[0].stream_id.as_str(), "alpha");
+}
+
 /// Regression for #456: existing Postgres SM tables created before
 /// the driver-aware BIGINT selector must be widened online. The test
 /// exercises both session timestamp fields and unacked receipt
