@@ -1,7 +1,9 @@
 # ADR-0017 Phase 1 Completion — Actor-Authoritative Registration
 
 Companion design note to [ADR-0017](./0017-horizontal-scaling-remote-actors.md).
-Status: **Planned** (design agreed; implementation in slices below).
+Status: **In progress** — Slices 0–1 landed; Slice 2 (delivery cutover) next.
+See the slice order below for per-slice status and the ADR-0017 tracking issue
+for the live epic.
 
 ## Why this exists
 
@@ -91,11 +93,14 @@ get-or-create/reaper split is a fast follow-up availability slice.
 
 ## Slice order
 
-- **Slice 0 — authoritative registration** (this note). Owner tokens,
-  synchronous fail-closed bind register + rollback, best-effort
+- **Slice 0 — authoritative registration.** ✅ **Landed** (commit `12328df`).
+  Owner tokens, synchronous fail-closed bind register + rollback, best-effort
   ownership-gated unregister. *No read cutover* — pure strengthening of the
-  mirror into an authority. Entire e2e suite stays green unchanged.
-- **Slice 1 — selection cutover.** `route_to_connection` bare-JID selection
+  mirror into an authority. Entire e2e suite stays green unchanged. Follow-up
+  fix (commit `4e3bbd3`): SM-detach also mirror-unregisters, so a
+  detached-then-expired session no longer leaks its `UserActor` entry.
+- **Slice 1 — selection cutover.** ✅ **Landed** (commit `5367ec2`).
+  `route_to_connection` bare-JID selection
   reads *both* tiers (`SelectRoutableResources`, then `GetResources`) from the
   *same* authoritative actor — no DashMap *fallback* for the candidate set. The
   prior revert mixed sources (tier-1 actor, tier-2 DashMap), which is why a
@@ -118,17 +123,66 @@ get-or-create/reaper split is a fast follow-up availability slice.
   keeps a stale high-priority extra from masking a live lower-priority resource
   (tier-1 filtered-empty falls through to tier-2). Slice 2 retires this filter
   when delivery moves to the actor (whose `try_deliver` evicts closed channels).
-- **Slice 2 — delivery + MUC fan-out cutover.** `deliver_peer_to_full` routes
-  via `TrySendPeer` with **no DashMap send fallback**. Duplicate is impossible
-  structurally (one `try_send` per recipient). Distinguish the ask-level
-  `SendError` (mailbox-full / reply-timeout → **terminal: log + count, never
-  retry, never route to detached**, because the handler may still deliver
-  post-timeout) from the handler's `BroadcastOutcome` (`NotConnected` /
-  `DroppedClosed` → the offline/SM detached path, which is correct and
-  non-duplicating).
+- **Slice 2 — delivery + MUC fan-out cutover.** ⏳ **Next.** `deliver_peer_to_full`
+  routes via the actor's `TrySendPeer` with **no DashMap send fallback**.
+  Duplicate is impossible structurally (one `try_send` per recipient). Full
+  design, locked:
+
+  - **Backpressure decision (maintainer-visible behaviour change).** 1:1
+    delivery moves from the **blocking** `send_peer_to` to the actor's
+    **non-blocking** `TrySendPeer`. On a full recipient channel,
+    `BroadcastOutcome::DroppedFull` → **log + Prometheus dropped-full count +
+    drop the frame** — the same treatment groupchat fan-out already gives, and
+    what the ADR-0017 non-blocking delivery surface mandates. Rationale: a
+    wedged/zombie recipient can no longer stall global dispatch (issue #699).
+    Cost: a severely backpressured 1:1 recipient can lose a *live* frame under
+    sustained load (the sender-side MAM copy still exists; the recipient catches
+    up via MAM). This is a deliberate, called-out behaviour change from the
+    current "1:1 keeps blocking backpressure" comment.
+  - **Disposition + error mapping.** `deliver_peer_to_full` gains a
+    `user_registry` param and returns a `PeerDelivery { DeliveredLive,
+    QueuedDetached, Dropped }`. Production (`Some`): `GetUser(bare)` then
+    `TrySendPeer` (mailbox+reply timeout). Map `Ok(Delivered)` → `DeliveredLive`;
+    `Ok(DroppedFull)` → `Dropped`; `Ok(NotConnected | DroppedClosed)` →
+    `deliver_to_detached` (→ `QueuedDetached` if it queued, else `Dropped`);
+    `Err(SendError)` (mailbox-full / reply-timeout) → **`Dropped`, never route
+    to detached** (kameo does not cancel the enqueued handler — it may still
+    deliver post-timeout, so routing to detached would double-deliver).
+    `GetUser` `Ok(None)`/`Err` → `deliver_to_detached` (no delivery attempted,
+    safe). Test fixtures without an actor (`None`) keep the existing DashMap
+    delivery path until Slice 3 migrates them. `deliver_to_detached` returns a
+    `bool` (queued).
+  - **Retire the Slice 1 liveness filter.** `select_bare_jid_live_targets`
+    tier 1 returns to the actor's `SelectRoutableResources` (drop
+    `filter_deliverable`, the `registry` param, and the
+    `GetAvailableResources` + post-filter-max logic): delivery now self-heals
+    a stale extra via `TrySendPeer` → `DroppedClosed` eviction.
+  - **Headless-persistence gate (keeps Finding 1 closed).** In the bare-JID
+    else-branch, track whether *any* live target returned
+    `DeliveredLive`/`QueuedDetached` or any detached target queued; if **none**
+    reached a live/detached resource, run `run_headless_recipient_pass`
+    (local-domain only) so a sole stale extra (`DroppedClosed` → drop) still
+    archives.
+  - **Council review** (concurrency + correctness) before commit: 1:1
+    backpressure loss, Finding-1 gate soundness, no MUC duplicate (no
+    fallback), terminal-timeout no-double-deliver, ordering.
 - **Slice 3 — delete the DashMap *delivery* methods** (`send_peer_to`,
   `try_send_peer_to`, `select_routable_resources_for_user`,
-  `get_resources_for_user`) once Slices 1–2 are green in prod.
+  `get_resources_for_user`) once Slices 1–2 are green in prod and the remaining
+  `None`-path delivery tests are migrated onto the actor.
+
+## After Phase 1
+
+- **Phase 2** — owned libp2p swarm subsystem behind the `clustering` flag
+  (node discovery only; peer allowlist).
+- **Phase 3** — Postgres-authoritative ownership claims (epoch-fenced),
+  fenced SM-session persistence, cross-node XEP-0198 resume via claim-steal,
+  durable MUC room ownership, XEP-0397 ISR.
+- **Phase 4** — cross-node routing GA; unlock Helm `replicaCount > 1` and
+  `clustering.enabled`.
+
+Tracking issue: see the ADR-0017 horizontal-scaling epic issue for live
+slice/phase status.
 
 ## What survives Phase 1
 
