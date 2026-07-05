@@ -523,3 +523,90 @@ describe("archive stamps well after the synthesized receipt are distinct message
     expect(result.messages).toHaveLength(2);
   });
 });
+
+describe("content key covers caption + attachments together (#1182 review)", () => {
+  const withFile = (url: string, overrides: Partial<WasmArchivedMessage> = {}): WasmArchivedMessage => ({
+    ...baseArchivedRoom,
+    body: "look",
+    shared_files: [{ url, disposition: "inline" }],
+    timestamp: "2026-07-01T10:00:00.000Z",
+    ...overrides,
+  });
+
+  test("same caption but different attachment does not merge", () => {
+    const existing = [
+      mapLiveRoomMessageToTimeline(
+        session,
+        roomMessageFromArchived(withFile("https://files.example.com/a.png", { mam_id: crypto.randomUUID() }), "live")!,
+      ),
+    ];
+    const timeline = buildChannelTimelineFromMamResults({
+      session,
+      channelIsForum: false,
+      mamResults: [
+        roomMessageFromArchived(withFile("https://files.example.com/b.png", {
+          mam_id: "archive-uid-13",
+          stanza_id: "archive-uid-13",
+          stanza_id_by: "room@conf.example.com",
+          timestamp: "2026-07-01T10:00:01.000Z",
+        }))!,
+      ],
+      existing,
+    });
+    expect(timeline).toHaveLength(2);
+  });
+
+  test("same caption and same attachment merges", () => {
+    const existing = [
+      mapLiveRoomMessageToTimeline(
+        session,
+        roomMessageFromArchived(withFile("https://files.example.com/a.png", { mam_id: crypto.randomUUID() }), "live")!,
+      ),
+    ];
+    const timeline = buildChannelTimelineFromMamResults({
+      session,
+      channelIsForum: false,
+      mamResults: [
+        roomMessageFromArchived(withFile("https://files.example.com/a.png", {
+          mam_id: "archive-uid-14",
+          stanza_id: "archive-uid-14",
+          stanza_id_by: "room@conf.example.com",
+          timestamp: "2026-07-01T10:00:01.000Z",
+        }))!,
+      ],
+      existing,
+    });
+    expect(timeline).toHaveLength(1);
+    expect(timeline[0]!.id).toBe("archive-uid-14");
+  });
+
+  test("a body that spells a file key never collides with a file-only message", () => {
+    const bodySpoof = mapLiveRoomMessageToTimeline(
+      session,
+      roomMessageFromArchived(
+        {
+          ...baseArchivedRoom,
+          body: "files:https://files.example.com/pic.png",
+          mam_id: crypto.randomUUID(),
+          timestamp: "2026-07-01T10:00:00.000Z",
+        },
+        "live",
+      )!,
+    );
+    const fileOnly = mapLiveRoomMessageToTimeline(
+      session,
+      roomMessageFromArchived({
+        ...baseArchivedRoom,
+        body: undefined,
+        shared_files: [{ url: "https://files.example.com/pic.png", disposition: "inline" }],
+        mam_id: "archive-uid-15",
+        stanza_id: "archive-uid-15",
+        stanza_id_by: "room@conf.example.com",
+        timestamp: "2026-07-01T10:00:01.000Z",
+      })!,
+    );
+    const result = insertLiveMessage([bodySpoof], fileOnly, new Set());
+    expect(result.appended).toBe(true);
+    expect(result.messages).toHaveLength(2);
+  });
+});

@@ -53,14 +53,18 @@ function stampsReconcilable(synthesized: TimelineMessage, real: TimelineMessage)
 }
 
 /**
- * The comparable content of a row: its body, or — for body-less file
- * messages — its attachment URLs. Empty for rows with neither (e.g.
- * retraction tombstones), which therefore never content-match.
+ * The comparable content of a row: body AND attachment URLs together, in
+ * a fixed composite shape so a caption shared by two different file
+ * shares can't match, and a body that spells out the file section can't
+ * collide with a genuine file-only key. Empty for rows with neither
+ * (e.g. retraction tombstones), which therefore never content-match.
  */
 function contentKey(message: TimelineMessage): string {
-  if (message.body) return message.body;
   const urls = (message.sharedFiles ?? []).map((file) => file.url);
-  return urls.length ? `files:${urls.join("\n")}` : "";
+  if (!message.body && !urls.length) return "";
+  // Newline-delimited sections: URLs cannot contain raw newlines, so a
+  // body can never forge the files-section boundary.
+  return `body:${message.body}\nfiles:${urls.join("\n")}`;
 }
 
 /**
