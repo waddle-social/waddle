@@ -194,8 +194,11 @@ async fn node_keypair(
 ) -> Result<Keypair, SwarmError> {
     if config.keypair_pool.is_empty() {
         tracing::warn!(
-            "clustering: no keypair pool configured — using an ephemeral per-process identity \
-             (no stable or revocable PeerId; configure WADDLE_CLUSTERING_KEYPAIR_POOL for production)"
+            "clustering: no keypair pool configured — using an ephemeral per-process identity. \
+             An ephemeral PeerId can never be pre-enrolled on the peer allowlist, so this node \
+             CANNOT join or form a cluster (allowlist enforcement is symmetric and unconditional); \
+             configure WADDLE_CLUSTERING_KEYPAIR_POOL and enroll every node's PeerId for any \
+             multi-node deployment"
         );
         return Ok(identity::ephemeral_keypair());
     }
@@ -399,6 +402,14 @@ fn apply_allowlist(
     if !diff.removed.is_empty() {
         metrics::record_peers_revoked(diff.removed.len() as u64);
     }
+    if enrolled.is_empty() {
+        // Reachable only via a genuinely emptied table (an all-rows-invalid
+        // read fails the refresh instead) — i.e. a deliberate full-cluster
+        // revocation by the enrollment authority. Say so loudly.
+        tracing::warn!(
+            "clustering peer allowlist is now empty: deny-all — every peer connection revoked"
+        );
+    }
     metrics::record_allowlist_size(enrolled.len() as i64);
     tracing::info!(
         added = diff.added.len(),
@@ -521,6 +532,10 @@ mod tests {
     // Postgres-only (as clustering itself is).
     #[tokio::test]
     async fn swarm_spawn_brings_up_and_shuts_down() {
+        // Hold the shared table lock so a concurrently seeded (possibly
+        // invalid) allowlist row from the allowlist tests cannot fail this
+        // startup load.
+        let _guard = crate::clustering::allowlist_table_lock().lock().await;
         let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
             return;
         };

@@ -19,6 +19,11 @@ use tokio_util::sync::CancellationToken;
 mod allowlist;
 #[cfg(feature = "clustering")]
 mod behaviour;
+/// Remote XML-text serde codec for stanzas/elements crossing the kameo
+/// boundary. Public: the Slice 5 relay actors' message types embed these
+/// wrappers, and downstream phases (cross-node routing) build on them.
+#[cfg(feature = "clustering")]
+pub mod codec;
 #[cfg(feature = "clustering")]
 mod dns;
 #[cfg(feature = "clustering")]
@@ -29,6 +34,16 @@ mod lease;
 mod metrics;
 #[cfg(feature = "clustering")]
 mod swarm;
+
+/// Serializes tests that touch the shared `clustering_peer_allowlist` table
+/// (the allowlist store tests and the swarm bring-up smoke test, which loads
+/// the allowlist at startup) so a concurrently seeded row cannot leak between
+/// them.
+#[cfg(all(test, feature = "clustering"))]
+pub(crate) fn allowlist_table_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
 
 /// Startup failures for the clustering subsystem. The human-facing `Display`
 /// text is surfaced as the server-startup diagnostic.
