@@ -2600,3 +2600,59 @@ async fn sm_resume_replay_stamps_xep0203_delay_with_original_receipt_time() {
         "iq replay must not gain a delay element"
     );
 }
+
+#[tokio::test]
+async fn sm_detach_on_transport_drop_does_not_evict_sfu_call_session() {
+    // #935 decided behavior: presence loss must never end a healthy
+    // LiveKit session — an SM-resumable transport drop keeps the MUC
+    // occupant slot, and the SFU participant must survive with it.
+    // Only involuntary moderation (kick 307 / ban 301) or terminal
+    // session death may tear the call down.
+    let recorder = std::sync::Arc::new(super::RecordingSfu::default());
+    let state = super::create_test_websocket_state_with_sfu(recorder.clone()).await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "detach-keeps-call@muc.example.com".parse().expect("room");
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &jid,
+        "alice",
+        None,
+        &Some(owner_session),
+    )
+    .await;
+    let (tx, mut rx) = mpsc::channel::<OutboundStanza>(4);
+    let owner = state
+        .deps
+        .protocol
+        .connection_registry
+        .register(jid.clone(), tx);
+
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    conn.registry_owner = Some(owner);
+    conn.sm_state
+        .enable("stream-detach-call".to_string(), true, Some(300));
+
+    cleanup_connection_shutdown(state.as_ref(), &mut rx, &mut conn, false).await;
+
+    assert!(
+        recorder.snapshot().is_empty(),
+        "resumable SM detach must not evict the SFU participant"
+    );
+    assert!(
+        recorder.note_snapshot().is_empty(),
+        "resumable SM detach must not touch SFU bookkeeping either"
+    );
+    assert!(
+        snapshot_room(state.as_ref(), &room_jid)
+            .await
+            .room
+            .find_nick_by_real_jid(&jid)
+            .is_some(),
+        "occupant slot survives the detach"
+    );
+}

@@ -26,7 +26,6 @@ const props = defineProps<{
   avatarUrlByAuthor: Record<string, string | null>;
   isSending?: boolean;
   disabled?: boolean;
-  giphyApiKey?: string;
   mentionCandidates?: MentionCandidate[];
   slowModeCooldown?: number;
   uploadProgress?: { uploading: boolean; progress: number; filename: string };
@@ -128,7 +127,6 @@ onMounted(() => void nextTick(scrollToBottom));
       :is-forum-channel="false"
       :is-sending="!!isSending"
       :disabled="!!disabled"
-      :giphy-api-key="giphyApiKey ?? ''"
       :mention-candidates="mentionCandidates ?? []"
       :slow-mode-cooldown="slowModeCooldown ?? 0"
       :upload-progress="uploadProgress ?? { uploading: false, progress: 0, filename: '' }"

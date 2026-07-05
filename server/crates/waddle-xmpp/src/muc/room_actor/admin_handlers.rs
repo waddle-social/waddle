@@ -73,7 +73,7 @@ fn apply_affiliation_change(
     new_affiliation: Affiliation,
     actor: Option<&BareJid>,
     reason: Option<&str>,
-) -> Result<Vec<(FullJid, Presence)>, AdminApplyError> {
+) -> Result<AdminItemsApplied, AdminApplyError> {
     if new_affiliation != Affiliation::Owner {
         let target_current_affiliation = room.get_affiliation(&target_jid);
         if target_current_affiliation == Affiliation::Owner {
@@ -86,16 +86,17 @@ fn apply_affiliation_change(
 
     let change = room.set_affiliation(target_jid.clone(), new_affiliation);
     if change.is_none() {
-        return Ok(Vec::new());
+        return Ok(AdminItemsApplied::default());
     }
 
     let affected_occupants = occupants_for_bare(room, &target_jid);
     if affected_occupants.is_empty() {
-        return Ok(Vec::new());
+        return Ok(AdminItemsApplied::default());
     }
 
     if new_affiliation == Affiliation::Outcast {
         let mut updates = Vec::new();
+        let mut removed_by_moderation = Vec::new();
         for occupant in &affected_occupants {
             let from_room_jid = room
                 .room_jid
@@ -120,11 +121,15 @@ fn apply_affiliation_change(
                 );
                 (recipient, presence)
             }));
+            removed_by_moderation.extend(removed_sessions);
         }
         for occupant in affected_occupants {
             room.remove_occupant(&occupant.nick);
         }
-        return Ok(updates);
+        return Ok(AdminItemsApplied {
+            presence_updates: updates,
+            removed_by_moderation,
+        });
     }
 
     if room.config.members_only && new_affiliation < Affiliation::Member {
@@ -141,7 +146,13 @@ fn apply_affiliation_change(
         for occupant in affected_occupants {
             room.remove_occupant(&occupant.nick);
         }
-        return Ok(updates);
+        // Status-321 removals (affiliation loss in a members-only
+        // room) are deliberately NOT marked for SFU eviction — issue
+        // #935 scoped eviction to kick (307) and ban (301) only.
+        return Ok(AdminItemsApplied {
+            presence_updates: updates,
+            removed_by_moderation: Vec::new(),
+        });
     }
 
     let mut updates = Vec::new();
@@ -170,7 +181,10 @@ fn apply_affiliation_change(
             (recipient, presence)
         }));
     }
-    Ok(updates)
+    Ok(AdminItemsApplied {
+        presence_updates: updates,
+        removed_by_moderation: Vec::new(),
+    })
 }
 
 fn enforce_members_only(
@@ -259,8 +273,23 @@ pub struct ApplyAdminItems {
     pub items: Vec<AdminItem>,
 }
 
+/// Outcome of a moderation action that may involuntarily remove
+/// occupants.
+///
+/// `removed_by_moderation` carries the full JID of every session
+/// removed by a kick (XEP-0045 §8.2, status 307) or ban (§9.1, status
+/// 301). Callers owning an SFU handle must end these sessions' call
+/// participation — Membership-scoped visibility says a call is only
+/// joinable (and stayable) by current occupants. Voluntary leaves and
+/// presence loss never appear here.
+#[derive(Default)]
+pub struct AdminItemsApplied {
+    pub presence_updates: Vec<(FullJid, Presence)>,
+    pub removed_by_moderation: Vec<FullJid>,
+}
+
 impl kameo::message::Message<ApplyAdminItems> for RoomActor {
-    type Reply = Result<Vec<(FullJid, Presence)>, AdminApplyError>;
+    type Reply = Result<AdminItemsApplied, AdminApplyError>;
 
     async fn handle(
         &mut self,
@@ -268,6 +297,7 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let mut presence_updates: Vec<(FullJid, Presence)> = Vec::new();
+        let mut removed_by_moderation: Vec<FullJid> = Vec::new();
         let mut occupants_to_kick: Vec<String> = Vec::new();
         if is_role_change_query(&msg.items) {
             for item in &msg.items {
@@ -334,6 +364,7 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                         );
                         presence_updates.push((recipient, presence));
                     }
+                    removed_by_moderation.extend(target_sessions.iter().cloned());
                     occupants_to_kick.push(target_nick);
                 } else {
                     if let Some(occ) = self.room.occupants.get_mut(&target_nick) {
@@ -361,6 +392,13 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                 .map(|entry| (entry.jid, entry.affiliation))
                 .collect();
             let current_owner_count = self.room.get_jids_by_affiliation(Affiliation::Owner).len();
+            // Pre-validation simulates the mutation loop step by step
+            // against an evolving affiliation map. It must reject
+            // every set the loop below would reject — the loop
+            // mutates the room (bans remove occupants) as it goes, so
+            // a mid-loop error would leave a partially-applied batch
+            // whose removals and 301 presences are silently dropped
+            // (#935 review). Erroring here keeps the set atomic.
             for item in &msg.items {
                 let Some(target_jid) = item.jid.as_ref() else {
                     continue;
@@ -368,7 +406,10 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                 let Some(new_affiliation) = item.affiliation else {
                     continue;
                 };
-                let target_current_affiliation = self.room.get_affiliation(target_jid);
+                let target_current_affiliation = final_affiliations
+                    .get(target_jid)
+                    .copied()
+                    .unwrap_or(Affiliation::None);
                 let can_modify = match new_affiliation {
                     Affiliation::Owner | Affiliation::Admin => {
                         msg.sender_affiliation == Affiliation::Owner
@@ -394,6 +435,20 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                     && new_affiliation != Affiliation::Owner
                 {
                     return Err(AdminApplyError::CannotAdminModifyOwner);
+                }
+                // Mirror of apply_affiliation_change's per-step
+                // last-owner guard: demoting the sole owner at this
+                // point in the sequence would fail mid-loop.
+                if new_affiliation != Affiliation::Owner
+                    && target_current_affiliation == Affiliation::Owner
+                {
+                    let sole_owner = final_affiliations
+                        .iter()
+                        .filter(|(_, affiliation)| **affiliation == Affiliation::Owner)
+                        .all(|(jid, _)| jid == target_jid);
+                    if sole_owner {
+                        return Err(AdminApplyError::CannotRemoveLastOwner);
+                    }
                 }
                 if new_affiliation == Affiliation::None {
                     final_affiliations.remove(target_jid);
@@ -443,7 +498,7 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                     return Err(AdminApplyError::CannotAdminModifyOwner);
                 }
                 let actor = msg.sender_jid.to_bare();
-                let updates = apply_affiliation_change(
+                let applied = apply_affiliation_change(
                     &mut self.room,
                     &self.occupant_id_secret,
                     target_jid,
@@ -454,13 +509,17 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                 if target_current_affiliation != new_affiliation {
                     self.admission_revision = self.admission_revision.saturating_add(1);
                 }
-                presence_updates.extend(updates);
+                presence_updates.extend(applied.presence_updates);
+                removed_by_moderation.extend(applied.removed_by_moderation);
             }
         }
         for nick in occupants_to_kick {
             self.room.remove_occupant(&nick);
         }
-        Ok(presence_updates)
+        Ok(AdminItemsApplied {
+            presence_updates,
+            removed_by_moderation,
+        })
     }
 }
 
@@ -471,7 +530,7 @@ pub struct ApplyAffiliationChange {
 }
 
 impl kameo::message::Message<ApplyAffiliationChange> for RoomActor {
-    type Reply = Result<Vec<(FullJid, Presence)>, AdminApplyError>;
+    type Reply = Result<AdminItemsApplied, AdminApplyError>;
 
     async fn handle(
         &mut self,

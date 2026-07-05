@@ -1,9 +1,14 @@
 <script setup lang="ts">
 import { onMounted, ref, watch } from "vue";
 import { Loader2, Search, SearchX, X } from "lucide-vue-next";
+import {
+  GIF_SEARCH_UNAVAILABLE_MESSAGE,
+  resolveGifPickerResponse,
+  type GifPickerFetchState,
+  type GiphyGif,
+} from "@/lib/gif-picker-fetch";
 
-const props = defineProps<{
-  apiKey: string;
+defineProps<{
   isTopPinned?: boolean;
 }>();
 
@@ -17,32 +22,36 @@ onMounted(() => {
   searchInput.value?.focus();
 });
 
-interface GiphyGif {
-  id: string;
-  title: string;
-  images: {
-    fixed_height_small: { url: string; width: string; height: string };
-    original: { url: string };
-  };
-}
-
 const query = ref("");
 const results = ref<GiphyGif[]>([]);
 const isLoading = ref(false);
+const notConfigured = ref(false);
+const errorMessage = ref<string | null>(null);
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
+// Searches go through the same-origin `/api/giphy` proxy so the Giphy
+// key never reaches the browser (see `@/lib/giphy-proxy`). Rating and
+// key handling live server-side; the client only sends `q` + `limit`.
+// Response classification (503 not-configured vs 429/502 error vs ok)
+// lives in `@/lib/gif-picker-fetch` so the latest response always
+// drives the panel and failed fetches never keep stale results.
 async function fetchGifs(searchQuery: string) {
-  if (!props.apiKey) return;
   isLoading.value = true;
   try {
-    const endpoint = searchQuery.trim()
-      ? `https://api.giphy.com/v1/gifs/search?q=${encodeURIComponent(searchQuery)}&api_key=${props.apiKey}&limit=24&rating=g`
-      : `https://api.giphy.com/v1/gifs/trending?api_key=${props.apiKey}&limit=24&rating=g`;
-    const res = await fetch(endpoint);
-    if (res.ok) {
-      const data = await res.json();
-      results.value = data.data ?? [];
-    }
+    const params = new URLSearchParams({ limit: "24" });
+    const q = searchQuery.trim();
+    if (q) params.set("q", q);
+    const state = await fetch(`/api/giphy?${params}`).then(
+      resolveGifPickerResponse,
+      (): GifPickerFetchState => ({
+        notConfigured: false,
+        results: [],
+        errorMessage: GIF_SEARCH_UNAVAILABLE_MESSAGE,
+      }),
+    );
+    notConfigured.value = state.notConfigured;
+    results.value = state.results;
+    errorMessage.value = state.errorMessage;
   } finally {
     isLoading.value = false;
   }
@@ -91,9 +100,14 @@ function selectGif(gif: GiphyGif) {
       </div>
     </div>
 
-    <!-- No API key -->
-    <div v-if="!apiKey" class="type-control flex h-24 items-center justify-center px-4 text-center text-muted-foreground">
+    <!-- Server has no Giphy key configured (proxy answered 503) -->
+    <div v-if="notConfigured" class="type-control flex h-24 items-center justify-center px-4 text-center text-muted-foreground">
       GIF search is not configured.
+    </div>
+
+    <!-- Transient proxy failure (429 rate limit / 502 upstream) -->
+    <div v-else-if="errorMessage" class="type-control flex h-24 items-center justify-center px-4 text-center text-muted-foreground">
+      {{ errorMessage }}
     </div>
 
     <!-- Results -->

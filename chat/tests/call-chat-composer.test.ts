@@ -139,7 +139,6 @@ describe("call-chat composer", () => {
         callThreadId: "call-thread-123",
         isSending: false,
         disabled: false,
-        giphyApiKey: "",
         mentionCandidates: [],
         slowModeCooldown: 0,
         uploadProgress: { uploading: false, progress: 0, filename: "" },

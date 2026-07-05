@@ -94,6 +94,108 @@ pub(crate) async fn register_test_connection(
     );
 }
 
+/// Build a test [`WebSocketState`] with an arbitrary [`SfuService`]
+/// plugged into the protocol services — used with [`RecordingSfu`] to
+/// assert which SFU teardown surface a handler actually invoked.
+pub(crate) async fn create_test_websocket_state_with_sfu(
+    sfu: Arc<dyn waddle_sfu::SfuService>,
+) -> Arc<WebSocketState> {
+    create_test_websocket_state_with_extension_manager(empty_extension_manager().await, Some(sfu))
+        .await
+}
+
+/// Recording fake: captures `(call_id, identity)` separately for each
+/// teardown dispatch — `unregister_call_participant` (the admin-evict
+/// path) into `calls`, `note_participant_left` (the webhook-bridge
+/// local-only path) into `note_calls`. Splitting the vecs lets tests
+/// assert which trait method was actually invoked, mirroring how
+/// `waddle-sfu`'s `RecordingAdmin` splits `remove_calls` from
+/// `delete_calls`. The other trait methods are unimplemented because
+/// the production code paths under test only touch the teardown
+/// surfaces.
+#[derive(Default)]
+pub(crate) struct RecordingSfu {
+    calls: std::sync::Mutex<Vec<(waddle_sfu::CallId, waddle_sfu::Identity)>>,
+    note_calls: std::sync::Mutex<Vec<(waddle_sfu::CallId, waddle_sfu::Identity)>>,
+}
+
+impl RecordingSfu {
+    pub(crate) fn snapshot(&self) -> Vec<(waddle_sfu::CallId, waddle_sfu::Identity)> {
+        self.calls.lock().expect("recording lock").clone()
+    }
+
+    pub(crate) fn note_snapshot(&self) -> Vec<(waddle_sfu::CallId, waddle_sfu::Identity)> {
+        self.note_calls.lock().expect("recording lock").clone()
+    }
+}
+
+impl waddle_sfu::SfuService for RecordingSfu {
+    fn issue_join_token(
+        &self,
+        _: &waddle_sfu::CallId,
+        _: &waddle_sfu::Identity,
+        _: waddle_sfu::MediaCapabilities,
+    ) -> Result<waddle_sfu::JoinToken, waddle_sfu::SfuError> {
+        unimplemented!("not exercised by these tests")
+    }
+
+    fn issue_turn_credentials(
+        &self,
+        _: &waddle_sfu::Identity,
+    ) -> Result<waddle_sfu::TurnCredential, waddle_sfu::SfuError> {
+        unimplemented!("not exercised by these tests")
+    }
+
+    fn register_call_participant(&self, _: &waddle_sfu::CallId, _: &waddle_sfu::Identity) {}
+
+    fn has_call_participant(&self, _: &waddle_sfu::CallId, _: &waddle_sfu::Identity) -> bool {
+        false
+    }
+
+    fn unregister_call_participant(
+        &self,
+        call_id: &waddle_sfu::CallId,
+        identity: &waddle_sfu::Identity,
+    ) -> waddle_sfu::CallState {
+        self.calls
+            .lock()
+            .expect("recording lock")
+            .push((call_id.clone(), identity.clone()));
+        waddle_sfu::CallState::Ended
+    }
+
+    fn note_participant_left(&self, call_id: &waddle_sfu::CallId, identity: &waddle_sfu::Identity) {
+        // Recorded into `note_calls`, NOT `calls`: the two trait
+        // methods imply different downstream effects (admin
+        // RemoveParticipant vs. local-only bookkeeping) and tests
+        // need to distinguish them.
+        self.note_calls
+            .lock()
+            .expect("recording lock")
+            .push((call_id.clone(), identity.clone()));
+    }
+
+    fn is_revoked(&self, _: &waddle_sfu::Jti) -> bool {
+        false
+    }
+
+    fn ws_url(&self) -> &waddle_sfu::WebsocketUrl {
+        unimplemented!("not exercised by these tests")
+    }
+
+    fn turn_host(&self) -> &waddle_sfu::TurnHost {
+        unimplemented!("not exercised by these tests")
+    }
+
+    fn webhook_secret(&self) -> &waddle_sfu::ApiSecret {
+        unimplemented!("not exercised by these tests")
+    }
+
+    fn participants_for_call(&self, _: &waddle_sfu::CallId) -> Vec<waddle_sfu::Identity> {
+        Vec::new()
+    }
+}
+
 /// A self-contained [`waddle_sfu::LiveKitSfu`] for tests. Mints real
 /// JWTs locally (no network), so the XEP-0166 Jingle handler can
 /// rewrite the Waddle LiveKit transport exactly as it does in

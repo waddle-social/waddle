@@ -95,7 +95,6 @@ const props = defineProps<{
   selfDomain?: string;
   avatarUrlByAuthor: Record<string, string | null>;
   authorJidByNick?: Record<string, string>;
-  giphyApiKey: string;
   mentionCandidates: MentionCandidate[];
   roomHats: RoomHats;
   roomAuthority: RoomAuthority;
@@ -873,7 +872,6 @@ function dayDividerLabel(createdAt: string): string {
       :is-forum-channel="isForumChannel"
       :is-sending="isSending"
       :disabled="!canShowComposer"
-      :giphy-api-key="giphyApiKey"
       :mention-candidates="mentionCandidates"
       :slow-mode-cooldown="slowModeCooldown"
       :upload-progress="uploadProgress"
@@ -1089,7 +1087,6 @@ function dayDividerLabel(createdAt: string): string {
       :is-forum-channel="isForumChannel"
       :is-sending="isSending"
       :disabled="!canShowComposer"
-      :giphy-api-key="giphyApiKey"
       :mention-candidates="mentionCandidates"
       :slow-mode-cooldown="slowModeCooldown"
       :upload-progress="uploadProgress"
@@ -1148,7 +1145,6 @@ function dayDividerLabel(createdAt: string): string {
       :avatar-url-by-author="avatarUrlByAuthor"
       :is-sending="isSending"
       :disabled="!canShowComposer"
-      :giphy-api-key="giphyApiKey"
       :mention-candidates="mentionCandidates"
       :slow-mode-cooldown="slowModeCooldown"
       :upload-progress="uploadProgress"

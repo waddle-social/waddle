@@ -35,7 +35,6 @@ const props = defineProps<{
   isForumChannel: boolean;
   isSending: boolean;
   disabled: boolean;
-  giphyApiKey: string;
   mentionCandidates: MentionCandidate[];
   slowModeCooldown: number;
   uploadProgress: { uploading: boolean; progress: number; filename: string };
@@ -443,7 +442,6 @@ watch(isPreparingSend, (preparing) => {
 
     <GifPicker
       v-if="showGifPicker"
-      :api-key="giphyApiKey"
       :is-top-pinned="isTopPinned"
       @select="onGifSelected"
       @close="showGifPicker = false"

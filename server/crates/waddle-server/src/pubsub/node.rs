@@ -1,4 +1,5 @@
 use jid::BareJid;
+use tracing::error;
 use waddle_xmpp::pubsub::{AccessModel, NodeConfig, PubSubNode};
 use waddle_xmpp::XmppError;
 
@@ -344,12 +345,40 @@ impl DatabasePubSubStorage {
         let created_at = chrono::DateTime::from_timestamp_millis(created_at_ms)
             .ok_or_else(|| XmppError::internal("invalid PubSub created_at_ms".to_string()))?;
 
+        let access_model = access_model_raw.parse().map_err(|()| {
+            error!(
+                node = %node_name,
+                owner = %owner,
+                raw = %access_model_raw,
+                "unknown persisted PubSub access_model; failing node load closed"
+            );
+            XmppError::internal("invalid PubSub access_model".to_string())
+        })?;
+        let publish_model = publish_model_raw.parse().map_err(|()| {
+            error!(
+                node = %node_name,
+                owner = %owner,
+                raw = %publish_model_raw,
+                "unknown persisted PubSub publish_model; failing node load closed"
+            );
+            XmppError::internal("invalid PubSub publish_model".to_string())
+        })?;
+        let send_last_published_item = send_last_raw.parse().map_err(|()| {
+            error!(
+                node = %node_name,
+                owner = %owner,
+                raw = %send_last_raw,
+                "unknown persisted PubSub send_last_published_item; failing node load closed"
+            );
+            XmppError::internal("invalid PubSub send_last_published_item".to_string())
+        })?;
+
         Ok(PubSubNode {
             node_name,
             owner,
             config: NodeConfig {
-                access_model: access_model_raw.parse().unwrap_or_default(),
-                publish_model: publish_model_raw.parse().unwrap_or_default(),
+                access_model,
+                publish_model,
                 node_type,
                 max_items: u32::try_from(max_items)
                     .map_err(|error| XmppError::internal(error.to_string()))?,
@@ -357,7 +386,7 @@ impl DatabasePubSubStorage {
                 deliver_payloads,
                 notify_retract,
                 notify_delete,
-                send_last_published_item: send_last_raw.parse().unwrap_or_default(),
+                send_last_published_item,
             },
             created_at,
         })

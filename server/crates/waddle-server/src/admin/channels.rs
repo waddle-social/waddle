@@ -347,6 +347,7 @@ pub async fn register(
     app_state: Arc<AppState>,
     connection_registry: Arc<ConnectionRegistry>,
     sm_session_registry: Arc<InMemorySmSessionRegistry>,
+    sfu: Option<Arc<dyn waddle_sfu::SfuService>>,
 ) {
     {
         let state = Arc::clone(&app_state);
@@ -407,6 +408,7 @@ pub async fn register(
     {
         let state = Arc::clone(&app_state);
         let connections = Arc::clone(&connection_registry);
+        let sfu = sfu.clone();
         registry
             .register(
                 NODE_SET_AFFILIATION,
@@ -414,7 +416,8 @@ pub async fn register(
                 move |ctx| {
                     let state = Arc::clone(&state);
                     let connections = Arc::clone(&connections);
-                    async move { handle_set_affiliation(ctx, state, connections).await }
+                    let sfu = sfu.clone();
+                    async move { handle_set_affiliation(ctx, state, connections, sfu).await }
                 },
             )
             .await;
@@ -422,11 +425,13 @@ pub async fn register(
     {
         let state = Arc::clone(&app_state);
         let connections = Arc::clone(&connection_registry);
+        let sfu = sfu.clone();
         registry
             .register(NODE_KICK, "Admin · Kick occupant", move |ctx| {
                 let state = Arc::clone(&state);
                 let connections = Arc::clone(&connections);
-                async move { handle_kick(ctx, state, connections).await }
+                let sfu = sfu.clone();
+                async move { handle_kick(ctx, state, connections, sfu).await }
             })
             .await;
     }
@@ -681,6 +686,7 @@ async fn handle_set_affiliation(
     ctx: CommandContext,
     state: Arc<AppState>,
     connections: Arc<ConnectionRegistry>,
+    sfu: Option<Arc<dyn waddle_sfu::SfuService>>,
 ) -> CommandResult {
     let caller_bare = match caller_or_forbidden(&ctx, &state).await {
         Ok(caller) => caller,
@@ -690,7 +696,7 @@ async fn handle_set_affiliation(
         Ok(args) => args,
         Err(error) => return *bad_request(error),
     };
-    match run_set_affiliation(&state, &connections, &caller_bare, &args).await {
+    match run_set_affiliation(&state, &connections, &caller_bare, &args, sfu.as_ref()).await {
         Ok(result) => CommandResult::Completed {
             form: Some(build_set_affiliation_form(&result)),
             notes: vec![],
@@ -703,6 +709,7 @@ async fn handle_kick(
     ctx: CommandContext,
     state: Arc<AppState>,
     connections: Arc<ConnectionRegistry>,
+    sfu: Option<Arc<dyn waddle_sfu::SfuService>>,
 ) -> CommandResult {
     let caller_bare = match caller_or_forbidden(&ctx, &state).await {
         Ok(bare) => bare,
@@ -730,7 +737,7 @@ async fn handle_kick(
         Ok(args) => args,
         Err(error) => return *bad_request(error),
     };
-    match run_kick(&state, &connections, &caller_full, &args).await {
+    match run_kick(&state, &connections, &caller_full, &args, sfu.as_ref()).await {
         Ok(result) => CommandResult::Completed {
             form: Some(build_kick_form(&result)),
             notes: vec![],
@@ -3501,6 +3508,7 @@ async fn run_set_affiliation(
     connections: &ConnectionRegistry,
     caller_bare: &BareJid,
     args: &ChannelsSetAffiliationArgs,
+    sfu: Option<&Arc<dyn waddle_sfu::SfuService>>,
 ) -> Result<ChannelsSetAffiliationResult, AdminErr> {
     let channel_id = waddle_xmpp::parse_managed_room_jid(&args.channel_jid)
         .ok_or_else(|| bad_request("channel_jid must be a managed MUC room JID"))?;
@@ -3553,7 +3561,7 @@ async fn run_set_affiliation(
         next_affiliation,
     )
     .await?;
-    let updates = match actor
+    let applied = match actor
         .ask(ApplyAffiliationChange {
             actor: Some(caller_bare.clone()),
             jid: args.member_jid.clone(),
@@ -3561,7 +3569,7 @@ async fn run_set_affiliation(
         })
         .await
     {
-        Ok(updates) => updates,
+        Ok(applied) => applied,
         Err(kameo::error::SendError::HandlerError(
             waddle_xmpp::muc::room_actor::AdminApplyError::CannotRemoveLastOwner,
         )) => {
@@ -3587,7 +3595,12 @@ async fn run_set_affiliation(
             return Err(send_err("room actor ApplyAffiliationChange")(error));
         }
     };
-    broadcast_presence_updates(connections, updates).await;
+    broadcast_presence_updates(connections, applied.presence_updates).await;
+    // Membership-scoped visibility (#935): an admin-V2 ban (Outcast)
+    // ends the occupant's room membership, so their live SFU call
+    // participation ends with it. Fire-and-forget inside the SFU
+    // layer; the moderation result is never blocked on LiveKit.
+    evict_moderation_removals(sfu, &args.channel_jid, &applied.removed_by_moderation);
     Ok(ChannelsSetAffiliationResult {
         member_jid: args.member_jid.clone(),
         affiliation: args.affiliation,
@@ -3611,8 +3624,8 @@ async fn sync_private_kick_affiliation_revocation(
         })
         .await
     {
-        Ok(affiliation_updates) => {
-            broadcast_presence_updates(connections, affiliation_updates).await;
+        Ok(applied) => {
+            broadcast_presence_updates(connections, applied.presence_updates).await;
             Ok(())
         }
         Err(error) => {
@@ -3633,6 +3646,7 @@ async fn run_kick(
     connections: &ConnectionRegistry,
     caller_full: &FullJid,
     args: &ChannelsKickArgs,
+    sfu: Option<&Arc<dyn waddle_sfu::SfuService>>,
 ) -> Result<ChannelsKickResult, AdminErr> {
     // XEP-0045 §9.1.1 — kicking an occupant is a role-change to "none";
     // the service MUST send `<presence type='unavailable'>` carrying
@@ -3725,7 +3739,7 @@ async fn run_kick(
         role: Some(Role::None),
         reason: args.reason.clone(),
     }];
-    let updates = match actor
+    let applied = match actor
         .ask(ApplyAdminItems {
             sender_jid: caller_full.clone(),
             // Community-owner admin V2 callers are not necessarily
@@ -3741,7 +3755,7 @@ async fn run_kick(
         })
         .await
     {
-        Ok(updates) => updates,
+        Ok(applied) => applied,
         Err(kameo::error::SendError::HandlerError(
             waddle_xmpp::muc::room_actor::AdminApplyError::OccupantNotFound(_),
         )) if revoke_members_only_member => {
@@ -3789,6 +3803,21 @@ async fn run_kick(
         }
     };
 
+    // The kick is durably applied in the room actor at this point:
+    // broadcast the 307 presences and run the SFU eviction BEFORE the
+    // fallible affiliation-revocation ask below, so an actor-
+    // infrastructure failure there can't strand an applied kick with
+    // no occupant notification and a live call session (#935 review).
+    for (recipient, presence) in applied.presence_updates {
+        let _ = connections
+            .send_to(&recipient, Stanza::Presence(presence))
+            .await;
+    }
+    // Membership-scoped visibility (#935): a kick (307) ends the
+    // occupant's room membership, so their live SFU call
+    // participation ends with it.
+    evict_moderation_removals(sfu, &args.channel_jid, &applied.removed_by_moderation);
+
     if revoke_members_only_member {
         sync_private_kick_affiliation_revocation(
             state,
@@ -3802,15 +3831,26 @@ async fn run_kick(
         .await?;
     }
 
-    for (recipient, presence) in updates {
-        let _ = connections
-            .send_to(&recipient, Stanza::Presence(presence))
-            .await;
-    }
-
     Ok(ChannelsKickResult {
         occupant_jid: args.occupant_jid.clone(),
     })
+}
+
+/// Evict every session involuntarily removed by moderation (kick 307
+/// / ban 301) from the room's SFU call, when an SFU is configured.
+fn evict_moderation_removals(
+    sfu: Option<&Arc<dyn waddle_sfu::SfuService>>,
+    room_jid: &BareJid,
+    removed: &[FullJid],
+) {
+    let Some(sfu) = sfu else {
+        return;
+    };
+    for jid in removed {
+        crate::server::routes::websocket::muc_call_sfu::unregister_participant_via_sfu(
+            sfu, room_jid, jid,
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4160,5 +4200,146 @@ mod tests {
     fn mint_channel_localpart_fallback() {
         assert!(mint_channel_localpart("???").starts_with("channel-"));
         assert!(mint_channel_localpart("Hello World").starts_with("hello-world-"));
+    }
+}
+
+#[cfg(test)]
+mod sfu_eviction_tests {
+    use super::*;
+    use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig};
+    use crate::server::routes::websocket::tests::RecordingSfu;
+    use crate::server::AppState;
+    use waddle_xmpp::muc::room_actor::JoinWithAffiliation;
+    use waddle_xmpp::muc::RoomConfig;
+
+    async fn fresh_state() -> AppState {
+        let db_pool = DatabasePool::new(DatabaseConfig::default(), PoolConfig)
+            .await
+            .expect("db pool");
+        MigrationRunner::global()
+            .run(db_pool.global())
+            .await
+            .expect("migrations");
+        AppState::new(Arc::new(db_pool))
+    }
+
+    async fn room_with_bob(state: &AppState, room_jid: &BareJid) -> FullJid {
+        let actor = state
+            .room_registry
+            .ask(GetOrCreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "test-waddle".to_string(),
+                channel_id: room_jid.node().expect("localpart").to_string(),
+                config: RoomConfig {
+                    members_only: false,
+                    ..RoomConfig::default()
+                },
+            })
+            .await
+            .expect("room actor");
+        let bob: FullJid = "bob@localhost/web".parse().expect("bob jid");
+        actor
+            .ask(JoinWithAffiliation {
+                sender_jid: bob.clone(),
+                nick: "bob".to_string(),
+                effective_affiliation: Affiliation::Member,
+                local_domain: "localhost".to_string(),
+                admission_revision: 0,
+            })
+            .await
+            .expect("bob joins");
+        bob
+    }
+
+    #[tokio::test]
+    async fn admin_v2_kick_evicts_target_sessions_from_room_call() {
+        let state = fresh_state().await;
+        let connections = ConnectionRegistry::new();
+        let room_jid: BareJid = "kick-evict-chan@muc.localhost".parse().expect("room jid");
+        let bob = room_with_bob(&state, &room_jid).await;
+
+        let recorder = Arc::new(RecordingSfu::default());
+        let sfu: Arc<dyn waddle_sfu::SfuService> = recorder.clone();
+        let caller: FullJid = "owner@localhost/admin".parse().expect("caller jid");
+        run_kick(
+            &state,
+            &connections,
+            &caller,
+            &ChannelsKickArgs {
+                channel_jid: room_jid.clone(),
+                occupant_jid: bob.to_bare(),
+                reason: None,
+            },
+            Some(&sfu),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("kick succeeds"));
+
+        let evicted = recorder.snapshot();
+        assert_eq!(evicted.len(), 1, "kicked session evicted: {evicted:?}");
+        assert_eq!(evicted[0].0.as_str(), "kick-evict-chan@muc.localhost");
+        assert_eq!(evicted[0].1.as_livekit_identity(), "bob@localhost/web");
+    }
+
+    #[tokio::test]
+    async fn admin_v2_ban_evicts_target_sessions_from_room_call() {
+        let state = fresh_state().await;
+        let connections = ConnectionRegistry::new();
+        let room_jid: BareJid = "ban-evict-chan@muc.localhost".parse().expect("room jid");
+        let bob = room_with_bob(&state, &room_jid).await;
+
+        let recorder = Arc::new(RecordingSfu::default());
+        let sfu: Arc<dyn waddle_sfu::SfuService> = recorder.clone();
+        let caller: BareJid = "owner@localhost".parse().expect("caller jid");
+        run_set_affiliation(
+            &state,
+            &connections,
+            &caller,
+            &ChannelsSetAffiliationArgs {
+                channel_jid: room_jid.clone(),
+                member_jid: bob.to_bare(),
+                affiliation: WireAffiliation::Outcast,
+                reason: None,
+            },
+            Some(&sfu),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("ban succeeds"));
+
+        let evicted = recorder.snapshot();
+        assert_eq!(evicted.len(), 1, "banned session evicted: {evicted:?}");
+        assert_eq!(evicted[0].0.as_str(), "ban-evict-chan@muc.localhost");
+        assert_eq!(evicted[0].1.as_livekit_identity(), "bob@localhost/web");
+    }
+
+    #[tokio::test]
+    async fn admin_v2_member_promotion_does_not_evict() {
+        let state = fresh_state().await;
+        let connections = ConnectionRegistry::new();
+        let room_jid: BareJid = "promote-chan@muc.localhost".parse().expect("room jid");
+        let bob = room_with_bob(&state, &room_jid).await;
+
+        let recorder = Arc::new(RecordingSfu::default());
+        let sfu: Arc<dyn waddle_sfu::SfuService> = recorder.clone();
+        let caller: BareJid = "owner@localhost".parse().expect("caller jid");
+        run_set_affiliation(
+            &state,
+            &connections,
+            &caller,
+            &ChannelsSetAffiliationArgs {
+                channel_jid: room_jid.clone(),
+                member_jid: bob.to_bare(),
+                affiliation: WireAffiliation::Admin,
+                reason: None,
+            },
+            Some(&sfu),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("promotion succeeds"));
+
+        assert!(
+            recorder.snapshot().is_empty(),
+            "an affiliation change that keeps the occupant must not evict"
+        );
     }
 }

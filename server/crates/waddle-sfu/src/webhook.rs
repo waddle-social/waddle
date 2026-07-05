@@ -84,10 +84,11 @@ pub fn verify_webhook_signature(
     let token = strip_bearer(raw).ok_or(WebhookVerifyError::MalformedAuthorization)?;
 
     let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
-    // LiveKit's webhook JWT omits `aud` / `iss` requirements; we only
-    // care about signature + lifetime. Disabling required claims keeps
-    // the verifier resilient to LK adding optional claims later.
-    validation.required_spec_claims.clear();
+    // LiveKit's webhook JWT omits `aud` / `iss`, so those stay
+    // unrequired — but `exp` must be present: `validate_exp` only
+    // checks the claim when it exists, and a signed token without
+    // `exp` would otherwise verify forever (unbounded replay window).
+    validation.required_spec_claims = std::collections::HashSet::from(["exp".to_owned()]);
     validation.validate_exp = true;
     validation.validate_nbf = true;
     // `leeway` is in seconds; allow a small clock-skew window so a
@@ -263,22 +264,29 @@ mod tests {
             .expect("fixture secret meets length minimum")
     }
 
-    fn sign_for_body(secret: &ApiSecret, body: &[u8]) -> String {
+    fn body_sha256_claim(body: &[u8]) -> String {
         let mut hasher = Sha256::new();
         hasher.update(body);
         let digest = hasher.finalize();
-        let sha256 = Base64Standard.encode(digest);
-        let claims = json!({
-            "sha256": sha256,
-            "exp": (chrono::Utc::now() + chrono::Duration::seconds(60)).timestamp(),
-            "iat": chrono::Utc::now().timestamp(),
-        });
+        Base64Standard.encode(digest)
+    }
+
+    fn sign_claims(secret: &ApiSecret, claims: &serde_json::Value) -> String {
         encode(
             &Header::default(),
-            &claims,
+            claims,
             &EncodingKey::from_secret(secret.as_bytes()),
         )
         .expect("encode test JWT")
+    }
+
+    fn sign_for_body(secret: &ApiSecret, body: &[u8]) -> String {
+        let claims = json!({
+            "sha256": body_sha256_claim(body),
+            "exp": (chrono::Utc::now() + chrono::Duration::seconds(60)).timestamp(),
+            "iat": chrono::Utc::now().timestamp(),
+        });
+        sign_claims(secret, &claims)
     }
 
     #[test]
@@ -336,6 +344,47 @@ mod tests {
             serde_json::to_vec(&json!({"event": "room_finished", "room": {"name": "b"}})).unwrap();
         let err = verify_webhook_signature(&secret, Some(&auth), &tampered).unwrap_err();
         assert!(matches!(err, WebhookVerifyError::BodyHashMismatch));
+    }
+
+    #[test]
+    fn rejects_a_jwt_without_an_exp_claim() {
+        let secret = fixture_secret();
+        let body =
+            serde_json::to_vec(&json!({"event": "room_finished", "room": {"name": "x"}})).unwrap();
+        let claims = json!({
+            "sha256": body_sha256_claim(&body),
+            "iat": chrono::Utc::now().timestamp(),
+        });
+        let auth = format!("Bearer {}", sign_claims(&secret, &claims));
+        let err = verify_webhook_signature(&secret, Some(&auth), &body).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                WebhookVerifyError::Jwt(jwt)
+                    if matches!(
+                        jwt.kind(),
+                        jsonwebtoken::errors::ErrorKind::MissingRequiredClaim(claim)
+                            if claim == "exp"
+                    )
+            ),
+            "expected missing-exp rejection, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_an_expired_jwt() {
+        let secret = fixture_secret();
+        let body =
+            serde_json::to_vec(&json!({"event": "room_finished", "room": {"name": "x"}})).unwrap();
+        let claims = json!({
+            "sha256": body_sha256_claim(&body),
+            // Older than the 30s clock-skew leeway, so it must bounce.
+            "exp": (chrono::Utc::now() - chrono::Duration::seconds(120)).timestamp(),
+            "iat": (chrono::Utc::now() - chrono::Duration::seconds(180)).timestamp(),
+        });
+        let auth = format!("Bearer {}", sign_claims(&secret, &claims));
+        let err = verify_webhook_signature(&secret, Some(&auth), &body).unwrap_err();
+        assert!(matches!(err, WebhookVerifyError::Jwt(_)));
     }
 
     #[test]

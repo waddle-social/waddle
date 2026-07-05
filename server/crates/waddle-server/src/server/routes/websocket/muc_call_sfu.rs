@@ -41,6 +41,17 @@ pub(crate) fn unregister_participant_from_room(
     let Some(sfu) = state.deps.protocol.sfu.as_ref() else {
         return;
     };
+    unregister_participant_via_sfu(sfu, room_jid, jid);
+}
+
+/// SFU-handle variant of [`unregister_participant_from_room`] for
+/// callers that don't hold a `WebSocketState` (the admin V2 command
+/// handlers receive the SFU as an explicit dependency).
+pub(crate) fn unregister_participant_via_sfu(
+    sfu: &std::sync::Arc<dyn waddle_sfu::SfuService>,
+    room_jid: &BareJid,
+    jid: &FullJid,
+) {
     let Ok(call_id) = CallId::new(room_jid.to_string()) else {
         // Room JID couldn't round-trip into a CallId, which means it
         // could never have been used to mint a join token either —
@@ -77,96 +88,10 @@ pub(crate) fn note_participant_left_from_webhook(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::routes::websocket::tests::create_test_websocket_state;
-    use std::sync::{Arc, Mutex};
-    use waddle_sfu::{
-        CallState, JoinToken, Jti, MediaCapabilities, SfuError, SfuService, TurnCredential,
-        TurnHost, WebsocketUrl,
+    use crate::server::routes::websocket::tests::{
+        create_test_websocket_state, create_test_websocket_state_with_sfu, RecordingSfu,
     };
-
-    /// Recording fake: captures `(call_id, identity)` separately for
-    /// each teardown dispatch — `unregister_call_participant` (the
-    /// admin-evict path) into `calls`, `note_participant_left` (the
-    /// webhook-bridge local-only path) into `note_calls`. Splitting
-    /// the vecs lets tests assert which trait method was actually
-    /// invoked, mirroring how `waddle-sfu`'s `RecordingAdmin` splits
-    /// `remove_calls` from `delete_calls`. The other trait methods
-    /// are unimplemented because the production code path under
-    /// test only touches the two dispatch surfaces.
-    #[derive(Default)]
-    struct RecordingSfu {
-        calls: Mutex<Vec<(CallId, Identity)>>,
-        note_calls: Mutex<Vec<(CallId, Identity)>>,
-    }
-
-    impl RecordingSfu {
-        fn snapshot(&self) -> Vec<(CallId, Identity)> {
-            self.calls.lock().expect("recording lock").clone()
-        }
-    }
-
-    impl SfuService for RecordingSfu {
-        fn issue_join_token(
-            &self,
-            _: &CallId,
-            _: &Identity,
-            _: MediaCapabilities,
-        ) -> Result<JoinToken, SfuError> {
-            unimplemented!("not exercised by these tests")
-        }
-
-        fn issue_turn_credentials(&self, _: &Identity) -> Result<TurnCredential, SfuError> {
-            unimplemented!("not exercised by these tests")
-        }
-
-        fn register_call_participant(&self, _: &CallId, _: &Identity) {}
-
-        fn has_call_participant(&self, _: &CallId, _: &Identity) -> bool {
-            false
-        }
-
-        fn unregister_call_participant(&self, call_id: &CallId, identity: &Identity) -> CallState {
-            self.calls
-                .lock()
-                .expect("recording lock")
-                .push((call_id.clone(), identity.clone()));
-            CallState::Ended
-        }
-
-        fn note_participant_left(&self, call_id: &CallId, identity: &Identity) {
-            // Recorded into `note_calls`, NOT `calls`: the two trait
-            // methods imply different downstream effects (admin
-            // RemoveParticipant vs. local-only bookkeeping) and the
-            // tests need to distinguish them. Keeping the dispatch
-            // record separated mirrors how `waddle-sfu`'s
-            // `RecordingAdmin` separates `remove_calls` from
-            // `delete_calls` for the same reason.
-            self.note_calls
-                .lock()
-                .expect("recording lock")
-                .push((call_id.clone(), identity.clone()));
-        }
-
-        fn is_revoked(&self, _: &Jti) -> bool {
-            false
-        }
-
-        fn ws_url(&self) -> &WebsocketUrl {
-            unimplemented!("not exercised by these tests")
-        }
-
-        fn turn_host(&self) -> &TurnHost {
-            unimplemented!("not exercised by these tests")
-        }
-
-        fn webhook_secret(&self) -> &waddle_sfu::ApiSecret {
-            unimplemented!("not exercised by these tests")
-        }
-
-        fn participants_for_call(&self, _: &CallId) -> Vec<Identity> {
-            Vec::new()
-        }
-    }
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn unregister_is_no_op_when_no_sfu_is_configured() {
@@ -181,75 +106,10 @@ mod tests {
         unregister_participant_from_room(&state, &room, &alice);
     }
 
-    /// Build a test state with a pluggable `SfuService`. The canonical
-    /// fixture (`create_test_websocket_state`) sets `sfu: None` so
-    /// non-call tests don't exercise SFU code paths; this helper
-    /// rebuilds the protocol services with the SFU slot filled.
-    async fn state_with_sfu(sfu: Arc<RecordingSfu>) -> Arc<WebSocketState> {
-        let base = create_test_websocket_state().await;
-        // `Arc::clone` + restamp the field by constructing a new
-        // WebSocketState wrapping the same deps. The `ProtocolServices`
-        // is owned by an `Arc<WebSocketState>`, so we have to clone
-        // each field — they're all `Arc`-shareable except the
-        // SFU slot we want to fill.
-        let deps = &base.deps;
-        Arc::new(WebSocketState {
-            deps: super::super::state::WebSocketDeps {
-                app_state: Arc::clone(&deps.app_state),
-                auth_state: Arc::clone(&deps.auth_state),
-                service_domains: deps.service_domains.clone(),
-                protocol: super::super::state::ProtocolServices {
-                    connection_registry: Arc::clone(&deps.protocol.connection_registry),
-                    user_registry: deps.protocol.user_registry.clone(),
-                    room_registry: deps.protocol.room_registry.clone(),
-                    mam_storage: Arc::clone(&deps.protocol.mam_storage),
-                    inbox_storage: Arc::clone(&deps.protocol.inbox_storage),
-                    threads_storage: Arc::clone(&deps.protocol.threads_storage),
-                    blocking_storage: Arc::clone(&deps.protocol.blocking_storage),
-                    pending_delivery_storage: Arc::clone(&deps.protocol.pending_delivery_storage),
-                    command_registry: Arc::clone(&deps.protocol.command_registry),
-                    extension_manager: Arc::clone(&deps.protocol.extension_manager),
-                    dispatcher: Arc::clone(&deps.protocol.dispatcher),
-                    pubsub_storage: Arc::clone(&deps.protocol.pubsub_storage),
-                    push_store: Arc::clone(&deps.protocol.push_store),
-                    push_service: Arc::clone(&deps.protocol.push_service),
-                    notification_outbox: Arc::clone(&deps.protocol.notification_outbox),
-                    notification_settings_projection: Arc::clone(
-                        &deps.protocol.notification_settings_projection,
-                    ),
-                    dnd_projection: Arc::clone(&deps.protocol.dnd_projection),
-                    dnd_reader: Arc::clone(&deps.protocol.dnd_reader),
-                    notification_activity: Arc::clone(&deps.protocol.notification_activity),
-                    isr_token_store: Arc::clone(&deps.protocol.isr_token_store),
-                    sm_session_registry: Arc::clone(&deps.protocol.sm_session_registry),
-                    resumable_sessions: Arc::clone(&deps.protocol.resumable_sessions),
-                    caps_resolver: Arc::clone(&deps.protocol.caps_resolver),
-                    avatar_source_locks: Arc::clone(&deps.protocol.avatar_source_locks),
-                    profile_publish_tracker: deps.protocol.profile_publish_tracker.clone(),
-                    pep_feed_bridge: Arc::clone(&deps.protocol.pep_feed_bridge),
-                    call_threads: Arc::clone(&deps.protocol.call_threads),
-                    dm_call_threads: Arc::clone(&deps.protocol.dm_call_threads),
-                    dm_pin_store: Arc::clone(&deps.protocol.dm_pin_store),
-                    dm_call_thread_projections: Arc::clone(
-                        &deps.protocol.dm_call_thread_projections,
-                    ),
-                    pending_dm_call_offers: Arc::clone(&deps.protocol.pending_dm_call_offers),
-                    sfu: Some(sfu),
-                },
-                occupant_id_secret: deps.occupant_id_secret.clone(),
-                link_preview: deps.link_preview.clone(),
-                ws_keepalive: deps.ws_keepalive,
-                shutdown: deps.shutdown.clone(),
-                provider_ingress: Arc::clone(&deps.provider_ingress),
-                provider_dispatch_tasks: deps.provider_dispatch_tasks.clone(),
-            },
-        })
-    }
-
     #[tokio::test]
     async fn unregister_records_call_id_and_identity_on_the_sfu() {
         let recorder = Arc::new(RecordingSfu::default());
-        let state = state_with_sfu(Arc::clone(&recorder)).await;
+        let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
         let room: BareJid = "room@muc.example.com".parse().unwrap();
         let alice: FullJid = "alice@example.com/web".parse().unwrap();
 
@@ -271,7 +131,7 @@ mod tests {
         // through the second call rather than short-circuiting,
         // since silently skipping would mask bugs in the SFU layer.
         let recorder = Arc::new(RecordingSfu::default());
-        let state = state_with_sfu(Arc::clone(&recorder)).await;
+        let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
         let room: BareJid = "room@muc.example.com".parse().unwrap();
         let alice: FullJid = "alice@example.com/web".parse().unwrap();
 

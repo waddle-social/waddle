@@ -50,7 +50,7 @@ import { useConnectionLifecycle } from "@/shell/controllers/use-connection-lifec
  * coupling), and assembles the controller object AppShell publishes via
  * the `appController` store.
  */
-export function useChatAppController(giphyApiKey: string) {
+export function useChatAppController() {
   const ui = useChatShellState();
   const { mode: scrollDirectionMode } = useScrollDirectionPreference();
   const { isWindowFocused } = useChatWindowVisibility();
@@ -445,7 +445,6 @@ export function useChatAppController(giphyApiKey: string) {
 
   return {
     connectionStore,
-    giphyApiKey,
     ui,
     waddles,
     messaging,
