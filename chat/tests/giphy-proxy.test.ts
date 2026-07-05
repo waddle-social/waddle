@@ -170,3 +170,23 @@ describe("handleGiphyProxyRequest", () => {
     expect(body.data[0]!.id).toBe("good");
   });
 });
+
+describe("response caching", () => {
+  test("successful responses carry a shared-cache Cache-Control so anonymous hits cannot burn Giphy quota unbounded", async () => {
+    const { fetchImpl } = stubFetch(() => Response.json(giphyUpstreamBody()));
+    const trending = await handleGiphyProxyRequest(KEY, new URLSearchParams(), fetchImpl);
+    expect(trending.headers.get("Cache-Control")).toBe("public, max-age=300");
+
+    const search = await handleGiphyProxyRequest(
+      KEY,
+      new URLSearchParams({ q: "cats" }),
+      fetchImpl,
+    );
+    expect(search.headers.get("Cache-Control")).toBe("public, max-age=300");
+  });
+
+  test("error responses are not cacheable", async () => {
+    const unconfigured = await handleGiphyProxyRequest(undefined, new URLSearchParams(), fetch);
+    expect(unconfigured.headers.get("Cache-Control")).toBeNull();
+  });
+});

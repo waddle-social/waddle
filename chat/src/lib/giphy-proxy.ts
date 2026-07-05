@@ -53,7 +53,15 @@ export async function handleGiphyProxyRequest(
     return jsonError("GIF search is unavailable", 502);
   }
 
-  return Response.json({ data: trimGiphyPayload(payload) });
+  // Shared-cache the trimmed result: the route is same-origin and
+  // unauthenticated (auth lives on the XMPP server), so a short CDN
+  // TTL is what bounds how fast anonymous traffic can burn the Giphy
+  // key's quota. Responses are identical for identical params —
+  // nothing user-specific is cached.
+  return Response.json(
+    { data: trimGiphyPayload(payload) },
+    { headers: { "Cache-Control": "public, max-age=300" } },
+  );
 }
 
 function clampLimit(raw: string | null): number {
