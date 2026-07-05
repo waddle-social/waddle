@@ -39,7 +39,11 @@ export function isStaleReactionUpdate(
   if (!applied) return false;
   const appliedMs = Date.parse(applied);
   const incomingMs = Date.parse(occurredAt);
-  return Number.isFinite(appliedMs) && Number.isFinite(incomingMs) && appliedMs > incomingMs;
+  // `>=` (not `>`): an exact re-delivery of the already-applied stanza
+  // (SM replay / overlapping MAM) carries the same instant and must be
+  // an idempotent no-op, not a re-apply that could clobber a newer live
+  // reaction stamped in between.
+  return Number.isFinite(appliedMs) && Number.isFinite(incomingMs) && appliedMs >= incomingMs;
 }
 
 /** Immutably stamp the sender's last-applied reaction instant on the row. */
@@ -48,8 +52,21 @@ function withReactionTime(
   senderNick: string,
   occurredAt: string | undefined,
 ): TimelineMessage {
-  if (!occurredAt) return row;
-  return { ...row, reactionTimes: { ...(row.reactionTimes ?? {}), [senderNick]: occurredAt } };
+  // A live undelayed reaction carries no wire instant, but it MUST still
+  // advance the sender's recency stamp — otherwise a later re-delivery of
+  // an older delayed stanza passes the stale check and clobbers it. Stamp
+  // the local receive time. This mixes clock domains (server delay stamps
+  // vs. the local clock), which is acceptable here: the stamp is only
+  // monotonic-enough per-sender bookkeeping, not a wire timestamp. Clamp
+  // to the existing stamp so a skewed-back local clock never regresses it.
+  const stamp = occurredAt ?? localReceiveStamp(row.reactionTimes?.[senderNick]);
+  return { ...row, reactionTimes: { ...(row.reactionTimes ?? {}), [senderNick]: stamp } };
+}
+
+function localReceiveStamp(applied: string | undefined): string {
+  const appliedMs = applied === undefined ? Number.NaN : Date.parse(applied);
+  const nowMs = Date.now();
+  return new Date(Number.isFinite(appliedMs) ? Math.max(appliedMs, nowMs) : nowMs).toISOString();
 }
 
 export interface ReactionPolicy {

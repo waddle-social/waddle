@@ -213,6 +213,15 @@ export class ReconnectScheduler {
   }
 
   /**
+   * True once the attempt cap is spent and no retry timer is pending —
+   * i.e. the state `onExhausted` announced. While a timer is still
+   * armed the loop is alive, so callers must not treat it as exhausted.
+   */
+  isExhausted(): boolean {
+    return this.attempt >= MAX_RECONNECT_ATTEMPTS && this.timer === null;
+  }
+
+  /**
    * Track the reconnect-duration stopwatch across status transitions.
    * Returns the `statusHook` telemetry meta: `reconnectDurationMs` is
    * present exactly when this status completes a reconnect.

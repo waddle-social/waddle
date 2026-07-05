@@ -29,6 +29,7 @@ type PrivateState = {
   connected: boolean;
   wireEvents: (xmpp: StubXmpp) => void;
   reconnect: { clearTimer: () => void };
+  connectWithFreshBudget: () => Promise<void>;
   handleDisconnected: (xmpp: unknown, error?: Error) => void;
   handleMessage: (message: unknown) => void;
   connectTimeoutMs: number;
@@ -200,8 +201,8 @@ describe("connect budget measures to session-ready, not catch-up completion (C1)
 });
 
 describe("exhaustion recovery (C2)", () => {
-  test("an explicit connect() after exhaustion restores a fresh retry budget", async () => {
-    const { client, state, stub, scheduled, fireDisconnected } = createHarness();
+  test("a fresh-budget connect after exhaustion restores the retry budget", async () => {
+    const { state, stub, scheduled, fireDisconnected } = createHarness();
     for (let i = 0; i < 11; i += 1) {
       state.reconnect.clearTimer();
       state.xmpp = stub;
@@ -210,11 +211,11 @@ describe("exhaustion recovery (C2)", () => {
     }
     expect(scheduled).toHaveLength(10);
 
-    // User-triggered connect: the attempt itself fails, but the budget
-    // is fresh — the next disconnect schedules attempt 1 again instead
-    // of re-exhausting instantly.
+    // User-explicit recovery (the online listener's path): the attempt
+    // itself fails, but the budget is fresh — the next disconnect
+    // schedules attempt 1 again instead of re-exhausting instantly.
     state.doConnect = async () => { throw new Error("still down"); };
-    await client.connect().catch(() => undefined);
+    await state.connectWithFreshBudget().catch(() => undefined);
     state.reconnect.clearTimer();
     state.xmpp = stub;
     state.connected = true;
@@ -249,7 +250,7 @@ describe("exhaustion recovery (C2)", () => {
     }
   });
 
-  test("a window online event after exhaustion triggers a fresh connect", () => {
+  test("a window online event after exhaustion triggers a fresh-budget connect and clears terminal state", async () => {
     const listeners: Record<string, Array<() => void>> = {};
     const globals = globalThis as { window?: unknown };
     const originalWindow = globals.window;
@@ -260,22 +261,155 @@ describe("exhaustion recovery (C2)", () => {
       },
     };
     try {
-      const { client, state, stub, fireDisconnected } = createHarness();
+      const { state, stub, scheduled, fireDisconnected } = createHarness();
+      state.doConnect = async () => { throw new Error("still down"); };
       for (let i = 0; i < 11; i += 1) {
         state.reconnect.clearTimer();
         state.xmpp = stub;
         state.connected = true;
         fireDisconnected();
       }
-      let connects = 0;
-      (client as unknown as { connect: () => Promise<void> }).connect = async () => { connects += 1; };
+      expect(scheduled).toHaveLength(10);
+
+      // Network returns: the listener fires the fresh-budget path.
       for (const cb of listeners.online ?? []) cb();
-      expect(connects).toBe(1);
+      await sleep(1);
+
+      // Fresh budget: the next disconnect schedules attempt 1 again —
+      // the exhausted/terminal gate no longer blocks the retry loop.
+      state.reconnect.clearTimer();
+      state.xmpp = stub;
+      state.connected = true;
+      fireDisconnected();
+      expect(scheduled).toHaveLength(11);
+      expect(scheduled.at(-1)?.attempt).toBe(1);
       state.reconnect.clearTimer();
     } finally {
       if (originalWindow === undefined) delete globals.window;
       else globals.window = originalWindow;
     }
+  });
+});
+
+describe("internal connect() must not leak the fresh-budget reset (F1)", () => {
+  test("repeated internal connect() during an outage does not reset the attempt counter", async () => {
+    const { client, state, stub, scheduled, fireDisconnected } = createHarness();
+    state.doConnect = async () => { throw new Error("still down"); };
+    for (let i = 0; i < 3; i += 1) {
+      state.reconnect.clearTimer();
+      state.xmpp = stub;
+      state.connected = true;
+      fireDisconnected();
+    }
+    expect(scheduled.at(-1)?.attempt).toBe(3);
+
+    // Background triggers (idle tracker → setPresence, MAM pagers,
+    // sendGroupMessage fallback) all route through connect() during
+    // the outage — the budget must keep counting up, not restart.
+    await client.connect().catch(() => undefined);
+    await client.connect().catch(() => undefined);
+    state.reconnect.clearTimer();
+    state.xmpp = stub;
+    state.connected = true;
+    fireDisconnected();
+
+    expect(scheduled.at(-1)?.attempt).toBe(4);
+    state.reconnect.clearTimer();
+  });
+
+  test("internal connect() while terminal-error rejects without clearing the error state or scheduling", async () => {
+    const { client, state, statuses, scheduled, fireError, fireDisconnected } = createHarness();
+    let attempts = 0;
+    state.connectTimeoutMs = 10;
+    state.doConnect = async () => { attempts += 1; };
+
+    fireError({ condition: "not-authorized", detail: "SASL authentication failed" });
+    fireDisconnected();
+    expect(statuses.at(-1)?.state).toBe("error");
+    const statusCount = statuses.length;
+
+    await expect(client.connect()).rejects.toThrow();
+
+    expect(attempts).toBe(0);
+    expect(scheduled).toHaveLength(0);
+    // No status churn: the terminal "sign in again" error stays put.
+    expect(statuses).toHaveLength(statusCount);
+    expect(statuses.at(-1)?.state).toBe("error");
+    state.reconnect.clearTimer();
+  });
+
+  test("internal connect() after exhaustion rejects without restarting the retry loop", async () => {
+    const { client, state, stub, statuses, scheduled, fireDisconnected } = createHarness();
+    for (let i = 0; i < 11; i += 1) {
+      state.reconnect.clearTimer();
+      state.xmpp = stub;
+      state.connected = true;
+      fireDisconnected();
+    }
+    expect(scheduled).toHaveLength(10);
+    expect(statuses.at(-1)?.state).toBe("error");
+    const statusCount = statuses.length;
+
+    let attempts = 0;
+    state.connectTimeoutMs = 10;
+    state.doConnect = async () => { attempts += 1; };
+    await expect(client.connect()).rejects.toThrow();
+
+    expect(attempts).toBe(0);
+    expect(scheduled).toHaveLength(10);
+    expect(statuses).toHaveLength(statusCount);
+    state.reconnect.clearTimer();
+  });
+});
+
+describe("disconnect() cancels the pending connect attempt (F3)", () => {
+  test("a stale connect timer cannot tear down a subsequent connect", async () => {
+    const client = new BrowserXmppClient(session());
+    const state = client as unknown as PrivateState;
+    const statuses: XmppStatusSnapshot[] = [];
+    const scheduled: Array<{ attempt: number; delayMs: number }> = [];
+    client.setStatusHandler((snapshot) => statuses.push(snapshot));
+    client.onReconnectScheduled((info) => scheduled.push(info));
+
+    let handleBDisconnects = 0;
+    const handleA = { disconnect: async () => {} };
+    const handleB = { disconnect: async () => { handleBDisconnects += 1; } };
+    let attempt = 0;
+    state.doConnect = async () => {
+      attempt += 1;
+      // Socket opens but the session never establishes (stalled).
+      state.xmpp = attempt === 1 ? handleA : handleB;
+    };
+
+    // Connect A stalls inside a 40ms budget, then the user disconnects.
+    state.connectTimeoutMs = 40;
+    const first = client.connect();
+    first.catch(() => undefined);
+    await sleep(5);
+    await client.disconnect();
+    // A's promise must settle at disconnect, not dangle until the
+    // orphaned timer fires.
+    let firstSettled = false;
+    await Promise.race([first.catch(() => { firstSettled = true; }), sleep(5)]);
+    expect(firstSettled).toBe(true);
+
+    // Connect B starts within A's original budget window.
+    statuses.length = 0;
+    state.connectTimeoutMs = 500;
+    const second = client.connect();
+    second.catch(() => undefined);
+
+    // Advance past A's original 40ms budget: the stale timer must not
+    // tear down B's half-open handle or emit spurious statuses.
+    await sleep(60);
+    expect(state.xmpp).toBe(handleB);
+    expect(handleBDisconnects).toBe(0);
+    expect(statuses.some((snapshot) => snapshot.state === "reconnecting")).toBe(false);
+    expect(scheduled).toHaveLength(0);
+
+    // Cleanup: cancel B's pending attempt too.
+    await client.disconnect();
+    state.reconnect.clearTimer();
   });
 });
 

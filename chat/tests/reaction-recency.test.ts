@@ -126,6 +126,48 @@ describe("XEP-0444 delayed-reaction recency (channel)", () => {
   });
 });
 
+describe("XEP-0444 live undelayed reactions advance the recency stamp (channel)", () => {
+  test("a re-delivered older delayed stanza cannot clobber a newer live undelayed reaction", () => {
+    const h = channelHarness([channelTarget()]);
+    // Delayed reaction T2 applies and stamps bob→T2.
+    h.liveMerge.applyReaction("stanza-1", "bob", ["🎉"], BOB, NEWER);
+    // Bob's NEWER live undelayed reaction replaces the set.
+    h.liveMerge.applyReaction("stanza-1", "bob", ["👍"], BOB);
+    // The T2 stanza re-delivers (SM replay / overlapping MAM): it is
+    // older than the live reaction and must not clobber it.
+    h.liveMerge.applyReaction("stanza-1", "bob", ["🎉"], BOB, NEWER);
+    expect(h.messages.value[0]?.reactions).toEqual({ "👍": ["bob"] });
+  });
+
+  test("exact same-stanza re-delivery is an idempotent no-op", () => {
+    const h = channelHarness([channelTarget()]);
+    h.liveMerge.applyReaction("stanza-1", "bob", ["🎉"], BOB, NEWER);
+    const before = h.messages.value;
+    h.liveMerge.applyReaction("stanza-1", "bob", ["🎉"], BOB, NEWER);
+    expect(h.messages.value).toBe(before);
+    expect(h.messages.value[0]?.reactions).toEqual({ "🎉": ["bob"] });
+  });
+});
+
+describe("XEP-0444 live undelayed reactions advance the recency stamp (DM)", () => {
+  test("a re-delivered older delayed stanza cannot clobber a newer live undelayed reaction", () => {
+    const h = dmHarness([dmTarget()]);
+    h.liveMerge.applyReaction("m1", "bob", ["🎉"], NEWER);
+    h.liveMerge.applyReaction("m1", "bob", ["👍"]);
+    h.liveMerge.applyReaction("m1", "bob", ["🎉"], NEWER);
+    expect(h.messages.value[0]?.reactions).toEqual({ "👍": ["bob"] });
+  });
+
+  test("exact same-stanza re-delivery is an idempotent no-op", () => {
+    const h = dmHarness([dmTarget()]);
+    h.liveMerge.applyReaction("m1", "bob", ["🎉"], NEWER);
+    const before = h.messages.value;
+    h.liveMerge.applyReaction("m1", "bob", ["🎉"], NEWER);
+    expect(h.messages.value).toBe(before);
+    expect(h.messages.value[0]?.reactions).toEqual({ "🎉": ["bob"] });
+  });
+});
+
 describe("XEP-0444 delayed-reaction recency (DM)", () => {
   test("an older delayed reaction from the same sender does not clobber a newer applied one", () => {
     const h = dmHarness([dmTarget()]);

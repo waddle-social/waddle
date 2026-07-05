@@ -446,8 +446,14 @@ export class BrowserXmppClient {
   // disconnect arrive as two separate WASM callbacks; this carries
   // the classification from the first into `handleDisconnected`,
   // which then emits `state: "error"` instead of scheduling retries.
-  // Cleared by an explicit `connect()` (user-driven fresh attempt).
+  // Cleared by a user-explicit fresh attempt (`connectWithFreshBudget`).
   private terminalDisconnectDetail: string | null = null;
+  // F1: sticky marker that the client surfaced a terminal `state:
+  // "error"` ("sign in again"). While set, internal/background
+  // `connect()` calls reject fast without scheduling — only a
+  // user-explicit recovery intent (`connectWithFreshBudget`, or a
+  // page load constructing a new client) may leave this state.
+  private inTerminalErrorState = false;
 
   constructor(session: WaddleSession, persistence?: ResumePersistence) {
     this.session = session;
@@ -527,8 +533,11 @@ export class BrowserXmppClient {
       connect: () => this.connectFromScheduler(),
       onScheduled: (info) => this.events.emitSafe("reconnectScheduled", info),
       // #1164: the retry budget ran out — an endless "reconnecting"
-      // banner would be dishonest. An explicit `connect()` restores
-      // the budget; a network-return `online` event triggers one.
+      // banner would be dishonest. Only a user-explicit recovery
+      // restores the budget: the network-return `online` event fires
+      // `connectWithFreshBudget`, and a page reload constructs a new
+      // client. Internal `connect()` calls reject while exhausted and
+      // never restart the loop (F1).
       onExhausted: () => {
         this.armOnlineRecovery();
         if (browserOffline()) {
@@ -698,16 +707,19 @@ export class BrowserXmppClient {
   }
 
   // C2: after retry exhaustion nothing would ever try again when the
-  // network returns. Armed from `onExhausted`; a fresh `connect()`
-  // (which the listener fires, with a full budget) disarms it, as does
-  // the `disconnect()` logout path.
+  // network returns. Armed from `onExhausted`; the fresh-budget connect
+  // the listener fires disarms it (via `connectInternal`), as does the
+  // `disconnect()` logout path.
   private onlineRecoveryListener: (() => void) | null = null;
 
   private armOnlineRecovery(): void {
     if (typeof window === "undefined" || this.onlineRecoveryListener) return;
     const listener = () => {
       this.disarmOnlineRecovery();
-      void this.connect().catch(() => undefined);
+      // The network coming back is a user-environment recovery signal —
+      // one of the two fresh-budget entry points (the other being a
+      // page load, which constructs a new client).
+      void this.connectWithFreshBudget().catch(() => undefined);
     };
     this.onlineRecoveryListener = listener;
     window.addEventListener("online", listener);
@@ -790,14 +802,49 @@ export class BrowserXmppClient {
   /** Budget for a single connect attempt to reach session-ready. Instance
    * field (not a module constant) so tests can shrink it. */
   private connectTimeoutMs = 15_000;
+  /** F3: the pending attempt's budget timer, tracked on the instance so
+   * `disconnect()` can cancel it — an orphaned timer surviving a
+   * disconnect would later tear down a NEWER connect's half-open handle
+   * (spurious "reconnecting" + a stray teardown). */
+  private connectTimer: ReturnType<typeof setTimeout> | null = null;
 
+  /**
+   * Internal/background connect path. Nearly every call site routes
+   * through here indirectly (`requireConnectedXmpp`, room switching,
+   * MAM pagers, send fallbacks, the XEP-0319 idle tracker via
+   * `setPresence`) — i.e. background triggers that fire constantly in
+   * an attended tab. This path therefore deliberately does NOT reset
+   * the retry budget (F1: resetting on every mouse move during an
+   * outage made exhaustion unreachable and hammered the server at
+   * restarted backoff) and does NOT clear a terminal-error
+   * classification. While terminal or exhausted it rejects fast
+   * without scheduling retries or emitting status, so
+   * `requireConnectedXmpp` callers fail the same way they do for any
+   * unavailable session and background pollers cause no status churn.
+   *
+   * Fresh-budget recovery is reserved for genuinely user-explicit
+   * intents via `connectWithFreshBudget` — currently the window
+   * `online` recovery listener; a page load gets a fresh budget
+   * implicitly by constructing a new client.
+   */
   async connect(): Promise<void> {
-    // An explicit connect is a fresh start: restore the retry budget
-    // (C2 — otherwise a post-exhaustion user-triggered connect that
-    // fails re-exhausts instantly) alongside the terminal-error
-    // classification cleared below. Scheduler-driven retries go through
-    // `connectFromScheduler` and do NOT reset the budget.
+    if (this.xmpp && this.connected) return;
+    if (this.inTerminalErrorState || this.reconnect.isExhausted()) {
+      throw new Error("XMPP session is not ready");
+    }
+    return this.connectInternal();
+  }
+
+  /**
+   * User-explicit recovery entry (C2/F1): restores the retry budget —
+   * otherwise a post-exhaustion recovery attempt that fails would
+   * re-exhaust instantly — and drops any terminal-error classification
+   * (#1164). Internal/background callers must use `connect()` instead.
+   */
+  private connectWithFreshBudget(): Promise<void> {
     this.reconnect.resetAttempts();
+    this.inTerminalErrorState = false;
+    this.terminalDisconnectDetail = null;
     return this.connectInternal();
   }
 
@@ -811,9 +858,6 @@ export class BrowserXmppClient {
     if (this.xmpp && this.connected) return;
     if (this.connectPromise) return this.connectPromise;
     this.destroying = false;
-    // An explicit connect is a fresh start: drop any terminal-error
-    // classification from the previous session (#1164).
-    this.terminalDisconnectDetail = null;
     this.disarmOnlineRecovery();
     this.clearReconnectTimer();
     this.connectPromise = withSpan(
@@ -839,6 +883,7 @@ export class BrowserXmppClient {
           // stalled on an `await` (module load) so it can't race a
           // newer attempt into a second live handle.
           this.connectEpoch += 1;
+          this.connectTimer = null;
           this.connectPromise = null;
           this.onceConnected = null;
           this.onceConnectFailed = null;
@@ -853,8 +898,10 @@ export class BrowserXmppClient {
           }
           reject(new Error("Reconnection timed out"));
         }, this.connectTimeoutMs);
+        this.connectTimer = timeout;
         const done = (fn: () => void) => {
           clearTimeout(timeout);
+          if (this.connectTimer === timeout) this.connectTimer = null;
           this.connectPromise = null;
           fn();
         };
@@ -876,6 +923,24 @@ export class BrowserXmppClient {
     this.destroying = true;
     this.disarmOnlineRecovery();
     this.clearReconnectTimer();
+    // F3: cancel the pending connect attempt outright. Bump the epoch
+    // so a continuation stalled on the module load aborts, clear the
+    // budget timer so it cannot fire later against a NEWER connect's
+    // half-open handle, and settle the pending `connect()` promise so
+    // its awaiter isn't left dangling (or spuriously rejected by the
+    // orphaned timer long after this disconnect).
+    this.connectEpoch += 1;
+    if (this.connectTimer) {
+      clearTimeout(this.connectTimer);
+      this.connectTimer = null;
+    }
+    const failPendingConnect = this.onceConnectFailed;
+    this.onceConnected = null;
+    this.onceConnectFailed = null;
+    failPendingConnect?.(new Error("XMPP disconnected"));
+    // A disconnect is user-explicit (logout): the terminal-error latch
+    // must not survive into a later session on this instance.
+    this.inTerminalErrorState = false;
     this.clearResumeState();
     const xmpp = this.xmpp;
     const joinedRooms = [...this.joinedMucs.keys()];
@@ -2217,6 +2282,9 @@ export class BrowserXmppClient {
     const terminalDetail = this.terminalDisconnectDetail;
     if (terminalDetail) {
       this.terminalDisconnectDetail = null;
+      // F1: latch the terminal state so background `connect()` calls
+      // cannot silently exit the "sign in again" error surface.
+      this.inTerminalErrorState = true;
       this.emitStatus({ state: "error", detail: terminalDetail });
       if (this.onceConnectFailed) { const fail = this.onceConnectFailed; this.onceConnected = null; this.onceConnectFailed = null; fail(error ?? new Error(terminalDetail)); }
       return;
