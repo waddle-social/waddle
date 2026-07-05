@@ -2,8 +2,8 @@
 
 Companion design note to [ADR-0017](./0017-horizontal-scaling-remote-actors.md).
 Status: **In progress** — Slices 0–1 landed; Slice 2 (delivery cutover) next.
-See the slice order below for per-slice status and the ADR-0017 tracking issue
-for the live epic.
+See the slice order below for per-slice status and issue #1195 (ADR-0017
+horizontal-scaling epic) for the live tracker.
 
 ## Why this exists
 
@@ -181,8 +181,8 @@ get-or-create/reaper split is a fast follow-up availability slice.
 - **Phase 4** — cross-node routing GA; unlock Helm `replicaCount > 1` and
   `clustering.enabled`.
 
-Tracking issue: see the ADR-0017 horizontal-scaling epic issue for live
-slice/phase status.
+Tracking issue: #1195 (ADR-0017 horizontal-scaling epic) for live slice/phase
+status.
 
 ## What survives Phase 1
 
