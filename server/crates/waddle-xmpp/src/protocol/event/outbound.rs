@@ -311,12 +311,21 @@ pub enum OutboundEvent {
     /// genuinely should be carboned. The interpreter wraps the message in
     /// `<sent>`/`<received>` → `<forwarded xmlns='urn:xmpp:forward:0'>`
     /// (XEP-0297) and delivers a copy to every resource of `owner`
-    /// except `exclude`.
+    /// except those in `exclude`.
+    ///
+    /// `exclude` is the full delivery set of the original stanza —
+    /// XEP-0280 §6.3: "The receiving server MUST NOT send a forwarded
+    /// copy to the client(s) the original <message/> stanza was
+    /// addressed to, as these recipients receive the original
+    /// <message/> stanza." For the sender pass and full-JID
+    /// deliveries this is the single originating/receiving resource;
+    /// for the shared bare-JID recipient pass (#1106) it is the whole
+    /// RFC 6121 §8.5.2.1.1 same-priority delivery set.
     SendCarbons {
         owner: BareJid,
         message: Box<Message>,
         kind: CarbonKind,
-        exclude: FullJid,
+        exclude: Vec<FullJid>,
     },
     /// XEP-0333 §3 — the sender displayed a message up to
     /// `displayed_message_id` in a MUC room. The interpreter resolves

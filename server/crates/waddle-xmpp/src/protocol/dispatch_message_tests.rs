@@ -71,6 +71,7 @@ impl Fixture {
             carbons: CarbonsState::Disabled,
             muc_occupancy: &self.occupancy,
             has_live_transport: true,
+            delivery_fanout: &[],
             id_gen: &self.id_gen,
         };
         MessageContext::derive(env, message)

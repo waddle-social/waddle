@@ -377,7 +377,7 @@ async fn xep0198_expired_claimed_sessions_are_hidden_from_detached_fanout() {
         .expect("interested resources")
         .is_empty());
     assert!(registry
-        .detached_carbon_resources_for_user(&bare, &jid)
+        .detached_carbon_resources_for_user(&bare, std::slice::from_ref(&jid))
         .await
         .expect("carbon resources")
         .is_empty());
@@ -497,7 +497,7 @@ async fn xep0198_detached_resource_lists_preserve_stream_flags() {
     assert!(!interested.contains(&laptop));
 
     let carbon = registry
-        .detached_carbon_resources_for_user(&alice, &phone)
+        .detached_carbon_resources_for_user(&alice, std::slice::from_ref(&phone))
         .await
         .expect("list carbon resources");
     assert!(!carbon.contains(&phone));

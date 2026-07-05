@@ -165,6 +165,141 @@ pub(super) async fn route_to_connection(
                     // PR #276).
                     let live_set: std::collections::HashSet<jid::FullJid> =
                         live_targets.iter().cloned().collect();
+
+                    // #1106: a bare-JID DM with live targets runs the
+                    // recipient pass ONCE (shared, headless-style) and
+                    // fans the single processed stanza out to every
+                    // same-priority resource — instead of queueing a
+                    // `PeerStanza` per resource, which ran the full
+                    // recipient pass N times (N archive rows with
+                    // divergent XEP-0359 stanza-ids, N inbox unread
+                    // increments, and cross-resource received-carbons
+                    // that XEP-0280 §6.3 forbids).
+                    let is_dm_message = matches!(
+                        stanza.as_ref(),
+                        Stanza::Message(message)
+                            if matches!(
+                                message.type_,
+                                xmpp_parsers::message::MessageType::Chat
+                                    | xmpp_parsers::message::MessageType::Normal,
+                            )
+                    );
+                    if is_dm_message && !live_targets.is_empty() {
+                        // The carbon exclusion set is every client the
+                        // original stanza is addressed to (XEP-0280 §6.3):
+                        // the live delivery set PLUS the detached XEP-0198
+                        // resources whose replay buffers get the processed
+                        // original queued below — a detached sibling must
+                        // not ALSO find a received-carbon in its buffer on
+                        // resume.
+                        let mut delivery_fanout = live_targets.clone();
+                        delivery_fanout.extend(
+                            detached_targets
+                                .iter()
+                                .filter(|full| !live_set.contains(*full))
+                                .cloned(),
+                        );
+                        match run_fanout_recipient_pass(
+                            deps,
+                            &bare,
+                            delivery_fanout,
+                            (*stanza).clone(),
+                            recursion_depth + 1,
+                        )
+                        .await
+                        {
+                            FanoutPassResult::Ran {
+                                processed,
+                                side_routes,
+                            } => {
+                                if let Some(processed) = processed {
+                                    // Wire delivery of the ONE processed
+                                    // stanza per resource. `send_to`
+                                    // queues a `DeliveryKind::DirectFrame`
+                                    // — the destination's main loop keeps
+                                    // XEP-0198 outbound accounting
+                                    // (`record_outbound`) but does NOT
+                                    // re-run the recipient pass. The
+                                    // stanza's `to` stays bare (RFC 6121
+                                    // §8.5.2.1.1 delivery of a
+                                    // bare-addressed message).
+                                    for full in &live_targets {
+                                        match registry.send_to(full, (*processed).clone()).await {
+                                            waddle_xmpp::registry::SendResult::Sent => {
+                                                debug!(
+                                                    jid = %full,
+                                                    "RouteToConnection: processed DM \
+                                                     delivered (shared recipient pass)"
+                                                );
+                                            }
+                                            waddle_xmpp::registry::SendResult::NotConnected
+                                            | waddle_xmpp::registry::SendResult::ChannelClosed => {
+                                                deliver_to_detached(
+                                                    deps.sm_session_registry,
+                                                    full,
+                                                    &processed,
+                                                )
+                                                .await;
+                                            }
+                                        }
+                                    }
+                                    // Detached XEP-0198 targets get the
+                                    // PROCESSED stanza too, so resume
+                                    // replay carries the recipient
+                                    // <stanza-id/> (closes the
+                                    // stanza-id-parity gap documented on
+                                    // the legacy path).
+                                    queue_processed_for_detached(
+                                        deps.sm_session_registry,
+                                        detached_targets,
+                                        &live_set,
+                                        &processed,
+                                    )
+                                    .await;
+                                } else {
+                                    debug!(
+                                        bare_jid = %bare,
+                                        "RouteToConnection: shared recipient pass \
+                                         produced no wire copy (blocked or halted); \
+                                         dropping delivery"
+                                    );
+                                }
+                                // Handler-generated side stanzas (XEP-0184
+                                // receipt back to the sender) route at the
+                                // OUTER depth — the old per-connection
+                                // pass routed them from the recipient's
+                                // own interpret loop at depth 0.
+                                // Receipts always target the sender's
+                                // full JID, so this cannot re-enter the
+                                // bare-JID fan-out.
+                                if !side_routes.is_empty() {
+                                    let side_events: Vec<OutboundEvent> = side_routes
+                                        .into_iter()
+                                        .map(|(jid, stanza)| OutboundEvent::RouteToConnection {
+                                            jid,
+                                            stanza,
+                                        })
+                                        .collect();
+                                    let _ = Box::pin(interpret_with_depth(
+                                        side_events,
+                                        deps,
+                                        recursion_depth,
+                                    ))
+                                    .await;
+                                }
+                                return;
+                            }
+                            FanoutPassResult::Unavailable => {
+                                // Shared pass unavailable (no dispatcher
+                                // in test fixtures, or blocklist load
+                                // failed): fall through to the legacy
+                                // per-resource PeerStanza path below —
+                                // each recipient connection's bind-time
+                                // blocklist snapshot keeps XEP-0191
+                                // enforcement.
+                            }
+                        }
+                    }
                     for full in live_targets {
                         deliver_peer_to_full(registry, deps.sm_session_registry, &full, &stanza)
                             .await;
@@ -237,6 +372,56 @@ pub(super) async fn route_to_connection(
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+/// #1106: queue the PROCESSED (recipient-stamped) stanza into the
+/// detached XEP-0198 replay buffers of `detached_targets`, skipping any
+/// resource that was just delivered live. Because the queued form is
+/// the shared recipient pass's wire output, resume replay carries the
+/// recipient-side `<stanza-id by='recipient'/>` (XEP-0359 §5) — the
+/// persistence side effects already ran exactly once in the shared
+/// pass, so replay is delivery-only.
+async fn queue_processed_for_detached(
+    sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
+    detached_targets: Vec<jid::FullJid>,
+    live_set: &std::collections::HashSet<jid::FullJid>,
+    stanza: &Stanza,
+) {
+    let Some(sm) = sm_session_registry else {
+        return;
+    };
+    for full in detached_targets {
+        if live_set.contains(&full) {
+            continue;
+        }
+        match sm
+            .record_stanza_for_detached_bound_resource(&full, stanza, chrono::Utc::now())
+            .await
+        {
+            Ok(true) => {
+                debug!(
+                    jid = %full,
+                    "RouteToConnection: processed DM queued for detached \
+                     XEP-0198 replay"
+                );
+            }
+            Ok(false) => {
+                debug!(
+                    jid = %full,
+                    "RouteToConnection: detached session expired between \
+                     enumeration and queue; dropping"
+                );
+            }
+            Err(error) => {
+                warn!(
+                    jid = %full,
+                    %error,
+                    "RouteToConnection: failed to record processed DM for \
+                     detached resource"
+                );
             }
         }
     }

@@ -10,6 +10,7 @@ import {
   type ScrollDirectionMode,
 } from "@/lib/scroll-direction";
 import { buildDmTimelineFromMamResults } from "@/dms/message-timeline-state";
+import { insertLiveMessage } from "@/lib/messaging/timeline-insert";
 import {
   firstUnseenIdAfterDisplayedState,
   firstUnseenIdFromUnreadCount,
@@ -129,7 +130,16 @@ export function useDmMamPaging(deps: UseDmMamPagingDeps) {
       });
       oldestArchiveId = cursor.oldestArchiveId;
       hasOlderMessages.value = cursor.hasOlderMessages;
-      const timeline = buildTimelineFromMamResults(mamResults);
+      // #675: a live DM merged into `messages.value` during the
+      // queryPersonalMamPage await must survive the rebuild. Re-insert each
+      // one through the same reconciliation as mergeLiveMessage, so a MAM
+      // copy of the same message (XEP-0359 id parity) merges instead of
+      // duplicating.
+      const liveDuringLoad = stripQueuedSelfMessages(messages.value);
+      let timeline = buildTimelineFromMamResults(mamResults);
+      for (const live of liveDuringLoad) {
+        timeline = insertLiveMessage(timeline, live, pendingEchoClientIds).messages;
+      }
       const timelineWithQueue = appendQueuedMessages(timeline, peerJid);
       messages.value = timelineWithQueue;
       if (requestId === messageRequestId) isLoadingMessages.value = false;
@@ -140,9 +150,16 @@ export function useDmMamPaging(deps: UseDmMamPagingDeps) {
         feedTimeline,
         getMdsDisplayedCandidates(mdsKey),
       );
+      // #675: count foreign live DMs that arrived during the await as
+      // unread too, mirroring the channel-side divider adjustment.
+      const liveUnreadDuringLoad = liveDuringLoad.filter(
+        (m) => isFeedVisible(m) && !m.isSelf,
+      ).length;
+      const unreadForDivider =
+        unreadAtLoad > 0 ? unreadAtLoad + liveUnreadDuringLoad : 0;
       firstUnseenId.value = firstUnseenIdAfterDisplayedState(
         feedTimeline,
-        firstUnseenIdFromUnreadCount(feedTimeline, unreadAtLoad),
+        firstUnseenIdFromUnreadCount(feedTimeline, unreadForDivider),
         displayed,
       );
       if (displayed) setMdsDisplayed(mdsKey, displayed);
@@ -158,10 +175,18 @@ export function useDmMamPaging(deps: UseDmMamPagingDeps) {
     } catch {
       if (requestId !== messageRequestId) return "aborted";
       console.warn("Could not load DM conversation");
-      const queuedOnly = appendQueuedMessages([], peerJid);
-      messages.value = queuedOnly;
+      // #675: messages.value already holds the queued rows plus any
+      // live DM merged during the failed await — keep them instead of
+      // resetting to queued-only.
       loadErrorPeerJid.value = peerJid;
-      loadErrorMessage.value = dmLoadErrorMessage(peerJid, { queuedOnly: queuedOnly.length > 0 });
+      // "Showing queued messages only" is claimed only when queued
+      // self-sends actually exist — a live arrival kept by the #675
+      // preservation is not a queued message.
+      loadErrorMessage.value = dmLoadErrorMessage(peerJid, {
+        queuedOnly: messages.value.some(
+          (m) => m.deliveryStatus === "queued" || m.deliveryStatus === "sending",
+        ),
+      });
       actionError.value = loadErrorMessage.value;
       isLoadingMessages.value = false;
       return "failed";

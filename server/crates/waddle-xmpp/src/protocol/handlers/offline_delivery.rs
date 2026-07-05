@@ -181,6 +181,7 @@ mod tests {
             carbons: CarbonsState::Disabled,
             muc_occupancy,
             has_live_transport,
+            delivery_fanout: &[],
             id_gen,
         };
         MessageContext::derive(env, message)

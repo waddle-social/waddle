@@ -2140,7 +2140,10 @@ export class BrowserXmppClient {
   }
   private wireEvents(xmpp: XmppClientInstance & { enableKeepAlive?: (opts: { interval: number; timeout: number }) => void; disableKeepAlive?: () => void }) {
     if (!this.xmpp && !this.destroying) this.xmpp = xmpp;
-    xmpp.set_on_connected?.(() => { if (!this.isCurrentXmpp(xmpp)) return; void this.enableCarbons(xmpp); });
+    // #754: carbons enable lives in the fresh branch of `runSessionReady`
+    // only — enabling from `on_connected` too doubled the IQ on every
+    // fresh connect and re-enabled on XEP-0198 resume, where the server
+    // already preserves carbon state for the resumed session.
     xmpp.set_on_session_lifecycle?.((event: string) => {
       if (!this.isCurrentXmpp(xmpp)) return;
       if (event === "resumed") this.handleSessionReady(xmpp, { type: "resumed" }); else this.handleSessionReady(xmpp, { type: "fresh" });

@@ -52,6 +52,14 @@ pub struct XmppStateMachine {
     /// transport. Headless offline-recipient passes flip this to `false`
     /// so delivery-only XEPs do not fire.
     has_live_transport: bool,
+    /// RFC 6121 §8.5.2.1.1 delivery-fanout set for the single shared
+    /// recipient pass (#1106). Empty on ordinary per-connection
+    /// machines; the bare-JID fan-out runner seeds it with the full
+    /// set of same-priority resources the processed stanza will be
+    /// delivered to, so the XEP-0280 carbons handler can exclude the
+    /// *whole* delivery set (XEP-0280 §6.3) instead of just one
+    /// resource.
+    delivery_fanout: Vec<jid::FullJid>,
     /// Source of fresh, opaque XEP-0359 stanza-ids stamped by message
     /// handlers. Defaults to UUIDv4; tests can override.
     id_gen: Arc<dyn IdGenerator>,
@@ -89,6 +97,7 @@ impl XmppStateMachine {
             carbons: CarbonsState::Disabled,
             muc_occupancy: MucOccupancy::empty(),
             has_live_transport: true,
+            delivery_fanout: Vec::new(),
             id_gen,
             keepalive: KeepalivePolicy::new(KeepaliveConfig::default()),
         }
@@ -172,6 +181,18 @@ impl XmppStateMachine {
     /// transport.
     pub fn set_has_live_transport(&mut self, has_live_transport: bool) {
         self.has_live_transport = has_live_transport;
+    }
+
+    /// Seed the RFC 6121 §8.5.2.1.1 delivery-fanout set for a shared
+    /// bare-JID recipient pass (#1106). Analogous to
+    /// [`Self::set_blocklist`]: called once on a transient machine
+    /// before feeding [`InboundEvent::StanzaFromPeer`], so the
+    /// XEP-0280 carbons handler emits the whole delivery set as the
+    /// carbon exclusion (XEP-0280 §6.3). Ordinary per-connection
+    /// machines leave this empty and the handler falls back to
+    /// excluding only the local resource.
+    pub fn set_delivery_fanout(&mut self, delivery_fanout: Vec<jid::FullJid>) {
+        self.delivery_fanout = delivery_fanout;
     }
 
     /// Replace the per-connection XEP-0191 blocklist snapshot.
@@ -309,6 +330,7 @@ impl XmppStateMachine {
                         carbons: self.carbons,
                         muc_occupancy: &self.muc_occupancy,
                         has_live_transport: self.has_live_transport,
+                        delivery_fanout: &self.delivery_fanout,
                         id_gen: self.id_gen.as_ref(),
                     };
                     let mctx = MessageContext::derive(env, &message);
@@ -360,6 +382,7 @@ impl XmppStateMachine {
                         carbons: self.carbons,
                         muc_occupancy: &self.muc_occupancy,
                         has_live_transport: self.has_live_transport,
+                        delivery_fanout: &self.delivery_fanout,
                         id_gen: self.id_gen.as_ref(),
                     };
                     // Peer stanzas are by definition recipient-pass —

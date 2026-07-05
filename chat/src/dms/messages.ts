@@ -340,8 +340,8 @@ export function useDirectMessages(
         // queued-only: the catch-up coverage skip would then block the
         // self-heal on the next reconnect. Restore the pre-reload
         // timeline (the load error stays surfaced) — merging in what
-        // the catch's queued-only reset holds, so a message the user
-        // queued DURING the reload doesn't vanish until its echo.
+        // the catch kept (queued rows plus any live arrival during the
+        // reload, #675), so neither vanishes until the next rebuild.
         const queuedDuringReload = messages.value.filter((m) => !findMessageById(snapshot, m.id));
         messages.value = [...snapshot, ...queuedDuringReload];
         return;
