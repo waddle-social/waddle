@@ -16,6 +16,8 @@ use kameo::remote::{self, registry};
 use libp2p::swarm::SwarmEvent;
 use libp2p::{noise, tcp, yamux, Multiaddr, PeerId, Swarm, SwarmBuilder};
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
@@ -146,6 +148,14 @@ async fn run_event_loop(
     // hold `dial_tx` for the loop's lifetime, so `recv()` never closes.
     let (dial_tx, mut dial_rx) = tokio::sync::mpsc::channel::<Multiaddr>(DIAL_CHANNEL_CAPACITY);
 
+    // Single-flight guard for the DNS resolver. `tokio::net::lookup_host` runs
+    // an uncancellable `getaddrinfo` on the blocking pool; without this, a DNS
+    // outage would spawn a new stuck task every interval and eventually
+    // saturate the blocking pool, starving unrelated `spawn_blocking` work
+    // process-wide. At most one resolver runs at a time; ticks are skipped
+    // while one is in flight and resume once it returns.
+    let dns_in_flight = Arc::new(AtomicBool::new(false));
+
     loop {
         tokio::select! {
             _ = stop_token.cancelled() => {
@@ -154,15 +164,19 @@ async fn run_event_loop(
             }
             _ = dial_timer.tick() => {
                 if let Some(ref bootstrap) = bootstrap {
-                    let bootstrap = bootstrap.clone();
-                    let dial_tx = dial_tx.clone();
-                    tokio::spawn(async move {
-                        for addr in dns::resolve_bootstrap_peers(&bootstrap).await {
-                            if dial_tx.send(addr).await.is_err() {
-                                break;
+                    if !dns_in_flight.swap(true, Ordering::AcqRel) {
+                        let bootstrap = bootstrap.clone();
+                        let dial_tx = dial_tx.clone();
+                        let in_flight = Arc::clone(&dns_in_flight);
+                        tokio::spawn(async move {
+                            for addr in dns::resolve_bootstrap_peers(&bootstrap).await {
+                                if dial_tx.send(addr).await.is_err() {
+                                    break;
+                                }
                             }
-                        }
-                    });
+                            in_flight.store(false, Ordering::Release);
+                        });
+                    }
                 }
             }
             Some(addr) = dial_rx.recv() => {
