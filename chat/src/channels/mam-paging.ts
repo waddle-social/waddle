@@ -246,8 +246,13 @@ export function useChannelMamPaging(deps: UseChannelMamPagingDeps) {
       if (requestId !== messageRequestId) return "aborted";
       // #675: messages.value already holds the queued rows plus any
       // live message merged during the failed await — keep them
-      // instead of resetting to queued-only.
-      actionError.value = messages.value.length > 0 ? "" : normalizeError(e);
+      // instead of resetting to queued-only. The error stays suppressed
+      // only for queued self-sends (pre-existing behavior); a live
+      // arrival doesn't hide that history failed to load.
+      const hasQueuedRows = messages.value.some(
+        (m) => m.deliveryStatus === "queued" || m.deliveryStatus === "sending",
+      );
+      actionError.value = hasQueuedRows ? "" : normalizeError(e);
       isLoadingMessages.value = false;
       return "failed";
     }

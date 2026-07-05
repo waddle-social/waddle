@@ -179,8 +179,13 @@ export function useDmMamPaging(deps: UseDmMamPagingDeps) {
       // live DM merged during the failed await — keep them instead of
       // resetting to queued-only.
       loadErrorPeerJid.value = peerJid;
+      // "Showing queued messages only" is claimed only when queued
+      // self-sends actually exist — a live arrival kept by the #675
+      // preservation is not a queued message.
       loadErrorMessage.value = dmLoadErrorMessage(peerJid, {
-        queuedOnly: messages.value.length > 0,
+        queuedOnly: messages.value.some(
+          (m) => m.deliveryStatus === "queued" || m.deliveryStatus === "sending",
+        ),
       });
       actionError.value = loadErrorMessage.value;
       isLoadingMessages.value = false;

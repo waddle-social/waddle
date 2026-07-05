@@ -223,6 +223,7 @@ describe("bootstrap failure keeps live arrivals (#675 review)", () => {
     } as unknown as BrowserXmppClient;
 
     const messages = ref<TimelineMessage[]>([]);
+    const actionError = ref("");
     const pendingEchoClientIds = new Set<string>();
     const paging = useChannelMamPaging({
       session: ref(session),
@@ -235,7 +236,7 @@ describe("bootstrap failure keeps live arrivals (#675 review)", () => {
       timelineEl: ref(null),
       scrollDirection: ref("bottom"),
       pinnedEdgeScroller: { cancelSettleLock: () => {} },
-      actionError: ref(""),
+      actionError,
       clearActionError: () => {},
       normalizeError: (e) => String(e),
       pendingEchoClientIds,
@@ -258,6 +259,9 @@ describe("bootstrap failure keeps live arrivals (#675 review)", () => {
     await expect(loadPromise).resolves.toBe("failed");
 
     expect(messages.value.some((m) => m.id === "live-1")).toBe(true);
+    // A kept live arrival must not hide that history failed to load —
+    // only queued self-sends suppress the error (pre-existing behavior).
+    expect(actionError.value).not.toBe("");
   });
 });
 
