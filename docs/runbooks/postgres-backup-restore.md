@@ -185,16 +185,59 @@ countdown described above.
       (`pg_stat_archiver`, `.status.firstRecoverabilityPoint`) and the first
       `Backup` CR (created by `immediate: true`) reaches phase `completed` for
       both clusters.
-- [ ] Run the scratch-namespace restore drill above for both clusters and
-      record the result.
-- [ ] Wire a backup-failure alert in the alerts-as-code issue. There is no
-      PrometheusRule/monitoring stack in this repo today (observability is
-      Grafana Alloy OTLP push), so this is documentation only for now.
-      Suggested signals from the CNPG metrics exporter:
-      - `cnpg_collector_last_available_backup_timestamp` — alert when older
-        than ~26h (a missed daily backup).
-      - `cnpg_collector_pg_wal_archive_status` — alert on growing failed WAL
-        archive count.
+- [ ] Load the backup-failure alert rules into Grafana Cloud (see
+      [Backup-failure alerting](#backup-failure-alerting) below).
+
+## Backup-failure alerting
+
+A silent backup failure is only discovered when a restore is needed, so
+backup health is alerted on as code:
+
+- **Metrics pipeline (reconciled by Flux):**
+  `gitops/grafana-alloy/helmrelease.yaml` scrapes each CNPG instance pod's
+  built-in exporter (`:9187/metrics`, `job="cnpg"`, `cnpg_cluster` label
+  preserved) and forwards it through the existing OTLP path to Grafana
+  Cloud. Without this the backup-health series never leave the cluster.
+  (This repo has no prometheus-operator / `PrometheusRule` CRDs, so an
+  in-cluster rule would not reconcile — the rules evaluate in Grafana
+  Cloud, where the metrics land.)
+- **Alert rules (as code):**
+  `infrastructure/waddle.cloud/grafana-cloud/alerts/postgres-backups.yaml`
+  is the source of truth — three rules: `CNPGBackupStale` (no base backup
+  in >26h), `CNPGWALArchiveFailing` (WAL not reaching R2), and
+  `CNPGBackupMetricsMissing` (the metrics pipeline itself broke, so the
+  other two have no data to fire on).
+
+Apply the rules to Grafana Cloud (HITL — needs a Grafana Cloud ruler token,
+not held in 1Password yet):
+
+- [ ] Confirm the CNPG metric names against the deployed operator
+      (`kubectl -n waddle exec postgresql-1 -- curl -s localhost:9187/metrics | grep -E 'backup|archiver'`)
+      and adjust the rule file if they differ from CNPG 1.25.
+- [ ] Load the rule group into the Grafana Cloud Mimir ruler
+      (`mimirtool rules load --address=<prom-url> --id=<tenant> …/postgres-backups.yaml`)
+      or provision the equivalent Grafana-managed rules from the same file.
+- [ ] Point the rules' notification policy at an operator-visible contact
+      point (the routing lives in Grafana Cloud, not this repo).
+
+## Restore validation (recoverability gate)
+
+**A backup is not proven until a restore has succeeded.** A full
+scratch-namespace restore drill (per [Full restore procedure](#full-restore-procedure-scratch-namespace)
+above) MUST be completed for **both** clusters before this backup
+configuration is trusted as the production recovery path, and re-run at
+least quarterly. Record each drill here:
+
+| Date (UTC) | Cluster | Backup restored (recovery target) | Row/table spot-check result | Operator |
+| --- | --- | --- | --- | --- |
+| _pending_ | `postgresql` | | | |
+| _pending_ | `postgresql-spicedb` | | | |
+
+> ⚠️ Not yet validated. These drills require a live CNPG operator and the
+> R2 bucket (which is created as part of the blocking pre-merge steps
+> above), so they cannot be run until rollout. Do not treat backups as a
+> recovery guarantee until this table is filled in with a successful drill
+> for each cluster.
 
 ## NetworkPolicy caveat
 
