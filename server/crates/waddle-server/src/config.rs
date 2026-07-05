@@ -146,6 +146,33 @@ pub struct ClusteringConfig {
     /// kameo `messaging::Config` limits and the ADR element-5 timeout
     /// hierarchy.
     pub messaging: ClusteringMessagingConfig,
+    /// Pre-enrolled per-pod keypair pool: base64-encoded 32-byte ed25519 secret
+    /// keys (`WADDLE_CLUSTERING_KEYPAIR_POOL`, comma-separated). At startup a
+    /// pod leases exactly one pool slot via a Postgres CAS and uses that
+    /// keypair as its libp2p identity (ADR element 3). Empty (the default)
+    /// falls back to an ephemeral per-process keypair — fine for the discovery
+    /// spike and tests, but no stable/revocable identity.
+    pub keypair_pool: Vec<String>,
+    /// Keypair-slot lease timing (heartbeat interval + lease TTL).
+    pub lease: ClusteringLeaseConfig,
+}
+
+/// Timing for the keypair-slot lease heartbeat and expiry (ADR element 4
+/// shape). `lease_ttl` must exceed `heartbeat_interval` with margin so a
+/// briefly-delayed renewal does not lose the slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClusteringLeaseConfig {
+    pub heartbeat_interval: Duration,
+    pub lease_ttl: Duration,
+}
+
+impl Default for ClusteringLeaseConfig {
+    fn default() -> Self {
+        Self {
+            heartbeat_interval: Duration::from_secs(10),
+            lease_ttl: Duration::from_secs(30),
+        }
+    }
 }
 
 /// Headless-Service peer discovery inputs for the swarm.
@@ -198,6 +225,8 @@ impl Default for ClusteringConfig {
             listen_addrs: vec!["/ip4/0.0.0.0/tcp/0".to_string()],
             bootstrap: None,
             messaging: ClusteringMessagingConfig::default(),
+            keypair_pool: Vec::new(),
+            lease: ClusteringLeaseConfig::default(),
         }
     }
 }
@@ -324,6 +353,46 @@ impl ClusteringConfig {
             );
         }
 
+        let keypair_pool = match vars
+            .get("WADDLE_CLUSTERING_KEYPAIR_POOL")
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        {
+            None => Vec::new(),
+            Some(raw) => raw
+                .split(',')
+                .map(|entry| entry.trim().to_string())
+                .filter(|entry| !entry.is_empty())
+                .collect(),
+        };
+
+        let lease_defaults = ClusteringLeaseConfig::default();
+        let heartbeat_interval = Duration::from_millis(parse_u64_var(
+            &vars,
+            "WADDLE_CLUSTERING_HEARTBEAT_INTERVAL_MS",
+            millis_u64(lease_defaults.heartbeat_interval),
+        )?);
+        let lease_ttl = Duration::from_millis(parse_u64_var(
+            &vars,
+            "WADDLE_CLUSTERING_LEASE_TTL_MS",
+            millis_u64(lease_defaults.lease_ttl),
+        )?);
+        if heartbeat_interval.is_zero() {
+            return Err(
+                "WADDLE_CLUSTERING_HEARTBEAT_INTERVAL_MS must be greater than 0".to_string(),
+            );
+        }
+        // TTL must survive at least one missed renewal plus margin, else a
+        // single delayed heartbeat forfeits the slot.
+        if lease_ttl < heartbeat_interval * 2 {
+            return Err(format!(
+                "WADDLE_CLUSTERING_LEASE_TTL_MS ({}) must be at least 2x \
+                 WADDLE_CLUSTERING_HEARTBEAT_INTERVAL_MS ({})",
+                lease_ttl.as_millis(),
+                heartbeat_interval.as_millis()
+            ));
+        }
+
         Ok(Self {
             enabled,
             listen_addrs,
@@ -335,6 +404,11 @@ impl ClusteringConfig {
                 max_concurrent_streams,
                 max_request_bytes,
                 max_response_bytes,
+            },
+            keypair_pool,
+            lease: ClusteringLeaseConfig {
+                heartbeat_interval,
+                lease_ttl,
             },
         })
     }
@@ -962,6 +1036,43 @@ mod tests {
         let err =
             ClusteringConfig::from_vars([("WADDLE_CLUSTERING_ENABLED", "maybe")]).unwrap_err();
         assert!(err.contains("WADDLE_CLUSTERING_ENABLED"));
+    }
+
+    #[test]
+    fn clustering_parses_keypair_pool_and_lease_timing() {
+        let config = ClusteringConfig::from_vars([
+            ("WADDLE_CLUSTERING_KEYPAIR_POOL", " keyA , keyB ,keyC"),
+            ("WADDLE_CLUSTERING_HEARTBEAT_INTERVAL_MS", "5000"),
+            ("WADDLE_CLUSTERING_LEASE_TTL_MS", "20000"),
+        ])
+        .unwrap();
+        assert_eq!(config.keypair_pool, vec!["keyA", "keyB", "keyC"]);
+        assert_eq!(config.lease.heartbeat_interval.as_millis(), 5000);
+        assert_eq!(config.lease.lease_ttl.as_millis(), 20000);
+    }
+
+    #[test]
+    fn clustering_defaults_have_empty_pool_and_valid_lease() {
+        let config = ClusteringConfig::from_vars(std::iter::empty::<(&str, &str)>()).unwrap();
+        assert!(config.keypair_pool.is_empty());
+        assert_eq!(config.lease, ClusteringLeaseConfig::default());
+    }
+
+    #[test]
+    fn clustering_rejects_lease_ttl_below_two_heartbeats() {
+        let err = ClusteringConfig::from_vars([
+            ("WADDLE_CLUSTERING_HEARTBEAT_INTERVAL_MS", "10000"),
+            ("WADDLE_CLUSTERING_LEASE_TTL_MS", "15000"),
+        ])
+        .unwrap_err();
+        assert!(err.contains("WADDLE_CLUSTERING_LEASE_TTL_MS"));
+    }
+
+    #[test]
+    fn clustering_rejects_zero_heartbeat_interval() {
+        let err = ClusteringConfig::from_vars([("WADDLE_CLUSTERING_HEARTBEAT_INTERVAL_MS", "0")])
+            .unwrap_err();
+        assert!(err.contains("WADDLE_CLUSTERING_HEARTBEAT_INTERVAL_MS"));
     }
 
     #[test]

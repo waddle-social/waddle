@@ -12,7 +12,7 @@
 //! the subsystem is exercised only by the multi-process test harness.
 
 use crate::config::ClusteringConfig;
-use crate::db::DatabaseDriver;
+use crate::db::{Database, DatabaseDriver};
 use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "clustering")]
@@ -21,6 +21,8 @@ mod behaviour;
 mod dns;
 #[cfg(feature = "clustering")]
 mod identity;
+#[cfg(feature = "clustering")]
+mod lease;
 #[cfg(feature = "clustering")]
 mod metrics;
 #[cfg(feature = "clustering")]
@@ -59,21 +61,23 @@ pub enum ClusteringError {
 /// the default single-replica path, unchanged. When enabled it validates the
 /// Postgres control-plane prerequisite and, on a `clustering`-feature build,
 /// brings up the owned libp2p swarm (later slices).
-pub fn start_if_enabled(
+pub async fn start_if_enabled(
     config: &ClusteringConfig,
-    driver: DatabaseDriver,
+    db: &Database,
     stop_token: &CancellationToken,
 ) -> Result<(), ClusteringError> {
     if !config.enabled {
         return Ok(());
     }
 
+    let driver = db.driver();
+
     // Root-cause-first: a binary built without the `clustering` feature can
     // never cluster regardless of driver, so that is the more fundamental
     // failure and is reported before the Postgres prerequisite.
     #[cfg(not(feature = "clustering"))]
     {
-        let _ = (driver, stop_token);
+        let _ = (db, stop_token, driver);
         Err(ClusteringError::FeatureNotCompiled)
     }
 
@@ -82,9 +86,10 @@ pub fn start_if_enabled(
         if driver != DatabaseDriver::Postgres {
             return Err(ClusteringError::RequiresPostgres { driver });
         }
-        // Slices 2–5 wire the keypair-slot lease, peer allowlist, remote codec,
-        // and supervised relay actors on top of this swarm.
-        let local_peer_id = swarm::spawn(config, stop_token.clone())?;
+        // The swarm leases its keypair-pool slot from `db` (Postgres control
+        // plane) before binding. Slices 3–5 add the peer allowlist, remote
+        // codec, and supervised relay actors on top.
+        let local_peer_id = swarm::spawn(config, db, stop_token.clone()).await?;
         tracing::info!(
             %local_peer_id,
             listen_addrs = ?config.listen_addrs,

@@ -8,11 +8,16 @@
 //! routed cross-node.
 
 use super::behaviour::{WaddleBehaviour, WaddleBehaviourEvent};
+use super::lease::{
+    KeypairSlotLease, LeaseError, LeaseIdentity, LeasedSlot, PostgresKeypairSlotLease,
+};
 use super::{dns, identity, metrics};
 use crate::config::{ClusteringBootstrapConfig, ClusteringConfig};
+use crate::db::Database;
 use core::convert::Infallible;
 use futures::StreamExt;
 use kameo::remote::{self, registry};
+use libp2p::identity::Keypair;
 use libp2p::swarm::SwarmEvent;
 use libp2p::{noise, tcp, yamux, Multiaddr, PeerId, Swarm, SwarmBuilder};
 use std::collections::HashSet;
@@ -49,12 +54,23 @@ pub enum SwarmError {
     /// `listen_on` was rejected by the transport for a parsed multiaddr.
     #[error("clustering swarm failed to listen on '{addr}': {reason}")]
     Listen { addr: String, reason: String },
+    /// The keypair-slot lease could not be acquired or its schema set up.
+    #[error(transparent)]
+    Lease(#[from] LeaseError),
+    /// A leased pool slot's keypair could not be decoded.
+    #[error(transparent)]
+    Identity(#[from] identity::IdentityError),
 }
 
 /// Build the swarm, install the global `ActorSwarm`, start listening, and
 /// spawn the event loop on `stop_token`. Returns the local `PeerId`.
-pub fn spawn(
+///
+/// When a keypair pool is configured the node leases one pool slot from the
+/// Postgres control plane and uses that keypair (and heartbeats it); otherwise
+/// it falls back to an ephemeral per-process identity.
+pub async fn spawn(
     config: &ClusteringConfig,
+    db: &Database,
     stop_token: CancellationToken,
 ) -> Result<PeerId, SwarmError> {
     // Parse and validate the listen multiaddrs first, before building any
@@ -74,7 +90,7 @@ pub fn spawn(
         })
         .collect::<Result<Vec<Multiaddr>, SwarmError>>()?;
 
-    let keypair = identity::node_keypair();
+    let keypair = node_keypair(config, db, &stop_token).await?;
     let local_peer_id = keypair.public().to_peer_id();
 
     let messaging_config = remote::messaging::Config::default()
@@ -97,7 +113,7 @@ pub fn spawn(
         // fallible form requires exactly `Box<dyn Error + Send + Sync>`, so an
         // `Ok::<_, Infallible>` wrapper would be misread as the behaviour type.
         .with_behaviour(|key| WaddleBehaviour::new(key.public().to_peer_id(), messaging_config))
-        .map_err(|never: Infallible| match never {})?
+        .map_err(|never: Infallible| -> SwarmError { match never {} })?
         .build();
 
     // Install the process-global kameo `ActorSwarm` so `RemoteActorRef`
@@ -123,6 +139,96 @@ pub fn spawn(
     tokio::spawn(run_event_loop(swarm, bootstrap, stop_token));
 
     Ok(local_peer_id)
+}
+
+/// Resolve this node's libp2p keypair: lease a pool slot (and start its
+/// heartbeat) when a keypair pool is configured, else generate an ephemeral
+/// identity.
+async fn node_keypair(
+    config: &ClusteringConfig,
+    db: &Database,
+    stop_token: &CancellationToken,
+) -> Result<Keypair, SwarmError> {
+    if config.keypair_pool.is_empty() {
+        tracing::warn!(
+            "clustering: no keypair pool configured — using an ephemeral per-process identity \
+             (no stable or revocable PeerId; configure WADDLE_CLUSTERING_KEYPAIR_POOL for production)"
+        );
+        return Ok(identity::ephemeral_keypair());
+    }
+
+    let lease = PostgresKeypairSlotLease::new(db.clone());
+    lease.ensure_schema().await?;
+    let node = LeaseIdentity {
+        node_id: uuid::Uuid::new_v4().to_string(),
+        node_epoch: uuid::Uuid::new_v4().to_string(),
+    };
+    let pool_size = config.keypair_pool.len();
+    let slot = lease
+        .acquire(&node, pool_size, config.lease.lease_ttl)
+        .await?;
+    // `acquire` only ever returns an in-range slot, so this index is valid.
+    let entry = &config.keypair_pool[slot.slot_index as usize];
+    let keypair = identity::keypair_from_pool_entry(entry)?;
+    tracing::info!(
+        slot = slot.slot_index,
+        pool_size,
+        "clustering: leased keypair-pool slot for node identity"
+    );
+
+    tokio::spawn(run_heartbeat(
+        lease,
+        node,
+        slot,
+        config.lease.heartbeat_interval,
+        config.lease.lease_ttl,
+        stop_token.clone(),
+    ));
+
+    Ok(keypair)
+}
+
+/// Renew the keypair-slot lease on a timer until shutdown; release the slot on
+/// graceful stop, and self-fence (cancel the swarm) on fencing loss so a
+/// superseded identity stops serving.
+async fn run_heartbeat(
+    lease: PostgresKeypairSlotLease,
+    node: LeaseIdentity,
+    slot: LeasedSlot,
+    interval: Duration,
+    lease_ttl: Duration,
+    stop_token: CancellationToken,
+) {
+    let mut timer = tokio::time::interval(interval);
+    timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            _ = stop_token.cancelled() => {
+                if let Err(error) = lease.release(&node, slot).await {
+                    tracing::warn!(%error, slot = slot.slot_index, "clustering keypair-slot release failed on shutdown");
+                }
+                break;
+            }
+            _ = timer.tick() => {
+                match lease.heartbeat(&node, slot, lease_ttl).await {
+                    Ok(()) => {}
+                    Err(LeaseError::FencingLoss { slot_index }) => {
+                        tracing::error!(
+                            slot = slot_index,
+                            "clustering keypair-slot lease lost (fencing) — self-fencing swarm"
+                        );
+                        // The identity is no longer ours; stop the swarm.
+                        stop_token.cancel();
+                        break;
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, slot = slot.slot_index, "clustering keypair-slot heartbeat error; will retry next tick");
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Drive the swarm until `stop_token` fires: dial seed peers on a timer, feed
@@ -186,7 +292,7 @@ async fn run_event_loop(
                 }
             }
             event = swarm.select_next_some() => {
-                handle_swarm_event(event, &mut connected, &mut routing_peers);
+                handle_swarm_event(&mut swarm, event, &mut connected, &mut routing_peers);
             }
         }
     }
@@ -210,8 +316,11 @@ fn track_peer_disconnected(peer_id: PeerId, connected: &mut HashSet<PeerId>) {
     }
 }
 
-/// Update local peer bookkeeping and metrics from a single swarm event.
+/// Update local peer bookkeeping and metrics from a single swarm event. Takes
+/// `&mut swarm` so it can close duplicate connections (duplicate-PeerId
+/// defense-in-depth, ADR element 3).
 fn handle_swarm_event(
+    swarm: &mut Swarm<WaddleBehaviour>,
     event: SwarmEvent<WaddleBehaviourEvent>,
     connected: &mut HashSet<PeerId>,
     routing_peers: &mut HashSet<PeerId>,
@@ -220,8 +329,24 @@ fn handle_swarm_event(
         SwarmEvent::NewListenAddr { address, .. } => {
             tracing::info!(%address, "clustering swarm listening");
         }
-        SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-            track_peer_connected(peer_id, connected);
+        SwarmEvent::ConnectionEstablished {
+            peer_id,
+            connection_id,
+            ..
+        } => {
+            // Duplicate-PeerId defense-in-depth (ADR element 3): the
+            // keypair-slot lease already guarantees a unique PeerId per live
+            // node, so a second concurrent connection to an already-connected
+            // peer is unexpected — keep the first, reject the new one.
+            if connected.contains(&peer_id) {
+                tracing::warn!(
+                    %peer_id,
+                    "clustering: rejecting duplicate connection to already-connected peer"
+                );
+                swarm.close_connection(connection_id);
+            } else {
+                track_peer_connected(peer_id, connected);
+            }
         }
         // Only drop the peer when its last connection closes (num_established 0).
         SwarmEvent::ConnectionClosed {
@@ -262,6 +387,18 @@ fn handle_swarm_event(
 mod tests {
     use super::*;
     use crate::config::ClusteringConfig;
+    use crate::db::{DatabaseConfig, DatabaseDriver};
+
+    // An in-memory SQLite handle for tests that take the ephemeral-identity
+    // path (empty keypair pool), where the DB is never touched.
+    async fn scratch_db() -> Database {
+        Database::from_config(
+            "clustering-swarm-test",
+            &DatabaseConfig::new(DatabaseDriver::Sqlite, "sqlite::memory:".to_string()),
+        )
+        .await
+        .expect("open scratch sqlite")
+    }
 
     // kameo's `init_global` is a process singleton, so exactly ONE test per
     // test binary may successfully bring up the swarm. This smoke test
@@ -277,9 +414,12 @@ mod tests {
             bootstrap: None,
             ..ClusteringConfig::default()
         };
+        let db = scratch_db().await;
         let stop = CancellationToken::new();
 
-        let peer_id = spawn(&config, stop.clone()).expect("swarm brings up cleanly");
+        let peer_id = spawn(&config, &db, stop.clone())
+            .await
+            .expect("swarm brings up cleanly");
         assert!(!peer_id.to_string().is_empty());
 
         // Let the event loop run a beat so a NewListenAddr is processed, then
@@ -297,7 +437,10 @@ mod tests {
             bootstrap: None,
             ..ClusteringConfig::default()
         };
-        let err = spawn(&config, CancellationToken::new()).expect_err("invalid addr rejected");
+        let db = scratch_db().await;
+        let err = spawn(&config, &db, CancellationToken::new())
+            .await
+            .expect_err("invalid addr rejected");
         assert!(matches!(err, SwarmError::ListenAddrInvalid { .. }));
     }
 }
