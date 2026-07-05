@@ -121,6 +121,14 @@ pub async fn resolve_muc_room_archive_access(
         };
     }
 
+    // Unmanaged room (instant room, no channel row). Admission data lives
+    // only in the live actor's in-memory affiliation list and config; both
+    // are lost when the room is evicted. If no actor is live we cannot
+    // authorize the request, so we deliberately fail closed rather than
+    // fail open: an instant room reconfigured members-only before eviction
+    // would otherwise leak its archive to non-members (the #1093 bypass).
+    // Managed channels — the norm in Waddle — always resolve above via the
+    // persisted channel row and are unaffected.
     match snapshot {
         Some(snapshot) if snapshot.room.can_user_join(requester) => RoomArchiveAccess::Allowed,
         _ => RoomArchiveAccess::Denied,
