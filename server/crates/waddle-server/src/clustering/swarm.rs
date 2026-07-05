@@ -402,6 +402,24 @@ async fn run_event_loop(
         tokio::sync::mpsc::channel::<HashSet<PeerId>>(ALLOWLIST_CHANNEL_CAPACITY);
     let allowlist_in_flight = Arc::new(AtomicBool::new(false));
 
+    // Resets its single-flight flag on drop, so a panic in a guarded task can
+    // never permanently wedge that background operation (for the allowlist
+    // that would mean this node stops applying peer revocations).
+    struct InFlightGuard(Arc<AtomicBool>);
+
+    impl InFlightGuard {
+        /// Claim the flag; `None` while a prior task is still in flight.
+        fn try_claim(flag: &Arc<AtomicBool>) -> Option<Self> {
+            (!flag.swap(true, Ordering::AcqRel)).then(|| Self(Arc::clone(flag)))
+        }
+    }
+
+    impl Drop for InFlightGuard {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::Release);
+        }
+    }
+
     loop {
         tokio::select! {
             _ = stop_token.cancelled() => {
@@ -409,28 +427,27 @@ async fn run_event_loop(
                 break;
             }
             _ = dial_timer.tick() => {
-                if !bootstrap_peers.is_empty()
-                    && !dns_in_flight.swap(true, Ordering::AcqRel)
-                {
-                    let seeds = bootstrap_peers.clone();
-                    let dial_tx = dial_tx.clone();
-                    let in_flight = Arc::clone(&dns_in_flight);
-                    tokio::spawn(async move {
-                        for addr in dns::resolve_bootstrap_peers(&seeds).await {
-                            if dial_tx.send(addr).await.is_err() {
-                                break;
+                if !bootstrap_peers.is_empty() {
+                    if let Some(guard) = InFlightGuard::try_claim(&dns_in_flight) {
+                        let seeds = bootstrap_peers.clone();
+                        let dial_tx = dial_tx.clone();
+                        tokio::spawn(async move {
+                            let _guard = guard;
+                            for addr in dns::resolve_bootstrap_peers(&seeds).await {
+                                if dial_tx.send(addr).await.is_err() {
+                                    break;
+                                }
                             }
-                        }
-                        in_flight.store(false, Ordering::Release);
-                    });
+                        });
+                    }
                 }
             }
             _ = allowlist_timer.tick() => {
-                if !allowlist_in_flight.swap(true, Ordering::AcqRel) {
+                if let Some(guard) = InFlightGuard::try_claim(&allowlist_in_flight) {
                     let store = Arc::clone(&allowlist.store);
                     let allowlist_tx = allowlist_tx.clone();
-                    let in_flight = Arc::clone(&allowlist_in_flight);
                     tokio::spawn(async move {
+                        let _guard = guard;
                         match store.enrolled_peers().await {
                             Ok(enrolled) => {
                                 let _ = allowlist_tx.send(enrolled).await;
@@ -442,7 +459,6 @@ async fn run_event_loop(
                                 tracing::warn!(%error, "clustering allowlist refresh failed; keeping current set");
                             }
                         }
-                        in_flight.store(false, Ordering::Release);
                     });
                 }
             }

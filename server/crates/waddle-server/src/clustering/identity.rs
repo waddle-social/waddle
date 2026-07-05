@@ -11,6 +11,7 @@
 
 use base64::Engine;
 use libp2p::identity::{ed25519, Keypair};
+use zeroize::Zeroize;
 
 /// Length of an ed25519 secret key seed in bytes.
 const ED25519_SECRET_LEN: usize = 32;
@@ -23,15 +24,21 @@ pub fn ephemeral_keypair() -> Keypair {
 /// Decode one enrolled keypair-pool entry (base64-encoded 32-byte ed25519
 /// secret key) into a libp2p `Keypair`.
 pub fn keypair_from_pool_entry(entry: &str) -> Result<Keypair, IdentityError> {
-    let raw = base64::engine::general_purpose::STANDARD
+    let mut raw = base64::engine::general_purpose::STANDARD
         .decode(entry.trim())
         .map_err(|error| IdentityError::Decode(error.to_string()))?;
-    let mut seed: [u8; ED25519_SECRET_LEN] = raw.as_slice().try_into().map_err(|_| {
-        IdentityError::Decode(format!(
-            "expected a {ED25519_SECRET_LEN}-byte ed25519 secret, got {} bytes",
-            raw.len()
-        ))
-    })?;
+    // `try_into` copies into `seed`, so the decode buffer still holds the
+    // secret — clear it on both paths rather than leave key material in heap
+    // memory until drop.
+    let seed: Result<[u8; ED25519_SECRET_LEN], _> = raw.as_slice().try_into();
+    let Ok(mut seed) = seed else {
+        let got = raw.len();
+        raw.zeroize();
+        return Err(IdentityError::Decode(format!(
+            "expected a {ED25519_SECRET_LEN}-byte ed25519 secret, got {got} bytes"
+        )));
+    };
+    raw.zeroize();
     // `try_from_bytes` zeroizes the input slice, so `seed` is cleared after.
     let secret = ed25519::SecretKey::try_from_bytes(&mut seed)
         .map_err(|error| IdentityError::Decode(error.to_string()))?;

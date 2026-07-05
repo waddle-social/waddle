@@ -238,8 +238,10 @@ pub struct ClusteringBootstrapConfig {
 
 /// kameo `messaging::Config` limits plus the ADR element-5 timeout hierarchy.
 ///
-/// Invariants enforced at parse time: `reply_timeout <= request_timeout` and
-/// `mailbox_timeout <= request_timeout`. `request_timeout` is the sender-side
+/// Invariants enforced at parse time: `reply_timeout <= request_timeout`,
+/// `mailbox_timeout <= request_timeout`, and — because the mailbox and reply
+/// phases run sequentially on the receiver — `mailbox_timeout + reply_timeout
+/// <= request_timeout`. `request_timeout` is the sender-side
 /// libp2p transport cap (`with_request_timeout`, applied at swarm build) and
 /// is the binding bound; any `reply_timeout` above it is dead configuration.
 /// `mailbox_timeout`/`reply_timeout` are per-ask parameters, applied by every
@@ -451,6 +453,22 @@ impl ClusteringConfig {
                 "WADDLE_CLUSTERING_MAILBOX_TIMEOUT_MS ({}) must be <= \
                  WADDLE_CLUSTERING_REQUEST_TIMEOUT_MS ({})",
                 mailbox_timeout.as_millis(),
+                request_timeout.as_millis()
+            ));
+        }
+        // The mailbox and reply phases of an ask are sequential on the
+        // receiver, so their combined worst case must also fit under the
+        // sender-side transport cap — otherwise the tail of the reply budget
+        // is dead configuration the transport timeout always preempts.
+        if mailbox_timeout + reply_timeout > request_timeout {
+            return Err(format!(
+                "WADDLE_CLUSTERING_MAILBOX_TIMEOUT_MS ({}) + \
+                 WADDLE_CLUSTERING_REPLY_TIMEOUT_MS ({}) must be <= \
+                 WADDLE_CLUSTERING_REQUEST_TIMEOUT_MS ({}): the phases are \
+                 sequential, so any combined budget above the transport cap \
+                 can never be observed",
+                mailbox_timeout.as_millis(),
+                reply_timeout.as_millis(),
                 request_timeout.as_millis()
             ));
         }
@@ -1202,6 +1220,22 @@ mod tests {
         ])
         .unwrap_err();
         assert!(err.contains("WADDLE_CLUSTERING_MAILBOX_TIMEOUT_MS"));
+    }
+
+    #[test]
+    fn clustering_rejects_combined_mailbox_plus_reply_above_request_timeout() {
+        // Each timeout individually fits under the transport cap, but the
+        // mailbox and reply phases are sequential, so their sum exceeding the
+        // cap makes the reply budget's tail unreachable.
+        let err = ClusteringConfig::from_vars([
+            ("WADDLE_CLUSTERING_REQUEST_TIMEOUT_MS", "10000"),
+            ("WADDLE_CLUSTERING_REPLY_TIMEOUT_MS", "8000"),
+            ("WADDLE_CLUSTERING_MAILBOX_TIMEOUT_MS", "8000"),
+        ])
+        .unwrap_err();
+        assert!(err.contains("WADDLE_CLUSTERING_MAILBOX_TIMEOUT_MS"));
+        assert!(err.contains("WADDLE_CLUSTERING_REPLY_TIMEOUT_MS"));
+        assert!(err.contains("sequential"));
     }
 
     #[test]
