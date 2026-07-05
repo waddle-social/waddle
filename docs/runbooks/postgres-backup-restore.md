@@ -2,10 +2,14 @@
 
 Covers the two CloudNativePG clusters in namespace `waddle`:
 
-| Cluster | Database | Backup path (`serverName`) |
-| --- | --- | --- |
-| `postgresql` | `waddle` | `s3://waddle-postgres-backups/postgresql/` (`postgresql`) |
-| `postgresql-spicedb` | `spicedb` | `s3://waddle-postgres-backups/postgresql-spicedb/` (`postgresql-spicedb`) |
+| Cluster | Database | `serverName` | Objects live under |
+| --- | --- | --- | --- |
+| `postgresql` | `waddle` | `postgresql` | `s3://waddle-postgres-backups/postgresql/{base,wals}/` |
+| `postgresql-spicedb` | `spicedb` | `postgresql-spicedb` | `s3://waddle-postgres-backups/postgresql-spicedb/{base,wals}/` |
+
+Both clusters share `destinationPath: s3://waddle-postgres-backups/`; barman
+appends `serverName` as the prefix, which is what keeps the two clusters from
+clobbering each other.
 
 Configuration lives in `infrastructure/waddle.cloud/gitops/waddle-server/`:
 
@@ -38,21 +42,46 @@ kubectl -n waddle exec postgresql-1 -- psql -c "SELECT archived_count, failed_co
 A healthy cluster shows `Backup` CRs in phase `completed`, a non-empty
 `firstRecoverabilityPoint`, and `pg_stat_archiver.failed_count` not growing.
 
+## WAL-buildup hazard and emergency rollback
+
+Once `spec.backup.barmanObjectStore` is applied, Postgres retains every WAL
+segment until it is archived to R2. If archiving fails persistently (bucket
+missing, credential scope wrong, R2 unreachable), WAL accumulates without
+bound: `postgresql` fills its dedicated 2Gi `walStorage` and the primary
+PANICs; `postgresql-spicedb` has no separate walStorage, so WAL eats the 10Gi
+data PVC instead. The Cluster CR stays `Ready` while this happens — only the
+`ContinuousArchiving` status condition flips — so it will not show up as a
+Flux health failure. Watch `pg_stat_archiver.failed_count` after any change
+to the backup config.
+
+Emergency rollback: remove `spec.backup` from the affected Cluster manifest
+(revert the commit) and let Flux reconcile — the `archive_command` returns to
+a no-op and Postgres recycles the retained WAL. No restart is needed; this is
+a config reload.
+
 ## Full restore procedure (scratch namespace)
 
 CNPG restores by bootstrapping a **new** cluster from the object store; it never
 restores in place. Run drills into a scratch namespace so production is untouched.
 
-1. Create the scratch namespace and copy the R2 credentials into it:
+1. Create the scratch namespace and copy the R2 credentials into it. Prefer a
+   second ExternalSecret (copy
+   `postgres-backup-credentials-external-secret.yaml` with
+   `metadata.namespace: waddle-restore-drill`, applied by hand — do not add it
+   to gitops). For a quick manual copy instead:
 
    ```bash
    kubectl create namespace waddle-restore-drill
-   kubectl -n waddle get secret postgres-backup-r2-credentials -o yaml \
-     | grep -v -E 'namespace:|resourceVersion:|uid:|creationTimestamp:|ownerReferences:' -A0 \
+   kubectl -n waddle get secret postgres-backup-r2-credentials -o json \
+     | jq 'del(.metadata.namespace, .metadata.uid, .metadata.resourceVersion,
+               .metadata.creationTimestamp, .metadata.ownerReferences,
+               .metadata.managedFields)' \
      | kubectl -n waddle-restore-drill apply -f -
    ```
 
-   (Or create a second ExternalSecret targeting the scratch namespace.)
+   (The plain `-o yaml | grep -v ...` trick does not work here: the secret is
+   owned by an ExternalSecret and carries a multi-line `ownerReferences`
+   block that line-filtering corrupts.)
 
 2. Apply a recovery cluster. `externalClusters[].name` and the
    `barmanObjectStore.serverName` must match the **source** cluster's
@@ -75,7 +104,7 @@ restores in place. Run drills into a scratch namespace so production is untouche
      externalClusters:
        - name: postgresql
          barmanObjectStore:
-           destinationPath: s3://waddle-postgres-backups/postgresql/
+           destinationPath: s3://waddle-postgres-backups/
            endpointURL: https://f90cc3950ab5b356ec869fe64c867ea7.r2.cloudflarestorage.com
            serverName: postgresql
            s3Credentials:
@@ -89,8 +118,11 @@ restores in place. Run drills into a scratch namespace so production is untouche
              compression: gzip
    ```
 
-   For spicedb, substitute `postgresql-spicedb` for the source name,
-   `destinationPath`, and `serverName`.
+   For spicedb, name the restore cluster `postgresql-spicedb-restore` and
+   substitute `postgresql-spicedb` for the `externalClusters[].name`,
+   `bootstrap.recovery.source`, and `serverName` (the `destinationPath` is
+   the same shared bucket root). Restore clusters carry no `spec.backup`, so
+   they never write back to the archive.
 
 3. Watch the restore:
 
@@ -132,14 +164,23 @@ promoted (CNPG promotes automatically when the recovery target is reached).
 
 Tear down when done: `kubectl delete namespace waddle-restore-drill`.
 
-## HITL checklist (follow-ups from issue #1159)
+## HITL checklist (issue #1159)
+
+**Blocking — complete BEFORE merging/applying the backup config.** Applying
+`spec.backup` without a working bucket + credentials starts the WAL-buildup
+countdown described above.
 
 - [ ] Create the R2 bucket `waddle-postgres-backups` in the Cloudflare account
-      if it does not exist yet (the operator does not create buckets).
-- [ ] Verify the `server-runtime-production` R2 API token scope covers the new
-      `waddle-postgres-backups` bucket (read **and** write). If it is scoped to
-      `waddle-social-files` only, mint a dedicated backup token and add it to
-      1Password (then point the ExternalSecret at the new properties).
+      (the operator does not create buckets).
+- [ ] Mint a dedicated R2 API token scoped to `waddle-postgres-backups`
+      (read **and** write), add it to 1Password, and point
+      `postgres-backup-credentials-external-secret.yaml` at the new
+      properties. Do not reuse the app-runtime token: even if its scope
+      happens to cover the new bucket, a compromised app key must not be able
+      to delete backups (R2 has no object lock).
+
+**Post-merge follow-ups.**
+
 - [ ] After Flux applies the change, confirm WAL archiving starts
       (`pg_stat_archiver`, `.status.firstRecoverabilityPoint`) and the first
       `Backup` CR (created by `immediate: true`) reaches phase `completed` for

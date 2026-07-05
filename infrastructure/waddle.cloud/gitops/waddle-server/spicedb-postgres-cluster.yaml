@@ -17,7 +17,7 @@ spec:
   backup:
     retentionPolicy: 30d
     barmanObjectStore:
-      destinationPath: s3://waddle-postgres-backups/postgresql-spicedb/
+      destinationPath: s3://waddle-postgres-backups/
       endpointURL: https://f90cc3950ab5b356ec869fe64c867ea7.r2.cloudflarestorage.com
       serverName: postgresql-spicedb
       s3Credentials:
