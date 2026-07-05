@@ -148,8 +148,11 @@ pub(super) async fn route_to_connection(
                 // one JID at a time and can fall back per-target), set
                 // completeness cannot be verified against an async mirror, so
                 // the selection cutover waits until registration is
-                // actor-authoritative. `SelectRoutableResourcesForUser` /
-                // `ResourcesForUser` are wired and tested, ready for that slice.
+                // actor-authoritative (see
+                // docs/adrs/0017-phase1-completion-authoritative-registration.md).
+                // At that point this reads both tiers — the `UserActor`
+                // `SelectRoutableResources` then `GetResources` — from the same
+                // authoritative actor rather than the DashMap.
                 let live_targets = {
                     let priority = registry.select_routable_resources_for_user(&bare);
                     if priority.is_empty() {
