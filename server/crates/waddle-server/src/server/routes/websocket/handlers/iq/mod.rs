@@ -206,8 +206,9 @@ use super::super::{
     is_muc_room_jid, stanza_to_xml, WebSocketState,
 };
 use super::presence::{
-    get_managed_channel_for_room, send_current_presence_from_user_to_jid,
-    send_unavailable_presence_from_user_to_jid,
+    get_managed_channel_for_room, resolve_muc_room_archive_access,
+    send_current_presence_from_user_to_jid, send_unavailable_presence_from_user_to_jid,
+    RoomArchiveAccess,
 };
 use crate::auth::{local_account_exists, Session};
 use crate::db::actor::{DbExecute, DbQuery, DbQueryOne, GetDatabase};

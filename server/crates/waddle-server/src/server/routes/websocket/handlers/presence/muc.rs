@@ -3,7 +3,10 @@ use super::*;
 mod access;
 mod xml;
 
-pub use access::{get_managed_channel_for_room, parse_room_jid_context};
+pub use access::{
+    get_managed_channel_for_room, parse_room_jid_context, resolve_muc_room_archive_access,
+    RoomArchiveAccess,
+};
 
 use access::{resolve_managed_channel_affiliation, server_permission_allowed};
 use waddle_xmpp::muc::room_actor::GetSnapshot;
@@ -110,7 +113,7 @@ async fn handle_muc_join_unlocked(
                 .unwrap_or(channel.members_only);
             match resolve_managed_channel_affiliation(
                 state,
-                session,
+                &session.user_jid,
                 room_jid,
                 &channel.id,
                 admission_members_only,

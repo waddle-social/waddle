@@ -4511,3 +4511,270 @@ async fn dm_call_session_initiate_forwards_to_peer_not_feature_not_implemented()
         "peer must receive the forwarded Jingle session-initiate; got: {xml}"
     );
 }
+
+// =========================================================================
+// XEP-0313 §5.1 MUC archive access gate (#1093)
+// =========================================================================
+
+fn mam_room_query_frame(id: &str, room_jid: &str) -> String {
+    let query =
+        xmpp_parsers::minidom::Element::builder("query", waddle_xmpp_core::mam::MAM_NS).build();
+    iq_set_frame(id, room_jid, query)
+}
+
+async fn upsert_test_channel(state: &WebSocketState, id: &str, members_only: bool) {
+    crate::server::xmpp_state::upsert_xmpp_channel(
+        state.deps.app_state.db_pool.global_actor().clone(),
+        &crate::server::xmpp_state::XmppChannelUpsert {
+            id: id.to_string(),
+            name: id.to_string(),
+            description: None,
+            channel_type: "channel".to_string(),
+            position: 0,
+            is_default: false,
+            pin_permission: waddle_xmpp::muc::PinPermission::Anyone,
+            members_only,
+            public_room: !members_only,
+        },
+    )
+    .await
+    .expect("channel upsert");
+}
+
+#[tokio::test]
+async fn mam_members_only_channel_query_returns_forbidden_for_non_member() {
+    let state = create_test_websocket_state().await;
+    upsert_test_channel(state.as_ref(), "secret-ops", true).await;
+
+    let mallory: FullJid = "mallory@example.com/web".parse().expect("jid");
+    let session = Session::new("mallory@example.com", "mallory", "mallory");
+
+    let responses = handle_iq(
+        &mam_room_query_frame("mam-gate-1", "secret-ops@muc.example.com"),
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(session),
+        &ready_phase(&mallory),
+    )
+    .await;
+
+    assert_eq!(
+        responses.len(),
+        1,
+        "non-member MAM query must yield exactly one error frame: {responses:?}"
+    );
+    assert!(
+        responses[0].contains("<forbidden"),
+        "non-member MAM query on a members-only channel must be forbidden: {responses:?}"
+    );
+}
+
+#[tokio::test]
+async fn mam_members_only_channel_query_succeeds_for_channel_member() {
+    let state = create_test_websocket_state().await;
+    upsert_test_channel(state.as_ref(), "secret-ops", true).await;
+
+    let alice: FullJid = "alice@example.com/web".parse().expect("jid");
+    let session = Session::new("alice@example.com", "alice", "alice");
+    state
+        .deps
+        .app_state
+        .permission_actor
+        .ask(WriteTuple {
+            tuple: Tuple::new(
+                Object::new(ObjectType::Channel, "secret-ops"),
+                Relation::new("member"),
+                Subject::user(&session.user_jid),
+            ),
+        })
+        .await
+        .expect("channel member tuple");
+
+    let responses = handle_iq(
+        &mam_room_query_frame("mam-gate-2", "secret-ops@muc.example.com"),
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(session),
+        &ready_phase(&alice),
+    )
+    .await;
+
+    let fin = responses.last().expect("member MAM query must respond");
+    assert!(
+        fin.contains("<fin") && fin.contains("type='result'"),
+        "channel member MAM query must return a result fin: {responses:?}"
+    );
+}
+
+#[tokio::test]
+async fn mam_public_channel_query_succeeds_for_non_member() {
+    let state = create_test_websocket_state().await;
+    upsert_test_channel(state.as_ref(), "town-square", false).await;
+
+    let mallory: FullJid = "mallory@example.com/web".parse().expect("jid");
+    let session = Session::new("mallory@example.com", "mallory", "mallory");
+
+    let responses = handle_iq(
+        &mam_room_query_frame("mam-gate-3", "town-square@muc.example.com"),
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(session),
+        &ready_phase(&mallory),
+    )
+    .await;
+
+    let fin = responses
+        .last()
+        .expect("public-room MAM query must respond");
+    assert!(
+        fin.contains("<fin") && fin.contains("type='result'"),
+        "public channel MAM query must stay open to non-members: {responses:?}"
+    );
+}
+
+/// Spawn an unmanaged members-only room actor with `member_jid` given
+/// Member affiliation via the same join message the presence path uses.
+async fn create_members_only_room_with_member(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    member_jid: &FullJid,
+) {
+    let config = waddle_xmpp::muc::RoomConfig {
+        name: "war-room".to_string(),
+        members_only: true,
+        ..Default::default()
+    };
+    let actor = get_or_create_room_actor(
+        state,
+        room_jid,
+        config,
+        "default".to_string(),
+        "default".to_string(),
+    )
+    .await
+    .expect("room actor");
+    actor
+        .ask(waddle_xmpp::muc::room_actor::JoinWithAffiliation {
+            sender_jid: member_jid.clone(),
+            nick: "member".to_string(),
+            effective_affiliation: Affiliation::Member,
+            local_domain: "example.com".to_string(),
+            admission_revision: 0,
+        })
+        .await
+        .expect("member join");
+}
+
+#[tokio::test]
+async fn mam_members_only_unmanaged_room_query_returns_forbidden_for_non_member() {
+    let state = create_test_websocket_state().await;
+    let room_jid: BareJid = "war-room@muc.example.com".parse().expect("room jid");
+    let member: FullJid = "alice@example.com/web".parse().expect("jid");
+    create_members_only_room_with_member(state.as_ref(), &room_jid, &member).await;
+
+    let mallory: FullJid = "mallory@example.com/web".parse().expect("jid");
+    let session = Session::new("mallory@example.com", "mallory", "mallory");
+
+    let responses = handle_iq(
+        &mam_room_query_frame("mam-gate-4", "war-room@muc.example.com"),
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(session),
+        &ready_phase(&mallory),
+    )
+    .await;
+
+    assert_eq!(
+        responses.len(),
+        1,
+        "expected one error frame: {responses:?}"
+    );
+    assert!(
+        responses[0].contains("<forbidden"),
+        "non-member MAM query on a members-only unmanaged room must be forbidden: {responses:?}"
+    );
+}
+
+#[tokio::test]
+async fn mam_members_only_unmanaged_room_query_succeeds_for_member() {
+    let state = create_test_websocket_state().await;
+    let room_jid: BareJid = "war-room@muc.example.com".parse().expect("room jid");
+    let member: FullJid = "alice@example.com/web".parse().expect("jid");
+    create_members_only_room_with_member(state.as_ref(), &room_jid, &member).await;
+
+    let session = Session::new("alice@example.com", "alice", "alice");
+    let responses = handle_iq(
+        &mam_room_query_frame("mam-gate-5", "war-room@muc.example.com"),
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(session),
+        &ready_phase(&member),
+    )
+    .await;
+
+    let fin = responses.last().expect("member MAM query must respond");
+    assert!(
+        fin.contains("<fin") && fin.contains("type='result'"),
+        "room member MAM query must return a result fin: {responses:?}"
+    );
+}
+
+#[tokio::test]
+async fn mam_room_query_without_bound_session_returns_forbidden() {
+    let state = create_test_websocket_state().await;
+    upsert_test_channel(state.as_ref(), "town-square", false).await;
+
+    let responses = handle_iq(
+        &mam_room_query_frame("mam-gate-6", "town-square@muc.example.com"),
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &None,
+        &ConnectionPhase::Unauthenticated,
+    )
+    .await;
+
+    assert_eq!(
+        responses.len(),
+        1,
+        "expected one error frame: {responses:?}"
+    );
+    assert!(
+        responses[0].contains("<forbidden"),
+        "room MAM query without a bound session must be forbidden: {responses:?}"
+    );
+}
+
+#[tokio::test]
+async fn mam_unmanaged_room_without_live_actor_fails_closed() {
+    let state = create_test_websocket_state().await;
+
+    let mallory: FullJid = "mallory@example.com/web".parse().expect("jid");
+    let session = Session::new("mallory@example.com", "mallory", "mallory");
+
+    let responses = handle_iq(
+        &mam_room_query_frame("mam-gate-7", "ghost-room@muc.example.com"),
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(session),
+        &ready_phase(&mallory),
+    )
+    .await;
+
+    assert_eq!(
+        responses.len(),
+        1,
+        "expected one error frame: {responses:?}"
+    );
+    assert!(
+        responses[0].contains("<forbidden"),
+        "an unmanaged room with no live actor has no admission data; the \
+         archive gate must fail closed: {responses:?}"
+    );
+}

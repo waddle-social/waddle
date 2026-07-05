@@ -986,3 +986,160 @@ async fn xep_0313_with_filter_does_not_match_domain_prefix_collision() {
     );
     assert_eq!(exact_result.messages[0].from, legit_from);
 }
+
+// =========================================================================
+// XEP-0313 §5.1 MUC archive access gate (#1093)
+// =========================================================================
+
+/// Join (creating an instant room), set the given members-only state via
+/// the XEP-0045 §10.2 owner-config form, and archive one message.
+async fn create_room_with_message(client: &mut WsXmppClient, room: &str, members_only: bool) {
+    client
+        .send(&format!(
+            r#"<presence to="{room}/{USERNAME}"><x xmlns="http://jabber.org/protocol/muc"/></presence>"#
+        ))
+        .await
+        .expect("send join");
+    client
+        .recv_until(|f| f.contains("<subject"))
+        .await
+        .expect("join responses");
+
+    let cfg_id = format!("cfg-{}", uuid::Uuid::new_v4());
+    let members_only_value = if members_only { "1" } else { "0" };
+    client
+        .send(&format!(
+            r#"<iq type="set" id="{cfg_id}" to="{room}"><query xmlns="http://jabber.org/protocol/muc#owner"><x xmlns="jabber:x:data" type="submit"><field var="FORM_TYPE" type="hidden"><value>http://jabber.org/protocol/muc#roomconfig</value></field><field var="muc#roomconfig_membersonly"><value>{members_only_value}</value></field></x></query></iq>"#
+        ))
+        .await
+        .expect("send owner config");
+    let cfg_response = client
+        .recv_matching(|f| f.contains("<iq") && f.contains(&cfg_id))
+        .await
+        .expect("owner config response");
+    assert!(
+        cfg_response.contains("result"),
+        "owner config must be accepted: {cfg_response}"
+    );
+
+    client
+        .send(&format!(
+            r#"<message type="groupchat" to="{room}"><body>archive gate probe</body></message>"#
+        ))
+        .await
+        .expect("send message");
+    client
+        .recv_matching(|f| f.contains("archive gate probe"))
+        .await
+        .expect("echo");
+}
+
+/// XEP-0313 §5.1: "In a members-only chat room, only owners, admins or
+/// members can query a room archive." A non-member MUST get <forbidden/>
+/// before any archive read; the owner keeps full access.
+#[tokio::test]
+async fn xep_0313_members_only_room_archive_requires_membership() {
+    let _guard = TEST_SERIAL.lock().await;
+    let mallory_pass = format!("mallory-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[("mallory", &mallory_pass)]);
+    let admin_pass = server.fixed_account_password().to_string();
+    let mut admin = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        USERNAME,
+        &admin_pass,
+        &format!("test-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("admin connect");
+
+    let room = format!("members-only-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    create_room_with_message(&mut admin, &room, true).await;
+
+    // Owner (member+) retains archive access.
+    let owner_q = format!("q-owner-{}", uuid::Uuid::new_v4());
+    let owner_frames = query_mam(&mut admin, &mam_query_xml(&owner_q, &room, Some(10)))
+        .await
+        .expect("owner MAM query");
+    assert!(
+        owner_frames
+            .iter()
+            .any(|f| f.contains("archive gate probe")),
+        "room owner must still read the members-only archive: {owner_frames:?}"
+    );
+
+    // Non-member is forbidden.
+    let mut mallory = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "mallory",
+        &mallory_pass,
+        &format!("test-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("mallory connect");
+    let mallory_q = format!("q-mallory-{}", uuid::Uuid::new_v4());
+    mallory
+        .send(&mam_query_xml(&mallory_q, &room, Some(10)))
+        .await
+        .expect("send non-member MAM query");
+    let denial = mallory
+        .recv_matching(|f| f.contains(&mallory_q))
+        .await
+        .expect("non-member MAM reply");
+    assert!(
+        denial.contains("<forbidden"),
+        "non-member MAM query on a members-only room must be forbidden: {denial}"
+    );
+    assert!(
+        !denial.contains("archive gate probe"),
+        "forbidden reply must not leak archived content: {denial}"
+    );
+
+    let _ = mallory.close().await;
+    let _ = admin.close().await;
+}
+
+/// XEP-0313 §5.1: "In the case of open MUC rooms, the MUC archives can
+/// generally be accessed by any users (including those who have never
+/// entered the room) who do not have an affiliation of 'outcast'."
+#[tokio::test]
+async fn xep_0313_open_room_archive_accessible_to_non_member() {
+    let _guard = TEST_SERIAL.lock().await;
+    let mallory_pass = format!("mallory-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[("mallory", &mallory_pass)]);
+    let admin_pass = server.fixed_account_password().to_string();
+    let mut admin = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        USERNAME,
+        &admin_pass,
+        &format!("test-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("admin connect");
+
+    let room = format!("open-room-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    create_room_with_message(&mut admin, &room, false).await;
+
+    let mut mallory = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "mallory",
+        &mallory_pass,
+        &format!("test-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("mallory connect");
+    let mallory_q = format!("q-open-{}", uuid::Uuid::new_v4());
+    let frames = query_mam(&mut mallory, &mam_query_xml(&mallory_q, &room, Some(10)))
+        .await
+        .expect("open-room MAM query by non-member");
+    assert!(
+        frames.iter().any(|f| f.contains("archive gate probe")),
+        "open-room archive must stay readable for non-outcast non-members: {frames:?}"
+    );
+
+    let _ = mallory.close().await;
+    let _ = admin.close().await;
+}

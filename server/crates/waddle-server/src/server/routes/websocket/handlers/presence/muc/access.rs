@@ -5,13 +5,13 @@ use crate::permissions::{
 
 pub(super) async fn resolve_managed_channel_affiliation(
     state: &WebSocketState,
-    session: &Session,
+    user_jid: &str,
     room_jid: &BareJid,
     channel_id: &str,
     members_only: bool,
 ) -> Result<Option<Affiliation>, ()> {
     let object = Object::new(ObjectType::Channel, channel_id);
-    let subject = Subject::user(&session.user_jid);
+    let subject = Subject::user(user_jid);
     if let Some(affiliation) =
         direct_channel_affiliation(state, object.clone(), subject.clone()).await?
     {
@@ -44,6 +44,87 @@ pub(super) async fn resolve_managed_channel_affiliation(
         return Ok(read_access_affiliation(members_only));
     }
     Ok(None)
+}
+
+/// XEP-0313 §5.1 archive-access decision for a MUC room MAM query.
+pub enum RoomArchiveAccess {
+    Allowed,
+    Denied,
+    Error,
+}
+
+/// XEP-0313 §5.1: "A MUC archive MUST check that the user requesting the
+/// archive has the right to enter it at the time of the query and only
+/// allow access if so." The decision mirrors join admission: members-only
+/// rooms require at least Member affiliation, open rooms admit any
+/// non-outcast. An unmanaged room without a live actor has no admission
+/// data, so it fails closed.
+pub async fn resolve_muc_room_archive_access(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    requester: Option<&BareJid>,
+) -> RoomArchiveAccess {
+    let Some(requester) = requester else {
+        return RoomArchiveAccess::Denied;
+    };
+
+    let channel = match get_managed_channel_for_room(state, room_jid).await {
+        Ok(channel) => channel,
+        Err(error) => {
+            warn!(
+                room = %room_jid,
+                requester = %requester,
+                error = %error,
+                "Failed to resolve managed channel for MAM access gate"
+            );
+            return RoomArchiveAccess::Error;
+        }
+    };
+
+    let snapshot = match get_room_actor(state, room_jid).await {
+        Some(actor) => match actor.ask(GetSnapshot).await {
+            Ok(snapshot) => Some(snapshot),
+            Err(error) => {
+                warn!(
+                    room = %room_jid,
+                    requester = %requester,
+                    error = ?error,
+                    "Failed to snapshot room for MAM access gate"
+                );
+                return RoomArchiveAccess::Error;
+            }
+        },
+        None => None,
+    };
+
+    if let Some(channel) = channel {
+        // Same precedence as join admission: a live actor's config wins
+        // over a stale channel row.
+        let members_only = snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.room.config.members_only)
+            .unwrap_or(channel.members_only);
+        return match resolve_managed_channel_affiliation(
+            state,
+            requester.to_string().as_str(),
+            room_jid,
+            &channel.id,
+            members_only,
+        )
+        .await
+        {
+            Ok(Some(Affiliation::Outcast)) => RoomArchiveAccess::Denied,
+            Ok(Some(_)) => RoomArchiveAccess::Allowed,
+            Ok(None) if members_only => RoomArchiveAccess::Denied,
+            Ok(None) => RoomArchiveAccess::Allowed,
+            Err(()) => RoomArchiveAccess::Error,
+        };
+    }
+
+    match snapshot {
+        Some(snapshot) if snapshot.room.can_user_join(requester) => RoomArchiveAccess::Allowed,
+        _ => RoomArchiveAccess::Denied,
+    }
 }
 
 async fn direct_channel_affiliation(

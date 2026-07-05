@@ -48,6 +48,31 @@ pub(super) async fn handle_archive_inbox_upload_iq(
             )];
         }
 
+        // XEP-0313 §5.1: a MUC archive MUST only serve users who have the
+        // right to enter the room at query time. Gate before any archive
+        // read, for every room type (#1093).
+        if !is_personal {
+            match resolve_muc_room_archive_access(state, &target_bare, sender_bare.as_ref()).await {
+                RoomArchiveAccess::Allowed => {}
+                RoomArchiveAccess::Denied => {
+                    return vec![build_iq_error_xml_typed(
+                        id,
+                        None,
+                        None,
+                        forbidden_iq_error("Operation not permitted."),
+                    )];
+                }
+                RoomArchiveAccess::Error => {
+                    return vec![build_iq_error_xml_typed(
+                        id,
+                        None,
+                        None,
+                        internal_server_error_iq_error("Internal server error."),
+                    )];
+                }
+            }
+        }
+
         if is_mam_query_form_request(request_iq) {
             return vec![iq_to_xml(build_query_form_iq(request_iq))];
         }
