@@ -714,9 +714,11 @@ watch(
               </div>
             </div>
           </button>
+          <!-- href resolves via the attachment scheme allowlist; a disallowed
+               scheme drops the attribute so the card renders inert. -->
           <a
             v-else
-            :href="file.url"
+            :href="resolvedAttachmentUrl(file) ?? undefined"
             target="_blank"
             rel="noopener noreferrer"
             class="chat-file-card inline-flex items-center gap-3 bg-muted rounded-lg p-3 hover:bg-muted/80 transition-all duration-200"
@@ -745,7 +747,7 @@ watch(
         >
           <a
             v-if="!file.encrypted || resolvedAttachmentUrl(file)"
-            :href="resolvedAttachmentUrl(file) || file.url || '#'"
+            :href="resolvedAttachmentUrl(file) ?? undefined"
             target="_blank"
             rel="noopener noreferrer"
             class="type-caption inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 text-foreground hover:bg-muted"

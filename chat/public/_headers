@@ -1,0 +1,11 @@
+# Headers for statically-served assets (Cloudflare Workers static assets).
+# All other HTML is rendered by the worker and gets its CSP from
+# src/middleware.ts; offline.html is the only static HTML document (served by
+# the service worker when the network is down). It has inline <style> only —
+# no scripts.
+# Both spellings: assets html_handling serves the canonical page at /offline
+# (redirecting /offline.html), while the service worker caches /offline.html.
+/offline.html
+  Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+/offline
+  Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
