@@ -283,6 +283,15 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                 // DashMap itself: if the janitor found nothing to remove
                 // (already superseded), it must not evict the actor-tree entry
                 // a newer session may have installed for the same JID.
+                //
+                // A session that reached the expiry janitor by detaching for
+                // XEP-0198 resume already had BOTH its DashMap and actor-tree
+                // entries pruned at detach time (`cleanup_connection_shutdown`
+                // now mirror-unregisters on the detach success arm), so
+                // `removed_entry` is `None` here for those and the skip is
+                // correct — the actor entry is already gone, not leaked. This
+                // arm still fires for a session that expired while its live
+                // routing entry was present (e.g. never detached).
                 if let Some(entry) = removed_entry {
                     crate::server::dual_registration::mirror_unregister(
                         &state.deps.protocol.user_registry,

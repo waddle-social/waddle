@@ -302,6 +302,24 @@ pub(super) async fn cleanup_connection_shutdown(
                             .await;
                         return;
                     }
+                    // ADR-0017 Phase 1: prune the actor-tree entry at detach
+                    // (Greptile review on PR #1177). We just removed the DashMap
+                    // routing entry and are about to close this resource's
+                    // channel; the actor entry is no longer live-routable.
+                    // Keeping it would LEAK: a later SM-expiry cannot converge
+                    // it — the janitor's `unregister` returns `None` (the
+                    // DashMap entry is already gone) so its mirror never fires.
+                    // Detached delivery is sourced from the SM session registry
+                    // (not the actor), and a successful resume re-registers a
+                    // fresh entry via `register_bound_connection_after_frame` →
+                    // `mirror_register`, so pruning here does not affect resume.
+                    // Owner-gated so a superseding newcomer is untouched.
+                    crate::server::dual_registration::mirror_unregister(
+                        &state.deps.protocol.user_registry,
+                        &jid,
+                        Some(std::sync::Arc::clone(owner)),
+                    )
+                    .await;
                     outbound_rx.close();
                     // Second detach drain: anything that arrived
                     // between the first drain and the registry

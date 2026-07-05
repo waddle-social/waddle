@@ -2214,6 +2214,85 @@ async fn cleanup_shutdown_detaches_resumable_session_on_transport_drop() {
         .is_some());
 }
 
+/// ADR-0017 Phase 1 (Greptile review on PR #1177): an SM detach prunes the
+/// resource's actor-tree entry as well as its DashMap entry. Without this, a
+/// session that detaches and then expires without ever resuming would leak its
+/// `UserActor` entry forever — the SM-expiry janitor cannot converge it because
+/// the DashMap entry is already gone at detach, so its removal-gated mirror
+/// never fires. Detached delivery is unaffected (it is sourced from the SM
+/// session registry, not the actor), and a resume re-registers a fresh entry.
+#[tokio::test]
+async fn cleanup_shutdown_detach_prunes_actor_tree_entry() {
+    use waddle_xmpp::registry::GetUser;
+    let state = create_test_websocket_state().await;
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    let (tx, mut rx) = mpsc::channel::<OutboundStanza>(4);
+    let owner = state
+        .deps
+        .protocol
+        .connection_registry
+        .register(jid.clone(), tx);
+    // Mirror into the actor tree exactly as the production bind path does,
+    // sharing the same Arc-backed entry.
+    let entry = state
+        .deps
+        .protocol
+        .connection_registry
+        .get_entry(&jid)
+        .expect("entry just registered");
+    assert!(
+        crate::server::dual_registration::mirror_register(
+            &state.deps.protocol.user_registry,
+            jid.clone(),
+            entry,
+        )
+        .await,
+        "actor mirror register should confirm the resource"
+    );
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .update_presence(&jid, true, 0);
+
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    conn.registry_owner = Some(owner);
+    conn.sm_state
+        .enable("stream-detach-actor".to_string(), true, Some(300));
+
+    cleanup_connection_shutdown(state.as_ref(), &mut rx, &mut conn, false).await;
+
+    // DashMap entry removed AND the resumable session stored (detached).
+    assert!(!state.deps.protocol.connection_registry.is_connected(&jid));
+    let stored = state
+        .deps
+        .protocol
+        .sm_session_registry
+        .peek_session("stream-detach-actor")
+        .await
+        .expect("registry lookup");
+    assert!(stored.is_some(), "detach stores the resumable session");
+
+    // The actor-tree entry for this bare JID is pruned (its only resource was
+    // removed, so the UserActor reports empty and is pruned). GetUser is
+    // FIFO-ordered after the unregister mirror on the same registry mailbox, so
+    // this observes the pruned state deterministically — no leak.
+    let user = state
+        .deps
+        .protocol
+        .user_registry
+        .ask(GetUser {
+            bare_jid: jid.to_bare(),
+        })
+        .await
+        .expect("get user");
+    assert!(
+        user.is_none(),
+        "SM detach must prune the actor-tree entry, not leak it until expiry"
+    );
+}
+
 #[tokio::test]
 async fn cleanup_shutdown_does_not_detach_explicit_close() {
     let state = create_test_websocket_state().await;
