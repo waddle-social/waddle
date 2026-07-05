@@ -48,11 +48,34 @@ pub(super) async fn handle_archive_inbox_upload_iq(
             )];
         }
 
+        // Resolve the managed-channel row once. Both the XEP-0313 §5.1
+        // archive gate and the group-DM visibility boundary need it;
+        // sharing the lookup avoids a duplicate DB round-trip per query.
+        let managed_channel = match get_managed_channel_for_room(state, &target_bare).await {
+            Ok(channel) => channel,
+            Err(error) => {
+                warn!(error = %error, target = %target_bare, "Failed to resolve managed channel for MAM query");
+                return vec![build_iq_error_xml_typed(
+                    id,
+                    None,
+                    None,
+                    internal_server_error_iq_error("Internal server error."),
+                )];
+            }
+        };
+
         // XEP-0313 §5.1: a MUC archive MUST only serve users who have the
         // right to enter the room at query time. Gate before any archive
         // read, for every room type (#1093).
         if !is_personal {
-            match resolve_muc_room_archive_access(state, &target_bare, sender_bare.as_ref()).await {
+            match resolve_muc_room_archive_access(
+                state,
+                &target_bare,
+                sender_bare.as_ref(),
+                managed_channel.as_ref(),
+            )
+            .await
+            {
                 RoomArchiveAccess::Allowed => {}
                 RoomArchiveAccess::Denied => {
                     return vec![build_iq_error_xml_typed(
@@ -98,8 +121,13 @@ pub(super) async fn handle_archive_inbox_upload_iq(
             }
         };
 
-        let visibility =
-            group_dm_archive_visibility(state, &target_bare, sender_bare.as_ref()).await;
+        let visibility = group_dm_archive_visibility(
+            state,
+            &target_bare,
+            sender_bare.as_ref(),
+            managed_channel.as_ref(),
+        )
+        .await;
         let visibility_boundary = match visibility {
             GroupDmArchiveVisibility::NotGroupDm | GroupDmArchiveVisibility::Full => None,
             GroupDmArchiveVisibility::Restricted(boundary) => Some(boundary),
@@ -373,26 +401,21 @@ async fn group_dm_archive_visibility(
     state: &WebSocketState,
     room_jid: &BareJid,
     sender_bare: Option<&BareJid>,
+    channel: Option<&XmppChannelRecord>,
 ) -> GroupDmArchiveVisibility {
     let Some(sender_bare) = sender_bare else {
         return GroupDmArchiveVisibility::Denied;
     };
-    let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(room_jid) else {
-        return GroupDmArchiveVisibility::NotGroupDm;
-    };
-    let channel = get_xmpp_channel(
-        state.deps.app_state.db_pool.global_actor().clone(),
-        &channel_id,
-    )
-    .await
-    .ok()
-    .flatten();
+    // The managed-channel row was resolved once by the caller and shared
+    // with the archive gate; a `None` row means the room is unmanaged and
+    // therefore not a group DM.
     let Some(channel) = channel else {
         return GroupDmArchiveVisibility::NotGroupDm;
     };
     if channel.channel_type != waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM {
         return GroupDmArchiveVisibility::NotGroupDm;
     }
+    let channel_id = channel.id.as_str();
 
     let allowed = state
         .deps
@@ -401,7 +424,7 @@ async fn group_dm_archive_visibility(
         .ask(CheckPermission {
             subject: Subject::user(sender_bare.to_string()),
             permission: Permission::Member,
-            object: Object::new(ObjectType::Channel, &channel_id),
+            object: Object::new(ObjectType::Channel, channel_id),
         })
         .await
         .map(|response| response.allowed);

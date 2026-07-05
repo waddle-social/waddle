@@ -70,26 +70,19 @@ pub enum RoomArchiveAccess {
 /// rooms require at least Member affiliation, open rooms admit any
 /// non-outcast. An unmanaged room without a live actor has no admission
 /// data, so it fails closed.
+///
+/// `channel` is the managed-channel row for `room_jid` (or `None` for an
+/// unmanaged room), resolved once by the caller and shared with
+/// `group_dm_archive_visibility` so a single MAM query does not fetch the
+/// same row twice.
 pub async fn resolve_muc_room_archive_access(
     state: &WebSocketState,
     room_jid: &BareJid,
     requester: Option<&BareJid>,
+    channel: Option<&XmppChannelRecord>,
 ) -> RoomArchiveAccess {
     let Some(requester) = requester else {
         return RoomArchiveAccess::Denied;
-    };
-
-    let channel = match get_managed_channel_for_room(state, room_jid).await {
-        Ok(channel) => channel,
-        Err(error) => {
-            warn!(
-                room = %room_jid,
-                requester = %requester,
-                error = %error,
-                "Failed to resolve managed channel for MAM access gate"
-            );
-            return RoomArchiveAccess::Error;
-        }
     };
 
     let snapshot = match get_room_actor(state, room_jid).await {
@@ -144,7 +137,22 @@ pub async fn resolve_muc_room_archive_access(
     // persisted channel row and are unaffected.
     match snapshot {
         Some(snapshot) if snapshot.room.can_user_join(requester) => RoomArchiveAccess::Allowed,
-        _ => RoomArchiveAccess::Denied,
+        Some(_) => {
+            debug!(
+                room = %room_jid,
+                requester = %requester,
+                "MAM archive denied: requester may not enter unmanaged room"
+            );
+            RoomArchiveAccess::Denied
+        }
+        None => {
+            debug!(
+                room = %room_jid,
+                requester = %requester,
+                "MAM archive denied: no live actor for unmanaged room (fail-closed)"
+            );
+            RoomArchiveAccess::Denied
+        }
     }
 }
 
