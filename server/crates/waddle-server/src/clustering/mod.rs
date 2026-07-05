@@ -37,8 +37,12 @@ mod metrics;
 /// builds on the relay message set.
 #[cfg(feature = "clustering")]
 pub mod relay;
+/// Owned swarm bring-up. Public so the multi-process cluster harness can run
+/// a swarm inside the test process (kameo's `init_global` is a process
+/// singleton, so multi-node behaviour is only testable across processes —
+/// the harness process joins the swarm as a real node).
 #[cfg(feature = "clustering")]
-mod swarm;
+pub mod swarm;
 
 /// Serializes tests that touch the shared `clustering_peer_allowlist` table
 /// (the allowlist store tests and the swarm bring-up smoke test, which loads

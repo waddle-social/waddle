@@ -21,16 +21,12 @@ use kameo::remote::{self, registry};
 use libp2p::identity::Keypair;
 use libp2p::swarm::SwarmEvent;
 use libp2p::{noise, tcp, yamux, Multiaddr, PeerId, Swarm, SwarmBuilder};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
-
-/// How often the event loop re-resolves the headless-DNS name and dials any
-/// seed peers, to pick up pod churn (rolling restarts, scale changes).
-const BOOTSTRAP_DIAL_INTERVAL: Duration = Duration::from_secs(15);
 
 /// Buffer for resolved-peer multiaddrs flowing from the off-loop DNS resolver
 /// back to the event loop for dialing.
@@ -40,6 +36,11 @@ const DIAL_CHANNEL_CAPACITY: usize = 64;
 /// back to the event loop. Single-flight refreshes mean at most one set is
 /// ever in flight; a small buffer keeps the sender from awaiting.
 const ALLOWLIST_CHANNEL_CAPACITY: usize = 4;
+
+/// Idle timeout for swarm connections: a cluster mesh wants long-lived peer
+/// connections, and libp2p's ~10s default would close them between discovery
+/// traffic and force a re-dial per interaction.
+const IDLE_CONNECTION_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Failures while building or starting the swarm. Human-facing `Display` text
 /// is surfaced at server startup.
@@ -69,6 +70,9 @@ pub enum SwarmError {
     /// The peer allowlist could not be read at startup.
     #[error(transparent)]
     Allowlist(#[from] AllowlistError),
+    /// The configured node-id file could not be written.
+    #[error("failed to write clustering node-id file '{path}': {reason}")]
+    NodeIdFile { path: String, reason: String },
 }
 
 /// Identity of a running swarm: the libp2p `PeerId` plus the per-process
@@ -153,6 +157,10 @@ pub async fn spawn(
             WaddleBehaviour::new(key.public().to_peer_id(), messaging_config, &enrolled)
         })
         .map_err(|never: Infallible| -> SwarmError { match never {} })?
+        // A cluster mesh wants long-lived peer connections; libp2p's default
+        // ~10s idle timeout would close them between discovery traffic and
+        // force a re-dial per interaction.
+        .with_swarm_config(|config| config.with_idle_connection_timeout(IDLE_CONNECTION_TIMEOUT))
         .build();
 
     // Install the process-global kameo `ActorSwarm` so `RemoteActorRef`
@@ -174,10 +182,11 @@ pub async fn spawn(
             })?;
     }
 
-    let bootstrap = config.bootstrap.clone();
+    let bootstrap_peers = config.bootstrap_peers.clone();
     tokio::spawn(run_event_loop(
         swarm,
-        bootstrap,
+        bootstrap_peers,
+        config.dial_interval,
         AllowlistRefresh {
             store: allowlist,
             current: enrolled,
@@ -189,12 +198,24 @@ pub async fn spawn(
     // The node's single kademlia registration: its supervised relay actor.
     // Must start after the event loop is polling (registration flows through
     // the swarm command channel serviced by the loop).
-    relay::spawn_supervised(node_id.clone(), stop_token);
+    relay::spawn_supervised(node_id.clone(), config.fault_injection, stop_token);
 
-    Ok(SwarmHandle {
+    let handle = SwarmHandle {
         local_peer_id,
         node_id,
-    })
+    };
+
+    // Publish the node identity for the multi-process harness (mirrors the
+    // WADDLE_HTTP_PORT_FILE convention).
+    if let Some(path) = &config.node_id_file {
+        let contents = format!("{} {}\n", handle.node_id, handle.local_peer_id);
+        std::fs::write(path, contents).map_err(|error| SwarmError::NodeIdFile {
+            path: path.display().to_string(),
+            reason: error.to_string(),
+        })?;
+    }
+
+    Ok(handle)
 }
 
 /// State for the periodic allowlist refresh driven by the event loop.
@@ -305,18 +326,24 @@ async fn run_heartbeat(
 /// events to the handler, and stop cleanly on shutdown.
 async fn run_event_loop(
     mut swarm: Swarm<WaddleBehaviour>,
-    bootstrap: Option<ClusteringBootstrapConfig>,
+    bootstrap_peers: Vec<ClusteringBootstrapConfig>,
+    dial_interval: Duration,
     mut allowlist: AllowlistRefresh,
     stop_token: CancellationToken,
 ) {
     // Peers we currently hold a connection to (authoritative from connection
-    // events) and peers observed to enter the kademlia routing table.
+    // events), peers observed to enter the kademlia routing table, and the
+    // remote address of every live connection (so the bootstrap dial loop can
+    // skip endpoints it is already connected to instead of churning a fresh
+    // connection every interval that the duplicate-PeerId defense then
+    // closes).
     let mut connected: HashSet<PeerId> = HashSet::new();
     let mut routing_peers: HashSet<PeerId> = HashSet::new();
+    let mut conn_addrs: HashMap<libp2p::swarm::ConnectionId, Multiaddr> = HashMap::new();
 
     // `interval` fires its first tick immediately, so the first dial round
     // happens right away rather than after a full interval.
-    let mut dial_timer = tokio::time::interval(BOOTSTRAP_DIAL_INTERVAL);
+    let mut dial_timer = tokio::time::interval(dial_interval);
     dial_timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut allowlist_timer = tokio::time::interval(allowlist.interval);
     allowlist_timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -349,20 +376,20 @@ async fn run_event_loop(
                 break;
             }
             _ = dial_timer.tick() => {
-                if let Some(ref bootstrap) = bootstrap {
-                    if !dns_in_flight.swap(true, Ordering::AcqRel) {
-                        let bootstrap = bootstrap.clone();
-                        let dial_tx = dial_tx.clone();
-                        let in_flight = Arc::clone(&dns_in_flight);
-                        tokio::spawn(async move {
-                            for addr in dns::resolve_bootstrap_peers(&bootstrap).await {
-                                if dial_tx.send(addr).await.is_err() {
-                                    break;
-                                }
+                if !bootstrap_peers.is_empty()
+                    && !dns_in_flight.swap(true, Ordering::AcqRel)
+                {
+                    let seeds = bootstrap_peers.clone();
+                    let dial_tx = dial_tx.clone();
+                    let in_flight = Arc::clone(&dns_in_flight);
+                    tokio::spawn(async move {
+                        for addr in dns::resolve_bootstrap_peers(&seeds).await {
+                            if dial_tx.send(addr).await.is_err() {
+                                break;
                             }
-                            in_flight.store(false, Ordering::Release);
-                        });
-                    }
+                        }
+                        in_flight.store(false, Ordering::Release);
+                    });
                 }
             }
             _ = allowlist_timer.tick() => {
@@ -390,13 +417,25 @@ async fn run_event_loop(
                 apply_allowlist(&mut swarm, &mut allowlist, enrolled);
             }
             Some(addr) = dial_rx.recv() => {
+                // Skip endpoints we already hold a connection to: redialing a
+                // connected peer every interval would just mint a duplicate
+                // connection for the duplicate-PeerId defense to close.
+                if conn_addrs.values().any(|connected_addr| *connected_addr == addr) {
+                    continue;
+                }
                 metrics::record_bootstrap_dial();
                 if let Err(error) = swarm.dial(addr.clone()) {
                     tracing::debug!(%addr, %error, "clustering bootstrap dial failed");
                 }
             }
             event = swarm.select_next_some() => {
-                handle_swarm_event(&mut swarm, event, &mut connected, &mut routing_peers);
+                handle_swarm_event(
+                    &mut swarm,
+                    event,
+                    &mut connected,
+                    &mut routing_peers,
+                    &mut conn_addrs,
+                );
             }
         }
     }
@@ -469,6 +508,7 @@ fn handle_swarm_event(
     event: SwarmEvent<WaddleBehaviourEvent>,
     connected: &mut HashSet<PeerId>,
     routing_peers: &mut HashSet<PeerId>,
+    conn_addrs: &mut HashMap<libp2p::swarm::ConnectionId, Multiaddr>,
 ) {
     match event {
         SwarmEvent::NewListenAddr { address, .. } => {
@@ -477,8 +517,19 @@ fn handle_swarm_event(
         SwarmEvent::ConnectionEstablished {
             peer_id,
             connection_id,
+            endpoint,
             ..
         } => {
+            conn_addrs.insert(connection_id, endpoint.get_remote_address().clone());
+            // Feed outbound (dialed) addresses to the behaviours: kademlia
+            // only inserts a peer into its routing table once it knows a
+            // dialable address for it. kameo's mDNS dev-bootstrap does this on
+            // every discovery; our owned dialing must do it explicitly or the
+            // routing table stays empty and every lookup fails. Inbound remote
+            // addresses are ephemeral ports, never dialable — skip those.
+            if endpoint.is_dialer() {
+                swarm.add_peer_address(peer_id, endpoint.get_remote_address().clone());
+            }
             // Duplicate-PeerId defense-in-depth (ADR element 3): the
             // keypair-slot lease already guarantees a unique PeerId per live
             // node, so a second concurrent connection to an already-connected
@@ -493,13 +544,17 @@ fn handle_swarm_event(
                 track_peer_connected(peer_id, connected);
             }
         }
-        // Only drop the peer when its last connection closes (num_established 0).
         SwarmEvent::ConnectionClosed {
             peer_id,
-            num_established: 0,
+            connection_id,
+            num_established,
             ..
         } => {
-            track_peer_disconnected(peer_id, connected);
+            conn_addrs.remove(&connection_id);
+            // Only drop the peer when its last connection closes.
+            if num_established == 0 {
+                track_peer_disconnected(peer_id, connected);
+            }
         }
         SwarmEvent::Behaviour(WaddleBehaviourEvent::Kameo(remote::Event::Registry(
             registry::Event::RoutingUpdated {
@@ -565,7 +620,7 @@ mod tests {
         let config = ClusteringConfig {
             enabled: true,
             listen_addrs: vec!["/ip4/127.0.0.1/tcp/0".to_string()],
-            bootstrap: None,
+            bootstrap_peers: Vec::new(),
             ..ClusteringConfig::default()
         };
         let db = Database::from_config(
@@ -622,7 +677,7 @@ mod tests {
         let config = ClusteringConfig {
             enabled: true,
             listen_addrs: vec!["not-a-multiaddr".to_string()],
-            bootstrap: None,
+            bootstrap_peers: Vec::new(),
             ..ClusteringConfig::default()
         };
         // Listen-addr validation fails before any DB access, so a SQLite

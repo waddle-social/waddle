@@ -2,7 +2,24 @@
 
 Companion execution note to [ADR-0017](./0017-horizontal-scaling-remote-actors.md)
 and the [Phase 1 completion note](./0017-phase1-completion-authoritative-registration.md).
-Status: **Phase 2 in progress.** Tracking: issue #1195.
+Status: **Phase 2 implemented — Slices 0–6 landed** (each council-reviewed;
+review findings folded in as fix commits). Tracking: issue #1195.
+
+Implementation notes vs. this plan:
+- The subsystem lives in `crates/waddle-server/src/clustering/` (config,
+  swarm, lease, allowlist, codec, relay, dns, identity, metrics).
+- The keypair-slot lease + peer-allowlist tables are self-initializing
+  Postgres-only schema (never in the migration stream, so they stay out of
+  non-clustering deployments). The dedicated control-plane pool remains a
+  Phase 3 deliverable as planned.
+- The relay supervisor additionally re-registers its name every 15s: a
+  registration performed before the node's first peer connection stores its
+  provider record only locally, and kademlia's own republish is 30 minutes
+  out — periodic same-name refresh bounds a (re)started node's
+  undiscoverability window (found by the Slice 6 churn harness case).
+- No dedicated CI check was added: `nixTest` runs the workspace with
+  `--all-features` against the Nix-spawned Postgres, which compiles and runs
+  the clustering unit tests and the multi-process harness already.
 
 ## Objective (this phase)
 

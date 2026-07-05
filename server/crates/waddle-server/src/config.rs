@@ -139,10 +139,13 @@ pub struct ClusteringConfig {
     /// libp2p listen multiaddrs for the swarm transport. Default: one
     /// ephemeral TCP address (`/ip4/0.0.0.0/tcp/0`).
     pub listen_addrs: Vec<String>,
-    /// Kubernetes headless-Service peer discovery. `None` = cold start with no
-    /// bootstrap peers (kademlia bootstrap retries continuously; an empty peer
-    /// set is tolerated, avoiding cold-start deadlock).
-    pub bootstrap: Option<ClusteringBootstrapConfig>,
+    /// Peer discovery seeds (`WADDLE_CLUSTERING_BOOTSTRAP_PEERS`, comma-
+    /// separated `host:port`). In production this is a single entry — the
+    /// Kubernetes headless Service name, which resolves to every ready pod;
+    /// the multi-process harness lists one loopback entry per node. Empty =
+    /// cold start with no bootstrap peers (dialing retries continuously; an
+    /// empty peer set is tolerated, avoiding cold-start deadlock).
+    pub bootstrap_peers: Vec<ClusteringBootstrapConfig>,
     /// kameo `messaging::Config` limits and the ADR element-5 timeout
     /// hierarchy.
     pub messaging: ClusteringMessagingConfig,
@@ -160,6 +163,19 @@ pub struct ClusteringConfig {
     /// (`WADDLE_CLUSTERING_ALLOWLIST_REFRESH_MS`). This interval is the
     /// containment bound for a revoked peer (ADR element 3).
     pub allowlist_refresh_interval: Duration,
+    /// How often the swarm re-resolves the headless-DNS bootstrap name and
+    /// dials seed peers, picking up pod churn
+    /// (`WADDLE_CLUSTERING_DIAL_INTERVAL_MS`).
+    pub dial_interval: Duration,
+    /// Enable the relay's fault-injection message set (crash/sleep) for the
+    /// multi-process cluster harness (`WADDLE_CLUSTERING_FAULT_INJECTION`).
+    /// Never enable in production: it lets any enrolled peer stop this node's
+    /// relay or hold its mailbox.
+    pub fault_injection: bool,
+    /// Write `"<node_id> <peer_id>\n"` to this path once the swarm is up
+    /// (`WADDLE_CLUSTERING_NODE_ID_FILE`) so the harness can resolve this
+    /// node's relay name — mirrors the `WADDLE_HTTP_PORT_FILE` convention.
+    pub node_id_file: Option<std::path::PathBuf>,
 }
 
 /// Timing for the keypair-slot lease heartbeat and expiry (ADR element 4
@@ -180,12 +196,12 @@ impl Default for ClusteringLeaseConfig {
     }
 }
 
-/// Headless-Service peer discovery inputs for the swarm.
+/// One peer-discovery seed: a DNS name (A/AAAA-resolved to one or more peer
+/// IPs — the headless Service resolves to every ready pod) plus the TCP port
+/// those peers listen on for the swarm transport.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClusteringBootstrapConfig {
-    /// Headless Service DNS name resolved (A/AAAA) to peer addresses.
     pub dns_name: String,
-    /// TCP port peers listen on for the swarm transport.
     pub port: u16,
 }
 
@@ -228,11 +244,14 @@ impl Default for ClusteringConfig {
         Self {
             enabled: false,
             listen_addrs: vec!["/ip4/0.0.0.0/tcp/0".to_string()],
-            bootstrap: None,
+            bootstrap_peers: Vec::new(),
             messaging: ClusteringMessagingConfig::default(),
             keypair_pool: Vec::new(),
             lease: ClusteringLeaseConfig::default(),
             allowlist_refresh_interval: Duration::from_secs(30),
+            dial_interval: Duration::from_secs(15),
+            fault_injection: false,
+            node_id_file: None,
         }
     }
 }
@@ -278,21 +297,43 @@ impl ClusteringConfig {
             }
         };
 
-        let bootstrap = match vars
-            .get("WADDLE_CLUSTERING_BOOTSTRAP_DNS")
-            .map(|value| value.trim().to_string())
+        let bootstrap_peers = match vars
+            .get("WADDLE_CLUSTERING_BOOTSTRAP_PEERS")
+            .map(|value| value.trim())
             .filter(|value| !value.is_empty())
         {
-            None => None,
-            Some(dns_name) => {
-                let port = parse_u64_var(&vars, "WADDLE_CLUSTERING_BOOTSTRAP_PORT", 7900)?;
-                let port = u16::try_from(port).ok().filter(|value| *value != 0).ok_or_else(|| {
-                    format!(
-                        "WADDLE_CLUSTERING_BOOTSTRAP_PORT='{port}' must be a valid TCP port (1-65535)"
-                    )
-                })?;
-                Some(ClusteringBootstrapConfig { dns_name, port })
-            }
+            None => Vec::new(),
+            Some(raw) => raw
+                .split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(|entry| {
+                    let (dns_name, port) = entry.rsplit_once(':').ok_or_else(|| {
+                        format!(
+                            "WADDLE_CLUSTERING_BOOTSTRAP_PEERS entry '{entry}' must be host:port"
+                        )
+                    })?;
+                    let port = port
+                        .parse::<u16>()
+                        .ok()
+                        .filter(|value| *value != 0)
+                        .ok_or_else(|| {
+                            format!(
+                                "WADDLE_CLUSTERING_BOOTSTRAP_PEERS entry '{entry}' has an \
+                                 invalid TCP port (1-65535)"
+                            )
+                        })?;
+                    if dns_name.is_empty() {
+                        return Err(format!(
+                            "WADDLE_CLUSTERING_BOOTSTRAP_PEERS entry '{entry}' has an empty host"
+                        ));
+                    }
+                    Ok(ClusteringBootstrapConfig {
+                        dns_name: dns_name.to_string(),
+                        port,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?,
         };
 
         let messaging_defaults = ClusteringMessagingConfig::default();
@@ -409,11 +450,25 @@ impl ClusteringConfig {
                 "WADDLE_CLUSTERING_ALLOWLIST_REFRESH_MS must be greater than 0".to_string(),
             );
         }
+        let dial_interval = Duration::from_millis(parse_u64_var(
+            &vars,
+            "WADDLE_CLUSTERING_DIAL_INTERVAL_MS",
+            millis_u64(Self::default().dial_interval),
+        )?);
+        if dial_interval.is_zero() {
+            return Err("WADDLE_CLUSTERING_DIAL_INTERVAL_MS must be greater than 0".to_string());
+        }
+        let fault_injection = parse_bool_var(&vars, "WADDLE_CLUSTERING_FAULT_INJECTION", false)?;
+        let node_id_file = vars
+            .get("WADDLE_CLUSTERING_NODE_ID_FILE")
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(std::path::PathBuf::from);
 
         Ok(Self {
             enabled,
             listen_addrs,
-            bootstrap,
+            bootstrap_peers,
             messaging: ClusteringMessagingConfig {
                 request_timeout,
                 reply_timeout,
@@ -428,6 +483,9 @@ impl ClusteringConfig {
                 lease_ttl,
             },
             allowlist_refresh_interval,
+            dial_interval,
+            fault_injection,
+            node_id_file,
         })
     }
 }
@@ -958,7 +1016,7 @@ mod tests {
         let config = ClusteringConfig::from_vars(std::iter::empty::<(&str, &str)>()).unwrap();
         assert!(!config.enabled);
         assert_eq!(config.listen_addrs, vec!["/ip4/0.0.0.0/tcp/0".to_string()]);
-        assert!(config.bootstrap.is_none());
+        assert!(config.bootstrap_peers.is_empty());
         assert_eq!(config.messaging, ClusteringMessagingConfig::default());
         // Byte-for-byte-identical guarantee: the whole struct equals Default.
         assert_eq!(config, ClusteringConfig::default());
@@ -985,36 +1043,40 @@ mod tests {
     }
 
     #[test]
-    fn clustering_parses_bootstrap_dns_and_port() {
+    fn clustering_parses_bootstrap_peer_list() {
         let config = ClusteringConfig::from_vars([
             ("WADDLE_CLUSTERING_ENABLED", "1"),
-            ("WADDLE_CLUSTERING_BOOTSTRAP_DNS", "waddle-server-swarm"),
-            ("WADDLE_CLUSTERING_BOOTSTRAP_PORT", "7900"),
+            (
+                "WADDLE_CLUSTERING_BOOTSTRAP_PEERS",
+                "waddle-server-swarm:7900, localhost:7901",
+            ),
         ])
         .unwrap();
-        let bootstrap = config.bootstrap.expect("bootstrap parsed");
-        assert_eq!(bootstrap.dns_name, "waddle-server-swarm");
-        assert_eq!(bootstrap.port, 7900);
+        assert_eq!(
+            config.bootstrap_peers,
+            vec![
+                ClusteringBootstrapConfig {
+                    dns_name: "waddle-server-swarm".to_string(),
+                    port: 7900,
+                },
+                ClusteringBootstrapConfig {
+                    dns_name: "localhost".to_string(),
+                    port: 7901,
+                },
+            ]
+        );
     }
 
     #[test]
-    fn clustering_bootstrap_defaults_port_when_dns_set() {
-        let config = ClusteringConfig::from_vars([(
-            "WADDLE_CLUSTERING_BOOTSTRAP_DNS",
-            "waddle-server-swarm",
-        )])
-        .unwrap();
-        assert_eq!(config.bootstrap.expect("bootstrap parsed").port, 7900);
-    }
-
-    #[test]
-    fn clustering_rejects_zero_bootstrap_port() {
-        let err = ClusteringConfig::from_vars([
-            ("WADDLE_CLUSTERING_BOOTSTRAP_DNS", "swarm"),
-            ("WADDLE_CLUSTERING_BOOTSTRAP_PORT", "0"),
-        ])
-        .unwrap_err();
-        assert!(err.contains("WADDLE_CLUSTERING_BOOTSTRAP_PORT"));
+    fn clustering_rejects_malformed_bootstrap_entries() {
+        for bad in ["no-port", "host:0", ":7900", "host:notaport"] {
+            let err = ClusteringConfig::from_vars([("WADDLE_CLUSTERING_BOOTSTRAP_PEERS", bad)])
+                .unwrap_err();
+            assert!(
+                err.contains("WADDLE_CLUSTERING_BOOTSTRAP_PEERS"),
+                "entry '{bad}' must be rejected: {err}"
+            );
+        }
     }
 
     #[test]
@@ -1096,6 +1158,31 @@ mod tests {
         let err = ClusteringConfig::from_vars([("WADDLE_CLUSTERING_ALLOWLIST_REFRESH_MS", "0")])
             .unwrap_err();
         assert!(err.contains("WADDLE_CLUSTERING_ALLOWLIST_REFRESH_MS"));
+    }
+
+    #[test]
+    fn clustering_parses_harness_knobs() {
+        let config = ClusteringConfig::from_vars([
+            ("WADDLE_CLUSTERING_DIAL_INTERVAL_MS", "2000"),
+            ("WADDLE_CLUSTERING_FAULT_INJECTION", "true"),
+            ("WADDLE_CLUSTERING_NODE_ID_FILE", "/tmp/node-id"),
+        ])
+        .unwrap();
+        assert_eq!(config.dial_interval.as_millis(), 2000);
+        assert!(config.fault_injection);
+        assert_eq!(
+            config.node_id_file,
+            Some(std::path::PathBuf::from("/tmp/node-id"))
+        );
+
+        let defaults = ClusteringConfig::from_vars(std::iter::empty::<(&str, &str)>()).unwrap();
+        assert_eq!(defaults.dial_interval.as_secs(), 15);
+        assert!(!defaults.fault_injection);
+        assert!(defaults.node_id_file.is_none());
+
+        let err =
+            ClusteringConfig::from_vars([("WADDLE_CLUSTERING_DIAL_INTERVAL_MS", "0")]).unwrap_err();
+        assert!(err.contains("WADDLE_CLUSTERING_DIAL_INTERVAL_MS"));
     }
 
     #[test]

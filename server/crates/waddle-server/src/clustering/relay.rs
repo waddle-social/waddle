@@ -38,6 +38,18 @@ pub fn relay_name(node_id: &str) -> String {
 /// Backoff between supervised respawn/re-registration attempts.
 const RESPAWN_BACKOFF: Duration = Duration::from_secs(1);
 
+/// Periodic same-name re-registration cadence. A registration performed
+/// before the node's first peer connection stores its provider record only
+/// locally (nobody can discover it), and kademlia's own republish is 30
+/// minutes out — so the supervisor re-registers on this cadence (same-peer
+/// metadata overwrite is permitted), bounding how long a freshly
+/// (re)started node stays undiscoverable to roughly one interval after its
+/// first peer connection.
+const REREGISTER_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Upper bound on a fault-injected relay sleep.
+const MAX_FAULT_SLEEP_MS: u64 = 60_000;
+
 /// Bounded backoff schedule for sender-side relay re-lookup.
 const LOOKUP_BACKOFF: [Duration; 3] = [
     Duration::from_millis(100),
@@ -46,16 +58,28 @@ const LOOKUP_BACKOFF: [Duration; 3] = [
 ];
 
 /// The per-node relay actor. Phase 2 carries only the liveness/codec-proof
-/// message set; the ordered per-peer relay channel semantics (sequencing, gap
-/// detection, sticky failover) land with cross-node routing in Phase 4.
+/// message set plus harness fault-injection; the ordered per-peer relay
+/// channel semantics (sequencing, gap detection, sticky failover) land with
+/// cross-node routing in Phase 4.
+// The id is pinned via the derive's attribute (the default would be
+// `module_path!()::RelayActor`, which silently changes on a module move and
+// breaks mixed-build rolling deploys). The derive must stay — a manual
+// `impl RemoteActor` skips the linkme `REMOTE_ACTORS` registration the swarm
+// uses to validate registry records, silently breaking lookups.
 #[derive(Actor, RemoteActor)]
+#[remote_actor(id = "waddle.clustering.relay-actor.v1")]
 pub struct RelayActor {
     node_id: String,
+    /// When false (production), the fault-injection messages are inert acks.
+    fault_injection: bool,
 }
 
 impl RelayActor {
-    pub fn new(node_id: String) -> Self {
-        Self { node_id }
+    pub fn new(node_id: String, fault_injection: bool) -> Self {
+        Self {
+            node_id,
+            fault_injection,
+        }
     }
 }
 
@@ -115,12 +139,79 @@ impl Message<RelayEchoStanza> for RelayActor {
     }
 }
 
+/// Harness fault injection: crash the relay actor (simulating an unexpected
+/// stop, so the supervised respawn + same-name re-registration and the
+/// sender-side stale-ref recovery can be asserted cross-node). Inert unless
+/// the node runs with `WADDLE_CLUSTERING_FAULT_INJECTION=true`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayCrash;
+
+/// Harness fault injection: hold the relay's mailbox for `millis`
+/// (single-threaded per-actor), so a receiver handler exceeding the sender's
+/// transport `request_timeout` can be provoked. Inert unless fault injection
+/// is enabled.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelaySleep {
+    pub millis: u64,
+}
+
+/// Reply to the fault-injection messages: whether the fault was applied
+/// (false = fault injection disabled on this node).
+#[derive(Debug, Clone, Serialize, Deserialize, Reply)]
+pub struct RelayFaultAck {
+    pub applied: bool,
+}
+
+#[kameo::remote_message("waddle.clustering.relay.crash.v1")]
+impl Message<RelayCrash> for RelayActor {
+    type Reply = RelayFaultAck;
+
+    async fn handle(
+        &mut self,
+        _msg: RelayCrash,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> RelayFaultAck {
+        if self.fault_injection {
+            // Kill this actor: an unexpected stop from the supervisor's point
+            // of view (kameo auto-unregisters, the supervisor respawns and
+            // re-registers). The reply may or may not make it out first —
+            // harness callers tolerate an error on this ask.
+            ctx.actor_ref().kill();
+            RelayFaultAck { applied: true }
+        } else {
+            RelayFaultAck { applied: false }
+        }
+    }
+}
+
+#[kameo::remote_message("waddle.clustering.relay.sleep.v1")]
+impl Message<RelaySleep> for RelayActor {
+    type Reply = RelayFaultAck;
+
+    async fn handle(
+        &mut self,
+        msg: RelaySleep,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> RelayFaultAck {
+        if self.fault_injection {
+            // Clamped so even the harness (or a compromised harness peer)
+            // cannot wedge the relay's single-threaded mailbox indefinitely —
+            // a wedged-but-live actor has no respawn path.
+            let millis = msg.millis.min(MAX_FAULT_SLEEP_MS);
+            tokio::time::sleep(Duration::from_millis(millis)).await;
+            RelayFaultAck { applied: true }
+        } else {
+            RelayFaultAck { applied: false }
+        }
+    }
+}
+
 /// Spawn the node's relay actor under supervision: register it in kademlia
 /// under [`relay_name`], respawn it if it ever stops unexpectedly, and
 /// **re-register under the same name** on every respawn (kameo auto-registers
 /// removal on actor stop, so re-registration is mandatory, not optional).
 /// Stops cleanly when `stop_token` fires.
-pub fn spawn_supervised(node_id: String, stop_token: CancellationToken) {
+pub fn spawn_supervised(node_id: String, fault_injection: bool, stop_token: CancellationToken) {
     tokio::spawn(async move {
         let name = relay_name(&node_id);
         let mut respawns: u64 = 0;
@@ -129,7 +220,7 @@ pub fn spawn_supervised(node_id: String, stop_token: CancellationToken) {
                 break;
             }
             let actor_ref: ActorRef<RelayActor> =
-                RelayActor::spawn(RelayActor::new(node_id.clone()));
+                RelayActor::spawn(RelayActor::new(node_id.clone(), fault_injection));
             match actor_ref.register(name.clone()).await {
                 Ok(()) => {
                     if respawns > 0 {
@@ -151,20 +242,39 @@ pub fn spawn_supervised(node_id: String, stop_token: CancellationToken) {
                 }
             }
 
-            tokio::select! {
-                _ = stop_token.cancelled() => {
-                    // Graceful stop: unregister the name proactively so peers
-                    // stop resolving a dead relay, then stop the actor.
-                    let _ = kameo::remote::unregister(name.clone()).await;
-                    let _ = actor_ref.stop_gracefully().await;
-                    break;
-                }
-                _ = actor_ref.wait_for_shutdown() => {
-                    // Unexpected stop/panic: kameo has already unregistered
-                    // the name. Respawn and re-register under the SAME name
-                    // after a short backoff.
-                    respawns += 1;
-                    tokio::time::sleep(RESPAWN_BACKOFF).await;
+            let mut reregister = tokio::time::interval(REREGISTER_INTERVAL);
+            // Skip the immediate first tick — we just registered above.
+            reregister.tick().await;
+
+            loop {
+                tokio::select! {
+                    _ = stop_token.cancelled() => {
+                        // Graceful stop: stopping the actor triggers kameo's
+                        // own (panic-free, fire-and-forget) unregistration.
+                        // Deliberately NOT `remote::unregister(..).await`
+                        // here: that future panics if the swarm's command
+                        // channel is dropped first, which this shutdown
+                        // races by construction (the event loop stops on the
+                        // same token).
+                        let _ = actor_ref.stop_gracefully().await;
+                        return;
+                    }
+                    _ = actor_ref.wait_for_shutdown() => {
+                        // Unexpected stop/panic: kameo has already
+                        // unregistered the name. Respawn and re-register
+                        // under the SAME name after a short backoff.
+                        respawns += 1;
+                        tokio::time::sleep(RESPAWN_BACKOFF).await;
+                        break;
+                    }
+                    _ = reregister.tick() => {
+                        // Same-name refresh so a registration that predated
+                        // our first peer connection becomes discoverable
+                        // (see REREGISTER_INTERVAL).
+                        if let Err(error) = actor_ref.register(name.clone()).await {
+                            tracing::debug!(%name, %error, "clustering relay periodic re-registration failed");
+                        }
+                    }
                 }
             }
         }
@@ -207,7 +317,8 @@ impl RelayHandle {
             return Ok(cached.clone());
         }
         let name = relay_name(&self.node_id);
-        for backoff in LOOKUP_BACKOFF {
+        let mut backoffs = LOOKUP_BACKOFF.iter();
+        loop {
             match RemoteActorRef::<RelayActor>::lookup(name.clone()).await {
                 Ok(Some(remote_ref)) => {
                     self.cached = Some(remote_ref.clone());
@@ -218,11 +329,17 @@ impl RelayHandle {
                     tracing::debug!(%name, %error, "clustering relay lookup error; backing off");
                 }
             }
-            tokio::time::sleep(backoff).await;
+            // Back off between attempts only — no trailing sleep after the
+            // final miss.
+            match backoffs.next() {
+                Some(backoff) => tokio::time::sleep(*backoff).await,
+                None => {
+                    return Err(RelayAskError::NotFound {
+                        node_id: self.node_id.clone(),
+                    })
+                }
+            }
         }
-        Err(RelayAskError::NotFound {
-            node_id: self.node_id.clone(),
-        })
     }
 
     /// Ping the relay, refreshing a stale cached ref once: transport-layer
@@ -247,6 +364,28 @@ impl RelayHandle {
             }
             Err(error) => Err(RelayAskError::Send(error.to_string())),
         }
+    }
+
+    /// Harness: ask the relay to crash (fault injection). The ask may fail —
+    /// the actor can die before the reply leaves — so the result only says
+    /// whether the *request* went out; callers assert recovery separately.
+    pub async fn crash(&mut self) -> Result<(), RelayAskError> {
+        let remote_ref = self.resolve().await?;
+        match remote_ref.ask(&RelayCrash).await {
+            // A dead-before-reply error is the expected outcome of a crash.
+            Ok(_) | Err(_) => Ok(()),
+        }
+    }
+
+    /// Harness: ask the relay to sleep for `millis` inside its handler,
+    /// WITHOUT the stale-ref retry (the point is to observe the sender-side
+    /// transport timeout, not to recover from it).
+    pub async fn sleep(&mut self, millis: u64) -> Result<RelayFaultAck, RelayAskError> {
+        let remote_ref = self.resolve().await?;
+        remote_ref
+            .ask(&RelaySleep { millis })
+            .await
+            .map_err(|error| RelayAskError::Send(error.to_string()))
     }
 
     /// Round-trip a stanza through the relay (codec proof), with the same

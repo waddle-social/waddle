@@ -11,28 +11,29 @@ use libp2p::multiaddr::Protocol;
 use libp2p::Multiaddr;
 use std::net::IpAddr;
 
-/// Resolve the headless-Service DNS name to a deduplicated set of dialable TCP
-/// multiaddrs. Returns an empty vec (never an error) when resolution fails, so
+/// Resolve every bootstrap seed's DNS name to a deduplicated set of dialable
+/// TCP multiaddrs. A seed that fails to resolve is skipped (never an error) —
 /// the caller's dial loop simply retries on its next tick.
-pub async fn resolve_bootstrap_peers(bootstrap: &ClusteringBootstrapConfig) -> Vec<Multiaddr> {
-    let host_port = format!("{}:{}", bootstrap.dns_name, bootstrap.port);
-    let resolved = match tokio::net::lookup_host(&host_port).await {
-        Ok(addrs) => addrs,
-        Err(error) => {
-            tracing::debug!(
-                dns = %bootstrap.dns_name,
-                %error,
-                "clustering bootstrap DNS resolution failed; will retry"
-            );
-            return Vec::new();
-        }
-    };
-
+pub async fn resolve_bootstrap_peers(seeds: &[ClusteringBootstrapConfig]) -> Vec<Multiaddr> {
     let mut peers: Vec<Multiaddr> = Vec::new();
-    for sockaddr in resolved {
-        let multiaddr = tcp_multiaddr(sockaddr.ip(), bootstrap.port);
-        if !peers.contains(&multiaddr) {
-            peers.push(multiaddr);
+    for seed in seeds {
+        let host_port = format!("{}:{}", seed.dns_name, seed.port);
+        let resolved = match tokio::net::lookup_host(&host_port).await {
+            Ok(addrs) => addrs,
+            Err(error) => {
+                tracing::debug!(
+                    dns = %seed.dns_name,
+                    %error,
+                    "clustering bootstrap DNS resolution failed; will retry"
+                );
+                continue;
+            }
+        };
+        for sockaddr in resolved {
+            let multiaddr = tcp_multiaddr(sockaddr.ip(), seed.port);
+            if !peers.contains(&multiaddr) {
+                peers.push(multiaddr);
+            }
         }
     }
     peers

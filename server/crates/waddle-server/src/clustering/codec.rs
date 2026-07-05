@@ -6,10 +6,12 @@
 //! `Stanza::to_element()` (which applies the `ensure_thread_element` fixup, so
 //! RFC 6121 `<thread/>` survives the wire) and `element_to_string`.
 //!
-//! Deserialization is **bounded before tree construction**: minidom's parser
-//! is recursive, so a small, deeply-nested payload from a compromised peer
-//! could otherwise overflow the stack and crash the node — forfeiting its
-//! claims. A non-recursive `quick-xml` pre-scan enforces a byte cap, a nesting
+//! Deserialization is **bounded before tree construction**. (minidom 0.18's
+//! own parse is an explicit-stack tree builder, so the parse itself cannot
+//! overflow — but the recursion in nested `Element` `Drop`/`Clone` glue and
+//! in `xmpp_parsers::*::try_from` is what the depth cap bounds, so the
+//! pre-scan stays load-bearing; do not remove it because the parser looks
+//! safe.) A non-recursive `quick-xml` pre-scan enforces a byte cap, a nesting
 //! depth cap, and a per-element attribute/namespace-declaration cap first; a
 //! payload failing any bound (or failing the re-parse) is a **typed error the
 //! caller NACKs to the sender** — never a silent drop — and counts in the drop
@@ -165,7 +167,10 @@ pub struct RemoteStanza(pub Stanza);
 
 impl Serialize for RemoteStanza {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let xml = encode_stanza(&self.0).map_err(S::Error::custom)?;
+        let xml = encode_stanza(&self.0).map_err(|error| {
+            metrics::record_remote_codec_drop(error.reason());
+            S::Error::custom(error)
+        })?;
         serializer.serialize_str(&xml)
     }
 }
@@ -187,7 +192,10 @@ pub struct RemoteElement(pub minidom::Element);
 
 impl Serialize for RemoteElement {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let xml = waddle_xmpp::parser::element_to_string(&self.0).map_err(S::Error::custom)?;
+        let xml = waddle_xmpp::parser::element_to_string(&self.0).map_err(|error| {
+            metrics::record_remote_codec_drop("serialize");
+            S::Error::custom(error)
+        })?;
         serializer.serialize_str(&xml)
     }
 }
