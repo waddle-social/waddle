@@ -486,12 +486,9 @@ pub(super) async fn cleanup_invalidated_detached_session(
         .resumable_sessions
         .remove(&detached.stream_id);
     // `entry_if_owner` is a READ-ONLY ownership check — it does NOT remove the
-    // DashMap entry (unlike `unregister_if_owner`). So the branch below is the
-    // sole remover: when the replacement is not the current owner (detached
-    // session still owns the slot, or no replacement), the plain `unregister`
-    // removes the detached entry and returns it, and the mirror fires with that
-    // entry's token. The entry is therefore never removed here without a
-    // matching actor-tree mirror.
+    // DashMap entry. It gates whether we attempt cleanup at all: if the
+    // replacement (the freshly-bound session that triggered this invalidation)
+    // already owns the slot, there is nothing of the old session's to clean up.
     let replacement_is_current_owner = replacement_owner.is_some_and(|owner| {
         state
             .deps
@@ -501,17 +498,24 @@ pub(super) async fn cleanup_invalidated_detached_session(
             .is_some()
     });
     if !replacement_is_current_owner {
+        // Remove the DashMap entry ONLY if it is still this exact invalidated
+        // session's, gated on its own SM stream id (Greptile P1 on PR #1177) —
+        // NOT a plain `unregister`. A plain unregister removes whatever holds
+        // the full JID, which can be an UNRELATED live session S3 that bound the
+        // same resource concurrently; the mirror below (keyed on the removed
+        // entry's token) would then evict S3 from the actor tree too, and under
+        // Slice 1 that silently drops S3 from bare-JID routing on both paths.
+        // The invalidated session was normally already pruned at detach, so this
+        // returns `None` and the mirror is skipped; if it somehow lingered, only
+        // its own entry (matching stream id) is removed.
         let removed_entry = state
             .deps
             .protocol
             .connection_registry
-            .unregister(&detached.jid);
-        // ADR-0017 Phase 1: mirror the unregister into the actor tree only when
-        // the DashMap actually removed an entry (Greptile review on PR #1177),
-        // consistent with every other teardown site — so a branch that found
-        // nothing to remove cannot evict an actor-tree entry a newer session
-        // installed for the same JID. Owner-gated on the removed entry's own
-        // token so the actor prunes only if it still holds that same session.
+            .unregister_if_sm_stream_id(
+                &detached.jid,
+                &waddle_xmpp::pending_delivery::SmSessionId::new(detached.stream_id.clone()),
+            );
         if let Some(entry) = removed_entry {
             crate::server::dual_registration::mirror_unregister(
                 &state.deps.protocol.user_registry,
